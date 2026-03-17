@@ -1,0 +1,7 @@
+{
+  "name": "@buildplane/adapters-tools",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Tool adapter layer for browser, shell, mac, search, and MCP integrations"
+}

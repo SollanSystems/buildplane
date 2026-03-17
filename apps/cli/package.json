@@ -1,0 +1,14 @@
+{
+  "name": "buildplane",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Buildplane CLI",
+  "bin": {
+    "buildplane": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "echo 'TODO: implement cli build'",
+    "test": "echo 'TODO: add cli tests'"
+  }
+}
