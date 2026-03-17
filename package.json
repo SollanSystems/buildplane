@@ -11,7 +11,7 @@
     "build": "tsc --build",
     "test": "vitest --run",
     "test:watch": "vitest",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --build --noEmit",
     "lint": "echo 'TODO: add workspace lint'"
   },
   "devDependencies": {
