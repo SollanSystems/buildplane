@@ -9,6 +9,6 @@
   },
   "scripts": {
     "build": "echo 'TODO: implement cli build'",
-    "test": "echo 'TODO: add cli tests'"
+    "test": "vitest --run"
   }
 }
