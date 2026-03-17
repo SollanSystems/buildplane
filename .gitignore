@@ -7,3 +7,4 @@ coverage/
 .env.*
 .buildplane/
 .bg-shell/
+.worktrees/
