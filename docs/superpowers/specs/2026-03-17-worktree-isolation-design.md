@@ -336,7 +336,7 @@ For the passed-run path, decision plus `passed` run state commit in one transact
 
 `getStatusSnapshot()` should include the latest workspace disposition when a latest run exists.
 
-It should also include `actionableWorkspaces` for `active`, retained, and `cleanup-failed` workspaces so older leftovers remain discoverable without knowing a run id in advance.
+It should also include `actionableWorkspaces` for retained and `cleanup-failed` workspaces so older leftovers remain discoverable without knowing a run id in advance.
 
 `inspectTarget(id)` should include the workspace record associated with the relevant run so operators can see:
 
