@@ -11,10 +11,12 @@ export type {
 	BuildplaneWorkspacePort,
 } from "./ports.js";
 export type {
+	ApprovedPolicyDecision,
 	ExecutionReceipt,
 	InspectSnapshot,
 	OutputCheck,
 	PolicyDecision,
+	RejectedPolicyDecision,
 	RunInfrastructureFailure,
 	RunPacketResult,
 	StatusSnapshot,

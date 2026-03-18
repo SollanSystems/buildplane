@@ -29,11 +29,19 @@ export interface ExecutionReceipt {
 	readonly outputChecks: readonly OutputCheck[];
 }
 
-export interface PolicyDecision {
-	readonly kind: "advance-run" | "reject-run";
-	readonly outcome: "approved" | "rejected";
+export interface ApprovedPolicyDecision {
+	readonly kind: "advance-run";
+	readonly outcome: "approved";
 	readonly reasons: readonly string[];
 }
+
+export interface RejectedPolicyDecision {
+	readonly kind: "reject-run";
+	readonly outcome: "rejected";
+	readonly reasons: readonly string[];
+}
+
+export type PolicyDecision = ApprovedPolicyDecision | RejectedPolicyDecision;
 
 export interface WorkspaceSnapshot {
 	readonly runId: string;
@@ -65,6 +73,9 @@ export interface StatusSnapshot {
 		readonly unitId: string;
 		readonly status: RunStatus;
 	};
+	readonly latestRunUsedWorkspace: boolean;
+	readonly latestWorkspace?: StatusWorkspaceSummary;
+	readonly actionableWorkspaces: readonly WorkspaceSnapshot[];
 	readonly runCounts: {
 		readonly pending: number;
 		readonly running: number;
@@ -78,6 +89,7 @@ export interface InspectSnapshot {
 	readonly kind: "run" | "unit";
 	readonly unit: Unit;
 	readonly run: Run;
+	readonly workspace?: WorkspaceSnapshot;
 	readonly runHistory: readonly {
 		readonly id: string;
 		readonly status: RunStatus;

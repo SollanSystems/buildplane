@@ -1,5 +1,11 @@
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
-import type { BuildplaneStoragePort } from "@buildplane/kernel";
+import type {
+	ApprovedPolicyDecision,
+	BuildplaneStoragePort,
+	RejectedPolicyDecision,
+	Run,
+	RunInfrastructureFailure,
+} from "@buildplane/kernel";
 import {
 	assertBuildplaneDatabaseIsInitialized,
 	insertProjectInitializedEvent,
@@ -7,6 +13,7 @@ import {
 } from "./database.js";
 import { resolveProjectLayout } from "./project-layout.js";
 import {
+	assertBaselineStorageProjectionSchema,
 	bootstrapStorageProjectionSchema,
 	createStorageStore,
 } from "./store.js";
@@ -25,6 +32,31 @@ export interface ProjectInitializationResult {
 
 export interface BuildplaneStorage extends BuildplaneStoragePort {
 	initializeProject(): ProjectInitializationResult;
+	recordWorkspacePrepared(
+		runId: string,
+		workspace: {
+			path: string;
+			headSha: string;
+			sourceProjectRoot: string;
+		},
+	): void;
+	commitRunFailureOutcome(
+		runId: string,
+		payload:
+			| {
+					decision: RejectedPolicyDecision;
+					infrastructureFailure?: never;
+					workspaceStatus: "retained";
+			  }
+			| {
+					decision?: never;
+					infrastructureFailure: RunInfrastructureFailure;
+					workspaceStatus?: "retained";
+			  },
+	): Run;
+	commitRunSuccessOutcome(runId: string, decision: ApprovedPolicyDecision): Run;
+	recordWorkspaceDeleted(runId: string): void;
+	recordWorkspaceCleanupFailed(runId: string, message: string): void;
 }
 
 export function createBuildplaneStorage(
@@ -54,42 +86,51 @@ export function createBuildplaneStorage(
 			mkdirSync(layout.evidenceDir, { recursive: true });
 			mkdirSync(layout.runsDir, { recursive: true });
 			mkdirSync(layout.logsDir, { recursive: true });
+			mkdirSync(layout.workspacesDir, { recursive: true });
 
-			const database = openBuildplaneDatabase(layout.stateDbPath);
-			bootstrapStorageProjectionSchema(database);
-
-			if (created) {
-				writeFileSync(
-					layout.projectJsonPath,
-					JSON.stringify({
-						schemaVersion: 1,
-						defaultPolicyProfile: "default",
-						initializedAt,
-					}),
-				);
-
-				database
-					.prepare(
-						`INSERT INTO projects (project_root, initialized_at, default_policy_profile) VALUES (?, ?, ?)`,
-					)
-					.run(projectRoot, initializedAt, "default");
-
-				insertProjectInitializedEvent(database, {
-					projectRoot,
-					defaultPolicyProfile: "default",
-					initializedAt,
-				});
-			} else {
+			if (!created) {
 				assertBuildplaneDatabaseIsInitialized(layout.stateDbPath, projectRoot);
 			}
 
-			database.close();
+			const database = openBuildplaneDatabase(layout.stateDbPath);
+			try {
+				if (!created) {
+					assertBaselineStorageProjectionSchema(database);
+				}
 
-			return {
-				created,
-				projectRoot,
-				stateDbPath: layout.stateDbPath,
-			};
+				bootstrapStorageProjectionSchema(database);
+
+				if (created) {
+					writeFileSync(
+						layout.projectJsonPath,
+						JSON.stringify({
+							schemaVersion: 1,
+							defaultPolicyProfile: "default",
+							initializedAt,
+						}),
+					);
+
+					database
+						.prepare(
+							`INSERT INTO projects (project_root, initialized_at, default_policy_profile) VALUES (?, ?, ?)`,
+						)
+						.run(projectRoot, initializedAt, "default");
+
+					insertProjectInitializedEvent(database, {
+						projectRoot,
+						defaultPolicyProfile: "default",
+						initializedAt,
+					});
+				}
+
+				return {
+					created,
+					projectRoot,
+					stateDbPath: layout.stateDbPath,
+				};
+			} finally {
+				database.close();
+			}
 		},
 	};
 }

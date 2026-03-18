@@ -45,6 +45,8 @@ function createHarness(outcome: PolicyDecision["outcome"]) {
 	const runEvents: string[] = [];
 	const statusSnapshot: StatusSnapshot = {
 		initialized: true,
+		latestRunUsedWorkspace: false,
+		actionableWorkspaces: [],
 		runCounts: {
 			pending: 0,
 			running: 0,
@@ -106,6 +108,23 @@ function createHarness(outcome: PolicyDecision["outcome"]) {
 		completeRun(_runId, status) {
 			runEvents.push(`completeRun:${status}`);
 			return { id: "run-1", unitId: packet.unit.id, status };
+		},
+		recordWorkspacePrepared() {
+			runEvents.push("recordWorkspacePrepared");
+		},
+		commitRunFailureOutcome() {
+			runEvents.push("commitRunFailureOutcome");
+			return { id: "run-1", unitId: packet.unit.id, status: "failed" };
+		},
+		commitRunSuccessOutcome() {
+			runEvents.push("commitRunSuccessOutcome");
+			return { id: "run-1", unitId: packet.unit.id, status: "passed" };
+		},
+		recordWorkspaceDeleted() {
+			runEvents.push("recordWorkspaceDeleted");
+		},
+		recordWorkspaceCleanupFailed() {
+			runEvents.push("recordWorkspaceCleanupFailed");
 		},
 		getStatusSnapshot() {
 			return statusSnapshot;
