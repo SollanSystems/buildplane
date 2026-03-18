@@ -1,20 +1,65 @@
-import { mkdtempSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative, resolve } from "node:path";
 import type { UnitPacket } from "@buildplane/kernel";
 import { describe, expect, it } from "vitest";
 import { executePacket } from "../src/command-executor";
 
 describe("command executor", () => {
-	it("runs a local command and captures receipt details", () => {
-		const projectRoot = mkdtempSync(join(tmpdir(), "buildplane-runtime-"));
+	it("resolves execution cwd and output checks relative to the supplied workspace root", () => {
+		const sourceCheckout = process.cwd();
+		const workspaceRoot = mkdtempSync(
+			join(tmpdir(), "buildplane-runtime-workspace-"),
+		);
+		const outputPath = `tmp/out-${Date.now()}-nested.txt`;
+		mkdirSync(join(workspaceRoot, "nested"), { recursive: true });
 		const packet: UnitPacket = {
 			unit: {
 				id: "unit-runtime",
 				kind: "command",
 				scope: "task",
 				inputRefs: [],
-				expectedOutputs: ["tmp/out.txt"],
+				expectedOutputs: [outputPath],
+				verificationContract: "exit-0-and-required-outputs",
+				policyProfile: "default",
+			},
+			execution: {
+				command: "node",
+				cwd: "nested",
+				args: [
+					"-e",
+					`const fs = require('node:fs'); const path = require('node:path'); const output = path.resolve('..', ${JSON.stringify(outputPath)}); fs.mkdirSync(path.dirname(output), { recursive: true }); fs.writeFileSync(output, 'ok'); console.log('done');`,
+				],
+			},
+			verification: {
+				requiredOutputs: [outputPath],
+			},
+		};
+
+		const receipt = executePacket(packet, workspaceRoot);
+
+		expect(receipt.exitCode).toBe(0);
+		expect(receipt.cwd).toBe(join(workspaceRoot, "nested"));
+		expect(receipt.stdout).toContain("done");
+		expect(receipt.outputChecks).toEqual([{ path: outputPath, exists: true }]);
+		expect(readFileSync(join(workspaceRoot, outputPath), "utf8")).toBe("ok");
+		expect(existsSync(join(sourceCheckout, outputPath))).toBe(false);
+	});
+
+	it("uses the supplied workspace root as the default cwd for receipts and output checks", () => {
+		const sourceCheckout = process.cwd();
+		const workspaceRoot = mkdtempSync(
+			join(tmpdir(), "buildplane-runtime-workspace-"),
+		);
+		const executionRoot = relative(sourceCheckout, workspaceRoot);
+		const outputPath = `tmp/out-${Date.now()}-root.txt`;
+		const packet: UnitPacket = {
+			unit: {
+				id: "unit-runtime-default-cwd",
+				kind: "command",
+				scope: "task",
+				inputRefs: [],
+				expectedOutputs: [outputPath],
 				verificationContract: "exit-0-and-required-outputs",
 				policyProfile: "default",
 			},
@@ -22,23 +67,21 @@ describe("command executor", () => {
 				command: "node",
 				args: [
 					"-e",
-					"const fs = require('node:fs'); fs.mkdirSync('tmp', { recursive: true }); fs.writeFileSync('tmp/out.txt', 'ok'); console.log('done');",
+					`const fs = require('node:fs'); fs.mkdirSync('tmp', { recursive: true }); fs.writeFileSync(${JSON.stringify(outputPath)}, 'ok'); console.log('done');`,
 				],
 			},
 			verification: {
-				requiredOutputs: ["tmp/out.txt"],
+				requiredOutputs: [outputPath],
 			},
 		};
 
-		const receipt = executePacket(packet, projectRoot);
+		const receipt = executePacket(packet, executionRoot);
 
 		expect(receipt.exitCode).toBe(0);
+		expect(receipt.cwd).toBe(resolve(workspaceRoot));
 		expect(receipt.stdout).toContain("done");
-		expect(receipt.outputChecks).toEqual([
-			{ path: "tmp/out.txt", exists: true },
-		]);
-		expect(readFileSync(join(projectRoot, "tmp", "out.txt"), "utf8")).toBe(
-			"ok",
-		);
+		expect(receipt.outputChecks).toEqual([{ path: outputPath, exists: true }]);
+		expect(readFileSync(join(workspaceRoot, outputPath), "utf8")).toBe("ok");
+		expect(existsSync(join(sourceCheckout, outputPath))).toBe(false);
 	});
 });

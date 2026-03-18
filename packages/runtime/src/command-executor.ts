@@ -5,12 +5,13 @@ import type { ExecutionReceipt, UnitPacket } from "@buildplane/kernel";
 
 export function executePacket(
 	packet: UnitPacket,
-	projectRoot: string,
+	executionRoot: string,
 ): ExecutionReceipt {
+	const workspaceRoot = resolve(executionRoot);
 	const args = [...(packet.execution.args ?? [])];
 	const cwd = packet.execution.cwd
-		? resolve(projectRoot, packet.execution.cwd)
-		: projectRoot;
+		? resolve(workspaceRoot, packet.execution.cwd)
+		: workspaceRoot;
 	const startedAt = new Date().toISOString();
 	const result = spawnSync(packet.execution.command, args, {
 		cwd,
@@ -29,7 +30,7 @@ export function executePacket(
 		stderr: result.stderr ?? "",
 		outputChecks: packet.verification.requiredOutputs.map((path: string) => ({
 			path,
-			exists: existsSync(resolve(projectRoot, path)),
+			exists: existsSync(resolve(workspaceRoot, path)),
 		})),
 	};
 }
