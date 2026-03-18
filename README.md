@@ -29,4 +29,50 @@ npm install -g buildplane
 
 ## Status
 
-This repo is an initial bootstrap scaffold. Milestone 1 is focused on the execution kernel: typed units of work, durable state, bounded worker runs, verification, and operator inspection.
+This repo now includes the first local vertical slice of the control plane. Milestone 1 is still focused on the execution kernel: typed units of work, durable state, bounded worker runs, verification, and operator inspection.
+
+## Local run loop
+
+Today’s working path is a local, packet-driven loop:
+
+1. `buildplane init`
+2. `buildplane run --packet <path>`
+3. `buildplane status --json`
+4. `buildplane inspect <run-id> --json`
+
+Example packet:
+
+```json
+{
+  "unit": {
+    "id": "unit-hello",
+    "kind": "command",
+    "scope": "task",
+    "inputRefs": [],
+    "expectedOutputs": ["tmp/out.txt"],
+    "verificationContract": "exit-0-and-required-outputs",
+    "policyProfile": "default"
+  },
+  "execution": {
+    "command": "node",
+    "args": [
+      "-e",
+      "const fs = require('node:fs'); fs.mkdirSync('tmp', { recursive: true }); fs.writeFileSync('tmp/out.txt', 'ok'); console.log('done');"
+    ]
+  },
+  "verification": {
+    "requiredOutputs": ["tmp/out.txt"]
+  }
+}
+```
+
+Example usage:
+
+```bash
+buildplane init
+buildplane run --packet ./packet.json
+buildplane status --json
+buildplane inspect <run-id> --json
+```
+
+This is intentionally narrow: one packet, one run, one local command step, one persisted decision path. Worktree isolation, replay, richer policy, and model-backed execution come later.

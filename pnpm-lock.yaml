@@ -36,7 +36,20 @@ importers:
         specifier: ^4.1.0
         version: 4.1.0(@types/node@25.5.0)(vite@8.0.0(@types/node@25.5.0)(esbuild@0.27.4)(jiti@2.6.1)(tsx@4.21.0))
 
-  apps/cli: {}
+  apps/cli:
+    dependencies:
+      '@buildplane/kernel':
+        specifier: workspace:*
+        version: link:../../packages/kernel
+      '@buildplane/policy':
+        specifier: workspace:*
+        version: link:../../packages/policy
+      '@buildplane/runtime':
+        specifier: workspace:*
+        version: link:../../packages/runtime
+      '@buildplane/storage':
+        specifier: workspace:*
+        version: link:../../packages/storage
 
   packages/adapters-git: {}
 
@@ -48,11 +61,23 @@ importers:
 
   packages/kernel: {}
 
-  packages/policy: {}
+  packages/policy:
+    dependencies:
+      '@buildplane/kernel':
+        specifier: workspace:*
+        version: link:../kernel
 
-  packages/runtime: {}
+  packages/runtime:
+    dependencies:
+      '@buildplane/kernel':
+        specifier: workspace:*
+        version: link:../kernel
 
-  packages/storage: {}
+  packages/storage:
+    dependencies:
+      '@buildplane/kernel':
+        specifier: workspace:*
+        version: link:../kernel
 
   packages/ui-tui: {}
 

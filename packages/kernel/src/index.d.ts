@@ -1,14 +1,14 @@
 export type {
 	BuildplaneOrchestrator,
 	CreateBuildplaneOrchestratorOptions,
-} from "./orchestrator.js";
-export { createBuildplaneOrchestrator } from "./orchestrator.js";
-export { parseUnitPacket } from "./packet.js";
+} from "./orchestrator.ts";
+export { createBuildplaneOrchestrator } from "./orchestrator.ts";
+export { parseUnitPacket } from "./packet.ts";
 export type {
 	BuildplanePolicyPort,
 	BuildplaneRuntimePort,
 	BuildplaneStoragePort,
-} from "./ports.js";
+} from "./ports.ts";
 export type {
 	ExecutionReceipt,
 	InspectSnapshot,
@@ -17,5 +17,5 @@ export type {
 	RunPacketResult,
 	StatusSnapshot,
 	UnitPacket,
-} from "./run-loop.js";
-export type { Run, RunStatus, Unit } from "./types.js";
+} from "./run-loop.ts";
+export type { Run, RunStatus, Unit } from "./types.ts";

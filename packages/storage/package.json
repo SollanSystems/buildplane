@@ -6,8 +6,15 @@
 	"description": "Durable state, artifacts, evidence, and run history for Buildplane",
 	"exports": {
 		".": {
-			"types": "./src/contracts.ts",
-			"import": "./src/index.ts"
+			"types": "./src/index.d.ts",
+			"import": "./src/index.js"
+		},
+		"./store": {
+			"types": "./src/store.ts",
+			"import": "./src/store.ts"
 		}
+	},
+	"dependencies": {
+		"@buildplane/kernel": "workspace:*"
 	}
 }
