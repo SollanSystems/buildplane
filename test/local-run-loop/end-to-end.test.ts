@@ -1,4 +1,5 @@
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -20,11 +21,32 @@ async function runCliCapture(cwd: string, argv: string[]) {
 	};
 }
 
+function git(root: string, args: string[]): string {
+	return execFileSync("git", args, {
+		cwd: root,
+		encoding: "utf8",
+	});
+}
+
+function createGitRepo(): string {
+	const root = mkdtempSync(join(tmpdir(), "buildplane-e2e-git-"));
+
+	git(root, ["init"]);
+	git(root, ["config", "user.name", "Buildplane Tests"]);
+	git(root, ["config", "user.email", "tests@example.com"]);
+	writeFileSync(join(root, "tracked.txt"), "baseline\n");
+	git(root, ["add", "tracked.txt"]);
+	git(root, ["commit", "-m", "baseline"]);
+
+	return root;
+}
+
 describe("local run loop end to end", () => {
 	it("initializes, runs a packet, and inspects the recorded result", async () => {
-		const root = mkdtempSync(join(tmpdir(), "buildplane-e2e-"));
-		const packetPath = join(root, "packet.json");
+		const root = createGitRepo();
+		const packetPath = join(root, ".buildplane", "packets", "packet.json");
 
+		mkdirSync(join(root, ".buildplane", "packets"), { recursive: true });
 		writeFileSync(
 			packetPath,
 			JSON.stringify({
@@ -49,6 +71,8 @@ describe("local run loop end to end", () => {
 				},
 			}),
 		);
+		git(root, ["add", ".buildplane/packets/packet.json"]);
+		git(root, ["commit", "-m", "add packet fixture"]);
 
 		const init = await runCliCapture(root, ["init"]);
 		const run = await runCliCapture(root, ["run", "--packet", packetPath]);
@@ -60,12 +84,19 @@ describe("local run loop end to end", () => {
 		expect(init.exitCode).toBe(0);
 		expect(run.exitCode).toBe(0);
 		expect(existsSync(join(root, ".buildplane", "state.db"))).toBe(true);
-		expect(readFileSync(join(root, "tmp", "out.txt"), "utf8")).toBe("ok");
+		expect(existsSync(join(root, "tmp", "out.txt"))).toBe(false);
 
 		const statusPayload = JSON.parse(status.stdout.join("\n"));
 		expect(statusPayload).toMatchObject({
 			initialized: true,
 			latestRun: { id: runId, status: "passed" },
+			latestRunUsedWorkspace: true,
+			latestWorkspace: {
+				runId: runId,
+				status: "deleted",
+				path: expect.stringMatching(/\.buildplane\/workspaces\//),
+				finalizedAt: expect.any(String),
+			},
 			runCounts: { passed: 1 },
 		});
 
@@ -73,6 +104,12 @@ describe("local run loop end to end", () => {
 		expect(inspectPayload).toMatchObject({
 			kind: "run",
 			run: { id: runId, status: "passed" },
+			workspace: {
+				status: "deleted",
+				path: expect.stringMatching(/\.buildplane\/workspaces\//),
+				existsOnDisk: false,
+				finalizedAt: expect.any(String),
+			},
 		});
 		expect(inspectPayload.evidence).toEqual(
 			expect.arrayContaining([

@@ -1,17 +1,31 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import type { UnitPacket } from "@buildplane/kernel";
 import {
 	formatHumanError,
 	formatInitializationResult,
+	formatInspectResult,
 	formatJson,
 	formatJsonError,
+	formatRunFailure,
 	formatRunResult,
+	formatStatusResult,
 } from "./formatters.js";
+
+export interface RunCliDependencies {
+	readonly createOrchestrator?: (
+		projectRoot: string,
+	) => Promise<BuildplaneCliOrchestrator> | BuildplaneCliOrchestrator;
+	readonly parsePacket?: (
+		packetPath: string,
+	) => Promise<UnitPacket> | UnitPacket;
+}
 
 export interface RunCliOptions {
 	readonly cwd?: string;
 	readonly stdout?: (line: string) => void;
 	readonly stderr?: (line: string) => void;
+	readonly dependencies?: RunCliDependencies;
 }
 
 interface BuildplaneCliOrchestrator {
@@ -20,15 +34,67 @@ interface BuildplaneCliOrchestrator {
 		projectRoot: string;
 		stateDbPath: string;
 	};
-	runPacket(packet: unknown): {
+	runPacket(packet: UnitPacket): {
 		run: { id: string; status: string };
-		receipt: unknown;
-		decision: unknown;
+		receipt?: unknown;
+		decision?: unknown;
+		failure?: { kind: string; message: string };
+		workspace?: {
+			path: string;
+			headSha: string;
+			status: "active" | "deleted" | "retained" | "cleanup-failed";
+			finalizedAt?: string;
+			cleanupError?: string;
+			existsOnDisk?: boolean;
+		};
 	};
-	getStatus(): { initialized: boolean } & Record<string, unknown>;
-	inspect(
-		id: string,
-	): { kind: string; run: { id: string } } & Record<string, unknown>;
+	getStatus(): {
+		initialized: boolean;
+		latestRun?: { id: string; unitId: string; status: string };
+		latestRunUsedWorkspace: boolean;
+		latestWorkspace?: {
+			runId: string;
+			path?: string;
+			headSha: string;
+			status: "active" | "deleted" | "retained" | "cleanup-failed";
+			finalizedAt?: string;
+			cleanupError?: string;
+		};
+		actionableWorkspaces: readonly unknown[];
+		runCounts: {
+			pending: number;
+			running: number;
+			passed: number;
+			failed: number;
+			cancelled: number;
+		};
+	};
+	inspect(id: string): {
+		kind: string;
+		unit: { id: string };
+		run: { id: string; unitId?: string; status: string };
+		workspace?: {
+			runId: string;
+			path: string;
+			headSha: string;
+			status: "active" | "deleted" | "retained" | "cleanup-failed";
+			finalizedAt?: string;
+			cleanupError?: string;
+			existsOnDisk?: boolean;
+		};
+		runHistory: readonly { id: string; status: string }[];
+		evidence: readonly {
+			kind: string;
+			status: string;
+			message?: string;
+		}[];
+		decisions: readonly {
+			kind: string;
+			outcome: string;
+			reasons: readonly string[];
+		}[];
+		artifacts: readonly { type: string; location: string }[];
+	};
 }
 
 async function loadCliOrchestrator(
@@ -38,10 +104,12 @@ async function loadCliOrchestrator(
 		createBuildplaneOrchestrator: (options: {
 			projectRoot: string;
 			storage: unknown;
-			runtime: { executePacket: (packet: unknown, root: string) => unknown };
-			policy: { evaluateRun: (packet: unknown, receipt: unknown) => unknown };
+			runtime: { executePacket: (packet: UnitPacket, root: string) => unknown };
+			policy: {
+				evaluateRun: (packet: UnitPacket, receipt: unknown) => unknown;
+			};
+			workspace: unknown;
 		}) => BuildplaneCliOrchestrator;
-		parseUnitPacket: (input: string) => unknown;
 	};
 	const runtime = (await import("@buildplane/runtime")) as unknown as {
 		executePacket: (packet: unknown, root: string) => unknown;
@@ -52,18 +120,22 @@ async function loadCliOrchestrator(
 	const storage = (await import("@buildplane/storage")) as unknown as {
 		createBuildplaneStorage: (root: string) => unknown;
 	};
+	const workspace = (await import("@buildplane/adapters-git")) as unknown as {
+		createGitWorkspaceAdapter: () => unknown;
+	};
 
 	return kernel.createBuildplaneOrchestrator({
 		projectRoot,
 		storage: storage.createBuildplaneStorage(projectRoot),
 		runtime: { executePacket: runtime.executePacket },
 		policy: { evaluateRun: policy.evaluateRun },
+		workspace: workspace.createGitWorkspaceAdapter(),
 	});
 }
 
-async function loadPacket(packetPath: string): Promise<unknown> {
+async function loadPacket(packetPath: string): Promise<UnitPacket> {
 	const kernel = (await import("@buildplane/kernel")) as unknown as {
-		parseUnitPacket: (input: string) => unknown;
+		parseUnitPacket: (input: string) => UnitPacket;
 	};
 
 	return kernel.parseUnitPacket(readFileSync(packetPath, "utf8"));
@@ -76,7 +148,9 @@ export async function runCli(
 	const cwd = options.cwd ?? process.cwd();
 	const stdout = options.stdout ?? ((line: string) => console.log(line));
 	const stderr = options.stderr ?? ((line: string) => console.error(line));
-	const orchestrator = await loadCliOrchestrator(cwd);
+	const createOrchestrator =
+		options.dependencies?.createOrchestrator ?? loadCliOrchestrator;
+	const parsePacket = options.dependencies?.parsePacket ?? loadPacket;
 	const [command, ...rest] = argv;
 
 	if (!command) {
@@ -85,37 +159,40 @@ export async function runCli(
 	}
 
 	try {
+		const orchestrator = await createOrchestrator(cwd);
+
 		switch (command) {
 			case "init": {
 				const result = orchestrator.initializeProject();
-				for (const line of formatInitializationResult(result)) {
-					stdout(line);
-				}
+				emitLines(stdout, formatInitializationResult(result));
 				return 0;
 			}
 			case "run": {
+				orchestrator.getStatus();
+
 				const packetIndex = rest.indexOf("--packet");
 				if (packetIndex === -1 || !rest[packetIndex + 1]) {
 					throw new Error("Missing required --packet <path> argument.");
 				}
 
 				const packetPath = resolve(cwd, rest[packetIndex + 1]);
-				const packet = await loadPacket(packetPath);
+				const packet = await parsePacket(packetPath);
 				const result = orchestrator.runPacket(packet);
 
-				for (const line of formatRunResult(result)) {
-					stdout(line);
-				}
+				emitLines(stdout, formatRunResult(result));
+				emitLines(stderr, formatRunFailure(result));
 
-				return result.run.status === "passed" ? 0 : 1;
+				return result.run.status === "passed" && !result.failure ? 0 : 1;
 			}
 			case "status": {
 				const json = rest.includes("--json");
 				const result = orchestrator.getStatus();
 
-				stdout(
-					json ? formatJson(result) : `initialized: ${result.initialized}`,
-				);
+				if (json) {
+					stdout(formatJson(result));
+				} else {
+					emitLines(stdout, formatStatusResult(result));
+				}
 				return 0;
 			}
 			case "inspect": {
@@ -126,11 +203,11 @@ export async function runCli(
 				}
 
 				const result = orchestrator.inspect(id);
-				stdout(
-					json
-						? formatJson(result)
-						: `inspect: ${result.kind} ${result.run.id}`,
-				);
+				if (json) {
+					stdout(formatJson(result));
+				} else {
+					emitLines(stdout, formatInspectResult(result));
+				}
 				return 0;
 			}
 			default:
@@ -174,4 +251,13 @@ function classifyCliError(error: unknown): { code: string; message: string } {
 	}
 
 	return { code: "CLI_ERROR", message };
+}
+
+function emitLines(
+	write: (line: string) => void,
+	lines: readonly string[],
+): void {
+	for (const line of lines) {
+		write(line);
+	}
 }
