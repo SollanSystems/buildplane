@@ -1,3 +1,8 @@
+export type {
+	BuildplaneOrchestrator,
+	CreateBuildplaneOrchestratorOptions,
+} from "./orchestrator.js";
+export { createBuildplaneOrchestrator } from "./orchestrator.js";
 export { parseUnitPacket } from "./packet.js";
 export type {
 	BuildplanePolicyPort,
