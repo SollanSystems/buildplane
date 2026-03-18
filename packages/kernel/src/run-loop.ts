@@ -50,6 +50,7 @@ export interface WorkspaceSnapshot {
 	readonly status: "active" | "deleted" | "retained" | "cleanup-failed";
 	readonly finalizedAt?: string;
 	readonly cleanupError?: string;
+	readonly existsOnDisk?: boolean;
 }
 
 export interface StatusWorkspaceSummary {
