@@ -19,6 +19,8 @@ describe("@buildplane/kernel package consumption", () => {
 			},
 		).trim();
 
-		expect(output).toBe(JSON.stringify(["parseUnitPacket"]));
+		expect(output).toBe(
+			JSON.stringify(["createBuildplaneOrchestrator", "parseUnitPacket"]),
+		);
 	});
 });
