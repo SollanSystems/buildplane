@@ -1,0 +1,250 @@
+import {
+	type SpawnSyncOptions,
+	type SpawnSyncReturns,
+	spawnSync,
+} from "node:child_process";
+import {
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+import { createGitWorkspaceAdapter } from "../src";
+
+const tempRoots: string[] = [];
+
+afterEach(() => {
+	while (tempRoots.length > 0) {
+		const root = tempRoots.pop();
+		if (root) {
+			rmSync(root, { recursive: true, force: true });
+		}
+	}
+});
+
+describe("git worktree adapter", () => {
+	it("pins HEAD, creates a deterministic worktree, and deletes it", () => {
+		const repo = createCommittedRepo();
+		const adapter = createGitWorkspaceAdapter();
+
+		const { headSha } = adapter.assertRunnableRepository(repo);
+		const workspace = adapter.prepareWorkspace(repo, "run-1", headSha);
+
+		expect(workspace).toEqual({
+			path: join(repo, ".buildplane", "workspaces", "run-1"),
+			headSha,
+		});
+		expect(readGitHead(workspace.path)).toBe(headSha);
+		expect(existsSync(workspace.path)).toBe(true);
+
+		const deleted = adapter.deleteWorkspace(workspace);
+
+		expect(deleted).toEqual({ deleted: true });
+		expect(existsSync(workspace.path)).toBe(false);
+	});
+
+	it("creates from the supplied pinned headSha even after source HEAD moves", () => {
+		const repo = createCommittedRepo();
+		const adapter = createGitWorkspaceAdapter();
+		const { headSha } = adapter.assertRunnableRepository(repo);
+
+		writeFileSync(join(repo, "future.txt"), "future\n");
+		runGitOrThrow(repo, ["add", "future.txt"]);
+		runGitOrThrow(repo, ["commit", "-m", "future"]);
+		const movedHeadSha = readGitHead(repo);
+
+		const workspace = adapter.prepareWorkspace(repo, "run-2", headSha);
+
+		expect(movedHeadSha).not.toBe(headSha);
+		expect(readGitHead(workspace.path)).toBe(headSha);
+		expect(existsSync(join(workspace.path, "future.txt"))).toBe(false);
+	});
+
+	it("fails clearly when the git binary is unavailable", () => {
+		const repo = createCommittedRepo();
+		const adapter = createGitWorkspaceAdapter({
+			gitBinary: "git-definitely-missing-buildplane",
+		});
+
+		expect(() => adapter.assertRunnableRepository(repo)).toThrow(
+			/git .* unavailable/i,
+		);
+	});
+
+	it("fails clearly when the project root is not a git repository", () => {
+		const root = createTempRoot("buildplane-not-git-");
+		const adapter = createGitWorkspaceAdapter();
+
+		expect(() => adapter.assertRunnableRepository(root)).toThrow(
+			/not a git repository/i,
+		);
+	});
+
+	it("rejects dirty repositories while ignoring .buildplane state", () => {
+		const repo = createCommittedRepo();
+		const adapter = createGitWorkspaceAdapter();
+
+		mkdirSync(join(repo, ".buildplane", "notes"), { recursive: true });
+		writeFileSync(
+			join(repo, ".buildplane", "notes", "ignored.txt"),
+			"ignored\n",
+		);
+
+		expect(adapter.assertRunnableRepository(repo)).toEqual({
+			headSha: readGitHead(repo),
+		});
+
+		writeFileSync(join(repo, "dirty.txt"), "dirty\n");
+
+		expect(() => adapter.assertRunnableRepository(repo)).toThrow(
+			/working tree is not clean/i,
+		);
+	});
+
+	it("does not let retained leftovers under .buildplane/workspaces poison cleanliness checks", () => {
+		const repo = createCommittedRepo();
+		const adapter = createGitWorkspaceAdapter();
+
+		mkdirSync(join(repo, ".buildplane", "workspaces", "run-retained"), {
+			recursive: true,
+		});
+		writeFileSync(
+			join(repo, ".buildplane", "workspaces", "run-retained", "log.txt"),
+			"left behind\n",
+		);
+
+		expect(adapter.assertRunnableRepository(repo)).toEqual({
+			headSha: readGitHead(repo),
+		});
+	});
+
+	it("rejects unresolved HEAD in an empty repository", () => {
+		const repo = createEmptyRepo();
+		const adapter = createGitWorkspaceAdapter();
+
+		expect(() => adapter.assertRunnableRepository(repo)).toThrow(
+			/unresolved HEAD|HEAD/i,
+		);
+	});
+
+	it("surfaces worktree creation failures cleanly", () => {
+		const repo = createCommittedRepo();
+		const adapter = createGitWorkspaceAdapter({
+			runGit: createSeam((args, options) => {
+				if (args[0] === "worktree" && args[1] === "add") {
+					return failureResult(
+						options,
+						"fatal: synthetic worktree add failure",
+					);
+				}
+				return spawnSync("git", args, options);
+			}),
+		});
+		const { headSha } = adapter.assertRunnableRepository(repo);
+
+		expect(() => adapter.prepareWorkspace(repo, "run-3", headSha)).toThrow(
+			/worktree add failed|synthetic worktree add failure/i,
+		);
+	});
+
+	it("surfaces delete failures cleanly", () => {
+		const repo = createCommittedRepo();
+		const adapter = createGitWorkspaceAdapter({
+			runGit: createSeam((args, options) => {
+				if (args[0] === "worktree" && args[1] === "remove") {
+					return failureResult(
+						options,
+						"fatal: synthetic worktree remove failure",
+					);
+				}
+				return spawnSync("git", args, options);
+			}),
+		});
+		const { headSha } = adapter.assertRunnableRepository(repo);
+		const workspace = adapter.prepareWorkspace(repo, "run-4", headSha);
+
+		expect(adapter.deleteWorkspace(workspace)).toEqual({
+			deleted: false,
+			cleanupError: expect.stringMatching(
+				/worktree remove failed|synthetic worktree remove failure/i,
+			),
+		});
+		expect(existsSync(workspace.path)).toBe(true);
+	});
+});
+
+function createCommittedRepo(): string {
+	const root = createEmptyRepo();
+	writeFileSync(join(root, "tracked.txt"), "initial\n");
+	runGitOrThrow(root, ["add", "tracked.txt"]);
+	runGitOrThrow(root, ["commit", "-m", "initial"]);
+	return root;
+}
+
+function createEmptyRepo(): string {
+	const root = createTempRoot("buildplane-git-adapter-");
+	runGitOrThrow(root, ["init"]);
+	runGitOrThrow(root, ["config", "user.name", "Buildplane Test"]);
+	runGitOrThrow(root, ["config", "user.email", "test@example.com"]);
+	return root;
+}
+
+function createTempRoot(prefix: string): string {
+	const root = mkdtempSync(join(tmpdir(), prefix));
+	tempRoots.push(root);
+	return root;
+}
+
+function readGitHead(cwd: string): string {
+	const result = runGit(cwd, ["rev-parse", "HEAD"]);
+	if (result.status !== 0) {
+		throw new Error(result.stderr.trim() || result.stdout.trim());
+	}
+	return result.stdout.trim();
+}
+
+function runGitOrThrow(cwd: string, args: string[]): void {
+	const result = runGit(cwd, args);
+	if (result.status !== 0) {
+		throw new Error(result.stderr.trim() || result.stdout.trim());
+	}
+}
+
+function runGit(cwd: string, args: string[]) {
+	return spawnSync("git", args, {
+		cwd,
+		encoding: "utf8",
+	});
+}
+
+function createSeam(
+	implementation: (
+		args: string[],
+		options: SpawnSyncOptions,
+	) => SpawnSyncReturns<string>,
+) {
+	return (
+		args: string[],
+		options: SpawnSyncOptions,
+	): SpawnSyncReturns<string> => implementation(args, options);
+}
+
+function failureResult(
+	options: SpawnSyncOptions,
+	stderr: string,
+): SpawnSyncReturns<string> {
+	const encoding = options.encoding === "buffer" ? undefined : "utf8";
+	return {
+		status: 1,
+		signal: null,
+		output: ["", "", stderr],
+		pid: 0,
+		stdout: encoding ? "" : Buffer.alloc(0),
+		stderr: encoding ? stderr : Buffer.from(stderr),
+		error: undefined,
+	} as SpawnSyncReturns<string>;
+}
