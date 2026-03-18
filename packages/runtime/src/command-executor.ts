@@ -27,7 +27,7 @@ export function executePacket(
 		exitCode: result.status ?? 1,
 		stdout: result.stdout ?? "",
 		stderr: result.stderr ?? "",
-		outputChecks: packet.verification.requiredOutputs.map((path) => ({
+		outputChecks: packet.verification.requiredOutputs.map((path: string) => ({
 			path,
 			exists: existsSync(resolve(projectRoot, path)),
 		})),

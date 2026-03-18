@@ -34,9 +34,7 @@ interface BuildplaneCliOrchestrator {
 async function loadCliOrchestrator(
 	projectRoot: string,
 ): Promise<BuildplaneCliOrchestrator> {
-	const kernel = (await import(
-		"../../../packages/kernel/src/index.js"
-	)) as unknown as {
+	const kernel = (await import("@buildplane/kernel")) as unknown as {
 		createBuildplaneOrchestrator: (options: {
 			projectRoot: string;
 			storage: unknown;
@@ -45,19 +43,13 @@ async function loadCliOrchestrator(
 		}) => BuildplaneCliOrchestrator;
 		parseUnitPacket: (input: string) => unknown;
 	};
-	const runtime = (await import(
-		"../../../packages/runtime/src/index.js"
-	)) as unknown as {
+	const runtime = (await import("@buildplane/runtime")) as unknown as {
 		executePacket: (packet: unknown, root: string) => unknown;
 	};
-	const policy = (await import(
-		"../../../packages/policy/src/index.js"
-	)) as unknown as {
+	const policy = (await import("@buildplane/policy")) as unknown as {
 		evaluateRun: (packet: unknown, receipt: unknown) => unknown;
 	};
-	const storage = (await import(
-		"../../../packages/storage/src/index.js"
-	)) as unknown as {
+	const storage = (await import("@buildplane/storage")) as unknown as {
 		createBuildplaneStorage: (root: string) => unknown;
 	};
 
@@ -70,9 +62,7 @@ async function loadCliOrchestrator(
 }
 
 async function loadPacket(packetPath: string): Promise<unknown> {
-	const kernel = (await import(
-		"../../../packages/kernel/src/index.js"
-	)) as unknown as {
+	const kernel = (await import("@buildplane/kernel")) as unknown as {
 		parseUnitPacket: (input: string) => unknown;
 	};
 

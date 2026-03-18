@@ -3,14 +3,7 @@
 	"compilerOptions": {
 		"outDir": "dist",
 		"rootDir": "src",
-		"composite": true,
-		"baseUrl": ".",
-		"paths": {
-			"@buildplane/kernel": ["../../packages/kernel/src/index.ts"],
-			"@buildplane/policy": ["../../packages/policy/src/index.ts"],
-			"@buildplane/runtime": ["../../packages/runtime/src/index.ts"],
-			"@buildplane/storage": ["../../packages/storage/src/index.ts"]
-		}
+		"composite": true
 	},
 	"include": ["src"],
 	"exclude": ["dist", "test"],

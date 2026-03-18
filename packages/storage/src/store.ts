@@ -6,6 +6,7 @@ import type {
 	ExecutionReceipt,
 	InspectSnapshot,
 	PolicyDecision,
+	RunStatus,
 	StatusSnapshot,
 	Unit,
 	UnitPacket,
@@ -392,7 +393,7 @@ export function createStorageStore(
 			database.close();
 		},
 
-		completeRun(runId: string, status) {
+		completeRun(runId: string, status: RunStatus) {
 			ensureInitialized();
 			const database = openStoreDatabase();
 			const completedAt = new Date().toISOString();
@@ -434,11 +435,11 @@ export function createStorageStore(
 			const countRows = database
 				.prepare(`SELECT status, COUNT(*) as count FROM runs GROUP BY status`)
 				.all() as unknown as {
-				status: keyof StatusSnapshot["runCounts"];
+				status: RunStatus;
 				count: number;
 			}[];
 
-			const runCounts = {
+			const runCounts: Record<RunStatus, number> = {
 				pending: 0,
 				running: 0,
 				passed: 0,
