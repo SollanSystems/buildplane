@@ -11,6 +11,7 @@
 		{ "path": "../../packages/kernel" },
 		{ "path": "../../packages/storage" },
 		{ "path": "../../packages/runtime" },
-		{ "path": "../../packages/policy" }
+		{ "path": "../../packages/policy" },
+		{ "path": "../../packages/adapters-git" }
 	]
 }
