@@ -28,6 +28,13 @@ export interface Unit {
 	readonly policyProfile: string;
 }
 
+export type RunStatus =
+	| "pending"
+	| "running"
+	| "passed"
+	| "failed"
+	| "cancelled";
+
 /**
  * One end-to-end execution attempt of a Unit under a policy profile.
  *
@@ -43,5 +50,5 @@ export interface Run {
 	readonly unitId: string;
 
 	/** Current lifecycle status of the run. */
-	readonly status: "pending" | "running" | "passed" | "failed" | "cancelled";
+	readonly status: RunStatus;
 }

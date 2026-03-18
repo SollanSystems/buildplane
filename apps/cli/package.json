@@ -8,7 +8,13 @@
 		"buildplane": "./dist/index.js"
 	},
 	"scripts": {
-		"build": "echo 'TODO: implement cli build'",
+		"build": "tsc --build",
 		"test": "vitest --run"
+	},
+	"dependencies": {
+		"@buildplane/kernel": "workspace:*",
+		"@buildplane/policy": "workspace:*",
+		"@buildplane/runtime": "workspace:*",
+		"@buildplane/storage": "workspace:*"
 	}
 }

@@ -6,5 +6,11 @@
 		"composite": true
 	},
 	"include": ["src"],
-	"exclude": ["dist", "test"]
+	"exclude": ["dist", "test"],
+	"references": [
+		{ "path": "../../packages/kernel" },
+		{ "path": "../../packages/storage" },
+		{ "path": "../../packages/runtime" },
+		{ "path": "../../packages/policy" }
+	]
 }

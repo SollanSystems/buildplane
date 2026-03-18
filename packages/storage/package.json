@@ -9,5 +9,8 @@
 			"types": "./src/contracts.ts",
 			"import": "./src/index.ts"
 		}
+	},
+	"dependencies": {
+		"@buildplane/kernel": "workspace:*"
 	}
 }
