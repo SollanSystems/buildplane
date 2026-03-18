@@ -45,8 +45,8 @@ The repo standardizes on these root commands:
 
 ### Command behavior
 
-- `lint` runs Biome checks over the repo
-- `format` applies Biome formatting
+- `lint` runs `biome check .`
+- `format` runs `biome format --write .`
 - `test` runs the Vitest suite
 - `build` runs the TypeScript composite build
 - `typecheck` runs TypeScript in no-emit mode across the project graph
@@ -97,11 +97,17 @@ Use **Husky**.
 
 #### `pre-commit`
 
-Run fast staged-file cleanup only:
+Run a fast whole-repo validation step:
 
-- Biome check/write against staged files
+- `pnpm lint`
 
-This keeps commits fast and ensures formatting/import organization do not drift.
+Biome is fast enough on the current Buildplane repo that we can avoid staged-file filtering complexity and extra tooling such as `lint-staged`.
+
+#### `commit-msg`
+
+Run commit message validation:
+
+- `commitlint --edit "$1"`
 
 #### `pre-push`
 
@@ -145,11 +151,8 @@ Every PR should answer:
 
 ### PR checklist
 
-- [ ] lint passes
-- [ ] typecheck passes
-- [ ] tests pass
-- [ ] build passes
-- [ ] changeset added if release-worthy
+- [ ] `pnpm check` passes
+- [ ] changeset added if release-worthy and the release track is active
 - [ ] docs updated if needed
 
 ## Release Automation
@@ -161,6 +164,10 @@ Use **Changesets**.
 ### Release model
 
 Changesets should be enabled now, but publishing remains disabled until Buildplane is intentionally ready for npm release.
+
+### Activation posture
+
+The repo should be configured for Changesets immediately, but changesets are only required for release-worthy changes once Buildplane has at least one intentionally publishable package or public release track. Before that point, the tooling exists but the process burden stays light.
 
 ### Expected workflow
 
@@ -178,6 +185,10 @@ For release-worthy changes:
 - good fit for monorepo evolution
 - clean changelog path
 - avoids accidental public release while the repo is still stabilizing
+
+### `release.yml` purpose
+
+The initial `release.yml` workflow exists to create or update the Changesets release PR only. It does not publish packages to npm in this slice.
 
 ## Dependency Automation
 
@@ -197,6 +208,10 @@ Configure updates for:
 - weekly dependency update checks
 - weekly GitHub Actions update checks
 
+### Activation posture
+
+Dependabot should be configured now so the repo starts with a predictable dependency hygiene path, but updates remain manually reviewed until CI and release confidence mature.
+
 ### Automerge policy
 
 Do **not** enable automerge yet.
@@ -208,6 +223,16 @@ Dependabot PRs should remain human-reviewed until CI and release confidence are 
 ### Philosophy
 
 CI should mirror the local commands exactly. Avoid CI-only special scripts unless the repo later has a concrete need for them.
+
+### Baseline runner setup
+
+CI should use:
+
+- `actions/checkout`
+- `pnpm/action-setup`
+- `actions/setup-node` with the pinned Node version and pnpm cache enabled
+
+The repo should also declare its supported Node version in both root `package.json` (`engines.node`) and a local version file such as `.node-version`.
 
 ### Required jobs
 
@@ -232,6 +257,7 @@ Possible later enhancements:
 
 - `biome.json`
 - `.husky/pre-commit`
+- `.husky/commit-msg`
 - `.husky/pre-push`
 - `commitlint.config.cjs`
 - `.changeset/config.json`
@@ -239,6 +265,7 @@ Possible later enhancements:
 - `.github/workflows/release.yml`
 - `.github/dependabot.yml`
 - `.github/pull_request_template.md`
+- `.node-version`
 - updates to root `package.json`
 
 ## Non-Goals
