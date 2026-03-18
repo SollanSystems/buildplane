@@ -4,8 +4,8 @@ export interface UnitPacket {
 	readonly unit: Unit;
 	readonly execution: {
 		readonly command: string;
-		readonly args: readonly string[];
-		readonly cwd: string;
+		readonly args?: readonly string[];
+		readonly cwd?: string;
 	};
 	readonly verification: {
 		readonly requiredOutputs: readonly string[];
@@ -13,7 +13,7 @@ export interface UnitPacket {
 }
 
 export interface OutputCheck {
-	readonly location: string;
+	readonly path: string;
 	readonly exists: boolean;
 }
 
@@ -53,8 +53,8 @@ export interface StatusSnapshot {
 
 export interface InspectSnapshot {
 	readonly kind: "run" | "unit";
-	readonly unit: Unit | null;
-	readonly run: Run | null;
+	readonly unit: Unit;
+	readonly run: Run;
 	readonly runHistory: readonly {
 		readonly id: string;
 		readonly status: RunStatus;

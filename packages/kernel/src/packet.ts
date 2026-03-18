@@ -1,25 +1,34 @@
 import type { UnitPacket } from "./run-loop.js";
 import type { Unit } from "./types.js";
 
-export function parseUnitPacket(input: unknown): UnitPacket {
-	const packet = asRecord(input, "packet");
+export function parseUnitPacket(input: string): UnitPacket {
+	const packet = asRecord(JSON.parse(input), "packet");
 	const unitRecord = asRecord(packet.unit, "packet.unit");
 	const executionRecord = asRecord(packet.execution, "packet.execution");
 	const verificationRecord =
 		packet.verification === undefined
 			? {}
 			: asRecord(packet.verification, "packet.verification");
+	const executionArgs = readOptionalStringArray(
+		executionRecord,
+		"args",
+		"packet.execution",
+	);
+	const executionCwd = readOptionalString(
+		executionRecord,
+		"cwd",
+		"packet.execution",
+	);
 
 	const unit: Unit = {
 		id: readRequiredString(unitRecord, "id", "packet.unit"),
 		kind: readRequiredString(unitRecord, "kind", "packet.unit"),
 		scope: readRequiredString(unitRecord, "scope", "packet.unit"),
-		inputRefs: readOptionalStringArray(unitRecord, "inputRefs", "packet.unit"),
-		expectedOutputs: readOptionalStringArray(
-			unitRecord,
-			"expectedOutputs",
-			"packet.unit",
-		),
+		inputRefs:
+			readOptionalStringArray(unitRecord, "inputRefs", "packet.unit") ?? [],
+		expectedOutputs:
+			readOptionalStringArray(unitRecord, "expectedOutputs", "packet.unit") ??
+			[],
 		verificationContract: readRequiredString(
 			unitRecord,
 			"verificationContract",
@@ -40,20 +49,16 @@ export function parseUnitPacket(input: unknown): UnitPacket {
 				"command",
 				"packet.execution",
 			),
-			args: readOptionalStringArray(
-				executionRecord,
-				"args",
-				"packet.execution",
-			),
-			cwd:
-				readOptionalString(executionRecord, "cwd", "packet.execution") ?? ".",
+			...(executionArgs === undefined ? {} : { args: executionArgs }),
+			...(executionCwd === undefined ? {} : { cwd: executionCwd }),
 		},
 		verification: {
-			requiredOutputs: readOptionalStringArray(
-				verificationRecord,
-				"requiredOutputs",
-				"packet.verification",
-			),
+			requiredOutputs:
+				readOptionalStringArray(
+					verificationRecord,
+					"requiredOutputs",
+					"packet.verification",
+				) ?? [],
 		},
 	};
 }
@@ -100,10 +105,10 @@ function readOptionalStringArray(
 	record: Record<string, unknown>,
 	key: string,
 	label: string,
-): readonly string[] {
+): readonly string[] | undefined {
 	const value = record[key];
 	if (value === undefined) {
-		return [];
+		return undefined;
 	}
 
 	if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
