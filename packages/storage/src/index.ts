@@ -1,10 +1,15 @@
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import type { BuildplaneStoragePort } from "@buildplane/kernel";
 import {
 	assertBuildplaneDatabaseIsInitialized,
 	insertProjectInitializedEvent,
 	openBuildplaneDatabase,
 } from "./database.js";
 import { resolveProjectLayout } from "./project-layout.js";
+import {
+	bootstrapStorageProjectionSchema,
+	createStorageStore,
+} from "./store.js";
 
 export type {
 	ArtifactRecord,
@@ -18,7 +23,7 @@ export interface ProjectInitializationResult {
 	readonly stateDbPath: string;
 }
 
-export interface BuildplaneStorage {
+export interface BuildplaneStorage extends BuildplaneStoragePort {
 	initializeProject(): ProjectInitializationResult;
 }
 
@@ -27,7 +32,10 @@ export function createBuildplaneStorage(
 ): BuildplaneStorage {
 	const layout = resolveProjectLayout(projectRoot);
 
+	const store = createStorageStore(projectRoot);
+
 	return {
+		...store,
 		initializeProject() {
 			const hasProjectJson = existsSync(layout.projectJsonPath);
 			const hasStateDb = existsSync(layout.stateDbPath);
@@ -47,9 +55,10 @@ export function createBuildplaneStorage(
 			mkdirSync(layout.runsDir, { recursive: true });
 			mkdirSync(layout.logsDir, { recursive: true });
 
-			if (created) {
-				const database = openBuildplaneDatabase(layout.stateDbPath);
+			const database = openBuildplaneDatabase(layout.stateDbPath);
+			bootstrapStorageProjectionSchema(database);
 
+			if (created) {
 				writeFileSync(
 					layout.projectJsonPath,
 					JSON.stringify({
@@ -70,10 +79,11 @@ export function createBuildplaneStorage(
 					defaultPolicyProfile: "default",
 					initializedAt,
 				});
-				database.close();
 			} else {
 				assertBuildplaneDatabaseIsInitialized(layout.stateDbPath, projectRoot);
 			}
+
+			database.close();
 
 			return {
 				created,
