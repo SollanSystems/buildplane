@@ -1,23 +1,29 @@
 {
-  "name": "buildplane-workspace",
-  "private": true,
-  "version": "0.1.0",
-  "packageManager": "pnpm@10.0.0",
-  "workspaces": [
-    "apps/*",
-    "packages/*"
-  ],
-  "scripts": {
-    "build": "tsc --build",
-    "test": "vitest --run",
-    "test:watch": "vitest",
-    "typecheck": "tsc --build --noEmit",
-    "lint": "echo 'TODO: add workspace lint'"
-  },
-  "devDependencies": {
-    "@types/node": "^25.5.0",
-    "tsx": "^4.21.0",
-    "typescript": "^5.9.3",
-    "vitest": "^4.1.0"
-  }
+	"name": "buildplane-workspace",
+	"private": true,
+	"version": "0.1.0",
+	"packageManager": "pnpm@10.0.0",
+	"workspaces": [
+		"apps/*",
+		"packages/*"
+	],
+	"engines": {
+		"node": "24.13.1"
+	},
+	"scripts": {
+		"build": "tsc --build",
+		"test": "vitest --run",
+		"test:watch": "vitest",
+		"typecheck": "tsc --build --noEmit",
+		"lint": "biome check .",
+		"format": "biome format --write .",
+		"check": "pnpm lint && pnpm typecheck && pnpm test && pnpm build"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "^2.4.7",
+		"@types/node": "^25.5.0",
+		"tsx": "^4.21.0",
+		"typescript": "^5.9.3",
+		"vitest": "^4.1.0"
+	}
 }

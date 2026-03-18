@@ -6,17 +6,17 @@
  * them, and storage records their existence and location.
  */
 export interface ArtifactRecord {
-  /** Unique identifier for this artifact record. */
-  readonly id: string;
+	/** Unique identifier for this artifact record. */
+	readonly id: string;
 
-  /** The run that produced this artifact. */
-  readonly runId: string;
+	/** The run that produced this artifact. */
+	readonly runId: string;
 
-  /** Artifact classification (e.g. "summary", "diff", "test-report"). */
-  readonly type: string;
+	/** Artifact classification (e.g. "summary", "diff", "test-report"). */
+	readonly type: string;
 
-  /** Path or URI where the artifact content is stored. */
-  readonly location: string;
+	/** Path or URI where the artifact content is stored. */
+	readonly location: string;
 }
 
 /**
@@ -26,17 +26,17 @@ export interface ArtifactRecord {
  * Storage owns the durable record of what was observed.
  */
 export interface EvidenceRecord {
-  /** Unique identifier for this evidence record. */
-  readonly id: string;
+	/** Unique identifier for this evidence record. */
+	readonly id: string;
 
-  /** The run that produced this evidence. */
-  readonly runId: string;
+	/** The run that produced this evidence. */
+	readonly runId: string;
 
-  /** Classification of the evidence signal (e.g. "command-exit", "test-result"). */
-  readonly kind: string;
+	/** Classification of the evidence signal (e.g. "command-exit", "test-result"). */
+	readonly kind: string;
 
-  /** Evaluated status of this evidence (e.g. "pass", "fail", "inconclusive"). */
-  readonly status: string;
+	/** Evaluated status of this evidence (e.g. "pass", "fail", "inconclusive"). */
+	readonly status: string;
 }
 
 /**
@@ -47,15 +47,15 @@ export interface EvidenceRecord {
  * produces them; storage preserves them for audit and replay.
  */
 export interface DecisionRecord {
-  /** Unique identifier for this decision record. */
-  readonly id: string;
+	/** Unique identifier for this decision record. */
+	readonly id: string;
 
-  /** The run this decision pertains to. */
-  readonly runId: string;
+	/** The run this decision pertains to. */
+	readonly runId: string;
 
-  /** Classification of the decision (e.g. "advance-unit", "retry", "escalate"). */
-  readonly kind: string;
+	/** Classification of the decision (e.g. "advance-unit", "retry", "escalate"). */
+	readonly kind: string;
 
-  /** The resolved outcome (e.g. "approved", "rejected", "deferred"). */
-  readonly outcome: string;
+	/** The resolved outcome (e.g. "approved", "rejected", "deferred"). */
+	readonly outcome: string;
 }
