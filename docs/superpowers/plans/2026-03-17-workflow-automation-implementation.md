@@ -361,7 +361,7 @@ Expected: FAIL because Changesets config, workflow, and scripts do not exist yet
 
 - [ ] **Step 3: Add Changesets dependency and scripts**
 
-Run: `pnpm add -D @changesets/cli`
+Run: `pnpm add -Dw @changesets/cli`
 
 Then update `package.json` to include:
 
