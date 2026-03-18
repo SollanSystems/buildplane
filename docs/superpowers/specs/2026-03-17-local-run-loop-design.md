@@ -134,6 +134,7 @@ This slice introduces one minimal JSON packet format. It must be small enough to
 - `unit.id`
 - `unit.kind`
 - `unit.scope`
+- `unit.verificationContract`
 - `unit.policyProfile`
 - `execution.command`
 
