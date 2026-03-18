@@ -18,10 +18,13 @@
 		"lint": "biome check .",
 		"format": "biome format --write .",
 		"check": "pnpm lint && pnpm typecheck && pnpm test && pnpm build",
-		"prepare": "husky"
+		"prepare": "husky",
+		"changeset": "changeset",
+		"changeset:status": "changeset status --verbose"
 	},
 	"devDependencies": {
 		"@biomejs/biome": "^2.4.7",
+		"@changesets/cli": "^2.30.0",
 		"@commitlint/cli": "^20.5.0",
 		"@commitlint/config-conventional": "^20.5.0",
 		"@types/node": "^25.5.0",
