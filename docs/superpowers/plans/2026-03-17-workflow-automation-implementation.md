@@ -99,7 +99,7 @@ Expected: FAIL because `.node-version`, `biome.json`, and the required scripts/d
 
 - [ ] **Step 3: Add the Biome dependency and root scripts**
 
-Run: `pnpm add -D @biomejs/biome`
+Run: `pnpm add -Dw @biomejs/biome`
 
 Then update `package.json` by adding or updating these keys while preserving the existing workspace metadata:
 
@@ -241,11 +241,12 @@ Expected: FAIL because Husky hooks and Commitlint config do not exist yet.
 
 - [ ] **Step 3: Add Husky and Commitlint dependencies**
 
-Run: `pnpm add -D husky @commitlint/cli @commitlint/config-conventional`
+Run: `pnpm add -Dw husky @commitlint/cli @commitlint/config-conventional`
 
 - [ ] **Step 4: Bootstrap Husky and replace the generated hook content**
 
 Run: `pnpm exec husky init`
+Expected: Husky bootstrap completes and adds `prepare: "husky"` to `package.json`
 
 Then replace `.husky/pre-commit` with:
 
@@ -598,7 +599,7 @@ Expected: PASS
 
 - [ ] **Step 7: Run the full suite and full local gate**
 
-Run: `pnpm test && pnpm check`
+Run: `pnpm check`
 Expected: all workflow contract tests plus existing repo tests pass, and the repo completes lint, typecheck, test, and build successfully
 
 - [ ] **Step 8: Commit**
