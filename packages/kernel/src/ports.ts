@@ -29,3 +29,19 @@ export interface BuildplaneRuntimePort {
 export interface BuildplanePolicyPort {
 	evaluateRun(packet: UnitPacket, receipt: ExecutionReceipt): PolicyDecision;
 }
+
+export interface BuildplaneWorkspacePort {
+	assertRunnableRepository(projectRoot: string): { headSha: string };
+	prepareWorkspace(
+		projectRoot: string,
+		runId: string,
+		headSha: string,
+	): {
+		path: string;
+		headSha: string;
+	};
+	deleteWorkspace(workspace: { path: string }): {
+		deleted: boolean;
+		cleanupError?: string;
+	};
+}

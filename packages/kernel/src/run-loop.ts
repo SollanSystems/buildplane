@@ -35,6 +35,29 @@ export interface PolicyDecision {
 	readonly reasons: readonly string[];
 }
 
+export interface WorkspaceSnapshot {
+	readonly runId: string;
+	readonly path: string;
+	readonly headSha: string;
+	readonly status: "active" | "deleted" | "retained" | "cleanup-failed";
+	readonly finalizedAt?: string;
+	readonly cleanupError?: string;
+}
+
+export interface StatusWorkspaceSummary {
+	readonly runId: string;
+	readonly path?: string;
+	readonly headSha: string;
+	readonly status: "active" | "deleted" | "retained" | "cleanup-failed";
+	readonly finalizedAt?: string;
+	readonly cleanupError?: string;
+}
+
+export interface RunInfrastructureFailure {
+	readonly kind: string;
+	readonly message: string;
+}
+
 export interface StatusSnapshot {
 	readonly initialized: boolean;
 	readonly latestRun?: {
@@ -63,6 +86,7 @@ export interface InspectSnapshot {
 		readonly id: string;
 		readonly kind: string;
 		readonly status: string;
+		readonly message?: string;
 	}[];
 	readonly decisions: readonly {
 		readonly id: string;
@@ -79,6 +103,8 @@ export interface InspectSnapshot {
 
 export interface RunPacketResult {
 	readonly run: Run;
-	readonly receipt: ExecutionReceipt;
-	readonly decision: PolicyDecision;
+	readonly receipt?: ExecutionReceipt;
+	readonly decision?: PolicyDecision;
+	readonly failure?: RunInfrastructureFailure;
+	readonly workspace?: WorkspaceSnapshot;
 }
