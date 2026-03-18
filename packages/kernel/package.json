@@ -1,13 +1,13 @@
 {
-  "name": "@buildplane/kernel",
-  "private": true,
-  "version": "0.1.0",
-  "type": "module",
-  "description": "Core units, scheduler, and orchestration primitives for Buildplane",
-  "exports": {
-    ".": {
-      "types": "./src/types.ts",
-      "import": "./src/index.ts"
-    }
-  }
+	"name": "@buildplane/kernel",
+	"private": true,
+	"version": "0.1.0",
+	"type": "module",
+	"description": "Core units, scheduler, and orchestration primitives for Buildplane",
+	"exports": {
+		".": {
+			"types": "./src/types.ts",
+			"import": "./src/index.ts"
+		}
+	}
 }

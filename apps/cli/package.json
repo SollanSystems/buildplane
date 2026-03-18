@@ -1,14 +1,14 @@
 {
-  "name": "buildplane",
-  "private": true,
-  "version": "0.1.0",
-  "type": "module",
-  "description": "Buildplane CLI",
-  "bin": {
-    "buildplane": "./dist/index.js"
-  },
-  "scripts": {
-    "build": "echo 'TODO: implement cli build'",
-    "test": "vitest --run"
-  }
+	"name": "buildplane",
+	"private": true,
+	"version": "0.1.0",
+	"type": "module",
+	"description": "Buildplane CLI",
+	"bin": {
+		"buildplane": "./dist/index.js"
+	},
+	"scripts": {
+		"build": "echo 'TODO: implement cli build'",
+		"test": "vitest --run"
+	}
 }

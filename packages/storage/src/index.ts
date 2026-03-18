@@ -1,1 +1,5 @@
-export type { ArtifactRecord, EvidenceRecord, DecisionRecord } from "./contracts";
+export type {
+	ArtifactRecord,
+	DecisionRecord,
+	EvidenceRecord,
+} from "./contracts";
