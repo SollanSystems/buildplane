@@ -89,8 +89,19 @@ function extractRunId(lines: readonly string[]): string {
 function git(root: string, args: string[]): string {
 	return execFileSync("git", args, {
 		cwd: root,
+		env: isolatedGitEnv(),
 		encoding: "utf8",
 	});
+}
+
+function isolatedGitEnv(): NodeJS.ProcessEnv {
+	const env = { ...process.env };
+	for (const key of Object.keys(env)) {
+		if (key.startsWith("GIT_")) {
+			delete env[key];
+		}
+	}
+	return env;
 }
 
 function createGitRepo(options: { commitHead?: boolean } = {}): string {

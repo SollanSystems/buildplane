@@ -12,7 +12,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createGitWorkspaceAdapter } from "../src";
 
 const tempRoots: string[] = [];
@@ -24,6 +24,7 @@ afterEach(() => {
 			rmSync(root, { recursive: true, force: true });
 		}
 	}
+	vi.unstubAllEnvs();
 });
 
 describe("git worktree adapter", () => {
@@ -82,6 +83,19 @@ describe("git worktree adapter", () => {
 		expect(() => adapter.assertRunnableRepository(root)).toThrow(
 			/not a git repository/i,
 		);
+	});
+
+	it("ignores inherited git environment when targeting a repository", () => {
+		const repo = createCommittedRepo();
+		const adapter = createGitWorkspaceAdapter();
+
+		vi.stubEnv("GIT_DIR", "/definitely/not/the/repo/.git");
+		vi.stubEnv("GIT_WORK_TREE", "/definitely/not/the/repo");
+		vi.stubEnv("GIT_INDEX_FILE", "/definitely/not/the/repo/index");
+
+		expect(adapter.assertRunnableRepository(repo)).toEqual({
+			headSha: readGitHead(repo),
+		});
 	});
 
 	it("rejects dirty repositories while ignoring persisted buildplane state", () => {
@@ -243,8 +257,19 @@ function runGitOrThrow(cwd: string, args: string[]): void {
 function runGit(cwd: string, args: string[]) {
 	return spawnSync("git", args, {
 		cwd,
+		env: isolatedGitEnv(),
 		encoding: "utf8",
 	});
+}
+
+function isolatedGitEnv(): NodeJS.ProcessEnv {
+	const env = { ...process.env };
+	for (const key of Object.keys(env)) {
+		if (key.startsWith("GIT_")) {
+			delete env[key];
+		}
+	}
+	return env;
 }
 
 function createSeam(

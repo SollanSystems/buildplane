@@ -25,6 +25,7 @@ export function createGitWorkspaceAdapter(
 		options.runGit ??
 		((args, spawnOptions) =>
 			spawnSync(gitBinary, args, {
+				env: createIsolatedGitEnv(spawnOptions.env),
 				encoding: "utf8",
 				...spawnOptions,
 			}) as SpawnSyncReturns<string>);
@@ -148,6 +149,22 @@ function executeGitCommand(
 	}
 
 	return result;
+}
+
+function createIsolatedGitEnv(
+	overrides: SpawnSyncOptions["env"],
+): NodeJS.ProcessEnv {
+	const env = { ...process.env };
+	for (const key of Object.keys(env)) {
+		if (key.startsWith("GIT_")) {
+			delete env[key];
+		}
+	}
+
+	return {
+		...env,
+		...overrides,
+	};
 }
 
 function createRepositoryError(
