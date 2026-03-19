@@ -1,4 +1,10 @@
-import { existsSync, mkdtempSync } from "node:fs";
+import {
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -282,6 +288,46 @@ describe("storage adapter", () => {
 			path: workspacePath,
 		});
 		expect(inspect.workspace?.finalizedAt).toEqual(expect.any(String));
+	});
+
+	it("copies workspace-backed required outputs into durable artifact storage", () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-store-artifacts-"));
+		const storage = createBuildplaneStorage(root);
+		storage.initializeProject();
+
+		const run = storage.createRun(packet);
+		const workspacePath = createWorkspacePath(root, run.id);
+		mkdirSync(join(workspacePath, "tmp"), { recursive: true });
+		writeFileSync(join(workspacePath, "tmp", "out.txt"), "ok");
+
+		storage.recordWorkspacePrepared(run.id, {
+			path: workspacePath,
+			headSha: "abc123",
+			sourceProjectRoot: root,
+		});
+		storage.markRunRunning(run.id);
+		storage.recordExecutionEvidence(run.id, {
+			...receipt,
+			cwd: workspacePath,
+		});
+		storage.commitRunSuccessOutcome(run.id, decision);
+		storage.recordWorkspaceDeleted(run.id);
+
+		const inspect = storage.inspectTarget(run.id);
+		expect(inspect.artifacts).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					type: "required-output",
+					location: `.buildplane/artifacts/${run.id}/tmp/out.txt`,
+				}),
+			]),
+		);
+		expect(
+			readFileSync(
+				join(root, ".buildplane", "artifacts", run.id, "tmp", "out.txt"),
+				"utf8",
+			),
+		).toBe("ok");
 	});
 
 	it("marks successful workspaces with cleanup failures as actionable", () => {

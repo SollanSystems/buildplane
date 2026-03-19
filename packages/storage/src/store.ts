@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join, relative, resolve } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import type {
 	ApprovedPolicyDecision,
@@ -340,6 +341,18 @@ export function createStorageStore(
 		writeFileSync(`${layout.logsDir}/${runId}.stderr.log`, receipt.stderr);
 	}
 
+	function persistWorkspaceArtifact(
+		workspacePath: string,
+		runId: string,
+		outputPath: string,
+	): string {
+		const sourcePath = resolve(workspacePath, outputPath);
+		const destinationPath = join(layout.artifactsDir, runId, outputPath);
+		mkdirSync(dirname(destinationPath), { recursive: true });
+		writeFileSync(destinationPath, readFileSync(sourcePath));
+		return relative(projectRoot, destinationPath);
+	}
+
 	function readUnit(unitId: string, database: DatabaseSync): Unit {
 		const row = database
 			.prepare(
@@ -606,6 +619,7 @@ export function createStorageStore(
 
 			try {
 				readRun(runId, database);
+				const workspaceRow = readWorkspaceRow(runId, database);
 				writeRunLogs(runId, receipt);
 
 				database
@@ -632,11 +646,14 @@ export function createStorageStore(
 						);
 
 					if (check.exists) {
+						const artifactLocation = workspaceRow
+							? persistWorkspaceArtifact(workspaceRow.path, runId, check.path)
+							: check.path;
 						database
 							.prepare(
 								`INSERT INTO artifacts (id, run_id, type, location) VALUES (?, ?, ?, ?)`,
 							)
-							.run(randomUUID(), runId, "required-output", check.path);
+							.run(randomUUID(), runId, "required-output", artifactLocation);
 					}
 				}
 

@@ -162,6 +162,18 @@ describe("git worktree adapter", () => {
 		);
 	});
 
+	it("checks cleanliness from the repository root even when invoked from a subdirectory", () => {
+		const repo = createCommittedRepo();
+		const adapter = createGitWorkspaceAdapter();
+		const nestedRoot = join(repo, "packages", "cli");
+		mkdirSync(nestedRoot, { recursive: true });
+		writeFileSync(join(repo, "root-dirty.txt"), "dirty\n");
+
+		expect(() => adapter.assertRunnableRepository(nestedRoot)).toThrow(
+			/working tree is not clean/i,
+		);
+	});
+
 	it("rejects unresolved HEAD in an empty repository", () => {
 		const repo = createEmptyRepo();
 		const adapter = createGitWorkspaceAdapter();

@@ -141,7 +141,7 @@ describe("local run loop end to end", () => {
 			expect.arrayContaining([
 				expect.objectContaining({
 					type: "required-output",
-					location: "tmp/out.txt",
+					location: `.buildplane/artifacts/${runId}/tmp/out.txt`,
 				}),
 			]),
 		);

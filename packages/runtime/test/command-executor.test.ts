@@ -1,4 +1,10 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync } from "node:fs";
+import {
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	symlinkSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
 import type { UnitPacket } from "@buildplane/kernel";
@@ -83,5 +89,38 @@ describe("command executor", () => {
 		expect(receipt.outputChecks).toEqual([{ path: outputPath, exists: true }]);
 		expect(readFileSync(join(workspaceRoot, outputPath), "utf8")).toBe("ok");
 		expect(existsSync(join(sourceCheckout, outputPath))).toBe(false);
+	});
+
+	it("rejects a symlinked cwd that resolves outside the supplied workspace root", () => {
+		const workspaceRoot = mkdtempSync(
+			join(tmpdir(), "buildplane-runtime-workspace-"),
+		);
+		const outsideRoot = mkdtempSync(
+			join(tmpdir(), "buildplane-runtime-outside-"),
+		);
+		symlinkSync(outsideRoot, join(workspaceRoot, "link-out"));
+		const packet: UnitPacket = {
+			unit: {
+				id: "unit-runtime-symlink-cwd",
+				kind: "command",
+				scope: "task",
+				inputRefs: [],
+				expectedOutputs: ["link-out/escape.txt"],
+				verificationContract: "exit-0-and-required-outputs",
+				policyProfile: "default",
+			},
+			execution: {
+				command: "node",
+				cwd: "link-out",
+				args: ["-e", "process.exit(0);"],
+			},
+			verification: {
+				requiredOutputs: ["link-out/escape.txt"],
+			},
+		};
+
+		expect(() => executePacket(packet, workspaceRoot)).toThrow(
+			/outside the worktree root|outside the workspace root|symlink/i,
+		);
 	});
 });

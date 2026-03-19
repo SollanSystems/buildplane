@@ -3,8 +3,8 @@ import {
 	type SpawnSyncReturns,
 	spawnSync,
 } from "node:child_process";
-import { mkdirSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { mkdirSync, realpathSync } from "node:fs";
+import { dirname, join, relative, sep } from "node:path";
 import type { BuildplaneWorkspacePort } from "@buildplane/kernel";
 
 export interface CreateGitWorkspaceAdapterOptions {
@@ -39,8 +39,13 @@ export function createGitWorkspaceAdapter(
 			if (repositoryCheck.status !== 0) {
 				throw createRepositoryError(projectRoot, repositoryCheck);
 			}
+			const repositoryRoot = realpathSync(repositoryCheck.stdout.trim());
+			const canonicalProjectRoot = realpathSync(projectRoot);
+			const buildplanePrefix = toGitPath(
+				relative(repositoryRoot, join(canonicalProjectRoot, ".buildplane")),
+			);
 
-			const headResolution = executeGitCommand(runGit, projectRoot, [
+			const headResolution = executeGitCommand(runGit, repositoryRoot, [
 				"rev-parse",
 				"HEAD",
 			]);
@@ -50,19 +55,19 @@ export function createGitWorkspaceAdapter(
 				);
 			}
 
-			const cleanlinessCheck = executeGitCommand(runGit, projectRoot, [
+			const cleanlinessCheck = executeGitCommand(runGit, repositoryRoot, [
 				"status",
 				"--porcelain",
 				"--untracked-files=all",
 				"--",
 				".",
-				":(exclude).buildplane/state.db",
-				":(exclude).buildplane/project.json",
-				":(exclude).buildplane/artifacts/**",
-				":(exclude).buildplane/evidence/**",
-				":(exclude).buildplane/runs/**",
-				":(exclude).buildplane/logs/**",
-				":(exclude).buildplane/workspaces/**",
+				`:(exclude)${buildplanePrefix}/state.db`,
+				`:(exclude)${buildplanePrefix}/project.json`,
+				`:(exclude)${buildplanePrefix}/artifacts/**`,
+				`:(exclude)${buildplanePrefix}/evidence/**`,
+				`:(exclude)${buildplanePrefix}/runs/**`,
+				`:(exclude)${buildplanePrefix}/logs/**`,
+				`:(exclude)${buildplanePrefix}/workspaces/**`,
 			]);
 			if (cleanlinessCheck.status !== 0) {
 				throw new Error(
@@ -165,6 +170,10 @@ function createIsolatedGitEnv(
 		...env,
 		...overrides,
 	};
+}
+
+function toGitPath(value: string): string {
+	return value.split(sep).join("/");
 }
 
 function createRepositoryError(
