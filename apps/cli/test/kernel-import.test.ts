@@ -27,4 +27,22 @@ describe("@buildplane/kernel package consumption", () => {
 			]),
 		);
 	});
+
+	it("resolves the full CLI dependency closure from source", () => {
+		const script = `
+			Promise.all([
+				import('@buildplane/kernel'),
+				import('@buildplane/runtime'),
+				import('@buildplane/policy'),
+				import('@buildplane/storage'),
+				import('@buildplane/adapters-git'),
+			]).then(() => console.log('ok'));
+		`;
+		const output = execFileSync(process.execPath, ["-e", script], {
+			cwd: cliDir,
+			encoding: "utf8",
+		}).trim();
+
+		expect(output).toBe("ok");
+	});
 });

@@ -21,6 +21,20 @@ describe("root workflow tooling", () => {
 		);
 	});
 
+	it("exposes the dev bootstrap script in the root workspace", () => {
+		const pkg = readJson("package.json");
+
+		expect(pkg.scripts?.buildplane).toBe(
+			"node --import tsx ./apps/cli/src/index.ts",
+		);
+	});
+
+	it("keeps apps/cli bin.buildplane pointed at the built artifact", () => {
+		const cliPkg = readJson("apps/cli/package.json");
+
+		expect(cliPkg.bin?.buildplane).toBe("./dist/index.js");
+	});
+
 	it("installs biome and enables formatter, linter, import organization, and git-aware ignores", () => {
 		const pkg = readJson("package.json");
 		const biome = readJson("biome.json");
