@@ -21,24 +21,57 @@ Build software with autonomy you can inspect, verify, reroute, and resume.
 - **Recovery built in** — resume after interruptions without losing the thread
 - **Policy-aware autonomy** — budgets, trust gates, retries, and stop rules are enforced by the runtime
 
-## Install
-
-```bash
-npm install -g buildplane
-```
-
 ## Status
 
 This repo now includes the first local vertical slice of the control plane. Milestone 1 is still focused on the execution kernel: typed units of work, durable state, bounded worker runs, verification, and operator inspection.
 
+## Getting started (repo development)
+
+After cloning the repository, install dependencies:
+
+```bash
+pnpm install
+```
+
+Then use the workspace-local dev command directly from the repo root:
+
+```bash
+pnpm buildplane init
+pnpm buildplane run --packet ./packet.json
+pnpm buildplane status --json
+pnpm buildplane inspect <run-id> --json
+```
+
+> **Precondition:** `run` expects a clean git working tree. Commit or stash uncommitted changes before dispatching work.
+
+This runs the CLI from TypeScript source via `tsx` — no build step required.
+
+## In-repo built CLI path
+
+After building the project, you can run the CLI from the compiled output:
+
+```bash
+pnpm build
+node apps/cli/dist/index.js init
+node apps/cli/dist/index.js run --packet ./packet.json
+node apps/cli/dist/index.js status --json
+node apps/cli/dist/index.js inspect <run-id> --json
+```
+
+This is the same interface used by the `bin.buildplane` entry in `apps/cli/package.json`.
+
+## Distribution
+
+> **Note:** Published distribution (e.g. via npm) is not yet available. The commands above are the current repo-local paths for development and testing. A packaged install path will be provided when the project reaches distribution readiness.
+
 ## Local run loop
 
-Today’s working path is a local, packet-driven loop:
+Today's working path is a local, packet-driven loop:
 
-1. `buildplane init`
-2. `buildplane run --packet <path>`
-3. `buildplane status --json`
-4. `buildplane inspect <run-id> --json`
+1. `pnpm buildplane init`
+2. `pnpm buildplane run --packet <path>`
+3. `pnpm buildplane status --json`
+4. `pnpm buildplane inspect <run-id> --json`
 
 Example packet:
 
@@ -64,15 +97,6 @@ Example packet:
     "requiredOutputs": ["tmp/out.txt"]
   }
 }
-```
-
-Example usage:
-
-```bash
-buildplane init
-buildplane run --packet ./packet.json
-buildplane status --json
-buildplane inspect <run-id> --json
 ```
 
 This is intentionally narrow: one packet, one run, one local command step, one persisted decision path. Worktree isolation, replay, richer policy, and model-backed execution come later.
