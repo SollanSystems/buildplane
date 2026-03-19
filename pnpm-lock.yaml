@@ -38,6 +38,9 @@ importers:
 
   apps/cli:
     dependencies:
+      '@buildplane/adapters-git':
+        specifier: workspace:*
+        version: link:../../packages/adapters-git
       '@buildplane/kernel':
         specifier: workspace:*
         version: link:../../packages/kernel
@@ -51,7 +54,11 @@ importers:
         specifier: workspace:*
         version: link:../../packages/storage
 
-  packages/adapters-git: {}
+  packages/adapters-git:
+    dependencies:
+      '@buildplane/kernel':
+        specifier: workspace:*
+        version: link:../kernel
 
   packages/adapters-models: {}
 

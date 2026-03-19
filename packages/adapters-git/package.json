@@ -3,5 +3,14 @@
 	"private": true,
 	"version": "0.1.0",
 	"type": "module",
-	"description": "Git and workspace isolation adapters for Buildplane"
+	"description": "Git and workspace isolation adapters for Buildplane",
+	"exports": {
+		".": {
+			"types": "./src/index.d.ts",
+			"import": "./src/index.js"
+		}
+	},
+	"dependencies": {
+		"@buildplane/kernel": "workspace:*"
+	}
 }

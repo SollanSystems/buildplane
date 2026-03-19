@@ -29,10 +29,42 @@ export interface ExecutionReceipt {
 	readonly outputChecks: readonly OutputCheck[];
 }
 
-export interface PolicyDecision {
-	readonly kind: "advance-run" | "reject-run";
-	readonly outcome: "approved" | "rejected";
+export interface ApprovedPolicyDecision {
+	readonly kind: "advance-run";
+	readonly outcome: "approved";
 	readonly reasons: readonly string[];
+}
+
+export interface RejectedPolicyDecision {
+	readonly kind: "reject-run";
+	readonly outcome: "rejected";
+	readonly reasons: readonly string[];
+}
+
+export type PolicyDecision = ApprovedPolicyDecision | RejectedPolicyDecision;
+
+export interface WorkspaceSnapshot {
+	readonly runId: string;
+	readonly path: string;
+	readonly headSha: string;
+	readonly status: "active" | "deleted" | "retained" | "cleanup-failed";
+	readonly finalizedAt?: string;
+	readonly cleanupError?: string;
+	readonly existsOnDisk?: boolean;
+}
+
+export interface StatusWorkspaceSummary {
+	readonly runId: string;
+	readonly path?: string;
+	readonly headSha: string;
+	readonly status: "active" | "deleted" | "retained" | "cleanup-failed";
+	readonly finalizedAt?: string;
+	readonly cleanupError?: string;
+}
+
+export interface RunInfrastructureFailure {
+	readonly kind: string;
+	readonly message: string;
 }
 
 export interface StatusSnapshot {
@@ -42,6 +74,9 @@ export interface StatusSnapshot {
 		readonly unitId: string;
 		readonly status: RunStatus;
 	};
+	readonly latestRunUsedWorkspace: boolean;
+	readonly latestWorkspace?: StatusWorkspaceSummary;
+	readonly actionableWorkspaces: readonly WorkspaceSnapshot[];
 	readonly runCounts: {
 		readonly pending: number;
 		readonly running: number;
@@ -55,6 +90,7 @@ export interface InspectSnapshot {
 	readonly kind: "run" | "unit";
 	readonly unit: Unit;
 	readonly run: Run;
+	readonly workspace?: WorkspaceSnapshot;
 	readonly runHistory: readonly {
 		readonly id: string;
 		readonly status: RunStatus;
@@ -63,6 +99,7 @@ export interface InspectSnapshot {
 		readonly id: string;
 		readonly kind: string;
 		readonly status: string;
+		readonly message?: string;
 	}[];
 	readonly decisions: readonly {
 		readonly id: string;
@@ -79,6 +116,8 @@ export interface InspectSnapshot {
 
 export interface RunPacketResult {
 	readonly run: Run;
-	readonly receipt: ExecutionReceipt;
-	readonly decision: PolicyDecision;
+	readonly receipt?: ExecutionReceipt;
+	readonly decision?: PolicyDecision;
+	readonly failure?: RunInfrastructureFailure;
+	readonly workspace?: WorkspaceSnapshot;
 }

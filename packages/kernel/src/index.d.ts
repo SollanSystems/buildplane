@@ -8,14 +8,21 @@ export type {
 	BuildplanePolicyPort,
 	BuildplaneRuntimePort,
 	BuildplaneStoragePort,
+	BuildplaneWorkspacePort,
 } from "./ports.ts";
 export type {
+	ApprovedPolicyDecision,
 	ExecutionReceipt,
 	InspectSnapshot,
 	OutputCheck,
 	PolicyDecision,
+	RejectedPolicyDecision,
+	RunInfrastructureFailure,
 	RunPacketResult,
 	StatusSnapshot,
+	StatusWorkspaceSummary,
 	UnitPacket,
+	WorkspaceSnapshot,
 } from "./run-loop.ts";
+export { validatePacketForWorkspaceRoot } from "./workspace-paths.ts";
 export type { Run, RunStatus, Unit } from "./types.ts";

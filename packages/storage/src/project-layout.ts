@@ -8,6 +8,7 @@ export interface BuildplaneProjectLayout {
 	readonly evidenceDir: string;
 	readonly runsDir: string;
 	readonly logsDir: string;
+	readonly workspacesDir: string;
 	readonly projectJsonPath: string;
 }
 
@@ -24,6 +25,7 @@ export function resolveProjectLayout(
 		evidenceDir: join(buildplaneDir, "evidence"),
 		runsDir: join(buildplaneDir, "runs"),
 		logsDir: join(buildplaneDir, "logs"),
+		workspacesDir: join(buildplaneDir, "workspaces"),
 		projectJsonPath: join(buildplaneDir, "project.json"),
 	};
 }

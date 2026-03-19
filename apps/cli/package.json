@@ -12,6 +12,7 @@
 		"test": "vitest --run"
 	},
 	"dependencies": {
+		"@buildplane/adapters-git": "workspace:*",
 		"@buildplane/kernel": "workspace:*",
 		"@buildplane/policy": "workspace:*",
 		"@buildplane/runtime": "workspace:*",
