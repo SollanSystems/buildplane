@@ -281,7 +281,14 @@ function createSeam(
 	return (
 		args: string[],
 		options: SpawnSyncOptions,
-	): SpawnSyncReturns<string> => implementation(args, options);
+	): SpawnSyncReturns<string> =>
+		implementation(args, {
+			...options,
+			env: {
+				...isolatedGitEnv(),
+				...options.env,
+			},
+		});
 }
 
 function failureResult(
