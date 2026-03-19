@@ -1,0 +1,421 @@
+# Published Bootstrap Design
+
+**Date:** 2026-03-19
+**Status:** Proposed
+**Related milestone:** Milestone 1 operator bootstrap outside the repo
+
+## Goal
+
+Make Buildplane usable for an operator standing in an arbitrary git repo after:
+
+```bash
+npm install -g buildplane
+```
+
+with no Buildplane monorepo checkout and no repo-local toolchain assumptions beyond:
+
+- Node `24.13.1`
+- `git`
+
+The published operator-facing command is:
+
+```bash
+buildplane <subcommand>
+```
+
+for the existing local loop:
+
+1. `buildplane init`
+2. `buildplane run --packet <path>`
+3. `buildplane status --json`
+4. `buildplane inspect <run-id> --json`
+
+This slice defines the **real published/distribution contract**. It does not replace the repo-local developer contract (`pnpm buildplane ...`) and it does not collapse the distinction between internal monorepo development and external operator installation.
+
+## Why this slice next
+
+The repo-local developer bootstrap story is now solid:
+
+- contributors can run `pnpm buildplane ...` after `pnpm install`
+- CI proves the repo-dev path before build
+- README now clearly says published distribution is not available yet
+
+That leaves one remaining ambiguity in the product surface: what `buildplane` means for a real operator outside this repo.
+
+Right now the gap is explicit but unresolved:
+
+- `apps/cli/package.json` is still `private: true`
+- the current package graph relies on workspace dependencies (`workspace:*`)
+- repo-local execution still assumes the monorepo layout exists
+- the README correctly avoids promising a global-install path, but the product eventually needs one
+
+This next slice should turn “future distribution” from a note into a concrete operator contract.
+
+## In scope
+
+### Operator install contract
+
+Support this first-class user path:
+
+```bash
+npm install -g buildplane
+buildplane init
+buildplane run --packet /absolute/path/to/packet.json
+buildplane status --json
+buildplane inspect <run-id> --json
+```
+
+The operator should be able to do this in an arbitrary git repo without cloning the Buildplane monorepo and without installing workspace-local tools like `pnpm` or `tsx`.
+
+### Packaging model
+
+Publish a **single self-contained CLI package** named `buildplane`.
+
+The published CLI must:
+
+- ship compiled runtime artifacts only
+- resolve its runtime pieces without workspace links
+- avoid source imports at install-time and run-time
+- preserve the current operator-visible CLI behavior for `init`, `run`, `status`, and `inspect`
+
+### Metadata and distribution boundary
+
+Define which package in the repo becomes the publish target and how its metadata differs from repo-dev tooling.
+
+At minimum, the design must settle:
+
+- what is published
+- what remains private/internal
+- what package metadata is authoritative for the public binary
+- what repo-only scripts and assumptions must not leak into the published path
+
+### Verification model
+
+Define how to prove the published bootstrap path works **without actually publishing to npm during development**.
+
+The verification must exercise the real install shape closely enough that success is meaningful for the eventual `npm install -g buildplane` contract.
+
+## Out of scope
+
+This slice does **not** include:
+
+- actual npm publication to a public registry
+- release automation changes beyond what is required to support packaging later
+- multi-package public distribution of `@buildplane/*`
+- native executable packaging
+- support for Node versions other than `24.13.1`
+- non-git repositories
+- new CLI subcommands
+- changes to runtime, storage, policy, or worktree semantics unrelated to packaging/installability
+
+## Desired operator flow
+
+### Installed operator path
+
+From an arbitrary git repo on a machine with Node `24.13.1` and `git`:
+
+```bash
+npm install -g buildplane
+buildplane init
+buildplane run --packet /absolute/path/to/packet.json
+buildplane status --json
+buildplane inspect <run-id> --json
+```
+
+Expected properties:
+
+- no Buildplane repo checkout required
+- no `pnpm` required
+- no `tsx` required
+- no workspace packages present on disk
+- same CLI surface and output shape as the current repo-local and built paths
+- same clean-git precondition for `run`, aside from Buildplane-managed `.buildplane` state
+
+### Repo-dev path remains valid
+
+The current contributor path still matters:
+
+```bash
+pnpm install
+pnpm buildplane init
+pnpm buildplane run --packet /absolute/path/to/packet.json
+```
+
+This slice must not break that path.
+
+### In-repo built CLI path remains valid
+
+The current built-artifact path still matters:
+
+```bash
+pnpm build
+node apps/cli/dist/index.js init
+node apps/cli/dist/index.js run --packet /absolute/path/to/packet.json
+```
+
+This slice must not break that path either.
+
+## Packaging approach
+
+### 1. Publish one package: `buildplane`
+
+The published install should remain a single-package contract.
+
+Recommended shape:
+
+- the repo continues to use a private monorepo for development
+- `apps/cli` becomes the publish target for npm
+- the published `buildplane` package owns the public `bin.buildplane`
+- internal `@buildplane/*` packages remain development-time structure unless there is a compelling reason to publish them later
+
+This keeps the operator story simple:
+
+- install one package
+- invoke one binary
+- do not think about internal package boundaries
+
+### 2. Ship a self-contained compiled runtime
+
+The published `buildplane` package must be self-contained at runtime.
+
+That means the installed package cannot depend on workspace links or repo-only source layout assumptions.
+
+The implementation can achieve this in multiple ways, but the operator contract is fixed:
+
+- compiled artifacts only
+- no TypeScript source execution
+- no `workspace:*` resolution at runtime
+- no imports that require sibling monorepo packages to exist outside the published package
+
+A practical way to think about the boundary:
+
+- monorepo package boundaries remain useful for development
+- the published package is an assembled runtime artifact, not a mirror of the monorepo’s source layout
+
+### 3. Keep the public binary pointed at built output
+
+The public binary contract should remain:
+
+```json
+"bin": {
+  "buildplane": "./dist/index.js"
+}
+```
+
+This is important for two reasons:
+
+- it keeps published execution boring and predictable
+- it prevents repo-only source execution techniques from leaking into public install behavior
+
+### 4. Do not make global install depend on repo-only tooling
+
+The published package must not require:
+
+- `pnpm`
+- `tsx`
+- the monorepo root `package.json`
+- sibling workspace packages on disk
+- repo-local scripts such as `pnpm buildplane`
+
+Those remain contributor-only concerns.
+
+## Package and metadata boundaries
+
+### Root workspace
+
+Owns:
+
+- developer scripts
+- monorepo-only tooling
+- CI verification for development and packaging readiness
+
+Must not own:
+
+- the public global-install contract
+- runtime requirements for the published package
+
+### `apps/cli`
+
+Owns:
+
+- the public npm package metadata for `buildplane`
+- the public `bin.buildplane`
+- the published CLI entrypoint
+- any packaging assembly needed to make the install self-contained
+
+Must not require:
+
+- workspace links at runtime in the published install
+- repo-root scripts or source loaders in the published install
+
+### Internal `@buildplane/*` packages
+
+Own:
+
+- development-time code organization
+- internal boundaries and testability
+
+Need not become public packages in this slice.
+
+If they remain private, the published CLI package must assemble what it needs from them into a runtime form that no longer depends on the monorepo package graph.
+
+## Documentation contract
+
+README and any user-facing install docs must clearly distinguish three paths:
+
+1. **Repo development**
+   - `pnpm install`
+   - `pnpm buildplane ...`
+
+2. **In-repo built CLI path**
+   - `pnpm build`
+   - `node apps/cli/dist/index.js ...`
+
+3. **Published/global install path**
+   - `npm install -g buildplane`
+   - `buildplane ...`
+
+Once this slice is implemented, top-level docs should stop describing published install as future-only. They should instead document the real operator contract while preserving the distinction from repo-dev usage.
+
+## Risks and tradeoffs
+
+### Risk: published artifact accidentally depends on monorepo structure
+
+This is the main failure mode.
+
+Examples:
+
+- `workspace:*` dependencies survive into the published package
+- published code imports source files that only exist inside the repo
+- runtime resolution still expects sibling `@buildplane/*` packages to be present
+
+Mitigation:
+
+- verify install and execution from outside the repo
+- inspect the packed artifact, not just the repo tree
+- keep the public binary tied to built output only
+
+### Risk: repo-dev and published behavior drift apart
+
+If the repo-dev path and published path use different wiring or assumptions, one can silently break while the other still passes.
+
+Mitigation:
+
+- preserve the same operator-visible CLI behavior across all three paths
+- verify repo-dev, built, and published-like smoke flows in the same slice
+
+### Tradeoff: single-package simplicity vs internal purity
+
+A self-contained published CLI is the cleanest operator story, but it means the published artifact is not a naive reflection of the monorepo structure.
+
+That is acceptable here.
+
+The operator contract matters more than preserving internal package purity in the published tarball.
+
+## Verification
+
+This slice is not done until all of the following pass.
+
+### 1. Repo-dev path regression
+
+```bash
+pnpm install --frozen-lockfile
+pnpm buildplane init
+pnpm buildplane run --packet <packet>
+pnpm buildplane status --json
+pnpm buildplane inspect <run-id> --json
+```
+
+Expected proof points:
+
+- repo-dev path still works after packaging changes
+- no hidden dependency on published-only assembly
+
+### 2. In-repo built path regression
+
+```bash
+pnpm build
+node apps/cli/dist/index.js init
+node apps/cli/dist/index.js run --packet <packet>
+node apps/cli/dist/index.js status --json
+node apps/cli/dist/index.js inspect <run-id> --json
+```
+
+Expected proof points:
+
+- built path still works exactly as before
+- no regressions in the compiled in-repo CLI path
+
+### 3. Published-package smoke in an external repo
+
+This proof should simulate the eventual public install without requiring an actual public npm publish.
+
+Recommended shape:
+
+1. build the publishable package artifact (`npm pack` or equivalent)
+2. create a fresh arbitrary git repo outside the monorepo
+3. install the tarball globally into an isolated npm prefix
+4. run:
+
+```bash
+buildplane init
+buildplane run --packet /absolute/path/to/packet.json
+buildplane status --json
+buildplane inspect <run-id> --json
+```
+
+Expected proof points:
+
+- the installed binary runs outside the monorepo
+- no workspace links are involved
+- no `tsx` or source execution is involved
+- the operator-visible behavior matches the repo-dev and built paths
+
+### 4. Packed artifact inspection
+
+Verification must also confirm the packed/publishable artifact itself is sane.
+
+At minimum, inspect that:
+
+- the public package is not marked `private: true`
+- `bin.buildplane` points at `./dist/index.js`
+- runtime dependencies are publishable/installable, not `workspace:*`
+- the package contains the built runtime files it actually needs
+- the package does not depend on repo-root scripts or monorepo-only metadata at runtime
+
+### 5. Repo verification
+
+```bash
+pnpm lint
+pnpm typecheck
+pnpm test
+pnpm build
+```
+
+## Open questions resolved by this design
+
+### Should the published install optimize for end users or CI first?
+
+End users first. CI can use the same install shape later.
+
+### Should the primary install contract be `npm install -g buildplane` or `npx buildplane`?
+
+`npm install -g buildplane` is the primary contract for this slice.
+
+### Should the published CLI be self-contained or depend on separately published internal packages?
+
+Self-contained. The operator should install one package.
+
+### Should the published CLI support a broader Node range now?
+
+No. The contract is Node `24.13.1` only in this slice.
+
+## Definition of done
+
+This slice is done when:
+
+- `buildplane` can be installed globally from a publishable package artifact outside the monorepo
+- the installed binary works in an arbitrary git repo with only Node `24.13.1` and `git` available
+- repo-dev and in-repo built paths still work
+- documentation distinguishes repo-dev, built, and published usage honestly
+- repo verification remains green
