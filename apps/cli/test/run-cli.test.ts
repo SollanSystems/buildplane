@@ -193,6 +193,72 @@ describe("cli command surface", () => {
 		expect(existsSync(join(root, ".buildplane", "state.db"))).toBe(true);
 	});
 
+	it("supports injected packet loading for run command tests", async () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-cli-parse-packet-"));
+		const loadedPacketPaths: string[] = [];
+		const receivedPackets: unknown[] = [];
+		const dependencies: RunCliDependencies = {
+			createOrchestrator: () => ({
+				initializeProject() {
+					return {
+						created: true,
+						projectRoot: root,
+						stateDbPath: join(root, ".buildplane", "state.db"),
+					};
+				},
+				runPacket(packet) {
+					receivedPackets.push(packet);
+					return {
+						run: {
+							id: "run-parse-packet",
+							status: "passed",
+						},
+					};
+				},
+				getStatus() {
+					return {
+						initialized: true,
+						latestRunUsedWorkspace: false,
+						actionableWorkspaces: [],
+						runCounts: {
+							pending: 0,
+							running: 0,
+							passed: 0,
+							failed: 0,
+							cancelled: 0,
+						},
+					};
+				},
+				inspect() {
+					throw new Error("not used");
+				},
+			}),
+			parsePacket(packetPath) {
+				loadedPacketPaths.push(packetPath);
+				return createPassingPacket("unit-parse-packet");
+			},
+		};
+
+		const result = await runCliCapture(
+			root,
+			["run", "--packet", "missing-packet.json"],
+			dependencies,
+		);
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stdout).toEqual([
+			"run-id: run-parse-packet",
+			"status: passed",
+		]);
+		expect(result.stderr).toEqual([]);
+		expect(loadedPacketPaths).toEqual([join(root, "missing-packet.json")]);
+		expect(receivedPackets).toEqual([
+			expect.objectContaining({
+				unit: expect.objectContaining({ id: "unit-parse-packet" }),
+			}),
+		]);
+	});
+
 	it("runs packets inside a git repo and surfaces retained workspaces in run, status, and inspect output", async () => {
 		const root = createGitRepo();
 
