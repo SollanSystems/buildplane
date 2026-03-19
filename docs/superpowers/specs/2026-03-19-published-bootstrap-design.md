@@ -164,9 +164,10 @@ The published install should remain a single-package contract.
 Recommended shape:
 
 - the repo continues to use a private monorepo for development
-- `apps/cli` remains the source of truth for the public CLI entrypoint and package metadata fields
+- `apps/cli/package.json` remains repo-private and is never packed directly
+- `apps/cli` remains the source of truth for the public CLI entrypoint and the metadata fields that feed publishing
 - the actual npm artifact is produced from a **staged publish directory** with a derived manifest, not by packing the raw `apps/cli/` source tree directly
-- the staged publish directory owns the public `bin.buildplane`
+- the staged publish manifest is the only manifest consumed by `npm pack` and by global-install verification
 - internal `@buildplane/*` packages remain development-time structure unless there is a compelling reason to publish them later
 
 This keeps the operator story simple:
@@ -250,9 +251,11 @@ Owns:
 The staged publish manifest derived from `apps/cli` must declare:
 
 - the public package name
+- version
 - `bin.buildplane = ./dist/index.js`
 - the Node `24.13.1` engine contract
-- only publish-safe runtime metadata
+- `files` / packaged asset boundaries
+- only publish-safe runtime dependencies and metadata
 
 Must not require:
 
@@ -367,7 +370,12 @@ Recommended shape:
 2. create the publishable tarball from that exact staged directory (`npm pack`)
 3. create a fresh arbitrary git repo outside the monorepo
 4. install the tarball globally into an isolated npm prefix
-5. prepend that prefix's `bin` directory to `PATH` and assert `command -v buildplane` resolves there
+5. run the smoke in a sanitized environment where:
+   - that prefix's `bin` directory is prepended to `PATH`
+   - `command -v buildplane` resolves there
+   - `pnpm` is unavailable
+   - `tsx` is unavailable
+   - no monorepo-local PATH/script leakage is present
 6. run:
 
 ```bash
@@ -399,7 +407,19 @@ At minimum, inspect that:
 - the tarball contains the built runtime files it actually needs and does not ship source/test payloads as runtime requirements
 - the package does not depend on repo-root scripts or monorepo-only metadata at runtime
 
-### 5. Repo verification
+### 5. Docs and contract verification
+
+Verification must also assert that:
+
+- README clearly documents all three paths separately:
+  - repo-dev via `pnpm buildplane ...`
+  - in-repo built via `node apps/cli/dist/index.js ...`
+  - published/global install via `npm install -g buildplane` then `buildplane ...`
+- root `scripts.buildplane` remains the repo-dev entrypoint
+- the public package binary remains `bin.buildplane = ./dist/index.js`
+- published install docs are no longer future-only once this slice lands, but they remain clearly distinct from repo-dev and in-repo built usage
+
+### 6. Repo verification
 
 ```bash
 pnpm lint
