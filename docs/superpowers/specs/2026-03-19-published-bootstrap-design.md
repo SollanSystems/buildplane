@@ -164,8 +164,9 @@ The published install should remain a single-package contract.
 Recommended shape:
 
 - the repo continues to use a private monorepo for development
-- `apps/cli` becomes the publish target for npm
-- the published `buildplane` package owns the public `bin.buildplane`
+- `apps/cli` remains the source of truth for the public CLI entrypoint and package metadata fields
+- the actual npm artifact is produced from a **staged publish directory** with a derived manifest, not by packing the raw `apps/cli/` source tree directly
+- the staged publish directory owns the public `bin.buildplane`
 - internal `@buildplane/*` packages remain development-time structure unless there is a compelling reason to publish them later
 
 This keeps the operator story simple:
@@ -174,11 +175,15 @@ This keeps the operator story simple:
 - invoke one binary
 - do not think about internal package boundaries
 
+It also keeps the repo implementation honest: today `apps/cli/package.json` is still private and workspace-linked, so the publish artifact must be assembled deliberately rather than inferred from the raw source package.
+
 ### 2. Ship a self-contained compiled runtime
 
 The published `buildplane` package must be self-contained at runtime.
 
 That means the installed package cannot depend on workspace links or repo-only source layout assumptions.
+
+The staged publish directory must contain the exact built runtime closure needed by the CLI. The publish smoke must pack and install that real staged artifact, not a hand-assembled approximation.
 
 The implementation can achieve this in multiple ways, but the operator contract is fixed:
 
@@ -238,10 +243,16 @@ Must not own:
 
 Owns:
 
-- the public npm package metadata for `buildplane`
-- the public `bin.buildplane`
-- the published CLI entrypoint
-- any packaging assembly needed to make the install self-contained
+- the source-of-truth metadata for the public `buildplane` package
+- the public CLI entrypoint
+- the packaging assembly rules needed to make the staged publish artifact self-contained
+
+The staged publish manifest derived from `apps/cli` must declare:
+
+- the public package name
+- `bin.buildplane = ./dist/index.js`
+- the Node `24.13.1` engine contract
+- only publish-safe runtime metadata
 
 Must not require:
 
@@ -352,10 +363,12 @@ This proof should simulate the eventual public install without requiring an actu
 
 Recommended shape:
 
-1. build the publishable package artifact (`npm pack` or equivalent)
-2. create a fresh arbitrary git repo outside the monorepo
-3. install the tarball globally into an isolated npm prefix
-4. run:
+1. build the staged publish directory
+2. create the publishable tarball from that exact staged directory (`npm pack`)
+3. create a fresh arbitrary git repo outside the monorepo
+4. install the tarball globally into an isolated npm prefix
+5. prepend that prefix's `bin` directory to `PATH` and assert `command -v buildplane` resolves there
+6. run:
 
 ```bash
 buildplane init
@@ -367,6 +380,7 @@ buildplane inspect <run-id> --json
 Expected proof points:
 
 - the installed binary runs outside the monorepo
+- `buildplane` resolves from the isolated global-install prefix used by the smoke
 - no workspace links are involved
 - no `tsx` or source execution is involved
 - the operator-visible behavior matches the repo-dev and built paths
@@ -378,9 +392,11 @@ Verification must also confirm the packed/publishable artifact itself is sane.
 At minimum, inspect that:
 
 - the public package is not marked `private: true`
+- the published package metadata declares the Node `24.13.1` engine contract
 - `bin.buildplane` points at `./dist/index.js`
-- runtime dependencies are publishable/installable, not `workspace:*`
-- the package contains the built runtime files it actually needs
+- there are no registry-resolved runtime `@buildplane/*` dependencies in the published contract unless they are physically bundled inside the tarball
+- there are no published runtime entrypoints resolving to `src/**` or `.ts` files
+- the tarball contains the built runtime files it actually needs and does not ship source/test payloads as runtime requirements
 - the package does not depend on repo-root scripts or monorepo-only metadata at runtime
 
 ### 5. Repo verification
