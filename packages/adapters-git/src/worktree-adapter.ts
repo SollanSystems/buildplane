@@ -55,7 +55,13 @@ export function createGitWorkspaceAdapter(
 				"--untracked-files=all",
 				"--",
 				".",
-				":(exclude).buildplane/**",
+				":(exclude).buildplane/state.db",
+				":(exclude).buildplane/project.json",
+				":(exclude).buildplane/artifacts/**",
+				":(exclude).buildplane/evidence/**",
+				":(exclude).buildplane/runs/**",
+				":(exclude).buildplane/logs/**",
+				":(exclude).buildplane/workspaces/**",
 			]);
 			if (cleanlinessCheck.status !== 0) {
 				throw new Error(

@@ -84,13 +84,18 @@ describe("git worktree adapter", () => {
 		);
 	});
 
-	it("rejects dirty repositories while ignoring .buildplane state", () => {
+	it("rejects dirty repositories while ignoring persisted buildplane state", () => {
 		const repo = createCommittedRepo();
 		const adapter = createGitWorkspaceAdapter();
 
-		mkdirSync(join(repo, ".buildplane", "notes"), { recursive: true });
+		mkdirSync(join(repo, ".buildplane", "logs"), { recursive: true });
+		writeFileSync(join(repo, ".buildplane", "state.db"), "sqlite\n");
 		writeFileSync(
-			join(repo, ".buildplane", "notes", "ignored.txt"),
+			join(repo, ".buildplane", "project.json"),
+			'{"schemaVersion":1}\n',
+		);
+		writeFileSync(
+			join(repo, ".buildplane", "logs", "run-1.stdout.log"),
 			"ignored\n",
 		);
 
@@ -120,6 +125,27 @@ describe("git worktree adapter", () => {
 		expect(adapter.assertRunnableRepository(repo)).toEqual({
 			headSha: readGitHead(repo),
 		});
+	});
+
+	it("rejects dirty packet inputs stored under .buildplane", () => {
+		const repo = createCommittedRepo();
+		const adapter = createGitWorkspaceAdapter();
+
+		mkdirSync(join(repo, ".buildplane", "packets"), { recursive: true });
+		writeFileSync(
+			join(repo, ".buildplane", "packets", "packet.json"),
+			'{"name":"baseline"}\n',
+		);
+		runGitOrThrow(repo, ["add", ".buildplane/packets/packet.json"]);
+		runGitOrThrow(repo, ["commit", "-m", "add packet fixture"]);
+		writeFileSync(
+			join(repo, ".buildplane", "packets", "packet.json"),
+			'{"name":"dirty"}\n',
+		);
+
+		expect(() => adapter.assertRunnableRepository(repo)).toThrow(
+			/working tree is not clean/i,
+		);
 	});
 
 	it("rejects unresolved HEAD in an empty repository", () => {

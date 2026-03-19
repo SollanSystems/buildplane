@@ -41,38 +41,43 @@ function createGitRepo(): string {
 	return root;
 }
 
-describe("local run loop end to end", () => {
-	it("initializes, runs a packet, and inspects the recorded result", async () => {
-		const root = createGitRepo();
-		const packetPath = join(root, ".buildplane", "packets", "packet.json");
+function writeCommittedPacket(
+	root: string,
+	name: string,
+	packet: unknown,
+): string {
+	const packetPath = join(root, ".buildplane", "packets", name);
+	mkdirSync(join(root, ".buildplane", "packets"), { recursive: true });
+	writeFileSync(packetPath, JSON.stringify(packet));
+	git(root, ["add", `.buildplane/packets/${name}`]);
+	git(root, ["commit", "-m", `add ${name} fixture`]);
+	return packetPath;
+}
 
-		mkdirSync(join(root, ".buildplane", "packets"), { recursive: true });
-		writeFileSync(
-			packetPath,
-			JSON.stringify({
-				unit: {
-					id: "unit-e2e",
-					kind: "command",
-					scope: "task",
-					inputRefs: [],
-					expectedOutputs: ["tmp/out.txt"],
-					verificationContract: "exit-0-and-required-outputs",
-					policyProfile: "default",
-				},
-				execution: {
-					command: "node",
-					args: [
-						"-e",
-						"const fs = require('node:fs'); fs.mkdirSync('tmp', { recursive: true }); fs.writeFileSync('tmp/out.txt', 'ok'); console.log('vertical-slice');",
-					],
-				},
-				verification: {
-					requiredOutputs: ["tmp/out.txt"],
-				},
-			}),
-		);
-		git(root, ["add", ".buildplane/packets/packet.json"]);
-		git(root, ["commit", "-m", "add packet fixture"]);
+describe("local run loop end to end", () => {
+	it("initializes, runs a passing packet, and inspects the recorded result", async () => {
+		const root = createGitRepo();
+		const packetPath = writeCommittedPacket(root, "packet.json", {
+			unit: {
+				id: "unit-e2e",
+				kind: "command",
+				scope: "task",
+				inputRefs: [],
+				expectedOutputs: ["tmp/out.txt"],
+				verificationContract: "exit-0-and-required-outputs",
+				policyProfile: "default",
+			},
+			execution: {
+				command: "node",
+				args: [
+					"-e",
+					"const fs = require('node:fs'); fs.mkdirSync('tmp', { recursive: true }); fs.writeFileSync('tmp/out.txt', 'ok'); console.log('vertical-slice');",
+				],
+			},
+			verification: {
+				requiredOutputs: ["tmp/out.txt"],
+			},
+		});
 
 		const init = await runCliCapture(root, ["init"]);
 		const run = await runCliCapture(root, ["run", "--packet", packetPath]);
@@ -127,6 +132,85 @@ describe("local run loop end to end", () => {
 					type: "required-output",
 					location: "tmp/out.txt",
 				}),
+			]),
+		);
+	});
+
+	it("retains a failed workspace and surfaces it in status and inspect output", async () => {
+		const root = createGitRepo();
+		const packetPath = writeCommittedPacket(root, "failing-packet.json", {
+			unit: {
+				id: "unit-failed-e2e",
+				kind: "command",
+				scope: "task",
+				inputRefs: [],
+				expectedOutputs: ["tmp/out.txt"],
+				verificationContract: "exit-0-and-required-outputs",
+				policyProfile: "default",
+			},
+			execution: {
+				command: "node",
+				args: ["-e", "process.exit(1);"],
+			},
+			verification: {
+				requiredOutputs: ["tmp/out.txt"],
+			},
+		});
+
+		const init = await runCliCapture(root, ["init"]);
+		const run = await runCliCapture(root, ["run", "--packet", packetPath]);
+		const runId =
+			run.stdout.find((line) => line.startsWith("run-id: "))?.slice(8) ?? "";
+		const workspacePath =
+			run.stdout.find((line) => line.startsWith("workspace: "))?.slice(11) ??
+			"";
+		const status = await runCliCapture(root, ["status", "--json"]);
+		const inspect = await runCliCapture(root, ["inspect", runId, "--json"]);
+
+		expect(init.exitCode).toBe(0);
+		expect(run.exitCode).toBe(1);
+		expect(run.stdout).toEqual(
+			expect.arrayContaining([
+				expect.stringMatching(/^run-id: /),
+				"status: failed",
+				expect.stringMatching(/^workspace: .+\.buildplane\/workspaces\//),
+			]),
+		);
+		expect(existsSync(workspacePath)).toBe(true);
+
+		const statusPayload = JSON.parse(status.stdout.join("\n"));
+		expect(statusPayload).toMatchObject({
+			initialized: true,
+			latestRun: { id: runId, status: "failed" },
+			latestRunUsedWorkspace: true,
+			latestWorkspace: {
+				runId: runId,
+				status: "retained",
+				path: workspacePath,
+			},
+			actionableWorkspaces: [
+				{
+					runId: runId,
+					status: "retained",
+					path: workspacePath,
+				},
+			],
+			runCounts: { failed: 1 },
+		});
+
+		const inspectPayload = JSON.parse(inspect.stdout.join("\n"));
+		expect(inspectPayload).toMatchObject({
+			kind: "run",
+			run: { id: runId, status: "failed" },
+			workspace: {
+				status: "retained",
+				path: workspacePath,
+				existsOnDisk: true,
+			},
+		});
+		expect(inspectPayload.evidence).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({ kind: "command-exit", status: "fail" }),
 			]),
 		);
 	});

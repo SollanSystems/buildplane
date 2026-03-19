@@ -71,6 +71,17 @@ function writePacket(root: string, name: string, packet: unknown): string {
 	return packetPath;
 }
 
+function writeCommittedPacket(
+	root: string,
+	name: string,
+	packet: unknown,
+): string {
+	const packetPath = writePacket(root, name, packet);
+	git(root, ["add", name]);
+	git(root, ["commit", "-m", `add ${name} fixture`]);
+	return packetPath;
+}
+
 function extractRunId(lines: readonly string[]): string {
 	return lines.find((line) => line.startsWith("run-id: "))?.slice(8) ?? "";
 }
@@ -187,12 +198,12 @@ describe("cli command surface", () => {
 
 		await runCliCapture(root, ["init"]);
 
-		const passingPacketPath = writePacket(
+		const passingPacketPath = writeCommittedPacket(
 			root,
 			".buildplane/test-packets/passing-packet.json",
 			createPassingPacket(),
 		);
-		const failingPacketPath = writePacket(
+		const failingPacketPath = writeCommittedPacket(
 			root,
 			".buildplane/test-packets/failing-packet.json",
 			createFailingPacket("unit-fail"),
