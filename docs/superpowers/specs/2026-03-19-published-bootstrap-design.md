@@ -369,7 +369,7 @@ This slice is not done until all of the following pass.
 
 ### 1. Repo-dev path regression
 
-Use a committed repo-owned smoke packet fixture under `test/fixtures/` or another clean-git-safe location.
+Use a committed repo-owned smoke packet fixture under `test/fixtures/` or another clean-git-safe location. Across all three positive smoke paths, capture the emitted run id with the same frozen stdout token: `^run-id: (.+)$`.
 
 ```bash
 pnpm install --frozen-lockfile
@@ -388,7 +388,7 @@ Expected proof points:
 
 ### 2. In-repo built path regression
 
-Use the same committed repo-owned smoke packet fixture and capture the emitted run id before calling `inspect`.
+Use the same committed repo-owned smoke packet fixture and capture the emitted run id with the same frozen stdout token before calling `inspect`.
 
 ```bash
 pnpm build
@@ -447,10 +447,11 @@ Verification must also confirm the packed/publishable artifact itself is sane.
 At minimum, inspect that:
 
 - the public package is not marked `private: true`
+- `package.json.name === "buildplane"`
 - the published package metadata declares the Node `24.13.1` engine contract
 - the published manifest defines no `preinstall`, `install`, or `postinstall` hooks and does not require build-from-source install behavior
 - `bin.buildplane` points at `./dist/index.js`
-- there are no separately installed, registry-resolved, or vendored runtime `@buildplane/*` dependencies in the published contract
+- there are no separately installed or registry-resolved runtime `@buildplane/*` dependencies in the published contract; private vendored files inside the single tarball are allowed
 - published runtime dependencies contain no `workspace:`, `file:`, `link:`, or absolute-path specifiers
 - there are no published runtime entrypoints resolving to `src/**` or `.ts` files
 - the tarball contains the built runtime files it actually needs and does not ship source/test payloads as runtime requirements
