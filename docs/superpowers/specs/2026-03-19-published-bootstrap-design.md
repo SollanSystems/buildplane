@@ -208,6 +208,8 @@ The public binary contract should remain:
 }
 ```
 
+The published `./dist/index.js` entrypoint must preserve a Node shebang and executable mode so a bare `buildplane` invocation works after global install.
+
 This is important for two reasons:
 
 - it keeps published execution boring and predictable
@@ -408,13 +410,17 @@ At minimum, inspect that:
 - the published package metadata declares the Node `24.13.1` engine contract
 - `bin.buildplane` points at `./dist/index.js`
 - there are no registry-resolved runtime `@buildplane/*` dependencies in the published contract unless they are physically bundled inside the tarball
+- published runtime dependencies contain no `workspace:`, `file:`, `link:`, or absolute-path specifiers
 - there are no published runtime entrypoints resolving to `src/**` or `.ts` files
 - the tarball contains the built runtime files it actually needs and does not ship source/test payloads as runtime requirements
+- the tarball preserves a shebang and executable mode on the `bin.buildplane -> ./dist/index.js` entrypoint
 - the package does not depend on repo-root scripts or monorepo-only metadata at runtime
 
 ### 5. Named publish verification entrypoint
 
-This slice must add one repo-owned verification entrypoint, runnable in CI, that performs the real published-bootstrap proof end to end:
+This slice must add one canonical root `package.json` script for the published-bootstrap proof, and CI must invoke that script.
+
+That script performs the real published-bootstrap proof end to end:
 
 - build the staged publish directory
 - create the tarball with `npm pack`
@@ -422,7 +428,7 @@ This slice must add one repo-owned verification entrypoint, runnable in CI, that
 - run the external-repo smoke in a sanitized environment
 - inspect the packed artifact for metadata/runtime isolation requirements
 
-This must be more than a manual checklist. The published-bootstrap contract needs one named script or workflow step that CI can execute repeatedly.
+This must be more than a manual checklist. The published-bootstrap contract needs one named local rerun command that CI also executes.
 
 ### 6. Docs and contract verification
 
