@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import {
 	existsSync,
 	mkdirSync,
@@ -57,5 +57,41 @@ describe("cli bootstrap", () => {
 		expect(existsSync(join(workspaceRoot, ".buildplane", "state.db"))).toBe(
 			true,
 		);
+	});
+
+	it("keeps stderr clean for source init and status --json", () => {
+		const workspaceRoot = mkdtempSync(join(tmpdir(), "buildplane-cli-clean-"));
+		cleanupPaths.push(workspaceRoot);
+
+		const initResult = spawnSync(
+			process.execPath,
+			["--import", tsxLoaderEntrypoint, cliSourceEntrypoint, "init"],
+			{
+				cwd: workspaceRoot,
+				encoding: "utf8",
+			},
+		);
+		expect(initResult.status).toBe(0);
+		expect(initResult.stderr).toBe("");
+
+		const statusResult = spawnSync(
+			process.execPath,
+			[
+				"--import",
+				tsxLoaderEntrypoint,
+				cliSourceEntrypoint,
+				"status",
+				"--json",
+			],
+			{
+				cwd: workspaceRoot,
+				encoding: "utf8",
+			},
+		);
+		expect(statusResult.status).toBe(0);
+		expect(statusResult.stderr).toBe("");
+		expect(JSON.parse(statusResult.stdout)).toMatchObject({
+			initialized: true,
+		});
 	});
 });

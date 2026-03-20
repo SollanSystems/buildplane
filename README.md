@@ -62,7 +62,19 @@ This is the same interface used by the `bin.buildplane` entry in `apps/cli/packa
 
 ## Distribution
 
-> **Note:** Published distribution (e.g. via npm) is not yet available. The commands above are the current repo-local paths for development and testing. A packaged install path will be provided when the project reaches distribution readiness.
+The packaged global-install contract verified by this repo is:
+
+```bash
+npm install -g buildplane
+buildplane init
+buildplane run --packet <path-to-packet.json>
+buildplane status --json
+buildplane inspect <run-id> --json
+```
+
+> **Precondition:** `run` expects a clean git working tree. Commit or stash uncommitted changes before dispatching work.
+
+Use this path when you want the packaged operator experience instead of the repo-local development or in-repo built CLI paths. The repo verifies this contract from a packed publishable artifact before any registry publication step.
 
 ## Local run loop
 

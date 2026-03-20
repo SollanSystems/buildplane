@@ -102,7 +102,7 @@ function ensureDirectory(path) {
 	return path;
 }
 
-function resolveSafeStagingParentDirectory() {
+export function resolveSafeStagingParentDirectory() {
 	const preferredParents = [tmpdir(), ...FALLBACK_STAGING_PARENT_PATHS]
 		.filter(Boolean)
 		.map((path) => resolve(path));
