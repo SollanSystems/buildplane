@@ -439,7 +439,7 @@ At minimum, inspect that:
 
 ### 5. Named publish verification entrypoint
 
-This slice must add one canonical root `package.json` script for the published-bootstrap proof, and CI must invoke that script.
+This slice must add one canonical root `package.json` script named `verify:published-bootstrap`, and CI must invoke that exact script.
 
 That script performs the real published-bootstrap proof end to end:
 
@@ -450,10 +450,18 @@ That script performs the real published-bootstrap proof end to end:
 - capture the emitted run id from `buildplane run --packet ...`
 - machine-check exit codes for `init`, `run`, `status`, and `inspect`
 - parse `status --json` and `inspect --json`
-- verify that `status.latestRun.id` and `inspect.run.id` match the captured run id and include the expected keys for the current local loop contract
+- verify this minimum JSON contract at a minimum:
+  - `status.initialized === true`
+  - `status.latestRun.id === <captured-run-id>`
+  - `status.latestRun.status` is present
+  - `inspect.kind === "run"`
+  - `inspect.run.id === <captured-run-id>`
+  - `inspect.run.status` is present
+  - `inspect.evidence` is an array
+  - `inspect.decisions` is an array
 - inspect the packed artifact for metadata/runtime isolation requirements
 
-This must be more than a manual checklist. The published-bootstrap contract needs one named local rerun command that CI also executes.
+This must be more than a manual checklist. The published-bootstrap contract needs one named local rerun command (`pnpm verify:published-bootstrap`) that CI also executes.
 
 ### 6. Docs and contract verification
 
@@ -476,7 +484,7 @@ pnpm test
 pnpm build
 ```
 
-Verification must also include one negative case on a non-`24.13.1` Node runtime to prove the published CLI fails fast with a clear version error.
+Verification must also include one negative case on a non-`24.13.1` Node runtime to prove the published CLI fails fast with a clear version error. The required mechanism for this slice is a repo-owned CI or script step that invokes the packed CLI under `npx -y node@24.13.0` (or another explicitly pinned non-`24.13.1` version) and asserts the version guard fails before normal execution.
 
 ## Open questions resolved by this design
 
