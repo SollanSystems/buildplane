@@ -202,8 +202,9 @@ The required staged artifact shape for this repo is:
 Rules for that staged artifact:
 
 - `package.json` is the derived publish manifest
-- `README.md` is the publish-facing README
+- `README.md` is the publish-facing README derived from the repo-root README
 - `dist/` contains compiled runtime assets only
+- internal `@buildplane/*` runtime imports are rewritten or assembled into relative compiled modules inside the staged `dist/` closure; the published package does not rely on separately installed `@buildplane/*` packages or a bundled private `node_modules/` closure for those internal runtime pieces
 - no `src/` or `test/` directories are present in the tarball
 - no runtime import in the staged artifact resolves outside the staged package root
 
@@ -484,10 +485,11 @@ This must be more than a manual checklist. The published-bootstrap contract need
 
 Verification must also assert that:
 
-- README clearly documents all three paths separately:
+- the repo-root README clearly documents all three paths separately:
   - repo-dev via `pnpm buildplane ...`
   - in-repo built via `node apps/cli/dist/index.js ...`
   - published/global install via `npm install -g buildplane` then `buildplane ...`
+- the staged publish `README.md` shipped in the tarball is validated too, and is either copied from or explicitly derived from the repo-root README
 - root `scripts.buildplane` remains the repo-dev entrypoint
 - the public package binary remains `bin.buildplane = ./dist/index.js`
 - published install docs are no longer future-only once this slice lands, but they remain clearly distinct from repo-dev and in-repo built usage
