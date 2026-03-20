@@ -368,6 +368,8 @@ pnpm buildplane inspect <captured-run-id> --json
 Expected proof points:
 
 - repo-dev path still works after packaging changes
+- the emitted run id is captured and machine-checked
+- `status --json` and `inspect --json` satisfy the same minimum success contract required by the published smoke
 - no hidden dependency on published-only assembly
 
 ### 2. In-repo built path regression
@@ -385,6 +387,8 @@ node apps/cli/dist/index.js inspect <captured-run-id> --json
 Expected proof points:
 
 - built path still works exactly as before
+- the emitted run id is captured and machine-checked
+- `status --json` and `inspect --json` satisfy the same minimum success contract required by the published smoke
 - no regressions in the compiled in-repo CLI path
 
 ### 3. Published-package smoke in an external repo
@@ -497,7 +501,12 @@ pnpm test
 pnpm build
 ```
 
-Verification must also include one negative case on a non-`24.13.1` Node runtime to prove the published CLI fails fast with a clear version error. The required mechanism for this slice is a repo-owned CI or script step that invokes the packed CLI under `npx -y node@24.13.0` (or another explicitly pinned non-`24.13.1` version) and asserts the version guard fails before normal execution.
+Verification must also include one negative case on a non-`24.13.1` Node runtime to prove the published CLI fails fast with a clear version error. The required mechanism for this slice is a repo-owned CI or script step that invokes the packed CLI under `npx -y node@24.13.0` (or another explicitly pinned non-`24.13.1` version) and asserts:
+
+- the process exits non-zero
+- the error text explicitly names required Node `24.13.1`
+- the error text preferably includes the detected version
+- the failure happens before normal repo/packet execution begins
 
 ## Open questions resolved by this design
 
