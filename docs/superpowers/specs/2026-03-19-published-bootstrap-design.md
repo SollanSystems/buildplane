@@ -395,7 +395,7 @@ Recommended shape:
 
 1. build the staged publish directory
 2. create the publishable tarball from that exact staged directory (`npm pack`)
-3. create a fresh arbitrary git repo outside the monorepo
+3. create a fresh arbitrary git repo outside the monorepo with at least one commit so `HEAD` is resolved
 4. write a smoke packet outside that repo (or in another clean-git-safe location) so `buildplane run --packet ...` does not fail the clean-worktree gate for the wrong reason
 5. install the tarball globally into an isolated npm prefix
 6. run the smoke in a sanitized environment where:
@@ -416,6 +416,7 @@ buildplane inspect <captured-run-id> --json
 Expected proof points:
 
 - the installed binary runs outside the monorepo
+- the operator repo is a real git repo with a resolved `HEAD`
 - `buildplane` resolves from the isolated global-install prefix used by the smoke
 - no workspace links are involved
 - no `tsx` or source execution is involved
@@ -441,9 +442,18 @@ At minimum, inspect that:
 
 This slice must add one canonical root `package.json` script named `verify:published-bootstrap`, and CI must invoke that exact script.
 
-That script performs the real published-bootstrap proof end to end:
+That script performs the real published-bootstrap proof end to end. It must execute or invoke all required checks for this slice, not just the packed-install subset:
 
-- build the staged publish directory
+- repo-dev path regression
+- in-repo built path regression
+- the staged publish build and tarball creation
+- the external-repo packed-install smoke in a sanitized environment
+- docs and contract checks
+- repo verification (`pnpm lint`, `pnpm typecheck`, `pnpm test`, `pnpm build`)
+- the negative Node-version guard case
+
+Within the packed-install proof specifically, it must:
+
 - create the tarball with `npm pack`
 - install it into an isolated npm prefix
 - run the external-repo smoke in a sanitized environment
@@ -453,10 +463,10 @@ That script performs the real published-bootstrap proof end to end:
 - verify this minimum JSON contract at a minimum:
   - `status.initialized === true`
   - `status.latestRun.id === <captured-run-id>`
-  - `status.latestRun.status` is present
+  - `status.latestRun.status === "passed"`
   - `inspect.kind === "run"`
   - `inspect.run.id === <captured-run-id>`
-  - `inspect.run.status` is present
+  - `inspect.run.status === "passed"`
   - `inspect.evidence` is an array
   - `inspect.decisions` is an array
 - inspect the packed artifact for metadata/runtime isolation requirements
