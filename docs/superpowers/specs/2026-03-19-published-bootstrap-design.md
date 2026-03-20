@@ -397,7 +397,7 @@ Recommended shape:
 2. create the publishable tarball from that exact staged directory (`npm pack`)
 3. create a fresh arbitrary git repo outside the monorepo with at least one commit so `HEAD` is resolved
 4. write a smoke packet outside that repo (or in another clean-git-safe location) so `buildplane run --packet ...` does not fail the clean-worktree gate for the wrong reason
-5. install the tarball globally into an isolated npm prefix
+5. install the tarball globally into an isolated npm prefix under the same sanitized environment assumptions used for the smoke
 6. run the smoke in a sanitized environment where:
    - that prefix's `bin` directory is prepended to `PATH`
    - `command -v buildplane` resolves there
@@ -430,6 +430,7 @@ At minimum, inspect that:
 
 - the public package is not marked `private: true`
 - the published package metadata declares the Node `24.13.1` engine contract
+- the published manifest defines no `preinstall`, `install`, or `postinstall` hooks and does not require build-from-source install behavior
 - `bin.buildplane` points at `./dist/index.js`
 - there are no registry-resolved runtime `@buildplane/*` dependencies in the published contract unless they are physically bundled inside the tarball
 - published runtime dependencies contain no `workspace:`, `file:`, `link:`, or absolute-path specifiers
@@ -451,6 +452,8 @@ That script performs the real published-bootstrap proof end to end. It must exec
 - docs and contract checks
 - repo verification (`pnpm lint`, `pnpm typecheck`, `pnpm test`, `pnpm build`)
 - the negative Node-version guard case
+
+Each phase must run in a fresh temp location or explicitly clean up generated `.buildplane` state, temp repos, packet outputs, and the isolated npm prefix before the next phase and before the final repo verification.
 
 Within the packed-install proof specifically, it must:
 
