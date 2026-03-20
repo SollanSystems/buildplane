@@ -21,7 +21,9 @@
 		"check": "pnpm lint && pnpm typecheck && pnpm test && pnpm build",
 		"prepare": "husky",
 		"changeset": "changeset",
-		"changeset:status": "changeset status --verbose"
+		"changeset:status": "changeset status --verbose",
+		"stage:published-bootstrap": "node ./scripts/published-bootstrap/stage-package.mjs",
+		"verify:published-bootstrap": "node ./scripts/published-bootstrap/verify-positive.mjs"
 	},
 	"devDependencies": {
 		"@biomejs/biome": "^2.4.7",
