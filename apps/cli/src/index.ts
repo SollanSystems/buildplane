@@ -1,13 +1,12 @@
-import { runCli } from "./run-cli.js";
+#!/usr/bin/env node
+import { assertSupportedNodeVersion } from "./version-guard.js";
 
-/**
- * Return the Buildplane bootstrap banner.
- */
-export function getBootstrapBanner(): string {
-	return "Buildplane by SollanSystems";
-}
+assertSupportedNodeVersion();
 
-export { runCli } from "./run-cli.js";
+const cli = await import("./cli-main.js");
+
+export const getBootstrapBanner = cli.getBootstrapBanner;
+export const runCli = cli.runCli;
 
 const isDirectRun =
 	typeof process !== "undefined" &&
@@ -15,7 +14,7 @@ const isDirectRun =
 	import.meta.url.endsWith(process.argv[1].replace(/\\/g, "/"));
 
 if (isDirectRun) {
-	void runCli(process.argv.slice(2)).then((exitCode) => {
+	void cli.runCli(process.argv.slice(2)).then((exitCode: number) => {
 		process.exitCode = exitCode;
 	});
 }
