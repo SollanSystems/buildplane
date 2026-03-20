@@ -130,7 +130,7 @@ Expected properties:
 - no `pnpm` required
 - no `tsx` required
 - no workspace packages present on disk
-- same CLI surface and output shape as the current repo-local and built paths
+- same CLI command surface and the same machine-checked JSON contract as the current repo-local and built paths
 - same clean-git precondition for `run`, aside from Buildplane-managed `.buildplane` state
 
 ### Repo-dev path remains valid
@@ -204,7 +204,7 @@ Rules for that staged artifact:
 - `package.json` is the derived publish manifest
 - `README.md` is the publish-facing README derived from the repo-root README
 - `dist/` contains compiled runtime assets only
-- internal `@buildplane/*` runtime imports are rewritten or assembled into relative compiled modules inside the staged `dist/` closure; the published package does not rely on separately installed `@buildplane/*` packages or a bundled private `node_modules/` closure for those internal runtime pieces
+- internal `@buildplane/*` runtime code is rewritten or assembled into relative compiled modules inside the staged `dist/` closure; the published package does not rely on separately installed, registry-resolved, or vendored `@buildplane/*` runtime packages
 - no `src/` or `test/` directories are present in the tarball
 - no runtime import in the staged artifact resolves outside the staged package root
 
@@ -437,7 +437,7 @@ At minimum, inspect that:
 - the published package metadata declares the Node `24.13.1` engine contract
 - the published manifest defines no `preinstall`, `install`, or `postinstall` hooks and does not require build-from-source install behavior
 - `bin.buildplane` points at `./dist/index.js`
-- there are no registry-resolved runtime `@buildplane/*` dependencies in the published contract unless they are physically bundled inside the tarball
+- there are no separately installed, registry-resolved, or vendored runtime `@buildplane/*` dependencies in the published contract
 - published runtime dependencies contain no `workspace:`, `file:`, `link:`, or absolute-path specifiers
 - there are no published runtime entrypoints resolving to `src/**` or `.ts` files
 - the tarball contains the built runtime files it actually needs and does not ship source/test payloads as runtime requirements
@@ -485,11 +485,12 @@ This must be more than a manual checklist. The published-bootstrap contract need
 
 Verification must also assert that:
 
-- the repo-root README clearly documents all three paths separately:
-  - repo-dev via `pnpm buildplane ...`
-  - in-repo built via `node apps/cli/dist/index.js ...`
-  - published/global install via `npm install -g buildplane` then `buildplane ...`
-- the staged publish `README.md` shipped in the tarball is validated too, and is either copied from or explicitly derived from the repo-root README
+- the repo-root README contains exact published/install contract assertions:
+  - `pnpm buildplane init`
+  - `node apps/cli/dist/index.js init`
+  - `npm install -g buildplane`
+  - `buildplane init`
+- the staged publish `README.md` shipped in the tarball is validated too and contains the published/install contract assertions required for operators
 - root `scripts.buildplane` remains the repo-dev entrypoint
 - the public package binary remains `bin.buildplane = ./dist/index.js`
 - published install docs are no longer future-only once this slice lands, but they remain clearly distinct from repo-dev and in-repo built usage
