@@ -195,8 +195,10 @@ The required staged artifact shape for this repo is:
   package.json
   README.md
   dist/
-    index.js
+    index.js        # tiny public bootstrap wrapper
+    cli.js          # main compiled CLI runtime
     ...compiled runtime closure used by the CLI
+  vendor/           # optional private internal runtime payload
 ```
 
 Rules for that staged artifact:
@@ -204,7 +206,8 @@ Rules for that staged artifact:
 - `package.json` is the derived publish manifest
 - `README.md` is the publish-facing README derived from the repo-root README
 - `dist/` contains compiled runtime assets only
-- internal `@buildplane/*` runtime code is rewritten or assembled into relative compiled modules inside the staged `dist/` closure; the published package does not rely on separately installed, registry-resolved, or vendored `@buildplane/*` runtime packages
+- internal `@buildplane/*` runtime code must be made self-contained inside the staged package, either as relative compiled modules under `dist/` or as a vendored private runtime payload inside the tarball
+- the published package must not rely on separately installed or registry-resolved `@buildplane/*` runtime packages
 - no `src/` or `test/` directories are present in the tarball
 - no runtime import in the staged artifact resolves outside the staged package root
 
@@ -230,12 +233,16 @@ The public binary contract should remain:
 }
 ```
 
-The published `./dist/index.js` entrypoint must preserve a Node shebang and executable mode so a bare `buildplane` invocation works after global install.
+The published `./dist/index.js` entrypoint must be a tiny bootstrap wrapper that:
+
+- preserves a Node shebang and executable mode so a bare `buildplane` invocation works after global install
+- validates `process.version` against the Node `24.13.1` contract before loading the main CLI runtime
+- imports the main compiled CLI runtime only after the version guard passes
 
 This is important for two reasons:
 
 - it keeps published execution boring and predictable
-- it prevents repo-only source execution techniques from leaking into public install behavior
+- it guarantees the wrong-Node error wins over deeper module-load/runtime failures
 
 ### 4. Do not make global install depend on repo-only tooling
 
@@ -284,7 +291,8 @@ The staged publish manifest derived from `apps/cli` must declare:
 Dependency rule for this slice:
 
 - normal third-party registry dependencies may remain normal npm-installed dependencies
-- all internal `@buildplane/*` runtime code must be assembled into the staged package itself and must not survive as separately installed runtime dependencies
+- all internal `@buildplane/*` runtime code must be assembled into the staged package itself and must not survive as separately installed or registry-resolved runtime dependencies
+- vendored private internal runtime code inside the single published tarball is allowed
 
 Must not require:
 
@@ -447,13 +455,14 @@ At minimum, inspect that:
 - there are no published runtime entrypoints resolving to `src/**` or `.ts` files
 - the tarball contains the built runtime files it actually needs and does not ship source/test payloads as runtime requirements
 - the tarball preserves a shebang and executable mode on the `bin.buildplane -> ./dist/index.js` entrypoint
+- the `bin.buildplane -> ./dist/index.js` entrypoint is a tiny bootstrap wrapper that version-checks before importing the main CLI runtime
 - the package does not depend on repo-root scripts or monorepo-only metadata at runtime
 
 ### 5. Named publish verification entrypoint
 
 This slice must add one canonical root `package.json` script named `verify:published-bootstrap`, and CI must invoke that exact script.
 
-That script performs the real published-bootstrap proof end to end. It must execute or invoke all required checks for this slice, not just the packed-install subset:
+That script performs the positive published-bootstrap proof end to end. It must execute or invoke all required positive-path checks for this slice, not just the packed-install subset:
 
 - repo-dev path regression
 - in-repo built path regression
@@ -461,7 +470,6 @@ That script performs the real published-bootstrap proof end to end. It must exec
 - the external-repo packed-install smoke in a sanitized environment
 - docs and contract checks
 - repo verification (`pnpm lint`, `pnpm typecheck`, `pnpm test`, `pnpm build`)
-- the negative Node-version guard case
 
 Each phase must run in a fresh temp location or explicitly clean up generated `.buildplane` state, temp repos, packet outputs, and the isolated npm prefix before the next phase and before the final repo verification.
 
@@ -509,7 +517,7 @@ pnpm test
 pnpm build
 ```
 
-Verification must also include one negative case on a non-`24.13.1` Node runtime to prove the published CLI fails fast with a clear version error. The required mechanism for this slice is a repo-owned CI or script step that invokes the packed CLI under an explicitly provisioned non-`24.13.1` Node runtime (for example a CI matrix entry, toolcache runtime, or local shim) and asserts:
+Verification must also include one negative case on a non-`24.13.1` Node runtime to prove the published CLI fails fast with a clear version error. This wrong-Node proof is CI-only companion verification to `verify:published-bootstrap`, not part of the required local rerun path. The required mechanism for this slice is a CI step or job that invokes the packed CLI under an explicitly provisioned non-`24.13.1` Node runtime (for example a CI matrix entry or toolcache runtime) and asserts:
 
 - the process exits non-zero
 - the error text explicitly names required Node `24.13.1`
