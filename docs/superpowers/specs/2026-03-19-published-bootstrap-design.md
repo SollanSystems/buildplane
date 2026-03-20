@@ -14,7 +14,7 @@ npm install -g buildplane
 
 with no Buildplane monorepo checkout and no repo-local toolchain assumptions beyond:
 
-- Node `24.13.1`
+- Node `24.13.1` with bundled `npm`
 - `git`
 
 The published operator-facing command is:
@@ -65,7 +65,7 @@ buildplane status --json
 buildplane inspect <run-id> --json
 ```
 
-The operator should be able to do this in an arbitrary git repo without cloning the Buildplane monorepo and without installing workspace-local tools like `pnpm` or `tsx`.
+The operator should be able to do this in an arbitrary git repo without cloning the Buildplane monorepo and without installing workspace-local tools like `pnpm` or `tsx`. The only required local tools are Node `24.13.1` with bundled `npm` and `git`.
 
 ### Packaging model
 
@@ -332,12 +332,14 @@ This slice is not done until all of the following pass.
 
 ### 1. Repo-dev path regression
 
+Use a committed repo-owned smoke packet fixture under `test/fixtures/` or another clean-git-safe location.
+
 ```bash
 pnpm install --frozen-lockfile
 pnpm buildplane init
-pnpm buildplane run --packet <packet>
+pnpm buildplane run --packet test/fixtures/<published-smoke-packet>.json
 pnpm buildplane status --json
-pnpm buildplane inspect <run-id> --json
+pnpm buildplane inspect <captured-run-id> --json
 ```
 
 Expected proof points:
@@ -347,12 +349,14 @@ Expected proof points:
 
 ### 2. In-repo built path regression
 
+Use the same committed repo-owned smoke packet fixture and capture the emitted run id before calling `inspect`.
+
 ```bash
 pnpm build
 node apps/cli/dist/index.js init
-node apps/cli/dist/index.js run --packet <packet>
+node apps/cli/dist/index.js run --packet test/fixtures/<published-smoke-packet>.json
 node apps/cli/dist/index.js status --json
-node apps/cli/dist/index.js inspect <run-id> --json
+node apps/cli/dist/index.js inspect <captured-run-id> --json
 ```
 
 Expected proof points:
@@ -369,20 +373,21 @@ Recommended shape:
 1. build the staged publish directory
 2. create the publishable tarball from that exact staged directory (`npm pack`)
 3. create a fresh arbitrary git repo outside the monorepo
-4. install the tarball globally into an isolated npm prefix
-5. run the smoke in a sanitized environment where:
+4. write a smoke packet outside that repo (or in another clean-git-safe location) so `buildplane run --packet ...` does not fail the clean-worktree gate for the wrong reason
+5. install the tarball globally into an isolated npm prefix
+6. run the smoke in a sanitized environment where:
    - that prefix's `bin` directory is prepended to `PATH`
    - `command -v buildplane` resolves there
    - `pnpm` is unavailable
    - `tsx` is unavailable
    - no monorepo-local PATH/script leakage is present
-6. run:
+7. run `buildplane init`
+8. run `buildplane run --packet /absolute/path/to/packet.json` and capture the emitted run id
+9. run:
 
 ```bash
-buildplane init
-buildplane run --packet /absolute/path/to/packet.json
 buildplane status --json
-buildplane inspect <run-id> --json
+buildplane inspect <captured-run-id> --json
 ```
 
 Expected proof points:
@@ -407,7 +412,19 @@ At minimum, inspect that:
 - the tarball contains the built runtime files it actually needs and does not ship source/test payloads as runtime requirements
 - the package does not depend on repo-root scripts or monorepo-only metadata at runtime
 
-### 5. Docs and contract verification
+### 5. Named publish verification entrypoint
+
+This slice must add one repo-owned verification entrypoint, runnable in CI, that performs the real published-bootstrap proof end to end:
+
+- build the staged publish directory
+- create the tarball with `npm pack`
+- install it into an isolated npm prefix
+- run the external-repo smoke in a sanitized environment
+- inspect the packed artifact for metadata/runtime isolation requirements
+
+This must be more than a manual checklist. The published-bootstrap contract needs one named script or workflow step that CI can execute repeatedly.
+
+### 6. Docs and contract verification
 
 Verification must also assert that:
 
@@ -419,7 +436,7 @@ Verification must also assert that:
 - the public package binary remains `bin.buildplane = ./dist/index.js`
 - published install docs are no longer future-only once this slice lands, but they remain clearly distinct from repo-dev and in-repo built usage
 
-### 6. Repo verification
+### 7. Repo verification
 
 ```bash
 pnpm lint
