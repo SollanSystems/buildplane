@@ -88,14 +88,26 @@ jobs:
                  .buildplane/workspaces \
                  tmp
 
-      - name: Lint
-        run: pnpm lint
+      - name: Verify published bootstrap
+        run: pnpm verify:published-bootstrap
 
-      - name: Typecheck
-        run: pnpm typecheck
+  verify-wrong-node:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
 
-      - name: Test
-        run: pnpm test
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v5
 
-      - name: Build
-        run: pnpm build
+      - name: Setup Node (wrong version for guard check)
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24.13.0"
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify wrong-Node guard
+        run: BUILDPLANE_EXPECT_UNSUPPORTED_NODE=1 node ./scripts/published-bootstrap/verify-wrong-node.mjs
