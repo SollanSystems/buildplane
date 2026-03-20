@@ -281,6 +281,11 @@ The staged publish manifest derived from `apps/cli` must declare:
 - `files` / packaged asset boundaries
 - only publish-safe runtime dependencies and metadata
 
+Dependency rule for this slice:
+
+- normal third-party registry dependencies may remain normal npm-installed dependencies
+- all internal `@buildplane/*` runtime code must be assembled into the staged package itself and must not survive as separately installed runtime dependencies
+
 Must not require:
 
 - workspace links at runtime in the published install
@@ -410,7 +415,7 @@ Recommended shape:
    - `tsx` is unavailable
    - no monorepo-local PATH/script leakage is present
 7. run `buildplane init`
-8. run `buildplane run --packet /absolute/path/to/packet.json` and capture the emitted run id
+8. run `buildplane run --packet /absolute/path/to/packet.json` and capture the emitted run id using the frozen machine-readable stdout token `^run-id: (.+)$`
 9. run:
 
 ```bash
@@ -504,7 +509,7 @@ pnpm test
 pnpm build
 ```
 
-Verification must also include one negative case on a non-`24.13.1` Node runtime to prove the published CLI fails fast with a clear version error. The required mechanism for this slice is a repo-owned CI or script step that invokes the packed CLI under `npx -y node@24.13.0` (or another explicitly pinned non-`24.13.1` version) and asserts:
+Verification must also include one negative case on a non-`24.13.1` Node runtime to prove the published CLI fails fast with a clear version error. The required mechanism for this slice is a repo-owned CI or script step that invokes the packed CLI under an explicitly provisioned non-`24.13.1` Node runtime (for example a CI matrix entry, toolcache runtime, or local shim) and asserts:
 
 - the process exits non-zero
 - the error text explicitly names required Node `24.13.1`
