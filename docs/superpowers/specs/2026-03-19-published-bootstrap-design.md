@@ -17,6 +17,8 @@ with no Buildplane monorepo checkout and no repo-local toolchain assumptions bey
 - Node `24.13.1` with bundled `npm`
 - `git`
 
+The published CLI must enforce the Node `24.13.1` contract at startup with a clear error when the version does not match.
+
 The published operator-facing command is:
 
 ```bash
@@ -186,7 +188,26 @@ That means the installed package cannot depend on workspace links or repo-only s
 
 The staged publish directory must contain the exact built runtime closure needed by the CLI. The publish smoke must pack and install that real staged artifact, not a hand-assembled approximation.
 
-The implementation can achieve this in multiple ways, but the operator contract is fixed:
+The required staged artifact shape for this repo is:
+
+```text
+<staged-publish-dir>/
+  package.json
+  README.md
+  dist/
+    index.js
+    ...compiled runtime closure used by the CLI
+```
+
+Rules for that staged artifact:
+
+- `package.json` is the derived publish manifest
+- `README.md` is the publish-facing README
+- `dist/` contains compiled runtime assets only
+- no `src/` or `test/` directories are present in the tarball
+- no runtime import in the staged artifact resolves outside the staged package root
+
+The operator contract is fixed:
 
 - compiled artifacts only
 - no TypeScript source execution
@@ -426,6 +447,10 @@ That script performs the real published-bootstrap proof end to end:
 - create the tarball with `npm pack`
 - install it into an isolated npm prefix
 - run the external-repo smoke in a sanitized environment
+- capture the emitted run id from `buildplane run --packet ...`
+- machine-check exit codes for `init`, `run`, `status`, and `inspect`
+- parse `status --json` and `inspect --json`
+- verify that `status.latestRun.id` and `inspect.run.id` match the captured run id and include the expected keys for the current local loop contract
 - inspect the packed artifact for metadata/runtime isolation requirements
 
 This must be more than a manual checklist. The published-bootstrap contract needs one named local rerun command that CI also executes.
@@ -450,6 +475,8 @@ pnpm typecheck
 pnpm test
 pnpm build
 ```
+
+Verification must also include one negative case on a non-`24.13.1` Node runtime to prove the published CLI fails fast with a clear version error.
 
 ## Open questions resolved by this design
 
