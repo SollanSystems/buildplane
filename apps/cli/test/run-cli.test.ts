@@ -257,6 +257,8 @@ describe("cli command surface", () => {
 		);
 
 		expect(result.exitCode).toBe(0);
+		// Lock the machine-readable run-id token the verifier parses via ^run-id: (.+)$
+		expect(result.stdout[0]).toBe("run-id: run-parse-packet");
 		expect(result.stdout).toEqual([
 			"run-id: run-parse-packet",
 			"status: passed",

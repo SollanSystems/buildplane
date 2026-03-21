@@ -13,11 +13,13 @@ describe("repository automation", () => {
 		expect(existsSync(join(root, ".github/workflows/ci.yml"))).toBe(true);
 
 		const workflow = read(".github/workflows/ci.yml");
-		expect(workflow).toContain("pnpm lint");
-		expect(workflow).toContain("pnpm typecheck");
-		expect(workflow).toContain("pnpm test");
-		expect(workflow).toContain("pnpm build");
+		// lint/typecheck/test/build run inside the positive verifier
+		expect(workflow).toContain("pnpm verify:published-bootstrap");
 		expect(workflow).toContain("node-version-file: .node-version");
+		// wrong-Node companion job exercises the guard on a distinct pinned version
+		expect(workflow).toContain("BUILDPLANE_EXPECT_UNSUPPORTED_NODE=1");
+		expect(workflow).toContain("verify-wrong-node.mjs");
+		expect(workflow).toContain('node-version: "24.13.0"');
 	});
 
 	it("defines dependabot and the PR checklist", () => {
