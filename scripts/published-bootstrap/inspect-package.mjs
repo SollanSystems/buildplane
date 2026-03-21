@@ -6,7 +6,7 @@ import {
 	rmSync,
 	statSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import { tmpdir as nodeOsTmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
@@ -830,7 +830,17 @@ function resolveInspectionTarget(inputPath) {
 		);
 	}
 
-	const extractionRoot = mkdtempSync(join(tmpdir(), "buildplane-inspect-"));
+	const rawTmpdir = nodeOsTmpdir();
+	const safeTmpdir =
+		typeof rawTmpdir === "string" &&
+		rawTmpdir.length > 0 &&
+		rawTmpdir !== "undefined" &&
+		existsSync(rawTmpdir)
+			? rawTmpdir
+			: process.platform === "win32"
+				? "C:\\Windows\\Temp"
+				: "/tmp";
+	const extractionRoot = mkdtempSync(join(safeTmpdir, "buildplane-inspect-"));
 	try {
 		extractTarballToDirectory(resolvedInputPath, extractionRoot);
 	} catch (error) {

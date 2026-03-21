@@ -575,6 +575,16 @@ function main() {
 		runCommand(PNPM_COMMAND, ["build"], { cwd: REPO_ROOT });
 		repoStateGuard.reset();
 
+		console.log("built-path: rebuilding dist for built-path smoke...");
+		runCommand(PNPM_COMMAND, ["exec", "tsc", "--build", "--force"], {
+			cwd: REPO_ROOT,
+		});
+		const distIndexPath = join(REPO_ROOT, "apps/cli/dist/index.js");
+		if (!existsSync(distIndexPath)) {
+			fail(
+				`built-path smoke: dist/index.js was not created by pnpm build (expected at ${distIndexPath})`,
+			);
+		}
 		const builtCli = makeInspectableCli(process.execPath, [
 			"apps/cli/dist/index.js",
 		]);

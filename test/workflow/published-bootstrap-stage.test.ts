@@ -12,10 +12,29 @@ import {
 	symlinkSync,
 	writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import { tmpdir as nodeOsTmpdir } from "node:os";
 import { delimiter, dirname, join, relative, win32 } from "node:path";
 import { gunzipSync, gzipSync } from "node:zlib";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+
+/**
+ * Hardened tmpdir that falls back to /tmp when os.safeTmpdir() returns a
+ * non-string value. This happens on some CI runners (GitHub Actions Ubuntu)
+ * inside Vitest worker threads when running under the positive verifier.
+ */
+function safeTmpdir(): string {
+	const dir = nodeOsTmpdir();
+	if (
+		typeof dir === "string" &&
+		dir.length > 0 &&
+		dir !== "undefined" &&
+		existsSync(dir)
+	) {
+		return dir;
+	}
+	const fallback = process.platform === "win32" ? "C:\\Windows\\Temp" : "/tmp";
+	return existsSync(fallback) ? fallback : dir;
+}
 
 const REQUIRED_BUILD_OUTPUTS = [
 	"apps/cli/dist/index.js",
@@ -104,12 +123,12 @@ function writeStubPackageManagerExecutable(
 }
 
 function listPublishedBootstrapTempDirs() {
-	return readdirSync(tmpdir(), { withFileTypes: true })
+	return readdirSync(safeTmpdir(), { withFileTypes: true })
 		.filter(
 			(entry) =>
 				entry.isDirectory() && entry.name.startsWith("buildplane-published-"),
 		)
-		.map((entry) => join(tmpdir(), entry.name))
+		.map((entry) => join(safeTmpdir(), entry.name))
 		.sort();
 }
 
@@ -335,7 +354,7 @@ function writeMinimalPublishedPackage(
 describe("workspace build artifact discovery", () => {
 	it("finds dist roots and tsbuildinfo files for cleanup", () => {
 		const tempRoot = mkdtempSync(
-			join(tmpdir(), "published-bootstrap-artifacts-"),
+			join(safeTmpdir(), "published-bootstrap-artifacts-"),
 		);
 
 		try {
@@ -390,7 +409,7 @@ describe("workspace build output preparation", () => {
 
 	it("forces a fresh build even when the required published outputs already exist", () => {
 		const tempRoot = mkdtempSync(
-			join(tmpdir(), "published-bootstrap-build-invocation-"),
+			join(safeTmpdir(), "published-bootstrap-build-invocation-"),
 		);
 		const binRoot = join(tempRoot, "bin");
 		const buildMarkerPath = join(tempRoot, "build-invoked.txt");
@@ -421,7 +440,7 @@ describe("workspace build output preparation", () => {
 
 	it("returns only build artifacts created by the fresh build for later cleanup", () => {
 		const tempRoot = mkdtempSync(
-			join(tmpdir(), "published-bootstrap-build-cleanup-"),
+			join(safeTmpdir(), "published-bootstrap-build-cleanup-"),
 		);
 		const binRoot = join(tempRoot, "bin");
 		const buildMarkerPath = join(tempRoot, "build-invoked.txt");
@@ -865,7 +884,7 @@ describe("published bootstrap staging", () => {
 		);
 		const originalCliMain = readFileSync(cliMainPath, "utf8");
 		const tempRoot = mkdtempSync(
-			join(tmpdir(), "published-bootstrap-runtime-symlink-stage-"),
+			join(safeTmpdir(), "published-bootstrap-runtime-symlink-stage-"),
 		);
 		const escapedRuntimePath = join(tempRoot, "escaped-runtime.js");
 		cleanupPaths.push(tempRoot);
@@ -917,7 +936,7 @@ describe("published bootstrap staging", () => {
 
 	it("rejects runtime imports that resolve outside their configured root boundary", () => {
 		const tempRoot = mkdtempSync(
-			join(tmpdir(), "published-bootstrap-runtime-root-"),
+			join(safeTmpdir(), "published-bootstrap-runtime-root-"),
 		);
 
 		try {
@@ -941,7 +960,7 @@ describe("published bootstrap staging", () => {
 
 	it("treats symlinked-directory ancestor escapes as outside the runtime root boundary", () => {
 		const tempRoot = mkdtempSync(
-			join(tmpdir(), "published-bootstrap-runtime-realpath-"),
+			join(safeTmpdir(), "published-bootstrap-runtime-realpath-"),
 		);
 
 		try {
@@ -966,7 +985,7 @@ describe("published bootstrap staging", () => {
 
 	it("rejects runtime imports that escape through symlinked directory ancestors", () => {
 		const tempRoot = mkdtempSync(
-			join(tmpdir(), "published-bootstrap-runtime-symlink-dir-"),
+			join(safeTmpdir(), "published-bootstrap-runtime-symlink-dir-"),
 		);
 
 		try {
@@ -996,7 +1015,7 @@ describe("published bootstrap staging", () => {
 
 	it("rejects runtime imports that traverse a symlinked directory segment even when the target stays inside the runtime root", () => {
 		const tempRoot = mkdtempSync(
-			join(tmpdir(), "published-bootstrap-runtime-symlink-segment-"),
+			join(safeTmpdir(), "published-bootstrap-runtime-symlink-segment-"),
 		);
 
 		try {
@@ -1053,7 +1072,7 @@ describe("published bootstrap staging", () => {
 		"\\\\server\\share\\buildplane-runtime-leak.js",
 	])("rejects absolute filesystem runtime import specifiers (%s)", (specifier) => {
 		const tempRoot = mkdtempSync(
-			join(tmpdir(), "published-bootstrap-runtime-specifier-"),
+			join(safeTmpdir(), "published-bootstrap-runtime-specifier-"),
 		);
 
 		try {
@@ -1114,7 +1133,7 @@ describe("published bootstrap staging", () => {
 
 	it("accepts the boring staged wrapper contract with ./cli.js as its runtime boundary", () => {
 		const tempRoot = mkdtempSync(
-			join(tmpdir(), "published-bootstrap-runtime-boundary-"),
+			join(safeTmpdir(), "published-bootstrap-runtime-boundary-"),
 		);
 		const packageRoot = join(tempRoot, "package");
 		cleanupPaths.push(tempRoot);
@@ -1130,7 +1149,7 @@ describe("published bootstrap staging", () => {
 
 	it("rejects a wrapper runtime boundary other than ./cli.js", () => {
 		const tempRoot = mkdtempSync(
-			join(tmpdir(), "published-bootstrap-runtime-boundary-invalid-"),
+			join(safeTmpdir(), "published-bootstrap-runtime-boundary-invalid-"),
 		);
 		const packageRoot = join(tempRoot, "package");
 		cleanupPaths.push(tempRoot);
@@ -1199,7 +1218,7 @@ describe("published bootstrap staging", () => {
 
 	it("rejects tarballs with absolute entry paths", () => {
 		const tempRoot = mkdtempSync(
-			join(tmpdir(), "published-bootstrap-tarball-absolute-"),
+			join(safeTmpdir(), "published-bootstrap-tarball-absolute-"),
 		);
 		const tarballPath = join(tempRoot, "absolute-entry.tgz");
 		const extractionRoot = join(tempRoot, "extracted");
@@ -1225,7 +1244,7 @@ describe("published bootstrap staging", () => {
 
 	it("rejects tarballs that would extract through a pre-existing symlinked ancestor under the extraction root", () => {
 		const tempRoot = mkdtempSync(
-			join(tmpdir(), "published-bootstrap-tarball-symlink-ancestor-"),
+			join(safeTmpdir(), "published-bootstrap-tarball-symlink-ancestor-"),
 		);
 		const tarballPath = join(tempRoot, "symlink-ancestor.tgz");
 		const extractionRoot = join(tempRoot, "extracted");
@@ -1257,7 +1276,7 @@ describe("published bootstrap staging", () => {
 
 	it("rejects tarballs with extra top-level entries outside package/", () => {
 		const tempRoot = mkdtempSync(
-			join(tmpdir(), "published-bootstrap-tarball-top-level-"),
+			join(safeTmpdir(), "published-bootstrap-tarball-top-level-"),
 		);
 		const tarballPath = join(tempRoot, "extra-top-level.tgz");
 
@@ -1318,7 +1337,7 @@ describe("published bootstrap staging", () => {
 
 	it("rejects tarballs with malformed PAX headers whose declared record length overruns the available body", () => {
 		const tempRoot = mkdtempSync(
-			join(tmpdir(), "published-bootstrap-tarball-pax-"),
+			join(safeTmpdir(), "published-bootstrap-tarball-pax-"),
 		);
 		const tarballPath = join(tempRoot, "malformed-pax.tgz");
 		const extractionRoot = join(tempRoot, "extracted");
@@ -1367,7 +1386,7 @@ describe("published bootstrap staging", () => {
 
 	it("rejects tarballs with malformed PAX length tokens that are not ASCII digits followed by a space", () => {
 		const tempRoot = mkdtempSync(
-			join(tmpdir(), "published-bootstrap-tarball-pax-length-"),
+			join(safeTmpdir(), "published-bootstrap-tarball-pax-length-"),
 		);
 
 		try {
@@ -1413,7 +1432,7 @@ describe("published bootstrap staging", () => {
 
 	it("accepts tarballs with valid UTF-8 PAX headers whose record lengths count bytes, not characters", () => {
 		const tempRoot = mkdtempSync(
-			join(tmpdir(), "published-bootstrap-tarball-pax-utf8-"),
+			join(safeTmpdir(), "published-bootstrap-tarball-pax-utf8-"),
 		);
 		const tarballPath = join(tempRoot, "utf8-pax.tgz");
 		const extractionRoot = join(tempRoot, "extracted");
@@ -1497,7 +1516,7 @@ describe("published bootstrap staging", () => {
 
 	it("rejects tarballs with non-octal size fields", () => {
 		const tempRoot = mkdtempSync(
-			join(tmpdir(), "published-bootstrap-tarball-size-field-"),
+			join(safeTmpdir(), "published-bootstrap-tarball-size-field-"),
 		);
 		const tarballPath = join(tempRoot, "non-octal-size.tgz");
 		const extractionRoot = join(tempRoot, "extracted");
@@ -1527,7 +1546,7 @@ describe("published bootstrap staging", () => {
 
 	it("rejects tarballs with invalid ustar header checksums", () => {
 		const tempRoot = mkdtempSync(
-			join(tmpdir(), "published-bootstrap-tarball-checksum-"),
+			join(safeTmpdir(), "published-bootstrap-tarball-checksum-"),
 		);
 		const tarballPath = join(tempRoot, "invalid-checksum.tgz");
 		const extractionRoot = join(tempRoot, "extracted");
@@ -1601,7 +1620,7 @@ describe("published bootstrap staging", () => {
 
 	it("rejects tarballs whose entry padding is truncated before the next block boundary", () => {
 		const tempRoot = mkdtempSync(
-			join(tmpdir(), "published-bootstrap-tarball-padding-"),
+			join(safeTmpdir(), "published-bootstrap-tarball-padding-"),
 		);
 		const tarballPath = join(tempRoot, "truncated-padding.tgz");
 		const extractionRoot = join(tempRoot, "extracted");
@@ -1639,7 +1658,7 @@ describe("published bootstrap staging", () => {
 
 	it("rejects tarballs that omit the required trailing zero blocks", () => {
 		const tempRoot = mkdtempSync(
-			join(tmpdir(), "published-bootstrap-tarball-trailing-zeroes-"),
+			join(safeTmpdir(), "published-bootstrap-tarball-trailing-zeroes-"),
 		);
 		const tarballPath = join(tempRoot, "missing-zero-blocks.tgz");
 		const extractionRoot = join(tempRoot, "extracted");
@@ -2203,7 +2222,7 @@ describe("published bootstrap staging", () => {
 		const staged = stagePublishedPackage();
 		cleanupPaths.push(staged.stagingRoot);
 		const tempRoot = mkdtempSync(
-			join(tmpdir(), "published-bootstrap-runtime-symlink-inspect-"),
+			join(safeTmpdir(), "published-bootstrap-runtime-symlink-inspect-"),
 		);
 		const escapedRuntimePath = join(tempRoot, "escaped-runtime.js");
 		const stagedSymlinkPath = join(
@@ -2750,7 +2769,7 @@ import "./leak.ts";
 
 	it("inspects staged packages from ancestor paths containing src without false leakage failures", () => {
 		const tempRoot = mkdtempSync(
-			join(tmpdir(), "published-bootstrap-ancestor-root-"),
+			join(safeTmpdir(), "published-bootstrap-ancestor-root-"),
 		);
 		const packageRoot = join(tempRoot, "src", "package");
 		cleanupPaths.push(tempRoot);

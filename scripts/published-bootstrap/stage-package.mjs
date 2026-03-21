@@ -102,8 +102,21 @@ function ensureDirectory(path) {
 	return path;
 }
 
+function isSaneDirectoryPath(path) {
+	return (
+		typeof path === "string" &&
+		path.length > 0 &&
+		path !== "undefined" &&
+		existsSync(path)
+	);
+}
+
 export function resolveSafeStagingParentDirectory() {
-	const preferredParents = [tmpdir(), ...FALLBACK_STAGING_PARENT_PATHS]
+	const rawTmpdir = tmpdir();
+	const preferredParents = [
+		...(isSaneDirectoryPath(rawTmpdir) ? [rawTmpdir] : []),
+		...FALLBACK_STAGING_PARENT_PATHS,
+	]
 		.filter(Boolean)
 		.map((path) => resolve(path));
 
@@ -117,7 +130,9 @@ export function resolveSafeStagingParentDirectory() {
 		} catch {}
 	}
 
-	let fallbackPath = resolve(tmpdir());
+	let fallbackPath = isSaneDirectoryPath(rawTmpdir)
+		? resolve(rawTmpdir)
+		: resolve(process.platform === "win32" ? "C:\\Windows\\Temp" : "/tmp");
 	while (isPathWithinProtectedStagingRoots(fallbackPath)) {
 		const parentPath = dirname(fallbackPath);
 		if (parentPath === fallbackPath) {
