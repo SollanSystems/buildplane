@@ -90,8 +90,8 @@ export interface EvidenceRecordedEvent extends BaseEvent {
 
 export interface PolicyDecisionEvent extends BaseEvent {
 	readonly kind: "policy-decision";
-	readonly decisionKind: "advance-run" | "reject-run";
-	readonly outcome: "approved" | "rejected";
+	readonly decisionKind: "advance-run" | "reject-run" | "retry-run";
+	readonly outcome: "approved" | "rejected" | "retrying";
 	readonly reasons: readonly string[];
 }
 

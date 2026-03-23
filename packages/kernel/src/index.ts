@@ -28,6 +28,7 @@ export type {
 	BudgetConstraints,
 	PolicyProfile,
 	ResourceUsageSnapshot,
+	RetryPolicy,
 } from "./policy.js";
 export { createResourceUsageSnapshot } from "./policy.js";
 export type {
@@ -45,6 +46,7 @@ export type {
 	OutputCheck,
 	PolicyDecision,
 	RejectedPolicyDecision,
+	RetryPolicyDecision,
 	RunInfrastructureFailure,
 	RunPacketResult,
 	StatusSnapshot,

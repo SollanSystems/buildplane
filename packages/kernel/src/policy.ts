@@ -21,6 +21,15 @@ export interface BudgetConstraints {
 export interface PolicyProfile {
 	readonly name: string;
 	readonly budgets?: BudgetConstraints;
+	readonly retry?: RetryPolicy;
+}
+
+// ── Retry Policy ────────────────────────────────────────────
+
+export interface RetryPolicy {
+	readonly maxRetries: number;
+	/** If true, the orchestrator injects failure reasons into the model's next prompt */
+	readonly injectFailureContext?: boolean;
 }
 
 // ── Resource Usage Tracking ─────────────────────────────────

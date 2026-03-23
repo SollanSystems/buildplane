@@ -14,9 +14,11 @@ import type {
 	BuildplaneWorkspacePort,
 } from "./ports.js";
 import type {
+	ApprovedPolicyDecision,
 	ExecutionReceipt,
 	InspectSnapshot,
 	PolicyDecision,
+	RejectedPolicyDecision,
 	RunInfrastructureFailure,
 	RunPacketResult,
 	StatusSnapshot,
@@ -250,9 +252,19 @@ export function createBuildplaneOrchestrator(
 				});
 			}
 
-			let decision: PolicyDecision;
+			let decision: ApprovedPolicyDecision | RejectedPolicyDecision;
 			try {
-				decision = policy.evaluateRun(validatedPacket, receipt);
+				const raw = policy.evaluateRun(validatedPacket, receipt);
+				// Sync path does not support retries — treat retry as reject
+				if (raw.kind === "retry-run") {
+					decision = {
+						kind: "reject-run",
+						outcome: "rejected",
+						reasons: raw.reasons,
+					};
+				} else {
+					decision = raw;
+				}
 			} catch (error) {
 				const failure = infrastructureFailure(
 					"policy-evaluation-failed",
@@ -417,8 +429,9 @@ export function createBuildplaneOrchestrator(
 
 			// Resolve budgets: profile registry takes precedence, then top-level option
 			let budgets: BudgetConstraints | undefined;
+			let resolvedProfile: PolicyProfile | undefined;
 			try {
-				const resolvedProfile = profileRegistry
+				resolvedProfile = profileRegistry
 					? profileRegistry.resolve(packet.unit.policyProfile)
 					: undefined;
 				budgets = resolvedProfile?.budgets ?? topLevelBudgets;
@@ -537,29 +550,117 @@ export function createBuildplaneOrchestrator(
 				status: receipt.exitCode === 0 ? "pass" : "fail",
 			});
 
-			const decision = policy.evaluateRun(packet, receipt);
-			bus.emit({
-				kind: "policy-decision",
-				runId: run.id,
-				timestamp: new Date().toISOString(),
-				decisionKind: decision.kind,
-				outcome: decision.outcome,
-				reasons: decision.reasons,
-			});
+			let attemptCount = 0;
+			let currentPacket = packet;
+			let currentReceipt = receipt;
 
-			storage.recordDecision(run.id, decision);
-			const finalStatus = decision.outcome === "approved" ? "passed" : "failed";
-			const completedRun = storage.completeRun(run.id, finalStatus);
+			// Retry loop — evaluateRun may return retry-run with feedback context
+			// biome-ignore lint/correctness/noConstantCondition: retry loop exits via return
+			while (true) {
+				const decision = policy.evaluateRun(
+					currentPacket,
+					currentReceipt,
+					resolvedProfile,
+					attemptCount,
+				);
+				bus.emit({
+					kind: "policy-decision",
+					runId: run.id,
+					timestamp: new Date().toISOString(),
+					decisionKind: decision.kind,
+					outcome: decision.outcome,
+					reasons: decision.reasons,
+				});
 
-			bus.emit({
-				kind: "run-completed",
-				runId: run.id,
-				unitId: packet.unit.id,
-				timestamp: new Date().toISOString(),
-				status: finalStatus as "passed" | "failed",
-			});
+				storage.recordDecision(run.id, decision);
 
-			return { run: completedRun, receipt, decision };
+				if (decision.kind !== "retry-run") {
+					const finalStatus =
+						decision.outcome === "approved" ? "passed" : "failed";
+					const completedRun = storage.completeRun(run.id, finalStatus);
+
+					bus.emit({
+						kind: "run-completed",
+						runId: run.id,
+						unitId: currentPacket.unit.id,
+						timestamp: new Date().toISOString(),
+						status: finalStatus as "passed" | "failed",
+					});
+
+					return { run: completedRun, receipt: currentReceipt, decision };
+				}
+
+				// Retry: augment system prompt with feedback context
+				attemptCount = decision.attemptNumber;
+				const feedbackSuffix =
+					decision.feedbackContext.length > 0
+						? `\n\nPrevious attempt failed:\n${decision.feedbackContext.join("\n")}\n\nPlease fix these issues and try again.`
+						: "";
+
+				if (currentPacket.model) {
+					currentPacket = {
+						...currentPacket,
+						model: {
+							...currentPacket.model,
+							systemPrompt:
+								(currentPacket.model.systemPrompt ?? "") + feedbackSuffix,
+						},
+					};
+				}
+
+				// Re-execute with augmented packet
+				bus.emit({
+					kind: "execution-started",
+					runId: run.id,
+					timestamp: new Date().toISOString(),
+					executionType: currentPacket.model
+						? ("model" as const)
+						: ("command" as const),
+				});
+
+				try {
+					if (runtime.executePacketAsync) {
+						currentReceipt = await runtime.executePacketAsync(
+							currentPacket,
+							projectRoot,
+							bus,
+						);
+					} else {
+						currentReceipt = runtime.executePacket(currentPacket, projectRoot);
+					}
+				} catch (error) {
+					const message =
+						error instanceof Error ? error.message : String(error);
+					bus.emit({
+						kind: "execution-error",
+						runId: run.id,
+						timestamp: new Date().toISOString(),
+						message,
+						phase: "retry-execution",
+					});
+					const failedRun = storage.completeRun(run.id, "failed");
+					bus.emit({
+						kind: "run-completed",
+						runId: run.id,
+						unitId: currentPacket.unit.id,
+						timestamp: new Date().toISOString(),
+						status: "failed" as const,
+					});
+					return {
+						run: failedRun,
+						failure: { kind: "runtime-execution-failed", message },
+					};
+				}
+
+				storage.recordExecutionEvidence(run.id, currentReceipt);
+				bus.emit({
+					kind: "evidence-recorded",
+					runId: run.id,
+					timestamp: new Date().toISOString(),
+					evidenceKind: "command-exit",
+					status: currentReceipt.exitCode === 0 ? "pass" : "fail",
+				});
+			}
 		},
 		getStatus() {
 			return storage.getStatusSnapshot();

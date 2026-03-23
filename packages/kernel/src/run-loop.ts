@@ -57,7 +57,18 @@ export interface RejectedPolicyDecision {
 	readonly reasons: readonly string[];
 }
 
-export type PolicyDecision = ApprovedPolicyDecision | RejectedPolicyDecision;
+export interface RetryPolicyDecision {
+	readonly kind: "retry-run";
+	readonly outcome: "retrying";
+	readonly reasons: readonly string[];
+	readonly attemptNumber: number;
+	readonly feedbackContext: readonly string[];
+}
+
+export type PolicyDecision =
+	| ApprovedPolicyDecision
+	| RejectedPolicyDecision
+	| RetryPolicyDecision;
 
 export interface WorkspaceSnapshot {
 	readonly runId: string;

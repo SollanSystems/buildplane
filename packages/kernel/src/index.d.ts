@@ -28,6 +28,7 @@ export type {
 	BudgetConstraints,
 	PolicyProfile,
 	ResourceUsageSnapshot,
+	RetryPolicy,
 } from "./policy.ts";
 export { createResourceUsageSnapshot } from "./policy.ts";
 export type {
@@ -45,6 +46,7 @@ export type {
 	OutputCheck,
 	PolicyDecision,
 	RejectedPolicyDecision,
+	RetryPolicyDecision,
 	RunInfrastructureFailure,
 	RunPacketResult,
 	StatusSnapshot,
