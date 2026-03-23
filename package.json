@@ -1,0 +1,39 @@
+{
+	"name": "buildplane-workspace",
+	"private": true,
+	"version": "0.1.0",
+	"packageManager": "pnpm@10.0.0",
+	"workspaces": [
+		"apps/*",
+		"packages/*"
+	],
+	"engines": {
+		"node": "24.13.1"
+	},
+	"scripts": {
+		"build": "tsc --build",
+		"buildplane": "node --import tsx ./apps/cli/src/index.ts",
+		"test": "vitest --run",
+		"test:watch": "vitest",
+		"typecheck": "pnpm exec tsc -p packages/kernel/tsconfig.json --noEmit && pnpm exec tsc -p packages/storage/tsconfig.json --noEmit && pnpm exec tsc -p packages/runtime/tsconfig.json --noEmit && pnpm exec tsc -p packages/policy/tsconfig.json --noEmit && pnpm exec tsc -p packages/adapters-git/tsconfig.json --noEmit && pnpm exec tsc -p packages/adapters-models/tsconfig.json --noEmit && pnpm exec tsc -p packages/adapters-tools/tsconfig.json --noEmit && pnpm exec tsc -p packages/compat-gsd/tsconfig.json --noEmit && pnpm exec tsc -p packages/ui-tui/tsconfig.json --noEmit && pnpm exec tsc -p apps/cli/tsconfig.json --noEmit",
+		"lint": "biome check .",
+		"format": "biome format --write .",
+		"check": "pnpm lint && pnpm typecheck && pnpm test && pnpm build",
+		"prepare": "husky",
+		"changeset": "changeset",
+		"changeset:status": "changeset status --verbose",
+		"stage:published-bootstrap": "node ./scripts/published-bootstrap/stage-package.mjs",
+		"verify:published-bootstrap": "node ./scripts/published-bootstrap/verify-positive.mjs"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "^2.4.7",
+		"@changesets/cli": "^2.30.0",
+		"@commitlint/cli": "^20.5.0",
+		"@commitlint/config-conventional": "^20.5.0",
+		"@types/node": "^25.5.0",
+		"husky": "^9.1.7",
+		"tsx": "^4.21.0",
+		"typescript": "^5.9.3",
+		"vitest": "^4.1.0"
+	}
+}

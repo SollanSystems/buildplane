@@ -1,1 +1,11 @@
+node_modules/
+dist/
+*.tsbuildinfo
+coverage/
+.DS_Store
+*.log
+.env
+.env.*
 .buildplane/
+.bg-shell/
+.worktrees/

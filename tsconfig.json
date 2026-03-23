@@ -1,0 +1,15 @@
+{
+	"files": [],
+	"references": [
+		{ "path": "packages/kernel" },
+		{ "path": "packages/policy" },
+		{ "path": "packages/runtime" },
+		{ "path": "packages/storage" },
+		{ "path": "packages/adapters-git" },
+		{ "path": "packages/adapters-models" },
+		{ "path": "packages/adapters-tools" },
+		{ "path": "packages/compat-gsd" },
+		{ "path": "packages/ui-tui" },
+		{ "path": "apps/cli" }
+	]
+}
