@@ -72,8 +72,17 @@ async function loadCliOrchestrator(
 		};
 		parseUnitPacket: (input: string) => unknown;
 	};
-	const runtime = (await import("@buildplane/runtime")) as unknown as {
-		executePacket: (packet: unknown, root: string) => unknown;
+	const adaptersModels = (await import(
+		"@buildplane/adapters-models"
+	)) as unknown as {
+		createModelExecutor: (options?: unknown) => {
+			executePacket: (packet: unknown, root: string) => unknown;
+			executePacketAsync: (
+				packet: unknown,
+				root: string,
+				eventBus: unknown,
+			) => Promise<unknown>;
+		};
 	};
 	const policy = (await import("@buildplane/policy")) as unknown as {
 		evaluateRun: (packet: unknown, receipt: unknown) => unknown;
@@ -106,10 +115,15 @@ async function loadCliOrchestrator(
 		createGitWorkspaceAdapter: () => unknown;
 	};
 
+	const modelExecutor = adaptersModels.createModelExecutor();
+
 	return kernel.createBuildplaneOrchestrator({
 		projectRoot,
 		storage: storage.createBuildplaneStorage(projectRoot),
-		runtime: { executePacket: runtime.executePacket },
+		runtime: {
+			executePacket: modelExecutor.executePacket,
+			executePacketAsync: modelExecutor.executePacketAsync,
+		},
 		policy: { evaluateRun: policy.evaluateRun },
 		workspace: adaptersGit.createGitWorkspaceAdapter(),
 		eventBus,
@@ -227,6 +241,28 @@ export async function runCli(
 					await tuiInstance.waitUntilExit();
 
 					return result.run.status === "passed" ? 0 : 1;
+				}
+
+				// Model packets require the async execution path
+				const p = packet as Record<string, unknown>;
+				const isModelPacket = !!p.model;
+
+				if (isModelPacket) {
+					const result = await orchestrator.runPacketAsync(packet);
+
+					for (const line of formatRunResult(result)) {
+						stdout(line);
+					}
+
+					const r = result as Record<string, unknown>;
+					if (r.failure && typeof r.failure === "object") {
+						const f = r.failure as { message?: string };
+						if (f.message) {
+							stderr(f.message);
+						}
+					}
+
+					return result.run.status === "passed" && !r.failure ? 0 : 1;
 				}
 
 				const result = orchestrator.runPacket(packet);

@@ -97,44 +97,65 @@ export function createModelExecutor(
 
 	async function getToolBuilder(): Promise<ToolBuilder> {
 		if (toolBuilder) return toolBuilder;
-		const { tool: aiTool } = await import("ai");
-		const { z } = await import("zod");
+		const ai = await import("ai");
 		const { createToolRegistry } = await import("@buildplane/adapters-tools");
-		// Cast through unknown — aiTool has 4 overloaded signatures that don't
-		// resolve cleanly through dynamic import + generic parameters.
-		const createTool = aiTool as unknown as (
-			config: Record<string, unknown>,
-		) => unknown;
 		return (worktreeRoot: string) => {
 			const registry = createToolRegistry(worktreeRoot);
+
+			// Use jsonSchema() with explicit JSON Schema objects.
+			// IMPORTANT: AI SDK v6 reads tool.inputSchema (not tool.parameters)
+			// in prepareToolsAndToolChoice. Using inputSchema directly.
 			return {
-				write_file: createTool({
+				write_file: {
 					description:
 						"Write content to a file. Creates parent directories as needed. Path must be relative to the worktree root.",
-					parameters: z.object({
-						path: z.string().describe("Relative file path within the worktree"),
-						content: z.string().describe("File content to write"),
+					inputSchema: ai.jsonSchema({
+						type: "object" as const,
+						properties: {
+							path: {
+								type: "string" as const,
+								description: "Relative file path within the worktree",
+							},
+							content: {
+								type: "string" as const,
+								description: "File content to write",
+							},
+						},
+						required: ["path", "content"] as const,
+						additionalProperties: false,
 					}),
 					execute: async (input: { path: string; content: string }) =>
 						registry.write_file(input),
-				}),
-				run_command: createTool({
+				},
+				run_command: {
 					description:
 						"Run a shell command. The command runs inside the worktree directory. Use cwd for a subdirectory.",
-					parameters: z.object({
-						command: z.string().describe("Command to execute"),
-						args: z.array(z.string()).optional().describe("Command arguments"),
-						cwd: z
-							.string()
-							.optional()
-							.describe("Working directory relative to the worktree root"),
+					inputSchema: ai.jsonSchema({
+						type: "object" as const,
+						properties: {
+							command: {
+								type: "string" as const,
+								description: "Command to execute",
+							},
+							args: {
+								type: "array" as const,
+								items: { type: "string" as const },
+								description: "Command arguments",
+							},
+							cwd: {
+								type: "string" as const,
+								description: "Working directory relative to the worktree root",
+							},
+						},
+						required: ["command"] as const,
+						additionalProperties: false,
 					}),
 					execute: async (input: {
 						command: string;
 						args?: string[];
 						cwd?: string;
 					}) => registry.run_command(input),
-				}),
+				},
 			};
 		};
 	}

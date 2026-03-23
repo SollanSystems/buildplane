@@ -17,22 +17,17 @@
 	},
 	"devDependencies": {
 		"@ai-sdk/anthropic": "^3.0.63",
-		"ai": "^6.0.134",
-		"zod": "^3.25.76"
+		"ai": "^6.0.134"
 	},
 	"peerDependencies": {
 		"ai": ">=6.0.0",
-		"@ai-sdk/anthropic": ">=3.0.0",
-		"zod": ">=3.25.0"
+		"@ai-sdk/anthropic": ">=3.0.0"
 	},
 	"peerDependenciesMeta": {
 		"ai": {
 			"optional": true
 		},
 		"@ai-sdk/anthropic": {
-			"optional": true
-		},
-		"zod": {
 			"optional": true
 		}
 	}
