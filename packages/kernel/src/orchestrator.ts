@@ -1,6 +1,8 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import type { EventBus } from "./events.js";
+import type { EventBus, ExecutionEvent } from "./events.js";
+import type { BudgetConstraints, ResourceUsageSnapshot } from "./policy.js";
+import { createResourceUsageSnapshot } from "./policy.js";
 import type {
 	BuildplanePolicyPort,
 	BuildplaneRuntimePort,
@@ -44,12 +46,13 @@ export interface CreateBuildplaneOrchestratorOptions {
 	readonly policy: BuildplanePolicyPort;
 	readonly workspace: BuildplaneWorkspacePort;
 	readonly eventBus?: EventBus;
+	readonly budgets?: BudgetConstraints;
 }
 
 export function createBuildplaneOrchestrator(
 	options: CreateBuildplaneOrchestratorOptions,
 ): BuildplaneOrchestrator {
-	const { projectRoot, storage, runtime, policy, workspace } = options;
+	const { projectRoot, storage, runtime, policy, workspace, budgets } = options;
 	const defaultBus = options.eventBus ?? noopBus;
 
 	function infrastructureFailure(
@@ -393,10 +396,55 @@ export function createBuildplaneOrchestrator(
 				executionType: packet.model ? ("model" as const) : ("command" as const),
 			});
 
+			// Budget enforcement: track token usage mid-flight and abort on breach
+			const controller = new AbortController();
+			const startTime = Date.now();
+			const usage: ResourceUsageSnapshot = createResourceUsageSnapshot();
+			let budgetBreached = false;
+
+			const budgetSubscription = budgets
+				? bus.subscribe((event: ExecutionEvent) => {
+						if (budgetBreached || controller.signal.aborted) return;
+
+						if (event.kind === "model-token-delta") {
+							// Approximate: count each delta as 1 completion token
+							// Accurate usage arrives in model-response-complete
+							(usage as { completionTokens: number }).completionTokens++;
+							(usage as { totalTokens: number }).totalTokens =
+								usage.promptTokens + usage.completionTokens;
+							(usage as { elapsedMs: number }).elapsedMs =
+								Date.now() - startTime;
+						}
+
+						if (policy.evaluateBudgets) {
+							const decision = policy.evaluateBudgets(packet, usage, budgets);
+							if (decision && decision.outcome === "rejected") {
+								budgetBreached = true;
+
+								bus.emit({
+									kind: "policy-budget-breached",
+									runId: run.id,
+									timestamp: new Date().toISOString(),
+									budgetType: "tokens",
+									limit: budgets.maxTokens ?? 0,
+									actual: usage.totalTokens,
+								});
+
+								controller.abort();
+							}
+						}
+					})
+				: undefined;
+
 			let receipt: ExecutionReceipt;
 			try {
 				if (runtime.executePacketAsync) {
-					receipt = await runtime.executePacketAsync(packet, projectRoot, bus);
+					receipt = await runtime.executePacketAsync(
+						packet,
+						projectRoot,
+						bus,
+						controller.signal,
+					);
 				} else {
 					receipt = runtime.executePacket(packet, projectRoot);
 					bus.emit({
@@ -411,6 +459,7 @@ export function createBuildplaneOrchestrator(
 					});
 				}
 			} catch (error) {
+				budgetSubscription?.();
 				const message = error instanceof Error ? error.message : String(error);
 				bus.emit({
 					kind: "execution-error",
@@ -432,6 +481,9 @@ export function createBuildplaneOrchestrator(
 					failure: { kind: "runtime-execution-failed", message },
 				};
 			}
+
+			// Clean up budget subscriber
+			budgetSubscription?.();
 
 			storage.recordExecutionEvidence(run.id, receipt);
 			bus.emit({

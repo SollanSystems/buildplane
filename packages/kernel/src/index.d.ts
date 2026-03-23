@@ -15,6 +15,7 @@ export type {
 	ExecutionStartedEvent,
 	ModelResponseCompleteEvent,
 	ModelTokenDeltaEvent,
+	PolicyBudgetBreachedEvent,
 	PolicyDecisionEvent,
 	RunCompletedEvent,
 	RunCreatedEvent,
@@ -23,6 +24,11 @@ export type {
 	ToolCallStartedEvent,
 } from "./events.ts";
 export { parseUnitPacket } from "./packet.ts";
+export type {
+	BudgetConstraints,
+	ResourceUsageSnapshot,
+} from "./policy.ts";
+export { createResourceUsageSnapshot } from "./policy.ts";
 export type {
 	BuildplanePolicyPort,
 	BuildplaneRuntimePort,

@@ -103,6 +103,15 @@ export interface ExecutionErrorEvent extends BaseEvent {
 	readonly phase: string;
 }
 
+// ── Budget ──────────────────────────────────────────────────
+
+export interface PolicyBudgetBreachedEvent extends BaseEvent {
+	readonly kind: "policy-budget-breached";
+	readonly budgetType: "tokens" | "time";
+	readonly limit: number;
+	readonly actual: number;
+}
+
 // ── Union ───────────────────────────────────────────────────
 
 export type ExecutionEvent =
@@ -117,7 +126,8 @@ export type ExecutionEvent =
 	| ToolCallCompletedEvent
 	| EvidenceRecordedEvent
 	| PolicyDecisionEvent
-	| ExecutionErrorEvent;
+	| ExecutionErrorEvent
+	| PolicyBudgetBreachedEvent;
 
 /** All possible event kind values. */
 export type ExecutionEventKind = ExecutionEvent["kind"];

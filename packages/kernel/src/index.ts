@@ -9,6 +9,7 @@ export type {
 	ExecutionStartedEvent,
 	ModelResponseCompleteEvent,
 	ModelTokenDeltaEvent,
+	PolicyBudgetBreachedEvent,
 	PolicyDecisionEvent,
 	RunCompletedEvent,
 	RunCreatedEvent,
@@ -23,6 +24,11 @@ export type {
 } from "./orchestrator.js";
 export { createBuildplaneOrchestrator } from "./orchestrator.js";
 export { parseUnitPacket } from "./packet.js";
+export type {
+	BudgetConstraints,
+	ResourceUsageSnapshot,
+} from "./policy.js";
+export { createResourceUsageSnapshot } from "./policy.js";
 export type {
 	BuildplanePolicyPort,
 	BuildplaneRuntimePort,

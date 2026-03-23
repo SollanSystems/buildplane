@@ -13,6 +13,7 @@ export interface ModelExecutorPort {
 		packet: UnitPacket,
 		projectRoot: string,
 		eventBus: EventBus,
+		signal?: AbortSignal,
 	): Promise<ExecutionReceipt>;
 }
 
@@ -48,6 +49,7 @@ export type StreamFunction = (options: {
 	system?: string;
 	prompt: string;
 	tools?: Record<string, unknown>;
+	abortSignal?: AbortSignal;
 }) => StreamResult;
 
 /** A function that resolves a provider+model string to an AI SDK model instance. */
@@ -174,6 +176,7 @@ export function createModelExecutor(
 			packet: UnitPacket,
 			projectRoot: string,
 			eventBus: EventBus,
+			signal?: AbortSignal,
 		): Promise<ExecutionReceipt> {
 			// Command packets delegate to the sync executor
 			if (packet.execution) {
@@ -197,6 +200,7 @@ export function createModelExecutor(
 					stream,
 					resolver,
 					buildTools,
+					signal,
 				);
 				return receipt;
 			} catch (error) {
@@ -237,6 +241,7 @@ async function executeModelStream(
 	streamFn: StreamFunction,
 	modelResolver: ModelResolver,
 	toolBuilder: ToolBuilder,
+	signal?: AbortSignal,
 ): Promise<ExecutionReceipt> {
 	const model = packet.model;
 	if (!model) {
@@ -252,55 +257,79 @@ async function executeModelStream(
 		system: model.systemPrompt,
 		prompt: "Execute the assigned task.",
 		tools: Object.keys(tools).length > 0 ? tools : undefined,
+		abortSignal: signal,
 	});
 
 	let fullText = "";
 	let finishReason = "unknown";
 	let usage: { promptTokens: number; completionTokens: number } | undefined;
+	let aborted = false;
 
-	for await (const chunk of result.fullStream) {
-		switch (chunk.type) {
-			case "text-delta": {
-				fullText += chunk.textDelta;
-				eventBus.emit({
-					kind: "model-token-delta",
-					runId: "",
-					timestamp: new Date().toISOString(),
-					delta: chunk.textDelta,
-				});
+	try {
+		for await (const chunk of result.fullStream) {
+			// Check abort between chunks
+			if (signal?.aborted) {
+				aborted = true;
 				break;
 			}
-			case "tool-call": {
-				eventBus.emit({
-					kind: "tool-call-started",
-					runId: "",
-					timestamp: new Date().toISOString(),
-					toolCallId: chunk.toolCallId,
-					toolName: chunk.toolName,
-					args: chunk.input as Record<string, unknown>,
-				});
-				break;
+
+			switch (chunk.type) {
+				case "text-delta": {
+					fullText += chunk.textDelta;
+					eventBus.emit({
+						kind: "model-token-delta",
+						runId: "",
+						timestamp: new Date().toISOString(),
+						delta: chunk.textDelta,
+					});
+					break;
+				}
+				case "tool-call": {
+					eventBus.emit({
+						kind: "tool-call-started",
+						runId: "",
+						timestamp: new Date().toISOString(),
+						toolCallId: chunk.toolCallId,
+						toolName: chunk.toolName,
+						args: chunk.input as Record<string, unknown>,
+					});
+					break;
+				}
+				case "tool-result": {
+					eventBus.emit({
+						kind: "tool-call-completed",
+						runId: "",
+						timestamp: new Date().toISOString(),
+						toolCallId: chunk.toolCallId,
+						toolName: chunk.toolName,
+						result: chunk.output,
+					});
+					break;
+				}
+				case "finish-step": {
+					finishReason = chunk.finishReason ?? "unknown";
+					usage = chunk.usage ?? undefined;
+					break;
+				}
 			}
-			case "tool-result": {
-				eventBus.emit({
-					kind: "tool-call-completed",
-					runId: "",
-					timestamp: new Date().toISOString(),
-					toolCallId: chunk.toolCallId,
-					toolName: chunk.toolName,
-					result: chunk.output,
-				});
-				break;
-			}
-			case "finish-step": {
-				finishReason = chunk.finishReason ?? "unknown";
-				usage = chunk.usage ?? undefined;
-				break;
-			}
+		}
+	} catch (error) {
+		// AbortError is thrown when the signal fires during an async iteration
+		const isAbort =
+			signal?.aborted ||
+			(error instanceof Error && error.name === "AbortError");
+		if (isAbort) {
+			aborted = true;
+		} else {
+			throw error;
 		}
 	}
 
 	const completedAt = new Date().toISOString();
+
+	if (aborted) {
+		finishReason = "aborted";
+	}
 
 	eventBus.emit({
 		kind: "model-response-complete",
@@ -317,9 +346,9 @@ async function executeModelStream(
 		cwd: projectRoot,
 		startedAt,
 		completedAt,
-		exitCode: 0,
+		exitCode: aborted ? 1 : 0,
 		stdout: fullText,
-		stderr: "",
+		stderr: aborted ? "model execution aborted" : "",
 		outputChecks: packet.verification.requiredOutputs.map((path) => ({
 			path,
 			exists: existsSync(resolve(projectRoot, path)),

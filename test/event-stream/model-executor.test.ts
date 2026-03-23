@@ -65,7 +65,7 @@ function mockStreamFn(): StreamFunction {
 			yield { type: "text-delta" as const, textDelta: "Hello" };
 			yield { type: "text-delta" as const, textDelta: " world" };
 			yield {
-				type: "step-finish" as const,
+				type: "finish-step" as const,
 				finishReason: "stop",
 				usage: { promptTokens: 10, completionTokens: 5 },
 			};
@@ -134,16 +134,16 @@ describe("model executor", () => {
 					type: "tool-call" as const,
 					toolCallId: "call-1",
 					toolName: "read_file",
-					args: { path: "/tmp/test.txt" },
+					input: { path: "/tmp/test.txt" },
 				};
 				yield {
 					type: "tool-result" as const,
 					toolCallId: "call-1",
 					toolName: "read_file",
-					result: "file contents",
+					output: "file contents",
 				};
 				yield { type: "text-delta" as const, textDelta: "Done" };
-				yield { type: "step-finish" as const, finishReason: "stop" };
+				yield { type: "finish-step" as const, finishReason: "stop" };
 			})(),
 		});
 
@@ -265,5 +265,55 @@ describe("model executor", () => {
 		expect(() => executor.executePacket(makeModelPacket(), root)).toThrow(
 			"Sync executePacket only supports command packets",
 		);
+	});
+
+	it("aborts model execution when signal fires", async () => {
+		const bus = createEventBus();
+		const events: ExecutionEvent[] = [];
+		bus.subscribe((e) => events.push(e));
+
+		const controller = new AbortController();
+
+		const streamFn: StreamFunction = () => ({
+			fullStream: (async function* () {
+				yield { type: "text-delta" as const, textDelta: "chunk1 " };
+				yield { type: "text-delta" as const, textDelta: "chunk2 " };
+				// Abort after 2 chunks
+				controller.abort();
+				yield { type: "text-delta" as const, textDelta: "chunk3 " };
+				yield {
+					type: "finish-step" as const,
+					finishReason: "stop",
+					usage: { promptTokens: 10, completionTokens: 30 },
+				};
+			})(),
+		});
+
+		const executor = createModelExecutor({
+			streamFn,
+			modelResolver: mockModelResolver(),
+			toolBuilder: () => ({}),
+		});
+
+		const root = mkdtempSync(join(tmpdir(), "bp-model-"));
+		const receipt = await executor.executePacketAsync(
+			makeModelPacket(),
+			root,
+			bus,
+			controller.signal,
+		);
+
+		expect(receipt.exitCode).toBe(1);
+		expect(receipt.stderr).toContain("aborted");
+		expect(receipt.stdout).toContain("chunk1");
+		expect(receipt.stdout).toContain("chunk2");
+
+		const responseComplete = events.find(
+			(e) => e.kind === "model-response-complete",
+		);
+		expect(responseComplete).toBeDefined();
+		if (responseComplete?.kind === "model-response-complete") {
+			expect(responseComplete.finishReason).toBe("aborted");
+		}
 	});
 });

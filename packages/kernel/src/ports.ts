@@ -1,4 +1,5 @@
 import type { EventBus } from "./events.js";
+import type { BudgetConstraints, ResourceUsageSnapshot } from "./policy.js";
 import type {
 	ApprovedPolicyDecision,
 	ExecutionReceipt,
@@ -57,11 +58,22 @@ export interface BuildplaneRuntimePort {
 		packet: UnitPacket,
 		projectRoot: string,
 		eventBus: EventBus,
+		signal?: AbortSignal,
 	): Promise<ExecutionReceipt>;
 }
 
 export interface BuildplanePolicyPort {
 	evaluateRun(packet: UnitPacket, receipt: ExecutionReceipt): PolicyDecision;
+
+	/**
+	 * Mid-execution budget evaluation.
+	 * Returns a reject decision if a hard limit is breached, null otherwise.
+	 */
+	evaluateBudgets?(
+		packet: UnitPacket,
+		usage: ResourceUsageSnapshot,
+		budgets?: BudgetConstraints,
+	): PolicyDecision | null;
 }
 
 export interface BuildplaneWorkspacePort {
