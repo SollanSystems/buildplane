@@ -16,6 +16,7 @@ import { createBuildplaneOrchestrator } from "../../packages/kernel/src/orchestr
 import type { UnitPacket } from "../../packages/kernel/src/run-loop";
 import { evaluateBudgets } from "../../packages/policy/src/budgets";
 import { evaluateRun } from "../../packages/policy/src/decision";
+import { createMockStorage } from "../helpers/mock-storage";
 
 function mockModelResolver(): ModelResolver {
 	return (provider: string, modelId: string) => ({
@@ -81,55 +82,7 @@ describe("budget enforcement end-to-end", () => {
 			toolBuilder: (() => ({})) as ToolBuilder,
 		});
 
-		// Minimal mock storage
-		const runs: Record<string, { id: string; unitId: string; status: string }> =
-			{};
-		const mockStorage = {
-			initializeProject: () => ({
-				created: true,
-				projectRoot: root,
-				stateDbPath: join(root, "state.db"),
-			}),
-			createRun: (packet: UnitPacket) => {
-				const id = `run-${Date.now()}`;
-				const run = { id, unitId: packet.unit.id, status: "pending" };
-				runs[id] = run;
-				return run;
-			},
-			markRunRunning: (runId: string) => {
-				if (runs[runId]) runs[runId].status = "running";
-			},
-			recordExecutionEvidence: () => {},
-			recordDecision: () => {},
-			completeRun: (runId: string, status: string) => {
-				if (runs[runId]) runs[runId].status = status;
-				return runs[runId];
-			},
-			getStatusSnapshot: () => ({
-				initialized: true,
-				latestRunUsedWorkspace: false,
-				actionableWorkspaces: [],
-				runCounts: {
-					pending: 0,
-					running: 0,
-					passed: 0,
-					failed: 0,
-					cancelled: 0,
-				},
-			}),
-			inspectTarget: () => {
-				throw new Error("not implemented");
-			},
-			recordWorkspacePrepared: () => {},
-			commitRunFailureOutcome: () => {
-				throw new Error("not implemented");
-			},
-			commitRunSuccessOutcome: () => {
-				throw new Error("not implemented");
-			},
-			recordWorkspaceDeleted: () => {},
-			recordWorkspaceCleanupFailed: () => {},
-		};
+		const mockStorage = createMockStorage();
 
 		const mockWorkspace = {
 			assertRunnableRepository: () => ({ headSha: "abc123" }),
@@ -139,7 +92,7 @@ describe("budget enforcement end-to-end", () => {
 
 		const orchestrator = createBuildplaneOrchestrator({
 			projectRoot: root,
-			storage: mockStorage as never,
+			storage: mockStorage,
 			runtime: {
 				executePacket: executor.executePacket,
 				executePacketAsync: executor.executePacketAsync,
@@ -191,58 +144,11 @@ describe("budget enforcement end-to-end", () => {
 			toolBuilder: (() => ({})) as ToolBuilder,
 		});
 
-		const runs: Record<string, { id: string; unitId: string; status: string }> =
-			{};
-		const mockStorage = {
-			initializeProject: () => ({
-				created: true,
-				projectRoot: root,
-				stateDbPath: join(root, "state.db"),
-			}),
-			createRun: (packet: UnitPacket) => {
-				const id = `run-${Date.now()}`;
-				const run = { id, unitId: packet.unit.id, status: "pending" };
-				runs[id] = run;
-				return run;
-			},
-			markRunRunning: (runId: string) => {
-				if (runs[runId]) runs[runId].status = "running";
-			},
-			recordExecutionEvidence: () => {},
-			recordDecision: () => {},
-			completeRun: (runId: string, status: string) => {
-				if (runs[runId]) runs[runId].status = status;
-				return runs[runId];
-			},
-			getStatusSnapshot: () => ({
-				initialized: true,
-				latestRunUsedWorkspace: false,
-				actionableWorkspaces: [],
-				runCounts: {
-					pending: 0,
-					running: 0,
-					passed: 0,
-					failed: 0,
-					cancelled: 0,
-				},
-			}),
-			inspectTarget: () => {
-				throw new Error("not implemented");
-			},
-			recordWorkspacePrepared: () => {},
-			commitRunFailureOutcome: () => {
-				throw new Error("not implemented");
-			},
-			commitRunSuccessOutcome: () => {
-				throw new Error("not implemented");
-			},
-			recordWorkspaceDeleted: () => {},
-			recordWorkspaceCleanupFailed: () => {},
-		};
+		const mockStorage = createMockStorage();
 
 		const orchestrator = createBuildplaneOrchestrator({
 			projectRoot: root,
-			storage: mockStorage as never,
+			storage: mockStorage,
 			runtime: {
 				executePacket: executor.executePacket,
 				executePacketAsync: executor.executePacketAsync,
@@ -281,58 +187,11 @@ describe("budget enforcement end-to-end", () => {
 			toolBuilder: (() => ({})) as ToolBuilder,
 		});
 
-		const runs: Record<string, { id: string; unitId: string; status: string }> =
-			{};
-		const mockStorage = {
-			initializeProject: () => ({
-				created: true,
-				projectRoot: root,
-				stateDbPath: join(root, "state.db"),
-			}),
-			createRun: (packet: UnitPacket) => {
-				const id = `run-${Date.now()}`;
-				const run = { id, unitId: packet.unit.id, status: "pending" };
-				runs[id] = run;
-				return run;
-			},
-			markRunRunning: (runId: string) => {
-				if (runs[runId]) runs[runId].status = "running";
-			},
-			recordExecutionEvidence: () => {},
-			recordDecision: () => {},
-			completeRun: (runId: string, status: string) => {
-				if (runs[runId]) runs[runId].status = status;
-				return runs[runId];
-			},
-			getStatusSnapshot: () => ({
-				initialized: true,
-				latestRunUsedWorkspace: false,
-				actionableWorkspaces: [],
-				runCounts: {
-					pending: 0,
-					running: 0,
-					passed: 0,
-					failed: 0,
-					cancelled: 0,
-				},
-			}),
-			inspectTarget: () => {
-				throw new Error("not implemented");
-			},
-			recordWorkspacePrepared: () => {},
-			commitRunFailureOutcome: () => {
-				throw new Error("not implemented");
-			},
-			commitRunSuccessOutcome: () => {
-				throw new Error("not implemented");
-			},
-			recordWorkspaceDeleted: () => {},
-			recordWorkspaceCleanupFailed: () => {},
-		};
+		const mockStorage = createMockStorage();
 
 		const orchestrator = createBuildplaneOrchestrator({
 			projectRoot: root,
-			storage: mockStorage as never,
+			storage: mockStorage,
 			runtime: {
 				executePacket: executor.executePacket,
 				executePacketAsync: executor.executePacketAsync,

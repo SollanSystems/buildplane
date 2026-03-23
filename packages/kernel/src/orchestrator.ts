@@ -443,13 +443,18 @@ export function createBuildplaneOrchestrator(
 				worktreeRoot,
 			);
 
+			// Record workspace in storage before execution begins
+			storage.recordWorkspacePrepared(run.id, {
+				path: worktreeRoot,
+				headSha: preparedWorkspace.headSha,
+				sourceProjectRoot: projectRoot,
+			});
+
 			/** Clean up the workspace; errors are emitted but don't override the primary result. */
-			async function cleanupWorkspace(
-				status: "retained" | "deleted",
-			): Promise<void> {
-				if (status !== "deleted") return;
+			async function cleanupWorkspace(): Promise<void> {
 				try {
 					workspace.deleteWorkspace({ path: worktreeRoot });
+					storage.recordWorkspaceDeleted(run.id);
 				} catch (cleanupError) {
 					const msg =
 						cleanupError instanceof Error
@@ -462,6 +467,11 @@ export function createBuildplaneOrchestrator(
 						message: `workspace cleanup failed: ${msg}`,
 						phase: "workspace-cleanup",
 					});
+					try {
+						storage.recordWorkspaceCleanupFailed(run.id, msg);
+					} catch {
+						// storage failure during cleanup — already emitted the event
+					}
 				}
 			}
 
@@ -505,7 +515,13 @@ export function createBuildplaneOrchestrator(
 					message,
 					phase: "profile-resolution",
 				});
-				const failedRun = storage.completeRun(run.id, "failed");
+				const failedRun = storage.commitRunFailureOutcome(run.id, {
+					infrastructureFailure: {
+						kind: "profile-resolution-failed",
+						message,
+					},
+					workspaceStatus: "retained",
+				});
 				bus.emit({
 					kind: "run-completed",
 					runId: run.id,
@@ -513,6 +529,7 @@ export function createBuildplaneOrchestrator(
 					timestamp: new Date().toISOString(),
 					status: "failed" as const,
 				});
+				await cleanupWorkspace();
 				return {
 					run: failedRun,
 					failure: { kind: "profile-resolution-failed", message },
@@ -585,7 +602,10 @@ export function createBuildplaneOrchestrator(
 					message,
 					phase: "execution",
 				});
-				const failedRun = storage.completeRun(run.id, "failed");
+				const failedRun = storage.commitRunFailureOutcome(run.id, {
+					infrastructureFailure: { kind: "runtime-execution-failed", message },
+					workspaceStatus: "retained",
+				});
 				bus.emit({
 					kind: "run-completed",
 					runId: run.id,
@@ -593,7 +613,7 @@ export function createBuildplaneOrchestrator(
 					timestamp: new Date().toISOString(),
 					status: "failed" as const,
 				});
-				await cleanupWorkspace("deleted");
+				await cleanupWorkspace();
 				return {
 					run: failedRun,
 					failure: { kind: "runtime-execution-failed", message },
@@ -636,9 +656,17 @@ export function createBuildplaneOrchestrator(
 				storage.recordDecision(run.id, decision);
 
 				if (decision.kind !== "retry-run") {
+					let completedRun: Run;
+					if (decision.kind === "advance-run") {
+						completedRun = storage.commitRunSuccessOutcome(run.id, decision);
+					} else {
+						completedRun = storage.commitRunFailureOutcome(run.id, {
+							decision,
+							workspaceStatus: "retained",
+						});
+					}
 					const finalStatus =
 						decision.outcome === "approved" ? "passed" : "failed";
-					const completedRun = storage.completeRun(run.id, finalStatus);
 
 					bus.emit({
 						kind: "run-completed",
@@ -648,7 +676,7 @@ export function createBuildplaneOrchestrator(
 						status: finalStatus as "passed" | "failed",
 					});
 
-					await cleanupWorkspace("deleted");
+					await cleanupWorkspace();
 					return { run: completedRun, receipt: currentReceipt, decision };
 				}
 
@@ -700,7 +728,13 @@ export function createBuildplaneOrchestrator(
 						message,
 						phase: "retry-execution",
 					});
-					const failedRun = storage.completeRun(run.id, "failed");
+					const failedRun = storage.commitRunFailureOutcome(run.id, {
+						infrastructureFailure: {
+							kind: "runtime-execution-failed",
+							message,
+						},
+						workspaceStatus: "retained",
+					});
 					bus.emit({
 						kind: "run-completed",
 						runId: run.id,
@@ -708,7 +742,7 @@ export function createBuildplaneOrchestrator(
 						timestamp: new Date().toISOString(),
 						status: "failed" as const,
 					});
-					await cleanupWorkspace("deleted");
+					await cleanupWorkspace();
 					return {
 						run: failedRun,
 						failure: { kind: "runtime-execution-failed", message },

@@ -10,6 +10,7 @@ import { createBuildplaneOrchestrator } from "../../packages/kernel/src/orchestr
 import type { UnitPacket } from "../../packages/kernel/src/run-loop";
 import { evaluateBudgets } from "../../packages/policy/src/budgets";
 import { evaluateRun } from "../../packages/policy/src/decision";
+import { createMockStorage as createSharedMockStorage } from "../helpers/mock-storage";
 
 function makeCommandPacket(): UnitPacket {
 	return {
@@ -31,43 +32,7 @@ function makeCommandPacket(): UnitPacket {
 }
 
 function makeMockStorage() {
-	const runs: Record<string, { id: string; unitId: string; status: string }> =
-		{};
-	return {
-		initializeProject: () => ({}),
-		createRun: (packet: UnitPacket) => {
-			const id = `run-${Math.random().toString(36).slice(2, 8)}`;
-			runs[id] = { id, unitId: packet.unit.id, status: "pending" };
-			return runs[id];
-		},
-		markRunRunning: (runId: string) => {
-			if (runs[runId]) runs[runId].status = "running";
-		},
-		recordExecutionEvidence: () => {},
-		recordDecision: () => {},
-		completeRun: (runId: string, status: string) => {
-			if (runs[runId]) runs[runId].status = status;
-			return runs[runId];
-		},
-		getStatusSnapshot: () => ({
-			initialized: true,
-			latestRunUsedWorkspace: false,
-			actionableWorkspaces: [],
-			runCounts: { pending: 0, running: 0, passed: 0, failed: 0, cancelled: 0 },
-		}),
-		inspectTarget: () => {
-			throw new Error("not implemented");
-		},
-		recordWorkspacePrepared: () => {},
-		commitRunFailureOutcome: () => {
-			throw new Error("not implemented");
-		},
-		commitRunSuccessOutcome: () => {
-			throw new Error("not implemented");
-		},
-		recordWorkspaceDeleted: () => {},
-		recordWorkspaceCleanupFailed: () => {},
-	} as never;
+	return createSharedMockStorage();
 }
 
 describe("async worktree isolation", () => {

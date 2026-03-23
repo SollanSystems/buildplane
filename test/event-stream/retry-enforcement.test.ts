@@ -17,6 +17,7 @@ import type { UnitPacket } from "../../packages/kernel/src/run-loop";
 import { evaluateBudgets } from "../../packages/policy/src/budgets";
 import { evaluateRun } from "../../packages/policy/src/decision";
 import { createProfileRegistry } from "../../packages/policy/src/profiles";
+import { createMockStorage } from "../helpers/mock-storage";
 
 function mockModelResolver(): ModelResolver {
 	return (provider: string, modelId: string) => ({
@@ -46,48 +47,8 @@ function makePacket(policyProfile: string): UnitPacket {
 	};
 }
 
-function makeMockStorage(root: string) {
-	const runs: Record<string, { id: string; unitId: string; status: string }> =
-		{};
-	return {
-		initializeProject: () => ({
-			created: true,
-			projectRoot: root,
-			stateDbPath: join(root, "state.db"),
-		}),
-		createRun: (packet: UnitPacket) => {
-			const id = `run-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-			runs[id] = { id, unitId: packet.unit.id, status: "pending" };
-			return runs[id];
-		},
-		markRunRunning: (runId: string) => {
-			if (runs[runId]) runs[runId].status = "running";
-		},
-		recordExecutionEvidence: () => {},
-		recordDecision: () => {},
-		completeRun: (runId: string, status: string) => {
-			if (runs[runId]) runs[runId].status = status;
-			return runs[runId];
-		},
-		getStatusSnapshot: () => ({
-			initialized: true,
-			latestRunUsedWorkspace: false,
-			actionableWorkspaces: [],
-			runCounts: { pending: 0, running: 0, passed: 0, failed: 0, cancelled: 0 },
-		}),
-		inspectTarget: () => {
-			throw new Error("not implemented");
-		},
-		recordWorkspacePrepared: () => {},
-		commitRunFailureOutcome: () => {
-			throw new Error("not implemented");
-		},
-		commitRunSuccessOutcome: () => {
-			throw new Error("not implemented");
-		},
-		recordWorkspaceDeleted: () => {},
-		recordWorkspaceCleanupFailed: () => {},
-	} as never;
+function makeMockStorage(_root: string) {
+	return createMockStorage();
 }
 
 describe("retry enforcement end-to-end", () => {
