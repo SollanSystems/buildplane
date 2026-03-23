@@ -16,6 +16,7 @@
 	},
 	"dependencies": {
 		"@buildplane/adapters-git": "workspace:*",
+		"@buildplane/adapters-models": "workspace:*",
 		"@buildplane/kernel": "workspace:*",
 		"@buildplane/policy": "workspace:*",
 		"@buildplane/runtime": "workspace:*",

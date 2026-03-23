@@ -164,7 +164,10 @@ export const INTERNAL_PACKAGE_ENTRYPOINTS = Object.freeze({
  * published bootstrap.  They are resolved at install-time as optional
  * peer dependencies instead of being bundled into the closure.
  */
-export const OPTIONAL_INTERNAL_PACKAGES = Object.freeze(["@buildplane/ui-tui"]);
+export const OPTIONAL_INTERNAL_PACKAGES = Object.freeze([
+	"@buildplane/ui-tui",
+	"@buildplane/adapters-models",
+]);
 
 function listInternalPackageNames() {
 	return Object.keys(INTERNAL_PACKAGE_ENTRYPOINTS);
