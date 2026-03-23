@@ -60,6 +60,9 @@ export type ToolBuilder = (
 	worktreeRoot: string,
 ) => Promise<Record<string, unknown>> | Record<string, unknown>;
 
+/** A function that checks whether a tool call is allowed. Returns an error message if blocked, null if allowed. */
+export type ToolGate = (toolName: string) => string | null;
+
 export interface CreateModelExecutorOptions {
 	/** Override the stream function (for testing). Defaults to AI SDK streamText. */
 	streamFn?: StreamFunction;
@@ -67,6 +70,8 @@ export interface CreateModelExecutorOptions {
 	modelResolver?: ModelResolver;
 	/** Override the tool builder (for testing). Defaults to adapters-tools with AI SDK tool(). */
 	toolBuilder?: ToolBuilder;
+	/** Optional gate that checks each tool call before execution. */
+	toolGate?: ToolGate;
 }
 
 export function createModelExecutor(
@@ -201,6 +206,7 @@ export function createModelExecutor(
 					resolver,
 					buildTools,
 					signal,
+					options.toolGate,
 				);
 				return receipt;
 			} catch (error) {
@@ -242,6 +248,7 @@ async function executeModelStream(
 	modelResolver: ModelResolver,
 	toolBuilder: ToolBuilder,
 	signal?: AbortSignal,
+	toolGateCheck?: ToolGate,
 ): Promise<ExecutionReceipt> {
 	const model = packet.model;
 	if (!model) {
@@ -250,7 +257,12 @@ async function executeModelStream(
 	const startedAt = new Date().toISOString();
 
 	const modelInstance = modelResolver(model.provider, model.model);
-	const tools = await toolBuilder(projectRoot);
+	const rawTools = await toolBuilder(projectRoot);
+
+	// Wrap tool execute functions with gate checks if a gate is provided
+	const tools = toolGateCheck
+		? wrapToolsWithGate(rawTools, toolGateCheck)
+		: rawTools;
 
 	const result = streamFn({
 		model: modelInstance,
@@ -354,4 +366,35 @@ async function executeModelStream(
 			exists: existsSync(resolve(projectRoot, path)),
 		})),
 	};
+}
+
+function wrapToolsWithGate(
+	tools: Record<string, unknown>,
+	gate: ToolGate,
+): Record<string, unknown> {
+	const wrapped: Record<string, unknown> = {};
+	for (const [name, tool] of Object.entries(tools)) {
+		const t = tool as {
+			description?: string;
+			inputSchema?: unknown;
+			parameters?: unknown;
+			execute?: (...args: unknown[]) => unknown;
+		};
+		if (t.execute) {
+			const originalExecute = t.execute;
+			wrapped[name] = {
+				...t,
+				execute: async (...args: unknown[]) => {
+					const rejection = gate(name);
+					if (rejection) {
+						return { success: false, error: rejection };
+					}
+					return originalExecute(...args);
+				},
+			};
+		} else {
+			wrapped[name] = tool;
+		}
+	}
+	return wrapped;
 }

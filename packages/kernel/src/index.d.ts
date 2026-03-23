@@ -29,6 +29,7 @@ export type {
 	PolicyProfile,
 	ResourceUsageSnapshot,
 	RetryPolicy,
+	TrustGateConfig,
 } from "./policy.ts";
 export { createResourceUsageSnapshot } from "./policy.ts";
 export type {

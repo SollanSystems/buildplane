@@ -83,6 +83,15 @@ export interface BuildplanePolicyPort {
 		usage: ResourceUsageSnapshot,
 		budgets?: BudgetConstraints,
 	): PolicyDecision | null;
+
+	/**
+	 * Pre-execution trust gate for tool calls.
+	 * Returns a reject decision if the tool is restricted, null if allowed.
+	 */
+	evaluateTrustGate?(
+		toolName: string,
+		profile?: PolicyProfile,
+	): PolicyDecision | null;
 }
 
 export interface BuildplaneWorkspacePort {

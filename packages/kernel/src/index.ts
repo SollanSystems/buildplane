@@ -29,6 +29,7 @@ export type {
 	PolicyProfile,
 	ResourceUsageSnapshot,
 	RetryPolicy,
+	TrustGateConfig,
 } from "./policy.js";
 export { createResourceUsageSnapshot } from "./policy.js";
 export type {

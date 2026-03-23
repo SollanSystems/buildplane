@@ -5,6 +5,7 @@ export type {
 	StreamFunction,
 	StreamResult,
 	ToolBuilder,
+	ToolGate,
 } from "./model-executor.js";
 export {
 	createModelExecutor,

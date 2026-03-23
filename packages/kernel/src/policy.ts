@@ -22,6 +22,16 @@ export interface PolicyProfile {
 	readonly name: string;
 	readonly budgets?: BudgetConstraints;
 	readonly retry?: RetryPolicy;
+	readonly trustGates?: TrustGateConfig;
+}
+
+// ── Trust Gates ─────────────────────────────────────────────
+
+export interface TrustGateConfig {
+	/** Tools that are explicitly blocked — any call to these tools is rejected */
+	readonly restrictedTools?: readonly string[];
+	/** If set, only these tools are allowed — any tool not in this list is rejected */
+	readonly allowedTools?: readonly string[];
 }
 
 // ── Retry Policy ────────────────────────────────────────────
