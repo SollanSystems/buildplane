@@ -45,6 +45,8 @@ interface BuildplaneCliOrchestrator {
 	inspect(
 		id: string,
 	): { kind: string; run: { id: string } } & Record<string, unknown>;
+	approveRun(runId: string): { id: string; status: string };
+	rejectSuspendedRun(runId: string): { id: string; status: string };
 }
 
 async function loadCliOrchestrator(
@@ -357,6 +359,24 @@ export async function runCli(
 						stdout(line);
 					}
 				}
+				return 0;
+			}
+			case "approve": {
+				const runId = rest.find((v) => !v.startsWith("--"));
+				if (!runId) {
+					throw new Error("Missing required run id for approve.");
+				}
+				const run = orchestrator.approveRun(runId);
+				stdout(`approved: run ${run.id} is now ${run.status}`);
+				return 0;
+			}
+			case "reject": {
+				const runId = rest.find((v) => !v.startsWith("--"));
+				if (!runId) {
+					throw new Error("Missing required run id for reject.");
+				}
+				const run = orchestrator.rejectSuspendedRun(runId);
+				stdout(`rejected: run ${run.id} is now ${run.status}`);
 				return 0;
 			}
 			case "history": {

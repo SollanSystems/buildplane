@@ -52,6 +52,9 @@ export interface BuildplaneStoragePort {
 	commitRunSuccessOutcome(runId: string, decision: ApprovedPolicyDecision): Run;
 	recordWorkspaceDeleted(runId: string): void;
 	recordWorkspaceCleanupFailed(runId: string, message: string): void;
+	suspendRun(runId: string): Run;
+	approveRun(runId: string): Run;
+	rejectSuspendedRun(runId: string): Run;
 	getStatusSnapshot(): StatusSnapshot;
 	inspectTarget(id: string): InspectSnapshot;
 }

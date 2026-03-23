@@ -33,7 +33,8 @@ export type RunStatus =
 	| "running"
 	| "passed"
 	| "failed"
-	| "cancelled";
+	| "cancelled"
+	| "suspended";
 
 /**
  * One end-to-end execution attempt of a Unit under a policy profile.

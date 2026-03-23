@@ -32,6 +32,12 @@ export interface TrustGateConfig {
 	readonly restrictedTools?: readonly string[];
 	/** If set, only these tools are allowed — any tool not in this list is rejected */
 	readonly allowedTools?: readonly string[];
+	/**
+	 * When true, the run requires explicit operator approval before execution begins.
+	 * The orchestrator suspends the run and returns { suspended: true }.
+	 * Resume via `buildplane approve <run-id>`.
+	 */
+	readonly requiresApproval?: boolean;
 }
 
 // ── Retry Policy ────────────────────────────────────────────

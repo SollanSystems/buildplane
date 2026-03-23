@@ -110,6 +110,7 @@ export interface StatusSnapshot {
 		readonly passed: number;
 		readonly failed: number;
 		readonly cancelled: number;
+		readonly suspended: number;
 	};
 }
 
@@ -147,4 +148,5 @@ export interface RunPacketResult {
 	readonly decision?: PolicyDecision;
 	readonly failure?: RunInfrastructureFailure;
 	readonly workspace?: WorkspaceSnapshot;
+	readonly suspended?: true;
 }

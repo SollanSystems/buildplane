@@ -99,7 +99,14 @@ function createMockStorage(): BuildplaneStoragePort {
 		recordWorkspaceCleanupFailed: () => {},
 		getStatusSnapshot: () => ({
 			initialized: true,
-			runCounts: { pending: 0, running: 0, passed: 0, failed: 0, cancelled: 0 },
+			runCounts: {
+				pending: 0,
+				running: 0,
+				passed: 0,
+				failed: 0,
+				cancelled: 0,
+				suspended: 0,
+			},
 		}),
 		inspectTarget: () => {
 			throw new Error("not implemented");

@@ -112,12 +112,29 @@ export interface PolicyBudgetBreachedEvent extends BaseEvent {
 	readonly actual: number;
 }
 
+// ── Operator suspension ─────────────────────────────────────
+
+export interface RunSuspendedEvent extends BaseEvent {
+	readonly kind: "run-suspended";
+	readonly unitId: string;
+	readonly profileName: string;
+	readonly reason: string;
+}
+
+export interface RunResumedEvent extends BaseEvent {
+	readonly kind: "run-resumed";
+	readonly unitId: string;
+	readonly approvedBy?: string;
+}
+
 // ── Union ───────────────────────────────────────────────────
 
 export type ExecutionEvent =
 	| RunCreatedEvent
 	| RunStartedEvent
 	| RunCompletedEvent
+	| RunSuspendedEvent
+	| RunResumedEvent
 	| ExecutionStartedEvent
 	| CommandExecutionCompleteEvent
 	| ModelTokenDeltaEvent

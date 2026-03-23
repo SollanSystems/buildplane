@@ -43,6 +43,8 @@ export interface BuildplaneOrchestrator {
 	): Promise<RunPacketResult>;
 	getStatus(): StatusSnapshot;
 	inspect(id: string): InspectSnapshot;
+	approveRun(runId: string): Run;
+	rejectSuspendedRun(runId: string): Run;
 }
 
 export interface CreateBuildplaneOrchestratorOptions {
@@ -404,6 +406,50 @@ export function createBuildplaneOrchestrator(
 				status: "pending" as const,
 			});
 
+			// ── Profile resolution (before workspace prep so we can suspend early) ─
+			let resolvedProfile: PolicyProfile | undefined;
+			try {
+				resolvedProfile = profileRegistry
+					? profileRegistry.resolve(packet.unit.policyProfile)
+					: undefined;
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				bus.emit({
+					kind: "execution-error",
+					runId: run.id,
+					timestamp: new Date().toISOString(),
+					message,
+					phase: "profile-resolution",
+				});
+				const failedRun = storage.completeRun(run.id, "failed");
+				bus.emit({
+					kind: "run-completed",
+					runId: run.id,
+					unitId: packet.unit.id,
+					timestamp: new Date().toISOString(),
+					status: "failed" as const,
+				});
+				return {
+					run: failedRun,
+					failure: { kind: "profile-resolution-failed", message },
+				};
+			}
+
+			// ── Operator suspension gate ───────────────────────────────────
+			if (resolvedProfile?.trustGates?.requiresApproval === true) {
+				storage.markRunRunning(run.id);
+				const suspendedRun = storage.suspendRun(run.id);
+				bus.emit({
+					kind: "run-suspended",
+					runId: run.id,
+					unitId: packet.unit.id,
+					timestamp: new Date().toISOString(),
+					profileName: resolvedProfile.name,
+					reason: "policy profile requires operator approval before execution",
+				});
+				return { run: suspendedRun, suspended: true };
+			}
+
 			// ── Workspace preparation ──────────────────────────────────────
 			let preparedWorkspace: WorkspaceSnapshot | undefined;
 			try {
@@ -498,43 +544,9 @@ export function createBuildplaneOrchestrator(
 			const usage: ResourceUsageSnapshot = createResourceUsageSnapshot();
 			let budgetBreached = false;
 
-			// Resolve budgets: profile registry takes precedence, then top-level option
-			let budgets: BudgetConstraints | undefined;
-			let resolvedProfile: PolicyProfile | undefined;
-			try {
-				resolvedProfile = profileRegistry
-					? profileRegistry.resolve(packet.unit.policyProfile)
-					: undefined;
-				budgets = resolvedProfile?.budgets ?? topLevelBudgets;
-			} catch (error) {
-				const message = error instanceof Error ? error.message : String(error);
-				bus.emit({
-					kind: "execution-error",
-					runId: run.id,
-					timestamp: new Date().toISOString(),
-					message,
-					phase: "profile-resolution",
-				});
-				const failedRun = storage.commitRunFailureOutcome(run.id, {
-					infrastructureFailure: {
-						kind: "profile-resolution-failed",
-						message,
-					},
-					workspaceStatus: "retained",
-				});
-				bus.emit({
-					kind: "run-completed",
-					runId: run.id,
-					unitId: packet.unit.id,
-					timestamp: new Date().toISOString(),
-					status: "failed" as const,
-				});
-				await cleanupWorkspace();
-				return {
-					run: failedRun,
-					failure: { kind: "profile-resolution-failed", message },
-				};
-			}
+			// Resolve budgets from the already-resolved profile
+			const budgets: BudgetConstraints | undefined =
+				resolvedProfile?.budgets ?? topLevelBudgets;
 
 			const budgetSubscription = budgets
 				? bus.subscribe((event: ExecutionEvent) => {
@@ -775,6 +787,14 @@ export function createBuildplaneOrchestrator(
 					existsOnDisk: existsSync(snapshot.workspace.path),
 				},
 			};
+		},
+
+		approveRun(runId) {
+			return storage.approveRun(runId);
+		},
+
+		rejectSuspendedRun(runId) {
+			return storage.rejectSuspendedRun(runId);
 		},
 	};
 }

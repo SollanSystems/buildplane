@@ -19,7 +19,9 @@ export type {
 	PolicyDecisionEvent,
 	RunCompletedEvent,
 	RunCreatedEvent,
+	RunResumedEvent,
 	RunStartedEvent,
+	RunSuspendedEvent,
 	ToolCallCompletedEvent,
 	ToolCallStartedEvent,
 } from "./events.ts";

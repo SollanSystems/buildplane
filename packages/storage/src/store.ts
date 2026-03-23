@@ -26,7 +26,13 @@ import { resolveProjectLayout } from "./project-layout.js";
 interface StoredRunRow {
 	readonly id: string;
 	readonly unit_id: string;
-	readonly status: "pending" | "running" | "passed" | "failed" | "cancelled";
+	readonly status:
+		| "pending"
+		| "running"
+		| "passed"
+		| "failed"
+		| "cancelled"
+		| "suspended";
 	readonly unit_snapshot?: string;
 	readonly used_workspace: number;
 }
@@ -988,6 +994,91 @@ export function createStorageStore(
 			}
 		},
 
+		suspendRun(runId: string): Run {
+			ensureInitialized();
+			const database = openStoreDatabase();
+			const updatedAt = new Date().toISOString();
+
+			try {
+				const runRow = readRun(runId, database);
+				if (runRow.status !== "running") {
+					throw new Error(
+						`suspendRun requires a running run, got '${runRow.status}'.`,
+					);
+				}
+				database
+					.prepare(`UPDATE runs SET status = ?, updated_at = ? WHERE id = ?`)
+					.run("suspended", updatedAt, runId);
+				appendEvent(
+					"run-suspended",
+					{ runId, unitId: runRow.unit_id, status: "suspended" },
+					database,
+				);
+				return toRun({ ...runRow, status: "suspended" });
+			} finally {
+				database.close();
+			}
+		},
+
+		approveRun(runId: string): Run {
+			ensureInitialized();
+			const database = openStoreDatabase();
+			const updatedAt = new Date().toISOString();
+
+			try {
+				const runRow = readRun(runId, database);
+				if (runRow.status !== "suspended") {
+					throw new Error(
+						`approveRun requires a suspended run, got '${runRow.status}'.`,
+					);
+				}
+				database
+					.prepare(`UPDATE runs SET status = ?, updated_at = ? WHERE id = ?`)
+					.run("pending", updatedAt, runId);
+				appendEvent(
+					"run-resumed",
+					{ runId, unitId: runRow.unit_id, status: "pending" },
+					database,
+				);
+				return toRun({ ...runRow, status: "pending" });
+			} finally {
+				database.close();
+			}
+		},
+
+		rejectSuspendedRun(runId: string): Run {
+			ensureInitialized();
+			const database = openStoreDatabase();
+			const updatedAt = new Date().toISOString();
+
+			try {
+				const runRow = readRun(runId, database);
+				if (runRow.status !== "suspended") {
+					throw new Error(
+						`rejectSuspendedRun requires a suspended run, got '${runRow.status}'.`,
+					);
+				}
+				database
+					.prepare(
+						`UPDATE runs SET status = ?, updated_at = ?, completed_at = ? WHERE id = ?`,
+					)
+					.run("failed", updatedAt, updatedAt, runId);
+				appendEvent(
+					"run-completed",
+					{
+						runId,
+						unitId: runRow.unit_id,
+						status: "failed",
+						reason: "rejected-by-operator",
+					},
+					database,
+				);
+				return toRun({ ...runRow, status: "failed" });
+			} finally {
+				database.close();
+			}
+		},
+
 		getStatusSnapshot(): WorkspaceAwareStatusSnapshot {
 			ensureInitialized();
 			const database = openStoreDatabase();
@@ -1001,7 +1092,13 @@ export function createStorageStore(
 					| {
 							id: string;
 							unit_id: string;
-							status: "pending" | "running" | "passed" | "failed" | "cancelled";
+							status:
+								| "pending"
+								| "running"
+								| "passed"
+								| "failed"
+								| "cancelled"
+								| "suspended";
 							used_workspace: number;
 					  }
 					| undefined;
@@ -1019,6 +1116,7 @@ export function createStorageStore(
 					passed: 0,
 					failed: 0,
 					cancelled: 0,
+					suspended: 0,
 				};
 
 				for (const row of countRows) {
