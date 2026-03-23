@@ -4,6 +4,7 @@ export type {
 	StreamChunk,
 	StreamFunction,
 	StreamResult,
+	ToolBuilder,
 } from "./model-executor.js";
 export {
 	createModelExecutor,

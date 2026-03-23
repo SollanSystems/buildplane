@@ -12,21 +12,27 @@
 	},
 	"dependencies": {
 		"@buildplane/kernel": "workspace:*",
-		"@buildplane/runtime": "workspace:*"
+		"@buildplane/runtime": "workspace:*",
+		"@buildplane/adapters-tools": "workspace:*"
 	},
 	"devDependencies": {
 		"@ai-sdk/anthropic": "^3.0.63",
-		"ai": "^6.0.134"
+		"ai": "^6.0.134",
+		"zod": "^3.25.76"
 	},
 	"peerDependencies": {
 		"ai": ">=6.0.0",
-		"@ai-sdk/anthropic": ">=3.0.0"
+		"@ai-sdk/anthropic": ">=3.0.0",
+		"zod": ">=3.25.0"
 	},
 	"peerDependenciesMeta": {
 		"ai": {
 			"optional": true
 		},
 		"@ai-sdk/anthropic": {
+			"optional": true
+		},
+		"zod": {
 			"optional": true
 		}
 	}

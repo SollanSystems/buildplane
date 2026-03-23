@@ -19,15 +19,20 @@ export interface ModelExecutorPort {
 /** Stream chunk types that the executor knows how to handle. */
 export type StreamChunk =
 	| { type: "text-delta"; textDelta: string }
-	| { type: "tool-call"; toolCallId: string; toolName: string; args: unknown }
+	| {
+			type: "tool-call";
+			toolCallId: string;
+			toolName: string;
+			input: unknown;
+	  }
 	| {
 			type: "tool-result";
 			toolCallId: string;
 			toolName: string;
-			result: unknown;
+			output: unknown;
 	  }
 	| {
-			type: "step-finish";
+			type: "finish-step";
 			finishReason?: string;
 			usage?: { promptTokens: number; completionTokens: number };
 	  };
@@ -42,16 +47,24 @@ export type StreamFunction = (options: {
 	model: unknown;
 	system?: string;
 	prompt: string;
+	tools?: Record<string, unknown>;
 }) => StreamResult;
 
 /** A function that resolves a provider+model string to an AI SDK model instance. */
 export type ModelResolver = (provider: string, modelId: string) => unknown;
+
+/** A function that builds AI SDK-compatible tools for a given worktree root. */
+export type ToolBuilder = (
+	worktreeRoot: string,
+) => Promise<Record<string, unknown>> | Record<string, unknown>;
 
 export interface CreateModelExecutorOptions {
 	/** Override the stream function (for testing). Defaults to AI SDK streamText. */
 	streamFn?: StreamFunction;
 	/** Override the model resolver (for testing). Defaults to AI SDK provider lookup. */
 	modelResolver?: ModelResolver;
+	/** Override the tool builder (for testing). Defaults to adapters-tools with AI SDK tool(). */
+	toolBuilder?: ToolBuilder;
 }
 
 export function createModelExecutor(
@@ -59,6 +72,7 @@ export function createModelExecutor(
 ): ModelExecutorPort {
 	const streamFn = options.streamFn;
 	const modelResolver = options.modelResolver;
+	const toolBuilder = options.toolBuilder;
 
 	async function getStreamFn(): Promise<StreamFunction> {
 		if (streamFn) return streamFn;
@@ -78,6 +92,50 @@ export function createModelExecutor(
 						`Unsupported model provider: ${provider}. Supported: anthropic`,
 					);
 			}
+		};
+	}
+
+	async function getToolBuilder(): Promise<ToolBuilder> {
+		if (toolBuilder) return toolBuilder;
+		const { tool: aiTool } = await import("ai");
+		const { z } = await import("zod");
+		const { createToolRegistry } = await import("@buildplane/adapters-tools");
+		// Cast through unknown — aiTool has 4 overloaded signatures that don't
+		// resolve cleanly through dynamic import + generic parameters.
+		const createTool = aiTool as unknown as (
+			config: Record<string, unknown>,
+		) => unknown;
+		return (worktreeRoot: string) => {
+			const registry = createToolRegistry(worktreeRoot);
+			return {
+				write_file: createTool({
+					description:
+						"Write content to a file. Creates parent directories as needed. Path must be relative to the worktree root.",
+					parameters: z.object({
+						path: z.string().describe("Relative file path within the worktree"),
+						content: z.string().describe("File content to write"),
+					}),
+					execute: async (input: { path: string; content: string }) =>
+						registry.write_file(input),
+				}),
+				run_command: createTool({
+					description:
+						"Run a shell command. The command runs inside the worktree directory. Use cwd for a subdirectory.",
+					parameters: z.object({
+						command: z.string().describe("Command to execute"),
+						args: z.array(z.string()).optional().describe("Command arguments"),
+						cwd: z
+							.string()
+							.optional()
+							.describe("Working directory relative to the worktree root"),
+					}),
+					execute: async (input: {
+						command: string;
+						args?: string[];
+						cwd?: string;
+					}) => registry.run_command(input),
+				}),
+			};
 		};
 	}
 
@@ -110,12 +168,14 @@ export function createModelExecutor(
 			try {
 				const stream = await getStreamFn();
 				const resolver = await getModelResolver();
+				const buildTools = await getToolBuilder();
 				const receipt = await executeModelStream(
 					packet,
 					projectRoot,
 					eventBus,
 					stream,
 					resolver,
+					buildTools,
 				);
 				return receipt;
 			} catch (error) {
@@ -155,6 +215,7 @@ async function executeModelStream(
 	eventBus: EventBus,
 	streamFn: StreamFunction,
 	modelResolver: ModelResolver,
+	toolBuilder: ToolBuilder,
 ): Promise<ExecutionReceipt> {
 	const model = packet.model;
 	if (!model) {
@@ -163,11 +224,13 @@ async function executeModelStream(
 	const startedAt = new Date().toISOString();
 
 	const modelInstance = modelResolver(model.provider, model.model);
+	const tools = await toolBuilder(projectRoot);
 
 	const result = streamFn({
 		model: modelInstance,
 		system: model.systemPrompt,
 		prompt: "Execute the assigned task.",
+		tools: Object.keys(tools).length > 0 ? tools : undefined,
 	});
 
 	let fullText = "";
@@ -193,7 +256,7 @@ async function executeModelStream(
 					timestamp: new Date().toISOString(),
 					toolCallId: chunk.toolCallId,
 					toolName: chunk.toolName,
-					args: chunk.args as Record<string, unknown>,
+					args: chunk.input as Record<string, unknown>,
 				});
 				break;
 			}
@@ -204,11 +267,11 @@ async function executeModelStream(
 					timestamp: new Date().toISOString(),
 					toolCallId: chunk.toolCallId,
 					toolName: chunk.toolName,
-					result: chunk.result,
+					result: chunk.output,
 				});
 				break;
 			}
-			case "step-finish": {
+			case "finish-step": {
 				finishReason = chunk.finishReason ?? "unknown";
 				usage = chunk.usage ?? undefined;
 				break;
