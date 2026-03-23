@@ -16,8 +16,14 @@ export interface BudgetConstraints {
 	readonly maxComputeTimeMs?: number;
 }
 
-// ── Resource Usage Tracking ─────────────────────────────────
+// ── Policy Profiles ─────────────────────────────────────────
 
+export interface PolicyProfile {
+	readonly name: string;
+	readonly budgets?: BudgetConstraints;
+}
+
+// ── Resource Usage Tracking ─────────────────────────────────
 export interface ResourceUsageSnapshot {
 	readonly promptTokens: number;
 	readonly completionTokens: number;

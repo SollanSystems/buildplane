@@ -26,6 +26,7 @@ export { createBuildplaneOrchestrator } from "./orchestrator.js";
 export { parseUnitPacket } from "./packet.js";
 export type {
 	BudgetConstraints,
+	PolicyProfile,
 	ResourceUsageSnapshot,
 } from "./policy.js";
 export { createResourceUsageSnapshot } from "./policy.js";

@@ -1,7 +1,11 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import type { EventBus, ExecutionEvent } from "./events.js";
-import type { BudgetConstraints, ResourceUsageSnapshot } from "./policy.js";
+import type {
+	BudgetConstraints,
+	PolicyProfile,
+	ResourceUsageSnapshot,
+} from "./policy.js";
 import { createResourceUsageSnapshot } from "./policy.js";
 import type {
 	BuildplanePolicyPort,
@@ -47,12 +51,21 @@ export interface CreateBuildplaneOrchestratorOptions {
 	readonly workspace: BuildplaneWorkspacePort;
 	readonly eventBus?: EventBus;
 	readonly budgets?: BudgetConstraints;
+	readonly profileRegistry?: { resolve(name: string): PolicyProfile };
 }
 
 export function createBuildplaneOrchestrator(
 	options: CreateBuildplaneOrchestratorOptions,
 ): BuildplaneOrchestrator {
-	const { projectRoot, storage, runtime, policy, workspace, budgets } = options;
+	const {
+		projectRoot,
+		storage,
+		runtime,
+		policy,
+		workspace,
+		budgets: topLevelBudgets,
+		profileRegistry,
+	} = options;
 	const defaultBus = options.eventBus ?? noopBus;
 
 	function infrastructureFailure(
@@ -401,6 +414,36 @@ export function createBuildplaneOrchestrator(
 			const startTime = Date.now();
 			const usage: ResourceUsageSnapshot = createResourceUsageSnapshot();
 			let budgetBreached = false;
+
+			// Resolve budgets: profile registry takes precedence, then top-level option
+			let budgets: BudgetConstraints | undefined;
+			try {
+				const resolvedProfile = profileRegistry
+					? profileRegistry.resolve(packet.unit.policyProfile)
+					: undefined;
+				budgets = resolvedProfile?.budgets ?? topLevelBudgets;
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				bus.emit({
+					kind: "execution-error",
+					runId: run.id,
+					timestamp: new Date().toISOString(),
+					message,
+					phase: "profile-resolution",
+				});
+				const failedRun = storage.completeRun(run.id, "failed");
+				bus.emit({
+					kind: "run-completed",
+					runId: run.id,
+					unitId: packet.unit.id,
+					timestamp: new Date().toISOString(),
+					status: "failed" as const,
+				});
+				return {
+					run: failedRun,
+					failure: { kind: "profile-resolution-failed", message },
+				};
+			}
 
 			const budgetSubscription = budgets
 				? bus.subscribe((event: ExecutionEvent) => {

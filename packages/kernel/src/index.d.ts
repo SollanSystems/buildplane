@@ -26,6 +26,7 @@ export type {
 export { parseUnitPacket } from "./packet.ts";
 export type {
 	BudgetConstraints,
+	PolicyProfile,
 	ResourceUsageSnapshot,
 } from "./policy.ts";
 export { createResourceUsageSnapshot } from "./policy.ts";
