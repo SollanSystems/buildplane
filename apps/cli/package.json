@@ -19,6 +19,7 @@
 		"@buildplane/kernel": "workspace:*",
 		"@buildplane/policy": "workspace:*",
 		"@buildplane/runtime": "workspace:*",
-		"@buildplane/storage": "workspace:*"
+		"@buildplane/storage": "workspace:*",
+		"@buildplane/ui-tui": "workspace:*"
 	}
 }

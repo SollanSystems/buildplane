@@ -159,6 +159,13 @@ export const INTERNAL_PACKAGE_ENTRYPOINTS = Object.freeze({
 	"@buildplane/adapters-git": "vendor/@buildplane/adapters-git/index.js",
 });
 
+/**
+ * Internal packages that are valid imports but not vendored into the
+ * published bootstrap.  They are resolved at install-time as optional
+ * peer dependencies instead of being bundled into the closure.
+ */
+export const OPTIONAL_INTERNAL_PACKAGES = Object.freeze(["@buildplane/ui-tui"]);
+
 function listInternalPackageNames() {
 	return Object.keys(INTERNAL_PACKAGE_ENTRYPOINTS);
 }
@@ -196,6 +203,7 @@ function collectRequiredRuntimeClosureFiles() {
 
 			return toRepoRuntimeEntrypoint(specifier);
 		},
+		optionalInternalPackages: OPTIONAL_INTERNAL_PACKAGES,
 		rootBoundaryPaths: [
 			CLI_DIST_ROOT,
 			...listInternalPackageNames().map(toRepoPackageDistRoot),
@@ -402,6 +410,7 @@ function assertStagedRuntimeClosure(packageRoot, manifest) {
 				throw new Error(message);
 			},
 			forbidInternalPackageImports: true,
+			optionalInternalPackages: OPTIONAL_INTERNAL_PACKAGES,
 			rootBoundaryPaths: [packageRoot],
 			allowedExternalPackageNames:
 				collectPublishedRuntimeDependencyNames(manifest),

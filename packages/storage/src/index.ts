@@ -24,6 +24,9 @@ export type {
 	EvidenceRecord,
 } from "./contracts";
 
+export { createEventStore, type EventStore } from "./event-store.js";
+export type { RunHistoryEntry } from "./store.js";
+
 export interface ProjectInitializationResult {
 	readonly created: boolean;
 	readonly projectRoot: string;
@@ -32,6 +35,10 @@ export interface ProjectInitializationResult {
 
 export interface BuildplaneStorage extends BuildplaneStoragePort {
 	initializeProject(): ProjectInitializationResult;
+	getRunHistory(): import("./store.js").RunHistoryEntry[];
+	getPacketSnapshot(
+		runId: string,
+	): import("@buildplane/kernel").UnitPacket | null;
 	recordWorkspacePrepared(
 		runId: string,
 		workspace: {

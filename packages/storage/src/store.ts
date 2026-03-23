@@ -99,6 +99,8 @@ interface WorkspaceAwareStorageStore
 	recordWorkspaceCleanupFailed(runId: string, message: string): void;
 	getStatusSnapshot(): WorkspaceAwareStatusSnapshot;
 	inspectTarget(id: string): WorkspaceAwareInspectSnapshot;
+	getRunHistory(): RunHistoryEntry[];
+	getPacketSnapshot(runId: string): UnitPacket | null;
 }
 
 function tableHasColumn(
@@ -267,6 +269,14 @@ function assertStorageProjectionSchema(database: DatabaseSync): void {
 	}
 
 	assertWorkspaceTableColumns(database);
+}
+
+export interface RunHistoryEntry {
+	readonly id: string;
+	readonly unitId: string;
+	readonly status: RunStatus;
+	readonly createdAt: string;
+	readonly completedAt?: string;
 }
 
 export function createStorageStore(
@@ -573,7 +583,7 @@ export function createStorageStore(
 						runId,
 						packet.unit.id,
 						"pending",
-						JSON.stringify(packet.unit),
+						JSON.stringify(packet),
 						createdAt,
 						createdAt,
 					);
@@ -1067,9 +1077,15 @@ export function createStorageStore(
 					.get(id) as StoredRunRow | undefined;
 
 				if (runRow) {
-					const unit = runRow.unit_snapshot
-						? (JSON.parse(runRow.unit_snapshot) as Unit)
-						: readUnit(runRow.unit_id, database);
+					const parsedSnapshot = runRow.unit_snapshot
+						? JSON.parse(runRow.unit_snapshot)
+						: null;
+					const unit: Unit =
+						parsedSnapshot && "unit" in parsedSnapshot
+							? (parsedSnapshot.unit as Unit)
+							: parsedSnapshot
+								? (parsedSnapshot as Unit)
+								: readUnit(runRow.unit_id, database);
 					const snapshot = {
 						kind: "run",
 						unit,
@@ -1114,6 +1130,52 @@ export function createStorageStore(
 			} finally {
 				database.close();
 			}
+		},
+
+		getRunHistory(): RunHistoryEntry[] {
+			ensureInitialized();
+			const database = openStoreDatabase();
+
+			const rows = database
+				.prepare(
+					`SELECT id, unit_id, status, created_at, completed_at FROM runs ORDER BY created_at DESC, rowid DESC`,
+				)
+				.all() as unknown as {
+				id: string;
+				unit_id: string;
+				status: RunStatus;
+				created_at: string;
+				completed_at: string | null;
+			}[];
+
+			database.close();
+
+			return rows.map((row) => ({
+				id: row.id,
+				unitId: row.unit_id,
+				status: row.status,
+				createdAt: row.created_at,
+				completedAt: row.completed_at ?? undefined,
+			}));
+		},
+
+		getPacketSnapshot(runId: string): UnitPacket | null {
+			ensureInitialized();
+			const database = openStoreDatabase();
+
+			const row = database
+				.prepare(`SELECT unit_snapshot FROM runs WHERE id = ?`)
+				.get(runId) as { unit_snapshot: string } | undefined;
+
+			database.close();
+
+			if (!row?.unit_snapshot) return null;
+
+			const parsed = JSON.parse(row.unit_snapshot);
+			if (parsed && "unit" in parsed && "verification" in parsed) {
+				return parsed as UnitPacket;
+			}
+			return null;
 		},
 	};
 }

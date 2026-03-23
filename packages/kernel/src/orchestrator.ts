@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-
+import type { EventBus } from "./events.js";
 import type {
 	BuildplanePolicyPort,
 	BuildplaneRuntimePort,
@@ -20,9 +20,19 @@ import type {
 import type { Run } from "./types.js";
 import { validatePacketForWorkspaceRoot } from "./workspace-paths.js";
 
+/** A no-op event bus for the sync path when no bus is provided. */
+const noopBus: EventBus = {
+	subscribe: () => () => {},
+	emit: () => {},
+};
+
 export interface BuildplaneOrchestrator {
 	initializeProject(): ReturnType<BuildplaneStoragePort["initializeProject"]>;
 	runPacket(packet: UnitPacket): RunPacketResult;
+	runPacketAsync(
+		packet: UnitPacket,
+		eventBus?: EventBus,
+	): Promise<RunPacketResult>;
 	getStatus(): StatusSnapshot;
 	inspect(id: string): InspectSnapshot;
 }
@@ -33,12 +43,14 @@ export interface CreateBuildplaneOrchestratorOptions {
 	readonly runtime: BuildplaneRuntimePort;
 	readonly policy: BuildplanePolicyPort;
 	readonly workspace: BuildplaneWorkspacePort;
+	readonly eventBus?: EventBus;
 }
 
 export function createBuildplaneOrchestrator(
 	options: CreateBuildplaneOrchestratorOptions,
 ): BuildplaneOrchestrator {
 	const { projectRoot, storage, runtime, policy, workspace } = options;
+	const defaultBus = options.eventBus ?? noopBus;
 
 	function infrastructureFailure(
 		kind: string,
@@ -351,6 +363,108 @@ export function createBuildplaneOrchestrator(
 				receipt,
 				decision,
 			};
+		},
+		async runPacketAsync(packet, eventBus?) {
+			const bus = eventBus ?? defaultBus;
+			const run = storage.createRun(packet);
+
+			bus.emit({
+				kind: "run-created",
+				runId: run.id,
+				unitId: packet.unit.id,
+				timestamp: new Date().toISOString(),
+				status: "pending" as const,
+			});
+
+			storage.markRunRunning(run.id);
+
+			bus.emit({
+				kind: "run-started",
+				runId: run.id,
+				unitId: packet.unit.id,
+				timestamp: new Date().toISOString(),
+				status: "running" as const,
+			});
+
+			bus.emit({
+				kind: "execution-started",
+				runId: run.id,
+				timestamp: new Date().toISOString(),
+				executionType: packet.model ? ("model" as const) : ("command" as const),
+			});
+
+			let receipt: ExecutionReceipt;
+			try {
+				if (runtime.executePacketAsync) {
+					receipt = await runtime.executePacketAsync(packet, projectRoot, bus);
+				} else {
+					receipt = runtime.executePacket(packet, projectRoot);
+					bus.emit({
+						kind: "command-execution-complete",
+						runId: run.id,
+						timestamp: new Date().toISOString(),
+						exitCode: receipt.exitCode,
+						outputChecks: receipt.outputChecks.map((c) => ({
+							path: c.path,
+							exists: c.exists,
+						})),
+					});
+				}
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				bus.emit({
+					kind: "execution-error",
+					runId: run.id,
+					timestamp: new Date().toISOString(),
+					message,
+					phase: "execution",
+				});
+				const failedRun = storage.completeRun(run.id, "failed");
+				bus.emit({
+					kind: "run-completed",
+					runId: run.id,
+					unitId: packet.unit.id,
+					timestamp: new Date().toISOString(),
+					status: "failed" as const,
+				});
+				return {
+					run: failedRun,
+					failure: { kind: "runtime-execution-failed", message },
+				};
+			}
+
+			storage.recordExecutionEvidence(run.id, receipt);
+			bus.emit({
+				kind: "evidence-recorded",
+				runId: run.id,
+				timestamp: new Date().toISOString(),
+				evidenceKind: "command-exit",
+				status: receipt.exitCode === 0 ? "pass" : "fail",
+			});
+
+			const decision = policy.evaluateRun(packet, receipt);
+			bus.emit({
+				kind: "policy-decision",
+				runId: run.id,
+				timestamp: new Date().toISOString(),
+				decisionKind: decision.kind,
+				outcome: decision.outcome,
+				reasons: decision.reasons,
+			});
+
+			storage.recordDecision(run.id, decision);
+			const finalStatus = decision.outcome === "approved" ? "passed" : "failed";
+			const completedRun = storage.completeRun(run.id, finalStatus);
+
+			bus.emit({
+				kind: "run-completed",
+				runId: run.id,
+				unitId: packet.unit.id,
+				timestamp: new Date().toISOString(),
+				status: finalStatus as "passed" | "failed",
+			});
+
+			return { run: completedRun, receipt, decision };
 		},
 		getStatus() {
 			return storage.getStatusSnapshot();

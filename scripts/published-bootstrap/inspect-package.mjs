@@ -14,6 +14,7 @@ import {
 	assertRuntimeImportClosure,
 	collectRuntimeFiles,
 } from "./runtime-closure.mjs";
+import { OPTIONAL_INTERNAL_PACKAGES } from "./stage-package.mjs";
 import { extractTarballToDirectory } from "./tarball.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -330,6 +331,7 @@ function assertNoUnexpectedRuntimePayload(
 	const reachableRuntimeFiles = assertRuntimeImportClosure([distIndexPath], {
 		onError: fail,
 		forbidInternalPackageImports: true,
+		optionalInternalPackages: OPTIONAL_INTERNAL_PACKAGES,
 		rootBoundaryPaths: [packageRoot],
 		allowedExternalPackageNames:
 			collectPublishedRuntimeDependencyNames(manifest),

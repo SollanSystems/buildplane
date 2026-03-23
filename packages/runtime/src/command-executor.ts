@@ -7,6 +7,12 @@ export function executePacket(
 	packet: UnitPacket,
 	executionRoot: string,
 ): ExecutionReceipt {
+	if (!packet.execution) {
+		throw new Error(
+			"executePacket requires a packet with an execution block. Model packets must use a model executor.",
+		);
+	}
+
 	const workspaceRoot = resolve(executionRoot);
 	assertWorkspacePathWithinRoot(
 		workspaceRoot,

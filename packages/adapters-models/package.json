@@ -3,5 +3,31 @@
 	"private": true,
 	"version": "0.1.0",
 	"type": "module",
-	"description": "Model and provider adapter layer for Buildplane"
+	"description": "Model and provider adapter layer for Buildplane",
+	"exports": {
+		".": {
+			"types": "./src/index.ts",
+			"import": "./src/index.js"
+		}
+	},
+	"dependencies": {
+		"@buildplane/kernel": "workspace:*",
+		"@buildplane/runtime": "workspace:*"
+	},
+	"devDependencies": {
+		"@ai-sdk/anthropic": "^3.0.63",
+		"ai": "^6.0.134"
+	},
+	"peerDependencies": {
+		"ai": ">=6.0.0",
+		"@ai-sdk/anthropic": ">=3.0.0"
+	},
+	"peerDependenciesMeta": {
+		"ai": {
+			"optional": true
+		},
+		"@ai-sdk/anthropic": {
+			"optional": true
+		}
+	}
 }

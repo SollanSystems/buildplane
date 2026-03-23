@@ -1,24 +1,18 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import type { UnitPacket } from "@buildplane/kernel";
 import {
 	formatHumanError,
 	formatInitializationResult,
-	formatInspectResult,
+	formatInspectDetail,
 	formatJson,
 	formatJsonError,
-	formatRunFailure,
+	formatRunHistory,
 	formatRunResult,
-	formatStatusResult,
 } from "./formatters.js";
 
 export interface RunCliDependencies {
-	readonly createOrchestrator?: (
-		projectRoot: string,
-	) => Promise<BuildplaneCliOrchestrator> | BuildplaneCliOrchestrator;
-	readonly parsePacket?: (
-		packetPath: string,
-	) => Promise<UnitPacket> | UnitPacket;
+	readonly createOrchestrator: () => BuildplaneCliOrchestrator;
+	readonly parsePacket?: (packetPath: string) => unknown;
 }
 
 export interface RunCliOptions {
@@ -34,67 +28,23 @@ interface BuildplaneCliOrchestrator {
 		projectRoot: string;
 		stateDbPath: string;
 	};
-	runPacket(packet: UnitPacket): {
+	runPacket(packet: unknown): {
 		run: { id: string; status: string };
-		receipt?: unknown;
-		decision?: unknown;
-		failure?: { kind: string; message: string };
-		workspace?: {
-			path: string;
-			headSha: string;
-			status: "active" | "deleted" | "retained" | "cleanup-failed";
-			finalizedAt?: string;
-			cleanupError?: string;
-			existsOnDisk?: boolean;
-		};
+		receipt: unknown;
+		decision: unknown;
 	};
-	getStatus(): {
-		initialized: boolean;
-		latestRun?: { id: string; unitId: string; status: string };
-		latestRunUsedWorkspace: boolean;
-		latestWorkspace?: {
-			runId: string;
-			path?: string;
-			headSha: string;
-			status: "active" | "deleted" | "retained" | "cleanup-failed";
-			finalizedAt?: string;
-			cleanupError?: string;
-		};
-		actionableWorkspaces: readonly unknown[];
-		runCounts: {
-			pending: number;
-			running: number;
-			passed: number;
-			failed: number;
-			cancelled: number;
-		};
-	};
-	inspect(id: string): {
-		kind: string;
-		unit: { id: string };
-		run: { id: string; unitId?: string; status: string };
-		workspace?: {
-			runId: string;
-			path: string;
-			headSha: string;
-			status: "active" | "deleted" | "retained" | "cleanup-failed";
-			finalizedAt?: string;
-			cleanupError?: string;
-			existsOnDisk?: boolean;
-		};
-		runHistory: readonly { id: string; status: string }[];
-		evidence: readonly {
-			kind: string;
-			status: string;
-			message?: string;
-		}[];
-		decisions: readonly {
-			kind: string;
-			outcome: string;
-			reasons: readonly string[];
-		}[];
-		artifacts: readonly { type: string; location: string }[];
-	};
+	runPacketAsync(
+		packet: unknown,
+		eventBus?: unknown,
+	): Promise<{
+		run: { id: string; status: string };
+		receipt: unknown;
+		decision: unknown;
+	}>;
+	getStatus(): { initialized: boolean } & Record<string, unknown>;
+	inspect(
+		id: string,
+	): { kind: string; run: { id: string } } & Record<string, unknown>;
 }
 
 async function loadCliOrchestrator(
@@ -104,12 +54,23 @@ async function loadCliOrchestrator(
 		createBuildplaneOrchestrator: (options: {
 			projectRoot: string;
 			storage: unknown;
-			runtime: { executePacket: (packet: UnitPacket, root: string) => unknown };
-			policy: {
-				evaluateRun: (packet: UnitPacket, receipt: unknown) => unknown;
+			runtime: {
+				executePacket: (packet: unknown, root: string) => unknown;
+				executePacketAsync?: (
+					packet: unknown,
+					root: string,
+					eventBus: unknown,
+				) => Promise<unknown>;
 			};
-			workspace: unknown;
+			policy: { evaluateRun: (packet: unknown, receipt: unknown) => unknown };
+			workspace?: unknown;
+			eventBus?: unknown;
 		}) => BuildplaneCliOrchestrator;
+		createEventBus: () => {
+			subscribe: (listener: (event: unknown) => void) => () => void;
+			emit: (event: unknown) => void;
+		};
+		parseUnitPacket: (input: string) => unknown;
 	};
 	const runtime = (await import("@buildplane/runtime")) as unknown as {
 		executePacket: (packet: unknown, root: string) => unknown;
@@ -119,8 +80,29 @@ async function loadCliOrchestrator(
 	};
 	const storage = (await import("@buildplane/storage")) as unknown as {
 		createBuildplaneStorage: (root: string) => unknown;
+		createEventStore: (root: string) => {
+			persistEvent: (runId: string, event: unknown) => void;
+		};
 	};
-	const workspace = (await import("@buildplane/adapters-git")) as unknown as {
+
+	// Create event bus with storage persistence subscriber
+	const eventBus = kernel.createEventBus();
+	const eventStore = storage.createEventStore(projectRoot);
+
+	// Wire up event persistence — every event emitted by the orchestrator
+	// gets persisted to storage for later inspection and replay
+	eventBus.subscribe((event: unknown) => {
+		const e = event as { runId?: string };
+		if (e.runId) {
+			try {
+				eventStore.persistEvent(e.runId, event as never);
+			} catch {
+				// Don't let storage failures break the run
+			}
+		}
+	});
+
+	const adaptersGit = (await import("@buildplane/adapters-git")) as unknown as {
 		createGitWorkspaceAdapter: () => unknown;
 	};
 
@@ -129,13 +111,34 @@ async function loadCliOrchestrator(
 		storage: storage.createBuildplaneStorage(projectRoot),
 		runtime: { executePacket: runtime.executePacket },
 		policy: { evaluateRun: policy.evaluateRun },
-		workspace: workspace.createGitWorkspaceAdapter(),
+		workspace: adaptersGit.createGitWorkspaceAdapter(),
+		eventBus,
 	});
 }
 
-async function loadPacket(packetPath: string): Promise<UnitPacket> {
+async function loadEventStore(projectRoot: string): Promise<{
+	getEventsByRunId: (runId: string) => unknown[];
+}> {
+	const storage = (await import("@buildplane/storage")) as unknown as {
+		createEventStore: (root: string) => {
+			getEventsByRunId: (runId: string) => unknown[];
+		};
+	};
+	return storage.createEventStore(projectRoot);
+}
+
+async function loadRunHistory(projectRoot: string): Promise<unknown[]> {
+	const storage = (await import("@buildplane/storage")) as unknown as {
+		createBuildplaneStorage: (root: string) => {
+			getRunHistory: () => unknown[];
+		};
+	};
+	return storage.createBuildplaneStorage(projectRoot).getRunHistory();
+}
+
+async function loadPacket(packetPath: string): Promise<unknown> {
 	const kernel = (await import("@buildplane/kernel")) as unknown as {
-		parseUnitPacket: (input: string) => UnitPacket;
+		parseUnitPacket: (input: string) => unknown;
 	};
 
 	return kernel.parseUnitPacket(readFileSync(packetPath, "utf8"));
@@ -148,9 +151,9 @@ export async function runCli(
 	const cwd = options.cwd ?? process.cwd();
 	const stdout = options.stdout ?? ((line: string) => console.log(line));
 	const stderr = options.stderr ?? ((line: string) => console.error(line));
-	const createOrchestrator =
-		options.dependencies?.createOrchestrator ?? loadCliOrchestrator;
-	const parsePacket = options.dependencies?.parsePacket ?? loadPacket;
+	const orchestrator = options.dependencies
+		? options.dependencies.createOrchestrator()
+		: await loadCliOrchestrator(cwd);
 	const [command, ...rest] = argv;
 
 	if (!command) {
@@ -159,15 +162,16 @@ export async function runCli(
 	}
 
 	try {
-		const orchestrator = await createOrchestrator(cwd);
-
 		switch (command) {
 			case "init": {
 				const result = orchestrator.initializeProject();
-				emitLines(stdout, formatInitializationResult(result));
+				for (const line of formatInitializationResult(result)) {
+					stdout(line);
+				}
 				return 0;
 			}
 			case "run": {
+				// Preflight: verify project is initialized before loading the packet
 				orchestrator.getStatus();
 
 				const packetIndex = rest.indexOf("--packet");
@@ -176,13 +180,70 @@ export async function runCli(
 				}
 
 				const packetPath = resolve(cwd, rest[packetIndex + 1]);
-				const packet = await parsePacket(packetPath);
+				const packet = options.dependencies?.parsePacket
+					? options.dependencies.parsePacket(packetPath)
+					: await loadPacket(packetPath);
+				const useTui = rest.includes("--tui");
+
+				if (useTui) {
+					// Lazy-load TUI — only imported when --tui is requested
+					const kernel = (await import("@buildplane/kernel")) as unknown as {
+						createEventBus: () => {
+							subscribe: (listener: (event: unknown) => void) => () => void;
+							emit: (event: unknown) => void;
+						};
+					};
+					const tui = (await import("@buildplane/ui-tui")) as unknown as {
+						renderTui: (eventBus: unknown) => {
+							waitUntilExit(): Promise<void>;
+							unmount(): void;
+							clear(): void;
+						};
+					};
+					const storage = (await import("@buildplane/storage")) as unknown as {
+						createEventStore: (root: string) => {
+							persistEvent: (runId: string, event: unknown) => void;
+						};
+					};
+
+					const tuiBus = kernel.createEventBus();
+
+					// Wire storage persistence to the TUI bus too
+					const eventStore = storage.createEventStore(cwd);
+					tuiBus.subscribe((event: unknown) => {
+						const e = event as { runId?: string };
+						if (e.runId) {
+							try {
+								eventStore.persistEvent(e.runId, event as never);
+							} catch {
+								// Don't let storage failures break the run
+							}
+						}
+					});
+
+					const tuiInstance = tui.renderTui(tuiBus);
+
+					const result = await orchestrator.runPacketAsync(packet, tuiBus);
+					await tuiInstance.waitUntilExit();
+
+					return result.run.status === "passed" ? 0 : 1;
+				}
+
 				const result = orchestrator.runPacket(packet);
 
-				emitLines(stdout, formatRunResult(result));
-				emitLines(stderr, formatRunFailure(result));
+				for (const line of formatRunResult(result)) {
+					stdout(line);
+				}
 
-				return result.run.status === "passed" && !result.failure ? 0 : 1;
+				const r = result as Record<string, unknown>;
+				if (r.failure && typeof r.failure === "object") {
+					const f = r.failure as { message?: string };
+					if (f.message) {
+						stderr(f.message);
+					}
+				}
+
+				return result.run.status === "passed" && !r.failure ? 0 : 1;
 			}
 			case "status": {
 				const json = rest.includes("--json");
@@ -191,8 +252,40 @@ export async function runCli(
 				if (json) {
 					stdout(formatJson(result));
 				} else {
-					emitLines(stdout, formatStatusResult(result));
+					stdout(`initialized: ${result.initialized}`);
+					const r = result as Record<string, unknown>;
+					if (r.latestRun && typeof r.latestRun === "object") {
+						const lr = r.latestRun as {
+							id: string;
+							status: string;
+							unitId?: string;
+						};
+						const unitSuffix = lr.unitId ? ` (${lr.unitId})` : "";
+						stdout(`latest-run: ${lr.id} ${lr.status}${unitSuffix}`);
+					}
+					if (r.runCounts && typeof r.runCounts === "object") {
+						const rc = r.runCounts as Record<string, number>;
+						stdout(
+							`run-counts: pending=${rc.pending ?? 0} running=${rc.running ?? 0} passed=${rc.passed ?? 0} failed=${rc.failed ?? 0} cancelled=${rc.cancelled ?? 0}`,
+						);
+					}
+					if (r.latestRunUsedWorkspace) {
+						if (r.latestWorkspace && typeof r.latestWorkspace === "object") {
+							const lw = r.latestWorkspace as { path: string; status: string };
+							stdout(`workspace: ${lw.path} (${lw.status})`);
+						}
+						const ws = r.actionableWorkspaces as
+							| Array<{ path: string; status: string }>
+							| undefined;
+						if (ws && ws.length > 0) {
+							for (const w of ws) {
+								stdout(`workspace: ${w.path} (${w.status})`);
+							}
+							stdout(`actionable-workspaces: ${ws.length}`);
+						}
+					}
 				}
+
 				return 0;
 			}
 			case "inspect": {
@@ -203,12 +296,136 @@ export async function runCli(
 				}
 
 				const result = orchestrator.inspect(id);
+
 				if (json) {
 					stdout(formatJson(result));
 				} else {
-					emitLines(stdout, formatInspectResult(result));
+					let events: Array<{
+						kind: string;
+						runId: string;
+						timestamp: string;
+						[key: string]: unknown;
+					}> = [];
+					try {
+						const eventStore = await loadEventStore(cwd);
+						events = eventStore.getEventsByRunId(
+							result.run.id,
+						) as typeof events;
+					} catch {
+						// Event store may not be available in all contexts
+					}
+					for (const line of formatInspectDetail(
+						result as unknown as Parameters<typeof formatInspectDetail>[0],
+						events,
+					)) {
+						stdout(line);
+					}
 				}
 				return 0;
+			}
+			case "history": {
+				const json = rest.includes("--json");
+				const entries = await loadRunHistory(cwd);
+
+				if (json) {
+					stdout(formatJson(entries));
+				} else {
+					for (const line of formatRunHistory(
+						entries as Array<{
+							id: string;
+							unitId: string;
+							status: string;
+							createdAt: string;
+							completedAt?: string;
+						}>,
+					)) {
+						stdout(line);
+					}
+				}
+				return 0;
+			}
+			case "replay": {
+				const runId = rest.find((v) => !v.startsWith("--"));
+				if (!runId) {
+					throw new Error("Missing required run id for replay.");
+				}
+
+				const json = rest.includes("--json");
+
+				// Load packet snapshot from storage
+				const storage = (await import("@buildplane/storage")) as unknown as {
+					createBuildplaneStorage: (root: string) => {
+						getPacketSnapshot: (id: string) => unknown | null;
+					};
+				};
+				const storageInst = storage.createBuildplaneStorage(cwd);
+				const packet = storageInst.getPacketSnapshot(runId);
+
+				if (!packet) {
+					throw new Error(
+						`Cannot replay run '${runId}': no packet snapshot found. Only runs created with the current version can be replayed.`,
+					);
+				}
+
+				// Apply overrides
+				const replayPacket = applyReplayOverrides(
+					packet as Record<string, unknown>,
+					rest,
+				);
+
+				// Create event bus with storage persistence
+				const kernel = (await import("@buildplane/kernel")) as unknown as {
+					createEventBus: () => {
+						subscribe: (listener: (event: unknown) => void) => () => void;
+						emit: (event: unknown) => void;
+					};
+				};
+				const storageForEvents = (await import(
+					"@buildplane/storage"
+				)) as unknown as {
+					createEventStore: (root: string) => {
+						persistEvent: (runId: string, event: unknown) => void;
+					};
+				};
+
+				const replayBus = kernel.createEventBus();
+				const eventStore = storageForEvents.createEventStore(cwd);
+				replayBus.subscribe((event: unknown) => {
+					const e = event as { runId?: string };
+					if (e.runId) {
+						try {
+							eventStore.persistEvent(e.runId, event as never);
+						} catch {
+							// Silent
+						}
+					}
+				});
+
+				const result = await orchestrator.runPacketAsync(
+					replayPacket,
+					replayBus,
+				);
+
+				if (json) {
+					stdout(
+						formatJson({
+							originalRunId: runId,
+							replay: {
+								runId: result.run.id,
+								status: result.run.status,
+							},
+						}),
+					);
+				} else {
+					stdout(`replay of: ${runId}`);
+					for (const line of formatRunResult(
+						result as { run: { id: string; status: string } },
+					)) {
+						stdout(line);
+					}
+				}
+
+				return result.run.status === "passed" ? 0 : 1;
 			}
 			default:
 				throw new Error(`Unknown command: ${command}`);
@@ -228,6 +445,41 @@ export async function runCli(
 
 		return 1;
 	}
+}
+
+function applyReplayOverrides(
+	packet: Record<string, unknown>,
+	args: string[],
+): unknown {
+	const result = { ...packet };
+
+	for (const arg of args) {
+		if (arg.startsWith("--model=")) {
+			const modelValue = arg.slice("--model=".length);
+			const slashIndex = modelValue.indexOf("/");
+
+			if (slashIndex > 0) {
+				// --model=provider/model-name
+				const provider = modelValue.slice(0, slashIndex);
+				const model = modelValue.slice(slashIndex + 1);
+				const existing = (result.model as Record<string, unknown>) ?? {};
+				result.model = { ...existing, provider, model };
+				// If switching to model execution, remove command execution
+				delete result.execution;
+			} else {
+				// --model=model-name (keep existing provider)
+				const existing = (result.model as Record<string, unknown>) ?? {};
+				result.model = { ...existing, model: modelValue };
+				delete result.execution;
+			}
+		} else if (arg.startsWith("--policy=")) {
+			const policyProfile = arg.slice("--policy=".length);
+			const unit = (result.unit as Record<string, unknown>) ?? {};
+			result.unit = { ...unit, policyProfile };
+		}
+	}
+
+	return result;
 }
 
 function classifyCliError(error: unknown): { code: string; message: string } {
@@ -251,13 +503,4 @@ function classifyCliError(error: unknown): { code: string; message: string } {
 	}
 
 	return { code: "CLI_ERROR", message };
-}
-
-function emitLines(
-	write: (line: string) => void,
-	lines: readonly string[],
-): void {
-	for (const line of lines) {
-		write(line);
-	}
 }

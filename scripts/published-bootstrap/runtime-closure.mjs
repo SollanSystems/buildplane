@@ -424,9 +424,13 @@ export function assertRuntimeImportClosure(entryFilePaths, options = {}) {
 		forbidInternalPackageImports = false,
 		rootBoundaryPaths,
 		allowedExternalPackageNames,
+		optionalInternalPackages,
 	} = options;
 	const allowedExternalPackageNameSet = allowedExternalPackageNames
 		? new Set(allowedExternalPackageNames)
+		: undefined;
+	const optionalInternalPackageSet = optionalInternalPackages
+		? new Set(optionalInternalPackages)
 		: undefined;
 	const visited = new Set();
 	const pending = [...entryFilePaths];
@@ -490,6 +494,10 @@ export function assertRuntimeImportClosure(entryFilePaths, options = {}) {
 			}
 
 			if (specifier.startsWith(INTERNAL_PACKAGE_PREFIX)) {
+				if (optionalInternalPackageSet?.has(specifier)) {
+					continue;
+				}
+
 				if (forbidInternalPackageImports) {
 					onError(
 						`Runtime file still contains internal package import ${JSON.stringify(specifier)}: ${filePath}`,

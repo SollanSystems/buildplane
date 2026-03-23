@@ -45,8 +45,12 @@ function createGitRepo(): string {
 	git(root, ["init"]);
 	git(root, ["config", "user.name", "Buildplane Tests"]);
 	git(root, ["config", "user.email", "tests@example.com"]);
+	writeFileSync(
+		join(root, ".gitignore"),
+		".buildplane/state.db\n.buildplane/project.json\n.buildplane/workspaces/\n",
+	);
 	writeFileSync(join(root, "tracked.txt"), "baseline\n");
-	git(root, ["add", "tracked.txt"]);
+	git(root, ["add", "."]);
 	git(root, ["commit", "-m", "baseline"]);
 
 	return root;
@@ -172,9 +176,9 @@ describe("local run loop end to end", () => {
 		const run = await runCliCapture(root, ["run", "--packet", packetPath]);
 		const runId =
 			run.stdout.find((line) => line.startsWith("run-id: "))?.slice(8) ?? "";
-		const workspacePath =
-			run.stdout.find((line) => line.startsWith("workspace: "))?.slice(11) ??
-			"";
+		const workspaceLine =
+			run.stdout.find((line) => line.startsWith("workspace: ")) ?? "";
+		const workspacePath = workspaceLine.slice(11).replace(/ \([^)]+\)$/, "");
 		const status = await runCliCapture(root, ["status", "--json"]);
 		const inspect = await runCliCapture(root, ["inspect", runId, "--json"]);
 

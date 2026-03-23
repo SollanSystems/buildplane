@@ -1,24 +1,33 @@
-import type { UnitPacket } from "./run-loop.js";
+import type {
+	CommandExecutionBlock,
+	ModelExecutionBlock,
+	ToolDefinition,
+	UnitPacket,
+} from "./run-loop.js";
 import type { Unit } from "./types.js";
 
 export function parseUnitPacket(input: string): UnitPacket {
 	const packet = asRecord(JSON.parse(input), "packet");
 	const unitRecord = asRecord(packet.unit, "packet.unit");
-	const executionRecord = asRecord(packet.execution, "packet.execution");
 	const verificationRecord =
 		packet.verification === undefined
 			? {}
 			: asRecord(packet.verification, "packet.verification");
-	const executionArgs = readOptionalStringArray(
-		executionRecord,
-		"args",
-		"packet.execution",
-	);
-	const executionCwd = readOptionalString(
-		executionRecord,
-		"cwd",
-		"packet.execution",
-	);
+
+	const hasExecution = packet.execution !== undefined;
+	const hasModel = packet.model !== undefined;
+
+	if (!hasExecution && !hasModel) {
+		throw new TypeError(
+			"packet must have either an 'execution' block or a 'model' block",
+		);
+	}
+
+	if (hasExecution && hasModel) {
+		throw new TypeError(
+			"packet must have either 'execution' or 'model', not both",
+		);
+	}
 
 	const unit: Unit = {
 		id: readRequiredString(unitRecord, "id", "packet.unit"),
@@ -41,26 +50,85 @@ export function parseUnitPacket(input: string): UnitPacket {
 		),
 	};
 
+	const verification = {
+		requiredOutputs:
+			readOptionalStringArray(
+				verificationRecord,
+				"requiredOutputs",
+				"packet.verification",
+			) ?? [],
+	};
+
+	if (hasExecution) {
+		return {
+			unit,
+			execution: parseExecutionBlock(packet.execution),
+			verification,
+		};
+	}
+
 	return {
 		unit,
-		execution: {
-			command: readRequiredString(
-				executionRecord,
-				"command",
-				"packet.execution",
-			),
-			...(executionArgs === undefined ? {} : { args: executionArgs }),
-			...(executionCwd === undefined ? {} : { cwd: executionCwd }),
-		},
-		verification: {
-			requiredOutputs:
-				readOptionalStringArray(
-					verificationRecord,
-					"requiredOutputs",
-					"packet.verification",
-				) ?? [],
-		},
+		model: parseModelBlock(packet.model),
+		verification,
 	};
+}
+
+function parseExecutionBlock(raw: unknown): CommandExecutionBlock {
+	const record = asRecord(raw, "packet.execution");
+	const args = readOptionalStringArray(record, "args", "packet.execution");
+	const cwd = readOptionalString(record, "cwd", "packet.execution");
+
+	return {
+		command: readRequiredString(record, "command", "packet.execution"),
+		...(args === undefined ? {} : { args }),
+		...(cwd === undefined ? {} : { cwd }),
+	};
+}
+
+function parseModelBlock(raw: unknown): ModelExecutionBlock {
+	const record = asRecord(raw, "packet.model");
+	const systemPrompt = readOptionalString(
+		record,
+		"systemPrompt",
+		"packet.model",
+	);
+	const tools = parseOptionalTools(record.tools);
+
+	return {
+		provider: readRequiredString(record, "provider", "packet.model"),
+		model: readRequiredString(record, "model", "packet.model"),
+		...(systemPrompt === undefined ? {} : { systemPrompt }),
+		...(tools === undefined ? {} : { tools }),
+	};
+}
+
+function parseOptionalTools(
+	raw: unknown,
+): readonly ToolDefinition[] | undefined {
+	if (raw === undefined) {
+		return undefined;
+	}
+
+	if (!Array.isArray(raw)) {
+		throw new TypeError("packet.model.tools must be an array");
+	}
+
+	return raw.map((item, i) => {
+		const record = asRecord(item, `packet.model.tools[${i}]`);
+		return {
+			name: readRequiredString(record, "name", `packet.model.tools[${i}]`),
+			description: readRequiredString(
+				record,
+				"description",
+				`packet.model.tools[${i}]`,
+			),
+			parameters: asRecord(
+				record.parameters ?? {},
+				`packet.model.tools[${i}].parameters`,
+			),
+		};
+	});
 }
 
 function asRecord(value: unknown, label: string): Record<string, unknown> {

@@ -1,3 +1,4 @@
+import type { EventBus } from "./events.js";
 import type {
 	ApprovedPolicyDecision,
 	ExecutionReceipt,
@@ -52,6 +53,11 @@ export interface BuildplaneStoragePort {
 
 export interface BuildplaneRuntimePort {
 	executePacket(packet: UnitPacket, projectRoot: string): ExecutionReceipt;
+	executePacketAsync?(
+		packet: UnitPacket,
+		projectRoot: string,
+		eventBus: EventBus,
+	): Promise<ExecutionReceipt>;
 }
 
 export interface BuildplanePolicyPort {

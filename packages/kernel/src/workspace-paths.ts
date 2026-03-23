@@ -54,18 +54,20 @@ export function validatePacketForWorkspaceRoot(
 				),
 			),
 		},
-		execution: {
-			...packet.execution,
-			cwd:
-				packet.execution.cwd === undefined
-					? undefined
-					: normalizeWorkspaceRelativePath(
-							packet.execution.cwd,
-							workspaceRoot,
-							"execution cwd",
-							{ allowWorkspaceRoot: true },
-						),
-		},
+		execution: packet.execution
+			? {
+					...packet.execution,
+					cwd:
+						packet.execution.cwd === undefined
+							? undefined
+							: normalizeWorkspaceRelativePath(
+									packet.execution.cwd,
+									workspaceRoot,
+									"execution cwd",
+									{ allowWorkspaceRoot: true },
+								),
+				}
+			: undefined,
 		verification: {
 			...packet.verification,
 			requiredOutputs: packet.verification.requiredOutputs.map((outputPath) =>

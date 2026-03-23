@@ -24,6 +24,10 @@
 		"./types": {
 			"types": "./src/types.ts",
 			"import": "./src/types.ts"
+		},
+		"./events": {
+			"types": "./src/events.ts",
+			"import": "./src/events.ts"
 		}
 	}
 }

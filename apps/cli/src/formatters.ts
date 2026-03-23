@@ -4,78 +4,15 @@ interface ProjectInitializationResult {
 	readonly stateDbPath: string;
 }
 
-interface RunWorkspaceLike {
-	readonly path: string;
-	readonly status: "active" | "deleted" | "retained" | "cleanup-failed";
-	readonly headSha: string;
-	readonly finalizedAt?: string;
-	readonly cleanupError?: string;
-	readonly existsOnDisk?: boolean;
-}
-
 interface RunResultLike {
 	readonly run: {
 		readonly id: string;
 		readonly status: string;
 	};
-	readonly failure?: {
-		readonly kind: string;
-		readonly message: string;
+	readonly workspace?: {
+		readonly path?: string;
+		readonly status?: string;
 	};
-	readonly workspace?: RunWorkspaceLike;
-}
-
-interface StatusWorkspaceLike {
-	readonly path?: string;
-	readonly status: "active" | "deleted" | "retained" | "cleanup-failed";
-}
-
-interface StatusResultLike {
-	readonly initialized: boolean;
-	readonly latestRun?: {
-		readonly id: string;
-		readonly unitId: string;
-		readonly status: string;
-	};
-	readonly latestWorkspace?: StatusWorkspaceLike;
-	readonly actionableWorkspaces: readonly unknown[];
-	readonly runCounts: {
-		readonly pending: number;
-		readonly running: number;
-		readonly passed: number;
-		readonly failed: number;
-		readonly cancelled: number;
-	};
-}
-
-interface InspectResultLike {
-	readonly kind: string;
-	readonly unit: {
-		readonly id: string;
-	};
-	readonly run: {
-		readonly id: string;
-		readonly status: string;
-	};
-	readonly workspace?: RunWorkspaceLike;
-	readonly runHistory: readonly {
-		readonly id: string;
-		readonly status: string;
-	}[];
-	readonly evidence: readonly {
-		readonly kind: string;
-		readonly status: string;
-		readonly message?: string;
-	}[];
-	readonly decisions: readonly {
-		readonly kind: string;
-		readonly outcome: string;
-		readonly reasons: readonly string[];
-	}[];
-	readonly artifacts: readonly {
-		readonly type: string;
-		readonly location: string;
-	}[];
 }
 
 export interface CliErrorPayload {
@@ -94,126 +31,16 @@ export function formatInitializationResult(
 }
 
 export function formatRunResult(result: RunResultLike): string[] {
-	const displayedStatus = result.failure ? "failed" : result.run.status;
-	const lines = [`run-id: ${result.run.id}`, `status: ${displayedStatus}`];
-
-	if (shouldSurfaceRunWorkspace(result)) {
-		lines.push(`workspace: ${result.workspace.path}`);
+	const r = result as unknown as Record<string, unknown>;
+	const hasFailure = r.failure && typeof r.failure === "object";
+	const displayStatus = hasFailure ? "failed" : result.run.status;
+	const lines = [`run-id: ${result.run.id}`, `status: ${displayStatus}`];
+	if (result.workspace?.path) {
+		const suffix = result.workspace.status
+			? ` (${result.workspace.status})`
+			: "";
+		lines.push(`workspace: ${result.workspace.path}${suffix}`);
 	}
-
-	return lines;
-}
-
-export function formatRunFailure(result: RunResultLike): string[] {
-	return result.failure ? [result.failure.message] : [];
-}
-
-export function formatStatusResult(result: StatusResultLike): string[] {
-	const lines = [`initialized: ${result.initialized}`];
-
-	if (result.latestRun) {
-		lines.push(
-			`latest-run: ${result.latestRun.id} ${result.latestRun.status} (${result.latestRun.unitId})`,
-		);
-	} else {
-		lines.push("latest-run: none");
-	}
-
-	lines.push(
-		`run-counts: pending=${result.runCounts.pending} running=${result.runCounts.running} passed=${result.runCounts.passed} failed=${result.runCounts.failed} cancelled=${result.runCounts.cancelled}`,
-	);
-
-	if (shouldSurfaceStatusWorkspace(result.latestWorkspace)) {
-		lines.push(
-			`workspace: ${result.latestWorkspace.path} (${result.latestWorkspace.status})`,
-		);
-	}
-
-	if (result.actionableWorkspaces.length > 0) {
-		lines.push(`actionable-workspaces: ${result.actionableWorkspaces.length}`);
-	}
-
-	return lines;
-}
-
-export function formatInspectResult(result: InspectResultLike): string[] {
-	const lines = [
-		`kind: ${result.kind}`,
-		`run-id: ${result.run.id}`,
-		`unit-id: ${result.unit.id}`,
-		`status: ${result.run.status}`,
-	];
-
-	if (result.workspace) {
-		lines.push(`workspace-status: ${result.workspace.status}`);
-		lines.push(`workspace: ${result.workspace.path}`);
-		lines.push(`workspace-head: ${result.workspace.headSha}`);
-
-		if (result.workspace.finalizedAt) {
-			lines.push(`workspace-finalized-at: ${result.workspace.finalizedAt}`);
-		}
-
-		if (result.workspace.cleanupError) {
-			lines.push(`workspace-cleanup-error: ${result.workspace.cleanupError}`);
-		}
-
-		if (result.workspace.existsOnDisk !== undefined) {
-			lines.push(`workspace-exists-on-disk: ${result.workspace.existsOnDisk}`);
-		}
-
-		if (
-			result.run.status === "passed" &&
-			result.workspace.status === "active"
-		) {
-			lines.push(
-				"workspace-note: passed run still reports an active workspace; cleanup may have been interrupted in this thin slice.",
-			);
-		}
-
-		if (
-			result.workspace.status === "active" &&
-			result.workspace.existsOnDisk === false
-		) {
-			lines.push(
-				"workspace-note: last-known workspace path may already be gone on disk despite the persisted active status.",
-			);
-		}
-	}
-
-	if (result.runHistory.length > 0) {
-		lines.push("run-history:");
-		for (const entry of result.runHistory) {
-			lines.push(`- ${entry.id} ${entry.status}`);
-		}
-	}
-
-	if (result.evidence.length > 0) {
-		lines.push("evidence:");
-		for (const evidence of result.evidence) {
-			lines.push(
-				evidence.message
-					? `- ${evidence.kind} [${evidence.status}] ${evidence.message}`
-					: `- ${evidence.kind} [${evidence.status}]`,
-			);
-		}
-	}
-
-	if (result.decisions.length > 0) {
-		lines.push("decisions:");
-		for (const decision of result.decisions) {
-			lines.push(
-				`- ${decision.kind} [${decision.outcome}] ${decision.reasons.join("; ")}`,
-			);
-		}
-	}
-
-	if (result.artifacts.length > 0) {
-		lines.push("artifacts:");
-		for (const artifact of result.artifacts) {
-			lines.push(`- ${artifact.type} ${artifact.location}`);
-		}
-	}
-
 	return lines;
 }
 
@@ -237,23 +64,131 @@ export function formatJsonError(
 	};
 }
 
-function shouldSurfaceRunWorkspace(
-	result: RunResultLike,
-): result is RunResultLike & { workspace: RunWorkspaceLike } {
-	return Boolean(
-		result.workspace?.path &&
-			(result.workspace.status === "retained" ||
-				result.workspace.status === "cleanup-failed"),
-	);
+interface RunHistoryEntryLike {
+	readonly id: string;
+	readonly unitId: string;
+	readonly status: string;
+	readonly createdAt: string;
+	readonly completedAt?: string;
 }
 
-function shouldSurfaceStatusWorkspace(
-	workspace: StatusWorkspaceLike | undefined,
-): workspace is StatusWorkspaceLike & { path: string } {
-	return Boolean(
-		workspace?.path &&
-			(workspace.status === "active" ||
-				workspace.status === "retained" ||
-				workspace.status === "cleanup-failed"),
+export function formatRunHistory(entries: RunHistoryEntryLike[]): string[] {
+	if (entries.length === 0) {
+		return ["No runs found."];
+	}
+
+	const lines: string[] = [];
+	lines.push(
+		`${"RUN ID".padEnd(38)} ${"UNIT".padEnd(24)} ${"STATUS".padEnd(10)} CREATED`,
 	);
+	lines.push("─".repeat(90));
+
+	for (const entry of entries) {
+		const created = entry.createdAt.replace("T", " ").slice(0, 19);
+		lines.push(
+			`${entry.id.padEnd(38)} ${entry.unitId.padEnd(24)} ${entry.status.padEnd(10)} ${created}`,
+		);
+	}
+
+	return lines;
+}
+
+interface ExecutionEventLike {
+	readonly kind: string;
+	readonly runId: string;
+	readonly timestamp: string;
+	readonly [key: string]: unknown;
+}
+
+interface InspectSnapshotLike {
+	readonly kind: string;
+	readonly unit: { readonly id: string; readonly kind: string };
+	readonly run: {
+		readonly id: string;
+		readonly unitId: string;
+		readonly status: string;
+	};
+	readonly evidence: readonly {
+		readonly kind: string;
+		readonly status: string;
+	}[];
+	readonly decisions: readonly {
+		readonly kind: string;
+		readonly outcome: string;
+		readonly reasons: readonly string[];
+	}[];
+	readonly artifacts: readonly {
+		readonly type: string;
+		readonly location: string;
+	}[];
+}
+
+export function formatInspectDetail(
+	snapshot: InspectSnapshotLike,
+	_events: ExecutionEventLike[],
+): string[] {
+	const lines: string[] = [];
+
+	lines.push(`kind: ${snapshot.kind}`);
+	lines.push(`run-id: ${snapshot.run.id}`);
+	lines.push(`unit-id: ${snapshot.run.unitId}`);
+	lines.push(`status: ${snapshot.run.status}`);
+
+	const s = snapshot as unknown as Record<string, unknown>;
+	if (s.workspace && typeof s.workspace === "object") {
+		const ws = s.workspace as {
+			status?: string;
+			path?: string;
+			headSha?: string;
+			existsOnDisk?: boolean;
+			finalizedAt?: string;
+			cleanupError?: string;
+		};
+		if (ws.status) {
+			lines.push(`workspace-status: ${ws.status}`);
+		}
+		if (ws.path) {
+			lines.push(`workspace: ${ws.path}`);
+		}
+		if (ws.headSha) {
+			lines.push(`workspace-head: ${ws.headSha}`);
+		}
+		if (ws.finalizedAt) {
+			lines.push(`workspace-finalized-at: ${ws.finalizedAt}`);
+		}
+		if (ws.cleanupError) {
+			lines.push(`workspace-cleanup-error: ${ws.cleanupError}`);
+		}
+		if (ws.existsOnDisk !== undefined) {
+			lines.push(`workspace-exists-on-disk: ${ws.existsOnDisk}`);
+		}
+		// Diagnostic notes for unusual workspace states
+		if (
+			ws.status === "active" &&
+			s.run &&
+			typeof s.run === "object" &&
+			(s.run as { status?: string }).status === "passed"
+		) {
+			lines.push(
+				"workspace-note: passed run still reports an active workspace; cleanup may have been interrupted in this thin slice.",
+			);
+		}
+		if (ws.existsOnDisk === false && ws.status === "active") {
+			lines.push(
+				"workspace-note: last-known workspace path may already be gone on disk despite the persisted active status.",
+			);
+		}
+	}
+
+	if (s.failure && typeof s.failure === "object") {
+		const f = s.failure as { kind?: string; message?: string };
+		if (f.kind) {
+			lines.push(`failure-kind: ${f.kind}`);
+		}
+		if (f.message) {
+			lines.push(`failure: ${f.message}`);
+		}
+	}
+
+	return lines;
 }

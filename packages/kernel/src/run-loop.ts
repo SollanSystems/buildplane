@@ -1,12 +1,28 @@
 import type { Run, RunStatus, Unit } from "./types.js";
 
+export interface ToolDefinition {
+	readonly name: string;
+	readonly description: string;
+	readonly parameters: Record<string, unknown>;
+}
+
+export interface ModelExecutionBlock {
+	readonly provider: string;
+	readonly model: string;
+	readonly systemPrompt?: string;
+	readonly tools?: readonly ToolDefinition[];
+}
+
+export interface CommandExecutionBlock {
+	readonly command: string;
+	readonly args?: readonly string[];
+	readonly cwd?: string;
+}
+
 export interface UnitPacket {
 	readonly unit: Unit;
-	readonly execution: {
-		readonly command: string;
-		readonly args?: readonly string[];
-		readonly cwd?: string;
-	};
+	readonly execution?: CommandExecutionBlock;
+	readonly model?: ModelExecutionBlock;
 	readonly verification: {
 		readonly requiredOutputs: readonly string[];
 	};

@@ -22,6 +22,7 @@ describe("@buildplane/kernel package consumption", () => {
 		expect(output).toBe(
 			JSON.stringify([
 				"createBuildplaneOrchestrator",
+				"createEventBus",
 				"parseUnitPacket",
 				"validatePacketForWorkspaceRoot",
 			]),

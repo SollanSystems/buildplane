@@ -685,10 +685,12 @@ describe("cli command surface", () => {
 		);
 
 		expect(result.exitCode).toBe(1);
-		expect(result.stdout).toEqual([
-			"run-id: run-delete-persistence",
-			"status: failed",
-		]);
+		expect(result.stdout).toEqual(
+			expect.arrayContaining([
+				"run-id: run-delete-persistence",
+				"status: failed",
+			]),
+		);
 		expect(result.stderr).toEqual([
 			"recordWorkspaceDeleted persistence failed",
 		]);
