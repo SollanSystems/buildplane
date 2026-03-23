@@ -404,6 +404,67 @@ export function createBuildplaneOrchestrator(
 				status: "pending" as const,
 			});
 
+			// ── Workspace preparation ──────────────────────────────────────
+			let preparedWorkspace: WorkspaceSnapshot | undefined;
+			try {
+				const { headSha } = workspace.assertRunnableRepository(projectRoot);
+				const created = workspace.prepareWorkspace(
+					projectRoot,
+					run.id,
+					headSha,
+				);
+				preparedWorkspace = toWorkspaceSnapshot(run, created);
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				bus.emit({
+					kind: "execution-error",
+					runId: run.id,
+					timestamp: new Date().toISOString(),
+					message,
+					phase: "workspace-prepare",
+				});
+				const failedRun = storage.completeRun(run.id, "failed");
+				bus.emit({
+					kind: "run-completed",
+					runId: run.id,
+					unitId: packet.unit.id,
+					timestamp: new Date().toISOString(),
+					status: "failed" as const,
+				});
+				return {
+					run: failedRun,
+					failure: { kind: "workspace-prepare-failed", message },
+				};
+			}
+
+			const worktreeRoot = preparedWorkspace.path;
+			const validatedPacket = validatePacketForWorkspaceRoot(
+				packet,
+				worktreeRoot,
+			);
+
+			/** Clean up the workspace; errors are emitted but don't override the primary result. */
+			async function cleanupWorkspace(
+				status: "retained" | "deleted",
+			): Promise<void> {
+				if (status !== "deleted") return;
+				try {
+					workspace.deleteWorkspace({ path: worktreeRoot });
+				} catch (cleanupError) {
+					const msg =
+						cleanupError instanceof Error
+							? cleanupError.message
+							: String(cleanupError);
+					bus.emit({
+						kind: "execution-error",
+						runId: run.id,
+						timestamp: new Date().toISOString(),
+						message: `workspace cleanup failed: ${msg}`,
+						phase: "workspace-cleanup",
+					});
+				}
+			}
+
 			storage.markRunRunning(run.id);
 
 			bus.emit({
@@ -496,13 +557,13 @@ export function createBuildplaneOrchestrator(
 			try {
 				if (runtime.executePacketAsync) {
 					receipt = await runtime.executePacketAsync(
-						packet,
-						projectRoot,
+						validatedPacket,
+						worktreeRoot,
 						bus,
 						controller.signal,
 					);
 				} else {
-					receipt = runtime.executePacket(packet, projectRoot);
+					receipt = runtime.executePacket(validatedPacket, worktreeRoot);
 					bus.emit({
 						kind: "command-execution-complete",
 						runId: run.id,
@@ -532,6 +593,7 @@ export function createBuildplaneOrchestrator(
 					timestamp: new Date().toISOString(),
 					status: "failed" as const,
 				});
+				await cleanupWorkspace("deleted");
 				return {
 					run: failedRun,
 					failure: { kind: "runtime-execution-failed", message },
@@ -551,11 +613,10 @@ export function createBuildplaneOrchestrator(
 			});
 
 			let attemptCount = 0;
-			let currentPacket = packet;
+			let currentPacket = validatedPacket;
 			let currentReceipt = receipt;
 
 			// Retry loop — evaluateRun may return retry-run with feedback context
-			// biome-ignore lint/correctness/noConstantCondition: retry loop exits via return
 			while (true) {
 				const decision = policy.evaluateRun(
 					currentPacket,
@@ -587,6 +648,7 @@ export function createBuildplaneOrchestrator(
 						status: finalStatus as "passed" | "failed",
 					});
 
+					await cleanupWorkspace("deleted");
 					return { run: completedRun, receipt: currentReceipt, decision };
 				}
 
@@ -622,11 +684,11 @@ export function createBuildplaneOrchestrator(
 					if (runtime.executePacketAsync) {
 						currentReceipt = await runtime.executePacketAsync(
 							currentPacket,
-							projectRoot,
+							worktreeRoot,
 							bus,
 						);
 					} else {
-						currentReceipt = runtime.executePacket(currentPacket, projectRoot);
+						currentReceipt = runtime.executePacket(currentPacket, worktreeRoot);
 					}
 				} catch (error) {
 					const message =
@@ -646,6 +708,7 @@ export function createBuildplaneOrchestrator(
 						timestamp: new Date().toISOString(),
 						status: "failed" as const,
 					});
+					await cleanupWorkspace("deleted");
 					return {
 						run: failedRun,
 						failure: { kind: "runtime-execution-failed", message },

@@ -1,8 +1,4 @@
-import type {
-	BudgetConstraints,
-	ResourceUsageSnapshot,
-	UnitPacket,
-} from "@buildplane/kernel";
+import type { ResourceUsageSnapshot, UnitPacket } from "@buildplane/kernel";
 import { describe, expect, it } from "vitest";
 import { evaluateBudgets } from "../src/budgets";
 

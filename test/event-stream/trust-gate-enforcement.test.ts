@@ -101,7 +101,7 @@ describe("trust gate enforcement", () => {
 			verification: { requiredOutputs: [] },
 		};
 
-		const receipt = await executor.executePacketAsync(packet, root, bus);
+		const _receipt = await executor.executePacketAsync(packet, root, bus);
 
 		// The tool call event should still be emitted
 		const toolStarted = events.find((e) => e.kind === "tool-call-started");
@@ -137,7 +137,7 @@ describe("trust gate enforcement", () => {
 			})(),
 		});
 
-		let writeFileCalled = false;
+		let _writeFileCalled = false;
 		const executor = createModelExecutor({
 			streamFn,
 			modelResolver: mockModelResolver(),
@@ -145,7 +145,7 @@ describe("trust gate enforcement", () => {
 				write_file: {
 					description: "Write a file",
 					execute: async () => {
-						writeFileCalled = true;
+						_writeFileCalled = true;
 						return { success: true };
 					},
 				},
