@@ -463,8 +463,45 @@ export function createBuildplaneOrchestrator(
 				return { run: failedRun, failure };
 			}
 
-			// 3. Mark running
-			storage.markRunRunning(run.id);
+			// 3. Mark running (guarded — persistence failure must not orphan workspace)
+			try {
+				storage.markRunRunning(run.id);
+			} catch (markError) {
+				bus.emit({
+					kind: "execution-error",
+					runId: run.id,
+					timestamp: new Date().toISOString(),
+					message:
+						markError instanceof Error ? markError.message : String(markError),
+					phase: "run-state-transition",
+				});
+				// Clean up the prepared workspace before failing
+				if (preparedWorkspace) {
+					try {
+						workspace.deleteWorkspace({ path: preparedWorkspace.path });
+					} catch {
+						// best-effort cleanup
+					}
+				}
+				const failedRun = storage.completeRun(run.id, "failed");
+				bus.emit({
+					kind: "run-completed",
+					runId: run.id,
+					unitId: packet.unit.id,
+					timestamp: new Date().toISOString(),
+					status: "failed" as const,
+				});
+				return {
+					run: failedRun,
+					failure: {
+						kind: "infrastructure-failure" as const,
+						message:
+							markError instanceof Error
+								? markError.message
+								: String(markError),
+					},
+				};
+			}
 			bus.emit({
 				kind: "run-started",
 				runId: run.id,
@@ -746,33 +783,58 @@ export function createBuildplaneOrchestrator(
 			}
 
 			// 7. Finalize run using workspace-aware commit methods
+			// Guarded — storage failure must not prevent run-completed emission
+			// or workspace cleanup.
 			let completedRun: Run;
-			if (finalStatus === "passed" && lastDecision?.outcome === "approved") {
-				completedRun = storage.commitRunSuccessOutcome(
-					run.id,
-					lastDecision as {
-						kind: "advance-run";
-						outcome: "approved";
-						reasons: readonly string[];
-					},
-				);
-			} else if (lastDecision?.outcome === "rejected") {
-				completedRun = storage.commitRunFailureOutcome(run.id, {
-					decision: lastDecision as {
-						kind: "reject-run";
-						outcome: "rejected";
-						reasons: readonly string[];
-					},
-					workspaceStatus: "retained",
+			try {
+				if (finalStatus === "passed" && lastDecision?.outcome === "approved") {
+					completedRun = storage.commitRunSuccessOutcome(
+						run.id,
+						lastDecision as {
+							kind: "advance-run";
+							outcome: "approved";
+							reasons: readonly string[];
+						},
+					);
+				} else if (lastDecision?.outcome === "rejected") {
+					completedRun = storage.commitRunFailureOutcome(run.id, {
+						decision: lastDecision as {
+							kind: "reject-run";
+							outcome: "rejected";
+							reasons: readonly string[];
+						},
+						workspaceStatus: "retained",
+					});
+				} else {
+					completedRun = storage.commitRunFailureOutcome(run.id, {
+						infrastructureFailure: {
+							kind: "run-failed",
+							message: "Run did not produce an approved policy decision",
+						},
+						workspaceStatus: "retained",
+					});
+				}
+			} catch (commitError) {
+				bus.emit({
+					kind: "execution-error",
+					runId: run.id,
+					timestamp: new Date().toISOString(),
+					message:
+						commitError instanceof Error
+							? commitError.message
+							: String(commitError),
+					phase: "outcome-persistence",
 				});
-			} else {
-				completedRun = storage.commitRunFailureOutcome(run.id, {
-					infrastructureFailure: {
-						kind: "run-failed",
-						message: "Run did not produce an approved policy decision",
-					},
-					workspaceStatus: "retained",
-				});
+				// Fall back to a plain completeRun so the run is not orphaned
+				try {
+					completedRun = storage.completeRun(run.id, finalStatus);
+				} catch {
+					// Last resort: use the in-memory run record
+					completedRun = {
+						...run,
+						status: finalStatus,
+					};
+				}
 			}
 
 			bus.emit({
