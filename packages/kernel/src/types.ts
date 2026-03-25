@@ -35,6 +35,52 @@ export type RunStatus =
 	| "failed"
 	| "cancelled";
 
+// ── Steps ──────────────────────────────────────────────────
+
+/** The kind of work a step represents within a multi-step run. */
+export type StepKind =
+	| "model-turn"
+	| "command"
+	| "verification"
+	| "retry-decision";
+
+/** Lifecycle status of an individual step. */
+export type StepStatus =
+	| "pending"
+	| "running"
+	| "completed"
+	| "failed"
+	| "skipped";
+
+/**
+ * One step within a multi-step run.
+ *
+ * Steps are children of a Run. The orchestrator advances through
+ * steps until the run completes or a budget is exhausted.
+ */
+export interface Step {
+	/** Unique identifier for this step. */
+	readonly id: string;
+
+	/** The run this step belongs to. */
+	readonly runId: string;
+
+	/** Zero-based position within the run. */
+	readonly index: number;
+
+	/** The kind of work this step represents. */
+	readonly kind: StepKind;
+
+	/** Current lifecycle status of the step. */
+	readonly status: StepStatus;
+
+	/** ISO timestamp when this step started executing. */
+	readonly startedAt?: string;
+
+	/** ISO timestamp when this step finished. */
+	readonly completedAt?: string;
+}
+
 /**
  * One end-to-end execution attempt of a Unit under a policy profile.
  *

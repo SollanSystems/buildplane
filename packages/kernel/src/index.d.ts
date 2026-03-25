@@ -1,14 +1,10 @@
 export type {
-	BuildplaneOrchestrator,
-	CreateBuildplaneOrchestratorOptions,
-} from "./orchestrator.ts";
-export { createBuildplaneOrchestrator } from "./orchestrator.ts";
-export { createEventBus } from "./events.ts";
-export type {
+	BudgetExhaustedEvent,
 	CommandExecutionCompleteEvent,
-	EvidenceRecordedEvent,
+	DiffCapturedEvent,
 	EventBus,
 	EventListener,
+	EvidenceRecordedEvent,
 	ExecutionErrorEvent,
 	ExecutionEvent,
 	ExecutionEventKind,
@@ -16,12 +12,24 @@ export type {
 	ModelResponseCompleteEvent,
 	ModelTokenDeltaEvent,
 	PolicyDecisionEvent,
+	RetryDecisionEvent,
 	RunCompletedEvent,
 	RunCreatedEvent,
 	RunStartedEvent,
+	StepCompletedEvent,
+	StepStartedEvent,
 	ToolCallCompletedEvent,
 	ToolCallStartedEvent,
+	VerificationResultEvent,
 } from "./events.ts";
+export { createEventBus } from "./events.ts";
+export type { BudgetEnforcer, BudgetExhaustion } from "./budget.ts";
+export { createBudgetEnforcer } from "./budget.ts";
+export type {
+	BuildplaneOrchestrator,
+	CreateBuildplaneOrchestratorOptions,
+} from "./orchestrator.ts";
+export { createBuildplaneOrchestrator } from "./orchestrator.ts";
 export { parseUnitPacket } from "./packet.ts";
 export type {
 	BuildplanePolicyPort,
@@ -31,6 +39,8 @@ export type {
 } from "./ports.ts";
 export type {
 	ApprovedPolicyDecision,
+	BudgetLimits,
+	BudgetSnapshot,
 	CommandExecutionBlock,
 	ExecutionReceipt,
 	InspectSnapshot,
@@ -42,9 +52,17 @@ export type {
 	RunPacketResult,
 	StatusSnapshot,
 	StatusWorkspaceSummary,
+	StepRecord,
 	ToolDefinition,
 	UnitPacket,
 	WorkspaceSnapshot,
 } from "./run-loop.ts";
-export type { Run, RunStatus, Unit } from "./types.ts";
+export type {
+	Run,
+	RunStatus,
+	Step,
+	StepKind,
+	StepStatus,
+	Unit,
+} from "./types.ts";
 export { validatePacketForWorkspaceRoot } from "./workspace-paths.ts";

@@ -12,7 +12,8 @@
 	},
 	"dependencies": {
 		"@buildplane/kernel": "workspace:*",
-		"@buildplane/runtime": "workspace:*"
+		"@buildplane/runtime": "workspace:*",
+		"@buildplane/adapters-tools": "workspace:*"
 	},
 	"devDependencies": {
 		"@ai-sdk/anthropic": "^3.0.63",

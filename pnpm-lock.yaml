@@ -41,6 +41,12 @@ importers:
       '@buildplane/adapters-git':
         specifier: workspace:*
         version: link:../../packages/adapters-git
+      '@buildplane/adapters-models':
+        specifier: workspace:*
+        version: link:../../packages/adapters-models
+      '@buildplane/adapters-tools':
+        specifier: workspace:*
+        version: link:../../packages/adapters-tools
       '@buildplane/kernel':
         specifier: workspace:*
         version: link:../../packages/kernel
@@ -65,6 +71,9 @@ importers:
 
   packages/adapters-models:
     dependencies:
+      '@buildplane/adapters-tools':
+        specifier: workspace:*
+        version: link:../adapters-tools
       '@buildplane/kernel':
         specifier: workspace:*
         version: link:../kernel
@@ -79,7 +88,11 @@ importers:
         specifier: ^6.0.134
         version: 6.0.134(zod@4.3.6)
 
-  packages/adapters-tools: {}
+  packages/adapters-tools:
+    dependencies:
+      '@buildplane/kernel':
+        specifier: workspace:*
+        version: link:../kernel
 
   packages/compat-gsd: {}
 

@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
+import type { ToolContext, ToolRouter } from "@buildplane/adapters-tools";
 import type {
 	EventBus,
 	ExecutionReceipt,
@@ -13,6 +14,7 @@ export interface ModelExecutorPort {
 		packet: UnitPacket,
 		projectRoot: string,
 		eventBus: EventBus,
+		runId?: string,
 	): Promise<ExecutionReceipt>;
 }
 
@@ -42,6 +44,8 @@ export type StreamFunction = (options: {
 	model: unknown;
 	system?: string;
 	prompt: string;
+	tools?: Record<string, unknown>;
+	maxSteps?: number;
 }) => StreamResult;
 
 /** A function that resolves a provider+model string to an AI SDK model instance. */
@@ -52,6 +56,8 @@ export interface CreateModelExecutorOptions {
 	streamFn?: StreamFunction;
 	/** Override the model resolver (for testing). Defaults to AI SDK provider lookup. */
 	modelResolver?: ModelResolver;
+	/** Tool router providing executable tool definitions for model calls. */
+	toolRouter?: ToolRouter;
 }
 
 export function createModelExecutor(
@@ -59,6 +65,7 @@ export function createModelExecutor(
 ): ModelExecutorPort {
 	const streamFn = options.streamFn;
 	const modelResolver = options.modelResolver;
+	const toolRouter = options.toolRouter;
 
 	async function getStreamFn(): Promise<StreamFunction> {
 		if (streamFn) return streamFn;
@@ -95,7 +102,10 @@ export function createModelExecutor(
 			packet: UnitPacket,
 			projectRoot: string,
 			eventBus: EventBus,
+			runId?: string,
 		): Promise<ExecutionReceipt> {
+			const effectiveRunId = runId ?? "";
+
 			// Command packets delegate to the sync executor
 			if (packet.execution) {
 				return executeCommandPacket(packet, projectRoot);
@@ -116,6 +126,8 @@ export function createModelExecutor(
 					eventBus,
 					stream,
 					resolver,
+					effectiveRunId,
+					toolRouter,
 				);
 				return receipt;
 			} catch (error) {
@@ -124,7 +136,7 @@ export function createModelExecutor(
 
 				eventBus.emit({
 					kind: "execution-error",
-					runId: "",
+					runId: effectiveRunId,
 					timestamp: completedAt,
 					message,
 					phase: "model-execution",
@@ -155,6 +167,8 @@ async function executeModelStream(
 	eventBus: EventBus,
 	streamFn: StreamFunction,
 	modelResolver: ModelResolver,
+	runId: string,
+	toolRouter?: ToolRouter,
 ): Promise<ExecutionReceipt> {
 	const model = packet.model;
 	if (!model) {
@@ -164,10 +178,25 @@ async function executeModelStream(
 
 	const modelInstance = modelResolver(model.provider, model.model);
 
+	// Build AI SDK-compatible tools if a router and tool definitions are present
+	let tools: Record<string, unknown> | undefined;
+	let maxSteps: number | undefined;
+	if (toolRouter && model.tools && model.tools.length > 0) {
+		const context: ToolContext = {
+			workspaceRoot: projectRoot,
+			eventBus,
+			runId,
+		};
+		tools = toolRouter.toAiSdkTools(context);
+		maxSteps = packet.budget?.maxSteps ?? 10;
+	}
+
 	const result = streamFn({
 		model: modelInstance,
 		system: model.systemPrompt,
 		prompt: "Execute the assigned task.",
+		tools,
+		maxSteps,
 	});
 
 	let fullText = "";
@@ -180,7 +209,7 @@ async function executeModelStream(
 				fullText += chunk.textDelta;
 				eventBus.emit({
 					kind: "model-token-delta",
-					runId: "",
+					runId,
 					timestamp: new Date().toISOString(),
 					delta: chunk.textDelta,
 				});
@@ -189,7 +218,7 @@ async function executeModelStream(
 			case "tool-call": {
 				eventBus.emit({
 					kind: "tool-call-started",
-					runId: "",
+					runId,
 					timestamp: new Date().toISOString(),
 					toolCallId: chunk.toolCallId,
 					toolName: chunk.toolName,
@@ -200,7 +229,7 @@ async function executeModelStream(
 			case "tool-result": {
 				eventBus.emit({
 					kind: "tool-call-completed",
-					runId: "",
+					runId,
 					timestamp: new Date().toISOString(),
 					toolCallId: chunk.toolCallId,
 					toolName: chunk.toolName,
@@ -210,7 +239,15 @@ async function executeModelStream(
 			}
 			case "step-finish": {
 				finishReason = chunk.finishReason ?? "unknown";
-				usage = chunk.usage ?? undefined;
+				if (chunk.usage) {
+					usage = usage
+						? {
+								promptTokens: usage.promptTokens + chunk.usage.promptTokens,
+								completionTokens:
+									usage.completionTokens + chunk.usage.completionTokens,
+							}
+						: chunk.usage;
+				}
 				break;
 			}
 		}
@@ -220,7 +257,7 @@ async function executeModelStream(
 
 	eventBus.emit({
 		kind: "model-response-complete",
-		runId: "",
+		runId,
 		timestamp: completedAt,
 		text: fullText,
 		finishReason,

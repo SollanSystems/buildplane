@@ -132,9 +132,38 @@ export function createGitWorkspaceAdapter(
 
 			return { deleted: true };
 		},
+		captureWorkspaceDiff(workspacePath: string) {
+			const diffResult = executeGitCommand(runGit, workspacePath, [
+				"diff",
+				"HEAD",
+			]);
+			if (diffResult.status !== 0) {
+				return { diff: "", filesChanged: 0 };
+			}
+
+			const statResult = executeGitCommand(runGit, workspacePath, [
+				"diff",
+				"HEAD",
+				"--stat",
+			]);
+			const filesChanged =
+				statResult.status === 0 ? countChangedFiles(statResult.stdout) : 0;
+
+			return { diff: diffResult.stdout, filesChanged };
+		},
 	};
 
 	return adapter;
+}
+
+function countChangedFiles(statOutput: string): number {
+	const lines = statOutput.trim().split("\n");
+	// The last line of --stat is the summary, e.g. "3 files changed, ..."
+	// Every line before it is one changed file.
+	if (lines.length <= 1) {
+		return 0;
+	}
+	return lines.length - 1;
 }
 
 function executeGitCommand(

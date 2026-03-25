@@ -57,6 +57,7 @@ export interface BuildplaneRuntimePort {
 		packet: UnitPacket,
 		projectRoot: string,
 		eventBus: EventBus,
+		runId?: string,
 	): Promise<ExecutionReceipt>;
 }
 
@@ -77,5 +78,10 @@ export interface BuildplaneWorkspacePort {
 	deleteWorkspace(workspace: { path: string }): {
 		deleted: boolean;
 		cleanupError?: string;
+	};
+	/** Capture the diff between HEAD and the current working tree state. */
+	captureWorkspaceDiff?(workspacePath: string): {
+		diff: string;
+		filesChanged: number;
 	};
 }

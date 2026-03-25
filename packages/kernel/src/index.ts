@@ -1,5 +1,9 @@
+export type { BudgetEnforcer, BudgetExhaustion } from "./budget.js";
+export { createBudgetEnforcer } from "./budget.js";
 export type {
+	BudgetExhaustedEvent,
 	CommandExecutionCompleteEvent,
+	DiffCapturedEvent,
 	EventBus,
 	EventListener,
 	EvidenceRecordedEvent,
@@ -10,11 +14,15 @@ export type {
 	ModelResponseCompleteEvent,
 	ModelTokenDeltaEvent,
 	PolicyDecisionEvent,
+	RetryDecisionEvent,
 	RunCompletedEvent,
 	RunCreatedEvent,
 	RunStartedEvent,
+	StepCompletedEvent,
+	StepStartedEvent,
 	ToolCallCompletedEvent,
 	ToolCallStartedEvent,
+	VerificationResultEvent,
 } from "./events.js";
 export { createEventBus } from "./events.js";
 export type {
@@ -31,6 +39,8 @@ export type {
 } from "./ports.js";
 export type {
 	ApprovedPolicyDecision,
+	BudgetLimits,
+	BudgetSnapshot,
 	CommandExecutionBlock,
 	ExecutionReceipt,
 	InspectSnapshot,
@@ -42,9 +52,17 @@ export type {
 	RunPacketResult,
 	StatusSnapshot,
 	StatusWorkspaceSummary,
+	StepRecord,
 	ToolDefinition,
 	UnitPacket,
 	WorkspaceSnapshot,
 } from "./run-loop.js";
-export type { Run, RunStatus, Unit } from "./types.js";
+export type {
+	Run,
+	RunStatus,
+	Step,
+	StepKind,
+	StepStatus,
+	Unit,
+} from "./types.js";
 export { validatePacketForWorkspaceRoot } from "./workspace-paths.js";

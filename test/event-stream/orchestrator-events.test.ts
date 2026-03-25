@@ -164,9 +164,12 @@ describe("orchestrator event emission", () => {
 		expect(kinds).toEqual([
 			"run-created",
 			"run-started",
+			"step-started",
 			"execution-started",
 			"command-execution-complete",
 			"evidence-recorded",
+			"step-completed",
+			"verification-result",
 			"policy-decision",
 			"run-completed",
 		]);
@@ -197,9 +200,12 @@ describe("orchestrator event emission", () => {
 		expect(kinds).toEqual([
 			"run-created",
 			"run-started",
+			"step-started",
 			"execution-started",
 			"command-execution-complete",
 			"evidence-recorded",
+			"step-completed",
+			"verification-result",
 			"policy-decision",
 			"run-completed",
 		]);
@@ -213,7 +219,7 @@ describe("orchestrator event emission", () => {
 		let asyncCalled = false;
 		const runtime: BuildplaneRuntimePort = {
 			executePacket: () => makeSuccessReceipt(),
-			executePacketAsync: async (_packet, _root, eventBus) => {
+			executePacketAsync: async (_packet, _root, eventBus, _runId?) => {
 				asyncCalled = true;
 				eventBus.emit({
 					kind: "model-token-delta",
@@ -276,11 +282,22 @@ describe("orchestrator event emission", () => {
 
 		expect(result.run.status).toBe("failed");
 
+		const kinds = events.map((e) => e.kind);
+		expect(kinds).toContain("step-started");
+		expect(kinds).toContain("step-completed");
+		expect(kinds).toContain("verification-result");
+		expect(kinds).toContain("retry-decision");
+
 		const policyEvent = events.find((e) => e.kind === "policy-decision");
 		expect(policyEvent).toBeDefined();
 		if (policyEvent?.kind === "policy-decision") {
 			expect(policyEvent.outcome).toBe("rejected");
 			expect(policyEvent.reasons).toContain("exit code 1");
+		}
+
+		const retryEvent = events.find((e) => e.kind === "retry-decision");
+		if (retryEvent?.kind === "retry-decision") {
+			expect(retryEvent.willRetry).toBe(false);
 		}
 
 		const completedEvent = events.find((e) => e.kind === "run-completed");

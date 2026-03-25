@@ -128,6 +128,17 @@ function ensureRunsUsedWorkspaceColumn(database: DatabaseSync): void {
 	}
 }
 
+function ensureRunsStepColumns(database: DatabaseSync): void {
+	if (!tableHasColumn(database, "runs", "step_count")) {
+		database.exec(
+			`ALTER TABLE runs ADD COLUMN step_count INTEGER NOT NULL DEFAULT 0`,
+		);
+	}
+	if (!tableHasColumn(database, "runs", "budget_snapshot")) {
+		database.exec(`ALTER TABLE runs ADD COLUMN budget_snapshot TEXT`);
+	}
+}
+
 function tableExists(database: DatabaseSync, tableName: string): boolean {
 	const row = database
 		.prepare(
@@ -216,10 +227,22 @@ export function bootstrapStorageProjectionSchema(database: DatabaseSync): void {
 			finalized_at TEXT,
 			cleanup_error TEXT
 		);
+
+		CREATE TABLE IF NOT EXISTS steps (
+			id TEXT PRIMARY KEY,
+			run_id TEXT NOT NULL,
+			step_index INTEGER NOT NULL,
+			kind TEXT NOT NULL,
+			status TEXT NOT NULL,
+			started_at TEXT NOT NULL,
+			completed_at TEXT,
+			detail TEXT
+		);
 	`);
 
 	ensureEvidenceMessageColumn(database);
 	ensureRunsUsedWorkspaceColumn(database);
+	ensureRunsStepColumns(database);
 	assertWorkspaceTableColumns(database);
 }
 

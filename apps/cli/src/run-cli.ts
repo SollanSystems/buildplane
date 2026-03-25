@@ -72,9 +72,6 @@ async function loadCliOrchestrator(
 		};
 		parseUnitPacket: (input: string) => unknown;
 	};
-	const runtime = (await import("@buildplane/runtime")) as unknown as {
-		executePacket: (packet: unknown, root: string) => unknown;
-	};
 	const policy = (await import("@buildplane/policy")) as unknown as {
 		evaluateRun: (packet: unknown, receipt: unknown) => unknown;
 	};
@@ -106,10 +103,33 @@ async function loadCliOrchestrator(
 		createGitWorkspaceAdapter: () => unknown;
 	};
 
+	// Wire tool router and model executor for model-backed packets
+	const adaptersTools = (await import(
+		"@buildplane/adapters-tools"
+	)) as unknown as {
+		createDefaultToolRouter: () => unknown;
+	};
+	const adaptersModels = (await import(
+		"@buildplane/adapters-models"
+	)) as unknown as {
+		createModelExecutor: (options: { toolRouter?: unknown }) => {
+			executePacket: (packet: unknown, root: string) => unknown;
+			executePacketAsync?: (
+				packet: unknown,
+				root: string,
+				eventBus: unknown,
+				runId?: string,
+			) => Promise<unknown>;
+		};
+	};
+
+	const toolRouter = adaptersTools.createDefaultToolRouter();
+	const modelExecutor = adaptersModels.createModelExecutor({ toolRouter });
+
 	return kernel.createBuildplaneOrchestrator({
 		projectRoot,
 		storage: storage.createBuildplaneStorage(projectRoot),
-		runtime: { executePacket: runtime.executePacket },
+		runtime: modelExecutor,
 		policy: { evaluateRun: policy.evaluateRun },
 		workspace: adaptersGit.createGitWorkspaceAdapter(),
 		eventBus,

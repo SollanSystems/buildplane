@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import { createBudgetEnforcer } from "./budget.js";
 import type { EventBus } from "./events.js";
 import type {
 	BuildplanePolicyPort,
@@ -8,16 +9,18 @@ import type {
 	BuildplaneWorkspacePort,
 } from "./ports.js";
 import type {
+	BudgetLimits,
 	ExecutionReceipt,
 	InspectSnapshot,
 	PolicyDecision,
 	RunInfrastructureFailure,
 	RunPacketResult,
 	StatusSnapshot,
+	StepRecord,
 	UnitPacket,
 	WorkspaceSnapshot,
 } from "./run-loop.js";
-import type { Run } from "./types.js";
+import type { Run, StepKind, StepStatus } from "./types.js";
 import { validatePacketForWorkspaceRoot } from "./workspace-paths.js";
 
 /** A no-op event bus for the sync path when no bus is provided. */
@@ -366,8 +369,15 @@ export function createBuildplaneOrchestrator(
 		},
 		async runPacketAsync(packet, eventBus?) {
 			const bus = eventBus ?? defaultBus;
-			const run = storage.createRun(packet);
+			const isModelPacket = !!packet.model;
+			const maxSteps = packet.budget?.maxSteps ?? (isModelPacket ? 3 : 1);
+			const budgetLimits: BudgetLimits = {
+				...packet.budget,
+				maxSteps,
+			};
 
+			// 1. Create run
+			const run = storage.createRun(packet);
 			bus.emit({
 				kind: "run-created",
 				runId: run.id,
@@ -376,48 +386,32 @@ export function createBuildplaneOrchestrator(
 				status: "pending" as const,
 			});
 
-			storage.markRunRunning(run.id);
-
-			bus.emit({
-				kind: "run-started",
-				runId: run.id,
-				unitId: packet.unit.id,
-				timestamp: new Date().toISOString(),
-				status: "running" as const,
-			});
-
-			bus.emit({
-				kind: "execution-started",
-				runId: run.id,
-				timestamp: new Date().toISOString(),
-				executionType: packet.model ? ("model" as const) : ("command" as const),
-			});
-
-			let receipt: ExecutionReceipt;
+			// 2. Prepare workspace
+			let preparedWorkspace: WorkspaceSnapshot | undefined;
 			try {
-				if (runtime.executePacketAsync) {
-					receipt = await runtime.executePacketAsync(packet, projectRoot, bus);
-				} else {
-					receipt = runtime.executePacket(packet, projectRoot);
-					bus.emit({
-						kind: "command-execution-complete",
-						runId: run.id,
-						timestamp: new Date().toISOString(),
-						exitCode: receipt.exitCode,
-						outputChecks: receipt.outputChecks.map((c) => ({
-							path: c.path,
-							exists: c.exists,
-						})),
-					});
-				}
+				const { headSha } = workspace.assertRunnableRepository(projectRoot);
+				const created = workspace.prepareWorkspace(
+					projectRoot,
+					run.id,
+					headSha,
+				);
+				preparedWorkspace = toWorkspaceSnapshot(run, created);
+				storage.recordWorkspacePrepared(run.id, {
+					path: created.path,
+					headSha: created.headSha,
+					sourceProjectRoot: projectRoot,
+				});
 			} catch (error) {
-				const message = error instanceof Error ? error.message : String(error);
+				const failure = infrastructureFailure(
+					"workspace-prepare-failed",
+					error,
+				);
 				bus.emit({
 					kind: "execution-error",
 					runId: run.id,
 					timestamp: new Date().toISOString(),
-					message,
-					phase: "execution",
+					message: failure.message,
+					phase: "workspace-prepare",
 				});
 				const failedRun = storage.completeRun(run.id, "failed");
 				bus.emit({
@@ -427,44 +421,329 @@ export function createBuildplaneOrchestrator(
 					timestamp: new Date().toISOString(),
 					status: "failed" as const,
 				});
-				return {
-					run: failedRun,
-					failure: { kind: "runtime-execution-failed", message },
-				};
+				return { run: failedRun, failure };
 			}
 
-			storage.recordExecutionEvidence(run.id, receipt);
+			const executionRoot = preparedWorkspace.path;
+
+			// 3. Mark running
+			storage.markRunRunning(run.id);
 			bus.emit({
-				kind: "evidence-recorded",
+				kind: "run-started",
 				runId: run.id,
+				unitId: packet.unit.id,
 				timestamp: new Date().toISOString(),
-				evidenceKind: "command-exit",
-				status: receipt.exitCode === 0 ? "pass" : "fail",
+				status: "running" as const,
 			});
 
-			const decision = policy.evaluateRun(packet, receipt);
-			bus.emit({
-				kind: "policy-decision",
-				runId: run.id,
-				timestamp: new Date().toISOString(),
-				decisionKind: decision.kind,
-				outcome: decision.outcome,
-				reasons: decision.reasons,
-			});
+			// 4. Initialize budget enforcer
+			const budgetEnforcer = createBudgetEnforcer(budgetLimits, Date.now());
 
-			storage.recordDecision(run.id, decision);
-			const finalStatus = decision.outcome === "approved" ? "passed" : "failed";
-			const completedRun = storage.completeRun(run.id, finalStatus);
+			// 5. Multi-step loop
+			const steps: StepRecord[] = [];
+			let lastReceipt: ExecutionReceipt | undefined;
+			let lastDecision: PolicyDecision | undefined;
+			let stepIndex = 0;
+			let finalStatus: "passed" | "failed" = "failed";
+
+			for (let attempt = 0; attempt < maxSteps; attempt++) {
+				// 5a. Check budget
+				const exhaustion = budgetEnforcer.check();
+				if (exhaustion) {
+					bus.emit({
+						kind: "budget-exhausted",
+						runId: run.id,
+						timestamp: new Date().toISOString(),
+						dimension: exhaustion.dimension,
+						limit: exhaustion.limit,
+						consumed: exhaustion.consumed,
+					});
+					break;
+				}
+
+				// 5b. Start step
+				const stepId = `${run.id}-step-${stepIndex}`;
+				const stepKind: StepKind = isModelPacket ? "model-turn" : "command";
+				const stepStartedAt = new Date().toISOString();
+
+				bus.emit({
+					kind: "step-started",
+					runId: run.id,
+					timestamp: stepStartedAt,
+					stepId,
+					stepIndex,
+					stepKind,
+				});
+
+				budgetEnforcer.recordStep();
+
+				// 5c. Execute
+				let receipt: ExecutionReceipt;
+				bus.emit({
+					kind: "execution-started",
+					runId: run.id,
+					timestamp: new Date().toISOString(),
+					executionType: isModelPacket
+						? ("model" as const)
+						: ("command" as const),
+				});
+
+				try {
+					if (runtime.executePacketAsync) {
+						receipt = await runtime.executePacketAsync(
+							packet,
+							executionRoot,
+							bus,
+							run.id,
+						);
+					} else {
+						receipt = runtime.executePacket(packet, executionRoot);
+						bus.emit({
+							kind: "command-execution-complete",
+							runId: run.id,
+							timestamp: new Date().toISOString(),
+							exitCode: receipt.exitCode,
+							outputChecks: receipt.outputChecks.map((c) => ({
+								path: c.path,
+								exists: c.exists,
+							})),
+						});
+					}
+				} catch (error) {
+					const message =
+						error instanceof Error ? error.message : String(error);
+					bus.emit({
+						kind: "execution-error",
+						runId: run.id,
+						timestamp: new Date().toISOString(),
+						message,
+						phase: "execution",
+					});
+					const stepCompletedAt = new Date().toISOString();
+					steps.push({
+						id: stepId,
+						kind: stepKind,
+						status: "failed",
+						startedAt: stepStartedAt,
+						completedAt: stepCompletedAt,
+					});
+					bus.emit({
+						kind: "step-completed",
+						runId: run.id,
+						timestamp: stepCompletedAt,
+						stepId,
+						stepKind,
+						stepStatus: "failed",
+					});
+					break;
+				}
+
+				lastReceipt = receipt;
+
+				// 5d. Record evidence
+				storage.recordExecutionEvidence(run.id, receipt);
+				bus.emit({
+					kind: "evidence-recorded",
+					runId: run.id,
+					timestamp: new Date().toISOString(),
+					evidenceKind: isModelPacket ? "model-response" : "command-exit",
+					status: receipt.exitCode === 0 ? "pass" : "fail",
+				});
+
+				// Track token usage for budget
+				if (isModelPacket && receipt.stdout && receipt.exitCode === 0) {
+					// Token usage is tracked via events; budget enforcer
+					// is updated from step-finish events in the model executor.
+					// For now, we don't double-count here.
+				}
+
+				// 5e. Complete step
+				const stepCompletedAt = new Date().toISOString();
+				const stepStatus: StepStatus = "completed";
+				steps.push({
+					id: stepId,
+					kind: stepKind,
+					status: stepStatus,
+					startedAt: stepStartedAt,
+					completedAt: stepCompletedAt,
+				});
+				bus.emit({
+					kind: "step-completed",
+					runId: run.id,
+					timestamp: stepCompletedAt,
+					stepId,
+					stepKind,
+					stepStatus,
+				});
+
+				// 5f. Evaluate policy
+				const decision = policy.evaluateRun(packet, receipt);
+				lastDecision = decision;
+
+				const checks = [
+					{
+						name: "exit-code",
+						passed: receipt.exitCode === 0,
+						detail: `exit code ${receipt.exitCode}`,
+					},
+					...receipt.outputChecks.map((c) => ({
+						name: `output:${c.path}`,
+						passed: c.exists,
+						detail: c.exists ? "exists" : "missing",
+					})),
+				];
+
+				bus.emit({
+					kind: "verification-result",
+					runId: run.id,
+					timestamp: new Date().toISOString(),
+					passed: decision.outcome === "approved",
+					checks,
+				});
+
+				bus.emit({
+					kind: "policy-decision",
+					runId: run.id,
+					timestamp: new Date().toISOString(),
+					decisionKind: decision.kind,
+					outcome: decision.outcome,
+					reasons: decision.reasons,
+				});
+
+				storage.recordDecision(run.id, decision);
+
+				// 5g. If approved, break to pass
+				if (decision.outcome === "approved") {
+					finalStatus = "passed";
+					break;
+				}
+
+				// 5h/5i. If rejected, decide whether to retry
+				const remainingAttempts = maxSteps - (attempt + 1);
+				const willRetry = remainingAttempts > 0 && isModelPacket;
+
+				bus.emit({
+					kind: "retry-decision",
+					runId: run.id,
+					timestamp: new Date().toISOString(),
+					willRetry,
+					reason: willRetry
+						? `Verification failed; ${remainingAttempts} attempt(s) remaining`
+						: "No retries remaining or command packet",
+					attempt: attempt + 1,
+					maxAttempts: maxSteps,
+				});
+
+				if (!willRetry) {
+					break;
+				}
+
+				stepIndex++;
+			}
+
+			// 6. Capture diff
+			if (preparedWorkspace && workspace.captureWorkspaceDiff) {
+				try {
+					const diffResult = workspace.captureWorkspaceDiff(
+						preparedWorkspace.path,
+					);
+					if (diffResult.diff) {
+						bus.emit({
+							kind: "diff-captured",
+							runId: run.id,
+							timestamp: new Date().toISOString(),
+							diff: diffResult.diff,
+							filesChanged: diffResult.filesChanged,
+						});
+					}
+				} catch {
+					// Diff capture is best-effort
+				}
+			}
+
+			// 7. Finalize run using workspace-aware commit methods
+			let completedRun: Run;
+			if (finalStatus === "passed" && lastDecision?.outcome === "approved") {
+				completedRun = storage.commitRunSuccessOutcome(
+					run.id,
+					lastDecision as {
+						kind: "advance-run";
+						outcome: "approved";
+						reasons: readonly string[];
+					},
+				);
+			} else if (lastDecision?.outcome === "rejected") {
+				completedRun = storage.commitRunFailureOutcome(run.id, {
+					decision: lastDecision as {
+						kind: "reject-run";
+						outcome: "rejected";
+						reasons: readonly string[];
+					},
+					workspaceStatus: "retained",
+				});
+			} else {
+				completedRun = storage.commitRunFailureOutcome(run.id, {
+					infrastructureFailure: {
+						kind: "run-failed",
+						message: "Run did not produce an approved policy decision",
+					},
+					workspaceStatus: "retained",
+				});
+			}
 
 			bus.emit({
 				kind: "run-completed",
 				runId: run.id,
 				unitId: packet.unit.id,
 				timestamp: new Date().toISOString(),
-				status: finalStatus as "passed" | "failed",
+				status: finalStatus,
 			});
 
-			return { run: completedRun, receipt, decision };
+			// 8. Cleanup workspace (only on success)
+			let workspaceResult: WorkspaceSnapshot | undefined = preparedWorkspace;
+			if (preparedWorkspace && finalStatus === "passed") {
+				try {
+					const cleanupResult = workspace.deleteWorkspace({
+						path: preparedWorkspace.path,
+					});
+					if (cleanupResult.deleted) {
+						storage.recordWorkspaceDeleted(run.id);
+						workspaceResult = {
+							...preparedWorkspace,
+							status: "deleted",
+						};
+					} else {
+						const cleanupError =
+							cleanupResult.cleanupError ?? "workspace cleanup failed";
+						storage.recordWorkspaceCleanupFailed(run.id, cleanupError);
+						workspaceResult = {
+							...preparedWorkspace,
+							status: "cleanup-failed",
+							cleanupError,
+						};
+					}
+				} catch {
+					workspaceResult = {
+						...preparedWorkspace,
+						status: "retained",
+					};
+				}
+			} else if (preparedWorkspace) {
+				// Failed runs retain their workspace for debugging
+				workspaceResult = {
+					...preparedWorkspace,
+					status: "retained",
+				};
+			}
+
+			return {
+				run: completedRun,
+				receipt: lastReceipt,
+				decision: lastDecision,
+				workspace: workspaceResult,
+				steps,
+				budgetSnapshot: budgetEnforcer.snapshot(),
+			};
 		},
 		getStatus() {
 			return storage.getStatusSnapshot();

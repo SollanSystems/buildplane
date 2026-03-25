@@ -1,4 +1,4 @@
-import type { Run, RunStatus, Unit } from "./types.js";
+import type { Run, RunStatus, StepKind, StepStatus, Unit } from "./types.js";
 
 export interface ToolDefinition {
 	readonly name: string;
@@ -19,6 +19,51 @@ export interface CommandExecutionBlock {
 	readonly cwd?: string;
 }
 
+// ── Budget ─────────────────────────────────────────────────
+
+/** Hard limits for a run's resource consumption. */
+export interface BudgetLimits {
+	/** Maximum wall-clock duration in milliseconds. */
+	readonly maxDurationMs?: number;
+
+	/** Maximum total tokens (prompt + completion) across all model turns. */
+	readonly maxTotalTokens?: number;
+
+	/** Maximum number of shell/command executions. */
+	readonly maxCommandCount?: number;
+
+	/** Maximum number of orchestrator steps (model turns + retries). */
+	readonly maxSteps?: number;
+
+	/** Glob patterns (relative to worktree) that tools may access. */
+	readonly allowedPaths?: readonly string[];
+
+	/** Network access policy for tool execution. */
+	readonly networkPolicy?: "none" | "localhost-only";
+}
+
+/** Point-in-time snapshot of budget consumption. */
+export interface BudgetSnapshot {
+	readonly elapsedMs: number;
+	readonly totalTokens: number;
+	readonly commandCount: number;
+	readonly stepCount: number;
+}
+
+// ── Step records ───────────────────────────────────────────
+
+/** Serializable record of a completed or in-progress step. */
+export interface StepRecord {
+	readonly id: string;
+	readonly kind: StepKind;
+	readonly status: StepStatus;
+	readonly startedAt: string;
+	readonly completedAt?: string;
+	readonly detail?: Record<string, unknown>;
+}
+
+// ── Packets ────────────────────────────────────────────────
+
 export interface UnitPacket {
 	readonly unit: Unit;
 	readonly execution?: CommandExecutionBlock;
@@ -26,6 +71,7 @@ export interface UnitPacket {
 	readonly verification: {
 		readonly requiredOutputs: readonly string[];
 	};
+	readonly budget?: BudgetLimits;
 }
 
 export interface OutputCheck {
@@ -136,4 +182,6 @@ export interface RunPacketResult {
 	readonly decision?: PolicyDecision;
 	readonly failure?: RunInfrastructureFailure;
 	readonly workspace?: WorkspaceSnapshot;
+	readonly steps?: readonly StepRecord[];
+	readonly budgetSnapshot?: BudgetSnapshot;
 }

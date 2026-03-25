@@ -7,6 +7,8 @@
  * to the EventBus and receive these — never untyped JSON.
  */
 
+import type { StepKind, StepStatus } from "./types.js";
+
 // ── Base ────────────────────────────────────────────────────
 
 interface BaseEvent {
@@ -103,6 +105,61 @@ export interface ExecutionErrorEvent extends BaseEvent {
 	readonly phase: string;
 }
 
+// ── Steps ───────────────────────────────────────────────────
+
+export interface StepStartedEvent extends BaseEvent {
+	readonly kind: "step-started";
+	readonly stepId: string;
+	readonly stepIndex: number;
+	readonly stepKind: StepKind;
+}
+
+export interface StepCompletedEvent extends BaseEvent {
+	readonly kind: "step-completed";
+	readonly stepId: string;
+	readonly stepKind: StepKind;
+	readonly stepStatus: StepStatus;
+}
+
+// ── Budget ──────────────────────────────────────────────────
+
+export interface BudgetExhaustedEvent extends BaseEvent {
+	readonly kind: "budget-exhausted";
+	readonly dimension: "time" | "tokens" | "commands" | "steps";
+	readonly limit: number;
+	readonly consumed: number;
+}
+
+// ── Diff capture ────────────────────────────────────────────
+
+export interface DiffCapturedEvent extends BaseEvent {
+	readonly kind: "diff-captured";
+	readonly diff: string;
+	readonly filesChanged: number;
+}
+
+// ── Verification ────────────────────────────────────────────
+
+export interface VerificationResultEvent extends BaseEvent {
+	readonly kind: "verification-result";
+	readonly passed: boolean;
+	readonly checks: readonly {
+		readonly name: string;
+		readonly passed: boolean;
+		readonly detail?: string;
+	}[];
+}
+
+// ── Retry ───────────────────────────────────────────────────
+
+export interface RetryDecisionEvent extends BaseEvent {
+	readonly kind: "retry-decision";
+	readonly willRetry: boolean;
+	readonly reason: string;
+	readonly attempt: number;
+	readonly maxAttempts: number;
+}
+
 // ── Union ───────────────────────────────────────────────────
 
 export type ExecutionEvent =
@@ -117,7 +174,13 @@ export type ExecutionEvent =
 	| ToolCallCompletedEvent
 	| EvidenceRecordedEvent
 	| PolicyDecisionEvent
-	| ExecutionErrorEvent;
+	| ExecutionErrorEvent
+	| StepStartedEvent
+	| StepCompletedEvent
+	| BudgetExhaustedEvent
+	| DiffCapturedEvent
+	| VerificationResultEvent
+	| RetryDecisionEvent;
 
 /** All possible event kind values. */
 export type ExecutionEventKind = ExecutionEvent["kind"];
