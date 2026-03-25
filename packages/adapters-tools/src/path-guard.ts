@@ -38,19 +38,17 @@ export function assertPathWithinWorkspace(
 
 		const stat = lstatSync(currentPath);
 		if (stat.isSymbolicLink()) {
-			throw new Error(
-				`${label} traverses a symlink and escapes the workspace root`,
-			);
-		}
-
-		const realPath = realpathSync(currentPath);
-		const realRelative = relative(normalizedWorkspaceRoot, realPath);
-		if (
-			realRelative.startsWith(`..${sep}`) ||
-			realRelative === ".." ||
-			isAbsolute(realRelative)
-		) {
-			throw new Error(`${label} is outside the workspace root`);
+			const realPath = realpathSync(currentPath);
+			const realRelative = relative(normalizedWorkspaceRoot, realPath);
+			if (
+				realRelative.startsWith(`..${sep}`) ||
+				realRelative === ".." ||
+				isAbsolute(realRelative)
+			) {
+				throw new Error(
+					`${label} traverses a symlink that escapes the workspace root`,
+				);
+			}
 		}
 	}
 }

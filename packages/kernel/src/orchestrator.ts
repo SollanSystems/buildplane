@@ -623,8 +623,30 @@ export function createBuildplaneOrchestrator(
 					stepStatus,
 				});
 
-				// 5f. Evaluate policy
-				const decision = policy.evaluateRun(validatedPacket, receipt);
+				// 5f. Evaluate policy (guarded — adapter failure must not orphan the run)
+				let decision: PolicyDecision;
+				try {
+					decision = policy.evaluateRun(validatedPacket, receipt);
+				} catch (policyError) {
+					bus.emit({
+						kind: "execution-error",
+						runId: run.id,
+						timestamp: new Date().toISOString(),
+						message:
+							policyError instanceof Error
+								? policyError.message
+								: String(policyError),
+						phase: "policy-evaluation",
+					});
+					// Treat policy failure as rejection so the run can finalize
+					decision = {
+						kind: "reject-run",
+						outcome: "rejected",
+						reasons: [
+							`Policy evaluation failed: ${policyError instanceof Error ? policyError.message : String(policyError)}`,
+						],
+					};
+				}
 				lastDecision = decision;
 
 				const checks = [
@@ -657,7 +679,9 @@ export function createBuildplaneOrchestrator(
 					reasons: decision.reasons,
 				});
 
-				storage.recordDecision(run.id, decision);
+				// Note: decision is NOT recorded here — the finalization methods
+				// (commitRunSuccessOutcome/commitRunFailureOutcome) insert it.
+				// Intermediate retry decisions are captured via policy-decision events.
 
 				// 5g. If approved, re-check budget before marking success
 				if (decision.outcome === "approved") {

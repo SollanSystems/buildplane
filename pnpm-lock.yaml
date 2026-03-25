@@ -84,9 +84,6 @@ importers:
       '@buildplane/kernel':
         specifier: workspace:*
         version: link:../kernel
-      '@buildplane/runtime':
-        specifier: workspace:*
-        version: link:../runtime
     devDependencies:
       '@ai-sdk/anthropic':
         specifier: ^3.0.63
