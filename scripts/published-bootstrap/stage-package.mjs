@@ -157,6 +157,8 @@ export const INTERNAL_PACKAGE_ENTRYPOINTS = Object.freeze({
 	"@buildplane/policy": "vendor/@buildplane/policy/index.js",
 	"@buildplane/storage": "vendor/@buildplane/storage/index.js",
 	"@buildplane/adapters-git": "vendor/@buildplane/adapters-git/index.js",
+	"@buildplane/adapters-tools": "vendor/@buildplane/adapters-tools/index.js",
+	"@buildplane/adapters-models": "vendor/@buildplane/adapters-models/index.js",
 });
 
 /**

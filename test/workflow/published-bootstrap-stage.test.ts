@@ -45,6 +45,8 @@ const REQUIRED_BUILD_OUTPUTS = [
 	"packages/policy/dist/index.js",
 	"packages/storage/dist/index.js",
 	"packages/adapters-git/dist/index.js",
+	"packages/adapters-tools/dist/index.js",
+	"packages/adapters-models/dist/index.js",
 ] as const;
 const WORKSPACE_ROOTS = ["apps", "packages"] as const;
 
