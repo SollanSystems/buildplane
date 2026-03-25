@@ -112,7 +112,10 @@ async function loadCliOrchestrator(
 	const adaptersModels = (await import(
 		"@buildplane/adapters-models"
 	)) as unknown as {
-		createModelExecutor: (options: { toolRouter?: unknown }) => {
+		createModelExecutor: (options: {
+			toolRouter?: unknown;
+			commandExecutor?: unknown;
+		}) => {
 			executePacket: (packet: unknown, root: string) => unknown;
 			executePacketAsync?: (
 				packet: unknown,
@@ -122,9 +125,15 @@ async function loadCliOrchestrator(
 			) => Promise<unknown>;
 		};
 	};
+	const runtime = (await import("@buildplane/runtime")) as unknown as {
+		executePacket: (packet: unknown, root: string) => unknown;
+	};
 
 	const toolRouter = adaptersTools.createDefaultToolRouter();
-	const modelExecutor = adaptersModels.createModelExecutor({ toolRouter });
+	const modelExecutor = adaptersModels.createModelExecutor({
+		toolRouter,
+		commandExecutor: runtime.executePacket,
+	});
 
 	return kernel.createBuildplaneOrchestrator({
 		projectRoot,

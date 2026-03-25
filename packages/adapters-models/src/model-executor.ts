@@ -7,7 +7,12 @@ import type {
 	ExecutionReceipt,
 	UnitPacket,
 } from "@buildplane/kernel";
-import { executePacket as executeCommandPacket } from "@buildplane/runtime/command-executor";
+
+/** Command executor function injected via DI to avoid value imports from workspace packages. */
+type CommandExecutorFn = (
+	packet: UnitPacket,
+	projectRoot: string,
+) => ExecutionReceipt;
 
 export interface ModelExecutorPort {
 	executePacket(packet: UnitPacket, projectRoot: string): ExecutionReceipt;
@@ -60,6 +65,8 @@ export interface CreateModelExecutorOptions {
 	modelResolver?: ModelResolver;
 	/** Tool router providing executable tool definitions for model calls. */
 	toolRouter?: ToolRouter;
+	/** Command executor for non-model packets. Required for executePacket(). */
+	commandExecutor?: CommandExecutorFn;
 }
 
 export function createModelExecutor(
@@ -68,6 +75,14 @@ export function createModelExecutor(
 	const streamFn = options.streamFn;
 	const modelResolver = options.modelResolver;
 	const toolRouter = options.toolRouter;
+	const commandExecutor = options.commandExecutor;
+
+	function getCommandExecutor(): CommandExecutorFn {
+		if (commandExecutor) return commandExecutor;
+		throw new Error(
+			"commandExecutor is required. Pass executePacket from @buildplane/runtime.",
+		);
+	}
 
 	async function getStreamFn(): Promise<StreamFunction> {
 		if (streamFn) return streamFn;
@@ -97,7 +112,7 @@ export function createModelExecutor(
 					"Sync executePacket only supports command packets. Use executePacketAsync for model packets.",
 				);
 			}
-			return executeCommandPacket(packet, projectRoot);
+			return getCommandExecutor()(packet, projectRoot);
 		},
 
 		async executePacketAsync(
@@ -111,7 +126,7 @@ export function createModelExecutor(
 
 			// Command packets delegate to the sync executor
 			if (packet.execution) {
-				return executeCommandPacket(packet, projectRoot);
+				return getCommandExecutor()(packet, projectRoot);
 			}
 
 			if (!packet.model) {
@@ -197,13 +212,14 @@ async function executeModelStream(
 		};
 		const allTools = toolRouter.toAiSdkTools(context);
 		// Filter to only the tools declared in the packet (least-privilege)
-		const allowedNames = new Set(
+		const allowedNames: Set<string> = new Set(
 			model.tools.map((t: { name: string }) => t.name),
 		);
+		const allToolsRecord = allTools as Record<string, unknown>;
 		tools = {};
 		for (const name of allowedNames) {
-			if (name in allTools) {
-				tools[name] = (allTools as Record<string, unknown>)[name];
+			if (name in allToolsRecord) {
+				tools[name] = allToolsRecord[name];
 			}
 		}
 		maxSteps = packet.budget?.maxSteps ?? 10;

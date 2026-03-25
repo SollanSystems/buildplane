@@ -12,7 +12,6 @@
 	},
 	"dependencies": {
 		"@buildplane/kernel": "workspace:*",
-		"@buildplane/runtime": "workspace:*",
 		"@buildplane/adapters-tools": "workspace:*"
 	},
 	"devDependencies": {
