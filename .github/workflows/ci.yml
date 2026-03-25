@@ -35,10 +35,12 @@ jobs:
           done
           echo "OK: no dist directories found"
 
-      - name: Dev bootstrap smoke (before build)
+      - name: Dev smoke — init
+        run: pnpm buildplane init
+
+      - name: Dev smoke — run packet
+        id: smoke-run
         run: |
-          set -ex
-          pnpm buildplane init
           RUN_OUTPUT=$(pnpm buildplane run --packet test/fixtures/dev-bootstrap/packet.json 2>&1)
           echo "$RUN_OUTPUT"
           RUN_ID=$(echo "$RUN_OUTPUT" | grep '^run-id:' | awk '{print $2}')
@@ -46,9 +48,13 @@ jobs:
             echo "FAIL: could not capture run id" >&2
             exit 1
           fi
-          echo "Captured RUN_ID=$RUN_ID"
-          pnpm buildplane status --json
-          pnpm buildplane inspect "$RUN_ID" --json
+          echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Dev smoke — status
+        run: pnpm buildplane status --json
+
+      - name: Dev smoke — inspect
+        run: pnpm buildplane inspect "${{ steps.smoke-run.outputs.run_id }}" --json
 
       - name: Assert clean worktree after smoke
         run: |
