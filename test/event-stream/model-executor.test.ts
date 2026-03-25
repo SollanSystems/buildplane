@@ -179,9 +179,13 @@ describe("model executor", () => {
 	it("delegates command packets to sync executor", async () => {
 		const bus = createEventBus();
 		const root = mkdtempSync(join(tmpdir(), "bp-model-"));
+		const { executePacket } = await import(
+			"../../packages/runtime/src/command-executor"
+		);
 		const executor = createModelExecutor({
 			streamFn: mockStreamFn(),
 			modelResolver: mockModelResolver(),
+			commandExecutor: executePacket,
 		});
 
 		const receipt = await executor.executePacketAsync(
