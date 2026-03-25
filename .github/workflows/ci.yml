@@ -6,6 +6,10 @@ on:
     branches:
       - main
 
+permissions:
+  contents: read
+  pull-requests: write
+
 jobs:
   verify:
     runs-on: ubuntu-latest
@@ -96,7 +100,32 @@ jobs:
                  tmp
 
       - name: Verify published bootstrap
-        run: pnpm verify:published-bootstrap
+        id: verify-bootstrap
+        run: |
+          pnpm verify:published-bootstrap > /tmp/ci-verify-stdout.txt 2>/tmp/ci-verify-stderr.txt
+        continue-on-error: true
+
+      - name: Diag — post failure context
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          BODY="## CI Diagnostic Output ($(git rev-parse --short HEAD))"$'\n\n'
+          for f in /tmp/ci-verify-stdout.txt /tmp/ci-verify-stderr.txt; do
+            BODY+="### $f"$'\n'
+            if [ -f "$f" ]; then
+              CONTENT=$(head -c 10000 "$f")
+              BODY+='```'$'\n'"${CONTENT:-"(empty)"}"$'\n''```'$'\n\n'
+            else
+              BODY+="(not found)"$'\n\n'
+            fi
+          done
+          BODY+="### verify-bootstrap outcome: ${{ steps.verify-bootstrap.outcome }}"$'\n'
+          gh pr comment 15 --repo "${{ github.repository }}" --body "$BODY"
+
+      - name: Fail if verify failed
+        if: steps.verify-bootstrap.outcome == 'failure'
+        run: exit 1
 
   verify-wrong-node:
     runs-on: ubuntu-latest
@@ -117,4 +146,29 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Verify wrong-Node guard
-        run: BUILDPLANE_EXPECT_UNSUPPORTED_NODE=1 node ./scripts/published-bootstrap/verify-wrong-node.mjs
+        id: verify-wrong-node
+        run: |
+          BUILDPLANE_EXPECT_UNSUPPORTED_NODE=1 node ./scripts/published-bootstrap/verify-wrong-node.mjs > /tmp/ci-wrong-node-stdout.txt 2>/tmp/ci-wrong-node-stderr.txt
+        continue-on-error: true
+
+      - name: Diag — post wrong-node failure context
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          BODY="## CI Wrong-Node Diagnostic ($(git rev-parse --short HEAD))"$'\n\n'
+          for f in /tmp/ci-wrong-node-stdout.txt /tmp/ci-wrong-node-stderr.txt; do
+            BODY+="### $f"$'\n'
+            if [ -f "$f" ]; then
+              CONTENT=$(head -c 10000 "$f")
+              BODY+='```'$'\n'"${CONTENT:-"(empty)"}"$'\n''```'$'\n\n'
+            else
+              BODY+="(not found)"$'\n\n'
+            fi
+          done
+          BODY+="### verify-wrong-node outcome: ${{ steps.verify-wrong-node.outcome }}"$'\n'
+          gh pr comment 15 --repo "${{ github.repository }}" --body "$BODY"
+
+      - name: Fail if verify-wrong-node failed
+        if: steps.verify-wrong-node.outcome == 'failure'
+        run: exit 1
