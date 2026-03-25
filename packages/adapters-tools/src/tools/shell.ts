@@ -38,7 +38,15 @@ export const shellTool: ToolImplementation = {
 			? resolve(context.workspaceRoot, cwdRel)
 			: context.workspaceRoot;
 
-		context.budgetEnforcer?.recordCommand();
+		const withinBudget = context.budgetEnforcer?.recordCommand() ?? true;
+		if (!withinBudget) {
+			return {
+				error: "Command budget exceeded",
+				exitCode: 1,
+				stdout: "",
+				stderr: "Budget limit: maxCommandCount exceeded",
+			};
+		}
 
 		const result = spawnSync(command, {
 			cwd,

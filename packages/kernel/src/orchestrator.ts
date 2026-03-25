@@ -725,10 +725,20 @@ export function createBuildplaneOrchestrator(
 							cleanupError,
 						};
 					}
-				} catch {
+				} catch (cleanupErr) {
+					const errMsg =
+						cleanupErr instanceof Error
+							? cleanupErr.message
+							: String(cleanupErr);
+					try {
+						storage.recordWorkspaceCleanupFailed(run.id, errMsg);
+					} catch {
+						// best-effort persistence
+					}
 					workspaceResult = {
 						...preparedWorkspace,
-						status: "retained",
+						status: "cleanup-failed",
+						cleanupError: errMsg,
 					};
 				}
 			} else if (preparedWorkspace) {
