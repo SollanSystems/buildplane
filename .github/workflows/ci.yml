@@ -6,6 +6,11 @@ on:
     branches:
       - main
 
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
 jobs:
   verify:
     runs-on: ubuntu-latest
@@ -112,30 +117,21 @@ jobs:
 
       - name: Diag — dump failure context
         if: always()
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const fs = require('fs');
-            let body = '## CI Diagnostic Output\n\n';
-            const files = [
-              '/tmp/ci-stderr-init.txt',
-              '/tmp/ci-stderr-status.txt',
-              '/tmp/ci-verify-stdout.txt',
-              '/tmp/ci-verify-stderr.txt'
-            ];
-            for (const f of files) {
-              try {
-                const content = fs.readFileSync(f, 'utf8').trim();
-                body += `### ${f}\n\`\`\`\n${content || '(empty)'}\n\`\`\`\n\n`;
-              } catch { body += `### ${f}\n(not found)\n\n`; }
-            }
-            body += `### verify-bootstrap outcome\n${context.steps?.['verify-bootstrap']?.outcome ?? 'unknown'}\n\n`;
-            await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: 15,
-              body
-            });
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          BODY="## CI Diagnostic Output"$'\n\n'
+          for f in /tmp/ci-stderr-init.txt /tmp/ci-stderr-status.txt /tmp/ci-verify-stdout.txt /tmp/ci-verify-stderr.txt; do
+            BODY+="### $f"$'\n'
+            if [ -f "$f" ]; then
+              CONTENT=$(cat "$f" | head -c 10000)
+              BODY+='```'$'\n'"${CONTENT:-"(empty)"}"$'\n''```'$'\n\n'
+            else
+              BODY+="(not found)"$'\n\n'
+            fi
+          done
+          BODY+="### verify-bootstrap outcome: ${{ steps.verify-bootstrap.outcome }}"$'\n'
+          gh pr comment 15 --repo "${{ github.repository }}" --body "$BODY"
 
       - name: Fail if verify failed
         if: steps.verify-bootstrap.outcome == 'failure'
