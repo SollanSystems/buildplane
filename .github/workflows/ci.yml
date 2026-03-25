@@ -37,6 +37,7 @@ jobs:
 
       - name: Dev bootstrap smoke (before build)
         run: |
+          set -ex
           pnpm buildplane init
           RUN_OUTPUT=$(pnpm buildplane run --packet test/fixtures/dev-bootstrap/packet.json 2>&1)
           echo "$RUN_OUTPUT"
@@ -89,7 +90,9 @@ jobs:
                  tmp
 
       - name: Verify published bootstrap
-        run: pnpm verify:published-bootstrap
+        run: |
+          echo "=== Starting verify:published-bootstrap ==="
+          pnpm verify:published-bootstrap
 
   verify-wrong-node:
     runs-on: ubuntu-latest
