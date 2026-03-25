@@ -31,6 +31,63 @@ describe("parseUnitPacket", () => {
 		expect(packet.verification.requiredOutputs).toEqual(["tmp/out.txt"]);
 	});
 
+	it("parses a packet with budget limits", () => {
+		const packet = parseUnitPacket(
+			JSON.stringify({
+				unit: {
+					id: "unit-budgeted",
+					kind: "command",
+					scope: "task",
+					inputRefs: [],
+					expectedOutputs: [],
+					verificationContract: "exit-0",
+					policyProfile: "default",
+				},
+				execution: {
+					command: "node",
+				},
+				budget: {
+					maxDurationMs: 60000,
+					maxTotalTokens: 10000,
+					maxCommandCount: 5,
+					maxSteps: 3,
+					allowedPaths: ["src/**"],
+					networkPolicy: "none",
+				},
+			}),
+		);
+
+		expect(packet.budget).toEqual({
+			maxDurationMs: 60000,
+			maxTotalTokens: 10000,
+			maxCommandCount: 5,
+			maxSteps: 3,
+			allowedPaths: ["src/**"],
+			networkPolicy: "none",
+		});
+	});
+
+	it("omits budget when not specified", () => {
+		const packet = parseUnitPacket(
+			JSON.stringify({
+				unit: {
+					id: "unit-no-budget",
+					kind: "command",
+					scope: "task",
+					inputRefs: [],
+					expectedOutputs: [],
+					verificationContract: "exit-0",
+					policyProfile: "default",
+				},
+				execution: {
+					command: "node",
+				},
+			}),
+		);
+
+		expect(packet.budget).toBeUndefined();
+	});
+
 	it("preserves omitted execution args and cwd", () => {
 		const packet = parseUnitPacket(
 			JSON.stringify({

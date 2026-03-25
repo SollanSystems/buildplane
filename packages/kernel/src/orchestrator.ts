@@ -636,8 +636,21 @@ export function createBuildplaneOrchestrator(
 
 				storage.recordDecision(run.id, decision);
 
-				// 5g. If approved, break to pass
+				// 5g. If approved, re-check budget before marking success
 				if (decision.outcome === "approved") {
+					const postStepExhaustion = budgetEnforcer.check();
+					if (postStepExhaustion) {
+						bus.emit({
+							kind: "budget-exhausted",
+							runId: run.id,
+							timestamp: new Date().toISOString(),
+							dimension: postStepExhaustion.dimension,
+							limit: postStepExhaustion.limit,
+							consumed: postStepExhaustion.consumed,
+						});
+						// Budget exceeded despite policy approval — fail the run
+						break;
+					}
 					finalStatus = "passed";
 					break;
 				}

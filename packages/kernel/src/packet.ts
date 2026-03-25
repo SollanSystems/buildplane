@@ -1,4 +1,5 @@
 import type {
+	BudgetLimits,
 	CommandExecutionBlock,
 	ModelExecutionBlock,
 	ToolDefinition,
@@ -59,11 +60,14 @@ export function parseUnitPacket(input: string): UnitPacket {
 			) ?? [],
 	};
 
+	const budget = parseOptionalBudget(packet.budget);
+
 	if (hasExecution) {
 		return {
 			unit,
 			execution: parseExecutionBlock(packet.execution),
 			verification,
+			...(budget === undefined ? {} : { budget }),
 		};
 	}
 
@@ -71,6 +75,7 @@ export function parseUnitPacket(input: string): UnitPacket {
 		unit,
 		model: parseModelBlock(packet.model),
 		verification,
+		...(budget === undefined ? {} : { budget }),
 	};
 }
 
@@ -101,6 +106,58 @@ function parseModelBlock(raw: unknown): ModelExecutionBlock {
 		...(systemPrompt === undefined ? {} : { systemPrompt }),
 		...(tools === undefined ? {} : { tools }),
 	};
+}
+
+function parseOptionalBudget(raw: unknown): BudgetLimits | undefined {
+	if (raw === undefined) {
+		return undefined;
+	}
+
+	const record = asRecord(raw, "packet.budget");
+	const budget: Record<string, unknown> = {};
+
+	const maxDurationMs = readOptionalNumber(
+		record,
+		"maxDurationMs",
+		"packet.budget",
+	);
+	const maxTotalTokens = readOptionalNumber(
+		record,
+		"maxTotalTokens",
+		"packet.budget",
+	);
+	const maxCommandCount = readOptionalNumber(
+		record,
+		"maxCommandCount",
+		"packet.budget",
+	);
+	const maxSteps = readOptionalNumber(record, "maxSteps", "packet.budget");
+	const allowedPaths = readOptionalStringArray(
+		record,
+		"allowedPaths",
+		"packet.budget",
+	);
+	const networkPolicy = readOptionalString(
+		record,
+		"networkPolicy",
+		"packet.budget",
+	);
+
+	if (maxDurationMs !== undefined) budget.maxDurationMs = maxDurationMs;
+	if (maxTotalTokens !== undefined) budget.maxTotalTokens = maxTotalTokens;
+	if (maxCommandCount !== undefined) budget.maxCommandCount = maxCommandCount;
+	if (maxSteps !== undefined) budget.maxSteps = maxSteps;
+	if (allowedPaths !== undefined) budget.allowedPaths = allowedPaths;
+	if (networkPolicy !== undefined) {
+		if (networkPolicy !== "none" && networkPolicy !== "localhost-only") {
+			throw new TypeError(
+				'packet.budget.networkPolicy must be "none" or "localhost-only"',
+			);
+		}
+		budget.networkPolicy = networkPolicy;
+	}
+
+	return budget as BudgetLimits;
 }
 
 function parseOptionalTools(
@@ -164,6 +221,23 @@ function readOptionalString(
 
 	if (typeof value !== "string" || value.length === 0) {
 		throw new TypeError(`${label}.${key} must be a non-empty string`);
+	}
+
+	return value;
+}
+
+function readOptionalNumber(
+	record: Record<string, unknown>,
+	key: string,
+	label: string,
+): number | undefined {
+	const value = record[key];
+	if (value === undefined) {
+		return undefined;
+	}
+
+	if (typeof value !== "number" || !Number.isFinite(value)) {
+		throw new TypeError(`${label}.${key} must be a finite number`);
 	}
 
 	return value;
