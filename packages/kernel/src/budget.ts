@@ -76,7 +76,7 @@ export function createBudgetEnforcer(
 			}
 			if (
 				limits.maxTotalTokens !== undefined &&
-				totalTokens >= limits.maxTotalTokens
+				totalTokens > limits.maxTotalTokens
 			) {
 				return {
 					dimension: "tokens",
@@ -86,7 +86,7 @@ export function createBudgetEnforcer(
 			}
 			if (
 				limits.maxCommandCount !== undefined &&
-				commandCount >= limits.maxCommandCount
+				commandCount > limits.maxCommandCount
 			) {
 				return {
 					dimension: "commands",
@@ -94,7 +94,7 @@ export function createBudgetEnforcer(
 					consumed: commandCount,
 				};
 			}
-			if (limits.maxSteps !== undefined && stepCount >= limits.maxSteps) {
+			if (limits.maxSteps !== undefined && stepCount > limits.maxSteps) {
 				return {
 					dimension: "steps",
 					limit: limits.maxSteps,

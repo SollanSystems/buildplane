@@ -21,6 +21,7 @@ describe("@buildplane/kernel package consumption", () => {
 
 		expect(output).toBe(
 			JSON.stringify([
+				"createBudgetEnforcer",
 				"createBuildplaneOrchestrator",
 				"createEventBus",
 				"parseUnitPacket",
@@ -37,6 +38,8 @@ describe("@buildplane/kernel package consumption", () => {
 				import('@buildplane/policy'),
 				import('@buildplane/storage'),
 				import('@buildplane/adapters-git'),
+				import('@buildplane/adapters-tools'),
+				import('@buildplane/adapters-models'),
 			]).then(() => console.log('ok'));
 		`;
 		const output = execFileSync(process.execPath, ["-e", script], {

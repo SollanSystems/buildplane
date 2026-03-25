@@ -249,6 +249,29 @@ export async function runCli(
 					return result.run.status === "passed" ? 0 : 1;
 				}
 
+				// Use async path for model packets (sync runPacket cannot handle them)
+				const isModelPacket =
+					packet != null &&
+					typeof (packet as Record<string, unknown>).model === "object";
+
+				if (isModelPacket) {
+					const result = await orchestrator.runPacketAsync(packet);
+
+					for (const line of formatRunResult(result)) {
+						stdout(line);
+					}
+
+					const r = result as Record<string, unknown>;
+					if (r.failure && typeof r.failure === "object") {
+						const f = r.failure as { message?: string };
+						if (f.message) {
+							stderr(f.message);
+						}
+					}
+
+					return result.run.status === "passed" && !r.failure ? 0 : 1;
+				}
+
 				const result = orchestrator.runPacket(packet);
 
 				for (const line of formatRunResult(result)) {

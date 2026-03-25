@@ -427,10 +427,31 @@ export function createBuildplaneOrchestrator(
 			const executionRoot = preparedWorkspace.path;
 
 			// Validate packet paths against the workspace root
-			const validatedPacket = validatePacketForWorkspaceRoot(
-				packet,
-				executionRoot,
-			);
+			let validatedPacket: typeof packet;
+			try {
+				validatedPacket = validatePacketForWorkspaceRoot(packet, executionRoot);
+			} catch (error) {
+				const failure = infrastructureFailure(
+					"packet-validation-failed",
+					error,
+				);
+				bus.emit({
+					kind: "execution-error",
+					runId: run.id,
+					timestamp: new Date().toISOString(),
+					message: failure.message,
+					phase: "validation",
+				});
+				const failedRun = storage.completeRun(run.id, "failed");
+				bus.emit({
+					kind: "run-completed",
+					runId: run.id,
+					unitId: packet.unit.id,
+					timestamp: new Date().toISOString(),
+					status: "failed" as const,
+				});
+				return { run: failedRun, failure };
+			}
 
 			// 3. Mark running
 			storage.markRunRunning(run.id);
