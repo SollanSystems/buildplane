@@ -6,11 +6,6 @@ on:
     branches:
       - main
 
-permissions:
-  contents: read
-  pull-requests: write
-  issues: write
-
 jobs:
   verify:
     runs-on: ubuntu-latest
@@ -61,14 +56,6 @@ jobs:
       - name: Dev smoke — inspect
         run: pnpm buildplane inspect "${{ steps.smoke-run.outputs.run_id }}" --json
 
-      - name: Diag — check stderr from silent CLI commands
-        run: |
-          echo "--- init stderr ---"
-          pnpm --silent buildplane init 2>/tmp/ci-stderr-init.txt; cat /tmp/ci-stderr-init.txt
-          echo "--- status stderr ---"
-          pnpm --silent buildplane status --json 2>/tmp/ci-stderr-status.txt >/dev/null; cat /tmp/ci-stderr-status.txt
-          echo "--- done ---"
-
       - name: Assert clean worktree after smoke
         run: |
           BP=".buildplane"
@@ -109,33 +96,7 @@ jobs:
                  tmp
 
       - name: Verify published bootstrap
-        id: verify-bootstrap
-        run: |
-          pnpm verify:published-bootstrap > /tmp/ci-verify-stdout.txt 2>/tmp/ci-verify-stderr.txt
-          echo "verify_exit=$?" >> "$GITHUB_OUTPUT"
-        continue-on-error: true
-
-      - name: Diag — dump failure context
-        if: always()
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          BODY="## CI Diagnostic Output"$'\n\n'
-          for f in /tmp/ci-stderr-init.txt /tmp/ci-stderr-status.txt /tmp/ci-verify-stdout.txt /tmp/ci-verify-stderr.txt; do
-            BODY+="### $f"$'\n'
-            if [ -f "$f" ]; then
-              CONTENT=$(cat "$f" | head -c 10000)
-              BODY+='```'$'\n'"${CONTENT:-"(empty)"}"$'\n''```'$'\n\n'
-            else
-              BODY+="(not found)"$'\n\n'
-            fi
-          done
-          BODY+="### verify-bootstrap outcome: ${{ steps.verify-bootstrap.outcome }}"$'\n'
-          gh pr comment 15 --repo "${{ github.repository }}" --body "$BODY"
-
-      - name: Fail if verify failed
-        if: steps.verify-bootstrap.outcome == 'failure'
-        run: exit 1
+        run: pnpm verify:published-bootstrap
 
   verify-wrong-node:
     runs-on: ubuntu-latest

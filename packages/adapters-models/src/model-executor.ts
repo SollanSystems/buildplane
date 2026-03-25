@@ -7,7 +7,7 @@ import type {
 	ExecutionReceipt,
 	UnitPacket,
 } from "@buildplane/kernel";
-import { executePacket as executeCommandPacket } from "@buildplane/runtime";
+import { executePacket as executeCommandPacket } from "@buildplane/runtime/command-executor";
 
 export interface ModelExecutorPort {
 	executePacket(packet: UnitPacket, projectRoot: string): ExecutionReceipt;
@@ -155,10 +155,12 @@ export function createModelExecutor(
 					exitCode: 1,
 					stdout: "",
 					stderr: message,
-					outputChecks: packet.verification.requiredOutputs.map((path) => ({
-						path,
-						exists: false,
-					})),
+					outputChecks: packet.verification.requiredOutputs.map(
+						(path: string) => ({
+							path,
+							exists: false,
+						}),
+					),
 				};
 			}
 		},
@@ -195,11 +197,13 @@ async function executeModelStream(
 		};
 		const allTools = toolRouter.toAiSdkTools(context);
 		// Filter to only the tools declared in the packet (least-privilege)
-		const allowedNames = new Set(model.tools.map((t) => t.name));
+		const allowedNames = new Set(
+			model.tools.map((t: { name: string }) => t.name),
+		);
 		tools = {};
 		for (const name of allowedNames) {
 			if (name in allTools) {
-				tools[name] = allTools[name];
+				tools[name] = (allTools as Record<string, unknown>)[name];
 			}
 		}
 		maxSteps = packet.budget?.maxSteps ?? 10;
@@ -290,7 +294,7 @@ async function executeModelStream(
 		exitCode: 0,
 		stdout: fullText,
 		stderr: "",
-		outputChecks: packet.verification.requiredOutputs.map((path) => ({
+		outputChecks: packet.verification.requiredOutputs.map((path: string) => ({
 			path,
 			exists: existsSync(resolve(projectRoot, path)),
 		})),
