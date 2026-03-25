@@ -55,10 +55,12 @@ export const shellTool: ToolImplementation = {
 			timeout: 120_000,
 		});
 
+		const stderr = result.stderr?.toString() || result.error?.message || "";
+
 		return {
 			exitCode: result.status ?? 1,
 			stdout: result.stdout ?? "",
-			stderr: result.stderr ?? "",
+			stderr,
 		};
 	},
 };

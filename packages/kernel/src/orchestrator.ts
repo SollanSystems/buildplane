@@ -396,11 +396,21 @@ export function createBuildplaneOrchestrator(
 					headSha,
 				);
 				preparedWorkspace = toWorkspaceSnapshot(run, created);
-				storage.recordWorkspacePrepared(run.id, {
-					path: created.path,
-					headSha: created.headSha,
-					sourceProjectRoot: projectRoot,
-				});
+				try {
+					storage.recordWorkspacePrepared(run.id, {
+						path: created.path,
+						headSha: created.headSha,
+						sourceProjectRoot: projectRoot,
+					});
+				} catch (persistError) {
+					// Storage failed after workspace was created — clean up the orphan
+					try {
+						workspace.deleteWorkspace({ path: created.path });
+					} catch {
+						// best-effort cleanup
+					}
+					throw persistError;
+				}
 			} catch (error) {
 				const failure = infrastructureFailure(
 					"workspace-prepare-failed",
@@ -568,8 +578,21 @@ export function createBuildplaneOrchestrator(
 
 				lastReceipt = receipt;
 
-				// 5d. Record evidence
-				storage.recordExecutionEvidence(run.id, receipt);
+				// 5d. Record evidence (guarded — storage failure must not orphan the run)
+				try {
+					storage.recordExecutionEvidence(run.id, receipt);
+				} catch (evidenceError) {
+					bus.emit({
+						kind: "execution-error",
+						runId: run.id,
+						timestamp: new Date().toISOString(),
+						message:
+							evidenceError instanceof Error
+								? evidenceError.message
+								: String(evidenceError),
+						phase: "evidence-persistence",
+					});
+				}
 				bus.emit({
 					kind: "evidence-recorded",
 					runId: run.id,
