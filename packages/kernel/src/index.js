@@ -1,8 +1,11 @@
+import { createBudgetEnforcer as createBudgetEnforcerImpl } from "./budget.ts";
 import { createEventBus as createEventBusImpl } from "./events.ts";
 import { createBuildplaneOrchestrator as createBuildplaneOrchestratorImpl } from "./orchestrator.ts";
 import { parseUnitPacket as parseUnitPacketImpl } from "./packet.ts";
 import { validatePacketForWorkspaceRoot as validatePacketForWorkspaceRootImpl } from "./workspace-paths.ts";
 
+/** @type {typeof import('./budget.ts').createBudgetEnforcer} */
+export const createBudgetEnforcer = createBudgetEnforcerImpl;
 /** @type {typeof import('./orchestrator.ts').createBuildplaneOrchestrator} */
 export const createBuildplaneOrchestrator = createBuildplaneOrchestratorImpl;
 /** @type {typeof import('./events.ts').createEventBus} */
