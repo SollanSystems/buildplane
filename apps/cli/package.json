@@ -23,5 +23,9 @@
 		"@buildplane/runtime": "workspace:*",
 		"@buildplane/storage": "workspace:*",
 		"@buildplane/ui-tui": "workspace:*"
+	},
+	"optionalDependencies": {
+		"ai": ">=6.0.0",
+		"@ai-sdk/anthropic": ">=3.0.0"
 	}
 }

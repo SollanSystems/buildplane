@@ -62,6 +62,13 @@ importers:
       '@buildplane/ui-tui':
         specifier: workspace:*
         version: link:../../packages/ui-tui
+    optionalDependencies:
+      '@ai-sdk/anthropic':
+        specifier: '>=3.0.0'
+        version: 3.0.63(zod@4.3.6)
+      ai:
+        specifier: '>=6.0.0'
+        version: 6.0.134(zod@4.3.6)
 
   packages/adapters-git:
     dependencies:

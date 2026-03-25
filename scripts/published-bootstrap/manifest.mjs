@@ -122,6 +122,26 @@ export function derivePublishManifest(sourceManifest = readSourceManifest()) {
 		}
 	}
 
+	// Filter optionalDependencies: keep only publish-safe non-@buildplane/* entries
+	if (sourceManifest.optionalDependencies) {
+		const filtered = {};
+		let hasExternal = false;
+		for (const [name, specifier] of Object.entries(
+			sourceManifest.optionalDependencies,
+		)) {
+			if (name.startsWith("@buildplane/")) {
+				continue;
+			}
+
+			assertPublishSafeExternalDependency(name, specifier);
+			filtered[name] = specifier;
+			hasExternal = true;
+		}
+		if (hasExternal) {
+			manifest.optionalDependencies = filtered;
+		}
+	}
+
 	// Explicitly do NOT carry over:
 	// - private (the published package must not be private)
 	// - scripts (all current scripts are workspace-only: build, test)

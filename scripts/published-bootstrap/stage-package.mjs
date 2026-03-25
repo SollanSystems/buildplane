@@ -398,7 +398,10 @@ function rewriteStagedBootstrapWrapper(packageRoot) {
 }
 
 function collectPublishedRuntimeDependencyNames(manifest) {
-	return Object.keys(manifest.dependencies ?? {});
+	return [
+		...Object.keys(manifest.dependencies ?? {}),
+		...Object.keys(manifest.optionalDependencies ?? {}),
+	];
 }
 
 function assertStagedRuntimeClosure(packageRoot, manifest) {
