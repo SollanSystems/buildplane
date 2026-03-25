@@ -6,7 +6,7 @@
 	"description": "Tool adapter layer for browser, shell, mac, search, and MCP integrations",
 	"exports": {
 		".": {
-			"types": "./src/index.ts",
+			"types": "./src/index.d.ts",
 			"import": "./src/index.js"
 		}
 	},

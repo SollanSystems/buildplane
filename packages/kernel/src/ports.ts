@@ -1,3 +1,4 @@
+import type { BudgetEnforcer } from "./budget.js";
 import type { EventBus } from "./events.js";
 import type {
 	ApprovedPolicyDecision,
@@ -58,6 +59,7 @@ export interface BuildplaneRuntimePort {
 		projectRoot: string,
 		eventBus: EventBus,
 		runId?: string,
+		budgetEnforcer?: BudgetEnforcer,
 	): Promise<ExecutionReceipt>;
 }
 

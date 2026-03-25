@@ -426,6 +426,12 @@ export function createBuildplaneOrchestrator(
 
 			const executionRoot = preparedWorkspace.path;
 
+			// Validate packet paths against the workspace root
+			const validatedPacket = validatePacketForWorkspaceRoot(
+				packet,
+				executionRoot,
+			);
+
 			// 3. Mark running
 			storage.markRunRunning(run.id);
 			bus.emit({
@@ -491,13 +497,14 @@ export function createBuildplaneOrchestrator(
 				try {
 					if (runtime.executePacketAsync) {
 						receipt = await runtime.executePacketAsync(
-							packet,
+							validatedPacket,
 							executionRoot,
 							bus,
 							run.id,
+							budgetEnforcer,
 						);
 					} else {
-						receipt = runtime.executePacket(packet, executionRoot);
+						receipt = runtime.executePacket(validatedPacket, executionRoot);
 						bus.emit({
 							kind: "command-execution-complete",
 							runId: run.id,
@@ -550,12 +557,8 @@ export function createBuildplaneOrchestrator(
 					status: receipt.exitCode === 0 ? "pass" : "fail",
 				});
 
-				// Track token usage for budget
-				if (isModelPacket && receipt.stdout && receipt.exitCode === 0) {
-					// Token usage is tracked via events; budget enforcer
-					// is updated from step-finish events in the model executor.
-					// For now, we don't double-count here.
-				}
+				// Token usage is tracked by the model executor via step-finish
+				// events, which call budgetEnforcer.recordTokens() directly.
 
 				// 5e. Complete step
 				const stepCompletedAt = new Date().toISOString();
@@ -577,7 +580,7 @@ export function createBuildplaneOrchestrator(
 				});
 
 				// 5f. Evaluate policy
-				const decision = policy.evaluateRun(packet, receipt);
+				const decision = policy.evaluateRun(validatedPacket, receipt);
 				lastDecision = decision;
 
 				const checks = [

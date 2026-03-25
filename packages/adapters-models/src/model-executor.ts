@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import type { ToolContext, ToolRouter } from "@buildplane/adapters-tools";
 import type {
+	BudgetEnforcer,
 	EventBus,
 	ExecutionReceipt,
 	UnitPacket,
@@ -15,6 +16,7 @@ export interface ModelExecutorPort {
 		projectRoot: string,
 		eventBus: EventBus,
 		runId?: string,
+		budgetEnforcer?: BudgetEnforcer,
 	): Promise<ExecutionReceipt>;
 }
 
@@ -103,6 +105,7 @@ export function createModelExecutor(
 			projectRoot: string,
 			eventBus: EventBus,
 			runId?: string,
+			budgetEnforcer?: BudgetEnforcer,
 		): Promise<ExecutionReceipt> {
 			const effectiveRunId = runId ?? "";
 
@@ -128,6 +131,7 @@ export function createModelExecutor(
 					resolver,
 					effectiveRunId,
 					toolRouter,
+					budgetEnforcer,
 				);
 				return receipt;
 			} catch (error) {
@@ -169,6 +173,7 @@ async function executeModelStream(
 	modelResolver: ModelResolver,
 	runId: string,
 	toolRouter?: ToolRouter,
+	budgetEnforcer?: BudgetEnforcer,
 ): Promise<ExecutionReceipt> {
 	const model = packet.model;
 	if (!model) {
@@ -184,10 +189,19 @@ async function executeModelStream(
 	if (toolRouter && model.tools && model.tools.length > 0) {
 		const context: ToolContext = {
 			workspaceRoot: projectRoot,
+			budgetEnforcer,
 			eventBus,
 			runId,
 		};
-		tools = toolRouter.toAiSdkTools(context);
+		const allTools = toolRouter.toAiSdkTools(context);
+		// Filter to only the tools declared in the packet (least-privilege)
+		const allowedNames = new Set(model.tools.map((t) => t.name));
+		tools = {};
+		for (const name of allowedNames) {
+			if (name in allTools) {
+				tools[name] = allTools[name];
+			}
+		}
 		maxSteps = packet.budget?.maxSteps ?? 10;
 	}
 
@@ -240,6 +254,9 @@ async function executeModelStream(
 			case "step-finish": {
 				finishReason = chunk.finishReason ?? "unknown";
 				if (chunk.usage) {
+					const stepTokens =
+						chunk.usage.promptTokens + chunk.usage.completionTokens;
+					budgetEnforcer?.recordTokens(stepTokens);
 					usage = usage
 						? {
 								promptTokens: usage.promptTokens + chunk.usage.promptTokens,
