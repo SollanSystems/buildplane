@@ -16,7 +16,7 @@ export type {
 	ToolCallCompletedEvent,
 	ToolCallStartedEvent,
 } from "./events.js";
-export { createEventBus } from "./events.js";
+export { createEventBus, createRunScopedBus } from "./events.js";
 export type {
 	BuildplaneOrchestrator,
 	CreateBuildplaneOrchestratorOptions,
