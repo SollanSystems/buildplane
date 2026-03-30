@@ -41,6 +41,9 @@ importers:
       '@buildplane/adapters-git':
         specifier: workspace:*
         version: link:../../packages/adapters-git
+      '@buildplane/adapters-models':
+        specifier: workspace:*
+        version: link:../../packages/adapters-models
       '@buildplane/kernel':
         specifier: workspace:*
         version: link:../../packages/kernel
