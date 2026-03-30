@@ -219,6 +219,14 @@ function createHarness(options: HarnessOptions = {}) {
 			}
 			return baseReceipt;
 		},
+		async executePacketAsync(_packet, executionRoot, _bus) {
+			runEvents.push("execute-packet");
+			runtimeRoots.push(executionRoot);
+			if (shouldThrow("runtime")) {
+				throw new Error("runtime execution failed");
+			}
+			return baseReceipt;
+		},
 	};
 
 	const policy: BuildplanePolicyPort = {
@@ -702,6 +710,162 @@ describe("kernel orchestrator", () => {
 			]);
 			expect(runEvents).not.toContain("assert-repo");
 			expect(runEvents).not.toContain("create-run");
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("orchestrates a successful async run through the full workspace lifecycle", async () => {
+		const { orchestrator, runEvents, runtimeRoots, workspacePath, cleanup } =
+			createHarness({ policyOutcome: "approved" });
+
+		try {
+			const result = await orchestrator.runPacketAsync(packet);
+
+			expect(eventLog(runEvents)).toEqual([
+				"get-status-snapshot-for-init-preflight",
+				"validate-packet-for-workspace-root",
+				"assert-repo",
+				"create-run",
+				"prepare-workspace",
+				"record-workspace-prepared",
+				"mark-run-running",
+				"execute-packet",
+				"record-execution-evidence",
+				"evaluate-run",
+				"commit-run-success-outcome",
+				"delete-workspace",
+				"record-workspace-deleted",
+			]);
+			expect(runtimeRoots).toEqual([workspacePath]);
+			expect(result.run.status).toBe("passed");
+			expect(result.decision?.outcome).toBe("approved");
+			expect(result.workspace).toBeUndefined();
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("retains rejected-policy workspaces in async path", async () => {
+		const {
+			orchestrator,
+			runEvents,
+			runtimeRoots,
+			failurePayloads,
+			workspacePath,
+			cleanup,
+		} = createHarness({ policyOutcome: "rejected" });
+
+		try {
+			const result = await orchestrator.runPacketAsync(packet);
+
+			expect(runEvents).not.toContain("delete-workspace");
+			expect(runtimeRoots).toEqual([workspacePath]);
+			expect(failurePayloads).toEqual([
+				expect.objectContaining({
+					decision: expect.objectContaining({ outcome: "rejected" }),
+					workspaceStatus: "retained",
+				}),
+			]);
+			expect(result.run.status).toBe("failed");
+			expect(result.decision?.outcome).toBe("rejected");
+			expect(result.workspace).toMatchObject({
+				path: workspacePath,
+				headSha: "abc123",
+				status: "retained",
+			});
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("finalizes post-prepare infra failure with retained workspace in async", async () => {
+		const { orchestrator, runEvents, failurePayloads, workspacePath, cleanup } =
+			createHarness({ throwOn: ["runtime"] });
+
+		try {
+			const result = await orchestrator.runPacketAsync(packet);
+
+			expect(runEvents).not.toContain("delete-workspace");
+			expect(failurePayloads).toEqual([
+				expect.objectContaining({
+					infrastructureFailure: {
+						kind: "runtime-execution-failed",
+						message: "runtime execution failed",
+					},
+					workspaceStatus: "retained",
+				}),
+			]);
+			expect(result.failure).toEqual({
+				kind: "runtime-execution-failed",
+				message: "runtime execution failed",
+			});
+			expect(result.workspace).toMatchObject({
+				path: workspacePath,
+				status: "retained",
+			});
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("best-effort cleans up when recordWorkspacePrepared fails in async", async () => {
+		const { orchestrator, runEvents, failurePayloads, cleanup } = createHarness(
+			{
+				throwOn: ["recordWorkspacePrepared"],
+			},
+		);
+
+		try {
+			const result = await orchestrator.runPacketAsync(packet);
+
+			expect(eventLog(runEvents)).toEqual([
+				"get-status-snapshot-for-init-preflight",
+				"validate-packet-for-workspace-root",
+				"assert-repo",
+				"create-run",
+				"prepare-workspace",
+				"record-workspace-prepared",
+				"delete-workspace",
+				"commit-run-failure-outcome",
+			]);
+			expect(failurePayloads[0]).toMatchObject({
+				infrastructureFailure: {
+					kind: "workspace-persistence-failed",
+					message: "recordWorkspacePrepared persistence failed",
+				},
+			});
+			expect(failurePayloads[0]).not.toHaveProperty("workspaceStatus");
+			expect(result.workspace).toBeUndefined();
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("falls back to failed run when success-finalization fails in async", async () => {
+		const { orchestrator, runEvents, failurePayloads, workspacePath, cleanup } =
+			createHarness({ throwOn: ["commitRunSuccessOutcome"] });
+
+		try {
+			const result = await orchestrator.runPacketAsync(packet);
+
+			expect(runEvents).not.toContain("delete-workspace");
+			expect(failurePayloads.at(-1)).toMatchObject({
+				infrastructureFailure: {
+					kind: "run-success-persistence-failed",
+					message: "commitRunSuccessOutcome persistence failed",
+				},
+				workspaceStatus: "retained",
+			});
+			expect(result.run.status).toBe("failed");
+			expect(result.failure).toEqual({
+				kind: "run-success-persistence-failed",
+				message: "commitRunSuccessOutcome persistence failed",
+			});
+			expect(result.workspace).toMatchObject({
+				path: workspacePath,
+				status: "retained",
+			});
 		} finally {
 			cleanup();
 		}
