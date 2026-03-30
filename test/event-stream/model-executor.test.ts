@@ -266,4 +266,58 @@ describe("model executor", () => {
 			"Sync executePacket only supports command packets",
 		);
 	});
+
+	it("uses packet.model.prompt when present", async () => {
+		const bus = createEventBus();
+		let capturedPrompt: string | undefined;
+
+		const capturingStreamFn: StreamFunction = (options) => {
+			capturedPrompt = options.prompt;
+			return {
+				fullStream: (async function* () {
+					yield { type: "text-delta" as const, textDelta: "done" };
+					yield { type: "step-finish" as const, finishReason: "stop" };
+				})(),
+			};
+		};
+
+		const executor = createModelExecutor({
+			streamFn: capturingStreamFn,
+			modelResolver: mockModelResolver(),
+		});
+
+		const root = mkdtempSync(join(tmpdir(), "bp-model-"));
+		await executor.executePacketAsync(
+			makeModelPacket({ prompt: "Custom task prompt." }),
+			root,
+			bus,
+		);
+
+		expect(capturedPrompt).toBe("Custom task prompt.");
+	});
+
+	it("falls back to default prompt when packet.model.prompt is absent", async () => {
+		const bus = createEventBus();
+		let capturedPrompt: string | undefined;
+
+		const capturingStreamFn: StreamFunction = (options) => {
+			capturedPrompt = options.prompt;
+			return {
+				fullStream: (async function* () {
+					yield { type: "text-delta" as const, textDelta: "done" };
+					yield { type: "step-finish" as const, finishReason: "stop" };
+				})(),
+			};
+		};
+
+		const executor = createModelExecutor({
+			streamFn: capturingStreamFn,
+			modelResolver: mockModelResolver(),
+		});
+
+		const root = mkdtempSync(join(tmpdir(), "bp-model-"));
+		await executor.executePacketAsync(makeModelPacket(), root, bus);
+
+		expect(capturedPrompt).toBe("Execute the assigned task.");
+	});
 });
