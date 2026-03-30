@@ -38,6 +38,7 @@ export type {
 	OutputCheck,
 	PolicyDecision,
 	RejectedPolicyDecision,
+	RoutingHints,
 	RunInfrastructureFailure,
 	RunPacketResult,
 	StatusSnapshot,
