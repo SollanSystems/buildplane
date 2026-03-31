@@ -17,6 +17,7 @@ import type {
 	UnitPacket,
 	WorkspaceSnapshot,
 } from "./run-loop.js";
+import { createRunScopedBus } from "./run-scoped-bus.js";
 import type { Run } from "./types.js";
 import { validatePacketForWorkspaceRoot } from "./workspace-paths.js";
 
@@ -130,211 +131,208 @@ export function createBuildplaneOrchestrator(
 		}
 	}
 
-	return {
-		initializeProject() {
-			return storage.initializeProject();
-		},
-		runPacket(packet) {
-			storage.getStatusSnapshot();
+	type PrepareRunResult =
+		| {
+				ok: true;
+				ctx: {
+					run: Run;
+					validatedPacket: UnitPacket;
+					workspace: WorkspaceSnapshot;
+					projectRoot: string;
+				};
+		  }
+		| { ok: false; result: RunPacketResult };
 
-			const validatedPacket = validatePacketForWorkspaceRoot(
-				packet,
-				join(projectRoot, ".buildplane", "workspaces", "future-run-id"),
+	function prepareRun(packet: UnitPacket): PrepareRunResult {
+		storage.getStatusSnapshot();
+
+		const validatedPacket = validatePacketForWorkspaceRoot(
+			packet,
+			join(projectRoot, ".buildplane", "workspaces", "future-run-id"),
+		);
+		const { headSha } = workspace.assertRunnableRepository(projectRoot);
+		const run = storage.createRun(validatedPacket);
+
+		let preparedWorkspace: WorkspaceSnapshot;
+
+		try {
+			const createdWorkspace = workspace.prepareWorkspace(
+				projectRoot,
+				run.id,
+				headSha,
 			);
-			const { headSha } = workspace.assertRunnableRepository(projectRoot);
-			const run = storage.createRun(validatedPacket);
+			preparedWorkspace = toWorkspaceSnapshot(run, createdWorkspace);
+		} catch (error) {
+			const failure = infrastructureFailure("workspace-prepare-failed", error);
+			return { ok: false, result: finalizeInfrastructureFailure(run, failure) };
+		}
 
-			let preparedWorkspace: WorkspaceSnapshot | undefined;
-			let receipt: ExecutionReceipt | undefined;
-
+		try {
+			storage.recordWorkspacePrepared(run.id, {
+				path: preparedWorkspace.path,
+				headSha: preparedWorkspace.headSha,
+				sourceProjectRoot: projectRoot,
+			});
+		} catch (error) {
+			let cleanupDetail: string | undefined;
 			try {
-				const createdWorkspace = workspace.prepareWorkspace(
-					projectRoot,
-					run.id,
-					headSha,
-				);
-				preparedWorkspace = toWorkspaceSnapshot(run, createdWorkspace);
-			} catch (error) {
-				const failure = infrastructureFailure(
-					"workspace-prepare-failed",
-					error,
-				);
-				return finalizeInfrastructureFailure(run, failure);
-			}
-
-			try {
-				storage.recordWorkspacePrepared(run.id, {
+				const cleanupResult = workspace.deleteWorkspace({
 					path: preparedWorkspace.path,
-					headSha: preparedWorkspace.headSha,
-					sourceProjectRoot: projectRoot,
 				});
-			} catch (error) {
-				let cleanupDetail: string | undefined;
-				try {
-					const cleanupResult = workspace.deleteWorkspace({
-						path: preparedWorkspace.path,
-					});
-					if (!cleanupResult.deleted) {
-						cleanupDetail =
-							cleanupResult.cleanupError ?? "workspace cleanup failed";
-					}
-				} catch (cleanupError) {
+				if (!cleanupResult.deleted) {
 					cleanupDetail =
-						cleanupError instanceof Error
-							? cleanupError.message
-							: String(cleanupError);
+						cleanupResult.cleanupError ?? "workspace cleanup failed";
 				}
-
-				const failure = infrastructureFailure(
-					"workspace-persistence-failed",
-					cleanupDetail
-						? `${error instanceof Error ? error.message : String(error)}; cleanup also failed: ${cleanupDetail}`
-						: error,
-				);
-				return finalizeInfrastructureFailure(run, failure);
+			} catch (cleanupError) {
+				cleanupDetail =
+					cleanupError instanceof Error
+						? cleanupError.message
+						: String(cleanupError);
 			}
 
-			try {
-				storage.markRunRunning(run.id);
-			} catch (error) {
-				const failure = infrastructureFailure("run-start-failed", error);
-				return finalizeInfrastructureFailure(run, failure, {
+			const failure = infrastructureFailure(
+				"workspace-persistence-failed",
+				cleanupDetail
+					? `${error instanceof Error ? error.message : String(error)}; cleanup also failed: ${cleanupDetail}`
+					: error,
+			);
+			return { ok: false, result: finalizeInfrastructureFailure(run, failure) };
+		}
+
+		try {
+			storage.markRunRunning(run.id);
+		} catch (error) {
+			const failure = infrastructureFailure("run-start-failed", error);
+			return {
+				ok: false,
+				result: finalizeInfrastructureFailure(run, failure, {
 					workspace: preparedWorkspace,
 					workspaceStatus: "retained",
-				});
-			}
+				}),
+			};
+		}
 
+		return {
+			ok: true,
+			ctx: {
+				run,
+				validatedPacket,
+				workspace: preparedWorkspace,
+				projectRoot,
+			},
+		};
+	}
+
+	function finalizeRun(
+		ctx: {
+			run: Run;
+			validatedPacket: UnitPacket;
+			workspace: WorkspaceSnapshot;
+		},
+		receipt: ExecutionReceipt,
+	): RunPacketResult {
+		const { run, validatedPacket, workspace: preparedWorkspace } = ctx;
+
+		try {
+			storage.recordExecutionEvidence(run.id, receipt);
+		} catch (error) {
+			const failure = infrastructureFailure(
+				"execution-evidence-persistence-failed",
+				error,
+			);
+			return finalizeInfrastructureFailure(run, failure, {
+				receipt,
+				workspace: preparedWorkspace,
+				workspaceStatus: "retained",
+			});
+		}
+
+		let decision: PolicyDecision;
+		try {
+			decision = policy.evaluateRun(validatedPacket, receipt);
+		} catch (error) {
+			const failure = infrastructureFailure("policy-evaluation-failed", error);
+			return finalizeInfrastructureFailure(run, failure, {
+				receipt,
+				workspace: preparedWorkspace,
+				workspaceStatus: "retained",
+			});
+		}
+
+		if (decision.outcome === "rejected") {
 			try {
-				receipt = runtime.executePacket(
-					validatedPacket,
-					preparedWorkspace.path,
-				);
-			} catch (error) {
-				const failure = infrastructureFailure(
-					"runtime-execution-failed",
-					error,
-				);
-				return finalizeInfrastructureFailure(run, failure, {
-					workspace: preparedWorkspace,
+				const failedRun = storage.commitRunFailureOutcome(run.id, {
+					decision,
 					workspaceStatus: "retained",
 				});
-			}
 
-			try {
-				storage.recordExecutionEvidence(run.id, receipt);
-			} catch (error) {
-				const failure = infrastructureFailure(
-					"execution-evidence-persistence-failed",
-					error,
-				);
-				return finalizeInfrastructureFailure(run, failure, {
-					receipt,
-					workspace: preparedWorkspace,
-					workspaceStatus: "retained",
-				});
-			}
-
-			let decision: PolicyDecision;
-			try {
-				decision = policy.evaluateRun(validatedPacket, receipt);
-			} catch (error) {
-				const failure = infrastructureFailure(
-					"policy-evaluation-failed",
-					error,
-				);
-				return finalizeInfrastructureFailure(run, failure, {
-					receipt,
-					workspace: preparedWorkspace,
-					workspaceStatus: "retained",
-				});
-			}
-
-			if (decision.outcome === "rejected") {
-				try {
-					const failedRun = storage.commitRunFailureOutcome(run.id, {
-						decision,
-						workspaceStatus: "retained",
-					});
-
-					return {
-						run: failedRun,
-						receipt,
-						decision,
-						workspace: {
-							...preparedWorkspace,
-							status: "retained",
-						},
-					};
-				} catch (error) {
-					return {
-						run: {
-							id: run.id,
-							unitId: run.unitId,
-							status: "failed",
-						},
-						receipt,
-						decision,
-						failure: infrastructureFailure(
-							"run-failure-finalization-failed",
-							error,
-						),
-					};
-				}
-			}
-
-			let completedRun: Run;
-			try {
-				completedRun = storage.commitRunSuccessOutcome(run.id, decision);
-			} catch (error) {
-				const failure = infrastructureFailure(
-					"run-success-persistence-failed",
-					error,
-				);
-				return finalizeInfrastructureFailure(run, failure, {
+				return {
+					run: failedRun,
 					receipt,
 					decision,
-					workspace: preparedWorkspace,
-					workspaceStatus: "retained",
-				});
-			}
-
-			let cleanupResult: { deleted: boolean; cleanupError?: string };
-			try {
-				cleanupResult = workspace.deleteWorkspace({
-					path: preparedWorkspace.path,
-				});
+					workspace: {
+						...preparedWorkspace,
+						status: "retained",
+					},
+				};
 			} catch (error) {
-				cleanupResult = {
-					deleted: false,
-					cleanupError: error instanceof Error ? error.message : String(error),
+				return {
+					run: {
+						id: run.id,
+						unitId: run.unitId,
+						status: "failed",
+					},
+					receipt,
+					decision,
+					failure: infrastructureFailure(
+						"run-failure-finalization-failed",
+						error,
+					),
 				};
 			}
-			if (!cleanupResult.deleted) {
-				const cleanupError =
-					cleanupResult.cleanupError ?? "workspace cleanup failed";
-				try {
-					storage.recordWorkspaceCleanupFailed(run.id, cleanupError);
-				} catch (error) {
-					return {
-						run: completedRun,
-						receipt,
-						decision,
-						failure: infrastructureFailure(
-							"workspace-cleanup-persistence-failed",
-							error,
-						),
-						workspace: {
-							...preparedWorkspace,
-							status: "cleanup-failed",
-							cleanupError,
-						},
-					};
-				}
+		}
 
+		let completedRun: Run;
+		try {
+			completedRun = storage.commitRunSuccessOutcome(run.id, decision);
+		} catch (error) {
+			const failure = infrastructureFailure(
+				"run-success-persistence-failed",
+				error,
+			);
+			return finalizeInfrastructureFailure(run, failure, {
+				receipt,
+				decision,
+				workspace: preparedWorkspace,
+				workspaceStatus: "retained",
+			});
+		}
+
+		let cleanupResult: { deleted: boolean; cleanupError?: string };
+		try {
+			cleanupResult = workspace.deleteWorkspace({
+				path: preparedWorkspace.path,
+			});
+		} catch (error) {
+			cleanupResult = {
+				deleted: false,
+				cleanupError: error instanceof Error ? error.message : String(error),
+			};
+		}
+		if (!cleanupResult.deleted) {
+			const cleanupError =
+				cleanupResult.cleanupError ?? "workspace cleanup failed";
+			try {
+				storage.recordWorkspaceCleanupFailed(run.id, cleanupError);
+			} catch (error) {
 				return {
 					run: completedRun,
 					receipt,
 					decision,
+					failure: infrastructureFailure(
+						"workspace-cleanup-persistence-failed",
+						error,
+					),
 					workspace: {
 						...preparedWorkspace,
 						status: "cleanup-failed",
@@ -343,52 +341,80 @@ export function createBuildplaneOrchestrator(
 				};
 			}
 
-			try {
-				storage.recordWorkspaceDeleted(run.id);
-			} catch (error) {
-				return {
-					run: completedRun,
-					receipt,
-					decision,
-					failure: infrastructureFailure(
-						"workspace-delete-persistence-failed",
-						error,
-					),
-					workspace: preparedWorkspace,
-				};
-			}
-
 			return {
 				run: completedRun,
 				receipt,
 				decision,
+				workspace: {
+					...preparedWorkspace,
+					status: "cleanup-failed",
+					cleanupError,
+				},
 			};
+		}
+
+		try {
+			storage.recordWorkspaceDeleted(run.id);
+		} catch (error) {
+			return {
+				run: completedRun,
+				receipt,
+				decision,
+				failure: infrastructureFailure(
+					"workspace-delete-persistence-failed",
+					error,
+				),
+				workspace: preparedWorkspace,
+			};
+		}
+
+		return {
+			run: completedRun,
+			receipt,
+			decision,
+		};
+	}
+
+	return {
+		initializeProject() {
+			return storage.initializeProject();
+		},
+		runPacket(packet) {
+			const prepared = prepareRun(packet);
+			if (!prepared.ok) return prepared.result;
+			const { ctx } = prepared;
+
+			let receipt: ExecutionReceipt;
+			try {
+				receipt = runtime.executePacket(
+					ctx.validatedPacket,
+					ctx.workspace.path,
+				);
+			} catch (error) {
+				const failure = infrastructureFailure(
+					"runtime-execution-failed",
+					error,
+				);
+				return finalizeInfrastructureFailure(ctx.run, failure, {
+					workspace: ctx.workspace,
+					workspaceStatus: "retained",
+				});
+			}
+
+			return finalizeRun(ctx, receipt);
 		},
 		async runPacketAsync(packet, eventBus?) {
 			const bus = eventBus ?? defaultBus;
-			const run = storage.createRun(packet);
 
-			bus.emit({
-				kind: "run-created",
-				runId: run.id,
-				unitId: packet.unit.id,
-				timestamp: new Date().toISOString(),
-				status: "pending" as const,
-			});
+			const prepared = prepareRun(packet);
+			if (!prepared.ok) return prepared.result;
+			const { ctx } = prepared;
 
-			storage.markRunRunning(run.id);
+			const scopedBus = createRunScopedBus(ctx.run.id, bus);
 
-			bus.emit({
-				kind: "run-started",
-				runId: run.id,
-				unitId: packet.unit.id,
-				timestamp: new Date().toISOString(),
-				status: "running" as const,
-			});
-
-			bus.emit({
+			scopedBus.emit({
 				kind: "execution-started",
-				runId: run.id,
+				runId: ctx.run.id,
 				timestamp: new Date().toISOString(),
 				executionType: packet.model ? ("model" as const) : ("command" as const),
 			});
@@ -396,12 +422,19 @@ export function createBuildplaneOrchestrator(
 			let receipt: ExecutionReceipt;
 			try {
 				if (runtime.executePacketAsync) {
-					receipt = await runtime.executePacketAsync(packet, projectRoot, bus);
+					receipt = await runtime.executePacketAsync(
+						ctx.validatedPacket,
+						ctx.workspace.path,
+						scopedBus,
+					);
 				} else {
-					receipt = runtime.executePacket(packet, projectRoot);
-					bus.emit({
+					receipt = runtime.executePacket(
+						ctx.validatedPacket,
+						ctx.workspace.path,
+					);
+					scopedBus.emit({
 						kind: "command-execution-complete",
-						runId: run.id,
+						runId: ctx.run.id,
 						timestamp: new Date().toISOString(),
 						exitCode: receipt.exitCode,
 						outputChecks: receipt.outputChecks.map((c) => ({
@@ -412,59 +445,24 @@ export function createBuildplaneOrchestrator(
 				}
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
-				bus.emit({
+				scopedBus.emit({
 					kind: "execution-error",
-					runId: run.id,
+					runId: ctx.run.id,
 					timestamp: new Date().toISOString(),
 					message,
 					phase: "execution",
 				});
-				const failedRun = storage.completeRun(run.id, "failed");
-				bus.emit({
-					kind: "run-completed",
-					runId: run.id,
-					unitId: packet.unit.id,
-					timestamp: new Date().toISOString(),
-					status: "failed" as const,
+				const failure = infrastructureFailure(
+					"runtime-execution-failed",
+					error,
+				);
+				return finalizeInfrastructureFailure(ctx.run, failure, {
+					workspace: ctx.workspace,
+					workspaceStatus: "retained",
 				});
-				return {
-					run: failedRun,
-					failure: { kind: "runtime-execution-failed", message },
-				};
 			}
 
-			storage.recordExecutionEvidence(run.id, receipt);
-			bus.emit({
-				kind: "evidence-recorded",
-				runId: run.id,
-				timestamp: new Date().toISOString(),
-				evidenceKind: "command-exit",
-				status: receipt.exitCode === 0 ? "pass" : "fail",
-			});
-
-			const decision = policy.evaluateRun(packet, receipt);
-			bus.emit({
-				kind: "policy-decision",
-				runId: run.id,
-				timestamp: new Date().toISOString(),
-				decisionKind: decision.kind,
-				outcome: decision.outcome,
-				reasons: decision.reasons,
-			});
-
-			storage.recordDecision(run.id, decision);
-			const finalStatus = decision.outcome === "approved" ? "passed" : "failed";
-			const completedRun = storage.completeRun(run.id, finalStatus);
-
-			bus.emit({
-				kind: "run-completed",
-				runId: run.id,
-				unitId: packet.unit.id,
-				timestamp: new Date().toISOString(),
-				status: finalStatus as "passed" | "failed",
-			});
-
-			return { run: completedRun, receipt, decision };
+			return finalizeRun(ctx, receipt);
 		},
 		getStatus() {
 			return storage.getStatusSnapshot();

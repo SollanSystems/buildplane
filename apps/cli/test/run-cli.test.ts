@@ -831,6 +831,146 @@ describe("cli command surface", () => {
 		});
 	});
 
+	it("dispatches model packets via runPacketAsync even without --tui", async () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-cli-model-async-"));
+		const calls: string[] = [];
+		const dependencies: RunCliDependencies = {
+			createOrchestrator: () => ({
+				initializeProject() {
+					return {
+						created: true,
+						projectRoot: root,
+						stateDbPath: join(root, ".buildplane", "state.db"),
+					};
+				},
+				runPacket(_packet: unknown) {
+					calls.push("runPacket");
+					return {
+						run: { id: "run-sync", status: "passed" },
+						receipt: null,
+						decision: null,
+					};
+				},
+				async runPacketAsync(_packet: unknown, _eventBus?: unknown) {
+					calls.push("runPacketAsync");
+					return {
+						run: { id: "run-async", status: "passed" },
+						receipt: null,
+						decision: null,
+					};
+				},
+				getStatus() {
+					return {
+						initialized: true,
+						latestRunUsedWorkspace: false,
+						actionableWorkspaces: [],
+						runCounts: {
+							pending: 0,
+							running: 0,
+							passed: 0,
+							failed: 0,
+							cancelled: 0,
+						},
+					};
+				},
+				inspect() {
+					throw new Error("not used");
+				},
+			}),
+			parsePacket(_packetPath: string) {
+				return {
+					unit: {
+						id: "unit-model",
+						kind: "model",
+						scope: "task",
+						inputRefs: [],
+						expectedOutputs: [],
+						verificationContract: "exit-0-and-required-outputs",
+						policyProfile: "default",
+					},
+					model: {
+						provider: "anthropic",
+						model: "claude-sonnet-4-20250514",
+						prompt: "hello",
+					},
+					verification: { requiredOutputs: [] },
+				};
+			},
+		};
+
+		const result = await runCliCapture(
+			root,
+			["run", "--packet", "model-packet.json"],
+			dependencies,
+		);
+
+		expect(result.exitCode).toBe(0);
+		expect(calls).toEqual(["runPacketAsync"]);
+		expect(result.stdout[0]).toBe("run-id: run-async");
+	});
+
+	it("dispatches command packets via sync runPacket when --tui is not set", async () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-cli-cmd-sync-"));
+		const calls: string[] = [];
+		const dependencies: RunCliDependencies = {
+			createOrchestrator: () => ({
+				initializeProject() {
+					return {
+						created: true,
+						projectRoot: root,
+						stateDbPath: join(root, ".buildplane", "state.db"),
+					};
+				},
+				runPacket(_packet: unknown) {
+					calls.push("runPacket");
+					return {
+						run: { id: "run-sync", status: "passed" },
+						receipt: null,
+						decision: null,
+					};
+				},
+				async runPacketAsync(_packet: unknown, _eventBus?: unknown) {
+					calls.push("runPacketAsync");
+					return {
+						run: { id: "run-async", status: "passed" },
+						receipt: null,
+						decision: null,
+					};
+				},
+				getStatus() {
+					return {
+						initialized: true,
+						latestRunUsedWorkspace: false,
+						actionableWorkspaces: [],
+						runCounts: {
+							pending: 0,
+							running: 0,
+							passed: 0,
+							failed: 0,
+							cancelled: 0,
+						},
+					};
+				},
+				inspect() {
+					throw new Error("not used");
+				},
+			}),
+			parsePacket(_packetPath: string) {
+				return createPassingPacket("unit-cmd");
+			},
+		};
+
+		const result = await runCliCapture(
+			root,
+			["run", "--packet", "cmd-packet.json"],
+			dependencies,
+		);
+
+		expect(result.exitCode).toBe(0);
+		expect(calls).toEqual(["runPacket"]);
+		expect(result.stdout[0]).toBe("run-id: run-sync");
+	});
+
 	it("returns stable operator-facing errors for setup failures and git preflight failures", async () => {
 		const setupFailureRoot = mkdtempSync(
 			join(tmpdir(), "buildplane-cli-setup-failure-"),

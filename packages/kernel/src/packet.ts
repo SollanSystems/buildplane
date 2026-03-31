@@ -1,6 +1,7 @@
 import type {
 	CommandExecutionBlock,
 	ModelExecutionBlock,
+	RoutingHints,
 	ToolDefinition,
 	UnitPacket,
 } from "./run-loop.js";
@@ -59,11 +60,14 @@ export function parseUnitPacket(input: string): UnitPacket {
 			) ?? [],
 	};
 
+	const routingHints = parseRoutingHints(packet.routingHints);
+
 	if (hasExecution) {
 		return {
 			unit,
 			execution: parseExecutionBlock(packet.execution),
 			verification,
+			...(routingHints === undefined ? {} : { routingHints }),
 		};
 	}
 
@@ -71,6 +75,7 @@ export function parseUnitPacket(input: string): UnitPacket {
 		unit,
 		model: parseModelBlock(packet.model),
 		verification,
+		...(routingHints === undefined ? {} : { routingHints }),
 	};
 }
 
@@ -93,13 +98,64 @@ function parseModelBlock(raw: unknown): ModelExecutionBlock {
 		"systemPrompt",
 		"packet.model",
 	);
+	const prompt = readOptionalString(record, "prompt", "packet.model");
 	const tools = parseOptionalTools(record.tools);
 
 	return {
 		provider: readRequiredString(record, "provider", "packet.model"),
 		model: readRequiredString(record, "model", "packet.model"),
+		...(prompt === undefined ? {} : { prompt }),
 		...(systemPrompt === undefined ? {} : { systemPrompt }),
 		...(tools === undefined ? {} : { tools }),
+	};
+}
+
+const VALID_PREFERRED_WORKERS = new Set(["claude-code"]);
+
+function parseRoutingHints(raw: unknown): RoutingHints | undefined {
+	if (raw === undefined) {
+		return undefined;
+	}
+
+	const record = asRecord(raw, "packet.routingHints");
+	const preferredWorker = readOptionalString(
+		record,
+		"preferredWorker",
+		"packet.routingHints",
+	);
+
+	if (
+		preferredWorker !== undefined &&
+		!VALID_PREFERRED_WORKERS.has(preferredWorker)
+	) {
+		throw new TypeError(
+			`packet.routingHints.preferredWorker must be one of: ${[...VALID_PREFERRED_WORKERS].join(", ")}`,
+		);
+	}
+
+	const preferredModel = readOptionalString(
+		record,
+		"preferredModel",
+		"packet.routingHints",
+	);
+	const effort = readOptionalString(record, "effort", "packet.routingHints");
+
+	if (effort !== undefined && !["low", "medium", "high"].includes(effort)) {
+		throw new TypeError(
+			"packet.routingHints.effort must be one of: low, medium, high",
+		);
+	}
+
+	return {
+		...(preferredWorker === undefined
+			? {}
+			: {
+					preferredWorker: preferredWorker as RoutingHints["preferredWorker"],
+				}),
+		...(preferredModel === undefined ? {} : { preferredModel }),
+		...(effort === undefined
+			? {}
+			: { effort: effort as RoutingHints["effort"] }),
 	};
 }
 

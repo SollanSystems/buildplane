@@ -153,3 +153,5 @@ export function createEventBus(): EventBus {
 		},
 	};
 }
+
+export { createRunScopedBus } from "./run-scoped-bus.js";

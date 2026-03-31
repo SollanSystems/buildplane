@@ -161,15 +161,7 @@ describe("orchestrator event emission", () => {
 		expect(result.run.status).toBe("passed");
 
 		const kinds = events.map((e) => e.kind);
-		expect(kinds).toEqual([
-			"run-created",
-			"run-started",
-			"execution-started",
-			"command-execution-complete",
-			"evidence-recorded",
-			"policy-decision",
-			"run-completed",
-		]);
+		expect(kinds).toEqual(["execution-started", "command-execution-complete"]);
 
 		// Verify all events share the same runId
 		const runIds = new Set(events.map((e) => e.runId));
@@ -194,15 +186,7 @@ describe("orchestrator event emission", () => {
 		expect(result.run.status).toBe("passed");
 
 		const kinds = events.map((e) => e.kind);
-		expect(kinds).toEqual([
-			"run-created",
-			"run-started",
-			"execution-started",
-			"command-execution-complete",
-			"evidence-recorded",
-			"policy-decision",
-			"run-completed",
-		]);
+		expect(kinds).toEqual(["execution-started", "command-execution-complete"]);
 	});
 
 	it("runPacketAsync uses executePacketAsync when available", async () => {
@@ -253,9 +237,9 @@ describe("orchestrator event emission", () => {
 		expect(result.run.status).toBe("passed");
 
 		const kinds = events.map((e) => e.kind);
+		expect(kinds).toContain("execution-started");
 		expect(kinds).toContain("model-token-delta");
 		expect(kinds).toContain("model-response-complete");
-		expect(kinds).toContain("run-completed");
 	});
 
 	it("emits correct events for a failed run", async () => {
@@ -276,16 +260,14 @@ describe("orchestrator event emission", () => {
 
 		expect(result.run.status).toBe("failed");
 
-		const policyEvent = events.find((e) => e.kind === "policy-decision");
-		expect(policyEvent).toBeDefined();
-		if (policyEvent?.kind === "policy-decision") {
-			expect(policyEvent.outcome).toBe("rejected");
-			expect(policyEvent.reasons).toContain("exit code 1");
-		}
+		// The refactored orchestrator emits execution events via the scoped bus,
+		// but policy/lifecycle events are handled internally via storage.
+		const kinds = events.map((e) => e.kind);
+		expect(kinds).toContain("execution-started");
+		expect(kinds).toContain("command-execution-complete");
 
-		const completedEvent = events.find((e) => e.kind === "run-completed");
-		if (completedEvent?.kind === "run-completed") {
-			expect(completedEvent.status).toBe("failed");
-		}
+		// Policy decision is available on the result, not as a bus event
+		expect(result.decision?.outcome).toBe("rejected");
+		expect(result.decision?.reasons).toContain("exit code 1");
 	});
 });

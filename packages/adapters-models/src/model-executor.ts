@@ -167,7 +167,7 @@ async function executeModelStream(
 	const result = streamFn({
 		model: modelInstance,
 		system: model.systemPrompt,
-		prompt: "Execute the assigned task.",
+		prompt: packet.model?.prompt ?? "Execute the assigned task.",
 	});
 
 	let fullText = "";
