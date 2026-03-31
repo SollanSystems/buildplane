@@ -16,7 +16,7 @@
 		"@buildplane/adapters-tools": "workspace:*"
 	},
 	"devDependencies": {
-		"@ai-sdk/anthropic": "^3.0.63",
+		"@ai-sdk/anthropic": "^3.0.64",
 		"ai": "^6.0.134"
 	},
 	"peerDependencies": {
