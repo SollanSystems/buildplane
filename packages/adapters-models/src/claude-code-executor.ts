@@ -60,11 +60,7 @@ export function createClaudeCodeExecutor(
 		return model.prompt!;
 	}
 
-	function buildArgs(
-		envelope: string,
-		modelId: string,
-		workspacePath: string,
-	): string[] {
+	function buildArgs(envelope: string, modelId: string): string[] {
 		return [
 			"-p",
 			envelope,
@@ -74,8 +70,6 @@ export function createClaudeCodeExecutor(
 			modelId,
 			"--max-turns",
 			String(maxTurns),
-			"--cwd",
-			workspacePath,
 		];
 	}
 
@@ -94,7 +88,7 @@ export function createClaudeCodeExecutor(
 			validatePacket(packet);
 
 			const envelope = buildEnvelope(packet);
-			const args = buildArgs(envelope, packet.model!.model, projectRoot);
+			const args = buildArgs(envelope, packet.model!.model);
 			const startedAt = new Date().toISOString();
 
 			return new Promise<ExecutionReceipt>((resolvePromise, rejectPromise) => {
