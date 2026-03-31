@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { createRunScopedBus } from "../src/run-scoped-bus.js";
 import type { EventBus, ExecutionEvent } from "../src/events.js";
+import { createRunScopedBus } from "../src/run-scoped-bus.js";
 
 describe("createRunScopedBus", () => {
 	function createCollectorBus(): EventBus & { emitted: ExecutionEvent[] } {

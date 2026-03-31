@@ -132,7 +132,15 @@ export function createBuildplaneOrchestrator(
 	}
 
 	type PrepareRunResult =
-		| { ok: true; ctx: { run: Run; validatedPacket: UnitPacket; workspace: WorkspaceSnapshot; projectRoot: string } }
+		| {
+				ok: true;
+				ctx: {
+					run: Run;
+					validatedPacket: UnitPacket;
+					workspace: WorkspaceSnapshot;
+					projectRoot: string;
+				};
+		  }
 		| { ok: false; result: RunPacketResult };
 
 	function prepareRun(packet: UnitPacket): PrepareRunResult {
@@ -155,10 +163,7 @@ export function createBuildplaneOrchestrator(
 			);
 			preparedWorkspace = toWorkspaceSnapshot(run, createdWorkspace);
 		} catch (error) {
-			const failure = infrastructureFailure(
-				"workspace-prepare-failed",
-				error,
-			);
+			const failure = infrastructureFailure("workspace-prepare-failed", error);
 			return { ok: false, result: finalizeInfrastructureFailure(run, failure) };
 		}
 
@@ -219,7 +224,11 @@ export function createBuildplaneOrchestrator(
 	}
 
 	function finalizeRun(
-		ctx: { run: Run; validatedPacket: UnitPacket; workspace: WorkspaceSnapshot },
+		ctx: {
+			run: Run;
+			validatedPacket: UnitPacket;
+			workspace: WorkspaceSnapshot;
+		},
 		receipt: ExecutionReceipt,
 	): RunPacketResult {
 		const { run, validatedPacket, workspace: preparedWorkspace } = ctx;
@@ -242,10 +251,7 @@ export function createBuildplaneOrchestrator(
 		try {
 			decision = policy.evaluateRun(validatedPacket, receipt);
 		} catch (error) {
-			const failure = infrastructureFailure(
-				"policy-evaluation-failed",
-				error,
-			);
+			const failure = infrastructureFailure("policy-evaluation-failed", error);
 			return finalizeInfrastructureFailure(run, failure, {
 				receipt,
 				workspace: preparedWorkspace,

@@ -136,11 +136,7 @@ async function loadCliOrchestrator(
 			if (p.execution) return commandExecutor.executePacket(packet, root);
 			throw new Error("Model packets require async execution path");
 		},
-		async executePacketAsync(
-			packet: unknown,
-			root: string,
-			bus: unknown,
-		) {
+		async executePacketAsync(packet: unknown, root: string, bus: unknown) {
 			const p = packet as {
 				execution?: unknown;
 				routingHints?: { preferredWorker?: string };

@@ -1,5 +1,4 @@
 import { EventEmitter } from "node:events";
-import { describe, expect, it, vi } from "vitest";
 import type {
 	EventBus,
 	ExecutionEvent,
@@ -7,6 +6,7 @@ import type {
 	UnitPacket,
 } from "@buildplane/kernel";
 import { createEventBus } from "@buildplane/kernel";
+import { describe, expect, it, vi } from "vitest";
 import { createClaudeCodeExecutor } from "../src/claude-code-executor.js";
 
 // ── Helpers ─────────────────────────────────────────────────
@@ -18,7 +18,9 @@ function createMockSpawn(opts: {
 	error?: Error;
 }) {
 	return vi.fn().mockImplementation(() => {
-		const child = new EventEmitter() as ReturnType<typeof import("node:child_process").spawn>;
+		const child = new EventEmitter() as ReturnType<
+			typeof import("node:child_process").spawn
+		>;
 		const stdoutEmitter = new EventEmitter();
 		const stderrEmitter = new EventEmitter();
 		(child as any).stdout = stdoutEmitter;
@@ -43,13 +45,19 @@ function createMockSpawn(opts: {
 	});
 }
 
-function makeModelPacket(overrides: {
-	prompt?: string;
-	systemPrompt?: string;
-	model?: string;
-	tools?: readonly { name: string; description: string; parameters: Record<string, unknown> }[];
-	requiredOutputs?: readonly string[];
-} = {}): UnitPacket {
+function makeModelPacket(
+	overrides: {
+		prompt?: string;
+		systemPrompt?: string;
+		model?: string;
+		tools?: readonly {
+			name: string;
+			description: string;
+			parameters: Record<string, unknown>;
+		}[];
+		requiredOutputs?: readonly string[];
+	} = {},
+): UnitPacket {
 	return {
 		unit: {
 			id: "unit-1",
@@ -111,22 +119,28 @@ describe("createClaudeCodeExecutor", () => {
 		const events = collectEvents(bus);
 
 		const packet = makeModelPacket({ prompt: "Write hello.ts" });
-		const receipt = await executor.executePacketAsync(packet, "/workspace", bus);
+		const receipt = await executor.executePacketAsync(
+			packet,
+			"/workspace",
+			bus,
+		);
 
 		expect(receipt.exitCode).toBe(0);
 		expect(receipt.stdout).toBe(claudeOutput);
 		expect(receipt.command).toBe("claude");
 		expect(receipt.cwd).toBe("/workspace");
 
-		const complete = events.find(
-			(e) => e.kind === "model-response-complete",
-		) as ModelResponseCompleteEvent | undefined;
+		const complete = events.find((e) => e.kind === "model-response-complete") as
+			| ModelResponseCompleteEvent
+			| undefined;
 		expect(complete).toBeDefined();
 		expect(complete!.text).toBe("Generated code here");
 		expect(complete!.finishReason).toBe("end_turn");
 
 		// No model-token-delta events ever
-		expect(events.filter((e) => e.kind === "model-token-delta")).toHaveLength(0);
+		expect(events.filter((e) => e.kind === "model-token-delta")).toHaveLength(
+			0,
+		);
 	});
 
 	it("malformed JSON → receipt, no model-response-complete", async () => {
@@ -136,11 +150,17 @@ describe("createClaudeCodeExecutor", () => {
 		const events = collectEvents(bus);
 
 		const packet = makeModelPacket({ prompt: "Do something" });
-		const receipt = await executor.executePacketAsync(packet, "/workspace", bus);
+		const receipt = await executor.executePacketAsync(
+			packet,
+			"/workspace",
+			bus,
+		);
 
 		expect(receipt.exitCode).toBe(0);
 		expect(receipt.stdout).toBe("not json {{{");
-		expect(events.filter((e) => e.kind === "model-response-complete")).toHaveLength(0);
+		expect(
+			events.filter((e) => e.kind === "model-response-complete"),
+		).toHaveLength(0);
 	});
 
 	it("missing model.prompt → throw before spawn", async () => {
@@ -249,7 +269,11 @@ describe("createClaudeCodeExecutor", () => {
 		const bus = createEventBus();
 
 		const packet = makeModelPacket({ prompt: "Build it" });
-		const receipt = await executor.executePacketAsync(packet, "/workspace", bus);
+		const receipt = await executor.executePacketAsync(
+			packet,
+			"/workspace",
+			bus,
+		);
 
 		// args should contain the -p, --output-format, --model, --max-turns, --cwd flags
 		expect(receipt.args).toContain("-p");

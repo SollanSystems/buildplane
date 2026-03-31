@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { type ChildProcess, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import type {
@@ -43,9 +43,7 @@ export function createClaudeCodeExecutor(
 			);
 		}
 		if (!packet.model.prompt) {
-			throw new Error(
-				"Claude Code executor requires model.prompt to be set.",
-			);
+			throw new Error("Claude Code executor requires model.prompt to be set.");
 		}
 		if (packet.model.tools) {
 			throw new Error(

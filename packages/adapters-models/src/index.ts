@@ -1,4 +1,9 @@
 export type {
+	ClaudeCodeExecutorOptions,
+	ClaudeCodeExecutorPort,
+} from "./claude-code-executor.js";
+export { createClaudeCodeExecutor } from "./claude-code-executor.js";
+export type {
 	CreateModelExecutorOptions,
 	ModelResolver,
 	StreamChunk,
@@ -9,8 +14,3 @@ export {
 	createModelExecutor,
 	type ModelExecutorPort,
 } from "./model-executor.js";
-export type {
-	ClaudeCodeExecutorOptions,
-	ClaudeCodeExecutorPort,
-} from "./claude-code-executor.js";
-export { createClaudeCodeExecutor } from "./claude-code-executor.js";

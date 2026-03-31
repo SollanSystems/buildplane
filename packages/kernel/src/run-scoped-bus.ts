@@ -1,6 +1,9 @@
 import type { EventBus, EventListener, ExecutionEvent } from "./events.js";
 
-export function createRunScopedBus(runId: string, innerBus: EventBus): EventBus {
+export function createRunScopedBus(
+	runId: string,
+	innerBus: EventBus,
+): EventBus {
 	return {
 		emit(event: ExecutionEvent) {
 			innerBus.emit({ ...event, runId });
