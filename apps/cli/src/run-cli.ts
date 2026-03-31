@@ -139,6 +139,49 @@ async function loadCliOrchestrator(
 			return sdkExecutor.executePacketAsync(packet, root, bus);
 		},
 	};
+	const adaptersModels = (await import(
+		"@buildplane/adapters-models"
+	)) as unknown as {
+		createModelExecutor: () => {
+			executePacket: (packet: unknown, root: string) => unknown;
+			executePacketAsync: (
+				packet: unknown,
+				root: string,
+				eventBus: unknown,
+			) => Promise<unknown>;
+		};
+		createClaudeCodeExecutor: () => {
+			executePacket: (packet: unknown, root: string) => unknown;
+			executePacketAsync: (
+				packet: unknown,
+				root: string,
+				eventBus: unknown,
+			) => Promise<unknown>;
+		};
+	};
+
+	const commandExecutor = { executePacket: runtime.executePacket };
+	const sdkExecutor = adaptersModels.createModelExecutor();
+	const claudeExecutor = adaptersModels.createClaudeCodeExecutor();
+
+	const runtimeRouter = {
+		executePacket(packet: unknown, root: string) {
+			const p = packet as { execution?: unknown };
+			if (p.execution) return commandExecutor.executePacket(packet, root);
+			throw new Error("Model packets require async execution path");
+		},
+		async executePacketAsync(packet: unknown, root: string, bus: unknown) {
+			const p = packet as {
+				execution?: unknown;
+				routingHints?: { preferredWorker?: string };
+			};
+			if (p.execution) return commandExecutor.executePacket(packet, root);
+			if (p.routingHints?.preferredWorker === "claude-code") {
+				return claudeExecutor.executePacketAsync(packet, root, bus);
+			}
+			return sdkExecutor.executePacketAsync(packet, root, bus);
+		},
+	};
 
 	return kernel.createBuildplaneOrchestrator({
 		projectRoot,
@@ -272,7 +315,12 @@ export async function runCli(
 					return result.run.status === "passed" ? 0 : 1;
 				}
 
-				const result = orchestrator.runPacket(packet);
+				const isModelPacket = !!(packet as { model?: unknown }).model;
+				const useAsync = useTui || isModelPacket;
+
+				const result = useAsync
+					? await orchestrator.runPacketAsync(packet, undefined)
+					: orchestrator.runPacket(packet);
 
 				for (const line of formatRunResult(result)) {
 					stdout(line);

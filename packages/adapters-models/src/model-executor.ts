@@ -20,8 +20,17 @@ export interface ModelExecutorPort {
 export type StreamChunk =
 	| { type: "text-delta"; textDelta: string }
 	| { type: "tool-call"; toolCallId: string; toolName: string; args: unknown }
-	| { type: "tool-result"; toolCallId: string; toolName: string; result: unknown }
-	| { type: "step-finish"; finishReason?: string; usage?: { promptTokens: number; completionTokens: number } };
+	| {
+			type: "tool-result";
+			toolCallId: string;
+			toolName: string;
+			result: unknown;
+	  }
+	| {
+			type: "step-finish";
+			finishReason?: string;
+			usage?: { promptTokens: number; completionTokens: number };
+	  };
 
 /** Abstraction over the AI SDK's streamText return value. */
 export interface StreamResult {
@@ -93,9 +102,7 @@ export function createModelExecutor(
 			}
 
 			if (!packet.model) {
-				throw new Error(
-					"Packet must have either an execution or model block.",
-				);
+				throw new Error("Packet must have either an execution or model block.");
 			}
 
 			const startedAt = new Date().toISOString();
@@ -113,8 +120,7 @@ export function createModelExecutor(
 				return receipt;
 			} catch (error) {
 				const completedAt = new Date().toISOString();
-				const message =
-					error instanceof Error ? error.message : String(error);
+				const message = error instanceof Error ? error.message : String(error);
 
 				eventBus.emit({
 					kind: "execution-error",
@@ -150,7 +156,10 @@ async function executeModelStream(
 	streamFn: StreamFunction,
 	modelResolver: ModelResolver,
 ): Promise<ExecutionReceipt> {
-	const model = packet.model!;
+	const model = packet.model;
+	if (!model) {
+		throw new Error("Packet must have a model block for model execution.");
+	}
 	const startedAt = new Date().toISOString();
 
 	const modelInstance = modelResolver(model.provider, model.model);
@@ -158,7 +167,7 @@ async function executeModelStream(
 	const result = streamFn({
 		model: modelInstance,
 		system: model.systemPrompt,
-		prompt: model.prompt ?? "Execute the assigned task.",
+		prompt: packet.model?.prompt ?? "Execute the assigned task.",
 	});
 
 	let fullText = "";

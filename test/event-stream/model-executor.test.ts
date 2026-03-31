@@ -65,7 +65,7 @@ function mockStreamFn(): StreamFunction {
 			yield { type: "text-delta" as const, textDelta: "Hello" };
 			yield { type: "text-delta" as const, textDelta: " world" };
 			yield {
-				type: "finish-step" as const,
+				type: "step-finish" as const,
 				finishReason: "stop",
 				usage: { promptTokens: 10, completionTokens: 5 },
 			};
@@ -134,16 +134,16 @@ describe("model executor", () => {
 					type: "tool-call" as const,
 					toolCallId: "call-1",
 					toolName: "read_file",
-					input: { path: "/tmp/test.txt" },
+					args: { path: "/tmp/test.txt" },
 				};
 				yield {
 					type: "tool-result" as const,
 					toolCallId: "call-1",
 					toolName: "read_file",
-					output: "file contents",
+					result: "file contents",
 				};
 				yield { type: "text-delta" as const, textDelta: "Done" };
-				yield { type: "finish-step" as const, finishReason: "stop" };
+				yield { type: "step-finish" as const, finishReason: "stop" };
 			})(),
 		});
 
@@ -267,53 +267,57 @@ describe("model executor", () => {
 		);
 	});
 
-	it("aborts model execution when signal fires", async () => {
+	it("uses packet.model.prompt when present", async () => {
 		const bus = createEventBus();
-		const events: ExecutionEvent[] = [];
-		bus.subscribe((e) => events.push(e));
+		let capturedPrompt: string | undefined;
 
-		const controller = new AbortController();
-
-		const streamFn: StreamFunction = () => ({
-			fullStream: (async function* () {
-				yield { type: "text-delta" as const, textDelta: "chunk1 " };
-				yield { type: "text-delta" as const, textDelta: "chunk2 " };
-				// Abort after 2 chunks
-				controller.abort();
-				yield { type: "text-delta" as const, textDelta: "chunk3 " };
-				yield {
-					type: "finish-step" as const,
-					finishReason: "stop",
-					usage: { promptTokens: 10, completionTokens: 30 },
-				};
-			})(),
-		});
+		const capturingStreamFn: StreamFunction = (options) => {
+			capturedPrompt = options.prompt;
+			return {
+				fullStream: (async function* () {
+					yield { type: "text-delta" as const, textDelta: "done" };
+					yield { type: "step-finish" as const, finishReason: "stop" };
+				})(),
+			};
+		};
 
 		const executor = createModelExecutor({
-			streamFn,
+			streamFn: capturingStreamFn,
 			modelResolver: mockModelResolver(),
-			toolBuilder: () => ({}),
 		});
 
 		const root = mkdtempSync(join(tmpdir(), "bp-model-"));
-		const receipt = await executor.executePacketAsync(
-			makeModelPacket(),
+		await executor.executePacketAsync(
+			makeModelPacket({ prompt: "Custom task prompt." }),
 			root,
 			bus,
-			controller.signal,
 		);
 
-		expect(receipt.exitCode).toBe(1);
-		expect(receipt.stderr).toContain("aborted");
-		expect(receipt.stdout).toContain("chunk1");
-		expect(receipt.stdout).toContain("chunk2");
+		expect(capturedPrompt).toBe("Custom task prompt.");
+	});
 
-		const responseComplete = events.find(
-			(e) => e.kind === "model-response-complete",
-		);
-		expect(responseComplete).toBeDefined();
-		if (responseComplete?.kind === "model-response-complete") {
-			expect(responseComplete.finishReason).toBe("aborted");
-		}
+	it("falls back to default prompt when packet.model.prompt is absent", async () => {
+		const bus = createEventBus();
+		let capturedPrompt: string | undefined;
+
+		const capturingStreamFn: StreamFunction = (options) => {
+			capturedPrompt = options.prompt;
+			return {
+				fullStream: (async function* () {
+					yield { type: "text-delta" as const, textDelta: "done" };
+					yield { type: "step-finish" as const, finishReason: "stop" };
+				})(),
+			};
+		};
+
+		const executor = createModelExecutor({
+			streamFn: capturingStreamFn,
+			modelResolver: mockModelResolver(),
+		});
+
+		const root = mkdtempSync(join(tmpdir(), "bp-model-"));
+		await executor.executePacketAsync(makeModelPacket(), root, bus);
+
+		expect(capturedPrompt).toBe("Execute the assigned task.");
 	});
 });

@@ -60,10 +60,7 @@ export function parseUnitPacket(input: string): UnitPacket {
 			) ?? [],
 	};
 
-	const routingHints =
-		packet.routingHints === undefined
-			? undefined
-			: parseRoutingHints(packet.routingHints);
+	const routingHints = parseRoutingHints(packet.routingHints);
 
 	if (hasExecution) {
 		return {
@@ -101,60 +98,64 @@ function parseModelBlock(raw: unknown): ModelExecutionBlock {
 		"systemPrompt",
 		"packet.model",
 	);
-
-	// prompt: optional, but must not be empty if present
-	const promptRaw = record["prompt"];
-	if (promptRaw !== undefined) {
-		if (typeof promptRaw !== "string" || promptRaw.length === 0) {
-			throw new TypeError("model.prompt must not be empty if present");
-		}
-	}
-	const prompt = promptRaw as string | undefined;
-
+	const prompt = readOptionalString(record, "prompt", "packet.model");
 	const tools = parseOptionalTools(record.tools);
 
 	return {
 		provider: readRequiredString(record, "provider", "packet.model"),
 		model: readRequiredString(record, "model", "packet.model"),
-		...(systemPrompt === undefined ? {} : { systemPrompt }),
 		...(prompt === undefined ? {} : { prompt }),
+		...(systemPrompt === undefined ? {} : { systemPrompt }),
 		...(tools === undefined ? {} : { tools }),
 	};
 }
 
-function parseRoutingHints(raw: unknown): RoutingHints {
-	const record = asRecord(raw, "packet.routingHints");
+const VALID_PREFERRED_WORKERS = new Set(["claude-code"]);
 
-	const preferredWorkerRaw = record["preferredWorker"];
-	if (preferredWorkerRaw !== undefined) {
-		if (preferredWorkerRaw !== "claude-code") {
-			throw new TypeError(
-				`packet.routingHints.preferredWorker must be "claude-code" if present, got: ${String(preferredWorkerRaw)}`,
-			);
-		}
+function parseRoutingHints(raw: unknown): RoutingHints | undefined {
+	if (raw === undefined) {
+		return undefined;
 	}
-	const preferredWorker = preferredWorkerRaw as "claude-code" | undefined;
+
+	const record = asRecord(raw, "packet.routingHints");
+	const preferredWorker = readOptionalString(
+		record,
+		"preferredWorker",
+		"packet.routingHints",
+	);
+
+	if (
+		preferredWorker !== undefined &&
+		!VALID_PREFERRED_WORKERS.has(preferredWorker)
+	) {
+		throw new TypeError(
+			`packet.routingHints.preferredWorker must be one of: ${[...VALID_PREFERRED_WORKERS].join(", ")}`,
+		);
+	}
 
 	const preferredModel = readOptionalString(
 		record,
 		"preferredModel",
 		"packet.routingHints",
 	);
+	const effort = readOptionalString(record, "effort", "packet.routingHints");
 
-	const effortRaw = record["effort"];
-	if (effortRaw !== undefined) {
-		if (effortRaw !== "low" && effortRaw !== "medium" && effortRaw !== "high") {
-			throw new TypeError(
-				`packet.routingHints.effort must be "low", "medium", or "high" if present, got: ${String(effortRaw)}`,
-			);
-		}
+	if (effort !== undefined && !["low", "medium", "high"].includes(effort)) {
+		throw new TypeError(
+			"packet.routingHints.effort must be one of: low, medium, high",
+		);
 	}
-	const effort = effortRaw as "low" | "medium" | "high" | undefined;
 
 	return {
-		...(preferredWorker === undefined ? {} : { preferredWorker }),
+		...(preferredWorker === undefined
+			? {}
+			: {
+					preferredWorker: preferredWorker as RoutingHints["preferredWorker"],
+				}),
 		...(preferredModel === undefined ? {} : { preferredModel }),
-		...(effort === undefined ? {} : { effort }),
+		...(effort === undefined
+			? {}
+			: { effort: effort as RoutingHints["effort"] }),
 	};
 }
 

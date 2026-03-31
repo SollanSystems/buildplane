@@ -9,9 +9,16 @@ export interface ToolDefinition {
 export interface ModelExecutionBlock {
 	readonly provider: string;
 	readonly model: string;
+	readonly prompt?: string;
 	readonly systemPrompt?: string;
 	readonly prompt?: string;
 	readonly tools?: readonly ToolDefinition[];
+}
+
+export interface RoutingHints {
+	readonly preferredWorker?: "claude-code";
+	readonly preferredModel?: string;
+	readonly effort?: "low" | "medium" | "high";
 }
 
 export interface CommandExecutionBlock {
