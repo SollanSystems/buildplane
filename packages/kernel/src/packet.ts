@@ -1,6 +1,7 @@
 import type {
 	CommandExecutionBlock,
 	ModelExecutionBlock,
+	RoutingHints,
 	ToolDefinition,
 	UnitPacket,
 } from "./run-loop.js";
@@ -59,11 +60,17 @@ export function parseUnitPacket(input: string): UnitPacket {
 			) ?? [],
 	};
 
+	const routingHints =
+		packet.routingHints === undefined
+			? undefined
+			: parseRoutingHints(packet.routingHints);
+
 	if (hasExecution) {
 		return {
 			unit,
 			execution: parseExecutionBlock(packet.execution),
 			verification,
+			...(routingHints === undefined ? {} : { routingHints }),
 		};
 	}
 
@@ -71,6 +78,7 @@ export function parseUnitPacket(input: string): UnitPacket {
 		unit,
 		model: parseModelBlock(packet.model),
 		verification,
+		...(routingHints === undefined ? {} : { routingHints }),
 	};
 }
 
@@ -93,13 +101,60 @@ function parseModelBlock(raw: unknown): ModelExecutionBlock {
 		"systemPrompt",
 		"packet.model",
 	);
+
+	// prompt: optional, but must not be empty if present
+	const promptRaw = record["prompt"];
+	if (promptRaw !== undefined) {
+		if (typeof promptRaw !== "string" || promptRaw.length === 0) {
+			throw new TypeError("model.prompt must not be empty if present");
+		}
+	}
+	const prompt = promptRaw as string | undefined;
+
 	const tools = parseOptionalTools(record.tools);
 
 	return {
 		provider: readRequiredString(record, "provider", "packet.model"),
 		model: readRequiredString(record, "model", "packet.model"),
 		...(systemPrompt === undefined ? {} : { systemPrompt }),
+		...(prompt === undefined ? {} : { prompt }),
 		...(tools === undefined ? {} : { tools }),
+	};
+}
+
+function parseRoutingHints(raw: unknown): RoutingHints {
+	const record = asRecord(raw, "packet.routingHints");
+
+	const preferredWorkerRaw = record["preferredWorker"];
+	if (preferredWorkerRaw !== undefined) {
+		if (preferredWorkerRaw !== "claude-code") {
+			throw new TypeError(
+				`packet.routingHints.preferredWorker must be "claude-code" if present, got: ${String(preferredWorkerRaw)}`,
+			);
+		}
+	}
+	const preferredWorker = preferredWorkerRaw as "claude-code" | undefined;
+
+	const preferredModel = readOptionalString(
+		record,
+		"preferredModel",
+		"packet.routingHints",
+	);
+
+	const effortRaw = record["effort"];
+	if (effortRaw !== undefined) {
+		if (effortRaw !== "low" && effortRaw !== "medium" && effortRaw !== "high") {
+			throw new TypeError(
+				`packet.routingHints.effort must be "low", "medium", or "high" if present, got: ${String(effortRaw)}`,
+			);
+		}
+	}
+	const effort = effortRaw as "low" | "medium" | "high" | undefined;
+
+	return {
+		...(preferredWorker === undefined ? {} : { preferredWorker }),
+		...(preferredModel === undefined ? {} : { preferredModel }),
+		...(effort === undefined ? {} : { effort }),
 	};
 }
 

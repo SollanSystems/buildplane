@@ -10,16 +10,10 @@ import {
 	formatRunResult,
 } from "./formatters.js";
 
-export interface RunCliDependencies {
-	readonly createOrchestrator: () => BuildplaneCliOrchestrator;
-	readonly parsePacket?: (packetPath: string) => unknown;
-}
-
 export interface RunCliOptions {
 	readonly cwd?: string;
 	readonly stdout?: (line: string) => void;
 	readonly stderr?: (line: string) => void;
-	readonly dependencies?: RunCliDependencies;
 }
 
 interface BuildplaneCliOrchestrator {
@@ -45,8 +39,6 @@ interface BuildplaneCliOrchestrator {
 	inspect(
 		id: string,
 	): { kind: string; run: { id: string } } & Record<string, unknown>;
-	approveRun(runId: string): { id: string; status: string };
-	rejectSuspendedRun(runId: string): { id: string; status: string };
 }
 
 async function loadCliOrchestrator(
@@ -65,7 +57,6 @@ async function loadCliOrchestrator(
 				) => Promise<unknown>;
 			};
 			policy: { evaluateRun: (packet: unknown, receipt: unknown) => unknown };
-			workspace?: unknown;
 			eventBus?: unknown;
 		}) => BuildplaneCliOrchestrator;
 		createEventBus: () => {
@@ -74,17 +65,8 @@ async function loadCliOrchestrator(
 		};
 		parseUnitPacket: (input: string) => unknown;
 	};
-	const adaptersModels = (await import(
-		"@buildplane/adapters-models"
-	)) as unknown as {
-		createModelExecutor: (options?: unknown) => {
-			executePacket: (packet: unknown, root: string) => unknown;
-			executePacketAsync: (
-				packet: unknown,
-				root: string,
-				eventBus: unknown,
-			) => Promise<unknown>;
-		};
+	const runtime = (await import("@buildplane/runtime")) as unknown as {
+		executePacket: (packet: unknown, root: string) => unknown;
 	};
 	const policy = (await import("@buildplane/policy")) as unknown as {
 		evaluateRun: (packet: unknown, receipt: unknown) => unknown;
@@ -113,21 +95,56 @@ async function loadCliOrchestrator(
 		}
 	});
 
-	const adaptersGit = (await import("@buildplane/adapters-git")) as unknown as {
-		createGitWorkspaceAdapter: () => unknown;
+	// Runtime router: selects executor based on packet type and routing hints
+	const adaptersModels = (await import(
+		"@buildplane/adapters-models"
+	)) as unknown as {
+		createModelExecutor: () => {
+			executePacket: (packet: unknown, root: string) => unknown;
+			executePacketAsync: (
+				packet: unknown,
+				root: string,
+				eventBus: unknown,
+			) => Promise<unknown>;
+		};
+		createClaudeCodeExecutor: () => {
+			executePacket: (packet: unknown, root: string) => unknown;
+			executePacketAsync: (
+				packet: unknown,
+				root: string,
+				eventBus: unknown,
+			) => Promise<unknown>;
+		};
 	};
 
-	const modelExecutor = adaptersModels.createModelExecutor();
+	const sdkExecutor = adaptersModels.createModelExecutor();
+	const claudeExecutor = adaptersModels.createClaudeCodeExecutor();
+
+	const runtimeRouter = {
+		executePacket(packet: unknown, root: string) {
+			const p = packet as { execution?: unknown; model?: unknown };
+			if (p.execution) return runtime.executePacket(packet, root);
+			throw new Error("Model packets require async execution path");
+		},
+		async executePacketAsync(packet: unknown, root: string, bus: unknown) {
+			const p = packet as {
+				execution?: unknown;
+				model?: unknown;
+				routingHints?: { preferredWorker?: string };
+			};
+			if (p.execution) return runtime.executePacket(packet, root);
+			if (p.routingHints?.preferredWorker === "claude-code") {
+				return claudeExecutor.executePacketAsync(packet, root, bus);
+			}
+			return sdkExecutor.executePacketAsync(packet, root, bus);
+		},
+	};
 
 	return kernel.createBuildplaneOrchestrator({
 		projectRoot,
 		storage: storage.createBuildplaneStorage(projectRoot),
-		runtime: {
-			executePacket: modelExecutor.executePacket,
-			executePacketAsync: modelExecutor.executePacketAsync,
-		},
+		runtime: runtimeRouter,
 		policy: { evaluateRun: policy.evaluateRun },
-		workspace: adaptersGit.createGitWorkspaceAdapter(),
 		eventBus,
 	});
 }
@@ -167,9 +184,7 @@ export async function runCli(
 	const cwd = options.cwd ?? process.cwd();
 	const stdout = options.stdout ?? ((line: string) => console.log(line));
 	const stderr = options.stderr ?? ((line: string) => console.error(line));
-	const orchestrator = options.dependencies
-		? options.dependencies.createOrchestrator()
-		: await loadCliOrchestrator(cwd);
+	const orchestrator = await loadCliOrchestrator(cwd);
 	const [command, ...rest] = argv;
 
 	if (!command) {
@@ -187,19 +202,31 @@ export async function runCli(
 				return 0;
 			}
 			case "run": {
-				// Preflight: verify project is initialized before loading the packet
-				orchestrator.getStatus();
-
 				const packetIndex = rest.indexOf("--packet");
 				if (packetIndex === -1 || !rest[packetIndex + 1]) {
 					throw new Error("Missing required --packet <path> argument.");
 				}
 
 				const packetPath = resolve(cwd, rest[packetIndex + 1]);
-				const packet = options.dependencies?.parsePacket
-					? options.dependencies.parsePacket(packetPath)
-					: await loadPacket(packetPath);
+				const packet = await loadPacket(packetPath);
 				const useTui = rest.includes("--tui");
+				const isModelPacket = !!(packet as { model?: unknown }).model;
+				const useAsync = useTui || isModelPacket;
+
+				if (useAsync && !useTui) {
+					// Model packets auto-switch to async (no TUI)
+					const result = await orchestrator.runPacketAsync(packet);
+
+					for (const line of formatRunResult(
+						result as { run: { id: string; status: string } },
+					)) {
+						stdout(line);
+					}
+
+					return (result as { run: { status: string } }).run.status === "passed"
+						? 0
+						: 1;
+				}
 
 				if (useTui) {
 					// Lazy-load TUI — only imported when --tui is requested
@@ -245,85 +272,21 @@ export async function runCli(
 					return result.run.status === "passed" ? 0 : 1;
 				}
 
-				// Model packets require the async execution path
-				const p = packet as Record<string, unknown>;
-				const isModelPacket = !!p.model;
-
-				if (isModelPacket) {
-					const result = await orchestrator.runPacketAsync(packet);
-
-					for (const line of formatRunResult(result)) {
-						stdout(line);
-					}
-
-					const r = result as Record<string, unknown>;
-					if (r.failure && typeof r.failure === "object") {
-						const f = r.failure as { message?: string };
-						if (f.message) {
-							stderr(f.message);
-						}
-					}
-
-					return result.run.status === "passed" && !r.failure ? 0 : 1;
-				}
-
 				const result = orchestrator.runPacket(packet);
 
 				for (const line of formatRunResult(result)) {
 					stdout(line);
 				}
 
-				const r = result as Record<string, unknown>;
-				if (r.failure && typeof r.failure === "object") {
-					const f = r.failure as { message?: string };
-					if (f.message) {
-						stderr(f.message);
-					}
-				}
-
-				return result.run.status === "passed" && !r.failure ? 0 : 1;
+				return result.run.status === "passed" ? 0 : 1;
 			}
 			case "status": {
 				const json = rest.includes("--json");
 				const result = orchestrator.getStatus();
 
-				if (json) {
-					stdout(formatJson(result));
-				} else {
-					stdout(`initialized: ${result.initialized}`);
-					const r = result as Record<string, unknown>;
-					if (r.latestRun && typeof r.latestRun === "object") {
-						const lr = r.latestRun as {
-							id: string;
-							status: string;
-							unitId?: string;
-						};
-						const unitSuffix = lr.unitId ? ` (${lr.unitId})` : "";
-						stdout(`latest-run: ${lr.id} ${lr.status}${unitSuffix}`);
-					}
-					if (r.runCounts && typeof r.runCounts === "object") {
-						const rc = r.runCounts as Record<string, number>;
-						stdout(
-							`run-counts: pending=${rc.pending ?? 0} running=${rc.running ?? 0} passed=${rc.passed ?? 0} failed=${rc.failed ?? 0} cancelled=${rc.cancelled ?? 0}`,
-						);
-					}
-					if (r.latestRunUsedWorkspace) {
-						if (r.latestWorkspace && typeof r.latestWorkspace === "object") {
-							const lw = r.latestWorkspace as { path: string; status: string };
-							stdout(`workspace: ${lw.path} (${lw.status})`);
-						}
-						const ws = r.actionableWorkspaces as
-							| Array<{ path: string; status: string }>
-							| undefined;
-						if (ws && ws.length > 0) {
-							for (const w of ws) {
-								stdout(`workspace: ${w.path} (${w.status})`);
-							}
-							stdout(`actionable-workspaces: ${ws.length}`);
-						}
-					}
-				}
-
+				stdout(
+					json ? formatJson(result) : `initialized: ${result.initialized}`,
+				);
 				return 0;
 			}
 			case "inspect": {
@@ -338,20 +301,13 @@ export async function runCli(
 				if (json) {
 					stdout(formatJson(result));
 				} else {
-					let events: Array<{
+					const eventStore = await loadEventStore(cwd);
+					const events = eventStore.getEventsByRunId(result.run.id) as Array<{
 						kind: string;
 						runId: string;
 						timestamp: string;
 						[key: string]: unknown;
-					}> = [];
-					try {
-						const eventStore = await loadEventStore(cwd);
-						events = eventStore.getEventsByRunId(
-							result.run.id,
-						) as typeof events;
-					} catch {
-						// Event store may not be available in all contexts
-					}
+					}>;
 					for (const line of formatInspectDetail(
 						result as unknown as Parameters<typeof formatInspectDetail>[0],
 						events,
@@ -359,24 +315,6 @@ export async function runCli(
 						stdout(line);
 					}
 				}
-				return 0;
-			}
-			case "approve": {
-				const runId = rest.find((v) => !v.startsWith("--"));
-				if (!runId) {
-					throw new Error("Missing required run id for approve.");
-				}
-				const run = orchestrator.approveRun(runId);
-				stdout(`approved: run ${run.id} is now ${run.status}`);
-				return 0;
-			}
-			case "reject": {
-				const runId = rest.find((v) => !v.startsWith("--"));
-				if (!runId) {
-					throw new Error("Missing required run id for reject.");
-				}
-				const run = orchestrator.rejectSuspendedRun(runId);
-				stdout(`rejected: run ${run.id} is now ${run.status}`);
 				return 0;
 			}
 			case "history": {

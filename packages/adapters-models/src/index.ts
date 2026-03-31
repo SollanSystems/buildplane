@@ -1,13 +1,14 @@
+export { createModelExecutor, type ModelExecutorPort } from "./model-executor.js";
 export type {
-	CreateModelExecutorOptions,
-	ModelResolver,
 	StreamChunk,
-	StreamFunction,
 	StreamResult,
-	ToolBuilder,
-	ToolGate,
+	StreamFunction,
+	ModelResolver,
+	CreateModelExecutorOptions,
 } from "./model-executor.js";
+
 export {
-	createModelExecutor,
-	type ModelExecutorPort,
-} from "./model-executor.js";
+	createClaudeCodeExecutor,
+	type ClaudeCodeExecutorPort,
+	type ClaudeCodeExecutorOptions,
+} from "./claude-code-executor.js";
