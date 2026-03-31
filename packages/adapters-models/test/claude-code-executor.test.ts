@@ -275,13 +275,13 @@ describe("createClaudeCodeExecutor", () => {
 			bus,
 		);
 
-		// args should contain the -p, --output-format, --model, --max-turns, --cwd flags
+		// args should contain the -p, --output-format, --model, --max-turns flags
+		// (workspace path is set via process cwd, not a --cwd CLI arg)
 		expect(receipt.args).toContain("-p");
 		expect(receipt.args).toContain("--output-format");
 		expect(receipt.args).toContain("json");
 		expect(receipt.args).toContain("--model");
 		expect(receipt.args).toContain("--max-turns");
-		expect(receipt.args).toContain("--cwd");
-		expect(receipt.args).toContain("/workspace");
+		expect(receipt.args).not.toContain("--cwd");
 	});
 });

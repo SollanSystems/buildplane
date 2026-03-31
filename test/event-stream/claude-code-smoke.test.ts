@@ -38,9 +38,11 @@ afterAll(() => {
 
 /**
  * Creates a shell script that mimics `claude -p` in print mode:
- * - Parses --cwd from arguments
- * - Creates an output.txt marker file in the workspace
+ * - Creates an output.txt marker file in the current working directory
  * - Prints valid Claude JSON to stdout
+ *
+ * The executor spawns the binary with cwd set to the workspace worktree path,
+ * so $PWD inside the stub is the workspace — no --cwd arg needed.
  *
  * Returns the directory containing the stub (to prepend to PATH).
  */
@@ -53,20 +55,10 @@ function createStubClaude(): string {
 		stubPath,
 		`#!/bin/sh
 # Stub claude binary for Buildplane smoke tests.
-# Parse --cwd from arguments.
-CWD=""
-while [ $# -gt 0 ]; do
-  case "$1" in
-    --cwd) shift; CWD="$1" ;;
-  esac
-  shift
-done
+# The executor sets cwd to the workspace worktree, so $PWD is the workspace.
 
 # Create the expected output file in the workspace
-if [ -n "$CWD" ]; then
-  mkdir -p "$CWD"
-  echo "stub-marker" > "$CWD/output.txt"
-fi
+echo "stub-marker" > "$PWD/output.txt"
 
 # Emit valid Claude JSON to stdout
 echo '{"result":"Task completed.","cost_usd":0.01,"duration_ms":1000,"num_turns":1}'
