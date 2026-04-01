@@ -30,6 +30,7 @@ export interface UnitPacket {
 	readonly unit: Unit;
 	readonly execution?: CommandExecutionBlock;
 	readonly model?: ModelExecutionBlock;
+	readonly intent?: import("./types.js").TaskIntent;
 	readonly verification: {
 		readonly requiredOutputs: readonly string[];
 	};

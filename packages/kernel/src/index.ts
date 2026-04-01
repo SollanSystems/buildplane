@@ -73,12 +73,17 @@ export type {
 	ExecutionRole,
 	MergeDecision,
 	MergePolicy,
+	RenderedPrompt,
 	Run,
 	RunStatus,
 	StrategyChild,
 	StrategyMode,
 	StrategyPacket,
 	StrategyResult,
+	TaskFeatures,
+	TaskIntent,
+	TaskRenderer,
+	TaskType,
 	Unit,
 } from "./types.js";
 export { validatePacketForWorkspaceRoot } from "./workspace-paths.js";

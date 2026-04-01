@@ -52,6 +52,58 @@ export interface StrategyResult {
 	readonly mergeDecision: MergeDecision;
 }
 
+// ── Task intent + renderer types ───────────────────────────
+
+export type TaskType =
+	| "implement"
+	| "review"
+	| "diagnose"
+	| "refactor"
+	| "test-gen"
+	| "security-audit"
+	| "migration"
+	| "architecture";
+
+export interface TaskFeatures {
+	readonly ambiguity: "low" | "medium" | "high";
+	readonly reversibility: "easy" | "hard";
+	readonly verifierStrength: "strong" | "weak" | "none";
+	readonly language?: string;
+	readonly framework?: string;
+	readonly estimatedComplexity?: "low" | "medium" | "high";
+	readonly changeSurface?: number;
+}
+
+export interface TaskIntent {
+	readonly objective: string;
+	readonly taskType: TaskType;
+	readonly context: {
+		readonly files: readonly string[];
+		readonly priorWork?: readonly string[];
+		readonly memories?: readonly string[];
+		readonly codebaseHints?: string;
+		readonly retryContext?: string;
+	};
+	readonly constraints: {
+		readonly scope: readonly string[];
+		readonly forbidden?: readonly string[];
+		readonly verification: readonly string[];
+	};
+	readonly features: TaskFeatures;
+}
+
+export interface RenderedPrompt {
+	readonly system?: string;
+	readonly prompt: string;
+	readonly maxTokens?: number;
+	readonly tools?: readonly import("./run-loop.js").ToolDefinition[];
+}
+
+export interface TaskRenderer {
+	readonly provider: string;
+	render(intent: TaskIntent, role: ExecutionRole): RenderedPrompt;
+}
+
 // ── Core kernel types ───────────────────────────────────────
 
 /**
