@@ -14,3 +14,7 @@ export {
 	createModelExecutor,
 	type ModelExecutorPort,
 } from "./model-executor.js";
+export {
+	createClaudeRenderer,
+	createCodexRenderer,
+} from "./renderers/index.js";
