@@ -1,6 +1,6 @@
 import { type SpawnSyncReturns, spawnSync } from "node:child_process";
-import { mkdirSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { mkdirSync, realpathSync } from "node:fs";
+import { dirname, join, relative } from "node:path";
 import type { BuildplaneWorkspacePort } from "@buildplane/kernel";
 
 /** A function that runs a git command and returns its result synchronously. */
@@ -65,13 +65,20 @@ export function createGitWorktreeAdapter(
 			}
 
 			const repositoryRoot = rootResolution.stdout.trim();
-			// We exclude .buildplane by constructing path relative to repo root
-
-			// If projectRoot and repositoryRoot are identical, the prefix is just .buildplane
-			// Otherwise, it's relative_path/.buildplane
-			// Instead of calculating buildplanePrefix, we will just exclude .buildplane anywhere or from projectRoot
-			// Actually, just ignore .buildplane completely in the status check.
-			const buildplanePrefix = ".buildplane";
+			// Compute the .buildplane prefix relative to the repo root.
+			// When the project lives in a subdirectory (e.g. services/api/), git status
+			// reports paths relative to the repo root, so the exclude pathspecs must be
+			// relative to the repo root too (e.g. "services/api/.buildplane").
+			// Resolve real paths to handle OS-level symlinks (e.g. /var → /private/var on macOS)
+			// before computing the relative path — without this, relative() produces
+			// traversal paths (../../..) that git rejects as "outside repository".
+			const resolvedRepoRoot = realpathSync(repositoryRoot);
+			const resolvedProjectRoot = realpathSync(projectRoot);
+			const projectRelative = relative(resolvedRepoRoot, resolvedProjectRoot);
+			const buildplanePrefix =
+				projectRelative === ""
+					? ".buildplane"
+					: `${projectRelative}/.buildplane`;
 
 			const headResolution = executeGitCommand(runGit, projectRoot, [
 				"rev-parse",
