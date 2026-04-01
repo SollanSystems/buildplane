@@ -15,6 +15,7 @@
 		"test": "vitest --run"
 	},
 	"dependencies": {
+		"@buildplane/adapters-codex": "workspace:*",
 		"@buildplane/adapters-git": "workspace:*",
 		"@buildplane/adapters-models": "workspace:*",
 		"@buildplane/kernel": "workspace:*",

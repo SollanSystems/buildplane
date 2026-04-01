@@ -1,51 +1,86 @@
-import {
-	type SpawnSyncOptions,
-	type SpawnSyncReturns,
-	spawnSync,
-} from "node:child_process";
+import { type SpawnSyncReturns, spawnSync } from "node:child_process";
 import { mkdirSync, realpathSync } from "node:fs";
-import { dirname, join, relative, sep } from "node:path";
+import { dirname, join, relative } from "node:path";
 import type { BuildplaneWorkspacePort } from "@buildplane/kernel";
 
-export interface CreateGitWorkspaceAdapterOptions {
-	readonly gitBinary?: string;
-	readonly runGit?: GitCommandRunner;
-}
-
+/** A function that runs a git command and returns its result synchronously. */
 export type GitCommandRunner = (
 	args: string[],
-	options: SpawnSyncOptions,
+	options: { cwd: string; encoding: "utf8" },
 ) => SpawnSyncReturns<string>;
 
-export function createGitWorkspaceAdapter(
-	options: CreateGitWorkspaceAdapterOptions = {},
-): BuildplaneWorkspacePort {
-	const gitBinary = options.gitBinary ?? "git";
-	const runGit: GitCommandRunner =
-		options.runGit ??
-		((args, spawnOptions) =>
-			spawnSync(gitBinary, args, {
-				env: createIsolatedGitEnv(spawnOptions.env),
-				encoding: "utf8",
-				...spawnOptions,
-			}) as SpawnSyncReturns<string>);
+/** Details about why a git command failed. */
+function formatGitFailure(result: SpawnSyncReturns<string>): string {
+	const parts = [];
+	if (result.stderr) parts.push(result.stderr.trim());
+	if (result.stdout) parts.push(result.stdout.trim());
+	if (result.error) parts.push(result.error.message);
+	if (result.status !== null) parts.push(`exit code ${result.status}`);
+	return parts.join("; ") || "unknown error";
+}
 
+/**
+ * Creates a BuildplaneWorkspacePort backed by real Git worktrees.
+ *
+ * @param runGit Custom runner for testing (defaults to `child_process.spawnSync("git", ...)`).
+ */
+export interface CreateGitWorkspaceAdapterOptions {
+	runGit?: GitCommandRunner;
+	gitBinary?: string;
+}
+
+export function createGitWorktreeAdapter(
+	options?: CreateGitWorkspaceAdapterOptions,
+): BuildplaneWorkspacePort {
+	const gitBinary = options?.gitBinary ?? "git";
+	const runGit: GitCommandRunner =
+		options?.runGit ??
+		((args, spawnOptions) => {
+			// Clear git env vars so tests pass
+			const env = { ...process.env };
+			delete env.GIT_DIR;
+			delete env.GIT_WORK_TREE;
+			delete env.GIT_INDEX_FILE;
+			return spawnSync(gitBinary, args, { ...spawnOptions, env });
+		});
 	const adapter: BuildplaneWorkspacePort = {
 		assertRunnableRepository(projectRoot: string) {
-			const repositoryCheck = executeGitCommand(runGit, projectRoot, [
+			// Check if git is available
+			const versionCheck = runGit(["--version"], {
+				cwd: projectRoot,
+				encoding: "utf8",
+			});
+			if (versionCheck.error) {
+				throw new Error(`git binary is unavailable: ${gitBinary}`);
+			}
+
+			const rootResolution = executeGitCommand(runGit, projectRoot, [
 				"rev-parse",
 				"--show-toplevel",
 			]);
-			if (repositoryCheck.status !== 0) {
-				throw createRepositoryError(projectRoot, repositoryCheck);
+			if (rootResolution.status !== 0) {
+				throw new Error(
+					`${projectRoot} does not appear to be inside a git repository: ${formatGitFailure(rootResolution)}.`,
+				);
 			}
-			const repositoryRoot = realpathSync(repositoryCheck.stdout.trim());
-			const canonicalProjectRoot = realpathSync(projectRoot);
-			const buildplanePrefix = toGitPath(
-				relative(repositoryRoot, join(canonicalProjectRoot, ".buildplane")),
-			);
 
-			const headResolution = executeGitCommand(runGit, repositoryRoot, [
+			const repositoryRoot = rootResolution.stdout.trim();
+			// Compute the .buildplane prefix relative to the repo root.
+			// When the project lives in a subdirectory (e.g. services/api/), git status
+			// reports paths relative to the repo root, so the exclude pathspecs must be
+			// relative to the repo root too (e.g. "services/api/.buildplane").
+			// Resolve real paths to handle OS-level symlinks (e.g. /var → /private/var on macOS)
+			// before computing the relative path — without this, relative() produces
+			// traversal paths (../../..) that git rejects as "outside repository".
+			const resolvedRepoRoot = realpathSync(repositoryRoot);
+			const resolvedProjectRoot = realpathSync(projectRoot);
+			const projectRelative = relative(resolvedRepoRoot, resolvedProjectRoot);
+			const buildplanePrefix =
+				projectRelative === ""
+					? ".buildplane"
+					: `${projectRelative}/.buildplane`;
+
+			const headResolution = executeGitCommand(runGit, projectRoot, [
 				"rev-parse",
 				"HEAD",
 			]);
@@ -114,8 +149,60 @@ export function createGitWorkspaceAdapter(
 			};
 		},
 
-		deleteWorkspace(workspace: { path: string }) {
-			const projectRoot = dirname(dirname(dirname(workspace.path)));
+		commitAndMergeWorkspace(workspace: {
+			path: string;
+			runId: string;
+			projectRoot?: string;
+		}) {
+			const projectRoot =
+				workspace.projectRoot ?? dirname(dirname(dirname(workspace.path)));
+
+			// Commit any changes made in the worktree
+			executeGitCommand(runGit, workspace.path, ["add", "."]);
+			const commitRes = executeGitCommand(runGit, workspace.path, [
+				"commit",
+				"--allow-empty",
+				"-m",
+				`Buildplane run ${workspace.runId} completed`,
+			]);
+
+			if (commitRes.status !== 0) {
+				throw new Error(
+					`Git commit failed in worktree ${workspace.path}: ${formatGitFailure(commitRes)}`,
+				);
+			}
+
+			const newHeadRes = executeGitCommand(runGit, workspace.path, [
+				"rev-parse",
+				"HEAD",
+			]);
+			if (newHeadRes.status !== 0) {
+				throw new Error(
+					`Git rev-parse HEAD failed in worktree ${workspace.path}`,
+				);
+			}
+
+			const newHead = newHeadRes.stdout.trim();
+
+			// Merge back to project root
+			const mergeRes = executeGitCommand(runGit, projectRoot, [
+				"merge",
+				"--no-ff",
+				"-m",
+				`Merge Buildplane run ${workspace.runId}`,
+				newHead,
+			]);
+
+			if (mergeRes.status !== 0) {
+				throw new Error(
+					`Git merge failed in project root ${projectRoot}: ${formatGitFailure(mergeRes)}`,
+				);
+			}
+		},
+
+		deleteWorkspace(workspace: { path: string; projectRoot?: string }) {
+			const projectRoot =
+				workspace.projectRoot ?? dirname(dirname(dirname(workspace.path)));
 			const worktreeRemove = executeGitCommand(runGit, projectRoot, [
 				"worktree",
 				"remove",
@@ -148,58 +235,16 @@ function executeGitCommand(
 	});
 
 	if (result.error) {
-		throw new Error(
-			`Git binary is unavailable: ${result.error.message || "unknown git error"}.`,
-		);
+		// e.g., git is not installed, ENONENT
+		return {
+			...result,
+			status: result.status ?? 1,
+			stdout: result.stdout ?? "",
+			stderr:
+				result.stderr ??
+				`Failed to launch git command: ${result.error.message}`,
+		};
 	}
 
 	return result;
-}
-
-function createIsolatedGitEnv(
-	overrides: SpawnSyncOptions["env"],
-): NodeJS.ProcessEnv {
-	const env = { ...process.env };
-	for (const key of Object.keys(env)) {
-		if (key.startsWith("GIT_")) {
-			delete env[key];
-		}
-	}
-
-	return {
-		...env,
-		...overrides,
-	};
-}
-
-function toGitPath(value: string): string {
-	return value.split(sep).join("/");
-}
-
-function createRepositoryError(
-	projectRoot: string,
-	result: SpawnSyncReturns<string>,
-): Error {
-	const detail = formatGitFailure(result);
-	if (/not a git repository/i.test(detail)) {
-		return new Error(`${projectRoot} is not a git repository.`);
-	}
-
-	return new Error(
-		`Git repository check failed for ${projectRoot}: ${detail}.`,
-	);
-}
-
-function formatGitFailure(result: SpawnSyncReturns<string>): string {
-	const stderr = result.stderr.trim();
-	if (stderr.length > 0) {
-		return stderr;
-	}
-
-	const stdout = result.stdout.trim();
-	if (stdout.length > 0) {
-		return stdout;
-	}
-
-	return `git exited with status ${result.status ?? "unknown"}`;
 }

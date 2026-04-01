@@ -134,7 +134,7 @@ describe("async worktree isolation", () => {
 		expect(deletedPaths[0]).toBe(worktreeRoot);
 	});
 
-	it("cleans up the workspace after a failed run", async () => {
+	it("retains the workspace after a failed run", async () => {
 		const projectRoot = realpathSync(
 			mkdtempSync(join(tmpdir(), "bp-wt-project-")),
 		);
@@ -176,9 +176,10 @@ describe("async worktree isolation", () => {
 
 		const result = await orchestrator.runPacketAsync(makeCommandPacket(), bus);
 
+		// Failed runs retain the workspace (not deleted) for inspection
 		expect(result.run.status).toBe("failed");
-		expect(deletedPaths).toHaveLength(1);
-		expect(deletedPaths[0]).toBe(worktreeRoot);
+		expect(deletedPaths).toHaveLength(0);
+		expect(result.workspace?.status).toBe("retained");
 	});
 
 	it("fails run when workspace preparation throws", async () => {

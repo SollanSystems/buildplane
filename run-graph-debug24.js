@@ -1,16 +1,19 @@
 const fs = require("node:fs");
 const path = require("node:path");
 
-const storePath = path.join(process.cwd(), "packages/storage/src/event-store.ts");
+const storePath = path.join(
+	process.cwd(),
+	"packages/storage/src/event-store.ts",
+);
 let storeSrc = fs.readFileSync(storePath, "utf8");
 
 storeSrc = storeSrc.replace(
-    /const \{ kind, timestamp, \.\.\.payload \} = event;/g,
-    `const { kind, timestamp, ...payload } = event;
+	/const \{ kind, timestamp, \.\.\.payload \} = event;/g,
+	`const { kind, timestamp, ...payload } = event;
 			console.log("PERSIST EVENT:", kind, "runId:", runId, "timestamp:", timestamp);
 			if (typeof kind !== "string") {
 				console.error("WAIT, kind is NOT A STRING!!! kind:", kind, "event:", JSON.stringify(event));
-			}`
+			}`,
 );
 
 fs.writeFileSync(storePath, storeSrc);

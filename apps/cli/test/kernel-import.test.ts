@@ -23,7 +23,9 @@ describe("@buildplane/kernel package consumption", () => {
 			JSON.stringify([
 				"createBuildplaneOrchestrator",
 				"createEventBus",
-				"createRunScopedBus",
+				"createGraphScheduler",
+				"createResourceUsageSnapshot",
+				"parseStrategyPacket",
 				"parseUnitPacket",
 				"validatePacketForWorkspaceRoot",
 			]),

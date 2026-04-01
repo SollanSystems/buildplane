@@ -6,8 +6,8 @@
 	"description": "Git and workspace isolation adapters for Buildplane",
 	"exports": {
 		".": {
-			"types": "./src/index.d.ts",
-			"import": "./src/index.js"
+			"types": "./dist/index.d.ts",
+			"import": "./dist/index.js"
 		}
 	},
 	"dependencies": {

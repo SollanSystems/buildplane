@@ -5,6 +5,7 @@ import type { DatabaseSync } from "node:sqlite";
 import type {
 	ApprovedPolicyDecision,
 	BuildplaneStoragePort,
+	CreateRunOptions,
 	ExecutionReceipt,
 	InspectSnapshot,
 	PolicyDecision,
@@ -35,6 +36,8 @@ interface StoredRunRow {
 		| "suspended";
 	readonly unit_snapshot?: string;
 	readonly used_workspace: number;
+	readonly parent_run_id: string | null;
+	readonly strategy_id: string | null;
 }
 
 interface StoredDecisionRow {
@@ -134,6 +137,18 @@ function ensureRunsUsedWorkspaceColumn(database: DatabaseSync): void {
 	}
 }
 
+function ensureRunsStrategyColumns(database: DatabaseSync): void {
+	if (!tableHasColumn(database, "runs", "parent_run_id")) {
+		database.exec("ALTER TABLE runs ADD COLUMN parent_run_id TEXT");
+	}
+	if (!tableHasColumn(database, "runs", "strategy_id")) {
+		database.exec("ALTER TABLE runs ADD COLUMN strategy_id TEXT");
+		database.exec(
+			"CREATE INDEX IF NOT EXISTS idx_runs_strategy_id ON runs (strategy_id)",
+		);
+	}
+}
+
 function tableExists(database: DatabaseSync, tableName: string): boolean {
 	const row = database
 		.prepare(
@@ -226,6 +241,7 @@ export function bootstrapStorageProjectionSchema(database: DatabaseSync): void {
 
 	ensureEvidenceMessageColumn(database);
 	ensureRunsUsedWorkspaceColumn(database);
+	ensureRunsStrategyColumns(database);
 	assertWorkspaceTableColumns(database);
 }
 
@@ -265,6 +281,8 @@ function assertStorageProjectionSchema(database: DatabaseSync): void {
 
 	for (const [tableName, columnName] of [
 		["runs", "used_workspace"],
+		["runs", "parent_run_id"],
+		["runs", "strategy_id"],
 		["evidence", "message"],
 	] as const) {
 		if (!tableHasColumn(database, tableName, columnName)) {
@@ -404,7 +422,7 @@ export function createStorageStore(
 	function readRun(runId: string, database: DatabaseSync): StoredRunRow {
 		const row = database
 			.prepare(
-				`SELECT id, unit_id, status, unit_snapshot, used_workspace FROM runs WHERE id = ?`,
+				`SELECT id, unit_id, status, unit_snapshot, used_workspace, parent_run_id, strategy_id FROM runs WHERE id = ?`,
 			)
 			.get(runId) as StoredRunRow | undefined;
 
@@ -560,11 +578,13 @@ export function createStorageStore(
 	}
 
 	return {
-		createRun(packet: UnitPacket) {
+		createRun(packet: UnitPacket, options?: CreateRunOptions) {
 			ensureInitialized();
 			const database = openStoreDatabase();
 			const createdAt = new Date().toISOString();
 			const runId = randomUUID();
+			const parentRunId = options?.parentRunId ?? null;
+			const strategyId = options?.strategyId ?? null;
 
 			try {
 				database
@@ -583,7 +603,7 @@ export function createStorageStore(
 
 				database
 					.prepare(
-						`INSERT INTO runs (id, unit_id, status, unit_snapshot, created_at, updated_at, completed_at, used_workspace) VALUES (?, ?, ?, ?, ?, ?, NULL, 0)`,
+						`INSERT INTO runs (id, unit_id, status, unit_snapshot, created_at, updated_at, completed_at, used_workspace, parent_run_id, strategy_id) VALUES (?, ?, ?, ?, ?, ?, NULL, 0, ?, ?)`,
 					)
 					.run(
 						runId,
@@ -592,6 +612,8 @@ export function createStorageStore(
 						JSON.stringify(packet),
 						createdAt,
 						createdAt,
+						parentRunId,
+						strategyId,
 					);
 
 				appendEvent(
@@ -605,6 +627,30 @@ export function createStorageStore(
 					unitId: packet.unit.id,
 					status: "pending",
 				};
+			} finally {
+				database.close();
+			}
+		},
+
+		getChildRuns(parentRunId: string): Run[] {
+			ensureInitialized();
+			const database = openStoreDatabase();
+			try {
+				const rows = database
+					.prepare(
+						`SELECT id, unit_id, status FROM runs WHERE parent_run_id = ? ORDER BY created_at ASC, rowid ASC`,
+					)
+					.all(parentRunId) as {
+					id: string;
+					unit_id: string;
+					status: string;
+				}[];
+
+				return rows.map((row) => ({
+					id: row.id,
+					unitId: row.unit_id,
+					status: row.status as Run["status"],
+				}));
 			} finally {
 				database.close();
 			}

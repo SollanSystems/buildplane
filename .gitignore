@@ -9,3 +9,4 @@ coverage/
 .buildplane/
 .bg-shell/
 .worktrees/
+.gsd/

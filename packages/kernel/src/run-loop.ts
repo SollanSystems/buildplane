@@ -11,12 +11,11 @@ export interface ModelExecutionBlock {
 	readonly model: string;
 	readonly prompt?: string;
 	readonly systemPrompt?: string;
-	readonly prompt?: string;
 	readonly tools?: readonly ToolDefinition[];
 }
 
 export interface RoutingHints {
-	readonly preferredWorker?: "claude-code";
+	readonly preferredWorker?: "claude-code" | "codex";
 	readonly preferredModel?: string;
 	readonly effort?: "low" | "medium" | "high";
 }
@@ -27,16 +26,11 @@ export interface CommandExecutionBlock {
 	readonly cwd?: string;
 }
 
-export interface RoutingHints {
-	readonly preferredWorker?: "claude-code";
-	readonly preferredModel?: string;
-	readonly effort?: "low" | "medium" | "high";
-}
-
 export interface UnitPacket {
 	readonly unit: Unit;
 	readonly execution?: CommandExecutionBlock;
 	readonly model?: ModelExecutionBlock;
+	readonly intent?: import("./types.js").TaskIntent;
 	readonly verification: {
 		readonly requiredOutputs: readonly string[];
 	};
@@ -60,10 +54,52 @@ export interface ExecutionReceipt {
 	readonly outputChecks: readonly OutputCheck[];
 }
 
-export interface PolicyDecision {
-	readonly kind: "advance-run" | "reject-run";
-	readonly outcome: "approved" | "rejected";
+export interface ApprovedPolicyDecision {
+	readonly kind: "advance-run";
+	readonly outcome: "approved";
 	readonly reasons: readonly string[];
+}
+
+export interface RejectedPolicyDecision {
+	readonly kind: "reject-run";
+	readonly outcome: "rejected";
+	readonly reasons: readonly string[];
+}
+
+export interface RetryPolicyDecision {
+	readonly kind: "retry-run";
+	readonly outcome: "retrying";
+	readonly reasons: readonly string[];
+	readonly attemptNumber: number;
+	readonly feedbackContext: readonly string[];
+}
+
+export type PolicyDecision =
+	| ApprovedPolicyDecision
+	| RejectedPolicyDecision
+	| RetryPolicyDecision;
+
+export interface RunInfrastructureFailure {
+	readonly kind: string;
+	readonly message: string;
+}
+
+export interface WorkspaceSnapshot {
+	readonly runId: string;
+	readonly path: string;
+	readonly headSha: string;
+	readonly status: "active" | "retained" | "deleted" | "cleanup-failed";
+	readonly finalizedAt?: string;
+	readonly cleanupError?: string;
+}
+
+export interface StatusWorkspaceSummary {
+	readonly runId: string;
+	readonly path: string;
+	readonly headSha: string;
+	readonly status: "active" | "retained" | "deleted" | "cleanup-failed";
+	readonly finalizedAt?: string;
+	readonly cleanupError?: string;
 }
 
 export interface StatusSnapshot {
@@ -79,6 +115,7 @@ export interface StatusSnapshot {
 		readonly passed: number;
 		readonly failed: number;
 		readonly cancelled: number;
+		readonly suspended: number;
 	};
 }
 
@@ -86,6 +123,7 @@ export interface InspectSnapshot {
 	readonly kind: "run" | "unit";
 	readonly unit: Unit;
 	readonly run: Run;
+	readonly workspace?: WorkspaceSnapshot;
 	readonly runHistory: readonly {
 		readonly id: string;
 		readonly status: RunStatus;
@@ -110,6 +148,9 @@ export interface InspectSnapshot {
 
 export interface RunPacketResult {
 	readonly run: Run;
-	readonly receipt: ExecutionReceipt;
-	readonly decision: PolicyDecision;
+	readonly receipt?: ExecutionReceipt;
+	readonly decision?: PolicyDecision;
+	readonly failure?: RunInfrastructureFailure;
+	readonly workspace?: WorkspaceSnapshot;
+	readonly suspended?: boolean;
 }

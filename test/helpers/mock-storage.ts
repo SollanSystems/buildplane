@@ -41,6 +41,7 @@ export function createMockStorage(): BuildplaneStoragePort & {
 			runs[id] = { id, unitId: packet.unit.id, status: "pending" };
 			return runs[id] as Run;
 		},
+		getChildRuns: (_parentRunId) => [],
 		markRunRunning: (runId) => {
 			getOrThrow(runId).status = "running";
 		},

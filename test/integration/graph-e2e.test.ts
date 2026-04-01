@@ -11,7 +11,9 @@ describe("CLI run-graph integration", () => {
 	beforeEach(() => {
 		projectRoot = mkdtempSync(join(tmpdir(), "bp-graph-e2e-"));
 		execSync("git init", { cwd: projectRoot });
-		execSync('git commit --allow-empty -m "initial commit"', { cwd: projectRoot });
+		execSync('git commit --allow-empty -m "initial commit"', {
+			cwd: projectRoot,
+		});
 
 		// Write a valid graph JSON
 		const graph = {
@@ -121,10 +123,10 @@ describe("CLI run-graph integration", () => {
 			expect(cContent).toContain("Hello from A");
 			expect(cContent).toContain("Hello from B");
 		} catch (e: any) {
-			console.log('--- ERROR ---');
+			console.log("--- ERROR ---");
 			console.log(e.stdout);
 			console.log(e.stderr);
-			console.log('Project Root:', projectRoot);
+			console.log("Project Root:", projectRoot);
 			throw e;
 		}
 	});

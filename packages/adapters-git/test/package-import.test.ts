@@ -18,7 +18,7 @@ describe("@buildplane/adapters-git package consumption", () => {
 			},
 		).trim();
 
-		expect(output).toBe(JSON.stringify(["createGitWorkspaceAdapter"]));
+		expect(output).toBe(JSON.stringify(["createGitWorktreeAdapter"]));
 	});
 
 	it("does not expose internal adapter implementation subpaths", () => {

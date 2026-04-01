@@ -208,6 +208,9 @@ function createHarness(options: HarnessOptions = {}) {
 			runEvents.push("inspect-target");
 			return inspectSnapshot;
 		},
+		getChildRuns() {
+			return [];
+		},
 	};
 
 	const runtime: BuildplaneRuntimePort = {

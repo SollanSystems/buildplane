@@ -235,7 +235,7 @@ describe("model.prompt", () => {
 					verification: { requiredOutputs: [] },
 				}),
 			),
-		).toThrow("model.prompt must not be empty if present");
+		).toThrow("packet.model.prompt must be a non-empty string");
 	});
 });
 
@@ -275,7 +275,9 @@ describe("routingHints", () => {
 					routingHints: { preferredWorker: "gpt-4o-worker" },
 				}),
 			),
-		).toThrow('packet.routingHints.preferredWorker must be "claude-code"');
+		).toThrow(
+			"packet.routingHints.preferredWorker must be one of: claude-code",
+		);
 	});
 
 	it("parses effort correctly", () => {
@@ -303,6 +305,6 @@ describe("routingHints", () => {
 					routingHints: { effort: "extreme" },
 				}),
 			),
-		).toThrow('packet.routingHints.effort must be "low", "medium", or "high"');
+		).toThrow("packet.routingHints.effort must be one of: low, medium, high");
 	});
 });

@@ -2,7 +2,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 const eventsPath = path.join(process.cwd(), "packages/kernel/src/events.ts");
-let eventsSrc = fs.readFileSync(eventsPath, "utf8");
+const eventsSrc = fs.readFileSync(eventsPath, "utf8");
 
 // Put runId back on GraphStartedEvent but make it OPTIONAL for BaseEvent! No, wait, BaseEvent requires it.
 // If the type requires runId, we have to provide it.

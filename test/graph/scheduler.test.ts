@@ -134,7 +134,7 @@ describe("GraphScheduler", () => {
 			const sched = createGraphScheduler(graph);
 
 			// Only 2 should be ready even though all 4 are independent
-			let ready = sched.readyUnits();
+			const ready = sched.readyUnits();
 			expect(ready).toHaveLength(2);
 
 			sched.markRunning(ready[0]!);

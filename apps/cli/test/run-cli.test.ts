@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { createGitWorkspaceAdapter as createActualGitWorkspaceAdapter } from "@buildplane/adapters-git";
+import { createGitWorktreeAdapter as createActualGitWorkspaceAdapter } from "@buildplane/adapters-git";
 import {
 	type BuildplaneOrchestrator,
 	type BuildplaneWorkspacePort,
@@ -55,12 +55,12 @@ function createCliDependencies(
 				storage: createBuildplaneStorage(projectRoot),
 				runtime: { executePacket },
 				policy: { evaluateRun },
-				workspace: options.workspace ?? createGitWorkspaceAdapter(),
+				workspace: options.workspace ?? createGitWorktreeAdapter(),
 			}),
 	};
 }
 
-function createGitWorkspaceAdapter(): BuildplaneWorkspacePort {
+function createGitWorktreeAdapter(): BuildplaneWorkspacePort {
 	return createActualGitWorkspaceAdapter();
 }
 

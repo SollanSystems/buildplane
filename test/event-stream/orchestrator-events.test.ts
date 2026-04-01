@@ -111,6 +111,7 @@ function createMockStorage(): BuildplaneStoragePort {
 		inspectTarget: () => {
 			throw new Error("not implemented");
 		},
+		getChildRuns: () => [],
 	} as unknown as BuildplaneStoragePort;
 }
 
@@ -168,7 +169,11 @@ describe("orchestrator event emission", () => {
 		expect(result.run.status).toBe("passed");
 
 		const kinds = events.map((e) => e.kind);
-		expect(kinds).toEqual(["execution-started", "command-execution-complete"]);
+		expect(kinds).toEqual([
+			"execution-started",
+			"command-execution-complete",
+			"policy-decision",
+		]);
 
 		// Verify all events share the same runId
 		const runIds = new Set(events.map((e) => e.runId));
@@ -193,7 +198,11 @@ describe("orchestrator event emission", () => {
 		expect(result.run.status).toBe("passed");
 
 		const kinds = events.map((e) => e.kind);
-		expect(kinds).toEqual(["execution-started", "command-execution-complete"]);
+		expect(kinds).toEqual([
+			"execution-started",
+			"command-execution-complete",
+			"policy-decision",
+		]);
 	});
 
 	it("runPacketAsync uses executePacketAsync when available", async () => {

@@ -4,6 +4,8 @@ import { resolve } from "node:path";
 import type {
 	EventBus,
 	ExecutionReceipt,
+	ExecutionRole,
+	TaskRenderer,
 	UnitPacket,
 } from "@buildplane/kernel";
 
@@ -16,6 +18,12 @@ export interface ClaudeCodeExecutorOptions {
 	maxTurns?: number;
 	/** Override spawn for testing. */
 	spawnFn?: typeof spawn;
+	/**
+	 * Renderer used to convert packet.intent into a prompt.
+	 * When present and packet.intent exists, the rendered prompt takes
+	 * precedence over packet.model.prompt.
+	 */
+	renderer?: TaskRenderer;
 }
 
 export interface ClaudeCodeExecutorPort {
@@ -34,6 +42,7 @@ export function createClaudeCodeExecutor(
 	const timeoutMs = options?.timeoutMs ?? 300_000;
 	const maxTurns = options?.maxTurns ?? 20;
 	const spawnFn = options?.spawnFn ?? spawn;
+	const renderer = options?.renderer;
 
 	return {
 		executePacket(_packet: UnitPacket, _projectRoot: string): ExecutionReceipt {
@@ -58,11 +67,6 @@ export function createClaudeCodeExecutor(
 				throw new Error("Packet must have a model block.");
 			}
 
-			// Validate prompt is present
-			if (!packet.model.prompt) {
-				throw new Error("Packet model block must include a prompt.");
-			}
-
 			// Validate tools are not present (claude code CLI doesn't accept inline tool defs)
 			if (packet.model.tools && packet.model.tools.length > 0) {
 				throw new Error(
@@ -70,10 +74,24 @@ export function createClaudeCodeExecutor(
 				);
 			}
 
-			// Build folded prompt
-			const foldedPrompt = packet.model.systemPrompt
-				? `${packet.model.systemPrompt}\n\n---\n\n${packet.model.prompt}`
-				: packet.model.prompt;
+			// Resolve prompt: intent + renderer takes precedence over model.prompt
+			let foldedPrompt: string;
+			if (packet.intent && renderer) {
+				const role: ExecutionRole = "implementer";
+				const rendered = renderer.render(packet.intent, role);
+				foldedPrompt = rendered.system
+					? `${rendered.system}\n\n---\n\n${rendered.prompt}`
+					: rendered.prompt;
+			} else if (packet.model.prompt) {
+				// Legacy path: plain prompt with optional system prompt
+				foldedPrompt = packet.model.systemPrompt
+					? `${packet.model.systemPrompt}\n\n---\n\n${packet.model.prompt}`
+					: packet.model.prompt;
+			} else {
+				throw new Error(
+					"Packet must have either a model.prompt or an intent with a renderer.",
+				);
+			}
 
 			// Build CLI args
 			const args = [

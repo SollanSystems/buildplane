@@ -1,7 +1,10 @@
 const fs = require("node:fs");
 const path = require("node:path");
 
-const storePath = path.join(process.cwd(), "packages/storage/src/event-store.ts");
+const storePath = path.join(
+	process.cwd(),
+	"packages/storage/src/event-store.ts",
+);
 let storeSrc = fs.readFileSync(storePath, "utf8");
 
 // Since GraphStartedEvent already HAS `runId: string`, it DOES NOT go into `...payload` because it's part of the event type, wait, NO!
@@ -15,11 +18,11 @@ let storeSrc = fs.readFileSync(storePath, "utf8");
 // Which value? Is `kind` undefined AT RUNTIME? Let's find out!
 
 storeSrc = storeSrc.replace(
-    /const database = openDb\(\);/g,
-    `const database = openDb();
+	/const database = openDb\(\);/g,
+	`const database = openDb();
 			if (!kind) {
 				console.error("UNDEFINED KIND", JSON.stringify(event));
-			}`
+			}`,
 );
 
 fs.writeFileSync(storePath, storeSrc);

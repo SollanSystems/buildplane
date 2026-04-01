@@ -1,7 +1,10 @@
 const fs = require("node:fs");
 const path = require("node:path");
 
-const storePath = path.join(process.cwd(), "packages/storage/src/event-store.ts");
+const storePath = path.join(
+	process.cwd(),
+	"packages/storage/src/event-store.ts",
+);
 let storeSrc = fs.readFileSync(storePath, "utf8");
 
 // Try hardcoding a fixed string for kind to see if the error goes away.
@@ -18,13 +21,13 @@ let storeSrc = fs.readFileSync(storePath, "utf8");
 // How can a string not be bound to SQLite parameter 2?!
 
 storeSrc = storeSrc.replace(
-    /\.run\([\s\S]*?String\(id\),[\s\S]*?String\(kind\),[\s\S]*?String\(timestamp\),[\s\S]*?String\(JSON\.stringify\(\{ \.\.\.payload, runId \}\)\),[\s\S]*?\);/g,
-    `.run(
+	/\.run\([\s\S]*?String\(id\),[\s\S]*?String\(kind\),[\s\S]*?String\(timestamp\),[\s\S]*?String\(JSON\.stringify\(\{ \.\.\.payload, runId \}\)\),[\s\S]*?\);/g,
+	`.run(
 					id as string,
 					kind as string,
 					timestamp as string,
 					JSON.stringify({ ...payload, runId }) as string,
-				);`
+				);`,
 );
 
 fs.writeFileSync(storePath, storeSrc);

@@ -1,5 +1,4 @@
 export {
-	type CreateGitWorkspaceAdapterOptions,
-	createGitWorkspaceAdapter,
+	createGitWorktreeAdapter,
 	type GitCommandRunner,
 } from "./worktree-adapter.js";

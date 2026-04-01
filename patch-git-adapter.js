@@ -1,9 +1,12 @@
-const fs = require('fs');
-let code = fs.readFileSync('packages/adapters-git/src/worktree-adapter.ts', 'utf8');
+const fs = require("fs");
+let code = fs.readFileSync(
+	"packages/adapters-git/src/worktree-adapter.ts",
+	"utf8",
+);
 
 // Ensure that NO spawn exceptions are missed.
 code = code.replace(
-  `	if (result.error) {
+	`	if (result.error) {
 		// e.g., git is not installed, ENONENT
 		return {
 			...result,
@@ -13,7 +16,7 @@ code = code.replace(
 				result.stderr ?? \`Failed to launch git command: \${result.error.message}\`,
 		};
 	}`,
-  `	if (result.error) {
+	`	if (result.error) {
 		// e.g., git is not installed, ENONENT
 		return {
 			...result,
@@ -22,7 +25,7 @@ code = code.replace(
 			stderr:
 				result.stderr ?? \`Failed to launch git command: \${result.error.message}\`,
 		};
-	}`
+	}`,
 );
 
 // Actually, in `test/run-cli.test.ts`, the error is thrown inside `assertRunnableRepository`.
@@ -39,4 +42,3 @@ code = code.replace(
 // The CLI process prints the error thrown by `assertRunnableRepository`.
 // Since `versionCheck` now throws `git binary is unavailable: git`, this should work?
 // Let's check `test/run-cli.test.ts` to see what exact error text it expects.
-
