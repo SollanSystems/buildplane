@@ -97,6 +97,29 @@ export function createCodexExecutor(
 				let stderrBuf = "";
 				let timedOut = false;
 				let exitCode = 0;
+				let resolved = false;
+
+				const resolveOnce = (receipt: ExecutionReceipt) => {
+					if (resolved) return;
+					resolved = true;
+
+					const outputChecks = packet.verification.requiredOutputs.map(
+						(path) => ({
+							path,
+							exists: existsSync(resolve(projectRoot, path)),
+						}),
+					);
+
+					eventBus.emit({
+						kind: "command-execution-complete",
+						runId: "",
+						timestamp: receipt.completedAt,
+						exitCode: receipt.exitCode,
+						outputChecks,
+					});
+
+					resolvePromise({ ...receipt, outputChecks });
+				};
 
 				const timer = setTimeout(() => {
 					timedOut = true;
@@ -120,32 +143,16 @@ export function createCodexExecutor(
 						: err.message;
 					exitCode = 1;
 
-					const completedAt = new Date().toISOString();
-					const outputChecks = packet.verification.requiredOutputs.map(
-						(path) => ({
-							path,
-							exists: existsSync(resolve(projectRoot, path)),
-						}),
-					);
-
-					eventBus.emit({
-						kind: "command-execution-complete",
-						runId: "",
-						timestamp: completedAt,
-						exitCode,
-						outputChecks,
-					});
-
-					resolvePromise({
+					resolveOnce({
 						command: cliBinary,
 						args,
 						cwd: projectRoot,
 						startedAt,
-						completedAt,
+						completedAt: new Date().toISOString(),
 						exitCode,
 						stdout: stdoutBuf,
 						stderr: stderrBuf,
-						outputChecks,
+						outputChecks: [],
 					});
 				});
 
@@ -156,33 +163,16 @@ export function createCodexExecutor(
 						exitCode = code ?? 0;
 					}
 
-					const completedAt = new Date().toISOString();
-
-					const outputChecks = packet.verification.requiredOutputs.map(
-						(path) => ({
-							path,
-							exists: existsSync(resolve(projectRoot, path)),
-						}),
-					);
-
-					eventBus.emit({
-						kind: "command-execution-complete",
-						runId: "",
-						timestamp: completedAt,
-						exitCode,
-						outputChecks,
-					});
-
-					resolvePromise({
+					resolveOnce({
 						command: cliBinary,
 						args,
 						cwd: projectRoot,
 						startedAt,
-						completedAt,
+						completedAt: new Date().toISOString(),
 						exitCode,
 						stdout: stdoutBuf,
 						stderr: stderrBuf,
-						outputChecks,
+						outputChecks: [],
 					});
 				});
 			});

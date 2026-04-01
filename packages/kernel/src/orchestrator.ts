@@ -198,6 +198,7 @@ export function createBuildplaneOrchestrator(
 			try {
 				const cleanupResult = workspace.deleteWorkspace({
 					path: preparedWorkspace.path,
+					projectRoot,
 				});
 				if (!cleanupResult.deleted) {
 					cleanupDetail =
@@ -341,6 +342,7 @@ export function createBuildplaneOrchestrator(
 				workspace.commitAndMergeWorkspace({
 					path: preparedWorkspace.path,
 					runId: run.id,
+					projectRoot,
 				});
 			} catch (error) {
 				return finalizeInfrastructureFailure(
@@ -376,6 +378,7 @@ export function createBuildplaneOrchestrator(
 		try {
 			cleanupResult = workspace.deleteWorkspace({
 				path: preparedWorkspace.path,
+				projectRoot,
 			});
 		} catch (error) {
 			cleanupResult = {

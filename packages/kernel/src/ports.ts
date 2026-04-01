@@ -117,8 +117,12 @@ export interface BuildplaneWorkspacePort {
 		path: string;
 		headSha: string;
 	};
-	commitAndMergeWorkspace?(workspace: { path: string; runId: string }): void;
-	deleteWorkspace(workspace: { path: string }): {
+	commitAndMergeWorkspace?(workspace: {
+		path: string;
+		runId: string;
+		projectRoot?: string;
+	}): void;
+	deleteWorkspace(workspace: { path: string; projectRoot?: string }): {
 		deleted: boolean;
 		cleanupError?: string;
 	};

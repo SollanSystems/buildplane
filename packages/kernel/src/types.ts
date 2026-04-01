@@ -48,6 +48,10 @@ export interface StrategyResult {
 	readonly mode: StrategyMode;
 	readonly outcome: "passed" | "failed" | "mixed";
 	readonly childResults: Map<string, import("./run-loop.js").RunPacketResult>;
+	/** Per-round audit trail for multi-round strategies (e.g. implement-then-review). */
+	readonly rounds?: ReadonlyArray<
+		Map<string, import("./run-loop.js").RunPacketResult>
+	>;
 	readonly winnerRunId?: string;
 	readonly mergeDecision: MergeDecision;
 }

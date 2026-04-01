@@ -149,8 +149,13 @@ export function createGitWorktreeAdapter(
 			};
 		},
 
-		commitAndMergeWorkspace(workspace: { path: string; runId: string }) {
-			const projectRoot = dirname(dirname(dirname(workspace.path)));
+		commitAndMergeWorkspace(workspace: {
+			path: string;
+			runId: string;
+			projectRoot?: string;
+		}) {
+			const projectRoot =
+				workspace.projectRoot ?? dirname(dirname(dirname(workspace.path)));
 
 			// Commit any changes made in the worktree
 			executeGitCommand(runGit, workspace.path, ["add", "."]);
@@ -195,8 +200,9 @@ export function createGitWorktreeAdapter(
 			}
 		},
 
-		deleteWorkspace(workspace: { path: string }) {
-			const projectRoot = dirname(dirname(dirname(workspace.path)));
+		deleteWorkspace(workspace: { path: string; projectRoot?: string }) {
+			const projectRoot =
+				workspace.projectRoot ?? dirname(dirname(dirname(workspace.path)));
 			const worktreeRemove = executeGitCommand(runGit, projectRoot, [
 				"worktree",
 				"remove",

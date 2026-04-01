@@ -100,13 +100,17 @@ async function runImplementThenReviewMode(
 		);
 	}
 
-	const childResults = new Map<string, RunPacketResult>();
+	// Track results per round so earlier rounds are not overwritten
+	const allRoundResults: Array<Map<string, RunPacketResult>> = [];
+
+	// The implementer packet is mutated between rounds to inject reviewer feedback
+	let currentImplementerPacket = implementer.packet;
 
 	for (let round = 0; round < MAX_REVIEW_ROUNDS; round++) {
 		// Build a dependency graph: reviewer depends on implementer
 		const graph: UnitGraph = {
 			nodes: [
-				{ ...implementer.packet },
+				{ ...currentImplementerPacket },
 				{
 					...reviewer.packet,
 					dependsOn: [implementer.packet.unit.id],
@@ -124,14 +128,20 @@ async function runImplementThenReviewMode(
 			(n) => n.unitId === reviewer.packet.unit.id,
 		);
 
-		childResults.set(
+		// Store this round's results without overwriting previous rounds
+		const roundResults = new Map<string, RunPacketResult>();
+		roundResults.set(
 			implementer.packet.unit.id,
 			syntheticResult(graphResult, implementer.packet.unit.id),
 		);
-		childResults.set(
+		roundResults.set(
 			reviewer.packet.unit.id,
 			syntheticResult(graphResult, reviewer.packet.unit.id),
 		);
+		allRoundResults.push(roundResults);
+
+		// The final childResults always reflect the latest round
+		const childResults = new Map(roundResults);
 
 		const implPassed = implNode?.status === "passed";
 		const reviewPassed = reviewNode?.status === "passed";
@@ -142,6 +152,7 @@ async function runImplementThenReviewMode(
 				mode: strategy.mode,
 				outcome: "failed",
 				childResults,
+				rounds: allRoundResults,
 				mergeDecision: {
 					policy: strategy.mergePolicy,
 					outcome: "rejected",
@@ -156,6 +167,7 @@ async function runImplementThenReviewMode(
 				mode: strategy.mode,
 				outcome: "passed",
 				childResults,
+				rounds: allRoundResults,
 				winnerRunId: implNode?.runId,
 				mergeDecision: {
 					policy: strategy.mergePolicy,
@@ -172,10 +184,40 @@ async function runImplementThenReviewMode(
 				mode: strategy.mode,
 				outcome: "failed",
 				childResults,
+				rounds: allRoundResults,
 				mergeDecision: {
 					policy: strategy.mergePolicy,
 					outcome: "rejected",
 					reasons: [`reviewer rejected after ${MAX_REVIEW_ROUNDS} round(s)`],
+				},
+			};
+		}
+
+		// Extract reviewer rejection reasons and feed them back to the implementer
+		const reviewerResult = roundResults.get(reviewer.packet.unit.id);
+		const rejectionReasons: string[] = [];
+		if (reviewerResult?.decision?.reasons) {
+			rejectionReasons.push(...reviewerResult.decision.reasons);
+		}
+		if (reviewNode?.runId) {
+			rejectionReasons.push(
+				`reviewer run ${reviewNode.runId} did not approve (round ${round + 1})`,
+			);
+		}
+
+		const feedbackSuffix =
+			rejectionReasons.length > 0
+				? `\n\nReviewer feedback from round ${round + 1}:\n${rejectionReasons.join("\n")}\n\nPlease address the reviewer's concerns and try again.`
+				: "";
+
+		if (feedbackSuffix && currentImplementerPacket.model) {
+			currentImplementerPacket = {
+				...currentImplementerPacket,
+				model: {
+					...currentImplementerPacket.model,
+					systemPrompt:
+						(currentImplementerPacket.model.systemPrompt ?? "") +
+						feedbackSuffix,
 				},
 			};
 		}
@@ -186,7 +228,11 @@ async function runImplementThenReviewMode(
 		strategyId: strategy.id,
 		mode: strategy.mode,
 		outcome: "failed",
-		childResults,
+		childResults:
+			allRoundResults.length > 0
+				? allRoundResults[allRoundResults.length - 1]
+				: new Map(),
+		rounds: allRoundResults,
 		mergeDecision: {
 			policy: strategy.mergePolicy,
 			outcome: "rejected",
