@@ -40,7 +40,7 @@ export function createClaudeCodeExecutor(
 ): ClaudeCodeExecutorPort {
 	const cliBinary = options?.cliBinary ?? "claude";
 	const timeoutMs = options?.timeoutMs ?? 300_000;
-	const maxTurns = options?.maxTurns ?? 20;
+	const maxTurns = options?.maxTurns ?? 50;
 	const spawnFn = options?.spawnFn ?? spawn;
 	const renderer = options?.renderer;
 
