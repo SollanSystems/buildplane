@@ -33,7 +33,7 @@ export type {
 	CreateBuildplaneOrchestratorOptions,
 } from "./orchestrator.js";
 export { createBuildplaneOrchestrator } from "./orchestrator.js";
-export { parseUnitPacket } from "./packet.js";
+export { parseStrategyPacket, parseUnitPacket } from "./packet.js";
 export type {
 	BudgetConstraints,
 	PolicyProfile,

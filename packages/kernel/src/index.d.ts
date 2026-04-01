@@ -28,7 +28,7 @@ export type {
 	GraphStartedEvent,
 	GraphCompletedEvent,
 } from "./events.ts";
-export { parseUnitPacket } from "./packet.ts";
+export { parseStrategyPacket, parseUnitPacket } from "./packet.ts";
 export type {
 	BudgetConstraints,
 	PolicyProfile,
