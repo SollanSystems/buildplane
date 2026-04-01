@@ -68,6 +68,7 @@ export type {
 	UnitPacket,
 	WorkspaceSnapshot,
 } from "./run-loop.js";
+export type { StrategyOrchestrator } from "./strategy-executor.js";
 export type {
 	ExecutionRole,
 	MergeDecision,

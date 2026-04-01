@@ -74,6 +74,7 @@ export type {
 	StrategyResult,
 	Unit,
 } from "./types.ts";
+export type { StrategyOrchestrator } from "./strategy-executor.ts";
 export { validatePacketForWorkspaceRoot } from "./workspace-paths.ts";
 export type {
 	GraphNodeOutcome,

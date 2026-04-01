@@ -26,7 +26,8 @@ import type {
 	WorkspaceSnapshot,
 } from "./run-loop.js";
 import { createRunScopedBus } from "./run-scoped-bus.js";
-import type { Run } from "./types.js";
+import { runStrategy } from "./strategy-executor.js";
+import type { Run, StrategyPacket, StrategyResult } from "./types.js";
 import { validatePacketForWorkspaceRoot } from "./workspace-paths.js";
 
 /** A no-op event bus for the sync path when no bus is provided. */
@@ -47,6 +48,10 @@ export interface BuildplaneOrchestrator {
 	approveRun(runId: string): Run;
 	rejectSuspendedRun(runId: string): Run;
 	runGraphAsync(graph: UnitGraph, eventBus?: EventBus): Promise<GraphResult>;
+	runStrategy(
+		strategy: StrategyPacket,
+		eventBus?: EventBus,
+	): Promise<StrategyResult>;
 }
 
 export interface CreateBuildplaneOrchestratorOptions {
@@ -836,6 +841,13 @@ export function createBuildplaneOrchestrator(
 			});
 
 			return graphResult;
+		},
+
+		async runStrategy(
+			strategy: StrategyPacket,
+			eventBus?: EventBus,
+		): Promise<StrategyResult> {
+			return runStrategy(strategy, orchestrator, eventBus);
 		},
 	};
 
