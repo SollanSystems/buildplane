@@ -15,7 +15,7 @@ export interface ModelExecutionBlock {
 }
 
 export interface RoutingHints {
-	readonly preferredWorker?: "claude-code";
+	readonly preferredWorker?: "claude-code" | "codex";
 	readonly preferredModel?: string;
 	readonly effort?: "low" | "medium" | "high";
 }

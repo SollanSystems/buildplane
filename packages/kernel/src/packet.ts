@@ -117,7 +117,7 @@ function parseModelBlock(raw: unknown): ModelExecutionBlock {
 	};
 }
 
-const VALID_PREFERRED_WORKERS = new Set(["claude-code"]);
+const VALID_PREFERRED_WORKERS = new Set(["claude-code", "codex"]);
 
 function parseRoutingHints(raw: unknown): RoutingHints | undefined {
 	if (raw === undefined) {

@@ -145,9 +145,23 @@ async function loadCliOrchestrator(
 		createGitWorktreeAdapter: () => unknown;
 	};
 
+	const adaptersCodex = (await import(
+		"@buildplane/adapters-codex"
+	)) as unknown as {
+		createCodexExecutor: () => {
+			executePacket: (packet: unknown, root: string) => unknown;
+			executePacketAsync: (
+				packet: unknown,
+				root: string,
+				eventBus: unknown,
+			) => Promise<unknown>;
+		};
+	};
+
 	const commandExecutor = { executePacket: runtime.executePacket };
 	const sdkExecutor = adaptersModels.createModelExecutor();
 	const claudeExecutor = adaptersModels.createClaudeCodeExecutor();
+	const codexExecutor = adaptersCodex.createCodexExecutor();
 
 	const runtimeRouter = {
 		executePacket(packet: unknown, root: string) {
@@ -163,6 +177,9 @@ async function loadCliOrchestrator(
 			if (p.execution) return commandExecutor.executePacket(packet, root);
 			if (p.routingHints?.preferredWorker === "claude-code") {
 				return claudeExecutor.executePacketAsync(packet, root, bus);
+			}
+			if (p.routingHints?.preferredWorker === "codex") {
+				return codexExecutor.executePacketAsync(packet, root, bus);
 			}
 			return sdkExecutor.executePacketAsync(packet, root, bus);
 		},

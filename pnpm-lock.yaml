@@ -41,6 +41,9 @@ importers:
 
   apps/cli:
     dependencies:
+      '@buildplane/adapters-codex':
+        specifier: workspace:*
+        version: link:../../packages/adapters-codex
       '@buildplane/adapters-git':
         specifier: workspace:*
         version: link:../../packages/adapters-git
@@ -62,6 +65,12 @@ importers:
       '@buildplane/ui-tui':
         specifier: workspace:*
         version: link:../../packages/ui-tui
+
+  packages/adapters-codex:
+    dependencies:
+      '@buildplane/kernel':
+        specifier: workspace:*
+        version: link:../kernel
 
   packages/adapters-git:
     dependencies:
