@@ -764,6 +764,7 @@ export function createBuildplaneOrchestrator(
 
 			// Map from unitId → runId for toResult()
 			const runIdMap = new Map<string, string>();
+			const decisionReasonsMap = new Map<string, readonly string[]>();
 
 			bus.emit({
 				kind: "graph-started",
@@ -823,6 +824,9 @@ export function createBuildplaneOrchestrator(
 					if (result.run.id) {
 						runIdMap.set(unitId, result.run.id);
 					}
+					if (result.decision?.reasons) {
+						decisionReasonsMap.set(unitId, result.decision.reasons);
+					}
 
 					if (result.run.status === "passed") {
 						scheduler.markPassed(unitId);
@@ -835,7 +839,7 @@ export function createBuildplaneOrchestrator(
 
 			await drainLoop();
 
-			const graphResult = scheduler.toResult(runIdMap);
+			const graphResult = scheduler.toResult(runIdMap, decisionReasonsMap);
 
 			bus.emit({
 				kind: "graph-completed",
