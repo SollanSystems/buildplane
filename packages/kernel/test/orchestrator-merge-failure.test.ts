@@ -105,6 +105,9 @@ function createMergeFailureHarness() {
 		inspectTarget() {
 			throw new Error("not used in merge failure tests");
 		},
+		getChildRuns() {
+			return [];
+		},
 	};
 
 	const runtime: BuildplaneRuntimePort = {

@@ -48,6 +48,7 @@ export type {
 	BuildplaneRuntimePort,
 	BuildplaneStoragePort,
 	BuildplaneWorkspacePort,
+	CreateRunOptions,
 } from "./ports.js";
 export type {
 	ApprovedPolicyDecision,

@@ -111,6 +111,7 @@ function createMockStorage(): BuildplaneStoragePort {
 		inspectTarget: () => {
 			throw new Error("not implemented");
 		},
+		getChildRuns: () => [],
 	} as unknown as BuildplaneStoragePort;
 }
 

@@ -20,6 +20,9 @@ export interface EventStore {
 		runId: string,
 		kind: ExecutionEventKind,
 	): ExecutionEvent[];
+
+	/** Retrieve all typed events for a strategy (across all child runs). */
+	getEventsByStrategyId(strategyId: string): ExecutionEvent[];
 }
 
 interface StoredEventRow {
@@ -45,7 +48,13 @@ export function createEventStore(projectRoot: string): EventStore {
 	}
 
 	function openDb(): DatabaseSync {
-		return openBuildplaneDatabase(layout.stateDbPath);
+		const db = openBuildplaneDatabase(layout.stateDbPath);
+		// Ensure expression index exists for strategy-scoped event queries.
+		const idxSql =
+			"CREATE INDEX IF NOT EXISTS idx_events_strategy_id ON events " +
+			"(json_extract(payload, '$.context.strategyId'))";
+		db.exec(idxSql);
+		return db;
 	}
 
 	function deserializeEvent(row: StoredEventRow): ExecutionEvent {
@@ -103,6 +112,20 @@ export function createEventStore(projectRoot: string): EventStore {
 					`SELECT id, kind, occurred_at, payload FROM events WHERE json_extract(payload, '$.runId') = ? AND kind = ? ORDER BY occurred_at ASC, rowid ASC`,
 				)
 				.all(runId, kind) as unknown as StoredEventRow[];
+
+			database.close();
+			return rows.map(deserializeEvent);
+		},
+
+		getEventsByStrategyId(strategyId: string): ExecutionEvent[] {
+			ensureInitialized();
+			const database = openDb();
+
+			const rows = database
+				.prepare(
+					`SELECT id, kind, occurred_at, payload FROM events WHERE json_extract(payload, '$.context.strategyId') = ? ORDER BY occurred_at ASC, rowid ASC`,
+				)
+				.all(strategyId) as unknown as StoredEventRow[];
 
 			database.close();
 			return rows.map(deserializeEvent);

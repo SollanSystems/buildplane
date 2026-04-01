@@ -16,13 +16,19 @@ import type {
 } from "./run-loop.js";
 import type { Run } from "./types.js";
 
+export interface CreateRunOptions {
+	readonly parentRunId?: string;
+	readonly strategyId?: string;
+}
+
 export interface BuildplaneStoragePort {
 	initializeProject(): {
 		created: boolean;
 		projectRoot: string;
 		stateDbPath: string;
 	};
-	createRun(packet: UnitPacket): Run;
+	createRun(packet: UnitPacket, options?: CreateRunOptions): Run;
+	getChildRuns(parentRunId: string): Run[];
 	markRunRunning(runId: string): void;
 	recordExecutionEvidence(runId: string, receipt: ExecutionReceipt): void;
 	recordDecision(runId: string, decision: PolicyDecision): void;
