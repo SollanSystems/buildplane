@@ -48,6 +48,16 @@ interface BuildplaneCliOrchestrator {
 		outcome: "passed" | "failed";
 		nodes: Array<{ unitId: string; status: string; runId?: string }>;
 	}>;
+	runStrategy(
+		strategy: unknown,
+		eventBus?: unknown,
+	): Promise<{
+		strategyId: string;
+		mode: string;
+		outcome: "passed" | "failed" | "mixed";
+		mergeDecision: { policy: string; outcome: string; reasons: string[] };
+		winnerRunId?: string;
+	}>;
 	getStatus(): { initialized: boolean } & Record<string, unknown>;
 	inspect(
 		id: string,
@@ -531,6 +541,52 @@ export async function runCli(
 					stdout(` - ${node.unitId}: ${node.status}`);
 				}
 				return graphResult.outcome === "passed" ? 0 : 1;
+			}
+			case "run-strategy": {
+				const strategyIndex = rest.indexOf("--strategy");
+				if (strategyIndex === -1 || !rest[strategyIndex + 1]) {
+					throw new Error("Missing required --strategy <path> argument.");
+				}
+				const strategyPath = resolve(cwd, rest[strategyIndex + 1]);
+
+				const kernel = (await import("@buildplane/kernel")) as unknown as {
+					parseStrategyPacket: (raw: unknown) => unknown;
+					createEventBus: () => {
+						subscribe: (listener: (event: unknown) => void) => () => void;
+						emit: (event: unknown) => void;
+					};
+				};
+
+				const rawStrategy = JSON.parse(readFileSync(strategyPath, "utf8"));
+				const strategy = kernel.parseStrategyPacket(rawStrategy);
+				const strategyBus = kernel.createEventBus();
+
+				const strategyResult = await orchestrator.runStrategy(
+					strategy,
+					strategyBus,
+				);
+
+				const json = rest.includes("--json");
+				if (json) {
+					stdout(
+						formatJson(strategyResult as unknown as Record<string, unknown>),
+					);
+				} else {
+					stdout(`Strategy: ${strategyResult.strategyId}`);
+					stdout(`Mode: ${strategyResult.mode}`);
+					stdout(`Outcome: ${strategyResult.outcome}`);
+					stdout(
+						`Merge: ${strategyResult.mergeDecision.policy} → ${strategyResult.mergeDecision.outcome}`,
+					);
+					if (strategyResult.winnerRunId) {
+						stdout(`Winner Run: ${strategyResult.winnerRunId}`);
+					}
+					for (const reason of strategyResult.mergeDecision.reasons) {
+						stdout(`  reason: ${reason}`);
+					}
+				}
+
+				return strategyResult.outcome === "passed" ? 0 : 1;
 			}
 			default:
 				throw new Error(`Unknown command: ${command}`);
