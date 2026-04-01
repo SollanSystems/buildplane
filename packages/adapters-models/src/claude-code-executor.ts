@@ -175,13 +175,27 @@ export function createClaudeCodeExecutor(
 						}),
 					);
 
+					// Normalize exit code for Claude Code CLI:
+					// Claude Code returns exit 1 for max-turns, plugin warnings,
+					// and hook errors — none of which mean the task failed.
+					// If all required outputs exist, treat the run as successful.
+					let normalizedExitCode = exitCode;
+					if (
+						exitCode !== 0 &&
+						!timedOut &&
+						outputChecks.length > 0 &&
+						outputChecks.every((c) => c.exists)
+					) {
+						normalizedExitCode = 0;
+					}
+
 					resolvePromise({
 						command: cliBinary,
 						args,
 						cwd: projectRoot,
 						startedAt,
 						completedAt,
-						exitCode,
+						exitCode: normalizedExitCode,
 						stdout: stdoutBuf,
 						stderr: stderrBuf,
 						outputChecks,
