@@ -648,72 +648,76 @@ export function createBuildplaneOrchestrator(
 					},
 				);
 			}
-			budgetUnsubscribe?.();
-
-			// Retry-aware policy loop
+			// Retry-aware policy loop — budget subscriber stays active across all attempts
+			// so token usage accumulates cumulatively. budgetUnsubscribe is called in the
+			// finally block after ALL attempts complete (success, rejection, or error).
 			let attemptCount = 0;
-			while (true) {
-				storage.recordExecutionEvidence(ctx.run.id, currentReceipt);
+			try {
+				while (true) {
+					storage.recordExecutionEvidence(ctx.run.id, currentReceipt);
 
-				const decision = policy.evaluateRun(
-					currentPacket,
-					currentReceipt,
-					resolvedProfile,
-					attemptCount,
-				);
+					const decision = policy.evaluateRun(
+						currentPacket,
+						currentReceipt,
+						resolvedProfile,
+						attemptCount,
+					);
 
-				scopedBus.emit({
-					kind: "policy-decision",
-					runId: ctx.run.id,
-					timestamp: new Date().toISOString(),
-					decisionKind: decision.kind,
-					outcome: decision.outcome,
-					reasons: decision.reasons,
-				});
-
-				if (decision.kind !== "retry-run") {
-					return finalizeRun(ctx, currentReceipt, decision);
-				}
-
-				// Retry: augment packet with feedback and re-execute
-				attemptCount = decision.attemptNumber;
-				const feedbackSuffix =
-					decision.feedbackContext.length > 0
-						? `\n\nPrevious attempt failed:\n${decision.feedbackContext.join("\n")}\n\nPlease fix these issues and try again.`
-						: "";
-
-				if (currentPacket.model) {
-					currentPacket = {
-						...currentPacket,
-						model: {
-							...currentPacket.model,
-							systemPrompt:
-								(currentPacket.model.systemPrompt ?? "") + feedbackSuffix,
-						},
-					};
-				}
-
-				try {
-					currentReceipt = await executeOnce(currentPacket);
-				} catch (error) {
-					const message =
-						error instanceof Error ? error.message : String(error);
 					scopedBus.emit({
-						kind: "execution-error",
+						kind: "policy-decision",
 						runId: ctx.run.id,
 						timestamp: new Date().toISOString(),
-						message,
-						phase: "retry-execution",
+						decisionKind: decision.kind,
+						outcome: decision.outcome,
+						reasons: decision.reasons,
 					});
-					return finalizeInfrastructureFailure(
-						ctx.run,
-						infrastructureFailure("runtime-execution-failed", error),
-						{
-							workspace: ctx.workspace,
-							workspaceStatus: "retained",
-						},
-					);
+
+					if (decision.kind !== "retry-run") {
+						return finalizeRun(ctx, currentReceipt, decision);
+					}
+
+					// Retry: augment packet with feedback and re-execute
+					attemptCount = decision.attemptNumber;
+					const feedbackSuffix =
+						decision.feedbackContext.length > 0
+							? `\n\nPrevious attempt failed:\n${decision.feedbackContext.join("\n")}\n\nPlease fix these issues and try again.`
+							: "";
+
+					if (currentPacket.model) {
+						currentPacket = {
+							...currentPacket,
+							model: {
+								...currentPacket.model,
+								systemPrompt:
+									(currentPacket.model.systemPrompt ?? "") + feedbackSuffix,
+							},
+						};
+					}
+
+					try {
+						currentReceipt = await executeOnce(currentPacket);
+					} catch (error) {
+						const message =
+							error instanceof Error ? error.message : String(error);
+						scopedBus.emit({
+							kind: "execution-error",
+							runId: ctx.run.id,
+							timestamp: new Date().toISOString(),
+							message,
+							phase: "retry-execution",
+						});
+						return finalizeInfrastructureFailure(
+							ctx.run,
+							infrastructureFailure("runtime-execution-failed", error),
+							{
+								workspace: ctx.workspace,
+								workspaceStatus: "retained",
+							},
+						);
+					}
 				}
+			} finally {
+				budgetUnsubscribe?.();
 			}
 		},
 		getStatus() {

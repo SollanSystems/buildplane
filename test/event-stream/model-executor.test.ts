@@ -140,7 +140,7 @@ describe("model executor", () => {
 					type: "tool-result" as const,
 					toolCallId: "call-1",
 					toolName: "read_file",
-					result: "file contents",
+					output: "file contents",
 				};
 				yield { type: "text-delta" as const, textDelta: "Done" };
 				yield { type: "step-finish" as const, finishReason: "stop" };

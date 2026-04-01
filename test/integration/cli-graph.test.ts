@@ -54,6 +54,8 @@ describe("CLI run-graph command", () => {
 		};
 		const graphPath = join(repo, "graph.json");
 		writeFileSync(graphPath, JSON.stringify(graph, null, 2));
+		execFileSync("git", ["add", "graph.json"], { cwd: repo });
+		execFileSync("git", ["commit", "-m", "add graph"], { cwd: repo });
 
 		let stdout = "";
 		let stderr = "";
