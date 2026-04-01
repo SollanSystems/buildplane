@@ -157,8 +157,17 @@ export function createGitWorktreeAdapter(
 			const projectRoot =
 				workspace.projectRoot ?? dirname(dirname(dirname(workspace.path)));
 
-			// Commit any changes made in the worktree
-			executeGitCommand(runGit, workspace.path, ["add", "."]);
+			// Commit changes made in the worktree, excluding .buildplane/ state.
+			// The worktree may contain its own .buildplane/ artifacts from nested
+			// runs or the host project's state — these must not be merged back
+			// as they would conflict with the main repo's .buildplane/ directory.
+			executeGitCommand(runGit, workspace.path, [
+				"add",
+				"--all",
+				"--",
+				".",
+				":!.buildplane",
+			]);
 			const commitRes = executeGitCommand(runGit, workspace.path, [
 				"commit",
 				"--allow-empty",
