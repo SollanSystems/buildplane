@@ -171,8 +171,9 @@ export function createGitWorktreeAdapter(
 			const commitRes = executeGitCommand(runGit, workspace.path, [
 				"commit",
 				"--allow-empty",
+				"--no-verify",
 				"-m",
-				`Buildplane run ${workspace.runId} completed`,
+				`feat: buildplane run ${workspace.runId}`,
 			]);
 
 			if (commitRes.status !== 0) {
@@ -198,7 +199,7 @@ export function createGitWorktreeAdapter(
 				"merge",
 				"--no-ff",
 				"-m",
-				`Merge Buildplane run ${workspace.runId}`,
+				`feat: merge buildplane run ${workspace.runId}`,
 				newHead,
 			]);
 

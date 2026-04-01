@@ -125,6 +125,33 @@ export function createGraphScheduler(
 		}
 	}
 
+	// Detect dependency cycles using DFS
+	const visited = new Set<string>();
+	const visiting = new Set<string>();
+
+	function detectCycle(unitId: string, path: string[]): void {
+		if (visiting.has(unitId)) {
+			const cycleStart = path.indexOf(unitId);
+			const cyclePath = [...path.slice(cycleStart), unitId];
+			throw new Error(`Dependency cycle detected: ${cyclePath.join(" -> ")}`);
+		}
+		if (visited.has(unitId)) return;
+
+		visiting.add(unitId);
+		const node = graph.nodes.find(n => n.unit.id === unitId);
+		for (const dep of node?.dependsOn ?? []) {
+			detectCycle(dep, [...path, unitId]);
+		}
+		visiting.delete(unitId);
+		visited.add(unitId);
+	}
+
+	for (const node of graph.nodes) {
+		if (!visited.has(node.unit.id)) {
+			detectCycle(node.unit.id, []);
+		}
+	}
+
 	// State map: unitId → NodeStatus
 	const state = new Map<string, NodeStatus>(
 		graph.nodes.map((n) => [n.unit.id, "pending"]),
