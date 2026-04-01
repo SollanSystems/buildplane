@@ -61,7 +61,18 @@ export type {
 	UnitPacket,
 	WorkspaceSnapshot,
 } from "./run-loop.ts";
-export type { Run, RunStatus, Unit } from "./types.ts";
+export type {
+	ExecutionRole,
+	MergeDecision,
+	MergePolicy,
+	Run,
+	RunStatus,
+	StrategyChild,
+	StrategyMode,
+	StrategyPacket,
+	StrategyResult,
+	Unit,
+} from "./types.ts";
 export { validatePacketForWorkspaceRoot } from "./workspace-paths.ts";
 export type {
 	GraphNodeOutcome,

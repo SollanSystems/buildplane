@@ -67,5 +67,16 @@ export type {
 	UnitPacket,
 	WorkspaceSnapshot,
 } from "./run-loop.js";
-export type { Run, RunStatus, Unit } from "./types.js";
+export type {
+	ExecutionRole,
+	MergeDecision,
+	MergePolicy,
+	Run,
+	RunStatus,
+	StrategyChild,
+	StrategyMode,
+	StrategyPacket,
+	StrategyResult,
+	Unit,
+} from "./types.js";
 export { validatePacketForWorkspaceRoot } from "./workspace-paths.js";
