@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import type {
 	EventBus,
 	ExecutionReceipt,
+	TaskRenderer,
 	UnitPacket,
 } from "@buildplane/kernel";
 
@@ -14,6 +15,12 @@ export interface CodexExecutorOptions {
 	timeoutMs?: number;
 	/** Override spawn for testing. */
 	spawnFn?: typeof spawn;
+	/**
+	 * Renderer used to convert packet.intent into a prompt.
+	 * When present and packet.intent exists, the rendered prompt takes
+	 * precedence over packet.model.prompt.
+	 */
+	renderer?: TaskRenderer;
 }
 
 export interface CodexExecutorPort {
@@ -31,6 +38,7 @@ export function createCodexExecutor(
 	const cliBinary = options?.cliBinary ?? "codex";
 	const timeoutMs = options?.timeoutMs ?? 300_000;
 	const spawnFn = options?.spawnFn ?? spawn;
+	const renderer = options?.renderer;
 
 	return {
 		executePacket(_packet: UnitPacket, _projectRoot: string): ExecutionReceipt {
@@ -54,14 +62,24 @@ export function createCodexExecutor(
 				throw new Error("Packet must have a model block.");
 			}
 
-			if (!packet.model.prompt) {
-				throw new Error("Packet model block must include a prompt.");
-			}
-
 			const model = packet.model.model;
-			const prompt = packet.model.systemPrompt
-				? `${packet.model.systemPrompt}\n\n---\n\n${packet.model.prompt}`
-				: packet.model.prompt;
+
+			// Resolve prompt: intent + renderer takes precedence over model.prompt
+			let prompt: string;
+			if (packet.intent && renderer) {
+				const rendered = renderer.render(packet.intent, "implementer");
+				prompt = rendered.system
+					? `${rendered.system}\n\n---\n\n${rendered.prompt}`
+					: rendered.prompt;
+			} else if (packet.model.prompt) {
+				prompt = packet.model.systemPrompt
+					? `${packet.model.systemPrompt}\n\n---\n\n${packet.model.prompt}`
+					: packet.model.prompt;
+			} else {
+				throw new Error(
+					"Packet must have either a model.prompt or an intent with a renderer.",
+				);
+			}
 
 			const args = ["-q", "--model", model, "--full-auto", prompt];
 

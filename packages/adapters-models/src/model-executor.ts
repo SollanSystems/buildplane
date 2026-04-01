@@ -3,6 +3,8 @@ import { resolve } from "node:path";
 import type {
 	EventBus,
 	ExecutionReceipt,
+	ExecutionRole,
+	TaskRenderer,
 	UnitPacket,
 } from "@buildplane/kernel";
 import { executePacket as executeCommandPacket } from "@buildplane/runtime";
@@ -64,6 +66,12 @@ export interface CreateModelExecutorOptions {
 	modelResolver?: ModelResolver;
 	/** Build tools to pass to the model. */
 	toolBuilder?: ToolBuilder;
+	/**
+	 * Renderer used to convert packet.intent into system + prompt strings.
+	 * When present and packet.intent exists, the rendered output takes
+	 * precedence over packet.model.prompt / packet.model.systemPrompt.
+	 */
+	renderer?: TaskRenderer;
 }
 
 export function createModelExecutor(
@@ -72,6 +80,7 @@ export function createModelExecutor(
 	const streamFn = options.streamFn;
 	const modelResolver = options.modelResolver;
 	const toolBuilder = options.toolBuilder;
+	const renderer = options.renderer;
 
 	async function getStreamFn(): Promise<StreamFunction> {
 		if (streamFn) return streamFn;
@@ -131,6 +140,7 @@ export function createModelExecutor(
 					stream,
 					resolver,
 					toolBuilder,
+					renderer,
 					signal,
 				);
 				return receipt;
@@ -172,6 +182,7 @@ async function executeModelStream(
 	streamFn: StreamFunction,
 	modelResolver: ModelResolver,
 	toolBuilder?: ToolBuilder,
+	renderer?: TaskRenderer,
 	signal?: AbortSignal,
 ): Promise<ExecutionReceipt> {
 	const model = packet.model;
@@ -186,10 +197,23 @@ async function executeModelStream(
 	const builtTools = toolBuilder ? toolBuilder(projectRoot) : undefined;
 	const hasTools = builtTools && Object.keys(builtTools).length > 0;
 
+	// Resolve prompt: intent + renderer takes precedence over model.prompt
+	let resolvedSystem: string | undefined;
+	let resolvedPrompt: string;
+	if (packet.intent && renderer) {
+		const role: ExecutionRole = "implementer";
+		const rendered = renderer.render(packet.intent, role);
+		resolvedSystem = rendered.system;
+		resolvedPrompt = rendered.prompt;
+	} else {
+		resolvedSystem = model.systemPrompt;
+		resolvedPrompt = model.prompt ?? "Execute the assigned task.";
+	}
+
 	const result = streamFn({
 		model: modelInstance,
-		system: model.systemPrompt,
-		prompt: packet.model?.prompt ?? "Execute the assigned task.",
+		system: resolvedSystem,
+		prompt: resolvedPrompt,
 		tools: hasTools ? builtTools : undefined,
 	});
 
