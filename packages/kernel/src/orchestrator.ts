@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import type { EventBus } from "./events.js";
+import type { EventBus, EventContext } from "./events.js";
 import {
 	createGraphScheduler,
 	type GraphResult,
@@ -533,7 +533,13 @@ export function createBuildplaneOrchestrator(
 			}
 			const { ctx } = prepared;
 
-			const scopedBus = createRunScopedBus(ctx.run.id, bus);
+			const runContext: EventContext = {
+				runId: ctx.run.id,
+				executor:
+					ctx.validatedPacket.routingHints?.preferredWorker ??
+					(ctx.validatedPacket.model ? "ai-sdk" : "command"),
+			};
+			const scopedBus = createRunScopedBus(runContext, bus);
 
 			// Budget enforcement: count tokens mid-stream and abort if limit exceeded
 			const effectiveBudgets = resolvedProfile?.budgets ?? topLevelBudgets;
