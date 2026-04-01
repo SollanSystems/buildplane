@@ -1,5 +1,5 @@
-const fs = require('fs');
-let code = fs.readFileSync('test/integration/graph-cli.test.ts', 'utf8');
+const fs = require("fs");
+let code = fs.readFileSync("test/integration/graph-cli.test.ts", "utf8");
 
 // runCli doesn't return a result in the source file, it's an async function that just runs.
 // We need to use `runCli` from cli-test-helper, but we imported `runCli` directly from `src`.
@@ -8,8 +8,8 @@ let code = fs.readFileSync('test/integration/graph-cli.test.ts', 'utf8');
 // Wait, `apps/cli/test` has `runCli` exported? Yes.
 
 code = code.replace(
-  'import { runCli } from "../../apps/cli/src/run-cli.js";',
-  'import { runCli } from "../../apps/cli/test/cli-test-helper";'
+	'import { runCli } from "../../apps/cli/src/run-cli.js";',
+	'import { runCli } from "../../apps/cli/test/cli-test-helper";',
 );
 // wait, `apps/cli/test/cli-test-helper` might need `.js` or something. Or we just execute the CLI directly!
 
@@ -64,4 +64,4 @@ describe("graph CLI commands", () => {
     });
 });
 `;
-fs.writeFileSync('test/integration/graph-cli.test.ts', code);
+fs.writeFileSync("test/integration/graph-cli.test.ts", code);

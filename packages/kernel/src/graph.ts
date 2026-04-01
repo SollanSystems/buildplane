@@ -44,7 +44,12 @@ export interface GraphResult {
 }
 
 /** Internal status tracked per node inside the scheduler. */
-export type NodeStatus = "pending" | "running" | "passed" | "failed" | "cancelled";
+export type NodeStatus =
+	| "pending"
+	| "running"
+	| "passed"
+	| "failed"
+	| "cancelled";
 
 export interface GraphSchedulerOptions {
 	readonly maxConcurrent: number;

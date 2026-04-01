@@ -7,11 +7,35 @@
  * to the EventBus and receive these — never untyped JSON.
  */
 
+// ── EventContext ────────────────────────────────────────────
+
+/**
+ * Rich metadata injected into every event by the run-scoped bus.
+ * Enables cross-model lineage tracking, cost attribution, and
+ * strategy grouping across child runs.
+ */
+export interface EventContext {
+	readonly runId: string;
+	readonly parentRunId?: string;
+	readonly strategyId?: string;
+	readonly role?: string;
+	readonly candidateId?: string;
+	readonly executor: string;
+	readonly provider?: string;
+	readonly model?: string;
+	readonly cost?: {
+		readonly inputTokens: number;
+		readonly outputTokens: number;
+		readonly estimatedUsd?: number;
+	};
+}
+
 // ── Base ────────────────────────────────────────────────────
 
 interface BaseEvent {
 	readonly runId: string;
 	readonly timestamp: string;
+	readonly context?: EventContext;
 }
 
 // ── Run lifecycle ───────────────────────────────────────────
@@ -127,6 +151,22 @@ export interface RunResumedEvent extends BaseEvent {
 	readonly approvedBy?: string;
 }
 
+// ── Graph orchestration ─────────────────────────────────────
+
+export interface GraphStartedEvent extends BaseEvent {
+	readonly kind: "graph-started";
+	readonly graphId: string;
+	readonly unitCount: number;
+	readonly timestamp: string;
+}
+
+export interface GraphCompletedEvent extends BaseEvent {
+	readonly kind: "graph-completed";
+	readonly graphId: string;
+	readonly outcome: "passed" | "failed";
+	readonly timestamp: string;
+}
+
 // ── Union ───────────────────────────────────────────────────
 
 export type ExecutionEvent =
@@ -144,7 +184,9 @@ export type ExecutionEvent =
 	| EvidenceRecordedEvent
 	| PolicyDecisionEvent
 	| ExecutionErrorEvent
-	| PolicyBudgetBreachedEvent;
+	| PolicyBudgetBreachedEvent
+	| GraphStartedEvent
+	| GraphCompletedEvent;
 
 /** All possible event kind values. */
 export type ExecutionEventKind = ExecutionEvent["kind"];

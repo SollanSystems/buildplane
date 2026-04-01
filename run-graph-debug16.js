@@ -6,16 +6,19 @@ let eventsSrc = fs.readFileSync(eventsPath, "utf8");
 
 // Export GraphStartedEvent and GraphCompletedEvent as BaseEvent
 eventsSrc = eventsSrc.replace(
-    /export interface GraphStartedEvent \{/g,
-    "export interface GraphStartedEvent extends BaseEvent {"
+	/export interface GraphStartedEvent \{/g,
+	"export interface GraphStartedEvent extends BaseEvent {",
 );
 eventsSrc = eventsSrc.replace(
-    /export interface GraphCompletedEvent \{/g,
-    "export interface GraphCompletedEvent extends BaseEvent {"
+	/export interface GraphCompletedEvent \{/g,
+	"export interface GraphCompletedEvent extends BaseEvent {",
 );
 fs.writeFileSync(eventsPath, eventsSrc);
 
-const orchPath = path.join(process.cwd(), "packages/kernel/src/orchestrator.ts");
+const orchPath = path.join(
+	process.cwd(),
+	"packages/kernel/src/orchestrator.ts",
+);
 let orchSrc = fs.readFileSync(orchPath, "utf8");
 
 // Wait, the emit method inside kernel takes an `ExecutionEvent`.
@@ -27,17 +30,19 @@ let orchSrc = fs.readFileSync(orchPath, "utf8");
 // The SQL binds `kind` as a column `VALUES (?, ?, ?, ?)`, 2nd arg is `kind`.
 
 orchSrc = orchSrc.replace(
-    /kind: "graph-started",\n\s*graphId,/g,
-    `kind: "graph-started",
+	/kind: "graph-started",\n\s*graphId,/g,
+	`kind: "graph-started",
 				runId: graphId,
-				graphId,`
+				graphId,`,
 );
 orchSrc = orchSrc.replace(
-    /kind: "graph-completed",\n\s*graphId,/g,
-    `kind: "graph-completed",
+	/kind: "graph-completed",\n\s*graphId,/g,
+	`kind: "graph-completed",
 				runId: graphId,
-				graphId,`
+				graphId,`,
 );
 fs.writeFileSync(orchPath, orchSrc);
 
-console.log("WAIT... `randomUUID()` is used for `id`. But `randomUUID` is NOT imported from `crypto`?!");
+console.log(
+	"WAIT... `randomUUID()` is used for `id`. But `randomUUID` is NOT imported from `crypto`?!",
+);

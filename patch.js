@@ -1,5 +1,5 @@
-const fs = require('fs');
-const code = fs.readFileSync('packages/kernel/src/ports.ts', 'utf8');
+const fs = require("fs");
+const code = fs.readFileSync("packages/kernel/src/ports.ts", "utf8");
 
 const target = `	deleteWorkspace(workspace: { path: string }): {
 		deleted: boolean;
@@ -12,4 +12,7 @@ const replacement = `	commitAndMergeWorkspace?(workspace: { path: string; runId:
 		cleanupError?: string;
 	};`;
 
-fs.writeFileSync('packages/kernel/src/ports.ts', code.replace(target, replacement));
+fs.writeFileSync(
+	"packages/kernel/src/ports.ts",
+	code.replace(target, replacement),
+);

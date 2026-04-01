@@ -61,7 +61,7 @@ export function createEventStore(projectRoot: string): EventStore {
 		persistEvent(runId: string, event: ExecutionEvent): void {
 			ensureInitialized();
 			const database = openDb();
-			const { kind, timestamp, ...payload } = event;
+			// removed
 
 			database
 				.prepare(
@@ -69,9 +69,9 @@ export function createEventStore(projectRoot: string): EventStore {
 				)
 				.run(
 					randomUUID(),
-					kind,
-					timestamp,
-					JSON.stringify({ ...payload, runId }),
+					String(event.kind),
+					String(event.timestamp),
+					JSON.stringify({ ...event, runId }),
 				);
 
 			database.close();

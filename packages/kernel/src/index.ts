@@ -1,6 +1,7 @@
 export type {
 	CommandExecutionCompleteEvent,
 	EventBus,
+	EventContext,
 	EventListener,
 	EvidenceRecordedEvent,
 	ExecutionErrorEvent,
@@ -16,7 +17,17 @@ export type {
 	ToolCallCompletedEvent,
 	ToolCallStartedEvent,
 } from "./events.js";
-export { createEventBus, createRunScopedBus } from "./events.js";
+export { createEventBus } from "./events.js";
+export type {
+	GraphNodeOutcome,
+	GraphResult,
+	GraphScheduler,
+	GraphSchedulerOptions,
+	NodeStatus,
+	UnitGraph,
+	UnitGraphNode,
+} from "./graph.js";
+export { createGraphScheduler } from "./graph.js";
 export type {
 	BuildplaneOrchestrator,
 	CreateBuildplaneOrchestratorOptions,
@@ -24,7 +35,16 @@ export type {
 export { createBuildplaneOrchestrator } from "./orchestrator.js";
 export { parseUnitPacket } from "./packet.js";
 export type {
+	BudgetConstraints,
+	PolicyProfile,
+	ResourceUsageSnapshot,
+	RetryPolicy,
+	TrustGateConfig,
+} from "./policy.js";
+export { createResourceUsageSnapshot } from "./policy.js";
+export type {
 	BuildplanePolicyPort,
+	BuildplaneProfileRegistryPort,
 	BuildplaneRuntimePort,
 	BuildplaneStoragePort,
 	BuildplaneWorkspacePort,

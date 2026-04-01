@@ -1,5 +1,5 @@
-const fs = require('fs');
-let code = fs.readFileSync('packages/kernel/src/orchestrator.ts', 'utf8');
+const fs = require("fs");
+let code = fs.readFileSync("packages/kernel/src/orchestrator.ts", "utf8");
 
 // Replace workspace cleanup for passing runs with a commit-and-merge
 const target1 = `			let cleanupResult: { deleted: boolean; cleanupError?: string };
@@ -94,4 +94,4 @@ code = code.replace(target1, replacement1);
 code = code.replace(target2, replacement2);
 code = code.replace(target3, replacement3);
 
-fs.writeFileSync('packages/kernel/src/orchestrator.ts', code);
+fs.writeFileSync("packages/kernel/src/orchestrator.ts", code);

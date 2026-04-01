@@ -1,17 +1,15 @@
 {
-  "nodes": [
-    {
-      "unit": {
-        "id": "unit-a"
-      },
-      "dependencies": [],
-      "execution": {
-        "kind": "command",
-        "entrypoint": "echo",
-        "args": [
-          "A"
-        ]
-      }
-    }
-  ]
+	"nodes": [
+		{
+			"unit": {
+				"id": "unit-a"
+			},
+			"dependencies": [],
+			"execution": {
+				"kind": "command",
+				"entrypoint": "echo",
+				"args": ["A"]
+			}
+		}
+	]
 }

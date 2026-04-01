@@ -2,7 +2,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 const eventsPath = path.join(process.cwd(), "packages/kernel/src/events.ts");
-let eventsSrc = fs.readFileSync(eventsPath, "utf8");
+const eventsSrc = fs.readFileSync(eventsPath, "utf8");
 
 // BaseEvent has `runId`. GraphStartedEvent and GraphCompletedEvent don't naturally have a single runId!
 // In `eventStore.persistEvent(runId, event)`, runId comes from the FIRST ARGUMENT.
@@ -13,4 +13,6 @@ let eventsSrc = fs.readFileSync(eventsPath, "utf8");
 // `const { kind, timestamp, ...payload } = event;`
 // `JSON.stringify({ ...payload, runId })`
 
-console.log("WAIT, IS `kind` THE SECOND PARAMETER TO `INSERT INTO events (id, kind, occurred_at, payload) VALUES (?, ?, ?, ?)`?");
+console.log(
+	"WAIT, IS `kind` THE SECOND PARAMETER TO `INSERT INTO events (id, kind, occurred_at, payload) VALUES (?, ?, ?, ?)`?",
+);

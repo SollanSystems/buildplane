@@ -13,7 +13,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createGitWorkspaceAdapter } from "../src";
+import { createGitWorktreeAdapter } from "../src";
 
 const tempRoots: string[] = [];
 
@@ -30,7 +30,7 @@ afterEach(() => {
 describe("git worktree adapter", () => {
 	it("pins HEAD, creates a deterministic worktree, and deletes it", () => {
 		const repo = createCommittedRepo();
-		const adapter = createGitWorkspaceAdapter();
+		const adapter = createGitWorktreeAdapter();
 
 		const { headSha } = adapter.assertRunnableRepository(repo);
 		const workspace = adapter.prepareWorkspace(repo, "run-1", headSha);
@@ -50,7 +50,7 @@ describe("git worktree adapter", () => {
 
 	it("creates from the supplied pinned headSha even after source HEAD moves", () => {
 		const repo = createCommittedRepo();
-		const adapter = createGitWorkspaceAdapter();
+		const adapter = createGitWorktreeAdapter();
 		const { headSha } = adapter.assertRunnableRepository(repo);
 
 		writeFileSync(join(repo, "future.txt"), "future\n");
@@ -67,7 +67,7 @@ describe("git worktree adapter", () => {
 
 	it("fails clearly when the git binary is unavailable", () => {
 		const repo = createCommittedRepo();
-		const adapter = createGitWorkspaceAdapter({
+		const adapter = createGitWorktreeAdapter({
 			gitBinary: "git-definitely-missing-buildplane",
 		});
 
@@ -78,7 +78,7 @@ describe("git worktree adapter", () => {
 
 	it("fails clearly when the project root is not a git repository", () => {
 		const root = createTempRoot("buildplane-not-git-");
-		const adapter = createGitWorkspaceAdapter();
+		const adapter = createGitWorktreeAdapter();
 
 		expect(() => adapter.assertRunnableRepository(root)).toThrow(
 			/not a git repository/i,
@@ -87,7 +87,7 @@ describe("git worktree adapter", () => {
 
 	it("ignores inherited git environment when targeting a repository", () => {
 		const repo = createCommittedRepo();
-		const adapter = createGitWorkspaceAdapter();
+		const adapter = createGitWorktreeAdapter();
 
 		vi.stubEnv("GIT_DIR", "/definitely/not/the/repo/.git");
 		vi.stubEnv("GIT_WORK_TREE", "/definitely/not/the/repo");
@@ -100,7 +100,7 @@ describe("git worktree adapter", () => {
 
 	it("rejects dirty repositories while ignoring persisted buildplane state", () => {
 		const repo = createCommittedRepo();
-		const adapter = createGitWorkspaceAdapter();
+		const adapter = createGitWorktreeAdapter();
 
 		mkdirSync(join(repo, ".buildplane", "logs"), { recursive: true });
 		writeFileSync(join(repo, ".buildplane", "state.db"), "sqlite\n");
@@ -126,7 +126,7 @@ describe("git worktree adapter", () => {
 
 	it("does not let retained leftovers under .buildplane/workspaces poison cleanliness checks", () => {
 		const repo = createCommittedRepo();
-		const adapter = createGitWorkspaceAdapter();
+		const adapter = createGitWorktreeAdapter();
 
 		mkdirSync(join(repo, ".buildplane", "workspaces", "run-retained"), {
 			recursive: true,
@@ -143,7 +143,7 @@ describe("git worktree adapter", () => {
 
 	it("rejects dirty packet inputs stored under .buildplane", () => {
 		const repo = createCommittedRepo();
-		const adapter = createGitWorkspaceAdapter();
+		const adapter = createGitWorktreeAdapter();
 
 		mkdirSync(join(repo, ".buildplane", "packets"), { recursive: true });
 		writeFileSync(
@@ -164,7 +164,7 @@ describe("git worktree adapter", () => {
 
 	it("checks cleanliness from the repository root even when invoked from a subdirectory", () => {
 		const repo = createCommittedRepo();
-		const adapter = createGitWorkspaceAdapter();
+		const adapter = createGitWorktreeAdapter();
 		const nestedRoot = join(repo, "packages", "cli");
 		mkdirSync(nestedRoot, { recursive: true });
 		writeFileSync(join(repo, "root-dirty.txt"), "dirty\n");
@@ -176,7 +176,7 @@ describe("git worktree adapter", () => {
 
 	it("rejects unresolved HEAD in an empty repository", () => {
 		const repo = createEmptyRepo();
-		const adapter = createGitWorkspaceAdapter();
+		const adapter = createGitWorktreeAdapter();
 
 		expect(() => adapter.assertRunnableRepository(repo)).toThrow(
 			/unresolved HEAD|HEAD/i,
@@ -185,7 +185,7 @@ describe("git worktree adapter", () => {
 
 	it("surfaces worktree creation failures cleanly", () => {
 		const repo = createCommittedRepo();
-		const adapter = createGitWorkspaceAdapter({
+		const adapter = createGitWorktreeAdapter({
 			runGit: createSeam((args, options) => {
 				if (args[0] === "worktree" && args[1] === "add") {
 					return failureResult(
@@ -205,7 +205,7 @@ describe("git worktree adapter", () => {
 
 	it("surfaces delete failures cleanly", () => {
 		const repo = createCommittedRepo();
-		const adapter = createGitWorkspaceAdapter({
+		const adapter = createGitWorktreeAdapter({
 			runGit: createSeam((args, options) => {
 				if (args[0] === "worktree" && args[1] === "remove") {
 					return failureResult(

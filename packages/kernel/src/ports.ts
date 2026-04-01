@@ -97,6 +97,10 @@ export interface BuildplanePolicyPort {
 	): PolicyDecision | null;
 }
 
+export interface BuildplaneProfileRegistryPort {
+	resolve(name: string): PolicyProfile;
+}
+
 export interface BuildplaneWorkspacePort {
 	assertRunnableRepository(projectRoot: string): { headSha: string };
 	prepareWorkspace(
@@ -107,6 +111,7 @@ export interface BuildplaneWorkspacePort {
 		path: string;
 		headSha: string;
 	};
+	commitAndMergeWorkspace?(workspace: { path: string; runId: string }): void;
 	deleteWorkspace(workspace: { path: string }): {
 		deleted: boolean;
 		cleanupError?: string;

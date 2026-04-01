@@ -3,8 +3,8 @@ import {
 	createEventBus,
 	type ExecutionEvent,
 } from "../../packages/kernel/src/events";
-import { createBuildplaneOrchestrator } from "../../packages/kernel/src/orchestrator";
 import type { UnitGraph } from "../../packages/kernel/src/graph";
+import { createBuildplaneOrchestrator } from "../../packages/kernel/src/orchestrator";
 import { createMockStorage } from "../helpers/mock-storage";
 
 function makeNode(id: string, shouldFail = false, dependsOn?: string[]) {
@@ -103,7 +103,9 @@ describe("runGraphAsync", () => {
 		expect(result.nodes.find((n) => n.unitId === "B")?.status).toBe("passed");
 
 		// A must execute before B
-		expect(executionOrder.indexOf("A")).toBeLessThan(executionOrder.indexOf("B"));
+		expect(executionOrder.indexOf("A")).toBeLessThan(
+			executionOrder.indexOf("B"),
+		);
 
 		// Graph lifecycle events emitted
 		expect(events.find((e) => e.kind === "graph-started")).toBeDefined();
@@ -175,11 +177,7 @@ describe("runGraphAsync", () => {
 
 		const graph: UnitGraph = {
 			// A fails → B cancelled; C independent → still runs
-			nodes: [
-				makeNode("A"),
-				makeNode("B", false, ["A"]),
-				makeNode("C"),
-			],
+			nodes: [makeNode("A"), makeNode("B", false, ["A"]), makeNode("C")],
 			maxConcurrent: 3,
 		};
 

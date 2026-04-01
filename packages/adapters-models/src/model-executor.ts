@@ -13,21 +13,27 @@ export interface ModelExecutorPort {
 		packet: UnitPacket,
 		projectRoot: string,
 		eventBus: EventBus,
+		signal?: AbortSignal,
 	): Promise<ExecutionReceipt>;
 }
 
 /** Stream chunk types that the executor knows how to handle. */
 export type StreamChunk =
 	| { type: "text-delta"; textDelta: string }
-	| { type: "tool-call"; toolCallId: string; toolName: string; args: unknown }
+	| { type: "tool-call"; toolCallId: string; toolName: string; input: unknown }
 	| {
 			type: "tool-result";
 			toolCallId: string;
 			toolName: string;
-			result: unknown;
+			output: unknown;
 	  }
 	| {
 			type: "step-finish";
+			finishReason?: string;
+			usage?: { promptTokens: number; completionTokens: number };
+	  }
+	| {
+			type: "finish-step";
 			finishReason?: string;
 			usage?: { promptTokens: number; completionTokens: number };
 	  };
@@ -42,16 +48,22 @@ export type StreamFunction = (options: {
 	model: unknown;
 	system?: string;
 	prompt: string;
+	tools?: Record<string, unknown>;
 }) => StreamResult;
 
 /** A function that resolves a provider+model string to an AI SDK model instance. */
 export type ModelResolver = (provider: string, modelId: string) => unknown;
+
+/** A function that builds tool definitions for the model from the workspace root. */
+export type ToolBuilder = (root: string) => Record<string, unknown>;
 
 export interface CreateModelExecutorOptions {
 	/** Override the stream function (for testing). Defaults to AI SDK streamText. */
 	streamFn?: StreamFunction;
 	/** Override the model resolver (for testing). Defaults to AI SDK provider lookup. */
 	modelResolver?: ModelResolver;
+	/** Build tools to pass to the model. */
+	toolBuilder?: ToolBuilder;
 }
 
 export function createModelExecutor(
@@ -59,6 +71,7 @@ export function createModelExecutor(
 ): ModelExecutorPort {
 	const streamFn = options.streamFn;
 	const modelResolver = options.modelResolver;
+	const toolBuilder = options.toolBuilder;
 
 	async function getStreamFn(): Promise<StreamFunction> {
 		if (streamFn) return streamFn;
@@ -95,6 +108,7 @@ export function createModelExecutor(
 			packet: UnitPacket,
 			projectRoot: string,
 			eventBus: EventBus,
+			signal?: AbortSignal,
 		): Promise<ExecutionReceipt> {
 			// Command packets delegate to the sync executor
 			if (packet.execution) {
@@ -116,6 +130,8 @@ export function createModelExecutor(
 					eventBus,
 					stream,
 					resolver,
+					toolBuilder,
+					signal,
 				);
 				return receipt;
 			} catch (error) {
@@ -155,6 +171,8 @@ async function executeModelStream(
 	eventBus: EventBus,
 	streamFn: StreamFunction,
 	modelResolver: ModelResolver,
+	toolBuilder?: ToolBuilder,
+	signal?: AbortSignal,
 ): Promise<ExecutionReceipt> {
 	const model = packet.model;
 	if (!model) {
@@ -164,10 +182,15 @@ async function executeModelStream(
 
 	const modelInstance = modelResolver(model.provider, model.model);
 
+	// Build tools if a toolBuilder is provided
+	const builtTools = toolBuilder ? toolBuilder(projectRoot) : undefined;
+	const hasTools = builtTools && Object.keys(builtTools).length > 0;
+
 	const result = streamFn({
 		model: modelInstance,
 		system: model.systemPrompt,
 		prompt: packet.model?.prompt ?? "Execute the assigned task.",
+		tools: hasTools ? builtTools : undefined,
 	});
 
 	let fullText = "";
@@ -175,6 +198,7 @@ async function executeModelStream(
 	let usage: { promptTokens: number; completionTokens: number } | undefined;
 
 	for await (const chunk of result.fullStream) {
+		if (signal?.aborted) break;
 		switch (chunk.type) {
 			case "text-delta": {
 				fullText += chunk.textDelta;
@@ -193,7 +217,7 @@ async function executeModelStream(
 					timestamp: new Date().toISOString(),
 					toolCallId: chunk.toolCallId,
 					toolName: chunk.toolName,
-					args: chunk.args as Record<string, unknown>,
+					args: chunk.input as Record<string, unknown>,
 				});
 				break;
 			}
@@ -204,11 +228,12 @@ async function executeModelStream(
 					timestamp: new Date().toISOString(),
 					toolCallId: chunk.toolCallId,
 					toolName: chunk.toolName,
-					result: chunk.result,
+					result: chunk.output,
 				});
 				break;
 			}
-			case "step-finish": {
+			case "step-finish":
+			case "finish-step": {
 				finishReason = chunk.finishReason ?? "unknown";
 				usage = chunk.usage ?? undefined;
 				break;
@@ -217,13 +242,15 @@ async function executeModelStream(
 	}
 
 	const completedAt = new Date().toISOString();
+	const aborted = signal?.aborted ?? false;
+	const actualFinishReason = aborted ? "aborted" : finishReason;
 
 	eventBus.emit({
 		kind: "model-response-complete",
 		runId: "",
 		timestamp: completedAt,
 		text: fullText,
-		finishReason,
+		finishReason: actualFinishReason,
 		usage,
 	});
 
@@ -233,9 +260,9 @@ async function executeModelStream(
 		cwd: projectRoot,
 		startedAt,
 		completedAt,
-		exitCode: 0,
+		exitCode: aborted ? 1 : 0,
 		stdout: fullText,
-		stderr: "",
+		stderr: aborted ? "execution aborted: budget limit exceeded" : "",
 		outputChecks: packet.verification.requiredOutputs.map((path) => ({
 			path,
 			exists: existsSync(resolve(projectRoot, path)),

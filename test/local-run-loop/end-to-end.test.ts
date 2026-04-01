@@ -104,7 +104,7 @@ describe("local run loop end to end", () => {
 		expect(init.exitCode).toBe(0);
 		expect(run.exitCode).toBe(0);
 		expect(existsSync(join(root, ".buildplane", "state.db"))).toBe(true);
-		expect(existsSync(join(root, "tmp", "out.txt"))).toBe(false);
+		expect(existsSync(join(root, "tmp", "out.txt"))).toBe(true);
 
 		const statusPayload = JSON.parse(status.stdout.join("\n"));
 		expect(statusPayload).toMatchObject({
