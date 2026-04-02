@@ -1,13 +1,17 @@
 use bp_memory::{
     EffectiveMemoryContext, EffectiveMemoryPolicy, ExplainedMemoryItem, MemoryItem, MemoryKind,
-    MemoryQuery, MemoryScope, MemoryService, PromoteMemoryInput, RememberMemoryInput,
+    MemoryLinkRelation, MemoryQuery, MemoryScope, MemoryService, PromoteMemoryInput,
+    RememberMemoryInput,
 };
 use bp_pack_loader::load_pack_from_native_root;
 use bp_storage_sqlite::{
     MemoryDoctorReport, MemoryExportBundle, MemoryImportReport, MemoryPruneReport,
     SqliteMemoryStore,
 };
-use bp_ui_terminal::{render_memory_explanations, render_memory_item, render_memory_list};
+use bp_ui_terminal::{
+    render_links_section, render_memory_explanations, render_memory_item, render_memory_links,
+    render_memory_list,
+};
 use serde::Serialize;
 use std::ffi::OsString;
 use std::fs;
@@ -26,6 +30,8 @@ pub enum MemoryCommand {
     Import(ImportMemoryArgs),
     Doctor(DoctorMemoryArgs),
     Prune(PruneMemoryArgs),
+    LinkAdd(LinkAddArgs),
+    LinkList(LinkListArgs),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -133,6 +139,22 @@ pub struct PruneMemoryArgs {
     pub json: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkAddArgs {
+    pub workspace_root: PathBuf,
+    pub from_id: String,
+    pub to_id: String,
+    pub relation: MemoryLinkRelation,
+    pub json: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkListArgs {
+    pub workspace_root: PathBuf,
+    pub memory_id: Option<String>,
+    pub json: bool,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct ExecutionOverrides {
     global_root: Option<PathBuf>,
@@ -160,7 +182,7 @@ where
         .into_iter();
     let Some(action) = args.next() else {
         return Err(
-            "missing memory action; expected one of remember, inspect, explain, search, forget, restore, promote, export, import, doctor, prune"
+            "missing memory action; expected one of remember, inspect, explain, search, forget, restore, promote, export, import, doctor, prune, link"
                 .to_string(),
         );
     };
@@ -178,6 +200,7 @@ where
         "import" => parse_import(args, default_workspace_root),
         "doctor" => parse_doctor(args, default_workspace_root),
         "prune" => parse_prune(args, default_workspace_root),
+        "link" => parse_link(args, default_workspace_root),
         other => Err(format!("unknown memory action '{other}'")),
     }
 }
@@ -204,6 +227,8 @@ fn execute_memory_command(
         MemoryCommand::Import(args) => run_import(args, &overrides),
         MemoryCommand::Doctor(args) => run_doctor(args, &overrides),
         MemoryCommand::Prune(args) => run_prune(args, &overrides),
+        MemoryCommand::LinkAdd(args) => run_link_add(args, &overrides),
+        MemoryCommand::LinkList(args) => run_link_list(args, &overrides),
     }
 }
 
@@ -658,6 +683,98 @@ fn parse_prune(
     }))
 }
 
+fn parse_link(
+    mut args: std::vec::IntoIter<OsString>,
+    default_workspace_root: PathBuf,
+) -> Result<MemoryCommand, String> {
+    let sub_action = parse_string(
+        args.next().ok_or_else(|| {
+            "missing link sub-action; expected `memory link add` or `memory link list`".to_string()
+        })?,
+        "link sub-action",
+    )?;
+    match sub_action.as_str() {
+        "add" => parse_link_add(args, default_workspace_root),
+        "list" => parse_link_list(args, default_workspace_root),
+        other => Err(format!(
+            "unknown link sub-action '{other}'; expected add or list"
+        )),
+    }
+}
+
+fn parse_link_add(
+    mut args: std::vec::IntoIter<OsString>,
+    default_workspace_root: PathBuf,
+) -> Result<MemoryCommand, String> {
+    let from_id = parse_string(
+        args.next().ok_or_else(|| {
+            "missing from-id; expected `memory link add <from-id> <to-id> --relation <rel>`"
+                .to_string()
+        })?,
+        "from-id",
+    )?;
+    let to_id = parse_string(
+        args.next().ok_or_else(|| {
+            "missing to-id; expected `memory link add <from-id> <to-id> --relation <rel>`"
+                .to_string()
+        })?,
+        "to-id",
+    )?;
+    let mut workspace_root = default_workspace_root;
+    let mut relation = None;
+    let mut json = false;
+
+    while let Some(flag) = args.next() {
+        let flag = parse_string(flag, "flag")?;
+        match flag.as_str() {
+            "--relation" => relation = Some(parse_relation(&next_value(&mut args, "--relation")?)?),
+            "--workspace-root" => {
+                workspace_root = PathBuf::from(next_value(&mut args, "--workspace-root")?)
+            }
+            "--json" => json = true,
+            other => return Err(format!("unknown flag '{other}'")),
+        }
+    }
+
+    Ok(MemoryCommand::LinkAdd(LinkAddArgs {
+        workspace_root,
+        from_id,
+        to_id,
+        relation: relation.ok_or_else(|| "missing --relation for memory link add".to_string())?,
+        json,
+    }))
+}
+
+fn parse_link_list(
+    mut args: std::vec::IntoIter<OsString>,
+    default_workspace_root: PathBuf,
+) -> Result<MemoryCommand, String> {
+    let mut workspace_root = default_workspace_root;
+    let mut memory_id = None;
+    let mut json = false;
+
+    while let Some(value) = args.next() {
+        let value = parse_string(value, "link list argument")?;
+        if !value.starts_with("--") && memory_id.is_none() {
+            memory_id = Some(value);
+            continue;
+        }
+        match value.as_str() {
+            "--workspace-root" => {
+                workspace_root = PathBuf::from(next_value(&mut args, "--workspace-root")?)
+            }
+            "--json" => json = true,
+            other => return Err(format!("unknown flag '{other}'")),
+        }
+    }
+
+    Ok(MemoryCommand::LinkList(LinkListArgs {
+        workspace_root,
+        memory_id,
+        json,
+    }))
+}
+
 fn run_remember(
     args: RememberMemoryArgs,
     overrides: &ExecutionOverrides,
@@ -705,7 +822,12 @@ fn run_inspect(args: InspectMemoryArgs, overrides: &ExecutionOverrides) -> Resul
     if let Some(id) = args.id.as_deref() {
         let item = service.inspect(id).map_err(|err| err.to_string())?;
         return match item {
-            Some(item) => Ok(render_output(&item, args.json, render_memory_item(&item))),
+            Some(item) => {
+                let links = service.links(Some(id)).map_err(|err| err.to_string())?;
+                let mut text = render_memory_item(&item);
+                text.push_str(&render_links_section(&links));
+                Ok(render_output(&item, args.json, text))
+            }
             None => Err(format!("memory item '{id}' was not found")),
         };
     }
@@ -757,11 +879,10 @@ fn run_explain(args: ExplainMemoryArgs, overrides: &ExecutionOverrides) -> Resul
         .map_err(|err| err.to_string())?
         .ok_or_else(|| format!("memory item '{id}' was not found"))?;
     let explained = explain_item(item);
-    Ok(render_output(
-        &explained,
-        args.json,
-        render_memory_explanations(std::slice::from_ref(&explained)),
-    ))
+    let links = service.links(Some(id)).map_err(|err| err.to_string())?;
+    let mut text = render_memory_explanations(std::slice::from_ref(&explained));
+    text.push_str(&render_links_section(&links));
+    Ok(render_output(&explained, args.json, text))
 }
 
 fn run_search(args: SearchMemoryArgs, overrides: &ExecutionOverrides) -> Result<String, String> {
@@ -894,6 +1015,30 @@ fn run_prune(args: PruneMemoryArgs, overrides: &ExecutionOverrides) -> Result<St
     ))
 }
 
+fn run_link_add(args: LinkAddArgs, overrides: &ExecutionOverrides) -> Result<String, String> {
+    let mut service = MemoryService::new(open_store(&args.workspace_root, overrides)?);
+    let link = service
+        .link_items(&args.from_id, &args.to_id, args.relation)
+        .map_err(|err| err.to_string())?;
+    let text = format!(
+        "Linked {} -> {} ({})",
+        link.from_memory_id, link.to_memory_id, link.relation
+    );
+    Ok(render_output(&link, args.json, text))
+}
+
+fn run_link_list(args: LinkListArgs, overrides: &ExecutionOverrides) -> Result<String, String> {
+    let service = MemoryService::new(open_store(&args.workspace_root, overrides)?);
+    let links = service
+        .links(args.memory_id.as_deref())
+        .map_err(|err| err.to_string())?;
+    Ok(render_output(
+        &links,
+        args.json,
+        render_memory_links(&links),
+    ))
+}
+
 fn open_store(
     workspace_root: &Path,
     overrides: &ExecutionOverrides,
@@ -994,6 +1139,13 @@ fn parse_kind(value: &OsString) -> Result<MemoryKind, String> {
         .map_err(|err: bp_memory::MemoryError| err.to_string())
 }
 
+fn parse_relation(value: &OsString) -> Result<MemoryLinkRelation, String> {
+    let value = parse_string(value.clone(), "relation")?;
+    value
+        .parse()
+        .map_err(|err: bp_memory::MemoryError| err.to_string())
+}
+
 fn parse_string(value: OsString, label: &str) -> Result<String, String> {
     value
         .into_string()
@@ -1081,7 +1233,9 @@ pub fn memory_usage_text() -> &'static str {
   buildplane-native memory export --out <path> [--scope <scope>] [--pack <id>] [--session <id>] [--include-forgotten] [--workspace-root <path>] [--json]
   buildplane-native memory import <path> [--workspace-root <path>] [--json]
   buildplane-native memory doctor [--workspace-root <path>] [--json]
-  buildplane-native memory prune [--workspace-root <path>] [--json]"
+  buildplane-native memory prune [--workspace-root <path>] [--json]
+  buildplane-native memory link add <from-id> <to-id> --relation <derived-from|promoted-from|supports|contradicts|duplicate-of> [--workspace-root <path>] [--json]
+  buildplane-native memory link list [<memory-id>] [--workspace-root <path>] [--json]"
 }
 
 #[cfg(test)]
@@ -1414,6 +1568,197 @@ mod tests {
         assert!(doctor_output.contains("forgotten items: 1"));
         assert!(prune_output.contains("Pruned 1 forgotten memory items"));
         assert!(import_output.contains("Imported 2 memory items"));
+
+        let _ = fs::remove_dir_all(temp_root);
+    }
+
+    #[test]
+    fn parses_link_add_command() {
+        let command = parse_memory_command(
+            vec![
+                "link",
+                "add",
+                "mem_123",
+                "mem_456",
+                "--relation",
+                "supports",
+                "--json",
+            ],
+            PathBuf::from("/tmp/buildplane"),
+        )
+        .expect("link add should parse");
+
+        assert_eq!(
+            command,
+            MemoryCommand::LinkAdd(LinkAddArgs {
+                workspace_root: PathBuf::from("/tmp/buildplane"),
+                from_id: "mem_123".to_string(),
+                to_id: "mem_456".to_string(),
+                relation: MemoryLinkRelation::Supports,
+                json: true,
+            })
+        );
+    }
+
+    #[test]
+    fn parses_link_list_command_with_optional_memory_id() {
+        let command = parse_memory_command(
+            vec!["link", "list", "mem_123"],
+            PathBuf::from("/tmp/buildplane"),
+        )
+        .expect("link list should parse");
+
+        assert_eq!(
+            command,
+            MemoryCommand::LinkList(LinkListArgs {
+                workspace_root: PathBuf::from("/tmp/buildplane"),
+                memory_id: Some("mem_123".to_string()),
+                json: false,
+            })
+        );
+
+        let command_all = parse_memory_command(
+            vec!["link", "list", "--json"],
+            PathBuf::from("/tmp/buildplane"),
+        )
+        .expect("link list --json should parse");
+
+        assert_eq!(
+            command_all,
+            MemoryCommand::LinkList(LinkListArgs {
+                workspace_root: PathBuf::from("/tmp/buildplane"),
+                memory_id: None,
+                json: true,
+            })
+        );
+    }
+
+    #[test]
+    fn link_add_rejects_missing_relation() {
+        let err = parse_memory_command(
+            vec!["link", "add", "mem_123", "mem_456"],
+            PathBuf::from("/tmp/buildplane"),
+        )
+        .expect_err("link add without --relation should fail");
+
+        assert!(err.contains("--relation"));
+    }
+
+    #[test]
+    fn link_commands_and_inspect_explain_show_links_end_to_end() {
+        let temp_root = unique_temp_root("bp-memory-links-e2e");
+        let workspace_root = temp_root.join("workspace");
+        let global_root = temp_root.join("home").join(".buildplane");
+        fs::create_dir_all(&workspace_root).expect("workspace root should exist");
+
+        let overrides = ExecutionOverrides {
+            global_root: Some(global_root.clone()),
+        };
+
+        let item_a_json = execute_memory_command(
+            MemoryCommand::Remember(RememberMemoryArgs {
+                workspace_root: workspace_root.clone(),
+                body: "Prefer concise output".to_string(),
+                scope: MemoryScope::User,
+                kind: MemoryKind::Preference,
+                title: Some("concise output".to_string()),
+                pack_id: None,
+                session_id: None,
+                json: true,
+            }),
+            overrides.clone(),
+        )
+        .expect("remember A should succeed");
+        let item_a: MemoryItem = serde_json::from_str(&item_a_json).expect("A json should parse");
+
+        let item_b_json = execute_memory_command(
+            MemoryCommand::Remember(RememberMemoryArgs {
+                workspace_root: workspace_root.clone(),
+                body: "No trailing summaries".to_string(),
+                scope: MemoryScope::User,
+                kind: MemoryKind::Constraint,
+                title: Some("skip summaries".to_string()),
+                pack_id: None,
+                session_id: None,
+                json: true,
+            }),
+            overrides.clone(),
+        )
+        .expect("remember B should succeed");
+        let item_b: MemoryItem = serde_json::from_str(&item_b_json).expect("B json should parse");
+
+        let link_output = execute_memory_command(
+            MemoryCommand::LinkAdd(LinkAddArgs {
+                workspace_root: workspace_root.clone(),
+                from_id: item_b.id.clone(),
+                to_id: item_a.id.clone(),
+                relation: MemoryLinkRelation::Supports,
+                json: false,
+            }),
+            overrides.clone(),
+        )
+        .expect("link add should succeed");
+        assert!(link_output.contains("(supports)"));
+
+        let list_output = execute_memory_command(
+            MemoryCommand::LinkList(LinkListArgs {
+                workspace_root: workspace_root.clone(),
+                memory_id: Some(item_a.id.clone()),
+                json: false,
+            }),
+            overrides.clone(),
+        )
+        .expect("link list should succeed");
+        assert!(list_output.contains("Links: 1"));
+        assert!(list_output.contains("supports"));
+
+        let inspect_output = execute_memory_command(
+            MemoryCommand::Inspect(InspectMemoryArgs {
+                native_root: workspace_root.clone(),
+                workspace_root: workspace_root.clone(),
+                id: Some(item_a.id.clone()),
+                scope: None,
+                pack_id: None,
+                session_id: None,
+                effective: false,
+                include_forgotten: false,
+                json: false,
+            }),
+            overrides.clone(),
+        )
+        .expect("inspect should succeed");
+        assert!(inspect_output.contains("concise output"));
+        assert!(inspect_output.contains("Links:"));
+        assert!(inspect_output.contains("supports"));
+
+        let explain_output = execute_memory_command(
+            MemoryCommand::Explain(ExplainMemoryArgs {
+                native_root: workspace_root.clone(),
+                workspace_root: workspace_root.clone(),
+                id: Some(item_b.id.clone()),
+                pack_id: None,
+                session_id: None,
+                effective: false,
+                include_forgotten: false,
+                json: false,
+            }),
+            overrides.clone(),
+        )
+        .expect("explain should succeed");
+        assert!(explain_output.contains("skip summaries"));
+        assert!(explain_output.contains("Links:"));
+        assert!(explain_output.contains("supports"));
+
+        let list_all_output = execute_memory_command(
+            MemoryCommand::LinkList(LinkListArgs {
+                workspace_root: workspace_root.clone(),
+                memory_id: None,
+                json: false,
+            }),
+            overrides,
+        )
+        .expect("link list all should succeed");
+        assert!(list_all_output.contains("Links: 1"));
 
         let _ = fs::remove_dir_all(temp_root);
     }

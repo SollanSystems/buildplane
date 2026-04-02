@@ -1,5 +1,5 @@
 use bp_host_sdk::{AuthState, HostBridgeAuthOwnership, HostBridgePlan, HostBridgeProtocol};
-use bp_memory::{ExplainedMemoryItem, MemoryItem};
+use bp_memory::{ExplainedMemoryItem, MemoryItem, MemoryLink};
 use bp_pack_inspection::{DetectionSource, LoadedPackInspection, PackInspectionReport};
 use bp_runtime::{ExecutionRoute, RuntimeSelection, RuntimeSelectionProvenance};
 use std::fmt::Write as _;
@@ -63,6 +63,41 @@ pub fn render_memory_explanations(items: &[ExplainedMemoryItem]) -> String {
         )
         .expect("write explanation row");
         writeln!(output, "  because: {}", entry.reason).expect("write explanation reason");
+    }
+    output.trim_end().to_string()
+}
+
+pub fn render_memory_links(links: &[MemoryLink]) -> String {
+    if links.is_empty() {
+        return "No links found.".to_string();
+    }
+    let mut output = String::new();
+    writeln!(output, "Links: {}", links.len()).expect("write count");
+    for link in links {
+        writeln!(
+            output,
+            "- {} {} -> {} ({})",
+            link.id, link.from_memory_id, link.to_memory_id, link.relation
+        )
+        .expect("write link row");
+    }
+    output.trim_end().to_string()
+}
+
+pub fn render_links_section(links: &[MemoryLink]) -> String {
+    if links.is_empty() {
+        return String::new();
+    }
+    let mut output = String::new();
+    writeln!(output).expect("blank line");
+    writeln!(output, "Links:").expect("write links heading");
+    for link in links {
+        writeln!(
+            output,
+            "  {} -> {} ({})",
+            link.from_memory_id, link.to_memory_id, link.relation
+        )
+        .expect("write link row");
     }
     output.trim_end().to_string()
 }
@@ -446,5 +481,42 @@ mod tests {
         assert!(rendered.contains("prefers concise output"));
         assert!(rendered.contains("because: user scope is shared for all packs"));
         assert!(rendered.contains("repo uses pnpm"));
+    }
+
+    #[test]
+    fn renders_memory_links_list_and_section() {
+        use bp_memory::MemoryLinkRelation;
+
+        let links = vec![
+            MemoryLink {
+                id: "lnk_1".to_string(),
+                from_memory_id: "mem_a".to_string(),
+                to_memory_id: "mem_b".to_string(),
+                relation: MemoryLinkRelation::Supports,
+                created_at: "1".to_string(),
+            },
+            MemoryLink {
+                id: "lnk_2".to_string(),
+                from_memory_id: "mem_c".to_string(),
+                to_memory_id: "mem_a".to_string(),
+                relation: MemoryLinkRelation::DerivedFrom,
+                created_at: "1".to_string(),
+            },
+        ];
+
+        let list = render_memory_links(&links);
+        assert!(list.contains("Links: 2"));
+        assert!(list.contains("lnk_1 mem_a -> mem_b (supports)"));
+        assert!(list.contains("lnk_2 mem_c -> mem_a (derived-from)"));
+
+        let section = render_links_section(&links);
+        assert!(section.contains("Links:"));
+        assert!(section.contains("mem_a -> mem_b (supports)"));
+
+        let empty_list = render_memory_links(&[]);
+        assert_eq!(empty_list, "No links found.");
+
+        let empty_section = render_links_section(&[]);
+        assert!(empty_section.is_empty());
     }
 }
