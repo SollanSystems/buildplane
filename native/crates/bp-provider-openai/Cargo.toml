@@ -1,0 +1,9 @@
+[package]
+name = "bp-provider-openai"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+bp-provider-sdk.workspace = true

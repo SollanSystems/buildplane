@@ -1,0 +1,9 @@
+[package]
+name = "bp-pack-loader"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+bp-pack-manifest.workspace = true
+thiserror.workspace = true
