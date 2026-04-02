@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+  "crates/bp-cli",
   "crates/bp-config",
   "crates/bp-core",
   "crates/bp-host-claude",
