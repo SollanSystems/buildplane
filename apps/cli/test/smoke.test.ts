@@ -57,6 +57,28 @@ function runSourceMemoryDoctor(
 	);
 }
 
+function runSourcePackShow(
+	workspaceRoot: string,
+	env: NodeJS.ProcessEnv = process.env,
+) {
+	return spawnSync(
+		process.execPath,
+		[
+			"--import",
+			tsxLoaderEntrypoint,
+			cliSourceEntrypoint,
+			"pack",
+			"show",
+			"superclaude",
+		],
+		{
+			cwd: workspaceRoot,
+			encoding: "utf8",
+			env,
+		},
+	);
+}
+
 afterEach(() => {
 	for (const path of cleanupPaths.splice(0)) {
 		rmSync(path, { force: true, recursive: true });
@@ -178,13 +200,37 @@ describe("cli bootstrap", () => {
 		expect(result.stderr).toBe("");
 		const payload = JSON.parse(result.stdout);
 		expect(payload).toMatchObject({
-			error: { code: "NATIVE_MEMORY_DISPATCH_FAILED" },
+			error: { code: "NATIVE_COMMAND_DISPATCH_FAILED" },
 		});
 		expect(payload.error.message).toContain(
 			"Failed to dispatch to the native memory command runner.",
 		);
 		expect(payload.error.message).toContain("BUILDPLANE_NATIVE_BIN");
 		expect(payload.error.message).toContain("buildplane-native");
+	});
+
+	it("delegates source CLI pack show through BUILDPLANE_NATIVE_BIN", () => {
+		const tempRoot = mkdtempSync(
+			join(tmpdir(), "buildplane-cli-pack-show-smoke-"),
+		);
+		const workspaceRoot = join(tempRoot, "workspace");
+		const nativeBin = join(tempRoot, "buildplane-native");
+		cleanupPaths.push(tempRoot);
+		mkdirSync(workspaceRoot, { recursive: true });
+		writeNativeStub(nativeBin, "pack-show-source");
+
+		const result = runSourcePackShow(workspaceRoot, {
+			...process.env,
+			BUILDPLANE_NATIVE_BIN: nativeBin,
+		});
+
+		expect(result.status).toBe(0);
+		expect(result.stderr).toBe("");
+		expect(JSON.parse(result.stdout)).toMatchObject({
+			ok: true,
+			which: "pack-show-source",
+			argv: "pack show superclaude",
+		});
 	});
 
 	it("uses a cwd-local debug native binary when BUILDPLANE_NATIVE_BIN is unset", () => {
@@ -298,6 +344,37 @@ describe("cli bootstrap", () => {
 			ok: true,
 			which: "env-built",
 			argv: "memory doctor --json",
+		});
+	});
+
+	it("delegates built CLI pack show through BUILDPLANE_NATIVE_BIN", () => {
+		ensureBuiltCliDist();
+		const tempRoot = mkdtempSync(join(tmpdir(), "buildplane-cli-pack-show-dist-"));
+		const workspaceRoot = join(tempRoot, "workspace");
+		const nativeBin = join(tempRoot, "buildplane-native");
+		cleanupPaths.push(tempRoot);
+		mkdirSync(workspaceRoot, { recursive: true });
+		writeNativeStub(nativeBin, "pack-show-built");
+
+		const result = spawnSync(
+			process.execPath,
+			[cliDistEntrypoint, "pack", "show", "superclaude"],
+			{
+				cwd: workspaceRoot,
+				encoding: "utf8",
+				env: {
+					...process.env,
+					BUILDPLANE_NATIVE_BIN: nativeBin,
+				},
+			},
+		);
+
+		expect(result.status).toBe(0);
+		expect(result.stderr).toBe("");
+		expect(JSON.parse(result.stdout)).toMatchObject({
+			ok: true,
+			which: "pack-show-built",
+			argv: "pack show superclaude",
 		});
 	});
 });

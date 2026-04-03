@@ -272,12 +272,12 @@ describe("cli command surface", () => {
 		]);
 	});
 
-	it("delegates memory commands to the native memory runner dependency", async () => {
+	it("delegates memory commands to the native runner dependency", async () => {
 		const root = mkdtempSync(join(tmpdir(), "buildplane-cli-memory-delegate-"));
-		const calls: Array<{ cwd: string; argv: string[] }> = [];
+		const calls: Array<{ cwd: string; argv: string[]; commandPath: string[] }> = [];
 		const dependencies: RunCliDependencies = {
-			runNativeMemoryCommand: async (argv, options) => {
-				calls.push({ cwd: options.cwd, argv });
+			runNativeCommand: async (argv, options) => {
+				calls.push({ cwd: options.cwd, argv, commandPath: options.commandPath });
 				options.stdout("memory-ok");
 				options.stderr("memory-warn");
 				return 7;
@@ -296,7 +296,38 @@ describe("cli command surface", () => {
 		expect(calls).toEqual([
 			{
 				cwd: root,
+				commandPath: ["memory"],
 				argv: ["doctor", "--json"],
+			},
+		]);
+	});
+
+	it("delegates pack show to the native runner dependency", async () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-cli-pack-show-delegate-"));
+		const calls: Array<{ cwd: string; argv: string[]; commandPath: string[] }> = [];
+		const dependencies: RunCliDependencies = {
+			runNativeCommand: async (argv, options) => {
+				calls.push({ cwd: options.cwd, argv, commandPath: options.commandPath });
+				options.stdout("pack-show-ok");
+				options.stderr("pack-show-warn");
+				return 9;
+			},
+		};
+
+		const result = await runCliCapture(
+			root,
+			["pack", "show", "superclaude"],
+			dependencies,
+		);
+
+		expect(result.exitCode).toBe(9);
+		expect(result.stdout).toEqual(["pack-show-ok"]);
+		expect(result.stderr).toEqual(["pack-show-warn"]);
+		expect(calls).toEqual([
+			{
+				cwd: root,
+				commandPath: ["pack", "show"],
+				argv: ["superclaude"],
 			},
 		]);
 	});
@@ -306,7 +337,7 @@ describe("cli command surface", () => {
 			join(tmpdir(), "buildplane-cli-memory-json-error-"),
 		);
 		const dependencies: RunCliDependencies = {
-			runNativeMemoryCommand: async () => {
+			runNativeCommand: async () => {
 				throw new Error("spawnSync /tmp/buildplane-native ENOENT");
 			},
 		};
@@ -321,7 +352,7 @@ describe("cli command surface", () => {
 		expect(result.stderr).toEqual([]);
 		const payload = JSON.parse(result.stdout.join("\n"));
 		expect(payload).toMatchObject({
-			error: { code: "NATIVE_MEMORY_DISPATCH_FAILED" },
+			error: { code: "NATIVE_COMMAND_DISPATCH_FAILED" },
 		});
 		expect(payload.error.message).toContain(
 			"Failed to dispatch to the native memory command runner.",
@@ -338,7 +369,7 @@ describe("cli command surface", () => {
 			join(tmpdir(), "buildplane-cli-memory-human-error-"),
 		);
 		const dependencies: RunCliDependencies = {
-			runNativeMemoryCommand: async () => {
+			runNativeCommand: async () => {
 				throw new Error("spawnSync /tmp/buildplane-native ENOENT");
 			},
 		};
@@ -359,6 +390,35 @@ describe("cli command surface", () => {
 		expect(result.stderr.join("\n")).toContain(
 			"cargo build --manifest-path native/Cargo.toml -p bp-cli",
 		);
+	});
+
+	it("returns machine-readable JSON when pack show dispatch fails in --json mode", async () => {
+		const root = mkdtempSync(
+			join(tmpdir(), "buildplane-cli-pack-show-json-error-"),
+		);
+		const dependencies: RunCliDependencies = {
+			runNativeCommand: async () => {
+				throw new Error("spawnSync /tmp/buildplane-native ENOENT");
+			},
+		};
+
+		const result = await runCliCapture(
+			root,
+			["pack", "show", "superclaude", "--json"],
+			dependencies,
+		);
+
+		expect(result.exitCode).toBe(1);
+		expect(result.stderr).toEqual([]);
+		const payload = JSON.parse(result.stdout.join("\n"));
+		expect(payload).toMatchObject({
+			error: { code: "NATIVE_COMMAND_DISPATCH_FAILED" },
+		});
+		expect(payload.error.message).toContain(
+			"Failed to dispatch to the native pack show command runner.",
+		);
+		expect(payload.error.message).toContain("BUILDPLANE_NATIVE_BIN");
+		expect(payload.error.message).toContain("buildplane-native");
 	});
 
 	it("runs packets inside a git repo and surfaces retained workspaces in run, status, and inspect output", async () => {
