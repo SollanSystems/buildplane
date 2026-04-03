@@ -78,6 +78,16 @@ importers:
         specifier: workspace:*
         version: link:../kernel
 
+  packages/adapters-honcho:
+    dependencies:
+      '@buildplane/kernel':
+        specifier: workspace:*
+        version: link:../kernel
+    devDependencies:
+      '@honcho-ai/sdk':
+        specifier: ^2.1.0
+        version: 2.1.0
+
   packages/adapters-models:
     dependencies:
       '@buildplane/adapters-tools':
@@ -92,10 +102,10 @@ importers:
     devDependencies:
       '@ai-sdk/anthropic':
         specifier: ^3.0.63
-        version: 3.0.63(zod@3.25.76)
+        version: 3.0.63(zod@4.0.0)
       ai:
         specifier: ^6.0.134
-        version: 6.0.134(zod@3.25.76)
+        version: 6.0.134(zod@4.0.0)
 
   packages/adapters-tools:
     dependencies:
@@ -534,6 +544,9 @@ packages:
     engines: {node: '>=18'}
     cpu: [x64]
     os: [win32]
+
+  '@honcho-ai/sdk@2.1.0':
+    resolution: {integrity: sha512-GPyeKTDRhg5jd77RAh63LwrxLxnbluLdYUF1gsI6g6CU4eTyv8s1+KJ3/OTCiBwJ/dhjznNvQUngkUjjnNzUTA==}
 
   '@inquirer/external-editor@1.0.3':
     resolution: {integrity: sha512-RWbSrDiYmO4LbejWY7ttpxczuwQyZLBUyygsA9Nsv95hpzUWwnNTVQmAq3xuh7vNwCp07UTmE5i11XAEExx4RA==}
@@ -1711,30 +1724,30 @@ packages:
   yoga-layout@3.2.1:
     resolution: {integrity: sha512-0LPOt3AxKqMdFBZA3HBAt/t/8vIKq7VaQYbuA8WxCgung+p9TVyKRYdpvCb80HcdTN2NkbIKbhNwKUfm3tQywQ==}
 
-  zod@3.25.76:
-    resolution: {integrity: sha512-gzUt/qt81nXsFGKIFcC3YnfEAx5NkunCfnDlvuBSSFS02bcXu4Lmea0AFIUwbLWxWPx3d9p8S5QoaujKcNQxcQ==}
+  zod@4.0.0:
+    resolution: {integrity: sha512-9diLdTPc/L7w/5jI4C3gHYNiGHDV9IZYxo1e5LSD8cabi65WVTWWb+g2BGPEpUUCOxR4D+6O5B0AzyMdUAXwrw==}
 
 snapshots:
 
-  '@ai-sdk/anthropic@3.0.63(zod@3.25.76)':
+  '@ai-sdk/anthropic@3.0.63(zod@4.0.0)':
     dependencies:
       '@ai-sdk/provider': 3.0.8
-      '@ai-sdk/provider-utils': 4.0.21(zod@3.25.76)
-      zod: 3.25.76
+      '@ai-sdk/provider-utils': 4.0.21(zod@4.0.0)
+      zod: 4.0.0
 
-  '@ai-sdk/gateway@3.0.77(zod@3.25.76)':
+  '@ai-sdk/gateway@3.0.77(zod@4.0.0)':
     dependencies:
       '@ai-sdk/provider': 3.0.8
-      '@ai-sdk/provider-utils': 4.0.21(zod@3.25.76)
+      '@ai-sdk/provider-utils': 4.0.21(zod@4.0.0)
       '@vercel/oidc': 3.1.0
-      zod: 3.25.76
+      zod: 4.0.0
 
-  '@ai-sdk/provider-utils@4.0.21(zod@3.25.76)':
+  '@ai-sdk/provider-utils@4.0.21(zod@4.0.0)':
     dependencies:
       '@ai-sdk/provider': 3.0.8
       '@standard-schema/spec': 1.1.0
       eventsource-parser: 3.0.6
-      zod: 3.25.76
+      zod: 4.0.0
 
   '@ai-sdk/provider@3.0.8':
     dependencies:
@@ -2149,6 +2162,10 @@ snapshots:
   '@esbuild/win32-x64@0.27.4':
     optional: true
 
+  '@honcho-ai/sdk@2.1.0':
+    dependencies:
+      zod: 4.0.0
+
   '@inquirer/external-editor@1.0.3(@types/node@25.5.0)':
     dependencies:
       chardet: 2.1.1
@@ -2323,13 +2340,13 @@ snapshots:
       convert-source-map: 2.0.0
       tinyrainbow: 3.1.0
 
-  ai@6.0.134(zod@3.25.76):
+  ai@6.0.134(zod@4.0.0):
     dependencies:
-      '@ai-sdk/gateway': 3.0.77(zod@3.25.76)
+      '@ai-sdk/gateway': 3.0.77(zod@4.0.0)
       '@ai-sdk/provider': 3.0.8
-      '@ai-sdk/provider-utils': 4.0.21(zod@3.25.76)
+      '@ai-sdk/provider-utils': 4.0.21(zod@4.0.0)
       '@opentelemetry/api': 1.9.0
-      zod: 3.25.76
+      zod: 4.0.0
 
   ajv@8.18.0:
     dependencies:
@@ -3156,4 +3173,4 @@ snapshots:
 
   yoga-layout@3.2.1: {}
 
-  zod@3.25.76: {}
+  zod@4.0.0: {}
