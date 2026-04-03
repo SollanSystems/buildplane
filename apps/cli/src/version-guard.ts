@@ -51,10 +51,12 @@ function isEmitWarningOptions(
 export function assertSupportedNodeVersion(
 	current = process.versions.node,
 ): void {
-	const major = parseInt(current.split(".")[0], 10);
+	const [majorStr] = current.split(".");
+	const major = parseInt(majorStr, 10);
+
 	if (major < SUPPORTED_NODE_MAJOR) {
 		throw new Error(
-			`Buildplane requires Node ${SUPPORTED_NODE_VERSION}+ (major ${SUPPORTED_NODE_MAJOR}). Detected ${current}.`,
+			`Buildplane requires Node ${SUPPORTED_NODE_VERSION}+. Detected ${current}.`,
 		);
 	}
 
