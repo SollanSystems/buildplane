@@ -272,6 +272,95 @@ describe("cli command surface", () => {
 		]);
 	});
 
+	it("delegates memory commands to the native memory runner dependency", async () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-cli-memory-delegate-"));
+		const calls: Array<{ cwd: string; argv: string[] }> = [];
+		const dependencies: RunCliDependencies = {
+			runNativeMemoryCommand: async (argv, options) => {
+				calls.push({ cwd: options.cwd, argv });
+				options.stdout("memory-ok");
+				options.stderr("memory-warn");
+				return 7;
+			},
+		};
+
+		const result = await runCliCapture(
+			root,
+			["memory", "doctor", "--json"],
+			dependencies,
+		);
+
+		expect(result.exitCode).toBe(7);
+		expect(result.stdout).toEqual(["memory-ok"]);
+		expect(result.stderr).toEqual(["memory-warn"]);
+		expect(calls).toEqual([
+			{
+				cwd: root,
+				argv: ["doctor", "--json"],
+			},
+		]);
+	});
+
+	it("returns machine-readable JSON when memory dispatch fails in --json mode", async () => {
+		const root = mkdtempSync(
+			join(tmpdir(), "buildplane-cli-memory-json-error-"),
+		);
+		const dependencies: RunCliDependencies = {
+			runNativeMemoryCommand: async () => {
+				throw new Error("spawnSync /tmp/buildplane-native ENOENT");
+			},
+		};
+
+		const result = await runCliCapture(
+			root,
+			["memory", "doctor", "--json"],
+			dependencies,
+		);
+
+		expect(result.exitCode).toBe(1);
+		expect(result.stderr).toEqual([]);
+		const payload = JSON.parse(result.stdout.join("\n"));
+		expect(payload).toMatchObject({
+			error: { code: "NATIVE_MEMORY_DISPATCH_FAILED" },
+		});
+		expect(payload.error.message).toContain(
+			"Failed to dispatch to the native memory command runner.",
+		);
+		expect(payload.error.message).toContain("BUILDPLANE_NATIVE_BIN");
+		expect(payload.error.message).toContain("buildplane-native");
+		expect(payload.error.message).toContain(
+			"cargo build --manifest-path native/Cargo.toml -p bp-cli",
+		);
+	});
+
+	it("emits remediation hints when memory dispatch fails in human mode", async () => {
+		const root = mkdtempSync(
+			join(tmpdir(), "buildplane-cli-memory-human-error-"),
+		);
+		const dependencies: RunCliDependencies = {
+			runNativeMemoryCommand: async () => {
+				throw new Error("spawnSync /tmp/buildplane-native ENOENT");
+			},
+		};
+
+		const result = await runCliCapture(
+			root,
+			["memory", "doctor"],
+			dependencies,
+		);
+
+		expect(result.exitCode).toBe(1);
+		expect(result.stdout).toEqual([]);
+		expect(result.stderr.join("\n")).toContain(
+			"Failed to dispatch to the native memory command runner.",
+		);
+		expect(result.stderr.join("\n")).toContain("BUILDPLANE_NATIVE_BIN");
+		expect(result.stderr.join("\n")).toContain("buildplane-native");
+		expect(result.stderr.join("\n")).toContain(
+			"cargo build --manifest-path native/Cargo.toml -p bp-cli",
+		);
+	});
+
 	it("runs packets inside a git repo and surfaces retained workspaces in run, status, and inspect output", async () => {
 		const root = createGitRepo();
 

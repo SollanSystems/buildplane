@@ -40,11 +40,19 @@ pnpm buildplane init
 pnpm buildplane run --packet ./packet.json
 pnpm buildplane status --json
 pnpm buildplane inspect <run-id> --json
+pnpm buildplane memory doctor
 ```
 
 > **Precondition:** `run` expects a clean git working tree. Commit or stash uncommitted changes before dispatching work.
 
 This runs the CLI from TypeScript source via `tsx` — no build step required.
+
+Memory commands currently dispatch from the main TypeScript CLI into the native Rust memory runner. That bridge lives in `apps/cli/src/run-cli.ts`, and the repo-development and in-repo built CLI paths below are the verified `buildplane memory ...` bridge surfaces today. In repo development, either build the native binary first or point the CLI at it explicitly:
+
+```bash
+cargo build --manifest-path native/Cargo.toml -p bp-cli
+BUILDPLANE_NATIVE_BIN="$PWD/native/target/debug/buildplane-native" pnpm buildplane memory doctor --json
+```
 
 ## In-repo built CLI path
 
@@ -56,9 +64,16 @@ node apps/cli/dist/index.js init
 node apps/cli/dist/index.js run --packet ./packet.json
 node apps/cli/dist/index.js status --json
 node apps/cli/dist/index.js inspect <run-id> --json
+node apps/cli/dist/index.js memory doctor --json
 ```
 
 This is the same interface used by the `bin.buildplane` entry in `apps/cli/package.json`.
+
+The compiled CLI uses the same native-memory bridge implementation as the published package entrypoint, but this repo only verifies `buildplane memory ...` end-to-end for the repo-development and in-repo built CLI paths. When that bridge is used, the CLI resolves the native binary in this order:
+- `BUILDPLANE_NATIVE_BIN` if set
+- `native/target/debug/buildplane-native` relative to the current working directory
+- `native/target/release/buildplane-native` relative to the current working directory
+- `buildplane-native` on `PATH`
 
 ## Distribution
 
@@ -73,6 +88,8 @@ buildplane inspect <run-id> --json
 ```
 
 > **Precondition:** `run` expects a clean git working tree. Commit or stash uncommitted changes before dispatching work.
+
+Published/global installs do not yet include a verified `buildplane memory ...` contract. The npm package does not bundle or provision `buildplane-native`, so memory remains a repo-local or direct-native workflow unless you separately supply the native binary yourself.
 
 Use this path when you want the packaged operator experience instead of the repo-local development or in-repo built CLI paths. The repo verifies this contract from a packed publishable artifact before any registry publication step.
 

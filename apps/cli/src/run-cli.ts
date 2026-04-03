@@ -1,4 +1,5 @@
-import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {
 	formatHumanError,
@@ -13,6 +14,14 @@ import {
 export interface RunCliDependencies {
 	createOrchestrator?: () => BuildplaneCliOrchestrator;
 	parsePacket?: (packetPath: string) => unknown;
+	runNativeMemoryCommand?: (
+		argv: string[],
+		options: {
+			cwd: string;
+			stdout: (line: string) => void;
+			stderr: (line: string) => void;
+		},
+	) => Promise<number> | number;
 }
 
 export interface RunCliOptions {
@@ -223,6 +232,93 @@ async function loadPacket(packetPath: string): Promise<unknown> {
 	return kernel.parseUnitPacket(readFileSync(packetPath, "utf8"));
 }
 
+const NATIVE_MEMORY_DISPATCH_ERROR_CODE = "NATIVE_MEMORY_DISPATCH_FAILED";
+const NATIVE_MEMORY_DISPATCH_HINT =
+	"Hint: build the native binary with `cargo build --manifest-path native/Cargo.toml -p bp-cli`, or set BUILDPLANE_NATIVE_BIN, or ensure `buildplane-native` is on PATH.";
+
+class NativeMemoryDispatchError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "NativeMemoryDispatchError";
+	}
+}
+
+function createNativeMemoryDispatchError(
+	error: unknown,
+): NativeMemoryDispatchError {
+	const detail =
+		error instanceof Error && error.message.length > 0
+			? error.message
+			: undefined;
+	const message = [
+		"Failed to dispatch to the native memory command runner.",
+		detail,
+		NATIVE_MEMORY_DISPATCH_HINT,
+	]
+		.filter((value): value is string => Boolean(value))
+		.join(" ");
+	return new NativeMemoryDispatchError(message);
+}
+
+function splitOutputLines(output: string): string[] {
+	return output
+		.split(/\r?\n/u)
+		.map((line) => line.trimEnd())
+		.filter((line) => line.length > 0);
+}
+
+function resolveNativeMemoryBinary(cwd: string): string {
+	const explicit = process.env.BUILDPLANE_NATIVE_BIN;
+	if (explicit) {
+		return explicit;
+	}
+
+	const candidates = [
+		resolve(cwd, "native", "target", "debug", "buildplane-native"),
+		resolve(cwd, "native", "target", "release", "buildplane-native"),
+	];
+	for (const candidate of candidates) {
+		if (existsSync(candidate)) {
+			return candidate;
+		}
+	}
+	return "buildplane-native";
+}
+
+async function runNativeMemoryCommand(
+	argv: string[],
+	options: {
+		cwd: string;
+		stdout: (line: string) => void;
+		stderr: (line: string) => void;
+	},
+): Promise<number> {
+	const binary = resolveNativeMemoryBinary(options.cwd);
+	const result = spawnSync(binary, ["memory", ...argv], {
+		cwd: options.cwd,
+		encoding: "utf8",
+		env: process.env,
+	});
+
+	for (const line of splitOutputLines(result.stdout ?? "")) {
+		options.stdout(line);
+	}
+	for (const line of splitOutputLines(result.stderr ?? "")) {
+		options.stderr(line);
+	}
+
+	if (result.error) {
+		const detail =
+			result.error instanceof Error
+				? result.error.message
+				: String(result.error);
+		throw new Error(
+			`Resolved native memory binary '${binary}' but could not start it. ${detail}`,
+		);
+	}
+	return result.status ?? 1;
+}
+
 export async function runCli(
 	argv: string[],
 	options: RunCliOptions = {},
@@ -231,9 +327,6 @@ export async function runCli(
 	const stdout = options.stdout ?? ((line: string) => console.log(line));
 	const stderr = options.stderr ?? ((line: string) => console.error(line));
 	const deps = options.dependencies;
-	const orchestrator = deps?.createOrchestrator
-		? deps.createOrchestrator()
-		: await loadCliOrchestrator(cwd);
 	const [command, ...rest] = argv;
 
 	if (!command) {
@@ -242,6 +335,25 @@ export async function runCli(
 	}
 
 	try {
+		if (command === "memory") {
+			try {
+				return await (deps?.runNativeMemoryCommand ?? runNativeMemoryCommand)(
+					rest,
+					{
+						cwd,
+						stdout,
+						stderr,
+					},
+				);
+			} catch (error) {
+				throw createNativeMemoryDispatchError(error);
+			}
+		}
+
+		const orchestrator = deps?.createOrchestrator
+			? deps.createOrchestrator()
+			: await loadCliOrchestrator(cwd);
+
 		switch (command) {
 			case "init": {
 				const result = orchestrator.initializeProject();
@@ -711,6 +823,10 @@ function applyReplayOverrides(
 
 function classifyCliError(error: unknown): { code: string; message: string } {
 	const message = error instanceof Error ? error.message : String(error);
+
+	if (error instanceof NativeMemoryDispatchError) {
+		return { code: NATIVE_MEMORY_DISPATCH_ERROR_CODE, message };
+	}
 
 	if (/not initialized/i.test(message)) {
 		return { code: "NOT_INITIALIZED", message };

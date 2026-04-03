@@ -49,6 +49,10 @@ describe("README contract", () => {
 		expect(repoDevelopmentSection).toContain(
 			"pnpm buildplane inspect <run-id> --json",
 		);
+		expect(repoDevelopmentSection).toContain("pnpm buildplane memory doctor");
+		expect(repoDevelopmentSection).toContain(
+			'BUILDPLANE_NATIVE_BIN="$PWD/native/target/debug/buildplane-native" pnpm buildplane memory doctor --json',
+		);
 		expect(repoDevelopmentSection).not.toContain("npm install -g buildplane");
 		expect(repoDevelopmentSection).not.toMatch(/^buildplane\s/m);
 		expect(repoDevelopmentSection).not.toContain("node apps/cli/dist/index.js");
@@ -65,6 +69,9 @@ describe("README contract", () => {
 		expect(builtCliSection).toContain(
 			"node apps/cli/dist/index.js inspect <run-id> --json",
 		);
+		expect(builtCliSection).toContain(
+			"node apps/cli/dist/index.js memory doctor --json",
+		);
 		expect(builtCliSection).not.toContain("npm install -g buildplane");
 		expect(builtCliSection).not.toMatch(/^buildplane\s/m);
 		expect(builtCliSection).not.toContain("pnpm buildplane");
@@ -79,6 +86,12 @@ describe("README contract", () => {
 		);
 		expect(distributionSection).toContain("buildplane status --json");
 		expect(distributionSection).toContain("buildplane inspect <run-id> --json");
+		expect(distributionSection).toContain(
+			"Published/global installs do not yet include a verified `buildplane memory ...` contract.",
+		);
+		expect(distributionSection).not.toContain(
+			"buildplane memory doctor --json",
+		);
 		expect(distributionSection).not.toContain("pnpm buildplane");
 		expect(distributionSection).not.toContain("pnpm install");
 		expect(distributionSection).not.toContain("pnpm build");
