@@ -274,10 +274,15 @@ describe("cli command surface", () => {
 
 	it("delegates memory commands to the native runner dependency", async () => {
 		const root = mkdtempSync(join(tmpdir(), "buildplane-cli-memory-delegate-"));
-		const calls: Array<{ cwd: string; argv: string[]; commandPath: string[] }> = [];
+		const calls: Array<{ cwd: string; argv: string[]; commandPath: string[] }> =
+			[];
 		const dependencies: RunCliDependencies = {
 			runNativeCommand: async (argv, options) => {
-				calls.push({ cwd: options.cwd, argv, commandPath: options.commandPath });
+				calls.push({
+					cwd: options.cwd,
+					argv,
+					commandPath: options.commandPath,
+				});
 				options.stdout("memory-ok");
 				options.stderr("memory-warn");
 				return 7;
@@ -303,11 +308,18 @@ describe("cli command surface", () => {
 	});
 
 	it("delegates pack show to the native runner dependency", async () => {
-		const root = mkdtempSync(join(tmpdir(), "buildplane-cli-pack-show-delegate-"));
-		const calls: Array<{ cwd: string; argv: string[]; commandPath: string[] }> = [];
+		const root = mkdtempSync(
+			join(tmpdir(), "buildplane-cli-pack-show-delegate-"),
+		);
+		const calls: Array<{ cwd: string; argv: string[]; commandPath: string[] }> =
+			[];
 		const dependencies: RunCliDependencies = {
 			runNativeCommand: async (argv, options) => {
-				calls.push({ cwd: options.cwd, argv, commandPath: options.commandPath });
+				calls.push({
+					cwd: options.cwd,
+					argv,
+					commandPath: options.commandPath,
+				});
 				options.stdout("pack-show-ok");
 				options.stderr("pack-show-warn");
 				return 9;

@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -58,7 +58,7 @@ describe("CLI run-graph command", () => {
 		execFileSync("git", ["commit", "-m", "add graph"], { cwd: repo });
 
 		let stdout = "";
-		let stderr = "";
+		let _stderr = "";
 		let exitCode = 0;
 		try {
 			stdout = execFileSync(
@@ -73,13 +73,14 @@ describe("CLI run-graph command", () => {
 				],
 				{ cwd: repo, encoding: "utf8" },
 			);
-		} catch (e: any) {
-			stdout = e.stdout;
-			stderr = e.stderr;
-			exitCode = e.status;
+		} catch (e: unknown) {
+			const err = e as { stdout: string; stderr: string; status: number };
+			stdout = err.stdout;
+			_stderr = err.stderr;
+			exitCode = err.status;
 			console.log("CRASH:");
-			console.log(e.stdout);
-			console.log(e.stderr);
+			console.log(err.stdout);
+			console.log(err.stderr);
 		}
 
 		expect(exitCode).toBe(0);

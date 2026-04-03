@@ -1,67 +1,67 @@
 {
-  "id": "strat-dogfood-001",
-  "mode": "implement-then-review",
-  "mergePolicy": "reviewer-must-approve",
-  "children": [
-    {
-      "role": "implementer",
-      "packet": {
-        "unit": {
-          "id": "impl-cyclic-detection",
-          "kind": "model",
-          "scope": "task",
-          "inputRefs": [],
-          "expectedOutputs": [
-            "packages/kernel/src/graph.ts",
-            "packages/kernel/test/graph-cycle.test.ts"
-          ],
-          "verificationContract": "exit-0-and-required-outputs",
-          "policyProfile": "default"
-        },
-        "model": {
-          "provider": "anthropic",
-          "model": "claude-sonnet-4-20250514",
-          "prompt": "You are fixing a bug in a TypeScript monorepo (pnpm workspaces, vitest). The graph scheduler in packages/kernel/src/graph.ts does not detect dependency cycles. When a graph like A->B->A is submitted, readyUnits() returns empty, runGraphAsync() exits its drain loop with both nodes still pending, and toResult() throws 'graph is not done' instead of returning a clean validation error.\n\nFix: Add cycle detection to createGraphScheduler() in packages/kernel/src/graph.ts. Use a topological sort or DFS-based cycle check during initialization. If a cycle is detected, throw an Error with a clear message like 'Dependency cycle detected: A -> B -> A'. The check should run in the constructor/factory, before any scheduling begins.\n\nThen create packages/kernel/test/graph-cycle.test.ts with these tests:\n1. A simple cycle (A->B->A) throws with 'cycle' in the error message\n2. A longer cycle (A->B->C->A) throws\n3. A self-referencing node (A->A) throws\n4. A valid DAG (A->B, A->C, B->C) does NOT throw\n5. An empty graph does NOT throw\n\nVerification: Run 'pnpm exec vitest --run packages/kernel/test/graph-cycle.test.ts' and ensure all tests pass. Also run 'pnpm typecheck' to verify no type errors.\n\nCommit with message 'fix(kernel): add cycle detection to graph scheduler'."
-        },
-        "verification": {
-          "requiredOutputs": [
-            "packages/kernel/src/graph.ts",
-            "packages/kernel/test/graph-cycle.test.ts"
-          ]
-        },
-        "routingHints": {
-          "preferredWorker": "claude-code"
-        }
-      }
-    },
-    {
-      "role": "reviewer",
-      "dependsOn": ["impl-cyclic-detection"],
-      "packet": {
-        "unit": {
-          "id": "review-cyclic-detection",
-          "kind": "model",
-          "scope": "task",
-          "inputRefs": [
-            "packages/kernel/src/graph.ts",
-            "packages/kernel/test/graph-cycle.test.ts"
-          ],
-          "expectedOutputs": [],
-          "verificationContract": "exit-0-and-required-outputs",
-          "policyProfile": "default"
-        },
-        "model": {
-          "provider": "openai",
-          "model": "o4-mini",
-          "prompt": "Review the cycle detection implementation in packages/kernel/src/graph.ts. Check:\n1. Is the algorithm correct? Does it handle all cycle types (simple, long, self-referencing)?\n2. Is it efficient? O(V+E) is expected for cycle detection.\n3. Does it throw a clear, actionable error message that includes the cycle path?\n4. Does the implementation affect existing non-cyclic graph behavior?\n5. Are the tests in packages/kernel/test/graph-cycle.test.ts comprehensive?\n6. Run 'pnpm exec vitest --run packages/kernel/test/graph-cycle.test.ts' to verify tests pass.\n7. Run 'pnpm exec vitest --run' to verify no regressions.\n\nExit 0 if the implementation is correct and tests pass. Exit non-zero if there are bugs or missing test coverage."
-        },
-        "verification": {
-          "requiredOutputs": []
-        },
-        "routingHints": {
-          "preferredWorker": "codex"
-        }
-      }
-    }
-  ]
+	"id": "strat-dogfood-001",
+	"mode": "implement-then-review",
+	"mergePolicy": "reviewer-must-approve",
+	"children": [
+		{
+			"role": "implementer",
+			"packet": {
+				"unit": {
+					"id": "impl-cyclic-detection",
+					"kind": "model",
+					"scope": "task",
+					"inputRefs": [],
+					"expectedOutputs": [
+						"packages/kernel/src/graph.ts",
+						"packages/kernel/test/graph-cycle.test.ts"
+					],
+					"verificationContract": "exit-0-and-required-outputs",
+					"policyProfile": "default"
+				},
+				"model": {
+					"provider": "anthropic",
+					"model": "claude-sonnet-4-20250514",
+					"prompt": "You are fixing a bug in a TypeScript monorepo (pnpm workspaces, vitest). The graph scheduler in packages/kernel/src/graph.ts does not detect dependency cycles. When a graph like A->B->A is submitted, readyUnits() returns empty, runGraphAsync() exits its drain loop with both nodes still pending, and toResult() throws 'graph is not done' instead of returning a clean validation error.\n\nFix: Add cycle detection to createGraphScheduler() in packages/kernel/src/graph.ts. Use a topological sort or DFS-based cycle check during initialization. If a cycle is detected, throw an Error with a clear message like 'Dependency cycle detected: A -> B -> A'. The check should run in the constructor/factory, before any scheduling begins.\n\nThen create packages/kernel/test/graph-cycle.test.ts with these tests:\n1. A simple cycle (A->B->A) throws with 'cycle' in the error message\n2. A longer cycle (A->B->C->A) throws\n3. A self-referencing node (A->A) throws\n4. A valid DAG (A->B, A->C, B->C) does NOT throw\n5. An empty graph does NOT throw\n\nVerification: Run 'pnpm exec vitest --run packages/kernel/test/graph-cycle.test.ts' and ensure all tests pass. Also run 'pnpm typecheck' to verify no type errors.\n\nCommit with message 'fix(kernel): add cycle detection to graph scheduler'."
+				},
+				"verification": {
+					"requiredOutputs": [
+						"packages/kernel/src/graph.ts",
+						"packages/kernel/test/graph-cycle.test.ts"
+					]
+				},
+				"routingHints": {
+					"preferredWorker": "claude-code"
+				}
+			}
+		},
+		{
+			"role": "reviewer",
+			"dependsOn": ["impl-cyclic-detection"],
+			"packet": {
+				"unit": {
+					"id": "review-cyclic-detection",
+					"kind": "model",
+					"scope": "task",
+					"inputRefs": [
+						"packages/kernel/src/graph.ts",
+						"packages/kernel/test/graph-cycle.test.ts"
+					],
+					"expectedOutputs": [],
+					"verificationContract": "exit-0-and-required-outputs",
+					"policyProfile": "default"
+				},
+				"model": {
+					"provider": "openai",
+					"model": "o4-mini",
+					"prompt": "Review the cycle detection implementation in packages/kernel/src/graph.ts. Check:\n1. Is the algorithm correct? Does it handle all cycle types (simple, long, self-referencing)?\n2. Is it efficient? O(V+E) is expected for cycle detection.\n3. Does it throw a clear, actionable error message that includes the cycle path?\n4. Does the implementation affect existing non-cyclic graph behavior?\n5. Are the tests in packages/kernel/test/graph-cycle.test.ts comprehensive?\n6. Run 'pnpm exec vitest --run packages/kernel/test/graph-cycle.test.ts' to verify tests pass.\n7. Run 'pnpm exec vitest --run' to verify no regressions.\n\nExit 0 if the implementation is correct and tests pass. Exit non-zero if there are bugs or missing test coverage."
+				},
+				"verification": {
+					"requiredOutputs": []
+				},
+				"routingHints": {
+					"preferredWorker": "codex"
+				}
+			}
+		}
+	]
 }

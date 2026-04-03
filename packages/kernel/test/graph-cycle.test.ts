@@ -21,10 +21,7 @@ function makeUnitNode(id: string, dependsOn?: readonly string[]) {
 describe("Graph cycle detection", () => {
 	it("throws on simple cycle (A->B->A) with 'cycle' in error message", () => {
 		const graph: UnitGraph = {
-			nodes: [
-				makeUnitNode("A", ["B"]),
-				makeUnitNode("B", ["A"]),
-			],
+			nodes: [makeUnitNode("A", ["B"]), makeUnitNode("B", ["A"])],
 		};
 
 		expect(() => createGraphScheduler(graph)).toThrow(/cycle/i);
@@ -44,9 +41,7 @@ describe("Graph cycle detection", () => {
 
 	it("throws on self-referencing node (A->A)", () => {
 		const graph: UnitGraph = {
-			nodes: [
-				makeUnitNode("A", ["A"]),
-			],
+			nodes: [makeUnitNode("A", ["A"])],
 		};
 
 		expect(() => createGraphScheduler(graph)).toThrow(/cycle/i);

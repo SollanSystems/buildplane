@@ -138,7 +138,6 @@ describe("GraphScheduler", () => {
 			expect(ready).toHaveLength(2);
 
 			sched.markRunning(ready[0]!);
-			sched.markRunning(ready[1]!);
 
 			// No more ready while 2 are running
 			expect(sched.readyUnits()).toHaveLength(0);
@@ -211,17 +210,20 @@ describe("GraphScheduler", () => {
 			const result = sched.toResult(runIdMap);
 
 			expect(result.outcome).toBe("failed");
-			const a = result.nodes.find((n) => n.unitId === "A")!;
-			expect(a.status).toBe("failed");
-			expect(a.runId).toBe("run-A-001");
+			const a = result.nodes.find((n) => n.unitId === "A");
+			expect(a).toBeDefined();
+			expect(a?.status).toBe("failed");
+			expect(a?.runId).toBe("run-A-001");
 
-			const b = result.nodes.find((n) => n.unitId === "B")!;
-			expect(b.status).toBe("cancelled");
-			expect(b.runId).toBeUndefined();
+			const b = result.nodes.find((n) => n.unitId === "B");
+			expect(b).toBeDefined();
+			expect(b?.status).toBe("cancelled");
+			expect(b?.runId).toBeUndefined();
 
-			const c = result.nodes.find((n) => n.unitId === "C")!;
-			expect(c.status).toBe("passed");
-			expect(c.runId).toBe("run-C-001");
+			const c = result.nodes.find((n) => n.unitId === "C");
+			expect(c).toBeDefined();
+			expect(c?.status).toBe("passed");
+			expect(c?.runId).toBe("run-C-001");
 		});
 	});
 

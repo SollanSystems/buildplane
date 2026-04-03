@@ -376,15 +376,12 @@ export async function runCli(
 	try {
 		if (command === "memory") {
 			try {
-				return await (deps?.runNativeCommand ?? runNativeCommand)(
-					rest,
-					{
-						cwd,
-						commandPath: ["memory"],
-						stdout,
-						stderr,
-					},
-				);
+				return await (deps?.runNativeCommand ?? runNativeCommand)(rest, {
+					cwd,
+					commandPath: ["memory"],
+					stdout,
+					stderr,
+				});
 			} catch (error) {
 				throw createNativeDispatchError(["memory"], error);
 			}

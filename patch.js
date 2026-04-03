@@ -1,4 +1,4 @@
-const fs = require("fs");
+const fs = require("node:fs");
 const code = fs.readFileSync("packages/kernel/src/ports.ts", "utf8");
 
 const target = `	deleteWorkspace(workspace: { path: string }): {

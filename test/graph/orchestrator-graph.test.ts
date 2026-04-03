@@ -162,12 +162,15 @@ describe("runGraphAsync", () => {
 
 		// C must have started after both A and B were dispatched (at least one of them)
 		// The key invariant: A and B have runIds (were dispatched)
-		const aOutcome = result.nodes.find((n) => n.unitId === "A")!;
-		const bOutcome = result.nodes.find((n) => n.unitId === "B")!;
-		const cOutcome = result.nodes.find((n) => n.unitId === "C")!;
-		expect(aOutcome.runId).toBeDefined();
-		expect(bOutcome.runId).toBeDefined();
-		expect(cOutcome.runId).toBeDefined();
+		const aOutcome = result.nodes.find((n) => n.unitId === "A");
+		const bOutcome = result.nodes.find((n) => n.unitId === "B");
+		const cOutcome = result.nodes.find((n) => n.unitId === "C");
+		expect(aOutcome).toBeDefined();
+		expect(aOutcome?.runId).toBeDefined();
+		expect(bOutcome).toBeDefined();
+		expect(bOutcome?.runId).toBeDefined();
+		expect(cOutcome).toBeDefined();
+		expect(cOutcome?.runId).toBeDefined();
 	});
 
 	it("cancels dependents when a node fails", async () => {
@@ -184,11 +187,14 @@ describe("runGraphAsync", () => {
 		const result = await orchestrator.runGraphAsync(graph, bus);
 		expect(result.outcome).toBe("failed");
 
-		const a = result.nodes.find((n) => n.unitId === "A")!;
-		const b = result.nodes.find((n) => n.unitId === "B")!;
-		const c = result.nodes.find((n) => n.unitId === "C")!;
+		const a = result.nodes.find((n) => n.unitId === "A");
+		const b = result.nodes.find((n) => n.unitId === "B");
+		const c = result.nodes.find((n) => n.unitId === "C");
+		expect(a).toBeDefined();
+		expect(b).toBeDefined();
+		expect(c).toBeDefined();
 
-		expect(a.status).toBe("failed");
+		expect(a?.status).toBe("failed");
 		expect(b.status).toBe("cancelled");
 		expect(b.runId).toBeUndefined(); // never dispatched
 		expect(c.status).toBe("passed");

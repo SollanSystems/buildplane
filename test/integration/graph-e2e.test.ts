@@ -1,8 +1,8 @@
 import { execSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 
 describe("CLI run-graph integration", () => {
 	let projectRoot: string;
@@ -122,10 +122,11 @@ describe("CLI run-graph integration", () => {
 			const cContent = readFileSync(join(projectRoot, "c.txt"), "utf8");
 			expect(cContent).toContain("Hello from A");
 			expect(cContent).toContain("Hello from B");
-		} catch (e: any) {
+		} catch (e: unknown) {
+			const err = e as { stdout: string; stderr: string };
 			console.log("--- ERROR ---");
-			console.log(e.stdout);
-			console.log(e.stderr);
+			console.log(err.stdout);
+			console.log(err.stderr);
 			console.log("Project Root:", projectRoot);
 			throw e;
 		}

@@ -349,7 +349,9 @@ describe("cli bootstrap", () => {
 
 	it("delegates built CLI pack show through BUILDPLANE_NATIVE_BIN", () => {
 		ensureBuiltCliDist();
-		const tempRoot = mkdtempSync(join(tmpdir(), "buildplane-cli-pack-show-dist-"));
+		const tempRoot = mkdtempSync(
+			join(tmpdir(), "buildplane-cli-pack-show-dist-"),
+		);
 		const workspaceRoot = join(tempRoot, "workspace");
 		const nativeBin = join(tempRoot, "buildplane-native");
 		cleanupPaths.push(tempRoot);

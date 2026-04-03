@@ -138,7 +138,7 @@ export function createGraphScheduler(
 		if (visited.has(unitId)) return;
 
 		visiting.add(unitId);
-		const node = graph.nodes.find(n => n.unit.id === unitId);
+		const node = graph.nodes.find((n) => n.unit.id === unitId);
 		for (const dep of node?.dependsOn ?? []) {
 			detectCycle(dep, [...path, unitId]);
 		}
@@ -268,8 +268,12 @@ export function createGraphScheduler(
 		): GraphResult {
 			const nodes: GraphNodeOutcome[] = graph.nodes.map((n) => {
 				const id = n.unit.id;
-				const status = state.get(id)!;
-				if (status === "pending" || status === "running") {
+				const status = state.get(id);
+				if (
+					status === undefined ||
+					status === "pending" ||
+					status === "running"
+				) {
 					throw new Error(
 						`toResult: graph is not done — unit '${id}' is still '${status}'`,
 					);

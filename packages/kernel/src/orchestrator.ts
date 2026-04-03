@@ -573,7 +573,7 @@ export function createBuildplaneOrchestrator(
 						elapsedMs,
 					};
 
-					const decision = policy.evaluateBudgets!(
+					const decision = policy.evaluateBudgets?.(
 						ctx.validatedPacket,
 						usage,
 						effectiveBudgets,
@@ -587,7 +587,7 @@ export function createBuildplaneOrchestrator(
 							? "tokens"
 							: "time";
 						const limit = isTokensBreach
-							? effectiveBudgets.maxTokens!
+							? (effectiveBudgets.maxTokens ?? 0)
 							: (effectiveBudgets.maxComputeTimeMs ?? 0);
 						const actual = isTokensBreach ? tokenCount : elapsedMs;
 						scopedBus.emit({
@@ -792,7 +792,8 @@ export function createBuildplaneOrchestrator(
 					// Dispatch all ready units that aren't already in-flight
 					for (const unitId of scheduler.readyUnits()) {
 						if (inFlight.has(unitId)) continue;
-						const graphNode = nodeById.get(unitId)!;
+						const graphNode = nodeById.get(unitId);
+						if (!graphNode) continue;
 						// Build a UnitPacket from the graph node (strip dependsOn)
 						const packet: UnitPacket = {
 							unit: graphNode.unit,
