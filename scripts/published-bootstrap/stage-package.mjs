@@ -168,6 +168,7 @@ export const OPTIONAL_INTERNAL_PACKAGES = Object.freeze([
 	"@buildplane/ui-tui",
 	"@buildplane/adapters-models",
 	"@buildplane/adapters-codex",
+	"@buildplane/adapters-honcho",
 ]);
 
 function listInternalPackageNames() {
