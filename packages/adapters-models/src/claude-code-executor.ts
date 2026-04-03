@@ -4,8 +4,6 @@ import { resolve } from "node:path";
 import type {
 	EventBus,
 	ExecutionReceipt,
-	ExecutionRole,
-	TaskRenderer,
 	UnitPacket,
 } from "@buildplane/kernel";
 
@@ -18,12 +16,6 @@ export interface ClaudeCodeExecutorOptions {
 	maxTurns?: number;
 	/** Override spawn for testing. */
 	spawnFn?: typeof spawn;
-	/**
-	 * Renderer used to convert packet.intent into a prompt.
-	 * When present and packet.intent exists, the rendered prompt takes
-	 * precedence over packet.model.prompt.
-	 */
-	renderer?: TaskRenderer;
 }
 
 export interface ClaudeCodeExecutorPort {
@@ -40,9 +32,8 @@ export function createClaudeCodeExecutor(
 ): ClaudeCodeExecutorPort {
 	const cliBinary = options?.cliBinary ?? "claude";
 	const timeoutMs = options?.timeoutMs ?? 300_000;
-	const maxTurns = options?.maxTurns ?? 50;
+	const maxTurns = options?.maxTurns ?? 20;
 	const spawnFn = options?.spawnFn ?? spawn;
-	const renderer = options?.renderer;
 
 	return {
 		executePacket(_packet: UnitPacket, _projectRoot: string): ExecutionReceipt {
@@ -67,6 +58,11 @@ export function createClaudeCodeExecutor(
 				throw new Error("Packet must have a model block.");
 			}
 
+			// Validate prompt is present
+			if (!packet.model.prompt) {
+				throw new Error("Packet model block must include a prompt.");
+			}
+
 			// Validate tools are not present (claude code CLI doesn't accept inline tool defs)
 			if (packet.model.tools && packet.model.tools.length > 0) {
 				throw new Error(
@@ -74,24 +70,10 @@ export function createClaudeCodeExecutor(
 				);
 			}
 
-			// Resolve prompt: intent + renderer takes precedence over model.prompt
-			let foldedPrompt: string;
-			if (packet.intent && renderer) {
-				const role: ExecutionRole = "implementer";
-				const rendered = renderer.render(packet.intent, role);
-				foldedPrompt = rendered.system
-					? `${rendered.system}\n\n---\n\n${rendered.prompt}`
-					: rendered.prompt;
-			} else if (packet.model.prompt) {
-				// Legacy path: plain prompt with optional system prompt
-				foldedPrompt = packet.model.systemPrompt
-					? `${packet.model.systemPrompt}\n\n---\n\n${packet.model.prompt}`
-					: packet.model.prompt;
-			} else {
-				throw new Error(
-					"Packet must have either a model.prompt or an intent with a renderer.",
-				);
-			}
+			// Build folded prompt
+			const foldedPrompt = packet.model.systemPrompt
+				? `${packet.model.systemPrompt}\n\n---\n\n${packet.model.prompt}`
+				: packet.model.prompt;
 
 			// Build CLI args
 			const args = [
@@ -103,7 +85,6 @@ export function createClaudeCodeExecutor(
 				packet.model.model,
 				"--max-turns",
 				String(maxTurns),
-				"--dangerously-skip-permissions",
 			];
 
 			return new Promise<ExecutionReceipt>((resolvePromise) => {
@@ -175,27 +156,13 @@ export function createClaudeCodeExecutor(
 						}),
 					);
 
-					// Normalize exit code for Claude Code CLI:
-					// Claude Code returns exit 1 for max-turns, plugin warnings,
-					// and hook errors — none of which mean the task failed.
-					// If all required outputs exist, treat the run as successful.
-					let normalizedExitCode = exitCode;
-					if (
-						exitCode !== 0 &&
-						!timedOut &&
-						outputChecks.length > 0 &&
-						outputChecks.every((c) => c.exists)
-					) {
-						normalizedExitCode = 0;
-					}
-
 					resolvePromise({
 						command: cliBinary,
 						args,
 						cwd: projectRoot,
 						startedAt,
 						completedAt,
-						exitCode: normalizedExitCode,
+						exitCode,
 						stdout: stdoutBuf,
 						stderr: stderrBuf,
 						outputChecks,

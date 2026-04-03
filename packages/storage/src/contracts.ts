@@ -37,9 +37,6 @@ export interface EvidenceRecord {
 
 	/** Evaluated status of this evidence (e.g. "pass", "fail", "inconclusive"). */
 	readonly status: string;
-
-	/** Optional detail associated with the evidence record. */
-	readonly message?: string;
 }
 
 /**

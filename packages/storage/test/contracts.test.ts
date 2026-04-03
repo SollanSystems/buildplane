@@ -19,13 +19,6 @@ describe("storage contract exports", () => {
 			runId: "run-1",
 			kind: "command-exit",
 			status: "pass",
-			message: "command exited with code 1",
-		};
-		const evidenceWithoutMessage: EvidenceRecord = {
-			id: "evidence-2",
-			runId: "run-1",
-			kind: "output-check",
-			status: "fail",
 		};
 
 		const decision: DecisionRecord = {
@@ -35,16 +28,8 @@ describe("storage contract exports", () => {
 			outcome: "approved",
 		};
 
-		expect([
-			artifact.runId,
-			evidence.runId,
-			evidence.message,
-			evidenceWithoutMessage.runId,
-			decision.runId,
-		]).toEqual([
+		expect([artifact.runId, evidence.runId, decision.runId]).toEqual([
 			"run-1",
-			"run-1",
-			"command exited with code 1",
 			"run-1",
 			"run-1",
 		]);

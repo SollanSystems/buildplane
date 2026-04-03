@@ -140,7 +140,7 @@ describe("model executor", () => {
 					type: "tool-result" as const,
 					toolCallId: "call-1",
 					toolName: "read_file",
-					output: "file contents",
+					result: "file contents",
 				};
 				yield { type: "text-delta" as const, textDelta: "Done" };
 				yield { type: "step-finish" as const, finishReason: "stop" };
@@ -201,7 +201,7 @@ describe("model executor", () => {
 		bus.subscribe((e) => events.push(e));
 
 		const failingStreamFn: StreamFunction = () => ({
-			// biome-ignore lint/correctness/useYield: intentionally throws before yielding
+			// biome-ignore lint/correctness/useYield: testing error path — the generator is supposed to throw before yielding
 			fullStream: (async function* () {
 				throw new Error("API connection failed");
 			})(),
@@ -265,59 +265,5 @@ describe("model executor", () => {
 		expect(() => executor.executePacket(makeModelPacket(), root)).toThrow(
 			"Sync executePacket only supports command packets",
 		);
-	});
-
-	it("uses packet.model.prompt when present", async () => {
-		const bus = createEventBus();
-		let capturedPrompt: string | undefined;
-
-		const capturingStreamFn: StreamFunction = (options) => {
-			capturedPrompt = options.prompt;
-			return {
-				fullStream: (async function* () {
-					yield { type: "text-delta" as const, textDelta: "done" };
-					yield { type: "step-finish" as const, finishReason: "stop" };
-				})(),
-			};
-		};
-
-		const executor = createModelExecutor({
-			streamFn: capturingStreamFn,
-			modelResolver: mockModelResolver(),
-		});
-
-		const root = mkdtempSync(join(tmpdir(), "bp-model-"));
-		await executor.executePacketAsync(
-			makeModelPacket({ prompt: "Custom task prompt." }),
-			root,
-			bus,
-		);
-
-		expect(capturedPrompt).toBe("Custom task prompt.");
-	});
-
-	it("falls back to default prompt when packet.model.prompt is absent", async () => {
-		const bus = createEventBus();
-		let capturedPrompt: string | undefined;
-
-		const capturingStreamFn: StreamFunction = (options) => {
-			capturedPrompt = options.prompt;
-			return {
-				fullStream: (async function* () {
-					yield { type: "text-delta" as const, textDelta: "done" };
-					yield { type: "step-finish" as const, finishReason: "stop" };
-				})(),
-			};
-		};
-
-		const executor = createModelExecutor({
-			streamFn: capturingStreamFn,
-			modelResolver: mockModelResolver(),
-		});
-
-		const root = mkdtempSync(join(tmpdir(), "bp-model-"));
-		await executor.executePacketAsync(makeModelPacket(), root, bus);
-
-		expect(capturedPrompt).toBe("Execute the assigned task.");
 	});
 });

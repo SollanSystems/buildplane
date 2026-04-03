@@ -1,18 +1,9 @@
-import { execFileSync } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { runCli } from "../../apps/cli/src/run-cli";
 import { createEventStore } from "../../packages/storage/src/event-store";
-
-function git(cwd: string, args: string[]): void {
-	const env = { ...process.env };
-	for (const key of Object.keys(env)) {
-		if (key.startsWith("GIT_")) delete env[key];
-	}
-	execFileSync("git", args, { cwd, env });
-}
 
 async function runCliCapture(cwd: string, argv: string[]) {
 	const stdout: string[] = [];
@@ -23,18 +14,6 @@ async function runCliCapture(cwd: string, argv: string[]) {
 		stderr: (line) => stderr.push(line),
 	});
 	return { exitCode, stdout, stderr };
-}
-
-function createGitTempDir(prefix: string): string {
-	const root = mkdtempSync(join(tmpdir(), prefix));
-	git(root, ["init"]);
-	git(root, ["config", "user.name", "Test"]);
-	git(root, ["config", "user.email", "t@t.co"]);
-	writeFileSync(join(root, ".gitignore"), ".buildplane/\n");
-	writeFileSync(join(root, "init.txt"), "x");
-	git(root, ["add", "."]);
-	git(root, ["commit", "-m", "init"]);
-	return root;
 }
 
 function setupAndRun(root: string) {
@@ -63,14 +42,12 @@ function setupAndRun(root: string) {
 			},
 		}),
 	);
-	git(root, ["add", "packet.json"]);
-	git(root, ["commit", "-m", "add packet"]);
 	return packetPath;
 }
 
 describe("replay command", () => {
 	it("replays a command packet producing a new run", async () => {
-		const root = createGitTempDir("bp-replay-");
+		const root = mkdtempSync(join(tmpdir(), "bp-replay-"));
 		const packetPath = setupAndRun(root);
 
 		await runCliCapture(root, ["init"]);
@@ -101,7 +78,7 @@ describe("replay command", () => {
 	});
 
 	it("replay --json returns structured output", async () => {
-		const root = createGitTempDir("bp-replay-");
+		const root = mkdtempSync(join(tmpdir(), "bp-replay-"));
 		const packetPath = setupAndRun(root);
 
 		await runCliCapture(root, ["init"]);
@@ -123,7 +100,7 @@ describe("replay command", () => {
 	});
 
 	it("replay with --policy override changes policy profile", async () => {
-		const root = createGitTempDir("bp-replay-");
+		const root = mkdtempSync(join(tmpdir(), "bp-replay-"));
 		const packetPath = setupAndRun(root);
 
 		await runCliCapture(root, ["init"]);

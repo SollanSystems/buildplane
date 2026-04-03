@@ -9,10 +9,6 @@ interface RunResultLike {
 		readonly id: string;
 		readonly status: string;
 	};
-	readonly workspace?: {
-		readonly path?: string;
-		readonly status?: string;
-	};
 }
 
 export interface CliErrorPayload {
@@ -31,17 +27,7 @@ export function formatInitializationResult(
 }
 
 export function formatRunResult(result: RunResultLike): string[] {
-	const r = result as unknown as Record<string, unknown>;
-	const hasFailure = r.failure && typeof r.failure === "object";
-	const displayStatus = hasFailure ? "failed" : result.run.status;
-	const lines = [`run-id: ${result.run.id}`, `status: ${displayStatus}`];
-	if (result.workspace?.path) {
-		const suffix = result.workspace.status
-			? ` (${result.workspace.status})`
-			: "";
-		lines.push(`workspace: ${result.workspace.path}${suffix}`);
-	}
-	return lines;
+	return [`run-id: ${result.run.id}`, `status: ${result.run.status}`];
 }
 
 export function formatJson(value: unknown): string {
@@ -125,69 +111,94 @@ interface InspectSnapshotLike {
 
 export function formatInspectDetail(
 	snapshot: InspectSnapshotLike,
-	_events: ExecutionEventLike[],
+	events: ExecutionEventLike[],
 ): string[] {
 	const lines: string[] = [];
 
-	lines.push(`kind: ${snapshot.kind}`);
-	lines.push(`run-id: ${snapshot.run.id}`);
-	lines.push(`unit-id: ${snapshot.run.unitId}`);
-	lines.push(`status: ${snapshot.run.status}`);
+	// Header
+	lines.push(`Run: ${snapshot.run.id}`);
+	lines.push(`Unit: ${snapshot.unit.id} (${snapshot.unit.kind})`);
+	lines.push(`Status: ${snapshot.run.status}`);
+	lines.push("");
 
-	const s = snapshot as unknown as Record<string, unknown>;
-	if (s.workspace && typeof s.workspace === "object") {
-		const ws = s.workspace as {
-			status?: string;
-			path?: string;
-			headSha?: string;
-			existsOnDisk?: boolean;
-			finalizedAt?: string;
-			cleanupError?: string;
-		};
-		if (ws.status) {
-			lines.push(`workspace-status: ${ws.status}`);
+	// Model response
+	const modelComplete = events.find(
+		(e) => e.kind === "model-response-complete",
+	);
+	if (modelComplete && typeof modelComplete.text === "string") {
+		lines.push("── Model Response ──");
+		lines.push(modelComplete.text);
+		if (modelComplete.finishReason) {
+			lines.push(`  finish: ${modelComplete.finishReason}`);
 		}
-		if (ws.path) {
-			lines.push(`workspace: ${ws.path}`);
-		}
-		if (ws.headSha) {
-			lines.push(`workspace-head: ${ws.headSha}`);
-		}
-		if (ws.finalizedAt) {
-			lines.push(`workspace-finalized-at: ${ws.finalizedAt}`);
-		}
-		if (ws.cleanupError) {
-			lines.push(`workspace-cleanup-error: ${ws.cleanupError}`);
-		}
-		if (ws.existsOnDisk !== undefined) {
-			lines.push(`workspace-exists-on-disk: ${ws.existsOnDisk}`);
-		}
-		// Diagnostic notes for unusual workspace states
 		if (
-			ws.status === "active" &&
-			s.run &&
-			typeof s.run === "object" &&
-			(s.run as { status?: string }).status === "passed"
+			modelComplete.usage &&
+			typeof modelComplete.usage === "object" &&
+			modelComplete.usage !== null
 		) {
-			lines.push(
-				"workspace-note: passed run still reports an active workspace; cleanup may have been interrupted in this thin slice.",
-			);
+			const u = modelComplete.usage as {
+				promptTokens?: number;
+				completionTokens?: number;
+			};
+			if (u.promptTokens !== undefined) {
+				lines.push(
+					`  tokens: ${u.promptTokens} prompt + ${u.completionTokens} completion`,
+				);
+			}
 		}
-		if (ws.existsOnDisk === false && ws.status === "active") {
-			lines.push(
-				"workspace-note: last-known workspace path may already be gone on disk despite the persisted active status.",
-			);
-		}
+		lines.push("");
 	}
 
-	if (s.failure && typeof s.failure === "object") {
-		const f = s.failure as { kind?: string; message?: string };
-		if (f.kind) {
-			lines.push(`failure-kind: ${f.kind}`);
+	// Tool calls
+	const toolStarts = events.filter((e) => e.kind === "tool-call-started");
+	const toolCompletes = events.filter((e) => e.kind === "tool-call-completed");
+	if (toolStarts.length > 0) {
+		lines.push("── Tool Calls ──");
+		for (const tc of toolStarts) {
+			const name = tc.toolName as string;
+			const id = tc.toolCallId as string;
+			const args = tc.args ? JSON.stringify(tc.args) : "{}";
+			const completed = toolCompletes.find((c) => c.toolCallId === id);
+			const result = completed?.result;
+			lines.push(`  ${name} (${id})`);
+			lines.push(`    args: ${args}`);
+			if (result !== undefined) {
+				const resultStr =
+					typeof result === "string" ? result : JSON.stringify(result);
+				lines.push(`    result: ${resultStr}`);
+			}
 		}
-		if (f.message) {
-			lines.push(`failure: ${f.message}`);
+		lines.push("");
+	}
+
+	// Evidence
+	if (snapshot.evidence.length > 0) {
+		lines.push("── Evidence ──");
+		for (const ev of snapshot.evidence) {
+			lines.push(`  ${ev.kind}: ${ev.status}`);
 		}
+		lines.push("");
+	}
+
+	// Decisions
+	if (snapshot.decisions.length > 0) {
+		lines.push("── Policy ──");
+		for (const d of snapshot.decisions) {
+			lines.push(`  ${d.kind}: ${d.outcome}`);
+			for (const reason of d.reasons) {
+				lines.push(`    - ${reason}`);
+			}
+		}
+		lines.push("");
+	}
+
+	// Artifacts
+	if (snapshot.artifacts.length > 0) {
+		lines.push("── Artifacts ──");
+		for (const a of snapshot.artifacts) {
+			lines.push(`  ${a.type}: ${a.location}`);
+		}
+		lines.push("");
 	}
 
 	return lines;
