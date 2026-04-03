@@ -22,6 +22,11 @@
 		"changeset": "changeset",
 		"changeset:status": "changeset status --verbose"
 	},
+	"pnpm": {
+		"overrides": {
+			"picomatch": "^4.0.4"
+		}
+	},
 	"devDependencies": {
 		"@biomejs/biome": "^2.4.7",
 		"@changesets/cli": "^2.30.0",
