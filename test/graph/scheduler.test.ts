@@ -137,9 +137,10 @@ describe("GraphScheduler", () => {
 			const ready = sched.readyUnits();
 			expect(ready).toHaveLength(2);
 
-			sched.markRunning(ready[0]!);
+		sched.markRunning(ready[0]!);
+		sched.markRunning(ready[1]!);
 
-			// No more ready while 2 are running
+		// No more ready while 2 are running
 			expect(sched.readyUnits()).toHaveLength(0);
 
 			sched.markPassed(ready[0]!);
