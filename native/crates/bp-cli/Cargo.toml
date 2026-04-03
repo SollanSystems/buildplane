@@ -1,0 +1,19 @@
+[package]
+name = "bp-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "buildplane-native"
+path = "src/main.rs"
+
+[dependencies]
+bp-memory.workspace = true
+bp-pack-inspection.workspace = true
+bp-pack-loader.workspace = true
+bp-storage-sqlite.workspace = true
+bp-ui-terminal.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true

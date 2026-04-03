@@ -1,0 +1,9 @@
+[package]
+name = "bp-provider-anthropic"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+bp-provider-sdk.workspace = true

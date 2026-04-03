@@ -1,0 +1,48 @@
+schema_version = 1
+
+[pack]
+id = "superclaude"
+display_name = "SuperClaude"
+version = "0.1.0"
+description = "Provider-specific workflow pack that prefers Claude host reuse but can fall back to Anthropic directly."
+default_provider = "anthropic"
+
+[memory]
+share_user = true
+share_workspace = true
+share_pack = true
+
+[[modes]]
+id = "daily"
+display_name = "Daily"
+reasoning = "fast"
+autonomy = "guided"
+default = true
+
+[[modes]]
+id = "deep"
+display_name = "Deep"
+reasoning = "xhigh"
+autonomy = "spec-driven"
+
+[[commands]]
+name = "/fast"
+mode = "daily"
+description = "Fast daily coding loop with low ceremony."
+
+[[commands]]
+name = "/deep"
+mode = "deep"
+description = "High-rigor spec-driven workflow for hard problems."
+
+[[host_preferences]]
+host = "claude"
+transport = "host"
+auth = "host-oauth"
+priority = 10
+
+[[host_preferences]]
+host = "codex"
+transport = "host"
+auth = "shared-session"
+priority = 20

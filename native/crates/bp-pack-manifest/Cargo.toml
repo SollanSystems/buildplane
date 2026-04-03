@@ -1,0 +1,11 @@
+[package]
+name = "bp-pack-manifest"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+bp-core.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+toml.workspace = true

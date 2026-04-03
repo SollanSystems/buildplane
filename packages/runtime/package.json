@@ -1,0 +1,20 @@
+{
+	"name": "@buildplane/runtime",
+	"private": true,
+	"version": "0.1.0",
+	"type": "module",
+	"description": "Bounded worker execution and supervision runtime for Buildplane",
+	"exports": {
+		".": {
+			"types": "./src/index.d.ts",
+			"import": "./src/index.js"
+		},
+		"./command-executor": {
+			"types": "./src/command-executor.ts",
+			"import": "./src/command-executor.ts"
+		}
+	},
+	"dependencies": {
+		"@buildplane/kernel": "workspace:*"
+	}
+}

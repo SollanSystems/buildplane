@@ -1,0 +1,9 @@
+[package]
+name = "bp-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+bp-pack-manifest.workspace = true
+serde.workspace = true
