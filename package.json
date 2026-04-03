@@ -36,5 +36,15 @@
 		"tsx": "^4.21.0",
 		"typescript": "^5.9.3",
 		"vitest": "^4.1.0"
+	},
+	"pnpm": {
+		"onlyBuiltDependencies": [
+			"@biomejs/biome"
+		],
+		"overrides": {
+			"picomatch@<2.3.2": ">=2.3.2",
+			"picomatch@>=4.0.0 <4.0.4": ">=4.0.4",
+			"brace-expansion@>=4.0.0 <5.0.5": ">=5.0.5"
+		}
 	}
 }
