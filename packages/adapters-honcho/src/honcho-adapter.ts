@@ -1,3 +1,15 @@
+/**
+ * Honcho Memory Adapter for Buildplane
+ *
+ * Environment variables:
+ * - HONCHO_API_KEY (required) — API key from https://app.honcho.dev
+ * - HONCHO_WORKSPACE_ID (optional, default: "buildplane") — Honcho workspace name
+ * - BUILDPLANE_USER_ID (optional, default: "operator") — User identifier for Honcho peer
+ *
+ * When HONCHO_API_KEY is not set, the adapter is not loaded and Buildplane
+ * operates without memory. This is the default behavior.
+ */
+
 import type { EventListener, ExecutionEvent } from "@buildplane/kernel";
 import type { HonchoContextResult, HonchoPort } from "./honcho-port.js";
 
