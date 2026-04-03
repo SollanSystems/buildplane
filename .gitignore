@@ -10,3 +10,5 @@ coverage/
 .bg-shell/
 .worktrees/
 .gsd/
+native/target/
+.hermes/
