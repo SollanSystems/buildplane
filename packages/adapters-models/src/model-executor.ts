@@ -139,10 +139,12 @@ export function createModelExecutor(
 					exitCode: 1,
 					stdout: "",
 					stderr: message,
-					outputChecks: packet.verification.requiredOutputs.map((path) => ({
-						path,
-						exists: false,
-					})),
+					outputChecks: packet.verification.requiredOutputs.map(
+						(path: string) => ({
+							path,
+							exists: false,
+						}),
+					),
 				};
 			}
 		},
@@ -235,7 +237,7 @@ async function executeModelStream(
 		exitCode: 0,
 		stdout: fullText,
 		stderr: "",
-		outputChecks: packet.verification.requiredOutputs.map((path) => ({
+		outputChecks: packet.verification.requiredOutputs.map((path: string) => ({
 			path,
 			exists: existsSync(resolve(projectRoot, path)),
 		})),
