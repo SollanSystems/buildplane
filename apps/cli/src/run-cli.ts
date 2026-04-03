@@ -14,10 +14,11 @@ import {
 export interface RunCliDependencies {
 	createOrchestrator?: () => BuildplaneCliOrchestrator;
 	parsePacket?: (packetPath: string) => unknown;
-	runNativeMemoryCommand?: (
+	runNativeCommand?: (
 		argv: string[],
 		options: {
 			cwd: string;
+			commandPath: string[];
 			stdout: (line: string) => void;
 			stderr: (line: string) => void;
 		},
@@ -128,6 +129,38 @@ async function loadCliOrchestrator(
 		}
 	});
 
+	// ── Optional Honcho memory integration ─────────────────────
+	// Activated when HONCHO_API_KEY is set in the environment.
+	// The adapter owns the SDK import — the CLI never touches @honcho-ai/sdk directly.
+
+	if (process.env.HONCHO_API_KEY) {
+		try {
+			const { createHonchoAdapter, createHonchoClient } = await import(
+				"@buildplane/adapters-honcho"
+			);
+
+			const honchoClient = await createHonchoClient({
+				workspaceId: process.env.HONCHO_WORKSPACE_ID,
+				apiKey: process.env.HONCHO_API_KEY,
+			});
+
+			const userId = process.env.BUILDPLANE_USER_ID ?? "operator";
+			const adapter = createHonchoAdapter({
+				client: honchoClient as never,
+				userId,
+			});
+
+			// Subscribe to the event bus for message storage
+			const honchoSubscriber = adapter.createSubscriber("default", userId);
+			eventBus.subscribe(honchoSubscriber as never);
+		} catch (err) {
+			// Warn when explicitly configured but broken — silence when SDK simply absent
+			console.warn(
+				`[buildplane] Honcho memory disabled: ${err instanceof Error ? err.message : "unknown error"}`,
+			);
+		}
+	}
+
 	// Runtime router: selects executor based on packet type and routing hints
 	const adaptersModels = (await import(
 		"@buildplane/adapters-models"
@@ -232,32 +265,37 @@ async function loadPacket(packetPath: string): Promise<unknown> {
 	return kernel.parseUnitPacket(readFileSync(packetPath, "utf8"));
 }
 
-const NATIVE_MEMORY_DISPATCH_ERROR_CODE = "NATIVE_MEMORY_DISPATCH_FAILED";
-const NATIVE_MEMORY_DISPATCH_HINT =
+const NATIVE_COMMAND_DISPATCH_ERROR_CODE = "NATIVE_COMMAND_DISPATCH_FAILED";
+const NATIVE_COMMAND_DISPATCH_HINT =
 	"Hint: build the native binary with `cargo build --manifest-path native/Cargo.toml -p bp-cli`, or set BUILDPLANE_NATIVE_BIN, or ensure `buildplane-native` is on PATH.";
 
-class NativeMemoryDispatchError extends Error {
+class NativeCommandDispatchError extends Error {
 	constructor(message: string) {
 		super(message);
-		this.name = "NativeMemoryDispatchError";
+		this.name = "NativeCommandDispatchError";
 	}
 }
 
-function createNativeMemoryDispatchError(
+function formatNativeCommandPath(commandPath: string[]): string {
+	return commandPath.join(" ");
+}
+
+function createNativeDispatchError(
+	commandPath: string[],
 	error: unknown,
-): NativeMemoryDispatchError {
+): NativeCommandDispatchError {
 	const detail =
 		error instanceof Error && error.message.length > 0
 			? error.message
 			: undefined;
 	const message = [
-		"Failed to dispatch to the native memory command runner.",
+		`Failed to dispatch to the native ${formatNativeCommandPath(commandPath)} command runner.`,
 		detail,
-		NATIVE_MEMORY_DISPATCH_HINT,
+		NATIVE_COMMAND_DISPATCH_HINT,
 	]
 		.filter((value): value is string => Boolean(value))
 		.join(" ");
-	return new NativeMemoryDispatchError(message);
+	return new NativeCommandDispatchError(message);
 }
 
 function splitOutputLines(output: string): string[] {
@@ -267,7 +305,7 @@ function splitOutputLines(output: string): string[] {
 		.filter((line) => line.length > 0);
 }
 
-function resolveNativeMemoryBinary(cwd: string): string {
+function resolveNativeBinary(cwd: string): string {
 	const explicit = process.env.BUILDPLANE_NATIVE_BIN;
 	if (explicit) {
 		return explicit;
@@ -285,16 +323,17 @@ function resolveNativeMemoryBinary(cwd: string): string {
 	return "buildplane-native";
 }
 
-async function runNativeMemoryCommand(
+async function runNativeCommand(
 	argv: string[],
 	options: {
 		cwd: string;
+		commandPath: string[];
 		stdout: (line: string) => void;
 		stderr: (line: string) => void;
 	},
 ): Promise<number> {
-	const binary = resolveNativeMemoryBinary(options.cwd);
-	const result = spawnSync(binary, ["memory", ...argv], {
+	const binary = resolveNativeBinary(options.cwd);
+	const result = spawnSync(binary, [...options.commandPath, ...argv], {
 		cwd: options.cwd,
 		encoding: "utf8",
 		env: process.env,
@@ -313,7 +352,7 @@ async function runNativeMemoryCommand(
 				? result.error.message
 				: String(result.error);
 		throw new Error(
-			`Resolved native memory binary '${binary}' but could not start it. ${detail}`,
+			`Resolved native binary '${binary}' for '${formatNativeCommandPath(options.commandPath)}' but could not start it. ${detail}`,
 		);
 	}
 	return result.status ?? 1;
@@ -337,16 +376,33 @@ export async function runCli(
 	try {
 		if (command === "memory") {
 			try {
-				return await (deps?.runNativeMemoryCommand ?? runNativeMemoryCommand)(
+				return await (deps?.runNativeCommand ?? runNativeCommand)(
 					rest,
 					{
 						cwd,
+						commandPath: ["memory"],
 						stdout,
 						stderr,
 					},
 				);
 			} catch (error) {
-				throw createNativeMemoryDispatchError(error);
+				throw createNativeDispatchError(["memory"], error);
+			}
+		}
+
+		if (command === "pack" && rest[0] === "show") {
+			try {
+				return await (deps?.runNativeCommand ?? runNativeCommand)(
+					rest.slice(1),
+					{
+						cwd,
+						commandPath: ["pack", "show"],
+						stdout,
+						stderr,
+					},
+				);
+			} catch (error) {
+				throw createNativeDispatchError(["pack", "show"], error);
 			}
 		}
 
@@ -824,8 +880,8 @@ function applyReplayOverrides(
 function classifyCliError(error: unknown): { code: string; message: string } {
 	const message = error instanceof Error ? error.message : String(error);
 
-	if (error instanceof NativeMemoryDispatchError) {
-		return { code: NATIVE_MEMORY_DISPATCH_ERROR_CODE, message };
+	if (error instanceof NativeCommandDispatchError) {
+		return { code: NATIVE_COMMAND_DISPATCH_ERROR_CODE, message };
 	}
 
 	if (/not initialized/i.test(message)) {

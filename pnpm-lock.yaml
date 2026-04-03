@@ -47,6 +47,9 @@ importers:
       '@buildplane/adapters-git':
         specifier: workspace:*
         version: link:../../packages/adapters-git
+      '@buildplane/adapters-honcho':
+        specifier: workspace:*
+        version: link:../../packages/adapters-honcho
       '@buildplane/adapters-models':
         specifier: workspace:*
         version: link:../../packages/adapters-models
