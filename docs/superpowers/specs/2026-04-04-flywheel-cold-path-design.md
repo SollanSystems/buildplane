@@ -223,7 +223,7 @@ No renderer changes needed — `claude-renderer.ts:48-53` and the Codex renderer
 | `packages/kernel/src/orchestrator.ts` | Add `memoryPort` option + extraction hook in `finalizeRun()` success path (after line ~363) + policy rejection path (lines ~293-331). |
 | `packages/kernel/src/index.ts` | Re-export new types + `extractLearnings` |
 | `packages/storage/src/index.ts` | Re-export `LearningStore` |
-| `apps/cli/src/run-cli.ts` | Restructure `loadCliOrchestrator` to return `CliOrchestratorBundle` (orchestrator + memoryPort + honchoAdapter). Add pre-run memory injection in `runCli` for run, run-graph, run-strategy. |
+| `apps/cli/src/run-cli.ts` | Restructure `loadCliOrchestrator` to return `CliOrchestratorBundle` (orchestrator + memoryPort + honchoAdapter). Wrap `deps.createOrchestrator()` test-injection branch as `{ orchestrator: deps.createOrchestrator() }` so optional fields default to `undefined` (benign — memory injection is guarded by `if (memoryPort && ...)`). Add pre-run memory injection in `runCli` for run, run-graph, run-strategy. |
 
 **New files created:**
 
