@@ -40,6 +40,8 @@ CREATE INDEX IF NOT EXISTS idx_run_learnings_scope ON run_learnings (scope);
 CREATE INDEX IF NOT EXISTS idx_run_learnings_status ON run_learnings (status);
 ```
 
+**Backwards-compatible migration:** Following the existing pattern (`ensureEvidenceMessageColumn`, `ensureRunsUsedWorkspaceColumn`, `ensureRunsStrategyColumns` at lines 126-149 of `store.ts`), add an `ensureRunLearningsTable()` function that uses `CREATE TABLE IF NOT EXISTS`. Call it from `bootstrapStorageProjectionSchema()`. Do **not** add `run_learnings` to `assertStorageProjectionSchema()` — this table is additive and optional; older databases without it should not error, they simply have no learnings yet.
+
 Mirrors the Rust `memory_items` schema shape (scope, kind, status, promoted_from_id) but drops columns only needed at scale (tags_json, applicable_packs_json, origin_pack, source_type). The `source_run_id` column creates lineage: learning → originating run → evidence.
 
 ### 2. Outcome Extractor
@@ -57,7 +59,9 @@ export interface ExtractedLearning {
 }
 
 export interface OutcomeExtractionInput {
-  readonly result: RunPacketResult;
+  readonly run: Run;
+  readonly receipt: ExecutionReceipt;
+  readonly decision: PolicyDecision;
   readonly packet: UnitPacket;
   readonly strategyResult?: StrategyResult;
   readonly attemptCount?: number;
@@ -65,6 +69,8 @@ export interface OutcomeExtractionInput {
 
 export function extractLearnings(input: OutcomeExtractionInput): ExtractedLearning[];
 ```
+
+Note: The input takes `run`, `receipt`, and `decision` as separate fields (not a full `RunPacketResult`) because at the hook point in `finalizeRun()`, these are the variables in scope. The extractor must narrow `decision` internally — on the success path it will be `ApprovedPolicyDecision`, on the failure path `RejectedPolicyDecision`.
 
 **Extraction rules:**
 
@@ -80,7 +86,11 @@ No LLM summarization — pattern matching only. No deduplication — storage han
 
 ### 3. Memory Port
 
-Added to `packages/kernel/src/ports.ts`:
+Added to `packages/kernel/src/ports.ts`. Requires new import:
+
+```typescript
+import type { ExtractedLearning } from "./outcome-extractor.js";
+```
 
 ```typescript
 export interface BuildplaneMemoryPort {
@@ -119,17 +129,19 @@ export interface CreateBuildplaneOrchestratorOptions {
 }
 ```
 
-**Success path** — after `commitRunSuccessOutcome()` (line ~363), before workspace cleanup:
+**Success path** — after `commitRunSuccessOutcome()` (line ~363), before workspace cleanup (line ~377):
 
 ```typescript
 if (memoryPort) {
   try {
     const learnings = extractLearnings({
-      result: { run: completedRun, receipt, decision: approvedDecision },
+      run: completedRun,
+      receipt,
+      decision: approvedDecision,
       packet: validatedPacket,
     });
     if (learnings.length > 0) {
-      memoryPort.writeLearnings(run.id, learnings);
+      memoryPort.writeLearnings(completedRun.id, learnings);
     }
   } catch {
     // Silent — never break the run for memory
@@ -137,27 +149,58 @@ if (memoryPort) {
 }
 ```
 
-**Failure path** — after `commitRunFailureOutcome()`, same pattern for constraint/workflow learnings from rejection reasons.
+**Failure path** — after `commitRunFailureOutcome()` in the **policy rejection branch only** (lines ~293-331 of `orchestrator.ts`, where `decision.outcome === "rejected"`). Do **not** hook into `finalizeInfrastructureFailure()` — infrastructure failures (workspace-prepare, runtime-execution) have no policy decision to extract learnings from. Same try/catch-swallow pattern.
 
-Follows the established silent-side-effect convention (see `honcho-adapter.ts:134-139`).
+Follows the established silent-side-effect convention (see `honcho-adapter.ts:134-140`).
 
 ### 6. CLI Memory Injection (Closing the Loop)
 
-In `apps/cli/src/run-cli.ts`, before execution of `run`, `run-graph`, and `run-strategy`:
+**Restructuring `loadCliOrchestrator`:** Currently the Honcho adapter is constructed inside `loadCliOrchestrator()` (lines 158-183 of `run-cli.ts`) and never surfaced to `runCli()`. To support memory injection, `loadCliOrchestrator` must return both the orchestrator and the optional adapters:
 
 ```typescript
-if (memoryPort && packet.intent) {
-  const learnings = memoryPort.fetchLearnings({ limit: 10 });
-  if (learnings.length > 0) {
-    packet = {
-      ...packet,
+interface CliOrchestratorBundle {
+  orchestrator: BuildplaneCliOrchestrator;
+  memoryPort?: BuildplaneMemoryPort;
+  honchoAdapter?: HonchoPort;
+  userId?: string;
+}
+
+async function loadCliOrchestrator(projectRoot: string): Promise<CliOrchestratorBundle> {
+  // ... existing code ...
+  // Construct memoryPort from LearningStore using the same database
+  // Return { orchestrator, memoryPort, honchoAdapter, userId }
+}
+```
+
+**Memory injection** — in `runCli()`, after loading the packet but before execution. Note: `packet` must be declared with `let` (not `const`) to allow reassignment, or use a separate `enrichedPacket` variable:
+
+```typescript
+const { orchestrator, memoryPort, honchoAdapter, userId } = await loadCliOrchestrator(projectRoot);
+
+// ... load packet ...
+
+let enrichedPacket = packet;
+if (memoryPort && enrichedPacket.intent) {
+  const localLearnings = memoryPort.fetchLearnings({ limit: 10 });
+
+  // Honcho merge — fetchContext is async, fetchLearnings is sync (DatabaseSync)
+  const honchoMemories = honchoAdapter && userId
+    ? (await honchoAdapter.fetchContext(userId)).memories
+    : [];
+
+  const memories = [
+    ...localLearnings.map(l => `[${l.kind}] ${l.title}: ${l.body}`),
+    ...honchoMemories.map(m => `[honcho] ${m}`),
+  ];
+
+  if (memories.length > 0) {
+    enrichedPacket = {
+      ...enrichedPacket,
       intent: {
-        ...packet.intent,
+        ...enrichedPacket.intent,
         context: {
-          ...packet.intent.context,
-          memories: learnings.map(
-            (l) => `[${l.kind}] ${l.title}: ${l.body}`
-          ),
+          ...enrichedPacket.intent.context,
+          memories,
         },
       },
     };
@@ -165,19 +208,7 @@ if (memoryPort && packet.intent) {
 }
 ```
 
-**Honcho merge** — when both local and Honcho are available:
-
-```typescript
-const localLearnings = memoryPort.fetchLearnings({ limit: 10 });
-const honchoContext = honchoAdapter
-  ? await honchoAdapter.fetchContext(userId)
-  : { memories: [] };
-
-const memories = [
-  ...localLearnings.map(l => `[${l.kind}] ${l.title}: ${l.body}`),
-  ...honchoContext.memories.map(m => `[honcho] ${m}`),
-];
-```
+Same pattern for `run-graph` (inject into each graph node's intent) and `run-strategy` (inject into each strategy child's packet intent).
 
 No renderer changes needed — `claude-renderer.ts:48-53` and the Codex renderer already handle `intent.context.memories`. They just never received data until now.
 
@@ -187,12 +218,12 @@ No renderer changes needed — `claude-renderer.ts:48-53` and the Codex renderer
 
 | File | Change |
 |------|--------|
-| `packages/storage/src/store.ts` | Add `run_learnings` table to `bootstrapStorageProjectionSchema()` |
-| `packages/kernel/src/ports.ts` | Add `BuildplaneMemoryPort` + `StoredLearning` interfaces |
-| `packages/kernel/src/orchestrator.ts` | Add `memoryPort` option + extraction hook in `finalizeRun()` (success + failure paths) |
+| `packages/storage/src/store.ts` | Add `ensureRunLearningsTable()` migration + call from `bootstrapStorageProjectionSchema()`. Do NOT add to `assertStorageProjectionSchema()`. |
+| `packages/kernel/src/ports.ts` | Add `import type { ExtractedLearning }` from `outcome-extractor.js`. Add `BuildplaneMemoryPort` + `StoredLearning` interfaces. |
+| `packages/kernel/src/orchestrator.ts` | Add `memoryPort` option + extraction hook in `finalizeRun()` success path (after line ~363) + policy rejection path (lines ~293-331). |
 | `packages/kernel/src/index.ts` | Re-export new types + `extractLearnings` |
 | `packages/storage/src/index.ts` | Re-export `LearningStore` |
-| `apps/cli/src/run-cli.ts` | Pre-run memory injection for run, run-graph, run-strategy |
+| `apps/cli/src/run-cli.ts` | Restructure `loadCliOrchestrator` to return `CliOrchestratorBundle` (orchestrator + memoryPort + honchoAdapter). Add pre-run memory injection in `runCli` for run, run-graph, run-strategy. |
 
 **New files created:**
 
