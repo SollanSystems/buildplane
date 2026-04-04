@@ -3,7 +3,8 @@
 	"compilerOptions": {
 		"outDir": "dist",
 		"rootDir": "src",
-		"composite": true
+		"composite": true,
+		"jsx": "react-jsx"
 	},
 	"include": ["src"],
 	"exclude": ["dist", "test"],
@@ -12,6 +13,7 @@
 		{ "path": "../../packages/storage" },
 		{ "path": "../../packages/runtime" },
 		{ "path": "../../packages/policy" },
-		{ "path": "../../packages/ui-tui" }
+		{ "path": "../../packages/adapters-git" },
+		{ "path": "../../packages/adapters-codex" }
 	]
 }

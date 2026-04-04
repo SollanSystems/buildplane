@@ -1,14 +1,39 @@
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import type {
 	BuildplanePolicyPort,
 	BuildplaneRuntimePort,
 	BuildplaneStoragePort,
+	BuildplaneWorkspacePort,
 	ExecutionReceipt,
 	InspectSnapshot,
 	PolicyDecision,
 	StatusSnapshot,
 	UnitPacket,
+	WorkspaceSnapshot,
 } from "@buildplane/kernel";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const { validationEvents } = vi.hoisted(() => ({
+	validationEvents: [] as string[],
+}));
+
+vi.mock("../src/workspace-paths.js", async () => {
+	const actual = await vi.importActual<
+		typeof import("../src/workspace-paths.js")
+	>("../src/workspace-paths.js");
+
+	return {
+		...actual,
+		validatePacketForWorkspaceRoot(packet: UnitPacket, workspaceRoot: string) {
+			validationEvents.push("validate-packet-for-workspace-root");
+			return actual.validatePacketForWorkspaceRoot(packet, workspaceRoot);
+		},
+	};
+});
+
 import { createBuildplaneOrchestrator } from "../src/orchestrator";
 
 const packet: UnitPacket = {
@@ -23,39 +48,74 @@ const packet: UnitPacket = {
 	},
 	execution: {
 		command: "node",
+		cwd: "nested/../nested",
 	},
 	verification: {
 		requiredOutputs: ["tmp/out.txt"],
 	},
 };
 
-const receipt: ExecutionReceipt = {
-	command: "node",
-	args: [],
-	cwd: "/tmp/project",
-	startedAt: "2026-03-17T00:00:00.000Z",
-	completedAt: "2026-03-17T00:00:01.000Z",
-	exitCode: 0,
-	stdout: "ok",
-	stderr: "",
-	outputChecks: [{ path: "tmp/out.txt", exists: true }],
-};
+type FailurePoint =
+	| "prepareWorkspace"
+	| "recordWorkspacePrepared"
+	| "markRunRunning"
+	| "runtime"
+	| "recordExecutionEvidence"
+	| "policy"
+	| "commitRunFailureOutcome"
+	| "commitRunSuccessOutcome"
+	| "recordWorkspaceDeleted"
+	| "recordWorkspaceCleanupFailed"
+	| "deleteWorkspace";
 
-function createHarness(outcome: PolicyDecision["outcome"]) {
+interface HarnessOptions {
+	readonly policyOutcome?: PolicyDecision["outcome"];
+	readonly throwOn?: readonly FailurePoint[];
+	readonly deleteResult?: {
+		readonly deleted: boolean;
+		readonly cleanupError?: string;
+	};
+	readonly inspectWorkspace?: WorkspaceSnapshot;
+}
+
+function createHarness(options: HarnessOptions = {}) {
+	const {
+		policyOutcome = "approved",
+		throwOn = [],
+		deleteResult = { deleted: true },
+		inspectWorkspace,
+	} = options;
 	const runEvents: string[] = [];
+	const runtimeRoots: string[] = [];
+	const failurePayloads: Parameters<
+		BuildplaneStoragePort["commitRunFailureOutcome"]
+	>[1][] = [];
+	const cleanupErrors: string[] = [];
+	const root = mkdtempSync(join(tmpdir(), "buildplane-orchestrator-"));
+	const workspacePath = join(root, ".buildplane", "workspaces", "run-1");
+	const baseReceipt: ExecutionReceipt = {
+		command: "node",
+		args: [],
+		cwd: workspacePath,
+		startedAt: "2026-03-17T00:00:00.000Z",
+		completedAt: "2026-03-17T00:00:01.000Z",
+		exitCode: policyOutcome === "approved" ? 0 : 1,
+		stdout: policyOutcome === "approved" ? "ok" : "",
+		stderr: policyOutcome === "approved" ? "" : "failed",
+		outputChecks: [
+			{ path: "tmp/out.txt", exists: policyOutcome === "approved" },
+		],
+	};
 	const statusSnapshot: StatusSnapshot = {
 		initialized: true,
+		latestRunUsedWorkspace: false,
+		actionableWorkspaces: [],
 		runCounts: {
 			pending: 0,
 			running: 0,
-			passed: outcome === "approved" ? 1 : 0,
-			failed: outcome === "rejected" ? 1 : 0,
+			passed: 0,
+			failed: 0,
 			cancelled: 0,
-		},
-		latestRun: {
-			id: "run-1",
-			unitId: packet.unit.id,
-			status: outcome === "approved" ? "passed" : "failed",
 		},
 	};
 	const inspectSnapshot: InspectSnapshot = {
@@ -64,70 +124,122 @@ function createHarness(outcome: PolicyDecision["outcome"]) {
 		run: {
 			id: "run-1",
 			unitId: packet.unit.id,
-			status: outcome === "approved" ? "passed" : "failed",
+			status: inspectWorkspace?.status === "deleted" ? "passed" : "failed",
 		},
-		runHistory: [
-			{ id: "run-1", status: outcome === "approved" ? "passed" : "failed" },
-		],
-		evidence: [{ id: "evidence-1", kind: "command-exit", status: "pass" }],
-		decisions: [
-			{
-				id: "decision-1",
-				kind: outcome === "approved" ? "advance-run" : "reject-run",
-				outcome,
-				reasons: outcome === "approved" ? [] : ["command exited with code 1"],
-			},
-		],
+		workspace: inspectWorkspace,
+		runHistory: [{ id: "run-1", status: "failed" }],
+		evidence: [],
+		decisions: [],
 		artifacts: [],
 	};
 
+	const shouldThrow = (point: FailurePoint) => throwOn.includes(point);
+
 	const storage: BuildplaneStoragePort = {
 		initializeProject() {
-			runEvents.push("initializeProject");
+			runEvents.push("initialize-project");
 			return {
 				created: true,
-				projectRoot: "/tmp/project",
-				stateDbPath: "/tmp/project/.buildplane/state.db",
+				projectRoot: root,
+				stateDbPath: join(root, ".buildplane", "state.db"),
 			};
 		},
 		createRun() {
-			runEvents.push("createRun");
+			runEvents.push("create-run");
 			return { id: "run-1", unitId: packet.unit.id, status: "pending" };
 		},
 		markRunRunning() {
-			runEvents.push("markRunRunning");
+			runEvents.push("mark-run-running");
+			if (shouldThrow("markRunRunning")) {
+				throw new Error("markRunRunning persistence failed");
+			}
 		},
 		recordExecutionEvidence() {
-			runEvents.push("recordExecutionEvidence");
+			runEvents.push("record-execution-evidence");
+			if (shouldThrow("recordExecutionEvidence")) {
+				throw new Error("recordExecutionEvidence persistence failed");
+			}
 		},
 		recordDecision() {
-			runEvents.push("recordDecision");
+			throw new Error("legacy recordDecision should not be used");
 		},
-		completeRun(_runId, status) {
-			runEvents.push(`completeRun:${status}`);
-			return { id: "run-1", unitId: packet.unit.id, status };
+		completeRun() {
+			throw new Error("legacy completeRun should not be used");
+		},
+		recordWorkspacePrepared() {
+			runEvents.push("record-workspace-prepared");
+			if (shouldThrow("recordWorkspacePrepared")) {
+				throw new Error("recordWorkspacePrepared persistence failed");
+			}
+		},
+		commitRunFailureOutcome(_runId, payload) {
+			runEvents.push("commit-run-failure-outcome");
+			failurePayloads.push(payload);
+			if (shouldThrow("commitRunFailureOutcome")) {
+				throw new Error("commitRunFailureOutcome persistence failed");
+			}
+			return { id: "run-1", unitId: packet.unit.id, status: "failed" };
+		},
+		commitRunSuccessOutcome() {
+			runEvents.push("commit-run-success-outcome");
+			if (shouldThrow("commitRunSuccessOutcome")) {
+				throw new Error("commitRunSuccessOutcome persistence failed");
+			}
+			return { id: "run-1", unitId: packet.unit.id, status: "passed" };
+		},
+		recordWorkspaceDeleted() {
+			runEvents.push("record-workspace-deleted");
+			if (shouldThrow("recordWorkspaceDeleted")) {
+				throw new Error("recordWorkspaceDeleted persistence failed");
+			}
+		},
+		recordWorkspaceCleanupFailed(_runId, message) {
+			runEvents.push("record-workspace-cleanup-failed");
+			if (shouldThrow("recordWorkspaceCleanupFailed")) {
+				throw new Error("recordWorkspaceCleanupFailed persistence failed");
+			}
+			cleanupErrors.push(message);
 		},
 		getStatusSnapshot() {
+			runEvents.push("get-status-snapshot-for-init-preflight");
 			return statusSnapshot;
 		},
 		inspectTarget() {
+			runEvents.push("inspect-target");
 			return inspectSnapshot;
+		},
+		getChildRuns() {
+			return [];
 		},
 	};
 
 	const runtime: BuildplaneRuntimePort = {
-		executePacket() {
-			return {
-				...receipt,
-				exitCode: outcome === "approved" ? 0 : 1,
-				outputChecks: [{ path: "tmp/out.txt", exists: outcome === "approved" }],
-			};
+		executePacket(_packet, executionRoot) {
+			runEvents.push("execute-packet");
+			runtimeRoots.push(executionRoot);
+			if (shouldThrow("runtime")) {
+				throw new Error("runtime execution failed");
+			}
+			return baseReceipt;
+		},
+		async executePacketAsync(_packet, executionRoot, _bus) {
+			runEvents.push("execute-packet");
+			runtimeRoots.push(executionRoot);
+			if (shouldThrow("runtime")) {
+				throw new Error("runtime execution failed");
+			}
+			return baseReceipt;
 		},
 	};
 
 	const policy: BuildplanePolicyPort = {
 		evaluateRun() {
-			return outcome === "approved"
+			runEvents.push("evaluate-run");
+			if (shouldThrow("policy")) {
+				throw new Error("policy evaluation failed");
+			}
+
+			return policyOutcome === "approved"
 				? { kind: "advance-run", outcome: "approved", reasons: [] }
 				: {
 						kind: "reject-run",
@@ -137,56 +249,645 @@ function createHarness(outcome: PolicyDecision["outcome"]) {
 		},
 	};
 
+	const workspace: BuildplaneWorkspacePort = {
+		assertRunnableRepository() {
+			runEvents.push("assert-repo");
+			return { headSha: "abc123" };
+		},
+		prepareWorkspace() {
+			runEvents.push("prepare-workspace");
+			if (shouldThrow("prepareWorkspace")) {
+				throw new Error("git worktree add failed");
+			}
+			return { path: workspacePath, headSha: "abc123" };
+		},
+		deleteWorkspace() {
+			runEvents.push("delete-workspace");
+			if (shouldThrow("deleteWorkspace")) {
+				throw new Error("git worktree remove failed");
+			}
+			return deleteResult;
+		},
+	};
+
 	return {
+		root,
+		workspacePath,
 		runEvents,
+		runtimeRoots,
+		failurePayloads,
+		cleanupErrors,
 		statusSnapshot,
 		inspectSnapshot,
 		orchestrator: createBuildplaneOrchestrator({
-			projectRoot: "/tmp/project",
+			projectRoot: root,
 			storage,
 			runtime,
 			policy,
+			workspace,
 		}),
+		cleanup() {
+			rmSync(root, { recursive: true, force: true });
+		},
 	};
 }
 
+function eventLog(runEvents: readonly string[]) {
+	return [runEvents[0], ...validationEvents, ...runEvents.slice(1)];
+}
+
+beforeEach(() => {
+	validationEvents.length = 0;
+});
+
 describe("kernel orchestrator", () => {
-	it("orchestrates a successful packet run", () => {
-		const { orchestrator, runEvents } = createHarness("approved");
+	it("orchestrates a successful packet run inside a prepared workspace", () => {
+		const { orchestrator, runEvents, runtimeRoots, workspacePath, cleanup } =
+			createHarness({ policyOutcome: "approved" });
 
-		const result = orchestrator.runPacket(packet);
+		try {
+			const result = orchestrator.runPacket(packet);
 
-		expect(runEvents).toEqual([
-			"createRun",
-			"markRunRunning",
-			"recordExecutionEvidence",
-			"recordDecision",
-			"completeRun:passed",
-		]);
-		expect(result.run.status).toBe("passed");
-		expect(result.decision.outcome).toBe("approved");
+			expect(eventLog(runEvents)).toEqual([
+				"get-status-snapshot-for-init-preflight",
+				"validate-packet-for-workspace-root",
+				"assert-repo",
+				"create-run",
+				"prepare-workspace",
+				"record-workspace-prepared",
+				"mark-run-running",
+				"execute-packet",
+				"record-execution-evidence",
+				"evaluate-run",
+				"commit-run-success-outcome",
+				"delete-workspace",
+				"record-workspace-deleted",
+			]);
+			expect(runtimeRoots).toEqual([workspacePath]);
+			expect(result.run.status).toBe("passed");
+			expect(result.decision?.outcome).toBe("approved");
+			expect(result.workspace).toBeUndefined();
+		} finally {
+			cleanup();
+		}
 	});
 
-	it("orchestrates a rejected packet run", () => {
-		const { orchestrator } = createHarness("rejected");
+	it("enriches inspect workspace snapshots with a read-time existsOnDisk observation", () => {
+		const root = mkdtempSync(
+			join(tmpdir(), "buildplane-orchestrator-inspect-"),
+		);
+		const workspacePath = join(root, ".buildplane", "workspaces", "run-1");
+		mkdirSync(workspacePath, { recursive: true });
 
-		const result = orchestrator.runPacket(packet);
-
-		expect(result.run.status).toBe("failed");
-		expect(result.decision.outcome).toBe("rejected");
-	});
-
-	it("delegates init, status, and inspect to storage", () => {
-		const { orchestrator, runEvents, statusSnapshot, inspectSnapshot } =
-			createHarness("approved");
-
-		expect(orchestrator.initializeProject()).toEqual({
-			created: true,
-			projectRoot: "/tmp/project",
-			stateDbPath: "/tmp/project/.buildplane/state.db",
+		const { orchestrator, cleanup } = createHarness({
+			inspectWorkspace: {
+				runId: "run-1",
+				path: workspacePath,
+				headSha: "abc123",
+				status: "retained",
+			},
 		});
-		expect(runEvents).toContain("initializeProject");
-		expect(orchestrator.getStatus()).toBe(statusSnapshot);
-		expect(orchestrator.inspect("run-1")).toBe(inspectSnapshot);
+
+		try {
+			const existingInspect = orchestrator.inspect("run-1");
+			expect(existingInspect.workspace?.existsOnDisk).toBe(true);
+
+			rmSync(workspacePath, { recursive: true, force: true });
+
+			const missingInspect = orchestrator.inspect("run-1");
+			expect(missingInspect.workspace?.existsOnDisk).toBe(false);
+		} finally {
+			cleanup();
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("finalizes setup failures after run creation without recording a workspace row", () => {
+		const { orchestrator, runEvents, runtimeRoots, failurePayloads, cleanup } =
+			createHarness({ throwOn: ["prepareWorkspace"] });
+
+		try {
+			const result = orchestrator.runPacket(packet);
+
+			expect(runEvents).not.toContain("record-workspace-prepared");
+			expect(runEvents).not.toContain("evaluate-run");
+			expect(runtimeRoots).toEqual([]);
+			expect(failurePayloads).toEqual([
+				expect.objectContaining({
+					infrastructureFailure: {
+						kind: "workspace-prepare-failed",
+						message: "git worktree add failed",
+					},
+				}),
+			]);
+			expect(failurePayloads[0]).not.toHaveProperty("workspaceStatus");
+			expect(result.failure).toEqual({
+				kind: "workspace-prepare-failed",
+				message: "git worktree add failed",
+			});
+			expect(result.workspace).toBeUndefined();
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("best-effort cleans up when workspace persistence fails after git preparation", () => {
+		const { orchestrator, runEvents, failurePayloads, cleanup } = createHarness(
+			{
+				throwOn: ["recordWorkspacePrepared"],
+			},
+		);
+
+		try {
+			const result = orchestrator.runPacket(packet);
+
+			expect(eventLog(runEvents)).toEqual([
+				"get-status-snapshot-for-init-preflight",
+				"validate-packet-for-workspace-root",
+				"assert-repo",
+				"create-run",
+				"prepare-workspace",
+				"record-workspace-prepared",
+				"delete-workspace",
+				"commit-run-failure-outcome",
+			]);
+			expect(failurePayloads[0]).toMatchObject({
+				infrastructureFailure: {
+					kind: "workspace-persistence-failed",
+					message: "recordWorkspacePrepared persistence failed",
+				},
+			});
+			expect(failurePayloads[0]).not.toHaveProperty("workspaceStatus");
+			expect(result.workspace).toBeUndefined();
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("surfaces cleanup details when recordWorkspacePrepared fails and best-effort cleanup also fails", () => {
+		const { orchestrator, cleanup, failurePayloads } = createHarness({
+			throwOn: ["recordWorkspacePrepared"],
+			deleteResult: {
+				deleted: false,
+				cleanupError: "worktree remove blocked",
+			},
+		});
+
+		try {
+			const result = orchestrator.runPacket(packet);
+
+			expect(failurePayloads[0]).toMatchObject({
+				infrastructureFailure: {
+					kind: "workspace-persistence-failed",
+					message: expect.stringMatching(
+						/recordWorkspacePrepared persistence failed.*worktree remove blocked/i,
+					),
+				},
+			});
+			expect(result.failure?.message).toMatch(/worktree remove blocked/i);
+			expect(result.workspace).toBeUndefined();
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("retains rejected-policy workspaces and returns workspace metadata", () => {
+		const {
+			orchestrator,
+			runEvents,
+			runtimeRoots,
+			failurePayloads,
+			workspacePath,
+			cleanup,
+		} = createHarness({ policyOutcome: "rejected" });
+
+		try {
+			const result = orchestrator.runPacket(packet);
+
+			expect(runEvents).not.toContain("delete-workspace");
+			expect(runtimeRoots).toEqual([workspacePath]);
+			expect(failurePayloads).toEqual([
+				expect.objectContaining({
+					decision: expect.objectContaining({ outcome: "rejected" }),
+					workspaceStatus: "retained",
+				}),
+			]);
+			expect(result.run.status).toBe("failed");
+			expect(result.decision?.outcome).toBe("rejected");
+			expect(result.workspace).toMatchObject({
+				path: workspacePath,
+				headSha: "abc123",
+				status: "retained",
+			});
+		} finally {
+			cleanup();
+		}
+	});
+
+	it.each([
+		["markRunRunning", "run-start-failed", "markRunRunning persistence failed"],
+		[
+			"recordExecutionEvidence",
+			"execution-evidence-persistence-failed",
+			"recordExecutionEvidence persistence failed",
+		],
+		["runtime", "runtime-execution-failed", "runtime execution failed"],
+		["policy", "policy-evaluation-failed", "policy evaluation failed"],
+	] as const)("retains prepared workspaces when %s fails after preparation", (failurePoint, expectedKind, expectedMessage) => {
+		const { orchestrator, runEvents, failurePayloads, workspacePath, cleanup } =
+			createHarness({ throwOn: [failurePoint] });
+
+		try {
+			const result = orchestrator.runPacket(packet);
+
+			expect(runEvents).not.toContain("delete-workspace");
+			expect(failurePayloads).toEqual([
+				expect.objectContaining({
+					infrastructureFailure: {
+						kind: expectedKind,
+						message: expectedMessage,
+					},
+					workspaceStatus: "retained",
+				}),
+			]);
+			expect(result.failure).toEqual({
+				kind: expectedKind,
+				message: expectedMessage,
+			});
+			expect(result.workspace).toMatchObject({
+				path: workspacePath,
+				status: "retained",
+			});
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("surfaces an infrastructure error when failed-path finalization cannot be persisted", () => {
+		const { orchestrator, failurePayloads, cleanup } = createHarness({
+			throwOn: ["runtime", "commitRunFailureOutcome"],
+		});
+
+		try {
+			const result = orchestrator.runPacket(packet);
+
+			expect(failurePayloads).toEqual([
+				expect.objectContaining({
+					infrastructureFailure: {
+						kind: "runtime-execution-failed",
+						message: "runtime execution failed",
+					},
+					workspaceStatus: "retained",
+				}),
+			]);
+			expect(result.failure).toEqual({
+				kind: "run-failure-finalization-failed",
+				message: "commitRunFailureOutcome persistence failed",
+			});
+			expect(result.workspace).toBeUndefined();
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("records cleanup failures separately after a passed run and returns actionable workspace metadata", () => {
+		const { orchestrator, runEvents, cleanupErrors, workspacePath, cleanup } =
+			createHarness({
+				policyOutcome: "approved",
+				deleteResult: { deleted: false, cleanupError: "disk busy" },
+			});
+
+		try {
+			const result = orchestrator.runPacket(packet);
+
+			expect(runEvents).toContain("record-workspace-cleanup-failed");
+			expect(cleanupErrors).toEqual(["disk busy"]);
+			expect(result.run.status).toBe("passed");
+			expect(result.failure).toBeUndefined();
+			expect(result.workspace).toMatchObject({
+				path: workspacePath,
+				status: "cleanup-failed",
+				cleanupError: "disk busy",
+			});
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("treats thrown workspace deletes as cleanup failures and returns actionable workspace metadata", () => {
+		const { orchestrator, cleanupErrors, workspacePath, cleanup } =
+			createHarness({
+				policyOutcome: "approved",
+				throwOn: ["deleteWorkspace"],
+			});
+
+		try {
+			const result = orchestrator.runPacket(packet);
+
+			expect(cleanupErrors).toEqual(["git worktree remove failed"]);
+			expect(result.run.status).toBe("passed");
+			expect(result.failure).toBeUndefined();
+			expect(result.workspace).toMatchObject({
+				path: workspacePath,
+				status: "cleanup-failed",
+				cleanupError: "git worktree remove failed",
+			});
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("returns an infrastructure failure when cleanup-failed persistence also fails", () => {
+		const { orchestrator, workspacePath, cleanup } = createHarness({
+			policyOutcome: "approved",
+			deleteResult: { deleted: false, cleanupError: "disk busy" },
+			throwOn: ["recordWorkspaceCleanupFailed"],
+		});
+
+		try {
+			const result = orchestrator.runPacket(packet);
+
+			expect(result.run.status).toBe("passed");
+			expect(result.failure).toEqual({
+				kind: "workspace-cleanup-persistence-failed",
+				message: "recordWorkspaceCleanupFailed persistence failed",
+			});
+			expect(result.workspace).toMatchObject({
+				path: workspacePath,
+				status: "cleanup-failed",
+				cleanupError: "disk busy",
+			});
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("surfaces the fallback cleanup message when delete returns no explicit error", () => {
+		const { orchestrator, cleanupErrors, workspacePath, cleanup } =
+			createHarness({
+				policyOutcome: "approved",
+				deleteResult: { deleted: false },
+			});
+
+		try {
+			const result = orchestrator.runPacket(packet);
+
+			expect(cleanupErrors).toEqual(["workspace cleanup failed"]);
+			expect(result.workspace).toMatchObject({
+				path: workspacePath,
+				status: "cleanup-failed",
+				cleanupError: "workspace cleanup failed",
+			});
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("retains the prepared workspace when success finalization fails after policy approval", () => {
+		const { orchestrator, runEvents, failurePayloads, workspacePath, cleanup } =
+			createHarness({ throwOn: ["commitRunSuccessOutcome"] });
+
+		try {
+			const result = orchestrator.runPacket(packet);
+
+			expect(runEvents).not.toContain("delete-workspace");
+			expect(failurePayloads.at(-1)).toMatchObject({
+				infrastructureFailure: {
+					kind: "run-success-persistence-failed",
+					message: "commitRunSuccessOutcome persistence failed",
+				},
+				workspaceStatus: "retained",
+			});
+			expect(result.run.status).toBe("failed");
+			expect(result.failure).toEqual({
+				kind: "run-success-persistence-failed",
+				message: "commitRunSuccessOutcome persistence failed",
+			});
+			expect(result.workspace).toMatchObject({
+				path: workspacePath,
+				status: "retained",
+			});
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("returns an infrastructure error when delete persistence fails after git cleanup succeeds", () => {
+		const { orchestrator, workspacePath, cleanup } = createHarness({
+			throwOn: ["recordWorkspaceDeleted"],
+		});
+
+		try {
+			const result = orchestrator.runPacket(packet);
+
+			expect(result.run.status).toBe("passed");
+			expect(result.failure).toEqual({
+				kind: "workspace-delete-persistence-failed",
+				message: "recordWorkspaceDeleted persistence failed",
+			});
+			expect(result.workspace).toMatchObject({
+				path: workspacePath,
+				status: "active",
+			});
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("rejects escaping packet paths before creating a run or workspace", () => {
+		const { orchestrator, runEvents, cleanup } = createHarness();
+
+		try {
+			expect(() =>
+				orchestrator.runPacket({
+					...packet,
+					execution: {
+						...packet.execution,
+						cwd: "../escape",
+					},
+				}),
+			).toThrow(/outside the worktree root/i);
+			expect(eventLog(runEvents)).toEqual([
+				"get-status-snapshot-for-init-preflight",
+				"validate-packet-for-workspace-root",
+			]);
+			expect(runEvents).not.toContain("assert-repo");
+			expect(runEvents).not.toContain("create-run");
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("orchestrates a successful async run through the full workspace lifecycle", async () => {
+		const { orchestrator, runEvents, runtimeRoots, workspacePath, cleanup } =
+			createHarness({ policyOutcome: "approved" });
+
+		try {
+			const result = await orchestrator.runPacketAsync(packet);
+
+			expect(eventLog(runEvents)).toEqual([
+				"get-status-snapshot-for-init-preflight",
+				"validate-packet-for-workspace-root",
+				"assert-repo",
+				"create-run",
+				"prepare-workspace",
+				"record-workspace-prepared",
+				"mark-run-running",
+				"execute-packet",
+				"record-execution-evidence",
+				"evaluate-run",
+				"commit-run-success-outcome",
+				"delete-workspace",
+				"record-workspace-deleted",
+			]);
+			expect(runtimeRoots).toEqual([workspacePath]);
+			expect(result.run.status).toBe("passed");
+			expect(result.decision?.outcome).toBe("approved");
+			expect(result.workspace).toBeUndefined();
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("retains rejected-policy workspaces in async path", async () => {
+		const {
+			orchestrator,
+			runEvents,
+			runtimeRoots,
+			failurePayloads,
+			workspacePath,
+			cleanup,
+		} = createHarness({ policyOutcome: "rejected" });
+
+		try {
+			const result = await orchestrator.runPacketAsync(packet);
+
+			expect(runEvents).not.toContain("delete-workspace");
+			expect(runtimeRoots).toEqual([workspacePath]);
+			expect(failurePayloads).toEqual([
+				expect.objectContaining({
+					decision: expect.objectContaining({ outcome: "rejected" }),
+					workspaceStatus: "retained",
+				}),
+			]);
+			expect(result.run.status).toBe("failed");
+			expect(result.decision?.outcome).toBe("rejected");
+			expect(result.workspace).toMatchObject({
+				path: workspacePath,
+				headSha: "abc123",
+				status: "retained",
+			});
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("finalizes post-prepare infra failure with retained workspace in async", async () => {
+		const { orchestrator, runEvents, failurePayloads, workspacePath, cleanup } =
+			createHarness({ throwOn: ["runtime"] });
+
+		try {
+			const result = await orchestrator.runPacketAsync(packet);
+
+			expect(runEvents).not.toContain("delete-workspace");
+			expect(failurePayloads).toEqual([
+				expect.objectContaining({
+					infrastructureFailure: {
+						kind: "runtime-execution-failed",
+						message: "runtime execution failed",
+					},
+					workspaceStatus: "retained",
+				}),
+			]);
+			expect(result.failure).toEqual({
+				kind: "runtime-execution-failed",
+				message: "runtime execution failed",
+			});
+			expect(result.workspace).toMatchObject({
+				path: workspacePath,
+				status: "retained",
+			});
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("best-effort cleans up when recordWorkspacePrepared fails in async", async () => {
+		const { orchestrator, runEvents, failurePayloads, cleanup } = createHarness(
+			{
+				throwOn: ["recordWorkspacePrepared"],
+			},
+		);
+
+		try {
+			const result = await orchestrator.runPacketAsync(packet);
+
+			expect(eventLog(runEvents)).toEqual([
+				"get-status-snapshot-for-init-preflight",
+				"validate-packet-for-workspace-root",
+				"assert-repo",
+				"create-run",
+				"prepare-workspace",
+				"record-workspace-prepared",
+				"delete-workspace",
+				"commit-run-failure-outcome",
+			]);
+			expect(failurePayloads[0]).toMatchObject({
+				infrastructureFailure: {
+					kind: "workspace-persistence-failed",
+					message: "recordWorkspacePrepared persistence failed",
+				},
+			});
+			expect(failurePayloads[0]).not.toHaveProperty("workspaceStatus");
+			expect(result.workspace).toBeUndefined();
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("falls back to failed run when success-finalization fails in async", async () => {
+		const { orchestrator, runEvents, failurePayloads, workspacePath, cleanup } =
+			createHarness({ throwOn: ["commitRunSuccessOutcome"] });
+
+		try {
+			const result = await orchestrator.runPacketAsync(packet);
+
+			expect(runEvents).not.toContain("delete-workspace");
+			expect(failurePayloads.at(-1)).toMatchObject({
+				infrastructureFailure: {
+					kind: "run-success-persistence-failed",
+					message: "commitRunSuccessOutcome persistence failed",
+				},
+				workspaceStatus: "retained",
+			});
+			expect(result.run.status).toBe("failed");
+			expect(result.failure).toEqual({
+				kind: "run-success-persistence-failed",
+				message: "commitRunSuccessOutcome persistence failed",
+			});
+			expect(result.workspace).toMatchObject({
+				path: workspacePath,
+				status: "retained",
+			});
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("delegates init and status to storage", () => {
+		const { orchestrator, runEvents, statusSnapshot, cleanup } =
+			createHarness();
+
+		try {
+			expect(orchestrator.initializeProject()).toEqual({
+				created: true,
+				projectRoot: expect.any(String),
+				stateDbPath: expect.stringContaining(".buildplane/state.db"),
+			});
+			expect(orchestrator.getStatus()).toBe(statusSnapshot);
+			expect(runEvents).toContain("initialize-project");
+		} finally {
+			cleanup();
+		}
 	});
 });

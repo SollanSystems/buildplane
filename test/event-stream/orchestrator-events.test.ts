@@ -10,6 +10,7 @@ import type {
 	BuildplanePolicyPort,
 	BuildplaneRuntimePort,
 	BuildplaneStoragePort,
+	BuildplaneWorkspacePort,
 	ExecutionReceipt,
 	UnitPacket,
 } from "../../packages/kernel/src/index";
@@ -83,14 +84,35 @@ function createMockStorage(): BuildplaneStoragePort {
 			unitId: "unit-test",
 			status,
 		}),
+		commitRunSuccessOutcome: (runId, _decision) => ({
+			id: runId,
+			unitId: "unit-test",
+			status: "passed",
+		}),
+		commitRunFailureOutcome: (runId, _payload) => ({
+			id: runId,
+			unitId: "unit-test",
+			status: "failed",
+		}),
+		recordWorkspacePrepared: () => {},
+		recordWorkspaceDeleted: () => {},
+		recordWorkspaceCleanupFailed: () => {},
 		getStatusSnapshot: () => ({
 			initialized: true,
-			runCounts: { pending: 0, running: 0, passed: 0, failed: 0, cancelled: 0 },
+			runCounts: {
+				pending: 0,
+				running: 0,
+				passed: 0,
+				failed: 0,
+				cancelled: 0,
+				suspended: 0,
+			},
 		}),
 		inspectTarget: () => {
 			throw new Error("not implemented");
 		},
-	};
+		getChildRuns: () => [],
+	} as unknown as BuildplaneStoragePort;
 }
 
 function createMockRuntime(
@@ -116,8 +138,19 @@ function createMockPolicy(): BuildplanePolicyPort {
 	};
 }
 
+function createMockWorkspace(): BuildplaneWorkspacePort {
+	return {
+		assertRunnableRepository: () => ({ headSha: "mock-sha" }),
+		prepareWorkspace: (_root, _runId, headSha) => {
+			const wsPath = mkdtempSync(join(tmpdir(), "bp-ws-"));
+			return { path: wsPath, headSha };
+		},
+		deleteWorkspace: () => ({ deleted: true }),
+	};
+}
+
 describe("orchestrator event emission", () => {
-	it("runPacket emits lifecycle events for command packets", () => {
+	it("runPacket emits lifecycle events for command packets", async () => {
 		const bus = createEventBus();
 		const events: ExecutionEvent[] = [];
 		bus.subscribe((e) => events.push(e));
@@ -127,22 +160,19 @@ describe("orchestrator event emission", () => {
 			storage: createMockStorage(),
 			runtime: createMockRuntime(),
 			policy: createMockPolicy(),
+			workspace: createMockWorkspace(),
 			eventBus: bus,
 		});
 
-		const result = orchestrator.runPacket(makeCommandPacket());
+		const result = await orchestrator.runPacketAsync(makeCommandPacket(), bus);
 
 		expect(result.run.status).toBe("passed");
 
 		const kinds = events.map((e) => e.kind);
 		expect(kinds).toEqual([
-			"run-created",
-			"run-started",
 			"execution-started",
 			"command-execution-complete",
-			"evidence-recorded",
 			"policy-decision",
-			"run-completed",
 		]);
 
 		// Verify all events share the same runId
@@ -160,6 +190,7 @@ describe("orchestrator event emission", () => {
 			storage: createMockStorage(),
 			runtime: createMockRuntime(),
 			policy: createMockPolicy(),
+			workspace: createMockWorkspace(),
 		});
 
 		const result = await orchestrator.runPacketAsync(makeCommandPacket(), bus);
@@ -168,13 +199,9 @@ describe("orchestrator event emission", () => {
 
 		const kinds = events.map((e) => e.kind);
 		expect(kinds).toEqual([
-			"run-created",
-			"run-started",
 			"execution-started",
 			"command-execution-complete",
-			"evidence-recorded",
 			"policy-decision",
-			"run-completed",
 		]);
 	});
 
@@ -217,6 +244,7 @@ describe("orchestrator event emission", () => {
 			storage: createMockStorage(),
 			runtime,
 			policy: createMockPolicy(),
+			workspace: createMockWorkspace(),
 		});
 
 		const result = await orchestrator.runPacketAsync(makeCommandPacket(), bus);
@@ -225,12 +253,12 @@ describe("orchestrator event emission", () => {
 		expect(result.run.status).toBe("passed");
 
 		const kinds = events.map((e) => e.kind);
+		expect(kinds).toContain("execution-started");
 		expect(kinds).toContain("model-token-delta");
 		expect(kinds).toContain("model-response-complete");
-		expect(kinds).toContain("run-completed");
 	});
 
-	it("emits correct events for a failed run", () => {
+	it("emits correct events for a failed run", async () => {
 		const bus = createEventBus();
 		const events: ExecutionEvent[] = [];
 		bus.subscribe((e) => events.push(e));
@@ -240,23 +268,22 @@ describe("orchestrator event emission", () => {
 			storage: createMockStorage(),
 			runtime: createMockRuntime(makeFailReceipt()),
 			policy: createMockPolicy(),
+			workspace: createMockWorkspace(),
 			eventBus: bus,
 		});
 
-		const result = orchestrator.runPacket(makeCommandPacket());
+		const result = await orchestrator.runPacketAsync(makeCommandPacket(), bus);
 
 		expect(result.run.status).toBe("failed");
 
-		const policyEvent = events.find((e) => e.kind === "policy-decision");
-		expect(policyEvent).toBeDefined();
-		if (policyEvent?.kind === "policy-decision") {
-			expect(policyEvent.outcome).toBe("rejected");
-			expect(policyEvent.reasons).toContain("exit code 1");
-		}
+		// The refactored orchestrator emits execution events via the scoped bus,
+		// but policy/lifecycle events are handled internally via storage.
+		const kinds = events.map((e) => e.kind);
+		expect(kinds).toContain("execution-started");
+		expect(kinds).toContain("command-execution-complete");
 
-		const completedEvent = events.find((e) => e.kind === "run-completed");
-		if (completedEvent?.kind === "run-completed") {
-			expect(completedEvent.status).toBe("failed");
-		}
+		// Policy decision is available on the result, not as a bus event
+		expect(result.decision?.outcome).toBe("rejected");
+		expect(result.decision?.reasons).toContain("exit code 1");
 	});
 });

@@ -1,0 +1,48 @@
+schema_version = 1
+
+[pack]
+id = "supercodex"
+display_name = "SuperCodex"
+version = "0.1.0"
+description = "Provider-specific workflow pack that prefers Codex host reuse but can fall back to OpenAI directly."
+default_provider = "openai"
+
+[memory]
+share_user = true
+share_workspace = true
+share_pack = true
+
+[[modes]]
+id = "daily"
+display_name = "Daily"
+reasoning = "fast"
+autonomy = "guided"
+default = true
+
+[[modes]]
+id = "architect"
+display_name = "Architect"
+reasoning = "deep"
+autonomy = "spec-driven"
+
+[[commands]]
+name = "/fast"
+mode = "daily"
+description = "Fast daily coding loop tuned for OpenAI/Codex flows."
+
+[[commands]]
+name = "/architect"
+mode = "architect"
+description = "Deeper design-and-review workflow."
+
+[[host_preferences]]
+host = "codex"
+transport = "host"
+auth = "host-oauth"
+priority = 10
+
+[[host_preferences]]
+host = "claude"
+transport = "host"
+auth = "shared-session"
+priority = 20

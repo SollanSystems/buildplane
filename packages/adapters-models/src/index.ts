@@ -1,8 +1,8 @@
-export {
-	type ClaudeCodeExecutorOptions,
-	type ClaudeCodeExecutorPort,
-	createClaudeCodeExecutor,
+export type {
+	ClaudeCodeExecutorOptions,
+	ClaudeCodeExecutorPort,
 } from "./claude-code-executor.js";
+export { createClaudeCodeExecutor } from "./claude-code-executor.js";
 export type {
 	CreateModelExecutorOptions,
 	ModelResolver,
@@ -14,3 +14,7 @@ export {
 	createModelExecutor,
 	type ModelExecutorPort,
 } from "./model-executor.js";
+export {
+	createClaudeRenderer,
+	createCodexRenderer,
+} from "./renderers/index.js";

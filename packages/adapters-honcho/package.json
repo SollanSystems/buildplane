@@ -1,0 +1,27 @@
+{
+	"name": "@buildplane/adapters-honcho",
+	"private": true,
+	"version": "0.1.0",
+	"type": "module",
+	"description": "Honcho memory adapter for Buildplane",
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"import": "./dist/index.js"
+		}
+	},
+	"dependencies": {
+		"@buildplane/kernel": "workspace:*"
+	},
+	"devDependencies": {
+		"@honcho-ai/sdk": "^2.1.0"
+	},
+	"peerDependencies": {
+		"@honcho-ai/sdk": ">=2.0.0"
+	},
+	"peerDependenciesMeta": {
+		"@honcho-ai/sdk": {
+			"optional": true
+		}
+	}
+}

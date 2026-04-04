@@ -19,13 +19,19 @@
 		"clientKind": "git",
 		"useIgnoreFile": true
 	},
-	"files": {
-		"includes": [
-			"**",
-			"!!**/main",
-			"!!**/.worktrees",
-			"!!**/node_modules",
-			"!!**/dist"
-		]
-	}
+	"overrides": [
+		{
+			"includes": ["test/**/*", "**/*.test.ts"],
+			"linter": {
+				"rules": {
+					"style": {
+						"noNonNullAssertion": "off"
+					},
+					"suspicious": {
+						"noExplicitAny": "off"
+					}
+				}
+			}
+		}
+	]
 }

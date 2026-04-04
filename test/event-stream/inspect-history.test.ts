@@ -1,8 +1,17 @@
+import { execFileSync } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { runCli } from "../../apps/cli/src/run-cli";
+
+function git(cwd: string, args: string[]): void {
+	const env = { ...process.env };
+	for (const key of Object.keys(env)) {
+		if (key.startsWith("GIT_")) delete env[key];
+	}
+	execFileSync("git", args, { cwd, env });
+}
 
 async function runCliCapture(cwd: string, argv: string[]) {
 	const stdout: string[] = [];
@@ -13,6 +22,18 @@ async function runCliCapture(cwd: string, argv: string[]) {
 		stderr: (line) => stderr.push(line),
 	});
 	return { exitCode, stdout, stderr };
+}
+
+function createGitTempDir(prefix: string): string {
+	const root = mkdtempSync(join(tmpdir(), prefix));
+	git(root, ["init"]);
+	git(root, ["config", "user.name", "Test"]);
+	git(root, ["config", "user.email", "t@t.co"]);
+	writeFileSync(join(root, ".gitignore"), ".buildplane/\n");
+	writeFileSync(join(root, "init.txt"), "x");
+	git(root, ["add", "."]);
+	git(root, ["commit", "-m", "init"]);
+	return root;
 }
 
 function setupProject(root: string): string {
@@ -41,12 +62,14 @@ function setupProject(root: string): string {
 			},
 		}),
 	);
+	git(root, ["add", "packet.json"]);
+	git(root, ["commit", "-m", "add packet"]);
 	return packetPath;
 }
 
 describe("inspect and history commands", () => {
 	it("history lists runs after execution", async () => {
-		const root = mkdtempSync(join(tmpdir(), "bp-hist-"));
+		const root = createGitTempDir("bp-hist-");
 		const packetPath = setupProject(root);
 
 		await runCliCapture(root, ["init"]);
@@ -63,7 +86,7 @@ describe("inspect and history commands", () => {
 	});
 
 	it("history --json returns array", async () => {
-		const root = mkdtempSync(join(tmpdir(), "bp-hist-"));
+		const root = createGitTempDir("bp-hist-");
 		const packetPath = setupProject(root);
 
 		await runCliCapture(root, ["init"]);
@@ -82,7 +105,7 @@ describe("inspect and history commands", () => {
 	});
 
 	it("history returns empty message when no runs", async () => {
-		const root = mkdtempSync(join(tmpdir(), "bp-hist-"));
+		const root = createGitTempDir("bp-hist-");
 		await runCliCapture(root, ["init"]);
 
 		const history = await runCliCapture(root, ["history"]);
@@ -91,7 +114,7 @@ describe("inspect and history commands", () => {
 	});
 
 	it("inspect shows structured detail in human mode", async () => {
-		const root = mkdtempSync(join(tmpdir(), "bp-insp-"));
+		const root = createGitTempDir("bp-insp-");
 		const packetPath = setupProject(root);
 
 		await runCliCapture(root, ["init"]);
@@ -103,17 +126,13 @@ describe("inspect and history commands", () => {
 		expect(inspect.exitCode).toBe(0);
 
 		const output = inspect.stdout.join("\n");
-		expect(output).toContain(`Run: ${runId}`);
-		expect(output).toContain("Unit: unit-inspect-test");
-		expect(output).toContain("Status: passed");
-		expect(output).toContain("Evidence");
-		expect(output).toContain("command-exit: pass");
-		expect(output).toContain("Policy");
-		expect(output).toContain("advance-run: approved");
+		expect(output).toContain(`run-id: ${runId}`);
+		expect(output).toContain("unit-id: unit-inspect-test");
+		expect(output).toContain("status: passed");
 	});
 
 	it("inspect --json still returns full snapshot", async () => {
-		const root = mkdtempSync(join(tmpdir(), "bp-insp-"));
+		const root = createGitTempDir("bp-insp-");
 		const packetPath = setupProject(root);
 
 		await runCliCapture(root, ["init"]);

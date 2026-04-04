@@ -6,28 +6,28 @@
 	"description": "Core units, scheduler, and orchestration primitives for Buildplane",
 	"exports": {
 		".": {
-			"types": "./src/index.d.ts",
-			"import": "./src/index.js"
+			"types": "./dist/index.d.ts",
+			"import": "./dist/index.js"
 		},
 		"./packet": {
-			"types": "./src/packet.ts",
-			"import": "./src/packet.ts"
+			"types": "./dist/packet.d.ts",
+			"import": "./dist/packet.js"
 		},
 		"./ports": {
-			"types": "./src/ports.ts",
-			"import": "./src/ports.ts"
+			"types": "./dist/ports.d.ts",
+			"import": "./dist/ports.js"
 		},
 		"./run-loop": {
-			"types": "./src/run-loop.ts",
-			"import": "./src/run-loop.ts"
+			"types": "./dist/run-loop.d.ts",
+			"import": "./dist/run-loop.js"
 		},
 		"./types": {
-			"types": "./src/types.ts",
-			"import": "./src/types.ts"
+			"types": "./dist/types.d.ts",
+			"import": "./dist/types.js"
 		},
 		"./events": {
-			"types": "./src/events.ts",
-			"import": "./src/events.ts"
+			"types": "./dist/events.d.ts",
+			"import": "./dist/events.js"
 		}
 	}
 }

@@ -7,11 +7,35 @@
  * to the EventBus and receive these — never untyped JSON.
  */
 
+// ── EventContext ────────────────────────────────────────────
+
+/**
+ * Rich metadata injected into every event by the run-scoped bus.
+ * Enables cross-model lineage tracking, cost attribution, and
+ * strategy grouping across child runs.
+ */
+export interface EventContext {
+	readonly runId: string;
+	readonly parentRunId?: string;
+	readonly strategyId?: string;
+	readonly role?: string;
+	readonly candidateId?: string;
+	readonly executor: string;
+	readonly provider?: string;
+	readonly model?: string;
+	readonly cost?: {
+		readonly inputTokens: number;
+		readonly outputTokens: number;
+		readonly estimatedUsd?: number;
+	};
+}
+
 // ── Base ────────────────────────────────────────────────────
 
 interface BaseEvent {
 	readonly runId: string;
 	readonly timestamp: string;
+	readonly context?: EventContext;
 }
 
 // ── Run lifecycle ───────────────────────────────────────────
@@ -90,8 +114,8 @@ export interface EvidenceRecordedEvent extends BaseEvent {
 
 export interface PolicyDecisionEvent extends BaseEvent {
 	readonly kind: "policy-decision";
-	readonly decisionKind: "advance-run" | "reject-run";
-	readonly outcome: "approved" | "rejected";
+	readonly decisionKind: "advance-run" | "reject-run" | "retry-run";
+	readonly outcome: "approved" | "rejected" | "retrying";
 	readonly reasons: readonly string[];
 }
 
@@ -103,12 +127,54 @@ export interface ExecutionErrorEvent extends BaseEvent {
 	readonly phase: string;
 }
 
+// ── Budget ──────────────────────────────────────────────────
+
+export interface PolicyBudgetBreachedEvent extends BaseEvent {
+	readonly kind: "policy-budget-breached";
+	readonly budgetType: "tokens" | "time";
+	readonly limit: number;
+	readonly actual: number;
+}
+
+// ── Operator suspension ─────────────────────────────────────
+
+export interface RunSuspendedEvent extends BaseEvent {
+	readonly kind: "run-suspended";
+	readonly unitId: string;
+	readonly profileName: string;
+	readonly reason: string;
+}
+
+export interface RunResumedEvent extends BaseEvent {
+	readonly kind: "run-resumed";
+	readonly unitId: string;
+	readonly approvedBy?: string;
+}
+
+// ── Graph orchestration ─────────────────────────────────────
+
+export interface GraphStartedEvent extends BaseEvent {
+	readonly kind: "graph-started";
+	readonly graphId: string;
+	readonly unitCount: number;
+	readonly timestamp: string;
+}
+
+export interface GraphCompletedEvent extends BaseEvent {
+	readonly kind: "graph-completed";
+	readonly graphId: string;
+	readonly outcome: "passed" | "failed";
+	readonly timestamp: string;
+}
+
 // ── Union ───────────────────────────────────────────────────
 
 export type ExecutionEvent =
 	| RunCreatedEvent
 	| RunStartedEvent
 	| RunCompletedEvent
+	| RunSuspendedEvent
+	| RunResumedEvent
 	| ExecutionStartedEvent
 	| CommandExecutionCompleteEvent
 	| ModelTokenDeltaEvent
@@ -117,7 +183,10 @@ export type ExecutionEvent =
 	| ToolCallCompletedEvent
 	| EvidenceRecordedEvent
 	| PolicyDecisionEvent
-	| ExecutionErrorEvent;
+	| ExecutionErrorEvent
+	| PolicyBudgetBreachedEvent
+	| GraphStartedEvent
+	| GraphCompletedEvent;
 
 /** All possible event kind values. */
 export type ExecutionEventKind = ExecutionEvent["kind"];
@@ -153,3 +222,5 @@ export function createEventBus(): EventBus {
 		},
 	};
 }
+
+export { createRunScopedBus } from "./run-scoped-bus.js";

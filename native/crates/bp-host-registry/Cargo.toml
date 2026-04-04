@@ -1,0 +1,13 @@
+[package]
+name = "bp-host-registry"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+bp-host-claude.workspace = true
+bp-host-codex.workspace = true
+bp-host-sdk.workspace = true
+
+[dev-dependencies]
+futures.workspace = true

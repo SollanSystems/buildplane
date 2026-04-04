@@ -11,13 +11,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v5
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version-file: .node-version
           cache: pnpm
@@ -25,14 +25,89 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Lint
-        run: pnpm lint
+      - name: Assert no dist directories before build
+        run: |
+          for d in apps/cli/dist packages/*/dist; do
+            if [ -d "$d" ]; then
+              echo "FAIL: $d exists before build" >&2
+              exit 1
+            fi
+          done
+          echo "OK: no dist directories found"
 
-      - name: Build
-        run: pnpm build
+      - name: Dev bootstrap smoke (before build)
+        run: |
+          pnpm buildplane init
+          RUN_OUTPUT=$(pnpm buildplane run --packet test/fixtures/dev-bootstrap/packet.json 2>&1)
+          echo "$RUN_OUTPUT"
+          RUN_ID=$(echo "$RUN_OUTPUT" | grep '^run-id:' | awk '{print $2}')
+          if [ -z "$RUN_ID" ]; then
+            echo "FAIL: could not capture run id" >&2
+            exit 1
+          fi
+          echo "Captured RUN_ID=$RUN_ID"
+          pnpm buildplane status --json
+          pnpm buildplane inspect "$RUN_ID" --json
 
-      - name: Typecheck
-        run: pnpm typecheck
+      - name: Assert clean worktree after smoke
+        run: |
+          BP=".buildplane"
+          DIRTY=$(git status --porcelain --untracked-files=all -- . \
+            ":(exclude)${BP}/state.db" \
+            ":(exclude)${BP}/project.json" \
+            ":(exclude)${BP}/artifacts/**" \
+            ":(exclude)${BP}/evidence/**" \
+            ":(exclude)${BP}/runs/**" \
+            ":(exclude)${BP}/logs/**" \
+            ":(exclude)${BP}/workspaces/**")
+          if [ -n "$DIRTY" ]; then
+            echo "FAIL: worktree is dirty after smoke:" >&2
+            echo "$DIRTY" >&2
+            exit 1
+          fi
+          echo "OK: worktree is clean (excluding Buildplane-managed state)"
 
-      - name: Test
-        run: pnpm test
+      - name: Assert no dist directories created by smoke
+        run: |
+          for d in apps/cli/dist packages/*/dist; do
+            if [ -d "$d" ]; then
+              echo "FAIL: $d was created by smoke" >&2
+              exit 1
+            fi
+          done
+          echo "OK: no dist directories after smoke"
+
+      - name: Clean Buildplane state before build
+        run: |
+          rm -rf .buildplane/project.json \
+                 .buildplane/state.db \
+                 .buildplane/artifacts \
+                 .buildplane/evidence \
+                 .buildplane/runs \
+                 .buildplane/logs \
+                 .buildplane/workspaces \
+                 tmp
+
+      - name: Verify published bootstrap
+        run: pnpm verify:published-bootstrap
+
+  verify-wrong-node:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v5
+
+      - name: Setup Node (wrong version for guard check)
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24.13.0"
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify wrong-Node guard
+        run: BUILDPLANE_EXPECT_UNSUPPORTED_NODE=1 node ./scripts/published-bootstrap/verify-wrong-node.mjs

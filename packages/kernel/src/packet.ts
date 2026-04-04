@@ -5,7 +5,14 @@ import type {
 	ToolDefinition,
 	UnitPacket,
 } from "./run-loop.js";
-import type { Unit } from "./types.js";
+import type {
+	ExecutionRole,
+	MergePolicy,
+	StrategyChild,
+	StrategyMode,
+	StrategyPacket,
+	Unit,
+} from "./types.js";
 
 export function parseUnitPacket(input: string): UnitPacket {
 	const packet = asRecord(JSON.parse(input), "packet");
@@ -60,10 +67,7 @@ export function parseUnitPacket(input: string): UnitPacket {
 			) ?? [],
 	};
 
-	const routingHints =
-		packet.routingHints === undefined
-			? undefined
-			: parseRoutingHints(packet.routingHints);
+	const routingHints = parseRoutingHints(packet.routingHints);
 
 	if (hasExecution) {
 		return {
@@ -101,60 +105,64 @@ function parseModelBlock(raw: unknown): ModelExecutionBlock {
 		"systemPrompt",
 		"packet.model",
 	);
-
-	// prompt: optional, but must not be empty if present
-	const promptRaw = record.prompt;
-	if (promptRaw !== undefined) {
-		if (typeof promptRaw !== "string" || promptRaw.length === 0) {
-			throw new TypeError("model.prompt must not be empty if present");
-		}
-	}
-	const prompt = promptRaw as string | undefined;
-
+	const prompt = readOptionalString(record, "prompt", "packet.model");
 	const tools = parseOptionalTools(record.tools);
 
 	return {
 		provider: readRequiredString(record, "provider", "packet.model"),
 		model: readRequiredString(record, "model", "packet.model"),
-		...(systemPrompt === undefined ? {} : { systemPrompt }),
 		...(prompt === undefined ? {} : { prompt }),
+		...(systemPrompt === undefined ? {} : { systemPrompt }),
 		...(tools === undefined ? {} : { tools }),
 	};
 }
 
-function parseRoutingHints(raw: unknown): RoutingHints {
-	const record = asRecord(raw, "packet.routingHints");
+const VALID_PREFERRED_WORKERS = new Set(["claude-code", "codex"]);
 
-	const preferredWorkerRaw = record.preferredWorker;
-	if (preferredWorkerRaw !== undefined) {
-		if (preferredWorkerRaw !== "claude-code") {
-			throw new TypeError(
-				`packet.routingHints.preferredWorker must be "claude-code" if present, got: ${String(preferredWorkerRaw)}`,
-			);
-		}
+function parseRoutingHints(raw: unknown): RoutingHints | undefined {
+	if (raw === undefined) {
+		return undefined;
 	}
-	const preferredWorker = preferredWorkerRaw as "claude-code" | undefined;
+
+	const record = asRecord(raw, "packet.routingHints");
+	const preferredWorker = readOptionalString(
+		record,
+		"preferredWorker",
+		"packet.routingHints",
+	);
+
+	if (
+		preferredWorker !== undefined &&
+		!VALID_PREFERRED_WORKERS.has(preferredWorker)
+	) {
+		throw new TypeError(
+			`packet.routingHints.preferredWorker must be one of: ${[...VALID_PREFERRED_WORKERS].join(", ")}`,
+		);
+	}
 
 	const preferredModel = readOptionalString(
 		record,
 		"preferredModel",
 		"packet.routingHints",
 	);
+	const effort = readOptionalString(record, "effort", "packet.routingHints");
 
-	const effortRaw = record.effort;
-	if (effortRaw !== undefined) {
-		if (effortRaw !== "low" && effortRaw !== "medium" && effortRaw !== "high") {
-			throw new TypeError(
-				`packet.routingHints.effort must be "low", "medium", or "high" if present, got: ${String(effortRaw)}`,
-			);
-		}
+	if (effort !== undefined && !["low", "medium", "high"].includes(effort)) {
+		throw new TypeError(
+			"packet.routingHints.effort must be one of: low, medium, high",
+		);
 	}
-	const effort = effortRaw as "low" | "medium" | "high" | undefined;
 
 	return {
-		...(preferredWorker === undefined ? {} : { preferredWorker }),
+		...(preferredWorker === undefined
+			? {}
+			: {
+					preferredWorker: preferredWorker as RoutingHints["preferredWorker"],
+				}),
 		...(preferredModel === undefined ? {} : { preferredModel }),
-		...(effort === undefined ? {} : { effort }),
+		...(effort === undefined
+			? {}
+			: { effort: effort as RoutingHints["effort"] }),
 	};
 }
 
@@ -239,4 +247,122 @@ function readOptionalStringArray(
 	}
 
 	return value;
+}
+
+// ── StrategyPacket parser ───────────────────────────────────
+
+const VALID_STRATEGY_MODES = new Set<StrategyMode>([
+	"single",
+	"implement-then-review",
+	"parallel-candidates",
+	"escalate-on-disagreement",
+	"adversarial",
+]);
+
+const VALID_MERGE_POLICIES = new Set<MergePolicy>([
+	"direct",
+	"reviewer-must-approve",
+	"best-by-objective",
+	"judge-decides",
+	"adversary-loop",
+]);
+
+const VALID_EXECUTION_ROLES = new Set<ExecutionRole>([
+	"implementer",
+	"reviewer",
+	"adversary",
+	"judge",
+	"candidate",
+]);
+
+export function parseStrategyPacket(raw: unknown): StrategyPacket {
+	const packet = asRecord(raw, "strategyPacket");
+
+	const id = readRequiredString(packet, "id", "strategyPacket");
+
+	const modeRaw = readRequiredString(packet, "mode", "strategyPacket");
+	if (!VALID_STRATEGY_MODES.has(modeRaw as StrategyMode)) {
+		throw new TypeError(
+			`strategyPacket.mode must be one of: ${[...VALID_STRATEGY_MODES].join(", ")}`,
+		);
+	}
+	const mode = modeRaw as StrategyMode;
+
+	const mergePolicyRaw = readRequiredString(
+		packet,
+		"mergePolicy",
+		"strategyPacket",
+	);
+	if (!VALID_MERGE_POLICIES.has(mergePolicyRaw as MergePolicy)) {
+		throw new TypeError(
+			`strategyPacket.mergePolicy must be one of: ${[...VALID_MERGE_POLICIES].join(", ")}`,
+		);
+	}
+	const mergePolicy = mergePolicyRaw as MergePolicy;
+
+	if (!Array.isArray(packet.children) || packet.children.length === 0) {
+		throw new TypeError("strategyPacket.children must be a non-empty array");
+	}
+
+	const childUnitIds = new Set<string>();
+	const children: StrategyChild[] = (packet.children as unknown[]).map(
+		(rawChild: unknown, i: number) => {
+			const child = asRecord(rawChild, `strategyPacket.children[${i}]`);
+
+			const roleRaw = readRequiredString(
+				child,
+				"role",
+				`strategyPacket.children[${i}]`,
+			);
+			if (!VALID_EXECUTION_ROLES.has(roleRaw as ExecutionRole)) {
+				throw new TypeError(
+					`strategyPacket.children[${i}].role must be one of: ${[...VALID_EXECUTION_ROLES].join(", ")}`,
+				);
+			}
+			const role = roleRaw as ExecutionRole;
+
+			const packetRecord = asRecord(
+				child.packet,
+				`strategyPacket.children[${i}].packet`,
+			);
+			const childPacket = parseUnitPacket(JSON.stringify(packetRecord));
+			childUnitIds.add(childPacket.unit.id);
+
+			const dependsOnRaw = child.dependsOn;
+			let dependsOn: readonly string[] | undefined;
+			if (dependsOnRaw !== undefined) {
+				if (
+					!Array.isArray(dependsOnRaw) ||
+					dependsOnRaw.some((x) => typeof x !== "string")
+				) {
+					throw new TypeError(
+						`strategyPacket.children[${i}].dependsOn must be an array of strings`,
+					);
+				}
+				dependsOn = dependsOnRaw as string[];
+			}
+
+			return {
+				packet: childPacket,
+				role,
+				...(dependsOn !== undefined ? { dependsOn } : {}),
+			};
+		},
+	);
+
+	// Validate dependsOn references point to valid child unit IDs
+	for (let i = 0; i < children.length; i++) {
+		const child = children[i];
+		if (child.dependsOn) {
+			for (const ref of child.dependsOn) {
+				if (!childUnitIds.has(ref)) {
+					throw new TypeError(
+						`strategyPacket.children[${i}].dependsOn references unknown unit id "${ref}"`,
+					);
+				}
+			}
+		}
+	}
+
+	return { id, mode, children, mergePolicy };
 }

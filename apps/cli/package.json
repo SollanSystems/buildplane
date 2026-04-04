@@ -7,13 +7,19 @@
 	"bin": {
 		"buildplane": "./dist/index.js"
 	},
+	"engines": {
+		"node": "24.13.1"
+	},
 	"scripts": {
 		"build": "tsc --build",
 		"test": "vitest --run"
 	},
 	"dependencies": {
-		"@buildplane/kernel": "workspace:*",
+		"@buildplane/adapters-codex": "workspace:*",
+		"@buildplane/adapters-honcho": "workspace:*",
+		"@buildplane/adapters-git": "workspace:*",
 		"@buildplane/adapters-models": "workspace:*",
+		"@buildplane/kernel": "workspace:*",
 		"@buildplane/policy": "workspace:*",
 		"@buildplane/runtime": "workspace:*",
 		"@buildplane/storage": "workspace:*",
