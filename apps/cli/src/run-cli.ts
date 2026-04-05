@@ -56,6 +56,7 @@ function formatTopLevelHelp(): string[] {
 		"  buildplane pack show <pack-id>",
 		"  buildplane install",
 		"  buildplane uninstall --force",
+		"  demo [--model]         Run flywheel proof-of-value demo",
 	];
 }
 
@@ -525,6 +526,13 @@ export async function runCli(
 			} catch (error) {
 				throw createNativeDispatchError(["uninstall"], error);
 			}
+		}
+
+		if (command === "demo") {
+			const modelFlag = rest.includes("--model");
+			const { runDemo } = await import("./demo.js");
+			await runDemo({ model: modelFlag });
+			return 0;
 		}
 
 		const bundle: CliOrchestratorBundle = deps?.createOrchestrator

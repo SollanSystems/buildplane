@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createCommandPacket1, createCommandPacket2 } from "../src/demo.js";
+import { runCli } from "../src/run-cli.js";
 
 describe("demo packet factories", () => {
 	it("creates command packet 1 with correct structure", () => {
@@ -20,4 +21,46 @@ describe("demo packet factories", () => {
 		expect(packet.verification.requiredOutputs).toContain("output/summary.txt");
 		expect(packet.intent.objective).toBe("Summarize workspace state");
 	});
+});
+
+describe("CLI demo dispatch", () => {
+	it("dispatches buildplane demo and exits 0", async () => {
+		const originalWrite = process.stdout.write;
+		process.stdout.write = (() => true) as typeof process.stdout.write;
+		try {
+			const exitCode = await runCli(["demo"], {
+				stdout: () => {},
+				stderr: () => {},
+			});
+			expect(exitCode).toBe(0);
+		} finally {
+			process.stdout.write = originalWrite;
+		}
+	}, 15_000);
+});
+
+describe("runDemo integration", () => {
+	it("runs two command packets and proves flywheel loop", async () => {
+		const output: string[] = [];
+		const originalWrite = process.stdout.write;
+		process.stdout.write = ((chunk: string) => {
+			output.push(chunk);
+			return true;
+		}) as typeof process.stdout.write;
+
+		try {
+			const { runDemo } = await import("../src/demo.js");
+			await runDemo({ model: false });
+		} finally {
+			process.stdout.write = originalWrite;
+		}
+
+		const text = output.join("");
+		expect(text).toContain("Buildplane Flywheel Demo");
+		expect(text).toContain("Passed");
+		expect(text).toContain("Flywheel closed");
+		expect(text).toContain("learnings found");
+		expect(text).toContain("[fact]");
+		expect(text).toContain("[decision]");
+	}, 15_000);
 });
