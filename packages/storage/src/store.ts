@@ -149,6 +149,33 @@ function ensureRunsStrategyColumns(database: DatabaseSync): void {
 	}
 }
 
+function ensureRunLearningsTable(database: DatabaseSync): void {
+	database.exec(`
+		CREATE TABLE IF NOT EXISTS run_learnings (
+			id               TEXT PRIMARY KEY,
+			run_id           TEXT NOT NULL,
+			scope            TEXT NOT NULL,
+			kind             TEXT NOT NULL,
+			title            TEXT NOT NULL,
+			body             TEXT NOT NULL,
+			status           TEXT NOT NULL DEFAULT 'active',
+			promoted_from_id TEXT,
+			source_run_id    TEXT,
+			created_at       TEXT NOT NULL,
+			updated_at       TEXT NOT NULL
+		)
+	`);
+	database.exec(
+		`CREATE INDEX IF NOT EXISTS idx_run_learnings_run_id ON run_learnings (run_id)`,
+	);
+	database.exec(
+		`CREATE INDEX IF NOT EXISTS idx_run_learnings_scope ON run_learnings (scope)`,
+	);
+	database.exec(
+		`CREATE INDEX IF NOT EXISTS idx_run_learnings_status ON run_learnings (status)`,
+	);
+}
+
 function tableExists(database: DatabaseSync, tableName: string): boolean {
 	const row = database
 		.prepare(
@@ -242,6 +269,7 @@ export function bootstrapStorageProjectionSchema(database: DatabaseSync): void {
 	ensureEvidenceMessageColumn(database);
 	ensureRunsUsedWorkspaceColumn(database);
 	ensureRunsStrategyColumns(database);
+	ensureRunLearningsTable(database);
 	assertWorkspaceTableColumns(database);
 }
 

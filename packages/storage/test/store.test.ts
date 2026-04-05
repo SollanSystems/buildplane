@@ -17,7 +17,10 @@ import type {
 } from "@buildplane/kernel";
 import { describe, expect, it } from "vitest";
 import { createBuildplaneStorage } from "../src";
-import { createStorageStore } from "../src/store";
+import {
+	bootstrapStorageProjectionSchema,
+	createStorageStore,
+} from "../src/store";
 
 const packet: UnitPacket = {
 	unit: {
@@ -798,5 +801,26 @@ describe("storage adapter", () => {
 		expect(() => storage.getStatusSnapshot()).toThrow(
 			/missing required projection schema|repair/i,
 		);
+	});
+
+	it("bootstraps run_learnings table on fresh init", () => {
+		const dir = mkdtempSync(join(tmpdir(), "bp-store-learnings-"));
+		const db = new DatabaseSync(join(dir, "state.db"));
+		bootstrapStorageProjectionSchema(db);
+		const tables = db
+			.prepare(
+				`SELECT name FROM sqlite_master WHERE type='table' AND name='run_learnings'`,
+			)
+			.all() as { name: string }[];
+		expect(tables).toHaveLength(1);
+		db.close();
+	});
+
+	it("run_learnings migration is idempotent", () => {
+		const dir = mkdtempSync(join(tmpdir(), "bp-store-learnings-idem-"));
+		const db = new DatabaseSync(join(dir, "state.db"));
+		bootstrapStorageProjectionSchema(db);
+		expect(() => bootstrapStorageProjectionSchema(db)).not.toThrow();
+		db.close();
 	});
 });
