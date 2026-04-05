@@ -138,14 +138,15 @@ describe("extractLearnings", () => {
 		expect(workflow?.body.toLowerCase()).toContain("feedback");
 	});
 
-	it("returns no learnings for unknown decision outcome", () => {
+	it("handles approved decision with empty reasons using fallback body", () => {
 		const learnings = extractLearnings({
 			run: baseRun,
 			receipt: baseReceipt,
 			decision: { kind: "advance-run", outcome: "approved", reasons: [] },
 			packet: basePacket,
 		});
-		// approved with no reasons still produces a fact
-		expect(Array.isArray(learnings)).toBe(true);
+		const fact = learnings.find((l) => l.kind === "fact");
+		expect(fact).toBeDefined();
+		expect(fact?.body).toContain("run completed successfully");
 	});
 });
