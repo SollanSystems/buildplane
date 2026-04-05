@@ -42,6 +42,11 @@ export function extractLearnings(
 	const { decision, packet, attemptCount = 0 } = input;
 	const learnings: ExtractedLearning[] = [];
 
+	// Defensive: this function is only meaningful on resolved runs
+	if (decision.outcome !== "approved" && decision.outcome !== "rejected") {
+		return learnings;
+	}
+
 	// Rule 1: Approved run → session-scoped fact
 	if (decision.outcome === "approved") {
 		const reasons =
@@ -96,9 +101,7 @@ export function extractLearnings(
 	const roundCount = input.strategyResult?.rounds?.length ?? 0;
 	if (roundCount > 1) {
 		const feedback =
-			input.decision.reasons.length > 0
-				? input.decision.reasons.join("; ")
-				: "none";
+			decision.reasons.length > 0 ? decision.reasons.join("; ") : "none";
 		learnings.push({
 			kind: "workflow",
 			scope: "workspace",

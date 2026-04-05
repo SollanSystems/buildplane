@@ -113,7 +113,7 @@ describe("extractLearnings", () => {
 		const heuristic = learnings.find((l) => l.kind === "provider_heuristic");
 		expect(heuristic).toBeDefined();
 		expect(heuristic?.scope).toBe("workspace");
-		expect(heuristic?.body).toContain("attempt");
+		expect(heuristic?.body).toContain("2 attempt");
 	});
 
 	it("extracts a workspace-scoped workflow when strategy used multiple rounds", () => {
