@@ -7,8 +7,10 @@ import {
 	type GraphResult,
 	type UnitGraph,
 } from "./graph.js";
+import { extractLearnings } from "./outcome-extractor.js";
 import type { BudgetConstraints, PolicyProfile } from "./policy.js";
 import type {
+	BuildplaneMemoryPort,
 	BuildplanePolicyPort,
 	BuildplaneProfileRegistryPort,
 	BuildplaneRuntimePort,
@@ -63,6 +65,7 @@ export interface CreateBuildplaneOrchestratorOptions {
 	readonly eventBus?: EventBus;
 	readonly profileRegistry?: BuildplaneProfileRegistryPort;
 	readonly budgets?: BudgetConstraints;
+	readonly memoryPort?: BuildplaneMemoryPort;
 }
 
 export function createBuildplaneOrchestrator(
@@ -72,6 +75,7 @@ export function createBuildplaneOrchestrator(
 	const profileRegistry = options.profileRegistry;
 	const topLevelBudgets = options.budgets;
 	const defaultBus = options.eventBus ?? noopBus;
+	const memoryPort = options.memoryPort;
 
 	function infrastructureFailure(
 		kind: string,
@@ -305,6 +309,23 @@ export function createBuildplaneOrchestrator(
 					workspaceStatus: "retained",
 				});
 
+				// Extract constraint learnings from rejection — silent
+				if (memoryPort) {
+					try {
+						const learnings = extractLearnings({
+							run: failedRun,
+							receipt,
+							decision: rejectedDecision,
+							packet: validatedPacket,
+						});
+						if (learnings.length > 0) {
+							memoryPort.writeLearnings(failedRun.id, learnings);
+						}
+					} catch {
+						// Silent
+					}
+				}
+
 				return {
 					run: failedRun,
 					receipt,
@@ -372,6 +393,23 @@ export function createBuildplaneOrchestrator(
 				workspace: preparedWorkspace,
 				workspaceStatus: "retained",
 			});
+		}
+
+		// Extract and persist learnings — silent, never breaks the run
+		if (memoryPort) {
+			try {
+				const learnings = extractLearnings({
+					run: completedRun,
+					receipt,
+					decision: approvedDecision,
+					packet: validatedPacket,
+				});
+				if (learnings.length > 0) {
+					memoryPort.writeLearnings(completedRun.id, learnings);
+				}
+			} catch {
+				// Silent — follows event bus subscriber convention
+			}
 		}
 
 		let cleanupResult: { deleted: boolean; cleanupError?: string };
