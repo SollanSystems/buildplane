@@ -14,9 +14,9 @@ This job is about **progress**: moving from fragmented, manual AI tool orchestra
 
 | Dimension | Description | Why It Matters |
 |-----------|-------------|----------------|
-| **Functional** | Orchestrate AI coding agents with shared memory, execution isolation (git worktrees), quality gates, and reproducible workflows -- all from the CLI | Without this, every session starts from zero. You lose time re-explaining architecture, conventions, and preferences. The kernel must own scheduling, state, policy, and verification -- not the model. |
-| **Emotional** | Feel in control and confident that delegated work won't blow up the repo; trust the system to "just work" without constant supervision | The biggest barrier to AI adoption isn't capability -- it's anxiety about losing control of your codebase. Verification contracts and evidence-first execution address this directly. |
-| **Social** | Be seen as a serious builder who uses systems, not hacks; ship fast without looking reckless | Power users want to be known for shipping quality work, not for being the person who merged broken AI output. Strategy modes (implement-then-review, adversarial, parallel-candidates) formalize this. |
+| **Functional** | Orchestrate AI coding agents with shared memory, execution isolation, quality gates, and reproducible workflows -- all from the CLI | Without this, every session starts from zero. You lose time re-explaining architecture, conventions, and preferences. |
+| **Emotional** | Feel in control and confident that delegated work won't blow up the repo; trust the system to "just work" without constant supervision | The biggest barrier to AI adoption isn't capability -- it's anxiety about losing control of your codebase. |
+| **Social** | Be seen as a serious builder who uses systems, not hacks; ship fast without looking reckless | Power users want to be known for shipping quality work, not for being the person who merged broken AI output. |
 
 ## The Big Hire vs Little Hire
 
@@ -34,27 +34,26 @@ The repeated, moment-to-moment decision: "Should I use Buildplane for this, or j
 - Memory from previous runs makes each run smarter
 - Quality gates catch issues before I review
 - Isolation (worktrees) lets me parallelize safely
-- Strategy execution (implement-then-review, adversarial) delivers better results than I could alone
 
 **Little Hire fails when:**
 - Setup overhead exceeds task complexity
+- Configuration drift between runs
 - A run takes 10 minutes of config to save 30 minutes of work
-- Error messages are cryptic and force debugging the framework instead of code
-- The 505 passing tests hide the fact that Node version guard (now fixed) was blocking local dev
+- Error messages are cryptic and force me to debug the framework instead of my code
 
-**Retention rule:** Every failed run, confusing error, or "it would be faster to just do it myself" moment chips away at adoption.
+**Retention rule:** Every failed run, confusing error, or "it would be faster to just do it myself" moment chips away at adoption. The Little Hire metric is: % of runs that complete without human intervention.
 
 ## Forces of Progress
 
 | Force | Assessment | Intervention |
 |-------|-----------|-------------|
 | **Push** (frustration with current state) | Medium -- power users feel fragmentation acutely | Name it: "Stop being the glue between your AI tools" |
-| **Pull** (attraction of Buildplane) | Strong -- unified memory + multi-agent orchestration is compelling | Show implement-then-review strategy in 30 seconds |
-| **Anxiety** (fear of the new) | High -- "will this break my workflow?" | Evidence-first approach: every action produces receipts, artifacts, and verification signals |
-| **Habit** (comfort with current behavior) | High -- existing snippets, tmux, muscle memory | Import layer: bring your existing prompt packets and workflows |
+| **Pull** (attraction of Buildplane) | Strong -- unified memory + multi-agent orchestration is compelling | Show, don't tell: 30-second demo of memory flowing between Claude and Codex |
+| **Anxiety** (fear of the new) | High -- "will this break my workflow?" | Zero-config defaults, rollback guarantees, local-only storage |
+| **Habit** (comfort with current behavior) | High -- existing snippets, tmux, muscle memory | Import layer: "Bring your existing prompts, we'll structure them" |
 
 **Change formula:** Push + Pull > Habit + Anxiety
-Currently, Habit + Anxiety may still win for most users. The kernel abstraction (model as worker, not system) is the key differentiator.
+Currently, Habit + Anxiety may still win for most users. The highest-ROI improvements are reducing Anxiety and Habit friction.
 
 ## Competitive Landscape (Non-Obvious)
 
@@ -62,9 +61,8 @@ Currently, Habit + Anxiety may still win for most users. The kernel abstraction 
 |------------|----------|-------------|
 | Raw Claude Code / Codex CLI | Direct simplicity | "One command, no setup" |
 | Cursor / Windsurf | IDE integration | "It's in my editor with zero config" |
-| Devin (Cognition) | Autonomous agent | "It just works -- I don't need to orchestrate" |
-| Devin (Cognition) | Autonomy without config | "One tool, zero setup" |
 | Custom tmux + prompt snippets | Workaround | "I've already invested in this" |
+| Devin / Aider | Single-product | "One tool, one workflow" |
 | GitHub Copilot agent | Big-tech default | "Already installed, works OK" |
 | **Doing nothing / manual coding** | **Non-consumption** | **"I'll just write it myself, it's faster"** |
 
@@ -84,32 +82,10 @@ Currently, Habit + Anxiety may still win for most users. The kernel abstraction 
 
 **Overall JTBD Score: 6/10**
 
-## Feature-to-Job Mapping (Current Repo State)
-
-| Feature | Job Dimension | Status |
-|---------|--------------|--------|
-| Kernel orchestrator (865 LOC) | Functional | IMPLEMENTED |
-| Strategy execution (implement-then-review, adversarial) | Functional + Emotional | IMPLEMENTED |
-| Event bus + run-scoped-bus | Functional | IMPLEMENTED |
-| SQLite evidence store | Functional | IMPLEMENTED |
-| Policy budgets + trust gates | Functional + Emotional | IMPLEMENTED |
-| Git worktree isolation | Functional + Social | IMPLEMENTED |
-| Honcho memory adapter | Functional | IMPLEMENTED |
-| Multi-agent rendering (Claude/Codex) | Functional | IMPLEMENTED |
-| Operator inspection + replay | Emotional | IMPLEMENTED |
-| Published bootstrap staging | Social (trust) | IMPLEMENTED |
-
-**Gaps vs the job:**
-1. No zero-config install -- still requires `pnpm install` and Node 24+ setup
-2. No workflow import from existing Claude Code / Codex setups
-3. Memory promotion between packs not fully wired end-to-end
-4. No eval harness to benchmark against raw agents
-5. TUI exists (ui-tui) as skeleton only -- no visual operator experience
-
 ## Key Recommendations
 
 1. **Measure Little Hire**: Track "% of runs that complete without human intervention" as the north-star retention metric
-2. **Implement-then-review as killer feature**: This is Buildplane's most compelling differentiator vs raw agents. Make it the default path.
-3. **One-line installer**: `curl -fsSL buildplane.dev/install | bash` or `npm install -g buildplane`
-4. **Import existing workflows**: Reduce Habit friction by scanning Claude Code / Codex configs
-5. **Eval harness**: Build benchmarks to validate "best in the world" claims
+2. **Reduce installation friction**: One-step install (`npm install -g buildplane`), zero-config default
+3. **Memory promotion**: When one pack learns something, make it visible to other packs automatically
+4. **Eval harness**: Build benchmarks to validate "best in the world" claims
+5. **Import existing workflows**: Reduce Habit friction by accepting user's current prompt snippets and tmux configs
