@@ -1,0 +1,80 @@
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
+import type { ExtractedLearning } from "@buildplane/kernel";
+import { describe, expect, it } from "vitest";
+import { createLearningStore } from "../src/learning-store.js";
+import { bootstrapStorageProjectionSchema } from "../src/store.js";
+
+function makeDb(): DatabaseSync {
+	const dir = mkdtempSync(join(tmpdir(), "bp-learnings-"));
+	const db = new DatabaseSync(join(dir, "state.db"));
+	bootstrapStorageProjectionSchema(db);
+	return db;
+}
+
+const learning: ExtractedLearning = {
+	kind: "fact",
+	scope: "session",
+	title: "Run approved",
+	body: "All checks passed",
+};
+
+describe("createLearningStore", () => {
+	it("writes and fetches a learning", () => {
+		const store = createLearningStore(makeDb());
+		store.writeLearnings("run-1", [learning]);
+		const results = store.fetchLearnings();
+		expect(results).toHaveLength(1);
+		expect(results[0].kind).toBe("fact");
+		expect(results[0].runId).toBe("run-1");
+		expect(results[0].status).toBe("active");
+	});
+
+	it("filters by scope", () => {
+		const store = createLearningStore(makeDb());
+		store.writeLearnings("run-1", [
+			{ ...learning, scope: "session" },
+			{ ...learning, scope: "workspace" },
+		]);
+		const session = store.fetchLearnings({ scope: "session" });
+		expect(session).toHaveLength(1);
+		expect(session[0].scope).toBe("session");
+	});
+
+	it("filters by kind", () => {
+		const store = createLearningStore(makeDb());
+		store.writeLearnings("run-1", [
+			{ ...learning, kind: "fact" },
+			{ ...learning, kind: "constraint" },
+		]);
+		const constraints = store.fetchLearnings({ kind: "constraint" });
+		expect(constraints).toHaveLength(1);
+		expect(constraints[0].kind).toBe("constraint");
+	});
+
+	it("respects the limit option", () => {
+		const store = createLearningStore(makeDb());
+		const many = Array.from({ length: 5 }, (_, i) => ({
+			...learning,
+			title: `learning ${i}`,
+		}));
+		store.writeLearnings("run-1", many);
+		expect(store.fetchLearnings({ limit: 3 })).toHaveLength(3);
+	});
+
+	it("only returns active learnings", () => {
+		const db = makeDb();
+		const store = createLearningStore(db);
+		store.writeLearnings("run-1", [learning]);
+		db.prepare(
+			`UPDATE run_learnings SET status = 'archived' WHERE run_id = 'run-1'`,
+		).run();
+		expect(store.fetchLearnings()).toHaveLength(0);
+	});
+
+	it("returns empty array when no learnings exist", () => {
+		expect(createLearningStore(makeDb()).fetchLearnings()).toEqual([]);
+	});
+});

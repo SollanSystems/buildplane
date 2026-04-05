@@ -1,0 +1,7 @@
+{
+	"name": "@buildplane/compat-gsd",
+	"private": true,
+	"version": "0.1.0",
+	"type": "module",
+	"description": "Import bridge from legacy .gsd projects into Buildplane"
+}

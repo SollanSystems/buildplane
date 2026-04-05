@@ -1,0 +1,16 @@
+{
+	"name": "@buildplane/adapters-tools",
+	"private": true,
+	"version": "0.1.0",
+	"type": "module",
+	"description": "Tool adapter layer — worktree-sandboxed tools for model execution",
+	"exports": {
+		".": {
+			"types": "./src/index.ts",
+			"import": "./src/index.js"
+		}
+	},
+	"dependencies": {
+		"@buildplane/kernel": "workspace:*"
+	}
+}
