@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync, SQLInputValue } from "node:sqlite";
 import type {
 	BuildplaneMemoryPort,
 	ExtractedLearning,
@@ -53,7 +53,7 @@ export function createLearningStore(
 		}): readonly StoredLearning[] {
 			const { scope, kind, limit = 20 } = options ?? {};
 			const conditions: string[] = ["status = 'active'"];
-			const params: unknown[] = [];
+			const params: SQLInputValue[] = [];
 
 			if (scope) {
 				conditions.push("scope = ?");
@@ -73,7 +73,7 @@ export function createLearningStore(
            ORDER BY created_at DESC
            LIMIT ?`,
 				)
-				.all(...params) as LearningRow[];
+				.all(...params) as unknown as LearningRow[];
 
 			return rows.map((row) => ({
 				id: row.id,

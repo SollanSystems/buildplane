@@ -139,6 +139,7 @@ async function loadCliOrchestrator(
 			policy: { evaluateRun: (packet: unknown, receipt: unknown) => unknown };
 			workspace?: unknown;
 			eventBus?: unknown;
+			memoryPort?: unknown;
 		}) => BuildplaneCliOrchestrator;
 		createEventBus: () => {
 			subscribe: (listener: (event: unknown) => void) => () => void;
@@ -217,8 +218,11 @@ async function loadCliOrchestrator(
 	// ── Optional local memory port ──────────────────────────────
 	// Reads from the project's run_learnings table (state.db) if initialized.
 	// Only opened if state.db exists — never creates the file.
+	// Two separate connections: read-only for CLI enrichment (pre-run fetch),
+	// read-write for orchestrator post-run writes.
 
 	let memoryPortRef: MemoryPortLike | undefined;
+	let orchestratorMemoryPortRef: MemoryPortLike | undefined;
 	try {
 		const { resolveProjectLayout, createLearningStore } = (await import(
 			"@buildplane/storage"
@@ -229,11 +233,15 @@ async function loadCliOrchestrator(
 		const { DatabaseSync } = await import("node:sqlite");
 		const layout = resolveProjectLayout(projectRoot);
 		if (existsSync(layout.stateDbPath)) {
-			const db = new DatabaseSync(layout.stateDbPath, { readOnly: true });
-			memoryPortRef = createLearningStore(db);
+			// Read-only connection for CLI enrichment (pre-run fetch)
+			const readDb = new DatabaseSync(layout.stateDbPath, { readOnly: true });
+			memoryPortRef = createLearningStore(readDb);
+			// Read-write connection for orchestrator post-run writes
+			const writeDb = new DatabaseSync(layout.stateDbPath);
+			orchestratorMemoryPortRef = createLearningStore(writeDb);
 		}
 	} catch {
-		// Memory port unavailable (e.g. project not yet initialized) — run without it
+		// Memory ports unavailable — run without them
 	}
 
 	// Runtime router: selects executor based on packet type and routing hints
@@ -309,6 +317,7 @@ async function loadCliOrchestrator(
 		policy: { evaluateRun: policy.evaluateRun },
 		workspace: adaptersGit.createGitWorktreeAdapter(),
 		eventBus,
+		memoryPort: orchestratorMemoryPortRef, // READ-WRITE port for post-run writes
 	});
 
 	return {
