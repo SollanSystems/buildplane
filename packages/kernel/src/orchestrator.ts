@@ -253,11 +253,17 @@ export function createBuildplaneOrchestrator(
 			run: Run;
 			validatedPacket: UnitPacket;
 			workspace: WorkspaceSnapshot;
+			attemptCount?: number;
 		},
 		receipt: ExecutionReceipt,
 		preEvaluatedDecision?: PolicyDecision,
 	): RunPacketResult {
-		const { run, validatedPacket, workspace: preparedWorkspace } = ctx;
+		const {
+			run,
+			validatedPacket,
+			workspace: preparedWorkspace,
+			attemptCount,
+		} = ctx;
 
 		if (!preEvaluatedDecision) {
 			try {
@@ -317,6 +323,7 @@ export function createBuildplaneOrchestrator(
 							receipt,
 							decision: rejectedDecision,
 							packet: validatedPacket,
+							attemptCount,
 						});
 						if (learnings.length > 0) {
 							memoryPort.writeLearnings(failedRun.id, learnings);
@@ -403,6 +410,7 @@ export function createBuildplaneOrchestrator(
 					receipt,
 					decision: approvedDecision,
 					packet: validatedPacket,
+					attemptCount,
 				});
 				if (learnings.length > 0) {
 					memoryPort.writeLearnings(completedRun.id, learnings);
@@ -719,7 +727,11 @@ export function createBuildplaneOrchestrator(
 					});
 
 					if (decision.kind !== "retry-run") {
-						return finalizeRun(ctx, currentReceipt, decision);
+						return finalizeRun(
+							{ ...ctx, attemptCount },
+							currentReceipt,
+							decision,
+						);
 					}
 
 					// Retry: augment packet with feedback and re-execute
@@ -895,7 +907,74 @@ export function createBuildplaneOrchestrator(
 			strategy: StrategyPacket,
 			eventBus?: EventBus,
 		): Promise<StrategyResult> {
-			return runStrategy(strategy, orchestrator, eventBus);
+			const strategyResult = await runStrategy(
+				strategy,
+				orchestrator,
+				eventBus,
+			);
+
+			// Post-strategy memory hook — fires once when all strategy children complete
+			if (
+				memoryPort &&
+				strategyResult.rounds &&
+				strategyResult.rounds.length > 1
+			) {
+				try {
+					const strategyDecision: PolicyDecision =
+						strategyResult.outcome === "passed"
+							? {
+									kind: "advance-run" as const,
+									outcome: "approved" as const,
+									reasons: strategyResult.mergeDecision.reasons,
+								}
+							: {
+									kind: "reject-run" as const,
+									outcome: "rejected" as const,
+									reasons: strategyResult.mergeDecision.reasons,
+								};
+
+					const learnings = extractLearnings({
+						run: {
+							id: strategyResult.strategyId,
+							unitId: strategyResult.strategyId,
+							status: strategyResult.outcome === "passed" ? "passed" : "failed",
+						},
+						receipt: {
+							command: "",
+							args: [],
+							cwd: "",
+							startedAt: new Date().toISOString(),
+							completedAt: new Date().toISOString(),
+							exitCode: strategyResult.outcome === "passed" ? 0 : 1,
+							stdout: "",
+							stderr: "",
+							outputChecks: [],
+						},
+						decision: strategyDecision,
+						packet: {
+							unit: {
+								id: strategyResult.strategyId,
+								kind: "command",
+								scope: "task",
+								inputRefs: [],
+								expectedOutputs: [],
+								verificationContract: "exit-0",
+								policyProfile: "default",
+							},
+							execution: { command: "", args: [] },
+							verification: { requiredOutputs: [] },
+						},
+						strategyResult,
+					});
+					if (learnings.length > 0) {
+						memoryPort.writeLearnings(strategyResult.strategyId, learnings);
+					}
+				} catch {
+					// Silent — follows event bus subscriber convention
+				}
+			}
+
+			return strategyResult;
 		},
 	};
 
