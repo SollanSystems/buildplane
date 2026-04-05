@@ -1,5 +1,10 @@
 import type { EventBus } from "./events.js";
 import type {
+	ExtractedLearning,
+	LearningKind,
+	LearningScope,
+} from "./outcome-extractor.js";
+import type {
 	BudgetConstraints,
 	PolicyProfile,
 	ResourceUsageSnapshot,
@@ -126,4 +131,28 @@ export interface BuildplaneWorkspacePort {
 		deleted: boolean;
 		cleanupError?: string;
 	};
+}
+
+export interface StoredLearning extends ExtractedLearning {
+	readonly id: string;
+	readonly runId: string;
+	readonly status: "active" | "superseded" | "archived";
+	readonly createdAt: string;
+}
+
+export interface BuildplaneMemoryPort {
+	/**
+	 * Persist extracted learnings for a completed run.
+	 * Synchronous (backed by DatabaseSync — never returns a Promise).
+	 */
+	writeLearnings(runId: string, learnings: readonly ExtractedLearning[]): void;
+	/**
+	 * Retrieve active learnings for injection into the next run's prompt.
+	 * Synchronous. Default limit: 20.
+	 */
+	fetchLearnings(options?: {
+		scope?: LearningScope;
+		kind?: LearningKind;
+		limit?: number;
+	}): readonly StoredLearning[];
 }

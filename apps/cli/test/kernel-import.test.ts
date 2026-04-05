@@ -25,6 +25,7 @@ describe("@buildplane/kernel package consumption", () => {
 				"createEventBus",
 				"createGraphScheduler",
 				"createResourceUsageSnapshot",
+				"extractLearnings",
 				"parseStrategyPacket",
 				"parseUnitPacket",
 				"validatePacketForWorkspaceRoot",

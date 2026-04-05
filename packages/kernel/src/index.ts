@@ -33,6 +33,13 @@ export type {
 	CreateBuildplaneOrchestratorOptions,
 } from "./orchestrator.js";
 export { createBuildplaneOrchestrator } from "./orchestrator.js";
+export type {
+	ExtractedLearning,
+	LearningKind,
+	LearningScope,
+	OutcomeExtractionInput,
+} from "./outcome-extractor.js";
+export { extractLearnings } from "./outcome-extractor.js";
 export { parseStrategyPacket, parseUnitPacket } from "./packet.js";
 export type {
 	BudgetConstraints,
@@ -43,12 +50,14 @@ export type {
 } from "./policy.js";
 export { createResourceUsageSnapshot } from "./policy.js";
 export type {
+	BuildplaneMemoryPort,
 	BuildplanePolicyPort,
 	BuildplaneProfileRegistryPort,
 	BuildplaneRuntimePort,
 	BuildplaneStoragePort,
 	BuildplaneWorkspacePort,
 	CreateRunOptions,
+	StoredLearning,
 } from "./ports.js";
 export type {
 	ApprovedPolicyDecision,
