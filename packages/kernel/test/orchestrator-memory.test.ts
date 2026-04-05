@@ -179,6 +179,43 @@ describe("orchestrator memory integration", () => {
 		expect(allLearnings.some((l) => l.kind === "constraint")).toBe(true);
 	});
 
+	it("does not write learnings on a retrying policy decision", () => {
+		const root = mkdtempSync(join(tmpdir(), "bp-orch-retry-"));
+		const writtenLearnings: {
+			runId: string;
+			learnings: readonly ExtractedLearning[];
+		}[] = [];
+
+		const memoryPort: BuildplaneMemoryPort = {
+			writeLearnings(runId, learnings) {
+				writtenLearnings.push({ runId, learnings });
+			},
+			fetchLearnings() {
+				return [];
+			},
+		};
+
+		const orch = createBuildplaneOrchestrator({
+			projectRoot: root,
+			storage: makeStorage("rejected"),
+			runtime: {
+				executePacket: vi.fn().mockReturnValue({ ...receipt, exitCode: 1 }),
+			} as unknown as BuildplaneRuntimePort,
+			policy: {
+				evaluateRun: vi.fn().mockReturnValue({
+					kind: "advance-run",
+					outcome: "retrying",
+					reasons: ["trying again"],
+				}),
+			} as unknown as BuildplanePolicyPort,
+			workspace: makeWorkspace(root),
+			memoryPort,
+		});
+
+		orch.runPacket(packet);
+		expect(writtenLearnings).toHaveLength(0);
+	});
+
 	it("does not throw when no memoryPort is provided (backwards compat)", () => {
 		const root = mkdtempSync(join(tmpdir(), "bp-orch-nomem-"));
 		const orch = createBuildplaneOrchestrator({

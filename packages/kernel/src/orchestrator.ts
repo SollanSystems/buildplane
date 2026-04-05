@@ -309,8 +309,8 @@ export function createBuildplaneOrchestrator(
 					workspaceStatus: "retained",
 				});
 
-				// Extract constraint learnings from rejection — silent
-				if (memoryPort) {
+				// Extract constraint learnings from rejection — silent (rejected outcome only, not retrying)
+				if (memoryPort && decision.outcome === "rejected") {
 					try {
 						const learnings = extractLearnings({
 							run: failedRun,
