@@ -10,6 +10,11 @@ import {
 	formatRunHistory,
 	formatRunResult,
 } from "./formatters.js";
+import {
+	enrichGraphWithMemories,
+	enrichPacketWithMemories,
+	enrichStrategyWithMemories,
+} from "./packet-enrichment.js";
 
 export interface RunCliDependencies {
 	createOrchestrator?: () => BuildplaneCliOrchestrator;
@@ -96,9 +101,29 @@ interface BuildplaneCliOrchestrator {
 	): { kind: string; run: { id: string } } & Record<string, unknown>;
 }
 
+interface HonchoPortLike {
+	createSubscriber(sessionId: string, userId: string): (event: unknown) => void;
+	fetchContext(userId: string): Promise<{ memories: string[] }>;
+}
+
+interface MemoryPortLike {
+	fetchLearnings(options?: { limit?: number }): ReadonlyArray<{
+		kind: string;
+		title: string;
+		body: string;
+	}>;
+}
+
+interface CliOrchestratorBundle {
+	orchestrator: BuildplaneCliOrchestrator;
+	memoryPort?: MemoryPortLike;
+	honchoAdapter?: HonchoPortLike;
+	userId?: string;
+}
+
 async function loadCliOrchestrator(
 	projectRoot: string,
-): Promise<BuildplaneCliOrchestrator> {
+): Promise<CliOrchestratorBundle> {
 	const kernel = (await import("@buildplane/kernel")) as unknown as {
 		createBuildplaneOrchestrator: (options: {
 			projectRoot: string;
@@ -155,6 +180,9 @@ async function loadCliOrchestrator(
 	// Activated when HONCHO_API_KEY is set in the environment.
 	// The adapter owns the SDK import — the CLI never touches @honcho-ai/sdk directly.
 
+	let honchoAdapterRef: HonchoPortLike | undefined;
+	let userIdRef: string | undefined;
+
 	if (process.env.HONCHO_API_KEY) {
 		try {
 			const { createHonchoAdapter, createHonchoClient } = await import(
@@ -175,12 +203,37 @@ async function loadCliOrchestrator(
 			// Subscribe to the event bus for message storage
 			const honchoSubscriber = adapter.createSubscriber("default", userId);
 			eventBus.subscribe(honchoSubscriber as never);
+
+			honchoAdapterRef = adapter as unknown as HonchoPortLike;
+			userIdRef = userId;
 		} catch (err) {
 			// Warn when explicitly configured but broken — silence when SDK simply absent
 			console.warn(
 				`[buildplane] Honcho memory disabled: ${err instanceof Error ? err.message : "unknown error"}`,
 			);
 		}
+	}
+
+	// ── Optional local memory port ──────────────────────────────
+	// Reads from the project's run_learnings table (state.db) if initialized.
+	// Only opened if state.db exists — never creates the file.
+
+	let memoryPortRef: MemoryPortLike | undefined;
+	try {
+		const { resolveProjectLayout, createLearningStore } = (await import(
+			"@buildplane/storage"
+		)) as unknown as {
+			resolveProjectLayout: (root: string) => { stateDbPath: string };
+			createLearningStore: (db: unknown) => MemoryPortLike;
+		};
+		const { DatabaseSync } = await import("node:sqlite");
+		const layout = resolveProjectLayout(projectRoot);
+		if (existsSync(layout.stateDbPath)) {
+			const db = new DatabaseSync(layout.stateDbPath, { readOnly: true });
+			memoryPortRef = createLearningStore(db);
+		}
+	} catch {
+		// Memory port unavailable (e.g. project not yet initialized) — run without it
 	}
 
 	// Runtime router: selects executor based on packet type and routing hints
@@ -249,7 +302,7 @@ async function loadCliOrchestrator(
 		},
 	};
 
-	return kernel.createBuildplaneOrchestrator({
+	const orchestrator = kernel.createBuildplaneOrchestrator({
 		projectRoot,
 		storage: storage.createBuildplaneStorage(projectRoot),
 		runtime: runtimeRouter,
@@ -257,6 +310,13 @@ async function loadCliOrchestrator(
 		workspace: adaptersGit.createGitWorktreeAdapter(),
 		eventBus,
 	});
+
+	return {
+		orchestrator,
+		memoryPort: memoryPortRef,
+		honchoAdapter: honchoAdapterRef,
+		userId: userIdRef,
+	};
 }
 
 async function loadEventStore(projectRoot: string): Promise<{
@@ -458,9 +518,10 @@ export async function runCli(
 			}
 		}
 
-		const orchestrator = deps?.createOrchestrator
-			? deps.createOrchestrator()
+		const bundle: CliOrchestratorBundle = deps?.createOrchestrator
+			? { orchestrator: deps.createOrchestrator() }
 			: await loadCliOrchestrator(cwd);
+		const { orchestrator, memoryPort, honchoAdapter, userId } = bundle;
 
 		switch (command) {
 			case "init": {
@@ -483,13 +544,19 @@ export async function runCli(
 				const packet = deps?.parsePacket
 					? deps.parsePacket(packetPath)
 					: await loadPacket(packetPath);
+				const enrichedPacket = await enrichPacketWithMemories(
+					packet,
+					memoryPort,
+					honchoAdapter,
+					userId,
+				);
 				const useTui = rest.includes("--tui");
-				const isModelPacket = !!(packet as { model?: unknown }).model;
+				const isModelPacket = !!(enrichedPacket as { model?: unknown }).model;
 				const useAsync = useTui || isModelPacket;
 
 				if (useAsync && !useTui) {
 					// Model packets auto-switch to async (no TUI)
-					const result = await orchestrator.runPacketAsync(packet);
+					const result = await orchestrator.runPacketAsync(enrichedPacket);
 
 					for (const line of formatRunResult(
 						result as { run: { id: string; status: string } },
@@ -540,15 +607,18 @@ export async function runCli(
 
 					const tuiInstance = tui.renderTui(tuiBus);
 
-					const result = await orchestrator.runPacketAsync(packet, tuiBus);
+					const result = await orchestrator.runPacketAsync(
+						enrichedPacket,
+						tuiBus,
+					);
 					await tuiInstance.waitUntilExit();
 
 					return result.run.status === "passed" ? 0 : 1;
 				}
 
 				const result = useAsync
-					? await orchestrator.runPacketAsync(packet, undefined)
-					: orchestrator.runPacket(packet);
+					? await orchestrator.runPacketAsync(enrichedPacket, undefined)
+					: orchestrator.runPacket(enrichedPacket);
 
 				const resultRecord = result as unknown as Record<string, unknown>;
 				const hasFailed =
@@ -762,6 +832,12 @@ export async function runCli(
 					unknown
 				>;
 				const graph = normalizeGraph(rawGraph);
+				const enrichedGraph = await enrichGraphWithMemories(
+					graph as Record<string, unknown>,
+					memoryPort,
+					honchoAdapter,
+					userId,
+				);
 
 				const kernel = (await import("@buildplane/kernel")) as unknown as {
 					createEventBus: () => {
@@ -771,7 +847,10 @@ export async function runCli(
 				};
 				const graphBus = kernel.createEventBus();
 
-				const graphResult = await orchestrator.runGraphAsync(graph, graphBus);
+				const graphResult = await orchestrator.runGraphAsync(
+					enrichedGraph,
+					graphBus,
+				);
 
 				stdout(`Graph Outcome: ${graphResult.outcome}`);
 				for (const node of graphResult.nodes) {
@@ -796,10 +875,16 @@ export async function runCli(
 
 				const rawStrategy = JSON.parse(readFileSync(strategyPath, "utf8"));
 				const strategy = kernel.parseStrategyPacket(rawStrategy);
+				const enrichedStrategy = await enrichStrategyWithMemories(
+					strategy as Record<string, unknown>,
+					memoryPort,
+					honchoAdapter,
+					userId,
+				);
 				const strategyBus = kernel.createEventBus();
 
 				const strategyResult = await orchestrator.runStrategy(
-					strategy,
+					enrichedStrategy,
 					strategyBus,
 				);
 

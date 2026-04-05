@@ -26,6 +26,7 @@ export type {
 
 export { createEventStore, type EventStore } from "./event-store.js";
 export { createLearningStore } from "./learning-store.js";
+export { resolveProjectLayout } from "./project-layout.js";
 export type { RunHistoryEntry } from "./store.js";
 
 export interface ProjectInitializationResult {
