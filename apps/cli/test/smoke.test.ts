@@ -90,14 +90,27 @@ describe("cli bootstrap", () => {
 		expect(getBootstrapBanner()).toContain("Buildplane");
 	});
 
-	it("emits real CLI output when invoked via the root script entrypoint", () => {
+	it("emits top-level help when invoked via the root script entrypoint", () => {
 		const output = execFileSync(
 			process.execPath,
 			["--import", "tsx", "./apps/cli/src/index.ts"],
 			{ cwd: root, encoding: "utf8" },
 		).trim();
 
-		expect(output).toBe("Buildplane by SollanSystems");
+		expect(output).toContain("Buildplane by SollanSystems");
+		expect(output).toContain("Execute:");
+		expect(output).toContain("init");
+	});
+
+	it("supports --help via the root script entrypoint", () => {
+		const output = execFileSync(
+			process.execPath,
+			["--import", "tsx", "./apps/cli/src/index.ts", "--help"],
+			{ cwd: root, encoding: "utf8" },
+		).trim();
+
+		expect(output).toContain("Execute:");
+		expect(output).toContain("run --packet <path>");
 	});
 
 	it("runs init when the source CLI is invoked through a symlinked entrypoint", () => {

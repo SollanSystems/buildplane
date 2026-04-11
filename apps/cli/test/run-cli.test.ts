@@ -179,8 +179,8 @@ describe("cli command surface", () => {
 		expect(result.exitCode).toBe(0);
 		expect(result.stderr).toEqual([]);
 		expect(result.stdout.join("\n")).toContain("Buildplane by SollanSystems");
-		expect(result.stdout.join("\n")).toContain("Usage:");
-		expect(result.stdout.join("\n")).toContain("buildplane init");
+		expect(result.stdout.join("\n")).toContain("Execute:");
+		expect(result.stdout.join("\n")).toContain("init");
 	});
 
 	it("shows top-level help for --help", async () => {
@@ -190,10 +190,8 @@ describe("cli command surface", () => {
 
 		expect(result.exitCode).toBe(0);
 		expect(result.stderr).toEqual([]);
-		expect(result.stdout.join("\n")).toContain("Usage:");
-		expect(result.stdout.join("\n")).toContain(
-			"buildplane run --packet <path>",
-		);
+		expect(result.stdout.join("\n")).toContain("Execute:");
+		expect(result.stdout.join("\n")).toContain("run --packet <path>");
 	});
 
 	it("returns machine-readable NOT_INITIALIZED errors before init and preflights run before packet loading", async () => {
