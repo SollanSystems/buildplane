@@ -44,6 +44,45 @@ export function formatRunResult(result: RunResultLike): string[] {
 	return lines;
 }
 
+export interface StrategyResultLike {
+	readonly strategyId: string;
+	readonly mode: string;
+	readonly outcome: "passed" | "failed" | "mixed";
+	readonly childResults: Map<string, RunResultLike>;
+	readonly rounds?: ReadonlyArray<Map<string, RunResultLike>>;
+	readonly winnerRunId?: string;
+	readonly mergeDecision: {
+		readonly policy: string;
+		readonly outcome: string;
+		readonly reasons: readonly string[];
+	};
+}
+
+export function formatStrategyRunResult(result: StrategyResultLike): string[] {
+	const lines: string[] = [];
+	lines.push(`strategy: ${result.strategyId}`);
+	lines.push(`mode: ${result.mode}`);
+	lines.push(`outcome: ${result.outcome}`);
+
+	for (const [unitId, childResult] of result.childResults) {
+		const role = unitId.endsWith("-reviewer") ? "reviewer" : "implementer";
+		lines.push(`  ${role} (${unitId}): ${childResult.run.status}`);
+	}
+
+	const roundCount = result.rounds?.length ?? 1;
+	if (roundCount > 1) {
+		lines.push(`rounds: ${roundCount} — reviewer feedback incorporated`);
+	}
+
+	if (result.mergeDecision.reasons.length > 0) {
+		lines.push(
+			`decision: ${result.mergeDecision.outcome} (${result.mergeDecision.reasons.join("; ")})`,
+		);
+	}
+
+	return lines;
+}
+
 export function formatJson(value: unknown): string {
 	return JSON.stringify(value);
 }
