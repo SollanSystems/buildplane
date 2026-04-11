@@ -127,7 +127,12 @@ describe("claude-code e2e smoke test", () => {
 			expect(init.exitCode).toBe(0);
 
 			// Run the packet
-			const run = await runCliCapture(root, ["run", "--packet", packetPath]);
+			const run = await runCliCapture(root, [
+				"run",
+				"--packet",
+				packetPath,
+				"--raw",
+			]);
 
 			// The run should have completed successfully
 			// (exit 0 means the stub binary ran, created output.txt in the

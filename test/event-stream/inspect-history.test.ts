@@ -73,7 +73,12 @@ describe("inspect and history commands", () => {
 		const packetPath = setupProject(root);
 
 		await runCliCapture(root, ["init"]);
-		const run = await runCliCapture(root, ["run", "--packet", packetPath]);
+		const run = await runCliCapture(root, [
+			"run",
+			"--packet",
+			packetPath,
+			"--raw",
+		]);
 		expect(run.exitCode).toBe(0);
 
 		const history = await runCliCapture(root, ["history"]);
@@ -90,7 +95,7 @@ describe("inspect and history commands", () => {
 		const packetPath = setupProject(root);
 
 		await runCliCapture(root, ["init"]);
-		await runCliCapture(root, ["run", "--packet", packetPath]);
+		await runCliCapture(root, ["run", "--packet", packetPath, "--raw"]);
 
 		const history = await runCliCapture(root, ["history", "--json"]);
 		expect(history.exitCode).toBe(0);
@@ -118,7 +123,12 @@ describe("inspect and history commands", () => {
 		const packetPath = setupProject(root);
 
 		await runCliCapture(root, ["init"]);
-		const run = await runCliCapture(root, ["run", "--packet", packetPath]);
+		const run = await runCliCapture(root, [
+			"run",
+			"--packet",
+			packetPath,
+			"--raw",
+		]);
 		const runId =
 			run.stdout.find((l) => l.startsWith("run-id: "))?.slice(8) ?? "";
 
@@ -136,7 +146,12 @@ describe("inspect and history commands", () => {
 		const packetPath = setupProject(root);
 
 		await runCliCapture(root, ["init"]);
-		const run = await runCliCapture(root, ["run", "--packet", packetPath]);
+		const run = await runCliCapture(root, [
+			"run",
+			"--packet",
+			packetPath,
+			"--raw",
+		]);
 		const runId =
 			run.stdout.find((l) => l.startsWith("run-id: "))?.slice(8) ?? "";
 

@@ -70,7 +70,12 @@ describe("e2e model run with events", () => {
 		const init = await runCliCapture(root, ["init"]);
 		expect(init.exitCode).toBe(0);
 
-		const run = await runCliCapture(root, ["run", "--packet", packetPath]);
+		const run = await runCliCapture(root, [
+			"run",
+			"--packet",
+			packetPath,
+			"--raw",
+		]);
 		expect(run.exitCode).toBe(0);
 
 		const runId =
@@ -152,7 +157,12 @@ describe("e2e model run with events", () => {
 		git(root, ["commit", "-m", "add packet"]);
 
 		const init = await runCliCapture(root, ["init"]);
-		const run = await runCliCapture(root, ["run", "--packet", packetPath]);
+		const run = await runCliCapture(root, [
+			"run",
+			"--packet",
+			packetPath,
+			"--raw",
+		]);
 		const runId =
 			run.stdout.find((line) => line.startsWith("run-id: "))?.slice(8) ?? "";
 		const status = await runCliCapture(root, ["status", "--json"]);

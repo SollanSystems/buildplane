@@ -95,7 +95,12 @@ describe("local run loop end to end", () => {
 		});
 
 		const init = await runCliCapture(root, ["init"]);
-		const run = await runCliCapture(root, ["run", "--packet", packetPath]);
+		const run = await runCliCapture(root, [
+			"run",
+			"--packet",
+			packetPath,
+			"--raw",
+		]);
 		const runId =
 			run.stdout.find((line) => line.startsWith("run-id: "))?.slice(8) ?? "";
 		const status = await runCliCapture(root, ["status", "--json"]);
@@ -173,7 +178,12 @@ describe("local run loop end to end", () => {
 		});
 
 		const init = await runCliCapture(root, ["init"]);
-		const run = await runCliCapture(root, ["run", "--packet", packetPath]);
+		const run = await runCliCapture(root, [
+			"run",
+			"--packet",
+			packetPath,
+			"--raw",
+		]);
 		const runId =
 			run.stdout.find((line) => line.startsWith("run-id: "))?.slice(8) ?? "";
 		const workspaceLine =

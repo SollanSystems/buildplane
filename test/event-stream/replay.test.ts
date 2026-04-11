@@ -74,7 +74,12 @@ describe("replay command", () => {
 		const packetPath = setupAndRun(root);
 
 		await runCliCapture(root, ["init"]);
-		const run = await runCliCapture(root, ["run", "--packet", packetPath]);
+		const run = await runCliCapture(root, [
+			"run",
+			"--packet",
+			packetPath,
+			"--raw",
+		]);
 		const originalRunId =
 			run.stdout.find((l) => l.startsWith("run-id: "))?.slice(8) ?? "";
 		expect(originalRunId).not.toBe("");
@@ -105,7 +110,12 @@ describe("replay command", () => {
 		const packetPath = setupAndRun(root);
 
 		await runCliCapture(root, ["init"]);
-		const run = await runCliCapture(root, ["run", "--packet", packetPath]);
+		const run = await runCliCapture(root, [
+			"run",
+			"--packet",
+			packetPath,
+			"--raw",
+		]);
 		const originalRunId =
 			run.stdout.find((l) => l.startsWith("run-id: "))?.slice(8) ?? "";
 
@@ -127,7 +137,12 @@ describe("replay command", () => {
 		const packetPath = setupAndRun(root);
 
 		await runCliCapture(root, ["init"]);
-		const run = await runCliCapture(root, ["run", "--packet", packetPath]);
+		const run = await runCliCapture(root, [
+			"run",
+			"--packet",
+			packetPath,
+			"--raw",
+		]);
 		const originalRunId =
 			run.stdout.find((l) => l.startsWith("run-id: "))?.slice(8) ?? "";
 
