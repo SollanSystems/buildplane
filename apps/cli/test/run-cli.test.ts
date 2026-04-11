@@ -277,7 +277,7 @@ describe("cli command surface", () => {
 
 		const result = await runCliCapture(
 			root,
-			["run", "--packet", "missing-packet.json"],
+			["run", "--raw", "--packet", "missing-packet.json"],
 			dependencies,
 		);
 
@@ -476,16 +476,19 @@ describe("cli command surface", () => {
 
 		const passResult = await runCliCapture(root, [
 			"run",
+			"--raw",
 			"--packet",
 			passingPacketPath,
 		]);
 		const firstFailure = await runCliCapture(root, [
 			"run",
+			"--raw",
 			"--packet",
 			failingPacketPath,
 		]);
 		const secondFailure = await runCliCapture(root, [
 			"run",
+			"--raw",
 			"--packet",
 			failingPacketPath,
 		]);
@@ -639,7 +642,7 @@ describe("cli command surface", () => {
 
 		const runResult = await runCliCapture(
 			root,
-			["run", "--packet", packetPath],
+			["run", "--raw", "--packet", packetPath],
 			dependencies,
 		);
 		const runId = extractRunId(runResult.stdout);
@@ -786,7 +789,7 @@ describe("cli command surface", () => {
 
 		const result = await runCliCapture(
 			root,
-			["run", "--packet", packetPath],
+			["run", "--raw", "--packet", packetPath],
 			dependencies,
 		);
 
@@ -866,7 +869,7 @@ describe("cli command surface", () => {
 
 		const result = await runCliCapture(
 			root,
-			["run", "--packet", packetPath],
+			["run", "--raw", "--packet", packetPath],
 			dependencies,
 		);
 
@@ -1086,7 +1089,7 @@ describe("cli command surface", () => {
 
 		const result = await runCliCapture(
 			root,
-			["run", "--packet", "model-packet.json"],
+			["run", "--raw", "--packet", "model-packet.json"],
 			dependencies,
 		);
 
@@ -1148,7 +1151,7 @@ describe("cli command surface", () => {
 
 		const result = await runCliCapture(
 			root,
-			["run", "--packet", "cmd-packet.json"],
+			["run", "--raw", "--packet", "cmd-packet.json"],
 			dependencies,
 		);
 
@@ -1183,7 +1186,7 @@ describe("cli command surface", () => {
 
 		const setupFailure = await runCliCapture(
 			setupFailureRoot,
-			["run", "--packet", setupPacketPath],
+			["run", "--raw", "--packet", setupPacketPath],
 			setupDependencies,
 		);
 
@@ -1206,6 +1209,7 @@ describe("cli command surface", () => {
 
 		const nonGit = await runCliCapture(nonGitRoot, [
 			"run",
+			"--raw",
 			"--packet",
 			nonGitPacketPath,
 		]);
@@ -1223,6 +1227,7 @@ describe("cli command surface", () => {
 
 		const dirty = await runCliCapture(dirtyRoot, [
 			"run",
+			"--raw",
 			"--packet",
 			dirtyPacketPath,
 		]);
@@ -1239,6 +1244,7 @@ describe("cli command surface", () => {
 
 		const unresolvedHead = await runCliCapture(unresolvedHeadRoot, [
 			"run",
+			"--raw",
 			"--packet",
 			unresolvedHeadPacketPath,
 		]);
@@ -1256,6 +1262,7 @@ describe("cli command surface", () => {
 
 		const missingGit = await runCliCapture(missingGitRoot, [
 			"run",
+			"--raw",
 			"--packet",
 			missingGitPacketPath,
 		]);

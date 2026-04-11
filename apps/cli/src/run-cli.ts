@@ -9,6 +9,7 @@ import {
 	formatJsonError,
 	formatRunHistory,
 	formatRunResult,
+	formatStrategyRunResult,
 } from "./formatters.js";
 import {
 	enrichGraphWithMemories,
@@ -60,6 +61,21 @@ function formatTopLevelHelp(): string[] {
 	];
 }
 
+function formatRunHelp(): string[] {
+	return [
+		"buildplane run --packet <path> [options]",
+		"",
+		"  By default, runs implement-then-review: an implementer executes the task,",
+		"  then a reviewer verifies the output. This is what makes Buildplane runs",
+		"  self-correcting.",
+		"",
+		"  Options:",
+		"    --raw            Single-shot execution (no review loop)",
+		"    --tui            Interactive terminal UI",
+		"    --json           Machine-readable output",
+	];
+}
+
 interface BuildplaneCliOrchestrator {
 	initializeProject(): {
 		created: boolean;
@@ -93,6 +109,10 @@ interface BuildplaneCliOrchestrator {
 		strategyId: string;
 		mode: string;
 		outcome: "passed" | "failed" | "mixed";
+		childResults: Map<string, { run: { id: string; status: string } }>;
+		rounds?: ReadonlyArray<
+			Map<string, { run: { id: string; status: string } }>
+		>;
 		mergeDecision: { policy: string; outcome: string; reasons: string[] };
 		winnerRunId?: string;
 	}>;
@@ -549,6 +569,14 @@ export async function runCli(
 				return 0;
 			}
 			case "run": {
+				// --help BEFORE --packet validation (so `buildplane run --help` works without --packet)
+				if (rest.includes("--help")) {
+					for (const line of formatRunHelp()) {
+						stdout(line);
+					}
+					return 0;
+				}
+
 				// Pre-flight: ensure project is initialized before packet loading
 				orchestrator.getStatus();
 
@@ -567,6 +595,59 @@ export async function runCli(
 					honchoAdapter,
 					userId,
 				);
+
+				const useRaw = rest.includes("--raw");
+				const useJson = rest.includes("--json");
+
+				// ── Strategy path (default) ──────────────────────────────
+				if (!useRaw) {
+					const { wrapAsStrategy } = await import("./strategy-wrapper.js");
+					const strategy = wrapAsStrategy(
+						enrichedPacket as Parameters<typeof wrapAsStrategy>[0],
+					);
+
+					const kernel = (await import("@buildplane/kernel")) as unknown as {
+						createEventBus: () => {
+							subscribe: (listener: (event: unknown) => void) => () => void;
+							emit: (event: unknown) => void;
+						};
+					};
+					const strategyBus = kernel.createEventBus();
+
+					const useTui = rest.includes("--tui");
+					if (useTui) {
+						const tui = (await import("@buildplane/ui-tui")) as unknown as {
+							renderTui: (eventBus: unknown) => {
+								waitUntilExit(): Promise<void>;
+								unmount(): void;
+								clear(): void;
+							};
+						};
+						tui.renderTui(strategyBus);
+					}
+
+					const strategyResult = await orchestrator.runStrategy(
+						strategy,
+						strategyBus,
+					);
+
+					if (useJson) {
+						stdout(
+							formatJson(strategyResult as unknown as Record<string, unknown>),
+						);
+					} else {
+						for (const line of formatStrategyRunResult(
+							strategyResult as Parameters<typeof formatStrategyRunResult>[0],
+						)) {
+							stdout(line);
+						}
+					}
+
+					return strategyResult.outcome === "passed" ? 0 : 1;
+				}
+
+				// ── Raw path (single-shot, backward compat) ─────────────
+				// Everything below is the EXISTING code, unchanged
 				const useTui = rest.includes("--tui");
 				const isModelPacket = !!(enrichedPacket as { model?: unknown }).model;
 				const useAsync = useTui || isModelPacket;
