@@ -104,4 +104,56 @@ describe("createLearningStore", () => {
 		const results = store.fetchLearnings();
 		expect(results[0].body).toBe("updated body");
 	});
+
+	it("promotes session→workspace at seen_count >= 3", () => {
+		const store = createLearningStore(makeDb());
+		const sessionLearning: ExtractedLearning = {
+			kind: "constraint",
+			scope: "session",
+			title: "Run rejected",
+			body: "Rejected: exit code 1",
+		};
+		store.writeLearnings("run-1", [sessionLearning]);
+		store.writeLearnings("run-2", [sessionLearning]);
+		store.writeLearnings("run-3", [sessionLearning]); // seen_count = 3
+		store.promoteLearnings("run-3");
+		const workspaceLearnings = store.fetchLearnings({ scope: "workspace" });
+		expect(workspaceLearnings).toHaveLength(1);
+		expect(workspaceLearnings[0].title).toBe("Run rejected");
+		expect(workspaceLearnings[0].scope).toBe("workspace");
+	});
+
+	it("promotes workspace→user at seen_count >= 5", () => {
+		const store = createLearningStore(makeDb());
+		const wsLearning: ExtractedLearning = {
+			kind: "fact",
+			scope: "workspace",
+			title: "Verification gate passed",
+			body: "All outputs verified",
+		};
+		for (let i = 0; i < 5; i++) {
+			store.writeLearnings(`run-${i}`, [wsLearning]);
+		}
+		store.promoteLearnings("run-4");
+		const userLearnings = store.fetchLearnings({ scope: "user" });
+		expect(userLearnings).toHaveLength(1);
+		expect(userLearnings[0].scope).toBe("user");
+	});
+
+	it("promotion is idempotent", () => {
+		const store = createLearningStore(makeDb());
+		const sessionLearning: ExtractedLearning = {
+			kind: "constraint",
+			scope: "session",
+			title: "Run rejected",
+			body: "Rejected: exit code 1",
+		};
+		for (let i = 0; i < 3; i++) {
+			store.writeLearnings(`run-${i}`, [sessionLearning]);
+		}
+		store.promoteLearnings("run-2");
+		store.promoteLearnings("run-2"); // second call = no-op
+		const workspaceLearnings = store.fetchLearnings({ scope: "workspace" });
+		expect(workspaceLearnings).toHaveLength(1);
+	});
 });

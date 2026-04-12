@@ -156,4 +156,10 @@ export interface BuildplaneMemoryPort {
 		kind?: LearningKind;
 		limit?: number;
 	}): readonly StoredLearning[];
+	/**
+	 * Promote learnings that have crossed the seen-count threshold.
+	 * session (seen_count >= 3) → workspace; workspace (seen_count >= 5) → user.
+	 * Idempotent — skips if a promoted row already exists.
+	 */
+	promoteLearnings(runId: string): void;
 }

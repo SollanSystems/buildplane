@@ -103,5 +103,78 @@ export function createLearningStore(
 				seenCount: row.seen_count,
 			}));
 		},
+
+		promoteLearnings(runId: string): void {
+			const now = new Date().toISOString();
+			const checkPromoted = database.prepare(
+				`SELECT 1 FROM run_learnings WHERE promoted_from_id = ? AND status = 'active' LIMIT 1`,
+			);
+			const insertPromoted = database.prepare(
+				`INSERT INTO run_learnings (id, run_id, scope, kind, title, body, status, promoted_from_id, source_run_id, seen_count, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, 1, ?, ?)`,
+			);
+
+			// Session → Workspace (threshold: 3)
+			const sessionCandidates = database
+				.prepare(
+					`SELECT id, kind, title, body FROM run_learnings
+           WHERE scope = 'session' AND status = 'active' AND seen_count >= 3`,
+				)
+				.all() as unknown as {
+				id: string;
+				kind: string;
+				title: string;
+				body: string;
+			}[];
+
+			for (const c of sessionCandidates) {
+				const existing = checkPromoted.all(c.id) as unknown as unknown[];
+				if (existing.length === 0) {
+					insertPromoted.run(
+						randomUUID(),
+						runId,
+						"workspace",
+						c.kind,
+						c.title,
+						c.body,
+						c.id,
+						runId,
+						now,
+						now,
+					);
+				}
+			}
+
+			// Workspace → User (threshold: 5)
+			const workspaceCandidates = database
+				.prepare(
+					`SELECT id, kind, title, body FROM run_learnings
+           WHERE scope = 'workspace' AND status = 'active' AND seen_count >= 5`,
+				)
+				.all() as unknown as {
+				id: string;
+				kind: string;
+				title: string;
+				body: string;
+			}[];
+
+			for (const c of workspaceCandidates) {
+				const existing = checkPromoted.all(c.id) as unknown as unknown[];
+				if (existing.length === 0) {
+					insertPromoted.run(
+						randomUUID(),
+						runId,
+						"user",
+						c.kind,
+						c.title,
+						c.body,
+						c.id,
+						runId,
+						now,
+						now,
+					);
+				}
+			}
+		},
 	};
 }
