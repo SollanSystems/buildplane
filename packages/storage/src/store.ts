@@ -5,11 +5,13 @@ import type { DatabaseSync } from "node:sqlite";
 import type {
 	ApprovedPolicyDecision,
 	BuildplaneStoragePort,
+	CreateProcedureInput,
 	CreateRunOptions,
 	ExecutionReceipt,
 	InspectSnapshot,
 	MemoryScopeType,
 	PolicyDecision,
+	ProcedureMemory,
 	RejectedPolicyDecision,
 	RepoFact,
 	Run,
@@ -78,6 +80,24 @@ interface StoredRepoFactRow {
 	readonly status: "active" | "stale" | "superseded" | "archived";
 	readonly valid_from_commit: string | null;
 	readonly valid_to_commit: string | null;
+	readonly created_at: string;
+	readonly updated_at: string;
+}
+
+interface StoredProcedureRow {
+	readonly id: string;
+	readonly repo_id: string | null;
+	readonly name: string;
+	readonly task_type: string | null;
+	readonly body_markdown: string;
+	readonly metadata_json: string | null;
+	readonly confidence: number;
+	readonly source_run_id: string | null;
+	readonly source_task_id: string | null;
+	readonly created_by: "system" | "worker" | "operator";
+	readonly branch: string | null;
+	readonly commit_sha: string | null;
+	readonly status: "active" | "stale" | "superseded" | "archived";
 	readonly created_at: string;
 	readonly updated_at: string;
 }
@@ -223,6 +243,19 @@ function ensureRepoFactColumns(database: DatabaseSync): void {
 	}
 }
 
+function ensureProcedureColumns(database: DatabaseSync): void {
+	for (const statement of [
+		`ALTER TABLE procedures ADD COLUMN created_by TEXT NOT NULL DEFAULT 'system'`,
+		`ALTER TABLE procedures ADD COLUMN branch TEXT`,
+		`ALTER TABLE procedures ADD COLUMN commit_sha TEXT`,
+	] as const) {
+		const columnName = statement.match(/ADD COLUMN ([^ ]+)/)?.[1];
+		if (columnName && !tableHasColumn(database, "procedures", columnName)) {
+			database.exec(statement);
+		}
+	}
+}
+
 function assertTableColumns(
 	database: DatabaseSync,
 	tableName: string,
@@ -293,6 +326,9 @@ function assertProceduresTableColumns(database: DatabaseSync): void {
 		"confidence",
 		"source_run_id",
 		"source_task_id",
+		"created_by",
+		"branch",
+		"commit_sha",
 		"status",
 		"created_at",
 		"updated_at",
@@ -417,6 +453,9 @@ export function bootstrapStorageProjectionSchema(database: DatabaseSync): void {
 			confidence REAL NOT NULL DEFAULT 1.0,
 			source_run_id TEXT,
 			source_task_id TEXT,
+			created_by TEXT NOT NULL DEFAULT 'system',
+			branch TEXT,
+			commit_sha TEXT,
 			status TEXT NOT NULL DEFAULT 'active',
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL
@@ -452,6 +491,7 @@ export function bootstrapStorageProjectionSchema(database: DatabaseSync): void {
 	ensureSeenCountColumn(database);
 	ensureRunsStepColumns(database);
 	ensureRepoFactColumns(database);
+	ensureProcedureColumns(database);
 	assertWorkspaceTableColumns(database);
 	assertRepoFactsTableColumns(database);
 	assertProceduresTableColumns(database);
@@ -721,6 +761,33 @@ export function createStorageStore(
 		};
 	}
 
+	function toProcedureMemory(row: StoredProcedureRow): ProcedureMemory {
+		return {
+			id: row.id,
+			memoryType: "procedure",
+			scopeType: "repo",
+			scopeKey: undefined,
+			status: row.status,
+			name: row.name,
+			taskType: row.task_type ?? undefined,
+			bodyMarkdown: row.body_markdown,
+			metadata: row.metadata_json
+				? (JSON.parse(row.metadata_json) as Record<string, unknown>)
+				: undefined,
+			provenance: {
+				sourceRunId: row.source_run_id ?? undefined,
+				sourceTaskId: row.source_task_id ?? undefined,
+				createdBy: row.created_by,
+				createdAt: row.created_at,
+				updatedAt: row.updated_at,
+				confidence: row.confidence,
+				repoId: row.repo_id ?? undefined,
+				branch: row.branch ?? undefined,
+				commitSha: row.commit_sha ?? undefined,
+			},
+		};
+	}
+
 	function readRepoFactRows(
 		database: DatabaseSync,
 		options: {
@@ -768,6 +835,36 @@ export function createStorageStore(
 		`;
 
 		return database.prepare(query).all(...params) as unknown as StoredRepoFactRow[];
+	}
+
+	function readProcedureRows(
+		database: DatabaseSync,
+		options: {
+			taskType?: string;
+			includeInactive?: boolean;
+		},
+	): StoredProcedureRow[] {
+		const clauses = ["repo_id = ?"];
+		const params: (string | null)[] = [projectRoot];
+
+		if (options.taskType) {
+			clauses.push("task_type = ?");
+			params.push(options.taskType);
+		}
+		if (!options.includeInactive) {
+			clauses.push("status = 'active'");
+		}
+
+		const query = `
+			SELECT id, repo_id, name, task_type, body_markdown, metadata_json,
+			       confidence, source_run_id, source_task_id, created_by, branch,
+			       commit_sha, status, created_at, updated_at
+			FROM procedures
+			WHERE ${clauses.join(" AND ")}
+			ORDER BY updated_at DESC, created_at DESC
+		`;
+
+		return database.prepare(query).all(...params) as unknown as StoredProcedureRow[];
 	}
 
 	function defaultRepoFactScope(options?: {
@@ -1591,6 +1688,86 @@ export function createStorageStore(
 						changes: number;
 					};
 
+				return result.changes;
+			} finally {
+				database.close();
+			}
+		},
+
+		createProcedure(input: CreateProcedureInput): ProcedureMemory {
+			ensureInitialized();
+			const database = openStoreDatabase();
+			const now = new Date().toISOString();
+
+			try {
+				const id = randomUUID();
+				database
+					.prepare(
+						`INSERT INTO procedures (id, repo_id, name, task_type, body_markdown, metadata_json, confidence, source_run_id, source_task_id, created_by, branch, commit_sha, status, created_at, updated_at)
+						 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)`,
+					)
+					.run(
+						id,
+						projectRoot,
+						input.name,
+						input.taskType ?? null,
+						input.bodyMarkdown,
+						input.metadata ? JSON.stringify(input.metadata) : null,
+						input.confidence ?? 1,
+						input.sourceRunId ?? null,
+						input.sourceTaskId ?? null,
+						input.createdBy,
+						input.branch ?? null,
+						input.commitSha ?? null,
+						now,
+						now,
+					);
+
+				return toProcedureMemory(
+					readProcedureRows(database, {
+						includeInactive: true,
+					}).find((row) => row.id === id) as StoredProcedureRow,
+				);
+			} finally {
+				database.close();
+			}
+		},
+
+		listProcedures(options?: { taskType?: string }): readonly ProcedureMemory[] {
+			ensureInitialized();
+			const database = openStoreDatabase();
+
+			try {
+				return readProcedureRows(database, {
+					taskType: options?.taskType,
+				}).map(toProcedureMemory);
+			} finally {
+				database.close();
+			}
+		},
+
+		findProceduresByTaskType(taskType: string): readonly ProcedureMemory[] {
+			ensureInitialized();
+			const database = openStoreDatabase();
+
+			try {
+				return readProcedureRows(database, { taskType }).map(toProcedureMemory);
+			} finally {
+				database.close();
+			}
+		},
+
+		supersedeProcedure(id: string): number {
+			ensureInitialized();
+			const database = openStoreDatabase();
+			const now = new Date().toISOString();
+
+			try {
+				const result = database
+					.prepare(
+						`UPDATE procedures SET status = 'superseded', updated_at = ? WHERE id = ? AND repo_id = ? AND status = 'active'`,
+					)
+					.run(now, id, projectRoot) as { changes: number };
 				return result.changes;
 			} finally {
 				database.close();

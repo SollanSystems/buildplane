@@ -19,7 +19,7 @@ import type {
 	StatusSnapshot,
 	UnitPacket,
 } from "./run-loop.js";
-import type { MemoryScopeType, RepoFact, UpsertRepoFactInput } from "./memory-types.js";
+import type { MemoryScopeType, RepoFact, UpsertRepoFactInput, ProcedureMemory, CreateProcedureInput } from "./memory-types.js";
 import type { Run } from "./types.js";
 
 export interface CreateRunOptions {
@@ -86,6 +86,10 @@ export interface BuildplaneStoragePort {
 			scopeKey?: string;
 		},
 	): number;
+	createProcedure(input: CreateProcedureInput): ProcedureMemory;
+	listProcedures(options?: { taskType?: string }): readonly ProcedureMemory[];
+	findProceduresByTaskType(taskType: string): readonly ProcedureMemory[];
+	supersedeProcedure(id: string): number;
 	getStatusSnapshot(): StatusSnapshot;
 	inspectTarget(id: string): InspectSnapshot;
 }

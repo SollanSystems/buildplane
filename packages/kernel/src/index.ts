@@ -102,6 +102,7 @@ export type {
 	MemoryStatus,
 	MemoryType,
 	MemoryValueType,
+	CreateProcedureInput,
 	ProcedureMemory,
 	RepoFact,
 	UpsertRepoFactInput,

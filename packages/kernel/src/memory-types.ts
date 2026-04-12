@@ -58,6 +58,19 @@ export interface ProcedureMemory extends BaseMemoryRecord {
 	readonly metadata?: Record<string, unknown>;
 }
 
+export interface CreateProcedureInput {
+	readonly name: string;
+	readonly taskType?: string;
+	readonly bodyMarkdown: string;
+	readonly metadata?: Record<string, unknown>;
+	readonly confidence?: number;
+	readonly createdBy: MemoryCreatedBy;
+	readonly sourceRunId?: string;
+	readonly sourceTaskId?: string;
+	readonly branch?: string;
+	readonly commitSha?: string;
+}
+
 export interface UpsertRepoFactInput {
 	readonly factKey: string;
 	readonly factValue: unknown;
