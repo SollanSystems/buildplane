@@ -9,6 +9,6 @@ coverage/
 .buildplane/
 .bg-shell/
 .worktrees/
-.gsd/
+.gsd
 native/target/
 .hermes/
