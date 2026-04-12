@@ -184,6 +184,20 @@ function ensureSeenCountColumn(database: DatabaseSync): void {
 	}
 }
 
+function assertTableColumns(
+	database: DatabaseSync,
+	tableName: string,
+	columnNames: readonly string[],
+): void {
+	for (const columnName of columnNames) {
+		if (!tableHasColumn(database, tableName, columnName)) {
+			throw new Error(
+				"Buildplane state is incomplete: state.db is missing required projection schema. Remove .buildplane or repair the database before rerunning `buildplane init`.",
+			);
+		}
+	}
+}
+
 function tableExists(database: DatabaseSync, tableName: string): boolean {
 	const row = database
 		.prepare(
@@ -194,7 +208,7 @@ function tableExists(database: DatabaseSync, tableName: string): boolean {
 }
 
 function assertWorkspaceTableColumns(database: DatabaseSync): void {
-	for (const columnName of [
+	assertTableColumns(database, "workspaces", [
 		"run_id",
 		"source_project_root",
 		"path",
@@ -203,18 +217,73 @@ function assertWorkspaceTableColumns(database: DatabaseSync): void {
 		"created_at",
 		"finalized_at",
 		"cleanup_error",
-	] as const) {
-		if (!tableHasColumn(database, "workspaces", columnName)) {
-			throw new Error(
-				"Buildplane state is incomplete: state.db is missing required projection schema. Remove .buildplane or repair the database before rerunning `buildplane init`.",
-			);
-		}
-	}
+	] as const);
+}
+
+function assertRepoFactsTableColumns(database: DatabaseSync): void {
+	assertTableColumns(database, "repo_facts", [
+		"id",
+		"repo_id",
+		"fact_key",
+		"fact_value_json",
+		"value_type",
+		"scope_type",
+		"scope_key",
+		"confidence",
+		"source_run_id",
+		"source_task_id",
+		"status",
+		"valid_from_commit",
+		"valid_to_commit",
+		"created_at",
+		"updated_at",
+	] as const);
+}
+
+function assertProceduresTableColumns(database: DatabaseSync): void {
+	assertTableColumns(database, "procedures", [
+		"id",
+		"repo_id",
+		"name",
+		"task_type",
+		"body_markdown",
+		"metadata_json",
+		"confidence",
+		"source_run_id",
+		"source_task_id",
+		"status",
+		"created_at",
+		"updated_at",
+	] as const);
+}
+
+function assertSearchableDocumentsTableColumns(database: DatabaseSync): void {
+	assertTableColumns(database, "searchable_documents", [
+		"id",
+		"repo_id",
+		"source_table",
+		"source_id",
+		"document_kind",
+		"title",
+		"body_text",
+		"metadata_json",
+		"created_at",
+		"updated_at",
+	] as const);
 }
 
 export function bootstrapStorageProjectionSchema(database: DatabaseSync): void {
 	if (tableExists(database, "workspaces")) {
 		assertWorkspaceTableColumns(database);
+	}
+	if (tableExists(database, "repo_facts")) {
+		assertRepoFactsTableColumns(database);
+	}
+	if (tableExists(database, "procedures")) {
+		assertProceduresTableColumns(database);
+	}
+	if (tableExists(database, "searchable_documents")) {
+		assertSearchableDocumentsTableColumns(database);
 	}
 
 	database.exec(`
@@ -272,6 +341,72 @@ export function bootstrapStorageProjectionSchema(database: DatabaseSync): void {
 			finalized_at TEXT,
 			cleanup_error TEXT
 		);
+
+		CREATE TABLE IF NOT EXISTS steps (
+			id TEXT PRIMARY KEY,
+			run_id TEXT NOT NULL,
+			step_index INTEGER NOT NULL,
+			kind TEXT NOT NULL,
+			status TEXT NOT NULL,
+			started_at TEXT NOT NULL,
+			completed_at TEXT,
+			detail TEXT
+		);
+
+		CREATE TABLE IF NOT EXISTS repo_facts (
+			id TEXT PRIMARY KEY,
+			repo_id TEXT NOT NULL,
+			fact_key TEXT NOT NULL,
+			fact_value_json TEXT NOT NULL,
+			value_type TEXT NOT NULL,
+			scope_type TEXT NOT NULL DEFAULT 'repo',
+			scope_key TEXT,
+			confidence REAL NOT NULL DEFAULT 1.0,
+			source_run_id TEXT,
+			source_task_id TEXT,
+			status TEXT NOT NULL DEFAULT 'active',
+			valid_from_commit TEXT,
+			valid_to_commit TEXT,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		);
+
+		CREATE TABLE IF NOT EXISTS procedures (
+			id TEXT PRIMARY KEY,
+			repo_id TEXT,
+			name TEXT NOT NULL,
+			task_type TEXT,
+			body_markdown TEXT NOT NULL,
+			metadata_json TEXT,
+			confidence REAL NOT NULL DEFAULT 1.0,
+			source_run_id TEXT,
+			source_task_id TEXT,
+			status TEXT NOT NULL DEFAULT 'active',
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		);
+
+		CREATE TABLE IF NOT EXISTS searchable_documents (
+			id TEXT PRIMARY KEY,
+			repo_id TEXT,
+			source_table TEXT NOT NULL,
+			source_id TEXT NOT NULL,
+			document_kind TEXT NOT NULL,
+			title TEXT,
+			body_text TEXT NOT NULL,
+			metadata_json TEXT,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		);
+	`);
+
+	database.exec(`
+		CREATE VIRTUAL TABLE IF NOT EXISTS searchable_documents_fts USING fts5(
+			title,
+			body_text,
+			content='searchable_documents',
+			content_rowid='rowid'
+		);
 	`);
 
 	ensureEvidenceMessageColumn(database);
@@ -280,6 +415,9 @@ export function bootstrapStorageProjectionSchema(database: DatabaseSync): void {
 	ensureRunLearningsTable(database);
 	ensureSeenCountColumn(database);
 	assertWorkspaceTableColumns(database);
+	assertRepoFactsTableColumns(database);
+	assertProceduresTableColumns(database);
+	assertSearchableDocumentsTableColumns(database);
 }
 
 export function assertBaselineStorageProjectionSchema(
@@ -287,7 +425,7 @@ export function assertBaselineStorageProjectionSchema(
 ): void {
 	const rows = database
 		.prepare(
-			`SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('units', 'runs', 'evidence', 'decisions', 'artifacts')`,
+			`SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('units', 'runs', 'evidence', 'decisions', 'artifacts', 'repo_facts', 'procedures', 'searchable_documents')`,
 		)
 		.all() as unknown as { name: string }[];
 	const existingTables = new Set(rows.map((row) => row.name));
@@ -298,6 +436,9 @@ export function assertBaselineStorageProjectionSchema(
 		"evidence",
 		"decisions",
 		"artifacts",
+		"repo_facts",
+		"procedures",
+		"searchable_documents",
 	]) {
 		if (!existingTables.has(tableName)) {
 			throw new Error(

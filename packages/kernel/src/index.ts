@@ -95,4 +95,14 @@ export type {
 	TaskType,
 	Unit,
 } from "./types.js";
+export type {
+	MemoryCreatedBy,
+	MemoryProvenance,
+	MemoryScopeType,
+	MemoryStatus,
+	MemoryType,
+	MemoryValueType,
+	ProcedureMemory,
+	RepoFact,
+} from "./memory-types.js";
 export { validatePacketForWorkspaceRoot } from "./workspace-paths.js";

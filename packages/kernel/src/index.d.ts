@@ -75,6 +75,16 @@ export type {
 	Unit,
 } from "./types.ts";
 export type { StrategyOrchestrator } from "./strategy-executor.ts";
+export type {
+	MemoryCreatedBy,
+	MemoryProvenance,
+	MemoryScopeType,
+	MemoryStatus,
+	MemoryType,
+	MemoryValueType,
+	ProcedureMemory,
+	RepoFact,
+} from "./memory-types.ts";
 export { validatePacketForWorkspaceRoot } from "./workspace-paths.ts";
 export type {
 	GraphNodeOutcome,
