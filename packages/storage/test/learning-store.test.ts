@@ -157,6 +157,36 @@ describe("createLearningStore", () => {
 		expect(workspaceLearnings).toHaveLength(1);
 	});
 
+	it("fetchLearningById returns a single learning by ID", () => {
+		const store = createLearningStore(makeDb());
+		store.writeLearnings("run-1", [learning]);
+		const all = store.fetchLearnings();
+		const id = all[0].id;
+		const result = store.fetchLearningById(id);
+		expect(result).toBeDefined();
+		expect(result!.id).toBe(id);
+		expect(result!.title).toBe("Run approved");
+	});
+
+	it("fetchLearningById returns undefined for missing ID", () => {
+		const store = createLearningStore(makeDb());
+		expect(store.fetchLearningById("nonexistent")).toBeUndefined();
+	});
+
+	it("fetchLearningsByRunId returns learnings for that run only", () => {
+		const store = createLearningStore(makeDb());
+		store.writeLearnings("run-1", [learning]);
+		store.writeLearnings("run-2", [{ ...learning, title: "Second learning" }]);
+		const run1Learnings = store.fetchLearningsByRunId("run-1");
+		expect(run1Learnings).toHaveLength(1);
+		expect(run1Learnings[0].title).toBe("Run approved");
+	});
+
+	it("fetchLearningsByRunId returns empty array for unknown run", () => {
+		const store = createLearningStore(makeDb());
+		expect(store.fetchLearningsByRunId("nonexistent")).toEqual([]);
+	});
+
 	it("scope-ordered fetch returns user > workspace > session", () => {
 		const db = makeDb();
 		const store = createLearningStore(db);

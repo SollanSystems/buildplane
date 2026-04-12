@@ -162,4 +162,14 @@ export interface BuildplaneMemoryPort {
 	 * Idempotent — skips if a promoted row already exists.
 	 */
 	promoteLearnings(runId: string): void;
+	/**
+	 * Retrieve a single learning by its ID. Returns undefined if not found or not active.
+	 * Synchronous.
+	 */
+	fetchLearningById(id: string): StoredLearning | undefined;
+	/**
+	 * Retrieve all active learnings produced by a specific run.
+	 * Synchronous. No limit — a single run produces at most a few learnings.
+	 */
+	fetchLearningsByRunId(runId: string): readonly StoredLearning[];
 }

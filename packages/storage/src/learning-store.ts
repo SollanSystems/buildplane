@@ -179,5 +179,55 @@ export function createLearningStore(
 				}
 			}
 		},
+
+		fetchLearningById(id: string): StoredLearning | undefined {
+			const rows = database
+				.prepare(
+					`SELECT id, run_id, scope, kind, title, body, status, created_at, seen_count
+           FROM run_learnings
+           WHERE id = ? AND status = 'active'
+           LIMIT 1`,
+				)
+				.all(id) as unknown as LearningRow[];
+
+			if (rows.length === 0) {
+				return undefined;
+			}
+			const row = rows[0];
+			return {
+				id: row.id,
+				runId: row.run_id,
+				scope: row.scope as LearningScope,
+				kind: row.kind as LearningKind,
+				title: row.title,
+				body: row.body,
+				status: row.status as "active" | "superseded" | "archived",
+				createdAt: row.created_at,
+				seenCount: row.seen_count,
+			};
+		},
+
+		fetchLearningsByRunId(runId: string): readonly StoredLearning[] {
+			const rows = database
+				.prepare(
+					`SELECT id, run_id, scope, kind, title, body, status, created_at, seen_count
+           FROM run_learnings
+           WHERE run_id = ? AND status = 'active'
+           ORDER BY created_at ASC`,
+				)
+				.all(runId) as unknown as LearningRow[];
+
+			return rows.map((row) => ({
+				id: row.id,
+				runId: row.run_id,
+				scope: row.scope as LearningScope,
+				kind: row.kind as LearningKind,
+				title: row.title,
+				body: row.body,
+				status: row.status as "active" | "superseded" | "archived",
+				createdAt: row.created_at,
+				seenCount: row.seen_count,
+			}));
+		},
 	};
 }
