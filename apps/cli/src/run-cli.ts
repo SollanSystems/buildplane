@@ -949,9 +949,32 @@ export async function runCli(
 					} catch {
 						// Event store unavailable (e.g., uninitialized in tests)
 					}
+					// Query learnings produced by this run
+					let runLearnings: Array<{
+						id: string;
+						runId: string;
+						scope: string;
+						kind: string;
+						title: string;
+						body: string;
+						status: string;
+						createdAt: string;
+						seenCount: number;
+					}> = [];
+					try {
+						const memoryPort = await loadReadOnlyMemoryPort(cwd);
+						if (memoryPort) {
+							runLearnings = [
+								...memoryPort.fetchLearningsByRunId(result.run.id),
+							];
+						}
+					} catch {
+						// Memory port unavailable
+					}
 					for (const line of formatInspectDetail(
 						result as unknown as Parameters<typeof formatInspectDetail>[0],
 						events,
+						runLearnings,
 					)) {
 						stdout(line);
 					}

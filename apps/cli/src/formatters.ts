@@ -165,6 +165,7 @@ interface InspectSnapshotLike {
 export function formatInspectDetail(
 	snapshot: InspectSnapshotLike,
 	_events: ExecutionEventLike[],
+	learnings?: readonly StoredLearningLike[],
 ): string[] {
 	const lines: string[] = [];
 
@@ -226,6 +227,14 @@ export function formatInspectDetail(
 		}
 		if (f.message) {
 			lines.push(`failure: ${f.message}`);
+		}
+	}
+
+	if (learnings && learnings.length > 0) {
+		lines.push("");
+		lines.push("learnings:");
+		for (const l of learnings) {
+			lines.push(`  [${l.scope}/${l.kind}] ${l.title} (seen: ${l.seenCount})`);
 		}
 	}
 

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+	formatInspectDetail,
 	formatLearningDetail,
 	formatLearningsList,
 } from "../src/formatters.js";
@@ -60,5 +61,48 @@ describe("formatLearningDetail", () => {
 		expect(lines).toContainEqual(
 			expect.stringContaining("Rejected: exit code 1"),
 		);
+	});
+});
+
+describe("formatInspectDetail", () => {
+	const baseSnapshot = {
+		kind: "run",
+		unit: { id: "implement-foo", kind: "command" },
+		run: { id: "run-xyz", unitId: "implement-foo", status: "passed" },
+		evidence: [],
+		decisions: [],
+		artifacts: [],
+	};
+
+	it("includes learnings section when learnings are provided", () => {
+		const learnings = [
+			{
+				id: "abc-123",
+				runId: "run-xyz",
+				scope: "workspace",
+				kind: "fact",
+				title: "Verification gate passed",
+				body: "All outputs verified",
+				status: "active",
+				createdAt: "2026-04-12T01:00:00Z",
+				seenCount: 1,
+			},
+		];
+		const lines = formatInspectDetail(baseSnapshot, [], learnings);
+		expect(lines).toContainEqual(expect.stringContaining("learnings:"));
+		expect(lines).toContainEqual(
+			expect.stringContaining("[workspace/fact] Verification gate passed"),
+		);
+		expect(lines).toContainEqual(expect.stringContaining("(seen: 1)"));
+	});
+
+	it("omits learnings section when no learnings provided", () => {
+		const lines = formatInspectDetail(baseSnapshot, []);
+		expect(lines.join("\n")).not.toContain("learnings:");
+	});
+
+	it("omits learnings section when empty array provided", () => {
+		const lines = formatInspectDetail(baseSnapshot, [], []);
+		expect(lines.join("\n")).not.toContain("learnings:");
 	});
 });
