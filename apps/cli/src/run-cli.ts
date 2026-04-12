@@ -62,7 +62,9 @@ function formatTopLevelHelp(): string[] {
 		"",
 		"  Project:",
 		"    init                   Initialize .buildplane in this repo",
-		"    memory <action>        Manage stored learnings",
+		"    memory list            Show stored learnings",
+		"    memory inspect <id>    Detail for one learning",
+		"    memory <action>        Advanced memory operations (native)",
 		"    pack show <id>         Inspect a pack",
 		"",
 		"  buildplane run --help    Show run options (--raw, --tui)",
@@ -572,19 +574,18 @@ export async function runCli(
 					kindIdx >= 0 && kindIdx + 1 < subRest.length
 						? subRest[kindIdx + 1]
 						: undefined;
-				const memoryPort = await loadReadOnlyMemoryPort(cwd);
-				if (!memoryPort) {
-					if (json) {
-						stdout(formatJson([]));
-					} else {
-						stdout("No learnings found.");
+				let learnings: ReturnType<MemoryPortLike["fetchLearnings"]> = [];
+				try {
+					const memoryPort = await loadReadOnlyMemoryPort(cwd);
+					if (memoryPort) {
+						learnings = memoryPort.fetchLearnings({
+							scope: scope as string | undefined,
+							kind: kind as string | undefined,
+						});
 					}
-					return 0;
+				} catch {
+					// Database may lack run_learnings table (pre-cold-path project)
 				}
-				const learnings = memoryPort.fetchLearnings({
-					scope: scope as string | undefined,
-					kind: kind as string | undefined,
-				});
 				if (json) {
 					stdout(formatJson(learnings));
 				} else {
@@ -607,17 +608,17 @@ export async function runCli(
 					}
 					return 1;
 				}
-				const memoryPort = await loadReadOnlyMemoryPort(cwd);
-				if (!memoryPort) {
-					const msg = `Learning not found: ${id}`;
-					if (json) {
-						stdout(formatJson(formatJsonError("NOT_FOUND", msg)));
-					} else {
-						stderr(msg);
+				let learning:
+					| ReturnType<MemoryPortLike["fetchLearningById"]>
+					| undefined;
+				try {
+					const memoryPort = await loadReadOnlyMemoryPort(cwd);
+					if (memoryPort) {
+						learning = memoryPort.fetchLearningById(id);
 					}
-					return 1;
+				} catch {
+					// Database may lack run_learnings table (pre-cold-path project)
 				}
-				const learning = memoryPort.fetchLearningById(id);
 				if (!learning) {
 					const msg = `Learning not found: ${id}`;
 					if (json) {
