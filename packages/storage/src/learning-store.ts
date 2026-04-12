@@ -17,6 +17,7 @@ interface LearningRow {
 	readonly body: string;
 	readonly status: string;
 	readonly created_at: string;
+	readonly seen_count: number;
 }
 
 export function createLearningStore(
@@ -67,7 +68,7 @@ export function createLearningStore(
 
 			const rows = database
 				.prepare(
-					`SELECT id, run_id, scope, kind, title, body, status, created_at
+					`SELECT id, run_id, scope, kind, title, body, status, created_at, seen_count
            FROM run_learnings
            WHERE ${conditions.join(" AND ")}
            ORDER BY created_at DESC
@@ -84,6 +85,7 @@ export function createLearningStore(
 				body: row.body,
 				status: row.status as "active" | "superseded" | "archived",
 				createdAt: row.created_at,
+				seenCount: row.seen_count,
 			}));
 		},
 	};

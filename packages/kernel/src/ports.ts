@@ -138,6 +138,7 @@ export interface StoredLearning extends ExtractedLearning {
 	readonly runId: string;
 	readonly status: "active" | "superseded" | "archived";
 	readonly createdAt: string;
+	readonly seenCount: number;
 }
 
 export interface BuildplaneMemoryPort {

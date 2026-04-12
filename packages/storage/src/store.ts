@@ -176,6 +176,14 @@ function ensureRunLearningsTable(database: DatabaseSync): void {
 	);
 }
 
+function ensureSeenCountColumn(database: DatabaseSync): void {
+	if (!tableHasColumn(database, "run_learnings", "seen_count")) {
+		database.exec(
+			`ALTER TABLE run_learnings ADD COLUMN seen_count INTEGER NOT NULL DEFAULT 1`,
+		);
+	}
+}
+
 function tableExists(database: DatabaseSync, tableName: string): boolean {
 	const row = database
 		.prepare(
@@ -270,6 +278,7 @@ export function bootstrapStorageProjectionSchema(database: DatabaseSync): void {
 	ensureRunsUsedWorkspaceColumn(database);
 	ensureRunsStrategyColumns(database);
 	ensureRunLearningsTable(database);
+	ensureSeenCountColumn(database);
 	assertWorkspaceTableColumns(database);
 }
 
