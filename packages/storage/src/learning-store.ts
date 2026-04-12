@@ -86,7 +86,10 @@ export function createLearningStore(
 					`SELECT id, run_id, scope, kind, title, body, status, created_at, seen_count
            FROM run_learnings
            WHERE ${conditions.join(" AND ")}
-           ORDER BY created_at DESC
+           ORDER BY
+             CASE WHEN scope = 'user' THEN 3 WHEN scope = 'workspace' THEN 2 ELSE 1 END DESC,
+             seen_count DESC,
+             created_at DESC
            LIMIT ?`,
 				)
 				.all(...params) as unknown as LearningRow[];

@@ -156,4 +156,53 @@ describe("createLearningStore", () => {
 		const workspaceLearnings = store.fetchLearnings({ scope: "workspace" });
 		expect(workspaceLearnings).toHaveLength(1);
 	});
+
+	it("scope-ordered fetch returns user > workspace > session", () => {
+		const db = makeDb();
+		const store = createLearningStore(db);
+		const now = new Date().toISOString();
+		// Insert one learning per scope directly via SQL
+		const insert = db.prepare(
+			`INSERT INTO run_learnings (id, run_id, scope, kind, title, body, status, seen_count, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)`,
+		);
+		insert.run(
+			"id-session",
+			"run-1",
+			"session",
+			"fact",
+			"S",
+			"session body",
+			1,
+			now,
+			now,
+		);
+		insert.run(
+			"id-workspace",
+			"run-1",
+			"workspace",
+			"fact",
+			"W",
+			"workspace body",
+			1,
+			now,
+			now,
+		);
+		insert.run(
+			"id-user",
+			"run-1",
+			"user",
+			"fact",
+			"U",
+			"user body",
+			1,
+			now,
+			now,
+		);
+
+		const results = store.fetchLearnings();
+		expect(results[0].scope).toBe("user");
+		expect(results[1].scope).toBe("workspace");
+		expect(results[2].scope).toBe("session");
+	});
 });

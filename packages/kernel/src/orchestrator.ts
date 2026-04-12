@@ -328,6 +328,7 @@ export function createBuildplaneOrchestrator(
 						if (learnings.length > 0) {
 							memoryPort.writeLearnings(failedRun.id, learnings);
 						}
+						memoryPort.promoteLearnings(failedRun.id);
 					} catch {
 						// Silent
 					}
@@ -415,6 +416,7 @@ export function createBuildplaneOrchestrator(
 				if (learnings.length > 0) {
 					memoryPort.writeLearnings(completedRun.id, learnings);
 				}
+				memoryPort.promoteLearnings(completedRun.id);
 			} catch {
 				// Silent — follows event bus subscriber convention
 			}

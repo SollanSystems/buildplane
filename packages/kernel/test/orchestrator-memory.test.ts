@@ -116,6 +116,7 @@ describe("orchestrator memory integration", () => {
 			fetchLearnings() {
 				return [];
 			},
+			promoteLearnings: vi.fn(),
 		};
 
 		const orch = createBuildplaneOrchestrator({
@@ -155,6 +156,7 @@ describe("orchestrator memory integration", () => {
 			fetchLearnings() {
 				return [];
 			},
+			promoteLearnings: vi.fn(),
 		};
 
 		const orch = createBuildplaneOrchestrator({
@@ -193,6 +195,7 @@ describe("orchestrator memory integration", () => {
 			fetchLearnings() {
 				return [];
 			},
+			promoteLearnings: vi.fn(),
 		};
 
 		const orch = createBuildplaneOrchestrator({
@@ -244,6 +247,7 @@ describe("orchestrator memory integration", () => {
 				throw new Error("db error");
 			}),
 			fetchLearnings: vi.fn().mockReturnValue([]),
+			promoteLearnings: vi.fn(),
 		};
 
 		const orch = createBuildplaneOrchestrator({
