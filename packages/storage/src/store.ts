@@ -8,14 +8,17 @@ import type {
 	CreateRunOptions,
 	ExecutionReceipt,
 	InspectSnapshot,
+	MemoryScopeType,
 	PolicyDecision,
 	RejectedPolicyDecision,
+	RepoFact,
 	Run,
 	RunStatus,
 	StatusSnapshot,
 	StatusWorkspaceSummary,
 	Unit,
 	UnitPacket,
+	UpsertRepoFactInput,
 	WorkspaceSnapshot,
 } from "@buildplane/kernel";
 import {
@@ -56,6 +59,27 @@ interface StoredWorkspaceRow {
 	readonly created_at: string;
 	readonly finalized_at: string | null;
 	readonly cleanup_error: string | null;
+}
+
+interface StoredRepoFactRow {
+	readonly id: string;
+	readonly repo_id: string;
+	readonly fact_key: string;
+	readonly fact_value_json: string;
+	readonly value_type: "string" | "number" | "boolean" | "json";
+	readonly scope_type: MemoryScopeType;
+	readonly scope_key: string | null;
+	readonly confidence: number;
+	readonly source_run_id: string | null;
+	readonly source_task_id: string | null;
+	readonly created_by: "system" | "worker" | "operator";
+	readonly branch: string | null;
+	readonly commit_sha: string | null;
+	readonly status: "active" | "stale" | "superseded" | "archived";
+	readonly valid_from_commit: string | null;
+	readonly valid_to_commit: string | null;
+	readonly created_at: string;
+	readonly updated_at: string;
 }
 
 export interface StorageTestingHooks {
@@ -184,6 +208,21 @@ function ensureSeenCountColumn(database: DatabaseSync): void {
 	}
 }
 
+function ensureRepoFactColumns(database: DatabaseSync): void {
+	for (const statement of [
+		`ALTER TABLE repo_facts ADD COLUMN created_by TEXT NOT NULL DEFAULT 'system'`,
+		`ALTER TABLE repo_facts ADD COLUMN branch TEXT`,
+		`ALTER TABLE repo_facts ADD COLUMN commit_sha TEXT`,
+		`ALTER TABLE repo_facts ADD COLUMN valid_from_commit TEXT`,
+		`ALTER TABLE repo_facts ADD COLUMN valid_to_commit TEXT`,
+	] as const) {
+		const columnName = statement.match(/ADD COLUMN ([^ ]+)/)?.[1];
+		if (columnName && !tableHasColumn(database, "repo_facts", columnName)) {
+			database.exec(statement);
+		}
+	}
+}
+
 function assertTableColumns(
 	database: DatabaseSync,
 	tableName: string,
@@ -232,6 +271,9 @@ function assertRepoFactsTableColumns(database: DatabaseSync): void {
 		"confidence",
 		"source_run_id",
 		"source_task_id",
+		"created_by",
+		"branch",
+		"commit_sha",
 		"status",
 		"valid_from_commit",
 		"valid_to_commit",
@@ -275,15 +317,6 @@ function assertSearchableDocumentsTableColumns(database: DatabaseSync): void {
 export function bootstrapStorageProjectionSchema(database: DatabaseSync): void {
 	if (tableExists(database, "workspaces")) {
 		assertWorkspaceTableColumns(database);
-	}
-	if (tableExists(database, "repo_facts")) {
-		assertRepoFactsTableColumns(database);
-	}
-	if (tableExists(database, "procedures")) {
-		assertProceduresTableColumns(database);
-	}
-	if (tableExists(database, "searchable_documents")) {
-		assertSearchableDocumentsTableColumns(database);
 	}
 
 	database.exec(`
@@ -364,6 +397,9 @@ export function bootstrapStorageProjectionSchema(database: DatabaseSync): void {
 			confidence REAL NOT NULL DEFAULT 1.0,
 			source_run_id TEXT,
 			source_task_id TEXT,
+			created_by TEXT NOT NULL DEFAULT 'system',
+			branch TEXT,
+			commit_sha TEXT,
 			status TEXT NOT NULL DEFAULT 'active',
 			valid_from_commit TEXT,
 			valid_to_commit TEXT,
@@ -414,6 +450,8 @@ export function bootstrapStorageProjectionSchema(database: DatabaseSync): void {
 	ensureRunsStrategyColumns(database);
 	ensureRunLearningsTable(database);
 	ensureSeenCountColumn(database);
+	ensureRunsStepColumns(database);
+	ensureRepoFactColumns(database);
 	assertWorkspaceTableColumns(database);
 	assertRepoFactsTableColumns(database);
 	assertProceduresTableColumns(database);
@@ -471,6 +509,9 @@ function assertStorageProjectionSchema(database: DatabaseSync): void {
 	}
 
 	assertWorkspaceTableColumns(database);
+	assertRepoFactsTableColumns(database);
+	assertProceduresTableColumns(database);
+	assertSearchableDocumentsTableColumns(database);
 }
 
 export interface RunHistoryEntry {
@@ -652,6 +693,131 @@ export function createStorageStore(
 			unitId: row.unit_id,
 			status: row.status,
 		};
+	}
+
+	function toRepoFact(row: StoredRepoFactRow): RepoFact {
+		return {
+			id: row.id,
+			memoryType: "repo-fact",
+			scopeType: row.scope_type,
+			scopeKey: row.scope_key ?? undefined,
+			status: row.status,
+			factKey: row.fact_key,
+			valueType: row.value_type,
+			factValue: JSON.parse(row.fact_value_json) as unknown,
+			validFromCommit: row.valid_from_commit ?? undefined,
+			validToCommit: row.valid_to_commit ?? undefined,
+			provenance: {
+				sourceRunId: row.source_run_id ?? undefined,
+				sourceTaskId: row.source_task_id ?? undefined,
+				createdBy: row.created_by,
+				createdAt: row.created_at,
+				updatedAt: row.updated_at,
+				confidence: row.confidence,
+				repoId: row.repo_id,
+				branch: row.branch ?? undefined,
+				commitSha: row.commit_sha ?? undefined,
+			},
+		};
+	}
+
+	function readRepoFactRows(
+		database: DatabaseSync,
+		options: {
+			factKey?: string;
+			scopeType?: MemoryScopeType;
+			scopeKey?: string;
+			includeInactive?: boolean;
+		},
+	): StoredRepoFactRow[] {
+		const clauses = ["repo_id = ?"];
+		const params: (string | null)[] = [projectRoot];
+
+		if (options.factKey) {
+			clauses.push("fact_key = ?");
+			params.push(options.factKey);
+		}
+		if (options.scopeType) {
+			clauses.push("scope_type = ?");
+			params.push(options.scopeType);
+		}
+		if (options.scopeKey !== undefined) {
+			if (options.scopeKey === "") {
+				clauses.push("scope_key = ''");
+			} else {
+				clauses.push("scope_key = ?");
+				params.push(options.scopeKey);
+			}
+		} else if (
+			options.scopeType === "repo" ||
+			options.scopeType === "global"
+		) {
+			clauses.push("scope_key IS NULL");
+		}
+		if (!options.includeInactive) {
+			clauses.push("status = 'active'");
+		}
+
+		const query = `
+			SELECT id, repo_id, fact_key, fact_value_json, value_type, scope_type, scope_key,
+			       confidence, source_run_id, source_task_id, created_by, branch, commit_sha,
+			       status, valid_from_commit, valid_to_commit, created_at, updated_at
+			FROM repo_facts
+			WHERE ${clauses.join(" AND ")}
+			ORDER BY updated_at DESC, created_at DESC
+		`;
+
+		return database.prepare(query).all(...params) as unknown as StoredRepoFactRow[];
+	}
+
+	function defaultRepoFactScope(options?: {
+		scopeType?: MemoryScopeType;
+		scopeKey?: string;
+	}): { scopeType: MemoryScopeType; scopeKey?: string } {
+		return {
+			scopeType: options?.scopeType ?? "repo",
+			scopeKey: options?.scopeKey,
+		};
+	}
+
+	function assertScopeKeyForExactLookup(
+		scopeType: MemoryScopeType,
+		scopeKey?: string,
+	): void {
+		const hasScopeKey = scopeKey !== undefined;
+		const hasNonEmptyScopeKey = scopeKey !== undefined && scopeKey.length > 0;
+
+		if (scopeType !== "repo" && scopeType !== "global" && !hasNonEmptyScopeKey) {
+			throw new Error(
+				`Exact scoped repo fact lookup for '${scopeType}' requires a scope key.`,
+			);
+		}
+		if ((scopeType === "repo" || scopeType === "global") && hasScopeKey) {
+			throw new Error(
+				`Scope '${scopeType}' does not accept a scope key for exact repo fact operations.`,
+			);
+		}
+	}
+
+	function assertRepoFactListFilter(options?: {
+		scopeType?: MemoryScopeType;
+		scopeKey?: string;
+	}): void {
+		const hasScopeKey = options?.scopeKey !== undefined;
+
+		if (hasScopeKey && !options?.scopeType) {
+			throw new Error(
+				"Listing repo facts by scope key requires a matching scope type.",
+			);
+		}
+		if (
+			hasScopeKey &&
+			(options?.scopeType === "repo" || options?.scopeType === "global")
+		) {
+			throw new Error(
+				`Scope '${options.scopeType}' does not accept a scope key for repo fact filters.`,
+			);
+		}
 	}
 
 	function readEvidence(
@@ -1298,6 +1464,134 @@ export function createStorageStore(
 					database,
 				);
 				return toRun({ ...runRow, status: "failed" });
+			} finally {
+				database.close();
+			}
+		},
+
+		upsertRepoFact(input: UpsertRepoFactInput): RepoFact {
+			ensureInitialized();
+			const database = openStoreDatabase();
+			const now = new Date().toISOString();
+			const scope = defaultRepoFactScope({
+				scopeType: input.scopeType,
+				scopeKey: input.scopeKey,
+			});
+			assertScopeKeyForExactLookup(scope.scopeType, scope.scopeKey);
+
+			try {
+				return runInTransaction(database, () => {
+					database
+						.prepare(
+							`UPDATE repo_facts SET status = 'superseded', updated_at = ? WHERE repo_id = ? AND fact_key = ? AND scope_type = ? AND scope_key IS ? AND status = 'active'`,
+						)
+						.run(now, projectRoot, input.factKey, scope.scopeType, scope.scopeKey ?? null);
+
+					const id = randomUUID();
+					database
+						.prepare(
+							`INSERT INTO repo_facts (id, repo_id, fact_key, fact_value_json, value_type, scope_type, scope_key, confidence, source_run_id, source_task_id, created_by, branch, commit_sha, status, valid_from_commit, valid_to_commit, created_at, updated_at)
+							 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)`,
+						)
+						.run(
+							id,
+							projectRoot,
+							input.factKey,
+							JSON.stringify(input.factValue),
+							input.valueType,
+							scope.scopeType,
+							scope.scopeKey ?? null,
+							input.confidence ?? 1,
+							input.sourceRunId ?? null,
+							input.sourceTaskId ?? null,
+							input.createdBy,
+							input.branch ?? null,
+							input.commitSha ?? null,
+							input.validFromCommit ?? null,
+							input.validToCommit ?? null,
+							now,
+							now,
+						);
+
+					return toRepoFact(
+						readRepoFactRows(database, {
+							factKey: input.factKey,
+							scopeType: scope.scopeType,
+							scopeKey: scope.scopeKey,
+						})[0] as StoredRepoFactRow,
+					);
+				});
+			} finally {
+				database.close();
+			}
+		},
+
+		getRepoFact(
+			factKey: string,
+			options?: {
+				scopeType?: MemoryScopeType;
+				scopeKey?: string;
+			},
+		): RepoFact | null {
+			ensureInitialized();
+			const database = openStoreDatabase();
+			const scope = defaultRepoFactScope(options);
+			assertScopeKeyForExactLookup(scope.scopeType, scope.scopeKey);
+
+			try {
+				const row = readRepoFactRows(database, {
+					factKey,
+					scopeType: scope.scopeType,
+					scopeKey: scope.scopeKey,
+				})[0];
+				return row ? toRepoFact(row) : null;
+			} finally {
+				database.close();
+			}
+		},
+
+		listRepoFacts(options?: {
+			scopeType?: MemoryScopeType;
+			scopeKey?: string;
+		}): readonly RepoFact[] {
+			ensureInitialized();
+			const database = openStoreDatabase();
+			const scope = defaultRepoFactScope(options);
+			assertRepoFactListFilter(options);
+
+			try {
+				return readRepoFactRows(database, {
+					scopeType: options?.scopeType ? scope.scopeType : undefined,
+					scopeKey: options?.scopeKey,
+				}).map(toRepoFact);
+			} finally {
+				database.close();
+			}
+		},
+
+		supersedeRepoFact(
+			factKey: string,
+			options?: {
+				scopeType?: MemoryScopeType;
+				scopeKey?: string;
+			},
+		): number {
+			ensureInitialized();
+			const database = openStoreDatabase();
+			const now = new Date().toISOString();
+			const scope = defaultRepoFactScope(options);
+			assertScopeKeyForExactLookup(scope.scopeType, scope.scopeKey);
+
+			try {
+				const result = database
+					.prepare(
+						`UPDATE repo_facts SET status = 'superseded', updated_at = ? WHERE repo_id = ? AND fact_key = ? AND scope_type = ? AND scope_key IS ? AND status = 'active'`,
+					)
+					.run(now, projectRoot, factKey, scope.scopeType, scope.scopeKey ?? null) as {
+						changes: number;
+					};
+
+				return result.changes;
 			} finally {
 				database.close();
 			}

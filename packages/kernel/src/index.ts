@@ -104,5 +104,6 @@ export type {
 	MemoryValueType,
 	ProcedureMemory,
 	RepoFact,
+	UpsertRepoFactInput,
 } from "./memory-types.js";
 export { validatePacketForWorkspaceRoot } from "./workspace-paths.js";

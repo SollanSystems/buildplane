@@ -84,6 +84,7 @@ export type {
 	MemoryValueType,
 	ProcedureMemory,
 	RepoFact,
+	UpsertRepoFactInput,
 } from "./memory-types.ts";
 export { validatePacketForWorkspaceRoot } from "./workspace-paths.ts";
 export type {

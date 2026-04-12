@@ -19,6 +19,7 @@ import type {
 	StatusSnapshot,
 	UnitPacket,
 } from "./run-loop.js";
+import type { MemoryScopeType, RepoFact, UpsertRepoFactInput } from "./memory-types.js";
 import type { Run } from "./types.js";
 
 export interface CreateRunOptions {
@@ -66,6 +67,25 @@ export interface BuildplaneStoragePort {
 	suspendRun(runId: string): Run;
 	approveRun(runId: string): Run;
 	rejectSuspendedRun(runId: string): Run;
+	upsertRepoFact(input: UpsertRepoFactInput): RepoFact;
+	getRepoFact(
+		factKey: string,
+		options?: {
+			scopeType?: MemoryScopeType;
+			scopeKey?: string;
+		},
+	): RepoFact | null;
+	listRepoFacts(options?: {
+		scopeType?: MemoryScopeType;
+		scopeKey?: string;
+	}): readonly RepoFact[];
+	supersedeRepoFact(
+		factKey: string,
+		options?: {
+			scopeType?: MemoryScopeType;
+			scopeKey?: string;
+		},
+	): number;
 	getStatusSnapshot(): StatusSnapshot;
 	inspectTarget(id: string): InspectSnapshot;
 }

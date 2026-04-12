@@ -46,6 +46,8 @@ export interface RepoFact extends BaseMemoryRecord {
 	readonly factKey: string;
 	readonly valueType: MemoryValueType;
 	readonly factValue: unknown;
+	readonly validFromCommit?: string;
+	readonly validToCommit?: string;
 }
 
 export interface ProcedureMemory extends BaseMemoryRecord {
@@ -54,4 +56,20 @@ export interface ProcedureMemory extends BaseMemoryRecord {
 	readonly taskType?: string;
 	readonly bodyMarkdown: string;
 	readonly metadata?: Record<string, unknown>;
+}
+
+export interface UpsertRepoFactInput {
+	readonly factKey: string;
+	readonly factValue: unknown;
+	readonly valueType: MemoryValueType;
+	readonly scopeType?: MemoryScopeType;
+	readonly scopeKey?: string;
+	readonly confidence?: number;
+	readonly createdBy: MemoryCreatedBy;
+	readonly sourceRunId?: string;
+	readonly sourceTaskId?: string;
+	readonly branch?: string;
+	readonly commitSha?: string;
+	readonly validFromCommit?: string;
+	readonly validToCommit?: string;
 }
