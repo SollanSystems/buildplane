@@ -50,7 +50,7 @@ const receipt: ExecutionReceipt = {
 	exitCode: 0,
 	stdout: "ok",
 	stderr: "",
-	outputChecks: [],
+	outputChecks: [{ path: "output/result.txt", exists: true }],
 };
 
 function makeStorage(policyOutcome: "approved" | "rejected") {

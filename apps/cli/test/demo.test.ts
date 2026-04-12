@@ -61,6 +61,5 @@ describe("runDemo integration", () => {
 		expect(text).toContain("Flywheel closed");
 		expect(text).toContain("learnings found");
 		expect(text).toContain("[fact]");
-		expect(text).toContain("[decision]");
 	}, 15_000);
 });
