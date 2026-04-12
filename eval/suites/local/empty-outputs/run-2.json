@@ -1,0 +1,37 @@
+{
+	"unit": {
+		"id": "eval-eo-2",
+		"kind": "command",
+		"scope": "task",
+		"inputRefs": [],
+		"expectedOutputs": ["output/result.txt"],
+		"verificationContract": "exit-0-and-required-outputs",
+		"policyProfile": "default"
+	},
+	"execution": {
+		"command": "node",
+		"args": [
+			"-e",
+			"const fs = require('fs'); fs.mkdirSync('output', { recursive: true }); fs.writeFileSync('output/result.txt', 'result');"
+		]
+	},
+	"verification": {
+		"requiredOutputs": ["output/result.txt"]
+	},
+	"intent": {
+		"objective": "Write output after empty run",
+		"taskType": "implement",
+		"context": {
+			"files": []
+		},
+		"constraints": {
+			"scope": [],
+			"verification": []
+		},
+		"features": {
+			"ambiguity": "low",
+			"reversibility": "easy",
+			"verifierStrength": "strong"
+		}
+	}
+}

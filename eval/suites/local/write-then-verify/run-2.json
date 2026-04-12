@@ -1,0 +1,37 @@
+{
+	"unit": {
+		"id": "eval-wtv-2",
+		"kind": "command",
+		"scope": "task",
+		"inputRefs": ["output/result.txt"],
+		"expectedOutputs": ["output/summary.txt"],
+		"verificationContract": "exit-0-and-required-outputs",
+		"policyProfile": "default"
+	},
+	"execution": {
+		"command": "node",
+		"args": [
+			"-e",
+			"const fs = require('fs'); fs.mkdirSync('output', { recursive: true }); fs.writeFileSync('output/summary.txt', 'workspace summary');"
+		]
+	},
+	"verification": {
+		"requiredOutputs": ["output/summary.txt"]
+	},
+	"intent": {
+		"objective": "Summarize workspace state",
+		"taskType": "implement",
+		"context": {
+			"files": []
+		},
+		"constraints": {
+			"scope": [],
+			"verification": []
+		},
+		"features": {
+			"ambiguity": "low",
+			"reversibility": "easy",
+			"verifierStrength": "strong"
+		}
+	}
+}

@@ -1,0 +1,4 @@
+{
+	"name": "fail-then-learn",
+	"description": "Run 1 fails (exit 1), run 2 succeeds — proves rejection learnings are stored as memories"
+}

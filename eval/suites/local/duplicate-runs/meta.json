@@ -1,0 +1,4 @@
+{
+	"name": "duplicate-runs",
+	"description": "Run 1 and run 2 are identical — proves dedup increments seen_count"
+}

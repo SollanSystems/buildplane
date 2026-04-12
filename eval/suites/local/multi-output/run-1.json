@@ -1,0 +1,37 @@
+{
+	"unit": {
+		"id": "eval-mo-1",
+		"kind": "command",
+		"scope": "task",
+		"inputRefs": [],
+		"expectedOutputs": ["output/a.txt", "output/b.txt", "output/c.txt"],
+		"verificationContract": "exit-0-and-required-outputs",
+		"policyProfile": "default"
+	},
+	"execution": {
+		"command": "node",
+		"args": [
+			"-e",
+			"const fs = require('fs'); fs.mkdirSync('output', { recursive: true }); fs.writeFileSync('output/a.txt', 'file a'); fs.writeFileSync('output/b.txt', 'file b'); fs.writeFileSync('output/c.txt', 'file c');"
+		]
+	},
+	"verification": {
+		"requiredOutputs": ["output/a.txt", "output/b.txt", "output/c.txt"]
+	},
+	"intent": {
+		"objective": "Write multiple output files",
+		"taskType": "implement",
+		"context": {
+			"files": []
+		},
+		"constraints": {
+			"scope": [],
+			"verification": []
+		},
+		"features": {
+			"ambiguity": "low",
+			"reversibility": "easy",
+			"verifierStrength": "strong"
+		}
+	}
+}

@@ -1,0 +1,4 @@
+{
+	"name": "multi-output",
+	"description": "Run 1 writes 3 files — proves multi-path verification learning is injected"
+}

@@ -1,0 +1,4 @@
+{
+	"name": "write-then-verify",
+	"description": "Run 1 writes output, run 2 verifies — proves verification-gate-win learning is injected"
+}

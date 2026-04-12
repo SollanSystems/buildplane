@@ -1,0 +1,4 @@
+{
+	"name": "empty-outputs",
+	"description": "Run 1 succeeds with no outputs (zero learnings) — proves empty case is handled"
+}
