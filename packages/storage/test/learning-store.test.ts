@@ -77,4 +77,31 @@ describe("createLearningStore", () => {
 	it("returns empty array when no learnings exist", () => {
 		expect(createLearningStore(makeDb()).fetchLearnings()).toEqual([]);
 	});
+
+	it("dedup: increments seen_count instead of inserting duplicate", () => {
+		const store = createLearningStore(makeDb());
+		store.writeLearnings("run-1", [learning]);
+		store.writeLearnings("run-2", [learning]); // same scope+kind+title
+		const results = store.fetchLearnings();
+		expect(results).toHaveLength(1);
+		expect(results[0].seenCount).toBe(2);
+	});
+
+	it("dedup: preserves original ID on update", () => {
+		const store = createLearningStore(makeDb());
+		store.writeLearnings("run-1", [learning]);
+		const first = store.fetchLearnings();
+		const originalId = first[0].id;
+		store.writeLearnings("run-2", [learning]);
+		const second = store.fetchLearnings();
+		expect(second[0].id).toBe(originalId);
+	});
+
+	it("dedup: updates body with latest content", () => {
+		const store = createLearningStore(makeDb());
+		store.writeLearnings("run-1", [learning]);
+		store.writeLearnings("run-2", [{ ...learning, body: "updated body" }]);
+		const results = store.fetchLearnings();
+		expect(results[0].body).toBe("updated body");
+	});
 });

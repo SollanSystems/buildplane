@@ -29,21 +29,36 @@ export function createLearningStore(
 			learnings: readonly ExtractedLearning[],
 		): void {
 			const now = new Date().toISOString();
+			const findExisting = database.prepare(
+				`SELECT id FROM run_learnings WHERE scope = ? AND kind = ? AND title = ? AND status = 'active' LIMIT 1`,
+			);
+			const updateExisting = database.prepare(
+				`UPDATE run_learnings SET body = ?, updated_at = ?, seen_count = seen_count + 1 WHERE id = ?`,
+			);
 			const insert = database.prepare(
-				`INSERT INTO run_learnings (id, run_id, scope, kind, title, body, status, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?)`,
+				`INSERT INTO run_learnings (id, run_id, scope, kind, title, body, status, seen_count, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, 'active', 1, ?, ?)`,
 			);
 			for (const l of learnings) {
-				insert.run(
-					randomUUID(),
-					runId,
+				const existing = findExisting.all(
 					l.scope,
 					l.kind,
 					l.title,
-					l.body,
-					now,
-					now,
-				);
+				) as unknown as { id: string }[];
+				if (existing.length > 0) {
+					updateExisting.run(l.body, now, existing[0].id);
+				} else {
+					insert.run(
+						randomUUID(),
+						runId,
+						l.scope,
+						l.kind,
+						l.title,
+						l.body,
+						now,
+						now,
+					);
+				}
 			}
 		},
 
