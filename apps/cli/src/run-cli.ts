@@ -7,6 +7,8 @@ import {
 	formatInspectDetail,
 	formatJson,
 	formatJsonError,
+	formatLearningDetail,
+	formatLearningsList,
 	formatRunHistory,
 	formatRunResult,
 	formatStrategyRunResult,
@@ -134,10 +136,44 @@ interface HonchoPortLike {
 }
 
 interface MemoryPortLike {
-	fetchLearnings(options?: { limit?: number }): ReadonlyArray<{
+	fetchLearnings(options?: {
+		scope?: string;
+		kind?: string;
+		limit?: number;
+	}): ReadonlyArray<{
+		id: string;
+		runId: string;
+		scope: string;
 		kind: string;
 		title: string;
 		body: string;
+		status: string;
+		createdAt: string;
+		seenCount: number;
+	}>;
+	fetchLearningById(id: string):
+		| {
+				id: string;
+				runId: string;
+				scope: string;
+				kind: string;
+				title: string;
+				body: string;
+				status: string;
+				createdAt: string;
+				seenCount: number;
+		  }
+		| undefined;
+	fetchLearningsByRunId(runId: string): ReadonlyArray<{
+		id: string;
+		runId: string;
+		scope: string;
+		kind: string;
+		title: string;
+		body: string;
+		status: string;
+		createdAt: string;
+		seenCount: number;
 	}>;
 }
 
@@ -375,6 +411,28 @@ async function loadRunHistory(projectRoot: string): Promise<unknown[]> {
 	return storage.createBuildplaneStorage(projectRoot).getRunHistory();
 }
 
+async function loadReadOnlyMemoryPort(
+	projectRoot: string,
+): Promise<MemoryPortLike | undefined> {
+	try {
+		const { resolveProjectLayout, createLearningStore } = (await import(
+			"@buildplane/storage"
+		)) as unknown as {
+			resolveProjectLayout: (root: string) => { stateDbPath: string };
+			createLearningStore: (db: unknown) => MemoryPortLike;
+		};
+		const { DatabaseSync } = await import("node:sqlite");
+		const layout = resolveProjectLayout(projectRoot);
+		if (existsSync(layout.stateDbPath)) {
+			const readDb = new DatabaseSync(layout.stateDbPath, { readOnly: true });
+			return createLearningStore(readDb);
+		}
+	} catch {
+		// Memory port unavailable
+	}
+	return undefined;
+}
+
 async function loadPacket(packetPath: string): Promise<unknown> {
 	const kernel = (await import("@buildplane/kernel")) as unknown as {
 		parseUnitPacket: (input: string) => unknown;
@@ -500,6 +558,85 @@ export async function runCli(
 
 	try {
 		if (command === "memory") {
+			const subcommand = rest[0];
+			if (subcommand === "list") {
+				const subRest = rest.slice(1);
+				const json = subRest.includes("--json");
+				const scopeIdx = subRest.indexOf("--scope");
+				const scope =
+					scopeIdx >= 0 && scopeIdx + 1 < subRest.length
+						? subRest[scopeIdx + 1]
+						: undefined;
+				const kindIdx = subRest.indexOf("--kind");
+				const kind =
+					kindIdx >= 0 && kindIdx + 1 < subRest.length
+						? subRest[kindIdx + 1]
+						: undefined;
+				const memoryPort = await loadReadOnlyMemoryPort(cwd);
+				if (!memoryPort) {
+					if (json) {
+						stdout(formatJson([]));
+					} else {
+						stdout("No learnings found.");
+					}
+					return 0;
+				}
+				const learnings = memoryPort.fetchLearnings({
+					scope: scope as string | undefined,
+					kind: kind as string | undefined,
+				});
+				if (json) {
+					stdout(formatJson(learnings));
+				} else {
+					for (const line of formatLearningsList(learnings)) {
+						stdout(line);
+					}
+				}
+				return 0;
+			}
+			if (subcommand === "inspect") {
+				const subRest = rest.slice(1);
+				const json = subRest.includes("--json");
+				const id = subRest.find((v) => v !== "--json");
+				if (!id) {
+					const msg = "Missing required learning ID for memory inspect.";
+					if (json) {
+						stdout(formatJson(formatJsonError("MISSING_ARGUMENT", msg)));
+					} else {
+						stderr(msg);
+					}
+					return 1;
+				}
+				const memoryPort = await loadReadOnlyMemoryPort(cwd);
+				if (!memoryPort) {
+					const msg = `Learning not found: ${id}`;
+					if (json) {
+						stdout(formatJson(formatJsonError("NOT_FOUND", msg)));
+					} else {
+						stderr(msg);
+					}
+					return 1;
+				}
+				const learning = memoryPort.fetchLearningById(id);
+				if (!learning) {
+					const msg = `Learning not found: ${id}`;
+					if (json) {
+						stdout(formatJson(formatJsonError("NOT_FOUND", msg)));
+					} else {
+						stderr(msg);
+					}
+					return 1;
+				}
+				if (json) {
+					stdout(formatJson(learning));
+				} else {
+					for (const line of formatLearningDetail(learning)) {
+						stdout(line);
+					}
+				}
+				return 0;
+			}
+			// Fall through to native for all other memory subcommands
 			try {
 				return await (deps?.runNativeCommand ?? runNativeCommand)(rest, {
 					cwd,

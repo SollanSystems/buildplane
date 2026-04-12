@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { createGitWorktreeAdapter as createActualGitWorkspaceAdapter } from "@buildplane/adapters-git";
 import {
 	type BuildplaneOrchestrator,
@@ -10,7 +11,11 @@ import {
 } from "@buildplane/kernel";
 import { evaluateRun } from "@buildplane/policy";
 import { executePacket } from "@buildplane/runtime";
-import { createBuildplaneStorage } from "@buildplane/storage";
+import {
+	createBuildplaneStorage,
+	createLearningStore,
+	resolveProjectLayout,
+} from "@buildplane/storage";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { type RunCliDependencies, runCli } from "../src/run-cli";
 
@@ -1266,5 +1271,153 @@ describe("cli command surface", () => {
 		]);
 		expect(missingGit.exitCode).toBe(1);
 		expect(missingGit.stderr.join("\n")).toMatch(/git binary is unavailable/i);
+	});
+
+	async function createProjectWithLearnings(
+		root: string,
+		learnings: Array<{
+			kind: string;
+			scope: string;
+			title: string;
+			body: string;
+		}>,
+	): Promise<{ learningIds: string[] }> {
+		execFileSync("git", ["init"], { cwd: root });
+		execFileSync("git", ["config", "user.name", "Buildplane Tests"], {
+			cwd: root,
+		});
+		execFileSync("git", ["config", "user.email", "tests@example.com"], {
+			cwd: root,
+		});
+		execFileSync("git", ["commit", "--allow-empty", "-m", "init"], {
+			cwd: root,
+		});
+		const storage = createBuildplaneStorage(root);
+		storage.initializeProject();
+		const layout = resolveProjectLayout(root);
+		const db = new DatabaseSync(layout.stateDbPath);
+		const store = createLearningStore(db);
+		store.writeLearnings("run-abc", learnings as never);
+		const all = store.fetchLearnings();
+		const ids = (all as Array<{ id: string }>).map((l) => l.id);
+		db.close();
+		return { learningIds: ids };
+	}
+
+	it("memory list returns a formatted table of learnings", async () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-cli-memory-list-"));
+		await createProjectWithLearnings(root, [
+			{
+				kind: "fact",
+				scope: "workspace",
+				title: "Verification gate passed",
+				body: "All outputs verified",
+			},
+		]);
+
+		const result = await runCliCapture(root, ["memory", "list"]);
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stdout.join("\n")).toContain("Verification gate passed");
+		expect(result.stdout.join("\n")).toContain("workspace");
+	});
+
+	it("memory list --json returns JSON array", async () => {
+		const root = mkdtempSync(
+			join(tmpdir(), "buildplane-cli-memory-list-json-"),
+		);
+		await createProjectWithLearnings(root, [
+			{
+				kind: "fact",
+				scope: "workspace",
+				title: "Verification gate passed",
+				body: "All outputs verified",
+			},
+		]);
+
+		const result = await runCliCapture(root, ["memory", "list", "--json"]);
+
+		expect(result.exitCode).toBe(0);
+		const parsed = JSON.parse(result.stdout.join("\n"));
+		expect(Array.isArray(parsed)).toBe(true);
+		expect(parsed).toHaveLength(1);
+		expect(parsed[0].title).toBe("Verification gate passed");
+	});
+
+	it("memory inspect returns detail for a single learning", async () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-cli-memory-inspect-"));
+		const { learningIds } = await createProjectWithLearnings(root, [
+			{
+				kind: "constraint",
+				scope: "session",
+				title: "Run rejected",
+				body: "Rejected: exit code 1",
+			},
+		]);
+
+		const result = await runCliCapture(root, [
+			"memory",
+			"inspect",
+			learningIds[0],
+		]);
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stdout.join("\n")).toContain("Run rejected");
+		expect(result.stdout.join("\n")).toContain("Rejected: exit code 1");
+		expect(result.stdout.join("\n")).toContain(learningIds[0]);
+	});
+
+	it("memory inspect with nonexistent ID returns error", async () => {
+		const root = mkdtempSync(
+			join(tmpdir(), "buildplane-cli-memory-inspect-missing-"),
+		);
+		await createProjectWithLearnings(root, [
+			{
+				kind: "fact",
+				scope: "workspace",
+				title: "Some learning",
+				body: "body",
+			},
+		]);
+
+		const result = await runCliCapture(root, [
+			"memory",
+			"inspect",
+			"nonexistent-id",
+		]);
+
+		expect(result.exitCode).toBe(1);
+		expect(result.stderr.join("\n")).toContain("Learning not found");
+	});
+
+	it("unknown memory subcommands still dispatch to native", async () => {
+		const root = mkdtempSync(
+			join(tmpdir(), "buildplane-cli-memory-native-fallthrough-"),
+		);
+		const calls: Array<{
+			cwd: string;
+			argv: string[];
+			commandPath: string[];
+		}> = [];
+		const dependencies: RunCliDependencies = {
+			runNativeCommand: async (argv, options) => {
+				calls.push({
+					cwd: options.cwd,
+					argv,
+					commandPath: options.commandPath,
+				});
+				return 0;
+			},
+		};
+
+		await runCliCapture(root, ["memory", "search", "foo"], dependencies);
+
+		expect(calls).toEqual([
+			{
+				cwd: root,
+				commandPath: ["memory"],
+				argv: ["search", "foo"],
+			},
+		]);
 	});
 });
