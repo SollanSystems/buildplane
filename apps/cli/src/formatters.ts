@@ -231,3 +231,54 @@ export function formatInspectDetail(
 
 	return lines;
 }
+
+interface StoredLearningLike {
+	readonly id: string;
+	readonly runId: string;
+	readonly scope: string;
+	readonly kind: string;
+	readonly title: string;
+	readonly body: string;
+	readonly status: string;
+	readonly createdAt: string;
+	readonly seenCount: number;
+}
+
+export function formatLearningsList(
+	learnings: readonly StoredLearningLike[],
+): string[] {
+	if (learnings.length === 0) {
+		return ["No learnings found."];
+	}
+
+	const lines: string[] = [];
+	lines.push(
+		`${"ID".padEnd(12)} ${"Scope".padEnd(12)} ${"Kind".padEnd(22)} ${"Seen".padEnd(6)} Title`,
+	);
+	lines.push("─".repeat(80));
+
+	for (const l of learnings) {
+		const shortId = l.id.slice(0, 8);
+		lines.push(
+			`${shortId.padEnd(12)} ${l.scope.padEnd(12)} ${l.kind.padEnd(22)} ${String(l.seenCount).padEnd(6)} ${l.title}`,
+		);
+	}
+
+	return lines;
+}
+
+export function formatLearningDetail(learning: StoredLearningLike): string[] {
+	const lines: string[] = [];
+	lines.push(`ID:         ${learning.id}`);
+	lines.push(`Title:      ${learning.title}`);
+	lines.push(`Scope:      ${learning.scope}`);
+	lines.push(`Kind:       ${learning.kind}`);
+	lines.push(`Status:     ${learning.status}`);
+	lines.push(`Seen:       ${learning.seenCount}`);
+	lines.push(`Run:        ${learning.runId}`);
+	lines.push(`Created:    ${learning.createdAt}`);
+	lines.push("");
+	lines.push("Body:");
+	lines.push(learning.body);
+	return lines;
+}
