@@ -345,50 +345,146 @@ async function loadCliOrchestrator(
 	}
 
 	// Runtime router: selects executor based on packet type and routing hints
-	const adaptersModels = (await cliImport(
-		"@buildplane/adapters-models",
-	)) as unknown as {
-		createModelExecutor: () => {
-			executePacket: (packet: unknown, root: string) => unknown;
-			executePacketAsync: (
-				packet: unknown,
-				root: string,
-				eventBus: unknown,
-			) => Promise<unknown>;
-		};
-		createClaudeCodeExecutor: () => {
-			executePacket: (packet: unknown, root: string) => unknown;
-			executePacketAsync: (
-				packet: unknown,
-				root: string,
-				eventBus: unknown,
-			) => Promise<unknown>;
-		};
-	};
-
 	const adaptersGit = (await cliImport(
 		"@buildplane/adapters-git",
 	)) as unknown as {
 		createGitWorktreeAdapter: () => unknown;
 	};
 
-	const adaptersCodex = (await cliImport(
-		"@buildplane/adapters-codex",
-	)) as unknown as {
-		createCodexExecutor: () => {
-			executePacket: (packet: unknown, root: string) => unknown;
-			executePacketAsync: (
-				packet: unknown,
-				root: string,
-				eventBus: unknown,
-			) => Promise<unknown>;
-		};
+	const commandExecutor = { executePacket: runtime.executePacket };
+	let adaptersModelsPromise:
+		| Promise<{
+				createModelExecutor: () => {
+					executePacket: (packet: unknown, root: string) => unknown;
+					executePacketAsync: (
+						packet: unknown,
+						root: string,
+						eventBus: unknown,
+					) => Promise<unknown>;
+				};
+				createClaudeCodeExecutor: () => {
+					executePacket: (packet: unknown, root: string) => unknown;
+					executePacketAsync: (
+						packet: unknown,
+						root: string,
+						eventBus: unknown,
+					) => Promise<unknown>;
+				};
+		  }>
+		| undefined;
+	let adaptersCodexPromise:
+		| Promise<{
+				createCodexExecutor: () => {
+					executePacket: (packet: unknown, root: string) => unknown;
+					executePacketAsync: (
+						packet: unknown,
+						root: string,
+						eventBus: unknown,
+					) => Promise<unknown>;
+				};
+		  }>
+		| undefined;
+	let sdkExecutorPromise:
+		| Promise<{
+				executePacket: (packet: unknown, root: string) => unknown;
+				executePacketAsync: (
+					packet: unknown,
+					root: string,
+					eventBus: unknown,
+				) => Promise<unknown>;
+		  }>
+		| undefined;
+	let claudeExecutorPromise:
+		| Promise<{
+				executePacket: (packet: unknown, root: string) => unknown;
+				executePacketAsync: (
+					packet: unknown,
+					root: string,
+					eventBus: unknown,
+				) => Promise<unknown>;
+		  }>
+		| undefined;
+	let codexExecutorPromise:
+		| Promise<{
+				executePacket: (packet: unknown, root: string) => unknown;
+				executePacketAsync: (
+					packet: unknown,
+					root: string,
+					eventBus: unknown,
+				) => Promise<unknown>;
+		  }>
+		| undefined;
+
+	const loadAdaptersModels = () => {
+		if (!adaptersModelsPromise) {
+			adaptersModelsPromise = cliImport(
+				"@buildplane/adapters-models",
+			) as Promise<{
+				createModelExecutor: () => {
+					executePacket: (packet: unknown, root: string) => unknown;
+					executePacketAsync: (
+						packet: unknown,
+						root: string,
+						eventBus: unknown,
+					) => Promise<unknown>;
+				};
+				createClaudeCodeExecutor: () => {
+					executePacket: (packet: unknown, root: string) => unknown;
+					executePacketAsync: (
+						packet: unknown,
+						root: string,
+						eventBus: unknown,
+					) => Promise<unknown>;
+				};
+			}>;
+		}
+		return adaptersModelsPromise;
 	};
 
-	const commandExecutor = { executePacket: runtime.executePacket };
-	const sdkExecutor = adaptersModels.createModelExecutor();
-	const claudeExecutor = adaptersModels.createClaudeCodeExecutor();
-	const codexExecutor = adaptersCodex.createCodexExecutor();
+	const loadAdaptersCodex = () => {
+		if (!adaptersCodexPromise) {
+			adaptersCodexPromise = cliImport(
+				"@buildplane/adapters-codex",
+			) as Promise<{
+				createCodexExecutor: () => {
+					executePacket: (packet: unknown, root: string) => unknown;
+					executePacketAsync: (
+						packet: unknown,
+						root: string,
+						eventBus: unknown,
+					) => Promise<unknown>;
+				};
+			}>;
+		}
+		return adaptersCodexPromise;
+	};
+
+	const getSdkExecutor = async () => {
+		if (!sdkExecutorPromise) {
+			sdkExecutorPromise = loadAdaptersModels().then((mod) =>
+				mod.createModelExecutor(),
+			);
+		}
+		return sdkExecutorPromise;
+	};
+
+	const getClaudeExecutor = async () => {
+		if (!claudeExecutorPromise) {
+			claudeExecutorPromise = loadAdaptersModels().then((mod) =>
+				mod.createClaudeCodeExecutor(),
+			);
+		}
+		return claudeExecutorPromise;
+	};
+
+	const getCodexExecutor = async () => {
+		if (!codexExecutorPromise) {
+			codexExecutorPromise = loadAdaptersCodex().then((mod) =>
+				mod.createCodexExecutor(),
+			);
+		}
+		return codexExecutorPromise;
+	};
 
 	const runtimeRouter = {
 		executePacket(packet: unknown, root: string) {
@@ -403,12 +499,16 @@ async function loadCliOrchestrator(
 			};
 			if (p.execution) return commandExecutor.executePacket(packet, root);
 			if (p.routingHints?.preferredWorker === "claude-code") {
-				return claudeExecutor.executePacketAsync(packet, root, bus);
+				return (await getClaudeExecutor()).executePacketAsync(
+					packet,
+					root,
+					bus,
+				);
 			}
 			if (p.routingHints?.preferredWorker === "codex") {
-				return codexExecutor.executePacketAsync(packet, root, bus);
+				return (await getCodexExecutor()).executePacketAsync(packet, root, bus);
 			}
-			return sdkExecutor.executePacketAsync(packet, root, bus);
+			return (await getSdkExecutor()).executePacketAsync(packet, root, bus);
 		},
 	};
 
