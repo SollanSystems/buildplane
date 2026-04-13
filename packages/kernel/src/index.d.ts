@@ -33,6 +33,7 @@ export type {
 export { createGraphScheduler } from "./graph.ts";
 export type {
 	CreateProcedureInput,
+	CreateSearchableDocumentInput,
 	MemoryCreatedBy,
 	MemoryProvenance,
 	MemoryScopeType,
@@ -41,6 +42,7 @@ export type {
 	MemoryValueType,
 	ProcedureMemory,
 	RepoFact,
+	SearchableDocument,
 	UpsertRepoFactInput,
 } from "./memory-types.ts";
 export type {

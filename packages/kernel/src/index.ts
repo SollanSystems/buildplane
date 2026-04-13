@@ -30,6 +30,7 @@ export type {
 export { createGraphScheduler } from "./graph.js";
 export type {
 	CreateProcedureInput,
+	CreateSearchableDocumentInput,
 	MemoryCreatedBy,
 	MemoryProvenance,
 	MemoryScopeType,
@@ -38,6 +39,7 @@ export type {
 	MemoryValueType,
 	ProcedureMemory,
 	RepoFact,
+	SearchableDocument,
 	UpsertRepoFactInput,
 } from "./memory-types.js";
 export type {

@@ -7,6 +7,7 @@ import type {
 	BuildplaneStoragePort,
 	CreateProcedureInput,
 	CreateRunOptions,
+	CreateSearchableDocumentInput,
 	ExecutionReceipt,
 	InspectSnapshot,
 	MemoryScopeType,
@@ -16,6 +17,7 @@ import type {
 	RepoFact,
 	Run,
 	RunStatus,
+	SearchableDocument,
 	StatusSnapshot,
 	StatusWorkspaceSummary,
 	Unit,
@@ -98,6 +100,19 @@ interface StoredProcedureRow {
 	readonly branch: string | null;
 	readonly commit_sha: string | null;
 	readonly status: "active" | "stale" | "superseded" | "archived";
+	readonly created_at: string;
+	readonly updated_at: string;
+}
+
+interface StoredSearchableDocumentRow {
+	readonly id: string;
+	readonly repo_id: string;
+	readonly source_table: string | null;
+	readonly source_id: string | null;
+	readonly document_kind: string;
+	readonly title: string | null;
+	readonly body_text: string;
+	readonly metadata_json: string | null;
 	readonly created_at: string;
 	readonly updated_at: string;
 }
@@ -824,6 +839,25 @@ export function createStorageStore(
 		};
 	}
 
+	function toSearchableDocument(
+		row: StoredSearchableDocumentRow,
+	): SearchableDocument {
+		return {
+			id: row.id,
+			repoId: row.repo_id,
+			sourceTable: row.source_table ?? "",
+			sourceId: row.source_id ?? "",
+			documentKind: row.document_kind,
+			title: row.title ?? undefined,
+			bodyText: row.body_text,
+			metadata: row.metadata_json
+				? (JSON.parse(row.metadata_json) as Record<string, unknown>)
+				: undefined,
+			createdAt: row.created_at,
+			updatedAt: row.updated_at,
+		};
+	}
+
 	function readRepoFactRows(
 		database: DatabaseSync,
 		options: {
@@ -902,6 +936,93 @@ export function createStorageStore(
 		return database
 			.prepare(query)
 			.all(...params) as unknown as StoredProcedureRow[];
+	}
+
+	function readSearchableDocumentRows(
+		database: DatabaseSync,
+		options: {
+			id?: string;
+			documentKind?: string;
+			sourceTable?: string;
+			sourceId?: string;
+			limit?: number;
+		},
+	): StoredSearchableDocumentRow[] {
+		const clauses = ["repo_id = ?"];
+		const params: (string | number | null)[] = [projectRoot];
+
+		if (options.id) {
+			clauses.push("id = ?");
+			params.push(options.id);
+		}
+		if (options.documentKind) {
+			clauses.push("document_kind = ?");
+			params.push(options.documentKind);
+		}
+		if (options.sourceTable) {
+			clauses.push("source_table = ?");
+			params.push(options.sourceTable);
+		}
+		if (options.sourceId) {
+			clauses.push("source_id = ?");
+			params.push(options.sourceId);
+		}
+		const limitClause = options.limit ? "LIMIT ?" : "";
+		if (options.limit) {
+			params.push(options.limit);
+		}
+
+		const query = `
+			SELECT id, repo_id, source_table, source_id, document_kind, title,
+			       body_text, metadata_json, created_at, updated_at
+			FROM searchable_documents
+			WHERE ${clauses.join(" AND ")}
+			ORDER BY updated_at DESC, created_at DESC
+			${limitClause}
+		`;
+
+		return database
+			.prepare(query)
+			.all(...params) as unknown as StoredSearchableDocumentRow[];
+	}
+
+	function searchSearchableDocumentRows(
+		database: DatabaseSync,
+		queryText: string,
+		options?: {
+			documentKind?: string;
+			limit?: number;
+		},
+	): StoredSearchableDocumentRow[] {
+		const clauses = [
+			"searchable_documents.repo_id = ?",
+			"searchable_documents_fts MATCH ?",
+		];
+		const params: (string | number)[] = [projectRoot, queryText];
+
+		if (options?.documentKind) {
+			clauses.push("searchable_documents.document_kind = ?");
+			params.push(options.documentKind);
+		}
+		params.push(options?.limit ?? 20);
+
+		const query = `
+			SELECT searchable_documents.id, searchable_documents.repo_id,
+			       searchable_documents.source_table, searchable_documents.source_id,
+			       searchable_documents.document_kind, searchable_documents.title,
+			       searchable_documents.body_text, searchable_documents.metadata_json,
+			       searchable_documents.created_at, searchable_documents.updated_at
+			FROM searchable_documents_fts
+			JOIN searchable_documents
+			  ON searchable_documents.rowid = searchable_documents_fts.rowid
+			WHERE ${clauses.join(" AND ")}
+			ORDER BY bm25(searchable_documents_fts), searchable_documents.updated_at DESC
+			LIMIT ?
+		`;
+
+		return database
+			.prepare(query)
+			.all(...params) as unknown as StoredSearchableDocumentRow[];
 	}
 
 	function defaultRepoFactScope(options?: {
@@ -1824,6 +1945,99 @@ export function createStorageStore(
 					)
 					.run(now, id, projectRoot) as { changes: number };
 				return result.changes;
+			} finally {
+				database.close();
+			}
+		},
+
+		createSearchableDocument(
+			input: CreateSearchableDocumentInput,
+		): SearchableDocument {
+			ensureInitialized();
+			const database = openStoreDatabase();
+			const now = new Date().toISOString();
+
+			try {
+				const id = randomUUID();
+				database
+					.prepare(
+						`INSERT INTO searchable_documents (id, repo_id, source_table, source_id, document_kind, title, body_text, metadata_json, created_at, updated_at)
+						 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+					)
+					.run(
+						id,
+						projectRoot,
+						input.sourceTable,
+						input.sourceId,
+						input.documentKind,
+						input.title ?? null,
+						input.bodyText,
+						input.metadata ? JSON.stringify(input.metadata) : null,
+						now,
+						now,
+					);
+
+				const rowId = database
+					.prepare(`SELECT rowid FROM searchable_documents WHERE id = ?`)
+					.get(id) as { rowid: number };
+				database
+					.prepare(
+						`INSERT INTO searchable_documents_fts (rowid, title, body_text) VALUES (?, ?, ?)`,
+					)
+					.run(rowId.rowid, input.title ?? null, input.bodyText);
+
+				return toSearchableDocument(
+					readSearchableDocumentRows(database, { id })[0] as StoredSearchableDocumentRow,
+				);
+			} finally {
+				database.close();
+			}
+		},
+
+		getSearchableDocument(id: string): SearchableDocument | undefined {
+			ensureInitialized();
+			const database = openStoreDatabase();
+
+			try {
+				const row = readSearchableDocumentRows(database, { id })[0];
+				return row ? toSearchableDocument(row) : undefined;
+			} finally {
+				database.close();
+			}
+		},
+
+		listSearchableDocuments(options?: {
+			documentKind?: string;
+			sourceTable?: string;
+			sourceId?: string;
+			limit?: number;
+		}): readonly SearchableDocument[] {
+			ensureInitialized();
+			const database = openStoreDatabase();
+
+			try {
+				return readSearchableDocumentRows(database, options ?? {}).map(
+					toSearchableDocument,
+				);
+			} finally {
+				database.close();
+			}
+		},
+
+		searchSearchableDocuments(
+			query: string,
+			options?: {
+				documentKind?: string;
+				limit?: number;
+			},
+		): readonly SearchableDocument[] {
+			ensureInitialized();
+			const database = openStoreDatabase();
+
+			try {
+				return searchSearchableDocumentRows(database, query, options).map(
+					toSearchableDocument,
+				);
 			} finally {
 				database.close();
 			}

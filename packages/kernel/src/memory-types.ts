@@ -58,6 +58,19 @@ export interface ProcedureMemory extends BaseMemoryRecord {
 	readonly metadata?: Record<string, unknown>;
 }
 
+export interface SearchableDocument {
+	readonly id: string;
+	readonly repoId: string;
+	readonly sourceTable: string;
+	readonly sourceId: string;
+	readonly documentKind: string;
+	readonly title?: string;
+	readonly bodyText: string;
+	readonly metadata?: Record<string, unknown>;
+	readonly createdAt: string;
+	readonly updatedAt: string;
+}
+
 export interface CreateProcedureInput {
 	readonly name: string;
 	readonly taskType?: string;
@@ -69,6 +82,15 @@ export interface CreateProcedureInput {
 	readonly sourceTaskId?: string;
 	readonly branch?: string;
 	readonly commitSha?: string;
+}
+
+export interface CreateSearchableDocumentInput {
+	readonly sourceTable: string;
+	readonly sourceId: string;
+	readonly documentKind: string;
+	readonly title?: string;
+	readonly bodyText: string;
+	readonly metadata?: Record<string, unknown>;
 }
 
 export interface UpsertRepoFactInput {

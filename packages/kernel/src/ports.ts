@@ -1,9 +1,11 @@
 import type { EventBus } from "./events.js";
 import type {
 	CreateProcedureInput,
+	CreateSearchableDocumentInput,
 	MemoryScopeType,
 	ProcedureMemory,
 	RepoFact,
+	SearchableDocument,
 	UpsertRepoFactInput,
 } from "./memory-types.js";
 import type {
@@ -96,6 +98,23 @@ export interface BuildplaneStoragePort {
 	listProcedures(options?: { taskType?: string }): readonly ProcedureMemory[];
 	findProceduresByTaskType(taskType: string): readonly ProcedureMemory[];
 	supersedeProcedure(id: string): number;
+	createSearchableDocument(
+		input: CreateSearchableDocumentInput,
+	): SearchableDocument;
+	getSearchableDocument(id: string): SearchableDocument | undefined;
+	listSearchableDocuments(options?: {
+		documentKind?: string;
+		sourceTable?: string;
+		sourceId?: string;
+		limit?: number;
+	}): readonly SearchableDocument[];
+	searchSearchableDocuments(
+		query: string,
+		options?: {
+			documentKind?: string;
+			limit?: number;
+		},
+	): readonly SearchableDocument[];
 	getStatusSnapshot(): StatusSnapshot;
 	inspectTarget(id: string): InspectSnapshot;
 }
