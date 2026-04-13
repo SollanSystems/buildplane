@@ -237,6 +237,8 @@ describe("repo fact storage", () => {
 
 		const storage = createBuildplaneStorage(root);
 
-		expect(() => storage.listRepoFacts()).toThrow(/required projection schema/i);
+		expect(() => storage.listRepoFacts()).toThrow(
+			/required projection schema/i,
+		);
 	});
 });

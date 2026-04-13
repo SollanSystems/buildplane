@@ -29,6 +29,18 @@ export type {
 } from "./graph.js";
 export { createGraphScheduler } from "./graph.js";
 export type {
+	CreateProcedureInput,
+	MemoryCreatedBy,
+	MemoryProvenance,
+	MemoryScopeType,
+	MemoryStatus,
+	MemoryType,
+	MemoryValueType,
+	ProcedureMemory,
+	RepoFact,
+	UpsertRepoFactInput,
+} from "./memory-types.js";
+export type {
 	BuildplaneOrchestrator,
 	CreateBuildplaneOrchestratorOptions,
 } from "./orchestrator.js";
@@ -95,16 +107,4 @@ export type {
 	TaskType,
 	Unit,
 } from "./types.js";
-export type {
-	MemoryCreatedBy,
-	MemoryProvenance,
-	MemoryScopeType,
-	MemoryStatus,
-	MemoryType,
-	MemoryValueType,
-	CreateProcedureInput,
-	ProcedureMemory,
-	RepoFact,
-	UpsertRepoFactInput,
-} from "./memory-types.js";
 export { validatePacketForWorkspaceRoot } from "./workspace-paths.js";

@@ -826,10 +826,7 @@ export function createStorageStore(
 				clauses.push("scope_key = ?");
 				params.push(options.scopeKey);
 			}
-		} else if (
-			options.scopeType === "repo" ||
-			options.scopeType === "global"
-		) {
+		} else if (options.scopeType === "repo" || options.scopeType === "global") {
 			clauses.push("scope_key IS NULL");
 		}
 		if (!options.includeInactive) {
@@ -845,7 +842,9 @@ export function createStorageStore(
 			ORDER BY updated_at DESC, created_at DESC
 		`;
 
-		return database.prepare(query).all(...params) as unknown as StoredRepoFactRow[];
+		return database
+			.prepare(query)
+			.all(...params) as unknown as StoredRepoFactRow[];
 	}
 
 	function readProcedureRows(
@@ -875,7 +874,9 @@ export function createStorageStore(
 			ORDER BY updated_at DESC, created_at DESC
 		`;
 
-		return database.prepare(query).all(...params) as unknown as StoredProcedureRow[];
+		return database
+			.prepare(query)
+			.all(...params) as unknown as StoredProcedureRow[];
 	}
 
 	function defaultRepoFactScope(options?: {
@@ -895,7 +896,11 @@ export function createStorageStore(
 		const hasScopeKey = scopeKey !== undefined;
 		const hasNonEmptyScopeKey = scopeKey !== undefined && scopeKey.length > 0;
 
-		if (scopeType !== "repo" && scopeType !== "global" && !hasNonEmptyScopeKey) {
+		if (
+			scopeType !== "repo" &&
+			scopeType !== "global" &&
+			!hasNonEmptyScopeKey
+		) {
 			throw new Error(
 				`Exact scoped repo fact lookup for '${scopeType}' requires a scope key.`,
 			);
@@ -1593,7 +1598,13 @@ export function createStorageStore(
 						.prepare(
 							`UPDATE repo_facts SET status = 'superseded', updated_at = ? WHERE repo_id = ? AND fact_key = ? AND scope_type = ? AND scope_key IS ? AND status = 'active'`,
 						)
-						.run(now, projectRoot, input.factKey, scope.scopeType, scope.scopeKey ?? null);
+						.run(
+							now,
+							projectRoot,
+							input.factKey,
+							scope.scopeType,
+							scope.scopeKey ?? null,
+						);
 
 					const id = randomUUID();
 					database
@@ -1695,9 +1706,15 @@ export function createStorageStore(
 					.prepare(
 						`UPDATE repo_facts SET status = 'superseded', updated_at = ? WHERE repo_id = ? AND fact_key = ? AND scope_type = ? AND scope_key IS ? AND status = 'active'`,
 					)
-					.run(now, projectRoot, factKey, scope.scopeType, scope.scopeKey ?? null) as {
-						changes: number;
-					};
+					.run(
+						now,
+						projectRoot,
+						factKey,
+						scope.scopeType,
+						scope.scopeKey ?? null,
+					) as {
+					changes: number;
+				};
 
 				return result.changes;
 			} finally {
@@ -1744,7 +1761,9 @@ export function createStorageStore(
 			}
 		},
 
-		listProcedures(options?: { taskType?: string }): readonly ProcedureMemory[] {
+		listProcedures(options?: {
+			taskType?: string;
+		}): readonly ProcedureMemory[] {
 			ensureInitialized();
 			const database = openStoreDatabase();
 

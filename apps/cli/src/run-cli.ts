@@ -345,7 +345,9 @@ async function loadCliOrchestrator(
 	}
 
 	// Runtime router: selects executor based on packet type and routing hints
-	const adaptersModels = (await cliImport("@buildplane/adapters-models")) as unknown as {
+	const adaptersModels = (await cliImport(
+		"@buildplane/adapters-models",
+	)) as unknown as {
 		createModelExecutor: () => {
 			executePacket: (packet: unknown, root: string) => unknown;
 			executePacketAsync: (
@@ -364,11 +366,15 @@ async function loadCliOrchestrator(
 		};
 	};
 
-	const adaptersGit = (await cliImport("@buildplane/adapters-git")) as unknown as {
+	const adaptersGit = (await cliImport(
+		"@buildplane/adapters-git",
+	)) as unknown as {
 		createGitWorktreeAdapter: () => unknown;
 	};
 
-	const adaptersCodex = (await cliImport("@buildplane/adapters-codex")) as unknown as {
+	const adaptersCodex = (await cliImport(
+		"@buildplane/adapters-codex",
+	)) as unknown as {
 		createCodexExecutor: () => {
 			executePacket: (packet: unknown, root: string) => unknown;
 			executePacketAsync: (
@@ -857,7 +863,9 @@ export async function runCli(
 							clear(): void;
 						};
 					};
-					const storage = (await cliImport("@buildplane/storage")) as unknown as {
+					const storage = (await cliImport(
+						"@buildplane/storage",
+					)) as unknown as {
 						createEventStore: (root: string) => {
 							persistEvent: (runId: string, event: unknown) => void;
 						};

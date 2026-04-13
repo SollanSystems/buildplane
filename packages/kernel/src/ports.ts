@@ -1,5 +1,12 @@
 import type { EventBus } from "./events.js";
 import type {
+	CreateProcedureInput,
+	MemoryScopeType,
+	ProcedureMemory,
+	RepoFact,
+	UpsertRepoFactInput,
+} from "./memory-types.js";
+import type {
 	ExtractedLearning,
 	LearningKind,
 	LearningScope,
@@ -19,7 +26,6 @@ import type {
 	StatusSnapshot,
 	UnitPacket,
 } from "./run-loop.js";
-import type { MemoryScopeType, RepoFact, UpsertRepoFactInput, ProcedureMemory, CreateProcedureInput } from "./memory-types.js";
 import type { Run } from "./types.js";
 
 export interface CreateRunOptions {
