@@ -29,6 +29,11 @@ export interface CreateGitWorkspaceAdapterOptions {
 	gitBinary?: string;
 }
 
+const DEFAULT_GIT_IDENTITY = Object.freeze({
+	name: "Buildplane",
+	email: "buildplane@local",
+});
+
 export function createGitWorktreeAdapter(
 	options?: CreateGitWorkspaceAdapterOptions,
 ): BuildplaneWorkspacePort {
@@ -41,6 +46,10 @@ export function createGitWorktreeAdapter(
 			delete env.GIT_DIR;
 			delete env.GIT_WORK_TREE;
 			delete env.GIT_INDEX_FILE;
+			env.GIT_AUTHOR_NAME ??= DEFAULT_GIT_IDENTITY.name;
+			env.GIT_AUTHOR_EMAIL ??= DEFAULT_GIT_IDENTITY.email;
+			env.GIT_COMMITTER_NAME ??= DEFAULT_GIT_IDENTITY.name;
+			env.GIT_COMMITTER_EMAIL ??= DEFAULT_GIT_IDENTITY.email;
 			return spawnSync(gitBinary, args, { ...spawnOptions, env });
 		});
 	const adapter: BuildplaneWorkspacePort = {

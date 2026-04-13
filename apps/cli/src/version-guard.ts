@@ -1,4 +1,3 @@
-export const SUPPORTED_NODE_MAJOR = 24;
 export const SUPPORTED_NODE_VERSION = "24.13.1";
 
 const SQLITE_EXPERIMENTAL_WARNING_PATTERN =
@@ -51,12 +50,9 @@ function isEmitWarningOptions(
 export function assertSupportedNodeVersion(
 	current = process.versions.node,
 ): void {
-	const [majorStr] = current.split(".");
-	const major = parseInt(majorStr, 10);
-
-	if (major < SUPPORTED_NODE_MAJOR) {
+	if (current !== SUPPORTED_NODE_VERSION) {
 		throw new Error(
-			`Buildplane requires Node ${SUPPORTED_NODE_VERSION}+. Detected ${current}.`,
+			`Buildplane requires Node ${SUPPORTED_NODE_VERSION}. Detected ${current}.`,
 		);
 	}
 

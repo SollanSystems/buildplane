@@ -203,6 +203,30 @@ describe("git worktree adapter", () => {
 		);
 	});
 
+	it("uses a buildplane git identity when repo config is absent", () => {
+		const repo = createCommittedRepo();
+		const adapter = createGitWorktreeAdapter();
+		const isolatedHome = createTempRoot("buildplane-git-home-");
+		const isolatedConfigHome = createTempRoot("buildplane-git-xdg-");
+		vi.stubEnv("HOME", isolatedHome);
+		vi.stubEnv("XDG_CONFIG_HOME", isolatedConfigHome);
+		vi.stubEnv("GIT_CONFIG_GLOBAL", join(isolatedHome, ".gitconfig"));
+		runGitOrThrow(repo, ["config", "--unset", "user.name"]);
+		runGitOrThrow(repo, ["config", "--unset", "user.email"]);
+		const { headSha } = adapter.assertRunnableRepository(repo);
+		const workspace = adapter.prepareWorkspace(repo, "run-identity", headSha);
+		writeFileSync(join(workspace.path, "generated.txt"), "generated\n");
+
+		expect(() =>
+			adapter.commitAndMergeWorkspace({
+				path: workspace.path,
+				runId: "run-identity",
+				projectRoot: repo,
+			}),
+		).not.toThrow();
+		expect(existsSync(join(repo, "generated.txt"))).toBe(true);
+	});
+
 	it("surfaces delete failures cleanly", () => {
 		const repo = createCommittedRepo();
 		const adapter = createGitWorktreeAdapter({
