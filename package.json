@@ -12,7 +12,7 @@
 	},
 	"scripts": {
 		"build": "tsc --build",
-		"buildplane": "node --import tsx ./apps/cli/src/index.ts",
+		"buildplane": "node --conditions=source --import tsx ./apps/cli/src/index.ts",
 		"test": "vitest --run",
 		"test:watch": "vitest",
 		"typecheck": "pnpm exec tsc -p packages/kernel/tsconfig.json --noEmit && pnpm exec tsc -p packages/storage/tsconfig.json --noEmit && pnpm exec tsc -p packages/runtime/tsconfig.json --noEmit && pnpm exec tsc -p packages/policy/tsconfig.json --noEmit && pnpm exec tsc -p packages/adapters-git/tsconfig.json --noEmit && pnpm exec tsc -p packages/adapters-models/tsconfig.json --noEmit && pnpm exec tsc -p packages/adapters-tools/tsconfig.json --noEmit && pnpm exec tsc -p packages/compat-gsd/tsconfig.json --noEmit && pnpm exec tsc -p packages/ui-tui/tsconfig.json --noEmit && pnpm exec tsc -p apps/cli/tsconfig.json --noEmit && pnpm exec tsc -p packages/adapters-honcho/tsconfig.json --noEmit",

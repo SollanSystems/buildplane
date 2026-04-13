@@ -45,59 +45,23 @@ const BUILDPLANE_BANNER = "Buildplane by SollanSystems";
 async function cliImport(specifier: string): Promise<unknown> {
 	switch (specifier) {
 		case "@buildplane/kernel":
-			try {
-				return await import("@buildplane/kernel");
-			} catch {
-				return import("../../../packages/kernel/src/index.ts");
-			}
+			return import("@buildplane/kernel");
 		case "@buildplane/runtime":
-			try {
-				return await import("@buildplane/runtime");
-			} catch {
-				return import("../../../packages/runtime/src/index.ts");
-			}
+			return import("@buildplane/runtime");
 		case "@buildplane/policy":
-			try {
-				return await import("@buildplane/policy");
-			} catch {
-				return import("../../../packages/policy/src/index.ts");
-			}
+			return import("@buildplane/policy");
 		case "@buildplane/storage":
-			try {
-				return await import("@buildplane/storage");
-			} catch {
-				return import("../../../packages/storage/src/index.ts");
-			}
+			return import("@buildplane/storage");
 		case "@buildplane/adapters-git":
-			try {
-				return await import("@buildplane/adapters-git");
-			} catch {
-				return import("../../../packages/adapters-git/src/index.ts");
-			}
+			return import("@buildplane/adapters-git");
 		case "@buildplane/adapters-models":
-			try {
-				return await import("@buildplane/adapters-models");
-			} catch {
-				return import("../../../packages/adapters-models/src/index.ts");
-			}
+			return import("@buildplane/adapters-models");
 		case "@buildplane/adapters-codex":
-			try {
-				return await import("@buildplane/adapters-codex");
-			} catch {
-				return import("../../../packages/adapters-codex/src/index.ts");
-			}
+			return import("@buildplane/adapters-codex");
 		case "@buildplane/adapters-honcho":
-			try {
-				return await import("@buildplane/adapters-honcho");
-			} catch {
-				return import("../../../packages/adapters-honcho/src/index.ts");
-			}
+			return import("@buildplane/adapters-honcho");
 		case "@buildplane/ui-tui":
-			try {
-				return await import("@buildplane/ui-tui");
-			} catch {
-				return import("../../../packages/ui-tui/src/index.ts");
-			}
+			return import("@buildplane/ui-tui");
 		default:
 			throw new Error(`Unsupported workspace import '${specifier}'`);
 	}

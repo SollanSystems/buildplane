@@ -25,7 +25,7 @@ describe("root workflow tooling", () => {
 		const pkg = readJson("package.json");
 
 		expect(pkg.scripts?.buildplane).toBe(
-			"node --import tsx ./apps/cli/src/index.ts",
+			"node --conditions=source --import tsx ./apps/cli/src/index.ts",
 		);
 	});
 
