@@ -6,14 +6,17 @@ import { createBuildplaneStorage } from "../src";
 
 describe("searchable document storage", () => {
 	it("stores and lists searchable documents for the current repo", () => {
-		const root = mkdtempSync(join(tmpdir(), "buildplane-searchable-documents-"));
+		const root = mkdtempSync(
+			join(tmpdir(), "buildplane-searchable-documents-"),
+		);
 		const storage = createBuildplaneStorage(root);
 		storage.initializeProject();
 
 		const document = storage.createSearchableDocument({
 			documentKind: "run-summary",
 			title: "Backtest replay summary",
-			bodyText: "NQ replay showed mean reversion around VWAP and the Kalman spread.",
+			bodyText:
+				"NQ replay showed mean reversion around VWAP and the Kalman spread.",
 			metadata: { tags: ["nq", "replay"] },
 			sourceTable: "runs",
 			sourceId: "run-1",
@@ -31,7 +34,9 @@ describe("searchable document storage", () => {
 	});
 
 	it("filters searchable documents by kind", () => {
-		const root = mkdtempSync(join(tmpdir(), "buildplane-searchable-documents-"));
+		const root = mkdtempSync(
+			join(tmpdir(), "buildplane-searchable-documents-"),
+		);
 		const storage = createBuildplaneStorage(root);
 		storage.initializeProject();
 
@@ -60,7 +65,9 @@ describe("searchable document storage", () => {
 	});
 
 	it("searches searchable documents by title and body text", () => {
-		const root = mkdtempSync(join(tmpdir(), "buildplane-searchable-documents-"));
+		const root = mkdtempSync(
+			join(tmpdir(), "buildplane-searchable-documents-"),
+		);
 		const storage = createBuildplaneStorage(root);
 		storage.initializeProject();
 

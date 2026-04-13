@@ -1987,7 +1987,9 @@ export function createStorageStore(
 					.run(rowId.rowid, input.title ?? null, input.bodyText);
 
 				return toSearchableDocument(
-					readSearchableDocumentRows(database, { id })[0] as StoredSearchableDocumentRow,
+					readSearchableDocumentRows(database, {
+						id,
+					})[0] as StoredSearchableDocumentRow,
 				);
 			} finally {
 				database.close();
