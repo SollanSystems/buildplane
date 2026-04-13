@@ -12,7 +12,7 @@
 
 ## Chunk 1: Product identity and workspace skeleton
 
-**Chunk acceptance criteria:** The repo exists at `/Users/kenthall/buildplane`, the Buildplane naming matrix is written into docs and manifests, the package boundaries match the design doc, and the repo can be committed as a clean bootstrap scaffold without production logic.
+**Chunk acceptance criteria:** The repo exists at `/path/to/buildplane`, the Buildplane naming matrix is written into docs and manifests, the package boundaries match the design doc, and the repo can be committed as a clean bootstrap scaffold without production logic.
 
 ### Task 1: Lock naming and state decisions first
 

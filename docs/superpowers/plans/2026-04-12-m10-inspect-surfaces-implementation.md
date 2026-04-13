@@ -41,7 +41,7 @@ it("fetchLearningById returns undefined for missing ID", () => {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd /Users/kenthall/buildplane/main && pnpm vitest run packages/storage/test/learning-store.test.ts`
+Run: `cd /path/to/buildplane && pnpm vitest run packages/storage/test/learning-store.test.ts`
 Expected: FAIL with "store.fetchLearningById is not a function"
 
 - [ ] **Step 3: Write failing test for `fetchLearningsByRunId`**
@@ -141,13 +141,13 @@ fetchLearningsByRunId(runId: string): readonly StoredLearning[] {
 
 - [ ] **Step 6: Run tests to verify they pass**
 
-Run: `cd /Users/kenthall/buildplane/main && pnpm vitest run packages/storage/test/learning-store.test.ts`
+Run: `cd /path/to/buildplane && pnpm vitest run packages/storage/test/learning-store.test.ts`
 Expected: All tests PASS
 
 - [ ] **Step 7: Commit**
 
 ```bash
-cd /Users/kenthall/buildplane/main
+cd /path/to/buildplane
 git add packages/kernel/src/ports.ts packages/storage/src/learning-store.ts packages/storage/test/learning-store.test.ts
 git commit -m "feat: add fetchLearningById and fetchLearningsByRunId to memory port"
 ```
@@ -162,7 +162,7 @@ git commit -m "feat: add fetchLearningById and fetchLearningsByRunId to memory p
 
 - [ ] **Step 1: Check if formatters test file exists**
 
-Run: `ls /Users/kenthall/buildplane/main/apps/cli/test/formatters.test.ts 2>/dev/null || echo "MISSING"`
+Run: `ls /path/to/buildplane/apps/cli/test/formatters.test.ts 2>/dev/null || echo "MISSING"`
 
 If missing, create it. If it exists, add to it.
 
@@ -215,7 +215,7 @@ describe("formatLearningsList", () => {
 
 - [ ] **Step 3: Run test to verify it fails**
 
-Run: `cd /Users/kenthall/buildplane/main && pnpm vitest run apps/cli/test/formatters.test.ts`
+Run: `cd /path/to/buildplane && pnpm vitest run apps/cli/test/formatters.test.ts`
 Expected: FAIL with "formatLearningsList is not a function" or import error
 
 - [ ] **Step 4: Write failing test for `formatLearningDetail`**
@@ -309,13 +309,13 @@ export function formatLearningDetail(
 
 - [ ] **Step 6: Run tests to verify they pass**
 
-Run: `cd /Users/kenthall/buildplane/main && pnpm vitest run apps/cli/test/formatters.test.ts`
+Run: `cd /path/to/buildplane && pnpm vitest run apps/cli/test/formatters.test.ts`
 Expected: All tests PASS
 
 - [ ] **Step 7: Commit**
 
 ```bash
-cd /Users/kenthall/buildplane/main
+cd /path/to/buildplane
 git add apps/cli/src/formatters.ts apps/cli/test/formatters.test.ts
 git commit -m "feat: add formatLearningsList and formatLearningDetail formatters"
 ```
@@ -375,7 +375,7 @@ it("memory list returns a formatted table of learnings", async () => {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd /Users/kenthall/buildplane/main && pnpm vitest run apps/cli/test/run-cli.test.ts -t "memory list"`
+Run: `cd /path/to/buildplane && pnpm vitest run apps/cli/test/run-cli.test.ts -t "memory list"`
 Expected: FAIL — `memory list` currently dispatches to native, which fails
 
 - [ ] **Step 3: Write failing test for `memory inspect`**
@@ -701,13 +701,13 @@ if (command === "memory") {
 
 - [ ] **Step 10: Run tests to verify they pass**
 
-Run: `cd /Users/kenthall/buildplane/main && pnpm vitest run apps/cli/test/run-cli.test.ts`
+Run: `cd /path/to/buildplane && pnpm vitest run apps/cli/test/run-cli.test.ts`
 Expected: All tests PASS (existing + new)
 
 - [ ] **Step 11: Commit**
 
 ```bash
-cd /Users/kenthall/buildplane/main
+cd /path/to/buildplane
 git add apps/cli/src/run-cli.ts apps/cli/test/run-cli.test.ts
 git commit -m "feat: add TS-native memory list and memory inspect commands"
 ```
@@ -774,7 +774,7 @@ describe("formatInspectDetail", () => {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd /Users/kenthall/buildplane/main && pnpm vitest run apps/cli/test/formatters.test.ts`
+Run: `cd /path/to/buildplane && pnpm vitest run apps/cli/test/formatters.test.ts`
 Expected: FAIL — `formatInspectDetail` doesn't accept a third argument (but won't error — it will fail the assertion about "learnings:")
 
 - [ ] **Step 3: Update `formatInspectDetail` to accept optional learnings**
@@ -816,7 +816,7 @@ if (learnings && learnings.length > 0) {
 
 - [ ] **Step 4: Run formatter tests to verify they pass**
 
-Run: `cd /Users/kenthall/buildplane/main && pnpm vitest run apps/cli/test/formatters.test.ts`
+Run: `cd /path/to/buildplane && pnpm vitest run apps/cli/test/formatters.test.ts`
 Expected: All tests PASS
 
 - [ ] **Step 5: Wire learnings query into the `inspect` CLI handler**
@@ -890,13 +890,13 @@ case "inspect": {
 
 - [ ] **Step 6: Run full CLI test suite**
 
-Run: `cd /Users/kenthall/buildplane/main && pnpm vitest run apps/cli/test/run-cli.test.ts`
+Run: `cd /path/to/buildplane && pnpm vitest run apps/cli/test/run-cli.test.ts`
 Expected: All tests PASS
 
 - [ ] **Step 7: Commit**
 
 ```bash
-cd /Users/kenthall/buildplane/main
+cd /path/to/buildplane
 git add apps/cli/src/formatters.ts apps/cli/test/formatters.test.ts apps/cli/src/run-cli.ts
 git commit -m "feat: augment run inspector with learnings section"
 ```
@@ -935,15 +935,15 @@ To:
 
 - [ ] **Step 2: Run the full test suite**
 
-Run: `cd /Users/kenthall/buildplane/main && pnpm test`
+Run: `cd /path/to/buildplane && pnpm test`
 Expected: All tests PASS, no regressions
 
 - [ ] **Step 3: Verify manually with `buildplane demo` then `buildplane memory list`**
 
 Run in sequence:
 ```bash
-cd /Users/kenthall/buildplane/main && pnpm buildplane demo
-cd /Users/kenthall/buildplane/main && pnpm buildplane memory list
+cd /path/to/buildplane && pnpm buildplane demo
+cd /path/to/buildplane && pnpm buildplane memory list
 ```
 
 Expected: `memory list` shows the learning produced by the demo run (verification-gate-win fact).
@@ -951,7 +951,7 @@ Expected: `memory list` shows the learning produced by the demo run (verificatio
 - [ ] **Step 4: Commit**
 
 ```bash
-cd /Users/kenthall/buildplane/main
+cd /path/to/buildplane
 git add apps/cli/src/run-cli.ts
 git commit -m "docs: update CLI help menu with memory list and inspect commands"
 ```

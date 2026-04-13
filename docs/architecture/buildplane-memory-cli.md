@@ -62,7 +62,7 @@ Examples:
 buildplane memory inspect mem_01HXYZ
 buildplane memory inspect --scope workspace
 buildplane memory inspect --pack superclaude
-buildplane memory inspect --workspace /Users/kenthall/buildplane/main
+buildplane memory inspect --workspace /path/to/buildplane
 buildplane memory inspect --effective --pack supercodex
 buildplane memory inspect mem_01HXYZ --json
 ```
@@ -135,7 +135,7 @@ Promote a memory item into a broader scope.
 Examples:
 
 ```bash
-buildplane memory promote mem_01HXYZ --to workspace --workspace /Users/kenthall/buildplane/main
+buildplane memory promote mem_01HXYZ --to workspace --workspace /path/to/buildplane
 buildplane memory promote mem_01HXYZ --to user
 buildplane memory promote mem_01HXYZ --to workspace --copy
 buildplane memory promote mem_01HXYZ --to user --title "Prefers rollback-safe execution"
@@ -182,7 +182,7 @@ Examples:
 ```bash
 buildplane memory search "planning mode"
 buildplane memory search "claude prompt" --scope pack --pack superclaude
-buildplane memory search "workspace conventions" --workspace /Users/kenthall/buildplane/main --json
+buildplane memory search "workspace conventions" --workspace /path/to/buildplane --json
 ```
 
 ### Explain

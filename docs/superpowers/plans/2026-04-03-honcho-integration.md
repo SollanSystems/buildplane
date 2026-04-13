@@ -91,7 +91,7 @@ Note: The barrel is intentionally empty so this commit compiles. It gets populat
 
 - [ ] **Step 4: Install dependencies**
 
-Run: `cd /Users/kenthall/buildplane/main && pnpm install`
+Run: `cd /path/to/buildplane && pnpm install`
 Expected: lockfile updated, `@honcho-ai/sdk` resolved
 
 - [ ] **Step 5: Commit**
@@ -131,7 +131,7 @@ describe("HonchoPort type contract", () => {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd /Users/kenthall/buildplane/main && pnpm vitest run packages/adapters-honcho/test/honcho-port.test.ts`
+Run: `cd /path/to/buildplane && pnpm vitest run packages/adapters-honcho/test/honcho-port.test.ts`
 Expected: FAIL — cannot resolve `../src/honcho-port.js`
 
 - [ ] **Step 3: Write the port interface**
@@ -181,7 +181,7 @@ export interface HonchoPort {
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `cd /Users/kenthall/buildplane/main && pnpm vitest run packages/adapters-honcho/test/honcho-port.test.ts`
+Run: `cd /path/to/buildplane && pnpm vitest run packages/adapters-honcho/test/honcho-port.test.ts`
 Expected: PASS
 
 - [ ] **Step 5: Commit**
@@ -357,7 +357,7 @@ describe("createHonchoAdapter", () => {
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cd /Users/kenthall/buildplane/main && pnpm vitest run packages/adapters-honcho/test/honcho-adapter.test.ts`
+Run: `cd /path/to/buildplane && pnpm vitest run packages/adapters-honcho/test/honcho-adapter.test.ts`
 Expected: FAIL — cannot resolve `../src/honcho-adapter.js`
 
 - [ ] **Step 3: Write the adapter implementation**
@@ -523,12 +523,12 @@ export function createHonchoAdapter(
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `cd /Users/kenthall/buildplane/main && pnpm vitest run packages/adapters-honcho/test/honcho-adapter.test.ts`
+Run: `cd /path/to/buildplane && pnpm vitest run packages/adapters-honcho/test/honcho-adapter.test.ts`
 Expected: PASS (all 4 tests)
 
 - [ ] **Step 5: Run typecheck**
 
-Run: `cd /Users/kenthall/buildplane/main && pnpm exec tsc -p packages/adapters-honcho/tsconfig.json --noEmit`
+Run: `cd /path/to/buildplane && pnpm exec tsc -p packages/adapters-honcho/tsconfig.json --noEmit`
 Expected: PASS
 
 - [ ] **Step 6: Update barrel export**
@@ -598,7 +598,7 @@ describe("CLI Honcho wiring", () => {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd /Users/kenthall/buildplane/main && pnpm vitest run apps/cli/test/honcho-wiring.test.ts`
+Run: `cd /path/to/buildplane && pnpm vitest run apps/cli/test/honcho-wiring.test.ts`
 Expected: FAIL — cannot resolve `@buildplane/adapters-honcho`
 
 - [ ] **Step 3: Add dependency to CLI package.json**
@@ -659,12 +659,12 @@ In the root `package.json`, append to the `typecheck` script:
 
 - [ ] **Step 6: Run pnpm install and verify test passes**
 
-Run: `cd /Users/kenthall/buildplane/main && pnpm install && pnpm vitest run apps/cli/test/honcho-wiring.test.ts`
+Run: `cd /path/to/buildplane && pnpm install && pnpm vitest run apps/cli/test/honcho-wiring.test.ts`
 Expected: PASS
 
 - [ ] **Step 7: Run full test suite**
 
-Run: `cd /Users/kenthall/buildplane/main && pnpm test`
+Run: `cd /path/to/buildplane && pnpm test`
 Expected: All existing tests pass, plus new Honcho tests
 
 - [ ] **Step 8: Commit**
@@ -712,20 +712,20 @@ git commit -m "docs(adapters-honcho): document environment variables for Honcho 
 
 - [ ] **Step 1: Run full typecheck**
 
-Run: `cd /Users/kenthall/buildplane/main && pnpm typecheck`
+Run: `cd /path/to/buildplane && pnpm typecheck`
 Expected: PASS
 
 - [ ] **Step 2: Run full test suite**
 
-Run: `cd /Users/kenthall/buildplane/main && pnpm test`
+Run: `cd /path/to/buildplane && pnpm test`
 Expected: All tests pass (existing + new Honcho tests)
 
 - [ ] **Step 3: Run linter**
 
-Run: `cd /Users/kenthall/buildplane/main && pnpm lint`
+Run: `cd /path/to/buildplane && pnpm lint`
 Expected: PASS
 
 - [ ] **Step 4: Build**
 
-Run: `cd /Users/kenthall/buildplane/main && pnpm build`
+Run: `cd /path/to/buildplane && pnpm build`
 Expected: PASS — adapters-honcho compiles to dist/
