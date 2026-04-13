@@ -9,6 +9,7 @@
 		{ "path": "packages/adapters-codex" },
 		{ "path": "packages/adapters-models" },
 		{ "path": "packages/adapters-tools" },
+		{ "path": "packages/adapters-honcho" },
 		{ "path": "packages/compat-gsd" },
 		{ "path": "packages/ui-tui" },
 		{ "path": "apps/cli" }

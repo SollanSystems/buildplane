@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import {
 	formatHumanError,
 	formatInitializationResult,
@@ -41,6 +42,62 @@ export interface RunCliOptions {
 }
 
 const BUILDPLANE_BANNER = "Buildplane by SollanSystems";
+
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+const CLI_DIR = resolve(__dirname, "..");
+
+function resolveCliModuleSpecifier(specifier: string): string {
+	if (!specifier.startsWith("@buildplane/")) {
+		return specifier;
+	}
+
+	const pkgDir = join(CLI_DIR, "node_modules", specifier);
+	const pkgJsonPath = join(pkgDir, "package.json");
+	if (!existsSync(pkgJsonPath)) {
+		return specifier;
+	}
+
+	const pkgJson = JSON.parse(readFileSync(pkgJsonPath, "utf8")) as {
+		main?: string;
+		exports?: Record<string, unknown>;
+	};
+
+	let entrypoint = pkgJson.main ?? "index.js";
+	if (pkgJson.exports && typeof pkgJson.exports === "object" && "." in pkgJson.exports) {
+		const dot = (pkgJson.exports as Record<string, unknown>)["."];
+		if (typeof dot === "string") {
+			entrypoint = dot;
+		} else if (dot && typeof dot === "object") {
+			const dotExp = dot as Record<string, unknown>;
+			const resolved = dotExp.import ?? dotExp.default ?? dotExp.require;
+			entrypoint = String(resolved);
+		}
+	}
+
+	const normalizedEntrypoint = entrypoint.replace(/^\.\//, "");
+	const candidates = [
+		join(pkgDir, normalizedEntrypoint),
+		join(pkgDir, normalizedEntrypoint.replace(/^dist\//, "src/")),
+		join(pkgDir, normalizedEntrypoint.replace(/^dist\//, "src/").replace(/\.js$/, ".ts")),
+		join(pkgDir, "src", "index.js"),
+		join(pkgDir, "src", "index.ts"),
+	];
+
+	for (const candidate of candidates) {
+		if (existsSync(candidate)) {
+			return pathToFileURL(candidate).href;
+		}
+	}
+
+	return specifier;
+}
+
+function cliImport(specifier: string): Promise<unknown> {
+	const resolved = resolveCliModuleSpecifier(specifier);
+	return import(resolved);
+}
 
 function formatTopLevelHelp(): string[] {
 	return [
@@ -189,7 +246,7 @@ interface CliOrchestratorBundle {
 async function loadCliOrchestrator(
 	projectRoot: string,
 ): Promise<CliOrchestratorBundle> {
-	const kernel = (await import("@buildplane/kernel")) as unknown as {
+	const kernel = (await cliImport("@buildplane/kernel")) as unknown as {
 		createBuildplaneOrchestrator: (options: {
 			projectRoot: string;
 			storage: unknown;
@@ -212,13 +269,13 @@ async function loadCliOrchestrator(
 		};
 		parseUnitPacket: (input: string) => unknown;
 	};
-	const runtime = (await import("@buildplane/runtime")) as unknown as {
+	const runtime = (await cliImport("@buildplane/runtime")) as unknown as {
 		executePacket: (packet: unknown, root: string) => unknown;
 	};
-	const policy = (await import("@buildplane/policy")) as unknown as {
+	const policy = (await cliImport("@buildplane/policy")) as unknown as {
 		evaluateRun: (packet: unknown, receipt: unknown) => unknown;
 	};
-	const storage = (await import("@buildplane/storage")) as unknown as {
+	const storage = (await cliImport("@buildplane/storage")) as unknown as {
 		createBuildplaneStorage: (root: string) => unknown;
 		createEventStore: (root: string) => {
 			persistEvent: (runId: string, event: unknown) => void;
@@ -251,9 +308,19 @@ async function loadCliOrchestrator(
 
 	if (process.env.HONCHO_API_KEY) {
 		try {
-			const { createHonchoAdapter, createHonchoClient } = await import(
-				"@buildplane/adapters-honcho"
-			);
+			const honchoModule = (await cliImport(
+				"@buildplane/adapters-honcho",
+			)) as unknown as {
+				createHonchoAdapter: (options: {
+					client: unknown;
+					userId: string;
+				}) => HonchoPortLike;
+				createHonchoClient: (options: {
+					workspaceId?: string;
+					apiKey: string;
+				}) => Promise<unknown>;
+			};
+			const { createHonchoAdapter, createHonchoClient } = honchoModule;
 
 			const honchoClient = await createHonchoClient({
 				workspaceId: process.env.HONCHO_WORKSPACE_ID,
@@ -310,9 +377,7 @@ async function loadCliOrchestrator(
 	}
 
 	// Runtime router: selects executor based on packet type and routing hints
-	const adaptersModels = (await import(
-		"@buildplane/adapters-models"
-	)) as unknown as {
+	const adaptersModels = (await cliImport("@buildplane/adapters-models")) as unknown as {
 		createModelExecutor: () => {
 			executePacket: (packet: unknown, root: string) => unknown;
 			executePacketAsync: (
@@ -331,13 +396,11 @@ async function loadCliOrchestrator(
 		};
 	};
 
-	const adaptersGit = (await import("@buildplane/adapters-git")) as unknown as {
+	const adaptersGit = (await cliImport("@buildplane/adapters-git")) as unknown as {
 		createGitWorktreeAdapter: () => unknown;
 	};
 
-	const adaptersCodex = (await import(
-		"@buildplane/adapters-codex"
-	)) as unknown as {
+	const adaptersCodex = (await cliImport("@buildplane/adapters-codex")) as unknown as {
 		createCodexExecutor: () => {
 			executePacket: (packet: unknown, root: string) => unknown;
 			executePacketAsync: (
@@ -396,7 +459,7 @@ async function loadCliOrchestrator(
 async function loadEventStore(projectRoot: string): Promise<{
 	getEventsByRunId: (runId: string) => unknown[];
 }> {
-	const storage = (await import("@buildplane/storage")) as unknown as {
+	const storage = (await cliImport("@buildplane/storage")) as unknown as {
 		createEventStore: (root: string) => {
 			getEventsByRunId: (runId: string) => unknown[];
 		};
@@ -405,7 +468,7 @@ async function loadEventStore(projectRoot: string): Promise<{
 }
 
 async function loadRunHistory(projectRoot: string): Promise<unknown[]> {
-	const storage = (await import("@buildplane/storage")) as unknown as {
+	const storage = (await cliImport("@buildplane/storage")) as unknown as {
 		createBuildplaneStorage: (root: string) => {
 			getRunHistory: () => unknown[];
 		};
@@ -436,7 +499,7 @@ async function loadReadOnlyMemoryPort(
 }
 
 async function loadPacket(packetPath: string): Promise<unknown> {
-	const kernel = (await import("@buildplane/kernel")) as unknown as {
+	const kernel = (await cliImport("@buildplane/kernel")) as unknown as {
 		parseUnitPacket: (input: string) => unknown;
 	};
 
@@ -750,7 +813,7 @@ export async function runCli(
 						enrichedPacket as Parameters<typeof wrapAsStrategy>[0],
 					);
 
-					const kernel = (await import("@buildplane/kernel")) as unknown as {
+					const kernel = (await cliImport("@buildplane/kernel")) as unknown as {
 						createEventBus: () => {
 							subscribe: (listener: (event: unknown) => void) => () => void;
 							emit: (event: unknown) => void;
@@ -760,7 +823,7 @@ export async function runCli(
 
 					const useTui = rest.includes("--tui");
 					if (useTui) {
-						const tui = (await import("@buildplane/ui-tui")) as unknown as {
+						const tui = (await cliImport("@buildplane/ui-tui")) as unknown as {
 							renderTui: (eventBus: unknown) => {
 								waitUntilExit(): Promise<void>;
 								unmount(): void;
@@ -813,20 +876,20 @@ export async function runCli(
 
 				if (useTui) {
 					// Lazy-load TUI — only imported when --tui is requested
-					const kernel = (await import("@buildplane/kernel")) as unknown as {
+					const kernel = (await cliImport("@buildplane/kernel")) as unknown as {
 						createEventBus: () => {
 							subscribe: (listener: (event: unknown) => void) => () => void;
 							emit: (event: unknown) => void;
 						};
 					};
-					const tui = (await import("@buildplane/ui-tui")) as unknown as {
+					const tui = (await cliImport("@buildplane/ui-tui")) as unknown as {
 						renderTui: (eventBus: unknown) => {
 							waitUntilExit(): Promise<void>;
 							unmount(): void;
 							clear(): void;
 						};
 					};
-					const storage = (await import("@buildplane/storage")) as unknown as {
+					const storage = (await cliImport("@buildplane/storage")) as unknown as {
 						createEventStore: (root: string) => {
 							persistEvent: (runId: string, event: unknown) => void;
 						};
@@ -1012,7 +1075,7 @@ export async function runCli(
 				const json = rest.includes("--json");
 
 				// Load packet snapshot from storage
-				const storage = (await import("@buildplane/storage")) as unknown as {
+				const storage = (await cliImport("@buildplane/storage")) as unknown as {
 					createBuildplaneStorage: (root: string) => {
 						getPacketSnapshot: (id: string) => unknown | null;
 					};
@@ -1033,7 +1096,7 @@ export async function runCli(
 				);
 
 				// Create event bus with storage persistence
-				const kernel = (await import("@buildplane/kernel")) as unknown as {
+				const kernel = (await cliImport("@buildplane/kernel")) as unknown as {
 					createEventBus: () => {
 						subscribe: (listener: (event: unknown) => void) => () => void;
 						emit: (event: unknown) => void;
@@ -1104,7 +1167,7 @@ export async function runCli(
 					userId,
 				);
 
-				const kernel = (await import("@buildplane/kernel")) as unknown as {
+				const kernel = (await cliImport("@buildplane/kernel")) as unknown as {
 					createEventBus: () => {
 						subscribe: (listener: (event: unknown) => void) => () => void;
 						emit: (event: unknown) => void;
@@ -1130,7 +1193,7 @@ export async function runCli(
 				}
 				const strategyPath = resolve(cwd, rest[strategyIndex + 1]);
 
-				const kernel = (await import("@buildplane/kernel")) as unknown as {
+				const kernel = (await cliImport("@buildplane/kernel")) as unknown as {
 					parseStrategyPacket: (raw: unknown) => unknown;
 					createEventBus: () => {
 						subscribe: (listener: (event: unknown) => void) => () => void;
