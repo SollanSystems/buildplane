@@ -1,7 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { resolve } from "node:path";
 import {
 	formatHumanError,
 	formatInitializationResult,
@@ -43,60 +42,65 @@ export interface RunCliOptions {
 
 const BUILDPLANE_BANNER = "Buildplane by SollanSystems";
 
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-const CLI_DIR = resolve(__dirname, "..");
-
-function resolveCliModuleSpecifier(specifier: string): string {
-	if (!specifier.startsWith("@buildplane/")) {
-		return specifier;
+async function cliImport(specifier: string): Promise<unknown> {
+	switch (specifier) {
+		case "@buildplane/kernel":
+			try {
+				return await import("@buildplane/kernel");
+			} catch {
+				return import("../../../packages/kernel/src/index.ts");
+			}
+		case "@buildplane/runtime":
+			try {
+				return await import("@buildplane/runtime");
+			} catch {
+				return import("../../../packages/runtime/src/index.ts");
+			}
+		case "@buildplane/policy":
+			try {
+				return await import("@buildplane/policy");
+			} catch {
+				return import("../../../packages/policy/src/index.ts");
+			}
+		case "@buildplane/storage":
+			try {
+				return await import("@buildplane/storage");
+			} catch {
+				return import("../../../packages/storage/src/index.ts");
+			}
+		case "@buildplane/adapters-git":
+			try {
+				return await import("@buildplane/adapters-git");
+			} catch {
+				return import("../../../packages/adapters-git/src/index.ts");
+			}
+		case "@buildplane/adapters-models":
+			try {
+				return await import("@buildplane/adapters-models");
+			} catch {
+				return import("../../../packages/adapters-models/src/index.ts");
+			}
+		case "@buildplane/adapters-codex":
+			try {
+				return await import("@buildplane/adapters-codex");
+			} catch {
+				return import("../../../packages/adapters-codex/src/index.ts");
+			}
+		case "@buildplane/adapters-honcho":
+			try {
+				return await import("@buildplane/adapters-honcho");
+			} catch {
+				return import("../../../packages/adapters-honcho/src/index.ts");
+			}
+		case "@buildplane/ui-tui":
+			try {
+				return await import("@buildplane/ui-tui");
+			} catch {
+				return import("../../../packages/ui-tui/src/index.ts");
+			}
+		default:
+			throw new Error(`Unsupported workspace import '${specifier}'`);
 	}
-
-	const pkgDir = join(CLI_DIR, "node_modules", specifier);
-	const pkgJsonPath = join(pkgDir, "package.json");
-	if (!existsSync(pkgJsonPath)) {
-		return specifier;
-	}
-
-	const pkgJson = JSON.parse(readFileSync(pkgJsonPath, "utf8")) as {
-		main?: string;
-		exports?: Record<string, unknown>;
-	};
-
-	let entrypoint = pkgJson.main ?? "index.js";
-	if (pkgJson.exports && typeof pkgJson.exports === "object" && "." in pkgJson.exports) {
-		const dot = (pkgJson.exports as Record<string, unknown>)["."];
-		if (typeof dot === "string") {
-			entrypoint = dot;
-		} else if (dot && typeof dot === "object") {
-			const dotExp = dot as Record<string, unknown>;
-			const resolved = dotExp.import ?? dotExp.default ?? dotExp.require;
-			entrypoint = String(resolved);
-		}
-	}
-
-	const normalizedEntrypoint = entrypoint.replace(/^\.\//, "");
-	const candidates = [
-		join(pkgDir, normalizedEntrypoint),
-		join(pkgDir, normalizedEntrypoint.replace(/^dist\//, "src/")),
-		join(pkgDir, normalizedEntrypoint.replace(/^dist\//, "src/").replace(/\.js$/, ".ts")),
-		join(pkgDir, "src", "index.js"),
-		join(pkgDir, "src", "index.ts"),
-	];
-
-	for (const candidate of candidates) {
-		if (existsSync(candidate)) {
-			return pathToFileURL(candidate).href;
-		}
-	}
-
-	return specifier;
-}
-
-function cliImport(specifier: string): Promise<unknown> {
-	const resolved = resolveCliModuleSpecifier(specifier);
-	return import(resolved);
 }
 
 function formatTopLevelHelp(): string[] {

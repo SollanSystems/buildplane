@@ -204,7 +204,7 @@ function runSmokePhase(label, cli, options) {
 		formatCommand(cliCommandName(cli), cliCommandArgs(cli, initArgs)),
 		initResult.stderr,
 	);
-	const runArgs = ["run", "--packet", packetPath];
+	const runArgs = ["run", "--raw", "--packet", packetPath];
 	const runResult = cli(runArgs, { cwd, env });
 	assertNoCommandStderr(
 		label,
