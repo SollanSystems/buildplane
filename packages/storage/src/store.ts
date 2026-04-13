@@ -537,6 +537,31 @@ export function assertBaselineStorageProjectionSchema(
 	}
 }
 
+export function assertInitializableStorageProjectionSchema(
+	database: DatabaseSync,
+): void {
+	const rows = database
+		.prepare(
+			`SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('units', 'runs', 'evidence', 'decisions', 'artifacts')`,
+		)
+		.all() as unknown as { name: string }[];
+	const existingTables = new Set(rows.map((row) => row.name));
+
+	for (const tableName of [
+		"units",
+		"runs",
+		"evidence",
+		"decisions",
+		"artifacts",
+	]) {
+		if (!existingTables.has(tableName)) {
+			throw new Error(
+				"Buildplane state is incomplete: state.db is missing required projection schema. Remove .buildplane or repair the database before rerunning `buildplane init`.",
+			);
+		}
+	}
+}
+
 function assertStorageProjectionSchema(database: DatabaseSync): void {
 	assertBaselineStorageProjectionSchema(database);
 

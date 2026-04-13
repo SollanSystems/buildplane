@@ -40,6 +40,11 @@ export function logSection(title: string): void {
 }
 
 // ── Git environment isolation ────────────────────────────────
+const DEFAULT_GIT_IDENTITY = Object.freeze({
+	name: "Buildplane",
+	email: "buildplane@local",
+});
+
 export function cleanGitEnv(): NodeJS.ProcessEnv {
 	const env = { ...process.env };
 	for (const key of Object.keys(env)) {
@@ -47,6 +52,10 @@ export function cleanGitEnv(): NodeJS.ProcessEnv {
 			delete env[key];
 		}
 	}
+	env.GIT_AUTHOR_NAME ??= DEFAULT_GIT_IDENTITY.name;
+	env.GIT_AUTHOR_EMAIL ??= DEFAULT_GIT_IDENTITY.email;
+	env.GIT_COMMITTER_NAME ??= DEFAULT_GIT_IDENTITY.name;
+	env.GIT_COMMITTER_EMAIL ??= DEFAULT_GIT_IDENTITY.email;
 	return env;
 }
 

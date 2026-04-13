@@ -14,6 +14,7 @@ import {
 import { resolveProjectLayout } from "./project-layout.js";
 import {
 	assertBaselineStorageProjectionSchema,
+	assertInitializableStorageProjectionSchema,
 	bootstrapStorageProjectionSchema,
 	createStorageStore,
 } from "./store.js";
@@ -104,10 +105,14 @@ export function createBuildplaneStorage(
 			const database = openBuildplaneDatabase(layout.stateDbPath);
 			try {
 				if (!created) {
-					assertBaselineStorageProjectionSchema(database);
+					assertInitializableStorageProjectionSchema(database);
 				}
 
 				bootstrapStorageProjectionSchema(database);
+
+				if (!created) {
+					assertBaselineStorageProjectionSchema(database);
+				}
 
 				if (created) {
 					writeFileSync(
