@@ -181,6 +181,17 @@ function ensureRunsUsedWorkspaceColumn(database: DatabaseSync): void {
 	}
 }
 
+function ensureRunsStepColumns(database: DatabaseSync): void {
+	if (!tableHasColumn(database, "runs", "step_count")) {
+		database.exec(
+			`ALTER TABLE runs ADD COLUMN step_count INTEGER NOT NULL DEFAULT 0`,
+		);
+	}
+	if (!tableHasColumn(database, "runs", "budget_snapshot")) {
+		database.exec(`ALTER TABLE runs ADD COLUMN budget_snapshot TEXT`);
+	}
+}
+
 function ensureRunsStrategyColumns(database: DatabaseSync): void {
 	if (!tableHasColumn(database, "runs", "parent_run_id")) {
 		database.exec("ALTER TABLE runs ADD COLUMN parent_run_id TEXT");
