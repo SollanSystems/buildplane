@@ -300,6 +300,272 @@ describe("cli command surface", () => {
 		]);
 	});
 
+	it("persists injected structured memories and surfaces them in run and inspect output", async () => {
+		const root = createGitRepo();
+		await runCliCapture(root, ["init"]);
+
+		const storage = createBuildplaneStorage(root);
+		storage.upsertRepoFact({
+			factKey: "commands.typecheck",
+			factValue: "npx pnpm typecheck",
+			valueType: "string",
+			scopeType: "repo",
+			createdBy: "system",
+		});
+		storage.createProcedure({
+			name: "fix TypeScript build",
+			taskType: "debug_failure",
+			bodyMarkdown: "Run typecheck before touching imports.",
+			createdBy: "worker",
+		});
+
+		const packetPath = writeCommittedPacket(
+			root,
+			".buildplane/test-packets/injected-packet.json",
+			{
+				...createPassingPacket("unit-injected"),
+				intent: {
+					objective: "Fix the TypeScript build",
+					taskType: "debug_failure",
+					context: { files: ["apps/cli/src/run-cli.ts"] },
+					constraints: {
+						scope: ["apps/cli/src"],
+						verification: ["npx pnpm typecheck"],
+					},
+					features: {
+						ambiguity: "low",
+						reversibility: "easy",
+						verifierStrength: "strong",
+					},
+				},
+			},
+		);
+
+		const runHuman = await runCliCapture(root, [
+			"run",
+			"--raw",
+			"--packet",
+			packetPath,
+		]);
+		const runId = extractRunId(runHuman.stdout);
+		const runJson = await runCliCapture(root, [
+			"run",
+			"--raw",
+			"--json",
+			"--packet",
+			packetPath,
+		]);
+		const inspectHuman = await runCliCapture(root, ["inspect", runId]);
+		const inspectJson = await runCliCapture(root, ["inspect", runId, "--json"]);
+
+		expect(runHuman.exitCode).toBe(0);
+		expect(runHuman.stdout).toEqual(
+			expect.arrayContaining([
+				expect.stringMatching(/^run-id: /),
+				"status: passed",
+				"injected-memories: 2",
+				"  - [repo-fact] commands.typecheck (fuzzy-fact-key)",
+				"  - [procedure] fix TypeScript build (exact-task-type)",
+			]),
+		);
+
+		const parsedRun = JSON.parse(runJson.stdout.join("\n"));
+		expect(parsedRun).toMatchObject({
+			run: { id: expect.any(String), status: "passed" },
+			injectedMemories: [
+				{
+					memoryKind: "repo-fact",
+					memoryId: expect.any(String),
+					matchReason: "fuzzy-fact-key",
+				},
+				{
+					memoryKind: "procedure",
+					memoryId: expect.any(String),
+					matchReason: "exact-task-type",
+				},
+			],
+		});
+
+		expect(inspectHuman.stdout).toEqual(
+			expect.arrayContaining([
+				`run-id: ${runId}`,
+				"injected-memories:",
+				"  [repo-fact] commands.typecheck: npx pnpm typecheck (fuzzy-fact-key)",
+				"  [procedure] fix TypeScript build: Run typecheck before touching imports. (exact-task-type)",
+			]),
+		);
+
+		expect(JSON.parse(inspectJson.stdout.join("\n"))).toMatchObject({
+			run: { id: runId, status: "passed" },
+			injectedMemories: [
+				{
+					memoryKind: "repo-fact",
+					matchReason: "fuzzy-fact-key",
+					displayText: "[repo-fact] commands.typecheck: npx pnpm typecheck",
+				},
+				{
+					memoryKind: "procedure",
+					matchReason: "exact-task-type",
+				},
+			],
+		});
+		const listedInjected = storage.listInjectedMemories(runId);
+		expect(listedInjected).toHaveLength(2);
+	});
+
+	it("persists injected structured memories for run-graph nodes", async () => {
+		const root = createGitRepo();
+		await runCliCapture(root, ["init"]);
+
+		const storage = createBuildplaneStorage(root);
+		storage.upsertRepoFact({
+			factKey: "commands.typecheck",
+			factValue: "npx pnpm typecheck",
+			valueType: "string",
+			scopeType: "repo",
+			createdBy: "system",
+		});
+		storage.createProcedure({
+			name: "fix TypeScript build",
+			taskType: "debug_failure",
+			bodyMarkdown: "Run typecheck before touching imports.",
+			createdBy: "worker",
+		});
+
+		const graphPath = writeCommittedPacket(
+			root,
+			".buildplane/test-packets/injected-graph.json",
+			{
+				nodes: [
+					{
+						...createPassingPacket("graph-injected"),
+						intent: {
+							objective: "Fix the TypeScript build",
+							taskType: "debug_failure",
+							context: { files: ["apps/cli/src/run-cli.ts"] },
+							constraints: {
+								scope: ["apps/cli/src"],
+								verification: ["npx pnpm typecheck"],
+							},
+							features: {
+								ambiguity: "low",
+								reversibility: "easy",
+								verifierStrength: "strong",
+							},
+						},
+					},
+				],
+				maxConcurrent: 1,
+			},
+		);
+
+		const runGraph = await runCliCapture(root, [
+			"run-graph",
+			"--graph",
+			graphPath,
+		]);
+		const inspectJson = await runCliCapture(root, [
+			"inspect",
+			"graph-injected",
+			"--json",
+		]);
+
+		expect(runGraph.exitCode).toBe(0);
+		expect(runGraph.stdout).toEqual(
+			expect.arrayContaining([
+				"Graph Outcome: passed",
+				" - graph-injected: passed",
+			]),
+		);
+		expect(JSON.parse(inspectJson.stdout.join("\n"))).toMatchObject({
+			run: { unitId: "graph-injected", status: "passed" },
+			injectedMemories: [
+				{ memoryKind: "repo-fact", matchReason: "fuzzy-fact-key" },
+				{ memoryKind: "procedure", matchReason: "exact-task-type" },
+			],
+		});
+	});
+
+	it("persists injected structured memories for custom run-strategy executions", async () => {
+		const root = createGitRepo();
+		await runCliCapture(root, ["init"]);
+
+		const storage = createBuildplaneStorage(root);
+		storage.upsertRepoFact({
+			factKey: "commands.typecheck",
+			factValue: "npx pnpm typecheck",
+			valueType: "string",
+			scopeType: "repo",
+			createdBy: "system",
+		});
+		storage.createProcedure({
+			name: "fix TypeScript build",
+			taskType: "debug_failure",
+			bodyMarkdown: "Run typecheck before touching imports.",
+			createdBy: "worker",
+		});
+
+		const strategyPath = writeCommittedPacket(
+			root,
+			".buildplane/test-packets/injected-strategy.json",
+			{
+				id: "strategy-injected",
+				mode: "single",
+				mergePolicy: "direct",
+				children: [
+					{
+						role: "implementer",
+						packet: {
+							...createPassingPacket("strategy-injected-unit"),
+							intent: {
+								objective: "Fix the TypeScript build",
+								taskType: "debug_failure",
+								context: { files: ["apps/cli/src/run-cli.ts"] },
+								constraints: {
+									scope: ["apps/cli/src"],
+									verification: ["npx pnpm typecheck"],
+								},
+								features: {
+									ambiguity: "low",
+									reversibility: "easy",
+									verifierStrength: "strong",
+								},
+							},
+						},
+					},
+				],
+			},
+		);
+
+		const runStrategy = await runCliCapture(root, [
+			"run-strategy",
+			"--strategy",
+			strategyPath,
+		]);
+		const inspectJson = await runCliCapture(root, [
+			"inspect",
+			"strategy-injected-unit",
+			"--json",
+		]);
+
+		expect(runStrategy.exitCode).toBe(0);
+		expect(runStrategy.stdout).toEqual(
+			expect.arrayContaining([
+				"strategy: strategy-injected",
+				"mode: single",
+				"outcome: passed",
+				"injected-memories: 2",
+			]),
+		);
+		expect(JSON.parse(inspectJson.stdout.join("\n"))).toMatchObject({
+			run: { unitId: "strategy-injected-unit", status: "passed" },
+			injectedMemories: [
+				{ memoryKind: "repo-fact", matchReason: "fuzzy-fact-key" },
+				{ memoryKind: "procedure", matchReason: "exact-task-type" },
+			],
+		});
+	});
+
 	it("delegates memory commands to the native runner dependency", async () => {
 		const root = mkdtempSync(join(tmpdir(), "buildplane-cli-memory-delegate-"));
 		const calls: Array<{ cwd: string; argv: string[]; commandPath: string[] }> =

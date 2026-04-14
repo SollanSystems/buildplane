@@ -1,6 +1,7 @@
 import { basename } from "node:path";
 import {
 	dedupeRankedMemoryResults,
+	type InjectedMemoryRecord,
 	type RankedProcedureResult,
 	type RankedRepoFactResult,
 	type RankedSearchableDocumentResult,
@@ -62,6 +63,7 @@ interface TaskIntentLike {
 
 interface PacketWithIntent {
 	unit?: {
+		id?: string;
 		inputRefs?: readonly string[];
 	};
 	intent?: TaskIntentLike & {
@@ -69,6 +71,27 @@ interface PacketWithIntent {
 			files?: readonly string[];
 		};
 	};
+}
+
+export interface PacketMemoryEnrichmentResult {
+	readonly packet: unknown;
+	readonly injectedMemories: readonly InjectedMemoryRecord[];
+}
+
+export interface GraphMemoryEnrichmentResult {
+	readonly graph: Record<string, unknown>;
+	readonly injectedMemoriesByUnitId: Record<
+		string,
+		readonly InjectedMemoryRecord[]
+	>;
+}
+
+export interface StrategyMemoryEnrichmentResult {
+	readonly strategy: Record<string, unknown>;
+	readonly injectedMemoriesByUnitId: Record<
+		string,
+		readonly InjectedMemoryRecord[]
+	>;
 }
 
 function addUniqueValue(
@@ -237,14 +260,35 @@ function summarizeSearchableDocument(bodyText: string): string {
 	).trim();
 }
 
-function collectStructuredMemoryStrings(
+function createInjectedMemoryRecord(
+	memoryKind: InjectedMemoryRecord["memoryKind"],
+	memoryId: string,
+	displayText: string,
+	matchReason: string,
+	matchClass: InjectedMemoryRecord["matchClass"],
+	scopePreferenceIndex?: number,
+): InjectedMemoryRecord {
+	return {
+		memoryKind,
+		memoryId,
+		displayText,
+		matchReason,
+		matchClass,
+		scopePreferenceIndex,
+	};
+}
+
+function collectStructuredMemoryEnrichment(
 	packet: PacketWithIntent,
 	structuredMemoryPort: StructuredMemoryPortLike | undefined,
 	currentBranch: string | undefined,
-): string[] {
+): {
+	readonly memories: readonly string[];
+	readonly injectedMemories: readonly InjectedMemoryRecord[];
+} {
 	const intent = packet.intent;
 	if (!structuredMemoryPort || !intent) {
-		return [];
+		return { memories: [], injectedMemories: [] };
 	}
 
 	const searchTerms = buildSearchTerms(intent);
@@ -297,44 +341,93 @@ function collectStructuredMemoryStrings(
 		),
 	]).slice(0, STRUCTURED_SEARCHABLE_DOCUMENT_LIMIT);
 
-	return [
-		...repoFactResults.map(
-			(result) =>
-				`[repo-fact] ${result.item.factKey}: ${formatRepoFactValue(result.item.factValue)}`,
-		),
-		...procedureResults.map((result) => {
-			const summary = summarizeProcedure(result.item.bodyMarkdown);
-			return summary
-				? `[procedure] ${result.item.name}: ${summary}`
-				: `[procedure] ${result.item.name}`;
-		}),
-		...searchableDocumentResults.map((result) => {
+	const repoFactInjections = repoFactResults.map((result) => {
+		const displayText = `[repo-fact] ${result.item.factKey}: ${formatRepoFactValue(result.item.factValue)}`;
+		return {
+			displayText,
+			record: createInjectedMemoryRecord(
+				"repo-fact",
+				result.item.id,
+				displayText,
+				result.reason,
+				result.matchClass,
+				result.scopePreferenceIndex,
+			),
+		};
+	});
+
+	const procedureInjections = procedureResults.map((result) => {
+		const summary = summarizeProcedure(result.item.bodyMarkdown);
+		const displayText = summary
+			? `[procedure] ${result.item.name}: ${summary}`
+			: `[procedure] ${result.item.name}`;
+		return {
+			displayText,
+			record: createInjectedMemoryRecord(
+				"procedure",
+				result.item.id,
+				displayText,
+				result.reason,
+				result.matchClass,
+				result.scopePreferenceIndex,
+			),
+		};
+	});
+
+	const searchableDocumentInjections = searchableDocumentResults.map(
+		(result) => {
 			const title = result.item.title?.trim();
 			const label =
 				title || `${result.item.sourceTable}/${result.item.sourceId}`;
 			const summary = summarizeSearchableDocument(result.item.bodyText);
-			return summary
+			const displayText = summary
 				? `[document] ${label}: ${summary}`
 				: `[document] ${label}`;
-		}),
+			return {
+				displayText,
+				record: createInjectedMemoryRecord(
+					"searchable-document",
+					result.item.id,
+					displayText,
+					result.reason,
+					result.matchClass,
+					result.scopePreferenceIndex,
+				),
+			};
+		},
+	);
+
+	const allInjections = [
+		...repoFactInjections,
+		...procedureInjections,
+		...searchableDocumentInjections,
 	];
+
+	return {
+		memories: allInjections.map((injection) => injection.displayText),
+		injectedMemories: allInjections.map((injection) => injection.record),
+	};
 }
 
-export async function enrichPacketWithMemories(
+export async function preparePacketMemoryEnrichment(
 	packet: unknown,
 	memoryPort: MemoryPortLike | undefined,
 	honchoAdapter: HonchoPortLike | undefined,
 	userId: string | undefined,
 	structuredMemoryPort?: StructuredMemoryPortLike,
 	currentBranch?: string,
-): Promise<unknown> {
+): Promise<PacketMemoryEnrichmentResult> {
 	const p = packet as PacketWithIntent;
-	if (!p.intent) return packet;
-	if (!memoryPort && !honchoAdapter && !structuredMemoryPort) return packet;
+	if (!p.intent) {
+		return { packet, injectedMemories: [] };
+	}
+	if (!memoryPort && !honchoAdapter && !structuredMemoryPort) {
+		return { packet, injectedMemories: [] };
+	}
 
 	const localLearnings =
 		memoryPort?.fetchLearnings({ limit: LOCAL_LEARNING_LIMIT }) ?? [];
-	const structuredMemories = collectStructuredMemoryStrings(
+	const structuredMemoryEnrichment = collectStructuredMemoryEnrichment(
 		p,
 		structuredMemoryPort,
 		currentBranch,
@@ -348,21 +441,85 @@ export async function enrichPacketWithMemories(
 
 	const memories = [
 		...localLearnings.map((l) => `[${l.kind}] ${l.title}: ${l.body}`),
-		...structuredMemories,
+		...structuredMemoryEnrichment.memories,
 		...honchoMemories,
 	];
 
-	if (memories.length === 0) return packet;
+	if (memories.length === 0) {
+		return {
+			packet,
+			injectedMemories: structuredMemoryEnrichment.injectedMemories,
+		};
+	}
 
 	return {
-		...(packet as object),
-		intent: {
-			...(p.intent as object),
-			context: {
-				...(p.intent.context as object),
-				memories,
+		packet: {
+			...(packet as object),
+			intent: {
+				...(p.intent as object),
+				context: {
+					...(p.intent.context as object),
+					memories,
+				},
 			},
 		},
+		injectedMemories: structuredMemoryEnrichment.injectedMemories,
+	};
+}
+
+export async function enrichPacketWithMemories(
+	packet: unknown,
+	memoryPort: MemoryPortLike | undefined,
+	honchoAdapter: HonchoPortLike | undefined,
+	userId: string | undefined,
+	structuredMemoryPort?: StructuredMemoryPortLike,
+	currentBranch?: string,
+): Promise<unknown> {
+	return (
+		await preparePacketMemoryEnrichment(
+			packet,
+			memoryPort,
+			honchoAdapter,
+			userId,
+			structuredMemoryPort,
+			currentBranch,
+		)
+	).packet;
+}
+
+export async function prepareGraphMemoryEnrichment(
+	graph: Record<string, unknown>,
+	memoryPort: MemoryPortLike | undefined,
+	honchoAdapter: HonchoPortLike | undefined,
+	userId: string | undefined,
+	structuredMemoryPort?: StructuredMemoryPortLike,
+	currentBranch?: string,
+): Promise<GraphMemoryEnrichmentResult> {
+	const nodes = (graph.nodes as unknown[]) ?? [];
+	const injectedMemoriesByUnitId: Record<
+		string,
+		readonly InjectedMemoryRecord[]
+	> = {};
+	const enrichedNodes = await Promise.all(
+		nodes.map(async (node) => {
+			const prepared = await preparePacketMemoryEnrichment(
+				node,
+				memoryPort,
+				honchoAdapter,
+				userId,
+				structuredMemoryPort,
+				currentBranch,
+			);
+			const unitId = (node as PacketWithIntent).unit?.id;
+			if (unitId && prepared.injectedMemories.length > 0) {
+				injectedMemoriesByUnitId[unitId] = prepared.injectedMemories;
+			}
+			return prepared.packet;
+		}),
+	);
+	return {
+		graph: { ...graph, nodes: enrichedNodes },
+		injectedMemoriesByUnitId,
 	};
 }
 
@@ -374,20 +531,55 @@ export async function enrichGraphWithMemories(
 	structuredMemoryPort?: StructuredMemoryPortLike,
 	currentBranch?: string,
 ): Promise<unknown> {
-	const nodes = (graph.nodes as unknown[]) ?? [];
-	const enriched = await Promise.all(
-		nodes.map((node) =>
-			enrichPacketWithMemories(
-				node,
+	return (
+		await prepareGraphMemoryEnrichment(
+			graph,
+			memoryPort,
+			honchoAdapter,
+			userId,
+			structuredMemoryPort,
+			currentBranch,
+		)
+	).graph;
+}
+
+export async function prepareStrategyMemoryEnrichment(
+	strategy: Record<string, unknown>,
+	memoryPort: MemoryPortLike | undefined,
+	honchoAdapter: HonchoPortLike | undefined,
+	userId: string | undefined,
+	structuredMemoryPort?: StructuredMemoryPortLike,
+	currentBranch?: string,
+): Promise<StrategyMemoryEnrichmentResult> {
+	const children = (strategy.children as Array<{ packet: unknown }>) ?? [];
+	const injectedMemoriesByUnitId: Record<
+		string,
+		readonly InjectedMemoryRecord[]
+	> = {};
+	const enrichedChildren = await Promise.all(
+		children.map(async (child) => {
+			const prepared = await preparePacketMemoryEnrichment(
+				child.packet,
 				memoryPort,
 				honchoAdapter,
 				userId,
 				structuredMemoryPort,
 				currentBranch,
-			),
-		),
+			);
+			const unitId = (child.packet as PacketWithIntent).unit?.id;
+			if (unitId && prepared.injectedMemories.length > 0) {
+				injectedMemoriesByUnitId[unitId] = prepared.injectedMemories;
+			}
+			return {
+				...child,
+				packet: prepared.packet,
+			};
+		}),
 	);
-	return { ...graph, nodes: enriched };
+	return {
+		strategy: { ...strategy, children: enrichedChildren },
+		injectedMemoriesByUnitId,
+	};
 }
 
 export async function enrichStrategyWithMemories(
@@ -398,19 +590,14 @@ export async function enrichStrategyWithMemories(
 	structuredMemoryPort?: StructuredMemoryPortLike,
 	currentBranch?: string,
 ): Promise<unknown> {
-	const children = (strategy.children as Array<{ packet: unknown }>) ?? [];
-	const enrichedChildren = await Promise.all(
-		children.map(async (child) => ({
-			...child,
-			packet: await enrichPacketWithMemories(
-				child.packet,
-				memoryPort,
-				honchoAdapter,
-				userId,
-				structuredMemoryPort,
-				currentBranch,
-			),
-		})),
-	);
-	return { ...strategy, children: enrichedChildren };
+	return (
+		await prepareStrategyMemoryEnrichment(
+			strategy,
+			memoryPort,
+			honchoAdapter,
+			userId,
+			structuredMemoryPort,
+			currentBranch,
+		)
+	).strategy;
 }

@@ -84,6 +84,21 @@ export interface RunInfrastructureFailure {
 	readonly message: string;
 }
 
+export interface InjectedMemoryRecord {
+	readonly memoryKind: "repo-fact" | "procedure" | "searchable-document";
+	readonly memoryId: string;
+	readonly displayText: string;
+	readonly matchReason: string;
+	readonly matchClass: "exact" | "fuzzy" | "full-text";
+	readonly scopePreferenceIndex?: number;
+}
+
+export interface PersistedInjectedMemoryRecord extends InjectedMemoryRecord {
+	readonly id: string;
+	readonly runId: string;
+	readonly createdAt: string;
+}
+
 export interface WorkspaceSnapshot {
 	readonly runId: string;
 	readonly path: string;
@@ -124,6 +139,7 @@ export interface InspectSnapshot {
 	readonly unit: Unit;
 	readonly run: Run;
 	readonly workspace?: WorkspaceSnapshot;
+	readonly injectedMemories?: readonly PersistedInjectedMemoryRecord[];
 	readonly runHistory: readonly {
 		readonly id: string;
 		readonly status: RunStatus;
@@ -152,5 +168,6 @@ export interface RunPacketResult {
 	readonly decision?: PolicyDecision;
 	readonly failure?: RunInfrastructureFailure;
 	readonly workspace?: WorkspaceSnapshot;
+	readonly injectedMemories?: readonly PersistedInjectedMemoryRecord[];
 	readonly suspended?: boolean;
 }

@@ -29,7 +29,9 @@ import type {
 import type {
 	ApprovedPolicyDecision,
 	ExecutionReceipt,
+	InjectedMemoryRecord,
 	InspectSnapshot,
+	PersistedInjectedMemoryRecord,
 	PolicyDecision,
 	RejectedPolicyDecision,
 	RunInfrastructureFailure,
@@ -132,6 +134,11 @@ export interface BuildplaneStoragePort {
 	retrieveSearchableDocuments(
 		query: SearchableDocumentRetrievalQuery,
 	): readonly RankedSearchableDocumentResult[];
+	recordInjectedMemories(
+		runId: string,
+		records: readonly InjectedMemoryRecord[],
+	): void;
+	listInjectedMemories(runId: string): readonly PersistedInjectedMemoryRecord[];
 	getStatusSnapshot(): StatusSnapshot;
 	inspectTarget(id: string): InspectSnapshot;
 }
