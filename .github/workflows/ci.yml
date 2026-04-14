@@ -38,7 +38,7 @@ jobs:
       - name: Dev bootstrap smoke (before build)
         run: |
           pnpm buildplane init
-          RUN_OUTPUT=$(pnpm buildplane run --packet test/fixtures/dev-bootstrap/packet.json 2>&1)
+          RUN_OUTPUT=$(pnpm buildplane run --raw --packet test/fixtures/dev-bootstrap/packet.json 2>&1)
           echo "$RUN_OUTPUT"
           RUN_ID=$(echo "$RUN_OUTPUT" | grep '^run-id:' | awk '{print $2}')
           if [ -z "$RUN_ID" ]; then

@@ -7,5 +7,6 @@
 		"jsx": "react-jsx"
 	},
 	"include": ["src"],
-	"exclude": ["dist", "test"]
+	"exclude": ["dist", "test"],
+	"references": [{ "path": "../kernel" }]
 }

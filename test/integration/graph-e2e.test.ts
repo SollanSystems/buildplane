@@ -1,4 +1,4 @@
-import { execSync } from "node:child_process";
+import { execFileSync, execSync } from "node:child_process";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -11,6 +11,8 @@ describe("CLI run-graph integration", () => {
 	beforeEach(() => {
 		projectRoot = mkdtempSync(join(tmpdir(), "bp-graph-e2e-"));
 		execSync("git init", { cwd: projectRoot });
+		execSync('git config user.name "Buildplane"', { cwd: projectRoot });
+		execSync('git config user.email "buildplane@local"', { cwd: projectRoot });
 		execSync('git commit --allow-empty -m "initial commit"', {
 			cwd: projectRoot,
 		});
@@ -75,7 +77,7 @@ describe("CLI run-graph integration", () => {
 		writeFileSync(graphPath, JSON.stringify(graph, null, 2));
 
 		const cliPath = join(__dirname, "../../apps/cli/dist/index.js");
-		execSync(`node ${cliPath} init`, { cwd: projectRoot });
+		execFileSync(process.execPath, [cliPath, "init"], { cwd: projectRoot });
 
 		// Create default profile
 		const buildplaneDir = join(projectRoot, ".buildplane");
@@ -107,8 +109,9 @@ describe("CLI run-graph integration", () => {
 
 		// Run the CLI
 		try {
-			const output = execSync(
-				`node ${cliPath} run-graph --graph ${graphPath}`,
+			const output = execFileSync(
+				process.execPath,
+				[cliPath, "run-graph", "--graph", graphPath],
 				{ cwd: projectRoot, encoding: "utf8" },
 			);
 

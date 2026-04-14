@@ -1,5 +1,14 @@
 import type { EventBus } from "./events.js";
 import type {
+	CreateProcedureInput,
+	CreateSearchableDocumentInput,
+	MemoryScopeType,
+	ProcedureMemory,
+	RepoFact,
+	SearchableDocument,
+	UpsertRepoFactInput,
+} from "./memory-types.js";
+import type {
 	ExtractedLearning,
 	LearningKind,
 	LearningScope,
@@ -66,6 +75,46 @@ export interface BuildplaneStoragePort {
 	suspendRun(runId: string): Run;
 	approveRun(runId: string): Run;
 	rejectSuspendedRun(runId: string): Run;
+	upsertRepoFact(input: UpsertRepoFactInput): RepoFact;
+	getRepoFact(
+		factKey: string,
+		options?: {
+			scopeType?: MemoryScopeType;
+			scopeKey?: string;
+		},
+	): RepoFact | null;
+	listRepoFacts(options?: {
+		scopeType?: MemoryScopeType;
+		scopeKey?: string;
+	}): readonly RepoFact[];
+	supersedeRepoFact(
+		factKey: string,
+		options?: {
+			scopeType?: MemoryScopeType;
+			scopeKey?: string;
+		},
+	): number;
+	createProcedure(input: CreateProcedureInput): ProcedureMemory;
+	listProcedures(options?: { taskType?: string }): readonly ProcedureMemory[];
+	findProceduresByTaskType(taskType: string): readonly ProcedureMemory[];
+	supersedeProcedure(id: string): number;
+	createSearchableDocument(
+		input: CreateSearchableDocumentInput,
+	): SearchableDocument;
+	getSearchableDocument(id: string): SearchableDocument | undefined;
+	listSearchableDocuments(options?: {
+		documentKind?: string;
+		sourceTable?: string;
+		sourceId?: string;
+		limit?: number;
+	}): readonly SearchableDocument[];
+	searchSearchableDocuments(
+		query: string,
+		options?: {
+			documentKind?: string;
+			limit?: number;
+		},
+	): readonly SearchableDocument[];
 	getStatusSnapshot(): StatusSnapshot;
 	inspectTarget(id: string): InspectSnapshot;
 }

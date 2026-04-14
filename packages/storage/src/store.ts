@@ -5,17 +5,24 @@ import type { DatabaseSync } from "node:sqlite";
 import type {
 	ApprovedPolicyDecision,
 	BuildplaneStoragePort,
+	CreateProcedureInput,
 	CreateRunOptions,
+	CreateSearchableDocumentInput,
 	ExecutionReceipt,
 	InspectSnapshot,
+	MemoryScopeType,
 	PolicyDecision,
+	ProcedureMemory,
 	RejectedPolicyDecision,
+	RepoFact,
 	Run,
 	RunStatus,
+	SearchableDocument,
 	StatusSnapshot,
 	StatusWorkspaceSummary,
 	Unit,
 	UnitPacket,
+	UpsertRepoFactInput,
 	WorkspaceSnapshot,
 } from "@buildplane/kernel";
 import {
@@ -56,6 +63,58 @@ interface StoredWorkspaceRow {
 	readonly created_at: string;
 	readonly finalized_at: string | null;
 	readonly cleanup_error: string | null;
+}
+
+interface StoredRepoFactRow {
+	readonly id: string;
+	readonly repo_id: string;
+	readonly fact_key: string;
+	readonly fact_value_json: string;
+	readonly value_type: "string" | "number" | "boolean" | "json";
+	readonly scope_type: MemoryScopeType;
+	readonly scope_key: string | null;
+	readonly confidence: number;
+	readonly source_run_id: string | null;
+	readonly source_task_id: string | null;
+	readonly created_by: "system" | "worker" | "operator";
+	readonly branch: string | null;
+	readonly commit_sha: string | null;
+	readonly status: "active" | "stale" | "superseded" | "archived";
+	readonly valid_from_commit: string | null;
+	readonly valid_to_commit: string | null;
+	readonly created_at: string;
+	readonly updated_at: string;
+}
+
+interface StoredProcedureRow {
+	readonly id: string;
+	readonly repo_id: string | null;
+	readonly name: string;
+	readonly task_type: string | null;
+	readonly body_markdown: string;
+	readonly metadata_json: string | null;
+	readonly confidence: number;
+	readonly source_run_id: string | null;
+	readonly source_task_id: string | null;
+	readonly created_by: "system" | "worker" | "operator";
+	readonly branch: string | null;
+	readonly commit_sha: string | null;
+	readonly status: "active" | "stale" | "superseded" | "archived";
+	readonly created_at: string;
+	readonly updated_at: string;
+}
+
+interface StoredSearchableDocumentRow {
+	readonly id: string;
+	readonly repo_id: string;
+	readonly source_table: string | null;
+	readonly source_id: string | null;
+	readonly document_kind: string;
+	readonly title: string | null;
+	readonly body_text: string;
+	readonly metadata_json: string | null;
+	readonly created_at: string;
+	readonly updated_at: string;
 }
 
 export interface StorageTestingHooks {
@@ -137,6 +196,17 @@ function ensureRunsUsedWorkspaceColumn(database: DatabaseSync): void {
 	}
 }
 
+function ensureRunsStepColumns(database: DatabaseSync): void {
+	if (!tableHasColumn(database, "runs", "step_count")) {
+		database.exec(
+			`ALTER TABLE runs ADD COLUMN step_count INTEGER NOT NULL DEFAULT 0`,
+		);
+	}
+	if (!tableHasColumn(database, "runs", "budget_snapshot")) {
+		database.exec(`ALTER TABLE runs ADD COLUMN budget_snapshot TEXT`);
+	}
+}
+
 function ensureRunsStrategyColumns(database: DatabaseSync): void {
 	if (!tableHasColumn(database, "runs", "parent_run_id")) {
 		database.exec("ALTER TABLE runs ADD COLUMN parent_run_id TEXT");
@@ -184,6 +254,48 @@ function ensureSeenCountColumn(database: DatabaseSync): void {
 	}
 }
 
+function ensureRepoFactColumns(database: DatabaseSync): void {
+	for (const statement of [
+		`ALTER TABLE repo_facts ADD COLUMN created_by TEXT NOT NULL DEFAULT 'system'`,
+		`ALTER TABLE repo_facts ADD COLUMN branch TEXT`,
+		`ALTER TABLE repo_facts ADD COLUMN commit_sha TEXT`,
+		`ALTER TABLE repo_facts ADD COLUMN valid_from_commit TEXT`,
+		`ALTER TABLE repo_facts ADD COLUMN valid_to_commit TEXT`,
+	] as const) {
+		const columnName = statement.match(/ADD COLUMN ([^ ]+)/)?.[1];
+		if (columnName && !tableHasColumn(database, "repo_facts", columnName)) {
+			database.exec(statement);
+		}
+	}
+}
+
+function ensureProcedureColumns(database: DatabaseSync): void {
+	for (const statement of [
+		`ALTER TABLE procedures ADD COLUMN created_by TEXT NOT NULL DEFAULT 'system'`,
+		`ALTER TABLE procedures ADD COLUMN branch TEXT`,
+		`ALTER TABLE procedures ADD COLUMN commit_sha TEXT`,
+	] as const) {
+		const columnName = statement.match(/ADD COLUMN ([^ ]+)/)?.[1];
+		if (columnName && !tableHasColumn(database, "procedures", columnName)) {
+			database.exec(statement);
+		}
+	}
+}
+
+function assertTableColumns(
+	database: DatabaseSync,
+	tableName: string,
+	columnNames: readonly string[],
+): void {
+	for (const columnName of columnNames) {
+		if (!tableHasColumn(database, tableName, columnName)) {
+			throw new Error(
+				"Buildplane state is incomplete: state.db is missing required projection schema. Remove .buildplane or repair the database before rerunning `buildplane init`.",
+			);
+		}
+	}
+}
+
 function tableExists(database: DatabaseSync, tableName: string): boolean {
 	const row = database
 		.prepare(
@@ -194,7 +306,7 @@ function tableExists(database: DatabaseSync, tableName: string): boolean {
 }
 
 function assertWorkspaceTableColumns(database: DatabaseSync): void {
-	for (const columnName of [
+	assertTableColumns(database, "workspaces", [
 		"run_id",
 		"source_project_root",
 		"path",
@@ -203,13 +315,65 @@ function assertWorkspaceTableColumns(database: DatabaseSync): void {
 		"created_at",
 		"finalized_at",
 		"cleanup_error",
-	] as const) {
-		if (!tableHasColumn(database, "workspaces", columnName)) {
-			throw new Error(
-				"Buildplane state is incomplete: state.db is missing required projection schema. Remove .buildplane or repair the database before rerunning `buildplane init`.",
-			);
-		}
-	}
+	] as const);
+}
+
+function assertRepoFactsTableColumns(database: DatabaseSync): void {
+	assertTableColumns(database, "repo_facts", [
+		"id",
+		"repo_id",
+		"fact_key",
+		"fact_value_json",
+		"value_type",
+		"scope_type",
+		"scope_key",
+		"confidence",
+		"source_run_id",
+		"source_task_id",
+		"created_by",
+		"branch",
+		"commit_sha",
+		"status",
+		"valid_from_commit",
+		"valid_to_commit",
+		"created_at",
+		"updated_at",
+	] as const);
+}
+
+function assertProceduresTableColumns(database: DatabaseSync): void {
+	assertTableColumns(database, "procedures", [
+		"id",
+		"repo_id",
+		"name",
+		"task_type",
+		"body_markdown",
+		"metadata_json",
+		"confidence",
+		"source_run_id",
+		"source_task_id",
+		"created_by",
+		"branch",
+		"commit_sha",
+		"status",
+		"created_at",
+		"updated_at",
+	] as const);
+}
+
+function assertSearchableDocumentsTableColumns(database: DatabaseSync): void {
+	assertTableColumns(database, "searchable_documents", [
+		"id",
+		"repo_id",
+		"source_table",
+		"source_id",
+		"document_kind",
+		"title",
+		"body_text",
+		"metadata_json",
+		"created_at",
+		"updated_at",
+	] as const);
 }
 
 export function bootstrapStorageProjectionSchema(database: DatabaseSync): void {
@@ -272,6 +436,78 @@ export function bootstrapStorageProjectionSchema(database: DatabaseSync): void {
 			finalized_at TEXT,
 			cleanup_error TEXT
 		);
+
+		CREATE TABLE IF NOT EXISTS steps (
+			id TEXT PRIMARY KEY,
+			run_id TEXT NOT NULL,
+			step_index INTEGER NOT NULL,
+			kind TEXT NOT NULL,
+			status TEXT NOT NULL,
+			started_at TEXT NOT NULL,
+			completed_at TEXT,
+			detail TEXT
+		);
+
+		CREATE TABLE IF NOT EXISTS repo_facts (
+			id TEXT PRIMARY KEY,
+			repo_id TEXT NOT NULL,
+			fact_key TEXT NOT NULL,
+			fact_value_json TEXT NOT NULL,
+			value_type TEXT NOT NULL,
+			scope_type TEXT NOT NULL DEFAULT 'repo',
+			scope_key TEXT,
+			confidence REAL NOT NULL DEFAULT 1.0,
+			source_run_id TEXT,
+			source_task_id TEXT,
+			created_by TEXT NOT NULL DEFAULT 'system',
+			branch TEXT,
+			commit_sha TEXT,
+			status TEXT NOT NULL DEFAULT 'active',
+			valid_from_commit TEXT,
+			valid_to_commit TEXT,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		);
+
+		CREATE TABLE IF NOT EXISTS procedures (
+			id TEXT PRIMARY KEY,
+			repo_id TEXT,
+			name TEXT NOT NULL,
+			task_type TEXT,
+			body_markdown TEXT NOT NULL,
+			metadata_json TEXT,
+			confidence REAL NOT NULL DEFAULT 1.0,
+			source_run_id TEXT,
+			source_task_id TEXT,
+			created_by TEXT NOT NULL DEFAULT 'system',
+			branch TEXT,
+			commit_sha TEXT,
+			status TEXT NOT NULL DEFAULT 'active',
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		);
+
+		CREATE TABLE IF NOT EXISTS searchable_documents (
+			id TEXT PRIMARY KEY,
+			repo_id TEXT,
+			source_table TEXT NOT NULL,
+			source_id TEXT NOT NULL,
+			document_kind TEXT NOT NULL,
+			title TEXT,
+			body_text TEXT NOT NULL,
+			metadata_json TEXT,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		);
+	`);
+
+	database.exec(`
+		CREATE VIRTUAL TABLE IF NOT EXISTS searchable_documents_fts USING fts5(
+			title,
+			body_text,
+			content='searchable_documents',
+			content_rowid='rowid'
+		);
 	`);
 
 	ensureEvidenceMessageColumn(database);
@@ -279,10 +515,44 @@ export function bootstrapStorageProjectionSchema(database: DatabaseSync): void {
 	ensureRunsStrategyColumns(database);
 	ensureRunLearningsTable(database);
 	ensureSeenCountColumn(database);
+	ensureRunsStepColumns(database);
+	ensureRepoFactColumns(database);
+	ensureProcedureColumns(database);
 	assertWorkspaceTableColumns(database);
+	assertRepoFactsTableColumns(database);
+	assertProceduresTableColumns(database);
+	assertSearchableDocumentsTableColumns(database);
 }
 
 export function assertBaselineStorageProjectionSchema(
+	database: DatabaseSync,
+): void {
+	const rows = database
+		.prepare(
+			`SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('units', 'runs', 'evidence', 'decisions', 'artifacts', 'repo_facts', 'procedures', 'searchable_documents')`,
+		)
+		.all() as unknown as { name: string }[];
+	const existingTables = new Set(rows.map((row) => row.name));
+
+	for (const tableName of [
+		"units",
+		"runs",
+		"evidence",
+		"decisions",
+		"artifacts",
+		"repo_facts",
+		"procedures",
+		"searchable_documents",
+	]) {
+		if (!existingTables.has(tableName)) {
+			throw new Error(
+				"Buildplane state is incomplete: state.db is missing required projection schema. Remove .buildplane or repair the database before rerunning `buildplane init`.",
+			);
+		}
+	}
+}
+
+export function assertInitializableStorageProjectionSchema(
 	database: DatabaseSync,
 ): void {
 	const rows = database
@@ -330,6 +600,9 @@ function assertStorageProjectionSchema(database: DatabaseSync): void {
 	}
 
 	assertWorkspaceTableColumns(database);
+	assertRepoFactsTableColumns(database);
+	assertProceduresTableColumns(database);
+	assertSearchableDocumentsTableColumns(database);
 }
 
 export interface RunHistoryEntry {
@@ -511,6 +784,299 @@ export function createStorageStore(
 			unitId: row.unit_id,
 			status: row.status,
 		};
+	}
+
+	function toRepoFact(row: StoredRepoFactRow): RepoFact {
+		return {
+			id: row.id,
+			memoryType: "repo-fact",
+			scopeType: row.scope_type,
+			scopeKey: row.scope_key ?? undefined,
+			status: row.status,
+			factKey: row.fact_key,
+			valueType: row.value_type,
+			factValue: JSON.parse(row.fact_value_json) as unknown,
+			validFromCommit: row.valid_from_commit ?? undefined,
+			validToCommit: row.valid_to_commit ?? undefined,
+			provenance: {
+				sourceRunId: row.source_run_id ?? undefined,
+				sourceTaskId: row.source_task_id ?? undefined,
+				createdBy: row.created_by,
+				createdAt: row.created_at,
+				updatedAt: row.updated_at,
+				confidence: row.confidence,
+				repoId: row.repo_id,
+				branch: row.branch ?? undefined,
+				commitSha: row.commit_sha ?? undefined,
+			},
+		};
+	}
+
+	function toProcedureMemory(row: StoredProcedureRow): ProcedureMemory {
+		return {
+			id: row.id,
+			memoryType: "procedure",
+			scopeType: "repo",
+			scopeKey: undefined,
+			status: row.status,
+			name: row.name,
+			taskType: row.task_type ?? undefined,
+			bodyMarkdown: row.body_markdown,
+			metadata: row.metadata_json
+				? (JSON.parse(row.metadata_json) as Record<string, unknown>)
+				: undefined,
+			provenance: {
+				sourceRunId: row.source_run_id ?? undefined,
+				sourceTaskId: row.source_task_id ?? undefined,
+				createdBy: row.created_by,
+				createdAt: row.created_at,
+				updatedAt: row.updated_at,
+				confidence: row.confidence,
+				repoId: row.repo_id ?? undefined,
+				branch: row.branch ?? undefined,
+				commitSha: row.commit_sha ?? undefined,
+			},
+		};
+	}
+
+	function toSearchableDocument(
+		row: StoredSearchableDocumentRow,
+	): SearchableDocument {
+		return {
+			id: row.id,
+			repoId: row.repo_id,
+			sourceTable: row.source_table ?? "",
+			sourceId: row.source_id ?? "",
+			documentKind: row.document_kind,
+			title: row.title ?? undefined,
+			bodyText: row.body_text,
+			metadata: row.metadata_json
+				? (JSON.parse(row.metadata_json) as Record<string, unknown>)
+				: undefined,
+			createdAt: row.created_at,
+			updatedAt: row.updated_at,
+		};
+	}
+
+	function readRepoFactRows(
+		database: DatabaseSync,
+		options: {
+			factKey?: string;
+			scopeType?: MemoryScopeType;
+			scopeKey?: string;
+			includeInactive?: boolean;
+		},
+	): StoredRepoFactRow[] {
+		const clauses = ["repo_id = ?"];
+		const params: (string | null)[] = [projectRoot];
+
+		if (options.factKey) {
+			clauses.push("fact_key = ?");
+			params.push(options.factKey);
+		}
+		if (options.scopeType) {
+			clauses.push("scope_type = ?");
+			params.push(options.scopeType);
+		}
+		if (options.scopeKey !== undefined) {
+			if (options.scopeKey === "") {
+				clauses.push("scope_key = ''");
+			} else {
+				clauses.push("scope_key = ?");
+				params.push(options.scopeKey);
+			}
+		} else if (options.scopeType === "repo" || options.scopeType === "global") {
+			clauses.push("scope_key IS NULL");
+		}
+		if (!options.includeInactive) {
+			clauses.push("status = 'active'");
+		}
+
+		const query = `
+			SELECT id, repo_id, fact_key, fact_value_json, value_type, scope_type, scope_key,
+			       confidence, source_run_id, source_task_id, created_by, branch, commit_sha,
+			       status, valid_from_commit, valid_to_commit, created_at, updated_at
+			FROM repo_facts
+			WHERE ${clauses.join(" AND ")}
+			ORDER BY updated_at DESC, created_at DESC
+		`;
+
+		return database
+			.prepare(query)
+			.all(...params) as unknown as StoredRepoFactRow[];
+	}
+
+	function readProcedureRows(
+		database: DatabaseSync,
+		options: {
+			taskType?: string;
+			includeInactive?: boolean;
+		},
+	): StoredProcedureRow[] {
+		const clauses = ["repo_id = ?"];
+		const params: (string | null)[] = [projectRoot];
+
+		if (options.taskType) {
+			clauses.push("task_type = ?");
+			params.push(options.taskType);
+		}
+		if (!options.includeInactive) {
+			clauses.push("status = 'active'");
+		}
+
+		const query = `
+			SELECT id, repo_id, name, task_type, body_markdown, metadata_json,
+			       confidence, source_run_id, source_task_id, created_by, branch,
+			       commit_sha, status, created_at, updated_at
+			FROM procedures
+			WHERE ${clauses.join(" AND ")}
+			ORDER BY updated_at DESC, created_at DESC
+		`;
+
+		return database
+			.prepare(query)
+			.all(...params) as unknown as StoredProcedureRow[];
+	}
+
+	function readSearchableDocumentRows(
+		database: DatabaseSync,
+		options: {
+			id?: string;
+			documentKind?: string;
+			sourceTable?: string;
+			sourceId?: string;
+			limit?: number;
+		},
+	): StoredSearchableDocumentRow[] {
+		const clauses = ["repo_id = ?"];
+		const params: (string | number | null)[] = [projectRoot];
+
+		if (options.id) {
+			clauses.push("id = ?");
+			params.push(options.id);
+		}
+		if (options.documentKind) {
+			clauses.push("document_kind = ?");
+			params.push(options.documentKind);
+		}
+		if (options.sourceTable) {
+			clauses.push("source_table = ?");
+			params.push(options.sourceTable);
+		}
+		if (options.sourceId) {
+			clauses.push("source_id = ?");
+			params.push(options.sourceId);
+		}
+		const limitClause = options.limit ? "LIMIT ?" : "";
+		if (options.limit) {
+			params.push(options.limit);
+		}
+
+		const query = `
+			SELECT id, repo_id, source_table, source_id, document_kind, title,
+			       body_text, metadata_json, created_at, updated_at
+			FROM searchable_documents
+			WHERE ${clauses.join(" AND ")}
+			ORDER BY updated_at DESC, created_at DESC
+			${limitClause}
+		`;
+
+		return database
+			.prepare(query)
+			.all(...params) as unknown as StoredSearchableDocumentRow[];
+	}
+
+	function searchSearchableDocumentRows(
+		database: DatabaseSync,
+		queryText: string,
+		options?: {
+			documentKind?: string;
+			limit?: number;
+		},
+	): StoredSearchableDocumentRow[] {
+		const clauses = [
+			"searchable_documents.repo_id = ?",
+			"searchable_documents_fts MATCH ?",
+		];
+		const params: (string | number)[] = [projectRoot, queryText];
+
+		if (options?.documentKind) {
+			clauses.push("searchable_documents.document_kind = ?");
+			params.push(options.documentKind);
+		}
+		params.push(options?.limit ?? 20);
+
+		const query = `
+			SELECT searchable_documents.id, searchable_documents.repo_id,
+			       searchable_documents.source_table, searchable_documents.source_id,
+			       searchable_documents.document_kind, searchable_documents.title,
+			       searchable_documents.body_text, searchable_documents.metadata_json,
+			       searchable_documents.created_at, searchable_documents.updated_at
+			FROM searchable_documents_fts
+			JOIN searchable_documents
+			  ON searchable_documents.rowid = searchable_documents_fts.rowid
+			WHERE ${clauses.join(" AND ")}
+			ORDER BY bm25(searchable_documents_fts), searchable_documents.updated_at DESC
+			LIMIT ?
+		`;
+
+		return database
+			.prepare(query)
+			.all(...params) as unknown as StoredSearchableDocumentRow[];
+	}
+
+	function defaultRepoFactScope(options?: {
+		scopeType?: MemoryScopeType;
+		scopeKey?: string;
+	}): { scopeType: MemoryScopeType; scopeKey?: string } {
+		return {
+			scopeType: options?.scopeType ?? "repo",
+			scopeKey: options?.scopeKey,
+		};
+	}
+
+	function assertScopeKeyForExactLookup(
+		scopeType: MemoryScopeType,
+		scopeKey?: string,
+	): void {
+		const hasScopeKey = scopeKey !== undefined;
+		const hasNonEmptyScopeKey = scopeKey !== undefined && scopeKey.length > 0;
+
+		if (
+			scopeType !== "repo" &&
+			scopeType !== "global" &&
+			!hasNonEmptyScopeKey
+		) {
+			throw new Error(
+				`Exact scoped repo fact lookup for '${scopeType}' requires a scope key.`,
+			);
+		}
+		if ((scopeType === "repo" || scopeType === "global") && hasScopeKey) {
+			throw new Error(
+				`Scope '${scopeType}' does not accept a scope key for exact repo fact operations.`,
+			);
+		}
+	}
+
+	function assertRepoFactListFilter(options?: {
+		scopeType?: MemoryScopeType;
+		scopeKey?: string;
+	}): void {
+		const hasScopeKey = options?.scopeKey !== undefined;
+
+		if (hasScopeKey && !options?.scopeType) {
+			throw new Error(
+				"Listing repo facts by scope key requires a matching scope type.",
+			);
+		}
+		if (
+			hasScopeKey &&
+			(options?.scopeType === "repo" || options?.scopeType === "global")
+		) {
+			throw new Error(
+				`Scope '${options.scopeType}' does not accept a scope key for repo fact filters.`,
+			);
+		}
 	}
 
 	function readEvidence(
@@ -1157,6 +1723,323 @@ export function createStorageStore(
 					database,
 				);
 				return toRun({ ...runRow, status: "failed" });
+			} finally {
+				database.close();
+			}
+		},
+
+		upsertRepoFact(input: UpsertRepoFactInput): RepoFact {
+			ensureInitialized();
+			const database = openStoreDatabase();
+			const now = new Date().toISOString();
+			const scope = defaultRepoFactScope({
+				scopeType: input.scopeType,
+				scopeKey: input.scopeKey,
+			});
+			assertScopeKeyForExactLookup(scope.scopeType, scope.scopeKey);
+
+			try {
+				return runInTransaction(database, () => {
+					database
+						.prepare(
+							`UPDATE repo_facts SET status = 'superseded', updated_at = ? WHERE repo_id = ? AND fact_key = ? AND scope_type = ? AND scope_key IS ? AND status = 'active'`,
+						)
+						.run(
+							now,
+							projectRoot,
+							input.factKey,
+							scope.scopeType,
+							scope.scopeKey ?? null,
+						);
+
+					const id = randomUUID();
+					database
+						.prepare(
+							`INSERT INTO repo_facts (id, repo_id, fact_key, fact_value_json, value_type, scope_type, scope_key, confidence, source_run_id, source_task_id, created_by, branch, commit_sha, status, valid_from_commit, valid_to_commit, created_at, updated_at)
+							 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)`,
+						)
+						.run(
+							id,
+							projectRoot,
+							input.factKey,
+							JSON.stringify(input.factValue),
+							input.valueType,
+							scope.scopeType,
+							scope.scopeKey ?? null,
+							input.confidence ?? 1,
+							input.sourceRunId ?? null,
+							input.sourceTaskId ?? null,
+							input.createdBy,
+							input.branch ?? null,
+							input.commitSha ?? null,
+							input.validFromCommit ?? null,
+							input.validToCommit ?? null,
+							now,
+							now,
+						);
+
+					return toRepoFact(
+						readRepoFactRows(database, {
+							factKey: input.factKey,
+							scopeType: scope.scopeType,
+							scopeKey: scope.scopeKey,
+						})[0] as StoredRepoFactRow,
+					);
+				});
+			} finally {
+				database.close();
+			}
+		},
+
+		getRepoFact(
+			factKey: string,
+			options?: {
+				scopeType?: MemoryScopeType;
+				scopeKey?: string;
+			},
+		): RepoFact | null {
+			ensureInitialized();
+			const database = openStoreDatabase();
+			const scope = defaultRepoFactScope(options);
+			assertScopeKeyForExactLookup(scope.scopeType, scope.scopeKey);
+
+			try {
+				const row = readRepoFactRows(database, {
+					factKey,
+					scopeType: scope.scopeType,
+					scopeKey: scope.scopeKey,
+				})[0];
+				return row ? toRepoFact(row) : null;
+			} finally {
+				database.close();
+			}
+		},
+
+		listRepoFacts(options?: {
+			scopeType?: MemoryScopeType;
+			scopeKey?: string;
+		}): readonly RepoFact[] {
+			ensureInitialized();
+			const database = openStoreDatabase();
+			const scope = defaultRepoFactScope(options);
+			assertRepoFactListFilter(options);
+
+			try {
+				return readRepoFactRows(database, {
+					scopeType: options?.scopeType ? scope.scopeType : undefined,
+					scopeKey: options?.scopeKey,
+				}).map(toRepoFact);
+			} finally {
+				database.close();
+			}
+		},
+
+		supersedeRepoFact(
+			factKey: string,
+			options?: {
+				scopeType?: MemoryScopeType;
+				scopeKey?: string;
+			},
+		): number {
+			ensureInitialized();
+			const database = openStoreDatabase();
+			const now = new Date().toISOString();
+			const scope = defaultRepoFactScope(options);
+			assertScopeKeyForExactLookup(scope.scopeType, scope.scopeKey);
+
+			try {
+				const result = database
+					.prepare(
+						`UPDATE repo_facts SET status = 'superseded', updated_at = ? WHERE repo_id = ? AND fact_key = ? AND scope_type = ? AND scope_key IS ? AND status = 'active'`,
+					)
+					.run(
+						now,
+						projectRoot,
+						factKey,
+						scope.scopeType,
+						scope.scopeKey ?? null,
+					) as {
+					changes: number;
+				};
+
+				return result.changes;
+			} finally {
+				database.close();
+			}
+		},
+
+		createProcedure(input: CreateProcedureInput): ProcedureMemory {
+			ensureInitialized();
+			const database = openStoreDatabase();
+			const now = new Date().toISOString();
+
+			try {
+				const id = randomUUID();
+				database
+					.prepare(
+						`INSERT INTO procedures (id, repo_id, name, task_type, body_markdown, metadata_json, confidence, source_run_id, source_task_id, created_by, branch, commit_sha, status, created_at, updated_at)
+						 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)`,
+					)
+					.run(
+						id,
+						projectRoot,
+						input.name,
+						input.taskType ?? null,
+						input.bodyMarkdown,
+						input.metadata ? JSON.stringify(input.metadata) : null,
+						input.confidence ?? 1,
+						input.sourceRunId ?? null,
+						input.sourceTaskId ?? null,
+						input.createdBy,
+						input.branch ?? null,
+						input.commitSha ?? null,
+						now,
+						now,
+					);
+
+				return toProcedureMemory(
+					readProcedureRows(database, {
+						includeInactive: true,
+					}).find((row) => row.id === id) as StoredProcedureRow,
+				);
+			} finally {
+				database.close();
+			}
+		},
+
+		listProcedures(options?: {
+			taskType?: string;
+		}): readonly ProcedureMemory[] {
+			ensureInitialized();
+			const database = openStoreDatabase();
+
+			try {
+				return readProcedureRows(database, {
+					taskType: options?.taskType,
+				}).map(toProcedureMemory);
+			} finally {
+				database.close();
+			}
+		},
+
+		findProceduresByTaskType(taskType: string): readonly ProcedureMemory[] {
+			ensureInitialized();
+			const database = openStoreDatabase();
+
+			try {
+				return readProcedureRows(database, { taskType }).map(toProcedureMemory);
+			} finally {
+				database.close();
+			}
+		},
+
+		supersedeProcedure(id: string): number {
+			ensureInitialized();
+			const database = openStoreDatabase();
+			const now = new Date().toISOString();
+
+			try {
+				const result = database
+					.prepare(
+						`UPDATE procedures SET status = 'superseded', updated_at = ? WHERE id = ? AND repo_id = ? AND status = 'active'`,
+					)
+					.run(now, id, projectRoot) as { changes: number };
+				return result.changes;
+			} finally {
+				database.close();
+			}
+		},
+
+		createSearchableDocument(
+			input: CreateSearchableDocumentInput,
+		): SearchableDocument {
+			ensureInitialized();
+			const database = openStoreDatabase();
+			const now = new Date().toISOString();
+
+			try {
+				const id = randomUUID();
+				database
+					.prepare(
+						`INSERT INTO searchable_documents (id, repo_id, source_table, source_id, document_kind, title, body_text, metadata_json, created_at, updated_at)
+						 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+					)
+					.run(
+						id,
+						projectRoot,
+						input.sourceTable,
+						input.sourceId,
+						input.documentKind,
+						input.title ?? null,
+						input.bodyText,
+						input.metadata ? JSON.stringify(input.metadata) : null,
+						now,
+						now,
+					);
+
+				const rowId = database
+					.prepare(`SELECT rowid FROM searchable_documents WHERE id = ?`)
+					.get(id) as { rowid: number };
+				database
+					.prepare(
+						`INSERT INTO searchable_documents_fts (rowid, title, body_text) VALUES (?, ?, ?)`,
+					)
+					.run(rowId.rowid, input.title ?? null, input.bodyText);
+
+				return toSearchableDocument(
+					readSearchableDocumentRows(database, {
+						id,
+					})[0] as StoredSearchableDocumentRow,
+				);
+			} finally {
+				database.close();
+			}
+		},
+
+		getSearchableDocument(id: string): SearchableDocument | undefined {
+			ensureInitialized();
+			const database = openStoreDatabase();
+
+			try {
+				const row = readSearchableDocumentRows(database, { id })[0];
+				return row ? toSearchableDocument(row) : undefined;
+			} finally {
+				database.close();
+			}
+		},
+
+		listSearchableDocuments(options?: {
+			documentKind?: string;
+			sourceTable?: string;
+			sourceId?: string;
+			limit?: number;
+		}): readonly SearchableDocument[] {
+			ensureInitialized();
+			const database = openStoreDatabase();
+
+			try {
+				return readSearchableDocumentRows(database, options ?? {}).map(
+					toSearchableDocument,
+				);
+			} finally {
+				database.close();
+			}
+		},
+
+		searchSearchableDocuments(
+			query: string,
+			options?: {
+				documentKind?: string;
+				limit?: number;
+			},
+		): readonly SearchableDocument[] {
+			ensureInitialized();
+			const database = openStoreDatabase();
+
+			try {
+				return searchSearchableDocumentRows(database, query, options).map(
+					toSearchableDocument,
+				);
 			} finally {
 				database.close();
 			}

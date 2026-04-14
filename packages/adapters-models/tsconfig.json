@@ -6,5 +6,6 @@
 		"composite": true
 	},
 	"include": ["src"],
-	"exclude": ["dist", "test"]
+	"exclude": ["dist", "test"],
+	"references": [{ "path": "../kernel" }, { "path": "../runtime" }]
 }

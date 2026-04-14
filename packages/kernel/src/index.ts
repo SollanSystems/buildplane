@@ -29,6 +29,20 @@ export type {
 } from "./graph.js";
 export { createGraphScheduler } from "./graph.js";
 export type {
+	CreateProcedureInput,
+	CreateSearchableDocumentInput,
+	MemoryCreatedBy,
+	MemoryProvenance,
+	MemoryScopeType,
+	MemoryStatus,
+	MemoryType,
+	MemoryValueType,
+	ProcedureMemory,
+	RepoFact,
+	SearchableDocument,
+	UpsertRepoFactInput,
+} from "./memory-types.js";
+export type {
 	BuildplaneOrchestrator,
 	CreateBuildplaneOrchestratorOptions,
 } from "./orchestrator.js";

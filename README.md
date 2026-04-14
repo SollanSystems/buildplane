@@ -114,7 +114,7 @@ Example packet:
     "kind": "command",
     "scope": "task",
     "inputRefs": [],
-    "expectedOutputs": ["tmp/out.txt"],
+    "expectedOutputs": [".buildplane/artifacts/published-bootstrap/out.txt"],
     "verificationContract": "exit-0-and-required-outputs",
     "policyProfile": "default"
   },
@@ -122,11 +122,11 @@ Example packet:
     "command": "node",
     "args": [
       "-e",
-      "const fs = require('node:fs'); fs.mkdirSync('tmp', { recursive: true }); fs.writeFileSync('tmp/out.txt', 'ok'); console.log('done');"
+      "const fs = require('node:fs'); fs.mkdirSync('.buildplane/artifacts/published-bootstrap', { recursive: true }); fs.writeFileSync('.buildplane/artifacts/published-bootstrap/out.txt', 'ok'); console.log('done');"
     ]
   },
   "verification": {
-    "requiredOutputs": ["tmp/out.txt"]
+    "requiredOutputs": [".buildplane/artifacts/published-bootstrap/out.txt"]
   }
 }
 ```

@@ -9,17 +9,21 @@ describe("published CLI node guard", () => {
 		expect(() => assertSupportedNodeVersion("24.13.1")).not.toThrow();
 	});
 
-	it("allows other 24.x versions", () => {
-		expect(() => assertSupportedNodeVersion("24.13.0")).not.toThrow();
+	it("rejects older patch versions with a clear error", () => {
+		expect(() => assertSupportedNodeVersion("24.13.0")).toThrow(
+			/Node 24\.13\.1.*24\.13\.0/i,
+		);
 	});
 
-	it("allows 25.x (compatible major)", () => {
-		expect(() => assertSupportedNodeVersion("25.6.1")).not.toThrow();
+	it("rejects newer major versions until explicitly blessed", () => {
+		expect(() => assertSupportedNodeVersion("25.6.1")).toThrow(
+			/Node 24\.13\.1.*25\.6\.1/i,
+		);
 	});
 
 	it("rejects too-old major versions with a clear error", () => {
 		expect(() => assertSupportedNodeVersion("20.11.0")).toThrow(
-			/Node 24\.13\.1.*major 24.*20\.11/i,
+			/Node 24\.13\.1.*20\.11/i,
 		);
 	});
 

@@ -42,6 +42,31 @@ export interface RunCliOptions {
 
 const BUILDPLANE_BANNER = "Buildplane by SollanSystems";
 
+async function cliImport(specifier: string): Promise<unknown> {
+	switch (specifier) {
+		case "@buildplane/kernel":
+			return import("@buildplane/kernel");
+		case "@buildplane/runtime":
+			return import("@buildplane/runtime");
+		case "@buildplane/policy":
+			return import("@buildplane/policy");
+		case "@buildplane/storage":
+			return import("@buildplane/storage");
+		case "@buildplane/adapters-git":
+			return import("@buildplane/adapters-git");
+		case "@buildplane/adapters-models":
+			return import("@buildplane/adapters-models");
+		case "@buildplane/adapters-codex":
+			return import("@buildplane/adapters-codex");
+		case "@buildplane/adapters-honcho":
+			return import("@buildplane/adapters-honcho");
+		case "@buildplane/ui-tui":
+			return import("@buildplane/ui-tui");
+		default:
+			throw new Error(`Unsupported workspace import '${specifier}'`);
+	}
+}
+
 function formatTopLevelHelp(): string[] {
 	return [
 		BUILDPLANE_BANNER,
@@ -189,7 +214,7 @@ interface CliOrchestratorBundle {
 async function loadCliOrchestrator(
 	projectRoot: string,
 ): Promise<CliOrchestratorBundle> {
-	const kernel = (await import("@buildplane/kernel")) as unknown as {
+	const kernel = (await cliImport("@buildplane/kernel")) as unknown as {
 		createBuildplaneOrchestrator: (options: {
 			projectRoot: string;
 			storage: unknown;
@@ -212,13 +237,13 @@ async function loadCliOrchestrator(
 		};
 		parseUnitPacket: (input: string) => unknown;
 	};
-	const runtime = (await import("@buildplane/runtime")) as unknown as {
+	const runtime = (await cliImport("@buildplane/runtime")) as unknown as {
 		executePacket: (packet: unknown, root: string) => unknown;
 	};
-	const policy = (await import("@buildplane/policy")) as unknown as {
+	const policy = (await cliImport("@buildplane/policy")) as unknown as {
 		evaluateRun: (packet: unknown, receipt: unknown) => unknown;
 	};
-	const storage = (await import("@buildplane/storage")) as unknown as {
+	const storage = (await cliImport("@buildplane/storage")) as unknown as {
 		createBuildplaneStorage: (root: string) => unknown;
 		createEventStore: (root: string) => {
 			persistEvent: (runId: string, event: unknown) => void;
@@ -251,9 +276,19 @@ async function loadCliOrchestrator(
 
 	if (process.env.HONCHO_API_KEY) {
 		try {
-			const { createHonchoAdapter, createHonchoClient } = await import(
-				"@buildplane/adapters-honcho"
-			);
+			const honchoModule = (await cliImport(
+				"@buildplane/adapters-honcho",
+			)) as unknown as {
+				createHonchoAdapter: (options: {
+					client: unknown;
+					userId: string;
+				}) => HonchoPortLike;
+				createHonchoClient: (options: {
+					workspaceId?: string;
+					apiKey: string;
+				}) => Promise<unknown>;
+			};
+			const { createHonchoAdapter, createHonchoClient } = honchoModule;
 
 			const honchoClient = await createHonchoClient({
 				workspaceId: process.env.HONCHO_WORKSPACE_ID,
@@ -310,48 +345,146 @@ async function loadCliOrchestrator(
 	}
 
 	// Runtime router: selects executor based on packet type and routing hints
-	const adaptersModels = (await import(
-		"@buildplane/adapters-models"
+	const adaptersGit = (await cliImport(
+		"@buildplane/adapters-git",
 	)) as unknown as {
-		createModelExecutor: () => {
-			executePacket: (packet: unknown, root: string) => unknown;
-			executePacketAsync: (
-				packet: unknown,
-				root: string,
-				eventBus: unknown,
-			) => Promise<unknown>;
-		};
-		createClaudeCodeExecutor: () => {
-			executePacket: (packet: unknown, root: string) => unknown;
-			executePacketAsync: (
-				packet: unknown,
-				root: string,
-				eventBus: unknown,
-			) => Promise<unknown>;
-		};
-	};
-
-	const adaptersGit = (await import("@buildplane/adapters-git")) as unknown as {
 		createGitWorktreeAdapter: () => unknown;
 	};
 
-	const adaptersCodex = (await import(
-		"@buildplane/adapters-codex"
-	)) as unknown as {
-		createCodexExecutor: () => {
-			executePacket: (packet: unknown, root: string) => unknown;
-			executePacketAsync: (
-				packet: unknown,
-				root: string,
-				eventBus: unknown,
-			) => Promise<unknown>;
-		};
+	const commandExecutor = { executePacket: runtime.executePacket };
+	let adaptersModelsPromise:
+		| Promise<{
+				createModelExecutor: () => {
+					executePacket: (packet: unknown, root: string) => unknown;
+					executePacketAsync: (
+						packet: unknown,
+						root: string,
+						eventBus: unknown,
+					) => Promise<unknown>;
+				};
+				createClaudeCodeExecutor: () => {
+					executePacket: (packet: unknown, root: string) => unknown;
+					executePacketAsync: (
+						packet: unknown,
+						root: string,
+						eventBus: unknown,
+					) => Promise<unknown>;
+				};
+		  }>
+		| undefined;
+	let adaptersCodexPromise:
+		| Promise<{
+				createCodexExecutor: () => {
+					executePacket: (packet: unknown, root: string) => unknown;
+					executePacketAsync: (
+						packet: unknown,
+						root: string,
+						eventBus: unknown,
+					) => Promise<unknown>;
+				};
+		  }>
+		| undefined;
+	let sdkExecutorPromise:
+		| Promise<{
+				executePacket: (packet: unknown, root: string) => unknown;
+				executePacketAsync: (
+					packet: unknown,
+					root: string,
+					eventBus: unknown,
+				) => Promise<unknown>;
+		  }>
+		| undefined;
+	let claudeExecutorPromise:
+		| Promise<{
+				executePacket: (packet: unknown, root: string) => unknown;
+				executePacketAsync: (
+					packet: unknown,
+					root: string,
+					eventBus: unknown,
+				) => Promise<unknown>;
+		  }>
+		| undefined;
+	let codexExecutorPromise:
+		| Promise<{
+				executePacket: (packet: unknown, root: string) => unknown;
+				executePacketAsync: (
+					packet: unknown,
+					root: string,
+					eventBus: unknown,
+				) => Promise<unknown>;
+		  }>
+		| undefined;
+
+	const loadAdaptersModels = () => {
+		if (!adaptersModelsPromise) {
+			adaptersModelsPromise = cliImport(
+				"@buildplane/adapters-models",
+			) as Promise<{
+				createModelExecutor: () => {
+					executePacket: (packet: unknown, root: string) => unknown;
+					executePacketAsync: (
+						packet: unknown,
+						root: string,
+						eventBus: unknown,
+					) => Promise<unknown>;
+				};
+				createClaudeCodeExecutor: () => {
+					executePacket: (packet: unknown, root: string) => unknown;
+					executePacketAsync: (
+						packet: unknown,
+						root: string,
+						eventBus: unknown,
+					) => Promise<unknown>;
+				};
+			}>;
+		}
+		return adaptersModelsPromise;
 	};
 
-	const commandExecutor = { executePacket: runtime.executePacket };
-	const sdkExecutor = adaptersModels.createModelExecutor();
-	const claudeExecutor = adaptersModels.createClaudeCodeExecutor();
-	const codexExecutor = adaptersCodex.createCodexExecutor();
+	const loadAdaptersCodex = () => {
+		if (!adaptersCodexPromise) {
+			adaptersCodexPromise = cliImport(
+				"@buildplane/adapters-codex",
+			) as Promise<{
+				createCodexExecutor: () => {
+					executePacket: (packet: unknown, root: string) => unknown;
+					executePacketAsync: (
+						packet: unknown,
+						root: string,
+						eventBus: unknown,
+					) => Promise<unknown>;
+				};
+			}>;
+		}
+		return adaptersCodexPromise;
+	};
+
+	const getSdkExecutor = async () => {
+		if (!sdkExecutorPromise) {
+			sdkExecutorPromise = loadAdaptersModels().then((mod) =>
+				mod.createModelExecutor(),
+			);
+		}
+		return sdkExecutorPromise;
+	};
+
+	const getClaudeExecutor = async () => {
+		if (!claudeExecutorPromise) {
+			claudeExecutorPromise = loadAdaptersModels().then((mod) =>
+				mod.createClaudeCodeExecutor(),
+			);
+		}
+		return claudeExecutorPromise;
+	};
+
+	const getCodexExecutor = async () => {
+		if (!codexExecutorPromise) {
+			codexExecutorPromise = loadAdaptersCodex().then((mod) =>
+				mod.createCodexExecutor(),
+			);
+		}
+		return codexExecutorPromise;
+	};
 
 	const runtimeRouter = {
 		executePacket(packet: unknown, root: string) {
@@ -366,12 +499,16 @@ async function loadCliOrchestrator(
 			};
 			if (p.execution) return commandExecutor.executePacket(packet, root);
 			if (p.routingHints?.preferredWorker === "claude-code") {
-				return claudeExecutor.executePacketAsync(packet, root, bus);
+				return (await getClaudeExecutor()).executePacketAsync(
+					packet,
+					root,
+					bus,
+				);
 			}
 			if (p.routingHints?.preferredWorker === "codex") {
-				return codexExecutor.executePacketAsync(packet, root, bus);
+				return (await getCodexExecutor()).executePacketAsync(packet, root, bus);
 			}
-			return sdkExecutor.executePacketAsync(packet, root, bus);
+			return (await getSdkExecutor()).executePacketAsync(packet, root, bus);
 		},
 	};
 
@@ -396,7 +533,7 @@ async function loadCliOrchestrator(
 async function loadEventStore(projectRoot: string): Promise<{
 	getEventsByRunId: (runId: string) => unknown[];
 }> {
-	const storage = (await import("@buildplane/storage")) as unknown as {
+	const storage = (await cliImport("@buildplane/storage")) as unknown as {
 		createEventStore: (root: string) => {
 			getEventsByRunId: (runId: string) => unknown[];
 		};
@@ -405,7 +542,7 @@ async function loadEventStore(projectRoot: string): Promise<{
 }
 
 async function loadRunHistory(projectRoot: string): Promise<unknown[]> {
-	const storage = (await import("@buildplane/storage")) as unknown as {
+	const storage = (await cliImport("@buildplane/storage")) as unknown as {
 		createBuildplaneStorage: (root: string) => {
 			getRunHistory: () => unknown[];
 		};
@@ -436,7 +573,7 @@ async function loadReadOnlyMemoryPort(
 }
 
 async function loadPacket(packetPath: string): Promise<unknown> {
-	const kernel = (await import("@buildplane/kernel")) as unknown as {
+	const kernel = (await cliImport("@buildplane/kernel")) as unknown as {
 		parseUnitPacket: (input: string) => unknown;
 	};
 
@@ -750,7 +887,7 @@ export async function runCli(
 						enrichedPacket as Parameters<typeof wrapAsStrategy>[0],
 					);
 
-					const kernel = (await import("@buildplane/kernel")) as unknown as {
+					const kernel = (await cliImport("@buildplane/kernel")) as unknown as {
 						createEventBus: () => {
 							subscribe: (listener: (event: unknown) => void) => () => void;
 							emit: (event: unknown) => void;
@@ -760,7 +897,7 @@ export async function runCli(
 
 					const useTui = rest.includes("--tui");
 					if (useTui) {
-						const tui = (await import("@buildplane/ui-tui")) as unknown as {
+						const tui = (await cliImport("@buildplane/ui-tui")) as unknown as {
 							renderTui: (eventBus: unknown) => {
 								waitUntilExit(): Promise<void>;
 								unmount(): void;
@@ -813,20 +950,22 @@ export async function runCli(
 
 				if (useTui) {
 					// Lazy-load TUI — only imported when --tui is requested
-					const kernel = (await import("@buildplane/kernel")) as unknown as {
+					const kernel = (await cliImport("@buildplane/kernel")) as unknown as {
 						createEventBus: () => {
 							subscribe: (listener: (event: unknown) => void) => () => void;
 							emit: (event: unknown) => void;
 						};
 					};
-					const tui = (await import("@buildplane/ui-tui")) as unknown as {
+					const tui = (await cliImport("@buildplane/ui-tui")) as unknown as {
 						renderTui: (eventBus: unknown) => {
 							waitUntilExit(): Promise<void>;
 							unmount(): void;
 							clear(): void;
 						};
 					};
-					const storage = (await import("@buildplane/storage")) as unknown as {
+					const storage = (await cliImport(
+						"@buildplane/storage",
+					)) as unknown as {
 						createEventStore: (root: string) => {
 							persistEvent: (runId: string, event: unknown) => void;
 						};
@@ -1012,7 +1151,7 @@ export async function runCli(
 				const json = rest.includes("--json");
 
 				// Load packet snapshot from storage
-				const storage = (await import("@buildplane/storage")) as unknown as {
+				const storage = (await cliImport("@buildplane/storage")) as unknown as {
 					createBuildplaneStorage: (root: string) => {
 						getPacketSnapshot: (id: string) => unknown | null;
 					};
@@ -1033,7 +1172,7 @@ export async function runCli(
 				);
 
 				// Create event bus with storage persistence
-				const kernel = (await import("@buildplane/kernel")) as unknown as {
+				const kernel = (await cliImport("@buildplane/kernel")) as unknown as {
 					createEventBus: () => {
 						subscribe: (listener: (event: unknown) => void) => () => void;
 						emit: (event: unknown) => void;
@@ -1104,7 +1243,7 @@ export async function runCli(
 					userId,
 				);
 
-				const kernel = (await import("@buildplane/kernel")) as unknown as {
+				const kernel = (await cliImport("@buildplane/kernel")) as unknown as {
 					createEventBus: () => {
 						subscribe: (listener: (event: unknown) => void) => () => void;
 						emit: (event: unknown) => void;
@@ -1130,7 +1269,7 @@ export async function runCli(
 				}
 				const strategyPath = resolve(cwd, rest[strategyIndex + 1]);
 
-				const kernel = (await import("@buildplane/kernel")) as unknown as {
+				const kernel = (await cliImport("@buildplane/kernel")) as unknown as {
 					parseStrategyPacket: (raw: unknown) => unknown;
 					createEventBus: () => {
 						subscribe: (listener: (event: unknown) => void) => () => void;
