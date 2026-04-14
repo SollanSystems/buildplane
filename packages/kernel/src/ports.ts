@@ -108,6 +108,13 @@ export interface BuildplaneStoragePort {
 		},
 	): number;
 	createProcedure(input: CreateProcedureInput): ProcedureMemory;
+	upsertProcedure(
+		input: CreateProcedureInput,
+		options?: {
+			matchMetadata?: Record<string, string>;
+			skipIfConflictingActiveName?: boolean;
+		},
+	): ProcedureMemory | null;
 	listProcedures(options?: { taskType?: string }): readonly ProcedureMemory[];
 	findProceduresByTaskType(taskType: string): readonly ProcedureMemory[];
 	retrieveProcedures(

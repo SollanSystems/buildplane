@@ -897,6 +897,51 @@ export function createStorageStore(
 		};
 	}
 
+	function procedureMetadataMatches(
+		row: StoredProcedureRow,
+		matchMetadata?: Record<string, string>,
+	): boolean {
+		if (!matchMetadata || Object.keys(matchMetadata).length === 0) {
+			return true;
+		}
+		const metadata = row.metadata_json
+			? (JSON.parse(row.metadata_json) as Record<string, unknown>)
+			: {};
+		return Object.entries(matchMetadata).every(
+			([key, value]) => metadata[key] === value,
+		);
+	}
+
+	function insertProcedureRow(
+		database: DatabaseSync,
+		input: CreateProcedureInput,
+		now: string,
+	): string {
+		const id = randomUUID();
+		database
+			.prepare(
+				`INSERT INTO procedures (id, repo_id, name, task_type, body_markdown, metadata_json, confidence, source_run_id, source_task_id, created_by, branch, commit_sha, status, created_at, updated_at)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)`,
+			)
+			.run(
+				id,
+				projectRoot,
+				input.name,
+				input.taskType ?? null,
+				input.bodyMarkdown,
+				input.metadata ? JSON.stringify(input.metadata) : null,
+				input.confidence ?? 1,
+				input.sourceRunId ?? null,
+				input.sourceTaskId ?? null,
+				input.createdBy,
+				input.branch ?? null,
+				input.commitSha ?? null,
+				now,
+				now,
+			);
+		return id;
+	}
+
 	function toSearchableDocument(
 		row: StoredSearchableDocumentRow,
 	): SearchableDocument {
@@ -998,6 +1043,8 @@ export function createStorageStore(
 	function readProcedureRows(
 		database: DatabaseSync,
 		options: {
+			id?: string;
+			name?: string;
 			taskType?: string;
 			includeInactive?: boolean;
 		},
@@ -1005,6 +1052,14 @@ export function createStorageStore(
 		const clauses = ["repo_id = ?"];
 		const params: (string | null)[] = [projectRoot];
 
+		if (options.id) {
+			clauses.push("id = ?");
+			params.push(options.id);
+		}
+		if (options.name) {
+			clauses.push("name = ?");
+			params.push(options.name);
+		}
 		if (options.taskType) {
 			clauses.push("task_type = ?");
 			params.push(options.taskType);
@@ -2239,34 +2294,90 @@ export function createStorageStore(
 			const now = new Date().toISOString();
 
 			try {
-				const id = randomUUID();
-				database
-					.prepare(
-						`INSERT INTO procedures (id, repo_id, name, task_type, body_markdown, metadata_json, confidence, source_run_id, source_task_id, created_by, branch, commit_sha, status, created_at, updated_at)
-						 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)`,
-					)
-					.run(
-						id,
-						projectRoot,
-						input.name,
-						input.taskType ?? null,
-						input.bodyMarkdown,
-						input.metadata ? JSON.stringify(input.metadata) : null,
-						input.confidence ?? 1,
-						input.sourceRunId ?? null,
-						input.sourceTaskId ?? null,
-						input.createdBy,
-						input.branch ?? null,
-						input.commitSha ?? null,
-						now,
-						now,
-					);
-
+				const id = insertProcedureRow(database, input, now);
 				return toProcedureMemory(
 					readProcedureRows(database, {
+						id,
 						includeInactive: true,
-					}).find((row) => row.id === id) as StoredProcedureRow,
+					})[0] as StoredProcedureRow,
 				);
+			} finally {
+				database.close();
+			}
+		},
+
+		upsertProcedure(
+			input: CreateProcedureInput,
+			options?: {
+				matchMetadata?: Record<string, string>;
+				skipIfConflictingActiveName?: boolean;
+			},
+		): ProcedureMemory | null {
+			ensureInitialized();
+			const database = openStoreDatabase();
+			const now = new Date().toISOString();
+
+			try {
+				database.exec("BEGIN IMMEDIATE");
+				try {
+					const sameNamedRows = readProcedureRows(database, {
+						name: input.name,
+						taskType: input.taskType,
+					});
+					const matchingRows = sameNamedRows.filter((row) =>
+						procedureMetadataMatches(row, options?.matchMetadata),
+					);
+
+					if (
+						options?.skipIfConflictingActiveName &&
+						sameNamedRows.length > 0 &&
+						matchingRows.length !== sameNamedRows.length
+					) {
+						database.exec("COMMIT");
+						return null;
+					}
+
+					const identicalRows = matchingRows.filter(
+						(row) => row.body_markdown === input.bodyMarkdown,
+					);
+					if (identicalRows.length > 0) {
+						const canonicalRow = identicalRows[0] as StoredProcedureRow;
+						for (const row of matchingRows) {
+							if (row.id !== canonicalRow.id) {
+								database
+									.prepare(
+										`UPDATE procedures SET status = 'superseded', updated_at = ? WHERE id = ? AND repo_id = ? AND status = 'active'`,
+									)
+									.run(now, row.id, projectRoot);
+							}
+						}
+						database.exec("COMMIT");
+						return toProcedureMemory(canonicalRow);
+					}
+
+					for (const row of matchingRows) {
+						database
+							.prepare(
+								`UPDATE procedures SET status = 'superseded', updated_at = ? WHERE id = ? AND repo_id = ? AND status = 'active'`,
+							)
+							.run(now, row.id, projectRoot);
+					}
+
+					const id = insertProcedureRow(database, input, now);
+					const insertedRow = readProcedureRows(database, {
+						id,
+						includeInactive: true,
+					})[0] as StoredProcedureRow;
+					database.exec("COMMIT");
+					return toProcedureMemory(insertedRow);
+				} catch (error) {
+					try {
+						database.exec("ROLLBACK");
+					} catch {
+						// Ignore rollback cleanup failures and surface the original error.
+					}
+					throw error;
+				}
 			} finally {
 				database.close();
 			}
