@@ -19,6 +19,10 @@ import {
 	enrichStrategyWithMemories,
 } from "./packet-enrichment.js";
 
+type StructuredMemoryPortLike = NonNullable<
+	Parameters<typeof enrichPacketWithMemories>[4]
+>;
+
 export interface RunCliDependencies {
 	createOrchestrator?: () => BuildplaneCliOrchestrator;
 	parsePacket?: (packetPath: string) => unknown;
@@ -65,6 +69,19 @@ async function cliImport(specifier: string): Promise<unknown> {
 		default:
 			throw new Error(`Unsupported workspace import '${specifier}'`);
 	}
+}
+
+function resolveCurrentBranch(projectRoot: string): string | undefined {
+	const result = spawnSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], {
+		cwd: projectRoot,
+		encoding: "utf8",
+		env: process.env,
+	});
+	if (result.status !== 0) {
+		return undefined;
+	}
+	const branch = result.stdout.trim();
+	return branch && branch !== "HEAD" ? branch : undefined;
 }
 
 function formatTopLevelHelp(): string[] {
@@ -207,8 +224,10 @@ interface MemoryPortLike {
 interface CliOrchestratorBundle {
 	orchestrator: BuildplaneCliOrchestrator;
 	memoryPort?: MemoryPortLike;
+	structuredMemoryPort?: StructuredMemoryPortLike;
 	honchoAdapter?: HonchoPortLike;
 	userId?: string;
+	currentBranch?: string;
 }
 
 async function loadCliOrchestrator(
@@ -323,12 +342,17 @@ async function loadCliOrchestrator(
 
 	let memoryPortRef: MemoryPortLike | undefined;
 	let orchestratorMemoryPortRef: MemoryPortLike | undefined;
+	let structuredMemoryPortRef: StructuredMemoryPortLike | undefined;
+	let currentBranchRef: string | undefined;
 	try {
-		const { resolveProjectLayout, createLearningStore } = (await import(
-			"@buildplane/storage"
-		)) as unknown as {
+		const {
+			resolveProjectLayout,
+			createLearningStore,
+			createBuildplaneStorage,
+		} = (await import("@buildplane/storage")) as unknown as {
 			resolveProjectLayout: (root: string) => { stateDbPath: string };
 			createLearningStore: (db: unknown) => MemoryPortLike;
+			createBuildplaneStorage: (root: string) => StructuredMemoryPortLike;
 		};
 		const { DatabaseSync } = await import("node:sqlite");
 		const layout = resolveProjectLayout(projectRoot);
@@ -336,6 +360,8 @@ async function loadCliOrchestrator(
 			// Read-only connection for CLI enrichment (pre-run fetch)
 			const readDb = new DatabaseSync(layout.stateDbPath, { readOnly: true });
 			memoryPortRef = createLearningStore(readDb);
+			structuredMemoryPortRef = createBuildplaneStorage(projectRoot);
+			currentBranchRef = resolveCurrentBranch(projectRoot);
 			// Read-write connection for orchestrator post-run writes
 			const writeDb = new DatabaseSync(layout.stateDbPath);
 			orchestratorMemoryPortRef = createLearningStore(writeDb);
@@ -525,8 +551,10 @@ async function loadCliOrchestrator(
 	return {
 		orchestrator,
 		memoryPort: memoryPortRef,
+		structuredMemoryPort: structuredMemoryPortRef,
 		honchoAdapter: honchoAdapterRef,
 		userId: userIdRef,
+		currentBranch: currentBranchRef,
 	};
 }
 
@@ -839,7 +867,14 @@ export async function runCli(
 		const bundle: CliOrchestratorBundle = deps?.createOrchestrator
 			? { orchestrator: deps.createOrchestrator() }
 			: await loadCliOrchestrator(cwd);
-		const { orchestrator, memoryPort, honchoAdapter, userId } = bundle;
+		const {
+			orchestrator,
+			memoryPort,
+			structuredMemoryPort,
+			honchoAdapter,
+			userId,
+			currentBranch,
+		} = bundle;
 
 		switch (command) {
 			case "init": {
@@ -875,6 +910,8 @@ export async function runCli(
 					memoryPort,
 					honchoAdapter,
 					userId,
+					structuredMemoryPort,
+					currentBranch,
 				);
 
 				const useRaw = rest.includes("--raw");
@@ -1241,6 +1278,8 @@ export async function runCli(
 					memoryPort,
 					honchoAdapter,
 					userId,
+					structuredMemoryPort,
+					currentBranch,
 				);
 
 				const kernel = (await cliImport("@buildplane/kernel")) as unknown as {
@@ -1284,6 +1323,8 @@ export async function runCli(
 					memoryPort,
 					honchoAdapter,
 					userId,
+					structuredMemoryPort,
+					currentBranch,
 				);
 				const strategyBus = kernel.createEventBus();
 
