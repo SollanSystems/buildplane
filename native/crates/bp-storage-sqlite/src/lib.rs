@@ -5,7 +5,7 @@ use bp_memory::{
 };
 use rusqlite::{params, Connection, Row};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -123,6 +123,8 @@ pub struct MemoryDoctorReport {
     pub duplicate_item_ids: Vec<String>,
     pub orphan_event_ids: Vec<String>,
     pub orphan_link_ids: Vec<String>,
+    pub orphan_promoted_item_ids: Vec<String>,
+    pub duplicate_promoted_item_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -271,6 +273,42 @@ impl SqliteMemoryStore {
             })
             .map(|link| link.id.clone())
             .collect::<Vec<_>>();
+        let mut orphan_promoted_item_ids = global_items
+            .iter()
+            .chain(workspace_items.iter())
+            .filter(|item| {
+                item.promoted_from_id
+                    .as_ref()
+                    .is_some_and(|id| !id.is_empty() && !known_item_ids.contains(id))
+            })
+            .map(|item| item.id.clone())
+            .collect::<Vec<_>>();
+        orphan_promoted_item_ids.sort();
+
+        let mut duplicate_promoted_groups: BTreeMap<
+            (String, String, String, String, String, String, Vec<String>, Vec<String>),
+            Vec<String>,
+        > = BTreeMap::new();
+        for item in global_items.iter().chain(workspace_items.iter()) {
+            let Some(promoted_from_id) = item.promoted_from_id.as_ref() else {
+                continue;
+            };
+            if promoted_from_id.is_empty() || item.status != MemoryStatus::Active {
+                continue;
+            }
+            duplicate_promoted_groups
+                .entry(Self::promoted_duplicate_key(item, promoted_from_id))
+                .or_default()
+                .push(item.id.clone());
+        }
+        let duplicate_promoted_item_ids = duplicate_promoted_groups
+            .into_values()
+            .filter(|ids| ids.len() > 1)
+            .flat_map(|mut ids| {
+                ids.sort();
+                ids
+            })
+            .collect::<Vec<_>>();
 
         let forgotten_item_count = global_items
             .iter()
@@ -291,6 +329,8 @@ impl SqliteMemoryStore {
             duplicate_item_ids: duplicate_item_ids.into_iter().collect(),
             orphan_event_ids,
             orphan_link_ids,
+            orphan_promoted_item_ids,
+            duplicate_promoted_item_ids,
         })
     }
 
@@ -355,6 +395,29 @@ impl SqliteMemoryStore {
             links.push(map_link_row(row)?);
         }
         Ok(links)
+    }
+
+    fn promoted_duplicate_key(
+        item: &MemoryItem,
+        promoted_from_id: &str,
+    ) -> (String, String, String, String, String, String, Vec<String>, Vec<String>) {
+        (
+            promoted_from_id.to_string(),
+            item.scope.to_string(),
+            item.scope_key.clone(),
+            item.kind.to_string(),
+            item.title.clone(),
+            item.body.clone(),
+            Self::normalized_string_list(&item.tags),
+            Self::normalized_string_list(&item.applicable_packs),
+        )
+    }
+
+    fn normalized_string_list(values: &[String]) -> Vec<String> {
+        let mut normalized = values.to_vec();
+        normalized.sort();
+        normalized.dedup();
+        normalized
     }
 
     fn fts_match_ids_for(
@@ -753,7 +816,7 @@ mod tests {
     use super::*;
     use bp_memory::{
         MemoryKind, MemoryLinkRelation, MemoryQuery, MemoryRepository, MemoryScope, MemoryService,
-        RememberMemoryInput,
+        MemorySourceType, MemoryStatus, PromoteMemoryInput, RememberMemoryInput,
     };
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -829,6 +892,160 @@ mod tests {
 
         assert_eq!(report.global_item_count, 1);
         assert_eq!(report.workspace_item_count, 1);
+
+        let _ = std::fs::remove_dir_all(&temp_root);
+    }
+
+    #[test]
+    fn doctor_reports_orphaned_promoted_rows() {
+        let temp_root = unique_temp_root();
+        let global_root = temp_root.join("home").join(DEFAULT_BUILDPLANE_DIRNAME);
+        let workspace_root = temp_root.join("workspace");
+        let mut store = SqliteMemoryStore::open_with_roots(&global_root, &workspace_root)
+            .expect("sqlite store should initialize");
+        store
+            .import_bundle(&MemoryExportBundle {
+                schema_version: 1,
+                items: vec![MemoryItem {
+                    id: "mem_promoted_orphan".to_string(),
+                    scope: MemoryScope::Workspace,
+                    scope_key: workspace_root.display().to_string(),
+                    kind: MemoryKind::Workflow,
+                    title: "review workflow".to_string(),
+                    body: "Use implement then review".to_string(),
+                    tags: vec!["workflow".to_string()],
+                    applicable_packs: Vec::new(),
+                    source_type: MemorySourceType::Promotion,
+                    source_ref: None,
+                    origin_pack: None,
+                    status: MemoryStatus::Active,
+                    promoted_from_id: Some("mem_missing_source".to_string()),
+                    created_at: "1".to_string(),
+                    updated_at: "1".to_string(),
+                }],
+                events: Vec::new(),
+                links: Vec::new(),
+            })
+            .expect("import should succeed");
+
+        let report = store.doctor().expect("doctor should succeed");
+
+        assert_eq!(
+            report.orphan_promoted_item_ids,
+            vec!["mem_promoted_orphan".to_string()]
+        );
+        assert!(report.duplicate_promoted_item_ids.is_empty());
+
+        let _ = std::fs::remove_dir_all(&temp_root);
+    }
+
+    #[test]
+    fn doctor_reports_duplicate_promoted_copies() {
+        let temp_root = unique_temp_root();
+        let global_root = temp_root.join("home").join(DEFAULT_BUILDPLANE_DIRNAME);
+        let workspace_root = temp_root.join("workspace");
+        let store = SqliteMemoryStore::open_with_roots(&global_root, &workspace_root)
+            .expect("sqlite store should initialize");
+        let mut service = MemoryService::new(store);
+        let original = service
+            .remember(RememberMemoryInput {
+                scope: MemoryScope::Workspace,
+                scope_key: Some(workspace_root.display().to_string()),
+                kind: MemoryKind::Workflow,
+                title: "review workflow".to_string(),
+                body: "Use implement then review".to_string(),
+                tags: vec!["workflow".to_string()],
+                origin_pack: None,
+                applicable_packs: vec!["superclaude".to_string()],
+            })
+            .expect("original memory should store");
+        let first = service
+            .promote(PromoteMemoryInput {
+                id: original.id.clone(),
+                to_scope: MemoryScope::User,
+                to_scope_key: None,
+                reason: Some("reuse broadly".to_string()),
+                kind: None,
+                title: None,
+                applicable_packs: None,
+            })
+            .expect("first promotion should succeed");
+        let second = service
+            .promote(PromoteMemoryInput {
+                id: original.id.clone(),
+                to_scope: MemoryScope::User,
+                to_scope_key: None,
+                reason: Some("reuse broadly".to_string()),
+                kind: None,
+                title: None,
+                applicable_packs: None,
+            })
+            .expect("second promotion should succeed");
+        let store = service.into_repository();
+
+        let report = store.doctor().expect("doctor should succeed");
+
+        assert_eq!(report.duplicate_promoted_item_ids.len(), 2);
+        assert!(report.duplicate_promoted_item_ids.contains(&first.id));
+        assert!(report.duplicate_promoted_item_ids.contains(&second.id));
+        assert!(!report.duplicate_promoted_item_ids.contains(&original.id));
+        assert!(report.orphan_promoted_item_ids.is_empty());
+
+        let _ = std::fs::remove_dir_all(&temp_root);
+    }
+
+    #[test]
+    fn doctor_ignores_forgotten_promoted_rows_for_duplicate_noise() {
+        let temp_root = unique_temp_root();
+        let global_root = temp_root.join("home").join(DEFAULT_BUILDPLANE_DIRNAME);
+        let workspace_root = temp_root.join("workspace");
+        let store = SqliteMemoryStore::open_with_roots(&global_root, &workspace_root)
+            .expect("sqlite store should initialize");
+        let mut service = MemoryService::new(store);
+        let original = service
+            .remember(RememberMemoryInput {
+                scope: MemoryScope::Workspace,
+                scope_key: Some(workspace_root.display().to_string()),
+                kind: MemoryKind::Workflow,
+                title: "review workflow".to_string(),
+                body: "Use implement then review".to_string(),
+                tags: vec!["workflow".to_string()],
+                origin_pack: None,
+                applicable_packs: vec!["superclaude".to_string()],
+            })
+            .expect("original memory should store");
+        let first = service
+            .promote(PromoteMemoryInput {
+                id: original.id.clone(),
+                to_scope: MemoryScope::User,
+                to_scope_key: None,
+                reason: Some("reuse broadly".to_string()),
+                kind: None,
+                title: None,
+                applicable_packs: None,
+            })
+            .expect("first promotion should succeed");
+        let second = service
+            .promote(PromoteMemoryInput {
+                id: original.id.clone(),
+                to_scope: MemoryScope::User,
+                to_scope_key: None,
+                reason: Some("reuse broadly".to_string()),
+                kind: None,
+                title: None,
+                applicable_packs: None,
+            })
+            .expect("second promotion should succeed");
+        service
+            .forget(&second.id, Some("cleanup duplicate".to_string()))
+            .expect("forgotten duplicate should succeed");
+        let store = service.into_repository();
+
+        let report = store.doctor().expect("doctor should succeed");
+
+        assert!(report.duplicate_promoted_item_ids.is_empty());
+        assert!(!report.orphan_promoted_item_ids.contains(&first.id));
+        assert!(!report.orphan_promoted_item_ids.contains(&second.id));
 
         let _ = std::fs::remove_dir_all(&temp_root);
     }

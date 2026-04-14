@@ -1186,7 +1186,7 @@ fn render_import_report(report: &MemoryImportReport) -> String {
 
 fn render_doctor_report(report: &MemoryDoctorReport) -> String {
     format!(
-        "Memory doctor\n- global database: {}\n- workspace database: {}\n- global items: {}\n- workspace items: {}\n- global events: {}\n- workspace events: {}\n- global links: {}\n- workspace links: {}\n- forgotten items: {}\n- duplicate item ids: {}\n- orphan event ids: {}\n- orphan link ids: {}",
+        "Memory doctor\n- global database: {}\n- workspace database: {}\n- global items: {}\n- workspace items: {}\n- global events: {}\n- workspace events: {}\n- global links: {}\n- workspace links: {}\n- forgotten items: {}\n- duplicate item ids: {}\n- orphan event ids: {}\n- orphan link ids: {}\n- orphan promoted item ids: {}\n- duplicate promoted item ids: {}",
         report.global_database.display(),
         report.workspace_database.display(),
         report.global_item_count,
@@ -1210,6 +1210,16 @@ fn render_doctor_report(report: &MemoryDoctorReport) -> String {
             "none".to_string()
         } else {
             report.orphan_link_ids.join(", ")
+        },
+        if report.orphan_promoted_item_ids.is_empty() {
+            "none".to_string()
+        } else {
+            report.orphan_promoted_item_ids.join(", ")
+        },
+        if report.duplicate_promoted_item_ids.is_empty() {
+            "none".to_string()
+        } else {
+            report.duplicate_promoted_item_ids.join(", ")
         }
     )
 }
@@ -1241,6 +1251,7 @@ pub fn memory_usage_text() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bp_memory::{MemorySourceType, MemoryStatus};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn unique_temp_root(prefix: &str) -> PathBuf {
@@ -1455,6 +1466,114 @@ mod tests {
             .join(".buildplane")
             .join("workspace.db")
             .is_file());
+
+        let _ = fs::remove_dir_all(temp_root);
+    }
+
+    #[test]
+    fn doctor_reports_promotion_noise_fields_in_json_and_human_output() {
+        let temp_root = unique_temp_root("bp-memory-doctor-promotions");
+        let workspace_root = temp_root.join("workspace");
+        let global_root = temp_root.join("home").join(".buildplane");
+        fs::create_dir_all(&workspace_root).expect("workspace root should exist");
+
+        let store = SqliteMemoryStore::open_with_roots(&global_root, &workspace_root)
+            .expect("store should initialize");
+        let mut service = MemoryService::new(store);
+        let original = service
+            .remember(RememberMemoryInput {
+                scope: MemoryScope::Workspace,
+                scope_key: Some(workspace_root.display().to_string()),
+                kind: MemoryKind::Workflow,
+                title: "review workflow".to_string(),
+                body: "Use implement then review".to_string(),
+                tags: vec!["workflow".to_string()],
+                origin_pack: None,
+                applicable_packs: Vec::new(),
+            })
+            .expect("original memory should store");
+        let first = service
+            .promote(PromoteMemoryInput {
+                id: original.id.clone(),
+                to_scope: MemoryScope::User,
+                to_scope_key: None,
+                reason: Some("promote".to_string()),
+                kind: None,
+                title: None,
+                applicable_packs: None,
+            })
+            .expect("first promotion should succeed");
+        let second = service
+            .promote(PromoteMemoryInput {
+                id: original.id.clone(),
+                to_scope: MemoryScope::User,
+                to_scope_key: None,
+                reason: Some("promote".to_string()),
+                kind: None,
+                title: None,
+                applicable_packs: None,
+            })
+            .expect("second promotion should succeed");
+        let mut store = service.into_repository();
+        store
+            .import_bundle(&MemoryExportBundle {
+                schema_version: 1,
+                items: vec![MemoryItem {
+                    id: "mem_promoted_orphan".to_string(),
+                    scope: MemoryScope::Workspace,
+                    scope_key: workspace_root.display().to_string(),
+                    kind: MemoryKind::Workflow,
+                    title: "review workflow".to_string(),
+                    body: "Use implement then review".to_string(),
+                    tags: vec!["workflow".to_string()],
+                    applicable_packs: Vec::new(),
+                    source_type: MemorySourceType::Promotion,
+                    source_ref: None,
+                    origin_pack: None,
+                    status: MemoryStatus::Active,
+                    promoted_from_id: Some("mem_missing_source".to_string()),
+                    created_at: "1".to_string(),
+                    updated_at: "1".to_string(),
+                }],
+                events: Vec::new(),
+                links: Vec::new(),
+            })
+            .expect("import should succeed");
+        drop(store);
+
+        let overrides = ExecutionOverrides {
+            global_root: Some(global_root.clone()),
+        };
+        let human_output = execute_memory_command(
+            MemoryCommand::Doctor(DoctorMemoryArgs {
+                workspace_root: workspace_root.clone(),
+                json: false,
+            }),
+            overrides.clone(),
+        )
+        .expect("human doctor should succeed");
+        let json_output = execute_memory_command(
+            MemoryCommand::Doctor(DoctorMemoryArgs {
+                workspace_root: workspace_root.clone(),
+                json: true,
+            }),
+            overrides,
+        )
+        .expect("json doctor should succeed");
+        let report: MemoryDoctorReport =
+            serde_json::from_str(&json_output).expect("doctor json should parse");
+
+        assert!(human_output.contains("orphan promoted item ids:"));
+        assert!(human_output.contains("duplicate promoted item ids:"));
+        assert!(human_output.contains("mem_promoted_orphan"));
+        assert!(human_output.contains(&first.id));
+        assert!(human_output.contains(&second.id));
+        assert_eq!(
+            report.orphan_promoted_item_ids,
+            vec!["mem_promoted_orphan".to_string()]
+        );
+        assert!(report.duplicate_promoted_item_ids.contains(&first.id));
+        assert!(report.duplicate_promoted_item_ids.contains(&second.id));
 
         let _ = fs::remove_dir_all(temp_root);
     }
