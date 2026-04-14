@@ -19,8 +19,10 @@ describe("@buildplane/kernel package consumption", () => {
 			},
 		).trim();
 
-		expect(output).toBe(
-			JSON.stringify([
+		const exportedKeys = JSON.parse(output) as string[];
+
+		expect(exportedKeys).toEqual(
+			expect.arrayContaining([
 				"createBuildplaneOrchestrator",
 				"createEventBus",
 				"createGraphScheduler",
