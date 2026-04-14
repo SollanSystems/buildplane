@@ -1,3 +1,4 @@
+import type { MemoryStatus } from "./memory-types.js";
 import type { Run, RunStatus, Unit } from "./types.js";
 
 export interface ToolDefinition {
@@ -99,6 +100,19 @@ export interface PersistedInjectedMemoryRecord extends InjectedMemoryRecord {
 	readonly createdAt: string;
 }
 
+export interface PromotedStructuredMemoryRecord {
+	readonly memoryKind: "procedure" | "repo-fact" | "searchable-document";
+	readonly memoryId: string;
+	readonly title: string;
+	readonly taskType?: string;
+	readonly bodySummary?: string;
+	readonly status: MemoryStatus;
+	readonly promotionRule?: string;
+	readonly sourceRunId?: string;
+	readonly sourceTaskId?: string;
+	readonly createdAt: string;
+}
+
 export interface WorkspaceSnapshot {
 	readonly runId: string;
 	readonly path: string;
@@ -140,6 +154,7 @@ export interface InspectSnapshot {
 	readonly run: Run;
 	readonly workspace?: WorkspaceSnapshot;
 	readonly injectedMemories?: readonly PersistedInjectedMemoryRecord[];
+	readonly promotedStructuredMemories?: readonly PromotedStructuredMemoryRecord[];
 	readonly runHistory: readonly {
 		readonly id: string;
 		readonly status: RunStatus;

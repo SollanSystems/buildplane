@@ -8,6 +8,7 @@ import {
 	type BuildplaneOrchestrator,
 	type BuildplaneWorkspacePort,
 	createBuildplaneOrchestrator,
+	type UnitPacket,
 } from "@buildplane/kernel";
 import { evaluateRun } from "@buildplane/policy";
 import { executePacket } from "@buildplane/runtime";
@@ -411,6 +412,84 @@ describe("cli command surface", () => {
 		});
 		const listedInjected = storage.listInjectedMemories(runId);
 		expect(listedInjected).toHaveLength(2);
+	});
+
+	it("surfaces promoted procedure lineage in inspect human and json output", async () => {
+		const root = createGitRepo();
+		await runCliCapture(root, ["init"]);
+
+		const storage = createBuildplaneStorage(root);
+		const packet = createPassingPacket("unit-promotion-lineage") as UnitPacket;
+		const run = storage.createRun(packet);
+		storage.completeRun(run.id, "passed");
+
+		const firstProcedure = storage.createProcedure({
+			name: "implement-then-review workflow for implement tasks",
+			taskType: "implement",
+			bodyMarkdown:
+				"Use an implement-then-review workflow for implement tasks.\n\nObserved learning: missing tests.",
+			createdBy: "worker",
+			sourceRunId: run.id,
+			sourceTaskId: "task-implementer",
+			metadata: {
+				promotionRule: "multi-round-strategy-workflow->procedure",
+				strategyMode: "implement-then-review",
+			},
+		});
+		storage.supersedeProcedure(firstProcedure.id);
+		storage.createProcedure({
+			name: "implement-then-review workflow for implement tasks",
+			taskType: "implement",
+			bodyMarkdown:
+				"Use an implement-then-review workflow for implement tasks.\n\nObserved learning: missing type guards.",
+			createdBy: "worker",
+			sourceRunId: run.id,
+			sourceTaskId: "task-implementer",
+			metadata: {
+				promotionRule: "multi-round-strategy-workflow->procedure",
+				strategyMode: "implement-then-review",
+			},
+		});
+
+		const inspectHuman = await runCliCapture(root, ["inspect", run.id]);
+		const inspectJson = await runCliCapture(root, [
+			"inspect",
+			run.id,
+			"--json",
+		]);
+
+		expect(inspectHuman.exitCode).toBe(0);
+		expect(inspectHuman.stdout).toEqual(
+			expect.arrayContaining([
+				`run-id: ${run.id}`,
+				"promoted-memories:",
+				expect.stringContaining(
+					"[procedure] implement-then-review workflow for implement tasks:",
+				),
+				expect.stringContaining(
+					"status=active, rule=multi-round-strategy-workflow->procedure, source-task=task-implementer",
+				),
+				expect.stringContaining("status=superseded"),
+			]),
+		);
+		expect(JSON.parse(inspectJson.stdout.join("\n"))).toMatchObject({
+			run: { id: run.id, status: "passed" },
+			promotedStructuredMemories: expect.arrayContaining([
+				expect.objectContaining({
+					memoryKind: "procedure",
+					status: "active",
+					promotionRule: "multi-round-strategy-workflow->procedure",
+					sourceRunId: run.id,
+					sourceTaskId: "task-implementer",
+				}),
+				expect.objectContaining({
+					memoryKind: "procedure",
+					status: "superseded",
+					promotionRule: "multi-round-strategy-workflow->procedure",
+					sourceRunId: run.id,
+				}),
+			]),
+		});
 	});
 
 	it("persists injected structured memories for run-graph nodes", async () => {
