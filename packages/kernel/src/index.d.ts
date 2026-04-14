@@ -46,6 +46,25 @@ export type {
 	UpsertRepoFactInput,
 } from "./memory-types.ts";
 export type {
+	ProcedureRetrievalQuery,
+	RankedMemoryResult,
+	RankedProcedureResult,
+	RankedRepoFactResult,
+	RankedSearchableDocumentResult,
+	RepoFactRetrievalQuery,
+	RepoFactScopeCandidate,
+	SearchableDocumentRetrievalQuery,
+	StructuredMemoryMatchClass,
+	StructuredMemoryMatchReason,
+} from "./memory-retrieval.ts";
+export {
+	compareRankedMemoryResults,
+	createRankedMemoryResult,
+	dedupeRankedMemoryResults,
+	getStructuredMemoryMatchClass,
+	rankMemoryResults,
+} from "./memory-retrieval.ts";
+export type {
 	BuildplaneOrchestrator,
 	CreateBuildplaneOrchestratorOptions,
 } from "./orchestrator.ts";

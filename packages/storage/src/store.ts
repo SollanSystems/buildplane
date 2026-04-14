@@ -2,6 +2,10 @@ import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
+import {
+	createRankedMemoryResult,
+	dedupeRankedMemoryResults,
+} from "@buildplane/kernel/source";
 import type {
 	ApprovedPolicyDecision,
 	BuildplaneStoragePort,
@@ -13,11 +17,18 @@ import type {
 	MemoryScopeType,
 	PolicyDecision,
 	ProcedureMemory,
+	ProcedureRetrievalQuery,
+	RankedProcedureResult,
+	RankedRepoFactResult,
+	RankedSearchableDocumentResult,
 	RejectedPolicyDecision,
 	RepoFact,
+	RepoFactRetrievalQuery,
+	RepoFactScopeCandidate,
 	Run,
 	RunStatus,
 	SearchableDocument,
+	SearchableDocumentRetrievalQuery,
 	StatusSnapshot,
 	StatusWorkspaceSummary,
 	Unit,
@@ -1079,6 +1090,224 @@ export function createStorageStore(
 		}
 	}
 
+	function normalizeExactText(value?: string): string | undefined {
+		const trimmed = value?.trim();
+		return trimmed ? trimmed : undefined;
+	}
+
+	function normalizeRetrievalLimit(limit?: number): number {
+		if (limit === undefined || !Number.isFinite(limit)) {
+			return 20;
+		}
+		return Math.max(0, Math.floor(limit));
+	}
+
+	function includesCaseInsensitive(
+		value: string | null | undefined,
+		searchText: string,
+	): boolean {
+		return (value ?? "").toLowerCase().includes(searchText.toLowerCase());
+	}
+
+	function normalizeRepoFactScopeCandidates(
+		scopeCandidates?: readonly RepoFactScopeCandidate[],
+	): readonly RepoFactScopeCandidate[] | undefined {
+		if (!scopeCandidates || scopeCandidates.length === 0) {
+			return undefined;
+		}
+
+		for (const candidate of scopeCandidates) {
+			assertScopeKeyForExactLookup(candidate.scopeType, candidate.scopeKey);
+		}
+
+		return scopeCandidates;
+	}
+
+	function repoFactMatchesScopeCandidate(
+		row: StoredRepoFactRow,
+		candidate: RepoFactScopeCandidate,
+	): boolean {
+		if (row.scope_type !== candidate.scopeType) {
+			return false;
+		}
+		if (candidate.scopeType === "repo" || candidate.scopeType === "global") {
+			return row.scope_key === null;
+		}
+		return row.scope_key === candidate.scopeKey;
+	}
+
+	function toRankedRepoFactResult(
+		row: StoredRepoFactRow,
+		reason: RankedRepoFactResult["reason"],
+		scopePreferenceIndex?: number,
+	): RankedRepoFactResult {
+		return createRankedMemoryResult({
+			item: toRepoFact(row),
+			reason,
+			confidence: row.confidence,
+			updatedAt: row.updated_at,
+			scopePreferenceIndex,
+		});
+	}
+
+	function toRankedProcedureResult(
+		row: StoredProcedureRow,
+		reason: RankedProcedureResult["reason"],
+	): RankedProcedureResult {
+		return createRankedMemoryResult({
+			item: toProcedureMemory(row),
+			reason,
+			confidence: row.confidence,
+			updatedAt: row.updated_at,
+		});
+	}
+
+	function toRankedSearchableDocumentResult(
+		row: StoredSearchableDocumentRow,
+		reason: RankedSearchableDocumentResult["reason"],
+	): RankedSearchableDocumentResult {
+		return createRankedMemoryResult({
+			item: toSearchableDocument(row),
+			reason,
+			confidence: 1,
+			updatedAt: row.updated_at,
+		});
+	}
+
+	function readActiveRepoFactRows(
+		database: DatabaseSync,
+		scopeCandidates?: readonly RepoFactScopeCandidate[],
+	): StoredRepoFactRow[] {
+		const rows = readRepoFactRows(database, {});
+		if (!scopeCandidates || scopeCandidates.length === 0) {
+			return rows;
+		}
+		return rows.filter((row) =>
+			scopeCandidates.some((candidate) =>
+				repoFactMatchesScopeCandidate(row, candidate),
+			),
+		);
+	}
+
+	function readExactRepoFactMatches(
+		database: DatabaseSync,
+		factKey: string,
+		scopeCandidates?: readonly RepoFactScopeCandidate[],
+	): RankedRepoFactResult[] {
+		if (!scopeCandidates || scopeCandidates.length === 0) {
+			return readRepoFactRows(database, { factKey }).map((row) =>
+				toRankedRepoFactResult(row, "exact-fact-key"),
+			);
+		}
+
+		const results: RankedRepoFactResult[] = [];
+		for (let scopePreferenceIndex = 0; scopePreferenceIndex < scopeCandidates.length; scopePreferenceIndex += 1) {
+			const candidate = scopeCandidates[scopePreferenceIndex] as RepoFactScopeCandidate;
+			for (const row of readRepoFactRows(database, {
+				factKey,
+				scopeType: candidate.scopeType,
+				scopeKey: candidate.scopeKey,
+			})) {
+				results.push(
+					toRankedRepoFactResult(
+						row,
+						"exact-fact-key",
+						scopePreferenceIndex,
+					),
+				);
+			}
+		}
+		return results;
+	}
+
+	function readFuzzyRepoFactMatches(
+		database: DatabaseSync,
+		searchText: string,
+		scopeCandidates?: readonly RepoFactScopeCandidate[],
+	): RankedRepoFactResult[] {
+		return readActiveRepoFactRows(database, scopeCandidates)
+			.map((row) => {
+				if (includesCaseInsensitive(row.fact_key, searchText)) {
+					return toRankedRepoFactResult(row, "fuzzy-fact-key");
+				}
+				if (includesCaseInsensitive(row.fact_value_json, searchText)) {
+					return toRankedRepoFactResult(row, "fuzzy-fact-value");
+				}
+				return undefined;
+			})
+			.filter((result): result is RankedRepoFactResult => result !== undefined);
+	}
+
+	function readRankedProcedureMatches(
+		database: DatabaseSync,
+		query: ProcedureRetrievalQuery,
+	): RankedProcedureResult[] {
+		const exactName = normalizeExactText(query.name);
+		const exactTaskType = normalizeExactText(query.taskType);
+		const searchText = normalizeExactText(query.searchText);
+		const results: RankedProcedureResult[] = [];
+
+		for (const row of readProcedureRows(database, {})) {
+			if (exactName && row.name === exactName) {
+				results.push(toRankedProcedureResult(row, "exact-name"));
+			}
+			if (exactTaskType && row.task_type === exactTaskType) {
+				results.push(toRankedProcedureResult(row, "exact-task-type"));
+			}
+			if (searchText && includesCaseInsensitive(row.name, searchText)) {
+				results.push(toRankedProcedureResult(row, "fuzzy-name"));
+			}
+			if (searchText && includesCaseInsensitive(row.body_markdown, searchText)) {
+				results.push(toRankedProcedureResult(row, "fuzzy-body"));
+			}
+		}
+
+		return results;
+	}
+
+	function readRankedSearchableDocumentMatches(
+		database: DatabaseSync,
+		query: SearchableDocumentRetrievalQuery,
+	): RankedSearchableDocumentResult[] {
+		const exactTitle = normalizeExactText(query.title);
+		const searchText = normalizeExactText(query.searchText);
+		const hasExactSource = Boolean(query.sourceTable && query.sourceId);
+		const results: RankedSearchableDocumentResult[] = [];
+
+		if (hasExactSource) {
+			for (const row of readSearchableDocumentRows(database, {
+				documentKind: query.documentKind,
+				sourceTable: query.sourceTable,
+				sourceId: query.sourceId,
+			})) {
+				results.push(toRankedSearchableDocumentResult(row, "exact-source"));
+			}
+		}
+
+		if (exactTitle) {
+			for (const row of readSearchableDocumentRows(database, {
+				documentKind: query.documentKind,
+			})) {
+				if (row.title === exactTitle) {
+					results.push(toRankedSearchableDocumentResult(row, "exact-title"));
+				}
+			}
+		}
+
+		if (searchText) {
+			for (const row of searchSearchableDocumentRows(database, searchText, {
+				documentKind: query.documentKind,
+				limit: Math.max(normalizeRetrievalLimit(query.limit) * 5, 20),
+			})) {
+				results.push(
+					toRankedSearchableDocumentResult(row, "full-text-document"),
+				);
+			}
+		}
+
+		return results;
+	}
+
 	function readEvidence(
 		runId: string,
 		database: DatabaseSync,
@@ -1834,6 +2063,39 @@ export function createStorageStore(
 			}
 		},
 
+		retrieveRepoFacts(query: RepoFactRetrievalQuery): readonly RankedRepoFactResult[] {
+			ensureInitialized();
+			const factKey = normalizeExactText(query.factKey);
+			const searchText = normalizeExactText(query.searchText);
+			const scopeCandidates = normalizeRepoFactScopeCandidates(
+				query.scopeCandidates,
+			);
+			const limit = normalizeRetrievalLimit(query.limit);
+
+			if (limit === 0 || (!factKey && !searchText)) {
+				return [];
+			}
+
+			const database = openStoreDatabase();
+			try {
+				const candidates: RankedRepoFactResult[] = [];
+				if (factKey) {
+					candidates.push(
+						...readExactRepoFactMatches(database, factKey, scopeCandidates),
+					);
+				}
+				if (searchText) {
+					candidates.push(
+						...readFuzzyRepoFactMatches(database, searchText, scopeCandidates),
+					);
+				}
+
+				return dedupeRankedMemoryResults(candidates).slice(0, limit);
+			} finally {
+				database.close();
+			}
+		},
+
 		supersedeRepoFact(
 			factKey: string,
 			options?: {
@@ -1928,6 +2190,31 @@ export function createStorageStore(
 
 			try {
 				return readProcedureRows(database, { taskType }).map(toProcedureMemory);
+			} finally {
+				database.close();
+			}
+		},
+
+		retrieveProcedures(
+			query: ProcedureRetrievalQuery,
+		): readonly RankedProcedureResult[] {
+			ensureInitialized();
+			const limit = normalizeRetrievalLimit(query.limit);
+			const hasQuery = Boolean(
+				normalizeExactText(query.name) ||
+					normalizeExactText(query.taskType) ||
+					normalizeExactText(query.searchText),
+			);
+
+			if (limit === 0 || !hasQuery) {
+				return [];
+			}
+
+			const database = openStoreDatabase();
+			try {
+				return dedupeRankedMemoryResults(
+					readRankedProcedureMatches(database, query),
+				).slice(0, limit);
 			} finally {
 				database.close();
 			}
@@ -2040,6 +2327,31 @@ export function createStorageStore(
 				return searchSearchableDocumentRows(database, query, options).map(
 					toSearchableDocument,
 				);
+			} finally {
+				database.close();
+			}
+		},
+
+		retrieveSearchableDocuments(
+			query: SearchableDocumentRetrievalQuery,
+		): readonly RankedSearchableDocumentResult[] {
+			ensureInitialized();
+			const limit = normalizeRetrievalLimit(query.limit);
+			const hasQuery = Boolean(
+				normalizeExactText(query.title) ||
+					(query.sourceTable && query.sourceId) ||
+					normalizeExactText(query.searchText),
+			);
+
+			if (limit === 0 || !hasQuery) {
+				return [];
+			}
+
+			const database = openStoreDatabase();
+			try {
+				return dedupeRankedMemoryResults(
+					readRankedSearchableDocumentMatches(database, query),
+				).slice(0, limit);
 			} finally {
 				database.close();
 			}

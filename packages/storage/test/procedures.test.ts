@@ -70,4 +70,52 @@ describe("procedure storage", () => {
 		expect(storage.listProcedures()).toEqual([]);
 		expect(storage.findProceduresByTaskType("debug_failure")).toEqual([]);
 	});
+
+	it("retrieves ranked procedures with exact matches before fuzzy fallbacks and deduplicates repeated hits", () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-procedures-"));
+		const storage = createBuildplaneStorage(root);
+		storage.initializeProject();
+
+		const exactName = storage.createProcedure({
+			name: "fix TypeScript build",
+			taskType: "debug_failure",
+			bodyMarkdown: "Run typecheck before touching imports.",
+			createdBy: "worker",
+			confidence: 0.25,
+		});
+		const exactTaskType = storage.createProcedure({
+			name: "triage flaky pipeline",
+			taskType: "debug_failure",
+			bodyMarkdown: "Collect evidence before editing files.",
+			createdBy: "system",
+			confidence: 0.95,
+		});
+		const fuzzyOnly = storage.createProcedure({
+			name: "TypeScript build checklist",
+			bodyMarkdown: "Review the build checklist after the fix lands.",
+			createdBy: "operator",
+			confidence: 1,
+		});
+
+		const results = storage.retrieveProcedures({
+			name: "fix TypeScript build",
+			taskType: "debug_failure",
+			searchText: "build",
+			limit: 10,
+		});
+
+		expect(results.map((result) => result.item.id)).toEqual([
+			exactName.id,
+			exactTaskType.id,
+			fuzzyOnly.id,
+		]);
+		expect(results.map((result) => result.reason)).toEqual([
+			"exact-name",
+			"exact-task-type",
+			"fuzzy-name",
+		]);
+		expect(new Set(results.map((result) => result.item.id)).size).toBe(
+			results.length,
+		);
+	});
 });

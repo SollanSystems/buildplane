@@ -134,6 +134,67 @@ describe("repo fact storage", () => {
 		).toThrow(/scope key/i);
 	});
 
+	it("retrieves ranked repo facts with exact matches first in caller scope order", () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-repo-facts-"));
+		const storage = createBuildplaneStorage(root);
+		storage.initializeProject();
+
+		const branchFact = storage.upsertRepoFact({
+			factKey: "commands.test",
+			factValue: "npx pnpm test --filter branch",
+			valueType: "string",
+			scopeType: "branch",
+			scopeKey: "release/2026-04-13",
+			confidence: 0.2,
+			createdBy: "system",
+		});
+		const repoFact = storage.upsertRepoFact({
+			factKey: "commands.test",
+			factValue: "npx pnpm test",
+			valueType: "string",
+			scopeType: "repo",
+			confidence: 0.99,
+			createdBy: "operator",
+		});
+		const fuzzyFact = storage.upsertRepoFact({
+			factKey: "commands.test.snapshot",
+			factValue: "Snapshot runner for commands.test investigations",
+			valueType: "string",
+			scopeType: "repo",
+			confidence: 1,
+			createdBy: "system",
+		});
+
+		const results = storage.retrieveRepoFacts({
+			factKey: "commands.test",
+			searchText: "commands.test",
+			scopeCandidates: [
+				{ scopeType: "branch", scopeKey: "release/2026-04-13" },
+				{ scopeType: "repo" },
+			],
+			limit: 10,
+		});
+
+		expect(results.map((result) => result.item.id)).toEqual([
+			branchFact.id,
+			repoFact.id,
+			fuzzyFact.id,
+		]);
+		expect(results.map((result) => result.reason)).toEqual([
+			"exact-fact-key",
+			"exact-fact-key",
+			"fuzzy-fact-key",
+		]);
+		expect(results.map((result) => result.scopePreferenceIndex)).toEqual([
+			0,
+			1,
+			undefined,
+		]);
+		expect(new Set(results.map((result) => result.item.id)).size).toBe(
+			results.length,
+		);
+	});
+
 	it("fails fast with a schema error when opening a legacy repo_facts projection", () => {
 		const root = mkdtempSync(join(tmpdir(), "buildplane-repo-facts-"));
 		const buildplaneDir = join(root, ".buildplane");
