@@ -29,6 +29,25 @@ export type {
 } from "./graph.js";
 export { createGraphScheduler } from "./graph.js";
 export type {
+	ProcedureRetrievalQuery,
+	RankedMemoryResult,
+	RankedProcedureResult,
+	RankedRepoFactResult,
+	RankedSearchableDocumentResult,
+	RepoFactRetrievalQuery,
+	RepoFactScopeCandidate,
+	SearchableDocumentRetrievalQuery,
+	StructuredMemoryMatchClass,
+	StructuredMemoryMatchReason,
+} from "./memory-retrieval.js";
+export {
+	compareRankedMemoryResults,
+	createRankedMemoryResult,
+	dedupeRankedMemoryResults,
+	getStructuredMemoryMatchClass,
+	rankMemoryResults,
+} from "./memory-retrieval.js";
+export type {
 	CreateProcedureInput,
 	CreateSearchableDocumentInput,
 	MemoryCreatedBy,

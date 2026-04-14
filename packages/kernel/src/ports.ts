@@ -1,5 +1,13 @@
 import type { EventBus } from "./events.js";
 import type {
+	ProcedureRetrievalQuery,
+	RankedProcedureResult,
+	RankedRepoFactResult,
+	RankedSearchableDocumentResult,
+	RepoFactRetrievalQuery,
+	SearchableDocumentRetrievalQuery,
+} from "./memory-retrieval.js";
+import type {
 	CreateProcedureInput,
 	CreateSearchableDocumentInput,
 	MemoryScopeType,
@@ -87,6 +95,9 @@ export interface BuildplaneStoragePort {
 		scopeType?: MemoryScopeType;
 		scopeKey?: string;
 	}): readonly RepoFact[];
+	retrieveRepoFacts(
+		query: RepoFactRetrievalQuery,
+	): readonly RankedRepoFactResult[];
 	supersedeRepoFact(
 		factKey: string,
 		options?: {
@@ -97,6 +108,9 @@ export interface BuildplaneStoragePort {
 	createProcedure(input: CreateProcedureInput): ProcedureMemory;
 	listProcedures(options?: { taskType?: string }): readonly ProcedureMemory[];
 	findProceduresByTaskType(taskType: string): readonly ProcedureMemory[];
+	retrieveProcedures(
+		query: ProcedureRetrievalQuery,
+	): readonly RankedProcedureResult[];
 	supersedeProcedure(id: string): number;
 	createSearchableDocument(
 		input: CreateSearchableDocumentInput,
@@ -115,6 +129,9 @@ export interface BuildplaneStoragePort {
 			limit?: number;
 		},
 	): readonly SearchableDocument[];
+	retrieveSearchableDocuments(
+		query: SearchableDocumentRetrievalQuery,
+	): readonly RankedSearchableDocumentResult[];
 	getStatusSnapshot(): StatusSnapshot;
 	inspectTarget(id: string): InspectSnapshot;
 }

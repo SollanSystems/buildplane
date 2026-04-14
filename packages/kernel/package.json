@@ -10,6 +10,11 @@
 			"types": "./src/index.d.ts",
 			"import": "./dist/index.js"
 		},
+		"./source": {
+			"source": "./src/index.ts",
+			"types": "./src/index.d.ts",
+			"import": "./dist/index.js"
+		},
 		"./packet": {
 			"types": "./dist/packet.d.ts",
 			"import": "./dist/packet.js"

@@ -92,4 +92,56 @@ describe("searchable document storage", () => {
 		expect(results[0]?.id).toBe(matching.id);
 		expect(results[0]?.title).toBe("Kalman spread replay");
 	});
+
+	it("retrieves ranked searchable documents with exact source and title matches ahead of full-text results", () => {
+		const root = mkdtempSync(
+			join(tmpdir(), "buildplane-searchable-documents-"),
+		);
+		const storage = createBuildplaneStorage(root);
+		storage.initializeProject();
+
+		const exactSource = storage.createSearchableDocument({
+			sourceTable: "runs",
+			sourceId: "run-1",
+			documentKind: "run-summary",
+			title: "Build failure summary",
+			bodyText: "The branch replay failed during typecheck.",
+		});
+		const exactTitle = storage.createSearchableDocument({
+			sourceTable: "notes",
+			sourceId: "note-9",
+			documentKind: "operator-note",
+			title: "Build failure summary",
+			bodyText: "Operator note about the same branch replay.",
+		});
+		const fullTextOnly = storage.createSearchableDocument({
+			sourceTable: "notes",
+			sourceId: "note-2",
+			documentKind: "operator-note",
+			title: "Checklist",
+			bodyText: "Capture the branch replay logs before cleanup.",
+		});
+
+		const results = storage.retrieveSearchableDocuments({
+			title: "Build failure summary",
+			sourceTable: "runs",
+			sourceId: "run-1",
+			searchText: "branch",
+			limit: 10,
+		});
+
+		expect(results.map((result) => result.item.id)).toEqual([
+			exactSource.id,
+			exactTitle.id,
+			fullTextOnly.id,
+		]);
+		expect(results.map((result) => result.reason)).toEqual([
+			"exact-source",
+			"exact-title",
+			"full-text-document",
+		]);
+		expect(new Set(results.map((result) => result.item.id)).size).toBe(
+			results.length,
+		);
+	});
 });
