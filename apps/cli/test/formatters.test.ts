@@ -143,6 +143,33 @@ describe("formatInspectDetail", () => {
 		);
 	});
 
+	it("includes terminal-safe promoted procedure lineage in inspect output", () => {
+		const lines = formatInspectDetail(
+			{
+				...baseSnapshot,
+				promotedStructuredMemories: [
+					{
+						memoryKind: "procedure",
+						memoryId: "procedure-1",
+						title: "implement-then-review workflow for implement tasks",
+						bodySummary:
+							"Use an implement-then-review workflow for implement tasks.\n\u001b[31mObserved learning",
+						status: "active",
+						promotionRule: "multi-round-strategy-workflow->procedure",
+						sourceRunId: "run-xyz",
+						sourceTaskId: "task-implementer",
+						createdAt: "2026-04-14T00:00:00Z",
+					},
+				],
+			},
+			[],
+		);
+		expect(lines).toContain("promoted-memories:");
+		expect(lines.join("\n")).toContain(
+			"[procedure] implement-then-review workflow for implement tasks: Use an implement-then-review workflow for implement tasks.\\n\\u001b[31mObserved learning (status=active, rule=multi-round-strategy-workflow->procedure, source-task=task-implementer)",
+		);
+	});
+
 	it("omits learnings section when no learnings provided", () => {
 		const lines = formatInspectDetail(baseSnapshot, []);
 		expect(lines.join("\n")).not.toContain("learnings:");

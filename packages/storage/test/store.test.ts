@@ -609,6 +609,75 @@ describe("storage adapter", () => {
 		]);
 	});
 
+	it("surfaces promoted procedure lineage in inspect snapshots, including superseded records", () => {
+		const root = mkdtempSync(
+			join(tmpdir(), "buildplane-store-promotion-lineage-"),
+		);
+		const storage = createBuildplaneStorage(root);
+		storage.initializeProject();
+
+		const run = storage.createRun({
+			...packet,
+			unit: { ...packet.unit, id: "unit-promotion-lineage" },
+		});
+		storage.completeRun(run.id, "passed");
+
+		const firstProcedure = storage.createProcedure({
+			name: "implement-then-review workflow for implement tasks",
+			taskType: "implement",
+			bodyMarkdown:
+				"Use an implement-then-review workflow for implement tasks.\n\nObserved learning: missing tests.",
+			createdBy: "worker",
+			sourceRunId: run.id,
+			sourceTaskId: "task-implementer",
+			metadata: {
+				promotionRule: "multi-round-strategy-workflow->procedure",
+				strategyMode: "implement-then-review",
+			},
+		});
+		storage.supersedeProcedure(firstProcedure.id);
+		const secondProcedure = storage.createProcedure({
+			name: "implement-then-review workflow for implement tasks",
+			taskType: "implement",
+			bodyMarkdown:
+				"Use an implement-then-review workflow for implement tasks.\n\nObserved learning: missing type guards.",
+			createdBy: "worker",
+			sourceRunId: run.id,
+			sourceTaskId: "task-implementer",
+			metadata: {
+				promotionRule: "multi-round-strategy-workflow->procedure",
+				strategyMode: "implement-then-review",
+			},
+		});
+
+		const inspect = storage.inspectTarget(run.id);
+		const unitInspect = storage.inspectTarget("unit-promotion-lineage");
+
+		expect(inspect.promotedStructuredMemories).toHaveLength(2);
+		expect(inspect.promotedStructuredMemories).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					memoryKind: "procedure",
+					memoryId: firstProcedure.id,
+					status: "superseded",
+					promotionRule: "multi-round-strategy-workflow->procedure",
+					sourceRunId: run.id,
+					sourceTaskId: "task-implementer",
+				}),
+				expect.objectContaining({
+					memoryKind: "procedure",
+					memoryId: secondProcedure.id,
+					status: "active",
+					promotionRule: "multi-round-strategy-workflow->procedure",
+					sourceRunId: run.id,
+				}),
+			]),
+		);
+		expect(unitInspect.promotedStructuredMemories).toEqual(
+			inspect.promotedStructuredMemories,
+		);
+	});
+
 	it("rejects invalid failure-outcome payload combinations", () => {
 		const root = mkdtempSync(
 			join(tmpdir(), "buildplane-store-invalid-failure-"),

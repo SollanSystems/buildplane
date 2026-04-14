@@ -102,6 +102,7 @@ export type {
 	OutputCheck,
 	PersistedInjectedMemoryRecord,
 	PolicyDecision,
+	PromotedStructuredMemoryRecord,
 	RejectedPolicyDecision,
 	RoutingHints,
 	RunInfrastructureFailure,

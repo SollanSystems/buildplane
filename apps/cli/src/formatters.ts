@@ -22,6 +22,19 @@ interface InjectedMemoryLike {
 	readonly scopePreferenceIndex?: number;
 }
 
+interface PromotedStructuredMemoryLike {
+	readonly memoryKind: string;
+	readonly memoryId: string;
+	readonly title: string;
+	readonly taskType?: string;
+	readonly bodySummary?: string;
+	readonly status: string;
+	readonly promotionRule?: string;
+	readonly sourceRunId?: string;
+	readonly sourceTaskId?: string;
+	readonly createdAt: string;
+}
+
 function sanitizeTerminalText(text: string): string {
 	let result = "";
 	for (const character of text) {
@@ -68,6 +81,24 @@ function summarizeInjectedMemoryForRun(memory: InjectedMemoryLike): string {
 			? remainder.trim()
 			: remainder.slice(0, colonIndex).trim();
 	return `${prefix} ${label}`;
+}
+
+function formatPromotedStructuredMemory(
+	memory: PromotedStructuredMemoryLike,
+): string {
+	const prefix = `[${sanitizeTerminalText(memory.memoryKind)}]`;
+	const title = sanitizeTerminalText(memory.title);
+	const bodySummary = memory.bodySummary
+		? `: ${sanitizeTerminalText(memory.bodySummary)}`
+		: "";
+	const details = [`status=${sanitizeTerminalText(memory.status)}`];
+	if (memory.promotionRule) {
+		details.push(`rule=${sanitizeTerminalText(memory.promotionRule)}`);
+	}
+	if (memory.sourceTaskId) {
+		details.push(`source-task=${sanitizeTerminalText(memory.sourceTaskId)}`);
+	}
+	return `${prefix} ${title}${bodySummary} (${details.join(", ")})`;
 }
 
 export interface CliErrorPayload {
@@ -235,6 +266,7 @@ interface InspectSnapshotLike {
 		readonly location: string;
 	}[];
 	readonly injectedMemories?: readonly InjectedMemoryLike[];
+	readonly promotedStructuredMemories?: readonly PromotedStructuredMemoryLike[];
 }
 
 export function formatInspectDetail(
@@ -311,6 +343,16 @@ export function formatInspectDetail(
 			lines.push(
 				`  ${sanitizeTerminalText(memory.displayText)} (${formatInjectedMemoryReason(memory)})`,
 			);
+		}
+	}
+	if (
+		snapshot.promotedStructuredMemories &&
+		snapshot.promotedStructuredMemories.length > 0
+	) {
+		lines.push("");
+		lines.push("promoted-memories:");
+		for (const memory of snapshot.promotedStructuredMemories) {
+			lines.push(`  ${formatPromotedStructuredMemory(memory)}`);
 		}
 	}
 
