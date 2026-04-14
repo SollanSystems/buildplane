@@ -645,6 +645,95 @@ describe("cli command surface", () => {
 		});
 	});
 
+	it("surfaces strategy lineage and memory summaries in inspect and history for strategy runs", async () => {
+		const root = createGitRepo();
+		await runCliCapture(root, ["init"]);
+
+		const storage = createBuildplaneStorage(root);
+		storage.upsertRepoFact({
+			factKey: "commands.typecheck",
+			factValue: "npx pnpm typecheck",
+			valueType: "string",
+			scopeType: "repo",
+			createdBy: "system",
+		});
+		storage.createProcedure({
+			name: "fix TypeScript build",
+			taskType: "debug_failure",
+			bodyMarkdown: "Run typecheck before touching imports.",
+			createdBy: "worker",
+		});
+
+		const strategyPath = writeCommittedPacket(
+			root,
+			".buildplane/test-packets/strategy-history.json",
+			{
+				id: "strategy-history",
+				mode: "single",
+				mergePolicy: "direct",
+				children: [
+					{
+						role: "implementer",
+						packet: {
+							...createPassingPacket("strategy-history-unit"),
+							intent: {
+								objective: "Fix the TypeScript build",
+								taskType: "debug_failure",
+								context: { files: ["apps/cli/src/run-cli.ts"] },
+								constraints: {
+									scope: ["apps/cli/src"],
+									verification: ["npx pnpm typecheck"],
+								},
+								features: {
+									ambiguity: "low",
+									reversibility: "easy",
+									verifierStrength: "strong",
+								},
+							},
+						},
+					},
+				],
+			},
+		);
+
+		const runStrategy = await runCliCapture(root, [
+			"run-strategy",
+			"--strategy",
+			strategyPath,
+		]);
+		const inspectHuman = await runCliCapture(root, [
+			"inspect",
+			"strategy-history-unit",
+		]);
+		const inspectJson = await runCliCapture(root, [
+			"inspect",
+			"strategy-history-unit",
+			"--json",
+		]);
+		const historyHuman = await runCliCapture(root, ["history"]);
+		const historyJson = await runCliCapture(root, ["history", "--json"]);
+
+		expect(runStrategy.exitCode).toBe(0);
+		expect(inspectHuman.stdout).toEqual(
+			expect.arrayContaining(["strategy: strategy-history"]),
+		);
+		expect(JSON.parse(inspectJson.stdout.join("\n"))).toMatchObject({
+			strategy: { strategyId: "strategy-history" },
+		});
+		expect(historyHuman.stdout.join("\n")).toContain("strategy-history");
+		expect(historyHuman.stdout.join("\n")).toContain("mem=2/0");
+		expect(JSON.parse(historyJson.stdout.join("\n"))).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					unitId: "strategy-history-unit",
+					strategyId: "strategy-history",
+					injectedMemoryCount: 2,
+					promotedStructuredMemoryCount: 0,
+				}),
+			]),
+		);
+	});
+
 	it("delegates memory commands to the native runner dependency", async () => {
 		const root = mkdtempSync(join(tmpdir(), "buildplane-cli-memory-delegate-"));
 		const calls: Array<{ cwd: string; argv: string[]; commandPath: string[] }> =

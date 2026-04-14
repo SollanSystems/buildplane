@@ -40,6 +40,7 @@ interface StructuredMemoryStoragePortLike extends StructuredMemoryPortLike {
 	listInjectedMemories(
 		runId: string,
 	): readonly PersistedInjectedMemoryRecordLike[];
+	recordRunStrategyId(runId: string, strategyId: string): void;
 }
 
 export interface RunCliDependencies {
@@ -193,6 +194,25 @@ function persistInjectedMemoriesForTargets(
 		}
 	}
 	return persisted;
+}
+
+function recordStrategyIdForTargets(
+	storagePort: StructuredMemoryStoragePortLike | undefined,
+	targets: Iterable<{ unitId: string; runId?: string }>,
+	strategyId: string,
+): void {
+	if (!storagePort) {
+		return;
+	}
+	const seen = new Set<string>();
+	for (const target of targets) {
+		const runId = target.runId;
+		if (!runId || runId === "unknown" || seen.has(runId)) {
+			continue;
+		}
+		seen.add(runId);
+		storagePort.recordRunStrategyId(runId, strategyId);
+	}
 }
 
 function formatTopLevelHelp(): string[] {
@@ -1072,6 +1092,11 @@ export async function runCli(
 							rounds?: ReadonlyArray<Map<string, { run?: { id?: string } }>>;
 						},
 					);
+					recordStrategyIdForTargets(
+						structuredMemoryPort,
+						strategyTargets,
+						strategyResult.strategyId,
+					);
 					const injectedMemories = persistInjectedMemoriesForTargets(
 						structuredMemoryPort,
 						strategyTargets,
@@ -1329,6 +1354,9 @@ export async function runCli(
 							id: string;
 							unitId: string;
 							status: string;
+							strategyId?: string;
+							injectedMemoryCount?: number;
+							promotedStructuredMemoryCount?: number;
 							createdAt: string;
 							completedAt?: string;
 						}>,
@@ -1515,6 +1543,11 @@ export async function runCli(
 						}),
 					),
 				];
+				recordStrategyIdForTargets(
+					structuredMemoryPort,
+					strategyTargets,
+					strategyResult.strategyId,
+				);
 				const injectedMemories = persistInjectedMemoriesForTargets(
 					structuredMemoryPort,
 					strategyTargets,

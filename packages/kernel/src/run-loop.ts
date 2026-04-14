@@ -153,6 +153,9 @@ export interface InspectSnapshot {
 	readonly unit: Unit;
 	readonly run: Run;
 	readonly workspace?: WorkspaceSnapshot;
+	readonly strategy?: {
+		readonly strategyId: string;
+	};
 	readonly injectedMemories?: readonly PersistedInjectedMemoryRecord[];
 	readonly promotedStructuredMemories?: readonly PromotedStructuredMemoryRecord[];
 	readonly runHistory: readonly {
