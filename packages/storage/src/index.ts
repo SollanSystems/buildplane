@@ -39,6 +39,7 @@ export interface ProjectInitializationResult {
 export interface BuildplaneStorage extends BuildplaneStoragePort {
 	initializeProject(): ProjectInitializationResult;
 	getRunHistory(): import("./store.js").RunHistoryEntry[];
+	recordRunStrategyId(runId: string, strategyId: string): void;
 	getPacketSnapshot(
 		runId: string,
 	): import("@buildplane/kernel").UnitPacket | null;
