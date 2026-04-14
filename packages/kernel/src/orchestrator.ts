@@ -76,6 +76,8 @@ export function createBuildplaneOrchestrator(
 	const topLevelBudgets = options.budgets;
 	const defaultBus = options.eventBus ?? noopBus;
 	const memoryPort = options.memoryPort;
+	const strategyWorkflowPromotionRule =
+		"multi-round-strategy-workflow->procedure";
 
 	function infrastructureFailure(
 		kind: string,
@@ -100,6 +102,78 @@ export function createBuildplaneOrchestrator(
 			headSha: preparedWorkspace.headSha,
 			status: "active",
 		};
+	}
+
+	function buildStrategyProcedureCandidate(
+		strategy: StrategyPacket,
+		strategyResult: StrategyResult,
+		workflowLearning: {
+			readonly kind: string;
+			readonly title: string;
+			readonly body: string;
+		},
+	): Parameters<BuildplaneStoragePort["createProcedure"]>[0] | null {
+		if (strategyResult.outcome !== "passed") {
+			return null;
+		}
+
+		const implementer = strategy.children.find(
+			(child) => child.role === "implementer",
+		);
+		const taskType = implementer?.packet.intent?.taskType;
+		if (!implementer || !taskType) {
+			return null;
+		}
+
+		return {
+			name: `${strategy.mode} workflow for ${taskType} tasks`,
+			taskType,
+			bodyMarkdown: `Use an ${strategy.mode} workflow for ${taskType} tasks.\n\nObserved learning: ${workflowLearning.body}`,
+			metadata: {
+				promotionRule: strategyWorkflowPromotionRule,
+				strategyMode: strategy.mode,
+				sourceLearningTitle: workflowLearning.title,
+				sourceLearningKind: workflowLearning.kind,
+				sourceStrategyId: strategy.id,
+			},
+			createdBy: "worker",
+			sourceRunId: strategyResult.winnerRunId,
+			sourceTaskId: implementer.packet.unit.id,
+		};
+	}
+
+	function promoteStrategyWorkflowProcedure(
+		strategy: StrategyPacket,
+		strategyResult: StrategyResult,
+		learnings: readonly {
+			readonly kind: string;
+			readonly title: string;
+			readonly body: string;
+		}[],
+	): void {
+		const workflowLearning = learnings.find(
+			(learning) => learning.kind === "workflow",
+		);
+		if (!workflowLearning) {
+			return;
+		}
+
+		const candidate = buildStrategyProcedureCandidate(
+			strategy,
+			strategyResult,
+			workflowLearning,
+		);
+		if (!candidate?.taskType) {
+			return;
+		}
+
+		storage.upsertProcedure(candidate, {
+			matchMetadata: {
+				promotionRule: strategyWorkflowPromotionRule,
+				strategyMode: strategy.mode,
+			},
+			skipIfConflictingActiveName: true,
+		});
 	}
 
 	function finalizeInfrastructureFailure(
@@ -916,11 +990,8 @@ export function createBuildplaneOrchestrator(
 			);
 
 			// Post-strategy memory hook — fires once when all strategy children complete
-			if (
-				memoryPort &&
-				strategyResult.rounds &&
-				strategyResult.rounds.length > 1
-			) {
+			if (strategyResult.rounds && strategyResult.rounds.length > 1) {
+				let learnings: ReturnType<typeof extractLearnings>;
 				try {
 					const strategyDecision: PolicyDecision =
 						strategyResult.outcome === "passed"
@@ -935,7 +1006,7 @@ export function createBuildplaneOrchestrator(
 									reasons: strategyResult.mergeDecision.reasons,
 								};
 
-					const learnings = extractLearnings({
+					learnings = extractLearnings({
 						run: {
 							id: strategyResult.strategyId,
 							unitId: strategyResult.strategyId,
@@ -968,9 +1039,21 @@ export function createBuildplaneOrchestrator(
 						},
 						strategyResult,
 					});
-					if (learnings.length > 0) {
+				} catch {
+					// Silent — follows event bus subscriber convention
+					return strategyResult;
+				}
+
+				if (memoryPort && learnings.length > 0) {
+					try {
 						memoryPort.writeLearnings(strategyResult.strategyId, learnings);
+					} catch {
+						// Silent — follows event bus subscriber convention
 					}
+				}
+
+				try {
+					promoteStrategyWorkflowProcedure(strategy, strategyResult, learnings);
 				} catch {
 					// Silent — follows event bus subscriber convention
 				}
