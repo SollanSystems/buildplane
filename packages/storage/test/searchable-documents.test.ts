@@ -144,4 +144,30 @@ describe("searchable document storage", () => {
 			results.length,
 		);
 	});
+
+	it("accepts slash-containing full-text queries without throwing", () => {
+		const root = mkdtempSync(
+			join(tmpdir(), "buildplane-searchable-documents-"),
+		);
+		const storage = createBuildplaneStorage(root);
+		storage.initializeProject();
+
+		const matching = storage.createSearchableDocument({
+			sourceTable: "notes",
+			sourceId: "note-7",
+			documentKind: "operator-note",
+			title: "Changed file note",
+			bodyText: "Investigate apps/cli/src/run-cli.ts before changing imports.",
+		});
+
+		const results = storage.retrieveSearchableDocuments({
+			searchText: "apps/cli/src/run-cli.ts",
+			limit: 10,
+		});
+
+		expect(results.map((result) => result.item.id)).toContain(matching.id);
+		expect(results.map((result) => result.reason)).toContain(
+			"full-text-document",
+		);
+	});
 });

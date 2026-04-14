@@ -13,6 +13,61 @@ interface RunResultLike {
 		readonly path?: string;
 		readonly status?: string;
 	};
+	readonly injectedMemories?: readonly InjectedMemoryLike[];
+}
+
+interface InjectedMemoryLike {
+	readonly displayText: string;
+	readonly matchReason: string;
+	readonly scopePreferenceIndex?: number;
+}
+
+function sanitizeTerminalText(text: string): string {
+	let result = "";
+	for (const character of text) {
+		const code = character.charCodeAt(0);
+		const isControl =
+			(code >= 0x00 && code <= 0x1f) || (code >= 0x7f && code <= 0x9f);
+		if (!isControl) {
+			result += character;
+			continue;
+		}
+		switch (character) {
+			case "\n":
+				result += "\\n";
+				break;
+			case "\r":
+				result += "\\r";
+				break;
+			case "\t":
+				result += "\\t";
+				break;
+			default:
+				result += `\\u${code.toString(16).padStart(4, "0")}`;
+		}
+	}
+	return result;
+}
+
+function formatInjectedMemoryReason(memory: InjectedMemoryLike): string {
+	return memory.scopePreferenceIndex === undefined
+		? memory.matchReason
+		: `${memory.matchReason}, scope-index=${memory.scopePreferenceIndex}`;
+}
+
+function summarizeInjectedMemoryForRun(memory: InjectedMemoryLike): string {
+	const sanitizedDisplayText = sanitizeTerminalText(memory.displayText);
+	const match = sanitizedDisplayText.match(/^(\[[^\]]+\])\s*(.+)$/);
+	if (!match) {
+		return sanitizedDisplayText;
+	}
+	const [, prefix, remainder] = match;
+	const colonIndex = remainder.indexOf(":");
+	const label =
+		colonIndex === -1
+			? remainder.trim()
+			: remainder.slice(0, colonIndex).trim();
+	return `${prefix} ${label}`;
 }
 
 export interface CliErrorPayload {
@@ -41,6 +96,14 @@ export function formatRunResult(result: RunResultLike): string[] {
 			: "";
 		lines.push(`workspace: ${result.workspace.path}${suffix}`);
 	}
+	if (result.injectedMemories && result.injectedMemories.length > 0) {
+		lines.push(`injected-memories: ${result.injectedMemories.length}`);
+		for (const memory of result.injectedMemories) {
+			lines.push(
+				`  - ${summarizeInjectedMemoryForRun(memory)} (${formatInjectedMemoryReason(memory)})`,
+			);
+		}
+	}
 	return lines;
 }
 
@@ -51,6 +114,7 @@ export interface StrategyResultLike {
 	readonly childResults: Map<string, RunResultLike>;
 	readonly rounds?: ReadonlyArray<Map<string, RunResultLike>>;
 	readonly winnerRunId?: string;
+	readonly injectedMemories?: readonly InjectedMemoryLike[];
 	readonly mergeDecision: {
 		readonly policy: string;
 		readonly outcome: string;
@@ -64,7 +128,9 @@ export function formatStrategyRunResult(result: StrategyResultLike): string[] {
 	lines.push(`mode: ${result.mode}`);
 	lines.push(`outcome: ${result.outcome}`);
 
-	for (const [unitId, childResult] of result.childResults) {
+	for (const [unitId, childResult] of Array.from(
+		result.childResults.entries(),
+	)) {
 		const role = unitId.endsWith("-reviewer") ? "reviewer" : "implementer";
 		lines.push(`  ${role} (${unitId}): ${childResult.run.status}`);
 	}
@@ -78,6 +144,14 @@ export function formatStrategyRunResult(result: StrategyResultLike): string[] {
 		lines.push(
 			`decision: ${result.mergeDecision.outcome} (${result.mergeDecision.reasons.join("; ")})`,
 		);
+	}
+	if (result.injectedMemories && result.injectedMemories.length > 0) {
+		lines.push(`injected-memories: ${result.injectedMemories.length}`);
+		for (const memory of result.injectedMemories) {
+			lines.push(
+				`  - ${summarizeInjectedMemoryForRun(memory)} (${formatInjectedMemoryReason(memory)})`,
+			);
+		}
 	}
 
 	return lines;
@@ -160,6 +234,7 @@ interface InspectSnapshotLike {
 		readonly type: string;
 		readonly location: string;
 	}[];
+	readonly injectedMemories?: readonly InjectedMemoryLike[];
 }
 
 export function formatInspectDetail(
@@ -227,6 +302,15 @@ export function formatInspectDetail(
 		}
 		if (f.message) {
 			lines.push(`failure: ${f.message}`);
+		}
+	}
+	if (snapshot.injectedMemories && snapshot.injectedMemories.length > 0) {
+		lines.push("");
+		lines.push("injected-memories:");
+		for (const memory of snapshot.injectedMemories) {
+			lines.push(
+				`  ${sanitizeTerminalText(memory.displayText)} (${formatInjectedMemoryReason(memory)})`,
+			);
 		}
 	}
 

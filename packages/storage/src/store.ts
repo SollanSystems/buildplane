@@ -11,8 +11,10 @@ import {
 	createRankedMemoryResult,
 	dedupeRankedMemoryResults,
 	type ExecutionReceipt,
+	type InjectedMemoryRecord,
 	type InspectSnapshot,
 	type MemoryScopeType,
+	type PersistedInjectedMemoryRecord,
 	type PolicyDecision,
 	type ProcedureMemory,
 	type ProcedureRetrievalQuery,
@@ -126,6 +128,18 @@ interface StoredSearchableDocumentRow {
 	readonly updated_at: string;
 }
 
+interface StoredInjectedMemoryRow {
+	readonly id: string;
+	readonly run_id: string;
+	readonly memory_kind: InjectedMemoryRecord["memoryKind"];
+	readonly memory_id: string;
+	readonly display_text: string;
+	readonly match_reason: string;
+	readonly match_class: InjectedMemoryRecord["matchClass"];
+	readonly scope_preference_index: number | null;
+	readonly created_at: string;
+}
+
 export interface StorageTestingHooks {
 	readonly failpoint?: (name: string) => void;
 }
@@ -142,6 +156,7 @@ type WorkspaceAwareStatusSnapshot = StatusSnapshot & {
 
 type WorkspaceAwareInspectSnapshot = InspectSnapshot & {
 	readonly workspace?: WorkspaceSnapshot;
+	readonly injectedMemories?: readonly PersistedInjectedMemoryRecord[];
 };
 
 interface WorkspaceAwareStorageStore
@@ -385,6 +400,20 @@ function assertSearchableDocumentsTableColumns(database: DatabaseSync): void {
 	] as const);
 }
 
+function assertInjectedMemoriesTableColumns(database: DatabaseSync): void {
+	assertTableColumns(database, "injected_memories", [
+		"id",
+		"run_id",
+		"memory_kind",
+		"memory_id",
+		"display_text",
+		"match_reason",
+		"match_class",
+		"scope_preference_index",
+		"created_at",
+	] as const);
+}
+
 export function bootstrapStorageProjectionSchema(database: DatabaseSync): void {
 	if (tableExists(database, "workspaces")) {
 		assertWorkspaceTableColumns(database);
@@ -508,6 +537,23 @@ export function bootstrapStorageProjectionSchema(database: DatabaseSync): void {
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL
 		);
+
+		CREATE TABLE IF NOT EXISTS injected_memories (
+			id TEXT PRIMARY KEY,
+			run_id TEXT NOT NULL,
+			memory_kind TEXT NOT NULL,
+			memory_id TEXT NOT NULL,
+			display_text TEXT NOT NULL,
+			match_reason TEXT NOT NULL,
+			match_class TEXT NOT NULL,
+			scope_preference_index INTEGER,
+			created_at TEXT NOT NULL
+		);
+	`);
+
+	database.exec(`
+		CREATE INDEX IF NOT EXISTS injected_memories_run_id_idx
+		ON injected_memories (run_id);
 	`);
 
 	database.exec(`
@@ -531,6 +577,7 @@ export function bootstrapStorageProjectionSchema(database: DatabaseSync): void {
 	assertRepoFactsTableColumns(database);
 	assertProceduresTableColumns(database);
 	assertSearchableDocumentsTableColumns(database);
+	assertInjectedMemoriesTableColumns(database);
 }
 
 export function assertBaselineStorageProjectionSchema(
@@ -538,7 +585,7 @@ export function assertBaselineStorageProjectionSchema(
 ): void {
 	const rows = database
 		.prepare(
-			`SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('units', 'runs', 'evidence', 'decisions', 'artifacts', 'repo_facts', 'procedures', 'searchable_documents')`,
+			`SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('units', 'runs', 'evidence', 'decisions', 'artifacts', 'repo_facts', 'procedures', 'searchable_documents', 'injected_memories')`,
 		)
 		.all() as unknown as { name: string }[];
 	const existingTables = new Set(rows.map((row) => row.name));
@@ -552,6 +599,7 @@ export function assertBaselineStorageProjectionSchema(
 		"repo_facts",
 		"procedures",
 		"searchable_documents",
+		"injected_memories",
 	]) {
 		if (!existingTables.has(tableName)) {
 			throw new Error(
@@ -612,6 +660,7 @@ function assertStorageProjectionSchema(database: DatabaseSync): void {
 	assertRepoFactsTableColumns(database);
 	assertProceduresTableColumns(database);
 	assertSearchableDocumentsTableColumns(database);
+	assertInjectedMemoriesTableColumns(database);
 }
 
 export interface RunHistoryEntry {
@@ -867,6 +916,37 @@ export function createStorageStore(
 		};
 	}
 
+	function toPersistedInjectedMemoryRecord(
+		row: StoredInjectedMemoryRow,
+	): PersistedInjectedMemoryRecord {
+		return {
+			id: row.id,
+			runId: row.run_id,
+			memoryKind: row.memory_kind,
+			memoryId: row.memory_id,
+			displayText: row.display_text,
+			matchReason: row.match_reason,
+			matchClass: row.match_class,
+			scopePreferenceIndex: row.scope_preference_index ?? undefined,
+			createdAt: row.created_at,
+		};
+	}
+
+	function readInjectedMemoryRows(
+		runId: string,
+		database: DatabaseSync,
+	): PersistedInjectedMemoryRecord[] {
+		const rows = database
+			.prepare(
+				`SELECT id, run_id, memory_kind, memory_id, display_text, match_reason, match_class, scope_preference_index, created_at
+				 FROM injected_memories
+				 WHERE run_id = ?
+				 ORDER BY rowid ASC`,
+			)
+			.all(runId) as unknown as StoredInjectedMemoryRow[];
+		return rows.map(toPersistedInjectedMemoryRecord);
+	}
+
 	function readRepoFactRows(
 		database: DatabaseSync,
 		options: {
@@ -1003,11 +1083,15 @@ export function createStorageStore(
 			limit?: number;
 		},
 	): StoredSearchableDocumentRow[] {
+		const ftsQuery = normalizeSearchableDocumentFtsQuery(queryText);
+		if (!ftsQuery) {
+			return [];
+		}
 		const clauses = [
 			"searchable_documents.repo_id = ?",
 			"searchable_documents_fts MATCH ?",
 		];
-		const params: (string | number)[] = [projectRoot, queryText];
+		const params: (string | number)[] = [projectRoot, ftsQuery];
 
 		if (options?.documentKind) {
 			clauses.push("searchable_documents.document_kind = ?");
@@ -1091,6 +1175,20 @@ export function createStorageStore(
 	function normalizeExactText(value?: string): string | undefined {
 		const trimmed = value?.trim();
 		return trimmed ? trimmed : undefined;
+	}
+
+	function normalizeSearchableDocumentFtsQuery(
+		queryText: string,
+	): string | undefined {
+		const trimmed = queryText.trim();
+		if (!trimmed) {
+			return undefined;
+		}
+		const tokens = Array.from(new Set(trimmed.match(/[A-Za-z0-9_]+/g) ?? []));
+		if (tokens.length === 0) {
+			return undefined;
+		}
+		return tokens.map((token) => `"${token}"`).join(" ");
 	}
 
 	function normalizeRetrievalLimit(limit?: number): number {
@@ -2362,6 +2460,56 @@ export function createStorageStore(
 			}
 		},
 
+		recordInjectedMemories(
+			runId: string,
+			records: readonly InjectedMemoryRecord[],
+		): void {
+			ensureInitialized();
+			const database = openStoreDatabase();
+			const now = new Date().toISOString();
+
+			try {
+				runInTransaction(database, () => {
+					database
+						.prepare(`DELETE FROM injected_memories WHERE run_id = ?`)
+						.run(runId);
+
+					for (const record of records) {
+						database
+							.prepare(
+								`INSERT INTO injected_memories (id, run_id, memory_kind, memory_id, display_text, match_reason, match_class, scope_preference_index, created_at)
+								 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+							)
+							.run(
+								randomUUID(),
+								runId,
+								record.memoryKind,
+								record.memoryId,
+								record.displayText,
+								record.matchReason,
+								record.matchClass,
+								record.scopePreferenceIndex ?? null,
+								now,
+							);
+					}
+				});
+			} finally {
+				database.close();
+			}
+		},
+
+		listInjectedMemories(
+			runId: string,
+		): readonly PersistedInjectedMemoryRecord[] {
+			ensureInitialized();
+			const database = openStoreDatabase();
+			try {
+				return readInjectedMemoryRows(runId, database);
+			} finally {
+				database.close();
+			}
+		},
+
 		getStatusSnapshot(): WorkspaceAwareStatusSnapshot {
 			ensureInitialized();
 			const database = openStoreDatabase();
@@ -2472,6 +2620,7 @@ export function createStorageStore(
 						unit,
 						run: toRun(runRow),
 						workspace: readWorkspaceSnapshot(runRow.id, database),
+						injectedMemories: readInjectedMemoryRows(runRow.id, database),
 						runHistory: [{ id: runRow.id, status: runRow.status }],
 						evidence: readEvidence(runRow.id, database),
 						decisions: readDecisions(runRow.id, database),
@@ -2499,6 +2648,7 @@ export function createStorageStore(
 						unit,
 						run: toRun(run),
 						workspace: readWorkspaceSnapshot(run.id, database),
+						injectedMemories: readInjectedMemoryRows(run.id, database),
 						runHistory,
 						evidence: readEvidence(run.id, database),
 						decisions: readDecisions(run.id, database),
