@@ -80,7 +80,8 @@ describe("enrichPacketWithMemories", () => {
 						status: "active",
 						name: "fix TypeScript build",
 						taskType: "debug_failure",
-						bodyMarkdown: "Run typecheck before touching imports.\nThen re-run the failing task.",
+						bodyMarkdown:
+							"Run typecheck before touching imports.\nThen re-run the failing task.",
 						provenance: {
 							createdBy: "worker",
 							createdAt: "2026-04-13T00:00:00.000Z",
@@ -264,7 +265,9 @@ describe("enrichPacketWithMemories", () => {
 			],
 		};
 		const honchoAdapter = {
-			fetchContext: async () => ({ memories: ["user prefers exact verification output"] }),
+			fetchContext: async () => ({
+				memories: ["user prefers exact verification output"],
+			}),
 		};
 
 		const result = (await enrichPacketWithMemories(

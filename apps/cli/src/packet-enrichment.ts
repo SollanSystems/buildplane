@@ -132,7 +132,9 @@ function buildRepoFactScopeCandidates(
 		}
 		seen.add(dedupeKey);
 		candidates.push(
-			normalizedScopeKey ? { scopeType, scopeKey: normalizedScopeKey } : { scopeType },
+			normalizedScopeKey
+				? { scopeType, scopeKey: normalizedScopeKey }
+				: { scopeType },
 		);
 	};
 
@@ -202,11 +204,7 @@ function collectStructuredMemoryStrings(
 	).slice(0, STRUCTURED_REPO_FACT_LIMIT);
 
 	const procedureQueries =
-		searchTerms.length > 0
-			? searchTerms
-			: intent.taskType
-				? [""]
-				: [];
+		searchTerms.length > 0 ? searchTerms : intent.taskType ? [""] : [];
 	const procedureResults = dedupeRankedMemoryResults(
 		procedureQueries.flatMap((searchText) =>
 			structuredMemoryPort.retrieveProcedures({
@@ -243,7 +241,8 @@ export async function enrichPacketWithMemories(
 	if (!p.intent) return packet;
 	if (!memoryPort && !honchoAdapter && !structuredMemoryPort) return packet;
 
-	const localLearnings = memoryPort?.fetchLearnings({ limit: LOCAL_LEARNING_LIMIT }) ?? [];
+	const localLearnings =
+		memoryPort?.fetchLearnings({ limit: LOCAL_LEARNING_LIMIT }) ?? [];
 	const structuredMemories = collectStructuredMemoryStrings(
 		p.intent,
 		structuredMemoryPort,
