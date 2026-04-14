@@ -110,9 +110,9 @@ function parseUpdatedAtTimestamp(updatedAt: string): number {
 	return Number.isNaN(timestamp) ? 0 : timestamp;
 }
 
-function normalizeScopePreferenceIndex<
-	TMemory extends { readonly id: string },
->(result: RankedMemoryResult<TMemory>): number {
+function normalizeScopePreferenceIndex<TMemory extends { readonly id: string }>(
+	result: RankedMemoryResult<TMemory>,
+): number {
 	return result.scopePreferenceIndex ?? Number.MAX_SAFE_INTEGER;
 }
 
@@ -129,8 +129,7 @@ export function compareRankedMemoryResults<
 	}
 
 	const scopePreferenceDelta =
-		normalizeScopePreferenceIndex(left) -
-		normalizeScopePreferenceIndex(right);
+		normalizeScopePreferenceIndex(left) - normalizeScopePreferenceIndex(right);
 	if (scopePreferenceDelta !== 0) {
 		return scopePreferenceDelta;
 	}
@@ -157,7 +156,9 @@ export function rankMemoryResults<TMemory extends { readonly id: string }>(
 
 export function dedupeRankedMemoryResults<
 	TMemory extends { readonly id: string },
->(results: readonly RankedMemoryResult<TMemory>[]): RankedMemoryResult<TMemory>[] {
+>(
+	results: readonly RankedMemoryResult<TMemory>[],
+): RankedMemoryResult<TMemory>[] {
 	const bestResultById = new Map<string, RankedMemoryResult<TMemory>>();
 
 	for (const result of results) {

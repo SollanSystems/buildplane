@@ -3,38 +3,36 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import {
+	type ApprovedPolicyDecision,
+	type BuildplaneStoragePort,
+	type CreateProcedureInput,
+	type CreateRunOptions,
+	type CreateSearchableDocumentInput,
 	createRankedMemoryResult,
 	dedupeRankedMemoryResults,
-} from "@buildplane/kernel/source";
-import type {
-	ApprovedPolicyDecision,
-	BuildplaneStoragePort,
-	CreateProcedureInput,
-	CreateRunOptions,
-	CreateSearchableDocumentInput,
-	ExecutionReceipt,
-	InspectSnapshot,
-	MemoryScopeType,
-	PolicyDecision,
-	ProcedureMemory,
-	ProcedureRetrievalQuery,
-	RankedProcedureResult,
-	RankedRepoFactResult,
-	RankedSearchableDocumentResult,
-	RejectedPolicyDecision,
-	RepoFact,
-	RepoFactRetrievalQuery,
-	RepoFactScopeCandidate,
-	Run,
-	RunStatus,
-	SearchableDocument,
-	SearchableDocumentRetrievalQuery,
-	StatusSnapshot,
-	StatusWorkspaceSummary,
-	Unit,
-	UnitPacket,
-	UpsertRepoFactInput,
-	WorkspaceSnapshot,
+	type ExecutionReceipt,
+	type InspectSnapshot,
+	type MemoryScopeType,
+	type PolicyDecision,
+	type ProcedureMemory,
+	type ProcedureRetrievalQuery,
+	type RankedProcedureResult,
+	type RankedRepoFactResult,
+	type RankedSearchableDocumentResult,
+	type RejectedPolicyDecision,
+	type RepoFact,
+	type RepoFactRetrievalQuery,
+	type RepoFactScopeCandidate,
+	type Run,
+	type RunStatus,
+	type SearchableDocument,
+	type SearchableDocumentRetrievalQuery,
+	type StatusSnapshot,
+	type StatusWorkspaceSummary,
+	type Unit,
+	type UnitPacket,
+	type UpsertRepoFactInput,
+	type WorkspaceSnapshot,
 } from "@buildplane/kernel";
 import {
 	assertBuildplaneDatabaseIsInitialized,
@@ -1201,19 +1199,21 @@ export function createStorageStore(
 		}
 
 		const results: RankedRepoFactResult[] = [];
-		for (let scopePreferenceIndex = 0; scopePreferenceIndex < scopeCandidates.length; scopePreferenceIndex += 1) {
-			const candidate = scopeCandidates[scopePreferenceIndex] as RepoFactScopeCandidate;
+		for (
+			let scopePreferenceIndex = 0;
+			scopePreferenceIndex < scopeCandidates.length;
+			scopePreferenceIndex += 1
+		) {
+			const candidate = scopeCandidates[
+				scopePreferenceIndex
+			] as RepoFactScopeCandidate;
 			for (const row of readRepoFactRows(database, {
 				factKey,
 				scopeType: candidate.scopeType,
 				scopeKey: candidate.scopeKey,
 			})) {
 				results.push(
-					toRankedRepoFactResult(
-						row,
-						"exact-fact-key",
-						scopePreferenceIndex,
-					),
+					toRankedRepoFactResult(row, "exact-fact-key", scopePreferenceIndex),
 				);
 			}
 		}
@@ -1257,7 +1257,10 @@ export function createStorageStore(
 			if (searchText && includesCaseInsensitive(row.name, searchText)) {
 				results.push(toRankedProcedureResult(row, "fuzzy-name"));
 			}
-			if (searchText && includesCaseInsensitive(row.body_markdown, searchText)) {
+			if (
+				searchText &&
+				includesCaseInsensitive(row.body_markdown, searchText)
+			) {
 				results.push(toRankedProcedureResult(row, "fuzzy-body"));
 			}
 		}
@@ -2063,7 +2066,9 @@ export function createStorageStore(
 			}
 		},
 
-		retrieveRepoFacts(query: RepoFactRetrievalQuery): readonly RankedRepoFactResult[] {
+		retrieveRepoFacts(
+			query: RepoFactRetrievalQuery,
+		): readonly RankedRepoFactResult[] {
 			ensureInitialized();
 			const factKey = normalizeExactText(query.factKey);
 			const searchText = normalizeExactText(query.searchText);

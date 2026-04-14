@@ -95,7 +95,9 @@ export interface BuildplaneStoragePort {
 		scopeType?: MemoryScopeType;
 		scopeKey?: string;
 	}): readonly RepoFact[];
-	retrieveRepoFacts(query: RepoFactRetrievalQuery): readonly RankedRepoFactResult[];
+	retrieveRepoFacts(
+		query: RepoFactRetrievalQuery,
+	): readonly RankedRepoFactResult[];
 	supersedeRepoFact(
 		factKey: string,
 		options?: {

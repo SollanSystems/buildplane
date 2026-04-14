@@ -22,8 +22,7 @@ export const createRankedMemoryResult = createRankedMemoryResultImpl;
 /** @type {typeof import('./memory-retrieval.ts').dedupeRankedMemoryResults} */
 export const dedupeRankedMemoryResults = dedupeRankedMemoryResultsImpl;
 /** @type {typeof import('./memory-retrieval.ts').getStructuredMemoryMatchClass} */
-export const getStructuredMemoryMatchClass =
-	getStructuredMemoryMatchClassImpl;
+export const getStructuredMemoryMatchClass = getStructuredMemoryMatchClassImpl;
 /** @type {typeof import('./memory-retrieval.ts').rankMemoryResults} */
 export const rankMemoryResults = rankMemoryResultsImpl;
 /** @type {typeof import('./run-scoped-bus.ts').createRunScopedBus} */

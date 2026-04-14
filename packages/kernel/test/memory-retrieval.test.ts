@@ -2,8 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
 	compareRankedMemoryResults,
 	dedupeRankedMemoryResults,
-	rankMemoryResults,
 	type RankedRepoFactResult,
+	rankMemoryResults,
 } from "../src/memory-retrieval";
 import type { RepoFact } from "../src/memory-types";
 
