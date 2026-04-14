@@ -3,13 +3,16 @@ import {
 	dedupeRankedMemoryResults,
 	type RankedProcedureResult,
 	type RankedRepoFactResult,
+	type RankedSearchableDocumentResult,
 } from "@buildplane/kernel";
 
 const LOCAL_LEARNING_LIMIT = 10;
 const STRUCTURED_QUERY_LIMIT = 5;
 const STRUCTURED_REPO_FACT_LIMIT = 3;
 const STRUCTURED_PROCEDURE_LIMIT = 2;
+const STRUCTURED_SEARCHABLE_DOCUMENT_LIMIT = 2;
 const MIN_KEYWORD_LENGTH = 4;
+const SEARCHABLE_DOCUMENT_SOURCE_TABLES = new Set(["runs", "notes"]);
 
 interface MemoryPortLike {
 	fetchLearnings(options?: { limit?: number }): ReadonlyArray<{
@@ -33,6 +36,13 @@ interface StructuredMemoryPortLike {
 		searchText?: string;
 		limit?: number;
 	}): ReadonlyArray<RankedProcedureResult>;
+	retrieveSearchableDocuments(query: {
+		title?: string;
+		sourceTable?: string;
+		sourceId?: string;
+		searchText?: string;
+		limit?: number;
+	}): ReadonlyArray<RankedSearchableDocumentResult>;
 }
 
 interface HonchoPortLike {
@@ -51,6 +61,9 @@ interface TaskIntentLike {
 }
 
 interface PacketWithIntent {
+	unit?: {
+		inputRefs?: readonly string[];
+	};
 	intent?: TaskIntentLike & {
 		context?: Record<string, unknown> & {
 			files?: readonly string[];
@@ -149,6 +162,40 @@ function buildRepoFactScopeCandidates(
 	return candidates;
 }
 
+function parseSearchableDocumentSourceRefs(
+	inputRefs: readonly string[] | undefined,
+): Array<{ sourceTable: string; sourceId: string }> {
+	const parsedRefs: Array<{ sourceTable: string; sourceId: string }> = [];
+	const seen = new Set<string>();
+
+	for (const inputRef of inputRefs ?? []) {
+		const match = inputRef.match(/^([^:/]+)[:/](.+)$/);
+		if (!match) {
+			continue;
+		}
+		const [, sourceTable, rawSourceId] = match;
+		const normalizedSourceTable = sourceTable.trim();
+		const normalizedSourceId = rawSourceId.trim();
+		if (
+			!SEARCHABLE_DOCUMENT_SOURCE_TABLES.has(normalizedSourceTable) ||
+			normalizedSourceId.length === 0
+		) {
+			continue;
+		}
+		const dedupeKey = `${normalizedSourceTable}:${normalizedSourceId}`;
+		if (seen.has(dedupeKey)) {
+			continue;
+		}
+		seen.add(dedupeKey);
+		parsedRefs.push({
+			sourceTable: normalizedSourceTable,
+			sourceId: normalizedSourceId,
+		});
+	}
+
+	return parsedRefs;
+}
+
 function formatRepoFactValue(value: unknown): string {
 	if (typeof value === "string") {
 		return value;
@@ -181,17 +228,30 @@ function summarizeProcedure(bodyMarkdown: string): string {
 		.trim();
 }
 
+function summarizeSearchableDocument(bodyText: string): string {
+	return (
+		bodyText
+			.split(/\r?\n/)
+			.map((line) => line.trim())
+			.find((line) => line.length > 0) ?? ""
+	).trim();
+}
+
 function collectStructuredMemoryStrings(
-	intent: TaskIntentLike,
+	packet: PacketWithIntent,
 	structuredMemoryPort: StructuredMemoryPortLike | undefined,
 	currentBranch: string | undefined,
 ): string[] {
-	if (!structuredMemoryPort) {
+	const intent = packet.intent;
+	if (!structuredMemoryPort || !intent) {
 		return [];
 	}
 
 	const searchTerms = buildSearchTerms(intent);
 	const scopeCandidates = buildRepoFactScopeCandidates(intent, currentBranch);
+	const searchableDocumentSourceRefs = parseSearchableDocumentSourceRefs(
+		packet.unit?.inputRefs,
+	);
 
 	const repoFactResults = dedupeRankedMemoryResults(
 		searchTerms.flatMap((searchText) =>
@@ -215,6 +275,28 @@ function collectStructuredMemoryStrings(
 		),
 	).slice(0, STRUCTURED_PROCEDURE_LIMIT);
 
+	const searchableDocumentResults = dedupeRankedMemoryResults([
+		...searchableDocumentSourceRefs.flatMap(({ sourceTable, sourceId }) =>
+			structuredMemoryPort.retrieveSearchableDocuments({
+				sourceTable,
+				sourceId,
+				limit: STRUCTURED_QUERY_LIMIT,
+			}),
+		),
+		...(intent.objective
+			? structuredMemoryPort.retrieveSearchableDocuments({
+					title: intent.objective,
+					limit: STRUCTURED_QUERY_LIMIT,
+				})
+			: []),
+		...searchTerms.flatMap((searchText) =>
+			structuredMemoryPort.retrieveSearchableDocuments({
+				searchText,
+				limit: STRUCTURED_QUERY_LIMIT,
+			}),
+		),
+	]).slice(0, STRUCTURED_SEARCHABLE_DOCUMENT_LIMIT);
+
 	return [
 		...repoFactResults.map(
 			(result) =>
@@ -225,6 +307,15 @@ function collectStructuredMemoryStrings(
 			return summary
 				? `[procedure] ${result.item.name}: ${summary}`
 				: `[procedure] ${result.item.name}`;
+		}),
+		...searchableDocumentResults.map((result) => {
+			const title = result.item.title?.trim();
+			const label =
+				title || `${result.item.sourceTable}/${result.item.sourceId}`;
+			const summary = summarizeSearchableDocument(result.item.bodyText);
+			return summary
+				? `[document] ${label}: ${summary}`
+				: `[document] ${label}`;
 		}),
 	];
 }
@@ -244,7 +335,7 @@ export async function enrichPacketWithMemories(
 	const localLearnings =
 		memoryPort?.fetchLearnings({ limit: LOCAL_LEARNING_LIMIT }) ?? [];
 	const structuredMemories = collectStructuredMemoryStrings(
-		p.intent,
+		p,
 		structuredMemoryPort,
 		currentBranch,
 	);
