@@ -15,7 +15,7 @@
 		"@buildplane/kernel": "workspace:*"
 	},
 	"devDependencies": {
-		"@honcho-ai/sdk": "^2.1.0"
+		"@honcho-ai/sdk": "^2.1.1"
 	},
 	"peerDependencies": {
 		"@honcho-ai/sdk": ">=2.0.0"
