@@ -259,6 +259,36 @@ interface WorkflowScanFindingLike {
 	readonly kind: string;
 }
 
+interface BootstrapDoctorCheckLike {
+	readonly id: string;
+	readonly ok: boolean;
+	readonly message: string;
+}
+
+interface BootstrapDoctorReportLike {
+	readonly ok: boolean;
+	readonly checks: readonly BootstrapDoctorCheckLike[];
+	readonly notes: readonly string[];
+}
+
+export function formatBootstrapDoctorReport(
+	report: BootstrapDoctorReportLike,
+): string[] {
+	const lines = [`bootstrap-doctor: ${report.ok ? "pass" : "fail"}`];
+	for (const check of report.checks) {
+		lines.push(
+			`  - [${check.ok ? "pass" : "fail"}] ${sanitizeTerminalText(check.id)}: ${sanitizeTerminalText(check.message)}`,
+		);
+	}
+	if (report.notes.length > 0) {
+		lines.push("notes:");
+		for (const note of report.notes) {
+			lines.push(`  - ${sanitizeTerminalText(note)}`);
+		}
+	}
+	return lines;
+}
+
 export function formatWorkflowScanPreview(preview: {
 	readonly findings: readonly WorkflowScanFindingLike[];
 }): string[] {

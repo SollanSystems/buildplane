@@ -2,6 +2,11 @@ import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {
+	type BootstrapDoctorReport,
+	inspectBootstrapDoctor,
+} from "./bootstrap-doctor.js";
+import {
+	formatBootstrapDoctorReport,
 	formatHumanError,
 	formatInitializationResult,
 	formatInspectDetail,
@@ -16,11 +21,9 @@ import {
 	formatWorkspaceCleanupResult,
 	formatWorkspaceList,
 } from "./formatters.js";
-import {
-	type PacketMemoryEnrichmentResult,
-	prepareGraphMemoryEnrichment,
+import type {
+	PacketMemoryEnrichmentResult,
 	preparePacketMemoryEnrichment,
-	prepareStrategyMemoryEnrichment,
 } from "./packet-enrichment.js";
 import { scanWorkflowPreview } from "./workflow-scan.js";
 
@@ -50,6 +53,7 @@ interface StructuredMemoryStoragePortLike extends StructuredMemoryPortLike {
 export interface RunCliDependencies {
 	createOrchestrator?: () => BuildplaneCliOrchestrator;
 	parsePacket?: (packetPath: string) => unknown;
+	inspectBootstrapDoctor?: () => BootstrapDoctorReport;
 	runNativeCommand?: (
 		argv: string[],
 		options: {
@@ -162,6 +166,10 @@ function collectStrategyRunTargets(result: {
 	return targets;
 }
 
+async function loadPacketEnrichmentModule() {
+	return import("./packet-enrichment.js");
+}
+
 type InjectedMemoryRecordsByUnitId = Record<
 	string,
 	readonly InjectedMemoryRecordLike[]
@@ -239,6 +247,7 @@ function formatTopLevelHelp(): string[] {
 		"",
 		"  Project:",
 		"    init                   Initialize .buildplane in this repo",
+		"    bootstrap doctor      Check published CLI prerequisites",
 		"    workspace list         Show actionable retained/cleanup-failed workspaces",
 		"    workspace cleanup <r>  Delete an actionable workspace by run id",
 		"    workflow scan [--json] Preview recognized Claude/Codex workflow files",
@@ -864,6 +873,35 @@ export async function runCli(
 	}
 
 	try {
+		if (command === "bootstrap") {
+			const subcommand = rest[0];
+			const doctorArgs = rest.slice(1);
+			const json = doctorArgs.includes("--json");
+			if (subcommand === "doctor") {
+				const hasOnlySupportedDoctorArgs =
+					doctorArgs.length === 0 ||
+					(doctorArgs.length === 1 && doctorArgs[0] === "--json");
+				if (!hasOnlySupportedDoctorArgs) {
+					throw new Error(
+						`Unsupported bootstrap doctor arguments: ${doctorArgs.join(" ")}`,
+					);
+				}
+				const report =
+					deps?.inspectBootstrapDoctor?.() ?? inspectBootstrapDoctor();
+				if (json) {
+					stdout(formatJson(report));
+				} else {
+					for (const line of formatBootstrapDoctorReport(report)) {
+						stdout(line);
+					}
+				}
+				return report.ok ? 0 : 1;
+			}
+			throw new Error(
+				`Unknown bootstrap command: ${subcommand ?? "(missing subcommand)"}`,
+			);
+		}
+
 		if (command === "memory") {
 			const subcommand = rest[0];
 			if (subcommand === "list") {
@@ -1189,6 +1227,8 @@ export async function runCli(
 				const packet = deps?.parsePacket
 					? deps.parsePacket(packetPath)
 					: await loadPacket(packetPath);
+				const { preparePacketMemoryEnrichment } =
+					await loadPacketEnrichmentModule();
 				const preparedPacket = await preparePacketMemoryEnrichment(
 					packet,
 					memoryPort,
@@ -1611,6 +1651,8 @@ export async function runCli(
 					unknown
 				>;
 				const graph = normalizeGraph(rawGraph);
+				const { prepareGraphMemoryEnrichment } =
+					await loadPacketEnrichmentModule();
 				const preparedGraph = await prepareGraphMemoryEnrichment(
 					graph as Record<string, unknown>,
 					memoryPort,
@@ -1664,6 +1706,8 @@ export async function runCli(
 
 				const rawStrategy = JSON.parse(readFileSync(strategyPath, "utf8"));
 				const strategy = kernel.parseStrategyPacket(rawStrategy);
+				const { prepareStrategyMemoryEnrichment } =
+					await loadPacketEnrichmentModule();
 				const preparedStrategy = await prepareStrategyMemoryEnrichment(
 					strategy as Record<string, unknown>,
 					memoryPort,

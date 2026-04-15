@@ -31,6 +31,7 @@ const PUBLISHED_DISTRIBUTION_BODY = [
 	"",
 	"```bash",
 	"npm install -g buildplane",
+	"buildplane bootstrap doctor --json",
 	"buildplane init",
 	"buildplane run --packet /absolute/path/to/packet.json",
 	"buildplane status --json",
