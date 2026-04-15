@@ -4,8 +4,16 @@ import React from "react";
 import { TuiApp } from "./app.js";
 
 export { TuiApp } from "./app.js";
-export type { RunViewState, ToolCallState } from "./hooks/use-run-state.js";
-export { useRunState } from "./hooks/use-run-state.js";
+export type {
+	BudgetAlertState,
+	RunViewState,
+	ToolCallState,
+} from "./hooks/use-run-state.js";
+export {
+	initialRunViewState,
+	reduceRunState,
+	useRunState,
+} from "./hooks/use-run-state.js";
 
 export interface TuiInstance {
 	waitUntilExit(): Promise<void>;
