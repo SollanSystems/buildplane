@@ -12,6 +12,7 @@ import {
 	formatRunHistory,
 	formatRunResult,
 	formatStrategyRunResult,
+	formatWorkflowScanPreview,
 	formatWorkspaceCleanupResult,
 	formatWorkspaceList,
 } from "./formatters.js";
@@ -21,6 +22,7 @@ import {
 	preparePacketMemoryEnrichment,
 	prepareStrategyMemoryEnrichment,
 } from "./packet-enrichment.js";
+import { scanWorkflowPreview } from "./workflow-scan.js";
 
 type StructuredMemoryPortLike = NonNullable<
 	Parameters<typeof preparePacketMemoryEnrichment>[4]
@@ -239,6 +241,7 @@ function formatTopLevelHelp(): string[] {
 		"    init                   Initialize .buildplane in this repo",
 		"    workspace list         Show actionable retained/cleanup-failed workspaces",
 		"    workspace cleanup <r>  Delete an actionable workspace by run id",
+		"    workflow scan [--json] Preview recognized Claude/Codex workflow files",
 		"    memory list            Show stored learnings",
 		"    memory inspect <id>    Detail for one learning",
 		"    memory <action>        Advanced memory operations (native)",
@@ -999,6 +1002,26 @@ export async function runCli(
 			const { runDemo } = await import("./demo.js");
 			await runDemo({ model: modelFlag });
 			return 0;
+		}
+
+		if (command === "workflow") {
+			const subcommand = rest[0];
+			const json = rest.includes("--json");
+			if (subcommand === "scan") {
+				const preview = scanWorkflowPreview(cwd);
+				if (json) {
+					stdout(formatJson(preview));
+				} else {
+					for (const line of formatWorkflowScanPreview(preview)) {
+						stdout(line);
+					}
+				}
+				return 0;
+			}
+
+			throw new Error(
+				`Unknown workflow command: ${subcommand ?? "(missing subcommand)"}`,
+			);
 		}
 
 		if (command === "workspace") {
