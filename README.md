@@ -83,6 +83,12 @@ The compiled CLI uses the same native-command bridge implementation as the publi
 The packaged global-install contract verified by this repo is:
 
 ```bash
+tmp="$(mktemp)" && curl -fsSL https://raw.githubusercontent.com/SollanSystems/buildplane/main/scripts/published-bootstrap/install.sh -o "$tmp" && bash "$tmp"
+```
+
+If you prefer the explicit npm path, the published fallback/reference contract is:
+
+```bash
 npm install -g buildplane
 buildplane init
 buildplane run --packet <path-to-packet.json>

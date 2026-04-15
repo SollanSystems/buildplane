@@ -79,6 +79,9 @@ describe("README contract", () => {
 	});
 
 	it("pins the published Distribution section command surface", () => {
+		expect(distributionSection).toContain(
+			'tmp="$(mktemp)" && curl -fsSL https://raw.githubusercontent.com/SollanSystems/buildplane/main/scripts/published-bootstrap/install.sh -o "$tmp" && bash "$tmp"',
+		);
 		expect(distributionSection).toContain("npm install -g buildplane");
 		expect(distributionSection).toContain("buildplane init");
 		expect(distributionSection).toContain(
