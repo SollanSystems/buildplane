@@ -101,23 +101,25 @@ Expected: PASS.
 **Objective:** prove unsupported Node still fails for normal commands but not for `bootstrap doctor`.
 
 **Files:**
-- Modify: `apps/cli/test/version-guard.test.ts`
-- Modify: `apps/cli/test/smoke.test.ts`
-- Modify: `apps/cli/src/version-guard.ts`
-- Modify: `apps/cli/src/index.ts`
+- modify: `apps/cli/test/version-guard.test.ts`
+- modify: `test/workflow/readme-contract.test.ts`
+- modify: `apps/cli/src/version-guard.ts`
+- modify: `apps/cli/src/index.ts`
+- modify: `apps/cli/src/run-cli.ts`
 
 **Step 1: Write failing guard tests**
 - unit test: helper returns true only for `bootstrap doctor` argv forms
 - unit test: helper returns false for `--help`, `bootstrap`, `bootstrap status`, `run`, and empty argv
-- smoke/integration test: source entrypoint can run `bootstrap doctor --json` under an unsupported-node simulation
-- smoke/integration test: `--help` still throws the existing strict version error under the same unsupported-node simulation
+- entrypoint test: source entrypoint can run `bootstrap doctor --json` under an unsupported-node environment without creating `.buildplane`
+- entrypoint test: `--help` still throws the existing strict version error under the same unsupported-node environment
+- README contract test: repo-dev, built, and published command surfaces mention `bootstrap doctor --json`
 
 **Step 2: Run the focused guard tests to verify failure**
 
 Run:
 
 ```bash
-npx vitest run apps/cli/test/version-guard.test.ts apps/cli/test/smoke.test.ts --testNamePattern='bootstrap doctor|node guard'
+npx vitest run apps/cli/test/version-guard.test.ts apps/cli/test/bootstrap-doctor.test.ts test/workflow/readme-contract.test.ts --testNamePattern='bootstrap doctor|node guard|command surface'
 ```
 
 Expected: FAIL because the bypass helper and entrypoint routing do not exist yet.
@@ -182,7 +184,7 @@ npx vitest run \
   apps/cli/test/bootstrap-doctor.test.ts \
   apps/cli/test/run-cli.test.ts \
   apps/cli/test/version-guard.test.ts \
-  apps/cli/test/smoke.test.ts \
+  test/workflow/readme-contract.test.ts \
   test/workflow/published-bootstrap-stage.test.ts \
   test/workflow/published-bootstrap-install.test.ts
 ```

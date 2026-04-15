@@ -182,6 +182,46 @@ function createFailingPacket(unitId = "unit-fail") {
 	};
 }
 
+function createBootstrapDoctorReport(ok = true) {
+	return {
+		ok,
+		checks: [
+			{
+				id: "node",
+				label: "Node.js",
+				ok,
+				required: true,
+				expected: "24.13.1",
+				detected: ok ? "24.13.1" : "22.22.2",
+				message: ok
+					? "detected 24.13.1 (requires 24.13.1)"
+					: "Buildplane requires Node 24.13.1. Detected 22.22.2.",
+			},
+			{
+				id: "npm",
+				label: "npm",
+				ok,
+				required: true,
+				command: "npm --version",
+				detected: ok ? "10.9.0" : undefined,
+				message: ok ? "npm 10.9.0" : "command not available",
+			},
+			{
+				id: "git",
+				label: "git",
+				ok,
+				required: true,
+				command: "git --version",
+				detected: ok ? "git version 2.49.0" : undefined,
+				message: ok ? "git version 2.49.0" : "command not available",
+			},
+		],
+		notes: [
+			"Published/global installs do not yet include a verified `buildplane memory ...` contract.",
+		],
+	};
+}
+
 afterEach(() => {
 	vi.restoreAllMocks();
 	vi.unstubAllEnvs();
@@ -198,7 +238,70 @@ describe("cli command surface", () => {
 		expect(result.stdout.join("\n")).toContain("Buildplane by SollanSystems");
 		expect(result.stdout.join("\n")).toContain("Execute:");
 		expect(result.stdout.join("\n")).toContain("init");
+		expect(result.stdout.join("\n")).toContain("bootstrap doctor");
 		expect(result.stdout.join("\n")).toContain("workflow scan");
+	});
+
+	it("bootstrap doctor prints a deterministic human prerequisite report before init", async () => {
+		const root = mkdtempSync(
+			join(tmpdir(), "buildplane-cli-bootstrap-doctor-human-"),
+		);
+
+		const result = await runCliCapture(root, ["bootstrap", "doctor"], {
+			inspectBootstrapDoctor: () => createBootstrapDoctorReport(true),
+		} as unknown as RunCliDependencies);
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stderr).toEqual([]);
+		expect(result.stdout).toContain("bootstrap-doctor: pass");
+		expect(result.stdout).toContain(
+			"  - [pass] node: detected 24.13.1 (requires 24.13.1)",
+		);
+		expect(result.stdout).toContain("  - [pass] npm: npm 10.9.0");
+		expect(result.stdout).toContain(
+			"  - Published/global installs do not yet include a verified `buildplane memory ...` contract.",
+		);
+		expect(existsSync(join(root, ".buildplane"))).toBe(false);
+	});
+
+	it("bootstrap doctor --json returns a failing report without creating .buildplane", async () => {
+		const root = mkdtempSync(
+			join(tmpdir(), "buildplane-cli-bootstrap-doctor-json-"),
+		);
+
+		const result = await runCliCapture(
+			root,
+			["bootstrap", "doctor", "--json"],
+			{
+				inspectBootstrapDoctor: () => createBootstrapDoctorReport(false),
+			} as unknown as RunCliDependencies,
+		);
+
+		expect(result.exitCode).toBe(1);
+		expect(result.stderr).toEqual([]);
+		expect(JSON.parse(result.stdout.join("\n"))).toEqual(
+			createBootstrapDoctorReport(false),
+		);
+		expect(existsSync(join(root, ".buildplane"))).toBe(false);
+	});
+
+	it("bootstrap doctor rejects unsupported extra arguments", async () => {
+		const root = mkdtempSync(
+			join(tmpdir(), "buildplane-cli-bootstrap-doctor-invalid-"),
+		);
+
+		const result = await runCliCapture(root, [
+			"bootstrap",
+			"doctor",
+			"unexpected",
+		]);
+
+		expect(result.exitCode).toBe(1);
+		expect(result.stdout).toEqual([]);
+		expect(result.stderr.join("\n")).toContain(
+			"Unsupported bootstrap doctor arguments: unexpected",
+		);
+		expect(existsSync(join(root, ".buildplane"))).toBe(false);
 	});
 
 	it("shows top-level help for --help", async () => {

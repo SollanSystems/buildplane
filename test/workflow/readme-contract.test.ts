@@ -43,6 +43,9 @@ const distributionSection = extractTopLevelSection(readme, "## Distribution");
 
 describe("README contract", () => {
 	it("documents the full repo development command surface in its own section", () => {
+		expect(repoDevelopmentSection).toContain(
+			"pnpm buildplane bootstrap doctor --json",
+		);
 		expect(repoDevelopmentSection).toContain("pnpm buildplane init");
 		expect(repoDevelopmentSection).toContain("pnpm buildplane run --packet");
 		expect(repoDevelopmentSection).toContain("pnpm buildplane status --json");
@@ -59,6 +62,9 @@ describe("README contract", () => {
 	});
 
 	it("documents the full in-repo built CLI command surface in its own section", () => {
+		expect(builtCliSection).toContain(
+			"node apps/cli/dist/index.js bootstrap doctor --json",
+		);
 		expect(builtCliSection).toContain("node apps/cli/dist/index.js init");
 		expect(builtCliSection).toContain(
 			"node apps/cli/dist/index.js run --packet",
@@ -83,6 +89,7 @@ describe("README contract", () => {
 			'tmp="$(mktemp)" && curl -fsSL https://raw.githubusercontent.com/SollanSystems/buildplane/main/scripts/published-bootstrap/install.sh -o "$tmp" && bash "$tmp"',
 		);
 		expect(distributionSection).toContain("npm install -g buildplane");
+		expect(distributionSection).toContain("buildplane bootstrap doctor --json");
 		expect(distributionSection).toContain("buildplane init");
 		expect(distributionSection).toContain(
 			"buildplane run --packet <path-to-packet.json>",

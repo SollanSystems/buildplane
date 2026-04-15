@@ -97,30 +97,30 @@ Add `bootstrap doctor` handling in `runCli()` near the existing pre-init surface
 
 This command should not load the orchestrator or require `.buildplane`.
 
-### 4. Doctor-only Node-guard bypass
+### 4. Doctor-only Node-guard bypass plus source-safe command path
 
 Today `apps/cli/src/index.ts` always calls `assertSupportedNodeVersion()` before importing the rest of the CLI.
 
-That makes a doctor command useless on unsupported Node.
+That makes a doctor command useless on unsupported Node unless the guard and the source import path are both narrowed carefully.
 
-Add a narrow helper in `version-guard.ts`:
+Add helpers in `version-guard.ts`:
 
 ```ts
 export function shouldBypassNodeVersionGuardForArgv(argv: readonly string[]): boolean
+export function assertPublishedCliNodeVersion(argv: readonly string[], current = process.versions.node): void
 ```
 
-Rule:
+Rules:
 
-- return `true` only for `bootstrap doctor` with or without `--json`
-- return `false` for everything else
+- return / bypass only for `bootstrap doctor` with or without `--json`
+- return false / throw normally for everything else
+- keep the published wrapper contract strict for all non-doctor commands
 
-Then update `apps/cli/src/index.ts` so that:
+Implementation note from this slice:
 
-- normal commands still call `assertSupportedNodeVersion()`
-- `bootstrap doctor` skips the hard throw and continues to import/run the CLI
-
-This is intentionally narrow.
-Do not relax the guard for `--help`, `bootstrap` without `doctor`, or any other command.
+- keep the published `dist/index.js` wrapper shape as close as possible to the existing contract
+- put the bypass logic inside the version guard rather than inventing a second published wrapper flow
+- keep `runCli()` source-safe by lazy-loading `packet-enrichment` only inside the commands that actually need it, so `bootstrap doctor` can run from source without requiring prebuilt structured-memory package outputs
 
 ## Testing strategy
 
@@ -135,8 +135,8 @@ Do not relax the guard for `--help`, `bootstrap` without `doctor`, or any other 
 - create: `apps/cli/test/bootstrap-doctor.test.ts`
 - modify: `apps/cli/test/run-cli.test.ts`
 - modify: `apps/cli/test/version-guard.test.ts`
-- modify: `apps/cli/test/smoke.test.ts`
-- modify only if staged contract coverage breaks due to the new entrypoint shape:
+- modify: `test/workflow/readme-contract.test.ts`
+- modify only if staged/published contract coverage needs alignment:
   - `test/workflow/published-bootstrap-stage.test.ts`
   - `test/workflow/published-bootstrap-install.test.ts`
 
@@ -149,7 +149,7 @@ npx vitest run \
   apps/cli/test/bootstrap-doctor.test.ts \
   apps/cli/test/run-cli.test.ts \
   apps/cli/test/version-guard.test.ts \
-  apps/cli/test/smoke.test.ts
+  test/workflow/readme-contract.test.ts
 ```
 
 If staged/published contract assertions need updates, expand to:
@@ -159,7 +159,7 @@ npx vitest run \
   apps/cli/test/bootstrap-doctor.test.ts \
   apps/cli/test/run-cli.test.ts \
   apps/cli/test/version-guard.test.ts \
-  apps/cli/test/smoke.test.ts \
+  test/workflow/readme-contract.test.ts \
   test/workflow/published-bootstrap-stage.test.ts \
   test/workflow/published-bootstrap-install.test.ts
 ```

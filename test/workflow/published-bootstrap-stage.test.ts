@@ -610,6 +610,7 @@ describe("published bootstrap staging", () => {
 			'tmp="$(mktemp)" && curl -fsSL https://raw.githubusercontent.com/SollanSystems/buildplane/main/scripts/published-bootstrap/install.sh -o "$tmp" && bash "$tmp"',
 		);
 		expect(publishedReadme).toContain("npm install -g buildplane");
+		expect(publishedReadme).toContain("buildplane bootstrap doctor --json");
 		expect(publishedReadme).toContain("buildplane init");
 		expect(publishedReadme).toContain(
 			"Published/global installs do not yet include a verified `buildplane memory ...` contract.",

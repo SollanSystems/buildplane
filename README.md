@@ -36,6 +36,7 @@ pnpm install
 Then use the workspace-local dev command directly from the repo root:
 
 ```bash
+pnpm buildplane bootstrap doctor --json
 pnpm buildplane init
 pnpm buildplane run --packet ./packet.json
 pnpm buildplane status --json
@@ -62,6 +63,7 @@ After building the project, you can run the CLI from the compiled output:
 
 ```bash
 pnpm build
+node apps/cli/dist/index.js bootstrap doctor --json
 node apps/cli/dist/index.js init
 node apps/cli/dist/index.js run --packet ./packet.json
 node apps/cli/dist/index.js status --json
@@ -90,6 +92,7 @@ If you prefer the explicit npm path, the published fallback/reference contract i
 
 ```bash
 npm install -g buildplane
+buildplane bootstrap doctor --json
 buildplane init
 buildplane run --packet <path-to-packet.json>
 buildplane status --json
