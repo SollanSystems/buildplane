@@ -1163,6 +1163,217 @@ describe("cli command surface", () => {
 		});
 	});
 
+	it("lists actionable workspaces in human and json output", async () => {
+		const root = createGitRepo();
+		await runCliCapture(root, ["init"]);
+		const storage = createBuildplaneStorage(root);
+		const workspaceAdapter = createActualGitWorkspaceAdapter();
+		const headSha = git(root, ["rev-parse", "HEAD"]).trim();
+
+		const retainedRun = storage.createRun({
+			...createPassingPacket("unit-workspace-retained"),
+		});
+		const retainedWorkspace = workspaceAdapter.prepareWorkspace(
+			root,
+			retainedRun.id,
+			headSha,
+		);
+		storage.recordWorkspacePrepared(retainedRun.id, {
+			path: retainedWorkspace.path,
+			headSha: retainedWorkspace.headSha,
+			sourceProjectRoot: root,
+		});
+		storage.commitRunFailureOutcome(retainedRun.id, {
+			decision: {
+				kind: "reject-run",
+				outcome: "rejected",
+				reasons: ["command exited with code 1"],
+			},
+			workspaceStatus: "retained",
+		});
+
+		const cleanupRun = storage.createRun({
+			...createPassingPacket("unit-workspace-cleanup-failed"),
+		});
+		const cleanupWorkspace = workspaceAdapter.prepareWorkspace(
+			root,
+			cleanupRun.id,
+			headSha,
+		);
+		storage.recordWorkspacePrepared(cleanupRun.id, {
+			path: cleanupWorkspace.path,
+			headSha: cleanupWorkspace.headSha,
+			sourceProjectRoot: root,
+		});
+		storage.markRunRunning(cleanupRun.id);
+		storage.commitRunSuccessOutcome(cleanupRun.id, {
+			kind: "advance-run",
+			outcome: "approved",
+			reasons: [],
+		});
+		storage.recordWorkspaceCleanupFailed(cleanupRun.id, "disk busy");
+
+		const human = await runCliCapture(root, ["workspace", "list"]);
+		const json = await runCliCapture(root, ["workspace", "list", "--json"]);
+
+		expect(human.exitCode).toBe(0);
+		expect(human.stdout.join("\n")).toContain(retainedRun.id);
+		expect(human.stdout.join("\n")).toContain(cleanupRun.id);
+		expect(human.stdout.join("\n")).toContain("retained");
+		expect(human.stdout.join("\n")).toContain("cleanup-failed");
+		expect(human.stdout.join("\n")).toContain("cleanup-error: disk busy");
+		expect(JSON.parse(json.stdout.join("\n"))).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					runId: retainedRun.id,
+					status: "retained",
+					path: retainedWorkspace.path,
+				}),
+				expect.objectContaining({
+					runId: cleanupRun.id,
+					status: "cleanup-failed",
+					path: cleanupWorkspace.path,
+					cleanupError: "disk busy",
+				}),
+			]),
+		);
+	});
+
+	it("cleans up retained workspaces and removes them from actionable status", async () => {
+		const root = createGitRepo();
+		await runCliCapture(root, ["init"]);
+		const packetPath = writeCommittedPacket(
+			root,
+			".buildplane/test-packets/cleanup-retained.json",
+			createFailingPacket("unit-cleanup-retained"),
+		);
+
+		const runResult = await runCliCapture(root, [
+			"run",
+			"--raw",
+			"--packet",
+			packetPath,
+		]);
+		const runId = extractRunId(runResult.stdout);
+		const cleanup = await runCliCapture(root, ["workspace", "cleanup", runId]);
+		const statusJson = await runCliCapture(root, ["status", "--json"]);
+		const inspectJson = await runCliCapture(root, ["inspect", runId, "--json"]);
+
+		expect(cleanup.exitCode).toBe(0);
+		expect(cleanup.stdout).toEqual(
+			expect.arrayContaining([
+				"workspace-cleanup: deleted",
+				`run-id: ${runId}`,
+			]),
+		);
+		expect(JSON.parse(statusJson.stdout.join("\n"))).toMatchObject({
+			actionableWorkspaces: [],
+		});
+		expect(JSON.parse(inspectJson.stdout.join("\n"))).toMatchObject({
+			workspace: {
+				status: "deleted",
+				existsOnDisk: false,
+			},
+		});
+	});
+
+	it("cleans up cleanup-failed workspaces and removes them from actionable status", async () => {
+		const root = createGitRepo();
+		await runCliCapture(root, ["init"]);
+		const storage = createBuildplaneStorage(root);
+		const workspaceAdapter = createActualGitWorkspaceAdapter();
+		const headSha = git(root, ["rev-parse", "HEAD"]).trim();
+
+		const run = storage.createRun({
+			...createPassingPacket("unit-cleanup-failed-operator"),
+		});
+		const preparedWorkspace = workspaceAdapter.prepareWorkspace(
+			root,
+			run.id,
+			headSha,
+		);
+		storage.recordWorkspacePrepared(run.id, {
+			path: preparedWorkspace.path,
+			headSha: preparedWorkspace.headSha,
+			sourceProjectRoot: root,
+		});
+		storage.markRunRunning(run.id);
+		storage.commitRunSuccessOutcome(run.id, {
+			kind: "advance-run",
+			outcome: "approved",
+			reasons: [],
+		});
+		storage.recordWorkspaceCleanupFailed(run.id, "disk busy");
+
+		const cleanup = await runCliCapture(root, [
+			"workspace",
+			"cleanup",
+			run.id,
+			"--json",
+		]);
+		const statusJson = await runCliCapture(root, ["status", "--json"]);
+		const inspectJson = await runCliCapture(root, [
+			"inspect",
+			run.id,
+			"--json",
+		]);
+
+		expect(cleanup.exitCode).toBe(0);
+		expect(JSON.parse(cleanup.stdout.join("\n"))).toMatchObject({
+			runId: run.id,
+			status: "deleted",
+			previousStatus: "cleanup-failed",
+			path: preparedWorkspace.path,
+		});
+		expect(JSON.parse(statusJson.stdout.join("\n"))).toMatchObject({
+			actionableWorkspaces: [],
+		});
+		expect(JSON.parse(inspectJson.stdout.join("\n"))).toMatchObject({
+			workspace: {
+				status: "deleted",
+				existsOnDisk: false,
+			},
+		});
+	});
+
+	it("returns stable errors for unknown and non-actionable workspace cleanup requests", async () => {
+		const root = createGitRepo();
+		await runCliCapture(root, ["init"]);
+		const storage = createBuildplaneStorage(root);
+		const run = storage.createRun({
+			...createPassingPacket("unit-workspace-active"),
+		});
+		const workspacePath = join(root, ".buildplane", "workspaces", run.id);
+		mkdirSync(workspacePath, { recursive: true });
+		storage.recordWorkspacePrepared(run.id, {
+			path: workspacePath,
+			headSha: "abc123",
+			sourceProjectRoot: root,
+		});
+
+		const unknown = await runCliCapture(root, [
+			"workspace",
+			"cleanup",
+			"missing-run",
+			"--json",
+		]);
+		const nonActionable = await runCliCapture(root, [
+			"workspace",
+			"cleanup",
+			run.id,
+			"--json",
+		]);
+
+		expect(unknown.exitCode).toBe(1);
+		expect(JSON.parse(unknown.stdout.join("\n"))).toMatchObject({
+			error: { code: "NOT_FOUND" },
+		});
+		expect(nonActionable.exitCode).toBe(1);
+		expect(JSON.parse(nonActionable.stdout.join("\n"))).toMatchObject({
+			error: { code: "WORKSPACE_NOT_ACTIONABLE" },
+		});
+	});
+
 	it("surfaces post-run infrastructure failures with run id, retained workspace, and explicit human error text", async () => {
 		const root = mkdtempSync(join(tmpdir(), "buildplane-cli-runtime-failure-"));
 		const retainedWorkspacePath = join(

@@ -245,6 +245,49 @@ export function formatRunHistory(entries: RunHistoryEntryLike[]): string[] {
 	return lines;
 }
 
+interface WorkspaceSummaryLike {
+	readonly runId: string;
+	readonly status: string;
+	readonly path: string;
+	readonly headSha?: string;
+	readonly cleanupError?: string;
+}
+
+export function formatWorkspaceList(entries: WorkspaceSummaryLike[]): string[] {
+	if (entries.length === 0) {
+		return ["No actionable workspaces."];
+	}
+
+	const lines: string[] = [];
+	lines.push(
+		`${"RUN ID".padEnd(38)} ${"STATUS".padEnd(16)} ${"HEAD".padEnd(12)} PATH`,
+	);
+	lines.push("─".repeat(110));
+	for (const entry of entries) {
+		lines.push(
+			`${entry.runId.padEnd(38)} ${entry.status.padEnd(16)} ${(entry.headSha ?? "-").padEnd(12)} ${entry.path}`,
+		);
+		if (entry.cleanupError) {
+			lines.push(`  cleanup-error: ${entry.cleanupError}`);
+		}
+	}
+	return lines;
+}
+
+export function formatWorkspaceCleanupResult(result: {
+	readonly runId: string;
+	readonly path: string;
+	readonly status: string;
+	readonly previousStatus: string;
+}): string[] {
+	return [
+		`workspace-cleanup: ${result.status}`,
+		`run-id: ${result.runId}`,
+		`workspace: ${result.path}`,
+		`previous-status: ${result.previousStatus}`,
+	];
+}
+
 interface ExecutionEventLike {
 	readonly kind: string;
 	readonly runId: string;
