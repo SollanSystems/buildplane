@@ -194,6 +194,7 @@ interface WorkspaceAwareStorageStore
 	commitRunSuccessOutcome(runId: string, decision: ApprovedPolicyDecision): Run;
 	recordWorkspaceDeleted(runId: string): void;
 	recordWorkspaceCleanupFailed(runId: string, message: string): void;
+	recordWorkspaceCleanedUp(runId: string): void;
 	getStatusSnapshot(): WorkspaceAwareStatusSnapshot;
 	inspectTarget(id: string): WorkspaceAwareInspectSnapshot;
 	getRunHistory(): RunHistoryEntry[];
@@ -2111,6 +2112,47 @@ export function createStorageStore(
 					appendEvent(
 						"workspace-cleanup-failed",
 						{ runId, status: "cleanup-failed", message },
+						database,
+					);
+				});
+			} finally {
+				database.close();
+			}
+		},
+
+		recordWorkspaceCleanedUp(runId) {
+			ensureInitialized();
+			const database = openStoreDatabase();
+			const finalizedAt = new Date().toISOString();
+
+			try {
+				runInTransaction(database, () => {
+					const workspaceRow = readWorkspaceRow(runId, database);
+					if (!workspaceRow) {
+						throw new Error(`No workspace found for run '${runId}'`);
+					}
+					if (
+						workspaceRow.status !== "retained" &&
+						workspaceRow.status !== "cleanup-failed"
+					) {
+						throw new Error(
+							"Workspace operator cleanup requires a retained or cleanup-failed workspace.",
+						);
+					}
+
+					database
+						.prepare(
+							`UPDATE workspaces SET status = ?, finalized_at = ?, cleanup_error = NULL WHERE run_id = ?`,
+						)
+						.run("deleted", finalizedAt, runId);
+					appendEvent(
+						"workspace-deleted",
+						{
+							runId,
+							status: "deleted",
+							previousStatus: workspaceRow.status,
+							cleanedBy: "operator",
+						},
 						database,
 					);
 				});

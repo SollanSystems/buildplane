@@ -12,6 +12,8 @@ import {
 	formatRunHistory,
 	formatRunResult,
 	formatStrategyRunResult,
+	formatWorkspaceCleanupResult,
+	formatWorkspaceList,
 } from "./formatters.js";
 import {
 	type PacketMemoryEnrichmentResult,
@@ -235,6 +237,8 @@ function formatTopLevelHelp(): string[] {
 		"",
 		"  Project:",
 		"    init                   Initialize .buildplane in this repo",
+		"    workspace list         Show actionable retained/cleanup-failed workspaces",
+		"    workspace cleanup <r>  Delete an actionable workspace by run id",
 		"    memory list            Show stored learnings",
 		"    memory inspect <id>    Detail for one learning",
 		"    memory <action>        Advanced memory operations (native)",
@@ -995,6 +999,130 @@ export async function runCli(
 			const { runDemo } = await import("./demo.js");
 			await runDemo({ model: modelFlag });
 			return 0;
+		}
+
+		if (command === "workspace") {
+			const subcommand = rest[0];
+			const json = rest.includes("--json");
+			const storage = (await cliImport("@buildplane/storage")) as unknown as {
+				createBuildplaneStorage: (root: string) => {
+					getStatusSnapshot: () => {
+						actionableWorkspaces?: Array<{
+							runId: string;
+							status: string;
+							path: string;
+							headSha?: string;
+							cleanupError?: string;
+						}>;
+					};
+					inspectTarget: (id: string) => {
+						workspace?: { status?: string; path?: string };
+					};
+					recordWorkspaceCleanedUp: (runId: string) => void;
+				};
+			};
+			const storageInst = storage.createBuildplaneStorage(cwd);
+
+			if (subcommand === "list") {
+				const actionableWorkspaces =
+					storageInst.getStatusSnapshot().actionableWorkspaces ?? [];
+				if (json) {
+					stdout(formatJson(actionableWorkspaces));
+				} else {
+					for (const line of formatWorkspaceList(actionableWorkspaces)) {
+						stdout(line);
+					}
+				}
+				return 0;
+			}
+
+			if (subcommand === "cleanup") {
+				const runId = rest.find(
+					(value) => value !== "cleanup" && value !== "--json",
+				);
+				if (!runId) {
+					const message = "Missing required run id for workspace cleanup.";
+					if (json) {
+						stdout(formatJson(formatJsonError("MISSING_ARGUMENT", message)));
+					} else {
+						stderr(message);
+					}
+					return 1;
+				}
+
+				const actionableWorkspaces =
+					storageInst.getStatusSnapshot().actionableWorkspaces ?? [];
+				const target = actionableWorkspaces.find(
+					(workspace) => workspace.runId === runId,
+				);
+				if (!target) {
+					let message = `No workspace found for run '${runId}'.`;
+					let code = "NOT_FOUND";
+					try {
+						const inspect = storageInst.inspectTarget(runId);
+						if (inspect.workspace?.status) {
+							message = `Workspace for run '${runId}' is not actionable.`;
+							code = "WORKSPACE_NOT_ACTIONABLE";
+						}
+					} catch {
+						// Leave as not-found
+					}
+					if (json) {
+						stdout(formatJson(formatJsonError(code, message)));
+					} else {
+						stderr(message);
+					}
+					return 1;
+				}
+
+				const adaptersGit = (await cliImport(
+					"@buildplane/adapters-git",
+				)) as unknown as {
+					createGitWorktreeAdapter: () => {
+						deleteWorkspace: (workspace: {
+							path: string;
+							projectRoot?: string;
+						}) => { deleted: boolean; cleanupError?: string };
+					};
+				};
+				const cleanupResult = adaptersGit
+					.createGitWorktreeAdapter()
+					.deleteWorkspace({
+						path: target.path,
+						projectRoot: cwd,
+					});
+				if (!cleanupResult.deleted) {
+					const message =
+						cleanupResult.cleanupError ??
+						`Workspace cleanup failed for run '${runId}'.`;
+					if (json) {
+						stdout(formatJson(formatJsonError("CLI_ERROR", message)));
+					} else {
+						stderr(message);
+					}
+					return 1;
+				}
+
+				storageInst.recordWorkspaceCleanedUp(runId);
+				const payload = {
+					runId,
+					path: target.path,
+					status: "deleted",
+					previousStatus: target.status,
+				};
+				if (json) {
+					stdout(formatJson(payload));
+				} else {
+					for (const line of formatWorkspaceCleanupResult(payload)) {
+						stdout(line);
+					}
+				}
+				return 0;
+			}
+
+			throw new Error(
+				`Unknown workspace command: ${subcommand ?? "(missing subcommand)"}`,
+			);
 		}
 
 		const bundle: CliOrchestratorBundle = deps?.createOrchestrator

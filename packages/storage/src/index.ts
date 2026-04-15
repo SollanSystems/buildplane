@@ -68,6 +68,7 @@ export interface BuildplaneStorage extends BuildplaneStoragePort {
 	commitRunSuccessOutcome(runId: string, decision: ApprovedPolicyDecision): Run;
 	recordWorkspaceDeleted(runId: string): void;
 	recordWorkspaceCleanupFailed(runId: string, message: string): void;
+	recordWorkspaceCleanedUp(runId: string): void;
 }
 
 export function createBuildplaneStorage(
