@@ -1,7 +1,9 @@
 use bp_host_sdk::{AuthState, HostBridgeAuthOwnership, HostBridgePlan, HostBridgeProtocol};
 use bp_memory::{ExplainedMemoryItem, MemoryItem, MemoryLink};
-use bp_pack_inspection::{DetectionSource, LoadedPackInspection, PackInspectionReport};
-use bp_runtime::{ExecutionRoute, RuntimeSelection, RuntimeSelectionProvenance};
+use bp_pack_inspection::{
+    selection_reason_for_report, DetectionSource, LoadedPackInspection, PackInspectionReport,
+};
+use bp_runtime::{ExecutionRoute, RuntimeSelection};
 use std::fmt::Write as _;
 
 pub fn render_selection(selection: &RuntimeSelection) -> String {
@@ -226,15 +228,7 @@ pub fn render_pack_inspection(inspection: &LoadedPackInspection) -> String {
 }
 
 fn selection_reason_for_display(report: &PackInspectionReport) -> String {
-    match (&report.detection_source, &report.selection.provenance) {
-        (
-            DetectionSource::CliOverride,
-            RuntimeSelectionProvenance::DetectedPreferredHost { matched_host },
-        ) => format!(
-            "matched preferred host '{matched_host}' from pack manifest using cli override (--detected-host)"
-        ),
-        _ => report.selection.reason(),
-    }
+    selection_reason_for_report(report)
 }
 
 fn render_bridge_plan(output: &mut String, plan: &HostBridgePlan) {

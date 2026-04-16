@@ -9,6 +9,7 @@ bp-host-registry.workspace = true
 bp-host-sdk.workspace = true
 bp-pack-loader.workspace = true
 bp-runtime.workspace = true
+serde.workspace = true
 
 [dev-dependencies]
 futures.workspace = true
