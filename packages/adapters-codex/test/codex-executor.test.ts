@@ -3,6 +3,7 @@ import { Readable } from "node:stream";
 import type { UnitPacket } from "@buildplane/kernel";
 import { createEventBus } from "@buildplane/kernel";
 import { describe, expect, it, vi } from "vitest";
+import { createCodexRenderer } from "../../adapters-models/src/renderers/index.js";
 import { createCodexExecutor } from "../src/codex-executor.js";
 
 // ---------------------------------------------------------------------------
@@ -173,6 +174,47 @@ describe("CodexExecutor", () => {
 		expect(promptArg).toContain("You are an expert.");
 		expect(promptArg).toContain("---");
 		expect(promptArg).toContain("Write a hello world file.");
+	});
+
+	it("renderer path folds injected memories into the codex prompt", async () => {
+		const mockSpawn = createMockSpawn({ exitCode: 0 });
+		const executor = createCodexExecutor({
+			renderer: createCodexRenderer(),
+			spawnFn: mockSpawn as never,
+		});
+		const eventBus = createEventBus();
+
+		const packet = makePacket({
+			intent: {
+				objective: "Write a hello world file.",
+				taskType: "implement",
+				context: {
+					files: ["output/result.txt"],
+					priorWork: [],
+					memories: ["[procedure] always write output/hello.js first"],
+				},
+				constraints: {
+					scope: ["output/"],
+					verification: ["test -f output/hello.js"],
+				},
+				features: {
+					ambiguity: "low",
+					reversibility: "easy",
+					verifierStrength: "strong",
+				},
+			},
+			model: {
+				provider: "codex",
+				model: "o4-mini",
+			},
+		});
+
+		await executor.executePacketAsync(packet, PROJECT_ROOT, eventBus);
+
+		const spawnArgs: string[] = mockSpawn.mock.calls[0][1] as string[];
+		const promptArg = spawnArgs[spawnArgs.length - 1];
+		expect(promptArg).toContain("<memories>");
+		expect(promptArg).toContain("always write output/hello.js first");
 	});
 
 	it("model and --model flag passed to codex CLI args", async () => {
