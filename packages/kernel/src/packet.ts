@@ -67,12 +67,14 @@ export function parseUnitPacket(input: string): UnitPacket {
 			) ?? [],
 	};
 
+	const intent = parseTaskIntent(packet.intent);
 	const routingHints = parseRoutingHints(packet.routingHints);
 
 	if (hasExecution) {
 		return {
 			unit,
 			execution: parseExecutionBlock(packet.execution),
+			...(intent === undefined ? {} : { intent }),
 			verification,
 			...(routingHints === undefined ? {} : { routingHints }),
 		};
@@ -81,8 +83,195 @@ export function parseUnitPacket(input: string): UnitPacket {
 	return {
 		unit,
 		model: parseModelBlock(packet.model),
+		...(intent === undefined ? {} : { intent }),
 		verification,
 		...(routingHints === undefined ? {} : { routingHints }),
+	};
+}
+
+function parseTaskIntent(
+	raw: unknown,
+): NonNullable<UnitPacket["intent"]> | undefined {
+	if (raw === undefined) {
+		return undefined;
+	}
+
+	const record = asRecord(raw, "packet.intent");
+	const contextRecord = asRecord(record.context ?? {}, "packet.intent.context");
+	const constraintsRecord = asRecord(
+		record.constraints ?? {},
+		"packet.intent.constraints",
+	);
+	const featuresRecord = asRecord(
+		record.features ?? {},
+		"packet.intent.features",
+	);
+
+	return {
+		objective: readRequiredString(record, "objective", "packet.intent"),
+		taskType: readRequiredString(
+			record,
+			"taskType",
+			"packet.intent",
+		) as NonNullable<UnitPacket["intent"]>["taskType"],
+		context: {
+			files:
+				readOptionalStringArray(
+					contextRecord,
+					"files",
+					"packet.intent.context",
+				) ?? [],
+			...(readOptionalStringArray(
+				contextRecord,
+				"priorWork",
+				"packet.intent.context",
+			) === undefined
+				? {}
+				: {
+						priorWork: readOptionalStringArray(
+							contextRecord,
+							"priorWork",
+							"packet.intent.context",
+						),
+					}),
+			...(readOptionalStringArray(
+				contextRecord,
+				"memories",
+				"packet.intent.context",
+			) === undefined
+				? {}
+				: {
+						memories: readOptionalStringArray(
+							contextRecord,
+							"memories",
+							"packet.intent.context",
+						),
+					}),
+			...(readOptionalString(
+				contextRecord,
+				"codebaseHints",
+				"packet.intent.context",
+			) === undefined
+				? {}
+				: {
+						codebaseHints: readOptionalString(
+							contextRecord,
+							"codebaseHints",
+							"packet.intent.context",
+						),
+					}),
+			...(readOptionalString(
+				contextRecord,
+				"retryContext",
+				"packet.intent.context",
+			) === undefined
+				? {}
+				: {
+						retryContext: readOptionalString(
+							contextRecord,
+							"retryContext",
+							"packet.intent.context",
+						),
+					}),
+		},
+		constraints: {
+			scope:
+				readOptionalStringArray(
+					constraintsRecord,
+					"scope",
+					"packet.intent.constraints",
+				) ?? [],
+			...(readOptionalStringArray(
+				constraintsRecord,
+				"forbidden",
+				"packet.intent.constraints",
+			) === undefined
+				? {}
+				: {
+						forbidden: readOptionalStringArray(
+							constraintsRecord,
+							"forbidden",
+							"packet.intent.constraints",
+						),
+					}),
+			verification:
+				readOptionalStringArray(
+					constraintsRecord,
+					"verification",
+					"packet.intent.constraints",
+				) ?? [],
+		},
+		features: {
+			ambiguity: readRequiredString(
+				featuresRecord,
+				"ambiguity",
+				"packet.intent.features",
+			) as NonNullable<UnitPacket["intent"]>["features"]["ambiguity"],
+			reversibility: readRequiredString(
+				featuresRecord,
+				"reversibility",
+				"packet.intent.features",
+			) as NonNullable<UnitPacket["intent"]>["features"]["reversibility"],
+			verifierStrength: readRequiredString(
+				featuresRecord,
+				"verifierStrength",
+				"packet.intent.features",
+			) as NonNullable<UnitPacket["intent"]>["features"]["verifierStrength"],
+			...(readOptionalString(
+				featuresRecord,
+				"language",
+				"packet.intent.features",
+			) === undefined
+				? {}
+				: {
+						language: readOptionalString(
+							featuresRecord,
+							"language",
+							"packet.intent.features",
+						),
+					}),
+			...(readOptionalString(
+				featuresRecord,
+				"framework",
+				"packet.intent.features",
+			) === undefined
+				? {}
+				: {
+						framework: readOptionalString(
+							featuresRecord,
+							"framework",
+							"packet.intent.features",
+						),
+					}),
+			...(readOptionalString(
+				featuresRecord,
+				"estimatedComplexity",
+				"packet.intent.features",
+			) === undefined
+				? {}
+				: {
+						estimatedComplexity: readOptionalString(
+							featuresRecord,
+							"estimatedComplexity",
+							"packet.intent.features",
+						) as NonNullable<
+							UnitPacket["intent"]
+						>["features"]["estimatedComplexity"],
+					}),
+			...(readOptionalNumber(
+				featuresRecord,
+				"changeSurface",
+				"packet.intent.features",
+			) === undefined
+				? {}
+				: {
+						changeSurface: readOptionalNumber(
+							featuresRecord,
+							"changeSurface",
+							"packet.intent.features",
+						),
+					}),
+		},
 	};
 }
 
@@ -227,6 +416,23 @@ function readOptionalString(
 
 	if (typeof value !== "string" || value.length === 0) {
 		throw new TypeError(`${label}.${key} must be a non-empty string`);
+	}
+
+	return value;
+}
+
+function readOptionalNumber(
+	record: Record<string, unknown>,
+	key: string,
+	label: string,
+): number | undefined {
+	const value = record[key];
+	if (value === undefined) {
+		return undefined;
+	}
+
+	if (typeof value !== "number" || !Number.isFinite(value)) {
+		throw new TypeError(`${label}.${key} must be a finite number`);
 	}
 
 	return value;

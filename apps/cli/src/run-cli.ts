@@ -14,14 +14,33 @@ import {
 	formatStrategyRunResult,
 } from "./formatters.js";
 import {
-	enrichGraphWithMemories,
-	enrichPacketWithMemories,
-	enrichStrategyWithMemories,
+	type PacketMemoryEnrichmentResult,
+	prepareGraphMemoryEnrichment,
+	preparePacketMemoryEnrichment,
+	prepareStrategyMemoryEnrichment,
 } from "./packet-enrichment.js";
 
 type StructuredMemoryPortLike = NonNullable<
-	Parameters<typeof enrichPacketWithMemories>[4]
+	Parameters<typeof preparePacketMemoryEnrichment>[4]
 >;
+type InjectedMemoryRecordLike =
+	PacketMemoryEnrichmentResult["injectedMemories"][number];
+
+interface PersistedInjectedMemoryRecordLike extends InjectedMemoryRecordLike {
+	readonly id: string;
+	readonly runId: string;
+	readonly createdAt: string;
+}
+
+interface StructuredMemoryStoragePortLike extends StructuredMemoryPortLike {
+	recordInjectedMemories(
+		runId: string,
+		records: readonly InjectedMemoryRecordLike[],
+	): void;
+	listInjectedMemories(
+		runId: string,
+	): readonly PersistedInjectedMemoryRecordLike[];
+}
 
 export interface RunCliDependencies {
 	createOrchestrator?: () => BuildplaneCliOrchestrator;
@@ -82,6 +101,98 @@ function resolveCurrentBranch(projectRoot: string): string | undefined {
 	}
 	const branch = result.stdout.trim();
 	return branch && branch !== "HEAD" ? branch : undefined;
+}
+
+function persistInjectedMemories(
+	storagePort: StructuredMemoryStoragePortLike | undefined,
+	runId: string,
+	records: readonly InjectedMemoryRecordLike[],
+): readonly PersistedInjectedMemoryRecordLike[] {
+	if (!storagePort || records.length === 0) {
+		return [];
+	}
+	storagePort.recordInjectedMemories(runId, records);
+	return [...storagePort.listInjectedMemories(runId)];
+}
+
+function withPersistedInjectedMemories<T extends { run: { id: string } }>(
+	result: T,
+	storagePort: StructuredMemoryStoragePortLike | undefined,
+	records: readonly InjectedMemoryRecordLike[],
+): T & { injectedMemories?: readonly PersistedInjectedMemoryRecordLike[] } {
+	const injectedMemories = persistInjectedMemories(
+		storagePort,
+		result.run.id,
+		records,
+	);
+	if (injectedMemories.length === 0) {
+		return result;
+	}
+	return {
+		...result,
+		injectedMemories,
+	};
+}
+
+function collectStrategyRunTargets(result: {
+	childResults: Map<string, { run?: { id?: string } }>;
+	rounds?: ReadonlyArray<Map<string, { run?: { id?: string } }>>;
+}): ReadonlyArray<{ unitId: string; runId?: string }> {
+	const targets: Array<{ unitId: string; runId?: string }> = [];
+	const addResults = (
+		entries: Iterable<[string, { run?: { id?: string } }]>,
+	) => {
+		for (const [unitId, childResult] of entries) {
+			targets.push({
+				unitId,
+				runId: childResult.run?.id,
+			});
+		}
+	};
+
+	for (const round of result.rounds ?? []) {
+		addResults(Array.from(round.entries()));
+	}
+	addResults(Array.from(result.childResults.entries()));
+	return targets;
+}
+
+type InjectedMemoryRecordsByUnitId = Record<
+	string,
+	readonly InjectedMemoryRecordLike[]
+>;
+
+function persistInjectedMemoriesForTargets(
+	storagePort: StructuredMemoryStoragePortLike | undefined,
+	targets: Iterable<{ unitId: string; runId?: string }>,
+	injectedMemoriesByUnitId: InjectedMemoryRecordsByUnitId,
+	preferredRunId?: string,
+): readonly PersistedInjectedMemoryRecordLike[] {
+	let persisted: readonly PersistedInjectedMemoryRecordLike[] = [];
+	const seen = new Set<string>();
+	for (const target of targets) {
+		const runId = target.runId;
+		const records = injectedMemoriesByUnitId[target.unitId];
+		if (!runId || runId === "unknown" || !records || records.length === 0) {
+			continue;
+		}
+		if (seen.has(runId)) {
+			continue;
+		}
+		seen.add(runId);
+		const current = persistInjectedMemories(storagePort, runId, records);
+		if (runId === preferredRunId && current.length > 0) {
+			persisted = current;
+			continue;
+		}
+		if (persisted.length === 0 && current.length > 0) {
+			persisted = current;
+		}
+		if (!preferredRunId && current.length > 0) {
+			persisted = current;
+		}
+	}
+	return persisted;
 }
 
 function formatTopLevelHelp(): string[] {
@@ -224,7 +335,7 @@ interface MemoryPortLike {
 interface CliOrchestratorBundle {
 	orchestrator: BuildplaneCliOrchestrator;
 	memoryPort?: MemoryPortLike;
-	structuredMemoryPort?: StructuredMemoryPortLike;
+	structuredMemoryPort?: StructuredMemoryStoragePortLike;
 	honchoAdapter?: HonchoPortLike;
 	userId?: string;
 	currentBranch?: string;
@@ -342,7 +453,7 @@ async function loadCliOrchestrator(
 
 	let memoryPortRef: MemoryPortLike | undefined;
 	let orchestratorMemoryPortRef: MemoryPortLike | undefined;
-	let structuredMemoryPortRef: StructuredMemoryPortLike | undefined;
+	let structuredMemoryPortRef: StructuredMemoryStoragePortLike | undefined;
 	let currentBranchRef: string | undefined;
 	try {
 		const {
@@ -352,7 +463,9 @@ async function loadCliOrchestrator(
 		} = (await import("@buildplane/storage")) as unknown as {
 			resolveProjectLayout: (root: string) => { stateDbPath: string };
 			createLearningStore: (db: unknown) => MemoryPortLike;
-			createBuildplaneStorage: (root: string) => StructuredMemoryPortLike;
+			createBuildplaneStorage: (
+				root: string,
+			) => StructuredMemoryStoragePortLike;
 		};
 		const { DatabaseSync } = await import("node:sqlite");
 		const layout = resolveProjectLayout(projectRoot);
@@ -905,7 +1018,7 @@ export async function runCli(
 				const packet = deps?.parsePacket
 					? deps.parsePacket(packetPath)
 					: await loadPacket(packetPath);
-				const enrichedPacket = await enrichPacketWithMemories(
+				const preparedPacket = await preparePacketMemoryEnrichment(
 					packet,
 					memoryPort,
 					honchoAdapter,
@@ -913,6 +1026,11 @@ export async function runCli(
 					structuredMemoryPort,
 					currentBranch,
 				);
+				const enrichedPacket = preparedPacket.packet;
+				const packetUnitId =
+					(enrichedPacket as { unit?: { id?: string } }).unit?.id ??
+					(packet as { unit?: { id?: string } }).unit?.id ??
+					"";
 
 				const useRaw = rest.includes("--raw");
 				const useJson = rest.includes("--json");
@@ -948,14 +1066,33 @@ export async function runCli(
 						strategy,
 						strategyBus,
 					);
+					const strategyTargets = collectStrategyRunTargets(
+						strategyResult as {
+							childResults: Map<string, { run?: { id?: string } }>;
+							rounds?: ReadonlyArray<Map<string, { run?: { id?: string } }>>;
+						},
+					);
+					const injectedMemories = persistInjectedMemoriesForTargets(
+						structuredMemoryPort,
+						strategyTargets,
+						preparedPacket.injectedMemories.length > 0
+							? { [packetUnitId]: preparedPacket.injectedMemories }
+							: {},
+						strategyResult.winnerRunId,
+					);
+					const strategyOutput =
+						injectedMemories.length > 0
+							? {
+									...strategyResult,
+									injectedMemories,
+								}
+							: strategyResult;
 
 					if (useJson) {
-						stdout(
-							formatJson(strategyResult as unknown as Record<string, unknown>),
-						);
+						stdout(formatJson(strategyOutput as Record<string, unknown>));
 					} else {
 						for (const line of formatStrategyRunResult(
-							strategyResult as Parameters<typeof formatStrategyRunResult>[0],
+							strategyOutput as Parameters<typeof formatStrategyRunResult>[0],
 						)) {
 							stdout(line);
 						}
@@ -972,12 +1109,21 @@ export async function runCli(
 
 				if (useAsync && !useTui) {
 					// Model packets auto-switch to async (no TUI)
-					const result = await orchestrator.runPacketAsync(enrichedPacket);
+					const result = withPersistedInjectedMemories(
+						await orchestrator.runPacketAsync(enrichedPacket),
+						structuredMemoryPort,
+						preparedPacket.injectedMemories,
+					);
+					const resultRecord = result as unknown as Record<string, unknown>;
 
-					for (const line of formatRunResult(
-						result as { run: { id: string; status: string } },
-					)) {
-						stdout(line);
+					if (useJson) {
+						stdout(formatJson(resultRecord));
+					} else {
+						for (const line of formatRunResult(
+							result as { run: { id: string; status: string } },
+						)) {
+							stdout(line);
+						}
 					}
 
 					return (result as { run: { status: string } }).run.status === "passed"
@@ -1029,20 +1175,33 @@ export async function runCli(
 						enrichedPacket,
 						tuiBus,
 					);
+					persistInjectedMemories(
+						structuredMemoryPort,
+						result.run.id,
+						preparedPacket.injectedMemories,
+					);
 					await tuiInstance.waitUntilExit();
 
 					return result.run.status === "passed" ? 0 : 1;
 				}
 
-				const result = useAsync
-					? await orchestrator.runPacketAsync(enrichedPacket, undefined)
-					: orchestrator.runPacket(enrichedPacket);
+				const result = withPersistedInjectedMemories(
+					useAsync
+						? await orchestrator.runPacketAsync(enrichedPacket, undefined)
+						: orchestrator.runPacket(enrichedPacket),
+					structuredMemoryPort,
+					preparedPacket.injectedMemories,
+				);
 
 				const resultRecord = result as unknown as Record<string, unknown>;
 				const hasFailed =
 					resultRecord.failure && typeof resultRecord.failure === "object";
-				for (const line of formatRunResult(result)) {
-					stdout(line);
+				if (useJson) {
+					stdout(formatJson(resultRecord));
+				} else {
+					for (const line of formatRunResult(result)) {
+						stdout(line);
+					}
 				}
 				if (hasFailed) {
 					const f = resultRecord.failure as { message?: string };
@@ -1273,7 +1432,7 @@ export async function runCli(
 					unknown
 				>;
 				const graph = normalizeGraph(rawGraph);
-				const enrichedGraph = await enrichGraphWithMemories(
+				const preparedGraph = await prepareGraphMemoryEnrichment(
 					graph as Record<string, unknown>,
 					memoryPort,
 					honchoAdapter,
@@ -1291,8 +1450,16 @@ export async function runCli(
 				const graphBus = kernel.createEventBus();
 
 				const graphResult = await orchestrator.runGraphAsync(
-					enrichedGraph,
+					preparedGraph.graph,
 					graphBus,
+				);
+				persistInjectedMemoriesForTargets(
+					structuredMemoryPort,
+					graphResult.nodes.map((node) => ({
+						unitId: node.unitId,
+						runId: node.runId,
+					})),
+					preparedGraph.injectedMemoriesByUnitId,
 				);
 
 				stdout(`Graph Outcome: ${graphResult.outcome}`);
@@ -1318,7 +1485,7 @@ export async function runCli(
 
 				const rawStrategy = JSON.parse(readFileSync(strategyPath, "utf8"));
 				const strategy = kernel.parseStrategyPacket(rawStrategy);
-				const enrichedStrategy = await enrichStrategyWithMemories(
+				const preparedStrategy = await prepareStrategyMemoryEnrichment(
 					strategy as Record<string, unknown>,
 					memoryPort,
 					honchoAdapter,
@@ -1329,27 +1496,47 @@ export async function runCli(
 				const strategyBus = kernel.createEventBus();
 
 				const strategyResult = await orchestrator.runStrategy(
-					enrichedStrategy,
+					preparedStrategy.strategy,
 					strategyBus,
 				);
+				const strategyTargets = [
+					...Array.from(
+						(strategyResult.rounds ?? []).flatMap((round) =>
+							Array.from(round.entries()).map(([unitId, childResult]) => ({
+								unitId,
+								runId: childResult.run.id,
+							})),
+						),
+					),
+					...Array.from(strategyResult.childResults.entries()).map(
+						([unitId, childResult]) => ({
+							unitId,
+							runId: childResult.run.id,
+						}),
+					),
+				];
+				const injectedMemories = persistInjectedMemoriesForTargets(
+					structuredMemoryPort,
+					strategyTargets,
+					preparedStrategy.injectedMemoriesByUnitId,
+					strategyResult.winnerRunId,
+				);
+				const strategyOutput =
+					injectedMemories.length > 0
+						? {
+								...strategyResult,
+								injectedMemories,
+							}
+						: strategyResult;
 
 				const json = rest.includes("--json");
 				if (json) {
-					stdout(
-						formatJson(strategyResult as unknown as Record<string, unknown>),
-					);
+					stdout(formatJson(strategyOutput as Record<string, unknown>));
 				} else {
-					stdout(`Strategy: ${strategyResult.strategyId}`);
-					stdout(`Mode: ${strategyResult.mode}`);
-					stdout(`Outcome: ${strategyResult.outcome}`);
-					stdout(
-						`Merge: ${strategyResult.mergeDecision.policy} → ${strategyResult.mergeDecision.outcome}`,
-					);
-					if (strategyResult.winnerRunId) {
-						stdout(`Winner Run: ${strategyResult.winnerRunId}`);
-					}
-					for (const reason of strategyResult.mergeDecision.reasons) {
-						stdout(`  reason: ${reason}`);
+					for (const line of formatStrategyRunResult(
+						strategyOutput as Parameters<typeof formatStrategyRunResult>[0],
+					)) {
+						stdout(line);
 					}
 				}
 

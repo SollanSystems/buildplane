@@ -99,8 +99,10 @@ export type {
 	ApprovedPolicyDecision,
 	CommandExecutionBlock,
 	ExecutionReceipt,
+	InjectedMemoryRecord,
 	InspectSnapshot,
 	ModelExecutionBlock,
+	PersistedInjectedMemoryRecord,
 	OutputCheck,
 	PolicyDecision,
 	RejectedPolicyDecision,
@@ -114,6 +116,7 @@ export type {
 	WorkspaceSnapshot,
 } from "./run-loop.ts";
 export type { StrategyOrchestrator } from "./strategy-executor.ts";
+
 export type {
 	ExecutionRole,
 	MergeDecision,
