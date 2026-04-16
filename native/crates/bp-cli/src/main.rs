@@ -2,7 +2,10 @@ mod memory_cli;
 
 #[cfg(test)]
 use bp_memory::{MemoryKind, MemoryScope};
-use bp_pack_inspection::{collect_process_env, inspect_pack, InspectPackRequest};
+use bp_pack_inspection::{
+    collect_process_env, inspect_pack, pack_inspection_json, InspectPackRequest,
+    LoadedPackInspection,
+};
 use bp_ui_terminal::render_pack_inspection;
 use futures::executor::block_on;
 use memory_cli::{memory_usage_text, parse_memory_command, run_memory_command, MemoryCommand};
@@ -28,6 +31,7 @@ struct InspectPackArgs {
     explicit_host: Option<String>,
     explicit_provider: Option<String>,
     detected_hosts: Vec<String>,
+    json: bool,
 }
 
 impl InspectPackArgs {
@@ -68,10 +72,23 @@ fn run() -> Result<(), String> {
 }
 
 fn run_inspect_pack(args: InspectPackArgs) -> Result<(), String> {
+    let json = args.json;
     let request = args.into_request(collect_process_env());
     let inspection = block_on(inspect_pack(&request))?;
-    println!("{}", render_pack_inspection(&inspection));
+    println!("{}", render_pack_inspection_output(&inspection, json)?);
     Ok(())
+}
+
+fn render_pack_inspection_output(
+    inspection: &LoadedPackInspection,
+    json: bool,
+) -> Result<String, String> {
+    if json {
+        serde_json::to_string_pretty(&pack_inspection_json(inspection))
+            .map_err(|err| format!("failed to serialize pack inspection as json: {err}"))
+    } else {
+        Ok(render_pack_inspection(inspection))
+    }
 }
 
 fn parse_args_from_iter<I, T>(iter: I) -> Result<Command, String>
@@ -153,6 +170,7 @@ where
     let mut explicit_host = None;
     let mut explicit_provider = None;
     let mut detected_hosts = Vec::new();
+    let mut json = false;
 
     while let Some(flag) = args.next() {
         let flag = parse_string(flag, "flag")?;
@@ -178,6 +196,7 @@ where
                     "detected host",
                 )?);
             }
+            "--json" => json = true,
             "--help" | "-h" => return Ok(Command::Help),
             other => return Err(format!("unknown flag '{other}'")),
         }
@@ -190,6 +209,7 @@ where
         explicit_host,
         explicit_provider,
         detected_hosts,
+        json,
     }))
 }
 
@@ -228,13 +248,14 @@ fn is_help_flag(value: &str) -> bool {
 fn usage_text() -> String {
     format!(
         "Usage:
-  buildplane-native pack show <pack-id> [--native-root <path>] [--workspace-root <path>] [--host <id>] [--provider <id>] [--detected-host <id>]...
+  buildplane-native pack show <pack-id> [--native-root <path>] [--workspace-root <path>] [--host <id>] [--provider <id>] [--detected-host <id>]... [--json]
   buildplane-native memory <action> [options]
 
 Examples:
   cargo run --manifest-path native/Cargo.toml -p bp-cli -- pack show superclaude
   CLAUDE_CODE=1 cargo run --manifest-path native/Cargo.toml -p bp-cli -- pack show superclaude
   cargo run --manifest-path native/Cargo.toml -p bp-cli -- pack show superclaude --detected-host codex --workspace-root /tmp/buildplane-test-workspace
+  cargo run --manifest-path native/Cargo.toml -p bp-cli -- pack show superclaude --json
   cargo run --manifest-path native/Cargo.toml -p bp-cli -- memory remember \"User prefers concise output\" --scope user --kind preference
 
 {}",
@@ -267,6 +288,7 @@ mod tests {
             explicit_host: None,
             explicit_provider: None,
             detected_hosts: Vec::new(),
+            json: false,
         }
     }
 
@@ -311,6 +333,7 @@ mod tests {
                 explicit_host: Some("claude".to_string()),
                 explicit_provider: Some("anthropic".to_string()),
                 detected_hosts: vec!["codex".to_string(), "claude".to_string()],
+                json: false,
             })
         );
     }
@@ -341,6 +364,30 @@ mod tests {
                 explicit_host: Some("claude".to_string()),
                 explicit_provider: None,
                 detected_hosts: Vec::new(),
+                json: false,
+            })
+        );
+    }
+
+    #[test]
+    fn parses_pack_show_with_json() {
+        let native_root = PathBuf::from("/tmp/buildplane/native");
+        let command = parse_args_with_default_native_root(
+            vec!["pack", "show", "superclaude", "--json"],
+            native_root.clone(),
+        )
+        .expect("command should parse");
+
+        assert_eq!(
+            command,
+            Command::InspectPack(InspectPackArgs {
+                pack_id: "superclaude".to_string(),
+                native_root,
+                workspace_root: PathBuf::from("/tmp/buildplane"),
+                explicit_host: None,
+                explicit_provider: None,
+                detected_hosts: Vec::new(),
+                json: true,
             })
         );
     }
@@ -365,6 +412,7 @@ mod tests {
             explicit_host: Some("claude".to_string()),
             explicit_provider: Some("anthropic".to_string()),
             detected_hosts: vec!["claude".to_string()],
+            json: false,
         };
 
         let request = args.into_request(env_map_for_test(&[("CLAUDE_CODE", "1")]));
@@ -391,6 +439,27 @@ mod tests {
         assert!(rendered.contains("Buildplane native host-aware pack inspection"));
         assert!(rendered.contains("selected route: host:claude"));
         assert!(rendered.contains("bridge plan:"));
+    }
+
+    #[test]
+    fn cli_smoke_test_can_render_shared_inspection_as_json() {
+        let request = inspect_args_for_test("superclaude")
+            .into_request(env_map_for_test(&[("CLAUDE_CODE", "1")]));
+        let inspection = block_on(inspect_pack(&request)).expect("inspection should succeed");
+        let rendered =
+            render_pack_inspection_output(&inspection, true).expect("json rendering should work");
+        let payload: serde_json::Value =
+            serde_json::from_str(&rendered).expect("pack inspection json should parse");
+
+        assert_eq!(payload["pack"]["id"], "superclaude");
+        assert_eq!(payload["detectionSource"], "environment");
+        assert_eq!(
+            payload["selectionReason"],
+            "detected preferred host 'claude' from pack manifest"
+        );
+        assert_eq!(payload["selection"]["route"]["route"], "host");
+        assert_eq!(payload["selection"]["route"]["value"], "claude");
+        assert!(payload["bridgePlan"].is_object());
     }
 
     #[test]
