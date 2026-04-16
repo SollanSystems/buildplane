@@ -3,6 +3,7 @@ import {
 	formatInspectDetail,
 	formatLearningDetail,
 	formatLearningsList,
+	formatRunHistory,
 	formatRunResult,
 } from "../src/formatters.js";
 
@@ -88,6 +89,27 @@ describe("formatRunResult", () => {
 	});
 });
 
+describe("formatRunHistory", () => {
+	it("includes strategy ids and memory provenance summaries", () => {
+		const lines = formatRunHistory([
+			{
+				id: "run-xyz",
+				unitId: "implement-foo",
+				status: "passed",
+				strategyId: "strategy-injected",
+				injectedMemoryCount: 2,
+				promotedStructuredMemoryCount: 1,
+				createdAt: "2026-04-14T01:02:03Z",
+			},
+		]);
+
+		expect(lines[0]).toContain("STRATEGY");
+		expect(lines[0]).toContain("MEM");
+		expect(lines[2]).toContain("strategy-injected");
+		expect(lines[2]).toContain("mem=2/1");
+	});
+});
+
 describe("formatInspectDetail", () => {
 	const baseSnapshot = {
 		kind: "run",
@@ -168,6 +190,19 @@ describe("formatInspectDetail", () => {
 		expect(lines.join("\n")).toContain(
 			"[procedure] implement-then-review workflow for implement tasks: Use an implement-then-review workflow for implement tasks.\\n\\u001b[31mObserved learning (status=active, rule=multi-round-strategy-workflow->procedure, source-task=task-implementer)",
 		);
+	});
+
+	it("includes strategy lineage when present", () => {
+		const lines = formatInspectDetail(
+			{
+				...baseSnapshot,
+				strategy: {
+					strategyId: "strategy-injected",
+				},
+			},
+			[],
+		);
+		expect(lines).toContain("strategy: strategy-injected");
 	});
 
 	it("omits learnings section when no learnings provided", () => {

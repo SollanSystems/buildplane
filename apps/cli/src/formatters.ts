@@ -212,6 +212,9 @@ interface RunHistoryEntryLike {
 	readonly id: string;
 	readonly unitId: string;
 	readonly status: string;
+	readonly strategyId?: string;
+	readonly injectedMemoryCount?: number;
+	readonly promotedStructuredMemoryCount?: number;
 	readonly createdAt: string;
 	readonly completedAt?: string;
 }
@@ -223,14 +226,19 @@ export function formatRunHistory(entries: RunHistoryEntryLike[]): string[] {
 
 	const lines: string[] = [];
 	lines.push(
-		`${"RUN ID".padEnd(38)} ${"UNIT".padEnd(24)} ${"STATUS".padEnd(10)} CREATED`,
+		`${"RUN ID".padEnd(38)} ${"UNIT".padEnd(24)} ${"STATUS".padEnd(10)} ${"STRATEGY".padEnd(24)} ${"MEM".padEnd(8)} CREATED`,
 	);
-	lines.push("─".repeat(90));
+	lines.push("─".repeat(130));
 
 	for (const entry of entries) {
 		const created = entry.createdAt.replace("T", " ").slice(0, 19);
+		const strategy = (entry.strategyId ?? "-").padEnd(24);
+		const memorySummary =
+			`mem=${entry.injectedMemoryCount ?? 0}/${entry.promotedStructuredMemoryCount ?? 0}`.padEnd(
+				8,
+			);
 		lines.push(
-			`${entry.id.padEnd(38)} ${entry.unitId.padEnd(24)} ${entry.status.padEnd(10)} ${created}`,
+			`${entry.id.padEnd(38)} ${entry.unitId.padEnd(24)} ${entry.status.padEnd(10)} ${strategy} ${memorySummary} ${created}`,
 		);
 	}
 
@@ -251,6 +259,9 @@ interface InspectSnapshotLike {
 		readonly id: string;
 		readonly unitId: string;
 		readonly status: string;
+	};
+	readonly strategy?: {
+		readonly strategyId: string;
 	};
 	readonly evidence: readonly {
 		readonly kind: string;
@@ -280,6 +291,11 @@ export function formatInspectDetail(
 	lines.push(`run-id: ${snapshot.run.id}`);
 	lines.push(`unit-id: ${snapshot.run.unitId}`);
 	lines.push(`status: ${snapshot.run.status}`);
+	if (snapshot.strategy?.strategyId) {
+		lines.push(
+			`strategy: ${sanitizeTerminalText(snapshot.strategy.strategyId)}`,
+		);
+	}
 
 	const s = snapshot as unknown as Record<string, unknown>;
 	if (s.workspace && typeof s.workspace === "object") {

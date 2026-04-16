@@ -609,6 +609,65 @@ describe("storage adapter", () => {
 		]);
 	});
 
+	it("surfaces strategy lineage and memory summary counts in inspect and history", () => {
+		const root = mkdtempSync(
+			join(tmpdir(), "buildplane-store-strategy-history-"),
+		);
+		const storage = createBuildplaneStorage(root);
+		storage.initializeProject();
+
+		const run = storage.createRun(
+			{
+				...packet,
+				unit: { ...packet.unit, id: "unit-strategy-history" },
+			},
+			{ strategyId: "strategy-injected" },
+		);
+		storage.completeRun(run.id, "passed");
+		storage.recordInjectedMemories(run.id, [
+			{
+				memoryKind: "repo-fact",
+				memoryId: "fact-1",
+				displayText: "[repo-fact] commands.typecheck: npx pnpm typecheck",
+				matchReason: "fuzzy-fact-key",
+				matchClass: "fuzzy",
+			},
+			{
+				memoryKind: "procedure",
+				memoryId: "procedure-1",
+				displayText: "[procedure] fix TypeScript build: Run typecheck first.",
+				matchReason: "exact-task-type",
+				matchClass: "exact",
+			},
+		]);
+		storage.createProcedure({
+			name: "implement-then-review workflow for implement tasks",
+			taskType: "implement",
+			bodyMarkdown:
+				"Use an implement-then-review workflow for implement tasks.\n\nObserved learning: missing type guards.",
+			createdBy: "worker",
+			sourceRunId: run.id,
+			sourceTaskId: "task-implementer",
+			metadata: {
+				promotionRule: "multi-round-strategy-workflow->procedure",
+				strategyMode: "implement-then-review",
+			},
+		});
+
+		const inspect = storage.inspectTarget(run.id);
+		const unitInspect = storage.inspectTarget("unit-strategy-history");
+		const history = storage.getRunHistory();
+
+		expect(inspect.strategy).toEqual({ strategyId: "strategy-injected" });
+		expect(unitInspect.strategy).toEqual({ strategyId: "strategy-injected" });
+		expect(history[0]).toMatchObject({
+			id: run.id,
+			strategyId: "strategy-injected",
+			injectedMemoryCount: 2,
+			promotedStructuredMemoryCount: 1,
+		});
+	});
+
 	it("surfaces promoted procedure lineage in inspect snapshots, including superseded records", () => {
 		const root = mkdtempSync(
 			join(tmpdir(), "buildplane-store-promotion-lineage-"),

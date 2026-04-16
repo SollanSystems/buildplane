@@ -157,6 +157,9 @@ type WorkspaceAwareStatusSnapshot = StatusSnapshot & {
 
 type WorkspaceAwareInspectSnapshot = InspectSnapshot & {
 	readonly workspace?: WorkspaceSnapshot;
+	readonly strategy?: {
+		readonly strategyId: string;
+	};
 	readonly injectedMemories?: readonly PersistedInjectedMemoryRecord[];
 	readonly promotedStructuredMemories?: readonly PromotedStructuredMemoryRecord[];
 };
@@ -194,6 +197,7 @@ interface WorkspaceAwareStorageStore
 	getStatusSnapshot(): WorkspaceAwareStatusSnapshot;
 	inspectTarget(id: string): WorkspaceAwareInspectSnapshot;
 	getRunHistory(): RunHistoryEntry[];
+	recordRunStrategyId(runId: string, strategyId: string): void;
 	getPacketSnapshot(runId: string): UnitPacket | null;
 }
 
@@ -669,6 +673,9 @@ export interface RunHistoryEntry {
 	readonly id: string;
 	readonly unitId: string;
 	readonly status: RunStatus;
+	readonly strategyId?: string;
+	readonly injectedMemoryCount: number;
+	readonly promotedStructuredMemoryCount: number;
 	readonly createdAt: string;
 	readonly completedAt?: string;
 }
@@ -844,6 +851,28 @@ export function createStorageStore(
 			unitId: row.unit_id,
 			status: row.status,
 		};
+	}
+
+	function toStrategySummary(row: StoredRunRow):
+		| {
+				readonly strategyId: string;
+		  }
+		| undefined {
+		return row.strategy_id ? { strategyId: row.strategy_id } : undefined;
+	}
+
+	function countInjectedMemories(
+		runId: string,
+		database: DatabaseSync,
+	): number {
+		return readInjectedMemoryRows(runId, database).length;
+	}
+
+	function countPromotedStructuredMemories(
+		runId: string,
+		database: DatabaseSync,
+	): number {
+		return readPromotedStructuredMemoryRows(runId, database).length;
 	}
 
 	function toRepoFact(row: StoredRepoFactRow): RepoFact {
@@ -2774,7 +2803,7 @@ export function createStorageStore(
 			try {
 				const runRow = database
 					.prepare(
-						`SELECT id, unit_id, status, unit_snapshot, used_workspace FROM runs WHERE id = ?`,
+						`SELECT id, unit_id, status, unit_snapshot, used_workspace, parent_run_id, strategy_id FROM runs WHERE id = ?`,
 					)
 					.get(id) as StoredRunRow | undefined;
 
@@ -2793,6 +2822,7 @@ export function createStorageStore(
 						unit,
 						run: toRun(runRow),
 						workspace: readWorkspaceSnapshot(runRow.id, database),
+						strategy: toStrategySummary(runRow),
 						injectedMemories: readInjectedMemoryRows(runRow.id, database),
 						promotedStructuredMemories: readPromotedStructuredMemoryRows(
 							runRow.id,
@@ -2825,6 +2855,7 @@ export function createStorageStore(
 						unit,
 						run: toRun(run),
 						workspace: readWorkspaceSnapshot(run.id, database),
+						strategy: toStrategySummary(run),
 						injectedMemories: readInjectedMemoryRows(run.id, database),
 						promotedStructuredMemories: readPromotedStructuredMemoryRows(
 							run.id,
@@ -2848,27 +2879,51 @@ export function createStorageStore(
 			ensureInitialized();
 			const database = openStoreDatabase();
 
-			const rows = database
-				.prepare(
-					`SELECT id, unit_id, status, created_at, completed_at FROM runs ORDER BY created_at DESC, rowid DESC`,
-				)
-				.all() as unknown as {
-				id: string;
-				unit_id: string;
-				status: RunStatus;
-				created_at: string;
-				completed_at: string | null;
-			}[];
+			try {
+				const rows = database
+					.prepare(
+						`SELECT id, unit_id, status, strategy_id, created_at, completed_at FROM runs ORDER BY created_at DESC, rowid DESC`,
+					)
+					.all() as unknown as {
+					id: string;
+					unit_id: string;
+					status: RunStatus;
+					strategy_id: string | null;
+					created_at: string;
+					completed_at: string | null;
+				}[];
 
-			database.close();
+				return rows.map((row) => ({
+					id: row.id,
+					unitId: row.unit_id,
+					status: row.status,
+					strategyId: row.strategy_id ?? undefined,
+					injectedMemoryCount: countInjectedMemories(row.id, database),
+					promotedStructuredMemoryCount: countPromotedStructuredMemories(
+						row.id,
+						database,
+					),
+					createdAt: row.created_at,
+					completedAt: row.completed_at ?? undefined,
+				}));
+			} finally {
+				database.close();
+			}
+		},
 
-			return rows.map((row) => ({
-				id: row.id,
-				unitId: row.unit_id,
-				status: row.status,
-				createdAt: row.created_at,
-				completedAt: row.completed_at ?? undefined,
-			}));
+		recordRunStrategyId(runId: string, strategyId: string): void {
+			ensureInitialized();
+			const database = openStoreDatabase();
+			try {
+				readRun(runId, database);
+				database
+					.prepare(
+						`UPDATE runs SET strategy_id = ?, updated_at = ? WHERE id = ?`,
+					)
+					.run(strategyId, new Date().toISOString(), runId);
+			} finally {
+				database.close();
+			}
 		},
 
 		getPacketSnapshot(runId: string): UnitPacket | null {
