@@ -1,9 +1,8 @@
 use bp_memory::{
-    EffectiveMemoryContext, EffectiveMemoryPolicy, ExplainedMemoryItem, MemoryItem, MemoryKind,
-    MemoryLinkRelation, MemoryQuery, MemoryScope, MemoryService, PromoteMemoryInput,
-    RememberMemoryInput,
+    EffectiveMemoryContext, ExplainedMemoryItem, MemoryItem, MemoryKind, MemoryLinkRelation,
+    MemoryQuery, MemoryScope, MemoryService, PromoteMemoryInput, RememberMemoryInput,
 };
-use bp_pack_loader::load_pack_from_native_root;
+use bp_pack_inspection::effective_memory_policy_for_pack;
 use bp_storage_sqlite::{
     MemoryDoctorReport, MemoryExportBundle, MemoryImportReport, MemoryPruneReport,
     SqliteMemoryStore,
@@ -814,7 +813,7 @@ fn run_inspect(args: InspectMemoryArgs, overrides: &ExecutionOverrides) -> Resul
                     session_scope_key: args.session_id.clone(),
                     include_forgotten: args.include_forgotten,
                 },
-                effective_policy_for_pack(&args.native_root, args.pack_id.as_deref())?,
+                effective_memory_policy_for_pack(&args.native_root, args.pack_id.as_deref())?,
             )
             .map_err(|err| err.to_string())?;
         return Ok(render_output(&items, args.json, render_memory_list(&items)));
@@ -860,7 +859,7 @@ fn run_explain(args: ExplainMemoryArgs, overrides: &ExecutionOverrides) -> Resul
                     session_scope_key: args.session_id.clone(),
                     include_forgotten: args.include_forgotten,
                 },
-                effective_policy_for_pack(&args.native_root, args.pack_id.as_deref())?,
+                effective_memory_policy_for_pack(&args.native_root, args.pack_id.as_deref())?,
             )
             .map_err(|err| err.to_string())?;
         return Ok(render_output(
@@ -1048,22 +1047,6 @@ fn open_store(
         None => SqliteMemoryStore::open_under_workspace(workspace_root),
     }
     .map_err(|err| err.to_string())
-}
-
-pub fn effective_policy_for_pack(
-    native_root: &Path,
-    pack_id: Option<&str>,
-) -> Result<EffectiveMemoryPolicy, String> {
-    let Some(pack_id) = pack_id else {
-        return Ok(EffectiveMemoryPolicy::default());
-    };
-    let loaded = load_pack_from_native_root(native_root, pack_id).map_err(|err| err.to_string())?;
-    Ok(EffectiveMemoryPolicy {
-        include_user: loaded.manifest.memory.share_user,
-        include_workspace: loaded.manifest.memory.share_workspace,
-        include_pack: loaded.manifest.memory.share_pack,
-        include_session: true,
-    })
 }
 
 fn scope_key_for(
@@ -1350,8 +1333,11 @@ mod tests {
         let native_root = unique_temp_root("bp-memory-policy");
         write_pack_manifest(&native_root, false, true, false);
 
-        let policy = effective_policy_for_pack(&native_root, Some("superclaude"))
-            .expect("policy should load from pack manifest");
+        let policy = bp_pack_inspection::effective_memory_policy_for_pack(
+            &native_root,
+            Some("superclaude"),
+        )
+        .expect("policy should load from pack manifest");
 
         assert!(!policy.include_user);
         assert!(policy.include_workspace);
@@ -1359,6 +1345,110 @@ mod tests {
         assert!(policy.include_session);
 
         let _ = fs::remove_dir_all(native_root);
+    }
+
+    #[test]
+    fn effective_memory_commands_honor_non_default_pack_visibility() {
+        let temp_root = unique_temp_root("bp-memory-policy-effective");
+        let native_root = temp_root.join("native");
+        let workspace_root = temp_root.join("workspace");
+        let global_root = temp_root.join("home").join(".buildplane");
+        fs::create_dir_all(&workspace_root).expect("workspace root should exist");
+        write_pack_manifest(&native_root, false, true, false);
+
+        execute_memory_command(
+            MemoryCommand::Remember(RememberMemoryArgs {
+                workspace_root: workspace_root.clone(),
+                body: "Keep answers concise".to_string(),
+                scope: MemoryScope::User,
+                kind: MemoryKind::Preference,
+                title: Some("prefers concise output".to_string()),
+                pack_id: None,
+                session_id: None,
+                json: false,
+            }),
+            ExecutionOverrides {
+                global_root: Some(global_root.clone()),
+            },
+        )
+        .expect("user remember should succeed");
+        execute_memory_command(
+            MemoryCommand::Remember(RememberMemoryArgs {
+                workspace_root: workspace_root.clone(),
+                body: "Use pnpm from the repo root".to_string(),
+                scope: MemoryScope::Workspace,
+                kind: MemoryKind::Fact,
+                title: Some("repo uses pnpm".to_string()),
+                pack_id: None,
+                session_id: None,
+                json: false,
+            }),
+            ExecutionOverrides {
+                global_root: Some(global_root.clone()),
+            },
+        )
+        .expect("workspace remember should succeed");
+        execute_memory_command(
+            MemoryCommand::Remember(RememberMemoryArgs {
+                workspace_root: workspace_root.clone(),
+                body: "Prefer explicit plan sections".to_string(),
+                scope: MemoryScope::Pack,
+                kind: MemoryKind::ProviderHeuristic,
+                title: Some("structured planning prompts".to_string()),
+                pack_id: Some("superclaude".to_string()),
+                session_id: None,
+                json: false,
+            }),
+            ExecutionOverrides {
+                global_root: Some(global_root.clone()),
+            },
+        )
+        .expect("pack remember should succeed");
+
+        let inspect_output = execute_memory_command(
+            MemoryCommand::Inspect(InspectMemoryArgs {
+                native_root: native_root.clone(),
+                workspace_root: workspace_root.clone(),
+                id: None,
+                scope: None,
+                pack_id: Some("superclaude".to_string()),
+                session_id: None,
+                effective: true,
+                include_forgotten: false,
+                json: false,
+            }),
+            ExecutionOverrides {
+                global_root: Some(global_root.clone()),
+            },
+        )
+        .expect("effective inspect should succeed");
+
+        let explain_output = execute_memory_command(
+            MemoryCommand::Explain(ExplainMemoryArgs {
+                native_root: native_root.clone(),
+                workspace_root: workspace_root.clone(),
+                id: None,
+                pack_id: Some("superclaude".to_string()),
+                session_id: None,
+                effective: true,
+                include_forgotten: false,
+                json: false,
+            }),
+            ExecutionOverrides {
+                global_root: Some(global_root.clone()),
+            },
+        )
+        .expect("effective explain should succeed");
+
+        assert!(inspect_output.contains("Memory items: 1"));
+        assert!(inspect_output.contains("repo uses pnpm"));
+        assert!(!inspect_output.contains("prefers concise output"));
+        assert!(!inspect_output.contains("structured planning prompts"));
+        assert!(explain_output.contains("because: workspace scope matched active workspace"));
+        assert!(!explain_output.contains("because: user scope is shared for all packs"));
+        assert!(!explain_output.contains("because: pack scope matched active pack 'superclaude'"));
+
+        let _ = fs::remove_dir_all(temp_root);
     }
 
     #[test]
