@@ -368,6 +368,95 @@ describe("storage adapter", () => {
 		});
 	});
 
+	it("marks retained workspaces as deleted when operator cleanup completes", () => {
+		const root = mkdtempSync(
+			join(tmpdir(), "buildplane-store-cleaned-retained-"),
+		);
+		const storage = createBuildplaneStorage(root);
+		storage.initializeProject();
+
+		const run = storage.createRun(packet);
+		const workspacePath = createWorkspacePath(root, run.id);
+		storage.recordWorkspacePrepared(run.id, {
+			path: workspacePath,
+			headSha: "abc123",
+			sourceProjectRoot: root,
+		});
+		storage.commitRunFailureOutcome(run.id, {
+			decision: rejectedDecision,
+			workspaceStatus: "retained",
+		});
+
+		storage.recordWorkspaceCleanedUp(run.id);
+
+		const status = storage.getStatusSnapshot();
+		expect(status.actionableWorkspaces).toEqual([]);
+		expect(status.latestWorkspace).toMatchObject({
+			runId: run.id,
+			status: "deleted",
+			path: workspacePath,
+		});
+		const inspect = storage.inspectTarget(run.id);
+		expect(inspect.workspace).toMatchObject({
+			status: "deleted",
+			path: workspacePath,
+		});
+	});
+
+	it("marks cleanup-failed workspaces as deleted when operator cleanup completes", () => {
+		const root = mkdtempSync(
+			join(tmpdir(), "buildplane-store-cleaned-failed-"),
+		);
+		const storage = createBuildplaneStorage(root);
+		storage.initializeProject();
+
+		const run = storage.createRun(packet);
+		const workspacePath = createWorkspacePath(root, run.id);
+		storage.recordWorkspacePrepared(run.id, {
+			path: workspacePath,
+			headSha: "abc123",
+			sourceProjectRoot: root,
+		});
+		storage.markRunRunning(run.id);
+		storage.commitRunSuccessOutcome(run.id, decision);
+		storage.recordWorkspaceCleanupFailed(run.id, "permission denied");
+
+		storage.recordWorkspaceCleanedUp(run.id);
+
+		const status = storage.getStatusSnapshot();
+		expect(status.actionableWorkspaces).toEqual([]);
+		expect(status.latestWorkspace).toMatchObject({
+			runId: run.id,
+			status: "deleted",
+			path: workspacePath,
+		});
+		const inspect = storage.inspectTarget(run.id);
+		expect(inspect.workspace).toMatchObject({
+			status: "deleted",
+			path: workspacePath,
+		});
+	});
+
+	it("rejects operator cleanup for non-actionable workspaces", () => {
+		const root = mkdtempSync(
+			join(tmpdir(), "buildplane-store-cleaned-invalid-"),
+		);
+		const storage = createBuildplaneStorage(root);
+		storage.initializeProject();
+
+		const run = storage.createRun(packet);
+		const workspacePath = createWorkspacePath(root, run.id);
+		storage.recordWorkspacePrepared(run.id, {
+			path: workspacePath,
+			headSha: "abc123",
+			sourceProjectRoot: root,
+		});
+
+		expect(() => storage.recordWorkspaceCleanedUp(run.id)).toThrow(
+			/operator cleanup requires a retained or cleanup-failed workspace/i,
+		);
+	});
+
 	it("returns actionable workspaces newest-first and excludes deleted workspaces", () => {
 		const root = mkdtempSync(join(tmpdir(), "buildplane-store-actionable-"));
 		const storage = createBuildplaneStorage(root);
