@@ -41,8 +41,10 @@ This lets tests supply a stub `codex` binary that simply writes the required out
 
 In `eval/runner.ts`, treat model-backed suites as opt-in.
 
-Proposed rule:
+Proposed rules:
 
+- suite ids must be bare names such as `local` or `model-codex`
+- reject path-like or traversal-like forms such as `./model-codex` or `model-codex/../model-codex`
 - if `suite === "model-codex"` and `BUILDPLANE_EVAL_MODEL !== "1"`, exit with a clear error before fixture execution
 
 This keeps the default local eval loop deterministic and avoids accidental dependence on host tools.

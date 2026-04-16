@@ -61,6 +61,11 @@ function cliImport(pkg: string): Promise<unknown> {
 }
 
 // ── Git environment isolation ──────────────────────────────────
+const DEFAULT_GIT_IDENTITY = Object.freeze({
+	name: "Buildplane",
+	email: "buildplane@local",
+});
+
 function cleanGitEnv(): NodeJS.ProcessEnv {
 	const env = { ...process.env };
 	for (const key of Object.keys(env)) {
@@ -68,6 +73,10 @@ function cleanGitEnv(): NodeJS.ProcessEnv {
 			delete env[key];
 		}
 	}
+	env.GIT_AUTHOR_NAME ??= DEFAULT_GIT_IDENTITY.name;
+	env.GIT_AUTHOR_EMAIL ??= DEFAULT_GIT_IDENTITY.email;
+	env.GIT_COMMITTER_NAME ??= DEFAULT_GIT_IDENTITY.name;
+	env.GIT_COMMITTER_EMAIL ??= DEFAULT_GIT_IDENTITY.email;
 	return env;
 }
 
@@ -141,7 +150,7 @@ function discoverFixtures(suiteDir: string): Fixture[] {
 async function bootstrapProject(
 	kernel: KernelModule,
 	storage: StorageModule,
-	runtime: RuntimeModule,
+	runtimePort: RuntimePortLike,
 	policy: PolicyModule,
 	adaptersGit: AdaptersGitModule,
 ): Promise<{
@@ -154,7 +163,7 @@ async function bootstrapProject(
 	const gitEnv = cleanGitEnv();
 	const gitOpts = { cwd: demoDir, env: gitEnv, encoding: "utf8" as const };
 
-	execFileSync("git", ["init"], gitOpts);
+	execFileSync("git", ["init", "-b", "main"], gitOpts);
 	writeFileSync(join(demoDir, ".gitkeep"), "");
 	execFileSync("git", ["add", "."], gitOpts);
 	execFileSync("git", ["commit", "-m", "init"], gitOpts);
@@ -162,7 +171,7 @@ async function bootstrapProject(
 	const baseOpts = {
 		projectRoot: demoDir,
 		storage: storage.createBuildplaneStorage(demoDir),
-		runtime: { executePacket: runtime.executePacket },
+		runtime: runtimePort,
 		policy: { evaluateRun: policy.evaluateRun },
 		workspace: adaptersGit.createGitWorktreeAdapter(),
 	};
@@ -192,6 +201,14 @@ type OrchestratorLike = {
 		receipt: unknown;
 		decision?: { outcome: string; reasons: string[] };
 	};
+	runPacketAsync: (
+		packet: unknown,
+		eventBus?: unknown,
+	) => Promise<{
+		run: { id: string; status: string };
+		receipt: unknown;
+		decision?: { outcome: string; reasons: string[] };
+	}>;
 	runStrategy: (
 		strategy: unknown,
 		eventBus?: unknown,
@@ -229,12 +246,39 @@ type RuntimeModule = {
 	executePacket: (packet: unknown, root: string) => unknown;
 };
 
+type RuntimePortLike = {
+	executePacket: (packet: unknown, root: string) => unknown;
+	executePacketAsync: (
+		packet: unknown,
+		root: string,
+		eventBus: unknown,
+	) => Promise<unknown>;
+};
+
 type PolicyModule = {
 	evaluateRun: (...args: unknown[]) => unknown;
 };
 
 type AdaptersGitModule = {
 	createGitWorktreeAdapter: () => unknown;
+};
+
+type AdaptersModelsModule = {
+	createCodexRenderer: () => unknown;
+};
+
+type AdaptersCodexModule = {
+	createCodexExecutor: (options?: {
+		renderer?: unknown;
+		cliBinary?: string;
+	}) => {
+		executePacket: (packet: unknown, root: string) => unknown;
+		executePacketAsync: (
+			packet: unknown,
+			root: string,
+			eventBus: unknown,
+		) => Promise<unknown>;
+	};
 };
 
 type EnrichFn = (
@@ -253,7 +297,7 @@ async function runCondition(
 	rawRun2Packet: unknown,
 	kernel: KernelModule,
 	storage: StorageModule,
-	runtime: RuntimeModule,
+	runtimePort: RuntimePortLike,
 	policy: PolicyModule,
 	adaptersGit: AdaptersGitModule,
 	enrichPacketWithMemories: EnrichFn,
@@ -265,7 +309,7 @@ async function runCondition(
 	const { orchestrator, readMemoryPort } = await bootstrapProject(
 		kernel,
 		storage,
-		runtime,
+		runtimePort,
 		policy,
 		adaptersGit,
 	);
@@ -304,6 +348,11 @@ async function runCondition(
 		const result = await orchestrator.runStrategy(strategy, eventBus);
 		passed = result.outcome === "passed";
 		rounds = result.rounds?.length ?? 1;
+	} else if ((run2Packet as { model?: unknown }).model) {
+		const eventBus = kernel.createEventBus();
+		const result = await orchestrator.runPacketAsync(run2Packet, eventBus);
+		passed = result.run.status === "passed";
+		rounds = 0;
 	} else {
 		const result = orchestrator.runPacket(run2Packet);
 		passed = result.run.status === "passed";
@@ -330,8 +379,34 @@ const CONDITIONS: Condition[] = [
 	"nomemory+raw",
 ];
 
+const MODEL_BACKED_SUITES = new Set(["model-codex"]);
+const SUITE_ID_PATTERN = /^[a-z0-9-]+$/i;
+
+function normalizeSuiteId(suite: string): string {
+	if (!SUITE_ID_PATTERN.test(suite)) {
+		throw new Error(
+			`Suite ids must be bare names without path segments (received '${suite}').`,
+		);
+	}
+	return suite.toLowerCase();
+}
+
+function assertSuiteEnabled(suite: string): void {
+	if (
+		MODEL_BACKED_SUITES.has(suite) &&
+		process.env.BUILDPLANE_EVAL_MODEL !== "1"
+	) {
+		throw new Error(
+			`Suite '${suite}' requires BUILDPLANE_EVAL_MODEL=1 to run model-backed fixtures.`,
+		);
+	}
+}
+
 async function main(): Promise<void> {
-	const { suite, json } = parseArgs();
+	const parsed = parseArgs();
+	const suite = normalizeSuiteId(parsed.suite);
+	const { json } = parsed;
+	assertSuiteEnabled(suite);
 
 	const suiteDir = join(__dirname, "suites", suite);
 	const fixtures = discoverFixtures(suiteDir);
@@ -357,6 +432,44 @@ async function main(): Promise<void> {
 	const adaptersGit = (await cliImport(
 		"@buildplane/adapters-git",
 	)) as unknown as AdaptersGitModule;
+	const adaptersModels = (await cliImport(
+		"@buildplane/adapters-models",
+	)) as unknown as AdaptersModelsModule;
+	const adaptersCodex = (await cliImport(
+		"@buildplane/adapters-codex",
+	)) as unknown as AdaptersCodexModule;
+
+	const codexExecutor = adaptersCodex.createCodexExecutor({
+		renderer: adaptersModels.createCodexRenderer(),
+	});
+	const runtimeRouter: RuntimePortLike = {
+		executePacket(packet: unknown, root: string) {
+			const candidate = packet as { execution?: unknown };
+			if (candidate.execution) {
+				return runtime.executePacket(packet, root);
+			}
+			throw new Error("Model packets require async execution path.");
+		},
+		async executePacketAsync(packet: unknown, root: string, eventBus: unknown) {
+			const candidate = packet as {
+				execution?: unknown;
+				routingHints?: { preferredWorker?: string };
+			};
+			if (candidate.execution) {
+				return runtime.executePacket(packet, root);
+			}
+			if (candidate.routingHints?.preferredWorker === "codex") {
+				return codexExecutor.executePacketAsync(
+					packet as never,
+					root,
+					eventBus,
+				);
+			}
+			throw new Error(
+				`Unsupported eval model worker: ${candidate.routingHints?.preferredWorker ?? "(missing preferredWorker)"}`,
+			);
+		},
+	};
 
 	const cliSrcBase = pathToFileURL(join(CLI_DIR, "src")).href;
 	const { enrichPacketWithMemories } = (await import(
@@ -387,7 +500,7 @@ async function main(): Promise<void> {
 				fixture.run2,
 				kernel,
 				storage,
-				runtime,
+				runtimeRouter,
 				policy,
 				adaptersGit,
 				enrichPacketWithMemories,

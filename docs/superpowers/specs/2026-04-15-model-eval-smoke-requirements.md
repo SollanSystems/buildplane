@@ -27,6 +27,7 @@ This slice must:
 - route model packets through the Codex executor path
 - preserve injected memories in the implementer prompt by using the Codex renderer
 - keep the suite output compatible with the existing `EvalReport` shape
+- require suite ids to be bare names (no path segments or traversal forms)
 
 ## Exact behavior
 
