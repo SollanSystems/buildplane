@@ -1,0 +1,7 @@
+{
+	"name": "memory-strategy-rescue",
+	"description": "Only memory plus reviewer-guided retry can turn the hidden target path into an approved artifact",
+	"rawApprovalMode": "reviewer-must-approve",
+	"rawApprovalOutputPath": "output/memory-strategy-rescue.js",
+	"rawApprovalMustContain": "approved memory strategy rescue"
+}

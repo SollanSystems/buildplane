@@ -89,6 +89,11 @@ function createCodexStub(binRoot: string): string {
 				"const prompt = process.argv.slice(2).join(' ');",
 				"fs.mkdirSync('output', { recursive: true });",
 				"if (prompt.includes('Review the implementer output')) {",
+				"  const memoryStrategyRescuePath = path.join('output', 'memory-strategy-rescue.js');",
+				"  if (fs.existsSync(memoryStrategyRescuePath)) {",
+				"    const memoryStrategyRescueBody = fs.readFileSync(memoryStrategyRescuePath, 'utf8');",
+				"    process.exit(memoryStrategyRescueBody.includes('approved') ? 0 : 1);",
+				"  }",
 				"  const reviewerRescuePath = path.join('output', 'reviewer-rescue.js');",
 				"  if (fs.existsSync(reviewerRescuePath)) {",
 				"    const reviewerRescueBody = fs.readFileSync(reviewerRescuePath, 'utf8');",
@@ -96,6 +101,11 @@ function createCodexStub(binRoot: string): string {
 				"  }",
 				"  const hasJs = fs.existsSync('output') && fs.readdirSync('output').some((entry) => entry.endsWith('.js'));",
 				"  process.exit(hasJs ? 0 : 1);",
+				"}",
+				"if (prompt.includes('output/memory-strategy-rescue.js') || prompt.includes('output\\\\memory-strategy-rescue.js')) {",
+				"  const memoryStrategyRescueContent = prompt.includes('Reviewer feedback from round 1') ? \"console.log('approved memory strategy rescue')\\n\" : \"console.log('draft memory strategy rescue')\\n\";",
+				"  fs.writeFileSync(path.join('output', 'memory-strategy-rescue.js'), memoryStrategyRescueContent);",
+				"  process.exit(0);",
 				"}",
 				"if (prompt.includes('output/reviewer-rescue.js') || prompt.includes('output\\\\reviewer-rescue.js')) {",
 				"  const reviewerRescueContent = prompt.includes('Reviewer feedback from round 1') ? \"console.log('approved reviewer rescue')\\n\" : \"console.log('draft reviewer rescue')\\n\";",
@@ -140,12 +150,24 @@ function createCodexStub(binRoot: string): string {
 				'prompt="$*"',
 				"mkdir -p output",
 				"if printf '%s' \"$prompt\" | grep -Fq 'Review the implementer output'; then",
+				"  if [ -f output/memory-strategy-rescue.js ]; then",
+				"    if grep -Fq 'approved' output/memory-strategy-rescue.js; then exit 0; fi",
+				"    exit 1",
+				"  fi",
 				"  if [ -f output/reviewer-rescue.js ]; then",
 				"    if grep -Fq 'approved' output/reviewer-rescue.js; then exit 0; fi",
 				"    exit 1",
 				"  fi",
 				"  if find output -maxdepth 1 -type f -name '*.js' | grep -q .; then exit 0; fi",
 				"  exit 1",
+				"fi",
+				"if printf '%s' \"$prompt\" | grep -Fq 'output/memory-strategy-rescue.js'; then",
+				"  if printf '%s' \"$prompt\" | grep -Fq 'Reviewer feedback from round 1'; then",
+				"    printf 'console.log(\"approved memory strategy rescue\")\\n' > output/memory-strategy-rescue.js",
+				"  else",
+				"    printf 'console.log(\"draft memory strategy rescue\")\\n' > output/memory-strategy-rescue.js",
+				"  fi",
+				"  exit 0",
 				"fi",
 				"if printf '%s' \"$prompt\" | grep -Fq 'output/reviewer-rescue.js'; then",
 				"  if printf '%s' \"$prompt\" | grep -Fq 'Reviewer feedback from round 1'; then",
@@ -255,8 +277,8 @@ describe("model-codex eval suite", () => {
 		};
 
 		expect(report.suiteId).toBe("model-codex");
-		expect(report.aggregates.totalFixtures).toBe(3);
-		expect(report.aggregates.totalConditions).toBe(12);
+		expect(report.aggregates.totalFixtures).toBe(4);
+		expect(report.aggregates.totalConditions).toBe(16);
 		expect(report.aggregates.memoryInjectedRate).toBeGreaterThan(0);
 		expect(report.aggregates.memoryHelpedRate).toBeGreaterThan(0);
 		expect(report.aggregates.strategyHelpedRate).toBeGreaterThan(0);
@@ -328,6 +350,24 @@ describe("model-codex eval suite", () => {
 				expect.objectContaining({ condition: "nomemory+raw", passed: false }),
 			]),
 		);
+		const memoryStrategyConditions =
+			fixtures.get("memory-strategy-rescue")?.conditions ?? [];
+		expect(memoryStrategyConditions).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					condition: "memory+strategy",
+					passed: true,
+					memoriesInjected: expect.any(Number),
+				}),
+				expect.objectContaining({ condition: "memory+raw", passed: false }),
+				expect.objectContaining({
+					condition: "nomemory+strategy",
+					passed: false,
+					memoriesInjected: 0,
+				}),
+				expect.objectContaining({ condition: "nomemory+raw", passed: false }),
+			]),
+		);
 		expect(
 			helloConditions
 				.filter((condition) => condition.condition.startsWith("memory+"))
@@ -335,6 +375,11 @@ describe("model-codex eval suite", () => {
 		).toBe(true);
 		expect(
 			memoryHelpConditions
+				.filter((condition) => condition.condition.startsWith("memory+"))
+				.every((condition) => condition.memoriesInjected > 0),
+		).toBe(true);
+		expect(
+			memoryStrategyConditions
 				.filter((condition) => condition.condition.startsWith("memory+"))
 				.every((condition) => condition.memoriesInjected > 0),
 		).toBe(true);
