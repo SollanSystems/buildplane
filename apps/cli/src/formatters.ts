@@ -253,6 +253,25 @@ interface WorkspaceSummaryLike {
 	readonly cleanupError?: string;
 }
 
+interface WorkflowScanFindingLike {
+	readonly path: string;
+	readonly source: string;
+	readonly kind: string;
+}
+
+export function formatWorkflowScanPreview(preview: {
+	readonly findings: readonly WorkflowScanFindingLike[];
+}): string[] {
+	const lines = [`workflow-findings: ${preview.findings.length}`];
+	for (const finding of preview.findings) {
+		lines.push(
+			`  - [${sanitizeTerminalText(finding.source)}/${sanitizeTerminalText(finding.kind)}] ${sanitizeTerminalText(finding.path)}`,
+		);
+	}
+	lines.push("preview-only: no workflow data was imported");
+	return lines;
+}
+
 export function formatWorkspaceList(entries: WorkspaceSummaryLike[]): string[] {
 	if (entries.length === 0) {
 		return ["No actionable workspaces."];

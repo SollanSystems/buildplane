@@ -70,6 +70,17 @@ function createGitWorktreeAdapter(): BuildplaneWorkspacePort {
 	return createActualGitWorkspaceAdapter();
 }
 
+function writeWorkspaceFile(
+	root: string,
+	name: string,
+	content: string,
+): string {
+	const targetPath = join(root, name);
+	mkdirSync(dirname(targetPath), { recursive: true });
+	writeFileSync(targetPath, content);
+	return targetPath;
+}
+
 function writePacket(root: string, name: string, packet: unknown): string {
 	const packetPath = join(root, name);
 	mkdirSync(dirname(packetPath), { recursive: true });
@@ -187,6 +198,7 @@ describe("cli command surface", () => {
 		expect(result.stdout.join("\n")).toContain("Buildplane by SollanSystems");
 		expect(result.stdout.join("\n")).toContain("Execute:");
 		expect(result.stdout.join("\n")).toContain("init");
+		expect(result.stdout.join("\n")).toContain("workflow scan");
 	});
 
 	it("shows top-level help for --help", async () => {
@@ -198,6 +210,59 @@ describe("cli command surface", () => {
 		expect(result.stderr).toEqual([]);
 		expect(result.stdout.join("\n")).toContain("Execute:");
 		expect(result.stdout.join("\n")).toContain("run --packet <path>");
+	});
+
+	it("workflow scan prints a preview of recognized workflow files without init", async () => {
+		const root = mkdtempSync(
+			join(tmpdir(), "buildplane-cli-workflow-scan-human-"),
+		);
+		writeWorkspaceFile(root, "CLAUDE.md", "# Claude instructions\n");
+		writeWorkspaceFile(root, ".claude/settings.json", "{}\n");
+		writeWorkspaceFile(root, ".claude/hooks/pre_tool_use.py", "print('hi')\n");
+		writeWorkspaceFile(root, ".codex/config.toml", "model = 'o3'\n");
+		writeWorkspaceFile(root, ".codex/auth.json", "ignored\n");
+
+		const result = await runCliCapture(root, ["workflow", "scan"]);
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stderr).toEqual([]);
+		expect(result.stdout).toContain("workflow-findings: 4");
+		expect(result.stdout).toContain("  - [shared/instructions] CLAUDE.md");
+		expect(result.stdout).toContain(
+			"  - [claude/config] .claude/settings.json",
+		);
+		expect(result.stdout).toContain(
+			"  - [claude/hooks] .claude/hooks/pre_tool_use.py",
+		);
+		expect(result.stdout).toContain("  - [codex/config] .codex/config.toml");
+		expect(result.stdout).toContain(
+			"preview-only: no workflow data was imported",
+		);
+		expect(existsSync(join(root, ".buildplane"))).toBe(false);
+	});
+
+	it("workflow scan --json returns a deterministic preview before init", async () => {
+		const root = mkdtempSync(
+			join(tmpdir(), "buildplane-cli-workflow-scan-json-"),
+		);
+		writeWorkspaceFile(root, "AGENTS.md", "# shared\n");
+		writeWorkspaceFile(root, ".codex/AGENTS.md", "# codex\n");
+		writeWorkspaceFile(root, ".codex/config.toml", "model = 'o3'\n");
+		writeWorkspaceFile(root, ".claude/auth.json", "ignored\n");
+
+		const result = await runCliCapture(root, ["workflow", "scan", "--json"]);
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stderr).toEqual([]);
+		expect(JSON.parse(result.stdout.join("\n"))).toEqual({
+			preview: true,
+			findings: [
+				{ path: "AGENTS.md", source: "shared", kind: "instructions" },
+				{ path: ".codex/AGENTS.md", source: "codex", kind: "instructions" },
+				{ path: ".codex/config.toml", source: "codex", kind: "config" },
+			],
+		});
+		expect(existsSync(join(root, ".buildplane"))).toBe(false);
 	});
 
 	it("returns machine-readable NOT_INITIALIZED errors before init and preflights run before packet loading", async () => {
