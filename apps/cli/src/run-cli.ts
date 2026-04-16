@@ -790,6 +790,25 @@ function createNativeDispatchError(
 	return new NativeCommandDispatchError(message);
 }
 
+function classifyLocalLearningInspect(
+	args: string[],
+): { json: boolean; id?: string } | null {
+	const unsupportedFlags = args.filter(
+		(value) => value.startsWith("--") && value !== "--json",
+	);
+	if (unsupportedFlags.length > 0) {
+		return null;
+	}
+	const positionalArgs = args.filter((value) => !value.startsWith("--"));
+	if (positionalArgs.length === 0 || positionalArgs.length > 1) {
+		return null;
+	}
+	return {
+		json: args.includes("--json"),
+		id: positionalArgs[0],
+	};
+}
+
 function splitOutputLines(output: string): string[] {
 	return output
 		.split(/\r?\n/u)
@@ -940,8 +959,20 @@ export async function runCli(
 			}
 			if (subcommand === "inspect") {
 				const subRest = rest.slice(1);
-				const json = subRest.includes("--json");
-				const id = subRest.find((v) => v !== "--json");
+				const localInspect = classifyLocalLearningInspect(subRest);
+				if (!localInspect) {
+					try {
+						return await (deps?.runNativeCommand ?? runNativeCommand)(rest, {
+							cwd,
+							commandPath: ["memory"],
+							stdout,
+							stderr,
+						});
+					} catch (error) {
+						throw createNativeDispatchError(["memory"], error);
+					}
+				}
+				const { json, id } = localInspect;
 				if (!id) {
 					const msg = "Missing required learning ID for memory inspect.";
 					if (json) {
