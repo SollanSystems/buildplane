@@ -28,6 +28,7 @@ export interface EvalReport {
 		readonly passRate: number;
 		readonly memoryInjectedRate: number;
 		readonly memoryHelpedRate: number;
+		readonly strategyHelpedRate: number;
 		readonly meanDurationMs: number;
 	};
 }
@@ -49,6 +50,7 @@ export function computeAggregates(
 	);
 
 	let memoryHelped = 0;
+	let strategyHelped = 0;
 	for (const f of fixtures) {
 		const memStrat = f.conditions.find(
 			(c) => c.condition === "memory+strategy",
@@ -56,15 +58,24 @@ export function computeAggregates(
 		const noMemStrat = f.conditions.find(
 			(c) => c.condition === "nomemory+strategy",
 		);
-		if (!memStrat || !noMemStrat) continue;
+		const memRaw = f.conditions.find((c) => c.condition === "memory+raw");
+		const noMemRaw = f.conditions.find((c) => c.condition === "nomemory+raw");
+		if (memStrat && noMemStrat) {
+			if (
+				(memStrat.passed && !noMemStrat.passed) ||
+				(memStrat.passed &&
+					noMemStrat.passed &&
+					memStrat.rounds > 0 &&
+					memStrat.rounds < noMemStrat.rounds)
+			) {
+				memoryHelped++;
+			}
+		}
 		if (
-			(memStrat.passed && !noMemStrat.passed) ||
-			(memStrat.passed &&
-				noMemStrat.passed &&
-				memStrat.rounds > 0 &&
-				memStrat.rounds < noMemStrat.rounds)
+			(memStrat?.passed === true && memRaw?.passed === false) ||
+			(noMemStrat?.passed === true && noMemRaw?.passed === false)
 		) {
-			memoryHelped++;
+			strategyHelped++;
 		}
 	}
 
@@ -75,6 +86,8 @@ export function computeAggregates(
 		memoryInjectedRate:
 			fixtures.length > 0 ? memoryOnFixtures.length / fixtures.length : 0,
 		memoryHelpedRate: fixtures.length > 0 ? memoryHelped / fixtures.length : 0,
+		strategyHelpedRate:
+			fixtures.length > 0 ? strategyHelped / fixtures.length : 0,
 		meanDurationMs: total > 0 ? Math.round(totalDuration / total) : 0,
 	};
 }
@@ -121,6 +134,7 @@ export function formatEvalReport(report: EvalReport): string {
 	);
 	lines.push(`  Memory injected rate:  ${pct(a.memoryInjectedRate)}`);
 	lines.push(`  Memory helped rate:    ${pct(a.memoryHelpedRate)}`);
+	lines.push(`  Strategy helped rate:  ${pct(a.strategyHelpedRate)}`);
 	lines.push(`  Mean duration:         ${a.meanDurationMs}ms`);
 
 	return lines.join("\n");

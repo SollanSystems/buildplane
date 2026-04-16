@@ -1,0 +1,37 @@
+{
+	"unit": {
+		"id": "eval-model-codex-8",
+		"kind": "model",
+		"scope": "task",
+		"inputRefs": [],
+		"expectedOutputs": ["output/memory-strategy-rescue.js"],
+		"verificationContract": "exit-0-and-required-outputs",
+		"policyProfile": "default"
+	},
+	"model": {
+		"provider": "codex",
+		"model": "o4-mini"
+	},
+	"routingHints": {
+		"preferredWorker": "codex"
+	},
+	"verification": {
+		"requiredOutputs": ["output/memory-strategy-rescue.js"]
+	},
+	"intent": {
+		"objective": "Create the exact JavaScript artifact path identified by prior guidance as an initial draft implementation. Do not invent a different output path.",
+		"taskType": "implement",
+		"context": {
+			"files": []
+		},
+		"constraints": {
+			"scope": ["output/"],
+			"verification": []
+		},
+		"features": {
+			"ambiguity": "low",
+			"reversibility": "easy",
+			"verifierStrength": "strong"
+		}
+	}
+}

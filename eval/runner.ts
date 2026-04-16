@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import {
+	existsSync,
 	mkdtempSync,
 	readdirSync,
 	readFileSync,
@@ -7,7 +8,7 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
@@ -102,6 +103,9 @@ function parseArgs(): { suite: string; json: boolean } {
 interface FixtureMeta {
 	name: string;
 	description: string;
+	rawApprovalMode?: "reviewer-must-approve";
+	rawApprovalOutputPath?: string;
+	rawApprovalMustContain?: string;
 }
 
 interface Fixture {
@@ -293,6 +297,7 @@ type WrapAsStrategyFn = (packet: unknown) => unknown;
 // ── Run a single condition ─────────────────────────────────────
 async function runCondition(
 	condition: Condition,
+	fixtureMeta: FixtureMeta,
 	rawRun1Packet: unknown,
 	rawRun2Packet: unknown,
 	kernel: KernelModule,
@@ -306,7 +311,7 @@ async function runCondition(
 	const useMemory = condition.startsWith("memory+");
 	const useStrategy = condition.endsWith("+strategy");
 
-	const { orchestrator, readMemoryPort } = await bootstrapProject(
+	const { demoDir, orchestrator, readMemoryPort } = await bootstrapProject(
 		kernel,
 		storage,
 		runtimePort,
@@ -352,6 +357,20 @@ async function runCondition(
 		const eventBus = kernel.createEventBus();
 		const result = await orchestrator.runPacketAsync(run2Packet, eventBus);
 		passed = result.run.status === "passed";
+		if (passed && fixtureMeta.rawApprovalMode === "reviewer-must-approve") {
+			const approvalOutputPath = fixtureMeta.rawApprovalOutputPath;
+			if (!approvalOutputPath) {
+				throw new Error(
+					`Fixture '${fixtureMeta.name}' requires rawApprovalOutputPath when reviewer approval measurement is enabled.`,
+				);
+			}
+			const approvalPath = resolve(demoDir, approvalOutputPath);
+			passed = existsSync(approvalPath);
+			if (passed && fixtureMeta.rawApprovalMustContain) {
+				const outputText = readFileSync(approvalPath, "utf8");
+				passed = outputText.includes(fixtureMeta.rawApprovalMustContain);
+			}
+		}
 		rounds = 0;
 	} else {
 		const result = orchestrator.runPacket(run2Packet);
@@ -496,6 +515,7 @@ async function main(): Promise<void> {
 
 			const result = await runCondition(
 				condition,
+				fixture.meta,
 				fixture.run1,
 				fixture.run2,
 				kernel,
