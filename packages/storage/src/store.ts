@@ -18,6 +18,7 @@ import {
 	type PolicyDecision,
 	type ProcedureMemory,
 	type ProcedureRetrievalQuery,
+	type PromotedStructuredMemoryRecord,
 	type RankedProcedureResult,
 	type RankedRepoFactResult,
 	type RankedSearchableDocumentResult,
@@ -157,6 +158,7 @@ type WorkspaceAwareStatusSnapshot = StatusSnapshot & {
 type WorkspaceAwareInspectSnapshot = InspectSnapshot & {
 	readonly workspace?: WorkspaceSnapshot;
 	readonly injectedMemories?: readonly PersistedInjectedMemoryRecord[];
+	readonly promotedStructuredMemories?: readonly PromotedStructuredMemoryRecord[];
 };
 
 interface WorkspaceAwareStorageStore
@@ -870,6 +872,29 @@ export function createStorageStore(
 		};
 	}
 
+	function parseProcedureMetadata(
+		row: StoredProcedureRow,
+	): Record<string, unknown> | undefined {
+		return row.metadata_json
+			? (JSON.parse(row.metadata_json) as Record<string, unknown>)
+			: undefined;
+	}
+
+	function summarizeProcedureBodyMarkdown(
+		bodyMarkdown: string,
+	): string | undefined {
+		const firstLine =
+			bodyMarkdown
+				.split(/\r?\n/)
+				.map((line) => line.trim())
+				.find((line) => line.length > 0) ?? "";
+		const summary = firstLine
+			.replace(/^[-*]\s+/, "")
+			.replace(/^\d+\.\s+/, "")
+			.trim();
+		return summary.length > 0 ? summary : undefined;
+	}
+
 	function toProcedureMemory(row: StoredProcedureRow): ProcedureMemory {
 		return {
 			id: row.id,
@@ -880,9 +905,7 @@ export function createStorageStore(
 			name: row.name,
 			taskType: row.task_type ?? undefined,
 			bodyMarkdown: row.body_markdown,
-			metadata: row.metadata_json
-				? (JSON.parse(row.metadata_json) as Record<string, unknown>)
-				: undefined,
+			metadata: parseProcedureMetadata(row),
 			provenance: {
 				sourceRunId: row.source_run_id ?? undefined,
 				sourceTaskId: row.source_task_id ?? undefined,
@@ -897,6 +920,28 @@ export function createStorageStore(
 		};
 	}
 
+	function toPromotedStructuredMemoryRecord(
+		row: StoredProcedureRow,
+	): PromotedStructuredMemoryRecord | null {
+		const metadata = parseProcedureMetadata(row);
+		const promotionRule = metadata?.promotionRule;
+		if (typeof promotionRule !== "string" || promotionRule.length === 0) {
+			return null;
+		}
+		return {
+			memoryKind: "procedure",
+			memoryId: row.id,
+			title: row.name,
+			taskType: row.task_type ?? undefined,
+			bodySummary: summarizeProcedureBodyMarkdown(row.body_markdown),
+			status: row.status,
+			promotionRule,
+			sourceRunId: row.source_run_id ?? undefined,
+			sourceTaskId: row.source_task_id ?? undefined,
+			createdAt: row.created_at,
+		};
+	}
+
 	function procedureMetadataMatches(
 		row: StoredProcedureRow,
 		matchMetadata?: Record<string, string>,
@@ -904,9 +949,7 @@ export function createStorageStore(
 		if (!matchMetadata || Object.keys(matchMetadata).length === 0) {
 			return true;
 		}
-		const metadata = row.metadata_json
-			? (JSON.parse(row.metadata_json) as Record<string, unknown>)
-			: {};
+		const metadata = parseProcedureMetadata(row) ?? {};
 		return Object.entries(matchMetadata).every(
 			([key, value]) => metadata[key] === value,
 		);
@@ -1080,6 +1123,25 @@ export function createStorageStore(
 		return database
 			.prepare(query)
 			.all(...params) as unknown as StoredProcedureRow[];
+	}
+
+	function readPromotedStructuredMemoryRows(
+		runId: string,
+		database: DatabaseSync,
+	): PromotedStructuredMemoryRecord[] {
+		const rows = database
+			.prepare(
+				`SELECT id, repo_id, name, task_type, body_markdown, metadata_json,
+				       confidence, source_run_id, source_task_id, created_by, branch,
+				       commit_sha, status, created_at, updated_at
+				 FROM procedures
+				 WHERE repo_id = ? AND source_run_id = ?
+				 ORDER BY created_at DESC, rowid DESC`,
+			)
+			.all(projectRoot, runId) as unknown as StoredProcedureRow[];
+		return rows
+			.map(toPromotedStructuredMemoryRecord)
+			.filter((row): row is PromotedStructuredMemoryRecord => row !== null);
 	}
 
 	function readSearchableDocumentRows(
@@ -2732,6 +2794,10 @@ export function createStorageStore(
 						run: toRun(runRow),
 						workspace: readWorkspaceSnapshot(runRow.id, database),
 						injectedMemories: readInjectedMemoryRows(runRow.id, database),
+						promotedStructuredMemories: readPromotedStructuredMemoryRows(
+							runRow.id,
+							database,
+						),
 						runHistory: [{ id: runRow.id, status: runRow.status }],
 						evidence: readEvidence(runRow.id, database),
 						decisions: readDecisions(runRow.id, database),
@@ -2760,6 +2826,10 @@ export function createStorageStore(
 						run: toRun(run),
 						workspace: readWorkspaceSnapshot(run.id, database),
 						injectedMemories: readInjectedMemoryRows(run.id, database),
+						promotedStructuredMemories: readPromotedStructuredMemoryRows(
+							run.id,
+							database,
+						),
 						runHistory,
 						evidence: readEvidence(run.id, database),
 						decisions: readDecisions(run.id, database),
