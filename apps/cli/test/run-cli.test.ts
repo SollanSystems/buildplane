@@ -2242,6 +2242,165 @@ describe("cli command surface", () => {
 		expect(result.stderr.join("\n")).toContain("Learning not found");
 	});
 
+	it("delegates no-id memory inspect forms to native", async () => {
+		const root = mkdtempSync(
+			join(tmpdir(), "buildplane-cli-memory-inspect-no-id-native-"),
+		);
+		const calls: Array<{
+			cwd: string;
+			argv: string[];
+			commandPath: string[];
+		}> = [];
+		const dependencies: RunCliDependencies = {
+			runNativeCommand: async (argv, options) => {
+				calls.push({
+					cwd: options.cwd,
+					argv,
+					commandPath: options.commandPath,
+				});
+				return 0;
+			},
+		};
+
+		const inspectResult = await runCliCapture(
+			root,
+			["memory", "inspect"],
+			dependencies,
+		);
+		const inspectJsonResult = await runCliCapture(
+			root,
+			["memory", "inspect", "--json"],
+			dependencies,
+		);
+
+		expect(inspectResult.exitCode).toBe(0);
+		expect(inspectJsonResult.exitCode).toBe(0);
+		expect(calls).toEqual([
+			{
+				cwd: root,
+				commandPath: ["memory"],
+				argv: ["inspect"],
+			},
+			{
+				cwd: root,
+				commandPath: ["memory"],
+				argv: ["inspect", "--json"],
+			},
+		]);
+	});
+
+	it("delegates id-plus-extra-flag memory inspect forms to native", async () => {
+		const root = mkdtempSync(
+			join(tmpdir(), "buildplane-cli-memory-inspect-id-flags-native-"),
+		);
+		const calls: Array<{
+			cwd: string;
+			argv: string[];
+			commandPath: string[];
+		}> = [];
+		const dependencies: RunCliDependencies = {
+			runNativeCommand: async (argv, options) => {
+				calls.push({
+					cwd: options.cwd,
+					argv,
+					commandPath: options.commandPath,
+				});
+				return 0;
+			},
+		};
+
+		const result = await runCliCapture(
+			root,
+			["memory", "inspect", "mem_123", "--include-forgotten"],
+			dependencies,
+		);
+
+		expect(result.exitCode).toBe(0);
+		expect(calls).toEqual([
+			{
+				cwd: root,
+				commandPath: ["memory"],
+				argv: ["inspect", "mem_123", "--include-forgotten"],
+			},
+		]);
+	});
+
+	it("delegates advanced memory inspect forms to native", async () => {
+		const root = mkdtempSync(
+			join(tmpdir(), "buildplane-cli-memory-inspect-native-fallthrough-"),
+		);
+		const calls: Array<{
+			cwd: string;
+			argv: string[];
+			commandPath: string[];
+		}> = [];
+		const dependencies: RunCliDependencies = {
+			runNativeCommand: async (argv, options) => {
+				calls.push({
+					cwd: options.cwd,
+					argv,
+					commandPath: options.commandPath,
+				});
+				return 0;
+			},
+		};
+
+		const result = await runCliCapture(
+			root,
+			["memory", "inspect", "--effective", "--json"],
+			dependencies,
+		);
+
+		expect(result.exitCode).toBe(0);
+		expect(calls).toEqual([
+			{
+				cwd: root,
+				commandPath: ["memory"],
+				argv: ["inspect", "--effective", "--json"],
+			},
+		]);
+	});
+
+	it("preserves native json output for advanced memory inspect success paths", async () => {
+		const root = mkdtempSync(
+			join(tmpdir(), "buildplane-cli-memory-inspect-json-success-"),
+		);
+		const calls: Array<{
+			cwd: string;
+			argv: string[];
+			commandPath: string[];
+		}> = [];
+		const dependencies: RunCliDependencies = {
+			runNativeCommand: async (argv, options) => {
+				calls.push({
+					cwd: options.cwd,
+					argv,
+					commandPath: options.commandPath,
+				});
+				options.stdout('{"nativeRoot":"/tmp/native","items":[]}');
+				options.stderr("memory-inspect-json-warn");
+				return 7;
+			},
+		};
+
+		const result = await runCliCapture(
+			root,
+			["memory", "inspect", "--effective", "--json"],
+			dependencies,
+		);
+
+		expect(result.exitCode).toBe(7);
+		expect(result.stdout).toEqual(['{"nativeRoot":"/tmp/native","items":[]}']);
+		expect(result.stderr).toEqual(["memory-inspect-json-warn"]);
+		expect(calls).toEqual([
+			{
+				cwd: root,
+				commandPath: ["memory"],
+				argv: ["inspect", "--effective", "--json"],
+			},
+		]);
+	});
+
 	it("unknown memory subcommands still dispatch to native", async () => {
 		const root = mkdtempSync(
 			join(tmpdir(), "buildplane-cli-memory-native-fallthrough-"),
