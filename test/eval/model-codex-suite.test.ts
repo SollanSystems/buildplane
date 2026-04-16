@@ -56,13 +56,55 @@ function createCodexStub(binRoot: string): string {
 	);
 	mkdirSync(binRoot, { recursive: true });
 	if (process.platform === "win32") {
+		const jsPath = join(
+			binRoot,
+			"node_modules",
+			"@openai",
+			"codex",
+			"bin",
+			"codex.js",
+		);
+		mkdirSync(join(binRoot, "node_modules", "@openai", "codex", "bin"), {
+			recursive: true,
+		});
+		writeFileSync(
+			jsPath,
+			[
+				"const fs = require('node:fs');",
+				"const path = require('node:path');",
+				"const prompt = process.argv.slice(2).join(' ');",
+				"fs.mkdirSync('output', { recursive: true });",
+				"if (prompt.includes('Review the implementer output')) {",
+				"  const hasJs = fs.existsSync('output') && fs.readdirSync('output').some((entry) => entry.endsWith('.js'));",
+				"  process.exit(hasJs ? 0 : 1);",
+				"}",
+				"if (prompt.includes('output/memory-helped.js') || prompt.includes('output\\\\memory-helped.js')) {",
+				"  fs.writeFileSync(path.join('output', 'memory-helped.js'), \"console.log('memory helped')\\n\");",
+				"  process.exit(0);",
+				"}",
+				"if (prompt.includes('output/hello.js') || prompt.includes('output\\\\hello.js')) {",
+				"  fs.writeFileSync(path.join('output', 'hello.js'), \"console.log('hello from codex')\\n\");",
+				"  process.exit(0);",
+				"}",
+				"process.exit(1);",
+			].join("\r\n"),
+		);
 		writeFileSync(
 			stubPath,
 			[
-				"@echo off",
-				"if not exist output mkdir output",
-				"echo console.log('hello from codex');> output\\hello.js",
-				"exit /b 0",
+				"@ECHO off",
+				"SETLOCAL",
+				"CALL :find_dp0",
+				'IF EXIST "%dp0%\\node.exe" (',
+				'  SET "_prog=%dp0%\\node.exe"',
+				") ELSE (",
+				'  SET "_prog=node"',
+				"  SET PATHEXT=%PATHEXT:;.JS;=;%",
+				")",
+				'endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\\node_modules\\@openai\\codex\\bin\\codex.js" %*',
+				":find_dp0",
+				"SET dp0=%~dp0",
+				"EXIT /b",
 			].join("\r\n"),
 		);
 	} else {
@@ -70,9 +112,22 @@ function createCodexStub(binRoot: string): string {
 			stubPath,
 			[
 				"#!/usr/bin/env sh",
+				"set -eu",
+				'prompt="$*"',
 				"mkdir -p output",
-				"printf 'console.log(\"hello from codex\")\n' > output/hello.js",
-				"exit 0",
+				"if printf '%s' \"$prompt\" | grep -Fq 'Review the implementer output'; then",
+				"  if find output -maxdepth 1 -type f -name '*.js' | grep -q .; then exit 0; fi",
+				"  exit 1",
+				"fi",
+				"if printf '%s' \"$prompt\" | grep -Fq 'output/memory-helped.js'; then",
+				"  printf 'console.log(\"memory helped\")\\n' > output/memory-helped.js",
+				"  exit 0",
+				"fi",
+				"if printf '%s' \"$prompt\" | grep -Fq 'output/hello.js'; then",
+				"  printf 'console.log(\"hello from codex\")\\n' > output/hello.js",
+				"  exit 0",
+				"fi",
+				"exit 1",
 			].join("\n"),
 		);
 		spawnSync("chmod", ["+x", stubPath], { encoding: "utf8" });
@@ -120,7 +175,9 @@ describe("model-codex eval suite", () => {
 		);
 	});
 
-	it("runs the opt-in Codex model suite with a stub codex binary", () => {
+	it("runs the opt-in Codex model suite with a stub codex binary", {
+		timeout: 10_000,
+	}, () => {
 		ensureWorkspaceBuildOutputs();
 
 		const tempRoot = mkdtempSync(
@@ -145,6 +202,7 @@ describe("model-codex eval suite", () => {
 		const report = JSON.parse(result.stdout) as {
 			suiteId: string;
 			fixtures: Array<{
+				name: string;
 				conditions: Array<{
 					condition: string;
 					passed: boolean;
@@ -155,15 +213,21 @@ describe("model-codex eval suite", () => {
 				totalFixtures: number;
 				totalConditions: number;
 				memoryInjectedRate: number;
+				memoryHelpedRate: number;
 			};
 		};
 
 		expect(report.suiteId).toBe("model-codex");
-		expect(report.aggregates.totalFixtures).toBe(1);
-		expect(report.aggregates.totalConditions).toBe(4);
+		expect(report.aggregates.totalFixtures).toBe(2);
+		expect(report.aggregates.totalConditions).toBe(8);
 		expect(report.aggregates.memoryInjectedRate).toBeGreaterThan(0);
-		const conditions = report.fixtures[0]?.conditions ?? [];
-		expect(conditions).toEqual(
+		expect(report.aggregates.memoryHelpedRate).toBeGreaterThan(0);
+		const fixtures = new Map(
+			report.fixtures.map((fixture) => [fixture.name, fixture]),
+		);
+		const helloConditions =
+			fixtures.get("hello-memory-smoke")?.conditions ?? [];
+		expect(helloConditions).toEqual(
 			expect.arrayContaining([
 				expect.objectContaining({
 					condition: "memory+strategy",
@@ -187,8 +251,39 @@ describe("model-codex eval suite", () => {
 				}),
 			]),
 		);
+		const memoryHelpConditions =
+			fixtures.get("memory-helped-path")?.conditions ?? [];
+		expect(memoryHelpConditions).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					condition: "memory+strategy",
+					passed: true,
+					memoriesInjected: expect.any(Number),
+				}),
+				expect.objectContaining({
+					condition: "memory+raw",
+					passed: true,
+					memoriesInjected: expect.any(Number),
+				}),
+				expect.objectContaining({
+					condition: "nomemory+strategy",
+					passed: false,
+					memoriesInjected: 0,
+				}),
+				expect.objectContaining({
+					condition: "nomemory+raw",
+					passed: false,
+					memoriesInjected: 0,
+				}),
+			]),
+		);
 		expect(
-			conditions
+			helloConditions
+				.filter((condition) => condition.condition.startsWith("memory+"))
+				.every((condition) => condition.memoriesInjected > 0),
+		).toBe(true);
+		expect(
+			memoryHelpConditions
 				.filter((condition) => condition.condition.startsWith("memory+"))
 				.every((condition) => condition.memoriesInjected > 0),
 		).toBe(true);

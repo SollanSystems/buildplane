@@ -25,6 +25,7 @@ This slice must:
 - make `memory+strategy` pass while `nomemory+strategy` fails or performs worse for the new fixture
 - cause the suite-level `memoryHelpedRate` to become greater than `0`
 - remain fully local-only and testable with a stub `codex` binary
+- keep the Codex path safe on Windows when the binary resolves through an npm-style `codex.cmd` shim
 
 ## Exact behavior
 
@@ -56,6 +57,7 @@ This slice may use the existing `memoryHelpedRate` definition in `eval/report.ts
 - Do not add CI-backed model evaluation yet
 - Do not widen into multi-provider fixtures, benchmark publication, or raw-agent comparison suites
 - Do not change CLI/runtime routing semantics unless required for the fixture to run deterministically
+- Any Codex executor change must stay narrow to preserving the existing prompt payload across Windows npm-style shims
 
 ## Out of scope
 
@@ -76,4 +78,5 @@ This slice may use the existing `memoryHelpedRate` definition in `eval/report.ts
   - `nomemory+strategy` does not match that outcome
 - suite aggregates show `memoryHelpedRate > 0`
 - focused tests cover the new fixture and the prompt-sensitive Codex stub behavior
+- focused tests cover any narrow Windows Codex shim handling needed to preserve multiline prompts
 - `pnpm eval --suite local --json` remains unchanged and passes

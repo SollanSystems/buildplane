@@ -67,6 +67,8 @@ Prefer not to modify:
 
 unless a tiny supporting change is truly required.
 
+One narrow runtime adjustment is acceptable here if needed for cross-platform determinism: preserving multiline Codex prompts on Windows when `codex` resolves through an npm-generated `codex.cmd` shim. If that issue appears, fix it only inside `packages/adapters-codex/src/codex-executor.ts` without widening any other provider/runtime behavior.
+
 ### 4. Make the test Codex stub prompt-sensitive
 
 Extend the existing stub in `test/eval/model-codex-suite.test.ts` so it behaves differently by prompt content.
@@ -104,6 +106,8 @@ Extend `test/eval/model-codex-suite.test.ts` so the opt-in suite test asserts:
 - `eval/suites/model-codex/memory-helped-path/run-2.json`
 
 ### Modified
+- `packages/adapters-codex/src/codex-executor.ts`
+- `packages/adapters-codex/test/codex-executor.test.ts`
 - `test/eval/model-codex-suite.test.ts`
 - `docs/superpowers/specs/2026-04-15-model-memory-help-requirements.md`
 - `docs/superpowers/specs/2026-04-15-model-memory-help-design.md`

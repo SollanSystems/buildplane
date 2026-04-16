@@ -16,6 +16,8 @@
 
 **Files:**
 - Modify: `test/eval/model-codex-suite.test.ts`
+- Modify: `packages/adapters-codex/src/codex-executor.ts`
+- Modify: `packages/adapters-codex/test/codex-executor.test.ts`
 - Create: `eval/suites/model-codex/memory-helped-path/{meta,run-1,run-2}.json`
 
 **Step 1: Write failing assertions**
@@ -55,11 +57,12 @@ Expected: still FAIL until the stub becomes prompt-sensitive.
 **Files:**
 - Modify: `test/eval/model-codex-suite.test.ts`
 
-**Step 1: Update the stub behavior**
+**Step 1: Update the stub/runtime behavior**
 - reviewer prompts should pass only when a JS artifact already exists in `output/`
 - implementer prompts containing `output/hello.js` should create `output/hello.js`
 - implementer prompts containing the hidden memory-help path should create that file
 - implementer prompts with neither path should exit non-zero
+- if Windows npm-style `codex.cmd` shims would truncate multiline prompts, add the smallest executor/test change needed to route through the underlying JS entry without losing the prompt body
 
 **Step 2: Run the focused test to verify the intended red/green transition**
 
