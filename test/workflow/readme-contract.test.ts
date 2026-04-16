@@ -113,6 +113,11 @@ describe("README contract", () => {
 		expect(distributionSection).toMatch(/clean git working tree/i);
 	});
 
+	it("links to the model benchmark summary doc", () => {
+		expect(readme).toContain("docs/benchmarks/model-codex.md");
+		expect(readme).toContain("model-codex");
+	});
+
 	it("does not describe published install as future-only anywhere in the README", () => {
 		expect(readme).not.toMatch(/not yet available|future-only/i);
 	});
