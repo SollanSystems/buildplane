@@ -1,7 +1,9 @@
 use bp_host_sdk::{AuthState, HostBridgeAuthOwnership, HostBridgePlan, HostBridgeProtocol};
 use bp_memory::{ExplainedMemoryItem, MemoryItem, MemoryLink};
-use bp_pack_inspection::{DetectionSource, LoadedPackInspection, PackInspectionReport};
-use bp_runtime::{ExecutionRoute, RuntimeSelection, RuntimeSelectionProvenance};
+use bp_pack_inspection::{
+    selection_reason_for_report, DetectionSource, LoadedPackInspection, PackInspectionReport,
+};
+use bp_runtime::{ExecutionRoute, RuntimeSelection};
 use std::fmt::Write as _;
 
 pub fn render_selection(selection: &RuntimeSelection) -> String {
@@ -162,6 +164,17 @@ pub fn render_pack_inspection(inspection: &LoadedPackInspection) -> String {
         }
     }
 
+    writeln!(output, "memory visibility:").expect("write memory visibility header");
+    writeln!(
+        output,
+        "  - user={} workspace={} pack={} session={}",
+        report.effective_memory_policy.include_user,
+        report.effective_memory_policy.include_workspace,
+        report.effective_memory_policy.include_pack,
+        report.effective_memory_policy.include_session
+    )
+    .expect("write memory visibility row");
+
     if report.host_rows.is_empty() {
         writeln!(output, "host status: none").expect("write empty host status");
     } else {
@@ -226,15 +239,7 @@ pub fn render_pack_inspection(inspection: &LoadedPackInspection) -> String {
 }
 
 fn selection_reason_for_display(report: &PackInspectionReport) -> String {
-    match (&report.detection_source, &report.selection.provenance) {
-        (
-            DetectionSource::CliOverride,
-            RuntimeSelectionProvenance::DetectedPreferredHost { matched_host },
-        ) => format!(
-            "matched preferred host '{matched_host}' from pack manifest using cli override (--detected-host)"
-        ),
-        _ => report.selection.reason(),
-    }
+    selection_reason_for_report(report)
 }
 
 fn render_bridge_plan(output: &mut String, plan: &HostBridgePlan) {
@@ -428,6 +433,11 @@ mod tests {
 
         assert!(rendered.contains("selected route: provider:openai"));
         assert!(rendered.contains("selection reason: explicit provider requested"));
+        assert!(rendered.contains("memory visibility:"));
+        assert!(rendered.contains("user=true"));
+        assert!(rendered.contains("workspace=true"));
+        assert!(rendered.contains("pack=true"));
+        assert!(rendered.contains("session=true"));
         assert!(rendered
             .contains("bridge plan: none (selected route does not use a detected host bridge)"));
     }

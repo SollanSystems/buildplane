@@ -3,8 +3,13 @@ use bp_host_sdk::{
     AuthState, DetectionContext, HostBridgePlan, HostExecutionRequest, HostRegistry,
     HostSessionContext, HostStatus, RegisteredHostAdapter,
 };
+use bp_memory::EffectiveMemoryPolicy;
 use bp_pack_loader::{load_pack_from_native_root, LoadedPack};
-use bp_runtime::{resolve_transport, ExecutionRoute, RuntimeSelection, RuntimeSelectionInput};
+use bp_runtime::{
+    resolve_transport, ExecutionRoute, RuntimeSelection, RuntimeSelectionInput,
+    RuntimeSelectionProvenance,
+};
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -19,26 +24,30 @@ pub struct InspectPackRequest {
     pub process_env: BTreeMap<String, String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct HostInspectionRow {
     pub host: String,
     pub display_name: String,
     pub status: HostStatus,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
 pub enum DetectionSource {
     Environment,
     CliOverride,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct PackInspectionReport {
     pub workspace_root: PathBuf,
     pub selection: RuntimeSelection,
     pub host_rows: Vec<HostInspectionRow>,
     pub effective_detected_hosts: Vec<String>,
     pub detection_source: DetectionSource,
+    pub effective_memory_policy: EffectiveMemoryPolicy,
     pub bridge_plan: Option<HostBridgePlan>,
 }
 
@@ -46,6 +55,39 @@ pub struct PackInspectionReport {
 pub struct LoadedPackInspection {
     pub loaded: LoadedPack,
     pub report: PackInspectionReport,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PackModeSummaryJson {
+    pub id: String,
+    pub display_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PackSummaryJson {
+    pub id: String,
+    pub display_name: String,
+    pub version: String,
+    pub default_provider: Option<String>,
+    pub default_mode: Option<PackModeSummaryJson>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PackInspectionJson {
+    pub pack: PackSummaryJson,
+    pub pack_root: PathBuf,
+    pub manifest_path: PathBuf,
+    pub workspace_root: PathBuf,
+    pub selection: RuntimeSelection,
+    pub selection_reason: String,
+    pub effective_detected_hosts: Vec<String>,
+    pub detection_source: DetectionSource,
+    pub effective_memory_policy: EffectiveMemoryPolicy,
+    pub host_rows: Vec<HostInspectionRow>,
+    pub bridge_plan: Option<HostBridgePlan>,
 }
 
 pub fn collect_process_env() -> BTreeMap<String, String> {
@@ -72,6 +114,66 @@ pub async fn inspect_pack(request: &InspectPackRequest) -> Result<LoadedPackInsp
     let report = build_pack_report(&loaded, request).await?;
 
     Ok(LoadedPackInspection { loaded, report })
+}
+
+pub fn effective_memory_policy_for_loaded_pack(loaded: &LoadedPack) -> EffectiveMemoryPolicy {
+    EffectiveMemoryPolicy {
+        include_user: loaded.manifest.memory.share_user,
+        include_workspace: loaded.manifest.memory.share_workspace,
+        include_pack: loaded.manifest.memory.share_pack,
+        include_session: true,
+    }
+}
+
+pub fn effective_memory_policy_for_pack(
+    native_root: &Path,
+    pack_id: Option<&str>,
+) -> Result<EffectiveMemoryPolicy, String> {
+    let Some(pack_id) = pack_id else {
+        return Ok(EffectiveMemoryPolicy::default());
+    };
+    let loaded = load_pack_from_native_root(native_root, pack_id).map_err(|err| err.to_string())?;
+    Ok(effective_memory_policy_for_loaded_pack(&loaded))
+}
+
+pub fn selection_reason_for_report(report: &PackInspectionReport) -> String {
+    match (&report.detection_source, &report.selection.provenance) {
+        (
+            DetectionSource::CliOverride,
+            RuntimeSelectionProvenance::DetectedPreferredHost { matched_host },
+        ) => format!(
+            "matched preferred host '{matched_host}' from pack manifest using cli override (--detected-host)"
+        ),
+        _ => report.selection.reason(),
+    }
+}
+
+pub fn pack_inspection_json(inspection: &LoadedPackInspection) -> PackInspectionJson {
+    let loaded = &inspection.loaded;
+    let report = &inspection.report;
+
+    PackInspectionJson {
+        pack: PackSummaryJson {
+            id: loaded.manifest.pack.id.clone(),
+            display_name: loaded.manifest.pack.display_name.clone(),
+            version: loaded.manifest.pack.version.clone(),
+            default_provider: loaded.manifest.pack.default_provider.clone(),
+            default_mode: loaded.manifest.default_mode().map(|mode| PackModeSummaryJson {
+                id: mode.id.clone(),
+                display_name: mode.display_name.clone(),
+            }),
+        },
+        pack_root: loaded.pack_root.clone(),
+        manifest_path: loaded.manifest_path.clone(),
+        workspace_root: report.workspace_root.clone(),
+        selection: report.selection.clone(),
+        selection_reason: selection_reason_for_report(report),
+        effective_detected_hosts: report.effective_detected_hosts.clone(),
+        detection_source: report.detection_source.clone(),
+        effective_memory_policy: report.effective_memory_policy,
+        host_rows: report.host_rows.clone(),
+        bridge_plan: report.bridge_plan.clone(),
+    }
 }
 
 pub async fn build_pack_report(
@@ -127,6 +229,7 @@ pub async fn build_pack_report(
         &request.workspace_root,
     )
     .await?;
+    let effective_memory_policy = effective_memory_policy_for_loaded_pack(loaded);
 
     Ok(PackInspectionReport {
         workspace_root: request.workspace_root.clone(),
@@ -134,6 +237,7 @@ pub async fn build_pack_report(
         host_rows,
         effective_detected_hosts,
         detection_source,
+        effective_memory_policy,
         bridge_plan,
     })
 }
@@ -211,6 +315,8 @@ mod tests {
     use super::*;
     use bp_runtime::{ExecutionRoute, RuntimeSelectionProvenance};
     use futures::executor::block_on;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[derive(Debug, Clone, Default)]
     struct InspectOverrides {
@@ -222,6 +328,32 @@ mod tests {
 
     fn native_root_for_tests() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+    }
+
+    fn unique_temp_root(prefix: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should move forward")
+            .as_nanos();
+        std::env::temp_dir().join(format!("{prefix}-{}-{nanos}", std::process::id()))
+    }
+
+    fn write_pack_manifest(
+        native_root: &Path,
+        share_user: bool,
+        share_workspace: bool,
+        share_pack: bool,
+    ) {
+        let pack_root = native_root.join("packs").join("superclaude");
+        fs::create_dir_all(&pack_root).expect("pack root should exist");
+        fs::write(
+            pack_root.join("pack.toml"),
+            format!(
+                "schema_version = 1\n\n[pack]\nid = \"superclaude\"\ndisplay_name = \"SuperClaude\"\nversion = \"0.1.0\"\ndefault_provider = \"anthropic\"\n\n[memory]\nshare_user = {}\nshare_workspace = {}\nshare_pack = {}\n\n[[modes]]\nid = \"daily\"\ndisplay_name = \"Daily\"\nreasoning = \"fast\"\nautonomy = \"guided\"\ndefault = true\n",
+                share_user, share_workspace, share_pack
+            ),
+        )
+        .expect("manifest should be written");
     }
 
     fn env_map_for_test(entries: &[(&str, &str)]) -> BTreeMap<String, String> {
@@ -366,5 +498,72 @@ mod tests {
             }
         );
         assert!(report.bridge_plan.is_some(), "expected Codex bridge plan");
+    }
+
+    #[test]
+    fn selection_reason_uses_cli_override_language() {
+        let report = inspect_report_for_test(
+            "superclaude",
+            &[("OPENAI_CODEX", "1")],
+            InspectOverrides {
+                detected_hosts: vec!["codex".to_string()],
+                ..InspectOverrides::default()
+            },
+        )
+        .expect("inspection should succeed");
+
+        assert_eq!(
+            selection_reason_for_report(&report),
+            "matched preferred host 'codex' from pack manifest using cli override (--detected-host)"
+        );
+    }
+
+    #[test]
+    fn pack_inspection_json_reports_provider_override_without_bridge_plan() {
+        let request = inspect_request_for_test(
+            "superclaude",
+            &[("CLAUDE_CODE", "1")],
+            InspectOverrides {
+                explicit_provider: Some("openai".to_string()),
+                ..InspectOverrides::default()
+            },
+        );
+        let inspection = block_on(inspect_pack(&request)).expect("inspection should succeed");
+        let payload = pack_inspection_json(&inspection);
+
+        assert_eq!(payload.pack.id, "superclaude");
+        assert_eq!(payload.selection.route, ExecutionRoute::Provider("openai".to_string()));
+        assert_eq!(payload.selection_reason, "explicit provider requested");
+        assert_eq!(payload.detection_source, DetectionSource::Environment);
+        assert!(payload.effective_memory_policy.include_user);
+        assert!(payload.effective_memory_policy.include_workspace);
+        assert!(payload.effective_memory_policy.include_pack);
+        assert!(payload.effective_memory_policy.include_session);
+        assert!(payload.bridge_plan.is_none());
+    }
+
+    #[test]
+    fn pack_inspection_json_reports_non_default_memory_visibility_policy() {
+        let native_root = unique_temp_root("bp-pack-inspection-memory-policy");
+        write_pack_manifest(&native_root, false, true, false);
+        let request = InspectPackRequest {
+            pack_id: "superclaude".to_string(),
+            native_root: native_root.clone(),
+            workspace_root: PathBuf::from("/tmp/buildplane-test-workspace"),
+            explicit_host: None,
+            explicit_provider: None,
+            detected_hosts: Vec::new(),
+            process_env: BTreeMap::new(),
+        };
+
+        let inspection = block_on(inspect_pack(&request)).expect("inspection should succeed");
+        let payload = pack_inspection_json(&inspection);
+
+        assert!(!payload.effective_memory_policy.include_user);
+        assert!(payload.effective_memory_policy.include_workspace);
+        assert!(!payload.effective_memory_policy.include_pack);
+        assert!(payload.effective_memory_policy.include_session);
+
+        let _ = fs::remove_dir_all(native_root);
     }
 }
