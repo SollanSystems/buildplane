@@ -36,9 +36,9 @@ The current raw conditions only look at direct run success, which is too weak fo
 Add one narrow comparison rule inside `eval/runner.ts`:
 - strategy conditions keep using `wrapAsStrategy(...)` and `orchestrator.runStrategy(...)`
 - raw conditions remain single-shot implementer execution
-- after a raw model execution for the comparison fixture, run a measurement-only reviewer packet against the produced output
-- if that reviewer rejects, mark the raw condition as failed for eval purposes
-- do not feed the reviewer response back into the raw implementer
+- after a raw model execution for the comparison fixture, apply a deterministic measurement-only approval check to the produced artifact
+- if that approval check fails, mark the raw condition as failed for eval purposes
+- do not grant the raw path any reviewer-guided retry
 
 This preserves the distinction:
 - raw = one shot, no recovery
@@ -61,9 +61,11 @@ Extend `test/eval/model-codex-suite.test.ts` so the stub can model three states 
 - reviewer prompt for the fixture → rejects unless the artifact contains the approved/fixed form
 - implementer prompt containing reviewer feedback from round 1 → writes the corrected artifact
 
+Because the implementer packet still uses `intent`, also add one narrow executor compatibility check: when a renderer is active, `packet.model.systemPrompt` must still be folded into the final Codex prompt so strategy retry feedback reaches the second-round implementer.
+
 This gives deterministic outcomes:
 - `*+strategy` can pass after reviewer-guided retry
-- `*+raw` fails because the measurement-only reviewer rejects the single-shot draft
+- `*+raw` fails because the measurement-only approval check rejects the single-shot draft
 
 ### 5. Keep the slice narrow
 

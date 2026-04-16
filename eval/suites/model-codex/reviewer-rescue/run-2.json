@@ -1,0 +1,37 @@
+{
+	"unit": {
+		"id": "eval-model-codex-6",
+		"kind": "model",
+		"scope": "task",
+		"inputRefs": ["output/reviewer-seed.txt"],
+		"expectedOutputs": ["output/reviewer-rescue.js"],
+		"verificationContract": "exit-0-and-required-outputs",
+		"policyProfile": "default"
+	},
+	"model": {
+		"provider": "codex",
+		"model": "o4-mini"
+	},
+	"routingHints": {
+		"preferredWorker": "codex"
+	},
+	"verification": {
+		"requiredOutputs": ["output/reviewer-rescue.js"]
+	},
+	"intent": {
+		"objective": "Write output/reviewer-rescue.js as an initial draft implementation using the seeded workspace context.",
+		"taskType": "implement",
+		"context": {
+			"files": ["output/reviewer-seed.txt"]
+		},
+		"constraints": {
+			"scope": ["output/"],
+			"verification": ["test -f output/reviewer-rescue.js"]
+		},
+		"features": {
+			"ambiguity": "low",
+			"reversibility": "easy",
+			"verifierStrength": "strong"
+		}
+	}
+}

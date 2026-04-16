@@ -1,0 +1,37 @@
+{
+	"unit": {
+		"id": "eval-model-codex-5",
+		"kind": "command",
+		"scope": "task",
+		"inputRefs": [],
+		"expectedOutputs": ["output/reviewer-seed.txt"],
+		"verificationContract": "exit-0-and-required-outputs",
+		"policyProfile": "default"
+	},
+	"execution": {
+		"command": "node",
+		"args": [
+			"-e",
+			"const fs = require('fs'); fs.mkdirSync('output', { recursive: true }); fs.writeFileSync('output/reviewer-seed.txt', 'seeded reviewer comparison');"
+		]
+	},
+	"verification": {
+		"requiredOutputs": ["output/reviewer-seed.txt"]
+	},
+	"intent": {
+		"objective": "Seed the reviewer-rescue comparison workspace",
+		"taskType": "implement",
+		"context": {
+			"files": []
+		},
+		"constraints": {
+			"scope": ["output/"],
+			"verification": []
+		},
+		"features": {
+			"ambiguity": "low",
+			"reversibility": "easy",
+			"verifierStrength": "strong"
+		}
+	}
+}

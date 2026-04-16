@@ -49,9 +49,9 @@ Expected: FAIL because the comparison fixture and aggregate do not exist yet.
 
 **Step 2: Add the narrow harness change**
 - keep strategy conditions unchanged
-- for raw conditions on the comparison fixture, run a measurement-only reviewer after the single-shot implementer run
-- if the reviewer rejects, mark the raw condition as failed for eval purposes
-- do not allow reviewer feedback to modify the raw implementer attempt
+- for raw conditions on the comparison fixture, apply a deterministic measurement-only approval check to the produced artifact
+- if that approval check fails, mark the raw condition as failed for eval purposes
+- do not allow any reviewer-guided retry on the raw path
 
 **Step 3: Re-run the focused test**
 
@@ -63,18 +63,21 @@ Expected: still FAIL until the stub models the reviewer rescue path.
 
 ---
 
-## Task 3: Extend the Codex stub for reviewer rescue
+## Task 3: Extend the Codex stub and renderer-feedback path for reviewer rescue
 
 **Objective:** make the new fixture deterministic under strategy and raw conditions.
 
 **Files:**
 - Modify: `test/eval/model-codex-suite.test.ts`
+- Modify: `packages/adapters-codex/src/codex-executor.ts`
+- Modify: `packages/adapters-codex/test/codex-executor.test.ts`
 
 **Step 1: Update the stub behavior**
 - initial implementer prompt for the new fixture writes a draft artifact that reviewers reject
 - reviewer prompt for the new fixture rejects unless the artifact contains the fixed/approved form
 - implementer prompt containing reviewer feedback writes the corrected artifact
 - preserve existing hello/memory-help fixture behavior unchanged
+- add one focused executor test proving renderer-driven packets still include `model.systemPrompt` so retry feedback survives the renderer path
 
 **Step 2: Re-run the focused test**
 

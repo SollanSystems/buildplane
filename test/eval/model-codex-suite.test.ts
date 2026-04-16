@@ -4,6 +4,7 @@ import {
 	mkdirSync,
 	mkdtempSync,
 	rmSync,
+	statSync,
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -22,12 +23,25 @@ const REQUIRED_BUILD_OUTPUTS = [
 	"packages/adapters-models/dist/index.js",
 	"packages/adapters-codex/dist/index.js",
 ] as const;
+const REQUIRED_FRESHNESS_CHECKS = [
+	[
+		"packages/adapters-codex/src/codex-executor.ts",
+		"packages/adapters-codex/dist/index.js",
+	],
+] as const;
 
 function ensureWorkspaceBuildOutputs() {
 	const missing = REQUIRED_BUILD_OUTPUTS.filter(
 		(relativePath) => !existsSync(join(root, relativePath)),
 	);
-	if (missing.length === 0) {
+	const stale = REQUIRED_FRESHNESS_CHECKS.some(
+		([sourcePath, outputPath]) =>
+			existsSync(join(root, sourcePath)) &&
+			existsSync(join(root, outputPath)) &&
+			statSync(join(root, sourcePath)).mtimeMs >
+				statSync(join(root, outputPath)).mtimeMs,
+	);
+	if (missing.length === 0 && !stale) {
 		return;
 	}
 	const npxCommand = process.platform === "win32" ? "npx.cmd" : "npx";
@@ -75,8 +89,18 @@ function createCodexStub(binRoot: string): string {
 				"const prompt = process.argv.slice(2).join(' ');",
 				"fs.mkdirSync('output', { recursive: true });",
 				"if (prompt.includes('Review the implementer output')) {",
+				"  const reviewerRescuePath = path.join('output', 'reviewer-rescue.js');",
+				"  if (fs.existsSync(reviewerRescuePath)) {",
+				"    const reviewerRescueBody = fs.readFileSync(reviewerRescuePath, 'utf8');",
+				"    process.exit(reviewerRescueBody.includes('approved') ? 0 : 1);",
+				"  }",
 				"  const hasJs = fs.existsSync('output') && fs.readdirSync('output').some((entry) => entry.endsWith('.js'));",
 				"  process.exit(hasJs ? 0 : 1);",
+				"}",
+				"if (prompt.includes('output/reviewer-rescue.js') || prompt.includes('output\\\\reviewer-rescue.js')) {",
+				"  const reviewerRescueContent = prompt.includes('Reviewer feedback from round 1') ? \"console.log('approved reviewer rescue')\\n\" : \"console.log('draft reviewer rescue')\\n\";",
+				"  fs.writeFileSync(path.join('output', 'reviewer-rescue.js'), reviewerRescueContent);",
+				"  process.exit(0);",
 				"}",
 				"if (prompt.includes('output/memory-helped.js') || prompt.includes('output\\\\memory-helped.js')) {",
 				"  fs.writeFileSync(path.join('output', 'memory-helped.js'), \"console.log('memory helped')\\n\");",
@@ -116,8 +140,20 @@ function createCodexStub(binRoot: string): string {
 				'prompt="$*"',
 				"mkdir -p output",
 				"if printf '%s' \"$prompt\" | grep -Fq 'Review the implementer output'; then",
+				"  if [ -f output/reviewer-rescue.js ]; then",
+				"    if grep -Fq 'approved' output/reviewer-rescue.js; then exit 0; fi",
+				"    exit 1",
+				"  fi",
 				"  if find output -maxdepth 1 -type f -name '*.js' | grep -q .; then exit 0; fi",
 				"  exit 1",
+				"fi",
+				"if printf '%s' \"$prompt\" | grep -Fq 'output/reviewer-rescue.js'; then",
+				"  if printf '%s' \"$prompt\" | grep -Fq 'Reviewer feedback from round 1'; then",
+				"    printf 'console.log(\"approved reviewer rescue\")\\n' > output/reviewer-rescue.js",
+				"  else",
+				"    printf 'console.log(\"draft reviewer rescue\")\\n' > output/reviewer-rescue.js",
+				"  fi",
+				"  exit 0",
 				"fi",
 				"if printf '%s' \"$prompt\" | grep -Fq 'output/memory-helped.js'; then",
 				"  printf 'console.log(\"memory helped\")\\n' > output/memory-helped.js",
@@ -214,14 +250,16 @@ describe("model-codex eval suite", () => {
 				totalConditions: number;
 				memoryInjectedRate: number;
 				memoryHelpedRate: number;
+				strategyHelpedRate: number;
 			};
 		};
 
 		expect(report.suiteId).toBe("model-codex");
-		expect(report.aggregates.totalFixtures).toBe(2);
-		expect(report.aggregates.totalConditions).toBe(8);
+		expect(report.aggregates.totalFixtures).toBe(3);
+		expect(report.aggregates.totalConditions).toBe(12);
 		expect(report.aggregates.memoryInjectedRate).toBeGreaterThan(0);
 		expect(report.aggregates.memoryHelpedRate).toBeGreaterThan(0);
+		expect(report.aggregates.strategyHelpedRate).toBeGreaterThan(0);
 		const fixtures = new Map(
 			report.fixtures.map((fixture) => [fixture.name, fixture]),
 		);
@@ -275,6 +313,19 @@ describe("model-codex eval suite", () => {
 					passed: false,
 					memoriesInjected: 0,
 				}),
+			]),
+		);
+		const reviewerRescueConditions =
+			fixtures.get("reviewer-rescue")?.conditions ?? [];
+		expect(reviewerRescueConditions).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({ condition: "memory+strategy", passed: true }),
+				expect.objectContaining({ condition: "memory+raw", passed: false }),
+				expect.objectContaining({
+					condition: "nomemory+strategy",
+					passed: true,
+				}),
+				expect.objectContaining({ condition: "nomemory+raw", passed: false }),
 			]),
 		);
 		expect(

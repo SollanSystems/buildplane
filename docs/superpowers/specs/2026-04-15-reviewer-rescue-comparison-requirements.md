@@ -41,7 +41,8 @@ The new fixture must be designed so that:
 For this slice:
 - strategy conditions may use the existing implement-then-review retry loop
 - raw conditions must remain single-shot from the implementer's perspective
-- raw conditions may run a measurement-only reviewer after execution so the outcome is judged against the same acceptance standard, but that reviewer must not feed changes back into the implementer
+- raw conditions must be judged against the same approval standard as strategy, but without granting a retry or second model pass
+- the raw comparison path may use a deterministic measurement-only approval check over produced artifacts as long as it matches the reviewer acceptance rule for the fixture
 
 ### Aggregate proof
 
