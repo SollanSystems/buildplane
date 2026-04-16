@@ -1,0 +1,7 @@
+{
+	"name": "reviewer-rescue",
+	"description": "A raw single-shot draft is reviewer-rejected, but the implement-then-review strategy fixes it on the second round",
+	"rawApprovalMode": "reviewer-must-approve",
+	"rawApprovalOutputPath": "output/reviewer-rescue.js",
+	"rawApprovalMustContain": "approved reviewer rescue"
+}

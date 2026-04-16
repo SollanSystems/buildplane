@@ -220,6 +220,51 @@ describe("CodexExecutor", () => {
 		expect(promptArg).toContain("always write output/hello.js first");
 	});
 
+	it("renderer path also folds model.systemPrompt before the rendered prompt", async () => {
+		const mockSpawn = createMockSpawn({ exitCode: 0 });
+		const executor = createCodexExecutor({
+			renderer: createCodexRenderer(),
+			spawnFn: mockSpawn as never,
+		});
+		const eventBus = createEventBus();
+
+		const packet = makePacket({
+			intent: {
+				objective:
+					"Write output/reviewer-rescue.js as an initial draft implementation.",
+				taskType: "implement",
+				context: {
+					files: ["output/reviewer-seed.txt"],
+					priorWork: [],
+					memories: [],
+				},
+				constraints: {
+					scope: ["output/"],
+					verification: ["test -f output/reviewer-rescue.js"],
+				},
+				features: {
+					ambiguity: "low",
+					reversibility: "easy",
+					verifierStrength: "strong",
+				},
+			},
+			model: {
+				provider: "codex",
+				model: "o4-mini",
+				systemPrompt:
+					"Reviewer feedback from round 1: address the approval issue before retrying.",
+			},
+		});
+
+		await executor.executePacketAsync(packet, PROJECT_ROOT, eventBus);
+
+		const spawnArgs: string[] = mockSpawn.mock.calls[0][1] as string[];
+		const promptArg = spawnArgs[spawnArgs.length - 1];
+		expect(promptArg).toContain("Reviewer feedback from round 1");
+		expect(promptArg).toContain("<task");
+		expect(promptArg).toContain("output/reviewer-rescue.js");
+	});
+
 	it("model and --model flag passed to codex CLI args", async () => {
 		const mockSpawn = createMockSpawn({ exitCode: 0 });
 		const executor = createCodexExecutor({ spawnFn: mockSpawn as never });

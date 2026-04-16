@@ -140,9 +140,13 @@ export function createCodexExecutor(
 			let prompt: string;
 			if (packet.intent && renderer) {
 				const rendered = renderer.render(packet.intent, "implementer");
-				prompt = rendered.system
-					? `${rendered.system}\n\n---\n\n${rendered.prompt}`
-					: rendered.prompt;
+				const systemParts = [packet.model.systemPrompt, rendered.system].filter(
+					(part): part is string => typeof part === "string" && part.length > 0,
+				);
+				prompt =
+					systemParts.length > 0
+						? `${systemParts.join("\n\n---\n\n")}\n\n---\n\n${rendered.prompt}`
+						: rendered.prompt;
 			} else if (packet.model.prompt) {
 				prompt = packet.model.systemPrompt
 					? `${packet.model.systemPrompt}\n\n---\n\n${packet.model.prompt}`
