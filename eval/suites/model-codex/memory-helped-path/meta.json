@@ -1,0 +1,4 @@
+{
+	"name": "memory-helped-path",
+	"description": "Run 1 seeds a missing-output constraint; run 2 succeeds only when the exact target path arrives via injected memories"
+}
