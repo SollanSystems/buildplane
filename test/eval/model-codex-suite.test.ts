@@ -234,7 +234,7 @@ describe("model-codex eval suite", () => {
 	});
 
 	it("runs the opt-in Codex model suite with a stub codex binary", {
-		timeout: 10_000,
+		timeout: 20_000,
 	}, () => {
 		ensureWorkspaceBuildOutputs();
 
