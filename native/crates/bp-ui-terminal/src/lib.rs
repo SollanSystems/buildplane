@@ -164,6 +164,17 @@ pub fn render_pack_inspection(inspection: &LoadedPackInspection) -> String {
         }
     }
 
+    writeln!(output, "memory visibility:").expect("write memory visibility header");
+    writeln!(
+        output,
+        "  - user={} workspace={} pack={} session={}",
+        report.effective_memory_policy.include_user,
+        report.effective_memory_policy.include_workspace,
+        report.effective_memory_policy.include_pack,
+        report.effective_memory_policy.include_session
+    )
+    .expect("write memory visibility row");
+
     if report.host_rows.is_empty() {
         writeln!(output, "host status: none").expect("write empty host status");
     } else {
@@ -422,6 +433,11 @@ mod tests {
 
         assert!(rendered.contains("selected route: provider:openai"));
         assert!(rendered.contains("selection reason: explicit provider requested"));
+        assert!(rendered.contains("memory visibility:"));
+        assert!(rendered.contains("user=true"));
+        assert!(rendered.contains("workspace=true"));
+        assert!(rendered.contains("pack=true"));
+        assert!(rendered.contains("session=true"));
         assert!(rendered
             .contains("bridge plan: none (selected route does not use a detected host bridge)"));
     }

@@ -110,6 +110,7 @@ version = "0.1.0"
 dependencies = [
  "bp-host-registry",
  "bp-host-sdk",
+ "bp-memory",
  "bp-pack-loader",
  "bp-runtime",
  "futures",

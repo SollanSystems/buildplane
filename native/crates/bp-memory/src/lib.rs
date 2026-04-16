@@ -331,7 +331,8 @@ pub struct EffectiveMemoryContext {
     pub include_forgotten: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct EffectiveMemoryPolicy {
     pub include_user: bool,
     pub include_workspace: bool,
