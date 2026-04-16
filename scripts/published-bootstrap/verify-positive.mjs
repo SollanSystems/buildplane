@@ -26,13 +26,23 @@ import {
 
 const PACKET_FIXTURE_RELATIVE_PATH =
 	"test/fixtures/published-bootstrap/packet.json";
+const INSTALLER_SHIM_PATH = join(
+	REPO_ROOT,
+	"scripts",
+	"published-bootstrap",
+	"install.sh",
+);
+const INSTALLER_ONE_LINER =
+	'tmp="$(mktemp)" && curl -fsSL https://raw.githubusercontent.com/SollanSystems/buildplane/main/scripts/published-bootstrap/install.sh -o "$tmp" && bash "$tmp"';
 const PACKET_FIXTURE_PATH = join(REPO_ROOT, PACKET_FIXTURE_RELATIVE_PATH);
 const REQUIRED_STAGED_README_SNIPPETS = Object.freeze([
+	INSTALLER_ONE_LINER,
 	"npm install -g buildplane",
 	"buildplane init",
 	"buildplane run --packet",
 	"buildplane status --json",
 	"buildplane inspect <run-id> --json",
+	"Published/global installs do not yet include a verified `buildplane memory ...` contract.",
 ]);
 const PUBLISHED_SMOKE_UNIT_ID = "unit-published-bootstrap-smoke";
 const FORBIDDEN_STAGED_README_PATTERNS = Object.freeze([
@@ -433,11 +443,17 @@ function runExternalPackedInstallSmoke(tarballPath, tempPaths) {
 
 	console.log(`Installing packed CLI into isolated npm prefix: ${npmPrefix}`);
 	runCommand(
-		NPM_COMMAND,
-		["install", "-g", "--prefix", npmPrefix, tarballPath],
+		process.platform === "win32" ? "bash" : "/bin/bash",
+		[INSTALLER_SHIM_PATH],
 		{
 			cwd: externalRepoRoot,
-			env: installEnv,
+			env: {
+				...installEnv,
+				BUILDPLANE_INSTALL_SPEC: tarballPath,
+				BUILDPLANE_INSTALL_PREFIX: npmPrefix,
+				BUILDPLANE_INSTALL_NPM: NPM_COMMAND,
+				BUILDPLANE_INSTALL_GIT: GIT_COMMAND,
+			},
 		},
 	);
 	assertFile(resolveInstalledCliPath(npmPrefix), "published buildplane binary");
