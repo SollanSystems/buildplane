@@ -1,0 +1,4 @@
+{
+	"name": "hello-memory-smoke",
+	"description": "Run 1 seeds a learning, run 2 executes through the Codex worker path and writes output/hello.js"
+}
