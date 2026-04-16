@@ -288,7 +288,6 @@ export function formatBootstrapDoctorReport(
 	}
 	return lines;
 }
-
 export function formatWorkflowScanPreview(preview: {
 	readonly findings: readonly WorkflowScanFindingLike[];
 }): string[] {
