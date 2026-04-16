@@ -199,7 +199,7 @@ afterEach(() => {
 	}
 });
 
-describe("model-codex eval suite", () => {
+describe("model-codex eval suite", { timeout: 20_000 }, () => {
 	it("fails fast when the model suite is requested without explicit opt-in", () => {
 		ensureWorkspaceBuildOutputs();
 
@@ -233,9 +233,7 @@ describe("model-codex eval suite", () => {
 		);
 	});
 
-	it("runs the opt-in Codex model suite with a stub codex binary", {
-		timeout: 20_000,
-	}, () => {
+	it("runs the opt-in Codex model suite with a stub codex binary", () => {
 		ensureWorkspaceBuildOutputs();
 
 		const tempRoot = mkdtempSync(
