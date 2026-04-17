@@ -36,6 +36,7 @@ pnpm install
 Then use the workspace-local dev command directly from the repo root:
 
 ```bash
+pnpm buildplane bootstrap doctor --json
 pnpm buildplane init
 pnpm buildplane run --packet ./packet.json
 pnpm buildplane status --json
@@ -62,6 +63,7 @@ After building the project, you can run the CLI from the compiled output:
 
 ```bash
 pnpm build
+node apps/cli/dist/index.js bootstrap doctor --json
 node apps/cli/dist/index.js init
 node apps/cli/dist/index.js run --packet ./packet.json
 node apps/cli/dist/index.js status --json
@@ -83,7 +85,14 @@ The compiled CLI uses the same native-command bridge implementation as the publi
 The packaged global-install contract verified by this repo is:
 
 ```bash
+tmp="$(mktemp)" && curl -fsSL https://raw.githubusercontent.com/SollanSystems/buildplane/main/scripts/published-bootstrap/install.sh -o "$tmp" && bash "$tmp"
+```
+
+If you prefer the explicit npm path, the published fallback/reference contract is:
+
+```bash
 npm install -g buildplane
+buildplane bootstrap doctor --json
 buildplane init
 buildplane run --packet <path-to-packet.json>
 buildplane status --json

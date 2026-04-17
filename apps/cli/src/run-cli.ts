@@ -2,6 +2,11 @@ import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {
+	type BootstrapDoctorReport,
+	inspectBootstrapDoctor,
+} from "./bootstrap-doctor.js";
+import {
+	formatBootstrapDoctorReport,
 	formatHumanError,
 	formatInitializationResult,
 	formatInspectDetail,
@@ -12,13 +17,15 @@ import {
 	formatRunHistory,
 	formatRunResult,
 	formatStrategyRunResult,
+	formatWorkflowScanPreview,
+	formatWorkspaceCleanupResult,
+	formatWorkspaceList,
 } from "./formatters.js";
-import {
-	type PacketMemoryEnrichmentResult,
-	prepareGraphMemoryEnrichment,
+import type {
+	PacketMemoryEnrichmentResult,
 	preparePacketMemoryEnrichment,
-	prepareStrategyMemoryEnrichment,
 } from "./packet-enrichment.js";
+import { scanWorkflowPreview } from "./workflow-scan.js";
 
 type StructuredMemoryPortLike = NonNullable<
 	Parameters<typeof preparePacketMemoryEnrichment>[4]
@@ -40,11 +47,13 @@ interface StructuredMemoryStoragePortLike extends StructuredMemoryPortLike {
 	listInjectedMemories(
 		runId: string,
 	): readonly PersistedInjectedMemoryRecordLike[];
+	recordRunStrategyId(runId: string, strategyId: string): void;
 }
 
 export interface RunCliDependencies {
 	createOrchestrator?: () => BuildplaneCliOrchestrator;
 	parsePacket?: (packetPath: string) => unknown;
+	inspectBootstrapDoctor?: () => BootstrapDoctorReport;
 	runNativeCommand?: (
 		argv: string[],
 		options: {
@@ -157,6 +166,10 @@ function collectStrategyRunTargets(result: {
 	return targets;
 }
 
+async function loadPacketEnrichmentModule() {
+	return import("./packet-enrichment.js");
+}
+
 type InjectedMemoryRecordsByUnitId = Record<
 	string,
 	readonly InjectedMemoryRecordLike[]
@@ -195,6 +208,25 @@ function persistInjectedMemoriesForTargets(
 	return persisted;
 }
 
+function recordStrategyIdForTargets(
+	storagePort: StructuredMemoryStoragePortLike | undefined,
+	targets: Iterable<{ unitId: string; runId?: string }>,
+	strategyId: string,
+): void {
+	if (!storagePort) {
+		return;
+	}
+	const seen = new Set<string>();
+	for (const target of targets) {
+		const runId = target.runId;
+		if (!runId || runId === "unknown" || seen.has(runId)) {
+			continue;
+		}
+		seen.add(runId);
+		storagePort.recordRunStrategyId(runId, strategyId);
+	}
+}
+
 function formatTopLevelHelp(): string[] {
 	return [
 		BUILDPLANE_BANNER,
@@ -215,6 +247,10 @@ function formatTopLevelHelp(): string[] {
 		"",
 		"  Project:",
 		"    init                   Initialize .buildplane in this repo",
+		"    bootstrap doctor      Check published CLI prerequisites",
+		"    workspace list         Show actionable retained/cleanup-failed workspaces",
+		"    workspace cleanup <r>  Delete an actionable workspace by run id",
+		"    workflow scan [--json] Preview recognized Claude/Codex workflow files",
 		"    memory list            Show stored learnings",
 		"    memory inspect <id>    Detail for one learning",
 		"    memory <action>        Advanced memory operations (native)",
@@ -837,6 +873,35 @@ export async function runCli(
 	}
 
 	try {
+		if (command === "bootstrap") {
+			const subcommand = rest[0];
+			const doctorArgs = rest.slice(1);
+			const json = doctorArgs.includes("--json");
+			if (subcommand === "doctor") {
+				const hasOnlySupportedDoctorArgs =
+					doctorArgs.length === 0 ||
+					(doctorArgs.length === 1 && doctorArgs[0] === "--json");
+				if (!hasOnlySupportedDoctorArgs) {
+					throw new Error(
+						`Unsupported bootstrap doctor arguments: ${doctorArgs.join(" ")}`,
+					);
+				}
+				const report =
+					deps?.inspectBootstrapDoctor?.() ?? inspectBootstrapDoctor();
+				if (json) {
+					stdout(formatJson(report));
+				} else {
+					for (const line of formatBootstrapDoctorReport(report)) {
+						stdout(line);
+					}
+				}
+				return report.ok ? 0 : 1;
+			}
+			throw new Error(
+				`Unknown bootstrap command: ${subcommand ?? "(missing subcommand)"}`,
+			);
+		}
+
 		if (command === "memory") {
 			const subcommand = rest[0];
 			if (subcommand === "list") {
@@ -977,6 +1042,150 @@ export async function runCli(
 			return 0;
 		}
 
+		if (command === "workflow") {
+			const subcommand = rest[0];
+			const json = rest.includes("--json");
+			if (subcommand === "scan") {
+				const preview = scanWorkflowPreview(cwd);
+				if (json) {
+					stdout(formatJson(preview));
+				} else {
+					for (const line of formatWorkflowScanPreview(preview)) {
+						stdout(line);
+					}
+				}
+				return 0;
+			}
+
+			throw new Error(
+				`Unknown workflow command: ${subcommand ?? "(missing subcommand)"}`,
+			);
+		}
+
+		if (command === "workspace") {
+			const subcommand = rest[0];
+			const json = rest.includes("--json");
+			const storage = (await cliImport("@buildplane/storage")) as unknown as {
+				createBuildplaneStorage: (root: string) => {
+					getStatusSnapshot: () => {
+						actionableWorkspaces?: Array<{
+							runId: string;
+							status: string;
+							path: string;
+							headSha?: string;
+							cleanupError?: string;
+						}>;
+					};
+					inspectTarget: (id: string) => {
+						workspace?: { status?: string; path?: string };
+					};
+					recordWorkspaceCleanedUp: (runId: string) => void;
+				};
+			};
+			const storageInst = storage.createBuildplaneStorage(cwd);
+
+			if (subcommand === "list") {
+				const actionableWorkspaces =
+					storageInst.getStatusSnapshot().actionableWorkspaces ?? [];
+				if (json) {
+					stdout(formatJson(actionableWorkspaces));
+				} else {
+					for (const line of formatWorkspaceList(actionableWorkspaces)) {
+						stdout(line);
+					}
+				}
+				return 0;
+			}
+
+			if (subcommand === "cleanup") {
+				const runId = rest.find(
+					(value) => value !== "cleanup" && value !== "--json",
+				);
+				if (!runId) {
+					const message = "Missing required run id for workspace cleanup.";
+					if (json) {
+						stdout(formatJson(formatJsonError("MISSING_ARGUMENT", message)));
+					} else {
+						stderr(message);
+					}
+					return 1;
+				}
+
+				const actionableWorkspaces =
+					storageInst.getStatusSnapshot().actionableWorkspaces ?? [];
+				const target = actionableWorkspaces.find(
+					(workspace) => workspace.runId === runId,
+				);
+				if (!target) {
+					let message = `No workspace found for run '${runId}'.`;
+					let code = "NOT_FOUND";
+					try {
+						const inspect = storageInst.inspectTarget(runId);
+						if (inspect.workspace?.status) {
+							message = `Workspace for run '${runId}' is not actionable.`;
+							code = "WORKSPACE_NOT_ACTIONABLE";
+						}
+					} catch {
+						// Leave as not-found
+					}
+					if (json) {
+						stdout(formatJson(formatJsonError(code, message)));
+					} else {
+						stderr(message);
+					}
+					return 1;
+				}
+
+				const adaptersGit = (await cliImport(
+					"@buildplane/adapters-git",
+				)) as unknown as {
+					createGitWorktreeAdapter: () => {
+						deleteWorkspace: (workspace: {
+							path: string;
+							projectRoot?: string;
+						}) => { deleted: boolean; cleanupError?: string };
+					};
+				};
+				const cleanupResult = adaptersGit
+					.createGitWorktreeAdapter()
+					.deleteWorkspace({
+						path: target.path,
+						projectRoot: cwd,
+					});
+				if (!cleanupResult.deleted) {
+					const message =
+						cleanupResult.cleanupError ??
+						`Workspace cleanup failed for run '${runId}'.`;
+					if (json) {
+						stdout(formatJson(formatJsonError("CLI_ERROR", message)));
+					} else {
+						stderr(message);
+					}
+					return 1;
+				}
+
+				storageInst.recordWorkspaceCleanedUp(runId);
+				const payload = {
+					runId,
+					path: target.path,
+					status: "deleted",
+					previousStatus: target.status,
+				};
+				if (json) {
+					stdout(formatJson(payload));
+				} else {
+					for (const line of formatWorkspaceCleanupResult(payload)) {
+						stdout(line);
+					}
+				}
+				return 0;
+			}
+
+			throw new Error(
+				`Unknown workspace command: ${subcommand ?? "(missing subcommand)"}`,
+			);
+		}
+
 		const bundle: CliOrchestratorBundle = deps?.createOrchestrator
 			? { orchestrator: deps.createOrchestrator() }
 			: await loadCliOrchestrator(cwd);
@@ -1018,6 +1227,8 @@ export async function runCli(
 				const packet = deps?.parsePacket
 					? deps.parsePacket(packetPath)
 					: await loadPacket(packetPath);
+				const { preparePacketMemoryEnrichment } =
+					await loadPacketEnrichmentModule();
 				const preparedPacket = await preparePacketMemoryEnrichment(
 					packet,
 					memoryPort,
@@ -1071,6 +1282,11 @@ export async function runCli(
 							childResults: Map<string, { run?: { id?: string } }>;
 							rounds?: ReadonlyArray<Map<string, { run?: { id?: string } }>>;
 						},
+					);
+					recordStrategyIdForTargets(
+						structuredMemoryPort,
+						strategyTargets,
+						strategyResult.strategyId,
 					);
 					const injectedMemories = persistInjectedMemoriesForTargets(
 						structuredMemoryPort,
@@ -1329,6 +1545,9 @@ export async function runCli(
 							id: string;
 							unitId: string;
 							status: string;
+							strategyId?: string;
+							injectedMemoryCount?: number;
+							promotedStructuredMemoryCount?: number;
 							createdAt: string;
 							completedAt?: string;
 						}>,
@@ -1432,6 +1651,8 @@ export async function runCli(
 					unknown
 				>;
 				const graph = normalizeGraph(rawGraph);
+				const { prepareGraphMemoryEnrichment } =
+					await loadPacketEnrichmentModule();
 				const preparedGraph = await prepareGraphMemoryEnrichment(
 					graph as Record<string, unknown>,
 					memoryPort,
@@ -1485,6 +1706,8 @@ export async function runCli(
 
 				const rawStrategy = JSON.parse(readFileSync(strategyPath, "utf8"));
 				const strategy = kernel.parseStrategyPacket(rawStrategy);
+				const { prepareStrategyMemoryEnrichment } =
+					await loadPacketEnrichmentModule();
 				const preparedStrategy = await prepareStrategyMemoryEnrichment(
 					strategy as Record<string, unknown>,
 					memoryPort,
@@ -1515,6 +1738,11 @@ export async function runCli(
 						}),
 					),
 				];
+				recordStrategyIdForTargets(
+					structuredMemoryPort,
+					strategyTargets,
+					strategyResult.strategyId,
+				);
 				const injectedMemories = persistInjectedMemoriesForTargets(
 					structuredMemoryPort,
 					strategyTargets,

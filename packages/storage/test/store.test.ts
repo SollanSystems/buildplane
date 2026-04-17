@@ -368,6 +368,95 @@ describe("storage adapter", () => {
 		});
 	});
 
+	it("marks retained workspaces as deleted when operator cleanup completes", () => {
+		const root = mkdtempSync(
+			join(tmpdir(), "buildplane-store-cleaned-retained-"),
+		);
+		const storage = createBuildplaneStorage(root);
+		storage.initializeProject();
+
+		const run = storage.createRun(packet);
+		const workspacePath = createWorkspacePath(root, run.id);
+		storage.recordWorkspacePrepared(run.id, {
+			path: workspacePath,
+			headSha: "abc123",
+			sourceProjectRoot: root,
+		});
+		storage.commitRunFailureOutcome(run.id, {
+			decision: rejectedDecision,
+			workspaceStatus: "retained",
+		});
+
+		storage.recordWorkspaceCleanedUp(run.id);
+
+		const status = storage.getStatusSnapshot();
+		expect(status.actionableWorkspaces).toEqual([]);
+		expect(status.latestWorkspace).toMatchObject({
+			runId: run.id,
+			status: "deleted",
+			path: workspacePath,
+		});
+		const inspect = storage.inspectTarget(run.id);
+		expect(inspect.workspace).toMatchObject({
+			status: "deleted",
+			path: workspacePath,
+		});
+	});
+
+	it("marks cleanup-failed workspaces as deleted when operator cleanup completes", () => {
+		const root = mkdtempSync(
+			join(tmpdir(), "buildplane-store-cleaned-failed-"),
+		);
+		const storage = createBuildplaneStorage(root);
+		storage.initializeProject();
+
+		const run = storage.createRun(packet);
+		const workspacePath = createWorkspacePath(root, run.id);
+		storage.recordWorkspacePrepared(run.id, {
+			path: workspacePath,
+			headSha: "abc123",
+			sourceProjectRoot: root,
+		});
+		storage.markRunRunning(run.id);
+		storage.commitRunSuccessOutcome(run.id, decision);
+		storage.recordWorkspaceCleanupFailed(run.id, "permission denied");
+
+		storage.recordWorkspaceCleanedUp(run.id);
+
+		const status = storage.getStatusSnapshot();
+		expect(status.actionableWorkspaces).toEqual([]);
+		expect(status.latestWorkspace).toMatchObject({
+			runId: run.id,
+			status: "deleted",
+			path: workspacePath,
+		});
+		const inspect = storage.inspectTarget(run.id);
+		expect(inspect.workspace).toMatchObject({
+			status: "deleted",
+			path: workspacePath,
+		});
+	});
+
+	it("rejects operator cleanup for non-actionable workspaces", () => {
+		const root = mkdtempSync(
+			join(tmpdir(), "buildplane-store-cleaned-invalid-"),
+		);
+		const storage = createBuildplaneStorage(root);
+		storage.initializeProject();
+
+		const run = storage.createRun(packet);
+		const workspacePath = createWorkspacePath(root, run.id);
+		storage.recordWorkspacePrepared(run.id, {
+			path: workspacePath,
+			headSha: "abc123",
+			sourceProjectRoot: root,
+		});
+
+		expect(() => storage.recordWorkspaceCleanedUp(run.id)).toThrow(
+			/operator cleanup requires a retained or cleanup-failed workspace/i,
+		);
+	});
+
 	it("returns actionable workspaces newest-first and excludes deleted workspaces", () => {
 		const root = mkdtempSync(join(tmpdir(), "buildplane-store-actionable-"));
 		const storage = createBuildplaneStorage(root);
@@ -607,6 +696,65 @@ describe("storage adapter", () => {
 			{ id: secondRun.id, status: "passed" },
 			{ id: firstRun.id, status: "passed" },
 		]);
+	});
+
+	it("surfaces strategy lineage and memory summary counts in inspect and history", () => {
+		const root = mkdtempSync(
+			join(tmpdir(), "buildplane-store-strategy-history-"),
+		);
+		const storage = createBuildplaneStorage(root);
+		storage.initializeProject();
+
+		const run = storage.createRun(
+			{
+				...packet,
+				unit: { ...packet.unit, id: "unit-strategy-history" },
+			},
+			{ strategyId: "strategy-injected" },
+		);
+		storage.completeRun(run.id, "passed");
+		storage.recordInjectedMemories(run.id, [
+			{
+				memoryKind: "repo-fact",
+				memoryId: "fact-1",
+				displayText: "[repo-fact] commands.typecheck: npx pnpm typecheck",
+				matchReason: "fuzzy-fact-key",
+				matchClass: "fuzzy",
+			},
+			{
+				memoryKind: "procedure",
+				memoryId: "procedure-1",
+				displayText: "[procedure] fix TypeScript build: Run typecheck first.",
+				matchReason: "exact-task-type",
+				matchClass: "exact",
+			},
+		]);
+		storage.createProcedure({
+			name: "implement-then-review workflow for implement tasks",
+			taskType: "implement",
+			bodyMarkdown:
+				"Use an implement-then-review workflow for implement tasks.\n\nObserved learning: missing type guards.",
+			createdBy: "worker",
+			sourceRunId: run.id,
+			sourceTaskId: "task-implementer",
+			metadata: {
+				promotionRule: "multi-round-strategy-workflow->procedure",
+				strategyMode: "implement-then-review",
+			},
+		});
+
+		const inspect = storage.inspectTarget(run.id);
+		const unitInspect = storage.inspectTarget("unit-strategy-history");
+		const history = storage.getRunHistory();
+
+		expect(inspect.strategy).toEqual({ strategyId: "strategy-injected" });
+		expect(unitInspect.strategy).toEqual({ strategyId: "strategy-injected" });
+		expect(history[0]).toMatchObject({
+			id: run.id,
+			strategyId: "strategy-injected",
+			injectedMemoryCount: 2,
+			promotedStructuredMemoryCount: 1,
+		});
 	});
 
 	it("surfaces promoted procedure lineage in inspect snapshots, including superseded records", () => {

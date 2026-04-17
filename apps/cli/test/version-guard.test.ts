@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+	assertPublishedCliNodeVersion,
 	assertSupportedNodeVersion,
+	shouldBypassNodeVersionGuardForArgv,
 	shouldSuppressCliWarning,
 } from "../src/version-guard";
 
@@ -24,6 +26,60 @@ describe("published CLI node guard", () => {
 	it("rejects too-old major versions with a clear error", () => {
 		expect(() => assertSupportedNodeVersion("20.11.0")).toThrow(
 			/Node 24\.13\.1.*20\.11/i,
+		);
+	});
+
+	it("bypasses the hard node guard only for the exact bootstrap doctor forms", () => {
+		expect(shouldBypassNodeVersionGuardForArgv(["bootstrap", "doctor"])).toBe(
+			true,
+		);
+		expect(
+			shouldBypassNodeVersionGuardForArgv(["bootstrap", "doctor", "--json"]),
+		).toBe(true);
+		expect(
+			shouldBypassNodeVersionGuardForArgv(["bootstrap", "doctor", "--help"]),
+		).toBe(false);
+		expect(
+			shouldBypassNodeVersionGuardForArgv([
+				"bootstrap",
+				"doctor",
+				"unexpected",
+			]),
+		).toBe(false);
+		expect(
+			shouldBypassNodeVersionGuardForArgv([
+				"bootstrap",
+				"doctor",
+				"--json",
+				"unexpected",
+			]),
+		).toBe(false);
+		expect(shouldBypassNodeVersionGuardForArgv(["bootstrap"])).toBe(false);
+		expect(shouldBypassNodeVersionGuardForArgv(["--help"])).toBe(false);
+		expect(shouldBypassNodeVersionGuardForArgv(["run", "--help"])).toBe(false);
+	});
+
+	it("allows only exact bootstrap doctor forms on unsupported node while keeping other commands strict", () => {
+		expect(() =>
+			assertPublishedCliNodeVersion(
+				["bootstrap", "doctor", "--json"],
+				"22.22.2",
+			),
+		).not.toThrow();
+		expect(() =>
+			assertPublishedCliNodeVersion(
+				["bootstrap", "doctor", "--help"],
+				"22.22.2",
+			),
+		).toThrow(/Node 24\.13\.1.*22\.22\.2/i);
+		expect(() =>
+			assertPublishedCliNodeVersion(
+				["bootstrap", "doctor", "unexpected"],
+				"22.22.2",
+			),
+		).toThrow(/Node 24\.13\.1.*22\.22\.2/i);
+		expect(() => assertPublishedCliNodeVersion(["--help"], "22.22.2")).toThrow(
+			/Node 24\.13\.1.*22\.22\.2/i,
 		);
 	});
 

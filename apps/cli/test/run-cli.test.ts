@@ -70,6 +70,17 @@ function createGitWorktreeAdapter(): BuildplaneWorkspacePort {
 	return createActualGitWorkspaceAdapter();
 }
 
+function writeWorkspaceFile(
+	root: string,
+	name: string,
+	content: string,
+): string {
+	const targetPath = join(root, name);
+	mkdirSync(dirname(targetPath), { recursive: true });
+	writeFileSync(targetPath, content);
+	return targetPath;
+}
+
 function writePacket(root: string, name: string, packet: unknown): string {
 	const packetPath = join(root, name);
 	mkdirSync(dirname(packetPath), { recursive: true });
@@ -171,6 +182,46 @@ function createFailingPacket(unitId = "unit-fail") {
 	};
 }
 
+function createBootstrapDoctorReport(ok = true) {
+	return {
+		ok,
+		checks: [
+			{
+				id: "node",
+				label: "Node.js",
+				ok,
+				required: true,
+				expected: "24.13.1",
+				detected: ok ? "24.13.1" : "22.22.2",
+				message: ok
+					? "detected 24.13.1 (requires 24.13.1)"
+					: "Buildplane requires Node 24.13.1. Detected 22.22.2.",
+			},
+			{
+				id: "npm",
+				label: "npm",
+				ok,
+				required: true,
+				command: "npm --version",
+				detected: ok ? "10.9.0" : undefined,
+				message: ok ? "npm 10.9.0" : "command not available",
+			},
+			{
+				id: "git",
+				label: "git",
+				ok,
+				required: true,
+				command: "git --version",
+				detected: ok ? "git version 2.49.0" : undefined,
+				message: ok ? "git version 2.49.0" : "command not available",
+			},
+		],
+		notes: [
+			"Published/global installs do not yet include a verified `buildplane memory ...` contract.",
+		],
+	};
+}
+
 afterEach(() => {
 	vi.restoreAllMocks();
 	vi.unstubAllEnvs();
@@ -187,6 +238,70 @@ describe("cli command surface", () => {
 		expect(result.stdout.join("\n")).toContain("Buildplane by SollanSystems");
 		expect(result.stdout.join("\n")).toContain("Execute:");
 		expect(result.stdout.join("\n")).toContain("init");
+		expect(result.stdout.join("\n")).toContain("bootstrap doctor");
+		expect(result.stdout.join("\n")).toContain("workflow scan");
+	});
+
+	it("bootstrap doctor prints a deterministic human prerequisite report before init", async () => {
+		const root = mkdtempSync(
+			join(tmpdir(), "buildplane-cli-bootstrap-doctor-human-"),
+		);
+
+		const result = await runCliCapture(root, ["bootstrap", "doctor"], {
+			inspectBootstrapDoctor: () => createBootstrapDoctorReport(true),
+		} as unknown as RunCliDependencies);
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stderr).toEqual([]);
+		expect(result.stdout).toContain("bootstrap-doctor: pass");
+		expect(result.stdout).toContain(
+			"  - [pass] node: detected 24.13.1 (requires 24.13.1)",
+		);
+		expect(result.stdout).toContain("  - [pass] npm: npm 10.9.0");
+		expect(result.stdout).toContain(
+			"  - Published/global installs do not yet include a verified `buildplane memory ...` contract.",
+		);
+		expect(existsSync(join(root, ".buildplane"))).toBe(false);
+	});
+
+	it("bootstrap doctor --json returns a failing report without creating .buildplane", async () => {
+		const root = mkdtempSync(
+			join(tmpdir(), "buildplane-cli-bootstrap-doctor-json-"),
+		);
+
+		const result = await runCliCapture(
+			root,
+			["bootstrap", "doctor", "--json"],
+			{
+				inspectBootstrapDoctor: () => createBootstrapDoctorReport(false),
+			} as unknown as RunCliDependencies,
+		);
+
+		expect(result.exitCode).toBe(1);
+		expect(result.stderr).toEqual([]);
+		expect(JSON.parse(result.stdout.join("\n"))).toEqual(
+			createBootstrapDoctorReport(false),
+		);
+		expect(existsSync(join(root, ".buildplane"))).toBe(false);
+	});
+
+	it("bootstrap doctor rejects unsupported extra arguments", async () => {
+		const root = mkdtempSync(
+			join(tmpdir(), "buildplane-cli-bootstrap-doctor-invalid-"),
+		);
+
+		const result = await runCliCapture(root, [
+			"bootstrap",
+			"doctor",
+			"unexpected",
+		]);
+
+		expect(result.exitCode).toBe(1);
+		expect(result.stdout).toEqual([]);
+		expect(result.stderr.join("\n")).toContain(
+			"Unsupported bootstrap doctor arguments: unexpected",
+		);
+		expect(existsSync(join(root, ".buildplane"))).toBe(false);
 	});
 
 	it("shows top-level help for --help", async () => {
@@ -198,6 +313,59 @@ describe("cli command surface", () => {
 		expect(result.stderr).toEqual([]);
 		expect(result.stdout.join("\n")).toContain("Execute:");
 		expect(result.stdout.join("\n")).toContain("run --packet <path>");
+	});
+
+	it("workflow scan prints a preview of recognized workflow files without init", async () => {
+		const root = mkdtempSync(
+			join(tmpdir(), "buildplane-cli-workflow-scan-human-"),
+		);
+		writeWorkspaceFile(root, "CLAUDE.md", "# Claude instructions\n");
+		writeWorkspaceFile(root, ".claude/settings.json", "{}\n");
+		writeWorkspaceFile(root, ".claude/hooks/pre_tool_use.py", "print('hi')\n");
+		writeWorkspaceFile(root, ".codex/config.toml", "model = 'o3'\n");
+		writeWorkspaceFile(root, ".codex/auth.json", "ignored\n");
+
+		const result = await runCliCapture(root, ["workflow", "scan"]);
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stderr).toEqual([]);
+		expect(result.stdout).toContain("workflow-findings: 4");
+		expect(result.stdout).toContain("  - [shared/instructions] CLAUDE.md");
+		expect(result.stdout).toContain(
+			"  - [claude/config] .claude/settings.json",
+		);
+		expect(result.stdout).toContain(
+			"  - [claude/hooks] .claude/hooks/pre_tool_use.py",
+		);
+		expect(result.stdout).toContain("  - [codex/config] .codex/config.toml");
+		expect(result.stdout).toContain(
+			"preview-only: no workflow data was imported",
+		);
+		expect(existsSync(join(root, ".buildplane"))).toBe(false);
+	});
+
+	it("workflow scan --json returns a deterministic preview before init", async () => {
+		const root = mkdtempSync(
+			join(tmpdir(), "buildplane-cli-workflow-scan-json-"),
+		);
+		writeWorkspaceFile(root, "AGENTS.md", "# shared\n");
+		writeWorkspaceFile(root, ".codex/AGENTS.md", "# codex\n");
+		writeWorkspaceFile(root, ".codex/config.toml", "model = 'o3'\n");
+		writeWorkspaceFile(root, ".claude/auth.json", "ignored\n");
+
+		const result = await runCliCapture(root, ["workflow", "scan", "--json"]);
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stderr).toEqual([]);
+		expect(JSON.parse(result.stdout.join("\n"))).toEqual({
+			preview: true,
+			findings: [
+				{ path: "AGENTS.md", source: "shared", kind: "instructions" },
+				{ path: ".codex/AGENTS.md", source: "codex", kind: "instructions" },
+				{ path: ".codex/config.toml", source: "codex", kind: "config" },
+			],
+		});
+		expect(existsSync(join(root, ".buildplane"))).toBe(false);
 	});
 
 	it("returns machine-readable NOT_INITIALIZED errors before init and preflights run before packet loading", async () => {
@@ -645,6 +813,95 @@ describe("cli command surface", () => {
 		});
 	});
 
+	it("surfaces strategy lineage and memory summaries in inspect and history for strategy runs", async () => {
+		const root = createGitRepo();
+		await runCliCapture(root, ["init"]);
+
+		const storage = createBuildplaneStorage(root);
+		storage.upsertRepoFact({
+			factKey: "commands.typecheck",
+			factValue: "npx pnpm typecheck",
+			valueType: "string",
+			scopeType: "repo",
+			createdBy: "system",
+		});
+		storage.createProcedure({
+			name: "fix TypeScript build",
+			taskType: "debug_failure",
+			bodyMarkdown: "Run typecheck before touching imports.",
+			createdBy: "worker",
+		});
+
+		const strategyPath = writeCommittedPacket(
+			root,
+			".buildplane/test-packets/strategy-history.json",
+			{
+				id: "strategy-history",
+				mode: "single",
+				mergePolicy: "direct",
+				children: [
+					{
+						role: "implementer",
+						packet: {
+							...createPassingPacket("strategy-history-unit"),
+							intent: {
+								objective: "Fix the TypeScript build",
+								taskType: "debug_failure",
+								context: { files: ["apps/cli/src/run-cli.ts"] },
+								constraints: {
+									scope: ["apps/cli/src"],
+									verification: ["npx pnpm typecheck"],
+								},
+								features: {
+									ambiguity: "low",
+									reversibility: "easy",
+									verifierStrength: "strong",
+								},
+							},
+						},
+					},
+				],
+			},
+		);
+
+		const runStrategy = await runCliCapture(root, [
+			"run-strategy",
+			"--strategy",
+			strategyPath,
+		]);
+		const inspectHuman = await runCliCapture(root, [
+			"inspect",
+			"strategy-history-unit",
+		]);
+		const inspectJson = await runCliCapture(root, [
+			"inspect",
+			"strategy-history-unit",
+			"--json",
+		]);
+		const historyHuman = await runCliCapture(root, ["history"]);
+		const historyJson = await runCliCapture(root, ["history", "--json"]);
+
+		expect(runStrategy.exitCode).toBe(0);
+		expect(inspectHuman.stdout).toEqual(
+			expect.arrayContaining(["strategy: strategy-history"]),
+		);
+		expect(JSON.parse(inspectJson.stdout.join("\n"))).toMatchObject({
+			strategy: { strategyId: "strategy-history" },
+		});
+		expect(historyHuman.stdout.join("\n")).toContain("strategy-history");
+		expect(historyHuman.stdout.join("\n")).toContain("mem=2/0");
+		expect(JSON.parse(historyJson.stdout.join("\n"))).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					unitId: "strategy-history-unit",
+					strategyId: "strategy-history",
+					injectedMemoryCount: 2,
+					promotedStructuredMemoryCount: 0,
+				}),
+			]),
+		);
+	});
+
 	it("delegates memory commands to the native runner dependency", async () => {
 		const root = mkdtempSync(join(tmpdir(), "buildplane-cli-memory-delegate-"));
 		const calls: Array<{ cwd: string; argv: string[]; commandPath: string[] }> =
@@ -1071,6 +1328,217 @@ describe("cli command surface", () => {
 				finalizedAt: expect.any(String),
 				existsOnDisk: true,
 			},
+		});
+	});
+
+	it("lists actionable workspaces in human and json output", async () => {
+		const root = createGitRepo();
+		await runCliCapture(root, ["init"]);
+		const storage = createBuildplaneStorage(root);
+		const workspaceAdapter = createActualGitWorkspaceAdapter();
+		const headSha = git(root, ["rev-parse", "HEAD"]).trim();
+
+		const retainedRun = storage.createRun({
+			...createPassingPacket("unit-workspace-retained"),
+		});
+		const retainedWorkspace = workspaceAdapter.prepareWorkspace(
+			root,
+			retainedRun.id,
+			headSha,
+		);
+		storage.recordWorkspacePrepared(retainedRun.id, {
+			path: retainedWorkspace.path,
+			headSha: retainedWorkspace.headSha,
+			sourceProjectRoot: root,
+		});
+		storage.commitRunFailureOutcome(retainedRun.id, {
+			decision: {
+				kind: "reject-run",
+				outcome: "rejected",
+				reasons: ["command exited with code 1"],
+			},
+			workspaceStatus: "retained",
+		});
+
+		const cleanupRun = storage.createRun({
+			...createPassingPacket("unit-workspace-cleanup-failed"),
+		});
+		const cleanupWorkspace = workspaceAdapter.prepareWorkspace(
+			root,
+			cleanupRun.id,
+			headSha,
+		);
+		storage.recordWorkspacePrepared(cleanupRun.id, {
+			path: cleanupWorkspace.path,
+			headSha: cleanupWorkspace.headSha,
+			sourceProjectRoot: root,
+		});
+		storage.markRunRunning(cleanupRun.id);
+		storage.commitRunSuccessOutcome(cleanupRun.id, {
+			kind: "advance-run",
+			outcome: "approved",
+			reasons: [],
+		});
+		storage.recordWorkspaceCleanupFailed(cleanupRun.id, "disk busy");
+
+		const human = await runCliCapture(root, ["workspace", "list"]);
+		const json = await runCliCapture(root, ["workspace", "list", "--json"]);
+
+		expect(human.exitCode).toBe(0);
+		expect(human.stdout.join("\n")).toContain(retainedRun.id);
+		expect(human.stdout.join("\n")).toContain(cleanupRun.id);
+		expect(human.stdout.join("\n")).toContain("retained");
+		expect(human.stdout.join("\n")).toContain("cleanup-failed");
+		expect(human.stdout.join("\n")).toContain("cleanup-error: disk busy");
+		expect(JSON.parse(json.stdout.join("\n"))).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					runId: retainedRun.id,
+					status: "retained",
+					path: retainedWorkspace.path,
+				}),
+				expect.objectContaining({
+					runId: cleanupRun.id,
+					status: "cleanup-failed",
+					path: cleanupWorkspace.path,
+					cleanupError: "disk busy",
+				}),
+			]),
+		);
+	});
+
+	it("cleans up retained workspaces and removes them from actionable status", async () => {
+		const root = createGitRepo();
+		await runCliCapture(root, ["init"]);
+		const packetPath = writeCommittedPacket(
+			root,
+			".buildplane/test-packets/cleanup-retained.json",
+			createFailingPacket("unit-cleanup-retained"),
+		);
+
+		const runResult = await runCliCapture(root, [
+			"run",
+			"--raw",
+			"--packet",
+			packetPath,
+		]);
+		const runId = extractRunId(runResult.stdout);
+		const cleanup = await runCliCapture(root, ["workspace", "cleanup", runId]);
+		const statusJson = await runCliCapture(root, ["status", "--json"]);
+		const inspectJson = await runCliCapture(root, ["inspect", runId, "--json"]);
+
+		expect(cleanup.exitCode).toBe(0);
+		expect(cleanup.stdout).toEqual(
+			expect.arrayContaining([
+				"workspace-cleanup: deleted",
+				`run-id: ${runId}`,
+			]),
+		);
+		expect(JSON.parse(statusJson.stdout.join("\n"))).toMatchObject({
+			actionableWorkspaces: [],
+		});
+		expect(JSON.parse(inspectJson.stdout.join("\n"))).toMatchObject({
+			workspace: {
+				status: "deleted",
+				existsOnDisk: false,
+			},
+		});
+	});
+
+	it("cleans up cleanup-failed workspaces and removes them from actionable status", async () => {
+		const root = createGitRepo();
+		await runCliCapture(root, ["init"]);
+		const storage = createBuildplaneStorage(root);
+		const workspaceAdapter = createActualGitWorkspaceAdapter();
+		const headSha = git(root, ["rev-parse", "HEAD"]).trim();
+
+		const run = storage.createRun({
+			...createPassingPacket("unit-cleanup-failed-operator"),
+		});
+		const preparedWorkspace = workspaceAdapter.prepareWorkspace(
+			root,
+			run.id,
+			headSha,
+		);
+		storage.recordWorkspacePrepared(run.id, {
+			path: preparedWorkspace.path,
+			headSha: preparedWorkspace.headSha,
+			sourceProjectRoot: root,
+		});
+		storage.markRunRunning(run.id);
+		storage.commitRunSuccessOutcome(run.id, {
+			kind: "advance-run",
+			outcome: "approved",
+			reasons: [],
+		});
+		storage.recordWorkspaceCleanupFailed(run.id, "disk busy");
+
+		const cleanup = await runCliCapture(root, [
+			"workspace",
+			"cleanup",
+			run.id,
+			"--json",
+		]);
+		const statusJson = await runCliCapture(root, ["status", "--json"]);
+		const inspectJson = await runCliCapture(root, [
+			"inspect",
+			run.id,
+			"--json",
+		]);
+
+		expect(cleanup.exitCode).toBe(0);
+		expect(JSON.parse(cleanup.stdout.join("\n"))).toMatchObject({
+			runId: run.id,
+			status: "deleted",
+			previousStatus: "cleanup-failed",
+			path: preparedWorkspace.path,
+		});
+		expect(JSON.parse(statusJson.stdout.join("\n"))).toMatchObject({
+			actionableWorkspaces: [],
+		});
+		expect(JSON.parse(inspectJson.stdout.join("\n"))).toMatchObject({
+			workspace: {
+				status: "deleted",
+				existsOnDisk: false,
+			},
+		});
+	});
+
+	it("returns stable errors for unknown and non-actionable workspace cleanup requests", async () => {
+		const root = createGitRepo();
+		await runCliCapture(root, ["init"]);
+		const storage = createBuildplaneStorage(root);
+		const run = storage.createRun({
+			...createPassingPacket("unit-workspace-active"),
+		});
+		const workspacePath = join(root, ".buildplane", "workspaces", run.id);
+		mkdirSync(workspacePath, { recursive: true });
+		storage.recordWorkspacePrepared(run.id, {
+			path: workspacePath,
+			headSha: "abc123",
+			sourceProjectRoot: root,
+		});
+
+		const unknown = await runCliCapture(root, [
+			"workspace",
+			"cleanup",
+			"missing-run",
+			"--json",
+		]);
+		const nonActionable = await runCliCapture(root, [
+			"workspace",
+			"cleanup",
+			run.id,
+			"--json",
+		]);
+
+		expect(unknown.exitCode).toBe(1);
+		expect(JSON.parse(unknown.stdout.join("\n"))).toMatchObject({
+			error: { code: "NOT_FOUND" },
+		});
+		expect(nonActionable.exitCode).toBe(1);
+		expect(JSON.parse(nonActionable.stdout.join("\n"))).toMatchObject({
+			error: { code: "WORKSPACE_NOT_ACTIONABLE" },
 		});
 	});
 

@@ -212,6 +212,9 @@ interface RunHistoryEntryLike {
 	readonly id: string;
 	readonly unitId: string;
 	readonly status: string;
+	readonly strategyId?: string;
+	readonly injectedMemoryCount?: number;
+	readonly promotedStructuredMemoryCount?: number;
 	readonly createdAt: string;
 	readonly completedAt?: string;
 }
@@ -223,18 +226,115 @@ export function formatRunHistory(entries: RunHistoryEntryLike[]): string[] {
 
 	const lines: string[] = [];
 	lines.push(
-		`${"RUN ID".padEnd(38)} ${"UNIT".padEnd(24)} ${"STATUS".padEnd(10)} CREATED`,
+		`${"RUN ID".padEnd(38)} ${"UNIT".padEnd(24)} ${"STATUS".padEnd(10)} ${"STRATEGY".padEnd(24)} ${"MEM".padEnd(8)} CREATED`,
 	);
-	lines.push("─".repeat(90));
+	lines.push("─".repeat(130));
 
 	for (const entry of entries) {
 		const created = entry.createdAt.replace("T", " ").slice(0, 19);
+		const strategy = (entry.strategyId ?? "-").padEnd(24);
+		const memorySummary =
+			`mem=${entry.injectedMemoryCount ?? 0}/${entry.promotedStructuredMemoryCount ?? 0}`.padEnd(
+				8,
+			);
 		lines.push(
-			`${entry.id.padEnd(38)} ${entry.unitId.padEnd(24)} ${entry.status.padEnd(10)} ${created}`,
+			`${entry.id.padEnd(38)} ${entry.unitId.padEnd(24)} ${entry.status.padEnd(10)} ${strategy} ${memorySummary} ${created}`,
 		);
 	}
 
 	return lines;
+}
+
+interface WorkspaceSummaryLike {
+	readonly runId: string;
+	readonly status: string;
+	readonly path: string;
+	readonly headSha?: string;
+	readonly cleanupError?: string;
+}
+
+interface WorkflowScanFindingLike {
+	readonly path: string;
+	readonly source: string;
+	readonly kind: string;
+}
+
+interface BootstrapDoctorCheckLike {
+	readonly id: string;
+	readonly ok: boolean;
+	readonly message: string;
+}
+
+interface BootstrapDoctorReportLike {
+	readonly ok: boolean;
+	readonly checks: readonly BootstrapDoctorCheckLike[];
+	readonly notes: readonly string[];
+}
+
+export function formatBootstrapDoctorReport(
+	report: BootstrapDoctorReportLike,
+): string[] {
+	const lines = [`bootstrap-doctor: ${report.ok ? "pass" : "fail"}`];
+	for (const check of report.checks) {
+		lines.push(
+			`  - [${check.ok ? "pass" : "fail"}] ${sanitizeTerminalText(check.id)}: ${sanitizeTerminalText(check.message)}`,
+		);
+	}
+	if (report.notes.length > 0) {
+		lines.push("notes:");
+		for (const note of report.notes) {
+			lines.push(`  - ${sanitizeTerminalText(note)}`);
+		}
+	}
+	return lines;
+}
+
+export function formatWorkflowScanPreview(preview: {
+	readonly findings: readonly WorkflowScanFindingLike[];
+}): string[] {
+	const lines = [`workflow-findings: ${preview.findings.length}`];
+	for (const finding of preview.findings) {
+		lines.push(
+			`  - [${sanitizeTerminalText(finding.source)}/${sanitizeTerminalText(finding.kind)}] ${sanitizeTerminalText(finding.path)}`,
+		);
+	}
+	lines.push("preview-only: no workflow data was imported");
+	return lines;
+}
+
+export function formatWorkspaceList(entries: WorkspaceSummaryLike[]): string[] {
+	if (entries.length === 0) {
+		return ["No actionable workspaces."];
+	}
+
+	const lines: string[] = [];
+	lines.push(
+		`${"RUN ID".padEnd(38)} ${"STATUS".padEnd(16)} ${"HEAD".padEnd(12)} PATH`,
+	);
+	lines.push("─".repeat(110));
+	for (const entry of entries) {
+		lines.push(
+			`${entry.runId.padEnd(38)} ${entry.status.padEnd(16)} ${(entry.headSha ?? "-").padEnd(12)} ${entry.path}`,
+		);
+		if (entry.cleanupError) {
+			lines.push(`  cleanup-error: ${entry.cleanupError}`);
+		}
+	}
+	return lines;
+}
+
+export function formatWorkspaceCleanupResult(result: {
+	readonly runId: string;
+	readonly path: string;
+	readonly status: string;
+	readonly previousStatus: string;
+}): string[] {
+	return [
+		`workspace-cleanup: ${result.status}`,
+		`run-id: ${result.runId}`,
+		`workspace: ${result.path}`,
+		`previous-status: ${result.previousStatus}`,
+	];
 }
 
 interface ExecutionEventLike {
@@ -251,6 +351,9 @@ interface InspectSnapshotLike {
 		readonly id: string;
 		readonly unitId: string;
 		readonly status: string;
+	};
+	readonly strategy?: {
+		readonly strategyId: string;
 	};
 	readonly evidence: readonly {
 		readonly kind: string;
@@ -280,6 +383,11 @@ export function formatInspectDetail(
 	lines.push(`run-id: ${snapshot.run.id}`);
 	lines.push(`unit-id: ${snapshot.run.unitId}`);
 	lines.push(`status: ${snapshot.run.status}`);
+	if (snapshot.strategy?.strategyId) {
+		lines.push(
+			`strategy: ${sanitizeTerminalText(snapshot.strategy.strategyId)}`,
+		);
+	}
 
 	const s = snapshot as unknown as Record<string, unknown>;
 	if (s.workspace && typeof s.workspace === "object") {

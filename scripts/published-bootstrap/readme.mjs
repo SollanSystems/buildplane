@@ -21,10 +21,17 @@ const REPO_ONLY_SECTION_PATTERNS = Object.freeze([
 	/^##\s+Status\b|\bMilestone\s+\d+\b/im,
 ]);
 const PUBLISHED_DISTRIBUTION_BODY = [
-	"Install Buildplane with npm, then use the published CLI directly:",
+	"Install Buildplane with the published one-line installer:",
+	"",
+	"```bash",
+	'tmp="$(mktemp)" && curl -fsSL https://raw.githubusercontent.com/SollanSystems/buildplane/main/scripts/published-bootstrap/install.sh -o "$tmp" && bash "$tmp"',
+	"```",
+	"",
+	"If you prefer the explicit npm path, the published fallback/reference contract is:",
 	"",
 	"```bash",
 	"npm install -g buildplane",
+	"buildplane bootstrap doctor --json",
 	"buildplane init",
 	"buildplane run --packet /absolute/path/to/packet.json",
 	"buildplane status --json",
@@ -32,6 +39,10 @@ const PUBLISHED_DISTRIBUTION_BODY = [
 	"```",
 	"",
 	"> **Precondition:** `run` expects a clean git working tree. Commit or stash uncommitted changes before dispatching work.",
+	"",
+	"Published/global installs do not yet include a verified `buildplane memory ...` contract. The npm package does not bundle or provision `buildplane-native`, so memory remains a repo-local or direct-native workflow unless you separately supply the native binary yourself.",
+	"",
+	"Use this path when you want the packaged operator experience instead of the repo-local development or in-repo built CLI paths. The repo verifies this contract from a packed publishable artifact before any registry publication step.",
 ].join("\n");
 
 function readRootReadme() {
