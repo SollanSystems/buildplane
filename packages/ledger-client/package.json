@@ -13,5 +13,11 @@
 	},
 	"scripts": {
 		"build": "tsc --build"
+	},
+	"dependencies": {
+		"uuid": "^11"
+	},
+	"devDependencies": {
+		"@types/uuid": "^10"
 	}
 }
