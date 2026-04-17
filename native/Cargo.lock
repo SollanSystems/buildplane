@@ -65,6 +65,7 @@ dependencies = [
 name = "bp-cli"
 version = "0.1.0"
 dependencies = [
+ "bp-ledger",
  "bp-memory",
  "bp-pack-inspection",
  "bp-pack-loader",

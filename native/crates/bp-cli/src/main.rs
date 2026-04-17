@@ -1,3 +1,4 @@
+mod ledger_cli;
 mod memory_cli;
 
 #[cfg(test)]
@@ -19,6 +20,7 @@ use std::process;
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Command {
     InspectPack(InspectPackArgs),
+    Ledger(ledger_cli::LedgerCommand),
     Memory(MemoryCommand),
     Help,
 }
@@ -63,6 +65,13 @@ fn main() {
 fn run() -> Result<(), String> {
     match parse_args_from_iter(env::args_os().skip(1))? {
         Command::InspectPack(args) => run_inspect_pack(args),
+        Command::Ledger(ledger_cli::LedgerCommand::Serve(serve_args)) => {
+            ledger_cli::run_serve(serve_args)
+        }
+        Command::Ledger(ledger_cli::LedgerCommand::Help) => {
+            println!("{}", ledger_cli::usage_text());
+            Ok(())
+        }
         Command::Memory(command) => run_memory_command(command),
         Command::Help => {
             println!("{}", usage_text());
@@ -144,6 +153,15 @@ where
     let first = parse_string(first, "subcommand")?;
     if is_help_flag(&first) {
         return Ok(Command::Help);
+    }
+    if first == "ledger" {
+        let rest: Vec<String> = args
+            .map(|a| {
+                a.into_string()
+                    .map_err(|_| "ledger argument must be valid UTF-8".to_string())
+            })
+            .collect::<Result<_, _>>()?;
+        return ledger_cli::parse_ledger_command(&rest).map(Command::Ledger);
     }
     if first == "memory" {
         return parse_memory_command(args, default_workspace_root).map(Command::Memory);
@@ -250,6 +268,7 @@ fn usage_text() -> String {
         "Usage:
   buildplane-native pack show <pack-id> [--native-root <path>] [--workspace-root <path>] [--host <id>] [--provider <id>] [--detected-host <id>]... [--json]
   buildplane-native memory <action> [options]
+  buildplane-native ledger <subcommand> [options]
 
 Examples:
   cargo run --manifest-path native/Cargo.toml -p bp-cli -- pack show superclaude
@@ -257,9 +276,12 @@ Examples:
   cargo run --manifest-path native/Cargo.toml -p bp-cli -- pack show superclaude --detected-host codex --workspace-root /tmp/buildplane-test-workspace
   cargo run --manifest-path native/Cargo.toml -p bp-cli -- pack show superclaude --json
   cargo run --manifest-path native/Cargo.toml -p bp-cli -- memory remember \"User prefers concise output\" --scope user --kind preference
+  cargo run --manifest-path native/Cargo.toml -p bp-cli -- ledger serve --run-id <id> --workspace <path>
 
+{}
 {}",
-        memory_usage_text()
+        memory_usage_text(),
+        ledger_cli::usage_text()
     )
 }
 

@@ -9,6 +9,7 @@ name = "buildplane-native"
 path = "src/main.rs"
 
 [dependencies]
+bp-ledger.workspace = true
 bp-memory.workspace = true
 bp-pack-inspection.workspace = true
 bp-pack-loader.workspace = true
