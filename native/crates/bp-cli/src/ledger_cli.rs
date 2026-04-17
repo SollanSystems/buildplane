@@ -67,11 +67,48 @@ fn parse_serve(args: &[String]) -> Result<ServeArgs, String> {
         }
         i += 1;
     }
+    let workspace = workspace.ok_or("missing --workspace")?;
+    if !workspace.is_absolute() {
+        return Err(format!(
+            "--workspace must be an absolute path; got: {}",
+            workspace.display()
+        ));
+    }
     Ok(ServeArgs {
         run_id: run_id.ok_or("missing --run-id")?,
-        workspace: workspace.ok_or("missing --workspace")?,
+        workspace,
         schema_version,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_serve_rejects_relative_workspace() {
+        let args = vec![
+            "--run-id".to_string(),
+            "abc".to_string(),
+            "--workspace".to_string(),
+            "./relative/path".to_string(),
+        ];
+        let err = parse_serve(&args).unwrap_err();
+        assert!(err.contains("absolute"), "expected 'absolute' in error: {err}");
+    }
+
+    #[test]
+    fn parse_serve_accepts_absolute_workspace() {
+        let args = vec![
+            "--run-id".to_string(),
+            "abc".to_string(),
+            "--workspace".to_string(),
+            "/tmp/abs".to_string(),
+        ];
+        let out = parse_serve(&args).unwrap();
+        assert_eq!(out.workspace.to_str().unwrap(), "/tmp/abs");
+        assert_eq!(out.run_id, "abc");
+    }
 }
 
 /// Execute the `ledger serve` command.
