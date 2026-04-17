@@ -8,8 +8,52 @@
 use crate::canonicalize::canonicalize;
 use crate::error::{LedgerError, Result};
 use crate::event::Event;
+use crate::id::EventId;
 use crate::storage::sqlite::SqliteStore;
-use std::io::{BufRead, BufReader, Read};
+use crate::storage::Cas;
+use std::io::{BufRead, BufReader, Read, Write};
+
+/// A single stdin line, interpreted as either a control message or an event envelope.
+#[derive(Debug)]
+pub enum Line {
+    Control(ControlMessage),
+    Event(Event),
+}
+
+/// Control messages received on stdin.
+#[derive(Debug, serde::Deserialize)]
+#[serde(tag = "control", rename_all = "snake_case")]
+pub enum ControlMessage {
+    Handshake {
+        protocol: u32,
+        run_id: crate::id::RunId,
+        started_at: String,
+        schema_version: u32,
+    },
+    Flush {
+        seq: u64,
+    },
+    Close {
+        seq: u64,
+    },
+}
+
+/// Parse a JSON line as either a control message or an event envelope.
+pub fn parse_control_or_event(line: &str) -> Result<Line> {
+    let value: serde_json::Value = serde_json::from_str(line).map_err(|e| {
+        LedgerError::InvalidPayload {
+            kind: "<line>".into(),
+            reason: format!("invalid json: {e}"),
+        }
+    })?;
+    if value.get("control").is_some() {
+        let ctl: ControlMessage = serde_json::from_value(value).map_err(LedgerError::from)?;
+        Ok(Line::Control(ctl))
+    } else {
+        let evt: Event = serde_json::from_value(value).map_err(LedgerError::from)?;
+        Ok(Line::Event(evt))
+    }
+}
 
 /// Ingest events from `reader` and append to `store` until EOF.
 ///
@@ -108,5 +152,70 @@ mod tests {
         let err = ingest(&input[..], &store).unwrap_err();
         assert!(matches!(err, LedgerError::InvalidPayload { .. }));
         assert_eq!(store.event_count().unwrap(), 0);
+    }
+}
+
+#[cfg(test)]
+mod control_message_tests {
+    use super::*;
+
+    #[test]
+    fn control_handshake_parses() {
+        let line = r#"{"control":"handshake","protocol":1,"run_id":"01919000-0000-7000-8000-000000000000","started_at":"2026-04-17T12:00:00Z","schema_version":1}"#;
+        let msg = parse_control_or_event(line).unwrap();
+        match msg {
+            Line::Control(ControlMessage::Handshake { protocol, schema_version, .. }) => {
+                assert_eq!(protocol, 1);
+                assert_eq!(schema_version, 1);
+            }
+            _ => panic!("expected Handshake"),
+        }
+    }
+
+    #[test]
+    fn control_flush_parses() {
+        let line = r#"{"control":"flush","seq":42}"#;
+        match parse_control_or_event(line).unwrap() {
+            Line::Control(ControlMessage::Flush { seq }) => assert_eq!(seq, 42),
+            _ => panic!("expected Flush"),
+        }
+    }
+
+    #[test]
+    fn control_close_parses() {
+        let line = r#"{"control":"close","seq":43}"#;
+        match parse_control_or_event(line).unwrap() {
+            Line::Control(ControlMessage::Close { seq }) => assert_eq!(seq, 43),
+            _ => panic!("expected Close"),
+        }
+    }
+
+    #[test]
+    fn event_envelope_parses_as_event() {
+        use crate::id::{EventId, RunId};
+        use crate::kind::EventKind;
+        use crate::payload::run_lifecycle::{RunCompletedV1, RunOutcome};
+        use crate::payload::Payload;
+        use chrono::Utc;
+
+        let event = crate::event::Event {
+            id: EventId::new(),
+            run_id: RunId::new(),
+            parent_event_id: None,
+            schema_version: 1,
+            kind: EventKind::RunCompleted,
+            occurred_at: Utc::now(),
+            payload: Payload::RunCompletedV1(RunCompletedV1 {
+                outcome: RunOutcome::Passed,
+                duration_ms: 0,
+                event_count: 0,
+                unit_count: 0,
+            }),
+        };
+        let line = serde_json::to_string(&event).unwrap();
+        match parse_control_or_event(&line).unwrap() {
+            Line::Event(e) => assert_eq!(e.id, event.id),
+            _ => panic!("expected Event"),
+        }
     }
 }
