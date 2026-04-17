@@ -2,7 +2,7 @@
 
 use crate::error::{LedgerError, Result};
 use crate::event::Event;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use std::path::Path;
 
 /// SQLite connection wrapping the events + runs schema.
@@ -120,6 +120,75 @@ impl SqliteStore {
     /// append-only behavior. Not part of the stable API.
     pub fn conn_for_tests(&self) -> &Connection {
         &self.conn
+    }
+
+    /// Flush the WAL and fsync. Returns the id of the most recently appended
+    /// event (useful for flush_ack).
+    pub fn flush_fsync(&self) -> Result<Option<crate::id::EventId>> {
+        self.conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
+
+        let last: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT id FROM events ORDER BY id DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?;
+
+        match last {
+            Some(s) => {
+                let uuid = uuid::Uuid::parse_str(&s).map_err(|e| {
+                    LedgerError::Sqlite(rusqlite::Error::FromSqlConversionFailure(
+                        0,
+                        rusqlite::types::Type::Text,
+                        Box::new(e),
+                    ))
+                })?;
+                Ok(Some(crate::id::EventId::from_uuid(uuid)))
+            }
+            None => Ok(None),
+        }
+    }
+}
+
+#[cfg(test)]
+mod flush_fsync_tests {
+    use super::*;
+
+    #[test]
+    fn flush_fsync_on_empty_store_succeeds() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        store.flush_fsync().unwrap();
+    }
+
+    #[test]
+    fn flush_fsync_after_append_returns_last_event_id() {
+        use crate::event::Event;
+        use crate::id::{EventId, RunId};
+        use crate::kind::EventKind;
+        use crate::payload::run_lifecycle::{RunCompletedV1, RunOutcome};
+        use crate::payload::Payload;
+        use chrono::Utc;
+
+        let store = SqliteStore::open_in_memory().unwrap();
+        let event = Event {
+            id: EventId::new(),
+            run_id: RunId::new(),
+            parent_event_id: None,
+            schema_version: 1,
+            kind: EventKind::RunCompleted,
+            occurred_at: Utc::now(),
+            payload: Payload::RunCompletedV1(RunCompletedV1 {
+                outcome: RunOutcome::Passed,
+                duration_ms: 0,
+                event_count: 0,
+                unit_count: 0,
+            }),
+        };
+        store.append(&event).unwrap();
+        let last = store.flush_fsync().unwrap();
+        assert_eq!(last, Some(event.id));
     }
 }
 

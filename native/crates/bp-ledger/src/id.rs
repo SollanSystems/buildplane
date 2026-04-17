@@ -21,6 +21,9 @@ impl EventId {
     pub fn new() -> Self {
         Self(Uuid::now_v7())
     }
+    pub fn from_uuid(u: Uuid) -> Self {
+        Self(u)
+    }
     pub fn as_uuid(&self) -> Uuid {
         self.0
     }
