@@ -2,8 +2,9 @@
 //!
 //! Phase A: only `serve` is wired. Phase D adds `inspect`.
 
-use bp_ledger::serve::ingest;
+use bp_ledger::serve::serve_with_protocol;
 use bp_ledger::storage::sqlite::SqliteStore;
+use bp_ledger::storage::Cas;
 use std::io::{self, Write};
 use std::path::PathBuf;
 
@@ -114,7 +115,7 @@ mod tests {
 /// Execute the `ledger serve` command.
 ///
 /// Resolves the ledger database path from the workspace, opens it, and runs
-/// the ingest loop against stdin.
+/// the protocol state machine against stdin.
 pub fn run_serve(args: ServeArgs) -> Result<(), String> {
     if args.schema_version != 1 {
         return Err(format!(
@@ -126,12 +127,17 @@ pub fn run_serve(args: ServeArgs) -> Result<(), String> {
     std::fs::create_dir_all(&ledger_dir).map_err(|e| format!("creating ledger dir: {e}"))?;
     let db_path = ledger_dir.join("events.db");
     let store = SqliteStore::open(&db_path).map_err(|e| format!("opening events.db: {e}"))?;
+    let cas = Cas::open(ledger_dir.join("objects")).map_err(|e| format!("opening cas: {e}"))?;
 
     let stdin = io::stdin();
     let locked = stdin.lock();
-    ingest(locked, &store).map_err(|e| format!("ingest: {e}"))?;
+    let stderr = io::stderr();
+    let mut stderr_lock = stderr.lock();
 
-    io::stderr().flush().ok();
+    serve_with_protocol(locked, &mut stderr_lock, &store, &cas, 1)
+        .map_err(|e| format!("serve: {e}"))?;
+
+    stderr_lock.flush().ok();
     Ok(())
 }
 
