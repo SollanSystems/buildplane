@@ -8,3 +8,6 @@ pub mod kind;
 pub mod payload;
 pub mod serve;
 pub mod storage;
+
+pub use error::{LedgerError, Result};
+pub use id::{EventId, RunId};
