@@ -18,6 +18,7 @@
 		"typecheck": "pnpm exec tsc --build --pretty false",
 		"lint": "biome check .",
 		"format": "biome format --write .",
+		"ledger:gen": "./scripts/ledger/generate-schema.sh",
 		"check": "pnpm lint && pnpm typecheck && pnpm test && pnpm build",
 		"prepare": "husky",
 		"changeset": "changeset",

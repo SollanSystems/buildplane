@@ -12,6 +12,10 @@ use serde::{Deserialize, Serialize};
 /// The canonical payload type — what you get after `canonicalize()` reads an
 /// event. Rust enum variants correspond to (kind, version) pairs; future
 /// versions add variants without changing existing ones.
+///
+/// Note: `Payload` uses serde's default external tagging (`{"VariantV1": {...}}`).
+/// typeshare requires adjacent tagging for algebraic enums, so the TS declaration
+/// is maintained manually in `packages/ledger-client/src/payload.ts`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Payload {
     RunStartedV1(run_lifecycle::RunStartedV1),

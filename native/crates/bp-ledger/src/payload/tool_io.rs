@@ -1,9 +1,11 @@
 //! Tool I/O payloads: ToolRequest, ToolResult.
 
 use crate::id::EventId;
+use crate::types::U64;
 use bp_ledger_macros::RedactSecrets;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use typeshare::typeshare;
 
 /// Write-side tool request shape — uses RedactSecrets to redact `env` on
 /// serialize. Does not derive Serialize directly because RedactSecrets
@@ -18,6 +20,7 @@ pub struct ToolRequestV1 {
     pub unit_id: String,
 }
 
+#[typeshare]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ToolResultV1 {
     pub tool_request_id: EventId,
@@ -25,12 +28,13 @@ pub struct ToolResultV1 {
     pub stderr: String,
     pub exit_code: Option<i32>,
     pub output: Option<serde_json::Value>,
-    pub duration_ms: u64,
+    pub duration_ms: U64,
 }
 
 /// On-disk shape of a `ToolRequest` event — `env` is the redaction map, not a
 /// raw BTreeMap. This is what `canonicalize` produces when reading an event
 /// back from storage.
+#[typeshare]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ToolRequestStoredV1 {
     pub tool_name: String,
@@ -40,6 +44,7 @@ pub struct ToolRequestStoredV1 {
     pub unit_id: String,
 }
 
+#[typeshare]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct EnvRedaction {
     pub redacted: bool,

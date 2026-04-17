@@ -2,7 +2,9 @@
 //! file-system changes outside the tool adapter.
 
 use serde::{Deserialize, Serialize};
+use typeshare::typeshare;
 
+#[typeshare]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct GitCheckpointV1 {
     /// Boundary position relative to the unit.
@@ -17,6 +19,7 @@ pub struct GitCheckpointV1 {
     pub git_status: GitStatus,
 }
 
+#[typeshare]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum CheckpointBoundary {
@@ -24,8 +27,9 @@ pub enum CheckpointBoundary {
     PostUnit,
 }
 
+#[typeshare]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", tag = "kind")]
+#[serde(rename_all = "snake_case", tag = "kind", content = "data")]
 pub enum GitStatus {
     Ok,
     Failed { error: String },

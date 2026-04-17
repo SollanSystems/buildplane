@@ -5,9 +5,11 @@ use crate::kind::EventKind;
 use crate::payload::Payload;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use typeshare::typeshare;
 
 /// The frozen v1 event envelope. Six fields, never change shape. Payload
 /// evolves via its own versioning inside `Payload`.
+#[typeshare]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Event {
     pub id: EventId,

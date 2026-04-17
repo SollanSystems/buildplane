@@ -1,8 +1,11 @@
 //! Unit lifecycle payloads: UnitStarted, UnitCompleted, UnitFailed, UnitCancelled.
 
 use crate::id::EventId;
+use crate::types::U64;
 use serde::{Deserialize, Serialize};
+use typeshare::typeshare;
 
+#[typeshare]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct UnitStartedV1 {
     pub unit_id: String,
@@ -12,6 +15,7 @@ pub struct UnitStartedV1 {
     pub policy: serde_json::Value,
 }
 
+#[typeshare]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct UnitCompletedV1 {
     pub unit_id: String,
@@ -20,6 +24,7 @@ pub struct UnitCompletedV1 {
     pub artifacts: Vec<ArtifactRef>,
 }
 
+#[typeshare]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct UnitFailedV1 {
     pub unit_id: String,
@@ -27,12 +32,14 @@ pub struct UnitFailedV1 {
     pub terminating_event_id: Option<EventId>,
 }
 
+#[typeshare]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct UnitCancelledV1 {
     pub unit_id: String,
     pub cause: CancelCause,
 }
 
+#[typeshare]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UnitOutcome {
@@ -40,6 +47,7 @@ pub enum UnitOutcome {
     Failed,
 }
 
+#[typeshare]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CancelCause {
@@ -48,11 +56,12 @@ pub enum CancelCause {
     OperatorInterrupt,
 }
 
+#[typeshare]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ArtifactRef {
     pub path: String,
     pub hash: String,
-    pub size_bytes: u64,
+    pub size_bytes: U64,
 }
 
 #[cfg(test)]

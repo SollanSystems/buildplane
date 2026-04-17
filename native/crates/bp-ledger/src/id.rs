@@ -2,14 +2,17 @@
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use typeshare::typeshare;
 use uuid::Uuid;
 
 /// Identifier for a single event on the ledger. UUIDv7 — time-ordered.
+#[typeshare]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct EventId(Uuid);
 
 /// Identifier for a run. UUIDv7 — time-ordered.
+#[typeshare]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct RunId(Uuid);

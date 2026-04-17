@@ -5,9 +5,12 @@
 //! and system prompts are raw strings; if the operator puts secrets in prompts,
 //! they own that risk (documented).
 
+use crate::types::U64;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use typeshare::typeshare;
 
+#[typeshare]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ModelRequestV1 {
     pub provider: String,
@@ -20,21 +23,24 @@ pub struct ModelRequestV1 {
     pub headers: BTreeMap<String, HeaderValue>,
 }
 
+#[typeshare]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ModelResponseV1 {
     pub content: Option<String>,
     pub tool_calls: Vec<ToolCall>,
     pub usage: Usage,
     pub stop_reason: String,
-    pub latency_ms: u64,
+    pub latency_ms: U64,
 }
 
+#[typeshare]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Message {
     pub role: String,
     pub content: String,
 }
 
+#[typeshare]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SamplingParams {
     pub temperature: Option<f32>,
@@ -42,13 +48,15 @@ pub struct SamplingParams {
     pub max_tokens: Option<u32>,
 }
 
+#[typeshare]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 pub enum HeaderValue {
     Raw { value: String },
     Redacted { hash: String, hint: String },
 }
 
+#[typeshare]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ToolCall {
     pub id: String,
@@ -56,6 +64,7 @@ pub struct ToolCall {
     pub arguments: serde_json::Value,
 }
 
+#[typeshare]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Usage {
     pub input_tokens: u32,

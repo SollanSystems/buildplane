@@ -8,6 +8,7 @@ pub mod kind;
 pub mod payload;
 pub mod serve;
 pub mod storage;
+pub mod types;
 
 pub use error::{LedgerError, Result};
 pub use event::Event;

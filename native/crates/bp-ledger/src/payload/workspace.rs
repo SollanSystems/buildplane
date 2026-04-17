@@ -1,16 +1,20 @@
 //! Workspace observation payloads: WorkspaceRead, WorkspaceWrite.
 
 use crate::id::EventId;
+use crate::types::U64;
 use serde::{Deserialize, Serialize};
+use typeshare::typeshare;
 
+#[typeshare]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct WorkspaceReadV1 {
     pub tool_request_id: EventId,
     pub path: String,
     pub content_hash: String,
-    pub size_bytes: u64,
+    pub size_bytes: U64,
 }
 
+#[typeshare]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct WorkspaceWriteV1 {
     pub tool_request_id: EventId,
@@ -22,10 +26,11 @@ pub struct WorkspaceWriteV1 {
     pub after: PostWriteState,
 }
 
+#[typeshare]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "status", rename_all = "snake_case")]
+#[serde(tag = "status", content = "data", rename_all = "snake_case")]
 pub enum PostWriteState {
-    Captured { hash: String, size_bytes: u64 },
+    Captured { hash: String, size_bytes: U64 },
     Unreadable { reason: String },
 }
 

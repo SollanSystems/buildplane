@@ -1,10 +1,13 @@
 //! Run lifecycle payloads: RunStarted, RunCompleted, RunFailed.
 
 use crate::id::{EventId, RunId};
+use crate::types::U64;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use typeshare::typeshare;
 
 /// `run_started` payload — the root of the event tree.
+#[typeshare]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RunStartedV1 {
     /// Sha256 of the packet JSON; actual bytes in CAS.
@@ -20,21 +23,24 @@ pub struct RunStartedV1 {
 }
 
 /// `run_completed` payload.
+#[typeshare]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RunCompletedV1 {
     pub outcome: RunOutcome,
-    pub duration_ms: u64,
-    pub event_count: u64,
-    pub unit_count: u64,
+    pub duration_ms: U64,
+    pub event_count: U64,
+    pub unit_count: U64,
 }
 
 /// `run_failed` payload — a terminal failure that the run can't recover from.
+#[typeshare]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RunFailedV1 {
     pub reason: String,
     pub terminating_event_id: Option<EventId>,
 }
 
+#[typeshare]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RunOutcome {

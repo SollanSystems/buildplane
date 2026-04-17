@@ -1,11 +1,13 @@
 //! Event kind discriminator — one variant per event type at the envelope level.
 
 use serde::{Deserialize, Serialize};
+use typeshare::typeshare;
 
 /// The kind discriminator identifies which payload variant an event carries.
 ///
 /// Kinds are grouped: run lifecycle, unit lifecycle, git checkpoint, model I/O,
 /// tool I/O, workspace observation.
+#[typeshare]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EventKind {
