@@ -199,6 +199,62 @@ describe("parseUnitPacket", () => {
 		expect(packet.execution.cwd).toBeUndefined();
 		expect(packet.verification.requiredOutputs).toEqual([]);
 	});
+
+	it("preserves task intent when present on command packets", () => {
+		const packet = parseUnitPacket(
+			JSON.stringify({
+				unit: {
+					id: "unit-with-intent",
+					kind: "command",
+					scope: "task",
+					inputRefs: [],
+					expectedOutputs: [],
+					verificationContract: "exit-0",
+					policyProfile: "default",
+				},
+				execution: {
+					command: "node",
+					args: ["-e", "console.log('ok')"],
+				},
+				intent: {
+					objective: "Fix the TypeScript build",
+					taskType: "implement",
+					context: {
+						files: ["apps/cli/src/run-cli.ts"],
+						memories: ["[repo-fact] commands.typecheck: npx pnpm typecheck"],
+					},
+					constraints: {
+						scope: ["apps/cli/src"],
+						verification: ["npx pnpm typecheck"],
+					},
+					features: {
+						ambiguity: "low",
+						reversibility: "easy",
+						verifierStrength: "strong",
+					},
+				},
+				verification: { requiredOutputs: [] },
+			}),
+		);
+
+		expect(packet.intent).toMatchObject({
+			objective: "Fix the TypeScript build",
+			taskType: "implement",
+			context: {
+				files: ["apps/cli/src/run-cli.ts"],
+				memories: ["[repo-fact] commands.typecheck: npx pnpm typecheck"],
+			},
+			constraints: {
+				scope: ["apps/cli/src"],
+				verification: ["npx pnpm typecheck"],
+			},
+			features: {
+				ambiguity: "low",
+				reversibility: "easy",
+				verifierStrength: "strong",
+			},
+		});
+	});
 });
 
 describe("model.prompt", () => {

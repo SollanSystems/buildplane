@@ -118,4 +118,149 @@ describe("procedure storage", () => {
 			results.length,
 		);
 	});
+
+	it("upserts matching promoted procedures idempotently", () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-procedures-"));
+		const storage = createBuildplaneStorage(root);
+		storage.initializeProject();
+
+		const first = storage.upsertProcedure(
+			{
+				name: "implement-then-review workflow for implement tasks",
+				taskType: "implement",
+				bodyMarkdown:
+					"Use an implement-then-review workflow for implement tasks.\n\nObserved learning: Required 2 rounds. Round 1 reviewer: missing tests.",
+				createdBy: "worker",
+				metadata: {
+					promotionRule: "multi-round-strategy-workflow->procedure",
+					strategyMode: "implement-then-review",
+				},
+			},
+			{
+				matchMetadata: {
+					promotionRule: "multi-round-strategy-workflow->procedure",
+					strategyMode: "implement-then-review",
+				},
+				skipIfConflictingActiveName: true,
+			},
+		);
+		const second = storage.upsertProcedure(
+			{
+				name: "implement-then-review workflow for implement tasks",
+				taskType: "implement",
+				bodyMarkdown:
+					"Use an implement-then-review workflow for implement tasks.\n\nObserved learning: Required 2 rounds. Round 1 reviewer: missing tests.",
+				createdBy: "worker",
+				metadata: {
+					promotionRule: "multi-round-strategy-workflow->procedure",
+					strategyMode: "implement-then-review",
+				},
+			},
+			{
+				matchMetadata: {
+					promotionRule: "multi-round-strategy-workflow->procedure",
+					strategyMode: "implement-then-review",
+				},
+				skipIfConflictingActiveName: true,
+			},
+		);
+
+		expect(first?.id).toBeDefined();
+		expect(second?.id).toBe(first?.id);
+		expect(storage.listProcedures({ taskType: "implement" })).toHaveLength(1);
+	});
+
+	it("skips promoted upserts when a same-name manual procedure already exists", () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-procedures-"));
+		const storage = createBuildplaneStorage(root);
+		storage.initializeProject();
+
+		storage.createProcedure({
+			name: "implement-then-review workflow for implement tasks",
+			taskType: "implement",
+			bodyMarkdown: "Manual operator-authored guidance",
+			createdBy: "operator",
+		});
+
+		const result = storage.upsertProcedure(
+			{
+				name: "implement-then-review workflow for implement tasks",
+				taskType: "implement",
+				bodyMarkdown:
+					"Use an implement-then-review workflow for implement tasks.\n\nObserved learning: Required 2 rounds. Round 1 reviewer: missing tests.",
+				createdBy: "worker",
+				metadata: {
+					promotionRule: "multi-round-strategy-workflow->procedure",
+					strategyMode: "implement-then-review",
+				},
+			},
+			{
+				matchMetadata: {
+					promotionRule: "multi-round-strategy-workflow->procedure",
+					strategyMode: "implement-then-review",
+				},
+				skipIfConflictingActiveName: true,
+			},
+		);
+
+		expect(result).toBeNull();
+		expect(storage.listProcedures({ taskType: "implement" })).toHaveLength(1);
+		expect(
+			storage.listProcedures({ taskType: "implement" })[0]?.bodyMarkdown,
+		).toBe("Manual operator-authored guidance");
+	});
+
+	it("supersedes prior matching promoted procedures when the promoted body changes", () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-procedures-"));
+		const storage = createBuildplaneStorage(root);
+		storage.initializeProject();
+
+		const first = storage.upsertProcedure(
+			{
+				name: "implement-then-review workflow for implement tasks",
+				taskType: "implement",
+				bodyMarkdown:
+					"Use an implement-then-review workflow for implement tasks.\n\nObserved learning: Required 2 rounds. Round 1 reviewer: missing tests.",
+				createdBy: "worker",
+				metadata: {
+					promotionRule: "multi-round-strategy-workflow->procedure",
+					strategyMode: "implement-then-review",
+				},
+			},
+			{
+				matchMetadata: {
+					promotionRule: "multi-round-strategy-workflow->procedure",
+					strategyMode: "implement-then-review",
+				},
+				skipIfConflictingActiveName: true,
+			},
+		);
+		const second = storage.upsertProcedure(
+			{
+				name: "implement-then-review workflow for implement tasks",
+				taskType: "implement",
+				bodyMarkdown:
+					"Use an implement-then-review workflow for implement tasks.\n\nObserved learning: Required 2 rounds. Round 1 reviewer: missing type guards.",
+				createdBy: "worker",
+				metadata: {
+					promotionRule: "multi-round-strategy-workflow->procedure",
+					strategyMode: "implement-then-review",
+				},
+			},
+			{
+				matchMetadata: {
+					promotionRule: "multi-round-strategy-workflow->procedure",
+					strategyMode: "implement-then-review",
+				},
+				skipIfConflictingActiveName: true,
+			},
+		);
+
+		expect(first?.id).toBeDefined();
+		expect(second?.id).toBeDefined();
+		expect(second?.id).not.toBe(first?.id);
+		const activeProcedures = storage.listProcedures({ taskType: "implement" });
+		expect(activeProcedures).toHaveLength(1);
+		expect(activeProcedures[0]?.bodyMarkdown).toContain("missing type guards");
+	});
 });

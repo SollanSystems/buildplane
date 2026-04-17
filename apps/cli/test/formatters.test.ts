@@ -3,6 +3,7 @@ import {
 	formatInspectDetail,
 	formatLearningDetail,
 	formatLearningsList,
+	formatRunResult,
 } from "../src/formatters.js";
 
 const sampleLearning = {
@@ -64,6 +65,29 @@ describe("formatLearningDetail", () => {
 	});
 });
 
+describe("formatRunResult", () => {
+	it("sanitizes injected memory text for terminal-safe human output", () => {
+		const lines = formatRunResult({
+			run: { id: "run-xyz", status: "passed" },
+			injectedMemories: [
+				{
+					displayText:
+						"[repo-fact] commands.typecheck:\n\u001b[31mnpx pnpm typecheck",
+					matchReason: "fuzzy-fact-key",
+				},
+			],
+		});
+
+		expect(lines).toContain("injected-memories: 1");
+		expect(lines).toContain(
+			"  - [repo-fact] commands.typecheck (fuzzy-fact-key)",
+		);
+		expect(lines.join("\n")).not.toContain("\u001b[31m");
+		expect(lines.join("\n")).not.toContain("commands.typecheck:\n");
+		expect(lines.join("\n")).not.toContain("npx pnpm typecheck");
+	});
+});
+
 describe("formatInspectDetail", () => {
 	const baseSnapshot = {
 		kind: "run",
@@ -94,6 +118,56 @@ describe("formatInspectDetail", () => {
 			expect.stringContaining("[workspace/fact] Verification gate passed"),
 		);
 		expect(lines).toContainEqual(expect.stringContaining("(seen: 1)"));
+	});
+
+	it("sanitizes injected memory text for terminal-safe inspect output", () => {
+		const lines = formatInspectDetail(
+			{
+				...baseSnapshot,
+				injectedMemories: [
+					{
+						displayText:
+							"[procedure] fix TypeScript build:\n\u001b[31mRun typecheck first",
+						matchReason: "exact-task-type",
+					},
+				],
+			},
+			[],
+		);
+		expect(lines).toContain("injected-memories:");
+		expect(lines.join("\n")).toContain(
+			"[procedure] fix TypeScript build:\\n\\u001b[31mRun typecheck first (exact-task-type)",
+		);
+		expect(lines.join("\n")).not.toContain(
+			"[procedure] fix TypeScript build:\n",
+		);
+	});
+
+	it("includes terminal-safe promoted procedure lineage in inspect output", () => {
+		const lines = formatInspectDetail(
+			{
+				...baseSnapshot,
+				promotedStructuredMemories: [
+					{
+						memoryKind: "procedure",
+						memoryId: "procedure-1",
+						title: "implement-then-review workflow for implement tasks",
+						bodySummary:
+							"Use an implement-then-review workflow for implement tasks.\n\u001b[31mObserved learning",
+						status: "active",
+						promotionRule: "multi-round-strategy-workflow->procedure",
+						sourceRunId: "run-xyz",
+						sourceTaskId: "task-implementer",
+						createdAt: "2026-04-14T00:00:00Z",
+					},
+				],
+			},
+			[],
+		);
+		expect(lines).toContain("promoted-memories:");
+		expect(lines.join("\n")).toContain(
+			"[procedure] implement-then-review workflow for implement tasks: Use an implement-then-review workflow for implement tasks.\\n\\u001b[31mObserved learning (status=active, rule=multi-round-strategy-workflow->procedure, source-task=task-implementer)",
+		);
 	});
 
 	it("omits learnings section when no learnings provided", () => {
