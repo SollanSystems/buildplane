@@ -13,7 +13,7 @@ export type RunId = Uuid;
 export interface ArtifactRef {
 	path: string;
 	hash: string;
-	size_bytes: string;
+	size_bytes: number;
 }
 
 export interface EnvRedaction {
@@ -124,7 +124,7 @@ export interface ModelResponseV1 {
 	tool_calls: ToolCall[];
 	usage: Usage;
 	stop_reason: string;
-	latency_ms: string;
+	latency_ms: number;
 }
 
 export enum RunOutcome {
@@ -136,9 +136,9 @@ export enum RunOutcome {
 /** `run_completed` payload. */
 export interface RunCompletedV1 {
 	outcome: RunOutcome;
-	duration_ms: string;
-	event_count: string;
-	unit_count: string;
+	duration_ms: number;
+	event_count: number;
+	unit_count: number;
 }
 
 /** `run_failed` payload — a terminal failure that the run can't recover from. */
@@ -180,7 +180,7 @@ export interface ToolResultV1 {
 	stderr: string;
 	exit_code?: number;
 	output?: Value;
-	duration_ms: string;
+	duration_ms: number;
 }
 
 export enum CancelCause {
@@ -224,7 +224,7 @@ export interface WorkspaceReadV1 {
 	tool_request_id: EventId;
 	path: string;
 	content_hash: string;
-	size_bytes: string;
+	size_bytes: number;
 }
 
 export type PostWriteState =
@@ -232,7 +232,7 @@ export type PostWriteState =
 			status: "captured";
 			data: {
 				hash: string;
-				size_bytes: string;
+				size_bytes: number;
 			};
 	  }
 	| {

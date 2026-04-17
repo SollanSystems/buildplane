@@ -1,2 +1,2 @@
 [typescript.type_mappings]
-U64 = "string"
+U64 = "number"
