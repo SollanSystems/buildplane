@@ -1,6 +1,8 @@
-import { spawnSync } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import type { Readable, Writable } from "node:stream";
 import {
 	type BootstrapDoctorReport,
 	inspectBootstrapDoctor,
@@ -832,6 +834,61 @@ function resolveNativeBinary(cwd: string): string {
 		}
 	}
 	return "buildplane-native";
+}
+
+function resolveLedgerBinary(cwd: string): string {
+	// The ledger binary is the same `buildplane-native` — just invoke with a
+	// different subcommand. Reuse the existing resolution chain.
+	return resolveNativeBinary(cwd);
+}
+
+interface LedgerChild {
+	child: ChildProcess;
+	stdin: Writable;
+	stderr: Readable;
+	exit: Promise<number>;
+}
+
+function spawnLedgerSubprocess(
+	binary: string,
+	runId: string,
+	workspace: string,
+): LedgerChild {
+	const child = spawn(
+		binary,
+		[
+			"ledger",
+			"serve",
+			"--run-id",
+			runId,
+			"--workspace",
+			workspace,
+			"--schema-version",
+			"1",
+		],
+		{
+			stdio: ["pipe", "inherit", "pipe"],
+			cwd: workspace,
+		},
+	);
+	if (!child.stdin || !child.stderr) {
+		throw new Error("ledger subprocess stdio unexpectedly missing");
+	}
+	const exit = new Promise<number>((resolve, reject) => {
+		child.on("exit", (code) => resolve(code ?? -1));
+		// Handle spawn errors (e.g. binary not found) so they surface as a
+		// rejected promise rather than an unhandled 'error' event.
+		child.on("error", (err) => reject(err));
+	});
+	// Suppress unhandled-rejection noise for consumers that only attach .then()
+	// (e.g. createTapeEmitter adds .then but no .catch on childExit).
+	exit.catch(() => {});
+	return {
+		child,
+		stdin: child.stdin as Writable,
+		stderr: child.stderr as Readable,
+		exit,
+	};
 }
 
 async function runNativeCommand(

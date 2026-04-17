@@ -61,6 +61,9 @@ importers:
       '@buildplane/kernel':
         specifier: workspace:*
         version: link:../../packages/kernel
+      '@buildplane/ledger-client':
+        specifier: workspace:*
+        version: link:../../packages/ledger-client
       '@buildplane/policy':
         specifier: workspace:*
         version: link:../../packages/policy
