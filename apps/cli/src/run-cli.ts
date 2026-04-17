@@ -4,6 +4,11 @@ import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import type { Readable, Writable } from "node:stream";
 import {
+	createTapeEmitter,
+	type LedgerFailure,
+	type TapeEmitter,
+} from "@buildplane/ledger-client";
+import {
 	type BootstrapDoctorReport,
 	inspectBootstrapDoctor,
 } from "./bootstrap-doctor.js";
@@ -372,6 +377,13 @@ interface MemoryPortLike {
 
 interface CliOrchestratorBundle {
 	orchestrator: BuildplaneCliOrchestrator;
+	eventBus: {
+		subscribe: (listener: (event: unknown) => void) => () => void;
+		emit: (event: unknown) => void;
+	};
+	eventStore: {
+		persistEvent: (runId: string, event: unknown) => void;
+	};
 	memoryPort?: MemoryPortLike;
 	structuredMemoryPort?: StructuredMemoryStoragePortLike;
 	honchoAdapter?: HonchoPortLike;
@@ -701,6 +713,8 @@ async function loadCliOrchestrator(
 
 	return {
 		orchestrator,
+		eventBus,
+		eventStore,
 		memoryPort: memoryPortRef,
 		structuredMemoryPort: structuredMemoryPortRef,
 		honchoAdapter: honchoAdapterRef,
@@ -816,6 +830,51 @@ function splitOutputLines(output: string): string[] {
 		.split(/\r?\n/u)
 		.map((line) => line.trimEnd())
 		.filter((line) => line.length > 0);
+}
+
+/** Map an ExecutionEvent kind (from the kernel event bus) to a ledger EventKind.
+ * Returns null for kinds that don't have a ledger analogue yet (Phase C adds more).
+ */
+function mapEventKindForLedger(execKind: string): string | null {
+	switch (execKind) {
+		case "run-started":
+			return "run_started";
+		case "run-completed":
+			return "run_completed";
+		default:
+			return null;
+	}
+}
+
+/** Map an ExecutionEvent payload to a ledger payload. Phase B is a minimal
+ * shape; Phase C fills in tool events and workspace observations.
+ */
+function mapEventPayloadForLedger(event: unknown): unknown {
+	const e = event as Record<string, unknown>;
+	const kind = mapEventKindForLedger(e.kind as string);
+	switch (kind) {
+		case "run_started":
+			return {
+				RunStartedV1: {
+					packet_hash: e.packetHash ?? "sha256:unknown",
+					git_head: e.gitHead ?? "",
+					workspace_path: e.workspacePath ?? "",
+					config: {},
+					parent_run_id: null,
+				},
+			};
+		case "run_completed":
+			return {
+				RunCompletedV1: {
+					outcome: e.status ?? "passed",
+					duration_ms: e.durationMs ?? 0,
+					event_count: e.eventCount ?? 0,
+					unit_count: e.unitCount ?? 0,
+				},
+			};
+		default:
+			return {};
+	}
 }
 
 function resolveNativeBinary(cwd: string): string {
@@ -1275,10 +1334,16 @@ export async function runCli(
 		}
 
 		const bundle: CliOrchestratorBundle = deps?.createOrchestrator
-			? { orchestrator: deps.createOrchestrator() }
+			? {
+					orchestrator: deps.createOrchestrator(),
+					eventBus: { subscribe: () => () => {}, emit: () => {} },
+					eventStore: { persistEvent: () => {} },
+				}
 			: await loadCliOrchestrator(cwd);
 		const {
 			orchestrator,
+			eventBus: cliEventBus,
+			eventStore: cliEventStore,
 			memoryPort,
 			structuredMemoryPort,
 			honchoAdapter,
@@ -1406,33 +1471,109 @@ export async function runCli(
 				}
 
 				// ── Raw path (single-shot, backward compat) ─────────────
-				// Everything below is the EXISTING code, unchanged
+				// Everything below is the EXISTING code, with ledger integration added
 				const useTui = rest.includes("--tui");
 				const isModelPacket = !!(enrichedPacket as { model?: unknown }).model;
 				const useAsync = useTui || isModelPacket;
 
+				// --- begin ledger integration ---
+				// Disable when BUILDPLANE_LEDGER=0 or when running under test mocks
+				// (deps.createOrchestrator present means the caller is injecting a mock).
+				const useLedger =
+					process.env.BUILDPLANE_LEDGER !== "0" && !deps?.createOrchestrator;
+				let ledgerChild: LedgerChild | null = null;
+				let ledgerEmitter: TapeEmitter | null = null;
+				let unsubscribeLedger: (() => void) | null = null;
+				const { randomUUID } = await import("node:crypto");
+				const ledgerRunId = randomUUID();
+
+				if (useLedger) {
+					try {
+						const binary = resolveLedgerBinary(cwd);
+						ledgerChild = spawnLedgerSubprocess(binary, ledgerRunId, cwd);
+						ledgerEmitter = await createTapeEmitter({
+							childStdin: ledgerChild.stdin,
+							childStderr: ledgerChild.stderr,
+							childExit: ledgerChild.exit,
+							workspacePath: cwd,
+							runId: ledgerRunId,
+						});
+						ledgerEmitter.onFailure((failure: LedgerFailure) => {
+							// Best-effort: record that the ledger itself failed into the existing
+							// state.db event store so there's a durable trace.
+							try {
+								cliEventStore.persistEvent(ledgerRunId, {
+									kind: "ledger_failure",
+									timestamp: new Date().toISOString(),
+									runId: ledgerRunId,
+									payload: failure as unknown as Record<string, unknown>,
+								} as never);
+							} catch {
+								// Swallow: best-effort logging only.
+							}
+						});
+						unsubscribeLedger = cliEventBus.subscribe((evt: unknown) => {
+							if (!ledgerEmitter) return;
+							const e = evt as { kind?: string };
+							const ledgerKind = mapEventKindForLedger(e.kind ?? "");
+							if (!ledgerKind) return;
+							const payload = mapEventPayloadForLedger(evt);
+							ledgerEmitter.emit(ledgerKind, payload);
+						});
+					} catch {
+						// Ledger setup failed (spawn error, handshake timeout, version mismatch).
+						// Kill the subprocess if it's still alive — silent degradation so the
+						// run continues unaffected.
+						if (ledgerChild?.child && ledgerChild.child.exitCode === null) {
+							ledgerChild.child.kill("SIGTERM");
+						}
+						ledgerChild = null;
+						ledgerEmitter = null;
+					}
+				}
+				// --- end ledger integration ---
+
 				if (useAsync && !useTui) {
 					// Model packets auto-switch to async (no TUI)
-					const result = withPersistedInjectedMemories(
-						await orchestrator.runPacketAsync(enrichedPacket),
-						structuredMemoryPort,
-						preparedPacket.injectedMemories,
-					);
-					const resultRecord = result as unknown as Record<string, unknown>;
+					let asyncResultUnknown: unknown;
+					try {
+						asyncResultUnknown = withPersistedInjectedMemories(
+							await orchestrator.runPacketAsync(enrichedPacket),
+							structuredMemoryPort,
+							preparedPacket.injectedMemories,
+						);
+					} finally {
+						// --- begin ledger cleanup ---
+						unsubscribeLedger?.();
+						if (ledgerEmitter) {
+							try {
+								await ledgerEmitter.close();
+							} catch {
+								// Cleanup best-effort; the orchestrator result is the authoritative outcome.
+							}
+						}
+						// --- end ledger cleanup ---
+					}
+					// asyncResultUnknown is set here: if try threw, finally re-throws and we never reach this line.
+					const asyncResult = asyncResultUnknown as {
+						run: { id: string; status: string };
+						receipt: unknown;
+						decision: unknown;
+					};
+					const resultRecord = asyncResult as unknown as Record<
+						string,
+						unknown
+					>;
 
 					if (useJson) {
 						stdout(formatJson(resultRecord));
 					} else {
-						for (const line of formatRunResult(
-							result as { run: { id: string; status: string } },
-						)) {
+						for (const line of formatRunResult(asyncResult)) {
 							stdout(line);
 						}
 					}
 
-					return (result as { run: { status: string } }).run.status === "passed"
-						? 0
-						: 1;
+					return asyncResult.run.status === "passed" ? 0 : 1;
 				}
 
 				if (useTui) {
@@ -1461,12 +1602,12 @@ export async function runCli(
 					const tuiBus = kernel.createEventBus();
 
 					// Wire storage persistence to the TUI bus too
-					const eventStore = storage.createEventStore(cwd);
+					const tuiEventStore = storage.createEventStore(cwd);
 					tuiBus.subscribe((event: unknown) => {
 						const e = event as { runId?: string };
 						if (e.runId) {
 							try {
-								eventStore.persistEvent(e.runId, event as never);
+								tuiEventStore.persistEvent(e.runId, event as never);
 							} catch {
 								// Don't let storage failures break the run
 							}
@@ -1475,35 +1616,72 @@ export async function runCli(
 
 					const tuiInstance = tui.renderTui(tuiBus);
 
-					const result = await orchestrator.runPacketAsync(
-						enrichedPacket,
-						tuiBus,
-					);
+					let tuiResult: Awaited<
+						ReturnType<typeof orchestrator.runPacketAsync>
+					>;
+					try {
+						tuiResult = await orchestrator.runPacketAsync(
+							enrichedPacket,
+							tuiBus,
+						);
+					} finally {
+						// --- begin ledger cleanup ---
+						unsubscribeLedger?.();
+						if (ledgerEmitter) {
+							try {
+								await ledgerEmitter.close();
+							} catch {
+								// Cleanup best-effort; the orchestrator result is the authoritative outcome.
+							}
+						}
+						// --- end ledger cleanup ---
+					}
 					persistInjectedMemories(
 						structuredMemoryPort,
-						result.run.id,
+						tuiResult.run.id,
 						preparedPacket.injectedMemories,
 					);
 					await tuiInstance.waitUntilExit();
 
-					return result.run.status === "passed" ? 0 : 1;
+					return tuiResult.run.status === "passed" ? 0 : 1;
 				}
 
-				const result = withPersistedInjectedMemories(
-					useAsync
-						? await orchestrator.runPacketAsync(enrichedPacket, undefined)
-						: orchestrator.runPacket(enrichedPacket),
-					structuredMemoryPort,
-					preparedPacket.injectedMemories,
-				);
-
-				const resultRecord = result as unknown as Record<string, unknown>;
+				// Declare as unknown so both the try assignment and post-try casts typecheck.
+				let syncResultUnknown: unknown;
+				try {
+					syncResultUnknown = withPersistedInjectedMemories(
+						useAsync
+							? await orchestrator.runPacketAsync(enrichedPacket, undefined)
+							: orchestrator.runPacket(enrichedPacket),
+						structuredMemoryPort,
+						preparedPacket.injectedMemories,
+					);
+				} finally {
+					// --- begin ledger cleanup ---
+					unsubscribeLedger?.();
+					if (ledgerEmitter) {
+						try {
+							await ledgerEmitter.close();
+						} catch {
+							// Cleanup best-effort; the orchestrator result is the authoritative outcome.
+						}
+					}
+					// --- end ledger cleanup ---
+				}
+				// syncResultUnknown is set here: if try threw, finally re-throws and we never arrive.
+				const syncResult = syncResultUnknown as {
+					run: { id: string; status: string };
+					receipt: unknown;
+					decision: unknown;
+					failure?: unknown;
+				};
+				const resultRecord = syncResult as unknown as Record<string, unknown>;
 				const hasFailed =
 					resultRecord.failure && typeof resultRecord.failure === "object";
 				if (useJson) {
 					stdout(formatJson(resultRecord));
 				} else {
-					for (const line of formatRunResult(result)) {
+					for (const line of formatRunResult(syncResult)) {
 						stdout(line);
 					}
 				}
@@ -1511,7 +1689,7 @@ export async function runCli(
 					const f = resultRecord.failure as { message?: string };
 					if (f.message) stderr(f.message);
 				}
-				return hasFailed || result.run.status !== "passed" ? 1 : 0;
+				return hasFailed || syncResult.run.status !== "passed" ? 1 : 0;
 			}
 			case "status": {
 				const json = rest.includes("--json");
