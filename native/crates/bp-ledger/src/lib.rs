@@ -11,3 +11,4 @@ pub mod storage;
 
 pub use error::{LedgerError, Result};
 pub use id::{EventId, RunId};
+pub use kind::EventKind;
