@@ -38,7 +38,7 @@ pub fn canonicalize_payload(kind: &str, version: u32, payload: serde_json::Value
     }
     // Validate that the stored variant tag matches the declared kind.
     let expected_variant = kind_to_variant(kind)?;
-    if !payload.get(expected_variant).is_some() {
+    if payload.get(expected_variant).is_none() {
         return Err(LedgerError::InvalidPayload {
             kind: kind.to_string(),
             reason: format!("payload missing expected variant key '{expected_variant}'"),
