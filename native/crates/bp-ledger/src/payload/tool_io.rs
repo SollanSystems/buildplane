@@ -28,6 +28,48 @@ pub struct ToolResultV1 {
     pub duration_ms: u64,
 }
 
+/// On-disk shape of a `ToolRequest` event — `env` is the redaction map, not a
+/// raw BTreeMap. This is what `canonicalize` produces when reading an event
+/// back from storage.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ToolRequestStoredV1 {
+    pub tool_name: String,
+    pub arguments: serde_json::Value,
+    pub env: EnvRedaction,
+    pub working_directory: String,
+    pub unit_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct EnvRedaction {
+    pub redacted: bool,
+    pub hash: String,
+    pub hint: String,
+}
+
+#[cfg(test)]
+mod stored_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn tool_request_stored_round_trips() {
+        let p = ToolRequestStoredV1 {
+            tool_name: "shell".into(),
+            arguments: json!({"cmd": "ls"}),
+            env: EnvRedaction {
+                redacted: true,
+                hash: "sha256:aa".into(),
+                hint: "env_var".into(),
+            },
+            working_directory: "/tmp".into(),
+            unit_id: "u-1".into(),
+        };
+        let s = serde_json::to_string(&p).unwrap();
+        assert_eq!(p, serde_json::from_str::<ToolRequestStoredV1>(&s).unwrap());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
