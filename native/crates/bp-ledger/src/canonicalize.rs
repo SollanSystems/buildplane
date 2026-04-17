@@ -22,9 +22,13 @@ pub fn canonicalize(event: Event) -> Result<Event> {
     Ok(event)
 }
 
-/// Same as [`canonicalize`] but operates on a bare payload value when you
-/// already know the kind and version. Useful for storage-layer reads that
+/// Same as [`canonicalize`] but operates on a stored payload JSON value when
+/// you already know the kind and version. Useful for storage-layer reads that
 /// don't reconstitute the full envelope.
+///
+/// The `payload` argument must be the JSON representation of a [`Payload`]
+/// value as written by `serde_json::to_string(&event.payload)` — i.e. an
+/// externally-tagged enum object such as `{"WorkspaceReadV1": {...}}`.
 pub fn canonicalize_payload(kind: &str, version: u32, payload: serde_json::Value) -> Result<Payload> {
     if version != Event::CURRENT_SCHEMA_VERSION {
         return Err(LedgerError::UnsupportedSchemaVersion {
@@ -32,9 +36,15 @@ pub fn canonicalize_payload(kind: &str, version: u32, payload: serde_json::Value
             supported: Event::CURRENT_SCHEMA_VERSION,
         });
     }
-    let variant = kind_to_variant(kind)?;
-    let wrapped = serde_json::json!({ variant: payload });
-    serde_json::from_value::<Payload>(wrapped).map_err(LedgerError::from)
+    // Validate that the stored variant tag matches the declared kind.
+    let expected_variant = kind_to_variant(kind)?;
+    if !payload.get(expected_variant).is_some() {
+        return Err(LedgerError::InvalidPayload {
+            kind: kind.to_string(),
+            reason: format!("payload missing expected variant key '{expected_variant}'"),
+        });
+    }
+    serde_json::from_value::<Payload>(payload).map_err(LedgerError::from)
 }
 
 fn kind_to_variant(kind: &str) -> Result<&'static str> {
