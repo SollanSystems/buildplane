@@ -1,7 +1,19 @@
-// Phase A ships types only. Phase B adds the tape-emitter, IPC protocol, and
-// runtime code.
+// Public API for @buildplane/ledger-client.
+//
+// Phase A shipped the types skeleton; Phase B adds the runtime.
+
+export {
+	type CreateTapeEmitterOptions,
+	createTapeEmitter,
+	type EmitOptions,
+	type TapeEmitter,
+} from "./emitter.js";
+
+export {
+	type LedgerFailure,
+	type LedgerFailureKind,
+	LedgerHandshakeError,
+} from "./failure.js";
 
 export * from "./generated/index.js";
-// Re-export the hand-written Payload union (externally-tagged, matches wire format).
 export type { Payload } from "./payload.js";
-export * from "./shims.js";
