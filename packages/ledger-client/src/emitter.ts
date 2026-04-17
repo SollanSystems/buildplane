@@ -154,11 +154,10 @@ export async function createTapeEmitter(
 			const promise = new Promise<void>((resolve, reject) => {
 				pendingFlushes.set(seq, { resolve, reject });
 			});
-			// Write the flush control line synchronously so callers can
-			// immediately inspect stdin.writes in tests. Then wait for the
-			// pending flush_ack before resolving.
-			const flushLine = buildFlush(seq);
-			opts.childStdin.write(flushLine);
+			// Route through the queue so flush is serialized AFTER all preceding
+			// emits. Bypassing would let flush ack before queued events reach the
+			// ledger, breaking the "flush everything written so far" contract.
+			await queue.write(buildFlush(seq));
 			await promise;
 		},
 		async close() {

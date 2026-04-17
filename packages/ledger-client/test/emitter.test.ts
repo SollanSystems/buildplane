@@ -138,6 +138,9 @@ describe("createTapeEmitter", () => {
 		);
 		const emitter = await emitterP;
 		const flushP = emitter.flush();
+		// flush() routes through the queue, so the line lands on stdin after a
+		// microtask. Wait for the queue to drain before asserting on writes.
+		await new Promise((r) => setImmediate(r));
 		const flushLine = stdin.writes.find((w) => w.includes(`"control":"flush"`));
 		expect(flushLine).toBeTruthy();
 		const seq = JSON.parse(flushLine!).seq;
