@@ -55,6 +55,180 @@ pub fn parse_control_or_event(line: &str) -> Result<Line> {
     }
 }
 
+#[derive(Debug, Default)]
+pub struct ServeOutcome {
+    pub events_written: u64,
+    pub last_event_id: Option<EventId>,
+}
+
+/// Run the full protocol state machine against the provided reader/writer.
+pub fn serve_with_protocol<R: Read, W: Write>(
+    stdin: R,
+    mut stderr: W,
+    store: &SqliteStore,
+    _cas: &Cas,
+    declared_schema_version: u32,
+) -> Result<ServeOutcome> {
+    let mut buf = BufReader::new(stdin);
+    let mut outcome = ServeOutcome::default();
+
+    // Phase: AwaitingHandshake
+    let mut first_line = String::new();
+    if buf.read_line(&mut first_line)? == 0 {
+        write_error(&mut stderr, "handshake_missing", 1, "stdin closed before handshake")?;
+        return Err(LedgerError::InvalidPayload {
+            kind: "<handshake>".into(),
+            reason: "stdin closed before handshake".into(),
+        });
+    }
+
+    let line = first_line.trim();
+    let parsed = match parse_control_or_event(line) {
+        Ok(l) => l,
+        Err(_) => {
+            write_error(&mut stderr, "handshake_malformed", 1, "first line not valid json")?;
+            return Err(LedgerError::InvalidPayload {
+                kind: "<handshake>".into(),
+                reason: "first line not valid json".into(),
+            });
+        }
+    };
+
+    match parsed {
+        Line::Control(ControlMessage::Handshake { protocol, schema_version, .. }) => {
+            if protocol != 1 {
+                write_handshake_ack(&mut stderr, false, &format!("protocol {} not supported", protocol))?;
+                return Err(LedgerError::InvalidPayload {
+                    kind: "<handshake>".into(),
+                    reason: format!("protocol {protocol} not supported"),
+                });
+            }
+            if schema_version != declared_schema_version {
+                write_handshake_ack(
+                    &mut stderr,
+                    false,
+                    &format!("schema version {schema_version} not supported (supported: {declared_schema_version})"),
+                )?;
+                return Err(LedgerError::UnsupportedSchemaVersion {
+                    received: schema_version,
+                    supported: declared_schema_version,
+                });
+            }
+            write_handshake_ack(&mut stderr, true, "")?;
+        }
+        _ => {
+            write_error(&mut stderr, "handshake_required", 1, "first line must be a handshake")?;
+            return Err(LedgerError::InvalidPayload {
+                kind: "<handshake>".into(),
+                reason: "first line must be a handshake".into(),
+            });
+        }
+    }
+
+    // Phase: Ingesting
+    let mut line_no: u64 = 1;
+    loop {
+        line_no += 1;
+        let mut s = String::new();
+        let n = buf.read_line(&mut s)?;
+        if n == 0 {
+            break;
+        }
+        let s = s.trim();
+        if s.is_empty() {
+            continue;
+        }
+        let parsed = match parse_control_or_event(s) {
+            Ok(l) => l,
+            Err(e) => {
+                let msg = format!("line {}: {}", line_no, e);
+                write_error(&mut stderr, "malformed_event", line_no, &msg)?;
+                return Err(e);
+            }
+        };
+        match parsed {
+            Line::Event(event) => {
+                let canonical = canonicalize(event)?;
+                let event_id = canonical.id;
+                if let Err(e) = store.append(&canonical) {
+                    write_error(&mut stderr, "storage_failure", line_no, &format!("{}", e))?;
+                    return Err(e);
+                }
+                outcome.events_written += 1;
+                outcome.last_event_id = Some(event_id);
+            }
+            Line::Control(ControlMessage::Flush { seq }) => {
+                let last = store.flush_fsync()?;
+                write_flush_ack(&mut stderr, seq, last)?;
+            }
+            Line::Control(ControlMessage::Close { seq: _ }) => {
+                let last = store.flush_fsync()?;
+                write_close_ack(&mut stderr, outcome.events_written, last)?;
+                return Ok(outcome);
+            }
+            Line::Control(ControlMessage::Handshake { .. }) => {
+                write_error(&mut stderr, "unexpected_handshake", line_no, "handshake after initial setup")?;
+                return Err(LedgerError::InvalidPayload {
+                    kind: "<handshake>".into(),
+                    reason: "unexpected second handshake".into(),
+                });
+            }
+        }
+    }
+
+    Ok(outcome)
+}
+
+fn write_handshake_ack<W: Write>(stderr: &mut W, ready: bool, reason: &str) -> std::io::Result<()> {
+    let line = if ready {
+        format!(
+            r#"{{"control":"handshake_ack","ready":true,"ledger_version":"{}","schema_version":1}}{}"#,
+            env!("CARGO_PKG_VERSION"),
+            '\n'
+        )
+    } else {
+        format!(
+            r#"{{"control":"handshake_ack","ready":false,"reason":{}}}{}"#,
+            serde_json::to_string(reason).unwrap_or_else(|_| "\"error\"".to_string()),
+            '\n'
+        )
+    };
+    stderr.write_all(line.as_bytes())?;
+    stderr.flush()
+}
+
+fn write_flush_ack<W: Write>(stderr: &mut W, seq: u64, last: Option<EventId>) -> std::io::Result<()> {
+    let last_str = last.map(|e| e.to_string()).unwrap_or_default();
+    let line = format!(
+        r#"{{"control":"flush_ack","seq":{},"last_event_id":"{}"}}{}"#,
+        seq, last_str, '\n'
+    );
+    stderr.write_all(line.as_bytes())?;
+    stderr.flush()
+}
+
+fn write_close_ack<W: Write>(stderr: &mut W, events_written: u64, last: Option<EventId>) -> std::io::Result<()> {
+    let last_str = last.map(|e| e.to_string()).unwrap_or_default();
+    let line = format!(
+        r#"{{"control":"close_ack","events_written":{},"last_event_id":"{}"}}{}"#,
+        events_written, last_str, '\n'
+    );
+    stderr.write_all(line.as_bytes())?;
+    stderr.flush()
+}
+
+fn write_error<W: Write>(stderr: &mut W, kind: &str, line_no: u64, message: &str) -> std::io::Result<()> {
+    let line = format!(
+        r#"{{"control":"error","kind":"{}","line":{},"message":{}}}{}"#,
+        kind,
+        line_no,
+        serde_json::to_string(message).unwrap_or_else(|_| "\"error\"".to_string()),
+        '\n'
+    );
+    stderr.write_all(line.as_bytes())?;
+    stderr.flush()
+}
+
 /// Ingest events from `reader` and append to `store` until EOF.
 ///
 /// Returns the number of events successfully appended. The first malformed
