@@ -921,11 +921,39 @@ interface LedgerChild {
 	exit: Promise<number>;
 }
 
+/**
+ * Derive a suitable cwd for the ledger subprocess so the native binary can
+ * resolve its default native-root. The binary looks for `native/Cargo.toml`
+ * and `native/packs` relative to its cwd.
+ *
+ * Resolution order:
+ *  1. If the binary lives inside a `.../native/target/{debug,release}/` tree,
+ *     the project root is 4 directories up — use that.
+ *  2. Otherwise fall back to `workspace` (the user's project root).  In a
+ *     production install the binary is on PATH and the workspace itself may
+ *     not have a native subtree; the binary is expected to degrade gracefully
+ *     in that configuration.
+ */
+function deriveLedgerSpawnCwd(binary: string, workspace: string): string {
+	// Walk up: debug/release → target → native → <project-root>
+	const parts = binary.replace(/\\/g, "/").split("/");
+	const nativeIdx = parts.lastIndexOf("native");
+	if (
+		nativeIdx >= 0 &&
+		parts[nativeIdx + 1] === "target" &&
+		(parts[nativeIdx + 2] === "debug" || parts[nativeIdx + 2] === "release")
+	) {
+		return parts.slice(0, nativeIdx).join("/") || workspace;
+	}
+	return workspace;
+}
+
 function spawnLedgerSubprocess(
 	binary: string,
 	runId: string,
 	workspace: string,
 ): LedgerChild {
+	const spawnCwd = deriveLedgerSpawnCwd(binary, workspace);
 	const child = spawn(
 		binary,
 		[
@@ -940,7 +968,7 @@ function spawnLedgerSubprocess(
 		],
 		{
 			stdio: ["pipe", "inherit", "pipe"],
-			cwd: workspace,
+			cwd: spawnCwd,
 		},
 	);
 	if (!child.stdin || !child.stderr) {
@@ -1661,7 +1689,21 @@ export async function runCli(
 
 				// Declare as unknown so both the try assignment and post-try casts typecheck.
 				let syncResultUnknown: unknown;
+				const syncStartMs = Date.now();
 				try {
+					// Emit run_started directly for the sync path (runPacket does not use the
+					// event bus, so we cannot rely on bus subscription here).
+					if (ledgerEmitter) {
+						ledgerEmitter.emit("run_started", {
+							RunStartedV1: {
+								packet_hash: "sha256:unknown",
+								git_head: "",
+								workspace_path: cwd,
+								config: {},
+								parent_run_id: null,
+							},
+						});
+					}
 					syncResultUnknown = withPersistedInjectedMemories(
 						useAsync
 							? await orchestrator.runPacketAsync(enrichedPacket, undefined)
@@ -1669,6 +1711,19 @@ export async function runCli(
 						structuredMemoryPort,
 						preparedPacket.injectedMemories,
 					);
+					// Emit run_completed on success.
+					if (ledgerEmitter) {
+						const r = syncResultUnknown as { run?: { status?: string } };
+						const outcome = r.run?.status === "passed" ? "passed" : "failed";
+						ledgerEmitter.emit("run_completed", {
+							RunCompletedV1: {
+								outcome,
+								duration_ms: Date.now() - syncStartMs,
+								event_count: 0,
+								unit_count: 1,
+							},
+						});
+					}
 				} finally {
 					// --- begin ledger cleanup ---
 					unsubscribeLedger?.();

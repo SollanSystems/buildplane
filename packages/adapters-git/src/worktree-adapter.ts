@@ -112,6 +112,7 @@ export function createGitWorktreeAdapter(
 				`:(exclude)${buildplanePrefix}/runs/**`,
 				`:(exclude)${buildplanePrefix}/logs/**`,
 				`:(exclude)${buildplanePrefix}/workspaces/**`,
+				`:(exclude)${buildplanePrefix}/ledger/**`,
 			]);
 			if (cleanlinessCheck.status !== 0) {
 				throw new Error(
