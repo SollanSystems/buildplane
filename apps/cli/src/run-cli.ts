@@ -834,12 +834,19 @@ function splitOutputLines(output: string): string[] {
 
 /** Map an ExecutionEvent kind (from the kernel event bus) to a ledger EventKind.
  * Returns null for kinds that don't have a ledger analogue yet (Phase C adds more).
+ *
+ * Note: the kernel defines "run-started"/"run-completed" as types but does not
+ * emit them. Phase B maps the events that ARE emitted:
+ *   "execution-started"         → run_started
+ *   "command-execution-complete" → run_completed  (command packets)
+ *   "policy-decision"            → run_completed  (final decision, any packet)
  */
 function mapEventKindForLedger(execKind: string): string | null {
 	switch (execKind) {
-		case "run-started":
+		case "execution-started":
 			return "run_started";
-		case "run-completed":
+		case "command-execution-complete":
+		case "policy-decision":
 			return "run_completed";
 		default:
 			return null;
@@ -866,10 +873,16 @@ function mapEventPayloadForLedger(event: unknown): unknown {
 		case "run_completed":
 			return {
 				RunCompletedV1: {
-					outcome: e.status ?? "passed",
+					// For policy-decision: approved→passed, else use e.outcome/e.status.
+					// For command-execution-complete: exitCode 0 → passed.
+					outcome:
+						e.outcome === "approved" ||
+						(e.kind === "command-execution-complete" && e.exitCode === 0)
+							? "passed"
+							: "failed",
 					duration_ms: e.durationMs ?? 0,
-					event_count: e.eventCount ?? 0,
-					unit_count: e.unitCount ?? 0,
+					event_count: 0,
+					unit_count: 1,
 				},
 			};
 		default:
