@@ -9,7 +9,7 @@ members = [
   "crates/bp-host-codex",
   "crates/bp-host-sdk",
   "crates/bp-ledger",
-  # "crates/bp-ledger-macros",  (Task 2: will be uncommented when bp-ledger-macros crate is created)
+  "crates/bp-ledger-macros",
   "crates/bp-memory",
   "crates/bp-pack-inspection",
   "crates/bp-pack-loader",
@@ -45,7 +45,7 @@ sha2 = "0.10"
 typeshare = "1"
 
 bp-ledger = { path = "crates/bp-ledger" }
-# bp-ledger-macros = { path = "crates/bp-ledger-macros" }  (Task 2: will be uncommented when bp-ledger-macros crate is created)
+bp-ledger-macros = { path = "crates/bp-ledger-macros" }
 
 bp-config = { path = "crates/bp-config" }
 bp-core = { path = "crates/bp-core" }

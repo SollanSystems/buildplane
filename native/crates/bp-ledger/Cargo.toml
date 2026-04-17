@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-# bp-ledger-macros.workspace = true  (Task 2: will be uncommented when bp-ledger-macros crate is created)
+bp-ledger-macros.workspace = true
 chrono.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
