@@ -10,5 +10,7 @@ pub mod serve;
 pub mod storage;
 
 pub use error::{LedgerError, Result};
+pub use event::Event;
 pub use id::{EventId, RunId};
 pub use kind::EventKind;
+pub use payload::Payload;
