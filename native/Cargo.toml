@@ -8,6 +8,8 @@ members = [
   "crates/bp-host-registry",
   "crates/bp-host-codex",
   "crates/bp-host-sdk",
+  "crates/bp-ledger",
+  # "crates/bp-ledger-macros",  (Task 2: will be uncommented when bp-ledger-macros crate is created)
   "crates/bp-memory",
   "crates/bp-pack-inspection",
   "crates/bp-pack-loader",
@@ -37,6 +39,13 @@ serde_json = "1.0"
 thiserror = "2.0"
 toml = "0.8"
 rusqlite = { version = "0.32", features = ["bundled"] }
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v7", "serde"] }
+sha2 = "0.10"
+typeshare = "1"
+
+bp-ledger = { path = "crates/bp-ledger" }
+# bp-ledger-macros = { path = "crates/bp-ledger-macros" }  (Task 2: will be uncommented when bp-ledger-macros crate is created)
 
 bp-config = { path = "crates/bp-config" }
 bp-core = { path = "crates/bp-core" }

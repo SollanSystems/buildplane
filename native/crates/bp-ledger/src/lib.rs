@@ -1,0 +1,10 @@
+//! Buildplane event tape capture — append-only ledger for replayable runs.
+
+pub mod canonicalize;
+pub mod error;
+pub mod event;
+pub mod id;
+pub mod kind;
+pub mod payload;
+pub mod serve;
+pub mod storage;

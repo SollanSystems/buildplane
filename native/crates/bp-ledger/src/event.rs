@@ -1,0 +1,1 @@
+//! The canonical event envelope.

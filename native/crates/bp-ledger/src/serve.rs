@@ -1,0 +1,1 @@
+//! Stdin JSONL ingest loop.
