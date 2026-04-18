@@ -38,6 +38,11 @@ export async function makeLedgerFixture(options?: {
 		process.env.BUILDPLANE_NATIVE_BIN ??
 		join(process.cwd(), "native", "target", "debug", "buildplane-native");
 
+	// NOTE: cwd must NOT be a bare temp dir. The native binary resolves its
+	// "native workspace" by walking ancestors of cwd looking for Cargo.toml +
+	// packs/. Use the repo root (process.cwd() during `pnpm test`) so the
+	// binary starts successfully; the --workspace flag points to the isolated
+	// temp dir that holds the SQLite ledger.
 	const child = spawn(
 		binary,
 		[
@@ -50,7 +55,7 @@ export async function makeLedgerFixture(options?: {
 			"--schema-version",
 			"1",
 		],
-		{ stdio: ["pipe", "inherit", "pipe"], cwd: dir },
+		{ stdio: ["pipe", "inherit", "pipe"] },
 	);
 	if (!child.stdin || !child.stderr) {
 		throw new Error("subprocess stdio missing");
@@ -69,10 +74,15 @@ export async function makeLedgerFixture(options?: {
 	});
 
 	const cleanup = async () => {
-		try {
-			await emitter.close();
-		} catch {
-			// May already be closed; ensure child is terminated below.
+		// Only call emitter.close() if the child is still alive. A second
+		// close() on an already-exited child creates a promise that never
+		// settles (stdin is gone, close_ack never arrives) and hangs forever.
+		if (child.exitCode === null) {
+			try {
+				await emitter.close();
+			} catch {
+				// Tolerate errors (e.g. emitter already failed/closed).
+			}
 		}
 		if (child.exitCode === null) {
 			child.kill("SIGTERM");
