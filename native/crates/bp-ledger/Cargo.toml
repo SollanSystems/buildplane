@@ -20,3 +20,7 @@ typeshare = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
+
+[[bin]]
+name = "bp-ledger-gen-fixtures"
+path = "src/bin/gen_fixtures.rs"
