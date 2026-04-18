@@ -25,6 +25,11 @@ function sha256(bytes: Buffer | string): string {
 	return `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
 }
 
+/** Hash of an empty env map `{}`. Used when no env vars are captured —
+ * a real digest rather than the misleading bare-prefix placeholder "sha256:".
+ */
+const EMPTY_ENV_HASH = `sha256:${createHash("sha256").update("{}").digest("hex")}`;
+
 /** Wrap a ToolRegistry so every call emits tool_request / tool_result (and
  * workspace_write for write_file) to the ledger emitter. The original
  * registry is called unchanged; the wrapper is a transparent proxy.
@@ -57,7 +62,7 @@ export function wrapToolRegistryForLedger(
 					ToolRequestStoredV1: {
 						tool_name: "write_file",
 						arguments: { path: input.path, content_hash: hashAfter },
-						env: { redacted: true, hash: "sha256:", hint: "env_var" },
+						env: { redacted: true, hash: EMPTY_ENV_HASH, hint: "env_var" },
 						working_directory: "",
 						unit_id: ctx?.unitId ?? "",
 					},
@@ -125,7 +130,7 @@ export function wrapToolRegistryForLedger(
 							command: input.command,
 							args: input.args ?? [],
 						},
-						env: { redacted: true, hash: "sha256:", hint: "env_var" },
+						env: { redacted: true, hash: EMPTY_ENV_HASH, hint: "env_var" },
 						working_directory: input.cwd ?? "",
 						unit_id: ctx?.unitId ?? "",
 					},
