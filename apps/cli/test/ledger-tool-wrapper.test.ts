@@ -137,3 +137,96 @@ describe("wrapToolRegistryForLedger — write_file", () => {
 		expect(emitter.emitted[0].opts?.parent).toBeUndefined();
 	});
 });
+
+describe("wrapToolRegistryForLedger — run_command", () => {
+	it("emits tool_request and tool_result for a successful shell command", () => {
+		const rawRegistry = {
+			write_file: vi.fn(),
+			run_command: vi.fn(() => ({
+				success: true,
+				exitCode: 0,
+				stdout: "hi\n",
+				stderr: "",
+			})),
+		};
+		const emitter = createMockEmitter();
+		const wrapped = wrapToolRegistryForLedger(rawRegistry, emitter, () => ({
+			unitId: "u-1",
+			parentEventId: "01919000-0000-7000-8000-000000000010",
+		}));
+
+		wrapped.run_command({ command: "sh", args: ["-c", "echo hi"] });
+
+		const kinds = emitter.emitted.map((e) => e.kind);
+		expect(kinds).toEqual(["tool_request", "tool_result"]);
+
+		const toolReq = emitter.emitted[0].payload as {
+			ToolRequestStoredV1: { tool_name: string; arguments: unknown };
+		};
+		expect(toolReq.ToolRequestStoredV1.tool_name).toBe("run_command");
+		expect(toolReq.ToolRequestStoredV1.arguments).toEqual({
+			command: "sh",
+			args: ["-c", "echo hi"],
+		});
+
+		const toolRes = emitter.emitted[1].payload as {
+			ToolResultV1: {
+				stdout: string;
+				stderr: string;
+				exit_code: number | null;
+			};
+		};
+		expect(toolRes.ToolResultV1.stdout).toBe("hi\n");
+		expect(toolRes.ToolResultV1.exit_code).toBe(0);
+	});
+
+	it("emits tool_result with non-zero exit_code on command failure", () => {
+		const rawRegistry = {
+			write_file: vi.fn(),
+			run_command: vi.fn(() => ({
+				success: false,
+				exitCode: 1,
+				stdout: "",
+				stderr: "oops",
+			})),
+		};
+		const emitter = createMockEmitter();
+		const wrapped = wrapToolRegistryForLedger(rawRegistry, emitter, () => ({
+			unitId: "u-1",
+			parentEventId: "01919000-0000-7000-8000-000000000010",
+		}));
+
+		wrapped.run_command({ command: "false" });
+
+		const toolRes = emitter.emitted[1].payload as {
+			ToolResultV1: { exit_code: number | null; stderr: string };
+		};
+		expect(toolRes.ToolResultV1.exit_code).toBe(1);
+		expect(toolRes.ToolResultV1.stderr).toBe("oops");
+	});
+
+	it("never emits workspace_write for run_command", () => {
+		const rawRegistry = {
+			write_file: vi.fn(),
+			run_command: vi.fn(() => ({
+				success: true,
+				exitCode: 0,
+				stdout: "",
+				stderr: "",
+			})),
+		};
+		const emitter = createMockEmitter();
+		const wrapped = wrapToolRegistryForLedger(rawRegistry, emitter, () => ({
+			unitId: "u-1",
+			parentEventId: "01919000-0000-7000-8000-000000000010",
+		}));
+
+		wrapped.run_command({
+			command: "sh",
+			args: ["-c", "echo hi > /tmp/shell-out"],
+		});
+
+		const kinds = emitter.emitted.map((e) => e.kind);
+		expect(kinds).not.toContain("workspace_write");
+	});
+});

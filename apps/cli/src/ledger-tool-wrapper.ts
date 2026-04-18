@@ -113,8 +113,46 @@ export function wrapToolRegistryForLedger(
 		},
 
 		run_command(input: RunCommandInput): RunCommandResult {
-			// Task 2 adds instrumentation. For now, pass through.
-			return registry.run_command(input);
+			const ctx = getUnitCtx();
+			const toolReqId = randomUUID();
+
+			emitter.emit(
+				"tool_request",
+				{
+					ToolRequestStoredV1: {
+						tool_name: "run_command",
+						arguments: {
+							command: input.command,
+							args: input.args ?? [],
+						},
+						env: { redacted: true, hash: "sha256:", hint: "env_var" },
+						working_directory: input.cwd ?? "",
+						unit_id: ctx?.unitId ?? "",
+					},
+				},
+				{ parent: ctx?.parentEventId, id: toolReqId },
+			);
+
+			const started = Date.now();
+			const result = registry.run_command(input);
+			const durationMs = Date.now() - started;
+
+			emitter.emit(
+				"tool_result",
+				{
+					ToolResultV1: {
+						tool_request_id: toolReqId,
+						stdout: result.stdout,
+						stderr: result.stderr,
+						exit_code: result.exitCode,
+						output: null,
+						duration_ms: durationMs,
+					},
+				},
+				{ parent: toolReqId },
+			);
+
+			return result;
 		},
 	};
 }
