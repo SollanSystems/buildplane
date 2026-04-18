@@ -29,6 +29,20 @@ export interface EmitOptions {
 }
 
 export interface TapeEmitter {
+	/**
+	 * Emit an event envelope. Synchronous, fire-and-forget: the call returns
+	 * immediately after enqueueing. The queue's `highWatermark` throttles
+	 * **execution order** of pending writes through an internal promise chain,
+	 * but does NOT admission-control the pending count — under a tight
+	 * synchronous burst (e.g. `for (let i = 0; i < 1_000_000; i++) emit(...)`)
+	 * all N promises and JSON strings will be enqueued before Node pumps
+	 * the event loop.
+	 *
+	 * Memory is bounded by the producer's cadence, not by the emitter. If
+	 * bounded memory under adversarial bursts matters, the producer should
+	 * yield to the event loop periodically (`await new Promise(setImmediate)`)
+	 * or use `flush()` as a soft backpressure signal.
+	 */
 	emit(kind: string, payload: unknown, opts?: EmitOptions): void;
 	flush(): Promise<void>;
 	close(): Promise<void>;
