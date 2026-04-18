@@ -73,18 +73,26 @@ export async function makeLedgerFixture(options?: {
 		handshakeTimeoutMs: options?.handshakeTimeoutMs ?? 5_000,
 	});
 
+	// Track whether the child has exited via any means (exit code or signal).
+	let childDead = false;
+	child.on("exit", () => {
+		childDead = true;
+	});
+
 	const cleanup = async () => {
 		// Only call emitter.close() if the child is still alive. A second
 		// close() on an already-exited child creates a promise that never
 		// settles (stdin is gone, close_ack never arrives) and hangs forever.
-		if (child.exitCode === null) {
+		// Use `childDead` rather than `exitCode` because signal-killed processes
+		// have `exitCode === null` even after they are gone.
+		if (!childDead) {
 			try {
 				await emitter.close();
 			} catch {
 				// Tolerate errors (e.g. emitter already failed/closed).
 			}
 		}
-		if (child.exitCode === null) {
+		if (!childDead) {
 			child.kill("SIGTERM");
 			await once(child, "exit");
 		}
