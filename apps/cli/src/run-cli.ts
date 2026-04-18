@@ -3,6 +3,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import type { Readable, Writable } from "node:stream";
+import { createToolRegistry } from "@buildplane/adapters-tools";
 import {
 	createTapeEmitter,
 	type LedgerFailure,
@@ -28,6 +29,7 @@ import {
 	formatWorkspaceCleanupResult,
 	formatWorkspaceList,
 } from "./formatters.js";
+import { wrapToolRegistryForLedger } from "./ledger-tool-wrapper.js";
 import type {
 	PacketMemoryEnrichmentResult,
 	preparePacketMemoryEnrichment,
@@ -1535,6 +1537,23 @@ export async function runCli(
 					}
 				}
 				// --- end ledger integration ---
+
+				// Unit-context tracker: mutable state that getUnitCtx returns on demand.
+				// Updated by the unit-boundary hooks in Task 7.
+				const currentUnit: { unitId: string; parentEventId: string } | null =
+					null;
+				const getUnitCtx = () => currentUnit;
+
+				// Wrap the raw registry so every tool call emits to the ledger.
+				const rawRegistry = createToolRegistry(cwd);
+				const registry = ledgerEmitter
+					? wrapToolRegistryForLedger(rawRegistry, ledgerEmitter, getUnitCtx)
+					: rawRegistry;
+
+				// Suppress unused-variable lint: registry is the instrumented entry
+				// point for tool calls; downstream orchestrator plumbing picks it up
+				// when execution adapters are threaded in Phase D+.
+				void registry;
 
 				if (useAsync && !useTui) {
 					// Model packets auto-switch to async (no TUI)
