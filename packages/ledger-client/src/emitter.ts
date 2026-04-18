@@ -118,17 +118,27 @@ export async function createTapeEmitter(
 		if (closeReject) closeReject(new Error(failure.message));
 	}
 
-	opts.childExit.then((code) => {
-		if (code !== 0) {
+	opts.childExit
+		.then((code) => {
+			if (code !== 0) {
+				markFailed({
+					kind: "exit",
+					exitCode: code,
+					stderrTail: tailer.tail(),
+					lastAckedEventId,
+					message: `ledger exited with code ${code}`,
+				});
+			}
+		})
+		.catch((err: unknown) => {
 			markFailed({
 				kind: "exit",
-				exitCode: code,
+				exitCode: null,
 				stderrTail: tailer.tail(),
 				lastAckedEventId,
-				message: `ledger exited with code ${code}`,
+				message: `childExit promise rejected: ${String(err)}`,
 			});
-		}
-	});
+		});
 
 	return {
 		emit(kind, payload, emitOpts) {
