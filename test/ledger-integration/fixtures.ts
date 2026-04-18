@@ -1,5 +1,6 @@
-import { type ChildProcess, spawn } from "node:child_process";
+import { type ChildProcess, spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
+import { writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -100,4 +101,74 @@ export async function makeLedgerFixture(options?: {
 	};
 
 	return { dir, binary, child, emitter, cleanup };
+}
+
+export interface BuildplaneRunFixture {
+	dir: string;
+	eventsDbPath: string;
+	exitCode: number;
+	cleanup: () => Promise<void>;
+}
+
+/** Spin up an isolated workspace, write a packet.json, and run `runCli()`
+ * in-process with process.cwd() temporarily chdir'd to the tempdir. Restores
+ * cwd in finally. Returns the run result + path to events.db.
+ *
+ * CRITICAL: tests using this fixture MUST NOT run concurrently with each
+ * other (process.chdir is process-global). Vitest's default is worker-per-file
+ * with sequential tests in a file — co-locating such tests in one file or
+ * different files is fine; inside one file, don't mark `concurrent: true`.
+ */
+export async function makeBuildplaneRunFixture(opts: {
+	packet: unknown;
+}): Promise<BuildplaneRunFixture> {
+	const dir = await mkdtemp(join(tmpdir(), "bp-run-"));
+
+	const runGit = (args: string[]) => {
+		const r = spawnSync("git", args, { cwd: dir, encoding: "utf8" });
+		if (r.status !== 0) {
+			throw new Error(`git ${args.join(" ")} failed: ${r.stderr}`);
+		}
+	};
+	runGit(["init", "-q"]);
+	runGit(["config", "user.email", "test@test"]);
+	runGit(["config", "user.name", "test"]);
+	runGit(["commit", "-q", "--allow-empty", "-m", "init"]);
+
+	const packetPath = join(dir, "packet.json");
+	writeFileSync(packetPath, JSON.stringify(opts.packet, null, 2));
+
+	// Import runCli dynamically so module eval doesn't pull the whole CLI
+	// into memory for non-fixture tests.
+	const { runCli } = (await import("../../apps/cli/src/run-cli.js")) as {
+		runCli: (
+			argv: string[],
+			options?: {
+				cwd?: string;
+				stdout?: (line: string) => void;
+				stderr?: (line: string) => void;
+			},
+		) => Promise<number>;
+	};
+
+	const originalCwd = process.cwd();
+	let exitCode = 1;
+	try {
+		process.chdir(dir);
+		exitCode = await runCli(["run", "--packet", packetPath], {
+			cwd: dir,
+			stdout: (_s: string) => {},
+			stderr: (_s: string) => {},
+		});
+	} finally {
+		process.chdir(originalCwd);
+	}
+
+	const eventsDbPath = join(dir, ".buildplane", "ledger", "events.db");
+
+	const cleanup = async () => {
+		await rm(dir, { recursive: true, force: true });
+	};
+
+	return { dir, eventsDbPath, exitCode, cleanup };
 }
