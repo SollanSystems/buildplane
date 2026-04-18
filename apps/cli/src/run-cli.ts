@@ -833,61 +833,23 @@ function splitOutputLines(output: string): string[] {
 }
 
 /** Map an ExecutionEvent kind (from the kernel event bus) to a ledger EventKind.
- * Returns null for kinds that don't have a ledger analogue yet (Phase C adds more).
  *
- * Note: the kernel defines "run-started"/"run-completed" as types but does not
- * emit them. Phase B maps the events that ARE emitted:
- *   "execution-started"         → run_started
- *   "command-execution-complete" → run_completed  (command packets)
- *   "policy-decision"            → run_completed  (final decision, any packet)
+ * Phase B: returns null for every kind. The ledger's run_started / run_completed
+ * events are emitted DIRECTLY from the run command handler (near line 1696) in
+ * both sync and async orchestrator paths. The bus subscription is left wired
+ * so Phase C can add tool-event mappings (command-execution-complete → tool
+ * events, etc.) without re-wiring the subscription itself.
  */
-function mapEventKindForLedger(execKind: string): string | null {
-	switch (execKind) {
-		case "execution-started":
-			return "run_started";
-		case "command-execution-complete":
-		case "policy-decision":
-			return "run_completed";
-		default:
-			return null;
-	}
+function mapEventKindForLedger(_execKind: string): string | null {
+	return null;
 }
 
-/** Map an ExecutionEvent payload to a ledger payload. Phase B is a minimal
- * shape; Phase C fills in tool events and workspace observations.
+/** Map an ExecutionEvent payload to a ledger payload. Phase B: unreachable (the
+ * bus subscription short-circuits on null kinds). Stub preserved for Phase C
+ * to fill in tool event mappings.
  */
-function mapEventPayloadForLedger(event: unknown): unknown {
-	const e = event as Record<string, unknown>;
-	const kind = mapEventKindForLedger(e.kind as string);
-	switch (kind) {
-		case "run_started":
-			return {
-				RunStartedV1: {
-					packet_hash: e.packetHash ?? "sha256:unknown",
-					git_head: e.gitHead ?? "",
-					workspace_path: e.workspacePath ?? "",
-					config: {},
-					parent_run_id: null,
-				},
-			};
-		case "run_completed":
-			return {
-				RunCompletedV1: {
-					// For policy-decision: approved→passed, else use e.outcome/e.status.
-					// For command-execution-complete: exitCode 0 → passed.
-					outcome:
-						e.outcome === "approved" ||
-						(e.kind === "command-execution-complete" && e.exitCode === 0)
-							? "passed"
-							: "failed",
-					duration_ms: e.durationMs ?? 0,
-					event_count: 0,
-					unit_count: 1,
-				},
-			};
-		default:
-			return {};
-	}
+function mapEventPayloadForLedger(_event: unknown): unknown {
+	return {};
 }
 
 function resolveNativeBinary(cwd: string): string {
