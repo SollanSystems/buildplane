@@ -19,6 +19,7 @@
 		"lint": "biome check .",
 		"format": "biome format --write .",
 		"ledger:gen": "./scripts/ledger/generate-schema.sh",
+		"ledger:gen-fixtures": "./scripts/ledger/gen-fixtures.sh",
 		"check": "pnpm lint && pnpm typecheck && pnpm test && pnpm build",
 		"prepare": "husky",
 		"changeset": "changeset",
