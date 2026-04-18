@@ -29,6 +29,7 @@ import {
 	formatWorkspaceCleanupResult,
 	formatWorkspaceList,
 } from "./formatters.js";
+import { runGitCheckpoint } from "./ledger-git-checkpoint.js";
 import { wrapToolRegistryForLedger } from "./ledger-tool-wrapper.js";
 import type {
 	PacketMemoryEnrichmentResult,
@@ -834,26 +835,6 @@ function splitOutputLines(output: string): string[] {
 		.filter((line) => line.length > 0);
 }
 
-/** Map an ExecutionEvent kind (from the kernel event bus) to a ledger EventKind.
- *
- * Phase B: returns null for every kind. The ledger's run_started / run_completed
- * events are emitted DIRECTLY from the run command handler (near line 1696) in
- * both sync and async orchestrator paths. The bus subscription is left wired
- * so Phase C can add tool-event mappings (command-execution-complete → tool
- * events, etc.) without re-wiring the subscription itself.
- */
-function mapEventKindForLedger(_execKind: string): string | null {
-	return null;
-}
-
-/** Map an ExecutionEvent payload to a ledger payload. Phase B: unreachable (the
- * bus subscription short-circuits on null kinds). Stub preserved for Phase C
- * to fill in tool event mappings.
- */
-function mapEventPayloadForLedger(_event: unknown): unknown {
-	return {};
-}
-
 function resolveNativeBinary(cwd: string): string {
 	const explicit = process.env.BUILDPLANE_NATIVE_BIN;
 	if (explicit) {
@@ -1492,6 +1473,12 @@ export async function runCli(
 				const { randomUUID } = await import("node:crypto");
 				const ledgerRunId = randomUUID();
 
+				// Unit-context tracker: mutable state that getUnitCtx returns on demand.
+				// Updated by the unit-boundary subscription below.
+				let currentUnit: { unitId: string; parentEventId: string } | null =
+					null;
+				const getUnitCtx = () => currentUnit;
+
 				if (useLedger) {
 					try {
 						const binary = resolveLedgerBinary(cwd);
@@ -1517,13 +1504,76 @@ export async function runCli(
 								// Swallow: best-effort logging only.
 							}
 						});
+						const workspacePath = resolve(cwd);
 						unsubscribeLedger = cliEventBus.subscribe((evt: unknown) => {
 							if (!ledgerEmitter) return;
-							const e = evt as { kind?: string };
-							const ledgerKind = mapEventKindForLedger(e.kind ?? "");
-							if (!ledgerKind) return;
-							const payload = mapEventPayloadForLedger(evt);
-							ledgerEmitter.emit(ledgerKind, payload);
+							const e = evt as {
+								kind?: string;
+								unitId?: string;
+								exitCode?: number;
+							};
+							switch (e.kind) {
+								case "execution-started": {
+									// Unit-level start. Emit unit_started, run pre-unit checkpoint,
+									// update currentUnit.
+									const unitId = e.unitId ?? "unknown";
+									const unitStartedId = randomUUID();
+									ledgerEmitter.emit(
+										"unit_started",
+										{
+											UnitStartedV1: {
+												unit_id: unitId,
+												parent_unit_id: null,
+												unit_kind: "command",
+												policy: {},
+											},
+										},
+										{ id: unitStartedId },
+									);
+									currentUnit = { unitId, parentEventId: unitStartedId };
+									runGitCheckpoint({
+										boundary: "pre-unit",
+										runId: ledgerRunId,
+										unitId,
+										cwd: workspacePath,
+										emitter: ledgerEmitter,
+										parentEventId: unitStartedId,
+									});
+									break;
+								}
+								case "command-execution-complete": {
+									// Unit-level end. Run post-unit checkpoint, emit unit_completed,
+									// clear currentUnit.
+									if (currentUnit) {
+										runGitCheckpoint({
+											boundary: "post-unit",
+											runId: ledgerRunId,
+											unitId: currentUnit.unitId,
+											cwd: workspacePath,
+											emitter: ledgerEmitter,
+											parentEventId: currentUnit.parentEventId,
+										});
+										const outcome = e.exitCode === 0 ? "passed" : "failed";
+										ledgerEmitter.emit(
+											"unit_completed",
+											{
+												UnitCompletedV1: {
+													unit_id: currentUnit.unitId,
+													outcome,
+													artifacts: [],
+												},
+											},
+											{ parent: currentUnit.parentEventId },
+										);
+										currentUnit = null;
+									}
+									break;
+								}
+								default:
+									// Phase C does not map policy-decision or other kernel events to
+									// ledger events; Phase D+ concerns.
+									break;
+							}
 						});
 					} catch {
 						// Ledger setup failed (spawn error, handshake timeout, version mismatch).
@@ -1537,12 +1587,6 @@ export async function runCli(
 					}
 				}
 				// --- end ledger integration ---
-
-				// Unit-context tracker: mutable state that getUnitCtx returns on demand.
-				// Updated by the unit-boundary hooks in Task 7.
-				const currentUnit: { unitId: string; parentEventId: string } | null =
-					null;
-				const getUnitCtx = () => currentUnit;
 
 				// Wrap the raw registry so every tool call emits to the ledger.
 				const rawRegistry = createToolRegistry(cwd);
