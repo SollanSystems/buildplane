@@ -58,6 +58,9 @@ importers:
       '@buildplane/adapters-models':
         specifier: workspace:*
         version: link:../../packages/adapters-models
+      '@buildplane/adapters-tools':
+        specifier: workspace:*
+        version: link:../../packages/adapters-tools
       '@buildplane/kernel':
         specifier: workspace:*
         version: link:../../packages/kernel

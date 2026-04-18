@@ -7,6 +7,9 @@ export default defineConfig({
 			"@buildplane/ledger-client": resolve(
 				"packages/ledger-client/src/index.ts",
 			),
+			"@buildplane/adapters-tools": resolve(
+				"packages/adapters-tools/src/index.ts",
+			),
 		},
 	},
 	test: {
