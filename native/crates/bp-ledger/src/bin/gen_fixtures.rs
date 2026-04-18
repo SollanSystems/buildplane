@@ -113,6 +113,8 @@ fn main() {
             .into_owned()
     });
     fs::create_dir_all(PathBuf::from(&dest).parent().unwrap()).unwrap();
-    fs::write(&dest, serde_json::to_string_pretty(&out).unwrap()).unwrap();
+    let mut content = serde_json::to_string_pretty(&out).unwrap();
+    content.push('\n');
+    fs::write(&dest, content).unwrap();
     eprintln!("wrote {}", dest);
 }

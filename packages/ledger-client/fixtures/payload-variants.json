@@ -119,7 +119,7 @@
 			"output": null,
 			"stderr": "",
 			"stdout": "",
-			"tool_request_id": "019d9edc-2797-7611-ba2d-4ded579ffdb6"
+			"tool_request_id": "01919000-0000-7000-8000-000000000001"
 		}
 	},
 	{
@@ -127,7 +127,7 @@
 			"content_hash": "sha256:aa",
 			"path": "x",
 			"size_bytes": 0,
-			"tool_request_id": "019d9edc-2797-7611-ba2d-4dfbce2268dd"
+			"tool_request_id": "01919000-0000-7000-8000-000000000002"
 		}
 	},
 	{
@@ -141,7 +141,7 @@
 			},
 			"hash_before": null,
 			"path": "x",
-			"tool_request_id": "019d9edc-2797-7611-ba2d-4e0835ee3957"
+			"tool_request_id": "01919000-0000-7000-8000-000000000003"
 		}
 	}
 ]

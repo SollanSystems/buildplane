@@ -8,3 +8,5 @@ if [[ ! -x "$BIN" ]]; then
   cargo build --manifest-path "$ROOT/native/Cargo.toml" -p bp-ledger --bin bp-ledger-gen-fixtures --quiet
 fi
 "$BIN" "$OUT"
+# Normalise indentation to match Biome project style (tabs).
+"$ROOT/node_modules/.bin/biome" format --write "$OUT" 2>/dev/null || true
