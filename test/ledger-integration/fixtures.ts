@@ -1,6 +1,6 @@
 import { type ChildProcess, spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
-import { writeFileSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -110,19 +110,50 @@ export interface BuildplaneRunFixture {
 	cleanup: () => Promise<void>;
 }
 
-/** Spin up an isolated workspace, write a packet.json, and run `runCli()`
- * in-process with process.cwd() temporarily chdir'd to the tempdir. Restores
- * cwd in finally. Returns the run result + path to events.db.
+/** Spin up an isolated workspace, initialize a Buildplane project, write a
+ * packet.json, and run `runCli()` in-process with process.cwd() temporarily
+ * chdir'd to the tempdir. Restores cwd + BUILDPLANE_NATIVE_BIN in finally.
+ * Returns the run result + path to events.db.
  *
  * CRITICAL: tests using this fixture MUST NOT run concurrently with each
  * other (process.chdir is process-global). Vitest's default is worker-per-file
  * with sequential tests in a file — co-locating such tests in one file or
  * different files is fine; inside one file, don't mark `concurrent: true`.
+ *
+ * Binary resolution (same strategy as makeLedgerFixture):
+ *  1. Honor BUILDPLANE_NATIVE_BIN if already set in the environment.
+ *  2. Look for native/target/debug/buildplane-native relative to the vitest
+ *     invocation cwd (the repo root when running `pnpm test`).
+ *  3. Fall back to "buildplane-native" on PATH.
+ * The resolved binary is injected as BUILDPLANE_NATIVE_BIN so the run-cli
+ * subprocess-spawn path can locate it even when cwd is the tempdir.
+ *
+ * NOTE on --raw flag: the ledger subprocess integration lives in the "raw"
+ * single-shot execution path of run-cli.  The default strategy path bypasses
+ * it entirely.  This fixture always passes --raw so that the ledger subprocess
+ * is spawned and events.db is populated.  Tests that need the strategy path
+ * should call runCli directly instead of using this fixture.
  */
 export async function makeBuildplaneRunFixture(opts: {
 	packet: unknown;
 }): Promise<BuildplaneRunFixture> {
 	const dir = await mkdtemp(join(tmpdir(), "bp-run-"));
+
+	// Capture repo-root cwd BEFORE chdir so binary resolution uses the right base.
+	const repoRoot = process.cwd();
+
+	// Resolve the native binary using the same logic as makeLedgerFixture.
+	const nativeBinary =
+		process.env.BUILDPLANE_NATIVE_BIN ??
+		(existsSync(
+			join(repoRoot, "native", "target", "debug", "buildplane-native"),
+		)
+			? join(repoRoot, "native", "target", "debug", "buildplane-native")
+			: existsSync(
+						join(repoRoot, "native", "target", "release", "buildplane-native"),
+					)
+				? join(repoRoot, "native", "target", "release", "buildplane-native")
+				: "buildplane-native");
 
 	const runGit = (args: string[]) => {
 		const r = spawnSync("git", args, { cwd: dir, encoding: "utf8" });
@@ -134,9 +165,6 @@ export async function makeBuildplaneRunFixture(opts: {
 	runGit(["config", "user.email", "test@test"]);
 	runGit(["config", "user.name", "test"]);
 	runGit(["commit", "-q", "--allow-empty", "-m", "init"]);
-
-	const packetPath = join(dir, "packet.json");
-	writeFileSync(packetPath, JSON.stringify(opts.packet, null, 2));
 
 	// Import runCli dynamically so module eval doesn't pull the whole CLI
 	// into memory for non-fixture tests.
@@ -152,16 +180,46 @@ export async function makeBuildplaneRunFixture(opts: {
 	};
 
 	const originalCwd = process.cwd();
+	const originalNativeBin = process.env.BUILDPLANE_NATIVE_BIN;
 	let exitCode = 1;
 	try {
 		process.chdir(dir);
-		exitCode = await runCli(["run", "--packet", packetPath], {
+		// Inject resolved binary path so run-cli can find it from the tempdir.
+		process.env.BUILDPLANE_NATIVE_BIN = nativeBinary;
+
+		// 1. Initialize the Buildplane project (creates .buildplane/ structure).
+		await runCli(["init"], {
+			cwd: dir,
+			stdout: (_s: string) => {},
+			stderr: (_s: string) => {},
+		});
+
+		// 2. Commit the init artifacts so the working tree is clean.
+		runGit(["add", "-A"]);
+		runGit(["commit", "-q", "-m", "buildplane: init"]);
+
+		// 3. Write the packet and commit it so the working tree stays clean.
+		const packetPath = join(dir, "packet.json");
+		writeFileSync(packetPath, JSON.stringify(opts.packet, null, 2));
+		runGit(["add", "packet.json"]);
+		runGit(["commit", "-q", "-m", "buildplane: add packet"]);
+
+		// 4. Run the packet using --raw to engage the ledger-subprocess path.
+		//    The default strategy path does not spawn a ledger subprocess, so
+		//    events.db would be empty/missing without this flag.
+		exitCode = await runCli(["run", "--packet", packetPath, "--raw"], {
 			cwd: dir,
 			stdout: (_s: string) => {},
 			stderr: (_s: string) => {},
 		});
 	} finally {
 		process.chdir(originalCwd);
+		// Restore BUILDPLANE_NATIVE_BIN to its original state.
+		if (originalNativeBin === undefined) {
+			delete process.env.BUILDPLANE_NATIVE_BIN;
+		} else {
+			process.env.BUILDPLANE_NATIVE_BIN = originalNativeBin;
+		}
 	}
 
 	const eventsDbPath = join(dir, ".buildplane", "ledger", "events.db");
