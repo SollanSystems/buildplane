@@ -459,6 +459,8 @@ Ranked by probability:
 3. **Node's `child_process.spawn` quirks on long-running stdin pipes.** Specifically `EPIPE` when child exits before stdin is closed. Mitigation: `failure.ts` swallows EPIPE on writes after `childExit` resolves.
 4. **typeshare re-runs during Phase B producing different output.** Phase A's hand-written `Payload` + shims were careful; if someone bumps typeshare or adjusts annotations, the generated file shifts. Mitigation: pin the typeshare version in `scripts/ledger/generate-schema.sh` and run it as a no-op verification in CI.
 
+**Phase B status: complete (2026-04-18).**
+
 ---
 
 ## Appendix A: Decision Log
