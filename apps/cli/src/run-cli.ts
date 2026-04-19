@@ -423,6 +423,10 @@ interface CliOrchestratorBundle {
 	honchoAdapter?: HonchoPortLike;
 	userId?: string;
 	currentBranch?: string;
+	/** Mutable slot — swapped per-run to route through the ledger-wrapped ToolRegistry. */
+	commandExecutor: {
+		executePacket: (packet: unknown, root: string) => unknown;
+	};
 }
 
 async function loadCliOrchestrator(
@@ -754,6 +758,7 @@ async function loadCliOrchestrator(
 		honchoAdapter: honchoAdapterRef,
 		userId: userIdRef,
 		currentBranch: currentBranchRef,
+		commandExecutor,
 	};
 }
 
@@ -1355,6 +1360,11 @@ export async function runCli(
 					orchestrator: deps.createOrchestrator(),
 					eventBus: { subscribe: () => () => {}, emit: () => {} },
 					eventStore: { persistEvent: () => {} },
+					commandExecutor: {
+						executePacket: (_p: unknown, _r: string) => {
+							throw new Error("mock bundle: executePacket not wired");
+						},
+					},
 				}
 			: await loadCliOrchestrator(cwd);
 		const {
@@ -1366,6 +1376,7 @@ export async function runCli(
 			honchoAdapter,
 			userId,
 			currentBranch,
+			commandExecutor,
 		} = bundle;
 
 		switch (command) {
@@ -1619,16 +1630,88 @@ export async function runCli(
 				}
 				// --- end ledger integration ---
 
-				// Wrap the raw registry so every tool call emits to the ledger.
-				const rawRegistry = createToolRegistry(cwd);
-				const registry = ledgerEmitter
-					? wrapToolRegistryForLedger(rawRegistry, ledgerEmitter, getUnitCtx)
-					: rawRegistry;
+				// Capture the current ledgerEmitter reference so the closure below
+				// captures the per-run emitter (not a shared mutable variable that
+				// could change between runs).
+				const runLedgerEmitter = ledgerEmitter;
+				const runGetUnitCtx = getUnitCtx;
 
-				// Suppress unused-variable lint: registry is the instrumented entry
-				// point for tool calls; downstream orchestrator plumbing picks it up
-				// when execution adapters are threaded in Phase D+.
-				void registry;
+				// Thread the (possibly ledger-wrapped) registry into the execution
+				// adapter by swapping the mutable commandExecutor slot.  The
+				// runtimeRouter in loadCliOrchestrator reads commandExecutor.executePacket
+				// by reference on every call, so swapping the property here is sufficient
+				// to route all subsequent command packets through the wrapper.
+				//
+				// The registry is created per-call from executionRoot (the Git worktree
+				// path) so that sandbox path validation inside run_command uses the
+				// correct workspace root, not the project-root cwd.
+				const { existsSync: fsExistsSync, realpathSync: fsRealpathSync } =
+					await import("node:fs");
+				const { resolve: pathResolve } = await import("node:path");
+				commandExecutor.executePacket = (
+					packetUnknown: unknown,
+					executionRoot: string,
+				): unknown => {
+					const p = packetUnknown as {
+						execution: {
+							command: string;
+							args?: readonly string[];
+							cwd?: string;
+						};
+						verification: { requiredOutputs: readonly string[] };
+					};
+					const workspaceRoot = pathResolve(executionRoot);
+					// Create a registry scoped to the worktree (executionRoot) so that
+					// sandbox path resolution inside run_command uses the right root.
+					const perCallRawRegistry = createToolRegistry(workspaceRoot);
+					const perCallRegistry = runLedgerEmitter
+						? wrapToolRegistryForLedger(
+								perCallRawRegistry,
+								runLedgerEmitter,
+								runGetUnitCtx,
+							)
+						: perCallRawRegistry;
+					// Resolve the effective cwd for the receipt (absolute path)
+					const effectiveCwd = p.execution.cwd
+						? pathResolve(workspaceRoot, p.execution.cwd)
+						: workspaceRoot;
+					const startedAt = new Date().toISOString();
+					const result = perCallRegistry.run_command({
+						command: p.execution.command,
+						args: p.execution.args,
+						// Pass cwd relative so the sandbox resolver inside run_command
+						// can validate it against the worktreeRoot.
+						cwd: p.execution.cwd,
+					});
+					const completedAt = new Date().toISOString();
+					return {
+						command: p.execution.command,
+						args: [...(p.execution.args ?? [])],
+						cwd: effectiveCwd,
+						startedAt,
+						completedAt,
+						exitCode: result.exitCode,
+						stdout: result.stdout,
+						stderr: result.stderr,
+						outputChecks: p.verification.requiredOutputs.map(
+							(outputPath: string) => {
+								const realWorkspaceRoot = (() => {
+									try {
+										return fsRealpathSync(workspaceRoot);
+									} catch {
+										return workspaceRoot;
+									}
+								})();
+								return {
+									path: outputPath,
+									exists: fsExistsSync(
+										pathResolve(realWorkspaceRoot, outputPath),
+									),
+								};
+							},
+						),
+					};
+				};
 
 				if (useAsync && !useTui) {
 					// Model packets auto-switch to async (no TUI)

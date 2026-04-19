@@ -2,12 +2,11 @@ import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it } from "vitest";
 import { makeBuildplaneRunFixture } from "./fixtures.js";
 
-// Phase D: runPacket now emits execution-started / command-execution-complete
-// on the event bus, so unit-boundary events (unit_started, git_checkpoint,
-// unit_completed) fire for sync command packets via the cliEventBus subscriber
-// in run-cli.  tool_request / workspace_write remain out of scope for Task 1
-// (those require the instrumented ToolRegistry to be threaded into the
-// command-execution adapter, which is Task 2 work).
+// Phase D Task 2: the ledger-wrapped ToolRegistry is now threaded into the
+// execution adapter (commandExecutor in run-cli).  run_command invocations for
+// command packets flow through wrapToolRegistryForLedger, so tool_request and
+// tool_result events appear in events.db in addition to the unit-boundary
+// events that Task 1 added.
 
 describe("tool-capture", () => {
 	it("captures run lifecycle events in events.db for a command packet", async () => {
@@ -49,6 +48,12 @@ describe("tool-capture", () => {
 			expect(kinds).toContain("unit_started");
 			expect(kinds).toContain("git_checkpoint");
 			expect(kinds).toContain("unit_completed");
+
+			// Task 2: tool_request + tool_result now appear because the wrapped
+			// ToolRegistry is threaded into the commandExecutor in run-cli.
+			// run_command is instrumented — every command packet emits these events.
+			expect(kinds).toContain("tool_request");
+			expect(kinds).toContain("tool_result");
 
 			db.close();
 		} finally {
