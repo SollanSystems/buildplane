@@ -293,7 +293,7 @@ pub fn run_replay(args: ReplayArgs) -> Result<(), String> {
     }
 
     let mut count = 0usize;
-    while let Some(step) = engine.next() {
+    for step in engine.by_ref() {
         emit_step(&step, args.format)?;
         count += 1;
         if let Some(limit) = args.limit {
