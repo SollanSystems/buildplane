@@ -1,3 +1,4 @@
+mod fork_cli;
 mod ledger_cli;
 mod memory_cli;
 
@@ -20,6 +21,7 @@ use std::process;
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Command {
     InspectPack(InspectPackArgs),
+    Fork(fork_cli::ForkCommand),
     Ledger(ledger_cli::LedgerCommand),
     Memory(MemoryCommand),
     Help,
@@ -65,6 +67,13 @@ fn main() {
 fn run() -> Result<(), String> {
     match parse_args_from_iter(env::args_os().skip(1))? {
         Command::InspectPack(args) => run_inspect_pack(args),
+        Command::Fork(fork_cli::ForkCommand::Plan(args)) => {
+            fork_cli::run_fork_plan(args)
+        }
+        Command::Fork(fork_cli::ForkCommand::Help) => {
+            println!("{}", fork_cli::usage_text());
+            Ok(())
+        }
         Command::Ledger(ledger_cli::LedgerCommand::Serve(serve_args)) => {
             ledger_cli::run_serve(serve_args)
         }
@@ -165,6 +174,15 @@ where
             })
             .collect::<Result<_, _>>()?;
         return ledger_cli::parse_ledger_command(&rest).map(Command::Ledger);
+    }
+    if first == "fork" {
+        let rest: Vec<String> = args
+            .map(|a| {
+                a.into_string()
+                    .map_err(|_| "fork argument must be valid UTF-8".to_string())
+            })
+            .collect::<Result<_, _>>()?;
+        return fork_cli::parse_fork_command(&rest).map(Command::Fork);
     }
     if first == "memory" {
         return parse_memory_command(args, default_workspace_root).map(Command::Memory);
