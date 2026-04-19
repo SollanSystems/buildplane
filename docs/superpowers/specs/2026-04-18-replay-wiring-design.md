@@ -350,6 +350,8 @@ Ranked by probability:
 3. **`ReplayState` cloning cost on big tapes.** Defer optimization unless a real user hits it.
 4. **Unskipping Phase C `.skip` reveals deeper issue.** D.1's gate is explicit; halt and address in D.1/D.2 before D.3.
 
+**Phase D status: complete (2026-04-18).**
+
 ---
 
 ## Appendix A: Decision Log
