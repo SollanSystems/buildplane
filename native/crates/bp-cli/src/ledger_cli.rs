@@ -295,7 +295,7 @@ pub fn run_replay(args: ReplayArgs) -> Result<(), String> {
     let mut count = 0usize;
     let mut printed_lineage_header = false;
 
-    while let Some(step) = engine.next() {
+    for step in engine.by_ref() {
         if !printed_lineage_header && args.format == ReplayFormat::Human {
             if let Some(parent) = &step.state_after.parent_run_id {
                 println!("forked from {}", parent);

@@ -133,7 +133,7 @@ fn find_pre_checkpoint_after(engine: &mut ReplayEngine, unit_id: &str) -> Option
     use bp_ledger::payload::git_checkpoint::CheckpointBoundary;
     use bp_ledger::payload::Payload;
 
-    while let Some(step) = engine.next() {
+    for step in engine.by_ref() {
         if let Payload::GitCheckpointV1(p) = &step.event.payload {
             if p.unit_id == unit_id
                 && matches!(p.boundary, CheckpointBoundary::PreUnit)
@@ -153,7 +153,6 @@ fn nearest_unit_start(step: &bp_replay::engine::ReplayStep, _kind: EventKind) ->
     step.state_after
         .parent_chain
         .iter()
-        .rev()
-        .next()
+        .next_back()
         .map(|id| id.to_string())
 }
