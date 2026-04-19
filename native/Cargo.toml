@@ -4,6 +4,7 @@ members = [
   "crates/bp-cli",
   "crates/bp-config",
   "crates/bp-core",
+  "crates/bp-fork",
   "crates/bp-host-claude",
   "crates/bp-host-registry",
   "crates/bp-host-codex",
@@ -45,6 +46,7 @@ uuid = { version = "1", features = ["v7", "serde"] }
 sha2 = "0.10"
 typeshare = "1"
 
+bp-fork = { path = "crates/bp-fork" }
 bp-ledger = { path = "crates/bp-ledger" }
 bp-ledger-macros = { path = "crates/bp-ledger-macros" }
 bp-replay = { path = "crates/bp-replay" }
