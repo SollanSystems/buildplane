@@ -38,31 +38,67 @@ import type {
 } from "./packet-enrichment.js";
 import { scanWorkflowPreview } from "./workflow-scan.js";
 
-/**
- * Generate a UUIDv7 (time-ordered) string using the current millisecond
- * timestamp in the high bits and random bytes in the low bits. The result
- * sorts lexicographically in insertion order, matching the ledger's own
- * auto-generated IDs so that `ORDER BY id ASC` reflects event ordering.
- */
+// Monotonic UUIDv7 generator for TS-side event ids.
+//
+// Critical: `id` on the ledger's events table is UUIDv7. SQLite sorts events
+// lexicographically by id, which for UUIDv7 matches time order — BUT only if
+// two ids generated in the same ms are ordered by a deterministic counter
+// rather than random tie-break. Otherwise `tool_result` (emitted right after
+// `tool_request`) can sort before it in events.db, breaking replay's
+// parent_chain invariant.
+//
+// This implementation:
+//   - bits 0-47: current ms timestamp
+//   - bits 48-51: version nibble (0x7)
+//   - bits 52-63: 12-bit monotonic counter (resets when ms advances)
+//   - bits 64-65: variant (0b10)
+//   - bits 66-127: 62 random bits
+//
+// If the counter saturates within a single ms (>4096 calls), we bump the ms
+// timestamp by 1 and reset the counter. This is rare in practice but
+// preserves strict monotonicity.
+let lastMs = 0n;
+let subMsCounter = 0;
 function generateUuidV7(): string {
-	const ms = BigInt(Date.now());
-	const rand = randomBytes(10);
-	// UUIDv7 layout: 48-bit ms | ver(4) | 12-bit rand | var(2) | 62-bit rand
-	const hi =
-		(ms << 16n) | 0x7000n | BigInt((rand[0] & 0x0f) << 8) | BigInt(rand[1]);
-	const lo =
-		0x8000_0000_0000_0000n |
-		(BigInt(rand[2] & 0x3f) << 56n) |
-		(BigInt(rand[3]) << 48n) |
-		(BigInt(rand[4]) << 40n) |
-		(BigInt(rand[5]) << 32n) |
-		(BigInt(rand[6]) << 24n) |
-		(BigInt(rand[7]) << 16n) |
-		(BigInt(rand[8]) << 8n) |
-		BigInt(rand[9]);
-	const hex =
-		hi.toString(16).padStart(16, "0") + lo.toString(16).padStart(16, "0");
-	return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+	let nowMs = BigInt(Date.now());
+	if (nowMs <= lastMs) {
+		subMsCounter += 1;
+		if (subMsCounter >= 0x1000) {
+			// Counter saturated within one ms; bump the timestamp and reset.
+			lastMs = lastMs + 1n;
+			nowMs = lastMs;
+			subMsCounter = 0;
+		} else {
+			nowMs = lastMs;
+		}
+	} else {
+		lastMs = nowMs;
+		subMsCounter = 0;
+	}
+
+	// 16-byte UUID: 48-bit timestamp || 4-bit version || 12-bit counter
+	//             || 2-bit variant || 62-bit random
+	const bytes = randomBytes(16);
+
+	// Timestamp (big-endian ms in bytes 0-5)
+	bytes[0] = Number((nowMs >> 40n) & 0xffn);
+	bytes[1] = Number((nowMs >> 32n) & 0xffn);
+	bytes[2] = Number((nowMs >> 24n) & 0xffn);
+	bytes[3] = Number((nowMs >> 16n) & 0xffn);
+	bytes[4] = Number((nowMs >> 8n) & 0xffn);
+	bytes[5] = Number(nowMs & 0xffn);
+
+	// Version nibble (0x7) || high 4 bits of counter
+	bytes[6] = 0x70 | ((subMsCounter >> 8) & 0x0f);
+	// Low 8 bits of counter
+	bytes[7] = subMsCounter & 0xff;
+
+	// Variant (0b10xxxxxx in byte 8)
+	bytes[8] = (bytes[8] & 0x3f) | 0x80;
+
+	// Format as 8-4-4-4-12
+	const hex = bytes.toString("hex");
+	return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
 }
 
 type StructuredMemoryPortLike = NonNullable<
