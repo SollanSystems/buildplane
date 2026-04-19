@@ -1697,6 +1697,7 @@ export async function runCli(
 				const { existsSync: fsExistsSync, realpathSync: fsRealpathSync } =
 					await import("node:fs");
 				const { resolve: pathResolve } = await import("node:path");
+				const originalExecutePacket = commandExecutor.executePacket;
 				commandExecutor.executePacket = (
 					packetUnknown: unknown,
 					executionRoot: string,
@@ -1781,6 +1782,9 @@ export async function runCli(
 								// Cleanup best-effort; the orchestrator result is the authoritative outcome.
 							}
 						}
+						// Restore the original commandExecutor.executePacket so a subsequent
+						// invocation of the orchestrator doesn't inherit this run's closed emitter.
+						commandExecutor.executePacket = originalExecutePacket;
 						// --- end ledger cleanup ---
 					}
 					// asyncResultUnknown is set here: if try threw, finally re-throws and we never reach this line.
@@ -1863,6 +1867,9 @@ export async function runCli(
 								// Cleanup best-effort; the orchestrator result is the authoritative outcome.
 							}
 						}
+						// Restore the original commandExecutor.executePacket so a subsequent
+						// invocation of the orchestrator doesn't inherit this run's closed emitter.
+						commandExecutor.executePacket = originalExecutePacket;
 						// --- end ledger cleanup ---
 					}
 					persistInjectedMemories(
@@ -1922,6 +1929,9 @@ export async function runCli(
 							// Cleanup best-effort; the orchestrator result is the authoritative outcome.
 						}
 					}
+					// Restore the original commandExecutor.executePacket so a subsequent
+					// invocation of the orchestrator doesn't inherit this run's closed emitter.
+					commandExecutor.executePacket = originalExecutePacket;
 					// --- end ledger cleanup ---
 				}
 				// syncResultUnknown is set here: if try threw, finally re-throws and we never arrive.
