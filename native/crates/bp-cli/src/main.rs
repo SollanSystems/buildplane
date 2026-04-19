@@ -68,6 +68,9 @@ fn run() -> Result<(), String> {
         Command::Ledger(ledger_cli::LedgerCommand::Serve(serve_args)) => {
             ledger_cli::run_serve(serve_args)
         }
+        Command::Ledger(ledger_cli::LedgerCommand::Replay(replay_args)) => {
+            ledger_cli::run_replay(replay_args)
+        }
         Command::Ledger(ledger_cli::LedgerCommand::Help) => {
             println!("{}", ledger_cli::usage_text());
             Ok(())
