@@ -931,6 +931,190 @@ function resolveLedgerBinary(cwd: string): string {
 	return resolveNativeBinary(cwd);
 }
 
+// ---------------------------------------------------------------------------
+// buildplane fork — Phase E Task 5
+// ---------------------------------------------------------------------------
+
+interface ForkPlan {
+	new_run_id: string;
+	workspace_path: string;
+	checkout_sha: string;
+	packet_json: unknown;
+	parent_run_id: string;
+	parent_event_id: string;
+}
+
+interface ForkArgs {
+	runId: string;
+	at: string;
+	workspace?: string;
+	packet: string;
+}
+
+function parseForkArgs(
+	rest: string[],
+): { ok: true; value: ForkArgs } | { ok: false; error: string } {
+	let runId: string | undefined;
+	let at: string | undefined;
+	let workspace: string | undefined;
+	let packet: string | undefined;
+	let i = 0;
+	while (i < rest.length) {
+		const arg = rest[i];
+		switch (arg) {
+			case "--run-id":
+				i += 1;
+				runId = rest[i];
+				break;
+			case "--at":
+				i += 1;
+				at = rest[i];
+				break;
+			case "--workspace":
+				i += 1;
+				workspace = rest[i];
+				break;
+			case "--packet":
+				i += 1;
+				packet = rest[i];
+				break;
+			default:
+				if (arg && !runId) {
+					runId = arg;
+				} else {
+					return { ok: false, error: `unknown argument: ${arg}` };
+				}
+		}
+		i += 1;
+	}
+	if (!runId)
+		return {
+			ok: false,
+			error: "missing parent run id (positional or --run-id)",
+		};
+	if (!at) return { ok: false, error: "missing --at <event-id>" };
+	if (!packet) return { ok: false, error: "missing --packet <file>" };
+	return { ok: true, value: { runId, at, workspace, packet } };
+}
+
+function forkUsageText(): string {
+	return `usage: buildplane fork <parent-run-id> --at <event-id> --packet <file> [--workspace <path>]
+
+  --run-id       parent run id (or positional first arg)
+  --at           parent unit_started event id to fork at
+  --packet       path to the new packet json
+  --workspace    workspace root (defaults to cwd)
+`;
+}
+
+async function runForkExecution(
+	plan: ForkPlan,
+	_workspace: string,
+	opts: { stdout: (s: string) => void; stderr: (s: string) => void },
+): Promise<number> {
+	// Phase E Task 6 implements the actual ledger spawn + orchestrator
+	// invocation. Stub for Task 5.
+	void plan;
+	opts.stderr("fork execution not yet wired (Task 6)\n");
+	return 1;
+}
+
+async function runFork(
+	rest: string[],
+	opts: {
+		cwd: string;
+		stdout: (s: string) => void;
+		stderr: (s: string) => void;
+	},
+): Promise<number> {
+	const args = parseForkArgs(rest);
+	if (!args.ok) {
+		opts.stderr(`buildplane fork: ${args.error}\n`);
+		opts.stderr(forkUsageText());
+		return 1;
+	}
+
+	const workspace = resolve(args.value.workspace ?? opts.cwd);
+	const binary = resolveLedgerBinary(opts.cwd);
+
+	// Phase 1: plan.
+	const planArgs = [
+		"fork",
+		"plan",
+		"--run-id",
+		args.value.runId,
+		"--at",
+		args.value.at,
+		"--workspace",
+		workspace,
+		"--packet",
+		args.value.packet,
+	];
+	const planResult = spawnSync(binary, planArgs, { encoding: "utf8" });
+	if (planResult.status !== 0) {
+		opts.stderr(planResult.stderr ?? `fork plan failed\n`);
+		return planResult.status ?? 1;
+	}
+	let plan: ForkPlan;
+	try {
+		plan = JSON.parse(planResult.stdout.trim()) as ForkPlan;
+	} catch (e) {
+		opts.stderr(`fork plan returned invalid JSON: ${String(e)}\n`);
+		return 1;
+	}
+
+	// Phase 2: clean-worktree pre-flight.
+	const statusResult = spawnSync(
+		"git",
+		["-C", workspace, "status", "--porcelain"],
+		{ encoding: "utf8" },
+	);
+	if (statusResult.status !== 0) {
+		opts.stderr(`git status in ${workspace} failed: ${statusResult.stderr}\n`);
+		return 1;
+	}
+	if (statusResult.stdout.trim().length > 0) {
+		opts.stderr(
+			`workspace has uncommitted changes; commit or stash before forking\n`,
+		);
+		return 1;
+	}
+
+	// Phase 3: checkout the pre-unit SHA.
+	const checkoutResult = spawnSync(
+		"git",
+		["-C", workspace, "checkout", plan.checkout_sha],
+		{ encoding: "utf8" },
+	);
+	if (checkoutResult.status !== 0) {
+		opts.stderr(
+			`git checkout ${plan.checkout_sha} failed: ${checkoutResult.stderr}\n`,
+		);
+		return 1;
+	}
+
+	// Phase 4: stub execution for Task 5. Task 6 replaces this with a real
+	// ledger spawn + orchestrator invocation.
+	const exitCode = await runForkExecution(plan, workspace, opts);
+
+	// Phase 5: exit hint.
+	const currentBranchResult = spawnSync(
+		"git",
+		["-C", workspace, "rev-parse", "--abbrev-ref", "HEAD"],
+		{ encoding: "utf8" },
+	);
+	const currentBranch = currentBranchResult.stdout.trim();
+	opts.stdout(
+		`\nHEAD is at fork tree ${plan.checkout_sha.slice(0, 8)}; ` +
+			`run \`git checkout <branch>\` to restore.\n`,
+	);
+	if (currentBranch === "HEAD") {
+		opts.stdout(`(detached HEAD)\n`);
+	}
+
+	return exitCode;
+}
+
 interface LedgerChild {
 	child: ChildProcess;
 	stdin: Writable;
@@ -1209,6 +1393,10 @@ export async function runCli(
 			} catch (error) {
 				throw createNativeDispatchError(["ledger"], error);
 			}
+		}
+
+		if (command === "fork") {
+			return await runFork(rest, { cwd, stdout, stderr });
 		}
 
 		if (command === "pack" && rest[0] === "show") {
