@@ -12,6 +12,8 @@ pub struct ReplayState {
     pub run_id: Option<String>,
     /// Parent run id if this is a fork. None for top-level runs.
     pub parent_run_id: Option<String>,
+    /// Parent event id (unit_started) this fork branched from. None for top-level runs.
+    pub parent_event_id: Option<String>,
     /// Currently-active unit. Set on unit_started; cleared on
     /// unit_completed/unit_failed/unit_cancelled.
     pub current_unit: Option<String>,

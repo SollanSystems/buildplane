@@ -34,6 +34,7 @@ fn write_sample_tape(db_path: &std::path::Path, run_id: RunId) {
             workspace_path: "/ws".into(),
             config: BTreeMap::new(),
             parent_run_id: None,
+            parent_event_id: None,
         }),
     )).unwrap();
     store.append(&event_of(

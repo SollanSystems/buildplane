@@ -297,7 +297,9 @@ pub fn run_replay(args: ReplayArgs) -> Result<(), String> {
 
     for step in engine.by_ref() {
         if !printed_lineage_header && args.format == ReplayFormat::Human {
-            if let Some(parent) = &step.state_after.parent_run_id {
+            if let (Some(parent), Some(event)) = (&step.state_after.parent_run_id, &step.state_after.parent_event_id) {
+                println!("forked from {} at {}", parent, event);
+            } else if let Some(parent) = &step.state_after.parent_run_id {
                 println!("forked from {}", parent);
             }
             printed_lineage_header = true;

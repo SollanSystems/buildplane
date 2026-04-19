@@ -39,6 +39,7 @@ fn events_for_run_returns_in_insert_order() {
             workspace_path: "/tmp/ws".into(),
             config: BTreeMap::new(),
             parent_run_id: None,
+            parent_event_id: None,
         }),
     );
     let unit = build(

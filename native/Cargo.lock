@@ -65,6 +65,7 @@ dependencies = [
 name = "bp-cli"
 version = "0.1.0"
 dependencies = [
+ "bp-fork",
  "bp-ledger",
  "bp-memory",
  "bp-pack-inspection",
@@ -90,6 +91,20 @@ name = "bp-core"
 version = "0.1.0"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "bp-fork"
+version = "0.1.0"
+dependencies = [
+ "bp-ledger",
+ "bp-replay",
+ "chrono",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "uuid",
 ]
 
 [[package]]

@@ -20,6 +20,10 @@ pub struct RunStartedV1 {
     pub config: BTreeMap<String, serde_json::Value>,
     /// Optional parent run id if this run was forked from another.
     pub parent_run_id: Option<RunId>,
+    /// Optional parent event id (unit_started) this fork branched from.
+    /// None for top-level runs and for tapes written before Phase E.
+    #[serde(default)]
+    pub parent_event_id: Option<EventId>,
 }
 
 /// `run_completed` payload.
@@ -61,10 +65,26 @@ mod tests {
             workspace_path: "/tmp/ws".into(),
             config: BTreeMap::new(),
             parent_run_id: None,
+            parent_event_id: None,
         };
         let s = serde_json::to_string(&payload).unwrap();
         let back: RunStartedV1 = serde_json::from_str(&s).unwrap();
         assert_eq!(payload, back);
+    }
+
+    #[test]
+    fn run_started_v1_backward_compat_missing_parent_event_id() {
+        // Old tapes written before Phase E will not have parent_event_id.
+        // Deserialization must succeed and default it to None.
+        let old_json = r#"{
+            "packet_hash": "sha256:abc",
+            "git_head": "deadbeef",
+            "workspace_path": "/tmp/ws",
+            "config": {},
+            "parent_run_id": null
+        }"#;
+        let back: RunStartedV1 = serde_json::from_str(old_json).unwrap();
+        assert_eq!(back.parent_event_id, None);
     }
 
     #[test]

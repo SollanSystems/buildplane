@@ -59,8 +59,16 @@ describe("fork basic", () => {
 			).map((r) => r.kind);
 			expect(forkKinds).toContain("run_started");
 			expect(forkKinds).toContain("run_completed");
+			expect(forkKinds).toContain("unit_started");
 
 			db.close();
+
+			// Verify the fork packet's expected output exists in the workspace.
+			const { existsSync, readFileSync } = await import("node:fs");
+			const { join } = await import("node:path");
+			const forkOutputPath = join(fixture.dir, "fork.txt");
+			expect(existsSync(forkOutputPath)).toBe(true);
+			expect(readFileSync(forkOutputPath, "utf8").trim()).toBe("fork");
 		} finally {
 			await fixture.cleanup();
 		}

@@ -1176,7 +1176,7 @@ async function runForkExecution(
 
 	let exitCode = 1;
 	try {
-		// Emit run_started with parent_run_id for fork lineage.
+		// Emit run_started with parent_run_id and parent_event_id for fork lineage.
 		emitter.emit("run_started", {
 			RunStartedV1: {
 				packet_hash: packetHash,
@@ -1184,6 +1184,7 @@ async function runForkExecution(
 				workspace_path: workspace,
 				config: {},
 				parent_run_id: plan.parent_run_id,
+				parent_event_id: plan.parent_event_id,
 			},
 		});
 
@@ -1207,6 +1208,15 @@ async function runForkExecution(
 	} catch (err) {
 		opts.stderr(`fork orchestrator error: ${String(err)}\n`);
 		exitCode = 1;
+		try {
+			emitter.emit("run_failed", {
+				RunFailedV1: {
+					reason: String(err),
+				},
+			});
+		} catch {
+			// best-effort; original error already logged
+		}
 	} finally {
 		unsubscribeFork();
 		forkCommandExecutor.executePacket = originalForkExecutePacket;

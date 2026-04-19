@@ -39,6 +39,7 @@ fn main() {
             workspace_path: "/ws".into(),
             config: BTreeMap::new(),
             parent_run_id: None,
+            parent_event_id: None,
         })).unwrap(),
 
         serde_json::to_value(Payload::RunCompletedV1(RunCompletedV1 {

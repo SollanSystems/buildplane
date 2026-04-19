@@ -36,6 +36,7 @@ fn run_started_sets_run_id_and_pushes_parent_chain() {
             workspace_path: "/ws".into(),
             config: BTreeMap::new(),
             parent_run_id: None,
+            parent_event_id: None,
         }),
     );
     apply(&mut state, &event);

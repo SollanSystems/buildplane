@@ -4,6 +4,7 @@
 			"config": {},
 			"git_head": "dead",
 			"packet_hash": "sha256:aa",
+			"parent_event_id": null,
 			"parent_run_id": null,
 			"workspace_path": "/ws"
 		}

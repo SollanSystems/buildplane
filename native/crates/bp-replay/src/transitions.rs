@@ -32,6 +32,7 @@ pub fn apply(state: &mut ReplayState, event: &Event) {
 fn apply_run_started(state: &mut ReplayState, event: &Event, p: &RunStartedV1) {
     state.run_id = Some(event.run_id.to_string());
     state.parent_run_id = p.parent_run_id.as_ref().map(|id| id.to_string());
+    state.parent_event_id = p.parent_event_id.as_ref().map(|id| id.to_string());
     state.parent_chain.push(event.id);
 }
 

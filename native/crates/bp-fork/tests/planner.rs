@@ -52,6 +52,7 @@ fn write_parent_tape() -> (TempDir, std::path::PathBuf, RunId, EventId, String) 
             workspace_path: tmp.path().display().to_string(),
             config: BTreeMap::new(),
             parent_run_id: None,
+            parent_event_id: None,
         }),
     )).unwrap();
 
@@ -214,4 +215,52 @@ fn invalid_packet_json_errors() {
         &packet_path,
     ).unwrap_err();
     assert!(matches!(err, PlanError::PacketJson { .. }));
+}
+
+#[test]
+fn missing_pre_unit_checkpoint_errors() {
+    // Write a tape with unit_started but no following git_checkpoint.
+    // The planner must return MissingPreCheckpoint, not panic.
+    let tmp = TempDir::new().unwrap();
+    let db_path = tmp.path().join(".buildplane").join("ledger").join("events.db");
+    std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+    let store = SqliteStore::open(&db_path).unwrap();
+    let run_id = RunId::new();
+
+    let run_start_id = EventId::new();
+    store.append(&event_of(
+        run_start_id, run_id, None, EventKind::RunStarted,
+        Payload::RunStartedV1(RunStartedV1 {
+            packet_hash: "sha256:aa".into(),
+            git_head: "dead".into(),
+            workspace_path: tmp.path().display().to_string(),
+            config: BTreeMap::new(),
+            parent_run_id: None,
+            parent_event_id: None,
+        }),
+    )).unwrap();
+
+    let unit_start_id = EventId::new();
+    store.append(&event_of(
+        unit_start_id, run_id, Some(run_start_id), EventKind::UnitStarted,
+        Payload::UnitStartedV1(UnitStartedV1 {
+            unit_id: "u-corrupt".into(),
+            parent_unit_id: None,
+            unit_kind: "command".into(),
+            policy: serde_json::json!({}),
+        }),
+    )).unwrap();
+
+    // Intentionally NO git_checkpoint — corrupted/partial tape.
+
+    let packet_path = tmp.path().join("p.json");
+    std::fs::write(&packet_path, b"{}").unwrap();
+
+    let err = build_fork_plan(
+        &run_id.to_string(),
+        &unit_start_id.to_string(),
+        tmp.path(),
+        &packet_path,
+    ).unwrap_err();
+    assert!(matches!(err, PlanError::MissingPreCheckpoint { .. }));
 }

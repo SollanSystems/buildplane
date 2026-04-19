@@ -32,6 +32,7 @@ fn write_multistep_tape(db_path: &std::path::Path, run_id: RunId) -> Vec<EventId
             workspace_path: "/ws".into(),
             config: BTreeMap::new(),
             parent_run_id: None,
+            parent_event_id: None,
         }),
     }).unwrap();
 

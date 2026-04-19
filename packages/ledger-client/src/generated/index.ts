@@ -159,6 +159,11 @@ export interface RunStartedV1 {
 	config: BTreeMap<string, Value>;
 	/** Optional parent run id if this run was forked from another. */
 	parent_run_id?: RunId;
+	/**
+	 * Optional parent event id (unit_started) this fork branched from.
+	 * None for top-level runs and for tapes written before Phase E.
+	 */
+	parent_event_id?: EventId;
 }
 
 /**
