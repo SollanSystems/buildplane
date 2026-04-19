@@ -9,6 +9,7 @@ members = [
   "crates/bp-host-codex",
   "crates/bp-host-sdk",
   "crates/bp-ledger",
+  "crates/bp-replay",
   "crates/bp-ledger-macros",
   "crates/bp-memory",
   "crates/bp-pack-inspection",
@@ -46,6 +47,7 @@ typeshare = "1"
 
 bp-ledger = { path = "crates/bp-ledger" }
 bp-ledger-macros = { path = "crates/bp-ledger-macros" }
+bp-replay = { path = "crates/bp-replay" }
 
 bp-config = { path = "crates/bp-config" }
 bp-core = { path = "crates/bp-core" }
