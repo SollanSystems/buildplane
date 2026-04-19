@@ -1,6 +1,6 @@
 import type { ChildProcess } from "node:child_process";
 import { spawn, spawnSync } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import type { Readable, Writable } from "node:stream";
@@ -1009,14 +1009,216 @@ function forkUsageText(): string {
 
 async function runForkExecution(
 	plan: ForkPlan,
-	_workspace: string,
+	workspace: string,
 	opts: { stdout: (s: string) => void; stderr: (s: string) => void },
 ): Promise<number> {
-	// Phase E Task 6 implements the actual ledger spawn + orchestrator
-	// invocation. Stub for Task 5.
-	void plan;
-	opts.stderr("fork execution not yet wired (Task 6)\n");
-	return 1;
+	// Phase E Task 6: real ledger spawn + orchestrator invocation.
+	//
+	// NOTE: This duplicates the ledger-integration block from the `run` command
+	// handler rather than extracting a shared helper, because that block is
+	// tightly coupled to the `case "run"` closure locals (enrichedPacket,
+	// cliEventBus, commandExecutor, etc.). A full extraction is tracked for
+	// Phase F consolidation.
+	const binary = resolveLedgerBinary(workspace);
+	const ledgerChild = spawnLedgerSubprocess(binary, plan.new_run_id, workspace);
+
+	let emitter: TapeEmitter;
+	try {
+		emitter = await createTapeEmitter({
+			childStdin: ledgerChild.stdin,
+			childStderr: ledgerChild.stderr,
+			childExit: ledgerChild.exit,
+			workspacePath: workspace,
+			runId: plan.new_run_id,
+		});
+	} catch (err) {
+		// Handshake failed — kill child and surface the error.
+		if (ledgerChild.child.exitCode === null) {
+			ledgerChild.child.kill("SIGTERM");
+		}
+		opts.stderr(`fork ledger handshake failed: ${String(err)}\n`);
+		return 1;
+	}
+
+	// Load a fresh orchestrator bundle scoped to the fork workspace.
+	const bundle = await loadCliOrchestrator(workspace);
+	const {
+		orchestrator: forkOrchestrator,
+		eventBus: forkEventBus,
+		commandExecutor: forkCommandExecutor,
+	} = bundle;
+
+	// Unit-context tracker for tool-event wiring.
+	let forkCurrentUnit: { unitId: string; parentEventId: string } | null = null;
+	const getForkUnitCtx = () => forkCurrentUnit;
+
+	// Wire bus subscription for unit-boundary events (mirrors run command handler).
+	const workspacePath = resolve(workspace);
+	const unsubscribeFork = forkEventBus.subscribe((evt: unknown) => {
+		const e = evt as { kind?: string; unitId?: string; exitCode?: number };
+		switch (e.kind) {
+			case "execution-started": {
+				const unitId = e.unitId ?? "unknown";
+				const unitStartedId = generateUuidV7();
+				emitter.emit(
+					"unit_started",
+					{
+						UnitStartedV1: {
+							unit_id: unitId,
+							parent_unit_id: null,
+							unit_kind: "command",
+							policy: {},
+						},
+					},
+					{ id: unitStartedId },
+				);
+				forkCurrentUnit = { unitId, parentEventId: unitStartedId };
+				runGitCheckpoint({
+					boundary: "pre-unit",
+					runId: plan.new_run_id,
+					unitId,
+					cwd: workspacePath,
+					emitter,
+					parentEventId: unitStartedId,
+				});
+				break;
+			}
+			case "command-execution-complete": {
+				if (forkCurrentUnit) {
+					runGitCheckpoint({
+						boundary: "post-unit",
+						runId: plan.new_run_id,
+						unitId: forkCurrentUnit.unitId,
+						cwd: workspacePath,
+						emitter,
+						parentEventId: forkCurrentUnit.parentEventId,
+					});
+					const outcome = e.exitCode === 0 ? "passed" : "failed";
+					emitter.emit(
+						"unit_completed",
+						{
+							UnitCompletedV1: {
+								unit_id: forkCurrentUnit.unitId,
+								outcome,
+								artifacts: [],
+							},
+						},
+						{ parent: forkCurrentUnit.parentEventId },
+					);
+					forkCurrentUnit = null;
+				}
+				break;
+			}
+			default:
+				break;
+		}
+	});
+
+	// Wrap the commandExecutor so tool calls are instrumented through the ledger.
+	const { existsSync: fsExistsSync, realpathSync: fsRealpathSync } =
+		await import("node:fs");
+	const { resolve: pathResolve } = await import("node:path");
+	const originalForkExecutePacket = forkCommandExecutor.executePacket;
+	forkCommandExecutor.executePacket = (
+		packetUnknown: unknown,
+		executionRoot: string,
+	): unknown => {
+		const p = packetUnknown as {
+			execution: { command: string; args?: readonly string[]; cwd?: string };
+			verification: { requiredOutputs: readonly string[] };
+		};
+		const worktreeRoot = pathResolve(executionRoot);
+		const perCallRawRegistry = createToolRegistry(worktreeRoot);
+		const perCallRegistry = wrapToolRegistryForLedger(
+			perCallRawRegistry,
+			emitter,
+			getForkUnitCtx,
+		);
+		const effectiveCwd = p.execution.cwd
+			? pathResolve(worktreeRoot, p.execution.cwd)
+			: worktreeRoot;
+		const startedAt = new Date().toISOString();
+		const result = perCallRegistry.run_command({
+			command: p.execution.command,
+			args: p.execution.args,
+			cwd: p.execution.cwd,
+		});
+		const completedAt = new Date().toISOString();
+		return {
+			command: p.execution.command,
+			args: [...(p.execution.args ?? [])],
+			cwd: effectiveCwd,
+			startedAt,
+			completedAt,
+			exitCode: result.exitCode,
+			stdout: result.stdout,
+			stderr: result.stderr,
+			outputChecks: p.verification.requiredOutputs.map((outputPath: string) => {
+				const realRoot = (() => {
+					try {
+						return fsRealpathSync(worktreeRoot);
+					} catch {
+						return worktreeRoot;
+					}
+				})();
+				return {
+					path: outputPath,
+					exists: fsExistsSync(pathResolve(realRoot, outputPath)),
+				};
+			}),
+		};
+	};
+
+	const packetHash = `sha256:${createHash("sha256")
+		.update(JSON.stringify(plan.packet_json))
+		.digest("hex")}`;
+	const runStartMs = Date.now();
+
+	let exitCode = 1;
+	try {
+		// Emit run_started with parent_run_id for fork lineage.
+		emitter.emit("run_started", {
+			RunStartedV1: {
+				packet_hash: packetHash,
+				git_head: plan.checkout_sha,
+				workspace_path: workspace,
+				config: {},
+				parent_run_id: plan.parent_run_id,
+			},
+		});
+
+		// Invoke the orchestrator with the fork packet.
+		const orchResult = forkOrchestrator.runPacket(
+			plan.packet_json as never,
+			forkEventBus,
+		);
+		const status = (orchResult as { run?: { status?: string } }).run?.status;
+		exitCode = status === "passed" ? 0 : 1;
+
+		// Emit run_completed.
+		emitter.emit("run_completed", {
+			RunCompletedV1: {
+				outcome: exitCode === 0 ? "passed" : "failed",
+				duration_ms: Date.now() - runStartMs,
+				event_count: 0,
+				unit_count: 1,
+			},
+		});
+	} catch (err) {
+		opts.stderr(`fork orchestrator error: ${String(err)}\n`);
+		exitCode = 1;
+	} finally {
+		unsubscribeFork();
+		forkCommandExecutor.executePacket = originalForkExecutePacket;
+		try {
+			await emitter.close();
+		} catch {
+			// Best-effort close; the orchestrator result is authoritative.
+		}
+	}
+
+	opts.stdout(`fork run completed: ${plan.new_run_id} (exit ${exitCode})\n`);
+	return exitCode;
 }
 
 async function runFork(
