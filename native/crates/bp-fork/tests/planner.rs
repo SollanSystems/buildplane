@@ -135,3 +135,83 @@ fn happy_path_returns_fork_plan() {
     assert!(!plan.new_run_id.is_empty());
     assert!(plan.packet_json.get("unit").is_some());
 }
+
+#[test]
+fn target_run_started_errors_with_fork_at_root() {
+    let (tmp, _db_path, run_id, _unit_start_id, _pre_sha) = write_parent_tape();
+    // Find run_started event id.
+    use bp_ledger::storage::sqlite::SqliteStore;
+    let db_path = tmp.path().join(".buildplane").join("ledger").join("events.db");
+    let store = SqliteStore::open(&db_path).unwrap();
+    let rows = store.events_for_run(&run_id.to_string()).unwrap();
+    let run_start_id = &rows[0].id;
+
+    let packet_path = tmp.path().join("p.json");
+    std::fs::write(&packet_path, b"{}").unwrap();
+
+    let err = build_fork_plan(&run_id.to_string(), run_start_id, tmp.path(), &packet_path).unwrap_err();
+    assert!(matches!(err, PlanError::ForkAtRoot));
+}
+
+#[test]
+fn target_non_unit_event_errors_with_suggestion() {
+    let (tmp, _db_path, run_id, _unit_start_id, _pre_sha) = write_parent_tape();
+    use bp_ledger::storage::sqlite::SqliteStore;
+    let db_path = tmp.path().join(".buildplane").join("ledger").join("events.db");
+    let store = SqliteStore::open(&db_path).unwrap();
+    let rows = store.events_for_run(&run_id.to_string()).unwrap();
+    // Pick an event that is NOT unit_started or run_started — use the
+    // post-unit git_checkpoint row.
+    let target = rows
+        .iter()
+        .find(|r| r.kind == "git_checkpoint")
+        .expect("at least one git_checkpoint in fixture")
+        .id
+        .clone();
+
+    let packet_path = tmp.path().join("p.json");
+    std::fs::write(&packet_path, b"{}").unwrap();
+
+    let err = build_fork_plan(&run_id.to_string(), &target, tmp.path(), &packet_path).unwrap_err();
+    assert!(matches!(err, PlanError::TargetNotUnitStarted { .. }));
+}
+
+#[test]
+fn nonexistent_event_errors() {
+    let (tmp, _db_path, run_id, _unit_start_id, _pre_sha) = write_parent_tape();
+    let bogus = "01919000-0000-7000-8000-ffffffffffff";
+    let packet_path = tmp.path().join("p.json");
+    std::fs::write(&packet_path, b"{}").unwrap();
+
+    let err = build_fork_plan(&run_id.to_string(), bogus, tmp.path(), &packet_path).unwrap_err();
+    assert!(matches!(err, PlanError::EventNotFound { .. }));
+}
+
+#[test]
+fn missing_packet_file_errors() {
+    let (tmp, _db_path, run_id, unit_start_id, _pre_sha) = write_parent_tape();
+    let missing = tmp.path().join("no-such-file.json");
+
+    let err = build_fork_plan(
+        &run_id.to_string(),
+        &unit_start_id.to_string(),
+        tmp.path(),
+        &missing,
+    ).unwrap_err();
+    assert!(matches!(err, PlanError::PacketIo { .. }));
+}
+
+#[test]
+fn invalid_packet_json_errors() {
+    let (tmp, _db_path, run_id, unit_start_id, _pre_sha) = write_parent_tape();
+    let packet_path = tmp.path().join("bad.json");
+    std::fs::write(&packet_path, b"not json").unwrap();
+
+    let err = build_fork_plan(
+        &run_id.to_string(),
+        &unit_start_id.to_string(),
+        tmp.path(),
+        &packet_path,
+    ).unwrap_err();
+    assert!(matches!(err, PlanError::PacketJson { .. }));
+}
