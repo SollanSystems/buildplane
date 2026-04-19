@@ -10,6 +10,8 @@ use std::collections::BTreeMap;
 pub struct ReplayState {
     /// Run id. Set on first run_started event.
     pub run_id: Option<String>,
+    /// Parent run id if this is a fork. None for top-level runs.
+    pub parent_run_id: Option<String>,
     /// Currently-active unit. Set on unit_started; cleared on
     /// unit_completed/unit_failed/unit_cancelled.
     pub current_unit: Option<String>,

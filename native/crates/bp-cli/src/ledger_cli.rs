@@ -293,7 +293,15 @@ pub fn run_replay(args: ReplayArgs) -> Result<(), String> {
     }
 
     let mut count = 0usize;
-    for step in engine.by_ref() {
+    let mut printed_lineage_header = false;
+
+    while let Some(step) = engine.next() {
+        if !printed_lineage_header && args.format == ReplayFormat::Human {
+            if let Some(parent) = &step.state_after.parent_run_id {
+                println!("forked from {}", parent);
+            }
+            printed_lineage_header = true;
+        }
         emit_step(&step, args.format)?;
         count += 1;
         if let Some(limit) = args.limit {
