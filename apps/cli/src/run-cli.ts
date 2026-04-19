@@ -1162,6 +1162,19 @@ export async function runCli(
 			}
 		}
 
+		if (command === "ledger") {
+			try {
+				return await (deps?.runNativeCommand ?? runNativeCommand)(rest, {
+					cwd,
+					commandPath: ["ledger"],
+					stdout,
+					stderr,
+				});
+			} catch (error) {
+				throw createNativeDispatchError(["ledger"], error);
+			}
+		}
+
 		if (command === "pack" && rest[0] === "show") {
 			try {
 				return await (deps?.runNativeCommand ?? runNativeCommand)(
