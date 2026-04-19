@@ -33,18 +33,8 @@ impl ReplayEngine {
         Ok(Self { events, cursor: 0, state: ReplayState::default() })
     }
 
-    pub fn next(&mut self) -> Option<ReplayStep> {
-        if self.cursor >= self.events.len() {
-            return None;
-        }
-        let event = self.events[self.cursor].clone();
-        self.cursor += 1;
-        transitions::apply(&mut self.state, &event);
-        Some(ReplayStep { event, state_after: self.state.clone() })
-    }
-
     pub fn fast_forward_to(&mut self, target: EventId) -> Option<ReplayStep> {
-        while let Some(step) = self.next() {
+        for step in self.by_ref() {
             if step.event.id == target {
                 return Some(step);
             }
@@ -61,5 +51,19 @@ impl ReplayEngine {
 
     pub fn total_events(&self) -> usize {
         self.events.len()
+    }
+}
+
+impl Iterator for ReplayEngine {
+    type Item = ReplayStep;
+
+    fn next(&mut self) -> Option<ReplayStep> {
+        if self.cursor >= self.events.len() {
+            return None;
+        }
+        let event = self.events[self.cursor].clone();
+        self.cursor += 1;
+        transitions::apply(&mut self.state, &event);
+        Some(ReplayStep { event, state_after: self.state.clone() })
     }
 }
