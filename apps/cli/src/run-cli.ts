@@ -1240,6 +1240,11 @@ async function runFork(
 	const binary = resolveLedgerBinary(opts.cwd);
 
 	// Phase 1: plan.
+	// NOTE: spawnSync for `fork plan` must run from the project root (not from the
+	// workspace temp dir) so that the native binary can resolve its native workspace
+	// (Cargo.toml + packs/) via ancestor-walk. Use the same deriveLedgerSpawnCwd
+	// logic that spawnLedgerSubprocess uses.
+	const planSpawnCwd = deriveLedgerSpawnCwd(binary, opts.cwd);
 	const planArgs = [
 		"fork",
 		"plan",
@@ -1252,7 +1257,10 @@ async function runFork(
 		"--packet",
 		args.value.packet,
 	];
-	const planResult = spawnSync(binary, planArgs, { encoding: "utf8" });
+	const planResult = spawnSync(binary, planArgs, {
+		encoding: "utf8",
+		cwd: planSpawnCwd,
+	});
 	if (planResult.status !== 0) {
 		opts.stderr(planResult.stderr ?? `fork plan failed\n`);
 		return planResult.status ?? 1;
@@ -1266,6 +1274,9 @@ async function runFork(
 	}
 
 	// Phase 2: clean-worktree pre-flight.
+	// Filter out SQLite WAL companion files (*.db-shm, *.db-wal) — these are
+	// created transiently when fork plan opens events.db for replay and do not
+	// represent user changes. Everything else must be committed.
 	const statusResult = spawnSync(
 		"git",
 		["-C", workspace, "status", "--porcelain"],
@@ -1275,7 +1286,11 @@ async function runFork(
 		opts.stderr(`git status in ${workspace} failed: ${statusResult.stderr}\n`);
 		return 1;
 	}
-	if (statusResult.stdout.trim().length > 0) {
+	const dirtyLines = statusResult.stdout
+		.split("\n")
+		.filter((line) => line.trim().length > 0)
+		.filter((line) => !line.match(/\.db-shm$|\.db-wal$/u));
+	if (dirtyLines.length > 0) {
 		opts.stderr(
 			`workspace has uncommitted changes; commit or stash before forking\n`,
 		);

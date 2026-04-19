@@ -230,3 +230,155 @@ export async function makeBuildplaneRunFixture(opts: {
 
 	return { dir, eventsDbPath, exitCode, cleanup };
 }
+
+export interface ForkFixtureInputs {
+	parentPacket: unknown;
+	forkPacket: unknown;
+	forkTargetKindHint?:
+		| "unit_started"
+		| "git_checkpoint"
+		| "run_started"
+		| "tool_request";
+}
+
+export interface ForkFixtureResult {
+	dir: string;
+	eventsDbPath: string;
+	parentRunId: string;
+	forkRunId: string;
+	forkExitCode: number;
+	cleanup: () => Promise<void>;
+}
+
+/** Run the parent packet, then fork at the first unit_started event
+ * with the provided fork packet. Returns both run_ids and the events.db
+ * path (both runs share the same file).
+ */
+export async function makeForkFixture(
+	opts: ForkFixtureInputs,
+): Promise<ForkFixtureResult> {
+	const parent = await makeBuildplaneRunFixture({ packet: opts.parentPacket });
+	const dir = parent.dir;
+	const eventsDbPath = parent.eventsDbPath;
+
+	// Read parent run_id + target event_id from events.db.
+	const { DatabaseSync } = await import("node:sqlite");
+	const db = new DatabaseSync(eventsDbPath);
+	const parentRunId = (
+		db.prepare("SELECT DISTINCT run_id FROM events LIMIT 1").get() as {
+			run_id: string;
+		}
+	).run_id;
+	const targetKind = opts.forkTargetKindHint ?? "unit_started";
+	const targetRow = db
+		.prepare("SELECT id FROM events WHERE kind = ? ORDER BY id ASC LIMIT 1")
+		.get(targetKind) as { id: string } | undefined;
+	db.close();
+	if (!targetRow) {
+		throw new Error(`fixture: no ${targetKind} event found in parent tape`);
+	}
+	const targetId = targetRow.id;
+
+	// The fork command requires a clean working tree. After makeBuildplaneRunFixture
+	// runs the packet, the workspace has modified/untracked files (ledger db, artifacts).
+	// Commit them so the pre-flight git status check passes.
+	const runGitForFork = (args: string[]) => {
+		const r = spawnSync("git", args, { cwd: dir, encoding: "utf8" });
+		if (r.status !== 0) {
+			throw new Error(`git ${args.join(" ")} failed: ${r.stderr}`);
+		}
+	};
+	runGitForFork(["add", "-A"]);
+	runGitForFork(["commit", "-q", "-m", "buildplane: post-run state"]);
+
+	// Write fork packet.
+	const { writeFileSync } = await import("node:fs");
+	const { join } = await import("node:path");
+	const forkPacketPath = join(dir, "fork-packet.json");
+	writeFileSync(forkPacketPath, JSON.stringify(opts.forkPacket, null, 2));
+	runGitForFork(["add", "fork-packet.json"]);
+	runGitForFork(["commit", "-q", "-m", "buildplane: add fork packet"]);
+
+	// Invoke runCli({ args: ["fork", parentRunId, "--at", targetId, ...] }).
+	const { runCli } = (await import(
+		"../../apps/cli/src/run-cli.js"
+	)) as unknown as {
+		runCli: (
+			argv: string[],
+			options: {
+				cwd: string;
+				stdout: (s: string) => void;
+				stderr: (s: string) => void;
+			},
+		) => Promise<number>;
+	};
+
+	// Resolve the native binary before chdir so we can inject BUILDPLANE_NATIVE_BIN.
+	// makeBuildplaneRunFixture restores the env var after its finally block, so we
+	// must re-inject it here. Use the same resolution chain as makeBuildplaneRunFixture.
+	const repoRoot = process.cwd();
+	const nativeBinary =
+		process.env.BUILDPLANE_NATIVE_BIN ??
+		(existsSync(
+			join(repoRoot, "native", "target", "debug", "buildplane-native"),
+		)
+			? join(repoRoot, "native", "target", "debug", "buildplane-native")
+			: existsSync(
+						join(repoRoot, "native", "target", "release", "buildplane-native"),
+					)
+				? join(repoRoot, "native", "target", "release", "buildplane-native")
+				: "buildplane-native");
+
+	const originalCwd = process.cwd();
+	const originalNativeBin = process.env.BUILDPLANE_NATIVE_BIN;
+	let forkExitCode = 1;
+	try {
+		process.chdir(dir);
+		process.env.BUILDPLANE_NATIVE_BIN = nativeBinary;
+		forkExitCode = await runCli(
+			[
+				"fork",
+				parentRunId,
+				"--at",
+				targetId,
+				"--packet",
+				forkPacketPath,
+				"--workspace",
+				dir,
+			],
+			{
+				cwd: dir,
+				stdout: () => {},
+				stderr: () => {},
+			},
+		);
+	} finally {
+		process.chdir(originalCwd);
+		if (originalNativeBin === undefined) {
+			delete process.env.BUILDPLANE_NATIVE_BIN;
+		} else {
+			process.env.BUILDPLANE_NATIVE_BIN = originalNativeBin;
+		}
+	}
+
+	// Read fork run_id — whichever run_id in events.db has parent_run_id == parentRunId.
+	const db2 = new DatabaseSync(eventsDbPath);
+	const forkRow = db2
+		.prepare(
+			"SELECT run_id FROM events WHERE kind = 'run_started' " +
+				"AND json_extract(payload, '$.RunStartedV1.parent_run_id') = ? LIMIT 1",
+		)
+		.get(parentRunId) as { run_id: string } | undefined;
+	db2.close();
+
+	const forkRunId = forkRow?.run_id ?? "";
+
+	return {
+		dir,
+		eventsDbPath,
+		parentRunId,
+		forkRunId,
+		forkExitCode,
+		cleanup: parent.cleanup,
+	};
+}
