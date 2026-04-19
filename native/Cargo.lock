@@ -69,11 +69,13 @@ dependencies = [
  "bp-memory",
  "bp-pack-inspection",
  "bp-pack-loader",
+ "bp-replay",
  "bp-storage-sqlite",
  "bp-ui-terminal",
  "futures",
  "serde",
  "serde_json",
+ "uuid",
 ]
 
 [[package]]
@@ -217,6 +219,20 @@ dependencies = [
  "async-trait",
  "serde",
  "thiserror",
+]
+
+[[package]]
+name = "bp-replay"
+version = "0.1.0"
+dependencies = [
+ "bp-ledger",
+ "chrono",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "uuid",
 ]
 
 [[package]]
