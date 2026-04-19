@@ -40,7 +40,7 @@ const noopBus: EventBus = {
 
 export interface BuildplaneOrchestrator {
 	initializeProject(): ReturnType<BuildplaneStoragePort["initializeProject"]>;
-	runPacket(packet: UnitPacket): RunPacketResult;
+	runPacket(packet: UnitPacket, eventBus?: EventBus): RunPacketResult;
 	runPacketAsync(
 		packet: UnitPacket,
 		eventBus?: EventBus,
@@ -568,10 +568,18 @@ export function createBuildplaneOrchestrator(
 		initializeProject() {
 			return storage.initializeProject();
 		},
-		runPacket(packet) {
+		runPacket(packet, eventBus?) {
+			const bus = eventBus ?? defaultBus;
 			const prepared = prepareRun(packet);
 			if (!prepared.ok) return prepared.result;
 			const { ctx } = prepared;
+
+			bus.emit({
+				kind: "execution-started",
+				runId: ctx.run.id,
+				timestamp: new Date().toISOString(),
+				executionType: "command",
+			});
 
 			let receipt: ExecutionReceipt;
 			try {
@@ -589,6 +597,17 @@ export function createBuildplaneOrchestrator(
 					workspaceStatus: "retained",
 				});
 			}
+
+			bus.emit({
+				kind: "command-execution-complete",
+				runId: ctx.run.id,
+				timestamp: new Date().toISOString(),
+				exitCode: receipt.exitCode,
+				outputChecks: receipt.outputChecks.map((c) => ({
+					path: c.path,
+					exists: c.exists,
+				})),
+			});
 
 			return finalizeRun(ctx, receipt);
 		},

@@ -1,5 +1,6 @@
 import type { ChildProcess } from "node:child_process";
 import { spawn, spawnSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import type { Readable, Writable } from "node:stream";
@@ -36,6 +37,33 @@ import type {
 	preparePacketMemoryEnrichment,
 } from "./packet-enrichment.js";
 import { scanWorkflowPreview } from "./workflow-scan.js";
+
+/**
+ * Generate a UUIDv7 (time-ordered) string using the current millisecond
+ * timestamp in the high bits and random bytes in the low bits. The result
+ * sorts lexicographically in insertion order, matching the ledger's own
+ * auto-generated IDs so that `ORDER BY id ASC` reflects event ordering.
+ */
+function generateUuidV7(): string {
+	const ms = BigInt(Date.now());
+	const rand = randomBytes(10);
+	// UUIDv7 layout: 48-bit ms | ver(4) | 12-bit rand | var(2) | 62-bit rand
+	const hi =
+		(ms << 16n) | 0x7000n | BigInt((rand[0] & 0x0f) << 8) | BigInt(rand[1]);
+	const lo =
+		0x8000_0000_0000_0000n |
+		(BigInt(rand[2] & 0x3f) << 56n) |
+		(BigInt(rand[3]) << 48n) |
+		(BigInt(rand[4]) << 40n) |
+		(BigInt(rand[5]) << 32n) |
+		(BigInt(rand[6]) << 24n) |
+		(BigInt(rand[7]) << 16n) |
+		(BigInt(rand[8]) << 8n) |
+		BigInt(rand[9]);
+	const hex =
+		hi.toString(16).padStart(16, "0") + lo.toString(16).padStart(16, "0");
+	return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
 
 type StructuredMemoryPortLike = NonNullable<
 	Parameters<typeof preparePacketMemoryEnrichment>[4]
@@ -291,7 +319,10 @@ interface BuildplaneCliOrchestrator {
 		projectRoot: string;
 		stateDbPath: string;
 	};
-	runPacket(packet: unknown): {
+	runPacket(
+		packet: unknown,
+		eventBus?: unknown,
+	): {
 		run: { id: string; status: string };
 		receipt: unknown;
 		decision: unknown;
@@ -1517,7 +1548,7 @@ export async function runCli(
 									// Unit-level start. Emit unit_started, run pre-unit checkpoint,
 									// update currentUnit.
 									const unitId = e.unitId ?? "unknown";
-									const unitStartedId = randomUUID();
+									const unitStartedId = generateUuidV7();
 									ledgerEmitter.emit(
 										"unit_started",
 										{
@@ -1732,7 +1763,7 @@ export async function runCli(
 					syncResultUnknown = withPersistedInjectedMemories(
 						useAsync
 							? await orchestrator.runPacketAsync(enrichedPacket, undefined)
-							: orchestrator.runPacket(enrichedPacket),
+							: orchestrator.runPacket(enrichedPacket, cliEventBus),
 						structuredMemoryPort,
 						preparedPacket.injectedMemories,
 					);

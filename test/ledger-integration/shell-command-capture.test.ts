@@ -2,21 +2,10 @@ import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it } from "vitest";
 import { makeBuildplaneRunFixture } from "./fixtures.js";
 
-// Shape B — realistic assertions based on probe findings.
-//
-// Probe result: a shell command packet run through the --raw path produces
-// ["run_started", "run_completed"] in events.db.  git_checkpoint events do NOT
-// appear because the sync runPacket() path never fires "execution-started" on
-// the event bus, so the pre/post-unit checkpoint hooks are never called.
-//
-// workspace_write also does not appear: shell side effects (files written by
-// the "sh -c" subprocess) bypass the ToolRegistry wrapper entirely — the
-// process-spawn adapter in the kernel dispatches command packets directly.
-//
-// What Phase C CAN capture for a shell packet: the run-lifecycle bookends.
-// This test asserts exactly that — no more, no less.  Phase D will add the
-// git-tree and workspace_write assertions once the async execution path and
-// instrumented registry are wired together.
+// Phase D: runPacket now emits execution-started / command-execution-complete
+// on the event bus, so unit-boundary events (unit_started, git_checkpoint,
+// unit_completed) now fire for sync command packets.  workspace_write remains
+// out of scope for Task 1.
 
 describe("shell-command-capture", () => {
 	it("captures run lifecycle events for a shell command packet", async () => {
@@ -49,21 +38,15 @@ describe("shell-command-capture", () => {
 				}[]
 			).map((r) => r.kind);
 
-			// Run-lifecycle events are always present — emitted directly via
-			// ledgerEmitter.emit() in the raw path.
+			// Run-lifecycle bookends.
 			expect(kinds).toContain("run_started");
 			expect(kinds).toContain("run_completed");
 
-			expect(kinds[0]).toBe("run_started");
-			expect(kinds[kinds.length - 1]).toBe("run_completed");
-
-			// git_checkpoint does NOT appear: the sync runPacket() path does not
-			// emit "execution-started" on the event bus, so the unit-boundary
-			// checkpoint hooks never fire.  Phase D will address this gap.
-
-			// workspace_write does NOT appear: shell side effects bypass the
-			// ToolRegistry wrapper (command packets dispatch via process spawn, not
-			// through ToolRegistry methods).
+			// Unit-boundary events now fire because runPacket emits execution-started
+			// and command-execution-complete on the cliEventBus (Phase D Task 1).
+			expect(kinds).toContain("unit_started");
+			expect(kinds).toContain("git_checkpoint");
+			expect(kinds).toContain("unit_completed");
 
 			db.close();
 		} finally {

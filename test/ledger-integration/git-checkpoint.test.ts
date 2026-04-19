@@ -3,29 +3,12 @@ import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it, test } from "vitest";
 import { makeBuildplaneRunFixture } from "./fixtures.js";
 
-// Probe finding: git_checkpoint events do NOT appear in events.db for sync
-// command packets.  The unit-boundary checkpoint hooks (runGitCheckpoint) are
-// wired to the "execution-started" and "command-execution-complete" events on
-// the CLI event bus.  Those events are only emitted by runPacketAsync(), which
-// is not called for command packets in the --raw sync path.
-//
-// As a result, the ideal assertions (refs/buildplane/run/<id>, pre-unit /
-// post-unit boundaries, HEAD isolation) cannot be verified end-to-end in
-// Phase C.  The runGitCheckpoint unit tests in ledger-git-checkpoint.test.ts
-// cover the plumbing in isolation.
-//
-// This test:
-//   1. Verifies that the run completes without error (smoke test that the
-//      checkpoint code path does not crash when the event bus is wired up,
-//      even if it never fires).
-//   2. Confirms no git_checkpoint events appear — documents the gap explicitly
-//      so a future maintainer will notice if Phase D ships the fix and this
-//      assertion starts failing.
-//   3. Uses test.skip to mark the ideal assertions that will become valid once
-//      runPacketAsync is used for command packets.
+// Phase D: runPacket now emits execution-started / command-execution-complete
+// on the cliEventBus, so the unit-boundary checkpoint hooks fire for sync
+// command packets.  git_checkpoint events now appear in events.db.
 
 describe("git-checkpoint", () => {
-	it("run completes cleanly without git_checkpoint events in Phase C sync path", async () => {
+	it("produces git_checkpoint events for a sync command packet", async () => {
 		const fixture = await makeBuildplaneRunFixture({
 			packet: {
 				unit: {
@@ -46,7 +29,6 @@ describe("git-checkpoint", () => {
 		});
 
 		try {
-			// Run must succeed — the absence of checkpoints is a gap, not a failure.
 			expect(fixture.exitCode).toBe(0);
 
 			const db = new DatabaseSync(fixture.eventsDbPath);
@@ -56,18 +38,14 @@ describe("git-checkpoint", () => {
 				}[]
 			).map((r) => r.kind);
 
-			// Phase C sync path: only run-lifecycle bookends.
+			// Run-lifecycle bookends.
 			expect(kinds).toContain("run_started");
 			expect(kinds).toContain("run_completed");
 
-			// git_checkpoint does NOT appear — document the gap explicitly.
-			// When Phase D wires runPacketAsync into the --raw command path,
-			// this assertion should be removed and the skipped tests below
-			// should be unskipped.
-			const checkpointCount = kinds.filter(
-				(k) => k === "git_checkpoint",
-			).length;
-			expect(checkpointCount).toBe(0);
+			// Unit-boundary events now fire (Phase D Task 1).
+			expect(kinds).toContain("unit_started");
+			expect(kinds).toContain("git_checkpoint");
+			expect(kinds).toContain("unit_completed");
 
 			db.close();
 		} finally {
@@ -75,13 +53,7 @@ describe("git-checkpoint", () => {
 		}
 	}, 30_000);
 
-	// --- Phase D assertions (skipped until runPacketAsync is used for command packets) ---
-	//
-	// These tests encode the desired behaviour once the async execution path is
-	// wired up.  They are marked skip rather than deleted so the spec is not
-	// lost and the failure mode is immediately visible when the gap is closed.
-
-	test.skip("[Phase D] produces a ref chain on refs/buildplane/run/<runId> without touching HEAD", async () => {
+	test("[Phase D] produces a ref chain on refs/buildplane/run/<runId> without touching HEAD", async () => {
 		const fixture = await makeBuildplaneRunFixture({
 			packet: {
 				unit: {
