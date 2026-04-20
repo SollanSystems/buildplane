@@ -11,6 +11,7 @@
 	"references": [
 		{ "path": "../../packages/kernel" },
 		{ "path": "../../packages/storage" },
+		{ "path": "../../packages/ledger-client" },
 		{ "path": "../../packages/runtime" },
 		{ "path": "../../packages/policy" },
 		{ "path": "../../packages/adapters-git" },
