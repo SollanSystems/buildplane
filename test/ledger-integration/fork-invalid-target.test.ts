@@ -1,8 +1,11 @@
-import { existsSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it } from "vitest";
-import { makeBuildplaneRunFixture } from "./fixtures.js";
+import {
+	makeBuildplaneRunFixture,
+	resolveNativeBinaryForLedgerTests,
+} from "./fixtures.js";
 
 async function runForkCli(
 	args: string[],
@@ -25,31 +28,7 @@ async function runForkCli(
 	const originalNativeBin = process.env.BUILDPLANE_NATIVE_BIN;
 	let exitCode = 1;
 	try {
-		// Inject the native binary path so the fork plan spawnSync can find it
-		// even when cwd is a temp dir (not the repo root).
-		const nativeBinary =
-			process.env.BUILDPLANE_NATIVE_BIN ??
-			(existsSync(
-				join(originalCwd, "native", "target", "debug", "buildplane-native"),
-			)
-				? join(originalCwd, "native", "target", "debug", "buildplane-native")
-				: existsSync(
-							join(
-								originalCwd,
-								"native",
-								"target",
-								"release",
-								"buildplane-native",
-							),
-						)
-					? join(
-							originalCwd,
-							"native",
-							"target",
-							"release",
-							"buildplane-native",
-						)
-					: "buildplane-native");
+		const nativeBinary = resolveNativeBinaryForLedgerTests();
 		process.env.BUILDPLANE_NATIVE_BIN = nativeBinary;
 		process.chdir(cwd);
 		exitCode = await runCli(args, {

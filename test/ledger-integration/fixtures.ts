@@ -3,10 +3,45 @@ import { once } from "node:events";
 import { existsSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import type { Readable, Writable } from "node:stream";
+import { fileURLToPath } from "node:url";
 
 import { createTapeEmitter, type TapeEmitter } from "@buildplane/ledger-client";
+
+const LEDGER_FIXTURES_DIR = dirname(fileURLToPath(import.meta.url));
+export const LEDGER_TEST_REPO_ROOT = resolve(LEDGER_FIXTURES_DIR, "../..");
+
+export function resolveNativeBinaryForLedgerTests(): string {
+	const explicit = process.env.BUILDPLANE_NATIVE_BIN;
+	if (explicit) {
+		return explicit;
+	}
+
+	const debugBinary = join(
+		LEDGER_TEST_REPO_ROOT,
+		"native",
+		"target",
+		"debug",
+		"buildplane-native",
+	);
+	if (existsSync(debugBinary)) {
+		return debugBinary;
+	}
+
+	const releaseBinary = join(
+		LEDGER_TEST_REPO_ROOT,
+		"native",
+		"target",
+		"release",
+		"buildplane-native",
+	);
+	if (existsSync(releaseBinary)) {
+		return releaseBinary;
+	}
+
+	return "buildplane-native";
+}
 
 export interface LedgerFixture {
 	dir: string; // absolute tempdir path
@@ -32,18 +67,16 @@ export async function makeLedgerFixture(options?: {
 	const dir = await mkdtemp(join(tmpdir(), "bp-ledger-it-"));
 	const runId = options?.runId ?? "01919000-0000-7000-8000-000000000000";
 
-	// Locate the native binary. Honor BUILDPLANE_NATIVE_BIN; otherwise fall
-	// back to the debug build relative to the repo root (process.cwd() here
-	// is the vitest invocation cwd, which is the repo root for `pnpm test`).
-	const binary =
-		process.env.BUILDPLANE_NATIVE_BIN ??
-		join(process.cwd(), "native", "target", "debug", "buildplane-native");
+	// Locate the native binary using the ledger-integration fixture root rather
+	// than process.cwd(), which can be changed by unrelated tests before this
+	// helper runs.
+	const binary = resolveNativeBinaryForLedgerTests();
 
 	// NOTE: cwd must NOT be a bare temp dir. The native binary resolves its
 	// "native workspace" by walking ancestors of cwd looking for Cargo.toml +
-	// packs/. Use the repo root (process.cwd() during `pnpm test`) so the
-	// binary starts successfully; the --workspace flag points to the isolated
-	// temp dir that holds the SQLite ledger.
+	// packs/. Use the repo root derived from this fixture file so the binary
+	// starts successfully; the --workspace flag points to the isolated temp dir
+	// that holds the SQLite ledger.
 	const child = spawn(
 		binary,
 		[
@@ -56,7 +89,7 @@ export async function makeLedgerFixture(options?: {
 			"--schema-version",
 			"1",
 		],
-		{ stdio: ["pipe", "inherit", "pipe"] },
+		{ stdio: ["pipe", "inherit", "pipe"], cwd: LEDGER_TEST_REPO_ROOT },
 	);
 	if (!child.stdin || !child.stderr) {
 		throw new Error("subprocess stdio missing");
@@ -120,13 +153,12 @@ export interface BuildplaneRunFixture {
  * with sequential tests in a file — co-locating such tests in one file or
  * different files is fine; inside one file, don't mark `concurrent: true`.
  *
- * Binary resolution (same strategy as makeLedgerFixture):
- *  1. Honor BUILDPLANE_NATIVE_BIN if already set in the environment.
- *  2. Look for native/target/debug/buildplane-native relative to the vitest
- *     invocation cwd (the repo root when running `pnpm test`).
- *  3. Fall back to "buildplane-native" on PATH.
- * The resolved binary is injected as BUILDPLANE_NATIVE_BIN so the run-cli
- * subprocess-spawn path can locate it even when cwd is the tempdir.
+	// Binary resolution (same strategy as makeLedgerFixture):
+	//  1. Honor BUILDPLANE_NATIVE_BIN if already set in the environment.
+	//  2. Look for native/target/debug/buildplane-native relative to this
+	//     fixture's repo root, not process.cwd().
+	//  3. Fall back to "buildplane-native" on PATH.
+	// The resolved binary is injected as BUILDPLANE_NATIVE_BIN so the run-cli
  *
  * NOTE on --raw flag: the ledger subprocess integration lives in the "raw"
  * single-shot execution path of run-cli.  The default strategy path bypasses
@@ -139,21 +171,7 @@ export async function makeBuildplaneRunFixture(opts: {
 }): Promise<BuildplaneRunFixture> {
 	const dir = await mkdtemp(join(tmpdir(), "bp-run-"));
 
-	// Capture repo-root cwd BEFORE chdir so binary resolution uses the right base.
-	const repoRoot = process.cwd();
-
-	// Resolve the native binary using the same logic as makeLedgerFixture.
-	const nativeBinary =
-		process.env.BUILDPLANE_NATIVE_BIN ??
-		(existsSync(
-			join(repoRoot, "native", "target", "debug", "buildplane-native"),
-		)
-			? join(repoRoot, "native", "target", "debug", "buildplane-native")
-			: existsSync(
-						join(repoRoot, "native", "target", "release", "buildplane-native"),
-					)
-				? join(repoRoot, "native", "target", "release", "buildplane-native")
-				: "buildplane-native");
+	const nativeBinary = resolveNativeBinaryForLedgerTests();
 
 	const runGit = (args: string[]) => {
 		const r = spawnSync("git", args, { cwd: dir, encoding: "utf8" });
@@ -315,19 +333,8 @@ export async function makeForkFixture(
 
 	// Resolve the native binary before chdir so we can inject BUILDPLANE_NATIVE_BIN.
 	// makeBuildplaneRunFixture restores the env var after its finally block, so we
-	// must re-inject it here. Use the same resolution chain as makeBuildplaneRunFixture.
-	const repoRoot = process.cwd();
-	const nativeBinary =
-		process.env.BUILDPLANE_NATIVE_BIN ??
-		(existsSync(
-			join(repoRoot, "native", "target", "debug", "buildplane-native"),
-		)
-			? join(repoRoot, "native", "target", "debug", "buildplane-native")
-			: existsSync(
-						join(repoRoot, "native", "target", "release", "buildplane-native"),
-					)
-				? join(repoRoot, "native", "target", "release", "buildplane-native")
-				: "buildplane-native");
+	// must re-inject it here using the same fixture-root resolution helper.
+	const nativeBinary = resolveNativeBinaryForLedgerTests();
 
 	const originalCwd = process.cwd();
 	const originalNativeBin = process.env.BUILDPLANE_NATIVE_BIN;

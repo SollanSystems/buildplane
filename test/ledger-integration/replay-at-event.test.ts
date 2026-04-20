@@ -1,11 +1,12 @@
 import { spawnSync } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it } from "vitest";
-import { makeBuildplaneRunFixture } from "./fixtures.js";
+import {
+	makeBuildplaneRunFixture,
+	resolveNativeBinaryForLedgerTests,
+} from "./fixtures.js";
 
-const NATIVE_BIN =
-	process.env.BUILDPLANE_NATIVE_BIN ??
-	`${process.cwd()}/native/target/debug/buildplane-native`;
+const NATIVE_BIN = resolveNativeBinaryForLedgerTests();
 
 describe("replay --at event", () => {
 	it("fast-forwards to target event and emits state there", async () => {

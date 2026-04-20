@@ -1,11 +1,12 @@
 import { spawnSync } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it } from "vitest";
-import { makeBuildplaneRunFixture } from "./fixtures.js";
+import {
+	makeBuildplaneRunFixture,
+	resolveNativeBinaryForLedgerTests,
+} from "./fixtures.js";
 
-const NATIVE_BIN =
-	process.env.BUILDPLANE_NATIVE_BIN ??
-	`${process.cwd()}/native/target/debug/buildplane-native`;
+const NATIVE_BIN = resolveNativeBinaryForLedgerTests();
 
 describe("replay basic", () => {
 	it("streams one JSON line per event with hydrated state", async () => {
@@ -53,7 +54,7 @@ describe("replay basic", () => {
 					"--format",
 					"json",
 				],
-				{ encoding: "utf8" },
+				{ encoding: "utf8", cwd: process.cwd() },
 			);
 			expect(result.status).toBe(0);
 

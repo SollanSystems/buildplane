@@ -8,10 +8,9 @@ import {
 	LedgerHandshakeError,
 } from "@buildplane/ledger-client";
 import { describe, expect, it } from "vitest";
+import { resolveNativeBinaryForLedgerTests } from "./fixtures.js";
 
-const NATIVE_BIN =
-	process.env.BUILDPLANE_NATIVE_BIN ??
-	join(process.cwd(), "native", "target", "debug", "buildplane-native");
+const NATIVE_BIN = resolveNativeBinaryForLedgerTests();
 
 describe("handshake failure", () => {
 	it("rejects when schema version is unsupported", async () => {
