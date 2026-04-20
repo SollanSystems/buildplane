@@ -100,8 +100,13 @@ const hoisted = vi.hoisted(() => {
 	};
 });
 
-const { forkState, parseUnitPacketMock, runPacketMock, runPacketAsyncMock } =
-	hoisted;
+const {
+	forkState,
+	parseUnitPacketMock,
+	runPacketMock,
+	runPacketAsyncMock,
+	createTapeEmitterMock,
+} = hoisted;
 
 vi.mock("node:child_process", async () => {
 	const actual =
@@ -198,6 +203,7 @@ vi.mock("@buildplane/adapters-git", () => ({
 	})),
 }));
 
+import { createBuildplaneOrchestrator } from "@buildplane/kernel";
 import { runCli } from "../src/run-cli";
 
 function createTempForkInputs() {
@@ -291,6 +297,10 @@ describe("fork CLI orchestration", () => {
 				routingHints: { preferredWorker: "claude-code" },
 			}),
 			expect.any(Object),
+			expect.objectContaining({
+				runId: "fork-run-123",
+				parentRunId: "parent-run-1",
+			}),
 		);
 		expect(runPacketMock).not.toHaveBeenCalled();
 		expect(stdout.join("\n")).toContain(
@@ -374,6 +384,79 @@ describe("fork CLI orchestration", () => {
 				verification: { requiredOutputs: [] },
 			}),
 			expect.any(Object),
+			expect.objectContaining({
+				runId: "fork-run-123",
+				parentRunId: "parent-run-1",
+			}),
 		);
+	});
+
+	it("closes the fork ledger emitter when planned packet normalization throws", async () => {
+		forkState.plan.packet_json = { invalid: true };
+		forkState.parsePacketImpl = () => {
+			throw new Error("invalid fork packet");
+		};
+
+		const { root, packetPath } = createTempForkInputs();
+		const stderr: string[] = [];
+
+		const exitCode = await runCli(
+			[
+				"fork",
+				"parent-run-1",
+				"--at",
+				"parent-event-1",
+				"--packet",
+				packetPath,
+				"--workspace",
+				root,
+			],
+			{
+				cwd: root,
+				stdout: () => {},
+				stderr: (line) => stderr.push(line),
+			},
+		);
+
+		expect(exitCode).toBe(1);
+		expect(stderr.join("\n")).toContain(
+			"fork orchestrator error: Error: invalid fork packet",
+		);
+		const emitter = await createTapeEmitterMock.mock.results[0]?.value;
+		expect(emitter?.close).toHaveBeenCalledTimes(1);
+	});
+
+	it("closes the fork ledger emitter when orchestrator setup throws after handshake", async () => {
+		vi.mocked(createBuildplaneOrchestrator).mockImplementationOnce(() => {
+			throw new Error("orchestrator setup failed");
+		});
+
+		const { root, packetPath } = createTempForkInputs();
+		const stderr: string[] = [];
+
+		const exitCode = await runCli(
+			[
+				"fork",
+				"parent-run-1",
+				"--at",
+				"parent-event-1",
+				"--packet",
+				packetPath,
+				"--workspace",
+				root,
+			],
+			{
+				cwd: root,
+				stdout: () => {},
+				stderr: (line) => stderr.push(line),
+			},
+		);
+
+		expect(exitCode).toBe(1);
+		expect(stderr.join("\n")).toContain(
+			"fork orchestrator error: Error: orchestrator setup failed",
+		);
+		const emitter = await createTapeEmitterMock.mock.results[0]?.value;
+		expect(emitter?.close).toHaveBeenCalledTimes(1);
 	});
 });

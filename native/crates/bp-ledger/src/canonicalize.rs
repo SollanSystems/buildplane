@@ -19,6 +19,7 @@ pub fn canonicalize(event: Event) -> Result<Event> {
             supported: Event::CURRENT_SCHEMA_VERSION,
         });
     }
+    validate_kind_matches_payload(event.kind_str(), &event.payload)?;
     Ok(event)
 }
 
@@ -36,15 +37,39 @@ pub fn canonicalize_payload(kind: &str, version: u32, payload: serde_json::Value
             supported: Event::CURRENT_SCHEMA_VERSION,
         });
     }
-    // Validate that the stored variant tag matches the declared kind.
+    let payload = serde_json::from_value::<Payload>(payload).map_err(LedgerError::from)?;
+    validate_kind_matches_payload(kind, &payload)?;
+    Ok(payload)
+}
+
+fn validate_kind_matches_payload(kind: &str, payload: &Payload) -> Result<()> {
     let expected_variant = kind_to_variant(kind)?;
-    if payload.get(expected_variant).is_none() {
+    if payload_variant_name(payload) != expected_variant {
         return Err(LedgerError::InvalidPayload {
             kind: kind.to_string(),
             reason: format!("payload missing expected variant key '{expected_variant}'"),
         });
     }
-    serde_json::from_value::<Payload>(payload).map_err(LedgerError::from)
+    Ok(())
+}
+
+fn payload_variant_name(payload: &Payload) -> &'static str {
+    match payload {
+        Payload::RunStartedV1(_) => "RunStartedV1",
+        Payload::RunCompletedV1(_) => "RunCompletedV1",
+        Payload::RunFailedV1(_) => "RunFailedV1",
+        Payload::UnitStartedV1(_) => "UnitStartedV1",
+        Payload::UnitCompletedV1(_) => "UnitCompletedV1",
+        Payload::UnitFailedV1(_) => "UnitFailedV1",
+        Payload::UnitCancelledV1(_) => "UnitCancelledV1",
+        Payload::GitCheckpointV1(_) => "GitCheckpointV1",
+        Payload::ModelRequestV1(_) => "ModelRequestV1",
+        Payload::ModelResponseV1(_) => "ModelResponseV1",
+        Payload::ToolRequestStoredV1(_) => "ToolRequestStoredV1",
+        Payload::ToolResultV1(_) => "ToolResultV1",
+        Payload::WorkspaceReadV1(_) => "WorkspaceReadV1",
+        Payload::WorkspaceWriteV1(_) => "WorkspaceWriteV1",
+    }
 }
 
 fn kind_to_variant(kind: &str) -> Result<&'static str> {

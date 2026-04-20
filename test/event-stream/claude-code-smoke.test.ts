@@ -2,8 +2,10 @@ import { execFileSync } from "node:child_process";
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { afterAll, describe, expect, it } from "vitest";
 import { runCli } from "../../apps/cli/src/run-cli";
+import { resolveNativeBinaryForLedgerTests } from "../ledger-integration/fixtures.js";
 
 // ── Helpers ─────────────────────────────────────────────────
 
@@ -46,7 +48,7 @@ afterAll(() => {
  *
  * Returns the directory containing the stub (to prepend to PATH).
  */
-function createStubClaude(): string {
+function createStubClaude(stdoutText = '{"result":"Task completed.","cost_usd":0.01,"duration_ms":1000,"num_turns":1}'): string {
 	const binDir = mkdtempSync(join(tmpdir(), "bp-stub-claude-"));
 	cleanupPaths.push(binDir);
 
@@ -60,8 +62,8 @@ function createStubClaude(): string {
 # Create the expected output file in the workspace
 echo "stub-marker" > "$PWD/output.txt"
 
-# Emit valid Claude JSON to stdout
-echo '{"result":"Task completed.","cost_usd":0.01,"duration_ms":1000,"num_turns":1}'
+# Emit configurable stdout to simulate Claude CLI behavior
+printf '%s\n' ${JSON.stringify(stdoutText)}
 `,
 	);
 	chmodSync(stubPath, 0o755);
@@ -88,7 +90,9 @@ describe("claude-code e2e smoke test", () => {
 		// Create stub claude binary in a separate temp dir (outside the git repo)
 		const stubBinDir = createStubClaude();
 		const origPath = process.env.PATH;
+		const originalNativeBin = process.env.BUILDPLANE_NATIVE_BIN;
 		process.env.PATH = `${stubBinDir}:${origPath}`;
+		process.env.BUILDPLANE_NATIVE_BIN = resolveNativeBinaryForLedgerTests();
 
 		try {
 			// Write the model packet with routingHints
@@ -152,8 +156,47 @@ describe("claude-code e2e smoke test", () => {
 				initialized: true,
 				latestRun: { id: runId, status: "passed" },
 			});
+
+			const ledgerDbPath = join(root, ".buildplane", "ledger", "events.db");
+			const db = new DatabaseSync(ledgerDbPath);
+			const tapeRunIds = (
+				db
+					.prepare("SELECT DISTINCT run_id FROM events ORDER BY run_id ASC")
+					.all() as {
+					run_id: string;
+				}[]
+			).map((row) => row.run_id);
+			expect(tapeRunIds).toEqual([runId]);
+
+			const rows = db
+				.prepare(
+					"SELECT kind, payload FROM events WHERE run_id = ? ORDER BY id ASC",
+				)
+				.all(runId) as { kind: string; payload: string }[];
+			const kinds = rows.map((row) => row.kind);
+			expect(kinds).toContain("unit_started");
+			expect(kinds).toContain("unit_completed");
+			expect(kinds).toContain("git_checkpoint");
+			const checkpointBoundaries = rows
+				.filter((row) => row.kind === "git_checkpoint")
+				.map(
+					(row) =>
+						(
+							JSON.parse(row.payload) as {
+								GitCheckpointV1: { boundary: string };
+							}
+						).GitCheckpointV1.boundary,
+				);
+			expect(checkpointBoundaries).toContain("pre-unit");
+			expect(checkpointBoundaries).toContain("post-unit");
+			db.close();
 		} finally {
 			process.env.PATH = origPath;
+			if (originalNativeBin === undefined) {
+				delete process.env.BUILDPLANE_NATIVE_BIN;
+			} else {
+				process.env.BUILDPLANE_NATIVE_BIN = originalNativeBin;
+			}
 		}
 	});
 });

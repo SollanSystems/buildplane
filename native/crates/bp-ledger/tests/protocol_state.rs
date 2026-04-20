@@ -1,6 +1,6 @@
 //! Integration tests for the serve_with_protocol state machine.
 
-use bp_ledger::serve::{serve_with_protocol, ServeOutcome};
+use bp_ledger::serve::serve_with_protocol;
 use bp_ledger::storage::{sqlite::SqliteStore, Cas};
 use std::io::Cursor;
 use tempfile::TempDir;
@@ -93,6 +93,43 @@ fn event_after_handshake_is_stored() {
     let outcome = serve_with_protocol(Cursor::new(stdin.as_bytes()), &mut stderr, &store, &cas, 1).unwrap();
     assert_eq!(outcome.events_written, 1);
     assert_eq!(outcome.last_event_id, Some(event.id));
+}
+
+#[test]
+fn mismatched_kind_and_payload_is_rejected_before_store() {
+    use bp_ledger::event::Event;
+    use bp_ledger::id::{EventId, RunId};
+    use bp_ledger::kind::EventKind;
+    use bp_ledger::payload::workspace::WorkspaceReadV1;
+    use bp_ledger::payload::Payload;
+    use chrono::Utc;
+
+    let (store, cas, _tmp) = make_fixture();
+    let event = Event {
+        id: EventId::new(),
+        run_id: RunId::new(),
+        parent_event_id: None,
+        schema_version: 1,
+        kind: EventKind::RunCompleted,
+        occurred_at: Utc::now(),
+        payload: Payload::WorkspaceReadV1(WorkspaceReadV1 {
+            tool_request_id: EventId::new(),
+            path: "README.md".into(),
+            content_hash: "abc123".into(),
+            size_bytes: 12,
+        }),
+    };
+    let stdin = format!(
+        "{}\n{}\n",
+        handshake_line(1),
+        serde_json::to_string(&event).unwrap(),
+    );
+    let mut stderr = Vec::new();
+    let err = serve_with_protocol(Cursor::new(stdin.as_bytes()), &mut stderr, &store, &cas, 1);
+    assert!(err.is_err());
+    let stderr_text = String::from_utf8(stderr).unwrap();
+    assert!(stderr_text.contains(r#""control":"handshake_ack""#));
+    assert_eq!(store.event_count().unwrap(), 0);
 }
 
 #[test]

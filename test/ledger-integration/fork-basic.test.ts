@@ -52,14 +52,29 @@ describe("fork basic", () => {
 			expect(payload.RunStartedV1.parent_run_id).toBe(fixture.parentRunId);
 
 			// Verify fork tape has the full Phase A sequence.
-			const forkKinds = (
-				db
-					.prepare("SELECT kind FROM events WHERE run_id = ? ORDER BY id ASC")
-					.all(fixture.forkRunId) as { kind: string }[]
-			).map((r) => r.kind);
+			const forkRows = db
+				.prepare(
+					"SELECT kind, payload FROM events WHERE run_id = ? ORDER BY id ASC",
+				)
+				.all(fixture.forkRunId) as { kind: string; payload: string }[];
+			const forkKinds = forkRows.map((row) => row.kind);
 			expect(forkKinds).toContain("run_started");
 			expect(forkKinds).toContain("run_completed");
 			expect(forkKinds).toContain("unit_started");
+			expect(forkKinds).toContain("unit_completed");
+			expect(forkKinds).toContain("git_checkpoint");
+			const checkpointBoundaries = forkRows
+				.filter((row) => row.kind === "git_checkpoint")
+				.map(
+					(row) =>
+						(
+							JSON.parse(row.payload) as {
+								GitCheckpointV1: { boundary: string };
+							}
+						).GitCheckpointV1.boundary,
+				);
+			expect(checkpointBoundaries).toContain("pre-unit");
+			expect(checkpointBoundaries).toContain("post-unit");
 
 			db.close();
 

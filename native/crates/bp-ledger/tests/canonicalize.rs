@@ -5,6 +5,7 @@ use bp_ledger::event::Event;
 use bp_ledger::id::{EventId, RunId};
 use bp_ledger::kind::EventKind;
 use bp_ledger::payload::run_lifecycle::{RunCompletedV1, RunOutcome};
+use bp_ledger::payload::workspace::WorkspaceReadV1;
 use bp_ledger::payload::Payload;
 use chrono::Utc;
 
@@ -46,4 +47,24 @@ fn unsupported_schema_version_errors() {
     };
     let err = canonicalize(event).unwrap_err();
     assert!(matches!(err, bp_ledger::LedgerError::UnsupportedSchemaVersion { .. }));
+}
+
+#[test]
+fn mismatched_kind_and_payload_errors() {
+    let event = Event {
+        id: EventId::new(),
+        run_id: RunId::new(),
+        parent_event_id: None,
+        schema_version: 1,
+        kind: EventKind::RunCompleted,
+        occurred_at: Utc::now(),
+        payload: Payload::WorkspaceReadV1(WorkspaceReadV1 {
+            tool_request_id: EventId::new(),
+            path: "README.md".into(),
+            content_hash: "abc123".into(),
+            size_bytes: 12,
+        }),
+    };
+    let err = canonicalize(event).unwrap_err();
+    assert!(matches!(err, bp_ledger::LedgerError::InvalidPayload { .. }));
 }

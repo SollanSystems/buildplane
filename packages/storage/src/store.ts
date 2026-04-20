@@ -1665,7 +1665,7 @@ export function createStorageStore(
 			ensureInitialized();
 			const database = openStoreDatabase();
 			const createdAt = new Date().toISOString();
-			const runId = randomUUID();
+			const runId = options?.runId ?? randomUUID();
 			const parentRunId = options?.parentRunId ?? null;
 			const strategyId = options?.strategyId ?? null;
 
