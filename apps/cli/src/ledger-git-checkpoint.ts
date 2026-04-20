@@ -21,15 +21,19 @@ type GitStep = "write-tree" | "commit-tree" | "update-ref";
  * run ref. The user's branch is never modified.
  *
  * If any git step fails, emits a git_checkpoint event with
- * git_status: { kind: "failed", step: <step>, error: "..." } and does NOT
- * throw — checkpoints are advisory and shouldn't abort a run.
+ * git_status: { kind: "failed", data: { error: "<step>: <message>" } }
+ * and does NOT throw — checkpoints are advisory and shouldn't abort a run.
+ *
+ * The wire shape matches Rust's GitStatus serde-tagged union
+ * (tag="kind", content="data"). The failing step is folded into the
+ * error string since the Rust schema's Failed variant has only `error`.
  */
 export function runGitCheckpoint(input: GitCheckpointInput): void {
 	const reference = `refs/buildplane/run/${input.runId}`;
 	let commitSha = "";
 	let status:
 		| { kind: "ok" }
-		| { kind: "failed"; step: GitStep; error: string } = { kind: "ok" };
+		| { kind: "failed"; data: { error: string } } = { kind: "ok" };
 
 	let lastStep: GitStep = "write-tree";
 	try {
@@ -53,8 +57,8 @@ export function runGitCheckpoint(input: GitCheckpointInput): void {
 		lastStep = "update-ref";
 		gitInWorkspace(input.cwd, ["update-ref", reference, commitSha]);
 	} catch (err) {
-		const error = err instanceof Error ? err.message : String(err);
-		status = { kind: "failed", step: lastStep, error };
+		const message = err instanceof Error ? err.message : String(err);
+		status = { kind: "failed", data: { error: `${lastStep}: ${message}` } };
 	}
 
 	input.emitter.emit(

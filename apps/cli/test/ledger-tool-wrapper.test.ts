@@ -61,12 +61,12 @@ describe("wrapToolRegistryForLedger — write_file", () => {
 			const wsWrite = emitter.emitted[1].payload as {
 				WorkspaceWriteV1: {
 					hash_before: string | null;
-					after: { status: string; hash: string };
+					after: { status: string; data: { hash: string; size_bytes: number } };
 				};
 			};
 			expect(wsWrite.WorkspaceWriteV1.hash_before).toBeNull();
 			expect(wsWrite.WorkspaceWriteV1.after.status).toBe("captured");
-			expect(wsWrite.WorkspaceWriteV1.after.hash).toMatch(/^sha256:/);
+			expect(wsWrite.WorkspaceWriteV1.after.data.hash).toMatch(/^sha256:/);
 
 			const toolRes = emitter.emitted[2].payload as {
 				ToolResultV1: { output: { success: boolean } };

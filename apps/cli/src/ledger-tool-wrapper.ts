@@ -90,9 +90,14 @@ export function wrapToolRegistryForLedger(
 							path: input.path,
 							hash_before: hashBefore,
 							after: {
+								// PostWriteState is a serde-tagged union with
+								// tag="status" and content="data" — the variant
+								// fields live inside `data`, not alongside `status`.
 								status: "captured",
-								hash: hashAfter,
-								size_bytes: sizeBytes,
+								data: {
+									hash: hashAfter,
+									size_bytes: sizeBytes,
+								},
 							},
 						},
 					},
