@@ -79,6 +79,9 @@ importers:
       '@buildplane/ui-tui':
         specifier: workspace:*
         version: link:../../packages/ui-tui
+      uuid:
+        specifier: ^11
+        version: 11.1.0
 
   packages/adapters-codex:
     dependencies:

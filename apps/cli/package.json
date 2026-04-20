@@ -25,6 +25,7 @@
 		"@buildplane/policy": "workspace:*",
 		"@buildplane/runtime": "workspace:*",
 		"@buildplane/storage": "workspace:*",
-		"@buildplane/ui-tui": "workspace:*"
+		"@buildplane/ui-tui": "workspace:*",
+		"uuid": "^11"
 	}
 }
