@@ -8,6 +8,7 @@ import { createToolRegistry } from "@buildplane/adapters-tools";
 import {
 	createTapeEmitter,
 	type LedgerFailure,
+	newEventId,
 	type TapeEmitter,
 } from "@buildplane/ledger-client";
 import {
@@ -1976,8 +1977,7 @@ export async function runCli(
 				let ledgerChild: LedgerChild | null = null;
 				let ledgerEmitter: TapeEmitter | null = null;
 				let unsubscribeLedger: (() => void) | null = null;
-				const { randomUUID } = await import("node:crypto");
-				const ledgerRunId = randomUUID();
+				const ledgerRunId = newEventId();
 
 				// Unit-context tracker: mutable state that getUnitCtx returns on demand.
 				// Updated by the unit-boundary subscription below.

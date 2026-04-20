@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import type {
 	RunCommandInput,
@@ -7,6 +7,7 @@ import type {
 	WriteFileInput,
 	WriteFileResult,
 } from "@buildplane/adapters-tools";
+import { newEventId } from "@buildplane/ledger-client";
 
 export interface UnitCtx {
 	unitId: string;
@@ -42,7 +43,7 @@ export function wrapToolRegistryForLedger(
 	return {
 		write_file(input: WriteFileInput): WriteFileResult {
 			const ctx = getUnitCtx();
-			const toolReqId = randomUUID();
+			const toolReqId = newEventId();
 
 			// Pre-hash: capture the existing file content if any.
 			let hashBefore: string | null = null;
@@ -119,7 +120,7 @@ export function wrapToolRegistryForLedger(
 
 		run_command(input: RunCommandInput): RunCommandResult {
 			const ctx = getUnitCtx();
-			const toolReqId = randomUUID();
+			const toolReqId = newEventId();
 
 			emitter.emit(
 				"tool_request",
