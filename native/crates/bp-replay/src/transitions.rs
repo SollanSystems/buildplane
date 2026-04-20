@@ -3,7 +3,7 @@
 use crate::state::{CheckpointRef, FileObservation, ReplayIssue, ReplayState};
 use bp_ledger::event::Event;
 use bp_ledger::payload::{
-    git_checkpoint::{GitCheckpointV1, GitStatus},
+    git_checkpoint::{CheckpointBoundary, GitCheckpointV1, GitStatus},
     run_lifecycle::{RunCompletedV1, RunFailedV1, RunStartedV1},
     tool_io::{ToolRequestStoredV1, ToolResultV1},
     unit_lifecycle::{UnitCancelledV1, UnitCompletedV1, UnitFailedV1, UnitStartedV1},
@@ -69,8 +69,8 @@ fn apply_git_checkpoint(state: &mut ReplayState, event: &Event, p: &GitCheckpoin
         GitStatus::Ok => {
             state.checkpoints.push(CheckpointRef {
                 boundary: match p.boundary {
-                    crate::payload::git_checkpoint::CheckpointBoundary::PreUnit => "pre-unit".to_string(),
-                    crate::payload::git_checkpoint::CheckpointBoundary::PostUnit => "post-unit".to_string(),
+                    CheckpointBoundary::PreUnit => "pre-unit".to_string(),
+                    CheckpointBoundary::PostUnit => "post-unit".to_string(),
                 },
                 reference: p.reference.clone(),
                 commit_sha: p.commit_sha.clone(),
