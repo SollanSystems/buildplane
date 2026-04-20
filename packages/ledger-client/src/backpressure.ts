@@ -29,40 +29,26 @@ export class WriteQueue {
 
 		this.inFlight += 1;
 		const current = waitForHead.then(async () => {
-			await new Promise<void>((resolve, reject) => {
-				const done = (error?: Error) => {
-					this.pipe.off("error", onError);
-					if (error) {
-						reject(error);
-					} else {
-						resolve();
-					}
-				};
-				const onError = (error: Error) => {
-					done(error);
-				};
-				this.pipe.once("error", onError);
-
-				const ok = this.pipe.write(chunk, (error: Error | null | undefined) => {
-					if (error) {
-						done(error);
-						return;
-					}
-					if (ok) {
-						done();
-						return;
-					}
+			const ok = this.pipe.write(chunk);
+			if (!ok) {
+				await new Promise<void>((resolve, reject) => {
 					const onDrain = () => {
-						this.pipe.off("drain", onDrain);
-						done();
+						this.pipe.off("error", onError);
+						resolve();
 					};
+					const onError = (error: Error) => {
+						this.pipe.off("drain", onDrain);
+						reject(error);
+					};
+
 					this.pipe.once("drain", onDrain);
+					this.pipe.once("error", onError);
 				});
-			});
+			}
 		});
 		this.tail = current.catch(() => undefined);
 		return current.finally(() => {
-			this.inFlight -= 1;
+			this.inFlight = Math.max(0, this.inFlight - 1);
 		});
 	}
 
