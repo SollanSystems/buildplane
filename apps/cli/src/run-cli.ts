@@ -1248,6 +1248,11 @@ async function runFork(
 	}
 
 	const workspace = resolve(args.value.workspace ?? opts.cwd);
+	// Resolve the packet path against the user's cwd BEFORE spawning the native
+	// binary — the plan subprocess runs in `planSpawnCwd` (project root), not
+	// `opts.cwd`, so a relative path like `./packet.json` would otherwise be
+	// resolved from the wrong directory.
+	const packet = resolve(opts.cwd, args.value.packet);
 	const binary = resolveLedgerBinary(opts.cwd);
 
 	// Phase 1: plan.
@@ -1266,7 +1271,7 @@ async function runFork(
 		"--workspace",
 		workspace,
 		"--packet",
-		args.value.packet,
+		packet,
 	];
 	const planResult = spawnSync(binary, planArgs, {
 		encoding: "utf8",
