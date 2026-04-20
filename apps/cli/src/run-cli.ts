@@ -1008,6 +1008,13 @@ function forkUsageText(): string {
 `;
 }
 
+async function parsePlannedForkPacket(packetJson: unknown): Promise<unknown> {
+	const kernel = (await cliImport("@buildplane/kernel")) as unknown as {
+		parseUnitPacket: (input: string) => unknown;
+	};
+	return kernel.parseUnitPacket(JSON.stringify(packetJson));
+}
+
 async function runForkExecution(
 	plan: ForkPlan,
 	workspace: string,
@@ -1170,8 +1177,9 @@ async function runForkExecution(
 		};
 	};
 
+	const forkPacket = await parsePlannedForkPacket(plan.packet_json);
 	const packetHash = `sha256:${createHash("sha256")
-		.update(JSON.stringify(plan.packet_json))
+		.update(JSON.stringify(forkPacket))
 		.digest("hex")}`;
 	const runStartMs = Date.now();
 
@@ -1189,9 +1197,9 @@ async function runForkExecution(
 			},
 		});
 
-		// Invoke the orchestrator with the fork packet.
-		const orchResult = forkOrchestrator.runPacket(
-			plan.packet_json as never,
+		// Invoke the orchestrator with the normalized fork packet.
+		const orchResult = await forkOrchestrator.runPacketAsync(
+			forkPacket as never,
 			forkEventBus,
 		);
 		const status = (orchResult as { run?: { status?: string } }).run?.status;
