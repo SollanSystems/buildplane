@@ -97,7 +97,12 @@ pub fn serve_with_protocol<R: Read, W: Write>(
     match parsed {
         Line::Control(ControlMessage::Handshake { protocol, schema_version, .. }) => {
             if protocol != 1 {
-                write_handshake_ack(&mut stderr, false, &format!("protocol {} not supported", protocol))?;
+                write_handshake_ack(
+                    &mut stderr,
+                    false,
+                    &format!("protocol {} not supported", protocol),
+                    declared_schema_version,
+                )?;
                 return Err(LedgerError::InvalidPayload {
                     kind: "<handshake>".into(),
                     reason: format!("protocol {protocol} not supported"),
@@ -108,13 +113,19 @@ pub fn serve_with_protocol<R: Read, W: Write>(
                     &mut stderr,
                     false,
                     &format!("schema version {schema_version} not supported (supported: {declared_schema_version})"),
+                    declared_schema_version,
                 )?;
                 return Err(LedgerError::UnsupportedSchemaVersion {
                     received: schema_version,
                     supported: declared_schema_version,
                 });
             }
-            write_handshake_ack(&mut stderr, true, "")?;
+            write_handshake_ack(
+                &mut stderr,
+                true,
+                "",
+                declared_schema_version,
+            )?;
         }
         _ => {
             write_error(&mut stderr, "handshake_required", 1, "first line must be a handshake")?;
@@ -179,7 +190,12 @@ pub fn serve_with_protocol<R: Read, W: Write>(
     Ok(outcome)
 }
 
-fn write_handshake_ack<W: Write>(stderr: &mut W, ready: bool, reason: &str) -> std::io::Result<()> {
+fn write_handshake_ack<W: Write>(
+    stderr: &mut W,
+    ready: bool,
+    reason: &str,
+    declared_schema_version: u32,
+) -> std::io::Result<()> {
     let line = if ready {
         format!(
             r#"{{"control":"handshake_ack","ready":true,"ledger_version":"{}","schema_version":{}}}{}"#,
