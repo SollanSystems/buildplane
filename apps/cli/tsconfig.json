@@ -15,6 +15,7 @@
 		{ "path": "../../packages/policy" },
 		{ "path": "../../packages/adapters-git" },
 		{ "path": "../../packages/adapters-honcho" },
-		{ "path": "../../packages/adapters-codex" }
+		{ "path": "../../packages/adapters-codex" },
+		{ "path": "../../packages/ledger-client" }
 	]
 }
