@@ -68,7 +68,10 @@ fn apply_git_checkpoint(state: &mut ReplayState, event: &Event, p: &GitCheckpoin
     match &p.git_status {
         GitStatus::Ok => {
             state.checkpoints.push(CheckpointRef {
-                boundary: format!("{:?}", p.boundary),
+                boundary: match p.boundary {
+                    crate::payload::git_checkpoint::CheckpointBoundary::PreUnit => "pre-unit".to_string(),
+                    crate::payload::git_checkpoint::CheckpointBoundary::PostUnit => "post-unit".to_string(),
+                },
                 reference: p.reference.clone(),
                 commit_sha: p.commit_sha.clone(),
                 unit_id: p.unit_id.clone(),

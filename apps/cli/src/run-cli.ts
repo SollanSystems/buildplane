@@ -1066,6 +1066,7 @@ function beginLedgerUnit(
 	ledgerWorkspacePath: string,
 	unitId: string,
 	unitKind: "command" | "model",
+	parentEventId?: string | null,
 ): LedgerUnitContext {
 	const unitStartedId = generateUuidV7();
 	emitter.emit(
@@ -1078,7 +1079,7 @@ function beginLedgerUnit(
 				policy: {},
 			},
 		},
-		{ id: unitStartedId },
+		{ id: unitStartedId, ...(parentEventId ? { parent: parentEventId } : {}) },
 	);
 	runGitCheckpoint({
 		boundary: "pre-unit",
@@ -1123,6 +1124,53 @@ function completeLedgerUnit(
 	return null;
 }
 
+function emitLedgerRunStarted(
+	emitter: TapeEmitter | null,
+	packetHash: string,
+	workspacePath: string,
+	parentRunId: string | null,
+	parentEventId?: string | null,
+	gitHead = "",
+): string | undefined {
+	if (!emitter) {
+		return undefined;
+	}
+	const runStartedId = generateUuidV7();
+	emitter.emit(
+		"run_started",
+		{
+			RunStartedV1: {
+				packet_hash: packetHash,
+				git_head: gitHead,
+				workspace_path: workspacePath,
+				config: {},
+				parent_run_id: parentRunId,
+				...(parentEventId ? { parent_event_id: parentEventId } : {}),
+			},
+		},
+		{ id: runStartedId },
+	);
+	return runStartedId;
+}
+
+function emitLedgerRunCompleted(
+	emitter: TapeEmitter | null,
+	outcome: "passed" | "failed",
+	durationMs: number,
+): void {
+	if (!emitter) {
+		return;
+	}
+	emitter.emit("run_completed", {
+		RunCompletedV1: {
+			outcome,
+			duration_ms: durationMs,
+			event_count: 0,
+			unit_count: 1,
+		},
+	});
+}
+
 async function runForkExecution(
 	plan: ForkPlan,
 	workspace: string,
@@ -1157,6 +1205,7 @@ async function runForkExecution(
 	}
 
 	let exitCode = 1;
+	let runStartEventId: string | undefined;
 	let forkCurrentUnit: LedgerUnitContext | null = null;
 	const getForkUnitCtx = () => forkCurrentUnit;
 	const ledgerWorkspacePath = resolve(workspace);
@@ -1207,6 +1256,7 @@ async function runForkExecution(
 						ledgerWorkspacePath,
 						unitId,
 						e.executionType ?? "command",
+						runStartEventId,
 					);
 					break;
 				}
@@ -1281,19 +1331,21 @@ async function runForkExecution(
 				exitCode: result.exitCode,
 				stdout: result.stdout,
 				stderr: result.stderr,
-				outputChecks: p.verification.requiredOutputs.map((outputPath: string) => {
-					const realRoot = (() => {
-						try {
-							return fsRealpathSync(worktreeRoot);
-						} catch {
-							return worktreeRoot;
-						}
-					})();
-					return {
-						path: outputPath,
-						exists: fsExistsSync(pathResolve(realRoot, outputPath)),
-					};
-				}),
+				outputChecks: p.verification.requiredOutputs.map(
+					(outputPath: string) => {
+						const realRoot = (() => {
+							try {
+								return fsRealpathSync(worktreeRoot);
+							} catch {
+								return worktreeRoot;
+							}
+						})();
+						return {
+							path: outputPath,
+							exists: fsExistsSync(pathResolve(realRoot, outputPath)),
+						};
+					},
+				),
 			};
 		};
 
@@ -1302,17 +1354,14 @@ async function runForkExecution(
 		const packetHash = `sha256:${createHash("sha256")
 			.update(JSON.stringify(forkPacket))
 			.digest("hex")}`;
-		// Emit run_started with parent_run_id and parent_event_id for fork lineage.
-		emitter.emit("run_started", {
-			RunStartedV1: {
-				packet_hash: packetHash,
-				git_head: plan.checkout_sha,
-				workspace_path: workspace,
-				config: {},
-				parent_run_id: plan.parent_run_id,
-				parent_event_id: plan.parent_event_id,
-			},
-		});
+		runStartEventId = emitLedgerRunStarted(
+			emitter,
+			packetHash,
+			workspace,
+			plan.parent_run_id,
+			plan.parent_event_id,
+			plan.checkout_sha,
+		);
 
 		// Invoke the orchestrator with the normalized fork packet.
 		const orchResult = await forkOrchestrator.runPacketAsync(
@@ -1331,14 +1380,11 @@ async function runForkExecution(
 		);
 
 		// Emit run_completed.
-		emitter.emit("run_completed", {
-			RunCompletedV1: {
-				outcome: exitCode === 0 ? "passed" : "failed",
-				duration_ms: Date.now() - runStartMs,
-				event_count: 0,
-				unit_count: 1,
-			},
-		});
+		emitLedgerRunCompleted(
+			emitter,
+			exitCode === 0 ? "passed" : "failed",
+			Date.now() - runStartMs,
+		);
 	} catch (err) {
 		opts.stderr(`fork orchestrator error: ${String(err)}\n`);
 		exitCode = 1;
@@ -1607,6 +1653,7 @@ export async function runCli(
 	options: RunCliOptions = {},
 ): Promise<number> {
 	const cwd = options.cwd ?? process.cwd();
+	const resolvedCwd = resolve(cwd);
 	const stdout = options.stdout ?? ((line: string) => console.log(line));
 	const stderr = options.stderr ?? ((line: string) => console.error(line));
 	const deps = options.dependencies;
@@ -2125,22 +2172,27 @@ export async function runCli(
 				let ledgerEmitter: TapeEmitter | null = null;
 				let unsubscribeLedger: (() => void) | null = null;
 				const ledgerRunId = newEventId();
-				const ledgerWorkspacePath = resolve(cwd);
+				const ledgerWorkspacePath = resolvedCwd;
 
 				// Unit-context tracker: mutable state that getUnitCtx returns on demand.
 				// Updated by the unit-boundary subscription below.
 				let currentUnit: LedgerUnitContext | null = null;
+				let runStartEventId: string | undefined;
 				const getUnitCtx = () => currentUnit;
 
 				if (useLedger) {
 					try {
 						const binary = resolveLedgerBinary(cwd);
-						ledgerChild = spawnLedgerSubprocess(binary, ledgerRunId, cwd);
+						ledgerChild = spawnLedgerSubprocess(
+							binary,
+							ledgerRunId,
+							resolvedCwd,
+						);
 						ledgerEmitter = await createTapeEmitter({
 							childStdin: ledgerChild.stdin,
 							childStderr: ledgerChild.stderr,
 							childExit: ledgerChild.exit,
-							workspacePath: cwd,
+							workspacePath: resolvedCwd,
 							runId: ledgerRunId,
 						});
 						ledgerEmitter.onFailure((failure: LedgerFailure) => {
@@ -2183,6 +2235,7 @@ export async function runCli(
 										ledgerWorkspacePath,
 										unitId,
 										e.executionType ?? "command",
+										runStartEventId,
 									);
 									break;
 								}
@@ -2253,10 +2306,13 @@ export async function runCli(
 				const { existsSync: fsExistsSync, realpathSync: fsRealpathSync } =
 					await import("node:fs");
 				const { resolve: pathResolve } = await import("node:path");
-				const originalExecutePacket = commandExecutor.executePacket;
-				commandExecutor.executePacket = (
+				let originalExecutePacket:
+					| ((packetUnknown: unknown, executionRoot: string) => unknown)
+					| undefined;
+				const makeReceipt = (
 					packetUnknown: unknown,
 					executionRoot: string,
+					ledgerEmitterForCommand: TapeEmitter,
 				): unknown => {
 					const p = packetUnknown as {
 						execution: {
@@ -2267,17 +2323,12 @@ export async function runCli(
 						verification: { requiredOutputs: readonly string[] };
 					};
 					const workspaceRoot = pathResolve(executionRoot);
-					// Create a registry scoped to the worktree (executionRoot) so that
-					// sandbox path resolution inside run_command uses the right root.
 					const perCallRawRegistry = createToolRegistry(workspaceRoot);
-					const perCallRegistry = runLedgerEmitter
-						? wrapToolRegistryForLedger(
-								perCallRawRegistry,
-								runLedgerEmitter,
-								runGetUnitCtx,
-							)
-						: perCallRawRegistry;
-					// Resolve the effective cwd for the receipt (absolute path)
+					const perCallRegistry = wrapToolRegistryForLedger(
+						perCallRawRegistry,
+						ledgerEmitterForCommand,
+						runGetUnitCtx,
+					);
 					const effectiveCwd = p.execution.cwd
 						? pathResolve(workspaceRoot, p.execution.cwd)
 						: workspaceRoot;
@@ -2318,6 +2369,15 @@ export async function runCli(
 						),
 					};
 				};
+				if (runLedgerEmitter) {
+					const activeLedgerEmitter = runLedgerEmitter;
+					originalExecutePacket = commandExecutor.executePacket;
+					commandExecutor.executePacket = (
+						packetUnknown: unknown,
+						root: string,
+					) => makeReceipt(packetUnknown, root, activeLedgerEmitter);
+				}
+				const runStartMs = Date.now();
 
 				if (useAsync && !useTui) {
 					// Model packets auto-switch to async (no TUI)
@@ -2325,7 +2385,16 @@ export async function runCli(
 						| Awaited<ReturnType<typeof orchestrator.runPacketAsync>>
 						| undefined;
 					let asyncResultUnknown: unknown;
+					const packetHash = `sha256:${createHash("sha256")
+						.update(JSON.stringify(enrichedPacket))
+						.digest("hex")}`;
 					try {
+						runStartEventId = emitLedgerRunStarted(
+							ledgerEmitter,
+							packetHash,
+							resolvedCwd,
+							null,
+						);
 						asyncOrchestratorResult = await orchestrator.runPacketAsync(
 							enrichedPacket,
 							cliEventBus,
@@ -2335,6 +2404,13 @@ export async function runCli(
 							asyncOrchestratorResult,
 							structuredMemoryPort,
 							preparedPacket.injectedMemories,
+						);
+						emitLedgerRunCompleted(
+							ledgerEmitter,
+							asyncOrchestratorResult.run.status === "passed"
+								? "passed"
+								: "failed",
+							Date.now() - runStartMs,
 						);
 					} finally {
 						// --- begin ledger cleanup ---
@@ -2359,7 +2435,9 @@ export async function runCli(
 						}
 						// Restore the original commandExecutor.executePacket so a subsequent
 						// invocation of the orchestrator doesn't inherit this run's closed emitter.
-						commandExecutor.executePacket = originalExecutePacket;
+						if (originalExecutePacket) {
+							commandExecutor.executePacket = originalExecutePacket;
+						}
 						// --- end ledger cleanup ---
 					}
 					// asyncResultUnknown is set here: if try threw, finally re-throws and we never reach this line.
@@ -2401,11 +2479,26 @@ export async function runCli(
 					let tuiResult:
 						| Awaited<ReturnType<typeof orchestrator.runPacketAsync>>
 						| undefined;
+					const packetHash = `sha256:${createHash("sha256")
+						.update(JSON.stringify(enrichedPacket))
+						.digest("hex")}`;
+					const tuiStartMs = Date.now();
 					try {
+						runStartEventId = emitLedgerRunStarted(
+							ledgerEmitter,
+							packetHash,
+							resolvedCwd,
+							null,
+						);
 						tuiResult = await orchestrator.runPacketAsync(
 							enrichedPacket,
 							tuiBus,
 							ledgerRunOptions,
+						);
+						emitLedgerRunCompleted(
+							ledgerEmitter,
+							tuiResult.run.status === "passed" ? "passed" : "failed",
+							Date.now() - tuiStartMs,
 						);
 					} finally {
 						// --- begin ledger cleanup ---
@@ -2428,7 +2521,9 @@ export async function runCli(
 						}
 						// Restore the original commandExecutor.executePacket so a subsequent
 						// invocation of the orchestrator doesn't inherit this run's closed emitter.
-						commandExecutor.executePacket = originalExecutePacket;
+						if (originalExecutePacket) {
+							commandExecutor.executePacket = originalExecutePacket;
+						}
 						// --- end ledger cleanup ---
 					}
 					persistInjectedMemories(
@@ -2443,21 +2538,18 @@ export async function runCli(
 
 				// Declare as unknown so both the try assignment and post-try casts typecheck.
 				let syncResultUnknown: unknown;
-				const syncStartMs = Date.now();
+				const packetHash = `sha256:${createHash("sha256")
+					.update(JSON.stringify(enrichedPacket))
+					.digest("hex")}`;
 				try {
 					// Emit run_started directly for the sync path (runPacket does not use the
 					// event bus, so we cannot rely on bus subscription here).
-					if (ledgerEmitter) {
-						ledgerEmitter.emit("run_started", {
-							RunStartedV1: {
-								packet_hash: "sha256:unknown",
-								git_head: "",
-								workspace_path: cwd,
-								config: {},
-								parent_run_id: null,
-							},
-						});
-					}
+					runStartEventId = emitLedgerRunStarted(
+						ledgerEmitter,
+						packetHash,
+						resolvedCwd,
+						null,
+					);
 					syncResultUnknown = withPersistedInjectedMemories(
 						useAsync
 							? await orchestrator.runPacketAsync(
@@ -2474,18 +2566,13 @@ export async function runCli(
 						preparedPacket.injectedMemories,
 					);
 					// Emit run_completed on success.
-					if (ledgerEmitter) {
-						const r = syncResultUnknown as { run?: { status?: string } };
-						const outcome = r.run?.status === "passed" ? "passed" : "failed";
-						ledgerEmitter.emit("run_completed", {
-							RunCompletedV1: {
-								outcome,
-								duration_ms: Date.now() - syncStartMs,
-								event_count: 0,
-								unit_count: 1,
-							},
-						});
-					}
+					const r = syncResultUnknown as { run?: { status?: string } };
+					const outcome = r.run?.status === "passed" ? "passed" : "failed";
+					emitLedgerRunCompleted(
+						ledgerEmitter,
+						outcome,
+						Date.now() - runStartMs,
+					);
 				} finally {
 					// --- begin ledger cleanup ---
 					if (ledgerEmitter) {
@@ -2496,8 +2583,8 @@ export async function runCli(
 							currentUnit,
 							(syncResultUnknown as { run?: { status?: string } } | undefined)
 								?.run?.status === "passed"
-									? "passed"
-									: "failed",
+								? "passed"
+								: "failed",
 						);
 					}
 					unsubscribeLedger?.();
@@ -2510,7 +2597,9 @@ export async function runCli(
 					}
 					// Restore the original commandExecutor.executePacket so a subsequent
 					// invocation of the orchestrator doesn't inherit this run's closed emitter.
-					commandExecutor.executePacket = originalExecutePacket;
+					if (originalExecutePacket) {
+						commandExecutor.executePacket = originalExecutePacket;
+					}
 					// --- end ledger cleanup ---
 				}
 				// syncResultUnknown is set here: if try threw, finally re-throws and we never arrive.

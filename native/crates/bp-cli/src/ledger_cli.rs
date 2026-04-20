@@ -41,8 +41,18 @@ pub enum ReplayFormat {
 /// Parse `ledger <subcommand> [args...]` into a LedgerCommand.
 pub fn parse_ledger_command(args: &[String]) -> Result<LedgerCommand, String> {
     match args.first().map(String::as_str) {
-        Some("serve") => parse_serve(&args[1..]).map(LedgerCommand::Serve),
-        Some("replay") => parse_replay(&args[1..]).map(LedgerCommand::Replay),
+        Some("serve") => {
+            if args.iter().any(|arg| matches!(arg.as_str(), "--help" | "-h" | "help")) {
+                return Ok(LedgerCommand::Help);
+            }
+            parse_serve(&args[1..]).map(LedgerCommand::Serve)
+        }
+        Some("replay") => {
+            if args.iter().any(|arg| matches!(arg.as_str(), "--help" | "-h" | "help")) {
+                return Ok(LedgerCommand::Help);
+            }
+            parse_replay(&args[1..]).map(LedgerCommand::Replay)
+        }
         Some("--help" | "-h" | "help") | None => Ok(LedgerCommand::Help),
         Some(other) => Err(format!("unknown ledger subcommand: {other}")),
     }
@@ -76,11 +86,7 @@ fn parse_serve(args: &[String]) -> Result<ServeArgs, String> {
                     .map_err(|_| "--schema-version must be an integer")?;
             }
             "--help" | "-h" => {
-                // Treat help flag inside serve as LedgerCommand::Help by
-                // returning an Err and re-routing at call site is awkward;
-                // instead just print usage and exit cleanly via Ok path by
-                // returning a sentinel error the caller recognises.
-                return Err("__help__".to_string());
+                return Err("--help is handled by the top-level ledger parser".to_string());
             }
             other => return Err(format!("unknown flag: {other}")),
         }
@@ -239,6 +245,31 @@ mod tests {
         ];
         let err = parse_replay(&args).unwrap_err();
         assert!(err.contains("xml"), "expected format name in error: {err}");
+    }
+
+    #[test]
+    fn parse_ledger_command_routes_serve_help_to_help() {
+        let args = vec!["serve".to_string(), "--help".to_string()];
+        assert_eq!(
+            parse_ledger_command(&args).unwrap(),
+            LedgerCommand::Help
+        );
+    }
+
+    #[test]
+    fn parse_ledger_command_routes_replay_help_to_help() {
+        let args = vec![
+            "replay".to_string(),
+            "--run-id".to_string(),
+            "run-1".to_string(),
+            "--workspace".to_string(),
+            "/tmp/ws".to_string(),
+            "-h".to_string(),
+        ];
+        assert_eq!(
+            parse_ledger_command(&args).unwrap(),
+            LedgerCommand::Help
+        );
     }
 }
 

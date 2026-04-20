@@ -48,7 +48,9 @@ afterAll(() => {
  *
  * Returns the directory containing the stub (to prepend to PATH).
  */
-function createStubClaude(stdoutText = '{"result":"Task completed.","cost_usd":0.01,"duration_ms":1000,"num_turns":1}'): string {
+function createStubClaude(
+	stdoutText = '{"result":"Task completed.","cost_usd":0.01,"duration_ms":1000,"num_turns":1}',
+): string {
 	const binDir = mkdtempSync(join(tmpdir(), "bp-stub-claude-"));
 	cleanupPaths.push(binDir);
 

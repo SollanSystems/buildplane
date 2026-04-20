@@ -182,8 +182,9 @@ pub fn serve_with_protocol<R: Read, W: Write>(
 fn write_handshake_ack<W: Write>(stderr: &mut W, ready: bool, reason: &str) -> std::io::Result<()> {
     let line = if ready {
         format!(
-            r#"{{"control":"handshake_ack","ready":true,"ledger_version":"{}","schema_version":1}}{}"#,
+            r#"{{"control":"handshake_ack","ready":true,"ledger_version":"{}","schema_version":{}}}{}"#,
             env!("CARGO_PKG_VERSION"),
+            declared_schema_version,
             '\n'
         )
     } else {

@@ -597,6 +597,13 @@ export function createBuildplaneOrchestrator(
 					ctx.workspace.path,
 				);
 			} catch (error) {
+				bus.emit({
+					kind: "execution-error",
+					runId: ctx.run.id,
+					timestamp: new Date().toISOString(),
+					message: error instanceof Error ? error.message : String(error),
+					phase: "execution",
+				});
 				const failure = infrastructureFailure(
 					"runtime-execution-failed",
 					error,
