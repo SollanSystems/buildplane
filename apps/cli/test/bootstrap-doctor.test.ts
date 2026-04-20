@@ -137,6 +137,8 @@ describe("bootstrap doctor report", () => {
 		const result = spawnSync(
 			process.execPath,
 			[
+				"--conditions",
+				"source",
 				"--import",
 				tsxLoaderEntrypoint,
 				cliSourceEntrypoint,
@@ -177,7 +179,14 @@ describe("bootstrap doctor report", () => {
 
 		const result = spawnSync(
 			process.execPath,
-			["--import", tsxLoaderEntrypoint, cliSourceEntrypoint, "--help"],
+			[
+				"--conditions",
+				"source",
+				"--import",
+				tsxLoaderEntrypoint,
+				cliSourceEntrypoint,
+				"--help",
+			],
 			{
 				cwd: workspaceRoot,
 				encoding: "utf8",

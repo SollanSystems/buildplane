@@ -15,8 +15,10 @@
 		{ "path": "../../packages/policy" },
 		{ "path": "../../packages/adapters-git" },
 		{ "path": "../../packages/adapters-tools" },
+		{ "path": "../../packages/adapters-models" },
 		{ "path": "../../packages/ledger-client" },
 		{ "path": "../../packages/adapters-honcho" },
-		{ "path": "../../packages/adapters-codex" }
+		{ "path": "../../packages/adapters-codex" },
+		{ "path": "../../packages/ui-tui" }
 	]
 }
