@@ -31,9 +31,9 @@ type GitStep = "write-tree" | "commit-tree" | "update-ref";
 export function runGitCheckpoint(input: GitCheckpointInput): void {
 	const reference = `refs/buildplane/run/${input.runId}`;
 	let commitSha = "";
-	let status:
-		| { kind: "ok" }
-		| { kind: "failed"; data: { error: string } } = { kind: "ok" };
+	let status: { kind: "ok" } | { kind: "failed"; data: { error: string } } = {
+		kind: "ok",
+	};
 
 	let lastStep: GitStep = "write-tree";
 	try {

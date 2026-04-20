@@ -129,7 +129,10 @@ describe("published bootstrap contract", () => {
 		});
 
 		it("includes uuid for the vendored ledger client runtime", () => {
-			const deps = (publishManifest.dependencies ?? {}) as Record<string, string>;
+			const deps = (publishManifest.dependencies ?? {}) as Record<
+				string,
+				string
+			>;
 			expect(deps.uuid).toBe("^11");
 		});
 

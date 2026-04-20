@@ -2,22 +2,6 @@
 //
 // Phase A shipped the types skeleton; Phase B adds the runtime.
 
-export {
-	type CreateTapeEmitterOptions,
-	createTapeEmitter,
-	type EmitOptions,
-	type TapeEmitter,
-} from "./emitter.js";
-
-export {
-	type LedgerFailure,
-	type LedgerFailureKind,
-	LedgerHandshakeError,
-} from "./failure.js";
-
-export * from "./generated/index.js";
-export type { Payload } from "./payload.js";
-
 /**
  * Generate a new event identifier for the ledger.
  *
@@ -28,3 +12,16 @@ export type { Payload } from "./payload.js";
  * by id will see events out of order.
  */
 export { v7 as newEventId } from "uuid";
+export {
+	type CreateTapeEmitterOptions,
+	createTapeEmitter,
+	type EmitOptions,
+	type TapeEmitter,
+} from "./emitter.js";
+export {
+	type LedgerFailure,
+	type LedgerFailureKind,
+	LedgerHandshakeError,
+} from "./failure.js";
+export * from "./generated/index.js";
+export type { Payload } from "./payload.js";

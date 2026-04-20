@@ -37,7 +37,9 @@ const hoisted = vi.hoisted(() => {
 	const parseUnitPacketMock = vi.fn((input: string) =>
 		forkState.parsePacketImpl(input),
 	);
-	const runPacketMock = vi.fn((packet: unknown) => forkState.runPacketImpl(packet));
+	const runPacketMock = vi.fn((packet: unknown) =>
+		forkState.runPacketImpl(packet),
+	);
 	const runPacketAsyncMock = vi.fn((packet: unknown) =>
 		forkState.runPacketAsyncImpl(packet),
 	);
@@ -98,20 +100,14 @@ const hoisted = vi.hoisted(() => {
 	};
 });
 
-const {
-	forkState,
-	parseUnitPacketMock,
-	runPacketMock,
-	runPacketAsyncMock,
-	createTapeEmitterMock,
-	spawnSyncMock,
-	spawnMock,
-} = hoisted;
+const { forkState, parseUnitPacketMock, runPacketMock, runPacketAsyncMock } =
+	hoisted;
 
 vi.mock("node:child_process", async () => {
-	const actual = await vi.importActual<typeof import("node:child_process")>(
-		"node:child_process",
-	);
+	const actual =
+		await vi.importActual<typeof import("node:child_process")>(
+			"node:child_process",
+		);
 	return {
 		...actual,
 		spawn: hoisted.spawnMock,
@@ -297,7 +293,9 @@ describe("fork CLI orchestration", () => {
 			expect.any(Object),
 		);
 		expect(runPacketMock).not.toHaveBeenCalled();
-		expect(stdout.join("\n")).toContain("fork run completed: fork-run-123 (exit 0)");
+		expect(stdout.join("\n")).toContain(
+			"fork run completed: fork-run-123 (exit 0)",
+		);
 	});
 
 	it("normalizes planned packet JSON through parseUnitPacket before fork execution", async () => {
@@ -323,14 +321,20 @@ describe("fork CLI orchestration", () => {
 		});
 		forkState.runPacketImpl = (packet: unknown) => {
 			const typed = packet as { verification?: { requiredOutputs?: string[] } };
-			if (!typed.verification || !Array.isArray(typed.verification.requiredOutputs)) {
+			if (
+				!typed.verification ||
+				!Array.isArray(typed.verification.requiredOutputs)
+			) {
 				throw new Error("packet verification defaults were not normalized");
 			}
 			return { run: { status: "passed" } };
 		};
 		forkState.runPacketAsyncImpl = async (packet: unknown) => {
 			const typed = packet as { verification?: { requiredOutputs?: string[] } };
-			if (!typed.verification || !Array.isArray(typed.verification.requiredOutputs)) {
+			if (
+				!typed.verification ||
+				!Array.isArray(typed.verification.requiredOutputs)
+			) {
 				throw new Error("packet verification defaults were not normalized");
 			}
 			return { run: { status: "passed" } };
