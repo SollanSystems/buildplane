@@ -1,0 +1,17 @@
+[package]
+name = "bp-replay"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+bp-ledger.workspace = true
+chrono.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

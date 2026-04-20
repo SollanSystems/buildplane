@@ -51,6 +51,9 @@ const FORBIDDEN_STAGED_README_PATTERNS = Object.freeze([
 const NPM_COMMAND = resolveRequiredCommand("npm");
 const PNPM_COMMAND = resolveRequiredCommand("pnpm");
 const GIT_COMMAND = resolveRequiredCommand("git");
+const CARGO_COMMAND = resolveRequiredCommand("cargo");
+const NATIVE_BINARY_NAME =
+	process.platform === "win32" ? "buildplane-native.exe" : "buildplane-native";
 
 function getErrorMessage(error) {
 	return error instanceof Error ? error.message : String(error);
@@ -182,6 +185,28 @@ function assertNoCommandStderr(label, commandDescription, stderr) {
 			`${label}: command produced unexpected stderr for ${commandDescription}\n${stderr.trim()}`,
 		);
 	}
+}
+
+function buildFreshLedgerTestBinary() {
+	console.log("repo verification gate: building native ledger binary...");
+	runCommand(
+		CARGO_COMMAND,
+		["build", "--manifest-path", "native/Cargo.toml", "-p", "bp-cli"],
+		{ cwd: REPO_ROOT },
+	);
+	const nativeBinaryPath = join(
+		REPO_ROOT,
+		"native",
+		"target",
+		"debug",
+		NATIVE_BINARY_NAME,
+	);
+	if (!existsSync(nativeBinaryPath)) {
+		fail(
+			`repo verification gate: expected native ledger binary at ${nativeBinaryPath}`,
+		);
+	}
+	return nativeBinaryPath;
 }
 
 function createCliRunner(command, prefixArgs = []) {
@@ -587,7 +612,14 @@ function main() {
 		console.log("== repo verification gate ==");
 		runCommand(PNPM_COMMAND, ["lint"], { cwd: REPO_ROOT });
 		runCommand(PNPM_COMMAND, ["typecheck"], { cwd: REPO_ROOT });
-		runCommand(PNPM_COMMAND, ["test"], { cwd: REPO_ROOT });
+		const nativeBinaryPath = buildFreshLedgerTestBinary();
+		runCommand(PNPM_COMMAND, ["test"], {
+			cwd: REPO_ROOT,
+			env: {
+				...process.env,
+				BUILDPLANE_NATIVE_BIN: nativeBinaryPath,
+			},
+		});
 		runCommand(PNPM_COMMAND, ["build"], { cwd: REPO_ROOT });
 		repoStateGuard.reset();
 

@@ -1,0 +1,26 @@
+[package]
+name = "bp-ledger"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+bp-ledger-macros.workspace = true
+chrono.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2 = { workspace = true }
+thiserror.workspace = true
+typeshare.workspace = true
+uuid.workspace = true
+
+[build-dependencies]
+typeshare = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+
+[[bin]]
+name = "bp-ledger-gen-fixtures"
+path = "src/bin/gen_fixtures.rs"

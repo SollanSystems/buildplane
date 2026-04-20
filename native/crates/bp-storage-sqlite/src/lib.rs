@@ -285,10 +285,9 @@ impl SqliteMemoryStore {
             .collect::<Vec<_>>();
         orphan_promoted_item_ids.sort();
 
-        let mut duplicate_promoted_groups: BTreeMap<
-            (String, String, String, String, String, String, Vec<String>, Vec<String>),
-            Vec<String>,
-        > = BTreeMap::new();
+        // Key: (kind, title, body, scope_type, scope_key, origin_pack, tags, packs)
+        type DupKey = (String, String, String, String, String, String, Vec<String>, Vec<String>);
+        let mut duplicate_promoted_groups: BTreeMap<DupKey, Vec<String>> = BTreeMap::new();
         for item in global_items.iter().chain(workspace_items.iter()) {
             let Some(promoted_from_id) = item.promoted_from_id.as_ref() else {
                 continue;

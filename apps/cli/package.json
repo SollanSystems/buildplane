@@ -16,13 +16,16 @@
 	},
 	"dependencies": {
 		"@buildplane/adapters-codex": "workspace:*",
+		"@buildplane/adapters-tools": "workspace:*",
 		"@buildplane/adapters-honcho": "workspace:*",
 		"@buildplane/adapters-git": "workspace:*",
 		"@buildplane/adapters-models": "workspace:*",
 		"@buildplane/kernel": "workspace:*",
+		"@buildplane/ledger-client": "workspace:*",
 		"@buildplane/policy": "workspace:*",
 		"@buildplane/runtime": "workspace:*",
 		"@buildplane/storage": "workspace:*",
-		"@buildplane/ui-tui": "workspace:*"
+		"@buildplane/ui-tui": "workspace:*",
+		"uuid": "^11"
 	}
 }

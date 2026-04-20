@@ -41,6 +41,7 @@ import type {
 import type { Run } from "./types.js";
 
 export interface CreateRunOptions {
+	readonly runId?: string;
 	readonly parentRunId?: string;
 	readonly strategyId?: string;
 }

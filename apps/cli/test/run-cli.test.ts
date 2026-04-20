@@ -1953,6 +1953,97 @@ describe("cli command surface", () => {
 		expect(result.stdout[0]).toBe("run-id: run-async");
 	});
 
+	it("reuses the existing CLI event bus for TUI execution instead of creating a separate TUI bus", async () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-cli-tui-bus-"));
+		const renderTuiMock = vi.fn(() => ({
+			waitUntilExit: async () => {},
+			unmount: () => {},
+			clear: () => {},
+		}));
+		const createEventBusMock = vi.fn(() => ({
+			subscribe: () => () => {},
+			emit: () => {},
+		}));
+		vi.doMock("@buildplane/ui-tui", () => ({ renderTui: renderTuiMock }));
+		vi.doMock("@buildplane/kernel", () => ({
+			createEventBus: createEventBusMock,
+		}));
+		let asyncBus: unknown;
+		const dependencies: RunCliDependencies = {
+			createOrchestrator: () => ({
+				initializeProject() {
+					return {
+						created: true,
+						projectRoot: root,
+						stateDbPath: join(root, ".buildplane", "state.db"),
+					};
+				},
+				runPacket() {
+					throw new Error("sync path should not be used for --tui");
+				},
+				async runPacketAsync(_packet: unknown, eventBus?: unknown) {
+					asyncBus = eventBus;
+					return {
+						run: { id: "run-tui", status: "passed" },
+						receipt: null,
+						decision: null,
+					};
+				},
+				getStatus() {
+					return {
+						initialized: true,
+						latestRunUsedWorkspace: false,
+						actionableWorkspaces: [],
+						runCounts: {
+							pending: 0,
+							running: 0,
+							passed: 0,
+							failed: 0,
+							cancelled: 0,
+						},
+					};
+				},
+				inspect() {
+					throw new Error("not used");
+				},
+			}),
+			parsePacket() {
+				return {
+					unit: {
+						id: "unit-tui-command",
+						kind: "command",
+						scope: "task",
+						inputRefs: [],
+						expectedOutputs: [],
+						verificationContract: "exit-0",
+						policyProfile: "default",
+					},
+					execution: {
+						command: "node",
+						args: ["-e", "console.log('ok')"],
+					},
+					verification: { requiredOutputs: [] },
+				};
+			},
+		};
+
+		try {
+			const result = await runCliCapture(
+				root,
+				["run", "--raw", "--tui", "--packet", "command-packet.json"],
+				dependencies,
+			);
+
+			expect(result.exitCode).toBe(0);
+			expect(createEventBusMock).not.toHaveBeenCalled();
+			expect(renderTuiMock).toHaveBeenCalledTimes(1);
+			expect(asyncBus).toBe(renderTuiMock.mock.calls[0]?.[0]);
+		} finally {
+			vi.doUnmock("@buildplane/ui-tui");
+			vi.doUnmock("@buildplane/kernel");
+		}
+	});
+
 	it("dispatches command packets via sync runPacket when --tui is not set", async () => {
 		const root = mkdtempSync(join(tmpdir(), "buildplane-cli-cmd-sync-"));
 		const calls: string[] = [];

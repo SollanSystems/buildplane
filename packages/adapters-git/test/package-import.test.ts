@@ -9,6 +9,10 @@ describe("@buildplane/adapters-git package consumption", () => {
 		const output = execFileSync(
 			process.execPath,
 			[
+				"--conditions",
+				"source",
+				"--import",
+				"tsx",
 				"-e",
 				"import('@buildplane/adapters-git').then((mod) => console.log(JSON.stringify(Object.keys(mod).sort())))",
 			],
@@ -25,6 +29,10 @@ describe("@buildplane/adapters-git package consumption", () => {
 		const output = execFileSync(
 			process.execPath,
 			[
+				"--conditions",
+				"source",
+				"--import",
+				"tsx",
 				"-e",
 				"import('@buildplane/adapters-git/worktree-adapter').then(() => console.log('resolved')).catch((error) => console.log(error.code ?? error.message))",
 			],

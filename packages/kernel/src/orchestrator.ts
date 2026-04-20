@@ -16,6 +16,7 @@ import type {
 	BuildplaneRuntimePort,
 	BuildplaneStoragePort,
 	BuildplaneWorkspacePort,
+	CreateRunOptions,
 } from "./ports.js";
 import type {
 	ExecutionReceipt,
@@ -40,10 +41,15 @@ const noopBus: EventBus = {
 
 export interface BuildplaneOrchestrator {
 	initializeProject(): ReturnType<BuildplaneStoragePort["initializeProject"]>;
-	runPacket(packet: UnitPacket): RunPacketResult;
+	runPacket(
+		packet: UnitPacket,
+		eventBus?: EventBus,
+		createRunOptions?: CreateRunOptions,
+	): RunPacketResult;
 	runPacketAsync(
 		packet: UnitPacket,
 		eventBus?: EventBus,
+		createRunOptions?: CreateRunOptions,
 	): Promise<RunPacketResult>;
 	getStatus(): StatusSnapshot;
 	inspect(id: string): InspectSnapshot;
@@ -241,7 +247,10 @@ export function createBuildplaneOrchestrator(
 		  }
 		| { ok: false; result: RunPacketResult };
 
-	function prepareRun(packet: UnitPacket): PrepareRunResult {
+	function prepareRun(
+		packet: UnitPacket,
+		createRunOptions?: CreateRunOptions,
+	): PrepareRunResult {
 		storage.getStatusSnapshot();
 
 		const validatedPacket = validatePacketForWorkspaceRoot(
@@ -249,7 +258,7 @@ export function createBuildplaneOrchestrator(
 			join(projectRoot, ".buildplane", "workspaces", "future-run-id"),
 		);
 		const { headSha } = workspace.assertRunnableRepository(projectRoot);
-		const run = storage.createRun(validatedPacket);
+		const run = storage.createRun(validatedPacket, createRunOptions);
 
 		let preparedWorkspace: WorkspaceSnapshot;
 
@@ -568,10 +577,18 @@ export function createBuildplaneOrchestrator(
 		initializeProject() {
 			return storage.initializeProject();
 		},
-		runPacket(packet) {
-			const prepared = prepareRun(packet);
+		runPacket(packet, eventBus?, createRunOptions?) {
+			const bus = eventBus ?? defaultBus;
+			const prepared = prepareRun(packet, createRunOptions);
 			if (!prepared.ok) return prepared.result;
 			const { ctx } = prepared;
+
+			bus.emit({
+				kind: "execution-started",
+				runId: ctx.run.id,
+				timestamp: new Date().toISOString(),
+				executionType: "command",
+			});
 
 			let receipt: ExecutionReceipt;
 			try {
@@ -580,6 +597,13 @@ export function createBuildplaneOrchestrator(
 					ctx.workspace.path,
 				);
 			} catch (error) {
+				bus.emit({
+					kind: "execution-error",
+					runId: ctx.run.id,
+					timestamp: new Date().toISOString(),
+					message: error instanceof Error ? error.message : String(error),
+					phase: "execution",
+				});
 				const failure = infrastructureFailure(
 					"runtime-execution-failed",
 					error,
@@ -590,9 +614,20 @@ export function createBuildplaneOrchestrator(
 				});
 			}
 
+			bus.emit({
+				kind: "command-execution-complete",
+				runId: ctx.run.id,
+				timestamp: new Date().toISOString(),
+				exitCode: receipt.exitCode,
+				outputChecks: receipt.outputChecks.map((c) => ({
+					path: c.path,
+					exists: c.exists,
+				})),
+			});
+
 			return finalizeRun(ctx, receipt);
 		},
-		async runPacketAsync(packet, eventBus?) {
+		async runPacketAsync(packet, eventBus?, createRunOptions?) {
 			const bus = eventBus ?? defaultBus;
 
 			// Resolve policy profile from registry
@@ -612,7 +647,7 @@ export function createBuildplaneOrchestrator(
 							packet,
 							join(projectRoot, ".buildplane", "workspaces", "future-run-id"),
 						);
-						const run = storage.createRun(validatedPacket);
+						const run = storage.createRun(validatedPacket, createRunOptions);
 						return finalizeInfrastructureFailure(run, failure);
 					} catch {
 						return {
@@ -633,7 +668,7 @@ export function createBuildplaneOrchestrator(
 					packet,
 					join(projectRoot, ".buildplane", "workspaces", "future-run-id"),
 				);
-				const run = storage.createRun(validatedPacket);
+				const run = storage.createRun(validatedPacket, createRunOptions);
 				storage.markRunRunning(run.id);
 				const suspendedRun = storage.suspendRun(run.id);
 				bus.emit({
@@ -647,7 +682,7 @@ export function createBuildplaneOrchestrator(
 				return { run: suspendedRun, suspended: true } as RunPacketResult;
 			}
 
-			const prepared = prepareRun(packet);
+			const prepared = prepareRun(packet, createRunOptions);
 			if (!prepared.ok) {
 				// Emit a visible event when workspace preparation fails
 				if (prepared.result.failure?.kind === "workspace-prepare-failed") {

@@ -25,6 +25,14 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Verify ledger payload fixtures are fresh
+        run: |
+          pnpm ledger:gen-fixtures
+          git diff --exit-code -- packages/ledger-client/fixtures/payload-variants.json
+
       - name: Assert no dist directories before build
         run: |
           for d in apps/cli/dist packages/*/dist; do

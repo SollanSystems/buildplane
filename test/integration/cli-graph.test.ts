@@ -35,8 +35,18 @@ describe("CLI run-graph command", () => {
 
 		execFileSync(
 			process.execPath,
-			["--import", tsxLoaderEntrypoint, cliSourceEntrypoint, "init"],
-			{ cwd: repo, encoding: "utf8" },
+			[
+				"--conditions",
+				"source",
+				"--import",
+				tsxLoaderEntrypoint,
+				cliSourceEntrypoint,
+				"init",
+			],
+			{
+				cwd: repo,
+				encoding: "utf8",
+			},
 		);
 
 		const graph = {
@@ -64,6 +74,8 @@ describe("CLI run-graph command", () => {
 			stdout = execFileSync(
 				process.execPath,
 				[
+					"--conditions",
+					"source",
 					"--import",
 					tsxLoaderEntrypoint,
 					cliSourceEntrypoint,

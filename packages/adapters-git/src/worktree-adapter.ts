@@ -112,6 +112,9 @@ export function createGitWorktreeAdapter(
 				`:(exclude)${buildplanePrefix}/runs/**`,
 				`:(exclude)${buildplanePrefix}/logs/**`,
 				`:(exclude)${buildplanePrefix}/workspaces/**`,
+				// Phase B: ledger writes events.db and WAL files under .buildplane/ledger/
+				// during runs; excluding them keeps the clean-worktree check honest.
+				`:(exclude)${buildplanePrefix}/ledger/**`,
 			]);
 			if (cleanlinessCheck.status !== 0) {
 				throw new Error(

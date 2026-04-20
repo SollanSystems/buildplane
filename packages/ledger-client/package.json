@@ -1,0 +1,23 @@
+{
+	"name": "@buildplane/ledger-client",
+	"private": true,
+	"version": "0.1.0",
+	"type": "module",
+	"description": "Typed TS client for the bp-ledger event store (IPC protocol wired in Phase B)",
+	"exports": {
+		".": {
+			"source": "./src/index.ts",
+			"types": "./src/index.d.ts",
+			"import": "./dist/index.js"
+		}
+	},
+	"scripts": {
+		"build": "tsc --build"
+	},
+	"dependencies": {
+		"uuid": "^11"
+	},
+	"devDependencies": {
+		"@types/uuid": "^10"
+	}
+}
