@@ -12,3 +12,4 @@ coverage/
 .gsd
 native/target/
 .hermes/
+.claude/settings.local.json

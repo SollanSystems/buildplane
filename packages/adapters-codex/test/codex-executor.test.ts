@@ -1,8 +1,12 @@
 import { EventEmitter } from "node:events";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Readable } from "node:stream";
 import type { UnitPacket } from "@buildplane/kernel";
 import { createEventBus } from "@buildplane/kernel";
 import { describe, expect, it, vi } from "vitest";
+import { createCodexRenderer } from "../../adapters-models/src/renderers/index.js";
 import { createCodexExecutor } from "../src/codex-executor.js";
 
 // ---------------------------------------------------------------------------
@@ -175,6 +179,92 @@ describe("CodexExecutor", () => {
 		expect(promptArg).toContain("Write a hello world file.");
 	});
 
+	it("renderer path folds injected memories into the codex prompt", async () => {
+		const mockSpawn = createMockSpawn({ exitCode: 0 });
+		const executor = createCodexExecutor({
+			renderer: createCodexRenderer(),
+			spawnFn: mockSpawn as never,
+		});
+		const eventBus = createEventBus();
+
+		const packet = makePacket({
+			intent: {
+				objective: "Write a hello world file.",
+				taskType: "implement",
+				context: {
+					files: ["output/result.txt"],
+					priorWork: [],
+					memories: ["[procedure] always write output/hello.js first"],
+				},
+				constraints: {
+					scope: ["output/"],
+					verification: ["test -f output/hello.js"],
+				},
+				features: {
+					ambiguity: "low",
+					reversibility: "easy",
+					verifierStrength: "strong",
+				},
+			},
+			model: {
+				provider: "codex",
+				model: "o4-mini",
+			},
+		});
+
+		await executor.executePacketAsync(packet, PROJECT_ROOT, eventBus);
+
+		const spawnArgs: string[] = mockSpawn.mock.calls[0][1] as string[];
+		const promptArg = spawnArgs[spawnArgs.length - 1];
+		expect(promptArg).toContain("<memories>");
+		expect(promptArg).toContain("always write output/hello.js first");
+	});
+
+	it("renderer path also folds model.systemPrompt before the rendered prompt", async () => {
+		const mockSpawn = createMockSpawn({ exitCode: 0 });
+		const executor = createCodexExecutor({
+			renderer: createCodexRenderer(),
+			spawnFn: mockSpawn as never,
+		});
+		const eventBus = createEventBus();
+
+		const packet = makePacket({
+			intent: {
+				objective:
+					"Write output/reviewer-rescue.js as an initial draft implementation.",
+				taskType: "implement",
+				context: {
+					files: ["output/reviewer-seed.txt"],
+					priorWork: [],
+					memories: [],
+				},
+				constraints: {
+					scope: ["output/"],
+					verification: ["test -f output/reviewer-rescue.js"],
+				},
+				features: {
+					ambiguity: "low",
+					reversibility: "easy",
+					verifierStrength: "strong",
+				},
+			},
+			model: {
+				provider: "codex",
+				model: "o4-mini",
+				systemPrompt:
+					"Reviewer feedback from round 1: address the approval issue before retrying.",
+			},
+		});
+
+		await executor.executePacketAsync(packet, PROJECT_ROOT, eventBus);
+
+		const spawnArgs: string[] = mockSpawn.mock.calls[0][1] as string[];
+		const promptArg = spawnArgs[spawnArgs.length - 1];
+		expect(promptArg).toContain("Reviewer feedback from round 1");
+		expect(promptArg).toContain("<task");
+		expect(promptArg).toContain("output/reviewer-rescue.js");
+	});
+
 	it("model and --model flag passed to codex CLI args", async () => {
 		const mockSpawn = createMockSpawn({ exitCode: 0 });
 		const executor = createCodexExecutor({ spawnFn: mockSpawn as never });
@@ -190,6 +280,102 @@ describe("CodexExecutor", () => {
 		const modelIndex = spawnArgs.indexOf("--model");
 		expect(modelIndex).toBeGreaterThanOrEqual(0);
 		expect(spawnArgs[modelIndex + 1]).toBe("o3");
+	});
+
+	it("on Windows, npm-style cmd shims resolve to the JS entry so multiline prompts survive", async () => {
+		const shimRoot = mkdtempSync(join(tmpdir(), "bp-codex-win-shim-"));
+		const shimBin = join(shimRoot, "bin");
+		const shimEntry = join(
+			shimBin,
+			"node_modules",
+			"@openai",
+			"codex",
+			"bin",
+			"codex.js",
+		);
+		mkdirSync(join(shimBin, "node_modules", "@openai", "codex", "bin"), {
+			recursive: true,
+		});
+		writeFileSync(join(shimBin, "codex.cmd"), "@echo off\r\nexit /b 0\r\n");
+		writeFileSync(shimEntry, "process.exit(0);\n");
+
+		const originalPlatform = process.platform;
+		const originalPath = process.env.PATH;
+		const pathValue = [shimBin, originalPath ?? ""].filter(Boolean).join(";");
+		Object.defineProperty(process, "platform", {
+			configurable: true,
+			value: "win32",
+		});
+		process.env.PATH = pathValue;
+
+		try {
+			const mockSpawn = createMockSpawn({ exitCode: 0 });
+			const executor = createCodexExecutor({ spawnFn: mockSpawn as never });
+			const eventBus = createEventBus();
+			const packet = makePacket({
+				model: {
+					provider: "codex",
+					model: "o4-mini",
+					prompt: "<task>\nUse output/memory-helped.js from memories\n</task>",
+				},
+			});
+
+			await executor.executePacketAsync(packet, PROJECT_ROOT, eventBus);
+
+			expect(mockSpawn).toHaveBeenCalledOnce();
+			expect(mockSpawn.mock.calls[0][0]).toBe(process.execPath);
+			const spawnArgs: string[] = mockSpawn.mock.calls[0][1] as string[];
+			expect(spawnArgs[0]).toBe(shimEntry);
+			expect(spawnArgs[spawnArgs.length - 1]).toContain(
+				"output/memory-helped.js",
+			);
+		} finally {
+			Object.defineProperty(process, "platform", {
+				configurable: true,
+				value: originalPlatform,
+			});
+			process.env.PATH = originalPath;
+			rmSync(shimRoot, { force: true, recursive: true });
+		}
+	});
+
+	it("on Windows, local node_modules/.bin shims resolve to the package JS entry", async () => {
+		const shimRoot = mkdtempSync(join(tmpdir(), "bp-codex-win-local-"));
+		const shimDir = join(shimRoot, "node_modules");
+		const shimEntry = join(shimDir, "@openai", "codex", "bin", "codex.js");
+		const shimPath = join(shimDir, ".bin", "codex.cmd");
+		mkdirSync(join(shimDir, ".bin"), { recursive: true });
+		mkdirSync(join(shimDir, "@openai", "codex", "bin"), { recursive: true });
+		writeFileSync(shimPath, "@echo off\r\nexit /b 0\r\n");
+		writeFileSync(shimEntry, "process.exit(0);\n");
+
+		const originalPlatform = process.platform;
+		Object.defineProperty(process, "platform", {
+			configurable: true,
+			value: "win32",
+		});
+
+		try {
+			const mockSpawn = createMockSpawn({ exitCode: 0 });
+			const executor = createCodexExecutor({
+				cliBinary: shimPath,
+				spawnFn: mockSpawn as never,
+			});
+			const eventBus = createEventBus();
+
+			await executor.executePacketAsync(makePacket(), PROJECT_ROOT, eventBus);
+
+			expect(mockSpawn).toHaveBeenCalledOnce();
+			expect(mockSpawn.mock.calls[0][0]).toBe(process.execPath);
+			const spawnArgs: string[] = mockSpawn.mock.calls[0][1] as string[];
+			expect(spawnArgs[0]).toBe(shimEntry);
+		} finally {
+			Object.defineProperty(process, "platform", {
+				configurable: true,
+				value: originalPlatform,
+			});
+			rmSync(shimRoot, { force: true, recursive: true });
+		}
 	});
 
 	it("command packet (has execution block) → throws before spawn", async () => {

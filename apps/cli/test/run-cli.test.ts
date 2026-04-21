@@ -8,6 +8,7 @@ import {
 	type BuildplaneOrchestrator,
 	type BuildplaneWorkspacePort,
 	createBuildplaneOrchestrator,
+	type UnitPacket,
 } from "@buildplane/kernel";
 import { evaluateRun } from "@buildplane/policy";
 import { executePacket } from "@buildplane/runtime";
@@ -67,6 +68,17 @@ function createCliDependencies(
 
 function createGitWorktreeAdapter(): BuildplaneWorkspacePort {
 	return createActualGitWorkspaceAdapter();
+}
+
+function writeWorkspaceFile(
+	root: string,
+	name: string,
+	content: string,
+): string {
+	const targetPath = join(root, name);
+	mkdirSync(dirname(targetPath), { recursive: true });
+	writeFileSync(targetPath, content);
+	return targetPath;
 }
 
 function writePacket(root: string, name: string, packet: unknown): string {
@@ -170,6 +182,46 @@ function createFailingPacket(unitId = "unit-fail") {
 	};
 }
 
+function createBootstrapDoctorReport(ok = true) {
+	return {
+		ok,
+		checks: [
+			{
+				id: "node",
+				label: "Node.js",
+				ok,
+				required: true,
+				expected: "24.13.1",
+				detected: ok ? "24.13.1" : "22.22.2",
+				message: ok
+					? "detected 24.13.1 (requires 24.13.1)"
+					: "Buildplane requires Node 24.13.1. Detected 22.22.2.",
+			},
+			{
+				id: "npm",
+				label: "npm",
+				ok,
+				required: true,
+				command: "npm --version",
+				detected: ok ? "10.9.0" : undefined,
+				message: ok ? "npm 10.9.0" : "command not available",
+			},
+			{
+				id: "git",
+				label: "git",
+				ok,
+				required: true,
+				command: "git --version",
+				detected: ok ? "git version 2.49.0" : undefined,
+				message: ok ? "git version 2.49.0" : "command not available",
+			},
+		],
+		notes: [
+			"Published/global installs do not yet include a verified `buildplane memory ...` contract.",
+		],
+	};
+}
+
 afterEach(() => {
 	vi.restoreAllMocks();
 	vi.unstubAllEnvs();
@@ -186,6 +238,70 @@ describe("cli command surface", () => {
 		expect(result.stdout.join("\n")).toContain("Buildplane by SollanSystems");
 		expect(result.stdout.join("\n")).toContain("Execute:");
 		expect(result.stdout.join("\n")).toContain("init");
+		expect(result.stdout.join("\n")).toContain("bootstrap doctor");
+		expect(result.stdout.join("\n")).toContain("workflow scan");
+	});
+
+	it("bootstrap doctor prints a deterministic human prerequisite report before init", async () => {
+		const root = mkdtempSync(
+			join(tmpdir(), "buildplane-cli-bootstrap-doctor-human-"),
+		);
+
+		const result = await runCliCapture(root, ["bootstrap", "doctor"], {
+			inspectBootstrapDoctor: () => createBootstrapDoctorReport(true),
+		} as unknown as RunCliDependencies);
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stderr).toEqual([]);
+		expect(result.stdout).toContain("bootstrap-doctor: pass");
+		expect(result.stdout).toContain(
+			"  - [pass] node: detected 24.13.1 (requires 24.13.1)",
+		);
+		expect(result.stdout).toContain("  - [pass] npm: npm 10.9.0");
+		expect(result.stdout).toContain(
+			"  - Published/global installs do not yet include a verified `buildplane memory ...` contract.",
+		);
+		expect(existsSync(join(root, ".buildplane"))).toBe(false);
+	});
+
+	it("bootstrap doctor --json returns a failing report without creating .buildplane", async () => {
+		const root = mkdtempSync(
+			join(tmpdir(), "buildplane-cli-bootstrap-doctor-json-"),
+		);
+
+		const result = await runCliCapture(
+			root,
+			["bootstrap", "doctor", "--json"],
+			{
+				inspectBootstrapDoctor: () => createBootstrapDoctorReport(false),
+			} as unknown as RunCliDependencies,
+		);
+
+		expect(result.exitCode).toBe(1);
+		expect(result.stderr).toEqual([]);
+		expect(JSON.parse(result.stdout.join("\n"))).toEqual(
+			createBootstrapDoctorReport(false),
+		);
+		expect(existsSync(join(root, ".buildplane"))).toBe(false);
+	});
+
+	it("bootstrap doctor rejects unsupported extra arguments", async () => {
+		const root = mkdtempSync(
+			join(tmpdir(), "buildplane-cli-bootstrap-doctor-invalid-"),
+		);
+
+		const result = await runCliCapture(root, [
+			"bootstrap",
+			"doctor",
+			"unexpected",
+		]);
+
+		expect(result.exitCode).toBe(1);
+		expect(result.stdout).toEqual([]);
+		expect(result.stderr.join("\n")).toContain(
+			"Unsupported bootstrap doctor arguments: unexpected",
+		);
+		expect(existsSync(join(root, ".buildplane"))).toBe(false);
 	});
 
 	it("shows top-level help for --help", async () => {
@@ -197,6 +313,59 @@ describe("cli command surface", () => {
 		expect(result.stderr).toEqual([]);
 		expect(result.stdout.join("\n")).toContain("Execute:");
 		expect(result.stdout.join("\n")).toContain("run --packet <path>");
+	});
+
+	it("workflow scan prints a preview of recognized workflow files without init", async () => {
+		const root = mkdtempSync(
+			join(tmpdir(), "buildplane-cli-workflow-scan-human-"),
+		);
+		writeWorkspaceFile(root, "CLAUDE.md", "# Claude instructions\n");
+		writeWorkspaceFile(root, ".claude/settings.json", "{}\n");
+		writeWorkspaceFile(root, ".claude/hooks/pre_tool_use.py", "print('hi')\n");
+		writeWorkspaceFile(root, ".codex/config.toml", "model = 'o3'\n");
+		writeWorkspaceFile(root, ".codex/auth.json", "ignored\n");
+
+		const result = await runCliCapture(root, ["workflow", "scan"]);
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stderr).toEqual([]);
+		expect(result.stdout).toContain("workflow-findings: 4");
+		expect(result.stdout).toContain("  - [shared/instructions] CLAUDE.md");
+		expect(result.stdout).toContain(
+			"  - [claude/config] .claude/settings.json",
+		);
+		expect(result.stdout).toContain(
+			"  - [claude/hooks] .claude/hooks/pre_tool_use.py",
+		);
+		expect(result.stdout).toContain("  - [codex/config] .codex/config.toml");
+		expect(result.stdout).toContain(
+			"preview-only: no workflow data was imported",
+		);
+		expect(existsSync(join(root, ".buildplane"))).toBe(false);
+	});
+
+	it("workflow scan --json returns a deterministic preview before init", async () => {
+		const root = mkdtempSync(
+			join(tmpdir(), "buildplane-cli-workflow-scan-json-"),
+		);
+		writeWorkspaceFile(root, "AGENTS.md", "# shared\n");
+		writeWorkspaceFile(root, ".codex/AGENTS.md", "# codex\n");
+		writeWorkspaceFile(root, ".codex/config.toml", "model = 'o3'\n");
+		writeWorkspaceFile(root, ".claude/auth.json", "ignored\n");
+
+		const result = await runCliCapture(root, ["workflow", "scan", "--json"]);
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stderr).toEqual([]);
+		expect(JSON.parse(result.stdout.join("\n"))).toEqual({
+			preview: true,
+			findings: [
+				{ path: "AGENTS.md", source: "shared", kind: "instructions" },
+				{ path: ".codex/AGENTS.md", source: "codex", kind: "instructions" },
+				{ path: ".codex/config.toml", source: "codex", kind: "config" },
+			],
+		});
+		expect(existsSync(join(root, ".buildplane"))).toBe(false);
 	});
 
 	it("returns machine-readable NOT_INITIALIZED errors before init and preflights run before packet loading", async () => {
@@ -300,6 +469,439 @@ describe("cli command surface", () => {
 		]);
 	});
 
+	it("persists injected structured memories and surfaces them in run and inspect output", async () => {
+		const root = createGitRepo();
+		await runCliCapture(root, ["init"]);
+
+		const storage = createBuildplaneStorage(root);
+		storage.upsertRepoFact({
+			factKey: "commands.typecheck",
+			factValue: "npx pnpm typecheck",
+			valueType: "string",
+			scopeType: "repo",
+			createdBy: "system",
+		});
+		storage.createProcedure({
+			name: "fix TypeScript build",
+			taskType: "debug_failure",
+			bodyMarkdown: "Run typecheck before touching imports.",
+			createdBy: "worker",
+		});
+
+		const packetPath = writeCommittedPacket(
+			root,
+			".buildplane/test-packets/injected-packet.json",
+			{
+				...createPassingPacket("unit-injected"),
+				intent: {
+					objective: "Fix the TypeScript build",
+					taskType: "debug_failure",
+					context: { files: ["apps/cli/src/run-cli.ts"] },
+					constraints: {
+						scope: ["apps/cli/src"],
+						verification: ["npx pnpm typecheck"],
+					},
+					features: {
+						ambiguity: "low",
+						reversibility: "easy",
+						verifierStrength: "strong",
+					},
+				},
+			},
+		);
+
+		const runHuman = await runCliCapture(root, [
+			"run",
+			"--raw",
+			"--packet",
+			packetPath,
+		]);
+		const runId = extractRunId(runHuman.stdout);
+		const runJson = await runCliCapture(root, [
+			"run",
+			"--raw",
+			"--json",
+			"--packet",
+			packetPath,
+		]);
+		const inspectHuman = await runCliCapture(root, ["inspect", runId]);
+		const inspectJson = await runCliCapture(root, ["inspect", runId, "--json"]);
+
+		expect(runHuman.exitCode).toBe(0);
+		expect(runHuman.stdout).toEqual(
+			expect.arrayContaining([
+				expect.stringMatching(/^run-id: /),
+				"status: passed",
+				"injected-memories: 2",
+				"  - [repo-fact] commands.typecheck (fuzzy-fact-key)",
+				"  - [procedure] fix TypeScript build (exact-task-type)",
+			]),
+		);
+
+		const parsedRun = JSON.parse(runJson.stdout.join("\n"));
+		expect(parsedRun).toMatchObject({
+			run: { id: expect.any(String), status: "passed" },
+			injectedMemories: [
+				{
+					memoryKind: "repo-fact",
+					memoryId: expect.any(String),
+					matchReason: "fuzzy-fact-key",
+				},
+				{
+					memoryKind: "procedure",
+					memoryId: expect.any(String),
+					matchReason: "exact-task-type",
+				},
+			],
+		});
+
+		expect(inspectHuman.stdout).toEqual(
+			expect.arrayContaining([
+				`run-id: ${runId}`,
+				"injected-memories:",
+				"  [repo-fact] commands.typecheck: npx pnpm typecheck (fuzzy-fact-key)",
+				"  [procedure] fix TypeScript build: Run typecheck before touching imports. (exact-task-type)",
+			]),
+		);
+
+		expect(JSON.parse(inspectJson.stdout.join("\n"))).toMatchObject({
+			run: { id: runId, status: "passed" },
+			injectedMemories: [
+				{
+					memoryKind: "repo-fact",
+					matchReason: "fuzzy-fact-key",
+					displayText: "[repo-fact] commands.typecheck: npx pnpm typecheck",
+				},
+				{
+					memoryKind: "procedure",
+					matchReason: "exact-task-type",
+				},
+			],
+		});
+		const listedInjected = storage.listInjectedMemories(runId);
+		expect(listedInjected).toHaveLength(2);
+	});
+
+	it("surfaces promoted procedure lineage in inspect human and json output", async () => {
+		const root = createGitRepo();
+		await runCliCapture(root, ["init"]);
+
+		const storage = createBuildplaneStorage(root);
+		const packet = createPassingPacket("unit-promotion-lineage") as UnitPacket;
+		const run = storage.createRun(packet);
+		storage.completeRun(run.id, "passed");
+
+		const firstProcedure = storage.createProcedure({
+			name: "implement-then-review workflow for implement tasks",
+			taskType: "implement",
+			bodyMarkdown:
+				"Use an implement-then-review workflow for implement tasks.\n\nObserved learning: missing tests.",
+			createdBy: "worker",
+			sourceRunId: run.id,
+			sourceTaskId: "task-implementer",
+			metadata: {
+				promotionRule: "multi-round-strategy-workflow->procedure",
+				strategyMode: "implement-then-review",
+			},
+		});
+		storage.supersedeProcedure(firstProcedure.id);
+		storage.createProcedure({
+			name: "implement-then-review workflow for implement tasks",
+			taskType: "implement",
+			bodyMarkdown:
+				"Use an implement-then-review workflow for implement tasks.\n\nObserved learning: missing type guards.",
+			createdBy: "worker",
+			sourceRunId: run.id,
+			sourceTaskId: "task-implementer",
+			metadata: {
+				promotionRule: "multi-round-strategy-workflow->procedure",
+				strategyMode: "implement-then-review",
+			},
+		});
+
+		const inspectHuman = await runCliCapture(root, ["inspect", run.id]);
+		const inspectJson = await runCliCapture(root, [
+			"inspect",
+			run.id,
+			"--json",
+		]);
+
+		expect(inspectHuman.exitCode).toBe(0);
+		expect(inspectHuman.stdout).toEqual(
+			expect.arrayContaining([
+				`run-id: ${run.id}`,
+				"promoted-memories:",
+				expect.stringContaining(
+					"[procedure] implement-then-review workflow for implement tasks:",
+				),
+				expect.stringContaining(
+					"status=active, rule=multi-round-strategy-workflow->procedure, source-task=task-implementer",
+				),
+				expect.stringContaining("status=superseded"),
+			]),
+		);
+		expect(JSON.parse(inspectJson.stdout.join("\n"))).toMatchObject({
+			run: { id: run.id, status: "passed" },
+			promotedStructuredMemories: expect.arrayContaining([
+				expect.objectContaining({
+					memoryKind: "procedure",
+					status: "active",
+					promotionRule: "multi-round-strategy-workflow->procedure",
+					sourceRunId: run.id,
+					sourceTaskId: "task-implementer",
+				}),
+				expect.objectContaining({
+					memoryKind: "procedure",
+					status: "superseded",
+					promotionRule: "multi-round-strategy-workflow->procedure",
+					sourceRunId: run.id,
+				}),
+			]),
+		});
+	});
+
+	it("persists injected structured memories for run-graph nodes", async () => {
+		const root = createGitRepo();
+		await runCliCapture(root, ["init"]);
+
+		const storage = createBuildplaneStorage(root);
+		storage.upsertRepoFact({
+			factKey: "commands.typecheck",
+			factValue: "npx pnpm typecheck",
+			valueType: "string",
+			scopeType: "repo",
+			createdBy: "system",
+		});
+		storage.createProcedure({
+			name: "fix TypeScript build",
+			taskType: "debug_failure",
+			bodyMarkdown: "Run typecheck before touching imports.",
+			createdBy: "worker",
+		});
+
+		const graphPath = writeCommittedPacket(
+			root,
+			".buildplane/test-packets/injected-graph.json",
+			{
+				nodes: [
+					{
+						...createPassingPacket("graph-injected"),
+						intent: {
+							objective: "Fix the TypeScript build",
+							taskType: "debug_failure",
+							context: { files: ["apps/cli/src/run-cli.ts"] },
+							constraints: {
+								scope: ["apps/cli/src"],
+								verification: ["npx pnpm typecheck"],
+							},
+							features: {
+								ambiguity: "low",
+								reversibility: "easy",
+								verifierStrength: "strong",
+							},
+						},
+					},
+				],
+				maxConcurrent: 1,
+			},
+		);
+
+		const runGraph = await runCliCapture(root, [
+			"run-graph",
+			"--graph",
+			graphPath,
+		]);
+		const inspectJson = await runCliCapture(root, [
+			"inspect",
+			"graph-injected",
+			"--json",
+		]);
+
+		expect(runGraph.exitCode).toBe(0);
+		expect(runGraph.stdout).toEqual(
+			expect.arrayContaining([
+				"Graph Outcome: passed",
+				" - graph-injected: passed",
+			]),
+		);
+		expect(JSON.parse(inspectJson.stdout.join("\n"))).toMatchObject({
+			run: { unitId: "graph-injected", status: "passed" },
+			injectedMemories: [
+				{ memoryKind: "repo-fact", matchReason: "fuzzy-fact-key" },
+				{ memoryKind: "procedure", matchReason: "exact-task-type" },
+			],
+		});
+	});
+
+	it("persists injected structured memories for custom run-strategy executions", async () => {
+		const root = createGitRepo();
+		await runCliCapture(root, ["init"]);
+
+		const storage = createBuildplaneStorage(root);
+		storage.upsertRepoFact({
+			factKey: "commands.typecheck",
+			factValue: "npx pnpm typecheck",
+			valueType: "string",
+			scopeType: "repo",
+			createdBy: "system",
+		});
+		storage.createProcedure({
+			name: "fix TypeScript build",
+			taskType: "debug_failure",
+			bodyMarkdown: "Run typecheck before touching imports.",
+			createdBy: "worker",
+		});
+
+		const strategyPath = writeCommittedPacket(
+			root,
+			".buildplane/test-packets/injected-strategy.json",
+			{
+				id: "strategy-injected",
+				mode: "single",
+				mergePolicy: "direct",
+				children: [
+					{
+						role: "implementer",
+						packet: {
+							...createPassingPacket("strategy-injected-unit"),
+							intent: {
+								objective: "Fix the TypeScript build",
+								taskType: "debug_failure",
+								context: { files: ["apps/cli/src/run-cli.ts"] },
+								constraints: {
+									scope: ["apps/cli/src"],
+									verification: ["npx pnpm typecheck"],
+								},
+								features: {
+									ambiguity: "low",
+									reversibility: "easy",
+									verifierStrength: "strong",
+								},
+							},
+						},
+					},
+				],
+			},
+		);
+
+		const runStrategy = await runCliCapture(root, [
+			"run-strategy",
+			"--strategy",
+			strategyPath,
+		]);
+		const inspectJson = await runCliCapture(root, [
+			"inspect",
+			"strategy-injected-unit",
+			"--json",
+		]);
+
+		expect(runStrategy.exitCode).toBe(0);
+		expect(runStrategy.stdout).toEqual(
+			expect.arrayContaining([
+				"strategy: strategy-injected",
+				"mode: single",
+				"outcome: passed",
+				"injected-memories: 2",
+			]),
+		);
+		expect(JSON.parse(inspectJson.stdout.join("\n"))).toMatchObject({
+			run: { unitId: "strategy-injected-unit", status: "passed" },
+			injectedMemories: [
+				{ memoryKind: "repo-fact", matchReason: "fuzzy-fact-key" },
+				{ memoryKind: "procedure", matchReason: "exact-task-type" },
+			],
+		});
+	});
+
+	it("surfaces strategy lineage and memory summaries in inspect and history for strategy runs", async () => {
+		const root = createGitRepo();
+		await runCliCapture(root, ["init"]);
+
+		const storage = createBuildplaneStorage(root);
+		storage.upsertRepoFact({
+			factKey: "commands.typecheck",
+			factValue: "npx pnpm typecheck",
+			valueType: "string",
+			scopeType: "repo",
+			createdBy: "system",
+		});
+		storage.createProcedure({
+			name: "fix TypeScript build",
+			taskType: "debug_failure",
+			bodyMarkdown: "Run typecheck before touching imports.",
+			createdBy: "worker",
+		});
+
+		const strategyPath = writeCommittedPacket(
+			root,
+			".buildplane/test-packets/strategy-history.json",
+			{
+				id: "strategy-history",
+				mode: "single",
+				mergePolicy: "direct",
+				children: [
+					{
+						role: "implementer",
+						packet: {
+							...createPassingPacket("strategy-history-unit"),
+							intent: {
+								objective: "Fix the TypeScript build",
+								taskType: "debug_failure",
+								context: { files: ["apps/cli/src/run-cli.ts"] },
+								constraints: {
+									scope: ["apps/cli/src"],
+									verification: ["npx pnpm typecheck"],
+								},
+								features: {
+									ambiguity: "low",
+									reversibility: "easy",
+									verifierStrength: "strong",
+								},
+							},
+						},
+					},
+				],
+			},
+		);
+
+		const runStrategy = await runCliCapture(root, [
+			"run-strategy",
+			"--strategy",
+			strategyPath,
+		]);
+		const inspectHuman = await runCliCapture(root, [
+			"inspect",
+			"strategy-history-unit",
+		]);
+		const inspectJson = await runCliCapture(root, [
+			"inspect",
+			"strategy-history-unit",
+			"--json",
+		]);
+		const historyHuman = await runCliCapture(root, ["history"]);
+		const historyJson = await runCliCapture(root, ["history", "--json"]);
+
+		expect(runStrategy.exitCode).toBe(0);
+		expect(inspectHuman.stdout).toEqual(
+			expect.arrayContaining(["strategy: strategy-history"]),
+		);
+		expect(JSON.parse(inspectJson.stdout.join("\n"))).toMatchObject({
+			strategy: { strategyId: "strategy-history" },
+		});
+		expect(historyHuman.stdout.join("\n")).toContain("strategy-history");
+		expect(historyHuman.stdout.join("\n")).toContain("mem=2/0");
+		expect(JSON.parse(historyJson.stdout.join("\n"))).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					unitId: "strategy-history-unit",
+					strategyId: "strategy-history",
+					injectedMemoryCount: 2,
+					promotedStructuredMemoryCount: 0,
+				}),
+			]),
+		);
+	});
+
 	it("delegates memory commands to the native runner dependency", async () => {
 		const root = mkdtempSync(join(tmpdir(), "buildplane-cli-memory-delegate-"));
 		const calls: Array<{ cwd: string; argv: string[]; commandPath: string[] }> =
@@ -368,6 +970,45 @@ describe("cli command surface", () => {
 				cwd: root,
 				commandPath: ["pack", "show"],
 				argv: ["superclaude"],
+			},
+		]);
+	});
+
+	it("preserves native json output for pack show --json success paths", async () => {
+		const root = mkdtempSync(
+			join(tmpdir(), "buildplane-cli-pack-show-json-success-"),
+		);
+		const calls: Array<{ cwd: string; argv: string[]; commandPath: string[] }> =
+			[];
+		const dependencies: RunCliDependencies = {
+			runNativeCommand: async (argv, options) => {
+				calls.push({
+					cwd: options.cwd,
+					argv,
+					commandPath: options.commandPath,
+				});
+				options.stdout('{"selectionReason":"explicit provider requested"}');
+				options.stderr("pack-show-json-warn");
+				return 7;
+			},
+		};
+
+		const result = await runCliCapture(
+			root,
+			["pack", "show", "superclaude", "--json"],
+			dependencies,
+		);
+
+		expect(result.exitCode).toBe(7);
+		expect(result.stdout).toEqual([
+			'{"selectionReason":"explicit provider requested"}',
+		]);
+		expect(result.stderr).toEqual(["pack-show-json-warn"]);
+		expect(calls).toEqual([
+			{
+				cwd: root,
+				commandPath: ["pack", "show"],
+				argv: ["superclaude", "--json"],
 			},
 		]);
 	});
@@ -726,6 +1367,217 @@ describe("cli command surface", () => {
 				finalizedAt: expect.any(String),
 				existsOnDisk: true,
 			},
+		});
+	});
+
+	it("lists actionable workspaces in human and json output", async () => {
+		const root = createGitRepo();
+		await runCliCapture(root, ["init"]);
+		const storage = createBuildplaneStorage(root);
+		const workspaceAdapter = createActualGitWorkspaceAdapter();
+		const headSha = git(root, ["rev-parse", "HEAD"]).trim();
+
+		const retainedRun = storage.createRun({
+			...createPassingPacket("unit-workspace-retained"),
+		});
+		const retainedWorkspace = workspaceAdapter.prepareWorkspace(
+			root,
+			retainedRun.id,
+			headSha,
+		);
+		storage.recordWorkspacePrepared(retainedRun.id, {
+			path: retainedWorkspace.path,
+			headSha: retainedWorkspace.headSha,
+			sourceProjectRoot: root,
+		});
+		storage.commitRunFailureOutcome(retainedRun.id, {
+			decision: {
+				kind: "reject-run",
+				outcome: "rejected",
+				reasons: ["command exited with code 1"],
+			},
+			workspaceStatus: "retained",
+		});
+
+		const cleanupRun = storage.createRun({
+			...createPassingPacket("unit-workspace-cleanup-failed"),
+		});
+		const cleanupWorkspace = workspaceAdapter.prepareWorkspace(
+			root,
+			cleanupRun.id,
+			headSha,
+		);
+		storage.recordWorkspacePrepared(cleanupRun.id, {
+			path: cleanupWorkspace.path,
+			headSha: cleanupWorkspace.headSha,
+			sourceProjectRoot: root,
+		});
+		storage.markRunRunning(cleanupRun.id);
+		storage.commitRunSuccessOutcome(cleanupRun.id, {
+			kind: "advance-run",
+			outcome: "approved",
+			reasons: [],
+		});
+		storage.recordWorkspaceCleanupFailed(cleanupRun.id, "disk busy");
+
+		const human = await runCliCapture(root, ["workspace", "list"]);
+		const json = await runCliCapture(root, ["workspace", "list", "--json"]);
+
+		expect(human.exitCode).toBe(0);
+		expect(human.stdout.join("\n")).toContain(retainedRun.id);
+		expect(human.stdout.join("\n")).toContain(cleanupRun.id);
+		expect(human.stdout.join("\n")).toContain("retained");
+		expect(human.stdout.join("\n")).toContain("cleanup-failed");
+		expect(human.stdout.join("\n")).toContain("cleanup-error: disk busy");
+		expect(JSON.parse(json.stdout.join("\n"))).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					runId: retainedRun.id,
+					status: "retained",
+					path: retainedWorkspace.path,
+				}),
+				expect.objectContaining({
+					runId: cleanupRun.id,
+					status: "cleanup-failed",
+					path: cleanupWorkspace.path,
+					cleanupError: "disk busy",
+				}),
+			]),
+		);
+	});
+
+	it("cleans up retained workspaces and removes them from actionable status", async () => {
+		const root = createGitRepo();
+		await runCliCapture(root, ["init"]);
+		const packetPath = writeCommittedPacket(
+			root,
+			".buildplane/test-packets/cleanup-retained.json",
+			createFailingPacket("unit-cleanup-retained"),
+		);
+
+		const runResult = await runCliCapture(root, [
+			"run",
+			"--raw",
+			"--packet",
+			packetPath,
+		]);
+		const runId = extractRunId(runResult.stdout);
+		const cleanup = await runCliCapture(root, ["workspace", "cleanup", runId]);
+		const statusJson = await runCliCapture(root, ["status", "--json"]);
+		const inspectJson = await runCliCapture(root, ["inspect", runId, "--json"]);
+
+		expect(cleanup.exitCode).toBe(0);
+		expect(cleanup.stdout).toEqual(
+			expect.arrayContaining([
+				"workspace-cleanup: deleted",
+				`run-id: ${runId}`,
+			]),
+		);
+		expect(JSON.parse(statusJson.stdout.join("\n"))).toMatchObject({
+			actionableWorkspaces: [],
+		});
+		expect(JSON.parse(inspectJson.stdout.join("\n"))).toMatchObject({
+			workspace: {
+				status: "deleted",
+				existsOnDisk: false,
+			},
+		});
+	});
+
+	it("cleans up cleanup-failed workspaces and removes them from actionable status", async () => {
+		const root = createGitRepo();
+		await runCliCapture(root, ["init"]);
+		const storage = createBuildplaneStorage(root);
+		const workspaceAdapter = createActualGitWorkspaceAdapter();
+		const headSha = git(root, ["rev-parse", "HEAD"]).trim();
+
+		const run = storage.createRun({
+			...createPassingPacket("unit-cleanup-failed-operator"),
+		});
+		const preparedWorkspace = workspaceAdapter.prepareWorkspace(
+			root,
+			run.id,
+			headSha,
+		);
+		storage.recordWorkspacePrepared(run.id, {
+			path: preparedWorkspace.path,
+			headSha: preparedWorkspace.headSha,
+			sourceProjectRoot: root,
+		});
+		storage.markRunRunning(run.id);
+		storage.commitRunSuccessOutcome(run.id, {
+			kind: "advance-run",
+			outcome: "approved",
+			reasons: [],
+		});
+		storage.recordWorkspaceCleanupFailed(run.id, "disk busy");
+
+		const cleanup = await runCliCapture(root, [
+			"workspace",
+			"cleanup",
+			run.id,
+			"--json",
+		]);
+		const statusJson = await runCliCapture(root, ["status", "--json"]);
+		const inspectJson = await runCliCapture(root, [
+			"inspect",
+			run.id,
+			"--json",
+		]);
+
+		expect(cleanup.exitCode).toBe(0);
+		expect(JSON.parse(cleanup.stdout.join("\n"))).toMatchObject({
+			runId: run.id,
+			status: "deleted",
+			previousStatus: "cleanup-failed",
+			path: preparedWorkspace.path,
+		});
+		expect(JSON.parse(statusJson.stdout.join("\n"))).toMatchObject({
+			actionableWorkspaces: [],
+		});
+		expect(JSON.parse(inspectJson.stdout.join("\n"))).toMatchObject({
+			workspace: {
+				status: "deleted",
+				existsOnDisk: false,
+			},
+		});
+	});
+
+	it("returns stable errors for unknown and non-actionable workspace cleanup requests", async () => {
+		const root = createGitRepo();
+		await runCliCapture(root, ["init"]);
+		const storage = createBuildplaneStorage(root);
+		const run = storage.createRun({
+			...createPassingPacket("unit-workspace-active"),
+		});
+		const workspacePath = join(root, ".buildplane", "workspaces", run.id);
+		mkdirSync(workspacePath, { recursive: true });
+		storage.recordWorkspacePrepared(run.id, {
+			path: workspacePath,
+			headSha: "abc123",
+			sourceProjectRoot: root,
+		});
+
+		const unknown = await runCliCapture(root, [
+			"workspace",
+			"cleanup",
+			"missing-run",
+			"--json",
+		]);
+		const nonActionable = await runCliCapture(root, [
+			"workspace",
+			"cleanup",
+			run.id,
+			"--json",
+		]);
+
+		expect(unknown.exitCode).toBe(1);
+		expect(JSON.parse(unknown.stdout.join("\n"))).toMatchObject({
+			error: { code: "NOT_FOUND" },
+		});
+		expect(nonActionable.exitCode).toBe(1);
+		expect(JSON.parse(nonActionable.stdout.join("\n"))).toMatchObject({
+			error: { code: "WORKSPACE_NOT_ACTIONABLE" },
 		});
 	});
 
@@ -1101,6 +1953,97 @@ describe("cli command surface", () => {
 		expect(result.stdout[0]).toBe("run-id: run-async");
 	});
 
+	it("reuses the existing CLI event bus for TUI execution instead of creating a separate TUI bus", async () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-cli-tui-bus-"));
+		const renderTuiMock = vi.fn(() => ({
+			waitUntilExit: async () => {},
+			unmount: () => {},
+			clear: () => {},
+		}));
+		const createEventBusMock = vi.fn(() => ({
+			subscribe: () => () => {},
+			emit: () => {},
+		}));
+		vi.doMock("@buildplane/ui-tui", () => ({ renderTui: renderTuiMock }));
+		vi.doMock("@buildplane/kernel", () => ({
+			createEventBus: createEventBusMock,
+		}));
+		let asyncBus: unknown;
+		const dependencies: RunCliDependencies = {
+			createOrchestrator: () => ({
+				initializeProject() {
+					return {
+						created: true,
+						projectRoot: root,
+						stateDbPath: join(root, ".buildplane", "state.db"),
+					};
+				},
+				runPacket() {
+					throw new Error("sync path should not be used for --tui");
+				},
+				async runPacketAsync(_packet: unknown, eventBus?: unknown) {
+					asyncBus = eventBus;
+					return {
+						run: { id: "run-tui", status: "passed" },
+						receipt: null,
+						decision: null,
+					};
+				},
+				getStatus() {
+					return {
+						initialized: true,
+						latestRunUsedWorkspace: false,
+						actionableWorkspaces: [],
+						runCounts: {
+							pending: 0,
+							running: 0,
+							passed: 0,
+							failed: 0,
+							cancelled: 0,
+						},
+					};
+				},
+				inspect() {
+					throw new Error("not used");
+				},
+			}),
+			parsePacket() {
+				return {
+					unit: {
+						id: "unit-tui-command",
+						kind: "command",
+						scope: "task",
+						inputRefs: [],
+						expectedOutputs: [],
+						verificationContract: "exit-0",
+						policyProfile: "default",
+					},
+					execution: {
+						command: "node",
+						args: ["-e", "console.log('ok')"],
+					},
+					verification: { requiredOutputs: [] },
+				};
+			},
+		};
+
+		try {
+			const result = await runCliCapture(
+				root,
+				["run", "--raw", "--tui", "--packet", "command-packet.json"],
+				dependencies,
+			);
+
+			expect(result.exitCode).toBe(0);
+			expect(createEventBusMock).not.toHaveBeenCalled();
+			expect(renderTuiMock).toHaveBeenCalledTimes(1);
+			expect(asyncBus).toBe(renderTuiMock.mock.calls[0]?.[0]);
+		} finally {
+			vi.doUnmock("@buildplane/ui-tui");
+			vi.doUnmock("@buildplane/kernel");
+		}
+	});
+
 	it("dispatches command packets via sync runPacket when --tui is not set", async () => {
 		const root = mkdtempSync(join(tmpdir(), "buildplane-cli-cmd-sync-"));
 		const calls: string[] = [];
@@ -1388,6 +2331,165 @@ describe("cli command surface", () => {
 
 		expect(result.exitCode).toBe(1);
 		expect(result.stderr.join("\n")).toContain("Learning not found");
+	});
+
+	it("delegates no-id memory inspect forms to native", async () => {
+		const root = mkdtempSync(
+			join(tmpdir(), "buildplane-cli-memory-inspect-no-id-native-"),
+		);
+		const calls: Array<{
+			cwd: string;
+			argv: string[];
+			commandPath: string[];
+		}> = [];
+		const dependencies: RunCliDependencies = {
+			runNativeCommand: async (argv, options) => {
+				calls.push({
+					cwd: options.cwd,
+					argv,
+					commandPath: options.commandPath,
+				});
+				return 0;
+			},
+		};
+
+		const inspectResult = await runCliCapture(
+			root,
+			["memory", "inspect"],
+			dependencies,
+		);
+		const inspectJsonResult = await runCliCapture(
+			root,
+			["memory", "inspect", "--json"],
+			dependencies,
+		);
+
+		expect(inspectResult.exitCode).toBe(0);
+		expect(inspectJsonResult.exitCode).toBe(0);
+		expect(calls).toEqual([
+			{
+				cwd: root,
+				commandPath: ["memory"],
+				argv: ["inspect"],
+			},
+			{
+				cwd: root,
+				commandPath: ["memory"],
+				argv: ["inspect", "--json"],
+			},
+		]);
+	});
+
+	it("delegates id-plus-extra-flag memory inspect forms to native", async () => {
+		const root = mkdtempSync(
+			join(tmpdir(), "buildplane-cli-memory-inspect-id-flags-native-"),
+		);
+		const calls: Array<{
+			cwd: string;
+			argv: string[];
+			commandPath: string[];
+		}> = [];
+		const dependencies: RunCliDependencies = {
+			runNativeCommand: async (argv, options) => {
+				calls.push({
+					cwd: options.cwd,
+					argv,
+					commandPath: options.commandPath,
+				});
+				return 0;
+			},
+		};
+
+		const result = await runCliCapture(
+			root,
+			["memory", "inspect", "mem_123", "--include-forgotten"],
+			dependencies,
+		);
+
+		expect(result.exitCode).toBe(0);
+		expect(calls).toEqual([
+			{
+				cwd: root,
+				commandPath: ["memory"],
+				argv: ["inspect", "mem_123", "--include-forgotten"],
+			},
+		]);
+	});
+
+	it("delegates advanced memory inspect forms to native", async () => {
+		const root = mkdtempSync(
+			join(tmpdir(), "buildplane-cli-memory-inspect-native-fallthrough-"),
+		);
+		const calls: Array<{
+			cwd: string;
+			argv: string[];
+			commandPath: string[];
+		}> = [];
+		const dependencies: RunCliDependencies = {
+			runNativeCommand: async (argv, options) => {
+				calls.push({
+					cwd: options.cwd,
+					argv,
+					commandPath: options.commandPath,
+				});
+				return 0;
+			},
+		};
+
+		const result = await runCliCapture(
+			root,
+			["memory", "inspect", "--effective", "--json"],
+			dependencies,
+		);
+
+		expect(result.exitCode).toBe(0);
+		expect(calls).toEqual([
+			{
+				cwd: root,
+				commandPath: ["memory"],
+				argv: ["inspect", "--effective", "--json"],
+			},
+		]);
+	});
+
+	it("preserves native json output for advanced memory inspect success paths", async () => {
+		const root = mkdtempSync(
+			join(tmpdir(), "buildplane-cli-memory-inspect-json-success-"),
+		);
+		const calls: Array<{
+			cwd: string;
+			argv: string[];
+			commandPath: string[];
+		}> = [];
+		const dependencies: RunCliDependencies = {
+			runNativeCommand: async (argv, options) => {
+				calls.push({
+					cwd: options.cwd,
+					argv,
+					commandPath: options.commandPath,
+				});
+				options.stdout('{"nativeRoot":"/tmp/native","items":[]}');
+				options.stderr("memory-inspect-json-warn");
+				return 7;
+			},
+		};
+
+		const result = await runCliCapture(
+			root,
+			["memory", "inspect", "--effective", "--json"],
+			dependencies,
+		);
+
+		expect(result.exitCode).toBe(7);
+		expect(result.stdout).toEqual(['{"nativeRoot":"/tmp/native","items":[]}']);
+		expect(result.stderr).toEqual(["memory-inspect-json-warn"]);
+		expect(calls).toEqual([
+			{
+				cwd: root,
+				commandPath: ["memory"],
+				argv: ["inspect", "--effective", "--json"],
+			},
+		]);
 	});
 
 	it("unknown memory subcommands still dispatch to native", async () => {

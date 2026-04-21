@@ -47,14 +47,36 @@ function isEmitWarningOptions(
 	return typeof value === "object" && value !== null && "type" in value;
 }
 
-export function assertSupportedNodeVersion(
+export function shouldBypassNodeVersionGuardForArgv(
+	argv: readonly string[] = process.argv.slice(2),
+): boolean {
+	return (
+		(argv.length === 2 && argv[0] === "bootstrap" && argv[1] === "doctor") ||
+		(argv.length === 3 &&
+			argv[0] === "bootstrap" &&
+			argv[1] === "doctor" &&
+			argv[2] === "--json")
+	);
+}
+
+export function assertPublishedCliNodeVersion(
+	argv: readonly string[],
 	current = process.versions.node,
 ): void {
+	assertSupportedNodeVersion(current, argv);
+}
+
+export function assertSupportedNodeVersion(
+	current = process.versions.node,
+	argv: readonly string[] = process.argv.slice(2),
+): void {
+	installCliWarningFilter();
+	if (shouldBypassNodeVersionGuardForArgv(argv)) {
+		return;
+	}
 	if (current !== SUPPORTED_NODE_VERSION) {
 		throw new Error(
 			`Buildplane requires Node ${SUPPORTED_NODE_VERSION}. Detected ${current}.`,
 		);
 	}
-
-	installCliWarningFilter();
 }

@@ -12,6 +12,7 @@
 		{ "path": "packages/adapters-honcho" },
 		{ "path": "packages/compat-gsd" },
 		{ "path": "packages/ui-tui" },
-		{ "path": "apps/cli" }
+		{ "path": "apps/cli" },
+		{ "path": "packages/ledger-client" }
 	]
 }

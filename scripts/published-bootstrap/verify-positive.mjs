@@ -26,13 +26,23 @@ import {
 
 const PACKET_FIXTURE_RELATIVE_PATH =
 	"test/fixtures/published-bootstrap/packet.json";
+const INSTALLER_SHIM_PATH = join(
+	REPO_ROOT,
+	"scripts",
+	"published-bootstrap",
+	"install.sh",
+);
+const INSTALLER_ONE_LINER =
+	'tmp="$(mktemp)" && curl -fsSL https://raw.githubusercontent.com/SollanSystems/buildplane/main/scripts/published-bootstrap/install.sh -o "$tmp" && bash "$tmp"';
 const PACKET_FIXTURE_PATH = join(REPO_ROOT, PACKET_FIXTURE_RELATIVE_PATH);
 const REQUIRED_STAGED_README_SNIPPETS = Object.freeze([
+	INSTALLER_ONE_LINER,
 	"npm install -g buildplane",
 	"buildplane init",
 	"buildplane run --packet",
 	"buildplane status --json",
 	"buildplane inspect <run-id> --json",
+	"Published/global installs do not yet include a verified `buildplane memory ...` contract.",
 ]);
 const PUBLISHED_SMOKE_UNIT_ID = "unit-published-bootstrap-smoke";
 const FORBIDDEN_STAGED_README_PATTERNS = Object.freeze([
@@ -41,6 +51,9 @@ const FORBIDDEN_STAGED_README_PATTERNS = Object.freeze([
 const NPM_COMMAND = resolveRequiredCommand("npm");
 const PNPM_COMMAND = resolveRequiredCommand("pnpm");
 const GIT_COMMAND = resolveRequiredCommand("git");
+const CARGO_COMMAND = resolveRequiredCommand("cargo");
+const NATIVE_BINARY_NAME =
+	process.platform === "win32" ? "buildplane-native.exe" : "buildplane-native";
 
 function getErrorMessage(error) {
 	return error instanceof Error ? error.message : String(error);
@@ -172,6 +185,28 @@ function assertNoCommandStderr(label, commandDescription, stderr) {
 			`${label}: command produced unexpected stderr for ${commandDescription}\n${stderr.trim()}`,
 		);
 	}
+}
+
+function buildFreshLedgerTestBinary() {
+	console.log("repo verification gate: building native ledger binary...");
+	runCommand(
+		CARGO_COMMAND,
+		["build", "--manifest-path", "native/Cargo.toml", "-p", "bp-cli"],
+		{ cwd: REPO_ROOT },
+	);
+	const nativeBinaryPath = join(
+		REPO_ROOT,
+		"native",
+		"target",
+		"debug",
+		NATIVE_BINARY_NAME,
+	);
+	if (!existsSync(nativeBinaryPath)) {
+		fail(
+			`repo verification gate: expected native ledger binary at ${nativeBinaryPath}`,
+		);
+	}
+	return nativeBinaryPath;
 }
 
 function createCliRunner(command, prefixArgs = []) {
@@ -433,11 +468,17 @@ function runExternalPackedInstallSmoke(tarballPath, tempPaths) {
 
 	console.log(`Installing packed CLI into isolated npm prefix: ${npmPrefix}`);
 	runCommand(
-		NPM_COMMAND,
-		["install", "-g", "--prefix", npmPrefix, tarballPath],
+		process.platform === "win32" ? "bash" : "/bin/bash",
+		[INSTALLER_SHIM_PATH],
 		{
 			cwd: externalRepoRoot,
-			env: installEnv,
+			env: {
+				...installEnv,
+				BUILDPLANE_INSTALL_SPEC: tarballPath,
+				BUILDPLANE_INSTALL_PREFIX: npmPrefix,
+				BUILDPLANE_INSTALL_NPM: NPM_COMMAND,
+				BUILDPLANE_INSTALL_GIT: GIT_COMMAND,
+			},
 		},
 	);
 	assertFile(resolveInstalledCliPath(npmPrefix), "published buildplane binary");
@@ -571,7 +612,14 @@ function main() {
 		console.log("== repo verification gate ==");
 		runCommand(PNPM_COMMAND, ["lint"], { cwd: REPO_ROOT });
 		runCommand(PNPM_COMMAND, ["typecheck"], { cwd: REPO_ROOT });
-		runCommand(PNPM_COMMAND, ["test"], { cwd: REPO_ROOT });
+		const nativeBinaryPath = buildFreshLedgerTestBinary();
+		runCommand(PNPM_COMMAND, ["test"], {
+			cwd: REPO_ROOT,
+			env: {
+				...process.env,
+				BUILDPLANE_NATIVE_BIN: nativeBinaryPath,
+			},
+		});
 		runCommand(PNPM_COMMAND, ["build"], { cwd: REPO_ROOT });
 		repoStateGuard.reset();
 

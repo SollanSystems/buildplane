@@ -1,3 +1,4 @@
+import type { MemoryStatus } from "./memory-types.js";
 import type { Run, RunStatus, Unit } from "./types.js";
 
 export interface ToolDefinition {
@@ -84,6 +85,34 @@ export interface RunInfrastructureFailure {
 	readonly message: string;
 }
 
+export interface InjectedMemoryRecord {
+	readonly memoryKind: "repo-fact" | "procedure" | "searchable-document";
+	readonly memoryId: string;
+	readonly displayText: string;
+	readonly matchReason: string;
+	readonly matchClass: "exact" | "fuzzy" | "full-text";
+	readonly scopePreferenceIndex?: number;
+}
+
+export interface PersistedInjectedMemoryRecord extends InjectedMemoryRecord {
+	readonly id: string;
+	readonly runId: string;
+	readonly createdAt: string;
+}
+
+export interface PromotedStructuredMemoryRecord {
+	readonly memoryKind: "procedure" | "repo-fact" | "searchable-document";
+	readonly memoryId: string;
+	readonly title: string;
+	readonly taskType?: string;
+	readonly bodySummary?: string;
+	readonly status: MemoryStatus;
+	readonly promotionRule?: string;
+	readonly sourceRunId?: string;
+	readonly sourceTaskId?: string;
+	readonly createdAt: string;
+}
+
 export interface WorkspaceSnapshot {
 	readonly runId: string;
 	readonly path: string;
@@ -124,6 +153,11 @@ export interface InspectSnapshot {
 	readonly unit: Unit;
 	readonly run: Run;
 	readonly workspace?: WorkspaceSnapshot;
+	readonly strategy?: {
+		readonly strategyId: string;
+	};
+	readonly injectedMemories?: readonly PersistedInjectedMemoryRecord[];
+	readonly promotedStructuredMemories?: readonly PromotedStructuredMemoryRecord[];
 	readonly runHistory: readonly {
 		readonly id: string;
 		readonly status: RunStatus;
@@ -152,5 +186,6 @@ export interface RunPacketResult {
 	readonly decision?: PolicyDecision;
 	readonly failure?: RunInfrastructureFailure;
 	readonly workspace?: WorkspaceSnapshot;
+	readonly injectedMemories?: readonly PersistedInjectedMemoryRecord[];
 	readonly suspended?: boolean;
 }

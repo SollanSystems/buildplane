@@ -16,6 +16,7 @@ import type {
 	BuildplaneRuntimePort,
 	BuildplaneStoragePort,
 	BuildplaneWorkspacePort,
+	CreateRunOptions,
 } from "./ports.js";
 import type {
 	ExecutionReceipt,
@@ -40,10 +41,15 @@ const noopBus: EventBus = {
 
 export interface BuildplaneOrchestrator {
 	initializeProject(): ReturnType<BuildplaneStoragePort["initializeProject"]>;
-	runPacket(packet: UnitPacket): RunPacketResult;
+	runPacket(
+		packet: UnitPacket,
+		eventBus?: EventBus,
+		createRunOptions?: CreateRunOptions,
+	): RunPacketResult;
 	runPacketAsync(
 		packet: UnitPacket,
 		eventBus?: EventBus,
+		createRunOptions?: CreateRunOptions,
 	): Promise<RunPacketResult>;
 	getStatus(): StatusSnapshot;
 	inspect(id: string): InspectSnapshot;
@@ -76,6 +82,8 @@ export function createBuildplaneOrchestrator(
 	const topLevelBudgets = options.budgets;
 	const defaultBus = options.eventBus ?? noopBus;
 	const memoryPort = options.memoryPort;
+	const strategyWorkflowPromotionRule =
+		"multi-round-strategy-workflow->procedure";
 
 	function infrastructureFailure(
 		kind: string,
@@ -100,6 +108,78 @@ export function createBuildplaneOrchestrator(
 			headSha: preparedWorkspace.headSha,
 			status: "active",
 		};
+	}
+
+	function buildStrategyProcedureCandidate(
+		strategy: StrategyPacket,
+		strategyResult: StrategyResult,
+		workflowLearning: {
+			readonly kind: string;
+			readonly title: string;
+			readonly body: string;
+		},
+	): Parameters<BuildplaneStoragePort["createProcedure"]>[0] | null {
+		if (strategyResult.outcome !== "passed") {
+			return null;
+		}
+
+		const implementer = strategy.children.find(
+			(child) => child.role === "implementer",
+		);
+		const taskType = implementer?.packet.intent?.taskType;
+		if (!implementer || !taskType) {
+			return null;
+		}
+
+		return {
+			name: `${strategy.mode} workflow for ${taskType} tasks`,
+			taskType,
+			bodyMarkdown: `Use an ${strategy.mode} workflow for ${taskType} tasks.\n\nObserved learning: ${workflowLearning.body}`,
+			metadata: {
+				promotionRule: strategyWorkflowPromotionRule,
+				strategyMode: strategy.mode,
+				sourceLearningTitle: workflowLearning.title,
+				sourceLearningKind: workflowLearning.kind,
+				sourceStrategyId: strategy.id,
+			},
+			createdBy: "worker",
+			sourceRunId: strategyResult.winnerRunId,
+			sourceTaskId: implementer.packet.unit.id,
+		};
+	}
+
+	function promoteStrategyWorkflowProcedure(
+		strategy: StrategyPacket,
+		strategyResult: StrategyResult,
+		learnings: readonly {
+			readonly kind: string;
+			readonly title: string;
+			readonly body: string;
+		}[],
+	): void {
+		const workflowLearning = learnings.find(
+			(learning) => learning.kind === "workflow",
+		);
+		if (!workflowLearning) {
+			return;
+		}
+
+		const candidate = buildStrategyProcedureCandidate(
+			strategy,
+			strategyResult,
+			workflowLearning,
+		);
+		if (!candidate?.taskType) {
+			return;
+		}
+
+		storage.upsertProcedure(candidate, {
+			matchMetadata: {
+				promotionRule: strategyWorkflowPromotionRule,
+				strategyMode: strategy.mode,
+			},
+			skipIfConflictingActiveName: true,
+		});
 	}
 
 	function finalizeInfrastructureFailure(
@@ -167,7 +247,10 @@ export function createBuildplaneOrchestrator(
 		  }
 		| { ok: false; result: RunPacketResult };
 
-	function prepareRun(packet: UnitPacket): PrepareRunResult {
+	function prepareRun(
+		packet: UnitPacket,
+		createRunOptions?: CreateRunOptions,
+	): PrepareRunResult {
 		storage.getStatusSnapshot();
 
 		const validatedPacket = validatePacketForWorkspaceRoot(
@@ -175,7 +258,7 @@ export function createBuildplaneOrchestrator(
 			join(projectRoot, ".buildplane", "workspaces", "future-run-id"),
 		);
 		const { headSha } = workspace.assertRunnableRepository(projectRoot);
-		const run = storage.createRun(validatedPacket);
+		const run = storage.createRun(validatedPacket, createRunOptions);
 
 		let preparedWorkspace: WorkspaceSnapshot;
 
@@ -494,10 +577,18 @@ export function createBuildplaneOrchestrator(
 		initializeProject() {
 			return storage.initializeProject();
 		},
-		runPacket(packet) {
-			const prepared = prepareRun(packet);
+		runPacket(packet, eventBus?, createRunOptions?) {
+			const bus = eventBus ?? defaultBus;
+			const prepared = prepareRun(packet, createRunOptions);
 			if (!prepared.ok) return prepared.result;
 			const { ctx } = prepared;
+
+			bus.emit({
+				kind: "execution-started",
+				runId: ctx.run.id,
+				timestamp: new Date().toISOString(),
+				executionType: "command",
+			});
 
 			let receipt: ExecutionReceipt;
 			try {
@@ -506,6 +597,13 @@ export function createBuildplaneOrchestrator(
 					ctx.workspace.path,
 				);
 			} catch (error) {
+				bus.emit({
+					kind: "execution-error",
+					runId: ctx.run.id,
+					timestamp: new Date().toISOString(),
+					message: error instanceof Error ? error.message : String(error),
+					phase: "execution",
+				});
 				const failure = infrastructureFailure(
 					"runtime-execution-failed",
 					error,
@@ -516,9 +614,20 @@ export function createBuildplaneOrchestrator(
 				});
 			}
 
+			bus.emit({
+				kind: "command-execution-complete",
+				runId: ctx.run.id,
+				timestamp: new Date().toISOString(),
+				exitCode: receipt.exitCode,
+				outputChecks: receipt.outputChecks.map((c) => ({
+					path: c.path,
+					exists: c.exists,
+				})),
+			});
+
 			return finalizeRun(ctx, receipt);
 		},
-		async runPacketAsync(packet, eventBus?) {
+		async runPacketAsync(packet, eventBus?, createRunOptions?) {
 			const bus = eventBus ?? defaultBus;
 
 			// Resolve policy profile from registry
@@ -538,7 +647,7 @@ export function createBuildplaneOrchestrator(
 							packet,
 							join(projectRoot, ".buildplane", "workspaces", "future-run-id"),
 						);
-						const run = storage.createRun(validatedPacket);
+						const run = storage.createRun(validatedPacket, createRunOptions);
 						return finalizeInfrastructureFailure(run, failure);
 					} catch {
 						return {
@@ -559,7 +668,7 @@ export function createBuildplaneOrchestrator(
 					packet,
 					join(projectRoot, ".buildplane", "workspaces", "future-run-id"),
 				);
-				const run = storage.createRun(validatedPacket);
+				const run = storage.createRun(validatedPacket, createRunOptions);
 				storage.markRunRunning(run.id);
 				const suspendedRun = storage.suspendRun(run.id);
 				bus.emit({
@@ -573,7 +682,7 @@ export function createBuildplaneOrchestrator(
 				return { run: suspendedRun, suspended: true } as RunPacketResult;
 			}
 
-			const prepared = prepareRun(packet);
+			const prepared = prepareRun(packet, createRunOptions);
 			if (!prepared.ok) {
 				// Emit a visible event when workspace preparation fails
 				if (prepared.result.failure?.kind === "workspace-prepare-failed") {
@@ -916,11 +1025,8 @@ export function createBuildplaneOrchestrator(
 			);
 
 			// Post-strategy memory hook — fires once when all strategy children complete
-			if (
-				memoryPort &&
-				strategyResult.rounds &&
-				strategyResult.rounds.length > 1
-			) {
+			if (strategyResult.rounds && strategyResult.rounds.length > 1) {
+				let learnings: ReturnType<typeof extractLearnings>;
 				try {
 					const strategyDecision: PolicyDecision =
 						strategyResult.outcome === "passed"
@@ -935,7 +1041,7 @@ export function createBuildplaneOrchestrator(
 									reasons: strategyResult.mergeDecision.reasons,
 								};
 
-					const learnings = extractLearnings({
+					learnings = extractLearnings({
 						run: {
 							id: strategyResult.strategyId,
 							unitId: strategyResult.strategyId,
@@ -968,9 +1074,21 @@ export function createBuildplaneOrchestrator(
 						},
 						strategyResult,
 					});
-					if (learnings.length > 0) {
+				} catch {
+					// Silent — follows event bus subscriber convention
+					return strategyResult;
+				}
+
+				if (memoryPort && learnings.length > 0) {
+					try {
 						memoryPort.writeLearnings(strategyResult.strategyId, learnings);
+					} catch {
+						// Silent — follows event bus subscriber convention
 					}
+				}
+
+				try {
+					promoteStrategyWorkflowProcedure(strategy, strategyResult, learnings);
 				} catch {
 					// Silent — follows event bus subscriber convention
 				}

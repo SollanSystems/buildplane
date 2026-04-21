@@ -11,11 +11,14 @@ import {
 	createRankedMemoryResult,
 	dedupeRankedMemoryResults,
 	type ExecutionReceipt,
+	type InjectedMemoryRecord,
 	type InspectSnapshot,
 	type MemoryScopeType,
+	type PersistedInjectedMemoryRecord,
 	type PolicyDecision,
 	type ProcedureMemory,
 	type ProcedureRetrievalQuery,
+	type PromotedStructuredMemoryRecord,
 	type RankedProcedureResult,
 	type RankedRepoFactResult,
 	type RankedSearchableDocumentResult,
@@ -126,6 +129,18 @@ interface StoredSearchableDocumentRow {
 	readonly updated_at: string;
 }
 
+interface StoredInjectedMemoryRow {
+	readonly id: string;
+	readonly run_id: string;
+	readonly memory_kind: InjectedMemoryRecord["memoryKind"];
+	readonly memory_id: string;
+	readonly display_text: string;
+	readonly match_reason: string;
+	readonly match_class: InjectedMemoryRecord["matchClass"];
+	readonly scope_preference_index: number | null;
+	readonly created_at: string;
+}
+
 export interface StorageTestingHooks {
 	readonly failpoint?: (name: string) => void;
 }
@@ -142,6 +157,11 @@ type WorkspaceAwareStatusSnapshot = StatusSnapshot & {
 
 type WorkspaceAwareInspectSnapshot = InspectSnapshot & {
 	readonly workspace?: WorkspaceSnapshot;
+	readonly strategy?: {
+		readonly strategyId: string;
+	};
+	readonly injectedMemories?: readonly PersistedInjectedMemoryRecord[];
+	readonly promotedStructuredMemories?: readonly PromotedStructuredMemoryRecord[];
 };
 
 interface WorkspaceAwareStorageStore
@@ -174,9 +194,11 @@ interface WorkspaceAwareStorageStore
 	commitRunSuccessOutcome(runId: string, decision: ApprovedPolicyDecision): Run;
 	recordWorkspaceDeleted(runId: string): void;
 	recordWorkspaceCleanupFailed(runId: string, message: string): void;
+	recordWorkspaceCleanedUp(runId: string): void;
 	getStatusSnapshot(): WorkspaceAwareStatusSnapshot;
 	inspectTarget(id: string): WorkspaceAwareInspectSnapshot;
 	getRunHistory(): RunHistoryEntry[];
+	recordRunStrategyId(runId: string, strategyId: string): void;
 	getPacketSnapshot(runId: string): UnitPacket | null;
 }
 
@@ -385,6 +407,20 @@ function assertSearchableDocumentsTableColumns(database: DatabaseSync): void {
 	] as const);
 }
 
+function assertInjectedMemoriesTableColumns(database: DatabaseSync): void {
+	assertTableColumns(database, "injected_memories", [
+		"id",
+		"run_id",
+		"memory_kind",
+		"memory_id",
+		"display_text",
+		"match_reason",
+		"match_class",
+		"scope_preference_index",
+		"created_at",
+	] as const);
+}
+
 export function bootstrapStorageProjectionSchema(database: DatabaseSync): void {
 	if (tableExists(database, "workspaces")) {
 		assertWorkspaceTableColumns(database);
@@ -508,6 +544,23 @@ export function bootstrapStorageProjectionSchema(database: DatabaseSync): void {
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL
 		);
+
+		CREATE TABLE IF NOT EXISTS injected_memories (
+			id TEXT PRIMARY KEY,
+			run_id TEXT NOT NULL,
+			memory_kind TEXT NOT NULL,
+			memory_id TEXT NOT NULL,
+			display_text TEXT NOT NULL,
+			match_reason TEXT NOT NULL,
+			match_class TEXT NOT NULL,
+			scope_preference_index INTEGER,
+			created_at TEXT NOT NULL
+		);
+	`);
+
+	database.exec(`
+		CREATE INDEX IF NOT EXISTS injected_memories_run_id_idx
+		ON injected_memories (run_id);
 	`);
 
 	database.exec(`
@@ -531,6 +584,7 @@ export function bootstrapStorageProjectionSchema(database: DatabaseSync): void {
 	assertRepoFactsTableColumns(database);
 	assertProceduresTableColumns(database);
 	assertSearchableDocumentsTableColumns(database);
+	assertInjectedMemoriesTableColumns(database);
 }
 
 export function assertBaselineStorageProjectionSchema(
@@ -538,7 +592,7 @@ export function assertBaselineStorageProjectionSchema(
 ): void {
 	const rows = database
 		.prepare(
-			`SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('units', 'runs', 'evidence', 'decisions', 'artifacts', 'repo_facts', 'procedures', 'searchable_documents')`,
+			`SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('units', 'runs', 'evidence', 'decisions', 'artifacts', 'repo_facts', 'procedures', 'searchable_documents', 'injected_memories')`,
 		)
 		.all() as unknown as { name: string }[];
 	const existingTables = new Set(rows.map((row) => row.name));
@@ -552,6 +606,7 @@ export function assertBaselineStorageProjectionSchema(
 		"repo_facts",
 		"procedures",
 		"searchable_documents",
+		"injected_memories",
 	]) {
 		if (!existingTables.has(tableName)) {
 			throw new Error(
@@ -612,12 +667,16 @@ function assertStorageProjectionSchema(database: DatabaseSync): void {
 	assertRepoFactsTableColumns(database);
 	assertProceduresTableColumns(database);
 	assertSearchableDocumentsTableColumns(database);
+	assertInjectedMemoriesTableColumns(database);
 }
 
 export interface RunHistoryEntry {
 	readonly id: string;
 	readonly unitId: string;
 	readonly status: RunStatus;
+	readonly strategyId?: string;
+	readonly injectedMemoryCount: number;
+	readonly promotedStructuredMemoryCount: number;
 	readonly createdAt: string;
 	readonly completedAt?: string;
 }
@@ -690,6 +749,9 @@ export function createStorageStore(
 	}
 
 	function writeRunLogs(runId: string, receipt: ExecutionReceipt): void {
+		// Ensure logsDir exists — it may be absent if the workspace was restored
+		// from a git checkout that pre-dates the first log write (e.g. fork replay).
+		mkdirSync(layout.logsDir, { recursive: true });
 		writeFileSync(`${layout.logsDir}/${runId}.stdout.log`, receipt.stdout);
 		writeFileSync(`${layout.logsDir}/${runId}.stderr.log`, receipt.stderr);
 	}
@@ -795,6 +857,28 @@ export function createStorageStore(
 		};
 	}
 
+	function toStrategySummary(row: StoredRunRow):
+		| {
+				readonly strategyId: string;
+		  }
+		| undefined {
+		return row.strategy_id ? { strategyId: row.strategy_id } : undefined;
+	}
+
+	function countInjectedMemories(
+		runId: string,
+		database: DatabaseSync,
+	): number {
+		return readInjectedMemoryRows(runId, database).length;
+	}
+
+	function countPromotedStructuredMemories(
+		runId: string,
+		database: DatabaseSync,
+	): number {
+		return readPromotedStructuredMemoryRows(runId, database).length;
+	}
+
 	function toRepoFact(row: StoredRepoFactRow): RepoFact {
 		return {
 			id: row.id,
@@ -821,6 +905,29 @@ export function createStorageStore(
 		};
 	}
 
+	function parseProcedureMetadata(
+		row: StoredProcedureRow,
+	): Record<string, unknown> | undefined {
+		return row.metadata_json
+			? (JSON.parse(row.metadata_json) as Record<string, unknown>)
+			: undefined;
+	}
+
+	function summarizeProcedureBodyMarkdown(
+		bodyMarkdown: string,
+	): string | undefined {
+		const firstLine =
+			bodyMarkdown
+				.split(/\r?\n/)
+				.map((line) => line.trim())
+				.find((line) => line.length > 0) ?? "";
+		const summary = firstLine
+			.replace(/^[-*]\s+/, "")
+			.replace(/^\d+\.\s+/, "")
+			.trim();
+		return summary.length > 0 ? summary : undefined;
+	}
+
 	function toProcedureMemory(row: StoredProcedureRow): ProcedureMemory {
 		return {
 			id: row.id,
@@ -831,9 +938,7 @@ export function createStorageStore(
 			name: row.name,
 			taskType: row.task_type ?? undefined,
 			bodyMarkdown: row.body_markdown,
-			metadata: row.metadata_json
-				? (JSON.parse(row.metadata_json) as Record<string, unknown>)
-				: undefined,
+			metadata: parseProcedureMetadata(row),
 			provenance: {
 				sourceRunId: row.source_run_id ?? undefined,
 				sourceTaskId: row.source_task_id ?? undefined,
@@ -846,6 +951,71 @@ export function createStorageStore(
 				commitSha: row.commit_sha ?? undefined,
 			},
 		};
+	}
+
+	function toPromotedStructuredMemoryRecord(
+		row: StoredProcedureRow,
+	): PromotedStructuredMemoryRecord | null {
+		const metadata = parseProcedureMetadata(row);
+		const promotionRule = metadata?.promotionRule;
+		if (typeof promotionRule !== "string" || promotionRule.length === 0) {
+			return null;
+		}
+		return {
+			memoryKind: "procedure",
+			memoryId: row.id,
+			title: row.name,
+			taskType: row.task_type ?? undefined,
+			bodySummary: summarizeProcedureBodyMarkdown(row.body_markdown),
+			status: row.status,
+			promotionRule,
+			sourceRunId: row.source_run_id ?? undefined,
+			sourceTaskId: row.source_task_id ?? undefined,
+			createdAt: row.created_at,
+		};
+	}
+
+	function procedureMetadataMatches(
+		row: StoredProcedureRow,
+		matchMetadata?: Record<string, string>,
+	): boolean {
+		if (!matchMetadata || Object.keys(matchMetadata).length === 0) {
+			return true;
+		}
+		const metadata = parseProcedureMetadata(row) ?? {};
+		return Object.entries(matchMetadata).every(
+			([key, value]) => metadata[key] === value,
+		);
+	}
+
+	function insertProcedureRow(
+		database: DatabaseSync,
+		input: CreateProcedureInput,
+		now: string,
+	): string {
+		const id = randomUUID();
+		database
+			.prepare(
+				`INSERT INTO procedures (id, repo_id, name, task_type, body_markdown, metadata_json, confidence, source_run_id, source_task_id, created_by, branch, commit_sha, status, created_at, updated_at)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)`,
+			)
+			.run(
+				id,
+				projectRoot,
+				input.name,
+				input.taskType ?? null,
+				input.bodyMarkdown,
+				input.metadata ? JSON.stringify(input.metadata) : null,
+				input.confidence ?? 1,
+				input.sourceRunId ?? null,
+				input.sourceTaskId ?? null,
+				input.createdBy,
+				input.branch ?? null,
+				input.commitSha ?? null,
+				now,
+				now,
+			);
+		return id;
 	}
 
 	function toSearchableDocument(
@@ -865,6 +1035,37 @@ export function createStorageStore(
 			createdAt: row.created_at,
 			updatedAt: row.updated_at,
 		};
+	}
+
+	function toPersistedInjectedMemoryRecord(
+		row: StoredInjectedMemoryRow,
+	): PersistedInjectedMemoryRecord {
+		return {
+			id: row.id,
+			runId: row.run_id,
+			memoryKind: row.memory_kind,
+			memoryId: row.memory_id,
+			displayText: row.display_text,
+			matchReason: row.match_reason,
+			matchClass: row.match_class,
+			scopePreferenceIndex: row.scope_preference_index ?? undefined,
+			createdAt: row.created_at,
+		};
+	}
+
+	function readInjectedMemoryRows(
+		runId: string,
+		database: DatabaseSync,
+	): PersistedInjectedMemoryRecord[] {
+		const rows = database
+			.prepare(
+				`SELECT id, run_id, memory_kind, memory_id, display_text, match_reason, match_class, scope_preference_index, created_at
+				 FROM injected_memories
+				 WHERE run_id = ?
+				 ORDER BY rowid ASC`,
+			)
+			.all(runId) as unknown as StoredInjectedMemoryRow[];
+		return rows.map(toPersistedInjectedMemoryRecord);
 	}
 
 	function readRepoFactRows(
@@ -918,6 +1119,8 @@ export function createStorageStore(
 	function readProcedureRows(
 		database: DatabaseSync,
 		options: {
+			id?: string;
+			name?: string;
 			taskType?: string;
 			includeInactive?: boolean;
 		},
@@ -925,6 +1128,14 @@ export function createStorageStore(
 		const clauses = ["repo_id = ?"];
 		const params: (string | null)[] = [projectRoot];
 
+		if (options.id) {
+			clauses.push("id = ?");
+			params.push(options.id);
+		}
+		if (options.name) {
+			clauses.push("name = ?");
+			params.push(options.name);
+		}
 		if (options.taskType) {
 			clauses.push("task_type = ?");
 			params.push(options.taskType);
@@ -945,6 +1156,25 @@ export function createStorageStore(
 		return database
 			.prepare(query)
 			.all(...params) as unknown as StoredProcedureRow[];
+	}
+
+	function readPromotedStructuredMemoryRows(
+		runId: string,
+		database: DatabaseSync,
+	): PromotedStructuredMemoryRecord[] {
+		const rows = database
+			.prepare(
+				`SELECT id, repo_id, name, task_type, body_markdown, metadata_json,
+				       confidence, source_run_id, source_task_id, created_by, branch,
+				       commit_sha, status, created_at, updated_at
+				 FROM procedures
+				 WHERE repo_id = ? AND source_run_id = ?
+				 ORDER BY created_at DESC, rowid DESC`,
+			)
+			.all(projectRoot, runId) as unknown as StoredProcedureRow[];
+		return rows
+			.map(toPromotedStructuredMemoryRecord)
+			.filter((row): row is PromotedStructuredMemoryRecord => row !== null);
 	}
 
 	function readSearchableDocumentRows(
@@ -1003,11 +1233,15 @@ export function createStorageStore(
 			limit?: number;
 		},
 	): StoredSearchableDocumentRow[] {
+		const ftsQuery = normalizeSearchableDocumentFtsQuery(queryText);
+		if (!ftsQuery) {
+			return [];
+		}
 		const clauses = [
 			"searchable_documents.repo_id = ?",
 			"searchable_documents_fts MATCH ?",
 		];
-		const params: (string | number)[] = [projectRoot, queryText];
+		const params: (string | number)[] = [projectRoot, ftsQuery];
 
 		if (options?.documentKind) {
 			clauses.push("searchable_documents.document_kind = ?");
@@ -1091,6 +1325,20 @@ export function createStorageStore(
 	function normalizeExactText(value?: string): string | undefined {
 		const trimmed = value?.trim();
 		return trimmed ? trimmed : undefined;
+	}
+
+	function normalizeSearchableDocumentFtsQuery(
+		queryText: string,
+	): string | undefined {
+		const trimmed = queryText.trim();
+		if (!trimmed) {
+			return undefined;
+		}
+		const tokens = Array.from(new Set(trimmed.match(/[A-Za-z0-9_]+/g) ?? []));
+		if (tokens.length === 0) {
+			return undefined;
+		}
+		return tokens.map((token) => `"${token}"`).join(" ");
 	}
 
 	function normalizeRetrievalLimit(limit?: number): number {
@@ -1417,7 +1665,7 @@ export function createStorageStore(
 			ensureInitialized();
 			const database = openStoreDatabase();
 			const createdAt = new Date().toISOString();
-			const runId = randomUUID();
+			const runId = options?.runId ?? randomUUID();
 			const parentRunId = options?.parentRunId ?? null;
 			const strategyId = options?.strategyId ?? null;
 
@@ -1875,6 +2123,47 @@ export function createStorageStore(
 			}
 		},
 
+		recordWorkspaceCleanedUp(runId) {
+			ensureInitialized();
+			const database = openStoreDatabase();
+			const finalizedAt = new Date().toISOString();
+
+			try {
+				runInTransaction(database, () => {
+					const workspaceRow = readWorkspaceRow(runId, database);
+					if (!workspaceRow) {
+						throw new Error(`No workspace found for run '${runId}'`);
+					}
+					if (
+						workspaceRow.status !== "retained" &&
+						workspaceRow.status !== "cleanup-failed"
+					) {
+						throw new Error(
+							"Workspace operator cleanup requires a retained or cleanup-failed workspace.",
+						);
+					}
+
+					database
+						.prepare(
+							`UPDATE workspaces SET status = ?, finalized_at = ?, cleanup_error = NULL WHERE run_id = ?`,
+						)
+						.run("deleted", finalizedAt, runId);
+					appendEvent(
+						"workspace-deleted",
+						{
+							runId,
+							status: "deleted",
+							previousStatus: workspaceRow.status,
+							cleanedBy: "operator",
+						},
+						database,
+					);
+				});
+			} finally {
+				database.close();
+			}
+		},
+
 		suspendRun(runId: string): Run {
 			ensureInitialized();
 			const database = openStoreDatabase();
@@ -2141,34 +2430,90 @@ export function createStorageStore(
 			const now = new Date().toISOString();
 
 			try {
-				const id = randomUUID();
-				database
-					.prepare(
-						`INSERT INTO procedures (id, repo_id, name, task_type, body_markdown, metadata_json, confidence, source_run_id, source_task_id, created_by, branch, commit_sha, status, created_at, updated_at)
-						 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)`,
-					)
-					.run(
-						id,
-						projectRoot,
-						input.name,
-						input.taskType ?? null,
-						input.bodyMarkdown,
-						input.metadata ? JSON.stringify(input.metadata) : null,
-						input.confidence ?? 1,
-						input.sourceRunId ?? null,
-						input.sourceTaskId ?? null,
-						input.createdBy,
-						input.branch ?? null,
-						input.commitSha ?? null,
-						now,
-						now,
-					);
-
+				const id = insertProcedureRow(database, input, now);
 				return toProcedureMemory(
 					readProcedureRows(database, {
+						id,
 						includeInactive: true,
-					}).find((row) => row.id === id) as StoredProcedureRow,
+					})[0] as StoredProcedureRow,
 				);
+			} finally {
+				database.close();
+			}
+		},
+
+		upsertProcedure(
+			input: CreateProcedureInput,
+			options?: {
+				matchMetadata?: Record<string, string>;
+				skipIfConflictingActiveName?: boolean;
+			},
+		): ProcedureMemory | null {
+			ensureInitialized();
+			const database = openStoreDatabase();
+			const now = new Date().toISOString();
+
+			try {
+				database.exec("BEGIN IMMEDIATE");
+				try {
+					const sameNamedRows = readProcedureRows(database, {
+						name: input.name,
+						taskType: input.taskType,
+					});
+					const matchingRows = sameNamedRows.filter((row) =>
+						procedureMetadataMatches(row, options?.matchMetadata),
+					);
+
+					if (
+						options?.skipIfConflictingActiveName &&
+						sameNamedRows.length > 0 &&
+						matchingRows.length !== sameNamedRows.length
+					) {
+						database.exec("COMMIT");
+						return null;
+					}
+
+					const identicalRows = matchingRows.filter(
+						(row) => row.body_markdown === input.bodyMarkdown,
+					);
+					if (identicalRows.length > 0) {
+						const canonicalRow = identicalRows[0] as StoredProcedureRow;
+						for (const row of matchingRows) {
+							if (row.id !== canonicalRow.id) {
+								database
+									.prepare(
+										`UPDATE procedures SET status = 'superseded', updated_at = ? WHERE id = ? AND repo_id = ? AND status = 'active'`,
+									)
+									.run(now, row.id, projectRoot);
+							}
+						}
+						database.exec("COMMIT");
+						return toProcedureMemory(canonicalRow);
+					}
+
+					for (const row of matchingRows) {
+						database
+							.prepare(
+								`UPDATE procedures SET status = 'superseded', updated_at = ? WHERE id = ? AND repo_id = ? AND status = 'active'`,
+							)
+							.run(now, row.id, projectRoot);
+					}
+
+					const id = insertProcedureRow(database, input, now);
+					const insertedRow = readProcedureRows(database, {
+						id,
+						includeInactive: true,
+					})[0] as StoredProcedureRow;
+					database.exec("COMMIT");
+					return toProcedureMemory(insertedRow);
+				} catch (error) {
+					try {
+						database.exec("ROLLBACK");
+					} catch {
+						// Ignore rollback cleanup failures and surface the original error.
+					}
+					throw error;
+				}
 			} finally {
 				database.close();
 			}
@@ -2362,6 +2707,56 @@ export function createStorageStore(
 			}
 		},
 
+		recordInjectedMemories(
+			runId: string,
+			records: readonly InjectedMemoryRecord[],
+		): void {
+			ensureInitialized();
+			const database = openStoreDatabase();
+			const now = new Date().toISOString();
+
+			try {
+				runInTransaction(database, () => {
+					database
+						.prepare(`DELETE FROM injected_memories WHERE run_id = ?`)
+						.run(runId);
+
+					for (const record of records) {
+						database
+							.prepare(
+								`INSERT INTO injected_memories (id, run_id, memory_kind, memory_id, display_text, match_reason, match_class, scope_preference_index, created_at)
+								 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+							)
+							.run(
+								randomUUID(),
+								runId,
+								record.memoryKind,
+								record.memoryId,
+								record.displayText,
+								record.matchReason,
+								record.matchClass,
+								record.scopePreferenceIndex ?? null,
+								now,
+							);
+					}
+				});
+			} finally {
+				database.close();
+			}
+		},
+
+		listInjectedMemories(
+			runId: string,
+		): readonly PersistedInjectedMemoryRecord[] {
+			ensureInitialized();
+			const database = openStoreDatabase();
+			try {
+				return readInjectedMemoryRows(runId, database);
+			} finally {
+				database.close();
+			}
+		},
+
 		getStatusSnapshot(): WorkspaceAwareStatusSnapshot {
 			ensureInitialized();
 			const database = openStoreDatabase();
@@ -2453,7 +2848,7 @@ export function createStorageStore(
 			try {
 				const runRow = database
 					.prepare(
-						`SELECT id, unit_id, status, unit_snapshot, used_workspace FROM runs WHERE id = ?`,
+						`SELECT id, unit_id, status, unit_snapshot, used_workspace, parent_run_id, strategy_id FROM runs WHERE id = ?`,
 					)
 					.get(id) as StoredRunRow | undefined;
 
@@ -2472,6 +2867,12 @@ export function createStorageStore(
 						unit,
 						run: toRun(runRow),
 						workspace: readWorkspaceSnapshot(runRow.id, database),
+						strategy: toStrategySummary(runRow),
+						injectedMemories: readInjectedMemoryRows(runRow.id, database),
+						promotedStructuredMemories: readPromotedStructuredMemoryRows(
+							runRow.id,
+							database,
+						),
 						runHistory: [{ id: runRow.id, status: runRow.status }],
 						evidence: readEvidence(runRow.id, database),
 						decisions: readDecisions(runRow.id, database),
@@ -2499,6 +2900,12 @@ export function createStorageStore(
 						unit,
 						run: toRun(run),
 						workspace: readWorkspaceSnapshot(run.id, database),
+						strategy: toStrategySummary(run),
+						injectedMemories: readInjectedMemoryRows(run.id, database),
+						promotedStructuredMemories: readPromotedStructuredMemoryRows(
+							run.id,
+							database,
+						),
 						runHistory,
 						evidence: readEvidence(run.id, database),
 						decisions: readDecisions(run.id, database),
@@ -2517,27 +2924,51 @@ export function createStorageStore(
 			ensureInitialized();
 			const database = openStoreDatabase();
 
-			const rows = database
-				.prepare(
-					`SELECT id, unit_id, status, created_at, completed_at FROM runs ORDER BY created_at DESC, rowid DESC`,
-				)
-				.all() as unknown as {
-				id: string;
-				unit_id: string;
-				status: RunStatus;
-				created_at: string;
-				completed_at: string | null;
-			}[];
+			try {
+				const rows = database
+					.prepare(
+						`SELECT id, unit_id, status, strategy_id, created_at, completed_at FROM runs ORDER BY created_at DESC, rowid DESC`,
+					)
+					.all() as unknown as {
+					id: string;
+					unit_id: string;
+					status: RunStatus;
+					strategy_id: string | null;
+					created_at: string;
+					completed_at: string | null;
+				}[];
 
-			database.close();
+				return rows.map((row) => ({
+					id: row.id,
+					unitId: row.unit_id,
+					status: row.status,
+					strategyId: row.strategy_id ?? undefined,
+					injectedMemoryCount: countInjectedMemories(row.id, database),
+					promotedStructuredMemoryCount: countPromotedStructuredMemories(
+						row.id,
+						database,
+					),
+					createdAt: row.created_at,
+					completedAt: row.completed_at ?? undefined,
+				}));
+			} finally {
+				database.close();
+			}
+		},
 
-			return rows.map((row) => ({
-				id: row.id,
-				unitId: row.unit_id,
-				status: row.status,
-				createdAt: row.created_at,
-				completedAt: row.completed_at ?? undefined,
-			}));
+		recordRunStrategyId(runId: string, strategyId: string): void {
+			ensureInitialized();
+			const database = openStoreDatabase();
+			try {
+				readRun(runId, database);
+				database
+					.prepare(
+						`UPDATE runs SET strategy_id = ?, updated_at = ? WHERE id = ?`,
+					)
+					.run(strategyId, new Date().toISOString(), runId);
+			} finally {
+				database.close();
+			}
 		},
 
 		getPacketSnapshot(runId: string): UnitPacket | null {

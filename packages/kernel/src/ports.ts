@@ -29,7 +29,9 @@ import type {
 import type {
 	ApprovedPolicyDecision,
 	ExecutionReceipt,
+	InjectedMemoryRecord,
 	InspectSnapshot,
+	PersistedInjectedMemoryRecord,
 	PolicyDecision,
 	RejectedPolicyDecision,
 	RunInfrastructureFailure,
@@ -39,6 +41,7 @@ import type {
 import type { Run } from "./types.js";
 
 export interface CreateRunOptions {
+	readonly runId?: string;
 	readonly parentRunId?: string;
 	readonly strategyId?: string;
 }
@@ -106,6 +109,13 @@ export interface BuildplaneStoragePort {
 		},
 	): number;
 	createProcedure(input: CreateProcedureInput): ProcedureMemory;
+	upsertProcedure(
+		input: CreateProcedureInput,
+		options?: {
+			matchMetadata?: Record<string, string>;
+			skipIfConflictingActiveName?: boolean;
+		},
+	): ProcedureMemory | null;
 	listProcedures(options?: { taskType?: string }): readonly ProcedureMemory[];
 	findProceduresByTaskType(taskType: string): readonly ProcedureMemory[];
 	retrieveProcedures(
@@ -132,6 +142,11 @@ export interface BuildplaneStoragePort {
 	retrieveSearchableDocuments(
 		query: SearchableDocumentRetrievalQuery,
 	): readonly RankedSearchableDocumentResult[];
+	recordInjectedMemories(
+		runId: string,
+		records: readonly InjectedMemoryRecord[],
+	): void;
+	listInjectedMemories(runId: string): readonly PersistedInjectedMemoryRecord[];
 	getStatusSnapshot(): StatusSnapshot;
 	inspectTarget(id: string): InspectSnapshot;
 }

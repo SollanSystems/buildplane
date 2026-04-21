@@ -89,6 +89,7 @@ describe("wrapAsStrategy", () => {
 		expect(rev.packet.model?.systemPrompt).toContain(
 			"Write a hello world script",
 		);
+		expect(rev.packet.model?.prompt).toContain("Write a hello world script");
 		expect(rev.packet.model?.provider).toBe("anthropic");
 		expect(rev.packet.verification.requiredOutputs).toEqual([]);
 		expect(rev.packet.intent).toBeUndefined();
@@ -116,6 +117,21 @@ describe("wrapAsStrategy", () => {
 		const rev = strategy.children[1];
 		expect(rev.packet.execution?.command).toBe("true");
 		expect(rev.packet.execution?.args).toEqual([]);
+	});
+
+	it("preserves routing hints for model reviewer packets", () => {
+		const codexPacket = {
+			...modelPacket,
+			model: {
+				provider: "codex",
+				model: "o4-mini",
+			},
+			routingHints: { preferredWorker: "codex" },
+		};
+
+		const strategy = wrapAsStrategy(codexPacket);
+		const reviewerPacket = strategy.children[1]?.packet;
+		expect(reviewerPacket.routingHints).toEqual({ preferredWorker: "codex" });
 	});
 
 	it("exports the reviewer system prompt template", () => {

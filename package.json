@@ -18,6 +18,8 @@
 		"typecheck": "pnpm exec tsc --build --pretty false",
 		"lint": "biome check .",
 		"format": "biome format --write .",
+		"ledger:gen": "bash ./scripts/ledger/generate-schema.sh",
+		"ledger:gen-fixtures": "bash ./scripts/ledger/gen-fixtures.sh",
 		"check": "pnpm lint && pnpm typecheck && pnpm test && pnpm build",
 		"prepare": "husky",
 		"changeset": "changeset",
@@ -36,7 +38,7 @@
 		"husky": "^9.1.7",
 		"tsx": "^4.21.0",
 		"typescript": "^5.9.3",
-		"vitest": "^4.1.0"
+		"vitest": "^4.1.4"
 	},
 	"pnpm": {
 		"onlyBuiltDependencies": [

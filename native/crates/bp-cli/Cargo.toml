@@ -9,11 +9,15 @@ name = "buildplane-native"
 path = "src/main.rs"
 
 [dependencies]
+bp-fork.workspace = true
+bp-ledger.workspace = true
 bp-memory.workspace = true
 bp-pack-inspection.workspace = true
 bp-pack-loader.workspace = true
+bp-replay.workspace = true
 bp-storage-sqlite.workspace = true
 bp-ui-terminal.workspace = true
 futures.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+uuid.workspace = true

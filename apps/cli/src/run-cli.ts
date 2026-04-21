@@ -1,7 +1,22 @@
-import { spawnSync } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { createHash, randomBytes } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import type { Readable, Writable } from "node:stream";
+import { createToolRegistry } from "@buildplane/adapters-tools";
 import {
+	createTapeEmitter,
+	type LedgerFailure,
+	newEventId,
+	type TapeEmitter,
+} from "@buildplane/ledger-client";
+import {
+	type BootstrapDoctorReport,
+	inspectBootstrapDoctor,
+} from "./bootstrap-doctor.js";
+import {
+	formatBootstrapDoctorReport,
 	formatHumanError,
 	formatInitializationResult,
 	formatInspectDetail,
@@ -12,16 +27,108 @@ import {
 	formatRunHistory,
 	formatRunResult,
 	formatStrategyRunResult,
+	formatWorkflowScanPreview,
+	formatWorkspaceCleanupResult,
+	formatWorkspaceList,
 } from "./formatters.js";
-import {
-	enrichGraphWithMemories,
-	enrichPacketWithMemories,
-	enrichStrategyWithMemories,
+import { runGitCheckpoint } from "./ledger-git-checkpoint.js";
+import { wrapToolRegistryForLedger } from "./ledger-tool-wrapper.js";
+import type {
+	PacketMemoryEnrichmentResult,
+	preparePacketMemoryEnrichment,
 } from "./packet-enrichment.js";
+import { scanWorkflowPreview } from "./workflow-scan.js";
+
+// Monotonic UUIDv7 generator for TS-side event ids.
+//
+// Critical: `id` on the ledger's events table is UUIDv7. SQLite sorts events
+// lexicographically by id, which for UUIDv7 matches time order — BUT only if
+// two ids generated in the same ms are ordered by a deterministic counter
+// rather than random tie-break. Otherwise `tool_result` (emitted right after
+// `tool_request`) can sort before it in events.db, breaking replay's
+// parent_chain invariant.
+//
+// This implementation:
+//   - bits 0-47: current ms timestamp
+//   - bits 48-51: version nibble (0x7)
+//   - bits 52-63: 12-bit monotonic counter (resets when ms advances)
+//   - bits 64-65: variant (0b10)
+//   - bits 66-127: 62 random bits
+//
+// If the counter saturates within a single ms (>4096 calls), we bump the ms
+// timestamp by 1 and reset the counter. This is rare in practice but
+// preserves strict monotonicity.
+let lastMs = 0n;
+let subMsCounter = 0;
+function generateUuidV7(): string {
+	let nowMs = BigInt(Date.now());
+	if (nowMs <= lastMs) {
+		subMsCounter += 1;
+		if (subMsCounter >= 0x1000) {
+			// Counter saturated within one ms; bump the timestamp and reset.
+			lastMs = lastMs + 1n;
+			nowMs = lastMs;
+			subMsCounter = 0;
+		} else {
+			nowMs = lastMs;
+		}
+	} else {
+		lastMs = nowMs;
+		subMsCounter = 0;
+	}
+
+	// 16-byte UUID: 48-bit timestamp || 4-bit version || 12-bit counter
+	//             || 2-bit variant || 62-bit random
+	const bytes = randomBytes(16);
+
+	// Timestamp (big-endian ms in bytes 0-5)
+	bytes[0] = Number((nowMs >> 40n) & 0xffn);
+	bytes[1] = Number((nowMs >> 32n) & 0xffn);
+	bytes[2] = Number((nowMs >> 24n) & 0xffn);
+	bytes[3] = Number((nowMs >> 16n) & 0xffn);
+	bytes[4] = Number((nowMs >> 8n) & 0xffn);
+	bytes[5] = Number(nowMs & 0xffn);
+
+	// Version nibble (0x7) || high 4 bits of counter
+	bytes[6] = 0x70 | ((subMsCounter >> 8) & 0x0f);
+	// Low 8 bits of counter
+	bytes[7] = subMsCounter & 0xff;
+
+	// Variant (0b10xxxxxx in byte 8)
+	bytes[8] = (bytes[8] & 0x3f) | 0x80;
+
+	// Format as 8-4-4-4-12
+	const hex = bytes.toString("hex");
+	return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
+}
+
+type StructuredMemoryPortLike = NonNullable<
+	Parameters<typeof preparePacketMemoryEnrichment>[4]
+>;
+type InjectedMemoryRecordLike =
+	PacketMemoryEnrichmentResult["injectedMemories"][number];
+
+interface PersistedInjectedMemoryRecordLike extends InjectedMemoryRecordLike {
+	readonly id: string;
+	readonly runId: string;
+	readonly createdAt: string;
+}
+
+interface StructuredMemoryStoragePortLike extends StructuredMemoryPortLike {
+	recordInjectedMemories(
+		runId: string,
+		records: readonly InjectedMemoryRecordLike[],
+	): void;
+	listInjectedMemories(
+		runId: string,
+	): readonly PersistedInjectedMemoryRecordLike[];
+	recordRunStrategyId(runId: string, strategyId: string): void;
+}
 
 export interface RunCliDependencies {
 	createOrchestrator?: () => BuildplaneCliOrchestrator;
 	parsePacket?: (packetPath: string) => unknown;
+	inspectBootstrapDoctor?: () => BootstrapDoctorReport;
 	runNativeCommand?: (
 		argv: string[],
 		options: {
@@ -67,6 +174,134 @@ async function cliImport(specifier: string): Promise<unknown> {
 	}
 }
 
+function resolveCurrentBranch(projectRoot: string): string | undefined {
+	const result = spawnSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], {
+		cwd: projectRoot,
+		encoding: "utf8",
+		env: process.env,
+	});
+	if (result.status !== 0) {
+		return undefined;
+	}
+	const branch = result.stdout.trim();
+	return branch && branch !== "HEAD" ? branch : undefined;
+}
+
+function persistInjectedMemories(
+	storagePort: StructuredMemoryStoragePortLike | undefined,
+	runId: string,
+	records: readonly InjectedMemoryRecordLike[],
+): readonly PersistedInjectedMemoryRecordLike[] {
+	if (!storagePort || records.length === 0) {
+		return [];
+	}
+	storagePort.recordInjectedMemories(runId, records);
+	return [...storagePort.listInjectedMemories(runId)];
+}
+
+function withPersistedInjectedMemories<T extends { run: { id: string } }>(
+	result: T,
+	storagePort: StructuredMemoryStoragePortLike | undefined,
+	records: readonly InjectedMemoryRecordLike[],
+): T & { injectedMemories?: readonly PersistedInjectedMemoryRecordLike[] } {
+	const injectedMemories = persistInjectedMemories(
+		storagePort,
+		result.run.id,
+		records,
+	);
+	if (injectedMemories.length === 0) {
+		return result;
+	}
+	return {
+		...result,
+		injectedMemories,
+	};
+}
+
+function collectStrategyRunTargets(result: {
+	childResults: Map<string, { run?: { id?: string } }>;
+	rounds?: ReadonlyArray<Map<string, { run?: { id?: string } }>>;
+}): ReadonlyArray<{ unitId: string; runId?: string }> {
+	const targets: Array<{ unitId: string; runId?: string }> = [];
+	const addResults = (
+		entries: Iterable<[string, { run?: { id?: string } }]>,
+	) => {
+		for (const [unitId, childResult] of entries) {
+			targets.push({
+				unitId,
+				runId: childResult.run?.id,
+			});
+		}
+	};
+
+	for (const round of result.rounds ?? []) {
+		addResults(Array.from(round.entries()));
+	}
+	addResults(Array.from(result.childResults.entries()));
+	return targets;
+}
+
+async function loadPacketEnrichmentModule() {
+	return import("./packet-enrichment.js");
+}
+
+type InjectedMemoryRecordsByUnitId = Record<
+	string,
+	readonly InjectedMemoryRecordLike[]
+>;
+
+function persistInjectedMemoriesForTargets(
+	storagePort: StructuredMemoryStoragePortLike | undefined,
+	targets: Iterable<{ unitId: string; runId?: string }>,
+	injectedMemoriesByUnitId: InjectedMemoryRecordsByUnitId,
+	preferredRunId?: string,
+): readonly PersistedInjectedMemoryRecordLike[] {
+	let persisted: readonly PersistedInjectedMemoryRecordLike[] = [];
+	const seen = new Set<string>();
+	for (const target of targets) {
+		const runId = target.runId;
+		const records = injectedMemoriesByUnitId[target.unitId];
+		if (!runId || runId === "unknown" || !records || records.length === 0) {
+			continue;
+		}
+		if (seen.has(runId)) {
+			continue;
+		}
+		seen.add(runId);
+		const current = persistInjectedMemories(storagePort, runId, records);
+		if (runId === preferredRunId && current.length > 0) {
+			persisted = current;
+			continue;
+		}
+		if (persisted.length === 0 && current.length > 0) {
+			persisted = current;
+		}
+		if (!preferredRunId && current.length > 0) {
+			persisted = current;
+		}
+	}
+	return persisted;
+}
+
+function recordStrategyIdForTargets(
+	storagePort: StructuredMemoryStoragePortLike | undefined,
+	targets: Iterable<{ unitId: string; runId?: string }>,
+	strategyId: string,
+): void {
+	if (!storagePort) {
+		return;
+	}
+	const seen = new Set<string>();
+	for (const target of targets) {
+		const runId = target.runId;
+		if (!runId || runId === "unknown" || seen.has(runId)) {
+			continue;
+		}
+		seen.add(runId);
+		storagePort.recordRunStrategyId(runId, strategyId);
+	}
+}
+
 function formatTopLevelHelp(): string[] {
 	return [
 		BUILDPLANE_BANNER,
@@ -87,6 +322,10 @@ function formatTopLevelHelp(): string[] {
 		"",
 		"  Project:",
 		"    init                   Initialize .buildplane in this repo",
+		"    bootstrap doctor      Check published CLI prerequisites",
+		"    workspace list         Show actionable retained/cleanup-failed workspaces",
+		"    workspace cleanup <r>  Delete an actionable workspace by run id",
+		"    workflow scan [--json] Preview recognized Claude/Codex workflow files",
 		"    memory list            Show stored learnings",
 		"    memory inspect <id>    Detail for one learning",
 		"    memory <action>        Advanced memory operations (native)",
@@ -117,7 +356,15 @@ interface BuildplaneCliOrchestrator {
 		projectRoot: string;
 		stateDbPath: string;
 	};
-	runPacket(packet: unknown): {
+	runPacket(
+		packet: unknown,
+		eventBus?: unknown,
+		runOptions?: {
+			runId?: string;
+			parentRunId?: string;
+			strategyId?: string;
+		},
+	): {
 		run: { id: string; status: string };
 		receipt: unknown;
 		decision: unknown;
@@ -125,6 +372,11 @@ interface BuildplaneCliOrchestrator {
 	runPacketAsync(
 		packet: unknown,
 		eventBus?: unknown,
+		runOptions?: {
+			runId?: string;
+			parentRunId?: string;
+			strategyId?: string;
+		},
 	): Promise<{
 		run: { id: string; status: string };
 		receipt: unknown;
@@ -206,9 +458,22 @@ interface MemoryPortLike {
 
 interface CliOrchestratorBundle {
 	orchestrator: BuildplaneCliOrchestrator;
+	eventBus: {
+		subscribe: (listener: (event: unknown) => void) => () => void;
+		emit: (event: unknown) => void;
+	};
+	eventStore: {
+		persistEvent: (runId: string, event: unknown) => void;
+	};
 	memoryPort?: MemoryPortLike;
+	structuredMemoryPort?: StructuredMemoryStoragePortLike;
 	honchoAdapter?: HonchoPortLike;
 	userId?: string;
+	currentBranch?: string;
+	/** Mutable slot — swapped per-run to route through the ledger-wrapped ToolRegistry. */
+	commandExecutor: {
+		executePacket: (packet: unknown, root: string) => unknown;
+	};
 }
 
 async function loadCliOrchestrator(
@@ -323,12 +588,19 @@ async function loadCliOrchestrator(
 
 	let memoryPortRef: MemoryPortLike | undefined;
 	let orchestratorMemoryPortRef: MemoryPortLike | undefined;
+	let structuredMemoryPortRef: StructuredMemoryStoragePortLike | undefined;
+	let currentBranchRef: string | undefined;
 	try {
-		const { resolveProjectLayout, createLearningStore } = (await import(
-			"@buildplane/storage"
-		)) as unknown as {
+		const {
+			resolveProjectLayout,
+			createLearningStore,
+			createBuildplaneStorage,
+		} = (await import("@buildplane/storage")) as unknown as {
 			resolveProjectLayout: (root: string) => { stateDbPath: string };
 			createLearningStore: (db: unknown) => MemoryPortLike;
+			createBuildplaneStorage: (
+				root: string,
+			) => StructuredMemoryStoragePortLike;
 		};
 		const { DatabaseSync } = await import("node:sqlite");
 		const layout = resolveProjectLayout(projectRoot);
@@ -336,6 +608,8 @@ async function loadCliOrchestrator(
 			// Read-only connection for CLI enrichment (pre-run fetch)
 			const readDb = new DatabaseSync(layout.stateDbPath, { readOnly: true });
 			memoryPortRef = createLearningStore(readDb);
+			structuredMemoryPortRef = createBuildplaneStorage(projectRoot);
+			currentBranchRef = resolveCurrentBranch(projectRoot);
 			// Read-write connection for orchestrator post-run writes
 			const writeDb = new DatabaseSync(layout.stateDbPath);
 			orchestratorMemoryPortRef = createLearningStore(writeDb);
@@ -497,7 +771,37 @@ async function loadCliOrchestrator(
 				execution?: unknown;
 				routingHints?: { preferredWorker?: string };
 			};
-			if (p.execution) return commandExecutor.executePacket(packet, root);
+			if (p.execution) {
+				const receipt = commandExecutor.executePacket(packet, root) as {
+					exitCode: number;
+					outputChecks: Array<{ path: string; exists: boolean }>;
+				};
+				if (
+					typeof bus === "object" &&
+					bus !== null &&
+					typeof (bus as { emit?: unknown }).emit === "function"
+				) {
+					(
+						bus as {
+							emit: (event: {
+								kind: "command-execution-complete";
+								timestamp: string;
+								exitCode: number;
+								outputChecks: Array<{ path: string; exists: boolean }>;
+							}) => void;
+						}
+					).emit({
+						kind: "command-execution-complete",
+						timestamp: new Date().toISOString(),
+						exitCode: receipt.exitCode,
+						outputChecks: receipt.outputChecks.map((check) => ({
+							path: check.path,
+							exists: check.exists,
+						})),
+					});
+				}
+				return receipt;
+			}
 			if (p.routingHints?.preferredWorker === "claude-code") {
 				return (await getClaudeExecutor()).executePacketAsync(
 					packet,
@@ -524,9 +828,14 @@ async function loadCliOrchestrator(
 
 	return {
 		orchestrator,
+		eventBus,
+		eventStore,
 		memoryPort: memoryPortRef,
+		structuredMemoryPort: structuredMemoryPortRef,
 		honchoAdapter: honchoAdapterRef,
 		userId: userIdRef,
+		currentBranch: currentBranchRef,
+		commandExecutor,
 	};
 }
 
@@ -613,6 +922,25 @@ function createNativeDispatchError(
 	return new NativeCommandDispatchError(message);
 }
 
+function classifyLocalLearningInspect(
+	args: string[],
+): { json: boolean; id?: string } | null {
+	const unsupportedFlags = args.filter(
+		(value) => value.startsWith("--") && value !== "--json",
+	);
+	if (unsupportedFlags.length > 0) {
+		return null;
+	}
+	const positionalArgs = args.filter((value) => !value.startsWith("--"));
+	if (positionalArgs.length === 0 || positionalArgs.length > 1) {
+		return null;
+	}
+	return {
+		json: args.includes("--json"),
+		id: positionalArgs[0],
+	};
+}
+
 function splitOutputLines(output: string): string[] {
 	return output
 		.split(/\r?\n/u)
@@ -636,6 +964,653 @@ function resolveNativeBinary(cwd: string): string {
 		}
 	}
 	return "buildplane-native";
+}
+
+function resolveLedgerBinary(cwd: string): string {
+	// The ledger binary is the same `buildplane-native` — just invoke with a
+	// different subcommand. Reuse the existing resolution chain.
+	return resolveNativeBinary(cwd);
+}
+
+// ---------------------------------------------------------------------------
+// buildplane fork — Phase E Task 5
+// ---------------------------------------------------------------------------
+
+interface ForkPlan {
+	new_run_id: string;
+	workspace_path: string;
+	checkout_sha: string;
+	packet_json: unknown;
+	parent_run_id: string;
+	parent_event_id: string;
+}
+
+interface ForkArgs {
+	runId: string;
+	at: string;
+	workspace?: string;
+	packet: string;
+}
+
+function parseForkArgs(
+	rest: string[],
+): { ok: true; value: ForkArgs } | { ok: false; error: string } {
+	let runId: string | undefined;
+	let at: string | undefined;
+	let workspace: string | undefined;
+	let packet: string | undefined;
+	let i = 0;
+	while (i < rest.length) {
+		const arg = rest[i];
+		switch (arg) {
+			case "--run-id":
+				i += 1;
+				runId = rest[i];
+				break;
+			case "--at":
+				i += 1;
+				at = rest[i];
+				break;
+			case "--workspace":
+				i += 1;
+				workspace = rest[i];
+				break;
+			case "--packet":
+				i += 1;
+				packet = rest[i];
+				break;
+			default:
+				if (arg && !runId) {
+					runId = arg;
+				} else {
+					return { ok: false, error: `unknown argument: ${arg}` };
+				}
+		}
+		i += 1;
+	}
+	if (!runId)
+		return {
+			ok: false,
+			error: "missing parent run id (positional or --run-id)",
+		};
+	if (!at) return { ok: false, error: "missing --at <event-id>" };
+	if (!packet) return { ok: false, error: "missing --packet <file>" };
+	return { ok: true, value: { runId, at, workspace, packet } };
+}
+
+function forkUsageText(): string {
+	return `usage: buildplane fork <parent-run-id> --at <event-id> --packet <file> [--workspace <path>]
+
+  --run-id       parent run id (or positional first arg)
+  --at           parent unit_started event id to fork at
+  --packet       path to the new packet json
+  --workspace    workspace root (defaults to cwd)
+`;
+}
+
+async function parsePlannedForkPacket(packetJson: unknown): Promise<unknown> {
+	const kernel = (await cliImport("@buildplane/kernel")) as unknown as {
+		parseUnitPacket: (input: string) => unknown;
+	};
+	return kernel.parseUnitPacket(JSON.stringify(packetJson));
+}
+
+interface LedgerUnitContext {
+	readonly unitId: string;
+	readonly parentEventId: string;
+}
+
+function beginLedgerUnit(
+	emitter: TapeEmitter,
+	runId: string,
+	ledgerWorkspacePath: string,
+	unitId: string,
+	unitKind: "command" | "model",
+	parentEventId?: string | null,
+): LedgerUnitContext {
+	const unitStartedId = generateUuidV7();
+	emitter.emit(
+		"unit_started",
+		{
+			UnitStartedV1: {
+				unit_id: unitId,
+				parent_unit_id: null,
+				unit_kind: unitKind,
+				policy: {},
+			},
+		},
+		{ id: unitStartedId, ...(parentEventId ? { parent: parentEventId } : {}) },
+	);
+	runGitCheckpoint({
+		boundary: "pre-unit",
+		runId,
+		unitId,
+		cwd: ledgerWorkspacePath,
+		emitter,
+		parentEventId: unitStartedId,
+	});
+	return { unitId, parentEventId: unitStartedId };
+}
+
+function completeLedgerUnit(
+	emitter: TapeEmitter,
+	runId: string,
+	ledgerWorkspacePath: string,
+	currentUnit: LedgerUnitContext | null,
+	outcome: "passed" | "failed",
+): null {
+	if (!currentUnit) {
+		return null;
+	}
+	runGitCheckpoint({
+		boundary: "post-unit",
+		runId,
+		unitId: currentUnit.unitId,
+		cwd: ledgerWorkspacePath,
+		emitter,
+		parentEventId: currentUnit.parentEventId,
+	});
+	emitter.emit(
+		"unit_completed",
+		{
+			UnitCompletedV1: {
+				unit_id: currentUnit.unitId,
+				outcome,
+				artifacts: [],
+			},
+		},
+		{ parent: currentUnit.parentEventId },
+	);
+	return null;
+}
+
+function emitLedgerRunStarted(
+	emitter: TapeEmitter | null,
+	packetHash: string,
+	workspacePath: string,
+	parentRunId: string | null,
+	parentEventId?: string | null,
+	gitHead = "",
+): string | undefined {
+	if (!emitter) {
+		return undefined;
+	}
+	const runStartedId = generateUuidV7();
+	emitter.emit(
+		"run_started",
+		{
+			RunStartedV1: {
+				packet_hash: packetHash,
+				git_head: gitHead,
+				workspace_path: workspacePath,
+				config: {},
+				parent_run_id: parentRunId,
+				...(parentEventId ? { parent_event_id: parentEventId } : {}),
+			},
+		},
+		{ id: runStartedId },
+	);
+	return runStartedId;
+}
+
+function emitLedgerRunCompleted(
+	emitter: TapeEmitter | null,
+	outcome: "passed" | "failed",
+	durationMs: number,
+): void {
+	if (!emitter) {
+		return;
+	}
+	emitter.emit("run_completed", {
+		RunCompletedV1: {
+			outcome,
+			duration_ms: durationMs,
+			event_count: 0,
+			unit_count: 1,
+		},
+	});
+}
+
+async function runForkExecution(
+	plan: ForkPlan,
+	workspace: string,
+	opts: { stdout: (s: string) => void; stderr: (s: string) => void },
+): Promise<number> {
+	// Phase E Task 6: real ledger spawn + orchestrator invocation.
+	//
+	// NOTE: This duplicates the ledger-integration block from the `run` command
+	// handler rather than extracting a shared helper, because that block is
+	// tightly coupled to the `case "run"` closure locals (enrichedPacket,
+	// cliEventBus, commandExecutor, etc.). A full extraction is tracked for
+	// Phase F consolidation.
+	const binary = resolveLedgerBinary(workspace);
+	const ledgerChild = spawnLedgerSubprocess(binary, plan.new_run_id, workspace);
+
+	let emitter: TapeEmitter;
+	try {
+		emitter = await createTapeEmitter({
+			childStdin: ledgerChild.stdin,
+			childStderr: ledgerChild.stderr,
+			childExit: ledgerChild.exit,
+			workspacePath: workspace,
+			runId: plan.new_run_id,
+		});
+	} catch (err) {
+		// Handshake failed — kill child and surface the error.
+		if (ledgerChild.child.exitCode === null) {
+			ledgerChild.child.kill("SIGTERM");
+		}
+		opts.stderr(`fork ledger handshake failed: ${String(err)}\n`);
+		return 1;
+	}
+
+	let exitCode = 1;
+	let runStartEventId: string | undefined;
+	let forkCurrentUnit: LedgerUnitContext | null = null;
+	const getForkUnitCtx = () => forkCurrentUnit;
+	const ledgerWorkspacePath = resolve(workspace);
+	let unsubscribeFork: (() => void) | null = null;
+	let forkCommandExecutor:
+		| {
+				executePacket: (
+					packetUnknown: unknown,
+					executionRoot: string,
+				) => unknown;
+		  }
+		| undefined;
+	let originalForkExecutePacket:
+		| ((packetUnknown: unknown, executionRoot: string) => unknown)
+		| undefined;
+
+	try {
+		// Load a fresh orchestrator bundle scoped to the fork workspace.
+		const bundle = await loadCliOrchestrator(workspace);
+		const {
+			orchestrator: forkOrchestrator,
+			eventBus: forkEventBus,
+			commandExecutor: loadedForkCommandExecutor,
+		} = bundle;
+		forkCommandExecutor = loadedForkCommandExecutor;
+
+		// Wire bus subscription for unit-boundary events (mirrors run command handler).
+		unsubscribeFork = forkEventBus.subscribe((evt: unknown) => {
+			const e = evt as {
+				kind?: string;
+				unitId?: string;
+				exitCode?: number;
+				executionType?: "command" | "model";
+			};
+			switch (e.kind) {
+				case "execution-started": {
+					const unitId = e.unitId ?? "unknown";
+					forkCurrentUnit = completeLedgerUnit(
+						emitter,
+						plan.new_run_id,
+						ledgerWorkspacePath,
+						forkCurrentUnit,
+						"failed",
+					);
+					forkCurrentUnit = beginLedgerUnit(
+						emitter,
+						plan.new_run_id,
+						ledgerWorkspacePath,
+						unitId,
+						e.executionType ?? "command",
+						runStartEventId,
+					);
+					break;
+				}
+				case "command-execution-complete": {
+					forkCurrentUnit = completeLedgerUnit(
+						emitter,
+						plan.new_run_id,
+						ledgerWorkspacePath,
+						forkCurrentUnit,
+						e.exitCode === 0 ? "passed" : "failed",
+					);
+					break;
+				}
+				case "model-response-complete": {
+					// Do not finalize the ledger unit here. Some async model executors can
+					// emit a response event and still finish the overall run as failed
+					// (for example budget-aborted streams). Leave the unit open so the
+					// authoritative final run outcome can close it during cleanup.
+					break;
+				}
+				case "execution-error": {
+					forkCurrentUnit = completeLedgerUnit(
+						emitter,
+						plan.new_run_id,
+						ledgerWorkspacePath,
+						forkCurrentUnit,
+						"failed",
+					);
+					break;
+				}
+				default:
+					break;
+			}
+		});
+
+		// Wrap the commandExecutor so tool calls are instrumented through the ledger.
+		const { existsSync: fsExistsSync, realpathSync: fsRealpathSync } =
+			await import("node:fs");
+		const { resolve: pathResolve } = await import("node:path");
+		originalForkExecutePacket = forkCommandExecutor.executePacket;
+		forkCommandExecutor.executePacket = (
+			packetUnknown: unknown,
+			executionRoot: string,
+		): unknown => {
+			const p = packetUnknown as {
+				execution: { command: string; args?: readonly string[]; cwd?: string };
+				verification: { requiredOutputs: readonly string[] };
+			};
+			const worktreeRoot = pathResolve(executionRoot);
+			const perCallRawRegistry = createToolRegistry(worktreeRoot);
+			const perCallRegistry = wrapToolRegistryForLedger(
+				perCallRawRegistry,
+				emitter,
+				getForkUnitCtx,
+			);
+			const effectiveCwd = p.execution.cwd
+				? pathResolve(worktreeRoot, p.execution.cwd)
+				: worktreeRoot;
+			const startedAt = new Date().toISOString();
+			const result = perCallRegistry.run_command({
+				command: p.execution.command,
+				args: p.execution.args,
+				cwd: p.execution.cwd,
+			});
+			const completedAt = new Date().toISOString();
+			return {
+				command: p.execution.command,
+				args: [...(p.execution.args ?? [])],
+				cwd: effectiveCwd,
+				startedAt,
+				completedAt,
+				exitCode: result.exitCode,
+				stdout: result.stdout,
+				stderr: result.stderr,
+				outputChecks: p.verification.requiredOutputs.map(
+					(outputPath: string) => {
+						const realRoot = (() => {
+							try {
+								return fsRealpathSync(worktreeRoot);
+							} catch {
+								return worktreeRoot;
+							}
+						})();
+						return {
+							path: outputPath,
+							exists: fsExistsSync(pathResolve(realRoot, outputPath)),
+						};
+					},
+				),
+			};
+		};
+
+		const runStartMs = Date.now();
+		const forkPacket = await parsePlannedForkPacket(plan.packet_json);
+		const packetHash = `sha256:${createHash("sha256")
+			.update(JSON.stringify(forkPacket))
+			.digest("hex")}`;
+		runStartEventId = emitLedgerRunStarted(
+			emitter,
+			packetHash,
+			workspace,
+			plan.parent_run_id,
+			plan.parent_event_id,
+			plan.checkout_sha,
+		);
+
+		// Invoke the orchestrator with the normalized fork packet.
+		const orchResult = await forkOrchestrator.runPacketAsync(
+			forkPacket as never,
+			forkEventBus,
+			{ runId: plan.new_run_id, parentRunId: plan.parent_run_id },
+		);
+		const status = (orchResult as { run?: { status?: string } }).run?.status;
+		exitCode = status === "passed" ? 0 : 1;
+		forkCurrentUnit = completeLedgerUnit(
+			emitter,
+			plan.new_run_id,
+			ledgerWorkspacePath,
+			forkCurrentUnit,
+			exitCode === 0 ? "passed" : "failed",
+		);
+
+		// Emit run_completed.
+		emitLedgerRunCompleted(
+			emitter,
+			exitCode === 0 ? "passed" : "failed",
+			Date.now() - runStartMs,
+		);
+	} catch (err) {
+		opts.stderr(`fork orchestrator error: ${String(err)}\n`);
+		exitCode = 1;
+		try {
+			emitter.emit("run_failed", {
+				RunFailedV1: {
+					reason: String(err),
+				},
+			});
+		} catch {
+			// best-effort; original error already logged
+		}
+	} finally {
+		unsubscribeFork?.();
+		forkCurrentUnit = completeLedgerUnit(
+			emitter,
+			plan.new_run_id,
+			ledgerWorkspacePath,
+			forkCurrentUnit,
+			exitCode === 0 ? "passed" : "failed",
+		);
+		if (forkCommandExecutor && originalForkExecutePacket) {
+			forkCommandExecutor.executePacket = originalForkExecutePacket;
+		}
+		try {
+			await emitter.close();
+		} catch {
+			// Best-effort close; the orchestrator result is authoritative.
+		}
+	}
+
+	opts.stdout(`fork run completed: ${plan.new_run_id} (exit ${exitCode})\n`);
+	return exitCode;
+}
+
+async function runFork(
+	rest: string[],
+	opts: {
+		cwd: string;
+		stdout: (s: string) => void;
+		stderr: (s: string) => void;
+	},
+): Promise<number> {
+	const args = parseForkArgs(rest);
+	if (!args.ok) {
+		opts.stderr(`buildplane fork: ${args.error}\n`);
+		opts.stderr(forkUsageText());
+		return 1;
+	}
+
+	const workspace = resolve(args.value.workspace ?? opts.cwd);
+	// Resolve the packet path against the user's cwd BEFORE spawning the native
+	// binary — the plan subprocess runs in `planSpawnCwd` (project root), not
+	// `opts.cwd`, so a relative path like `./packet.json` would otherwise be
+	// resolved from the wrong directory.
+	const packet = resolve(opts.cwd, args.value.packet);
+	const binary = resolveLedgerBinary(opts.cwd);
+
+	// Phase 1: plan.
+	// NOTE: spawnSync for `fork plan` must run from the project root (not from the
+	// workspace temp dir) so that the native binary can resolve its native workspace
+	// (Cargo.toml + packs/) via ancestor-walk. Use the same deriveLedgerSpawnCwd
+	// logic that spawnLedgerSubprocess uses.
+	const planSpawnCwd = deriveLedgerSpawnCwd(binary, opts.cwd);
+	const planArgs = [
+		"fork",
+		"plan",
+		"--run-id",
+		args.value.runId,
+		"--at",
+		args.value.at,
+		"--workspace",
+		workspace,
+		"--packet",
+		packet,
+	];
+	const planResult = spawnSync(binary, planArgs, {
+		encoding: "utf8",
+		cwd: planSpawnCwd,
+	});
+	if (planResult.status !== 0) {
+		opts.stderr(planResult.stderr ?? `fork plan failed\n`);
+		return planResult.status ?? 1;
+	}
+	let plan: ForkPlan;
+	try {
+		plan = JSON.parse(planResult.stdout.trim()) as ForkPlan;
+	} catch (e) {
+		opts.stderr(`fork plan returned invalid JSON: ${String(e)}\n`);
+		return 1;
+	}
+
+	// Phase 2: clean-worktree pre-flight.
+	// Filter out SQLite WAL companion files (*.db-shm, *.db-wal) — these are
+	// created transiently when fork plan opens events.db for replay and do not
+	// represent user changes. Everything else must be committed.
+	const statusResult = spawnSync(
+		"git",
+		["-C", workspace, "status", "--porcelain"],
+		{ encoding: "utf8" },
+	);
+	if (statusResult.status !== 0) {
+		opts.stderr(`git status in ${workspace} failed: ${statusResult.stderr}\n`);
+		return 1;
+	}
+	const dirtyLines = statusResult.stdout
+		.split("\n")
+		.filter((line) => line.trim().length > 0)
+		.filter((line) => !line.match(/\.db-shm$|\.db-wal$/u));
+	if (dirtyLines.length > 0) {
+		opts.stderr(
+			`workspace has uncommitted changes; commit or stash before forking\n`,
+		);
+		return 1;
+	}
+
+	// Phase 3: checkout the pre-unit SHA.
+	const checkoutResult = spawnSync(
+		"git",
+		["-C", workspace, "checkout", plan.checkout_sha],
+		{ encoding: "utf8" },
+	);
+	if (checkoutResult.status !== 0) {
+		opts.stderr(
+			`git checkout ${plan.checkout_sha} failed: ${checkoutResult.stderr}\n`,
+		);
+		return 1;
+	}
+
+	// Phase 4: stub execution for Task 5. Task 6 replaces this with a real
+	// ledger spawn + orchestrator invocation.
+	const exitCode = await runForkExecution(plan, workspace, opts);
+
+	// Phase 5: exit hint.
+	const currentBranchResult = spawnSync(
+		"git",
+		["-C", workspace, "rev-parse", "--abbrev-ref", "HEAD"],
+		{ encoding: "utf8" },
+	);
+	const currentBranch = currentBranchResult.stdout.trim();
+	opts.stdout(
+		`\nHEAD is at fork tree ${plan.checkout_sha.slice(0, 8)}; ` +
+			`run \`git checkout <branch>\` to restore.\n`,
+	);
+	if (currentBranch === "HEAD") {
+		opts.stdout(`(detached HEAD)\n`);
+	}
+
+	return exitCode;
+}
+
+interface LedgerChild {
+	child: ChildProcess;
+	stdin: Writable;
+	stderr: Readable;
+	exit: Promise<number>;
+}
+
+/**
+ * Derive a suitable cwd for the ledger subprocess so the native binary can
+ * resolve its default native-root. The binary looks for `native/Cargo.toml`
+ * and `native/packs` relative to its cwd.
+ *
+ * Resolution order:
+ *  1. If the binary lives inside a `.../native/target/{debug,release}/` tree,
+ *     the project root is 4 directories up — use that.
+ *  2. Otherwise fall back to `workspace` (the user's project root).  In a
+ *     production install the binary is on PATH and the workspace itself may
+ *     not have a native subtree; the binary is expected to degrade gracefully
+ *     in that configuration.
+ */
+function deriveLedgerSpawnCwd(binary: string, workspace: string): string {
+	// Walk up: debug/release → target → native → <project-root>
+	const parts = binary.replace(/\\/g, "/").split("/");
+	const nativeIdx = parts.lastIndexOf("native");
+	if (
+		nativeIdx >= 0 &&
+		parts[nativeIdx + 1] === "target" &&
+		(parts[nativeIdx + 2] === "debug" || parts[nativeIdx + 2] === "release")
+	) {
+		return parts.slice(0, nativeIdx).join("/") || workspace;
+	}
+	return workspace;
+}
+
+function spawnLedgerSubprocess(
+	binary: string,
+	runId: string,
+	workspace: string,
+): LedgerChild {
+	const spawnCwd = deriveLedgerSpawnCwd(binary, workspace);
+	const child = spawn(
+		binary,
+		[
+			"ledger",
+			"serve",
+			"--run-id",
+			runId,
+			"--workspace",
+			workspace,
+			"--schema-version",
+			"1",
+		],
+		{
+			stdio: ["pipe", "inherit", "pipe"],
+			cwd: spawnCwd,
+		},
+	);
+	if (!child.stdin || !child.stderr) {
+		throw new Error("ledger subprocess stdio unexpectedly missing");
+	}
+	const exit = new Promise<number>((resolve, reject) => {
+		child.on("exit", (code) => resolve(code ?? -1));
+		// Handle spawn errors (e.g. binary not found) so they surface as a
+		// rejected promise rather than an unhandled 'error' event.
+		child.on("error", (err) => reject(err));
+	});
+	// Suppress unhandled-rejection noise for consumers that only attach .then()
+	// (e.g. createTapeEmitter adds .then but no .catch on childExit).
+	exit.catch(() => {});
+	return {
+		child,
+		stdin: child.stdin as Writable,
+		stderr: child.stderr as Readable,
+		exit,
+	};
 }
 
 async function runNativeCommand(
@@ -678,6 +1653,7 @@ export async function runCli(
 	options: RunCliOptions = {},
 ): Promise<number> {
 	const cwd = options.cwd ?? process.cwd();
+	const resolvedCwd = resolve(cwd);
 	const stdout = options.stdout ?? ((line: string) => console.log(line));
 	const stderr = options.stderr ?? ((line: string) => console.error(line));
 	const deps = options.dependencies;
@@ -696,6 +1672,35 @@ export async function runCli(
 	}
 
 	try {
+		if (command === "bootstrap") {
+			const subcommand = rest[0];
+			const doctorArgs = rest.slice(1);
+			const json = doctorArgs.includes("--json");
+			if (subcommand === "doctor") {
+				const hasOnlySupportedDoctorArgs =
+					doctorArgs.length === 0 ||
+					(doctorArgs.length === 1 && doctorArgs[0] === "--json");
+				if (!hasOnlySupportedDoctorArgs) {
+					throw new Error(
+						`Unsupported bootstrap doctor arguments: ${doctorArgs.join(" ")}`,
+					);
+				}
+				const report =
+					deps?.inspectBootstrapDoctor?.() ?? inspectBootstrapDoctor();
+				if (json) {
+					stdout(formatJson(report));
+				} else {
+					for (const line of formatBootstrapDoctorReport(report)) {
+						stdout(line);
+					}
+				}
+				return report.ok ? 0 : 1;
+			}
+			throw new Error(
+				`Unknown bootstrap command: ${subcommand ?? "(missing subcommand)"}`,
+			);
+		}
+
 		if (command === "memory") {
 			const subcommand = rest[0];
 			if (subcommand === "list") {
@@ -734,8 +1739,20 @@ export async function runCli(
 			}
 			if (subcommand === "inspect") {
 				const subRest = rest.slice(1);
-				const json = subRest.includes("--json");
-				const id = subRest.find((v) => v !== "--json");
+				const localInspect = classifyLocalLearningInspect(subRest);
+				if (!localInspect) {
+					try {
+						return await (deps?.runNativeCommand ?? runNativeCommand)(rest, {
+							cwd,
+							commandPath: ["memory"],
+							stdout,
+							stderr,
+						});
+					} catch (error) {
+						throw createNativeDispatchError(["memory"], error);
+					}
+				}
+				const { json, id } = localInspect;
 				if (!id) {
 					const msg = "Missing required learning ID for memory inspect.";
 					if (json) {
@@ -787,6 +1804,23 @@ export async function runCli(
 			}
 		}
 
+		if (command === "ledger") {
+			try {
+				return await (deps?.runNativeCommand ?? runNativeCommand)(rest, {
+					cwd,
+					commandPath: ["ledger"],
+					stdout,
+					stderr,
+				});
+			} catch (error) {
+				throw createNativeDispatchError(["ledger"], error);
+			}
+		}
+
+		if (command === "fork") {
+			return await runFork(rest, { cwd, stdout, stderr });
+		}
+
 		if (command === "pack" && rest[0] === "show") {
 			try {
 				return await (deps?.runNativeCommand ?? runNativeCommand)(
@@ -836,10 +1870,173 @@ export async function runCli(
 			return 0;
 		}
 
+		if (command === "workflow") {
+			const subcommand = rest[0];
+			const json = rest.includes("--json");
+			if (subcommand === "scan") {
+				const preview = scanWorkflowPreview(cwd);
+				if (json) {
+					stdout(formatJson(preview));
+				} else {
+					for (const line of formatWorkflowScanPreview(preview)) {
+						stdout(line);
+					}
+				}
+				return 0;
+			}
+
+			throw new Error(
+				`Unknown workflow command: ${subcommand ?? "(missing subcommand)"}`,
+			);
+		}
+
+		if (command === "workspace") {
+			const subcommand = rest[0];
+			const json = rest.includes("--json");
+			const storage = (await cliImport("@buildplane/storage")) as unknown as {
+				createBuildplaneStorage: (root: string) => {
+					getStatusSnapshot: () => {
+						actionableWorkspaces?: Array<{
+							runId: string;
+							status: string;
+							path: string;
+							headSha?: string;
+							cleanupError?: string;
+						}>;
+					};
+					inspectTarget: (id: string) => {
+						workspace?: { status?: string; path?: string };
+					};
+					recordWorkspaceCleanedUp: (runId: string) => void;
+				};
+			};
+			const storageInst = storage.createBuildplaneStorage(cwd);
+
+			if (subcommand === "list") {
+				const actionableWorkspaces =
+					storageInst.getStatusSnapshot().actionableWorkspaces ?? [];
+				if (json) {
+					stdout(formatJson(actionableWorkspaces));
+				} else {
+					for (const line of formatWorkspaceList(actionableWorkspaces)) {
+						stdout(line);
+					}
+				}
+				return 0;
+			}
+
+			if (subcommand === "cleanup") {
+				const runId = rest.find(
+					(value) => value !== "cleanup" && value !== "--json",
+				);
+				if (!runId) {
+					const message = "Missing required run id for workspace cleanup.";
+					if (json) {
+						stdout(formatJson(formatJsonError("MISSING_ARGUMENT", message)));
+					} else {
+						stderr(message);
+					}
+					return 1;
+				}
+
+				const actionableWorkspaces =
+					storageInst.getStatusSnapshot().actionableWorkspaces ?? [];
+				const target = actionableWorkspaces.find(
+					(workspace) => workspace.runId === runId,
+				);
+				if (!target) {
+					let message = `No workspace found for run '${runId}'.`;
+					let code = "NOT_FOUND";
+					try {
+						const inspect = storageInst.inspectTarget(runId);
+						if (inspect.workspace?.status) {
+							message = `Workspace for run '${runId}' is not actionable.`;
+							code = "WORKSPACE_NOT_ACTIONABLE";
+						}
+					} catch {
+						// Leave as not-found
+					}
+					if (json) {
+						stdout(formatJson(formatJsonError(code, message)));
+					} else {
+						stderr(message);
+					}
+					return 1;
+				}
+
+				const adaptersGit = (await cliImport(
+					"@buildplane/adapters-git",
+				)) as unknown as {
+					createGitWorktreeAdapter: () => {
+						deleteWorkspace: (workspace: {
+							path: string;
+							projectRoot?: string;
+						}) => { deleted: boolean; cleanupError?: string };
+					};
+				};
+				const cleanupResult = adaptersGit
+					.createGitWorktreeAdapter()
+					.deleteWorkspace({
+						path: target.path,
+						projectRoot: cwd,
+					});
+				if (!cleanupResult.deleted) {
+					const message =
+						cleanupResult.cleanupError ??
+						`Workspace cleanup failed for run '${runId}'.`;
+					if (json) {
+						stdout(formatJson(formatJsonError("CLI_ERROR", message)));
+					} else {
+						stderr(message);
+					}
+					return 1;
+				}
+
+				storageInst.recordWorkspaceCleanedUp(runId);
+				const payload = {
+					runId,
+					path: target.path,
+					status: "deleted",
+					previousStatus: target.status,
+				};
+				if (json) {
+					stdout(formatJson(payload));
+				} else {
+					for (const line of formatWorkspaceCleanupResult(payload)) {
+						stdout(line);
+					}
+				}
+				return 0;
+			}
+
+			throw new Error(
+				`Unknown workspace command: ${subcommand ?? "(missing subcommand)"}`,
+			);
+		}
+
 		const bundle: CliOrchestratorBundle = deps?.createOrchestrator
-			? { orchestrator: deps.createOrchestrator() }
+			? {
+					orchestrator: deps.createOrchestrator(),
+					eventBus: { subscribe: () => () => {}, emit: () => {} },
+					eventStore: { persistEvent: () => {} },
+					commandExecutor: {
+						executePacket: (_p: unknown, _r: string) => {
+							throw new Error("mock bundle: executePacket not wired");
+						},
+					},
+				}
 			: await loadCliOrchestrator(cwd);
-		const { orchestrator, memoryPort, honchoAdapter, userId } = bundle;
+		const {
+			orchestrator,
+			eventBus: cliEventBus,
+			eventStore: cliEventStore,
+			memoryPort,
+			structuredMemoryPort,
+			honchoAdapter,
+			userId,
+			currentBranch,
+			commandExecutor,
+		} = bundle;
 
 		switch (command) {
 			case "init": {
@@ -870,12 +2067,21 @@ export async function runCli(
 				const packet = deps?.parsePacket
 					? deps.parsePacket(packetPath)
 					: await loadPacket(packetPath);
-				const enrichedPacket = await enrichPacketWithMemories(
+				const { preparePacketMemoryEnrichment } =
+					await loadPacketEnrichmentModule();
+				const preparedPacket = await preparePacketMemoryEnrichment(
 					packet,
 					memoryPort,
 					honchoAdapter,
 					userId,
+					structuredMemoryPort,
+					currentBranch,
 				);
+				const enrichedPacket = preparedPacket.packet;
+				const packetUnitId =
+					(enrichedPacket as { unit?: { id?: string } }).unit?.id ??
+					(packet as { unit?: { id?: string } }).unit?.id ??
+					"";
 
 				const useRaw = rest.includes("--raw");
 				const useJson = rest.includes("--json");
@@ -911,14 +2117,38 @@ export async function runCli(
 						strategy,
 						strategyBus,
 					);
+					const strategyTargets = collectStrategyRunTargets(
+						strategyResult as {
+							childResults: Map<string, { run?: { id?: string } }>;
+							rounds?: ReadonlyArray<Map<string, { run?: { id?: string } }>>;
+						},
+					);
+					recordStrategyIdForTargets(
+						structuredMemoryPort,
+						strategyTargets,
+						strategyResult.strategyId,
+					);
+					const injectedMemories = persistInjectedMemoriesForTargets(
+						structuredMemoryPort,
+						strategyTargets,
+						preparedPacket.injectedMemories.length > 0
+							? { [packetUnitId]: preparedPacket.injectedMemories }
+							: {},
+						strategyResult.winnerRunId,
+					);
+					const strategyOutput =
+						injectedMemories.length > 0
+							? {
+									...strategyResult,
+									injectedMemories,
+								}
+							: strategyResult;
 
 					if (useJson) {
-						stdout(
-							formatJson(strategyResult as unknown as Record<string, unknown>),
-						);
+						stdout(formatJson(strategyOutput as Record<string, unknown>));
 					} else {
 						for (const line of formatStrategyRunResult(
-							strategyResult as Parameters<typeof formatStrategyRunResult>[0],
+							strategyOutput as Parameters<typeof formatStrategyRunResult>[0],
 						)) {
 							stdout(line);
 						}
@@ -928,34 +2158,312 @@ export async function runCli(
 				}
 
 				// ── Raw path (single-shot, backward compat) ─────────────
-				// Everything below is the EXISTING code, unchanged
+				// Everything below is the EXISTING code, with ledger integration added
 				const useTui = rest.includes("--tui");
 				const isModelPacket = !!(enrichedPacket as { model?: unknown }).model;
 				const useAsync = useTui || isModelPacket;
 
+				// --- begin ledger integration ---
+				// Disable when BUILDPLANE_LEDGER=0 or when running under test mocks
+				// (deps.createOrchestrator present means the caller is injecting a mock).
+				const useLedger =
+					process.env.BUILDPLANE_LEDGER !== "0" && !deps?.createOrchestrator;
+				let ledgerChild: LedgerChild | null = null;
+				let ledgerEmitter: TapeEmitter | null = null;
+				let unsubscribeLedger: (() => void) | null = null;
+				const ledgerRunId = newEventId();
+				const ledgerWorkspacePath = resolvedCwd;
+
+				// Unit-context tracker: mutable state that getUnitCtx returns on demand.
+				// Updated by the unit-boundary subscription below.
+				let currentUnit: LedgerUnitContext | null = null;
+				let runStartEventId: string | undefined;
+				const getUnitCtx = () => currentUnit;
+
+				if (useLedger) {
+					try {
+						const binary = resolveLedgerBinary(cwd);
+						ledgerChild = spawnLedgerSubprocess(
+							binary,
+							ledgerRunId,
+							resolvedCwd,
+						);
+						ledgerEmitter = await createTapeEmitter({
+							childStdin: ledgerChild.stdin,
+							childStderr: ledgerChild.stderr,
+							childExit: ledgerChild.exit,
+							workspacePath: resolvedCwd,
+							runId: ledgerRunId,
+						});
+						ledgerEmitter.onFailure((failure: LedgerFailure) => {
+							// Best-effort: record that the ledger itself failed into the existing
+							// state.db event store so there's a durable trace.
+							try {
+								cliEventStore.persistEvent(ledgerRunId, {
+									kind: "ledger_failure",
+									timestamp: new Date().toISOString(),
+									runId: ledgerRunId,
+									payload: failure as unknown as Record<string, unknown>,
+								} as never);
+							} catch {
+								// Swallow: best-effort logging only.
+							}
+						});
+						unsubscribeLedger = cliEventBus.subscribe((evt: unknown) => {
+							if (!ledgerEmitter) return;
+							const e = evt as {
+								kind?: string;
+								unitId?: string;
+								exitCode?: number;
+								executionType?: "command" | "model";
+							};
+							switch (e.kind) {
+								case "execution-started": {
+									// Unit-level start. If a previous attempt is still open, close it
+									// as failed before starting the new attempt.
+									const unitId = e.unitId ?? "unknown";
+									currentUnit = completeLedgerUnit(
+										ledgerEmitter,
+										ledgerRunId,
+										ledgerWorkspacePath,
+										currentUnit,
+										"failed",
+									);
+									currentUnit = beginLedgerUnit(
+										ledgerEmitter,
+										ledgerRunId,
+										ledgerWorkspacePath,
+										unitId,
+										e.executionType ?? "command",
+										runStartEventId,
+									);
+									break;
+								}
+								case "command-execution-complete": {
+									currentUnit = completeLedgerUnit(
+										ledgerEmitter,
+										ledgerRunId,
+										ledgerWorkspacePath,
+										currentUnit,
+										e.exitCode === 0 ? "passed" : "failed",
+									);
+									break;
+								}
+								case "model-response-complete": {
+									// Do not finalize the ledger unit here. Some async model executors
+									// can emit a response event and still finish the overall run as
+									// failed (for example budget-aborted streams). Leave the unit
+									// open so cleanup can close it using the final run outcome.
+									break;
+								}
+								case "execution-error": {
+									currentUnit = completeLedgerUnit(
+										ledgerEmitter,
+										ledgerRunId,
+										ledgerWorkspacePath,
+										currentUnit,
+										"failed",
+									);
+									break;
+								}
+								default:
+									// Phase C does not map policy-decision or other kernel events to
+									// ledger events; Phase D+ concerns.
+									break;
+							}
+						});
+					} catch {
+						// Ledger setup failed (spawn error, handshake timeout, version mismatch).
+						// Kill the subprocess if it's still alive — silent degradation so the
+						// run continues unaffected.
+						if (ledgerChild?.child && ledgerChild.child.exitCode === null) {
+							ledgerChild.child.kill("SIGTERM");
+						}
+						ledgerChild = null;
+						ledgerEmitter = null;
+					}
+				}
+				// --- end ledger integration ---
+				const ledgerRunOptions = ledgerEmitter
+					? { runId: ledgerRunId }
+					: undefined;
+
+				// Capture the current ledgerEmitter reference so the closure below
+				// captures the per-run emitter (not a shared mutable variable that
+				// could change between runs).
+				const runLedgerEmitter = ledgerEmitter;
+				const runGetUnitCtx = getUnitCtx;
+
+				// Thread the (possibly ledger-wrapped) registry into the execution
+				// adapter by swapping the mutable commandExecutor slot.  The
+				// runtimeRouter in loadCliOrchestrator reads commandExecutor.executePacket
+				// by reference on every call, so swapping the property here is sufficient
+				// to route all subsequent command packets through the wrapper.
+				//
+				// The registry is created per-call from executionRoot (the Git worktree
+				// path) so that sandbox path validation inside run_command uses the
+				// correct workspace root, not the project-root cwd.
+				const { existsSync: fsExistsSync, realpathSync: fsRealpathSync } =
+					await import("node:fs");
+				const { resolve: pathResolve } = await import("node:path");
+				let originalExecutePacket:
+					| ((packetUnknown: unknown, executionRoot: string) => unknown)
+					| undefined;
+				const makeReceipt = (
+					packetUnknown: unknown,
+					executionRoot: string,
+					ledgerEmitterForCommand: TapeEmitter,
+				): unknown => {
+					const p = packetUnknown as {
+						execution: {
+							command: string;
+							args?: readonly string[];
+							cwd?: string;
+						};
+						verification: { requiredOutputs: readonly string[] };
+					};
+					const workspaceRoot = pathResolve(executionRoot);
+					const perCallRawRegistry = createToolRegistry(workspaceRoot);
+					const perCallRegistry = wrapToolRegistryForLedger(
+						perCallRawRegistry,
+						ledgerEmitterForCommand,
+						runGetUnitCtx,
+					);
+					const effectiveCwd = p.execution.cwd
+						? pathResolve(workspaceRoot, p.execution.cwd)
+						: workspaceRoot;
+					const startedAt = new Date().toISOString();
+					const result = perCallRegistry.run_command({
+						command: p.execution.command,
+						args: p.execution.args,
+						// Pass cwd relative so the sandbox resolver inside run_command
+						// can validate it against the worktreeRoot.
+						cwd: p.execution.cwd,
+					});
+					const completedAt = new Date().toISOString();
+					return {
+						command: p.execution.command,
+						args: [...(p.execution.args ?? [])],
+						cwd: effectiveCwd,
+						startedAt,
+						completedAt,
+						exitCode: result.exitCode,
+						stdout: result.stdout,
+						stderr: result.stderr,
+						outputChecks: p.verification.requiredOutputs.map(
+							(outputPath: string) => {
+								const realWorkspaceRoot = (() => {
+									try {
+										return fsRealpathSync(workspaceRoot);
+									} catch {
+										return workspaceRoot;
+									}
+								})();
+								return {
+									path: outputPath,
+									exists: fsExistsSync(
+										pathResolve(realWorkspaceRoot, outputPath),
+									),
+								};
+							},
+						),
+					};
+				};
+				if (runLedgerEmitter) {
+					const activeLedgerEmitter = runLedgerEmitter;
+					originalExecutePacket = commandExecutor.executePacket;
+					commandExecutor.executePacket = (
+						packetUnknown: unknown,
+						root: string,
+					) => makeReceipt(packetUnknown, root, activeLedgerEmitter);
+				}
+				const runStartMs = Date.now();
+
 				if (useAsync && !useTui) {
 					// Model packets auto-switch to async (no TUI)
-					const result = await orchestrator.runPacketAsync(enrichedPacket);
+					let asyncOrchestratorResult:
+						| Awaited<ReturnType<typeof orchestrator.runPacketAsync>>
+						| undefined;
+					let asyncResultUnknown: unknown;
+					const packetHash = `sha256:${createHash("sha256")
+						.update(JSON.stringify(enrichedPacket))
+						.digest("hex")}`;
+					try {
+						runStartEventId = emitLedgerRunStarted(
+							ledgerEmitter,
+							packetHash,
+							resolvedCwd,
+							null,
+						);
+						asyncOrchestratorResult = await orchestrator.runPacketAsync(
+							enrichedPacket,
+							cliEventBus,
+							ledgerRunOptions,
+						);
+						asyncResultUnknown = withPersistedInjectedMemories(
+							asyncOrchestratorResult,
+							structuredMemoryPort,
+							preparedPacket.injectedMemories,
+						);
+						emitLedgerRunCompleted(
+							ledgerEmitter,
+							asyncOrchestratorResult.run.status === "passed"
+								? "passed"
+								: "failed",
+							Date.now() - runStartMs,
+						);
+					} finally {
+						// --- begin ledger cleanup ---
+						if (ledgerEmitter) {
+							currentUnit = completeLedgerUnit(
+								ledgerEmitter,
+								ledgerRunId,
+								ledgerWorkspacePath,
+								currentUnit,
+								asyncOrchestratorResult?.run?.status === "passed"
+									? "passed"
+									: "failed",
+							);
+						}
+						unsubscribeLedger?.();
+						if (ledgerEmitter) {
+							try {
+								await ledgerEmitter.close();
+							} catch {
+								// Cleanup best-effort; the orchestrator result is the authoritative outcome.
+							}
+						}
+						// Restore the original commandExecutor.executePacket so a subsequent
+						// invocation of the orchestrator doesn't inherit this run's closed emitter.
+						if (originalExecutePacket) {
+							commandExecutor.executePacket = originalExecutePacket;
+						}
+						// --- end ledger cleanup ---
+					}
+					// asyncResultUnknown is set here: if try threw, finally re-throws and we never reach this line.
+					const asyncResult = asyncResultUnknown as {
+						run: { id: string; status: string };
+						receipt: unknown;
+						decision: unknown;
+					};
+					const resultRecord = asyncResult as unknown as Record<
+						string,
+						unknown
+					>;
 
-					for (const line of formatRunResult(
-						result as { run: { id: string; status: string } },
-					)) {
-						stdout(line);
+					if (useJson) {
+						stdout(formatJson(resultRecord));
+					} else {
+						for (const line of formatRunResult(asyncResult)) {
+							stdout(line);
+						}
 					}
 
-					return (result as { run: { status: string } }).run.status === "passed"
-						? 0
-						: 1;
+					return asyncResult.run.status === "passed" ? 0 : 1;
 				}
 
 				if (useTui) {
 					// Lazy-load TUI — only imported when --tui is requested
-					const kernel = (await cliImport("@buildplane/kernel")) as unknown as {
-						createEventBus: () => {
-							subscribe: (listener: (event: unknown) => void) => () => void;
-							emit: (event: unknown) => void;
-						};
-					};
 					const tui = (await cliImport("@buildplane/ui-tui")) as unknown as {
 						renderTui: (eventBus: unknown) => {
 							waitUntilExit(): Promise<void>;
@@ -963,55 +2471,159 @@ export async function runCli(
 							clear(): void;
 						};
 					};
-					const storage = (await cliImport(
-						"@buildplane/storage",
-					)) as unknown as {
-						createEventStore: (root: string) => {
-							persistEvent: (runId: string, event: unknown) => void;
-						};
-					};
 
-					const tuiBus = kernel.createEventBus();
-
-					// Wire storage persistence to the TUI bus too
-					const eventStore = storage.createEventStore(cwd);
-					tuiBus.subscribe((event: unknown) => {
-						const e = event as { runId?: string };
-						if (e.runId) {
-							try {
-								eventStore.persistEvent(e.runId, event as never);
-							} catch {
-								// Don't let storage failures break the run
-							}
-						}
-					});
+					const tuiBus = cliEventBus;
 
 					const tuiInstance = tui.renderTui(tuiBus);
 
-					const result = await orchestrator.runPacketAsync(
-						enrichedPacket,
-						tuiBus,
+					let tuiResult:
+						| Awaited<ReturnType<typeof orchestrator.runPacketAsync>>
+						| undefined;
+					const packetHash = `sha256:${createHash("sha256")
+						.update(JSON.stringify(enrichedPacket))
+						.digest("hex")}`;
+					const tuiStartMs = Date.now();
+					try {
+						runStartEventId = emitLedgerRunStarted(
+							ledgerEmitter,
+							packetHash,
+							resolvedCwd,
+							null,
+						);
+						tuiResult = await orchestrator.runPacketAsync(
+							enrichedPacket,
+							tuiBus,
+							ledgerRunOptions,
+						);
+						emitLedgerRunCompleted(
+							ledgerEmitter,
+							tuiResult.run.status === "passed" ? "passed" : "failed",
+							Date.now() - tuiStartMs,
+						);
+					} finally {
+						// --- begin ledger cleanup ---
+						if (ledgerEmitter) {
+							currentUnit = completeLedgerUnit(
+								ledgerEmitter,
+								ledgerRunId,
+								ledgerWorkspacePath,
+								currentUnit,
+								tuiResult?.run?.status === "passed" ? "passed" : "failed",
+							);
+						}
+						unsubscribeLedger?.();
+						if (ledgerEmitter) {
+							try {
+								await ledgerEmitter.close();
+							} catch {
+								// Cleanup best-effort; the orchestrator result is the authoritative outcome.
+							}
+						}
+						// Restore the original commandExecutor.executePacket so a subsequent
+						// invocation of the orchestrator doesn't inherit this run's closed emitter.
+						if (originalExecutePacket) {
+							commandExecutor.executePacket = originalExecutePacket;
+						}
+						// --- end ledger cleanup ---
+					}
+					persistInjectedMemories(
+						structuredMemoryPort,
+						tuiResult.run.id,
+						preparedPacket.injectedMemories,
 					);
 					await tuiInstance.waitUntilExit();
 
-					return result.run.status === "passed" ? 0 : 1;
+					return tuiResult.run.status === "passed" ? 0 : 1;
 				}
 
-				const result = useAsync
-					? await orchestrator.runPacketAsync(enrichedPacket, undefined)
-					: orchestrator.runPacket(enrichedPacket);
-
-				const resultRecord = result as unknown as Record<string, unknown>;
+				// Declare as unknown so both the try assignment and post-try casts typecheck.
+				let syncResultUnknown: unknown;
+				const packetHash = `sha256:${createHash("sha256")
+					.update(JSON.stringify(enrichedPacket))
+					.digest("hex")}`;
+				try {
+					// Emit run_started directly for the sync path (runPacket does not use the
+					// event bus, so we cannot rely on bus subscription here).
+					runStartEventId = emitLedgerRunStarted(
+						ledgerEmitter,
+						packetHash,
+						resolvedCwd,
+						null,
+					);
+					syncResultUnknown = withPersistedInjectedMemories(
+						useAsync
+							? await orchestrator.runPacketAsync(
+									enrichedPacket,
+									cliEventBus,
+									ledgerRunOptions,
+								)
+							: orchestrator.runPacket(
+									enrichedPacket,
+									cliEventBus,
+									ledgerRunOptions,
+								),
+						structuredMemoryPort,
+						preparedPacket.injectedMemories,
+					);
+					// Emit run_completed on success.
+					const r = syncResultUnknown as { run?: { status?: string } };
+					const outcome = r.run?.status === "passed" ? "passed" : "failed";
+					emitLedgerRunCompleted(
+						ledgerEmitter,
+						outcome,
+						Date.now() - runStartMs,
+					);
+				} finally {
+					// --- begin ledger cleanup ---
+					if (ledgerEmitter) {
+						currentUnit = completeLedgerUnit(
+							ledgerEmitter,
+							ledgerRunId,
+							ledgerWorkspacePath,
+							currentUnit,
+							(syncResultUnknown as { run?: { status?: string } } | undefined)
+								?.run?.status === "passed"
+								? "passed"
+								: "failed",
+						);
+					}
+					unsubscribeLedger?.();
+					if (ledgerEmitter) {
+						try {
+							await ledgerEmitter.close();
+						} catch {
+							// Cleanup best-effort; the orchestrator result is the authoritative outcome.
+						}
+					}
+					// Restore the original commandExecutor.executePacket so a subsequent
+					// invocation of the orchestrator doesn't inherit this run's closed emitter.
+					if (originalExecutePacket) {
+						commandExecutor.executePacket = originalExecutePacket;
+					}
+					// --- end ledger cleanup ---
+				}
+				// syncResultUnknown is set here: if try threw, finally re-throws and we never arrive.
+				const syncResult = syncResultUnknown as {
+					run: { id: string; status: string };
+					receipt: unknown;
+					decision: unknown;
+					failure?: unknown;
+				};
+				const resultRecord = syncResult as unknown as Record<string, unknown>;
 				const hasFailed =
 					resultRecord.failure && typeof resultRecord.failure === "object";
-				for (const line of formatRunResult(result)) {
-					stdout(line);
+				if (useJson) {
+					stdout(formatJson(resultRecord));
+				} else {
+					for (const line of formatRunResult(syncResult)) {
+						stdout(line);
+					}
 				}
 				if (hasFailed) {
 					const f = resultRecord.failure as { message?: string };
 					if (f.message) stderr(f.message);
 				}
-				return hasFailed || result.run.status !== "passed" ? 1 : 0;
+				return hasFailed || syncResult.run.status !== "passed" ? 1 : 0;
 			}
 			case "status": {
 				const json = rest.includes("--json");
@@ -1133,6 +2745,9 @@ export async function runCli(
 							id: string;
 							unitId: string;
 							status: string;
+							strategyId?: string;
+							injectedMemoryCount?: number;
+							promotedStructuredMemoryCount?: number;
 							createdAt: string;
 							completedAt?: string;
 						}>,
@@ -1236,11 +2851,15 @@ export async function runCli(
 					unknown
 				>;
 				const graph = normalizeGraph(rawGraph);
-				const enrichedGraph = await enrichGraphWithMemories(
+				const { prepareGraphMemoryEnrichment } =
+					await loadPacketEnrichmentModule();
+				const preparedGraph = await prepareGraphMemoryEnrichment(
 					graph as Record<string, unknown>,
 					memoryPort,
 					honchoAdapter,
 					userId,
+					structuredMemoryPort,
+					currentBranch,
 				);
 
 				const kernel = (await cliImport("@buildplane/kernel")) as unknown as {
@@ -1252,8 +2871,16 @@ export async function runCli(
 				const graphBus = kernel.createEventBus();
 
 				const graphResult = await orchestrator.runGraphAsync(
-					enrichedGraph,
+					preparedGraph.graph,
 					graphBus,
+				);
+				persistInjectedMemoriesForTargets(
+					structuredMemoryPort,
+					graphResult.nodes.map((node) => ({
+						unitId: node.unitId,
+						runId: node.runId,
+					})),
+					preparedGraph.injectedMemoriesByUnitId,
 				);
 
 				stdout(`Graph Outcome: ${graphResult.outcome}`);
@@ -1279,36 +2906,65 @@ export async function runCli(
 
 				const rawStrategy = JSON.parse(readFileSync(strategyPath, "utf8"));
 				const strategy = kernel.parseStrategyPacket(rawStrategy);
-				const enrichedStrategy = await enrichStrategyWithMemories(
+				const { prepareStrategyMemoryEnrichment } =
+					await loadPacketEnrichmentModule();
+				const preparedStrategy = await prepareStrategyMemoryEnrichment(
 					strategy as Record<string, unknown>,
 					memoryPort,
 					honchoAdapter,
 					userId,
+					structuredMemoryPort,
+					currentBranch,
 				);
 				const strategyBus = kernel.createEventBus();
 
 				const strategyResult = await orchestrator.runStrategy(
-					enrichedStrategy,
+					preparedStrategy.strategy,
 					strategyBus,
 				);
+				const strategyTargets = [
+					...Array.from(
+						(strategyResult.rounds ?? []).flatMap((round) =>
+							Array.from(round.entries()).map(([unitId, childResult]) => ({
+								unitId,
+								runId: childResult.run.id,
+							})),
+						),
+					),
+					...Array.from(strategyResult.childResults.entries()).map(
+						([unitId, childResult]) => ({
+							unitId,
+							runId: childResult.run.id,
+						}),
+					),
+				];
+				recordStrategyIdForTargets(
+					structuredMemoryPort,
+					strategyTargets,
+					strategyResult.strategyId,
+				);
+				const injectedMemories = persistInjectedMemoriesForTargets(
+					structuredMemoryPort,
+					strategyTargets,
+					preparedStrategy.injectedMemoriesByUnitId,
+					strategyResult.winnerRunId,
+				);
+				const strategyOutput =
+					injectedMemories.length > 0
+						? {
+								...strategyResult,
+								injectedMemories,
+							}
+						: strategyResult;
 
 				const json = rest.includes("--json");
 				if (json) {
-					stdout(
-						formatJson(strategyResult as unknown as Record<string, unknown>),
-					);
+					stdout(formatJson(strategyOutput as Record<string, unknown>));
 				} else {
-					stdout(`Strategy: ${strategyResult.strategyId}`);
-					stdout(`Mode: ${strategyResult.mode}`);
-					stdout(`Outcome: ${strategyResult.outcome}`);
-					stdout(
-						`Merge: ${strategyResult.mergeDecision.policy} → ${strategyResult.mergeDecision.outcome}`,
-					);
-					if (strategyResult.winnerRunId) {
-						stdout(`Winner Run: ${strategyResult.winnerRunId}`);
-					}
-					for (const reason of strategyResult.mergeDecision.reasons) {
-						stdout(`  reason: ${reason}`);
+					for (const line of formatStrategyRunResult(
+						strategyOutput as Parameters<typeof formatStrategyRunResult>[0],
+					)) {
+						stdout(line);
 					}
 				}
 

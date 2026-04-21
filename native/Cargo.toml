@@ -4,10 +4,14 @@ members = [
   "crates/bp-cli",
   "crates/bp-config",
   "crates/bp-core",
+  "crates/bp-fork",
   "crates/bp-host-claude",
   "crates/bp-host-registry",
   "crates/bp-host-codex",
   "crates/bp-host-sdk",
+  "crates/bp-ledger",
+  "crates/bp-replay",
+  "crates/bp-ledger-macros",
   "crates/bp-memory",
   "crates/bp-pack-inspection",
   "crates/bp-pack-loader",
@@ -37,6 +41,15 @@ serde_json = "1.0"
 thiserror = "2.0"
 toml = "0.8"
 rusqlite = { version = "0.32", features = ["bundled"] }
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v7", "serde"] }
+sha2 = "0.10"
+typeshare = "1"
+
+bp-fork = { path = "crates/bp-fork" }
+bp-ledger = { path = "crates/bp-ledger" }
+bp-ledger-macros = { path = "crates/bp-ledger-macros" }
+bp-replay = { path = "crates/bp-replay" }
 
 bp-config = { path = "crates/bp-config" }
 bp-core = { path = "crates/bp-core" }

@@ -45,6 +45,8 @@ const REQUIRED_BUILD_OUTPUTS = [
 	"packages/policy/dist/index.js",
 	"packages/storage/dist/index.js",
 	"packages/adapters-git/dist/index.js",
+	"packages/adapters-tools/dist/index.js",
+	"packages/ledger-client/dist/index.js",
 ] as const;
 const WORKSPACE_ROOTS = ["apps", "packages"] as const;
 
@@ -495,8 +497,10 @@ describe("workspace build output preparation", () => {
 				"apps/cli/dist",
 				"apps/cli/tsconfig.tsbuildinfo",
 				"packages/adapters-git/dist",
+				"packages/adapters-tools/dist",
 				"packages/kernel/dist",
 				"packages/kernel/tsconfig.tsbuildinfo",
+				"packages/ledger-client/dist",
 				"packages/policy/dist",
 				"packages/runtime/dist",
 				"packages/storage/dist",
@@ -606,8 +610,15 @@ describe("published bootstrap staging", () => {
 		expect(publishedReadme).toContain("Buildplane by **SollanSystems**");
 		expect(publishedReadme).toContain("## Why Buildplane");
 		expect(publishedReadme).toContain("## Distribution");
+		expect(publishedReadme).toContain(
+			'tmp="$(mktemp)" && curl -fsSL https://raw.githubusercontent.com/SollanSystems/buildplane/main/scripts/published-bootstrap/install.sh -o "$tmp" && bash "$tmp"',
+		);
 		expect(publishedReadme).toContain("npm install -g buildplane");
+		expect(publishedReadme).toContain("buildplane bootstrap doctor --json");
 		expect(publishedReadme).toContain("buildplane init");
+		expect(publishedReadme).toContain(
+			"Published/global installs do not yet include a verified `buildplane memory ...` contract.",
+		);
 		expect(publishedReadme).toContain(
 			"buildplane run --packet /absolute/path/to/packet.json",
 		);
@@ -721,8 +732,36 @@ describe("published bootstrap staging", () => {
 				join(staged.packageRoot, "vendor", "@buildplane", "kernel", "index.js"),
 			),
 		).toBe(true);
+		expect(
+			existsSync(
+				join(
+					staged.packageRoot,
+					"vendor",
+					"@buildplane",
+					"adapters-tools",
+					"index.js",
+				),
+			),
+		).toBe(true);
+		expect(
+			existsSync(
+				join(
+					staged.packageRoot,
+					"vendor",
+					"@buildplane",
+					"ledger-client",
+					"index.js",
+				),
+			),
+		).toBe(true);
 		expect(stagedReadme).not.toContain("pnpm buildplane");
 		expect(stagedRunCli).toContain("../vendor/@buildplane/kernel/index.js");
+		expect(stagedRunCli).toContain(
+			"../vendor/@buildplane/adapters-tools/index.js",
+		);
+		expect(stagedRunCli).toContain(
+			"../vendor/@buildplane/ledger-client/index.js",
+		);
 		expect(stagedRunCli).not.toContain('import("@buildplane/kernel")');
 		expect(stagedEntryMode).not.toBe(0);
 	});

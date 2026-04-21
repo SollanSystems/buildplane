@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { resolve } from "node:path";
+import { delimiter, dirname, join, resolve } from "node:path";
 import type {
 	EventBus,
 	ExecutionReceipt,
@@ -30,6 +30,78 @@ export interface CodexExecutorPort {
 		projectRoot: string,
 		eventBus: EventBus,
 	): Promise<ExecutionReceipt>;
+}
+
+function resolveCommandOnPath(command: string): string | undefined {
+	const explicitPath = resolve(command);
+	if (command.includes("/") || command.includes("\\")) {
+		return existsSync(explicitPath) ? explicitPath : undefined;
+	}
+
+	const pathEnv = process.env.PATH ?? "";
+	const pathDelimiter = process.platform === "win32" ? ";" : delimiter;
+	const extensions =
+		process.platform === "win32" ? ["", ".exe", ".cmd", ".bat", ".com"] : [""];
+
+	for (const entry of pathEnv.split(pathDelimiter)) {
+		if (!entry) continue;
+		for (const extension of extensions) {
+			const candidate = join(entry, `${command}${extension}`);
+			if (existsSync(candidate)) {
+				return candidate;
+			}
+		}
+	}
+
+	return undefined;
+}
+
+function resolveCodexSpawnTarget(cliBinary: string): {
+	command: string;
+	argsPrefix: string[];
+} {
+	const resolvedBinary = resolveCommandOnPath(cliBinary);
+	if (!resolvedBinary) {
+		return { command: cliBinary, argsPrefix: [] };
+	}
+
+	if (process.platform !== "win32") {
+		return { command: resolvedBinary, argsPrefix: [] };
+	}
+
+	if (!/\.(cmd|bat)$/i.test(resolvedBinary)) {
+		return { command: resolvedBinary, argsPrefix: [] };
+	}
+
+	const siblingJs = resolvedBinary.replace(/\.(cmd|bat)$/i, ".js");
+	if (existsSync(siblingJs)) {
+		return { command: process.execPath, argsPrefix: [siblingJs] };
+	}
+
+	const localNodeModulesJs = join(
+		dirname(dirname(resolvedBinary)),
+		"@openai",
+		"codex",
+		"bin",
+		"codex.js",
+	);
+	if (existsSync(localNodeModulesJs)) {
+		return { command: process.execPath, argsPrefix: [localNodeModulesJs] };
+	}
+
+	const npmShimJs = join(
+		dirname(resolvedBinary),
+		"node_modules",
+		"@openai",
+		"codex",
+		"bin",
+		"codex.js",
+	);
+	if (existsSync(npmShimJs)) {
+		return { command: process.execPath, argsPrefix: [npmShimJs] };
+	}
+
+	return { command: resolvedBinary, argsPrefix: [] };
 }
 
 export function createCodexExecutor(
@@ -68,9 +140,13 @@ export function createCodexExecutor(
 			let prompt: string;
 			if (packet.intent && renderer) {
 				const rendered = renderer.render(packet.intent, "implementer");
-				prompt = rendered.system
-					? `${rendered.system}\n\n---\n\n${rendered.prompt}`
-					: rendered.prompt;
+				const systemParts = [packet.model.systemPrompt, rendered.system].filter(
+					(part): part is string => typeof part === "string" && part.length > 0,
+				);
+				prompt =
+					systemParts.length > 0
+						? `${systemParts.join("\n\n---\n\n")}\n\n---\n\n${rendered.prompt}`
+						: rendered.prompt;
 			} else if (packet.model.prompt) {
 				prompt = packet.model.systemPrompt
 					? `${packet.model.systemPrompt}\n\n---\n\n${packet.model.prompt}`
@@ -81,7 +157,15 @@ export function createCodexExecutor(
 				);
 			}
 
-			const args = ["-q", "--model", model, "--full-auto", prompt];
+			const spawnTarget = resolveCodexSpawnTarget(cliBinary);
+			const args = [
+				...spawnTarget.argsPrefix,
+				"-q",
+				"--model",
+				model,
+				"--full-auto",
+				prompt,
+			];
 
 			eventBus.emit({
 				kind: "execution-started",
@@ -91,7 +175,7 @@ export function createCodexExecutor(
 			});
 
 			return new Promise<ExecutionReceipt>((resolvePromise) => {
-				const child = spawnFn(cliBinary, args, { cwd: projectRoot });
+				const child = spawnFn(spawnTarget.command, args, { cwd: projectRoot });
 
 				let stdoutBuf = "";
 				let stderrBuf = "";
