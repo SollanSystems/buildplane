@@ -8,22 +8,25 @@
 
 </div>
 
-Buildplane by **SollanSystems** is an operator-first execution system for autonomous software work. It treats language models as bounded workers inside a deterministic kernel that owns scheduling, state, policies, verification, and recovery. Instead of relying on one long-running chat session, Buildplane dispatches typed units of work in isolated contexts, captures evidence for every meaningful action, and advances only when reality matches the contract.
+Buildplane by **SollanSystems** is the deterministic control plane for autonomous software execution. It treats language models and agent shells as bounded workers inside a kernel that owns scheduling, state, policies, verification, and recovery. Instead of treating one long-running chat session as the system, Buildplane dispatches typed units of work in isolated contexts, captures evidence for every meaningful action, and advances only when reality matches the contract.
 
 Build software with autonomy you can inspect, verify, reroute, and resume.
 
 ## Why Buildplane
 
-- **Deterministic control plane** — the model is a worker, not the system
+- **Deterministic control plane** — the worker is not the system
 - **Bounded execution units** — work is dispatched in clean, isolated contexts
 - **Evidence-first automation** — actions produce receipts, artifacts, and verification signals
 - **Operator control** — inspect, pause, replay, intervene, recover
 - **Recovery built in** — resume after interruptions without losing the thread
 - **Policy-aware autonomy** — budgets, trust gates, retries, and stop rules are enforced by the runtime
+- **Worker-agnostic execution model** — route Hermes, Claude Code, Codex, or future workers without making any single shell the product center
 
 ## Status
 
-This repo now includes the first local vertical slice of the control plane. Milestone 1 is still focused on the execution kernel: typed units of work, durable state, bounded worker runs, verification, and operator inspection.
+Buildplane already has a real repo-local control-plane path: typed runs, durable state, evidence capture, policy evaluation, status/inspect surfaces, replay-oriented execution flows, strategy execution, and structured memory foundations. The current best-supported operator paths are the repo-development and in-repo built CLI flows documented below.
+
+Near-term work is focused on trust-surface hardening rather than broader agent-shell breadth: stabilizing the verified published install contract, tightening provenance and inspect surfaces, and making replay/review/recovery easier to operate. Published/global install remains intentionally narrower than repo-local development, especially for native-backed memory commands.
 
 ## Benchmarks
 
