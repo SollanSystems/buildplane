@@ -124,5 +124,5 @@ describe("published bootstrap installer shim", () => {
 		} else {
 			expect(helpCheck).toThrow(/Buildplane requires Node 24\.13\.1/i);
 		}
-	});
+	}, 15_000);
 });

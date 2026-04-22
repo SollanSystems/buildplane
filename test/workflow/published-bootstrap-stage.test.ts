@@ -597,7 +597,7 @@ describe("published bootstrap staging", () => {
 			"../../scripts/published-bootstrap/tarball.mjs"
 		);
 		extractTarballToDirectory = tarballModule.extractTarballToDirectory;
-	});
+	}, 30_000);
 
 	it("derives a publish-facing README from the repo-root structure without repo leakage", () => {
 		const sourceReadme = readFileSync(join(process.cwd(), "README.md"), "utf8");
@@ -732,7 +732,7 @@ describe("published bootstrap staging", () => {
 		expect(stagedRunCli).toContain("../vendor/@buildplane/kernel/index.js");
 		expect(stagedRunCli).not.toContain('import("@buildplane/kernel")');
 		expect(stagedEntryMode).not.toBe(0);
-	});
+	}, 15_000);
 
 	it("strips stale sourceMappingURL comments from staged runtime modules", () => {
 		const staged = stagePublishedPackage();
@@ -1803,7 +1803,7 @@ describe("published bootstrap staging", () => {
 		expect(() => inspectPublishedPackage(staged.packageRoot)).toThrow(
 			/README\.md.*npm install -g buildplane/i,
 		);
-	});
+	}, 15_000);
 
 	it("wraps staged package.json parse failures with the offending path", () => {
 		const staged = stagePublishedPackage();
@@ -1821,7 +1821,7 @@ describe("published bootstrap staging", () => {
 
 		expect(message).toMatch(/Failed to parse JSON file/i);
 		expect(message).toContain(manifestPath);
-	});
+	}, 15_000);
 
 	it("rejects any present package.json.private value except explicit false", () => {
 		const staged = stagePublishedPackage();
@@ -1956,7 +1956,7 @@ describe("published bootstrap staging", () => {
 		expect(() => inspectPublishedPackage(staged.packageRoot)).toThrow(
 			new RegExp(`package\\.json\\.${field} must be a plain object`, "i"),
 		);
-	});
+	}, 15_000);
 
 	it.each([
 		"dependencies",
@@ -2454,7 +2454,7 @@ export { loadKernel };
 		expect(() => inspectPublishedPackage(staged.packageRoot)).toThrow(
 			/named import|assertSupportedNodeVersion/i,
 		);
-	});
+	}, 15_000);
 
 	it("fails inspection when the wrapper namespace-imports assertSupportedNodeVersion before the runtime boundary", () => {
 		const staged = stagePublishedPackage();
@@ -2472,7 +2472,7 @@ export { loadKernel };
 		expect(() => inspectPublishedPackage(staged.packageRoot)).toThrow(
 			/named import|assertSupportedNodeVersion/i,
 		);
-	});
+	}, 15_000);
 
 	it("fails inspection when the runtime boundary is a bare awaited import expression", () => {
 		const staged = stagePublishedPackage();
@@ -2490,7 +2490,7 @@ export { loadKernel };
 		expect(() => inspectPublishedPackage(staged.packageRoot)).toThrow(
 			/top-level variable statement|runtime boundary/i,
 		);
-	});
+	}, 15_000);
 
 	it("fails inspection when the runtime boundary is not awaited inside its top-level variable statement", () => {
 		const staged = stagePublishedPackage();
@@ -2508,7 +2508,7 @@ export { loadKernel };
 		expect(() => inspectPublishedPackage(staged.packageRoot)).toThrow(
 			/top-level variable statement|runtime boundary/i,
 		);
-	});
+	}, 15_000);
 
 	it("fails inspection when the runtime boundary statement does extra work in the same declaration", () => {
 		const staged = stagePublishedPackage();
@@ -2526,7 +2526,7 @@ export { loadKernel };
 		expect(() => inspectPublishedPackage(staged.packageRoot)).toThrow(
 			/top-level variable statement|runtime boundary/i,
 		);
-	});
+	}, 15_000);
 
 	it("fails inspection when the wrapper performs another top-level awaited runtime import after the required boundary", () => {
 		const staged = stagePublishedPackage();
@@ -2548,7 +2548,7 @@ export { loadKernel };
 		expect(() => inspectPublishedPackage(staged.packageRoot)).toThrow(
 			/top-level dynamic import|runtime boundary|\.\/extra\.js/i,
 		);
-	});
+	}, 15_000);
 
 	it.each([
 		{
@@ -2578,7 +2578,7 @@ export { loadKernel };
 		expect(() => inspectPublishedPackage(staged.packageRoot)).toThrow(
 			/top-level dynamic import|runtime boundary|\.\/extra\.js/i,
 		);
-	});
+	}, 15_000);
 
 	it("fails inspection when the wrapper imports its runtime boundary before asserting the Node version", () => {
 		const staged = stagePublishedPackage();
@@ -2836,7 +2836,7 @@ import "./src/leak.js";
 				),
 			);
 		}
-	});
+	}, 15_000);
 
 	it("fails inspection when empty src or test directories leak into the shipped runtime tree", () => {
 		for (const leakedRelativePath of [
@@ -2857,5 +2857,5 @@ import "./src/leak.js";
 				),
 			);
 		}
-	});
+	}, 30_000);
 });

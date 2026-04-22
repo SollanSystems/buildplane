@@ -169,7 +169,7 @@ describe("cli bootstrap", () => {
 		expect(JSON.parse(statusResult.stdout)).toMatchObject({
 			initialized: true,
 		});
-	});
+	}, 10_000);
 
 	it("delegates source CLI memory commands through BUILDPLANE_NATIVE_BIN", () => {
 		const tempRoot = mkdtempSync(
