@@ -27,7 +27,8 @@
   - `pnpm build` passed
   - `pnpm buildplane bootstrap doctor --json` passed
 - [x] Current main blocker is trust/readiness credibility, not lack of architectural direction.
-- [x] Published-bootstrap verification is the most visible weak spot because the packaging lane times out under the current default test harness.
+- [x] The earlier published-bootstrap timeout-realism blocker is resolved in current live evidence: `pnpm test` passes and `pnpm verify:published-bootstrap` now completes successfully.
+- [x] The most visible remaining trust gap is keeping the support matrix, provenance surfaces, and branch/worktree hygiene aligned with the verified product surface.
 
 ---
 
@@ -67,14 +68,14 @@ Success means:
 
 ### Acceptance criteria
 
-- [ ] `pnpm test` no longer fails because publish/bootstrap integration tests time out under default suite settings
-- [ ] integration-heavy publish/bootstrap tests have realistic timeout budgets or a separate slower verification lane
-- [ ] `verify:published-bootstrap` reflects the real public contract without being needlessly coupled to unrelated suite instability
-- [ ] README and any release-facing docs clearly distinguish:
+- [x] `pnpm test` no longer fails because publish/bootstrap integration tests time out under default suite settings
+- [x] integration-heavy publish/bootstrap tests have realistic timeout budgets or a separate slower verification lane
+- [x] `verify:published-bootstrap` reflects the real public contract without being needlessly coupled to unrelated suite instability
+- [x] README and any release-facing docs clearly distinguish:
   - repo-development path
   - in-repo built CLI path
   - published/global install path
-- [ ] the current best-supported operator path is stated plainly and honestly
+- [x] the current best-supported operator path is stated plainly and honestly
 
 ### Likely files
 
@@ -87,10 +88,10 @@ Success means:
 
 ### Slice tasks
 
-- [ ] Task 1A: measure and document the exact timeout-sensitive publish/bootstrap cases
-- [ ] Task 1B: raise timeout realism or split a slower publish-contract lane from the broad default suite
-- [ ] Task 1C: make `verify:published-bootstrap` prove the public contract with minimal collateral coupling
-- [ ] Task 1D: add or update a support-matrix doc and ensure README wording matches the real contract
+- [x] Task 1A: measure and document the exact timeout-sensitive publish/bootstrap cases
+- [x] Task 1B: raise timeout realism or split a slower publish-contract lane from the broad default suite
+- [x] Task 1C: make `verify:published-bootstrap` prove the public contract with minimal collateral coupling
+- [x] Task 1D: add or update a support-matrix doc and ensure README wording matches the real contract
 
 ---
 
@@ -160,9 +161,9 @@ Success means:
 
 ### Week 1
 
-- [ ] finish Slice 1 diagnosis and timeout realism fixes
-- [ ] decide whether publish-contract verification remains in the default suite or gets its own lane
-- [ ] update README/support-matrix language to match the real support contract
+- [x] finish Slice 1 diagnosis and timeout realism fixes
+- [x] decide whether publish-contract verification remains in the default suite or gets its own lane
+- [x] update README/support-matrix language to match the real support contract
 
 ### Week 2
 
