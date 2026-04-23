@@ -54,7 +54,7 @@ function runEval(
 ) {
 	return spawnSync(
 		process.execPath,
-		["--import", "tsx", "./eval/runner.ts", ...args],
+		["--conditions", "source", "--import", "tsx", "./eval/runner.ts", ...args],
 		{
 			cwd: root,
 			encoding: "utf8",

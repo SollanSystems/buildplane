@@ -488,6 +488,8 @@ The sub-project is mostly sequential (each phase blocks the next). Total ~3 week
 
 **Gate to next phase:** Rust Layer 1 tests ≥90% coverage, schema generation produces compile-clean TS.
 
+**Phase A status: complete (2026-04-17).**
+
 ### Phase B — IPC + tape-emitter (5–7 days)
 
 **Deliverables**

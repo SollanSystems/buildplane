@@ -18,6 +18,17 @@ const cliDistEntrypoint = resolve(root, "apps/cli/dist/index.js");
 const tsxLoaderEntrypoint = resolve(root, "node_modules/tsx/dist/loader.mjs");
 const cleanupPaths: string[] = [];
 
+function sourceCliArgs(entrypoint: string, ...args: string[]): string[] {
+	return [
+		"--conditions",
+		"source",
+		"--import",
+		tsxLoaderEntrypoint,
+		entrypoint,
+		...args,
+	];
+}
+
 function ensureBuiltCliDist(): void {
 	execFileSync("pnpm", ["--filter", "buildplane", "build"], {
 		cwd: root,
@@ -41,14 +52,7 @@ function runSourceMemoryDoctor(
 ) {
 	return spawnSync(
 		process.execPath,
-		[
-			"--import",
-			tsxLoaderEntrypoint,
-			cliSourceEntrypoint,
-			"memory",
-			"doctor",
-			"--json",
-		],
+		sourceCliArgs(cliSourceEntrypoint, "memory", "doctor", "--json"),
 		{
 			cwd: workspaceRoot,
 			encoding: "utf8",
@@ -63,14 +67,7 @@ function runSourcePackShow(
 ) {
 	return spawnSync(
 		process.execPath,
-		[
-			"--import",
-			tsxLoaderEntrypoint,
-			cliSourceEntrypoint,
-			"pack",
-			"show",
-			"superclaude",
-		],
+		sourceCliArgs(cliSourceEntrypoint, "pack", "show", "superclaude"),
 		{
 			cwd: workspaceRoot,
 			encoding: "utf8",
@@ -93,7 +90,7 @@ describe("cli bootstrap", () => {
 	it("emits top-level help when invoked via the root script entrypoint", () => {
 		const output = execFileSync(
 			process.execPath,
-			["--import", "tsx", "./apps/cli/src/index.ts"],
+			["--conditions", "source", "--import", "tsx", "./apps/cli/src/index.ts"],
 			{ cwd: root, encoding: "utf8" },
 		).trim();
 
@@ -105,7 +102,14 @@ describe("cli bootstrap", () => {
 	it("supports --help via the root script entrypoint", () => {
 		const output = execFileSync(
 			process.execPath,
-			["--import", "tsx", "./apps/cli/src/index.ts", "--help"],
+			[
+				"--conditions",
+				"source",
+				"--import",
+				"tsx",
+				"./apps/cli/src/index.ts",
+				"--help",
+			],
 			{ cwd: root, encoding: "utf8" },
 		).trim();
 
@@ -121,14 +125,10 @@ describe("cli bootstrap", () => {
 		mkdirSync(workspaceRoot, { recursive: true });
 		symlinkSync(cliSourceEntrypoint, symlinkPath, "file");
 
-		execFileSync(
-			process.execPath,
-			["--import", tsxLoaderEntrypoint, symlinkPath, "init"],
-			{
-				cwd: workspaceRoot,
-				encoding: "utf8",
-			},
-		);
+		execFileSync(process.execPath, sourceCliArgs(symlinkPath, "init"), {
+			cwd: workspaceRoot,
+			encoding: "utf8",
+		});
 
 		expect(existsSync(join(workspaceRoot, ".buildplane", "state.db"))).toBe(
 			true,
@@ -141,7 +141,7 @@ describe("cli bootstrap", () => {
 
 		const initResult = spawnSync(
 			process.execPath,
-			["--import", tsxLoaderEntrypoint, cliSourceEntrypoint, "init"],
+			sourceCliArgs(cliSourceEntrypoint, "init"),
 			{
 				cwd: workspaceRoot,
 				encoding: "utf8",
@@ -152,13 +152,7 @@ describe("cli bootstrap", () => {
 
 		const statusResult = spawnSync(
 			process.execPath,
-			[
-				"--import",
-				tsxLoaderEntrypoint,
-				cliSourceEntrypoint,
-				"status",
-				"--json",
-			],
+			sourceCliArgs(cliSourceEntrypoint, "status", "--json"),
 			{
 				cwd: workspaceRoot,
 				encoding: "utf8",

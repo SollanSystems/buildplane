@@ -365,3 +365,5 @@ Ranked by probability:
 - 10. Cloud / team ledger — hosted product.
 
 Phase E closes the first half of the fork story: "resume from event N with a correction, lineage preserved, new tape captures the divergent path." Phase F closes the second half (VCR) when the CAS-population work can be justified.
+
+**Phase E status: complete (2026-04-19).**

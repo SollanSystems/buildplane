@@ -10,6 +10,10 @@ describe("@buildplane/kernel package consumption", () => {
 		const output = execFileSync(
 			process.execPath,
 			[
+				"--conditions",
+				"source",
+				"--import",
+				"tsx",
 				"-e",
 				"import('@buildplane/kernel').then((mod) => console.log(JSON.stringify(Object.keys(mod).sort())))",
 			],
@@ -45,10 +49,14 @@ describe("@buildplane/kernel package consumption", () => {
 				import('@buildplane/adapters-git'),
 			]).then(() => console.log('ok'));
 		`;
-		const output = execFileSync(process.execPath, ["-e", script], {
-			cwd: cliDir,
-			encoding: "utf8",
-		}).trim();
+		const output = execFileSync(
+			process.execPath,
+			["--conditions", "source", "--import", "tsx", "-e", script],
+			{
+				cwd: cliDir,
+				encoding: "utf8",
+			},
+		).trim();
 
 		expect(output).toBe("ok");
 	});

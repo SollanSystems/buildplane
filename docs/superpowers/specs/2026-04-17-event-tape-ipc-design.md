@@ -281,6 +281,8 @@ After writing `control:"error"`, the ledger exits with a non-zero code matching 
 
 Emitter wraps `childStdin.write(line)` in a promise chain. When `write` returns `false`, the emitter awaits a single `drain` event before writing the next line. The public `emit()` method remains synchronous: it appends to an internal `Promise<void>` chain that serializes writes. Under burst load, `emit()` returns instantly while writes queue behind the pending chain. When the internal queue depth reaches `queueHighWatermark`, further `emit()` calls await the head of the chain before appending. Zero event loss, bounded memory, caller's event-producing code slows down naturally.
 
+**Honest limit on memory boundedness.** `emit()` is synchronous per the public API contract. Under a tight synchronous burst (1M emits in a hot loop, without any yield to the event loop), all N writes enqueue before any execute — the high-watermark throttles execution order via the queue's internal promise chain, but cannot admission-control the pending count without making `emit()` awaitable. This is a deliberate trade-off for API ergonomics. Producers emitting at adversarial rates should yield (`await new Promise(setImmediate)`) or call `flush()` periodically.
+
 ### Handshake timing
 
 Ledger must respond to `_handshake` within `handshakeTimeoutMs` (default 30s). Ledger side: on spawn, the serve loop reads the first stdin line; if it's not a valid `control:"handshake"`, it exits non-zero without writing an ack. If valid, the ledger initializes SQLite (creates tables, runs `PRAGMA journal_mode=WAL`) and the CAS directory, then writes the ack. Database creation is inside the handshake window — for a cold start on a slow filesystem, this can be several hundred ms. Default 30s is generous enough that no legitimate run should time out.
@@ -458,6 +460,8 @@ Ranked by probability:
 2. **Handshake race conditions.** E.g., child writes `handshake_ack` before TS attaches a stderr reader. Mitigation: spawn sequence attaches the reader first, writes the handshake second.
 3. **Node's `child_process.spawn` quirks on long-running stdin pipes.** Specifically `EPIPE` when child exits before stdin is closed. Mitigation: `failure.ts` swallows EPIPE on writes after `childExit` resolves.
 4. **typeshare re-runs during Phase B producing different output.** Phase A's hand-written `Payload` + shims were careful; if someone bumps typeshare or adjusts annotations, the generated file shifts. Mitigation: pin the typeshare version in `scripts/ledger/generate-schema.sh` and run it as a no-op verification in CI.
+
+**Phase B status: complete (2026-04-18).**
 
 ---
 

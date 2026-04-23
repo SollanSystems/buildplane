@@ -16,6 +16,12 @@ describe("root workflow tooling", () => {
 		expect(pkg.engines?.node).toBe("24.13.1");
 		expect(pkg.scripts?.lint).toBe("biome check .");
 		expect(pkg.scripts?.format).toBe("biome format --write .");
+		expect(pkg.scripts?.["ledger:gen"]).toBe(
+			"bash ./scripts/ledger/generate-schema.sh",
+		);
+		expect(pkg.scripts?.["ledger:gen-fixtures"]).toBe(
+			"bash ./scripts/ledger/gen-fixtures.sh",
+		);
 		expect(pkg.scripts?.check).toBe(
 			"pnpm lint && pnpm typecheck && pnpm test && pnpm build",
 		);

@@ -323,6 +323,21 @@ Ranked by probability:
 3. **Kernel's orchestrator lacks a clean unit-boundary hook.** If only post-hoc signals are available, pre-unit checkpoints become approximate. Mitigation: add a hook point in C.4 if needed.
 4. **Permission-denied test platform-flaky.** Skip-if-platform per Section 3.
 
+**Phase C status: complete (2026-04-18).**
+
+**Honest limits delivered vs. spec:**
+
+Infrastructure code (wrapToolRegistryForLedger, runGitCheckpoint, gitInWorkspace, makeBuildplaneRunFixture) ships fully tested at Layer 2. The cwd-isolation canary PASSES, confirming Phase B's pollution pattern does not recur.
+
+However, during C.5 integration testing, the probe revealed that the current sync `orchestrator.runPacket()` path (engaged by `--raw`) does not emit `execution-started` / `command-execution-complete` events on the event bus. The result: a real `buildplane run` produces only `run_started` and `run_completed` in events.db. The unit_started, git_checkpoint, unit_completed, tool_request, tool_result, and workspace_write events that Section 1's success criteria anticipate are NOT reaching the tape yet.
+
+The infrastructure is in place (bus subscription correctly wired; wrapper threading complete). Phase D or a targeted Phase C.7 follow-up needs to either:
+- Switch the default run path to `runPacketAsync()` so bus events fire.
+- Extend `runPacket()` to emit the corresponding bus events directly.
+- Thread the instrumented ToolRegistry into the execution adapter so tool_request events flow.
+
+The Layer-3 integration tests (test/ledger-integration/) were shipped with realistic assertions matching current behavior; aspirational assertions are preserved as `test.skip` markers documenting the Phase D gap.
+
 ---
 
 ## Appendix A: Decision Log

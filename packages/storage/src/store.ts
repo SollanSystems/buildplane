@@ -749,6 +749,9 @@ export function createStorageStore(
 	}
 
 	function writeRunLogs(runId: string, receipt: ExecutionReceipt): void {
+		// Ensure logsDir exists — it may be absent if the workspace was restored
+		// from a git checkout that pre-dates the first log write (e.g. fork replay).
+		mkdirSync(layout.logsDir, { recursive: true });
 		writeFileSync(`${layout.logsDir}/${runId}.stdout.log`, receipt.stdout);
 		writeFileSync(`${layout.logsDir}/${runId}.stderr.log`, receipt.stderr);
 	}
@@ -1662,7 +1665,7 @@ export function createStorageStore(
 			ensureInitialized();
 			const database = openStoreDatabase();
 			const createdAt = new Date().toISOString();
-			const runId = randomUUID();
+			const runId = options?.runId ?? randomUUID();
 			const parentRunId = options?.parentRunId ?? null;
 			const strategyId = options?.strategyId ?? null;
 
