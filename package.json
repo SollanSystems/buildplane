@@ -13,7 +13,8 @@
 	"scripts": {
 		"build": "tsc --build",
 		"buildplane": "node --conditions=source --import tsx ./apps/cli/src/index.ts",
-		"test": "vitest --run",
+		"native:build": "cargo build --manifest-path native/Cargo.toml -p bp-cli",
+		"test": "pnpm native:build && vitest --run",
 		"test:watch": "vitest",
 		"typecheck": "pnpm exec tsc --build --pretty false",
 		"lint": "biome check .",
