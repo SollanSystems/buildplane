@@ -152,6 +152,19 @@ export interface InspectSnapshot {
 	readonly kind: "run" | "unit";
 	readonly unit: Unit;
 	readonly run: Run;
+	readonly provenance?: {
+		readonly route: {
+			readonly worker: string;
+			readonly source: "routing-hints" | "model-block" | "command-block";
+			readonly preferredModel?: string;
+			readonly effort?: string;
+			readonly provider?: string;
+			readonly model?: string;
+		};
+		readonly policy: {
+			readonly profile: string;
+		};
+	};
 	readonly workspace?: WorkspaceSnapshot;
 	readonly strategy?: {
 		readonly strategyId: string;

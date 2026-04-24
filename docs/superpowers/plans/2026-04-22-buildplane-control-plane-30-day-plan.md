@@ -103,7 +103,7 @@ Success means:
 
 ### Acceptance criteria
 
-- [ ] inspect output shows the chosen worker/route in a first-class way
+- [x] inspect output shows the chosen worker/route in a first-class way
 - [ ] inspect output shows pack / host / provider selection where applicable
 - [ ] inspect output shows injected memories and why they were surfaced
 - [ ] inspect output shows the active policy profile / trust gates / approval-relevant decisions
@@ -120,8 +120,8 @@ Success means:
 
 ### Slice tasks
 
-- [ ] Task 2A: define the minimum provenance payload contract for inspect/history
-- [ ] Task 2B: surface route and worker selection explicitly
+- [x] Task 2A: define the minimum provenance payload contract for inspect/history
+- [x] Task 2B: surface route and worker selection explicitly
 - [ ] Task 2C: surface structured memory injection reasons explicitly
 - [ ] Task 2D: surface policy/trust-gate context without overloading the operator
 - [ ] Task 2E: tighten human-readable formatting so inspect feels calm, not dumpy

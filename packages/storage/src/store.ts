@@ -1624,6 +1624,41 @@ export function createStorageStore(
 		return rows;
 	}
 
+	function buildInspectProvenance(
+		packet: UnitPacket | null,
+		unit: Unit,
+	): InspectSnapshot["provenance"] {
+		const routingHints = packet?.routingHints;
+		const model = packet?.model;
+		const isCommandExecution = Boolean(packet?.execution);
+		const source = isCommandExecution
+			? "command-block"
+			: routingHints?.preferredWorker
+				? "routing-hints"
+				: model
+					? "model-block"
+					: "command-block";
+		const worker = isCommandExecution
+			? "command"
+			: (routingHints?.preferredWorker ?? (model ? "ai-sdk" : "command"));
+
+		return {
+			route: {
+				worker,
+				source,
+				...(routingHints?.preferredModel
+					? { preferredModel: routingHints.preferredModel }
+					: {}),
+				...(routingHints?.effort ? { effort: routingHints.effort } : {}),
+				...(model?.provider ? { provider: model.provider } : {}),
+				...(model?.model ? { model: model.model } : {}),
+			},
+			policy: {
+				profile: unit.policyProfile,
+			},
+		};
+	}
+
 	function readWorkspaceSnapshot(
 		runId: string,
 		database: DatabaseSync,
@@ -2866,6 +2901,12 @@ export function createStorageStore(
 						kind: "run",
 						unit,
 						run: toRun(runRow),
+						provenance: buildInspectProvenance(
+							parsedSnapshot && "unit" in parsedSnapshot
+								? (parsedSnapshot as UnitPacket)
+								: null,
+							unit,
+						),
 						workspace: readWorkspaceSnapshot(runRow.id, database),
 						strategy: toStrategySummary(runRow),
 						injectedMemories: readInjectedMemoryRows(runRow.id, database),
@@ -2895,10 +2936,22 @@ export function createStorageStore(
 					}
 
 					const run = readRun(latestRun.id, database);
+					const latestRunRow = database
+						.prepare(`SELECT unit_snapshot FROM runs WHERE id = ?`)
+						.get(latestRun.id) as { unit_snapshot: string | null } | undefined;
+					const parsedSnapshot = latestRunRow?.unit_snapshot
+						? JSON.parse(latestRunRow.unit_snapshot)
+						: null;
 					const snapshot = {
 						kind: "unit",
 						unit,
 						run: toRun(run),
+						provenance: buildInspectProvenance(
+							parsedSnapshot && "unit" in parsedSnapshot
+								? (parsedSnapshot as UnitPacket)
+								: null,
+							unit,
+						),
 						workspace: readWorkspaceSnapshot(run.id, database),
 						strategy: toStrategySummary(run),
 						injectedMemories: readInjectedMemoryRows(run.id, database),

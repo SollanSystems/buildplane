@@ -205,6 +205,37 @@ describe("formatInspectDetail", () => {
 		expect(lines).toContain("strategy: strategy-injected");
 	});
 
+	it("includes route and policy provenance when present", () => {
+		const lines = formatInspectDetail(
+			{
+				...baseSnapshot,
+				provenance: {
+					route: {
+						worker: "codex",
+						source: "routing-hints",
+						provider: "openai-codex",
+						model: "gpt-5.4",
+						preferredModel: "gpt-5.4",
+						effort: "high",
+					},
+					policy: {
+						profile: "default",
+					},
+				},
+			},
+			[],
+		);
+
+		expect(lines).toContain("provenance:");
+		expect(lines).toContain("  route-worker: codex");
+		expect(lines).toContain("  route-source: routing-hints");
+		expect(lines).toContain("  provider: openai-codex");
+		expect(lines).toContain("  model: gpt-5.4");
+		expect(lines).toContain("  preferred-model: gpt-5.4");
+		expect(lines).toContain("  effort: high");
+		expect(lines).toContain("  policy-profile: default");
+	});
+
 	it("omits learnings section when no learnings provided", () => {
 		const lines = formatInspectDetail(baseSnapshot, []);
 		expect(lines.join("\n")).not.toContain("learnings:");

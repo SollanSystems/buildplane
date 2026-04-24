@@ -106,6 +106,15 @@ describe("storage adapter", () => {
 		expect(inspect.evidence[0].kind).toBe("command-exit");
 		expect(inspect.evidence[0]?.message).toBeUndefined();
 		expect(inspect.decisions[0].kind).toBe("advance-run");
+		expect(inspect.provenance).toEqual({
+			route: {
+				worker: "command",
+				source: "command-block",
+			},
+			policy: {
+				profile: "default",
+			},
+		});
 		expect(
 			existsSync(join(root, ".buildplane", "logs", `${run.id}.stdout.log`)),
 		).toBe(true);
@@ -124,6 +133,55 @@ describe("storage adapter", () => {
 			"decision-recorded",
 			"run-completed",
 		]);
+	});
+
+	it("surfaces route and policy provenance for model packets with routing hints", () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-store-provenance-"));
+		const storage = createBuildplaneStorage(root);
+		storage.initializeProject();
+		const routedPacket: UnitPacket = {
+			unit: {
+				id: "unit-routed",
+				kind: "model",
+				scope: "task",
+				inputRefs: [],
+				expectedOutputs: [],
+				verificationContract: "exit-0",
+				policyProfile: "requires-review",
+			},
+			model: {
+				provider: "openai-codex",
+				model: "gpt-5.4",
+				prompt: "Implement the slice",
+			},
+			routingHints: {
+				preferredWorker: "codex",
+				preferredModel: "gpt-5.4",
+				effort: "high",
+			},
+			verification: {
+				requiredOutputs: [],
+			},
+		};
+
+		const run = storage.createRun(routedPacket);
+		const inspectRun = storage.inspectTarget(run.id);
+		const inspectUnit = storage.inspectTarget(routedPacket.unit.id);
+
+		expect(inspectRun.provenance).toEqual({
+			route: {
+				worker: "codex",
+				source: "routing-hints",
+				preferredModel: "gpt-5.4",
+				effort: "high",
+				provider: "openai-codex",
+				model: "gpt-5.4",
+			},
+			policy: {
+				profile: "requires-review",
+			},
+		});
+		expect(inspectUnit.provenance).toEqual(inspectRun.provenance);
 	});
 
 	it("persists retained workspaces for rejected runs and exposes workspace snapshots", () => {

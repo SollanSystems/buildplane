@@ -352,6 +352,19 @@ interface InspectSnapshotLike {
 		readonly unitId: string;
 		readonly status: string;
 	};
+	readonly provenance?: {
+		readonly route?: {
+			readonly worker?: string;
+			readonly source?: string;
+			readonly preferredModel?: string;
+			readonly effort?: string;
+			readonly provider?: string;
+			readonly model?: string;
+		};
+		readonly policy?: {
+			readonly profile?: string;
+		};
+	};
 	readonly strategy?: {
 		readonly strategyId: string;
 	};
@@ -387,6 +400,35 @@ export function formatInspectDetail(
 		lines.push(
 			`strategy: ${sanitizeTerminalText(snapshot.strategy.strategyId)}`,
 		);
+	}
+	if (snapshot.provenance) {
+		const route = snapshot.provenance.route;
+		const policy = snapshot.provenance.policy;
+		lines.push("");
+		lines.push("provenance:");
+		if (route?.worker) {
+			lines.push(`  route-worker: ${sanitizeTerminalText(route.worker)}`);
+		}
+		if (route?.source) {
+			lines.push(`  route-source: ${sanitizeTerminalText(route.source)}`);
+		}
+		if (route?.provider) {
+			lines.push(`  provider: ${sanitizeTerminalText(route.provider)}`);
+		}
+		if (route?.model) {
+			lines.push(`  model: ${sanitizeTerminalText(route.model)}`);
+		}
+		if (route?.preferredModel) {
+			lines.push(
+				`  preferred-model: ${sanitizeTerminalText(route.preferredModel)}`,
+			);
+		}
+		if (route?.effort) {
+			lines.push(`  effort: ${sanitizeTerminalText(route.effort)}`);
+		}
+		if (policy?.profile) {
+			lines.push(`  policy-profile: ${sanitizeTerminalText(policy.profile)}`);
+		}
 	}
 
 	const s = snapshot as unknown as Record<string, unknown>;
