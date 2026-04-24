@@ -432,10 +432,10 @@ export function formatInspectDetail(
 ): string[] {
 	const lines: string[] = [];
 
-	lines.push(`kind: ${snapshot.kind}`);
-	lines.push(`run-id: ${snapshot.run.id}`);
-	lines.push(`unit-id: ${snapshot.run.unitId}`);
-	lines.push(`status: ${snapshot.run.status}`);
+	lines.push(`kind: ${sanitizeTerminalText(snapshot.kind)}`);
+	lines.push(`run-id: ${sanitizeTerminalText(snapshot.run.id)}`);
+	lines.push(`unit-id: ${sanitizeTerminalText(snapshot.run.unitId)}`);
+	lines.push(`status: ${sanitizeTerminalText(snapshot.run.status)}`);
 	if (snapshot.strategy?.strategyId) {
 		lines.push(
 			`strategy: ${sanitizeTerminalText(snapshot.strategy.strategyId)}`,
@@ -517,19 +517,23 @@ export function formatInspectDetail(
 			cleanupError?: string;
 		};
 		if (ws.status) {
-			lines.push(`workspace-status: ${ws.status}`);
+			lines.push(`workspace-status: ${sanitizeTerminalText(ws.status)}`);
 		}
 		if (ws.path) {
-			lines.push(`workspace: ${ws.path}`);
+			lines.push(`workspace: ${sanitizeTerminalText(ws.path)}`);
 		}
 		if (ws.headSha) {
-			lines.push(`workspace-head: ${ws.headSha}`);
+			lines.push(`workspace-head: ${sanitizeTerminalText(ws.headSha)}`);
 		}
 		if (ws.finalizedAt) {
-			lines.push(`workspace-finalized-at: ${ws.finalizedAt}`);
+			lines.push(
+				`workspace-finalized-at: ${sanitizeTerminalText(ws.finalizedAt)}`,
+			);
 		}
 		if (ws.cleanupError) {
-			lines.push(`workspace-cleanup-error: ${ws.cleanupError}`);
+			lines.push(
+				`workspace-cleanup-error: ${sanitizeTerminalText(ws.cleanupError)}`,
+			);
 		}
 		if (ws.existsOnDisk !== undefined) {
 			lines.push(`workspace-exists-on-disk: ${ws.existsOnDisk}`);
@@ -614,7 +618,9 @@ export function formatInspectDetail(
 		lines.push("");
 		lines.push("learnings:");
 		for (const l of learnings) {
-			lines.push(`  [${l.scope}/${l.kind}] ${l.title} (seen: ${l.seenCount})`);
+			lines.push(
+				`  [${sanitizeTerminalText(l.scope)}/${sanitizeTerminalText(l.kind)}] ${sanitizeTerminalText(l.title)} (seen: ${l.seenCount})`,
+			);
 		}
 	}
 

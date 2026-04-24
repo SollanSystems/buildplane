@@ -351,6 +351,60 @@ describe("formatInspectDetail", () => {
 		expect(lines.join("\n")).not.toContain("bad cwd\n");
 	});
 
+	it("sanitizes inspect header, workspace, and learning fields", () => {
+		const lines = formatInspectDetail(
+			{
+				...baseSnapshot,
+				kind: "run\n\u001b[31mkind",
+				run: {
+					id: "run\n\u001b[31mid",
+					unitId: "unit\n\u001b[31mid",
+					status: "failed\n\u001b[31mstatus",
+				},
+				workspace: {
+					status: "active\n\u001b[31mstatus",
+					path: "/tmp/ws\n\u001b[31mpath",
+					headSha: "abc\n\u001b[31msha",
+					finalizedAt: "2026-04-24\n\u001b[31mtime",
+					cleanupError: "cleanup\n\u001b[31merror",
+					existsOnDisk: false,
+				},
+			} as unknown as Parameters<typeof formatInspectDetail>[0],
+			[],
+			[
+				{
+					id: "learning-1",
+					runId: "run-xyz",
+					scope: "workspace\n\u001b[31mscope",
+					kind: "fact\n\u001b[31mkind",
+					title: "title\n\u001b[31mtitle",
+					body: "body",
+					status: "active",
+					createdAt: "2026-04-24T00:00:00Z",
+					seenCount: 1,
+				},
+			],
+		);
+
+		expect(lines).toContain("kind: run\\n\\u001b[31mkind");
+		expect(lines).toContain("run-id: run\\n\\u001b[31mid");
+		expect(lines).toContain("unit-id: unit\\n\\u001b[31mid");
+		expect(lines).toContain("status: failed\\n\\u001b[31mstatus");
+		expect(lines).toContain("workspace-status: active\\n\\u001b[31mstatus");
+		expect(lines).toContain("workspace: /tmp/ws\\n\\u001b[31mpath");
+		expect(lines).toContain("workspace-head: abc\\n\\u001b[31msha");
+		expect(lines).toContain(
+			"workspace-finalized-at: 2026-04-24\\n\\u001b[31mtime",
+		);
+		expect(lines).toContain(
+			"workspace-cleanup-error: cleanup\\n\\u001b[31merror",
+		);
+		expect(lines).toContain(
+			"  [workspace\\n\\u001b[31mscope/fact\\n\\u001b[31mkind] title\\n\\u001b[31mtitle (seen: 1)",
+		);
+		expect(lines.join("\n")).not.toContain("\u001b[31m");
+	});
+
 	it("omits learnings section when no learnings provided", () => {
 		const lines = formatInspectDetail(baseSnapshot, []);
 		expect(lines.join("\n")).not.toContain("learnings:");

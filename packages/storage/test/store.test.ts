@@ -203,6 +203,53 @@ describe("storage adapter", () => {
 		expect(inspectUnit.provenance).toEqual(inspectRun.provenance);
 	});
 
+	it("falls back to unit kind for legacy model runs without packet snapshots", () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-store-legacy-model-"));
+		const storage = createBuildplaneStorage(root);
+		storage.initializeProject();
+		const legacyModelPacket: UnitPacket = {
+			unit: {
+				id: "unit-legacy-model",
+				kind: "model",
+				scope: "task",
+				inputRefs: [],
+				expectedOutputs: [],
+				verificationContract: "exit-0",
+				policyProfile: "requires-review",
+			},
+			model: {
+				provider: "openai-codex",
+				model: "gpt-5.4",
+				prompt: "Implement the slice",
+			},
+			verification: {
+				requiredOutputs: [],
+			},
+		};
+
+		const run = storage.createRun(legacyModelPacket);
+		const database = new DatabaseSync(join(root, ".buildplane", "state.db"));
+		try {
+			database
+				.prepare(`UPDATE runs SET unit_snapshot = ? WHERE id = ?`)
+				.run(JSON.stringify(legacyModelPacket.unit), run.id);
+		} finally {
+			database.close();
+		}
+
+		const inspectRun = storage.inspectTarget(run.id);
+		const inspectUnit = storage.inspectTarget(legacyModelPacket.unit.id);
+
+		expect(inspectRun.provenance.route).toEqual({
+			worker: "ai-sdk",
+			source: "model-block",
+		});
+		expect(inspectUnit.provenance.route).toEqual({
+			worker: "ai-sdk",
+			source: "model-block",
+		});
+	});
+
 	it("persists retained workspaces for rejected runs and exposes workspace snapshots", () => {
 		const root = mkdtempSync(join(tmpdir(), "buildplane-store-workspaces-"));
 		const storage = createBuildplaneStorage(root);

@@ -1636,16 +1636,18 @@ export function createStorageStore(
 		const routingHints = packet?.routingHints;
 		const model = packet?.model;
 		const isCommandExecution = Boolean(packet?.execution);
+		const isModelRoute = Boolean(model) || unit.kind === "model";
 		const source = isCommandExecution
 			? "command-block"
 			: routingHints?.preferredWorker
 				? "routing-hints"
-				: model
+				: isModelRoute
 					? "model-block"
 					: "command-block";
 		const worker = isCommandExecution
 			? "command"
-			: (routingHints?.preferredWorker ?? (model ? "ai-sdk" : "command"));
+			: (routingHints?.preferredWorker ??
+				(isModelRoute ? "ai-sdk" : "command"));
 		const matchReasons = [
 			...new Set(injectedMemories.map((m) => m.matchReason)),
 		];
@@ -2966,11 +2968,8 @@ export function createStorageStore(
 					}
 
 					const run = readRun(latestRun.id, database);
-					const latestRunRow = database
-						.prepare(`SELECT unit_snapshot FROM runs WHERE id = ?`)
-						.get(latestRun.id) as { unit_snapshot: string | null } | undefined;
-					const parsedSnapshot = latestRunRow?.unit_snapshot
-						? JSON.parse(latestRunRow.unit_snapshot)
+					const parsedSnapshot = run.unit_snapshot
+						? JSON.parse(run.unit_snapshot)
 						: null;
 					const injectedMemories = readInjectedMemoryRows(run.id, database);
 					const decisions = readDecisions(run.id, database);
