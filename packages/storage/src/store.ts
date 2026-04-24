@@ -677,6 +677,9 @@ export interface RunHistoryEntry {
 	readonly strategyId?: string;
 	readonly injectedMemoryCount: number;
 	readonly promotedStructuredMemoryCount: number;
+	readonly routeWorker?: string;
+	readonly routeSource?: "routing-hints" | "model-block" | "command-block";
+	readonly policyProfile?: string;
 	readonly createdAt: string;
 	readonly completedAt?: string;
 }
@@ -1627,7 +1630,9 @@ export function createStorageStore(
 	function buildInspectProvenance(
 		packet: UnitPacket | null,
 		unit: Unit,
-	): InspectSnapshot["provenance"] {
+		injectedMemories: readonly PersistedInjectedMemoryRecord[],
+		decisions: InspectSnapshot["decisions"],
+	): NonNullable<InspectSnapshot["provenance"]> {
 		const routingHints = packet?.routingHints;
 		const model = packet?.model;
 		const isCommandExecution = Boolean(packet?.execution);
@@ -1641,6 +1646,17 @@ export function createStorageStore(
 		const worker = isCommandExecution
 			? "command"
 			: (routingHints?.preferredWorker ?? (model ? "ai-sdk" : "command"));
+		const matchReasons = [
+			...new Set(injectedMemories.map((m) => m.matchReason)),
+		];
+		const matchClasses = [
+			...new Set(injectedMemories.map((m) => m.matchClass)),
+		];
+		const policyDecisions = decisions.map((decision) => ({
+			kind: decision.kind,
+			outcome: decision.outcome,
+			reasons: decision.reasons,
+		}));
 
 		return {
 			route: {
@@ -1653,8 +1669,18 @@ export function createStorageStore(
 				...(model?.provider ? { provider: model.provider } : {}),
 				...(model?.model ? { model: model.model } : {}),
 			},
+			...(injectedMemories.length > 0
+				? {
+						memory: {
+							injectedCount: injectedMemories.length,
+							matchReasons,
+							matchClasses,
+						},
+					}
+				: {}),
 			policy: {
 				profile: unit.policyProfile,
+				...(policyDecisions.length > 0 ? { decisions: policyDecisions } : {}),
 			},
 		};
 	}
@@ -2897,6 +2923,8 @@ export function createStorageStore(
 							: parsedSnapshot
 								? (parsedSnapshot as Unit)
 								: readUnit(runRow.unit_id, database);
+					const injectedMemories = readInjectedMemoryRows(runRow.id, database);
+					const decisions = readDecisions(runRow.id, database);
 					const snapshot = {
 						kind: "run",
 						unit,
@@ -2906,17 +2934,19 @@ export function createStorageStore(
 								? (parsedSnapshot as UnitPacket)
 								: null,
 							unit,
+							injectedMemories,
+							decisions,
 						),
 						workspace: readWorkspaceSnapshot(runRow.id, database),
 						strategy: toStrategySummary(runRow),
-						injectedMemories: readInjectedMemoryRows(runRow.id, database),
+						injectedMemories,
 						promotedStructuredMemories: readPromotedStructuredMemoryRows(
 							runRow.id,
 							database,
 						),
 						runHistory: [{ id: runRow.id, status: runRow.status }],
 						evidence: readEvidence(runRow.id, database),
-						decisions: readDecisions(runRow.id, database),
+						decisions,
 						artifacts: readArtifacts(runRow.id, database),
 					};
 					return snapshot as WorkspaceAwareInspectSnapshot;
@@ -2942,6 +2972,8 @@ export function createStorageStore(
 					const parsedSnapshot = latestRunRow?.unit_snapshot
 						? JSON.parse(latestRunRow.unit_snapshot)
 						: null;
+					const injectedMemories = readInjectedMemoryRows(run.id, database);
+					const decisions = readDecisions(run.id, database);
 					const snapshot = {
 						kind: "unit",
 						unit,
@@ -2951,17 +2983,19 @@ export function createStorageStore(
 								? (parsedSnapshot as UnitPacket)
 								: null,
 							unit,
+							injectedMemories,
+							decisions,
 						),
 						workspace: readWorkspaceSnapshot(run.id, database),
 						strategy: toStrategySummary(run),
-						injectedMemories: readInjectedMemoryRows(run.id, database),
+						injectedMemories,
 						promotedStructuredMemories: readPromotedStructuredMemoryRows(
 							run.id,
 							database,
 						),
 						runHistory,
 						evidence: readEvidence(run.id, database),
-						decisions: readDecisions(run.id, database),
+						decisions,
 						artifacts: readArtifacts(run.id, database),
 					};
 					return snapshot as WorkspaceAwareInspectSnapshot;
@@ -2980,30 +3014,56 @@ export function createStorageStore(
 			try {
 				const rows = database
 					.prepare(
-						`SELECT id, unit_id, status, strategy_id, created_at, completed_at FROM runs ORDER BY created_at DESC, rowid DESC`,
+						`SELECT id, unit_id, status, strategy_id, unit_snapshot, created_at, completed_at FROM runs ORDER BY created_at DESC, rowid DESC`,
 					)
 					.all() as unknown as {
 					id: string;
 					unit_id: string;
 					status: RunStatus;
 					strategy_id: string | null;
+					unit_snapshot: string | null;
 					created_at: string;
 					completed_at: string | null;
 				}[];
 
-				return rows.map((row) => ({
-					id: row.id,
-					unitId: row.unit_id,
-					status: row.status,
-					strategyId: row.strategy_id ?? undefined,
-					injectedMemoryCount: countInjectedMemories(row.id, database),
-					promotedStructuredMemoryCount: countPromotedStructuredMemories(
-						row.id,
-						database,
-					),
-					createdAt: row.created_at,
-					completedAt: row.completed_at ?? undefined,
-				}));
+				return rows.map((row) => {
+					const parsedSnapshot = row.unit_snapshot
+						? JSON.parse(row.unit_snapshot)
+						: null;
+					const historyUnit: Unit =
+						parsedSnapshot && "unit" in parsedSnapshot
+							? (parsedSnapshot.unit as Unit)
+							: parsedSnapshot
+								? (parsedSnapshot as Unit)
+								: readUnit(row.unit_id, database);
+					const historyPacket =
+						parsedSnapshot && "unit" in parsedSnapshot
+							? (parsedSnapshot as UnitPacket)
+							: null;
+					const provenance = buildInspectProvenance(
+						historyPacket,
+						historyUnit,
+						[],
+						[],
+					);
+
+					return {
+						id: row.id,
+						unitId: row.unit_id,
+						status: row.status,
+						strategyId: row.strategy_id ?? undefined,
+						injectedMemoryCount: countInjectedMemories(row.id, database),
+						promotedStructuredMemoryCount: countPromotedStructuredMemories(
+							row.id,
+							database,
+						),
+						routeWorker: provenance.route.worker,
+						routeSource: provenance.route.source,
+						policyProfile: provenance.policy.profile,
+						createdAt: row.created_at,
+						completedAt: row.completed_at ?? undefined,
+					};
+				});
 			} finally {
 				database.close();
 			}

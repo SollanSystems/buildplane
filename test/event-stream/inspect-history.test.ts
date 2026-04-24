@@ -107,6 +107,11 @@ describe("inspect and history commands", () => {
 		expect(entries[0]).toHaveProperty("unitId");
 		expect(entries[0]).toHaveProperty("status");
 		expect(entries[0]).toHaveProperty("createdAt");
+		expect(entries[0]).toMatchObject({
+			routeWorker: "command",
+			routeSource: "command-block",
+			policyProfile: "default",
+		});
 	});
 
 	it("history returns empty message when no runs", async () => {

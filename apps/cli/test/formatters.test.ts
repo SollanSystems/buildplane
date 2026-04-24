@@ -236,6 +236,54 @@ describe("formatInspectDetail", () => {
 		expect(lines).toContain("  policy-profile: default");
 	});
 
+	it("includes memory and policy decision provenance summaries when present", () => {
+		const lines = formatInspectDetail(
+			{
+				...baseSnapshot,
+				provenance: {
+					route: {
+						worker: "codex",
+						source: "routing-hints",
+					},
+					memory: {
+						injectedCount: 2,
+						matchReasons: ["exact-task-type", "fuzzy-fact-key"],
+						matchClasses: ["exact", "fuzzy"],
+					},
+					policy: {
+						profile: "requires-review",
+						decisions: [
+							{
+								kind: "advance-run",
+								outcome: "approved",
+								reasons: ["requires human approval"],
+							},
+							{
+								kind: "reject-run",
+								outcome: "rejected",
+								reasons: ["budget exceeded"],
+							},
+						],
+					},
+				},
+			},
+			[],
+		);
+
+		expect(lines).toContain("  memory-injected: 2");
+		expect(lines).toContain(
+			"  memory-reasons: exact-task-type, fuzzy-fact-key",
+		);
+		expect(lines).toContain("  memory-match-classes: exact, fuzzy");
+		expect(lines).toContain("  policy-profile: requires-review");
+		expect(lines).toContain(
+			"  policy-decisions: advance-run:approved, reject-run:rejected",
+		);
+		expect(lines).toContain(
+			"  policy-reasons: requires human approval, budget exceeded",
+		);
+	});
+
 	it("omits learnings section when no learnings provided", () => {
 		const lines = formatInspectDetail(baseSnapshot, []);
 		expect(lines.join("\n")).not.toContain("learnings:");

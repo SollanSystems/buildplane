@@ -113,6 +113,13 @@ describe("storage adapter", () => {
 			},
 			policy: {
 				profile: "default",
+				decisions: [
+					{
+						kind: "advance-run",
+						outcome: "approved",
+						reasons: [],
+					},
+				],
 			},
 		});
 		expect(
@@ -165,6 +172,11 @@ describe("storage adapter", () => {
 		};
 
 		const run = storage.createRun(routedPacket);
+		storage.recordDecision(run.id, {
+			kind: "advance-run",
+			outcome: "approved",
+			reasons: ["requires human approval"],
+		});
 		const inspectRun = storage.inspectTarget(run.id);
 		const inspectUnit = storage.inspectTarget(routedPacket.unit.id);
 
@@ -179,6 +191,13 @@ describe("storage adapter", () => {
 			},
 			policy: {
 				profile: "requires-review",
+				decisions: [
+					{
+						kind: "advance-run",
+						outcome: "approved",
+						reasons: ["requires human approval"],
+					},
+				],
 			},
 		});
 		expect(inspectUnit.provenance).toEqual(inspectRun.provenance);
@@ -807,11 +826,28 @@ describe("storage adapter", () => {
 
 		expect(inspect.strategy).toEqual({ strategyId: "strategy-injected" });
 		expect(unitInspect.strategy).toEqual({ strategyId: "strategy-injected" });
+		expect(inspect.provenance).toMatchObject({
+			route: {
+				worker: "command",
+				source: "command-block",
+			},
+			memory: {
+				injectedCount: 2,
+				matchReasons: ["fuzzy-fact-key", "exact-task-type"],
+				matchClasses: ["fuzzy", "exact"],
+			},
+			policy: {
+				profile: "default",
+			},
+		});
 		expect(history[0]).toMatchObject({
 			id: run.id,
 			strategyId: "strategy-injected",
 			injectedMemoryCount: 2,
 			promotedStructuredMemoryCount: 1,
+			routeWorker: "command",
+			routeSource: "command-block",
+			policyProfile: "default",
 		});
 	});
 

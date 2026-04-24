@@ -361,8 +361,18 @@ interface InspectSnapshotLike {
 			readonly provider?: string;
 			readonly model?: string;
 		};
+		readonly memory?: {
+			readonly injectedCount?: number;
+			readonly matchReasons?: readonly string[];
+			readonly matchClasses?: readonly string[];
+		};
 		readonly policy?: {
 			readonly profile?: string;
+			readonly decisions?: readonly {
+				readonly kind?: string;
+				readonly outcome?: string;
+				readonly reasons?: readonly string[];
+			}[];
 		};
 	};
 	readonly strategy?: {
@@ -403,6 +413,7 @@ export function formatInspectDetail(
 	}
 	if (snapshot.provenance) {
 		const route = snapshot.provenance.route;
+		const memory = snapshot.provenance.memory;
 		const policy = snapshot.provenance.policy;
 		lines.push("");
 		lines.push("provenance:");
@@ -426,8 +437,42 @@ export function formatInspectDetail(
 		if (route?.effort) {
 			lines.push(`  effort: ${sanitizeTerminalText(route.effort)}`);
 		}
+		if (memory?.injectedCount !== undefined) {
+			lines.push(`  memory-injected: ${memory.injectedCount}`);
+		}
+		if (memory?.matchReasons && memory.matchReasons.length > 0) {
+			lines.push(
+				`  memory-reasons: ${sanitizeTerminalText(memory.matchReasons.join(", "))}`,
+			);
+		}
+		if (memory?.matchClasses && memory.matchClasses.length > 0) {
+			lines.push(
+				`  memory-match-classes: ${sanitizeTerminalText(memory.matchClasses.join(", "))}`,
+			);
+		}
 		if (policy?.profile) {
 			lines.push(`  policy-profile: ${sanitizeTerminalText(policy.profile)}`);
+		}
+		if (policy?.decisions && policy.decisions.length > 0) {
+			const decisionSummary = policy.decisions
+				.map(
+					(decision) =>
+						`${decision.kind ?? "unknown"}:${decision.outcome ?? "unknown"}`,
+				)
+				.join(", ");
+			lines.push(
+				`  policy-decisions: ${sanitizeTerminalText(decisionSummary)}`,
+			);
+			const policyReasons = [
+				...new Set(
+					policy.decisions.flatMap((decision) => decision.reasons ?? []),
+				),
+			];
+			if (policyReasons.length > 0) {
+				lines.push(
+					`  policy-reasons: ${sanitizeTerminalText(policyReasons.join(", "))}`,
+				);
+			}
 		}
 	}
 

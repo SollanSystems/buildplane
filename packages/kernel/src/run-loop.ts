@@ -161,8 +161,18 @@ export interface InspectSnapshot {
 			readonly provider?: string;
 			readonly model?: string;
 		};
+		readonly memory?: {
+			readonly injectedCount: number;
+			readonly matchReasons: readonly string[];
+			readonly matchClasses: readonly PersistedInjectedMemoryRecord["matchClass"][];
+		};
 		readonly policy: {
 			readonly profile: string;
+			readonly decisions?: readonly {
+				readonly kind: PolicyDecision["kind"];
+				readonly outcome: PolicyDecision["outcome"];
+				readonly reasons: readonly string[];
+			}[];
 		};
 	};
 	readonly workspace?: WorkspaceSnapshot;
