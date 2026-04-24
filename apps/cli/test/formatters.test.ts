@@ -284,6 +284,73 @@ describe("formatInspectDetail", () => {
 		);
 	});
 
+	it("shows outcome, evidence, decisions, and artifacts as a calm causal story", () => {
+		const lines = formatInspectDetail(
+			{
+				...baseSnapshot,
+				run: { id: "run-xyz", unitId: "implement-foo", status: "failed" },
+				evidence: [
+					{
+						kind: "verification",
+						status: "failed",
+						message: "pytest failed\n\u001b[31m1 failed",
+					},
+				] as Array<{ kind: string; status: string; message: string }>,
+				decisions: [
+					{
+						kind: "advance-run",
+						outcome: "blocked",
+						reasons: ["verification failed", "needs retry"],
+					},
+				],
+				artifacts: [
+					{
+						type: "log",
+						location: ".buildplane/artifacts/run-xyz/verify.log",
+					},
+				],
+			},
+			[],
+		);
+
+		expect(lines).toContain("outcome:");
+		expect(lines).toContain("  status: failed");
+		expect(lines).toContain("evidence:");
+		expect(lines).toContain(
+			"  - verification failed: pytest failed\\n\\u001b[31m1 failed",
+		);
+		expect(lines).toContain("decisions:");
+		expect(lines).toContain(
+			"  - advance-run blocked: verification failed; needs retry",
+		);
+		expect(lines).toContain("artifacts:");
+		expect(lines).toContain(
+			"  - log: .buildplane/artifacts/run-xyz/verify.log",
+		);
+		expect(lines.join("\n")).not.toContain("\u001b[31m1 failed");
+	});
+
+	it("sanitizes failure details and still shows outcome when failure is the only detail", () => {
+		const lines = formatInspectDetail(
+			{
+				...baseSnapshot,
+				run: { id: "run-xyz", unitId: "implement-foo", status: "failed" },
+				failure: {
+					kind: "setup\n\u001b[31mkind",
+					message: "bad cwd\n\u001b[31mstop",
+				},
+			} as unknown as Parameters<typeof formatInspectDetail>[0],
+			[],
+		);
+
+		expect(lines).toContain("failure-kind: setup\\n\\u001b[31mkind");
+		expect(lines).toContain("failure: bad cwd\\n\\u001b[31mstop");
+		expect(lines).toContain("outcome:");
+		expect(lines).toContain("  status: failed");
+		expect(lines.join("\n")).not.toContain("setup\n");
+		expect(lines.join("\n")).not.toContain("bad cwd\n");
+	});
+
 	it("omits learnings section when no learnings provided", () => {
 		const lines = formatInspectDetail(baseSnapshot, []);
 		expect(lines.join("\n")).not.toContain("learnings:");

@@ -106,8 +106,8 @@ Success means:
 - [x] inspect output shows the chosen worker/route in a first-class way
 - [ ] inspect output shows pack / host / provider selection where applicable
 - [x] inspect output shows injected memories and why they were surfaced
-- [ ] inspect output shows the active policy profile / trust gates / approval-relevant decisions
-- [ ] inspect output shows evidence, artifacts, and final outcome in one causal story
+- [x] inspect output shows the active policy profile / trust gates / approval-relevant decisions
+- [x] inspect output shows evidence, artifacts, and final outcome in one causal story
 - [ ] operator can answer "what happened and why?" from one surface without reading raw SQLite tables
 
 ### Likely files
@@ -124,7 +124,7 @@ Success means:
 - [x] Task 2B: surface route and worker selection explicitly
 - [x] Task 2C: surface structured memory injection reasons explicitly
 - [x] Task 2D: surface policy/trust-gate context without overloading the operator
-- [ ] Task 2E: tighten human-readable formatting so inspect feels calm, not dumpy
+- [x] Task 2E: tighten human-readable formatting so inspect feels calm, not dumpy
 
 ---
 

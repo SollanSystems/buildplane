@@ -381,6 +381,7 @@ interface InspectSnapshotLike {
 	readonly evidence: readonly {
 		readonly kind: string;
 		readonly status: string;
+		readonly message?: string;
 	}[];
 	readonly decisions: readonly {
 		readonly kind: string;
@@ -393,6 +394,35 @@ interface InspectSnapshotLike {
 	}[];
 	readonly injectedMemories?: readonly InjectedMemoryLike[];
 	readonly promotedStructuredMemories?: readonly PromotedStructuredMemoryLike[];
+}
+
+function formatInspectArtifactLine(artifact: {
+	readonly type: string;
+	readonly location: string;
+}): string {
+	return `${sanitizeTerminalText(artifact.type)}: ${sanitizeTerminalText(artifact.location)}`;
+}
+
+function formatInspectDecisionLine(decision: {
+	readonly kind: string;
+	readonly outcome: string;
+	readonly reasons: readonly string[];
+}): string {
+	const reasons = decision.reasons.length
+		? `: ${sanitizeTerminalText(decision.reasons.join("; "))}`
+		: "";
+	return `${sanitizeTerminalText(decision.kind)} ${sanitizeTerminalText(decision.outcome)}${reasons}`;
+}
+
+function formatInspectEvidenceLine(evidence: {
+	readonly kind: string;
+	readonly status: string;
+	readonly message?: string;
+}): string {
+	const message = evidence.message
+		? `: ${sanitizeTerminalText(evidence.message)}`
+		: "";
+	return `${sanitizeTerminalText(evidence.kind)} ${sanitizeTerminalText(evidence.status)}${message}`;
 }
 
 export function formatInspectDetail(
@@ -525,10 +555,39 @@ export function formatInspectDetail(
 	if (s.failure && typeof s.failure === "object") {
 		const f = s.failure as { kind?: string; message?: string };
 		if (f.kind) {
-			lines.push(`failure-kind: ${f.kind}`);
+			lines.push(`failure-kind: ${sanitizeTerminalText(f.kind)}`);
 		}
 		if (f.message) {
-			lines.push(`failure: ${f.message}`);
+			lines.push(`failure: ${sanitizeTerminalText(f.message)}`);
+		}
+	}
+
+	const hasCausalStory =
+		snapshot.evidence.length > 0 ||
+		snapshot.decisions.length > 0 ||
+		snapshot.artifacts.length > 0 ||
+		Boolean(s.failure);
+	if (hasCausalStory) {
+		lines.push("");
+		lines.push("outcome:");
+		lines.push(`  status: ${sanitizeTerminalText(snapshot.run.status)}`);
+		if (snapshot.evidence.length > 0) {
+			lines.push("evidence:");
+			for (const evidence of snapshot.evidence) {
+				lines.push(`  - ${formatInspectEvidenceLine(evidence)}`);
+			}
+		}
+		if (snapshot.decisions.length > 0) {
+			lines.push("decisions:");
+			for (const decision of snapshot.decisions) {
+				lines.push(`  - ${formatInspectDecisionLine(decision)}`);
+			}
+		}
+		if (snapshot.artifacts.length > 0) {
+			lines.push("artifacts:");
+			for (const artifact of snapshot.artifacts) {
+				lines.push(`  - ${formatInspectArtifactLine(artifact)}`);
+			}
 		}
 	}
 	if (snapshot.injectedMemories && snapshot.injectedMemories.length > 0) {
