@@ -15,7 +15,7 @@
 		"build": "tsc --build"
 	},
 	"dependencies": {
-		"uuid": "^11"
+		"uuid": "^14"
 	},
 	"devDependencies": {
 		"@types/uuid": "^10"

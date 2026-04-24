@@ -133,7 +133,7 @@ describe("published bootstrap contract", () => {
 				string,
 				string
 			>;
-			expect(deps.uuid).toBe("^11");
+			expect(deps.uuid).toBe("^14");
 		});
 
 		it("rejects publish-unsafe external dependency specifiers", () => {
