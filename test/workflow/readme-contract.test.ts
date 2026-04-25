@@ -121,4 +121,13 @@ describe("README contract", () => {
 	it("does not describe published install as future-only anywhere in the README", () => {
 		expect(readme).not.toMatch(/not yet available|future-only/i);
 	});
+
+	it("does not leave the local run loop contradicted by stale future-only maturity language", () => {
+		expect(readme).not.toContain(
+			"Worktree isolation, replay, richer policy, and model-backed execution come later.",
+		);
+		expect(readme).toContain(
+			"Broader repo-local surfaces already include history/status/inspect",
+		);
+	});
 });

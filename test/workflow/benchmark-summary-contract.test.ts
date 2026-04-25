@@ -13,6 +13,10 @@ const fixtureNames = readdirSync(join(repoRoot, "eval/suites/model-codex"), {
 	.filter((entry) => entry.isDirectory())
 	.map((entry) => entry.name)
 	.sort();
+const documentedFixtureNames = Array.from(
+	benchmarkDoc.matchAll(/^### `([^`]+)`$/gm),
+	(match) => match[1],
+).sort();
 
 describe("benchmark summary contract", () => {
 	it("publishes the model-codex rerun contract and aggregate vocabulary", () => {
@@ -27,16 +31,15 @@ describe("benchmark summary contract", () => {
 		expect(benchmarkDoc).toContain("meanDurationMs");
 	});
 
-	it("documents every current model-codex fixture", () => {
-		for (const fixtureName of fixtureNames) {
-			expect(benchmarkDoc).toContain(`\`${fixtureName}\``);
-		}
+	it("documents exactly the current model-codex fixture set", () => {
+		expect(documentedFixtureNames).toEqual(fixtureNames);
 	});
 
-	it("explains the three benchmark deltas in plain language", () => {
+	it("explains the current benchmark deltas and combined-only gap", () => {
 		expect(benchmarkDoc).toContain("memory changes the outcome");
 		expect(benchmarkDoc).toContain("strategy changes the outcome");
-		expect(benchmarkDoc).toContain("only `memory+strategy` succeeds");
+		expect(benchmarkDoc).toContain("combined-only memory-plus-strategy path");
+		expect(benchmarkDoc).toContain("not currently prove");
 		expect(benchmarkDoc).toMatch(/duration .* environment-sensitive/i);
 	});
 });

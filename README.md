@@ -32,7 +32,7 @@ Near-term work is focused on trust-surface hardening rather than broader agent-s
 
 Current Phase 5 benchmark evidence for the `model-codex` eval suite lives in [`docs/benchmarks/model-codex.md`](docs/benchmarks/model-codex.md).
 
-That summary documents the rerun command, current aggregate signals, and what the current memory-help, strategy-help, and memory-plus-strategy fixtures prove.
+That summary documents the rerun command, current aggregate signals, what the current memory-help and strategy-help fixtures prove, and which combined memory-plus-strategy proof remains a benchmark gap.
 
 ## Getting started (repo development)
 
@@ -149,4 +149,4 @@ Example packet:
 }
 ```
 
-This is intentionally narrow: one packet, one run, one local command step, one persisted decision path. Worktree isolation, replay, richer policy, and model-backed execution come later.
+This example is intentionally narrow: one packet, one run, one local command step, one persisted decision path. Broader repo-local surfaces already include history/status/inspect, workspace retention and cleanup, replay-oriented flows, strategy execution, policy decisions, and model-worker routing where the documented repo-development and in-repo built CLI paths support them. Published/global install remains intentionally narrower, especially for native-backed memory and ledger surfaces.
