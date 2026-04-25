@@ -39,7 +39,7 @@ describe("benchmark summary contract", () => {
 		expect(benchmarkDoc).toContain("memory changes the outcome");
 		expect(benchmarkDoc).toContain("strategy changes the outcome");
 		expect(benchmarkDoc).toContain("combined-only memory-plus-strategy path");
-		expect(benchmarkDoc).toContain("not currently prove");
+		expect(benchmarkDoc).toContain("does not currently prove");
 		expect(benchmarkDoc).toMatch(/duration .* environment-sensitive/i);
 	});
 });

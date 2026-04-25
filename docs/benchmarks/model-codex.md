@@ -31,7 +31,7 @@ Current checked-in snapshot from one local stub-backed run:
 
 | Aggregate field | Current snapshot | Meaning |
 | --- | --- | --- |
-| `passRate` | `66.67% (8/12)` | Snapshot from a prior verified local stub run; not guaranteed to reproduce in every environment |
+| `passRate` | `66.67% (8/12)` | Snapshot from that local stub-backed run; not guaranteed to reproduce in every environment |
 | `memoryInjectedRate` | `100% (3/3 fixtures)` | Every current fixture has a memory-on path where memories were injected in that snapshot |
 | `memoryHelpedRate` | `33.33% (1/3 fixtures)` | Memory changed the outcome on one current fixture in that snapshot |
 | `strategyHelpedRate` | `33.33% (1/3 fixtures)` | Strategy changed the outcome on one current fixture in that snapshot |
