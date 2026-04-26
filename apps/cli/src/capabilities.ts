@@ -129,12 +129,18 @@ function defaultProbeCommand(
 
 	if (result.status !== 0) {
 		const detected = result.stderr.trim() || result.stdout.trim() || undefined;
+		const reason =
+			result.status === null
+				? result.signal
+					? `terminated by signal ${result.signal}`
+					: "terminated before exit status was available"
+				: `exited with status ${result.status}`;
 		return {
 			ok: false,
 			available: false,
 			command: invocation,
 			detected,
-			message: `exited with status ${result.status}`,
+			message: reason,
 		};
 	}
 
@@ -211,15 +217,21 @@ function defaultResolveNativeBinary(
 	cwd: string,
 	env: NodeJS.ProcessEnv,
 ): string | undefined {
-	if (env.BUILDPLANE_NATIVE_BIN && existsSync(env.BUILDPLANE_NATIVE_BIN)) {
-		return env.BUILDPLANE_NATIVE_BIN;
+	if (env.BUILDPLANE_NATIVE_BIN) {
+		return findExecutableOnPath(env.BUILDPLANE_NATIVE_BIN, env);
 	}
-	for (const candidate of [
-		resolve(cwd, "native", "target", "debug", "buildplane-native"),
-		resolve(cwd, "native", "target", "release", "buildplane-native"),
-	]) {
-		if (existsSync(candidate)) {
-			return candidate;
+	const targets =
+		process.platform === "win32"
+			? ["buildplane-native.exe", "buildplane-native"]
+			: ["buildplane-native"];
+	for (const target of targets) {
+		for (const candidate of [
+			resolve(cwd, "native", "target", "debug", target),
+			resolve(cwd, "native", "target", "release", target),
+		]) {
+			if (existsSync(candidate)) {
+				return findExecutableOnPath(candidate, env) ?? candidate;
+			}
 		}
 	}
 	return findExecutableOnPath("buildplane-native", env);
