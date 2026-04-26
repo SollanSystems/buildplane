@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -97,7 +97,7 @@ describe("Buildplane capability primitives", () => {
 				(capability) => capability.id === "published_memory",
 			),
 		).toMatchObject({
-			ok: true,
+			ok: false,
 			required: false,
 			available: false,
 		});
@@ -108,6 +108,11 @@ describe("Buildplane capability primitives", () => {
 		try {
 			const fakeNative = join(tempRoot, "buildplane-native");
 			writeFileSync(fakeNative, "#!/usr/bin/env sh\nexit 0\n");
+			try {
+				chmodSync(fakeNative, 0o755);
+			} catch {
+				// Ignore chmod failures on non-POSIX environments.
+			}
 
 			const report = inspectCapabilities({
 				currentNodeVersion: "24.13.2",

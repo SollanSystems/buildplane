@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { delimiter, resolve } from "node:path";
 
@@ -189,8 +189,18 @@ function findExecutableOnPath(
 		}
 		for (const extension of extensions) {
 			const candidate = resolve(directory, `${executable}${extension}`);
-			if (existsSync(candidate)) {
-				return candidate;
+			try {
+				const stat = statSync(candidate);
+				if (stat.isFile()) {
+					if (process.platform === "win32") {
+						return candidate;
+					}
+					if ((stat.mode & 0o111) !== 0) {
+						return candidate;
+					}
+				}
+			} catch {
+				// Ignore missing or unreadable candidates.
 			}
 		}
 	}
@@ -300,18 +310,18 @@ export function inspectCapabilities(
 		{
 			id: "native_binary",
 			label: "Native binary",
-			ok: true,
+			ok: Boolean(nativeBinary),
 			required: false,
 			available: Boolean(nativeBinary),
 			detected: nativeBinary,
 			message: nativeBinary
 				? `native binary found at ${nativeBinary}`
-				: "native binary not found in BUILDPLANE_NATIVE_BIN or local native target paths",
+				: "native binary not found in BUILDPLANE_NATIVE_BIN, native/target, or PATH",
 		},
 		{
 			id: "repo_local_memory",
 			label: "Repo-local memory",
-			ok: true,
+			ok: Boolean(nativeBinary),
 			required: false,
 			available: Boolean(nativeBinary),
 			message: nativeBinary
@@ -321,7 +331,7 @@ export function inspectCapabilities(
 		{
 			id: "published_memory",
 			label: "Published memory",
-			ok: true,
+			ok: false,
 			required: false,
 			available: false,
 			message:
