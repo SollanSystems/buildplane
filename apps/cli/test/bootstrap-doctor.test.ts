@@ -7,7 +7,10 @@ import {
 	type BootstrapDoctorProbeResult,
 	inspectBootstrapDoctor,
 } from "../src/bootstrap-doctor";
-import { SUPPORTED_NODE_VERSION } from "../src/version-guard";
+import {
+	isSupportedNodeVersion,
+	SUPPORTED_NODE_RANGE,
+} from "../src/capabilities";
 
 const root = resolve(import.meta.dirname, "../../..");
 const cliSourceEntrypoint = resolve(root, "apps/cli/src/index.ts");
@@ -35,16 +38,23 @@ afterEach(() => {
 describe("bootstrap doctor report", () => {
 	it("returns a deterministic passing report when all required checks succeed", () => {
 		const report = inspectBootstrapDoctor({
-			currentNodeVersion: SUPPORTED_NODE_VERSION,
+			currentNodeVersion: "24.13.2",
+			detectNodeSqlite: () => ({
+				ok: true,
+				available: true,
+				message: "node:sqlite import available",
+			}),
 			probeCommand: createProbe({
 				npm: {
 					ok: true,
+					available: true,
 					command: "npm --version",
 					detected: "10.9.0",
 					message: "npm 10.9.0",
 				},
 				git: {
 					ok: true,
+					available: true,
 					command: "git --version",
 					detected: "git version 2.49.0",
 					message: "git version 2.49.0",
@@ -55,6 +65,7 @@ describe("bootstrap doctor report", () => {
 		expect(report.ok).toBe(true);
 		expect(report.checks.map((check) => check.id)).toEqual([
 			"node",
+			"node_sqlite",
 			"npm",
 			"git",
 		]);
@@ -63,8 +74,14 @@ describe("bootstrap doctor report", () => {
 				id: "node",
 				ok: true,
 				required: true,
-				expected: SUPPORTED_NODE_VERSION,
-				detected: SUPPORTED_NODE_VERSION,
+				expected: SUPPORTED_NODE_RANGE,
+				detected: "24.13.2",
+			}),
+			expect.objectContaining({
+				id: "node_sqlite",
+				ok: true,
+				required: true,
+				message: "node:sqlite import available",
 			}),
 			expect.objectContaining({
 				id: "npm",
@@ -79,22 +96,29 @@ describe("bootstrap doctor report", () => {
 				detected: "git version 2.49.0",
 			}),
 		]);
-		expect(report.notes).toEqual([
+		expect(report.notes).toContain(
 			"Published/global installs do not yet include a verified `buildplane memory ...` contract.",
-		]);
+		);
 	});
 
 	it("returns a failing report when node mismatches or required commands are unavailable", () => {
 		const report = inspectBootstrapDoctor({
 			currentNodeVersion: "22.22.2",
+			detectNodeSqlite: () => ({
+				ok: true,
+				available: true,
+				message: "node:sqlite import available",
+			}),
 			probeCommand: createProbe({
 				npm: {
 					ok: false,
+					available: false,
 					command: "npm --version",
 					message: "command not available",
 				},
 				git: {
 					ok: false,
+					available: false,
 					command: "git --version",
 					message: "exited with status 127",
 				},
@@ -104,28 +128,63 @@ describe("bootstrap doctor report", () => {
 		expect(report.ok).toBe(false);
 		expect(report.checks.map((check) => check.ok)).toEqual([
 			false,
+			true,
 			false,
 			false,
 		]);
 		expect(report.checks[0]).toEqual(
 			expect.objectContaining({
 				id: "node",
-				expected: SUPPORTED_NODE_VERSION,
+				expected: SUPPORTED_NODE_RANGE,
 				detected: "22.22.2",
 			}),
 		);
-		expect(report.checks[1]).toEqual(
+		expect(report.checks[2]).toEqual(
 			expect.objectContaining({
 				id: "npm",
 				message: "command not available",
 			}),
 		);
-		expect(report.checks[2]).toEqual(
+		expect(report.checks[3]).toEqual(
 			expect.objectContaining({
 				id: "git",
 				message: "exited with status 127",
 			}),
 		);
+	});
+
+	it("returns a failing report when node:sqlite is unavailable", () => {
+		const report = inspectBootstrapDoctor({
+			currentNodeVersion: "24.13.2",
+			detectNodeSqlite: () => ({
+				ok: false,
+				available: false,
+				message: "node:sqlite import failed",
+			}),
+			probeCommand: createProbe({
+				npm: {
+					ok: true,
+					available: true,
+					command: "npm --version",
+					message: "10.0.0",
+				},
+				git: {
+					ok: true,
+					available: true,
+					command: "git --version",
+					message: "git version 2.49.0",
+				},
+			}),
+		});
+
+		expect(report.ok).toBe(false);
+		expect(
+			report.checks.find((check) => check.id === "node_sqlite"),
+		).toMatchObject({
+			ok: false,
+			required: true,
+			message: "node:sqlite import failed",
+		});
 	});
 
 	it("source entrypoint runs bootstrap doctor before init without creating .buildplane", () => {
@@ -154,11 +213,12 @@ describe("bootstrap doctor report", () => {
 
 		expect(result.stderr).toBe("");
 		expect(result.status).toBe(
-			process.versions.node === SUPPORTED_NODE_VERSION ? 0 : 1,
+			isSupportedNodeVersion(process.versions.node) ? 0 : 1,
 		);
 		const payload = JSON.parse(result.stdout);
 		expect(payload.checks.map((check: { id: string }) => check.id)).toEqual([
 			"node",
+			"node_sqlite",
 			"npm",
 			"git",
 		]);
@@ -168,8 +228,45 @@ describe("bootstrap doctor report", () => {
 		expect(existsSync(join(workspaceRoot, ".buildplane"))).toBe(false);
 	});
 
+	it("source entrypoint runs bootstrap doctor --capabilities --json before init", () => {
+		const workspaceRoot = mkdtempSync(
+			join(tmpdir(), "buildplane-bootstrap-capabilities-entry-"),
+		);
+		cleanupPaths.push(workspaceRoot);
+
+		const result = spawnSync(
+			process.execPath,
+			[
+				"--conditions",
+				"source",
+				"--import",
+				tsxLoaderEntrypoint,
+				cliSourceEntrypoint,
+				"bootstrap",
+				"doctor",
+				"--capabilities",
+				"--json",
+			],
+			{
+				cwd: workspaceRoot,
+				encoding: "utf8",
+			},
+		);
+
+		expect(result.stderr).toBe("");
+		expect(result.status).toBe(
+			isSupportedNodeVersion(process.versions.node) ? 0 : 1,
+		);
+		const payload = JSON.parse(result.stdout);
+		expect(payload.environment.supportedNodeRange).toBe(">=24.13.1 <25");
+		expect(
+			payload.capabilities.map((check: { id: string }) => check.id),
+		).toContain("published_memory");
+		expect(existsSync(join(workspaceRoot, ".buildplane"))).toBe(false);
+	});
+
 	it("source entrypoint keeps the strict node guard for other commands when current node is unsupported", () => {
-		if (process.versions.node === SUPPORTED_NODE_VERSION) {
+		if (isSupportedNodeVersion(process.versions.node)) {
 			return;
 		}
 		const workspaceRoot = mkdtempSync(
@@ -195,7 +292,7 @@ describe("bootstrap doctor report", () => {
 
 		expect(result.status).toBe(1);
 		expect(`${result.stderr}${result.stdout}`).toContain(
-			`Buildplane requires Node ${SUPPORTED_NODE_VERSION}`,
+			`Buildplane requires Node ${SUPPORTED_NODE_RANGE}`,
 		);
 	});
 });

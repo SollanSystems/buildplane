@@ -314,7 +314,7 @@ function writeMinimalPublishedPackage(
 					buildplane: "./dist/index.js",
 				},
 				engines: {
-					node: "24.13.1",
+					node: ">=24.13.1 <25",
 				},
 				files: ["README.md", "dist", "vendor"],
 			},
@@ -1333,7 +1333,7 @@ describe("published bootstrap staging", () => {
 									buildplane: "./dist/index.js",
 								},
 								engines: {
-									node: "24.13.1",
+									node: ">=24.13.1 <25",
 								},
 								files: ["README.md", "dist", "vendor"],
 							},
@@ -1401,7 +1401,7 @@ describe("published bootstrap staging", () => {
 									buildplane: "./dist/index.js",
 								},
 								engines: {
-									node: "24.13.1",
+									node: ">=24.13.1 <25",
 								},
 								files: ["README.md", "dist", "vendor"],
 							},
@@ -1495,7 +1495,7 @@ describe("published bootstrap staging", () => {
 									buildplane: "./dist/index.js",
 								},
 								engines: {
-									node: "24.13.1",
+									node: ">=24.13.1 <25",
 								},
 								files: ["README.md", "dist", "vendor"],
 							},
@@ -1606,7 +1606,7 @@ describe("published bootstrap staging", () => {
 										buildplane: "./dist/index.js",
 									},
 									engines: {
-										node: "24.13.1",
+										node: ">=24.13.1 <25",
 									},
 								},
 								null,

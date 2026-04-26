@@ -1,4 +1,16 @@
+import {
+	formatUnsupportedNodeVersionMessage,
+	isNodeSqliteAvailable,
+	isSupportedNodeVersion,
+	SUPPORTED_NODE_RANGE,
+} from "./capabilities.js";
+
+export { SUPPORTED_NODE_RANGE };
 export const SUPPORTED_NODE_VERSION = "24.13.1";
+
+export interface RuntimeGuardOptions {
+	readonly nodeSqliteAvailable?: boolean | (() => boolean);
+}
 
 const SQLITE_EXPERIMENTAL_WARNING_PATTERN =
 	/^SQLite is an experimental feature and might change at any time\.?$/i;
@@ -47,36 +59,64 @@ function isEmitWarningOptions(
 	return typeof value === "object" && value !== null && "type" in value;
 }
 
+function hasOnlySupportedBootstrapDoctorFlags(
+	flags: readonly string[],
+): boolean {
+	const allowed = new Set(["--json", "--capabilities"]);
+	const seen = new Set<string>();
+	for (const flag of flags) {
+		if (!allowed.has(flag) || seen.has(flag)) {
+			return false;
+		}
+		seen.add(flag);
+	}
+	return true;
+}
+
+function resolveNodeSqliteAvailability(options: RuntimeGuardOptions): boolean {
+	if (typeof options.nodeSqliteAvailable === "function") {
+		return options.nodeSqliteAvailable();
+	}
+	if (typeof options.nodeSqliteAvailable === "boolean") {
+		return options.nodeSqliteAvailable;
+	}
+	return isNodeSqliteAvailable();
+}
+
+function formatMissingNodeSqliteMessage(): string {
+	return "Buildplane requires the Node node:sqlite runtime feature. Run `buildplane bootstrap doctor --capabilities --json` for host diagnostics.";
+}
+
 export function shouldBypassNodeVersionGuardForArgv(
 	argv: readonly string[] = process.argv.slice(2),
 ): boolean {
-	return (
-		(argv.length === 2 && argv[0] === "bootstrap" && argv[1] === "doctor") ||
-		(argv.length === 3 &&
-			argv[0] === "bootstrap" &&
-			argv[1] === "doctor" &&
-			argv[2] === "--json")
-	);
+	if (argv[0] !== "bootstrap" || argv[1] !== "doctor") {
+		return false;
+	}
+	return hasOnlySupportedBootstrapDoctorFlags(argv.slice(2));
 }
 
 export function assertPublishedCliNodeVersion(
 	argv: readonly string[],
 	current = process.versions.node,
+	options: RuntimeGuardOptions = {},
 ): void {
-	assertSupportedNodeVersion(current, argv);
+	assertSupportedNodeVersion(current, argv, options);
 }
 
 export function assertSupportedNodeVersion(
 	current = process.versions.node,
 	argv: readonly string[] = process.argv.slice(2),
+	options: RuntimeGuardOptions = {},
 ): void {
 	installCliWarningFilter();
 	if (shouldBypassNodeVersionGuardForArgv(argv)) {
 		return;
 	}
-	if (current !== SUPPORTED_NODE_VERSION) {
-		throw new Error(
-			`Buildplane requires Node ${SUPPORTED_NODE_VERSION}. Detected ${current}.`,
-		);
+	if (!isSupportedNodeVersion(current)) {
+		throw new Error(formatUnsupportedNodeVersionMessage(current));
+	}
+	if (!resolveNodeSqliteAvailability(options)) {
+		throw new Error(formatMissingNodeSqliteMessage());
 	}
 }

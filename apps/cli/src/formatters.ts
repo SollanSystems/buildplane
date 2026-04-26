@@ -271,6 +271,20 @@ interface BootstrapDoctorReportLike {
 	readonly notes: readonly string[];
 }
 
+interface CapabilityCheckLike {
+	readonly id: string;
+	readonly ok: boolean;
+	readonly required: boolean;
+	readonly available: boolean;
+	readonly message: string;
+}
+
+interface CapabilityReportLike {
+	readonly ok: boolean;
+	readonly capabilities: readonly CapabilityCheckLike[];
+	readonly notes: readonly string[];
+}
+
 export function formatBootstrapDoctorReport(
 	report: BootstrapDoctorReportLike,
 ): string[] {
@@ -278,6 +292,25 @@ export function formatBootstrapDoctorReport(
 	for (const check of report.checks) {
 		lines.push(
 			`  - [${check.ok ? "pass" : "fail"}] ${sanitizeTerminalText(check.id)}: ${sanitizeTerminalText(check.message)}`,
+		);
+	}
+	if (report.notes.length > 0) {
+		lines.push("notes:");
+		for (const note of report.notes) {
+			lines.push(`  - ${sanitizeTerminalText(note)}`);
+		}
+	}
+	return lines;
+}
+
+export function formatCapabilityReport(report: CapabilityReportLike): string[] {
+	const lines = [`capabilities: ${report.ok ? "pass" : "fail"}`];
+	for (const capability of report.capabilities) {
+		const status = capability.ok ? "pass" : "fail";
+		const required = capability.required ? "required" : "optional";
+		const availability = capability.available ? "available" : "unavailable";
+		lines.push(
+			`  - [${status}] ${sanitizeTerminalText(capability.id)} (${required}, ${availability}): ${sanitizeTerminalText(capability.message)}`,
 		);
 	}
 	if (report.notes.length > 0) {

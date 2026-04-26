@@ -18,7 +18,7 @@ import { OPTIONAL_INTERNAL_PACKAGES } from "./stage-package.mjs";
 import { extractTarballToDirectory } from "./tarball.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
-const REQUIRED_NODE_VERSION = "24.13.1";
+const REQUIRED_NODE_RANGE = ">=24.13.1 <25";
 const DEPENDENCY_FIELDS = [
 	"dependencies",
 	"optionalDependencies",
@@ -682,9 +682,9 @@ function assertManifestContract(packageRoot, manifest, options = {}) {
 		);
 	}
 
-	if (manifest.engines?.node !== REQUIRED_NODE_VERSION) {
+	if (manifest.engines?.node !== REQUIRED_NODE_RANGE) {
 		fail(
-			`package.json.engines.node must be "${REQUIRED_NODE_VERSION}" (received ${JSON.stringify(manifest.engines?.node)})`,
+			`package.json.engines.node must be "${REQUIRED_NODE_RANGE}" (received ${JSON.stringify(manifest.engines?.node)})`,
 		);
 	}
 
