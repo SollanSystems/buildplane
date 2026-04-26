@@ -38,8 +38,8 @@ describe("published bootstrap contract", () => {
 			expect(cliPkg.bin?.buildplane).toBe("./dist/index.js");
 		});
 
-		it("pins engines.node to 24.13.1", () => {
-			expect(cliPkg.engines?.node).toBe("24.13.1");
+		it("declares a supported Node 24 runtime range", () => {
+			expect(cliPkg.engines?.node).toBe(">=24.13.1 <25");
 		});
 	});
 
@@ -82,9 +82,9 @@ describe("published bootstrap contract", () => {
 			expect(bin?.buildplane).toBe("./dist/index.js");
 		});
 
-		it("keeps engines.node", () => {
+		it("keeps engines.node range", () => {
 			const engines = publishManifest.engines as Record<string, string>;
-			expect(engines?.node).toBe("24.13.1");
+			expect(engines?.node).toBe(">=24.13.1 <25");
 		});
 
 		it("emits files covering dist, vendor, and README.md", () => {
