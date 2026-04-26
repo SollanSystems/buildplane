@@ -27,7 +27,7 @@
   - `pnpm build` passed
   - `pnpm buildplane bootstrap doctor --json` passed
 - [x] Current main blocker is trust/readiness credibility, not lack of architectural direction.
-- [x] The earlier published-bootstrap timeout-realism blocker is resolved in current live evidence: `pnpm test` passes and `pnpm verify:published-bootstrap` now completes successfully.
+- [x] The earlier published-bootstrap timeout-realism blocker is resolved in current live evidence: default `pnpm test` passes; `pnpm verify:published-bootstrap` is side-effecting and should be run only in a disposable validation worktree when that contract specifically needs rechecking.
 - [x] The most visible remaining trust gap is keeping the support matrix, provenance surfaces, and branch/worktree hygiene aligned with the verified product surface.
 
 ---
@@ -57,6 +57,12 @@ Success means:
   - `pnpm build`
 - [ ] Treat publish/bootstrap verification as side-effecting and use disposable validation worktrees when needed.
 - [ ] If a verification lane is timing out rather than asserting a real failure, fix the harness realism instead of normalizing red gates.
+
+## Status semantics
+
+- Task checkboxes mean the implementation task has landed on the relevant branch.
+- Acceptance checkboxes mean the operator-visible criterion has been checked against the shipped surface.
+- Leave acceptance unchecked when a capability is only partially visible, even if supporting implementation tasks are complete.
 
 ---
 
@@ -104,11 +110,11 @@ Success means:
 ### Acceptance criteria
 
 - [x] inspect output shows the chosen worker/route in a first-class way
-- [ ] inspect output shows pack / host / provider selection where applicable
+- [ ] inspect output shows pack / host / provider selection where applicable (partial: route/provider/model provenance exists for model packets, but pack/host visibility remains narrower than the target surface)
 - [x] inspect output shows injected memories and why they were surfaced
 - [x] inspect output shows the active policy profile / trust gates / approval-relevant decisions
 - [x] inspect output shows evidence, artifacts, and final outcome in one causal story
-- [ ] operator can answer "what happened and why?" from one surface without reading raw SQLite tables
+- [x] operator can answer "what happened and why?" from one surface without reading raw SQLite tables (for route, memory, policy, evidence, artifacts, and final outcome; pack/host/provider remains the narrower open sub-surface above)
 
 ### Likely files
 
@@ -167,13 +173,13 @@ Success means:
 
 ### Week 2
 
-- [ ] land the unified provenance payload contract
-- [ ] ship first inspect/history improvements for route + memory visibility
+- [x] land the unified provenance payload contract
+- [x] ship first inspect/history improvements for route + memory visibility
 
 ### Week 3
 
-- [ ] ship policy/trust-gate visibility improvements
-- [ ] tighten inspect formatting and operator readability
+- [x] ship policy/trust-gate visibility improvements
+- [x] tighten inspect formatting and operator readability
 
 ### Week 4
 
