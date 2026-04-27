@@ -8,7 +8,7 @@
 		"buildplane": "./dist/index.js"
 	},
 	"engines": {
-		"node": "24.13.1"
+		"node": ">=24.13.1 <25"
 	},
 	"scripts": {
 		"build": "tsc --build",
@@ -26,6 +26,6 @@
 		"@buildplane/runtime": "workspace:*",
 		"@buildplane/storage": "workspace:*",
 		"@buildplane/ui-tui": "workspace:*",
-		"uuid": "^11"
+		"uuid": "^14"
 	}
 }
