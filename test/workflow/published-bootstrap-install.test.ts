@@ -3,6 +3,10 @@ import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
+import {
+	isSupportedNodeVersion,
+	SUPPORTED_NODE_RANGE,
+} from "../../apps/cli/src/capabilities";
 
 const root = process.cwd();
 const REQUIRED_BUILD_OUTPUTS = [
@@ -119,10 +123,18 @@ describe("published bootstrap installer shim", () => {
 				env: runEnv,
 				encoding: "utf8",
 			});
-		if (process.versions.node === "24.13.1") {
+		if (isSupportedNodeVersion(process.versions.node)) {
 			expect(helpCheck()).toContain("Buildplane by SollanSystems");
 		} else {
-			expect(helpCheck).toThrow(/Buildplane requires Node 24\.13\.1/i);
+			expect(helpCheck).toThrow(
+				new RegExp(
+					`Buildplane requires Node ${SUPPORTED_NODE_RANGE}`.replace(
+						/[.*+?^${}()|[\]\\]/g,
+						"\\$&",
+					),
+					"i",
+				),
+			);
 		}
-	});
+	}, 15_000);
 });
