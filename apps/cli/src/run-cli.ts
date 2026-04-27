@@ -15,8 +15,10 @@ import {
 	type BootstrapDoctorReport,
 	inspectBootstrapDoctor,
 } from "./bootstrap-doctor.js";
+import { type CapabilityReport, inspectCapabilities } from "./capabilities.js";
 import {
 	formatBootstrapDoctorReport,
+	formatCapabilityReport,
 	formatHumanError,
 	formatInitializationResult,
 	formatInspectDetail,
@@ -129,6 +131,7 @@ export interface RunCliDependencies {
 	createOrchestrator?: () => BuildplaneCliOrchestrator;
 	parsePacket?: (packetPath: string) => unknown;
 	inspectBootstrapDoctor?: () => BootstrapDoctorReport;
+	inspectCapabilities?: () => CapabilityReport;
 	runNativeCommand?: (
 		argv: string[],
 		options: {
@@ -322,7 +325,7 @@ function formatTopLevelHelp(): string[] {
 		"",
 		"  Project:",
 		"    init                   Initialize .buildplane in this repo",
-		"    bootstrap doctor      Check published CLI prerequisites",
+		"    bootstrap doctor      Check published CLI prerequisites and capabilities",
 		"    workspace list         Show actionable retained/cleanup-failed workspaces",
 		"    workspace cleanup <r>  Delete an actionable workspace by run id",
 		"    workflow scan [--json] Preview recognized Claude/Codex workflow files",
@@ -1675,18 +1678,37 @@ export async function runCli(
 		if (command === "bootstrap") {
 			const subcommand = rest[0];
 			const doctorArgs = rest.slice(1);
-			const json = doctorArgs.includes("--json");
 			if (subcommand === "doctor") {
-				const hasOnlySupportedDoctorArgs =
-					doctorArgs.length === 0 ||
-					(doctorArgs.length === 1 && doctorArgs[0] === "--json");
+				const supportedDoctorFlags = new Set(["--json", "--capabilities"]);
+				const seenDoctorFlags = new Set<string>();
+				const hasOnlySupportedDoctorArgs = doctorArgs.every((arg) => {
+					if (!supportedDoctorFlags.has(arg) || seenDoctorFlags.has(arg)) {
+						return false;
+					}
+					seenDoctorFlags.add(arg);
+					return true;
+				});
 				if (!hasOnlySupportedDoctorArgs) {
 					throw new Error(
 						`Unsupported bootstrap doctor arguments: ${doctorArgs.join(" ")}`,
 					);
 				}
+				const json = seenDoctorFlags.has("--json");
+				const capabilities = seenDoctorFlags.has("--capabilities");
+				if (capabilities) {
+					const report =
+						deps?.inspectCapabilities?.() ?? inspectCapabilities({ cwd });
+					if (json) {
+						stdout(formatJson(report));
+					} else {
+						for (const line of formatCapabilityReport(report)) {
+							stdout(line);
+						}
+					}
+					return report.ok ? 0 : 1;
+				}
 				const report =
-					deps?.inspectBootstrapDoctor?.() ?? inspectBootstrapDoctor();
+					deps?.inspectBootstrapDoctor?.() ?? inspectBootstrapDoctor({ cwd });
 				if (json) {
 					stdout(formatJson(report));
 				} else {

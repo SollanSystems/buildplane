@@ -1,7 +1,7 @@
 # Buildplane Package Architecture
 
-Date: 2026-04-01
-Status: Approved architectural direction for umbrella system and pack model
+Date: 2026-04-24
+Status: Current architectural direction for umbrella system and pack model
 
 This document defines how Buildplane, SuperClaude, and SuperCodex fit together as one system.
 
@@ -95,6 +95,8 @@ packages/
   adapters-models/
   adapters-tools/
   adapters-codex/
+  adapters-honcho/
+  ledger-client/
   compat-gsd/
 ```
 
@@ -109,7 +111,7 @@ Current responsibilities:
 
 ### 2. Rust-first native workspace under `native/`
 
-This is the future-facing host-aware runtime scaffold.
+This native workspace is no longer only a future scaffold. It is the host-aware runtime track for pack inspection, memory, ledger/replay, and fork-planning primitives while the TypeScript workspace remains the main product surface.
 
 ```text
 native/
@@ -118,10 +120,13 @@ native/
     bp-cli/
     bp-config/
     bp-core/
+    bp-fork/
     bp-host-claude/
     bp-host-codex/
     bp-host-registry/
     bp-host-sdk/
+    bp-ledger/
+    bp-ledger-macros/
     bp-memory/
     bp-pack-inspection/
     bp-pack-loader/
@@ -129,6 +134,7 @@ native/
     bp-provider-anthropic/
     bp-provider-openai/
     bp-provider-sdk/
+    bp-replay/
     bp-runtime/
     bp-storage-sqlite/
     bp-test-support/
@@ -138,7 +144,7 @@ native/
     supercodex/pack.toml
 ```
 
-The native workspace is where the clean pack/host/provider split should harden first.
+The native workspace is where the clean pack/host/provider split should harden first. It also now owns native ledger, replay, fork-planning, and memory-storage primitives that the TypeScript CLI can bridge to when repo-local native commands are available.
 
 ## Recommended ownership by crate/package
 
@@ -203,13 +209,25 @@ The native workspace is where the clean pack/host/provider split should harden f
 - `bp-provider-openai`
   - OpenAI transport adapter
 
-### Native delivery crates
+### Native delivery and recovery crates
 
 - `bp-ui-terminal`
   - human-readable terminal rendering
 
+- `bp-ledger`
+  - native event ledger persistence, serve, replay, and schema behavior
+
+- `bp-ledger-macros`
+  - compile-time support for ledger schema/event contracts
+
+- `bp-replay`
+  - replay-oriented native state hydration and event streaming helpers
+
+- `bp-fork`
+  - fork planning from ledger events and parent run context
+
 - `bp-cli`
-  - command wiring and public CLI contract
+  - command wiring and public native CLI contract
 
 - `bp-test-support`
   - shared fixtures and test helpers
@@ -259,6 +277,9 @@ Recommended native dependency direction:
 bp-cli
   -> bp-ui-terminal
   -> bp-runtime
+  -> bp-ledger
+  -> bp-replay
+  -> bp-fork
 
 bp-runtime
   -> bp-core
@@ -318,15 +339,18 @@ This matches the current native design direction and keeps route choice inspecta
 User-facing commands should stay under the Buildplane umbrella:
 
 ```bash
-buildplane run
+buildplane run --packet ./packet.json
+buildplane status --json
+buildplane history --json
+buildplane inspect <run-id> --json
+buildplane replay <run-id> --json
+buildplane memory list
+buildplane memory inspect <learning-id>
 buildplane pack show superclaude
 buildplane pack show supercodex
-buildplane memory inspect --effective
-buildplane mode fast
-buildplane mode deep
 ```
 
-Packs influence behavior, but they should not fragment the public product into separate CLIs.
+Native-backed recovery and ledger commands remain under the same `buildplane` umbrella when a repo-local or supplied `buildplane-native` binary is available; they should not become separate product CLIs.
 
 ## Migration guidance
 
@@ -338,8 +362,9 @@ Near-term rule:
 Good first native vertical slices:
 1. pack loading and route inspection
 2. memory store and retrieval inspection
-3. route-aware execution bridge
-4. operator-facing memory and pack inspection commands
+3. ledger/replay/fork primitives for recoverable runs
+4. route-aware execution bridge
+5. operator-facing memory and pack inspection commands
 
 ## Non-goals for now
 
