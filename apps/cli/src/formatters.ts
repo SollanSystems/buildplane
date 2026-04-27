@@ -271,6 +271,20 @@ interface BootstrapDoctorReportLike {
 	readonly notes: readonly string[];
 }
 
+interface CapabilityCheckLike {
+	readonly id: string;
+	readonly ok: boolean;
+	readonly required: boolean;
+	readonly available: boolean;
+	readonly message: string;
+}
+
+interface CapabilityReportLike {
+	readonly ok: boolean;
+	readonly capabilities: readonly CapabilityCheckLike[];
+	readonly notes: readonly string[];
+}
+
 export function formatBootstrapDoctorReport(
 	report: BootstrapDoctorReportLike,
 ): string[] {
@@ -278,6 +292,25 @@ export function formatBootstrapDoctorReport(
 	for (const check of report.checks) {
 		lines.push(
 			`  - [${check.ok ? "pass" : "fail"}] ${sanitizeTerminalText(check.id)}: ${sanitizeTerminalText(check.message)}`,
+		);
+	}
+	if (report.notes.length > 0) {
+		lines.push("notes:");
+		for (const note of report.notes) {
+			lines.push(`  - ${sanitizeTerminalText(note)}`);
+		}
+	}
+	return lines;
+}
+
+export function formatCapabilityReport(report: CapabilityReportLike): string[] {
+	const lines = [`capabilities: ${report.ok ? "pass" : "fail"}`];
+	for (const capability of report.capabilities) {
+		const status = capability.ok ? "pass" : "fail";
+		const required = capability.required ? "required" : "optional";
+		const availability = capability.available ? "available" : "unavailable";
+		lines.push(
+			`  - [${status}] ${sanitizeTerminalText(capability.id)} (${required}, ${availability}): ${sanitizeTerminalText(capability.message)}`,
 		);
 	}
 	if (report.notes.length > 0) {
@@ -352,12 +385,36 @@ interface InspectSnapshotLike {
 		readonly unitId: string;
 		readonly status: string;
 	};
+	readonly provenance?: {
+		readonly route?: {
+			readonly worker?: string;
+			readonly source?: string;
+			readonly preferredModel?: string;
+			readonly effort?: string;
+			readonly provider?: string;
+			readonly model?: string;
+		};
+		readonly memory?: {
+			readonly injectedCount?: number;
+			readonly matchReasons?: readonly string[];
+			readonly matchClasses?: readonly string[];
+		};
+		readonly policy?: {
+			readonly profile?: string;
+			readonly decisions?: readonly {
+				readonly kind?: string;
+				readonly outcome?: string;
+				readonly reasons?: readonly string[];
+			}[];
+		};
+	};
 	readonly strategy?: {
 		readonly strategyId: string;
 	};
 	readonly evidence: readonly {
 		readonly kind: string;
 		readonly status: string;
+		readonly message?: string;
 	}[];
 	readonly decisions: readonly {
 		readonly kind: string;
@@ -372,6 +429,35 @@ interface InspectSnapshotLike {
 	readonly promotedStructuredMemories?: readonly PromotedStructuredMemoryLike[];
 }
 
+function formatInspectArtifactLine(artifact: {
+	readonly type: string;
+	readonly location: string;
+}): string {
+	return `${sanitizeTerminalText(artifact.type)}: ${sanitizeTerminalText(artifact.location)}`;
+}
+
+function formatInspectDecisionLine(decision: {
+	readonly kind: string;
+	readonly outcome: string;
+	readonly reasons: readonly string[];
+}): string {
+	const reasons = decision.reasons.length
+		? `: ${sanitizeTerminalText(decision.reasons.join("; "))}`
+		: "";
+	return `${sanitizeTerminalText(decision.kind)} ${sanitizeTerminalText(decision.outcome)}${reasons}`;
+}
+
+function formatInspectEvidenceLine(evidence: {
+	readonly kind: string;
+	readonly status: string;
+	readonly message?: string;
+}): string {
+	const message = evidence.message
+		? `: ${sanitizeTerminalText(evidence.message)}`
+		: "";
+	return `${sanitizeTerminalText(evidence.kind)} ${sanitizeTerminalText(evidence.status)}${message}`;
+}
+
 export function formatInspectDetail(
 	snapshot: InspectSnapshotLike,
 	_events: ExecutionEventLike[],
@@ -379,14 +465,78 @@ export function formatInspectDetail(
 ): string[] {
 	const lines: string[] = [];
 
-	lines.push(`kind: ${snapshot.kind}`);
-	lines.push(`run-id: ${snapshot.run.id}`);
-	lines.push(`unit-id: ${snapshot.run.unitId}`);
-	lines.push(`status: ${snapshot.run.status}`);
+	lines.push(`kind: ${sanitizeTerminalText(snapshot.kind)}`);
+	lines.push(`run-id: ${sanitizeTerminalText(snapshot.run.id)}`);
+	lines.push(`unit-id: ${sanitizeTerminalText(snapshot.run.unitId)}`);
+	lines.push(`status: ${sanitizeTerminalText(snapshot.run.status)}`);
 	if (snapshot.strategy?.strategyId) {
 		lines.push(
 			`strategy: ${sanitizeTerminalText(snapshot.strategy.strategyId)}`,
 		);
+	}
+	if (snapshot.provenance) {
+		const route = snapshot.provenance.route;
+		const memory = snapshot.provenance.memory;
+		const policy = snapshot.provenance.policy;
+		lines.push("");
+		lines.push("provenance:");
+		if (route?.worker) {
+			lines.push(`  route-worker: ${sanitizeTerminalText(route.worker)}`);
+		}
+		if (route?.source) {
+			lines.push(`  route-source: ${sanitizeTerminalText(route.source)}`);
+		}
+		if (route?.provider) {
+			lines.push(`  provider: ${sanitizeTerminalText(route.provider)}`);
+		}
+		if (route?.model) {
+			lines.push(`  model: ${sanitizeTerminalText(route.model)}`);
+		}
+		if (route?.preferredModel) {
+			lines.push(
+				`  preferred-model: ${sanitizeTerminalText(route.preferredModel)}`,
+			);
+		}
+		if (route?.effort) {
+			lines.push(`  effort: ${sanitizeTerminalText(route.effort)}`);
+		}
+		if (memory?.injectedCount !== undefined) {
+			lines.push(`  memory-injected: ${memory.injectedCount}`);
+		}
+		if (memory?.matchReasons && memory.matchReasons.length > 0) {
+			lines.push(
+				`  memory-reasons: ${sanitizeTerminalText(memory.matchReasons.join(", "))}`,
+			);
+		}
+		if (memory?.matchClasses && memory.matchClasses.length > 0) {
+			lines.push(
+				`  memory-match-classes: ${sanitizeTerminalText(memory.matchClasses.join(", "))}`,
+			);
+		}
+		if (policy?.profile) {
+			lines.push(`  policy-profile: ${sanitizeTerminalText(policy.profile)}`);
+		}
+		if (policy?.decisions && policy.decisions.length > 0) {
+			const decisionSummary = policy.decisions
+				.map(
+					(decision) =>
+						`${decision.kind ?? "unknown"}:${decision.outcome ?? "unknown"}`,
+				)
+				.join(", ");
+			lines.push(
+				`  policy-decisions: ${sanitizeTerminalText(decisionSummary)}`,
+			);
+			const policyReasons = [
+				...new Set(
+					policy.decisions.flatMap((decision) => decision.reasons ?? []),
+				),
+			];
+			if (policyReasons.length > 0) {
+				lines.push(
+					`  policy-reasons: ${sanitizeTerminalText(policyReasons.join(", "))}`,
+				);
+			}
+		}
 	}
 
 	const s = snapshot as unknown as Record<string, unknown>;
@@ -400,19 +550,23 @@ export function formatInspectDetail(
 			cleanupError?: string;
 		};
 		if (ws.status) {
-			lines.push(`workspace-status: ${ws.status}`);
+			lines.push(`workspace-status: ${sanitizeTerminalText(ws.status)}`);
 		}
 		if (ws.path) {
-			lines.push(`workspace: ${ws.path}`);
+			lines.push(`workspace: ${sanitizeTerminalText(ws.path)}`);
 		}
 		if (ws.headSha) {
-			lines.push(`workspace-head: ${ws.headSha}`);
+			lines.push(`workspace-head: ${sanitizeTerminalText(ws.headSha)}`);
 		}
 		if (ws.finalizedAt) {
-			lines.push(`workspace-finalized-at: ${ws.finalizedAt}`);
+			lines.push(
+				`workspace-finalized-at: ${sanitizeTerminalText(ws.finalizedAt)}`,
+			);
 		}
 		if (ws.cleanupError) {
-			lines.push(`workspace-cleanup-error: ${ws.cleanupError}`);
+			lines.push(
+				`workspace-cleanup-error: ${sanitizeTerminalText(ws.cleanupError)}`,
+			);
 		}
 		if (ws.existsOnDisk !== undefined) {
 			lines.push(`workspace-exists-on-disk: ${ws.existsOnDisk}`);
@@ -438,10 +592,39 @@ export function formatInspectDetail(
 	if (s.failure && typeof s.failure === "object") {
 		const f = s.failure as { kind?: string; message?: string };
 		if (f.kind) {
-			lines.push(`failure-kind: ${f.kind}`);
+			lines.push(`failure-kind: ${sanitizeTerminalText(f.kind)}`);
 		}
 		if (f.message) {
-			lines.push(`failure: ${f.message}`);
+			lines.push(`failure: ${sanitizeTerminalText(f.message)}`);
+		}
+	}
+
+	const hasCausalStory =
+		snapshot.evidence.length > 0 ||
+		snapshot.decisions.length > 0 ||
+		snapshot.artifacts.length > 0 ||
+		Boolean(s.failure);
+	if (hasCausalStory) {
+		lines.push("");
+		lines.push("outcome:");
+		lines.push(`  status: ${sanitizeTerminalText(snapshot.run.status)}`);
+		if (snapshot.evidence.length > 0) {
+			lines.push("evidence:");
+			for (const evidence of snapshot.evidence) {
+				lines.push(`  - ${formatInspectEvidenceLine(evidence)}`);
+			}
+		}
+		if (snapshot.decisions.length > 0) {
+			lines.push("decisions:");
+			for (const decision of snapshot.decisions) {
+				lines.push(`  - ${formatInspectDecisionLine(decision)}`);
+			}
+		}
+		if (snapshot.artifacts.length > 0) {
+			lines.push("artifacts:");
+			for (const artifact of snapshot.artifacts) {
+				lines.push(`  - ${formatInspectArtifactLine(artifact)}`);
+			}
 		}
 	}
 	if (snapshot.injectedMemories && snapshot.injectedMemories.length > 0) {
@@ -468,7 +651,9 @@ export function formatInspectDetail(
 		lines.push("");
 		lines.push("learnings:");
 		for (const l of learnings) {
-			lines.push(`  [${l.scope}/${l.kind}] ${l.title} (seen: ${l.seenCount})`);
+			lines.push(
+				`  [${sanitizeTerminalText(l.scope)}/${sanitizeTerminalText(l.kind)}] ${sanitizeTerminalText(l.title)} (seen: ${l.seenCount})`,
+			);
 		}
 	}
 
