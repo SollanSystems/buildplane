@@ -189,6 +189,7 @@ export interface InspectSnapshot {
 		readonly id: string;
 		readonly kind: string;
 		readonly status: string;
+		readonly message?: string;
 	}[];
 	readonly decisions: readonly {
 		readonly id: string;

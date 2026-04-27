@@ -26,6 +26,7 @@ import {
 	type RepoFact,
 	type RepoFactRetrievalQuery,
 	type RepoFactScopeCandidate,
+	type RoutingHints,
 	type Run,
 	type RunStatus,
 	type SearchableDocument,
@@ -43,25 +44,7 @@ import {
 } from "./database.js";
 import { resolveProjectLayout } from "./project-layout.js";
 
-interface InspectProvenanceRouteLike {
-	readonly worker: string;
-	readonly source: string;
-	readonly provider?: string;
-	readonly model?: string;
-	readonly preferredWorker?: string;
-	readonly preferredModel?: string;
-	readonly effort?: string;
-}
-
-interface InspectProvenanceLike {
-	readonly route: InspectProvenanceRouteLike;
-	readonly policy: {
-		readonly profile: string;
-		readonly decisionKind?: string;
-		readonly decisionOutcome?: string;
-		readonly decisionReasons?: readonly string[];
-	};
-}
+type InspectProvenanceLike = NonNullable<InspectSnapshot["provenance"]>;
 
 interface PacketSnapshotLike {
 	readonly unit: {
@@ -73,11 +56,7 @@ interface PacketSnapshotLike {
 		readonly provider: string;
 		readonly model: string;
 	};
-	readonly routingHints?: {
-		readonly preferredWorker?: string;
-		readonly preferredModel?: string;
-		readonly effort?: string;
-	};
+	readonly routingHints?: RoutingHints;
 }
 interface StoredRunRow {
 	readonly id: string;
