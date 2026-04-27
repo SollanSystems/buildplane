@@ -120,66 +120,6 @@ describe("formatInspectDetail", () => {
 		artifacts: [],
 	};
 
-	it("includes a calm provenance section for command packets", () => {
-		const lines = formatInspectDetail(
-			{
-				...baseSnapshot,
-				provenance: {
-					route: {
-						worker: "command",
-						source: "command-block",
-					},
-					policy: {
-						profile: "default",
-					},
-				},
-			},
-			[],
-		);
-
-		expect(lines).toContain("provenance:");
-		expect(lines).toContain("  route: command (command-block)");
-		expect(lines).toContain("  policy-profile: default");
-		expect(lines.join("\n")).not.toContain("provider:");
-	});
-
-	it("includes routed model, provider, and trust-decision details", () => {
-		const lines = formatInspectDetail(
-			{
-				...baseSnapshot,
-				provenance: {
-					route: {
-						worker: "codex",
-						source: "routing-hints",
-						provider: "openai",
-						model: "gpt-5.4",
-						preferredWorker: "codex",
-						preferredModel: "gpt-5.4",
-						effort: "high",
-					},
-					policy: {
-						profile: "restricted",
-						decisionKind: "reject-run",
-						decisionOutcome: "rejected",
-						decisionReasons: ["tool call blocked"],
-					},
-				},
-			},
-			[],
-		);
-
-		expect(lines).toContain("provenance:");
-		expect(lines).toContain("  route: codex (routing-hints)");
-		expect(lines).toContain("  provider: openai");
-		expect(lines).toContain("  model: gpt-5.4");
-		expect(lines).toContain(
-			"  routing-hints: preferred-worker=codex, preferred-model=gpt-5.4, effort=high",
-		);
-		expect(lines).toContain("  policy-profile: restricted");
-		expect(lines).toContain("  trust-decision: reject-run rejected");
-		expect(lines).toContain("  trust-reasons: tool call blocked");
-	});
-
 	it("includes learnings section when learnings are provided", () => {
 		const learnings = [
 			{
@@ -263,6 +203,206 @@ describe("formatInspectDetail", () => {
 			[],
 		);
 		expect(lines).toContain("strategy: strategy-injected");
+	});
+
+	it("includes route and policy provenance when present", () => {
+		const lines = formatInspectDetail(
+			{
+				...baseSnapshot,
+				provenance: {
+					route: {
+						worker: "codex",
+						source: "routing-hints",
+						provider: "openai-codex",
+						model: "gpt-5.4",
+						preferredModel: "gpt-5.4",
+						effort: "high",
+					},
+					policy: {
+						profile: "default",
+					},
+				},
+			},
+			[],
+		);
+
+		expect(lines).toContain("provenance:");
+		expect(lines).toContain("  route-worker: codex");
+		expect(lines).toContain("  route-source: routing-hints");
+		expect(lines).toContain("  provider: openai-codex");
+		expect(lines).toContain("  model: gpt-5.4");
+		expect(lines).toContain("  preferred-model: gpt-5.4");
+		expect(lines).toContain("  effort: high");
+		expect(lines).toContain("  policy-profile: default");
+	});
+
+	it("includes memory and policy decision provenance summaries when present", () => {
+		const lines = formatInspectDetail(
+			{
+				...baseSnapshot,
+				provenance: {
+					route: {
+						worker: "codex",
+						source: "routing-hints",
+					},
+					memory: {
+						injectedCount: 2,
+						matchReasons: ["exact-task-type", "fuzzy-fact-key"],
+						matchClasses: ["exact", "fuzzy"],
+					},
+					policy: {
+						profile: "requires-review",
+						decisions: [
+							{
+								kind: "advance-run",
+								outcome: "approved",
+								reasons: ["requires human approval"],
+							},
+							{
+								kind: "reject-run",
+								outcome: "rejected",
+								reasons: ["budget exceeded"],
+							},
+						],
+					},
+				},
+			},
+			[],
+		);
+
+		expect(lines).toContain("  memory-injected: 2");
+		expect(lines).toContain(
+			"  memory-reasons: exact-task-type, fuzzy-fact-key",
+		);
+		expect(lines).toContain("  memory-match-classes: exact, fuzzy");
+		expect(lines).toContain("  policy-profile: requires-review");
+		expect(lines).toContain(
+			"  policy-decisions: advance-run:approved, reject-run:rejected",
+		);
+		expect(lines).toContain(
+			"  policy-reasons: requires human approval, budget exceeded",
+		);
+	});
+
+	it("shows outcome, evidence, decisions, and artifacts as a calm causal story", () => {
+		const lines = formatInspectDetail(
+			{
+				...baseSnapshot,
+				run: { id: "run-xyz", unitId: "implement-foo", status: "failed" },
+				evidence: [
+					{
+						kind: "verification",
+						status: "failed",
+						message: "pytest failed\n\u001b[31m1 failed",
+					},
+				] as Array<{ kind: string; status: string; message: string }>,
+				decisions: [
+					{
+						kind: "advance-run",
+						outcome: "blocked",
+						reasons: ["verification failed", "needs retry"],
+					},
+				],
+				artifacts: [
+					{
+						type: "log",
+						location: ".buildplane/artifacts/run-xyz/verify.log",
+					},
+				],
+			},
+			[],
+		);
+
+		expect(lines).toContain("outcome:");
+		expect(lines).toContain("  status: failed");
+		expect(lines).toContain("evidence:");
+		expect(lines).toContain(
+			"  - verification failed: pytest failed\\n\\u001b[31m1 failed",
+		);
+		expect(lines).toContain("decisions:");
+		expect(lines).toContain(
+			"  - advance-run blocked: verification failed; needs retry",
+		);
+		expect(lines).toContain("artifacts:");
+		expect(lines).toContain(
+			"  - log: .buildplane/artifacts/run-xyz/verify.log",
+		);
+		expect(lines.join("\n")).not.toContain("\u001b[31m1 failed");
+	});
+
+	it("sanitizes failure details and still shows outcome when failure is the only detail", () => {
+		const lines = formatInspectDetail(
+			{
+				...baseSnapshot,
+				run: { id: "run-xyz", unitId: "implement-foo", status: "failed" },
+				failure: {
+					kind: "setup\n\u001b[31mkind",
+					message: "bad cwd\n\u001b[31mstop",
+				},
+			} as unknown as Parameters<typeof formatInspectDetail>[0],
+			[],
+		);
+
+		expect(lines).toContain("failure-kind: setup\\n\\u001b[31mkind");
+		expect(lines).toContain("failure: bad cwd\\n\\u001b[31mstop");
+		expect(lines).toContain("outcome:");
+		expect(lines).toContain("  status: failed");
+		expect(lines.join("\n")).not.toContain("setup\n");
+		expect(lines.join("\n")).not.toContain("bad cwd\n");
+	});
+
+	it("sanitizes inspect header, workspace, and learning fields", () => {
+		const lines = formatInspectDetail(
+			{
+				...baseSnapshot,
+				kind: "run\n\u001b[31mkind",
+				run: {
+					id: "run\n\u001b[31mid",
+					unitId: "unit\n\u001b[31mid",
+					status: "failed\n\u001b[31mstatus",
+				},
+				workspace: {
+					status: "active\n\u001b[31mstatus",
+					path: "/tmp/ws\n\u001b[31mpath",
+					headSha: "abc\n\u001b[31msha",
+					finalizedAt: "2026-04-24\n\u001b[31mtime",
+					cleanupError: "cleanup\n\u001b[31merror",
+					existsOnDisk: false,
+				},
+			} as unknown as Parameters<typeof formatInspectDetail>[0],
+			[],
+			[
+				{
+					id: "learning-1",
+					runId: "run-xyz",
+					scope: "workspace\n\u001b[31mscope",
+					kind: "fact\n\u001b[31mkind",
+					title: "title\n\u001b[31mtitle",
+					body: "body",
+					status: "active",
+					createdAt: "2026-04-24T00:00:00Z",
+					seenCount: 1,
+				},
+			],
+		);
+
+		expect(lines).toContain("kind: run\\n\\u001b[31mkind");
+		expect(lines).toContain("run-id: run\\n\\u001b[31mid");
+		expect(lines).toContain("unit-id: unit\\n\\u001b[31mid");
+		expect(lines).toContain("status: failed\\n\\u001b[31mstatus");
+		expect(lines).toContain("workspace-status: active\\n\\u001b[31mstatus");
+		expect(lines).toContain("workspace: /tmp/ws\\n\\u001b[31mpath");
+		expect(lines).toContain("workspace-head: abc\\n\\u001b[31msha");
+		expect(lines).toContain(
+			"workspace-finalized-at: 2026-04-24\\n\\u001b[31mtime",
+		);
+		expect(lines).toContain(
+			"workspace-cleanup-error: cleanup\\n\\u001b[31merror",
+		);
+		expect(lines).toContain(
+			"  [workspace\\n\\u001b[31mscope/fact\\n\\u001b[31mkind] title\\n\\u001b[31mtitle (seen: 1)",
+		);
+		expect(lines.join("\n")).not.toContain("\u001b[31m");
 	});
 
 	it("omits learnings section when no learnings provided", () => {

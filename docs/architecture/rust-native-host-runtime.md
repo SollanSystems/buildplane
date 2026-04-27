@@ -1,13 +1,13 @@
-# Buildplane Rust-first host-aware runtime scaffold
+# Buildplane Rust-first host-aware runtime
 
-Date: 2026-04-01
+Date: 2026-04-24
 
-This document captures the approved starter architecture for a Rust-first Buildplane runtime that can eventually sit under the broader SuperClaude + Buildplane stack.
+This document describes the current Rust-first Buildplane runtime track under `native/`. It began as a host-aware scaffold, but it now carries real native command surfaces for pack inspection, memory, ledger/event replay, and fork planning. The TypeScript workspace remains the active product and release surface; native code is promoted into the product path only where it improves reliability, inspectability, or operator UX.
 
-Why this starts under `native/`:
-- the current TypeScript workspace remains the active product and release surface
-- we want a real compiling Rust workspace without destabilizing the live pnpm root
-- this creates a clean seam for gradual migration instead of forcing a rewrite-in-place
+Why this lives under `native/`:
+- the TypeScript workspace remains the main repo-local and published package surface
+- the Rust workspace gives Buildplane a stronger host/runtime/storage foundation without forcing a rewrite-in-place
+- the native seam lets Buildplane migrate one subsystem at a time while preserving the existing pnpm CLI contract
 
 Core separation rules:
 - Pack != Host != Provider
@@ -16,58 +16,75 @@ Core separation rules:
 - providers own direct API transport
 - runtime chooses the best route in this order: explicit host, explicit provider, detected preferred host, pack default provider, standalone
 
-Initial native workspace layout:
+Current native workspace layout:
 
 ```text
 native/
   Cargo.toml
   crates/
-    bp-core/
+    bp-cli/
     bp-config/
-    bp-memory/
-    bp-storage-sqlite/
-    bp-pack-manifest/
-    bp-pack-loader/
-    bp-pack-inspection/
-    bp-host-sdk/
-    bp-host-registry/
+    bp-core/
+    bp-fork/
     bp-host-claude/
     bp-host-codex/
-    bp-provider-sdk/
+    bp-host-registry/
+    bp-host-sdk/
+    bp-ledger/
+    bp-ledger-macros/
+    bp-memory/
+    bp-pack-inspection/
+    bp-pack-loader/
+    bp-pack-manifest/
     bp-provider-anthropic/
     bp-provider-openai/
+    bp-provider-sdk/
+    bp-replay/
     bp-runtime/
-    bp-ui-terminal/
-    bp-cli/
+    bp-storage-sqlite/
     bp-test-support/
+    bp-ui-terminal/
   packs/
     superclaude/pack.toml
     supercodex/pack.toml
 ```
 
-What is concrete in this scaffold:
+What is concrete now:
 - `bp-pack-manifest` parses and validates declarative `pack.toml`
 - `bp-pack-loader` discovers and loads pack manifests
 - `bp-pack-inspection` owns route and bridge-plan inspection helpers
 - `bp-host-sdk` defines the host contract and selection helpers
 - `bp-host-registry` aggregates detected host state and route candidates
-- `bp-host-claude` and `bp-host-codex` provide detection/status stubs for future OAuth/session reuse
-- `bp-runtime` contains the first transport-resolution helper
-- `buildplane-native pack show <pack-id>` is the inspection seam for validating host-aware routing, real detected hosts, `--detected-host` route-selection overrides, and bridge-plan shape on a real machine before live execution exists
+- `bp-host-claude` and `bp-host-codex` provide host detection/status surfaces
+- `bp-runtime` contains transport-resolution helpers
+- `bp-storage-sqlite` backs native memory and ledger storage paths
+- `bp-memory` owns native memory import/inspect/explain/search/remember/forget/restore/promote/export/import/doctor/prune/link flows
+- `bp-ledger` owns native event ledger persistence, serve, replay, and schema behavior
+- `bp-replay` supports replay-oriented native state hydration
+- `bp-fork` supports native fork planning against ledger events
+- `bp-cli` exposes the native command runner used by the TypeScript CLI bridge
 - example `pack.toml` manifests exist for SuperClaude and SuperCodex
 
-What is intentionally still stubbed:
-- no live Claude/Codex execution bridge yet
-- no provider transport yet
-- no SQLite write path yet
-- no production CLI command surface yet
+Current command surfaces:
+- `buildplane-native pack show <pack-id>` validates host-aware routing and bridge-plan shape on a real machine
+- native `memory` subcommands support SQLite-backed local memory operations
+- native `ledger` subcommands support ledger serving/replay paths used by integration tests and recovery flows
+- native `fork` planning supports replay/recovery workflows that start from ledger events
+
+Current boundaries / still narrower than the TypeScript control plane:
+- no complete native replacement for the TypeScript orchestrator yet
+- no live Claude/Codex execution bridge owned fully by native yet
+- no direct provider transport promoted as the default production path yet
+- published/global npm installs do not bundle or provision `buildplane-native`; native-backed commands are repo-local, built-CLI, or direct-native workflows unless the operator supplies the binary separately
 
 Migration intent:
-- keep the current TS control plane shipping
-- grow the native workspace until a vertical slice can replace one subsystem at a time
+- keep the current TypeScript control plane shipping
+- grow the native workspace where Rust gives stronger storage, replay, fork, pack, or host boundaries
 - only promote native code into the main product path when it wins on reliability and operator UX
+- keep docs and help honest about which path is repo-local, in-repo built, native-backed, or published/global
 
 Related docs:
 - `docs/architecture/buildplane-package-architecture.md`
 - `docs/architecture/buildplane-memory-schema.md`
 - `docs/architecture/buildplane-memory-cli.md`
+- `docs/ledger.md`

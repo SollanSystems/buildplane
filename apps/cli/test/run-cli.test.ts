@@ -191,11 +191,20 @@ function createBootstrapDoctorReport(ok = true) {
 				label: "Node.js",
 				ok,
 				required: true,
-				expected: "24.13.1",
-				detected: ok ? "24.13.1" : "22.22.2",
+				expected: ">=24.13.1 <25",
+				detected: ok ? "24.13.2" : "22.22.2",
 				message: ok
-					? "detected 24.13.1 (requires 24.13.1)"
-					: "Buildplane requires Node 24.13.1. Detected 22.22.2.",
+					? "detected 24.13.2; supports >=24.13.1 <25"
+					: "Buildplane requires Node >=24.13.1 <25. Detected 22.22.2.",
+			},
+			{
+				id: "node_sqlite",
+				label: "node:sqlite",
+				ok,
+				required: true,
+				message: ok
+					? "node:sqlite import available"
+					: "node:sqlite import failed",
 			},
 			{
 				id: "npm",
@@ -217,7 +226,44 @@ function createBootstrapDoctorReport(ok = true) {
 			},
 		],
 		notes: [
+			".node-version pins the tested development baseline; the published CLI accepts compatible Node 24 runtimes.",
 			"Published/global installs do not yet include a verified `buildplane memory ...` contract.",
+		],
+	};
+}
+
+function createCapabilityReport(ok = true) {
+	return {
+		ok,
+		environment: {
+			detectedNodeVersion: ok ? "24.13.2" : "22.22.2",
+			supportedNodeRange: ">=24.13.1 <25",
+		},
+		capabilities: [
+			{
+				id: "node",
+				label: "Node.js",
+				ok,
+				required: true,
+				available: ok,
+				expected: ">=24.13.1 <25",
+				detected: ok ? "24.13.2" : "22.22.2",
+				message: ok
+					? "detected 24.13.2; supports >=24.13.1 <25"
+					: "Buildplane requires Node >=24.13.1 <25. Detected 22.22.2.",
+			},
+			{
+				id: "published_memory",
+				label: "Published memory",
+				ok: true,
+				required: false,
+				available: false,
+				message:
+					"published/global installs do not yet include a verified buildplane memory contract",
+			},
+		],
+		notes: [
+			".node-version pins the tested development baseline; the published CLI accepts compatible Node 24 runtimes.",
 		],
 	};
 }
@@ -255,7 +301,10 @@ describe("cli command surface", () => {
 		expect(result.stderr).toEqual([]);
 		expect(result.stdout).toContain("bootstrap-doctor: pass");
 		expect(result.stdout).toContain(
-			"  - [pass] node: detected 24.13.1 (requires 24.13.1)",
+			"  - [pass] node: detected 24.13.2; supports >=24.13.1 <25",
+		);
+		expect(result.stdout).toContain(
+			"  - [pass] node_sqlite: node:sqlite import available",
 		);
 		expect(result.stdout).toContain("  - [pass] npm: npm 10.9.0");
 		expect(result.stdout).toContain(
@@ -281,6 +330,62 @@ describe("cli command surface", () => {
 		expect(result.stderr).toEqual([]);
 		expect(JSON.parse(result.stdout.join("\n"))).toEqual(
 			createBootstrapDoctorReport(false),
+		);
+		expect(existsSync(join(root, ".buildplane"))).toBe(false);
+	});
+
+	it("bootstrap doctor --capabilities prints deterministic human capability truth", async () => {
+		const root = mkdtempSync(
+			join(tmpdir(), "buildplane-cli-capabilities-human-"),
+		);
+		const result = await runCliCapture(
+			root,
+			["bootstrap", "doctor", "--capabilities"],
+			{
+				inspectCapabilities: () => createCapabilityReport(true),
+			} as unknown as RunCliDependencies,
+		);
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stderr).toEqual([]);
+		expect(result.stdout).toContain("capabilities: pass");
+		expect(result.stdout.join("\n")).toContain("node");
+		expect(result.stdout.join("\n")).toContain("published_memory");
+		expect(existsSync(join(root, ".buildplane"))).toBe(false);
+	});
+
+	it("bootstrap doctor --capabilities --json returns capability report", async () => {
+		const root = mkdtempSync(
+			join(tmpdir(), "buildplane-cli-capabilities-json-"),
+		);
+		const report = createCapabilityReport(true);
+		const result = await runCliCapture(
+			root,
+			["bootstrap", "doctor", "--capabilities", "--json"],
+			{ inspectCapabilities: () => report } as unknown as RunCliDependencies,
+		);
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stderr).toEqual([]);
+		expect(JSON.parse(result.stdout.join("\n"))).toEqual(report);
+		expect(existsSync(join(root, ".buildplane"))).toBe(false);
+	});
+
+	it("bootstrap doctor --capabilities rejects unsupported extra arguments", async () => {
+		const root = mkdtempSync(
+			join(tmpdir(), "buildplane-cli-capabilities-invalid-"),
+		);
+		const result = await runCliCapture(root, [
+			"bootstrap",
+			"doctor",
+			"--capabilities",
+			"unexpected",
+		]);
+
+		expect(result.exitCode).toBe(1);
+		expect(result.stdout).toEqual([]);
+		expect(result.stderr.join("\n")).toContain(
+			"Unsupported bootstrap doctor arguments: --capabilities unexpected",
 		);
 		expect(existsSync(join(root, ".buildplane"))).toBe(false);
 	});

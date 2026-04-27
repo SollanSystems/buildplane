@@ -106,6 +106,22 @@ describe("storage adapter", () => {
 		expect(inspect.evidence[0].kind).toBe("command-exit");
 		expect(inspect.evidence[0]?.message).toBeUndefined();
 		expect(inspect.decisions[0].kind).toBe("advance-run");
+		expect(inspect.provenance).toEqual({
+			route: {
+				worker: "command",
+				source: "command-block",
+			},
+			policy: {
+				profile: "default",
+				decisions: [
+					{
+						kind: "advance-run",
+						outcome: "approved",
+						reasons: [],
+					},
+				],
+			},
+		});
 		expect(
 			existsSync(join(root, ".buildplane", "logs", `${run.id}.stdout.log`)),
 		).toBe(true);
@@ -124,6 +140,114 @@ describe("storage adapter", () => {
 			"decision-recorded",
 			"run-completed",
 		]);
+	});
+
+	it("surfaces route and policy provenance for model packets with routing hints", () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-store-provenance-"));
+		const storage = createBuildplaneStorage(root);
+		storage.initializeProject();
+		const routedPacket: UnitPacket = {
+			unit: {
+				id: "unit-routed",
+				kind: "model",
+				scope: "task",
+				inputRefs: [],
+				expectedOutputs: [],
+				verificationContract: "exit-0",
+				policyProfile: "requires-review",
+			},
+			model: {
+				provider: "openai-codex",
+				model: "gpt-5.4",
+				prompt: "Implement the slice",
+			},
+			routingHints: {
+				preferredWorker: "codex",
+				preferredModel: "gpt-5.4",
+				effort: "high",
+			},
+			verification: {
+				requiredOutputs: [],
+			},
+		};
+
+		const run = storage.createRun(routedPacket);
+		storage.recordDecision(run.id, {
+			kind: "advance-run",
+			outcome: "approved",
+			reasons: ["requires human approval"],
+		});
+		const inspectRun = storage.inspectTarget(run.id);
+		const inspectUnit = storage.inspectTarget(routedPacket.unit.id);
+
+		expect(inspectRun.provenance).toEqual({
+			route: {
+				worker: "codex",
+				source: "routing-hints",
+				preferredModel: "gpt-5.4",
+				effort: "high",
+				provider: "openai-codex",
+				model: "gpt-5.4",
+			},
+			policy: {
+				profile: "requires-review",
+				decisions: [
+					{
+						kind: "advance-run",
+						outcome: "approved",
+						reasons: ["requires human approval"],
+					},
+				],
+			},
+		});
+		expect(inspectUnit.provenance).toEqual(inspectRun.provenance);
+	});
+
+	it("falls back to unit kind for legacy model runs without packet snapshots", () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-store-legacy-model-"));
+		const storage = createBuildplaneStorage(root);
+		storage.initializeProject();
+		const legacyModelPacket: UnitPacket = {
+			unit: {
+				id: "unit-legacy-model",
+				kind: "model",
+				scope: "task",
+				inputRefs: [],
+				expectedOutputs: [],
+				verificationContract: "exit-0",
+				policyProfile: "requires-review",
+			},
+			model: {
+				provider: "openai-codex",
+				model: "gpt-5.4",
+				prompt: "Implement the slice",
+			},
+			verification: {
+				requiredOutputs: [],
+			},
+		};
+
+		const run = storage.createRun(legacyModelPacket);
+		const database = new DatabaseSync(join(root, ".buildplane", "state.db"));
+		try {
+			database
+				.prepare(`UPDATE runs SET unit_snapshot = ? WHERE id = ?`)
+				.run(JSON.stringify(legacyModelPacket.unit), run.id);
+		} finally {
+			database.close();
+		}
+
+		const inspectRun = storage.inspectTarget(run.id);
+		const inspectUnit = storage.inspectTarget(legacyModelPacket.unit.id);
+
+		expect(inspectRun.provenance.route).toEqual({
+			worker: "ai-sdk",
+			source: "model-block",
+		});
+		expect(inspectUnit.provenance.route).toEqual({
+			worker: "ai-sdk",
+			source: "model-block",
+		});
 	});
 
 	it("persists retained workspaces for rejected runs and exposes workspace snapshots", () => {
@@ -758,10 +882,15 @@ describe("storage adapter", () => {
 			},
 		});
 		expect(unitInspect.strategy).toEqual({ strategyId: "strategy-injected" });
-		expect(unitInspect.provenance).toMatchObject({
+		expect(inspect.provenance).toMatchObject({
 			route: {
 				worker: "command",
 				source: "command-block",
+			},
+			memory: {
+				injectedCount: 2,
+				matchReasons: ["fuzzy-fact-key", "exact-task-type"],
+				matchClasses: ["fuzzy", "exact"],
 			},
 			policy: {
 				profile: "default",
@@ -772,6 +901,9 @@ describe("storage adapter", () => {
 			strategyId: "strategy-injected",
 			injectedMemoryCount: 2,
 			promotedStructuredMemoryCount: 1,
+			routeWorker: "command",
+			routeSource: "command-block",
+			policyProfile: "default",
 		});
 	});
 

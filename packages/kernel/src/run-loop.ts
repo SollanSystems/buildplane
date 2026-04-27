@@ -174,11 +174,33 @@ export interface InspectSnapshot {
 	readonly kind: "run" | "unit";
 	readonly unit: Unit;
 	readonly run: Run;
+	readonly provenance?: {
+		readonly route: {
+			readonly worker: string;
+			readonly source: "routing-hints" | "model-block" | "command-block";
+			readonly preferredModel?: string;
+			readonly effort?: string;
+			readonly provider?: string;
+			readonly model?: string;
+		};
+		readonly memory?: {
+			readonly injectedCount: number;
+			readonly matchReasons: readonly string[];
+			readonly matchClasses: readonly PersistedInjectedMemoryRecord["matchClass"][];
+		};
+		readonly policy: {
+			readonly profile: string;
+			readonly decisions?: readonly {
+				readonly kind: PolicyDecision["kind"];
+				readonly outcome: PolicyDecision["outcome"];
+				readonly reasons: readonly string[];
+			}[];
+		};
+	};
 	readonly workspace?: WorkspaceSnapshot;
 	readonly strategy?: {
 		readonly strategyId: string;
 	};
-	readonly provenance?: InspectProvenance;
 	readonly injectedMemories?: readonly PersistedInjectedMemoryRecord[];
 	readonly promotedStructuredMemories?: readonly PromotedStructuredMemoryRecord[];
 	readonly runHistory: readonly {

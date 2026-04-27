@@ -32,7 +32,22 @@ Near-term work is focused on trust-surface hardening rather than broader agent-s
 
 Current Phase 5 benchmark evidence for the `model-codex` eval suite lives in [`docs/benchmarks/model-codex.md`](docs/benchmarks/model-codex.md).
 
-That summary documents the rerun command, current aggregate signals, and what the current memory-help, strategy-help, and memory-plus-strategy fixtures prove.
+That summary documents the rerun command, current aggregate signals, what the current memory-help and strategy-help fixtures prove, and which combined memory-plus-strategy proof remains a benchmark gap.
+
+## Verification contract
+
+CI keeps the deterministic trust gate explicit. The required local equivalents are:
+
+```bash
+pnpm lint
+pnpm typecheck
+pnpm test
+pnpm build
+cargo test --manifest-path native/Cargo.toml
+pnpm verify:published-bootstrap
+```
+
+Model-backed evals remain opt-in until a deterministic local suite is promoted into the required gate.
 
 ## Getting started (repo development)
 
@@ -42,10 +57,13 @@ After cloning the repository, install dependencies:
 pnpm install
 ```
 
+Repo development uses `.node-version` (`24.13.1`) as the tested development baseline. The published CLI runtime guard accepts compatible Node 24 runtimes in the range `>=24.13.1 <25`; use the doctor commands below to inspect the current host instead of guessing from the pinned development baseline.
+
 Then use the workspace-local dev command directly from the repo root:
 
 ```bash
 pnpm buildplane bootstrap doctor --json
+pnpm buildplane bootstrap doctor --capabilities --json
 pnpm buildplane init
 pnpm buildplane run --packet ./packet.json
 pnpm buildplane status --json
@@ -73,6 +91,7 @@ After building the project, you can run the CLI from the compiled output:
 ```bash
 pnpm build
 node apps/cli/dist/index.js bootstrap doctor --json
+node apps/cli/dist/index.js bootstrap doctor --capabilities --json
 node apps/cli/dist/index.js init
 node apps/cli/dist/index.js run --packet ./packet.json
 node apps/cli/dist/index.js status --json
@@ -102,6 +121,7 @@ If you prefer the explicit npm path, the published fallback/reference contract i
 ```bash
 npm install -g buildplane
 buildplane bootstrap doctor --json
+buildplane bootstrap doctor --capabilities --json
 buildplane init
 buildplane run --packet <path-to-packet.json>
 buildplane status --json
@@ -110,7 +130,9 @@ buildplane inspect <run-id> --json
 
 > **Precondition:** `run` expects a clean git working tree. Commit or stash uncommitted changes before dispatching work.
 
-Published/global installs do not yet include a verified `buildplane memory ...` contract. The npm package does not bundle or provision `buildplane-native`, so memory remains a repo-local or direct-native workflow unless you separately supply the native binary yourself.
+Published/global installs do not yet include a verified `buildplane memory ...` contract. The npm package does not bundle or provision `buildplane-native`, so memory remains a repo-local or direct-native workflow unless you separately supply the native binary yourself. Published/global native memory remains outside the verified package contract unless you separately supply a discoverable `buildplane-native` binary; the capability doctor reports this as optional/unavailable rather than failing the published run contract.
+
+The capability doctor also reports required host/runtime features such as `node:sqlite`, npm, git, and the supported Node range, so global-install operators can see which prerequisite failed without reading the source.
 
 Use this path when you want the packaged operator experience instead of the repo-local development or in-repo built CLI paths. The repo verifies this contract from a packed publishable artifact before any registry publication step.
 
@@ -149,4 +171,4 @@ Example packet:
 }
 ```
 
-This is intentionally narrow: one packet, one run, one local command step, one persisted decision path. Worktree isolation, replay, richer policy, and model-backed execution come later.
+This example is intentionally narrow: one packet, one run, one local command step, one persisted decision path. Broader repo-local surfaces already include history/status/inspect, workspace retention and cleanup, replay-oriented flows, strategy execution, policy decisions, and model-worker routing where the documented repo-development and in-repo built CLI paths support them. Published/global install remains intentionally narrower, especially for native-backed memory and ledger surfaces.

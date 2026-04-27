@@ -46,6 +46,9 @@ describe("README contract", () => {
 		expect(repoDevelopmentSection).toContain(
 			"pnpm buildplane bootstrap doctor --json",
 		);
+		expect(repoDevelopmentSection).toContain(
+			"pnpm buildplane bootstrap doctor --capabilities --json",
+		);
 		expect(repoDevelopmentSection).toContain("pnpm buildplane init");
 		expect(repoDevelopmentSection).toContain("pnpm buildplane run --packet");
 		expect(repoDevelopmentSection).toContain("pnpm buildplane status --json");
@@ -64,6 +67,9 @@ describe("README contract", () => {
 	it("documents the full in-repo built CLI command surface in its own section", () => {
 		expect(builtCliSection).toContain(
 			"node apps/cli/dist/index.js bootstrap doctor --json",
+		);
+		expect(builtCliSection).toContain(
+			"node apps/cli/dist/index.js bootstrap doctor --capabilities --json",
 		);
 		expect(builtCliSection).toContain("node apps/cli/dist/index.js init");
 		expect(builtCliSection).toContain(
@@ -90,6 +96,9 @@ describe("README contract", () => {
 		);
 		expect(distributionSection).toContain("npm install -g buildplane");
 		expect(distributionSection).toContain("buildplane bootstrap doctor --json");
+		expect(distributionSection).toContain(
+			"buildplane bootstrap doctor --capabilities --json",
+		);
 		expect(distributionSection).toContain("buildplane init");
 		expect(distributionSection).toContain(
 			"buildplane run --packet <path-to-packet.json>",
@@ -120,5 +129,44 @@ describe("README contract", () => {
 
 	it("does not describe published install as future-only anywhere in the README", () => {
 		expect(readme).not.toMatch(/not yet available|future-only/i);
+	});
+
+	it("does not leave the local run loop contradicted by stale future-only maturity language", () => {
+		expect(readme).not.toContain(
+			"Worktree isolation, replay, richer policy, and model-backed execution come later.",
+		);
+		expect(readme).toContain(
+			"Broader repo-local surfaces already include history/status/inspect",
+		);
+	});
+
+	it("documents the Node baseline and published runtime range", () => {
+		expect(readme).toContain(".node-version");
+		expect(readme).toContain("24.13.1");
+		expect(readme).toContain(">=24.13.1 <25");
+		expect(readme).toContain(
+			"`.node-version` (`24.13.1`) as the tested development baseline",
+		);
+	});
+
+	it("documents capability doctor output for published/global installs", () => {
+		expect(distributionSection).toContain(
+			"buildplane bootstrap doctor --capabilities --json",
+		);
+		expect(readme).toContain("node:sqlite");
+		expect(distributionSection).toContain("Published/global native memory");
+	});
+
+	it("documents the explicit deterministic CI trust gate", () => {
+		for (const command of [
+			"pnpm lint",
+			"pnpm typecheck",
+			"pnpm test",
+			"pnpm build",
+			"cargo test --manifest-path native/Cargo.toml",
+			"pnpm verify:published-bootstrap",
+		]) {
+			expect(readme).toContain(command);
+		}
 	});
 });
