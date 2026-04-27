@@ -43,6 +43,42 @@ import {
 } from "./database.js";
 import { resolveProjectLayout } from "./project-layout.js";
 
+interface InspectProvenanceRouteLike {
+	readonly worker: string;
+	readonly source: string;
+	readonly provider?: string;
+	readonly model?: string;
+	readonly preferredWorker?: string;
+	readonly preferredModel?: string;
+	readonly effort?: string;
+}
+
+interface InspectProvenanceLike {
+	readonly route: InspectProvenanceRouteLike;
+	readonly policy: {
+		readonly profile: string;
+		readonly decisionKind?: string;
+		readonly decisionOutcome?: string;
+		readonly decisionReasons?: readonly string[];
+	};
+}
+
+interface PacketSnapshotLike {
+	readonly unit: {
+		readonly kind: string;
+		readonly policyProfile: string;
+	};
+	readonly execution?: unknown;
+	readonly model?: {
+		readonly provider: string;
+		readonly model: string;
+	};
+	readonly routingHints?: {
+		readonly preferredWorker?: string;
+		readonly preferredModel?: string;
+		readonly effort?: string;
+	};
+}
 interface StoredRunRow {
 	readonly id: string;
 	readonly unit_id: string;
@@ -805,7 +841,7 @@ export function createStorageStore(
 			.prepare(
 				`SELECT id, unit_id, status, unit_snapshot, used_workspace, parent_run_id, strategy_id FROM runs WHERE id = ?`,
 			)
-			.get(runId) as StoredRunRow | undefined;
+			.get(runId) as unknown as StoredRunRow | undefined;
 
 		if (!row) {
 			throw new Error(`No run found for id '${runId}'`);
@@ -822,7 +858,7 @@ export function createStorageStore(
 			.prepare(
 				`SELECT run_id, source_project_root, path, head_sha, status, created_at, finalized_at, cleanup_error FROM workspaces WHERE run_id = ?`,
 			)
-			.get(runId) as StoredWorkspaceRow | undefined;
+			.get(runId) as unknown as StoredWorkspaceRow | undefined;
 	}
 
 	function toWorkspaceSnapshot(row: StoredWorkspaceRow): WorkspaceSnapshot {
@@ -1630,6 +1666,64 @@ export function createStorageStore(
 	): WorkspaceSnapshot | undefined {
 		const row = readWorkspaceRow(runId, database);
 		return row ? toWorkspaceSnapshot(row) : undefined;
+	}
+
+	function toInspectProvenance(
+		packet: PacketSnapshotLike,
+		decisions: InspectSnapshot["decisions"],
+	): InspectProvenanceLike {
+		const hasRoutingHints =
+			packet.routingHints?.preferredWorker !== undefined ||
+			packet.routingHints?.preferredModel !== undefined ||
+			packet.routingHints?.effort !== undefined;
+		const routeSource = packet.execution
+			? "command-block"
+			: hasRoutingHints
+				? "routing-hints"
+				: "model-block";
+		const routeWorker = packet.execution
+			? "command"
+			: (packet.routingHints?.preferredWorker ??
+				(packet.model ? "ai-sdk" : "command"));
+		const latestDecision = decisions.at(-1);
+		return {
+			route: {
+				worker: routeWorker,
+				source: routeSource,
+				provider: packet.model?.provider,
+				model: packet.model?.model,
+				preferredWorker: packet.routingHints?.preferredWorker,
+				preferredModel: packet.routingHints?.preferredModel,
+				effort: packet.routingHints?.effort,
+			},
+			policy: {
+				profile: packet.unit.policyProfile,
+				decisionKind: latestDecision?.kind,
+				decisionOutcome: latestDecision?.outcome,
+				decisionReasons: latestDecision?.reasons,
+			},
+		};
+	}
+
+	function parsePacketSnapshot(
+		raw: string | undefined,
+	): PacketSnapshotLike | null {
+		if (!raw) {
+			return null;
+		}
+		const parsed = JSON.parse(raw) as unknown;
+		if (!parsed || typeof parsed !== "object" || !("unit" in parsed)) {
+			return null;
+		}
+		return parsed as PacketSnapshotLike;
+	}
+
+	function getInspectProvenance(
+		runRow: StoredRunRow,
+		decisions: InspectSnapshot["decisions"],
+	): InspectProvenanceLike | undefined {
+		const packet = parsePacketSnapshot(runRow.unit_snapshot);
+		return packet ? toInspectProvenance(packet, decisions) : undefined;
 	}
 
 	function insertDecisionRecord(
@@ -2850,7 +2944,7 @@ export function createStorageStore(
 					.prepare(
 						`SELECT id, unit_id, status, unit_snapshot, used_workspace, parent_run_id, strategy_id FROM runs WHERE id = ?`,
 					)
-					.get(id) as StoredRunRow | undefined;
+					.get(id) as unknown as StoredRunRow | undefined;
 
 				if (runRow) {
 					const parsedSnapshot = runRow.unit_snapshot
@@ -2868,6 +2962,10 @@ export function createStorageStore(
 						run: toRun(runRow),
 						workspace: readWorkspaceSnapshot(runRow.id, database),
 						strategy: toStrategySummary(runRow),
+						provenance: getInspectProvenance(
+							runRow,
+							readDecisions(runRow.id, database),
+						),
 						injectedMemories: readInjectedMemoryRows(runRow.id, database),
 						promotedStructuredMemories: readPromotedStructuredMemoryRows(
 							runRow.id,
@@ -2895,12 +2993,14 @@ export function createStorageStore(
 					}
 
 					const run = readRun(latestRun.id, database);
+					const decisions = readDecisions(run.id, database);
 					const snapshot = {
 						kind: "unit",
 						unit,
 						run: toRun(run),
 						workspace: readWorkspaceSnapshot(run.id, database),
 						strategy: toStrategySummary(run),
+						provenance: getInspectProvenance(run, decisions),
 						injectedMemories: readInjectedMemoryRows(run.id, database),
 						promotedStructuredMemories: readPromotedStructuredMemoryRows(
 							run.id,

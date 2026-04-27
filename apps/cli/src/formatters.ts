@@ -344,6 +344,24 @@ interface ExecutionEventLike {
 	readonly [key: string]: unknown;
 }
 
+interface InspectProvenanceLike {
+	readonly route: {
+		readonly worker: string;
+		readonly source: string;
+		readonly provider?: string;
+		readonly model?: string;
+		readonly preferredWorker?: string;
+		readonly preferredModel?: string;
+		readonly effort?: string;
+	};
+	readonly policy: {
+		readonly profile: string;
+		readonly decisionKind?: string;
+		readonly decisionOutcome?: string;
+		readonly decisionReasons?: readonly string[];
+	};
+}
+
 interface InspectSnapshotLike {
 	readonly kind: string;
 	readonly unit: { readonly id: string; readonly kind: string };
@@ -355,9 +373,11 @@ interface InspectSnapshotLike {
 	readonly strategy?: {
 		readonly strategyId: string;
 	};
+	readonly provenance?: InspectProvenanceLike;
 	readonly evidence: readonly {
 		readonly kind: string;
 		readonly status: string;
+		readonly message?: string;
 	}[];
 	readonly decisions: readonly {
 		readonly kind: string;
@@ -379,10 +399,10 @@ export function formatInspectDetail(
 ): string[] {
 	const lines: string[] = [];
 
-	lines.push(`kind: ${snapshot.kind}`);
-	lines.push(`run-id: ${snapshot.run.id}`);
-	lines.push(`unit-id: ${snapshot.run.unitId}`);
-	lines.push(`status: ${snapshot.run.status}`);
+	lines.push(`kind: ${sanitizeTerminalText(snapshot.kind)}`);
+	lines.push(`run-id: ${sanitizeTerminalText(snapshot.run.id)}`);
+	lines.push(`unit-id: ${sanitizeTerminalText(snapshot.run.unitId)}`);
+	lines.push(`status: ${sanitizeTerminalText(snapshot.run.status)}`);
 	if (snapshot.strategy?.strategyId) {
 		lines.push(
 			`strategy: ${sanitizeTerminalText(snapshot.strategy.strategyId)}`,
@@ -390,6 +410,59 @@ export function formatInspectDetail(
 	}
 
 	const s = snapshot as unknown as Record<string, unknown>;
+	if (s.provenance && typeof s.provenance === "object") {
+		const provenance = s.provenance as InspectProvenanceLike;
+		lines.push("");
+		lines.push("provenance:");
+		lines.push(
+			`  route: ${sanitizeTerminalText(provenance.route.worker)} (${sanitizeTerminalText(provenance.route.source)})`,
+		);
+		if (provenance.route.provider) {
+			lines.push(
+				`  provider: ${sanitizeTerminalText(provenance.route.provider)}`,
+			);
+		}
+		if (provenance.route.model) {
+			lines.push(`  model: ${sanitizeTerminalText(provenance.route.model)}`);
+		}
+		if (
+			provenance.route.preferredWorker ||
+			provenance.route.preferredModel ||
+			provenance.route.effort
+		) {
+			const hints: string[] = [];
+			if (provenance.route.preferredWorker) {
+				hints.push(
+					`preferred-worker=${sanitizeTerminalText(provenance.route.preferredWorker)}`,
+				);
+			}
+			if (provenance.route.preferredModel) {
+				hints.push(
+					`preferred-model=${sanitizeTerminalText(provenance.route.preferredModel)}`,
+				);
+			}
+			if (provenance.route.effort) {
+				hints.push(`effort=${sanitizeTerminalText(provenance.route.effort)}`);
+			}
+			lines.push(`  routing-hints: ${hints.join(", ")}`);
+		}
+		lines.push(
+			`  policy-profile: ${sanitizeTerminalText(provenance.policy.profile)}`,
+		);
+		if (provenance.policy.decisionKind || provenance.policy.decisionOutcome) {
+			lines.push(
+				`  trust-decision: ${sanitizeTerminalText(provenance.policy.decisionKind ?? "-")} ${sanitizeTerminalText(provenance.policy.decisionOutcome ?? "-")}`,
+			);
+		}
+		if (provenance.policy.decisionReasons?.length) {
+			lines.push(
+				`  trust-reasons: ${provenance.policy.decisionReasons
+					.map((reason) => sanitizeTerminalText(reason))
+					.join("; ")}`,
+			);
+		}
+	}
+
 	if (s.workspace && typeof s.workspace === "object") {
 		const ws = s.workspace as {
 			status?: string;
@@ -400,19 +473,23 @@ export function formatInspectDetail(
 			cleanupError?: string;
 		};
 		if (ws.status) {
-			lines.push(`workspace-status: ${ws.status}`);
+			lines.push(`workspace-status: ${sanitizeTerminalText(ws.status)}`);
 		}
 		if (ws.path) {
-			lines.push(`workspace: ${ws.path}`);
+			lines.push(`workspace: ${sanitizeTerminalText(ws.path)}`);
 		}
 		if (ws.headSha) {
-			lines.push(`workspace-head: ${ws.headSha}`);
+			lines.push(`workspace-head: ${sanitizeTerminalText(ws.headSha)}`);
 		}
 		if (ws.finalizedAt) {
-			lines.push(`workspace-finalized-at: ${ws.finalizedAt}`);
+			lines.push(
+				`workspace-finalized-at: ${sanitizeTerminalText(ws.finalizedAt)}`,
+			);
 		}
 		if (ws.cleanupError) {
-			lines.push(`workspace-cleanup-error: ${ws.cleanupError}`);
+			lines.push(
+				`workspace-cleanup-error: ${sanitizeTerminalText(ws.cleanupError)}`,
+			);
 		}
 		if (ws.existsOnDisk !== undefined) {
 			lines.push(`workspace-exists-on-disk: ${ws.existsOnDisk}`);
@@ -438,10 +515,42 @@ export function formatInspectDetail(
 	if (s.failure && typeof s.failure === "object") {
 		const f = s.failure as { kind?: string; message?: string };
 		if (f.kind) {
-			lines.push(`failure-kind: ${f.kind}`);
+			lines.push(`failure-kind: ${sanitizeTerminalText(f.kind)}`);
 		}
 		if (f.message) {
-			lines.push(`failure: ${f.message}`);
+			lines.push(`failure: ${sanitizeTerminalText(f.message)}`);
+		}
+	}
+	if (snapshot.evidence.length > 0) {
+		lines.push("");
+		lines.push("evidence:");
+		for (const evidence of snapshot.evidence) {
+			const message = evidence.message
+				? `: ${sanitizeTerminalText(evidence.message)}`
+				: "";
+			lines.push(
+				`  ${sanitizeTerminalText(evidence.kind)} ${sanitizeTerminalText(evidence.status)}${message}`,
+			);
+		}
+	}
+	if (snapshot.decisions.length > 0) {
+		lines.push("");
+		lines.push("policy-decisions:");
+		for (const decision of snapshot.decisions) {
+			lines.push(
+				`  ${sanitizeTerminalText(decision.kind)} ${sanitizeTerminalText(decision.outcome)} (${decision.reasons
+					.map((reason) => sanitizeTerminalText(reason))
+					.join("; ")})`,
+			);
+		}
+	}
+	if (snapshot.artifacts.length > 0) {
+		lines.push("");
+		lines.push("artifacts:");
+		for (const artifact of snapshot.artifacts) {
+			lines.push(
+				`  ${sanitizeTerminalText(artifact.type)}: ${sanitizeTerminalText(artifact.location)}`,
+			);
 		}
 	}
 	if (snapshot.injectedMemories && snapshot.injectedMemories.length > 0) {
@@ -468,7 +577,9 @@ export function formatInspectDetail(
 		lines.push("");
 		lines.push("learnings:");
 		for (const l of learnings) {
-			lines.push(`  [${l.scope}/${l.kind}] ${l.title} (seen: ${l.seenCount})`);
+			lines.push(
+				`  [${sanitizeTerminalText(l.scope)}/${sanitizeTerminalText(l.kind)}] ${sanitizeTerminalText(l.title)} (seen: ${l.seenCount})`,
+			);
 		}
 	}
 

@@ -103,28 +103,28 @@ Success means:
 
 ### Acceptance criteria
 
-- [ ] inspect output shows the chosen worker/route in a first-class way
-- [ ] inspect output shows pack / host / provider selection where applicable
-- [ ] inspect output shows injected memories and why they were surfaced
-- [ ] inspect output shows the active policy profile / trust gates / approval-relevant decisions
-- [ ] inspect output shows evidence, artifacts, and final outcome in one causal story
-- [ ] operator can answer "what happened and why?" from one surface without reading raw SQLite tables
+- [x] inspect output shows the chosen worker/route in a first-class way
+- [x] inspect output shows pack / host / provider selection where applicable
+- [x] inspect output shows injected memories and why they were surfaced
+- [x] inspect output shows the active policy profile / trust gates / approval-relevant decisions
+- [x] inspect output shows evidence, artifacts, and final outcome in one causal story
+- [x] operator can answer "what happened and why?" from one surface without reading raw SQLite tables
 
 ### Likely files
 
 - [ ] Modify: `apps/cli/src/run-cli.ts`
-- [ ] Modify: `apps/cli/src/formatters.ts`
-- [ ] Modify: `packages/storage/src/store.ts`
-- [ ] Modify: `packages/kernel/src/*` where provenance payloads are assembled
-- [ ] Modify: relevant inspect/history tests
+- [x] Modify: `apps/cli/src/formatters.ts`
+- [x] Modify: `packages/storage/src/store.ts`
+- [x] Modify: `packages/kernel/src/*` where provenance payloads are assembled
+- [x] Modify: relevant inspect/history tests
 
 ### Slice tasks
 
-- [ ] Task 2A: define the minimum provenance payload contract for inspect/history
-- [ ] Task 2B: surface route and worker selection explicitly
-- [ ] Task 2C: surface structured memory injection reasons explicitly
-- [ ] Task 2D: surface policy/trust-gate context without overloading the operator
-- [ ] Task 2E: tighten human-readable formatting so inspect feels calm, not dumpy
+- [x] Task 2A: define the minimum provenance payload contract for inspect/history
+- [x] Task 2B: surface route and worker selection explicitly
+- [x] Task 2C: surface structured memory injection reasons explicitly
+- [x] Task 2D: surface policy/trust-gate context without overloading the operator
+- [x] Task 2E: tighten human-readable formatting so inspect feels calm, not dumpy
 
 ---
 
@@ -167,13 +167,13 @@ Success means:
 
 ### Week 2
 
-- [ ] land the unified provenance payload contract
-- [ ] ship first inspect/history improvements for route + memory visibility
+- [x] land the unified provenance payload contract
+- [x] ship first inspect/history improvements for route + memory visibility
 
 ### Week 3
 
-- [ ] ship policy/trust-gate visibility improvements
-- [ ] tighten inspect formatting and operator readability
+- [x] ship policy/trust-gate visibility improvements
+- [x] tighten inspect formatting and operator readability
 
 ### Week 4
 

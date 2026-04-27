@@ -120,16 +120,76 @@ describe("formatInspectDetail", () => {
 		artifacts: [],
 	};
 
+	it("includes a calm provenance section for command packets", () => {
+		const lines = formatInspectDetail(
+			{
+				...baseSnapshot,
+				provenance: {
+					route: {
+						worker: "command",
+						source: "command-block",
+					},
+					policy: {
+						profile: "default",
+					},
+				},
+			},
+			[],
+		);
+
+		expect(lines).toContain("provenance:");
+		expect(lines).toContain("  route: command (command-block)");
+		expect(lines).toContain("  policy-profile: default");
+		expect(lines.join("\n")).not.toContain("provider:");
+	});
+
+	it("includes routed model, provider, and trust-decision details", () => {
+		const lines = formatInspectDetail(
+			{
+				...baseSnapshot,
+				provenance: {
+					route: {
+						worker: "codex",
+						source: "routing-hints",
+						provider: "openai",
+						model: "gpt-5.4",
+						preferredWorker: "codex",
+						preferredModel: "gpt-5.4",
+						effort: "high",
+					},
+					policy: {
+						profile: "restricted",
+						decisionKind: "reject-run",
+						decisionOutcome: "rejected",
+						decisionReasons: ["tool call blocked"],
+					},
+				},
+			},
+			[],
+		);
+
+		expect(lines).toContain("provenance:");
+		expect(lines).toContain("  route: codex (routing-hints)");
+		expect(lines).toContain("  provider: openai");
+		expect(lines).toContain("  model: gpt-5.4");
+		expect(lines).toContain(
+			"  routing-hints: preferred-worker=codex, preferred-model=gpt-5.4, effort=high",
+		);
+		expect(lines).toContain("  policy-profile: restricted");
+		expect(lines).toContain("  trust-decision: reject-run rejected");
+		expect(lines).toContain("  trust-reasons: tool call blocked");
+	});
+
 	it("includes learnings section when learnings are provided", () => {
 		const learnings = [
 			{
 				id: "abc-123",
 				runId: "run-xyz",
-				scope: "workspace",
-				kind: "fact",
+				scope: "workspace" as const,
+				kind: "fact" as const,
 				title: "Verification gate passed",
 				body: "All outputs verified",
-				status: "active",
+				status: "active" as const,
 				createdAt: "2026-04-12T01:00:00Z",
 				seenCount: 1,
 			},

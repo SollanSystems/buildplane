@@ -148,6 +148,28 @@ export interface StatusSnapshot {
 	};
 }
 
+export interface InspectProvenanceRoute {
+	readonly worker: string;
+	readonly source: string;
+	readonly provider?: string;
+	readonly model?: string;
+	readonly preferredWorker?: RoutingHints["preferredWorker"];
+	readonly preferredModel?: string;
+	readonly effort?: RoutingHints["effort"];
+}
+
+export interface InspectProvenancePolicy {
+	readonly profile: string;
+	readonly decisionKind?: PolicyDecision["kind"];
+	readonly decisionOutcome?: PolicyDecision["outcome"];
+	readonly decisionReasons?: readonly string[];
+}
+
+export interface InspectProvenance {
+	readonly route: InspectProvenanceRoute;
+	readonly policy: InspectProvenancePolicy;
+}
+
 export interface InspectSnapshot {
 	readonly kind: "run" | "unit";
 	readonly unit: Unit;
@@ -156,6 +178,7 @@ export interface InspectSnapshot {
 	readonly strategy?: {
 		readonly strategyId: string;
 	};
+	readonly provenance?: InspectProvenance;
 	readonly injectedMemories?: readonly PersistedInjectedMemoryRecord[];
 	readonly promotedStructuredMemories?: readonly PromotedStructuredMemoryRecord[];
 	readonly runHistory: readonly {
