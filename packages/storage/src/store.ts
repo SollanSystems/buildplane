@@ -141,6 +141,13 @@ interface StoredInjectedMemoryRow {
 	readonly created_at: string;
 }
 
+interface StoredInspectEventRow {
+	readonly id: string;
+	readonly kind: string;
+	readonly occurred_at: string;
+	readonly payload: string;
+}
+
 export interface StorageTestingHooks {
 	readonly failpoint?: (name: string) => void;
 }
@@ -1627,6 +1634,92 @@ export function createStorageStore(
 		return rows;
 	}
 
+	function summarizeEvent(
+		kind: string,
+		payload: Record<string, unknown>,
+	): string {
+		switch (kind) {
+			case "run-created":
+				return `created unit ${String(payload.unitId ?? "unknown")}`;
+			case "run-started":
+				return `started unit ${String(payload.unitId ?? "unknown")}`;
+			case "execution-evidence-recorded": {
+				const exitCode = payload.exitCode ?? "unknown";
+				const outputChecks = Array.isArray(payload.outputChecks)
+					? payload.outputChecks.length
+					: 0;
+				return `execution exit ${String(exitCode)} with ${outputChecks} output checks`;
+			}
+			case "decision-recorded":
+				return `${String(payload.kind ?? "decision")} ${String(payload.outcome ?? "unknown")}`;
+			case "run-completed":
+				return `completed ${String(payload.status ?? "unknown")}`;
+			default:
+				return kind;
+		}
+	}
+
+	function parseEventPayload(payload: string): Record<string, unknown> {
+		try {
+			const parsed = JSON.parse(payload) as unknown;
+			return parsed && typeof parsed === "object"
+				? (parsed as Record<string, unknown>)
+				: {};
+		} catch {
+			return {};
+		}
+	}
+
+	function readEventTapeSummary(
+		runId: string,
+		database: DatabaseSync,
+	): InspectSnapshot["eventTape"] {
+		const rows = database
+			.prepare(
+				`SELECT id, kind, occurred_at, payload FROM events WHERE json_extract(payload, '$.runId') = ? ORDER BY occurred_at ASC, rowid ASC`,
+			)
+			.all(runId) as unknown as StoredInspectEventRow[];
+
+		if (rows.length === 0) {
+			return undefined;
+		}
+
+		const events = rows.map((row) => {
+			const payload = parseEventPayload(row.payload);
+			return {
+				id: row.id,
+				kind: row.kind,
+				occurredAt: row.occurred_at,
+				summary: summarizeEvent(row.kind, payload),
+			};
+		});
+
+		const lastRow = rows[rows.length - 1];
+		const lastPayload = lastRow ? parseEventPayload(lastRow.payload) : {};
+		const terminalStatus =
+			lastRow?.kind === "run-completed" &&
+			typeof lastPayload.status === "string" &&
+			[
+				"pending",
+				"running",
+				"passed",
+				"failed",
+				"cancelled",
+				"suspended",
+			].includes(lastPayload.status)
+				? (lastPayload.status as RunStatus)
+				: undefined;
+
+		return {
+			runId,
+			eventCount: events.length,
+			firstKind: events[0]?.kind,
+			lastKind: events[events.length - 1]?.kind,
+			...(terminalStatus ? { terminalStatus } : {}),
+			events,
+		};
+	}
+
 	function buildInspectProvenance(
 		packet: UnitPacket | null,
 		unit: Unit,
@@ -2931,6 +3024,7 @@ export function createStorageStore(
 						kind: "run",
 						unit,
 						run: toRun(runRow),
+						eventTape: readEventTapeSummary(runRow.id, database),
 						provenance: buildInspectProvenance(
 							parsedSnapshot && "unit" in parsedSnapshot
 								? (parsedSnapshot as UnitPacket)
@@ -2977,6 +3071,7 @@ export function createStorageStore(
 						kind: "unit",
 						unit,
 						run: toRun(run),
+						eventTape: readEventTapeSummary(run.id, database),
 						provenance: buildInspectProvenance(
 							parsedSnapshot && "unit" in parsedSnapshot
 								? (parsedSnapshot as UnitPacket)
