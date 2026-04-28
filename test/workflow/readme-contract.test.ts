@@ -55,6 +55,12 @@ describe("README contract", () => {
 		expect(repoDevelopmentSection).toContain(
 			"pnpm buildplane inspect <run-id> --json",
 		);
+		expect(repoDevelopmentSection).toContain(
+			"pnpm buildplane replay <run-id> --json",
+		);
+		expect(repoDevelopmentSection).toContain(
+			"pnpm buildplane fork <run-id> --at <event-id> --packet <fixed-packet.json>",
+		);
 		expect(repoDevelopmentSection).toContain("pnpm buildplane memory doctor");
 		expect(repoDevelopmentSection).toContain(
 			'BUILDPLANE_NATIVE_BIN="$PWD/native/target/debug/buildplane-native" pnpm buildplane memory doctor --json',
@@ -80,6 +86,12 @@ describe("README contract", () => {
 		);
 		expect(builtCliSection).toContain(
 			"node apps/cli/dist/index.js inspect <run-id> --json",
+		);
+		expect(builtCliSection).toContain(
+			"node apps/cli/dist/index.js replay <run-id> --json",
+		);
+		expect(builtCliSection).toContain(
+			"node apps/cli/dist/index.js fork <run-id> --at <event-id> --packet <fixed-packet.json>",
 		);
 		expect(builtCliSection).toContain(
 			"node apps/cli/dist/index.js memory doctor --json",
@@ -137,6 +149,16 @@ describe("README contract", () => {
 		);
 		expect(readme).toContain(
 			"Broader repo-local surfaces already include history/status/inspect",
+		);
+	});
+
+	it("keeps replay, fork, and event-tape docs tied to the operator loop", () => {
+		expect(readme).toContain("docs/ledger.md");
+		expect(readme).toContain("inspect the event tape");
+		expect(readme).toContain("replay the stored packet snapshot");
+		expect(readme).toContain("fork from a unit boundary");
+		expect(readme).toContain(
+			"buildplane ledger replay --run-id <run-id> --workspace <path>",
 		);
 	});
 
