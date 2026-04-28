@@ -205,6 +205,47 @@ describe("formatInspectDetail", () => {
 		expect(lines).toContain("strategy: strategy-injected");
 	});
 
+	it("renders event tape summary in inspect output", () => {
+		const lines = formatInspectDetail(
+			{
+				...baseSnapshot,
+				eventTape: {
+					runId: "run-xyz",
+					eventCount: 3,
+					firstKind: "run-created",
+					lastKind: "run-completed",
+					terminalStatus: "failed",
+					events: [
+						{
+							id: "event-1",
+							kind: "run-created",
+							occurredAt: "2026-04-27T00:00:00.000Z",
+							summary: "created unit unit-1",
+						},
+						{
+							id: "event-2",
+							kind: "decision-recorded",
+							occurredAt: "2026-04-27T00:00:01.000Z",
+							summary: "reject-run rejected\n\u001b[31m",
+						},
+					],
+				},
+			},
+			[],
+		);
+
+		expect(lines).toContain("event-tape:");
+		expect(lines).toContain("  events: 3");
+		expect(lines).toContain("  first: run-created");
+		expect(lines).toContain("  last: run-completed");
+		expect(lines).toContain("  terminal-status: failed");
+		expect(lines.join("\n")).toContain(
+			"decision-recorded event-2: reject-run rejected\\n\\u001b[31m",
+		);
+		expect(lines).toContain("  - ... 1 more events");
+		expect(lines.join("\n")).not.toContain("reject-run rejected\n");
+	});
+
 	it("includes route and policy provenance when present", () => {
 		const lines = formatInspectDetail(
 			{
@@ -289,6 +330,21 @@ describe("formatInspectDetail", () => {
 			{
 				...baseSnapshot,
 				run: { id: "run-xyz", unitId: "implement-foo", status: "failed" },
+				eventTape: {
+					runId: "run-xyz",
+					eventCount: 1,
+					firstKind: "run-created",
+					lastKind: "run-created",
+					terminalStatus: "failed",
+					events: [
+						{
+							id: "event-1",
+							kind: "run-created",
+							occurredAt: "2026-04-27T00:00:00.000Z",
+							summary: "created unit implement-foo",
+						},
+					],
+				},
 				evidence: [
 					{
 						kind: "verification",
@@ -313,6 +369,8 @@ describe("formatInspectDetail", () => {
 			[],
 		);
 
+		expect(lines).toContain("event-tape:");
+		expect(lines).toContain("  events: 1");
 		expect(lines).toContain("outcome:");
 		expect(lines).toContain("  status: failed");
 		expect(lines).toContain("evidence:");

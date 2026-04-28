@@ -156,10 +156,12 @@ Success means:
 
 ### Slice tasks
 
-- [ ] Task 3A: tighten replay/help/operator wording so the flow is obvious
-- [ ] Task 3B: make review-mode outcomes clearer in inspect/history surfaces
+- [x] Task 3A: land a clean event-tape capture spine from current `origin/main`
+- [ ] Task 3B: project event-tape summaries into inspect/history surfaces
 - [ ] Task 3C: document a concrete rescue/recovery comparison against a raw worker path
 - [ ] Task 3D: ensure the front-door docs talk about replay/review/recovery, not generic shell behavior
+
+Branch hygiene note: the old `spec/event-tape-capture` PR branch is reference evidence only if its history remains polluted by merge or synthetic run commits. Replacement slices should start from current `origin/main` and port only intentional deltas.
 
 ---
 
