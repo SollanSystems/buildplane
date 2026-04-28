@@ -148,11 +148,19 @@ export interface StatusSnapshot {
 	};
 }
 
+export type InspectEventTapeMetadataValue = string | number | boolean;
+
+export interface InspectEventTapeKindCount {
+	readonly kind: string;
+	readonly count: number;
+}
+
 export interface InspectEventTapeEntry {
 	readonly id: string;
 	readonly kind: string;
 	readonly occurredAt: string;
 	readonly summary: string;
+	readonly metadata?: Readonly<Record<string, InspectEventTapeMetadataValue>>;
 }
 
 export interface InspectEventTapeSummary {
@@ -160,7 +168,10 @@ export interface InspectEventTapeSummary {
 	readonly eventCount: number;
 	readonly firstKind?: string;
 	readonly lastKind?: string;
+	readonly firstOccurredAt?: string;
+	readonly lastOccurredAt?: string;
 	readonly terminalStatus?: RunStatus;
+	readonly kindCounts?: readonly InspectEventTapeKindCount[];
 	readonly events: readonly InspectEventTapeEntry[];
 }
 

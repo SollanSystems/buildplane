@@ -205,7 +205,7 @@ describe("formatInspectDetail", () => {
 		expect(lines).toContain("strategy: strategy-injected");
 	});
 
-	it("renders event tape summary in inspect output", () => {
+	it("renders event tape summary with compact sanitized metadata in inspect output", () => {
 		const lines = formatInspectDetail(
 			{
 				...baseSnapshot,
@@ -214,19 +214,36 @@ describe("formatInspectDetail", () => {
 					eventCount: 3,
 					firstKind: "run-created",
 					lastKind: "run-completed",
+					firstOccurredAt: "2026-04-27T00:00:00.000Z",
+					lastOccurredAt: "2026-04-27T00:00:02.000Z",
 					terminalStatus: "failed",
+					kindCounts: [
+						{ kind: "run-created", count: 1 },
+						{ kind: "decision-recorded", count: 1 },
+						{ kind: "run-completed", count: 1 },
+					],
 					events: [
 						{
 							id: "event-1",
 							kind: "run-created",
 							occurredAt: "2026-04-27T00:00:00.000Z",
 							summary: "created unit unit-1",
+							metadata: {
+								unitId: "unit-1",
+								status: "pending",
+							},
 						},
 						{
 							id: "event-2",
 							kind: "decision-recorded",
 							occurredAt: "2026-04-27T00:00:01.000Z",
 							summary: "reject-run rejected\n\u001b[31m",
+							metadata: {
+								decisionKind: "reject-run",
+								outcome: "rejected",
+								reasonPreview: "blocked\n\u001b[31mnow",
+								reasonsCount: 1,
+							},
 						},
 					],
 				},
@@ -238,12 +255,49 @@ describe("formatInspectDetail", () => {
 		expect(lines).toContain("  events: 3");
 		expect(lines).toContain("  first: run-created");
 		expect(lines).toContain("  last: run-completed");
+		expect(lines).toContain(
+			"  window: 2026-04-27T00:00:00.000Z -> 2026-04-27T00:00:02.000Z",
+		);
+		expect(lines).toContain(
+			"  kinds: run-created=1, decision-recorded=1, run-completed=1",
+		);
 		expect(lines).toContain("  terminal-status: failed");
 		expect(lines.join("\n")).toContain(
-			"decision-recorded event-2: reject-run rejected\\n\\u001b[31m",
+			"decision-recorded event-2: reject-run rejected\\n\\u001b[31m [decisionKind=reject-run, outcome=rejected, reasonPreview=blocked\\n\\u001b[31mnow, reasonsCount=1]",
 		);
 		expect(lines).toContain("  - ... 1 more events");
 		expect(lines.join("\n")).not.toContain("reject-run rejected\n");
+		expect(lines.join("\n")).not.toContain("reasonPreview=blocked\n");
+	});
+
+	it("omits empty event metadata without adding trailing whitespace", () => {
+		const lines = formatInspectDetail(
+			{
+				...baseSnapshot,
+				eventTape: {
+					runId: "run-xyz",
+					eventCount: 1,
+					firstKind: "run-created",
+					lastKind: "run-created",
+					terminalStatus: "passed",
+					events: [
+						{
+							id: "event-1",
+							kind: "run-created",
+							occurredAt: "2026-04-27T00:00:00.000Z",
+							summary: "created unit unit-1",
+							metadata: {},
+						},
+					],
+				},
+			},
+			[],
+		);
+
+		expect(lines).toContain("  - run-created event-1: created unit unit-1");
+		expect(lines).not.toContain(
+			"  - run-created event-1: created unit unit-1 ",
+		);
 	});
 
 	it("includes route and policy provenance when present", () => {

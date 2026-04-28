@@ -98,6 +98,8 @@ export type {
 	ExecutionReceipt,
 	InjectedMemoryRecord,
 	InspectEventTapeEntry,
+	InspectEventTapeKindCount,
+	InspectEventTapeMetadataValue,
 	InspectEventTapeSummary,
 	InspectSnapshot,
 	ModelExecutionBlock,
