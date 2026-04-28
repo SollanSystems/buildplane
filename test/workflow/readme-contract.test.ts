@@ -40,6 +40,10 @@ const builtCliSection = extractTopLevelSection(
 	"## In-repo built CLI path",
 );
 const distributionSection = extractTopLevelSection(readme, "## Distribution");
+const highTrustLoopSection = extractTopLevelSection(
+	readme,
+	"## High-trust operator loop",
+);
 
 describe("README contract", () => {
 	it("documents the full repo development command surface in its own section", () => {
@@ -137,6 +141,9 @@ describe("README contract", () => {
 	it("links to the model benchmark summary doc", () => {
 		expect(readme).toContain("docs/benchmarks/model-codex.md");
 		expect(readme).toContain("model-codex");
+		expect(readme).toContain("reviewer-rescue");
+		expect(readme).toContain("raw one-shot path");
+		expect(readme).toContain("implement-then-review");
 	});
 
 	it("does not describe published install as future-only anywhere in the README", () => {
@@ -160,6 +167,15 @@ describe("README contract", () => {
 		expect(readme).toContain(
 			"buildplane ledger replay --run-id <run-id> --workspace <path>",
 		);
+	});
+
+	it("presents replay review and recovery as the high-trust operator loop", () => {
+		expect(highTrustLoopSection).toContain("run with implement-then-review");
+		expect(highTrustLoopSection).toContain("inspect the event tape");
+		expect(highTrustLoopSection).toContain("replay the stored packet snapshot");
+		expect(highTrustLoopSection).toContain("fork from a unit boundary");
+		expect(highTrustLoopSection).toContain("reviewer-rescue");
+		expect(highTrustLoopSection).toContain("raw one-shot path");
 	});
 
 	it("documents the Node baseline and published runtime range", () => {

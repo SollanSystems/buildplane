@@ -143,10 +143,10 @@ Success means:
 
 ### Acceptance criteria
 
-- [ ] replay-oriented workflows are easy to discover and understand from CLI help/docs
-- [ ] implement-then-review is presented as the default high-trust mode where appropriate
-- [ ] recovery after bad or partial runs is visible in operator surfaces and docs
-- [ ] a clear benchmark/demo story exists showing why review/replay/recovery beats raw one-shot execution for at least one meaningful case
+- [x] replay-oriented workflows are easy to discover and understand from CLI help/docs
+- [x] implement-then-review is presented as the default high-trust mode where appropriate
+- [x] recovery after bad or partial runs is visible in operator surfaces and docs
+- [x] a clear benchmark/demo story exists showing why review/replay/recovery beats raw one-shot execution for at least one meaningful case
 
 ### Likely files
 
@@ -159,7 +159,7 @@ Success means:
 
 - [x] Task 3A: land a clean event-tape capture spine from current `origin/main`
 - [x] Task 3B: project event-tape summaries into inspect/history surfaces
-- [ ] Task 3C: document a concrete rescue/recovery comparison against a raw worker path
+- [x] Task 3C: document a concrete rescue/recovery comparison against a raw worker path
 - [x] Task 3D: ensure the front-door docs talk about replay/review/recovery, not generic shell behavior
 
 Branch hygiene note: the old `spec/event-tape-capture` PR branch is reference evidence only if its history remains polluted by merge or synthetic run commits. Replacement slices should start from current `origin/main` and port only intentional deltas.
