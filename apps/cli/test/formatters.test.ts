@@ -329,6 +329,21 @@ describe("formatInspectDetail", () => {
 			{
 				...baseSnapshot,
 				run: { id: "run-xyz", unitId: "implement-foo", status: "failed" },
+				eventTape: {
+					runId: "run-xyz",
+					eventCount: 3,
+					firstKind: "run-created",
+					lastKind: "run-completed",
+					terminalStatus: "failed",
+					events: [
+						{
+							id: "event-1",
+							kind: "run-created",
+							occurredAt: "2026-04-27T00:00:00.000Z",
+							summary: "created unit implement-foo",
+						},
+					],
+				},
 				evidence: [
 					{
 						kind: "verification",
@@ -353,6 +368,8 @@ describe("formatInspectDetail", () => {
 			[],
 		);
 
+		expect(lines).toContain("event-tape:");
+		expect(lines).toContain("  events: 3");
 		expect(lines).toContain("outcome:");
 		expect(lines).toContain("  status: failed");
 		expect(lines).toContain("evidence:");

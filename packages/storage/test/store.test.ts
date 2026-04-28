@@ -173,6 +173,38 @@ describe("storage adapter", () => {
 		]);
 	});
 
+	it("keeps failed-run event tape, evidence, and decision reasons together", () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-store-failed-proof-"));
+		const storage = createBuildplaneStorage(root);
+		storage.initializeProject();
+
+		const run = storage.createRun({
+			...packet,
+			unit: { ...packet.unit, id: "unit-failed-proof" },
+		});
+		storage.markRunRunning(run.id);
+		storage.recordExecutionEvidence(run.id, failedReceipt);
+		storage.recordDecision(run.id, rejectedDecision);
+		storage.completeRun(run.id, "failed");
+
+		const inspect = storage.inspectTarget(run.id);
+		expect(inspect.run.status).toBe("failed");
+		expect(inspect.evidence).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({ kind: "command-exit", status: "fail" }),
+				expect.objectContaining({ kind: "output-check", status: "fail" }),
+			]),
+		);
+		expect(inspect.decisions).toEqual([
+			expect.objectContaining({
+				kind: "reject-run",
+				outcome: "rejected",
+				reasons: ["command exited with code 1"],
+			}),
+		]);
+		expect(inspect.eventTape?.terminalStatus).toBe("failed");
+	});
+
 	it("surfaces route and policy provenance for model packets with routing hints", () => {
 		const root = mkdtempSync(join(tmpdir(), "buildplane-store-provenance-"));
 		const storage = createBuildplaneStorage(root);
