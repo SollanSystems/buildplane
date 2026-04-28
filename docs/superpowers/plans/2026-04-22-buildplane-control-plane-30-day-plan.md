@@ -64,6 +64,7 @@ Success means:
 - Acceptance checkboxes mean the operator-visible criterion has been checked against the shipped surface.
 - Leave acceptance unchecked when a capability is only partially visible, even if supporting implementation tasks are complete.
 
+
 ---
 
 ## Slice 1 — Make the trust contract boring and green
@@ -119,10 +120,10 @@ Success means:
 ### Likely files
 
 - [ ] Modify: `apps/cli/src/run-cli.ts`
-- [ ] Modify: `apps/cli/src/formatters.ts`
-- [ ] Modify: `packages/storage/src/store.ts`
-- [ ] Modify: `packages/kernel/src/*` where provenance payloads are assembled
-- [ ] Modify: relevant inspect/history tests
+- [x] Modify: `apps/cli/src/formatters.ts`
+- [x] Modify: `packages/storage/src/store.ts`
+- [x] Modify: `packages/kernel/src/*` where provenance payloads are assembled
+- [x] Modify: relevant inspect/history tests
 
 ### Slice tasks
 
