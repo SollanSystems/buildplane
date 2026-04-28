@@ -1854,6 +1854,9 @@ export function createStorageStore(
 			route: {
 				worker,
 				source,
+				...(routingHints?.preferredWorker
+					? { preferredWorker: routingHints.preferredWorker }
+					: {}),
 				...(routingHints?.preferredModel
 					? { preferredModel: routingHints.preferredModel }
 					: {}),

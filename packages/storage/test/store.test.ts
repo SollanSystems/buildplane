@@ -287,6 +287,7 @@ describe("storage adapter", () => {
 			route: {
 				worker: "codex",
 				source: "routing-hints",
+				preferredWorker: "codex",
 				preferredModel: "gpt-5.4",
 				effort: "high",
 				provider: "openai-codex",
