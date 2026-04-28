@@ -171,6 +171,9 @@ describe("storage adapter", () => {
 			"decision-recorded",
 			"run-completed",
 		]);
+		expect(inspect.eventTape?.events[1]?.summary).toBe(
+			"started unit unit-event-tape",
+		);
 	});
 
 	it("keeps failed-run event tape, evidence, and decision reasons together", () => {

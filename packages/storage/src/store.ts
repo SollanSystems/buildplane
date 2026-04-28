@@ -1908,7 +1908,11 @@ export function createStorageStore(
 				database
 					.prepare(`UPDATE runs SET status = ?, updated_at = ? WHERE id = ?`)
 					.run("running", updatedAt, runId);
-				appendEvent("run-started", { runId, status: "running" }, database);
+				appendEvent(
+					"run-started",
+					{ runId, unitId: runRow.unit_id, status: "running" },
+					database,
+				);
 			} finally {
 				database.close();
 			}
