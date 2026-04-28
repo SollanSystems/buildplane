@@ -287,6 +287,7 @@ describe("storage adapter", () => {
 			route: {
 				worker: "codex",
 				source: "routing-hints",
+				preferredWorker: "codex",
 				preferredModel: "gpt-5.4",
 				effort: "high",
 				provider: "openai-codex",
@@ -979,6 +980,15 @@ describe("storage adapter", () => {
 		const history = storage.getRunHistory();
 
 		expect(inspect.strategy).toEqual({ strategyId: "strategy-injected" });
+		expect(inspect.provenance).toMatchObject({
+			route: {
+				worker: "command",
+				source: "command-block",
+			},
+			policy: {
+				profile: "default",
+			},
+		});
 		expect(unitInspect.strategy).toEqual({ strategyId: "strategy-injected" });
 		expect(inspect.provenance).toMatchObject({
 			route: {
@@ -1072,6 +1082,51 @@ describe("storage adapter", () => {
 		expect(unitInspect.promotedStructuredMemories).toEqual(
 			inspect.promotedStructuredMemories,
 		);
+	});
+
+	it("surfaces model routing provenance when a worker hint is present", () => {
+		const root = mkdtempSync(
+			join(tmpdir(), "buildplane-store-model-provenance-"),
+		);
+		const storage = createBuildplaneStorage(root);
+		storage.initializeProject();
+
+		const modelRun = storage.createRun({
+			unit: {
+				...packet.unit,
+				id: "unit-model-provenance",
+				kind: "model",
+			},
+			model: {
+				provider: "openai",
+				model: "gpt-5.4",
+			},
+			routingHints: {
+				preferredWorker: "codex",
+				preferredModel: "gpt-5.4",
+				effort: "high",
+			},
+			verification: {
+				requiredOutputs: [],
+			},
+		});
+		storage.completeRun(modelRun.id, "passed");
+
+		const inspect = storage.inspectTarget(modelRun.id);
+		expect(inspect.provenance).toMatchObject({
+			route: {
+				worker: "codex",
+				source: "routing-hints",
+				provider: "openai",
+				model: "gpt-5.4",
+				preferredWorker: "codex",
+				preferredModel: "gpt-5.4",
+				effort: "high",
+			},
+			policy: {
+				profile: "default",
+			},
+		});
 	});
 
 	it("rejects invalid failure-outcome payload combinations", () => {
