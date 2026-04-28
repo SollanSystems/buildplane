@@ -32,7 +32,18 @@ Near-term work is focused on trust-surface hardening rather than broader agent-s
 
 Current Phase 5 benchmark evidence for the `model-codex` eval suite lives in [`docs/benchmarks/model-codex.md`](docs/benchmarks/model-codex.md).
 
-That summary documents the rerun command, current aggregate signals, what the current memory-help and strategy-help fixtures prove, and which combined memory-plus-strategy proof remains a benchmark gap.
+That summary documents the rerun command, current aggregate signals, what the current memory-help and strategy-help fixtures prove, and which combined memory-plus-strategy proof remains a benchmark gap. The current concrete rescue story is the `reviewer-rescue` fixture: the raw one-shot path leaves a rejected draft, while Buildplane's implement-then-review strategy path records reviewer feedback and produces an accepted result.
+
+## High-trust operator loop
+
+For high-trust work, Buildplane's front door is the governed loop rather than a raw one-shot worker path:
+
+1. `pnpm buildplane run --packet <path>` to run with implement-then-review instead of unbounded chat.
+2. `pnpm buildplane inspect <run-id> --json` to inspect the event tape, policy decisions, evidence, artifacts, and final outcome.
+3. `pnpm buildplane replay <run-id> --json` to replay the stored packet snapshot as a new run when the same unit needs another attempt with changed settings.
+4. `pnpm buildplane fork <run-id> --at <event-id> --packet <fixed-packet.json>` to fork from a unit boundary when recovery after a bad or partial run needs a corrected packet.
+
+The concrete `reviewer-rescue` benchmark documents why this loop matters: the raw one-shot path leaves a rejected draft, while the implement-then-review path records reviewer feedback and lands an accepted artifact. Use the benchmark doc for the current evidence matrix and the local run loop below for the exact repo-development commands.
 
 ## Verification contract
 

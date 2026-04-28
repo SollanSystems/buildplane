@@ -70,6 +70,19 @@ This fixture proves memory changes the outcome: the exact output path arrives th
 
 This fixture proves strategy changes the outcome: Buildplane's reviewer loop rescues a draft that the raw one-shot path leaves rejected. It does not prove memory is required, because the no-memory strategy path also passes.
 
+## Concrete rescue/recovery story
+
+The `reviewer-rescue` fixture is the current concrete comparison against raw one-shot execution:
+
+| Condition | Outcome | Operator meaning |
+| --- | --- | --- |
+| `memory+raw` | fail | The raw one-shot path writes `output/reviewer-rescue.js`, but the draft remains reviewer-rejected because there is no corrective review loop. |
+| `memory+strategy` | pass | Buildplane's implement-then-review strategy records reviewer feedback after round 1, reruns the implementer with that feedback, and produces the accepted `approved reviewer rescue` result. |
+| `nomemory+raw` | fail | Removing memory does not rescue the raw path; the failure is about absent review/recovery, not just missing context. |
+| `nomemory+strategy` | pass | The same implement-then-review loop still rescues the task, so this fixture proves strategy/reviewer help rather than memory dependence. |
+
+This is the current proof that Buildplane's control-plane loop can change a meaningful outcome: inspect/review evidence identifies a rejected draft, the strategy path feeds that evidence back into the worker, and the second attempt lands an accepted artifact. Treat it as a rescue/recovery demo story, not a broad performance benchmark.
+
 ## What this benchmark currently proves
 
 Buildplane currently has checked-in benchmark evidence that:

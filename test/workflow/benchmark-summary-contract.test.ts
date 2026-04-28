@@ -42,4 +42,13 @@ describe("benchmark summary contract", () => {
 		expect(benchmarkDoc).toContain("does not currently prove");
 		expect(benchmarkDoc).toMatch(/duration .* environment-sensitive/i);
 	});
+
+	it("documents a concrete reviewer-rescue comparison against raw one-shot execution", () => {
+		expect(benchmarkDoc).toContain("## Concrete rescue/recovery story");
+		expect(benchmarkDoc).toContain("raw one-shot path");
+		expect(benchmarkDoc).toContain("implement-then-review");
+		expect(benchmarkDoc).toContain("reviewer-rescue");
+		expect(benchmarkDoc).toContain("`memory+raw` | fail");
+		expect(benchmarkDoc).toContain("`memory+strategy` | pass");
+	});
 });
