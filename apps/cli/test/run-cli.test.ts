@@ -418,6 +418,175 @@ describe("cli command surface", () => {
 		expect(result.stderr).toEqual([]);
 		expect(result.stdout.join("\n")).toContain("Execute:");
 		expect(result.stdout.join("\n")).toContain("run --packet <path>");
+		expect(result.stdout.join("\n")).toContain("replay <id> [--json]");
+		expect(result.stdout.join("\n")).toContain(
+			"fork <id> --at <event> --packet <file>",
+		);
+		expect(result.stdout.join("\n")).toContain(
+			"ledger replay --run-id <id> --workspace <path>",
+		);
+	});
+
+	it("shows replay help without requiring init or a run id", async () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-cli-replay-help-"));
+
+		const result = await runCliCapture(root, ["replay", "--help"]);
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stderr).toEqual([]);
+		const output = result.stdout.join("\n");
+		expect(output).toContain("buildplane replay <run-id> [options]");
+		expect(output).toContain("Re-executes the stored packet snapshot");
+		expect(output).toContain("--policy <profile>");
+		expect(output).toContain(
+			"buildplane ledger replay --run-id <run-id> --workspace <path>",
+		);
+		expect(existsSync(join(root, ".buildplane"))).toBe(false);
+	});
+
+	it("routes bare replay/fork help tokens to help output instead of parsing them as ids", async () => {
+		const replayRoot = mkdtempSync(
+			join(tmpdir(), "buildplane-cli-replay-help-token-"),
+		);
+		const replayResult = await runCliCapture(replayRoot, ["replay", "help"]);
+
+		expect(replayResult.exitCode).toBe(0);
+		expect(replayResult.stderr).toEqual([]);
+		expect(replayResult.stdout.join("\n")).toContain(
+			"buildplane replay <run-id> [options]",
+		);
+		expect(replayResult.stdout.join("\n")).toContain("--policy <profile>");
+		expect(existsSync(join(replayRoot, ".buildplane"))).toBe(false);
+
+		const forkRoot = mkdtempSync(
+			join(tmpdir(), "buildplane-cli-fork-help-token-"),
+		);
+		const forkResult = await runCliCapture(forkRoot, ["fork", "help"]);
+
+		expect(forkResult.exitCode).toBe(0);
+		expect(forkResult.stderr).toEqual([]);
+		expect(forkResult.stdout.join("\n")).toContain(
+			"buildplane fork <parent-run-id> --at <event-id> --packet <file>",
+		);
+		expect(existsSync(join(forkRoot, ".buildplane"))).toBe(false);
+	});
+
+	it("applies replay policy overrides from both --policy=<profile> and --policy <profile>", async () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-cli-replay-policy-"));
+		const capturedPolicies: string[] = [];
+		const packetSnapshot = createPassingPacket("unit-replay-policy");
+
+		vi.doMock("@buildplane/storage", () => ({
+			createBuildplaneStorage: () => ({
+				getPacketSnapshot: (_runId: string) => packetSnapshot,
+			}),
+			createEventStore: () => ({
+				persistEvent: (_runId: string, _event: unknown) => {},
+			}),
+		}));
+		vi.doMock("@buildplane/kernel", () => ({
+			createEventBus: () => ({
+				subscribe: (_listener: (event: unknown) => void) => () => {},
+				emit: (_event: unknown) => {},
+			}),
+		}));
+
+		const dependencies: RunCliDependencies = {
+			createOrchestrator: () =>
+				({
+					initializeProject() {
+						return {
+							created: true,
+							projectRoot: root,
+							stateDbPath: join(root, ".buildplane", "state.db"),
+						};
+					},
+					runPacket() {
+						throw new Error("not used");
+					},
+					async runPacketAsync(packet: unknown) {
+						const replayPacket = packet as {
+							unit?: { policyProfile?: string };
+						};
+						capturedPolicies.push(replayPacket.unit?.policyProfile ?? "");
+						return {
+							run: {
+								id: `run-replay-${capturedPolicies.length}`,
+								status: "passed",
+							},
+							receipt: null,
+							decision: null,
+						};
+					},
+					async runGraphAsync() {
+						return { outcome: "passed" as const, nodes: [] };
+					},
+					async runStrategy() {
+						return {
+							strategyId: "strategy-1",
+							mode: "single",
+							outcome: "passed" as const,
+							childResults: new Map(),
+							mergeDecision: {
+								policy: "default",
+								outcome: "passed",
+								reasons: [],
+							},
+						};
+					},
+					getStatus() {
+						return { initialized: true };
+					},
+					inspect(id: string) {
+						return { kind: "run", run: { id } };
+					},
+				}) as BuildplaneOrchestrator,
+		};
+
+		try {
+			const equalsResult = await runCliCapture(
+				root,
+				["replay", "run-policy-equals", "--policy=safe"],
+				dependencies,
+			);
+			expect(equalsResult.exitCode).toBe(0);
+
+			const spaceResult = await runCliCapture(
+				root,
+				["replay", "run-policy-space", "--policy", "safe"],
+				dependencies,
+			);
+			expect(spaceResult.exitCode).toBe(0);
+
+			const helpValueResult = await runCliCapture(
+				root,
+				["replay", "run-policy-help-value", "--policy", "help"],
+				dependencies,
+			);
+			expect(helpValueResult.exitCode).toBe(0);
+
+			expect(capturedPolicies).toEqual(["safe", "safe", "help"]);
+		} finally {
+			vi.doUnmock("@buildplane/storage");
+			vi.doUnmock("@buildplane/kernel");
+		}
+	});
+
+	it("shows fork help without requiring init or fork args", async () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-cli-fork-help-"));
+
+		const result = await runCliCapture(root, ["fork", "--help"]);
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stderr).toEqual([]);
+		const output = result.stdout.join("\n");
+		expect(output).toContain(
+			"buildplane fork <parent-run-id> --at <event-id> --packet <file>",
+		);
+		expect(output).toContain("Fork resumes from a unit boundary");
+		expect(output).toContain("workspace git state must be clean");
+		expect(output).toContain("Target event must be a unit_started event");
+		expect(existsSync(join(root, ".buildplane"))).toBe(false);
 	});
 
 	it("workflow scan prints a preview of recognized workflow files without init", async () => {
