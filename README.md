@@ -191,3 +191,20 @@ Example packet:
 ```
 
 This example is intentionally narrow: one packet, one run, one local command step, one persisted decision path. Broader repo-local surfaces already include history/status/inspect, workspace retention and cleanup, replay-oriented flows, strategy execution, policy decisions, and model-worker routing where the documented repo-development and in-repo built CLI paths support them. Published/global install remains intentionally narrower, especially for native-backed memory and ledger surfaces.
+
+## GSD-2 repo-local task state
+
+GSD-2 is the repo-local state layer for turning ambiguous work into bounded task envelopes before execution. It complements Buildplane's high-trust run/inspect/replay/fork loop; it does not replace `/auto-coder` as the serious coding front door and does not make a dry-run into a verified run.
+
+Milestone 1 is intentionally non-executing: it writes and validates `.gsd2` state and previews routes, but it does not dispatch Buildplane runs, worktree-kernel slices, tmux sessions, or model workers.
+
+Current repo-development commands:
+
+```bash
+pnpm gsd2 status
+pnpm gsd2 new "<goal>" --route planning_only
+pnpm gsd2 validate
+pnpm gsd2 run --dry-run <task-id>
+```
+
+The first implementation target is only the state skeleton: `.gsd2/PROJECT.md`, `.gsd2/STATE.md`, `.gsd2/QUEUE.md`, `.gsd2/config.yaml`, and per-task `task.md`, `envelope.yaml`, and `receipt.yaml`. Later milestones may bridge those envelopes to worktree-kernel or Buildplane after the dry-run contract is accepted.
