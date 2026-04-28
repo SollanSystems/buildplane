@@ -130,6 +130,11 @@ describe("storage adapter", () => {
 		const eventKinds = database
 			.prepare(`SELECT kind FROM events ORDER BY rowid ASC`)
 			.all() as { kind: string }[];
+		const eventIndexes = database
+			.prepare(`PRAGMA index_list(events)`)
+			.all() as {
+			name: string;
+		}[];
 		database.close();
 
 		expect(eventKinds.map((row) => row.kind)).toEqual([
@@ -140,6 +145,104 @@ describe("storage adapter", () => {
 			"decision-recorded",
 			"run-completed",
 		]);
+		expect(eventIndexes.map((row) => row.name)).toContain(
+			"idx_events_run_id_occurred_at",
+		);
+	});
+
+	it("surfaces a compact event tape summary in inspect snapshots", () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-store-event-tape-"));
+		const storage = createBuildplaneStorage(root);
+		storage.initializeProject();
+
+		const run = storage.createRun({
+			...packet,
+			unit: { ...packet.unit, id: "unit-event-tape" },
+		});
+		storage.markRunRunning(run.id);
+		storage.recordExecutionEvidence(run.id, failedReceipt);
+		storage.recordDecision(run.id, rejectedDecision);
+		storage.completeRun(run.id, "failed");
+
+		const inspect = storage.inspectTarget(run.id);
+		expect(inspect.eventTape).toMatchObject({
+			runId: run.id,
+			eventCount: 5,
+			firstKind: "run-created",
+			lastKind: "run-completed",
+			terminalStatus: "failed",
+		});
+		expect(inspect.eventTape?.events.map((event) => event.kind)).toEqual([
+			"run-created",
+			"run-started",
+			"execution-evidence-recorded",
+			"decision-recorded",
+			"run-completed",
+		]);
+		expect(inspect.eventTape?.events[1]?.summary).toBe(
+			"started unit unit-event-tape",
+		);
+		expect(inspect.eventTape?.firstOccurredAt).toBe(
+			inspect.eventTape?.events[0]?.occurredAt,
+		);
+		expect(inspect.eventTape?.lastOccurredAt).toBe(
+			inspect.eventTape?.events[inspect.eventTape.events.length - 1]
+				?.occurredAt,
+		);
+		expect(inspect.eventTape?.kindCounts).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({ kind: "run-created", count: 1 }),
+				expect.objectContaining({ kind: "run-started", count: 1 }),
+				expect.objectContaining({
+					kind: "execution-evidence-recorded",
+					count: 1,
+				}),
+				expect.objectContaining({ kind: "decision-recorded", count: 1 }),
+				expect.objectContaining({ kind: "run-completed", count: 1 }),
+			]),
+		);
+		expect(inspect.eventTape?.events[2]?.metadata).toMatchObject({
+			exitCode: 1,
+			outputChecksCount: 1,
+			failedOutputChecks: 1,
+		});
+		expect(inspect.eventTape?.events[3]?.metadata).toMatchObject({
+			kind: "reject-run",
+			outcome: "rejected",
+			reasonsCount: 1,
+		});
+	});
+
+	it("keeps failed-run event tape, evidence, and decision reasons together", () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-store-failed-proof-"));
+		const storage = createBuildplaneStorage(root);
+		storage.initializeProject();
+
+		const run = storage.createRun({
+			...packet,
+			unit: { ...packet.unit, id: "unit-failed-proof" },
+		});
+		storage.markRunRunning(run.id);
+		storage.recordExecutionEvidence(run.id, failedReceipt);
+		storage.recordDecision(run.id, rejectedDecision);
+		storage.completeRun(run.id, "failed");
+
+		const inspect = storage.inspectTarget(run.id);
+		expect(inspect.run.status).toBe("failed");
+		expect(inspect.evidence).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({ kind: "command-exit", status: "fail" }),
+				expect.objectContaining({ kind: "output-check", status: "fail" }),
+			]),
+		);
+		expect(inspect.decisions).toEqual([
+			expect.objectContaining({
+				kind: "reject-run",
+				outcome: "rejected",
+				reasons: ["command exited with code 1"],
+			}),
+		]);
+		expect(inspect.eventTape?.terminalStatus).toBe("failed");
 	});
 
 	it("surfaces route and policy provenance for model packets with routing hints", () => {
@@ -294,6 +397,10 @@ describe("storage adapter", () => {
 			path: workspacePath,
 		});
 		expect(inspect.workspace?.finalizedAt).toEqual(expect.any(String));
+		expect(inspect.eventTape).toMatchObject({
+			lastKind: "workspace-retained",
+			terminalStatus: "failed",
+		});
 	});
 
 	it("persists infrastructure evidence for setup failures without fabricating a workspace row", () => {

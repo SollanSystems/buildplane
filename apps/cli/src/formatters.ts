@@ -411,6 +411,26 @@ interface InspectSnapshotLike {
 	readonly strategy?: {
 		readonly strategyId: string;
 	};
+	readonly eventTape?: {
+		readonly runId: string;
+		readonly eventCount: number;
+		readonly firstKind?: string;
+		readonly lastKind?: string;
+		readonly firstOccurredAt?: string;
+		readonly lastOccurredAt?: string;
+		readonly terminalStatus?: string;
+		readonly kindCounts?: readonly {
+			readonly kind: string;
+			readonly count: number;
+		}[];
+		readonly events: readonly {
+			readonly id: string;
+			readonly kind: string;
+			readonly occurredAt: string;
+			readonly summary: string;
+			readonly metadata?: Readonly<Record<string, string | number | boolean>>;
+		}[];
+	};
 	readonly evidence: readonly {
 		readonly kind: string;
 		readonly status: string;
@@ -456,6 +476,48 @@ function formatInspectEvidenceLine(evidence: {
 		? `: ${sanitizeTerminalText(evidence.message)}`
 		: "";
 	return `${sanitizeTerminalText(evidence.kind)} ${sanitizeTerminalText(evidence.status)}${message}`;
+}
+
+function clipInspectMetadataText(value: string, maxLength = 80): string {
+	return value.length <= maxLength
+		? value
+		: `${value.slice(0, Math.max(maxLength - 1, 0))}…`;
+}
+
+function formatEventTapeMetadata(
+	metadata: Readonly<Record<string, string | number | boolean>>,
+	maxPairs = 4,
+): string {
+	const pairs = Object.entries(metadata)
+		.sort(([left], [right]) => left.localeCompare(right))
+		.map(([key, value]) => {
+			const normalized =
+				typeof value === "string"
+					? clipInspectMetadataText(value)
+					: String(value);
+			return `${sanitizeTerminalText(key)}=${sanitizeTerminalText(normalized)}`;
+		});
+
+	if (pairs.length === 0) {
+		return "";
+	}
+
+	const shown = pairs.slice(0, maxPairs);
+	if (pairs.length > maxPairs) {
+		shown.push(`+${pairs.length - maxPairs} more`);
+	}
+	return `[${shown.join(", ")}]`;
+}
+
+function formatEventTapeKindCounts(
+	kindCounts: readonly { readonly kind: string; readonly count: number }[],
+): string {
+	return kindCounts
+		.map(
+			(entry) =>
+				`${sanitizeTerminalText(entry.kind)}=${sanitizeTerminalText(String(entry.count))}`,
+		)
+		.join(", ");
 }
 
 export function formatInspectDetail(
@@ -536,6 +598,58 @@ export function formatInspectDetail(
 					`  policy-reasons: ${sanitizeTerminalText(policyReasons.join(", "))}`,
 				);
 			}
+		}
+	}
+
+	if (snapshot.eventTape) {
+		lines.push("");
+		lines.push("event-tape:");
+		lines.push(`  events: ${snapshot.eventTape.eventCount}`);
+		if (snapshot.eventTape.firstKind) {
+			lines.push(
+				`  first: ${sanitizeTerminalText(snapshot.eventTape.firstKind)}`,
+			);
+		}
+		if (snapshot.eventTape.lastKind) {
+			lines.push(
+				`  last: ${sanitizeTerminalText(snapshot.eventTape.lastKind)}`,
+			);
+		}
+		if (
+			snapshot.eventTape.firstOccurredAt &&
+			snapshot.eventTape.lastOccurredAt
+		) {
+			lines.push(
+				`  window: ${sanitizeTerminalText(snapshot.eventTape.firstOccurredAt)} -> ${sanitizeTerminalText(snapshot.eventTape.lastOccurredAt)}`,
+			);
+		}
+		if (
+			snapshot.eventTape.kindCounts &&
+			snapshot.eventTape.kindCounts.length > 0
+		) {
+			lines.push(
+				`  kinds: ${formatEventTapeKindCounts(snapshot.eventTape.kindCounts)}`,
+			);
+		}
+		if (snapshot.eventTape.terminalStatus) {
+			lines.push(
+				`  terminal-status: ${sanitizeTerminalText(snapshot.eventTape.terminalStatus)}`,
+			);
+		}
+		const renderedEvents = snapshot.eventTape.events.slice(0, 8);
+		for (const event of renderedEvents) {
+			const formattedMetadata = event.metadata
+				? formatEventTapeMetadata(event.metadata)
+				: "";
+			const metadata = formattedMetadata ? ` ${formattedMetadata}` : "";
+			lines.push(
+				`  - ${sanitizeTerminalText(event.kind)} ${sanitizeTerminalText(event.id)}: ${sanitizeTerminalText(event.summary)}${metadata}`,
+			);
+		}
+		const omittedEventCount =
+			snapshot.eventTape.eventCount - renderedEvents.length;
+		if (omittedEventCount > 0) {
+			lines.push(`  - ... ${omittedEventCount} more events`);
 		}
 	}
 

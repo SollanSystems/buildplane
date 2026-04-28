@@ -141,6 +141,13 @@ interface StoredInjectedMemoryRow {
 	readonly created_at: string;
 }
 
+interface StoredInspectEventRow {
+	readonly id: string;
+	readonly kind: string;
+	readonly occurred_at: string;
+	readonly payload: string;
+}
+
 export interface StorageTestingHooks {
 	readonly failpoint?: (name: string) => void;
 }
@@ -1627,6 +1634,189 @@ export function createStorageStore(
 		return rows;
 	}
 
+	function summarizeEvent(
+		kind: string,
+		payload: Record<string, unknown>,
+	): string {
+		switch (kind) {
+			case "run-created":
+				return `created unit ${String(payload.unitId ?? "unknown")}`;
+			case "run-started":
+				return `started unit ${String(payload.unitId ?? "unknown")}`;
+			case "execution-evidence-recorded": {
+				const exitCode = payload.exitCode ?? "unknown";
+				const outputChecks = Array.isArray(payload.outputChecks)
+					? payload.outputChecks.length
+					: 0;
+				return `execution exit ${String(exitCode)} with ${outputChecks} output checks`;
+			}
+			case "decision-recorded":
+				return `${String(payload.kind ?? "decision")} ${String(payload.outcome ?? "unknown")}`;
+			case "run-completed":
+				return `completed ${String(payload.status ?? "unknown")}`;
+			default:
+				return kind;
+		}
+	}
+
+	function parseEventPayload(payload: string): Record<string, unknown> {
+		try {
+			const parsed = JSON.parse(payload) as unknown;
+			return parsed && typeof parsed === "object"
+				? (parsed as Record<string, unknown>)
+				: {};
+		} catch {
+			return {};
+		}
+	}
+
+	type EventMetadata = NonNullable<
+		NonNullable<InspectSnapshot["eventTape"]>["events"][number]["metadata"]
+	>;
+
+	function isEventMetadataValue(
+		value: unknown,
+	): value is string | number | boolean {
+		return (
+			typeof value === "string" ||
+			typeof value === "number" ||
+			typeof value === "boolean"
+		);
+	}
+
+	function clipEventMetadataText(value: string, maxLength = 120): string {
+		return value.length <= maxLength
+			? value
+			: `${value.slice(0, Math.max(maxLength - 1, 0))}…`;
+	}
+
+	function extractEventMetadata(
+		kind: string,
+		payload: Record<string, unknown>,
+	): EventMetadata | undefined {
+		const metadata: Record<string, string | number | boolean> = {};
+
+		for (const [key, value] of Object.entries(payload)) {
+			if (key === "runId") {
+				continue;
+			}
+
+			if (isEventMetadataValue(value)) {
+				metadata[key] =
+					typeof value === "string" ? clipEventMetadataText(value) : value;
+				continue;
+			}
+
+			if (Array.isArray(value)) {
+				metadata[`${key}Count`] = value.length;
+				if (
+					key !== "reasons" &&
+					value.length > 0 &&
+					value.every((item) => typeof item === "string")
+				) {
+					metadata[`${key}Preview`] = clipEventMetadataText(
+						(value as string[]).slice(0, 2).join("; "),
+					);
+				}
+			}
+		}
+
+		if (
+			kind === "execution-evidence-recorded" &&
+			Array.isArray(payload.outputChecks)
+		) {
+			const failedOutputChecks = payload.outputChecks.filter((check) => {
+				return (
+					check !== null &&
+					typeof check === "object" &&
+					(check as { exists?: unknown }).exists === false
+				);
+			}).length;
+			metadata.failedOutputChecks = failedOutputChecks;
+		}
+
+		if (kind === "decision-recorded" && Array.isArray(payload.reasons)) {
+			const firstReason = payload.reasons.find(
+				(reason) => typeof reason === "string",
+			) as string | undefined;
+			if (firstReason) {
+				metadata.reasonPreview = clipEventMetadataText(firstReason);
+			}
+		}
+
+		return Object.keys(metadata).length > 0 ? metadata : undefined;
+	}
+
+	function readEventTapeSummary(
+		runId: string,
+		database: DatabaseSync,
+	): InspectSnapshot["eventTape"] {
+		const rows = database
+			.prepare(
+				`SELECT id, kind, occurred_at, payload FROM events WHERE json_extract(payload, '$.runId') = ? ORDER BY occurred_at ASC, rowid ASC`,
+			)
+			.all(runId) as unknown as StoredInspectEventRow[];
+
+		if (rows.length === 0) {
+			return undefined;
+		}
+
+		const events = rows.map((row) => {
+			const payload = parseEventPayload(row.payload);
+			const metadata = extractEventMetadata(row.kind, payload);
+			return {
+				id: row.id,
+				kind: row.kind,
+				occurredAt: row.occurred_at,
+				summary: summarizeEvent(row.kind, payload),
+				...(metadata ? { metadata } : {}),
+			};
+		});
+
+		const completedRow = rows
+			.slice()
+			.reverse()
+			.find((row) => row.kind === "run-completed");
+		const completedPayload = completedRow
+			? parseEventPayload(completedRow.payload)
+			: {};
+
+		const kindCountsByKind = new Map<string, number>();
+		for (const event of events) {
+			kindCountsByKind.set(
+				event.kind,
+				(kindCountsByKind.get(event.kind) ?? 0) + 1,
+			);
+		}
+		const kindCounts = Array.from(kindCountsByKind.entries()).map(
+			([kind, count]) => ({ kind, count }),
+		);
+		const terminalStatus =
+			typeof completedPayload.status === "string" &&
+			[
+				"pending",
+				"running",
+				"passed",
+				"failed",
+				"cancelled",
+				"suspended",
+			].includes(completedPayload.status)
+				? (completedPayload.status as RunStatus)
+				: undefined;
+
+		return {
+			runId,
+			eventCount: events.length,
+			firstKind: events[0]?.kind,
+			lastKind: events[events.length - 1]?.kind,
+			firstOccurredAt: events[0]?.occurredAt,
+			lastOccurredAt: events[events.length - 1]?.occurredAt,
+			kindCounts,
+			...(terminalStatus ? { terminalStatus } : {}),
+			events,
+		};
+	}
+
 	function buildInspectProvenance(
 		packet: UnitPacket | null,
 		unit: Unit,
@@ -1815,7 +2005,11 @@ export function createStorageStore(
 				database
 					.prepare(`UPDATE runs SET status = ?, updated_at = ? WHERE id = ?`)
 					.run("running", updatedAt, runId);
-				appendEvent("run-started", { runId, status: "running" }, database);
+				appendEvent(
+					"run-started",
+					{ runId, unitId: runRow.unit_id, status: "running" },
+					database,
+				);
 			} finally {
 				database.close();
 			}
@@ -2931,6 +3125,7 @@ export function createStorageStore(
 						kind: "run",
 						unit,
 						run: toRun(runRow),
+						eventTape: readEventTapeSummary(runRow.id, database),
 						provenance: buildInspectProvenance(
 							parsedSnapshot && "unit" in parsedSnapshot
 								? (parsedSnapshot as UnitPacket)
@@ -2977,6 +3172,7 @@ export function createStorageStore(
 						kind: "unit",
 						unit,
 						run: toRun(run),
+						eventTape: readEventTapeSummary(run.id, database),
 						provenance: buildInspectProvenance(
 							parsedSnapshot && "unit" in parsedSnapshot
 								? (parsedSnapshot as UnitPacket)
