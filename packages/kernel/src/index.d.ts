@@ -32,20 +32,6 @@ export type {
 } from "./graph.ts";
 export { createGraphScheduler } from "./graph.ts";
 export type {
-	CreateProcedureInput,
-	CreateSearchableDocumentInput,
-	MemoryCreatedBy,
-	MemoryProvenance,
-	MemoryScopeType,
-	MemoryStatus,
-	MemoryType,
-	MemoryValueType,
-	ProcedureMemory,
-	RepoFact,
-	SearchableDocument,
-	UpsertRepoFactInput,
-} from "./memory-types.ts";
-export type {
 	ProcedureRetrievalQuery,
 	RankedMemoryResult,
 	RankedProcedureResult,
@@ -64,6 +50,20 @@ export {
 	getStructuredMemoryMatchClass,
 	rankMemoryResults,
 } from "./memory-retrieval.ts";
+export type {
+	CreateProcedureInput,
+	CreateSearchableDocumentInput,
+	MemoryCreatedBy,
+	MemoryProvenance,
+	MemoryScopeType,
+	MemoryStatus,
+	MemoryType,
+	MemoryValueType,
+	ProcedureMemory,
+	RepoFact,
+	SearchableDocument,
+	UpsertRepoFactInput,
+} from "./memory-types.ts";
 export type {
 	BuildplaneOrchestrator,
 	CreateBuildplaneOrchestratorOptions,
@@ -107,8 +107,8 @@ export type {
 	ModelExecutionBlock,
 	OutputCheck,
 	PersistedInjectedMemoryRecord,
-	PromotedStructuredMemoryRecord,
 	PolicyDecision,
+	PromotedStructuredMemoryRecord,
 	RejectedPolicyDecision,
 	RoutingHints,
 	RunInfrastructureFailure,
