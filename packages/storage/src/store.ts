@@ -815,7 +815,7 @@ export function createStorageStore(
 			.prepare(
 				`SELECT id, unit_id, status, unit_snapshot, used_workspace, parent_run_id, strategy_id FROM runs WHERE id = ?`,
 			)
-			.get(runId) as StoredRunRow | undefined;
+			.get(runId) as unknown as StoredRunRow | undefined;
 
 		if (!row) {
 			throw new Error(`No run found for id '${runId}'`);
@@ -832,7 +832,7 @@ export function createStorageStore(
 			.prepare(
 				`SELECT run_id, source_project_root, path, head_sha, status, created_at, finalized_at, cleanup_error FROM workspaces WHERE run_id = ?`,
 			)
-			.get(runId) as StoredWorkspaceRow | undefined;
+			.get(runId) as unknown as StoredWorkspaceRow | undefined;
 	}
 
 	function toWorkspaceSnapshot(row: StoredWorkspaceRow): WorkspaceSnapshot {
@@ -1854,6 +1854,9 @@ export function createStorageStore(
 			route: {
 				worker,
 				source,
+				...(routingHints?.preferredWorker
+					? { preferredWorker: routingHints.preferredWorker }
+					: {}),
 				...(routingHints?.preferredModel
 					? { preferredModel: routingHints.preferredModel }
 					: {}),
@@ -3107,7 +3110,7 @@ export function createStorageStore(
 					.prepare(
 						`SELECT id, unit_id, status, unit_snapshot, used_workspace, parent_run_id, strategy_id FROM runs WHERE id = ?`,
 					)
-					.get(id) as StoredRunRow | undefined;
+					.get(id) as unknown as StoredRunRow | undefined;
 
 				if (runRow) {
 					const parsedSnapshot = runRow.unit_snapshot
