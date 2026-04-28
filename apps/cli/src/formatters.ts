@@ -571,13 +571,16 @@ export function formatInspectDetail(
 				`  terminal-status: ${sanitizeTerminalText(snapshot.eventTape.terminalStatus)}`,
 			);
 		}
-		for (const event of snapshot.eventTape.events.slice(0, 8)) {
+		const renderedEvents = snapshot.eventTape.events.slice(0, 8);
+		for (const event of renderedEvents) {
 			lines.push(
 				`  - ${sanitizeTerminalText(event.kind)} ${sanitizeTerminalText(event.id)}: ${sanitizeTerminalText(event.summary)}`,
 			);
 		}
-		if (snapshot.eventTape.events.length > 8) {
-			lines.push(`  - ... ${snapshot.eventTape.events.length - 8} more events`);
+		const omittedEventCount =
+			snapshot.eventTape.eventCount - renderedEvents.length;
+		if (omittedEventCount > 0) {
+			lines.push(`  - ... ${omittedEventCount} more events`);
 		}
 	}
 

@@ -1694,11 +1694,15 @@ export function createStorageStore(
 			};
 		});
 
-		const lastRow = rows[rows.length - 1];
-		const lastPayload = lastRow ? parseEventPayload(lastRow.payload) : {};
+		const completedRow = rows
+			.slice()
+			.reverse()
+			.find((row) => row.kind === "run-completed");
+		const completedPayload = completedRow
+			? parseEventPayload(completedRow.payload)
+			: {};
 		const terminalStatus =
-			lastRow?.kind === "run-completed" &&
-			typeof lastPayload.status === "string" &&
+			typeof completedPayload.status === "string" &&
 			[
 				"pending",
 				"running",
@@ -1706,8 +1710,8 @@ export function createStorageStore(
 				"failed",
 				"cancelled",
 				"suspended",
-			].includes(lastPayload.status)
-				? (lastPayload.status as RunStatus)
+			].includes(completedPayload.status)
+				? (completedPayload.status as RunStatus)
 				: undefined;
 
 		return {

@@ -130,6 +130,11 @@ describe("storage adapter", () => {
 		const eventKinds = database
 			.prepare(`SELECT kind FROM events ORDER BY rowid ASC`)
 			.all() as { kind: string }[];
+		const eventIndexes = database
+			.prepare(`PRAGMA index_list(events)`)
+			.all() as {
+			name: string;
+		}[];
 		database.close();
 
 		expect(eventKinds.map((row) => row.kind)).toEqual([
@@ -140,6 +145,9 @@ describe("storage adapter", () => {
 			"decision-recorded",
 			"run-completed",
 		]);
+		expect(eventIndexes.map((row) => row.name)).toContain(
+			"idx_events_run_id_occurred_at",
+		);
 	});
 
 	it("surfaces a compact event tape summary in inspect snapshots", () => {
@@ -360,6 +368,10 @@ describe("storage adapter", () => {
 			path: workspacePath,
 		});
 		expect(inspect.workspace?.finalizedAt).toEqual(expect.any(String));
+		expect(inspect.eventTape).toMatchObject({
+			lastKind: "workspace-retained",
+			terminalStatus: "failed",
+		});
 	});
 
 	it("persists infrastructure evidence for setup failures without fabricating a workspace row", () => {

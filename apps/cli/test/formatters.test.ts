@@ -242,6 +242,7 @@ describe("formatInspectDetail", () => {
 		expect(lines.join("\n")).toContain(
 			"decision-recorded event-2: reject-run rejected\\n\\u001b[31m",
 		);
+		expect(lines).toContain("  - ... 1 more events");
 		expect(lines.join("\n")).not.toContain("reject-run rejected\n");
 	});
 
@@ -331,9 +332,9 @@ describe("formatInspectDetail", () => {
 				run: { id: "run-xyz", unitId: "implement-foo", status: "failed" },
 				eventTape: {
 					runId: "run-xyz",
-					eventCount: 3,
+					eventCount: 1,
 					firstKind: "run-created",
-					lastKind: "run-completed",
+					lastKind: "run-created",
 					terminalStatus: "failed",
 					events: [
 						{
@@ -369,7 +370,7 @@ describe("formatInspectDetail", () => {
 		);
 
 		expect(lines).toContain("event-tape:");
-		expect(lines).toContain("  events: 3");
+		expect(lines).toContain("  events: 1");
 		expect(lines).toContain("outcome:");
 		expect(lines).toContain("  status: failed");
 		expect(lines).toContain("evidence:");
