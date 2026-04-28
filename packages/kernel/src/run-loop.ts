@@ -148,6 +148,28 @@ export interface StatusSnapshot {
 	};
 }
 
+export interface InspectProvenanceRoute {
+	readonly worker: string;
+	readonly source: string;
+	readonly provider?: string;
+	readonly model?: string;
+	readonly preferredWorker?: RoutingHints["preferredWorker"];
+	readonly preferredModel?: string;
+	readonly effort?: RoutingHints["effort"];
+}
+
+export interface InspectProvenancePolicy {
+	readonly profile: string;
+	readonly decisionKind?: PolicyDecision["kind"];
+	readonly decisionOutcome?: PolicyDecision["outcome"];
+	readonly decisionReasons?: readonly string[];
+}
+
+export interface InspectProvenance {
+	readonly route: InspectProvenanceRoute;
+	readonly policy: InspectProvenancePolicy;
+}
+
 export type InspectEventTapeMetadataValue = string | number | boolean;
 
 export interface InspectEventTapeKindCount {
@@ -217,6 +239,7 @@ export interface InspectSnapshot {
 		readonly id: string;
 		readonly kind: string;
 		readonly status: string;
+		readonly message?: string;
 	}[];
 	readonly decisions: readonly {
 		readonly id: string;

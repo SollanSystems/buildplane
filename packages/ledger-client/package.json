@@ -18,6 +18,6 @@
 		"uuid": "^14"
 	},
 	"devDependencies": {
-		"@types/uuid": "^10"
+		"@types/uuid": "^11"
 	}
 }
