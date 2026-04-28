@@ -316,8 +316,10 @@ function formatTopLevelHelp(): string[] {
 		"  Observe:",
 		"    status [--json]        Project health snapshot",
 		"    history [--json]       List all runs",
-		"    inspect <id> [--json]  Deep-dive into a run",
-		"    replay <id> [--json]   Re-run with different settings",
+		"    inspect <id> [--json]  Deep-dive into a run and event tape",
+		"    replay <id> [--json]   Re-execute the stored packet snapshot",
+		"    ledger replay --run-id <id> --workspace <path>  Read-only tape replay",
+		"    fork <id> --at <event> --packet <file>          Recover from a unit boundary",
 		"",
 		"  Advanced:",
 		"    run-graph --graph <p>  Execute a DAG of tasks",
@@ -351,6 +353,26 @@ function formatRunHelp(): string[] {
 		"    --tui            Interactive terminal UI",
 		"    --json           Machine-readable output",
 	];
+}
+
+function formatReplayHelp(): string[] {
+	return [
+		"buildplane replay <run-id> [options]",
+		"",
+		"  Re-executes the stored packet snapshot from a prior run and records a new run.",
+		"  Use this when you want to try the same unit again with a changed policy or",
+		"  runtime setting. For read-only event-tape reconstruction, use:",
+		"",
+		"    buildplane ledger replay --run-id <run-id> --workspace <path>",
+		"",
+		"  Options:",
+		"    --json              Machine-readable replay result",
+		"    --policy <profile>  Override the policy profile for the replay run",
+	];
+}
+
+function isHelpRequested(args: readonly string[]): boolean {
+	return args.includes("--help") || args.includes("-h") || args[0] === "help";
 }
 
 interface BuildplaneCliOrchestrator {
@@ -1044,6 +1066,10 @@ function parseForkArgs(
 function forkUsageText(): string {
 	return `usage: buildplane fork <parent-run-id> --at <event-id> --packet <file> [--workspace <path>]
 
+  Fork resumes from a unit boundary in a prior run with a replacement packet.
+  The workspace git state must be clean before fork execution.
+  Target event must be a unit_started event.
+
   --run-id       parent run id (or positional first arg)
   --at           parent unit_started event id to fork at
   --packet       path to the new packet json
@@ -1431,6 +1457,11 @@ async function runFork(
 		stderr: (s: string) => void;
 	},
 ): Promise<number> {
+	if (isHelpRequested(rest)) {
+		opts.stdout(forkUsageText());
+		return 0;
+	}
+
 	const args = parseForkArgs(rest);
 	if (!args.ok) {
 		opts.stderr(`buildplane fork: ${args.error}\n`);
@@ -1841,6 +1872,13 @@ export async function runCli(
 
 		if (command === "fork") {
 			return await runFork(rest, { cwd, stdout, stderr });
+		}
+
+		if (command === "replay" && isHelpRequested(rest)) {
+			for (const line of formatReplayHelp()) {
+				stdout(line);
+			}
+			return 0;
 		}
 
 		if (command === "pack" && rest[0] === "show") {
@@ -3067,7 +3105,8 @@ function applyReplayOverrides(
 ): unknown {
 	const result = { ...packet };
 
-	for (const arg of args) {
+	for (let index = 0; index < args.length; index += 1) {
+		const arg = args[index];
 		if (arg.startsWith("--model=")) {
 			const modelValue = arg.slice("--model=".length);
 			const slashIndex = modelValue.indexOf("/");
@@ -3090,6 +3129,13 @@ function applyReplayOverrides(
 			const policyProfile = arg.slice("--policy=".length);
 			const unit = (result.unit as Record<string, unknown>) ?? {};
 			result.unit = { ...unit, policyProfile };
+		} else if (arg === "--policy") {
+			const policyProfile = args[index + 1];
+			if (policyProfile && !policyProfile.startsWith("--")) {
+				const unit = (result.unit as Record<string, unknown>) ?? {};
+				result.unit = { ...unit, policyProfile };
+				index += 1;
+			}
 		}
 	}
 

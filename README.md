@@ -68,6 +68,8 @@ pnpm buildplane init
 pnpm buildplane run --packet ./packet.json
 pnpm buildplane status --json
 pnpm buildplane inspect <run-id> --json
+pnpm buildplane replay <run-id> --json
+pnpm buildplane fork <run-id> --at <event-id> --packet <fixed-packet.json>
 pnpm buildplane memory doctor
 pnpm buildplane pack show superclaude
 ```
@@ -96,6 +98,8 @@ node apps/cli/dist/index.js init
 node apps/cli/dist/index.js run --packet ./packet.json
 node apps/cli/dist/index.js status --json
 node apps/cli/dist/index.js inspect <run-id> --json
+node apps/cli/dist/index.js replay <run-id> --json
+node apps/cli/dist/index.js fork <run-id> --at <event-id> --packet <fixed-packet.json>
 node apps/cli/dist/index.js memory doctor --json
 node apps/cli/dist/index.js pack show superclaude
 ```
@@ -143,7 +147,11 @@ Today's working path is a local, packet-driven loop:
 1. `pnpm buildplane init`
 2. `pnpm buildplane run --packet <path>`
 3. `pnpm buildplane status --json`
-4. `pnpm buildplane inspect <run-id> --json`
+4. `pnpm buildplane inspect <run-id> --json` to inspect the event tape, decisions, evidence, and workspace state
+5. `pnpm buildplane replay <run-id> --json` to replay the stored packet snapshot as a new run when you want another attempt with changed settings
+6. `pnpm buildplane fork <run-id> --at <event-id> --packet <fixed-packet.json>` to fork from a unit boundary when recovery needs a corrected packet
+
+The top-level `replay` command re-executes the stored packet snapshot and records a new run. The native-backed read-only event-tape walker is documented separately in [`docs/ledger.md`](docs/ledger.md) as `buildplane ledger replay --run-id <run-id> --workspace <path>`. Use `fork` when a prior run found the right setup but a later unit needs recovery from a known `unit_started` boundary.
 
 Example packet:
 
