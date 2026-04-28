@@ -270,6 +270,36 @@ describe("formatInspectDetail", () => {
 		expect(lines.join("\n")).not.toContain("reasonPreview=blocked\n");
 	});
 
+	it("omits empty event metadata without adding trailing whitespace", () => {
+		const lines = formatInspectDetail(
+			{
+				...baseSnapshot,
+				eventTape: {
+					runId: "run-xyz",
+					eventCount: 1,
+					firstKind: "run-created",
+					lastKind: "run-created",
+					terminalStatus: "passed",
+					events: [
+						{
+							id: "event-1",
+							kind: "run-created",
+							occurredAt: "2026-04-27T00:00:00.000Z",
+							summary: "created unit unit-1",
+							metadata: {},
+						},
+					],
+				},
+			},
+			[],
+		);
+
+		expect(lines).toContain("  - run-created event-1: created unit unit-1");
+		expect(lines).not.toContain(
+			"  - run-created event-1: created unit unit-1 ",
+		);
+	});
+
 	it("includes route and policy provenance when present", () => {
 		const lines = formatInspectDetail(
 			{

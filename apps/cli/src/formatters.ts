@@ -638,9 +638,10 @@ export function formatInspectDetail(
 		}
 		const renderedEvents = snapshot.eventTape.events.slice(0, 8);
 		for (const event of renderedEvents) {
-			const metadata = event.metadata
-				? ` ${formatEventTapeMetadata(event.metadata)}`
+			const formattedMetadata = event.metadata
+				? formatEventTapeMetadata(event.metadata)
 				: "";
+			const metadata = formattedMetadata ? ` ${formattedMetadata}` : "";
 			lines.push(
 				`  - ${sanitizeTerminalText(event.kind)} ${sanitizeTerminalText(event.id)}: ${sanitizeTerminalText(event.summary)}${metadata}`,
 			);
