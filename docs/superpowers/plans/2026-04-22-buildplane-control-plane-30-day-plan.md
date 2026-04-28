@@ -157,7 +157,7 @@ Success means:
 ### Slice tasks
 
 - [x] Task 3A: land a clean event-tape capture spine from current `origin/main`
-- [ ] Task 3B: project event-tape summaries into inspect/history surfaces
+- [x] Task 3B: project event-tape summaries into inspect/history surfaces
 - [ ] Task 3C: document a concrete rescue/recovery comparison against a raw worker path
 - [ ] Task 3D: ensure the front-door docs talk about replay/review/recovery, not generic shell behavior
 

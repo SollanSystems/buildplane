@@ -1670,6 +1670,83 @@ export function createStorageStore(
 		}
 	}
 
+	type EventMetadata = NonNullable<
+		NonNullable<InspectSnapshot["eventTape"]>["events"][number]["metadata"]
+	>;
+
+	function isEventMetadataValue(
+		value: unknown,
+	): value is string | number | boolean {
+		return (
+			typeof value === "string" ||
+			typeof value === "number" ||
+			typeof value === "boolean"
+		);
+	}
+
+	function clipEventMetadataText(value: string, maxLength = 120): string {
+		return value.length <= maxLength
+			? value
+			: `${value.slice(0, Math.max(maxLength - 1, 0))}…`;
+	}
+
+	function extractEventMetadata(
+		kind: string,
+		payload: Record<string, unknown>,
+	): EventMetadata | undefined {
+		const metadata: Record<string, string | number | boolean> = {};
+
+		for (const [key, value] of Object.entries(payload)) {
+			if (key === "runId") {
+				continue;
+			}
+
+			if (isEventMetadataValue(value)) {
+				metadata[key] =
+					typeof value === "string" ? clipEventMetadataText(value) : value;
+				continue;
+			}
+
+			if (Array.isArray(value)) {
+				metadata[`${key}Count`] = value.length;
+				if (
+					key !== "reasons" &&
+					value.length > 0 &&
+					value.every((item) => typeof item === "string")
+				) {
+					metadata[`${key}Preview`] = clipEventMetadataText(
+						(value as string[]).slice(0, 2).join("; "),
+					);
+				}
+			}
+		}
+
+		if (
+			kind === "execution-evidence-recorded" &&
+			Array.isArray(payload.outputChecks)
+		) {
+			const failedOutputChecks = payload.outputChecks.filter((check) => {
+				return (
+					check !== null &&
+					typeof check === "object" &&
+					(check as { exists?: unknown }).exists === false
+				);
+			}).length;
+			metadata.failedOutputChecks = failedOutputChecks;
+		}
+
+		if (kind === "decision-recorded" && Array.isArray(payload.reasons)) {
+			const firstReason = payload.reasons.find(
+				(reason) => typeof reason === "string",
+			) as string | undefined;
+			if (firstReason) {
+				metadata.reasonPreview = clipEventMetadataText(firstReason);
+			}
+		}
+
+		return Object.keys(metadata).length > 0 ? metadata : undefined;
+	}
+
 	function readEventTapeSummary(
 		runId: string,
 		database: DatabaseSync,
@@ -1686,11 +1763,13 @@ export function createStorageStore(
 
 		const events = rows.map((row) => {
 			const payload = parseEventPayload(row.payload);
+			const metadata = extractEventMetadata(row.kind, payload);
 			return {
 				id: row.id,
 				kind: row.kind,
 				occurredAt: row.occurred_at,
 				summary: summarizeEvent(row.kind, payload),
+				...(metadata ? { metadata } : {}),
 			};
 		});
 
@@ -1701,6 +1780,17 @@ export function createStorageStore(
 		const completedPayload = completedRow
 			? parseEventPayload(completedRow.payload)
 			: {};
+
+		const kindCountsByKind = new Map<string, number>();
+		for (const event of events) {
+			kindCountsByKind.set(
+				event.kind,
+				(kindCountsByKind.get(event.kind) ?? 0) + 1,
+			);
+		}
+		const kindCounts = Array.from(kindCountsByKind.entries()).map(
+			([kind, count]) => ({ kind, count }),
+		);
 		const terminalStatus =
 			typeof completedPayload.status === "string" &&
 			[
@@ -1719,6 +1809,9 @@ export function createStorageStore(
 			eventCount: events.length,
 			firstKind: events[0]?.kind,
 			lastKind: events[events.length - 1]?.kind,
+			firstOccurredAt: events[0]?.occurredAt,
+			lastOccurredAt: events[events.length - 1]?.occurredAt,
+			kindCounts,
 			...(terminalStatus ? { terminalStatus } : {}),
 			events,
 		};

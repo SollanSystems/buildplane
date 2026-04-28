@@ -182,6 +182,35 @@ describe("storage adapter", () => {
 		expect(inspect.eventTape?.events[1]?.summary).toBe(
 			"started unit unit-event-tape",
 		);
+		expect(inspect.eventTape?.firstOccurredAt).toBe(
+			inspect.eventTape?.events[0]?.occurredAt,
+		);
+		expect(inspect.eventTape?.lastOccurredAt).toBe(
+			inspect.eventTape?.events[inspect.eventTape.events.length - 1]
+				?.occurredAt,
+		);
+		expect(inspect.eventTape?.kindCounts).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({ kind: "run-created", count: 1 }),
+				expect.objectContaining({ kind: "run-started", count: 1 }),
+				expect.objectContaining({
+					kind: "execution-evidence-recorded",
+					count: 1,
+				}),
+				expect.objectContaining({ kind: "decision-recorded", count: 1 }),
+				expect.objectContaining({ kind: "run-completed", count: 1 }),
+			]),
+		);
+		expect(inspect.eventTape?.events[2]?.metadata).toMatchObject({
+			exitCode: 1,
+			outputChecksCount: 1,
+			failedOutputChecks: 1,
+		});
+		expect(inspect.eventTape?.events[3]?.metadata).toMatchObject({
+			kind: "reject-run",
+			outcome: "rejected",
+			reasonsCount: 1,
+		});
 	});
 
 	it("keeps failed-run event tape, evidence, and decision reasons together", () => {
