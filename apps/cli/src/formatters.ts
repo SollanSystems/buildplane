@@ -411,6 +411,19 @@ interface InspectSnapshotLike {
 	readonly strategy?: {
 		readonly strategyId: string;
 	};
+	readonly eventTape?: {
+		readonly runId: string;
+		readonly eventCount: number;
+		readonly firstKind?: string;
+		readonly lastKind?: string;
+		readonly terminalStatus?: string;
+		readonly events: readonly {
+			readonly id: string;
+			readonly kind: string;
+			readonly occurredAt: string;
+			readonly summary: string;
+		}[];
+	};
 	readonly evidence: readonly {
 		readonly kind: string;
 		readonly status: string;
@@ -536,6 +549,35 @@ export function formatInspectDetail(
 					`  policy-reasons: ${sanitizeTerminalText(policyReasons.join(", "))}`,
 				);
 			}
+		}
+	}
+
+	if (snapshot.eventTape) {
+		lines.push("");
+		lines.push("event-tape:");
+		lines.push(`  events: ${snapshot.eventTape.eventCount}`);
+		if (snapshot.eventTape.firstKind) {
+			lines.push(
+				`  first: ${sanitizeTerminalText(snapshot.eventTape.firstKind)}`,
+			);
+		}
+		if (snapshot.eventTape.lastKind) {
+			lines.push(
+				`  last: ${sanitizeTerminalText(snapshot.eventTape.lastKind)}`,
+			);
+		}
+		if (snapshot.eventTape.terminalStatus) {
+			lines.push(
+				`  terminal-status: ${sanitizeTerminalText(snapshot.eventTape.terminalStatus)}`,
+			);
+		}
+		for (const event of snapshot.eventTape.events.slice(0, 8)) {
+			lines.push(
+				`  - ${sanitizeTerminalText(event.kind)} ${sanitizeTerminalText(event.id)}: ${sanitizeTerminalText(event.summary)}`,
+			);
+		}
+		if (snapshot.eventTape.events.length > 8) {
+			lines.push(`  - ... ${snapshot.eventTape.events.length - 8} more events`);
 		}
 	}
 
