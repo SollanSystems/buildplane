@@ -148,10 +148,27 @@ export interface StatusSnapshot {
 	};
 }
 
+export interface InspectEventTapeEntry {
+	readonly id: string;
+	readonly kind: string;
+	readonly occurredAt: string;
+	readonly summary: string;
+}
+
+export interface InspectEventTapeSummary {
+	readonly runId: string;
+	readonly eventCount: number;
+	readonly firstKind?: string;
+	readonly lastKind?: string;
+	readonly terminalStatus?: RunStatus;
+	readonly events: readonly InspectEventTapeEntry[];
+}
+
 export interface InspectSnapshot {
 	readonly kind: "run" | "unit";
 	readonly unit: Unit;
 	readonly run: Run;
+	readonly eventTape?: InspectEventTapeSummary;
 	readonly provenance?: {
 		readonly route: {
 			readonly worker: string;

@@ -142,6 +142,37 @@ describe("storage adapter", () => {
 		]);
 	});
 
+	it("surfaces a compact event tape summary in inspect snapshots", () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-store-event-tape-"));
+		const storage = createBuildplaneStorage(root);
+		storage.initializeProject();
+
+		const run = storage.createRun({
+			...packet,
+			unit: { ...packet.unit, id: "unit-event-tape" },
+		});
+		storage.markRunRunning(run.id);
+		storage.recordExecutionEvidence(run.id, failedReceipt);
+		storage.recordDecision(run.id, rejectedDecision);
+		storage.completeRun(run.id, "failed");
+
+		const inspect = storage.inspectTarget(run.id);
+		expect(inspect.eventTape).toMatchObject({
+			runId: run.id,
+			eventCount: 5,
+			firstKind: "run-created",
+			lastKind: "run-completed",
+			terminalStatus: "failed",
+		});
+		expect(inspect.eventTape?.events.map((event) => event.kind)).toEqual([
+			"run-created",
+			"run-started",
+			"execution-evidence-recorded",
+			"decision-recorded",
+			"run-completed",
+		]);
+	});
+
 	it("surfaces route and policy provenance for model packets with routing hints", () => {
 		const root = mkdtempSync(join(tmpdir(), "buildplane-store-provenance-"));
 		const storage = createBuildplaneStorage(root);

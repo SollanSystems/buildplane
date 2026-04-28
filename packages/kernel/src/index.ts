@@ -97,6 +97,8 @@ export type {
 	CommandExecutionBlock,
 	ExecutionReceipt,
 	InjectedMemoryRecord,
+	InspectEventTapeEntry,
+	InspectEventTapeSummary,
 	InspectSnapshot,
 	ModelExecutionBlock,
 	OutputCheck,
