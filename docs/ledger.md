@@ -4,8 +4,10 @@ The Buildplane ledger records a causal, append-only tape of events for every run
 
 ## Replaying a run
 
-`buildplane ledger replay <run-id>` walks the tape for a run in causal order and emits either JSON (default) or an indented human tree. Flags:
+`buildplane ledger replay --run-id <run-id> --workspace <path>` walks the tape for a run in causal order and emits either JSON (default) or an indented human tree. Flags:
 
+- `--run-id <id>` — run identifier to replay (required).
+- `--workspace <path>` — absolute workspace root containing `.buildplane/ledger/events.db` (required by the native-backed command).
 - `--format json|human` — output mode. JSON is one line per event, carrying `{event, state_after}`. Human is an indented tree.
 - `--limit <n>` — stop after n events.
 - `--at <event-id>` — fast-forward to the given event, emit state at that point, exit. Preparatory for `fork`.
@@ -13,9 +15,9 @@ The Buildplane ledger records a causal, append-only tape of events for every run
 Examples:
 
 ```bash
-buildplane ledger replay <run-id> --format human
-buildplane ledger replay <run-id> --format json | jq '.event.kind'
-buildplane ledger replay <run-id> --at <event-id> --format json
+buildplane ledger replay --run-id <run-id> --workspace /path/to/ws --format human
+buildplane ledger replay --run-id <run-id> --workspace /path/to/ws --format json | jq '.event.kind'
+buildplane ledger replay --run-id <run-id> --workspace /path/to/ws --at <event-id> --format json
 ```
 
 Replay is read-only — no model calls, no tool invocations, no side effects. Replay does not verify the tape against external truth (git history, real filesystem); it faithfully reports whatever the tape says happened. Corruption surfaces as `ReplayIssue` entries on the final state.
@@ -39,7 +41,7 @@ Examples:
 buildplane fork RRR --at UUU --packet fixed-packet.json --workspace /path/to/ws
 
 # Inspect the fork's tape:
-buildplane ledger replay <fork-run-id> --format human
+buildplane ledger replay --run-id <fork-run-id> --workspace /path/to/ws --format human
 # Output includes: "forked from RRR"
 ```
 
