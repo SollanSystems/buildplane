@@ -1,11 +1,16 @@
 import {
+	closeSync,
 	existsSync,
+	fsyncSync,
 	mkdirSync,
+	openSync,
 	readdirSync,
 	readFileSync,
-	writeFileSync,
+	renameSync,
+	unlinkSync,
+	writeSync,
 } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 export const GSD2_TASK_STATUSES = [
 	"NEW",
@@ -58,6 +63,11 @@ interface RunGsd2Options {
 }
 
 const TASK_ID_PATTERN = /^G2-\d{4}$/;
+const NEXT_TASK_NUMBER_LINE_PATTERN =
+	/^next_task_number:\s*['"]?\s*(\d+)\s*['"]?(?:\s+#.*)?\s*$/gm;
+const STATE_SCHEMA_VERSION_LINE_PATTERN =
+	/^schema_version:\s*['"]?\s*(\d+)\s*['"]?(?:\s+#.*)?\s*$/gm;
+const CURRENT_STATE_SCHEMA_VERSION = 1;
 const DEFAULT_VERIFICATION_COMMANDS = ["git diff --check"] as const;
 const DEFAULT_RECOVERY_ACTIONS = [
 	"retry_with_tighter_context",
@@ -188,6 +198,7 @@ function runStatus(cwd: string, stdout: (line: string) => void): number {
 		);
 		return 1;
 	}
+	prepareStateForCommand(cwd);
 
 	const tasks = listTaskIds(cwd);
 	stdout("gsd2 status: ready");
@@ -215,50 +226,56 @@ function runNew(
 	}
 
 	const root = join(cwd, ".gsd2");
-	mkdirSync(join(root, "tasks"), { recursive: true });
-	writeIfMissing(
-		join(root, "PROJECT.md"),
-		"# GSD-2 Project\n\nRepo-local autonomous-work state.\n",
-	);
-	if (!existsSync(join(root, "STATE.md"))) {
-		writeStateMarkdown(root, Math.max(maxTaskDirectoryNumber(cwd) + 1, 1));
-	}
-	writeIfMissing(join(root, "QUEUE.md"), "# GSD-2 Queue\n\n");
-	writeIfMissing(
-		join(root, "config.yaml"),
-		"version: 0\nrouting:\n  default_front_door: auto-coder\nsafety:\n  no_push_by_default: true\n  no_deploy_by_default: true\n",
-	);
-
-	const taskNumber = nextTaskNumber(cwd);
-	if (taskNumber === undefined) {
-		stderr(
-			"gsd2 new: task id space exhausted for V0 format G2-0001 through G2-9999",
+	const lock = acquireMutationLock(root);
+	try {
+		mkdirSync(join(root, "tasks"), { recursive: true });
+		writeIfMissing(
+			join(root, "PROJECT.md"),
+			"# GSD-2 Project\n\nRepo-local autonomous-work state.\n",
 		);
-		return 1;
-	}
-	const taskId = formatTaskId(taskNumber);
-	const taskDir = join(root, "tasks", taskId);
-	mkdirSync(taskDir, { recursive: true });
-	const backend = backendForRoute(parsed.route);
-	const now = new Date().toISOString();
-	writeFileSync(
-		join(taskDir, "task.md"),
-		formatTaskMarkdown(taskId, parsed.goal),
-	);
-	writeFileSync(
-		join(taskDir, "envelope.yaml"),
-		formatEnvelopeYaml(taskId, parsed.goal, parsed.route, backend, now),
-	);
-	writeFileSync(
-		join(taskDir, "receipt.yaml"),
-		formatReceiptYaml(taskId, backend, now),
-	);
-	writeStateMarkdown(root, taskNumber + 1);
+		if (!existsSync(join(root, "STATE.md"))) {
+			writeStateMarkdown(root, Math.max(maxTaskDirectoryNumber(cwd) + 1, 1));
+		}
+		writeIfMissing(join(root, "QUEUE.md"), "# GSD-2 Queue\n\n");
+		writeIfMissing(
+			join(root, "config.yaml"),
+			"version: 0\nrouting:\n  default_front_door: auto-coder\nsafety:\n  no_push_by_default: true\n  no_deploy_by_default: true\n",
+		);
+		migrateStateSchema(cwd);
 
-	stdout(`task-id: ${taskId}`);
-	stdout(`route: ${parsed.route}`);
-	stdout("will-execute: false");
-	return 0;
+		const taskNumber = nextTaskNumber(cwd);
+		if (taskNumber === undefined) {
+			stderr(
+				"gsd2 new: task id space exhausted for V0 format G2-0001 through G2-9999",
+			);
+			return 1;
+		}
+		const taskId = formatTaskId(taskNumber);
+		const taskDir = join(root, "tasks", taskId);
+		mkdirSync(taskDir, { recursive: true });
+		const backend = backendForRoute(parsed.route);
+		const now = new Date().toISOString();
+		writeTextAtomic(
+			join(taskDir, "task.md"),
+			formatTaskMarkdown(taskId, parsed.goal),
+		);
+		writeTextAtomic(
+			join(taskDir, "envelope.yaml"),
+			formatEnvelopeYaml(taskId, parsed.goal, parsed.route, backend, now),
+		);
+		writeTextAtomic(
+			join(taskDir, "receipt.yaml"),
+			formatReceiptYaml(taskId, backend, now),
+		);
+		writeStateMarkdown(root, taskNumber + 1);
+
+		stdout(`task-id: ${taskId}`);
+		stdout(`route: ${parsed.route}`);
+		stdout("will-execute: false");
+		return 0;
+	} finally {
+		releaseMutationLock(lock);
+	}
 }
 
 function runValidate(cwd: string, stdout: (line: string) => void): number {
@@ -269,6 +286,7 @@ function runValidate(cwd: string, stdout: (line: string) => void): number {
 		);
 		return 1;
 	}
+	prepareStateForCommand(cwd);
 
 	const tasks = listTaskIds(cwd);
 	const errors: string[] = [];
@@ -279,19 +297,35 @@ function runValidate(cwd: string, stdout: (line: string) => void): number {
 		if (!existsSync(envelopePath)) {
 			errors.push(`${taskId}/envelope.yaml is missing`);
 		} else {
-			for (const error of validateGsd2Envelope(
-				parseGsd2Envelope(readFileSync(envelopePath, "utf8")),
-			)) {
+			const envelope = parseGsd2Envelope(readFileSync(envelopePath, "utf8"));
+			for (const error of validateGsd2Envelope(envelope)) {
 				errors.push(`${taskId}/envelope.yaml: ${error}`);
+			}
+			if (
+				envelope.id !== undefined &&
+				TASK_ID_PATTERN.test(envelope.id) &&
+				envelope.id !== taskId
+			) {
+				errors.push(
+					`${taskId}/envelope.yaml: envelope.id must match task directory`,
+				);
 			}
 		}
 		if (!existsSync(receiptPath)) {
 			errors.push(`${taskId}/receipt.yaml is missing`);
 		} else {
-			for (const error of validateGsd2Receipt(
-				parseGsd2Receipt(readFileSync(receiptPath, "utf8")),
-			)) {
+			const receipt = parseGsd2Receipt(readFileSync(receiptPath, "utf8"));
+			for (const error of validateGsd2Receipt(receipt)) {
 				errors.push(`${taskId}/receipt.yaml: ${error}`);
+			}
+			if (
+				receipt.taskId !== undefined &&
+				TASK_ID_PATTERN.test(receipt.taskId) &&
+				receipt.taskId !== taskId
+			) {
+				errors.push(
+					`${taskId}/receipt.yaml: receipt.task_id must match task directory`,
+				);
 			}
 		}
 	}
@@ -322,6 +356,9 @@ function runDryRun(
 	if (!parsed.taskId || !TASK_ID_PATTERN.test(parsed.taskId)) {
 		stderr("gsd2 run --dry-run: missing required task id such as G2-0001");
 		return 1;
+	}
+	if (existsSync(join(cwd, ".gsd2"))) {
+		prepareStateForCommand(cwd);
 	}
 	const envelopePath = join(
 		cwd,
@@ -459,19 +496,122 @@ function readNextTaskNumber(cwd: string): number | undefined {
 	if (!existsSync(statePath)) {
 		return undefined;
 	}
-	const value = readScalar(readFileSync(statePath, "utf8"), "next_task_number");
-	if (!value) {
-		return undefined;
-	}
-	const parsed = Number(value);
-	return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
+	const parsed = readNumberFromLastMatch(
+		readFileSync(statePath, "utf8"),
+		NEXT_TASK_NUMBER_LINE_PATTERN,
+	);
+	return parsed;
 }
 
 function writeStateMarkdown(root: string, nextTaskNumber: number): void {
-	writeFileSync(
-		join(root, "STATE.md"),
-		`# GSD-2 State\n\nCurrent status: initialized\nnext_task_number: ${nextTaskNumber}\n`,
+	const statePath = join(root, "STATE.md");
+	const existing = existsSync(statePath)
+		? readFileSync(statePath, "utf8")
+		: "# GSD-2 State\n\nCurrent status: initialized\n";
+	const withoutCounter = existing
+		.replace(STATE_SCHEMA_VERSION_LINE_PATTERN, "")
+		.replace(NEXT_TASK_NUMBER_LINE_PATTERN, "");
+	const updated = `${withoutCounter.replace(/\s*$/, "\n")}schema_version: ${CURRENT_STATE_SCHEMA_VERSION}\nnext_task_number: ${nextTaskNumber}\n`;
+	writeTextAtomic(statePath, updated);
+}
+
+function prepareStateForCommand(cwd: string): void {
+	const root = join(cwd, ".gsd2");
+	const lock = acquireMutationLock(root);
+	try {
+		migrateStateSchema(cwd);
+	} finally {
+		releaseMutationLock(lock);
+	}
+}
+
+function migrateStateSchema(cwd: string): void {
+	const root = join(cwd, ".gsd2");
+	const path = join(root, "STATE.md");
+	if (!existsSync(path)) {
+		return;
+	}
+	const content = readFileSync(path, "utf8");
+	const version = readNumberFromLastMatch(
+		content,
+		STATE_SCHEMA_VERSION_LINE_PATTERN,
 	);
+	if (version === undefined) {
+		const nextNumber =
+			readNumberFromLastMatch(content, NEXT_TASK_NUMBER_LINE_PATTERN) ??
+			Math.max(maxTaskDirectoryNumber(cwd) + 1, 1);
+		writeStateMarkdown(root, nextNumber);
+		return;
+	}
+	if (version !== CURRENT_STATE_SCHEMA_VERSION) {
+		throw new Error(
+			`unsupported .gsd2 state schema_version ${version} (supported: ${CURRENT_STATE_SCHEMA_VERSION})`,
+		);
+	}
+}
+
+function acquireMutationLock(root: string): { lockPath: string; fd: number } {
+	mkdirSync(root, { recursive: true });
+	const lockPath = join(root, "mutation.lock");
+	try {
+		const fd = openSync(lockPath, "wx");
+		writeSync(fd, `${process.pid}\n`);
+		fsyncSync(fd);
+		return { lockPath, fd };
+	} catch {
+		throw new Error("mutation lock already held for this worktree");
+	}
+}
+
+function releaseMutationLock(lock: { lockPath: string; fd: number }): void {
+	try {
+		closeSync(lock.fd);
+	} finally {
+		if (existsSync(lock.lockPath)) {
+			unlinkSync(lock.lockPath);
+		}
+	}
+}
+
+function writeTextAtomic(path: string, content: string): void {
+	const dir = dirname(path);
+	mkdirSync(dir, { recursive: true });
+	const tempPath = join(
+		dir,
+		`.tmp-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+	);
+	const fd = openSync(tempPath, "wx");
+	try {
+		writeSync(fd, content);
+		fsyncSync(fd);
+	} finally {
+		closeSync(fd);
+	}
+	renameSync(tempPath, path);
+	const dirFd = openSync(dir, "r");
+	try {
+		fsyncSync(dirFd);
+	} finally {
+		closeSync(dirFd);
+	}
+}
+
+function readNumberFromLastMatch(
+	content: string,
+	pattern: RegExp,
+): number | undefined {
+	let last: RegExpExecArray | null = null;
+	pattern.lastIndex = 0;
+	let match = pattern.exec(content);
+	while (match !== null) {
+		last = match;
+		match = pattern.exec(content);
+	}
+	if (!last) {
+		return undefined;
+	}
+	const parsed = Number(last[1]);
+	return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
 }
 
 function formatTaskId(taskNumber: number): string {
@@ -515,7 +655,7 @@ function formatReceiptYaml(
 
 function writeIfMissing(path: string, content: string): void {
 	if (!existsSync(path)) {
-		writeFileSync(path, content);
+		writeTextAtomic(path, content);
 	}
 }
 

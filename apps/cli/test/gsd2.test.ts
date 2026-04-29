@@ -39,6 +39,22 @@ async function runCapture(cwd: string, argv: string[]) {
 	return { exitCode, stdout, stderr };
 }
 
+function statePath(cwd: string): string {
+	return join(cwd, ".gsd2", "STATE.md");
+}
+
+function removeStateSchemaVersion(cwd: string): void {
+	writeFileSync(
+		statePath(cwd),
+		readFileSync(statePath(cwd), "utf8").replace(/^schema_version:.*\n/gm, ""),
+	);
+}
+
+function writeMutationLock(cwd: string): void {
+	mkdirSync(join(cwd, ".gsd2"), { recursive: true });
+	writeFileSync(join(cwd, ".gsd2", "mutation.lock"), "stale lock\n");
+}
+
 afterEach(() => {
 	for (const path of cleanupPaths.splice(0)) {
 		rmSync(path, { force: true, recursive: true });
@@ -180,6 +196,81 @@ describe("GSD-2 V0 CLI skeleton", () => {
 		expect(result.stdout).toEqual(["gsd2 validate: pass", "tasks: 1"]);
 	});
 
+	it("migrates legacy state before status", async () => {
+		const cwd = tempWorkspace();
+		await runCapture(cwd, ["new", "Status migrates state"]);
+		removeStateSchemaVersion(cwd);
+
+		const result = await runCapture(cwd, ["status"]);
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stderr).toEqual([]);
+		expect(readFileSync(statePath(cwd), "utf8")).toContain("schema_version: 1");
+	});
+
+	it("migrates legacy state before validate", async () => {
+		const cwd = tempWorkspace();
+		await runCapture(cwd, ["new", "Validate migrates state"]);
+		removeStateSchemaVersion(cwd);
+
+		const result = await runCapture(cwd, ["validate"]);
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stderr).toEqual([]);
+		expect(readFileSync(statePath(cwd), "utf8")).toContain("schema_version: 1");
+	});
+
+	it("migrates legacy state before dry-run", async () => {
+		const cwd = tempWorkspace();
+		await runCapture(cwd, ["new", "Dry-run migrates state"]);
+		removeStateSchemaVersion(cwd);
+
+		const result = await runCapture(cwd, ["run", "--dry-run", "G2-0001"]);
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stderr).toEqual([]);
+		expect(readFileSync(statePath(cwd), "utf8")).toContain("schema_version: 1");
+	});
+
+	it("status fails closed while the mutation lock exists", async () => {
+		const cwd = tempWorkspace();
+		await runCapture(cwd, ["new", "Status lock"]);
+		writeMutationLock(cwd);
+
+		const result = await runCapture(cwd, ["status"]);
+
+		expect(result.exitCode).toBe(1);
+		expect(result.stderr.join("\n")).toContain(
+			"gsd2: mutation lock already held for this worktree",
+		);
+	});
+
+	it("validate fails closed while the mutation lock exists", async () => {
+		const cwd = tempWorkspace();
+		await runCapture(cwd, ["new", "Validate lock"]);
+		writeMutationLock(cwd);
+
+		const result = await runCapture(cwd, ["validate"]);
+
+		expect(result.exitCode).toBe(1);
+		expect(result.stderr.join("\n")).toContain(
+			"gsd2: mutation lock already held for this worktree",
+		);
+	});
+
+	it("dry-run fails closed while the mutation lock exists", async () => {
+		const cwd = tempWorkspace();
+		await runCapture(cwd, ["new", "Dry-run lock"]);
+		writeMutationLock(cwd);
+
+		const result = await runCapture(cwd, ["run", "--dry-run", "G2-0001"]);
+
+		expect(result.exitCode).toBe(1);
+		expect(result.stderr.join("\n")).toContain(
+			"gsd2: mutation lock already held for this worktree",
+		);
+	});
+
 	it("fails validation when repo-local state is absent", async () => {
 		const cwd = tempWorkspace();
 		const result = await runCapture(cwd, ["validate"]);
@@ -296,6 +387,160 @@ verification:
 		expect(readFileSync(join(cwd, ".gsd2", "STATE.md"), "utf8")).toContain(
 			"next_task_number: 3",
 		);
+	});
+
+	it("preserves operator state notes while advancing the task counter", async () => {
+		const cwd = tempWorkspace();
+		await runCapture(cwd, ["new", "First task"]);
+		writeFileSync(
+			join(cwd, ".gsd2", "STATE.md"),
+			"# GSD-2 State\n\nCurrent status: active\noperator_note: keep this\nnext_task_number: 2\n",
+		);
+
+		const result = await runCapture(cwd, ["new", "Second task"]);
+
+		expect(result.exitCode).toBe(0);
+		const state = readFileSync(join(cwd, ".gsd2", "STATE.md"), "utf8");
+		expect(state).toContain("Current status: active");
+		expect(state).toContain("operator_note: keep this");
+		expect(state).toContain("schema_version: 1");
+		expect(state).toContain("next_task_number: 3");
+	});
+
+	it("migrates legacy state by adding the schema version line", async () => {
+		const cwd = tempWorkspace();
+		await runCapture(cwd, ["new", "First task"]);
+		writeFileSync(
+			join(cwd, ".gsd2", "STATE.md"),
+			"# GSD-2 State\n\nCurrent status: active\nnext_task_number: 2\n",
+		);
+
+		const result = await runCapture(cwd, ["new", "Second task"]);
+
+		expect(result.exitCode).toBe(0);
+		const state = readFileSync(join(cwd, ".gsd2", "STATE.md"), "utf8");
+		expect(state).toContain("schema_version: 1");
+		expect(state).toContain("next_task_number: 3");
+	});
+
+	it("fails closed when the worktree mutation lock already exists", async () => {
+		const cwd = tempWorkspace();
+		mkdirSync(join(cwd, ".gsd2"), { recursive: true });
+		writeFileSync(join(cwd, ".gsd2", "mutation.lock"), "stale lock\n");
+
+		const result = await runCapture(cwd, ["new", "Blocked by lock"]);
+
+		expect(result.exitCode).toBe(1);
+		expect(result.stderr.join("\n")).toContain(
+			"gsd2: mutation lock already held for this worktree",
+		);
+	});
+
+	it("replaces noncanonical task counter lines instead of appending duplicates", async () => {
+		const cwd = tempWorkspace();
+		await runCapture(cwd, ["new", "First task"]);
+		rmSync(join(cwd, ".gsd2", "tasks", "G2-0001"), {
+			force: true,
+			recursive: true,
+		});
+		writeFileSync(
+			join(cwd, ".gsd2", "STATE.md"),
+			"# GSD-2 State\n\nCurrent status: active\nnext_task_number: ' 2 ' # keep moving\n",
+		);
+
+		const result = await runCapture(cwd, ["new", "Second task"]);
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stdout).toContain("task-id: G2-0002");
+		const state = readFileSync(join(cwd, ".gsd2", "STATE.md"), "utf8");
+		expect(state.match(/^next_task_number:/gm)).toHaveLength(1);
+		expect(state).toContain("next_task_number: 3");
+	});
+
+	it("fails validation when task documents disagree with their directory", async () => {
+		const cwd = tempWorkspace();
+		await runCapture(cwd, ["new", "Validate task identity"]);
+		writeFileSync(
+			join(cwd, ".gsd2", "tasks", "G2-0001", "envelope.yaml"),
+			`id: G2-0002
+status: NEW
+goal: "Validate task identity"
+routing:
+  mode: planning_only
+  front_door: auto-coder
+  backend: none
+verification:
+  commands:
+    - "git diff --check"
+`,
+		);
+
+		const result = await runCapture(cwd, ["validate"]);
+
+		expect(result.exitCode).toBe(1);
+		expect(result.stderr).toEqual([]);
+		expect(result.stdout).toEqual([
+			"gsd2 validate: fail",
+			"  - G2-0001/envelope.yaml: envelope.id must match task directory",
+		]);
+	});
+
+	it("fails validation when receipt task IDs disagree with their directory", async () => {
+		const cwd = tempWorkspace();
+		await runCapture(cwd, ["new", "Validate receipt identity"]);
+		writeFileSync(
+			join(cwd, ".gsd2", "tasks", "G2-0001", "receipt.yaml"),
+			`task_id: G2-0002
+run_id: null
+backend: none
+final_status: BLOCKED
+checked_by: agent
+checked_at: "2026-04-28T16:26:35Z"
+verification:
+  required_complete: false
+acceptance:
+  explicitly_checked: false
+`,
+		);
+
+		const result = await runCapture(cwd, ["validate"]);
+
+		expect(result.exitCode).toBe(1);
+		expect(result.stderr).toEqual([]);
+		expect(result.stdout).toEqual([
+			"gsd2 validate: fail",
+			"  - G2-0001/receipt.yaml: receipt.task_id must match task directory",
+		]);
+	});
+
+	it("does not duplicate directory mismatch errors for malformed document IDs", async () => {
+		const cwd = tempWorkspace();
+		await runCapture(cwd, ["new", "Validate malformed identities"]);
+		writeFileSync(
+			join(cwd, ".gsd2", "tasks", "G2-0001", "envelope.yaml"),
+			`id: task-1
+status: NEW
+goal: "Validate malformed identities"
+routing:
+  mode: planning_only
+`,
+		);
+		writeFileSync(
+			join(cwd, ".gsd2", "tasks", "G2-0001", "receipt.yaml"),
+			`task_id: nope
+backend: none
+final_status: BLOCKED
+`,
+		);
+
+		const result = await runCapture(cwd, ["validate"]);
+
+		expect(result.exitCode).toBe(1);
+		expect(result.stdout).toEqual([
+			"gsd2 validate: fail",
+			"  - G2-0001/envelope.yaml: envelope.id must match G2-0001 format",
+			"  - G2-0001/receipt.yaml: receipt.task_id must match G2-0001 format",
+		]);
 	});
 
 	it("fails closed instead of emitting task IDs outside the V0 format", async () => {
