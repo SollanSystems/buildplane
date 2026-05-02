@@ -45,6 +45,16 @@ For high-trust work, Buildplane's front door is the governed loop rather than a 
 
 The concrete `reviewer-rescue` benchmark documents why this loop matters: the raw one-shot path leaves a rejected draft, while the implement-then-review path records reviewer feedback and lands an accepted artifact. Use the benchmark doc for the current evidence matrix and the local run loop below for the exact repo-development commands.
 
+## Evidence-first Run Inspector
+
+The first Mission Control slice is **Run Inspector**: a read-only forensic surface for completed or halted Buildplane runs. It is deliberately narrower than a live cockpit and is organized around three evidence-backed panels:
+
+- **Event Timeline** — the persisted event tape, using only real ledger/runtime events
+- **Evidence Pane** — raw evidence, decisions, artifacts, tool output, and hashes behind the selected event
+- **Outcome Strip** — a compact PASSED / BLOCKED / FAILED verdict that fails closed when verification or acceptance is missing
+
+The contract is documented in [`docs/architecture/run-inspector-evidence-slice.md`](docs/architecture/run-inspector-evidence-slice.md). It explicitly defers orchestration graphs, intake parsing, replay scrubbers, persona cards, live cockpit controls, and synthetic reasoning events until the runtime records can support them honestly.
+
 ## Verification contract
 
 CI keeps the deterministic trust gate explicit. The required local equivalents are:

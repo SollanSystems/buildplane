@@ -212,7 +212,10 @@ describe("model-codex eval suite", () => {
 	});
 
 	it("runs the opt-in Codex model suite with a stub codex binary", {
-		timeout: 20_000,
+		// This test shells through the full eval runner for 12 conditions. In the
+		// full Vitest suite it competes with ledger/storage integration tests, so
+		// the focused ~8s path can legitimately exceed the default 20s budget.
+		timeout: 60_000,
 	}, () => {
 		ensureWorkspaceBuildOutputs();
 

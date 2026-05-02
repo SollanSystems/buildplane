@@ -166,6 +166,37 @@ Branch hygiene note: the old `spec/event-tape-capture` PR branch is reference ev
 
 ---
 
+## Slice 4 — Evidence-first Run Inspector contract
+
+**Why now:** The Mission Control concept is strategically useful, but the first visible surface must stay forensic and evidence-backed before it becomes a live cockpit.
+
+**Outcome:** The repo documents a read-only Run Inspector slice centered on Event Timeline, Evidence Pane, and Outcome Strip, with every field tied to current Buildplane runtime records.
+
+### Acceptance criteria
+
+- [x] the first Mission Control slice is named Run Inspector rather than a broad live cockpit
+- [x] the MVP is limited to Event Timeline, Evidence Pane, and Outcome Strip
+- [x] the evidence contract maps each panel to current `InspectSnapshot`, storage, and ledger schema records
+- [x] the closed v1 event vocabulary comes from generated `EventKind` values
+- [x] synthetic reasoning events, orchestration graphs, intake parsing, replay scrubbers, persona cards, and live controls are explicitly deferred
+- [x] the recommended demo posture leads with a BLOCKED run so missing verification is visible rather than hidden
+
+### Likely files
+
+- [x] Modify: `README.md`
+- [x] Modify: `docs/architecture/README.md`
+- [x] Add: `docs/architecture/run-inspector-evidence-slice.md`
+- [x] Add: `test/workflow/run-inspector-evidence-doc-contract.test.ts`
+
+### Slice tasks
+
+- [x] Task 4A: define the read-only Run Inspector product boundary
+- [x] Task 4B: map Event Timeline, Evidence Pane, and Outcome Strip to runtime records
+- [x] Task 4C: pin the generated ledger event vocabulary in documentation
+- [x] Task 4D: add a docs contract test so future prose cannot drift into unsupported cockpit claims
+
+---
+
 ## Weekly cadence
 
 ### Week 1
@@ -188,6 +219,7 @@ Branch hygiene note: the old `spec/event-tape-capture` PR branch is reference ev
 
 - [ ] ship replay/review/recovery front-door improvements
 - [ ] publish one benchmark/demo story proving the control-plane thesis more clearly than raw one-shot execution
+- [x] document the evidence-first Run Inspector contract before widening into live cockpit UI
 
 ---
 
@@ -209,5 +241,6 @@ At the end of this plan window:
 - [ ] Buildplane's public story matches its actual verified contract
 - [ ] the trust/readiness surface is materially stronger and calmer
 - [ ] operators can inspect route, memory, policy, and evidence in one coherent flow
+- [x] the first Mission Control slice is constrained to an evidence-first Run Inspector contract
 - [ ] replay/review/recovery is a stronger default narrative than "just use a smarter shell"
 - [ ] the repo is more clearly building control-plane depth, not agent breadth
