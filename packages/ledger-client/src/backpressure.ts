@@ -13,6 +13,7 @@ export interface WriteQueueOptions {
 export class WriteQueue {
 	private tail: Promise<void> = Promise.resolve();
 	private inFlight: number = 0;
+	private drainPromise: Promise<void> | null = null;
 	private readonly highWatermark: number;
 
 	constructor(
@@ -31,25 +32,35 @@ export class WriteQueue {
 		const current = waitForHead.then(async () => {
 			const ok = this.pipe.write(chunk);
 			if (!ok) {
-				await new Promise<void>((resolve, reject) => {
-					const onDrain = () => {
-						this.pipe.off("error", onError);
-						resolve();
-					};
-					const onError = (error: Error) => {
-						this.pipe.off("drain", onDrain);
-						reject(error);
-					};
-
-					this.pipe.once("drain", onDrain);
-					this.pipe.once("error", onError);
-				});
+				await this.waitForDrain();
 			}
 		});
 		this.tail = current.catch(() => undefined);
 		return current.finally(() => {
 			this.inFlight = Math.max(0, this.inFlight - 1);
 		});
+	}
+
+	private waitForDrain(): Promise<void> {
+		this.drainPromise ??= new Promise<void>((resolve, reject) => {
+			const clear = () => {
+				this.pipe.off("drain", onDrain);
+				this.pipe.off("error", onError);
+				this.drainPromise = null;
+			};
+			const onDrain = () => {
+				clear();
+				resolve();
+			};
+			const onError = (error: Error) => {
+				clear();
+				reject(error);
+			};
+
+			this.pipe.once("drain", onDrain);
+			this.pipe.once("error", onError);
+		});
+		return this.drainPromise;
 	}
 
 	async flush(): Promise<void> {
