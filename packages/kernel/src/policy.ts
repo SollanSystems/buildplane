@@ -16,11 +16,37 @@ export interface BudgetConstraints {
 	readonly maxComputeTimeMs?: number;
 }
 
+// ── Capability Grants ───────────────────────────────────────
+
+/**
+ * Narrow permission for an observable side effect.
+ *
+ * Runtime side-effect receipts must cite a grant by id. Matching is exact except
+ * that actions/targets may contain "*" to intentionally grant a wider scope.
+ */
+export interface CapabilityGrant {
+	readonly id: string;
+	readonly capability: string;
+	readonly actions: readonly string[];
+	readonly targets: readonly string[];
+}
+
+// ── Architecture Gates ──────────────────────────────────────
+
+/** Deterministic path allow/deny list for architecture-scoped diffs. */
+export interface ArchitectureDiffScopeGate {
+	/** Glob-like allow patterns (`src/**`, `package.json`, `docs/*.md`). */
+	readonly allowedPaths: readonly string[];
+	/** Optional deny patterns checked before allow patterns. */
+	readonly deniedPaths?: readonly string[];
+}
+
 // ── Policy Profiles ─────────────────────────────────────────
 
 export interface PolicyProfile {
 	readonly name: string;
 	readonly budgets?: BudgetConstraints;
+	readonly capabilityGrants?: readonly CapabilityGrant[];
 	readonly retry?: RetryPolicy;
 	readonly trustGates?: TrustGateConfig;
 }
@@ -38,6 +64,11 @@ export interface TrustGateConfig {
 	 * Resume via `buildplane approve <run-id>`.
 	 */
 	readonly requiresApproval?: boolean;
+	/**
+	 * Deterministic architecture scope gate over changed file paths.
+	 * A rejected result blocks the run without asking an LLM to judge architecture.
+	 */
+	readonly architectureDiffScope?: ArchitectureDiffScopeGate;
 }
 
 // ── Retry Policy ────────────────────────────────────────────

@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
@@ -108,6 +109,36 @@ export function createBuildplaneOrchestrator(
 			headSha: preparedWorkspace.headSha,
 			status: "active",
 		};
+	}
+
+	function collectWorkspaceChangedFiles(
+		workspaceRoot: string,
+	): readonly string[] {
+		try {
+			const tracked = execFileSync(
+				"git",
+				["-C", workspaceRoot, "diff", "--name-only", "HEAD", "--"],
+				{
+					encoding: "utf8",
+				},
+			);
+			const untracked = execFileSync(
+				"git",
+				["-C", workspaceRoot, "ls-files", "--others", "--exclude-standard"],
+				{
+					encoding: "utf8",
+				},
+			);
+			return Array.from(
+				new Set(
+					[...tracked.split(/\r?\n/), ...untracked.split(/\r?\n/)]
+						.map((path) => path.trim())
+						.filter(Boolean),
+				),
+			).sort();
+		} catch {
+			return ["../buildplane-diff-unavailable"];
+		}
 	}
 
 	function buildStrategyProcedureCandidate(
@@ -794,6 +825,10 @@ export function createBuildplaneOrchestrator(
 
 			try {
 				currentReceipt = await executeOnce(currentPacket);
+				currentReceipt = {
+					...currentReceipt,
+					changedFiles: collectWorkspaceChangedFiles(ctx.workspace.path),
+				};
 			} catch (error) {
 				budgetUnsubscribe?.();
 				const message = error instanceof Error ? error.message : String(error);
@@ -820,6 +855,27 @@ export function createBuildplaneOrchestrator(
 			try {
 				while (true) {
 					storage.recordExecutionEvidence(ctx.run.id, currentReceipt);
+
+					const architectureGate =
+						resolvedProfile?.trustGates?.architectureDiffScope;
+					if (architectureGate && policy.evaluateArchitectureDiffScope) {
+						const architectureDecision = policy.evaluateArchitectureDiffScope(
+							currentReceipt.changedFiles ?? [],
+							architectureGate,
+						);
+						if (architectureDecision) {
+							return finalizeRun(
+								{
+									run: ctx.run,
+									validatedPacket: currentPacket,
+									workspace: ctx.workspace,
+									attemptCount,
+								},
+								currentReceipt,
+								architectureDecision,
+							);
+						}
+					}
 
 					const decision = policy.evaluateRun(
 						currentPacket,

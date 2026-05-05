@@ -317,6 +317,8 @@ function formatTopLevelHelp(): string[] {
 		"    status [--json]        Project health snapshot",
 		"    history [--json]       List all runs",
 		"    inspect <id> [--json]  Deep-dive into a run and event tape",
+		"    verify --run <id> [--json]  Final receipt-backed verdict",
+		"    evidence export --run <id> --out <file>  Export Mission Control bundle",
 		"    replay <id> [--json]   Re-execute the stored packet snapshot",
 		"    ledger replay --run-id <id> --workspace <path>  Read-only tape replay",
 		"    fork <id> --at <event> --packet <file>          Recover from a unit boundary",
@@ -368,6 +370,33 @@ function formatReplayHelp(): string[] {
 		"  Options:",
 		"    --json              Machine-readable replay result",
 		"    --policy <profile>  Override the policy profile for the replay run",
+	];
+}
+
+function formatVerifyHelp(): string[] {
+	return [
+		"buildplane verify --run <run-id> [--json]",
+		"",
+		"  Computes the final receipt-backed verdict from verifier evidence,",
+		"  policy approvals, blockers, and missing acceptance criteria.",
+		"",
+		"  Options:",
+		"    --run <id>   Run id to verify",
+		"    --json       Print the verdict report as JSON",
+	];
+}
+
+function formatEvidenceHelp(): string[] {
+	return [
+		"buildplane evidence export --run <run-id> --out <file> [--json]",
+		"",
+		"  Exports a Mission Control run_bundle fixture with worker claims,",
+		"  verifier receipts, artifacts, and final halt evidence kept distinct.",
+		"",
+		"  Options:",
+		"    --run <id>   Run id to export",
+		"    --out <file> Write bundle JSON to this path",
+		"    --json       Also print the exported bundle JSON",
 	];
 }
 
@@ -1950,6 +1979,80 @@ export async function runCli(
 			);
 		}
 
+		if (command === "verify") {
+			if (isHelpRequested(rest)) {
+				for (const line of formatVerifyHelp()) {
+					stdout(line);
+				}
+				return 0;
+			}
+			const json = rest.includes("--json");
+			const runIndex = rest.indexOf("--run");
+			if (runIndex === -1 || !rest[runIndex + 1]) {
+				throw new Error("Missing required --run <id> argument.");
+			}
+			const runId = rest[runIndex + 1];
+			const storage = (await cliImport("@buildplane/storage")) as unknown as {
+				verifyRunFinalVerdict: (
+					root: string,
+					options: { runId: string },
+				) => { verdict: string; runId: string } & Record<string, unknown>;
+			};
+			const report = storage.verifyRunFinalVerdict(cwd, { runId });
+			if (json) {
+				stdout(formatJson(report));
+			} else {
+				stdout(`verify: ${report.verdict}`);
+				stdout(`run-id: ${report.runId}`);
+			}
+			return report.verdict === "PASSED" ? 0 : 1;
+		}
+
+		if (command === "evidence") {
+			const subcommand = rest[0];
+			if (isHelpRequested(rest)) {
+				for (const line of formatEvidenceHelp()) {
+					stdout(line);
+				}
+				return 0;
+			}
+
+			if (subcommand === "export") {
+				const subRest = rest.slice(1);
+				const json = subRest.includes("--json");
+				const runIndex = subRest.indexOf("--run");
+				const outIndex = subRest.indexOf("--out");
+				if (runIndex === -1 || !subRest[runIndex + 1]) {
+					throw new Error("Missing required --run <id> argument.");
+				}
+				if (outIndex === -1 || !subRest[outIndex + 1]) {
+					throw new Error("Missing required --out <path> argument.");
+				}
+
+				const runId = subRest[runIndex + 1];
+				const outPath = resolve(cwd, subRest[outIndex + 1]);
+				const storage = (await cliImport("@buildplane/storage")) as unknown as {
+					exportRunBundle: (
+						root: string,
+						options: { runId: string; outPath: string },
+					) => Record<string, unknown>;
+				};
+				const bundle = storage.exportRunBundle(cwd, { runId, outPath });
+				if (json) {
+					stdout(formatJson(bundle));
+				} else {
+					stdout("evidence-export: wrote");
+					stdout(`run-id: ${runId}`);
+					stdout(`out: ${outPath}`);
+				}
+				return 0;
+			}
+
+			throw new Error(
+				`Unknown evidence command: ${subcommand ?? "(missing subcommand)"}`,
+			);
+		}
+
 		if (command === "workspace") {
 			const subcommand = rest[0];
 			const json = rest.includes("--json");
@@ -3153,7 +3256,7 @@ function classifyCliError(error: unknown): { code: string; message: string } {
 		return { code: "NOT_INITIALIZED", message };
 	}
 
-	if (/No run or unit found/i.test(message)) {
+	if (/No run or unit found|No run found/i.test(message)) {
 		return { code: "NOT_FOUND", message };
 	}
 

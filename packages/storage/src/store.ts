@@ -1648,7 +1648,10 @@ export function createStorageStore(
 				const outputChecks = Array.isArray(payload.outputChecks)
 					? payload.outputChecks.length
 					: 0;
-				return `execution exit ${String(exitCode)} with ${outputChecks} output checks`;
+				const sideEffects = Array.isArray(payload.sideEffects)
+					? payload.sideEffects.length
+					: 0;
+				return `execution exit ${String(exitCode)} with ${outputChecks} output checks and ${sideEffects} side effects`;
 			}
 			case "decision-recorded":
 				return `${String(payload.kind ?? "decision")} ${String(payload.outcome ?? "unknown")}`;
@@ -2068,6 +2071,8 @@ export function createStorageStore(
 						runId,
 						exitCode: receipt.exitCode,
 						outputChecks: receipt.outputChecks,
+						changedFiles: receipt.changedFiles ?? [],
+						sideEffects: receipt.sideEffects ?? [],
 					},
 					database,
 				);

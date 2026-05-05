@@ -43,6 +43,19 @@ export interface OutputCheck {
 	readonly exists: boolean;
 }
 
+/**
+ * Runtime receipt for a side effect that crosses the local read/compute boundary.
+ * Examples: creating a PR draft, publishing a comment, mutating remote state.
+ */
+export interface SideEffectReceipt {
+	readonly id: string;
+	readonly capability: string;
+	readonly action: string;
+	readonly target: string;
+	readonly grantId?: string;
+	readonly metadata?: Readonly<Record<string, string | number | boolean>>;
+}
+
 export interface ExecutionReceipt {
 	readonly command: string;
 	readonly args: readonly string[];
@@ -53,6 +66,9 @@ export interface ExecutionReceipt {
 	readonly stdout: string;
 	readonly stderr: string;
 	readonly outputChecks: readonly OutputCheck[];
+	/** Deterministic repo-relative diff paths captured after execution when available. */
+	readonly changedFiles?: readonly string[];
+	readonly sideEffects?: readonly SideEffectReceipt[];
 }
 
 export interface ApprovedPolicyDecision {
@@ -62,7 +78,7 @@ export interface ApprovedPolicyDecision {
 }
 
 export interface RejectedPolicyDecision {
-	readonly kind: "reject-run";
+	readonly kind: "reject-run" | "architecture.diff_scope";
 	readonly outcome: "rejected";
 	readonly reasons: readonly string[];
 }
