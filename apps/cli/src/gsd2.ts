@@ -34,12 +34,43 @@ export const GSD2_ROUTE_MODES = [
 
 export const GSD2_FINAL_STATUSES = ["PASSED", "BLOCKED", "FAILED"] as const;
 
+export const GSD2_ADMISSION_COLUMNS = [
+	"inbox",
+	"triage",
+	"planned",
+	"architecture_review",
+	"ready_for_execution",
+	"running",
+	"verifying",
+	"blocked",
+	"ready_for_pr",
+	"pr_open",
+	"accepted",
+	"archived",
+] as const;
+
+export const GSD2_ARCHITECTURE_IMPACTS = [
+	"none",
+	"low",
+	"medium",
+	"high",
+] as const;
+
+const GSD2_ADMISSION_RECEIPT_TYPE = "task.admitted";
+const GSD2_READY_COLUMN = "ready_for_execution";
+
 type Gsd2RouteMode = (typeof GSD2_ROUTE_MODES)[number];
+type Gsd2ArchitectureImpact = (typeof GSD2_ARCHITECTURE_IMPACTS)[number];
 
 interface Gsd2Envelope {
 	readonly id?: string;
 	readonly status?: string;
 	readonly goal?: string;
+	readonly architectureImpact?: string;
+	readonly requiredAdrs: readonly string[];
+	readonly requestedCapabilities: readonly string[];
+	readonly evidenceRequirements: readonly string[];
+	readonly gateReceipts: readonly string[];
 	readonly routing?: {
 		readonly mode?: string;
 		readonly frontDoor?: string;
@@ -48,6 +79,21 @@ interface Gsd2Envelope {
 	readonly verification?: {
 		readonly commands: readonly string[];
 	};
+	readonly buildplane?: {
+		readonly runIds: readonly string[];
+	};
+}
+
+interface AdmissionPlan {
+	readonly taskId: string;
+	readonly fromStatus: string;
+	readonly toStatus: "READY";
+	readonly kanbanColumn: "ready_for_execution";
+	readonly route: Gsd2RouteMode;
+	readonly backend: string;
+	readonly gates: readonly string[];
+	readonly requestedCapabilities: readonly string[];
+	readonly evidenceRequirements: readonly string[];
 }
 
 interface Gsd2Receipt {
@@ -69,6 +115,11 @@ const STATE_SCHEMA_VERSION_LINE_PATTERN =
 	/^schema_version:\s*['"]?\s*(\d+)\s*['"]?(?:\s+#.*)?\s*$/gm;
 const CURRENT_STATE_SCHEMA_VERSION = 1;
 const DEFAULT_VERIFICATION_COMMANDS = ["git diff --check"] as const;
+const DEFAULT_EVIDENCE_REQUIREMENTS = [
+	"task.admitted receipt",
+	"verifier.executed receipts",
+	"evidence.accepted receipts",
+] as const;
 const DEFAULT_RECOVERY_ACTIONS = [
 	"retry_with_tighter_context",
 	"fresh_worktree",
@@ -82,6 +133,11 @@ export function parseGsd2Envelope(content: string): Gsd2Envelope {
 		id: readScalar(content, "id"),
 		status: readScalar(content, "status"),
 		goal: readScalar(content, "goal"),
+		architectureImpact: readScalar(content, "architecture_impact"),
+		requiredAdrs: readTopLevelList(content, "required_adrs"),
+		requestedCapabilities: readTopLevelList(content, "requested_capabilities"),
+		evidenceRequirements: readTopLevelList(content, "evidence_requirements"),
+		gateReceipts: readTopLevelList(content, "gate_receipts"),
 		routing: {
 			mode: readNestedScalar(content, "routing", "mode"),
 			frontDoor: readNestedScalar(content, "routing", "front_door"),
@@ -89,6 +145,9 @@ export function parseGsd2Envelope(content: string): Gsd2Envelope {
 		},
 		verification: {
 			commands: readNestedList(content, "verification", "commands"),
+		},
+		buildplane: {
+			runIds: readNestedList(content, "buildplane", "run_ids"),
 		},
 	};
 }
@@ -117,6 +176,14 @@ export function validateGsd2Envelope(envelope: Gsd2Envelope): string[] {
 	if (!isOneOf(envelope.routing?.mode, GSD2_ROUTE_MODES)) {
 		errors.push(
 			`envelope.routing.mode must be one of ${GSD2_ROUTE_MODES.join(", ")}`,
+		);
+	}
+	if (
+		envelope.architectureImpact !== undefined &&
+		!isOneOf(envelope.architectureImpact, GSD2_ARCHITECTURE_IMPACTS)
+	) {
+		errors.push(
+			`envelope.architecture_impact must be one of ${GSD2_ARCHITECTURE_IMPACTS.join(", ")}`,
 		);
 	}
 	return errors;
@@ -162,6 +229,8 @@ export async function runGsd2(
 				return runStatus(cwd, stdout);
 			case "new":
 				return runNew(cwd, rest, stdout, stderr);
+			case "admit":
+				return runAdmit(cwd, rest, stdout, stderr);
 			case "validate":
 				return runValidate(cwd, stdout);
 			case "run":
@@ -183,10 +252,12 @@ function formatHelp(): string[] {
 		"Usage:",
 		"  gsd2 status",
 		'  gsd2 new "<goal>" [--route <mode>]',
+		"  gsd2 admit [--dry-run] <task-id>",
 		"  gsd2 validate",
 		"  gsd2 run --dry-run <task-id>",
 		"",
-		"Milestone 1 is non-executing: dry-run previews routes but never spawns workers.",
+		"Admission moves NEW tasks to READY with a local task.admitted receipt; it never executes workers.",
+		"Milestone 1 route previews remain non-executing: dry-run previews routes but never spawns workers.",
 	];
 }
 
@@ -271,6 +342,91 @@ function runNew(
 
 		stdout(`task-id: ${taskId}`);
 		stdout(`route: ${parsed.route}`);
+		stdout("will-execute: false");
+		return 0;
+	} finally {
+		releaseMutationLock(lock);
+	}
+}
+
+function runAdmit(
+	cwd: string,
+	argv: readonly string[],
+	stdout: (line: string) => void,
+	stderr: (line: string) => void,
+): number {
+	const parsed = parseAdmitArgs(argv);
+	if (!parsed.taskId || !TASK_ID_PATTERN.test(parsed.taskId)) {
+		stderr("gsd2 admit: missing required task id such as G2-0001");
+		return 1;
+	}
+	if (existsSync(join(cwd, ".gsd2"))) {
+		prepareStateForCommand(cwd);
+	}
+	const taskDir = join(cwd, ".gsd2", "tasks", parsed.taskId);
+	const envelopePath = join(taskDir, "envelope.yaml");
+	const receiptPath = join(taskDir, "receipt.yaml");
+	if (!existsSync(envelopePath)) {
+		stderr(`gsd2 admit: task ${parsed.taskId} not found`);
+		return 1;
+	}
+
+	const envelopeContent = readFileSync(envelopePath, "utf8");
+	const envelope = parseGsd2Envelope(envelopeContent);
+	const planResult = buildAdmissionPlan(parsed.taskId, envelope);
+	if (planResult.errors.length > 0) {
+		for (const error of planResult.errors) {
+			stderr(`gsd2 admit: ${parsed.taskId}/envelope.yaml: ${error}`);
+		}
+		return 1;
+	}
+	const plan = planResult.plan;
+	if (parsed.dryRun) {
+		stdout(`gsd2 admission dry-run: ${plan.taskId}`);
+		stdout(`from-status: ${plan.fromStatus}`);
+		stdout(`to-status: ${plan.toStatus}`);
+		stdout(`kanban-column: ${plan.kanbanColumn}`);
+		stdout(`route: ${plan.route}`);
+		stdout(`backend: ${plan.backend}`);
+		stdout("will-execute: false");
+		stdout("required-gates:");
+		for (const gate of plan.gates) {
+			stdout(`  - ${gate}`);
+		}
+		stdout("requested-capabilities:");
+		for (const capability of plan.requestedCapabilities) {
+			stdout(`  - ${capability}`);
+		}
+		stdout("evidence-requirements:");
+		for (const evidence of plan.evidenceRequirements) {
+			stdout(`  - ${evidence}`);
+		}
+		return 0;
+	}
+
+	const lock = acquireMutationLock(join(cwd, ".gsd2"));
+	try {
+		const now = new Date().toISOString();
+		const latestEnvelope = parseGsd2Envelope(
+			readFileSync(envelopePath, "utf8"),
+		);
+		const latestPlanResult = buildAdmissionPlan(parsed.taskId, latestEnvelope);
+		if (latestPlanResult.errors.length > 0) {
+			for (const error of latestPlanResult.errors) {
+				stderr(`gsd2 admit: ${parsed.taskId}/envelope.yaml: ${error}`);
+			}
+			return 1;
+		}
+		const latestPlan = latestPlanResult.plan;
+		writeTextAtomic(
+			envelopePath,
+			markEnvelopeAdmitted(readFileSync(envelopePath, "utf8"), now),
+		);
+		writeTextAtomic(receiptPath, formatAdmissionReceiptYaml(latestPlan, now));
+		stdout(`gsd2 admit: ${latestPlan.taskId}`);
+		stdout(`status: ${latestPlan.toStatus}`);
+		stdout(`kanban-column: ${latestPlan.kanbanColumn}`);
+		stdout(`receipt: ${GSD2_ADMISSION_RECEIPT_TYPE}`);
 		stdout("will-execute: false");
 		return 0;
 	} finally {
@@ -466,6 +622,169 @@ function parseDryRunArgs(argv: readonly string[]): {
 	return { dryRun, taskId };
 }
 
+function parseAdmitArgs(argv: readonly string[]): {
+	dryRun: boolean;
+	taskId?: string;
+} {
+	let dryRun = false;
+	let taskId: string | undefined;
+	for (const token of argv) {
+		if (token === "--dry-run") {
+			dryRun = true;
+			continue;
+		}
+		if (!token.startsWith("--") && taskId === undefined) {
+			taskId = token;
+		}
+	}
+	return { dryRun, taskId };
+}
+
+function buildAdmissionPlan(
+	taskId: string,
+	envelope: Gsd2Envelope,
+): { plan: AdmissionPlan; errors: readonly string[] } {
+	const errors: string[] = [...validateGsd2Envelope(envelope)];
+	if (envelope.id !== taskId) {
+		errors.push(`envelope.id must match task id ${taskId}`);
+	}
+	if (envelope.status !== "NEW") {
+		errors.push("envelope.status must be NEW before admission");
+	}
+	if ((envelope.verification?.commands.length ?? 0) === 0) {
+		errors.push("envelope.verification.commands is required for admission");
+	}
+	const route = asRouteMode(envelope.routing?.mode ?? "planning_only");
+	const backend = envelope.routing?.backend ?? backendForRoute(route);
+	const architectureImpact = asArchitectureImpact(
+		envelope.architectureImpact ?? "low",
+	);
+	const requestedCapabilities =
+		envelope.requestedCapabilities.length > 0
+			? envelope.requestedCapabilities
+			: defaultCapabilitiesForRoute(route);
+	const evidenceRequirements =
+		envelope.evidenceRequirements.length > 0
+			? envelope.evidenceRequirements
+			: DEFAULT_EVIDENCE_REQUIREMENTS;
+	const gates = admissionGatesFor(route, architectureImpact);
+	return {
+		plan: {
+			taskId,
+			fromStatus: envelope.status ?? "UNKNOWN",
+			toStatus: "READY",
+			kanbanColumn: GSD2_READY_COLUMN,
+			route,
+			backend,
+			gates,
+			requestedCapabilities,
+			evidenceRequirements,
+		},
+		errors,
+	};
+}
+
+function admissionGatesFor(
+	route: Gsd2RouteMode,
+	architectureImpact: Gsd2ArchitectureImpact,
+): string[] {
+	const gates = [
+		"task.envelope.valid",
+		"task.scope.declared",
+		"verification.plan.present",
+	];
+	if (route !== "planning_only" || architectureImpact !== "none") {
+		gates.push("architecture.diff_scope");
+	}
+	return gates;
+}
+
+function defaultCapabilitiesForRoute(route: Gsd2RouteMode): string[] {
+	switch (route) {
+		case "planning_only":
+			return ["fs.read:repo"];
+		case "buildplane":
+			return [
+				"fs.read:repo",
+				"fs.write:declared_scope",
+				"command.execute:verification",
+				"buildplane.run",
+			];
+		case "manual_recovery":
+			return ["fs.read:repo", "operator.approval"];
+		default:
+			return [
+				"fs.read:repo",
+				"fs.write:declared_scope",
+				"command.execute:verification",
+			];
+	}
+}
+
+function markEnvelopeAdmitted(content: string, now: string): string {
+	return replaceTopLevelScalar(
+		replaceTopLevelScalar(content, "status", "READY"),
+		"updated_at",
+		`"${now}"`,
+	);
+}
+
+function formatAdmissionReceiptYaml(plan: AdmissionPlan, now: string): string {
+	return `task_id: ${plan.taskId}
+run_id: null
+backend: ${plan.backend}
+final_status: BLOCKED
+checked_by: agent
+checked_at: "${now}"
+admission:
+  receipt_type: ${GSD2_ADMISSION_RECEIPT_TYPE}
+  from_status: ${plan.fromStatus}
+  to_status: ${plan.toStatus}
+  kanban_column: ${plan.kanbanColumn}
+  admitted_at: "${now}"
+  route: ${plan.route}
+  backend: ${plan.backend}
+  will_execute: false
+  required_gates:
+${formatYamlList(plan.gates, 4)}  requested_capabilities:
+${formatYamlList(plan.requestedCapabilities, 4)}  evidence_requirements:
+${formatYamlList(plan.evidenceRequirements, 4)}verification:
+  required_complete: false
+acceptance:
+  explicitly_checked: false
+unresolved_findings:
+  - "Task is admitted to READY but execution and verification have not run."
+recovery_next_step: "Prepare the selected backend only after explicit operator approval."
+`;
+}
+
+function replaceTopLevelScalar(
+	content: string,
+	key: string,
+	serializedValue: string,
+): string {
+	const pattern = new RegExp(`^${escapeRegExp(key)}:\\s*.*$`, "m");
+	if (pattern.test(content)) {
+		return content.replace(pattern, `${key}: ${serializedValue}`);
+	}
+	return `${content.replace(/\s*$/, "\n")}${key}: ${serializedValue}\n`;
+}
+
+function formatYamlList(values: readonly string[], spaces: number): string {
+	const indent = " ".repeat(spaces);
+	return values
+		.map((value) => `${indent}- ${formatYamlString(value)}\n`)
+		.join("");
+}
+
+function formatYamlString(value: string): string {
+	return `"${escapeYamlString(sanitizeYamlListValue(value))}"`;
+}
+
+function sanitizeYamlListValue(value: string): string {
+	return value.replace(/[\r\n]/g, " ").trim();
+}
+
 function listTaskIds(cwd: string): string[] {
 	const tasksRoot = join(cwd, ".gsd2", "tasks");
 	if (!existsSync(tasksRoot)) {
@@ -642,7 +961,7 @@ function formatEnvelopeYaml(
 	backend: string,
 	now: string,
 ): string {
-	return `id: ${taskId}\nstatus: NEW\ncreated_at: "${now}"\nupdated_at: "${now}"\ngoal: "${escapeYamlString(goal)}"\nrouting:\n  mode: ${route}\n  front_door: auto-coder\n  backend: ${backend}\nverification:\n  commands:\n    - "git diff --check"\nrecovery:\n  max_attempts: 2\n  allowed_actions:\n    - retry_with_tighter_context\n    - fresh_worktree\n    - buildplane_replay\n    - buildplane_fork\n    - manual_escalation\n`;
+	return `id: ${taskId}\nstatus: NEW\ncreated_at: "${now}"\nupdated_at: "${now}"\ngoal: "${escapeYamlString(goal)}"\narchitecture_impact: low\nrequired_adrs: []\nscope:\n  allowed_paths:\n    - "."\n  forbidden_paths:\n    - ".env"\n    - "secrets/"\n  out_of_scope:\n    - "push"\n    - "deploy"\nrequested_capabilities:\n${formatYamlList(defaultCapabilitiesForRoute(route), 2)}evidence_requirements:\n${formatYamlList(DEFAULT_EVIDENCE_REQUIREMENTS, 2)}buildplane:\n  run_ids: []\ngate_receipts: []\nrouting:\n  mode: ${route}\n  front_door: auto-coder\n  backend: ${backend}\nverification:\n  commands:\n    - "git diff --check"\nrecovery:\n  max_attempts: 2\n  allowed_actions:\n    - retry_with_tighter_context\n    - fresh_worktree\n    - buildplane_replay\n    - buildplane_fork\n    - manual_escalation\n`;
 }
 
 function formatReceiptYaml(
@@ -671,6 +990,30 @@ function readNestedScalar(
 	key: string,
 ): string | undefined {
 	return readScalar(extractSection(content, section), key);
+}
+
+function readTopLevelList(content: string, key: string): string[] {
+	const scalar = readScalar(content, key);
+	if (scalar === "[]") {
+		return [];
+	}
+	const lines = content.split(/\r?\n/);
+	const values: string[] = [];
+	let inList = false;
+	for (const line of lines) {
+		if (new RegExp(`^${escapeRegExp(key)}:`).test(line)) {
+			inList = true;
+			continue;
+		}
+		if (inList && /^\s{2}-\s+/.test(line)) {
+			values.push(cleanScalar(line.replace(/^\s{2}-\s+/, "")));
+			continue;
+		}
+		if (inList && /^\S/.test(line)) {
+			break;
+		}
+	}
+	return values;
 }
 
 function readNestedList(
@@ -745,6 +1088,10 @@ function isOneOf<T extends readonly string[]>(
 
 function asRouteMode(value: string): Gsd2RouteMode {
 	return isOneOf(value, GSD2_ROUTE_MODES) ? value : "planning_only";
+}
+
+function asArchitectureImpact(value: string): Gsd2ArchitectureImpact {
+	return isOneOf(value, GSD2_ARCHITECTURE_IMPACTS) ? value : "low";
 }
 
 function formatError(error: unknown): string {

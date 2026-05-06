@@ -215,6 +215,10 @@ pnpm gsd2 status
 pnpm gsd2 new "<goal>" --route planning_only
 pnpm gsd2 validate
 pnpm gsd2 run --dry-run <task-id>
+pnpm gsd2 admit --dry-run <task-id>
+pnpm gsd2 admit <task-id>
 ```
+
+Admission is still non-executing: it moves a valid `NEW` task envelope to `READY`, records a local `task.admitted` receipt, estimates gates/capabilities/evidence, and does not dispatch Buildplane, worktree-kernel, tmux, or model workers.
 
 The first implementation target is only the state skeleton: `.gsd2/PROJECT.md`, `.gsd2/STATE.md`, `.gsd2/QUEUE.md`, `.gsd2/config.yaml`, and per-task `task.md`, `envelope.yaml`, and `receipt.yaml`. Later milestones may bridge those envelopes to worktree-kernel or Buildplane after the dry-run contract is accepted.
