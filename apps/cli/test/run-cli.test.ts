@@ -1,5 +1,11 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -2795,5 +2801,548 @@ describe("cli command surface", () => {
 				argv: ["search", "foo"],
 			},
 		]);
+	});
+
+	it("reports receipt-backed final verdicts from verify --run --json", async () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-cli-verify-pass-"));
+		await runCliCapture(root, ["init"]);
+		const storage = createBuildplaneStorage(root);
+		const run = storage.createRun(createPassingPacket("unit-cli-verify-pass"), {
+			runId: "run-cli-verify-pass",
+		});
+		storage.markRunRunning(run.id);
+		storage.recordExecutionEvidence(run.id, {
+			command: "node",
+			args: ["-e", "console.log('worker claim')"],
+			cwd: root,
+			startedAt: "2026-05-04T10:00:00.000Z",
+			completedAt: "2026-05-04T10:00:01.000Z",
+			exitCode: 0,
+			stdout: "worker claim\n",
+			stderr: "",
+			outputChecks: [{ path: "tmp/pass.txt", exists: true }],
+		});
+		storage.recordDecision(run.id, {
+			kind: "advance-run",
+			outcome: "approved",
+			reasons: ["required output exists"],
+		});
+		storage.completeRun(run.id, "passed");
+
+		const result = await runCliCapture(root, [
+			"verify",
+			"--run",
+			run.id,
+			"--json",
+		]);
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stderr).toEqual([]);
+		const report = JSON.parse(result.stdout.join("\n"));
+		expect(report).toMatchObject({
+			runId: run.id,
+			verdict: "PASSED",
+			receipts: { verifier: 2, approvals: 1, rejections: 0 },
+		});
+		expect(report.criteria).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					id: "required-output:tmp/pass.txt",
+					status: "PASSED",
+				}),
+				expect.objectContaining({ id: "command-exit:0", status: "PASSED" }),
+			]),
+		);
+	});
+
+	it("fails closed from verify --run --json when acceptance evidence is missing", async () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-cli-verify-blocked-"));
+		await runCliCapture(root, ["init"]);
+		const storage = createBuildplaneStorage(root);
+		const run = storage.createRun(
+			createPassingPacket("unit-cli-verify-blocked"),
+			{
+				runId: "run-cli-verify-blocked",
+			},
+		);
+		storage.markRunRunning(run.id);
+		storage.recordDecision(run.id, {
+			kind: "advance-run",
+			outcome: "approved",
+			reasons: ["worker claimed success"],
+		});
+		storage.completeRun(run.id, "passed");
+
+		const result = await runCliCapture(root, [
+			"verify",
+			"--run",
+			run.id,
+			"--json",
+		]);
+
+		expect(result.exitCode).toBe(1);
+		expect(result.stderr).toEqual([]);
+		const blockedReport = JSON.parse(result.stdout.join("\n"));
+		expect(blockedReport).toMatchObject({
+			runId: run.id,
+			verdict: "BLOCKED",
+		});
+		expect(blockedReport.criteria).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					id: "required-output:tmp/pass.txt",
+					status: "INSUFFICIENT_EVIDENCE",
+				}),
+				expect.objectContaining({
+					id: "command-exit:0",
+					status: "INSUFFICIENT_EVIDENCE",
+				}),
+			]),
+		);
+		expect(blockedReport.issues).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({ code: "MISSING_VERIFIER_RECEIPT" }),
+			]),
+		);
+	});
+
+	it("surfaces architecture.diff_scope blockers from verify --run --json", async () => {
+		const root = mkdtempSync(
+			join(tmpdir(), "buildplane-cli-verify-architecture-scope-"),
+		);
+		await runCliCapture(root, ["init"]);
+		const storage = createBuildplaneStorage(root);
+		const run = storage.createRun(
+			createPassingPacket("unit-cli-verify-architecture-scope"),
+			{
+				runId: "run-cli-verify-architecture-scope",
+			},
+		);
+		storage.markRunRunning(run.id);
+		storage.recordExecutionEvidence(run.id, {
+			command: "node",
+			args: ["-e", "console.log('changed files')"],
+			cwd: root,
+			startedAt: "2026-05-04T10:00:00.000Z",
+			completedAt: "2026-05-04T10:00:01.000Z",
+			exitCode: 0,
+			stdout: "changed files: src/domain/runBundle.ts infra/prod.tf\n",
+			stderr: "",
+			outputChecks: [{ path: "tmp/pass.txt", exists: true }],
+		});
+		storage.recordDecision(run.id, {
+			kind: "architecture.diff_scope",
+			outcome: "rejected",
+			reasons: [
+				"architecture.diff_scope blocked infra/prod.tf: path is outside allowed architecture scope src/**, tests/**.",
+			],
+		});
+		storage.completeRun(run.id, "failed");
+
+		const result = await runCliCapture(root, [
+			"verify",
+			"--run",
+			run.id,
+			"--json",
+		]);
+
+		expect(result.exitCode).toBe(1);
+		expect(result.stderr).toEqual([]);
+		const report = JSON.parse(result.stdout.join("\n"));
+		expect(report).toMatchObject({
+			runId: run.id,
+			verdict: "BLOCKED",
+		});
+		expect(report.issues).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					code: "UNRESOLVED_BLOCKER",
+					message: expect.stringContaining(
+						"architecture.diff_scope blocked infra/prod.tf",
+					),
+				}),
+			]),
+		);
+	});
+
+	it("exports Mission Control run bundles from evidence export", async () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-cli-evidence-export-"));
+		await runCliCapture(root, ["init"]);
+		const storage = createBuildplaneStorage(root);
+		const run = storage.createRun(
+			createPassingPacket("unit-cli-evidence-export"),
+			{
+				runId: "run-cli-evidence-export",
+			},
+		);
+		storage.markRunRunning(run.id);
+		storage.recordExecutionEvidence(run.id, {
+			command: "node",
+			args: ["-e", "console.log('worker claim')"],
+			cwd: root,
+			startedAt: "2026-05-04T10:00:00.000Z",
+			completedAt: "2026-05-04T10:00:01.000Z",
+			exitCode: 0,
+			stdout: "worker claim\n",
+			stderr: "",
+			outputChecks: [{ path: "tmp/pass.txt", exists: true }],
+		});
+		storage.recordDecision(run.id, {
+			kind: "advance-run",
+			outcome: "approved",
+			reasons: ["required output exists"],
+		});
+		storage.completeRun(run.id, "passed");
+
+		const outPath = join(root, ".buildplane", "exports", "run-bundle.json");
+		const result = await runCliCapture(root, [
+			"evidence",
+			"export",
+			"--run",
+			run.id,
+			"--out",
+			outPath,
+		]);
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stderr).toEqual([]);
+		expect(result.stdout).toEqual([
+			"evidence-export: wrote",
+			`run-id: ${run.id}`,
+			`out: ${outPath}`,
+		]);
+		const bundle = JSON.parse(readFileSync(outPath, "utf8"));
+		expect(bundle).toMatchObject({
+			kind: "run_bundle",
+			schema_version: "1.0",
+			run: { id: run.id, status: "passed", verdict: "passed" },
+		});
+		const workerEvent = bundle.events.find(
+			(event: { kind: string; actor: { id: string } }) =>
+				event.kind === "tool_call" && event.actor.id === "buildplane.runtime",
+		);
+		const verifierEvent = bundle.events.find(
+			(event: { kind: string; actor: { id: string } }) =>
+				event.kind === "assertion_check" &&
+				event.actor.id === "buildplane.verifier",
+		);
+		expect(bundle.run.verified_criteria[0].evidence_event_id).toBe(
+			verifierEvent.id,
+		);
+		expect(bundle.run.verified_criteria[0].evidence_event_id).not.toBe(
+			workerEvent.id,
+		);
+	});
+
+	it("prints exported run bundle JSON when evidence export uses --json", async () => {
+		const root = mkdtempSync(
+			join(tmpdir(), "buildplane-cli-evidence-export-json-"),
+		);
+		await runCliCapture(root, ["init"]);
+		const storage = createBuildplaneStorage(root);
+		const run = storage.createRun(
+			createPassingPacket("unit-cli-evidence-export-json"),
+			{
+				runId: "run-cli-evidence-export-json",
+			},
+		);
+		storage.markRunRunning(run.id);
+		storage.recordExecutionEvidence(run.id, {
+			command: "node",
+			args: ["-e", "console.log('worker claim')"],
+			cwd: root,
+			startedAt: "2026-05-04T10:00:00.000Z",
+			completedAt: "2026-05-04T10:00:01.000Z",
+			exitCode: 0,
+			stdout: "worker claim\n",
+			stderr: "",
+			outputChecks: [{ path: "tmp/pass.txt", exists: true }],
+		});
+		storage.recordDecision(run.id, {
+			kind: "advance-run",
+			outcome: "approved",
+			reasons: ["required output exists"],
+		});
+		storage.completeRun(run.id, "passed");
+
+		const outPath = join(root, "bundle.json");
+		const result = await runCliCapture(root, [
+			"evidence",
+			"export",
+			"--run",
+			run.id,
+			"--out",
+			outPath,
+			"--json",
+		]);
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stderr).toEqual([]);
+		const printedBundle = JSON.parse(result.stdout.join("\n"));
+		expect(printedBundle).toEqual(JSON.parse(readFileSync(outPath, "utf8")));
+		expect(printedBundle.run.id).toBe(run.id);
+	});
+
+	it("returns stable json errors for evidence export argument failures", async () => {
+		const root = mkdtempSync(
+			join(tmpdir(), "buildplane-cli-evidence-export-error-"),
+		);
+		await runCliCapture(root, ["init"]);
+
+		const result = await runCliCapture(root, [
+			"evidence",
+			"export",
+			"--run",
+			"run-missing-out",
+			"--json",
+		]);
+
+		expect(result.exitCode).toBe(1);
+		expect(result.stderr).toEqual([]);
+		expect(JSON.parse(result.stdout.join("\n"))).toMatchObject({
+			error: {
+				code: "CLI_ERROR",
+				message: "Missing required --out <path> argument.",
+			},
+		});
+	});
+
+	it("previews the exact GitHub check-run payload from pr-check dry-run", async () => {
+		const root = mkdtempSync(
+			join(tmpdir(), "buildplane-cli-pr-check-dry-run-"),
+		);
+		await runCliCapture(root, ["init"]);
+		const storage = createBuildplaneStorage(root);
+		const run = storage.createRun(createPassingPacket("unit-cli-pr-check"), {
+			runId: "run-cli-pr-check-dry-run",
+		});
+		storage.markRunRunning(run.id);
+		storage.recordExecutionEvidence(run.id, {
+			command: "node",
+			args: ["-e", "console.log('worker claim')"],
+			cwd: root,
+			startedAt: "2026-05-04T10:00:00.000Z",
+			completedAt: "2026-05-04T10:00:01.000Z",
+			exitCode: 0,
+			stdout: "worker claim\n",
+			stderr: "",
+			outputChecks: [{ path: "tmp/pass.txt", exists: true }],
+		});
+		storage.recordDecision(run.id, {
+			kind: "advance-run",
+			outcome: "approved",
+			reasons: ["required output exists"],
+		});
+		storage.completeRun(run.id, "passed");
+
+		const result = await runCliCapture(root, [
+			"pr-check",
+			"dry-run",
+			"--run",
+			run.id,
+			"--repo",
+			"SollanSystems/buildplane",
+			"--sha",
+			"abc1234",
+			"--name",
+			"Buildplane Evidence",
+			"--json",
+		]);
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stderr).toEqual([]);
+		const preview = JSON.parse(result.stdout.join("\n"));
+		expect(preview).toMatchObject({
+			mode: "dry-run",
+			operation: {
+				method: "POST",
+				path: "/repos/SollanSystems/buildplane/check-runs",
+				body: {
+					name: "Buildplane Evidence",
+					head_sha: "abc1234",
+					status: "completed",
+					conclusion: "success",
+					external_id: run.id,
+				},
+			},
+			sideEffect: {
+				capability: "github.pr_check",
+				action: "publish",
+				target: "repo:SollanSystems/buildplane",
+			},
+		});
+	});
+
+	it("fails closed before network when pr-check publish lacks a matching grant", async () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-cli-pr-check-denied-"));
+		await runCliCapture(root, ["init"]);
+		const storage = createBuildplaneStorage(root);
+		const run = storage.createRun(
+			createPassingPacket("unit-cli-pr-check-denied"),
+			{
+				runId: "run-cli-pr-check-denied",
+			},
+		);
+		storage.markRunRunning(run.id);
+		storage.recordExecutionEvidence(run.id, {
+			command: "node",
+			args: ["-e", "console.log('worker claim')"],
+			cwd: root,
+			startedAt: "2026-05-04T10:00:00.000Z",
+			completedAt: "2026-05-04T10:00:01.000Z",
+			exitCode: 0,
+			stdout: "worker claim\n",
+			stderr: "",
+			outputChecks: [{ path: "tmp/pass.txt", exists: true }],
+		});
+		storage.recordDecision(run.id, {
+			kind: "advance-run",
+			outcome: "approved",
+			reasons: ["required output exists"],
+		});
+		storage.completeRun(run.id, "passed");
+		const grantPath = join(root, "grants.json");
+		writeFileSync(grantPath, JSON.stringify({ capabilityGrants: [] }), "utf8");
+		const request = vi.fn();
+		const originalEnv = process.env;
+		const credentialReads: string[] = [];
+		process.env = new Proxy(
+			{ ...originalEnv, BUILDPLANE_TEST_CREDENTIAL: "cred" },
+			{
+				get(target, property, receiver) {
+					if (property === "BUILDPLANE_TEST_CREDENTIAL") {
+						credentialReads.push(String(property));
+					}
+					return Reflect.get(target, property, receiver);
+				},
+			},
+		) as NodeJS.ProcessEnv;
+		let result: Awaited<ReturnType<typeof runCliCapture>>;
+		try {
+			result = await runCliCapture(
+				root,
+				[
+					"pr-check",
+					"publish",
+					"--run",
+					run.id,
+					"--repo",
+					"SollanSystems/buildplane",
+					"--sha",
+					"abc1234",
+					"--grant-file",
+					grantPath,
+					"--grant-id",
+					"grant-pr-check-publish",
+					"--credential-env",
+					"BUILDPLANE_TEST_CREDENTIAL",
+					"--json",
+				],
+				{ publishPrCheckRequest: request },
+			);
+		} finally {
+			process.env = originalEnv;
+		}
+
+		expect(result.exitCode).toBe(1);
+		expect(result.stderr).toEqual([]);
+		expect(JSON.parse(result.stdout.join("\n"))).toMatchObject({
+			error: { message: expect.stringContaining("UNSAFE_TO_RUN") },
+		});
+		expect(request).not.toHaveBeenCalled();
+		expect(credentialReads).toEqual([]);
+	});
+
+	it("publishes pr-check only after a matching grant and credential are present", async () => {
+		const root = mkdtempSync(
+			join(tmpdir(), "buildplane-cli-pr-check-publish-"),
+		);
+		await runCliCapture(root, ["init"]);
+		const storage = createBuildplaneStorage(root);
+		const run = storage.createRun(
+			createPassingPacket("unit-cli-pr-check-publish"),
+			{
+				runId: "run-cli-pr-check-publish",
+			},
+		);
+		storage.markRunRunning(run.id);
+		storage.recordExecutionEvidence(run.id, {
+			command: "node",
+			args: ["-e", "console.log('worker claim')"],
+			cwd: root,
+			startedAt: "2026-05-04T10:00:00.000Z",
+			completedAt: "2026-05-04T10:00:01.000Z",
+			exitCode: 0,
+			stdout: "worker claim\n",
+			stderr: "",
+			outputChecks: [{ path: "tmp/pass.txt", exists: true }],
+		});
+		storage.recordDecision(run.id, {
+			kind: "advance-run",
+			outcome: "approved",
+			reasons: ["required output exists"],
+		});
+		storage.completeRun(run.id, "passed");
+		const grantPath = join(root, "grants.json");
+		writeFileSync(
+			grantPath,
+			JSON.stringify({
+				capabilityGrants: [
+					{
+						id: "grant-pr-check-publish",
+						capability: "github.pr_check",
+						actions: ["publish"],
+						targets: ["repo:SollanSystems/buildplane"],
+					},
+				],
+			}),
+			"utf8",
+		);
+		vi.stubEnv("BUILDPLANE_TEST_CREDENTIAL", "cred");
+		const request = vi.fn().mockResolvedValue({ status: 201, ok: true });
+
+		const result = await runCliCapture(
+			root,
+			[
+				"pr-check",
+				"publish",
+				"--run",
+				run.id,
+				"--repo",
+				"SollanSystems/buildplane",
+				"--sha",
+				"abc1234",
+				"--grant-file",
+				grantPath,
+				"--grant-id",
+				"grant-pr-check-publish",
+				"--credential-env",
+				"BUILDPLANE_TEST_CREDENTIAL",
+				"--json",
+			],
+			{ publishPrCheckRequest: request },
+		);
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stderr).toEqual([]);
+		const published = JSON.parse(result.stdout.join("\n"));
+		expect(published).toMatchObject({
+			mode: "published",
+			grantId: "grant-pr-check-publish",
+			sideEffect: {
+				grantId: "grant-pr-check-publish",
+				capability: "github.pr_check",
+				action: "publish",
+				target: "repo:SollanSystems/buildplane",
+			},
+			response: { status: 201, ok: true },
+		});
+		expect(request).toHaveBeenCalledTimes(1);
+		expect(request).toHaveBeenCalledWith(
+			expect.objectContaining({
+				path: "/repos/SollanSystems/buildplane/check-runs",
+			}),
+			{ credential: "cred" },
+		);
 	});
 });

@@ -78,7 +78,9 @@ export type {
 export { extractLearnings } from "./outcome-extractor.ts";
 export { parseStrategyPacket, parseUnitPacket } from "./packet.ts";
 export type {
+	ArchitectureDiffScopeGate,
 	BudgetConstraints,
+	CapabilityGrant,
 	PolicyProfile,
 	ResourceUsageSnapshot,
 	RetryPolicy,
@@ -113,6 +115,7 @@ export type {
 	RoutingHints,
 	RunInfrastructureFailure,
 	RunPacketResult,
+	SideEffectReceipt,
 	StatusSnapshot,
 	StatusWorkspaceSummary,
 	ToolDefinition,

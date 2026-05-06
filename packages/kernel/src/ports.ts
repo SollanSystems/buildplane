@@ -22,6 +22,7 @@ import type {
 	LearningScope,
 } from "./outcome-extractor.js";
 import type {
+	ArchitectureDiffScopeGate,
 	BudgetConstraints,
 	PolicyProfile,
 	ResourceUsageSnapshot,
@@ -178,6 +179,16 @@ export interface BuildplanePolicyPort {
 		usage: ResourceUsageSnapshot,
 		budgets?: BudgetConstraints,
 	): PolicyDecision | null;
+
+	/**
+	 * Deterministic architecture diff-scope trust gate.
+	 * Returns a rejected decision when changed files escape the configured scope.
+	 * Returns null when the gate passes.
+	 */
+	evaluateArchitectureDiffScope?(
+		changedFiles: readonly string[],
+		gate: ArchitectureDiffScopeGate,
+	): RejectedPolicyDecision | null;
 
 	/**
 	 * Pre-execution trust gate for tool calls.

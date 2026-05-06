@@ -69,6 +69,7 @@ export interface CommandExecutionCompleteEvent extends BaseEvent {
 	readonly kind: "command-execution-complete";
 	readonly exitCode: number;
 	readonly outputChecks: readonly { path: string; exists: boolean }[];
+	readonly changedFiles?: readonly string[];
 }
 
 // ── Model streaming ─────────────────────────────────────────
@@ -114,7 +115,11 @@ export interface EvidenceRecordedEvent extends BaseEvent {
 
 export interface PolicyDecisionEvent extends BaseEvent {
 	readonly kind: "policy-decision";
-	readonly decisionKind: "advance-run" | "reject-run" | "retry-run";
+	readonly decisionKind:
+		| "advance-run"
+		| "reject-run"
+		| "retry-run"
+		| "architecture.diff_scope";
 	readonly outcome: "approved" | "rejected" | "retrying";
 	readonly reasons: readonly string[];
 }
