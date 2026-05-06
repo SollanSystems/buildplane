@@ -39,6 +39,14 @@ import type {
 	PacketMemoryEnrichmentResult,
 	preparePacketMemoryEnrichment,
 } from "./packet-enrichment.js";
+import {
+	defaultPrCheckRequest,
+	formatPrCheckHuman,
+	loadCapabilityGrantsFromJson,
+	type PrCheckRequest,
+	planPrCheckOperation,
+	publishPrCheckOperation,
+} from "./pr-check.js";
 import { scanWorkflowPreview } from "./workflow-scan.js";
 
 // Monotonic UUIDv7 generator for TS-side event ids.
@@ -132,6 +140,7 @@ export interface RunCliDependencies {
 	parsePacket?: (packetPath: string) => unknown;
 	inspectBootstrapDoctor?: () => BootstrapDoctorReport;
 	inspectCapabilities?: () => CapabilityReport;
+	publishPrCheckRequest?: PrCheckRequest;
 	runNativeCommand?: (
 		argv: string[],
 		options: {
@@ -319,6 +328,7 @@ function formatTopLevelHelp(): string[] {
 		"    inspect <id> [--json]  Deep-dive into a run and event tape",
 		"    verify --run <id> [--json]  Final receipt-backed verdict",
 		"    evidence export --run <id> --out <file>  Export Mission Control bundle",
+		"    pr-check dry-run --run <id> --repo <owner/repo> --sha <head> [--json]  Preview GitHub check-run publish",
 		"    replay <id> [--json]   Re-execute the stored packet snapshot",
 		"    ledger replay --run-id <id> --workspace <path>  Read-only tape replay",
 		"    fork <id> --at <event> --packet <file>          Recover from a unit boundary",
@@ -398,6 +408,53 @@ function formatEvidenceHelp(): string[] {
 		"    --out <file> Write bundle JSON to this path",
 		"    --json       Also print the exported bundle JSON",
 	];
+}
+
+function formatPrCheckHelp(): string[] {
+	return [
+		"buildplane pr-check dry-run --run <run-id> --repo <owner/repo> --sha <head-sha> [--json]",
+		"buildplane pr-check publish --run <run-id> --repo <owner/repo> --sha <head-sha> --grant-file <file> --grant-id <id> [--json]",
+		"",
+		"  Builds the GitHub check-run payload from the receipt-backed final verdict.",
+		"  dry-run never calls GitHub; publish requires an explicit matching capability grant.",
+		"",
+		"  Options:",
+		"    --run <id>              Run id to verify and report",
+		"    --repo <owner/repo>     GitHub repository target",
+		"    --sha <head-sha>        Commit SHA for the check run",
+		"    --name <name>           Check-run name (default: Buildplane)",
+		"    --details-url <url>     Optional evidence URL for GitHub",
+		"    --grant-file <file>     JSON file with capabilityGrants/grants",
+		"    --grant-id <id>         Capability grant id required for publish",
+		"    --credential-env <name> Environment variable for GitHub credential (default: GITHUB_TOKEN)",
+		"    --json                  Print machine-readable result",
+	];
+}
+
+function readFlag(args: readonly string[], flag: string): string | undefined {
+	const index = args.indexOf(flag);
+	const value = index === -1 ? undefined : args[index + 1];
+	return value && !value.startsWith("--") ? value : undefined;
+}
+
+function requireFlag(
+	args: readonly string[],
+	flag: string,
+	label: string,
+): string {
+	const value = readFlag(args, flag);
+	if (!value) {
+		throw new Error(`Missing required ${label} argument.`);
+	}
+	return value;
+}
+
+function requireHeadSha(args: readonly string[]): string {
+	const value = readFlag(args, "--sha") ?? readFlag(args, "--head-sha");
+	if (!value) {
+		throw new Error("Missing required --sha <head-sha> argument.");
+	}
+	return value;
 }
 
 function isHelpRequested(args: readonly string[]): boolean {
@@ -2051,6 +2108,85 @@ export async function runCli(
 			throw new Error(
 				`Unknown evidence command: ${subcommand ?? "(missing subcommand)"}`,
 			);
+		}
+
+		if (command === "pr-check") {
+			const subcommand = rest[0];
+			if (isHelpRequested(rest)) {
+				for (const line of formatPrCheckHelp()) {
+					stdout(line);
+				}
+				return 0;
+			}
+			const subRest = rest.slice(1);
+			const json = subRest.includes("--json");
+			if (subcommand !== "dry-run" && subcommand !== "publish") {
+				throw new Error(
+					`Unknown pr-check command: ${subcommand ?? "(missing subcommand)"}`,
+				);
+			}
+
+			const runId = requireFlag(subRest, "--run", "--run <id>");
+			const repository = requireFlag(subRest, "--repo", "--repo <owner/repo>");
+			const headSha = requireHeadSha(subRest);
+			const name = readFlag(subRest, "--name");
+			const detailsUrl = readFlag(subRest, "--details-url");
+			const storage = (await cliImport("@buildplane/storage")) as unknown as {
+				verifyRunFinalVerdict: (
+					root: string,
+					options: { runId: string },
+				) => { verdict: string; runId: string } & Record<string, unknown>;
+			};
+			const report = storage.verifyRunFinalVerdict(cwd, { runId });
+
+			if (subcommand === "dry-run") {
+				const preview = planPrCheckOperation({
+					report,
+					repository,
+					headSha,
+					name,
+					detailsUrl,
+				});
+				if (json) {
+					stdout(formatJson(preview));
+				} else {
+					for (const line of formatPrCheckHuman(preview)) {
+						stdout(line);
+					}
+				}
+				return 0;
+			}
+
+			const grantFile = requireFlag(
+				subRest,
+				"--grant-file",
+				"--grant-file <file>",
+			);
+			const grantId = requireFlag(subRest, "--grant-id", "--grant-id <id>");
+			const credentialEnv =
+				readFlag(subRest, "--credential-env") ?? "GITHUB_TOKEN";
+			const grants = loadCapabilityGrantsFromJson(
+				JSON.parse(readFileSync(resolve(cwd, grantFile), "utf8")),
+			);
+			const published = await publishPrCheckOperation({
+				report,
+				repository,
+				headSha,
+				name,
+				detailsUrl,
+				grants,
+				grantId,
+				credential: () => process.env[credentialEnv] ?? "",
+				request: deps?.publishPrCheckRequest ?? defaultPrCheckRequest,
+			});
+			if (json) {
+				stdout(formatJson(published));
+			} else {
+				for (const line of formatPrCheckHuman(published)) {
+					stdout(line);
+				}
+			}
+			return 0;
 		}
 
 		if (command === "workspace") {

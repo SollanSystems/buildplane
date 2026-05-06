@@ -83,7 +83,7 @@ function findMatchingGrant(
 	grants: readonly CapabilityGrant[],
 ): CapabilityGrant | undefined {
 	return grants.find((grant) => {
-		if (sideEffect.grantId && grant.id !== sideEffect.grantId) return false;
+		if (!sideEffect.grantId || grant.id !== sideEffect.grantId) return false;
 		return (
 			grant.capability === sideEffect.capability &&
 			matchesGrantScope(sideEffect.action, grant.actions) &&

@@ -3106,4 +3106,243 @@ describe("cli command surface", () => {
 			},
 		});
 	});
+
+	it("previews the exact GitHub check-run payload from pr-check dry-run", async () => {
+		const root = mkdtempSync(
+			join(tmpdir(), "buildplane-cli-pr-check-dry-run-"),
+		);
+		await runCliCapture(root, ["init"]);
+		const storage = createBuildplaneStorage(root);
+		const run = storage.createRun(createPassingPacket("unit-cli-pr-check"), {
+			runId: "run-cli-pr-check-dry-run",
+		});
+		storage.markRunRunning(run.id);
+		storage.recordExecutionEvidence(run.id, {
+			command: "node",
+			args: ["-e", "console.log('worker claim')"],
+			cwd: root,
+			startedAt: "2026-05-04T10:00:00.000Z",
+			completedAt: "2026-05-04T10:00:01.000Z",
+			exitCode: 0,
+			stdout: "worker claim\n",
+			stderr: "",
+			outputChecks: [{ path: "tmp/pass.txt", exists: true }],
+		});
+		storage.recordDecision(run.id, {
+			kind: "advance-run",
+			outcome: "approved",
+			reasons: ["required output exists"],
+		});
+		storage.completeRun(run.id, "passed");
+
+		const result = await runCliCapture(root, [
+			"pr-check",
+			"dry-run",
+			"--run",
+			run.id,
+			"--repo",
+			"SollanSystems/buildplane",
+			"--sha",
+			"abc1234",
+			"--name",
+			"Buildplane Evidence",
+			"--json",
+		]);
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stderr).toEqual([]);
+		const preview = JSON.parse(result.stdout.join("\n"));
+		expect(preview).toMatchObject({
+			mode: "dry-run",
+			operation: {
+				method: "POST",
+				path: "/repos/SollanSystems/buildplane/check-runs",
+				body: {
+					name: "Buildplane Evidence",
+					head_sha: "abc1234",
+					status: "completed",
+					conclusion: "success",
+					external_id: run.id,
+				},
+			},
+			sideEffect: {
+				capability: "github.pr_check",
+				action: "publish",
+				target: "repo:SollanSystems/buildplane",
+			},
+		});
+	});
+
+	it("fails closed before network when pr-check publish lacks a matching grant", async () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-cli-pr-check-denied-"));
+		await runCliCapture(root, ["init"]);
+		const storage = createBuildplaneStorage(root);
+		const run = storage.createRun(
+			createPassingPacket("unit-cli-pr-check-denied"),
+			{
+				runId: "run-cli-pr-check-denied",
+			},
+		);
+		storage.markRunRunning(run.id);
+		storage.recordExecutionEvidence(run.id, {
+			command: "node",
+			args: ["-e", "console.log('worker claim')"],
+			cwd: root,
+			startedAt: "2026-05-04T10:00:00.000Z",
+			completedAt: "2026-05-04T10:00:01.000Z",
+			exitCode: 0,
+			stdout: "worker claim\n",
+			stderr: "",
+			outputChecks: [{ path: "tmp/pass.txt", exists: true }],
+		});
+		storage.recordDecision(run.id, {
+			kind: "advance-run",
+			outcome: "approved",
+			reasons: ["required output exists"],
+		});
+		storage.completeRun(run.id, "passed");
+		const grantPath = join(root, "grants.json");
+		writeFileSync(grantPath, JSON.stringify({ capabilityGrants: [] }), "utf8");
+		const request = vi.fn();
+		const originalEnv = process.env;
+		const credentialReads: string[] = [];
+		process.env = new Proxy(
+			{ ...originalEnv, BUILDPLANE_TEST_CREDENTIAL: "cred" },
+			{
+				get(target, property, receiver) {
+					if (property === "BUILDPLANE_TEST_CREDENTIAL") {
+						credentialReads.push(String(property));
+					}
+					return Reflect.get(target, property, receiver);
+				},
+			},
+		) as NodeJS.ProcessEnv;
+		let result: Awaited<ReturnType<typeof runCliCapture>>;
+		try {
+			result = await runCliCapture(
+				root,
+				[
+					"pr-check",
+					"publish",
+					"--run",
+					run.id,
+					"--repo",
+					"SollanSystems/buildplane",
+					"--sha",
+					"abc1234",
+					"--grant-file",
+					grantPath,
+					"--grant-id",
+					"grant-pr-check-publish",
+					"--credential-env",
+					"BUILDPLANE_TEST_CREDENTIAL",
+					"--json",
+				],
+				{ publishPrCheckRequest: request },
+			);
+		} finally {
+			process.env = originalEnv;
+		}
+
+		expect(result.exitCode).toBe(1);
+		expect(result.stderr).toEqual([]);
+		expect(JSON.parse(result.stdout.join("\n"))).toMatchObject({
+			error: { message: expect.stringContaining("UNSAFE_TO_RUN") },
+		});
+		expect(request).not.toHaveBeenCalled();
+		expect(credentialReads).toEqual([]);
+	});
+
+	it("publishes pr-check only after a matching grant and credential are present", async () => {
+		const root = mkdtempSync(
+			join(tmpdir(), "buildplane-cli-pr-check-publish-"),
+		);
+		await runCliCapture(root, ["init"]);
+		const storage = createBuildplaneStorage(root);
+		const run = storage.createRun(
+			createPassingPacket("unit-cli-pr-check-publish"),
+			{
+				runId: "run-cli-pr-check-publish",
+			},
+		);
+		storage.markRunRunning(run.id);
+		storage.recordExecutionEvidence(run.id, {
+			command: "node",
+			args: ["-e", "console.log('worker claim')"],
+			cwd: root,
+			startedAt: "2026-05-04T10:00:00.000Z",
+			completedAt: "2026-05-04T10:00:01.000Z",
+			exitCode: 0,
+			stdout: "worker claim\n",
+			stderr: "",
+			outputChecks: [{ path: "tmp/pass.txt", exists: true }],
+		});
+		storage.recordDecision(run.id, {
+			kind: "advance-run",
+			outcome: "approved",
+			reasons: ["required output exists"],
+		});
+		storage.completeRun(run.id, "passed");
+		const grantPath = join(root, "grants.json");
+		writeFileSync(
+			grantPath,
+			JSON.stringify({
+				capabilityGrants: [
+					{
+						id: "grant-pr-check-publish",
+						capability: "github.pr_check",
+						actions: ["publish"],
+						targets: ["repo:SollanSystems/buildplane"],
+					},
+				],
+			}),
+			"utf8",
+		);
+		vi.stubEnv("BUILDPLANE_TEST_CREDENTIAL", "cred");
+		const request = vi.fn().mockResolvedValue({ status: 201, ok: true });
+
+		const result = await runCliCapture(
+			root,
+			[
+				"pr-check",
+				"publish",
+				"--run",
+				run.id,
+				"--repo",
+				"SollanSystems/buildplane",
+				"--sha",
+				"abc1234",
+				"--grant-file",
+				grantPath,
+				"--grant-id",
+				"grant-pr-check-publish",
+				"--credential-env",
+				"BUILDPLANE_TEST_CREDENTIAL",
+				"--json",
+			],
+			{ publishPrCheckRequest: request },
+		);
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stderr).toEqual([]);
+		const published = JSON.parse(result.stdout.join("\n"));
+		expect(published).toMatchObject({
+			mode: "published",
+			grantId: "grant-pr-check-publish",
+			sideEffect: {
+				grantId: "grant-pr-check-publish",
+				capability: "github.pr_check",
+				action: "publish",
+				target: "repo:SollanSystems/buildplane",
+			},
+			response: { status: 201, ok: true },
+		});
+		expect(request).toHaveBeenCalledTimes(1);
+		expect(request).toHaveBeenCalledWith(
+			expect.objectContaining({
+				path: "/repos/SollanSystems/buildplane/check-runs",
+			}),
+			{ credential: "cred" },
+		);
+	});
 });
