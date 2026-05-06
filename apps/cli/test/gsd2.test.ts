@@ -10,6 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+	GSD2_ADMISSION_COLUMNS,
 	GSD2_FINAL_STATUSES,
 	GSD2_ROUTE_MODES,
 	GSD2_TASK_STATUSES,
@@ -82,6 +83,20 @@ describe("GSD-2 V0 schema contract", () => {
 			"manual_recovery",
 		]);
 		expect(GSD2_FINAL_STATUSES).toEqual(["PASSED", "BLOCKED", "FAILED"]);
+		expect(GSD2_ADMISSION_COLUMNS).toEqual([
+			"inbox",
+			"triage",
+			"planned",
+			"architecture_review",
+			"ready_for_execution",
+			"running",
+			"verifying",
+			"blocked",
+			"ready_for_pr",
+			"pr_open",
+			"accepted",
+			"archived",
+		]);
 	});
 
 	it("validates minimal envelopes and receipts", () => {
@@ -180,6 +195,13 @@ describe("GSD-2 V0 CLI skeleton", () => {
 		expect(readFileSync(join(taskDir, "envelope.yaml"), "utf8")).toContain(
 			"front_door: auto-coder",
 		);
+		const envelope = readFileSync(join(taskDir, "envelope.yaml"), "utf8");
+		expect(envelope).toContain("architecture_impact: low");
+		expect(envelope).toContain("required_adrs: []");
+		expect(envelope).toContain("requested_capabilities:");
+		expect(envelope).toContain("evidence_requirements:");
+		expect(envelope).toContain("buildplane:");
+		expect(envelope).toContain("gate_receipts: []");
 		expect(readFileSync(join(taskDir, "receipt.yaml"), "utf8")).toContain(
 			"final_status: BLOCKED",
 		);
@@ -327,6 +349,145 @@ describe("GSD-2 V0 CLI skeleton", () => {
 			"  - buildplane_fork",
 			"  - manual_escalation",
 		]);
+	});
+
+	it("previews admission gates and capabilities without mutating task state", async () => {
+		const cwd = tempWorkspace();
+		await runCapture(cwd, [
+			"new",
+			"Admit a worktree kernel task",
+			"--route",
+			"worktree_kernel",
+		]);
+
+		const result = await runCapture(cwd, ["admit", "--dry-run", "G2-0001"]);
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stderr).toEqual([]);
+		expect(result.stdout).toEqual([
+			"gsd2 admission dry-run: G2-0001",
+			"from-status: NEW",
+			"to-status: READY",
+			"kanban-column: ready_for_execution",
+			"route: worktree_kernel",
+			"backend: worktree-kernel",
+			"will-execute: false",
+			"required-gates:",
+			"  - task.envelope.valid",
+			"  - task.scope.declared",
+			"  - verification.plan.present",
+			"  - architecture.diff_scope",
+			"requested-capabilities:",
+			"  - fs.read:repo",
+			"  - fs.write:declared_scope",
+			"  - command.execute:verification",
+			"evidence-requirements:",
+			"  - task.admitted receipt",
+			"  - verifier.executed receipts",
+			"  - evidence.accepted receipts",
+		]);
+		expect(
+			readFileSync(
+				join(cwd, ".gsd2", "tasks", "G2-0001", "envelope.yaml"),
+				"utf8",
+			),
+		).toContain("status: NEW");
+		expect(
+			readFileSync(
+				join(cwd, ".gsd2", "tasks", "G2-0001", "receipt.yaml"),
+				"utf8",
+			),
+		).not.toContain("receipt_type: task.admitted");
+	});
+
+	it("admits a NEW task to READY with a local transition receipt and no worker execution", async () => {
+		const cwd = tempWorkspace();
+		await runCapture(cwd, [
+			"new",
+			"Admit a Buildplane task",
+			"--route",
+			"buildplane",
+		]);
+
+		const result = await runCapture(cwd, ["admit", "G2-0001"]);
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stderr).toEqual([]);
+		expect(result.stdout).toEqual([
+			"gsd2 admit: G2-0001",
+			"status: READY",
+			"kanban-column: ready_for_execution",
+			"receipt: task.admitted",
+			"will-execute: false",
+		]);
+		const envelope = readFileSync(
+			join(cwd, ".gsd2", "tasks", "G2-0001", "envelope.yaml"),
+			"utf8",
+		);
+		expect(envelope).toContain("status: READY");
+		expect(envelope).toContain("routing:\n  mode: buildplane");
+		const receipt = readFileSync(
+			join(cwd, ".gsd2", "tasks", "G2-0001", "receipt.yaml"),
+			"utf8",
+		);
+		expect(receipt).toContain("final_status: BLOCKED");
+		expect(receipt).toContain("receipt_type: task.admitted");
+		expect(receipt).toContain("from_status: NEW");
+		expect(receipt).toContain("to_status: READY");
+		expect(receipt).toContain("will_execute: false");
+		expect(receipt).toContain('- "buildplane.run"');
+
+		const validate = await runCapture(cwd, ["validate"]);
+		expect(validate.exitCode).toBe(0);
+	});
+
+	it("fails closed instead of admitting a task twice", async () => {
+		const cwd = tempWorkspace();
+		await runCapture(cwd, ["new", "Admit once", "--route", "direct"]);
+		await runCapture(cwd, ["admit", "G2-0001"]);
+
+		const result = await runCapture(cwd, ["admit", "G2-0001"]);
+
+		expect(result.exitCode).toBe(1);
+		expect(result.stdout).toEqual([]);
+		expect(result.stderr).toEqual([
+			"gsd2 admit: G2-0001/envelope.yaml: envelope.status must be NEW before admission",
+		]);
+	});
+
+	it("fails closed when admission envelope id does not match the task directory", async () => {
+		const cwd = tempWorkspace();
+		await runCapture(cwd, ["new", "Reject mismatched admission"]);
+		const envelopePath = join(
+			cwd,
+			".gsd2",
+			"tasks",
+			"G2-0001",
+			"envelope.yaml",
+		);
+		writeFileSync(
+			envelopePath,
+			readFileSync(envelopePath, "utf8").replace("id: G2-0001", "id: G2-0002"),
+		);
+
+		const dryRun = await runCapture(cwd, ["admit", "--dry-run", "G2-0001"]);
+		const mutate = await runCapture(cwd, ["admit", "G2-0001"]);
+
+		expect(dryRun.exitCode).toBe(1);
+		expect(dryRun.stdout).toEqual([]);
+		expect(dryRun.stderr).toEqual([
+			"gsd2 admit: G2-0001/envelope.yaml: envelope.id must match task id G2-0001",
+		]);
+		expect(mutate.exitCode).toBe(1);
+		expect(mutate.stdout).toEqual([]);
+		expect(mutate.stderr).toEqual(dryRun.stderr);
+		expect(readFileSync(envelopePath, "utf8")).toContain("status: NEW");
+		expect(
+			readFileSync(
+				join(cwd, ".gsd2", "tasks", "G2-0001", "receipt.yaml"),
+				"utf8",
+			),
+		).not.toContain("receipt_type: task.admitted");
 	});
 
 	it("rejects run without dry-run", async () => {
