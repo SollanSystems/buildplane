@@ -3996,6 +3996,27 @@ function hasLine(content: string, expected: string): boolean {
 		.some((line) => line.trim().toLowerCase() === expected.toLowerCase());
 }
 
+function hasForbiddenPlanForgeGoalIntent(goal: string | undefined): boolean {
+	if (!goal) {
+		return false;
+	}
+	const forbiddenGoalIntent =
+		/\b(push|deploy|merge|open\s+(?:pr|pull\s+request)|pull\s+request|network\s+write|board\s+write|kanban|gsd2|github|worker[-\s]+spawn|spawn\s+(?:a\s+)?worker|execute\s+code|code\s+execution|run\s+command)\b/gi;
+	for (const match of goal.matchAll(forbiddenGoalIntent)) {
+		const index = match.index ?? 0;
+		const prefix = goal.slice(Math.max(0, index - 24), index).toLowerCase();
+		if (
+			/(?:\bno\b|\bnot\b|\bwithout\b|\bmust not\b|\bdoes not\b|\bdo not\b)(?:\s+(?:to|use|perform|request|run|open|create|any|a|an|the)){0,3}\W*$/.test(
+				prefix,
+			)
+		) {
+			continue;
+		}
+		return true;
+	}
+	return false;
+}
+
 function createPlanForgeDryRunPlan(inputPath: string): Record<string, unknown> {
 	const content = readFileSync(inputPath, "utf8");
 	const goal = sectionText(content, "Goal");
@@ -4030,9 +4051,7 @@ function createPlanForgeDryRunPlan(inputPath: string): Record<string, unknown> {
 	} else if (worktreePolicy !== "isolated-worktree-required") {
 		unsafeReasons.push("worktree policy must require an isolated worktree");
 	}
-	const forbiddenGoalIntent =
-		/\b(push|deploy|merge|open\s+(?:pr|pull\s+request)|pull\s+request|network\s+write|board\s+write|kanban|gsd2|github|worker[-\s]+spawn|spawn\s+(?:a\s+)?worker|execute\s+code|code\s+execution|run\s+command)\b/i;
-	if (forbiddenGoalIntent.test(goal ?? "")) {
+	if (hasForbiddenPlanForgeGoalIntent(goal)) {
 		unsafeReasons.push("goal requests a forbidden side effect");
 	}
 
@@ -4054,7 +4073,12 @@ function createPlanForgeDryRunPlan(inputPath: string): Record<string, unknown> {
 		},
 		{
 			id: "dry-run-only",
-			status: unsafeReasons.length > 0 ? "UNSAFE_TO_RUN" : "PASS",
+			status:
+				unsafeReasons.length > 0
+					? "UNSAFE_TO_RUN"
+					: missingEvidence.includes("dry_run_constraints")
+						? "INSUFFICIENT_EVIDENCE"
+						: "PASS",
 			message:
 				"The proposed plan emits review artifacts only and forbids execution, board writes, network writes, push, deploy, and merge.",
 			evidenceRefs: ["goal-input.md#safety-constraints"],
