@@ -1,0 +1,116 @@
+{
+	"schemaVersion": "planforge.plan.v0",
+	"id": "pf-plan-8f1f4fd7",
+	"idempotencyKey": "planforge:v0:buildplane:15dbb32db0e1f0024687533755805fc23f3ef6d4:8f1f4fd7",
+	"title": "PlanForge dry-run admission slice",
+	"goal": "Create a local-first PlanForge dry-run slice for Buildplane that validates the trusted boundary and emits reviewable plan artifacts without execution or board writes.",
+	"trustedBase": "15dbb32db0e1f0024687533755805fc23f3ef6d4",
+	"tasks": [
+		{
+			"id": "PF1",
+			"title": "Spec PlanForge contracts and fixture artifacts",
+			"objective": "Define the narrow documentation-level PlanForge contracts plus deterministic dry-run fixtures.",
+			"assigneeHint": "auto-coder",
+			"workspace": "isolated-worktree",
+			"dependsOn": [],
+			"allowedSideEffects": ["local-doc", "local-fixture"],
+			"forbiddenSideEffects": [
+				"execute-code",
+				"board-write",
+				"network-write",
+				"push",
+				"deploy",
+				"merge"
+			],
+			"acceptanceCriteria": [
+				"Define PlanForgeInput, PlanForgePlan, PlanForgeTask, PlanForgeValidation, and PlanForgeReceipt at documentation/fixture level.",
+				"State that the Buildplane kernel validates and admits plans while coding agents remain untrusted workers.",
+				"State dry-run/no-side-effect behavior.",
+				"Define PASS, BLOCKED, FAILED, INSUFFICIENT_EVIDENCE, and UNSAFE_TO_RUN failure/pass states.",
+				"Define idempotency key semantics for repeated planning."
+			],
+			"verificationCommands": [
+				"git status --short --branch",
+				"git diff --check",
+				"pnpm lint"
+			]
+		},
+		{
+			"id": "PF2",
+			"title": "Implement PlanForge dry-run CLI and schema validation",
+			"objective": "Add a later dry-run command that validates local input and emits stable JSON without storage, board, network, or worker side effects.",
+			"assigneeHint": "auto-coder",
+			"workspace": "isolated-worktree",
+			"dependsOn": ["PF1"],
+			"allowedSideEffects": ["local-doc", "local-fixture", "local-receipt"],
+			"forbiddenSideEffects": [
+				"execute-code",
+				"board-write",
+				"network-write",
+				"push",
+				"deploy",
+				"merge"
+			],
+			"acceptanceCriteria": [
+				"Missing input fails closed before any write.",
+				"Invalid input fails closed before any write.",
+				"Unsupported non-dry-run forms fail with a clear message.",
+				"Output is stable JSON suitable for review."
+			],
+			"verificationCommands": [
+				"pnpm vitest --run apps/cli/test/run-cli.test.ts -t planforge",
+				"pnpm typecheck",
+				"git diff --check"
+			]
+		}
+	],
+	"validation": {
+		"status": "PASS",
+		"checks": [
+			{
+				"id": "trusted-boundary",
+				"status": "PASS",
+				"message": "Buildplane kernel validates and admits the plan; coding agents remain untrusted workers.",
+				"evidenceRefs": ["goal-input.md#safety-constraints"]
+			},
+			{
+				"id": "dry-run-only",
+				"status": "PASS",
+				"message": "The proposed plan emits review artifacts only and forbids execution, board writes, network writes, push, deploy, and merge.",
+				"evidenceRefs": ["goal-input.md#safety-constraints"]
+			},
+			{
+				"id": "evidence-present",
+				"status": "PASS",
+				"message": "Operator goal, repository remote, trusted base, worktree policy, and safety constraints are present.",
+				"evidenceRefs": ["goal-input.md#repository-context"]
+			}
+		],
+		"requiredEvidence": [
+			"operator_goal",
+			"repository_remote",
+			"trusted_base",
+			"dry_run_constraints"
+		],
+		"missingEvidence": [],
+		"unsafeReasons": []
+	},
+	"receiptPreview": {
+		"schemaVersion": "planforge.receipt.v0",
+		"status": "PASS",
+		"planId": "pf-plan-8f1f4fd7",
+		"idempotencyKey": "planforge:v0:buildplane:15dbb32db0e1f0024687533755805fc23f3ef6d4:8f1f4fd7",
+		"inputDigest": "sha256:fixture-input-digest-placeholder",
+		"planDigest": "sha256:fixture-plan-digest-placeholder",
+		"trustedBase": "15dbb32db0e1f0024687533755805fc23f3ef6d4",
+		"admittedBy": "buildplane-kernel",
+		"generatedAt": "2026-05-07T00:00:00.000Z",
+		"dryRun": true,
+		"sideEffects": [],
+		"notes": [
+			"Receipt preview is documentation/fixture only for PF1.",
+			"PASS does not create tasks, grant write capabilities, merge, deploy, or start workers.",
+			"Non-PASS statuses fail closed: BLOCKED, FAILED, INSUFFICIENT_EVIDENCE, UNSAFE_TO_RUN."
+		]
+	}
+}
