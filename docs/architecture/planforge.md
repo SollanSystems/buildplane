@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed local-first contract for PF1. This document defines the planning artifacts and safety boundaries for later PlanForge implementation slices. It is intentionally documentation and fixture only; it does not add a CLI command, execution path, storage writer, hosted service, router, swarm, or Kanban mutation.
+Proposed local-first contract for PF1/PF2. This document defines the planning artifacts, safety boundaries, and local-only dry-run CLI artifact generator for PlanForge implementation slices. It does not add a non-dry-run execution path, storage writer, hosted service, router, swarm, or Kanban mutation.
 
 ## Product sentence
 

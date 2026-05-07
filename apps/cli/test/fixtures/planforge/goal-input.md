@@ -10,7 +10,7 @@ Create a local-first PlanForge dry-run slice for Buildplane that accepts this go
 
 - Remote: https://github.com/SollanSystems/buildplane.git
 - Trusted base: 15dbb32db0e1f0024687533755805fc23f3ef6d4
-- Worktree policy: isolated worktree required
+- Worktree policy: isolated-worktree-required
 
 ## Safety constraints
 

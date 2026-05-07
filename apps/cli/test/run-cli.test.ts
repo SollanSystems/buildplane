@@ -4040,7 +4040,62 @@ describe("planforge dry-run", () => {
 			"repository_remote",
 			"trusted_base",
 			"dry_run_constraints",
+			"worktree_policy",
 		]);
+		expect(existsSync(join(root, ".buildplane"))).toBe(false);
+	});
+
+	it("planforge derives identifiers from input evidence", async () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-planforge-"));
+		const alternateInput = join(root, "alternate-goal.md");
+		writeFileSync(
+			alternateInput,
+			[
+				"# Alternate PlanForge input",
+				"",
+				"## Goal",
+				"Create a different dry-run plan artifact.",
+				"",
+				"## Repository context",
+				"",
+				"- Remote: https://github.com/SollanSystems/buildplane.git",
+				"- Trusted base: 15dbb32db0e1f0024687533755805fc23f3ef6d4",
+				"- Worktree policy: isolated-worktree-required",
+				"",
+				"## Safety constraints",
+				"",
+				"- Dry-run only.",
+				"- No Kanban, GSD2, GitHub, network, push, PR, deploy, merge, or worker-spawn side effects.",
+				"",
+			].join("\n"),
+			"utf8",
+		);
+
+		const fixtureResult = await runCliCapture(root, [
+			"planforge",
+			"dry-run",
+			"--input",
+			inputFixture,
+			"--json",
+		]);
+		const alternateResult = await runCliCapture(root, [
+			"planforge",
+			"dry-run",
+			"--input",
+			alternateInput,
+			"--json",
+		]);
+
+		const fixturePayload = JSON.parse(fixtureResult.stdout.join("\n"));
+		const alternatePayload = JSON.parse(alternateResult.stdout.join("\n"));
+		expect(alternatePayload.validation.status).toBe("PASS");
+		expect(alternatePayload.goal).toBe(
+			"Create a different dry-run plan artifact.",
+		);
+		expect(alternatePayload.id).not.toBe(fixturePayload.id);
+		expect(alternatePayload.idempotencyKey).not.toBe(
+			fixturePayload.idempotencyKey,
+		);
 		expect(existsSync(join(root, ".buildplane"))).toBe(false);
 	});
 
@@ -4066,15 +4121,27 @@ describe("planforge dry-run", () => {
 			"--json",
 			"--write",
 		]);
+		const writeEqualsForm = await runCliCapture(root, [
+			"planforge",
+			"dry-run",
+			"--input",
+			inputFixture,
+			"--json",
+			"--write=receipt.json",
+		]);
 
 		expect(missingInput.exitCode).toBe(1);
 		expect(nonDryRun.exitCode).toBe(1);
 		expect(writeForm.exitCode).toBe(1);
+		expect(writeEqualsForm.exitCode).toBe(1);
 		expect(missingInput.stdout.join("\n")).toContain(
 			"Missing required --input",
 		);
 		expect(nonDryRun.stdout.join("\n")).toContain("Only dry-run is available");
 		expect(writeForm.stdout.join("\n")).toContain(
+			"side-effect forms are disabled",
+		);
+		expect(writeEqualsForm.stdout.join("\n")).toContain(
 			"side-effect forms are disabled",
 		);
 		expect(existsSync(join(root, ".buildplane"))).toBe(false);

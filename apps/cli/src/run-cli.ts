@@ -2310,9 +2310,10 @@ export async function runCli(
 			}
 			const subRest = rest.slice(1);
 			if (
-				subRest.some(
-					(arg) =>
-						arg === "--write" || arg === "--execute" || arg === "--admit",
+				subRest.some((arg) =>
+					["--write", "--execute", "--admit"].some(
+						(flag) => arg === flag || arg.startsWith(`${flag}=`),
+					),
 				)
 			) {
 				throw new Error(
@@ -4016,7 +4017,9 @@ function createPlanForgeDryRunPlan(inputPath: string): Record<string, unknown> {
 	) {
 		missingEvidence.push("dry_run_constraints");
 	}
-	if (worktreePolicy && worktreePolicy !== "isolated worktree required") {
+	if (!worktreePolicy) {
+		missingEvidence.push("worktree_policy");
+	} else if (worktreePolicy !== "isolated-worktree-required") {
 		unsafeReasons.push("worktree policy must require an isolated worktree");
 	}
 	if (
@@ -4059,12 +4062,28 @@ function createPlanForgeDryRunPlan(inputPath: string): Record<string, unknown> {
 		},
 	];
 
-	const normalizedGoal =
-		"Create a local-first PlanForge dry-run slice for Buildplane that validates the trusted boundary and emits reviewable plan artifacts without execution or board writes.";
-	const normalizedTrustedBase =
-		trustedBase ?? "15dbb32db0e1f0024687533755805fc23f3ef6d4";
-	const planFingerprint = "8f1f4fd7";
+	const normalizedGoal = goal ?? "";
+	const normalizedTrustedBase = trustedBase ?? "unknown";
+	const normalizedRemote = remote ?? "unknown";
+	const fingerprintInput = JSON.stringify({
+		constraints: {
+			dryRun: hasLine(content, "- Dry-run only."),
+			noSideEffects: hasLine(
+				content,
+				"- No Kanban, GSD2, GitHub, network, push, PR, deploy, merge, or worker-spawn side effects.",
+			),
+		},
+		goal: normalizedGoal,
+		remote: normalizedRemote,
+		trustedBase: normalizedTrustedBase,
+		worktreePolicy: worktreePolicy ?? "unknown",
+	});
+	const planFingerprint = createHash("sha256")
+		.update(fingerprintInput)
+		.digest("hex")
+		.slice(0, 8);
 	const idempotencyKey = `planforge:v0:buildplane:${normalizedTrustedBase}:${planFingerprint}`;
+	const inputDigest = `sha256:${createHash("sha256").update(content).digest("hex")}`;
 
 	return {
 		schemaVersion: "planforge.plan.v0",
@@ -4141,6 +4160,7 @@ function createPlanForgeDryRunPlan(inputPath: string): Record<string, unknown> {
 				"operator_goal",
 				"repository_remote",
 				"trusted_base",
+				"worktree_policy",
 				"dry_run_constraints",
 			],
 			missingEvidence,
@@ -4151,7 +4171,7 @@ function createPlanForgeDryRunPlan(inputPath: string): Record<string, unknown> {
 			status: validationStatus,
 			planId: `pf-plan-${planFingerprint}`,
 			idempotencyKey,
-			inputDigest: "sha256:fixture-input-digest-placeholder",
+			inputDigest,
 			planDigest: "sha256:fixture-plan-digest-placeholder",
 			trustedBase: normalizedTrustedBase,
 			admittedBy: "buildplane-kernel",
