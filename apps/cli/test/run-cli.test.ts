@@ -4121,6 +4121,29 @@ describe("planforge dry-run", () => {
 			].join("\n"),
 			"utf8",
 		);
+		const safeNegatedInput = join(root, "safe-negated-goal.md");
+		writeFileSync(
+			safeNegatedInput,
+			[
+				"# Safe negated PlanForge input",
+				"",
+				"## Goal",
+				"Create a local dry-run plan artifact that does not execute code and does not use GitHub.",
+				"",
+				"## Repository context",
+				"",
+				"- Remote: https://github.com/SollanSystems/buildplane.git",
+				"- Trusted base: 15dbb32db0e1f0024687533755805fc23f3ef6d4",
+				"- Worktree policy: isolated-worktree-required",
+				"",
+				"## Safety constraints",
+				"",
+				"- Dry-run only.",
+				"- No Kanban, GSD2, GitHub, network, push, PR, deploy, merge, or worker-spawn side effects.",
+				"",
+			].join("\n"),
+			"utf8",
+		);
 		const unsafeInput = join(root, "unsafe-goal.md");
 		writeFileSync(
 			unsafeInput,
@@ -4128,7 +4151,7 @@ describe("planforge dry-run", () => {
 				"# Unsafe PlanForge input",
 				"",
 				"## Goal",
-				"Spawn a worker to execute code for a local dry-run plan artifact.",
+				"Run commands locally for a dry-run plan artifact.",
 				"",
 				"## Repository context",
 				"",
@@ -4152,6 +4175,13 @@ describe("planforge dry-run", () => {
 			misplacedEvidenceInput,
 			"--json",
 		]);
+		const safeNegatedResult = await runCliCapture(root, [
+			"planforge",
+			"dry-run",
+			"--input",
+			safeNegatedInput,
+			"--json",
+		]);
 		const unsafeResult = await runCliCapture(root, [
 			"planforge",
 			"dry-run",
@@ -4161,6 +4191,7 @@ describe("planforge dry-run", () => {
 		]);
 
 		const misplacedPayload = JSON.parse(misplacedResult.stdout.join("\n"));
+		const safeNegatedPayload = JSON.parse(safeNegatedResult.stdout.join("\n"));
 		const unsafePayload = JSON.parse(unsafeResult.stdout.join("\n"));
 		expect(misplacedResult.exitCode).toBe(1);
 		expect(misplacedPayload.validation.status).toBe("INSUFFICIENT_EVIDENCE");
@@ -4170,6 +4201,18 @@ describe("planforge dry-run", () => {
 			"dry_run_constraints",
 			"worktree_policy",
 		]);
+		expect(
+			misplacedPayload.validation.checks.find(
+				(check: { id: string }) => check.id === "dry-run-only",
+			)?.status,
+		).toBe("INSUFFICIENT_EVIDENCE");
+		expect(safeNegatedResult.exitCode).toBe(0);
+		expect(safeNegatedPayload.validation.status).toBe("PASS");
+		expect(
+			safeNegatedPayload.validation.checks.flatMap(
+				(check: { evidenceRefs: string[] }) => check.evidenceRefs,
+			),
+		).toContain("safe-negated-goal.md#safety-constraints");
 		expect(unsafeResult.exitCode).toBe(1);
 		expect(unsafePayload.validation.status).toBe("UNSAFE_TO_RUN");
 		expect(unsafePayload.validation.unsafeReasons).toEqual([
