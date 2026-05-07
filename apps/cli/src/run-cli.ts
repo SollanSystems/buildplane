@@ -3978,9 +3978,15 @@ function sectionText(content: string, heading: string): string | undefined {
 	return (nextHeading ? rest.slice(0, nextHeading.index) : rest).trim();
 }
 
-function listValue(content: string, label: string): string | undefined {
-	const pattern = new RegExp(`^- ${label}:\\s*(.+)$`, "m");
-	const match = pattern.exec(content);
+function listValue(
+	section: string | undefined,
+	label: string,
+): string | undefined {
+	if (!section) {
+		return undefined;
+	}
+	const pattern = new RegExp(`^- ${label}:[ \t]*(.+)$`, "m");
+	const match = pattern.exec(section);
 	return match?.[1]?.trim();
 }
 
@@ -3993,9 +3999,11 @@ function hasLine(content: string, expected: string): boolean {
 function createPlanForgeDryRunPlan(inputPath: string): Record<string, unknown> {
 	const content = readFileSync(inputPath, "utf8");
 	const goal = sectionText(content, "Goal");
-	const remote = listValue(content, "Remote");
-	const trustedBase = listValue(content, "Trusted base");
-	const worktreePolicy = listValue(content, "Worktree policy");
+	const repositoryContext = sectionText(content, "Repository context");
+	const safetyConstraints = sectionText(content, "Safety constraints");
+	const remote = listValue(repositoryContext, "Remote");
+	const trustedBase = listValue(repositoryContext, "Trusted base");
+	const worktreePolicy = listValue(repositoryContext, "Worktree policy");
 	const missingEvidence: string[] = [];
 	const unsafeReasons: string[] = [];
 
@@ -4009,9 +4017,9 @@ function createPlanForgeDryRunPlan(inputPath: string): Record<string, unknown> {
 		missingEvidence.push("trusted_base");
 	}
 	if (
-		!hasLine(content, "- Dry-run only.") ||
+		!hasLine(safetyConstraints ?? "", "- Dry-run only.") ||
 		!hasLine(
-			content,
+			safetyConstraints ?? "",
 			"- No Kanban, GSD2, GitHub, network, push, PR, deploy, merge, or worker-spawn side effects.",
 		)
 	) {
@@ -4022,11 +4030,9 @@ function createPlanForgeDryRunPlan(inputPath: string): Record<string, unknown> {
 	} else if (worktreePolicy !== "isolated-worktree-required") {
 		unsafeReasons.push("worktree policy must require an isolated worktree");
 	}
-	if (
-		/\b(push|deploy|merge|open\s+pr|network\s+write|board\s+write)\b/i.test(
-			goal ?? "",
-		)
-	) {
+	const forbiddenGoalIntent =
+		/\b(push|deploy|merge|open\s+(?:pr|pull\s+request)|pull\s+request|network\s+write|board\s+write|kanban|gsd2|github|worker[-\s]+spawn|spawn\s+(?:a\s+)?worker|execute\s+code|code\s+execution|run\s+command)\b/i;
+	if (forbiddenGoalIntent.test(goal ?? "")) {
 		unsafeReasons.push("goal requests a forbidden side effect");
 	}
 
@@ -4067,9 +4073,9 @@ function createPlanForgeDryRunPlan(inputPath: string): Record<string, unknown> {
 	const normalizedRemote = remote ?? "unknown";
 	const fingerprintInput = JSON.stringify({
 		constraints: {
-			dryRun: hasLine(content, "- Dry-run only."),
+			dryRun: hasLine(safetyConstraints ?? "", "- Dry-run only."),
 			noSideEffects: hasLine(
-				content,
+				safetyConstraints ?? "",
 				"- No Kanban, GSD2, GitHub, network, push, PR, deploy, merge, or worker-spawn side effects.",
 			),
 		},

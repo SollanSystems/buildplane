@@ -4099,6 +4099,84 @@ describe("planforge dry-run", () => {
 		expect(existsSync(join(root, ".buildplane"))).toBe(false);
 	});
 
+	it("planforge requires evidence in the intended sections and rejects forbidden goal intents", async () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-planforge-"));
+		const misplacedEvidenceInput = join(root, "misplaced-evidence.md");
+		writeFileSync(
+			misplacedEvidenceInput,
+			[
+				"# Misplaced PlanForge input",
+				"",
+				"## Goal",
+				"Create a local dry-run plan artifact.",
+				"",
+				"## Notes",
+				"",
+				"- Remote: https://github.com/SollanSystems/buildplane.git",
+				"- Trusted base: 15dbb32db0e1f0024687533755805fc23f3ef6d4",
+				"- Worktree policy: isolated-worktree-required",
+				"- Dry-run only.",
+				"- No Kanban, GSD2, GitHub, network, push, PR, deploy, merge, or worker-spawn side effects.",
+				"",
+			].join("\n"),
+			"utf8",
+		);
+		const unsafeInput = join(root, "unsafe-goal.md");
+		writeFileSync(
+			unsafeInput,
+			[
+				"# Unsafe PlanForge input",
+				"",
+				"## Goal",
+				"Spawn a worker to execute code for a local dry-run plan artifact.",
+				"",
+				"## Repository context",
+				"",
+				"- Remote: https://github.com/SollanSystems/buildplane.git",
+				"- Trusted base: 15dbb32db0e1f0024687533755805fc23f3ef6d4",
+				"- Worktree policy: isolated-worktree-required",
+				"",
+				"## Safety constraints",
+				"",
+				"- Dry-run only.",
+				"- No Kanban, GSD2, GitHub, network, push, PR, deploy, merge, or worker-spawn side effects.",
+				"",
+			].join("\n"),
+			"utf8",
+		);
+
+		const misplacedResult = await runCliCapture(root, [
+			"planforge",
+			"dry-run",
+			"--input",
+			misplacedEvidenceInput,
+			"--json",
+		]);
+		const unsafeResult = await runCliCapture(root, [
+			"planforge",
+			"dry-run",
+			"--input",
+			unsafeInput,
+			"--json",
+		]);
+
+		const misplacedPayload = JSON.parse(misplacedResult.stdout.join("\n"));
+		const unsafePayload = JSON.parse(unsafeResult.stdout.join("\n"));
+		expect(misplacedResult.exitCode).toBe(1);
+		expect(misplacedPayload.validation.status).toBe("INSUFFICIENT_EVIDENCE");
+		expect(misplacedPayload.validation.missingEvidence).toEqual([
+			"repository_remote",
+			"trusted_base",
+			"dry_run_constraints",
+			"worktree_policy",
+		]);
+		expect(unsafeResult.exitCode).toBe(1);
+		expect(unsafePayload.validation.status).toBe("UNSAFE_TO_RUN");
+		expect(unsafePayload.validation.unsafeReasons).toEqual([
+			"goal requests a forbidden side effect",
+		]);
+		expect(existsSync(join(root, ".buildplane"))).toBe(false);
+	});
 	it("planforge rejects missing input, unsupported non-dry-run, and write forms before side effects", async () => {
 		const root = mkdtempSync(join(tmpdir(), "buildplane-planforge-"));
 		const missingInput = await runCliCapture(root, [
