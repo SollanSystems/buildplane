@@ -3985,3 +3985,98 @@ describe("cli command surface", () => {
 		expect(credentialReads).toEqual([]);
 	});
 });
+
+describe("planforge dry-run", () => {
+	const fixtureRoot = join(process.cwd(), "apps/cli/test/fixtures/planforge");
+	const inputFixture = join(fixtureRoot, "goal-input.md");
+	const expectedFixture = join(fixtureRoot, "expected-plan.json");
+
+	it("planforge emits the expected stable dry-run plan fixture without project writes", async () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-planforge-"));
+		const result = await runCliCapture(root, [
+			"planforge",
+			"dry-run",
+			"--input",
+			inputFixture,
+			"--json",
+		]);
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stderr).toEqual([]);
+		expect(JSON.parse(result.stdout.join("\n"))).toEqual(
+			JSON.parse(readFileSync(expectedFixture, "utf8")),
+		);
+		expect(existsSync(join(root, ".buildplane"))).toBe(false);
+	});
+
+	it("planforge fails closed when required evidence is missing", async () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-planforge-"));
+		const invalidInput = join(root, "missing-evidence.md");
+		writeFileSync(
+			invalidInput,
+			[
+				"# Bad PlanForge input",
+				"",
+				"## Goal",
+				"Create a local dry-run plan.",
+				"",
+			].join("\n"),
+			"utf8",
+		);
+
+		const result = await runCliCapture(root, [
+			"planforge",
+			"dry-run",
+			"--input",
+			invalidInput,
+			"--json",
+		]);
+
+		expect(result.exitCode).toBe(1);
+		expect(result.stderr).toEqual([]);
+		const payload = JSON.parse(result.stdout.join("\n"));
+		expect(payload.validation.status).toBe("INSUFFICIENT_EVIDENCE");
+		expect(payload.validation.missingEvidence).toEqual([
+			"repository_remote",
+			"trusted_base",
+			"dry_run_constraints",
+		]);
+		expect(existsSync(join(root, ".buildplane"))).toBe(false);
+	});
+
+	it("planforge rejects missing input, unsupported non-dry-run, and write forms before side effects", async () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-planforge-"));
+		const missingInput = await runCliCapture(root, [
+			"planforge",
+			"dry-run",
+			"--json",
+		]);
+		const nonDryRun = await runCliCapture(root, [
+			"planforge",
+			"admit",
+			"--input",
+			inputFixture,
+			"--json",
+		]);
+		const writeForm = await runCliCapture(root, [
+			"planforge",
+			"dry-run",
+			"--input",
+			inputFixture,
+			"--json",
+			"--write",
+		]);
+
+		expect(missingInput.exitCode).toBe(1);
+		expect(nonDryRun.exitCode).toBe(1);
+		expect(writeForm.exitCode).toBe(1);
+		expect(missingInput.stdout.join("\n")).toContain(
+			"Missing required --input",
+		);
+		expect(nonDryRun.stdout.join("\n")).toContain("Only dry-run is available");
+		expect(writeForm.stdout.join("\n")).toContain(
+			"side-effect forms are disabled",
+		);
+		expect(existsSync(join(root, ".buildplane"))).toBe(false);
+	});
+});

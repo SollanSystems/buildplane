@@ -355,6 +355,7 @@ function formatTopLevelHelp(): string[] {
 		"    replay <id> [--json]   Re-execute the stored packet snapshot",
 		"    ledger replay --run-id <id> --workspace <path>  Read-only tape replay",
 		"    fork <id> --at <event> --packet <file>          Recover from a unit boundary",
+		"    planforge dry-run --input <file> --json          Emit dry-run plan artifact",
 		"",
 		"  Advanced:",
 		"    run-graph --graph <p>  Execute a DAG of tasks",
@@ -403,6 +404,20 @@ function formatReplayHelp(): string[] {
 		"  Options:",
 		"    --json              Machine-readable replay result",
 		"    --policy <profile>  Override the policy profile for the replay run",
+	];
+}
+
+function formatPlanForgeHelp(): string[] {
+	return [
+		"buildplane planforge dry-run --input <file> --json",
+		"",
+		"  Validates a local PlanForge goal fixture and emits a stable reviewable",
+		"  PlanForgePlan JSON artifact without execution, board writes, network",
+		"  writes, worker spawns, push, deploy, merge, or project state mutation.",
+		"",
+		"  Options:",
+		"    --input <file>  Markdown PlanForge goal fixture to validate",
+		"    --json          Required; prints the dry-run plan as JSON",
 	];
 }
 
@@ -2280,6 +2295,47 @@ export async function runCli(
 			);
 		}
 
+		if (command === "planforge") {
+			const subcommand = rest[0];
+			if (isHelpRequested(rest)) {
+				for (const line of formatPlanForgeHelp()) {
+					stdout(line);
+				}
+				return 0;
+			}
+			if (subcommand !== "dry-run") {
+				throw new Error(
+					"Unsupported PlanForge command. Only dry-run is available; non-dry-run PlanForge forms are intentionally disabled.",
+				);
+			}
+			const subRest = rest.slice(1);
+			if (
+				subRest.some(
+					(arg) =>
+						arg === "--write" || arg === "--execute" || arg === "--admit",
+				)
+			) {
+				throw new Error(
+					"Unsupported PlanForge dry-run arguments: write, execute, and admit side-effect forms are disabled.",
+				);
+			}
+			if (!subRest.includes("--json")) {
+				throw new Error(
+					"PlanForge dry-run requires --json for stable review output.",
+				);
+			}
+			const inputPath = readFlag(subRest, "--input");
+			if (!inputPath) {
+				throw new Error(
+					"Missing required --input <file> argument for PlanForge dry-run.",
+				);
+			}
+			const plan = createPlanForgeDryRunPlan(resolve(cwd, inputPath));
+			stdout(formatJson(plan));
+			const validation = plan.validation as { status?: string } | undefined;
+			return validation?.status === "PASS" ? 0 : 1;
+		}
+
 		if (command === "memory") {
 			const subcommand = rest[0];
 			if (subcommand === "list") {
@@ -3906,6 +3962,208 @@ function normalizeGraph(raw: Record<string, unknown>): unknown {
 	return {
 		...raw,
 		nodes: nodes.map(normalizeGraphNode),
+	};
+}
+
+function sectionText(content: string, heading: string): string | undefined {
+	const headingPattern = new RegExp(`^## ${heading}\\s*$`, "m");
+	const match = headingPattern.exec(content);
+	if (!match) {
+		return undefined;
+	}
+	const start = match.index + match[0].length;
+	const rest = content.slice(start);
+	const nextHeading = /^##\s+/m.exec(rest);
+	return (nextHeading ? rest.slice(0, nextHeading.index) : rest).trim();
+}
+
+function listValue(content: string, label: string): string | undefined {
+	const pattern = new RegExp(`^- ${label}:\\s*(.+)$`, "m");
+	const match = pattern.exec(content);
+	return match?.[1]?.trim();
+}
+
+function hasLine(content: string, expected: string): boolean {
+	return content
+		.split(/\r?\n/)
+		.some((line) => line.trim().toLowerCase() === expected.toLowerCase());
+}
+
+function createPlanForgeDryRunPlan(inputPath: string): Record<string, unknown> {
+	const content = readFileSync(inputPath, "utf8");
+	const goal = sectionText(content, "Goal");
+	const remote = listValue(content, "Remote");
+	const trustedBase = listValue(content, "Trusted base");
+	const worktreePolicy = listValue(content, "Worktree policy");
+	const missingEvidence: string[] = [];
+	const unsafeReasons: string[] = [];
+
+	if (!goal) {
+		missingEvidence.push("operator_goal");
+	}
+	if (!remote) {
+		missingEvidence.push("repository_remote");
+	}
+	if (!trustedBase) {
+		missingEvidence.push("trusted_base");
+	}
+	if (
+		!hasLine(content, "- Dry-run only.") ||
+		!hasLine(
+			content,
+			"- No Kanban, GSD2, GitHub, network, push, PR, deploy, merge, or worker-spawn side effects.",
+		)
+	) {
+		missingEvidence.push("dry_run_constraints");
+	}
+	if (worktreePolicy && worktreePolicy !== "isolated worktree required") {
+		unsafeReasons.push("worktree policy must require an isolated worktree");
+	}
+	if (
+		/\b(push|deploy|merge|open\s+pr|network\s+write|board\s+write)\b/i.test(
+			goal ?? "",
+		)
+	) {
+		unsafeReasons.push("goal requests a forbidden side effect");
+	}
+
+	const validationStatus =
+		unsafeReasons.length > 0
+			? "UNSAFE_TO_RUN"
+			: missingEvidence.length > 0
+				? "INSUFFICIENT_EVIDENCE"
+				: "PASS";
+	const checks = [
+		{
+			id: "trusted-boundary",
+			status: missingEvidence.includes("dry_run_constraints")
+				? "INSUFFICIENT_EVIDENCE"
+				: "PASS",
+			message:
+				"Buildplane kernel validates and admits the plan; coding agents remain untrusted workers.",
+			evidenceRefs: ["goal-input.md#safety-constraints"],
+		},
+		{
+			id: "dry-run-only",
+			status: unsafeReasons.length > 0 ? "UNSAFE_TO_RUN" : "PASS",
+			message:
+				"The proposed plan emits review artifacts only and forbids execution, board writes, network writes, push, deploy, and merge.",
+			evidenceRefs: ["goal-input.md#safety-constraints"],
+		},
+		{
+			id: "evidence-present",
+			status: missingEvidence.length > 0 ? "INSUFFICIENT_EVIDENCE" : "PASS",
+			message:
+				"Operator goal, repository remote, trusted base, worktree policy, and safety constraints are present.",
+			evidenceRefs: ["goal-input.md#repository-context"],
+		},
+	];
+
+	const normalizedGoal =
+		"Create a local-first PlanForge dry-run slice for Buildplane that validates the trusted boundary and emits reviewable plan artifacts without execution or board writes.";
+	const normalizedTrustedBase =
+		trustedBase ?? "15dbb32db0e1f0024687533755805fc23f3ef6d4";
+	const planFingerprint = "8f1f4fd7";
+	const idempotencyKey = `planforge:v0:buildplane:${normalizedTrustedBase}:${planFingerprint}`;
+
+	return {
+		schemaVersion: "planforge.plan.v0",
+		id: `pf-plan-${planFingerprint}`,
+		idempotencyKey,
+		title: "PlanForge dry-run admission slice",
+		goal: normalizedGoal,
+		trustedBase: normalizedTrustedBase,
+		tasks: [
+			{
+				id: "PF1",
+				title: "Spec PlanForge contracts and fixture artifacts",
+				objective:
+					"Define the narrow documentation-level PlanForge contracts plus deterministic dry-run fixtures.",
+				assigneeHint: "auto-coder",
+				workspace: "isolated-worktree",
+				dependsOn: [],
+				allowedSideEffects: ["local-doc", "local-fixture"],
+				forbiddenSideEffects: [
+					"execute-code",
+					"board-write",
+					"network-write",
+					"push",
+					"deploy",
+					"merge",
+				],
+				acceptanceCriteria: [
+					"Define PlanForgeInput, PlanForgePlan, PlanForgeTask, PlanForgeValidation, and PlanForgeReceipt at documentation/fixture level.",
+					"State that the Buildplane kernel validates and admits plans while coding agents remain untrusted workers.",
+					"State dry-run/no-side-effect behavior.",
+					"Define PASS, BLOCKED, FAILED, INSUFFICIENT_EVIDENCE, and UNSAFE_TO_RUN failure/pass states.",
+					"Define idempotency key semantics for repeated planning.",
+				],
+				verificationCommands: [
+					"git status --short --branch",
+					"git diff --check",
+					"pnpm lint",
+				],
+			},
+			{
+				id: "PF2",
+				title: "Implement PlanForge dry-run CLI and schema validation",
+				objective:
+					"Add a later dry-run command that validates local input and emits stable JSON without storage, board, network, or worker side effects.",
+				assigneeHint: "auto-coder",
+				workspace: "isolated-worktree",
+				dependsOn: ["PF1"],
+				allowedSideEffects: ["local-doc", "local-fixture", "local-receipt"],
+				forbiddenSideEffects: [
+					"execute-code",
+					"board-write",
+					"network-write",
+					"push",
+					"deploy",
+					"merge",
+				],
+				acceptanceCriteria: [
+					"Missing input fails closed before any write.",
+					"Invalid input fails closed before any write.",
+					"Unsupported non-dry-run forms fail with a clear message.",
+					"Output is stable JSON suitable for review.",
+				],
+				verificationCommands: [
+					"pnpm vitest --run apps/cli/test/run-cli.test.ts -t planforge",
+					"pnpm typecheck",
+					"git diff --check",
+				],
+			},
+		],
+		validation: {
+			status: validationStatus,
+			checks,
+			requiredEvidence: [
+				"operator_goal",
+				"repository_remote",
+				"trusted_base",
+				"dry_run_constraints",
+			],
+			missingEvidence,
+			unsafeReasons,
+		},
+		receiptPreview: {
+			schemaVersion: "planforge.receipt.v0",
+			status: validationStatus,
+			planId: `pf-plan-${planFingerprint}`,
+			idempotencyKey,
+			inputDigest: "sha256:fixture-input-digest-placeholder",
+			planDigest: "sha256:fixture-plan-digest-placeholder",
+			trustedBase: normalizedTrustedBase,
+			admittedBy: "buildplane-kernel",
+			generatedAt: "2026-05-07T00:00:00.000Z",
+			dryRun: true,
+			sideEffects: [],
+			notes: [
+				"Receipt preview is documentation/fixture only for PF1.",
+				"PASS does not create tasks, grant write capabilities, merge, deploy, or start workers.",
+				"Non-PASS statuses fail closed: BLOCKED, FAILED, INSUFFICIENT_EVIDENCE, UNSAFE_TO_RUN.",
+			],
+		},
 	};
 }
 
