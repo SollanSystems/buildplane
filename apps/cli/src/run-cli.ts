@@ -208,6 +208,19 @@ function resolveCurrentBranch(projectRoot: string): string | undefined {
 	return branch && branch !== "HEAD" ? branch : undefined;
 }
 
+function resolveCurrentCommit(projectRoot: string): string | undefined {
+	const result = spawnSync("git", ["rev-parse", "HEAD"], {
+		cwd: projectRoot,
+		encoding: "utf8",
+		env: process.env,
+	});
+	if (result.status !== 0) {
+		return undefined;
+	}
+	const commit = result.stdout.trim();
+	return commit.length > 0 ? commit : undefined;
+}
+
 function persistInjectedMemories(
 	storagePort: StructuredMemoryStoragePortLike | undefined,
 	runId: string,
@@ -417,6 +430,20 @@ function formatEvidenceHelp(): string[] {
 		"    --run <id>   Run id to export",
 		"    --out <file> Write bundle JSON to this path",
 		"    --json       Also print the exported bundle JSON",
+	];
+}
+
+function formatMemoryPromoteHelp(): string[] {
+	return [
+		"buildplane memory promote --receipt <run-id> [--json]",
+		"",
+		"  Promotes eligible run learnings into durable structured memory only",
+		"  after the cited run has a PASSED receipt-backed final verdict.",
+		"  Raw logs and worker claims without accepted verifier receipts fail closed.",
+		"",
+		"  Options:",
+		"    --receipt <id>  Accepted run receipt to cite as provenance",
+		"    --json          Print machine-readable promotion report",
 	];
 }
 
@@ -1041,6 +1068,368 @@ async function loadReadOnlyMemoryPort(
 		// Memory port unavailable
 	}
 	return undefined;
+}
+
+interface VerifiedMemoryPromotionRecord {
+	readonly memoryType: "repo-fact";
+	readonly factKey: string;
+	readonly sourceRunId: string;
+	readonly createdBy: "system";
+	readonly id?: string;
+	readonly status: "promoted" | "skipped";
+	readonly reason?: string;
+}
+
+interface VerifiedMemoryPromotionReport {
+	readonly receiptId: string;
+	readonly verdict: string;
+	readonly promoted: number;
+	readonly skipped: number;
+	readonly records: readonly VerifiedMemoryPromotionRecord[];
+}
+
+interface ReceiptNotAcceptedReport {
+	readonly error: { readonly code: string; readonly message: string };
+	readonly receipt: Record<string, unknown>;
+}
+
+interface ReceiptLearningRow {
+	readonly id: string;
+	readonly run_id: string;
+	readonly scope: string;
+	readonly kind: string;
+	readonly title: string;
+	readonly body: string;
+	readonly status: string;
+	readonly created_at: string;
+	readonly updated_at: string;
+	readonly seen_count: number;
+	readonly promoted_from_id: string | null;
+	readonly source_run_id: string | null;
+}
+
+interface ReceiptLearningCandidate {
+	readonly id: string;
+	readonly runId: string;
+	readonly scope: string;
+	readonly kind: string;
+	readonly title: string;
+	readonly body: string;
+	readonly status: string;
+	readonly createdAt: string;
+	readonly updatedAt: string;
+	readonly seenCount: number;
+	readonly promotedFromId?: string;
+	readonly sourceRunId?: string;
+}
+
+function escapeUnescapedCharacter(
+	value: string,
+	character: string,
+	escapedCharacter: string,
+): string {
+	let escaped = "";
+	for (let index = 0; index < value.length; index += 1) {
+		const current = value[index];
+		if (current === character && value[index - 1] !== "\\") {
+			escaped += escapedCharacter;
+		} else {
+			escaped += current;
+		}
+	}
+	return escaped;
+}
+
+function sanitizeVerifiedMemoryText(value: string): string {
+	const ansiEscapePattern = new RegExp(
+		`${String.fromCharCode(27)}\\[[0-?]*[ -/]*[@-~]`,
+		"g",
+	);
+	const withoutAnsi = value.replace(ansiEscapePattern, " ");
+	let result = "";
+	for (const character of withoutAnsi) {
+		const code = character.charCodeAt(0);
+		if (code < 0x20 || code === 0x7f || (code >= 0x80 && code <= 0x9f)) {
+			result += " ";
+		} else {
+			result += character;
+		}
+	}
+	const sanitized = result
+		.replace(/@(?!\u200b)/g, "@\u200b")
+		.split("`")
+		.join("'")
+		.split("-->")
+		.join("-\\->")
+		.split("<!--")
+		.join("<\\!--")
+		.replace(/\s+/g, " ")
+		.trim();
+	return escapeUnescapedCharacter(sanitized, "|", "\\|");
+}
+
+function normalizeReceiptLearningFactKey(title: string): string {
+	return sanitizeVerifiedMemoryText(title);
+}
+
+function normalizeReceiptLearningFactValue(body: string): string {
+	return sanitizeVerifiedMemoryText(body);
+}
+
+function formatMemoryPromotionHuman(
+	report: VerifiedMemoryPromotionReport,
+): string[] {
+	return [
+		"memory-promote: completed",
+		`receipt-id: ${sanitizeVerifiedMemoryText(report.receiptId)}`,
+		`verdict: ${sanitizeVerifiedMemoryText(report.verdict)}`,
+		`promoted: ${report.promoted}`,
+		`skipped: ${report.skipped}`,
+		...report.records.map(
+			(record) =>
+				`- ${sanitizeVerifiedMemoryText(record.status)}: ${sanitizeVerifiedMemoryText(record.memoryType)} ${sanitizeVerifiedMemoryText(record.factKey)}` +
+				(record.reason
+					? ` (${sanitizeVerifiedMemoryText(record.reason)})`
+					: ""),
+		),
+	];
+}
+
+async function fetchReceiptLearningCandidates(
+	projectRoot: string,
+	runId: string,
+	storageModule: {
+		resolveProjectLayout: (root: string) => { stateDbPath: string };
+	},
+): Promise<readonly ReceiptLearningCandidate[]> {
+	const { DatabaseSync } = await import("node:sqlite");
+	const layout = storageModule.resolveProjectLayout(projectRoot);
+	if (!existsSync(layout.stateDbPath)) {
+		return [];
+	}
+	const db = new DatabaseSync(layout.stateDbPath, { readOnly: true });
+	try {
+		const rows = db
+			.prepare(
+				`SELECT id, run_id, scope, kind, title, body, status, created_at, updated_at, seen_count, promoted_from_id, source_run_id
+           FROM run_learnings
+           WHERE run_id = ? AND status = 'active'
+           ORDER BY created_at ASC`,
+			)
+			.all(runId) as unknown as ReceiptLearningRow[];
+		return rows.map((row) => ({
+			id: row.id,
+			runId: row.run_id,
+			scope: row.scope,
+			kind: row.kind,
+			title: row.title,
+			body: row.body,
+			status: row.status,
+			createdAt: row.created_at,
+			updatedAt: row.updated_at,
+			seenCount: row.seen_count,
+			promotedFromId: row.promoted_from_id ?? undefined,
+			sourceRunId: row.source_run_id ?? undefined,
+		}));
+	} catch {
+		return [];
+	} finally {
+		db.close();
+	}
+}
+
+function createSkippedMemoryPromotionRecord(
+	learning: Pick<ReceiptLearningCandidate, "title">,
+	receiptRunId: string,
+	reason: string,
+): VerifiedMemoryPromotionRecord {
+	return {
+		memoryType: "repo-fact",
+		factKey:
+			normalizeReceiptLearningFactKey(learning.title) || "(empty fact key)",
+		sourceRunId: receiptRunId,
+		createdBy: "system",
+		status: "skipped",
+		reason,
+	};
+}
+
+async function promoteMemoryFromReceipt(
+	projectRoot: string,
+	receiptId: string,
+): Promise<
+	| { readonly ok: true; readonly report: VerifiedMemoryPromotionReport }
+	| { readonly ok: false; readonly report: ReceiptNotAcceptedReport }
+> {
+	const storageModule = (await cliImport("@buildplane/storage")) as unknown as {
+		createBuildplaneStorage: (root: string) => {
+			getRepoFact: (
+				factKey: string,
+				options?: { scopeType?: string; scopeKey?: string },
+			) => {
+				id: string;
+				factKey: string;
+				factValue: unknown;
+				provenance: { sourceRunId?: string; createdBy: string };
+			} | null;
+			upsertRepoFact: (input: {
+				factKey: string;
+				factValue: unknown;
+				valueType: string;
+				scopeType?: string;
+				confidence?: number;
+				createdBy: "system";
+				sourceRunId?: string;
+				branch?: string;
+				commitSha?: string;
+			}) => {
+				id: string;
+				factKey: string;
+				memoryType: "repo-fact";
+				provenance: { sourceRunId?: string; createdBy: string };
+			};
+		};
+		resolveProjectLayout: (root: string) => { stateDbPath: string };
+		verifyRunFinalVerdict: (
+			root: string,
+			options: { runId: string },
+		) => { verdict: string; runId: string } & Record<string, unknown>;
+	};
+	const receipt = storageModule.verifyRunFinalVerdict(projectRoot, {
+		runId: receiptId,
+	});
+	if (receipt.verdict !== "PASSED") {
+		return {
+			ok: false,
+			report: {
+				...formatJsonError(
+					"RECEIPT_NOT_ACCEPTED",
+					`Receipt ${receiptId} has verdict ${receipt.verdict}; only PASSED receipts can promote memory.`,
+				),
+				receipt,
+			},
+		};
+	}
+
+	const learnings = await fetchReceiptLearningCandidates(
+		projectRoot,
+		receipt.runId,
+		storageModule,
+	);
+	const storage = storageModule.createBuildplaneStorage(projectRoot);
+	const branch = resolveCurrentBranch(projectRoot);
+	const commitSha = resolveCurrentCommit(projectRoot);
+	const records: VerifiedMemoryPromotionRecord[] = [];
+
+	for (const learning of learnings) {
+		if (learning.kind !== "fact") {
+			records.push(
+				createSkippedMemoryPromotionRecord(
+					learning,
+					receipt.runId,
+					`unsupported learning kind: ${learning.kind}`,
+				),
+			);
+			continue;
+		}
+		if (learning.promotedFromId || learning.sourceRunId) {
+			records.push(
+				createSkippedMemoryPromotionRecord(
+					learning,
+					receipt.runId,
+					"derived learning lacks direct receipt binding",
+				),
+			);
+			continue;
+		}
+		if (learning.seenCount !== 1 || learning.createdAt !== learning.updatedAt) {
+			records.push(
+				createSkippedMemoryPromotionRecord(
+					learning,
+					receipt.runId,
+					"learning changed after receipt capture",
+				),
+			);
+			continue;
+		}
+		const factKey = normalizeReceiptLearningFactKey(learning.title);
+		if (!factKey) {
+			records.push(
+				createSkippedMemoryPromotionRecord(
+					learning,
+					receipt.runId,
+					"empty fact key",
+				),
+			);
+			continue;
+		}
+		const factValue = normalizeReceiptLearningFactValue(learning.body);
+		if (!factValue) {
+			records.push(
+				createSkippedMemoryPromotionRecord(
+					learning,
+					receipt.runId,
+					"empty fact value",
+				),
+			);
+			continue;
+		}
+		const existing = storage.getRepoFact(factKey, { scopeType: "repo" });
+		if (existing?.provenance.sourceRunId === receipt.runId) {
+			records.push({
+				id: existing.id,
+				memoryType: "repo-fact",
+				factKey,
+				sourceRunId: receipt.runId,
+				createdBy: "system",
+				status: "skipped",
+				reason: "already promoted from receipt",
+			});
+			continue;
+		}
+		if (existing) {
+			records.push({
+				id: existing.id,
+				memoryType: "repo-fact",
+				factKey,
+				sourceRunId: receipt.runId,
+				createdBy: "system",
+				status: "skipped",
+				reason: "active fact exists from different provenance",
+			});
+			continue;
+		}
+		const promoted = storage.upsertRepoFact({
+			factKey,
+			factValue,
+			valueType: "string",
+			scopeType: "repo",
+			confidence: 1,
+			createdBy: "system",
+			sourceRunId: receipt.runId,
+			branch,
+			commitSha,
+		});
+		records.push({
+			id: promoted.id,
+			memoryType: "repo-fact",
+			factKey: promoted.factKey,
+			sourceRunId: receipt.runId,
+			createdBy: "system",
+			status: "promoted",
+		});
+	}
+
+	return {
+		ok: true,
+		report: {
+			receiptId: receipt.runId,
+			verdict: receipt.verdict,
+			promoted: records.filter((record) => record.status === "promoted").length,
+			skipped: records.filter((record) => record.status === "skipped").length,
+			records,
+		},
+	};
 }
 
 async function loadPacket(packetPath: string): Promise<unknown> {
@@ -1926,6 +2315,95 @@ export async function runCli(
 					}
 				}
 				return 0;
+			}
+			if (subcommand === "promote") {
+				const subRest = rest.slice(1);
+				if (isHelpRequested(subRest)) {
+					for (const line of formatMemoryPromoteHelp()) {
+						stdout(line);
+					}
+					return 0;
+				}
+				const json = subRest.includes("--json");
+				const receiptLikeArgs = subRest.filter(
+					(arg) => arg === "--receipt" || arg.startsWith("--receipt="),
+				);
+				if (receiptLikeArgs.length === 0) {
+					try {
+						return await (deps?.runNativeCommand ?? runNativeCommand)(rest, {
+							cwd,
+							commandPath: ["memory"],
+							stdout,
+							stderr,
+						});
+					} catch (error) {
+						throw createNativeDispatchError(["memory"], error);
+					}
+				}
+				const receiptFlagIndexes = subRest.reduce<number[]>(
+					(indexes, arg, index) => {
+						if (arg === "--receipt") {
+							indexes.push(index);
+						}
+						return indexes;
+					},
+					[],
+				);
+				const failUnsupportedReceiptArgs = (
+					args: readonly string[],
+				): number => {
+					const msg = `Unsupported arguments for memory promote --receipt: ${args.join(" ")}.`;
+					if (json) {
+						stdout(formatJson(formatJsonError("UNSUPPORTED_ARGUMENTS", msg)));
+					} else {
+						stderr(msg);
+					}
+					return 1;
+				};
+				if (receiptFlagIndexes.length !== 1) {
+					return failUnsupportedReceiptArgs(
+						subRest.filter((arg) => arg !== "--json"),
+					);
+				}
+				const receiptIndex = receiptFlagIndexes[0];
+				const receiptId = subRest[receiptIndex + 1];
+				if (!receiptId || receiptId.startsWith("--")) {
+					const msg =
+						"Missing required --receipt <run-id> argument for memory promote.";
+					if (json) {
+						stdout(formatJson(formatJsonError("MISSING_ARGUMENT", msg)));
+					} else {
+						stderr(msg);
+					}
+					return 1;
+				}
+				const unsupportedArgs = subRest.filter((arg, index) => {
+					if (arg === "--json" || arg === "--receipt") {
+						return false;
+					}
+					if (arg.startsWith("--receipt=")) {
+						return true;
+					}
+					return index !== receiptIndex + 1;
+				});
+				if (unsupportedArgs.length > 0) {
+					return failUnsupportedReceiptArgs(unsupportedArgs);
+				}
+				const promotion = await promoteMemoryFromReceipt(cwd, receiptId);
+				if (json) {
+					stdout(formatJson(promotion.report));
+				} else if (promotion.ok) {
+					for (const line of formatMemoryPromotionHuman(promotion.report)) {
+						stdout(line);
+					}
+				} else {
+					const failedPromotion = promotion as {
+						readonly ok: false;
+						readonly report: ReceiptNotAcceptedReport;
+					};
+					stderr(failedPromotion.report.error.message);
+				}
+				return promotion.ok ? 0 : 1;
 			}
 			if (subcommand === "inspect") {
 				const subRest = rest.slice(1);
