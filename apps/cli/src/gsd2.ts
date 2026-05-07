@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
 	closeSync,
 	existsSync,
@@ -6,11 +7,13 @@ import {
 	openSync,
 	readdirSync,
 	readFileSync,
+	realpathSync,
 	renameSync,
+	statSync,
 	unlinkSync,
 	writeSync,
 } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 export const GSD2_TASK_STATUSES = [
 	"NEW",
@@ -82,6 +85,9 @@ interface Gsd2Envelope {
 	readonly buildplane?: {
 		readonly runIds: readonly string[];
 	};
+	readonly recovery?: {
+		readonly allowedActions: readonly string[];
+	};
 }
 
 interface AdmissionPlan {
@@ -106,6 +112,29 @@ interface RunGsd2Options {
 	readonly cwd?: string;
 	readonly stdout?: (line: string) => void;
 	readonly stderr?: (line: string) => void;
+}
+
+interface RecoverArgs {
+	readonly dryRun: boolean;
+	readonly taskId?: string;
+	readonly parentRunId?: string;
+	readonly forkEventId?: string;
+	readonly reason?: string;
+	readonly packet?: string;
+	readonly expectedEvidenceDelta: readonly string[];
+}
+
+interface RecoveryPlan {
+	readonly taskId: string;
+	readonly action: "buildplane_fork";
+	readonly parentRunId: string;
+	readonly forkEventId: string;
+	readonly reason: string;
+	readonly packetPath: string;
+	readonly packetSha256: string;
+	readonly expectedEvidenceDelta: readonly string[];
+	readonly commandPreview: string;
+	readonly createdAt: string;
 }
 
 const TASK_ID_PATTERN = /^G2-\d{4}$/;
@@ -148,6 +177,9 @@ export function parseGsd2Envelope(content: string): Gsd2Envelope {
 		},
 		buildplane: {
 			runIds: readNestedList(content, "buildplane", "run_ids"),
+		},
+		recovery: {
+			allowedActions: readNestedList(content, "recovery", "allowed_actions"),
 		},
 	};
 }
@@ -235,6 +267,8 @@ export async function runGsd2(
 				return runValidate(cwd, stdout);
 			case "run":
 				return runDryRun(cwd, rest, stdout, stderr);
+			case "recover":
+				return runRecover(cwd, rest, stdout, stderr);
 			default:
 				stderr(`gsd2: unknown command '${command}'`);
 				return 1;
@@ -255,9 +289,10 @@ function formatHelp(): string[] {
 		"  gsd2 admit [--dry-run] <task-id>",
 		"  gsd2 validate",
 		"  gsd2 run --dry-run <task-id>",
+		"  gsd2 recover [--dry-run] <task-id> --parent-run <run-id> --at <event-id> --reason <text> --packet <file> --expected-evidence <text>",
 		"",
 		"Admission moves NEW tasks to READY with a local task.admitted receipt; it never executes workers.",
-		"Milestone 1 route previews remain non-executing: dry-run previews routes but never spawns workers.",
+		"Milestone 1 is non-executing: dry-run previews routes and recovery plans but never spawns workers.",
 	];
 }
 
@@ -558,6 +593,185 @@ function runDryRun(
 	return 0;
 }
 
+function runRecover(
+	cwd: string,
+	argv: readonly string[],
+	stdout: (line: string) => void,
+	stderr: (line: string) => void,
+): number {
+	const parsed = parseRecoverArgs(argv);
+	if ("error" in parsed) {
+		stderr(`gsd2 recover: ${parsed.error}`);
+		return 1;
+	}
+	const args = parsed.value;
+	if (!args.taskId || !TASK_ID_PATTERN.test(args.taskId)) {
+		stderr("gsd2 recover: missing required task id such as G2-0001");
+		return 1;
+	}
+	if (!args.parentRunId) {
+		stderr("gsd2 recover: missing required --parent-run <run-id>");
+		return 1;
+	}
+	if (!args.forkEventId) {
+		stderr("gsd2 recover: missing required --at <event-id>");
+		return 1;
+	}
+	if (!args.reason) {
+		stderr("gsd2 recover: missing required --reason <text>");
+		return 1;
+	}
+	if (!args.packet) {
+		stderr("gsd2 recover: missing required --packet <file>");
+		return 1;
+	}
+	if (args.expectedEvidenceDelta.length === 0) {
+		stderr("gsd2 recover: missing required --expected-evidence <text>");
+		return 1;
+	}
+
+	const root = join(cwd, ".gsd2");
+	if (!existsSync(root)) {
+		stderr("gsd2 recover: no .gsd2 state found");
+		return 1;
+	}
+	prepareStateForCommand(cwd);
+
+	const taskDir = join(root, "tasks", args.taskId);
+	const taskDirCheck = resolveStateTaskDirectory(root, taskDir);
+	if ("error" in taskDirCheck) {
+		stderr(`gsd2 recover: ${args.taskId}: ${taskDirCheck.error}`);
+		return 1;
+	}
+	const envelopePath = join(taskDir, "envelope.yaml");
+	if (!existsSync(envelopePath)) {
+		stderr(`gsd2 recover: task ${args.taskId} not found`);
+		return 1;
+	}
+	const envelope = parseGsd2Envelope(readFileSync(envelopePath, "utf8"));
+	const envelopeErrors = validateGsd2Envelope(envelope);
+	if (
+		envelope.id !== undefined &&
+		TASK_ID_PATTERN.test(envelope.id) &&
+		envelope.id !== args.taskId
+	) {
+		envelopeErrors.push("envelope.id must match task directory");
+	}
+	if (envelopeErrors.length > 0) {
+		for (const error of envelopeErrors) {
+			stderr(`gsd2 recover: ${args.taskId}/envelope.yaml: ${error}`);
+		}
+		return 1;
+	}
+
+	const allowedActions = envelope.recovery?.allowedActions ?? [];
+	if (!allowedActions.includes("buildplane_fork")) {
+		stderr(
+			`gsd2 recover: ${args.taskId}/envelope.yaml does not allow buildplane_fork recovery`,
+		);
+		return 1;
+	}
+
+	const parentRunId = normalizeSingleLine(args.parentRunId);
+	if (parentRunId.length === 0) {
+		stderr("gsd2 recover: missing required --parent-run <run-id>");
+		return 1;
+	}
+	const forkEventId = normalizeSingleLine(args.forkEventId);
+	if (forkEventId.length === 0) {
+		stderr("gsd2 recover: missing required --at <event-id>");
+		return 1;
+	}
+	const reason = normalizeSingleLine(args.reason);
+	if (reason.length === 0) {
+		stderr("gsd2 recover: missing required --reason <text>");
+		return 1;
+	}
+	const expectedEvidenceDelta =
+		args.expectedEvidenceDelta.map(normalizeSingleLine);
+	if (
+		expectedEvidenceDelta.length === 0 ||
+		expectedEvidenceDelta.some((delta) => delta.length === 0)
+	) {
+		stderr("gsd2 recover: missing required --expected-evidence <text>");
+		return 1;
+	}
+
+	const packetResolution = resolveWorkspacePacket(cwd, args.packet);
+	if ("error" in packetResolution) {
+		stderr(`gsd2 recover: ${packetResolution.error}`);
+		return 1;
+	}
+	const packet = packetResolution.value;
+	let packetSha256: string;
+	try {
+		const packetStat = statSync(packet.realPath);
+		if (!packetStat.isFile()) {
+			stderr(`gsd2 recover: packet is not a file: ${packet.displayPath}`);
+			return 1;
+		}
+		packetSha256 = sha256File(packet.realPath);
+	} catch {
+		stderr(`gsd2 recover: packet not found: ${packet.displayPath}`);
+		return 1;
+	}
+
+	const plan = buildRecoveryPlan({
+		taskId: args.taskId,
+		parentRunId,
+		forkEventId,
+		reason,
+		packetPath: packet.displayPath,
+		packetSha256,
+		expectedEvidenceDelta,
+		createdAt: new Date().toISOString(),
+	});
+
+	if (args.dryRun) {
+		stdout(`gsd2 recovery dry-run: ${plan.taskId}`);
+		stdout(`action: ${plan.action}`);
+		stdout(`parent-run-id: ${plan.parentRunId}`);
+		stdout(`fork-event-id: ${plan.forkEventId}`);
+		stdout(`reason: ${plan.reason}`);
+		stdout(`packet: ${plan.packetPath}`);
+		stdout(`packet-sha256: ${plan.packetSha256}`);
+		stdout("will-execute: false");
+		stdout("expected-evidence-delta:");
+		for (const delta of plan.expectedEvidenceDelta) {
+			stdout(`  - ${delta}`);
+		}
+		stdout("command-preview:");
+		stdout(`  - ${plan.commandPreview}`);
+		return 0;
+	}
+
+	const lock = acquireMutationLock(root);
+	try {
+		writeTextAtomic(
+			join(taskDir, "recovery-plan.yaml"),
+			formatRecoveryPlanYaml(plan),
+		);
+		const backend =
+			envelope.routing?.backend ??
+			backendForRoute(asRouteMode(envelope.routing?.mode ?? "planning_only"));
+		writeTextAtomic(
+			join(taskDir, "receipt.yaml"),
+			formatRecoveryReceiptYaml(plan, backend),
+		);
+	} finally {
+		releaseMutationLock(lock);
+	}
+
+	stdout(`gsd2 recovery planned: ${plan.taskId}`);
+	stdout(`recovery-plan: .gsd2/tasks/${plan.taskId}/recovery-plan.yaml`);
+	stdout(`receipt: .gsd2/tasks/${plan.taskId}/receipt.yaml`);
+	stdout("will-execute: false");
+	stdout(
+		"next-step: operator approval required before running buildplane fork",
+	);
+	return 0;
+}
+
 function parseNewArgs(argv: readonly string[]): {
 	goal: string;
 	route: string;
@@ -638,6 +852,95 @@ function parseAdmitArgs(argv: readonly string[]): {
 		}
 	}
 	return { dryRun, taskId };
+}
+
+function parseRecoverArgs(
+	argv: readonly string[],
+):
+	| { value: RecoverArgs; error?: undefined }
+	| { error: string; value?: undefined } {
+	let dryRun = false;
+	let taskId: string | undefined;
+	let parentRunId: string | undefined;
+	let forkEventId: string | undefined;
+	let reason: string | undefined;
+	let packet: string | undefined;
+	const expectedEvidenceDelta: string[] = [];
+
+	for (let index = 0; index < argv.length; index += 1) {
+		const token = argv[index];
+		if (token === "--dry-run") {
+			dryRun = true;
+			continue;
+		}
+		if (token === "--parent-run" || token === "--parent-run-id") {
+			const value = readFlagValue(argv, index, token);
+			if ("error" in value) return { error: value.error };
+			parentRunId = value.value;
+			index += 1;
+			continue;
+		}
+		if (token === "--at" || token === "--fork-event") {
+			const value = readFlagValue(argv, index, token);
+			if ("error" in value) return { error: value.error };
+			forkEventId = value.value;
+			index += 1;
+			continue;
+		}
+		if (token === "--reason") {
+			const value = readFlagValue(argv, index, token);
+			if ("error" in value) return { error: value.error };
+			reason = value.value;
+			index += 1;
+			continue;
+		}
+		if (token === "--packet") {
+			const value = readFlagValue(argv, index, token);
+			if ("error" in value) return { error: value.error };
+			packet = value.value;
+			index += 1;
+			continue;
+		}
+		if (token === "--expected-evidence") {
+			const value = readFlagValue(argv, index, token);
+			if ("error" in value) return { error: value.error };
+			expectedEvidenceDelta.push(value.value);
+			index += 1;
+			continue;
+		}
+		if (token.startsWith("--")) {
+			return { error: `unknown argument: ${token}` };
+		}
+		if (taskId === undefined) {
+			taskId = token;
+			continue;
+		}
+		return { error: `unexpected argument: ${token}` };
+	}
+
+	return {
+		value: {
+			dryRun,
+			taskId,
+			parentRunId,
+			forkEventId,
+			reason,
+			packet,
+			expectedEvidenceDelta,
+		},
+	};
+}
+
+function readFlagValue(
+	argv: readonly string[],
+	index: number,
+	flag: string,
+): { ok: true; value: string } | { ok: false; error: string } {
+	const value = argv[index + 1];
+	if (!value || value.startsWith("--")) {
+		return { ok: false, error: `${flag} requires a value` };
+	}
+	return { ok: true, value };
 }
 
 function buildAdmissionPlan(
@@ -972,6 +1275,148 @@ function formatReceiptYaml(
 	return `task_id: ${taskId}\nrun_id: null\nbackend: ${backend}\nfinal_status: BLOCKED\nchecked_by: agent\nchecked_at: "${now}"\nverification:\n  required_complete: false\nacceptance:\n  explicitly_checked: false\nunresolved_findings:\n  - "Task has not executed; Milestone 1 only creates state and previews routes."\nrecovery_next_step: "Select an execution milestone explicitly before running workers."\n`;
 }
 
+function buildRecoveryPlan(input: {
+	readonly taskId: string;
+	readonly parentRunId: string;
+	readonly forkEventId: string;
+	readonly reason: string;
+	readonly packetPath: string;
+	readonly packetSha256: string;
+	readonly expectedEvidenceDelta: readonly string[];
+	readonly createdAt: string;
+}): RecoveryPlan {
+	const commandPreview = `pnpm buildplane fork ${shellArg(input.parentRunId)} --at ${shellArg(input.forkEventId)} --packet ${shellArg(input.packetPath)}`;
+	return {
+		taskId: input.taskId,
+		action: "buildplane_fork",
+		parentRunId: input.parentRunId,
+		forkEventId: input.forkEventId,
+		reason: input.reason,
+		packetPath: input.packetPath,
+		packetSha256: input.packetSha256,
+		expectedEvidenceDelta: input.expectedEvidenceDelta,
+		commandPreview,
+		createdAt: input.createdAt,
+	};
+}
+
+function formatRecoveryPlanYaml(plan: RecoveryPlan): string {
+	return `kind: RecoveryPlan\ntask_id: ${plan.taskId}\ncreated_at: "${escapeYamlString(plan.createdAt)}"\naction: "${plan.action}"\nparent_run_id: "${escapeYamlString(plan.parentRunId)}"\nfork_event_id: "${escapeYamlString(plan.forkEventId)}"\nreason: "${escapeYamlString(plan.reason)}"\npacket:\n  path: "${escapeYamlString(plan.packetPath)}"\n  sha256: "${plan.packetSha256}"\nexpected_evidence_delta:\n${formatYamlList(plan.expectedEvidenceDelta, 2)}command_preview:\n  - "${escapeYamlString(plan.commandPreview)}"\nwill_execute: false\nnext_step: "operator approval required before running buildplane fork"\n`;
+}
+
+function formatRecoveryReceiptYaml(
+	plan: RecoveryPlan,
+	backend: string,
+): string {
+	return `task_id: ${plan.taskId}\nrun_id: null\nbackend: ${backend}\nfinal_status: BLOCKED\nchecked_by: agent\nchecked_at: "${escapeYamlString(plan.createdAt)}"\nverification:\n  required_complete: false\nacceptance:\n  explicitly_checked: false\nrecovery_plan_ref: .gsd2/tasks/${plan.taskId}/recovery-plan.yaml\nrecovery_action: "${plan.action}"\nparent_run_id: "${escapeYamlString(plan.parentRunId)}"\nfork_event_id: "${escapeYamlString(plan.forkEventId)}"\nexpected_evidence_delta:\n${formatYamlList(plan.expectedEvidenceDelta, 2)}unresolved_findings:\n  - "Recovery plan recorded but not executed; operator approval is required before running buildplane fork."\nrecovery_next_step: "operator approval required before running buildplane fork"\n`;
+}
+
+function sha256File(path: string): string {
+	return createHash("sha256").update(readFileSync(path)).digest("hex");
+}
+
+function resolveStateTaskDirectory(
+	stateRoot: string,
+	taskDir: string,
+): { value: string } | { error: string } {
+	try {
+		const realStateRoot = realpathSync(stateRoot);
+		const realTaskDir = realpathSync(taskDir);
+		if (!isPathInside(realStateRoot, realTaskDir)) {
+			return { error: "task directory must resolve inside .gsd2 state" };
+		}
+		if (!statSync(realTaskDir).isDirectory()) {
+			return { error: "task path is not a directory" };
+		}
+		return { value: realTaskDir };
+	} catch {
+		return { error: "task directory is not readable" };
+	}
+}
+
+function resolveWorkspacePacket(
+	cwd: string,
+	packetArg: string,
+): { value: { realPath: string; displayPath: string } } | { error: string } {
+	const workspaceRoot = resolve(cwd);
+	const packetPath = resolve(workspaceRoot, packetArg);
+	if (!isPathInside(workspaceRoot, packetPath)) {
+		return { error: "packet must be inside the workspace" };
+	}
+	const lexicalDisplayPath = safeWorkspaceDisplayPath(
+		workspaceRoot,
+		packetPath,
+	);
+	if (
+		lexicalDisplayPath.length === 0 ||
+		hasUnsafePathCharacters(lexicalDisplayPath)
+	) {
+		return { error: "packet path contains unsupported control characters" };
+	}
+	let realWorkspaceRoot: string;
+	let realPacketPath: string;
+	try {
+		realWorkspaceRoot = realpathSync(workspaceRoot);
+		realPacketPath = realpathSync(packetPath);
+	} catch {
+		return { error: `packet not found: ${lexicalDisplayPath}` };
+	}
+	if (!isPathInside(realWorkspaceRoot, realPacketPath)) {
+		return { error: "packet must resolve inside the workspace" };
+	}
+	const displayPath = safeWorkspaceDisplayPath(
+		realWorkspaceRoot,
+		realPacketPath,
+	);
+	if (displayPath.length === 0 || hasUnsafePathCharacters(displayPath)) {
+		return { error: "packet path contains unsupported control characters" };
+	}
+	return { value: { realPath: realPacketPath, displayPath } };
+}
+
+function safeWorkspaceDisplayPath(
+	workspaceRoot: string,
+	packetPath: string,
+): string {
+	return relative(workspaceRoot, packetPath).replace(/\\/g, "/");
+}
+
+function isPathInside(root: string, candidate: string): boolean {
+	const relativePath = relative(root, candidate);
+	return (
+		relativePath.length > 0 &&
+		relativePath !== ".." &&
+		!relativePath.startsWith(`..${"/"}`) &&
+		!relativePath.startsWith(`..${"\\"}`) &&
+		!isAbsolute(relativePath)
+	);
+}
+
+function hasUnsafePathCharacters(value: string): boolean {
+	return Array.from(value).some((character) => {
+		const codePoint = character.codePointAt(0) ?? 0;
+		return codePoint < 32 || codePoint === 127;
+	});
+}
+
+function normalizeSingleLine(value: string): string {
+	return Array.from(value)
+		.filter((character) => {
+			const codePoint = character.codePointAt(0) ?? 0;
+			return codePoint === 9 || codePoint >= 32;
+		})
+		.join("")
+		.replace(/\s+/g, " ")
+		.trim();
+}
+
+function shellArg(value: string): string {
+	if (/^[A-Za-z0-9_./:=@+-]+$/.test(value)) {
+		return value;
+	}
+	return `'${value.replace(/'/g, `'"'"'`)}'`;
+}
+
 function writeIfMissing(path: string, content: string): void {
 	if (!existsSync(path)) {
 		writeTextAtomic(path, content);
@@ -1072,7 +1517,20 @@ function cleanScalar(value: string): string {
 }
 
 function escapeYamlString(value: string): string {
-	return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+	return Array.from(value)
+		.map((character) => {
+			if (character === "\\") return "\\\\";
+			if (character === '"') return '\\"';
+			if (character === "\n") return "\\n";
+			if (character === "\r") return "\\r";
+			if (character === "\t") return "\\t";
+			const codePoint = character.codePointAt(0) ?? 0;
+			if (codePoint < 32 || codePoint === 127) {
+				return `\\x${codePoint.toString(16).padStart(2, "0")}`;
+			}
+			return character;
+		})
+		.join("");
 }
 
 function escapeRegExp(value: string): string {

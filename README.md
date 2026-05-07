@@ -206,7 +206,7 @@ This example is intentionally narrow: one packet, one run, one local command ste
 
 GSD-2 is the repo-local state layer for turning ambiguous work into bounded task envelopes before execution. It complements Buildplane's high-trust run/inspect/replay/fork loop; it does not replace `/auto-coder` as the serious coding front door and does not make a dry-run into a verified run.
 
-Milestone 1 is intentionally non-executing: it writes and validates `.gsd2` state and previews routes, but it does not dispatch Buildplane runs, worktree-kernel slices, tmux sessions, or model workers.
+Milestone 1 is intentionally non-executing: it writes and validates `.gsd2` state and previews routes or recovery plans, but it does not dispatch Buildplane runs, worktree-kernel slices, tmux sessions, or model workers.
 
 Current repo-development commands:
 
@@ -217,8 +217,12 @@ pnpm gsd2 validate
 pnpm gsd2 run --dry-run <task-id>
 pnpm gsd2 admit --dry-run <task-id>
 pnpm gsd2 admit <task-id>
+pnpm gsd2 recover --dry-run <task-id> --parent-run <run-id> --at <event-id> --reason "<why>" --packet <file> --expected-evidence "<evidence>"
+pnpm gsd2 recover <task-id> --parent-run <run-id> --at <event-id> --reason "<why>" --packet <file> --expected-evidence "<evidence>"
 ```
 
 Admission is still non-executing: it moves a valid `NEW` task envelope to `READY`, records a local `task.admitted` receipt, estimates gates/capabilities/evidence, and does not dispatch Buildplane, worktree-kernel, tmux, or model workers.
 
-The first implementation target is only the state skeleton: `.gsd2/PROJECT.md`, `.gsd2/STATE.md`, `.gsd2/QUEUE.md`, `.gsd2/config.yaml`, and per-task `task.md`, `envelope.yaml`, and `receipt.yaml`. Later milestones may bridge those envelopes to worktree-kernel or Buildplane after the dry-run contract is accepted.
+`gsd2 recover` records a bounded `RecoveryPlan` for a reviewed Buildplane fork packet and leaves the task receipt `BLOCKED` until an operator explicitly approves execution and a later verifier receipt proves the fork/replay outcome. The command hashes the packet and writes local state only; it does not run Buildplane replay/fork by itself.
+
+The first implementation target is only the state skeleton: `.gsd2/PROJECT.md`, `.gsd2/STATE.md`, `.gsd2/QUEUE.md`, `.gsd2/config.yaml`, and per-task `task.md`, `envelope.yaml`, `receipt.yaml`, and optional `recovery-plan.yaml`. Later milestones may bridge those envelopes to worktree-kernel or Buildplane after the dry-run contract is accepted.
