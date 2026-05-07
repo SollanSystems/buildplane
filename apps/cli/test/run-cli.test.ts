@@ -3143,7 +3143,7 @@ describe("cli command surface", () => {
 			"--repo",
 			"SollanSystems/buildplane",
 			"--sha",
-			"abc1234",
+			"0123456789abcdef0123456789abcdef01234567",
 			"--name",
 			"Buildplane Evidence",
 			"--json",
@@ -3159,7 +3159,7 @@ describe("cli command surface", () => {
 				path: "/repos/SollanSystems/buildplane/check-runs",
 				body: {
 					name: "Buildplane Evidence",
-					head_sha: "abc1234",
+					head_sha: "0123456789abcdef0123456789abcdef01234567",
 					status: "completed",
 					conclusion: "success",
 					external_id: run.id,
@@ -3229,7 +3229,7 @@ describe("cli command surface", () => {
 					"--repo",
 					"SollanSystems/buildplane",
 					"--sha",
-					"abc1234",
+					"0123456789abcdef0123456789abcdef01234567",
 					"--grant-file",
 					grantPath,
 					"--grant-id",
@@ -3311,7 +3311,7 @@ describe("cli command surface", () => {
 				"--repo",
 				"SollanSystems/buildplane",
 				"--sha",
-				"abc1234",
+				"0123456789abcdef0123456789abcdef01234567",
 				"--grant-file",
 				grantPath,
 				"--grant-id",
@@ -3344,5 +3344,206 @@ describe("cli command surface", () => {
 			}),
 			{ credential: "cred" },
 		);
+	});
+
+	it("previews a compact PR evidence comment from pr-comment dry-run", async () => {
+		const root = mkdtempSync(
+			join(tmpdir(), "buildplane-cli-pr-comment-dry-run-"),
+		);
+		await runCliCapture(root, ["init"]);
+		const storage = createBuildplaneStorage(root);
+		const run = storage.createRun(createPassingPacket("unit-cli-pr-comment"), {
+			runId: "run-cli-pr-comment-dry-run",
+		});
+		storage.markRunRunning(run.id);
+		storage.recordExecutionEvidence(run.id, {
+			command: "node",
+			args: ["-e", "console.log('worker claim')"],
+			cwd: root,
+			startedAt: "2026-05-04T10:00:00.000Z",
+			completedAt: "2026-05-04T10:00:01.000Z",
+			exitCode: 0,
+			stdout: "worker claim\n",
+			stderr: "",
+			outputChecks: [{ path: "tmp/pass.txt", exists: true }],
+		});
+		storage.recordDecision(run.id, {
+			kind: "advance-run",
+			outcome: "approved",
+			reasons: ["required output exists"],
+		});
+		storage.completeRun(run.id, "passed");
+
+		const result = await runCliCapture(root, [
+			"pr-comment",
+			"dry-run",
+			"--run",
+			run.id,
+			"--repo",
+			"SollanSystems/buildplane",
+			"--pr",
+			"42",
+			"--sha",
+			"0123456789abcdef0123456789abcdef01234567",
+			"--details-url",
+			"https://mission-control.example/runs/run-cli-pr-comment-dry-run",
+			"--bundle-url",
+			"https://artifacts.example/run-cli-pr-comment-dry-run.json",
+			"--json",
+		]);
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stderr).toEqual([]);
+		const preview = JSON.parse(result.stdout.join("\n"));
+		expect(preview).toMatchObject({
+			mode: "dry-run",
+			preflight: {
+				method: "GET",
+				path: "/repos/SollanSystems/buildplane/pulls/42",
+			},
+			operation: {
+				method: "POST",
+				path: "/repos/SollanSystems/buildplane/issues/42/comments",
+			},
+			sideEffect: {
+				capability: "github.pr_comment",
+				action: "publish",
+				target: "repo:SollanSystems/buildplane#pr:42",
+				metadata: {
+					headSha: "0123456789abcdef0123456789abcdef01234567",
+					prNumber: 42,
+				},
+			},
+		});
+		expect(preview.operation.body.body).toContain(
+			"<!-- buildplane:pr-evidence run=run-cli-pr-comment-dry-run sha=0123456789abcdef0123456789abcdef01234567 pr=42 -->",
+		);
+		expect(preview.operation.body.body).toContain("| Final verdict | PASSED |");
+		expect(preview.operation.body.body).toContain("| Pull request | #42 |");
+		expect(preview.operation.body.body).toContain(
+			"| Head SHA | `0123456789abcdef0123456789abcdef01234567` |",
+		);
+		expect(preview.operation.body.body).toContain(
+			"| Pass authority | verifier receipts only; worker claims are not authoritative |",
+		);
+		expect(preview.operation.body.body).toContain(
+			"| Evidence bundle | https://artifacts.example/run-cli-pr-comment-dry-run.json |",
+		);
+	});
+
+	it("rejects non-canonical PR numbers before loading evidence", async () => {
+		for (const prNumber of ["1e2", "0x2a", "042"]) {
+			const root = mkdtempSync(
+				join(tmpdir(), "buildplane-cli-pr-comment-bad-pr-"),
+			);
+			await runCliCapture(root, ["init"]);
+			const result = await runCliCapture(root, [
+				"pr-comment",
+				"dry-run",
+				"--run",
+				"run-cli-pr-comment-bad-pr",
+				"--repo",
+				"SollanSystems/buildplane",
+				"--pr",
+				prNumber,
+				"--sha",
+				"0123456789abcdef0123456789abcdef01234567",
+				"--json",
+			]);
+
+			expect(result.exitCode).toBe(1);
+			expect(result.stderr).toEqual([]);
+			expect(JSON.parse(result.stdout.join("\n"))).toMatchObject({
+				error: {
+					message: expect.stringContaining(
+						"PR number must be a positive decimal integer",
+					),
+				},
+			});
+		}
+	});
+
+	it("fails closed before network when pr-comment publish lacks a matching grant", async () => {
+		const root = mkdtempSync(
+			join(tmpdir(), "buildplane-cli-pr-comment-denied-"),
+		);
+		await runCliCapture(root, ["init"]);
+		const storage = createBuildplaneStorage(root);
+		const run = storage.createRun(
+			createPassingPacket("unit-cli-pr-comment-denied"),
+			{
+				runId: "run-cli-pr-comment-denied",
+			},
+		);
+		storage.markRunRunning(run.id);
+		storage.recordExecutionEvidence(run.id, {
+			command: "node",
+			args: ["-e", "console.log('worker claim')"],
+			cwd: root,
+			startedAt: "2026-05-04T10:00:00.000Z",
+			completedAt: "2026-05-04T10:00:01.000Z",
+			exitCode: 0,
+			stdout: "worker claim\n",
+			stderr: "",
+			outputChecks: [{ path: "tmp/pass.txt", exists: true }],
+		});
+		storage.recordDecision(run.id, {
+			kind: "advance-run",
+			outcome: "approved",
+			reasons: ["required output exists"],
+		});
+		storage.completeRun(run.id, "passed");
+		const grantPath = join(root, "grants.json");
+		writeFileSync(grantPath, JSON.stringify({ capabilityGrants: [] }), "utf8");
+		const request = vi.fn();
+		const originalEnv = process.env;
+		const credentialReads: string[] = [];
+		process.env = new Proxy(
+			{ ...originalEnv, BUILDPLANE_TEST_CREDENTIAL: "cred" },
+			{
+				get(target, property, receiver) {
+					if (property === "BUILDPLANE_TEST_CREDENTIAL") {
+						credentialReads.push(String(property));
+					}
+					return Reflect.get(target, property, receiver);
+				},
+			},
+		) as NodeJS.ProcessEnv;
+		let result: Awaited<ReturnType<typeof runCliCapture>>;
+		try {
+			result = await runCliCapture(
+				root,
+				[
+					"pr-comment",
+					"publish",
+					"--run",
+					run.id,
+					"--repo",
+					"SollanSystems/buildplane",
+					"--pr",
+					"42",
+					"--sha",
+					"0123456789abcdef0123456789abcdef01234567",
+					"--grant-file",
+					grantPath,
+					"--grant-id",
+					"grant-pr-comment-publish",
+					"--credential-env",
+					"BUILDPLANE_TEST_CREDENTIAL",
+					"--json",
+				],
+				{ publishPrCommentRequest: request },
+			);
+		} finally {
+			process.env = originalEnv;
+		}
+
+		expect(result.exitCode).toBe(1);
+		expect(result.stderr).toEqual([]);
+		expect(JSON.parse(result.stdout.join("\n"))).toMatchObject({
+			error: { message: expect.stringContaining("UNSAFE_TO_RUN") },
+		});
+		expect(request).not.toHaveBeenCalled();
+		expect(credentialReads).toEqual([]);
 	});
 });
