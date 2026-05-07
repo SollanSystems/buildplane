@@ -4083,7 +4083,8 @@ function createPlanForgeDryRunPlan(inputPath: string): Record<string, unknown> {
 		.digest("hex")
 		.slice(0, 8);
 	const idempotencyKey = `planforge:v0:buildplane:${normalizedTrustedBase}:${planFingerprint}`;
-	const inputDigest = `sha256:${createHash("sha256").update(content).digest("hex")}`;
+	const canonicalInput = content.replace(/\r\n/g, "\n");
+	const inputDigest = `sha256:${createHash("sha256").update(canonicalInput).digest("hex")}`;
 
 	return {
 		schemaVersion: "planforge.plan.v0",

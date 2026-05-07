@@ -101,7 +101,7 @@
 		"status": "PASS",
 		"planId": "pf-plan-bd932749",
 		"idempotencyKey": "planforge:v0:buildplane:15dbb32db0e1f0024687533755805fc23f3ef6d4:bd932749",
-		"inputDigest": "sha256:b4c30e513296e20a0cbf935a6ffe3fc672f00b77f5d1b14c73fff7b0b962471b",
+		"inputDigest": "sha256:1a2924f8a39b906cbf8c3aa29abd093f7f18b38cb1e4e11d7587fa913af62c2d",
 		"planDigest": "sha256:fixture-plan-digest-placeholder",
 		"trustedBase": "15dbb32db0e1f0024687533755805fc23f3ef6d4",
 		"admittedBy": "buildplane-kernel",
