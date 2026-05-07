@@ -1,9 +1,11 @@
+import { createHash } from "node:crypto";
 import {
 	existsSync,
 	mkdirSync,
 	mkdtempSync,
 	readFileSync,
 	rmSync,
+	symlinkSync,
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -54,6 +56,30 @@ function removeStateSchemaVersion(cwd: string): void {
 function writeMutationLock(cwd: string): void {
 	mkdirSync(join(cwd, ".gsd2"), { recursive: true });
 	writeFileSync(join(cwd, ".gsd2", "mutation.lock"), "stale lock\n");
+}
+
+function sha256Text(value: string): string {
+	return createHash("sha256").update(value).digest("hex");
+}
+
+function recoveryArgs(
+	taskId = "G2-0001",
+	packet = "fixed-packet.json",
+): string[] {
+	return [
+		"recover",
+		taskId,
+		"--parent-run",
+		"run-parent-1",
+		"--at",
+		"event-safe-1",
+		"--reason",
+		"Verifier receipt was missing",
+		"--packet",
+		packet,
+		"--expected-evidence",
+		"verifier receipt passes acceptance",
+	];
 }
 
 afterEach(() => {
@@ -349,6 +375,279 @@ describe("GSD-2 V0 CLI skeleton", () => {
 			"  - buildplane_fork",
 			"  - manual_escalation",
 		]);
+	});
+
+	it("previews a bounded recovery plan without executing replay or fork", async () => {
+		const cwd = tempWorkspace();
+		await runCapture(cwd, [
+			"new",
+			"Recover a blocked Buildplane run",
+			"--route",
+			"buildplane",
+		]);
+		const packetPath = join(cwd, "fixed-packet.json");
+		const packetContent = JSON.stringify(
+			{ unit: { id: "unit-fixed" } },
+			null,
+			2,
+		);
+		writeFileSync(packetPath, packetContent);
+
+		const result = await runCapture(cwd, [
+			"recover",
+			"--dry-run",
+			"G2-0001",
+			"--parent-run",
+			"run-parent-1",
+			"--at",
+			"event-safe-1",
+			"--reason",
+			"Verifier receipt was missing",
+			"--packet",
+			packetPath,
+			"--expected-evidence",
+			"verifier receipt passes acceptance",
+		]);
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stderr).toEqual([]);
+		expect(result.stdout).toEqual([
+			"gsd2 recovery dry-run: G2-0001",
+			"action: buildplane_fork",
+			"parent-run-id: run-parent-1",
+			"fork-event-id: event-safe-1",
+			"reason: Verifier receipt was missing",
+			"packet: fixed-packet.json",
+			`packet-sha256: ${sha256Text(packetContent)}`,
+			"will-execute: false",
+			"expected-evidence-delta:",
+			"  - verifier receipt passes acceptance",
+			"command-preview:",
+			"  - pnpm buildplane fork run-parent-1 --at event-safe-1 --packet fixed-packet.json",
+		]);
+		expect(
+			existsSync(join(cwd, ".gsd2", "tasks", "G2-0001", "recovery-plan.yaml")),
+		).toBe(false);
+		expect(
+			readFileSync(
+				join(cwd, ".gsd2", "tasks", "G2-0001", "receipt.yaml"),
+				"utf8",
+			),
+		).not.toContain("recovery_plan_ref");
+	});
+
+	it("writes a RecoveryPlan object and blocked receipt without executing fork", async () => {
+		const cwd = tempWorkspace();
+		await runCapture(cwd, [
+			"new",
+			"Record recovery evidence",
+			"--route",
+			"buildplane",
+		]);
+		const packetName = "fixed  packet.json";
+		const packetPath = join(cwd, packetName);
+		const packetContent = JSON.stringify({ fixed: true }, null, 2);
+		writeFileSync(packetPath, packetContent);
+
+		const result = await runCapture(cwd, [
+			"recover",
+			"G2-0001",
+			"--parent-run",
+			"run-parent-2",
+			"--at",
+			"event-safe-2",
+			"--reason",
+			"Correct packet after blocked verifier evidence",
+			"--packet",
+			packetPath,
+			"--expected-evidence",
+			"new fork run has verifier receipt",
+		]);
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stderr).toEqual([]);
+		expect(result.stdout).toEqual([
+			"gsd2 recovery planned: G2-0001",
+			"recovery-plan: .gsd2/tasks/G2-0001/recovery-plan.yaml",
+			"receipt: .gsd2/tasks/G2-0001/receipt.yaml",
+			"will-execute: false",
+			"next-step: operator approval required before running buildplane fork",
+		]);
+		const taskDir = join(cwd, ".gsd2", "tasks", "G2-0001");
+		const plan = readFileSync(join(taskDir, "recovery-plan.yaml"), "utf8");
+		expect(plan).toContain("kind: RecoveryPlan");
+		expect(plan).toContain("task_id: G2-0001");
+		expect(plan).toContain('action: "buildplane_fork"');
+		expect(plan).toContain('parent_run_id: "run-parent-2"');
+		expect(plan).toContain('fork_event_id: "event-safe-2"');
+		expect(plan).toContain('path: "fixed  packet.json"');
+		expect(plan).toContain(`sha256: "${sha256Text(packetContent)}"`);
+		expect(plan).toContain("--packet 'fixed  packet.json'");
+		expect(plan).toContain('  - "new fork run has verifier receipt"');
+		const receipt = readFileSync(join(taskDir, "receipt.yaml"), "utf8");
+		expect(receipt).toContain("final_status: BLOCKED");
+		expect(receipt).toContain(
+			"recovery_plan_ref: .gsd2/tasks/G2-0001/recovery-plan.yaml",
+		);
+		expect(receipt).toContain('recovery_action: "buildplane_fork"');
+		expect(receipt).toContain('parent_run_id: "run-parent-2"');
+		expect(receipt).toContain('fork_event_id: "event-safe-2"');
+	});
+
+	it("fails closed unless recovery explicitly allows buildplane_fork", async () => {
+		const cwd = tempWorkspace();
+		await runCapture(cwd, ["new", "Recover requires explicit fork action"]);
+		writeFileSync(join(cwd, "fixed-packet.json"), "{}\n");
+		writeFileSync(
+			join(cwd, ".gsd2", "tasks", "G2-0001", "envelope.yaml"),
+			`id: G2-0001
+status: NEW
+goal: "Recover requires explicit fork action"
+routing:
+  mode: buildplane
+  front_door: auto-coder
+  backend: buildplane
+verification:
+  commands:
+    - "git diff --check"
+recovery:
+  allowed_actions:
+    - buildplane_replay
+`,
+		);
+
+		const result = await runCapture(cwd, recoveryArgs());
+
+		expect(result.exitCode).toBe(1);
+		expect(result.stdout).toEqual([]);
+		expect(result.stderr).toEqual([
+			"gsd2 recover: G2-0001/envelope.yaml does not allow buildplane_fork recovery",
+		]);
+		expect(
+			existsSync(join(cwd, ".gsd2", "tasks", "G2-0001", "recovery-plan.yaml")),
+		).toBe(false);
+	});
+
+	it("fails closed when recovery args normalize to empty strings", async () => {
+		const cwd = tempWorkspace();
+		await runCapture(cwd, ["new", "Reject empty recovery args"]);
+		writeFileSync(join(cwd, "fixed-packet.json"), "{}\n");
+
+		const result = await runCapture(cwd, [
+			"recover",
+			"G2-0001",
+			"--parent-run",
+			"   ",
+			"--at",
+			"event-safe-1",
+			"--reason",
+			"Verifier receipt was missing",
+			"--packet",
+			"fixed-packet.json",
+			"--expected-evidence",
+			"verifier receipt passes acceptance",
+		]);
+
+		expect(result.exitCode).toBe(1);
+		expect(result.stdout).toEqual([]);
+		expect(result.stderr).toEqual([
+			"gsd2 recover: missing required --parent-run <run-id>",
+		]);
+	});
+
+	it("rejects recovery packets outside the workspace or through symlink escapes", async () => {
+		const cwd = tempWorkspace();
+		const outside = tempWorkspace();
+		await runCapture(cwd, ["new", "Reject packet escape"]);
+		const outsidePacket = join(outside, "outside-packet.json");
+		writeFileSync(outsidePacket, "{}\n");
+
+		const absoluteResult = await runCapture(
+			cwd,
+			recoveryArgs("G2-0001", outsidePacket),
+		);
+		expect(absoluteResult.exitCode).toBe(1);
+		expect(absoluteResult.stdout).toEqual([]);
+		expect(absoluteResult.stderr).toEqual([
+			"gsd2 recover: packet must be inside the workspace",
+		]);
+
+		const symlinkPath = join(cwd, "linked-packet.json");
+		symlinkSync(outsidePacket, symlinkPath);
+		const symlinkResult = await runCapture(
+			cwd,
+			recoveryArgs("G2-0001", "linked-packet.json"),
+		);
+		expect(symlinkResult.exitCode).toBe(1);
+		expect(symlinkResult.stdout).toEqual([]);
+		expect(symlinkResult.stderr).toEqual([
+			"gsd2 recover: packet must resolve inside the workspace",
+		]);
+	});
+
+	it("rejects recovery packet paths with control characters before rendering output", async () => {
+		const cwd = tempWorkspace();
+		await runCapture(cwd, ["new", "Reject path injection"]);
+		const packetName = "bad\npacket.json";
+		writeFileSync(join(cwd, packetName), "{}\n");
+
+		const result = await runCapture(cwd, [
+			"recover",
+			"--dry-run",
+			"G2-0001",
+			"--parent-run",
+			"run-parent-1",
+			"--at",
+			"event-safe-1",
+			"--reason",
+			"Verifier receipt was missing",
+			"--packet",
+			packetName,
+			"--expected-evidence",
+			"verifier receipt passes acceptance",
+		]);
+
+		expect(result.exitCode).toBe(1);
+		expect(result.stdout).toEqual([]);
+		expect(result.stderr).toEqual([
+			"gsd2 recover: packet path contains unsupported control characters",
+		]);
+
+		const missingResult = await runCapture(
+			cwd,
+			recoveryArgs("G2-0001", "missing\npacket.json"),
+		);
+		expect(missingResult.exitCode).toBe(1);
+		expect(missingResult.stdout).toEqual([]);
+		expect(missingResult.stderr).toEqual([
+			"gsd2 recover: packet path contains unsupported control characters",
+		]);
+	});
+
+	it("rejects symlinked recovery task directories outside .gsd2 before writing state", async () => {
+		const cwd = tempWorkspace();
+		const outside = tempWorkspace();
+		await runCapture(cwd, ["new", "Reject task dir escape"]);
+		writeFileSync(join(cwd, "fixed-packet.json"), "{}\n");
+		const taskDir = join(cwd, ".gsd2", "tasks", "G2-0001");
+		const outsideTaskDir = join(outside, "G2-0001");
+		mkdirSync(outsideTaskDir, { recursive: true });
+		writeFileSync(
+			join(outsideTaskDir, "envelope.yaml"),
+			readFileSync(join(taskDir, "envelope.yaml"), "utf8"),
+		);
+		rmSync(taskDir, { force: true, recursive: true });
+		symlinkSync(outsideTaskDir, taskDir, "dir");
+
+		const result = await runCapture(cwd, recoveryArgs());
+
+		expect(result.exitCode).toBe(1);
+		expect(result.stdout).toEqual([]);
+		expect(result.stderr).toEqual([
+			"gsd2 recover: G2-0001: task directory must resolve inside .gsd2 state",
+		]);
+		expect(existsSync(join(outsideTaskDir, "recovery-plan.yaml"))).toBe(false);
+		expect(existsSync(join(outsideTaskDir, "receipt.yaml"))).toBe(false);
 	});
 
 	it("previews admission gates and capabilities without mutating task state", async () => {

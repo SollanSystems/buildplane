@@ -16,11 +16,16 @@ describe("GSD-2 Milestone 1 operator contract", () => {
 		expect(readme).toContain("pnpm gsd2 run --dry-run <task-id>");
 		expect(readme).toContain("pnpm gsd2 admit --dry-run <task-id>");
 		expect(readme).toContain("pnpm gsd2 admit <task-id>");
+		expect(readme).toContain("pnpm gsd2 recover --dry-run <task-id>");
+		expect(readme).toContain("pnpm gsd2 recover <task-id>");
 		expect(readme).toContain(
 			"Admission is still non-executing: it moves a valid `NEW` task envelope to `READY`, records a local `task.admitted` receipt, estimates gates/capabilities/evidence, and does not dispatch Buildplane, worktree-kernel, tmux, or model workers.",
 		);
 		expect(readme).toContain(
-			"Milestone 1 is intentionally non-executing: it writes and validates `.gsd2` state and previews routes, but it does not dispatch Buildplane runs, worktree-kernel slices, tmux sessions, or model workers.",
+			"Milestone 1 is intentionally non-executing: it writes and validates `.gsd2` state and previews routes or recovery plans, but it does not dispatch Buildplane runs, worktree-kernel slices, tmux sessions, or model workers.",
+		);
+		expect(readme).toContain(
+			"`gsd2 recover` records a bounded `RecoveryPlan` for a reviewed Buildplane fork packet and leaves the task receipt `BLOCKED` until an operator explicitly approves execution and a later verifier receipt proves the fork/replay outcome.",
 		);
 	});
 
