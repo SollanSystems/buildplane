@@ -41,11 +41,18 @@ import type {
 } from "./packet-enrichment.js";
 import {
 	defaultPrCheckRequest,
+	defaultPrCommentRequest,
+	defaultPrHeadVerifier,
 	formatPrCheckHuman,
+	formatPrCommentHuman,
 	loadCapabilityGrantsFromJson,
 	type PrCheckRequest,
+	type PrCommentRequest,
+	type PrHeadVerifier,
 	planPrCheckOperation,
+	planPrCommentOperation,
 	publishPrCheckOperation,
+	publishPrCommentOperation,
 } from "./pr-check.js";
 import { scanWorkflowPreview } from "./workflow-scan.js";
 
@@ -141,6 +148,8 @@ export interface RunCliDependencies {
 	inspectBootstrapDoctor?: () => BootstrapDoctorReport;
 	inspectCapabilities?: () => CapabilityReport;
 	publishPrCheckRequest?: PrCheckRequest;
+	publishPrCommentRequest?: PrCommentRequest;
+	verifyPrHeadRequest?: PrHeadVerifier;
 	runNativeCommand?: (
 		argv: string[],
 		options: {
@@ -329,6 +338,7 @@ function formatTopLevelHelp(): string[] {
 		"    verify --run <id> [--json]  Final receipt-backed verdict",
 		"    evidence export --run <id> --out <file>  Export Mission Control bundle",
 		"    pr-check dry-run --run <id> --repo <owner/repo> --sha <head> [--json]  Preview GitHub check-run publish",
+		"    pr-comment dry-run --run <id> --repo <owner/repo> --pr <n> --sha <head> [--json]  Preview PR evidence comment",
 		"    replay <id> [--json]   Re-execute the stored packet snapshot",
 		"    ledger replay --run-id <id> --workspace <path>  Read-only tape replay",
 		"    fork <id> --at <event> --packet <file>          Recover from a unit boundary",
@@ -431,6 +441,28 @@ function formatPrCheckHelp(): string[] {
 	];
 }
 
+function formatPrCommentHelp(): string[] {
+	return [
+		"buildplane pr-comment dry-run --run <run-id> --repo <owner/repo> --pr <number> --sha <head-sha> [--json]",
+		"buildplane pr-comment publish --run <run-id> --repo <owner/repo> --pr <number> --sha <head-sha> --grant-file <file> --grant-id <id> [--json]",
+		"",
+		"  Builds a compact PR evidence comment from the receipt-backed final verdict.",
+		"  dry-run never calls GitHub; publish requires an explicit matching capability grant.",
+		"",
+		"  Options:",
+		"    --run <id>              Run id to verify and report",
+		"    --repo <owner/repo>     GitHub repository target",
+		"    --pr <number>           Pull request number for the comment target",
+		"    --sha <head-sha>        Commit SHA represented by the evidence",
+		"    --details-url <url>     Optional Run Inspector URL",
+		"    --bundle-url <url>      Optional exported evidence bundle URL",
+		"    --grant-file <file>     JSON file with capabilityGrants/grants",
+		"    --grant-id <id>         Capability grant id required for publish",
+		"    --credential-env <name> Environment variable for GitHub credential (default: GITHUB_TOKEN)",
+		"    --json                  Print machine-readable result",
+	];
+}
+
 function readFlag(args: readonly string[], flag: string): string | undefined {
 	const index = args.indexOf(flag);
 	const value = index === -1 ? undefined : args[index + 1];
@@ -455,6 +487,25 @@ function requireHeadSha(args: readonly string[]): string {
 		throw new Error("Missing required --sha <head-sha> argument.");
 	}
 	return value;
+}
+
+function requirePrNumber(args: readonly string[]): number {
+	const value = readFlag(args, "--pr") ?? readFlag(args, "--pr-number");
+	if (!value) {
+		throw new Error("Missing required --pr <number> argument.");
+	}
+	if (!/^[1-9][0-9]*$/.test(value)) {
+		throw new Error(
+			"PR number must be a positive decimal integer without leading zeroes.",
+		);
+	}
+	const parsed = Number(value);
+	if (!Number.isSafeInteger(parsed)) {
+		throw new Error(
+			"PR number must be a positive decimal integer within JavaScript's safe integer range.",
+		);
+	}
+	return parsed;
 }
 
 function isHelpRequested(args: readonly string[]): boolean {
@@ -2183,6 +2234,89 @@ export async function runCli(
 				stdout(formatJson(published));
 			} else {
 				for (const line of formatPrCheckHuman(published)) {
+					stdout(line);
+				}
+			}
+			return 0;
+		}
+
+		if (command === "pr-comment") {
+			const subcommand = rest[0];
+			if (isHelpRequested(rest)) {
+				for (const line of formatPrCommentHelp()) {
+					stdout(line);
+				}
+				return 0;
+			}
+			const subRest = rest.slice(1);
+			const json = subRest.includes("--json");
+			if (subcommand !== "dry-run" && subcommand !== "publish") {
+				throw new Error(
+					`Unknown pr-comment command: ${subcommand ?? "(missing subcommand)"}`,
+				);
+			}
+
+			const runId = requireFlag(subRest, "--run", "--run <id>");
+			const repository = requireFlag(subRest, "--repo", "--repo <owner/repo>");
+			const prNumber = requirePrNumber(subRest);
+			const headSha = requireHeadSha(subRest);
+			const detailsUrl = readFlag(subRest, "--details-url");
+			const bundleUrl = readFlag(subRest, "--bundle-url");
+			const storage = (await cliImport("@buildplane/storage")) as unknown as {
+				verifyRunFinalVerdict: (
+					root: string,
+					options: { runId: string },
+				) => { verdict: string; runId: string } & Record<string, unknown>;
+			};
+			const report = storage.verifyRunFinalVerdict(cwd, { runId });
+
+			if (subcommand === "dry-run") {
+				const preview = planPrCommentOperation({
+					report,
+					repository,
+					prNumber,
+					headSha,
+					detailsUrl,
+					bundleUrl,
+				});
+				if (json) {
+					stdout(formatJson(preview));
+				} else {
+					for (const line of formatPrCommentHuman(preview)) {
+						stdout(line);
+					}
+				}
+				return 0;
+			}
+
+			const grantFile = requireFlag(
+				subRest,
+				"--grant-file",
+				"--grant-file <file>",
+			);
+			const grantId = requireFlag(subRest, "--grant-id", "--grant-id <id>");
+			const credentialEnv =
+				readFlag(subRest, "--credential-env") ?? "GITHUB_TOKEN";
+			const grants = loadCapabilityGrantsFromJson(
+				JSON.parse(readFileSync(resolve(cwd, grantFile), "utf8")),
+			);
+			const published = await publishPrCommentOperation({
+				report,
+				repository,
+				prNumber,
+				headSha,
+				detailsUrl,
+				bundleUrl,
+				grants,
+				grantId,
+				credential: () => process.env[credentialEnv] ?? "",
+				verifyPrHead: deps?.verifyPrHeadRequest ?? defaultPrHeadVerifier,
+				request: deps?.publishPrCommentRequest ?? defaultPrCommentRequest,
+			});
+			if (json) {
+				stdout(formatJson(published));
+			} else {
+				for (const line of formatPrCommentHuman(published)) {
 					stdout(line);
 				}
 			}
