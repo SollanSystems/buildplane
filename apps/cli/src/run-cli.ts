@@ -4212,6 +4212,7 @@ function createPlanForgeDryRunPlan(inputPath: string): Record<string, unknown> {
 				"trusted_base",
 				"worktree_policy",
 				"dry_run_constraints",
+				"trusted_boundary",
 			],
 			missingEvidence,
 			unsafeReasons,

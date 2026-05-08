@@ -4074,6 +4074,7 @@ describe("planforge dry-run", () => {
 			"trusted_boundary",
 			"worktree_policy",
 		]);
+		expect(payload.validation.requiredEvidence).toContain("trusted_boundary");
 		expect(existsSync(join(root, ".buildplane"))).toBe(false);
 	});
 
