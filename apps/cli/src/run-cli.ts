@@ -4001,7 +4001,7 @@ function hasForbiddenPlanForgeGoalIntent(goal: string | undefined): boolean {
 		return false;
 	}
 	const forbiddenGoalIntent =
-		/\b(push|deploy|merge|open\s+(?:pr|pull\s+request)|pull\s+request|network\s+write|board\s+write|kanban|gsd2|github|worker[-\s]+spawn|spawn\s+(?:a\s+)?worker|execute\s+code|code\s+execution|run\s+commands?)\b/gi;
+		/\b(push(?:es)?|deploys?|merges?|open\s+(?:prs?|pull\s+requests?)|pull\s+requests?|network\s+writes?|board\s+writes?|kanban|gsd2|github|worker[-\s]+spawns?|spawn\s+(?:a\s+)?workers?|execute\s+code|code\s+executions?|run\s+commands?)\b/gi;
 	for (const match of goal.matchAll(forbiddenGoalIntent)) {
 		const index = match.index ?? 0;
 		const prefix = goal.slice(Math.max(0, index - 24), index).toLowerCase();
@@ -4047,6 +4047,15 @@ function createPlanForgeDryRunPlan(inputPath: string): Record<string, unknown> {
 	) {
 		missingEvidence.push("dry_run_constraints");
 	}
+	if (
+		!hasLine(
+			safetyConstraints ?? "",
+			"- Buildplane kernel validates and admits plans.",
+		) ||
+		!hasLine(safetyConstraints ?? "", "- Coding agents are untrusted workers.")
+	) {
+		missingEvidence.push("trusted_boundary");
+	}
 	if (!worktreePolicy) {
 		missingEvidence.push("worktree_policy");
 	} else if (worktreePolicy !== "isolated-worktree-required") {
@@ -4065,9 +4074,11 @@ function createPlanForgeDryRunPlan(inputPath: string): Record<string, unknown> {
 	const checks = [
 		{
 			id: "trusted-boundary",
-			status: missingEvidence.includes("dry_run_constraints")
-				? "INSUFFICIENT_EVIDENCE"
-				: "PASS",
+			status:
+				missingEvidence.includes("dry_run_constraints") ||
+				missingEvidence.includes("trusted_boundary")
+					? "INSUFFICIENT_EVIDENCE"
+					: "PASS",
 			message:
 				"Buildplane kernel validates and admits the plan; coding agents remain untrusted workers.",
 			evidenceRefs: [`${inputEvidenceName}#safety-constraints`],
