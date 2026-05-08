@@ -125,6 +125,88 @@ export interface RunAdmissionReceipt extends JsonRecord {
 	readonly provenance: RunAdmissionProvenance;
 }
 
+export interface RunAdmissionRecordedReplay extends JsonRecord {
+	readonly side_effect_safe: true;
+	readonly allowed_actions: readonly string[];
+	readonly forbidden_side_effects: readonly string[];
+	readonly behavior: string;
+	readonly fork: string;
+}
+
+export interface RunAdmissionRecordedPayload extends JsonRecord {
+	readonly receipt_id: string;
+	readonly receipt_digest: string;
+	readonly receipt_ref: string | null;
+	readonly idempotency_key: string;
+	readonly decision: RunAdmissionDecision;
+	readonly policy_profile_id: string;
+	readonly requested_side_effects: readonly string[];
+	readonly allowed_side_effects: readonly string[];
+	readonly denied_side_effects: readonly RunAdmissionDeniedSideEffect[];
+	readonly missing_evidence: readonly string[];
+	readonly unsafe_requests: readonly string[];
+	readonly evidence_inputs: readonly RunAdmissionEvidenceInput[];
+	readonly quarantine: boolean;
+	readonly will_execute_worker: false;
+	readonly authorized_next_step: string;
+	readonly decided_by: string;
+	readonly decided_at: string;
+}
+
+export interface RunAdmissionRecordedEvent extends JsonRecord {
+	readonly kind: "run_admission_recorded";
+	readonly schema_version: "0.1.0";
+	readonly recorded_at: string;
+	readonly payload: RunAdmissionRecordedPayload;
+	readonly replay: RunAdmissionRecordedReplay;
+}
+
+export interface RunAdmissionReceiptArtifactWriteInput {
+	readonly receipt: RunAdmissionReceipt;
+	readonly receiptDigest: string;
+	readonly contents: string;
+}
+
+export interface RunAdmissionEventAppendInput {
+	readonly event: RunAdmissionRecordedEvent;
+	readonly receipt: RunAdmissionReceipt;
+}
+
+export interface RunAdmissionLocalEvidenceWriteResult {
+	readonly ref: string;
+	readonly path?: string;
+}
+
+export interface RunAdmissionLocalEvidenceStore {
+	readonly writeReceiptArtifact: (
+		input: RunAdmissionReceiptArtifactWriteInput,
+	) =>
+		| RunAdmissionLocalEvidenceWriteResult
+		| Promise<RunAdmissionLocalEvidenceWriteResult>;
+	readonly appendAdmissionEvent: (
+		input: RunAdmissionEventAppendInput,
+	) =>
+		| RunAdmissionLocalEvidenceWriteResult
+		| Promise<RunAdmissionLocalEvidenceWriteResult>;
+}
+
+export interface RecordRunAdmissionReceiptAttemptInput {
+	readonly receipt: RunAdmissionReceipt;
+	readonly store: RunAdmissionLocalEvidenceStore;
+	readonly recordedAt?: string;
+}
+
+export interface RunAdmissionReceiptAttemptRecord extends JsonRecord {
+	readonly receipt_json: string;
+	readonly receipt_digest: string;
+	readonly receipt_ref: string;
+	readonly receipt_path?: string;
+	readonly payload: RunAdmissionRecordedPayload;
+	readonly event: RunAdmissionRecordedEvent;
+	readonly event_ref: string;
+	readonly event_path?: string;
+}
+
 export class RunAdmissionReceiptInputError extends Error {
 	readonly code = "INVALID_PACKET";
 
@@ -490,6 +572,60 @@ function validateInput(input: CreateRunAdmissionReceiptDryRunInput): void {
 	}
 }
 
+function createReceiptDigest(receiptJson: string): string {
+	const digest = createHash("sha256").update(receiptJson).digest("hex");
+	return `sha256:${digest}`;
+}
+
+function createRecordedReplay(
+	receipt: RunAdmissionReceipt,
+): RunAdmissionRecordedReplay {
+	return {
+		side_effect_safe: true,
+		allowed_actions: ["inspect_receipt", "verify_receipt_digest"],
+		forbidden_side_effects: [
+			"worker.execute",
+			"github.pr.create",
+			"network.mutate",
+			"kanban.write:auto",
+			"git.push:remote",
+			"deploy:production",
+			"git.merge",
+		],
+		behavior: receipt.replay.behavior,
+		fork: receipt.replay.fork,
+	};
+}
+
+function createRecordedPayload(input: {
+	readonly receipt: RunAdmissionReceipt;
+	readonly receiptDigest: string;
+	readonly receiptRef: string | null;
+}): RunAdmissionRecordedPayload {
+	const { receipt, receiptDigest, receiptRef } = input;
+	return {
+		receipt_id: receipt.receipt_id,
+		receipt_digest: receiptDigest,
+		receipt_ref: receiptRef,
+		idempotency_key: receipt.idempotency_key,
+		decision: receipt.admission.decision,
+		policy_profile_id: receipt.policy.profile_id,
+		requested_side_effects: cloneJson(
+			receipt.request.requested_side_effects ?? [],
+		),
+		allowed_side_effects: cloneJson(receipt.policy.allowed_side_effects),
+		denied_side_effects: cloneJson(receipt.policy.denied_side_effects),
+		missing_evidence: cloneJson(receipt.admission.missing_evidence),
+		unsafe_requests: cloneJson(receipt.admission.unsafe_requests),
+		evidence_inputs: cloneJson(receipt.evidence_inputs),
+		quarantine: receipt.policy.quarantine,
+		will_execute_worker: false,
+		authorized_next_step: receipt.admission.authorized_next_step,
+		decided_by: receipt.admission.decided_by,
+		decided_at: receipt.admission.decided_at,
+	};
+}
+
 export function createRunAdmissionReceiptDryRun(
 	input: CreateRunAdmissionReceiptDryRunInput,
 ): RunAdmissionReceipt {
@@ -612,5 +748,43 @@ export function createRunAdmissionReceiptDryRun(
 			provider: input.provider ?? null,
 			worker_agent_trusted: false,
 		},
+	};
+}
+
+export async function recordRunAdmissionReceiptAttempt(
+	input: RecordRunAdmissionReceiptAttemptInput,
+): Promise<RunAdmissionReceiptAttemptRecord> {
+	const receiptJson = stableJson(input.receipt);
+	const receiptDigest = createReceiptDigest(receiptJson);
+	const receiptArtifact = await input.store.writeReceiptArtifact({
+		receipt: input.receipt,
+		receiptDigest,
+		contents: receiptJson,
+	});
+	const payload = createRecordedPayload({
+		receipt: input.receipt,
+		receiptDigest,
+		receiptRef: receiptArtifact.ref,
+	});
+	const event: RunAdmissionRecordedEvent = {
+		kind: "run_admission_recorded",
+		schema_version: "0.1.0",
+		recorded_at: input.recordedAt ?? input.receipt.admission.decided_at,
+		payload,
+		replay: createRecordedReplay(input.receipt),
+	};
+	const eventAppend = await input.store.appendAdmissionEvent({
+		event,
+		receipt: input.receipt,
+	});
+	return {
+		receipt_json: receiptJson,
+		receipt_digest: receiptDigest,
+		receipt_ref: receiptArtifact.ref,
+		...(receiptArtifact.path ? { receipt_path: receiptArtifact.path } : {}),
+		payload,
+		event,
+		event_ref: eventAppend.ref,
+		...(eventAppend.path ? { event_path: eventAppend.path } : {}),
 	};
 }

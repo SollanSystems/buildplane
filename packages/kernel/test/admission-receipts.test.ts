@@ -1,7 +1,14 @@
-import { readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
-import { createRunAdmissionReceiptDryRun } from "../src/index";
+import { describe, expect, it, vi } from "vitest";
+import {
+	createRunAdmissionReceiptDryRun,
+	type RunAdmissionDecision,
+	type RunAdmissionLocalEvidenceStore,
+	type RunAdmissionReceipt,
+	recordRunAdmissionReceiptAttempt,
+} from "../src/index";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -64,6 +71,88 @@ function withRequestedSideEffects(
 			...request,
 			requested_capabilities: requestedSideEffects,
 			requested_side_effects: requestedSideEffects,
+		},
+	};
+}
+
+function createTempEvidenceStore(): RunAdmissionLocalEvidenceStore & {
+	readonly root: string;
+	readonly forbiddenWorkerExecutor: ReturnType<typeof vi.fn>;
+	readonly forbiddenGithubMutation: ReturnType<typeof vi.fn>;
+	readonly forbiddenNetworkMutation: ReturnType<typeof vi.fn>;
+	readonly forbiddenKanbanWrite: ReturnType<typeof vi.fn>;
+	readonly forbiddenPush: ReturnType<typeof vi.fn>;
+	readonly forbiddenDeploy: ReturnType<typeof vi.fn>;
+	readonly forbiddenPullRequest: ReturnType<typeof vi.fn>;
+	readonly forbiddenMerge: ReturnType<typeof vi.fn>;
+} {
+	const root = mkdtempSync(join(tmpdir(), "buildplane-admission-"));
+	const store = {
+		root,
+		writeReceiptArtifact: vi.fn(({ receiptDigest, contents }) => {
+			const receiptPath = join(
+				root,
+				"receipts",
+				`${receiptDigest.replace("sha256:", "")}.json`,
+			);
+			mkdirSync(join(root, "receipts"), { recursive: true });
+			writeFileSync(receiptPath, `${contents}\n`, "utf8");
+			return { ref: `file://${receiptPath}`, path: receiptPath };
+		}),
+		appendAdmissionEvent: vi.fn(({ event }) => {
+			const eventPath = join(
+				root,
+				"events",
+				`${event.payload.receipt_digest.replace("sha256:", "")}.json`,
+			);
+			mkdirSync(join(root, "events"), { recursive: true });
+			writeFileSync(eventPath, `${JSON.stringify(event)}\n`, "utf8");
+			return { ref: `file://${eventPath}`, path: eventPath };
+		}),
+		forbiddenWorkerExecutor: vi.fn(),
+		forbiddenGithubMutation: vi.fn(),
+		forbiddenNetworkMutation: vi.fn(),
+		forbiddenKanbanWrite: vi.fn(),
+		forbiddenPush: vi.fn(),
+		forbiddenDeploy: vi.fn(),
+		forbiddenPullRequest: vi.fn(),
+		forbiddenMerge: vi.fn(),
+	};
+	return store;
+}
+
+function expectNoForbiddenSideEffects(
+	store: ReturnType<typeof createTempEvidenceStore>,
+): void {
+	expect(store.forbiddenWorkerExecutor).not.toHaveBeenCalled();
+	expect(store.forbiddenGithubMutation).not.toHaveBeenCalled();
+	expect(store.forbiddenNetworkMutation).not.toHaveBeenCalled();
+	expect(store.forbiddenKanbanWrite).not.toHaveBeenCalled();
+	expect(store.forbiddenPush).not.toHaveBeenCalled();
+	expect(store.forbiddenDeploy).not.toHaveBeenCalled();
+	expect(store.forbiddenPullRequest).not.toHaveBeenCalled();
+	expect(store.forbiddenMerge).not.toHaveBeenCalled();
+}
+
+function withAdmissionDecision(
+	receipt: RunAdmissionReceipt,
+	decision: RunAdmissionDecision,
+): RunAdmissionReceipt {
+	return {
+		...receipt,
+		admission: {
+			...receipt.admission,
+			decision,
+			will_execute_worker: false,
+			authorized_next_step:
+				decision === "FAILED"
+					? "fix_admission_input_then_recompute"
+					: "wait_for_explicit_operator_authority",
+		},
+		policy: {
+			...receipt.policy,
+			allowed_side_effects: [],
+			capability_grants: [],
 		},
 	};
 }
@@ -273,5 +362,129 @@ describe("createRunAdmissionReceiptDryRun", () => {
 			"github.pr.create",
 			"deploy:production",
 		]);
+	});
+});
+
+describe("recordRunAdmissionReceiptAttempt", () => {
+	it("records a PASS admission deterministically as local evidence without implying broader side effects", async () => {
+		const receipt = createRunAdmissionReceiptDryRun(
+			admissionInputFromFixture(loadFixture("pass")),
+		);
+		const store = createTempEvidenceStore();
+
+		const firstRecord = await recordRunAdmissionReceiptAttempt({
+			receipt,
+			store,
+		});
+		const secondRecord = await recordRunAdmissionReceiptAttempt({
+			receipt,
+			store,
+		});
+
+		expect(firstRecord.payload).toEqual(secondRecord.payload);
+		expect(firstRecord.event.kind).toBe("run_admission_recorded");
+		expect(firstRecord.payload).toMatchObject({
+			receipt_id: receipt.receipt_id,
+			receipt_digest: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
+			receipt_ref: firstRecord.receipt_ref,
+			idempotency_key: receipt.idempotency_key,
+			decision: "PASS",
+			policy_profile_id: "local-docs-fixture-v0",
+			requested_side_effects: receipt.request.requested_side_effects,
+			allowed_side_effects: receipt.policy.allowed_side_effects,
+			missing_evidence: [],
+			unsafe_requests: [],
+			quarantine: false,
+			will_execute_worker: false,
+			authorized_next_step: "record_admission_only",
+			decided_by: "buildplane.kernel.admission",
+			decided_at: "2026-05-08T00:00:00Z",
+		});
+		expect(
+			firstRecord.payload.denied_side_effects.map(({ effect }) => effect),
+		).toEqual(["git.push:remote", "github.pr.create", "deploy:production"]);
+		expect(firstRecord.event.replay).toMatchObject({
+			side_effect_safe: true,
+			allowed_actions: ["inspect_receipt", "verify_receipt_digest"],
+			forbidden_side_effects: expect.arrayContaining([
+				"worker.execute",
+				"github.pr.create",
+				"network.mutate",
+				"kanban.write:auto",
+				"git.push:remote",
+				"deploy:production",
+				"git.merge",
+			]),
+		});
+		expect(readFileSync(firstRecord.receipt_path, "utf8").trim()).toBe(
+			firstRecord.receipt_json,
+		);
+		expectNoForbiddenSideEffects(store);
+	});
+
+	it("records missing evidence as INSUFFICIENT_EVIDENCE and never calls a worker executor", async () => {
+		const receipt = createRunAdmissionReceiptDryRun(
+			admissionInputFromFixture(loadFixture("insufficient-evidence")),
+		);
+		const store = createTempEvidenceStore();
+
+		const record = await recordRunAdmissionReceiptAttempt({ receipt, store });
+
+		expect(record.payload.decision).toBe("INSUFFICIENT_EVIDENCE");
+		expect(record.payload.missing_evidence).toEqual(["git.status"]);
+		expect(record.payload.allowed_side_effects).toEqual([]);
+		expect(record.payload.will_execute_worker).toBe(false);
+		expect(record.event.replay.side_effect_safe).toBe(true);
+		expectNoForbiddenSideEffects(store);
+	});
+
+	it("records unsafe requested side effects as UNSAFE_TO_RUN and only persists local evidence", async () => {
+		const receipt = createRunAdmissionReceiptDryRun(
+			admissionInputFromFixture(loadFixture("unsafe-to-run")),
+		);
+		const store = createTempEvidenceStore();
+
+		const record = await recordRunAdmissionReceiptAttempt({ receipt, store });
+
+		expect(record.payload.decision).toBe("UNSAFE_TO_RUN");
+		expect(record.payload.unsafe_requests).toEqual([
+			"git.push:remote",
+			"github.pr.create",
+			"deploy:production",
+		]);
+		expect(record.payload.quarantine).toBe(true);
+		expect(record.payload.will_execute_worker).toBe(false);
+		expect(record.payload.allowed_side_effects).toEqual(["fs.read:repo"]);
+		expect(record.event.replay.forbidden_side_effects).toEqual(
+			expect.arrayContaining([
+				"github.pr.create",
+				"git.push:remote",
+				"deploy:production",
+			]),
+		);
+		expect(store.writeReceiptArtifact).toHaveBeenCalledTimes(1);
+		expect(store.appendAdmissionEvent).toHaveBeenCalledTimes(1);
+		expectNoForbiddenSideEffects(store);
+	});
+
+	it.each([
+		"BLOCKED",
+		"FAILED",
+	] as const)("records %s attempts fail-closed without dispatch authority", async (decision) => {
+		const receipt = withAdmissionDecision(
+			createRunAdmissionReceiptDryRun(
+				admissionInputFromFixture(loadFixture("pass")),
+			),
+			decision,
+		);
+		const store = createTempEvidenceStore();
+
+		const record = await recordRunAdmissionReceiptAttempt({ receipt, store });
+
+		expect(record.payload.decision).toBe(decision);
+		expect(record.payload.allowed_side_effects).toEqual([]);
+		expect(record.payload.will_execute_worker).toBe(false);
+		expect(record.event.replay.side_effect_safe).toBe(true);
+		expectNoForbiddenSideEffects(store);
 	});
 });
