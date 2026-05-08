@@ -3985,3 +3985,296 @@ describe("cli command surface", () => {
 		expect(credentialReads).toEqual([]);
 	});
 });
+
+describe("planforge dry-run", () => {
+	const fixtureRoot = join(process.cwd(), "apps/cli/test/fixtures/planforge");
+	const inputFixture = join(fixtureRoot, "goal-input.md");
+	const expectedFixture = join(fixtureRoot, "expected-plan.json");
+
+	it("planforge emits the expected stable dry-run plan fixture without project writes", async () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-planforge-"));
+		const result = await runCliCapture(root, [
+			"planforge",
+			"dry-run",
+			"--input",
+			inputFixture,
+			"--json",
+		]);
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stderr).toEqual([]);
+		expect(JSON.parse(result.stdout.join("\n"))).toEqual(
+			JSON.parse(readFileSync(expectedFixture, "utf8")),
+		);
+		expect(existsSync(join(root, ".buildplane"))).toBe(false);
+	});
+
+	it("planforge fails closed when required evidence is missing", async () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-planforge-"));
+		const invalidInput = join(root, "missing-evidence.md");
+		writeFileSync(
+			invalidInput,
+			[
+				"# Bad PlanForge input",
+				"",
+				"## Goal",
+				"Create a local dry-run plan.",
+				"",
+			].join("\n"),
+			"utf8",
+		);
+
+		const result = await runCliCapture(root, [
+			"planforge",
+			"dry-run",
+			"--input",
+			invalidInput,
+			"--json",
+		]);
+
+		expect(result.exitCode).toBe(1);
+		expect(result.stderr).toEqual([]);
+		const payload = JSON.parse(result.stdout.join("\n"));
+		expect(payload.validation.status).toBe("INSUFFICIENT_EVIDENCE");
+		expect(payload.validation.missingEvidence).toEqual([
+			"repository_remote",
+			"trusted_base",
+			"dry_run_constraints",
+			"trusted_boundary",
+			"worktree_policy",
+		]);
+		expect(existsSync(join(root, ".buildplane"))).toBe(false);
+	});
+
+	it("planforge derives identifiers from input evidence", async () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-planforge-"));
+		const alternateInput = join(root, "alternate-goal.md");
+		writeFileSync(
+			alternateInput,
+			[
+				"# Alternate PlanForge input",
+				"",
+				"## Goal",
+				"Create a different dry-run plan artifact.",
+				"",
+				"## Repository context",
+				"",
+				"- Remote: https://github.com/SollanSystems/buildplane.git",
+				"- Trusted base: 15dbb32db0e1f0024687533755805fc23f3ef6d4",
+				"- Worktree policy: isolated-worktree-required",
+				"",
+				"## Safety constraints",
+				"",
+				"- Dry-run only.",
+				"- Buildplane kernel validates and admits plans.",
+				"- Coding agents are untrusted workers.",
+				"- No Kanban, GSD2, GitHub, network, push, PR, deploy, merge, or worker-spawn side effects.",
+				"",
+			].join("\n"),
+			"utf8",
+		);
+
+		const fixtureResult = await runCliCapture(root, [
+			"planforge",
+			"dry-run",
+			"--input",
+			inputFixture,
+			"--json",
+		]);
+		const alternateResult = await runCliCapture(root, [
+			"planforge",
+			"dry-run",
+			"--input",
+			alternateInput,
+			"--json",
+		]);
+
+		const fixturePayload = JSON.parse(fixtureResult.stdout.join("\n"));
+		const alternatePayload = JSON.parse(alternateResult.stdout.join("\n"));
+		expect(alternatePayload.validation.status).toBe("PASS");
+		expect(alternatePayload.goal).toBe(
+			"Create a different dry-run plan artifact.",
+		);
+		expect(alternatePayload.id).not.toBe(fixturePayload.id);
+		expect(alternatePayload.idempotencyKey).not.toBe(
+			fixturePayload.idempotencyKey,
+		);
+		expect(existsSync(join(root, ".buildplane"))).toBe(false);
+	});
+
+	it("planforge requires evidence in the intended sections and rejects forbidden goal intents", async () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-planforge-"));
+		const misplacedEvidenceInput = join(root, "misplaced-evidence.md");
+		writeFileSync(
+			misplacedEvidenceInput,
+			[
+				"# Misplaced PlanForge input",
+				"",
+				"## Goal",
+				"Create a local dry-run plan artifact.",
+				"",
+				"## Notes",
+				"",
+				"- Remote: https://github.com/SollanSystems/buildplane.git",
+				"- Trusted base: 15dbb32db0e1f0024687533755805fc23f3ef6d4",
+				"- Worktree policy: isolated-worktree-required",
+				"- Dry-run only.",
+				"- Buildplane kernel validates and admits plans.",
+				"- Coding agents are untrusted workers.",
+				"- No Kanban, GSD2, GitHub, network, push, PR, deploy, merge, or worker-spawn side effects.",
+				"",
+			].join("\n"),
+			"utf8",
+		);
+		const safeNegatedInput = join(root, "safe-negated-goal.md");
+		writeFileSync(
+			safeNegatedInput,
+			[
+				"# Safe negated PlanForge input",
+				"",
+				"## Goal",
+				"Create a local dry-run plan artifact that does not execute code and does not use GitHub.",
+				"",
+				"## Repository context",
+				"",
+				"- Remote: https://github.com/SollanSystems/buildplane.git",
+				"- Trusted base: 15dbb32db0e1f0024687533755805fc23f3ef6d4",
+				"- Worktree policy: isolated-worktree-required",
+				"",
+				"## Safety constraints",
+				"",
+				"- Dry-run only.",
+				"- Buildplane kernel validates and admits plans.",
+				"- Coding agents are untrusted workers.",
+				"- No Kanban, GSD2, GitHub, network, push, PR, deploy, merge, or worker-spawn side effects.",
+				"",
+			].join("\n"),
+			"utf8",
+		);
+		const unsafeInput = join(root, "unsafe-goal.md");
+		writeFileSync(
+			unsafeInput,
+			[
+				"# Unsafe PlanForge input",
+				"",
+				"## Goal",
+				"Run commands locally, open pull requests, and perform network writes for a dry-run plan artifact.",
+				"",
+				"## Repository context",
+				"",
+				"- Remote: https://github.com/SollanSystems/buildplane.git",
+				"- Trusted base: 15dbb32db0e1f0024687533755805fc23f3ef6d4",
+				"- Worktree policy: isolated-worktree-required",
+				"",
+				"## Safety constraints",
+				"",
+				"- Dry-run only.",
+				"- Buildplane kernel validates and admits plans.",
+				"- Coding agents are untrusted workers.",
+				"- No Kanban, GSD2, GitHub, network, push, PR, deploy, merge, or worker-spawn side effects.",
+				"",
+			].join("\n"),
+			"utf8",
+		);
+
+		const misplacedResult = await runCliCapture(root, [
+			"planforge",
+			"dry-run",
+			"--input",
+			misplacedEvidenceInput,
+			"--json",
+		]);
+		const safeNegatedResult = await runCliCapture(root, [
+			"planforge",
+			"dry-run",
+			"--input",
+			safeNegatedInput,
+			"--json",
+		]);
+		const unsafeResult = await runCliCapture(root, [
+			"planforge",
+			"dry-run",
+			"--input",
+			unsafeInput,
+			"--json",
+		]);
+
+		const misplacedPayload = JSON.parse(misplacedResult.stdout.join("\n"));
+		const safeNegatedPayload = JSON.parse(safeNegatedResult.stdout.join("\n"));
+		const unsafePayload = JSON.parse(unsafeResult.stdout.join("\n"));
+		expect(misplacedResult.exitCode).toBe(1);
+		expect(misplacedPayload.validation.status).toBe("INSUFFICIENT_EVIDENCE");
+		expect(misplacedPayload.validation.missingEvidence).toEqual([
+			"repository_remote",
+			"trusted_base",
+			"dry_run_constraints",
+			"trusted_boundary",
+			"worktree_policy",
+		]);
+		expect(
+			misplacedPayload.validation.checks.find(
+				(check: { id: string }) => check.id === "dry-run-only",
+			)?.status,
+		).toBe("INSUFFICIENT_EVIDENCE");
+		expect(safeNegatedResult.exitCode).toBe(0);
+		expect(safeNegatedPayload.validation.status).toBe("PASS");
+		expect(
+			safeNegatedPayload.validation.checks.flatMap(
+				(check: { evidenceRefs: string[] }) => check.evidenceRefs,
+			),
+		).toContain("safe-negated-goal.md#safety-constraints");
+		expect(unsafeResult.exitCode).toBe(1);
+		expect(unsafePayload.validation.status).toBe("UNSAFE_TO_RUN");
+		expect(unsafePayload.validation.unsafeReasons).toEqual([
+			"goal requests a forbidden side effect",
+		]);
+		expect(existsSync(join(root, ".buildplane"))).toBe(false);
+	});
+	it("planforge rejects missing input, unsupported non-dry-run, and write forms before side effects", async () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-planforge-"));
+		const missingInput = await runCliCapture(root, [
+			"planforge",
+			"dry-run",
+			"--json",
+		]);
+		const nonDryRun = await runCliCapture(root, [
+			"planforge",
+			"admit",
+			"--input",
+			inputFixture,
+			"--json",
+		]);
+		const writeForm = await runCliCapture(root, [
+			"planforge",
+			"dry-run",
+			"--input",
+			inputFixture,
+			"--json",
+			"--write",
+		]);
+		const writeEqualsForm = await runCliCapture(root, [
+			"planforge",
+			"dry-run",
+			"--input",
+			inputFixture,
+			"--json",
+			"--write=receipt.json",
+		]);
+
+		expect(missingInput.exitCode).toBe(1);
+		expect(nonDryRun.exitCode).toBe(1);
+		expect(writeForm.exitCode).toBe(1);
+		expect(writeEqualsForm.exitCode).toBe(1);
+		expect(missingInput.stdout.join("\n")).toContain(
+			"Missing required --input",
+		);
+		expect(nonDryRun.stdout.join("\n")).toContain("Only dry-run is available");
+		expect(writeForm.stdout.join("\n")).toContain(
+			"side-effect forms are disabled",
+		);
+		expect(writeEqualsForm.stdout.join("\n")).toContain(
+			"side-effect forms are disabled",
+		);
+		expect(existsSync(join(root, ".buildplane"))).toBe(false);
+	});
+});
