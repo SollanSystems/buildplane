@@ -18,10 +18,10 @@
 - Modify: `packages/kernel/src/index.d.ts`
 - Test: `packages/kernel/test/memory-retrieval.test.ts`
 
-- [ ] Write failing tests for deterministic ranking and exact-first ordering.
-- [ ] Add retrieval query/result types plus the ranking helper.
-- [ ] Export the new contract from the kernel package.
-- [ ] Re-run the kernel test file until green.
+- [x] Write failing tests for deterministic ranking and exact-first ordering.
+- [x] Add retrieval query/result types plus the ranking helper.
+- [x] Export the new contract from the kernel package.
+- [x] Re-run the kernel test file until green.
 
 ### Task 2: Add ranked repo-fact retrieval
 
