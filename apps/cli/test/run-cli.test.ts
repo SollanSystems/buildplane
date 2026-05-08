@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
 	existsSync,
 	mkdirSync,
@@ -4005,6 +4006,36 @@ describe("planforge dry-run", () => {
 		expect(result.stderr).toEqual([]);
 		expect(JSON.parse(result.stdout.join("\n"))).toEqual(
 			JSON.parse(readFileSync(expectedFixture, "utf8")),
+		);
+		expect(existsSync(join(root, ".buildplane"))).toBe(false);
+	});
+
+	it("planforge computes the receipt plan digest from the review artifact", async () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-planforge-"));
+		const result = await runCliCapture(root, [
+			"planforge",
+			"dry-run",
+			"--input",
+			inputFixture,
+			"--json",
+		]);
+
+		expect(result.exitCode).toBe(0);
+		const payload = JSON.parse(result.stdout.join("\n"));
+		const digestInput = {
+			...payload,
+			receiptPreview: {
+				...payload.receiptPreview,
+				planDigest: "",
+			},
+		};
+		const expectedDigest = `sha256:${createHash("sha256")
+			.update(JSON.stringify(digestInput))
+			.digest("hex")}`;
+
+		expect(payload.receiptPreview.planDigest).toBe(expectedDigest);
+		expect(payload.receiptPreview.planDigest).not.toBe(
+			"sha256:fixture-plan-digest-placeholder",
 		);
 		expect(existsSync(join(root, ".buildplane"))).toBe(false);
 	});

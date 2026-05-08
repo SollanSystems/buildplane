@@ -4128,7 +4128,9 @@ function createPlanForgeDryRunPlan(inputPath: string): Record<string, unknown> {
 	const canonicalInput = content.replace(/\r\n/g, "\n");
 	const inputDigest = `sha256:${createHash("sha256").update(canonicalInput).digest("hex")}`;
 
-	return {
+	const plan: Record<string, unknown> & {
+		receiptPreview: { [key: string]: unknown; planDigest: string | null };
+	} = {
 		schemaVersion: "planforge.plan.v0",
 		id: `pf-plan-${planFingerprint}`,
 		idempotencyKey,
@@ -4215,7 +4217,7 @@ function createPlanForgeDryRunPlan(inputPath: string): Record<string, unknown> {
 			planId: `pf-plan-${planFingerprint}`,
 			idempotencyKey,
 			inputDigest,
-			planDigest: "sha256:fixture-plan-digest-placeholder",
+			planDigest: "",
 			trustedBase: normalizedTrustedBase,
 			admittedBy: "buildplane-kernel",
 			generatedAt: "2026-05-07T00:00:00.000Z",
@@ -4228,6 +4230,10 @@ function createPlanForgeDryRunPlan(inputPath: string): Record<string, unknown> {
 			],
 		},
 	};
+	plan.receiptPreview.planDigest = `sha256:${createHash("sha256")
+		.update(JSON.stringify(plan))
+		.digest("hex")}`;
+	return plan;
 }
 
 function normalizeGraphNode(node: Record<string, unknown>): unknown {
