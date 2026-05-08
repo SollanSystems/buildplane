@@ -1,4 +1,24 @@
 export type {
+	CreateRunAdmissionReceiptDryRunInput,
+	JsonRecord,
+	JsonValue,
+	RunAdmissionCapabilityGrant,
+	RunAdmissionDecision,
+	RunAdmissionDecisionBlock,
+	RunAdmissionDeniedSideEffect,
+	RunAdmissionEvidenceInput,
+	RunAdmissionPolicy,
+	RunAdmissionProvenance,
+	RunAdmissionReceipt,
+	RunAdmissionReplay,
+	RunAdmissionRepo,
+	RunAdmissionRequest,
+} from "./admission-receipts.js";
+export {
+	createRunAdmissionReceiptDryRun,
+	RunAdmissionReceiptInputError,
+} from "./admission-receipts.js";
+export type {
 	CommandExecutionCompleteEvent,
 	EventBus,
 	EventContext,
