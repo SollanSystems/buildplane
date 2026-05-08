@@ -4079,6 +4079,8 @@ describe("planforge dry-run", () => {
 
 	it("planforge derives identifiers from input evidence", async () => {
 		const root = mkdtempSync(join(tmpdir(), "buildplane-planforge-"));
+		const copiedInput = join(root, "copied-goal.md");
+		writeFileSync(copiedInput, readFileSync(inputFixture, "utf8"), "utf8");
 		const alternateInput = join(root, "alternate-goal.md");
 		writeFileSync(
 			alternateInput,
@@ -4112,6 +4114,13 @@ describe("planforge dry-run", () => {
 			inputFixture,
 			"--json",
 		]);
+		const copiedResult = await runCliCapture(root, [
+			"planforge",
+			"dry-run",
+			"--input",
+			copiedInput,
+			"--json",
+		]);
 		const alternateResult = await runCliCapture(root, [
 			"planforge",
 			"dry-run",
@@ -4121,7 +4130,18 @@ describe("planforge dry-run", () => {
 		]);
 
 		const fixturePayload = JSON.parse(fixtureResult.stdout.join("\n"));
+		const copiedPayload = JSON.parse(copiedResult.stdout.join("\n"));
 		const alternatePayload = JSON.parse(alternateResult.stdout.join("\n"));
+		expect(copiedPayload.validation.status).toBe("PASS");
+		expect(copiedPayload.receiptPreview.inputDigest).toBe(
+			fixturePayload.receiptPreview.inputDigest,
+		);
+		expect(copiedPayload.idempotencyKey).not.toBe(
+			fixturePayload.idempotencyKey,
+		);
+		expect(copiedPayload.receiptPreview.idempotencyKey).toBe(
+			copiedPayload.idempotencyKey,
+		);
 		expect(alternatePayload.validation.status).toBe("PASS");
 		expect(alternatePayload.goal).toBe(
 			"Create a different dry-run plan artifact.",
