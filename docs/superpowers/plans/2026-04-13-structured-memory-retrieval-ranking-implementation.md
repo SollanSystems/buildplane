@@ -30,10 +30,10 @@
 - Modify: `packages/storage/src/store.ts`
 - Test: `packages/storage/test/repo-facts.test.ts`
 
-- [ ] Write failing tests for exact fact-key matches beating fuzzy matches and for caller-supplied scope order.
-- [ ] Add the new storage-port method signature.
-- [ ] Implement ranked candidate collection, deduplication, and limiting in `store.ts`.
-- [ ] Re-run the repo-fact test file until green.
+- [x] Write failing tests for exact fact-key matches beating fuzzy matches and for caller-supplied scope order.
+- [x] Add the new storage-port method signature.
+- [x] Implement ranked candidate collection, deduplication, and limiting in `store.ts`.
+- [x] Re-run the repo-fact test file until green.
 
 ### Task 3: Add ranked procedure retrieval
 
@@ -42,10 +42,10 @@
 - Modify: `packages/storage/src/store.ts`
 - Test: `packages/storage/test/procedures.test.ts`
 
-- [ ] Write failing tests for exact task-type/name matches beating fuzzy body matches.
-- [ ] Implement the storage-port method and procedure text fallback.
-- [ ] Deduplicate rows matched by multiple exact/fuzzy rules.
-- [ ] Re-run the procedure test file until green.
+- [x] Write failing tests for exact task-type/name matches beating fuzzy body matches.
+- [x] Implement the storage-port method and procedure text fallback.
+- [x] Deduplicate rows matched by multiple exact/fuzzy rules.
+- [x] Re-run the procedure test file until green.
 
 ### Task 4: Add ranked searchable-document retrieval
 
@@ -54,17 +54,17 @@
 - Modify: `packages/storage/src/store.ts`
 - Test: `packages/storage/test/searchable-documents.test.ts`
 
-- [ ] Write failing tests for exact source/title matches beating FTS fallback.
-- [ ] Implement the storage-port method on top of the existing FTS table.
-- [ ] Deduplicate exact + FTS hits in favor of the exact explanation.
-- [ ] Re-run the searchable-document test file until green.
+- [x] Write failing tests for exact source/title matches beating FTS fallback.
+- [x] Implement the storage-port method on top of the existing FTS table.
+- [x] Deduplicate exact + FTS hits in favor of the exact explanation.
+- [x] Re-run the searchable-document test file until green.
 
 ### Task 5: Verify the slice
 
 **Files:**
 - Modify only if verification fails.
 
-- [ ] Run targeted Vitest files for the touched kernel/storage areas.
-- [ ] Run `npx pnpm typecheck`.
-- [ ] Run `npx pnpm build`.
-- [ ] If Linux/ext4 parity looks suspicious, validate in a disposable `/tmp` worktree before pushing.
+- [x] Run targeted Vitest files for the touched kernel/storage areas.
+- [x] Run `npx pnpm typecheck`.
+- [x] Run `npx pnpm build`.
+- [x] If Linux/ext4 parity looks suspicious, validate in a disposable `/tmp` worktree before pushing.
