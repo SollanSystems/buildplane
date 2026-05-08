@@ -4108,6 +4108,15 @@ describe("planforge dry-run", () => {
 			"utf8",
 		);
 
+		const missingTrustedBoundaryInput = join(root, "goal-input.md");
+		writeFileSync(
+			missingTrustedBoundaryInput,
+			readFileSync(inputFixture, "utf8")
+				.replace(/- Buildplane kernel validates and admits plans.\r?\n/, "")
+				.replace(/- Coding agents are untrusted workers.\r?\n/, ""),
+			"utf8",
+		);
+
 		const fixtureResult = await runCliCapture(root, [
 			"planforge",
 			"dry-run",
@@ -4129,10 +4138,20 @@ describe("planforge dry-run", () => {
 			alternateInput,
 			"--json",
 		]);
+		const missingTrustedBoundaryResult = await runCliCapture(root, [
+			"planforge",
+			"dry-run",
+			"--input",
+			missingTrustedBoundaryInput,
+			"--json",
+		]);
 
 		const fixturePayload = JSON.parse(fixtureResult.stdout.join("\n"));
 		const copiedPayload = JSON.parse(copiedResult.stdout.join("\n"));
 		const alternatePayload = JSON.parse(alternateResult.stdout.join("\n"));
+		const missingTrustedBoundaryPayload = JSON.parse(
+			missingTrustedBoundaryResult.stdout.join("\n"),
+		);
 		expect(copiedPayload.validation.status).toBe("PASS");
 		expect(copiedPayload.receiptPreview.inputDigest).toBe(
 			fixturePayload.receiptPreview.inputDigest,
@@ -4149,6 +4168,17 @@ describe("planforge dry-run", () => {
 		);
 		expect(alternatePayload.id).not.toBe(fixturePayload.id);
 		expect(alternatePayload.idempotencyKey).not.toBe(
+			fixturePayload.idempotencyKey,
+		);
+		expect(missingTrustedBoundaryResult.exitCode).toBe(1);
+		expect(missingTrustedBoundaryPayload.validation.status).toBe(
+			"INSUFFICIENT_EVIDENCE",
+		);
+		expect(missingTrustedBoundaryPayload.validation.missingEvidence).toEqual([
+			"trusted_boundary",
+		]);
+		expect(missingTrustedBoundaryPayload.id).not.toBe(fixturePayload.id);
+		expect(missingTrustedBoundaryPayload.idempotencyKey).not.toBe(
 			fixturePayload.idempotencyKey,
 		);
 		expect(existsSync(join(root, ".buildplane"))).toBe(false);
