@@ -195,6 +195,188 @@ async function cliImport(specifier: string): Promise<unknown> {
 	}
 }
 
+type AdmissionReceiptInputLike = Record<string, unknown>;
+
+interface AdmissionReceiptKernelModule {
+	createRunAdmissionReceiptDryRun(
+		input: AdmissionReceiptInputLike,
+	): Record<string, unknown>;
+}
+
+class AdmissionReceiptCliError extends Error {
+	constructor(
+		readonly code: string,
+		message: string,
+	) {
+		super(message);
+		this.name = "AdmissionReceiptCliError";
+	}
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function nestedRecord(
+	record: Record<string, unknown>,
+	key: string,
+): Record<string, unknown> | undefined {
+	const value = record[key];
+	return isPlainRecord(value) ? value : undefined;
+}
+
+function parseAdmissionReceiptArgs(args: string[]): {
+	readonly inputPath: string;
+	readonly dryRun: boolean;
+	readonly json: boolean;
+} {
+	let inputPath: string | undefined;
+	let dryRun = false;
+	let json = false;
+	for (let index = 0; index < args.length; index += 1) {
+		const arg = args[index];
+		if (arg === "--input") {
+			const value = args[index + 1];
+			if (!value || value.startsWith("--")) {
+				throw new AdmissionReceiptCliError(
+					"MISSING_ARGUMENT",
+					"Missing required --input <path> for admission receipt dry-run.",
+				);
+			}
+			inputPath = value;
+			index += 1;
+			continue;
+		}
+		if (arg === "--dry-run") {
+			dryRun = true;
+			continue;
+		}
+		if (arg === "--json") {
+			json = true;
+			continue;
+		}
+		throw new AdmissionReceiptCliError(
+			"UNSUPPORTED_ARGUMENTS",
+			`Unsupported admission receipt argument: ${arg}.`,
+		);
+	}
+	if (!inputPath) {
+		throw new AdmissionReceiptCliError(
+			"MISSING_ARGUMENT",
+			"Missing required --input <path> for admission receipt dry-run.",
+		);
+	}
+	if (!dryRun) {
+		throw new AdmissionReceiptCliError(
+			"UNSUPPORTED_ARGUMENTS",
+			"admission receipt currently supports --dry-run only.",
+		);
+	}
+	return { inputPath, dryRun, json };
+}
+
+function normalizeAdmissionReceiptDryRunInput(
+	raw: unknown,
+): AdmissionReceiptInputLike {
+	if (!isPlainRecord(raw)) {
+		throw new AdmissionReceiptCliError(
+			"INVALID_PACKET",
+			"Invalid run admission receipt input.",
+		);
+	}
+	if (
+		"receiptId" in raw ||
+		"decidedAt" in raw ||
+		"policyProfileId" in raw ||
+		"evidenceInputs" in raw
+	) {
+		return raw;
+	}
+	const policy = nestedRecord(raw, "policy");
+	const admission = nestedRecord(raw, "admission");
+	const provenance = nestedRecord(raw, "provenance");
+	return {
+		receiptId: raw.receipt_id,
+		decidedAt: admission?.decided_at,
+		run: raw.run,
+		repo: raw.repo,
+		request: raw.request,
+		policyProfileId: policy?.profile_id,
+		evidenceInputs: raw.evidence_inputs,
+		actor: admission?.decided_by,
+		source: provenance?.created_from ?? "dry-run",
+		pack: provenance?.pack,
+		host: provenance?.host,
+		provider: provenance?.provider,
+	};
+}
+
+function admissionReceiptErrorCode(error: unknown): string {
+	if (error instanceof AdmissionReceiptCliError) {
+		return error.code;
+	}
+	if (isPlainRecord(error) && typeof error.code === "string") {
+		return error.code;
+	}
+	if (error instanceof SyntaxError) {
+		return "INVALID_PACKET";
+	}
+	return "INVALID_PACKET";
+}
+
+function sanitizeAdmissionReceiptErrorMessage(error: unknown): string {
+	if (error instanceof AdmissionReceiptCliError) {
+		return error.message;
+	}
+	if (error instanceof SyntaxError) {
+		return "Invalid JSON input for admission receipt dry-run.";
+	}
+	if (isPlainRecord(error) && error.code === "INVALID_PACKET") {
+		return "Invalid run admission receipt input.";
+	}
+	return "Invalid run admission receipt input.";
+}
+
+async function runAdmissionReceiptDryRunCommand(
+	args: string[],
+	cwd: string,
+	stdout: (line: string) => void,
+): Promise<number> {
+	let json = args.includes("--json");
+	try {
+		const parsedArgs = parseAdmissionReceiptArgs(args);
+		json = parsedArgs.json;
+		const rawInput = JSON.parse(
+			readFileSync(resolve(cwd, parsedArgs.inputPath), "utf8"),
+		) as unknown;
+		const kernel = (await cliImport(
+			"@buildplane/kernel",
+		)) as AdmissionReceiptKernelModule;
+		const receipt = kernel.createRunAdmissionReceiptDryRun(
+			normalizeAdmissionReceiptDryRunInput(rawInput),
+		);
+		if (json) {
+			stdout(formatJson(receipt));
+		} else {
+			stdout(
+				`admission: ${nestedRecord(receipt, "admission")?.decision ?? "unknown"}`,
+			);
+			stdout("will-execute-worker: false");
+		}
+		return 0;
+	} catch (error) {
+		const code = admissionReceiptErrorCode(error);
+		const message = sanitizeAdmissionReceiptErrorMessage(error);
+		const formattedJsonError = formatJson(formatJsonError(code, message));
+		if (json) {
+			stdout(formattedJsonError);
+		} else {
+			stdout(formatHumanError(message).join("\n"));
+		}
+		return 1;
+	}
+}
+
 function resolveCurrentBranch(projectRoot: string): string | undefined {
 	const result = spawnSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], {
 		cwd: projectRoot,
@@ -2247,6 +2429,16 @@ export async function runCli(
 	}
 
 	try {
+		if (command === "admission") {
+			const subcommand = rest[0];
+			if (subcommand === "receipt") {
+				return runAdmissionReceiptDryRunCommand(rest.slice(1), cwd, stdout);
+			}
+			throw new Error(
+				`Unknown admission command: ${subcommand ?? "(missing subcommand)"}`,
+			);
+		}
+
 		if (command === "bootstrap") {
 			const subcommand = rest[0];
 			const doctorArgs = rest.slice(1);

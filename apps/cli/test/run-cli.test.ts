@@ -95,6 +95,23 @@ function writePacket(root: string, name: string, packet: unknown): string {
 	return packetPath;
 }
 
+function loadAdmissionFixture(name: string): unknown {
+	return JSON.parse(
+		readFileSync(
+			join(
+				process.cwd(),
+				"packages",
+				"kernel",
+				"test",
+				"fixtures",
+				"admission-receipts",
+				`${name}.json`,
+			),
+			"utf8",
+		),
+	);
+}
+
 function writeCommittedPacket(
 	root: string,
 	name: string,
@@ -748,6 +765,96 @@ describe("cli command surface", () => {
 				unit: expect.objectContaining({ id: "unit-parse-packet" }),
 			}),
 		]);
+	});
+
+	it("emits admission receipt dry-run JSON without initialization, worker, native, or remote side effects", async () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-cli-admission-"));
+		const inputPath = writePacket(
+			root,
+			"admission/pass.json",
+			loadAdmissionFixture("pass"),
+		);
+		const createOrchestrator = vi.fn();
+		const runNativeCommand = vi.fn();
+		const publishPrCheckRequest = vi.fn();
+		const publishPrCommentRequest = vi.fn();
+		const verifyPrHeadRequest = vi.fn();
+
+		const result = await runCliCapture(
+			root,
+			["admission", "receipt", "--input", inputPath, "--dry-run", "--json"],
+			{
+				createOrchestrator: createOrchestrator as NonNullable<
+					RunCliDependencies["createOrchestrator"]
+				>,
+				runNativeCommand,
+				publishPrCheckRequest: publishPrCheckRequest as NonNullable<
+					RunCliDependencies["publishPrCheckRequest"]
+				>,
+				publishPrCommentRequest: publishPrCommentRequest as NonNullable<
+					RunCliDependencies["publishPrCommentRequest"]
+				>,
+				verifyPrHeadRequest: verifyPrHeadRequest as NonNullable<
+					RunCliDependencies["verifyPrHeadRequest"]
+				>,
+			},
+		);
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stderr).toEqual([]);
+		const receipt = JSON.parse(result.stdout.join("\n"));
+		expect(receipt).toMatchObject({
+			receipt_type: "run.admission",
+			run: { run_id: "run_bp1_pass_0001" },
+			admission: {
+				decision: "PASS",
+				will_execute_worker: false,
+				authorized_next_step: "record_admission_only",
+			},
+			replay: { side_effect_safe: true },
+			provenance: { worker_agent_trusted: false },
+		});
+		expect(receipt.idempotency_key).toMatch(/^run\.admission:v0:sha256:/);
+		expect(existsSync(join(root, ".buildplane"))).toBe(false);
+		expect(createOrchestrator).not.toHaveBeenCalled();
+		expect(runNativeCommand).not.toHaveBeenCalled();
+		expect(publishPrCheckRequest).not.toHaveBeenCalled();
+		expect(publishPrCommentRequest).not.toHaveBeenCalled();
+		expect(verifyPrHeadRequest).not.toHaveBeenCalled();
+	});
+
+	it("fails admission receipt dry-run input validation without leaking credential-shaped values", async () => {
+		const root = mkdtempSync(
+			join(tmpdir(), "buildplane-cli-admission-invalid-"),
+		);
+		const sensitiveValue = ["ghp", "dummy_value_not_a_real_credential"].join(
+			"_",
+		);
+		const inputPath = writePacket(root, "admission/invalid.json", {
+			unsafe_value: sensitiveValue,
+			request: { requested_side_effects: ["git.push:remote"] },
+		});
+		const createOrchestrator = vi.fn();
+
+		const result = await runCliCapture(
+			root,
+			["admission", "receipt", "--input", inputPath, "--dry-run", "--json"],
+			{
+				createOrchestrator: createOrchestrator as NonNullable<
+					RunCliDependencies["createOrchestrator"]
+				>,
+			},
+		);
+
+		expect(result.exitCode).toBe(1);
+		expect(result.stderr).toEqual([]);
+		const output = result.stdout.join("\n");
+		expect(output).not.toContain(sensitiveValue);
+		expect(JSON.parse(output)).toMatchObject({
+			error: { code: "INVALID_PACKET" },
+		});
+		expect(createOrchestrator).not.toHaveBeenCalled();
+		expect(existsSync(join(root, ".buildplane"))).toBe(false);
 	});
 
 	it("persists injected structured memories and surfaces them in run and inspect output", async () => {
