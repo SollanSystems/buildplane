@@ -4118,6 +4118,16 @@ function createPlanForgeDryRunPlan(inputPath: string): Record<string, unknown> {
 				safetyConstraints ?? "",
 				"- No Kanban, GSD2, GitHub, network, push, PR, deploy, merge, or worker-spawn side effects.",
 			),
+			trustedBoundary: {
+				kernelAdmits: hasLine(
+					safetyConstraints ?? "",
+					"- Buildplane kernel validates and admits plans.",
+				),
+				untrustedWorkers: hasLine(
+					safetyConstraints ?? "",
+					"- Coding agents are untrusted workers.",
+				),
+			},
 		},
 		evidenceRefs,
 		goal: normalizedGoal,
