@@ -91,7 +91,8 @@
 			"repository_remote",
 			"trusted_base",
 			"worktree_policy",
-			"dry_run_constraints"
+			"dry_run_constraints",
+			"trusted_boundary"
 		],
 		"missingEvidence": [],
 		"unsafeReasons": []
@@ -102,7 +103,7 @@
 		"planId": "pf-plan-d6bd6262",
 		"idempotencyKey": "planforge:v0:buildplane:15dbb32db0e1f0024687533755805fc23f3ef6d4:d6bd6262",
 		"inputDigest": "sha256:1a2924f8a39b906cbf8c3aa29abd093f7f18b38cb1e4e11d7587fa913af62c2d",
-		"planDigest": "sha256:a3499d5fff4ad11e371cfbcddd158167df148c2d807942b3d51262b0688e8590",
+		"planDigest": "sha256:7e5b119c016e7529080384c64d2358c40bedbb50910638dba13fb21528c27cfb",
 		"trustedBase": "15dbb32db0e1f0024687533755805fc23f3ef6d4",
 		"admittedBy": "buildplane-kernel",
 		"generatedAt": "2026-05-07T00:00:00.000Z",
