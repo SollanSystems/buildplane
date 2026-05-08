@@ -1,7 +1,7 @@
 {
 	"schemaVersion": "planforge.plan.v0",
-	"id": "pf-plan-bd932749",
-	"idempotencyKey": "planforge:v0:buildplane:15dbb32db0e1f0024687533755805fc23f3ef6d4:bd932749",
+	"id": "pf-plan-d6bd6262",
+	"idempotencyKey": "planforge:v0:buildplane:15dbb32db0e1f0024687533755805fc23f3ef6d4:d6bd6262",
 	"title": "PlanForge dry-run admission slice",
 	"goal": "Create a local-first PlanForge dry-run slice for Buildplane that accepts this goal fixture, validates the trusted boundary, and emits a reviewable plan JSON fixture without executing code or writing board tasks.",
 	"trustedBase": "15dbb32db0e1f0024687533755805fc23f3ef6d4",
@@ -99,10 +99,10 @@
 	"receiptPreview": {
 		"schemaVersion": "planforge.receipt.v0",
 		"status": "PASS",
-		"planId": "pf-plan-bd932749",
-		"idempotencyKey": "planforge:v0:buildplane:15dbb32db0e1f0024687533755805fc23f3ef6d4:bd932749",
+		"planId": "pf-plan-d6bd6262",
+		"idempotencyKey": "planforge:v0:buildplane:15dbb32db0e1f0024687533755805fc23f3ef6d4:d6bd6262",
 		"inputDigest": "sha256:1a2924f8a39b906cbf8c3aa29abd093f7f18b38cb1e4e11d7587fa913af62c2d",
-		"planDigest": "sha256:69d9037cd14949210e4d488c58e9632c73ffe14ce692e76fbf65f860921fb621",
+		"planDigest": "sha256:a3499d5fff4ad11e371cfbcddd158167df148c2d807942b3d51262b0688e8590",
 		"trustedBase": "15dbb32db0e1f0024687533755805fc23f3ef6d4",
 		"admittedBy": "buildplane-kernel",
 		"generatedAt": "2026-05-07T00:00:00.000Z",

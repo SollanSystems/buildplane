@@ -4023,6 +4023,10 @@ function createPlanForgeDryRunPlan(inputPath: string): Record<string, unknown> {
 	const repositoryContext = sectionText(content, "Repository context");
 	const safetyConstraints = sectionText(content, "Safety constraints");
 	const inputEvidenceName = basename(inputPath);
+	const evidenceRefs = [
+		`${inputEvidenceName}#safety-constraints`,
+		`${inputEvidenceName}#repository-context`,
+	];
 	const remote = listValue(repositoryContext, "Remote");
 	const trustedBase = listValue(repositoryContext, "Trusted base");
 	const worktreePolicy = listValue(repositoryContext, "Worktree policy");
@@ -4081,7 +4085,7 @@ function createPlanForgeDryRunPlan(inputPath: string): Record<string, unknown> {
 					: "PASS",
 			message:
 				"Buildplane kernel validates and admits the plan; coding agents remain untrusted workers.",
-			evidenceRefs: [`${inputEvidenceName}#safety-constraints`],
+			evidenceRefs: [evidenceRefs[0]],
 		},
 		{
 			id: "dry-run-only",
@@ -4093,14 +4097,14 @@ function createPlanForgeDryRunPlan(inputPath: string): Record<string, unknown> {
 						: "PASS",
 			message:
 				"The proposed plan emits review artifacts only and forbids execution, board writes, network writes, push, deploy, and merge.",
-			evidenceRefs: [`${inputEvidenceName}#safety-constraints`],
+			evidenceRefs: [evidenceRefs[0]],
 		},
 		{
 			id: "evidence-present",
 			status: missingEvidence.length > 0 ? "INSUFFICIENT_EVIDENCE" : "PASS",
 			message:
 				"Operator goal, repository remote, trusted base, worktree policy, and safety constraints are present.",
-			evidenceRefs: [`${inputEvidenceName}#repository-context`],
+			evidenceRefs: [evidenceRefs[1]],
 		},
 	];
 
@@ -4115,6 +4119,7 @@ function createPlanForgeDryRunPlan(inputPath: string): Record<string, unknown> {
 				"- No Kanban, GSD2, GitHub, network, push, PR, deploy, merge, or worker-spawn side effects.",
 			),
 		},
+		evidenceRefs,
 		goal: normalizedGoal,
 		remote: normalizedRemote,
 		trustedBase: normalizedTrustedBase,
