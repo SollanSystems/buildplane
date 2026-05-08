@@ -34,6 +34,40 @@ function admissionInputFromFixture(fixture: JsonRecord) {
 	};
 }
 
+function withoutEvidenceKind(fixture: JsonRecord, kind: string): JsonRecord {
+	const evidenceInputs = fixture.evidence_inputs as readonly JsonRecord[];
+	return {
+		...fixture,
+		evidence_inputs: evidenceInputs.filter(
+			(evidence) => evidence.kind !== kind,
+		),
+	};
+}
+
+function withoutRepoField(fixture: JsonRecord, field: string): JsonRecord {
+	const repo = { ...(fixture.repo as JsonRecord) } as Record<string, unknown>;
+	delete repo[field];
+	return {
+		...fixture,
+		repo: repo as JsonRecord,
+	};
+}
+
+function withRequestedSideEffects(
+	fixture: JsonRecord,
+	requestedSideEffects: readonly string[],
+): JsonRecord {
+	const request = fixture.request as JsonRecord;
+	return {
+		...fixture,
+		request: {
+			...request,
+			requested_capabilities: requestedSideEffects,
+			requested_side_effects: requestedSideEffects,
+		},
+	};
+}
+
 describe("createRunAdmissionReceiptDryRun", () => {
 	it("emits a deterministic PASS receipt from present evidence and scoped local side effects", () => {
 		const fixture = loadFixture("pass");
@@ -105,6 +139,102 @@ describe("createRunAdmissionReceiptDryRun", () => {
 		expect(receipt.policy.allowed_side_effects).toEqual([]);
 		expect(receipt.policy.capability_grants).toEqual([]);
 		expect(receipt.policy.quarantine).toBe(false);
+	});
+
+	it.each([
+		"git.status",
+		"git.rev-parse",
+		"declared_scope",
+	])("fails closed when required %s evidence is absent from otherwise present inputs", (kind) => {
+		const fixture = withoutEvidenceKind(loadFixture("pass"), kind);
+
+		const receipt = createRunAdmissionReceiptDryRun(
+			admissionInputFromFixture(fixture),
+		);
+
+		expect(receipt.admission.decision).toBe("INSUFFICIENT_EVIDENCE");
+		expect(receipt.admission.missing_evidence).toEqual([kind]);
+		expect(receipt.admission.unsafe_requests).toEqual([]);
+		expect(receipt.policy.allowed_side_effects).toEqual([]);
+		expect(receipt.policy.capability_grants).toEqual([]);
+		expect(receipt.policy.quarantine).toBe(false);
+	});
+
+	it("fails closed when evidence inputs are omitted and repo binding is absent", () => {
+		const receipt = createRunAdmissionReceiptDryRun(
+			admissionInputFromFixture({
+				...loadFixture("pass"),
+				repo: {},
+				evidence_inputs: [],
+			}),
+		);
+
+		expect(receipt.admission.decision).toBe("INSUFFICIENT_EVIDENCE");
+		expect(receipt.admission.missing_evidence).toEqual(
+			expect.arrayContaining([
+				"git.status",
+				"git.rev-parse",
+				"declared_scope",
+				"repo.path",
+				"repo.worktree_path",
+				"repo.expected_remote",
+				"repo.base_ref",
+				"repo.base_commit",
+				"repo.head_commit",
+				"repo.worktree_clean",
+			]),
+		);
+		expect(receipt.policy.allowed_side_effects).toEqual([]);
+		expect(receipt.policy.capability_grants).toEqual([]);
+	});
+
+	it.each([
+		"path",
+		"worktree_path",
+		"expected_remote",
+		"base_ref",
+		"base_commit",
+		"head_commit",
+		"worktree_clean",
+	])("fails closed when repo binding omits %s", (field) => {
+		const receipt = createRunAdmissionReceiptDryRun(
+			admissionInputFromFixture(withoutRepoField(loadFixture("pass"), field)),
+		);
+
+		expect(receipt.admission.decision).toBe("INSUFFICIENT_EVIDENCE");
+		expect(receipt.admission.missing_evidence).toEqual([`repo.${field}`]);
+		expect(receipt.policy.allowed_side_effects).toEqual([]);
+		expect(receipt.policy.capability_grants).toEqual([]);
+	});
+
+	it("fails closed as UNSAFE_TO_RUN for unknown auto-Kanban side effects", () => {
+		const receipt = createRunAdmissionReceiptDryRun(
+			admissionInputFromFixture(
+				withRequestedSideEffects(loadFixture("pass"), [
+					"fs.read:repo",
+					"kanban.write:auto",
+				]),
+			),
+		);
+
+		expect(receipt.admission.decision).toBe("UNSAFE_TO_RUN");
+		expect(receipt.admission.missing_evidence).toEqual([]);
+		expect(receipt.admission.unsafe_requests).toEqual(["kanban.write:auto"]);
+		expect(receipt.admission.will_execute_worker).toBe(false);
+		expect(receipt.policy.allowed_side_effects).toEqual(["fs.read:repo"]);
+		expect(receipt.policy.capability_grants).toEqual([
+			{
+				capability: "fs.read:repo",
+				scope: ["/repo/buildplane"],
+				expires_at: null,
+			},
+		]);
+		expect(receipt.policy.quarantine).toBe(true);
+		expect(receipt.policy.denied_side_effects).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({ effect: "kanban.write:auto" }),
+			]),
+		);
 	});
 
 	it("fails closed as UNSAFE_TO_RUN and revokes non-read grants for unsafe side effects", () => {

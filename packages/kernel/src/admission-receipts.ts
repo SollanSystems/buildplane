@@ -143,6 +143,22 @@ const SAFE_SIDE_EFFECTS = new Set([
 
 const READ_ONLY_SIDE_EFFECTS = new Set(["fs.read:repo"]);
 
+const REQUIRED_PASS_EVIDENCE_KINDS = [
+	"git.status",
+	"git.rev-parse",
+	"declared_scope",
+] as const;
+
+const REQUIRED_PASS_REPO_BINDING_FIELDS = [
+	"path",
+	"worktree_path",
+	"expected_remote",
+	"base_ref",
+	"base_commit",
+	"head_commit",
+	"worktree_clean",
+] as const;
+
 const STANDARD_DENIED_SIDE_EFFECTS: readonly RunAdmissionDeniedSideEffect[] = [
 	{
 		effect: "git.push:remote",
@@ -216,17 +232,73 @@ function unique(items: readonly string[]): readonly string[] {
 	return Array.from(new Set(items));
 }
 
-function isUnsafeSideEffect(effect: string): boolean {
-	if (SAFE_SIDE_EFFECTS.has(effect)) {
-		return false;
-	}
-	return (
-		effect === "git.push:remote" ||
-		effect.startsWith("github.") ||
-		effect.startsWith("deploy:") ||
-		effect.startsWith("network.") ||
-		effect.includes(":production")
+function hasPresentRequiredEvidence(
+	evidenceInputs: readonly RunAdmissionEvidenceInput[],
+	kind: string,
+): boolean {
+	return evidenceInputs.some(
+		(evidence) =>
+			evidence.kind === kind &&
+			evidence.required &&
+			evidence.status === "present",
 	);
+}
+
+function collectUnavailableRequiredEvidence(
+	evidenceInputs: readonly RunAdmissionEvidenceInput[],
+): readonly string[] {
+	return unique(
+		evidenceInputs
+			.filter((evidence) => evidence.required && evidence.status !== "present")
+			.map((evidence) => evidence.kind),
+	);
+}
+
+function hasNonEmptyString(value: JsonValue): boolean {
+	return typeof value === "string" && value.trim().length > 0;
+}
+
+function collectMissingRepoBindingEvidence(
+	repo: RunAdmissionRepo,
+): readonly string[] {
+	return REQUIRED_PASS_REPO_BINDING_FIELDS.filter((field) => {
+		if (field === "worktree_clean") {
+			return repo.worktree_clean !== true;
+		}
+		return !hasNonEmptyString(repo[field]);
+	}).map((field) => `repo.${field}`);
+}
+
+function collectPassBlockingMissingEvidence(
+	evidenceInputs: readonly RunAdmissionEvidenceInput[],
+	repo: RunAdmissionRepo,
+): readonly string[] {
+	const unavailableRequiredEvidence =
+		collectUnavailableRequiredEvidence(evidenceInputs);
+	const absentRequiredEvidence = REQUIRED_PASS_EVIDENCE_KINDS.filter(
+		(kind) => !hasPresentRequiredEvidence(evidenceInputs, kind),
+	);
+	return unique([
+		...unavailableRequiredEvidence,
+		...absentRequiredEvidence,
+		...(unavailableRequiredEvidence.length === 0
+			? collectMissingRepoBindingEvidence(repo)
+			: []),
+	]);
+}
+
+function unsafeDenialReason(effect: string): string {
+	if (UNSAFE_DENIAL_REASONS.has(effect)) {
+		return UNSAFE_DENIAL_REASONS.get(effect) as string;
+	}
+	if (effect.startsWith("kanban.")) {
+		return "Kanban mutation is outside run admission and requires explicit operator authority.";
+	}
+	return "Requested side effect is not allowlisted for run admission.";
+}
+
+function isUnsafeSideEffect(effect: string): boolean {
+	return !SAFE_SIDE_EFFECTS.has(effect);
 }
 
 function compareJsonKeys(a: string, b: string): number {
@@ -349,9 +421,7 @@ function buildUnsafeDeniedSideEffects(
 	);
 	return deniedEffects.map((effect) => ({
 		effect,
-		reason:
-			UNSAFE_DENIAL_REASONS.get(effect) ??
-			"Requested side effect is not authorized by local-first run admission.",
+		reason: unsafeDenialReason(effect),
 	}));
 }
 
@@ -434,10 +504,9 @@ export function createRunAdmissionReceiptDryRun(
 		| RunAdmissionEvidenceInput[]
 		| readonly RunAdmissionEvidenceInput[];
 	const requestedSideEffects = [...(request.requested_side_effects ?? [])];
-	const missingEvidence = unique(
-		evidenceInputs
-			.filter((evidence) => evidence.required && evidence.status !== "present")
-			.map((evidence) => evidence.kind),
+	let missingEvidence = collectPassBlockingMissingEvidence(
+		evidenceInputs,
+		repo,
 	);
 	const unsafeRequests = unique(
 		requestedSideEffects.filter((effect) => isUnsafeSideEffect(effect)),
@@ -477,6 +546,7 @@ export function createRunAdmissionReceiptDryRun(
 
 	if (unsafeRequests.length > 0) {
 		decision = "UNSAFE_TO_RUN";
+		missingEvidence = collectUnavailableRequiredEvidence(evidenceInputs);
 		allowedSideEffects = requestedSideEffects.filter((effect) =>
 			READ_ONLY_SIDE_EFFECTS.has(effect),
 		);
