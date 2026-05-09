@@ -35,3 +35,4 @@ Supporting architecture docs:
 - `docs/architecture/buildplane-memory-cli.md` — operator-facing memory CLI contract, including the current `apps/cli/src/run-cli.ts` bridge for `buildplane memory ...`
 - `docs/architecture/run-inspector-evidence-slice.md` — evidence-first Run Inspector contract for the first Mission Control surface
 - `docs/architecture/run-admission-receipts.md` — deterministic local-first run admission receipt, ledger event contract, and BP5B fixture/implementation map
+- `docs/architecture/bp6a-run-loop-admission-checkpoint.md` — mini-spec choosing the prepared-run admission gate for BP6B run-loop wiring
