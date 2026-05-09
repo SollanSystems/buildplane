@@ -3,14 +3,56 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
+	type CreateRunAdmissionReceiptDryRunInput,
 	createRunAdmissionReceiptDryRun,
+	type JsonRecord,
 	type RunAdmissionDecision,
+	type RunAdmissionEvidenceInput,
 	type RunAdmissionLocalEvidenceStore,
 	type RunAdmissionReceipt,
+	RunAdmissionReceiptInputError,
+	type RunAdmissionRepo,
+	type RunAdmissionRequest,
 	recordRunAdmissionReceiptAttempt,
 } from "../src/index";
 
-type JsonRecord = Record<string, unknown>;
+const FAKE_OPERATOR_TOKEN = "ghp_FAKE_SECRET_SENTINEL_DO_NOT_USE_1234567890";
+const FAKE_EVIDENCE_REASON_TOKEN =
+	"sk-test-FAKE_SECRET_SENTINEL_DO_NOT_USE_1234567890";
+const FAKE_EVIDENCE_METADATA_TOKEN =
+	"bp_secret_FAKE_SENTINEL_DO_NOT_USE_1234567890";
+
+async function expectSanitizedSecretRejection(
+	action: () => Promise<unknown> | unknown,
+	rawSentinels: readonly string[],
+): Promise<void> {
+	let rejection: unknown;
+	try {
+		await action();
+	} catch (error) {
+		rejection = error;
+	}
+
+	expect(rejection).toBeInstanceOf(RunAdmissionReceiptInputError);
+	const errorText =
+		rejection instanceof Error
+			? `${rejection.name}: ${rejection.message}`
+			: String(rejection);
+	expect(errorText).toContain("credential-shaped");
+	for (const rawSentinel of rawSentinels) {
+		expect(errorText).not.toContain(rawSentinel);
+	}
+}
+
+function expectNoRawSentinels(
+	value: unknown,
+	rawSentinels: readonly string[],
+): void {
+	const serialized = JSON.stringify(value);
+	for (const rawSentinel of rawSentinels) {
+		expect(serialized).not.toContain(rawSentinel);
+	}
+}
 
 function loadFixture(name: string): JsonRecord {
 	return JSON.parse(
@@ -26,16 +68,19 @@ function loadFixture(name: string): JsonRecord {
 	) as JsonRecord;
 }
 
-function admissionInputFromFixture(fixture: JsonRecord) {
-	const policy = fixture.policy as { profile_id: string };
+function admissionInputFromFixture(
+	fixture: JsonRecord,
+): CreateRunAdmissionReceiptDryRunInput {
+	const policy = fixture.policy as JsonRecord;
 	return {
 		receiptId: `${fixture.receipt_id as string}-dry-run`,
 		decidedAt: "2026-05-08T00:00:00Z",
-		run: fixture.run,
-		repo: fixture.repo,
-		request: fixture.request,
-		policyProfileId: policy.profile_id,
-		evidenceInputs: fixture.evidence_inputs,
+		run: fixture.run as JsonRecord,
+		repo: fixture.repo as RunAdmissionRepo,
+		request: fixture.request as RunAdmissionRequest,
+		policyProfileId: policy.profile_id as string,
+		evidenceInputs:
+			fixture.evidence_inputs as readonly RunAdmissionEvidenceInput[],
 		actor: "buildplane.kernel.admission",
 		source: "unit-test",
 	};
@@ -209,6 +254,56 @@ describe("createRunAdmissionReceiptDryRun", () => {
 			receipt.policy.denied_side_effects.map(({ effect }) => effect),
 		).toEqual(["git.push:remote", "github.pr.create", "deploy:production"]);
 		expect(receipt.idempotency_key).toMatch(/^run\.admission:v0:sha256:/);
+	});
+
+	it("rejects credential-shaped operator approvals before returning a receipt", async () => {
+		const fixture = loadFixture("pass");
+		const request = fixture.request as JsonRecord;
+		let receipt: RunAdmissionReceipt | undefined;
+
+		await expectSanitizedSecretRejection(() => {
+			receipt = createRunAdmissionReceiptDryRun(
+				admissionInputFromFixture({
+					...fixture,
+					request: {
+						...request,
+						operator_approvals: [
+							{
+								approved_by: "operator.fixture",
+								token: FAKE_OPERATOR_TOKEN,
+							},
+						],
+					},
+				}),
+			);
+		}, [FAKE_OPERATOR_TOKEN]);
+		expect(receipt).toBeUndefined();
+	});
+
+	it("rejects credential-shaped evidence reason and metadata before returning a receipt", async () => {
+		const fixture = loadFixture("pass");
+		const evidenceInputs = fixture.evidence_inputs as readonly JsonRecord[];
+		let receipt: RunAdmissionReceipt | undefined;
+
+		await expectSanitizedSecretRejection(() => {
+			receipt = createRunAdmissionReceiptDryRun(
+				admissionInputFromFixture({
+					...fixture,
+					evidence_inputs: evidenceInputs.map((evidence, index) =>
+						index === 0
+							? {
+									...evidence,
+									reason: FAKE_EVIDENCE_REASON_TOKEN,
+									metadata: {
+										proof_token: FAKE_EVIDENCE_METADATA_TOKEN,
+									},
+								}
+							: evidence,
+					),
+				}),
+			);
+		}, [FAKE_EVIDENCE_REASON_TOKEN, FAKE_EVIDENCE_METADATA_TOKEN]);
+		expect(receipt).toBeUndefined();
 	});
 
 	it("fails closed as INSUFFICIENT_EVIDENCE when required evidence is missing", () => {
@@ -418,6 +513,62 @@ describe("recordRunAdmissionReceiptAttempt", () => {
 		});
 		expect(readFileSync(firstRecord.receipt_path, "utf8").trim()).toBe(
 			firstRecord.receipt_json,
+		);
+		expectNoForbiddenSideEffects(store);
+	});
+
+	it("rejects credential-shaped receipt values before writing artifacts or events", async () => {
+		const safeReceipt = createRunAdmissionReceiptDryRun(
+			admissionInputFromFixture(loadFixture("pass")),
+		);
+		const store = createTempEvidenceStore();
+		const rawSentinels = [
+			FAKE_OPERATOR_TOKEN,
+			FAKE_EVIDENCE_REASON_TOKEN,
+			FAKE_EVIDENCE_METADATA_TOKEN,
+		];
+		const unsafeReceipt: RunAdmissionReceipt = {
+			...safeReceipt,
+			request: {
+				...safeReceipt.request,
+				operator_approvals: [
+					{
+						approved_by: "operator.fixture",
+						token: FAKE_OPERATOR_TOKEN,
+					},
+				],
+			},
+			evidence_inputs: safeReceipt.evidence_inputs.map((evidence, index) =>
+				index === 0
+					? {
+							...evidence,
+							reason: FAKE_EVIDENCE_REASON_TOKEN,
+							metadata: {
+								proof_token: FAKE_EVIDENCE_METADATA_TOKEN,
+							},
+						}
+					: evidence,
+			),
+		};
+		let record: unknown;
+
+		await expectSanitizedSecretRejection(async () => {
+			record = await recordRunAdmissionReceiptAttempt({
+				receipt: unsafeReceipt,
+				store,
+			});
+		}, rawSentinels);
+
+		expect(record).toBeUndefined();
+		expect(store.writeReceiptArtifact).not.toHaveBeenCalled();
+		expect(store.appendAdmissionEvent).not.toHaveBeenCalled();
+		expectNoRawSentinels(
+			vi.mocked(store.writeReceiptArtifact).mock.calls,
+			rawSentinels,
+		);
+		expectNoRawSentinels(
+			vi.mocked(store.appendAdmissionEvent).mock.calls,
+			rawSentinels,
 		);
 		expectNoForbiddenSideEffects(store);
 	});

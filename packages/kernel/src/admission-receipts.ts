@@ -223,6 +223,20 @@ const SAFE_SIDE_EFFECTS = new Set([
 	"git.commit:local_worktree",
 ]);
 
+const CREDENTIAL_KEY_PATTERN =
+	/(^|[_-])(api[_-]?key|auth[_-]?token|credential|password|passwd|private[_-]?key|secret|token)([_-]|$)/i;
+
+const CREDENTIAL_VALUE_PATTERNS: readonly RegExp[] = [
+	/^gh[pousr]_[A-Za-z0-9_]{12,}$/,
+	/^sk-[A-Za-z0-9._-]{6,}$/,
+	/^bp_secret_[A-Za-z0-9_./+=-]{8,}$/i,
+	/^xox[abprs]-[A-Za-z0-9-]{10,}$/,
+	/^AKIA[0-9A-Z]{16}$/,
+	/^-----BEGIN (?:RSA |EC |OPENSSH |PRIVATE )?PRIVATE KEY-----/,
+];
+
+const REDACTED_PLACEHOLDER = "[REDACTED]";
+
 const READ_ONLY_SIDE_EFFECTS = new Set(["fs.read:repo"]);
 
 const REQUIRED_PASS_EVIDENCE_KINDS = [
@@ -405,6 +419,71 @@ function stableJson(value: JsonValue): string {
 		.join(",")}}`;
 }
 
+function isCredentialShapedString(value: string): boolean {
+	if (value === REDACTED_PLACEHOLDER) {
+		return false;
+	}
+	const trimmed = value.trim();
+	return CREDENTIAL_VALUE_PATTERNS.some((pattern) => pattern.test(trimmed));
+}
+
+function findUnsafeCredentialPath(
+	value: JsonValue,
+	path: string,
+	insideCredentialKey = false,
+): string | null {
+	if (value === undefined || value === null) {
+		return null;
+	}
+	if (typeof value === "string") {
+		if (value === REDACTED_PLACEHOLDER) {
+			return null;
+		}
+		return insideCredentialKey || isCredentialShapedString(value) ? path : null;
+	}
+	if (typeof value === "number" || typeof value === "boolean") {
+		return insideCredentialKey ? path : null;
+	}
+	if (Array.isArray(value)) {
+		for (let index = 0; index < value.length; index += 1) {
+			const unsafePath = findUnsafeCredentialPath(
+				value[index],
+				`${path}[${index}]`,
+				insideCredentialKey,
+			);
+			if (unsafePath) {
+				return unsafePath;
+			}
+		}
+		return null;
+	}
+	const record = value as { readonly [key: string]: JsonValue };
+	for (const key of Object.keys(record).sort(compareJsonKeys)) {
+		const child = record[key];
+		if (child === undefined) {
+			continue;
+		}
+		const unsafePath = findUnsafeCredentialPath(
+			child,
+			`${path}.${key}`,
+			insideCredentialKey || CREDENTIAL_KEY_PATTERN.test(key),
+		);
+		if (unsafePath) {
+			return unsafePath;
+		}
+	}
+	return null;
+}
+
+function assertNoCredentialShapedValues(value: JsonValue, field: string): void {
+	const unsafePath = findUnsafeCredentialPath(value, field);
+	if (unsafePath) {
+		throw new RunAdmissionReceiptInputError(
+			`${field} contains credential-shaped or non-redacted secret material at ${unsafePath}; replace the value with ${REDACTED_PLACEHOLDER}.`,
+		);
+	}
+}
+
 function createIdempotencyKey(input: {
 	readonly run: JsonRecord;
 	readonly repo: RunAdmissionRepo;
@@ -570,6 +649,7 @@ function validateInput(input: CreateRunAdmissionReceiptDryRunInput): void {
 			);
 		}
 	}
+	assertNoCredentialShapedValues(record as JsonValue, "input");
 }
 
 function createReceiptDigest(receiptJson: string): string {
@@ -754,6 +834,7 @@ export function createRunAdmissionReceiptDryRun(
 export async function recordRunAdmissionReceiptAttempt(
 	input: RecordRunAdmissionReceiptAttemptInput,
 ): Promise<RunAdmissionReceiptAttemptRecord> {
+	assertNoCredentialShapedValues(input.receipt, "receipt");
 	const receiptJson = stableJson(input.receipt);
 	const receiptDigest = createReceiptDigest(receiptJson);
 	const receiptArtifact = await input.store.writeReceiptArtifact({
