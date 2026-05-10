@@ -89,7 +89,7 @@ export interface RunAdmissionDecisionBlock extends JsonRecord {
 	readonly reasons: readonly string[];
 	readonly missing_evidence: readonly string[];
 	readonly unsafe_requests: readonly string[];
-	readonly will_execute_worker: false;
+	readonly will_execute_worker: boolean;
 	readonly authorized_next_step: string;
 }
 
@@ -137,6 +137,8 @@ export interface RunAdmissionRecordedPayload extends JsonRecord {
 	readonly receipt_id: string;
 	readonly receipt_digest: string;
 	readonly receipt_ref: string | null;
+	readonly run_id: string;
+	readonly unit_id: string;
 	readonly idempotency_key: string;
 	readonly decision: RunAdmissionDecision;
 	readonly policy_profile_id: string;
@@ -147,7 +149,7 @@ export interface RunAdmissionRecordedPayload extends JsonRecord {
 	readonly unsafe_requests: readonly string[];
 	readonly evidence_inputs: readonly RunAdmissionEvidenceInput[];
 	readonly quarantine: boolean;
-	readonly will_execute_worker: false;
+	readonly will_execute_worker: boolean;
 	readonly authorized_next_step: string;
 	readonly decided_by: string;
 	readonly decided_at: string;
@@ -677,6 +679,11 @@ function createRecordedReplay(
 	};
 }
 
+function stringRecordValue(record: JsonRecord, key: string): string {
+	const value = record[key];
+	return typeof value === "string" && value.length > 0 ? value : "unknown";
+}
+
 function createRecordedPayload(input: {
 	readonly receipt: RunAdmissionReceipt;
 	readonly receiptDigest: string;
@@ -687,6 +694,8 @@ function createRecordedPayload(input: {
 		receipt_id: receipt.receipt_id,
 		receipt_digest: receiptDigest,
 		receipt_ref: receiptRef,
+		run_id: stringRecordValue(receipt.run, "run_id"),
+		unit_id: stringRecordValue(receipt.run, "unit_id"),
 		idempotency_key: receipt.idempotency_key,
 		decision: receipt.admission.decision,
 		policy_profile_id: receipt.policy.profile_id,
@@ -699,15 +708,21 @@ function createRecordedPayload(input: {
 		unsafe_requests: cloneJson(receipt.admission.unsafe_requests),
 		evidence_inputs: cloneJson(receipt.evidence_inputs),
 		quarantine: receipt.policy.quarantine,
-		will_execute_worker: false,
+		will_execute_worker: receipt.admission.will_execute_worker,
 		authorized_next_step: receipt.admission.authorized_next_step,
 		decided_by: receipt.admission.decided_by,
 		decided_at: receipt.admission.decided_at,
 	};
 }
 
-export function createRunAdmissionReceiptDryRun(
+interface CreateRunAdmissionReceiptOptions {
+	readonly willExecuteWorker: boolean;
+	readonly authorizedNextStep: string;
+}
+
+function createRunAdmissionReceipt(
 	input: CreateRunAdmissionReceiptDryRunInput,
+	options: CreateRunAdmissionReceiptOptions,
 ): RunAdmissionReceipt {
 	validateInput(input);
 
@@ -777,6 +792,11 @@ export function createRunAdmissionReceiptDryRun(
 		authorizedNextStep = "freeze_and_require_explicit_release_authority";
 	}
 
+	const willExecuteWorker = decision === "PASS" && options.willExecuteWorker;
+	const effectiveAuthorizedNextStep = willExecuteWorker
+		? options.authorizedNextStep
+		: authorizedNextStep;
+
 	const policy: RunAdmissionPolicy = {
 		profile_id: input.policyProfileId,
 		allowed_side_effects: unique(allowedSideEffects),
@@ -807,8 +827,8 @@ export function createRunAdmissionReceiptDryRun(
 			reasons,
 			missing_evidence: missingEvidence,
 			unsafe_requests: unsafeRequests,
-			will_execute_worker: false,
-			authorized_next_step: authorizedNextStep,
+			will_execute_worker: willExecuteWorker,
+			authorized_next_step: effectiveAuthorizedNextStep,
 		},
 		idempotency_key: createIdempotencyKey({
 			run,
@@ -828,6 +848,83 @@ export function createRunAdmissionReceiptDryRun(
 			provider: input.provider ?? null,
 			worker_agent_trusted: false,
 		},
+	};
+}
+
+export function createRunAdmissionReceiptDryRun(
+	input: CreateRunAdmissionReceiptDryRunInput,
+): RunAdmissionReceipt {
+	return createRunAdmissionReceipt(input, {
+		willExecuteWorker: false,
+		authorizedNextStep: "record_receipt_only",
+	});
+}
+
+export function createRunAdmissionReceiptLive(
+	input: CreateRunAdmissionReceiptDryRunInput,
+): RunAdmissionReceipt {
+	return createRunAdmissionReceipt(input, {
+		willExecuteWorker: true,
+		authorizedNextStep: "dispatch_worker",
+	});
+}
+
+function isPromiseLike<T>(value: unknown): value is Promise<T> {
+	return (
+		typeof value === "object" &&
+		value !== null &&
+		"then" in value &&
+		typeof (value as { then?: unknown }).then === "function"
+	);
+}
+
+export function recordRunAdmissionReceiptAttemptSync(
+	input: RecordRunAdmissionReceiptAttemptInput,
+): RunAdmissionReceiptAttemptRecord {
+	assertNoCredentialShapedValues(input.receipt, "receipt");
+	const receiptJson = stableJson(input.receipt);
+	const receiptDigest = createReceiptDigest(receiptJson);
+	const receiptArtifact = input.store.writeReceiptArtifact({
+		receipt: input.receipt,
+		receiptDigest,
+		contents: receiptJson,
+	});
+	if (isPromiseLike<RunAdmissionLocalEvidenceWriteResult>(receiptArtifact)) {
+		throw new Error(
+			"Synchronous run admission requires a synchronous receipt artifact store.",
+		);
+	}
+	const payload = createRecordedPayload({
+		receipt: input.receipt,
+		receiptDigest,
+		receiptRef: receiptArtifact.ref,
+	});
+	const event: RunAdmissionRecordedEvent = {
+		kind: "run_admission_recorded",
+		schema_version: "0.1.0",
+		recorded_at: input.recordedAt ?? input.receipt.admission.decided_at,
+		payload,
+		replay: createRecordedReplay(input.receipt),
+	};
+	assertNoCredentialShapedValues(event, "event");
+	const eventWrite = input.store.appendAdmissionEvent({
+		event,
+		receipt: input.receipt,
+	});
+	if (isPromiseLike<RunAdmissionLocalEvidenceWriteResult>(eventWrite)) {
+		throw new Error(
+			"Synchronous run admission requires a synchronous admission event store.",
+		);
+	}
+	return {
+		receipt_json: receiptJson,
+		receipt_digest: receiptDigest,
+		receipt_ref: receiptArtifact.ref,
+		...(receiptArtifact.path ? { receipt_path: receiptArtifact.path } : {}),
+		payload,
+		event,
+		event_ref: eventWrite.ref,
+		...(eventWrite.path ? { event_path: eventWrite.path } : {}),
 	};
 }
 
