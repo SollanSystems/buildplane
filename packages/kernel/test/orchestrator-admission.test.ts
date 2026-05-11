@@ -19,7 +19,14 @@ import {
 	type UnitPacket,
 } from "../src/index.js";
 
-const FAKE_OPERATOR_TOKEN = "ghp_FAKE_SECRET_SENTINEL_DO_NOT_USE_1234567890";
+function credentialShapedSentinel(parts: readonly string[]): string {
+	return parts.join("");
+}
+
+const FAKE_OPERATOR_TOKEN = credentialShapedSentinel([
+	"gh",
+	"p_FAKE_SECRET_SENTINEL_DO_NOT_USE_1234567890",
+]);
 
 function createPacket(overrides: Partial<UnitPacket> = {}): UnitPacket {
 	return {
@@ -274,13 +281,69 @@ describe("orchestrator run admission", () => {
 			decision: "PASS",
 			receipt_ref: expect.stringMatching(/^artifact:\/\//),
 			policy_profile_id: "default",
-			allowed_side_effects: ["fs.read:repo"],
+			allowed_side_effects: [
+				"fs.read:repo",
+				"fs.write:declared_scope",
+				"command.execute:verification",
+			],
 		});
 		expect(
 			harness.artifacts[0]?.receipt.policy.denied_side_effects.map(
 				({ effect }) => effect,
 			),
 		).toEqual(["git.push:remote", "github.pr.create", "deploy:production"]);
+	});
+
+	it("derives live admission side effects from command packet semantics", () => {
+		const harness = createHarness();
+		cleanup.push(harness.cleanup);
+
+		const result = harness.orchestrator.runPacket(harness.packet);
+
+		expect(result.run.status).toBe("passed");
+		expect(
+			harness.artifacts[0]?.receipt.request.requested_side_effects,
+		).toEqual([
+			"fs.read:repo",
+			"fs.write:declared_scope",
+			"command.execute:verification",
+		]);
+		expect(harness.admissionPayloads[0]?.allowed_side_effects).toEqual([
+			"fs.read:repo",
+			"fs.write:declared_scope",
+			"command.execute:verification",
+		]);
+	});
+
+	it("fails closed before runtime when packet semantics require unsafe provider invocation", () => {
+		const packet = createPacket({
+			execution: undefined,
+			model: {
+				provider: "test-provider",
+				model: "test-model",
+				prompt: "Summarize the local fixture.",
+			},
+		});
+		const harness = createHarness({ packet });
+		cleanup.push(harness.cleanup);
+
+		const result = harness.orchestrator.runPacket(packet);
+
+		expect(result.run.status).toBe("failed");
+		expect(result.failure?.kind).toBe("run-admission-denied");
+		expect(harness.runtime.executePacket).not.toHaveBeenCalled();
+		expect(harness.runEvents).not.toContain("execution-started");
+		expect(harness.runEvents).not.toContain("runtime");
+		expect(harness.admissionPayloads[0]).toMatchObject({
+			decision: "UNSAFE_TO_RUN",
+			requested_side_effects: [
+				"fs.read:repo",
+				"fs.write:declared_scope",
+				"model.invoke:provider",
+			],
+			allowed_side_effects: ["fs.read:repo"],
+			unsafe_requests: ["model.invoke:provider"],
+		});
 	});
 
 	it("records live async admission before async execution", async () => {

@@ -10,6 +10,7 @@ import type {
 	ExecutionReceipt,
 	ExtractedLearning,
 	ProcedureMemory,
+	RunAdmissionLocalEvidenceStore,
 	StrategyPacket,
 	TaskType,
 	UnitPacket,
@@ -381,6 +382,33 @@ function makeMemoryPort(): BuildplaneMemoryPort {
 	} as unknown as BuildplaneMemoryPort;
 }
 
+function makeAdmissionStore(root: string): RunAdmissionLocalEvidenceStore {
+	return {
+		writeReceiptArtifact(input) {
+			return {
+				ref: `artifact://${input.receipt.receipt_id}`,
+				path: join(root, "run-admission.json"),
+			};
+		},
+		appendAdmissionEvent(input) {
+			return {
+				ref: `event://${input.event.event_id}`,
+				path: join(root, "run-admission-events.jsonl"),
+			};
+		},
+	};
+}
+
+function createOrchestratorWithAdmissionStore(
+	config: Parameters<typeof createBuildplaneOrchestrator>[0],
+): ReturnType<typeof createBuildplaneOrchestrator> {
+	return createBuildplaneOrchestrator({
+		...config,
+		admissionStore:
+			config.admissionStore ?? makeAdmissionStore(config.projectRoot),
+	});
+}
+
 describe("orchestrator memory integration", () => {
 	it("writes learnings after a successful run", () => {
 		const root = mkdtempSync(join(tmpdir(), "bp-orch-mem-"));
@@ -399,7 +427,7 @@ describe("orchestrator memory integration", () => {
 			promoteLearnings: vi.fn(),
 		} as unknown as BuildplaneMemoryPort;
 
-		const orch = createBuildplaneOrchestrator({
+		const orch = createOrchestratorWithAdmissionStore({
 			projectRoot: root,
 			storage: makeStorage("approved"),
 			runtime: {
@@ -439,7 +467,7 @@ describe("orchestrator memory integration", () => {
 			promoteLearnings: vi.fn(),
 		} as unknown as BuildplaneMemoryPort;
 
-		const orch = createBuildplaneOrchestrator({
+		const orch = createOrchestratorWithAdmissionStore({
 			projectRoot: root,
 			storage: makeStorage("rejected"),
 			runtime: {
@@ -478,7 +506,7 @@ describe("orchestrator memory integration", () => {
 			promoteLearnings: vi.fn(),
 		} as unknown as BuildplaneMemoryPort;
 
-		const orch = createBuildplaneOrchestrator({
+		const orch = createOrchestratorWithAdmissionStore({
 			projectRoot: root,
 			storage: makeStorage("rejected"),
 			runtime: {
@@ -501,7 +529,7 @@ describe("orchestrator memory integration", () => {
 
 	it("does not throw when no memoryPort is provided (backwards compat)", () => {
 		const root = mkdtempSync(join(tmpdir(), "bp-orch-nomem-"));
-		const orch = createBuildplaneOrchestrator({
+		const orch = createOrchestratorWithAdmissionStore({
 			projectRoot: root,
 			storage: makeStorage("approved"),
 			runtime: {
@@ -530,7 +558,7 @@ describe("orchestrator memory integration", () => {
 			promoteLearnings: vi.fn(),
 		} as unknown as BuildplaneMemoryPort;
 
-		const orch = createBuildplaneOrchestrator({
+		const orch = createOrchestratorWithAdmissionStore({
 			projectRoot: root,
 			storage: makeStorage("approved"),
 			runtime: {
@@ -554,7 +582,7 @@ describe("orchestrator memory integration", () => {
 	it("promotes a multi-round strategy workflow learning into a canonical procedure", async () => {
 		const root = mkdtempSync(join(tmpdir(), "bp-orch-strategy-promote-"));
 		const storage = makeProcedureAwareStorage();
-		const orch = createBuildplaneOrchestrator({
+		const orch = createOrchestratorWithAdmissionStore({
 			projectRoot: root,
 			storage,
 			runtime: {
@@ -594,7 +622,7 @@ describe("orchestrator memory integration", () => {
 		const root = mkdtempSync(join(tmpdir(), "bp-orch-strategy-dedupe-"));
 		const storage = makeProcedureAwareStorage();
 
-		const firstOrchestrator = createBuildplaneOrchestrator({
+		const firstOrchestrator = createOrchestratorWithAdmissionStore({
 			projectRoot: root,
 			storage,
 			runtime: {
@@ -606,7 +634,7 @@ describe("orchestrator memory integration", () => {
 		});
 		await firstOrchestrator.runStrategy(makeStrategyPacket());
 
-		const secondOrchestrator = createBuildplaneOrchestrator({
+		const secondOrchestrator = createOrchestratorWithAdmissionStore({
 			projectRoot: root,
 			storage,
 			runtime: {
@@ -635,7 +663,7 @@ describe("orchestrator memory integration", () => {
 			fetchLearnings: vi.fn().mockReturnValue([]),
 			promoteLearnings: vi.fn(),
 		} as unknown as BuildplaneMemoryPort;
-		const orch = createBuildplaneOrchestrator({
+		const orch = createOrchestratorWithAdmissionStore({
 			projectRoot: root,
 			storage,
 			runtime: {
@@ -663,7 +691,7 @@ describe("orchestrator memory integration", () => {
 			createdBy: "operator",
 		});
 		const initialProcedureCount = storage.procedures.length;
-		const orch = createBuildplaneOrchestrator({
+		const orch = createOrchestratorWithAdmissionStore({
 			projectRoot: root,
 			storage,
 			runtime: {
@@ -688,7 +716,7 @@ describe("orchestrator memory integration", () => {
 		const root = mkdtempSync(join(tmpdir(), "bp-orch-strategy-supersede-"));
 		const storage = makeProcedureAwareStorage();
 
-		const firstOrchestrator = createBuildplaneOrchestrator({
+		const firstOrchestrator = createOrchestratorWithAdmissionStore({
 			projectRoot: root,
 			storage,
 			runtime: {
@@ -700,7 +728,7 @@ describe("orchestrator memory integration", () => {
 		});
 		await firstOrchestrator.runStrategy(makeStrategyPacket());
 
-		const secondOrchestrator = createBuildplaneOrchestrator({
+		const secondOrchestrator = createOrchestratorWithAdmissionStore({
 			projectRoot: root,
 			storage,
 			runtime: {

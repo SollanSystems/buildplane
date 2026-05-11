@@ -163,13 +163,42 @@ export function createBuildplaneOrchestrator(
 			.digest("hex")}`;
 	}
 
+	function uniqueStrings(values: readonly string[]): readonly string[] {
+		return Array.from(new Set(values));
+	}
+
+	function collectDeclaredScopeAllowedPaths(
+		validatedPacket: UnitPacket,
+	): readonly string[] {
+		return uniqueStrings([
+			...validatedPacket.unit.expectedOutputs,
+			...validatedPacket.verification.requiredOutputs,
+		]);
+	}
+
+	function deriveRunAdmissionRequestedSideEffects(
+		validatedPacket: UnitPacket,
+	): readonly string[] {
+		const requestedSideEffects = ["fs.read:repo"];
+		if (collectDeclaredScopeAllowedPaths(validatedPacket).length > 0) {
+			requestedSideEffects.push("fs.write:declared_scope");
+		}
+		if (validatedPacket.execution !== undefined) {
+			requestedSideEffects.push("command.execute:verification");
+		}
+		if (validatedPacket.model !== undefined) {
+			requestedSideEffects.push("model.invoke:provider");
+		}
+		return uniqueStrings(requestedSideEffects);
+	}
+
 	function createRunAdmissionEvidenceInputs(ctx: {
 		run: Run;
 		validatedPacket: UnitPacket;
 		workspace: WorkspaceSnapshot;
 	}): readonly RunAdmissionEvidenceInput[] {
 		const scope = {
-			allowed_paths: ctx.validatedPacket.unit.expectedOutputs,
+			allowed_paths: collectDeclaredScopeAllowedPaths(ctx.validatedPacket),
 			network_allowed: false,
 		};
 		return [
@@ -212,9 +241,11 @@ export function createBuildplaneOrchestrator(
 	}): CreateRunAdmissionReceiptDryRunInput {
 		const { run, validatedPacket, workspace: preparedWorkspace } = ctx;
 		const declaredScope = {
-			allowed_paths: validatedPacket.unit.expectedOutputs,
+			allowed_paths: collectDeclaredScopeAllowedPaths(validatedPacket),
 			network_allowed: false,
 		};
+		const requestedSideEffects =
+			deriveRunAdmissionRequestedSideEffects(validatedPacket);
 		return {
 			receiptId: `run_admission_${run.id}`,
 			decidedAt: new Date().toISOString(),
@@ -236,8 +267,8 @@ export function createBuildplaneOrchestrator(
 				worktree_clean: true,
 			},
 			request: {
-				requested_capabilities: ["fs.read:repo"],
-				requested_side_effects: ["fs.read:repo"],
+				requested_capabilities: requestedSideEffects,
+				requested_side_effects: requestedSideEffects,
 				declared_scope: declaredScope,
 			},
 			policyProfileId: validatedPacket.unit.policyProfile,

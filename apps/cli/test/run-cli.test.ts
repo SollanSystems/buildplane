@@ -15,6 +15,7 @@ import {
 	type BuildplaneOrchestrator,
 	type BuildplaneWorkspacePort,
 	createBuildplaneOrchestrator,
+	type RunAdmissionLocalEvidenceStore,
 	type UnitPacket,
 } from "@buildplane/kernel";
 import { evaluateRun } from "@buildplane/policy";
@@ -69,12 +70,32 @@ function createCliDependencies(
 				runtime: { executePacket },
 				policy: { evaluateRun },
 				workspace: options.workspace ?? createGitWorktreeAdapter(),
+				admissionStore: createTestAdmissionStore(projectRoot),
 			}),
 	};
 }
 
 function createGitWorktreeAdapter(): BuildplaneWorkspacePort {
 	return createActualGitWorkspaceAdapter();
+}
+
+function createTestAdmissionStore(
+	root: string,
+): RunAdmissionLocalEvidenceStore {
+	return {
+		writeReceiptArtifact(input) {
+			return {
+				ref: `artifact://${input.receipt.receipt_id}`,
+				path: join(root, ".buildplane", "admission", "run-admission.json"),
+			};
+		},
+		appendAdmissionEvent(input) {
+			return {
+				ref: `event://${input.event.event_id}`,
+				path: join(root, ".buildplane", "admission", "events.jsonl"),
+			};
+		},
+	};
 }
 
 function writeWorkspaceFile(
