@@ -89,7 +89,7 @@ export interface RunAdmissionDecisionBlock extends JsonRecord {
 	readonly reasons: readonly string[];
 	readonly missing_evidence: readonly string[];
 	readonly unsafe_requests: readonly string[];
-	readonly will_execute_worker: false;
+	readonly will_execute_worker: boolean;
 	readonly authorized_next_step: string;
 }
 
@@ -125,6 +125,90 @@ export interface RunAdmissionReceipt extends JsonRecord {
 	readonly provenance: RunAdmissionProvenance;
 }
 
+export interface RunAdmissionRecordedReplay extends JsonRecord {
+	readonly side_effect_safe: true;
+	readonly allowed_actions: readonly string[];
+	readonly forbidden_side_effects: readonly string[];
+	readonly behavior: string;
+	readonly fork: string;
+}
+
+export interface RunAdmissionRecordedPayload extends JsonRecord {
+	readonly receipt_id: string;
+	readonly receipt_digest: string;
+	readonly receipt_ref: string | null;
+	readonly run_id: string;
+	readonly unit_id: string;
+	readonly idempotency_key: string;
+	readonly decision: RunAdmissionDecision;
+	readonly policy_profile_id: string;
+	readonly requested_side_effects: readonly string[];
+	readonly allowed_side_effects: readonly string[];
+	readonly denied_side_effects: readonly RunAdmissionDeniedSideEffect[];
+	readonly missing_evidence: readonly string[];
+	readonly unsafe_requests: readonly string[];
+	readonly evidence_inputs: readonly RunAdmissionEvidenceInput[];
+	readonly quarantine: boolean;
+	readonly will_execute_worker: boolean;
+	readonly authorized_next_step: string;
+	readonly decided_by: string;
+	readonly decided_at: string;
+}
+
+export interface RunAdmissionRecordedEvent extends JsonRecord {
+	readonly kind: "run_admission_recorded";
+	readonly schema_version: "0.1.0";
+	readonly recorded_at: string;
+	readonly payload: RunAdmissionRecordedPayload;
+	readonly replay: RunAdmissionRecordedReplay;
+}
+
+export interface RunAdmissionReceiptArtifactWriteInput {
+	readonly receipt: RunAdmissionReceipt;
+	readonly receiptDigest: string;
+	readonly contents: string;
+}
+
+export interface RunAdmissionEventAppendInput {
+	readonly event: RunAdmissionRecordedEvent;
+	readonly receipt: RunAdmissionReceipt;
+}
+
+export interface RunAdmissionLocalEvidenceWriteResult {
+	readonly ref: string;
+	readonly path?: string;
+}
+
+export interface RunAdmissionLocalEvidenceStore {
+	readonly writeReceiptArtifact: (
+		input: RunAdmissionReceiptArtifactWriteInput,
+	) =>
+		| RunAdmissionLocalEvidenceWriteResult
+		| Promise<RunAdmissionLocalEvidenceWriteResult>;
+	readonly appendAdmissionEvent: (
+		input: RunAdmissionEventAppendInput,
+	) =>
+		| RunAdmissionLocalEvidenceWriteResult
+		| Promise<RunAdmissionLocalEvidenceWriteResult>;
+}
+
+export interface RecordRunAdmissionReceiptAttemptInput {
+	readonly receipt: RunAdmissionReceipt;
+	readonly store: RunAdmissionLocalEvidenceStore;
+	readonly recordedAt?: string;
+}
+
+export interface RunAdmissionReceiptAttemptRecord extends JsonRecord {
+	readonly receipt_json: string;
+	readonly receipt_digest: string;
+	readonly receipt_ref: string;
+	readonly receipt_path?: string;
+	readonly payload: RunAdmissionRecordedPayload;
+	readonly event: RunAdmissionRecordedEvent;
+	readonly event_ref: string;
+	readonly event_path?: string;
+}
+
 export class RunAdmissionReceiptInputError extends Error {
 	readonly code = "INVALID_PACKET";
 
@@ -140,6 +224,20 @@ const SAFE_SIDE_EFFECTS = new Set([
 	"command.execute:verification",
 	"git.commit:local_worktree",
 ]);
+
+const CREDENTIAL_KEY_PATTERN =
+	/(^|[_-])(api[_-]?key|auth[_-]?token|credential|password|passwd|private[_-]?key|secret|token)([_-]|$)/i;
+
+const CREDENTIAL_VALUE_PATTERNS: readonly RegExp[] = [
+	/^gh[pousr]_[A-Za-z0-9_]{12,}$/,
+	/^sk-[A-Za-z0-9._-]{6,}$/,
+	/^bp_secret_[A-Za-z0-9_./+=-]{8,}$/i,
+	/^xox[abprs]-[A-Za-z0-9-]{10,}$/,
+	/^AKIA[0-9A-Z]{16}$/,
+	/^-----BEGIN (?:RSA |EC |OPENSSH |PRIVATE )?PRIVATE KEY-----/,
+];
+
+const REDACTED_PLACEHOLDER = "[REDACTED]";
 
 const READ_ONLY_SIDE_EFFECTS = new Set(["fs.read:repo"]);
 
@@ -323,6 +421,71 @@ function stableJson(value: JsonValue): string {
 		.join(",")}}`;
 }
 
+function isCredentialShapedString(value: string): boolean {
+	if (value === REDACTED_PLACEHOLDER) {
+		return false;
+	}
+	const trimmed = value.trim();
+	return CREDENTIAL_VALUE_PATTERNS.some((pattern) => pattern.test(trimmed));
+}
+
+function findUnsafeCredentialPath(
+	value: JsonValue,
+	path: string,
+	insideCredentialKey = false,
+): string | null {
+	if (value === undefined || value === null) {
+		return null;
+	}
+	if (typeof value === "string") {
+		if (value === REDACTED_PLACEHOLDER) {
+			return null;
+		}
+		return insideCredentialKey || isCredentialShapedString(value) ? path : null;
+	}
+	if (typeof value === "number" || typeof value === "boolean") {
+		return insideCredentialKey ? path : null;
+	}
+	if (Array.isArray(value)) {
+		for (let index = 0; index < value.length; index += 1) {
+			const unsafePath = findUnsafeCredentialPath(
+				value[index],
+				`${path}[${index}]`,
+				insideCredentialKey,
+			);
+			if (unsafePath) {
+				return unsafePath;
+			}
+		}
+		return null;
+	}
+	const record = value as { readonly [key: string]: JsonValue };
+	for (const key of Object.keys(record).sort(compareJsonKeys)) {
+		const child = record[key];
+		if (child === undefined) {
+			continue;
+		}
+		const unsafePath = findUnsafeCredentialPath(
+			child,
+			`${path}.${key}`,
+			insideCredentialKey || CREDENTIAL_KEY_PATTERN.test(key),
+		);
+		if (unsafePath) {
+			return unsafePath;
+		}
+	}
+	return null;
+}
+
+function assertNoCredentialShapedValues(value: JsonValue, field: string): void {
+	const unsafePath = findUnsafeCredentialPath(value, field);
+	if (unsafePath) {
+		throw new RunAdmissionReceiptInputError(
+			`${field} contains credential-shaped or non-redacted secret material at ${unsafePath}; replace the value with ${REDACTED_PLACEHOLDER}.`,
+		);
+	}
+}
+
 function createIdempotencyKey(input: {
 	readonly run: JsonRecord;
 	readonly repo: RunAdmissionRepo;
@@ -488,10 +651,78 @@ function validateInput(input: CreateRunAdmissionReceiptDryRunInput): void {
 			);
 		}
 	}
+	assertNoCredentialShapedValues(record as JsonValue, "input");
 }
 
-export function createRunAdmissionReceiptDryRun(
+function createReceiptDigest(receiptJson: string): string {
+	const digest = createHash("sha256").update(receiptJson).digest("hex");
+	return `sha256:${digest}`;
+}
+
+function createRecordedReplay(
+	receipt: RunAdmissionReceipt,
+): RunAdmissionRecordedReplay {
+	return {
+		side_effect_safe: true,
+		allowed_actions: ["inspect_receipt", "verify_receipt_digest"],
+		forbidden_side_effects: [
+			"worker.execute",
+			"github.pr.create",
+			"network.mutate",
+			"kanban.write:auto",
+			"git.push:remote",
+			"deploy:production",
+			"git.merge",
+		],
+		behavior: receipt.replay.behavior,
+		fork: receipt.replay.fork,
+	};
+}
+
+function stringRecordValue(record: JsonRecord, key: string): string {
+	const value = record[key];
+	return typeof value === "string" && value.length > 0 ? value : "unknown";
+}
+
+function createRecordedPayload(input: {
+	readonly receipt: RunAdmissionReceipt;
+	readonly receiptDigest: string;
+	readonly receiptRef: string | null;
+}): RunAdmissionRecordedPayload {
+	const { receipt, receiptDigest, receiptRef } = input;
+	return {
+		receipt_id: receipt.receipt_id,
+		receipt_digest: receiptDigest,
+		receipt_ref: receiptRef,
+		run_id: stringRecordValue(receipt.run, "run_id"),
+		unit_id: stringRecordValue(receipt.run, "unit_id"),
+		idempotency_key: receipt.idempotency_key,
+		decision: receipt.admission.decision,
+		policy_profile_id: receipt.policy.profile_id,
+		requested_side_effects: cloneJson(
+			receipt.request.requested_side_effects ?? [],
+		),
+		allowed_side_effects: cloneJson(receipt.policy.allowed_side_effects),
+		denied_side_effects: cloneJson(receipt.policy.denied_side_effects),
+		missing_evidence: cloneJson(receipt.admission.missing_evidence),
+		unsafe_requests: cloneJson(receipt.admission.unsafe_requests),
+		evidence_inputs: cloneJson(receipt.evidence_inputs),
+		quarantine: receipt.policy.quarantine,
+		will_execute_worker: receipt.admission.will_execute_worker,
+		authorized_next_step: receipt.admission.authorized_next_step,
+		decided_by: receipt.admission.decided_by,
+		decided_at: receipt.admission.decided_at,
+	};
+}
+
+interface CreateRunAdmissionReceiptOptions {
+	readonly willExecuteWorker: boolean;
+	readonly authorizedNextStep: string;
+}
+
+function createRunAdmissionReceipt(
 	input: CreateRunAdmissionReceiptDryRunInput,
+	options: CreateRunAdmissionReceiptOptions,
 ): RunAdmissionReceipt {
 	validateInput(input);
 
@@ -561,6 +792,11 @@ export function createRunAdmissionReceiptDryRun(
 		authorizedNextStep = "freeze_and_require_explicit_release_authority";
 	}
 
+	const willExecuteWorker = decision === "PASS" && options.willExecuteWorker;
+	const effectiveAuthorizedNextStep = willExecuteWorker
+		? options.authorizedNextStep
+		: authorizedNextStep;
+
 	const policy: RunAdmissionPolicy = {
 		profile_id: input.policyProfileId,
 		allowed_side_effects: unique(allowedSideEffects),
@@ -591,8 +827,8 @@ export function createRunAdmissionReceiptDryRun(
 			reasons,
 			missing_evidence: missingEvidence,
 			unsafe_requests: unsafeRequests,
-			will_execute_worker: false,
-			authorized_next_step: authorizedNextStep,
+			will_execute_worker: willExecuteWorker,
+			authorized_next_step: effectiveAuthorizedNextStep,
 		},
 		idempotency_key: createIdempotencyKey({
 			run,
@@ -612,5 +848,121 @@ export function createRunAdmissionReceiptDryRun(
 			provider: input.provider ?? null,
 			worker_agent_trusted: false,
 		},
+	};
+}
+
+export function createRunAdmissionReceiptDryRun(
+	input: CreateRunAdmissionReceiptDryRunInput,
+): RunAdmissionReceipt {
+	return createRunAdmissionReceipt(input, {
+		willExecuteWorker: false,
+		authorizedNextStep: "record_receipt_only",
+	});
+}
+
+export function createRunAdmissionReceiptLive(
+	input: CreateRunAdmissionReceiptDryRunInput,
+): RunAdmissionReceipt {
+	return createRunAdmissionReceipt(input, {
+		willExecuteWorker: true,
+		authorizedNextStep: "dispatch_worker",
+	});
+}
+
+function isPromiseLike<T>(value: unknown): value is Promise<T> {
+	return (
+		typeof value === "object" &&
+		value !== null &&
+		"then" in value &&
+		typeof (value as { then?: unknown }).then === "function"
+	);
+}
+
+export function recordRunAdmissionReceiptAttemptSync(
+	input: RecordRunAdmissionReceiptAttemptInput,
+): RunAdmissionReceiptAttemptRecord {
+	assertNoCredentialShapedValues(input.receipt, "receipt");
+	const receiptJson = stableJson(input.receipt);
+	const receiptDigest = createReceiptDigest(receiptJson);
+	const receiptArtifact = input.store.writeReceiptArtifact({
+		receipt: input.receipt,
+		receiptDigest,
+		contents: receiptJson,
+	});
+	if (isPromiseLike<RunAdmissionLocalEvidenceWriteResult>(receiptArtifact)) {
+		throw new Error(
+			"Synchronous run admission requires a synchronous receipt artifact store.",
+		);
+	}
+	const payload = createRecordedPayload({
+		receipt: input.receipt,
+		receiptDigest,
+		receiptRef: receiptArtifact.ref,
+	});
+	const event: RunAdmissionRecordedEvent = {
+		kind: "run_admission_recorded",
+		schema_version: "0.1.0",
+		recorded_at: input.recordedAt ?? input.receipt.admission.decided_at,
+		payload,
+		replay: createRecordedReplay(input.receipt),
+	};
+	assertNoCredentialShapedValues(event, "event");
+	const eventWrite = input.store.appendAdmissionEvent({
+		event,
+		receipt: input.receipt,
+	});
+	if (isPromiseLike<RunAdmissionLocalEvidenceWriteResult>(eventWrite)) {
+		throw new Error(
+			"Synchronous run admission requires a synchronous admission event store.",
+		);
+	}
+	return {
+		receipt_json: receiptJson,
+		receipt_digest: receiptDigest,
+		receipt_ref: receiptArtifact.ref,
+		...(receiptArtifact.path ? { receipt_path: receiptArtifact.path } : {}),
+		payload,
+		event,
+		event_ref: eventWrite.ref,
+		...(eventWrite.path ? { event_path: eventWrite.path } : {}),
+	};
+}
+
+export async function recordRunAdmissionReceiptAttempt(
+	input: RecordRunAdmissionReceiptAttemptInput,
+): Promise<RunAdmissionReceiptAttemptRecord> {
+	assertNoCredentialShapedValues(input.receipt, "receipt");
+	const receiptJson = stableJson(input.receipt);
+	const receiptDigest = createReceiptDigest(receiptJson);
+	const receiptArtifact = await input.store.writeReceiptArtifact({
+		receipt: input.receipt,
+		receiptDigest,
+		contents: receiptJson,
+	});
+	const payload = createRecordedPayload({
+		receipt: input.receipt,
+		receiptDigest,
+		receiptRef: receiptArtifact.ref,
+	});
+	const event: RunAdmissionRecordedEvent = {
+		kind: "run_admission_recorded",
+		schema_version: "0.1.0",
+		recorded_at: input.recordedAt ?? input.receipt.admission.decided_at,
+		payload,
+		replay: createRecordedReplay(input.receipt),
+	};
+	const eventAppend = await input.store.appendAdmissionEvent({
+		event,
+		receipt: input.receipt,
+	});
+	return {
+		receipt_json: receiptJson,
+		receipt_digest: receiptDigest,
+		receipt_ref: receiptArtifact.ref,
+		...(receiptArtifact.path ? { receipt_path: receiptArtifact.path } : {}),
+		payload,
+		event,
+		event_ref: eventAppend.ref,
+		...(eventAppend.path ? { event_path: eventAppend.path } : {}),
 	};
 }
