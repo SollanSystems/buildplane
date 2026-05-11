@@ -573,6 +573,35 @@ describe("recordRunAdmissionReceiptAttempt", () => {
 		expectNoForbiddenSideEffects(store);
 	});
 
+	it("rejects async credential-shaped admission event values before appending events", async () => {
+		const receipt = createRunAdmissionReceiptDryRun(
+			admissionInputFromFixture(loadFixture("pass")),
+		);
+		const baseStore = createTempEvidenceStore();
+		const rawSentinels = [FAKE_OPERATOR_TOKEN];
+		const store: ReturnType<typeof createTempEvidenceStore> = {
+			...baseStore,
+			writeReceiptArtifact: vi.fn(() => ({
+				ref: FAKE_OPERATOR_TOKEN,
+			})),
+			appendAdmissionEvent: vi.fn(() => ({ ref: "event://unsafe" })),
+		};
+		let record: unknown;
+
+		await expectSanitizedSecretRejection(async () => {
+			record = await recordRunAdmissionReceiptAttempt({ receipt, store });
+		}, rawSentinels);
+
+		expect(record).toBeUndefined();
+		expect(store.writeReceiptArtifact).toHaveBeenCalledTimes(1);
+		expect(store.appendAdmissionEvent).not.toHaveBeenCalled();
+		expectNoRawSentinels(
+			vi.mocked(store.appendAdmissionEvent).mock.calls,
+			rawSentinels,
+		);
+		expectNoForbiddenSideEffects(store);
+	});
+
 	it("records missing evidence as INSUFFICIENT_EVIDENCE and never calls a worker executor", async () => {
 		const receipt = createRunAdmissionReceiptDryRun(
 			admissionInputFromFixture(loadFixture("insufficient-evidence")),

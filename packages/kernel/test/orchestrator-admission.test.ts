@@ -60,6 +60,7 @@ function passingReceipt(cwd: string): ExecutionReceipt {
 
 interface HarnessOptions {
 	readonly packet?: UnitPacket;
+	readonly admissionStore?: RunAdmissionLocalEvidenceStore | null;
 	readonly appendAdmissionEvent?: RunAdmissionLocalEvidenceStore["appendAdmissionEvent"];
 	readonly writeReceiptArtifact?: RunAdmissionLocalEvidenceStore["writeReceiptArtifact"];
 }
@@ -172,7 +173,7 @@ function createHarness(options: HarnessOptions = {}): Harness {
 		),
 	};
 
-	const admissionStore: RunAdmissionLocalEvidenceStore = {
+	const defaultAdmissionStore: RunAdmissionLocalEvidenceStore = {
 		writeReceiptArtifact:
 			options.writeReceiptArtifact ??
 			vi.fn((input) => {
@@ -199,6 +200,10 @@ function createHarness(options: HarnessOptions = {}): Harness {
 				};
 			}),
 	};
+	const admissionStore =
+		options.admissionStore === null
+			? undefined
+			: (options.admissionStore ?? defaultAdmissionStore);
 
 	const bus = createEventBus();
 	bus.subscribe((event) => {
@@ -299,6 +304,36 @@ describe("orchestrator run admission", () => {
 		expect(harness.artifacts[0]?.receipt.admission.will_execute_worker).toBe(
 			true,
 		);
+	});
+
+	it("fails closed before sync or async runtime when no admission store is configured", async () => {
+		const syncHarness = createHarness({ admissionStore: null });
+		cleanup.push(syncHarness.cleanup);
+
+		const syncResult = syncHarness.orchestrator.runPacket(syncHarness.packet);
+
+		expect(syncResult.run.status).toBe("failed");
+		expect(syncResult.failure?.kind).toBe("run-admission-store-unavailable");
+		expect(syncHarness.runtime.executePacket).not.toHaveBeenCalled();
+		expect(syncHarness.artifacts).toHaveLength(0);
+		expect(syncHarness.admissionEvents).toHaveLength(0);
+		expect(syncHarness.runEvents).not.toContain("execution-started");
+		expect(syncHarness.runEvents).not.toContain("runtime");
+
+		const asyncHarness = createHarness({ admissionStore: null });
+		cleanup.push(asyncHarness.cleanup);
+
+		const asyncResult = await asyncHarness.orchestrator.runPacketAsync(
+			asyncHarness.packet,
+		);
+
+		expect(asyncResult.run.status).toBe("failed");
+		expect(asyncResult.failure?.kind).toBe("run-admission-store-unavailable");
+		expect(asyncHarness.runtime.executePacketAsync).not.toHaveBeenCalled();
+		expect(asyncHarness.artifacts).toHaveLength(0);
+		expect(asyncHarness.admissionEvents).toHaveLength(0);
+		expect(asyncHarness.runEvents).not.toContain("execution-started");
+		expect(asyncHarness.runEvents).not.toContain("runtime");
 	});
 
 	it("fails closed before runtime when admission input contains credential-shaped values", () => {

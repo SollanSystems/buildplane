@@ -281,13 +281,35 @@ export function createBuildplaneOrchestrator(
 		);
 	}
 
+	function finalizeAdmissionStoreUnavailable(ctx: {
+		run: Run;
+		workspace: WorkspaceSnapshot;
+	}): RunPacketResult {
+		return finalizeInfrastructureFailure(
+			ctx.run,
+			infrastructureFailure(
+				"run-admission-store-unavailable",
+				"Run admission evidence store is required before live worker execution.",
+			),
+			{
+				workspace: ctx.workspace,
+				workspaceStatus: "retained",
+			},
+		);
+	}
+
 	function admitPreparedRunSync(ctx: {
 		run: Run;
 		validatedPacket: UnitPacket;
 		workspace: WorkspaceSnapshot;
 		projectRoot: string;
 	}): { ok: true } | { ok: false; result: RunPacketResult } {
-		if (!admissionStore) return { ok: true };
+		if (!admissionStore) {
+			return {
+				ok: false,
+				result: finalizeAdmissionStoreUnavailable(ctx),
+			};
+		}
 		try {
 			const receipt = createRunAdmissionReceiptLive(
 				createRunAdmissionReceiptInput(ctx),
@@ -327,7 +349,12 @@ export function createBuildplaneOrchestrator(
 		workspace: WorkspaceSnapshot;
 		projectRoot: string;
 	}): Promise<{ ok: true } | { ok: false; result: RunPacketResult }> {
-		if (!admissionStore) return { ok: true };
+		if (!admissionStore) {
+			return {
+				ok: false,
+				result: finalizeAdmissionStoreUnavailable(ctx),
+			};
+		}
 		try {
 			const receipt = createRunAdmissionReceiptLive(
 				createRunAdmissionReceiptInput(ctx),
