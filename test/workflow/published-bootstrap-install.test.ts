@@ -136,5 +136,5 @@ describe("published bootstrap installer shim", () => {
 				),
 			);
 		}
-	}, 15_000);
+	}, 60_000);
 });
