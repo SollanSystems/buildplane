@@ -1,7 +1,13 @@
 import type { ChildProcess } from "node:child_process";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import {
+	appendFileSync,
+	existsSync,
+	mkdirSync,
+	readFileSync,
+	writeFileSync,
+} from "node:fs";
 import { basename, resolve } from "node:path";
 import type { Readable, Writable } from "node:stream";
 import { createToolRegistry } from "@buildplane/adapters-tools";
@@ -201,6 +207,113 @@ interface AdmissionReceiptKernelModule {
 	createRunAdmissionReceiptDryRun(
 		input: AdmissionReceiptInputLike,
 	): Record<string, unknown>;
+}
+
+type RunAdmissionStoreLike = {
+	writeReceiptArtifact(input: {
+		receipt: Record<string, unknown>;
+		receiptDigest: string;
+		contents: string;
+	}): { ref: string; path: string };
+	appendAdmissionEvent(input: {
+		event: Record<string, unknown>;
+		receipt: Record<string, unknown>;
+	}): {
+		ref: string;
+		path: string;
+	};
+};
+
+function safeAdmissionArtifactStem(value: unknown): string {
+	const raw = typeof value === "string" ? value : "run_admission";
+	const safe = raw.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 120);
+	return safe.length > 0 ? safe : "run_admission";
+}
+
+function createRunAdmissionEventRef(input: {
+	event: Record<string, unknown>;
+	receipt: Record<string, unknown>;
+}): string {
+	const eventKind =
+		typeof input.event.kind === "string" && input.event.kind.length > 0
+			? input.event.kind
+			: "run_admission_recorded";
+	const recordedAt =
+		typeof input.event.recorded_at === "string" &&
+		input.event.recorded_at.length > 0
+			? input.event.recorded_at
+			: "";
+	const payload = nestedRecord(input.event, "payload");
+	const payloadReceiptId =
+		payload && typeof payload.receipt_id === "string"
+			? payload.receipt_id
+			: undefined;
+	const storeReceiptId =
+		typeof input.receipt.receipt_id === "string"
+			? input.receipt.receipt_id
+			: undefined;
+	const receiptId = safeAdmissionArtifactStem(
+		payloadReceiptId ?? storeReceiptId,
+	);
+	const eventDigest = createHash("sha256")
+		.update(
+			JSON.stringify({
+				eventKind,
+				recordedAt,
+				receiptId,
+				payload,
+				receipt: input.receipt,
+			}),
+		)
+		.digest("hex");
+	return `event://run-admission/${receiptId}/${eventDigest}`;
+}
+
+function resolveGitMetadataDir(projectRoot: string): string {
+	const gitPath = resolve(projectRoot, ".git");
+	try {
+		const gitFile = readFileSync(gitPath, "utf8").trim();
+		const match = /^gitdir:\s*(.+)$/.exec(gitFile);
+		const gitdir = match?.[1]?.trim();
+		if (gitdir) {
+			return resolve(projectRoot, gitdir);
+		}
+	} catch {
+		// A normal repository has .git as a directory; fall through.
+	}
+	return gitPath;
+}
+
+function createCliRunAdmissionStore(
+	projectRoot: string,
+): RunAdmissionStoreLike {
+	const admissionDir = resolve(
+		resolveGitMetadataDir(projectRoot),
+		"buildplane",
+		"admission",
+	);
+	const receiptsDir = resolve(admissionDir, "receipts");
+	const eventsPath = resolve(admissionDir, "events.jsonl");
+	return {
+		writeReceiptArtifact(input) {
+			mkdirSync(receiptsDir, { recursive: true });
+			const stem = safeAdmissionArtifactStem(input.receipt.receipt_id);
+			const path = resolve(receiptsDir, `${stem}.json`);
+			writeFileSync(path, input.contents, "utf8");
+			return {
+				ref: `artifact://run-admission/${input.receiptDigest}`,
+				path,
+			};
+		},
+		appendAdmissionEvent(input) {
+			mkdirSync(admissionDir, { recursive: true });
+			appendFileSync(eventsPath, `${JSON.stringify(input.event)}\n`, "utf8");
+			return {
+				ref: createRunAdmissionEventRef(input),
+				path: eventsPath,
+			};
+		},
+	};
 }
 
 class AdmissionReceiptCliError extends Error {
@@ -879,6 +992,7 @@ async function loadCliOrchestrator(
 			};
 			policy: { evaluateRun: (packet: unknown, receipt: unknown) => unknown };
 			workspace?: unknown;
+			admissionStore?: RunAdmissionStoreLike;
 			eventBus?: unknown;
 			memoryPort?: unknown;
 		}) => BuildplaneCliOrchestrator;
@@ -1208,6 +1322,7 @@ async function loadCliOrchestrator(
 		runtime: runtimeRouter,
 		policy: { evaluateRun: policy.evaluateRun },
 		workspace: adaptersGit.createGitWorktreeAdapter(),
+		admissionStore: createCliRunAdmissionStore(projectRoot),
 		eventBus,
 		memoryPort: orchestratorMemoryPortRef, // READ-WRITE port for post-run writes
 	});

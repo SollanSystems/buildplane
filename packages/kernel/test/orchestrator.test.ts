@@ -10,6 +10,7 @@ import type {
 	ExecutionReceipt,
 	InspectSnapshot,
 	PolicyDecision,
+	RunAdmissionLocalEvidenceStore,
 	StatusSnapshot,
 	UnitPacket,
 	WorkspaceSnapshot,
@@ -270,6 +271,21 @@ function createHarness(options: HarnessOptions = {}) {
 		},
 	};
 
+	const admissionStore: RunAdmissionLocalEvidenceStore = {
+		writeReceiptArtifact(input) {
+			return {
+				ref: `artifact://${input.receipt.receipt_id}`,
+				path: join(root, "run-admission.json"),
+			};
+		},
+		appendAdmissionEvent(input) {
+			return {
+				ref: `event://${input.event.event_id}`,
+				path: join(root, "run-admission-events.jsonl"),
+			};
+		},
+	};
+
 	return {
 		root,
 		workspacePath,
@@ -285,6 +301,7 @@ function createHarness(options: HarnessOptions = {}) {
 			runtime,
 			policy,
 			workspace,
+			admissionStore,
 		}),
 		cleanup() {
 			rmSync(root, { recursive: true, force: true });

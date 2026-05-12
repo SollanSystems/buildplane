@@ -19,7 +19,14 @@ import {
 	type UnitPacket,
 } from "../src/index.js";
 
-const FAKE_OPERATOR_TOKEN = "ghp_FAKE_SECRET_SENTINEL_DO_NOT_USE_1234567890";
+function credentialShapedSentinel(parts: readonly string[]): string {
+	return parts.join("");
+}
+
+const FAKE_OPERATOR_TOKEN = credentialShapedSentinel([
+	"gh",
+	"p_FAKE_SECRET_SENTINEL_DO_NOT_USE_1234567890",
+]);
 
 function createPacket(overrides: Partial<UnitPacket> = {}): UnitPacket {
 	return {
@@ -60,6 +67,7 @@ function passingReceipt(cwd: string): ExecutionReceipt {
 
 interface HarnessOptions {
 	readonly packet?: UnitPacket;
+	readonly admissionStore?: RunAdmissionLocalEvidenceStore | null;
 	readonly appendAdmissionEvent?: RunAdmissionLocalEvidenceStore["appendAdmissionEvent"];
 	readonly writeReceiptArtifact?: RunAdmissionLocalEvidenceStore["writeReceiptArtifact"];
 }
@@ -172,7 +180,7 @@ function createHarness(options: HarnessOptions = {}): Harness {
 		),
 	};
 
-	const admissionStore: RunAdmissionLocalEvidenceStore = {
+	const defaultAdmissionStore: RunAdmissionLocalEvidenceStore = {
 		writeReceiptArtifact:
 			options.writeReceiptArtifact ??
 			vi.fn((input) => {
@@ -199,6 +207,10 @@ function createHarness(options: HarnessOptions = {}): Harness {
 				};
 			}),
 	};
+	const admissionStore =
+		options.admissionStore === undefined
+			? defaultAdmissionStore
+			: options.admissionStore;
 
 	const bus = createEventBus();
 	bus.subscribe((event) => {
@@ -269,13 +281,62 @@ describe("orchestrator run admission", () => {
 			decision: "PASS",
 			receipt_ref: expect.stringMatching(/^artifact:\/\//),
 			policy_profile_id: "default",
-			allowed_side_effects: ["fs.read:repo"],
+			allowed_side_effects: [
+				"fs.read:repo",
+				"fs.write:declared_scope",
+				"command.execute:verification",
+			],
 		});
 		expect(
 			harness.artifacts[0]?.receipt.policy.denied_side_effects.map(
 				({ effect }) => effect,
 			),
 		).toEqual(["git.push:remote", "github.pr.create", "deploy:production"]);
+	});
+
+	it("derives live admission side effects from command packet semantics", () => {
+		const harness = createHarness();
+		cleanup.push(harness.cleanup);
+
+		const result = harness.orchestrator.runPacket(harness.packet);
+
+		expect(result.run.status).toBe("passed");
+		expect(
+			harness.artifacts[0]?.receipt.request.requested_side_effects,
+		).toEqual([
+			"fs.read:repo",
+			"fs.write:declared_scope",
+			"command.execute:verification",
+		]);
+		expect(harness.admissionPayloads[0]?.allowed_side_effects).toEqual([
+			"fs.read:repo",
+			"fs.write:declared_scope",
+			"command.execute:verification",
+		]);
+	});
+
+	it("admits model packets using only local repo and declared-scope side effects", () => {
+		const packet = createPacket({
+			execution: undefined,
+			model: {
+				provider: "test-provider",
+				model: "test-model",
+				prompt: "Summarize the local fixture.",
+			},
+		});
+		const harness = createHarness({ packet });
+		cleanup.push(harness.cleanup);
+
+		const result = harness.orchestrator.runPacket(packet);
+
+		expect(result.run.status).toBe("passed");
+		expect(harness.runtime.executePacket).toHaveBeenCalledTimes(1);
+		expect(harness.admissionPayloads[0]).toMatchObject({
+			decision: "PASS",
+			requested_side_effects: ["fs.read:repo", "fs.write:declared_scope"],
+			allowed_side_effects: ["fs.read:repo", "fs.write:declared_scope"],
+			unsafe_requests: [],
+		});
 	});
 
 	it("records live async admission before async execution", async () => {
@@ -299,6 +360,36 @@ describe("orchestrator run admission", () => {
 		expect(harness.artifacts[0]?.receipt.admission.will_execute_worker).toBe(
 			true,
 		);
+	});
+
+	it("fails closed before sync or async runtime when no admission store is configured", async () => {
+		const syncHarness = createHarness({ admissionStore: null });
+		cleanup.push(syncHarness.cleanup);
+
+		const syncResult = syncHarness.orchestrator.runPacket(syncHarness.packet);
+
+		expect(syncResult.run.status).toBe("failed");
+		expect(syncResult.failure?.kind).toBe("run-admission-store-unavailable");
+		expect(syncHarness.runtime.executePacket).not.toHaveBeenCalled();
+		expect(syncHarness.artifacts).toHaveLength(0);
+		expect(syncHarness.admissionEvents).toHaveLength(0);
+		expect(syncHarness.runEvents).not.toContain("execution-started");
+		expect(syncHarness.runEvents).not.toContain("runtime");
+
+		const asyncHarness = createHarness({ admissionStore: null });
+		cleanup.push(asyncHarness.cleanup);
+
+		const asyncResult = await asyncHarness.orchestrator.runPacketAsync(
+			asyncHarness.packet,
+		);
+
+		expect(asyncResult.run.status).toBe("failed");
+		expect(asyncResult.failure?.kind).toBe("run-admission-store-unavailable");
+		expect(asyncHarness.runtime.executePacketAsync).not.toHaveBeenCalled();
+		expect(asyncHarness.artifacts).toHaveLength(0);
+		expect(asyncHarness.admissionEvents).toHaveLength(0);
+		expect(asyncHarness.runEvents).not.toContain("execution-started");
+		expect(asyncHarness.runEvents).not.toContain("runtime");
 	});
 
 	it("fails closed before runtime when admission input contains credential-shaped values", () => {

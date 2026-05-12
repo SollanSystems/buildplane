@@ -951,6 +951,7 @@ export async function recordRunAdmissionReceiptAttempt(
 		payload,
 		replay: createRecordedReplay(input.receipt),
 	};
+	assertNoCredentialShapedValues(event, "event");
 	const eventAppend = await input.store.appendAdmissionEvent({
 		event,
 		receipt: input.receipt,

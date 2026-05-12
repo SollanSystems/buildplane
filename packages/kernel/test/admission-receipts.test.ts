@@ -16,11 +16,22 @@ import {
 	recordRunAdmissionReceiptAttempt,
 } from "../src/index";
 
-const FAKE_OPERATOR_TOKEN = "ghp_FAKE_SECRET_SENTINEL_DO_NOT_USE_1234567890";
-const FAKE_EVIDENCE_REASON_TOKEN =
-	"sk-test-FAKE_SECRET_SENTINEL_DO_NOT_USE_1234567890";
-const FAKE_EVIDENCE_METADATA_TOKEN =
-	"bp_secret_FAKE_SENTINEL_DO_NOT_USE_1234567890";
+function credentialShapedSentinel(parts: readonly string[]): string {
+	return parts.join("");
+}
+
+const FAKE_OPERATOR_TOKEN = credentialShapedSentinel([
+	"gh",
+	"p_FAKE_SECRET_SENTINEL_DO_NOT_USE_1234567890",
+]);
+const FAKE_EVIDENCE_REASON_TOKEN = credentialShapedSentinel([
+	"s",
+	"k-test-sentinel-do-not-use-1234567890",
+]);
+const FAKE_EVIDENCE_METADATA_TOKEN = credentialShapedSentinel([
+	"bp",
+	"_secret_FAKE_SENTINEL_DO_NOT_USE_1234567890",
+]);
 
 async function expectSanitizedSecretRejection(
 	action: () => Promise<unknown> | unknown,
@@ -566,6 +577,35 @@ describe("recordRunAdmissionReceiptAttempt", () => {
 			vi.mocked(store.writeReceiptArtifact).mock.calls,
 			rawSentinels,
 		);
+		expectNoRawSentinels(
+			vi.mocked(store.appendAdmissionEvent).mock.calls,
+			rawSentinels,
+		);
+		expectNoForbiddenSideEffects(store);
+	});
+
+	it("rejects async credential-shaped admission event values before appending events", async () => {
+		const receipt = createRunAdmissionReceiptDryRun(
+			admissionInputFromFixture(loadFixture("pass")),
+		);
+		const baseStore = createTempEvidenceStore();
+		const rawSentinels = [FAKE_OPERATOR_TOKEN];
+		const store: ReturnType<typeof createTempEvidenceStore> = {
+			...baseStore,
+			writeReceiptArtifact: vi.fn(() => ({
+				ref: FAKE_OPERATOR_TOKEN,
+			})),
+			appendAdmissionEvent: vi.fn(() => ({ ref: "event://unsafe" })),
+		};
+		let record: unknown;
+
+		await expectSanitizedSecretRejection(async () => {
+			record = await recordRunAdmissionReceiptAttempt({ receipt, store });
+		}, rawSentinels);
+
+		expect(record).toBeUndefined();
+		expect(store.writeReceiptArtifact).toHaveBeenCalledTimes(1);
+		expect(store.appendAdmissionEvent).not.toHaveBeenCalled();
 		expectNoRawSentinels(
 			vi.mocked(store.appendAdmissionEvent).mock.calls,
 			rawSentinels,

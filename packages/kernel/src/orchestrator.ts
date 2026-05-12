@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { appendFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 import {
 	type CreateRunAdmissionReceiptDryRunInput,
 	createRunAdmissionReceiptLive,
@@ -50,6 +50,9 @@ const noopBus: EventBus = {
 	emit: () => {},
 };
 
+const DEFAULT_ADMISSION_STEM = "run_admission";
+const MAX_ADMISSION_STEM_LENGTH = 120;
+
 export interface BuildplaneOrchestrator {
 	initializeProject(): ReturnType<BuildplaneStoragePort["initializeProject"]>;
 	runPacket(
@@ -79,7 +82,7 @@ export interface CreateBuildplaneOrchestratorOptions {
 	readonly runtime: BuildplaneRuntimePort;
 	readonly policy: BuildplanePolicyPort;
 	readonly workspace: BuildplaneWorkspacePort;
-	readonly admissionStore?: RunAdmissionLocalEvidenceStore;
+	readonly admissionStore?: RunAdmissionLocalEvidenceStore | null;
 	readonly eventBus?: EventBus;
 	readonly profileRegistry?: BuildplaneProfileRegistryPort;
 	readonly budgets?: BudgetConstraints;
@@ -93,7 +96,10 @@ export function createBuildplaneOrchestrator(
 	const profileRegistry = options.profileRegistry;
 	const topLevelBudgets = options.budgets;
 	const defaultBus = options.eventBus ?? noopBus;
-	const admissionStore = options.admissionStore;
+	const admissionStore =
+		options.admissionStore === undefined
+			? createDefaultRunAdmissionStore(projectRoot)
+			: options.admissionStore;
 	const memoryPort = options.memoryPort;
 	const strategyWorkflowPromotionRule =
 		"multi-round-strategy-workflow->procedure";
@@ -106,6 +112,122 @@ export function createBuildplaneOrchestrator(
 			kind,
 			message: error instanceof Error ? error.message : String(error),
 		};
+	}
+
+	function createDefaultRunAdmissionStore(
+		root: string,
+	): RunAdmissionLocalEvidenceStore {
+		const admissionDir = resolve(
+			resolveGitMetadataDir(root),
+			"buildplane",
+			"admission",
+		);
+		const receiptsDir = resolve(admissionDir, "receipts");
+		const eventsPath = resolve(admissionDir, "events.jsonl");
+		return {
+			writeReceiptArtifact(input) {
+				mkdirSync(receiptsDir, { recursive: true });
+				const receiptId =
+					typeof input.receipt.receipt_id === "string" &&
+					input.receipt.receipt_id.length > 0
+						? input.receipt.receipt_id
+						: input.receiptDigest.replace(/^sha256:/, "");
+				const path = resolve(
+					receiptsDir,
+					`${sanitizeAdmissionStoreStem(receiptId)}.json`,
+				);
+				writeFileSync(path, input.contents, "utf8");
+				return {
+					ref: `artifact://run-admission/${input.receiptDigest}`,
+					path,
+				};
+			},
+			appendAdmissionEvent(input) {
+				mkdirSync(admissionDir, { recursive: true });
+				appendFileSync(eventsPath, `${JSON.stringify(input.event)}\n`, "utf8");
+				return {
+					ref: createDefaultRunAdmissionEventRef(input),
+					path: eventsPath,
+				};
+			},
+		};
+	}
+
+	function resolveGitMetadataDir(repositoryRoot: string): string {
+		try {
+			return execFileSync(
+				"git",
+				["-C", repositoryRoot, "rev-parse", "--absolute-git-dir"],
+				{
+					encoding: "utf8",
+					stdio: ["ignore", "pipe", "ignore"],
+				},
+			).trim();
+		} catch {
+			return resolve(repositoryRoot, ".git");
+		}
+	}
+
+	function sanitizeAdmissionStoreStem(value: string): string {
+		const safe = value
+			.replace(/[^A-Za-z0-9_-]/g, "_")
+			.slice(0, MAX_ADMISSION_STEM_LENGTH);
+		return safe.length > 0 ? safe : DEFAULT_ADMISSION_STEM;
+	}
+
+	function stableAdmissionJson(value: unknown): string {
+		if (value === null || typeof value !== "object") {
+			return JSON.stringify(value);
+		}
+		if (Array.isArray(value)) {
+			return `[${value.map((item) => stableAdmissionJson(item)).join(",")}]`;
+		}
+		const record = value as Record<string, unknown>;
+		return `{${Object.keys(record)
+			.sort()
+			.map(
+				(key) => `${JSON.stringify(key)}:${stableAdmissionJson(record[key])}`,
+			)
+			.join(",")}}`;
+	}
+
+	function createDefaultRunAdmissionEventRef(input: {
+		event: JsonRecord;
+		receipt: JsonRecord;
+	}): string {
+		const eventKind =
+			typeof input.event.kind === "string" && input.event.kind.length > 0
+				? input.event.kind
+				: "run_admission_recorded";
+		const recordedAt =
+			typeof input.event.recorded_at === "string" &&
+			input.event.recorded_at.length > 0
+				? input.event.recorded_at
+				: "";
+		const payload =
+			typeof input.event.payload === "object" &&
+			input.event.payload !== null &&
+			!Array.isArray(input.event.payload)
+				? (input.event.payload as JsonRecord)
+				: undefined;
+		const receiptId =
+			typeof payload?.receipt_id === "string"
+				? payload.receipt_id
+				: typeof input.receipt.receipt_id === "string"
+					? input.receipt.receipt_id
+					: DEFAULT_ADMISSION_STEM;
+		const eventDigest = createHash("sha256")
+			.update(
+				stableAdmissionJson({
+					eventKind,
+					recordedAt,
+					receiptId,
+					payload,
+					receipt: input.receipt,
+				}),
+			)
+			.digest("hex");
+		return `event://run-admission/${sanitizeAdmissionStoreStem(receiptId)}/${eventDigest}`;
 	}
 
 	function toWorkspaceSnapshot(
@@ -163,13 +285,39 @@ export function createBuildplaneOrchestrator(
 			.digest("hex")}`;
 	}
 
+	function uniqueStrings(values: readonly string[]): readonly string[] {
+		return Array.from(new Set(values));
+	}
+
+	function collectDeclaredScopeAllowedPaths(
+		validatedPacket: UnitPacket,
+	): readonly string[] {
+		return uniqueStrings([
+			...validatedPacket.unit.expectedOutputs,
+			...validatedPacket.verification.requiredOutputs,
+		]);
+	}
+
+	function deriveRunAdmissionRequestedSideEffects(
+		validatedPacket: UnitPacket,
+	): readonly string[] {
+		const requestedSideEffects = ["fs.read:repo"];
+		if (collectDeclaredScopeAllowedPaths(validatedPacket).length > 0) {
+			requestedSideEffects.push("fs.write:declared_scope");
+		}
+		if (validatedPacket.execution !== undefined) {
+			requestedSideEffects.push("command.execute:verification");
+		}
+		return uniqueStrings(requestedSideEffects);
+	}
+
 	function createRunAdmissionEvidenceInputs(ctx: {
 		run: Run;
 		validatedPacket: UnitPacket;
 		workspace: WorkspaceSnapshot;
 	}): readonly RunAdmissionEvidenceInput[] {
 		const scope = {
-			allowed_paths: ctx.validatedPacket.unit.expectedOutputs,
+			allowed_paths: collectDeclaredScopeAllowedPaths(ctx.validatedPacket),
 			network_allowed: false,
 		};
 		return [
@@ -212,9 +360,11 @@ export function createBuildplaneOrchestrator(
 	}): CreateRunAdmissionReceiptDryRunInput {
 		const { run, validatedPacket, workspace: preparedWorkspace } = ctx;
 		const declaredScope = {
-			allowed_paths: validatedPacket.unit.expectedOutputs,
+			allowed_paths: collectDeclaredScopeAllowedPaths(validatedPacket),
 			network_allowed: false,
 		};
+		const requestedSideEffects =
+			deriveRunAdmissionRequestedSideEffects(validatedPacket);
 		return {
 			receiptId: `run_admission_${run.id}`,
 			decidedAt: new Date().toISOString(),
@@ -236,8 +386,8 @@ export function createBuildplaneOrchestrator(
 				worktree_clean: true,
 			},
 			request: {
-				requested_capabilities: ["fs.read:repo"],
-				requested_side_effects: ["fs.read:repo"],
+				requested_capabilities: requestedSideEffects,
+				requested_side_effects: requestedSideEffects,
 				declared_scope: declaredScope,
 			},
 			policyProfileId: validatedPacket.unit.policyProfile,
@@ -281,13 +431,35 @@ export function createBuildplaneOrchestrator(
 		);
 	}
 
+	function finalizeAdmissionStoreUnavailable(ctx: {
+		run: Run;
+		workspace: WorkspaceSnapshot;
+	}): RunPacketResult {
+		return finalizeInfrastructureFailure(
+			ctx.run,
+			infrastructureFailure(
+				"run-admission-store-unavailable",
+				"Run admission evidence store is required before live worker execution.",
+			),
+			{
+				workspace: ctx.workspace,
+				workspaceStatus: "retained",
+			},
+		);
+	}
+
 	function admitPreparedRunSync(ctx: {
 		run: Run;
 		validatedPacket: UnitPacket;
 		workspace: WorkspaceSnapshot;
 		projectRoot: string;
 	}): { ok: true } | { ok: false; result: RunPacketResult } {
-		if (!admissionStore) return { ok: true };
+		if (!admissionStore) {
+			return {
+				ok: false,
+				result: finalizeAdmissionStoreUnavailable(ctx),
+			};
+		}
 		try {
 			const receipt = createRunAdmissionReceiptLive(
 				createRunAdmissionReceiptInput(ctx),
@@ -327,7 +499,12 @@ export function createBuildplaneOrchestrator(
 		workspace: WorkspaceSnapshot;
 		projectRoot: string;
 	}): Promise<{ ok: true } | { ok: false; result: RunPacketResult }> {
-		if (!admissionStore) return { ok: true };
+		if (!admissionStore) {
+			return {
+				ok: false,
+				result: finalizeAdmissionStoreUnavailable(ctx),
+			};
+		}
 		try {
 			const receipt = createRunAdmissionReceiptLive(
 				createRunAdmissionReceiptInput(ctx),
