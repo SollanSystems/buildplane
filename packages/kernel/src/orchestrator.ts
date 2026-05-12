@@ -56,6 +56,9 @@ const noopBus: EventBus = {
 	emit: () => {},
 };
 
+const DEFAULT_ADMISSION_STEM = "run_admission";
+const MAX_ADMISSION_STEM_LENGTH = 120;
+
 export interface BuildplaneOrchestrator {
 	initializeProject(): ReturnType<BuildplaneStoragePort["initializeProject"]>;
 	runPacket(
@@ -171,8 +174,10 @@ export function createBuildplaneOrchestrator(
 	}
 
 	function sanitizeAdmissionStoreStem(value: string): string {
-		const safe = value.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 120);
-		return safe.length > 0 ? safe : "run_admission";
+		const safe = value
+			.replace(/[^A-Za-z0-9._-]/g, "_")
+			.slice(0, MAX_ADMISSION_STEM_LENGTH);
+		return safe.length > 0 ? safe : DEFAULT_ADMISSION_STEM;
 	}
 
 	function createDefaultRunAdmissionEventRef(input: {
@@ -199,7 +204,7 @@ export function createBuildplaneOrchestrator(
 				? payload.receipt_id
 				: typeof input.receipt.receipt_id === "string"
 					? input.receipt.receipt_id
-					: "run_admission";
+					: DEFAULT_ADMISSION_STEM;
 		const eventDigest = createHash("sha256")
 			.update(
 				JSON.stringify({
