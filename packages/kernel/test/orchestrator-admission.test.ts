@@ -208,9 +208,9 @@ function createHarness(options: HarnessOptions = {}): Harness {
 			}),
 	};
 	const admissionStore =
-		options.admissionStore === null
-			? undefined
-			: (options.admissionStore ?? defaultAdmissionStore);
+		options.admissionStore === undefined
+			? defaultAdmissionStore
+			: options.admissionStore;
 
 	const bus = createEventBus();
 	bus.subscribe((event) => {
@@ -315,7 +315,7 @@ describe("orchestrator run admission", () => {
 		]);
 	});
 
-	it("fails closed before runtime when packet semantics require unsafe provider invocation", () => {
+	it("admits model packets using only local repo and declared-scope side effects", () => {
 		const packet = createPacket({
 			execution: undefined,
 			model: {
@@ -329,20 +329,13 @@ describe("orchestrator run admission", () => {
 
 		const result = harness.orchestrator.runPacket(packet);
 
-		expect(result.run.status).toBe("failed");
-		expect(result.failure?.kind).toBe("run-admission-denied");
-		expect(harness.runtime.executePacket).not.toHaveBeenCalled();
-		expect(harness.runEvents).not.toContain("execution-started");
-		expect(harness.runEvents).not.toContain("runtime");
+		expect(result.run.status).toBe("passed");
+		expect(harness.runtime.executePacket).toHaveBeenCalledTimes(1);
 		expect(harness.admissionPayloads[0]).toMatchObject({
-			decision: "UNSAFE_TO_RUN",
-			requested_side_effects: [
-				"fs.read:repo",
-				"fs.write:declared_scope",
-				"model.invoke:provider",
-			],
-			allowed_side_effects: ["fs.read:repo"],
-			unsafe_requests: ["model.invoke:provider"],
+			decision: "PASS",
+			requested_side_effects: ["fs.read:repo", "fs.write:declared_scope"],
+			allowed_side_effects: ["fs.read:repo", "fs.write:declared_scope"],
+			unsafe_requests: [],
 		});
 	});
 

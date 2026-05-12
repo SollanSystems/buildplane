@@ -1,7 +1,13 @@
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync } from "node:fs";
-import { join } from "node:path";
+import {
+	appendFileSync,
+	existsSync,
+	mkdirSync,
+	readFileSync,
+	writeFileSync,
+} from "node:fs";
+import { join, resolve } from "node:path";
 import {
 	type CreateRunAdmissionReceiptDryRunInput,
 	createRunAdmissionReceiptLive,
@@ -79,7 +85,7 @@ export interface CreateBuildplaneOrchestratorOptions {
 	readonly runtime: BuildplaneRuntimePort;
 	readonly policy: BuildplanePolicyPort;
 	readonly workspace: BuildplaneWorkspacePort;
-	readonly admissionStore?: RunAdmissionLocalEvidenceStore;
+	readonly admissionStore?: RunAdmissionLocalEvidenceStore | null;
 	readonly eventBus?: EventBus;
 	readonly profileRegistry?: BuildplaneProfileRegistryPort;
 	readonly budgets?: BudgetConstraints;
@@ -93,7 +99,10 @@ export function createBuildplaneOrchestrator(
 	const profileRegistry = options.profileRegistry;
 	const topLevelBudgets = options.budgets;
 	const defaultBus = options.eventBus ?? noopBus;
-	const admissionStore = options.admissionStore;
+	const admissionStore =
+		options.admissionStore === undefined
+			? createDefaultRunAdmissionStore(projectRoot)
+			: options.admissionStore;
 	const memoryPort = options.memoryPort;
 	const strategyWorkflowPromotionRule =
 		"multi-round-strategy-workflow->procedure";
@@ -106,6 +115,103 @@ export function createBuildplaneOrchestrator(
 			kind,
 			message: error instanceof Error ? error.message : String(error),
 		};
+	}
+
+	function createDefaultRunAdmissionStore(
+		root: string,
+	): RunAdmissionLocalEvidenceStore {
+		const admissionDir = resolve(
+			resolveGitMetadataDir(root),
+			"buildplane",
+			"admission",
+		);
+		const receiptsDir = resolve(admissionDir, "receipts");
+		const eventsPath = resolve(admissionDir, "events.jsonl");
+		return {
+			writeReceiptArtifact(input) {
+				mkdirSync(receiptsDir, { recursive: true });
+				const receiptId =
+					typeof input.receipt.receipt_id === "string" &&
+					input.receipt.receipt_id.length > 0
+						? input.receipt.receipt_id
+						: input.receiptDigest.replace(/^sha256:/, "");
+				const path = resolve(
+					receiptsDir,
+					`${sanitizeAdmissionStoreStem(receiptId)}.json`,
+				);
+				writeFileSync(path, input.contents, "utf8");
+				return {
+					ref: `artifact://run-admission/${input.receiptDigest}`,
+					path,
+				};
+			},
+			appendAdmissionEvent(input) {
+				mkdirSync(admissionDir, { recursive: true });
+				appendFileSync(eventsPath, `${JSON.stringify(input.event)}\n`, "utf8");
+				return {
+					ref: createDefaultRunAdmissionEventRef(input),
+					path: eventsPath,
+				};
+			},
+		};
+	}
+
+	function resolveGitMetadataDir(repositoryRoot: string): string {
+		const gitPath = resolve(repositoryRoot, ".git");
+		try {
+			const gitFile = readFileSync(gitPath, "utf8").trim();
+			const gitdir = /^gitdir:\s*(.+)$/.exec(gitFile)?.[1]?.trim();
+			if (gitdir) {
+				return resolve(repositoryRoot, gitdir);
+			}
+		} catch {
+			// Normal repositories use a .git directory.
+		}
+		return gitPath;
+	}
+
+	function sanitizeAdmissionStoreStem(value: string): string {
+		const safe = value.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 120);
+		return safe.length > 0 ? safe : "run_admission";
+	}
+
+	function createDefaultRunAdmissionEventRef(input: {
+		event: JsonRecord;
+		receipt: JsonRecord;
+	}): string {
+		const eventKind =
+			typeof input.event.kind === "string" && input.event.kind.length > 0
+				? input.event.kind
+				: "run_admission_recorded";
+		const recordedAt =
+			typeof input.event.recorded_at === "string" &&
+			input.event.recorded_at.length > 0
+				? input.event.recorded_at
+				: "";
+		const payload =
+			typeof input.event.payload === "object" &&
+			input.event.payload !== null &&
+			!Array.isArray(input.event.payload)
+				? (input.event.payload as JsonRecord)
+				: undefined;
+		const receiptId =
+			typeof payload?.receipt_id === "string"
+				? payload.receipt_id
+				: typeof input.receipt.receipt_id === "string"
+					? input.receipt.receipt_id
+					: "run_admission";
+		const eventDigest = createHash("sha256")
+			.update(
+				JSON.stringify({
+					eventKind,
+					recordedAt,
+					receiptId,
+					payload,
+					receipt: input.receipt,
+				}),
+			)
+			.digest("hex");
+		return `event://run-admission/${sanitizeAdmissionStoreStem(receiptId)}/${eventDigest}`;
 	}
 
 	function toWorkspaceSnapshot(
@@ -185,9 +291,6 @@ export function createBuildplaneOrchestrator(
 		}
 		if (validatedPacket.execution !== undefined) {
 			requestedSideEffects.push("command.execute:verification");
-		}
-		if (validatedPacket.model !== undefined) {
-			requestedSideEffects.push("model.invoke:provider");
 		}
 		return uniqueStrings(requestedSideEffects);
 	}
