@@ -1,12 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import {
-	appendFileSync,
-	existsSync,
-	mkdirSync,
-	readFileSync,
-	writeFileSync,
-} from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import {
 	type CreateRunAdmissionReceiptDryRunInput,
@@ -160,24 +154,41 @@ export function createBuildplaneOrchestrator(
 	}
 
 	function resolveGitMetadataDir(repositoryRoot: string): string {
-		const gitPath = resolve(repositoryRoot, ".git");
 		try {
-			const gitFile = readFileSync(gitPath, "utf8").trim();
-			const gitdir = /^gitdir:\s*(.+)$/.exec(gitFile)?.[1]?.trim();
-			if (gitdir) {
-				return resolve(repositoryRoot, gitdir);
-			}
+			return execFileSync(
+				"git",
+				["-C", repositoryRoot, "rev-parse", "--absolute-git-dir"],
+				{
+					encoding: "utf8",
+					stdio: ["ignore", "pipe", "ignore"],
+				},
+			).trim();
 		} catch {
-			// Normal repositories use a .git directory.
+			return resolve(repositoryRoot, ".git");
 		}
-		return gitPath;
 	}
 
 	function sanitizeAdmissionStoreStem(value: string): string {
 		const safe = value
-			.replace(/[^A-Za-z0-9._-]/g, "_")
+			.replace(/[^A-Za-z0-9_-]/g, "_")
 			.slice(0, MAX_ADMISSION_STEM_LENGTH);
 		return safe.length > 0 ? safe : DEFAULT_ADMISSION_STEM;
+	}
+
+	function stableAdmissionJson(value: unknown): string {
+		if (value === null || typeof value !== "object") {
+			return JSON.stringify(value);
+		}
+		if (Array.isArray(value)) {
+			return `[${value.map((item) => stableAdmissionJson(item)).join(",")}]`;
+		}
+		const record = value as Record<string, unknown>;
+		return `{${Object.keys(record)
+			.sort()
+			.map(
+				(key) => `${JSON.stringify(key)}:${stableAdmissionJson(record[key])}`,
+			)
+			.join(",")}}`;
 	}
 
 	function createDefaultRunAdmissionEventRef(input: {
@@ -207,7 +218,7 @@ export function createBuildplaneOrchestrator(
 					: DEFAULT_ADMISSION_STEM;
 		const eventDigest = createHash("sha256")
 			.update(
-				JSON.stringify({
+				stableAdmissionJson({
 					eventKind,
 					recordedAt,
 					receiptId,
