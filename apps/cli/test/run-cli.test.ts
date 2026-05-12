@@ -15,6 +15,7 @@ import {
 	type BuildplaneOrchestrator,
 	type BuildplaneWorkspacePort,
 	createBuildplaneOrchestrator,
+	type RunAdmissionLocalEvidenceStore,
 	type UnitPacket,
 } from "@buildplane/kernel";
 import { evaluateRun } from "@buildplane/policy";
@@ -69,12 +70,32 @@ function createCliDependencies(
 				runtime: { executePacket },
 				policy: { evaluateRun },
 				workspace: options.workspace ?? createGitWorktreeAdapter(),
+				admissionStore: createTestAdmissionStore(projectRoot),
 			}),
 	};
 }
 
 function createGitWorktreeAdapter(): BuildplaneWorkspacePort {
 	return createActualGitWorkspaceAdapter();
+}
+
+function createTestAdmissionStore(
+	root: string,
+): RunAdmissionLocalEvidenceStore {
+	return {
+		writeReceiptArtifact(input) {
+			return {
+				ref: `artifact://${input.receipt.receipt_id}`,
+				path: join(root, ".buildplane", "admission", "run-admission.json"),
+			};
+		},
+		appendAdmissionEvent(input) {
+			return {
+				ref: `event://${input.event.event_id}`,
+				path: join(root, ".buildplane", "admission", "events.jsonl"),
+			};
+		},
+	};
 }
 
 function writeWorkspaceFile(
@@ -1068,6 +1089,80 @@ describe("cli command surface", () => {
 		});
 		expect(createOrchestrator).not.toHaveBeenCalled();
 		expect(existsSync(join(root, ".buildplane"))).toBe(false);
+	});
+
+	it("persists CLI-created run admission receipts with kernel contents and digest refs", async () => {
+		const root = createGitRepo();
+		await runCliCapture(root, ["init"]);
+		const packetPath = writeCommittedPacket(
+			root,
+			".buildplane/test-packets/cli-admission-receipt.json",
+			createPassingPacket("unit-cli-store-integrity"),
+		);
+
+		const result = await runCliCapture(root, [
+			"run",
+			"--raw",
+			"--packet",
+			packetPath,
+		]);
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stderr).toEqual([]);
+		const eventsPath = join(
+			root,
+			".git",
+			"buildplane",
+			"admission",
+			"events.jsonl",
+		);
+		expect(existsSync(eventsPath)).toBe(true);
+		const events = readFileSync(eventsPath, "utf8")
+			.trim()
+			.split("\n")
+			.filter(Boolean)
+			.map(
+				(line) =>
+					JSON.parse(line) as {
+						kind?: string;
+						payload?: {
+							receipt_id?: string;
+							receipt_digest?: string;
+							receipt_ref?: string;
+							unit_id?: string;
+						};
+					},
+			);
+		const recordedEvent = events.find(
+			(event) =>
+				event.kind === "run_admission_recorded" &&
+				event.payload?.unit_id === "unit-cli-store-integrity",
+		);
+		if (!recordedEvent?.payload?.receipt_id) {
+			throw new Error("missing run admission receipt event");
+		}
+		const payload = recordedEvent.payload;
+		expect(payload.receipt_digest).toMatch(/^sha256:[a-f0-9]{64}$/);
+		expect(payload.receipt_ref).toBe(
+			`artifact://run-admission/${payload.receipt_digest}`,
+		);
+		const receiptPath = join(
+			root,
+			".git",
+			"buildplane",
+			"admission",
+			"receipts",
+			`${payload.receipt_id}.json`,
+		);
+		expect(existsSync(receiptPath)).toBe(true);
+		const receiptContents = readFileSync(receiptPath, "utf8");
+		expect(
+			`sha256:${createHash("sha256").update(receiptContents).digest("hex")}`,
+		).toBe(payload.receipt_digest);
+		expect(JSON.parse(receiptContents)).toMatchObject({
+			receipt_id: payload.receipt_id,
+			run: { unit_id: "unit-cli-store-integrity" },
+		});
 	});
 
 	it("persists injected structured memories and surfaces them in run and inspect output", async () => {
