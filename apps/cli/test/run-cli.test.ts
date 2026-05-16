@@ -4062,6 +4062,74 @@ describe("cli command surface", () => {
 		});
 	});
 
+	it("exports local OpenTelemetry-shaped traces from trace export", async () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-cli-trace-export-"));
+		await runCliCapture(root, ["init"]);
+		const storage = createBuildplaneStorage(root);
+		const run = storage.createRun(
+			createPassingPacket("unit-cli-trace-export"),
+			{
+				runId: "run-cli-trace-export",
+			},
+		);
+		storage.markRunRunning(run.id);
+		storage.recordExecutionEvidence(run.id, {
+			command: "node",
+			args: ["-e", "console.log('worker claim')"],
+			cwd: root,
+			startedAt: "2026-05-04T10:00:00.000Z",
+			completedAt: "2026-05-04T10:00:01.000Z",
+			exitCode: 0,
+			stdout: "worker claim\n",
+			stderr: "",
+			outputChecks: [{ path: "tmp/pass.txt", exists: true }],
+		});
+		storage.recordDecision(run.id, {
+			kind: "advance-run",
+			outcome: "approved",
+			reasons: ["required output exists"],
+		});
+		storage.completeRun(run.id, "passed");
+
+		const outPath = join(root, ".buildplane", "exports", "trace.json");
+		const result = await runCliCapture(root, [
+			"trace",
+			"export",
+			"--run",
+			run.id,
+			"--format",
+			"otel-json",
+			"--out",
+			outPath,
+			"--json",
+		]);
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stderr).toEqual([]);
+		const summary = JSON.parse(result.stdout.join("\n"));
+		expect(summary).toMatchObject({
+			format: "otel-json",
+			runId: run.id,
+			outPath,
+			traceGrading: {
+				schema: "buildplane.trace_grading.v0",
+				runId: run.id,
+			},
+		});
+		const trace = JSON.parse(readFileSync(outPath, "utf8"));
+		const spans = trace.resourceSpans[0].scopeSpans[0].spans;
+		expect(spans.map((span: { name: string }) => span.name)).toEqual(
+			expect.arrayContaining([
+				"buildplane.run",
+				"buildplane.evidence.command-exit",
+				"buildplane.policy.advance-run",
+			]),
+		);
+		expect(spans[0].kind).toBe(1);
+		expect(summary.spanCount).toBe(spans.length);
+		expect(trace.traceGrading).toBeUndefined();
+	});
+
 	it("previews the exact GitHub check-run payload from pr-check dry-run", async () => {
 		const root = mkdtempSync(
 			join(tmpdir(), "buildplane-cli-pr-check-dry-run-"),
