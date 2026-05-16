@@ -8,7 +8,7 @@ import {
 	readFileSync,
 	writeFileSync,
 } from "node:fs";
-import { basename, resolve } from "node:path";
+import { basename, dirname, resolve } from "node:path";
 import type { Readable, Writable } from "node:stream";
 import { createToolRegistry } from "@buildplane/adapters-tools";
 import {
@@ -62,6 +62,7 @@ import {
 	publishPrCheckOperation,
 	publishPrCommentOperation,
 } from "./pr-check.js";
+import { createOtelTraceExport } from "./trace-export.js";
 import { scanWorkflowPreview } from "./workflow-scan.js";
 
 // Monotonic UUIDv7 generator for TS-side event ids.
@@ -647,6 +648,7 @@ function formatTopLevelHelp(): string[] {
 		"    inspect <id> [--json] [--view inspector]  Deep-dive into a run and event tape",
 		"    verify --run <id> [--json]  Final receipt-backed verdict",
 		"    evidence export --run <id> --out <file>  Export Mission Control bundle",
+		"    trace export --run <id> --format otel-json --out <file>  Export local trace artifact",
 		"    pr-check dry-run --run <id> --repo <owner/repo> --sha <head> [--json]  Preview GitHub check-run publish",
 		"    pr-comment dry-run --run <id> --repo <owner/repo> --pr <n> --sha <head> [--json]  Preview PR evidence comment",
 		"    replay <id> [--json]   Re-execute the stored packet snapshot",
@@ -742,6 +744,21 @@ function formatEvidenceHelp(): string[] {
 		"    --run <id>   Run id to export",
 		"    --out <file> Write bundle JSON to this path",
 		"    --json       Also print the exported bundle JSON",
+	];
+}
+
+function formatTraceHelp(): string[] {
+	return [
+		"buildplane trace export --run <run-id> --format otel-json --out <file> [--json]",
+		"",
+		"  Exports a local OpenTelemetry-shaped trace artifact from stored",
+		"  run evidence. This command never sends telemetry to a vendor.",
+		"",
+		"  Options:",
+		"    --run <id>           Run id to export",
+		"    --format otel-json  Trace format; only otel-json is supported",
+		"    --out <file>         Write trace JSON to this path",
+		"    --json               Also print the export summary JSON",
 	];
 }
 
@@ -3002,6 +3019,78 @@ export async function runCli(
 
 			throw new Error(
 				`Unknown evidence command: ${subcommand ?? "(missing subcommand)"}`,
+			);
+		}
+
+		if (command === "trace") {
+			const subcommand = rest[0];
+			if (isHelpRequested(rest)) {
+				for (const line of formatTraceHelp()) {
+					stdout(line);
+				}
+				return 0;
+			}
+
+			if (subcommand === "export") {
+				const subRest = rest.slice(1);
+				const json = subRest.includes("--json");
+				const runIndex = subRest.indexOf("--run");
+				const formatIndex = subRest.indexOf("--format");
+				const outIndex = subRest.indexOf("--out");
+				if (runIndex === -1 || !subRest[runIndex + 1]) {
+					throw new Error("Missing required --run <id> argument.");
+				}
+				if (formatIndex === -1 || !subRest[formatIndex + 1]) {
+					throw new Error("Missing required --format otel-json argument.");
+				}
+				if (subRest[formatIndex + 1] !== "otel-json") {
+					throw new Error("Unsupported trace format. Supported: otel-json.");
+				}
+				if (outIndex === -1 || !subRest[outIndex + 1]) {
+					throw new Error("Missing required --out <path> argument.");
+				}
+
+				const runId = subRest[runIndex + 1];
+				const outPath = resolve(cwd, subRest[outIndex + 1]);
+				const storage = (await cliImport("@buildplane/storage")) as unknown as {
+					createBuildplaneStorage: (root: string) => {
+						inspectTarget: (id: string) => unknown;
+					};
+				};
+				const snapshot = storage
+					.createBuildplaneStorage(cwd)
+					.inspectTarget(runId);
+				const exportResult = createOtelTraceExport(
+					snapshot as Parameters<typeof createOtelTraceExport>[0],
+					outPath,
+				);
+				mkdirSync(dirname(outPath), { recursive: true });
+				writeFileSync(
+					outPath,
+					JSON.stringify(exportResult.trace, null, 2),
+					"utf8",
+				);
+				const summary = {
+					format: exportResult.format,
+					runId: exportResult.runId,
+					spanCount: exportResult.spanCount,
+					outPath: exportResult.outPath,
+					traceGrading: exportResult.traceGrading,
+				};
+				if (json) {
+					stdout(formatJson(summary));
+				} else {
+					stdout("trace-export: wrote");
+					stdout(`run-id: ${runId}`);
+					stdout(`format: ${exportResult.format}`);
+					stdout(`spans: ${exportResult.spanCount}`);
+					stdout(`out: ${outPath}`);
+				}
+				return 0;
+			}
+
+			throw new Error(
+				`Unknown trace command: ${subcommand ?? "(missing subcommand)"}`,
 			);
 		}
 
