@@ -681,6 +681,7 @@ function formatTopLevelHelp(): string[] {
 		"    memory inspect <id>    Detail for one learning",
 		"    memory <action>        Advanced memory operations (native)",
 		"    pack show <id>         Inspect a pack",
+		"    pack export <id> --target github-agent|github-skill --out <path>  Export pack guidance",
 		"",
 		"  buildplane run --help    Show run options (--raw, --tui)",
 	];
@@ -3589,19 +3590,20 @@ export async function runCli(
 			return 0;
 		}
 
-		if (command === "pack" && rest[0] === "show") {
+		if (command === "pack" && (rest[0] === "show" || rest[0] === "export")) {
+			const packAction = rest[0];
 			try {
 				return await (deps?.runNativeCommand ?? runNativeCommand)(
 					rest.slice(1),
 					{
 						cwd,
-						commandPath: ["pack", "show"],
+						commandPath: ["pack", packAction],
 						stdout,
 						stderr,
 					},
 				);
 			} catch (error) {
-				throw createNativeDispatchError(["pack", "show"], error);
+				throw createNativeDispatchError(["pack", packAction], error);
 			}
 		}
 

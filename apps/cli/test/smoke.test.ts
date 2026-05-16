@@ -76,6 +76,31 @@ function runSourcePackShow(
 	);
 }
 
+function runSourcePackExport(
+	workspaceRoot: string,
+	env: NodeJS.ProcessEnv = process.env,
+) {
+	return spawnSync(
+		process.execPath,
+		sourceCliArgs(
+			cliSourceEntrypoint,
+			"pack",
+			"export",
+			"superclaude",
+			"--target",
+			"github-agent",
+			"--out",
+			".github/agents/superclaude.md",
+			"--json",
+		),
+		{
+			cwd: workspaceRoot,
+			encoding: "utf8",
+			env,
+		},
+	);
+}
+
 afterEach(() => {
 	for (const path of cleanupPaths.splice(0)) {
 		rmSync(path, { force: true, recursive: true });
@@ -97,6 +122,7 @@ describe("cli bootstrap", () => {
 		expect(output).toContain("Buildplane by SollanSystems");
 		expect(output).toContain("Execute:");
 		expect(output).toContain("init");
+		expect(output).toContain("pack export <id>");
 	});
 
 	it("supports --help via the root script entrypoint", () => {
@@ -237,6 +263,30 @@ describe("cli bootstrap", () => {
 			ok: true,
 			which: "pack-show-source",
 			argv: "pack show superclaude",
+		});
+	});
+
+	it("delegates source CLI pack export through BUILDPLANE_NATIVE_BIN", () => {
+		const tempRoot = mkdtempSync(
+			join(tmpdir(), "buildplane-cli-pack-export-smoke-"),
+		);
+		const workspaceRoot = join(tempRoot, "workspace");
+		const nativeBin = join(tempRoot, "buildplane-native");
+		cleanupPaths.push(tempRoot);
+		mkdirSync(workspaceRoot, { recursive: true });
+		writeNativeStub(nativeBin, "pack-export-source");
+
+		const result = runSourcePackExport(workspaceRoot, {
+			...process.env,
+			BUILDPLANE_NATIVE_BIN: nativeBin,
+		});
+
+		expect(result.status).toBe(0);
+		expect(result.stderr).toBe("");
+		expect(JSON.parse(result.stdout)).toMatchObject({
+			ok: true,
+			which: "pack-export-source",
+			argv: "pack export superclaude --target github-agent --out .github/agents/superclaude.md --json",
 		});
 	});
 
@@ -429,6 +479,49 @@ describe("cli bootstrap", () => {
 			ok: true,
 			which: "pack-show-built",
 			argv: "pack show superclaude",
+		});
+	});
+
+	it("delegates built CLI pack export through BUILDPLANE_NATIVE_BIN", () => {
+		ensureBuiltCliDist();
+		const tempRoot = mkdtempSync(
+			join(tmpdir(), "buildplane-cli-pack-export-dist-"),
+		);
+		const workspaceRoot = join(tempRoot, "workspace");
+		const nativeBin = join(tempRoot, "buildplane-native");
+		cleanupPaths.push(tempRoot);
+		mkdirSync(workspaceRoot, { recursive: true });
+		writeNativeStub(nativeBin, "pack-export-built");
+
+		const result = spawnSync(
+			process.execPath,
+			[
+				cliDistEntrypoint,
+				"pack",
+				"export",
+				"superclaude",
+				"--target",
+				"github-skill",
+				"--out",
+				".github/skills",
+				"--json",
+			],
+			{
+				cwd: workspaceRoot,
+				encoding: "utf8",
+				env: {
+					...process.env,
+					BUILDPLANE_NATIVE_BIN: nativeBin,
+				},
+			},
+		);
+
+		expect(result.status).toBe(0);
+		expect(result.stderr).toBe("");
+		expect(JSON.parse(result.stdout)).toMatchObject({
+			ok: true,
+			which: "pack-export-built",
+			argv: "pack export superclaude --target github-skill --out .github/skills --json",
 		});
 	});
 });

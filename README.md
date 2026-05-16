@@ -93,18 +93,21 @@ pnpm buildplane replay <run-id> --json
 pnpm buildplane fork <run-id> --at <event-id> --packet <fixed-packet.json>
 pnpm buildplane memory doctor
 pnpm buildplane pack show superclaude
+pnpm buildplane pack export superclaude --target github-agent --out .github/agents/superclaude.md --json
+pnpm buildplane pack export superclaude --target github-skill --out .github/skills
 ```
 
 > **Precondition:** `run` expects a clean git working tree. Commit or stash uncommitted changes before dispatching work.
 
 This runs the CLI from TypeScript source via `tsx` — no build step required.
 
-Native host-aware commands currently dispatch from the main TypeScript CLI into the native Rust runner. That bridge lives in `apps/cli/src/run-cli.ts`, and the repo-development and in-repo built CLI paths below verify `buildplane memory ...` plus `buildplane pack show <pack-id>`. In repo development, either build the native binary first or point the CLI at it explicitly:
+Native host-aware commands currently dispatch from the main TypeScript CLI into the native Rust runner. That bridge lives in `apps/cli/src/run-cli.ts`, and the repo-development and in-repo built CLI paths below verify `buildplane memory ...` plus `buildplane pack show <pack-id>` and `buildplane pack export <pack-id>`. In repo development, either build the native binary first or point the CLI at it explicitly:
 
 ```bash
 cargo build --manifest-path native/Cargo.toml -p bp-cli
 BUILDPLANE_NATIVE_BIN="$PWD/native/target/debug/buildplane-native" pnpm buildplane memory doctor --json
 BUILDPLANE_NATIVE_BIN="$PWD/native/target/debug/buildplane-native" pnpm buildplane pack show superclaude
+BUILDPLANE_NATIVE_BIN="$PWD/native/target/debug/buildplane-native" pnpm buildplane pack export superclaude --target github-agent --out .github/agents/superclaude.md --json
 ```
 
 ## In-repo built CLI path
@@ -123,11 +126,12 @@ node apps/cli/dist/index.js replay <run-id> --json
 node apps/cli/dist/index.js fork <run-id> --at <event-id> --packet <fixed-packet.json>
 node apps/cli/dist/index.js memory doctor --json
 node apps/cli/dist/index.js pack show superclaude
+node apps/cli/dist/index.js pack export superclaude --target github-skill --out .github/skills --json
 ```
 
 This is the same interface used by the `bin.buildplane` entry in `apps/cli/package.json`.
 
-The compiled CLI uses the same native-command bridge implementation as the published package entrypoint, and this repo verifies `buildplane memory ...` and `buildplane pack show ...` end-to-end for the repo-development and in-repo built CLI paths. When that bridge is used, the CLI resolves the native binary in this order:
+The compiled CLI uses the same native-command bridge implementation as the published package entrypoint, and this repo verifies `buildplane memory ...`, `buildplane pack show ...`, and `buildplane pack export ...` end-to-end for the repo-development and in-repo built CLI paths. When that bridge is used, the CLI resolves the native binary in this order:
 - `BUILDPLANE_NATIVE_BIN` if set
 - packaged `vendor/native/linux-x64/buildplane-native` when running on Linux x64
 - `native/target/debug/buildplane-native` relative to the current working directory
@@ -162,6 +166,8 @@ Published/global native memory is packaged and verified on Linux x64. Windows an
 The capability doctor also reports required host/runtime features such as `node:sqlite`, npm, git, and the supported Node range, so global-install operators can see which prerequisite failed without reading the source.
 
 Use this path when you want the packaged operator experience instead of the repo-local development or in-repo built CLI paths. The repo verifies this contract from a packed publishable artifact before any registry publication step.
+
+Pack export is intentionally a workflow bridge, not a runtime bridge. `buildplane pack export <pack-id> --target github-agent|github-skill --out <path> --json` writes GitHub-compatible custom-agent or skill guidance from Buildplane pack metadata, but it does not grant provider credentials, MCP servers, hooks, GitHub permissions, or Buildplane execution authority.
 
 ## Local run loop
 
