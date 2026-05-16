@@ -67,9 +67,7 @@ fn main() {
 fn run() -> Result<(), String> {
     match parse_args_from_iter(env::args_os().skip(1))? {
         Command::InspectPack(args) => run_inspect_pack(args),
-        Command::Fork(fork_cli::ForkCommand::Plan(args)) => {
-            fork_cli::run_fork_plan(args)
-        }
+        Command::Fork(fork_cli::ForkCommand::Plan(args)) => fork_cli::run_fork_plan(args),
         Command::Fork(fork_cli::ForkCommand::Help) => {
             println!("{}", fork_cli::usage_text());
             Ok(())
@@ -118,14 +116,26 @@ where
     T: Into<OsString>,
 {
     let default_workspace_root = default_workspace_root()?;
-    let default_native_root =
+    let args = iter.into_iter().map(Into::into).collect::<Vec<_>>();
+    let default_native_root = if needs_default_native_root(&args)? {
         default_native_root_from(&default_workspace_root).ok_or_else(|| {
             format!(
                 "could not resolve the native workspace from {}; pass --native-root explicitly",
                 default_workspace_root.display()
             )
-        })?;
-    parse_args_with_defaults(iter, default_native_root, default_workspace_root)
+        })?
+    } else {
+        PathBuf::new()
+    };
+    parse_args_with_defaults(args, default_native_root, default_workspace_root)
+}
+
+fn needs_default_native_root(args: &[OsString]) -> Result<bool, String> {
+    let Some(first) = args.first() else {
+        return Ok(false);
+    };
+    let first = parse_string(first.clone(), "subcommand")?;
+    Ok(first == "pack")
 }
 
 #[cfg(test)]
@@ -344,6 +354,22 @@ mod tests {
         .expect("help should parse");
 
         assert_eq!(command, Command::Help);
+    }
+
+    #[test]
+    fn only_pack_commands_require_default_native_root_discovery() {
+        assert_eq!(
+            needs_default_native_root(&[OsString::from("memory"), OsString::from("doctor")]),
+            Ok(false)
+        );
+        assert_eq!(
+            needs_default_native_root(&[OsString::from("ledger"), OsString::from("replay")]),
+            Ok(false)
+        );
+        assert_eq!(
+            needs_default_native_root(&[OsString::from("pack"), OsString::from("show")]),
+            Ok(true)
+        );
     }
 
     #[test]

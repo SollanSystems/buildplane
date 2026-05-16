@@ -122,11 +122,9 @@ describe("README contract", () => {
 		expect(distributionSection).toContain("buildplane status --json");
 		expect(distributionSection).toContain("buildplane inspect <run-id> --json");
 		expect(distributionSection).toContain(
-			"Published/global installs do not yet include a verified `buildplane memory ...` contract.",
+			"Published/global native memory is packaged and verified on Linux x64.",
 		);
-		expect(distributionSection).not.toContain(
-			"buildplane memory doctor --json",
-		);
+		expect(distributionSection).toContain("buildplane memory doctor --json");
 		expect(distributionSection).not.toContain("pnpm buildplane");
 		expect(distributionSection).not.toContain("pnpm install");
 		expect(distributionSection).not.toContain("pnpm build");
@@ -193,6 +191,7 @@ describe("README contract", () => {
 		);
 		expect(readme).toContain("node:sqlite");
 		expect(distributionSection).toContain("Published/global native memory");
+		expect(distributionSection).toContain("Linux x64");
 	});
 
 	it("documents the explicit deterministic CI trust gate", () => {

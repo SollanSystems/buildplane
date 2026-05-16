@@ -270,6 +270,51 @@ describe("cli bootstrap", () => {
 		});
 	});
 
+	it("uses the packaged linux-x64 native binary before cwd-local targets", () => {
+		if (process.platform !== "linux" || process.arch !== "x64") {
+			return;
+		}
+		const sourcePackagedRoot = join(root, "apps", "cli", "vendor");
+		if (existsSync(sourcePackagedRoot)) {
+			return;
+		}
+
+		const tempRoot = mkdtempSync(
+			join(tmpdir(), "buildplane-cli-memory-packaged-"),
+		);
+		const workspaceRoot = join(tempRoot, "workspace");
+		const debugNativeBin = join(
+			workspaceRoot,
+			"native",
+			"target",
+			"debug",
+			"buildplane-native",
+		);
+		const packagedNativeBin = join(
+			sourcePackagedRoot,
+			"native",
+			"linux-x64",
+			"buildplane-native",
+		);
+		cleanupPaths.push(tempRoot, sourcePackagedRoot);
+		mkdirSync(workspaceRoot, { recursive: true });
+		writeNativeStub(debugNativeBin, "debug");
+		writeNativeStub(packagedNativeBin, "packaged");
+
+		const result = runSourceMemoryDoctor(workspaceRoot, {
+			...process.env,
+			BUILDPLANE_NATIVE_BIN: "",
+		});
+
+		expect(result.status).toBe(0);
+		expect(result.stderr).toBe("");
+		expect(JSON.parse(result.stdout)).toMatchObject({
+			ok: true,
+			which: "packaged",
+			argv: "memory doctor --json",
+		});
+	});
+
 	it("falls back to a cwd-local release native binary when debug is absent", () => {
 		const tempRoot = mkdtempSync(
 			join(tmpdir(), "buildplane-cli-memory-release-"),

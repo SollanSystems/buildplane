@@ -318,6 +318,9 @@ function ensureWorkspaceBuildOutputs() {
 function writeMinimalPublishedPackage(
 	packageRoot: string,
 	runtimeModulePath = "./cli.js",
+	options: {
+		readonly includeNative?: boolean;
+	} = {},
 ) {
 	mkdirSync(join(packageRoot, "dist"), { recursive: true });
 	mkdirSync(join(packageRoot, "vendor"), { recursive: true });
@@ -369,6 +372,19 @@ function writeMinimalPublishedPackage(
 		join(packageRoot, "dist", runtimeModulePath.replace(/^\.\//, "")),
 		"export {};\n",
 	);
+
+	if (options.includeNative ?? true) {
+		const nativePath = join(
+			packageRoot,
+			"vendor",
+			"native",
+			"linux-x64",
+			"buildplane-native",
+		);
+		mkdirSync(dirname(nativePath), { recursive: true });
+		writeFileSync(nativePath, "#!/bin/sh\nexit 0\n");
+		chmodSync(nativePath, 0o755);
+	}
 }
 
 describe("workspace build artifact discovery", () => {
@@ -541,6 +557,7 @@ describe("published bootstrap staging", () => {
 	let inspectPublishedPackage: (
 		inputPath: string,
 		options?: {
+			arch?: string;
 			platform?: NodeJS.Platform;
 		},
 	) => InspectionResult;
@@ -566,6 +583,9 @@ describe("published bootstrap staging", () => {
 		originalPath: string;
 		hiddenPath: string;
 	}> = [];
+	const originalPublishedNativeBin =
+		process.env.BUILDPLANE_PUBLISHED_NATIVE_BIN;
+	let fakePublishedNativeRoot: string | undefined;
 	let buildArtifactsCreatedByTest: string[] = [];
 
 	afterEach(() => {
@@ -585,6 +605,14 @@ describe("published bootstrap staging", () => {
 	});
 
 	afterAll(() => {
+		if (originalPublishedNativeBin === undefined) {
+			delete process.env.BUILDPLANE_PUBLISHED_NATIVE_BIN;
+		} else {
+			process.env.BUILDPLANE_PUBLISHED_NATIVE_BIN = originalPublishedNativeBin;
+		}
+		if (fakePublishedNativeRoot) {
+			rmSync(fakePublishedNativeRoot, { force: true, recursive: true });
+		}
 		for (const path of buildArtifactsCreatedByTest) {
 			rmSync(path, { force: true, recursive: true });
 		}
@@ -592,6 +620,16 @@ describe("published bootstrap staging", () => {
 
 	beforeAll(async () => {
 		buildArtifactsCreatedByTest = ensureWorkspaceBuildOutputs();
+		fakePublishedNativeRoot = mkdtempSync(
+			join(safeTmpdir(), "buildplane-published-native-fixture-"),
+		);
+		const fakeNativeBin = join(fakePublishedNativeRoot, "buildplane-native");
+		writeFileSync(
+			fakeNativeBin,
+			'#!/bin/sh\nprintf \'{"ok":true,"fixture":"published-native"}\\n\'\n',
+		);
+		chmodSync(fakeNativeBin, 0o755);
+		process.env.BUILDPLANE_PUBLISHED_NATIVE_BIN = fakeNativeBin;
 
 		const readmeModule = await import(
 			"../../scripts/published-bootstrap/readme.mjs"
@@ -635,8 +673,9 @@ describe("published bootstrap staging", () => {
 		expect(publishedReadme).toContain("buildplane bootstrap doctor --json");
 		expect(publishedReadme).toContain("buildplane init");
 		expect(publishedReadme).toContain(
-			"Published/global installs do not yet include a verified `buildplane memory ...` contract.",
+			"Published/global native memory is packaged and verified on Linux x64.",
 		);
+		expect(publishedReadme).toContain("buildplane memory doctor --json");
 		expect(publishedReadme).toContain(
 			"buildplane run --packet /absolute/path/to/packet.json",
 		);
@@ -782,6 +821,17 @@ describe("published bootstrap staging", () => {
 		);
 		expect(stagedRunCli).not.toContain('import("@buildplane/kernel")');
 		expect(stagedEntryMode).not.toBe(0);
+		expect(
+			existsSync(
+				join(
+					staged.packageRoot,
+					"vendor",
+					"native",
+					"linux-x64",
+					"buildplane-native",
+				),
+			),
+		).toBe(true);
 	}, 60_000);
 
 	it("strips stale sourceMappingURL comments from staged runtime modules", () => {
@@ -1218,6 +1268,40 @@ describe("published bootstrap staging", () => {
 		);
 	});
 
+	it("fails linux-x64 inspection when the packaged native binary is missing", () => {
+		const tempRoot = mkdtempSync(
+			join(safeTmpdir(), "published-bootstrap-native-missing-"),
+		);
+		const packageRoot = join(tempRoot, "package");
+		cleanupPaths.push(tempRoot);
+
+		writeMinimalPublishedPackage(packageRoot, "./cli.js", {
+			includeNative: false,
+		});
+
+		expect(() =>
+			inspectPublishedPackage(packageRoot, { arch: "x64", platform: "linux" }),
+		).toThrow(/missing packaged linux-x64 native binary/i);
+	});
+
+	it("fails linux-x64 inspection when the packaged native binary is not executable", () => {
+		const tempRoot = mkdtempSync(
+			join(safeTmpdir(), "published-bootstrap-native-mode-"),
+		);
+		const packageRoot = join(tempRoot, "package");
+		cleanupPaths.push(tempRoot);
+
+		writeMinimalPublishedPackage(packageRoot);
+		chmodSync(
+			join(packageRoot, "vendor", "native", "linux-x64", "buildplane-native"),
+			0o644,
+		);
+
+		expect(() =>
+			inspectPublishedPackage(packageRoot, { arch: "x64", platform: "linux" }),
+		).toThrow(/packaged linux-x64 native binary must be executable/i);
+	});
+
 	it("inspects tarballs and returns the tarball input path", () => {
 		const staged = stagePublishedPackage();
 		cleanupPaths.push(staged.stagingRoot);
@@ -1554,6 +1638,11 @@ describe("published bootstrap staging", () => {
 					{
 						path: "placeholder-path",
 						body: "export const cliRuntime = true;\n",
+					},
+					{
+						path: "package/vendor/native/linux-x64/buildplane-native",
+						body: "#!/bin/sh\nexit 0\n",
+						mode: 0o755,
 					},
 				]),
 			);

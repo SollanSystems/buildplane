@@ -66,6 +66,7 @@ describe("Buildplane capability primitives", () => {
 				},
 			}),
 			resolveNativeBinary: () => undefined,
+			resolvePackagedNativeBinary: () => undefined,
 		});
 
 		expect(report.ok).toBe(true);
@@ -103,10 +104,99 @@ describe("Buildplane capability primitives", () => {
 		});
 	});
 
+	it("reports published memory only when a packaged native binary is present", () => {
+		const report = inspectCapabilities({
+			currentNodeVersion: "24.13.2",
+			cwd: "/repo",
+			detectNodeSqlite: () => ({
+				ok: true,
+				available: true,
+				message: "node:sqlite import available",
+			}),
+			probeCommand: createProbe({
+				npm: {
+					ok: true,
+					available: true,
+					command: "npm --version",
+					message: "10.0.0",
+				},
+				git: {
+					ok: true,
+					available: true,
+					command: "git --version",
+					message: "git version 2.49.0",
+				},
+			}),
+			resolveNativeBinary: () =>
+				"/pkg/vendor/native/linux-x64/buildplane-native",
+			resolvePackagedNativeBinary: () =>
+				"/pkg/vendor/native/linux-x64/buildplane-native",
+		});
+
+		expect(
+			report.capabilities.find(
+				(capability) => capability.id === "published_memory",
+			),
+		).toMatchObject({
+			ok: true,
+			required: false,
+			available: true,
+			detected: "/pkg/vendor/native/linux-x64/buildplane-native",
+		});
+	});
+
+	it("does not treat an explicit native binary as published memory", () => {
+		const report = inspectCapabilities({
+			currentNodeVersion: "24.13.2",
+			cwd: "/repo",
+			detectNodeSqlite: () => ({
+				ok: true,
+				available: true,
+				message: "node:sqlite import available",
+			}),
+			probeCommand: createProbe({
+				npm: {
+					ok: true,
+					available: true,
+					command: "npm --version",
+					message: "10.0.0",
+				},
+				git: {
+					ok: true,
+					available: true,
+					command: "git --version",
+					message: "git version 2.49.0",
+				},
+			}),
+			resolveNativeBinary: () => "/tmp/buildplane-native",
+			resolvePackagedNativeBinary: () => undefined,
+		});
+
+		expect(
+			report.capabilities.find(
+				(capability) => capability.id === "native_binary",
+			),
+		).toMatchObject({ available: true });
+		expect(
+			report.capabilities.find(
+				(capability) => capability.id === "published_memory",
+			),
+		).toMatchObject({
+			ok: false,
+			required: false,
+			available: false,
+		});
+	});
+
 	it("discovers buildplane-native from PATH when local target paths are absent", () => {
 		const tempRoot = mkdtempSync(join(tmpdir(), "buildplane-capability-path-"));
 		try {
-			const fakeNative = join(tempRoot, "buildplane-native");
+			const fakeNative = join(
+				tempRoot,
+				process.platform === "win32"
+					? "buildplane-native.exe"
+					: "buildplane-native",
+			);
 			writeFileSync(fakeNative, "#!/usr/bin/env sh\nexit 0\n");
 			try {
 				chmodSync(fakeNative, 0o755);
@@ -137,6 +227,7 @@ describe("Buildplane capability primitives", () => {
 						message: "git version 2.49.0",
 					},
 				}),
+				resolvePackagedNativeBinary: () => undefined,
 			});
 
 			expect(
@@ -181,6 +272,7 @@ describe("Buildplane capability primitives", () => {
 				},
 			}),
 			resolveNativeBinary: () => undefined,
+			resolvePackagedNativeBinary: () => undefined,
 		});
 
 		expect(report.ok).toBe(false);
