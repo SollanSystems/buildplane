@@ -252,6 +252,13 @@ export async function makeBuildplaneRunFixture(opts: {
 export interface ForkFixtureInputs {
 	parentPacket: unknown;
 	forkPacket: unknown;
+	forkArgs?: readonly string[];
+	beforeFork?: (context: {
+		dir: string;
+		eventsDbPath: string;
+		parentRunId: string;
+		targetId: string;
+	}) => Promise<void> | void;
 	forkTargetKindHint?:
 		| "unit_started"
 		| "git_checkpoint"
@@ -265,6 +272,8 @@ export interface ForkFixtureResult {
 	parentRunId: string;
 	forkRunId: string;
 	forkExitCode: number;
+	forkStdout: string;
+	forkStderr: string;
 	cleanup: () => Promise<void>;
 }
 
@@ -296,6 +305,7 @@ export async function makeForkFixture(
 		throw new Error(`fixture: no ${targetKind} event found in parent tape`);
 	}
 	const targetId = targetRow.id;
+	await opts.beforeFork?.({ dir, eventsDbPath, parentRunId, targetId });
 
 	// The fork command requires a clean working tree. After makeBuildplaneRunFixture
 	// runs the packet, the workspace has modified/untracked files (ledger db, artifacts).
@@ -339,6 +349,8 @@ export async function makeForkFixture(
 	const originalCwd = process.cwd();
 	const originalNativeBin = process.env.BUILDPLANE_NATIVE_BIN;
 	let forkExitCode = 1;
+	const forkStdout: string[] = [];
+	const forkStderr: string[] = [];
 	try {
 		process.chdir(dir);
 		process.env.BUILDPLANE_NATIVE_BIN = nativeBinary;
@@ -352,11 +364,12 @@ export async function makeForkFixture(
 				forkPacketPath,
 				"--workspace",
 				dir,
+				...(opts.forkArgs ?? []),
 			],
 			{
 				cwd: dir,
-				stdout: () => {},
-				stderr: () => {},
+				stdout: (line) => forkStdout.push(line),
+				stderr: (line) => forkStderr.push(line),
 			},
 		);
 	} finally {
@@ -386,6 +399,8 @@ export async function makeForkFixture(
 		parentRunId,
 		forkRunId,
 		forkExitCode,
+		forkStdout: forkStdout.join("\n"),
+		forkStderr: forkStderr.join("\n"),
 		cleanup: parent.cleanup,
 	};
 }
