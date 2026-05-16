@@ -28,6 +28,7 @@ describe("benchmark summary contract", () => {
 		expect(benchmarkDoc).toContain("memoryInjectedRate");
 		expect(benchmarkDoc).toContain("memoryHelpedRate");
 		expect(benchmarkDoc).toContain("strategyHelpedRate");
+		expect(benchmarkDoc).toContain("combinedHelpedRate");
 		expect(benchmarkDoc).toContain("meanDurationMs");
 	});
 
@@ -35,11 +36,12 @@ describe("benchmark summary contract", () => {
 		expect(documentedFixtureNames).toEqual(fixtureNames);
 	});
 
-	it("explains the current benchmark deltas and combined-only gap", () => {
+	it("explains the current benchmark deltas and combined-only proof", () => {
 		expect(benchmarkDoc).toContain("memory changes the outcome");
 		expect(benchmarkDoc).toContain("strategy changes the outcome");
-		expect(benchmarkDoc).toContain("combined-only memory-plus-strategy path");
-		expect(benchmarkDoc).toContain("does not currently prove");
+		expect(benchmarkDoc).toContain("combined-only proof");
+		expect(benchmarkDoc).toContain("memory-strategy-combined-only");
+		expect(benchmarkDoc).not.toContain("does not currently prove");
 		expect(benchmarkDoc).toMatch(/duration .* environment-sensitive/i);
 	});
 

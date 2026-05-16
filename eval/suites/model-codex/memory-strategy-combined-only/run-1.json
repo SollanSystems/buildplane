@@ -1,0 +1,34 @@
+{
+	"unit": {
+		"id": "eval-model-codex-7",
+		"kind": "command",
+		"scope": "task",
+		"inputRefs": [],
+		"expectedOutputs": ["output/combined-only.js"],
+		"verificationContract": "exit-0-and-required-outputs",
+		"policyProfile": "default"
+	},
+	"execution": {
+		"command": "node",
+		"args": ["-e", "process.exit(1)"]
+	},
+	"verification": {
+		"requiredOutputs": ["output/combined-only.js"]
+	},
+	"intent": {
+		"objective": "Simulate a failed combined-only attempt that leaves the exact required output path in the verification trail",
+		"taskType": "implement",
+		"context": {
+			"files": []
+		},
+		"constraints": {
+			"scope": ["output/"],
+			"verification": []
+		},
+		"features": {
+			"ambiguity": "low",
+			"reversibility": "easy",
+			"verifierStrength": "strong"
+		}
+	}
+}
