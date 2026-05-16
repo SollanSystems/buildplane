@@ -1,6 +1,7 @@
 mod fork_cli;
 mod ledger_cli;
 mod memory_cli;
+mod pack_export;
 
 #[cfg(test)]
 use bp_memory::{MemoryKind, MemoryScope};
@@ -21,6 +22,7 @@ use std::process;
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Command {
     InspectPack(InspectPackArgs),
+    ExportPack(pack_export::PackExportArgs),
     Fork(fork_cli::ForkCommand),
     Ledger(ledger_cli::LedgerCommand),
     Memory(MemoryCommand),
@@ -67,6 +69,7 @@ fn main() {
 fn run() -> Result<(), String> {
     match parse_args_from_iter(env::args_os().skip(1))? {
         Command::InspectPack(args) => run_inspect_pack(args),
+        Command::ExportPack(args) => run_export_pack(args),
         Command::Fork(fork_cli::ForkCommand::Plan(args)) => fork_cli::run_fork_plan(args),
         Command::Fork(fork_cli::ForkCommand::Help) => {
             println!("{}", fork_cli::usage_text());
@@ -95,6 +98,21 @@ fn run_inspect_pack(args: InspectPackArgs) -> Result<(), String> {
     let request = args.into_request(collect_process_env());
     let inspection = block_on(inspect_pack(&request))?;
     println!("{}", render_pack_inspection_output(&inspection, json)?);
+    Ok(())
+}
+
+fn run_export_pack(args: pack_export::PackExportArgs) -> Result<(), String> {
+    let json = args.json;
+    let receipt = pack_export::export_pack(args)?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&receipt)
+                .map_err(|err| format!("failed to serialize pack export receipt as json: {err}"))?
+        );
+    } else {
+        println!("{}", pack_export::render_human_receipt(&receipt));
+    }
     Ok(())
 }
 
@@ -203,12 +221,23 @@ where
 
     let action = args
         .next()
-        .ok_or_else(|| "missing pack action; expected `show`".to_string())?;
+        .ok_or_else(|| "missing pack action; expected `show` or `export`".to_string())?;
     let action = parse_string(action, "pack action")?;
-    if action != "show" {
-        return Err(format!("unknown pack action '{action}'"));
+    if action == "show" {
+        return parse_pack_show_command(args, default_native_root, default_workspace_root);
+    }
+    if action == "export" {
+        return parse_pack_export_command(args, default_native_root);
     }
 
+    Err(format!("unknown pack action '{action}'"))
+}
+
+fn parse_pack_show_command(
+    mut args: std::vec::IntoIter<OsString>,
+    default_native_root: PathBuf,
+    default_workspace_root: PathBuf,
+) -> Result<Command, String> {
     let pack_id = args.next().ok_or_else(|| {
         "missing pack id; expected `buildplane-native pack show <pack-id>`".to_string()
     })?;
@@ -262,6 +291,52 @@ where
     }))
 }
 
+fn parse_pack_export_command(
+    mut args: std::vec::IntoIter<OsString>,
+    default_native_root: PathBuf,
+) -> Result<Command, String> {
+    let pack_id = args.next().ok_or_else(|| {
+        "missing pack id; expected `buildplane-native pack export <pack-id>`".to_string()
+    })?;
+    let pack_id = parse_string(pack_id, "pack id")?;
+
+    let mut native_root = default_native_root;
+    let mut target = None;
+    let mut out = None;
+    let mut json = false;
+
+    while let Some(flag) = args.next() {
+        let flag = parse_string(flag, "flag")?;
+        match flag.as_str() {
+            "--native-root" => {
+                native_root = PathBuf::from(next_value(&mut args, "--native-root")?);
+            }
+            "--target" => {
+                let value = parse_string(next_value(&mut args, "--target")?, "target")?;
+                target = Some(pack_export::PackExportTarget::parse(&value)?);
+            }
+            "--out" => {
+                out = Some(PathBuf::from(next_value(&mut args, "--out")?));
+            }
+            "--json" => json = true,
+            "--help" | "-h" => return Ok(Command::Help),
+            other => return Err(format!("unknown flag '{other}'")),
+        }
+    }
+
+    let target =
+        target.ok_or_else(|| "missing --target <github-agent|github-skill>".to_string())?;
+    let out = out.ok_or_else(|| "missing --out <path>".to_string())?;
+
+    Ok(Command::ExportPack(pack_export::PackExportArgs {
+        pack_id,
+        native_root,
+        target,
+        out,
+        json,
+    }))
+}
+
 fn parse_string(value: OsString, label: &str) -> Result<String, String> {
     value
         .into_string()
@@ -298,6 +373,7 @@ fn usage_text() -> String {
     format!(
         "Usage:
   buildplane-native pack show <pack-id> [--native-root <path>] [--workspace-root <path>] [--host <id>] [--provider <id>] [--detected-host <id>]... [--json]
+  buildplane-native pack export <pack-id> --target github-agent|github-skill --out <path> [--native-root <path>] [--json]
   buildplane-native memory <action> [options]
   buildplane-native ledger <subcommand> [options]
 
@@ -306,6 +382,8 @@ Examples:
   CLAUDE_CODE=1 cargo run --manifest-path native/Cargo.toml -p bp-cli -- pack show superclaude
   cargo run --manifest-path native/Cargo.toml -p bp-cli -- pack show superclaude --detected-host codex --workspace-root /tmp/buildplane-test-workspace
   cargo run --manifest-path native/Cargo.toml -p bp-cli -- pack show superclaude --json
+  cargo run --manifest-path native/Cargo.toml -p bp-cli -- pack export superclaude --target github-agent --out .github/agents/superclaude.md --json
+  cargo run --manifest-path native/Cargo.toml -p bp-cli -- pack export superclaude --target github-skill --out .github/skills
   cargo run --manifest-path native/Cargo.toml -p bp-cli -- memory remember \"User prefers concise output\" --scope user --kind preference
   cargo run --manifest-path native/Cargo.toml -p bp-cli -- ledger serve --run-id <id> --workspace <path>
 
@@ -459,6 +537,60 @@ mod tests {
                 json: true,
             })
         );
+    }
+
+    #[test]
+    fn parses_pack_export_with_target_out_and_json() {
+        let native_root = PathBuf::from("/tmp/buildplane/native");
+        let command = parse_args_with_default_native_root(
+            vec![
+                "pack",
+                "export",
+                "superclaude",
+                "--target",
+                "github-agent",
+                "--out",
+                "/tmp/out/agent.md",
+                "--json",
+            ],
+            native_root.clone(),
+        )
+        .expect("command should parse");
+
+        assert_eq!(
+            command,
+            Command::ExportPack(pack_export::PackExportArgs {
+                pack_id: "superclaude".to_string(),
+                native_root,
+                target: pack_export::PackExportTarget::GithubAgent,
+                out: PathBuf::from("/tmp/out/agent.md"),
+                json: true,
+            })
+        );
+    }
+
+    #[test]
+    fn pack_export_requires_target_and_out() {
+        let native_root = PathBuf::from("/tmp/buildplane/native");
+        let missing_target = parse_args_with_default_native_root(
+            vec![
+                "pack",
+                "export",
+                "superclaude",
+                "--out",
+                "/tmp/out/agent.md",
+            ],
+            native_root.clone(),
+        )
+        .expect_err("missing target should fail");
+        assert!(missing_target.contains("--target"));
+
+        let missing_out = parse_args_with_default_native_root(
+            vec!["pack", "export", "superclaude", "--target", "github-skill"],
+            native_root,
+        )
+        .expect_err("missing out should fail");
+        assert!(missing_out.contains("--out"));
     }
 
     #[test]
