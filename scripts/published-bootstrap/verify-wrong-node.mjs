@@ -16,6 +16,7 @@
  */
 import { spawnSync } from "node:child_process";
 import {
+	chmodSync,
 	existsSync,
 	mkdtempSync,
 	readFileSync,
@@ -165,6 +166,24 @@ function assertFile(path, description) {
 	}
 }
 
+function createWrongNodePackagedNativeFixture(tempPaths) {
+	if (process.platform !== "linux" || process.arch !== "x64") {
+		return undefined;
+	}
+
+	const fixtureRoot = mkdtempSync(
+		join(resolveSafeStagingParentDirectory(), "buildplane-wrong-node-native-"),
+	);
+	tempPaths.push(fixtureRoot);
+	const fixturePath = join(fixtureRoot, "buildplane-native");
+	writeFileSync(
+		fixturePath,
+		'#!/bin/sh\nprintf \'{"ok":true,"fixture":"wrong-node-native"}\\n\'\n',
+	);
+	chmodSync(fixturePath, 0o755);
+	return fixturePath;
+}
+
 function main() {
 	const tempPaths = [];
 
@@ -182,10 +201,15 @@ function main() {
 		runCommand(PNPM_COMMAND, ["build"], { cwd: REPO_ROOT });
 
 		console.log("== stage and pack ==");
+		const stageEnv = { ...process.env };
+		const nativeFixturePath = createWrongNodePackagedNativeFixture(tempPaths);
+		if (nativeFixturePath) {
+			stageEnv.BUILDPLANE_PUBLISHED_NATIVE_BIN = nativeFixturePath;
+		}
 		const { stdout: stageStdout } = runCommand(
 			process.execPath,
 			["./scripts/published-bootstrap/stage-package.mjs"],
-			{ cwd: REPO_ROOT },
+			{ cwd: REPO_ROOT, env: stageEnv },
 		);
 		const staged = parseJson(stageStdout.trim(), "stage-package.mjs output");
 		tempPaths.push(staged.stagingRoot);

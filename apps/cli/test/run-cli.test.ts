@@ -313,7 +313,7 @@ function createBootstrapDoctorReport(ok = true) {
 		],
 		notes: [
 			".node-version pins the tested development baseline; the published CLI accepts compatible Node 24 runtimes.",
-			"Published/global installs do not yet include a verified `buildplane memory ...` contract.",
+			"Published memory is available only when the installed package includes a packaged native binary for this platform.",
 		],
 	};
 }
@@ -341,11 +341,10 @@ function createCapabilityReport(ok = true) {
 			{
 				id: "published_memory",
 				label: "Published memory",
-				ok: true,
+				ok: false,
 				required: false,
 				available: false,
-				message:
-					"published/global installs do not yet include a verified buildplane memory contract",
+				message: "packaged linux-x64 native binary not found in vendor/native",
 			},
 		],
 		notes: [
@@ -394,7 +393,7 @@ describe("cli command surface", () => {
 		);
 		expect(result.stdout).toContain("  - [pass] npm: npm 10.9.0");
 		expect(result.stdout).toContain(
-			"  - Published/global installs do not yet include a verified `buildplane memory ...` contract.",
+			"  - Published memory is available only when the installed package includes a packaged native binary for this platform.",
 		);
 		expect(existsSync(join(root, ".buildplane"))).toBe(false);
 	});

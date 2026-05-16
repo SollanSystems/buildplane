@@ -97,7 +97,7 @@ describe("bootstrap doctor report", () => {
 			}),
 		]);
 		expect(report.notes).toContain(
-			"Published/global installs do not yet include a verified `buildplane memory ...` contract.",
+			"Published memory is available only when the installed package includes a packaged native binary for this platform.",
 		);
 	});
 
@@ -223,7 +223,7 @@ describe("bootstrap doctor report", () => {
 			"git",
 		]);
 		expect(payload.notes).toContain(
-			"Published/global installs do not yet include a verified `buildplane memory ...` contract.",
+			"Published memory is available only when the installed package includes a packaged native binary for this platform.",
 		);
 		expect(existsSync(join(workspaceRoot, ".buildplane"))).toBe(false);
 	});

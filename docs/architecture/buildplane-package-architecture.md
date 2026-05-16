@@ -350,7 +350,7 @@ buildplane pack show superclaude
 buildplane pack show supercodex
 ```
 
-Native-backed recovery and ledger commands remain under the same `buildplane` umbrella when a repo-local or supplied `buildplane-native` binary is available; they should not become separate product CLIs.
+Native-backed recovery and ledger commands remain under the same `buildplane` umbrella when a repo-local, supplied, or packaged `buildplane-native` binary is available; they should not become separate product CLIs. Published packaging ships Linux x64 native memory first and reports other platforms as unavailable until matching artifacts are staged.
 
 ## Migration guidance
 

@@ -1,7 +1,8 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
-import { delimiter, resolve } from "node:path";
+import { delimiter, dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 export const SUPPORTED_NODE_RANGE = ">=24.13.1 <25";
 
@@ -60,6 +61,9 @@ export interface InspectCapabilitiesOptions {
 	readonly detectNodeSqlite?: () => CapabilityProbeResult;
 	readonly resolveNativeBinary?: (
 		cwd: string,
+		env: NodeJS.ProcessEnv,
+	) => string | undefined;
+	readonly resolvePackagedNativeBinary?: (
 		env: NodeJS.ProcessEnv,
 	) => string | undefined;
 	readonly npmCommand?: string;
@@ -213,6 +217,65 @@ function findExecutableOnPath(
 	return undefined;
 }
 
+function isExecutableFile(path: string): boolean {
+	try {
+		const stat = statSync(path);
+		if (!stat.isFile()) {
+			return false;
+		}
+		if (process.platform === "win32") {
+			return true;
+		}
+		return (stat.mode & 0o111) !== 0;
+	} catch {
+		return false;
+	}
+}
+
+function currentPackagedNativeTarget():
+	| { readonly binaryName: string; readonly platform: "linux-x64" }
+	| undefined {
+	if (process.platform !== "linux" || process.arch !== "x64") {
+		return undefined;
+	}
+
+	return {
+		binaryName: "buildplane-native",
+		platform: "linux-x64",
+	};
+}
+
+function packagedNativeUnavailableMessage(): string {
+	if (process.platform === "linux" && process.arch === "x64") {
+		return "packaged linux-x64 native binary not found in vendor/native";
+	}
+
+	return `packaged native memory unavailable for ${process.platform}-${process.arch}; linux-x64 is currently the only packaged native target`;
+}
+
+function defaultResolvePackagedNativeBinary(
+	_env: NodeJS.ProcessEnv,
+): string | undefined {
+	const target = currentPackagedNativeTarget();
+	if (!target) {
+		return undefined;
+	}
+
+	const candidate = resolve(
+		dirname(fileURLToPath(import.meta.url)),
+		"..",
+		"vendor",
+		"native",
+		target.platform,
+		target.binaryName,
+	);
+	if (!isExecutableFile(candidate)) {
+		return undefined;
+	}
+
+	return candidate;
+}
+
 function defaultResolveNativeBinary(
 	cwd: string,
 	env: NodeJS.ProcessEnv,
@@ -220,6 +283,12 @@ function defaultResolveNativeBinary(
 	if (env.BUILDPLANE_NATIVE_BIN) {
 		return findExecutableOnPath(env.BUILDPLANE_NATIVE_BIN, env);
 	}
+
+	const packagedNative = defaultResolvePackagedNativeBinary(env);
+	if (packagedNative) {
+		return packagedNative;
+	}
+
 	const targets =
 		process.platform === "win32"
 			? ["buildplane-native.exe", "buildplane-native"]
@@ -271,6 +340,9 @@ export function inspectCapabilities(
 		options.detectNodeSqlite ?? detectNodeSqliteCapability;
 	const resolveNativeBinary =
 		options.resolveNativeBinary ?? defaultResolveNativeBinary;
+	const resolvePackagedNativeBinary =
+		options.resolvePackagedNativeBinary ?? defaultResolvePackagedNativeBinary;
+	const packagedNativeBinary = resolvePackagedNativeBinary(env);
 	const nativeBinary = resolveNativeBinary(cwd, env);
 	const nodeOk = isSupportedNodeVersion(currentNodeVersion);
 	const nodeSqlite = detectNodeSqlite();
@@ -328,7 +400,7 @@ export function inspectCapabilities(
 			detected: nativeBinary,
 			message: nativeBinary
 				? `native binary found at ${nativeBinary}`
-				: "native binary not found in BUILDPLANE_NATIVE_BIN, native/target, or PATH",
+				: "native binary not found in BUILDPLANE_NATIVE_BIN, packaged vendor/native, native/target, or PATH",
 		},
 		{
 			id: "repo_local_memory",
@@ -343,11 +415,13 @@ export function inspectCapabilities(
 		{
 			id: "published_memory",
 			label: "Published memory",
-			ok: false,
+			ok: Boolean(packagedNativeBinary),
 			required: false,
-			available: false,
-			message:
-				"published/global installs do not yet include a verified buildplane memory contract",
+			available: Boolean(packagedNativeBinary),
+			detected: packagedNativeBinary,
+			message: packagedNativeBinary
+				? `published memory can use packaged native binary at ${packagedNativeBinary}`
+				: packagedNativeUnavailableMessage(),
 		},
 	];
 
@@ -362,7 +436,7 @@ export function inspectCapabilities(
 		capabilities,
 		notes: [
 			".node-version pins the tested development baseline; the published CLI accepts compatible Node 24 runtimes.",
-			"Published/global installs do not yet include a verified `buildplane memory ...` contract.",
+			"Published memory is available only when the installed package includes a packaged native binary for this platform.",
 		],
 	};
 }

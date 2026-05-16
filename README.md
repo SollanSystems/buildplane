@@ -26,7 +26,7 @@ Build software with autonomy you can inspect, verify, reroute, and resume.
 
 Buildplane already has a real repo-local control-plane path: typed runs, durable state, evidence capture, policy evaluation, status/inspect surfaces, replay-oriented execution flows, strategy execution, and structured memory foundations. The current best-supported operator paths are the repo-development and in-repo built CLI flows documented below.
 
-Near-term work is focused on trust-surface hardening rather than broader agent-shell breadth: stabilizing the verified published install contract, tightening provenance and inspect surfaces, and making replay/review/recovery easier to operate. Published/global install remains intentionally narrower than repo-local development, especially for native-backed memory commands.
+Near-term work is focused on trust-surface hardening rather than broader agent-shell breadth: stabilizing the verified published install contract, tightening provenance and inspect surfaces, and making replay/review/recovery easier to operate. Published/global install remains intentionally narrower than repo-local development, with native-backed memory currently packaged for Linux x64 first.
 
 ## Benchmarks
 
@@ -129,6 +129,7 @@ This is the same interface used by the `bin.buildplane` entry in `apps/cli/packa
 
 The compiled CLI uses the same native-command bridge implementation as the published package entrypoint, and this repo verifies `buildplane memory ...` and `buildplane pack show ...` end-to-end for the repo-development and in-repo built CLI paths. When that bridge is used, the CLI resolves the native binary in this order:
 - `BUILDPLANE_NATIVE_BIN` if set
+- packaged `vendor/native/linux-x64/buildplane-native` when running on Linux x64
 - `native/target/debug/buildplane-native` relative to the current working directory
 - `native/target/release/buildplane-native` relative to the current working directory
 - `buildplane-native` on `PATH`
@@ -151,11 +152,12 @@ buildplane init
 buildplane run --packet <path-to-packet.json>
 buildplane status --json
 buildplane inspect <run-id> --json
+buildplane memory doctor --json
 ```
 
 > **Precondition:** `run` expects a clean git working tree. Commit or stash uncommitted changes before dispatching work.
 
-Published/global installs do not yet include a verified `buildplane memory ...` contract. The npm package does not bundle or provision `buildplane-native`, so memory remains a repo-local or direct-native workflow unless you separately supply the native binary yourself. Published/global native memory remains outside the verified package contract unless you separately supply a discoverable `buildplane-native` binary; the capability doctor reports this as optional/unavailable rather than failing the published run contract.
+Published/global native memory is packaged and verified on Linux x64. Windows and macOS packages currently report `published_memory` as optional/unavailable instead of silently trying a broken native path. You can still supply `BUILDPLANE_NATIVE_BIN` explicitly on any platform, but that is reported as a supplied native binary, not as the published package memory contract.
 
 The capability doctor also reports required host/runtime features such as `node:sqlite`, npm, git, and the supported Node range, so global-install operators can see which prerequisite failed without reading the source.
 
@@ -200,7 +202,7 @@ Example packet:
 }
 ```
 
-This example is intentionally narrow: one packet, one run, one local command step, one persisted decision path. Broader repo-local surfaces already include history/status/inspect, workspace retention and cleanup, replay-oriented flows, strategy execution, policy decisions, and model-worker routing where the documented repo-development and in-repo built CLI paths support them. Published/global install remains intentionally narrower, especially for native-backed memory and ledger surfaces.
+This example is intentionally narrow: one packet, one run, one local command step, one persisted decision path. Broader repo-local surfaces already include history/status/inspect, workspace retention and cleanup, replay-oriented flows, strategy execution, policy decisions, and model-worker routing where the documented repo-development and in-repo built CLI paths support them. Published/global install remains intentionally narrower, with native-backed memory packaged for Linux x64 first and wider native targets still explicit/unavailable.
 
 ## GSD-2 repo-local task state
 

@@ -17,8 +17,8 @@ Current implementation and verification boundary:
 - Other `buildplane memory ...` forms still dispatch from the TypeScript CLI into the native Rust memory runner; the bridge lives in `apps/cli/src/run-cli.ts`.
 - the native implementation is still directly invokable as `buildplane-native memory ...` or `cargo run --manifest-path native/Cargo.toml -p bp-cli -- memory ...`
 - repo-local `pnpm buildplane memory ...` and in-repo built `node apps/cli/dist/index.js memory ...` are the currently verified bridge surfaces
-- packaged/global `npm install -g buildplane` does not yet make `buildplane memory ...` a verified public contract because the published package does not bundle or provision the native binary
-- native binary discovery currently happens in this order: `BUILDPLANE_NATIVE_BIN`, `native/target/debug/buildplane-native` relative to the current working directory, `native/target/release/buildplane-native` relative to the current working directory, then `buildplane-native` on `PATH`
+- packaged/global `npm install -g buildplane` now includes a verified `buildplane memory doctor --json` contract when the installed package carries the Linux x64 native binary; Windows/macOS report `published_memory` as optional/unavailable until matching binaries are staged
+- native binary discovery currently happens in this order: `BUILDPLANE_NATIVE_BIN`, packaged `vendor/native/linux-x64/buildplane-native` on Linux x64, `native/target/debug/buildplane-native` relative to the current working directory, `native/target/release/buildplane-native` relative to the current working directory, then `buildplane-native` on `PATH`
 - the current `pack show` command remains an earlier inspection seam for host-aware runtime routing, not the finished memory contract
 
 ## Command design principles

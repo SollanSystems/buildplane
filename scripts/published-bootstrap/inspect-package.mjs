@@ -62,6 +62,9 @@ const FORBIDDEN_STAGED_README_PATTERNS = Object.freeze([
 ]);
 const RUNTIME_TREE_ROOTS = Object.freeze(["dist", "vendor"]);
 const REQUIRED_WRAPPER_RUNTIME_BOUNDARY_SPECIFIER = "./cli.js";
+const PACKAGED_NATIVE_RELATIVE_PATHS = new Set([
+	"vendor/native/linux-x64/buildplane-native",
+]);
 const ALLOWED_STAGED_PACKAGE_ROOT_ENTRIES = new Set([
 	"README.md",
 	"dist",
@@ -348,6 +351,54 @@ function assertNoUnexpectedRuntimePayload(
 	fail(
 		`Unexpected staged runtime payload outside the dist/index.js closure: ${extraRuntimeFiles.join(", ")}`,
 	);
+}
+
+function assertPackagedNativePayload(packageRoot, platform) {
+	const nativeRoot = join(packageRoot, "vendor", "native");
+	const linuxNativePath = join(
+		packageRoot,
+		"vendor",
+		"native",
+		"linux-x64",
+		"buildplane-native",
+	);
+	if (!existsSync(nativeRoot)) {
+		fail(`Missing packaged linux-x64 native binary: ${linuxNativePath}`);
+	}
+
+	const nativeFiles = [];
+	walkTree(nativeRoot, (entryPath, entry) => {
+		if (entry.isFile()) {
+			nativeFiles.push(relative(packageRoot, entryPath).replace(/\\/g, "/"));
+		}
+	});
+
+	const unexpectedNativeFiles = nativeFiles.filter(
+		(path) => !PACKAGED_NATIVE_RELATIVE_PATHS.has(path),
+	);
+	if (unexpectedNativeFiles.length > 0) {
+		fail(
+			`Unexpected packaged native payload: ${unexpectedNativeFiles.join(", ")}`,
+		);
+	}
+
+	if (!existsSync(linuxNativePath)) {
+		fail(`Missing packaged linux-x64 native binary: ${linuxNativePath}`);
+	}
+
+	const nativeStats = statSync(linuxNativePath);
+	if (!nativeStats.isFile()) {
+		fail(`Packaged linux-x64 native binary must be a file: ${linuxNativePath}`);
+	}
+
+	if (
+		shouldEnforceExecutableMode(platform) &&
+		(nativeStats.mode & EXECUTABLE_MODE_MASK) === 0
+	) {
+		fail(
+			`Packaged linux-x64 native binary must be executable: ${linuxNativePath}`,
+		);
+	}
 }
 
 function assertNoUnexpectedPackageRootPayload(packageRoot) {
@@ -793,6 +844,7 @@ function assertManifestContract(packageRoot, manifest, options = {}) {
 
 	assertNoRuntimePayloadLeakage(packageRoot);
 	assertNoUnexpectedRuntimePayload(packageRoot, distIndexPath, manifest);
+	assertPackagedNativePayload(packageRoot, platform);
 
 	const readmePath = join(packageRoot, "README.md");
 	if (!existsSync(readmePath) || !statSync(readmePath).isFile()) {

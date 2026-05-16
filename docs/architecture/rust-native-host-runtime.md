@@ -75,7 +75,7 @@ Current boundaries / still narrower than the TypeScript control plane:
 - no complete native replacement for the TypeScript orchestrator yet
 - no live Claude/Codex execution bridge owned fully by native yet
 - no direct provider transport promoted as the default production path yet
-- published/global npm installs do not bundle or provision `buildplane-native`; native-backed commands are repo-local, built-CLI, or direct-native workflows unless the operator supplies the binary separately
+- published/global npm installs bundle `buildplane-native` for Linux x64 first; Windows and macOS published installs report native-backed memory as optional/unavailable until those binaries are staged explicitly
 
 Migration intent:
 - keep the current TypeScript control plane shipping

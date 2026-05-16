@@ -20,6 +20,7 @@ import {
 	sep,
 } from "node:path";
 import type { Readable, Writable } from "node:stream";
+import { fileURLToPath } from "node:url";
 import { createToolRegistry } from "@buildplane/adapters-tools";
 import {
 	createTapeEmitter,
@@ -1783,7 +1784,7 @@ async function loadPacket(packetPath: string): Promise<unknown> {
 
 const NATIVE_COMMAND_DISPATCH_ERROR_CODE = "NATIVE_COMMAND_DISPATCH_FAILED";
 const NATIVE_COMMAND_DISPATCH_HINT =
-	"Hint: build the native binary with `cargo build --manifest-path native/Cargo.toml -p bp-cli`, or set BUILDPLANE_NATIVE_BIN, or ensure `buildplane-native` is on PATH.";
+	"Hint: build the native binary with `cargo build --manifest-path native/Cargo.toml -p bp-cli`, set BUILDPLANE_NATIVE_BIN, install a package with a bundled native binary, or ensure `buildplane-native` is on PATH.";
 
 class NativeCommandDispatchError extends Error {
 	constructor(message: string) {
@@ -1840,19 +1841,74 @@ function splitOutputLines(output: string): string[] {
 		.filter((line) => line.length > 0);
 }
 
+function currentPackagedNativeTarget():
+	| { readonly binaryName: string; readonly platform: "linux-x64" }
+	| undefined {
+	if (process.platform !== "linux" || process.arch !== "x64") {
+		return undefined;
+	}
+
+	return {
+		binaryName: "buildplane-native",
+		platform: "linux-x64",
+	};
+}
+
+function isExecutableFile(path: string): boolean {
+	try {
+		const stat = statSync(path);
+		if (!stat.isFile()) {
+			return false;
+		}
+		if (process.platform === "win32") {
+			return true;
+		}
+		return (stat.mode & 0o111) !== 0;
+	} catch {
+		return false;
+	}
+}
+
+function resolvePackagedNativeBinary(): string | undefined {
+	const target = currentPackagedNativeTarget();
+	if (!target) {
+		return undefined;
+	}
+
+	const candidate = resolve(
+		dirname(fileURLToPath(import.meta.url)),
+		"..",
+		"vendor",
+		"native",
+		target.platform,
+		target.binaryName,
+	);
+	return isExecutableFile(candidate) ? candidate : undefined;
+}
+
 function resolveNativeBinary(cwd: string): string {
 	const explicit = process.env.BUILDPLANE_NATIVE_BIN;
 	if (explicit) {
 		return explicit;
 	}
 
-	const candidates = [
-		resolve(cwd, "native", "target", "debug", "buildplane-native"),
-		resolve(cwd, "native", "target", "release", "buildplane-native"),
-	];
-	for (const candidate of candidates) {
-		if (existsSync(candidate)) {
-			return candidate;
+	const packaged = resolvePackagedNativeBinary();
+	if (packaged) {
+		return packaged;
+	}
+
+	const targets =
+		process.platform === "win32"
+			? ["buildplane-native.exe", "buildplane-native"]
+			: ["buildplane-native"];
+	for (const target of targets) {
+		for (const candidate of [
+			resolve(cwd, "native", "target", "debug", target),
+			resolve(cwd, "native", "target", "release", target),
+		]) {
+			if (existsSync(candidate)) {
+				return candidate;
+			}
 		}
 	}
 	return "buildplane-native";
