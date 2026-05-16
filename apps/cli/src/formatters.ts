@@ -580,6 +580,7 @@ function createMissingEvidence(
 	snapshot: InspectSnapshotLike,
 ): readonly string[] {
 	const missing: string[] = [];
+	const failure = inspectFailure(snapshot);
 	for (const evidence of snapshot.evidence) {
 		if (!evidenceIsPassing(evidence.status)) {
 			missing.push(
@@ -601,8 +602,8 @@ function createMissingEvidence(
 	if (!snapshot.eventTape) {
 		missing.push("event-tape: missing");
 	}
-	if (inspectFailure(snapshot)?.message) {
-		missing.push(`failure: ${inspectFailure(snapshot)?.message ?? ""}`);
+	if (failure?.message) {
+		missing.push(`failure: ${failure.message}`);
 	}
 	return [...new Set(missing)];
 }
