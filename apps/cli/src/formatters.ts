@@ -449,6 +449,39 @@ interface InspectSnapshotLike {
 	readonly promotedStructuredMemories?: readonly PromotedStructuredMemoryLike[];
 }
 
+export interface InspectorProjection {
+	readonly kind: "run-inspector";
+	readonly runId: string;
+	readonly outcomeStrip: {
+		readonly verdict: "PASSED" | "BLOCKED" | "FAILED" | "CANCELLED" | "UNKNOWN";
+		readonly runStatus: string;
+		readonly terminalEventKind?: string;
+		readonly eventCount: number;
+		readonly evidenceCount: number;
+		readonly decisionCount: number;
+		readonly artifactCount: number;
+		readonly missingEvidenceCount: number;
+		readonly failure?: {
+			readonly kind?: string;
+			readonly message?: string;
+		};
+	};
+	readonly eventTimeline: readonly {
+		readonly id: string;
+		readonly kind: string;
+		readonly occurredAt: string;
+		readonly summary: string;
+		readonly metadata?: Readonly<Record<string, string | number | boolean>>;
+	}[];
+	readonly evidencePane: {
+		readonly evidence: InspectSnapshotLike["evidence"];
+		readonly decisions: InspectSnapshotLike["decisions"];
+		readonly artifacts: InspectSnapshotLike["artifacts"];
+	};
+	readonly provenance: InspectSnapshotLike["provenance"];
+	readonly missingEvidence: readonly string[];
+}
+
 function formatInspectArtifactLine(artifact: {
 	readonly type: string;
 	readonly location: string;
@@ -518,6 +551,192 @@ function formatEventTapeKindCounts(
 				`${sanitizeTerminalText(entry.kind)}=${sanitizeTerminalText(String(entry.count))}`,
 		)
 		.join(", ");
+}
+
+function inspectFailure(snapshot: InspectSnapshotLike):
+	| {
+			readonly kind?: string;
+			readonly message?: string;
+	  }
+	| undefined {
+	const failure = (snapshot as unknown as { failure?: unknown }).failure;
+	if (!failure || typeof failure !== "object") {
+		return undefined;
+	}
+	const record = failure as { kind?: string; message?: string };
+	return {
+		kind: record.kind,
+		message: record.message,
+	};
+}
+
+function evidenceIsPassing(status: string): boolean {
+	return ["pass", "passed", "approved", "ok", "success"].includes(
+		status.toLowerCase(),
+	);
+}
+
+function createMissingEvidence(
+	snapshot: InspectSnapshotLike,
+): readonly string[] {
+	const missing: string[] = [];
+	for (const evidence of snapshot.evidence) {
+		if (!evidenceIsPassing(evidence.status)) {
+			missing.push(
+				evidence.message
+					? `${evidence.kind}: ${evidence.message}`
+					: `${evidence.kind}: ${evidence.status}`,
+			);
+		}
+	}
+	for (const decision of snapshot.decisions) {
+		if (["rejected", "blocked", "deferred"].includes(decision.outcome)) {
+			missing.push(
+				decision.reasons.length > 0
+					? `${decision.kind}: ${decision.reasons.join("; ")}`
+					: `${decision.kind}: ${decision.outcome}`,
+			);
+		}
+	}
+	if (!snapshot.eventTape) {
+		missing.push("event-tape: missing");
+	}
+	if (inspectFailure(snapshot)?.message) {
+		missing.push(`failure: ${inspectFailure(snapshot)?.message ?? ""}`);
+	}
+	return [...new Set(missing)];
+}
+
+function createInspectorVerdict(
+	snapshot: InspectSnapshotLike,
+	missingEvidence: readonly string[],
+): InspectorProjection["outcomeStrip"]["verdict"] {
+	const status = snapshot.run.status.toLowerCase();
+	if (status === "failed") return "FAILED";
+	if (status === "cancelled") return "CANCELLED";
+	if (status === "suspended") return "BLOCKED";
+	if (missingEvidence.length > 0) return "BLOCKED";
+	if (status === "passed") {
+		const hasSupport =
+			snapshot.evidence.some((evidence) =>
+				evidenceIsPassing(evidence.status),
+			) ||
+			snapshot.decisions.some((decision) => decision.outcome === "approved") ||
+			snapshot.eventTape?.terminalStatus === "passed" ||
+			snapshot.artifacts.length > 0;
+		return hasSupport ? "PASSED" : "UNKNOWN";
+	}
+	return "UNKNOWN";
+}
+
+export function createInspectorProjection(
+	snapshot: InspectSnapshotLike,
+): InspectorProjection {
+	const missingEvidence = createMissingEvidence(snapshot);
+	return {
+		kind: "run-inspector",
+		runId: snapshot.run.id,
+		outcomeStrip: {
+			verdict: createInspectorVerdict(snapshot, missingEvidence),
+			runStatus: snapshot.run.status,
+			terminalEventKind: snapshot.eventTape?.lastKind,
+			eventCount: snapshot.eventTape?.eventCount ?? 0,
+			evidenceCount: snapshot.evidence.length,
+			decisionCount: snapshot.decisions.length,
+			artifactCount: snapshot.artifacts.length,
+			missingEvidenceCount: missingEvidence.length,
+			failure: inspectFailure(snapshot),
+		},
+		eventTimeline: snapshot.eventTape?.events ?? [],
+		evidencePane: {
+			evidence: snapshot.evidence,
+			decisions: snapshot.decisions,
+			artifacts: snapshot.artifacts,
+		},
+		provenance: snapshot.provenance,
+		missingEvidence,
+	};
+}
+
+export function formatInspectorProjection(
+	projection: InspectorProjection,
+): string[] {
+	const lines: string[] = [];
+	lines.push("Run Inspector");
+	lines.push(`run-id: ${sanitizeTerminalText(projection.runId)}`);
+	lines.push("");
+	lines.push("Outcome Strip");
+	lines.push(`  verdict: ${projection.outcomeStrip.verdict}`);
+	lines.push(
+		`  run-status: ${sanitizeTerminalText(projection.outcomeStrip.runStatus)}`,
+	);
+	lines.push(`  events: ${projection.outcomeStrip.eventCount}`);
+	lines.push(`  evidence: ${projection.outcomeStrip.evidenceCount}`);
+	lines.push(`  decisions: ${projection.outcomeStrip.decisionCount}`);
+	lines.push(`  artifacts: ${projection.outcomeStrip.artifactCount}`);
+	lines.push(
+		`  missing-evidence: ${projection.outcomeStrip.missingEvidenceCount}`,
+	);
+	if (projection.outcomeStrip.terminalEventKind) {
+		lines.push(
+			`  terminal-event: ${sanitizeTerminalText(projection.outcomeStrip.terminalEventKind)}`,
+		);
+	}
+	if (projection.outcomeStrip.failure?.kind) {
+		lines.push(
+			`  failure-kind: ${sanitizeTerminalText(projection.outcomeStrip.failure.kind)}`,
+		);
+	}
+	if (projection.outcomeStrip.failure?.message) {
+		lines.push(
+			`  failure: ${sanitizeTerminalText(projection.outcomeStrip.failure.message)}`,
+		);
+	}
+	lines.push("");
+	lines.push("Event Timeline");
+	if (projection.eventTimeline.length === 0) {
+		lines.push("  - missing: no event tape records available");
+	} else {
+		for (const event of projection.eventTimeline.slice(0, 12)) {
+			const formattedMetadata = event.metadata
+				? formatEventTapeMetadata(event.metadata)
+				: "";
+			const metadata = formattedMetadata ? ` ${formattedMetadata}` : "";
+			lines.push(
+				`  - ${sanitizeTerminalText(event.occurredAt)} ${sanitizeTerminalText(event.kind)} ${sanitizeTerminalText(event.id)}: ${sanitizeTerminalText(event.summary)}${metadata}`,
+			);
+		}
+		const omittedCount = projection.eventTimeline.length - 12;
+		if (omittedCount > 0) {
+			lines.push(`  - ... ${omittedCount} more events`);
+		}
+	}
+	lines.push("");
+	lines.push("Evidence Pane");
+	if (
+		projection.evidencePane.evidence.length === 0 &&
+		projection.evidencePane.decisions.length === 0 &&
+		projection.evidencePane.artifacts.length === 0
+	) {
+		lines.push("  - missing: no evidence, decisions, or artifacts recorded");
+	}
+	for (const evidence of projection.evidencePane.evidence) {
+		lines.push(`  - evidence: ${formatInspectEvidenceLine(evidence)}`);
+	}
+	for (const decision of projection.evidencePane.decisions) {
+		lines.push(`  - decision: ${formatInspectDecisionLine(decision)}`);
+	}
+	for (const artifact of projection.evidencePane.artifacts) {
+		lines.push(`  - artifact: ${formatInspectArtifactLine(artifact)}`);
+	}
+	if (projection.missingEvidence.length > 0) {
+		lines.push("");
+		lines.push("Missing Evidence");
+		for (const missing of projection.missingEvidence) {
+			lines.push(`  - ${sanitizeTerminalText(missing)}`);
+		}
+	}
+	return lines;
 }
 
 export function formatInspectDetail(

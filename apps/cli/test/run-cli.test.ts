@@ -761,6 +761,107 @@ describe("cli command surface", () => {
 		expect(existsSync(join(root, ".buildplane", "state.db"))).toBe(true);
 	});
 
+	it("supports the evidence-first inspector projection for inspect", async () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-cli-inspector-view-"));
+		await runCliCapture(root, ["init"]);
+		const inspectSnapshot = {
+			kind: "run",
+			unit: { id: "unit-inspector", kind: "command" },
+			run: {
+				id: "run-inspector",
+				unitId: "unit-inspector",
+				status: "passed",
+			},
+			eventTape: {
+				runId: "run-inspector",
+				eventCount: 1,
+				firstKind: "run_started",
+				lastKind: "run_completed",
+				terminalStatus: "passed",
+				events: [
+					{
+						id: "event-1",
+						kind: "run_completed",
+						occurredAt: "2026-05-16T00:00:00.000Z",
+						summary: "completed",
+					},
+				],
+			},
+			evidence: [{ kind: "command-exit", status: "pass", message: "exit 0" }],
+			decisions: [
+				{
+					kind: "advance-run",
+					outcome: "approved",
+					reasons: ["required output exists"],
+				},
+			],
+			artifacts: [{ type: "log", location: ".buildplane/log.txt" }],
+		};
+		const dependencies: RunCliDependencies = {
+			createOrchestrator: () =>
+				({
+					inspect: () => inspectSnapshot,
+					initializeProject() {
+						throw new Error("not used");
+					},
+					runPacket() {
+						throw new Error("not used");
+					},
+					async runPacketAsync() {
+						throw new Error("not used");
+					},
+					getStatus() {
+						throw new Error("not used");
+					},
+					approveRun() {
+						throw new Error("not used");
+					},
+					rejectSuspendedRun() {
+						throw new Error("not used");
+					},
+					async runGraphAsync() {
+						throw new Error("not used");
+					},
+					async runStrategy() {
+						throw new Error("not used");
+					},
+				}) as unknown as BuildplaneOrchestrator,
+		};
+
+		const human = await runCliCapture(
+			root,
+			["inspect", "run-inspector", "--view", "inspector"],
+			dependencies,
+		);
+		const json = await runCliCapture(
+			root,
+			["inspect", "run-inspector", "--json", "--view=inspector"],
+			dependencies,
+		);
+		const rawJson = await runCliCapture(
+			root,
+			["inspect", "run-inspector", "--json"],
+			dependencies,
+		);
+
+		expect(human.exitCode).toBe(0);
+		expect(human.stdout).toContain("Run Inspector");
+		expect(human.stdout).toContain("Outcome Strip");
+		expect(human.stdout).toContain("Event Timeline");
+		expect(human.stdout).toContain("Evidence Pane");
+		expect(json.exitCode).toBe(0);
+		expect(JSON.parse(json.stdout.join("\n"))).toMatchObject({
+			kind: "run-inspector",
+			runId: "run-inspector",
+			outcomeStrip: { verdict: "PASSED" },
+		});
+		expect(rawJson.exitCode).toBe(0);
+		expect(JSON.parse(rawJson.stdout.join("\n"))).toMatchObject({
+			kind: "run",
+			run: { id: "run-inspector" },
+		});
+	});
+
 	it("supports injected packet loading for run command tests", async () => {
 		const root = mkdtempSync(join(tmpdir(), "buildplane-cli-parse-packet-"));
 		const loadedPacketPaths: string[] = [];

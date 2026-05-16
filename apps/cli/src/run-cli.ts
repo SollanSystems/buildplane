@@ -23,11 +23,13 @@ import {
 } from "./bootstrap-doctor.js";
 import { type CapabilityReport, inspectCapabilities } from "./capabilities.js";
 import {
+	createInspectorProjection,
 	formatBootstrapDoctorReport,
 	formatCapabilityReport,
 	formatHumanError,
 	formatInitializationResult,
 	formatInspectDetail,
+	formatInspectorProjection,
 	formatJson,
 	formatJsonError,
 	formatLearningDetail,
@@ -642,7 +644,7 @@ function formatTopLevelHelp(): string[] {
 		"  Observe:",
 		"    status [--json]        Project health snapshot",
 		"    history [--json]       List all runs",
-		"    inspect <id> [--json]  Deep-dive into a run and event tape",
+		"    inspect <id> [--json] [--view inspector]  Deep-dive into a run and event tape",
 		"    verify --run <id> [--json]  Final receipt-backed verdict",
 		"    evidence export --run <id> --out <file>  Export Mission Control bundle",
 		"    pr-check dry-run --run <id> --repo <owner/repo> --sha <head> [--json]  Preview GitHub check-run publish",
@@ -3952,12 +3954,45 @@ export async function runCli(
 			}
 			case "inspect": {
 				const json = rest.includes("--json");
-				const id = rest.find((value) => value !== "--json");
+				const viewIndex = rest.indexOf("--view");
+				const inlineView = rest.find((value) => value.startsWith("--view="));
+				const view =
+					inlineView?.slice("--view=".length) ??
+					(viewIndex >= 0 ? rest[viewIndex + 1] : "detail");
+				if (viewIndex >= 0 && (!view || view.startsWith("--"))) {
+					throw new Error("Missing required inspect view after --view.");
+				}
+				if (view !== "detail" && view !== "inspector") {
+					throw new Error(
+						`Unsupported inspect view '${view}'. Supported views: detail, inspector.`,
+					);
+				}
+				const id = rest.find((value, index) => {
+					if (value === "--json" || value === "--view") return false;
+					if (viewIndex >= 0 && index === viewIndex + 1) return false;
+					if (value.startsWith("--view=")) return false;
+					return !value.startsWith("--");
+				});
 				if (!id) {
 					throw new Error("Missing required run or unit id for inspect.");
 				}
 
 				const result = orchestrator.inspect(id);
+				if (view === "inspector") {
+					const projection = createInspectorProjection(
+						result as unknown as Parameters<
+							typeof createInspectorProjection
+						>[0],
+					);
+					if (json) {
+						stdout(formatJson(projection));
+					} else {
+						for (const line of formatInspectorProjection(projection)) {
+							stdout(line);
+						}
+					}
+					return 0;
+				}
 
 				if (json) {
 					stdout(formatJson(result));
