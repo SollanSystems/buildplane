@@ -3,12 +3,22 @@ import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import {
 	appendFileSync,
+	copyFileSync,
 	existsSync,
 	mkdirSync,
+	readdirSync,
 	readFileSync,
+	statSync,
 	writeFileSync,
 } from "node:fs";
-import { basename, dirname, resolve } from "node:path";
+import {
+	basename,
+	dirname,
+	isAbsolute,
+	relative,
+	resolve,
+	sep,
+} from "node:path";
 import type { Readable, Writable } from "node:stream";
 import { createToolRegistry } from "@buildplane/adapters-tools";
 import {
@@ -1872,6 +1882,8 @@ interface ForkArgs {
 	at: string;
 	workspace?: string;
 	packet: string;
+	vcr: boolean;
+	vcrMiss: "fail" | "reexecute";
 }
 
 function parseForkArgs(
@@ -1881,10 +1893,41 @@ function parseForkArgs(
 	let at: string | undefined;
 	let workspace: string | undefined;
 	let packet: string | undefined;
+	let vcr = false;
+	let vcrMiss: "fail" | "reexecute" = "fail";
+	let vcrMissProvided = false;
+	const setVcrMiss = (value: string | undefined): string | undefined => {
+		if (!value || value.startsWith("--")) {
+			return "missing --vcr-miss <fail|reexecute> value";
+		}
+		if (value === "reexecute") {
+			vcrMiss = "reexecute";
+			vcrMissProvided = true;
+			return undefined;
+		}
+		if (value === "fail") {
+			vcrMiss = "fail";
+			vcrMissProvided = true;
+			return undefined;
+		}
+		return "unsupported --vcr-miss value (expected fail or reexecute)";
+	};
 	let i = 0;
 	while (i < rest.length) {
 		const arg = rest[i];
 		switch (arg) {
+			case "--vcr":
+				vcr = true;
+				break;
+			case "--vcr-miss":
+				i += 1;
+				{
+					const error = setVcrMiss(rest[i]);
+					if (error) {
+						return { ok: false, error };
+					}
+				}
+				break;
 			case "--run-id":
 				i += 1;
 				runId = rest[i];
@@ -1902,13 +1945,24 @@ function parseForkArgs(
 				packet = rest[i];
 				break;
 			default:
-				if (arg && !runId) {
+				if (arg?.startsWith("--vcr-miss=")) {
+					const error = setVcrMiss(arg.slice("--vcr-miss=".length));
+					if (error) {
+						return { ok: false, error };
+					}
+				} else if (arg && !runId) {
+					if (arg.startsWith("--")) {
+						return { ok: false, error: `unknown argument: ${arg}` };
+					}
 					runId = arg;
 				} else {
 					return { ok: false, error: `unknown argument: ${arg}` };
 				}
 		}
 		i += 1;
+	}
+	if (vcrMissProvided && !vcr) {
+		return { ok: false, error: "--vcr-miss requires --vcr" };
 	}
 	if (!runId)
 		return {
@@ -1917,11 +1971,11 @@ function parseForkArgs(
 		};
 	if (!at) return { ok: false, error: "missing --at <event-id>" };
 	if (!packet) return { ok: false, error: "missing --packet <file>" };
-	return { ok: true, value: { runId, at, workspace, packet } };
+	return { ok: true, value: { runId, at, workspace, packet, vcr, vcrMiss } };
 }
 
 function forkUsageText(): string {
-	return `usage: buildplane fork <parent-run-id> --at <event-id> --packet <file> [--workspace <path>]
+	return `usage: buildplane fork <parent-run-id> --at <event-id> --packet <file> [--workspace <path>] [--vcr] [--vcr-miss <fail|reexecute>]
 
   Fork resumes from a unit boundary in a prior run with a replacement packet.
   The workspace git state must be clean before fork execution.
@@ -1931,6 +1985,8 @@ function forkUsageText(): string {
   --at           parent unit_started event id to fork at
   --packet       path to the new packet json
   --workspace    workspace root (defaults to cwd)
+  --vcr          reuse deterministic parent tool outputs when the tape matches
+  --vcr-miss     fail (default) or reexecute with a visible miss receipt
 `;
 }
 
@@ -2057,9 +2113,252 @@ function emitLedgerRunCompleted(
 	});
 }
 
+interface ForkVcrOptions {
+	readonly enabled: boolean;
+	readonly miss: "fail" | "reexecute";
+	readonly parentRunId: string;
+	readonly cassette?: ReadonlyMap<string, readonly VcrToolResult[]>;
+	readonly outputStore?: ReadonlyMap<string, Buffer>;
+}
+
+interface VcrToolResult {
+	readonly stdout: string;
+	readonly stderr: string;
+	readonly exitCode: number;
+	readonly output: unknown;
+	readonly parentToolRequestId: string;
+}
+
+interface VcrEventRow {
+	readonly id: string;
+	readonly parent_event_id: string | null;
+	readonly kind: string;
+	readonly payload: string;
+}
+
+interface PendingVcrToolResult {
+	readonly parentToolRequestId: string;
+	readonly result: VcrToolResult;
+}
+
+function vcrOutputStoreRoot(workspace: string, runId: string): string {
+	return resolve(workspace, ".buildplane", "vcr", runId, "outputs");
+}
+
+function vcrOutputKey(path: string): string {
+	return path.replace(/\\/g, "/");
+}
+
+type ContainedPathResult =
+	| { ok: true; path: string }
+	| { ok: false; reason: string };
+
+function hasWindowsAbsolutePrefix(path: string): boolean {
+	return /^[a-zA-Z]:[\\/]/.test(path) || path.startsWith("\\\\");
+}
+
+function isPathBelowRoot(root: string, candidate: string): boolean {
+	const relativePath = relative(resolve(root), resolve(candidate));
+	return relativePath !== "" && isPathAtOrBelowRoot(root, candidate);
+}
+
+function isPathAtOrBelowRoot(root: string, candidate: string): boolean {
+	const relativePath = relative(resolve(root), resolve(candidate));
+	return (
+		relativePath !== ".." &&
+		!relativePath.startsWith(`..${sep}`) &&
+		!relativePath.startsWith("../") &&
+		!relativePath.startsWith("..\\") &&
+		!isAbsolute(relativePath) &&
+		!hasWindowsAbsolutePrefix(relativePath)
+	);
+}
+
+function ensureContainedDirectory(
+	root: string,
+	directory: string,
+	realpath: (path: string) => string,
+): ContainedPathResult {
+	let existing = directory;
+	while (!existsSync(existing)) {
+		const parent = dirname(existing);
+		if (parent === existing) {
+			return { ok: false, reason: "output parent has no containing root" };
+		}
+		existing = parent;
+	}
+	if (!isPathAtOrBelowRoot(root, realpath(existing))) {
+		return { ok: false, reason: "output parent escapes root" };
+	}
+	mkdirSync(directory, { recursive: true });
+	if (!isPathAtOrBelowRoot(root, realpath(directory))) {
+		return { ok: false, reason: "output parent escapes root" };
+	}
+	return { ok: true, path: directory };
+}
+
+function resolveContainedPath(root: string, path: string): ContainedPathResult {
+	if (path.trim().length === 0) {
+		return { ok: false, reason: "empty output path" };
+	}
+	if (path.includes("\0")) {
+		return { ok: false, reason: "output path contains null byte" };
+	}
+	if (isAbsolute(path) || hasWindowsAbsolutePrefix(path)) {
+		return { ok: false, reason: "absolute output path is not allowed" };
+	}
+	const rootPath = resolve(root);
+	const candidate = resolve(rootPath, path);
+	if (!isPathBelowRoot(rootPath, candidate)) {
+		return { ok: false, reason: "output path escapes root" };
+	}
+	return { ok: true, path: candidate };
+}
+
+function loadForkVcrOutputStore(
+	workspace: string,
+	parentRunId: string,
+): Map<string, Buffer> {
+	const root = vcrOutputStoreRoot(workspace, parentRunId);
+	const outputs = new Map<string, Buffer>();
+	if (!existsSync(root)) {
+		return outputs;
+	}
+	const visit = (directory: string): void => {
+		for (const entry of readdirSync(directory, { withFileTypes: true })) {
+			const entryPath = resolve(directory, entry.name);
+			if (entry.isDirectory()) {
+				visit(entryPath);
+				continue;
+			}
+			if (!entry.isFile()) {
+				continue;
+			}
+			outputs.set(
+				vcrOutputKey(relative(root, entryPath)),
+				readFileSync(entryPath),
+			);
+		}
+	};
+	visit(root);
+	return outputs;
+}
+
+function stableJson(value: unknown): string {
+	if (Array.isArray(value)) {
+		return `[${value.map(stableJson).join(",")}]`;
+	}
+	if (value && typeof value === "object") {
+		return `{${Object.entries(value as Record<string, unknown>)
+			.sort(([a], [b]) => a.localeCompare(b))
+			.map(([key, nested]) => `${JSON.stringify(key)}:${stableJson(nested)}`)
+			.join(",")}}`;
+	}
+	return JSON.stringify(value);
+}
+
+function toolRequestKey(request: {
+	readonly tool_name?: string;
+	readonly arguments?: unknown;
+	readonly working_directory?: string;
+}): string {
+	return stableJson({
+		arguments: request.arguments ?? {},
+		tool_name: request.tool_name ?? "",
+		working_directory: request.working_directory ?? "",
+	});
+}
+
+function isVcrMissOutput(output: unknown): boolean {
+	return (
+		typeof output === "object" &&
+		output !== null &&
+		(output as { vcr?: unknown }).vcr === "miss"
+	);
+}
+
+async function loadForkVcrCassette(
+	workspace: string,
+	parentRunId: string,
+	forkPointEventId: string,
+): Promise<Map<string, VcrToolResult[]>> {
+	const eventsDbPath = resolve(workspace, ".buildplane", "ledger", "events.db");
+	if (!existsSync(eventsDbPath)) {
+		throw new Error(
+			`VCR requested but parent ledger was not found at ${eventsDbPath}`,
+		);
+	}
+	const { DatabaseSync } = await import("node:sqlite");
+	const db = new DatabaseSync(eventsDbPath, { readOnly: true });
+	try {
+		const rows = db
+			.prepare(
+				"SELECT id, parent_event_id, kind, payload FROM events WHERE run_id = ? AND kind IN ('tool_request', 'tool_result') ORDER BY occurred_at ASC, id ASC",
+			)
+			.all(parentRunId) as unknown as VcrEventRow[];
+		const requestById = new Map<string, string>();
+		const pendingResults: PendingVcrToolResult[] = [];
+		const resultByKey = new Map<string, VcrToolResult[]>();
+		for (const row of rows) {
+			const payload = JSON.parse(row.payload) as {
+				ToolRequestStoredV1?: {
+					tool_name?: string;
+					arguments?: unknown;
+					working_directory?: string;
+				};
+				ToolResultV1?: {
+					tool_request_id?: string;
+					stdout?: string;
+					stderr?: string;
+					exit_code?: number | null;
+					output?: unknown;
+				};
+			};
+			if (row.kind === "tool_request" && payload.ToolRequestStoredV1) {
+				if (row.parent_event_id !== forkPointEventId) {
+					continue;
+				}
+				requestById.set(row.id, toolRequestKey(payload.ToolRequestStoredV1));
+			}
+			if (row.kind === "tool_result" && payload.ToolResultV1) {
+				const parentToolRequestId = payload.ToolResultV1.tool_request_id;
+				if (!parentToolRequestId) {
+					continue;
+				}
+				if (isVcrMissOutput(payload.ToolResultV1.output)) {
+					continue;
+				}
+				pendingResults.push({
+					parentToolRequestId,
+					result: {
+						parentToolRequestId,
+						stdout: payload.ToolResultV1.stdout ?? "",
+						stderr: payload.ToolResultV1.stderr ?? "",
+						exitCode: payload.ToolResultV1.exit_code ?? 0,
+						output: payload.ToolResultV1.output ?? null,
+					},
+				});
+			}
+		}
+		for (const pending of pendingResults) {
+			const key = requestById.get(pending.parentToolRequestId);
+			if (!key) {
+				continue;
+			}
+			const results = resultByKey.get(key) ?? [];
+			results.push(pending.result);
+			resultByKey.set(key, results);
+		}
+		return resultByKey;
+	} finally {
+		db.close();
+	}
+}
+
 async function runForkExecution(
 	plan: ForkPlan,
 	workspace: string,
+	vcr: ForkVcrOptions,
 	opts: { stdout: (s: string) => void; stderr: (s: string) => void },
 ): Promise<number> {
 	// Phase E Task 6: real ledger spawn + orchestrator invocation.
@@ -2095,6 +2394,7 @@ async function runForkExecution(
 	let forkCurrentUnit: LedgerUnitContext | null = null;
 	const getForkUnitCtx = () => forkCurrentUnit;
 	const ledgerWorkspacePath = resolve(workspace);
+	let vcrCassette = new Map<string, VcrToolResult[]>();
 	let unsubscribeFork: (() => void) | null = null;
 	let forkCommandExecutor:
 		| {
@@ -2109,6 +2409,11 @@ async function runForkExecution(
 		| undefined;
 
 	try {
+		vcrCassette = new Map(
+			vcr.enabled && vcr.cassette
+				? [...vcr.cassette].map(([key, results]) => [key, [...results]])
+				: undefined,
+		);
 		// Load a fresh orchestrator bundle scoped to the fork workspace.
 		const bundle = await loadCliOrchestrator(workspace);
 		const {
@@ -2179,9 +2484,197 @@ async function runForkExecution(
 		});
 
 		// Wrap the commandExecutor so tool calls are instrumented through the ledger.
-		const { existsSync: fsExistsSync, realpathSync: fsRealpathSync } =
-			await import("node:fs");
+		const {
+			copyFileSync,
+			existsSync: fsExistsSync,
+			realpathSync: fsRealpathSync,
+			statSync,
+		} = await import("node:fs");
 		const { resolve: pathResolve } = await import("node:path");
+		const safeRealpath = (path: string): string => {
+			try {
+				return fsRealpathSync(path);
+			} catch {
+				return path;
+			}
+		};
+		const fileDigest = (path: string): string =>
+			`sha256:${createHash("sha256").update(readFileSync(path)).digest("hex")}`;
+		const vcrOutputStore = new Map(vcr.outputStore ?? []);
+		const materializeVcrOutputChecks = (
+			requiredOutputs: readonly string[],
+			worktreeRoot: string,
+			toolReqId: string,
+		): {
+			outputChecks: { path: string; exists: boolean }[];
+			materializationReceipts: {
+				path: string;
+				status: string;
+				source?: string;
+				reason?: string;
+			}[];
+		} => {
+			const realWorktreeRoot = safeRealpath(worktreeRoot);
+			const parentWorkspaceRoot = safeRealpath(
+				pathResolve(workspace, ".buildplane", "workspaces", vcr.parentRunId),
+			);
+			const parentOutputStoreRoot = safeRealpath(
+				vcrOutputStoreRoot(workspace, vcr.parentRunId),
+			);
+			const sourceRoots = [
+				{ label: "parent_vcr_output_store", root: parentOutputStoreRoot },
+				{ label: "parent_run_workspace", root: parentWorkspaceRoot },
+			];
+			const materializationReceipts: {
+				path: string;
+				status: string;
+				source?: string;
+				reason?: string;
+			}[] = [];
+			const outputChecks = requiredOutputs.map((outputPath: string) => {
+				const destinationResult = resolveContainedPath(
+					realWorktreeRoot,
+					outputPath,
+				);
+				if (!destinationResult.ok) {
+					materializationReceipts.push({
+						path: outputPath,
+						status: "invalid-output-path",
+						reason: destinationResult.reason,
+					});
+					return {
+						path: outputPath,
+						exists: false,
+					};
+				}
+				const destination = destinationResult.path;
+				try {
+					const emitWorkspaceWrite = (hashBefore: string | null): void => {
+						const copied = statSync(destination);
+						emitter.emit(
+							"workspace_write",
+							{
+								WorkspaceWriteV1: {
+									tool_request_id: toolReqId,
+									path: outputPath,
+									hash_before: hashBefore,
+									after: {
+										status: "captured",
+										data: {
+											hash: fileDigest(destination),
+											size_bytes: copied.size,
+										},
+									},
+								},
+							},
+							{ parent: toolReqId },
+						);
+					};
+					const prepareDestination = ():
+						| { ok: true; hashBefore: string | null }
+						| { ok: false; reason: string } => {
+						const destinationParent = ensureContainedDirectory(
+							realWorktreeRoot,
+							dirname(destination),
+							safeRealpath,
+						);
+						if (!destinationParent.ok) {
+							return { ok: false, reason: destinationParent.reason };
+						}
+						const hashBefore =
+							fsExistsSync(destination) && statSync(destination).isFile()
+								? fileDigest(destination)
+								: null;
+						return { ok: true, hashBefore };
+					};
+					const recordedOutput = vcrOutputStore.get(vcrOutputKey(outputPath));
+					if (recordedOutput !== undefined) {
+						const prepared = prepareDestination();
+						if (!prepared.ok) {
+							materializationReceipts.push({
+								path: outputPath,
+								status: "failed",
+								reason: prepared.reason,
+							});
+							return {
+								path: outputPath,
+								exists: false,
+							};
+						}
+						writeFileSync(destination, recordedOutput);
+						emitWorkspaceWrite(prepared.hashBefore);
+						materializationReceipts.push({
+							path: outputPath,
+							status: "copied",
+							source: "parent_vcr_output_store",
+						});
+						return {
+							path: outputPath,
+							exists: fsExistsSync(destination),
+						};
+					}
+					const sourceMatch = sourceRoots
+						.map((sourceRoot) => {
+							const sourceResult = resolveContainedPath(
+								sourceRoot.root,
+								outputPath,
+							);
+							return sourceResult.ok
+								? { ...sourceRoot, path: sourceResult.path }
+								: undefined;
+						})
+						.find((source) => {
+							if (!source) {
+								return false;
+							}
+							if (
+								!fsExistsSync(source.path) ||
+								!statSync(source.path).isFile()
+							) {
+								return false;
+							}
+							return isPathBelowRoot(source.root, safeRealpath(source.path));
+						});
+					if (sourceMatch) {
+						const prepared = prepareDestination();
+						if (!prepared.ok) {
+							materializationReceipts.push({
+								path: outputPath,
+								status: "failed",
+								reason: prepared.reason,
+							});
+							return {
+								path: outputPath,
+								exists: false,
+							};
+						}
+						copyFileSync(sourceMatch.path, destination);
+						emitWorkspaceWrite(prepared.hashBefore);
+						materializationReceipts.push({
+							path: outputPath,
+							status: "copied",
+							source: sourceMatch.label,
+						});
+					} else if (!fsExistsSync(destination)) {
+						materializationReceipts.push({
+							path: outputPath,
+							status: "missing-parent-output",
+						});
+					}
+				} catch (error) {
+					materializationReceipts.push({
+						path: outputPath,
+						status: "failed",
+						reason: error instanceof Error ? error.message : String(error),
+					});
+				}
+				return {
+					path: outputPath,
+					exists: fsExistsSync(destination),
+				};
+			});
+			return { outputChecks, materializationReceipts };
+		};
 		originalForkExecutePacket = forkCommandExecutor.executePacket;
 		forkCommandExecutor.executePacket = (
 			packetUnknown: unknown,
@@ -2202,6 +2695,136 @@ async function runForkExecution(
 				? pathResolve(worktreeRoot, p.execution.cwd)
 				: worktreeRoot;
 			const startedAt = new Date().toISOString();
+			const vcrKey = toolRequestKey({
+				tool_name: "run_command",
+				arguments: {
+					command: p.execution.command,
+					args: p.execution.args ?? [],
+				},
+				working_directory: p.execution.cwd ?? "",
+			});
+			if (vcr.enabled) {
+				const ctx = getForkUnitCtx();
+				const toolReqId = newEventId();
+				emitter.emit(
+					"tool_request",
+					{
+						ToolRequestStoredV1: {
+							tool_name: "run_command",
+							arguments: {
+								command: p.execution.command,
+								args: p.execution.args ?? [],
+							},
+							env: {
+								redacted: true,
+								hash: `sha256:${createHash("sha256")
+									.update("{}")
+									.digest("hex")}`,
+								hint: "env_var",
+							},
+							working_directory: p.execution.cwd ?? "",
+							unit_id: ctx?.unitId ?? "",
+						},
+					},
+					{ parent: ctx?.parentEventId, id: toolReqId },
+				);
+				const recordedQueue = vcrCassette.get(vcrKey);
+				const recorded = recordedQueue?.shift();
+				if (recordedQueue?.length === 0) {
+					vcrCassette.delete(vcrKey);
+				}
+				if (recorded) {
+					const { outputChecks, materializationReceipts } =
+						materializeVcrOutputChecks(
+							p.verification.requiredOutputs,
+							worktreeRoot,
+							toolReqId,
+						);
+					emitter.emit(
+						"tool_result",
+						{
+							ToolResultV1: {
+								tool_request_id: toolReqId,
+								stdout: recorded.stdout,
+								stderr: recorded.stderr,
+								exit_code: recorded.exitCode,
+								output: {
+									vcr: "hit",
+									parent_tool_request_id: recorded.parentToolRequestId,
+									parent_output: recorded.output,
+									materialized_outputs: materializationReceipts,
+								},
+								duration_ms: 0,
+							},
+						},
+						{ parent: toolReqId },
+					);
+					return {
+						command: p.execution.command,
+						args: [...(p.execution.args ?? [])],
+						cwd: effectiveCwd,
+						startedAt,
+						completedAt: new Date().toISOString(),
+						exitCode: recorded.exitCode,
+						stdout: recorded.stdout,
+						stderr: recorded.stderr,
+						outputChecks,
+					};
+				}
+				if (vcr.miss === "fail") {
+					const reason = `VCR miss for deterministic tool call ${p.execution.command}`;
+					emitter.emit(
+						"tool_result",
+						{
+							ToolResultV1: {
+								tool_request_id: toolReqId,
+								stdout: "",
+								stderr: reason,
+								exit_code: 97,
+								output: { vcr: "miss", policy: "fail" },
+								duration_ms: 0,
+							},
+						},
+						{ parent: toolReqId },
+					);
+					return {
+						command: p.execution.command,
+						args: [...(p.execution.args ?? [])],
+						cwd: effectiveCwd,
+						startedAt,
+						completedAt: new Date().toISOString(),
+						exitCode: 97,
+						stdout: "",
+						stderr: reason,
+						outputChecks: p.verification.requiredOutputs.map(
+							(outputPath: string) => ({
+								path: outputPath,
+								exists: (() => {
+									const outputResult = resolveContainedPath(
+										worktreeRoot,
+										outputPath,
+									);
+									return outputResult.ok && fsExistsSync(outputResult.path);
+								})(),
+							}),
+						),
+					};
+				}
+				emitter.emit(
+					"tool_result",
+					{
+						ToolResultV1: {
+							tool_request_id: toolReqId,
+							stdout: "",
+							stderr: "VCR miss; explicit reexecute policy selected",
+							exit_code: null,
+							output: { vcr: "miss", policy: "reexecute" },
+							duration_ms: 0,
+						},
+					},
+					{ parent: toolReqId },
+				);
+			}
 			const result = perCallRegistry.run_command({
 				command: p.execution.command,
 				args: p.execution.args,
@@ -2218,20 +2841,25 @@ async function runForkExecution(
 				stdout: result.stdout,
 				stderr: result.stderr,
 				outputChecks: p.verification.requiredOutputs.map(
-					(outputPath: string) => {
-						const realRoot = (() => {
-							try {
-								return fsRealpathSync(worktreeRoot);
-							} catch {
-								return worktreeRoot;
-							}
-						})();
-						return {
-							path: outputPath,
-							exists: fsExistsSync(pathResolve(realRoot, outputPath)),
-						};
-					},
+					(outputPath: string) => ({
+						path: outputPath,
+						exists: (() => {
+							const outputResult = resolveContainedPath(
+								safeRealpath(worktreeRoot),
+								outputPath,
+							);
+							return outputResult.ok && fsExistsSync(outputResult.path);
+						})(),
+					}),
 				),
+				...(vcr.enabled
+					? {
+							vcr: {
+								miss: "reexecute",
+								reason: "no deterministic parent tape match",
+							},
+						}
+					: {}),
 			};
 		};
 
@@ -2333,6 +2961,21 @@ async function runFork(
 	// resolved from the wrong directory.
 	const packet = resolve(opts.cwd, args.value.packet);
 	const binary = resolveLedgerBinary(opts.cwd);
+	let vcrCassette: Map<string, VcrToolResult[]> | undefined;
+	let vcrOutputStore: Map<string, Buffer> | undefined;
+	if (args.value.vcr) {
+		try {
+			vcrCassette = await loadForkVcrCassette(
+				workspace,
+				args.value.runId,
+				args.value.at,
+			);
+			vcrOutputStore = loadForkVcrOutputStore(workspace, args.value.runId);
+		} catch (error) {
+			opts.stderr(`buildplane fork: ${String(error)}\n`);
+			return 1;
+		}
+	}
 
 	// Phase 1: plan.
 	// NOTE: spawnSync for `fork plan` must run from the project root (not from the
@@ -2407,7 +3050,18 @@ async function runFork(
 
 	// Phase 4: stub execution for Task 5. Task 6 replaces this with a real
 	// ledger spawn + orchestrator invocation.
-	const exitCode = await runForkExecution(plan, workspace, opts);
+	const exitCode = await runForkExecution(
+		plan,
+		workspace,
+		{
+			enabled: args.value.vcr,
+			miss: args.value.vcrMiss,
+			parentRunId: args.value.runId,
+			cassette: vcrCassette,
+			outputStore: vcrOutputStore,
+		},
+		opts,
+	);
 
 	// Phase 5: exit hint.
 	const currentBranchResult = spawnSync(
@@ -3707,6 +4361,75 @@ export async function runCli(
 						cwd: p.execution.cwd,
 					});
 					const completedAt = new Date().toISOString();
+					const realWorkspaceRoot = (() => {
+						try {
+							return fsRealpathSync(workspaceRoot);
+						} catch {
+							return workspaceRoot;
+						}
+					})();
+					const outputChecks = p.verification.requiredOutputs.map(
+						(outputPath: string) => {
+							const outputResult = resolveContainedPath(
+								realWorkspaceRoot,
+								outputPath,
+							);
+							return {
+								path: outputPath,
+								exists: outputResult.ok && fsExistsSync(outputResult.path),
+							};
+						},
+					);
+					for (const check of outputChecks) {
+						if (!check.exists) {
+							continue;
+						}
+						try {
+							const sourceResult = resolveContainedPath(
+								realWorkspaceRoot,
+								check.path,
+							);
+							const destinationResult = resolveContainedPath(
+								vcrOutputStoreRoot(resolvedCwd, ledgerRunId),
+								check.path,
+							);
+							if (!sourceResult.ok || !destinationResult.ok) {
+								continue;
+							}
+							const source = sourceResult.path;
+							if (!statSync(source).isFile()) {
+								continue;
+							}
+							const realSource = fsRealpathSync(source);
+							if (!isPathBelowRoot(realWorkspaceRoot, realSource)) {
+								continue;
+							}
+							const destination = destinationResult.path;
+							const destinationParent = ensureContainedDirectory(
+								resolvedCwd,
+								dirname(destination),
+								fsRealpathSync,
+							);
+							if (!destinationParent.ok) {
+								continue;
+							}
+							const realDestinationRoot = fsRealpathSync(
+								vcrOutputStoreRoot(resolvedCwd, ledgerRunId),
+							);
+							if (
+								!isPathAtOrBelowRoot(
+									realDestinationRoot,
+									fsRealpathSync(dirname(destination)),
+								)
+							) {
+								continue;
+							}
+							copyFileSync(source, destination);
+						} catch {
+							// VCR output capture is opportunistic; the authoritative run
+							// receipt below still records whether the required output existed.
+						}
+					}
 					return {
 						command: p.execution.command,
 						args: [...(p.execution.args ?? [])],
@@ -3716,23 +4439,7 @@ export async function runCli(
 						exitCode: result.exitCode,
 						stdout: result.stdout,
 						stderr: result.stderr,
-						outputChecks: p.verification.requiredOutputs.map(
-							(outputPath: string) => {
-								const realWorkspaceRoot = (() => {
-									try {
-										return fsRealpathSync(workspaceRoot);
-									} catch {
-										return workspaceRoot;
-									}
-								})();
-								return {
-									path: outputPath,
-									exists: fsExistsSync(
-										pathResolve(realWorkspaceRoot, outputPath),
-									),
-								};
-							},
-						),
+						outputChecks,
 					};
 				};
 				if (runLedgerEmitter) {

@@ -103,6 +103,9 @@ describe("git worktree adapter", () => {
 		const adapter = createGitWorktreeAdapter();
 
 		mkdirSync(join(repo, ".buildplane", "logs"), { recursive: true });
+		mkdirSync(join(repo, ".buildplane", "vcr", "run-1", "outputs"), {
+			recursive: true,
+		});
 		writeFileSync(join(repo, ".buildplane", "state.db"), "sqlite\n");
 		writeFileSync(
 			join(repo, ".buildplane", "project.json"),
@@ -110,6 +113,10 @@ describe("git worktree adapter", () => {
 		);
 		writeFileSync(
 			join(repo, ".buildplane", "logs", "run-1.stdout.log"),
+			"ignored\n",
+		);
+		writeFileSync(
+			join(repo, ".buildplane", "vcr", "run-1", "outputs", "result.txt"),
 			"ignored\n",
 		);
 
