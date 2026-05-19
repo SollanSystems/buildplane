@@ -212,9 +212,13 @@ interface AdmissionReceiptKernelModule {
 type RunAdmissionStoreLike = {
 	writeReceiptArtifact(input: {
 		receipt: Record<string, unknown>;
-		digest: string;
+		receiptDigest: string;
+		contents: string;
 	}): { ref: string; path: string };
-	appendAdmissionEvent(input: { event: Record<string, unknown> }): {
+	appendAdmissionEvent(input: {
+		event: Record<string, unknown>;
+		receipt: Record<string, unknown>;
+	}): {
 		ref: string;
 		path: string;
 	};
@@ -224,6 +228,45 @@ function safeAdmissionArtifactStem(value: unknown): string {
 	const raw = typeof value === "string" ? value : "run_admission";
 	const safe = raw.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 120);
 	return safe.length > 0 ? safe : "run_admission";
+}
+
+function createRunAdmissionEventRef(input: {
+	event: Record<string, unknown>;
+	receipt: Record<string, unknown>;
+}): string {
+	const eventKind =
+		typeof input.event.kind === "string" && input.event.kind.length > 0
+			? input.event.kind
+			: "run_admission_recorded";
+	const recordedAt =
+		typeof input.event.recorded_at === "string" &&
+		input.event.recorded_at.length > 0
+			? input.event.recorded_at
+			: "";
+	const payload = nestedRecord(input.event, "payload");
+	const payloadReceiptId =
+		payload && typeof payload.receipt_id === "string"
+			? payload.receipt_id
+			: undefined;
+	const storeReceiptId =
+		typeof input.receipt.receipt_id === "string"
+			? input.receipt.receipt_id
+			: undefined;
+	const receiptId = safeAdmissionArtifactStem(
+		payloadReceiptId ?? storeReceiptId,
+	);
+	const eventDigest = createHash("sha256")
+		.update(
+			JSON.stringify({
+				eventKind,
+				recordedAt,
+				receiptId,
+				payload,
+				receipt: input.receipt,
+			}),
+		)
+		.digest("hex");
+	return `event://run-admission/${receiptId}/${eventDigest}`;
 }
 
 function resolveGitMetadataDir(projectRoot: string): string {
@@ -256,13 +299,9 @@ function createCliRunAdmissionStore(
 			mkdirSync(receiptsDir, { recursive: true });
 			const stem = safeAdmissionArtifactStem(input.receipt.receipt_id);
 			const path = resolve(receiptsDir, `${stem}.json`);
-			writeFileSync(
-				path,
-				`${JSON.stringify(input.receipt, null, 2)}\n`,
-				"utf8",
-			);
+			writeFileSync(path, input.contents, "utf8");
 			return {
-				ref: `artifact://run-admission/${input.digest}`,
+				ref: `artifact://run-admission/${input.receiptDigest}`,
 				path,
 			};
 		},
@@ -270,7 +309,7 @@ function createCliRunAdmissionStore(
 			mkdirSync(admissionDir, { recursive: true });
 			appendFileSync(eventsPath, `${JSON.stringify(input.event)}\n`, "utf8");
 			return {
-				ref: `event://${safeAdmissionArtifactStem(input.event.event_id)}`,
+				ref: createRunAdmissionEventRef(input),
 				path: eventsPath,
 			};
 		},
