@@ -7,6 +7,7 @@ pub mod id;
 pub mod kind;
 pub mod payload;
 pub mod serve;
+pub mod signing;
 pub mod storage;
 pub mod types;
 

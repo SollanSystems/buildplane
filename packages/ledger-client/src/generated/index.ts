@@ -10,6 +10,16 @@ export type EventId = Uuid;
 /** Identifier for a run. UUIDv7 — time-ordered. */
 export type RunId = Uuid;
 
+/** Stable reference to the actor key that produced a detached event signature. */
+export interface ActorKeyRef {
+	/** Stable actor identifier, for example `kernel`, `operator:<id>`, or `worker:<id>`. */
+	actor_id: string;
+	/** Key identifier scoped to the actor. */
+	key_id: string;
+	/** Optional digest of the public key material used by external verifiers. */
+	public_key_hash?: string;
+}
+
 export interface ArtifactRef {
 	path: string;
 	hash: string;
@@ -57,6 +67,27 @@ export interface Event {
 	kind: EventKind;
 	occurred_at: DateTime<Utc>;
 	payload: Payload;
+}
+
+/** Supported signature algorithms for signed tape events. */
+export enum SignatureAlgorithm {
+	Ed25519 = "ed25519",
+}
+
+/** Detached signature over one canonical event. */
+export interface EventSignatureV1 {
+	/** Event id this signature covers. */
+	event_id: EventId;
+	/** Digest of the canonical serialized event bytes, e.g. `sha256:<hex>`. */
+	canonical_event_hash: string;
+	/** Actor key that produced the signature. */
+	signer: ActorKeyRef;
+	/** Signature algorithm. */
+	algorithm: SignatureAlgorithm;
+	/** Encoded detached signature bytes. v0.5 uses base64url without padding. */
+	signature: string;
+	/** Time the signature was produced. */
+	signed_at: DateTime<Utc>;
 }
 
 export enum CheckpointBoundary {
