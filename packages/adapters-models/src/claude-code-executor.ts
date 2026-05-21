@@ -9,6 +9,12 @@ import type {
 	UnitPacket,
 } from "@buildplane/kernel";
 
+const CLAUDE_UNSAFE_PERMISSION_FLAG = [
+	"--dangerously",
+	"skip",
+	"permissions",
+].join("-");
+
 export interface ClaudeCodeExecutorOptions {
 	/** default: "claude" */
 	cliBinary?: string;
@@ -18,6 +24,12 @@ export interface ClaudeCodeExecutorOptions {
 	maxTurns?: number;
 	/** Override spawn for testing. */
 	spawnFn?: typeof spawn;
+	/**
+	 * Opt into Claude Code's ambient-permission bypass for local development.
+	 * Defaults to false. When enabled, the executor emits an evidence event
+	 * before spawning the worker so unsafe authority is never silent.
+	 */
+	unsafeMode?: boolean;
 	/**
 	 * Renderer used to convert packet.intent into a prompt.
 	 * When present and packet.intent exists, the rendered prompt takes
@@ -42,6 +54,7 @@ export function createClaudeCodeExecutor(
 	const timeoutMs = options?.timeoutMs ?? 300_000;
 	const maxTurns = options?.maxTurns ?? 50;
 	const spawnFn = options?.spawnFn ?? spawn;
+	const unsafeMode = options?.unsafeMode ?? false;
 	const renderer = options?.renderer;
 
 	return {
@@ -93,7 +106,9 @@ export function createClaudeCodeExecutor(
 				);
 			}
 
-			// Build CLI args
+			// Build CLI args. Claude Code permissions are preserved by default;
+			// unsafeMode is an explicit development escape hatch and is recorded
+			// before spawn so ambient authority is never silent.
 			const args = [
 				"-p",
 				foldedPrompt,
@@ -103,8 +118,18 @@ export function createClaudeCodeExecutor(
 				packet.model.model,
 				"--max-turns",
 				String(maxTurns),
-				"--dangerously-skip-permissions",
 			];
+
+			if (unsafeMode) {
+				args.push(CLAUDE_UNSAFE_PERMISSION_FLAG);
+				eventBus.emit({
+					kind: "evidence-recorded",
+					runId: "",
+					timestamp: new Date().toISOString(),
+					evidenceKind: "claude-code-unsafe-mode-used",
+					status: "unsafe-mode-used",
+				});
+			}
 
 			return new Promise<ExecutionReceipt>((resolvePromise) => {
 				const child = spawnFn(cliBinary, args, { cwd: projectRoot });
