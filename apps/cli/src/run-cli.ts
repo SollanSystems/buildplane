@@ -63,7 +63,9 @@ import {
 	PLANFORGE_RECEIPT_SCHEMA_VERSION,
 	PLANFORGE_REQUIRED_EVIDENCE,
 	PLANFORGE_TASK_IDS,
-	PLANFORGE_VALIDATION_STATUSES,
+	PLANFORGE_VALIDATION_STATUS_INSUFFICIENT_EVIDENCE,
+	PLANFORGE_VALIDATION_STATUS_PASS,
+	PLANFORGE_VALIDATION_STATUS_UNSAFE_TO_RUN,
 	type PlanForgePlan,
 	type PlanForgeRequiredEvidence,
 	type PlanForgeValidationCheck,
@@ -3381,7 +3383,7 @@ export async function runCli(
 			}
 			const plan = createPlanForgeDryRunPlan(resolve(cwd, inputPath));
 			stdout(formatJson(plan));
-			return plan.validation.status === PLANFORGE_VALIDATION_STATUSES[0]
+			return plan.validation.status === PLANFORGE_VALIDATION_STATUS_PASS
 				? 0
 				: 1;
 		}
@@ -5279,10 +5281,10 @@ function createPlanForgeDryRunPlan(inputPath: string): PlanForgePlan {
 
 	const validationStatus: PlanForgeValidationStatus =
 		unsafeReasons.length > 0
-			? PLANFORGE_VALIDATION_STATUSES[4]
+			? PLANFORGE_VALIDATION_STATUS_UNSAFE_TO_RUN
 			: missingEvidence.length > 0
-				? PLANFORGE_VALIDATION_STATUSES[3]
-				: PLANFORGE_VALIDATION_STATUSES[0];
+				? PLANFORGE_VALIDATION_STATUS_INSUFFICIENT_EVIDENCE
+				: PLANFORGE_VALIDATION_STATUS_PASS;
 	const checks: PlanForgeValidationCheck[] = [
 		{
 			id: "trusted-boundary",
