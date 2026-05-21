@@ -59,6 +59,19 @@ import type {
 	preparePacketMemoryEnrichment,
 } from "./packet-enrichment.js";
 import {
+	PLANFORGE_PLAN_SCHEMA_VERSION,
+	PLANFORGE_RECEIPT_SCHEMA_VERSION,
+	PLANFORGE_REQUIRED_EVIDENCE,
+	PLANFORGE_TASK_IDS,
+	PLANFORGE_VALIDATION_STATUS_INSUFFICIENT_EVIDENCE,
+	PLANFORGE_VALIDATION_STATUS_PASS,
+	PLANFORGE_VALIDATION_STATUS_UNSAFE_TO_RUN,
+	type PlanForgePlan,
+	type PlanForgeRequiredEvidence,
+	type PlanForgeValidationCheck,
+	type PlanForgeValidationStatus,
+} from "./planforge-schema.js";
+import {
 	defaultPrCheckRequest,
 	defaultPrCommentRequest,
 	defaultPrHeadVerifier,
@@ -3370,8 +3383,9 @@ export async function runCli(
 			}
 			const plan = createPlanForgeDryRunPlan(resolve(cwd, inputPath));
 			stdout(formatJson(plan));
-			const validation = plan.validation as { status?: string } | undefined;
-			return validation?.status === "PASS" ? 0 : 1;
+			return plan.validation.status === PLANFORGE_VALIDATION_STATUS_PASS
+				? 0
+				: 1;
 		}
 
 		if (command === "memory") {
@@ -5213,7 +5227,7 @@ function hasForbiddenPlanForgeGoalIntent(goal: string | undefined): boolean {
 	return false;
 }
 
-function createPlanForgeDryRunPlan(inputPath: string): Record<string, unknown> {
+function createPlanForgeDryRunPlan(inputPath: string): PlanForgePlan {
 	const content = readFileSync(inputPath, "utf8");
 	const goal = sectionText(content, "Goal");
 	const repositoryContext = sectionText(content, "Repository context");
@@ -5226,7 +5240,7 @@ function createPlanForgeDryRunPlan(inputPath: string): Record<string, unknown> {
 	const remote = listValue(repositoryContext, "Remote");
 	const trustedBase = listValue(repositoryContext, "Trusted base");
 	const worktreePolicy = listValue(repositoryContext, "Worktree policy");
-	const missingEvidence: string[] = [];
+	const missingEvidence: PlanForgeRequiredEvidence[] = [];
 	const unsafeReasons: string[] = [];
 
 	if (!goal) {
@@ -5265,13 +5279,13 @@ function createPlanForgeDryRunPlan(inputPath: string): Record<string, unknown> {
 		unsafeReasons.push("goal requests a forbidden side effect");
 	}
 
-	const validationStatus =
+	const validationStatus: PlanForgeValidationStatus =
 		unsafeReasons.length > 0
-			? "UNSAFE_TO_RUN"
+			? PLANFORGE_VALIDATION_STATUS_UNSAFE_TO_RUN
 			: missingEvidence.length > 0
-				? "INSUFFICIENT_EVIDENCE"
-				: "PASS";
-	const checks = [
+				? PLANFORGE_VALIDATION_STATUS_INSUFFICIENT_EVIDENCE
+				: PLANFORGE_VALIDATION_STATUS_PASS;
+	const checks: PlanForgeValidationCheck[] = [
 		{
 			id: "trusted-boundary",
 			status:
@@ -5339,10 +5353,8 @@ function createPlanForgeDryRunPlan(inputPath: string): Record<string, unknown> {
 	const canonicalInput = content.replace(/\r\n/g, "\n");
 	const inputDigest = `sha256:${createHash("sha256").update(canonicalInput).digest("hex")}`;
 
-	const plan: Record<string, unknown> & {
-		receiptPreview: { [key: string]: unknown; planDigest: string | null };
-	} = {
-		schemaVersion: "planforge.plan.v0",
+	const plan: PlanForgePlan = {
+		schemaVersion: PLANFORGE_PLAN_SCHEMA_VERSION,
 		id: `pf-plan-${planFingerprint}`,
 		idempotencyKey,
 		title: "PlanForge dry-run admission slice",
@@ -5350,7 +5362,7 @@ function createPlanForgeDryRunPlan(inputPath: string): Record<string, unknown> {
 		trustedBase: normalizedTrustedBase,
 		tasks: [
 			{
-				id: "PF1",
+				id: PLANFORGE_TASK_IDS[0],
 				title: "Spec PlanForge contracts and fixture artifacts",
 				objective:
 					"Define the narrow documentation-level PlanForge contracts plus deterministic dry-run fixtures.",
@@ -5380,13 +5392,13 @@ function createPlanForgeDryRunPlan(inputPath: string): Record<string, unknown> {
 				],
 			},
 			{
-				id: "PF2",
+				id: PLANFORGE_TASK_IDS[1],
 				title: "Implement PlanForge dry-run CLI and schema validation",
 				objective:
 					"Add a later dry-run command that validates local input and emits stable JSON without storage, board, network, or worker side effects.",
 				assigneeHint: "auto-coder",
 				workspace: "isolated-worktree",
-				dependsOn: ["PF1"],
+				dependsOn: [PLANFORGE_TASK_IDS[0]],
 				allowedSideEffects: ["local-doc", "local-fixture", "local-receipt"],
 				forbiddenSideEffects: [
 					"execute-code",
@@ -5412,19 +5424,12 @@ function createPlanForgeDryRunPlan(inputPath: string): Record<string, unknown> {
 		validation: {
 			status: validationStatus,
 			checks,
-			requiredEvidence: [
-				"operator_goal",
-				"repository_remote",
-				"trusted_base",
-				"worktree_policy",
-				"dry_run_constraints",
-				"trusted_boundary",
-			],
+			requiredEvidence: PLANFORGE_REQUIRED_EVIDENCE,
 			missingEvidence,
 			unsafeReasons,
 		},
 		receiptPreview: {
-			schemaVersion: "planforge.receipt.v0",
+			schemaVersion: PLANFORGE_RECEIPT_SCHEMA_VERSION,
 			status: validationStatus,
 			planId: `pf-plan-${planFingerprint}`,
 			idempotencyKey,
