@@ -42,7 +42,8 @@ const REQUIRED_STAGED_README_SNIPPETS = Object.freeze([
 	"buildplane run --packet",
 	"buildplane status --json",
 	"buildplane inspect <run-id> --json",
-	"Published/global installs do not yet include a verified `buildplane memory ...` contract.",
+	"buildplane memory doctor --json",
+	"Published/global native memory is packaged and verified on Linux x64.",
 ]);
 const PUBLISHED_SMOKE_UNIT_ID = "unit-published-bootstrap-smoke";
 const FORBIDDEN_STAGED_README_PATTERNS = Object.freeze([
@@ -393,6 +394,53 @@ function createPackedInstallArtifacts(tarballPath) {
 	}
 }
 
+function shouldExpectPackagedNativeMemory() {
+	return process.platform === "linux" && process.arch === "x64";
+}
+
+function assertPublishedMemoryContract(label, cli, options) {
+	const { cwd, env } = options;
+	const capabilities = runJsonCommand(
+		cliCommandName(cli),
+		cliCommandArgs(cli, ["bootstrap", "doctor", "--capabilities", "--json"]),
+		{ cwd, env },
+		`${label} capabilities`,
+	);
+	const publishedMemory = capabilities.capabilities?.find(
+		(capability) => capability.id === "published_memory",
+	);
+	if (!publishedMemory) {
+		fail(`${label}: capability doctor did not report published_memory`);
+	}
+
+	if (!shouldExpectPackagedNativeMemory()) {
+		if (publishedMemory.available === true || publishedMemory.ok === true) {
+			fail(
+				`${label}: published_memory must stay unavailable on unsupported native packaging platforms`,
+			);
+		}
+		return;
+	}
+
+	if (publishedMemory.available !== true || publishedMemory.ok !== true) {
+		fail(
+			`${label}: expected published_memory to be available on linux-x64 packed installs`,
+		);
+	}
+
+	const doctor = runJsonCommand(
+		cliCommandName(cli),
+		cliCommandArgs(cli, ["memory", "doctor", "--json"]),
+		{ cwd, env },
+		`${label} memory doctor`,
+	);
+	for (const key of ["global_database", "workspace_database"]) {
+		if (typeof doctor?.[key] !== "string" || doctor[key].length === 0) {
+			fail(`${label}: memory doctor JSON is missing ${key}`);
+		}
+	}
+}
+
 function createCommandShimDirectory(tempPaths, commandName, targetPath) {
 	const shimRoot = mkdtempSync(
 		join(
@@ -450,6 +498,7 @@ function runExternalPackedInstallSmoke(tarballPath, tempPaths) {
 	writeFileSync(npmUserConfig, "");
 	const nodeShimDir = createNodeShimDirectory(tempPaths);
 	const gitShimDir = createCommandShimDirectory(tempPaths, "git", GIT_COMMAND);
+	const npmShimDir = createCommandShimDirectory(tempPaths, "npm", NPM_COMMAND);
 	const npmCache = join(npmPrefix, "npm-cache");
 	const installEnv = createSanitizedEnvironment(npmPrefix, {
 		baseEnv: process.env,
@@ -493,7 +542,7 @@ function runExternalPackedInstallSmoke(tarballPath, tempPaths) {
 		},
 		repoRoot: REPO_ROOT,
 		requiredCommandNames: [],
-		requiredPathEntries: [nodeShimDir, gitShimDir],
+		requiredPathEntries: [nodeShimDir, gitShimDir, npmShimDir],
 	});
 	const { buildplanePath } = assertPackedInstallPathIsolation({
 		env: runEnv,
@@ -509,6 +558,10 @@ function runExternalPackedInstallSmoke(tarballPath, tempPaths) {
 		cwd: externalRepoRoot,
 		env: runEnv,
 		packetPath,
+	});
+	assertPublishedMemoryContract("external packed-install smoke", publishedCli, {
+		cwd: externalRepoRoot,
+		env: runEnv,
 	});
 }
 

@@ -1,5 +1,12 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import {
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -8,6 +15,7 @@ import {
 	type BuildplaneOrchestrator,
 	type BuildplaneWorkspacePort,
 	createBuildplaneOrchestrator,
+	type RunAdmissionLocalEvidenceStore,
 	type UnitPacket,
 } from "@buildplane/kernel";
 import { evaluateRun } from "@buildplane/policy";
@@ -62,12 +70,32 @@ function createCliDependencies(
 				runtime: { executePacket },
 				policy: { evaluateRun },
 				workspace: options.workspace ?? createGitWorktreeAdapter(),
+				admissionStore: createTestAdmissionStore(projectRoot),
 			}),
 	};
 }
 
 function createGitWorktreeAdapter(): BuildplaneWorkspacePort {
 	return createActualGitWorkspaceAdapter();
+}
+
+function createTestAdmissionStore(
+	root: string,
+): RunAdmissionLocalEvidenceStore {
+	return {
+		writeReceiptArtifact(input) {
+			return {
+				ref: `artifact://${input.receipt.receipt_id}`,
+				path: join(root, ".buildplane", "admission", "run-admission.json"),
+			};
+		},
+		appendAdmissionEvent(input) {
+			return {
+				ref: `event://${input.event.event_id}`,
+				path: join(root, ".buildplane", "admission", "events.jsonl"),
+			};
+		},
+	};
 }
 
 function writeWorkspaceFile(
@@ -86,6 +114,64 @@ function writePacket(root: string, name: string, packet: unknown): string {
 	mkdirSync(dirname(packetPath), { recursive: true });
 	writeFileSync(packetPath, JSON.stringify(packet));
 	return packetPath;
+}
+
+function loadAdmissionFixture(name: string): unknown {
+	return JSON.parse(
+		readFileSync(
+			join(
+				process.cwd(),
+				"packages",
+				"kernel",
+				"test",
+				"fixtures",
+				"admission-receipts",
+				`${name}.json`,
+			),
+			"utf8",
+		),
+	);
+}
+
+function loadAdmissionFixtureWithoutEvidence(
+	name: string,
+	kind: string,
+): unknown {
+	const fixture = loadAdmissionFixture(name) as Record<string, unknown>;
+	const evidenceInputs = fixture.evidence_inputs as readonly Record<
+		string,
+		unknown
+	>[];
+	return {
+		...fixture,
+		evidence_inputs: evidenceInputs.filter(
+			(evidence) => evidence.kind !== kind,
+		),
+	};
+}
+
+function loadAdmissionFixtureWithoutRepoOrEvidence(name: string): unknown {
+	return {
+		...(loadAdmissionFixture(name) as Record<string, unknown>),
+		repo: {},
+		evidence_inputs: [],
+	};
+}
+
+function loadAdmissionFixtureWithSideEffects(
+	name: string,
+	requestedSideEffects: readonly string[],
+): unknown {
+	const fixture = loadAdmissionFixture(name) as Record<string, unknown>;
+	const request = fixture.request as Record<string, unknown>;
+	return {
+		...fixture,
+		request: {
+			...request,
+			requested_capabilities: requestedSideEffects,
+			requested_side_effects: requestedSideEffects,
+		},
+	};
 }
 
 function writeCommittedPacket(
@@ -191,11 +277,20 @@ function createBootstrapDoctorReport(ok = true) {
 				label: "Node.js",
 				ok,
 				required: true,
-				expected: "24.13.1",
-				detected: ok ? "24.13.1" : "22.22.2",
+				expected: ">=24.13.1 <25",
+				detected: ok ? "24.13.2" : "22.22.2",
 				message: ok
-					? "detected 24.13.1 (requires 24.13.1)"
-					: "Buildplane requires Node 24.13.1. Detected 22.22.2.",
+					? "detected 24.13.2; supports >=24.13.1 <25"
+					: "Buildplane requires Node >=24.13.1 <25. Detected 22.22.2.",
+			},
+			{
+				id: "node_sqlite",
+				label: "node:sqlite",
+				ok,
+				required: true,
+				message: ok
+					? "node:sqlite import available"
+					: "node:sqlite import failed",
 			},
 			{
 				id: "npm",
@@ -217,7 +312,43 @@ function createBootstrapDoctorReport(ok = true) {
 			},
 		],
 		notes: [
-			"Published/global installs do not yet include a verified `buildplane memory ...` contract.",
+			".node-version pins the tested development baseline; the published CLI accepts compatible Node 24 runtimes.",
+			"Published memory is available only when the installed package includes a packaged native binary for this platform.",
+		],
+	};
+}
+
+function createCapabilityReport(ok = true) {
+	return {
+		ok,
+		environment: {
+			detectedNodeVersion: ok ? "24.13.2" : "22.22.2",
+			supportedNodeRange: ">=24.13.1 <25",
+		},
+		capabilities: [
+			{
+				id: "node",
+				label: "Node.js",
+				ok,
+				required: true,
+				available: ok,
+				expected: ">=24.13.1 <25",
+				detected: ok ? "24.13.2" : "22.22.2",
+				message: ok
+					? "detected 24.13.2; supports >=24.13.1 <25"
+					: "Buildplane requires Node >=24.13.1 <25. Detected 22.22.2.",
+			},
+			{
+				id: "published_memory",
+				label: "Published memory",
+				ok: false,
+				required: false,
+				available: false,
+				message: "packaged linux-x64 native binary not found in vendor/native",
+			},
+		],
+		notes: [
+			".node-version pins the tested development baseline; the published CLI accepts compatible Node 24 runtimes.",
 		],
 	};
 }
@@ -255,11 +386,14 @@ describe("cli command surface", () => {
 		expect(result.stderr).toEqual([]);
 		expect(result.stdout).toContain("bootstrap-doctor: pass");
 		expect(result.stdout).toContain(
-			"  - [pass] node: detected 24.13.1 (requires 24.13.1)",
+			"  - [pass] node: detected 24.13.2; supports >=24.13.1 <25",
+		);
+		expect(result.stdout).toContain(
+			"  - [pass] node_sqlite: node:sqlite import available",
 		);
 		expect(result.stdout).toContain("  - [pass] npm: npm 10.9.0");
 		expect(result.stdout).toContain(
-			"  - Published/global installs do not yet include a verified `buildplane memory ...` contract.",
+			"  - Published memory is available only when the installed package includes a packaged native binary for this platform.",
 		);
 		expect(existsSync(join(root, ".buildplane"))).toBe(false);
 	});
@@ -281,6 +415,62 @@ describe("cli command surface", () => {
 		expect(result.stderr).toEqual([]);
 		expect(JSON.parse(result.stdout.join("\n"))).toEqual(
 			createBootstrapDoctorReport(false),
+		);
+		expect(existsSync(join(root, ".buildplane"))).toBe(false);
+	});
+
+	it("bootstrap doctor --capabilities prints deterministic human capability truth", async () => {
+		const root = mkdtempSync(
+			join(tmpdir(), "buildplane-cli-capabilities-human-"),
+		);
+		const result = await runCliCapture(
+			root,
+			["bootstrap", "doctor", "--capabilities"],
+			{
+				inspectCapabilities: () => createCapabilityReport(true),
+			} as unknown as RunCliDependencies,
+		);
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stderr).toEqual([]);
+		expect(result.stdout).toContain("capabilities: pass");
+		expect(result.stdout.join("\n")).toContain("node");
+		expect(result.stdout.join("\n")).toContain("published_memory");
+		expect(existsSync(join(root, ".buildplane"))).toBe(false);
+	});
+
+	it("bootstrap doctor --capabilities --json returns capability report", async () => {
+		const root = mkdtempSync(
+			join(tmpdir(), "buildplane-cli-capabilities-json-"),
+		);
+		const report = createCapabilityReport(true);
+		const result = await runCliCapture(
+			root,
+			["bootstrap", "doctor", "--capabilities", "--json"],
+			{ inspectCapabilities: () => report } as unknown as RunCliDependencies,
+		);
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stderr).toEqual([]);
+		expect(JSON.parse(result.stdout.join("\n"))).toEqual(report);
+		expect(existsSync(join(root, ".buildplane"))).toBe(false);
+	});
+
+	it("bootstrap doctor --capabilities rejects unsupported extra arguments", async () => {
+		const root = mkdtempSync(
+			join(tmpdir(), "buildplane-cli-capabilities-invalid-"),
+		);
+		const result = await runCliCapture(root, [
+			"bootstrap",
+			"doctor",
+			"--capabilities",
+			"unexpected",
+		]);
+
+		expect(result.exitCode).toBe(1);
+		expect(result.stdout).toEqual([]);
+		expect(result.stderr.join("\n")).toContain(
+			"Unsupported bootstrap doctor arguments: --capabilities unexpected",
 		);
 		expect(existsSync(join(root, ".buildplane"))).toBe(false);
 	});
@@ -313,6 +503,175 @@ describe("cli command surface", () => {
 		expect(result.stderr).toEqual([]);
 		expect(result.stdout.join("\n")).toContain("Execute:");
 		expect(result.stdout.join("\n")).toContain("run --packet <path>");
+		expect(result.stdout.join("\n")).toContain("replay <id> [--json]");
+		expect(result.stdout.join("\n")).toContain(
+			"fork <id> --at <event> --packet <file>",
+		);
+		expect(result.stdout.join("\n")).toContain(
+			"ledger replay --run-id <id> --workspace <path>",
+		);
+	});
+
+	it("shows replay help without requiring init or a run id", async () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-cli-replay-help-"));
+
+		const result = await runCliCapture(root, ["replay", "--help"]);
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stderr).toEqual([]);
+		const output = result.stdout.join("\n");
+		expect(output).toContain("buildplane replay <run-id> [options]");
+		expect(output).toContain("Re-executes the stored packet snapshot");
+		expect(output).toContain("--policy <profile>");
+		expect(output).toContain(
+			"buildplane ledger replay --run-id <run-id> --workspace <path>",
+		);
+		expect(existsSync(join(root, ".buildplane"))).toBe(false);
+	});
+
+	it("routes bare replay/fork help tokens to help output instead of parsing them as ids", async () => {
+		const replayRoot = mkdtempSync(
+			join(tmpdir(), "buildplane-cli-replay-help-token-"),
+		);
+		const replayResult = await runCliCapture(replayRoot, ["replay", "help"]);
+
+		expect(replayResult.exitCode).toBe(0);
+		expect(replayResult.stderr).toEqual([]);
+		expect(replayResult.stdout.join("\n")).toContain(
+			"buildplane replay <run-id> [options]",
+		);
+		expect(replayResult.stdout.join("\n")).toContain("--policy <profile>");
+		expect(existsSync(join(replayRoot, ".buildplane"))).toBe(false);
+
+		const forkRoot = mkdtempSync(
+			join(tmpdir(), "buildplane-cli-fork-help-token-"),
+		);
+		const forkResult = await runCliCapture(forkRoot, ["fork", "help"]);
+
+		expect(forkResult.exitCode).toBe(0);
+		expect(forkResult.stderr).toEqual([]);
+		expect(forkResult.stdout.join("\n")).toContain(
+			"buildplane fork <parent-run-id> --at <event-id> --packet <file>",
+		);
+		expect(existsSync(join(forkRoot, ".buildplane"))).toBe(false);
+	});
+
+	it("applies replay policy overrides from both --policy=<profile> and --policy <profile>", async () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-cli-replay-policy-"));
+		const capturedPolicies: string[] = [];
+		const packetSnapshot = createPassingPacket("unit-replay-policy");
+
+		vi.doMock("@buildplane/storage", () => ({
+			createBuildplaneStorage: () => ({
+				getPacketSnapshot: (_runId: string) => packetSnapshot,
+			}),
+			createEventStore: () => ({
+				persistEvent: (_runId: string, _event: unknown) => {},
+			}),
+		}));
+		vi.doMock("@buildplane/kernel", () => ({
+			createEventBus: () => ({
+				subscribe: (_listener: (event: unknown) => void) => () => {},
+				emit: (_event: unknown) => {},
+			}),
+		}));
+
+		const dependencies: RunCliDependencies = {
+			createOrchestrator: () =>
+				({
+					initializeProject() {
+						return {
+							created: true,
+							projectRoot: root,
+							stateDbPath: join(root, ".buildplane", "state.db"),
+						};
+					},
+					runPacket() {
+						throw new Error("not used");
+					},
+					async runPacketAsync(packet: unknown) {
+						const replayPacket = packet as {
+							unit?: { policyProfile?: string };
+						};
+						capturedPolicies.push(replayPacket.unit?.policyProfile ?? "");
+						return {
+							run: {
+								id: `run-replay-${capturedPolicies.length}`,
+								status: "passed",
+							},
+							receipt: null,
+							decision: null,
+						};
+					},
+					async runGraphAsync() {
+						return { outcome: "passed" as const, nodes: [] };
+					},
+					async runStrategy() {
+						return {
+							strategyId: "strategy-1",
+							mode: "single",
+							outcome: "passed" as const,
+							childResults: new Map(),
+							mergeDecision: {
+								policy: "default",
+								outcome: "passed",
+								reasons: [],
+							},
+						};
+					},
+					getStatus() {
+						return { initialized: true };
+					},
+					inspect(id: string) {
+						return { kind: "run", run: { id } };
+					},
+				}) as BuildplaneOrchestrator,
+		};
+
+		try {
+			const equalsResult = await runCliCapture(
+				root,
+				["replay", "run-policy-equals", "--policy=safe"],
+				dependencies,
+			);
+			expect(equalsResult.exitCode).toBe(0);
+
+			const spaceResult = await runCliCapture(
+				root,
+				["replay", "run-policy-space", "--policy", "safe"],
+				dependencies,
+			);
+			expect(spaceResult.exitCode).toBe(0);
+
+			const helpValueResult = await runCliCapture(
+				root,
+				["replay", "run-policy-help-value", "--policy", "help"],
+				dependencies,
+			);
+			expect(helpValueResult.exitCode).toBe(0);
+
+			expect(capturedPolicies).toEqual(["safe", "safe", "help"]);
+		} finally {
+			vi.doUnmock("@buildplane/storage");
+			vi.doUnmock("@buildplane/kernel");
+		}
+	});
+
+	it("shows fork help without requiring init or fork args", async () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-cli-fork-help-"));
+
+		const result = await runCliCapture(root, ["fork", "--help"]);
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stderr).toEqual([]);
+		const output = result.stdout.join("\n");
+		expect(output).toContain(
+			"buildplane fork <parent-run-id> --at <event-id> --packet <file>",
+		);
+		expect(output).toContain("Fork resumes from a unit boundary");
+		expect(output).toContain("workspace git state must be clean");
+		expect(output).toContain("Target event must be a unit_started event");
+		expect(existsSync(join(root, ".buildplane"))).toBe(false);
 	});
 
 	it("workflow scan prints a preview of recognized workflow files without init", async () => {
@@ -401,6 +760,107 @@ describe("cli command surface", () => {
 		expect(existsSync(join(root, ".buildplane", "state.db"))).toBe(true);
 	});
 
+	it("supports the evidence-first inspector projection for inspect", async () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-cli-inspector-view-"));
+		await runCliCapture(root, ["init"]);
+		const inspectSnapshot = {
+			kind: "run",
+			unit: { id: "unit-inspector", kind: "command" },
+			run: {
+				id: "run-inspector",
+				unitId: "unit-inspector",
+				status: "passed",
+			},
+			eventTape: {
+				runId: "run-inspector",
+				eventCount: 1,
+				firstKind: "run_started",
+				lastKind: "run_completed",
+				terminalStatus: "passed",
+				events: [
+					{
+						id: "event-1",
+						kind: "run_completed",
+						occurredAt: "2026-05-16T00:00:00.000Z",
+						summary: "completed",
+					},
+				],
+			},
+			evidence: [{ kind: "command-exit", status: "pass", message: "exit 0" }],
+			decisions: [
+				{
+					kind: "advance-run",
+					outcome: "approved",
+					reasons: ["required output exists"],
+				},
+			],
+			artifacts: [{ type: "log", location: ".buildplane/log.txt" }],
+		};
+		const dependencies: RunCliDependencies = {
+			createOrchestrator: () =>
+				({
+					inspect: () => inspectSnapshot,
+					initializeProject() {
+						throw new Error("not used");
+					},
+					runPacket() {
+						throw new Error("not used");
+					},
+					async runPacketAsync() {
+						throw new Error("not used");
+					},
+					getStatus() {
+						throw new Error("not used");
+					},
+					approveRun() {
+						throw new Error("not used");
+					},
+					rejectSuspendedRun() {
+						throw new Error("not used");
+					},
+					async runGraphAsync() {
+						throw new Error("not used");
+					},
+					async runStrategy() {
+						throw new Error("not used");
+					},
+				}) as unknown as BuildplaneOrchestrator,
+		};
+
+		const human = await runCliCapture(
+			root,
+			["inspect", "run-inspector", "--view", "inspector"],
+			dependencies,
+		);
+		const json = await runCliCapture(
+			root,
+			["inspect", "run-inspector", "--json", "--view=inspector"],
+			dependencies,
+		);
+		const rawJson = await runCliCapture(
+			root,
+			["inspect", "run-inspector", "--json"],
+			dependencies,
+		);
+
+		expect(human.exitCode).toBe(0);
+		expect(human.stdout).toContain("Run Inspector");
+		expect(human.stdout).toContain("Outcome Strip");
+		expect(human.stdout).toContain("Event Timeline");
+		expect(human.stdout).toContain("Evidence Pane");
+		expect(json.exitCode).toBe(0);
+		expect(JSON.parse(json.stdout.join("\n"))).toMatchObject({
+			kind: "run-inspector",
+			runId: "run-inspector",
+			outcomeStrip: { verdict: "PASSED" },
+		});
+		expect(rawJson.exitCode).toBe(0);
+		expect(JSON.parse(rawJson.stdout.join("\n"))).toMatchObject({
+			kind: "run",
+			run: { id: "run-inspector" },
+		});
+	});
+
 	it("supports injected packet loading for run command tests", async () => {
 		const root = mkdtempSync(join(tmpdir(), "buildplane-cli-parse-packet-"));
 		const loadedPacketPaths: string[] = [];
@@ -467,6 +927,342 @@ describe("cli command surface", () => {
 				unit: expect.objectContaining({ id: "unit-parse-packet" }),
 			}),
 		]);
+	});
+
+	it("emits admission receipt dry-run JSON without initialization, worker, native, or remote side effects", async () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-cli-admission-"));
+		const inputPath = writePacket(
+			root,
+			"admission/pass.json",
+			loadAdmissionFixture("pass"),
+		);
+		const createOrchestrator = vi.fn();
+		const runNativeCommand = vi.fn();
+		const publishPrCheckRequest = vi.fn();
+		const publishPrCommentRequest = vi.fn();
+		const verifyPrHeadRequest = vi.fn();
+
+		const result = await runCliCapture(
+			root,
+			["admission", "receipt", "--input", inputPath, "--dry-run", "--json"],
+			{
+				createOrchestrator: createOrchestrator as NonNullable<
+					RunCliDependencies["createOrchestrator"]
+				>,
+				runNativeCommand,
+				publishPrCheckRequest: publishPrCheckRequest as NonNullable<
+					RunCliDependencies["publishPrCheckRequest"]
+				>,
+				publishPrCommentRequest: publishPrCommentRequest as NonNullable<
+					RunCliDependencies["publishPrCommentRequest"]
+				>,
+				verifyPrHeadRequest: verifyPrHeadRequest as NonNullable<
+					RunCliDependencies["verifyPrHeadRequest"]
+				>,
+			},
+		);
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stderr).toEqual([]);
+		const receipt = JSON.parse(result.stdout.join("\n"));
+		expect(receipt).toMatchObject({
+			receipt_type: "run.admission",
+			run: { run_id: "run_bp1_pass_0001" },
+			admission: {
+				decision: "PASS",
+				will_execute_worker: false,
+				authorized_next_step: "record_admission_only",
+			},
+			replay: { side_effect_safe: true },
+			provenance: { worker_agent_trusted: false },
+		});
+		expect(receipt.idempotency_key).toMatch(/^run\.admission:v0:sha256:/);
+		expect(existsSync(join(root, ".buildplane"))).toBe(false);
+		expect(createOrchestrator).not.toHaveBeenCalled();
+		expect(runNativeCommand).not.toHaveBeenCalled();
+		expect(publishPrCheckRequest).not.toHaveBeenCalled();
+		expect(publishPrCommentRequest).not.toHaveBeenCalled();
+		expect(verifyPrHeadRequest).not.toHaveBeenCalled();
+	});
+
+	it("fails admission receipt dry-run closed when required evidence is absent", async () => {
+		const root = mkdtempSync(
+			join(tmpdir(), "buildplane-cli-admission-missing-evidence-"),
+		);
+		const inputPath = writePacket(
+			root,
+			"admission/missing-rev-parse.json",
+			loadAdmissionFixtureWithoutEvidence("pass", "git.rev-parse"),
+		);
+		const createOrchestrator = vi.fn();
+		const runNativeCommand = vi.fn();
+		const publishPrCheckRequest = vi.fn();
+		const publishPrCommentRequest = vi.fn();
+		const verifyPrHeadRequest = vi.fn();
+
+		const result = await runCliCapture(
+			root,
+			["admission", "receipt", "--input", inputPath, "--dry-run", "--json"],
+			{
+				createOrchestrator: createOrchestrator as NonNullable<
+					RunCliDependencies["createOrchestrator"]
+				>,
+				runNativeCommand,
+				publishPrCheckRequest: publishPrCheckRequest as NonNullable<
+					RunCliDependencies["publishPrCheckRequest"]
+				>,
+				publishPrCommentRequest: publishPrCommentRequest as NonNullable<
+					RunCliDependencies["publishPrCommentRequest"]
+				>,
+				verifyPrHeadRequest: verifyPrHeadRequest as NonNullable<
+					RunCliDependencies["verifyPrHeadRequest"]
+				>,
+			},
+		);
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stderr).toEqual([]);
+		const receipt = JSON.parse(result.stdout.join("\n"));
+		expect(receipt).toMatchObject({
+			admission: {
+				decision: "INSUFFICIENT_EVIDENCE",
+				missing_evidence: ["git.rev-parse"],
+				unsafe_requests: [],
+				will_execute_worker: false,
+				authorized_next_step:
+					"capture_missing_evidence_then_recompute_admission",
+			},
+			policy: {
+				allowed_side_effects: [],
+				capability_grants: [],
+				quarantine: false,
+			},
+		});
+		expect(existsSync(join(root, ".buildplane"))).toBe(false);
+		expect(createOrchestrator).not.toHaveBeenCalled();
+		expect(runNativeCommand).not.toHaveBeenCalled();
+		expect(publishPrCheckRequest).not.toHaveBeenCalled();
+		expect(publishPrCommentRequest).not.toHaveBeenCalled();
+		expect(verifyPrHeadRequest).not.toHaveBeenCalled();
+	});
+
+	it("fails admission receipt dry-run closed when repo binding and evidence inputs are omitted", async () => {
+		const root = mkdtempSync(
+			join(tmpdir(), "buildplane-cli-admission-omitted-binding-"),
+		);
+		const inputPath = writePacket(
+			root,
+			"admission/omitted-binding.json",
+			loadAdmissionFixtureWithoutRepoOrEvidence("pass"),
+		);
+		const createOrchestrator = vi.fn();
+		const runNativeCommand = vi.fn();
+
+		const result = await runCliCapture(
+			root,
+			["admission", "receipt", "--input", inputPath, "--dry-run", "--json"],
+			{
+				createOrchestrator: createOrchestrator as NonNullable<
+					RunCliDependencies["createOrchestrator"]
+				>,
+				runNativeCommand,
+			},
+		);
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stderr).toEqual([]);
+		const receipt = JSON.parse(result.stdout.join("\n"));
+		expect(receipt.admission.decision).toBe("INSUFFICIENT_EVIDENCE");
+		expect(receipt.admission.missing_evidence).toEqual(
+			expect.arrayContaining([
+				"git.status",
+				"git.rev-parse",
+				"declared_scope",
+				"repo.base_commit",
+				"repo.worktree_path",
+			]),
+		);
+		expect(receipt.policy.allowed_side_effects).toEqual([]);
+		expect(receipt.policy.capability_grants).toEqual([]);
+		expect(receipt.admission.will_execute_worker).toBe(false);
+		expect(existsSync(join(root, ".buildplane"))).toBe(false);
+		expect(createOrchestrator).not.toHaveBeenCalled();
+		expect(runNativeCommand).not.toHaveBeenCalled();
+	});
+
+	it("fails admission receipt dry-run closed for unknown auto-Kanban side effects", async () => {
+		const root = mkdtempSync(
+			join(tmpdir(), "buildplane-cli-admission-kanban-side-effect-"),
+		);
+		const inputPath = writePacket(
+			root,
+			"admission/kanban-side-effect.json",
+			loadAdmissionFixtureWithSideEffects("pass", [
+				"fs.read:repo",
+				"kanban.write:auto",
+			]),
+		);
+		const createOrchestrator = vi.fn();
+		const runNativeCommand = vi.fn();
+		const publishPrCheckRequest = vi.fn();
+		const publishPrCommentRequest = vi.fn();
+		const verifyPrHeadRequest = vi.fn();
+
+		const result = await runCliCapture(
+			root,
+			["admission", "receipt", "--input", inputPath, "--dry-run", "--json"],
+			{
+				createOrchestrator: createOrchestrator as NonNullable<
+					RunCliDependencies["createOrchestrator"]
+				>,
+				runNativeCommand,
+				publishPrCheckRequest: publishPrCheckRequest as NonNullable<
+					RunCliDependencies["publishPrCheckRequest"]
+				>,
+				publishPrCommentRequest: publishPrCommentRequest as NonNullable<
+					RunCliDependencies["publishPrCommentRequest"]
+				>,
+				verifyPrHeadRequest: verifyPrHeadRequest as NonNullable<
+					RunCliDependencies["verifyPrHeadRequest"]
+				>,
+			},
+		);
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stderr).toEqual([]);
+		const receipt = JSON.parse(result.stdout.join("\n"));
+		expect(receipt).toMatchObject({
+			admission: {
+				decision: "UNSAFE_TO_RUN",
+				missing_evidence: [],
+				unsafe_requests: ["kanban.write:auto"],
+				will_execute_worker: false,
+				authorized_next_step: "freeze_and_require_explicit_release_authority",
+			},
+			policy: {
+				allowed_side_effects: ["fs.read:repo"],
+				quarantine: true,
+			},
+		});
+		expect(receipt.policy.denied_side_effects).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({ effect: "kanban.write:auto" }),
+			]),
+		);
+		expect(existsSync(join(root, ".buildplane"))).toBe(false);
+		expect(createOrchestrator).not.toHaveBeenCalled();
+		expect(runNativeCommand).not.toHaveBeenCalled();
+		expect(publishPrCheckRequest).not.toHaveBeenCalled();
+		expect(publishPrCommentRequest).not.toHaveBeenCalled();
+		expect(verifyPrHeadRequest).not.toHaveBeenCalled();
+	});
+
+	it("fails admission receipt dry-run input validation without leaking credential-shaped values", async () => {
+		const root = mkdtempSync(
+			join(tmpdir(), "buildplane-cli-admission-invalid-"),
+		);
+		const sensitiveValue = ["ghp", "dummy_value_not_a_real_credential"].join(
+			"_",
+		);
+		const inputPath = writePacket(root, "admission/invalid.json", {
+			unsafe_value: sensitiveValue,
+			request: { requested_side_effects: ["git.push:remote"] },
+		});
+		const createOrchestrator = vi.fn();
+
+		const result = await runCliCapture(
+			root,
+			["admission", "receipt", "--input", inputPath, "--dry-run", "--json"],
+			{
+				createOrchestrator: createOrchestrator as NonNullable<
+					RunCliDependencies["createOrchestrator"]
+				>,
+			},
+		);
+
+		expect(result.exitCode).toBe(1);
+		expect(result.stderr).toEqual([]);
+		const output = result.stdout.join("\n");
+		expect(output).not.toContain(sensitiveValue);
+		expect(JSON.parse(output)).toMatchObject({
+			error: { code: "INVALID_PACKET" },
+		});
+		expect(createOrchestrator).not.toHaveBeenCalled();
+		expect(existsSync(join(root, ".buildplane"))).toBe(false);
+	});
+
+	it("persists CLI-created run admission receipts with kernel contents and digest refs", async () => {
+		const root = createGitRepo();
+		await runCliCapture(root, ["init"]);
+		const packetPath = writeCommittedPacket(
+			root,
+			".buildplane/test-packets/cli-admission-receipt.json",
+			createPassingPacket("unit-cli-store-integrity"),
+		);
+
+		const result = await runCliCapture(root, [
+			"run",
+			"--raw",
+			"--packet",
+			packetPath,
+		]);
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stderr).toEqual([]);
+		const eventsPath = join(
+			root,
+			".git",
+			"buildplane",
+			"admission",
+			"events.jsonl",
+		);
+		expect(existsSync(eventsPath)).toBe(true);
+		const events = readFileSync(eventsPath, "utf8")
+			.trim()
+			.split("\n")
+			.filter(Boolean)
+			.map(
+				(line) =>
+					JSON.parse(line) as {
+						kind?: string;
+						payload?: {
+							receipt_id?: string;
+							receipt_digest?: string;
+							receipt_ref?: string;
+							unit_id?: string;
+						};
+					},
+			);
+		const recordedEvent = events.find(
+			(event) =>
+				event.kind === "run_admission_recorded" &&
+				event.payload?.unit_id === "unit-cli-store-integrity",
+		);
+		if (!recordedEvent?.payload?.receipt_id) {
+			throw new Error("missing run admission receipt event");
+		}
+		const payload = recordedEvent.payload;
+		expect(payload.receipt_digest).toMatch(/^sha256:[a-f0-9]{64}$/);
+		expect(payload.receipt_ref).toBe(
+			`artifact://run-admission/${payload.receipt_digest}`,
+		);
+		const receiptPath = join(
+			root,
+			".git",
+			"buildplane",
+			"admission",
+			"receipts",
+			`${payload.receipt_id}.json`,
+		);
+		expect(existsSync(receiptPath)).toBe(true);
+		const receiptContents = readFileSync(receiptPath, "utf8");
+		expect(
+			`sha256:${createHash("sha256").update(receiptContents).digest("hex")}`,
+		).toBe(payload.receipt_digest);
+		expect(JSON.parse(receiptContents)).toMatchObject({
+			receipt_id: payload.receipt_id,
+			run: { unit_id: "unit-cli-store-integrity" },
+		});
 	});
 
 	it("persists injected structured memories and surfaces them in run and inspect output", async () => {
@@ -2492,6 +3288,444 @@ describe("cli command surface", () => {
 		]);
 	});
 
+	async function createProjectWithReceiptBackedLearning(
+		options: {
+			prefix: string;
+			runId: string;
+			withVerifierReceipt: boolean;
+			learning?: {
+				kind: string;
+				scope: string;
+				title: string;
+				body: string;
+			};
+		} = {
+			prefix: "buildplane-cli-memory-promote-",
+			runId: "run-cli-memory-promote",
+			withVerifierReceipt: true,
+		},
+	): Promise<{ root: string; runId: string }> {
+		const root = mkdtempSync(join(tmpdir(), options.prefix));
+		await runCliCapture(root, ["init"]);
+		const storage = createBuildplaneStorage(root);
+		const run = storage.createRun(createPassingPacket(options.runId), {
+			runId: options.runId,
+		});
+		storage.markRunRunning(run.id);
+		if (options.withVerifierReceipt) {
+			storage.recordExecutionEvidence(run.id, {
+				command: "node",
+				args: ["-e", "console.log('verified source')"],
+				cwd: root,
+				startedAt: "2026-05-07T10:00:00.000Z",
+				completedAt: "2026-05-07T10:00:01.000Z",
+				exitCode: 0,
+				stdout: "verified source\n",
+				stderr: "",
+				outputChecks: [{ path: "tmp/pass.txt", exists: true }],
+			});
+		}
+		storage.recordDecision(run.id, {
+			kind: "advance-run",
+			outcome: "approved",
+			reasons: options.withVerifierReceipt
+				? ["required output exists"]
+				: ["worker claimed success"],
+		});
+		storage.completeRun(run.id, "passed");
+		const layout = resolveProjectLayout(root);
+		const db = new DatabaseSync(layout.stateDbPath);
+		const store = createLearningStore(db);
+		store.writeLearnings(run.id, [
+			options.learning ?? {
+				kind: "fact",
+				scope: "session",
+				title: "Repo uses receipt backed memory",
+				body: "Durable facts must cite accepted Buildplane receipts.",
+			},
+		] as never);
+		db.close();
+		return { root, runId: run.id };
+	}
+
+	it("shows local help for receipt-backed memory promotion", async () => {
+		const root = mkdtempSync(
+			join(tmpdir(), "buildplane-cli-memory-promote-help-"),
+		);
+		const dependencies: RunCliDependencies = {
+			runNativeCommand: async () => {
+				throw new Error("memory promote help should not dispatch to native");
+			},
+		};
+
+		const result = await runCliCapture(
+			root,
+			["memory", "promote", "--help"],
+			dependencies,
+		);
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stderr).toEqual([]);
+		expect(result.stdout.join("\n")).toContain(
+			"buildplane memory promote --receipt <run-id> [--json]",
+		);
+		expect(result.stdout.join("\n")).toContain(
+			"PASSED receipt-backed final verdict",
+		);
+	});
+
+	it("promotes source-backed fact learnings only from accepted receipts", async () => {
+		const { root, runId } = await createProjectWithReceiptBackedLearning({
+			prefix: "buildplane-cli-memory-promote-pass-",
+			runId: "run-cli-memory-promote-pass",
+			withVerifierReceipt: true,
+		});
+
+		const result = await runCliCapture(root, [
+			"memory",
+			"promote",
+			"--receipt",
+			runId,
+			"--json",
+		]);
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stderr).toEqual([]);
+		const report = JSON.parse(result.stdout.join("\n"));
+		expect(report).toMatchObject({
+			receiptId: runId,
+			verdict: "PASSED",
+			promoted: 1,
+			skipped: 0,
+		});
+		expect(report.records).toEqual([
+			expect.objectContaining({
+				memoryType: "repo-fact",
+				factKey: "Repo uses receipt backed memory",
+				sourceRunId: runId,
+				createdBy: "system",
+			}),
+		]);
+
+		const facts = createBuildplaneStorage(root).listRepoFacts();
+		expect(facts).toHaveLength(1);
+		expect(facts[0]).toMatchObject({
+			factKey: "Repo uses receipt backed memory",
+			factValue: "Durable facts must cite accepted Buildplane receipts.",
+			memoryType: "repo-fact",
+			scopeType: "repo",
+			provenance: expect.objectContaining({
+				sourceRunId: runId,
+				createdBy: "system",
+				confidence: 1,
+			}),
+		});
+	});
+
+	it("fails closed when memory promotion lacks an accepted receipt", async () => {
+		const { root, runId } = await createProjectWithReceiptBackedLearning({
+			prefix: "buildplane-cli-memory-promote-blocked-",
+			runId: "run-cli-memory-promote-blocked",
+			withVerifierReceipt: false,
+		});
+
+		const result = await runCliCapture(root, [
+			"memory",
+			"promote",
+			"--receipt",
+			runId,
+			"--json",
+		]);
+
+		expect(result.exitCode).toBe(1);
+		expect(result.stderr).toEqual([]);
+		const report = JSON.parse(result.stdout.join("\n"));
+		expect(report).toMatchObject({
+			error: {
+				code: "RECEIPT_NOT_ACCEPTED",
+			},
+			receipt: expect.objectContaining({
+				runId,
+				verdict: "BLOCKED",
+			}),
+		});
+		expect(createBuildplaneStorage(root).listRepoFacts()).toHaveLength(0);
+	});
+
+	it("keeps receipt-backed memory promotion idempotent", async () => {
+		const { root, runId } = await createProjectWithReceiptBackedLearning({
+			prefix: "buildplane-cli-memory-promote-idempotent-",
+			runId: "run-cli-memory-promote-idempotent",
+			withVerifierReceipt: true,
+		});
+
+		const first = await runCliCapture(root, [
+			"memory",
+			"promote",
+			"--receipt",
+			runId,
+			"--json",
+		]);
+		const second = await runCliCapture(root, [
+			"memory",
+			"promote",
+			"--receipt",
+			runId,
+			"--json",
+		]);
+
+		expect(first.exitCode).toBe(0);
+		expect(second.exitCode).toBe(0);
+		const secondReport = JSON.parse(second.stdout.join("\n"));
+		expect(secondReport).toMatchObject({
+			receiptId: runId,
+			verdict: "PASSED",
+			promoted: 0,
+			skipped: 1,
+		});
+		expect(createBuildplaneStorage(root).listRepoFacts()).toHaveLength(1);
+	});
+
+	it("skips receipt learning rows that changed after the accepted run", async () => {
+		const { root, runId } = await createProjectWithReceiptBackedLearning({
+			prefix: "buildplane-cli-memory-promote-mutated-",
+			runId: "run-cli-memory-promote-mutated",
+			withVerifierReceipt: true,
+		});
+		const layout = resolveProjectLayout(root);
+		const db = new DatabaseSync(layout.stateDbPath);
+		const store = createLearningStore(db);
+		store.writeLearnings("run-after-receipt", [
+			{
+				kind: "fact",
+				scope: "session",
+				title: "Repo uses receipt backed memory",
+				body: "Unverified later worker claim must not reuse the accepted run id.",
+			},
+		] as never);
+		db.close();
+
+		const result = await runCliCapture(root, [
+			"memory",
+			"promote",
+			"--receipt",
+			runId,
+			"--json",
+		]);
+
+		expect(result.exitCode).toBe(0);
+		const report = JSON.parse(result.stdout.join("\n"));
+		expect(report).toMatchObject({
+			receiptId: runId,
+			verdict: "PASSED",
+			promoted: 0,
+			skipped: 1,
+		});
+		expect(report.records[0]).toMatchObject({
+			status: "skipped",
+			reason: "learning changed after receipt capture",
+		});
+		expect(createBuildplaneStorage(root).listRepoFacts()).toHaveLength(0);
+	});
+
+	it("sanitizes promoted fact content idempotently before storage and human output", async () => {
+		const neutralizedMention = "@\u200bhere";
+		const escapedPipe = "\\|";
+		const doubleEscapedPipe = "\\\\|";
+		const { root, runId } = await createProjectWithReceiptBackedLearning({
+			prefix: "buildplane-cli-memory-promote-sanitize-",
+			runId: "run-cli-memory-promote-sanitize",
+			withVerifierReceipt: true,
+			learning: {
+				kind: "fact",
+				scope: "session",
+				title: "Repo uses\n@here \u001b[31m | memory",
+				body: "Durable facts\n@here \u001b[31m must stay | data with `ticks` <!--hidden-->.",
+			},
+		});
+
+		const result = await runCliCapture(root, [
+			"memory",
+			"promote",
+			"--receipt",
+			runId,
+		]);
+
+		expect(result.exitCode).toBe(0);
+		const humanOutput = result.stdout.join("\n");
+		expect(humanOutput).not.toContain("\u001b");
+		expect(humanOutput).not.toContain("@here");
+		expect(humanOutput).toContain(neutralizedMention);
+		expect(humanOutput).toContain(escapedPipe);
+		expect(humanOutput).not.toContain(doubleEscapedPipe);
+
+		const facts = createBuildplaneStorage(root).listRepoFacts();
+		expect(facts).toHaveLength(1);
+		expect(facts[0].factKey).not.toContain("\n");
+		expect(facts[0].factKey).not.toContain("\u001b");
+		expect(facts[0].factKey).not.toContain("@here");
+		expect(facts[0].factKey).toContain(neutralizedMention);
+		expect(facts[0].factKey).toContain(escapedPipe);
+		expect(facts[0].factKey).not.toContain(doubleEscapedPipe);
+		expect(facts[0].factValue).not.toContain("\n");
+		expect(facts[0].factValue).not.toContain("\u001b");
+		expect(facts[0].factValue).not.toContain("@here");
+		expect(facts[0].factValue).not.toContain("`");
+		expect(facts[0].factValue).not.toContain("<!--");
+		expect(facts[0].factValue).not.toContain("-->");
+		expect(facts[0].factValue).toContain(neutralizedMention);
+		expect(facts[0].factValue).toContain(escapedPipe);
+		expect(facts[0].factValue).not.toContain(doubleEscapedPipe);
+	});
+
+	it("skips conflicting repo facts from different provenance", async () => {
+		const { root, runId } = await createProjectWithReceiptBackedLearning({
+			prefix: "buildplane-cli-memory-promote-conflict-",
+			runId: "run-cli-memory-promote-conflict",
+			withVerifierReceipt: true,
+		});
+		createBuildplaneStorage(root).upsertRepoFact({
+			factKey: "Repo uses receipt backed memory",
+			factValue: "Existing operator-reviewed fact.",
+			valueType: "string",
+			scopeType: "repo",
+			createdBy: "operator",
+			sourceRunId: "operator-source",
+		});
+
+		const result = await runCliCapture(root, [
+			"memory",
+			"promote",
+			"--receipt",
+			runId,
+			"--json",
+		]);
+
+		expect(result.exitCode).toBe(0);
+		const report = JSON.parse(result.stdout.join("\n"));
+		expect(report).toMatchObject({ promoted: 0, skipped: 1 });
+		expect(report.records[0]).toMatchObject({
+			status: "skipped",
+			reason: "active fact exists from different provenance",
+		});
+		const facts = createBuildplaneStorage(root).listRepoFacts();
+		expect(facts).toHaveLength(1);
+		expect(facts[0].factValue).toBe("Existing operator-reviewed fact.");
+		expect(facts[0].provenance.sourceRunId).toBe("operator-source");
+	});
+
+	it("receipt-backed memory promotion rejects unsupported local arguments", async () => {
+		const { root, runId } = await createProjectWithReceiptBackedLearning({
+			prefix: "buildplane-cli-memory-promote-bad-args-",
+			runId: "run-cli-memory-promote-bad-args",
+			withVerifierReceipt: true,
+		});
+		const dependencies: RunCliDependencies = {
+			runNativeCommand: async () => {
+				throw new Error("receipt-like promote arguments must fail locally");
+			},
+		};
+
+		const scopedCopy = await runCliCapture(
+			root,
+			["memory", "promote", "--receipt", runId, "--to", "user", "--json"],
+			dependencies,
+		);
+		const duplicateReceipt = await runCliCapture(
+			root,
+			[
+				"memory",
+				"promote",
+				"--receipt",
+				runId,
+				"--receipt",
+				"run-cli-memory-promote-other",
+				"--json",
+			],
+			dependencies,
+		);
+		const equalsReceipt = await runCliCapture(
+			root,
+			["memory", "promote", `--receipt=${runId}`, "--json"],
+			dependencies,
+		);
+
+		for (const result of [scopedCopy, duplicateReceipt, equalsReceipt]) {
+			expect(result.exitCode).toBe(1);
+			expect(result.stderr).toEqual([]);
+			const report = JSON.parse(result.stdout.join("\n"));
+			expect(report).toMatchObject({
+				error: {
+					code: "UNSUPPORTED_ARGUMENTS",
+				},
+			});
+		}
+		expect(JSON.parse(scopedCopy.stdout.join("\n")).error.message).toContain(
+			"--to user",
+		);
+		expect(
+			JSON.parse(duplicateReceipt.stdout.join("\n")).error.message,
+		).toContain("--receipt");
+		expect(JSON.parse(equalsReceipt.stdout.join("\n")).error.message).toContain(
+			"--receipt=",
+		);
+		expect(createBuildplaneStorage(root).listRepoFacts()).toHaveLength(0);
+	});
+
+	it("native memory promote forms without receipt flags still dispatch to native", async () => {
+		const root = mkdtempSync(
+			join(tmpdir(), "buildplane-cli-memory-promote-native-fallthrough-"),
+		);
+		const calls: Array<{
+			cwd: string;
+			argv: string[];
+			commandPath: string[];
+		}> = [];
+		const dependencies: RunCliDependencies = {
+			runNativeCommand: async (argv, options) => {
+				calls.push({
+					cwd: options.cwd,
+					argv,
+					commandPath: options.commandPath,
+				});
+				return 0;
+			},
+		};
+
+		const bare = await runCliCapture(root, ["memory", "promote"], dependencies);
+		const jsonOnly = await runCliCapture(
+			root,
+			["memory", "promote", "--json"],
+			dependencies,
+		);
+		const scopedCopy = await runCliCapture(
+			root,
+			["memory", "promote", "mem_01HXYZ", "--to", "user"],
+			dependencies,
+		);
+
+		expect(bare.exitCode).toBe(0);
+		expect(jsonOnly.exitCode).toBe(0);
+		expect(scopedCopy.exitCode).toBe(0);
+		expect(calls).toEqual([
+			{
+				cwd: root,
+				commandPath: ["memory"],
+				argv: ["promote"],
+			},
+			{
+				cwd: root,
+				commandPath: ["memory"],
+				argv: ["promote", "--json"],
+			},
+			{
+				cwd: root,
+				commandPath: ["memory"],
+				argv: ["promote", "mem_01HXYZ", "--to", "user"],
+			},
+		]);
+	});
+
 	it("unknown memory subcommands still dispatch to native", async () => {
 		const root = mkdtempSync(
 			join(tmpdir(), "buildplane-cli-memory-native-fallthrough-"),
@@ -2521,5 +3755,1191 @@ describe("cli command surface", () => {
 				argv: ["search", "foo"],
 			},
 		]);
+	});
+
+	it("reports receipt-backed final verdicts from verify --run --json", async () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-cli-verify-pass-"));
+		await runCliCapture(root, ["init"]);
+		const storage = createBuildplaneStorage(root);
+		const run = storage.createRun(createPassingPacket("unit-cli-verify-pass"), {
+			runId: "run-cli-verify-pass",
+		});
+		storage.markRunRunning(run.id);
+		storage.recordExecutionEvidence(run.id, {
+			command: "node",
+			args: ["-e", "console.log('worker claim')"],
+			cwd: root,
+			startedAt: "2026-05-04T10:00:00.000Z",
+			completedAt: "2026-05-04T10:00:01.000Z",
+			exitCode: 0,
+			stdout: "worker claim\n",
+			stderr: "",
+			outputChecks: [{ path: "tmp/pass.txt", exists: true }],
+		});
+		storage.recordDecision(run.id, {
+			kind: "advance-run",
+			outcome: "approved",
+			reasons: ["required output exists"],
+		});
+		storage.completeRun(run.id, "passed");
+
+		const result = await runCliCapture(root, [
+			"verify",
+			"--run",
+			run.id,
+			"--json",
+		]);
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stderr).toEqual([]);
+		const report = JSON.parse(result.stdout.join("\n"));
+		expect(report).toMatchObject({
+			runId: run.id,
+			verdict: "PASSED",
+			receipts: { verifier: 2, approvals: 1, rejections: 0 },
+		});
+		expect(report.criteria).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					id: "required-output:tmp/pass.txt",
+					status: "PASSED",
+				}),
+				expect.objectContaining({ id: "command-exit:0", status: "PASSED" }),
+			]),
+		);
+	});
+
+	it("fails closed from verify --run --json when acceptance evidence is missing", async () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-cli-verify-blocked-"));
+		await runCliCapture(root, ["init"]);
+		const storage = createBuildplaneStorage(root);
+		const run = storage.createRun(
+			createPassingPacket("unit-cli-verify-blocked"),
+			{
+				runId: "run-cli-verify-blocked",
+			},
+		);
+		storage.markRunRunning(run.id);
+		storage.recordDecision(run.id, {
+			kind: "advance-run",
+			outcome: "approved",
+			reasons: ["worker claimed success"],
+		});
+		storage.completeRun(run.id, "passed");
+
+		const result = await runCliCapture(root, [
+			"verify",
+			"--run",
+			run.id,
+			"--json",
+		]);
+
+		expect(result.exitCode).toBe(1);
+		expect(result.stderr).toEqual([]);
+		const blockedReport = JSON.parse(result.stdout.join("\n"));
+		expect(blockedReport).toMatchObject({
+			runId: run.id,
+			verdict: "BLOCKED",
+		});
+		expect(blockedReport.criteria).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					id: "required-output:tmp/pass.txt",
+					status: "INSUFFICIENT_EVIDENCE",
+				}),
+				expect.objectContaining({
+					id: "command-exit:0",
+					status: "INSUFFICIENT_EVIDENCE",
+				}),
+			]),
+		);
+		expect(blockedReport.issues).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({ code: "MISSING_VERIFIER_RECEIPT" }),
+			]),
+		);
+	});
+
+	it("surfaces architecture.diff_scope blockers from verify --run --json", async () => {
+		const root = mkdtempSync(
+			join(tmpdir(), "buildplane-cli-verify-architecture-scope-"),
+		);
+		await runCliCapture(root, ["init"]);
+		const storage = createBuildplaneStorage(root);
+		const run = storage.createRun(
+			createPassingPacket("unit-cli-verify-architecture-scope"),
+			{
+				runId: "run-cli-verify-architecture-scope",
+			},
+		);
+		storage.markRunRunning(run.id);
+		storage.recordExecutionEvidence(run.id, {
+			command: "node",
+			args: ["-e", "console.log('changed files')"],
+			cwd: root,
+			startedAt: "2026-05-04T10:00:00.000Z",
+			completedAt: "2026-05-04T10:00:01.000Z",
+			exitCode: 0,
+			stdout: "changed files: src/domain/runBundle.ts infra/prod.tf\n",
+			stderr: "",
+			outputChecks: [{ path: "tmp/pass.txt", exists: true }],
+		});
+		storage.recordDecision(run.id, {
+			kind: "architecture.diff_scope",
+			outcome: "rejected",
+			reasons: [
+				"architecture.diff_scope blocked infra/prod.tf: path is outside allowed architecture scope src/**, tests/**.",
+			],
+		});
+		storage.completeRun(run.id, "failed");
+
+		const result = await runCliCapture(root, [
+			"verify",
+			"--run",
+			run.id,
+			"--json",
+		]);
+
+		expect(result.exitCode).toBe(1);
+		expect(result.stderr).toEqual([]);
+		const report = JSON.parse(result.stdout.join("\n"));
+		expect(report).toMatchObject({
+			runId: run.id,
+			verdict: "BLOCKED",
+		});
+		expect(report.issues).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					code: "UNRESOLVED_BLOCKER",
+					message: expect.stringContaining(
+						"architecture.diff_scope blocked infra/prod.tf",
+					),
+				}),
+			]),
+		);
+	});
+
+	it("exports Mission Control run bundles from evidence export", async () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-cli-evidence-export-"));
+		await runCliCapture(root, ["init"]);
+		const storage = createBuildplaneStorage(root);
+		const run = storage.createRun(
+			createPassingPacket("unit-cli-evidence-export"),
+			{
+				runId: "run-cli-evidence-export",
+			},
+		);
+		storage.markRunRunning(run.id);
+		storage.recordExecutionEvidence(run.id, {
+			command: "node",
+			args: ["-e", "console.log('worker claim')"],
+			cwd: root,
+			startedAt: "2026-05-04T10:00:00.000Z",
+			completedAt: "2026-05-04T10:00:01.000Z",
+			exitCode: 0,
+			stdout: "worker claim\n",
+			stderr: "",
+			outputChecks: [{ path: "tmp/pass.txt", exists: true }],
+		});
+		storage.recordDecision(run.id, {
+			kind: "advance-run",
+			outcome: "approved",
+			reasons: ["required output exists"],
+		});
+		storage.completeRun(run.id, "passed");
+
+		const outPath = join(root, ".buildplane", "exports", "run-bundle.json");
+		const result = await runCliCapture(root, [
+			"evidence",
+			"export",
+			"--run",
+			run.id,
+			"--out",
+			outPath,
+		]);
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stderr).toEqual([]);
+		expect(result.stdout).toEqual([
+			"evidence-export: wrote",
+			`run-id: ${run.id}`,
+			`out: ${outPath}`,
+		]);
+		const bundle = JSON.parse(readFileSync(outPath, "utf8"));
+		expect(bundle).toMatchObject({
+			kind: "run_bundle",
+			schema_version: "1.0",
+			run: { id: run.id, status: "passed", verdict: "passed" },
+		});
+		const workerEvent = bundle.events.find(
+			(event: { kind: string; actor: { id: string } }) =>
+				event.kind === "tool_call" && event.actor.id === "buildplane.runtime",
+		);
+		const verifierEvent = bundle.events.find(
+			(event: { kind: string; actor: { id: string } }) =>
+				event.kind === "assertion_check" &&
+				event.actor.id === "buildplane.verifier",
+		);
+		expect(bundle.run.verified_criteria[0].evidence_event_id).toBe(
+			verifierEvent.id,
+		);
+		expect(bundle.run.verified_criteria[0].evidence_event_id).not.toBe(
+			workerEvent.id,
+		);
+	});
+
+	it("prints exported run bundle JSON when evidence export uses --json", async () => {
+		const root = mkdtempSync(
+			join(tmpdir(), "buildplane-cli-evidence-export-json-"),
+		);
+		await runCliCapture(root, ["init"]);
+		const storage = createBuildplaneStorage(root);
+		const run = storage.createRun(
+			createPassingPacket("unit-cli-evidence-export-json"),
+			{
+				runId: "run-cli-evidence-export-json",
+			},
+		);
+		storage.markRunRunning(run.id);
+		storage.recordExecutionEvidence(run.id, {
+			command: "node",
+			args: ["-e", "console.log('worker claim')"],
+			cwd: root,
+			startedAt: "2026-05-04T10:00:00.000Z",
+			completedAt: "2026-05-04T10:00:01.000Z",
+			exitCode: 0,
+			stdout: "worker claim\n",
+			stderr: "",
+			outputChecks: [{ path: "tmp/pass.txt", exists: true }],
+		});
+		storage.recordDecision(run.id, {
+			kind: "advance-run",
+			outcome: "approved",
+			reasons: ["required output exists"],
+		});
+		storage.completeRun(run.id, "passed");
+
+		const outPath = join(root, "bundle.json");
+		const result = await runCliCapture(root, [
+			"evidence",
+			"export",
+			"--run",
+			run.id,
+			"--out",
+			outPath,
+			"--json",
+		]);
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stderr).toEqual([]);
+		const printedBundle = JSON.parse(result.stdout.join("\n"));
+		expect(printedBundle).toEqual(JSON.parse(readFileSync(outPath, "utf8")));
+		expect(printedBundle.run.id).toBe(run.id);
+	});
+
+	it("returns stable json errors for evidence export argument failures", async () => {
+		const root = mkdtempSync(
+			join(tmpdir(), "buildplane-cli-evidence-export-error-"),
+		);
+		await runCliCapture(root, ["init"]);
+
+		const result = await runCliCapture(root, [
+			"evidence",
+			"export",
+			"--run",
+			"run-missing-out",
+			"--json",
+		]);
+
+		expect(result.exitCode).toBe(1);
+		expect(result.stderr).toEqual([]);
+		expect(JSON.parse(result.stdout.join("\n"))).toMatchObject({
+			error: {
+				code: "CLI_ERROR",
+				message: "Missing required --out <path> argument.",
+			},
+		});
+	});
+
+	it("exports local OpenTelemetry-shaped traces from trace export", async () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-cli-trace-export-"));
+		await runCliCapture(root, ["init"]);
+		const storage = createBuildplaneStorage(root);
+		const run = storage.createRun(
+			createPassingPacket("unit-cli-trace-export"),
+			{
+				runId: "run-cli-trace-export",
+			},
+		);
+		storage.markRunRunning(run.id);
+		storage.recordExecutionEvidence(run.id, {
+			command: "node",
+			args: ["-e", "console.log('worker claim')"],
+			cwd: root,
+			startedAt: "2026-05-04T10:00:00.000Z",
+			completedAt: "2026-05-04T10:00:01.000Z",
+			exitCode: 0,
+			stdout: "worker claim\n",
+			stderr: "",
+			outputChecks: [{ path: "tmp/pass.txt", exists: true }],
+		});
+		storage.recordDecision(run.id, {
+			kind: "advance-run",
+			outcome: "approved",
+			reasons: ["required output exists"],
+		});
+		storage.completeRun(run.id, "passed");
+
+		const outPath = join(root, ".buildplane", "exports", "trace.json");
+		const result = await runCliCapture(root, [
+			"trace",
+			"export",
+			"--run",
+			run.id,
+			"--format",
+			"otel-json",
+			"--out",
+			outPath,
+			"--json",
+		]);
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stderr).toEqual([]);
+		const summary = JSON.parse(result.stdout.join("\n"));
+		expect(summary).toMatchObject({
+			format: "otel-json",
+			runId: run.id,
+			outPath,
+			traceGrading: {
+				schema: "buildplane.trace_grading.v0",
+				runId: run.id,
+			},
+		});
+		const trace = JSON.parse(readFileSync(outPath, "utf8"));
+		const spans = trace.resourceSpans[0].scopeSpans[0].spans;
+		expect(spans.map((span: { name: string }) => span.name)).toEqual(
+			expect.arrayContaining([
+				"buildplane.run",
+				"buildplane.evidence.command-exit",
+				"buildplane.policy.advance-run",
+			]),
+		);
+		expect(spans[0].kind).toBe(1);
+		expect(summary.spanCount).toBe(spans.length);
+		expect(trace.traceGrading).toBeUndefined();
+	});
+
+	it("previews the exact GitHub check-run payload from pr-check dry-run", async () => {
+		const root = mkdtempSync(
+			join(tmpdir(), "buildplane-cli-pr-check-dry-run-"),
+		);
+		await runCliCapture(root, ["init"]);
+		const storage = createBuildplaneStorage(root);
+		const run = storage.createRun(createPassingPacket("unit-cli-pr-check"), {
+			runId: "run-cli-pr-check-dry-run",
+		});
+		storage.markRunRunning(run.id);
+		storage.recordExecutionEvidence(run.id, {
+			command: "node",
+			args: ["-e", "console.log('worker claim')"],
+			cwd: root,
+			startedAt: "2026-05-04T10:00:00.000Z",
+			completedAt: "2026-05-04T10:00:01.000Z",
+			exitCode: 0,
+			stdout: "worker claim\n",
+			stderr: "",
+			outputChecks: [{ path: "tmp/pass.txt", exists: true }],
+		});
+		storage.recordDecision(run.id, {
+			kind: "advance-run",
+			outcome: "approved",
+			reasons: ["required output exists"],
+		});
+		storage.completeRun(run.id, "passed");
+
+		const result = await runCliCapture(root, [
+			"pr-check",
+			"dry-run",
+			"--run",
+			run.id,
+			"--repo",
+			"SollanSystems/buildplane",
+			"--sha",
+			"0123456789abcdef0123456789abcdef01234567",
+			"--name",
+			"Buildplane Evidence",
+			"--json",
+		]);
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stderr).toEqual([]);
+		const preview = JSON.parse(result.stdout.join("\n"));
+		expect(preview).toMatchObject({
+			mode: "dry-run",
+			operation: {
+				method: "POST",
+				path: "/repos/SollanSystems/buildplane/check-runs",
+				body: {
+					name: "Buildplane Evidence",
+					head_sha: "0123456789abcdef0123456789abcdef01234567",
+					status: "completed",
+					conclusion: "success",
+					external_id: run.id,
+				},
+			},
+			sideEffect: {
+				capability: "github.pr_check",
+				action: "publish",
+				target: "repo:SollanSystems/buildplane",
+			},
+		});
+	});
+
+	it("fails closed before network when pr-check publish lacks a matching grant", async () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-cli-pr-check-denied-"));
+		await runCliCapture(root, ["init"]);
+		const storage = createBuildplaneStorage(root);
+		const run = storage.createRun(
+			createPassingPacket("unit-cli-pr-check-denied"),
+			{
+				runId: "run-cli-pr-check-denied",
+			},
+		);
+		storage.markRunRunning(run.id);
+		storage.recordExecutionEvidence(run.id, {
+			command: "node",
+			args: ["-e", "console.log('worker claim')"],
+			cwd: root,
+			startedAt: "2026-05-04T10:00:00.000Z",
+			completedAt: "2026-05-04T10:00:01.000Z",
+			exitCode: 0,
+			stdout: "worker claim\n",
+			stderr: "",
+			outputChecks: [{ path: "tmp/pass.txt", exists: true }],
+		});
+		storage.recordDecision(run.id, {
+			kind: "advance-run",
+			outcome: "approved",
+			reasons: ["required output exists"],
+		});
+		storage.completeRun(run.id, "passed");
+		const grantPath = join(root, "grants.json");
+		writeFileSync(grantPath, JSON.stringify({ capabilityGrants: [] }), "utf8");
+		const request = vi.fn();
+		const originalEnv = process.env;
+		const credentialReads: string[] = [];
+		process.env = new Proxy(
+			{ ...originalEnv, BUILDPLANE_TEST_CREDENTIAL: "cred" },
+			{
+				get(target, property, receiver) {
+					if (property === "BUILDPLANE_TEST_CREDENTIAL") {
+						credentialReads.push(String(property));
+					}
+					return Reflect.get(target, property, receiver);
+				},
+			},
+		) as NodeJS.ProcessEnv;
+		let result: Awaited<ReturnType<typeof runCliCapture>>;
+		try {
+			result = await runCliCapture(
+				root,
+				[
+					"pr-check",
+					"publish",
+					"--run",
+					run.id,
+					"--repo",
+					"SollanSystems/buildplane",
+					"--sha",
+					"0123456789abcdef0123456789abcdef01234567",
+					"--grant-file",
+					grantPath,
+					"--grant-id",
+					"grant-pr-check-publish",
+					"--credential-env",
+					"BUILDPLANE_TEST_CREDENTIAL",
+					"--json",
+				],
+				{ publishPrCheckRequest: request },
+			);
+		} finally {
+			process.env = originalEnv;
+		}
+
+		expect(result.exitCode).toBe(1);
+		expect(result.stderr).toEqual([]);
+		expect(JSON.parse(result.stdout.join("\n"))).toMatchObject({
+			error: { message: expect.stringContaining("UNSAFE_TO_RUN") },
+		});
+		expect(request).not.toHaveBeenCalled();
+		expect(credentialReads).toEqual([]);
+	});
+
+	it("publishes pr-check only after a matching grant and credential are present", async () => {
+		const root = mkdtempSync(
+			join(tmpdir(), "buildplane-cli-pr-check-publish-"),
+		);
+		await runCliCapture(root, ["init"]);
+		const storage = createBuildplaneStorage(root);
+		const run = storage.createRun(
+			createPassingPacket("unit-cli-pr-check-publish"),
+			{
+				runId: "run-cli-pr-check-publish",
+			},
+		);
+		storage.markRunRunning(run.id);
+		storage.recordExecutionEvidence(run.id, {
+			command: "node",
+			args: ["-e", "console.log('worker claim')"],
+			cwd: root,
+			startedAt: "2026-05-04T10:00:00.000Z",
+			completedAt: "2026-05-04T10:00:01.000Z",
+			exitCode: 0,
+			stdout: "worker claim\n",
+			stderr: "",
+			outputChecks: [{ path: "tmp/pass.txt", exists: true }],
+		});
+		storage.recordDecision(run.id, {
+			kind: "advance-run",
+			outcome: "approved",
+			reasons: ["required output exists"],
+		});
+		storage.completeRun(run.id, "passed");
+		const grantPath = join(root, "grants.json");
+		writeFileSync(
+			grantPath,
+			JSON.stringify({
+				capabilityGrants: [
+					{
+						id: "grant-pr-check-publish",
+						capability: "github.pr_check",
+						actions: ["publish"],
+						targets: ["repo:SollanSystems/buildplane"],
+					},
+				],
+			}),
+			"utf8",
+		);
+		vi.stubEnv("BUILDPLANE_TEST_CREDENTIAL", "cred");
+		const request = vi.fn().mockResolvedValue({ status: 201, ok: true });
+
+		const result = await runCliCapture(
+			root,
+			[
+				"pr-check",
+				"publish",
+				"--run",
+				run.id,
+				"--repo",
+				"SollanSystems/buildplane",
+				"--sha",
+				"0123456789abcdef0123456789abcdef01234567",
+				"--grant-file",
+				grantPath,
+				"--grant-id",
+				"grant-pr-check-publish",
+				"--credential-env",
+				"BUILDPLANE_TEST_CREDENTIAL",
+				"--json",
+			],
+			{ publishPrCheckRequest: request },
+		);
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stderr).toEqual([]);
+		const published = JSON.parse(result.stdout.join("\n"));
+		expect(published).toMatchObject({
+			mode: "published",
+			grantId: "grant-pr-check-publish",
+			sideEffect: {
+				grantId: "grant-pr-check-publish",
+				capability: "github.pr_check",
+				action: "publish",
+				target: "repo:SollanSystems/buildplane",
+			},
+			response: { status: 201, ok: true },
+		});
+		expect(request).toHaveBeenCalledTimes(1);
+		expect(request).toHaveBeenCalledWith(
+			expect.objectContaining({
+				path: "/repos/SollanSystems/buildplane/check-runs",
+			}),
+			{ credential: "cred" },
+		);
+	});
+
+	it("previews a compact PR evidence comment from pr-comment dry-run", async () => {
+		const root = mkdtempSync(
+			join(tmpdir(), "buildplane-cli-pr-comment-dry-run-"),
+		);
+		await runCliCapture(root, ["init"]);
+		const storage = createBuildplaneStorage(root);
+		const run = storage.createRun(createPassingPacket("unit-cli-pr-comment"), {
+			runId: "run-cli-pr-comment-dry-run",
+		});
+		storage.markRunRunning(run.id);
+		storage.recordExecutionEvidence(run.id, {
+			command: "node",
+			args: ["-e", "console.log('worker claim')"],
+			cwd: root,
+			startedAt: "2026-05-04T10:00:00.000Z",
+			completedAt: "2026-05-04T10:00:01.000Z",
+			exitCode: 0,
+			stdout: "worker claim\n",
+			stderr: "",
+			outputChecks: [{ path: "tmp/pass.txt", exists: true }],
+		});
+		storage.recordDecision(run.id, {
+			kind: "advance-run",
+			outcome: "approved",
+			reasons: ["required output exists"],
+		});
+		storage.completeRun(run.id, "passed");
+
+		const result = await runCliCapture(root, [
+			"pr-comment",
+			"dry-run",
+			"--run",
+			run.id,
+			"--repo",
+			"SollanSystems/buildplane",
+			"--pr",
+			"42",
+			"--sha",
+			"0123456789abcdef0123456789abcdef01234567",
+			"--details-url",
+			"https://mission-control.example/runs/run-cli-pr-comment-dry-run",
+			"--bundle-url",
+			"https://artifacts.example/run-cli-pr-comment-dry-run.json",
+			"--json",
+		]);
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stderr).toEqual([]);
+		const preview = JSON.parse(result.stdout.join("\n"));
+		expect(preview).toMatchObject({
+			mode: "dry-run",
+			preflight: {
+				method: "GET",
+				path: "/repos/SollanSystems/buildplane/pulls/42",
+			},
+			operation: {
+				method: "POST",
+				path: "/repos/SollanSystems/buildplane/issues/42/comments",
+			},
+			sideEffect: {
+				capability: "github.pr_comment",
+				action: "publish",
+				target: "repo:SollanSystems/buildplane#pr:42",
+				metadata: {
+					headSha: "0123456789abcdef0123456789abcdef01234567",
+					prNumber: 42,
+				},
+			},
+		});
+		expect(preview.operation.body.body).toContain(
+			"<!-- buildplane:pr-evidence run=run-cli-pr-comment-dry-run sha=0123456789abcdef0123456789abcdef01234567 pr=42 -->",
+		);
+		expect(preview.operation.body.body).toContain("| Final verdict | PASSED |");
+		expect(preview.operation.body.body).toContain("| Pull request | #42 |");
+		expect(preview.operation.body.body).toContain(
+			"| Head SHA | `0123456789abcdef0123456789abcdef01234567` |",
+		);
+		expect(preview.operation.body.body).toContain(
+			"| Pass authority | verifier receipts only; worker claims are not authoritative |",
+		);
+		expect(preview.operation.body.body).toContain(
+			"| Evidence bundle | https://artifacts.example/run-cli-pr-comment-dry-run.json |",
+		);
+	});
+
+	it("rejects non-canonical PR numbers before loading evidence", async () => {
+		for (const prNumber of ["1e2", "0x2a", "042"]) {
+			const root = mkdtempSync(
+				join(tmpdir(), "buildplane-cli-pr-comment-bad-pr-"),
+			);
+			await runCliCapture(root, ["init"]);
+			const result = await runCliCapture(root, [
+				"pr-comment",
+				"dry-run",
+				"--run",
+				"run-cli-pr-comment-bad-pr",
+				"--repo",
+				"SollanSystems/buildplane",
+				"--pr",
+				prNumber,
+				"--sha",
+				"0123456789abcdef0123456789abcdef01234567",
+				"--json",
+			]);
+
+			expect(result.exitCode).toBe(1);
+			expect(result.stderr).toEqual([]);
+			expect(JSON.parse(result.stdout.join("\n"))).toMatchObject({
+				error: {
+					message: expect.stringContaining(
+						"PR number must be a positive decimal integer",
+					),
+				},
+			});
+		}
+	});
+
+	it("fails closed before network when pr-comment publish lacks a matching grant", async () => {
+		const root = mkdtempSync(
+			join(tmpdir(), "buildplane-cli-pr-comment-denied-"),
+		);
+		await runCliCapture(root, ["init"]);
+		const storage = createBuildplaneStorage(root);
+		const run = storage.createRun(
+			createPassingPacket("unit-cli-pr-comment-denied"),
+			{
+				runId: "run-cli-pr-comment-denied",
+			},
+		);
+		storage.markRunRunning(run.id);
+		storage.recordExecutionEvidence(run.id, {
+			command: "node",
+			args: ["-e", "console.log('worker claim')"],
+			cwd: root,
+			startedAt: "2026-05-04T10:00:00.000Z",
+			completedAt: "2026-05-04T10:00:01.000Z",
+			exitCode: 0,
+			stdout: "worker claim\n",
+			stderr: "",
+			outputChecks: [{ path: "tmp/pass.txt", exists: true }],
+		});
+		storage.recordDecision(run.id, {
+			kind: "advance-run",
+			outcome: "approved",
+			reasons: ["required output exists"],
+		});
+		storage.completeRun(run.id, "passed");
+		const grantPath = join(root, "grants.json");
+		writeFileSync(grantPath, JSON.stringify({ capabilityGrants: [] }), "utf8");
+		const request = vi.fn();
+		const originalEnv = process.env;
+		const credentialReads: string[] = [];
+		process.env = new Proxy(
+			{ ...originalEnv, BUILDPLANE_TEST_CREDENTIAL: "cred" },
+			{
+				get(target, property, receiver) {
+					if (property === "BUILDPLANE_TEST_CREDENTIAL") {
+						credentialReads.push(String(property));
+					}
+					return Reflect.get(target, property, receiver);
+				},
+			},
+		) as NodeJS.ProcessEnv;
+		let result: Awaited<ReturnType<typeof runCliCapture>>;
+		try {
+			result = await runCliCapture(
+				root,
+				[
+					"pr-comment",
+					"publish",
+					"--run",
+					run.id,
+					"--repo",
+					"SollanSystems/buildplane",
+					"--pr",
+					"42",
+					"--sha",
+					"0123456789abcdef0123456789abcdef01234567",
+					"--grant-file",
+					grantPath,
+					"--grant-id",
+					"grant-pr-comment-publish",
+					"--credential-env",
+					"BUILDPLANE_TEST_CREDENTIAL",
+					"--json",
+				],
+				{ publishPrCommentRequest: request },
+			);
+		} finally {
+			process.env = originalEnv;
+		}
+
+		expect(result.exitCode).toBe(1);
+		expect(result.stderr).toEqual([]);
+		expect(JSON.parse(result.stdout.join("\n"))).toMatchObject({
+			error: { message: expect.stringContaining("UNSAFE_TO_RUN") },
+		});
+		expect(request).not.toHaveBeenCalled();
+		expect(credentialReads).toEqual([]);
+	});
+});
+
+describe("planforge dry-run", () => {
+	const fixtureRoot = join(process.cwd(), "apps/cli/test/fixtures/planforge");
+	const inputFixture = join(fixtureRoot, "goal-input.md");
+	const expectedFixture = join(fixtureRoot, "expected-plan.json");
+
+	it("planforge emits the expected stable dry-run plan fixture without project writes", async () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-planforge-"));
+		const result = await runCliCapture(root, [
+			"planforge",
+			"dry-run",
+			"--input",
+			inputFixture,
+			"--json",
+		]);
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stderr).toEqual([]);
+		expect(JSON.parse(result.stdout.join("\n"))).toEqual(
+			JSON.parse(readFileSync(expectedFixture, "utf8")),
+		);
+		expect(existsSync(join(root, ".buildplane"))).toBe(false);
+	});
+
+	it("planforge computes the receipt plan digest from the review artifact", async () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-planforge-"));
+		const result = await runCliCapture(root, [
+			"planforge",
+			"dry-run",
+			"--input",
+			inputFixture,
+			"--json",
+		]);
+
+		expect(result.exitCode).toBe(0);
+		const payload = JSON.parse(result.stdout.join("\n"));
+		const digestInput = {
+			...payload,
+			receiptPreview: {
+				...payload.receiptPreview,
+				planDigest: "",
+			},
+		};
+		const expectedDigest = `sha256:${createHash("sha256")
+			.update(JSON.stringify(digestInput))
+			.digest("hex")}`;
+
+		expect(payload.receiptPreview.planDigest).toBe(expectedDigest);
+		expect(payload.receiptPreview.planDigest).not.toBe(
+			"sha256:fixture-plan-digest-placeholder",
+		);
+		expect(existsSync(join(root, ".buildplane"))).toBe(false);
+	});
+
+	it("planforge fails closed when required evidence is missing", async () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-planforge-"));
+		const invalidInput = join(root, "missing-evidence.md");
+		writeFileSync(
+			invalidInput,
+			[
+				"# Bad PlanForge input",
+				"",
+				"## Goal",
+				"Create a local dry-run plan.",
+				"",
+			].join("\n"),
+			"utf8",
+		);
+
+		const result = await runCliCapture(root, [
+			"planforge",
+			"dry-run",
+			"--input",
+			invalidInput,
+			"--json",
+		]);
+
+		expect(result.exitCode).toBe(1);
+		expect(result.stderr).toEqual([]);
+		const payload = JSON.parse(result.stdout.join("\n"));
+		expect(payload.validation.status).toBe("INSUFFICIENT_EVIDENCE");
+		expect(payload.validation.missingEvidence).toEqual([
+			"repository_remote",
+			"trusted_base",
+			"dry_run_constraints",
+			"trusted_boundary",
+			"worktree_policy",
+		]);
+		expect(payload.validation.requiredEvidence).toContain("trusted_boundary");
+		expect(existsSync(join(root, ".buildplane"))).toBe(false);
+	});
+
+	it("planforge derives identifiers from input evidence", async () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-planforge-"));
+		const copiedInput = join(root, "copied-goal.md");
+		writeFileSync(copiedInput, readFileSync(inputFixture, "utf8"), "utf8");
+		const alternateInput = join(root, "alternate-goal.md");
+		writeFileSync(
+			alternateInput,
+			[
+				"# Alternate PlanForge input",
+				"",
+				"## Goal",
+				"Create a different dry-run plan artifact.",
+				"",
+				"## Repository context",
+				"",
+				"- Remote: https://github.com/SollanSystems/buildplane.git",
+				"- Trusted base: 15dbb32db0e1f0024687533755805fc23f3ef6d4",
+				"- Worktree policy: isolated-worktree-required",
+				"",
+				"## Safety constraints",
+				"",
+				"- Dry-run only.",
+				"- Buildplane kernel validates and admits plans.",
+				"- Coding agents are untrusted workers.",
+				"- No Kanban, GSD2, GitHub, network, push, PR, deploy, merge, or worker-spawn side effects.",
+				"",
+			].join("\n"),
+			"utf8",
+		);
+
+		const missingTrustedBoundaryInput = join(root, "goal-input.md");
+		writeFileSync(
+			missingTrustedBoundaryInput,
+			readFileSync(inputFixture, "utf8")
+				.replace(/- Buildplane kernel validates and admits plans.\r?\n/, "")
+				.replace(/- Coding agents are untrusted workers.\r?\n/, ""),
+			"utf8",
+		);
+
+		const fixtureResult = await runCliCapture(root, [
+			"planforge",
+			"dry-run",
+			"--input",
+			inputFixture,
+			"--json",
+		]);
+		const copiedResult = await runCliCapture(root, [
+			"planforge",
+			"dry-run",
+			"--input",
+			copiedInput,
+			"--json",
+		]);
+		const alternateResult = await runCliCapture(root, [
+			"planforge",
+			"dry-run",
+			"--input",
+			alternateInput,
+			"--json",
+		]);
+		const missingTrustedBoundaryResult = await runCliCapture(root, [
+			"planforge",
+			"dry-run",
+			"--input",
+			missingTrustedBoundaryInput,
+			"--json",
+		]);
+
+		const fixturePayload = JSON.parse(fixtureResult.stdout.join("\n"));
+		const copiedPayload = JSON.parse(copiedResult.stdout.join("\n"));
+		const alternatePayload = JSON.parse(alternateResult.stdout.join("\n"));
+		const missingTrustedBoundaryPayload = JSON.parse(
+			missingTrustedBoundaryResult.stdout.join("\n"),
+		);
+		expect(copiedPayload.validation.status).toBe("PASS");
+		expect(copiedPayload.receiptPreview.inputDigest).toBe(
+			fixturePayload.receiptPreview.inputDigest,
+		);
+		expect(copiedPayload.idempotencyKey).not.toBe(
+			fixturePayload.idempotencyKey,
+		);
+		expect(copiedPayload.receiptPreview.idempotencyKey).toBe(
+			copiedPayload.idempotencyKey,
+		);
+		expect(alternatePayload.validation.status).toBe("PASS");
+		expect(alternatePayload.goal).toBe(
+			"Create a different dry-run plan artifact.",
+		);
+		expect(alternatePayload.id).not.toBe(fixturePayload.id);
+		expect(alternatePayload.idempotencyKey).not.toBe(
+			fixturePayload.idempotencyKey,
+		);
+		expect(missingTrustedBoundaryResult.exitCode).toBe(1);
+		expect(missingTrustedBoundaryPayload.validation.status).toBe(
+			"INSUFFICIENT_EVIDENCE",
+		);
+		expect(missingTrustedBoundaryPayload.validation.missingEvidence).toEqual([
+			"trusted_boundary",
+		]);
+		expect(missingTrustedBoundaryPayload.id).not.toBe(fixturePayload.id);
+		expect(missingTrustedBoundaryPayload.idempotencyKey).not.toBe(
+			fixturePayload.idempotencyKey,
+		);
+		expect(existsSync(join(root, ".buildplane"))).toBe(false);
+	});
+
+	it("planforge requires evidence in the intended sections and rejects forbidden goal intents", async () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-planforge-"));
+		const misplacedEvidenceInput = join(root, "misplaced-evidence.md");
+		writeFileSync(
+			misplacedEvidenceInput,
+			[
+				"# Misplaced PlanForge input",
+				"",
+				"## Goal",
+				"Create a local dry-run plan artifact.",
+				"",
+				"## Notes",
+				"",
+				"- Remote: https://github.com/SollanSystems/buildplane.git",
+				"- Trusted base: 15dbb32db0e1f0024687533755805fc23f3ef6d4",
+				"- Worktree policy: isolated-worktree-required",
+				"- Dry-run only.",
+				"- Buildplane kernel validates and admits plans.",
+				"- Coding agents are untrusted workers.",
+				"- No Kanban, GSD2, GitHub, network, push, PR, deploy, merge, or worker-spawn side effects.",
+				"",
+			].join("\n"),
+			"utf8",
+		);
+		const safeNegatedInput = join(root, "safe-negated-goal.md");
+		writeFileSync(
+			safeNegatedInput,
+			[
+				"# Safe negated PlanForge input",
+				"",
+				"## Goal",
+				"Create a local dry-run plan artifact that does not execute code and does not use GitHub.",
+				"",
+				"## Repository context",
+				"",
+				"- Remote: https://github.com/SollanSystems/buildplane.git",
+				"- Trusted base: 15dbb32db0e1f0024687533755805fc23f3ef6d4",
+				"- Worktree policy: isolated-worktree-required",
+				"",
+				"## Safety constraints",
+				"",
+				"- Dry-run only.",
+				"- Buildplane kernel validates and admits plans.",
+				"- Coding agents are untrusted workers.",
+				"- No Kanban, GSD2, GitHub, network, push, PR, deploy, merge, or worker-spawn side effects.",
+				"",
+			].join("\n"),
+			"utf8",
+		);
+		const unsafeInput = join(root, "unsafe-goal.md");
+		writeFileSync(
+			unsafeInput,
+			[
+				"# Unsafe PlanForge input",
+				"",
+				"## Goal",
+				"Run commands locally, open pull requests, and perform network writes for a dry-run plan artifact.",
+				"",
+				"## Repository context",
+				"",
+				"- Remote: https://github.com/SollanSystems/buildplane.git",
+				"- Trusted base: 15dbb32db0e1f0024687533755805fc23f3ef6d4",
+				"- Worktree policy: isolated-worktree-required",
+				"",
+				"## Safety constraints",
+				"",
+				"- Dry-run only.",
+				"- Buildplane kernel validates and admits plans.",
+				"- Coding agents are untrusted workers.",
+				"- No Kanban, GSD2, GitHub, network, push, PR, deploy, merge, or worker-spawn side effects.",
+				"",
+			].join("\n"),
+			"utf8",
+		);
+
+		const misplacedResult = await runCliCapture(root, [
+			"planforge",
+			"dry-run",
+			"--input",
+			misplacedEvidenceInput,
+			"--json",
+		]);
+		const safeNegatedResult = await runCliCapture(root, [
+			"planforge",
+			"dry-run",
+			"--input",
+			safeNegatedInput,
+			"--json",
+		]);
+		const unsafeResult = await runCliCapture(root, [
+			"planforge",
+			"dry-run",
+			"--input",
+			unsafeInput,
+			"--json",
+		]);
+
+		const misplacedPayload = JSON.parse(misplacedResult.stdout.join("\n"));
+		const safeNegatedPayload = JSON.parse(safeNegatedResult.stdout.join("\n"));
+		const unsafePayload = JSON.parse(unsafeResult.stdout.join("\n"));
+		expect(misplacedResult.exitCode).toBe(1);
+		expect(misplacedPayload.validation.status).toBe("INSUFFICIENT_EVIDENCE");
+		expect(misplacedPayload.validation.missingEvidence).toEqual([
+			"repository_remote",
+			"trusted_base",
+			"dry_run_constraints",
+			"trusted_boundary",
+			"worktree_policy",
+		]);
+		expect(
+			misplacedPayload.validation.checks.find(
+				(check: { id: string }) => check.id === "dry-run-only",
+			)?.status,
+		).toBe("INSUFFICIENT_EVIDENCE");
+		expect(safeNegatedResult.exitCode).toBe(0);
+		expect(safeNegatedPayload.validation.status).toBe("PASS");
+		expect(
+			safeNegatedPayload.validation.checks.flatMap(
+				(check: { evidenceRefs: string[] }) => check.evidenceRefs,
+			),
+		).toContain("safe-negated-goal.md#safety-constraints");
+		expect(unsafeResult.exitCode).toBe(1);
+		expect(unsafePayload.validation.status).toBe("UNSAFE_TO_RUN");
+		expect(unsafePayload.validation.unsafeReasons).toEqual([
+			"goal requests a forbidden side effect",
+		]);
+		expect(existsSync(join(root, ".buildplane"))).toBe(false);
+	});
+	it("planforge rejects missing input, unsupported non-dry-run, and write forms before side effects", async () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-planforge-"));
+		const missingInput = await runCliCapture(root, [
+			"planforge",
+			"dry-run",
+			"--json",
+		]);
+		const nonDryRun = await runCliCapture(root, [
+			"planforge",
+			"admit",
+			"--input",
+			inputFixture,
+			"--json",
+		]);
+		const writeForm = await runCliCapture(root, [
+			"planforge",
+			"dry-run",
+			"--input",
+			inputFixture,
+			"--json",
+			"--write",
+		]);
+		const writeEqualsForm = await runCliCapture(root, [
+			"planforge",
+			"dry-run",
+			"--input",
+			inputFixture,
+			"--json",
+			"--write=receipt.json",
+		]);
+
+		expect(missingInput.exitCode).toBe(1);
+		expect(nonDryRun.exitCode).toBe(1);
+		expect(writeForm.exitCode).toBe(1);
+		expect(writeEqualsForm.exitCode).toBe(1);
+		expect(missingInput.stdout.join("\n")).toContain(
+			"Missing required --input",
+		);
+		expect(nonDryRun.stdout.join("\n")).toContain("Only dry-run is available");
+		expect(writeForm.stdout.join("\n")).toContain(
+			"side-effect forms are disabled",
+		);
+		expect(writeEqualsForm.stdout.join("\n")).toContain(
+			"side-effect forms are disabled",
+		);
+		expect(existsSync(join(root, ".buildplane"))).toBe(false);
 	});
 });

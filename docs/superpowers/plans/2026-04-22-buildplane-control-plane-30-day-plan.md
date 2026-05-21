@@ -27,7 +27,7 @@
   - `pnpm build` passed
   - `pnpm buildplane bootstrap doctor --json` passed
 - [x] Current main blocker is trust/readiness credibility, not lack of architectural direction.
-- [x] The earlier published-bootstrap timeout-realism blocker is resolved in current live evidence: `pnpm test` passes and `pnpm verify:published-bootstrap` now completes successfully.
+- [x] The earlier published-bootstrap timeout-realism blocker is resolved in current live evidence: default `pnpm test` passes; `pnpm verify:published-bootstrap` is side-effecting and should be run only in a disposable validation worktree when that contract specifically needs rechecking.
 - [x] The most visible remaining trust gap is keeping the support matrix, provenance surfaces, and branch/worktree hygiene aligned with the verified product surface.
 
 ---
@@ -57,6 +57,13 @@ Success means:
   - `pnpm build`
 - [ ] Treat publish/bootstrap verification as side-effecting and use disposable validation worktrees when needed.
 - [ ] If a verification lane is timing out rather than asserting a real failure, fix the harness realism instead of normalizing red gates.
+
+## Status semantics
+
+- Task checkboxes mean the implementation task has landed on the relevant branch.
+- Acceptance checkboxes mean the operator-visible criterion has been checked against the shipped surface.
+- Leave acceptance unchecked when a capability is only partially visible, even if supporting implementation tasks are complete.
+
 
 ---
 
@@ -104,19 +111,19 @@ Success means:
 ### Acceptance criteria
 
 - [x] inspect output shows the chosen worker/route in a first-class way
-- [ ] inspect output shows pack / host / provider selection where applicable
+- [ ] inspect output shows pack / host / provider selection where applicable (partial: route/provider/model provenance exists for model packets, but pack/host visibility remains narrower than the target surface)
 - [x] inspect output shows injected memories and why they were surfaced
 - [x] inspect output shows the active policy profile / trust gates / approval-relevant decisions
 - [x] inspect output shows evidence, artifacts, and final outcome in one causal story
-- [ ] operator can answer "what happened and why?" from one surface without reading raw SQLite tables
+- [x] operator can answer "what happened and why?" from one surface without reading raw SQLite tables (for route, memory, policy, evidence, artifacts, and final outcome; pack/host/provider remains the narrower open sub-surface above)
 
 ### Likely files
 
 - [ ] Modify: `apps/cli/src/run-cli.ts`
-- [ ] Modify: `apps/cli/src/formatters.ts`
-- [ ] Modify: `packages/storage/src/store.ts`
-- [ ] Modify: `packages/kernel/src/*` where provenance payloads are assembled
-- [ ] Modify: relevant inspect/history tests
+- [x] Modify: `apps/cli/src/formatters.ts`
+- [x] Modify: `packages/storage/src/store.ts`
+- [x] Modify: `packages/kernel/src/*` where provenance payloads are assembled
+- [x] Modify: relevant inspect/history tests
 
 ### Slice tasks
 
@@ -136,10 +143,10 @@ Success means:
 
 ### Acceptance criteria
 
-- [ ] replay-oriented workflows are easy to discover and understand from CLI help/docs
-- [ ] implement-then-review is presented as the default high-trust mode where appropriate
-- [ ] recovery after bad or partial runs is visible in operator surfaces and docs
-- [ ] a clear benchmark/demo story exists showing why review/replay/recovery beats raw one-shot execution for at least one meaningful case
+- [x] replay-oriented workflows are easy to discover and understand from CLI help/docs
+- [x] implement-then-review is presented as the default high-trust mode where appropriate
+- [x] recovery after bad or partial runs is visible in operator surfaces and docs
+- [x] a clear benchmark/demo story exists showing why review/replay/recovery beats raw one-shot execution for at least one meaningful case
 
 ### Likely files
 
@@ -150,10 +157,43 @@ Success means:
 
 ### Slice tasks
 
-- [ ] Task 3A: tighten replay/help/operator wording so the flow is obvious
-- [ ] Task 3B: make review-mode outcomes clearer in inspect/history surfaces
-- [ ] Task 3C: document a concrete rescue/recovery comparison against a raw worker path
-- [ ] Task 3D: ensure the front-door docs talk about replay/review/recovery, not generic shell behavior
+- [x] Task 3A: land a clean event-tape capture spine from current `origin/main`
+- [x] Task 3B: project event-tape summaries into inspect/history surfaces
+- [x] Task 3C: document a concrete rescue/recovery comparison against a raw worker path
+- [x] Task 3D: ensure the front-door docs talk about replay/review/recovery, not generic shell behavior
+
+Branch hygiene note: the old `spec/event-tape-capture` PR branch is reference evidence only if its history remains polluted by merge or synthetic run commits. Replacement slices should start from current `origin/main` and port only intentional deltas.
+
+---
+
+## Slice 4 — Evidence-first Run Inspector contract
+
+**Why now:** The Mission Control concept is strategically useful, but the first visible surface must stay forensic and evidence-backed before it becomes a live cockpit.
+
+**Outcome:** The repo documents a read-only Run Inspector slice centered on Event Timeline, Evidence Pane, and Outcome Strip, with every field tied to current Buildplane runtime records.
+
+### Acceptance criteria
+
+- [x] the first Mission Control slice is named Run Inspector rather than a broad live cockpit
+- [x] the MVP is limited to Event Timeline, Evidence Pane, and Outcome Strip
+- [x] the evidence contract maps each panel to current `InspectSnapshot`, storage, and ledger schema records
+- [x] the closed v1 event vocabulary comes from generated `EventKind` values
+- [x] synthetic reasoning events, orchestration graphs, intake parsing, replay scrubbers, persona cards, and live controls are explicitly deferred
+- [x] the recommended demo posture leads with a BLOCKED run so missing verification is visible rather than hidden
+
+### Likely files
+
+- [x] Modify: `README.md`
+- [x] Modify: `docs/architecture/README.md`
+- [x] Add: `docs/architecture/run-inspector-evidence-slice.md`
+- [x] Add: `test/workflow/run-inspector-evidence-doc-contract.test.ts`
+
+### Slice tasks
+
+- [x] Task 4A: define the read-only Run Inspector product boundary
+- [x] Task 4B: map Event Timeline, Evidence Pane, and Outcome Strip to runtime records
+- [x] Task 4C: pin the generated ledger event vocabulary in documentation
+- [x] Task 4D: add a docs contract test so future prose cannot drift into unsupported cockpit claims
 
 ---
 
@@ -167,18 +207,19 @@ Success means:
 
 ### Week 2
 
-- [ ] land the unified provenance payload contract
-- [ ] ship first inspect/history improvements for route + memory visibility
+- [x] land the unified provenance payload contract
+- [x] ship first inspect/history improvements for route + memory visibility
 
 ### Week 3
 
-- [ ] ship policy/trust-gate visibility improvements
-- [ ] tighten inspect formatting and operator readability
+- [x] ship policy/trust-gate visibility improvements
+- [x] tighten inspect formatting and operator readability
 
 ### Week 4
 
 - [ ] ship replay/review/recovery front-door improvements
 - [ ] publish one benchmark/demo story proving the control-plane thesis more clearly than raw one-shot execution
+- [x] document the evidence-first Run Inspector contract before widening into live cockpit UI
 
 ---
 
@@ -200,5 +241,6 @@ At the end of this plan window:
 - [ ] Buildplane's public story matches its actual verified contract
 - [ ] the trust/readiness surface is materially stronger and calmer
 - [ ] operators can inspect route, memory, policy, and evidence in one coherent flow
+- [x] the first Mission Control slice is constrained to an evidence-first Run Inspector contract
 - [ ] replay/review/recovery is a stronger default narrative than "just use a smarter shell"
 - [ ] the repo is more clearly building control-plane depth, not agent breadth

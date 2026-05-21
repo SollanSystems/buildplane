@@ -28,6 +28,20 @@ export type {
 export { createEventStore, type EventStore } from "./event-store.js";
 export { createLearningStore } from "./learning-store.js";
 export { resolveProjectLayout } from "./project-layout.js";
+export type {
+	ExportRunBundleOptions,
+	FinalCriterionStatus,
+	FinalRunVerdict,
+	FinalVerdictCriterion,
+	FinalVerdictIssue,
+	FinalVerdictReport,
+	RunBundle,
+	RunBundleArtifactRecord,
+	RunBundleEventRecord,
+	RunBundleRunRecord,
+	VerifyRunFinalVerdictOptions,
+} from "./run-bundle.js";
+export { exportRunBundle, verifyRunFinalVerdict } from "./run-bundle.js";
 export type { RunHistoryEntry } from "./store.js";
 
 export interface ProjectInitializationResult {

@@ -13,6 +13,10 @@ const fixtureNames = readdirSync(join(repoRoot, "eval/suites/model-codex"), {
 	.filter((entry) => entry.isDirectory())
 	.map((entry) => entry.name)
 	.sort();
+const documentedFixtureNames = Array.from(
+	benchmarkDoc.matchAll(/^### `([^`]+)`$/gm),
+	(match) => match[1],
+).sort();
 
 describe("benchmark summary contract", () => {
 	it("publishes the model-codex rerun contract and aggregate vocabulary", () => {
@@ -24,19 +28,29 @@ describe("benchmark summary contract", () => {
 		expect(benchmarkDoc).toContain("memoryInjectedRate");
 		expect(benchmarkDoc).toContain("memoryHelpedRate");
 		expect(benchmarkDoc).toContain("strategyHelpedRate");
+		expect(benchmarkDoc).toContain("combinedHelpedRate");
 		expect(benchmarkDoc).toContain("meanDurationMs");
 	});
 
-	it("documents every current model-codex fixture", () => {
-		for (const fixtureName of fixtureNames) {
-			expect(benchmarkDoc).toContain(`\`${fixtureName}\``);
-		}
+	it("documents exactly the current model-codex fixture set", () => {
+		expect(documentedFixtureNames).toEqual(fixtureNames);
 	});
 
-	it("explains the three benchmark deltas in plain language", () => {
+	it("explains the current benchmark deltas and combined-only proof", () => {
 		expect(benchmarkDoc).toContain("memory changes the outcome");
 		expect(benchmarkDoc).toContain("strategy changes the outcome");
-		expect(benchmarkDoc).toContain("only `memory+strategy` succeeds");
+		expect(benchmarkDoc).toContain("combined-only proof");
+		expect(benchmarkDoc).toContain("memory-strategy-combined-only");
+		expect(benchmarkDoc).not.toContain("does not currently prove");
 		expect(benchmarkDoc).toMatch(/duration .* environment-sensitive/i);
+	});
+
+	it("documents a concrete reviewer-rescue comparison against raw one-shot execution", () => {
+		expect(benchmarkDoc).toContain("## Concrete rescue/recovery story");
+		expect(benchmarkDoc).toContain("raw one-shot path");
+		expect(benchmarkDoc).toContain("implement-then-review");
+		expect(benchmarkDoc).toContain("reviewer-rescue");
+		expect(benchmarkDoc).toContain("`memory+raw` | fail");
+		expect(benchmarkDoc).toContain("`memory+strategy` | pass");
 	});
 });

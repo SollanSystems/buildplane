@@ -12,12 +12,13 @@ buildplane memory ...
 ```
 
 Current implementation and verification boundary:
-- `buildplane memory ...` now dispatches from the TypeScript CLI into the native Rust memory runner; the bridge lives in `apps/cli/src/run-cli.ts`
-- the native workspace remains the active memory implementation today
+- `buildplane memory list` and simple `buildplane memory inspect <learning-id>` are served locally by the TypeScript CLI from the `run_learnings` projection table.
+- `buildplane memory promote --receipt <run-id>` is served locally by the TypeScript CLI and promotes only eligible learnings from runs whose receipt-backed final verdict is `PASSED`.
+- Other `buildplane memory ...` forms still dispatch from the TypeScript CLI into the native Rust memory runner; the bridge lives in `apps/cli/src/run-cli.ts`.
 - the native implementation is still directly invokable as `buildplane-native memory ...` or `cargo run --manifest-path native/Cargo.toml -p bp-cli -- memory ...`
 - repo-local `pnpm buildplane memory ...` and in-repo built `node apps/cli/dist/index.js memory ...` are the currently verified bridge surfaces
-- packaged/global `npm install -g buildplane` does not yet make `buildplane memory ...` a verified public contract because the published package does not bundle or provision the native binary
-- native binary discovery currently happens in this order: `BUILDPLANE_NATIVE_BIN`, `native/target/debug/buildplane-native` relative to the current working directory, `native/target/release/buildplane-native` relative to the current working directory, then `buildplane-native` on `PATH`
+- packaged/global `npm install -g buildplane` now includes a verified `buildplane memory doctor --json` contract when the installed package carries the Linux x64 native binary; Windows/macOS report `published_memory` as optional/unavailable until matching binaries are staged
+- native binary discovery currently happens in this order: `BUILDPLANE_NATIVE_BIN`, packaged `vendor/native/linux-x64/buildplane-native` on Linux x64, `native/target/debug/buildplane-native` relative to the current working directory, `native/target/release/buildplane-native` relative to the current working directory, then `buildplane-native` on `PATH`
 - the current `pack show` command remains an earlier inspection seam for host-aware runtime routing, not the finished memory contract
 
 ## Command design principles
@@ -135,6 +136,10 @@ Promote a memory item into a broader scope.
 Examples:
 
 ```bash
+# Verified-memory path implemented in the TypeScript CLI.
+buildplane memory promote --receipt run_01HXYZ --json
+
+# Future scope-copy forms remain part of the broader native memory roadmap.
 buildplane memory promote mem_01HXYZ --to workspace --workspace /path/to/buildplane
 buildplane memory promote mem_01HXYZ --to user
 buildplane memory promote mem_01HXYZ --to workspace --copy
@@ -153,7 +158,17 @@ Recommended flags:
 - `--kind <kind>`
 - `--applicable-packs all|superclaude,supercodex`
 
-Expected behavior:
+Implemented `--receipt` behavior:
+- requires a PASSED receipt-backed final verdict from `buildplane verify --run`
+- reads only active learnings directly attached to the cited run id
+- promotes fact learnings to repo-scoped structured memory with `sourceRunId`, branch, commit, and confidence provenance
+- skips non-fact, derived, or mutated learning rows (`seen_count !== 1`, `created_at !== updated_at`, or existing lineage fields)
+- sanitizes promoted fact keys/values for control characters, ANSI escapes, Markdown table/comment delimiters, and bot mentions before storage/output
+- skips an existing active repo fact unless it was already promoted from the same receipt, making reruns idempotent without overwriting different provenance
+- fails closed for missing/unaccepted receipts and unsupported local `--receipt` arguments
+- non-`--receipt` scope-copy forms still dispatch to the native memory roadmap command
+
+Expected behavior for future native scope-copy forms:
 - default should be copy, not move
 - the new row gets a new id
 - `promoted_from_id` points at the original item

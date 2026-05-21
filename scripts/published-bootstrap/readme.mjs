@@ -36,11 +36,12 @@ const PUBLISHED_DISTRIBUTION_BODY = [
 	"buildplane run --packet /absolute/path/to/packet.json",
 	"buildplane status --json",
 	"buildplane inspect <run-id> --json",
+	"buildplane memory doctor --json",
 	"```",
 	"",
 	"> **Precondition:** `run` expects a clean git working tree. Commit or stash uncommitted changes before dispatching work.",
 	"",
-	"Published/global installs do not yet include a verified `buildplane memory ...` contract. The npm package does not bundle or provision `buildplane-native`, so memory remains a repo-local or direct-native workflow unless you separately supply the native binary yourself.",
+	"Published/global native memory is packaged and verified on Linux x64. Windows and macOS packages currently report `published_memory` as optional/unavailable instead of silently trying a broken native path.",
 	"",
 	"Use this path when you want the packaged operator experience instead of the repo-local development or in-repo built CLI paths. The repo verifies this contract from a packed publishable artifact before any registry publication step.",
 ].join("\n");

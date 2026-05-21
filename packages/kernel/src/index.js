@@ -1,3 +1,8 @@
+import {
+	createRunAdmissionReceiptDryRun as createRunAdmissionReceiptDryRunImpl,
+	RunAdmissionReceiptInputError as RunAdmissionReceiptInputErrorImpl,
+	recordRunAdmissionReceiptAttempt as recordRunAdmissionReceiptAttemptImpl,
+} from "./admission-receipts.ts";
 import { createEventBus as createEventBusImpl } from "./events.ts";
 import {
 	compareRankedMemoryResults as compareRankedMemoryResultsImpl,
@@ -13,6 +18,14 @@ import { validatePacketForWorkspaceRoot as validatePacketForWorkspaceRootImpl } 
 
 /** @type {typeof import('./orchestrator.ts').createBuildplaneOrchestrator} */
 export const createBuildplaneOrchestrator = createBuildplaneOrchestratorImpl;
+/** @type {typeof import('./admission-receipts.ts').createRunAdmissionReceiptDryRun} */
+export const createRunAdmissionReceiptDryRun =
+	createRunAdmissionReceiptDryRunImpl;
+/** @type {typeof import('./admission-receipts.ts').RunAdmissionReceiptInputError} */
+export const RunAdmissionReceiptInputError = RunAdmissionReceiptInputErrorImpl;
+/** @type {typeof import('./admission-receipts.ts').recordRunAdmissionReceiptAttempt} */
+export const recordRunAdmissionReceiptAttempt =
+	recordRunAdmissionReceiptAttemptImpl;
 /** @type {typeof import('./events.ts').createEventBus} */
 export const createEventBus = createEventBusImpl;
 /** @type {typeof import('./memory-retrieval.ts').compareRankedMemoryResults} */

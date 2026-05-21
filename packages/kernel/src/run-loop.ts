@@ -43,6 +43,19 @@ export interface OutputCheck {
 	readonly exists: boolean;
 }
 
+/**
+ * Runtime receipt for a side effect that crosses the local read/compute boundary.
+ * Examples: creating a PR draft, publishing a comment, mutating remote state.
+ */
+export interface SideEffectReceipt {
+	readonly id: string;
+	readonly capability: string;
+	readonly action: string;
+	readonly target: string;
+	readonly grantId?: string;
+	readonly metadata?: Readonly<Record<string, string | number | boolean>>;
+}
+
 export interface ExecutionReceipt {
 	readonly command: string;
 	readonly args: readonly string[];
@@ -53,6 +66,9 @@ export interface ExecutionReceipt {
 	readonly stdout: string;
 	readonly stderr: string;
 	readonly outputChecks: readonly OutputCheck[];
+	/** Deterministic repo-relative diff paths captured after execution when available. */
+	readonly changedFiles?: readonly string[];
+	readonly sideEffects?: readonly SideEffectReceipt[];
 }
 
 export interface ApprovedPolicyDecision {
@@ -62,7 +78,7 @@ export interface ApprovedPolicyDecision {
 }
 
 export interface RejectedPolicyDecision {
-	readonly kind: "reject-run";
+	readonly kind: "reject-run" | "architecture.diff_scope";
 	readonly outcome: "rejected";
 	readonly reasons: readonly string[];
 }
@@ -148,10 +164,60 @@ export interface StatusSnapshot {
 	};
 }
 
+export interface InspectProvenanceRoute {
+	readonly worker: string;
+	readonly source: string;
+	readonly provider?: string;
+	readonly model?: string;
+	readonly preferredWorker?: RoutingHints["preferredWorker"];
+	readonly preferredModel?: string;
+	readonly effort?: RoutingHints["effort"];
+}
+
+export interface InspectProvenancePolicy {
+	readonly profile: string;
+	readonly decisionKind?: PolicyDecision["kind"];
+	readonly decisionOutcome?: PolicyDecision["outcome"];
+	readonly decisionReasons?: readonly string[];
+}
+
+export interface InspectProvenance {
+	readonly route: InspectProvenanceRoute;
+	readonly policy: InspectProvenancePolicy;
+}
+
+export type InspectEventTapeMetadataValue = string | number | boolean;
+
+export interface InspectEventTapeKindCount {
+	readonly kind: string;
+	readonly count: number;
+}
+
+export interface InspectEventTapeEntry {
+	readonly id: string;
+	readonly kind: string;
+	readonly occurredAt: string;
+	readonly summary: string;
+	readonly metadata?: Readonly<Record<string, InspectEventTapeMetadataValue>>;
+}
+
+export interface InspectEventTapeSummary {
+	readonly runId: string;
+	readonly eventCount: number;
+	readonly firstKind?: string;
+	readonly lastKind?: string;
+	readonly firstOccurredAt?: string;
+	readonly lastOccurredAt?: string;
+	readonly terminalStatus?: RunStatus;
+	readonly kindCounts?: readonly InspectEventTapeKindCount[];
+	readonly events: readonly InspectEventTapeEntry[];
+}
+
 export interface InspectSnapshot {
 	readonly kind: "run" | "unit";
 	readonly unit: Unit;
 	readonly run: Run;
+	readonly eventTape?: InspectEventTapeSummary;
 	readonly provenance?: {
 		readonly route: {
 			readonly worker: string;
@@ -189,6 +255,7 @@ export interface InspectSnapshot {
 		readonly id: string;
 		readonly kind: string;
 		readonly status: string;
+		readonly message?: string;
 	}[];
 	readonly decisions: readonly {
 		readonly id: string;

@@ -1,9 +1,26 @@
 import type { ChildProcess } from "node:child_process";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import {
+	appendFileSync,
+	copyFileSync,
+	existsSync,
+	mkdirSync,
+	readdirSync,
+	readFileSync,
+	statSync,
+	writeFileSync,
+} from "node:fs";
+import {
+	basename,
+	dirname,
+	isAbsolute,
+	relative,
+	resolve,
+	sep,
+} from "node:path";
 import type { Readable, Writable } from "node:stream";
+import { fileURLToPath } from "node:url";
 import { createToolRegistry } from "@buildplane/adapters-tools";
 import {
 	createTapeEmitter,
@@ -15,11 +32,15 @@ import {
 	type BootstrapDoctorReport,
 	inspectBootstrapDoctor,
 } from "./bootstrap-doctor.js";
+import { type CapabilityReport, inspectCapabilities } from "./capabilities.js";
 import {
+	createInspectorProjection,
 	formatBootstrapDoctorReport,
+	formatCapabilityReport,
 	formatHumanError,
 	formatInitializationResult,
 	formatInspectDetail,
+	formatInspectorProjection,
 	formatJson,
 	formatJsonError,
 	formatLearningDetail,
@@ -37,6 +58,35 @@ import type {
 	PacketMemoryEnrichmentResult,
 	preparePacketMemoryEnrichment,
 } from "./packet-enrichment.js";
+import {
+	PLANFORGE_PLAN_SCHEMA_VERSION,
+	PLANFORGE_RECEIPT_SCHEMA_VERSION,
+	PLANFORGE_REQUIRED_EVIDENCE,
+	PLANFORGE_TASK_IDS,
+	PLANFORGE_VALIDATION_STATUS_INSUFFICIENT_EVIDENCE,
+	PLANFORGE_VALIDATION_STATUS_PASS,
+	PLANFORGE_VALIDATION_STATUS_UNSAFE_TO_RUN,
+	type PlanForgePlan,
+	type PlanForgeRequiredEvidence,
+	type PlanForgeValidationCheck,
+	type PlanForgeValidationStatus,
+} from "./planforge-schema.js";
+import {
+	defaultPrCheckRequest,
+	defaultPrCommentRequest,
+	defaultPrHeadVerifier,
+	formatPrCheckHuman,
+	formatPrCommentHuman,
+	loadCapabilityGrantsFromJson,
+	type PrCheckRequest,
+	type PrCommentRequest,
+	type PrHeadVerifier,
+	planPrCheckOperation,
+	planPrCommentOperation,
+	publishPrCheckOperation,
+	publishPrCommentOperation,
+} from "./pr-check.js";
+import { createOtelTraceExport } from "./trace-export.js";
 import { scanWorkflowPreview } from "./workflow-scan.js";
 
 // Monotonic UUIDv7 generator for TS-side event ids.
@@ -129,6 +179,10 @@ export interface RunCliDependencies {
 	createOrchestrator?: () => BuildplaneCliOrchestrator;
 	parsePacket?: (packetPath: string) => unknown;
 	inspectBootstrapDoctor?: () => BootstrapDoctorReport;
+	inspectCapabilities?: () => CapabilityReport;
+	publishPrCheckRequest?: PrCheckRequest;
+	publishPrCommentRequest?: PrCommentRequest;
+	verifyPrHeadRequest?: PrHeadVerifier;
 	runNativeCommand?: (
 		argv: string[],
 		options: {
@@ -174,6 +228,295 @@ async function cliImport(specifier: string): Promise<unknown> {
 	}
 }
 
+type AdmissionReceiptInputLike = Record<string, unknown>;
+
+interface AdmissionReceiptKernelModule {
+	createRunAdmissionReceiptDryRun(
+		input: AdmissionReceiptInputLike,
+	): Record<string, unknown>;
+}
+
+type RunAdmissionStoreLike = {
+	writeReceiptArtifact(input: {
+		receipt: Record<string, unknown>;
+		receiptDigest: string;
+		contents: string;
+	}): { ref: string; path: string };
+	appendAdmissionEvent(input: {
+		event: Record<string, unknown>;
+		receipt: Record<string, unknown>;
+	}): {
+		ref: string;
+		path: string;
+	};
+};
+
+function safeAdmissionArtifactStem(value: unknown): string {
+	const raw = typeof value === "string" ? value : "run_admission";
+	const safe = raw.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 120);
+	return safe.length > 0 ? safe : "run_admission";
+}
+
+function createRunAdmissionEventRef(input: {
+	event: Record<string, unknown>;
+	receipt: Record<string, unknown>;
+}): string {
+	const eventKind =
+		typeof input.event.kind === "string" && input.event.kind.length > 0
+			? input.event.kind
+			: "run_admission_recorded";
+	const recordedAt =
+		typeof input.event.recorded_at === "string" &&
+		input.event.recorded_at.length > 0
+			? input.event.recorded_at
+			: "";
+	const payload = nestedRecord(input.event, "payload");
+	const payloadReceiptId =
+		payload && typeof payload.receipt_id === "string"
+			? payload.receipt_id
+			: undefined;
+	const storeReceiptId =
+		typeof input.receipt.receipt_id === "string"
+			? input.receipt.receipt_id
+			: undefined;
+	const receiptId = safeAdmissionArtifactStem(
+		payloadReceiptId ?? storeReceiptId,
+	);
+	const eventDigest = createHash("sha256")
+		.update(
+			JSON.stringify({
+				eventKind,
+				recordedAt,
+				receiptId,
+				payload,
+				receipt: input.receipt,
+			}),
+		)
+		.digest("hex");
+	return `event://run-admission/${receiptId}/${eventDigest}`;
+}
+
+function resolveGitMetadataDir(projectRoot: string): string {
+	const gitPath = resolve(projectRoot, ".git");
+	try {
+		const gitFile = readFileSync(gitPath, "utf8").trim();
+		const match = /^gitdir:\s*(.+)$/.exec(gitFile);
+		const gitdir = match?.[1]?.trim();
+		if (gitdir) {
+			return resolve(projectRoot, gitdir);
+		}
+	} catch {
+		// A normal repository has .git as a directory; fall through.
+	}
+	return gitPath;
+}
+
+function createCliRunAdmissionStore(
+	projectRoot: string,
+): RunAdmissionStoreLike {
+	const admissionDir = resolve(
+		resolveGitMetadataDir(projectRoot),
+		"buildplane",
+		"admission",
+	);
+	const receiptsDir = resolve(admissionDir, "receipts");
+	const eventsPath = resolve(admissionDir, "events.jsonl");
+	return {
+		writeReceiptArtifact(input) {
+			mkdirSync(receiptsDir, { recursive: true });
+			const stem = safeAdmissionArtifactStem(input.receipt.receipt_id);
+			const path = resolve(receiptsDir, `${stem}.json`);
+			writeFileSync(path, input.contents, "utf8");
+			return {
+				ref: `artifact://run-admission/${input.receiptDigest}`,
+				path,
+			};
+		},
+		appendAdmissionEvent(input) {
+			mkdirSync(admissionDir, { recursive: true });
+			appendFileSync(eventsPath, `${JSON.stringify(input.event)}\n`, "utf8");
+			return {
+				ref: createRunAdmissionEventRef(input),
+				path: eventsPath,
+			};
+		},
+	};
+}
+
+class AdmissionReceiptCliError extends Error {
+	constructor(
+		readonly code: string,
+		message: string,
+	) {
+		super(message);
+		this.name = "AdmissionReceiptCliError";
+	}
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function nestedRecord(
+	record: Record<string, unknown>,
+	key: string,
+): Record<string, unknown> | undefined {
+	const value = record[key];
+	return isPlainRecord(value) ? value : undefined;
+}
+
+function parseAdmissionReceiptArgs(args: string[]): {
+	readonly inputPath: string;
+	readonly dryRun: boolean;
+	readonly json: boolean;
+} {
+	let inputPath: string | undefined;
+	let dryRun = false;
+	let json = false;
+	for (let index = 0; index < args.length; index += 1) {
+		const arg = args[index];
+		if (arg === "--input") {
+			const value = args[index + 1];
+			if (!value || value.startsWith("--")) {
+				throw new AdmissionReceiptCliError(
+					"MISSING_ARGUMENT",
+					"Missing required --input <path> for admission receipt dry-run.",
+				);
+			}
+			inputPath = value;
+			index += 1;
+			continue;
+		}
+		if (arg === "--dry-run") {
+			dryRun = true;
+			continue;
+		}
+		if (arg === "--json") {
+			json = true;
+			continue;
+		}
+		throw new AdmissionReceiptCliError(
+			"UNSUPPORTED_ARGUMENTS",
+			`Unsupported admission receipt argument: ${arg}.`,
+		);
+	}
+	if (!inputPath) {
+		throw new AdmissionReceiptCliError(
+			"MISSING_ARGUMENT",
+			"Missing required --input <path> for admission receipt dry-run.",
+		);
+	}
+	if (!dryRun) {
+		throw new AdmissionReceiptCliError(
+			"UNSUPPORTED_ARGUMENTS",
+			"admission receipt currently supports --dry-run only.",
+		);
+	}
+	return { inputPath, dryRun, json };
+}
+
+function normalizeAdmissionReceiptDryRunInput(
+	raw: unknown,
+): AdmissionReceiptInputLike {
+	if (!isPlainRecord(raw)) {
+		throw new AdmissionReceiptCliError(
+			"INVALID_PACKET",
+			"Invalid run admission receipt input.",
+		);
+	}
+	if (
+		"receiptId" in raw ||
+		"decidedAt" in raw ||
+		"policyProfileId" in raw ||
+		"evidenceInputs" in raw
+	) {
+		return raw;
+	}
+	const policy = nestedRecord(raw, "policy");
+	const admission = nestedRecord(raw, "admission");
+	const provenance = nestedRecord(raw, "provenance");
+	return {
+		receiptId: raw.receipt_id,
+		decidedAt: admission?.decided_at,
+		run: raw.run,
+		repo: raw.repo,
+		request: raw.request,
+		policyProfileId: policy?.profile_id,
+		evidenceInputs: raw.evidence_inputs,
+		actor: admission?.decided_by,
+		source: provenance?.created_from ?? "dry-run",
+		pack: provenance?.pack,
+		host: provenance?.host,
+		provider: provenance?.provider,
+	};
+}
+
+function admissionReceiptErrorCode(error: unknown): string {
+	if (error instanceof AdmissionReceiptCliError) {
+		return error.code;
+	}
+	if (isPlainRecord(error) && typeof error.code === "string") {
+		return error.code;
+	}
+	if (error instanceof SyntaxError) {
+		return "INVALID_PACKET";
+	}
+	return "INVALID_PACKET";
+}
+
+function sanitizeAdmissionReceiptErrorMessage(error: unknown): string {
+	if (error instanceof AdmissionReceiptCliError) {
+		return error.message;
+	}
+	if (error instanceof SyntaxError) {
+		return "Invalid JSON input for admission receipt dry-run.";
+	}
+	if (isPlainRecord(error) && error.code === "INVALID_PACKET") {
+		return "Invalid run admission receipt input.";
+	}
+	return "Invalid run admission receipt input.";
+}
+
+async function runAdmissionReceiptDryRunCommand(
+	args: string[],
+	cwd: string,
+	stdout: (line: string) => void,
+): Promise<number> {
+	let json = args.includes("--json");
+	try {
+		const parsedArgs = parseAdmissionReceiptArgs(args);
+		json = parsedArgs.json;
+		const rawInput = JSON.parse(
+			readFileSync(resolve(cwd, parsedArgs.inputPath), "utf8"),
+		) as unknown;
+		const kernel = (await cliImport(
+			"@buildplane/kernel",
+		)) as AdmissionReceiptKernelModule;
+		const receipt = kernel.createRunAdmissionReceiptDryRun(
+			normalizeAdmissionReceiptDryRunInput(rawInput),
+		);
+		if (json) {
+			stdout(formatJson(receipt));
+		} else {
+			stdout(
+				`admission: ${nestedRecord(receipt, "admission")?.decision ?? "unknown"}`,
+			);
+			stdout("will-execute-worker: false");
+		}
+		return 0;
+	} catch (error) {
+		const code = admissionReceiptErrorCode(error);
+		const message = sanitizeAdmissionReceiptErrorMessage(error);
+		const formattedJsonError = formatJson(formatJsonError(code, message));
+		if (json) {
+			stdout(formattedJsonError);
+		} else {
+			stdout(formatHumanError(message).join("\n"));
+		}
+		return 1;
+	}
+}
+
 function resolveCurrentBranch(projectRoot: string): string | undefined {
 	const result = spawnSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], {
 		cwd: projectRoot,
@@ -185,6 +528,19 @@ function resolveCurrentBranch(projectRoot: string): string | undefined {
 	}
 	const branch = result.stdout.trim();
 	return branch && branch !== "HEAD" ? branch : undefined;
+}
+
+function resolveCurrentCommit(projectRoot: string): string | undefined {
+	const result = spawnSync("git", ["rev-parse", "HEAD"], {
+		cwd: projectRoot,
+		encoding: "utf8",
+		env: process.env,
+	});
+	if (result.status !== 0) {
+		return undefined;
+	}
+	const commit = result.stdout.trim();
+	return commit.length > 0 ? commit : undefined;
 }
 
 function persistInjectedMemories(
@@ -313,8 +669,16 @@ function formatTopLevelHelp(): string[] {
 		"  Observe:",
 		"    status [--json]        Project health snapshot",
 		"    history [--json]       List all runs",
-		"    inspect <id> [--json]  Deep-dive into a run",
-		"    replay <id> [--json]   Re-run with different settings",
+		"    inspect <id> [--json] [--view inspector]  Deep-dive into a run and event tape",
+		"    verify --run <id> [--json]  Final receipt-backed verdict",
+		"    evidence export --run <id> --out <file>  Export Mission Control bundle",
+		"    trace export --run <id> --format otel-json --out <file>  Export local trace artifact",
+		"    pr-check dry-run --run <id> --repo <owner/repo> --sha <head> [--json]  Preview GitHub check-run publish",
+		"    pr-comment dry-run --run <id> --repo <owner/repo> --pr <n> --sha <head> [--json]  Preview PR evidence comment",
+		"    replay <id> [--json]   Re-execute the stored packet snapshot",
+		"    ledger replay --run-id <id> --workspace <path>  Read-only tape replay",
+		"    fork <id> --at <event> --packet <file>          Recover from a unit boundary",
+		"    planforge dry-run --input <file> --json          Emit dry-run plan artifact",
 		"",
 		"  Advanced:",
 		"    run-graph --graph <p>  Execute a DAG of tasks",
@@ -322,7 +686,7 @@ function formatTopLevelHelp(): string[] {
 		"",
 		"  Project:",
 		"    init                   Initialize .buildplane in this repo",
-		"    bootstrap doctor      Check published CLI prerequisites",
+		"    bootstrap doctor      Check published CLI prerequisites and capabilities",
 		"    workspace list         Show actionable retained/cleanup-failed workspaces",
 		"    workspace cleanup <r>  Delete an actionable workspace by run id",
 		"    workflow scan [--json] Preview recognized Claude/Codex workflow files",
@@ -330,6 +694,7 @@ function formatTopLevelHelp(): string[] {
 		"    memory inspect <id>    Detail for one learning",
 		"    memory <action>        Advanced memory operations (native)",
 		"    pack show <id>         Inspect a pack",
+		"    pack export <id> --target github-agent|github-skill --out <path>  Export pack guidance",
 		"",
 		"  buildplane run --help    Show run options (--raw, --tui)",
 	];
@@ -348,6 +713,184 @@ function formatRunHelp(): string[] {
 		"    --tui            Interactive terminal UI",
 		"    --json           Machine-readable output",
 	];
+}
+
+function formatReplayHelp(): string[] {
+	return [
+		"buildplane replay <run-id> [options]",
+		"",
+		"  Re-executes the stored packet snapshot from a prior run and records a new run.",
+		"  Use this when you want to try the same unit again with a changed policy or",
+		"  runtime setting. For read-only event-tape reconstruction, use:",
+		"",
+		"    buildplane ledger replay --run-id <run-id> --workspace <path>",
+		"",
+		"  Options:",
+		"    --json              Machine-readable replay result",
+		"    --policy <profile>  Override the policy profile for the replay run",
+	];
+}
+
+function formatPlanForgeHelp(): string[] {
+	return [
+		"buildplane planforge dry-run --input <file> --json",
+		"",
+		"  Validates a local PlanForge goal fixture and emits a stable reviewable",
+		"  PlanForgePlan JSON artifact without execution, board writes, network",
+		"  writes, worker spawns, push, deploy, merge, or project state mutation.",
+		"",
+		"  Options:",
+		"    --input <file>  Markdown PlanForge goal fixture to validate",
+		"    --json          Required; prints the dry-run plan as JSON",
+	];
+}
+
+function formatVerifyHelp(): string[] {
+	return [
+		"buildplane verify --run <run-id> [--json]",
+		"",
+		"  Computes the final receipt-backed verdict from verifier evidence,",
+		"  policy approvals, blockers, and missing acceptance criteria.",
+		"",
+		"  Options:",
+		"    --run <id>   Run id to verify",
+		"    --json       Print the verdict report as JSON",
+	];
+}
+
+function formatEvidenceHelp(): string[] {
+	return [
+		"buildplane evidence export --run <run-id> --out <file> [--json]",
+		"",
+		"  Exports a Mission Control run_bundle fixture with worker claims,",
+		"  verifier receipts, artifacts, and final halt evidence kept distinct.",
+		"",
+		"  Options:",
+		"    --run <id>   Run id to export",
+		"    --out <file> Write bundle JSON to this path",
+		"    --json       Also print the exported bundle JSON",
+	];
+}
+
+function formatTraceHelp(): string[] {
+	return [
+		"buildplane trace export --run <run-id> --format otel-json --out <file> [--json]",
+		"",
+		"  Exports a local OpenTelemetry-shaped trace artifact from stored",
+		"  run evidence. This command never sends telemetry to a vendor.",
+		"",
+		"  Options:",
+		"    --run <id>           Run id to export",
+		"    --format otel-json  Trace format; only otel-json is supported",
+		"    --out <file>         Write trace JSON to this path",
+		"    --json               Also print the export summary JSON",
+	];
+}
+
+function formatMemoryPromoteHelp(): string[] {
+	return [
+		"buildplane memory promote --receipt <run-id> [--json]",
+		"",
+		"  Promotes eligible run learnings into durable structured memory only",
+		"  after the cited run has a PASSED receipt-backed final verdict.",
+		"  Raw logs and worker claims without accepted verifier receipts fail closed.",
+		"",
+		"  Options:",
+		"    --receipt <id>  Accepted run receipt to cite as provenance",
+		"    --json          Print machine-readable promotion report",
+	];
+}
+
+function formatPrCheckHelp(): string[] {
+	return [
+		"buildplane pr-check dry-run --run <run-id> --repo <owner/repo> --sha <head-sha> [--json]",
+		"buildplane pr-check publish --run <run-id> --repo <owner/repo> --sha <head-sha> --grant-file <file> --grant-id <id> [--json]",
+		"",
+		"  Builds the GitHub check-run payload from the receipt-backed final verdict.",
+		"  dry-run never calls GitHub; publish requires an explicit matching capability grant.",
+		"",
+		"  Options:",
+		"    --run <id>              Run id to verify and report",
+		"    --repo <owner/repo>     GitHub repository target",
+		"    --sha <head-sha>        Commit SHA for the check run",
+		"    --name <name>           Check-run name (default: Buildplane)",
+		"    --details-url <url>     Optional evidence URL for GitHub",
+		"    --grant-file <file>     JSON file with capabilityGrants/grants",
+		"    --grant-id <id>         Capability grant id required for publish",
+		"    --credential-env <name> Environment variable for GitHub credential (default: GITHUB_TOKEN)",
+		"    --json                  Print machine-readable result",
+	];
+}
+
+function formatPrCommentHelp(): string[] {
+	return [
+		"buildplane pr-comment dry-run --run <run-id> --repo <owner/repo> --pr <number> --sha <head-sha> [--json]",
+		"buildplane pr-comment publish --run <run-id> --repo <owner/repo> --pr <number> --sha <head-sha> --grant-file <file> --grant-id <id> [--json]",
+		"",
+		"  Builds a compact PR evidence comment from the receipt-backed final verdict.",
+		"  dry-run never calls GitHub; publish requires an explicit matching capability grant.",
+		"",
+		"  Options:",
+		"    --run <id>              Run id to verify and report",
+		"    --repo <owner/repo>     GitHub repository target",
+		"    --pr <number>           Pull request number for the comment target",
+		"    --sha <head-sha>        Commit SHA represented by the evidence",
+		"    --details-url <url>     Optional Run Inspector URL",
+		"    --bundle-url <url>      Optional exported evidence bundle URL",
+		"    --grant-file <file>     JSON file with capabilityGrants/grants",
+		"    --grant-id <id>         Capability grant id required for publish",
+		"    --credential-env <name> Environment variable for GitHub credential (default: GITHUB_TOKEN)",
+		"    --json                  Print machine-readable result",
+	];
+}
+
+function readFlag(args: readonly string[], flag: string): string | undefined {
+	const index = args.indexOf(flag);
+	const value = index === -1 ? undefined : args[index + 1];
+	return value && !value.startsWith("--") ? value : undefined;
+}
+
+function requireFlag(
+	args: readonly string[],
+	flag: string,
+	label: string,
+): string {
+	const value = readFlag(args, flag);
+	if (!value) {
+		throw new Error(`Missing required ${label} argument.`);
+	}
+	return value;
+}
+
+function requireHeadSha(args: readonly string[]): string {
+	const value = readFlag(args, "--sha") ?? readFlag(args, "--head-sha");
+	if (!value) {
+		throw new Error("Missing required --sha <head-sha> argument.");
+	}
+	return value;
+}
+
+function requirePrNumber(args: readonly string[]): number {
+	const value = readFlag(args, "--pr") ?? readFlag(args, "--pr-number");
+	if (!value) {
+		throw new Error("Missing required --pr <number> argument.");
+	}
+	if (!/^[1-9][0-9]*$/.test(value)) {
+		throw new Error(
+			"PR number must be a positive decimal integer without leading zeroes.",
+		);
+	}
+	const parsed = Number(value);
+	if (!Number.isSafeInteger(parsed)) {
+		throw new Error(
+			"PR number must be a positive decimal integer within JavaScript's safe integer range.",
+		);
+	}
+	return parsed;
+}
+
+function isHelpRequested(args: readonly string[]): boolean {
+	return args.includes("--help") || args.includes("-h") || args[0] === "help";
 }
 
 interface BuildplaneCliOrchestrator {
@@ -493,6 +1036,7 @@ async function loadCliOrchestrator(
 			};
 			policy: { evaluateRun: (packet: unknown, receipt: unknown) => unknown };
 			workspace?: unknown;
+			admissionStore?: RunAdmissionStoreLike;
 			eventBus?: unknown;
 			memoryPort?: unknown;
 		}) => BuildplaneCliOrchestrator;
@@ -822,6 +1366,7 @@ async function loadCliOrchestrator(
 		runtime: runtimeRouter,
 		policy: { evaluateRun: policy.evaluateRun },
 		workspace: adaptersGit.createGitWorktreeAdapter(),
+		admissionStore: createCliRunAdmissionStore(projectRoot),
 		eventBus,
 		memoryPort: orchestratorMemoryPortRef, // READ-WRITE port for post-run writes
 	});
@@ -881,6 +1426,368 @@ async function loadReadOnlyMemoryPort(
 	return undefined;
 }
 
+interface VerifiedMemoryPromotionRecord {
+	readonly memoryType: "repo-fact";
+	readonly factKey: string;
+	readonly sourceRunId: string;
+	readonly createdBy: "system";
+	readonly id?: string;
+	readonly status: "promoted" | "skipped";
+	readonly reason?: string;
+}
+
+interface VerifiedMemoryPromotionReport {
+	readonly receiptId: string;
+	readonly verdict: string;
+	readonly promoted: number;
+	readonly skipped: number;
+	readonly records: readonly VerifiedMemoryPromotionRecord[];
+}
+
+interface ReceiptNotAcceptedReport {
+	readonly error: { readonly code: string; readonly message: string };
+	readonly receipt: Record<string, unknown>;
+}
+
+interface ReceiptLearningRow {
+	readonly id: string;
+	readonly run_id: string;
+	readonly scope: string;
+	readonly kind: string;
+	readonly title: string;
+	readonly body: string;
+	readonly status: string;
+	readonly created_at: string;
+	readonly updated_at: string;
+	readonly seen_count: number;
+	readonly promoted_from_id: string | null;
+	readonly source_run_id: string | null;
+}
+
+interface ReceiptLearningCandidate {
+	readonly id: string;
+	readonly runId: string;
+	readonly scope: string;
+	readonly kind: string;
+	readonly title: string;
+	readonly body: string;
+	readonly status: string;
+	readonly createdAt: string;
+	readonly updatedAt: string;
+	readonly seenCount: number;
+	readonly promotedFromId?: string;
+	readonly sourceRunId?: string;
+}
+
+function escapeUnescapedCharacter(
+	value: string,
+	character: string,
+	escapedCharacter: string,
+): string {
+	let escaped = "";
+	for (let index = 0; index < value.length; index += 1) {
+		const current = value[index];
+		if (current === character && value[index - 1] !== "\\") {
+			escaped += escapedCharacter;
+		} else {
+			escaped += current;
+		}
+	}
+	return escaped;
+}
+
+function sanitizeVerifiedMemoryText(value: string): string {
+	const ansiEscapePattern = new RegExp(
+		`${String.fromCharCode(27)}\\[[0-?]*[ -/]*[@-~]`,
+		"g",
+	);
+	const withoutAnsi = value.replace(ansiEscapePattern, " ");
+	let result = "";
+	for (const character of withoutAnsi) {
+		const code = character.charCodeAt(0);
+		if (code < 0x20 || code === 0x7f || (code >= 0x80 && code <= 0x9f)) {
+			result += " ";
+		} else {
+			result += character;
+		}
+	}
+	const sanitized = result
+		.replace(/@(?!\u200b)/g, "@\u200b")
+		.split("`")
+		.join("'")
+		.split("-->")
+		.join("-\\->")
+		.split("<!--")
+		.join("<\\!--")
+		.replace(/\s+/g, " ")
+		.trim();
+	return escapeUnescapedCharacter(sanitized, "|", "\\|");
+}
+
+function normalizeReceiptLearningFactKey(title: string): string {
+	return sanitizeVerifiedMemoryText(title);
+}
+
+function normalizeReceiptLearningFactValue(body: string): string {
+	return sanitizeVerifiedMemoryText(body);
+}
+
+function formatMemoryPromotionHuman(
+	report: VerifiedMemoryPromotionReport,
+): string[] {
+	return [
+		"memory-promote: completed",
+		`receipt-id: ${sanitizeVerifiedMemoryText(report.receiptId)}`,
+		`verdict: ${sanitizeVerifiedMemoryText(report.verdict)}`,
+		`promoted: ${report.promoted}`,
+		`skipped: ${report.skipped}`,
+		...report.records.map(
+			(record) =>
+				`- ${sanitizeVerifiedMemoryText(record.status)}: ${sanitizeVerifiedMemoryText(record.memoryType)} ${sanitizeVerifiedMemoryText(record.factKey)}` +
+				(record.reason
+					? ` (${sanitizeVerifiedMemoryText(record.reason)})`
+					: ""),
+		),
+	];
+}
+
+async function fetchReceiptLearningCandidates(
+	projectRoot: string,
+	runId: string,
+	storageModule: {
+		resolveProjectLayout: (root: string) => { stateDbPath: string };
+	},
+): Promise<readonly ReceiptLearningCandidate[]> {
+	const { DatabaseSync } = await import("node:sqlite");
+	const layout = storageModule.resolveProjectLayout(projectRoot);
+	if (!existsSync(layout.stateDbPath)) {
+		return [];
+	}
+	const db = new DatabaseSync(layout.stateDbPath, { readOnly: true });
+	try {
+		const rows = db
+			.prepare(
+				`SELECT id, run_id, scope, kind, title, body, status, created_at, updated_at, seen_count, promoted_from_id, source_run_id
+           FROM run_learnings
+           WHERE run_id = ? AND status = 'active'
+           ORDER BY created_at ASC`,
+			)
+			.all(runId) as unknown as ReceiptLearningRow[];
+		return rows.map((row) => ({
+			id: row.id,
+			runId: row.run_id,
+			scope: row.scope,
+			kind: row.kind,
+			title: row.title,
+			body: row.body,
+			status: row.status,
+			createdAt: row.created_at,
+			updatedAt: row.updated_at,
+			seenCount: row.seen_count,
+			promotedFromId: row.promoted_from_id ?? undefined,
+			sourceRunId: row.source_run_id ?? undefined,
+		}));
+	} catch {
+		return [];
+	} finally {
+		db.close();
+	}
+}
+
+function createSkippedMemoryPromotionRecord(
+	learning: Pick<ReceiptLearningCandidate, "title">,
+	receiptRunId: string,
+	reason: string,
+): VerifiedMemoryPromotionRecord {
+	return {
+		memoryType: "repo-fact",
+		factKey:
+			normalizeReceiptLearningFactKey(learning.title) || "(empty fact key)",
+		sourceRunId: receiptRunId,
+		createdBy: "system",
+		status: "skipped",
+		reason,
+	};
+}
+
+async function promoteMemoryFromReceipt(
+	projectRoot: string,
+	receiptId: string,
+): Promise<
+	| { readonly ok: true; readonly report: VerifiedMemoryPromotionReport }
+	| { readonly ok: false; readonly report: ReceiptNotAcceptedReport }
+> {
+	const storageModule = (await cliImport("@buildplane/storage")) as unknown as {
+		createBuildplaneStorage: (root: string) => {
+			getRepoFact: (
+				factKey: string,
+				options?: { scopeType?: string; scopeKey?: string },
+			) => {
+				id: string;
+				factKey: string;
+				factValue: unknown;
+				provenance: { sourceRunId?: string; createdBy: string };
+			} | null;
+			upsertRepoFact: (input: {
+				factKey: string;
+				factValue: unknown;
+				valueType: string;
+				scopeType?: string;
+				confidence?: number;
+				createdBy: "system";
+				sourceRunId?: string;
+				branch?: string;
+				commitSha?: string;
+			}) => {
+				id: string;
+				factKey: string;
+				memoryType: "repo-fact";
+				provenance: { sourceRunId?: string; createdBy: string };
+			};
+		};
+		resolveProjectLayout: (root: string) => { stateDbPath: string };
+		verifyRunFinalVerdict: (
+			root: string,
+			options: { runId: string },
+		) => { verdict: string; runId: string } & Record<string, unknown>;
+	};
+	const receipt = storageModule.verifyRunFinalVerdict(projectRoot, {
+		runId: receiptId,
+	});
+	if (receipt.verdict !== "PASSED") {
+		return {
+			ok: false,
+			report: {
+				...formatJsonError(
+					"RECEIPT_NOT_ACCEPTED",
+					`Receipt ${receiptId} has verdict ${receipt.verdict}; only PASSED receipts can promote memory.`,
+				),
+				receipt,
+			},
+		};
+	}
+
+	const learnings = await fetchReceiptLearningCandidates(
+		projectRoot,
+		receipt.runId,
+		storageModule,
+	);
+	const storage = storageModule.createBuildplaneStorage(projectRoot);
+	const branch = resolveCurrentBranch(projectRoot);
+	const commitSha = resolveCurrentCommit(projectRoot);
+	const records: VerifiedMemoryPromotionRecord[] = [];
+
+	for (const learning of learnings) {
+		if (learning.kind !== "fact") {
+			records.push(
+				createSkippedMemoryPromotionRecord(
+					learning,
+					receipt.runId,
+					`unsupported learning kind: ${learning.kind}`,
+				),
+			);
+			continue;
+		}
+		if (learning.promotedFromId || learning.sourceRunId) {
+			records.push(
+				createSkippedMemoryPromotionRecord(
+					learning,
+					receipt.runId,
+					"derived learning lacks direct receipt binding",
+				),
+			);
+			continue;
+		}
+		if (learning.seenCount !== 1 || learning.createdAt !== learning.updatedAt) {
+			records.push(
+				createSkippedMemoryPromotionRecord(
+					learning,
+					receipt.runId,
+					"learning changed after receipt capture",
+				),
+			);
+			continue;
+		}
+		const factKey = normalizeReceiptLearningFactKey(learning.title);
+		if (!factKey) {
+			records.push(
+				createSkippedMemoryPromotionRecord(
+					learning,
+					receipt.runId,
+					"empty fact key",
+				),
+			);
+			continue;
+		}
+		const factValue = normalizeReceiptLearningFactValue(learning.body);
+		if (!factValue) {
+			records.push(
+				createSkippedMemoryPromotionRecord(
+					learning,
+					receipt.runId,
+					"empty fact value",
+				),
+			);
+			continue;
+		}
+		const existing = storage.getRepoFact(factKey, { scopeType: "repo" });
+		if (existing?.provenance.sourceRunId === receipt.runId) {
+			records.push({
+				id: existing.id,
+				memoryType: "repo-fact",
+				factKey,
+				sourceRunId: receipt.runId,
+				createdBy: "system",
+				status: "skipped",
+				reason: "already promoted from receipt",
+			});
+			continue;
+		}
+		if (existing) {
+			records.push({
+				id: existing.id,
+				memoryType: "repo-fact",
+				factKey,
+				sourceRunId: receipt.runId,
+				createdBy: "system",
+				status: "skipped",
+				reason: "active fact exists from different provenance",
+			});
+			continue;
+		}
+		const promoted = storage.upsertRepoFact({
+			factKey,
+			factValue,
+			valueType: "string",
+			scopeType: "repo",
+			confidence: 1,
+			createdBy: "system",
+			sourceRunId: receipt.runId,
+			branch,
+			commitSha,
+		});
+		records.push({
+			id: promoted.id,
+			memoryType: "repo-fact",
+			factKey: promoted.factKey,
+			sourceRunId: receipt.runId,
+			createdBy: "system",
+			status: "promoted",
+		});
+	}
+
+	return {
+		ok: true,
+		report: {
+			receiptId: receipt.runId,
+			verdict: receipt.verdict,
+			promoted: records.filter((record) => record.status === "promoted").length,
+			skipped: records.filter((record) => record.status === "skipped").length,
+			records,
+		},
+	};
+}
+
 async function loadPacket(packetPath: string): Promise<unknown> {
 	const kernel = (await cliImport("@buildplane/kernel")) as unknown as {
 		parseUnitPacket: (input: string) => unknown;
@@ -891,7 +1798,7 @@ async function loadPacket(packetPath: string): Promise<unknown> {
 
 const NATIVE_COMMAND_DISPATCH_ERROR_CODE = "NATIVE_COMMAND_DISPATCH_FAILED";
 const NATIVE_COMMAND_DISPATCH_HINT =
-	"Hint: build the native binary with `cargo build --manifest-path native/Cargo.toml -p bp-cli`, or set BUILDPLANE_NATIVE_BIN, or ensure `buildplane-native` is on PATH.";
+	"Hint: build the native binary with `cargo build --manifest-path native/Cargo.toml -p bp-cli`, set BUILDPLANE_NATIVE_BIN, install a package with a bundled native binary, or ensure `buildplane-native` is on PATH.";
 
 class NativeCommandDispatchError extends Error {
 	constructor(message: string) {
@@ -948,19 +1855,74 @@ function splitOutputLines(output: string): string[] {
 		.filter((line) => line.length > 0);
 }
 
+function currentPackagedNativeTarget():
+	| { readonly binaryName: string; readonly platform: "linux-x64" }
+	| undefined {
+	if (process.platform !== "linux" || process.arch !== "x64") {
+		return undefined;
+	}
+
+	return {
+		binaryName: "buildplane-native",
+		platform: "linux-x64",
+	};
+}
+
+function isExecutableFile(path: string): boolean {
+	try {
+		const stat = statSync(path);
+		if (!stat.isFile()) {
+			return false;
+		}
+		if (process.platform === "win32") {
+			return true;
+		}
+		return (stat.mode & 0o111) !== 0;
+	} catch {
+		return false;
+	}
+}
+
+function resolvePackagedNativeBinary(): string | undefined {
+	const target = currentPackagedNativeTarget();
+	if (!target) {
+		return undefined;
+	}
+
+	const candidate = resolve(
+		dirname(fileURLToPath(import.meta.url)),
+		"..",
+		"vendor",
+		"native",
+		target.platform,
+		target.binaryName,
+	);
+	return isExecutableFile(candidate) ? candidate : undefined;
+}
+
 function resolveNativeBinary(cwd: string): string {
 	const explicit = process.env.BUILDPLANE_NATIVE_BIN;
 	if (explicit) {
 		return explicit;
 	}
 
-	const candidates = [
-		resolve(cwd, "native", "target", "debug", "buildplane-native"),
-		resolve(cwd, "native", "target", "release", "buildplane-native"),
-	];
-	for (const candidate of candidates) {
-		if (existsSync(candidate)) {
-			return candidate;
+	const packaged = resolvePackagedNativeBinary();
+	if (packaged) {
+		return packaged;
+	}
+
+	const targets =
+		process.platform === "win32"
+			? ["buildplane-native.exe", "buildplane-native"]
+			: ["buildplane-native"];
+	for (const target of targets) {
+		for (const candidate of [
+			resolve(cwd, "native", "target", "debug", target),
+			resolve(cwd, "native", "target", "release", target),
+		]) {
+			if (existsSync(candidate)) {
+				return candidate;
+			}
 		}
 	}
 	return "buildplane-native";
@@ -990,6 +1952,8 @@ interface ForkArgs {
 	at: string;
 	workspace?: string;
 	packet: string;
+	vcr: boolean;
+	vcrMiss: "fail" | "reexecute";
 }
 
 function parseForkArgs(
@@ -999,10 +1963,41 @@ function parseForkArgs(
 	let at: string | undefined;
 	let workspace: string | undefined;
 	let packet: string | undefined;
+	let vcr = false;
+	let vcrMiss: "fail" | "reexecute" = "fail";
+	let vcrMissProvided = false;
+	const setVcrMiss = (value: string | undefined): string | undefined => {
+		if (!value || value.startsWith("--")) {
+			return "missing --vcr-miss <fail|reexecute> value";
+		}
+		if (value === "reexecute") {
+			vcrMiss = "reexecute";
+			vcrMissProvided = true;
+			return undefined;
+		}
+		if (value === "fail") {
+			vcrMiss = "fail";
+			vcrMissProvided = true;
+			return undefined;
+		}
+		return "unsupported --vcr-miss value (expected fail or reexecute)";
+	};
 	let i = 0;
 	while (i < rest.length) {
 		const arg = rest[i];
 		switch (arg) {
+			case "--vcr":
+				vcr = true;
+				break;
+			case "--vcr-miss":
+				i += 1;
+				{
+					const error = setVcrMiss(rest[i]);
+					if (error) {
+						return { ok: false, error };
+					}
+				}
+				break;
 			case "--run-id":
 				i += 1;
 				runId = rest[i];
@@ -1020,13 +2015,24 @@ function parseForkArgs(
 				packet = rest[i];
 				break;
 			default:
-				if (arg && !runId) {
+				if (arg?.startsWith("--vcr-miss=")) {
+					const error = setVcrMiss(arg.slice("--vcr-miss=".length));
+					if (error) {
+						return { ok: false, error };
+					}
+				} else if (arg && !runId) {
+					if (arg.startsWith("--")) {
+						return { ok: false, error: `unknown argument: ${arg}` };
+					}
 					runId = arg;
 				} else {
 					return { ok: false, error: `unknown argument: ${arg}` };
 				}
 		}
 		i += 1;
+	}
+	if (vcrMissProvided && !vcr) {
+		return { ok: false, error: "--vcr-miss requires --vcr" };
 	}
 	if (!runId)
 		return {
@@ -1035,16 +2041,22 @@ function parseForkArgs(
 		};
 	if (!at) return { ok: false, error: "missing --at <event-id>" };
 	if (!packet) return { ok: false, error: "missing --packet <file>" };
-	return { ok: true, value: { runId, at, workspace, packet } };
+	return { ok: true, value: { runId, at, workspace, packet, vcr, vcrMiss } };
 }
 
 function forkUsageText(): string {
-	return `usage: buildplane fork <parent-run-id> --at <event-id> --packet <file> [--workspace <path>]
+	return `usage: buildplane fork <parent-run-id> --at <event-id> --packet <file> [--workspace <path>] [--vcr] [--vcr-miss <fail|reexecute>]
+
+  Fork resumes from a unit boundary in a prior run with a replacement packet.
+  The workspace git state must be clean before fork execution.
+  Target event must be a unit_started event.
 
   --run-id       parent run id (or positional first arg)
   --at           parent unit_started event id to fork at
   --packet       path to the new packet json
   --workspace    workspace root (defaults to cwd)
+  --vcr          reuse deterministic parent tool outputs when the tape matches
+  --vcr-miss     fail (default) or reexecute with a visible miss receipt
 `;
 }
 
@@ -1171,9 +2183,252 @@ function emitLedgerRunCompleted(
 	});
 }
 
+interface ForkVcrOptions {
+	readonly enabled: boolean;
+	readonly miss: "fail" | "reexecute";
+	readonly parentRunId: string;
+	readonly cassette?: ReadonlyMap<string, readonly VcrToolResult[]>;
+	readonly outputStore?: ReadonlyMap<string, Buffer>;
+}
+
+interface VcrToolResult {
+	readonly stdout: string;
+	readonly stderr: string;
+	readonly exitCode: number;
+	readonly output: unknown;
+	readonly parentToolRequestId: string;
+}
+
+interface VcrEventRow {
+	readonly id: string;
+	readonly parent_event_id: string | null;
+	readonly kind: string;
+	readonly payload: string;
+}
+
+interface PendingVcrToolResult {
+	readonly parentToolRequestId: string;
+	readonly result: VcrToolResult;
+}
+
+function vcrOutputStoreRoot(workspace: string, runId: string): string {
+	return resolve(workspace, ".buildplane", "vcr", runId, "outputs");
+}
+
+function vcrOutputKey(path: string): string {
+	return path.replace(/\\/g, "/");
+}
+
+type ContainedPathResult =
+	| { ok: true; path: string }
+	| { ok: false; reason: string };
+
+function hasWindowsAbsolutePrefix(path: string): boolean {
+	return /^[a-zA-Z]:[\\/]/.test(path) || path.startsWith("\\\\");
+}
+
+function isPathBelowRoot(root: string, candidate: string): boolean {
+	const relativePath = relative(resolve(root), resolve(candidate));
+	return relativePath !== "" && isPathAtOrBelowRoot(root, candidate);
+}
+
+function isPathAtOrBelowRoot(root: string, candidate: string): boolean {
+	const relativePath = relative(resolve(root), resolve(candidate));
+	return (
+		relativePath !== ".." &&
+		!relativePath.startsWith(`..${sep}`) &&
+		!relativePath.startsWith("../") &&
+		!relativePath.startsWith("..\\") &&
+		!isAbsolute(relativePath) &&
+		!hasWindowsAbsolutePrefix(relativePath)
+	);
+}
+
+function ensureContainedDirectory(
+	root: string,
+	directory: string,
+	realpath: (path: string) => string,
+): ContainedPathResult {
+	let existing = directory;
+	while (!existsSync(existing)) {
+		const parent = dirname(existing);
+		if (parent === existing) {
+			return { ok: false, reason: "output parent has no containing root" };
+		}
+		existing = parent;
+	}
+	if (!isPathAtOrBelowRoot(root, realpath(existing))) {
+		return { ok: false, reason: "output parent escapes root" };
+	}
+	mkdirSync(directory, { recursive: true });
+	if (!isPathAtOrBelowRoot(root, realpath(directory))) {
+		return { ok: false, reason: "output parent escapes root" };
+	}
+	return { ok: true, path: directory };
+}
+
+function resolveContainedPath(root: string, path: string): ContainedPathResult {
+	if (path.trim().length === 0) {
+		return { ok: false, reason: "empty output path" };
+	}
+	if (path.includes("\0")) {
+		return { ok: false, reason: "output path contains null byte" };
+	}
+	if (isAbsolute(path) || hasWindowsAbsolutePrefix(path)) {
+		return { ok: false, reason: "absolute output path is not allowed" };
+	}
+	const rootPath = resolve(root);
+	const candidate = resolve(rootPath, path);
+	if (!isPathBelowRoot(rootPath, candidate)) {
+		return { ok: false, reason: "output path escapes root" };
+	}
+	return { ok: true, path: candidate };
+}
+
+function loadForkVcrOutputStore(
+	workspace: string,
+	parentRunId: string,
+): Map<string, Buffer> {
+	const root = vcrOutputStoreRoot(workspace, parentRunId);
+	const outputs = new Map<string, Buffer>();
+	if (!existsSync(root)) {
+		return outputs;
+	}
+	const visit = (directory: string): void => {
+		for (const entry of readdirSync(directory, { withFileTypes: true })) {
+			const entryPath = resolve(directory, entry.name);
+			if (entry.isDirectory()) {
+				visit(entryPath);
+				continue;
+			}
+			if (!entry.isFile()) {
+				continue;
+			}
+			outputs.set(
+				vcrOutputKey(relative(root, entryPath)),
+				readFileSync(entryPath),
+			);
+		}
+	};
+	visit(root);
+	return outputs;
+}
+
+function stableJson(value: unknown): string {
+	if (Array.isArray(value)) {
+		return `[${value.map(stableJson).join(",")}]`;
+	}
+	if (value && typeof value === "object") {
+		return `{${Object.entries(value as Record<string, unknown>)
+			.sort(([a], [b]) => a.localeCompare(b))
+			.map(([key, nested]) => `${JSON.stringify(key)}:${stableJson(nested)}`)
+			.join(",")}}`;
+	}
+	return JSON.stringify(value);
+}
+
+function toolRequestKey(request: {
+	readonly tool_name?: string;
+	readonly arguments?: unknown;
+	readonly working_directory?: string;
+}): string {
+	return stableJson({
+		arguments: request.arguments ?? {},
+		tool_name: request.tool_name ?? "",
+		working_directory: request.working_directory ?? "",
+	});
+}
+
+function isVcrMissOutput(output: unknown): boolean {
+	return (
+		typeof output === "object" &&
+		output !== null &&
+		(output as { vcr?: unknown }).vcr === "miss"
+	);
+}
+
+async function loadForkVcrCassette(
+	workspace: string,
+	parentRunId: string,
+	forkPointEventId: string,
+): Promise<Map<string, VcrToolResult[]>> {
+	const eventsDbPath = resolve(workspace, ".buildplane", "ledger", "events.db");
+	if (!existsSync(eventsDbPath)) {
+		throw new Error(
+			`VCR requested but parent ledger was not found at ${eventsDbPath}`,
+		);
+	}
+	const { DatabaseSync } = await import("node:sqlite");
+	const db = new DatabaseSync(eventsDbPath, { readOnly: true });
+	try {
+		const rows = db
+			.prepare(
+				"SELECT id, parent_event_id, kind, payload FROM events WHERE run_id = ? AND kind IN ('tool_request', 'tool_result') ORDER BY occurred_at ASC, id ASC",
+			)
+			.all(parentRunId) as unknown as VcrEventRow[];
+		const requestById = new Map<string, string>();
+		const pendingResults: PendingVcrToolResult[] = [];
+		const resultByKey = new Map<string, VcrToolResult[]>();
+		for (const row of rows) {
+			const payload = JSON.parse(row.payload) as {
+				ToolRequestStoredV1?: {
+					tool_name?: string;
+					arguments?: unknown;
+					working_directory?: string;
+				};
+				ToolResultV1?: {
+					tool_request_id?: string;
+					stdout?: string;
+					stderr?: string;
+					exit_code?: number | null;
+					output?: unknown;
+				};
+			};
+			if (row.kind === "tool_request" && payload.ToolRequestStoredV1) {
+				if (row.parent_event_id !== forkPointEventId) {
+					continue;
+				}
+				requestById.set(row.id, toolRequestKey(payload.ToolRequestStoredV1));
+			}
+			if (row.kind === "tool_result" && payload.ToolResultV1) {
+				const parentToolRequestId = payload.ToolResultV1.tool_request_id;
+				if (!parentToolRequestId) {
+					continue;
+				}
+				if (isVcrMissOutput(payload.ToolResultV1.output)) {
+					continue;
+				}
+				pendingResults.push({
+					parentToolRequestId,
+					result: {
+						parentToolRequestId,
+						stdout: payload.ToolResultV1.stdout ?? "",
+						stderr: payload.ToolResultV1.stderr ?? "",
+						exitCode: payload.ToolResultV1.exit_code ?? 0,
+						output: payload.ToolResultV1.output ?? null,
+					},
+				});
+			}
+		}
+		for (const pending of pendingResults) {
+			const key = requestById.get(pending.parentToolRequestId);
+			if (!key) {
+				continue;
+			}
+			const results = resultByKey.get(key) ?? [];
+			results.push(pending.result);
+			resultByKey.set(key, results);
+		}
+		return resultByKey;
+	} finally {
+		db.close();
+	}
+}
+
 async function runForkExecution(
 	plan: ForkPlan,
 	workspace: string,
+	vcr: ForkVcrOptions,
 	opts: { stdout: (s: string) => void; stderr: (s: string) => void },
 ): Promise<number> {
 	// Phase E Task 6: real ledger spawn + orchestrator invocation.
@@ -1209,6 +2464,7 @@ async function runForkExecution(
 	let forkCurrentUnit: LedgerUnitContext | null = null;
 	const getForkUnitCtx = () => forkCurrentUnit;
 	const ledgerWorkspacePath = resolve(workspace);
+	let vcrCassette = new Map<string, VcrToolResult[]>();
 	let unsubscribeFork: (() => void) | null = null;
 	let forkCommandExecutor:
 		| {
@@ -1223,6 +2479,11 @@ async function runForkExecution(
 		| undefined;
 
 	try {
+		vcrCassette = new Map(
+			vcr.enabled && vcr.cassette
+				? [...vcr.cassette].map(([key, results]) => [key, [...results]])
+				: undefined,
+		);
 		// Load a fresh orchestrator bundle scoped to the fork workspace.
 		const bundle = await loadCliOrchestrator(workspace);
 		const {
@@ -1293,9 +2554,197 @@ async function runForkExecution(
 		});
 
 		// Wrap the commandExecutor so tool calls are instrumented through the ledger.
-		const { existsSync: fsExistsSync, realpathSync: fsRealpathSync } =
-			await import("node:fs");
+		const {
+			copyFileSync,
+			existsSync: fsExistsSync,
+			realpathSync: fsRealpathSync,
+			statSync,
+		} = await import("node:fs");
 		const { resolve: pathResolve } = await import("node:path");
+		const safeRealpath = (path: string): string => {
+			try {
+				return fsRealpathSync(path);
+			} catch {
+				return path;
+			}
+		};
+		const fileDigest = (path: string): string =>
+			`sha256:${createHash("sha256").update(readFileSync(path)).digest("hex")}`;
+		const vcrOutputStore = new Map(vcr.outputStore ?? []);
+		const materializeVcrOutputChecks = (
+			requiredOutputs: readonly string[],
+			worktreeRoot: string,
+			toolReqId: string,
+		): {
+			outputChecks: { path: string; exists: boolean }[];
+			materializationReceipts: {
+				path: string;
+				status: string;
+				source?: string;
+				reason?: string;
+			}[];
+		} => {
+			const realWorktreeRoot = safeRealpath(worktreeRoot);
+			const parentWorkspaceRoot = safeRealpath(
+				pathResolve(workspace, ".buildplane", "workspaces", vcr.parentRunId),
+			);
+			const parentOutputStoreRoot = safeRealpath(
+				vcrOutputStoreRoot(workspace, vcr.parentRunId),
+			);
+			const sourceRoots = [
+				{ label: "parent_vcr_output_store", root: parentOutputStoreRoot },
+				{ label: "parent_run_workspace", root: parentWorkspaceRoot },
+			];
+			const materializationReceipts: {
+				path: string;
+				status: string;
+				source?: string;
+				reason?: string;
+			}[] = [];
+			const outputChecks = requiredOutputs.map((outputPath: string) => {
+				const destinationResult = resolveContainedPath(
+					realWorktreeRoot,
+					outputPath,
+				);
+				if (!destinationResult.ok) {
+					materializationReceipts.push({
+						path: outputPath,
+						status: "invalid-output-path",
+						reason: destinationResult.reason,
+					});
+					return {
+						path: outputPath,
+						exists: false,
+					};
+				}
+				const destination = destinationResult.path;
+				try {
+					const emitWorkspaceWrite = (hashBefore: string | null): void => {
+						const copied = statSync(destination);
+						emitter.emit(
+							"workspace_write",
+							{
+								WorkspaceWriteV1: {
+									tool_request_id: toolReqId,
+									path: outputPath,
+									hash_before: hashBefore,
+									after: {
+										status: "captured",
+										data: {
+											hash: fileDigest(destination),
+											size_bytes: copied.size,
+										},
+									},
+								},
+							},
+							{ parent: toolReqId },
+						);
+					};
+					const prepareDestination = ():
+						| { ok: true; hashBefore: string | null }
+						| { ok: false; reason: string } => {
+						const destinationParent = ensureContainedDirectory(
+							realWorktreeRoot,
+							dirname(destination),
+							safeRealpath,
+						);
+						if (!destinationParent.ok) {
+							return { ok: false, reason: destinationParent.reason };
+						}
+						const hashBefore =
+							fsExistsSync(destination) && statSync(destination).isFile()
+								? fileDigest(destination)
+								: null;
+						return { ok: true, hashBefore };
+					};
+					const recordedOutput = vcrOutputStore.get(vcrOutputKey(outputPath));
+					if (recordedOutput !== undefined) {
+						const prepared = prepareDestination();
+						if (!prepared.ok) {
+							materializationReceipts.push({
+								path: outputPath,
+								status: "failed",
+								reason: prepared.reason,
+							});
+							return {
+								path: outputPath,
+								exists: false,
+							};
+						}
+						writeFileSync(destination, recordedOutput);
+						emitWorkspaceWrite(prepared.hashBefore);
+						materializationReceipts.push({
+							path: outputPath,
+							status: "copied",
+							source: "parent_vcr_output_store",
+						});
+						return {
+							path: outputPath,
+							exists: fsExistsSync(destination),
+						};
+					}
+					const sourceMatch = sourceRoots
+						.map((sourceRoot) => {
+							const sourceResult = resolveContainedPath(
+								sourceRoot.root,
+								outputPath,
+							);
+							return sourceResult.ok
+								? { ...sourceRoot, path: sourceResult.path }
+								: undefined;
+						})
+						.find((source) => {
+							if (!source) {
+								return false;
+							}
+							if (
+								!fsExistsSync(source.path) ||
+								!statSync(source.path).isFile()
+							) {
+								return false;
+							}
+							return isPathBelowRoot(source.root, safeRealpath(source.path));
+						});
+					if (sourceMatch) {
+						const prepared = prepareDestination();
+						if (!prepared.ok) {
+							materializationReceipts.push({
+								path: outputPath,
+								status: "failed",
+								reason: prepared.reason,
+							});
+							return {
+								path: outputPath,
+								exists: false,
+							};
+						}
+						copyFileSync(sourceMatch.path, destination);
+						emitWorkspaceWrite(prepared.hashBefore);
+						materializationReceipts.push({
+							path: outputPath,
+							status: "copied",
+							source: sourceMatch.label,
+						});
+					} else if (!fsExistsSync(destination)) {
+						materializationReceipts.push({
+							path: outputPath,
+							status: "missing-parent-output",
+						});
+					}
+				} catch (error) {
+					materializationReceipts.push({
+						path: outputPath,
+						status: "failed",
+						reason: error instanceof Error ? error.message : String(error),
+					});
+				}
+				return {
+					path: outputPath,
+					exists: fsExistsSync(destination),
+				};
+			});
+			return { outputChecks, materializationReceipts };
+		};
 		originalForkExecutePacket = forkCommandExecutor.executePacket;
 		forkCommandExecutor.executePacket = (
 			packetUnknown: unknown,
@@ -1316,6 +2765,136 @@ async function runForkExecution(
 				? pathResolve(worktreeRoot, p.execution.cwd)
 				: worktreeRoot;
 			const startedAt = new Date().toISOString();
+			const vcrKey = toolRequestKey({
+				tool_name: "run_command",
+				arguments: {
+					command: p.execution.command,
+					args: p.execution.args ?? [],
+				},
+				working_directory: p.execution.cwd ?? "",
+			});
+			if (vcr.enabled) {
+				const ctx = getForkUnitCtx();
+				const toolReqId = newEventId();
+				emitter.emit(
+					"tool_request",
+					{
+						ToolRequestStoredV1: {
+							tool_name: "run_command",
+							arguments: {
+								command: p.execution.command,
+								args: p.execution.args ?? [],
+							},
+							env: {
+								redacted: true,
+								hash: `sha256:${createHash("sha256")
+									.update("{}")
+									.digest("hex")}`,
+								hint: "env_var",
+							},
+							working_directory: p.execution.cwd ?? "",
+							unit_id: ctx?.unitId ?? "",
+						},
+					},
+					{ parent: ctx?.parentEventId, id: toolReqId },
+				);
+				const recordedQueue = vcrCassette.get(vcrKey);
+				const recorded = recordedQueue?.shift();
+				if (recordedQueue?.length === 0) {
+					vcrCassette.delete(vcrKey);
+				}
+				if (recorded) {
+					const { outputChecks, materializationReceipts } =
+						materializeVcrOutputChecks(
+							p.verification.requiredOutputs,
+							worktreeRoot,
+							toolReqId,
+						);
+					emitter.emit(
+						"tool_result",
+						{
+							ToolResultV1: {
+								tool_request_id: toolReqId,
+								stdout: recorded.stdout,
+								stderr: recorded.stderr,
+								exit_code: recorded.exitCode,
+								output: {
+									vcr: "hit",
+									parent_tool_request_id: recorded.parentToolRequestId,
+									parent_output: recorded.output,
+									materialized_outputs: materializationReceipts,
+								},
+								duration_ms: 0,
+							},
+						},
+						{ parent: toolReqId },
+					);
+					return {
+						command: p.execution.command,
+						args: [...(p.execution.args ?? [])],
+						cwd: effectiveCwd,
+						startedAt,
+						completedAt: new Date().toISOString(),
+						exitCode: recorded.exitCode,
+						stdout: recorded.stdout,
+						stderr: recorded.stderr,
+						outputChecks,
+					};
+				}
+				if (vcr.miss === "fail") {
+					const reason = `VCR miss for deterministic tool call ${p.execution.command}`;
+					emitter.emit(
+						"tool_result",
+						{
+							ToolResultV1: {
+								tool_request_id: toolReqId,
+								stdout: "",
+								stderr: reason,
+								exit_code: 97,
+								output: { vcr: "miss", policy: "fail" },
+								duration_ms: 0,
+							},
+						},
+						{ parent: toolReqId },
+					);
+					return {
+						command: p.execution.command,
+						args: [...(p.execution.args ?? [])],
+						cwd: effectiveCwd,
+						startedAt,
+						completedAt: new Date().toISOString(),
+						exitCode: 97,
+						stdout: "",
+						stderr: reason,
+						outputChecks: p.verification.requiredOutputs.map(
+							(outputPath: string) => ({
+								path: outputPath,
+								exists: (() => {
+									const outputResult = resolveContainedPath(
+										worktreeRoot,
+										outputPath,
+									);
+									return outputResult.ok && fsExistsSync(outputResult.path);
+								})(),
+							}),
+						),
+					};
+				}
+				emitter.emit(
+					"tool_result",
+					{
+						ToolResultV1: {
+							tool_request_id: toolReqId,
+							stdout: "",
+							stderr: "VCR miss; explicit reexecute policy selected",
+							exit_code: null,
+							output: { vcr: "miss", policy: "reexecute" },
+							duration_ms: 0,
+						},
+					},
+					{ parent: toolReqId },
+				);
+			}
 			const result = perCallRegistry.run_command({
 				command: p.execution.command,
 				args: p.execution.args,
@@ -1332,20 +2911,25 @@ async function runForkExecution(
 				stdout: result.stdout,
 				stderr: result.stderr,
 				outputChecks: p.verification.requiredOutputs.map(
-					(outputPath: string) => {
-						const realRoot = (() => {
-							try {
-								return fsRealpathSync(worktreeRoot);
-							} catch {
-								return worktreeRoot;
-							}
-						})();
-						return {
-							path: outputPath,
-							exists: fsExistsSync(pathResolve(realRoot, outputPath)),
-						};
-					},
+					(outputPath: string) => ({
+						path: outputPath,
+						exists: (() => {
+							const outputResult = resolveContainedPath(
+								safeRealpath(worktreeRoot),
+								outputPath,
+							);
+							return outputResult.ok && fsExistsSync(outputResult.path);
+						})(),
+					}),
 				),
+				...(vcr.enabled
+					? {
+							vcr: {
+								miss: "reexecute",
+								reason: "no deterministic parent tape match",
+							},
+						}
+					: {}),
 			};
 		};
 
@@ -1428,6 +3012,11 @@ async function runFork(
 		stderr: (s: string) => void;
 	},
 ): Promise<number> {
+	if (isHelpRequested(rest)) {
+		opts.stdout(forkUsageText());
+		return 0;
+	}
+
 	const args = parseForkArgs(rest);
 	if (!args.ok) {
 		opts.stderr(`buildplane fork: ${args.error}\n`);
@@ -1442,6 +3031,21 @@ async function runFork(
 	// resolved from the wrong directory.
 	const packet = resolve(opts.cwd, args.value.packet);
 	const binary = resolveLedgerBinary(opts.cwd);
+	let vcrCassette: Map<string, VcrToolResult[]> | undefined;
+	let vcrOutputStore: Map<string, Buffer> | undefined;
+	if (args.value.vcr) {
+		try {
+			vcrCassette = await loadForkVcrCassette(
+				workspace,
+				args.value.runId,
+				args.value.at,
+			);
+			vcrOutputStore = loadForkVcrOutputStore(workspace, args.value.runId);
+		} catch (error) {
+			opts.stderr(`buildplane fork: ${String(error)}\n`);
+			return 1;
+		}
+	}
 
 	// Phase 1: plan.
 	// NOTE: spawnSync for `fork plan` must run from the project root (not from the
@@ -1516,7 +3120,18 @@ async function runFork(
 
 	// Phase 4: stub execution for Task 5. Task 6 replaces this with a real
 	// ledger spawn + orchestrator invocation.
-	const exitCode = await runForkExecution(plan, workspace, opts);
+	const exitCode = await runForkExecution(
+		plan,
+		workspace,
+		{
+			enabled: args.value.vcr,
+			miss: args.value.vcrMiss,
+			parentRunId: args.value.runId,
+			cassette: vcrCassette,
+			outputStore: vcrOutputStore,
+		},
+		opts,
+	);
 
 	// Phase 5: exit hint.
 	const currentBranchResult = spawnSync(
@@ -1672,21 +3287,50 @@ export async function runCli(
 	}
 
 	try {
+		if (command === "admission") {
+			const subcommand = rest[0];
+			if (subcommand === "receipt") {
+				return runAdmissionReceiptDryRunCommand(rest.slice(1), cwd, stdout);
+			}
+			throw new Error(
+				`Unknown admission command: ${subcommand ?? "(missing subcommand)"}`,
+			);
+		}
+
 		if (command === "bootstrap") {
 			const subcommand = rest[0];
 			const doctorArgs = rest.slice(1);
-			const json = doctorArgs.includes("--json");
 			if (subcommand === "doctor") {
-				const hasOnlySupportedDoctorArgs =
-					doctorArgs.length === 0 ||
-					(doctorArgs.length === 1 && doctorArgs[0] === "--json");
+				const supportedDoctorFlags = new Set(["--json", "--capabilities"]);
+				const seenDoctorFlags = new Set<string>();
+				const hasOnlySupportedDoctorArgs = doctorArgs.every((arg) => {
+					if (!supportedDoctorFlags.has(arg) || seenDoctorFlags.has(arg)) {
+						return false;
+					}
+					seenDoctorFlags.add(arg);
+					return true;
+				});
 				if (!hasOnlySupportedDoctorArgs) {
 					throw new Error(
 						`Unsupported bootstrap doctor arguments: ${doctorArgs.join(" ")}`,
 					);
 				}
+				const json = seenDoctorFlags.has("--json");
+				const capabilities = seenDoctorFlags.has("--capabilities");
+				if (capabilities) {
+					const report =
+						deps?.inspectCapabilities?.() ?? inspectCapabilities({ cwd });
+					if (json) {
+						stdout(formatJson(report));
+					} else {
+						for (const line of formatCapabilityReport(report)) {
+							stdout(line);
+						}
+					}
+					return report.ok ? 0 : 1;
+				}
 				const report =
-					deps?.inspectBootstrapDoctor?.() ?? inspectBootstrapDoctor();
+					deps?.inspectBootstrapDoctor?.() ?? inspectBootstrapDoctor({ cwd });
 				if (json) {
 					stdout(formatJson(report));
 				} else {
@@ -1699,6 +3343,49 @@ export async function runCli(
 			throw new Error(
 				`Unknown bootstrap command: ${subcommand ?? "(missing subcommand)"}`,
 			);
+		}
+
+		if (command === "planforge") {
+			const subcommand = rest[0];
+			if (isHelpRequested(rest)) {
+				for (const line of formatPlanForgeHelp()) {
+					stdout(line);
+				}
+				return 0;
+			}
+			if (subcommand !== "dry-run") {
+				throw new Error(
+					"Unsupported PlanForge command. Only dry-run is available; non-dry-run PlanForge forms are intentionally disabled.",
+				);
+			}
+			const subRest = rest.slice(1);
+			if (
+				subRest.some((arg) =>
+					["--write", "--execute", "--admit"].some(
+						(flag) => arg === flag || arg.startsWith(`${flag}=`),
+					),
+				)
+			) {
+				throw new Error(
+					"Unsupported PlanForge dry-run arguments: write, execute, and admit side-effect forms are disabled.",
+				);
+			}
+			if (!subRest.includes("--json")) {
+				throw new Error(
+					"PlanForge dry-run requires --json for stable review output.",
+				);
+			}
+			const inputPath = readFlag(subRest, "--input");
+			if (!inputPath) {
+				throw new Error(
+					"Missing required --input <file> argument for PlanForge dry-run.",
+				);
+			}
+			const plan = createPlanForgeDryRunPlan(resolve(cwd, inputPath));
+			stdout(formatJson(plan));
+			return plan.validation.status === PLANFORGE_VALIDATION_STATUS_PASS
+				? 0
+				: 1;
 		}
 
 		if (command === "memory") {
@@ -1736,6 +3423,95 @@ export async function runCli(
 					}
 				}
 				return 0;
+			}
+			if (subcommand === "promote") {
+				const subRest = rest.slice(1);
+				if (isHelpRequested(subRest)) {
+					for (const line of formatMemoryPromoteHelp()) {
+						stdout(line);
+					}
+					return 0;
+				}
+				const json = subRest.includes("--json");
+				const receiptLikeArgs = subRest.filter(
+					(arg) => arg === "--receipt" || arg.startsWith("--receipt="),
+				);
+				if (receiptLikeArgs.length === 0) {
+					try {
+						return await (deps?.runNativeCommand ?? runNativeCommand)(rest, {
+							cwd,
+							commandPath: ["memory"],
+							stdout,
+							stderr,
+						});
+					} catch (error) {
+						throw createNativeDispatchError(["memory"], error);
+					}
+				}
+				const receiptFlagIndexes = subRest.reduce<number[]>(
+					(indexes, arg, index) => {
+						if (arg === "--receipt") {
+							indexes.push(index);
+						}
+						return indexes;
+					},
+					[],
+				);
+				const failUnsupportedReceiptArgs = (
+					args: readonly string[],
+				): number => {
+					const msg = `Unsupported arguments for memory promote --receipt: ${args.join(" ")}.`;
+					if (json) {
+						stdout(formatJson(formatJsonError("UNSUPPORTED_ARGUMENTS", msg)));
+					} else {
+						stderr(msg);
+					}
+					return 1;
+				};
+				if (receiptFlagIndexes.length !== 1) {
+					return failUnsupportedReceiptArgs(
+						subRest.filter((arg) => arg !== "--json"),
+					);
+				}
+				const receiptIndex = receiptFlagIndexes[0];
+				const receiptId = subRest[receiptIndex + 1];
+				if (!receiptId || receiptId.startsWith("--")) {
+					const msg =
+						"Missing required --receipt <run-id> argument for memory promote.";
+					if (json) {
+						stdout(formatJson(formatJsonError("MISSING_ARGUMENT", msg)));
+					} else {
+						stderr(msg);
+					}
+					return 1;
+				}
+				const unsupportedArgs = subRest.filter((arg, index) => {
+					if (arg === "--json" || arg === "--receipt") {
+						return false;
+					}
+					if (arg.startsWith("--receipt=")) {
+						return true;
+					}
+					return index !== receiptIndex + 1;
+				});
+				if (unsupportedArgs.length > 0) {
+					return failUnsupportedReceiptArgs(unsupportedArgs);
+				}
+				const promotion = await promoteMemoryFromReceipt(cwd, receiptId);
+				if (json) {
+					stdout(formatJson(promotion.report));
+				} else if (promotion.ok) {
+					for (const line of formatMemoryPromotionHuman(promotion.report)) {
+						stdout(line);
+					}
+				} else {
+					const failedPromotion = promotion as {
+						readonly ok: false;
+						readonly report: ReceiptNotAcceptedReport;
+					};
+					stderr(failedPromotion.report.error.message);
+				}
+				return promotion.ok ? 0 : 1;
 			}
 			if (subcommand === "inspect") {
 				const subRest = rest.slice(1);
@@ -1821,19 +3597,27 @@ export async function runCli(
 			return await runFork(rest, { cwd, stdout, stderr });
 		}
 
-		if (command === "pack" && rest[0] === "show") {
+		if (command === "replay" && isHelpRequested(rest)) {
+			for (const line of formatReplayHelp()) {
+				stdout(line);
+			}
+			return 0;
+		}
+
+		if (command === "pack" && (rest[0] === "show" || rest[0] === "export")) {
+			const packAction = rest[0];
 			try {
 				return await (deps?.runNativeCommand ?? runNativeCommand)(
 					rest.slice(1),
 					{
 						cwd,
-						commandPath: ["pack", "show"],
+						commandPath: ["pack", packAction],
 						stdout,
 						stderr,
 					},
 				);
 			} catch (error) {
-				throw createNativeDispatchError(["pack", "show"], error);
+				throw createNativeDispatchError(["pack", packAction], error);
 			}
 		}
 
@@ -1888,6 +3672,314 @@ export async function runCli(
 			throw new Error(
 				`Unknown workflow command: ${subcommand ?? "(missing subcommand)"}`,
 			);
+		}
+
+		if (command === "verify") {
+			if (isHelpRequested(rest)) {
+				for (const line of formatVerifyHelp()) {
+					stdout(line);
+				}
+				return 0;
+			}
+			const json = rest.includes("--json");
+			const runIndex = rest.indexOf("--run");
+			if (runIndex === -1 || !rest[runIndex + 1]) {
+				throw new Error("Missing required --run <id> argument.");
+			}
+			const runId = rest[runIndex + 1];
+			const storage = (await cliImport("@buildplane/storage")) as unknown as {
+				verifyRunFinalVerdict: (
+					root: string,
+					options: { runId: string },
+				) => { verdict: string; runId: string } & Record<string, unknown>;
+			};
+			const report = storage.verifyRunFinalVerdict(cwd, { runId });
+			if (json) {
+				stdout(formatJson(report));
+			} else {
+				stdout(`verify: ${report.verdict}`);
+				stdout(`run-id: ${report.runId}`);
+			}
+			return report.verdict === "PASSED" ? 0 : 1;
+		}
+
+		if (command === "evidence") {
+			const subcommand = rest[0];
+			if (isHelpRequested(rest)) {
+				for (const line of formatEvidenceHelp()) {
+					stdout(line);
+				}
+				return 0;
+			}
+
+			if (subcommand === "export") {
+				const subRest = rest.slice(1);
+				const json = subRest.includes("--json");
+				const runIndex = subRest.indexOf("--run");
+				const outIndex = subRest.indexOf("--out");
+				if (runIndex === -1 || !subRest[runIndex + 1]) {
+					throw new Error("Missing required --run <id> argument.");
+				}
+				if (outIndex === -1 || !subRest[outIndex + 1]) {
+					throw new Error("Missing required --out <path> argument.");
+				}
+
+				const runId = subRest[runIndex + 1];
+				const outPath = resolve(cwd, subRest[outIndex + 1]);
+				const storage = (await cliImport("@buildplane/storage")) as unknown as {
+					exportRunBundle: (
+						root: string,
+						options: { runId: string; outPath: string },
+					) => Record<string, unknown>;
+				};
+				const bundle = storage.exportRunBundle(cwd, { runId, outPath });
+				if (json) {
+					stdout(formatJson(bundle));
+				} else {
+					stdout("evidence-export: wrote");
+					stdout(`run-id: ${runId}`);
+					stdout(`out: ${outPath}`);
+				}
+				return 0;
+			}
+
+			throw new Error(
+				`Unknown evidence command: ${subcommand ?? "(missing subcommand)"}`,
+			);
+		}
+
+		if (command === "trace") {
+			const subcommand = rest[0];
+			if (isHelpRequested(rest)) {
+				for (const line of formatTraceHelp()) {
+					stdout(line);
+				}
+				return 0;
+			}
+
+			if (subcommand === "export") {
+				const subRest = rest.slice(1);
+				const json = subRest.includes("--json");
+				const runIndex = subRest.indexOf("--run");
+				const formatIndex = subRest.indexOf("--format");
+				const outIndex = subRest.indexOf("--out");
+				if (runIndex === -1 || !subRest[runIndex + 1]) {
+					throw new Error("Missing required --run <id> argument.");
+				}
+				if (formatIndex === -1 || !subRest[formatIndex + 1]) {
+					throw new Error("Missing required --format otel-json argument.");
+				}
+				if (subRest[formatIndex + 1] !== "otel-json") {
+					throw new Error("Unsupported trace format. Supported: otel-json.");
+				}
+				if (outIndex === -1 || !subRest[outIndex + 1]) {
+					throw new Error("Missing required --out <path> argument.");
+				}
+
+				const runId = subRest[runIndex + 1];
+				const outPath = resolve(cwd, subRest[outIndex + 1]);
+				const storage = (await cliImport("@buildplane/storage")) as unknown as {
+					createBuildplaneStorage: (root: string) => {
+						inspectTarget: (id: string) => unknown;
+					};
+				};
+				const snapshot = storage
+					.createBuildplaneStorage(cwd)
+					.inspectTarget(runId);
+				const exportResult = createOtelTraceExport(
+					snapshot as Parameters<typeof createOtelTraceExport>[0],
+					outPath,
+				);
+				mkdirSync(dirname(outPath), { recursive: true });
+				writeFileSync(
+					outPath,
+					JSON.stringify(exportResult.trace, null, 2),
+					"utf8",
+				);
+				const summary = {
+					format: exportResult.format,
+					runId: exportResult.runId,
+					spanCount: exportResult.spanCount,
+					outPath: exportResult.outPath,
+					traceGrading: exportResult.traceGrading,
+				};
+				if (json) {
+					stdout(formatJson(summary));
+				} else {
+					stdout("trace-export: wrote");
+					stdout(`run-id: ${runId}`);
+					stdout(`format: ${exportResult.format}`);
+					stdout(`spans: ${exportResult.spanCount}`);
+					stdout(`out: ${outPath}`);
+				}
+				return 0;
+			}
+
+			throw new Error(
+				`Unknown trace command: ${subcommand ?? "(missing subcommand)"}`,
+			);
+		}
+
+		if (command === "pr-check") {
+			const subcommand = rest[0];
+			if (isHelpRequested(rest)) {
+				for (const line of formatPrCheckHelp()) {
+					stdout(line);
+				}
+				return 0;
+			}
+			const subRest = rest.slice(1);
+			const json = subRest.includes("--json");
+			if (subcommand !== "dry-run" && subcommand !== "publish") {
+				throw new Error(
+					`Unknown pr-check command: ${subcommand ?? "(missing subcommand)"}`,
+				);
+			}
+
+			const runId = requireFlag(subRest, "--run", "--run <id>");
+			const repository = requireFlag(subRest, "--repo", "--repo <owner/repo>");
+			const headSha = requireHeadSha(subRest);
+			const name = readFlag(subRest, "--name");
+			const detailsUrl = readFlag(subRest, "--details-url");
+			const storage = (await cliImport("@buildplane/storage")) as unknown as {
+				verifyRunFinalVerdict: (
+					root: string,
+					options: { runId: string },
+				) => { verdict: string; runId: string } & Record<string, unknown>;
+			};
+			const report = storage.verifyRunFinalVerdict(cwd, { runId });
+
+			if (subcommand === "dry-run") {
+				const preview = planPrCheckOperation({
+					report,
+					repository,
+					headSha,
+					name,
+					detailsUrl,
+				});
+				if (json) {
+					stdout(formatJson(preview));
+				} else {
+					for (const line of formatPrCheckHuman(preview)) {
+						stdout(line);
+					}
+				}
+				return 0;
+			}
+
+			const grantFile = requireFlag(
+				subRest,
+				"--grant-file",
+				"--grant-file <file>",
+			);
+			const grantId = requireFlag(subRest, "--grant-id", "--grant-id <id>");
+			const credentialEnv =
+				readFlag(subRest, "--credential-env") ?? "GITHUB_TOKEN";
+			const grants = loadCapabilityGrantsFromJson(
+				JSON.parse(readFileSync(resolve(cwd, grantFile), "utf8")),
+			);
+			const published = await publishPrCheckOperation({
+				report,
+				repository,
+				headSha,
+				name,
+				detailsUrl,
+				grants,
+				grantId,
+				credential: () => process.env[credentialEnv] ?? "",
+				request: deps?.publishPrCheckRequest ?? defaultPrCheckRequest,
+			});
+			if (json) {
+				stdout(formatJson(published));
+			} else {
+				for (const line of formatPrCheckHuman(published)) {
+					stdout(line);
+				}
+			}
+			return 0;
+		}
+
+		if (command === "pr-comment") {
+			const subcommand = rest[0];
+			if (isHelpRequested(rest)) {
+				for (const line of formatPrCommentHelp()) {
+					stdout(line);
+				}
+				return 0;
+			}
+			const subRest = rest.slice(1);
+			const json = subRest.includes("--json");
+			if (subcommand !== "dry-run" && subcommand !== "publish") {
+				throw new Error(
+					`Unknown pr-comment command: ${subcommand ?? "(missing subcommand)"}`,
+				);
+			}
+
+			const runId = requireFlag(subRest, "--run", "--run <id>");
+			const repository = requireFlag(subRest, "--repo", "--repo <owner/repo>");
+			const prNumber = requirePrNumber(subRest);
+			const headSha = requireHeadSha(subRest);
+			const detailsUrl = readFlag(subRest, "--details-url");
+			const bundleUrl = readFlag(subRest, "--bundle-url");
+			const storage = (await cliImport("@buildplane/storage")) as unknown as {
+				verifyRunFinalVerdict: (
+					root: string,
+					options: { runId: string },
+				) => { verdict: string; runId: string } & Record<string, unknown>;
+			};
+			const report = storage.verifyRunFinalVerdict(cwd, { runId });
+
+			if (subcommand === "dry-run") {
+				const preview = planPrCommentOperation({
+					report,
+					repository,
+					prNumber,
+					headSha,
+					detailsUrl,
+					bundleUrl,
+				});
+				if (json) {
+					stdout(formatJson(preview));
+				} else {
+					for (const line of formatPrCommentHuman(preview)) {
+						stdout(line);
+					}
+				}
+				return 0;
+			}
+
+			const grantFile = requireFlag(
+				subRest,
+				"--grant-file",
+				"--grant-file <file>",
+			);
+			const grantId = requireFlag(subRest, "--grant-id", "--grant-id <id>");
+			const credentialEnv =
+				readFlag(subRest, "--credential-env") ?? "GITHUB_TOKEN";
+			const grants = loadCapabilityGrantsFromJson(
+				JSON.parse(readFileSync(resolve(cwd, grantFile), "utf8")),
+			);
+			const published = await publishPrCommentOperation({
+				report,
+				repository,
+				prNumber,
+				headSha,
+				detailsUrl,
+				bundleUrl,
+				grants,
+				grantId,
+				credential: () => process.env[credentialEnv] ?? "",
+				verifyPrHead: deps?.verifyPrHeadRequest ?? defaultPrHeadVerifier,
+				request: deps?.publishPrCommentRequest ?? defaultPrCommentRequest,
+			});
+			if (json) {
+				stdout(formatJson(published));
+			} else {
+				for (const line of formatPrCommentHuman(published)) {
+					stdout(line);
+				}
+			}
+			return 0;
 		}
 
 		if (command === "workspace") {
@@ -2341,6 +4433,75 @@ export async function runCli(
 						cwd: p.execution.cwd,
 					});
 					const completedAt = new Date().toISOString();
+					const realWorkspaceRoot = (() => {
+						try {
+							return fsRealpathSync(workspaceRoot);
+						} catch {
+							return workspaceRoot;
+						}
+					})();
+					const outputChecks = p.verification.requiredOutputs.map(
+						(outputPath: string) => {
+							const outputResult = resolveContainedPath(
+								realWorkspaceRoot,
+								outputPath,
+							);
+							return {
+								path: outputPath,
+								exists: outputResult.ok && fsExistsSync(outputResult.path),
+							};
+						},
+					);
+					for (const check of outputChecks) {
+						if (!check.exists) {
+							continue;
+						}
+						try {
+							const sourceResult = resolveContainedPath(
+								realWorkspaceRoot,
+								check.path,
+							);
+							const destinationResult = resolveContainedPath(
+								vcrOutputStoreRoot(resolvedCwd, ledgerRunId),
+								check.path,
+							);
+							if (!sourceResult.ok || !destinationResult.ok) {
+								continue;
+							}
+							const source = sourceResult.path;
+							if (!statSync(source).isFile()) {
+								continue;
+							}
+							const realSource = fsRealpathSync(source);
+							if (!isPathBelowRoot(realWorkspaceRoot, realSource)) {
+								continue;
+							}
+							const destination = destinationResult.path;
+							const destinationParent = ensureContainedDirectory(
+								resolvedCwd,
+								dirname(destination),
+								fsRealpathSync,
+							);
+							if (!destinationParent.ok) {
+								continue;
+							}
+							const realDestinationRoot = fsRealpathSync(
+								vcrOutputStoreRoot(resolvedCwd, ledgerRunId),
+							);
+							if (
+								!isPathAtOrBelowRoot(
+									realDestinationRoot,
+									fsRealpathSync(dirname(destination)),
+								)
+							) {
+								continue;
+							}
+							copyFileSync(source, destination);
+						} catch {
+							// VCR output capture is opportunistic; the authoritative run
+							// receipt below still records whether the required output existed.
+						}
+					}
 					return {
 						command: p.execution.command,
 						args: [...(p.execution.args ?? [])],
@@ -2350,23 +4511,7 @@ export async function runCli(
 						exitCode: result.exitCode,
 						stdout: result.stdout,
 						stderr: result.stderr,
-						outputChecks: p.verification.requiredOutputs.map(
-							(outputPath: string) => {
-								const realWorkspaceRoot = (() => {
-									try {
-										return fsRealpathSync(workspaceRoot);
-									} catch {
-										return workspaceRoot;
-									}
-								})();
-								return {
-									path: outputPath,
-									exists: fsExistsSync(
-										pathResolve(realWorkspaceRoot, outputPath),
-									),
-								};
-							},
-						),
+						outputChecks,
 					};
 				};
 				if (runLedgerEmitter) {
@@ -2677,12 +4822,45 @@ export async function runCli(
 			}
 			case "inspect": {
 				const json = rest.includes("--json");
-				const id = rest.find((value) => value !== "--json");
+				const viewIndex = rest.indexOf("--view");
+				const inlineView = rest.find((value) => value.startsWith("--view="));
+				const view =
+					inlineView?.slice("--view=".length) ??
+					(viewIndex >= 0 ? rest[viewIndex + 1] : "detail");
+				if (viewIndex >= 0 && (!view || view.startsWith("--"))) {
+					throw new Error("Missing required inspect view after --view.");
+				}
+				if (view !== "detail" && view !== "inspector") {
+					throw new Error(
+						`Unsupported inspect view '${view}'. Supported views: detail, inspector.`,
+					);
+				}
+				const id = rest.find((value, index) => {
+					if (value === "--json" || value === "--view") return false;
+					if (viewIndex >= 0 && index === viewIndex + 1) return false;
+					if (value.startsWith("--view=")) return false;
+					return !value.startsWith("--");
+				});
 				if (!id) {
 					throw new Error("Missing required run or unit id for inspect.");
 				}
 
 				const result = orchestrator.inspect(id);
+				if (view === "inspector") {
+					const projection = createInspectorProjection(
+						result as unknown as Parameters<
+							typeof createInspectorProjection
+						>[0],
+					);
+					if (json) {
+						stdout(formatJson(projection));
+					} else {
+						for (const line of formatInspectorProjection(projection)) {
+							stdout(line);
+						}
+					}
+					return 0;
+				}
 
 				if (json) {
 					stdout(formatJson(result));
@@ -2998,6 +5176,283 @@ function normalizeGraph(raw: Record<string, unknown>): unknown {
 	};
 }
 
+function sectionText(content: string, heading: string): string | undefined {
+	const headingPattern = new RegExp(`^## ${heading}\\s*$`, "m");
+	const match = headingPattern.exec(content);
+	if (!match) {
+		return undefined;
+	}
+	const start = match.index + match[0].length;
+	const rest = content.slice(start);
+	const nextHeading = /^##\s+/m.exec(rest);
+	return (nextHeading ? rest.slice(0, nextHeading.index) : rest).trim();
+}
+
+function listValue(
+	section: string | undefined,
+	label: string,
+): string | undefined {
+	if (!section) {
+		return undefined;
+	}
+	const pattern = new RegExp(`^- ${label}:[ \t]*(.+)$`, "m");
+	const match = pattern.exec(section);
+	return match?.[1]?.trim();
+}
+
+function hasLine(content: string, expected: string): boolean {
+	return content
+		.split(/\r?\n/)
+		.some((line) => line.trim().toLowerCase() === expected.toLowerCase());
+}
+
+function hasForbiddenPlanForgeGoalIntent(goal: string | undefined): boolean {
+	if (!goal) {
+		return false;
+	}
+	const forbiddenGoalIntent =
+		/\b(push(?:es)?|deploys?|merges?|open\s+(?:prs?|pull\s+requests?)|pull\s+requests?|network\s+writes?|board\s+writes?|kanban|gsd2|github|worker[-\s]+spawns?|spawn\s+(?:a\s+)?workers?|execute\s+code|code\s+executions?|run\s+commands?)\b/gi;
+	for (const match of goal.matchAll(forbiddenGoalIntent)) {
+		const index = match.index ?? 0;
+		const prefix = goal.slice(Math.max(0, index - 24), index).toLowerCase();
+		if (
+			/(?:\bno\b|\bnot\b|\bwithout\b|\bmust not\b|\bdoes not\b|\bdo not\b)(?:\s+(?:to|use|perform|request|run|open|create|any|a|an|the)){0,3}\W*$/.test(
+				prefix,
+			)
+		) {
+			continue;
+		}
+		return true;
+	}
+	return false;
+}
+
+function createPlanForgeDryRunPlan(inputPath: string): PlanForgePlan {
+	const content = readFileSync(inputPath, "utf8");
+	const goal = sectionText(content, "Goal");
+	const repositoryContext = sectionText(content, "Repository context");
+	const safetyConstraints = sectionText(content, "Safety constraints");
+	const inputEvidenceName = basename(inputPath);
+	const evidenceRefs = [
+		`${inputEvidenceName}#safety-constraints`,
+		`${inputEvidenceName}#repository-context`,
+	];
+	const remote = listValue(repositoryContext, "Remote");
+	const trustedBase = listValue(repositoryContext, "Trusted base");
+	const worktreePolicy = listValue(repositoryContext, "Worktree policy");
+	const missingEvidence: PlanForgeRequiredEvidence[] = [];
+	const unsafeReasons: string[] = [];
+
+	if (!goal) {
+		missingEvidence.push("operator_goal");
+	}
+	if (!remote) {
+		missingEvidence.push("repository_remote");
+	}
+	if (!trustedBase) {
+		missingEvidence.push("trusted_base");
+	}
+	if (
+		!hasLine(safetyConstraints ?? "", "- Dry-run only.") ||
+		!hasLine(
+			safetyConstraints ?? "",
+			"- No Kanban, GSD2, GitHub, network, push, PR, deploy, merge, or worker-spawn side effects.",
+		)
+	) {
+		missingEvidence.push("dry_run_constraints");
+	}
+	if (
+		!hasLine(
+			safetyConstraints ?? "",
+			"- Buildplane kernel validates and admits plans.",
+		) ||
+		!hasLine(safetyConstraints ?? "", "- Coding agents are untrusted workers.")
+	) {
+		missingEvidence.push("trusted_boundary");
+	}
+	if (!worktreePolicy) {
+		missingEvidence.push("worktree_policy");
+	} else if (worktreePolicy !== "isolated-worktree-required") {
+		unsafeReasons.push("worktree policy must require an isolated worktree");
+	}
+	if (hasForbiddenPlanForgeGoalIntent(goal)) {
+		unsafeReasons.push("goal requests a forbidden side effect");
+	}
+
+	const validationStatus: PlanForgeValidationStatus =
+		unsafeReasons.length > 0
+			? PLANFORGE_VALIDATION_STATUS_UNSAFE_TO_RUN
+			: missingEvidence.length > 0
+				? PLANFORGE_VALIDATION_STATUS_INSUFFICIENT_EVIDENCE
+				: PLANFORGE_VALIDATION_STATUS_PASS;
+	const checks: PlanForgeValidationCheck[] = [
+		{
+			id: "trusted-boundary",
+			status:
+				missingEvidence.includes("dry_run_constraints") ||
+				missingEvidence.includes("trusted_boundary")
+					? "INSUFFICIENT_EVIDENCE"
+					: "PASS",
+			message:
+				"Buildplane kernel validates and admits the plan; coding agents remain untrusted workers.",
+			evidenceRefs: [evidenceRefs[0]],
+		},
+		{
+			id: "dry-run-only",
+			status:
+				unsafeReasons.length > 0
+					? "UNSAFE_TO_RUN"
+					: missingEvidence.includes("dry_run_constraints")
+						? "INSUFFICIENT_EVIDENCE"
+						: "PASS",
+			message:
+				"The proposed plan emits review artifacts only and forbids execution, board writes, network writes, push, deploy, and merge.",
+			evidenceRefs: [evidenceRefs[0]],
+		},
+		{
+			id: "evidence-present",
+			status: missingEvidence.length > 0 ? "INSUFFICIENT_EVIDENCE" : "PASS",
+			message:
+				"Operator goal, repository remote, trusted base, worktree policy, and safety constraints are present.",
+			evidenceRefs: [evidenceRefs[1]],
+		},
+	];
+
+	const normalizedGoal = goal ?? "";
+	const normalizedTrustedBase = trustedBase ?? "unknown";
+	const normalizedRemote = remote ?? "unknown";
+	const fingerprintInput = JSON.stringify({
+		constraints: {
+			dryRun: hasLine(safetyConstraints ?? "", "- Dry-run only."),
+			noSideEffects: hasLine(
+				safetyConstraints ?? "",
+				"- No Kanban, GSD2, GitHub, network, push, PR, deploy, merge, or worker-spawn side effects.",
+			),
+			trustedBoundary: {
+				kernelAdmits: hasLine(
+					safetyConstraints ?? "",
+					"- Buildplane kernel validates and admits plans.",
+				),
+				untrustedWorkers: hasLine(
+					safetyConstraints ?? "",
+					"- Coding agents are untrusted workers.",
+				),
+			},
+		},
+		evidenceRefs,
+		goal: normalizedGoal,
+		remote: normalizedRemote,
+		trustedBase: normalizedTrustedBase,
+		worktreePolicy: worktreePolicy ?? "unknown",
+	});
+	const planFingerprint = createHash("sha256")
+		.update(fingerprintInput)
+		.digest("hex")
+		.slice(0, 8);
+	const idempotencyKey = `planforge:v0:buildplane:${normalizedTrustedBase}:${planFingerprint}`;
+	const canonicalInput = content.replace(/\r\n/g, "\n");
+	const inputDigest = `sha256:${createHash("sha256").update(canonicalInput).digest("hex")}`;
+
+	const plan: PlanForgePlan = {
+		schemaVersion: PLANFORGE_PLAN_SCHEMA_VERSION,
+		id: `pf-plan-${planFingerprint}`,
+		idempotencyKey,
+		title: "PlanForge dry-run admission slice",
+		goal: normalizedGoal,
+		trustedBase: normalizedTrustedBase,
+		tasks: [
+			{
+				id: PLANFORGE_TASK_IDS[0],
+				title: "Spec PlanForge contracts and fixture artifacts",
+				objective:
+					"Define the narrow documentation-level PlanForge contracts plus deterministic dry-run fixtures.",
+				assigneeHint: "auto-coder",
+				workspace: "isolated-worktree",
+				dependsOn: [],
+				allowedSideEffects: ["local-doc", "local-fixture"],
+				forbiddenSideEffects: [
+					"execute-code",
+					"board-write",
+					"network-write",
+					"push",
+					"deploy",
+					"merge",
+				],
+				acceptanceCriteria: [
+					"Define PlanForgeInput, PlanForgePlan, PlanForgeTask, PlanForgeValidation, and PlanForgeReceipt at documentation/fixture level.",
+					"State that the Buildplane kernel validates and admits plans while coding agents remain untrusted workers.",
+					"State dry-run/no-side-effect behavior.",
+					"Define PASS, BLOCKED, FAILED, INSUFFICIENT_EVIDENCE, and UNSAFE_TO_RUN failure/pass states.",
+					"Define idempotency key semantics for repeated planning.",
+				],
+				verificationCommands: [
+					"git status --short --branch",
+					"git diff --check",
+					"pnpm lint",
+				],
+			},
+			{
+				id: PLANFORGE_TASK_IDS[1],
+				title: "Implement PlanForge dry-run CLI and schema validation",
+				objective:
+					"Add a later dry-run command that validates local input and emits stable JSON without storage, board, network, or worker side effects.",
+				assigneeHint: "auto-coder",
+				workspace: "isolated-worktree",
+				dependsOn: [PLANFORGE_TASK_IDS[0]],
+				allowedSideEffects: ["local-doc", "local-fixture", "local-receipt"],
+				forbiddenSideEffects: [
+					"execute-code",
+					"board-write",
+					"network-write",
+					"push",
+					"deploy",
+					"merge",
+				],
+				acceptanceCriteria: [
+					"Missing input fails closed before any write.",
+					"Invalid input fails closed before any write.",
+					"Unsupported non-dry-run forms fail with a clear message.",
+					"Output is stable JSON suitable for review.",
+				],
+				verificationCommands: [
+					"pnpm vitest --run apps/cli/test/run-cli.test.ts -t planforge",
+					"pnpm typecheck",
+					"git diff --check",
+				],
+			},
+		],
+		validation: {
+			status: validationStatus,
+			checks,
+			requiredEvidence: PLANFORGE_REQUIRED_EVIDENCE,
+			missingEvidence,
+			unsafeReasons,
+		},
+		receiptPreview: {
+			schemaVersion: PLANFORGE_RECEIPT_SCHEMA_VERSION,
+			status: validationStatus,
+			planId: `pf-plan-${planFingerprint}`,
+			idempotencyKey,
+			inputDigest,
+			planDigest: "",
+			trustedBase: normalizedTrustedBase,
+			admittedBy: "buildplane-kernel",
+			generatedAt: "2026-05-07T00:00:00.000Z",
+			dryRun: true,
+			sideEffects: [],
+			notes: [
+				"Receipt preview is documentation/fixture only for PF1.",
+				"PASS does not create tasks, grant write capabilities, merge, deploy, or start workers.",
+				"Non-PASS statuses fail closed: BLOCKED, FAILED, INSUFFICIENT_EVIDENCE, UNSAFE_TO_RUN.",
+			],
+		},
+	};
+	plan.receiptPreview.planDigest = `sha256:${createHash("sha256")
+		.update(JSON.stringify(plan))
+		.digest("hex")}`;
+	return plan;
+}
+
 function normalizeGraphNode(node: Record<string, unknown>): unknown {
 	const unit = (node.unit as Record<string, unknown>) ?? {};
 
@@ -3045,7 +5500,8 @@ function applyReplayOverrides(
 ): unknown {
 	const result = { ...packet };
 
-	for (const arg of args) {
+	for (let index = 0; index < args.length; index += 1) {
+		const arg = args[index];
 		if (arg.startsWith("--model=")) {
 			const modelValue = arg.slice("--model=".length);
 			const slashIndex = modelValue.indexOf("/");
@@ -3068,6 +5524,13 @@ function applyReplayOverrides(
 			const policyProfile = arg.slice("--policy=".length);
 			const unit = (result.unit as Record<string, unknown>) ?? {};
 			result.unit = { ...unit, policyProfile };
+		} else if (arg === "--policy") {
+			const policyProfile = args[index + 1];
+			if (policyProfile && !policyProfile.startsWith("--")) {
+				const unit = (result.unit as Record<string, unknown>) ?? {};
+				result.unit = { ...unit, policyProfile };
+				index += 1;
+			}
 		}
 	}
 
@@ -3085,7 +5548,7 @@ function classifyCliError(error: unknown): { code: string; message: string } {
 		return { code: "NOT_INITIALIZED", message };
 	}
 
-	if (/No run or unit found/i.test(message)) {
+	if (/No run or unit found|No run found/i.test(message)) {
 		return { code: "NOT_FOUND", message };
 	}
 

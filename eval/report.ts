@@ -29,6 +29,7 @@ export interface EvalReport {
 		readonly memoryInjectedRate: number;
 		readonly memoryHelpedRate: number;
 		readonly strategyHelpedRate: number;
+		readonly combinedHelpedRate: number;
 		readonly meanDurationMs: number;
 	};
 }
@@ -51,6 +52,7 @@ export function computeAggregates(
 
 	let memoryHelped = 0;
 	let strategyHelped = 0;
+	let combinedHelped = 0;
 	for (const f of fixtures) {
 		const memStrat = f.conditions.find(
 			(c) => c.condition === "memory+strategy",
@@ -77,6 +79,14 @@ export function computeAggregates(
 		) {
 			strategyHelped++;
 		}
+		if (
+			memStrat?.passed === true &&
+			memRaw?.passed === false &&
+			noMemStrat?.passed === false &&
+			noMemRaw?.passed === false
+		) {
+			combinedHelped++;
+		}
 	}
 
 	return {
@@ -88,6 +98,8 @@ export function computeAggregates(
 		memoryHelpedRate: fixtures.length > 0 ? memoryHelped / fixtures.length : 0,
 		strategyHelpedRate:
 			fixtures.length > 0 ? strategyHelped / fixtures.length : 0,
+		combinedHelpedRate:
+			fixtures.length > 0 ? combinedHelped / fixtures.length : 0,
 		meanDurationMs: total > 0 ? Math.round(totalDuration / total) : 0,
 	};
 }
@@ -135,6 +147,7 @@ export function formatEvalReport(report: EvalReport): string {
 	lines.push(`  Memory injected rate:  ${pct(a.memoryInjectedRate)}`);
 	lines.push(`  Memory helped rate:    ${pct(a.memoryHelpedRate)}`);
 	lines.push(`  Strategy helped rate:  ${pct(a.strategyHelpedRate)}`);
+	lines.push(`  Combined helped rate:  ${pct(a.combinedHelpedRate)}`);
 	lines.push(`  Mean duration:         ${a.meanDurationMs}ms`);
 
 	return lines.join("\n");

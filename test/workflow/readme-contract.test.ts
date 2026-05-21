@@ -40,17 +40,30 @@ const builtCliSection = extractTopLevelSection(
 	"## In-repo built CLI path",
 );
 const distributionSection = extractTopLevelSection(readme, "## Distribution");
+const highTrustLoopSection = extractTopLevelSection(
+	readme,
+	"## High-trust operator loop",
+);
 
 describe("README contract", () => {
 	it("documents the full repo development command surface in its own section", () => {
 		expect(repoDevelopmentSection).toContain(
 			"pnpm buildplane bootstrap doctor --json",
 		);
+		expect(repoDevelopmentSection).toContain(
+			"pnpm buildplane bootstrap doctor --capabilities --json",
+		);
 		expect(repoDevelopmentSection).toContain("pnpm buildplane init");
 		expect(repoDevelopmentSection).toContain("pnpm buildplane run --packet");
 		expect(repoDevelopmentSection).toContain("pnpm buildplane status --json");
 		expect(repoDevelopmentSection).toContain(
 			"pnpm buildplane inspect <run-id> --json",
+		);
+		expect(repoDevelopmentSection).toContain(
+			"pnpm buildplane replay <run-id> --json",
+		);
+		expect(repoDevelopmentSection).toContain(
+			"pnpm buildplane fork <run-id> --at <event-id> --packet <fixed-packet.json>",
 		);
 		expect(repoDevelopmentSection).toContain("pnpm buildplane memory doctor");
 		expect(repoDevelopmentSection).toContain(
@@ -65,6 +78,9 @@ describe("README contract", () => {
 		expect(builtCliSection).toContain(
 			"node apps/cli/dist/index.js bootstrap doctor --json",
 		);
+		expect(builtCliSection).toContain(
+			"node apps/cli/dist/index.js bootstrap doctor --capabilities --json",
+		);
 		expect(builtCliSection).toContain("node apps/cli/dist/index.js init");
 		expect(builtCliSection).toContain(
 			"node apps/cli/dist/index.js run --packet",
@@ -74,6 +90,12 @@ describe("README contract", () => {
 		);
 		expect(builtCliSection).toContain(
 			"node apps/cli/dist/index.js inspect <run-id> --json",
+		);
+		expect(builtCliSection).toContain(
+			"node apps/cli/dist/index.js replay <run-id> --json",
+		);
+		expect(builtCliSection).toContain(
+			"node apps/cli/dist/index.js fork <run-id> --at <event-id> --packet <fixed-packet.json>",
 		);
 		expect(builtCliSection).toContain(
 			"node apps/cli/dist/index.js memory doctor --json",
@@ -90,6 +112,9 @@ describe("README contract", () => {
 		);
 		expect(distributionSection).toContain("npm install -g buildplane");
 		expect(distributionSection).toContain("buildplane bootstrap doctor --json");
+		expect(distributionSection).toContain(
+			"buildplane bootstrap doctor --capabilities --json",
+		);
 		expect(distributionSection).toContain("buildplane init");
 		expect(distributionSection).toContain(
 			"buildplane run --packet <path-to-packet.json>",
@@ -97,11 +122,9 @@ describe("README contract", () => {
 		expect(distributionSection).toContain("buildplane status --json");
 		expect(distributionSection).toContain("buildplane inspect <run-id> --json");
 		expect(distributionSection).toContain(
-			"Published/global installs do not yet include a verified `buildplane memory ...` contract.",
+			"Published/global native memory is packaged and verified on Linux x64.",
 		);
-		expect(distributionSection).not.toContain(
-			"buildplane memory doctor --json",
-		);
+		expect(distributionSection).toContain("buildplane memory doctor --json");
 		expect(distributionSection).not.toContain("pnpm buildplane");
 		expect(distributionSection).not.toContain("pnpm install");
 		expect(distributionSection).not.toContain("pnpm build");
@@ -116,9 +139,71 @@ describe("README contract", () => {
 	it("links to the model benchmark summary doc", () => {
 		expect(readme).toContain("docs/benchmarks/model-codex.md");
 		expect(readme).toContain("model-codex");
+		expect(readme).toContain("reviewer-rescue");
+		expect(readme).toContain("raw one-shot path");
+		expect(readme).toContain("implement-then-review");
 	});
 
 	it("does not describe published install as future-only anywhere in the README", () => {
 		expect(readme).not.toMatch(/not yet available|future-only/i);
+	});
+
+	it("does not leave the local run loop contradicted by stale future-only maturity language", () => {
+		expect(readme).not.toContain(
+			"Worktree isolation, replay, richer policy, and model-backed execution come later.",
+		);
+		expect(readme).toContain(
+			"Broader repo-local surfaces already include history/status/inspect",
+		);
+	});
+
+	it("keeps replay, fork, and event-tape docs tied to the operator loop", () => {
+		expect(readme).toContain("docs/ledger.md");
+		expect(readme).toContain("inspect the event tape");
+		expect(readme).toContain("replay the stored packet snapshot");
+		expect(readme).toContain("fork from a unit boundary");
+		expect(readme).toContain(
+			"buildplane ledger replay --run-id <run-id> --workspace <path>",
+		);
+	});
+
+	it("presents replay review and recovery as the high-trust operator loop", () => {
+		expect(highTrustLoopSection).toContain("run with implement-then-review");
+		expect(highTrustLoopSection).toContain("inspect the event tape");
+		expect(highTrustLoopSection).toContain("replay the stored packet snapshot");
+		expect(highTrustLoopSection).toContain("fork from a unit boundary");
+		expect(highTrustLoopSection).toContain("reviewer-rescue");
+		expect(highTrustLoopSection).toContain("raw one-shot path");
+	});
+
+	it("documents the Node baseline and published runtime range", () => {
+		expect(readme).toContain(".node-version");
+		expect(readme).toContain("24.13.1");
+		expect(readme).toContain(">=24.13.1 <25");
+		expect(readme).toContain(
+			"`.node-version` (`24.13.1`) as the tested development baseline",
+		);
+	});
+
+	it("documents capability doctor output for published/global installs", () => {
+		expect(distributionSection).toContain(
+			"buildplane bootstrap doctor --capabilities --json",
+		);
+		expect(readme).toContain("node:sqlite");
+		expect(distributionSection).toContain("Published/global native memory");
+		expect(distributionSection).toContain("Linux x64");
+	});
+
+	it("documents the explicit deterministic CI trust gate", () => {
+		for (const command of [
+			"pnpm lint",
+			"pnpm typecheck",
+			"pnpm test",
+			"pnpm build",
+			"cargo test --manifest-path native/Cargo.toml",
+			"pnpm verify:published-bootstrap",
+		]) {
+			expect(readme).toContain(command);
+		}
 	});
 });

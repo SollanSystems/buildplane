@@ -61,6 +61,22 @@ describe("WriteQueue", () => {
 		expect(pipe.writes).toEqual(["a\n", "b\n", "c\n"]);
 	});
 
+	it("keeps only one drain waiter active while the pipe is full", async () => {
+		const pipe = new MockPipe();
+		pipe.fill();
+		const q = new WriteQueue(asWritable(pipe), { highWatermark: 100 });
+		const writes = Array.from({ length: 20 }, (_, i) => q.write(`${i}\n`));
+
+		await Promise.resolve();
+
+		expect(pipe.listenerCount("drain")).toBeLessThanOrEqual(1);
+		expect(pipe.listenerCount("error")).toBeLessThanOrEqual(1);
+		pipe.drain();
+		await Promise.all(writes);
+		await q.flush();
+		expect(pipe.writes).toEqual(Array.from({ length: 20 }, (_, i) => `${i}\n`));
+	});
+
 	it("reports depth accurately", async () => {
 		const pipe = new MockPipe();
 		pipe.fill();

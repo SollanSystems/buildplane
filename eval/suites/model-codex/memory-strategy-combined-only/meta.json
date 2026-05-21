@@ -1,0 +1,7 @@
+{
+	"name": "memory-strategy-combined-only",
+	"description": "Run 1 seeds the missing output path; run 2 needs both injected memory and the implement-then-review recovery loop to produce the approved artifact",
+	"rawApprovalMode": "reviewer-must-approve",
+	"rawApprovalOutputPath": "output/combined-only.js",
+	"rawApprovalMustContain": "approved combined memory strategy"
+}

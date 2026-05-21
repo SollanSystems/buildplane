@@ -1,0 +1,137 @@
+{
+	"$schema": "https://buildplane.local/schemas/run-admission-receipt.v0.json",
+	"schema_version": "0.1.0",
+	"receipt_type": "run.admission",
+	"receipt_id": "rar_bp1_unsafe_to_run_0001",
+	"run": {
+		"run_id": "run_bp1_unsafe_0001",
+		"unit_id": "unit_docs_fixture_0003",
+		"task_id": "bp1-fixture-unsafe-to-run"
+	},
+	"repo": {
+		"path": "/repo/buildplane",
+		"worktree_path": "/repo/buildplane/.worktrees/run_bp1_unsafe_0001",
+		"expected_remote": "https://github.com/SollanSystems/buildplane.git",
+		"base_ref": "origin/main",
+		"base_commit": "15dbb32db0e1f0024687533755805fc23f3ef6d4",
+		"head_commit": "15dbb32db0e1f0024687533755805fc23f3ef6d4",
+		"worktree_clean": true
+	},
+	"request": {
+		"requested_capabilities": [
+			"fs.read:repo",
+			"fs.write:declared_scope",
+			"command.execute:verification",
+			"git.push:remote",
+			"github.pr.create",
+			"deploy:production"
+		],
+		"requested_side_effects": [
+			"fs.read:repo",
+			"fs.write:declared_scope",
+			"command.execute:verification",
+			"git.push:remote",
+			"github.pr.create",
+			"deploy:production"
+		],
+		"declared_scope": {
+			"allowed_paths": [
+				"docs/architecture/run-admission-receipts.md",
+				"packages/kernel/test/fixtures/admission-receipts/*.json"
+			],
+			"forbidden_paths": [".git/**", "**/.env*", "**/*secret*"],
+			"network_allowed": false
+		},
+		"operator_approvals": []
+	},
+	"policy": {
+		"profile_id": "local-docs-fixture-v0",
+		"allowed_side_effects": ["fs.read:repo"],
+		"denied_side_effects": [
+			{
+				"effect": "fs.write:declared_scope",
+				"reason": "Non-read grants are revoked after an unsafe side-effect request."
+			},
+			{
+				"effect": "command.execute:verification",
+				"reason": "Execution grants are revoked until unsafe requested effects are removed or explicitly approved."
+			},
+			{
+				"effect": "git.push:remote",
+				"reason": "Remote push is outside local-first admission scope."
+			},
+			{
+				"effect": "github.pr.create",
+				"reason": "GitHub mutation requires a separate explicit approval and receipt."
+			},
+			{
+				"effect": "deploy:production",
+				"reason": "Production deploys are never authorized by run admission."
+			}
+		],
+		"capability_grants": [
+			{
+				"capability": "fs.read:repo",
+				"scope": ["/repo/buildplane"],
+				"expires_at": null
+			}
+		],
+		"quarantine": true,
+		"quarantine_reason": "Unsafe requested side effects require explicit release authority."
+	},
+	"evidence_inputs": [
+		{
+			"kind": "git.status",
+			"ref": "fixture://bp1/unsafe/git-status-preflight",
+			"digest": "sha256:a1c3b2455ae551ba0ae0bec8f366a742bc687813e8330dbf318a93854780e11c",
+			"required": true,
+			"status": "present"
+		},
+		{
+			"kind": "requested_side_effects",
+			"ref": "fixture://bp1/unsafe/requested-side-effects",
+			"digest": "sha256:185b1015b1815446617567cdedf5806cadea18183ba77dea92600d6f62bb6a92",
+			"required": true,
+			"status": "present"
+		},
+		{
+			"kind": "declared_scope",
+			"ref": "fixture://bp1/unsafe/scope-contract",
+			"digest": "sha256:2fdea54f5951792fb00456b44efd1c8e4880eed29bfa386db475a96450dbd19c",
+			"required": true,
+			"status": "present"
+		}
+	],
+	"admission": {
+		"decision": "UNSAFE_TO_RUN",
+		"decided_by": "buildplane.kernel.admission",
+		"decided_at": "2026-05-08T00:00:00Z",
+		"reasons": [
+			"Requested side effects include remote push, GitHub mutation, and production deploy.",
+			"Unsafe requested side effects revoke non-read grants and freeze the bundle until explicit release authority exists."
+		],
+		"missing_evidence": [],
+		"unsafe_requests": [
+			"git.push:remote",
+			"github.pr.create",
+			"deploy:production"
+		],
+		"will_execute_worker": false,
+		"authorized_next_step": "freeze_and_require_explicit_release_authority"
+	},
+	"idempotency_key": "run.admission:v0:sha256:185b1015b1815446617567cdedf5806cadea18183ba77dea92600d6f62bb6a92",
+	"replay": {
+		"side_effect_safe": true,
+		"behavior": "Replay may display the unsafe request and quarantine instruction but must not release the quarantine or perform denied effects.",
+		"fork": "A fork must remove unsafe requested side effects or cite a separate explicit release receipt before recomputing admission."
+	},
+	"provenance": {
+		"created_by": "buildplane.kernel.admission",
+		"created_from": "docs-fixture",
+		"redaction_policy": "Secrets are redacted as [REDACTED]; raw secret values are never stored.",
+		"pack": null,
+		"host": null,
+		"provider": null,
+		"worker_agent_trusted": false
+	}
+}

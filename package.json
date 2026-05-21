@@ -13,6 +13,7 @@
 	"scripts": {
 		"build": "tsc --build",
 		"buildplane": "node --conditions=source --import tsx ./apps/cli/src/index.ts",
+		"gsd2": "node --conditions=source --import tsx ./apps/cli/src/gsd2-index.ts",
 		"native:build": "cargo build --manifest-path native/Cargo.toml -p bp-cli",
 		"test": "pnpm native:build && vitest --run",
 		"test:watch": "vitest",
@@ -30,16 +31,17 @@
 		"eval": "node --import tsx ./eval/runner.ts"
 	},
 	"devDependencies": {
-		"@biomejs/biome": "^2.4.7",
-		"@changesets/cli": "^2.30.0",
-		"@commitlint/cli": "^20.5.0",
+		"@biomejs/biome": "^2.4.13",
+		"@changesets/cli": "^2.31.0",
+		"@commitlint/cli": "^20.5.2",
 		"@commitlint/config-conventional": "^20.5.0",
 		"@types/node": "^25.5.0",
 		"glob": "^13.0.6",
 		"husky": "^9.1.7",
 		"tsx": "^4.21.0",
 		"typescript": "^5.9.3",
-		"vitest": "^4.1.4"
+		"vite": "8.0.5",
+		"vitest": "^4.1.5"
 	},
 	"pnpm": {
 		"onlyBuiltDependencies": [
@@ -48,7 +50,8 @@
 		"overrides": {
 			"picomatch@<2.3.2": ">=2.3.2",
 			"picomatch@>=4.0.0 <4.0.4": ">=4.0.4",
-			"brace-expansion@>=4.0.0 <5.0.5": ">=5.0.5"
+			"brace-expansion@>=4.0.0 <5.0.5": ">=5.0.5",
+			"vite": "8.0.5"
 		}
 	}
 }

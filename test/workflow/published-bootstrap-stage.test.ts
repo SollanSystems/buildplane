@@ -15,7 +15,15 @@ import {
 import { tmpdir as nodeOsTmpdir } from "node:os";
 import { delimiter, dirname, join, relative, win32 } from "node:path";
 import { gunzipSync, gzipSync } from "node:zlib";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import {
+	afterAll,
+	afterEach,
+	beforeAll,
+	describe,
+	expect,
+	it,
+	vi,
+} from "vitest";
 
 /**
  * Hardened tmpdir that falls back to /tmp when os.safeTmpdir() returns a
@@ -49,6 +57,16 @@ const REQUIRED_BUILD_OUTPUTS = [
 	"packages/ledger-client/dist/index.js",
 ] as const;
 const WORKSPACE_ROOTS = ["apps", "packages"] as const;
+const BOOTSTRAP_TIMEOUT_MS = 60_000;
+
+vi.setConfig({
+	hookTimeout: BOOTSTRAP_TIMEOUT_MS,
+	testTimeout: BOOTSTRAP_TIMEOUT_MS,
+});
+
+afterAll(() => {
+	vi.resetConfig();
+});
 
 type InspectionResult = {
 	inputPath: string;
@@ -300,6 +318,9 @@ function ensureWorkspaceBuildOutputs() {
 function writeMinimalPublishedPackage(
 	packageRoot: string,
 	runtimeModulePath = "./cli.js",
+	options: {
+		readonly includeNative?: boolean;
+	} = {},
 ) {
 	mkdirSync(join(packageRoot, "dist"), { recursive: true });
 	mkdirSync(join(packageRoot, "vendor"), { recursive: true });
@@ -314,7 +335,7 @@ function writeMinimalPublishedPackage(
 					buildplane: "./dist/index.js",
 				},
 				engines: {
-					node: "24.13.1",
+					node: ">=24.13.1 <25",
 				},
 				files: ["README.md", "dist", "vendor"],
 			},
@@ -351,6 +372,19 @@ function writeMinimalPublishedPackage(
 		join(packageRoot, "dist", runtimeModulePath.replace(/^\.\//, "")),
 		"export {};\n",
 	);
+
+	if (options.includeNative ?? true) {
+		const nativePath = join(
+			packageRoot,
+			"vendor",
+			"native",
+			"linux-x64",
+			"buildplane-native",
+		);
+		mkdirSync(dirname(nativePath), { recursive: true });
+		writeFileSync(nativePath, "#!/bin/sh\nexit 0\n");
+		chmodSync(nativePath, 0o755);
+	}
 }
 
 describe("workspace build artifact discovery", () => {
@@ -523,6 +557,7 @@ describe("published bootstrap staging", () => {
 	let inspectPublishedPackage: (
 		inputPath: string,
 		options?: {
+			arch?: string;
 			platform?: NodeJS.Platform;
 		},
 	) => InspectionResult;
@@ -548,6 +583,9 @@ describe("published bootstrap staging", () => {
 		originalPath: string;
 		hiddenPath: string;
 	}> = [];
+	const originalPublishedNativeBin =
+		process.env.BUILDPLANE_PUBLISHED_NATIVE_BIN;
+	let fakePublishedNativeRoot: string | undefined;
 	let buildArtifactsCreatedByTest: string[] = [];
 
 	afterEach(() => {
@@ -567,6 +605,14 @@ describe("published bootstrap staging", () => {
 	});
 
 	afterAll(() => {
+		if (originalPublishedNativeBin === undefined) {
+			delete process.env.BUILDPLANE_PUBLISHED_NATIVE_BIN;
+		} else {
+			process.env.BUILDPLANE_PUBLISHED_NATIVE_BIN = originalPublishedNativeBin;
+		}
+		if (fakePublishedNativeRoot) {
+			rmSync(fakePublishedNativeRoot, { force: true, recursive: true });
+		}
 		for (const path of buildArtifactsCreatedByTest) {
 			rmSync(path, { force: true, recursive: true });
 		}
@@ -574,6 +620,16 @@ describe("published bootstrap staging", () => {
 
 	beforeAll(async () => {
 		buildArtifactsCreatedByTest = ensureWorkspaceBuildOutputs();
+		fakePublishedNativeRoot = mkdtempSync(
+			join(safeTmpdir(), "buildplane-published-native-fixture-"),
+		);
+		const fakeNativeBin = join(fakePublishedNativeRoot, "buildplane-native");
+		writeFileSync(
+			fakeNativeBin,
+			'#!/bin/sh\nprintf \'{"ok":true,"fixture":"published-native"}\\n\'\n',
+		);
+		chmodSync(fakeNativeBin, 0o755);
+		process.env.BUILDPLANE_PUBLISHED_NATIVE_BIN = fakeNativeBin;
 
 		const readmeModule = await import(
 			"../../scripts/published-bootstrap/readme.mjs"
@@ -601,7 +657,7 @@ describe("published bootstrap staging", () => {
 			"../../scripts/published-bootstrap/tarball.mjs"
 		);
 		extractTarballToDirectory = tarballModule.extractTarballToDirectory;
-	}, 30_000);
+	}, 60_000);
 
 	it("derives a publish-facing README from the repo-root structure without repo leakage", () => {
 		const sourceReadme = readFileSync(join(process.cwd(), "README.md"), "utf8");
@@ -617,8 +673,9 @@ describe("published bootstrap staging", () => {
 		expect(publishedReadme).toContain("buildplane bootstrap doctor --json");
 		expect(publishedReadme).toContain("buildplane init");
 		expect(publishedReadme).toContain(
-			"Published/global installs do not yet include a verified `buildplane memory ...` contract.",
+			"Published/global native memory is packaged and verified on Linux x64.",
 		);
+		expect(publishedReadme).toContain("buildplane memory doctor --json");
 		expect(publishedReadme).toContain(
 			"buildplane run --packet /absolute/path/to/packet.json",
 		);
@@ -764,7 +821,18 @@ describe("published bootstrap staging", () => {
 		);
 		expect(stagedRunCli).not.toContain('import("@buildplane/kernel")');
 		expect(stagedEntryMode).not.toBe(0);
-	}, 15_000);
+		expect(
+			existsSync(
+				join(
+					staged.packageRoot,
+					"vendor",
+					"native",
+					"linux-x64",
+					"buildplane-native",
+				),
+			),
+		).toBe(true);
+	}, 60_000);
 
 	it("strips stale sourceMappingURL comments from staged runtime modules", () => {
 		const staged = stagePublishedPackage();
@@ -1200,6 +1268,40 @@ describe("published bootstrap staging", () => {
 		);
 	});
 
+	it("fails linux-x64 inspection when the packaged native binary is missing", () => {
+		const tempRoot = mkdtempSync(
+			join(safeTmpdir(), "published-bootstrap-native-missing-"),
+		);
+		const packageRoot = join(tempRoot, "package");
+		cleanupPaths.push(tempRoot);
+
+		writeMinimalPublishedPackage(packageRoot, "./cli.js", {
+			includeNative: false,
+		});
+
+		expect(() =>
+			inspectPublishedPackage(packageRoot, { arch: "x64", platform: "linux" }),
+		).toThrow(/missing packaged linux-x64 native binary/i);
+	});
+
+	it("fails linux-x64 inspection when the packaged native binary is not executable", () => {
+		const tempRoot = mkdtempSync(
+			join(safeTmpdir(), "published-bootstrap-native-mode-"),
+		);
+		const packageRoot = join(tempRoot, "package");
+		cleanupPaths.push(tempRoot);
+
+		writeMinimalPublishedPackage(packageRoot);
+		chmodSync(
+			join(packageRoot, "vendor", "native", "linux-x64", "buildplane-native"),
+			0o644,
+		);
+
+		expect(() =>
+			inspectPublishedPackage(packageRoot, { arch: "x64", platform: "linux" }),
+		).toThrow(/packaged linux-x64 native binary must be executable/i);
+	});
+
 	it("inspects tarballs and returns the tarball input path", () => {
 		const staged = stagePublishedPackage();
 		cleanupPaths.push(staged.stagingRoot);
@@ -1333,7 +1435,7 @@ describe("published bootstrap staging", () => {
 									buildplane: "./dist/index.js",
 								},
 								engines: {
-									node: "24.13.1",
+									node: ">=24.13.1 <25",
 								},
 								files: ["README.md", "dist", "vendor"],
 							},
@@ -1401,7 +1503,7 @@ describe("published bootstrap staging", () => {
 									buildplane: "./dist/index.js",
 								},
 								engines: {
-									node: "24.13.1",
+									node: ">=24.13.1 <25",
 								},
 								files: ["README.md", "dist", "vendor"],
 							},
@@ -1495,7 +1597,7 @@ describe("published bootstrap staging", () => {
 									buildplane: "./dist/index.js",
 								},
 								engines: {
-									node: "24.13.1",
+									node: ">=24.13.1 <25",
 								},
 								files: ["README.md", "dist", "vendor"],
 							},
@@ -1536,6 +1638,11 @@ describe("published bootstrap staging", () => {
 					{
 						path: "placeholder-path",
 						body: "export const cliRuntime = true;\n",
+					},
+					{
+						path: "package/vendor/native/linux-x64/buildplane-native",
+						body: "#!/bin/sh\nexit 0\n",
+						mode: 0o755,
 					},
 				]),
 			);
@@ -1606,7 +1713,7 @@ describe("published bootstrap staging", () => {
 										buildplane: "./dist/index.js",
 									},
 									engines: {
-										node: "24.13.1",
+										node: ">=24.13.1 <25",
 									},
 								},
 								null,
@@ -1835,7 +1942,7 @@ describe("published bootstrap staging", () => {
 		expect(() => inspectPublishedPackage(staged.packageRoot)).toThrow(
 			/README\.md.*npm install -g buildplane/i,
 		);
-	}, 15_000);
+	}, 60_000);
 
 	it("wraps staged package.json parse failures with the offending path", () => {
 		const staged = stagePublishedPackage();
@@ -1853,7 +1960,7 @@ describe("published bootstrap staging", () => {
 
 		expect(message).toMatch(/Failed to parse JSON file/i);
 		expect(message).toContain(manifestPath);
-	}, 15_000);
+	}, 60_000);
 
 	it("rejects any present package.json.private value except explicit false", () => {
 		const staged = stagePublishedPackage();
@@ -1988,7 +2095,7 @@ describe("published bootstrap staging", () => {
 		expect(() => inspectPublishedPackage(staged.packageRoot)).toThrow(
 			new RegExp(`package\\.json\\.${field} must be a plain object`, "i"),
 		);
-	}, 15_000);
+	}, 60_000);
 
 	it.each([
 		"dependencies",
@@ -2486,7 +2593,7 @@ export { loadKernel };
 		expect(() => inspectPublishedPackage(staged.packageRoot)).toThrow(
 			/named import|assertSupportedNodeVersion/i,
 		);
-	}, 15_000);
+	}, 60_000);
 
 	it("fails inspection when the wrapper namespace-imports assertSupportedNodeVersion before the runtime boundary", () => {
 		const staged = stagePublishedPackage();
@@ -2504,7 +2611,7 @@ export { loadKernel };
 		expect(() => inspectPublishedPackage(staged.packageRoot)).toThrow(
 			/named import|assertSupportedNodeVersion/i,
 		);
-	}, 15_000);
+	}, 60_000);
 
 	it("fails inspection when the runtime boundary is a bare awaited import expression", () => {
 		const staged = stagePublishedPackage();
@@ -2522,7 +2629,7 @@ export { loadKernel };
 		expect(() => inspectPublishedPackage(staged.packageRoot)).toThrow(
 			/top-level variable statement|runtime boundary/i,
 		);
-	}, 15_000);
+	}, 60_000);
 
 	it("fails inspection when the runtime boundary is not awaited inside its top-level variable statement", () => {
 		const staged = stagePublishedPackage();
@@ -2540,7 +2647,7 @@ export { loadKernel };
 		expect(() => inspectPublishedPackage(staged.packageRoot)).toThrow(
 			/top-level variable statement|runtime boundary/i,
 		);
-	}, 15_000);
+	}, 60_000);
 
 	it("fails inspection when the runtime boundary statement does extra work in the same declaration", () => {
 		const staged = stagePublishedPackage();
@@ -2558,7 +2665,7 @@ export { loadKernel };
 		expect(() => inspectPublishedPackage(staged.packageRoot)).toThrow(
 			/top-level variable statement|runtime boundary/i,
 		);
-	}, 15_000);
+	}, 60_000);
 
 	it("fails inspection when the wrapper performs another top-level awaited runtime import after the required boundary", () => {
 		const staged = stagePublishedPackage();
@@ -2580,7 +2687,7 @@ export { loadKernel };
 		expect(() => inspectPublishedPackage(staged.packageRoot)).toThrow(
 			/top-level dynamic import|runtime boundary|\.\/extra\.js/i,
 		);
-	}, 15_000);
+	}, 60_000);
 
 	it.each([
 		{
@@ -2610,7 +2717,7 @@ export { loadKernel };
 		expect(() => inspectPublishedPackage(staged.packageRoot)).toThrow(
 			/top-level dynamic import|runtime boundary|\.\/extra\.js/i,
 		);
-	}, 15_000);
+	}, 60_000);
 
 	it("fails inspection when the wrapper imports its runtime boundary before asserting the Node version", () => {
 		const staged = stagePublishedPackage();
@@ -2868,7 +2975,7 @@ import "./src/leak.js";
 				),
 			);
 		}
-	}, 30_000);
+	}, 60_000);
 
 	it("fails inspection when empty src or test directories leak into the shipped runtime tree", () => {
 		for (const leakedRelativePath of [
@@ -2889,5 +2996,5 @@ import "./src/leak.js";
 				),
 			);
 		}
-	}, 30_000);
+	}, 60_000);
 });

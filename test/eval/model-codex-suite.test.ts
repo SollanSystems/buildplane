@@ -44,8 +44,8 @@ function ensureWorkspaceBuildOutputs() {
 	if (missing.length === 0 && !stale) {
 		return;
 	}
-	const npxCommand = process.platform === "win32" ? "npx.cmd" : "npx";
-	execFileSync(npxCommand, ["pnpm", "build"], { cwd: root, stdio: "pipe" });
+	const pnpmCommand = process.platform === "win32" ? "pnpm.cmd" : "pnpm";
+	execFileSync(pnpmCommand, ["build"], { cwd: root, stdio: "pipe" });
 }
 
 function runEval(
@@ -89,6 +89,11 @@ function createCodexStub(binRoot: string): string {
 				"const prompt = process.argv.slice(2).join(' ');",
 				"fs.mkdirSync('output', { recursive: true });",
 				"if (prompt.includes('Review the implementer output')) {",
+				"  const combinedOnlyPath = path.join('output', 'combined-only.js');",
+				"  if (fs.existsSync(combinedOnlyPath)) {",
+				"    const combinedOnlyBody = fs.readFileSync(combinedOnlyPath, 'utf8');",
+				"    process.exit(combinedOnlyBody.includes('approved combined memory strategy') ? 0 : 1);",
+				"  }",
 				"  const reviewerRescuePath = path.join('output', 'reviewer-rescue.js');",
 				"  if (fs.existsSync(reviewerRescuePath)) {",
 				"    const reviewerRescueBody = fs.readFileSync(reviewerRescuePath, 'utf8');",
@@ -101,6 +106,17 @@ function createCodexStub(binRoot: string): string {
 				"  const reviewerRescueContent = prompt.includes('Reviewer feedback from round 1') ? \"console.log('approved reviewer rescue')\\n\" : \"console.log('draft reviewer rescue')\\n\";",
 				"  fs.writeFileSync(path.join('output', 'reviewer-rescue.js'), reviewerRescueContent);",
 				"  process.exit(0);",
+				"}",
+				"if (prompt.includes('output/combined-only.js') || prompt.includes('output\\\\combined-only.js')) {",
+				"  if (prompt.includes('<memories>') && prompt.includes('Reviewer feedback from round 1')) {",
+				"    fs.writeFileSync(path.join('output', 'combined-only.js'), \"console.log('approved combined memory strategy')\\n\");",
+				"    process.exit(0);",
+				"  }",
+				"  if (prompt.includes('<memories>')) {",
+				"    fs.writeFileSync(path.join('output', 'combined-only.js'), \"console.log('draft combined memory strategy')\\n\");",
+				"    process.exit(0);",
+				"  }",
+				"  process.exit(1);",
 				"}",
 				"if (prompt.includes('output/memory-helped.js') || prompt.includes('output\\\\memory-helped.js')) {",
 				"  fs.writeFileSync(path.join('output', 'memory-helped.js'), \"console.log('memory helped')\\n\");",
@@ -140,6 +156,10 @@ function createCodexStub(binRoot: string): string {
 				'prompt="$*"',
 				"mkdir -p output",
 				"if printf '%s' \"$prompt\" | grep -Fq 'Review the implementer output'; then",
+				"  if [ -f output/combined-only.js ]; then",
+				"    if grep -Fq 'approved combined memory strategy' output/combined-only.js; then exit 0; fi",
+				"    exit 1",
+				"  fi",
 				"  if [ -f output/reviewer-rescue.js ]; then",
 				"    if grep -Fq 'approved' output/reviewer-rescue.js; then exit 0; fi",
 				"    exit 1",
@@ -154,6 +174,17 @@ function createCodexStub(binRoot: string): string {
 				"    printf 'console.log(\"draft reviewer rescue\")\\n' > output/reviewer-rescue.js",
 				"  fi",
 				"  exit 0",
+				"fi",
+				"if printf '%s' \"$prompt\" | grep -Fq 'output/combined-only.js'; then",
+				"  if printf '%s' \"$prompt\" | grep -Fq '<memories>' && printf '%s' \"$prompt\" | grep -Fq 'Reviewer feedback from round 1'; then",
+				"    printf 'console.log(\"approved combined memory strategy\")\\n' > output/combined-only.js",
+				"    exit 0",
+				"  fi",
+				"  if printf '%s' \"$prompt\" | grep -Fq '<memories>'; then",
+				"    printf 'console.log(\"draft combined memory strategy\")\\n' > output/combined-only.js",
+				"    exit 0",
+				"  fi",
+				"  exit 1",
 				"fi",
 				"if printf '%s' \"$prompt\" | grep -Fq 'output/memory-helped.js'; then",
 				"  printf 'console.log(\"memory helped\")\\n' > output/memory-helped.js",
@@ -178,18 +209,24 @@ afterEach(() => {
 });
 
 describe("model-codex eval suite", () => {
-	it("fails fast when the model suite is requested without explicit opt-in", () => {
+	it("runs the Codex suite locally without model opt-in", {
+		timeout: 60_000,
+	}, () => {
 		ensureWorkspaceBuildOutputs();
 
 		const result = runEval(["--suite", "model-codex", "--json"]);
 
-		expect(result.status).toBe(1);
-		expect(`${result.stderr}${result.stdout}`).toContain(
-			"BUILDPLANE_EVAL_MODEL=1",
-		);
+		expect(result.status).toBe(0);
+		const report = JSON.parse(result.stdout) as {
+			suiteId: string;
+			aggregates: { totalFixtures: number; totalConditions: number };
+		};
+		expect(report.suiteId).toBe("model-codex");
+		expect(report.aggregates.totalFixtures).toBe(4);
+		expect(report.aggregates.totalConditions).toBe(16);
 	});
 
-	it("does not allow path-variant suite names to bypass the model opt-in gate", () => {
+	it("does not allow path-variant suite names", () => {
 		ensureWorkspaceBuildOutputs();
 
 		const result = runEval(["--suite", "./model-codex", "--json"]);
@@ -200,19 +237,23 @@ describe("model-codex eval suite", () => {
 		);
 	});
 
-	it("treats mixed-case model suite names as the same gated suite", () => {
+	it("treats mixed-case model suite names as the same local suite", {
+		timeout: 60_000,
+	}, () => {
 		ensureWorkspaceBuildOutputs();
 
 		const result = runEval(["--suite", "MODEL-CODEX", "--json"]);
 
-		expect(result.status).toBe(1);
-		expect(`${result.stderr}${result.stdout}`).toContain(
-			"BUILDPLANE_EVAL_MODEL=1",
-		);
+		expect(result.status).toBe(0);
+		const report = JSON.parse(result.stdout) as { suiteId: string };
+		expect(report.suiteId).toBe("model-codex");
 	});
 
 	it("runs the opt-in Codex model suite with a stub codex binary", {
-		timeout: 20_000,
+		// This test shells through the full eval runner for 12 conditions. In the
+		// full Vitest suite it competes with ledger/storage integration tests, so
+		// the focused ~8s path can legitimately exceed the default 20s budget.
+		timeout: 60_000,
 	}, () => {
 		ensureWorkspaceBuildOutputs();
 
@@ -251,15 +292,17 @@ describe("model-codex eval suite", () => {
 				memoryInjectedRate: number;
 				memoryHelpedRate: number;
 				strategyHelpedRate: number;
+				combinedHelpedRate: number;
 			};
 		};
 
 		expect(report.suiteId).toBe("model-codex");
-		expect(report.aggregates.totalFixtures).toBe(3);
-		expect(report.aggregates.totalConditions).toBe(12);
+		expect(report.aggregates.totalFixtures).toBe(4);
+		expect(report.aggregates.totalConditions).toBe(16);
 		expect(report.aggregates.memoryInjectedRate).toBeGreaterThan(0);
 		expect(report.aggregates.memoryHelpedRate).toBeGreaterThan(0);
 		expect(report.aggregates.strategyHelpedRate).toBeGreaterThan(0);
+		expect(report.aggregates.combinedHelpedRate).toBeGreaterThan(0);
 		const fixtures = new Map(
 			report.fixtures.map((fixture) => [fixture.name, fixture]),
 		);
@@ -324,6 +367,19 @@ describe("model-codex eval suite", () => {
 				expect.objectContaining({
 					condition: "nomemory+strategy",
 					passed: true,
+				}),
+				expect.objectContaining({ condition: "nomemory+raw", passed: false }),
+			]),
+		);
+		const combinedOnlyConditions =
+			fixtures.get("memory-strategy-combined-only")?.conditions ?? [];
+		expect(combinedOnlyConditions).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({ condition: "memory+strategy", passed: true }),
+				expect.objectContaining({ condition: "memory+raw", passed: false }),
+				expect.objectContaining({
+					condition: "nomemory+strategy",
+					passed: false,
 				}),
 				expect.objectContaining({ condition: "nomemory+raw", passed: false }),
 			]),

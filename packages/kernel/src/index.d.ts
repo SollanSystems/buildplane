@@ -1,4 +1,34 @@
 export type {
+	CreateRunAdmissionReceiptDryRunInput,
+	JsonRecord,
+	JsonValue,
+	RecordRunAdmissionReceiptAttemptInput,
+	RunAdmissionCapabilityGrant,
+	RunAdmissionDecision,
+	RunAdmissionDecisionBlock,
+	RunAdmissionDeniedSideEffect,
+	RunAdmissionEventAppendInput,
+	RunAdmissionEvidenceInput,
+	RunAdmissionLocalEvidenceStore,
+	RunAdmissionLocalEvidenceWriteResult,
+	RunAdmissionPolicy,
+	RunAdmissionProvenance,
+	RunAdmissionReceipt,
+	RunAdmissionReceiptArtifactWriteInput,
+	RunAdmissionReceiptAttemptRecord,
+	RunAdmissionRecordedEvent,
+	RunAdmissionRecordedPayload,
+	RunAdmissionRecordedReplay,
+	RunAdmissionReplay,
+	RunAdmissionRepo,
+	RunAdmissionRequest,
+} from "./admission-receipts.ts";
+export {
+	createRunAdmissionReceiptDryRun,
+	RunAdmissionReceiptInputError,
+	recordRunAdmissionReceiptAttempt,
+} from "./admission-receipts.ts";
+export type {
 	CommandExecutionCompleteEvent,
 	EventBus,
 	EventContext,
@@ -32,20 +62,6 @@ export type {
 } from "./graph.ts";
 export { createGraphScheduler } from "./graph.ts";
 export type {
-	CreateProcedureInput,
-	CreateSearchableDocumentInput,
-	MemoryCreatedBy,
-	MemoryProvenance,
-	MemoryScopeType,
-	MemoryStatus,
-	MemoryType,
-	MemoryValueType,
-	ProcedureMemory,
-	RepoFact,
-	SearchableDocument,
-	UpsertRepoFactInput,
-} from "./memory-types.ts";
-export type {
 	ProcedureRetrievalQuery,
 	RankedMemoryResult,
 	RankedProcedureResult,
@@ -65,6 +81,20 @@ export {
 	rankMemoryResults,
 } from "./memory-retrieval.ts";
 export type {
+	CreateProcedureInput,
+	CreateSearchableDocumentInput,
+	MemoryCreatedBy,
+	MemoryProvenance,
+	MemoryScopeType,
+	MemoryStatus,
+	MemoryType,
+	MemoryValueType,
+	ProcedureMemory,
+	RepoFact,
+	SearchableDocument,
+	UpsertRepoFactInput,
+} from "./memory-types.ts";
+export type {
 	BuildplaneOrchestrator,
 	CreateBuildplaneOrchestratorOptions,
 } from "./orchestrator.ts";
@@ -78,7 +108,9 @@ export type {
 export { extractLearnings } from "./outcome-extractor.ts";
 export { parseStrategyPacket, parseUnitPacket } from "./packet.ts";
 export type {
+	ArchitectureDiffScopeGate,
 	BudgetConstraints,
+	CapabilityGrant,
 	PolicyProfile,
 	ResourceUsageSnapshot,
 	RetryPolicy,
@@ -100,16 +132,20 @@ export type {
 	CommandExecutionBlock,
 	ExecutionReceipt,
 	InjectedMemoryRecord,
+	InspectProvenance,
+	InspectProvenancePolicy,
+	InspectProvenanceRoute,
 	InspectSnapshot,
 	ModelExecutionBlock,
 	OutputCheck,
 	PersistedInjectedMemoryRecord,
-	PromotedStructuredMemoryRecord,
 	PolicyDecision,
+	PromotedStructuredMemoryRecord,
 	RejectedPolicyDecision,
 	RoutingHints,
 	RunInfrastructureFailure,
 	RunPacketResult,
+	SideEffectReceipt,
 	StatusSnapshot,
 	StatusWorkspaceSummary,
 	ToolDefinition,

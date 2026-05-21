@@ -17,6 +17,9 @@ export function openBuildplaneDatabase(path: string): DatabaseSync {
 			occurred_at TEXT NOT NULL,
 			payload TEXT NOT NULL
 		);
+
+		CREATE INDEX IF NOT EXISTS idx_events_run_id_occurred_at
+			ON events (json_extract(payload, '$.runId'), occurred_at);
 	`);
 
 	return database;

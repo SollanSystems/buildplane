@@ -1,6 +1,17 @@
-import { randomUUID } from "node:crypto";
-import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { execFileSync } from "node:child_process";
+import { createHash, randomUUID } from "node:crypto";
+import { appendFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { join, resolve } from "node:path";
+import {
+	type CreateRunAdmissionReceiptDryRunInput,
+	createRunAdmissionReceiptLive,
+	type JsonRecord,
+	type RunAdmissionEvidenceInput,
+	type RunAdmissionLocalEvidenceStore,
+	type RunAdmissionReceiptAttemptRecord,
+	recordRunAdmissionReceiptAttempt,
+	recordRunAdmissionReceiptAttemptSync,
+} from "./admission-receipts.js";
 import type { EventBus, EventContext } from "./events.js";
 import {
 	createGraphScheduler,
@@ -39,6 +50,9 @@ const noopBus: EventBus = {
 	emit: () => {},
 };
 
+const DEFAULT_ADMISSION_STEM = "run_admission";
+const MAX_ADMISSION_STEM_LENGTH = 120;
+
 export interface BuildplaneOrchestrator {
 	initializeProject(): ReturnType<BuildplaneStoragePort["initializeProject"]>;
 	runPacket(
@@ -68,6 +82,7 @@ export interface CreateBuildplaneOrchestratorOptions {
 	readonly runtime: BuildplaneRuntimePort;
 	readonly policy: BuildplanePolicyPort;
 	readonly workspace: BuildplaneWorkspacePort;
+	readonly admissionStore?: RunAdmissionLocalEvidenceStore | null;
 	readonly eventBus?: EventBus;
 	readonly profileRegistry?: BuildplaneProfileRegistryPort;
 	readonly budgets?: BudgetConstraints;
@@ -81,6 +96,10 @@ export function createBuildplaneOrchestrator(
 	const profileRegistry = options.profileRegistry;
 	const topLevelBudgets = options.budgets;
 	const defaultBus = options.eventBus ?? noopBus;
+	const admissionStore =
+		options.admissionStore === undefined
+			? createDefaultRunAdmissionStore(projectRoot)
+			: options.admissionStore;
 	const memoryPort = options.memoryPort;
 	const strategyWorkflowPromotionRule =
 		"multi-round-strategy-workflow->procedure";
@@ -93,6 +112,122 @@ export function createBuildplaneOrchestrator(
 			kind,
 			message: error instanceof Error ? error.message : String(error),
 		};
+	}
+
+	function createDefaultRunAdmissionStore(
+		root: string,
+	): RunAdmissionLocalEvidenceStore {
+		const admissionDir = resolve(
+			resolveGitMetadataDir(root),
+			"buildplane",
+			"admission",
+		);
+		const receiptsDir = resolve(admissionDir, "receipts");
+		const eventsPath = resolve(admissionDir, "events.jsonl");
+		return {
+			writeReceiptArtifact(input) {
+				mkdirSync(receiptsDir, { recursive: true });
+				const receiptId =
+					typeof input.receipt.receipt_id === "string" &&
+					input.receipt.receipt_id.length > 0
+						? input.receipt.receipt_id
+						: input.receiptDigest.replace(/^sha256:/, "");
+				const path = resolve(
+					receiptsDir,
+					`${sanitizeAdmissionStoreStem(receiptId)}.json`,
+				);
+				writeFileSync(path, input.contents, "utf8");
+				return {
+					ref: `artifact://run-admission/${input.receiptDigest}`,
+					path,
+				};
+			},
+			appendAdmissionEvent(input) {
+				mkdirSync(admissionDir, { recursive: true });
+				appendFileSync(eventsPath, `${JSON.stringify(input.event)}\n`, "utf8");
+				return {
+					ref: createDefaultRunAdmissionEventRef(input),
+					path: eventsPath,
+				};
+			},
+		};
+	}
+
+	function resolveGitMetadataDir(repositoryRoot: string): string {
+		try {
+			return execFileSync(
+				"git",
+				["-C", repositoryRoot, "rev-parse", "--absolute-git-dir"],
+				{
+					encoding: "utf8",
+					stdio: ["ignore", "pipe", "ignore"],
+				},
+			).trim();
+		} catch {
+			return resolve(repositoryRoot, ".git");
+		}
+	}
+
+	function sanitizeAdmissionStoreStem(value: string): string {
+		const safe = value
+			.replace(/[^A-Za-z0-9_-]/g, "_")
+			.slice(0, MAX_ADMISSION_STEM_LENGTH);
+		return safe.length > 0 ? safe : DEFAULT_ADMISSION_STEM;
+	}
+
+	function stableAdmissionJson(value: unknown): string {
+		if (value === null || typeof value !== "object") {
+			return JSON.stringify(value);
+		}
+		if (Array.isArray(value)) {
+			return `[${value.map((item) => stableAdmissionJson(item)).join(",")}]`;
+		}
+		const record = value as Record<string, unknown>;
+		return `{${Object.keys(record)
+			.sort()
+			.map(
+				(key) => `${JSON.stringify(key)}:${stableAdmissionJson(record[key])}`,
+			)
+			.join(",")}}`;
+	}
+
+	function createDefaultRunAdmissionEventRef(input: {
+		event: JsonRecord;
+		receipt: JsonRecord;
+	}): string {
+		const eventKind =
+			typeof input.event.kind === "string" && input.event.kind.length > 0
+				? input.event.kind
+				: "run_admission_recorded";
+		const recordedAt =
+			typeof input.event.recorded_at === "string" &&
+			input.event.recorded_at.length > 0
+				? input.event.recorded_at
+				: "";
+		const payload =
+			typeof input.event.payload === "object" &&
+			input.event.payload !== null &&
+			!Array.isArray(input.event.payload)
+				? (input.event.payload as JsonRecord)
+				: undefined;
+		const receiptId =
+			typeof payload?.receipt_id === "string"
+				? payload.receipt_id
+				: typeof input.receipt.receipt_id === "string"
+					? input.receipt.receipt_id
+					: DEFAULT_ADMISSION_STEM;
+		const eventDigest = createHash("sha256")
+			.update(
+				stableAdmissionJson({
+					eventKind,
+					recordedAt,
+					receiptId,
+					payload,
+					receipt: input.receipt,
+				}),
+			)
+			.digest("hex");
+		return `event://run-admission/${sanitizeAdmissionStoreStem(receiptId)}/${eventDigest}`;
 	}
 
 	function toWorkspaceSnapshot(
@@ -108,6 +243,299 @@ export function createBuildplaneOrchestrator(
 			headSha: preparedWorkspace.headSha,
 			status: "active",
 		};
+	}
+
+	function collectWorkspaceChangedFiles(
+		workspaceRoot: string,
+	): readonly string[] {
+		try {
+			const tracked = execFileSync(
+				"git",
+				["-C", workspaceRoot, "diff", "--name-only", "HEAD", "--"],
+				{
+					encoding: "utf8",
+					stdio: ["ignore", "pipe", "ignore"],
+				},
+			);
+			const untracked = execFileSync(
+				"git",
+				["-C", workspaceRoot, "ls-files", "--others", "--exclude-standard"],
+				{
+					encoding: "utf8",
+					stdio: ["ignore", "pipe", "ignore"],
+				},
+			);
+			return Array.from(
+				new Set(
+					[...tracked.split(/\r?\n/), ...untracked.split(/\r?\n/)]
+						.map((path) => path.trim())
+						.filter(Boolean),
+				),
+			).sort();
+		} catch {
+			return ["../buildplane-diff-unavailable"];
+		}
+	}
+
+	function createRunAdmissionDigest(
+		value: JsonRecord | readonly JsonRecord[],
+	): string {
+		return `sha256:${createHash("sha256")
+			.update(JSON.stringify(value))
+			.digest("hex")}`;
+	}
+
+	function uniqueStrings(values: readonly string[]): readonly string[] {
+		return Array.from(new Set(values));
+	}
+
+	function collectDeclaredScopeAllowedPaths(
+		validatedPacket: UnitPacket,
+	): readonly string[] {
+		return uniqueStrings([
+			...validatedPacket.unit.expectedOutputs,
+			...validatedPacket.verification.requiredOutputs,
+		]);
+	}
+
+	function deriveRunAdmissionRequestedSideEffects(
+		validatedPacket: UnitPacket,
+	): readonly string[] {
+		const requestedSideEffects = ["fs.read:repo"];
+		if (collectDeclaredScopeAllowedPaths(validatedPacket).length > 0) {
+			requestedSideEffects.push("fs.write:declared_scope");
+		}
+		if (validatedPacket.execution !== undefined) {
+			requestedSideEffects.push("command.execute:verification");
+		}
+		return uniqueStrings(requestedSideEffects);
+	}
+
+	function createRunAdmissionEvidenceInputs(ctx: {
+		run: Run;
+		validatedPacket: UnitPacket;
+		workspace: WorkspaceSnapshot;
+	}): readonly RunAdmissionEvidenceInput[] {
+		const scope = {
+			allowed_paths: collectDeclaredScopeAllowedPaths(ctx.validatedPacket),
+			network_allowed: false,
+		};
+		return [
+			{
+				kind: "git.status",
+				ref: `workspace://${ctx.run.id}/git-status-preflight`,
+				digest: createRunAdmissionDigest({
+					run_id: ctx.run.id,
+					worktree_path: ctx.workspace.path,
+					status: "clean",
+				}),
+				required: true,
+				status: "present",
+			},
+			{
+				kind: "git.rev-parse",
+				ref: `workspace://${ctx.run.id}/rev-parse-head`,
+				digest: createRunAdmissionDigest({
+					run_id: ctx.run.id,
+					head_commit: ctx.workspace.headSha,
+				}),
+				required: true,
+				status: "present",
+			},
+			{
+				kind: "declared_scope",
+				ref: `workspace://${ctx.run.id}/declared-scope`,
+				digest: createRunAdmissionDigest(scope),
+				required: true,
+				status: "present",
+			},
+		];
+	}
+
+	function createRunAdmissionReceiptInput(ctx: {
+		run: Run;
+		validatedPacket: UnitPacket;
+		workspace: WorkspaceSnapshot;
+		projectRoot: string;
+	}): CreateRunAdmissionReceiptDryRunInput {
+		const { run, validatedPacket, workspace: preparedWorkspace } = ctx;
+		const declaredScope = {
+			allowed_paths: collectDeclaredScopeAllowedPaths(validatedPacket),
+			network_allowed: false,
+		};
+		const requestedSideEffects =
+			deriveRunAdmissionRequestedSideEffects(validatedPacket);
+		return {
+			receiptId: `run_admission_${run.id}`,
+			decidedAt: new Date().toISOString(),
+			run: {
+				run_id: run.id,
+				unit_id: validatedPacket.unit.id,
+				unit_kind: validatedPacket.unit.kind,
+				unit_scope: validatedPacket.unit.scope,
+				policy_profile: validatedPacket.unit.policyProfile,
+				verification_contract: validatedPacket.unit.verificationContract,
+			} satisfies JsonRecord,
+			repo: {
+				path: ctx.projectRoot,
+				worktree_path: preparedWorkspace.path,
+				expected_remote: "local-first",
+				base_ref: "HEAD",
+				base_commit: preparedWorkspace.headSha,
+				head_commit: preparedWorkspace.headSha,
+				worktree_clean: true,
+			},
+			request: {
+				requested_capabilities: requestedSideEffects,
+				requested_side_effects: requestedSideEffects,
+				declared_scope: declaredScope,
+			},
+			policyProfileId: validatedPacket.unit.policyProfile,
+			evidenceInputs: createRunAdmissionEvidenceInputs({
+				run,
+				validatedPacket,
+				workspace: preparedWorkspace,
+			}),
+			actor: "kernel.orchestrator",
+			source: "run-loop",
+			host: "kernel",
+		};
+	}
+
+	function admissionDeniedFailure(
+		record: RunAdmissionReceiptAttemptRecord,
+	): RunInfrastructureFailure {
+		return {
+			kind: "run-admission-denied",
+			message: `Run admission ${record.payload.decision}: ${[
+				...record.payload.missing_evidence,
+				...record.payload.unsafe_requests,
+			].join(" ")}`,
+		};
+	}
+
+	function finalizeAdmissionRecordingFailure(
+		ctx: {
+			run: Run;
+			workspace: WorkspaceSnapshot;
+		},
+		error: unknown,
+	): RunPacketResult {
+		return finalizeInfrastructureFailure(
+			ctx.run,
+			infrastructureFailure("run-admission-record-failed", error),
+			{
+				workspace: ctx.workspace,
+				workspaceStatus: "retained",
+			},
+		);
+	}
+
+	function finalizeAdmissionStoreUnavailable(ctx: {
+		run: Run;
+		workspace: WorkspaceSnapshot;
+	}): RunPacketResult {
+		return finalizeInfrastructureFailure(
+			ctx.run,
+			infrastructureFailure(
+				"run-admission-store-unavailable",
+				"Run admission evidence store is required before live worker execution.",
+			),
+			{
+				workspace: ctx.workspace,
+				workspaceStatus: "retained",
+			},
+		);
+	}
+
+	function admitPreparedRunSync(ctx: {
+		run: Run;
+		validatedPacket: UnitPacket;
+		workspace: WorkspaceSnapshot;
+		projectRoot: string;
+	}): { ok: true } | { ok: false; result: RunPacketResult } {
+		if (!admissionStore) {
+			return {
+				ok: false,
+				result: finalizeAdmissionStoreUnavailable(ctx),
+			};
+		}
+		try {
+			const receipt = createRunAdmissionReceiptLive(
+				createRunAdmissionReceiptInput(ctx),
+			);
+			const record = recordRunAdmissionReceiptAttemptSync({
+				receipt,
+				store: admissionStore,
+			});
+			if (
+				record.payload.decision !== "PASS" ||
+				record.payload.will_execute_worker !== true
+			) {
+				return {
+					ok: false,
+					result: finalizeInfrastructureFailure(
+						ctx.run,
+						admissionDeniedFailure(record),
+						{
+							workspace: ctx.workspace,
+							workspaceStatus: "retained",
+						},
+					),
+				};
+			}
+			return { ok: true };
+		} catch (error) {
+			return {
+				ok: false,
+				result: finalizeAdmissionRecordingFailure(ctx, error),
+			};
+		}
+	}
+
+	async function admitPreparedRunAsync(ctx: {
+		run: Run;
+		validatedPacket: UnitPacket;
+		workspace: WorkspaceSnapshot;
+		projectRoot: string;
+	}): Promise<{ ok: true } | { ok: false; result: RunPacketResult }> {
+		if (!admissionStore) {
+			return {
+				ok: false,
+				result: finalizeAdmissionStoreUnavailable(ctx),
+			};
+		}
+		try {
+			const receipt = createRunAdmissionReceiptLive(
+				createRunAdmissionReceiptInput(ctx),
+			);
+			const record = await recordRunAdmissionReceiptAttempt({
+				receipt,
+				store: admissionStore,
+			});
+			if (
+				record.payload.decision !== "PASS" ||
+				record.payload.will_execute_worker !== true
+			) {
+				return {
+					ok: false,
+					result: finalizeInfrastructureFailure(
+						ctx.run,
+						admissionDeniedFailure(record),
+						{
+							workspace: ctx.workspace,
+							workspaceStatus: "retained",
+						},
+					),
+				};
+			}
+			return { ok: true };
+		} catch (error) {
+			return {
+				ok: false,
+				result: finalizeAdmissionRecordingFailure(ctx, error),
+			};
+		}
 	}
 
 	function buildStrategyProcedureCandidate(
@@ -582,6 +1010,8 @@ export function createBuildplaneOrchestrator(
 			const prepared = prepareRun(packet, createRunOptions);
 			if (!prepared.ok) return prepared.result;
 			const { ctx } = prepared;
+			const admitted = admitPreparedRunSync(ctx);
+			if (admitted.ok === false) return admitted.result;
 
 			bus.emit({
 				kind: "execution-started",
@@ -697,6 +1127,8 @@ export function createBuildplaneOrchestrator(
 				return prepared.result;
 			}
 			const { ctx } = prepared;
+			const admitted = await admitPreparedRunAsync(ctx);
+			if (admitted.ok === false) return admitted.result;
 
 			const runContext: EventContext = {
 				runId: ctx.run.id,
@@ -794,6 +1226,10 @@ export function createBuildplaneOrchestrator(
 
 			try {
 				currentReceipt = await executeOnce(currentPacket);
+				currentReceipt = {
+					...currentReceipt,
+					changedFiles: collectWorkspaceChangedFiles(ctx.workspace.path),
+				};
 			} catch (error) {
 				budgetUnsubscribe?.();
 				const message = error instanceof Error ? error.message : String(error);
@@ -820,6 +1256,27 @@ export function createBuildplaneOrchestrator(
 			try {
 				while (true) {
 					storage.recordExecutionEvidence(ctx.run.id, currentReceipt);
+
+					const architectureGate =
+						resolvedProfile?.trustGates?.architectureDiffScope;
+					if (architectureGate && policy.evaluateArchitectureDiffScope) {
+						const architectureDecision = policy.evaluateArchitectureDiffScope(
+							currentReceipt.changedFiles ?? [],
+							architectureGate,
+						);
+						if (architectureDecision) {
+							return finalizeRun(
+								{
+									run: ctx.run,
+									validatedPacket: currentPacket,
+									workspace: ctx.workspace,
+									attemptCount,
+								},
+								currentReceipt,
+								architectureDecision,
+							);
+						}
+					}
 
 					const decision = policy.evaluateRun(
 						currentPacket,

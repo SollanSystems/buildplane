@@ -4,18 +4,19 @@
  *
  * This script MUST run under an intentionally unsupported Node version.
  * It requires BUILDPLANE_EXPECT_UNSUPPORTED_NODE=1 so accidental local runs
- * on the supported Node 24.13.1 fail immediately with a clear message.
+ * on a supported Node 24 runtime fail immediately with a clear message.
  *
  * What it proves:
  *   - pnpm build succeeds on the current runtime
  *   - the staged publish artifact can be packed from compiled output
  *   - the packed buildplane binary exits non-zero under the wrong-Node runtime
- *   - the error message includes "24.13.1" (the required version)
+ *   - the error message includes ">=24.13.1 <25" (the supported range)
  *   - the error message includes the detected wrong version
  *   - failure happens before any normal CLI execution begins
  */
 import { spawnSync } from "node:child_process";
 import {
+	chmodSync,
 	existsSync,
 	mkdtempSync,
 	readFileSync,
@@ -34,11 +35,41 @@ import {
 	resolveInstalledCommandDirectory,
 } from "./verify-positive-lib.mjs";
 
-const SUPPORTED_NODE_VERSION = readFileSync(
+const SUPPORTED_NODE_BASELINE = readFileSync(
 	join(REPO_ROOT, ".node-version"),
 	"utf8",
 ).trim();
+const SUPPORTED_NODE_RANGE = ">=24.13.1 <25";
 const CURRENT_NODE_VERSION = process.versions.node;
+
+function parseNodeVersion(version) {
+	const match = /^(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/.exec(version);
+	if (!match) {
+		return null;
+	}
+	return {
+		major: Number(match[1]),
+		minor: Number(match[2]),
+		patch: Number(match[3]),
+	};
+}
+
+function compareNodeVersions(a, b) {
+	if (a.major !== b.major) return a.major - b.major;
+	if (a.minor !== b.minor) return a.minor - b.minor;
+	return a.patch - b.patch;
+}
+
+function isSupportedNodeVersion(version) {
+	const parsed = parseNodeVersion(version);
+	if (!parsed) {
+		return false;
+	}
+	return (
+		compareNodeVersions(parsed, { major: 24, minor: 13, patch: 1 }) >= 0 &&
+		parsed.major < 25
+	);
+}
 
 function guardExpectedUnsupportedNode() {
 	if (!process.env.BUILDPLANE_EXPECT_UNSUPPORTED_NODE) {
@@ -49,10 +80,11 @@ function guardExpectedUnsupportedNode() {
 		);
 	}
 
-	if (CURRENT_NODE_VERSION === SUPPORTED_NODE_VERSION) {
+	if (isSupportedNodeVersion(CURRENT_NODE_VERSION)) {
 		fail(
-			`verify-wrong-node.mjs is running on the supported version ${SUPPORTED_NODE_VERSION}.\n` +
-				`This script must run under a non-${SUPPORTED_NODE_VERSION} Node runtime to prove the guard.`,
+			`verify-wrong-node.mjs is running on supported range ${SUPPORTED_NODE_RANGE}.\n` +
+				`This script must run under a Node runtime outside ${SUPPORTED_NODE_RANGE} to prove the guard.\n` +
+				`Current Node version: ${CURRENT_NODE_VERSION}; tested baseline: ${SUPPORTED_NODE_BASELINE}`,
 		);
 	}
 }
@@ -134,6 +166,24 @@ function assertFile(path, description) {
 	}
 }
 
+function createWrongNodePackagedNativeFixture(tempPaths) {
+	if (process.platform !== "linux" || process.arch !== "x64") {
+		return undefined;
+	}
+
+	const fixtureRoot = mkdtempSync(
+		join(resolveSafeStagingParentDirectory(), "buildplane-wrong-node-native-"),
+	);
+	tempPaths.push(fixtureRoot);
+	const fixturePath = join(fixtureRoot, "buildplane-native");
+	writeFileSync(
+		fixturePath,
+		'#!/bin/sh\nprintf \'{"ok":true,"fixture":"wrong-node-native"}\\n\'\n',
+	);
+	chmodSync(fixturePath, 0o755);
+	return fixturePath;
+}
+
 function main() {
 	const tempPaths = [];
 
@@ -144,17 +194,22 @@ function main() {
 		const NPM_COMMAND = resolveRequiredCommandOnPath("npm");
 
 		console.log(
-			`Running wrong-Node guard verification under Node ${CURRENT_NODE_VERSION} (supported: ${SUPPORTED_NODE_VERSION})`,
+			`Running wrong-Node guard verification under Node ${CURRENT_NODE_VERSION} (supported: ${SUPPORTED_NODE_RANGE}; baseline: ${SUPPORTED_NODE_BASELINE})`,
 		);
 
 		console.log("== build ==");
 		runCommand(PNPM_COMMAND, ["build"], { cwd: REPO_ROOT });
 
 		console.log("== stage and pack ==");
+		const stageEnv = { ...process.env };
+		const nativeFixturePath = createWrongNodePackagedNativeFixture(tempPaths);
+		if (nativeFixturePath) {
+			stageEnv.BUILDPLANE_PUBLISHED_NATIVE_BIN = nativeFixturePath;
+		}
 		const { stdout: stageStdout } = runCommand(
 			process.execPath,
 			["./scripts/published-bootstrap/stage-package.mjs"],
-			{ cwd: REPO_ROOT },
+			{ cwd: REPO_ROOT, env: stageEnv },
 		);
 		const staged = parseJson(stageStdout.trim(), "stage-package.mjs output");
 		tempPaths.push(staged.stagingRoot);
@@ -229,9 +284,9 @@ function main() {
 			.filter(Boolean)
 			.join("\n");
 
-		if (!combinedOutput.includes(SUPPORTED_NODE_VERSION)) {
+		if (!combinedOutput.includes(SUPPORTED_NODE_RANGE)) {
 			fail(
-				`Expected error output to mention required version ${SUPPORTED_NODE_VERSION}\nGot: ${combinedOutput}`,
+				`Expected error output to mention supported range ${SUPPORTED_NODE_RANGE}\nGot: ${combinedOutput}`,
 			);
 		}
 

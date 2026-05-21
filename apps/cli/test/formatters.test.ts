@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+	createInspectorProjection,
 	formatInspectDetail,
+	formatInspectorProjection,
 	formatLearningDetail,
 	formatLearningsList,
 	formatRunHistory,
@@ -125,11 +127,11 @@ describe("formatInspectDetail", () => {
 			{
 				id: "abc-123",
 				runId: "run-xyz",
-				scope: "workspace",
-				kind: "fact",
+				scope: "workspace" as const,
+				kind: "fact" as const,
 				title: "Verification gate passed",
 				body: "All outputs verified",
-				status: "active",
+				status: "active" as const,
 				createdAt: "2026-04-12T01:00:00Z",
 				seenCount: 1,
 			},
@@ -203,6 +205,101 @@ describe("formatInspectDetail", () => {
 			[],
 		);
 		expect(lines).toContain("strategy: strategy-injected");
+	});
+
+	it("renders event tape summary with compact sanitized metadata in inspect output", () => {
+		const lines = formatInspectDetail(
+			{
+				...baseSnapshot,
+				eventTape: {
+					runId: "run-xyz",
+					eventCount: 3,
+					firstKind: "run-created",
+					lastKind: "run-completed",
+					firstOccurredAt: "2026-04-27T00:00:00.000Z",
+					lastOccurredAt: "2026-04-27T00:00:02.000Z",
+					terminalStatus: "failed",
+					kindCounts: [
+						{ kind: "run-created", count: 1 },
+						{ kind: "decision-recorded", count: 1 },
+						{ kind: "run-completed", count: 1 },
+					],
+					events: [
+						{
+							id: "event-1",
+							kind: "run-created",
+							occurredAt: "2026-04-27T00:00:00.000Z",
+							summary: "created unit unit-1",
+							metadata: {
+								unitId: "unit-1",
+								status: "pending",
+							},
+						},
+						{
+							id: "event-2",
+							kind: "decision-recorded",
+							occurredAt: "2026-04-27T00:00:01.000Z",
+							summary: "reject-run rejected\n\u001b[31m",
+							metadata: {
+								decisionKind: "reject-run",
+								outcome: "rejected",
+								reasonPreview: "blocked\n\u001b[31mnow",
+								reasonsCount: 1,
+							},
+						},
+					],
+				},
+			},
+			[],
+		);
+
+		expect(lines).toContain("event-tape:");
+		expect(lines).toContain("  events: 3");
+		expect(lines).toContain("  first: run-created");
+		expect(lines).toContain("  last: run-completed");
+		expect(lines).toContain(
+			"  window: 2026-04-27T00:00:00.000Z -> 2026-04-27T00:00:02.000Z",
+		);
+		expect(lines).toContain(
+			"  kinds: run-created=1, decision-recorded=1, run-completed=1",
+		);
+		expect(lines).toContain("  terminal-status: failed");
+		expect(lines.join("\n")).toContain(
+			"decision-recorded event-2: reject-run rejected\\n\\u001b[31m [decisionKind=reject-run, outcome=rejected, reasonPreview=blocked\\n\\u001b[31mnow, reasonsCount=1]",
+		);
+		expect(lines).toContain("  - ... 1 more events");
+		expect(lines.join("\n")).not.toContain("reject-run rejected\n");
+		expect(lines.join("\n")).not.toContain("reasonPreview=blocked\n");
+	});
+
+	it("omits empty event metadata without adding trailing whitespace", () => {
+		const lines = formatInspectDetail(
+			{
+				...baseSnapshot,
+				eventTape: {
+					runId: "run-xyz",
+					eventCount: 1,
+					firstKind: "run-created",
+					lastKind: "run-created",
+					terminalStatus: "passed",
+					events: [
+						{
+							id: "event-1",
+							kind: "run-created",
+							occurredAt: "2026-04-27T00:00:00.000Z",
+							summary: "created unit unit-1",
+							metadata: {},
+						},
+					],
+				},
+			},
+			[],
+		);
+
+		expect(lines).toContain("  - run-created event-1: created unit unit-1");
+		expect(lines).not.toContain(
+			"  - run-created event-1: created unit unit-1 ",
+		);
 	});
 
 	it("includes route and policy provenance when present", () => {
@@ -289,6 +386,21 @@ describe("formatInspectDetail", () => {
 			{
 				...baseSnapshot,
 				run: { id: "run-xyz", unitId: "implement-foo", status: "failed" },
+				eventTape: {
+					runId: "run-xyz",
+					eventCount: 1,
+					firstKind: "run-created",
+					lastKind: "run-created",
+					terminalStatus: "failed",
+					events: [
+						{
+							id: "event-1",
+							kind: "run-created",
+							occurredAt: "2026-04-27T00:00:00.000Z",
+							summary: "created unit implement-foo",
+						},
+					],
+				},
 				evidence: [
 					{
 						kind: "verification",
@@ -313,6 +425,8 @@ describe("formatInspectDetail", () => {
 			[],
 		);
 
+		expect(lines).toContain("event-tape:");
+		expect(lines).toContain("  events: 1");
 		expect(lines).toContain("outcome:");
 		expect(lines).toContain("  status: failed");
 		expect(lines).toContain("evidence:");
@@ -413,5 +527,109 @@ describe("formatInspectDetail", () => {
 	it("omits learnings section when empty array provided", () => {
 		const lines = formatInspectDetail(baseSnapshot, [], []);
 		expect(lines.join("\n")).not.toContain("learnings:");
+	});
+
+	it("creates a fail-closed inspector projection from existing inspect records", () => {
+		const projection = createInspectorProjection({
+			...baseSnapshot,
+			run: { id: "run-xyz", unitId: "implement-foo", status: "passed" },
+			eventTape: {
+				runId: "run-xyz",
+				eventCount: 2,
+				firstKind: "run_started",
+				lastKind: "run_completed",
+				terminalStatus: "passed",
+				events: [
+					{
+						id: "event-1",
+						kind: "run_started",
+						occurredAt: "2026-05-16T00:00:00.000Z",
+						summary: "run started",
+					},
+					{
+						id: "event-2",
+						kind: "run_completed",
+						occurredAt: "2026-05-16T00:00:01.000Z",
+						summary: "run completed",
+					},
+				],
+			},
+			evidence: [{ kind: "command-exit", status: "pass", message: "exit 0" }],
+			decisions: [
+				{
+					kind: "advance-run",
+					outcome: "approved",
+					reasons: ["required output exists"],
+				},
+			],
+			artifacts: [{ type: "log", location: ".buildplane/log.txt" }],
+		});
+
+		expect(projection).toMatchObject({
+			kind: "run-inspector",
+			runId: "run-xyz",
+			outcomeStrip: {
+				verdict: "PASSED",
+				eventCount: 2,
+				evidenceCount: 1,
+				decisionCount: 1,
+				artifactCount: 1,
+				missingEvidenceCount: 0,
+			},
+		});
+		expect(projection.eventTimeline).toHaveLength(2);
+		expect(projection.missingEvidence).toEqual([]);
+	});
+
+	it("renders the inspector view as outcome, timeline, and evidence panels", () => {
+		const projection = createInspectorProjection({
+			...baseSnapshot,
+			run: { id: "run-xyz", unitId: "implement-foo", status: "failed" },
+			eventTape: {
+				runId: "run-xyz",
+				eventCount: 1,
+				firstKind: "run_started",
+				lastKind: "run_failed",
+				terminalStatus: "failed",
+				events: [
+					{
+						id: "event-1",
+						kind: "run_failed",
+						occurredAt: "2026-05-16T00:00:01.000Z",
+						summary: "failed\n\u001b[31m",
+					},
+				],
+			},
+			evidence: [
+				{
+					kind: "verification",
+					status: "failed",
+					message: "pytest failed\n\u001b[31m",
+				},
+			],
+			decisions: [
+				{
+					kind: "reject-run",
+					outcome: "rejected",
+					reasons: ["verification failed"],
+				},
+			],
+			artifacts: [],
+		});
+		const lines = formatInspectorProjection(projection);
+
+		expect(lines).toContain("Run Inspector");
+		expect(lines).toContain("Outcome Strip");
+		expect(lines).toContain("  verdict: FAILED");
+		expect(lines).toContain("Event Timeline");
+		expect(lines.join("\n")).toContain(
+			"run_failed event-1: failed\\n\\u001b[31m",
+		);
+		expect(lines).toContain("Evidence Pane");
+		expect(lines).toContain(
+			"  - evidence: verification failed: pytest failed\\n\\u001b[31m",
+		);
+		expect(lines).toContain("Missing Evidence");
+		expect(lines.join("\n")).not.toContain("pytest failed\n");
 	});
 });

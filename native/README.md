@@ -22,7 +22,7 @@ The native workspace contains the active memory implementation today. The main T
 - FTS-backed search
 - memory maintenance commands like `doctor`, `export`, `import`, and `prune`
 
-That bridge is currently verified for repo-local source and in-repo built CLI flows. Published/global `npm install -g buildplane` does not yet make `buildplane memory ...` a verified operator contract because the published package does not bundle or install this binary.
+That bridge is verified for repo-local source, in-repo built CLI flows, and the published/global Linux x64 package. Windows and macOS published packages currently report native memory as unavailable instead of trying to execute an unsupported binary.
 
 Useful commands:
 
@@ -39,6 +39,7 @@ BUILDPLANE_NATIVE_BIN="$PWD/native/target/debug/buildplane-native" pnpm buildpla
 
 Native memory binary discovery for the repo-local/in-repo CLI bridge in `apps/cli/src/run-cli.ts`:
 - `BUILDPLANE_NATIVE_BIN` if set
+- packaged `vendor/native/linux-x64/buildplane-native` when running on Linux x64
 - `native/target/debug/buildplane-native` relative to the current working directory
 - `native/target/release/buildplane-native` relative to the current working directory
 - `buildplane-native` on `PATH`

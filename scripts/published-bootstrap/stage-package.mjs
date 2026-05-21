@@ -31,6 +31,8 @@ const STAGED_RUNTIME_ENTRY_BASENAME = "cli.js";
 const SOURCE_RUNTIME_ENTRY_BASENAME = "cli-main.js";
 const STAGED_RUNTIME_ENTRY_SPECIFIER = `./${STAGED_RUNTIME_ENTRY_BASENAME}`;
 const SOURCE_RUNTIME_ENTRY_SPECIFIER = `./${SOURCE_RUNTIME_ENTRY_BASENAME}`;
+const PACKAGED_NATIVE_PLATFORM = "linux-x64";
+const PACKAGED_NATIVE_BINARY_BASENAME = "buildplane-native";
 const FALLBACK_STAGING_PARENT_PATHS = Object.freeze(
 	process.platform === "win32"
 		? [
@@ -249,6 +251,77 @@ function copyRuntimeClosureFiles(sourceFilePaths, packageRoot) {
 	}
 }
 
+function currentPackagedNativeTarget() {
+	return {
+		binaryBasename: PACKAGED_NATIVE_BINARY_BASENAME,
+		platform: PACKAGED_NATIVE_PLATFORM,
+	};
+}
+
+function resolveBuiltNativeBinaryForPackaging(target) {
+	const explicitNativeBinary = process.env.BUILDPLANE_PUBLISHED_NATIVE_BIN;
+	if (explicitNativeBinary) {
+		const candidate = resolve(explicitNativeBinary);
+		if (existsSync(candidate) && statSync(candidate).isFile()) {
+			return candidate;
+		}
+
+		throw new Error(
+			`BUILDPLANE_PUBLISHED_NATIVE_BIN does not point to a file: ${candidate}`,
+		);
+	}
+
+	if (process.platform !== "linux" || process.arch !== "x64") {
+		return undefined;
+	}
+
+	for (const profile of ["debug", "release"]) {
+		const candidate = join(
+			REPO_ROOT,
+			"native",
+			"target",
+			profile,
+			target.binaryBasename,
+		);
+		if (existsSync(candidate) && statSync(candidate).isFile()) {
+			return candidate;
+		}
+	}
+
+	return undefined;
+}
+
+function stagePackagedNativeBinary(packageRoot) {
+	const target = currentPackagedNativeTarget();
+	const sourcePath = resolveBuiltNativeBinaryForPackaging(target);
+	if (!sourcePath) {
+		throw new Error(
+			[
+				"Missing required linux-x64 native binary for published memory packaging.",
+				"Run `pnpm native:build` on linux-x64 before `pnpm stage:published-bootstrap`, or set BUILDPLANE_PUBLISHED_NATIVE_BIN to an explicit linux-x64 binary.",
+			].join(" "),
+		);
+	}
+
+	const destinationPath = join(
+		packageRoot,
+		"vendor",
+		"native",
+		target.platform,
+		target.binaryBasename,
+	);
+	mkdirSync(dirname(destinationPath), { recursive: true });
+	cpSync(sourcePath, destinationPath);
+	chmodSync(destinationPath, 0o755);
+
+	return {
+		available: true,
+		platform: target.platform,
+		sourcePath,
+		destinationPath,
+	};
+}
+
 function toRuntimeModuleSpecifier(fromFilePath, packageRoot, packageName) {
 	const stagedTarget = INTERNAL_PACKAGE_ENTRYPOINTS[packageName];
 	if (!stagedTarget) {
@@ -445,6 +518,7 @@ export function stagePublishedPackage() {
 		rewriteStagedBootstrapWrapper(packageRoot);
 		stripStagedRuntimeSourceMapComments(packageRoot);
 		chmodSync(join(packageRoot, "dist", "index.js"), 0o755);
+		const packagedNative = stagePackagedNativeBinary(packageRoot);
 		assertStagedRuntimeClosure(packageRoot, manifest);
 
 		writeFileSync(
@@ -454,6 +528,7 @@ export function stagePublishedPackage() {
 		writeFileSync(join(packageRoot, "README.md"), derivePublishedReadme());
 
 		return {
+			packagedNative,
 			stagingRoot,
 			packageRoot,
 		};
