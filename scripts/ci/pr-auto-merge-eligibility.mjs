@@ -7,6 +7,7 @@ const BLOCKED_SHA_MISMATCH = "BLOCKED_SHA_MISMATCH";
 const BLOCKED_DEPLOYMENT_SIDE_EFFECT = "BLOCKED_DEPLOYMENT_SIDE_EFFECT";
 const BLOCKED_MERGE_STATE = "BLOCKED_MERGE_STATE";
 const BLOCKED_DRAFT = "BLOCKED_DRAFT";
+const BLOCKED_AUTO_MERGE_OPT_IN = "BLOCKED_AUTO_MERGE_OPT_IN";
 const AUTO_MERGE_READY = "AUTO_MERGE_READY";
 const RECONCILE_ALREADY_MERGED = "RECONCILE_ALREADY_MERGED";
 
@@ -37,6 +38,12 @@ function usage(exitCode = 0) {
 	stream.write(
 		`  --allow-deployments            Do not block if deployment objects exist for the head SHA.\n`,
 	);
+	stream.write(
+		`  --required-label <label>       Required opt-in label. Default: buildplane:auto-merge.\n`,
+	);
+	stream.write(
+		`  --allow-missing-label          Do not block if the opt-in label is absent.\n`,
+	);
 	stream.write(`  --json                         Emit JSON only.\n`);
 	stream.write(`  --help                         Show this help.\n`);
 	process.exit(exitCode);
@@ -45,11 +52,13 @@ function usage(exitCode = 0) {
 function parseArgs(argv) {
 	const args = {
 		allowDeployments: false,
+		allowMissingLabel: false,
 		allowNoChecks: false,
 		expectedHead: undefined,
 		jsonOnly: false,
 		pr: undefined,
 		requireGithubApproval: false,
+		requiredLabel: "buildplane:auto-merge",
 		reviewPass: false,
 	};
 
@@ -76,6 +85,14 @@ function parseArgs(argv) {
 			args.allowDeployments = true;
 			continue;
 		}
+		if (arg === "--allow-missing-label") {
+			args.allowMissingLabel = true;
+			continue;
+		}
+		if (arg === "--required-label") {
+			args.requiredLabel = argv[++index];
+			continue;
+		}
 		if (arg === "--pr") {
 			args.pr = argv[++index];
 			continue;
@@ -89,6 +106,10 @@ function parseArgs(argv) {
 
 	if (!args.pr || !/^\d+$/.test(args.pr)) {
 		throw new Error("--pr <number> is required");
+	}
+
+	if (!args.requiredLabel || args.requiredLabel.trim() === "") {
+		throw new Error("--required-label must not be empty");
 	}
 
 	return args;
@@ -206,6 +227,17 @@ function uniqueStatuses(blockers) {
 	return [...new Set(blockers.map((blocker) => blocker.status))];
 }
 
+function labelNames(labels) {
+	if (!Array.isArray(labels)) return [];
+	return labels
+		.map((label) => (typeof label === "string" ? label : label?.name))
+		.filter((name) => typeof name === "string" && name.length > 0);
+}
+
+function hasLabel(labels, requiredLabel) {
+	return labelNames(labels).includes(requiredLabel);
+}
+
 function determineResult({ args, deployments, pr, rollupItems }) {
 	const blockers = [];
 	const checkState = checksVerdict(rollupItems, args.allowNoChecks);
@@ -234,6 +266,13 @@ function determineResult({ args, deployments, pr, rollupItems }) {
 		blockers.push({
 			status: BLOCKED_REVIEW,
 			reason: `GitHub reviewDecision is ${pr.reviewDecision ?? "unknown"}`,
+		});
+	}
+
+	if (!args.allowMissingLabel && !hasLabel(pr.labels, args.requiredLabel)) {
+		blockers.push({
+			status: BLOCKED_AUTO_MERGE_OPT_IN,
+			reason: `missing required auto-merge opt-in label: ${args.requiredLabel}`,
 		});
 	}
 
@@ -294,7 +333,7 @@ function main() {
 		"view",
 		args.pr,
 		"--json",
-		"number,state,isDraft,headRefOid,headRefName,baseRefName,mergeStateStatus,reviewDecision,statusCheckRollup,url",
+		"number,state,isDraft,headRefOid,headRefName,baseRefName,mergeStateStatus,reviewDecision,statusCheckRollup,labels,url",
 	]);
 	const repo = runJson("gh", ["repo", "view", "--json", "nameWithOwner"]);
 	const deploymentPath = `repos/${repo.nameWithOwner}/deployments?ref=${encodeURIComponent(pr.headRefOid)}&per_page=20`;
@@ -304,6 +343,11 @@ function main() {
 	const verdict = determineResult({ args, deployments, pr, rollupItems });
 
 	const result = {
+		autoMergeOptIn: {
+			allowMissingLabel: args.allowMissingLabel,
+			labelPresent: hasLabel(pr.labels, args.requiredLabel),
+			requiredLabel: args.requiredLabel,
+		},
 		blockers: verdict.blockers,
 		checks: {
 			failing: verdict.checkState.failing,
@@ -325,6 +369,7 @@ function main() {
 			headRefName: pr.headRefName,
 			headRefOid: pr.headRefOid,
 			isDraft: pr.isDraft,
+			labels: labelNames(pr.labels),
 			mergeStateStatus: pr.mergeStateStatus,
 			number: pr.number,
 			reviewDecision: pr.reviewDecision,

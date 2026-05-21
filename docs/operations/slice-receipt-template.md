@@ -78,6 +78,8 @@ Record commands exactly as run. Include exit codes and relevant caveats.
 - Head SHA:
 - Merge state:
 - Review decision:
+- Auto-merge opt-in label present:
+- Required auto-merge label:
 - Required checks observed:
 - Advisory checks observed:
 - Deployment objects from GET-only probe:
