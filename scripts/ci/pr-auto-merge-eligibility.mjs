@@ -23,7 +23,7 @@ function usage(exitCode = 0) {
 		`  --pr <number>                 Pull request number to inspect.\n`,
 	);
 	stream.write(
-		`  --expected-head <sha>          Block unless PR head equals this SHA.\n`,
+		`  --expected-head <sha>          Required reviewed head SHA; block unless PR head equals it.\n`,
 	);
 	stream.write(
 		`  --review-pass                 Assert an independent review receipt is PASS.\n`,
@@ -237,7 +237,12 @@ function determineResult({ args, deployments, pr, rollupItems }) {
 		});
 	}
 
-	if (args.expectedHead && pr.headRefOid !== args.expectedHead) {
+	if (!args.expectedHead) {
+		blockers.push({
+			reason: "reviewed head SHA was not provided with --expected-head",
+			status: BLOCKED_SHA_MISMATCH,
+		});
+	} else if (pr.headRefOid !== args.expectedHead) {
 		blockers.push({
 			reason: `expected head ${args.expectedHead} but PR head is ${pr.headRefOid}`,
 			status: BLOCKED_SHA_MISMATCH,
