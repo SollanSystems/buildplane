@@ -1,5 +1,7 @@
 # Buildplane Autonomous Build-Out Plan
 
+> **Superseded 2026-05-21.** This plan predates the v0.5 design and the auto-merge governance work landed in PRs #112–#115. The canonical operating model for the M0–M6 buildout is now [`docs/architecture/buildplane-agent-operating-system.md`](../../architecture/buildplane-agent-operating-system.md). Use that doc for agent roles, model routing, PR/auto-merge policy, and phase-by-phase scope. The roadmap below is retained for lineage and the Phase 1 (structured memory retrieval) acceptance criteria, but is no longer the authoritative cadence.
+>
 > **For agentic workers:** REQUIRED SUB-SKILLS: use `writing-plans` before large new slices, `subagent-driven-development` for implementation, and `systematic-debugging` for any failure. Keep work PR-sized. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Finish Buildplane from the current green mainline into the operator-first, self-improving coding system for Claude Code CLI and Codex CLI.

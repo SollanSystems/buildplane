@@ -30,6 +30,7 @@ Native workspace:
 
 Supporting architecture docs:
 
+- `docs/architecture/buildplane-agent-operating-system.md` — canonical agent + model + workflow operating model for the v0.5 buildout (M0–M6). Read first.
 - `docs/architecture/buildplane-package-architecture.md` — umbrella system, pack model, dependency boundaries, and migration guidance
 - `docs/architecture/buildplane-memory-schema.md` — concrete layered memory model and SQLite schema
 - `docs/architecture/buildplane-memory-cli.md` — operator-facing memory CLI contract, including the current `apps/cli/src/run-cli.ts` bridge for `buildplane memory ...`
