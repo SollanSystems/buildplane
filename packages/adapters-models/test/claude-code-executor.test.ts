@@ -1,6 +1,6 @@
 import { EventEmitter } from "node:events";
 import { Readable } from "node:stream";
-import type { UnitPacket } from "@buildplane/kernel";
+import type { ExecutionEvent, UnitPacket } from "@buildplane/kernel";
 import { createEventBus } from "@buildplane/kernel";
 import { describe, expect, it, vi } from "vitest";
 import { createClaudeCodeExecutor } from "../src/claude-code-executor.js";
@@ -83,6 +83,9 @@ function makePacket(overrides: Partial<UnitPacket> = {}): UnitPacket {
 }
 
 const PROJECT_ROOT = "/tmp/bp-test";
+const UNSAFE_PERMISSION_FLAG = ["--dangerously", "skip", "permissions"].join(
+	"-",
+);
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -249,6 +252,44 @@ describe("ClaudeCodeExecutor", () => {
 		const modelIndex = spawnArgs.indexOf("--model");
 		expect(modelIndex).toBeGreaterThanOrEqual(0);
 		expect(spawnArgs[modelIndex + 1]).toBe("claude-sonnet-4-5");
+	});
+
+	it("does not pass unsafe permission bypass by default", async () => {
+		const mockSpawn = createMockSpawn({
+			stdout: JSON.stringify({ result: "done" }),
+		});
+		const executor = createClaudeCodeExecutor({ spawnFn: mockSpawn as never });
+		const eventBus = createEventBus();
+
+		await executor.executePacketAsync(makePacket(), PROJECT_ROOT, eventBus);
+
+		const spawnArgs: string[] = mockSpawn.mock.calls[0][1] as string[];
+		expect(spawnArgs).not.toContain(UNSAFE_PERMISSION_FLAG);
+	});
+
+	it("explicit unsafe mode passes dangerous flag and emits observable evidence", async () => {
+		const mockSpawn = createMockSpawn({
+			stdout: JSON.stringify({ result: "done" }),
+		});
+		const executor = createClaudeCodeExecutor({
+			spawnFn: mockSpawn as never,
+			unsafeMode: true,
+		});
+		const eventBus = createEventBus();
+		const events: ExecutionEvent[] = [];
+		eventBus.subscribe((ev) => events.push(ev));
+
+		await executor.executePacketAsync(makePacket(), PROJECT_ROOT, eventBus);
+
+		const spawnArgs: string[] = mockSpawn.mock.calls[0][1] as string[];
+		expect(spawnArgs).toContain(UNSAFE_PERMISSION_FLAG);
+		expect(events).toContainEqual(
+			expect.objectContaining({
+				kind: "evidence-recorded",
+				evidenceKind: "claude-code-unsafe-mode-used",
+				status: "unsafe-mode-used",
+			}),
+		);
 	});
 
 	it("custom cliBinary option → used in spawn call", async () => {
