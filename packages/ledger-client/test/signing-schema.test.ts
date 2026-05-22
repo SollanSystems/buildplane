@@ -8,6 +8,8 @@ import {
 } from "../src/generated/index.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+const SIGNED_EVENT_FIXTURE_HASH =
+	"sha256:71ad93c5d6863d077cbdd5f885275e2ebac705364c44631875c9044eaffe6a08";
 
 function loadSignatureFixture(): EventSignatureV1 {
 	const path = join(__dirname, "..", "fixtures", "event-signature-v1.json");
@@ -19,6 +21,8 @@ describe("signed tape schema", () => {
 		const signature = loadSignatureFixture();
 
 		expect(signature.algorithm).toBe(SignatureAlgorithm.Ed25519);
+		expect(signature.canonical_event_hash).toBe(SIGNED_EVENT_FIXTURE_HASH);
+		expect(signature.canonical_event_hash).toMatch(/^sha256:[0-9a-f]{64}$/);
 		expect(signature.signer.actor_id).toBe("kernel");
 		expect(Object.keys(signature).sort()).toEqual([
 			"algorithm",

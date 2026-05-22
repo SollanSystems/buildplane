@@ -51,6 +51,9 @@ mod tests {
     use super::*;
     use uuid::Uuid;
 
+    const SIGNED_EVENT_FIXTURE_HASH: &str =
+        "sha256:71ad93c5d6863d077cbdd5f885275e2ebac705364c44631875c9044eaffe6a08";
+
     #[test]
     fn signature_algorithm_serializes_to_ed25519() {
         let value = serde_json::to_value(SignatureAlgorithm::Ed25519).unwrap();
@@ -64,7 +67,7 @@ mod tests {
         let signed_at = "2026-05-21T21:30:00Z".parse::<DateTime<Utc>>().unwrap();
         let signature = EventSignatureV1 {
             event_id,
-            canonical_event_hash: "sha256:fixture".into(),
+            canonical_event_hash: SIGNED_EVENT_FIXTURE_HASH.into(),
             signer: ActorKeyRef {
                 actor_id: "kernel".into(),
                 key_id: "kernel-main".into(),
@@ -77,7 +80,7 @@ mod tests {
 
         let json = serde_json::to_value(&signature).unwrap();
         assert_eq!(json["event_id"], event_id.to_string());
-        assert_eq!(json["canonical_event_hash"], "sha256:fixture");
+        assert_eq!(json["canonical_event_hash"], SIGNED_EVENT_FIXTURE_HASH);
         assert_eq!(json["signer"]["actor_id"], "kernel");
         assert_eq!(json["algorithm"], "ed25519");
         assert_eq!(json["signature"], "base64url-signature");
