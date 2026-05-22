@@ -254,26 +254,35 @@ describe("ClaudeCodeExecutor", () => {
 		expect(spawnArgs[modelIndex + 1]).toBe("claude-sonnet-4-5");
 	});
 
-	it("does not pass unsafe permission bypass by default", async () => {
+	it("absent unsafeMode omits dangerous flag and emits no unsafe evidence", async () => {
 		const mockSpawn = createMockSpawn({
 			stdout: JSON.stringify({ result: "done" }),
 		});
 		const executor = createClaudeCodeExecutor({ spawnFn: mockSpawn as never });
 		const eventBus = createEventBus();
+		const events: ExecutionEvent[] = [];
+		eventBus.subscribe((ev) => events.push(ev));
 
 		await executor.executePacketAsync(makePacket(), PROJECT_ROOT, eventBus);
 
+		expect(mockSpawn).toHaveBeenCalledOnce();
 		const spawnArgs: string[] = mockSpawn.mock.calls[0][1] as string[];
 		expect(spawnArgs).not.toContain(UNSAFE_PERMISSION_FLAG);
+		expect(events).not.toContainEqual(
+			expect.objectContaining({
+				kind: "evidence-recorded",
+				evidenceKind: "claude-code-unsafe-mode-used",
+			}),
+		);
 	});
 
-	it("explicit unsafe mode passes dangerous flag and emits observable evidence", async () => {
+	it("unsafeMode false omits dangerous flag and emits no unsafe evidence", async () => {
 		const mockSpawn = createMockSpawn({
 			stdout: JSON.stringify({ result: "done" }),
 		});
 		const executor = createClaudeCodeExecutor({
 			spawnFn: mockSpawn as never,
-			unsafeMode: true,
+			unsafeMode: false,
 		});
 		const eventBus = createEventBus();
 		const events: ExecutionEvent[] = [];
@@ -281,7 +290,46 @@ describe("ClaudeCodeExecutor", () => {
 
 		await executor.executePacketAsync(makePacket(), PROJECT_ROOT, eventBus);
 
+		expect(mockSpawn).toHaveBeenCalledOnce();
 		const spawnArgs: string[] = mockSpawn.mock.calls[0][1] as string[];
+		expect(spawnArgs).not.toContain(UNSAFE_PERMISSION_FLAG);
+		expect(events).not.toContainEqual(
+			expect.objectContaining({
+				kind: "evidence-recorded",
+				evidenceKind: "claude-code-unsafe-mode-used",
+			}),
+		);
+	});
+
+	it("explicit unsafeMode true passes dangerous flag and emits evidence before spawn", async () => {
+		const mockSpawn = createMockSpawn({
+			stdout: JSON.stringify({ result: "done" }),
+		});
+		const eventOrder: string[] = [];
+		const orderedSpawn = vi.fn((...args: unknown[]) => {
+			eventOrder.push("spawn");
+			return mockSpawn(...args);
+		});
+		const executor = createClaudeCodeExecutor({
+			spawnFn: orderedSpawn as never,
+			unsafeMode: true,
+		});
+		const eventBus = createEventBus();
+		const events: ExecutionEvent[] = [];
+		eventBus.subscribe((ev) => {
+			events.push(ev);
+			if (
+				ev.kind === "evidence-recorded" &&
+				ev.evidenceKind === "claude-code-unsafe-mode-used"
+			) {
+				eventOrder.push("unsafe-evidence");
+			}
+		});
+
+		await executor.executePacketAsync(makePacket(), PROJECT_ROOT, eventBus);
+
+		expect(orderedSpawn).toHaveBeenCalledOnce();
+		const spawnArgs: string[] = orderedSpawn.mock.calls[0][1] as string[];
 		expect(spawnArgs).toContain(UNSAFE_PERMISSION_FLAG);
 		expect(events).toContainEqual(
 			expect.objectContaining({
@@ -289,6 +337,11 @@ describe("ClaudeCodeExecutor", () => {
 				evidenceKind: "claude-code-unsafe-mode-used",
 				status: "unsafe-mode-used",
 			}),
+		);
+		expect(eventOrder.indexOf("unsafe-evidence")).toBeGreaterThanOrEqual(0);
+		expect(eventOrder.indexOf("spawn")).toBeGreaterThanOrEqual(0);
+		expect(eventOrder.indexOf("unsafe-evidence")).toBeLessThan(
+			eventOrder.indexOf("spawn"),
 		);
 	});
 
