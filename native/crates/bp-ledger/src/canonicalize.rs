@@ -7,6 +7,7 @@
 use crate::error::{LedgerError, Result};
 use crate::event::Event;
 use crate::payload::Payload;
+use sha2::{Digest, Sha256};
 
 /// Canonicalize an event's payload, applying migrations if necessary.
 ///
@@ -23,6 +24,26 @@ pub fn canonicalize(event: Event) -> Result<Event> {
     Ok(event)
 }
 
+/// Return the SHA-256 digest of the canonical serialized event bytes.
+///
+/// The returned value is formatted as `sha256:<hex>` for detached signatures.
+pub fn canonical_event_hash(event: &Event) -> Result<String> {
+    let bytes = canonical_event_bytes(event)?;
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    Ok(format!("sha256:{:x}", hasher.finalize()))
+}
+
+/// Serialize an event in the canonical v1 envelope form used for signing.
+///
+/// Signatures are detached from events, so these bytes are computed only from
+/// the event envelope and payload after [`canonicalize`] has validated/migrated
+/// the event.
+fn canonical_event_bytes(event: &Event) -> Result<Vec<u8>> {
+    let canonical = canonicalize(event.clone())?;
+    Ok(serde_json::to_vec(&canonical)?)
+}
+
 /// Same as [`canonicalize`] but operates on a stored payload JSON value when
 /// you already know the kind and version. Useful for storage-layer reads that
 /// don't reconstitute the full envelope.
@@ -30,7 +51,11 @@ pub fn canonicalize(event: Event) -> Result<Event> {
 /// The `payload` argument must be the JSON representation of a [`Payload`]
 /// value as written by `serde_json::to_string(&event.payload)` — i.e. an
 /// externally-tagged enum object such as `{"WorkspaceReadV1": {...}}`.
-pub fn canonicalize_payload(kind: &str, version: u32, payload: serde_json::Value) -> Result<Payload> {
+pub fn canonicalize_payload(
+    kind: &str,
+    version: u32,
+    payload: serde_json::Value,
+) -> Result<Payload> {
     if version != Event::CURRENT_SCHEMA_VERSION {
         return Err(LedgerError::UnsupportedSchemaVersion {
             received: version,

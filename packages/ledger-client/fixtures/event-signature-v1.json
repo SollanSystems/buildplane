@@ -1,6 +1,6 @@
 {
 	"event_id": "01919000-0000-7000-8000-000000000101",
-	"canonical_event_hash": "sha256:fixture",
+	"canonical_event_hash": "sha256:71ad93c5d6863d077cbdd5f885275e2ebac705364c44631875c9044eaffe6a08",
 	"signer": {
 		"actor_id": "kernel",
 		"key_id": "kernel-main",
