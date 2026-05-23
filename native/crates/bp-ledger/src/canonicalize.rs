@@ -39,7 +39,7 @@ pub fn canonical_event_hash(event: &Event) -> Result<String> {
 /// Signatures are detached from events, so these bytes are computed only from
 /// the event envelope and payload after [`canonicalize`] has validated/migrated
 /// the event.
-fn canonical_event_bytes(event: &Event) -> Result<Vec<u8>> {
+pub fn canonical_event_bytes(event: &Event) -> Result<Vec<u8>> {
     let canonical = canonicalize(event.clone())?;
     Ok(serde_json::to_vec(&canonical)?)
 }
