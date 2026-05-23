@@ -57,6 +57,30 @@ impl SqliteStore {
                     SELECT RAISE(ABORT, 'events is append-only: DELETE forbidden');
                 END;
 
+            CREATE TABLE IF NOT EXISTS event_signatures (
+                event_id              TEXT PRIMARY KEY,
+                canonical_event_hash  TEXT NOT NULL,
+                actor_id              TEXT NOT NULL,
+                key_id                TEXT NOT NULL,
+                public_key_hash       TEXT,
+                algorithm             TEXT NOT NULL,
+                signature             TEXT NOT NULL,
+                signed_at             TEXT NOT NULL,
+                FOREIGN KEY(event_id) REFERENCES events(id)
+            );
+
+            CREATE TRIGGER IF NOT EXISTS event_signatures_no_update
+                BEFORE UPDATE ON event_signatures
+                BEGIN
+                    SELECT RAISE(ABORT, 'event_signatures is append-only: UPDATE forbidden');
+                END;
+
+            CREATE TRIGGER IF NOT EXISTS event_signatures_no_delete
+                BEFORE DELETE ON event_signatures
+                BEGIN
+                    SELECT RAISE(ABORT, 'event_signatures is append-only: DELETE forbidden');
+                END;
+
             CREATE TABLE IF NOT EXISTS runs (
                 id               TEXT PRIMARY KEY,
                 started_at       TEXT NOT NULL,
