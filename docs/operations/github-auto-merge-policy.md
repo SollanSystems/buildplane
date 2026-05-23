@@ -38,7 +38,7 @@ Candidate required checks:
 
 ## Security Posture
 
-- CodeQL workflow enabled for JavaScript/TypeScript
+- CodeQL workflow enabled for JavaScript/TypeScript as an advisory extraction/query smoke. Because Buildplane is currently a private repository without GitHub Advanced Security, SARIF upload is disabled with `upload: never`; switch to upload once GitHub code scanning is enabled for the repository.
 - Secret scanning / push protection (when GitHub plan allows)
 - Dependabot alerts triaged regularly
 - `pnpm audit` considered for additional dependency auditing
