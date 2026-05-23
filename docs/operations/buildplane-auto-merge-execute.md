@@ -30,7 +30,10 @@ pnpm auto-merge:execute --pr <number> --receipt <path>
 ## Required arguments
 
 - `--pr <number>` — PR number to merge
-- `--receipt <path>` — Path to eligibility receipt JSON (must have `verdict: AUTO_MERGE_READY`)
+- `--receipt <path>` — Path to an eligibility receipt JSON proving `AUTO_MERGE_READY`
+  - Accepted shapes:
+    - executor-style flat receipt (`pr`, `headSha`/`expectedHeadSha`, `timestamp`)
+    - canonical eligibility probe receipt (`status`, nested `pr.number`, nested `pr.headRefOid` or `review.expectedHead`, `timestamp`)
 
 ## Options
 
@@ -43,7 +46,7 @@ pnpm auto-merge:execute --pr <number> --receipt <path>
 
 1. **Receipt validation**: Must be valid JSON, have `verdict: AUTO_MERGE_READY`, contain PR number and head SHA, and be < 10 minutes old.
 2. **PR-to-receipt matching**: Receipt PR must match target PR; receipt SHA must match live PR head SHA.
-3. **Live re-probe**: After receipt validation, re-runs the eligibility probe; blocks if not `AUTO_MERGE_READY`.
+3. **Live re-probe**: After receipt validation, re-runs the canonical eligibility probe with both `--expected-head` and `--expected-base`; blocks if not `AUTO_MERGE_READY`.
 4. **Post-merge verification**: After merge, verifies PR state is `MERGED`, merge commit exists on default branch, and no new deployments appear.
 
 ## Merge Methods

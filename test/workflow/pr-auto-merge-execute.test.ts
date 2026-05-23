@@ -32,6 +32,42 @@ function makeReceipt(dir: string, overrides: Record<string, unknown> = {}) {
 	return path;
 }
 
+function makeCanonicalEligibilityReceipt(
+	dir: string,
+	overrides: Record<string, unknown> = {},
+) {
+	const extra = (overrides.extra as Record<string, unknown>) ?? {};
+	const timestamp = (extra.timestamp as string) ?? new Date().toISOString();
+	const headSha =
+		(overrides.headSha as string) ?? "abc123def4567890abc123def4567890abc123de";
+	const receipt: Record<string, unknown> = {
+		timestamp,
+		status: overrides.verdict ?? "AUTO_MERGE_READY",
+		pr: {
+			number: overrides.pr ?? 126,
+			headRefOid: headSha,
+			url: `https://github.com/SollanSystems/buildplane/pull/${overrides.pr ?? 126}`,
+		},
+		review: {
+			expectedBase: overrides.expectedBase ?? "main",
+			expectedHead: headSha,
+			reviewAssertion: {
+				asserted: true,
+				currentPrHeadSha: headSha,
+				reason: "review PASS",
+				reviewedCommitSha: headSha,
+				source: "--review-pass",
+				structured: true,
+				verdict: "PASS",
+			},
+		},
+		...extra,
+	};
+	const path = join(dir, "canonical-eligibility-receipt.json");
+	writeFileSync(path, JSON.stringify(receipt, null, 2));
+	return path;
+}
+
 afterEach(() => {
 	for (const dir of tempDirs) {
 		try {
@@ -51,6 +87,27 @@ describe("pr auto-merge execute", () => {
 		expect(args.receipt).toBe("/tmp/receipt.json");
 		expect(args.dryRun).toBe(false);
 		expect(args.directMerge).toBe(false);
+	});
+
+	it("builds live eligibility args with expected base", async () => {
+		const { buildLiveEligibilityArgs } = await execModule;
+		expect(
+			buildLiveEligibilityArgs(
+				126,
+				"abc123def4567890abc123def4567890abc123de",
+				"main",
+			),
+		).toEqual([
+			"scripts/ci/pr-auto-merge-eligibility.mjs",
+			"--pr",
+			"126",
+			"--expected-head",
+			"abc123def4567890abc123def4567890abc123de",
+			"--expected-base",
+			"main",
+			"--review-pass",
+			"--json",
+		]);
 	});
 
 	it("parses --dry-run flag", async () => {
@@ -132,6 +189,16 @@ describe("readReceipt", () => {
 		const result = readReceipt(path);
 		expect(result.valid).toBe(true);
 		expect(result.pr).toBe(125);
+		expect(result.headSha).toBe("abc123def4567890abc123def4567890abc123de");
+	});
+
+	it("reads canonical nested eligibility receipt", async () => {
+		const { readReceipt } = await execModule;
+		const dir = makeTempDir();
+		const path = makeCanonicalEligibilityReceipt(dir, { pr: 127 });
+		const result = readReceipt(path);
+		expect(result.valid).toBe(true);
+		expect(result.pr).toBe(127);
 		expect(result.headSha).toBe("abc123def4567890abc123def4567890abc123de");
 	});
 

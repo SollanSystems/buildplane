@@ -69,6 +69,13 @@ export function prShortSha(sha) {
 
 // ── receipt reading ──────────────────────────────────────────────────────────
 
+export function firstString(...values) {
+	for (const value of values) {
+		if (typeof value === "string" && value.trim() !== "") return value.trim();
+	}
+	return undefined;
+}
+
 export function readReceipt(path) {
 	if (!path || !existsSync(path)) {
 		return {
@@ -90,18 +97,35 @@ export function readReceipt(path) {
 		};
 	}
 
-	// Validate required fields
+	// Accept both flat executor-focused receipts and canonical nested eligibility receipts.
 	const verdict = data.verdict ?? data.status;
-	const receiptPr = data.pr;
-	const receiptHeadSha = data.headSha ?? data.expectedHeadSha;
-	const timestamp = data.timestamp;
+	const receiptPr =
+		typeof data.pr === "object" && data.pr !== null ? data.pr.number : data.pr;
+	const receiptHeadSha = firstString(
+		data.headSha,
+		data.expectedHeadSha,
+		data.pr?.headRefOid,
+		data.pr?.headSha,
+		data.review?.expectedHead,
+		data.review?.reviewAssertion?.reviewedCommitSha,
+		data.review?.reviewAssertion?.currentPrHeadSha,
+	);
+	const timestamp = firstString(
+		data.timestamp,
+		data.generatedAt,
+		data.createdAt,
+	);
 
 	const gaps = [];
 	if (verdict !== "AUTO_MERGE_READY") {
 		gaps.push(`verdict is "${verdict}", expected AUTO_MERGE_READY`);
 	}
-	if (receiptPr == null) gaps.push("missing pr");
-	if (!receiptHeadSha) gaps.push("missing headSha/expectedHeadSha");
+	if (receiptPr == null) gaps.push("missing pr/pr.number");
+	if (!receiptHeadSha) {
+		gaps.push(
+			"missing headSha/expectedHeadSha or canonical receipt review/pr head fields",
+		);
+	}
 	if (!timestamp) gaps.push("missing timestamp");
 
 	if (gaps.length > 0) {
@@ -176,16 +200,25 @@ export function queryPr(prNumber) {
 
 // ── recon live eligibility ───────────────────────────────────────────────────
 
-export function runLiveEligibility(prNumber, expectedHead) {
-	const result = tryRunJson("node", [
+export function buildLiveEligibilityArgs(prNumber, expectedHead, expectedBase) {
+	return [
 		"scripts/ci/pr-auto-merge-eligibility.mjs",
 		"--pr",
 		String(prNumber),
 		"--expected-head",
 		expectedHead,
+		"--expected-base",
+		expectedBase,
 		"--review-pass",
 		"--json",
-	]);
+	];
+}
+
+export function runLiveEligibility(prNumber, expectedHead, expectedBase) {
+	const result = tryRunJson(
+		"node",
+		buildLiveEligibilityArgs(prNumber, expectedHead, expectedBase),
+	);
 	return result;
 }
 
@@ -459,7 +492,11 @@ export async function main() {
 	}
 
 	// 7. Live re-probe using eligibility script
-	const liveProbe = runLiveEligibility(args.pr, receipt.headSha);
+	const liveProbe = runLiveEligibility(
+		args.pr,
+		receipt.headSha,
+		args.expectedBase,
+	);
 	if (
 		!liveProbe ||
 		(liveProbe.verdict !== "AUTO_MERGE_READY" &&
