@@ -136,8 +136,24 @@ export function readReceipt(path) {
 		};
 	}
 
-	// Check receipt age
-	const receiptAge = (Date.now() - new Date(timestamp).getTime()) / 60000;
+	// Check receipt age. Reject malformed or future timestamps fail-closed so
+	// receipts cannot bypass the freshness gate through NaN/negative ages.
+	const receiptTime = new Date(timestamp).getTime();
+	if (!Number.isFinite(receiptTime)) {
+		return {
+			valid: false,
+			reason: `receipt has invalid timestamp: ${timestamp}`,
+			status: BLOCKED_STALE_RECEIPT,
+		};
+	}
+	const receiptAge = (Date.now() - receiptTime) / 60000;
+	if (receiptAge < 0) {
+		return {
+			valid: false,
+			reason: `receipt timestamp is ${Math.abs(receiptAge).toFixed(1)} min in the future`,
+			status: BLOCKED_STALE_RECEIPT,
+		};
+	}
 	if (receiptAge > MAX_RECEIPT_AGE_MINUTES) {
 		return {
 			valid: false,
@@ -309,6 +325,25 @@ export function verifyPostMerge(prNumber, headSha, expectedBase) {
 		typeof deployments === "number" ? deployments : null;
 
 	return results;
+}
+
+export function isPostMergeVerified(postMerge) {
+	const allowedCheckConclusions = new Set(["SUCCESS", "SKIPPED", "NEUTRAL"]);
+	const checkRuns = Array.isArray(postMerge.checkRuns)
+		? postMerge.checkRuns
+		: [];
+	const checkRunsVerified = checkRuns.every(
+		(check) =>
+			check?.status === "COMPLETED" &&
+			allowedCheckConclusions.has(check?.conclusion),
+	);
+
+	return (
+		postMerge.merged === true &&
+		postMerge.onDefaultBranch === true &&
+		postMerge.deploymentCount === 0 &&
+		checkRunsVerified
+	);
 }
 
 export function tryRunText(command, args) {
@@ -582,13 +617,14 @@ export async function main() {
 		args.expectedBase,
 	);
 
+	const postMergeVerified = isPostMergeVerified(postMerge);
 	const execReceipt = {
 		timestamp: new Date().toISOString(),
 		pr: args.pr,
 		headSha: pr.headRefOid,
 		receiptSha: receipt.headSha,
 		mergeMethod: args.directMerge ? "direct-squash" : "native-auto-merge",
-		verdict: postMerge.merged
+		verdict: postMergeVerified
 			? args.directMerge
 				? EXEC_DIRECT_MERGED
 				: EXEC_AUTO_MERGE_ENABLED
@@ -598,7 +634,7 @@ export async function main() {
 
 	process.stdout.write(JSON.stringify(execReceipt, null, 2) + "\n");
 
-	if (!postMerge.merged) {
+	if (!postMergeVerified) {
 		process.exit(1);
 	}
 }

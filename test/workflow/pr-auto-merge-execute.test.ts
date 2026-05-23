@@ -264,6 +264,32 @@ describe("readReceipt", () => {
 		expect(result.status).toBe("BLOCKED_STALE_RECEIPT");
 	});
 
+	it("blocks malformed receipt timestamp", async () => {
+		const { readReceipt } = await execModule;
+		const dir = makeTempDir();
+		const path = makeReceipt(dir, {
+			extra: { timestamp: "not-a-date" },
+			timestamp: undefined,
+		});
+		const result = readReceipt(path);
+		expect(result.valid).toBe(false);
+		expect(result.status).toBe("BLOCKED_STALE_RECEIPT");
+		expect(result.reason).toContain("invalid timestamp");
+	});
+
+	it("blocks future receipt timestamp", async () => {
+		const { readReceipt } = await execModule;
+		const dir = makeTempDir();
+		const path = makeReceipt(dir, {
+			extra: { timestamp: new Date(Date.now() + 20 * 60000).toISOString() },
+			timestamp: undefined,
+		});
+		const result = readReceipt(path);
+		expect(result.valid).toBe(false);
+		expect(result.status).toBe("BLOCKED_STALE_RECEIPT");
+		expect(result.reason).toContain("future");
+	});
+
 	it("blocks non-JSON receipt", async () => {
 		const { readReceipt } = await execModule;
 		const dir = makeTempDir();
@@ -272,6 +298,62 @@ describe("readReceipt", () => {
 		const result = readReceipt(path);
 		expect(result.valid).toBe(false);
 		expect(result.status).toBe("BLOCKED_RECEIPT_UNREADABLE");
+	});
+});
+
+describe("post-merge verification", () => {
+	it("requires merged PR, default-branch containment, zero deployments, and completed successful checks", async () => {
+		const { isPostMergeVerified } = await execModule;
+		expect(
+			isPostMergeVerified({
+				checkRuns: [
+					{ conclusion: "SUCCESS", name: "verify", status: "COMPLETED" },
+				],
+				deploymentCount: 0,
+				merged: true,
+				onDefaultBranch: true,
+			}),
+		).toBe(true);
+		expect(
+			isPostMergeVerified({
+				checkRuns: [
+					{ conclusion: "SUCCESS", name: "verify", status: "COMPLETED" },
+				],
+				deploymentCount: 0,
+				merged: true,
+				onDefaultBranch: false,
+			}),
+		).toBe(false);
+		expect(
+			isPostMergeVerified({
+				checkRuns: [
+					{ conclusion: "SUCCESS", name: "verify", status: "COMPLETED" },
+				],
+				deploymentCount: 1,
+				merged: true,
+				onDefaultBranch: true,
+			}),
+		).toBe(false);
+		expect(
+			isPostMergeVerified({
+				checkRuns: [
+					{ conclusion: "FAILURE", name: "verify", status: "COMPLETED" },
+				],
+				deploymentCount: 0,
+				merged: true,
+				onDefaultBranch: true,
+			}),
+		).toBe(false);
+		expect(
+			isPostMergeVerified({
+				checkRuns: [
+					{ conclusion: null, name: "verify", status: "IN_PROGRESS" },
+				],
+				deploymentCount: 0,
+				merged: true,
+				onDefaultBranch: true,
+			}),
+		).toBe(false);
 	});
 });
 
