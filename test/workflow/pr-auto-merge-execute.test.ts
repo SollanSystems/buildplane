@@ -110,6 +110,18 @@ describe("pr auto-merge execute", () => {
 		]);
 	});
 
+	it("pins native auto-merge to the reviewed head SHA", async () => {
+		const { buildEnableAutoMergeArgs } = await execModule;
+		const args = buildEnableAutoMergeArgs(
+			"PR_kwDORp5t8M7esxmN",
+			"abc123def4567890abc123def4567890abc123de",
+		);
+		expect(args).toContain(
+			"expectedHeadOid=abc123def4567890abc123def4567890abc123de",
+		);
+		expect(args.join(" ")).toContain("expectedHeadOid: $expectedHeadOid");
+	});
+
 	it("parses --dry-run flag", async () => {
 		const { parseArgs } = await execModule;
 		const args = parseArgs([
@@ -349,6 +361,14 @@ describe("post-merge verification", () => {
 				checkRuns: [
 					{ conclusion: null, name: "verify", status: "IN_PROGRESS" },
 				],
+				deploymentCount: 0,
+				merged: true,
+				onDefaultBranch: true,
+			}),
+		).toBe(false);
+		expect(
+			isPostMergeVerified({
+				checkRuns: [],
 				deploymentCount: 0,
 				merged: true,
 				onDefaultBranch: true,

@@ -35,6 +35,7 @@ export const BLOCKED_RECEIPT_UNREADABLE = "BLOCKED_RECEIPT_UNREADABLE";
 export const BLOCKED_LIVE_SHA_MISMATCH = "BLOCKED_LIVE_SHA_MISMATCH";
 export const BLOCKED_LIVE_RECHECK = "BLOCKED_LIVE_RECHECK";
 export const BLOCKED_POST_MERGE = "BLOCKED_POST_MERGE";
+export const BLOCKED_PR_CLOSED = "BLOCKED_PR_CLOSED";
 export const ERROR_GITHUB_QUERY = "ERROR_GITHUB_QUERY";
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -240,10 +241,24 @@ export function runLiveEligibility(prNumber, expectedHead, expectedBase) {
 
 // ── merge ────────────────────────────────────────────────────────────────────
 
-export function enableAutoMerge(prId) {
-	// Use GraphQL to enable native auto-merge with SQUASH
-	const query = `mutation { enablePullRequestAutoMerge(input: {pullRequestId: "${prId}", mergeMethod: SQUASH}) { clientMutationId } }`;
-	runStdout("gh", ["api", "graphql", "-f", `query=${query}`]);
+export function buildEnableAutoMergeArgs(prId, expectedHeadOid) {
+	const query = `mutation($prId: ID!, $expectedHeadOid: GitObjectID!) { enablePullRequestAutoMerge(input: {pullRequestId: $prId, mergeMethod: SQUASH, expectedHeadOid: $expectedHeadOid}) { clientMutationId } }`;
+	return [
+		"api",
+		"graphql",
+		"-f",
+		`query=${query}`,
+		"-f",
+		`prId=${prId}`,
+		"-f",
+		`expectedHeadOid=${expectedHeadOid}`,
+	];
+}
+
+export function enableAutoMerge(prId, expectedHeadOid) {
+	// Use GraphQL to enable native auto-merge with SQUASH, pinned to the
+	// reviewed head SHA so a last-moment push cannot inherit this merge request.
+	runStdout("gh", buildEnableAutoMergeArgs(prId, expectedHeadOid));
 }
 
 export function directSquashMerge(prNumber, _headSha, commitTitle) {
@@ -261,6 +276,22 @@ export function directSquashMerge(prNumber, _headSha, commitTitle) {
 }
 
 // ── post-merge verification ──────────────────────────────────────────────────
+
+export function queryCheckRunsForCommit(commitSha) {
+	const checkRuns = [];
+	for (let page = 1; page <= 10; page++) {
+		const pageRuns = tryRunJson("gh", [
+			"api",
+			`repos/SollanSystems/buildplane/commits/${commitSha}/check-runs?per_page=100&page=${page}`,
+			"--jq",
+			".check_runs | map({name, conclusion, status})",
+		]);
+		if (!Array.isArray(pageRuns)) break;
+		checkRuns.push(...pageRuns);
+		if (pageRuns.length < 100) break;
+	}
+	return checkRuns;
+}
 
 export function verifyPostMerge(prNumber, headSha, expectedBase) {
 	const results = { checks: [], merged: false, onDefaultBranch: false };
@@ -305,13 +336,7 @@ export function verifyPostMerge(prNumber, headSha, expectedBase) {
 
 	// Query default branch checks (if merge commit known)
 	if (results.mergeCommit) {
-		const checkRuns = tryRunJson("gh", [
-			"api",
-			`repos/SollanSystems/buildplane/commits/${results.mergeCommit}/check-runs`,
-			"--jq",
-			".check_runs[:5] | map({name, conclusion, status})",
-		]);
-		results.checkRuns = Array.isArray(checkRuns) ? checkRuns : [];
+		results.checkRuns = queryCheckRunsForCommit(results.mergeCommit);
 	}
 
 	// GET-only deployment probe
@@ -332,11 +357,13 @@ export function isPostMergeVerified(postMerge) {
 	const checkRuns = Array.isArray(postMerge.checkRuns)
 		? postMerge.checkRuns
 		: [];
-	const checkRunsVerified = checkRuns.every(
-		(check) =>
-			check?.status === "COMPLETED" &&
-			allowedCheckConclusions.has(check?.conclusion),
-	);
+	const checkRunsVerified =
+		checkRuns.length > 0 &&
+		checkRuns.every(
+			(check) =>
+				check?.status === "COMPLETED" &&
+				allowedCheckConclusions.has(check?.conclusion),
+		);
 
 	return (
 		postMerge.merged === true &&
@@ -491,10 +518,10 @@ export async function main() {
 		});
 	}
 
-	if (pr && pr.state === "CLOSED" && pr.state !== "MERGED") {
+	if (pr && pr.state === "CLOSED") {
 		blockers.push({
-			status: RECONCILE_ALREADY_MERGED,
-			reason: "PR is closed",
+			status: BLOCKED_PR_CLOSED,
+			reason: "PR is closed without being merged",
 		});
 	}
 
@@ -592,13 +619,13 @@ export async function main() {
 			]);
 			const prId = prData?.data?.repository?.pullRequest?.id;
 			if (prId) {
-				enableAutoMerge(prId);
+				enableAutoMerge(prId, receipt.headSha);
 			} else {
 				// Fall back to direct merge if node ID unavailable
 				args.directMerge = true;
 			}
 		} else {
-			enableAutoMerge(nodeId);
+			enableAutoMerge(nodeId, receipt.headSha);
 		}
 	}
 
