@@ -28,9 +28,13 @@ pnpm auto-merge:eligibility --pr <number> --expected-head <sha> --expected-base 
 Exactly one review source is required:
 
 - `--review-pass`
-  - Manual assertion that an independent review receipt already recorded PASS.
+  - Manual assertion that an independent review receipt already recorded `PASS`.
+  - Use this only when a PASS verdict exists but is not stored in a local structured receipt file.
 - `--review-receipt <path>`
-  - Reads a local receipt file and requires a PASS-like verdict (`PASS`, `PASSED`, `APPROVED`, or `LGTM`).
+  - Reads a structured local review receipt and requires explicit review-gate fields:
+    - `Reviewed commit SHA`
+    - `Current PR head SHA`
+    - `Verdict: PASS`
 
 If neither is provided, the probe blocks.
 
@@ -75,15 +79,18 @@ The probe must not:
 
 The probe blocks when any of these are true:
 
-- no independent review PASS was asserted or read from receipt
+- no independent review `PASS` was asserted or read from a structured receipt
+- the review receipt is missing `Reviewed commit SHA` or `Current PR head SHA`
 - reviewed head SHA is missing
 - reviewed head SHA does not equal live PR head SHA
+- expected base is missing
 - expected base does not equal live PR base
 - required opt-in label is missing
 - PR is draft
 - PR state is merged/closed (reconciliation mode instead)
 - merge state is not clean/reconcilable
 - checks are missing, pending, or failing unless explicitly allowed
+- branch-protection-required checks are not all present in the observed check rollup
 - unresolved review threads remain
 - deployment objects exist for the head SHA unless explicitly allowed
 

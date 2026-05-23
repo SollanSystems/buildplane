@@ -16,13 +16,23 @@ export const AUTO_MERGE_READY = "AUTO_MERGE_READY";
 export const RECONCILE_ALREADY_MERGED = "RECONCILE_ALREADY_MERGED";
 export const ERROR_GITHUB_QUERY = "ERROR_GITHUB_QUERY";
 
-const REVIEW_PASS_TOKENS = new Set(["PASS", "PASSED", "APPROVED", "LGTM"]);
+const REVIEW_PASS_TOKENS = new Set(["PASS"]);
 const JSON_REVIEW_KEYS = [
 	"verdict",
 	"status",
 	"decision",
 	"reviewDecision",
 	"result",
+];
+const REVIEWED_HEAD_KEYS = [
+	"reviewedCommitSha",
+	"reviewedHeadSha",
+	"reviewed_sha",
+];
+const CURRENT_HEAD_KEYS = [
+	"currentPrHeadSha",
+	"currentHeadSha",
+	"current_head_sha",
 ];
 
 export function usage(exitCode = 0) {
@@ -35,10 +45,10 @@ export function usage(exitCode = 0) {
 	);
 	stream.write(`Review source (one required):\n`);
 	stream.write(
-		`  --review-pass                 Assert an independent review receipt is PASS.\n`,
+		`  --review-pass                 Assert an independent review receipt already recorded PASS.\n`,
 	);
 	stream.write(
-		`  --review-receipt <path>       Read a review receipt file and require a PASS-like verdict.\n\n`,
+		`  --review-receipt <path>       Read a structured review receipt file and require Verdict: PASS.\n\n`,
 	);
 	stream.write(`Options:\n`);
 	stream.write(
@@ -48,7 +58,7 @@ export function usage(exitCode = 0) {
 		`  --expected-head <sha>          Required reviewed head SHA; block unless PR head equals it.\n`,
 	);
 	stream.write(
-		`  --expected-base <branch>       Require the PR base branch to match the provided branch.\n`,
+		`  --expected-base <branch>       Required base branch; block unless PR base equals it.\n`,
 	);
 	stream.write(
 		`  --require-github-approval      Also require GitHub reviewDecision=APPROVED.\n`,
@@ -162,6 +172,14 @@ export function runJson(command, args) {
 		stdio: ["ignore", "pipe", "pipe"],
 	});
 	return JSON.parse(output);
+}
+
+export function tryRunJson(command, args) {
+	try {
+		return runJson(command, args);
+	} catch {
+		return undefined;
+	}
 }
 
 export function runText(command, args) {
@@ -280,24 +298,28 @@ export function hasLabel(labels, requiredLabel) {
 	return labelNames(labels).includes(requiredLabel);
 }
 
-function normalizeReviewToken(value) {
+export function normalizeReviewToken(value) {
 	return String(value ?? "")
 		.trim()
 		.toUpperCase();
 }
 
-function jsonReviewVerdict(data) {
+export function objectStringField(data, keys) {
 	if (!data || typeof data !== "object" || Array.isArray(data))
 		return undefined;
-	for (const key of JSON_REVIEW_KEYS) {
+	for (const key of keys) {
 		const value = data[key];
-		if (typeof value === "string" && value.trim() !== "") return value;
+		if (typeof value === "string" && value.trim() !== "") {
+			return value.trim();
+		}
 	}
-	if (typeof data.pass === "boolean") return data.pass ? "PASS" : "FAIL";
-	if (typeof data.approved === "boolean")
-		return data.approved ? "APPROVED" : "FAIL";
-	if (typeof data.ok === "boolean") return data.ok ? "PASS" : "FAIL";
 	return undefined;
+}
+
+function markdownField(text, label) {
+	const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+	const match = text.match(new RegExp(`^- ${escaped}:\\s*(.+)$`, "m"));
+	return match?.[1]?.trim();
 }
 
 export function readReviewReceipt(path) {
@@ -319,27 +341,52 @@ export function readReviewReceipt(path) {
 	const content = readFileSync(path, "utf8");
 	const trimmed = content.trim();
 	let verdict;
-	if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+	let reviewedCommitSha;
+	let currentPrHeadSha;
+	let structured = false;
+
+	if (trimmed.startsWith("{")) {
 		try {
-			verdict = jsonReviewVerdict(JSON.parse(trimmed));
+			const data = JSON.parse(trimmed);
+			verdict = objectStringField(data, JSON_REVIEW_KEYS);
+			reviewedCommitSha = objectStringField(data, REVIEWED_HEAD_KEYS);
+			currentPrHeadSha = objectStringField(data, CURRENT_HEAD_KEYS);
+			structured = true;
 		} catch {
-			verdict = undefined;
+			structured = false;
 		}
+	} else {
+		verdict = markdownField(trimmed, "Verdict");
+		reviewedCommitSha = markdownField(trimmed, "Reviewed commit SHA");
+		currentPrHeadSha = markdownField(trimmed, "Current PR head SHA");
+		structured =
+			verdict !== undefined ||
+			reviewedCommitSha !== undefined ||
+			currentPrHeadSha !== undefined;
 	}
-	if (!verdict) {
-		const match = trimmed.match(/\b(PASS(?:ED)?|APPROVED|LGTM|FAIL(?:ED)?)\b/i);
-		verdict = match?.[1];
-	}
+
 	const normalized = normalizeReviewToken(verdict);
 	const asserted = REVIEW_PASS_TOKENS.has(normalized);
+	const missingFields = [];
+	if (!reviewedCommitSha) missingFields.push("Reviewed commit SHA");
+	if (!currentPrHeadSha) missingFields.push("Current PR head SHA");
+
 	return {
-		asserted,
-		reason: asserted
-			? `review receipt indicates ${normalized}`
-			: verdict
-				? `review receipt indicates ${normalized}`
-				: "review receipt does not contain a PASS-like verdict",
+		asserted: asserted && missingFields.length === 0,
+		currentPrHeadSha,
+		missingFields,
+		reason: !structured
+			? "review receipt is not structured JSON or markdown with explicit review fields"
+			: !verdict
+				? "review receipt is missing Verdict"
+				: !asserted
+					? `review receipt verdict is ${normalized || "missing"}, expected PASS`
+					: missingFields.length > 0
+						? `review receipt is missing ${missingFields.join(" and ")}`
+						: `review receipt indicates ${normalized}`,
+		reviewedCommitSha,
 		source: path,
+		structured,
 		verdict: normalized || undefined,
 	};
 }
@@ -348,8 +395,12 @@ export function reviewAssertionFromArgs(args) {
 	if (args.reviewPass) {
 		return {
 			asserted: true,
+			currentPrHeadSha: args.expectedHead,
+			missingFields: [],
 			reason: "independent review PASS asserted by flag",
+			reviewedCommitSha: args.expectedHead,
 			source: "--review-pass",
+			structured: true,
 			verdict: "PASS",
 		};
 	}
@@ -369,8 +420,6 @@ export function summarizeReviewThreads(reviewThreads) {
 				thread.comments?.nodes?.[0]?.author?.login ??
 				thread.comments?.[0]?.author?.login ??
 				null,
-			commentBody:
-				thread.comments?.nodes?.[0]?.body ?? thread.comments?.[0]?.body ?? null,
 			isOutdated: thread.isOutdated ?? false,
 			line: thread.line ?? null,
 			path: thread.path ?? null,
@@ -382,10 +431,42 @@ export function summarizeReviewThreads(reviewThreads) {
 	};
 }
 
+export function requiredCheckNamesFromProtection(branchProtection) {
+	if (!branchProtection?.required_status_checks) return [];
+	const names = new Set();
+	for (const name of branchProtection.required_status_checks.contexts ?? []) {
+		if (typeof name === "string" && name.trim() !== "") names.add(name.trim());
+	}
+	for (const item of branchProtection.required_status_checks.checks ?? []) {
+		const name = item?.context;
+		if (typeof name === "string" && name.trim() !== "") names.add(name.trim());
+	}
+	return [...names].sort();
+}
+
+export function missingRequiredChecks(requiredChecks, observedChecks) {
+	const observedNames = new Set(observedChecks.map((item) => item.name));
+	return requiredChecks.filter((name) => !observedNames.has(name));
+}
+
+export function dedupeDeployments(...lists) {
+	const deployments = new Map();
+	for (const list of lists) {
+		for (const deployment of list ?? []) {
+			if (deployment?.id !== undefined) {
+				deployments.set(deployment.id, deployment);
+			}
+		}
+	}
+	return [...deployments.values()];
+}
+
 export function determineResult({
 	args,
 	deployments,
+	missingChecks,
 	pr,
+	requiredChecks,
 	reviewAssertion,
 	reviewThreads,
 	rollupItems,
@@ -439,7 +520,35 @@ export function determineResult({
 		});
 	}
 
-	if (args.expectedBase && pr.baseRefName !== args.expectedBase) {
+	if (
+		reviewAssertion.asserted &&
+		reviewAssertion.reviewedCommitSha &&
+		args.expectedHead &&
+		reviewAssertion.reviewedCommitSha !== args.expectedHead
+	) {
+		blockers.push({
+			status: BLOCKED_SHA_MISMATCH,
+			reason: `review receipt reviewed head ${reviewAssertion.reviewedCommitSha} does not equal expected head ${args.expectedHead}`,
+		});
+	}
+
+	if (
+		reviewAssertion.asserted &&
+		reviewAssertion.currentPrHeadSha &&
+		reviewAssertion.currentPrHeadSha !== pr.headRefOid
+	) {
+		blockers.push({
+			status: BLOCKED_SHA_MISMATCH,
+			reason: `review receipt current PR head ${reviewAssertion.currentPrHeadSha} does not equal live PR head ${pr.headRefOid}`,
+		});
+	}
+
+	if (!args.expectedBase) {
+		blockers.push({
+			status: BLOCKED_BASE_MISMATCH,
+			reason: "expected base branch was not provided with --expected-base",
+		});
+	} else if (pr.baseRefName !== args.expectedBase) {
 		blockers.push({
 			status: BLOCKED_BASE_MISMATCH,
 			reason: `expected base ${args.expectedBase} but PR base is ${pr.baseRefName}`,
@@ -468,6 +577,13 @@ export function determineResult({
 		blockers.push({ status: BLOCKED_CHECKS, reason: checkState.reason });
 	}
 
+	if (missingChecks.length > 0) {
+		blockers.push({
+			status: BLOCKED_CHECKS,
+			reason: `missing required checks: ${missingChecks.join(", ")}`,
+		});
+	}
+
 	if (!args.allowDeployments && deployments.length > 0) {
 		blockers.push({
 			reason: `${deployments.length} deployment object(s) exist for PR head`,
@@ -480,6 +596,8 @@ export function determineResult({
 		blockers,
 		checkState,
 		eligible,
+		missingChecks,
+		requiredChecks,
 		status: eligible ? AUTO_MERGE_READY : uniqueStatuses(blockers)[0],
 	};
 }
@@ -509,9 +627,11 @@ export function buildGithubErrorResult({ args, error, stage }) {
 		],
 		checks: {
 			failing: [],
+			missingRequired: [],
 			observed: [],
 			pending: [],
 			reason: "GitHub query failed before checks could be evaluated",
+			required: [],
 			skipped: [],
 		},
 		deployments: [],
@@ -538,6 +658,51 @@ export function buildGithubErrorResult({ args, error, stage }) {
 			reviewThreads: { total: 0, unresolved: [], unresolvedCount: 0 },
 		},
 		status: ERROR_GITHUB_QUERY,
+	};
+}
+
+function graphqlQuery(owner, repo, number, cursor) {
+	const after = cursor ? `, after: "${cursor}"` : "";
+	return `query { repository(owner: "${owner}", name: "${repo}") { pullRequest(number: ${number}) { viewerCanEnableAutoMerge reviewThreads(first: 100${after}) { pageInfo { hasNextPage endCursor } nodes { isResolved isOutdated path line comments(first: 1) { nodes { author { login } } } } } } } }`;
+}
+
+export function fetchReviewThreadData({ owner, repo, number }) {
+	const nodes = [];
+	let cursor;
+	let viewerCanEnableAutoMerge = null;
+	while (true) {
+		const response = runJson("gh", [
+			"api",
+			"graphql",
+			"-f",
+			`query=${graphqlQuery(owner, repo, number, cursor)}`,
+		]);
+		if (Array.isArray(response?.errors) && response.errors.length > 0) {
+			throw new Error(
+				`GraphQL review-thread query returned ${response.errors.length} error(s)`,
+			);
+		}
+		const graphPr = response?.data?.repository?.pullRequest;
+		const reviewThreads = graphPr?.reviewThreads;
+		if (
+			!graphPr ||
+			!reviewThreads?.pageInfo ||
+			!Array.isArray(reviewThreads.nodes)
+		) {
+			throw new Error("GraphQL review-thread query returned incomplete data");
+		}
+		viewerCanEnableAutoMerge = graphPr.viewerCanEnableAutoMerge ?? null;
+		nodes.push(...reviewThreads.nodes);
+		if (!reviewThreads.pageInfo.hasNextPage) {
+			break;
+		}
+		cursor = reviewThreads.pageInfo.endCursor;
+		if (!cursor)
+			throw new Error("GraphQL review-thread query missing endCursor");
+	}
+	return {
+		reviewThreads: { nodes },
+		viewerCanEnableAutoMerge,
 	};
 }
 
@@ -570,32 +735,39 @@ export function main(argv = process.argv.slice(2)) {
 			"view",
 			args.pr,
 			"--json",
-			"number,state,isDraft,headRefOid,headRefName,baseRefName,mergeStateStatus,reviewDecision,statusCheckRollup,labels,url",
+			"number,state,isDraft,headRefOid,headRefName,baseRefName,mergeStateStatus,reviewDecision,statusCheckRollup,labels,url,autoMergeRequest",
 		]);
 		const repo = runJson("gh", ["repo", "view", "--json", "nameWithOwner"]);
 		const [owner, name] = String(repo.nameWithOwner).split("/");
-		const reviewThreadQuery = `query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$number){viewerCanEnableAutoMerge reviewThreads(first:100){nodes{isResolved isOutdated path line comments(first:1){nodes{body author{login}}}}}}}}`;
-		const graph = runJson("gh", [
+		const threadData = fetchReviewThreadData({
+			name,
+			number: args.pr,
+			owner,
+			repo: name,
+		});
+		const shaDeployments = runJson("gh", [
 			"api",
-			"graphql",
-			"-F",
-			`owner=${owner}`,
-			"-F",
-			`repo=${name}`,
-			"-F",
-			`number=${args.pr}`,
-			"-f",
-			`query=${reviewThreadQuery}`,
+			`repos/${repo.nameWithOwner}/deployments?sha=${encodeURIComponent(pr.headRefOid)}&per_page=20`,
 		]);
-		const graphPr = graph?.data?.repository?.pullRequest;
-		const deploymentPath = `repos/${repo.nameWithOwner}/deployments?ref=${encodeURIComponent(pr.headRefOid)}&per_page=20`;
-		const deployments = runJson("gh", ["api", deploymentPath]);
+		const refDeployments = runJson("gh", [
+			"api",
+			`repos/${repo.nameWithOwner}/deployments?ref=${encodeURIComponent(pr.headRefName)}&per_page=20`,
+		]);
+		const deployments = dedupeDeployments(shaDeployments, refDeployments);
 		const rollupItems = statusRollupItems(pr.statusCheckRollup);
-		const reviewThreads = summarizeReviewThreads(graphPr?.reviewThreads);
+		const reviewThreads = summarizeReviewThreads(threadData.reviewThreads);
+		const branchProtection = tryRunJson("gh", [
+			"api",
+			`repos/${repo.nameWithOwner}/branches/${encodeURIComponent(pr.baseRefName)}/protection`,
+		]);
+		const requiredChecks = requiredCheckNamesFromProtection(branchProtection);
+		const missingChecks = missingRequiredChecks(requiredChecks, rollupItems);
 		const verdict = determineResult({
 			args,
 			deployments,
+			missingChecks,
 			pr,
+			requiredChecks,
 			reviewAssertion,
 			reviewThreads,
 			rollupItems,
@@ -609,14 +781,17 @@ export function main(argv = process.argv.slice(2)) {
 			blockers: verdict.blockers,
 			checks: {
 				failing: verdict.checkState.failing,
+				missingRequired: verdict.missingChecks,
 				observed: rollupItems,
 				pending: verdict.checkState.pending,
 				reason: verdict.checkState.reason,
+				required: verdict.requiredChecks,
 				skipped: verdict.checkState.skipped,
 			},
 			deployments: formatDeployments(deployments),
 			eligible: verdict.eligible,
 			pr: {
+				autoMergeRequest: pr.autoMergeRequest ?? null,
 				baseRefName: pr.baseRefName,
 				headRefName: pr.headRefName,
 				headRefOid: pr.headRefOid,
@@ -627,7 +802,7 @@ export function main(argv = process.argv.slice(2)) {
 				reviewDecision: pr.reviewDecision,
 				state: pr.state,
 				url: pr.url,
-				viewerCanEnableAutoMerge: graphPr?.viewerCanEnableAutoMerge ?? null,
+				viewerCanEnableAutoMerge: threadData.viewerCanEnableAutoMerge,
 			},
 			repository: repo.nameWithOwner,
 			review: {

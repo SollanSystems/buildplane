@@ -312,7 +312,7 @@ node scripts/ci/pr-auto-merge-eligibility.mjs \
   --json
 ```
 
-Use `--review-pass` instead of `--review-receipt` only when an independent PASS verdict exists but is not stored in a local receipt file.
+Use `--review-pass` instead of `--review-receipt` only when an independent PASS verdict exists but is not stored in a local structured receipt file. The probe fails closed if `--expected-head` or `--expected-base` is omitted.
 
 ## 7. Side-effect boundaries (durable for this queue)
 

@@ -49,33 +49,56 @@ describe("pr auto-merge eligibility probe", () => {
 		);
 	});
 
-	it("reads a PASS verdict from a JSON review receipt", async () => {
+	it("reads a structured PASS markdown review receipt with head binding", async () => {
 		const { readReviewReceipt } = await probeModule;
 		const dir = makeTempDir();
-		const receipt = join(dir, "review.json");
-		writeFileSync(receipt, JSON.stringify({ verdict: "PASS" }, null, 2));
+		const receipt = join(dir, "review.md");
+		writeFileSync(
+			receipt,
+			[
+				"## Review gate",
+				"",
+				"- Reviewed commit SHA: abc123",
+				"- Current PR head SHA: abc123",
+				"- Verdict: PASS",
+			].join("\n"),
+		);
 
 		expect(readReviewReceipt(receipt)).toMatchObject({
 			asserted: true,
+			currentPrHeadSha: "abc123",
+			reviewedCommitSha: "abc123",
 			source: receipt,
 			verdict: "PASS",
 		});
 	});
 
-	it("reads a failing verdict from a text review receipt", async () => {
+	it("rejects unstructured text even if it mentions PASS", async () => {
 		const { readReviewReceipt } = await probeModule;
 		const dir = makeTempDir();
 		const receipt = join(dir, "review.txt");
-		writeFileSync(receipt, "Verdict: FAIL\nNeeds changes\n");
+		writeFileSync(receipt, "This template says PASS is an allowed verdict.\n");
 
 		expect(readReviewReceipt(receipt)).toMatchObject({
 			asserted: false,
 			source: receipt,
-			verdict: "FAIL",
+			structured: false,
 		});
 	});
 
-	it("summarizes unresolved review threads", async () => {
+	it("rejects a structured receipt that omits reviewed head fields", async () => {
+		const { readReviewReceipt } = await probeModule;
+		const dir = makeTempDir();
+		const receipt = join(dir, "review.md");
+		writeFileSync(receipt, "- Verdict: PASS\n");
+
+		expect(readReviewReceipt(receipt)).toMatchObject({
+			asserted: false,
+			missingFields: ["Reviewed commit SHA", "Current PR head SHA"],
+		});
+	});
+
+	it("summarizes unresolved review threads without exposing bodies", async () => {
 		const { summarizeReviewThreads } = await probeModule;
 		const summary = summarizeReviewThreads({
 			nodes: [
@@ -99,12 +122,31 @@ describe("pr auto-merge eligibility probe", () => {
 			line: 89,
 			path: "native/crates/bp-ledger/src/signing.rs",
 		});
+		expect(summary.unresolved[0]).not.toHaveProperty("commentBody");
 	});
 
-	it("blocks when base branch mismatches and unresolved review threads remain", async () => {
+	it("extracts required checks from branch protection and finds missing checks", async () => {
+		const { missingRequiredChecks, requiredCheckNamesFromProtection } =
+			await probeModule;
+		const requiredChecks = requiredCheckNamesFromProtection({
+			required_status_checks: {
+				checks: [{ context: "verify" }],
+				contexts: ["verify", "verify-wrong-node"],
+			},
+		});
+		const missing = missingRequiredChecks(requiredChecks, [
+			{ conclusion: "SUCCESS", name: "verify", status: "COMPLETED" },
+		]);
+
+		expect(requiredChecks).toEqual(["verify", "verify-wrong-node"]);
+		expect(missing).toEqual(["verify-wrong-node"]);
+	});
+
+	it("blocks when base branch mismatches, required checks are missing, and unresolved review threads remain", async () => {
 		const {
 			BLOCKED_AUTO_MERGE_OPT_IN,
 			BLOCKED_BASE_MISMATCH,
+			BLOCKED_CHECKS,
 			BLOCKED_REVIEW_THREADS,
 			determineResult,
 		} = await probeModule;
@@ -120,6 +162,7 @@ describe("pr auto-merge eligibility probe", () => {
 				requiredLabel: "buildplane:auto-merge",
 			},
 			deployments: [],
+			missingChecks: ["verify-wrong-node"],
 			pr: {
 				baseRefName: "feat/m1-s3-signature-persistence-20260522225603",
 				headRefOid: "abc123",
@@ -129,9 +172,12 @@ describe("pr auto-merge eligibility probe", () => {
 				reviewDecision: null,
 				state: "OPEN",
 			},
+			requiredChecks: ["verify", "verify-wrong-node"],
 			reviewAssertion: {
 				asserted: true,
+				currentPrHeadSha: "abc123",
 				reason: "review PASS",
+				reviewedCommitSha: "abc123",
 				source: "--review-pass",
 			},
 			reviewThreads: {
@@ -152,6 +198,51 @@ describe("pr auto-merge eligibility probe", () => {
 				expect.objectContaining({ status: BLOCKED_AUTO_MERGE_OPT_IN }),
 				expect.objectContaining({ status: BLOCKED_BASE_MISMATCH }),
 				expect.objectContaining({ status: BLOCKED_REVIEW_THREADS }),
+				expect.objectContaining({ status: BLOCKED_CHECKS }),
+			]),
+		);
+	});
+
+	it("blocks when expected base is omitted", async () => {
+		const { BLOCKED_BASE_MISMATCH, determineResult } = await probeModule;
+		const verdict = determineResult({
+			args: {
+				allowDeployments: false,
+				allowMissingLabel: true,
+				allowNoChecks: false,
+				expectedBase: undefined,
+				expectedHead: "abc123",
+				requireGithubApproval: false,
+				requiredLabel: "buildplane:auto-merge",
+			},
+			deployments: [],
+			missingChecks: [],
+			pr: {
+				baseRefName: "main",
+				headRefOid: "abc123",
+				isDraft: false,
+				labels: [{ name: "buildplane:auto-merge" }],
+				mergeStateStatus: "CLEAN",
+				reviewDecision: null,
+				state: "OPEN",
+			},
+			requiredChecks: [],
+			reviewAssertion: {
+				asserted: true,
+				currentPrHeadSha: "abc123",
+				reason: "review PASS",
+				reviewedCommitSha: "abc123",
+				source: "--review-pass",
+			},
+			reviewThreads: { total: 0, unresolved: [], unresolvedCount: 0 },
+			rollupItems: [
+				{ conclusion: "SUCCESS", name: "verify", status: "COMPLETED" },
+			],
+		});
+
+		expect(verdict.blockers).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({ status: BLOCKED_BASE_MISMATCH }),
 			]),
 		);
 	});
@@ -169,6 +260,7 @@ describe("pr auto-merge eligibility probe", () => {
 				requiredLabel: "buildplane:auto-merge",
 			},
 			deployments: [],
+			missingChecks: [],
 			pr: {
 				baseRefName: "main",
 				headRefOid: "abc123",
@@ -178,9 +270,12 @@ describe("pr auto-merge eligibility probe", () => {
 				reviewDecision: "APPROVED",
 				state: "OPEN",
 			},
+			requiredChecks: ["verify", "verify-wrong-node"],
 			reviewAssertion: {
 				asserted: true,
+				currentPrHeadSha: "abc123",
 				reason: "review PASS",
+				reviewedCommitSha: "abc123",
 				source: "--review-pass",
 			},
 			reviewThreads: { total: 0, unresolved: [], unresolvedCount: 0 },
@@ -188,7 +283,7 @@ describe("pr auto-merge eligibility probe", () => {
 				{ conclusion: "SUCCESS", name: "verify", status: "COMPLETED" },
 				{
 					conclusion: "SUCCESS",
-					name: "GitGuardian Security Checks",
+					name: "verify-wrong-node",
 					status: "COMPLETED",
 				},
 			],
