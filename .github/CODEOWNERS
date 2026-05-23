@@ -1,0 +1,16 @@
+# Default ownership
+* @SollanSystems
+
+# GitHub automation and release governance
+.github/ @SollanSystems
+.github/workflows/ @SollanSystems
+
+# Native ledger and Rust crates
+native/ @SollanSystems
+
+# TypeScript control plane
+apps/ @SollanSystems
+packages/ @SollanSystems
+
+# Operator docs and plans
+docs/operations/ @SollanSystems

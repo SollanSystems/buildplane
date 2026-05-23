@@ -29,6 +29,8 @@
 		"stage:published-bootstrap": "node ./scripts/published-bootstrap/stage-package.mjs",
 		"verify:published-bootstrap": "node ./scripts/published-bootstrap/verify-positive.mjs",
 		"auto-merge:eligibility": "node ./scripts/ci/pr-auto-merge-eligibility.mjs",
+		"auto-merge:opt-in": "node ./scripts/ci/pr-auto-merge-opt-in.mjs",
+		"auto-merge:execute": "node ./scripts/ci/pr-auto-merge-execute.mjs",
 		"eval": "node --import tsx ./eval/runner.ts"
 	},
 	"devDependencies": {
