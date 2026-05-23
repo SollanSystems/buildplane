@@ -304,8 +304,15 @@ No M1 slice on this queue is auto-merge eligible. The `buildplane:auto-merge` la
 
 The probe is read-only:
 ```bash
-node scripts/ci/pr-auto-merge-eligibility.mjs --pr <n> --review-pass --expected-head <sha> --json
+node scripts/ci/pr-auto-merge-eligibility.mjs \
+  --pr <n> \
+  --review-receipt <path-to-independent-review> \
+  --expected-head <sha> \
+  --expected-base <branch> \
+  --json
 ```
+
+Use `--review-pass` instead of `--review-receipt` only when an independent PASS verdict exists but is not stored in a local receipt file.
 
 ## 7. Side-effect boundaries (durable for this queue)
 

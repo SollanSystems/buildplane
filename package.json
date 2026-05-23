@@ -28,6 +28,7 @@
 		"changeset:status": "changeset status --verbose",
 		"stage:published-bootstrap": "node ./scripts/published-bootstrap/stage-package.mjs",
 		"verify:published-bootstrap": "node ./scripts/published-bootstrap/verify-positive.mjs",
+		"auto-merge:eligibility": "node ./scripts/ci/pr-auto-merge-eligibility.mjs",
 		"eval": "node --import tsx ./eval/runner.ts"
 	},
 	"devDependencies": {
