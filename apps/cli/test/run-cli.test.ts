@@ -4605,15 +4605,9 @@ describe("planforge dry-run", () => {
 
 		expect(result.exitCode).toBe(0);
 		const payload = JSON.parse(result.stdout.join("\n"));
-		const digestInput = {
-			...payload,
-			receiptPreview: {
-				...payload.receiptPreview,
-				planDigest: "",
-			},
-		};
+		const { receiptPreview: _receiptPreview, ...reviewArtifact } = payload;
 		const expectedDigest = `sha256:${createHash("sha256")
-			.update(JSON.stringify(digestInput))
+			.update(JSON.stringify(reviewArtifact))
 			.digest("hex")}`;
 
 		expect(payload.receiptPreview.planDigest).toBe(expectedDigest);

@@ -5447,8 +5447,9 @@ function createPlanForgeDryRunPlan(inputPath: string): PlanForgePlan {
 			],
 		},
 	};
+	const { receiptPreview: _receiptPreview, ...reviewArtifact } = plan;
 	plan.receiptPreview.planDigest = `sha256:${createHash("sha256")
-		.update(JSON.stringify(plan))
+		.update(JSON.stringify(reviewArtifact))
 		.digest("hex")}`;
 	return plan;
 }
