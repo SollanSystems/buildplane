@@ -381,6 +381,30 @@ export function normalizeCheckState(value) {
 	return typeof value === "string" ? value.toUpperCase() : "";
 }
 
+export function sleepMs(ms) {
+	Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+export function waitForPostMergeVerification(
+	prNumber,
+	headSha,
+	expectedBase,
+	{
+		intervalMs = 10_000,
+		maxAttempts = 12,
+		sleep = sleepMs,
+		verify = verifyPostMerge,
+	} = {},
+) {
+	let postMerge;
+	for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+		postMerge = verify(prNumber, headSha, expectedBase);
+		if (isPostMergeVerified(postMerge)) return postMerge;
+		if (attempt < maxAttempts) sleep(intervalMs);
+	}
+	return postMerge;
+}
+
 export function isPostMergeVerified(postMerge) {
 	const allowedCheckConclusions = new Set(["SUCCESS", "SKIPPED", "NEUTRAL"]);
 	const checkRuns = Array.isArray(postMerge.checkRuns)
@@ -688,11 +712,9 @@ export async function main() {
 	}
 
 	// 10. Post-merge verification
-	const postMerge = verifyPostMerge(
-		args.pr,
-		receipt.headSha,
-		args.expectedBase,
-	);
+	const postMerge = args.directMerge
+		? verifyPostMerge(args.pr, receipt.headSha, args.expectedBase)
+		: waitForPostMergeVerification(args.pr, receipt.headSha, args.expectedBase);
 
 	const postMergeVerified = isPostMergeVerified(postMerge);
 	const execReceipt = {

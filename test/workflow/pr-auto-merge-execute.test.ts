@@ -415,6 +415,46 @@ describe("post-merge verification", () => {
 			}),
 		).toBe(false);
 	});
+
+	it("polls native auto-merge post-merge verification until merged", async () => {
+		const { waitForPostMergeVerification } = await execModule;
+		const attempts: string[] = [];
+		const result = waitForPostMergeVerification(128, "head-sha", "main", {
+			intervalMs: 1,
+			maxAttempts: 3,
+			sleep: () => attempts.push("sleep"),
+			verify: () => {
+				attempts.push("verify");
+				return attempts.filter((entry) => entry === "verify").length < 2
+					? {
+							checkRuns: [
+								{
+									conclusion: "SUCCESS",
+									name: "verify",
+									status: "COMPLETED",
+								},
+							],
+							deploymentCount: 0,
+							merged: false,
+							onDefaultBranch: false,
+						}
+					: {
+							checkRuns: [
+								{
+									conclusion: "SUCCESS",
+									name: "verify",
+									status: "COMPLETED",
+								},
+							],
+							deploymentCount: 0,
+							merged: true,
+							onDefaultBranch: true,
+						};
+			},
+		});
+		expect(attempts).toEqual(["verify", "sleep", "verify"]);
+		expect(result.merged).toBe(true);
+	});
 });
 
 describe("prShortSha", () => {
