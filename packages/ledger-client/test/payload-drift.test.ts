@@ -2,6 +2,11 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import {
+	EventKind,
+	RunAdmissionDecision,
+	type RunAdmissionRecordedV1,
+} from "../src/generated/index.js";
 import type { Payload } from "../src/payload.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -25,6 +30,7 @@ function kindName(p: Payload): string {
 		case "RunStartedV1":
 		case "RunCompletedV1":
 		case "RunFailedV1":
+		case "RunAdmissionRecordedV1":
 		case "UnitStartedV1":
 		case "UnitCompletedV1":
 		case "UnitFailedV1":
@@ -47,10 +53,32 @@ function kindName(p: Payload): string {
 describe("payload drift alarm", () => {
 	it("every fixture parses as a known variant", () => {
 		const fixtures = loadFixtures();
-		expect(fixtures.length).toBe(14);
+		expect(fixtures.length).toBe(15);
+		const names: string[] = [];
 		for (const fx of fixtures) {
 			const name = kindName(fx as Payload);
+			names.push(name);
 			expect(typeof name).toBe("string");
 		}
+		expect(names).toContain("RunAdmissionRecordedV1");
+	});
+
+	it("run admission fixture matches the generated wire contract", () => {
+		const fixtures = loadFixtures();
+		const admission = fixtures.find(
+			(fx): fx is { RunAdmissionRecordedV1: RunAdmissionRecordedV1 } =>
+				typeof fx === "object" && fx !== null && "RunAdmissionRecordedV1" in fx,
+		);
+
+		expect(EventKind.RunAdmissionRecorded).toBe("run_admission_recorded");
+		expect(admission).toBeDefined();
+		const payload = admission?.RunAdmissionRecordedV1;
+		expect(payload?.decision).toBe(RunAdmissionDecision.Pass);
+		expect(payload?.will_execute_worker).toBe(true);
+		expect(payload?.receipt_ref).toBe("cas:sha256:aa");
+		expect(payload?.evidence_inputs[0]?.digest).toBe("sha256:bb");
+		expect(Object.hasOwn(payload?.evidence_inputs[0] ?? {}, "reason")).toBe(
+			false,
+		);
 	});
 });

@@ -10,6 +10,7 @@ use bp_ledger::payload::model_io::{
     Message, ModelRequestV1, ModelResponseV1, SamplingParams, Usage,
 };
 use bp_ledger::payload::run_lifecycle::{
+    RunAdmissionDecision, RunAdmissionEvidenceInputV1, RunAdmissionRecordedV1,
     RunCompletedV1, RunFailedV1, RunOutcome, RunStartedV1,
 };
 use bp_ledger::payload::tool_io::{EnvRedaction, ToolRequestStoredV1, ToolResultV1};
@@ -48,6 +49,33 @@ fn main() {
 
         serde_json::to_value(Payload::RunFailedV1(RunFailedV1 {
             reason: "fixture".into(), terminating_event_id: None,
+        })).unwrap(),
+
+        serde_json::to_value(Payload::RunAdmissionRecordedV1(RunAdmissionRecordedV1 {
+            receipt_id: "receipt-fixture".into(),
+            receipt_digest: "sha256:aa".into(),
+            receipt_ref: Some("cas:sha256:aa".into()),
+            idempotency_key: "run.admission:v0:fixture".into(),
+            decision: RunAdmissionDecision::Pass,
+            policy_profile_id: "reviewed-green".into(),
+            requested_side_effects: vec!["fs.write:declared_scope".into()],
+            allowed_side_effects: vec!["fs.write:declared_scope".into()],
+            denied_side_effects: vec![],
+            missing_evidence: vec![],
+            unsafe_requests: vec![],
+            evidence_inputs: vec![RunAdmissionEvidenceInputV1 {
+                kind: "git.status".into(),
+                reference: "evidence/git-status.txt".into(),
+                digest: Some("sha256:bb".into()),
+                required: true,
+                status: "present".into(),
+                reason: None,
+            }],
+            quarantine: false,
+            will_execute_worker: true,
+            authorized_next_step: "dispatch_after_admission_append".into(),
+            decided_by: "buildplane.kernel.admission".into(),
+            decided_at: "2026-05-24T22:41:16Z".into(),
         })).unwrap(),
 
         serde_json::to_value(Payload::UnitStartedV1(UnitStartedV1 {

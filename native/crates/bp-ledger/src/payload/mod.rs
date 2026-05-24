@@ -21,6 +21,7 @@ pub enum Payload {
     RunStartedV1(run_lifecycle::RunStartedV1),
     RunCompletedV1(run_lifecycle::RunCompletedV1),
     RunFailedV1(run_lifecycle::RunFailedV1),
+    RunAdmissionRecordedV1(run_lifecycle::RunAdmissionRecordedV1),
     UnitStartedV1(unit_lifecycle::UnitStartedV1),
     UnitCompletedV1(unit_lifecycle::UnitCompletedV1),
     UnitFailedV1(unit_lifecycle::UnitFailedV1),
