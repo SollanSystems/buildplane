@@ -282,6 +282,19 @@ describe("rollupItems", () => {
 		expect(items[1].conclusion).toBe("FAILURE");
 	});
 
+	it("maps successful status context state into a terminal conclusion", async () => {
+		const { hasCheckPending, rollupItems } = await optInModule;
+		const items = rollupItems([
+			{
+				context: "legacy-status",
+				state: "SUCCESS",
+				__typename: "StatusContext",
+			},
+		]);
+		expect(items[0].conclusion).toBe("SUCCESS");
+		expect(hasCheckPending(items)).toBe(false);
+	});
+
 	it("handles non-array input", async () => {
 		const { rollupItems } = await optInModule;
 		expect(rollupItems(undefined as any)).toEqual([]);
@@ -345,6 +358,15 @@ describe("runPreChecks", () => {
 		);
 	});
 
+	it("blocks when review-thread query fails", async () => {
+		const { runPreChecks, BLOCKED_REVIEW_THREADS_QUERY } = await optInModule;
+		const pr = mockPr({ reviewThreadsQueryOk: false });
+		const blockers = runPreChecks(pr, pr.headRefOid);
+		expect(
+			blockers.some((b) => b.status === BLOCKED_REVIEW_THREADS_QUERY),
+		).toBe(true);
+	});
+
 	it("blocks unresolved review threads", async () => {
 		const { runPreChecks, BLOCKED_REVIEW_THREADS } = await optInModule;
 		const pr = mockPr({ unresolvedCount: 3 });
@@ -400,6 +422,7 @@ function mockPr(
 		unresolvedCount?: number;
 		hasCheckPending?: boolean;
 		checksLength?: number;
+		reviewThreadsQueryOk?: boolean;
 	} = {},
 ) {
 	const hasCheckPending = overrides.hasCheckPending ?? false;
@@ -449,6 +472,7 @@ function mockPr(
 			),
 			unresolvedCount: overrides.unresolvedCount ?? 0,
 		},
+		reviewThreadsQueryOk: overrides.reviewThreadsQueryOk ?? true,
 		hasLabel: (overrides.labels ?? ["buildplane:auto-merge"]).includes(
 			"buildplane:auto-merge",
 		),

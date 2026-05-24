@@ -21,6 +21,7 @@ import { execFileSync } from "node:child_process";
 const OPT_LABEL = "buildplane:auto-merge";
 
 export const BLOCKED_REVIEW_THREADS = "BLOCKED_REVIEW_THREADS";
+export const BLOCKED_REVIEW_THREADS_QUERY = "BLOCKED_REVIEW_THREADS_QUERY";
 export const BLOCKED_CHECKS_PENDING = "BLOCKED_CHECKS_PENDING";
 export const BLOCKED_DRAFT = "BLOCKED_DRAFT";
 export const BLOCKED_SHA_MISMATCH = "BLOCKED_SHA_MISMATCH";
@@ -82,6 +83,23 @@ export function labelNames(labels) {
 		.filter(Boolean);
 }
 
+const SUCCESS_STATES = new Set(["SUCCESS", "SKIPPED", "NEUTRAL"]);
+const FAILURE_STATES = new Set([
+	"FAILURE",
+	"FAILED",
+	"ERROR",
+	"CANCELLED",
+	"TIMED_OUT",
+	"ACTION_REQUIRED",
+]);
+
+export function terminalConclusionFromState(item) {
+	const state = String(item?.conclusion ?? item?.state ?? "").toUpperCase();
+	if (SUCCESS_STATES.has(state)) return state;
+	if (FAILURE_STATES.has(state)) return state;
+	return item?.conclusion ?? null;
+}
+
 export function hasCheckPending(items) {
 	for (const item of items ?? []) {
 		const status = item.status ?? item.state ?? "";
@@ -94,7 +112,7 @@ export function hasCheckPending(items) {
 export function rollupItems(statusCheckRollup) {
 	if (!Array.isArray(statusCheckRollup)) return [];
 	return statusCheckRollup.map((item) => ({
-		conclusion: item.conclusion ?? null,
+		conclusion: terminalConclusionFromState(item),
 		name: item.name ?? item.context ?? item.workflowName ?? "unknown",
 		status: item.status ?? item.state ?? "UNKNOWN",
 		type: item.__typename ?? "unknown",
@@ -193,6 +211,7 @@ export function queryPr(prNumber) {
 		autoMergeRequest: json.autoMergeRequest ?? null,
 		labels: labelNames(json.labels),
 		reviewThreads: summarizeReviewThreads(reviewThreads),
+		reviewThreadsQueryOk: reviewThreads !== undefined,
 		checks: rollupItems(json.statusCheckRollup),
 		hasLabel: labelNames(json.labels).includes(OPT_LABEL),
 	};
@@ -285,7 +304,12 @@ export function runPreChecks(pr, expectedHead, markReadyFlag = false) {
 		});
 	}
 
-	if (pr.reviewThreads.unresolvedCount > 0) {
+	if (pr.reviewThreadsQueryOk === false) {
+		blockers.push({
+			status: BLOCKED_REVIEW_THREADS_QUERY,
+			reason: "failed to query review threads",
+		});
+	} else if (pr.reviewThreads.unresolvedCount > 0) {
 		blockers.push({
 			status: BLOCKED_REVIEW_THREADS,
 			reason: `${pr.reviewThreads.unresolvedCount} unresolved review thread(s)`,
