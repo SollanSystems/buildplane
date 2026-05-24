@@ -269,8 +269,8 @@ export function missingNativeAutoMergePrIdBlocker(prNumber) {
 	};
 }
 
-export function directSquashMerge(prNumber, _headSha, commitTitle) {
-	runStdout("gh", [
+export function buildDirectSquashMergeArgs(prNumber, headSha, commitTitle) {
+	return [
 		"pr",
 		"merge",
 		String(prNumber),
@@ -278,9 +278,15 @@ export function directSquashMerge(prNumber, _headSha, commitTitle) {
 		"SollanSystems/buildplane",
 		"--squash",
 		"--delete-branch",
+		"--match-head-commit",
+		headSha,
 		"--subject",
 		commitTitle ?? `Auto-merge PR #${prNumber} via Buildplane`,
-	]);
+	];
+}
+
+export function directSquashMerge(prNumber, headSha, commitTitle) {
+	runStdout("gh", buildDirectSquashMergeArgs(prNumber, headSha, commitTitle));
 }
 
 // ── post-merge verification ──────────────────────────────────────────────────

@@ -28,6 +28,7 @@ export const BLOCKED_SHA_MISSING = "BLOCKED_SHA_MISSING";
 export const BLOCKED_ALREADY_MERGED = "BLOCKED_ALREADY_MERGED";
 export const BLOCKED_DEPLOYMENT_SIDE_EFFECT = "BLOCKED_DEPLOYMENT_SIDE_EFFECT";
 export const BLOCKED_DRY_RUN_DIVERGED = "BLOCKED_DRY_RUN_DIVERGED";
+export const BLOCKED_OPT_IN_LABEL_MISSING = "BLOCKED_OPT_IN_LABEL_MISSING";
 export const OPT_IN_OK = "OPT_IN_OK";
 export const OPT_IN_DRY_RUN = "OPT_IN_DRY_RUN";
 export const ERROR_GITHUB_QUERY = "ERROR_GITHUB_QUERY";
@@ -467,6 +468,65 @@ export function parseArgs(argv) {
 
 // ── main ─────────────────────────────────────────────────────────────────────
 
+export function postMutationSafetyBlockers(pr, prAfter, markReadyFlag = false) {
+	const postBlockers = [];
+	const reconciliation = [];
+	if (!prAfter) {
+		postBlockers.push({
+			status: ERROR_GITHUB_QUERY,
+			reason: "Failed to re-query PR after opt-in mutations",
+		});
+		return { postBlockers, reconciliation };
+	}
+	if (prAfter.headRefOid !== pr.headRefOid) {
+		postBlockers.push({
+			status: BLOCKED_DRY_RUN_DIVERGED,
+			reason: `PR head changed during opt-in: ${pr.headRefOid} → ${prAfter.headRefOid}`,
+		});
+		reconciliation.push(
+			"PR head changed during opt-in. Re-run eligibility probe.",
+		);
+	}
+	if (prAfter.isDraft && markReadyFlag) {
+		postBlockers.push({
+			status: BLOCKED_DRAFT,
+			reason: "PR is still draft after --mark-ready",
+		});
+		reconciliation.push(
+			"PR remained draft after mark-ready. Verify permissions and draft state.",
+		);
+	}
+	if (prAfter.isDraft !== pr.isDraft && !markReadyFlag) {
+		// Ready→draft would be unexpected; draft→ready without --mark-ready is also unexpected
+		postBlockers.push({
+			status: BLOCKED_DRY_RUN_DIVERGED,
+			reason: `PR draft state changed during opt-in: ${pr.isDraft} → ${prAfter.isDraft}`,
+		});
+		reconciliation.push(
+			"PR draft state changed unexpectedly. Verify whether this was intentional.",
+		);
+	}
+	if (prAfter.state !== pr.state) {
+		postBlockers.push({
+			status: BLOCKED_DRY_RUN_DIVERGED,
+			reason: `PR state changed during opt-in: ${pr.state} → ${prAfter.state}`,
+		});
+		reconciliation.push(
+			`PR state changed from ${pr.state} to ${prAfter.state}. Re-inspect before proceeding.`,
+		);
+	}
+	if (!prAfter.hasLabel) {
+		postBlockers.push({
+			status: BLOCKED_OPT_IN_LABEL_MISSING,
+			reason: `Opt-in label ${OPT_LABEL} is missing after mutation`,
+		});
+		reconciliation.push(
+			"Opt-in label is missing after mutation. Re-apply or investigate concurrent label changes before proceeding.",
+		);
+	}
+	return { postBlockers, reconciliation };
+}
+
 export async function main() {
 	const args = parseArgs(process.argv.slice(2));
 
@@ -563,52 +623,11 @@ export async function main() {
 	const deploymentsAfter = queryDeployments(args.expectedHead);
 
 	// Verify no unexpected side effects
-	const postBlockers = [];
-	const reconciliation = [];
-	if (!prAfter) {
-		postBlockers.push({
-			status: ERROR_GITHUB_QUERY,
-			reason: "Failed to re-query PR after mutation",
-		});
-	}
-	if (prAfter && prAfter.headRefOid !== pr.headRefOid) {
-		postBlockers.push({
-			status: BLOCKED_DRY_RUN_DIVERGED,
-			reason: `head SHA changed during opt-in: ${prShortSha(pr.headRefOid)} → ${prShortSha(prAfter.headRefOid)}`,
-		});
-		reconciliation.push(
-			"Re-run eligibility probe with new head SHA before considering merge.",
-		);
-	}
-	if (prAfter && prAfter.isDraft && args.markReady) {
-		postBlockers.push({
-			status: BLOCKED_DRAFT,
-			reason:
-				"PR is draft but mark-ready was requested; re-query shows draft=true",
-		});
-		reconciliation.push(
-			"Draft state did not change as expected. Manually inspect PR draft status.",
-		);
-	}
-	if (prAfter && !prAfter.isDraft && !args.markReady && pr.isDraft) {
-		// Ready→draft would be unexpected; draft→ready without --mark-ready is also unexpected
-		postBlockers.push({
-			status: BLOCKED_DRY_RUN_DIVERGED,
-			reason: `draft state changed during opt-in: ${pr.isDraft} → ${prAfter.isDraft}`,
-		});
-		reconciliation.push(
-			"PR draft state changed unexpectedly. Verify whether this was intentional.",
-		);
-	}
-	if (prAfter && prAfter.state !== pr.state) {
-		postBlockers.push({
-			status: BLOCKED_DRY_RUN_DIVERGED,
-			reason: `PR state changed during opt-in: ${pr.state} → ${prAfter.state}`,
-		});
-		reconciliation.push(
-			`PR state changed from ${pr.state} to ${prAfter.state}. Re-inspect before proceeding.`,
-		);
-	}
+	const { postBlockers, reconciliation } = postMutationSafetyBlockers(
+		pr,
+		prAfter,
+		args.markReady,
+	);
 
 	// Compare deployments before and after
 	if (!args.allowDeployments) {

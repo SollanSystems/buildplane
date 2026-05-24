@@ -367,6 +367,19 @@ describe("runPreChecks", () => {
 	});
 });
 
+describe("postMutationSafetyBlockers", () => {
+	it("blocks when opt-in label is missing after live mutation", async () => {
+		const { postMutationSafetyBlockers, BLOCKED_OPT_IN_LABEL_MISSING } =
+			await optInModule;
+		const pr = mockPr({ labels: [] });
+		const prAfter = mockPr({ labels: [] });
+		const { postBlockers } = postMutationSafetyBlockers(pr, prAfter);
+		expect(
+			postBlockers.some((b) => b.status === BLOCKED_OPT_IN_LABEL_MISSING),
+		).toBe(true);
+	});
+});
+
 describe("planMutations", () => {
 	it("plans to add label when missing", async () => {
 		const { planMutations } = await optInModule;

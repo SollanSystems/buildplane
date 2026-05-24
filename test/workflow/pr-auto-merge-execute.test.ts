@@ -122,6 +122,17 @@ describe("pr auto-merge execute", () => {
 		expect(args.join(" ")).toContain("expectedHeadOid: $expectedHeadOid");
 	});
 
+	it("pins direct squash merge to the reviewed head SHA", async () => {
+		const { buildDirectSquashMergeArgs } = await execModule;
+		const args = buildDirectSquashMergeArgs(
+			128,
+			"abc123def4567890abc123def4567890abc123de",
+			"merge title",
+		);
+		expect(args).toContain("--match-head-commit");
+		expect(args).toContain("abc123def4567890abc123def4567890abc123de");
+	});
+
 	it("fails closed when native auto-merge PR ID lookup is unavailable", async () => {
 		const { missingNativeAutoMergePrIdBlocker } = await execModule;
 		const blocker = missingNativeAutoMergePrIdBlocker(128);
