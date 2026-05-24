@@ -360,6 +360,10 @@ export function verifyPostMerge(prNumber, headSha, expectedBase) {
 	return results;
 }
 
+export function normalizeCheckState(value) {
+	return typeof value === "string" ? value.toUpperCase() : "";
+}
+
 export function isPostMergeVerified(postMerge) {
 	const allowedCheckConclusions = new Set(["SUCCESS", "SKIPPED", "NEUTRAL"]);
 	const checkRuns = Array.isArray(postMerge.checkRuns)
@@ -369,8 +373,8 @@ export function isPostMergeVerified(postMerge) {
 		checkRuns.length > 0 &&
 		checkRuns.every(
 			(check) =>
-				check?.status === "COMPLETED" &&
-				allowedCheckConclusions.has(check?.conclusion),
+				normalizeCheckState(check?.status) === "COMPLETED" &&
+				allowedCheckConclusions.has(normalizeCheckState(check?.conclusion)),
 		);
 
 	return (

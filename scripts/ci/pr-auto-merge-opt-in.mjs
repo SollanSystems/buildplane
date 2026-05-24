@@ -141,6 +141,27 @@ export function prShortSha(sha) {
 
 // ── query ────────────────────────────────────────────────────────────────────
 
+export function buildReviewThreadsGraphqlArgs(prNumber) {
+	const query = `query($owner:String!,$repo:String!,$number:Int!){ repository(owner:$owner,name:$repo){ pullRequest(number:$number){ reviewThreads(first:100){ nodes { isResolved isOutdated path line comments(first:1){ nodes { author { login } } } } } } } }`;
+	return [
+		"api",
+		"graphql",
+		"-f",
+		"owner=SollanSystems",
+		"-f",
+		"repo=buildplane",
+		"-F",
+		`number=${prNumber}`,
+		"-f",
+		`query=${query}`,
+	];
+}
+
+export function queryReviewThreads(prNumber) {
+	const result = tryRunJson("gh", buildReviewThreadsGraphqlArgs(prNumber));
+	return result?.data?.repository?.pullRequest?.reviewThreads;
+}
+
 export function queryPr(prNumber) {
 	const json = tryRunJson("gh", [
 		"pr",
@@ -151,9 +172,11 @@ export function queryPr(prNumber) {
 		"--json",
 		"number,url,state,isDraft,baseRefName,headRefName," +
 			"headRefOid,mergeable,mergeStateStatus,reviewDecision," +
-			"autoMergeRequest,statusCheckRollup,labels,reviewThreads,closed",
+			"autoMergeRequest,statusCheckRollup,labels",
 	]);
 	if (!json) return undefined;
+
+	const reviewThreads = queryReviewThreads(prNumber);
 
 	return {
 		number: json.number,
@@ -168,7 +191,7 @@ export function queryPr(prNumber) {
 		reviewDecision: json.reviewDecision,
 		autoMergeRequest: json.autoMergeRequest ?? null,
 		labels: labelNames(json.labels),
-		reviewThreads: summarizeReviewThreads(json.reviewThreads),
+		reviewThreads: summarizeReviewThreads(reviewThreads),
 		checks: rollupItems(json.statusCheckRollup),
 		hasLabel: labelNames(json.labels).includes(OPT_LABEL),
 	};

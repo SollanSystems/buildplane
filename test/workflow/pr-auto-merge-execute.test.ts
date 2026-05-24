@@ -337,6 +337,16 @@ describe("post-merge verification", () => {
 		expect(
 			isPostMergeVerified({
 				checkRuns: [
+					{ conclusion: "success", name: "verify", status: "completed" },
+				],
+				deploymentCount: 0,
+				merged: true,
+				onDefaultBranch: true,
+			}),
+		).toBe(true);
+		expect(
+			isPostMergeVerified({
+				checkRuns: [
 					{ conclusion: "SUCCESS", name: "verify", status: "COMPLETED" },
 				],
 				deploymentCount: 0,

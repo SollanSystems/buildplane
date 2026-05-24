@@ -217,6 +217,15 @@ describe("summarizeReviewThreads", () => {
 		expect(result.total).toBe(0);
 		expect(result.unresolvedCount).toBe(0);
 	});
+
+	it("builds a dedicated GraphQL review-thread query", async () => {
+		const { buildReviewThreadsGraphqlArgs } = await optInModule;
+		const args = buildReviewThreadsGraphqlArgs(128);
+		expect(args).toContain("owner=SollanSystems");
+		expect(args).toContain("repo=buildplane");
+		expect(args).toContain("number=128");
+		expect(args.join(" ")).toContain("reviewThreads(first:100)");
+	});
 });
 
 describe("hasCheckPending", () => {
