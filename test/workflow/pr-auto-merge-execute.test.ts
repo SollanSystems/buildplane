@@ -403,6 +403,17 @@ describe("post-merge verification", () => {
 				onDefaultBranch: true,
 			}),
 		).toBe(false);
+		expect(
+			isPostMergeVerified({
+				checkRuns: [
+					{ conclusion: "SUCCESS", name: "verify", status: "COMPLETED" },
+				],
+				deploymentCount: 0,
+				merged: true,
+				onDefaultBranch: true,
+				statuses: [{ context: "legacy-status", state: "failure" }],
+			}),
+		).toBe(false);
 	});
 });
 

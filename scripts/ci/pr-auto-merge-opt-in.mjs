@@ -160,8 +160,11 @@ export function prShortSha(sha) {
 
 // ── query ────────────────────────────────────────────────────────────────────
 
-export function buildReviewThreadsGraphqlArgs(prNumber) {
-	const query = `query($owner:String!,$repo:String!,$number:Int!){ repository(owner:$owner,name:$repo){ pullRequest(number:$number){ reviewThreads(first:100){ nodes { isResolved isOutdated path line comments(first:1){ nodes { author { login } } } } } } } }`;
+export function buildReviewThreadsGraphqlArgs(prNumber, afterCursor = null) {
+	const afterClause = afterCursor
+		? `, after: ${JSON.stringify(afterCursor)}`
+		: "";
+	const query = `query($owner:String!,$repo:String!,$number:Int!){ repository(owner:$owner,name:$repo){ pullRequest(number:$number){ reviewThreads(first:100${afterClause}){ nodes { isResolved isOutdated path line comments(first:1){ nodes { author { login } } } } pageInfo { hasNextPage endCursor } } } } }`;
 	return [
 		"api",
 		"graphql",
@@ -177,8 +180,21 @@ export function buildReviewThreadsGraphqlArgs(prNumber) {
 }
 
 export function queryReviewThreads(prNumber) {
-	const result = tryRunJson("gh", buildReviewThreadsGraphqlArgs(prNumber));
-	return result?.data?.repository?.pullRequest?.reviewThreads;
+	const nodes = [];
+	let afterCursor = null;
+	for (let page = 0; page < 20; page++) {
+		const result = tryRunJson(
+			"gh",
+			buildReviewThreadsGraphqlArgs(prNumber, afterCursor),
+		);
+		const reviewThreads = result?.data?.repository?.pullRequest?.reviewThreads;
+		if (!reviewThreads) return undefined;
+		if (Array.isArray(reviewThreads.nodes)) nodes.push(...reviewThreads.nodes);
+		if (!reviewThreads.pageInfo?.hasNextPage) return { nodes };
+		afterCursor = reviewThreads.pageInfo.endCursor;
+		if (!afterCursor) return undefined;
+	}
+	return undefined;
 }
 
 export function queryPr(prNumber) {
@@ -402,7 +418,12 @@ export function emitReceipt(pr, ops, expectedHead, dryRunMap, blockers) {
 		autoMergeRequest: pr.autoMergeRequest,
 		mutations: ops,
 		blockers: blockers.map((b) => ({ status: b.status, reason: b.reason })),
-		verdict: blockers.length > 0 ? "BLOCKED" : "OPT_IN_OK",
+		verdict:
+			blockers.length > 0
+				? "BLOCKED"
+				: dryRunMap.dryRun
+					? OPT_IN_DRY_RUN
+					: OPT_IN_OK,
 		reconciliation: dryRunMap.reconciliation ?? null,
 	};
 

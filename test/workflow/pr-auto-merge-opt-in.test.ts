@@ -225,6 +225,13 @@ describe("summarizeReviewThreads", () => {
 		expect(args).toContain("repo=buildplane");
 		expect(args).toContain("number=128");
 		expect(args.join(" ")).toContain("reviewThreads(first:100)");
+		expect(args.join(" ")).toContain("pageInfo");
+	});
+
+	it("adds a pagination cursor to review-thread GraphQL queries", async () => {
+		const { buildReviewThreadsGraphqlArgs } = await optInModule;
+		const args = buildReviewThreadsGraphqlArgs(128, "cursor-1");
+		expect(args.join(" ")).toContain('after: "cursor-1"');
 	});
 });
 
@@ -408,6 +415,24 @@ describe("planMutations", () => {
 		const pr = mockPr({ labels: [] });
 		const ops = planMutations(pr);
 		expect(ops.some((o) => o.op === "add-label")).toBe(true);
+	});
+});
+
+describe("emitReceipt", () => {
+	it("uses a dry-run verdict for clean dry-run receipts", async () => {
+		const { emitReceipt, OPT_IN_DRY_RUN } = await optInModule;
+		const originalWrite = process.stdout.write;
+		let output = "";
+		process.stdout.write = ((chunk: string) => {
+			output += chunk;
+			return true;
+		}) as typeof process.stdout.write;
+		try {
+			emitReceipt(mockPr(), [], mockPr().headRefOid, { dryRun: true }, []);
+		} finally {
+			process.stdout.write = originalWrite;
+		}
+		expect(JSON.parse(output).verdict).toBe(OPT_IN_DRY_RUN);
 	});
 });
 

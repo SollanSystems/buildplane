@@ -307,6 +307,16 @@ export function queryCheckRunsForCommit(commitSha) {
 	return checkRuns;
 }
 
+export function queryCommitStatusesForCommit(commitSha) {
+	const statuses = tryRunJson("gh", [
+		"api",
+		`repos/SollanSystems/buildplane/commits/${commitSha}/status`,
+		"--jq",
+		".statuses | map({context, state})",
+	]);
+	return Array.isArray(statuses) ? statuses : [];
+}
+
 export function verifyPostMerge(prNumber, headSha, expectedBase) {
 	const results = { checks: [], merged: false, onDefaultBranch: false };
 
@@ -348,9 +358,10 @@ export function verifyPostMerge(prNumber, headSha, expectedBase) {
 		results.onDefaultBranch = onBranch !== undefined && onBranch.length > 0;
 	}
 
-	// Query default branch checks (if merge commit known)
+	// Query default branch checks and commit statuses (if merge commit known)
 	if (results.mergeCommit) {
 		results.checkRuns = queryCheckRunsForCommit(results.mergeCommit);
+		results.statuses = queryCommitStatusesForCommit(results.mergeCommit);
 	}
 
 	// GET-only deployment probe
@@ -383,11 +394,19 @@ export function isPostMergeVerified(postMerge) {
 				allowedCheckConclusions.has(normalizeCheckState(check?.conclusion)),
 		);
 
+	const statuses = Array.isArray(postMerge.statuses) ? postMerge.statuses : [];
+	const statusesVerified =
+		statuses.length === 0 ||
+		statuses.every(
+			(status) => normalizeCheckState(status?.state) === "SUCCESS",
+		);
+
 	return (
 		postMerge.merged === true &&
 		postMerge.onDefaultBranch === true &&
 		postMerge.deploymentCount === 0 &&
-		checkRunsVerified
+		checkRunsVerified &&
+		statusesVerified
 	);
 }
 
