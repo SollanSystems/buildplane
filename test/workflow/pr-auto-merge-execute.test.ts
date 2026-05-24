@@ -122,6 +122,14 @@ describe("pr auto-merge execute", () => {
 		expect(args.join(" ")).toContain("expectedHeadOid: $expectedHeadOid");
 	});
 
+	it("fails closed when native auto-merge PR ID lookup is unavailable", async () => {
+		const { missingNativeAutoMergePrIdBlocker } = await execModule;
+		const blocker = missingNativeAutoMergePrIdBlocker(128);
+		expect(blocker.status).toBe("BLOCKED_PR_ID_LOOKUP");
+		expect(blocker.reason).toContain("native auto-merge");
+		expect(blocker.reason).toContain("--direct-merge explicitly");
+	});
+
 	it("parses --dry-run flag", async () => {
 		const { parseArgs } = await execModule;
 		const args = parseArgs([

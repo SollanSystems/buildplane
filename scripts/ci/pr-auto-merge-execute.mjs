@@ -36,6 +36,7 @@ export const BLOCKED_LIVE_SHA_MISMATCH = "BLOCKED_LIVE_SHA_MISMATCH";
 export const BLOCKED_LIVE_RECHECK = "BLOCKED_LIVE_RECHECK";
 export const BLOCKED_POST_MERGE = "BLOCKED_POST_MERGE";
 export const BLOCKED_PR_CLOSED = "BLOCKED_PR_CLOSED";
+export const BLOCKED_PR_ID_LOOKUP = "BLOCKED_PR_ID_LOOKUP";
 export const ERROR_GITHUB_QUERY = "ERROR_GITHUB_QUERY";
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -259,6 +260,13 @@ export function enableAutoMerge(prId, expectedHeadOid) {
 	// Use GraphQL to enable native auto-merge with SQUASH, pinned to the
 	// reviewed head SHA so a last-moment push cannot inherit this merge request.
 	runStdout("gh", buildEnableAutoMergeArgs(prId, expectedHeadOid));
+}
+
+export function missingNativeAutoMergePrIdBlocker(prNumber) {
+	return {
+		status: BLOCKED_PR_ID_LOOKUP,
+		reason: `Failed to resolve PR #${prNumber} node ID for native auto-merge; rerun after GitHub API recovery or pass --direct-merge explicitly to use direct squash merge`,
+	};
 }
 
 export function directSquashMerge(prNumber, _headSha, commitTitle) {
@@ -606,6 +614,7 @@ export async function main() {
 	}
 
 	// 9. Perform merge
+	const mergeBlockers = [];
 	if (!args.directMerge) {
 		// Prefer native auto-merge
 		const nodeId = pr.autoMergeRequest?.pullRequest?.id;
@@ -621,12 +630,24 @@ export async function main() {
 			if (prId) {
 				enableAutoMerge(prId, receipt.headSha);
 			} else {
-				// Fall back to direct merge if node ID unavailable
-				args.directMerge = true;
+				mergeBlockers.push(missingNativeAutoMergePrIdBlocker(args.pr));
 			}
 		} else {
 			enableAutoMerge(nodeId, receipt.headSha);
 		}
+	}
+
+	if (mergeBlockers.length > 0) {
+		if (args.jsonOnly) {
+			process.stdout.write(
+				JSON.stringify({ verdict: "BLOCKED", blockers: mergeBlockers }) + "\n",
+			);
+		} else {
+			process.stderr.write(`BLOCKED:\n`);
+			for (const b of mergeBlockers)
+				process.stderr.write(`  - ${b.status}: ${b.reason}\n`);
+		}
+		process.exit(1);
 	}
 
 	if (args.directMerge) {
