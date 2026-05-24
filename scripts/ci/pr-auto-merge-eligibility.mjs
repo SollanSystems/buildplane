@@ -614,6 +614,7 @@ function formatDeployments(deployments) {
 
 export function buildGithubErrorResult({ args, error, stage }) {
 	return {
+		timestamp: new Date().toISOString(),
 		autoMergeOptIn: {
 			allowMissingLabel: args.allowMissingLabel,
 			labelPresent: false,
@@ -773,6 +774,7 @@ export function main(argv = process.argv.slice(2)) {
 			rollupItems,
 		});
 		const result = {
+			timestamp: new Date().toISOString(),
 			autoMergeOptIn: {
 				allowMissingLabel: args.allowMissingLabel,
 				labelPresent: hasLabel(pr.labels, args.requiredLabel),
