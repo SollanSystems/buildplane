@@ -1,9 +1,18 @@
 //! SQLite-backed event store — append-only, trigger-enforced.
 
+use crate::canonicalize::canonicalize_payload;
 use crate::error::{LedgerError, Result};
 use crate::event::Event;
+use crate::id::{EventId, RunId};
+use crate::kind::EventKind;
+use crate::signing::{
+    verify_event_signature, ActorKeyRef, EventSignatureV1, SignatureAlgorithm, TrustedPublicKeys,
+    VerificationStatus,
+};
+use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::Path;
+use uuid::Uuid;
 
 /// SQLite connection wrapping the events + runs schema.
 pub struct SqliteStore {
@@ -114,6 +123,35 @@ impl SqliteStore {
         Ok(())
     }
 
+    /// Append a detached event signature. The `event_signatures` table is
+    /// append-only and keyed by `event_id`, so duplicates and missing event ids
+    /// fail through SQLite constraints.
+    pub fn append_event_signature(&self, signature: &EventSignatureV1) -> Result<()> {
+        self.conn.execute(
+            r#"INSERT INTO event_signatures (
+                event_id,
+                canonical_event_hash,
+                actor_id,
+                key_id,
+                public_key_hash,
+                algorithm,
+                signature,
+                signed_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"#,
+            params![
+                signature.event_id.to_string(),
+                signature.canonical_event_hash,
+                signature.signer.actor_id,
+                signature.signer.key_id,
+                signature.signer.public_key_hash,
+                signature_algorithm_wire(signature.algorithm),
+                signature.signature,
+                signature.signed_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
     /// Read all events for a run, ordered by id (UUIDv7 = time-ordered).
     pub fn events_for_run(&self, run_id: &str) -> Result<Vec<StoredEventRow>> {
         let mut stmt = self.conn.prepare(
@@ -131,12 +169,84 @@ impl SqliteStore {
                 payload: r.get(6)?,
             })
         })?;
-        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(LedgerError::from)
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(LedgerError::from)
+    }
+
+    /// Read events with explicit detached-signature verification status.
+    pub fn verified_events_for_run(
+        &self,
+        run_id: &str,
+        trusted_keys: &TrustedPublicKeys,
+    ) -> Result<Vec<VerifiedEventRow>> {
+        let rows = self.events_for_run(run_id)?;
+        rows.into_iter()
+            .map(|event_row| {
+                let event = event_row.to_event()?;
+                let Some(signature_row) = self.signature_for_event(&event_row.id)? else {
+                    return Ok(VerifiedEventRow {
+                        event: event_row,
+                        signature: None,
+                        verification: VerificationStatus::Unsigned,
+                    });
+                };
+
+                if signature_row.algorithm != "ed25519" {
+                    return Ok(VerifiedEventRow {
+                        event: event_row,
+                        signature: None,
+                        verification: VerificationStatus::UnsupportedAlgorithm,
+                    });
+                }
+
+                let signature = signature_row.to_event_signature()?;
+                let verification = verify_event_signature(&event, &signature, trusted_keys);
+                Ok(VerifiedEventRow {
+                    event: event_row,
+                    signature: Some(signature),
+                    verification,
+                })
+            })
+            .collect()
+    }
+
+    fn signature_for_event(&self, event_id: &str) -> Result<Option<StoredEventSignatureRow>> {
+        self.conn
+            .query_row(
+                r#"SELECT
+                    event_id,
+                    canonical_event_hash,
+                    actor_id,
+                    key_id,
+                    public_key_hash,
+                    algorithm,
+                    signature,
+                    signed_at
+                FROM event_signatures
+                WHERE event_id = ?1"#,
+                params![event_id],
+                |row| {
+                    Ok(StoredEventSignatureRow {
+                        event_id: row.get(0)?,
+                        canonical_event_hash: row.get(1)?,
+                        actor_id: row.get(2)?,
+                        key_id: row.get(3)?,
+                        public_key_hash: row.get(4)?,
+                        algorithm: row.get(5)?,
+                        signature: row.get(6)?,
+                        signed_at: row.get(7)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(LedgerError::from)
     }
 
     /// Count events in the store (for test convenience).
     pub fn event_count(&self) -> Result<u64> {
-        let n: i64 = self.conn.query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))?;
+        let n: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))?;
         Ok(n as u64)
     }
 
@@ -153,11 +263,9 @@ impl SqliteStore {
 
         let last: Option<String> = self
             .conn
-            .query_row(
-                "SELECT id FROM events ORDER BY id DESC LIMIT 1",
-                [],
-                |r| r.get(0),
-            )
+            .query_row("SELECT id FROM events ORDER BY id DESC LIMIT 1", [], |r| {
+                r.get(0)
+            })
             .optional()?;
 
         match last {
@@ -227,4 +335,110 @@ pub struct StoredEventRow {
     pub kind: String,
     pub occurred_at: String,
     pub payload: String,
+}
+
+impl StoredEventRow {
+    pub fn to_event(&self) -> Result<Event> {
+        let event_id = parse_event_id(&self.id, &self.kind)?;
+        let run_id = parse_run_id(&self.run_id, &self.kind)?;
+        let parent_event_id = self
+            .parent_event_id
+            .as_deref()
+            .map(|id| parse_event_id(id, &self.kind))
+            .transpose()?;
+        let kind: EventKind = serde_json::from_value(serde_json::Value::String(self.kind.clone()))?;
+        let occurred_at = DateTime::parse_from_rfc3339(&self.occurred_at)
+            .map_err(|err| invalid_payload(&self.kind, format!("invalid occurred_at: {err}")))?
+            .with_timezone(&Utc);
+        let payload_json: serde_json::Value = serde_json::from_str(&self.payload)?;
+        let payload = canonicalize_payload(&self.kind, self.schema_version, payload_json)?;
+        Ok(Event {
+            id: event_id,
+            run_id,
+            parent_event_id,
+            schema_version: self.schema_version,
+            kind,
+            occurred_at,
+            payload,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct StoredEventSignatureRow {
+    pub event_id: String,
+    pub canonical_event_hash: String,
+    pub actor_id: String,
+    pub key_id: String,
+    pub public_key_hash: Option<String>,
+    pub algorithm: String,
+    pub signature: String,
+    pub signed_at: String,
+}
+
+impl StoredEventSignatureRow {
+    pub fn to_event_signature(&self) -> Result<EventSignatureV1> {
+        let event_id = parse_event_id(&self.event_id, "event_signatures")?;
+        let algorithm = match self.algorithm.as_str() {
+            "ed25519" => SignatureAlgorithm::Ed25519,
+            _ => {
+                return Err(invalid_payload(
+                    "event_signatures",
+                    format!(
+                        "unsupported signature algorithm '{}'; check status first",
+                        self.algorithm
+                    ),
+                ));
+            }
+        };
+        let signed_at = DateTime::parse_from_rfc3339(&self.signed_at)
+            .map_err(|err| {
+                invalid_payload("event_signatures", format!("invalid signed_at: {err}"))
+            })?
+            .with_timezone(&Utc);
+        Ok(EventSignatureV1 {
+            event_id,
+            canonical_event_hash: self.canonical_event_hash.clone(),
+            signer: ActorKeyRef {
+                actor_id: self.actor_id.clone(),
+                key_id: self.key_id.clone(),
+                public_key_hash: self.public_key_hash.clone(),
+            },
+            algorithm,
+            signature: self.signature.clone(),
+            signed_at,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct VerifiedEventRow {
+    pub event: StoredEventRow,
+    pub signature: Option<EventSignatureV1>,
+    pub verification: VerificationStatus,
+}
+
+fn signature_algorithm_wire(algorithm: SignatureAlgorithm) -> &'static str {
+    match algorithm {
+        SignatureAlgorithm::Ed25519 => "ed25519",
+    }
+}
+
+fn parse_event_id(id: &str, kind: &str) -> Result<EventId> {
+    Uuid::parse_str(id)
+        .map(EventId::from_uuid)
+        .map_err(|err| invalid_payload(kind, format!("invalid event id: {err}")))
+}
+
+fn parse_run_id(id: &str, kind: &str) -> Result<RunId> {
+    Uuid::parse_str(id)
+        .map(RunId::from_uuid)
+        .map_err(|err| invalid_payload(kind, format!("invalid run id: {err}")))
+}
+
+fn invalid_payload(kind: &str, reason: String) -> LedgerError {
+    LedgerError::InvalidPayload {
+        kind: kind.to_string(),
+        reason,
+    }
 }
