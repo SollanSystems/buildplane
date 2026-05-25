@@ -1,5 +1,6 @@
 export type {
 	CreateRunAdmissionReceiptDryRunInput,
+	CreateRunAdmissionRecordedPayloadOptions,
 	JsonRecord,
 	JsonValue,
 	RecordRunAdmissionReceiptAttemptInput,
@@ -25,6 +26,7 @@ export type {
 } from "./admission-receipts.js";
 export {
 	createRunAdmissionReceiptDryRun,
+	createRunAdmissionRecordedPayload,
 	RunAdmissionReceiptInputError,
 	recordRunAdmissionReceiptAttempt,
 } from "./admission-receipts.js";

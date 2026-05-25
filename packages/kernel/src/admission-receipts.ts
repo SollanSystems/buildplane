@@ -174,6 +174,11 @@ export interface RunAdmissionEventAppendInput {
 	readonly receipt: RunAdmissionReceipt;
 }
 
+export interface CreateRunAdmissionRecordedPayloadOptions {
+	readonly receiptRef?: string | null;
+	readonly willExecuteWorker?: boolean;
+}
+
 export interface RunAdmissionLocalEvidenceWriteResult {
 	readonly ref: string;
 	readonly path?: string;
@@ -715,6 +720,44 @@ function createRecordedPayload(input: {
 	};
 }
 
+function shouldExecuteWorkerFromRecordedPayloadInput(input: {
+	readonly receipt: RunAdmissionReceipt;
+	readonly requestedWillExecuteWorker?: boolean;
+}): boolean {
+	const { receipt, requestedWillExecuteWorker } = input;
+	return (
+		requestedWillExecuteWorker === true &&
+		receipt.admission.will_execute_worker === true &&
+		receipt.admission.authorized_next_step === "dispatch_worker" &&
+		receipt.admission.decision === "PASS" &&
+		receipt.policy.quarantine === false &&
+		receipt.admission.missing_evidence.length === 0 &&
+		receipt.admission.unsafe_requests.length === 0
+	);
+}
+
+export function createRunAdmissionRecordedPayload(
+	receipt: RunAdmissionReceipt,
+	options: CreateRunAdmissionRecordedPayloadOptions = {},
+): RunAdmissionRecordedPayload {
+	assertNoCredentialShapedValues(receipt, "receipt");
+	const receiptDigest = createReceiptDigest(stableJson(receipt));
+	const payload = createRecordedPayload({
+		receipt,
+		receiptDigest,
+		receiptRef: options.receiptRef ?? null,
+	});
+	const safePayload: RunAdmissionRecordedPayload = {
+		...payload,
+		will_execute_worker: shouldExecuteWorkerFromRecordedPayloadInput({
+			receipt,
+			requestedWillExecuteWorker: options.willExecuteWorker,
+		}),
+	};
+	assertNoCredentialShapedValues(safePayload, "payload");
+	return safePayload;
+}
+
 interface CreateRunAdmissionReceiptOptions {
 	readonly willExecuteWorker: boolean;
 	readonly authorizedNextStep: string;
@@ -894,10 +937,9 @@ export function recordRunAdmissionReceiptAttemptSync(
 			"Synchronous run admission requires a synchronous receipt artifact store.",
 		);
 	}
-	const payload = createRecordedPayload({
-		receipt: input.receipt,
-		receiptDigest,
+	const payload = createRunAdmissionRecordedPayload(input.receipt, {
 		receiptRef: receiptArtifact.ref,
+		willExecuteWorker: input.receipt.admission.will_execute_worker,
 	});
 	const event: RunAdmissionRecordedEvent = {
 		kind: "run_admission_recorded",
@@ -939,10 +981,9 @@ export async function recordRunAdmissionReceiptAttempt(
 		receiptDigest,
 		contents: receiptJson,
 	});
-	const payload = createRecordedPayload({
-		receipt: input.receipt,
-		receiptDigest,
+	const payload = createRunAdmissionRecordedPayload(input.receipt, {
 		receiptRef: receiptArtifact.ref,
+		willExecuteWorker: input.receipt.admission.will_execute_worker,
 	});
 	const event: RunAdmissionRecordedEvent = {
 		kind: "run_admission_recorded",

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -5,7 +6,9 @@ import { describe, expect, it, vi } from "vitest";
 import {
 	type CreateRunAdmissionReceiptDryRunInput,
 	createRunAdmissionReceiptDryRun,
+	createRunAdmissionRecordedPayload,
 	type JsonRecord,
+	type JsonValue,
 	type RunAdmissionDecision,
 	type RunAdmissionEvidenceInput,
 	type RunAdmissionLocalEvidenceStore,
@@ -63,6 +66,32 @@ function expectNoRawSentinels(
 	for (const rawSentinel of rawSentinels) {
 		expect(serialized).not.toContain(rawSentinel);
 	}
+}
+
+function compareJsonKeys(a: string, b: string): number {
+	return a < b ? -1 : a > b ? 1 : 0;
+}
+
+function canonicalJson(value: JsonValue): string {
+	if (value === undefined) {
+		return "null";
+	}
+	if (value === null || typeof value !== "object") {
+		return JSON.stringify(value);
+	}
+	if (Array.isArray(value)) {
+		return `[${value.map((item) => canonicalJson(item)).join(",")}]`;
+	}
+	const record = value as { readonly [key: string]: JsonValue };
+	return `{${Object.keys(record)
+		.filter((key) => record[key] !== undefined)
+		.sort(compareJsonKeys)
+		.map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`)
+		.join(",")}}`;
+}
+
+function receiptDigest(receipt: RunAdmissionReceipt): string {
+	return `sha256:${createHash("sha256").update(canonicalJson(receipt)).digest("hex")}`;
 }
 
 function loadFixture(name: string): JsonRecord {
@@ -468,6 +497,146 @@ describe("createRunAdmissionReceiptDryRun", () => {
 			"github.pr.create",
 			"deploy:production",
 		]);
+	});
+});
+
+describe("createRunAdmissionRecordedPayload", () => {
+	it("summarizes PASS receipts with a canonical digest and explicit dispatch posture", () => {
+		const receipt = createRunAdmissionReceiptDryRun(
+			admissionInputFromFixture(loadFixture("pass")),
+		);
+		const dispatchReadyReceipt: RunAdmissionReceipt = {
+			...receipt,
+			admission: {
+				...receipt.admission,
+				will_execute_worker: true,
+				authorized_next_step: "dispatch_worker",
+			},
+		};
+
+		const dryRunDispatchAttempt = createRunAdmissionRecordedPayload(receipt, {
+			receiptRef: "artifact://run-admission/dry-run-pass",
+			willExecuteWorker: true,
+		});
+		const recordOnlyPayload = createRunAdmissionRecordedPayload(
+			dispatchReadyReceipt,
+			{
+				receiptRef: "artifact://run-admission/pass",
+				willExecuteWorker: false,
+			},
+		);
+		const dispatchPayload = createRunAdmissionRecordedPayload(
+			dispatchReadyReceipt,
+			{
+				receiptRef: "artifact://run-admission/pass",
+				willExecuteWorker: true,
+			},
+		);
+
+		expect(dryRunDispatchAttempt.will_execute_worker).toBe(false);
+		expect(recordOnlyPayload.will_execute_worker).toBe(false);
+		expect(dispatchPayload).toMatchObject({
+			receipt_id: receipt.receipt_id,
+			receipt_digest: receiptDigest(dispatchReadyReceipt),
+			receipt_ref: "artifact://run-admission/pass",
+			run_id: "run_bp1_pass_0001",
+			unit_id: "unit_docs_fixture_0001",
+			decision: "PASS",
+			policy_profile_id: "local-docs-fixture-v0",
+			idempotency_key: receipt.idempotency_key,
+			requested_side_effects: receipt.request.requested_side_effects,
+			allowed_side_effects: receipt.policy.allowed_side_effects,
+			missing_evidence: [],
+			unsafe_requests: [],
+			quarantine: false,
+			will_execute_worker: true,
+			authorized_next_step: "dispatch_worker",
+			decided_by: "buildplane.kernel.admission",
+			decided_at: "2026-05-08T00:00:00Z",
+		});
+		expect(dispatchPayload.idempotency_key).not.toBe(
+			dispatchPayload.receipt_digest,
+		);
+		expect(
+			dispatchPayload.denied_side_effects.map(({ effect }) => effect),
+		).toEqual(["git.push:remote", "github.pr.create", "deploy:production"]);
+		expect(dispatchPayload.evidence_inputs).toEqual(receipt.evidence_inputs);
+	});
+
+	it("fails closed for insufficient evidence even when dispatch is requested", () => {
+		const receipt = createRunAdmissionReceiptDryRun(
+			admissionInputFromFixture(loadFixture("insufficient-evidence")),
+		);
+
+		const payload = createRunAdmissionRecordedPayload(receipt, {
+			receiptRef: null,
+			willExecuteWorker: true,
+		});
+
+		expect(payload).toMatchObject({
+			receipt_digest: receiptDigest(receipt),
+			receipt_ref: null,
+			decision: "INSUFFICIENT_EVIDENCE",
+			missing_evidence: ["git.status"],
+			unsafe_requests: [],
+			quarantine: false,
+			will_execute_worker: false,
+			authorized_next_step: "capture_missing_evidence_then_recompute_admission",
+		});
+	});
+
+	it("fails closed for unsafe receipts even if the receipt claims worker execution", () => {
+		const unsafeReceipt = createRunAdmissionReceiptDryRun(
+			admissionInputFromFixture(loadFixture("unsafe-to-run")),
+		);
+		const maliciousReceipt: RunAdmissionReceipt = {
+			...unsafeReceipt,
+			admission: {
+				...unsafeReceipt.admission,
+				will_execute_worker: true,
+			},
+		};
+
+		const payload = createRunAdmissionRecordedPayload(maliciousReceipt, {
+			receiptRef: "artifact://run-admission/unsafe",
+			willExecuteWorker: true,
+		});
+
+		expect(payload.decision).toBe("UNSAFE_TO_RUN");
+		expect(payload.unsafe_requests).toEqual([
+			"git.push:remote",
+			"github.pr.create",
+			"deploy:production",
+		]);
+		expect(payload.quarantine).toBe(true);
+		expect(payload.will_execute_worker).toBe(false);
+	});
+
+	it("rejects credential-shaped receipt values without leaking the raw value", async () => {
+		const safeReceipt = createRunAdmissionReceiptDryRun(
+			admissionInputFromFixture(loadFixture("pass")),
+		);
+		const unsafeReceipt: RunAdmissionReceipt = {
+			...safeReceipt,
+			request: {
+				...safeReceipt.request,
+				operator_approvals: [
+					{
+						approved_by: "operator.fixture",
+						token: FAKE_OPERATOR_TOKEN,
+					},
+				],
+			},
+		};
+		let payload: unknown;
+
+		await expectSanitizedSecretRejection(() => {
+			payload = createRunAdmissionRecordedPayload(unsafeReceipt, {
+				receiptRef: "artifact://run-admission/unsafe",
+				willExecuteWorker: true,
+			});
+		}, [FAKE_OPERATOR_TOKEN]);
+		expect(payload).toBeUndefined();
 	});
 });
 
