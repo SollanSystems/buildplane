@@ -1,4 +1,4 @@
-//! Run lifecycle payloads: RunStarted, RunCompleted, RunFailed.
+//! Run lifecycle payloads: RunStarted, RunCompleted, RunFailed, RunAdmissionRecorded.
 
 use crate::id::{EventId, RunId};
 use crate::types::U64;
@@ -42,6 +42,85 @@ pub struct RunCompletedV1 {
 pub struct RunFailedV1 {
     pub reason: String,
     pub terminating_event_id: Option<EventId>,
+}
+
+/// `run_admission_recorded` payload — compact kernel-owned admission summary.
+///
+/// The full admission receipt is stored out-of-band and bound by
+/// `receipt_digest`/`receipt_ref`. This event repeats only the deterministic
+/// gating summary needed for inspection, replay, and dispatch decisions.
+#[typeshare]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RunAdmissionRecordedV1 {
+    /// Stable local receipt id for this admission attempt.
+    pub receipt_id: String,
+    /// Sha256 of canonical full receipt JSON, formatted as `sha256:<hex>`.
+    pub receipt_digest: String,
+    /// Optional CAS/artifact reference for the full receipt JSON.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt_ref: Option<String>,
+    /// Deterministic key over normalized admission inputs.
+    pub idempotency_key: String,
+    /// Final fail-closed admission decision.
+    pub decision: RunAdmissionDecision,
+    /// Policy/admission profile used to evaluate the request.
+    pub policy_profile_id: String,
+    /// Side effects requested by the run/unit.
+    pub requested_side_effects: Vec<String>,
+    /// Explicitly granted side effects for the admitted scope.
+    pub allowed_side_effects: Vec<String>,
+    /// Requested side effects denied by policy, preserved for review.
+    pub denied_side_effects: Vec<RunAdmissionDeniedSideEffectV1>,
+    /// Required evidence that was absent, stale, or unreadable.
+    pub missing_evidence: Vec<String>,
+    /// Requested authority that made the attempt unsafe.
+    pub unsafe_requests: Vec<String>,
+    /// Local deterministic evidence inputs considered by admission.
+    pub evidence_inputs: Vec<RunAdmissionEvidenceInputV1>,
+    /// Whether the admitted bundle/worktree/artifacts remain quarantined.
+    pub quarantine: bool,
+    /// True only for live PASS admission after durable append/flush succeeds.
+    pub will_execute_worker: bool,
+    /// Next step authorized by this receipt, if any.
+    pub authorized_next_step: String,
+    /// Kernel/policy authority that produced the decision.
+    pub decided_by: String,
+    /// Decision timestamp captured in the full receipt.
+    pub decided_at: String,
+}
+
+/// Closed admission decision vocabulary.
+#[typeshare]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum RunAdmissionDecision {
+    Pass,
+    Blocked,
+    Failed,
+    InsufficientEvidence,
+    UnsafeToRun,
+}
+
+/// Requested side effect denied by policy with a human-readable reason.
+#[typeshare]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunAdmissionDeniedSideEffectV1 {
+    pub effect: String,
+    pub reason: String,
+}
+
+/// Deterministic evidence input considered by run admission.
+#[typeshare]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunAdmissionEvidenceInputV1 {
+    pub kind: String,
+    pub reference: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub digest: Option<String>,
+    pub required: bool,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 #[typeshare]

@@ -42,6 +42,7 @@ export enum EventKind {
 	RunStarted = "run_started",
 	RunCompleted = "run_completed",
 	RunFailed = "run_failed",
+	RunAdmissionRecorded = "run_admission_recorded",
 	UnitStarted = "unit_started",
 	UnitCompleted = "unit_completed",
 	UnitFailed = "unit_failed",
@@ -156,6 +157,75 @@ export interface ModelResponseV1 {
 	usage: Usage;
 	stop_reason: string;
 	latency_ms: number;
+}
+
+/** Requested side effect denied by policy with a human-readable reason. */
+export interface RunAdmissionDeniedSideEffectV1 {
+	effect: string;
+	reason: string;
+}
+
+/** Deterministic evidence input considered by run admission. */
+export interface RunAdmissionEvidenceInputV1 {
+	kind: string;
+	reference: string;
+	digest?: string;
+	required: boolean;
+	status: string;
+	reason?: string;
+}
+
+/** Closed admission decision vocabulary. */
+export enum RunAdmissionDecision {
+	Pass = "PASS",
+	Blocked = "BLOCKED",
+	Failed = "FAILED",
+	InsufficientEvidence = "INSUFFICIENT_EVIDENCE",
+	UnsafeToRun = "UNSAFE_TO_RUN",
+}
+
+/**
+ * `run_admission_recorded` payload — compact kernel-owned admission summary.
+ *
+ * The full admission receipt is stored out-of-band and bound by
+ * `receipt_digest`/`receipt_ref`. This event repeats only the deterministic
+ * gating summary needed for inspection, replay, and dispatch decisions.
+ */
+export interface RunAdmissionRecordedV1 {
+	/** Stable local receipt id for this admission attempt. */
+	receipt_id: string;
+	/** Sha256 of canonical full receipt JSON, formatted as `sha256:<hex>`. */
+	receipt_digest: string;
+	/** Optional CAS/artifact reference for the full receipt JSON. */
+	receipt_ref?: string;
+	/** Deterministic key over normalized admission inputs. */
+	idempotency_key: string;
+	/** Final fail-closed admission decision. */
+	decision: RunAdmissionDecision;
+	/** Policy/admission profile used to evaluate the request. */
+	policy_profile_id: string;
+	/** Side effects requested by the run/unit. */
+	requested_side_effects: string[];
+	/** Explicitly granted side effects for the admitted scope. */
+	allowed_side_effects: string[];
+	/** Requested side effects denied by policy, preserved for review. */
+	denied_side_effects: RunAdmissionDeniedSideEffectV1[];
+	/** Required evidence that was absent, stale, or unreadable. */
+	missing_evidence: string[];
+	/** Requested authority that made the attempt unsafe. */
+	unsafe_requests: string[];
+	/** Local deterministic evidence inputs considered by admission. */
+	evidence_inputs: RunAdmissionEvidenceInputV1[];
+	/** Whether the admitted bundle/worktree/artifacts remain quarantined. */
+	quarantine: boolean;
+	/** True only for live PASS admission after durable append/flush succeeds. */
+	will_execute_worker: boolean;
+	/** Next step authorized by this receipt, if any. */
+	authorized_next_step: string;
+	/** Kernel/policy authority that produced the decision. */
+	decided_by: string;
+	/** Decision timestamp captured in the full receipt. */
+	decided_at: string;
 }
 
 export enum RunOutcome {

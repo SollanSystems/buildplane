@@ -21,7 +21,9 @@ pub fn apply(state: &mut ReplayState, event: &Event) {
         Payload::UnitFailedV1(p) => apply_unit_failed(state, event, p),
         Payload::UnitCancelledV1(p) => apply_unit_cancelled(state, event, p),
         Payload::GitCheckpointV1(p) => apply_git_checkpoint(state, event, p),
-        Payload::ModelRequestV1(_) | Payload::ModelResponseV1(_) => {}
+        Payload::RunAdmissionRecordedV1(_)
+        | Payload::ModelRequestV1(_)
+        | Payload::ModelResponseV1(_) => {}
         Payload::ToolRequestStoredV1(p) => apply_tool_request(state, event, p),
         Payload::ToolResultV1(p) => apply_tool_result(state, event, p),
         Payload::WorkspaceReadV1(_) => {}

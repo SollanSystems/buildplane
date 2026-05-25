@@ -24,7 +24,6 @@ pub enum SignatureAlgorithm {
 }
 
 /// Explicit verification state for a ledger event read from the tape.
-#[typeshare]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VerificationStatus {
