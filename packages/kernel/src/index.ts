@@ -18,6 +18,7 @@ export type {
 	RunAdmissionReceiptArtifactWriteInput,
 	RunAdmissionReceiptAttemptRecord,
 	RunAdmissionRecordedEvent,
+	RunAdmissionRecordedEvidenceInput,
 	RunAdmissionRecordedPayload,
 	RunAdmissionRecordedReplay,
 	RunAdmissionReplay,

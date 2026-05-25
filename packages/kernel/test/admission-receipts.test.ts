@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
+import { recordRunAdmissionReceiptAttemptSync } from "../src/admission-receipts";
 import {
 	type CreateRunAdmissionReceiptDryRunInput,
 	createRunAdmissionReceiptDryRun,
@@ -560,7 +561,15 @@ describe("createRunAdmissionRecordedPayload", () => {
 		expect(
 			dispatchPayload.denied_side_effects.map(({ effect }) => effect),
 		).toEqual(["git.push:remote", "github.pr.create", "deploy:production"]);
-		expect(dispatchPayload.evidence_inputs).toEqual(receipt.evidence_inputs);
+		expect(dispatchPayload.evidence_inputs).toEqual(
+			receipt.evidence_inputs.map((evidence) => ({
+				kind: evidence.kind,
+				reference: evidence.ref,
+				digest: evidence.digest,
+				required: evidence.required,
+				status: evidence.status,
+			})),
+		);
 	});
 
 	it("fails closed for insufficient evidence even when dispatch is requested", () => {
@@ -610,6 +619,55 @@ describe("createRunAdmissionRecordedPayload", () => {
 		]);
 		expect(payload.quarantine).toBe(true);
 		expect(payload.will_execute_worker).toBe(false);
+	});
+
+	it("summarizes evidence inputs using the native ledger contract shape", () => {
+		const receipt = createRunAdmissionReceiptDryRun(
+			admissionInputFromFixture(loadFixture("pass")),
+		);
+		const receiptWithNullableDigestEvidence: RunAdmissionReceipt = {
+			...receipt,
+			evidence_inputs: receipt.evidence_inputs.map((evidence, index) =>
+				index === 0
+					? {
+							...evidence,
+							digest: null,
+							metadata: {
+								ignored_by_compact_ledger_summary: true,
+							},
+						}
+					: evidence,
+			),
+		};
+
+		const payload = createRunAdmissionRecordedPayload(
+			receiptWithNullableDigestEvidence,
+			{
+				receiptRef: "artifact://run-admission/pass",
+				willExecuteWorker: false,
+			},
+		);
+		const firstEvidence = payload.evidence_inputs[0] as JsonRecord;
+		const secondEvidence = payload.evidence_inputs[1] as JsonRecord;
+
+		expect(firstEvidence).toEqual({
+			kind: "git.status",
+			reference: "fixture://bp1/pass/git-status-preflight",
+			required: true,
+			status: "present",
+		});
+		expect(firstEvidence).not.toHaveProperty("ref");
+		expect(firstEvidence).not.toHaveProperty("digest");
+		expect(firstEvidence).not.toHaveProperty("metadata");
+		expect(secondEvidence).toMatchObject({
+			kind: "git.rev-parse",
+			reference: "fixture://bp1/pass/rev-parse-head",
+			digest:
+				"sha256:625d2e818ec1d05cd2e691cd3f18fb4b6d4afe1d6770472b9cdcbb989589dbbd",
+			required: true,
+			status: "present",
+		});
+		expect(secondEvidence).not.toHaveProperty("ref");
 	});
 
 	it("rejects credential-shaped receipt values without leaking the raw value", async () => {
@@ -722,6 +780,47 @@ describe("recordRunAdmissionReceiptAttempt", () => {
 		expect(record.payload.receipt_digest).toBe(persistedDigest);
 		expect(record.event.payload.receipt_digest).toBe(persistedDigest);
 		expect(receiptDigest(receipt)).not.toBe(persistedDigest);
+		expect(readFileSync(record.receipt_path, "utf8").trim()).toBe(
+			record.receipt_json,
+		);
+		expectNoForbiddenSideEffects(store);
+	});
+
+	it.each([
+		["async", recordRunAdmissionReceiptAttempt],
+		["sync", recordRunAdmissionReceiptAttemptSync],
+	] as const)("keeps %s recorded dispatch authority bound to the persisted receipt snapshot", async (_mode, recordAttempt) => {
+		const receipt = createRunAdmissionReceiptDryRun(
+			admissionInputFromFixture(loadFixture("pass")),
+		);
+		const persistedDigest = receiptDigest(receipt);
+		const baseStore = createTempEvidenceStore();
+		const store: ReturnType<typeof createTempEvidenceStore> = {
+			...baseStore,
+			writeReceiptArtifact: vi.fn((input) => {
+				const result = baseStore.writeReceiptArtifact(input);
+				const mutableReceipt = input.receipt as unknown as {
+					admission: {
+						will_execute_worker: boolean;
+						authorized_next_step: string;
+					};
+				};
+				mutableReceipt.admission.will_execute_worker = true;
+				mutableReceipt.admission.authorized_next_step = "dispatch_worker";
+				return result;
+			}),
+		};
+
+		const record = await recordAttempt({ receipt, store });
+
+		expect(record.receipt_digest).toBe(persistedDigest);
+		expect(record.payload.receipt_digest).toBe(persistedDigest);
+		expect(record.payload.will_execute_worker).toBe(false);
+		expect(record.payload.authorized_next_step).toBe("record_admission_only");
+		expect(record.event.payload.will_execute_worker).toBe(false);
+		expect(record.event.payload.authorized_next_step).toBe(
+			"record_admission_only",
+		);
 		expect(readFileSync(record.receipt_path, "utf8").trim()).toBe(
 			record.receipt_json,
 		);
