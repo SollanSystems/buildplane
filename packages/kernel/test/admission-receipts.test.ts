@@ -3,9 +3,13 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { recordRunAdmissionReceiptAttemptSync } from "../src/admission-receipts";
+import {
+	createRunAdmissionReceiptLive,
+	recordRunAdmissionReceiptAttemptSync,
+} from "../src/admission-receipts";
 import {
 	type CreateRunAdmissionReceiptDryRunInput,
+	type CreateRunAdmissionRecordedPayloadOptions,
 	createRunAdmissionReceiptDryRun,
 	createRunAdmissionRecordedPayload,
 	type JsonRecord,
@@ -506,14 +510,9 @@ describe("createRunAdmissionRecordedPayload", () => {
 		const receipt = createRunAdmissionReceiptDryRun(
 			admissionInputFromFixture(loadFixture("pass")),
 		);
-		const dispatchReadyReceipt: RunAdmissionReceipt = {
-			...receipt,
-			admission: {
-				...receipt.admission,
-				will_execute_worker: true,
-				authorized_next_step: "dispatch_worker",
-			},
-		};
+		const dispatchReadyReceipt = createRunAdmissionReceiptLive(
+			admissionInputFromFixture(loadFixture("pass")),
+		);
 
 		const dryRunDispatchAttempt = createRunAdmissionRecordedPayload(receipt, {
 			receiptRef: "artifact://run-admission/dry-run-pass",
@@ -536,6 +535,9 @@ describe("createRunAdmissionRecordedPayload", () => {
 
 		expect(dryRunDispatchAttempt.will_execute_worker).toBe(false);
 		expect(recordOnlyPayload.will_execute_worker).toBe(false);
+		expect(recordOnlyPayload.authorized_next_step).toBe(
+			"record_admission_only",
+		);
 		expect(dispatchPayload).toMatchObject({
 			receipt_id: receipt.receipt_id,
 			receipt_digest: receiptDigest(dispatchReadyReceipt),
@@ -569,6 +571,208 @@ describe("createRunAdmissionRecordedPayload", () => {
 				required: evidence.required,
 				status: evidence.status,
 			})),
+		);
+	});
+
+	it("fails closed for dry-run-derived receipts with forged dispatch fields", () => {
+		const receipt = createRunAdmissionReceiptDryRun(
+			admissionInputFromFixture(loadFixture("pass")),
+		);
+		const forgedDispatchReceipt: RunAdmissionReceipt = {
+			...receipt,
+			admission: {
+				...receipt.admission,
+				will_execute_worker: true,
+				authorized_next_step: "dispatch_worker",
+			},
+		};
+
+		const payload = createRunAdmissionRecordedPayload(forgedDispatchReceipt, {
+			receiptRef: "artifact://run-admission/forged-dry-run",
+			willExecuteWorker: true,
+		});
+
+		expect(payload.decision).toBe("PASS");
+		expect(payload.will_execute_worker).toBe(false);
+		expect(payload.authorized_next_step).toBe("record_admission_only");
+
+		const serializedLiveReceipt = JSON.parse(
+			JSON.stringify(
+				createRunAdmissionReceiptLive(
+					admissionInputFromFixture(loadFixture("pass")),
+				),
+			),
+		) as RunAdmissionReceipt;
+		const serializedLivePayload = createRunAdmissionRecordedPayload(
+			serializedLiveReceipt,
+			{
+				receiptRef: "artifact://run-admission/serialized-live",
+				willExecuteWorker: true,
+			},
+		);
+
+		expect(serializedLivePayload.will_execute_worker).toBe(false);
+		expect(serializedLivePayload.authorized_next_step).toBe(
+			"record_admission_only",
+		);
+
+		const trustedLiveReceipt = createRunAdmissionReceiptLive(
+			admissionInputFromFixture(loadFixture("pass")),
+		);
+		const copiedAuthorityReceipt: RunAdmissionReceipt = {
+			...receipt,
+			admission: {
+				...receipt.admission,
+				will_execute_worker: true,
+				authorized_next_step: "dispatch_worker",
+			},
+		};
+		for (const key of Object.getOwnPropertySymbols(trustedLiveReceipt)) {
+			Object.defineProperty(
+				copiedAuthorityReceipt,
+				key,
+				Object.getOwnPropertyDescriptor(trustedLiveReceipt, key) ?? {
+					value: true,
+				},
+			);
+		}
+
+		const copiedAuthorityPayload = createRunAdmissionRecordedPayload(
+			copiedAuthorityReceipt,
+			{
+				receiptRef: "artifact://run-admission/copied-authority",
+				willExecuteWorker: true,
+			},
+		);
+
+		expect(copiedAuthorityPayload.will_execute_worker).toBe(false);
+		expect(copiedAuthorityPayload.authorized_next_step).toBe(
+			"record_admission_only",
+		);
+
+		const copiedAuthorityRecord = recordRunAdmissionReceiptAttemptSync({
+			receipt: copiedAuthorityReceipt,
+			store: createTempEvidenceStore(),
+		});
+		expect(copiedAuthorityRecord.payload.will_execute_worker).toBe(false);
+		expect(copiedAuthorityRecord.payload.authorized_next_step).toBe(
+			"record_admission_only",
+		);
+
+		const proxyOptions = new Proxy<CreateRunAdmissionRecordedPayloadOptions>(
+			{
+				receiptRef: "artifact://run-admission/proxy-authority",
+				willExecuteWorker: true,
+			},
+			{
+				get(target, property, receiver) {
+					if (typeof property === "symbol") {
+						return true;
+					}
+					return Reflect.get(target, property, receiver);
+				},
+			},
+		);
+		const proxyAuthorityPayload = createRunAdmissionRecordedPayload(
+			forgedDispatchReceipt,
+			proxyOptions,
+		);
+		expect(proxyAuthorityPayload.will_execute_worker).toBe(false);
+		expect(proxyAuthorityPayload.authorized_next_step).toBe(
+			"record_admission_only",
+		);
+
+		const inheritedAuthorityReceipt = Object.create(
+			trustedLiveReceipt,
+		) as RunAdmissionReceipt;
+		Object.defineProperty(inheritedAuthorityReceipt, "admission", {
+			value: {
+				...trustedLiveReceipt.admission,
+				decision: "PASS",
+				will_execute_worker: true,
+				authorized_next_step: "dispatch_worker",
+				missing_evidence: [],
+				unsafe_requests: [],
+			},
+			enumerable: true,
+		});
+
+		const inheritedAuthorityPayload = createRunAdmissionRecordedPayload(
+			inheritedAuthorityReceipt,
+			{
+				receiptRef: "artifact://run-admission/inherited-authority",
+				willExecuteWorker: true,
+			},
+		);
+
+		expect(inheritedAuthorityPayload.will_execute_worker).toBe(false);
+		expect(inheritedAuthorityPayload.authorized_next_step).toBe(
+			"record_admission_only",
+		);
+
+		const inheritedAuthorityRecordReceipt = {
+			...trustedLiveReceipt,
+			admission: {
+				...trustedLiveReceipt.admission,
+				decision: "PASS" as const,
+				will_execute_worker: true,
+				authorized_next_step: "dispatch_worker",
+				missing_evidence: [],
+				unsafe_requests: [],
+			},
+		} as RunAdmissionReceipt;
+		Object.setPrototypeOf(inheritedAuthorityRecordReceipt, trustedLiveReceipt);
+		const inheritedAuthorityRecord = recordRunAdmissionReceiptAttemptSync({
+			receipt: inheritedAuthorityRecordReceipt,
+			store: createTempEvidenceStore(),
+		});
+		expect(inheritedAuthorityRecord.payload.will_execute_worker).toBe(false);
+		expect(inheritedAuthorityRecord.payload.authorized_next_step).toBe(
+			"record_admission_only",
+		);
+	});
+
+	it("keeps trusted live receipts immutable before dispatch authority is recorded", () => {
+		const unsafeReceipt = createRunAdmissionReceiptLive(
+			admissionInputFromFixture(loadFixture("unsafe-to-run")),
+		);
+		try {
+			const mutableReceipt = unsafeReceipt as unknown as {
+				admission: {
+					decision: RunAdmissionDecision;
+					will_execute_worker: boolean;
+					authorized_next_step: string;
+					unsafe_requests: string[];
+				};
+				policy: { quarantine: boolean };
+			};
+			mutableReceipt.admission.decision = "PASS";
+			mutableReceipt.admission.will_execute_worker = true;
+			mutableReceipt.admission.authorized_next_step = "dispatch_worker";
+			mutableReceipt.admission.unsafe_requests = [];
+			mutableReceipt.policy.quarantine = false;
+		} catch {
+			// Frozen trusted receipts may reject mutation attempts at runtime.
+		}
+
+		const payload = createRunAdmissionRecordedPayload(unsafeReceipt, {
+			receiptRef: "artifact://run-admission/trusted-live-unsafe",
+			willExecuteWorker: true,
+		});
+		const record = recordRunAdmissionReceiptAttemptSync({
+			receipt: unsafeReceipt,
+			store: createTempEvidenceStore(),
+		});
+
+		expect(payload.decision).toBe("UNSAFE_TO_RUN");
+		expect(payload.will_execute_worker).toBe(false);
+		expect(payload.authorized_next_step).toBe(
+			"freeze_and_require_explicit_release_authority",
+		);
+		expect(record.payload.decision).toBe("UNSAFE_TO_RUN");
+		expect(record.payload.will_execute_worker).toBe(false);
+		expect(record.payload.authorized_next_step).toBe(
+			"freeze_and_require_explicit_release_authority",
 		);
 	});
 
