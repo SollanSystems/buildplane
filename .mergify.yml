@@ -1,9 +1,6 @@
-# Mergify configuration — https://docs.mergify.com/configuration/file-format/
-# Auto-merge is owned by Mergify. A pull request labeled `buildplane:auto-merge`
-# lands automatically once the `safe-to-merge` protection's success_conditions pass.
-# There is no local validator in the installed CLI build; the Mergify GitHub App
-# posts a `Configuration check` on the PR that opens this file.
-
+# Managed Mergify policy: label-gated auto-queue for reviewed green PRs.
+# The opt-in label intentionally stays aligned with Buildplane's local
+# auto-merge eligibility/opt-in tooling.
 merge_protections_settings:
   auto_merge_conditions:
     - label = buildplane:auto-merge
@@ -11,15 +8,45 @@ merge_protections_settings:
   reporting_method: check-runs
 
 merge_protections:
-  - name: safe-to-merge
-    description: >-
-      No major issues — required CI and secret scan are green, the branch has no
-      conflicts, it is not a draft, and no reviewer has requested changes.
+  - name: require reviewed green PRs on main
     if:
       - base = main
-    success_conditions:
+    success_conditions: &reviewed_green_conditions
+      - "#approved-reviews-by >= 1"
       - check-success = verify
+      - check-success = Analyze (javascript-typescript)
       - check-success = GitGuardian Security Checks
       - -conflict
       - -draft
       - "#changes-requested-reviews-by = 0"
+
+merge_queue:
+  mode: serial
+  max_parallel_checks: 1
+  status_comments: outcomes
+  queued_label: queued
+  dequeued_label: dequeued
+
+queue_rules:
+  - name: hotfix
+    queue_conditions:
+      - base = main
+      - label = buildplane:auto-merge
+      - label = hotfix
+    merge_conditions: *reviewed_green_conditions
+    merge_method: squash
+    batch_size: 1
+  - name: default
+    queue_conditions:
+      - base = main
+      - label = buildplane:auto-merge
+    merge_conditions: *reviewed_green_conditions
+    merge_method: squash
+    batch_size: 1
+
+priority_rules:
+  - name: hotfix priority
+    conditions:
+      - label = hotfix
+    priority: high
+    allow_checks_interruption: false
