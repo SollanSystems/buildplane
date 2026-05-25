@@ -1,41 +1,52 @@
 # Managed Mergify policy: label-gated auto-queue for reviewed green PRs.
+# The opt-in label intentionally stays aligned with Buildplane's local
+# auto-merge eligibility/opt-in tooling.
 merge_protections_settings:
   auto_merge_conditions:
-  - label = ready-to-merge
+    - label = buildplane:auto-merge
+    - base = main
   reporting_method: check-runs
+
 merge_protections:
-- name: require reviewed green PRs on main
-  if:
-  - base = main
-  success_conditions: &id001
-  - '#approved-reviews-by >= 1'
-  - check-success = verify
-  - check-success = Analyze (javascript-typescript)
+  - name: require reviewed green PRs on main
+    if:
+      - base = main
+    success_conditions: &reviewed_green_conditions
+      - "#approved-reviews-by >= 1"
+      - check-success = verify
+      - check-success = Analyze (javascript-typescript)
+      - check-success = GitGuardian Security Checks
+      - -conflict
+      - -draft
+      - "#changes-requested-reviews-by = 0"
+
 merge_queue:
   mode: serial
   max_parallel_checks: 1
   status_comments: outcomes
   queued_label: queued
   dequeued_label: dequeued
+
 queue_rules:
-- name: hotfix
-  queue_conditions:
-  - base = main
-  - label = ready-to-merge
-  - label = hotfix
-  merge_conditions: *id001
-  merge_method: squash
-  batch_size: 1
-- name: default
-  queue_conditions:
-  - base = main
-  - label = ready-to-merge
-  merge_conditions: *id001
-  merge_method: squash
-  batch_size: 1
+  - name: hotfix
+    queue_conditions:
+      - base = main
+      - label = buildplane:auto-merge
+      - label = hotfix
+    merge_conditions: *reviewed_green_conditions
+    merge_method: squash
+    batch_size: 1
+  - name: default
+    queue_conditions:
+      - base = main
+      - label = buildplane:auto-merge
+    merge_conditions: *reviewed_green_conditions
+    merge_method: squash
+    batch_size: 1
+
 priority_rules:
-- name: hotfix priority
-  conditions:
-  - label = hotfix
-  priority: high
-  allow_checks_interruption: false
+  - name: hotfix priority
+    conditions:
+      - label = hotfix
+    priority: high
+    allow_checks_interruption: false
