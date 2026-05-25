@@ -7,6 +7,7 @@
 merge_protections_settings:
   auto_merge_conditions:
     - label = buildplane:auto-merge
+    - base = main
   reporting_method: check-runs
 
 merge_protections:
