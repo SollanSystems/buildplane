@@ -697,6 +697,37 @@ describe("recordRunAdmissionReceiptAttempt", () => {
 		expectNoForbiddenSideEffects(store);
 	});
 
+	it("preserves the persisted artifact digest if a store mutates the receipt during write", async () => {
+		const receipt = createRunAdmissionReceiptDryRun(
+			admissionInputFromFixture(loadFixture("pass")),
+		);
+		const persistedDigest = receiptDigest(receipt);
+		const baseStore = createTempEvidenceStore();
+		const store: ReturnType<typeof createTempEvidenceStore> = {
+			...baseStore,
+			writeReceiptArtifact: vi.fn((input) => {
+				const result = baseStore.writeReceiptArtifact(input);
+				(
+					receipt.replay as unknown as {
+						behavior: string;
+					}
+				).behavior = "mutated by receipt artifact store";
+				return result;
+			}),
+		};
+
+		const record = await recordRunAdmissionReceiptAttempt({ receipt, store });
+
+		expect(record.receipt_digest).toBe(persistedDigest);
+		expect(record.payload.receipt_digest).toBe(persistedDigest);
+		expect(record.event.payload.receipt_digest).toBe(persistedDigest);
+		expect(receiptDigest(receipt)).not.toBe(persistedDigest);
+		expect(readFileSync(record.receipt_path, "utf8").trim()).toBe(
+			record.receipt_json,
+		);
+		expectNoForbiddenSideEffects(store);
+	});
+
 	it("rejects credential-shaped receipt values before writing artifacts or events", async () => {
 		const safeReceipt = createRunAdmissionReceiptDryRun(
 			admissionInputFromFixture(loadFixture("pass")),

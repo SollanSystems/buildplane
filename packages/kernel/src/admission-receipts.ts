@@ -176,6 +176,7 @@ export interface RunAdmissionEventAppendInput {
 
 export interface CreateRunAdmissionRecordedPayloadOptions {
 	readonly receiptRef?: string | null;
+	readonly receiptDigest?: string;
 	readonly willExecuteWorker?: boolean;
 }
 
@@ -741,7 +742,8 @@ export function createRunAdmissionRecordedPayload(
 	options: CreateRunAdmissionRecordedPayloadOptions = {},
 ): RunAdmissionRecordedPayload {
 	assertNoCredentialShapedValues(receipt, "receipt");
-	const receiptDigest = createReceiptDigest(stableJson(receipt));
+	const receiptDigest =
+		options.receiptDigest ?? createReceiptDigest(stableJson(receipt));
 	const payload = createRecordedPayload({
 		receipt,
 		receiptDigest,
@@ -938,6 +940,7 @@ export function recordRunAdmissionReceiptAttemptSync(
 		);
 	}
 	const payload = createRunAdmissionRecordedPayload(input.receipt, {
+		receiptDigest,
 		receiptRef: receiptArtifact.ref,
 		willExecuteWorker: input.receipt.admission.will_execute_worker,
 	});
@@ -982,6 +985,7 @@ export async function recordRunAdmissionReceiptAttempt(
 		contents: receiptJson,
 	});
 	const payload = createRunAdmissionRecordedPayload(input.receipt, {
+		receiptDigest,
 		receiptRef: receiptArtifact.ref,
 		willExecuteWorker: input.receipt.admission.will_execute_worker,
 	});
