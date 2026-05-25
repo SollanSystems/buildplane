@@ -1,5 +1,12 @@
 # Buildplane Auto-Merge Executor
 
+> **RETIRED (2026-05-24).** Auto-merge is now owned by Mergify via `.mergify.yml`
+> (`merge_protections` + label-gated `buildplane:auto-merge`). The executor's
+> merge path has been removed so it cannot race Mergify — running
+> `pr-auto-merge-execute.mjs` directly now refuses and exits non-zero. The
+> exported helpers and the read-only `auto-merge:eligibility` probe remain.
+> The sections below describe the historical behavior prior to retirement.
+
 ## Purpose
 
 `pr-auto-merge-execute.mjs` is the narrow mutating merge executor for Buildplane PR auto-merge. It performs a GitHub PR merge ONLY after a fresh eligibility receipt proves `AUTO_MERGE_READY`.
