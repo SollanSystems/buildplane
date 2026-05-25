@@ -9,6 +9,7 @@ import type {
 	GitCheckpointV1,
 	ModelRequestV1,
 	ModelResponseV1,
+	RunAdmissionRecordedV1,
 	RunCompletedV1,
 	RunFailedV1,
 	RunStartedV1,
@@ -27,6 +28,7 @@ export type Payload =
 	| { RunStartedV1: RunStartedV1 }
 	| { RunCompletedV1: RunCompletedV1 }
 	| { RunFailedV1: RunFailedV1 }
+	| { RunAdmissionRecordedV1: RunAdmissionRecordedV1 }
 	| { UnitStartedV1: UnitStartedV1 }
 	| { UnitCompletedV1: UnitCompletedV1 }
 	| { UnitFailedV1: UnitFailedV1 }

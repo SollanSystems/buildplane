@@ -15,6 +15,7 @@ pub enum EventKind {
     RunStarted,
     RunCompleted,
     RunFailed,
+    RunAdmissionRecorded,
     // Unit lifecycle
     UnitStarted,
     UnitCompleted,
@@ -40,6 +41,7 @@ impl EventKind {
             Self::RunStarted => "run_started",
             Self::RunCompleted => "run_completed",
             Self::RunFailed => "run_failed",
+            Self::RunAdmissionRecorded => "run_admission_recorded",
             Self::UnitStarted => "unit_started",
             Self::UnitCompleted => "unit_completed",
             Self::UnitFailed => "unit_failed",
@@ -69,6 +71,7 @@ mod tests {
     fn as_wire_matches_serde_output() {
         for kind in [
             EventKind::RunStarted, EventKind::RunCompleted, EventKind::RunFailed,
+            EventKind::RunAdmissionRecorded,
             EventKind::UnitStarted, EventKind::UnitCompleted, EventKind::UnitFailed,
             EventKind::UnitCancelled, EventKind::GitCheckpoint,
             EventKind::ModelRequest, EventKind::ModelResponse,

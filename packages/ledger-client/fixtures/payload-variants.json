@@ -24,6 +24,35 @@
 		}
 	},
 	{
+		"RunAdmissionRecordedV1": {
+			"allowed_side_effects": ["fs.write:declared_scope"],
+			"authorized_next_step": "dispatch_after_admission_append",
+			"decided_at": "2026-05-24T22:41:16Z",
+			"decided_by": "buildplane.kernel.admission",
+			"decision": "PASS",
+			"denied_side_effects": [],
+			"evidence_inputs": [
+				{
+					"digest": "sha256:bb",
+					"kind": "git.status",
+					"reference": "evidence/git-status.txt",
+					"required": true,
+					"status": "present"
+				}
+			],
+			"idempotency_key": "run.admission:v0:fixture",
+			"missing_evidence": [],
+			"policy_profile_id": "reviewed-green",
+			"quarantine": false,
+			"receipt_digest": "sha256:aa",
+			"receipt_id": "receipt-fixture",
+			"receipt_ref": "cas:sha256:aa",
+			"requested_side_effects": ["fs.write:declared_scope"],
+			"unsafe_requests": [],
+			"will_execute_worker": true
+		}
+	},
+	{
 		"UnitStartedV1": {
 			"parent_unit_id": null,
 			"policy": {},
