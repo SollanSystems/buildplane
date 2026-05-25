@@ -1,3 +1,24 @@
+# Mergify configuration — https://docs.mergify.com/configuration/file-format/
+# Auto-merge is owned by Mergify. A pull request labeled `buildplane:auto-merge`
+# lands automatically once the `safe-to-merge` protection's success_conditions pass.
+# There is no local validator in the installed CLI build; the Mergify GitHub App
+# posts a `Configuration check` on the PR that opens this file.
+
 merge_protections_settings:
-  auto_merge_conditions: true
+  auto_merge_conditions:
+    - label = buildplane:auto-merge
   reporting_method: check-runs
+
+merge_protections:
+  - name: safe-to-merge
+    description: >-
+      No major issues — required CI and secret scan are green, the branch has no
+      conflicts, it is not a draft, and no reviewer has requested changes.
+    if:
+      - base = main
+    success_conditions:
+      - check-success = verify
+      - check-success = GitGuardian Security Checks
+      - -conflict
+      - -draft
+      - "#changes-requested-reviews-by = 0"
