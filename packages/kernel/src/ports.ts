@@ -1,4 +1,4 @@
-import type { EventBus } from "./events.js";
+import type { EventBus, ExecutionEvent } from "./events.js";
 import type {
 	ProcedureRetrievalQuery,
 	RankedProcedureResult,
@@ -150,6 +150,10 @@ export interface BuildplaneStoragePort {
 	listInjectedMemories(runId: string): readonly PersistedInjectedMemoryRecord[];
 	getStatusSnapshot(): StatusSnapshot;
 	inspectTarget(id: string): InspectSnapshot;
+	listEvents(options: {
+		runId: string;
+		limit?: number;
+	}): readonly ExecutionEvent[];
 }
 
 export interface BuildplaneRuntimePort {

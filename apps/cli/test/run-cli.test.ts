@@ -22,6 +22,7 @@ import { evaluateRun } from "@buildplane/policy";
 import { executePacket } from "@buildplane/runtime";
 import {
 	createBuildplaneStorage,
+	createEventStore,
 	createLearningStore,
 	resolveProjectLayout,
 } from "@buildplane/storage";
@@ -4903,6 +4904,99 @@ describe("cli command surface", () => {
 		expect(JSON.parse(result.stdout.join("\n"))).toMatchObject({
 			error: { message: expect.stringContaining("--task-type") },
 		});
+	});
+
+	it("memory episodes lists a run's events as json and human output", async () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-cli-episodes-"));
+		const storage = createBuildplaneStorage(root);
+		storage.initializeProject();
+		const eventStore = createEventStore(root);
+		eventStore.persistEvent("run-x", {
+			kind: "run-created",
+			runId: "run-x",
+			unitId: "unit-x",
+			status: "pending",
+			timestamp: "2026-03-17T00:00:00.000Z",
+		});
+		eventStore.persistEvent("run-x", {
+			kind: "run-started",
+			runId: "run-x",
+			unitId: "unit-x",
+			status: "running",
+			timestamp: "2026-03-17T00:00:01.000Z",
+		});
+
+		const jsonResult = await runCliCapture(root, [
+			"memory",
+			"episodes",
+			"run-x",
+			"--json",
+		]);
+		expect(jsonResult.exitCode).toBe(0);
+		const events = JSON.parse(jsonResult.stdout.join("\n"));
+		expect(events.map((e: { kind: string }) => e.kind)).toEqual([
+			"run-created",
+			"run-started",
+		]);
+
+		const humanResult = await runCliCapture(root, [
+			"memory",
+			"episodes",
+			"run-x",
+		]);
+		expect(humanResult.exitCode).toBe(0);
+		expect(humanResult.stdout.join("\n")).toContain("run-created");
+		expect(humanResult.stdout.join("\n")).toContain("run-started");
+	});
+
+	it("memory episodes caps the output with --limit", async () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-cli-episodes-limit-"));
+		const storage = createBuildplaneStorage(root);
+		storage.initializeProject();
+		const eventStore = createEventStore(root);
+		for (let i = 0; i < 3; i++) {
+			eventStore.persistEvent("run-x", {
+				kind: "model-token-delta",
+				runId: "run-x",
+				delta: `t${i}`,
+				timestamp: `2026-03-17T00:00:0${i}.000Z`,
+			});
+		}
+
+		const result = await runCliCapture(root, [
+			"memory",
+			"episodes",
+			"run-x",
+			"--limit",
+			"1",
+			"--json",
+		]);
+		expect(result.exitCode).toBe(0);
+		const events = JSON.parse(result.stdout.join("\n"));
+		expect(events).toHaveLength(1);
+		expect(events[0].timestamp).toBe("2026-03-17T00:00:02.000Z");
+	});
+
+	it("memory episodes requires a runId argument", async () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-cli-episodes-norun-"));
+		const storage = createBuildplaneStorage(root);
+		storage.initializeProject();
+
+		const result = await runCliCapture(root, ["memory", "episodes", "--json"]);
+		expect(result.exitCode).toBe(1);
+		expect(JSON.parse(result.stdout.join("\n"))).toMatchObject({
+			error: { message: expect.stringContaining("runId") },
+		});
+	});
+
+	it("memory episodes on a run with no events prints the empty state", async () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-cli-episodes-empty-"));
+		const storage = createBuildplaneStorage(root);
+		storage.initializeProject();
+
+		const result = await runCliCapture(root, ["memory", "episodes", "run-x"]);
+		expect(result.exitCode).toBe(0);
+		expect(result.stdout.join("\n")).toContain("No events found.");
 	});
 });
 
