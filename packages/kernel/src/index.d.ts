@@ -1,5 +1,6 @@
 export type {
 	CreateRunAdmissionReceiptDryRunInput,
+	CreateRunAdmissionRecordedPayloadOptions,
 	JsonRecord,
 	JsonValue,
 	RecordRunAdmissionReceiptAttemptInput,
@@ -17,6 +18,7 @@ export type {
 	RunAdmissionReceiptArtifactWriteInput,
 	RunAdmissionReceiptAttemptRecord,
 	RunAdmissionRecordedEvent,
+	RunAdmissionRecordedEvidenceInput,
 	RunAdmissionRecordedPayload,
 	RunAdmissionRecordedReplay,
 	RunAdmissionReplay,
@@ -25,6 +27,7 @@ export type {
 } from "./admission-receipts.ts";
 export {
 	createRunAdmissionReceiptDryRun,
+	createRunAdmissionRecordedPayload,
 	RunAdmissionReceiptInputError,
 	recordRunAdmissionReceiptAttempt,
 } from "./admission-receipts.ts";

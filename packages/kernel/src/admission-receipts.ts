@@ -15,6 +15,9 @@ export type JsonValue =
 	| { readonly [key: string]: JsonValue };
 export type JsonRecord = { readonly [key: string]: JsonValue };
 
+const trustedRunAdmissionDispatchReceipts = new WeakSet<RunAdmissionReceipt>();
+const trustedRunAdmissionDispatchOptions = new WeakSet<object>();
+
 export interface RunAdmissionEvidenceInput extends JsonRecord {
 	readonly kind: string;
 	readonly ref: string;
@@ -133,6 +136,15 @@ export interface RunAdmissionRecordedReplay extends JsonRecord {
 	readonly fork: string;
 }
 
+export interface RunAdmissionRecordedEvidenceInput extends JsonRecord {
+	readonly kind: string;
+	readonly reference: string;
+	readonly digest?: string;
+	readonly required: boolean;
+	readonly status: string;
+	readonly reason?: string;
+}
+
 export interface RunAdmissionRecordedPayload extends JsonRecord {
 	readonly receipt_id: string;
 	readonly receipt_digest: string;
@@ -147,7 +159,7 @@ export interface RunAdmissionRecordedPayload extends JsonRecord {
 	readonly denied_side_effects: readonly RunAdmissionDeniedSideEffect[];
 	readonly missing_evidence: readonly string[];
 	readonly unsafe_requests: readonly string[];
-	readonly evidence_inputs: readonly RunAdmissionEvidenceInput[];
+	readonly evidence_inputs: readonly RunAdmissionRecordedEvidenceInput[];
 	readonly quarantine: boolean;
 	readonly will_execute_worker: boolean;
 	readonly authorized_next_step: string;
@@ -172,6 +184,12 @@ export interface RunAdmissionReceiptArtifactWriteInput {
 export interface RunAdmissionEventAppendInput {
 	readonly event: RunAdmissionRecordedEvent;
 	readonly receipt: RunAdmissionReceipt;
+}
+
+export interface CreateRunAdmissionRecordedPayloadOptions {
+	readonly receiptRef?: string | null;
+	readonly receiptDigest?: string;
+	readonly willExecuteWorker?: boolean;
 }
 
 export interface RunAdmissionLocalEvidenceWriteResult {
@@ -684,6 +702,59 @@ function stringRecordValue(record: JsonRecord, key: string): string {
 	return typeof value === "string" && value.length > 0 ? value : "unknown";
 }
 
+function createRecordedEvidenceInput(
+	evidence: RunAdmissionEvidenceInput,
+): RunAdmissionRecordedEvidenceInput {
+	return {
+		kind: evidence.kind,
+		reference: evidence.ref,
+		...(typeof evidence.digest === "string" ? { digest: evidence.digest } : {}),
+		required: evidence.required,
+		status: evidence.status,
+		...(typeof evidence.reason === "string" ? { reason: evidence.reason } : {}),
+	};
+}
+
+function deepFreezeObject<T>(value: T, seen = new WeakSet<object>()): T {
+	if (typeof value !== "object" || value === null) {
+		return value;
+	}
+	if (seen.has(value)) {
+		return value;
+	}
+	seen.add(value);
+	for (const key of Reflect.ownKeys(value)) {
+		deepFreezeObject(Reflect.get(value, key), seen);
+	}
+	return Object.freeze(value);
+}
+
+function markTrustedRunAdmissionDispatchReceipt(
+	receipt: RunAdmissionReceipt,
+): RunAdmissionReceipt {
+	trustedRunAdmissionDispatchReceipts.add(receipt);
+	return deepFreezeObject(receipt);
+}
+
+function hasTrustedRunAdmissionDispatchReceipt(
+	receipt: RunAdmissionReceipt,
+): boolean {
+	return trustedRunAdmissionDispatchReceipts.has(receipt);
+}
+
+function hasTrustedRunAdmissionDispatchOption(
+	options: CreateRunAdmissionRecordedPayloadOptions,
+): boolean {
+	return trustedRunAdmissionDispatchOptions.has(options);
+}
+
+function markTrustedRunAdmissionDispatchOption<
+	T extends CreateRunAdmissionRecordedPayloadOptions,
+>(options: T): T {
+	trustedRunAdmissionDispatchOptions.add(options);
+	return options;
+}
+
 function createRecordedPayload(input: {
 	readonly receipt: RunAdmissionReceipt;
 	readonly receiptDigest: string;
@@ -706,13 +777,77 @@ function createRecordedPayload(input: {
 		denied_side_effects: cloneJson(receipt.policy.denied_side_effects),
 		missing_evidence: cloneJson(receipt.admission.missing_evidence),
 		unsafe_requests: cloneJson(receipt.admission.unsafe_requests),
-		evidence_inputs: cloneJson(receipt.evidence_inputs),
+		evidence_inputs: receipt.evidence_inputs.map(createRecordedEvidenceInput),
 		quarantine: receipt.policy.quarantine,
 		will_execute_worker: receipt.admission.will_execute_worker,
 		authorized_next_step: receipt.admission.authorized_next_step,
 		decided_by: receipt.admission.decided_by,
 		decided_at: receipt.admission.decided_at,
 	};
+}
+
+function shouldExecuteWorkerFromRecordedPayloadInput(input: {
+	readonly receipt: RunAdmissionReceipt;
+	readonly requestedWillExecuteWorker?: boolean;
+	readonly trustedDispatchAuthority: boolean;
+}): boolean {
+	const { receipt, requestedWillExecuteWorker, trustedDispatchAuthority } =
+		input;
+	return (
+		trustedDispatchAuthority === true &&
+		requestedWillExecuteWorker === true &&
+		receipt.admission.will_execute_worker === true &&
+		receipt.admission.authorized_next_step === "dispatch_worker" &&
+		receipt.admission.decision === "PASS" &&
+		receipt.policy.quarantine === false &&
+		receipt.admission.missing_evidence.length === 0 &&
+		receipt.admission.unsafe_requests.length === 0
+	);
+}
+
+function createSafeRecordedAuthorizedNextStep(input: {
+	readonly receipt: RunAdmissionReceipt;
+	readonly willExecuteWorker: boolean;
+}): string {
+	const { receipt, willExecuteWorker } = input;
+	if (willExecuteWorker) {
+		return "dispatch_worker";
+	}
+	if (receipt.admission.authorized_next_step === "dispatch_worker") {
+		return "record_admission_only";
+	}
+	return receipt.admission.authorized_next_step;
+}
+
+export function createRunAdmissionRecordedPayload(
+	receipt: RunAdmissionReceipt,
+	options: CreateRunAdmissionRecordedPayloadOptions = {},
+): RunAdmissionRecordedPayload {
+	assertNoCredentialShapedValues(receipt, "receipt");
+	const receiptDigest =
+		options.receiptDigest ?? createReceiptDigest(stableJson(receipt));
+	const payload = createRecordedPayload({
+		receipt,
+		receiptDigest,
+		receiptRef: options.receiptRef ?? null,
+	});
+	const willExecuteWorker = shouldExecuteWorkerFromRecordedPayloadInput({
+		receipt,
+		requestedWillExecuteWorker: options.willExecuteWorker,
+		trustedDispatchAuthority:
+			hasTrustedRunAdmissionDispatchReceipt(receipt) ||
+			hasTrustedRunAdmissionDispatchOption(options),
+	});
+	const safePayload: RunAdmissionRecordedPayload = {
+		...payload,
+		will_execute_worker: willExecuteWorker,
+		authorized_next_step: createSafeRecordedAuthorizedNextStep({
+			receipt,
+			willExecuteWorker,
+		}),
+	};
+	assertNoCredentialShapedValues(safePayload, "payload");
+	return safePayload;
 }
 
 interface CreateRunAdmissionReceiptOptions {
@@ -863,10 +998,12 @@ export function createRunAdmissionReceiptDryRun(
 export function createRunAdmissionReceiptLive(
 	input: CreateRunAdmissionReceiptDryRunInput,
 ): RunAdmissionReceipt {
-	return createRunAdmissionReceipt(input, {
-		willExecuteWorker: true,
-		authorizedNextStep: "dispatch_worker",
-	});
+	return markTrustedRunAdmissionDispatchReceipt(
+		createRunAdmissionReceipt(input, {
+			willExecuteWorker: true,
+			authorizedNextStep: "dispatch_worker",
+		}),
+	);
 }
 
 function isPromiseLike<T>(value: unknown): value is Promise<T> {
@@ -878,14 +1015,30 @@ function isPromiseLike<T>(value: unknown): value is Promise<T> {
 	);
 }
 
+function cloneRunAdmissionReceiptSnapshot(
+	receipt: RunAdmissionReceipt,
+): RunAdmissionReceipt {
+	return cloneJson(receipt);
+}
+
+function cloneRunAdmissionRecordedEvent(
+	event: RunAdmissionRecordedEvent,
+): RunAdmissionRecordedEvent {
+	return cloneJson(event);
+}
+
 export function recordRunAdmissionReceiptAttemptSync(
 	input: RecordRunAdmissionReceiptAttemptInput,
 ): RunAdmissionReceiptAttemptRecord {
-	assertNoCredentialShapedValues(input.receipt, "receipt");
-	const receiptJson = stableJson(input.receipt);
+	const trustedDispatchAuthority = hasTrustedRunAdmissionDispatchReceipt(
+		input.receipt,
+	);
+	const receiptSnapshot = cloneRunAdmissionReceiptSnapshot(input.receipt);
+	assertNoCredentialShapedValues(receiptSnapshot, "receipt");
+	const receiptJson = stableJson(receiptSnapshot);
 	const receiptDigest = createReceiptDigest(receiptJson);
 	const receiptArtifact = input.store.writeReceiptArtifact({
-		receipt: input.receipt,
+		receipt: cloneRunAdmissionReceiptSnapshot(receiptSnapshot),
 		receiptDigest,
 		contents: receiptJson,
 	});
@@ -894,22 +1047,28 @@ export function recordRunAdmissionReceiptAttemptSync(
 			"Synchronous run admission requires a synchronous receipt artifact store.",
 		);
 	}
-	const payload = createRecordedPayload({
-		receipt: input.receipt,
+	const payloadOptions = {
 		receiptDigest,
 		receiptRef: receiptArtifact.ref,
-	});
+		willExecuteWorker: receiptSnapshot.admission.will_execute_worker,
+	};
+	const payload = createRunAdmissionRecordedPayload(
+		receiptSnapshot,
+		trustedDispatchAuthority
+			? markTrustedRunAdmissionDispatchOption(payloadOptions)
+			: payloadOptions,
+	);
 	const event: RunAdmissionRecordedEvent = {
 		kind: "run_admission_recorded",
 		schema_version: "0.1.0",
-		recorded_at: input.recordedAt ?? input.receipt.admission.decided_at,
+		recorded_at: input.recordedAt ?? receiptSnapshot.admission.decided_at,
 		payload,
-		replay: createRecordedReplay(input.receipt),
+		replay: createRecordedReplay(receiptSnapshot),
 	};
 	assertNoCredentialShapedValues(event, "event");
 	const eventWrite = input.store.appendAdmissionEvent({
-		event,
-		receipt: input.receipt,
+		event: cloneRunAdmissionRecordedEvent(event),
+		receipt: cloneRunAdmissionReceiptSnapshot(receiptSnapshot),
 	});
 	if (isPromiseLike<RunAdmissionLocalEvidenceWriteResult>(eventWrite)) {
 		throw new Error(
@@ -931,30 +1090,40 @@ export function recordRunAdmissionReceiptAttemptSync(
 export async function recordRunAdmissionReceiptAttempt(
 	input: RecordRunAdmissionReceiptAttemptInput,
 ): Promise<RunAdmissionReceiptAttemptRecord> {
-	assertNoCredentialShapedValues(input.receipt, "receipt");
-	const receiptJson = stableJson(input.receipt);
+	const trustedDispatchAuthority = hasTrustedRunAdmissionDispatchReceipt(
+		input.receipt,
+	);
+	const receiptSnapshot = cloneRunAdmissionReceiptSnapshot(input.receipt);
+	assertNoCredentialShapedValues(receiptSnapshot, "receipt");
+	const receiptJson = stableJson(receiptSnapshot);
 	const receiptDigest = createReceiptDigest(receiptJson);
 	const receiptArtifact = await input.store.writeReceiptArtifact({
-		receipt: input.receipt,
+		receipt: cloneRunAdmissionReceiptSnapshot(receiptSnapshot),
 		receiptDigest,
 		contents: receiptJson,
 	});
-	const payload = createRecordedPayload({
-		receipt: input.receipt,
+	const payloadOptions = {
 		receiptDigest,
 		receiptRef: receiptArtifact.ref,
-	});
+		willExecuteWorker: receiptSnapshot.admission.will_execute_worker,
+	};
+	const payload = createRunAdmissionRecordedPayload(
+		receiptSnapshot,
+		trustedDispatchAuthority
+			? markTrustedRunAdmissionDispatchOption(payloadOptions)
+			: payloadOptions,
+	);
 	const event: RunAdmissionRecordedEvent = {
 		kind: "run_admission_recorded",
 		schema_version: "0.1.0",
-		recorded_at: input.recordedAt ?? input.receipt.admission.decided_at,
+		recorded_at: input.recordedAt ?? receiptSnapshot.admission.decided_at,
 		payload,
-		replay: createRecordedReplay(input.receipt),
+		replay: createRecordedReplay(receiptSnapshot),
 	};
 	assertNoCredentialShapedValues(event, "event");
 	const eventAppend = await input.store.appendAdmissionEvent({
-		event,
-		receipt: input.receipt,
+		event: cloneRunAdmissionRecordedEvent(event),
+		receipt: cloneRunAdmissionReceiptSnapshot(receiptSnapshot),
 	});
 	return {
 		receipt_json: receiptJson,

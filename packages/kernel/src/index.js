@@ -1,5 +1,6 @@
 import {
 	createRunAdmissionReceiptDryRun as createRunAdmissionReceiptDryRunImpl,
+	createRunAdmissionRecordedPayload as createRunAdmissionRecordedPayloadImpl,
 	RunAdmissionReceiptInputError as RunAdmissionReceiptInputErrorImpl,
 	recordRunAdmissionReceiptAttempt as recordRunAdmissionReceiptAttemptImpl,
 } from "./admission-receipts.ts";
@@ -21,6 +22,9 @@ export const createBuildplaneOrchestrator = createBuildplaneOrchestratorImpl;
 /** @type {typeof import('./admission-receipts.ts').createRunAdmissionReceiptDryRun} */
 export const createRunAdmissionReceiptDryRun =
 	createRunAdmissionReceiptDryRunImpl;
+/** @type {typeof import('./admission-receipts.ts').createRunAdmissionRecordedPayload} */
+export const createRunAdmissionRecordedPayload =
+	createRunAdmissionRecordedPayloadImpl;
 /** @type {typeof import('./admission-receipts.ts').RunAdmissionReceiptInputError} */
 export const RunAdmissionReceiptInputError = RunAdmissionReceiptInputErrorImpl;
 /** @type {typeof import('./admission-receipts.ts').recordRunAdmissionReceiptAttempt} */
