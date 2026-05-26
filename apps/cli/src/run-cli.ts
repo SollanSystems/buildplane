@@ -1426,6 +1426,31 @@ async function loadReadOnlyMemoryPort(
 	return undefined;
 }
 
+type MemoryListPortLike = Pick<
+	import("@buildplane/kernel").BuildplaneStoragePort,
+	"listRepoFacts" | "listProcedures"
+>;
+
+async function loadStoragePort(
+	projectRoot: string,
+): Promise<MemoryListPortLike | undefined> {
+	try {
+		const { resolveProjectLayout, createBuildplaneStorage } = (await import(
+			"@buildplane/storage"
+		)) as unknown as {
+			resolveProjectLayout: (root: string) => { stateDbPath: string };
+			createBuildplaneStorage: (root: string) => MemoryListPortLike;
+		};
+		const layout = resolveProjectLayout(projectRoot);
+		if (existsSync(layout.stateDbPath)) {
+			return createBuildplaneStorage(projectRoot);
+		}
+	} catch {
+		// Storage port unavailable (pre-cold-path project)
+	}
+	return undefined;
+}
+
 interface VerifiedMemoryPromotionRecord {
 	readonly memoryType: "repo-fact";
 	readonly factKey: string;
