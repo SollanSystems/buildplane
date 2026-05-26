@@ -92,7 +92,8 @@ describe("wrapAsStrategy", () => {
 		expect(rev.packet.model?.prompt).toContain("Write a hello world script");
 		expect(rev.packet.model?.provider).toBe("anthropic");
 		expect(rev.packet.verification.requiredOutputs).toEqual([]);
-		expect(rev.packet.intent).toBeUndefined();
+		expect(rev.packet.intent?.taskType).toBe("review");
+		expect(rev.packet.intent?.objective).toContain("Write a hello world script");
 	});
 
 	it("wraps a command packet with a file-check reviewer", () => {

@@ -69,6 +69,10 @@ function buildModelReviewer(packet: PacketLike): PacketLike {
 			),
 			prompt: `Review the implementer output and determine whether the objective was satisfied: ${objective}`,
 		},
+		intent: {
+			objective: `Review whether the implementer satisfied: ${objective}`,
+			taskType: "review",
+		},
 		verification: { requiredOutputs: [] },
 		routingHints: packet.routingHints,
 	};
