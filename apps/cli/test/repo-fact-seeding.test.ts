@@ -64,7 +64,11 @@ describe("seedRepoFactsFromInspection", () => {
 		const port = fakePort();
 		const seeded = seedRepoFactsFromInspection(
 			port,
-			{ primaryLanguage: "typescript", testRunner: "", buildCommand: undefined },
+			{
+				primaryLanguage: "typescript",
+				testRunner: "",
+				buildCommand: undefined,
+			},
 			{},
 		);
 		expect(port.upsertRepoFact).toHaveBeenCalledTimes(1);

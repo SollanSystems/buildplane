@@ -87,7 +87,10 @@ import {
 	publishPrCheckOperation,
 	publishPrCommentOperation,
 } from "./pr-check.js";
-import { detectRepoSignals, seedRepoFactsFromInspection } from "./repo-fact-seeding.js";
+import {
+	detectRepoSignals,
+	seedRepoFactsFromInspection,
+} from "./repo-fact-seeding.js";
 import { createOtelTraceExport } from "./trace-export.js";
 import { scanWorkflowPreview } from "./workflow-scan.js";
 
@@ -3358,9 +3361,7 @@ export async function runCli(
 					);
 				}
 				const json = seenSeedFlags.has("--json");
-				const storage = (await cliImport(
-					"@buildplane/storage",
-				)) as unknown as {
+				const storage = (await cliImport("@buildplane/storage")) as unknown as {
 					createBuildplaneStorage: (
 						root: string,
 					) => Pick<BuildplaneStoragePort, "upsertRepoFact">;
