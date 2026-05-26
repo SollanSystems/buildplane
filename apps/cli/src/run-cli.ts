@@ -3624,6 +3624,34 @@ export async function runCli(
 				}
 				return 0;
 			}
+			if (subcommand === "procedures") {
+				const subRest = rest.slice(1);
+				const json = subRest.includes("--json");
+				const taskTypeIdx = subRest.indexOf("--task-type");
+				const taskType =
+					taskTypeIdx >= 0 && taskTypeIdx + 1 < subRest.length
+						? subRest[taskTypeIdx + 1]
+						: undefined;
+				let procedures: ReturnType<MemoryListPortLike["listProcedures"]> = [];
+				try {
+					const storagePort = await loadStoragePort(cwd);
+					if (storagePort) {
+						procedures = storagePort.listProcedures(
+							taskType ? { taskType } : undefined,
+						);
+					}
+				} catch {
+					// Database may lack the procedures table
+				}
+				if (json) {
+					stdout(formatJson(procedures));
+				} else {
+					for (const line of formatProceduresList(procedures)) {
+						stdout(line);
+					}
+				}
+				return 0;
+			}
 			// Fall through to native for all other memory subcommands
 			try {
 				return await (deps?.runNativeCommand ?? runNativeCommand)(rest, {

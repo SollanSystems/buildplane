@@ -4599,6 +4599,34 @@ describe("cli command surface", () => {
 		expect(result.exitCode).toBe(0);
 		expect(result.stdout.join("\n")).toContain("No repo facts found.");
 	});
+
+	it("memory procedures lists procedures filtered by --task-type", async () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-cli-procs-"));
+		const storage = createBuildplaneStorage(root);
+		storage.initializeProject();
+		storage.createProcedure({
+			name: "How to review a PR",
+			taskType: "review",
+			bodyMarkdown: "1. read the diff",
+			createdBy: "system",
+		});
+
+		const jsonResult = await runCliCapture(root, [
+			"memory",
+			"procedures",
+			"--task-type",
+			"review",
+			"--json",
+		]);
+		expect(jsonResult.exitCode).toBe(0);
+		const procs = JSON.parse(jsonResult.stdout.join("\n"));
+		expect(
+			procs.some((p: { name: string }) => p.name === "How to review a PR"),
+		).toBe(true);
+
+		const humanResult = await runCliCapture(root, ["memory", "procedures"]);
+		expect(humanResult.stdout.join("\n")).toContain("How to review a PR");
+	});
 });
 
 describe("planforge dry-run", () => {
