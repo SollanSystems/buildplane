@@ -4568,6 +4568,37 @@ describe("cli command surface", () => {
 		expect(request).not.toHaveBeenCalled();
 		expect(credentialReads).toEqual([]);
 	});
+
+	it("memory facts lists repo.* facts as json and human output", async () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-cli-facts-"));
+		const storage = createBuildplaneStorage(root);
+		storage.initializeProject();
+		storage.upsertRepoFact({
+			factKey: "repo.test-runner",
+			factValue: "vitest --run",
+			valueType: "string",
+			scopeType: "repo",
+			createdBy: "system",
+		});
+
+		const jsonResult = await runCliCapture(root, ["memory", "facts", "--json"]);
+		expect(jsonResult.exitCode).toBe(0);
+		const facts = JSON.parse(jsonResult.stdout.join("\n"));
+		expect(
+			facts.some((f: { factKey: string }) => f.factKey === "repo.test-runner"),
+		).toBe(true);
+
+		const humanResult = await runCliCapture(root, ["memory", "facts"]);
+		expect(humanResult.stdout.join("\n")).toContain("repo.test-runner");
+		expect(humanResult.stdout.join("\n")).toContain("vitest --run");
+	});
+
+	it("memory facts on an uninitialized project prints the empty state", async () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-cli-facts-empty-"));
+		const result = await runCliCapture(root, ["memory", "facts"]);
+		expect(result.exitCode).toBe(0);
+		expect(result.stdout.join("\n")).toContain("No repo facts found.");
+	});
 });
 
 describe("planforge dry-run", () => {

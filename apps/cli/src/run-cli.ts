@@ -45,6 +45,8 @@ import {
 	formatJsonError,
 	formatLearningDetail,
 	formatLearningsList,
+	formatProceduresList,
+	formatRepoFactsList,
 	formatRunHistory,
 	formatRunResult,
 	formatStrategyRunResult,
@@ -3587,6 +3589,36 @@ export async function runCli(
 					stdout(formatJson(learning));
 				} else {
 					for (const line of formatLearningDetail(learning)) {
+						stdout(line);
+					}
+				}
+				return 0;
+			}
+			if (subcommand === "facts") {
+				const subRest = rest.slice(1);
+				const json = subRest.includes("--json");
+				const scopeIdx = subRest.indexOf("--scope");
+				const scopeType =
+					scopeIdx >= 0 && scopeIdx + 1 < subRest.length
+						? (subRest[
+								scopeIdx + 1
+							] as import("@buildplane/kernel").MemoryScopeType)
+						: undefined;
+				let facts: ReturnType<MemoryListPortLike["listRepoFacts"]> = [];
+				try {
+					const storagePort = await loadStoragePort(cwd);
+					if (storagePort) {
+						facts = storagePort.listRepoFacts(
+							scopeType ? { scopeType } : undefined,
+						);
+					}
+				} catch {
+					// Database may lack the repo_facts table
+				}
+				if (json) {
+					stdout(formatJson(facts));
+				} else {
+					for (const line of formatRepoFactsList(facts)) {
 						stdout(line);
 					}
 				}
