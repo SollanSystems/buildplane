@@ -4159,21 +4159,6 @@ export async function runCli(
 				const packet = deps?.parsePacket
 					? deps.parsePacket(packetPath)
 					: await loadPacket(packetPath);
-				const { preparePacketMemoryEnrichment } =
-					await loadPacketEnrichmentModule();
-				const preparedPacket = await preparePacketMemoryEnrichment(
-					packet,
-					memoryPort,
-					honchoAdapter,
-					userId,
-					structuredMemoryPort,
-					currentBranch,
-				);
-				const enrichedPacket = preparedPacket.packet;
-				const packetUnitId =
-					(enrichedPacket as { unit?: { id?: string } }).unit?.id ??
-					(packet as { unit?: { id?: string } }).unit?.id ??
-					"";
 
 				const useRaw = rest.includes("--raw");
 				const useJson = rest.includes("--json");
@@ -4181,8 +4166,18 @@ export async function runCli(
 				// ── Strategy path (default) ──────────────────────────────
 				if (!useRaw) {
 					const { wrapAsStrategy } = await import("./strategy-wrapper.js");
+					const { prepareStrategyMemoryEnrichment } =
+						await loadPacketEnrichmentModule();
 					const strategy = wrapAsStrategy(
-						enrichedPacket as Parameters<typeof wrapAsStrategy>[0],
+						packet as Parameters<typeof wrapAsStrategy>[0],
+					);
+					const preparedStrategy = await prepareStrategyMemoryEnrichment(
+						strategy as unknown as Record<string, unknown>,
+						memoryPort,
+						honchoAdapter,
+						userId,
+						structuredMemoryPort,
+						currentBranch,
 					);
 
 					const kernel = (await cliImport("@buildplane/kernel")) as unknown as {
@@ -4206,7 +4201,7 @@ export async function runCli(
 					}
 
 					const strategyResult = await orchestrator.runStrategy(
-						strategy,
+						preparedStrategy.strategy,
 						strategyBus,
 					);
 					const strategyTargets = collectStrategyRunTargets(
@@ -4223,9 +4218,7 @@ export async function runCli(
 					const injectedMemories = persistInjectedMemoriesForTargets(
 						structuredMemoryPort,
 						strategyTargets,
-						preparedPacket.injectedMemories.length > 0
-							? { [packetUnitId]: preparedPacket.injectedMemories }
-							: {},
+						preparedStrategy.injectedMemoriesByUnitId,
 						strategyResult.winnerRunId,
 					);
 					const strategyOutput =
@@ -4248,6 +4241,19 @@ export async function runCli(
 
 					return strategyResult.outcome === "passed" ? 0 : 1;
 				}
+
+				// Raw path enriches the single packet directly (no strategy children).
+				const { preparePacketMemoryEnrichment } =
+					await loadPacketEnrichmentModule();
+				const preparedPacket = await preparePacketMemoryEnrichment(
+					packet,
+					memoryPort,
+					honchoAdapter,
+					userId,
+					structuredMemoryPort,
+					currentBranch,
+				);
+				const enrichedPacket = preparedPacket.packet;
 
 				// ── Raw path (single-shot, backward compat) ─────────────
 				// Everything below is the EXISTING code, with ledger integration added
