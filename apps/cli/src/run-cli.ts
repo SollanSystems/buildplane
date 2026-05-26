@@ -46,6 +46,8 @@ import {
 	formatJsonError,
 	formatLearningDetail,
 	formatLearningsList,
+	formatProceduresList,
+	formatRepoFactsList,
 	formatRunHistory,
 	formatRunResult,
 	formatStrategyRunResult,
@@ -696,6 +698,8 @@ function formatTopLevelHelp(): string[] {
 		"    workspace cleanup <r>  Delete an actionable workspace by run id",
 		"    workflow scan [--json] Preview recognized Claude/Codex workflow files",
 		"    memory list            Show stored learnings",
+		"    memory facts           Show structured repo facts",
+		"    memory procedures      Show stored procedures",
 		"    memory inspect <id>    Detail for one learning",
 		"    memory <action>        Advanced memory operations (native)",
 		"    pack show <id>         Inspect a pack",
@@ -1427,6 +1431,65 @@ async function loadReadOnlyMemoryPort(
 		}
 	} catch {
 		// Memory port unavailable
+	}
+	return undefined;
+}
+
+type MemoryListPortLike = Pick<
+	import("@buildplane/kernel").BuildplaneStoragePort,
+	"listRepoFacts" | "listProcedures"
+>;
+
+function validateMemoryListOptions(
+	args: readonly string[],
+	options: { valued: readonly string[] },
+): { code: string; message: string } | undefined {
+	const valuedConsumesNext = new Set<number>();
+	for (const flag of options.valued) {
+		const flagIdx = args.indexOf(flag);
+		if (flagIdx < 0) {
+			continue;
+		}
+		const value = args[flagIdx + 1];
+		if (value === undefined || value.startsWith("--")) {
+			return {
+				code: "MISSING_ARGUMENT",
+				message: `Missing value for ${flag}.`,
+			};
+		}
+		valuedConsumesNext.add(flagIdx + 1);
+	}
+	const unsupported = args.filter((arg, index) => {
+		if (arg === "--json" || options.valued.includes(arg)) {
+			return false;
+		}
+		return !valuedConsumesNext.has(index);
+	});
+	if (unsupported.length > 0) {
+		return {
+			code: "UNSUPPORTED_ARGUMENTS",
+			message: `Unsupported arguments: ${unsupported.join(" ")}.`,
+		};
+	}
+	return undefined;
+}
+
+async function loadStoragePort(
+	projectRoot: string,
+): Promise<MemoryListPortLike | undefined> {
+	try {
+		const { resolveProjectLayout, createBuildplaneStorage } = (await import(
+			"@buildplane/storage"
+		)) as unknown as {
+			resolveProjectLayout: (root: string) => { stateDbPath: string };
+			createBuildplaneStorage: (root: string) => MemoryListPortLike;
+		};
+		const layout = resolveProjectLayout(projectRoot);
+		if (existsSync(layout.stateDbPath)) {
+			return createBuildplaneStorage(projectRoot);
+		}
+	} catch {
+		// Storage port unavailable (pre-cold-path project)
 	}
 	return undefined;
 }
@@ -3604,6 +3667,84 @@ export async function runCli(
 					stdout(formatJson(learning));
 				} else {
 					for (const line of formatLearningDetail(learning)) {
+						stdout(line);
+					}
+				}
+				return 0;
+			}
+			if (subcommand === "facts") {
+				const subRest = rest.slice(1);
+				const json = subRest.includes("--json");
+				const optionError = validateMemoryListOptions(subRest, {
+					valued: ["--scope"],
+				});
+				if (optionError) {
+					if (json) {
+						stdout(
+							formatJson(
+								formatJsonError(optionError.code, optionError.message),
+							),
+						);
+					} else {
+						stderr(optionError.message);
+					}
+					return 1;
+				}
+				const scopeIdx = subRest.indexOf("--scope");
+				const scopeType =
+					scopeIdx >= 0
+						? (subRest[
+								scopeIdx + 1
+							] as import("@buildplane/kernel").MemoryScopeType)
+						: undefined;
+				let facts: ReturnType<MemoryListPortLike["listRepoFacts"]> = [];
+				const storagePort = await loadStoragePort(cwd);
+				if (storagePort) {
+					facts = storagePort.listRepoFacts(
+						scopeType ? { scopeType } : undefined,
+					);
+				}
+				if (json) {
+					stdout(formatJson(facts));
+				} else {
+					for (const line of formatRepoFactsList(facts)) {
+						stdout(line);
+					}
+				}
+				return 0;
+			}
+			if (subcommand === "procedures") {
+				const subRest = rest.slice(1);
+				const json = subRest.includes("--json");
+				const optionError = validateMemoryListOptions(subRest, {
+					valued: ["--task-type"],
+				});
+				if (optionError) {
+					if (json) {
+						stdout(
+							formatJson(
+								formatJsonError(optionError.code, optionError.message),
+							),
+						);
+					} else {
+						stderr(optionError.message);
+					}
+					return 1;
+				}
+				const taskTypeIdx = subRest.indexOf("--task-type");
+				const taskType =
+					taskTypeIdx >= 0 ? subRest[taskTypeIdx + 1] : undefined;
+				let procedures: ReturnType<MemoryListPortLike["listProcedures"]> = [];
+				const storagePort = await loadStoragePort(cwd);
+				if (storagePort) {
+					procedures = storagePort.listProcedures(
+						taskType ? { taskType } : undefined,
+					);
+				}
+				if (json) {
+					stdout(formatJson(procedures));
+				} else {
+					for (const line of formatProceduresList(procedures)) {
 						stdout(line);
 					}
 				}

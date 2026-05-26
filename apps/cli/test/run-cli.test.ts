@@ -4612,6 +4612,146 @@ describe("cli command surface", () => {
 		expect(request).not.toHaveBeenCalled();
 		expect(credentialReads).toEqual([]);
 	});
+
+	it("memory facts lists repo.* facts as json and human output", async () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-cli-facts-"));
+		const storage = createBuildplaneStorage(root);
+		storage.initializeProject();
+		storage.upsertRepoFact({
+			factKey: "repo.test-runner",
+			factValue: "vitest --run",
+			valueType: "string",
+			scopeType: "repo",
+			createdBy: "system",
+		});
+
+		const jsonResult = await runCliCapture(root, ["memory", "facts", "--json"]);
+		expect(jsonResult.exitCode).toBe(0);
+		const facts = JSON.parse(jsonResult.stdout.join("\n"));
+		expect(
+			facts.some((f: { factKey: string }) => f.factKey === "repo.test-runner"),
+		).toBe(true);
+
+		const humanResult = await runCliCapture(root, ["memory", "facts"]);
+		expect(humanResult.stdout.join("\n")).toContain("repo.test-runner");
+		expect(humanResult.stdout.join("\n")).toContain("vitest --run");
+	});
+
+	it("memory facts on an uninitialized project prints the empty state", async () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-cli-facts-empty-"));
+		const result = await runCliCapture(root, ["memory", "facts"]);
+		expect(result.exitCode).toBe(0);
+		expect(result.stdout.join("\n")).toContain("No repo facts found.");
+	});
+
+	it("memory procedures lists procedures filtered by --task-type", async () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-cli-procs-"));
+		const storage = createBuildplaneStorage(root);
+		storage.initializeProject();
+		storage.createProcedure({
+			name: "How to review a PR",
+			taskType: "review",
+			bodyMarkdown: "1. read the diff",
+			createdBy: "system",
+		});
+
+		const jsonResult = await runCliCapture(root, [
+			"memory",
+			"procedures",
+			"--task-type",
+			"review",
+			"--json",
+		]);
+		expect(jsonResult.exitCode).toBe(0);
+		const procs = JSON.parse(jsonResult.stdout.join("\n"));
+		expect(
+			procs.some((p: { name: string }) => p.name === "How to review a PR"),
+		).toBe(true);
+
+		const humanResult = await runCliCapture(root, ["memory", "procedures"]);
+		expect(humanResult.stdout.join("\n")).toContain("How to review a PR");
+	});
+
+	it("memory facts surfaces a real storage error with a non-zero exit", async () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-cli-facts-corrupt-"));
+		const storage = createBuildplaneStorage(root);
+		storage.initializeProject();
+		const layout = resolveProjectLayout(root);
+		writeFileSync(layout.stateDbPath, "not a sqlite database");
+
+		const result = await runCliCapture(root, ["memory", "facts", "--json"]);
+		expect(result.exitCode).toBe(1);
+		const error = JSON.parse(result.stdout.join("\n"));
+		expect(error).toMatchObject({ error: { message: expect.any(String) } });
+	});
+
+	it("memory procedures surfaces a real storage error with a non-zero exit", async () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-cli-procs-corrupt-"));
+		const storage = createBuildplaneStorage(root);
+		storage.initializeProject();
+		const layout = resolveProjectLayout(root);
+		writeFileSync(layout.stateDbPath, "not a sqlite database");
+
+		const result = await runCliCapture(root, [
+			"memory",
+			"procedures",
+			"--json",
+		]);
+		expect(result.exitCode).toBe(1);
+		const error = JSON.parse(result.stdout.join("\n"));
+		expect(error).toMatchObject({ error: { message: expect.any(String) } });
+	});
+
+	it("memory procedures on an uninitialized project prints the empty state", async () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-cli-procs-empty-"));
+		const result = await runCliCapture(root, ["memory", "procedures"]);
+		expect(result.exitCode).toBe(0);
+		expect(result.stdout.join("\n")).toContain("No procedures found.");
+	});
+
+	it("memory facts rejects --scope without a value", async () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-cli-facts-scope-"));
+		const result = await runCliCapture(root, [
+			"memory",
+			"facts",
+			"--scope",
+			"--json",
+		]);
+		expect(result.exitCode).toBe(1);
+		expect(JSON.parse(result.stdout.join("\n"))).toMatchObject({
+			error: { message: expect.stringContaining("--scope") },
+		});
+	});
+
+	it("memory facts rejects unsupported flags", async () => {
+		const root = mkdtempSync(
+			join(tmpdir(), "buildplane-cli-facts-unsupported-"),
+		);
+		const result = await runCliCapture(root, [
+			"memory",
+			"facts",
+			"--bogus",
+			"--json",
+		]);
+		expect(result.exitCode).toBe(1);
+		expect(JSON.parse(result.stdout.join("\n"))).toMatchObject({
+			error: { message: expect.stringContaining("--bogus") },
+		});
+	});
+
+	it("memory procedures rejects --task-type without a value", async () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-cli-procs-task-"));
+		const result = await runCliCapture(root, [
+			"memory",
+			"procedures",
+			"--task-type",
+			"--json",
+		]);
+		expect(result.exitCode).toBe(1);
+		expect(JSON.parse(result.stdout.join("\n"))).toMatchObject({
+			error: { message: expect.stringContaining("--task-type") },
+		});
+	});
 });
 
 describe("planforge dry-run", () => {

@@ -1044,3 +1044,50 @@ export function formatLearningDetail(learning: StoredLearningLike): string[] {
 	lines.push(learning.body);
 	return lines;
 }
+
+interface RepoFactLike {
+	readonly factKey: string;
+	readonly scopeType: string;
+	readonly valueType: string;
+	readonly factValue: unknown;
+}
+
+export function formatRepoFactsList(facts: readonly RepoFactLike[]): string[] {
+	if (facts.length === 0) {
+		return ["No repo facts found."];
+	}
+	const lines: string[] = [];
+	lines.push(
+		`${"Key".padEnd(28)} ${"Scope".padEnd(10)} ${"Type".padEnd(8)} Value`,
+	);
+	lines.push("─".repeat(80));
+	for (const f of facts) {
+		lines.push(
+			`${f.factKey.padEnd(28)} ${f.scopeType.padEnd(10)} ${f.valueType.padEnd(8)} ${String(f.factValue)}`,
+		);
+	}
+	return lines;
+}
+
+interface ProcedureLike {
+	readonly id: string;
+	readonly taskType?: string;
+	readonly name: string;
+}
+
+export function formatProceduresList(
+	procedures: readonly ProcedureLike[],
+): string[] {
+	if (procedures.length === 0) {
+		return ["No procedures found."];
+	}
+	const lines: string[] = [];
+	lines.push(`${"ID".padEnd(12)} ${"Task Type".padEnd(16)} Name`);
+	lines.push("─".repeat(80));
+	for (const p of procedures) {
+		lines.push(
+			`${p.id.slice(0, 8).padEnd(12)} ${(p.taskType ?? "-").padEnd(16)} ${p.name}`,
+		);
+	}
+	return lines;
+}

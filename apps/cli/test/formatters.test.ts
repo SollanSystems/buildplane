@@ -5,6 +5,8 @@ import {
 	formatInspectorProjection,
 	formatLearningDetail,
 	formatLearningsList,
+	formatProceduresList,
+	formatRepoFactsList,
 	formatRunHistory,
 	formatRunResult,
 } from "../src/formatters.js";
@@ -631,5 +633,44 @@ describe("formatInspectDetail", () => {
 		);
 		expect(lines).toContain("Missing Evidence");
 		expect(lines.join("\n")).not.toContain("pytest failed\n");
+	});
+});
+
+describe("formatRepoFactsList", () => {
+	it("returns an empty-state line when there are no facts", () => {
+		expect(formatRepoFactsList([])).toEqual(["No repo facts found."]);
+	});
+
+	it("renders a header and one row per fact", () => {
+		const lines = formatRepoFactsList([
+			{
+				factKey: "repo.test-runner",
+				scopeType: "repo",
+				valueType: "string",
+				factValue: "vitest --run",
+			},
+		]);
+		expect(lines[0]).toContain("Key");
+		expect(lines[0]).toContain("Value");
+		expect(lines.some((l) => l.includes("repo.test-runner"))).toBe(true);
+		expect(lines.some((l) => l.includes("vitest --run"))).toBe(true);
+	});
+});
+
+describe("formatProceduresList", () => {
+	it("returns an empty-state line when there are no procedures", () => {
+		expect(formatProceduresList([])).toEqual(["No procedures found."]);
+	});
+
+	it("renders a header and one row per procedure", () => {
+		const lines = formatProceduresList([
+			{ id: "abcdef1234", taskType: "review", name: "How to review a PR" },
+			{ id: "99887766", taskType: undefined, name: "General cleanup" },
+		]);
+		expect(lines[0]).toContain("Name");
+		expect(lines.some((l) => l.includes("How to review a PR"))).toBe(true);
+		expect(lines.some((l) => l.includes("review"))).toBe(true);
+		// undefined taskType renders as a placeholder, not the string "undefined"
+		expect(lines.some((l) => l.includes("undefined"))).toBe(false);
 	});
 });
