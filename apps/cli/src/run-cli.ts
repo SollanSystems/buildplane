@@ -38,6 +38,7 @@ import {
 	createInspectorProjection,
 	formatBootstrapDoctorReport,
 	formatCapabilityReport,
+	formatEventsList,
 	formatHumanError,
 	formatInitializationResult,
 	formatInspectDetail,
@@ -1437,7 +1438,7 @@ async function loadReadOnlyMemoryPort(
 
 type MemoryListPortLike = Pick<
 	import("@buildplane/kernel").BuildplaneStoragePort,
-	"listRepoFacts" | "listProcedures"
+	"listRepoFacts" | "listProcedures" | "listEvents"
 >;
 
 function validateMemoryListOptions(
@@ -3745,6 +3746,64 @@ export async function runCli(
 					stdout(formatJson(procedures));
 				} else {
 					for (const line of formatProceduresList(procedures)) {
+						stdout(line);
+					}
+				}
+				return 0;
+			}
+			if (subcommand === "episodes") {
+				const subRest = rest.slice(1);
+				const json = subRest.includes("--json");
+				const runId = subRest.find((arg) => !arg.startsWith("--"));
+				const optionError = validateMemoryListOptions(
+					runId ? subRest.filter((arg) => arg !== runId) : subRest,
+					{ valued: ["--limit"] },
+				);
+				if (optionError) {
+					if (json) {
+						stdout(
+							formatJson(
+								formatJsonError(optionError.code, optionError.message),
+							),
+						);
+					} else {
+						stderr(optionError.message);
+					}
+					return 1;
+				}
+				if (!runId) {
+					const msg = "Missing required <runId> argument for memory episodes.";
+					if (json) {
+						stdout(formatJson(formatJsonError("MISSING_ARGUMENT", msg)));
+					} else {
+						stderr(msg);
+					}
+					return 1;
+				}
+				const limitIdx = subRest.indexOf("--limit");
+				const limitRaw = limitIdx >= 0 ? subRest[limitIdx + 1] : undefined;
+				const limit =
+					limitRaw !== undefined ? Number.parseInt(limitRaw, 10) : undefined;
+				if (limit !== undefined && (Number.isNaN(limit) || limit < 0)) {
+					const msg = `Invalid value for --limit: ${limitRaw}.`;
+					if (json) {
+						stdout(formatJson(formatJsonError("INVALID_ARGUMENT", msg)));
+					} else {
+						stderr(msg);
+					}
+					return 1;
+				}
+				let events: ReturnType<MemoryListPortLike["listEvents"]> = [];
+				const storagePort = await loadStoragePort(cwd);
+				if (storagePort) {
+					events = storagePort.listEvents(
+						limit !== undefined ? { runId, limit } : { runId },
+					);
+				}
+				if (json) {
+					stdout(formatJson(events));
+				} else {
+					for (const line of formatEventsList(events)) {
 						stdout(line);
 					}
 				}

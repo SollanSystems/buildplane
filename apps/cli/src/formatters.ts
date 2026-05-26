@@ -1069,6 +1069,29 @@ export function formatRepoFactsList(facts: readonly RepoFactLike[]): string[] {
 	return lines;
 }
 
+interface EventListItemLike {
+	readonly kind: string;
+	readonly runId: string;
+	readonly timestamp: string;
+}
+
+export function formatEventsList(
+	events: readonly EventListItemLike[],
+): string[] {
+	if (events.length === 0) {
+		return ["No events found."];
+	}
+	const lines: string[] = [];
+	lines.push(`${"Timestamp".padEnd(26)} ${"Kind".padEnd(28)} Run`);
+	lines.push("─".repeat(80));
+	for (const event of events) {
+		lines.push(
+			`${event.timestamp.padEnd(26)} ${event.kind.padEnd(28)} ${event.runId}`,
+		);
+	}
+	return lines;
+}
+
 interface ProcedureLike {
 	readonly id: string;
 	readonly taskType?: string;

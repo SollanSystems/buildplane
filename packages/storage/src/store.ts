@@ -10,6 +10,7 @@ import {
 	type CreateSearchableDocumentInput,
 	createRankedMemoryResult,
 	dedupeRankedMemoryResults,
+	type ExecutionEvent,
 	type ExecutionReceipt,
 	type InjectedMemoryRecord,
 	type InspectSnapshot,
@@ -41,6 +42,7 @@ import {
 	assertBuildplaneDatabaseIsInitialized,
 	openBuildplaneDatabase,
 } from "./database.js";
+import { createEventStore } from "./event-store.js";
 import { resolveProjectLayout } from "./project-layout.js";
 
 interface StoredRunRow {
@@ -3208,6 +3210,20 @@ export function createStorageStore(
 			} finally {
 				database.close();
 			}
+		},
+
+		listEvents(options: {
+			runId: string;
+			limit?: number;
+		}): readonly ExecutionEvent[] {
+			ensureInitialized();
+			const events = createEventStore(projectRoot).getEventsByRunId(
+				options.runId,
+			);
+			if (options.limit === undefined || options.limit >= events.length) {
+				return events;
+			}
+			return events.slice(events.length - options.limit);
 		},
 
 		getRunHistory(): RunHistoryEntry[] {
