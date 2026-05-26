@@ -1,5 +1,9 @@
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
+	detectRepoSignals,
 	REPO_FACT_KEYS,
 	seedRepoFactsFromInspection,
 } from "../src/repo-fact-seeding.js";
@@ -78,5 +82,48 @@ describe("seedRepoFactsFromInspection", () => {
 		expect(port.upsertRepoFact.mock.calls[0][0].factKey).toBe(
 			port.upsertRepoFact.mock.calls[1][0].factKey,
 		);
+	});
+});
+
+describe("detectRepoSignals", () => {
+	it("reads scripts from package.json and detects TypeScript via tsconfig", () => {
+		const root = mkdtempSync(join(tmpdir(), "bp-seed-"));
+		writeFileSync(
+			join(root, "package.json"),
+			JSON.stringify({
+				scripts: {
+					test: "vitest --run",
+					build: "tsc --build",
+					typecheck: "tsc --noEmit",
+					lint: "biome check",
+				},
+			}),
+		);
+		writeFileSync(join(root, "tsconfig.json"), "{}");
+
+		expect(detectRepoSignals(root)).toEqual({
+			primaryLanguage: "typescript",
+			testRunner: "vitest --run",
+			buildCommand: "tsc --build",
+			typecheckCommand: "tsc --noEmit",
+			lintCommand: "biome check",
+		});
+	});
+
+	it("returns javascript and omits missing scripts when no tsconfig", () => {
+		const root = mkdtempSync(join(tmpdir(), "bp-seed-"));
+		writeFileSync(
+			join(root, "package.json"),
+			JSON.stringify({ scripts: { test: "node --test" } }),
+		);
+		const signals = detectRepoSignals(root);
+		expect(signals.primaryLanguage).toBe("javascript");
+		expect(signals.testRunner).toBe("node --test");
+		expect(signals.buildCommand).toBeUndefined();
+	});
+
+	it("returns empty signals when there is no package.json", () => {
+		const root = mkdtempSync(join(tmpdir(), "bp-seed-"));
+		expect(detectRepoSignals(root)).toEqual({});
 	});
 });

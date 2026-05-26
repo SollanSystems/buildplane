@@ -1,3 +1,5 @@
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import type { BuildplaneStoragePort, RepoFact } from "@buildplane/kernel";
 
 export const REPO_FACT_KEYS = {
@@ -58,4 +60,26 @@ export function seedRepoFactsFromInspection(
 		);
 	}
 	return seeded;
+}
+
+export function detectRepoSignals(projectRoot: string): RepoSignals {
+	const pkgPath = join(projectRoot, "package.json");
+	if (!existsSync(pkgPath)) {
+		return {};
+	}
+	let pkg: { scripts?: Record<string, string> };
+	try {
+		pkg = JSON.parse(readFileSync(pkgPath, "utf8"));
+	} catch {
+		return {};
+	}
+	const scripts = pkg.scripts ?? {};
+	const hasTsconfig = existsSync(join(projectRoot, "tsconfig.json"));
+	return {
+		primaryLanguage: hasTsconfig ? "typescript" : "javascript",
+		testRunner: scripts.test,
+		buildCommand: scripts.build,
+		typecheckCommand: scripts.typecheck,
+		lintCommand: scripts.lint,
+	};
 }
