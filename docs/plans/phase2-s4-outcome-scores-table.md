@@ -8,6 +8,19 @@
 
 **Tech Stack:** TypeScript (ESM, `.js`), Node ≥24.13, vitest, `@buildplane/storage`, `@buildplane/kernel`.
 
+> **⛔ Codex gate R2 (2026-05-26) — REDESIGN REQUIRED, NOT dispatch-ready.** The "mirror
+> `repo_facts`" model is wrong for an accumulator:
+> - **Supersede-then-insert (last-writer-wins) destroys the running tally.** Use atomic
+>   increment/update-in-place, OR persist raw per-run outcome rows and aggregate on read.
+> - **Decay needs per-run data.** Bare `success_count/sample_count/created_at` can't be decayed
+>   correctly later — store raw samples, or `decayed_success`/`decayed_sample`/`last_decay_at` + a
+>   fixed decay rule.
+> - **Add a uniqueness index** for one active row per `(repo_id, task_type, worker)`, else
+>   `listOutcomeScores` returns duplicates and S5's chooser is nondeterministic.
+> - **Define `score`/`confidence` invariants** (derive `score` from counts; `confidence` from
+>   `sample_count`) or rows drift into contradiction.
+> Re-spec the storage model, then re-run `/codex challenge` before dispatch.
+
 ## Opus Planning Reference (handoff contract)
 
 - **Slice ID:** `phase2-s4-outcome-scores-table`

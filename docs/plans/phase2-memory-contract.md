@@ -154,5 +154,13 @@ hook; that filling pre-snapshot keeps provenance consistent.
 
 **FROZEN** after operator sign-off (2026-05-26). Slice plans S1–S5 written
 (`docs/plans/phase2-s{1..5}-*.md`), each with verify-first + the `pnpm -C <wt> exec vitest run` /
-full-suite+lint+changeset gate. The S4/S5 scoring-math plans pass a **second Codex gate** before
-Track 2 dispatch. Track 1 (land order **S3 → S2 → S1**) is ready to triage to Hermes lanes.
+full-suite+lint+changeset gate.
+
+**Status after the second Codex gate (R2, 2026-05-26):**
+- **Track 1 (S3 → S2 → S1): VALIDATED, dispatch-ready.** Triage to Hermes lanes in land order.
+- **Track 2 (S4, S5): REDESIGN REQUIRED — NOT dispatch-ready.** R2 found 7 P1s: the `repo_facts`
+  supersession model destroys an accumulator's tally; decay is unimplementable without per-run
+  data; the producer hook must move ahead of `createRun()` (`orchestrator.ts:689`), not `:1133`,
+  or recorded≠actual route; outcome sources don't persist the worker used; `taskType` is optional;
+  cold-start/starvation is unhandled. See the ⛔ banners in the S4/S5 plans. Re-spec the
+  outcome-memory storage + producer model, then re-run `/codex challenge` before Track 2 dispatch.

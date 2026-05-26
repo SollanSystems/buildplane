@@ -8,6 +8,23 @@
 
 **Tech Stack:** TypeScript (ESM, `.js`), Node ≥24.13, vitest, `@buildplane/kernel`, `@buildplane/storage`.
 
+> **⛔ Codex gate R2 (2026-05-26) — REDESIGN REQUIRED, NOT dispatch-ready.** The producer
+> integration is mis-placed and underspecified:
+> - **The hook is too late.** `prepareRun()` persists `unit_snapshot` via `createRun()` at
+>   `orchestrator.ts:689` (store.ts:1954); the recorded route is read back from
+>   `runs.unit_snapshot` (store.ts:3121+). Filling `routingHints` before `:1133` changes execution
+>   but NOT the stored snapshot → recorded≠actual. Producer must run **before `createRun()`**.
+> - **Outcome sources lack route data.** `runs`/`decisions`/`run-completed` events don't record the
+>   worker used. Either aggregate in orchestrator finalization while `validatedPacket` is live, or
+>   persist route metadata explicitly (couples to the S4 redesign).
+> - **`taskType` is optional** (`UnitPacket.intent` optional; `taskType` lives in `intent`). Define a
+>   required-intent invariant or a `unit.kind` fallback, else the grain key is null.
+> - **Cold start/starvation.** Unhinted traffic routes to the SDK executor and never samples
+>   claude-code/codex. ε must operate at zero-score with a defined candidate set, or the table never
+>   warms.
+> - **ε only when `preferredWorker` is absent** — never override an explicit hint (contract rule 3).
+> Re-spec aggregation + hook placement against the S4 redesign, then re-run `/codex challenge`.
+
 ## Opus Planning Reference (handoff contract)
 
 - **Slice ID:** `phase2-s5-scoring-aggregation-routing-producer`
