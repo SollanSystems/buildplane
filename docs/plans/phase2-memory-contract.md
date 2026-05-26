@@ -1,4 +1,4 @@
-# Phase 2 Memory Contract (rev. post-Codex-gate R1, 2026-05-26 — pending operator sign-off to freeze)
+# Phase 2 Memory Contract (FROZEN 2026-05-26 — post-Codex-gate R1, operator-signed-off)
 
 > Authority: ADR 0001 + `docs/superpowers/specs/2026-05-26-memory-program-orchestration-design.md`.
 > Operator scope (2026-05-26): **Track 1 (V1-gap correctness fixes) first, then Track 2
@@ -152,6 +152,7 @@ hook; that filling pre-snapshot keeps provenance consistent.
 
 ## Gate
 
-rev R1 (this) → **operator sign-off** → freeze → write 5 slice plans (S1–S5) with verify-first +
-the `pnpm -C <wt> exec vitest run` / full-suite+lint+changeset gate per slice. (A second Codex pass
-targets the S4/S5 scoring math once those slice plans exist.)
+**FROZEN** after operator sign-off (2026-05-26). Slice plans S1–S5 written
+(`docs/plans/phase2-s{1..5}-*.md`), each with verify-first + the `pnpm -C <wt> exec vitest run` /
+full-suite+lint+changeset gate. The S4/S5 scoring-math plans pass a **second Codex gate** before
+Track 2 dispatch. Track 1 (land order **S3 → S2 → S1**) is ready to triage to Hermes lanes.
