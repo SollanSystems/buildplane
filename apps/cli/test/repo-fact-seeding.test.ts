@@ -66,4 +66,17 @@ describe("seedRepoFactsFromInspection", () => {
 		expect(port.upsertRepoFact).toHaveBeenCalledTimes(1);
 		expect(seeded).toHaveLength(1);
 	});
+
+	it("is idempotent last-writer-wins: re-seeding the same key issues a fresh upsert", () => {
+		const port = fakePort();
+		seedRepoFactsFromInspection(port, { testRunner: "vitest" }, {});
+		seedRepoFactsFromInspection(port, { testRunner: "vitest --run" }, {});
+		expect(port.upsertRepoFact).toHaveBeenCalledTimes(2);
+		expect(port.upsertRepoFact.mock.calls[0][0].factValue).toBe("vitest");
+		expect(port.upsertRepoFact.mock.calls[1][0].factValue).toBe("vitest --run");
+		// Both target the SAME factKey -> store supersedes the first (last-writer-wins).
+		expect(port.upsertRepoFact.mock.calls[0][0].factKey).toBe(
+			port.upsertRepoFact.mock.calls[1][0].factKey,
+		);
+	});
 });
