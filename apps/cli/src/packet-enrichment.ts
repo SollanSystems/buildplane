@@ -30,6 +30,7 @@ interface StructuredMemoryPortLike {
 			scopeType: string;
 			scopeKey?: string;
 		}>;
+		branch?: string;
 		limit?: number;
 	}): ReadonlyArray<RankedRepoFactResult>;
 	retrieveProcedures(query: {
@@ -302,6 +303,7 @@ function collectStructuredMemoryEnrichment(
 			structuredMemoryPort.retrieveRepoFacts({
 				searchText,
 				scopeCandidates,
+				branch: currentBranch,
 				limit: STRUCTURED_QUERY_LIMIT,
 			}),
 		),

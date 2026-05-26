@@ -195,6 +195,111 @@ describe("repo fact storage", () => {
 		);
 	});
 
+	it("excludes facts promoted on a different branch while keeping repo-global (null-branch) facts", () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-repo-facts-"));
+		const storage = createBuildplaneStorage(root);
+		storage.initializeProject();
+
+		const otherBranchFact = storage.upsertRepoFact({
+			factKey: "commands.feature",
+			factValue: "pnpm test:feature",
+			valueType: "string",
+			scopeType: "repo",
+			createdBy: "system",
+			branch: "feat/x",
+		});
+		const currentBranchFact = storage.upsertRepoFact({
+			factKey: "commands.main",
+			factValue: "pnpm test:main",
+			valueType: "string",
+			scopeType: "repo",
+			createdBy: "system",
+			branch: "main",
+		});
+		const globalFact = storage.upsertRepoFact({
+			factKey: "commands.global",
+			factValue: "pnpm test:global",
+			valueType: "string",
+			scopeType: "repo",
+			createdBy: "system",
+		});
+
+		const filtered = storage.retrieveRepoFacts({
+			searchText: "pnpm",
+			branch: "main",
+			limit: 10,
+		});
+
+		const filteredIds = new Set(filtered.map((result) => result.item.id));
+		expect(filteredIds.has(currentBranchFact.id)).toBe(true);
+		expect(filteredIds.has(globalFact.id)).toBe(true);
+		expect(filteredIds.has(otherBranchFact.id)).toBe(false);
+	});
+
+	it("returns facts from every branch when branch is omitted (unchanged behavior)", () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-repo-facts-"));
+		const storage = createBuildplaneStorage(root);
+		storage.initializeProject();
+
+		const otherBranchFact = storage.upsertRepoFact({
+			factKey: "commands.feature",
+			factValue: "pnpm test:feature",
+			valueType: "string",
+			scopeType: "repo",
+			createdBy: "system",
+			branch: "feat/x",
+		});
+		const globalFact = storage.upsertRepoFact({
+			factKey: "commands.global",
+			factValue: "pnpm test:global",
+			valueType: "string",
+			scopeType: "repo",
+			createdBy: "system",
+		});
+
+		const unfiltered = storage.retrieveRepoFacts({
+			searchText: "pnpm",
+			limit: 10,
+		});
+
+		const unfilteredIds = new Set(unfiltered.map((result) => result.item.id));
+		expect(unfilteredIds.has(otherBranchFact.id)).toBe(true);
+		expect(unfilteredIds.has(globalFact.id)).toBe(true);
+	});
+
+	it("applies branch filtering to exact fact-key matches", () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-repo-facts-"));
+		const storage = createBuildplaneStorage(root);
+		storage.initializeProject();
+
+		const otherBranchFact = storage.upsertRepoFact({
+			factKey: "commands.test",
+			factValue: "pnpm test:feature",
+			valueType: "string",
+			scopeType: "branch",
+			scopeKey: "feat/x",
+			createdBy: "system",
+			branch: "feat/x",
+		});
+		const globalFact = storage.upsertRepoFact({
+			factKey: "commands.test",
+			factValue: "pnpm test:global",
+			valueType: "string",
+			scopeType: "repo",
+			createdBy: "system",
+		});
+
+		const filtered = storage.retrieveRepoFacts({
+			factKey: "commands.test",
+			branch: "main",
+			limit: 10,
+		});
+
+		const filteredIds = new Set(filtered.map((result) => result.item.id));
+		expect(filteredIds.has(globalFact.id)).toBe(true);
+		expect(filteredIds.has(otherBranchFact.id)).toBe(false);
+	});
+
 	it("fails fast with a schema error when opening a legacy repo_facts projection", () => {
 		const root = mkdtempSync(join(tmpdir(), "buildplane-repo-facts-"));
 		const buildplaneDir = join(root, ".buildplane");

@@ -1086,6 +1086,7 @@ export function createStorageStore(
 			factKey?: string;
 			scopeType?: MemoryScopeType;
 			scopeKey?: string;
+			branch?: string;
 			includeInactive?: boolean;
 		},
 	): StoredRepoFactRow[] {
@@ -1109,6 +1110,10 @@ export function createStorageStore(
 			}
 		} else if (options.scopeType === "repo" || options.scopeType === "global") {
 			clauses.push("scope_key IS NULL");
+		}
+		if (options.branch !== undefined) {
+			clauses.push("(branch = ? OR branch IS NULL)");
+			params.push(options.branch);
 		}
 		if (!options.includeInactive) {
 			clauses.push("status = 'active'");
@@ -1435,8 +1440,9 @@ export function createStorageStore(
 	function readActiveRepoFactRows(
 		database: DatabaseSync,
 		scopeCandidates?: readonly RepoFactScopeCandidate[],
+		branch?: string,
 	): StoredRepoFactRow[] {
-		const rows = readRepoFactRows(database, {});
+		const rows = readRepoFactRows(database, { branch });
 		if (!scopeCandidates || scopeCandidates.length === 0) {
 			return rows;
 		}
@@ -1451,9 +1457,10 @@ export function createStorageStore(
 		database: DatabaseSync,
 		factKey: string,
 		scopeCandidates?: readonly RepoFactScopeCandidate[],
+		branch?: string,
 	): RankedRepoFactResult[] {
 		if (!scopeCandidates || scopeCandidates.length === 0) {
-			return readRepoFactRows(database, { factKey }).map((row) =>
+			return readRepoFactRows(database, { factKey, branch }).map((row) =>
 				toRankedRepoFactResult(row, "exact-fact-key"),
 			);
 		}
@@ -1471,6 +1478,7 @@ export function createStorageStore(
 				factKey,
 				scopeType: candidate.scopeType,
 				scopeKey: candidate.scopeKey,
+				branch,
 			})) {
 				results.push(
 					toRankedRepoFactResult(row, "exact-fact-key", scopePreferenceIndex),
@@ -1484,8 +1492,9 @@ export function createStorageStore(
 		database: DatabaseSync,
 		searchText: string,
 		scopeCandidates?: readonly RepoFactScopeCandidate[],
+		branch?: string,
 	): RankedRepoFactResult[] {
-		return readActiveRepoFactRows(database, scopeCandidates)
+		return readActiveRepoFactRows(database, scopeCandidates, branch)
 			.map((row) => {
 				if (includesCaseInsensitive(row.fact_key, searchText)) {
 					return toRankedRepoFactResult(row, "fuzzy-fact-key");
@@ -2631,6 +2640,7 @@ export function createStorageStore(
 			const scopeCandidates = normalizeRepoFactScopeCandidates(
 				query.scopeCandidates,
 			);
+			const branch = normalizeExactText(query.branch);
 			const limit = normalizeRetrievalLimit(query.limit);
 
 			if (limit === 0 || (!factKey && !searchText)) {
@@ -2642,12 +2652,22 @@ export function createStorageStore(
 				const candidates: RankedRepoFactResult[] = [];
 				if (factKey) {
 					candidates.push(
-						...readExactRepoFactMatches(database, factKey, scopeCandidates),
+						...readExactRepoFactMatches(
+							database,
+							factKey,
+							scopeCandidates,
+							branch,
+						),
 					);
 				}
 				if (searchText) {
 					candidates.push(
-						...readFuzzyRepoFactMatches(database, searchText, scopeCandidates),
+						...readFuzzyRepoFactMatches(
+							database,
+							searchText,
+							scopeCandidates,
+							branch,
+						),
 					);
 				}
 
