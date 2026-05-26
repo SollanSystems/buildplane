@@ -1609,6 +1609,98 @@ describe("cli command surface", () => {
 		});
 	});
 
+	it("persists reviewer-leg injected memories for implement-then-review strategies", async () => {
+		const root = createGitRepo();
+		await runCliCapture(root, ["init"]);
+
+		const storage = createBuildplaneStorage(root);
+		storage.createProcedure({
+			name: "How to review a change",
+			taskType: "review",
+			bodyMarkdown: "Confirm the objective is satisfied before approving.",
+			createdBy: "worker",
+		});
+
+		const strategyPath = writeCommittedPacket(
+			root,
+			".buildplane/test-packets/reviewer-injected-strategy.json",
+			{
+				id: "strategy-reviewer-injected",
+				mode: "implement-then-review",
+				mergePolicy: "reviewer-must-approve",
+				children: [
+					{
+						role: "implementer",
+						packet: {
+							...createPassingPacket("reviewer-injected-impl"),
+							intent: {
+								objective: "Write a parser",
+								taskType: "implement",
+								context: { files: [] },
+								constraints: { scope: ["apps/cli/src"], verification: [] },
+								features: {
+									ambiguity: "low",
+									reversibility: "easy",
+									verifierStrength: "strong",
+								},
+							},
+						},
+					},
+					{
+						role: "reviewer",
+						dependsOn: ["reviewer-injected-impl"],
+						packet: {
+							unit: {
+								id: "reviewer-injected-reviewer",
+								kind: "command",
+								scope: "task",
+								inputRefs: [],
+								expectedOutputs: [],
+								verificationContract: "exit-0-and-required-outputs",
+								policyProfile: "default",
+							},
+							execution: { command: "true", args: [] },
+							intent: {
+								objective:
+									"Review whether the implementer satisfied: Write a parser",
+								taskType: "review",
+								context: { files: [] },
+								constraints: { scope: [], verification: [] },
+								features: {
+									ambiguity: "low",
+									reversibility: "easy",
+									verifierStrength: "strong",
+								},
+							},
+							verification: { requiredOutputs: [] },
+						},
+					},
+				],
+			},
+		);
+
+		const runStrategy = await runCliCapture(root, [
+			"run-strategy",
+			"--strategy",
+			strategyPath,
+		]);
+		const reviewerInspect = await runCliCapture(root, [
+			"inspect",
+			"reviewer-injected-reviewer",
+			"--json",
+		]);
+
+		expect(runStrategy.exitCode).toBe(0);
+		const reviewerRun = JSON.parse(reviewerInspect.stdout.join("\n"));
+		expect(reviewerRun).toMatchObject({
+			run: { unitId: "reviewer-injected-reviewer", status: "passed" },
+			injectedMemories: [{ memoryKind: "procedure", matchReason: "exact-task-type" }],
+		});
+
+		const reviewerRunId = reviewerRun.run.id as string;
+		expect(storage.listInjectedMemories(reviewerRunId).length).toBeGreaterThan(0);
+	});
+
 	it("surfaces strategy lineage and memory summaries in inspect and history for strategy runs", async () => {
 		const root = createGitRepo();
 		await runCliCapture(root, ["init"]);

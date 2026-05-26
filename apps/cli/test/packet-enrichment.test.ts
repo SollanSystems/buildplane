@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { enrichPacketWithMemories } from "../src/packet-enrichment.js";
+import {
+	enrichPacketWithMemories,
+	prepareStrategyMemoryEnrichment,
+} from "../src/packet-enrichment.js";
+import { wrapAsStrategy } from "../src/strategy-wrapper.js";
 
 const mockMemoryPort = {
 	fetchLearnings: () => [
@@ -503,5 +507,59 @@ describe("enrichPacketWithMemories", () => {
 			undefined,
 		);
 		expect(result).toBe(packet);
+	});
+});
+
+describe("reviewer-side memory injection (Task C)", () => {
+	const implementerPacket = {
+		unit: {
+			id: "task-x",
+			kind: "model",
+			scope: "task",
+			inputRefs: [],
+			expectedOutputs: ["out/result.js"],
+			verificationContract: "exit-0-and-required-outputs",
+			policyProfile: "default",
+		},
+		model: { provider: "anthropic", model: "claude-sonnet-4-20250514" },
+		verification: { requiredOutputs: ["out/result.js"] },
+		intent: {
+			objective: "Write a parser",
+			taskType: "implement",
+			context: { files: [] },
+		},
+	};
+
+	it("enriches the reviewer child and keys injected memories by <id>-reviewer", async () => {
+		// Returns a procedure ONLY for the review leg, proving the reviewer
+		// packet now reaches enrichment (taskType:"review").
+		const structuredMemoryPort = createStructuredMemoryPort({
+			retrieveProcedures: (q: { taskType?: string }) =>
+				q.taskType === "review"
+					? [
+							createProcedureResult({
+								name: "How to review",
+								reason: "exact-task-type",
+							}),
+						]
+					: [],
+		});
+
+		const strategy = wrapAsStrategy(implementerPacket);
+		const prepared = await prepareStrategyMemoryEnrichment(
+			strategy as unknown as Record<string, unknown>,
+			undefined,
+			undefined,
+			undefined,
+			structuredMemoryPort,
+			undefined,
+		);
+
+		expect(Object.keys(prepared.injectedMemoriesByUnitId)).toContain(
+			"task-x-reviewer",
+		);
+		expect(
+			prepared.injectedMemoriesByUnitId["task-x-reviewer"].length,
+		).toBeGreaterThan(0);
 	});
 });
