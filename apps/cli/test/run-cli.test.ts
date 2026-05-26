@@ -494,6 +494,31 @@ describe("cli command surface", () => {
 		expect(existsSync(join(root, ".buildplane"))).toBe(false);
 	});
 
+	it("bootstrap seed writes repo.* facts and reports them", async () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-cli-seed-"));
+		// initialize a project so the state DB exists
+		createBuildplaneStorage(root).initializeProject();
+		writeFileSync(
+			join(root, "package.json"),
+			JSON.stringify({ scripts: { test: "vitest --run", build: "tsc -b" } }),
+		);
+		writeFileSync(join(root, "tsconfig.json"), "{}");
+
+		const result = await runCliCapture(root, ["bootstrap", "seed", "--json"]);
+		expect(result.exitCode).toBe(0);
+		const seeded = JSON.parse(result.stdout.join("\n"));
+		const keys = seeded.map((f: { factKey: string }) => f.factKey);
+		expect(keys).toContain("repo.primary-language");
+		expect(keys).toContain("repo.test-runner");
+		expect(keys).toContain("repo.build-command");
+
+		// Persisted: a fresh read-only port can list them.
+		const facts = createBuildplaneStorage(root).listRepoFacts({
+			scopeType: "repo",
+		});
+		expect(facts.some((f) => f.factKey === "repo.test-runner")).toBe(true);
+	});
+
 	it("shows top-level help for --help", async () => {
 		const root = mkdtempSync(join(tmpdir(), "buildplane-cli-help-flag-"));
 
