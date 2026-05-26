@@ -92,7 +92,10 @@ describe("wrapAsStrategy", () => {
 		expect(rev.packet.model?.prompt).toContain("Write a hello world script");
 		expect(rev.packet.model?.provider).toBe("anthropic");
 		expect(rev.packet.verification.requiredOutputs).toEqual([]);
-		expect(rev.packet.intent).toBeUndefined();
+		expect(rev.packet.intent?.taskType).toBe("review");
+		expect(rev.packet.intent?.objective).toContain(
+			"Write a hello world script",
+		);
 	});
 
 	it("wraps a command packet with a file-check reviewer", () => {
@@ -110,6 +113,8 @@ describe("wrapAsStrategy", () => {
 		);
 		expect(rev.packet.execution?.args?.[1]).toContain("test -s output/log.txt");
 		expect(rev.packet.model).toBeUndefined();
+		expect(rev.packet.intent?.taskType).toBe("review");
+		expect(rev.packet.intent?.objective).toContain("cmd-1");
 	});
 
 	it("uses 'true' command when no expected outputs", () => {
@@ -117,6 +122,7 @@ describe("wrapAsStrategy", () => {
 		const rev = strategy.children[1];
 		expect(rev.packet.execution?.command).toBe("true");
 		expect(rev.packet.execution?.args).toEqual([]);
+		expect(rev.packet.intent?.taskType).toBe("review");
 	});
 
 	it("preserves routing hints for model reviewer packets", () => {
