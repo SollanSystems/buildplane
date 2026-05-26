@@ -4166,19 +4166,72 @@ export async function runCli(
 				// ── Strategy path (default) ──────────────────────────────
 				if (!useRaw) {
 					const { wrapAsStrategy } = await import("./strategy-wrapper.js");
-					const { prepareStrategyMemoryEnrichment } =
+					const { preparePacketMemoryEnrichment } =
 						await loadPacketEnrichmentModule();
-					const strategy = wrapAsStrategy(
-						packet as Parameters<typeof wrapAsStrategy>[0],
-					);
-					const preparedStrategy = await prepareStrategyMemoryEnrichment(
-						strategy as unknown as Record<string, unknown>,
+
+					// Enrich the implementer packet exactly as the single-packet
+					// path does, then wrap it so the executed implementer leg carries
+					// its memory context. The reviewer child is enriched on top below
+					// without re-enriching the implementer.
+					const preparedImplementer = await preparePacketMemoryEnrichment(
+						packet,
 						memoryPort,
 						honchoAdapter,
 						userId,
 						structuredMemoryPort,
 						currentBranch,
 					);
+					const enrichedImplementer = preparedImplementer.packet;
+					const implementerUnitId =
+						(enrichedImplementer as { unit?: { id?: string } }).unit?.id ??
+						(packet as { unit?: { id?: string } }).unit?.id ??
+						"";
+
+					const baseStrategy = wrapAsStrategy(
+						enrichedImplementer as Parameters<typeof wrapAsStrategy>[0],
+					) as unknown as {
+						children: Array<{ role: string; packet: unknown }>;
+					};
+
+					const injectedMemoriesByUnitId: InjectedMemoryRecordsByUnitId = {};
+					if (preparedImplementer.injectedMemories.length > 0) {
+						injectedMemoriesByUnitId[implementerUnitId] =
+							preparedImplementer.injectedMemories;
+					}
+
+					const enrichedChildren = await Promise.all(
+						baseStrategy.children.map(async (child) => {
+							if (child.role !== "reviewer") {
+								return child;
+							}
+							const preparedReviewer = await preparePacketMemoryEnrichment(
+								child.packet,
+								memoryPort,
+								honchoAdapter,
+								userId,
+								structuredMemoryPort,
+								currentBranch,
+							);
+							const reviewerUnitId = (
+								child.packet as { unit?: { id?: string } }
+							).unit?.id;
+							if (
+								reviewerUnitId &&
+								preparedReviewer.injectedMemories.length > 0
+							) {
+								injectedMemoriesByUnitId[reviewerUnitId] =
+									preparedReviewer.injectedMemories;
+							}
+							return { ...child, packet: preparedReviewer.packet };
+						}),
+					);
+					const preparedStrategy = {
+						strategy: {
+							...baseStrategy,
+							children: enrichedChildren,
+						} as unknown as Record<string, unknown>,
+						injectedMemoriesByUnitId,
+					};
 
 					const kernel = (await cliImport("@buildplane/kernel")) as unknown as {
 						createEventBus: () => {

@@ -4,6 +4,31 @@ export const REVIEWER_SYSTEM_PROMPT_TEMPLATE =
 	"If the work is correct and complete, exit successfully. " +
 	"If there are issues, exit with a non-zero code and explain what's wrong.";
 
+function reviewerObjective(objective: string): string {
+	return `Review the implementer output and determine whether the objective was satisfied: ${objective}`;
+}
+
+interface TaskIntentLike {
+	readonly objective?: string;
+	readonly taskType?: string;
+	readonly context?: {
+		readonly files?: readonly string[];
+		readonly [key: string]: unknown;
+	};
+	readonly constraints?: {
+		readonly scope?: readonly string[];
+		readonly verification?: readonly string[];
+		readonly [key: string]: unknown;
+	};
+	readonly features?: {
+		readonly ambiguity?: string;
+		readonly reversibility?: string;
+		readonly verifierStrength?: string;
+		readonly [key: string]: unknown;
+	};
+	readonly [key: string]: unknown;
+}
+
 interface PacketLike {
 	readonly unit: {
 		readonly id: string;
@@ -25,14 +50,45 @@ interface PacketLike {
 		readonly prompt?: string;
 		readonly tools?: readonly unknown[];
 	};
-	readonly intent?: {
-		readonly objective?: string;
-		readonly [key: string]: unknown;
-	};
+	readonly intent?: TaskIntentLike;
 	readonly verification: {
 		readonly requiredOutputs: readonly string[];
 	};
 	readonly routingHints?: unknown;
+}
+
+const DEFAULT_REVIEW_FEATURES = {
+	ambiguity: "low",
+	reversibility: "easy",
+	verifierStrength: "strong",
+} as const;
+
+// Build a complete review TaskIntent so the reviewer leg both renders without
+// throwing (the renderer reads context.files and features) and is eligible for
+// memory enrichment (which keys off intent + taskType:"review"). Files are
+// inherited from the work under review (the implementer's expected outputs).
+function buildReviewIntent(
+	packet: PacketLike,
+	objective: string,
+	filesUnderReview: readonly string[],
+): TaskIntentLike {
+	const implementerFeatures = packet.intent?.features;
+	return {
+		objective: reviewerObjective(objective),
+		taskType: "review",
+		context: { files: [...filesUnderReview] },
+		constraints: { scope: [], verification: [] },
+		features: {
+			ambiguity:
+				implementerFeatures?.ambiguity ?? DEFAULT_REVIEW_FEATURES.ambiguity,
+			reversibility:
+				implementerFeatures?.reversibility ??
+				DEFAULT_REVIEW_FEATURES.reversibility,
+			verifierStrength:
+				implementerFeatures?.verifierStrength ??
+				DEFAULT_REVIEW_FEATURES.verifierStrength,
+		},
+	};
 }
 
 interface StrategyChildLike {
@@ -67,12 +123,9 @@ function buildModelReviewer(packet: PacketLike): PacketLike {
 				"OBJECTIVE",
 				objective,
 			),
-			prompt: `Review the implementer output and determine whether the objective was satisfied: ${objective}`,
+			prompt: reviewerObjective(objective),
 		},
-		intent: {
-			objective: `Review whether the implementer satisfied: ${objective}`,
-			taskType: "review",
-		},
+		intent: buildReviewIntent(packet, objective, packet.unit.expectedOutputs),
 		verification: { requiredOutputs: [] },
 		routingHints: packet.routingHints,
 	};
@@ -94,10 +147,7 @@ function buildCommandReviewer(packet: PacketLike): PacketLike {
 				policyProfile: "default",
 			},
 			execution: { command: "true", args: [] },
-			intent: {
-				objective: `Review whether the implementer satisfied: ${objective}`,
-				taskType: "review",
-			},
+			intent: buildReviewIntent(packet, objective, []),
 			verification: { requiredOutputs: [] },
 		};
 	}
@@ -113,10 +163,7 @@ function buildCommandReviewer(packet: PacketLike): PacketLike {
 			policyProfile: "default",
 		},
 		execution: { command: "sh", args: ["-c", checks] },
-		intent: {
-			objective: `Review whether the implementer satisfied: ${objective}`,
-			taskType: "review",
-		},
+		intent: buildReviewIntent(packet, objective, outputs),
 		verification: { requiredOutputs: [] },
 	};
 }
