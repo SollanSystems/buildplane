@@ -1435,6 +1435,40 @@ type MemoryListPortLike = Pick<
 	"listRepoFacts" | "listProcedures"
 >;
 
+function validateMemoryListOptions(
+	args: readonly string[],
+	options: { valued: readonly string[] },
+): { code: string; message: string } | undefined {
+	const valuedConsumesNext = new Set<number>();
+	for (const flag of options.valued) {
+		const flagIdx = args.indexOf(flag);
+		if (flagIdx < 0) {
+			continue;
+		}
+		const value = args[flagIdx + 1];
+		if (value === undefined || value.startsWith("--")) {
+			return {
+				code: "MISSING_ARGUMENT",
+				message: `Missing value for ${flag}.`,
+			};
+		}
+		valuedConsumesNext.add(flagIdx + 1);
+	}
+	const unsupported = args.filter((arg, index) => {
+		if (arg === "--json" || options.valued.includes(arg)) {
+			return false;
+		}
+		return !valuedConsumesNext.has(index);
+	});
+	if (unsupported.length > 0) {
+		return {
+			code: "UNSUPPORTED_ARGUMENTS",
+			message: `Unsupported arguments: ${unsupported.join(" ")}.`,
+		};
+	}
+	return undefined;
+}
+
 async function loadStoragePort(
 	projectRoot: string,
 ): Promise<MemoryListPortLike | undefined> {
@@ -3599,23 +3633,34 @@ export async function runCli(
 			if (subcommand === "facts") {
 				const subRest = rest.slice(1);
 				const json = subRest.includes("--json");
+				const optionError = validateMemoryListOptions(subRest, {
+					valued: ["--scope"],
+				});
+				if (optionError) {
+					if (json) {
+						stdout(
+							formatJson(
+								formatJsonError(optionError.code, optionError.message),
+							),
+						);
+					} else {
+						stderr(optionError.message);
+					}
+					return 1;
+				}
 				const scopeIdx = subRest.indexOf("--scope");
 				const scopeType =
-					scopeIdx >= 0 && scopeIdx + 1 < subRest.length
+					scopeIdx >= 0
 						? (subRest[
 								scopeIdx + 1
 							] as import("@buildplane/kernel").MemoryScopeType)
 						: undefined;
 				let facts: ReturnType<MemoryListPortLike["listRepoFacts"]> = [];
-				try {
-					const storagePort = await loadStoragePort(cwd);
-					if (storagePort) {
-						facts = storagePort.listRepoFacts(
-							scopeType ? { scopeType } : undefined,
-						);
-					}
-				} catch {
-					// Database may lack the repo_facts table
+				const storagePort = await loadStoragePort(cwd);
+				if (storagePort) {
+					facts = storagePort.listRepoFacts(
+						scopeType ? { scopeType } : undefined,
+					);
 				}
 				if (json) {
 					stdout(formatJson(facts));
@@ -3629,21 +3674,30 @@ export async function runCli(
 			if (subcommand === "procedures") {
 				const subRest = rest.slice(1);
 				const json = subRest.includes("--json");
+				const optionError = validateMemoryListOptions(subRest, {
+					valued: ["--task-type"],
+				});
+				if (optionError) {
+					if (json) {
+						stdout(
+							formatJson(
+								formatJsonError(optionError.code, optionError.message),
+							),
+						);
+					} else {
+						stderr(optionError.message);
+					}
+					return 1;
+				}
 				const taskTypeIdx = subRest.indexOf("--task-type");
 				const taskType =
-					taskTypeIdx >= 0 && taskTypeIdx + 1 < subRest.length
-						? subRest[taskTypeIdx + 1]
-						: undefined;
+					taskTypeIdx >= 0 ? subRest[taskTypeIdx + 1] : undefined;
 				let procedures: ReturnType<MemoryListPortLike["listProcedures"]> = [];
-				try {
-					const storagePort = await loadStoragePort(cwd);
-					if (storagePort) {
-						procedures = storagePort.listProcedures(
-							taskType ? { taskType } : undefined,
-						);
-					}
-				} catch {
-					// Database may lack the procedures table
+				const storagePort = await loadStoragePort(cwd);
+				if (storagePort) {
+					procedures = storagePort.listProcedures(
+						taskType ? { taskType } : undefined,
+					);
 				}
 				if (json) {
 					stdout(formatJson(procedures));
