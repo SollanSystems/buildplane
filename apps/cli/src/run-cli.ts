@@ -693,6 +693,8 @@ function formatTopLevelHelp(): string[] {
 		"    workspace cleanup <r>  Delete an actionable workspace by run id",
 		"    workflow scan [--json] Preview recognized Claude/Codex workflow files",
 		"    memory list            Show stored learnings",
+		"    memory facts           Show structured repo facts",
+		"    memory procedures      Show stored procedures",
 		"    memory inspect <id>    Detail for one learning",
 		"    memory <action>        Advanced memory operations (native)",
 		"    pack show <id>         Inspect a pack",
