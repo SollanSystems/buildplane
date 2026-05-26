@@ -1694,11 +1694,15 @@ describe("cli command surface", () => {
 		const reviewerRun = JSON.parse(reviewerInspect.stdout.join("\n"));
 		expect(reviewerRun).toMatchObject({
 			run: { unitId: "reviewer-injected-reviewer", status: "passed" },
-			injectedMemories: [{ memoryKind: "procedure", matchReason: "exact-task-type" }],
+			injectedMemories: [
+				{ memoryKind: "procedure", matchReason: "exact-task-type" },
+			],
 		});
 
 		const reviewerRunId = reviewerRun.run.id as string;
-		expect(storage.listInjectedMemories(reviewerRunId).length).toBeGreaterThan(0);
+		expect(storage.listInjectedMemories(reviewerRunId).length).toBeGreaterThan(
+			0,
+		);
 	});
 
 	it("persists reviewer-leg injected memories on the default run --packet path", async () => {
@@ -1752,9 +1756,9 @@ describe("cli command surface", () => {
 		});
 
 		const reviewerRunId = reviewerRun.run.id as string;
-		expect(
-			storage.listInjectedMemories(reviewerRunId).length,
-		).toBeGreaterThan(0);
+		expect(storage.listInjectedMemories(reviewerRunId).length).toBeGreaterThan(
+			0,
+		);
 	});
 
 	it("surfaces strategy lineage and memory summaries in inspect and history for strategy runs", async () => {
