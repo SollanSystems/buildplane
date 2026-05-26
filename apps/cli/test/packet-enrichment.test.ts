@@ -475,6 +475,65 @@ describe("enrichPacketWithMemories", () => {
 		]);
 	});
 
+	it("passes the run's current branch to repo-fact retrieval", async () => {
+		const packet = createPacket({
+			objective: "Fix the TypeScript build",
+			taskType: "debug_failure",
+			files: ["apps/cli/src/run-cli.ts"],
+			verification: ["npx pnpm typecheck"],
+		});
+		const observedBranches: Array<string | undefined> = [];
+		const structuredMemoryPort = createStructuredMemoryPort({
+			retrieveRepoFacts: (query: { branch?: string }) => {
+				observedBranches.push(query.branch);
+				return [];
+			},
+		});
+
+		await enrichPacketWithMemories(
+			packet,
+			undefined,
+			undefined,
+			undefined,
+			structuredMemoryPort,
+			"feat/phase2-s2",
+		);
+
+		expect(observedBranches.length).toBeGreaterThan(0);
+		for (const branch of observedBranches) {
+			expect(branch).toBe("feat/phase2-s2");
+		}
+	});
+
+	it("leaves repo-fact retrieval unfiltered when no current branch is provided", async () => {
+		const packet = createPacket({
+			objective: "Fix the TypeScript build",
+			taskType: "debug_failure",
+			files: ["apps/cli/src/run-cli.ts"],
+			verification: ["npx pnpm typecheck"],
+		});
+		const observedBranches: Array<string | undefined> = [];
+		const structuredMemoryPort = createStructuredMemoryPort({
+			retrieveRepoFacts: (query: { branch?: string }) => {
+				observedBranches.push(query.branch);
+				return [];
+			},
+		});
+
+		await enrichPacketWithMemories(
+			packet,
+			undefined,
+			undefined,
+			undefined,
+			structuredMemoryPort,
+		);
+
+		expect(observedBranches.length).toBeGreaterThan(0);
+		for (const branch of observedBranches) {
+			expect(branch).toBeUndefined();
+		}
+	});
+
 	it("returns packet unchanged when intent is absent", async () => {
 		const packet = { unit: { id: "u1" } };
 		const result = await enrichPacketWithMemories(

@@ -28,6 +28,7 @@ export interface RepoFactRetrievalQuery {
 	readonly factKey?: string;
 	readonly searchText?: string;
 	readonly scopeCandidates?: readonly RepoFactScopeCandidate[];
+	readonly branch?: string;
 	readonly limit?: number;
 }
 
