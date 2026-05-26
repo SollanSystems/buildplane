@@ -111,6 +111,8 @@ describe("wrapAsStrategy", () => {
 		);
 		expect(rev.packet.execution?.args?.[1]).toContain("test -s output/log.txt");
 		expect(rev.packet.model).toBeUndefined();
+		expect(rev.packet.intent?.taskType).toBe("review");
+		expect(rev.packet.intent?.objective).toContain("cmd-1");
 	});
 
 	it("uses 'true' command when no expected outputs", () => {
@@ -118,6 +120,7 @@ describe("wrapAsStrategy", () => {
 		const rev = strategy.children[1];
 		expect(rev.packet.execution?.command).toBe("true");
 		expect(rev.packet.execution?.args).toEqual([]);
+		expect(rev.packet.intent?.taskType).toBe("review");
 	});
 
 	it("preserves routing hints for model reviewer packets", () => {

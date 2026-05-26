@@ -80,6 +80,8 @@ function buildModelReviewer(packet: PacketLike): PacketLike {
 
 function buildCommandReviewer(packet: PacketLike): PacketLike {
 	const outputs = packet.unit.expectedOutputs;
+	const objective =
+		packet.intent?.objective ?? `complete the unit ${packet.unit.id}`;
 	if (outputs.length === 0) {
 		return {
 			unit: {
@@ -92,6 +94,10 @@ function buildCommandReviewer(packet: PacketLike): PacketLike {
 				policyProfile: "default",
 			},
 			execution: { command: "true", args: [] },
+			intent: {
+				objective: `Review whether the implementer satisfied: ${objective}`,
+				taskType: "review",
+			},
 			verification: { requiredOutputs: [] },
 		};
 	}
@@ -107,6 +113,10 @@ function buildCommandReviewer(packet: PacketLike): PacketLike {
 			policyProfile: "default",
 		},
 		execution: { command: "sh", args: ["-c", checks] },
+		intent: {
+			objective: `Review whether the implementer satisfied: ${objective}`,
+			taskType: "review",
+		},
 		verification: { requiredOutputs: [] },
 	};
 }
