@@ -4648,7 +4648,11 @@ describe("cli command surface", () => {
 		const layout = resolveProjectLayout(root);
 		writeFileSync(layout.stateDbPath, "not a sqlite database");
 
-		const result = await runCliCapture(root, ["memory", "procedures", "--json"]);
+		const result = await runCliCapture(root, [
+			"memory",
+			"procedures",
+			"--json",
+		]);
 		expect(result.exitCode).toBe(1);
 		const error = JSON.parse(result.stdout.join("\n"));
 		expect(error).toMatchObject({ error: { message: expect.any(String) } });
@@ -4676,7 +4680,9 @@ describe("cli command surface", () => {
 	});
 
 	it("memory facts rejects unsupported flags", async () => {
-		const root = mkdtempSync(join(tmpdir(), "buildplane-cli-facts-unsupported-"));
+		const root = mkdtempSync(
+			join(tmpdir(), "buildplane-cli-facts-unsupported-"),
+		);
 		const result = await runCliCapture(root, [
 			"memory",
 			"facts",
