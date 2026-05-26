@@ -3343,7 +3343,21 @@ export async function runCli(
 				return report.ok ? 0 : 1;
 			}
 			if (subcommand === "seed") {
-				const json = doctorArgs.includes("--json");
+				const supportedSeedFlags = new Set(["--json"]);
+				const seenSeedFlags = new Set<string>();
+				const hasOnlySupportedSeedArgs = doctorArgs.every((arg) => {
+					if (!supportedSeedFlags.has(arg) || seenSeedFlags.has(arg)) {
+						return false;
+					}
+					seenSeedFlags.add(arg);
+					return true;
+				});
+				if (!hasOnlySupportedSeedArgs) {
+					throw new Error(
+						`Unsupported bootstrap seed arguments: ${doctorArgs.join(" ")}`,
+					);
+				}
+				const json = seenSeedFlags.has("--json");
 				const storage = (await cliImport(
 					"@buildplane/storage",
 				)) as unknown as {

@@ -519,6 +519,25 @@ describe("cli command surface", () => {
 		expect(facts.some((f) => f.factKey === "repo.test-runner")).toBe(true);
 	});
 
+	it("bootstrap seed rejects unsupported extra arguments", async () => {
+		const root = mkdtempSync(
+			join(tmpdir(), "buildplane-cli-bootstrap-seed-invalid-"),
+		);
+		createBuildplaneStorage(root).initializeProject();
+
+		const result = await runCliCapture(root, ["bootstrap", "seed", "--bogus"]);
+
+		expect(result.exitCode).toBe(1);
+		expect(result.stdout).toEqual([]);
+		expect(result.stderr.join("\n")).toContain(
+			"Unsupported bootstrap seed arguments: --bogus",
+		);
+		const facts = createBuildplaneStorage(root).listRepoFacts({
+			scopeType: "repo",
+		});
+		expect(facts).toEqual([]);
+	});
+
 	it("shows top-level help for --help", async () => {
 		const root = mkdtempSync(join(tmpdir(), "buildplane-cli-help-flag-"));
 

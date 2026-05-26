@@ -32,9 +32,10 @@ const SIGNAL_TO_KEY: ReadonlyArray<readonly [keyof RepoSignals, string]> = [
 ];
 
 // Inspection-seeded `repo.*` facts are AUTHORITATIVE for that namespace and are
-// written last-writer-wins (ADR 0001 VF-2). The promote caller already refuses to
-// overwrite facts from different provenance, so seeding only ever supersedes a
-// previous seed of the same key.
+// written idempotent last-writer-wins (ADR 0001 VF-2): re-seeding the same key
+// overwrites the prior value with no conservatism. If a promote-derived fact
+// sanitized to a colliding `repo.*` key, a re-seed would supersede it; `createdBy:
+// "system"` distinguishes seed provenance.
 export function seedRepoFactsFromInspection(
 	port: Pick<BuildplaneStoragePort, "upsertRepoFact">,
 	signals: RepoSignals,
