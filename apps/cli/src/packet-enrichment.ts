@@ -115,6 +115,52 @@ function addUniqueValue(
 	values.push(trimmed);
 }
 
+// Cross-layer injection precedence (Phase 2 · S1).
+//
+// At this assembly each source has already been collapsed to display-text
+// strings, so the only identity available across every layer is the
+// normalized display text — the structured `memoryId`s live in the parallel
+// `injectedMemories` records, and the run-learning / honcho layers carry no id
+// at all here. We therefore key cross-layer dedup on normalized display text
+// with the leading `[layer-tag]` stripped, so the same underlying memory
+// surfacing under different layer tags collapses to one entry.
+//
+// Precedence is source-order: the caller passes layers ordered
+// `structured (repo_facts ≻ procedures ≻ documents) ≻ run_learnings ≻ honcho`,
+// and the first occurrence wins. The contract's finer tie-breaks (confidence,
+// then recency) are NOT applied here because that data does not survive to the
+// assembly — only display strings do — so we fall back to source-order
+// precedence as the contract permits.
+function normalizeCrossLayerIdentity(value: string): string {
+	return value
+		.replace(/^\[[^\]]*\]\s*/, "")
+		.trim()
+		.replace(/\s+/g, " ")
+		.toLowerCase();
+}
+
+export function dedupeAcrossLayers(
+	sources: ReadonlyArray<readonly string[]>,
+): string[] {
+	const deduped: string[] = [];
+	const seen = new Set<string>();
+	for (const layer of sources) {
+		for (const value of layer) {
+			const trimmed = value.trim();
+			if (!trimmed) {
+				continue;
+			}
+			const key = normalizeCrossLayerIdentity(value);
+			if (!key || seen.has(key)) {
+				continue;
+			}
+			seen.add(key);
+			deduped.push(value);
+		}
+	}
+	return deduped;
+}
+
 function extractKeywords(text: string | undefined): string[] {
 	if (!text) {
 		return [];
@@ -441,11 +487,11 @@ export async function preparePacketMemoryEnrichment(
 				)
 			: [];
 
-	const memories = [
-		...localLearnings.map((l) => `[${l.kind}] ${l.title}: ${l.body}`),
-		...structuredMemoryEnrichment.memories,
-		...honchoMemories,
-	];
+	const memories = dedupeAcrossLayers([
+		structuredMemoryEnrichment.memories,
+		localLearnings.map((l) => `[${l.kind}] ${l.title}: ${l.body}`),
+		honchoMemories,
+	]);
 
 	if (memories.length === 0) {
 		return {
