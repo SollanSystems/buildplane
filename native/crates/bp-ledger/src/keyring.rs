@@ -36,10 +36,51 @@ impl KeyringRef {
     /// Resolve the on-disk path for this key under the given keyring root.
     ///
     /// Layout: `<root>/<actor>/<key-id>.ed25519`.
-    pub fn path_under(&self, root: &Path) -> PathBuf {
-        root.join(&self.actor_id)
-            .join(format!("{}.ed25519", self.key_id))
+    ///
+    /// Both `actor_id` and `key_id` are validated by [`validate_keyring_id`]
+    /// before any join, so the resolved path is guaranteed to stay within
+    /// `<root>/<actor>/`. A traversal attempt (`..`, an absolute path, a path
+    /// separator, etc.) fails closed with [`LedgerError::UnsafeKeyringId`]
+    /// rather than escaping the actor-scoped directory.
+    pub fn path_under(&self, root: &Path) -> Result<PathBuf> {
+        validate_keyring_id("actor_id", &self.actor_id)?;
+        validate_keyring_id("key_id", &self.key_id)?;
+        Ok(root
+            .join(&self.actor_id)
+            .join(format!("{}.ed25519", self.key_id)))
     }
+}
+
+/// Reject any keyring identifier that could escape its actor-scoped directory
+/// or otherwise resolve outside `<root>/<actor>/<key-id>.ed25519`.
+///
+/// A safe id is non-empty, does not start with `.`, and is composed only of
+/// `[A-Za-z0-9._-]`. This rejects path separators (`/`, `\`), `..`, absolute
+/// paths, leading-dot dotfiles, and any control/whitespace/exotic byte. The
+/// error carries only the offending field name and a short descriptor of the
+/// rejected id — never key bytes.
+pub fn validate_keyring_id(which: &str, id: &str) -> Result<()> {
+    let reject = |reason: &str| {
+        Err(LedgerError::UnsafeKeyringId {
+            which: which.to_string(),
+            reason: format!("{reason}: {id:?}"),
+        })
+    };
+
+    if id.is_empty() {
+        return reject("identifier is empty");
+    }
+    if id.starts_with('.') {
+        // Covers `.`, `..`, and any leading-dot dotfile.
+        return reject("identifier must not start with '.'");
+    }
+    if let Some(bad) = id
+        .chars()
+        .find(|c| !matches!(c, 'A'..='Z' | 'a'..='z' | '0'..='9' | '.' | '_' | '-'))
+    {
+        return reject(&format!("identifier contains illegal character {bad:?}"));
+    }
+    Ok(())
 }
 
 /// Resolve the default keyring root: `~/.buildplane/keys`.
@@ -65,7 +106,7 @@ pub fn load_signing_key(key_ref: &KeyringRef) -> Result<SigningKey> {
 /// File format is a raw 32-byte ed25519 seed. Errors carry only the path that
 /// was attempted and an opaque reason — never seed bytes.
 pub fn load_signing_key_at(root: &Path, key_ref: &KeyringRef) -> Result<SigningKey> {
-    let path = key_ref.path_under(root);
+    let path = key_ref.path_under(root)?;
     let bytes = std::fs::read(&path).map_err(|err| LedgerError::InvalidPayload {
         kind: "<keyring>".into(),
         reason: format!("reading key at {}: {}", path.display(), err.kind()),
@@ -189,7 +230,79 @@ mod tests {
     #[test]
     fn path_under_uses_actor_scoped_layout() {
         let key_ref = KeyringRef::new("kernel", "kernel-main");
-        let path = key_ref.path_under(Path::new("/root/keys"));
+        let path = key_ref.path_under(Path::new("/root/keys")).unwrap();
         assert!(path.ends_with("kernel/kernel-main.ed25519"));
+    }
+
+    #[test]
+    fn valid_key_id_resolves_under_actor_dir() {
+        let root = Path::new("/root/keys");
+        let key_ref = KeyringRef::new("kernel", "kernel-main");
+        let path = key_ref.path_under(root).unwrap();
+        let actor_dir = root.join("kernel");
+        assert!(
+            path.starts_with(&actor_dir),
+            "resolved path {path:?} escaped actor dir {actor_dir:?}"
+        );
+        assert!(path.ends_with("kernel/kernel-main.ed25519"));
+    }
+
+    #[test]
+    fn rejects_parent_traversal_key_id() {
+        let key_ref = KeyringRef::new("kernel", "../../foo");
+        let err = key_ref.path_under(Path::new("/root/keys")).unwrap_err();
+        assert!(matches!(err, LedgerError::UnsafeKeyringId { .. }), "got: {err}");
+        // load path must reject identically.
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(matches!(
+            load_signing_key_at(tmp.path(), &key_ref).unwrap_err(),
+            LedgerError::UnsafeKeyringId { .. }
+        ));
+    }
+
+    #[test]
+    fn rejects_absolute_path_key_id() {
+        let key_ref = KeyringRef::new("kernel", "/tmp/foo");
+        let err = key_ref.path_under(Path::new("/root/keys")).unwrap_err();
+        assert!(matches!(err, LedgerError::UnsafeKeyringId { .. }), "got: {err}");
+    }
+
+    #[test]
+    fn rejects_path_separator_key_id() {
+        let key_ref = KeyringRef::new("kernel", "a/b");
+        let err = key_ref.path_under(Path::new("/root/keys")).unwrap_err();
+        assert!(matches!(err, LedgerError::UnsafeKeyringId { .. }), "got: {err}");
+    }
+
+    #[test]
+    fn rejects_dot_dot_key_id() {
+        let key_ref = KeyringRef::new("kernel", "..");
+        let err = key_ref.path_under(Path::new("/root/keys")).unwrap_err();
+        assert!(matches!(err, LedgerError::UnsafeKeyringId { .. }), "got: {err}");
+    }
+
+    #[test]
+    fn rejects_backslash_and_unsafe_actor_id() {
+        // Backslash separator (Windows-style traversal).
+        let err = KeyringRef::new("kernel", "a\\b")
+            .path_under(Path::new("/root/keys"))
+            .unwrap_err();
+        assert!(matches!(err, LedgerError::UnsafeKeyringId { .. }), "got: {err}");
+        // Actor id is validated too — a traversal actor escapes the keyring root.
+        let err = KeyringRef::new("../../kernel", "kernel-main")
+            .path_under(Path::new("/root/keys"))
+            .unwrap_err();
+        assert!(matches!(err, LedgerError::UnsafeKeyringId { .. }), "got: {err}");
+    }
+
+    #[test]
+    fn unsafe_id_error_does_not_leak_key_bytes() {
+        // The rejected id is echoed (a descriptor), but never any key material.
+        let err = KeyringRef::new("kernel", "../../foo")
+            .path_under(Path::new("/root/keys"))
+            .unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("../../foo"), "expected offending id in msg: {msg}");
+        assert!(!msg.contains(".ed25519"), "must not leak resolved path: {msg}");
     }
 }

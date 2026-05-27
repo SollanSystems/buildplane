@@ -147,6 +147,12 @@ pub fn verify_event_signature(
     signature: &EventSignatureV1,
     trusted_keys: &TrustedPublicKeys,
 ) -> VerificationStatus {
+    // Bind the signature to this exact event id before any crypto work: a
+    // signature lifted from a different event must not verify here.
+    if signature.event_id != event.id {
+        return VerificationStatus::HashMismatch;
+    }
+
     let Ok(actual_hash) = canonical_event_hash(event) else {
         return VerificationStatus::HashMismatch;
     };
@@ -163,6 +169,17 @@ pub fn verify_event_signature(
     let Ok(public_key) = VerifyingKey::from_bytes(public_key_bytes) else {
         return VerificationStatus::MissingKey;
     };
+
+    // Bind the retrieved key to its claimed hash. If the trust registry maps the
+    // claimed `public_key_hash` to bytes whose actual hash differs, the trusted
+    // key for that claimed identity effectively does not exist — fail closed
+    // rather than verify against a key whose real identity differs from the
+    // claim. `public_key_for` keyed on `Some(hash)`, so the hash is present here.
+    if let Some(claimed_hash) = signature.signer.public_key_hash.as_deref() {
+        if public_key_hash(&public_key) != claimed_hash {
+            return VerificationStatus::MissingKey;
+        }
+    }
 
     let Ok(signature_bytes) = URL_SAFE_NO_PAD.decode(&signature.signature) else {
         return VerificationStatus::BadSignature;
@@ -259,6 +276,57 @@ mod tests {
 
         let status = verify_event_signature(&event, &signature, &trusted_keys(&signing_key));
         assert_eq!(status, VerificationStatus::Verified);
+    }
+
+    #[test]
+    fn verify_rejects_wrong_key_for_claimed_hash() {
+        // A registry that maps the claimed hash string to the WRONG key bytes
+        // must not verify, even for an otherwise well-formed signature.
+        let event = sample_event();
+        let signing_key = fixture_signing_key();
+        let signer = ActorKeyRef {
+            actor_id: "kernel".into(),
+            key_id: "kernel-main".into(),
+            public_key_hash: None,
+        };
+        let signature =
+            sign_event(&event, &signing_key, &signer, "2026-05-22T23:30:00Z".parse().unwrap())
+                .unwrap();
+
+        let claimed_hash = signature.signer.public_key_hash.clone().unwrap();
+        // Map the claimed hash to a DIFFERENT key's bytes.
+        let other_key = SigningKey::from_bytes(&[99u8; 32]);
+        let mut poisoned = TrustedPublicKeys::default();
+        poisoned.insert_public_key(
+            claimed_hash,
+            other_key.verifying_key().to_bytes().to_vec(),
+        );
+
+        assert_eq!(
+            verify_event_signature(&event, &signature, &poisoned),
+            VerificationStatus::MissingKey
+        );
+    }
+
+    #[test]
+    fn verify_rejects_signature_for_different_event_id() {
+        let event = sample_event();
+        let signing_key = fixture_signing_key();
+        let signer = ActorKeyRef {
+            actor_id: "kernel".into(),
+            key_id: "kernel-main".into(),
+            public_key_hash: None,
+        };
+        let mut signature =
+            sign_event(&event, &signing_key, &signer, "2026-05-22T23:30:00Z".parse().unwrap())
+                .unwrap();
+        // Re-point the signature at a different event id.
+        signature.event_id = EventId::new();
+
+        assert_eq!(
+            verify_event_signature(&event, &signature, &trusted_keys(&signing_key)),
+            VerificationStatus::HashMismatch
+        );
     }
 
     #[test]

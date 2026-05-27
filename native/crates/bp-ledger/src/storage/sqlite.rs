@@ -130,6 +130,13 @@ impl SqliteStore {
     /// The signature is produced before the inserts so a signing error never
     /// touches the database. `signer.public_key_hash` is overwritten by
     /// [`sign_event`] with the verifying-key digest.
+    ///
+    /// On a `COMMIT` failure the transaction is dropped without committing, so
+    /// the inserts leave no committed state on this per-process connection; the
+    /// error is surfaced to the caller and the append fails closed.
+    // TODO(M4-04 multi-actor): `signer` is currently always the kernel actor,
+    // so every event is signed under kernel authorship. Per-actor signing is a
+    // follow-up (see R-004); this slice intentionally signs all-under-kernel.
     pub fn append_signed(
         &self,
         event: &Event,

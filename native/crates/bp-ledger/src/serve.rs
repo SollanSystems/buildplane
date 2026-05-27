@@ -33,6 +33,9 @@ pub enum SigningConfig {
     /// Sign each ingested event with the loaded kernel key, atomically with the
     /// event-row insert. Append fails closed on any signing or insert error.
     Signed {
+        // TODO(M2 R-003): wrap the loaded seed in a zeroizing container so the
+        // private key material is scrubbed from memory on drop. ed25519-dalek's
+        // `SigningKey` does not zeroize on drop by default; deferred this slice.
         signing_key: SigningKey,
         signer: ActorKeyRef,
     },

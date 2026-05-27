@@ -125,6 +125,80 @@ fn signing_failure_fails_closed_event_not_persisted() {
 }
 
 #[test]
+fn signature_insert_failure_rolls_back_event_row_atomically() {
+    // Headline fail-closed guarantee: if `insert_event_signature` fails AFTER
+    // `insert_event` has already succeeded inside the same transaction, the
+    // whole append must roll back — no orphaned event row, no partial state.
+    //
+    // We force the *post-insert* failure by pre-seeding an `event_signatures`
+    // row that collides on the PK (`event_id`) the append will try to write.
+    // The `event_signatures.event_id` FK references `events(id)`, so we seed the
+    // orphan signature row with foreign keys momentarily off; this never adds an
+    // events row, so `append_signed`'s `insert_event` still succeeds and the
+    // failure lands exactly on the signature insert.
+    let tmp = tempfile::tempdir().unwrap();
+    write_fixture_key(tmp.path(), "kernel", "kernel-main");
+    let signing_key =
+        load_signing_key_at(tmp.path(), &KeyringRef::new("kernel", "kernel-main")).unwrap();
+
+    let store = SqliteStore::open_in_memory().unwrap();
+    let run_id = RunId::new();
+    let event = sample_event(run_id);
+
+    // Seed a colliding signature row (no matching events row exists yet).
+    let conn = store.conn_for_tests();
+    conn.execute_batch("PRAGMA foreign_keys=OFF").unwrap();
+    conn.execute(
+        r#"INSERT INTO event_signatures (
+            event_id, canonical_event_hash, actor_id, key_id, public_key_hash, algorithm, signature, signed_at
+        ) VALUES (?1, 'sha256:preexisting', 'kernel', 'kernel-main', NULL, 'ed25519', 'preexisting', '2026-05-22T23:30:00Z')"#,
+        rusqlite::params![event.id.to_string()],
+    )
+    .unwrap();
+    conn.execute_batch("PRAGMA foreign_keys=ON").unwrap();
+
+    let events_before = store.event_count().unwrap();
+    assert_eq!(events_before, 0, "no events row should exist before append");
+
+    let result = store.append_signed(&event, &signing_key, &kernel_signer());
+    let err = result.expect_err("signature-insert PK collision must surface as an error");
+    // Lock in that the failure is the *signature* insert (post event-insert),
+    // not the event insert itself: a UNIQUE/PK violation on event_signatures.
+    let msg = format!("{err}").to_lowercase();
+    assert!(
+        msg.contains("unique") || msg.contains("constraint") || msg.contains("primary key"),
+        "expected a constraint violation on the signature insert, got: {err}"
+    );
+
+    // (b) event row was rolled back, not left orphaned.
+    assert_eq!(
+        store.event_count().unwrap(),
+        events_before,
+        "event row must be rolled back when the signature insert fails"
+    );
+    let this_event_rows: i64 = store
+        .conn_for_tests()
+        .query_row(
+            "SELECT COUNT(*) FROM events WHERE id = ?1",
+            [event.id.to_string()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(this_event_rows, 0, "no orphaned event row for the failed append");
+
+    // (c) no partial state: only the single pre-seeded signature row remains.
+    let sig_count: i64 = store
+        .conn_for_tests()
+        .query_row(
+            "SELECT COUNT(*) FROM event_signatures WHERE event_id = ?1",
+            [event.id.to_string()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(sig_count, 1, "only the pre-seeded signature row should remain");
+}
+
+#[test]
 fn signed_append_errors_never_contain_private_key_bytes() {
     let tmp = tempfile::tempdir().unwrap();
     write_fixture_key(tmp.path(), "kernel", "kernel-main");

@@ -25,6 +25,9 @@ pub enum LedgerError {
 
     #[error("invalid payload for kind {kind}: {reason}")]
     InvalidPayload { kind: String, reason: String },
+
+    #[error("rejected unsafe keyring identifier ({which}): {reason}")]
+    UnsafeKeyringId { which: String, reason: String },
 }
 
 pub type Result<T> = std::result::Result<T, LedgerError>;
