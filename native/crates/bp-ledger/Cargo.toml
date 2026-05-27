@@ -17,11 +17,25 @@ thiserror.workspace = true
 typeshare.workspace = true
 uuid.workspace = true
 
+[features]
+# Exposes test-only escape hatches (raw connection access, checkpoint
+# fault injection) for in-crate unit tests AND integration tests. Absent
+# from default/release builds so these can never bypass the append
+# invariants in production.
+test-support = []
+
 [build-dependencies]
 typeshare = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
+# Self dev-dependency idiom: integration tests in `tests/*.rs` link the
+# crate as an external dependency and cannot enable a feature on it
+# directly. Pulling `bp-ledger` in here with `test-support` makes the
+# gated `conn_for_tests`/`fail_next_checkpoint_signature_insert_for_tests`
+# helpers visible to integration tests under the project's plain
+# `cargo test` invocation (no new flag required).
+bp-ledger = { path = ".", features = ["test-support"] }
 
 [[bin]]
 name = "bp-ledger-gen-fixtures"

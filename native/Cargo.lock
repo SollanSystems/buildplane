@@ -160,6 +160,7 @@ name = "bp-ledger"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "bp-ledger",
  "bp-ledger-macros",
  "chrono",
  "ed25519-dalek",

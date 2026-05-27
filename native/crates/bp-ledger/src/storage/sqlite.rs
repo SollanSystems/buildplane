@@ -14,6 +14,7 @@ use crate::signing::{
 use chrono::{DateTime, Utc};
 use ed25519_dalek::SigningKey;
 use rusqlite::{params, Connection, OptionalExtension};
+#[cfg(any(test, feature = "test-support"))]
 use std::cell::Cell;
 use std::path::Path;
 use uuid::Uuid;
@@ -58,7 +59,11 @@ impl CheckpointPolicy {
 pub struct SqliteStore {
     conn: Connection,
     /// Test-only one-shot fault injector for the checkpoint signature insert.
-    /// Always `false` in production; armed only by `*_for_tests` helpers.
+    /// Compiled in only under `cfg(test)` or the `test-support` feature, so it
+    /// is wholly absent from default/release builds; armed only by the
+    /// `*_for_tests` helper, read only by the `emit_checkpoint` test-fault
+    /// branch.
+    #[cfg(any(test, feature = "test-support"))]
     fail_next_checkpoint_signature_insert: Cell<bool>,
 }
 
@@ -70,6 +75,7 @@ impl SqliteStore {
         Self::init(&conn)?;
         Ok(Self {
             conn,
+            #[cfg(any(test, feature = "test-support"))]
             fail_next_checkpoint_signature_insert: Cell::new(false),
         })
     }
@@ -80,6 +86,7 @@ impl SqliteStore {
         Self::init(&conn)?;
         Ok(Self {
             conn,
+            #[cfg(any(test, feature = "test-support"))]
             fail_next_checkpoint_signature_insert: Cell::new(false),
         })
     }
@@ -177,6 +184,17 @@ impl SqliteStore {
     ///     same run. Checkpoint ids never constrain the ordinary sequence (an
     ///     internally-minted checkpoint id can exceed a later, pre-generated
     ///     ordinary id), so the comparison deliberately ignores checkpoints.
+    ///
+    /// Single-writer assumption: the monotonic-id check in (b) reads the
+    /// latest ordinary id and then inserts in two separate statements rather
+    /// than inside one transaction. This is sound under buildplane's M1
+    /// single-writer / single-operator model — one `serve` connection appends
+    /// to a given run, and SQLite serializes writers — so no concurrent append
+    /// can interleave between the read and the insert. A fully concurrent
+    /// multi-writer deployment would need this read-before-insert guard moved
+    /// inside the insert transaction (or backed by a DB-level uniqueness/
+    /// ordering constraint) to stay race-free; that is deliberately out of
+    /// scope here and noted for whoever lifts the single-writer assumption.
     fn validate_external_append(&self, event: &Event) -> Result<()> {
         if event.kind == EventKind::TapeCheckpoint {
             return Err(LedgerError::CallerSuppliedCheckpoint);
@@ -349,6 +367,7 @@ impl SqliteStore {
 
         let tx = self.conn.unchecked_transaction()?;
         insert_event(&tx, &checkpoint_event)?;
+        #[cfg(any(test, feature = "test-support"))]
         if self.fail_next_checkpoint_signature_insert.replace(false) {
             // Test-only injected fault: drop the tx without committing so the
             // checkpoint event row rolls back with its (never-inserted)
@@ -364,7 +383,9 @@ impl SqliteStore {
 
     /// Arm a one-shot fault that makes the next checkpoint signature insert fail
     /// after the checkpoint event row has been inserted in the same transaction.
-    /// Test-only — used to prove the checkpoint's fail-closed rollback.
+    /// Test-only — used to prove the checkpoint's fail-closed rollback. Gated
+    /// behind `cfg(test)`/`test-support` so it cannot exist on release builds.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn fail_next_checkpoint_signature_insert_for_tests(&self) {
         self.fail_next_checkpoint_signature_insert.set(true);
     }
@@ -560,7 +581,9 @@ impl SqliteStore {
     }
 
     /// Expose the raw connection for use by tests that need to assert
-    /// append-only behavior. Not part of the stable API.
+    /// append-only behavior. Not part of the stable API; gated behind
+    /// `cfg(test)`/`test-support` so it is absent from release builds.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn conn_for_tests(&self) -> &Connection {
         &self.conn
     }
