@@ -28,6 +28,12 @@ pub enum LedgerError {
 
     #[error("rejected unsafe keyring identifier ({which}): {reason}")]
     UnsafeKeyringId { which: String, reason: String },
+
+    #[error("caller-supplied tape_checkpoint events are rejected: checkpoints are ledger-internal and created only by the checkpoint emitter")]
+    CallerSuppliedCheckpoint,
+
+    #[error("non-monotonic event id for run {run_id}: incoming event id must be strictly greater than the latest existing event id for the same run")]
+    NonMonotonicEventId { run_id: String },
 }
 
 pub type Result<T> = std::result::Result<T, LedgerError>;

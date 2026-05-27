@@ -217,6 +217,13 @@ impl SqliteStore {
     ///
     /// `tape_checkpoint` events do not themselves count toward the cadence and
     /// are never checkpointed.
+    ///
+    /// Two-transaction edge: the ordinary event commits in its own transaction
+    /// before checkpoint emission. If checkpoint emission then fails (e.g. its
+    /// signature insert aborts), the ordinary event stays committed without its
+    /// (final) checkpoint. This is recoverable — a later signed event for the
+    /// run re-triggers emission over the still-uncheckpointed prefix — and never
+    /// breaks per-event verification, which does not depend on checkpoints.
     pub fn append_signed_with_checkpoint(
         &self,
         event: &Event,
@@ -224,6 +231,32 @@ impl SqliteStore {
         signer: &ActorKeyRef,
         policy: &CheckpointPolicy,
     ) -> Result<Vec<EventId>> {
+        // Guard (Codex P1-1): reject caller/wire-supplied checkpoint events
+        // before signing or persisting anything. `tape_checkpoint` events are
+        // ledger-internal and created only by `emit_checkpoint` (which inserts
+        // directly via `insert_event`/`insert_event_signature`, bypassing this
+        // public entry point), so this never blocks legitimate internal
+        // checkpoints. Without this, a producer could inject a forged checkpoint
+        // that `latest_checkpoint` would then trust, corrupting cadence.
+        if event.kind == EventKind::TapeCheckpoint {
+            return Err(LedgerError::CallerSuppliedCheckpoint);
+        }
+
+        // Guard (Codex P1-2): enforce a per-run strictly-monotonic event id on
+        // incoming ordinary events before signing or persisting. UUIDv7 ids are
+        // time-monotonic and runs are single-producer, so an id that is not
+        // strictly greater than the latest existing id for the SAME run would
+        // either be a replay or an out-of-order insert that could retroactively
+        // invalidate a checkpoint's coverage. The guard is per-run, so events
+        // for different runs interleaving freely are unaffected.
+        if let Some(latest) = self.latest_event_id_for_run(&event.run_id)? {
+            if event.id.as_uuid() <= latest.as_uuid() {
+                return Err(LedgerError::NonMonotonicEventId {
+                    run_id: event.run_id.to_string(),
+                });
+            }
+        }
+
         // Step 1+2 (spec ordering): append the ordinary event and flush its
         // detached signature atomically. Sign first so a signing failure never
         // reaches the storage transaction.
@@ -238,10 +271,6 @@ impl SqliteStore {
         let CheckpointPolicy::Enabled { cadence } = *policy else {
             return Ok(vec![]);
         };
-        // tape_checkpoint events themselves never trigger or join a checkpoint.
-        if event.kind == EventKind::TapeCheckpoint {
-            return Ok(vec![]);
-        }
 
         // Step 3: decide whether a checkpoint is due over the run's signed
         // ordinary events. `prior` is the last checkpoint for this run, if any.
@@ -325,6 +354,24 @@ impl SqliteStore {
         self.fail_next_checkpoint_signature_insert.set(true);
     }
 
+    /// The id of the most recently appended event for a run (any kind),
+    /// id-ordered (UUIDv7 = time order), or `None` if the run has no events.
+    /// Used by the per-run monotonic-id guard on the signed-append path.
+    fn latest_event_id_for_run(&self, run_id: &RunId) -> Result<Option<EventId>> {
+        let last: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT id FROM events WHERE run_id = ?1 ORDER BY id DESC LIMIT 1",
+                params![run_id.to_string()],
+                |r| r.get(0),
+            )
+            .optional()?;
+        match last {
+            Some(s) => Ok(Some(parse_event_id(&s, "events")?)),
+            None => Ok(None),
+        }
+    }
+
     /// The latest tape-root checkpoint for a run, if any.
     fn latest_checkpoint(&self, run_id: &RunId) -> Result<Option<StoredCheckpoint>> {
         let mut stmt = self.conn.prepare(
@@ -351,6 +398,7 @@ impl SqliteStore {
         Ok(Some(StoredCheckpoint {
             event_id,
             checkpoint_index: cp.checkpoint_index,
+            through_event_id: cp.through_event_id,
             through_event_count: cp.through_event_count,
         }))
     }
@@ -647,10 +695,19 @@ pub struct VerifiedEventRow {
 }
 
 /// Minimal projection of the latest checkpoint needed to chain the next one.
+///
+/// `through_event_id` is retained (alongside `through_event_count`) so the
+/// checkpoint chain stays auditable: each checkpoint records the exact last
+/// covered event id, not merely how many events it covered.
 #[derive(Debug, Clone)]
 struct StoredCheckpoint {
     event_id: EventId,
     checkpoint_index: u64,
+    /// Last covered event id of the prior checkpoint. Retained for chain
+    /// auditability; not yet consumed by emission logic (cadence uses
+    /// `through_event_count`).
+    #[allow(dead_code)]
+    through_event_id: EventId,
     through_event_count: u64,
 }
 

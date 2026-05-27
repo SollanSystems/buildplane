@@ -2,6 +2,7 @@
 //! tamper-evidence integration tests.
 
 use bp_ledger::canonicalize::canonical_event_hash;
+use bp_ledger::error::LedgerError;
 use bp_ledger::event::Event;
 use bp_ledger::id::{EventId, RunId};
 use bp_ledger::kind::EventKind;
@@ -271,7 +272,7 @@ fn final_checkpoint_emits_at_run_completed_with_uncheckpointed_events() {
 }
 
 #[test]
-fn no_final_checkpoint_when_no_uncheckpointed_events() {
+fn final_checkpoint_covers_lone_run_completed_event() {
     let store = SqliteStore::open_in_memory().unwrap();
     let key = fixture_key();
     let run_id = RunId::new();
@@ -394,4 +395,210 @@ fn disabled_policy_emits_no_checkpoints_even_signed() {
         .append_signed_with_checkpoint(&done, &key, &kernel_signer(), &CheckpointPolicy::Disabled)
         .unwrap();
     assert_eq!(checkpoints_for_run(&store, run_id).len(), 0);
+}
+
+/// Build a forged caller-supplied `tape_checkpoint` event as a wire producer
+/// might inject it.
+fn forged_checkpoint_event(run_id: RunId) -> Event {
+    Event {
+        id: EventId::new(),
+        run_id,
+        parent_event_id: None,
+        schema_version: 1,
+        kind: EventKind::TapeCheckpoint,
+        occurred_at: chrono::Utc::now(),
+        payload: Payload::TapeCheckpointV1(TapeCheckpointV1 {
+            run_id,
+            checkpoint_index: 999,
+            through_event_id: EventId::new(),
+            through_event_count: 999,
+            previous_checkpoint_event_id: None,
+            tape_root_hash: "sha256:forged".into(),
+            algorithm: TapeRootAlgorithm::Sha256Linear,
+        }),
+    }
+}
+
+#[test]
+fn caller_supplied_checkpoint_is_rejected_pre_persist() {
+    // Codex P1-1: a producer-supplied `tape_checkpoint` event must be rejected
+    // BEFORE signing or persisting, so a forged checkpoint can never enter the
+    // store for `latest_checkpoint` to trust.
+    let store = SqliteStore::open_in_memory().unwrap();
+    let key = fixture_key();
+    let run_id = RunId::new();
+    let policy = CheckpointPolicy::every(2);
+
+    let forged = forged_checkpoint_event(run_id);
+    let result = store.append_signed_with_checkpoint(&forged, &key, &kernel_signer(), &policy);
+    assert!(
+        matches!(result, Err(LedgerError::CallerSuppliedCheckpoint)),
+        "wire-supplied tape_checkpoint must be rejected with a typed error, got {result:?}"
+    );
+
+    // Nothing persisted: no event row, no signature row.
+    let event_rows: i64 = store
+        .conn_for_tests()
+        .query_row(
+            "SELECT COUNT(*) FROM events WHERE id = ?1",
+            [forged.id.to_string()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(event_rows, 0, "forged checkpoint event must never persist");
+    let sig_rows: i64 = store
+        .conn_for_tests()
+        .query_row(
+            "SELECT COUNT(*) FROM event_signatures WHERE event_id = ?1",
+            [forged.id.to_string()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(sig_rows, 0, "forged checkpoint must never be signed");
+    assert_eq!(
+        checkpoints_for_run(&store, run_id).len(),
+        0,
+        "no checkpoint may exist after a rejected injection"
+    );
+}
+
+#[test]
+fn checkpoint_injection_does_not_perturb_cadence() {
+    // An attempted forged-checkpoint injection between cadence events must leave
+    // cadence unaffected: `latest_checkpoint` only ever sees ledger-emitted
+    // checkpoints, so the real checkpoints still emit at the right boundaries.
+    let store = SqliteStore::open_in_memory().unwrap();
+    let key = fixture_key();
+    let run_id = RunId::new();
+    let policy = CheckpointPolicy::every(2);
+
+    let e1 = run_started(run_id);
+    store
+        .append_signed_with_checkpoint(&e1, &key, &kernel_signer(), &policy)
+        .unwrap();
+
+    // Inject a forged checkpoint claiming to cover everything — must be rejected.
+    let forged = forged_checkpoint_event(run_id);
+    assert!(store
+        .append_signed_with_checkpoint(&forged, &key, &kernel_signer(), &policy)
+        .is_err());
+
+    let e2 = run_started(run_id);
+    store
+        .append_signed_with_checkpoint(&e2, &key, &kernel_signer(), &policy)
+        .unwrap();
+
+    // Exactly one real cadence-2 checkpoint over the two ordinary events, with
+    // honest coverage — the forged index/count never leaked in.
+    let checkpoints = checkpoints_for_run(&store, run_id);
+    assert_eq!(checkpoints.len(), 1, "cadence unaffected by injection attempt");
+    let (_, cp) = &checkpoints[0];
+    assert_eq!(cp.checkpoint_index, 0);
+    assert_eq!(cp.through_event_count, 2);
+    assert_eq!(cp.through_event_id, e2.id);
+}
+
+#[test]
+fn lower_id_ordinary_append_rejected_per_run_monotonic() {
+    // Codex P1-2: an incoming ordinary event whose id is not strictly greater
+    // than the latest existing id for the SAME run is rejected, preserving
+    // "id-ordered prefix == append order" so checkpoint coverage can't be
+    // retroactively invalidated.
+    let store = SqliteStore::open_in_memory().unwrap();
+    let key = fixture_key();
+    let run_id = RunId::new();
+    let policy = CheckpointPolicy::every(256);
+
+    let first = run_started(run_id);
+    store
+        .append_signed_with_checkpoint(&first, &key, &kernel_signer(), &policy)
+        .unwrap();
+
+    // A lower-id event for the same run is rejected.
+    let mut lower = run_started(run_id);
+    lower.id = EventId::from_uuid(
+        uuid::Uuid::parse_str("00000000-0000-7000-8000-000000000000").unwrap(),
+    );
+    let result = store.append_signed_with_checkpoint(&lower, &key, &kernel_signer(), &policy);
+    assert!(
+        matches!(result, Err(LedgerError::NonMonotonicEventId { .. })),
+        "lower-id same-run append must be rejected, got {result:?}"
+    );
+
+    // An equal-id (replay) event for the same run is also rejected.
+    let mut equal = run_started(run_id);
+    equal.id = first.id;
+    let result = store.append_signed_with_checkpoint(&equal, &key, &kernel_signer(), &policy);
+    assert!(
+        matches!(result, Err(LedgerError::NonMonotonicEventId { .. })),
+        "equal-id same-run replay must be rejected, got {result:?}"
+    );
+
+    // Neither rejected event persisted.
+    let count: i64 = store
+        .conn_for_tests()
+        .query_row(
+            "SELECT COUNT(*) FROM events WHERE run_id = ?1",
+            [run_id.to_string()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 1, "only the first monotonic event persists");
+
+    // A normal monotonic append still passes.
+    let next = run_started(run_id);
+    assert!(next.id.as_uuid() > first.id.as_uuid());
+    store
+        .append_signed_with_checkpoint(&next, &key, &kernel_signer(), &policy)
+        .unwrap();
+}
+
+#[test]
+fn monotonic_guard_is_per_run_and_allows_interleaving() {
+    // The monotonic guard is per-run: a low-id event for run B is accepted even
+    // when run A already holds higher-id events. Interleaving distinct runs is
+    // unaffected.
+    let store = SqliteStore::open_in_memory().unwrap();
+    let key = fixture_key();
+    let policy = CheckpointPolicy::every(256);
+
+    let run_a = RunId::new();
+    let run_b = RunId::new();
+
+    // Append a high-id event to run A first.
+    let a1 = run_started(run_a);
+    store
+        .append_signed_with_checkpoint(&a1, &key, &kernel_signer(), &policy)
+        .unwrap();
+
+    // run B's first event carries a lower id than run A's existing event; the
+    // per-run guard must NOT reject it (different run_id).
+    let mut b1 = run_started(run_b);
+    b1.id = EventId::from_uuid(
+        uuid::Uuid::parse_str("00000000-0000-7000-8000-000000000001").unwrap(),
+    );
+    assert!(b1.id.as_uuid() < a1.id.as_uuid());
+    store
+        .append_signed_with_checkpoint(&b1, &key, &kernel_signer(), &policy)
+        .expect("per-run guard must not reject a low-id event for a different run");
+
+    // Both events persisted under their own runs.
+    let a_count: i64 = store
+        .conn_for_tests()
+        .query_row(
+            "SELECT COUNT(*) FROM events WHERE run_id = ?1",
+            [run_a.to_string()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let b_count: i64 = store
+        .conn_for_tests()
+        .query_row(
+            "SELECT COUNT(*) FROM events WHERE run_id = ?1",
+            [run_b.to_string()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(a_count, 1);
+    assert_eq!(b_count, 1);
 }

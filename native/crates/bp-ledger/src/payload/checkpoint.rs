@@ -51,16 +51,34 @@ pub enum TapeRootAlgorithm {
 /// Compute the v0.5 tape-root hash over an ordered slice of per-event canonical
 /// hash strings.
 ///
-/// Each input is the exact `canonical_event_hash` string of a signed event
-/// (`sha256:<hex>`), in tape order (UUIDv7 id ascending). The root is:
+/// # Checkpoint root contract (M1-S7 load-bearing)
+///
+/// Let `H` be the multiset of stored `event_signatures.canonical_event_hash`
+/// strings for the run's **signed, non-`tape_checkpoint`** events — i.e. events
+/// that have a persisted signature row and whose `kind != tape_checkpoint`.
+/// Order `H` by the event `id` ascending (UUIDv7 = tape order). Then:
 ///
 /// ```text
-/// tape_root_hash = "sha256:" + hex(sha256(join("\n", ordered canonical_event_hash strings)))
+/// tape_root_hash = "sha256:" + hex(sha256(join("\n", H)))
 /// ```
 ///
-/// This is the precise contract an external verifier (M1-S7) must mirror: it
-/// hashes the per-event `sha256:<hex>` *strings*, joined by a single `\n`, with
-/// no trailing newline. An empty input hashes the empty byte string.
+/// Precisely:
+///
+/// - the input is each event's exact stored `canonical_event_hash` *string*
+///   (`sha256:<hex>`), NOT a re-hash of the event bytes here;
+/// - the strings are joined by a single `\n` (U+000A) separator with **no
+///   trailing newline** (an N-element join has N-1 separators);
+/// - `through_event_count` on the checkpoint equals the number of such signed,
+///   non-`tape_checkpoint` events covered — NOT the count of all run events;
+/// - **unsigned/legacy events are excluded** from `H` entirely (they carry no
+///   signature row); a "full prefix including unsigned events" reading is wrong;
+/// - `tape_checkpoint` events themselves are never members of `H`.
+///
+/// An external verifier reproduces the root by loading exactly those signed,
+/// non-checkpoint event rows for the run, reading their stored
+/// `canonical_event_hash` strings in id order, `\n`-joining with no trailing
+/// newline, and `sha256`-ing the joined bytes. An empty `H` hashes the empty
+/// byte string.
 pub fn tape_root_hash(ordered_canonical_event_hashes: &[String]) -> String {
     let joined = ordered_canonical_event_hashes.join("\n");
     let mut hasher = Sha256::new();
