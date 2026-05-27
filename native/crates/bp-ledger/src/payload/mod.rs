@@ -1,5 +1,6 @@
 //! Event payload definitions, versioned per kind.
 
+pub mod checkpoint;
 pub mod git_checkpoint;
 pub mod model_io;
 pub mod run_lifecycle;
@@ -33,4 +34,5 @@ pub enum Payload {
     ToolResultV1(tool_io::ToolResultV1),
     WorkspaceReadV1(workspace::WorkspaceReadV1),
     WorkspaceWriteV1(workspace::WorkspaceWriteV1),
+    TapeCheckpointV1(checkpoint::TapeCheckpointV1),
 }

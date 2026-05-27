@@ -353,6 +353,39 @@ Acceptance:
 - Checkpoint root recomputes from canonical event hashes.
 - Fixture freshness passes.
 
+#### Checkpoint root contract (S7 load-bearing)
+
+The external verifier (M1-S7) MUST reproduce the stored `tape_root_hash`
+exactly as follows. Let `H` be the ordered list of stored
+`event_signatures.canonical_event_hash` strings for the run's **signed,
+non-`tape_checkpoint`** events — events that have a persisted signature row and
+whose `kind != tape_checkpoint` — ordered by event `id` ascending (UUIDv7 = tape
+order). Then:
+
+```text
+tape_root_hash = "sha256:" + hex(sha256(join("\n", H)))
+```
+
+Exact rules, with no room for a "full prefix including unsigned" reading:
+
+- The hashed inputs are each event's exact stored `canonical_event_hash`
+  *string* (`sha256:<hex>`). The verifier joins these stored strings; it does not
+  re-hash event bytes at this step.
+- Join with a single `\n` (U+000A) separator and **no trailing newline**: an
+  `N`-element list produces `N-1` separators.
+- `through_event_count` equals the number of signed, non-`tape_checkpoint`
+  events covered — **not** the count of all run events.
+- **Unsigned / legacy events are excluded** from `H` entirely (they carry no
+  signature row). They do not contribute to the hash and are not counted.
+- `tape_checkpoint` events are never members of `H` (they neither contribute to
+  nor count toward any checkpoint).
+
+Caller-supplied `tape_checkpoint` events are rejected by the signed-append entry
+point before signing/persisting; only the ledger's own checkpoint emitter
+creates them. The signed-append path also enforces a per-run strictly-monotonic
+event id (single-producer, time-monotonic UUIDv7), so a checkpoint's id-ordered
+coverage prefix can never be retroactively invalidated by a lower-id insert.
+
 Verification:
 
 ```bash

@@ -2,7 +2,8 @@
 //! Phase B drift alarm: TS exhaustive switch is kept in sync by comparing
 //! against this generated file in CI.
 
-use bp_ledger::id::EventId;
+use bp_ledger::id::{EventId, RunId};
+use bp_ledger::payload::checkpoint::{TapeCheckpointV1, TapeRootAlgorithm};
 use bp_ledger::payload::git_checkpoint::{
     CheckpointBoundary, GitCheckpointV1, GitStatus,
 };
@@ -29,6 +30,13 @@ use std::path::PathBuf;
 fn fixed_event_id(n: u8) -> EventId {
     EventId::from_uuid(
         uuid::Uuid::parse_str(&format!("01919000-0000-7000-8000-{:012}", n)).unwrap(),
+    )
+}
+
+/// Fixed deterministic RunId for fixture stability.
+fn fixed_run_id() -> RunId {
+    RunId::from_uuid(
+        uuid::Uuid::parse_str("01919000-0000-7000-8000-0000000000ff").unwrap(),
     )
 }
 
@@ -133,6 +141,16 @@ fn main() {
         serde_json::to_value(Payload::WorkspaceWriteV1(WorkspaceWriteV1 {
             tool_request_id: fixed_event_id(3), path: "x".into(), hash_before: None,
             after: PostWriteState::Captured { hash: "sha256:aa".into(), size_bytes: 0 },
+        })).unwrap(),
+
+        serde_json::to_value(Payload::TapeCheckpointV1(TapeCheckpointV1 {
+            run_id: fixed_run_id(),
+            checkpoint_index: 0,
+            through_event_id: fixed_event_id(4),
+            through_event_count: 2,
+            previous_checkpoint_event_id: None,
+            tape_root_hash: "sha256:aa".into(),
+            algorithm: TapeRootAlgorithm::Sha256Linear,
         })).unwrap(),
     ];
 

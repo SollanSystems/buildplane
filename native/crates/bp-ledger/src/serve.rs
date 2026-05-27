@@ -11,7 +11,7 @@ use crate::event::Event;
 use crate::id::EventId;
 use crate::keyring::{load_signing_key, KeyringRef};
 use crate::signing::ActorKeyRef;
-use crate::storage::sqlite::SqliteStore;
+use crate::storage::sqlite::{CheckpointPolicy, SqliteStore};
 use crate::storage::Cas;
 use ed25519_dalek::SigningKey;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -32,12 +32,16 @@ pub enum SigningConfig {
     Unsigned,
     /// Sign each ingested event with the loaded kernel key, atomically with the
     /// event-row insert. Append fails closed on any signing or insert error.
+    ///
+    /// Emits tape-root checkpoints per `checkpoint_policy` (default cadence:
+    /// 256 signed events per run, plus a final checkpoint at `run_completed`).
     Signed {
         // TODO(M2 R-003): wrap the loaded seed in a zeroizing container so the
         // private key material is scrubbed from memory on drop. ed25519-dalek's
         // `SigningKey` does not zeroize on drop by default; deferred this slice.
         signing_key: SigningKey,
         signer: ActorKeyRef,
+        checkpoint_policy: CheckpointPolicy,
     },
 }
 
@@ -56,6 +60,7 @@ impl SigningConfig {
                 key_id: key_ref.key_id.clone(),
                 public_key_hash: None,
             },
+            checkpoint_policy: CheckpointPolicy::default(),
         })
     }
 }
@@ -65,10 +70,15 @@ impl std::fmt::Debug for SigningConfig {
         // Never render key material.
         match self {
             SigningConfig::Unsigned => f.write_str("SigningConfig::Unsigned"),
-            SigningConfig::Signed { signer, .. } => f
+            SigningConfig::Signed {
+                signer,
+                checkpoint_policy,
+                ..
+            } => f
                 .debug_struct("SigningConfig::Signed")
                 .field("actor_id", &signer.actor_id)
                 .field("key_id", &signer.key_id)
+                .field("checkpoint_policy", checkpoint_policy)
                 .finish_non_exhaustive(),
         }
     }
@@ -228,7 +238,15 @@ pub fn serve_with_protocol<R: Read, W: Write>(
                     SigningConfig::Signed {
                         signing_key,
                         signer,
-                    } => store.append_signed(&canonical, signing_key, signer),
+                        checkpoint_policy,
+                    } => store
+                        .append_signed_with_checkpoint(
+                            &canonical,
+                            signing_key,
+                            signer,
+                            checkpoint_policy,
+                        )
+                        .map(|_| ()),
                 };
                 if let Err(e) = append_result {
                     write_error(&mut stderr, "storage_failure", line_no, &format!("{}", e))?;

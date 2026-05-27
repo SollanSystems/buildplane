@@ -23,7 +23,10 @@ pub fn apply(state: &mut ReplayState, event: &Event) {
         Payload::GitCheckpointV1(p) => apply_git_checkpoint(state, event, p),
         Payload::RunAdmissionRecordedV1(_)
         | Payload::ModelRequestV1(_)
-        | Payload::ModelResponseV1(_) => {}
+        | Payload::ModelResponseV1(_)
+        // Tape-root checkpoints (M1-S6) are tape-integrity metadata, not
+        // replayable state transitions — no-op during replay.
+        | Payload::TapeCheckpointV1(_) => {}
         Payload::ToolRequestStoredV1(p) => apply_tool_request(state, event, p),
         Payload::ToolResultV1(p) => apply_tool_result(state, event, p),
         Payload::WorkspaceReadV1(_) => {}

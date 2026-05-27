@@ -173,5 +173,16 @@
 			"path": "x",
 			"tool_request_id": "01919000-0000-7000-8000-000000000003"
 		}
+	},
+	{
+		"TapeCheckpointV1": {
+			"algorithm": "sha256_linear",
+			"checkpoint_index": 0,
+			"previous_checkpoint_event_id": null,
+			"run_id": "01919000-0000-7000-8000-0000000000ff",
+			"tape_root_hash": "sha256:aa",
+			"through_event_count": 2,
+			"through_event_id": "01919000-0000-7000-8000-000000000004"
+		}
 	}
 ]

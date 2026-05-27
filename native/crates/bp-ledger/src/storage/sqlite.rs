@@ -5,6 +5,8 @@ use crate::error::{LedgerError, Result};
 use crate::event::Event;
 use crate::id::{EventId, RunId};
 use crate::kind::EventKind;
+use crate::payload::checkpoint::{tape_root_hash, TapeCheckpointV1, TapeRootAlgorithm};
+use crate::payload::Payload;
 use crate::signing::{
     sign_event, verify_event_signature, ActorKeyRef, EventSignatureV1, SignatureAlgorithm,
     TrustedPublicKeys, VerificationStatus,
@@ -12,12 +14,73 @@ use crate::signing::{
 use chrono::{DateTime, Utc};
 use ed25519_dalek::SigningKey;
 use rusqlite::{params, Connection, OptionalExtension};
+#[cfg(any(test, feature = "test-support"))]
+use std::cell::Cell;
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::path::Path;
 use uuid::Uuid;
+
+/// Default tape-root checkpoint cadence: emit one checkpoint per 256 signed
+/// events per run.
+pub const DEFAULT_CHECKPOINT_CADENCE: u64 = 256;
+
+/// Tape-root checkpoint emission policy for the signed-append path.
+///
+/// Checkpoints belong to signed mode. A `Disabled` policy (the default for the
+/// legacy [`SqliteStore::append_signed`] surface) never emits checkpoints.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CheckpointPolicy {
+    /// Never emit tape-root checkpoints.
+    Disabled,
+    /// Emit a checkpoint every `cadence` signed ordinary events per run, and a
+    /// final checkpoint at `run_completed` when at least one signed ordinary
+    /// event is uncheckpointed since the last checkpoint.
+    Enabled { cadence: u64 },
+}
+
+impl Default for CheckpointPolicy {
+    fn default() -> Self {
+        CheckpointPolicy::Enabled {
+            cadence: DEFAULT_CHECKPOINT_CADENCE,
+        }
+    }
+}
+
+impl CheckpointPolicy {
+    /// Enable checkpoints with an explicit per-run cadence. A cadence of 0 is
+    /// treated as 1 (emit on every signed event) to avoid a divide-by-never.
+    pub fn every(cadence: u64) -> Self {
+        CheckpointPolicy::Enabled {
+            cadence: cadence.max(1),
+        }
+    }
+}
 
 /// SQLite connection wrapping the events + runs schema.
 pub struct SqliteStore {
     conn: Connection,
+    /// Per-run high-water mark of the latest NON-checkpoint event id, used by
+    /// the monotonic-id guard so it never has to issue a per-append `SELECT`.
+    ///
+    /// Lazily seeded from the DB the first time a run is touched (one query per
+    /// run, via [`Self::latest_ordinary_event_id_for_run`]), then advanced
+    /// in-process on every successful ordinary append. This is the O(1) replacement
+    /// for a per-event ordinary-id lookup, sound under buildplane's M1
+    /// single-writer model (see [`Self::validate_external_append`]). Checkpoint
+    /// ids deliberately never advance the mark — checkpoints are minted after the
+    /// events they cover and must not constrain the ordinary sequence.
+    ///
+    /// `RefCell` because the public append entry points take `&self`; the
+    /// single-writer model means there is never a concurrent borrow.
+    ordinary_id_high_water: RefCell<HashMap<RunId, EventId>>,
+    /// Test-only one-shot fault injector for the checkpoint signature insert.
+    /// Compiled in only under `cfg(test)` or the `test-support` feature, so it
+    /// is wholly absent from default/release builds; armed only by the
+    /// `*_for_tests` helper, read only by the `emit_checkpoint` test-fault
+    /// branch.
+    #[cfg(any(test, feature = "test-support"))]
+    fail_next_checkpoint_signature_insert: Cell<bool>,
 }
 
 impl SqliteStore {
@@ -26,14 +89,24 @@ impl SqliteStore {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let conn = Connection::open(path)?;
         Self::init(&conn)?;
-        Ok(Self { conn })
+        Ok(Self {
+            conn,
+            ordinary_id_high_water: RefCell::new(HashMap::new()),
+            #[cfg(any(test, feature = "test-support"))]
+            fail_next_checkpoint_signature_insert: Cell::new(false),
+        })
     }
 
     /// Open an in-memory database for tests.
     pub fn open_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
         Self::init(&conn)?;
-        Ok(Self { conn })
+        Ok(Self {
+            conn,
+            ordinary_id_high_water: RefCell::new(HashMap::new()),
+            #[cfg(any(test, feature = "test-support"))]
+            fail_next_checkpoint_signature_insert: Cell::new(false),
+        })
     }
 
     fn init(conn: &Connection) -> Result<()> {
@@ -106,8 +179,89 @@ impl SqliteStore {
     }
 
     /// Append an event to the log. Fails if the id already exists.
+    ///
+    /// This is the raw/unsigned public append path. It still runs the shared
+    /// external-append validation so a caller can never inject a forged
+    /// `tape_checkpoint` (checkpoints are ledger-internal in EVERY mode) or an
+    /// out-of-order ordinary event id, regardless of signing mode.
     pub fn append(&self, event: &Event) -> Result<()> {
-        insert_event(&self.conn, event)
+        self.validate_external_append(event)?;
+        insert_event(&self.conn, event)?;
+        self.record_ordinary_append(event);
+        Ok(())
+    }
+
+    /// Validation enforced on every public append entry point for events that
+    /// arrive from a caller/wire (NOT internal checkpoint creation).
+    ///
+    /// (a) Reject caller-supplied `tape_checkpoint` events: checkpoints are
+    ///     ledger-internal and minted only by [`Self::emit_checkpoint`], which
+    ///     inserts directly through the private `insert_event`/
+    ///     `insert_event_signature` and so bypasses this helper. Enforced in
+    ///     EVERY mode (signed and unsigned).
+    /// (b) Per-run strictly-monotonic ordinary-event id: reject an ordinary
+    ///     event whose id is `<=` the latest NON-checkpoint event id for the
+    ///     same run. Checkpoint ids never constrain the ordinary sequence (an
+    ///     internally-minted checkpoint id can exceed a later, pre-generated
+    ///     ordinary id), so the comparison deliberately ignores checkpoints.
+    ///
+    /// Single-writer assumption: the monotonic-id check in (b) compares against
+    /// an in-process per-run high-water mark
+    /// ([`Self::ordinary_id_high_water`]) and then inserts in two separate steps
+    /// rather than inside one transaction. The mark is seeded from the DB once
+    /// per run (lazily, on first touch) and advanced in-process on each
+    /// successful ordinary append, so the guard runs in O(1) with no per-append
+    /// `SELECT`. This is sound under buildplane's M1 single-writer /
+    /// single-operator model — one `serve` connection appends to a given run,
+    /// and SQLite serializes writers — so no concurrent append can interleave
+    /// between the check and the insert, and the in-memory mark cannot drift
+    /// from durable state. A fully concurrent multi-writer deployment would need
+    /// this guard moved inside the insert transaction (or backed by a DB-level
+    /// uniqueness/ordering constraint) to stay race-free; that is deliberately
+    /// out of scope here and noted for whoever lifts the single-writer
+    /// assumption.
+    fn validate_external_append(&self, event: &Event) -> Result<()> {
+        if event.kind == EventKind::TapeCheckpoint {
+            return Err(LedgerError::CallerSuppliedCheckpoint);
+        }
+        if let Some(latest) = self.latest_ordinary_id(&event.run_id)? {
+            if event.id.as_uuid() <= latest.as_uuid() {
+                return Err(LedgerError::NonMonotonicEventId {
+                    run_id: event.run_id.to_string(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// The latest NON-checkpoint event id for `run_id`, served from the
+    /// in-process high-water mark and seeded once from the DB on first touch.
+    ///
+    /// `None` means the run has no ordinary events yet (a fresh run, or a run
+    /// whose only rows are checkpoints — which never advance the mark).
+    fn latest_ordinary_id(&self, run_id: &RunId) -> Result<Option<EventId>> {
+        if let Some(id) = self.ordinary_id_high_water.borrow().get(run_id) {
+            return Ok(Some(*id));
+        }
+        // Cold run: one DB query to seed the mark, then cache it. Subsequent
+        // appends for this run are served purely from memory.
+        let seeded = self.latest_ordinary_event_id_for_run(run_id)?;
+        if let Some(id) = seeded {
+            self.ordinary_id_high_water.borrow_mut().insert(*run_id, id);
+        }
+        Ok(seeded)
+    }
+
+    /// Advance the per-run high-water mark after a successful ordinary append.
+    /// `validate_external_append` guarantees the new id is strictly greater than
+    /// any prior ordinary id for the run, so this is an unconditional set.
+    /// Never called for checkpoint events — checkpoints must not constrain the
+    /// ordinary id sequence.
+    fn record_ordinary_append(&self, event: &Event) {
+        debug_assert_ne!(event.kind, EventKind::TapeCheckpoint);
+        self.ordinary_id_high_water
+            .borrow_mut()
+            .insert(event.run_id, event.id);
     }
 
     /// Append a detached event signature. The `event_signatures` table is
@@ -143,15 +297,251 @@ impl SqliteStore {
         signing_key: &SigningKey,
         signer: &ActorKeyRef,
     ) -> Result<()> {
-        // Sign first: a signing failure (e.g. unsupported schema version) must
-        // never reach the storage transaction.
+        self.append_signed_with_checkpoint(event, signing_key, signer, &CheckpointPolicy::Disabled)
+            .map(|_| ())
+    }
+
+    /// Append a signed event and, per `policy`, emit a tape-root checkpoint.
+    ///
+    /// This first appends the ordinary event and its detached signature exactly
+    /// as [`append_signed`] does (one atomic transaction; fails closed on any
+    /// signing or insert error). Then, in signed mode with an enabled policy:
+    ///
+    /// 1. count the run's uncheckpointed signed ordinary events;
+    /// 2. if the cadence boundary is reached — or the event is `run_completed`
+    ///    and at least one signed ordinary event is uncheckpointed — build a
+    ///    checkpoint over the full prefix of the run's signed ordinary event
+    ///    hashes through the latest such event;
+    /// 3. sign the checkpoint event and append it together with its signature in
+    ///    a single transaction, so a checkpoint never persists without its
+    ///    signature (fail closed).
+    ///
+    /// Returns the ids of any checkpoint events emitted (0 or 1). A failure
+    /// while building/appending the checkpoint surfaces as an error; the
+    /// ordinary event remains committed (it was its own atomic append), but the
+    /// checkpoint event and its signature roll back together.
+    ///
+    /// `tape_checkpoint` events do not themselves count toward the cadence and
+    /// are never checkpointed.
+    ///
+    /// Two-transaction edge: the ordinary event commits in its own transaction
+    /// before checkpoint emission. If checkpoint emission then fails (e.g. its
+    /// signature insert aborts), the ordinary event stays committed without its
+    /// (final) checkpoint. This is recoverable — a later signed event for the
+    /// run re-triggers emission over the still-uncheckpointed prefix — and never
+    /// breaks per-event verification, which does not depend on checkpoints.
+    pub fn append_signed_with_checkpoint(
+        &self,
+        event: &Event,
+        signing_key: &SigningKey,
+        signer: &ActorKeyRef,
+        policy: &CheckpointPolicy,
+    ) -> Result<Vec<EventId>> {
+        // Shared external-append validation (Codex P1-1 + P1-2): reject a
+        // caller-supplied `tape_checkpoint` and any non-monotonic ordinary id
+        // for this run, before signing or persisting anything. Centralized in
+        // `validate_external_append` so every public append path (raw/unsigned
+        // `append`, `append_signed`, this method) stays consistent. Internal
+        // checkpoint creation bypasses it (see `emit_checkpoint`).
+        self.validate_external_append(event)?;
+
+        // Step 1+2 (spec ordering): append the ordinary event and flush its
+        // detached signature atomically. Sign first so a signing failure never
+        // reaches the storage transaction.
         let signature = sign_event(event, signing_key, signer, Utc::now())?;
+        {
+            let tx = self.conn.unchecked_transaction()?;
+            insert_event(&tx, event)?;
+            insert_event_signature(&tx, &signature)?;
+            tx.commit()?;
+        }
+        // The ordinary event is now durably committed (its own atomic
+        // transaction above), so advance the high-water mark before any
+        // checkpoint emission. A later checkpoint failure leaves this ordinary
+        // event committed, so the mark must reflect it regardless.
+        self.record_ordinary_append(event);
+
+        let CheckpointPolicy::Enabled { cadence } = *policy else {
+            return Ok(vec![]);
+        };
+
+        // Step 3: decide whether a checkpoint is due over the run's signed
+        // ordinary events. `prior` is the last checkpoint for this run, if any.
+        let prior = self.latest_checkpoint(&event.run_id)?;
+        let already_checkpointed = prior.as_ref().map(|p| p.through_event_count).unwrap_or(0);
+        let covered = self.signed_ordinary_events(&event.run_id)?;
+        let total = covered.len() as u64;
+        let uncheckpointed = total.saturating_sub(already_checkpointed);
+
+        let is_final = event.kind == EventKind::RunCompleted;
+        let cadence_due = uncheckpointed >= cadence;
+        let final_due = is_final && uncheckpointed >= 1;
+        if !cadence_due && !final_due {
+            return Ok(vec![]);
+        }
+
+        let checkpoint_id =
+            self.emit_checkpoint(&event.run_id, &covered, prior, signing_key, signer)?;
+        Ok(vec![checkpoint_id])
+    }
+
+    /// Build, sign, and atomically append a tape-root checkpoint over the full
+    /// prefix of `covered` (the run's signed ordinary events, id-ordered).
+    fn emit_checkpoint(
+        &self,
+        run_id: &RunId,
+        covered: &[SignedOrdinaryEvent],
+        prior: Option<StoredCheckpoint>,
+        signing_key: &SigningKey,
+        signer: &ActorKeyRef,
+    ) -> Result<EventId> {
+        let through = covered.last().expect("checkpoint requires >=1 covered event");
+        let hashes: Vec<String> = covered.iter().map(|e| e.canonical_event_hash.clone()).collect();
+        let root = tape_root_hash(&hashes);
+
+        let checkpoint_index = prior.as_ref().map(|p| p.checkpoint_index + 1).unwrap_or(0);
+        let previous_checkpoint_event_id = prior.as_ref().map(|p| p.event_id);
+
+        let payload = TapeCheckpointV1 {
+            run_id: *run_id,
+            checkpoint_index,
+            through_event_id: through.event_id,
+            through_event_count: covered.len() as u64,
+            previous_checkpoint_event_id,
+            tape_root_hash: root,
+            algorithm: TapeRootAlgorithm::Sha256Linear,
+        };
+
+        let checkpoint_event = Event {
+            id: EventId::new(),
+            run_id: *run_id,
+            parent_event_id: Some(through.event_id),
+            schema_version: Event::CURRENT_SCHEMA_VERSION,
+            kind: EventKind::TapeCheckpoint,
+            occurred_at: Utc::now(),
+            payload: Payload::TapeCheckpointV1(payload),
+        };
+
+        // Sign the checkpoint before opening the transaction.
+        let signature = sign_event(&checkpoint_event, signing_key, signer, Utc::now())?;
 
         let tx = self.conn.unchecked_transaction()?;
-        insert_event(&tx, event)?;
+        insert_event(&tx, &checkpoint_event)?;
+        #[cfg(any(test, feature = "test-support"))]
+        if self.fail_next_checkpoint_signature_insert.replace(false) {
+            // Test-only injected fault: drop the tx without committing so the
+            // checkpoint event row rolls back with its (never-inserted)
+            // signature. Mirrors a real signature-insert failure.
+            return Err(LedgerError::AppendOnlyViolation(
+                "injected checkpoint signature insert failure (test only)".into(),
+            ));
+        }
         insert_event_signature(&tx, &signature)?;
         tx.commit()?;
-        Ok(())
+        Ok(checkpoint_event.id)
+    }
+
+    /// Arm a one-shot fault that makes the next checkpoint signature insert fail
+    /// after the checkpoint event row has been inserted in the same transaction.
+    /// Test-only — used to prove the checkpoint's fail-closed rollback. Gated
+    /// behind `cfg(test)`/`test-support` so it cannot exist on release builds.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn fail_next_checkpoint_signature_insert_for_tests(&self) {
+        self.fail_next_checkpoint_signature_insert.set(true);
+    }
+
+    /// The id of the most recently appended NON-checkpoint event for a run,
+    /// id-ordered (UUIDv7 = time order), or `None` if the run has no ordinary
+    /// events. Used ONCE per run to lazily seed the in-memory monotonic-id
+    /// high-water mark (`latest_ordinary_id`); the per-append guard then reads
+    /// the in-memory mark, so this query never runs on the hot path.
+    ///
+    /// Checkpoints are excluded deliberately (Codex gate round 2 regression
+    /// fix): a `tape_checkpoint` id is minted by `emit_checkpoint` AFTER the
+    /// events it covers, so it can be greater than a subsequent legitimate
+    /// ordinary event whose id was generated earlier (batched/pre-generated
+    /// ids). Comparing the incoming ordinary id against the latest event of ANY
+    /// kind would then falsely reject that ordinary event. The ordinary-event
+    /// sequence must never be constrained by an internally-minted checkpoint id.
+    fn latest_ordinary_event_id_for_run(&self, run_id: &RunId) -> Result<Option<EventId>> {
+        let last: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT id FROM events
+                 WHERE run_id = ?1 AND kind != 'tape_checkpoint'
+                 ORDER BY id DESC LIMIT 1",
+                params![run_id.to_string()],
+                |r| r.get(0),
+            )
+            .optional()?;
+        match last {
+            Some(s) => Ok(Some(parse_event_id(&s, "events")?)),
+            None => Ok(None),
+        }
+    }
+
+    /// The latest tape-root checkpoint for a run, if any.
+    ///
+    /// Defense-in-depth (Codex gate round 2, fix #3): only SIGNED checkpoint
+    /// rows are trusted for cadence accounting. The `JOIN event_signatures`
+    /// means a hypothetical unsigned `tape_checkpoint` row (one without a
+    /// matching signature) is never returned, so it can never drive cadence,
+    /// chaining, or `previous_checkpoint_event_id`. After fix #1 the raw wire
+    /// injection of a checkpoint is already closed; this closes the read side.
+    fn latest_checkpoint(&self, run_id: &RunId) -> Result<Option<StoredCheckpoint>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT e.id, e.payload FROM events e
+             JOIN event_signatures s ON s.event_id = e.id
+             WHERE e.run_id = ?1 AND e.kind = 'tape_checkpoint'
+             ORDER BY e.id DESC LIMIT 1",
+        )?;
+        let row = stmt
+            .query_row(params![run_id.to_string()], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })
+            .optional()?;
+        let Some((id, payload_json)) = row else {
+            return Ok(None);
+        };
+        let event_id = parse_event_id(&id, "tape_checkpoint")?;
+        let payload: Payload = serde_json::from_str(&payload_json)?;
+        let Payload::TapeCheckpointV1(cp) = payload else {
+            return Err(invalid_payload(
+                "tape_checkpoint",
+                "checkpoint row payload is not a TapeCheckpointV1".into(),
+            ));
+        };
+        Ok(Some(StoredCheckpoint {
+            event_id,
+            checkpoint_index: cp.checkpoint_index,
+            through_event_id: cp.through_event_id,
+            through_event_count: cp.through_event_count,
+        }))
+    }
+
+    /// All signed, non-checkpoint events for a run, id-ordered (tape order),
+    /// paired with their stored canonical event hash. Only events with a
+    /// persisted signature row are returned — checkpoints cover signed events.
+    fn signed_ordinary_events(&self, run_id: &RunId) -> Result<Vec<SignedOrdinaryEvent>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT e.id, s.canonical_event_hash
+             FROM events e
+             JOIN event_signatures s ON s.event_id = e.id
+             WHERE e.run_id = ?1 AND e.kind != 'tape_checkpoint'
+             ORDER BY e.id ASC",
+        )?;
+        let rows = stmt.query_map(params![run_id.to_string()], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (id, canonical_event_hash) = row?;
+            out.push(SignedOrdinaryEvent {
+                event_id: parse_event_id(&id, "events")?,
+                canonical_event_hash,
+            });
+        }
+        Ok(out)
     }
 
     /// Read all events for a run, ordered by id (UUIDv7 = time-ordered).
@@ -253,7 +643,9 @@ impl SqliteStore {
     }
 
     /// Expose the raw connection for use by tests that need to assert
-    /// append-only behavior. Not part of the stable API.
+    /// append-only behavior. Not part of the stable API; gated behind
+    /// `cfg(test)`/`test-support` so it is absent from release builds.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn conn_for_tests(&self) -> &Connection {
         &self.conn
     }
@@ -323,6 +715,96 @@ mod flush_fsync_tests {
         store.append(&event).unwrap();
         let last = store.flush_fsync().unwrap();
         assert_eq!(last, Some(event.id));
+    }
+}
+
+#[cfg(test)]
+mod latest_checkpoint_signature_tests {
+    use super::*;
+    use crate::payload::checkpoint::{TapeCheckpointV1, TapeRootAlgorithm};
+
+    fn unsigned_checkpoint_event(run_id: RunId) -> Event {
+        Event {
+            id: EventId::new(),
+            run_id,
+            parent_event_id: None,
+            schema_version: Event::CURRENT_SCHEMA_VERSION,
+            kind: EventKind::TapeCheckpoint,
+            occurred_at: Utc::now(),
+            payload: Payload::TapeCheckpointV1(TapeCheckpointV1 {
+                run_id,
+                checkpoint_index: 0,
+                through_event_id: EventId::new(),
+                through_event_count: 7,
+                previous_checkpoint_event_id: None,
+                tape_root_hash: "sha256:unsigned".into(),
+                algorithm: TapeRootAlgorithm::Sha256Linear,
+            }),
+        }
+    }
+
+    #[test]
+    fn latest_checkpoint_ignores_unsigned_checkpoint_rows() {
+        // Gate round 2, fix #3 (defense-in-depth): even a checkpoint row that
+        // somehow lands without a signature must NOT be trusted for cadence.
+        // We insert a raw, UNSIGNED tape_checkpoint row directly (bypassing the
+        // public guarded entry points) and assert `latest_checkpoint` returns
+        // None — the JOIN on event_signatures filters it out.
+        let store = SqliteStore::open_in_memory().unwrap();
+        let run_id = RunId::new();
+
+        let unsigned_cp = unsigned_checkpoint_event(run_id);
+        insert_event(&store.conn, &unsigned_cp).unwrap();
+
+        assert!(
+            store.latest_checkpoint(&run_id).unwrap().is_none(),
+            "an unsigned checkpoint row must never be trusted by latest_checkpoint"
+        );
+    }
+
+    #[test]
+    fn latest_checkpoint_returns_signed_checkpoint_rows() {
+        // The JOIN must still surface a properly SIGNED checkpoint. Emit a real
+        // one through the signed path, then confirm latest_checkpoint sees it.
+        use crate::signing::ActorKeyRef;
+        use ed25519_dalek::SigningKey;
+
+        let store = SqliteStore::open_in_memory().unwrap();
+        let key = SigningKey::from_bytes(&[21u8; 32]);
+        let signer = ActorKeyRef {
+            actor_id: "kernel".into(),
+            key_id: "kernel-main".into(),
+            public_key_hash: None,
+        };
+        let run_id = RunId::new();
+        let policy = CheckpointPolicy::every(1);
+
+        let event = Event {
+            id: EventId::new(),
+            run_id,
+            parent_event_id: None,
+            schema_version: Event::CURRENT_SCHEMA_VERSION,
+            kind: EventKind::RunStarted,
+            occurred_at: Utc::now(),
+            payload: Payload::RunStartedV1(crate::payload::run_lifecycle::RunStartedV1 {
+                packet_hash: "sha256:aa".into(),
+                git_head: "dead".into(),
+                workspace_path: "/ws".into(),
+                config: std::collections::BTreeMap::new(),
+                parent_run_id: None,
+                parent_event_id: None,
+            }),
+        };
+        let emitted = store
+            .append_signed_with_checkpoint(&event, &key, &signer, &policy)
+            .unwrap();
+        assert_eq!(emitted.len(), 1, "cadence-1 must emit a checkpoint");
+
+        let latest = store
+            .latest_checkpoint(&run_id)
+            .unwrap()
+            .expect("a signed checkpoint must be returned");
+        assert_eq!(latest.event_id, emitted[0]);
     }
 }
 
@@ -418,6 +900,31 @@ pub struct VerifiedEventRow {
     pub event: StoredEventRow,
     pub signature: Option<EventSignatureV1>,
     pub verification: VerificationStatus,
+}
+
+/// Minimal projection of the latest checkpoint needed to chain the next one.
+///
+/// `through_event_id` is retained (alongside `through_event_count`) so the
+/// checkpoint chain stays auditable: each checkpoint records the exact last
+/// covered event id, not merely how many events it covered.
+#[derive(Debug, Clone)]
+struct StoredCheckpoint {
+    event_id: EventId,
+    checkpoint_index: u64,
+    /// Last covered event id of the prior checkpoint. Retained for chain
+    /// auditability; not yet consumed by emission logic (cadence uses
+    /// `through_event_count`).
+    #[allow(dead_code)]
+    through_event_id: EventId,
+    through_event_count: u64,
+}
+
+/// A signed, non-checkpoint event in tape order, with its stored canonical
+/// hash — the input to the tape-root computation.
+#[derive(Debug, Clone)]
+struct SignedOrdinaryEvent {
+    event_id: EventId,
+    canonical_event_hash: String,
 }
 
 fn signature_algorithm_wire(algorithm: SignatureAlgorithm) -> &'static str {

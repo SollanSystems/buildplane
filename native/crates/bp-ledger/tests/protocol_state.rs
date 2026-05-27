@@ -197,6 +197,9 @@ fn signed_mode_ingests_and_reads_back_verified() {
             key_id: "kernel-main".into(),
             public_key_hash: None,
         },
+        // This test asserts a single signed event reads back verified; disable
+        // checkpoints so no final checkpoint event is emitted at run_completed.
+        checkpoint_policy: bp_ledger::storage::sqlite::CheckpointPolicy::Disabled,
     };
 
     let run_id = RunId::new();
@@ -236,6 +239,92 @@ fn signed_mode_ingests_and_reads_back_verified() {
         .unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].verification, VerificationStatus::Verified);
+}
+
+#[test]
+fn signed_serve_loop_emits_verified_checkpoints_at_cadence() {
+    use bp_ledger::event::Event;
+    use bp_ledger::id::{EventId, RunId};
+    use bp_ledger::kind::EventKind;
+    use bp_ledger::payload::run_lifecycle::{RunStartedV1};
+    use bp_ledger::payload::Payload;
+    use bp_ledger::signing::{public_key_hash, ActorKeyRef, TrustedPublicKeys, VerificationStatus};
+    use bp_ledger::storage::sqlite::CheckpointPolicy;
+    use chrono::Utc;
+    use std::collections::BTreeMap;
+
+    let (store, cas, tmp) = make_fixture();
+    let key_root = tmp.path().join("keys");
+    std::fs::create_dir_all(key_root.join("kernel")).unwrap();
+    std::fs::write(key_root.join("kernel").join("kernel-main.ed25519"), [5u8; 32]).unwrap();
+    let signing_key = bp_ledger::keyring::load_signing_key_at(
+        &key_root,
+        &bp_ledger::keyring::KeyringRef::new("kernel", "kernel-main"),
+    )
+    .unwrap();
+
+    // Live signed loop with a small explicit cadence so the test is fast.
+    let signing = SigningConfig::Signed {
+        signing_key: signing_key.clone(),
+        signer: ActorKeyRef {
+            actor_id: "kernel".into(),
+            key_id: "kernel-main".into(),
+            public_key_hash: None,
+        },
+        checkpoint_policy: CheckpointPolicy::every(2),
+    };
+
+    let run_id = RunId::new();
+    let make = || Event {
+        id: EventId::new(),
+        run_id,
+        parent_event_id: None,
+        schema_version: 1,
+        kind: EventKind::RunStarted,
+        occurred_at: Utc::now(),
+        payload: Payload::RunStartedV1(RunStartedV1 {
+            packet_hash: "sha256:aa".into(),
+            git_head: "dead".into(),
+            workspace_path: "/ws".into(),
+            config: BTreeMap::new(),
+            parent_run_id: None,
+            parent_event_id: None,
+        }),
+    };
+    let e1 = make();
+    let e2 = make();
+    let stdin = format!(
+        "{}\n{}\n{}\n{}\n",
+        handshake_line(1),
+        serde_json::to_string(&e1).unwrap(),
+        serde_json::to_string(&e2).unwrap(),
+        close_line(1),
+    );
+    let mut stderr = Vec::new();
+    let outcome =
+        serve_with_protocol(Cursor::new(stdin.as_bytes()), &mut stderr, &store, &cas, 1, &signing)
+            .unwrap();
+    // Only ordinary ingested events are counted by the serve outcome.
+    assert_eq!(outcome.events_written, 2);
+
+    let mut trusted = TrustedPublicKeys::default();
+    trusted.insert_public_key(
+        public_key_hash(&signing_key.verifying_key()),
+        signing_key.verifying_key().to_bytes().to_vec(),
+    );
+    let rows = store
+        .verified_events_for_run(&run_id.to_string(), &trusted)
+        .unwrap();
+    // 2 ordinary events + 1 cadence checkpoint, all verified.
+    assert_eq!(rows.len(), 3);
+    for row in &rows {
+        assert_eq!(row.verification, VerificationStatus::Verified);
+    }
+    let checkpoint_rows = rows
+        .iter()
+        .filter(|r| r.event.kind == "tape_checkpoint")
+        .count();
+    assert_eq!(checkpoint_rows, 1, "one checkpoint at cadence 2 over 2 events");
 }
 
 #[test]
