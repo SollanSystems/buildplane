@@ -1,1 +1,6 @@
-pnpm check
+# Fast, side-effect-free pre-push gate. The full suite (`pnpm test`) is NOT run
+# here: a workflow test uses process.chdir into a tempdir, which under vitest's
+# parallel workers can race and commit into the *checked-out* branch, corrupting
+# a git worktree on push. CI runs the full `pnpm check` on the PR. Root-cause
+# fix (remove process.chdir / thread explicit cwd) tracked separately.
+pnpm lint && pnpm typecheck
