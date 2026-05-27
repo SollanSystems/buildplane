@@ -6,10 +6,11 @@ use crate::event::Event;
 use crate::id::{EventId, RunId};
 use crate::kind::EventKind;
 use crate::signing::{
-    verify_event_signature, ActorKeyRef, EventSignatureV1, SignatureAlgorithm, TrustedPublicKeys,
-    VerificationStatus,
+    sign_event, verify_event_signature, ActorKeyRef, EventSignatureV1, SignatureAlgorithm,
+    TrustedPublicKeys, VerificationStatus,
 };
 use chrono::{DateTime, Utc};
+use ed25519_dalek::SigningKey;
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::Path;
 use uuid::Uuid;
@@ -106,49 +107,43 @@ impl SqliteStore {
 
     /// Append an event to the log. Fails if the id already exists.
     pub fn append(&self, event: &Event) -> Result<()> {
-        let payload_json = serde_json::to_string(&event.payload)?;
-        self.conn.execute(
-            r#"INSERT INTO events (id, run_id, parent_event_id, schema_version, kind, occurred_at, payload)
-               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"#,
-            params![
-                event.id.to_string(),
-                event.run_id.to_string(),
-                event.parent_event_id.map(|e| e.to_string()),
-                event.schema_version,
-                event.kind_str(),
-                event.occurred_at.to_rfc3339(),
-                payload_json,
-            ],
-        )?;
-        Ok(())
+        insert_event(&self.conn, event)
     }
 
     /// Append a detached event signature. The `event_signatures` table is
     /// append-only and keyed by `event_id`, so duplicates and missing event ids
     /// fail through SQLite constraints.
     pub fn append_event_signature(&self, signature: &EventSignatureV1) -> Result<()> {
-        self.conn.execute(
-            r#"INSERT INTO event_signatures (
-                event_id,
-                canonical_event_hash,
-                actor_id,
-                key_id,
-                public_key_hash,
-                algorithm,
-                signature,
-                signed_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"#,
-            params![
-                signature.event_id.to_string(),
-                signature.canonical_event_hash,
-                signature.signer.actor_id,
-                signature.signer.key_id,
-                signature.signer.public_key_hash,
-                signature_algorithm_wire(signature.algorithm),
-                signature.signature,
-                signature.signed_at.to_rfc3339(),
-            ],
-        )?;
+        insert_event_signature(&self.conn, signature)
+    }
+
+    /// Append an event and its matching detached signature atomically (signed
+    /// mode).
+    ///
+    /// Within a single SQLite transaction this: (1) signs the canonical event
+    /// bytes with `signing_key`, (2) inserts the event row, (3) inserts the
+    /// matching `event_signatures` row, and commits only if all three succeed.
+    /// If signing fails, the event-row insert fails, or the signature insert
+    /// fails, the transaction rolls back and no event row persists — the append
+    /// fails closed.
+    ///
+    /// The signature is produced before the inserts so a signing error never
+    /// touches the database. `signer.public_key_hash` is overwritten by
+    /// [`sign_event`] with the verifying-key digest.
+    pub fn append_signed(
+        &self,
+        event: &Event,
+        signing_key: &SigningKey,
+        signer: &ActorKeyRef,
+    ) -> Result<()> {
+        // Sign first: a signing failure (e.g. unsupported schema version) must
+        // never reach the storage transaction.
+        let signature = sign_event(event, signing_key, signer, Utc::now())?;
+
+        let tx = self.conn.unchecked_transaction()?;
+        insert_event(&tx, event)?;
+        insert_event_signature(&tx, &signature)?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -422,6 +417,50 @@ fn signature_algorithm_wire(algorithm: SignatureAlgorithm) -> &'static str {
     match algorithm {
         SignatureAlgorithm::Ed25519 => "ed25519",
     }
+}
+
+fn insert_event(conn: &Connection, event: &Event) -> Result<()> {
+    let payload_json = serde_json::to_string(&event.payload)?;
+    conn.execute(
+        r#"INSERT INTO events (id, run_id, parent_event_id, schema_version, kind, occurred_at, payload)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"#,
+        params![
+            event.id.to_string(),
+            event.run_id.to_string(),
+            event.parent_event_id.map(|e| e.to_string()),
+            event.schema_version,
+            event.kind_str(),
+            event.occurred_at.to_rfc3339(),
+            payload_json,
+        ],
+    )?;
+    Ok(())
+}
+
+fn insert_event_signature(conn: &Connection, signature: &EventSignatureV1) -> Result<()> {
+    conn.execute(
+        r#"INSERT INTO event_signatures (
+            event_id,
+            canonical_event_hash,
+            actor_id,
+            key_id,
+            public_key_hash,
+            algorithm,
+            signature,
+            signed_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"#,
+        params![
+            signature.event_id.to_string(),
+            signature.canonical_event_hash,
+            signature.signer.actor_id,
+            signature.signer.key_id,
+            signature.signer.public_key_hash,
+            signature_algorithm_wire(signature.algorithm),
+            signature.signature,
+            signature.signed_at.to_rfc3339(),
+        ],
+    )?;
+    Ok(())
 }
 
 fn parse_event_id(id: &str, kind: &str) -> Result<EventId> {
