@@ -13,6 +13,7 @@ import type {
 	RunCompletedV1,
 	RunFailedV1,
 	RunStartedV1,
+	TapeCheckpointV1,
 	ToolRequestStoredV1,
 	ToolResultV1,
 	UnitCancelledV1,
@@ -39,4 +40,5 @@ export type Payload =
 	| { ToolRequestStoredV1: ToolRequestStoredV1 }
 	| { ToolResultV1: ToolResultV1 }
 	| { WorkspaceReadV1: WorkspaceReadV1 }
-	| { WorkspaceWriteV1: WorkspaceWriteV1 };
+	| { WorkspaceWriteV1: WorkspaceWriteV1 }
+	| { TapeCheckpointV1: TapeCheckpointV1 };

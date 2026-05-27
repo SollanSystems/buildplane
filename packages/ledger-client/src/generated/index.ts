@@ -54,6 +54,7 @@ export enum EventKind {
 	ToolResult = "tool_result",
 	WorkspaceRead = "workspace_read",
 	WorkspaceWrite = "workspace_write",
+	TapeCheckpoint = "tape_checkpoint",
 }
 
 /**
@@ -265,6 +266,39 @@ export interface RunStartedV1 {
 	 * None for top-level runs and for tapes written before Phase E.
 	 */
 	parent_event_id?: EventId;
+}
+
+/** Closed vocabulary of tape-root algorithms. v0.5 ships exactly one. */
+export enum TapeRootAlgorithm {
+	/**
+	 * `sha256("sha256:" + hex)` over the `\n`-joined ordered canonical event
+	 * hash strings. See [`tape_root_hash`].
+	 */
+	Sha256Linear = "sha256_linear",
+}
+
+/**
+ * `tape_checkpoint` payload — a monotonic local checkpoint over the signed
+ * events of one run, through (and including) `through_event_id`.
+ */
+export interface TapeCheckpointV1 {
+	/** Run this checkpoint covers. */
+	run_id: RunId;
+	/** Monotonic per-run index, starting at 0 for a run's first checkpoint. */
+	checkpoint_index: number;
+	/** Last signed event id included in this checkpoint (inclusive). */
+	through_event_id: EventId;
+	/**
+	 * Total count of signed events covered by this checkpoint, from the start
+	 * of the run through `through_event_id` (inclusive).
+	 */
+	through_event_count: number;
+	/** Event id of the previous checkpoint for this run, or `None` for the first. */
+	previous_checkpoint_event_id?: EventId;
+	/** Root hash over the covered events' canonical hashes, as `sha256:<hex>`. */
+	tape_root_hash: string;
+	/** Algorithm used to derive `tape_root_hash`. */
+	algorithm: TapeRootAlgorithm;
 }
 
 /**

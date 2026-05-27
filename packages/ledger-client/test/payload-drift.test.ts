@@ -42,6 +42,7 @@ function kindName(p: Payload): string {
 		case "ToolResultV1":
 		case "WorkspaceReadV1":
 		case "WorkspaceWriteV1":
+		case "TapeCheckpointV1":
 			return k;
 		default: {
 			const _exhaustive: never = k as never;
@@ -53,7 +54,7 @@ function kindName(p: Payload): string {
 describe("payload drift alarm", () => {
 	it("every fixture parses as a known variant", () => {
 		const fixtures = loadFixtures();
-		expect(fixtures.length).toBe(15);
+		expect(fixtures.length).toBe(16);
 		const names: string[] = [];
 		for (const fx of fixtures) {
 			const name = kindName(fx as Payload);
@@ -61,6 +62,7 @@ describe("payload drift alarm", () => {
 			expect(typeof name).toBe("string");
 		}
 		expect(names).toContain("RunAdmissionRecordedV1");
+		expect(names).toContain("TapeCheckpointV1");
 	});
 
 	it("run admission fixture matches the generated wire contract", () => {
