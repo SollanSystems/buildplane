@@ -554,6 +554,141 @@ fn lower_id_ordinary_append_rejected_per_run_monotonic() {
 }
 
 #[test]
+fn unsigned_append_rejects_caller_supplied_checkpoint() {
+    // Gate round 2, fix #1(a): the raw/unsigned `append` path must also reject a
+    // caller-supplied `tape_checkpoint`. Checkpoints are ledger-internal in
+    // EVERY mode, so a producer talking to an unsigned ledger can't inject one.
+    let store = SqliteStore::open_in_memory().unwrap();
+    let run_id = RunId::new();
+
+    let forged = forged_checkpoint_event(run_id);
+    let result = store.append(&forged);
+    assert!(
+        matches!(result, Err(LedgerError::CallerSuppliedCheckpoint)),
+        "unsigned append of a tape_checkpoint must be rejected, got {result:?}"
+    );
+
+    let event_rows: i64 = store
+        .conn_for_tests()
+        .query_row(
+            "SELECT COUNT(*) FROM events WHERE id = ?1",
+            [forged.id.to_string()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        event_rows, 0,
+        "forged checkpoint must never persist via unsigned append"
+    );
+    assert_eq!(checkpoints_for_run(&store, run_id).len(), 0);
+}
+
+#[test]
+fn unsigned_append_rejects_non_monotonic_ordinary_id() {
+    // Gate round 2, fix #1(b): the raw/unsigned `append` path enforces the same
+    // per-run strictly-monotonic ordinary-id guard as the signed paths.
+    let store = SqliteStore::open_in_memory().unwrap();
+    let run_id = RunId::new();
+
+    let first = run_started(run_id);
+    store.append(&first).unwrap();
+
+    let mut lower = run_started(run_id);
+    lower.id =
+        EventId::from_uuid(uuid::Uuid::parse_str("00000000-0000-7000-8000-000000000000").unwrap());
+    let result = store.append(&lower);
+    assert!(
+        matches!(result, Err(LedgerError::NonMonotonicEventId { .. })),
+        "lower-id same-run unsigned append must be rejected, got {result:?}"
+    );
+
+    // Equal-id (replay) is rejected too.
+    let mut equal = run_started(run_id);
+    equal.id = first.id;
+    let result = store.append(&equal);
+    assert!(
+        matches!(result, Err(LedgerError::NonMonotonicEventId { .. })),
+        "equal-id same-run unsigned replay must be rejected, got {result:?}"
+    );
+
+    let count: i64 = store
+        .conn_for_tests()
+        .query_row(
+            "SELECT COUNT(*) FROM events WHERE run_id = ?1",
+            [run_id.to_string()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        count, 1,
+        "only the first monotonic event persists on unsigned path"
+    );
+
+    // A normal monotonic unsigned append still passes.
+    let next = run_started(run_id);
+    assert!(next.id.as_uuid() > first.id.as_uuid());
+    store.append(&next).unwrap();
+}
+
+#[test]
+fn ordinary_id_below_emitted_checkpoint_id_is_accepted() {
+    // Gate round 2, fix #2 (regression): a checkpoint id is minted AFTER the
+    // events it covers, so it can be greater than a subsequent legitimate
+    // ordinary event whose id was pre-generated earlier. The monotonic guard
+    // must compare only against the latest NON-checkpoint event id, never the
+    // checkpoint id, so such an ordinary event is ACCEPTED.
+    let store = SqliteStore::open_in_memory().unwrap();
+    let key = fixture_key();
+    let run_id = RunId::new();
+    let policy = CheckpointPolicy::every(2);
+
+    // Pre-generate ordinary ids up front so the "next" ordinary event's id is
+    // already minted BEFORE the checkpoint event is created.
+    let e1 = run_started(run_id);
+    let e2 = run_started(run_id);
+    let e3 = run_started(run_id); // id minted now, appended after the checkpoint
+    assert!(e1.id.as_uuid() < e2.id.as_uuid());
+    assert!(e2.id.as_uuid() < e3.id.as_uuid());
+
+    // Cross the cadence boundary => a checkpoint is emitted. Its id is minted
+    // (EventId::new()) AFTER e3's id was generated, so checkpoint_id > e3.id.
+    store
+        .append_signed_with_checkpoint(&e1, &key, &kernel_signer(), &policy)
+        .unwrap();
+    store
+        .append_signed_with_checkpoint(&e2, &key, &kernel_signer(), &policy)
+        .unwrap();
+
+    let checkpoints = checkpoints_for_run(&store, run_id);
+    assert_eq!(
+        checkpoints.len(),
+        1,
+        "cadence-2 checkpoint over the first two events"
+    );
+    let (cp_id, _) = &checkpoints[0];
+    assert!(
+        cp_id.as_uuid() > e3.id.as_uuid(),
+        "regression precondition: emitted checkpoint id must exceed the pre-generated ordinary id"
+    );
+
+    // e3 has a lower id than the just-emitted checkpoint, but a higher id than
+    // the latest ORDINARY event (e2). It MUST be accepted.
+    store
+        .append_signed_with_checkpoint(&e3, &key, &kernel_signer(), &policy)
+        .expect("ordinary event with id below the emitted checkpoint id must be accepted");
+
+    let ordinary_count: i64 = store
+        .conn_for_tests()
+        .query_row(
+            "SELECT COUNT(*) FROM events WHERE run_id = ?1 AND kind = 'run_started'",
+            [run_id.to_string()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(ordinary_count, 3, "all three ordinary events must persist");
+}
+
+#[test]
 fn monotonic_guard_is_per_run_and_allows_interleaving() {
     // The monotonic guard is per-run: a low-id event for run B is accepted even
     // when run A already holds higher-id events. Interleaving distinct runs is
