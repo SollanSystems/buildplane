@@ -4,6 +4,7 @@ pub mod canonicalize;
 pub mod error;
 pub mod event;
 pub mod id;
+pub mod keyring;
 pub mod kind;
 pub mod payload;
 pub mod serve;
