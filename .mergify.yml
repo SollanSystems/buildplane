@@ -8,17 +8,21 @@ merge_protections_settings:
   reporting_method: check-runs
 
 merge_protections:
-  - name: require reviewed green PRs on main
+  # Always-on gate for ALL merges to main: required CI green + no conflict/draft.
+  # Review is intentionally NOT required here so a solo operator can land a
+  # reviewed PR (GitHub forbids self-approval, which made every solo PR
+  # permanently BLOCKED). The `#approved-reviews-by >= 1` requirement is
+  # enforced only on the label-gated auto-merge queue below, so unattended
+  # auto-merge still demands a review.
+  - name: require green CI on main
     if:
       - base = main
-    success_conditions: &reviewed_green_conditions
-      - "#approved-reviews-by >= 1"
+    success_conditions:
       - check-success = verify
       - check-success = Analyze (javascript-typescript)
       - check-success = GitGuardian Security Checks
       - -conflict
       - -draft
-      - "#changes-requested-reviews-by = 0"
 
 merge_queue:
   mode: serial
@@ -33,7 +37,14 @@ queue_rules:
       - base = main
       - label = buildplane:auto-merge
       - label = hotfix
-    merge_conditions: *reviewed_green_conditions
+    merge_conditions: &reviewed_green_conditions
+      - "#approved-reviews-by >= 1"
+      - check-success = verify
+      - check-success = Analyze (javascript-typescript)
+      - check-success = GitGuardian Security Checks
+      - -conflict
+      - -draft
+      - "#changes-requested-reviews-by = 0"
     merge_method: squash
     batch_size: 1
   - name: default
