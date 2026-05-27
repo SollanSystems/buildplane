@@ -2,12 +2,16 @@
 //!
 //! Phase A: `serve` is wired. Phase D adds `replay`.
 
-use bp_ledger::serve::serve_with_protocol;
+use bp_ledger::keyring::KeyringRef;
+use bp_ledger::serve::{serve_with_protocol, SigningConfig};
 use bp_ledger::storage::sqlite::SqliteStore;
 use bp_ledger::storage::Cas;
 use bp_replay::engine::ReplayEngine;
 use std::io::{self, Write};
 use std::path::PathBuf;
+
+/// Default kernel key id used when `--sign` is set without `--signing-key-id`.
+const DEFAULT_KERNEL_KEY_ID: &str = "kernel-main";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LedgerCommand {
@@ -21,6 +25,10 @@ pub struct ServeArgs {
     pub run_id: String,
     pub workspace: PathBuf,
     pub schema_version: u32,
+    /// Opt-in signing. Default OFF (unsigned), preserving legacy behavior.
+    pub sign: bool,
+    /// Kernel key id to load from `~/.buildplane/keys/kernel/<id>.ed25519`.
+    pub signing_key_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,6 +70,8 @@ fn parse_serve(args: &[String]) -> Result<ServeArgs, String> {
     let mut run_id: Option<String> = None;
     let mut workspace: Option<PathBuf> = None;
     let mut schema_version: u32 = 1;
+    let mut sign = false;
+    let mut signing_key_id: Option<String> = None;
 
     let mut i = 0;
     while i < args.len() {
@@ -85,6 +95,14 @@ fn parse_serve(args: &[String]) -> Result<ServeArgs, String> {
                     .parse()
                     .map_err(|_| "--schema-version must be an integer")?;
             }
+            "--sign" => {
+                sign = true;
+            }
+            "--signing-key-id" => {
+                i += 1;
+                signing_key_id =
+                    Some(args.get(i).ok_or("--signing-key-id requires a value")?.clone());
+            }
             "--help" | "-h" => {
                 return Err("--help is handled by the top-level ledger parser".to_string());
             }
@@ -103,6 +121,8 @@ fn parse_serve(args: &[String]) -> Result<ServeArgs, String> {
         run_id: run_id.ok_or("missing --run-id")?,
         workspace,
         schema_version,
+        sign,
+        signing_key_id: signing_key_id.unwrap_or_else(|| DEFAULT_KERNEL_KEY_ID.to_string()),
     })
 }
 
@@ -186,6 +206,35 @@ mod tests {
         let out = parse_serve(&args).unwrap();
         assert_eq!(out.workspace.to_str().unwrap(), "/tmp/abs");
         assert_eq!(out.run_id, "abc");
+    }
+
+    #[test]
+    fn parse_serve_defaults_to_unsigned() {
+        let args = vec![
+            "--run-id".to_string(),
+            "abc".to_string(),
+            "--workspace".to_string(),
+            "/tmp/abs".to_string(),
+        ];
+        let out = parse_serve(&args).unwrap();
+        assert!(!out.sign, "signing must default OFF");
+        assert_eq!(out.signing_key_id, "kernel-main");
+    }
+
+    #[test]
+    fn parse_serve_accepts_sign_flag_and_key_id() {
+        let args = vec![
+            "--run-id".to_string(),
+            "abc".to_string(),
+            "--workspace".to_string(),
+            "/tmp/abs".to_string(),
+            "--sign".to_string(),
+            "--signing-key-id".to_string(),
+            "kernel-2026".to_string(),
+        ];
+        let out = parse_serve(&args).unwrap();
+        assert!(out.sign);
+        assert_eq!(out.signing_key_id, "kernel-2026");
     }
 
     #[test]
@@ -290,12 +339,23 @@ pub fn run_serve(args: ServeArgs) -> Result<(), String> {
     let store = SqliteStore::open(&db_path).map_err(|e| format!("opening events.db: {e}"))?;
     let cas = Cas::open(ledger_dir.join("objects")).map_err(|e| format!("opening cas: {e}"))?;
 
+    // Signing is opt-in (default OFF). When enabled, only a key *reference* is
+    // resolved here; key bytes are loaded locally by the ledger and any error
+    // redacts secret-shaped material.
+    let signing = if args.sign {
+        let key_ref = KeyringRef::new("kernel", args.signing_key_id.clone());
+        SigningConfig::signed_from_keyring(&key_ref)
+            .map_err(|e| format!("loading kernel signing key: {e}"))?
+    } else {
+        SigningConfig::Unsigned
+    };
+
     let stdin = io::stdin();
     let locked = stdin.lock();
     let stderr = io::stderr();
     let mut stderr_lock = stderr.lock();
 
-    serve_with_protocol(locked, &mut stderr_lock, &store, &cas, 1)
+    serve_with_protocol(locked, &mut stderr_lock, &store, &cas, 1, &signing)
         .map_err(|e| format!("serve: {e}"))?;
 
     stderr_lock.flush().ok();
@@ -402,6 +462,8 @@ flags for `serve`:
   --run-id <id>             run identifier (required)
   --workspace <path>        absolute path to the workspace root (required)
   --schema-version <n>      wire schema version (default: 1)
+  --sign                    sign each appended event with the kernel key (default: off)
+  --signing-key-id <id>     kernel key id under ~/.buildplane/keys/kernel (default: kernel-main)
 
 flags for `replay`:
   --run-id <id>             run identifier (required)

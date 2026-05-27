@@ -5,13 +5,15 @@
 //! signature envelope.
 
 use crate::canonicalize::{canonical_event_bytes, canonical_event_hash};
+use crate::error::Result;
 use crate::event::Event;
 use crate::id::EventId;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use chrono::{DateTime, Utc};
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use typeshare::typeshare;
 
@@ -90,6 +92,52 @@ impl TrustedPublicKeys {
     }
 }
 
+/// Digest of an ed25519 verifying (public) key, formatted as `sha256:<hex>`.
+///
+/// This is the exact value `TrustedPublicKeys::public_key_for` keys on, so the
+/// producer side must compute it identically to the verifier side.
+pub fn public_key_hash(verifying_key: &VerifyingKey) -> String {
+    let digest = Sha256::digest(verifying_key.as_bytes());
+    format!("sha256:{digest:x}")
+}
+
+/// Produce a detached Ed25519 signature over the canonical bytes of `event`.
+///
+/// The returned [`EventSignatureV1`] is the producer half of the M1 signed-tape
+/// contract and is verifiable by [`verify_event_signature`]:
+///
+/// - `canonical_event_hash` is `canonical_event_hash(event)`.
+/// - the 64-byte signature is over `canonical_event_bytes(event)`, encoded as
+///   base64url without padding (round-trips with `URL_SAFE_NO_PAD.decode`).
+/// - `signer.public_key_hash` is overwritten with `sha256:<hex>` of the
+///   verifying key so that the verifier's [`TrustedPublicKeys`] lookup matches.
+///
+/// Ed25519 is deterministic, so the same key + event + `signed_at` yields a
+/// stable signature. Fails closed if the event cannot be canonicalized (for
+/// example an unsupported schema version); no partial signature is produced.
+pub fn sign_event(
+    event: &Event,
+    signing_key: &SigningKey,
+    signer: &ActorKeyRef,
+    signed_at: DateTime<Utc>,
+) -> Result<EventSignatureV1> {
+    let canonical_event_hash = canonical_event_hash(event)?;
+    let message = canonical_event_bytes(event)?;
+    let signature = signing_key.sign(&message);
+
+    let mut signer = signer.clone();
+    signer.public_key_hash = Some(public_key_hash(&signing_key.verifying_key()));
+
+    Ok(EventSignatureV1 {
+        event_id: event.id,
+        canonical_event_hash,
+        signer,
+        algorithm: SignatureAlgorithm::Ed25519,
+        signature: URL_SAFE_NO_PAD.encode(signature.to_bytes()),
+        signed_at,
+    })
+}
+
 /// Verify one detached Ed25519 signature against the supplied event and public
 /// key registry. Unsupported algorithm dispatch is handled by storage before it
 /// constructs an [`EventSignatureV1`], so this function covers only the typed
@@ -99,6 +147,12 @@ pub fn verify_event_signature(
     signature: &EventSignatureV1,
     trusted_keys: &TrustedPublicKeys,
 ) -> VerificationStatus {
+    // Bind the signature to this exact event id before any crypto work: a
+    // signature lifted from a different event must not verify here.
+    if signature.event_id != event.id {
+        return VerificationStatus::HashMismatch;
+    }
+
     let Ok(actual_hash) = canonical_event_hash(event) else {
         return VerificationStatus::HashMismatch;
     };
@@ -115,6 +169,17 @@ pub fn verify_event_signature(
     let Ok(public_key) = VerifyingKey::from_bytes(public_key_bytes) else {
         return VerificationStatus::MissingKey;
     };
+
+    // Bind the retrieved key to its claimed hash. If the trust registry maps the
+    // claimed `public_key_hash` to bytes whose actual hash differs, the trusted
+    // key for that claimed identity effectively does not exist — fail closed
+    // rather than verify against a key whose real identity differs from the
+    // claim. `public_key_for` keyed on `Some(hash)`, so the hash is present here.
+    if let Some(claimed_hash) = signature.signer.public_key_hash.as_deref() {
+        if public_key_hash(&public_key) != claimed_hash {
+            return VerificationStatus::MissingKey;
+        }
+    }
 
     let Ok(signature_bytes) = URL_SAFE_NO_PAD.decode(&signature.signature) else {
         return VerificationStatus::BadSignature;
@@ -137,10 +202,164 @@ pub fn verify_event_signature(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::id::RunId;
+    use crate::kind::EventKind;
+    use crate::payload::run_lifecycle::{RunCompletedV1, RunOutcome};
+    use crate::payload::Payload;
+    use ed25519_dalek::SigningKey;
+    use sha2::{Digest, Sha256};
     use uuid::Uuid;
 
     const SIGNED_EVENT_FIXTURE_HASH: &str =
         "sha256:71ad93c5d6863d077cbdd5f885275e2ebac705364c44631875c9044eaffe6a08";
+
+    fn sample_event() -> Event {
+        Event {
+            id: EventId::new(),
+            run_id: RunId::new(),
+            parent_event_id: None,
+            schema_version: 1,
+            kind: EventKind::RunCompleted,
+            occurred_at: chrono::Utc::now(),
+            payload: Payload::RunCompletedV1(RunCompletedV1 {
+                outcome: RunOutcome::Passed,
+                duration_ms: 1,
+                event_count: 1,
+                unit_count: 0,
+            }),
+        }
+    }
+
+    fn fixture_signing_key() -> SigningKey {
+        SigningKey::from_bytes(&[42u8; 32])
+    }
+
+    fn expected_public_key_hash(signing_key: &SigningKey) -> String {
+        let digest = Sha256::digest(signing_key.verifying_key().as_bytes());
+        format!("sha256:{digest:x}")
+    }
+
+    fn trusted_keys(signing_key: &SigningKey) -> TrustedPublicKeys {
+        let mut keys = TrustedPublicKeys::default();
+        keys.insert_public_key(
+            expected_public_key_hash(signing_key),
+            signing_key.verifying_key().to_bytes().to_vec(),
+        );
+        keys
+    }
+
+    #[test]
+    fn sign_event_round_trips_to_verified() {
+        let event = sample_event();
+        let signing_key = fixture_signing_key();
+        let signer = ActorKeyRef {
+            actor_id: "kernel".into(),
+            key_id: "kernel-main".into(),
+            public_key_hash: None,
+        };
+
+        let signature =
+            sign_event(&event, &signing_key, &signer, "2026-05-22T23:30:00Z".parse().unwrap())
+                .unwrap();
+
+        // public_key_hash is filled in by sign_event and must match the verify-path lookup.
+        assert_eq!(
+            signature.signer.public_key_hash.as_deref(),
+            Some(expected_public_key_hash(&signing_key).as_str())
+        );
+        assert_eq!(signature.event_id, event.id);
+        assert_eq!(signature.algorithm, SignatureAlgorithm::Ed25519);
+        assert_eq!(
+            signature.canonical_event_hash,
+            canonical_event_hash(&event).unwrap()
+        );
+
+        let status = verify_event_signature(&event, &signature, &trusted_keys(&signing_key));
+        assert_eq!(status, VerificationStatus::Verified);
+    }
+
+    #[test]
+    fn verify_rejects_wrong_key_for_claimed_hash() {
+        // A registry that maps the claimed hash string to the WRONG key bytes
+        // must not verify, even for an otherwise well-formed signature.
+        let event = sample_event();
+        let signing_key = fixture_signing_key();
+        let signer = ActorKeyRef {
+            actor_id: "kernel".into(),
+            key_id: "kernel-main".into(),
+            public_key_hash: None,
+        };
+        let signature =
+            sign_event(&event, &signing_key, &signer, "2026-05-22T23:30:00Z".parse().unwrap())
+                .unwrap();
+
+        let claimed_hash = signature.signer.public_key_hash.clone().unwrap();
+        // Map the claimed hash to a DIFFERENT key's bytes.
+        let other_key = SigningKey::from_bytes(&[99u8; 32]);
+        let mut poisoned = TrustedPublicKeys::default();
+        poisoned.insert_public_key(
+            claimed_hash,
+            other_key.verifying_key().to_bytes().to_vec(),
+        );
+
+        assert_eq!(
+            verify_event_signature(&event, &signature, &poisoned),
+            VerificationStatus::MissingKey
+        );
+    }
+
+    #[test]
+    fn verify_rejects_signature_for_different_event_id() {
+        let event = sample_event();
+        let signing_key = fixture_signing_key();
+        let signer = ActorKeyRef {
+            actor_id: "kernel".into(),
+            key_id: "kernel-main".into(),
+            public_key_hash: None,
+        };
+        let mut signature =
+            sign_event(&event, &signing_key, &signer, "2026-05-22T23:30:00Z".parse().unwrap())
+                .unwrap();
+        // Re-point the signature at a different event id.
+        signature.event_id = EventId::new();
+
+        assert_eq!(
+            verify_event_signature(&event, &signature, &trusted_keys(&signing_key)),
+            VerificationStatus::HashMismatch
+        );
+    }
+
+    #[test]
+    fn sign_event_is_deterministic() {
+        let event = sample_event();
+        let signing_key = fixture_signing_key();
+        let signer = ActorKeyRef {
+            actor_id: "kernel".into(),
+            key_id: "kernel-main".into(),
+            public_key_hash: None,
+        };
+        let at = "2026-05-22T23:30:00Z".parse().unwrap();
+
+        let a = sign_event(&event, &signing_key, &signer, at).unwrap();
+        let b = sign_event(&event, &signing_key, &signer, at).unwrap();
+        assert_eq!(a.signature, b.signature);
+    }
+
+    #[test]
+    fn sign_event_base64url_decodes_to_64_bytes() {
+        let event = sample_event();
+        let signing_key = fixture_signing_key();
+        let signer = ActorKeyRef {
+            actor_id: "kernel".into(),
+            key_id: "kernel-main".into(),
+            public_key_hash: None,
+        };
+        let signature =
+            sign_event(&event, &signing_key, &signer, "2026-05-22T23:30:00Z".parse().unwrap())
+                .unwrap();
+        let raw = URL_SAFE_NO_PAD.decode(&signature.signature).unwrap();
+        assert_eq!(raw.len(), 64);
+    }
 
     #[test]
     fn signature_algorithm_serializes_to_ed25519() {

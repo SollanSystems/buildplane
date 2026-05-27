@@ -9,9 +9,70 @@ use crate::canonicalize::canonicalize;
 use crate::error::{LedgerError, Result};
 use crate::event::Event;
 use crate::id::EventId;
+use crate::keyring::{load_signing_key, KeyringRef};
+use crate::signing::ActorKeyRef;
 use crate::storage::sqlite::SqliteStore;
 use crate::storage::Cas;
+use ed25519_dalek::SigningKey;
 use std::io::{BufRead, BufReader, Read, Write};
+
+/// Whether the ingest loop signs events on append.
+///
+/// Default is [`SigningConfig::Unsigned`], preserving pre-M1-S4 behavior.
+/// `Signed` loads the kernel actor key locally (only a key *reference* crosses
+/// the config boundary) and signs every ingested event under the kernel actor.
+///
+/// Held by reference for the lifetime of a serve loop, so the inter-variant
+/// size difference is not a concern.
+#[derive(Default)]
+#[allow(clippy::large_enum_variant)]
+pub enum SigningConfig {
+    /// Append events without producing detached signatures (legacy/default).
+    #[default]
+    Unsigned,
+    /// Sign each ingested event with the loaded kernel key, atomically with the
+    /// event-row insert. Append fails closed on any signing or insert error.
+    Signed {
+        // TODO(M2 R-003): wrap the loaded seed in a zeroizing container so the
+        // private key material is scrubbed from memory on drop. ed25519-dalek's
+        // `SigningKey` does not zeroize on drop by default; deferred this slice.
+        signing_key: SigningKey,
+        signer: ActorKeyRef,
+    },
+}
+
+impl SigningConfig {
+    /// Build a signed-mode config by loading the kernel key referenced by
+    /// `key_ref` from the default keyring (`~/.buildplane/keys`).
+    ///
+    /// Only the key reference is passed in; key bytes are loaded locally and
+    /// errors redact secret-shaped material.
+    pub fn signed_from_keyring(key_ref: &KeyringRef) -> Result<Self> {
+        let signing_key = load_signing_key(key_ref)?;
+        Ok(SigningConfig::Signed {
+            signing_key,
+            signer: ActorKeyRef {
+                actor_id: key_ref.actor_id.clone(),
+                key_id: key_ref.key_id.clone(),
+                public_key_hash: None,
+            },
+        })
+    }
+}
+
+impl std::fmt::Debug for SigningConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Never render key material.
+        match self {
+            SigningConfig::Unsigned => f.write_str("SigningConfig::Unsigned"),
+            SigningConfig::Signed { signer, .. } => f
+                .debug_struct("SigningConfig::Signed")
+                .field("actor_id", &signer.actor_id)
+                .field("key_id", &signer.key_id)
+                .finish_non_exhaustive(),
+        }
+    }
+}
 
 /// A single stdin line, interpreted as either a control message or an event envelope.
 #[derive(Debug)]
@@ -68,6 +129,7 @@ pub fn serve_with_protocol<R: Read, W: Write>(
     store: &SqliteStore,
     _cas: &Cas,
     declared_schema_version: u32,
+    signing: &SigningConfig,
 ) -> Result<ServeOutcome> {
     let mut buf = BufReader::new(stdin);
     let mut outcome = ServeOutcome::default();
@@ -161,7 +223,14 @@ pub fn serve_with_protocol<R: Read, W: Write>(
             Line::Event(event) => {
                 let canonical = canonicalize(event)?;
                 let event_id = canonical.id;
-                if let Err(e) = store.append(&canonical) {
+                let append_result = match signing {
+                    SigningConfig::Unsigned => store.append(&canonical),
+                    SigningConfig::Signed {
+                        signing_key,
+                        signer,
+                    } => store.append_signed(&canonical, signing_key, signer),
+                };
+                if let Err(e) = append_result {
                     write_error(&mut stderr, "storage_failure", line_no, &format!("{}", e))?;
                     return Err(e);
                 }
