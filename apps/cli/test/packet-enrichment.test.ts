@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+	dedupeAcrossLayers,
 	enrichPacketWithMemories,
 	prepareStrategyMemoryEnrichment,
 } from "../src/packet-enrichment.js";
@@ -150,6 +151,59 @@ function createStructuredMemoryPort(overrides?: {
 			overrides?.retrieveSearchableDocuments ?? (() => []),
 	};
 }
+
+describe("dedupeAcrossLayers", () => {
+	it("keeps a memory that appears in two layers once, from the higher-precedence layer", () => {
+		const result = dedupeAcrossLayers([
+			["[repo-fact] commands.build: npx pnpm build"],
+			["[fact] commands.build: npx pnpm build"],
+		]);
+		expect(result).toEqual(["[repo-fact] commands.build: npx pnpm build"]);
+	});
+
+	it("recognizes the same memory across different layer tags", () => {
+		const result = dedupeAcrossLayers([
+			["[procedure] run tests before pushing"],
+			["[honcho] run tests before pushing"],
+		]);
+		expect(result).toEqual(["[procedure] run tests before pushing"]);
+	});
+
+	it("preserves all distinct memories in stable source order", () => {
+		const result = dedupeAcrossLayers([
+			["[repo-fact] a", "[repo-fact] b"],
+			["[fact] c"],
+			["[honcho] d"],
+		]);
+		expect(result).toEqual([
+			"[repo-fact] a",
+			"[repo-fact] b",
+			"[fact] c",
+			"[honcho] d",
+		]);
+	});
+
+	it("dedupes within a layer as well as across layers", () => {
+		const result = dedupeAcrossLayers([
+			["[repo-fact] x", "[repo-fact] x"],
+			["[honcho] x"],
+		]);
+		expect(result).toEqual(["[repo-fact] x"]);
+	});
+
+	it("normalizes whitespace and case when comparing identities", () => {
+		const result = dedupeAcrossLayers([
+			["[repo-fact] Build  The   Project"],
+			["[fact] build the project"],
+		]);
+		expect(result).toEqual(["[repo-fact] Build  The   Project"]);
+	});
+
+	it("ignores empty and whitespace-only entries", () => {
+		const result = dedupeAcrossLayers([["[repo-fact] kept", "   ", ""], [""]]);
+		expect(result).toEqual(["[repo-fact] kept"]);
+	});
+});
 
 describe("enrichPacketWithMemories", () => {
 	it("injects memories into a packet that has an intent", async () => {
@@ -466,12 +520,96 @@ describe("enrichPacketWithMemories", () => {
 			intent: { context: { memories?: string[] } };
 		};
 
+		// Cross-layer precedence (Phase 2 · S1): structured (repo-fact ≻
+		// procedure ≻ document) ≻ run_learnings ≻ honcho.
 		expect(result.intent.context.memories).toEqual([
-			"[fact] Tests passed: All checks passed",
 			"[repo-fact] commands.typecheck: npx pnpm typecheck",
 			"[procedure] fix TypeScript build: Run typecheck before touching imports.",
 			"[document] Build failure summary: The branch replay failed during typecheck.",
+			"[fact] Tests passed: All checks passed",
 			"[honcho] user prefers exact verification output",
+		]);
+	});
+
+	it("drops a memory that surfaces in both run_learnings and structured layers, keeping the higher-precedence structured copy", async () => {
+		const packet = createPacket({
+			objective: "Fix the TypeScript build",
+			taskType: "debug_failure",
+			files: ["apps/cli/src/run-cli.ts"],
+			verification: ["npx pnpm typecheck"],
+		});
+		// The same instruction surfaces as a structured repo-fact and a local
+		// learning (different layer tags, identical underlying text).
+		const overlappingMemoryPort = {
+			fetchLearnings: () => [
+				{
+					kind: "fact",
+					title: "commands.typecheck",
+					body: "npx pnpm typecheck",
+				},
+				{
+					kind: "fact",
+					title: "local only",
+					body: "keep this learning",
+				},
+			],
+		};
+		const structuredMemoryPort = createStructuredMemoryPort({
+			retrieveRepoFacts: () => [createRepoFactResult()],
+		});
+
+		const result = (await enrichPacketWithMemories(
+			packet,
+			overlappingMemoryPort,
+			undefined,
+			undefined,
+			structuredMemoryPort,
+			"release/2026-04-13",
+		)) as {
+			intent: { context: { memories?: string[] } };
+		};
+
+		// Structured wins (higher precedence, listed first), the duplicate
+		// run-learning is dropped, the distinct learning survives.
+		expect(result.intent.context.memories).toEqual([
+			"[repo-fact] commands.typecheck: npx pnpm typecheck",
+			"[fact] local only: keep this learning",
+		]);
+	});
+
+	it("drops a honcho memory that duplicates a structured memory", async () => {
+		const packet = createPacket({
+			objective: "Fix the TypeScript build",
+			taskType: "debug_failure",
+			files: ["apps/cli/src/run-cli.ts"],
+			verification: ["npx pnpm typecheck"],
+		});
+		const structuredMemoryPort = createStructuredMemoryPort({
+			retrieveRepoFacts: () => [createRepoFactResult()],
+		});
+		const honchoAdapter = {
+			fetchContext: async () => ({
+				memories: [
+					"commands.typecheck: npx pnpm typecheck",
+					"unique honcho memory",
+				],
+			}),
+		};
+
+		const result = (await enrichPacketWithMemories(
+			packet,
+			undefined,
+			honchoAdapter,
+			"user-1",
+			structuredMemoryPort,
+			"release/2026-04-13",
+		)) as {
+			intent: { context: { memories?: string[] } };
+		};
+
+		expect(result.intent.context.memories).toEqual([
+			"[repo-fact] commands.typecheck: npx pnpm typecheck",
+			"[honcho] unique honcho memory",
 		]);
 	});
 
