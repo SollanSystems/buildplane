@@ -61,6 +61,7 @@ Run Inspector's event vocabulary starts from the generated ledger `EventKind` en
 - `tool_result`
 - `workspace_read`
 - `workspace_write`
+- `tape_checkpoint`
 
 If a new visual state needs a new kind, add it to the ledger/runtime schema first and verify it through storage/tests. Do not add UI-only event kinds for model reasoning, vibes, confidence, or inferred progress.
 

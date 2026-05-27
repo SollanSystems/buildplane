@@ -16,6 +16,8 @@ use ed25519_dalek::SigningKey;
 use rusqlite::{params, Connection, OptionalExtension};
 #[cfg(any(test, feature = "test-support"))]
 use std::cell::Cell;
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::path::Path;
 use uuid::Uuid;
 
@@ -58,6 +60,20 @@ impl CheckpointPolicy {
 /// SQLite connection wrapping the events + runs schema.
 pub struct SqliteStore {
     conn: Connection,
+    /// Per-run high-water mark of the latest NON-checkpoint event id, used by
+    /// the monotonic-id guard so it never has to issue a per-append `SELECT`.
+    ///
+    /// Lazily seeded from the DB the first time a run is touched (one query per
+    /// run, via [`Self::latest_ordinary_event_id_for_run`]), then advanced
+    /// in-process on every successful ordinary append. This is the O(1) replacement
+    /// for a per-event ordinary-id lookup, sound under buildplane's M1
+    /// single-writer model (see [`Self::validate_external_append`]). Checkpoint
+    /// ids deliberately never advance the mark — checkpoints are minted after the
+    /// events they cover and must not constrain the ordinary sequence.
+    ///
+    /// `RefCell` because the public append entry points take `&self`; the
+    /// single-writer model means there is never a concurrent borrow.
+    ordinary_id_high_water: RefCell<HashMap<RunId, EventId>>,
     /// Test-only one-shot fault injector for the checkpoint signature insert.
     /// Compiled in only under `cfg(test)` or the `test-support` feature, so it
     /// is wholly absent from default/release builds; armed only by the
@@ -75,6 +91,7 @@ impl SqliteStore {
         Self::init(&conn)?;
         Ok(Self {
             conn,
+            ordinary_id_high_water: RefCell::new(HashMap::new()),
             #[cfg(any(test, feature = "test-support"))]
             fail_next_checkpoint_signature_insert: Cell::new(false),
         })
@@ -86,6 +103,7 @@ impl SqliteStore {
         Self::init(&conn)?;
         Ok(Self {
             conn,
+            ordinary_id_high_water: RefCell::new(HashMap::new()),
             #[cfg(any(test, feature = "test-support"))]
             fail_next_checkpoint_signature_insert: Cell::new(false),
         })
@@ -168,7 +186,9 @@ impl SqliteStore {
     /// out-of-order ordinary event id, regardless of signing mode.
     pub fn append(&self, event: &Event) -> Result<()> {
         self.validate_external_append(event)?;
-        insert_event(&self.conn, event)
+        insert_event(&self.conn, event)?;
+        self.record_ordinary_append(event);
+        Ok(())
     }
 
     /// Validation enforced on every public append entry point for events that
@@ -185,21 +205,26 @@ impl SqliteStore {
     ///     internally-minted checkpoint id can exceed a later, pre-generated
     ///     ordinary id), so the comparison deliberately ignores checkpoints.
     ///
-    /// Single-writer assumption: the monotonic-id check in (b) reads the
-    /// latest ordinary id and then inserts in two separate statements rather
-    /// than inside one transaction. This is sound under buildplane's M1
-    /// single-writer / single-operator model — one `serve` connection appends
-    /// to a given run, and SQLite serializes writers — so no concurrent append
-    /// can interleave between the read and the insert. A fully concurrent
-    /// multi-writer deployment would need this read-before-insert guard moved
-    /// inside the insert transaction (or backed by a DB-level uniqueness/
-    /// ordering constraint) to stay race-free; that is deliberately out of
-    /// scope here and noted for whoever lifts the single-writer assumption.
+    /// Single-writer assumption: the monotonic-id check in (b) compares against
+    /// an in-process per-run high-water mark
+    /// ([`Self::ordinary_id_high_water`]) and then inserts in two separate steps
+    /// rather than inside one transaction. The mark is seeded from the DB once
+    /// per run (lazily, on first touch) and advanced in-process on each
+    /// successful ordinary append, so the guard runs in O(1) with no per-append
+    /// `SELECT`. This is sound under buildplane's M1 single-writer /
+    /// single-operator model — one `serve` connection appends to a given run,
+    /// and SQLite serializes writers — so no concurrent append can interleave
+    /// between the check and the insert, and the in-memory mark cannot drift
+    /// from durable state. A fully concurrent multi-writer deployment would need
+    /// this guard moved inside the insert transaction (or backed by a DB-level
+    /// uniqueness/ordering constraint) to stay race-free; that is deliberately
+    /// out of scope here and noted for whoever lifts the single-writer
+    /// assumption.
     fn validate_external_append(&self, event: &Event) -> Result<()> {
         if event.kind == EventKind::TapeCheckpoint {
             return Err(LedgerError::CallerSuppliedCheckpoint);
         }
-        if let Some(latest) = self.latest_ordinary_event_id_for_run(&event.run_id)? {
+        if let Some(latest) = self.latest_ordinary_id(&event.run_id)? {
             if event.id.as_uuid() <= latest.as_uuid() {
                 return Err(LedgerError::NonMonotonicEventId {
                     run_id: event.run_id.to_string(),
@@ -207,6 +232,36 @@ impl SqliteStore {
             }
         }
         Ok(())
+    }
+
+    /// The latest NON-checkpoint event id for `run_id`, served from the
+    /// in-process high-water mark and seeded once from the DB on first touch.
+    ///
+    /// `None` means the run has no ordinary events yet (a fresh run, or a run
+    /// whose only rows are checkpoints — which never advance the mark).
+    fn latest_ordinary_id(&self, run_id: &RunId) -> Result<Option<EventId>> {
+        if let Some(id) = self.ordinary_id_high_water.borrow().get(run_id) {
+            return Ok(Some(*id));
+        }
+        // Cold run: one DB query to seed the mark, then cache it. Subsequent
+        // appends for this run are served purely from memory.
+        let seeded = self.latest_ordinary_event_id_for_run(run_id)?;
+        if let Some(id) = seeded {
+            self.ordinary_id_high_water.borrow_mut().insert(*run_id, id);
+        }
+        Ok(seeded)
+    }
+
+    /// Advance the per-run high-water mark after a successful ordinary append.
+    /// `validate_external_append` guarantees the new id is strictly greater than
+    /// any prior ordinary id for the run, so this is an unconditional set.
+    /// Never called for checkpoint events — checkpoints must not constrain the
+    /// ordinary id sequence.
+    fn record_ordinary_append(&self, event: &Event) {
+        debug_assert_ne!(event.kind, EventKind::TapeCheckpoint);
+        self.ordinary_id_high_water
+            .borrow_mut()
+            .insert(event.run_id, event.id);
     }
 
     /// Append a detached event signature. The `event_signatures` table is
@@ -300,6 +355,11 @@ impl SqliteStore {
             insert_event_signature(&tx, &signature)?;
             tx.commit()?;
         }
+        // The ordinary event is now durably committed (its own atomic
+        // transaction above), so advance the high-water mark before any
+        // checkpoint emission. A later checkpoint failure leaves this ordinary
+        // event committed, so the mark must reflect it regardless.
+        self.record_ordinary_append(event);
 
         let CheckpointPolicy::Enabled { cadence } = *policy else {
             return Ok(vec![]);
@@ -392,7 +452,9 @@ impl SqliteStore {
 
     /// The id of the most recently appended NON-checkpoint event for a run,
     /// id-ordered (UUIDv7 = time order), or `None` if the run has no ordinary
-    /// events. Used by the per-run monotonic-id guard.
+    /// events. Used ONCE per run to lazily seed the in-memory monotonic-id
+    /// high-water mark (`latest_ordinary_id`); the per-append guard then reads
+    /// the in-memory mark, so this query never runs on the hot path.
     ///
     /// Checkpoints are excluded deliberately (Codex gate round 2 regression
     /// fix): a `tape_checkpoint` id is minted by `emit_checkpoint` AFTER the
