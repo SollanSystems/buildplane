@@ -8,7 +8,7 @@
 
 **Tech Stack:** TypeScript (ESM, `.js`), Node ≥24.13, vitest, `@buildplane/kernel`, `@buildplane/storage`.
 
-> **✅ Redesigned 2026-05-28** per `docs/superpowers/specs/2026-05-28-track2-outcome-memory-redesign-design.md` (operator-approved). **Supersedes** the mis-placed producer hook (`:1133`) and the accumulator dependency that Codex gate **R2** marked not-dispatch-ready. Hook moved before `createRun` (`:689`); exploration is **directed + deterministic**; steering is **opt-in, default OFF**. **This plan must pass `/codex challenge` before dispatch.**
+> **✅ Redesigned 2026-05-28** per `docs/superpowers/specs/2026-05-28-track2-outcome-memory-redesign-design.md` (operator-approved). **Supersedes** the mis-placed producer hook (`:1133`) and the accumulator dependency that Codex gate **R2** marked not-dispatch-ready. Hook moved before `createRun` (`:689`); steering is **opt-in, default OFF**. **R3 fixes folded in:** producer is **model-packets only** (command packets untouched); cold start is a **seed-free deterministic least-sampled rotation** (the per-unit-frozen ε coin that R3 flagged is gone — ε is now optional steady-state with a per-run seed). **Pending R4 `/codex challenge` before dispatch.**
 
 ## Opus Planning Reference (handoff contract)
 
@@ -16,10 +16,10 @@
 - **Phase:** 2 · Track 2 — **serial, AFTER S4.** Cut worktree from `origin/main` after S4 merges; re-verify tip.
 - **Authority:** the redesign spec (above) + `docs/plans/phase2-memory-contract.md` (Track 2, amended 2026-05-28).
 - **Aggregation:** per `(repoId, taskType, worker)` from `run_outcomes`; exponential recency decay `w = 2 ** (-ageMs / halfLifeMs)`; a worker is eligible to *exploit* only at `decayedSamples ≥ minSamples`. Pure module; `now` injected.
-- **Producer hook:** inside `prepareRun`, after `validatePacketForWorkspaceRoot`, **before** `storage.createRun` (`orchestrator.ts:689`). Fill `preferredWorker` **only if absent**; with probability ε pick the **least-sampled** candidate (directed, deterministic via a run-derived seed); else exploit best decayed `rate`; else leave absent. Construct one `routedPacket`, use it for `createRun` **and** downstream ⇒ recorded==actual. **No late mutation** (not `runtimeRouter`, not orchestrator :1136, not run-cli :1359).
-- **Worker↔hint mapping:** `worker ∈ {sdk,claude-code,codex}`; `preferredWorker ∈ {claude-code,codex}`. `chooseWorker` returning `"sdk"` (or `undefined`) ⇒ leave the hint **absent** (default executor). This is symmetric with S4's recorder (`absent ⇒ "sdk"`).
-- **Invariants:** `repoId = projectRoot`. Recorded route == actual route. Never override an explicit `preferredWorker`. Default OFF ⇒ unchanged behavior.
-- **Codex target (second gate):** the scoring math (decay, eligibility, directed-explore tie-break), the fill-not-override + route==record invariants, and the cold-start coverage argument.
+- **Producer hook:** inside `prepareRun`, after `validatePacketForWorkspaceRoot`, **before** `storage.createRun` (`orchestrator.ts:689`). **Model packets only** (`packet.execution === undefined`). Fill `preferredWorker` **only if absent**: if any candidate is under `minSamples` → least-sampled (seed-free cold-start coverage); else exploit best decayed `rate`; optional ε steady-state with a per-run seed; `sdk` ⇒ leave absent. Construct one `routedPacket`, use it for `createRun` **and** downstream ⇒ recorded==actual. **No late mutation** (not `runtimeRouter`, not orchestrator :1136, not run-cli :1359).
+- **Worker↔hint mapping:** `worker ∈ {sdk,claude-code,codex}`; `preferredWorker ∈ {claude-code,codex}`. `chooseWorker` returning `"sdk"` ⇒ leave the hint **absent** (default executor). Symmetric with S4's recorder (`absent ⇒ "sdk"`).
+- **Invariants:** `repoId = projectRoot`. Recorded route == actual route. Never override an explicit `preferredWorker`. Model-packets only. Default OFF ⇒ routing unchanged.
+- **Codex target (second gate):** the scoring math (decay, seed-free cold-start coverage, eligibility), the fill-not-override + route==record + model-packet invariants, and the cold-start convergence argument.
 - **Off-limits:** the `routingHints` consumer branches (`run-cli.ts:1359/1366`, orchestrator `:1136`, eval/runner); `run_outcomes` DDL + recorder (S4); promotion logic; `memory-retrieval.ts` ranking.
 - **Merge eligibility:** load-bearing routing change → **manual Opus review.**
 - **Verify command:** `pnpm -C <worktree> exec vitest run packages/kernel/test`. **Then the gate:** full suite + `pnpm -C <worktree> lint` + changeset.
@@ -28,9 +28,10 @@
 
 - [ ] **VF-1:** Confirm S4 shipped: `listRunOutcomes`/`appendRunOutcome` exist; `run_outcomes` populated by the recorder. Confirm `RunOutcome.createdAt` parses with `Date.parse`.
 - [ ] **VF-2:** Confirm the orchestrator's construction/dependency-injection seam — **where `createOrchestrator` (or equiv) receives deps/config** — and add `outcomeRouting` there. **Do not assume a global `config`.** Confirm `storage` is in scope inside `prepareRun`.
-- [ ] **VF-3:** Confirm `prepareRun` has `validatedPacket` + a stable run-derived value for the explore seed (e.g. the unit id / pending run id) available **before** `:689`, and that the value passed to `createRun` is the same object used downstream (so the snapshot reflects the fill).
-- [ ] **VF-4:** Classify the other `createRun` call sites (`orchestrator.ts:1080`, `:1101`): which represent a **fresh** routing decision (need the producer) vs an **inherited/retry** packet (must NOT re-route — already carries the filled hint). Default: only `prepareRun:689` gets the producer. Record the classification.
-- [ ] **VF-5:** Confirm an explicit incoming `routingHints.preferredWorker` flows through `prepareRun` unchanged when the flag is on (fill-not-override) and when off.
+- [ ] **VF-3 (R3 P1 — seed timing):** The run id is minted inside `storage.createRun` (`store.ts:1937`), i.e. **after** scoring, so it cannot seed the explore decision at the hook. Cold-start rotation is **seed-free** (no seed needed). If optional ε steady-state exploration is kept, confirm a **per-run** value can be pre-minted/passed before `:689` (a per-*unit* value is forbidden — it froze the R3 coin). **Default for V1: omit ε (pass `exploreSeed` undefined); cold-start rotation alone guarantees coverage.** Confirm the packet passed to `createRun` is the same object used downstream (so the snapshot reflects the fill).
+- [ ] **VF-4 (R3 P2 — corrected):** The non-`prepareRun` `createRun` sites are **profile-resolution failure (`orchestrator.ts:1063`)** and **approval suspension (`:1095`)** — NOT retry/child paths. They commit a run where **no model worker runs**, so the producer must **not** fire and the recorder appends **no** row. Re-confirm against the live source; record the classification. Only `prepareRun:689` gets the producer.
+- [ ] **VF-5 (R3 P1 — model-packet scope):** Confirm `fillRoutingHints` is a no-op for command packets (`packet.execution !== undefined`, dispatched at `run-cli.ts:1328` before routing) — they must never receive a `preferredWorker`.
+- [ ] **VF-6:** Confirm an explicit incoming `routingHints.preferredWorker` flows through `prepareRun` unchanged when the flag is on (fill-not-override) and when off.
 
 ## File Structure
 
@@ -123,26 +124,35 @@ import { chooseWorker, seededUnitInterval } from "../src/outcome-scoring.js";
 
 const CANDS = ["sdk", "claude-code", "codex"] as const;
 
-it("exploits the highest-rate eligible worker", () => {
-	const scores = new Map([
-		["codex", { decayedSuccess: 9, decayedSamples: 10, rate: 0.9 }],
-		["sdk", { decayedSuccess: 5, decayedSamples: 10, rate: 0.5 }],
-	]);
-	expect(chooseWorker(scores, { candidates: CANDS, minSamples: 5, epsilon: 0, exploreSeed: 1 })).toBe("codex");
-});
-
-it("returns undefined when no worker meets min-sample (and not exploring)", () => {
-	const scores = new Map([["codex", { decayedSuccess: 2, decayedSamples: 2, rate: 1 }]]);
-	expect(chooseWorker(scores, { candidates: CANDS, minSamples: 5, epsilon: 0, exploreSeed: 1 })).toBeUndefined();
-});
-
-it("explores the least-sampled candidate when the seed falls under epsilon", () => {
+it("cold start: routes to the least-sampled candidate (seed-free) until coverage", () => {
+	// sdk + codex have samples, claude-code has none ⇒ claude-code is least-sampled
 	const scores = new Map([
 		["sdk", { decayedSuccess: 8, decayedSamples: 8, rate: 1 }],
 		["codex", { decayedSuccess: 2, decayedSamples: 2, rate: 1 }],
-		// claude-code has zero samples ⇒ least-sampled
 	]);
-	const seed = explorerSeedUnder(0.2);   // helper picks a seed with seededUnitInterval < 0.2
+	expect(chooseWorker(scores, { candidates: CANDS, minSamples: 5, epsilon: 0 })).toBe("claude-code");
+});
+
+it("at zero data, rotates by least-sampled (tie → candidate order)", () => {
+	expect(chooseWorker(new Map(), { candidates: CANDS, minSamples: 5, epsilon: 0 })).toBe("sdk");
+});
+
+it("exploits the highest-rate candidate once all candidates are covered", () => {
+	const scores = new Map([
+		["sdk", { decayedSuccess: 5, decayedSamples: 10, rate: 0.5 }],
+		["claude-code", { decayedSuccess: 6, decayedSamples: 10, rate: 0.6 }],
+		["codex", { decayedSuccess: 9, decayedSamples: 10, rate: 0.9 }],
+	]);
+	expect(chooseWorker(scores, { candidates: CANDS, minSamples: 5, epsilon: 0 })).toBe("codex");
+});
+
+it("optional steady-state ε re-explores least-sampled when a per-run seed falls under ε", () => {
+	const scores = new Map([        // all ≥ minSamples ⇒ past cold start
+		["sdk", { decayedSuccess: 50, decayedSamples: 50, rate: 1 }],
+		["claude-code", { decayedSuccess: 6, decayedSamples: 6, rate: 1 }],
+		["codex", { decayedSuccess: 9, decayedSamples: 9, rate: 1 }],
+	]);
+	const seed = explorerSeedUnder(0.2);   // helper: first int with seededUnitInterval < 0.2
 	expect(chooseWorker(scores, { candidates: CANDS, minSamples: 5, epsilon: 0.2, exploreSeed: seed })).toBe("claude-code");
 });
 
@@ -175,28 +185,34 @@ export function chooseWorker(
 		candidates: readonly WorkerLabel[];
 		minSamples: number;
 		epsilon: number;
-		exploreSeed: number;
+		exploreSeed?: number;        // per-RUN seed; only consulted post-coverage
 	},
 ): WorkerLabel | undefined {
+	if (opts.candidates.length === 0) return undefined;
 	const samples = (w: WorkerLabel) => scores.get(w)?.decayedSamples ?? 0;
-	if (seededUnitInterval(opts.exploreSeed) < opts.epsilon) {
-		const min = Math.min(...opts.candidates.map(samples));
-		const least = opts.candidates.filter((w) => samples(w) === min);
-		return least[opts.exploreSeed % least.length];     // deterministic tie-break rotates coverage
-	}
-	const eligible = opts.candidates.filter((w) => samples(w) >= opts.minSamples);
-	if (eligible.length === 0) return undefined;
-	return eligible.reduce((best, w) => ((scores.get(w)?.rate ?? 0) > (scores.get(best)?.rate ?? 0) ? w : best));
+	// least-sampled candidate; `<=` makes ties resolve to the earlier candidate (deterministic)
+	const leastSampled = () => opts.candidates.reduce((a, b) => (samples(a) <= samples(b) ? a : b));
+	// 1. cold-start coverage (seed-free): warm every candidate to minSamples — kills R3 starvation
+	if (opts.candidates.some((w) => samples(w) < opts.minSamples)) return leastSampled();
+	// 2. optional steady-state exploration — needs a per-RUN seed (never a per-unit one)
+	if (opts.epsilon > 0 && opts.exploreSeed !== undefined &&
+		seededUnitInterval(opts.exploreSeed) < opts.epsilon) return leastSampled();
+	// 3. exploit: highest decayed rate (all candidates are covered here)
+	return opts.candidates.reduce((best, w) =>
+		((scores.get(w)?.rate ?? 0) > (scores.get(best)?.rate ?? 0) ? w : best));
 }
 ```
 
-- [ ] **Step 4 — run, expect PASS. Commit:** `feat(kernel): chooseWorker (eligibility + directed exploration)`
+Note: with cold-start rotation, `chooseWorker` only returns `undefined` for an empty candidate set;
+the "leave the hint absent" decision happens in `fillRoutingHints` (`worker === "sdk"` ⇒ absent).
+
+- [ ] **Step 4 — run, expect PASS. Commit:** `feat(kernel): chooseWorker (seed-free cold-start rotation + exploit)`
 
 ### Task 3 — fillRoutingHints adapter + config
 
 **Files:** Create `packages/kernel/src/routing-producer.ts`; create `packages/kernel/test/routing-producer.test.ts`
 
-- [ ] **Step 1 — failing tests:** flag OFF ⇒ packet returned unchanged; explicit `preferredWorker` ⇒ never overridden (even with flag on); flag ON + hint absent + `chooseWorker` ⇒ `codex` ⇒ packet gains `routingHints.preferredWorker === "codex"`; `chooseWorker` ⇒ `sdk`/`undefined` ⇒ hint stays absent. Build packets with `intent.taskType` present and absent (fallback to `unit.kind`).
+- [ ] **Step 1 — failing tests:** flag OFF ⇒ packet returned unchanged (and `listRunOutcomes` never called); **command packet (`execution` set) ⇒ returned unchanged even with flag ON** (R3 P1 — must never route a non-model packet); explicit `preferredWorker` ⇒ never overridden (even with flag on); flag ON + model packet + hint absent + `chooseWorker` ⇒ `codex` ⇒ packet gains `routingHints.preferredWorker === "codex"`; `chooseWorker` ⇒ `sdk`/`undefined` ⇒ hint stays absent. Build packets with `intent.taskType` present and absent (fallback to `unit.kind`).
 
 - [ ] **Step 2 — run, expect FAIL.**
 
@@ -229,9 +245,10 @@ export function fillRoutingHints(
 	storage: BuildplaneStoragePort,
 	cfg: OutcomeRoutingConfig,
 	now: number,
-	exploreSeed: number,
+	exploreSeed?: number,                                        // per-RUN seed (optional ε)
 ): UnitPacket {
 	if (!cfg.enabled) return packet;
+	if (packet.execution !== undefined) return packet;           // command packet — not a model worker (D5/R3)
 	if (packet.routingHints?.preferredWorker) return packet;     // never override
 	const taskType = packet.intent?.taskType ?? packet.unit.kind;
 	const scores = aggregateOutcomeScores(
@@ -252,21 +269,21 @@ export function fillRoutingHints(
 
 **Files:** Modify `packages/kernel/src/orchestrator.ts`; new orchestrator integration test
 
-- [ ] **Step 1 — failing integration tests** (orchestrator test harness): with `outcomeRouting.enabled=false` (default) a run's `unit_snapshot.routingHints` is identical to today (no-op). With `enabled=true`, seeded `run_outcomes` favoring `codex` (≥minSamples) and ε=0, an unhinted run's **persisted** `unit_snapshot` shows `preferredWorker === "codex"` AND the executed route is codex (**recorded==actual**). An explicit `preferredWorker` is preserved.
+- [ ] **Step 1 — failing integration tests** (orchestrator test harness): with `outcomeRouting.enabled=false` (default) a run's `unit_snapshot.routingHints` is identical to today (no-op) **and `listRunOutcomes` is never queried**. With `enabled=true` and seeded `run_outcomes` where every candidate is past `minSamples` and `codex` has the best rate, an unhinted **model** run's **persisted** `unit_snapshot` shows `preferredWorker === "codex"` AND the executed route is codex (**recorded==actual**). With every candidate under `minSamples`, the unhinted run routes to the least-sampled candidate (cold-start coverage). An explicit `preferredWorker` is preserved. A **command packet** (`execution` set) is never routed.
 
 - [ ] **Step 2 — run, expect FAIL.**
 
-- [ ] **Step 3 — implement** per VF-2/VF-3: thread `outcomeRouting: OutcomeRoutingConfig` (default `defaultOutcomeRoutingConfig`) through orchestrator construction; in `prepareRun`, before `storage.createRun` (:689):
+- [ ] **Step 3 — implement** per VF-2/VF-3/VF-4: thread `outcomeRouting: OutcomeRoutingConfig` (default `defaultOutcomeRoutingConfig`) through orchestrator construction; in `prepareRun`, before `storage.createRun` (:689):
 
 ```ts
 const routedPacket = fillRoutingHints(
-	validatedPacket, storage, outcomeRouting, Date.now(), seededRunValue,
+	validatedPacket, storage, outcomeRouting, Date.now(), /* exploreSeed */ undefined,
 );
 const run = storage.createRun(routedPacket, createRunOptions);
 // use routedPacket (not validatedPacket) for ctx/downstream so execution reads the filled hint
 ```
 
-`seededRunValue` = a stable integer from the pending run/unit id (VF-3). Per VF-4, do **not** add the producer to the `:1080/:1101` createRun sites unless they are fresh-decision paths.
+V1 passes `exploreSeed` undefined — cold-start rotation guarantees coverage without ε (VF-3). If ε is enabled later, pass a **per-run** seed (never per-unit). Per VF-4, do **not** add the producer to the `:1063`/`:1095` createRun sites (profile-resolution failure / approval suspension — no model worker runs).
 
 - [ ] **Step 4 — run, expect PASS. Commit:** `feat(kernel): score-driven routing producer in prepareRun (opt-in)`
 
@@ -278,9 +295,9 @@ const run = storage.createRun(routedPacket, createRunOptions);
 
 ## Acceptance criteria
 
-- Decay correct (one half-life ⇒ weight 0.5); below-min-sample workers never exploited; `seededUnitInterval` deterministic in [0,1).
-- Directed exploration picks the least-sampled candidate; at zero data all candidates are reachable across seeds (cold start covered).
-- Explicit `preferredWorker` never overridden; `chooseWorker → sdk/undefined` leaves the hint absent.
-- **Default OFF ⇒ byte-for-byte unchanged routing** (no-op integration test passes).
+- Decay correct (one half-life ⇒ weight 0.5); `seededUnitInterval` deterministic in [0,1).
+- **Cold-start coverage is seed-free:** an under-sampled grain routes to its least-sampled candidate, so every candidate reaches `minSamples` without RNG and without a per-unit-frozen coin (the R3 starvation bug is gone). Post-coverage, the highest-rate candidate is exploited.
+- **Command packets are never routed** (`execution` set ⇒ no-op); explicit `preferredWorker` never overridden; `chooseWorker → sdk` leaves the hint absent.
+- **Default OFF ⇒ routing unchanged** (`fillRoutingHints` not called, `listRunOutcomes` not queried) — no-op integration test passes.
 - With the flag on: persisted `unit_snapshot` route == executed route (recorded==actual); no late mutation anywhere.
-- Scoring math + invariants passed `/codex challenge`. Full suite + lint green; changeset added.
+- Scoring math + invariants passed `/codex challenge` (R4). Full suite + lint green; changeset added.

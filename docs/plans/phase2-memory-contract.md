@@ -102,33 +102,37 @@ a `<runId>` arg), reuse `formatters.ts` with `--json` parity.
 > **REDESIGNED 2026-05-28** (operator-approved) — authority:
 > `docs/superpowers/specs/2026-05-28-track2-outcome-memory-redesign-design.md`. The accumulator
 > model below was replaced with **raw append-only per-run rows aggregated at read time** after
-> Codex gate R2 found 7 P1s. The two slice plans (`phase2-s4-*`, `phase2-s5-*`) are rewritten to
-> the new model and await `/codex challenge` re-gate.
+> Codex gate R2 found 7 P1s; Codex R3 then found 4 P1 + 3 P2, all addressed in the current spec +
+> plans. The two slice plans (`phase2-s4-*`, `phase2-s5-*`) are rewritten and await the **R4**
+> `/codex challenge` re-gate.
 
-**Invariants (redesigned):** `repoId = projectRoot`. Grain = `(repoId, taskType, worker)` where
-`worker ∈ {sdk, claude-code, codex}` (the 3-value reality; `preferredWorker` is only
-`claude-code|codex`, absent ⇒ `sdk`) and `taskType = intent?.taskType ?? unit.kind`. Routing is
-**opt-in, default OFF**, **fill-not-override**, with **min-sample + directed ε-exploration +
-read-time recency decay**.
+**Invariants (redesigned, R3-corrected):** `repoId = projectRoot`. Grain = `(repoId, taskType,
+worker)` where `worker ∈ {sdk, claude-code, codex}` (the 3-value reality; `preferredWorker` is only
+`claude-code|codex`, absent ⇒ `sdk`) and `taskType = intent?.taskType ?? unit.kind`. **Model packets
+only** (`execution`-bearing/command packets excluded from recording + routing). **One run = at most
+one row** (unique `(repo_id, source_run_id)` + idempotent insert). Routing is **opt-in, default OFF**,
+**fill-not-override**, with **seed-free cold-start rotation + optional ε + read-time recency decay**.
 
 ### S4 — `run_outcomes` table + store + recorder  (was `outcome_scores`)
 **Do:** new **append-only** DDL `run_outcomes (id, repo_id, task_type, worker, success,
-source_run_id, created_at)` + grain index, in `bootstrapStorageProjectionSchema` (store.ts:433);
-**no supersession, no stored score/confidence/sample_count** (derived at read in S5). ADD
-`appendRunOutcome`/`listRunOutcomes` after `ports.ts:153`. Recorder in `finalizeRun`
-(orchestrator.ts:762) appends one row per terminal run; `worker = snapshot.preferredWorker ?? "sdk"`.
-**Codex target:** the column set + append-only decision + worker/taskType derivation.
+source_run_id, created_at)` + grain index + **`uq_run_outcomes_run` unique `(repo_id, source_run_id)`**,
+in `bootstrapStorageProjectionSchema` (store.ts:433); **no supersession, no stored
+score/confidence/sample_count** (derived at read in S5). ADD idempotent `appendRunOutcome`/
+`listRunOutcomes` after `ports.ts:153` + barrel exports. A **shared phase-gated recorder** runs from
+**every** terminal-commit path (`finalizeRun` :762 + `finalizeInfrastructureFailure` :1023/:1227),
+**model-packets only**; `worker = snapshot.preferredWorker ?? "sdk"`.
+**Codex target:** column set + append-only/idempotency + recorder placement + worker/taskType derivation.
 **Off-limits:** altering any existing table DDL — only ADD `run_outcomes`.
 
 ### S5 — outcome aggregation + routingHints producer  (depends on S4)
 **Aggregation:** pure module over `listRunOutcomes`, grouped per `(repoId, taskType, worker)`;
 read-time exponential recency decay (`w = 2 ** (-ageMs/halfLifeMs)`); min-sample eligibility.
-**Producer hook (corrected R2):** inside `prepareRun`, **before `storage.createRun`
-(`orchestrator.ts:689`)** — the snapshot point. Fill `preferredWorker` **only if absent**; with
-probability ε pick the **least-sampled** candidate (directed, deterministic seed); else exploit the
-best decayed rate; else leave absent. The same `routedPacket` is snapshotted and executed ⇒
-recorded==actual, **no late mutation**. Steering is gated by an `outcomeRouting` config flag,
-**default OFF**.
+**Producer hook (corrected R2/R3):** inside `prepareRun`, **before `storage.createRun`
+(`orchestrator.ts:689`)** — the snapshot point. **Model packets only.** Fill `preferredWorker` **only
+if absent**: if any candidate < `minSamples` → least-sampled (**seed-free** cold-start coverage —
+no per-unit-frozen coin); else exploit best decayed rate; optional ε steady-state (per-run seed);
+`sdk` ⇒ leave absent. The same `routedPacket` is snapshotted and executed ⇒ recorded==actual,
+**no late mutation**. Steering is gated by an `outcomeRouting` config flag, **default OFF**.
 **Codex targets:** scoring math, fill-not-override + exploration + route==record invariants,
 cold-start coverage. **Verify-first:** orchestrator config-injection seam; the other `createRun`
 sites (:1080/:1101); explicit-hint pass-through.
@@ -170,10 +174,9 @@ full-suite+lint+changeset gate.
 
 **Status after the second Codex gate (R2, 2026-05-26):**
 - **Track 1 (S3 → S2 → S1): SHIPPED on `origin/main`** (#146 / #148 / #149).
-- **Track 2 (S4, S5): REDESIGNED 2026-05-28 — pending `/codex challenge` re-gate.** R2's 7 P1s
-  (accumulator tally destruction; un-decayable counts; producer hook too late → recorded≠actual;
-  no persisted worker; optional `taskType`; cold-start/starvation; uniqueness/score-confidence) are
-  resolved by the raw-rows redesign — authority
-  `docs/superpowers/specs/2026-05-28-track2-outcome-memory-redesign-design.md`, P1→resolution map
-  therein. The S4/S5 plans are rewritten to the new model. **Re-run `/codex challenge` against the
-  spec + plans before Track 2 dispatch.**
+- **Track 2 (S4, S5): REDESIGNED 2026-05-28 — Codex R3 FAIL addressed, pending R4 re-gate.** R2's
+  7 P1s were resolved by the raw-rows redesign; Codex **R3** then returned FAIL with 4 P1 + 3 P2
+  (command-packet score poisoning; infra-failure recording path; missing `source_run_id` uniqueness;
+  per-unit-frozen ε starvation) — all addressed in the current spec + plans (authority
+  `docs/superpowers/specs/2026-05-28-track2-outcome-memory-redesign-design.md`; see its "R3 findings
+  → resolution"). **Re-run `/codex challenge` (R4) against the spec + plans before Track 2 dispatch.**

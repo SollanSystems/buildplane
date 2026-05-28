@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Design — approved by operator 2026-05-28, pre-`/codex challenge` re-gate |
+| **Status** | Design — operator-approved 2026-05-28. Codex R3 returned FAIL (4 P1 + 3 P2); all addressed in this rev (see "R3 findings → resolution"). **Pending R4 `/codex challenge` re-gate.** |
 | **Supersedes** | The frozen `outcome_scores` / `upsertOutcomeScore` storage model in `docs/plans/phase2-memory-contract.md` (Track 2) and the ⛔-banner'd plans `phase2-s4-outcome-scores-table.md`, `phase2-s5-scoring-aggregation-routing-producer.md` |
 | **Authority** | ADR 0001; `docs/superpowers/specs/2026-05-26-memory-program-orchestration-design.md`; the Phase-2 contract (Track 1 portion unchanged) |
 | **Gate** | Re-run `/codex challenge` against this spec + the revised S4/S5 plans before Track 2 dispatch |
@@ -41,9 +41,18 @@ read time**, and moves the producer ahead of run persistence. Most P1s dissolve 
   byte-for-byte unchanged. (Honors contract rule 2 "additive / opt-in, no silent behavior change".)
 - **D3 — Recording lives in S4** (folded into the write path), so the table warms from real runs
   the moment S4 lands, before any steering logic exists.
-- **D4 — Exploration is directed (least-sampled candidate), deterministic.** ε gates *whether* to
-  explore; the *choice within* exploration is the least-sampled candidate (no RNG), so every route
-  is reproducible and explainable.
+- **D4 — Cold start is a seed-free deterministic rotation; ε is optional steady-state.** Coverage is
+  guaranteed by always routing under-sampled grains to their **least-sampled candidate** (read from
+  the table, no RNG, no seed) until every candidate reaches `minSamples`. Only after coverage does
+  exploitation kick in, with an **optional** ε-exploration tick. This replaces the rejected R3
+  design where the explore decision was a per-*unit* hash that froze forever (a unit hashing above ε
+  never explored → permanent starvation). See [[#cold-start--exploration-p1-6]].
+- **D5 — Outcome memory scopes to *model* packets only.** A `UnitPacket` carrying `execution`
+  (command/shell packets, run via `commandExecutor` at `run-cli.ts:1328` *before* worker routing)
+  ran no model worker. Such packets are **excluded from both recording and routing** — they never
+  append a `run_outcomes` row and `fillRoutingHints` returns them untouched. `worker ∈
+  {sdk,claude-code,codex}` only ever describes a model-execution packet. (Resolves R3 P1: command
+  packets were being mis-recorded as `sdk`.)
 
 ## Architecture
 
@@ -58,6 +67,10 @@ type WorkerLabel = "sdk" | "claude-code" | "codex";
 ```
 
 The outcome table records this 3-value reality. The candidate set for exploration is the same three.
+**Only model-execution packets are in scope** (D5): a packet with `execution` set runs the
+`commandExecutor` (`run-cli.ts:1328`), not a model worker, and is excluded from recording + routing.
+The model-packet predicate (`packet.execution === undefined`, plus any model-route precondition) is
+pinned in S4/S5 verify-first.
 
 ### Grain key (P1 #5)
 
@@ -84,11 +97,15 @@ CREATE TABLE IF NOT EXISTS run_outcomes (
   created_at   TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_run_outcomes_grain ON run_outcomes (repo_id, task_type, worker);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_run_outcomes_run ON run_outcomes (repo_id, source_run_id);
 ```
 
 No supersession, no `status`, no stored `score`/`confidence`/`sample_count` — the raw success
 signal is the only stored fact; everything else is derived in S5. (Graded/continuous outcome scores
-→ Phase 3.)
+→ Phase 3.) **One run = at most one row:** the `uq_run_outcomes_run` unique index + an idempotent
+`INSERT … ON CONFLICT DO NOTHING` make `appendRunOutcome` safe against a recorder that fires twice
+(retry, replay, or two finalization paths) — otherwise a double-fire double-weights that run
+forever. (Resolves R3 P1 / R2 #7.)
 
 **Port** (`packages/kernel/src/ports.ts`, `BuildplaneStoragePort` after :153; supersedes the frozen
 `upsertOutcomeScore`/`listOutcomeScores`):
@@ -102,18 +119,26 @@ listRunOutcomes(options?: {
 
 Types (`packages/kernel/src/memory-types.ts`): `WorkerLabel`, `AppendRunOutcomeInput`, `RunOutcome`.
 
-**Recorder** (P1 #4 — resolved for free by D2's recorded==actual): at run finalization
-(`orchestrator.ts:762 finalizeRun`), append one row:
-- `worker = run.unit_snapshot.routingHints?.preferredWorker ?? "sdk"` — because the producer fills
-  the hint *before* the snapshot (D2/below), the persisted snapshot **is** the authoritative record
-  of which worker ran. No separate provenance plumbing.
-- `success` from the run's terminal status (the `run-completed` payload status read at
-  `store.ts:1809`): a terminal *success* → 1, a terminal *failure* → 0. Only runs that reach a
-  terminal success/failure are recorded; cancelled/superseded/non-terminal runs append no row. **S4
-  verify-first pins the exact run-status vocabulary** before mapping.
-- `task_type` via the grain-key rule; `repo_id = projectRoot`; `source_run_id = run.id`.
+**Recorder** (P1 #4 — worker provenance falls out of D2's recorded==actual). A **terminal run can be
+committed from more than one path**: the clean `finalizeRun` (`orchestrator.ts:762`) *and*
+`finalizeInfrastructureFailure` (sync `:1023` / async `:1227`, committing a failed run at `:613`). A
+worker that *started and then threw* exits through the failure path — recording only in `finalizeRun`
+would silently drop those failures and bias every score upward. So the recorder is a **single shared
+helper invoked from every terminal-commit path**, **phase-gated**:
+- Record **iff** a model worker actually started executing (post-execution-start). Pre-execution
+  failures (profile resolution, admission, validation) and **command/`execution` packets (D5)**
+  append **no** row — there was no model worker to score.
+- `worker = run.unit_snapshot.routingHints?.preferredWorker ?? "sdk"` — the producer fills the hint
+  *before* the snapshot (D2), so the persisted snapshot **is** the authoritative record of which
+  model worker ran. No separate provenance plumbing.
+- `success` from the terminal status: terminal *success* → 1, a post-execution *failure* (incl. the
+  infra-failure path) → 0. **S4 verify-first pins** the exact run-status vocabulary, the
+  "worker-started" phase predicate, and every terminal-commit call site.
+- `task_type` via the grain-key rule; `repo_id = projectRoot`; `source_run_id = run.id`. Idempotent
+  insert (the unique index above) tolerates a path firing the recorder twice.
 
-S4 is **fully additive**: it changes no routing behavior. The table simply begins accumulating.
+S4 changes **no routing behavior**; its only effect is a new write-only `run_outcomes` row per
+in-scope terminal run (see the "routing unchanged, not byte-for-byte" note under Invariants).
 
 ### S5 — read path (aggregation + producer), opt-in
 
@@ -133,25 +158,34 @@ injected for testability). (Resolves P1 #2.)
 
 **Producer** — `chooseWorker(scores, opts): WorkerLabel | undefined`:
 
+#### cold start / exploration (P1 #6)
+
 ```ts
 chooseWorker(
   scores: ReturnType<typeof aggregateOutcomeScores>,
   opts: {
     candidates: readonly WorkerLabel[];   // ["sdk","claude-code","codex"]
-    minSamples: number;                    // eligibility gate
-    epsilon: number;                       // P(explore)
-    exploreSeed: number;                   // deterministic explore decision (e.g. run-id hash)
+    minSamples: number;                    // coverage + eligibility gate
+    epsilon: number;                       // optional steady-state P(explore); 0 disables
+    exploreSeed?: number;                  // per-RUN seed (see below); only used post-coverage
   },
 ): WorkerLabel | undefined;
 ```
 
-- A worker is **eligible** to exploit only at `decayedSamples ≥ minSamples`.
-- **Explore** (gated by ε via `exploreSeed`, deterministic): return the **least-sampled** candidate
-  (directed — warms all three fastest; D4). Handles cold start: at zero data every candidate ties
-  at 0 samples and exploration cycles them. (Resolves P1 #6.)
-- Otherwise **exploit**: the eligible worker with the highest `rate`.
-- If neither explores nor has an eligible worker → return `undefined` (leave hint absent → default
-  SDK; unchanged behavior).
+Decision order:
+1. **Cold-start coverage (seed-free, deterministic).** If any candidate has `decayedSamples <
+   minSamples`, return the **least-sampled** candidate (tie-break by candidate order). This
+   *guarantees* every candidate — including the ones the default path never picks — climbs to
+   `minSamples`, with no RNG and no per-unit frozen coin. This is the fix for the R3 starvation P1.
+2. **Exploit.** Once all candidates are covered, return the highest-`rate` candidate.
+3. **Optional steady-state ε.** If `epsilon > 0` and a **per-run** `exploreSeed` is supplied,
+   `seededUnitInterval(exploreSeed) < epsilon` re-explores the least-sampled candidate. The seed
+   **must vary per run, not per unit** (a per-unit seed froze the decision in R3). Since the run id
+   is minted inside `createRun` *after* scoring (`store.ts:1937`), S5 must pre-mint/pass a run id (or
+   another per-run value) into the hook, or omit ε for V1 — cold-start rotation + exploit already
+   guarantees coverage without it.
+
+Returning `"sdk"` (or `undefined`) ⇒ leave the hint absent (default executor).
 
 **Integration** (`orchestrator.ts`, inside `prepareRun` **before** `storage.createRun` at
 `:689`) — resolves P1 #3:
@@ -168,30 +202,35 @@ const run = storage.createRun(routedPacket, createRunOptions);
 The `outcomeRouting` config is threaded into the orchestrator via its existing dependency-injection
 seam — **S5 verify-first must confirm where orchestrator construction takes config/deps** and add
 the flag there (do not assume a global `config`). `fillRoutingHints` returns `validatedPacket`
-unchanged when `routingHints.preferredWorker` is
-already set (**never override an explicit hint** — contract rule 3) or when `chooseWorker` returns
-`undefined`; otherwise it returns a packet with the filled hint. Because the **same** `routedPacket`
-is both snapshotted by `createRun` (`store.ts:1959`, `unit_snapshot`) and read at execution
-(`orchestrator.ts:1136`), **recorded route == actual route** by construction. No downstream
-mutation (not `runtimeRouter`). (Resolves P1 #3 and feeds the clean P1 #4 recording above.)
+**unchanged** when any of:
+- the packet is **not a model packet** (`packet.execution` is set — D5; a command packet must never
+  receive a `preferredWorker`, or it would be mis-recorded as `sdk`);
+- `routingHints.preferredWorker` is already set (**never override an explicit hint** — contract rule 3);
+- `chooseWorker` returns `undefined` or `"sdk"`.
+
+Otherwise it returns a packet with the filled hint. Because the **same** `routedPacket` is both
+snapshotted by `createRun` (`store.ts:1959`, `unit_snapshot`) and read at execution
+(`orchestrator.ts:1136`), **recorded route == actual route** by construction. No downstream mutation
+(not `runtimeRouter`). (Resolves P1 #3 and feeds the clean P1 #4 recording above.)
 
 **Config / flag** (D2): `outcomeRouting: { enabled: boolean (default false), epsilon, halfLifeMs,
 minSamples, candidates }`. Disabled ⇒ `fillRoutingHints` is never called ⇒ zero behavior change.
 
 ### Other `createRun` sites
 
-`storage.createRun` is also called at `orchestrator.ts:1080` and `:1101` (retry/child paths). The
-S5 plan's verify-first must classify each: a site that represents a **fresh routing decision** needs
-the producer; a site that **inherits** an already-routed packet must not re-route (it already
-carries the filled hint). Default position: only the `prepareRun` (`:689`) fresh-decision path gets
-the producer; retry/child runs inherit. Pin this in the plan, do not over-apply.
+`storage.createRun` is called from additional sites that are **not** fresh routing decisions:
+profile-resolution failure (`orchestrator.ts:1063`) and approval suspension (`orchestrator.ts:1095`)
+— corrected from the earlier "retry/child" guess after the R3 challenge. These commit a run where
+**no model worker runs**, so the producer must **not** fire there and the recorder appends **no**
+row (the phase gate / model-packet predicate excludes them). Only the `prepareRun` (`:689`)
+fresh-decision path gets the producer. S5 verify-first re-confirms each site against the live source.
 
 ## Slices
 
 | Slice | Scope | Routing change | Merge gate |
 |---|---|---|---|
-| **S4** | `run_outcomes` table + DDL + `assertTableColumns`; `WorkerLabel`/`AppendRunOutcomeInput`/`RunOutcome`; `appendRunOutcome`/`listRunOutcomes` port + store impl; recorder in `finalizeRun`. | **None** (additive). | Manual Opus review (new table + port + recorder). |
-| **S5** | `outcome-scoring.ts` (aggregate + chooseWorker, pure); `fillRoutingHints` producer in `prepareRun` before `:689`; `outcomeRouting` config flag (default OFF). Depends on S4. | Behind opt-in flag; default OFF. | Manual Opus review (load-bearing routing). |
+| **S4** | `run_outcomes` table (+ grain index + `uq_run_outcomes_run` unique index) + `assertTableColumns`; `WorkerLabel`/`AppendRunOutcomeInput`/`RunOutcome` types **+ `index.ts` barrel exports**; idempotent `appendRunOutcome`/`listRunOutcomes` port + store impl **+ test-double updates**; a shared phase-gated recorder invoked from **all** terminal-commit paths (`finalizeRun` + `finalizeInfrastructureFailure`), model-packets only. | None to routing; adds a write-only row per in-scope terminal run. | Manual Opus review (new table + port + recorder). |
+| **S5** | `outcome-scoring.ts` (aggregate + `chooseWorker` with seed-free cold-start rotation, pure); `fillRoutingHints` producer in `prepareRun` before `:689` (model-packets only, fill-not-override); `outcomeRouting` config flag (default OFF). Depends on S4. | Behind opt-in flag; default OFF. | Manual Opus review (load-bearing routing). |
 
 Each slice: TDD; verify command `pnpm -C <worktree> exec vitest run <pkg>/test`; then the gate —
 full suite + `pnpm -C <worktree> lint` + changeset. (Per the slice-verify-command memory: use
@@ -204,19 +243,35 @@ full suite + `pnpm -C <worktree> lint` + changeset. (Per the slice-verify-comman
 | #1 tally destroyed | Append-only raw rows; no supersession (D1). |
 | #2 decay unimplementable | Raw timestamps + read-time exponential decay; retunable (D1, S5). |
 | #3 recorded ≠ actual | Producer fills before `createRun` (`:689`); same packet snapshotted + executed (D2). |
-| #4 no worker provenance | Recorded==actual ⇒ `snapshot.preferredWorker ?? "sdk"` is the worker; recorder reads it. |
+| #4 no worker provenance | Recorded==actual ⇒ `snapshot.preferredWorker ?? "sdk"` is the worker; shared phase-gated recorder reads it from **all** terminal-commit paths (incl. infra-failure). |
 | #5 taskType optional | Grain key `intent?.taskType ?? unit.kind`; `unit.kind` required ⇒ never null. |
-| #6 cold start / starvation | Directed ε-exploration over `{sdk,claude-code,codex}` at zero-score (D4). |
-| #7 uniqueness / score-confidence | No stored score/confidence; derived at read; grain index for query locality. |
+| #6 cold start / starvation | **Seed-free deterministic least-sampled rotation until coverage** (D4), not a per-unit-frozen ε coin; ε is optional steady-state with a per-run seed. |
+| #7 uniqueness / score-confidence | No stored score/confidence (derived at read); `uq_run_outcomes_run` unique index + idempotent insert ⇒ one run = one row, no double-weighting. |
+
+### R3 findings → resolution
+
+| R3 finding | Resolution |
+|---|---|
+| [P1] command packets mis-recorded as `sdk` | D5: model-packet scope — `execution` packets excluded from recording + routing. |
+| [P1] infra-failure path unrecorded → upward bias | Shared phase-gated recorder across `finalizeRun` + `finalizeInfrastructureFailure`. |
+| [P1] no `source_run_id` uniqueness | `uq_run_outcomes_run` + idempotent `INSERT … ON CONFLICT DO NOTHING`. |
+| [P1] frozen-per-unit ε starves | Seed-free cold-start rotation; ε per-run + optional. |
+| [P2] createRun sites misclassified | Corrected to profile-resolution (`:1063`) + approval-suspension (`:1095`), no row. |
+| [P2] "byte-for-byte unchanged" false | Reworded: routing unchanged; S4 adds a write-only row. |
+| [P2] missing barrel exports / test doubles | Added to the S4 task list. |
 
 ## Invariants
 
 1. `repoId = projectRoot`. Grain = `(repoId, taskType, worker)`, `worker ∈ {sdk,claude-code,codex}`.
-2. Recorded route == actual route (producer fills pre-snapshot; no late mutation).
-3. Never override an explicit `routingHints.preferredWorker` (ε-explore only fills when absent).
-4. Additive / opt-in: steering does nothing unless `outcomeRouting.enabled` and eligible scores
-   (or an explore tick) exist. Default OFF ⇒ no behavior change.
-5. `run_outcomes` is append-only; no existing-table DDL is altered (only ADD).
+2. **Model packets only** (D5): packets with `execution` set are excluded from recording + routing.
+3. Recorded route == actual route (producer fills pre-snapshot; no late mutation).
+4. Never override an explicit `routingHints.preferredWorker` (the producer only fills when absent).
+5. **One run = at most one `run_outcomes` row** (`uq_run_outcomes_run` + idempotent insert).
+6. **Routing unchanged, not byte-for-byte unchanged.** With the flag OFF, `fillRoutingHints` is
+   never called ⇒ routing is identical to today. S4's recorder still appends a write-only outcome
+   row per in-scope terminal run — a new write with **no** routing or observable-execution effect.
+7. Cold-start coverage is guaranteed seed-free; ε steady-state exploration requires a per-run seed.
+8. `run_outcomes` is append-only; no existing-table DDL is altered (only ADD).
 
 ## Off-limits (unchanged from contract)
 
