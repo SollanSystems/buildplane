@@ -49,11 +49,13 @@ runtime worker branch apps/cli/src/run-cli.ts               selection branches o
 // packages/kernel/src/ports.ts — BuildplaneStoragePort, ADDED by S3 ONLY:
 listEvents(options: { runId: string; limit?: number }): readonly ExecutionEvent[];
 
-// packages/kernel/src/ports.ts — BuildplaneStoragePort, ADDED by S4:
-upsertOutcomeScore(input: UpsertOutcomeScoreInput): OutcomeScore;
-listOutcomeScores(options?: { repoId?: string; taskType?: string }): readonly OutcomeScore[];
+// packages/kernel/src/ports.ts — BuildplaneStoragePort, ADDED by S4 (REDESIGNED 2026-05-28):
+appendRunOutcome(input: AppendRunOutcomeInput): RunOutcome;
+listRunOutcomes(options?: { repoId?: string; taskType?: string; worker?: WorkerLabel }): readonly RunOutcome[];
 ```
 No existing signature is modified or removed. `ExecutionEvent` already exists (`event-store.ts`).
+The `upsertOutcomeScore`/`listOutcomeScores` accumulator surface is **superseded** by the raw-rows
+redesign (`docs/superpowers/specs/2026-05-28-track2-outcome-memory-redesign-design.md`).
 
 ---
 
@@ -97,29 +99,39 @@ a `<runId>` arg), reuse `formatters.ts` with `--json` parity.
 
 ## Track 2 — outcome memory layer 5 (serial, AFTER Track 1 lands)
 
-**Invariants:** `repoId = projectRoot` (store.ts:1090). Scoring grain = `(repoId, taskType,
-preferredWorker)` — **preferredWorker only**; model/effort excluded. Score-driven routing is
-**fill-not-override** and must include **min-sample threshold + ε-exploration + recency decay**.
+> **REDESIGNED 2026-05-28** (operator-approved) — authority:
+> `docs/superpowers/specs/2026-05-28-track2-outcome-memory-redesign-design.md`. The accumulator
+> model below was replaced with **raw append-only per-run rows aggregated at read time** after
+> Codex gate R2 found 7 P1s. The two slice plans (`phase2-s4-*`, `phase2-s5-*`) are rewritten to
+> the new model and await `/codex challenge` re-gate.
 
-### S4 — `outcome_scores` table + store + port
-Confirmed unbuilt. **Do:** new DDL in `store.ts` near :555 mirroring `repo_facts:503–522` (typed,
-scoped, `confidence`, `status`, `source_run_id`, `created_by`, `created_at`). Columns: `repo_id`
-(=projectRoot), `task_type`, `worker` (=preferredWorker value), outcome metric(s) (`success`,
-`score`, `sample_count`), provenance. Add `upsertOutcomeScore`/`listOutcomeScores` after
-`ports.ts:153`. **Codex target:** the score schema + aggregation grain.
-**Off-limits:** altering any existing table DDL — only ADD `outcome_scores`.
+**Invariants (redesigned):** `repoId = projectRoot`. Grain = `(repoId, taskType, worker)` where
+`worker ∈ {sdk, claude-code, codex}` (the 3-value reality; `preferredWorker` is only
+`claude-code|codex`, absent ⇒ `sdk`) and `taskType = intent?.taskType ?? unit.kind`. Routing is
+**opt-in, default OFF**, **fill-not-override**, with **min-sample + directed ε-exploration +
+read-time recency decay**.
 
-### S5 — scoring aggregation + routingHints producer  (depends on S4)
-**Aggregation:** per `(repoId, taskType, preferredWorker)` from run outcomes; apply recency decay;
-require a min sample count before a score is eligible to steer routing.
-**Producer hook (corrected):** at **packet-prep, before `orchestrator.ts:1133` snapshots
-`ctx.validatedPacket.routingHints`** — query `outcome_scores` for `(repoId, taskType)`, and **only
-if `routingHints.preferredWorker` is absent**, fill it; otherwise leave the explicit value. With
-probability ε, pick an under-sampled worker instead (exploration). The recorded route and the
-actual route must be the same value (no late `runtimeRouter` mutation).
-**Codex targets:** scoring math, the fill-not-override + exploration invariants, route/record
-consistency. **Verify-first:** which outcome source feeds aggregation; `repoId` derivation at the
-hook; that filling pre-snapshot keeps provenance consistent.
+### S4 — `run_outcomes` table + store + recorder  (was `outcome_scores`)
+**Do:** new **append-only** DDL `run_outcomes (id, repo_id, task_type, worker, success,
+source_run_id, created_at)` + grain index, in `bootstrapStorageProjectionSchema` (store.ts:433);
+**no supersession, no stored score/confidence/sample_count** (derived at read in S5). ADD
+`appendRunOutcome`/`listRunOutcomes` after `ports.ts:153`. Recorder in `finalizeRun`
+(orchestrator.ts:762) appends one row per terminal run; `worker = snapshot.preferredWorker ?? "sdk"`.
+**Codex target:** the column set + append-only decision + worker/taskType derivation.
+**Off-limits:** altering any existing table DDL — only ADD `run_outcomes`.
+
+### S5 — outcome aggregation + routingHints producer  (depends on S4)
+**Aggregation:** pure module over `listRunOutcomes`, grouped per `(repoId, taskType, worker)`;
+read-time exponential recency decay (`w = 2 ** (-ageMs/halfLifeMs)`); min-sample eligibility.
+**Producer hook (corrected R2):** inside `prepareRun`, **before `storage.createRun`
+(`orchestrator.ts:689`)** — the snapshot point. Fill `preferredWorker` **only if absent**; with
+probability ε pick the **least-sampled** candidate (directed, deterministic seed); else exploit the
+best decayed rate; else leave absent. The same `routedPacket` is snapshotted and executed ⇒
+recorded==actual, **no late mutation**. Steering is gated by an `outcomeRouting` config flag,
+**default OFF**.
+**Codex targets:** scoring math, fill-not-override + exploration + route==record invariants,
+cold-start coverage. **Verify-first:** orchestrator config-injection seam; the other `createRun`
+sites (:1080/:1101); explicit-hint pass-through.
 
 ---
 
@@ -140,7 +152,7 @@ hook; that filling pre-snapshot keeps provenance consistent.
   logic + conservatism.
 - `memory-retrieval.ts` **ranking algorithm** (adding the `branch` query field is allowed).
 - Existing table DDL (`repo_facts`/`procedures`/`events`/`run_learnings`/`runs`) — only ADD
-  `outcome_scores`. `valid_from_commit`/`valid_to_commit` untouched.
+  `run_outcomes`. `valid_from_commit`/`valid_to_commit` untouched.
 - Embeddings / team mode / Postgres (V2/V3 — Phase 3, parked).
 
 ## Deferred to Phase 3 (recorded)
@@ -157,10 +169,11 @@ hook; that filling pre-snapshot keeps provenance consistent.
 full-suite+lint+changeset gate.
 
 **Status after the second Codex gate (R2, 2026-05-26):**
-- **Track 1 (S3 → S2 → S1): VALIDATED, dispatch-ready.** Triage to Hermes lanes in land order.
-- **Track 2 (S4, S5): REDESIGN REQUIRED — NOT dispatch-ready.** R2 found 7 P1s: the `repo_facts`
-  supersession model destroys an accumulator's tally; decay is unimplementable without per-run
-  data; the producer hook must move ahead of `createRun()` (`orchestrator.ts:689`), not `:1133`,
-  or recorded≠actual route; outcome sources don't persist the worker used; `taskType` is optional;
-  cold-start/starvation is unhandled. See the ⛔ banners in the S4/S5 plans. Re-spec the
-  outcome-memory storage + producer model, then re-run `/codex challenge` before Track 2 dispatch.
+- **Track 1 (S3 → S2 → S1): SHIPPED on `origin/main`** (#146 / #148 / #149).
+- **Track 2 (S4, S5): REDESIGNED 2026-05-28 — pending `/codex challenge` re-gate.** R2's 7 P1s
+  (accumulator tally destruction; un-decayable counts; producer hook too late → recorded≠actual;
+  no persisted worker; optional `taskType`; cold-start/starvation; uniqueness/score-confidence) are
+  resolved by the raw-rows redesign — authority
+  `docs/superpowers/specs/2026-05-28-track2-outcome-memory-redesign-design.md`, P1→resolution map
+  therein. The S4/S5 plans are rewritten to the new model. **Re-run `/codex challenge` against the
+  spec + plans before Track 2 dispatch.**
