@@ -112,6 +112,12 @@ export type {
 	OutcomeExtractionInput,
 } from "./outcome-extractor.ts";
 export { extractLearnings } from "./outcome-extractor.ts";
+export type { WorkerScore } from "./outcome-scoring.ts";
+export {
+	aggregateOutcomeScores,
+	chooseWorker,
+	seededUnitInterval,
+} from "./outcome-scoring.ts";
 export { parseStrategyPacket, parseUnitPacket } from "./packet.ts";
 export type {
 	ArchitectureDiffScopeGate,
@@ -133,6 +139,11 @@ export type {
 	CreateRunOptions,
 	StoredLearning,
 } from "./ports.ts";
+export type { OutcomeRoutingConfig } from "./routing-producer.ts";
+export {
+	defaultOutcomeRoutingConfig,
+	fillRoutingHints,
+} from "./routing-producer.ts";
 export type {
 	ApprovedPolicyDecision,
 	CommandExecutionBlock,
