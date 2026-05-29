@@ -108,3 +108,22 @@ export interface UpsertRepoFactInput {
 	readonly validFromCommit?: string;
 	readonly validToCommit?: string;
 }
+
+export type WorkerLabel = "sdk" | "claude-code" | "codex";
+
+export interface AppendRunOutcomeInput {
+	readonly taskType: string;
+	readonly worker: WorkerLabel;
+	readonly success: boolean;
+	readonly sourceRunId: string;
+}
+
+export interface RunOutcome {
+	readonly id: string;
+	readonly repoId: string;
+	readonly taskType: string;
+	readonly worker: WorkerLabel;
+	readonly success: boolean;
+	readonly sourceRunId: string;
+	readonly createdAt: string;
+}

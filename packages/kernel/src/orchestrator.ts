@@ -759,6 +759,26 @@ export function createBuildplaneOrchestrator(
 		};
 	}
 
+	function recordModelOutcome(
+		ctx: { run: Run; validatedPacket: UnitPacket },
+		success: boolean,
+	): void {
+		const packet = ctx.validatedPacket;
+		if (packet.model === undefined) {
+			return;
+		}
+		try {
+			storage.appendRunOutcome({
+				taskType: packet.intent?.taskType ?? packet.unit.kind,
+				worker: packet.routingHints?.preferredWorker ?? "sdk",
+				success,
+				sourceRunId: ctx.run.id,
+			});
+		} catch {
+			// Silent — a write-only memory row must never break run finalization.
+		}
+	}
+
 	function finalizeRun(
 		ctx: {
 			run: Run;
@@ -845,6 +865,12 @@ export function createBuildplaneOrchestrator(
 					}
 				}
 
+				// retrying is not a terminal quality signal — record only a true
+				// rejection (mirrors the rejected-only learnings guard above).
+				if (decision.outcome === "rejected") {
+					recordModelOutcome(ctx, false);
+				}
+
 				return {
 					run: failedRun,
 					receipt,
@@ -913,6 +939,8 @@ export function createBuildplaneOrchestrator(
 				workspaceStatus: "retained",
 			});
 		}
+
+		recordModelOutcome(ctx, true);
 
 		// Extract and persist learnings — silent, never breaks the run
 		if (memoryPort) {

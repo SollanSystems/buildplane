@@ -212,6 +212,21 @@ function createHarness(options: HarnessOptions = {}) {
 		getChildRuns() {
 			return [];
 		},
+		appendRunOutcome(input) {
+			runEvents.push("append-run-outcome");
+			return {
+				id: "outcome-1",
+				repoId: root,
+				taskType: input.taskType,
+				worker: input.worker,
+				success: input.success,
+				sourceRunId: input.sourceRunId,
+				createdAt: "2026-03-17T00:00:02.000Z",
+			};
+		},
+		listRunOutcomes() {
+			return [];
+		},
 	};
 
 	const runtime: BuildplaneRuntimePort = {

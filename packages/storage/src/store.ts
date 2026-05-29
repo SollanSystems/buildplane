@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import {
+	type AppendRunOutcomeInput,
 	type ApprovedPolicyDecision,
 	type BuildplaneStoragePort,
 	type CreateProcedureInput,
@@ -28,6 +29,7 @@ import {
 	type RepoFactRetrievalQuery,
 	type RepoFactScopeCandidate,
 	type Run,
+	type RunOutcome,
 	type RunStatus,
 	type SearchableDocument,
 	type SearchableDocumentRetrievalQuery,
@@ -36,6 +38,7 @@ import {
 	type Unit,
 	type UnitPacket,
 	type UpsertRepoFactInput,
+	type WorkerLabel,
 	type WorkspaceSnapshot,
 } from "@buildplane/kernel";
 import {
@@ -116,6 +119,16 @@ interface StoredProcedureRow {
 	readonly status: "active" | "stale" | "superseded" | "archived";
 	readonly created_at: string;
 	readonly updated_at: string;
+}
+
+interface StoredRunOutcomeRow {
+	readonly id: string;
+	readonly repo_id: string;
+	readonly task_type: string;
+	readonly worker: WorkerLabel;
+	readonly success: number;
+	readonly source_run_id: string;
+	readonly created_at: string;
 }
 
 interface StoredSearchableDocumentRow {
@@ -430,6 +443,18 @@ function assertInjectedMemoriesTableColumns(database: DatabaseSync): void {
 	] as const);
 }
 
+function assertRunOutcomesTableColumns(database: DatabaseSync): void {
+	assertTableColumns(database, "run_outcomes", [
+		"id",
+		"repo_id",
+		"task_type",
+		"worker",
+		"success",
+		"source_run_id",
+		"created_at",
+	] as const);
+}
+
 export function bootstrapStorageProjectionSchema(database: DatabaseSync): void {
 	if (tableExists(database, "workspaces")) {
 		assertWorkspaceTableColumns(database);
@@ -565,11 +590,31 @@ export function bootstrapStorageProjectionSchema(database: DatabaseSync): void {
 			scope_preference_index INTEGER,
 			created_at TEXT NOT NULL
 		);
+
+		CREATE TABLE IF NOT EXISTS run_outcomes (
+			id TEXT PRIMARY KEY,
+			repo_id TEXT NOT NULL,
+			task_type TEXT NOT NULL,
+			worker TEXT NOT NULL,
+			success INTEGER NOT NULL,
+			source_run_id TEXT NOT NULL,
+			created_at TEXT NOT NULL
+		);
 	`);
 
 	database.exec(`
 		CREATE INDEX IF NOT EXISTS injected_memories_run_id_idx
 		ON injected_memories (run_id);
+	`);
+
+	database.exec(`
+		CREATE INDEX IF NOT EXISTS idx_run_outcomes_grain
+		ON run_outcomes (repo_id, task_type, worker);
+	`);
+
+	database.exec(`
+		CREATE UNIQUE INDEX IF NOT EXISTS uq_run_outcomes_run
+		ON run_outcomes (repo_id, source_run_id);
 	`);
 
 	database.exec(`
@@ -594,6 +639,7 @@ export function bootstrapStorageProjectionSchema(database: DatabaseSync): void {
 	assertProceduresTableColumns(database);
 	assertSearchableDocumentsTableColumns(database);
 	assertInjectedMemoriesTableColumns(database);
+	assertRunOutcomesTableColumns(database);
 }
 
 export function assertBaselineStorageProjectionSchema(
@@ -601,7 +647,7 @@ export function assertBaselineStorageProjectionSchema(
 ): void {
 	const rows = database
 		.prepare(
-			`SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('units', 'runs', 'evidence', 'decisions', 'artifacts', 'repo_facts', 'procedures', 'searchable_documents', 'injected_memories')`,
+			`SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('units', 'runs', 'evidence', 'decisions', 'artifacts', 'repo_facts', 'procedures', 'searchable_documents', 'injected_memories', 'run_outcomes')`,
 		)
 		.all() as unknown as { name: string }[];
 	const existingTables = new Set(rows.map((row) => row.name));
@@ -616,6 +662,7 @@ export function assertBaselineStorageProjectionSchema(
 		"procedures",
 		"searchable_documents",
 		"injected_memories",
+		"run_outcomes",
 	]) {
 		if (!existingTables.has(tableName)) {
 			throw new Error(
@@ -677,6 +724,7 @@ function assertStorageProjectionSchema(database: DatabaseSync): void {
 	assertProceduresTableColumns(database);
 	assertSearchableDocumentsTableColumns(database);
 	assertInjectedMemoriesTableColumns(database);
+	assertRunOutcomesTableColumns(database);
 }
 
 export interface RunHistoryEntry {
@@ -914,6 +962,18 @@ export function createStorageStore(
 				branch: row.branch ?? undefined,
 				commitSha: row.commit_sha ?? undefined,
 			},
+		};
+	}
+
+	function toRunOutcome(row: StoredRunOutcomeRow): RunOutcome {
+		return {
+			id: row.id,
+			repoId: row.repo_id,
+			taskType: row.task_type,
+			worker: row.worker,
+			success: row.success !== 0,
+			sourceRunId: row.source_run_id,
+			createdAt: row.created_at,
 		};
 	}
 
@@ -3244,6 +3304,81 @@ export function createStorageStore(
 				return events;
 			}
 			return events.slice(events.length - options.limit);
+		},
+
+		appendRunOutcome(input: AppendRunOutcomeInput): RunOutcome {
+			ensureInitialized();
+			const database = openStoreDatabase();
+			const now = new Date().toISOString();
+
+			try {
+				return runInTransaction(database, () => {
+					database
+						.prepare(
+							`INSERT INTO run_outcomes (id, repo_id, task_type, worker, success, source_run_id, created_at)
+							 VALUES (?, ?, ?, ?, ?, ?, ?)
+							 ON CONFLICT(repo_id, source_run_id) DO NOTHING`,
+						)
+						.run(
+							randomUUID(),
+							projectRoot,
+							input.taskType,
+							input.worker,
+							input.success ? 1 : 0,
+							input.sourceRunId,
+							now,
+						);
+
+					const row = database
+						.prepare(
+							`SELECT id, repo_id, task_type, worker, success, source_run_id, created_at
+							 FROM run_outcomes
+							 WHERE repo_id = ? AND source_run_id = ?`,
+						)
+						.get(
+							projectRoot,
+							input.sourceRunId,
+						) as unknown as StoredRunOutcomeRow;
+
+					return toRunOutcome(row);
+				});
+			} finally {
+				database.close();
+			}
+		},
+
+		listRunOutcomes(options?: {
+			repoId?: string;
+			taskType?: string;
+			worker?: WorkerLabel;
+		}): readonly RunOutcome[] {
+			ensureInitialized();
+			const database = openStoreDatabase();
+			const clauses = ["repo_id = ?"];
+			const params: string[] = [options?.repoId ?? projectRoot];
+
+			if (options?.taskType !== undefined) {
+				clauses.push("task_type = ?");
+				params.push(options.taskType);
+			}
+			if (options?.worker !== undefined) {
+				clauses.push("worker = ?");
+				params.push(options.worker);
+			}
+
+			try {
+				const rows = database
+					.prepare(
+						`SELECT id, repo_id, task_type, worker, success, source_run_id, created_at
+						 FROM run_outcomes
+						 WHERE ${clauses.join(" AND ")}
+						 ORDER BY created_at, rowid`,
+					)
+					.all(...params) as unknown as StoredRunOutcomeRow[];
+				return rows.map(toRunOutcome);
+			} finally {
+				database.close();
+			}
 		},
 
 		getRunHistory(): RunHistoryEntry[] {
