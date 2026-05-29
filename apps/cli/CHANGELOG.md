@@ -1,5 +1,22 @@
 # buildplane
 
+## 0.4.1
+
+### Patch Changes
+
+- Updated dependencies [c24dae5]
+- Updated dependencies [ad3cde8]
+  - @buildplane/storage@0.2.0
+  - @buildplane/kernel@0.2.0
+  - @buildplane/adapters-codex@0.1.1
+  - @buildplane/adapters-git@0.1.1
+  - @buildplane/adapters-honcho@0.1.1
+  - @buildplane/adapters-models@0.1.1
+  - @buildplane/adapters-tools@0.1.1
+  - @buildplane/policy@0.1.1
+  - @buildplane/runtime@0.1.1
+  - @buildplane/ui-tui@0.1.1
+
 ## 0.4.0
 
 ### Minor Changes
