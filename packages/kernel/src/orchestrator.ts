@@ -29,6 +29,11 @@ import type {
 	BuildplaneWorkspacePort,
 	CreateRunOptions,
 } from "./ports.js";
+import {
+	defaultOutcomeRoutingConfig,
+	fillRoutingHints,
+	type OutcomeRoutingConfig,
+} from "./routing-producer.js";
 import type {
 	ExecutionReceipt,
 	InspectSnapshot,
@@ -87,6 +92,7 @@ export interface CreateBuildplaneOrchestratorOptions {
 	readonly profileRegistry?: BuildplaneProfileRegistryPort;
 	readonly budgets?: BudgetConstraints;
 	readonly memoryPort?: BuildplaneMemoryPort;
+	readonly outcomeRouting?: OutcomeRoutingConfig;
 }
 
 export function createBuildplaneOrchestrator(
@@ -101,6 +107,7 @@ export function createBuildplaneOrchestrator(
 			? createDefaultRunAdmissionStore(projectRoot)
 			: options.admissionStore;
 	const memoryPort = options.memoryPort;
+	const outcomeRouting = options.outcomeRouting ?? defaultOutcomeRoutingConfig;
 	const strategyWorkflowPromotionRule =
 		"multi-round-strategy-workflow->procedure";
 
@@ -685,8 +692,20 @@ export function createBuildplaneOrchestrator(
 			packet,
 			join(projectRoot, ".buildplane", "workspaces", "future-run-id"),
 		);
+		// Outcome-driven routing producer (opt-in, default OFF). Fills
+		// routingHints.preferredWorker from run_outcomes scores. Must run before
+		// createRun so the persisted unit_snapshot equals the executed route, and
+		// the recorder reads the same routedPacket — recorded route == actual route.
+		// V1 threads no per-run seed (exploreSeed undefined); cold-start rotation
+		// guarantees coverage without ε.
+		const routedPacket = fillRoutingHints(
+			validatedPacket,
+			storage,
+			outcomeRouting,
+			Date.now(),
+		);
 		const { headSha } = workspace.assertRunnableRepository(projectRoot);
-		const run = storage.createRun(validatedPacket, createRunOptions);
+		const run = storage.createRun(routedPacket, createRunOptions);
 
 		let preparedWorkspace: WorkspaceSnapshot;
 
@@ -752,7 +771,7 @@ export function createBuildplaneOrchestrator(
 			ok: true,
 			ctx: {
 				run,
-				validatedPacket,
+				validatedPacket: routedPacket,
 				workspace: preparedWorkspace,
 				projectRoot,
 			},
