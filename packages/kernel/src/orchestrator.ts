@@ -865,7 +865,11 @@ export function createBuildplaneOrchestrator(
 					}
 				}
 
-				recordModelOutcome(ctx, false);
+				// retrying is not a terminal quality signal — record only a true
+				// rejection (mirrors the rejected-only learnings guard above).
+				if (decision.outcome === "rejected") {
+					recordModelOutcome(ctx, false);
+				}
 
 				return {
 					run: failedRun,
