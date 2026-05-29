@@ -8,7 +8,7 @@
 
 **Tech Stack:** TypeScript (ESM, `.js`), Node ≥24.13, vitest, `@buildplane/storage`, `@buildplane/kernel`.
 
-> **✅ Redesigned 2026-05-28** per `docs/superpowers/specs/2026-05-28-track2-outcome-memory-redesign-design.md` (operator-approved). **Supersedes** the `outcome_scores` accumulator model that Codex gate **R2** marked not-dispatch-ready. The 7 R2 P1s + the **R3** findings (command-packet scope, infra-failure recording path, `source_run_id` uniqueness) are resolved here — see the spec's "P1 → resolution map" + "R3 findings → resolution". **Pending R4 `/codex challenge` before dispatch.**
+> **✅ Redesigned 2026-05-28** per `docs/superpowers/specs/2026-05-28-track2-outcome-memory-redesign-design.md` (operator-approved). **Supersedes** the `outcome_scores` accumulator model that Codex **R2** marked not-dispatch-ready. R2 (7 P1) + **R3** (command-packet scope, infra-failure path, `source_run_id` uniqueness, ε starvation) + **R4** (model predicate = `packet.model`; recording `finalizeRun`-only; raw-count coverage; ε default 0) findings resolved — see the spec's resolution maps. **Pending R5 `/codex challenge` before dispatch.**
 
 ## Opus Planning Reference (handoff contract)
 
@@ -19,7 +19,7 @@
 - **Storage model:** new append-only DDL in `bootstrapStorageProjectionSchema` (`store.ts:433`, near the `repo_facts` block `:505`). **No supersession, no `status`, no stored score/confidence/sample_count.** Registered in the schema-assertion table lists (`assertBaselineStorageProjectionSchema` :599, `assertInitializableStorageProjectionSchema` :628).
 - **Invariants:** `repo_id = projectRoot` (the `createBuildplaneStorage(root)` root; `provenance.repoId === root`). `worker ∈ {"sdk","claude-code","codex"}` — the 3-value reality (`RoutingHints.preferredWorker` is only `claude-code|codex`; absent ⇒ `"sdk"`).
 - **Port:** ADD `appendRunOutcome`/`listRunOutcomes` to `BuildplaneStoragePort` after the `listEvents` method (`ports.ts:153`).
-- **Recorder:** one shared `recordRunOutcome` helper called from **every** terminal-commit path (`finalizeRun` :762 + `finalizeInfrastructureFailure` :1023/:1227), **phase-gated** (only when a model worker started) and **model-packets only** (`packet.execution === undefined`); `worker = snapshot.preferredWorker ?? "sdk"`; idempotent insert.
+- **Recorder:** at `finalizeRun` (`:762`) only — the post-execution terminal commit — **model packets only** (`packet.model !== undefined`); `worker = snapshot.preferredWorker ?? "sdk"`; idempotent insert. Executor infra-crashes (`finalizeInfrastructureFailure`) are out of scope for V1 (Phase 3).
 - **Codex target (second gate):** the column set + the append-only/raw-rows decision + the `worker`/`taskType` derivation.
 - **Off-limits:** altering ANY existing table DDL (only ADD `run_outcomes`); the `routingHints` consumer; aggregation/producer logic (S5).
 - **Merge eligibility:** new table + port + recorder → **manual Opus review** (trust/storage surface).
@@ -31,8 +31,8 @@
 - [ ] **VF-2:** Read `repo_facts` DDL + its registration in the three schema fns (`store.ts:433/599/628`) and the `assertTableColumns` pattern (`:362`). Mirror the *style* only — `run_outcomes` is append-only (no `status`/`updated_at`).
 - [ ] **VF-3:** Confirm `repoId = projectRoot` via the `createBuildplaneStorage(root)` root (test: `provenance.repoId === root`, see `repo-facts.test.ts`). Confirm `appendRunOutcome` derives `repo_id` internally (like `upsertRepoFact`) — not from input.
 - [ ] **VF-4:** Pin the **run-status vocabulary** at `finalizeRun` (orchestrator.ts:762) and the `run-completed` payload status (`store.ts:1809`): which terminal states are *success* (→1) vs *failure* (→0). Confirm the run's `unit_snapshot` + `validatedPacket` are reachable at the recorder seam, and that `taskType = packet.intent?.taskType ?? packet.unit.kind` is resolvable there.
-- [ ] **VF-5 (R3 P1):** Enumerate **every terminal-commit path**: `finalizeRun` (:762) and `finalizeInfrastructureFailure` (sync :1023 / async :1227 → committed at :613); confirm whether the createRun sites at :1063 (profile-resolution failure) and :1095 (approval suspension) also reach a terminal commit. For each, determine whether a **model worker actually started executing** (the recorder records only post-execution terminal outcomes). Pin the existing "worker started" signal (a flag/phase the orchestrator already tracks); **do not invent one if it exists**. Pre-execution failures append no row.
-- [ ] **VF-6 (R3 P1 / D5):** Pin the **model-packet predicate**. Confirm command/shell packets carry `execution` (`UnitPacket.execution`) and are dispatched via `commandExecutor` (`run-cli.ts:1328`) before worker routing. `packet.execution !== undefined` ⇒ not a model worker ⇒ recorder appends no row (and S5's producer leaves it untouched). Confirm no model-route path also sets `execution`.
+- [ ] **VF-5 (R4 — recording site):** Confirm `finalizeRun` (:762) is reached **only post-execution**, and that **both** clean success and quality-failure (worker ran, output rejected) terminal-commit through it (with a status distinguishing the two for the VF-4 mapping). Confirm `finalizeInfrastructureFailure` (:613, callers incl. :1041/:1243/:1335) is the path for executor crashes — **out of scope for V1** (D6). Confirm `ctx.validatedPacket` (== the routed packet == `unit_snapshot`) and `ctx.run.id` are in scope at the recorder seam.
+- [ ] **VF-6 (R4 P1 / D5):** Pin the **model-packet predicate = `packet.model !== undefined`** against the live `UnitPacket` type (`run-loop.ts:30-39` — has both `execution?` and `model?`). Confirm `model` and `execution` are mutually exclusive on real packets, and that a packet with neither would otherwise default to the SDK executor (`run-cli.ts:1369`) — hence `model`-presence, not `execution`-absence, is the correct gate for recording + routing.
 
 ## File Structure
 
@@ -40,7 +40,7 @@
 - `packages/kernel/src/index.ts` — **modify:** export the three new types (barrel; storage imports via `@buildplane/kernel`).
 - `packages/kernel/src/ports.ts` — **modify:** add `appendRunOutcome`/`listRunOutcomes` to `BuildplaneStoragePort` after `:153`.
 - `packages/storage/src/store.ts` — **modify:** `run_outcomes` DDL + grain index + `uq_run_outcomes_run` unique index in `bootstrapStorageProjectionSchema`; register in the two assertion fns; implement idempotent `appendRunOutcome`/`listRunOutcomes`.
-- `packages/kernel/src/orchestrator.ts` — **modify:** one shared `recordRunOutcome` helper called from `finalizeRun` + `finalizeInfrastructureFailure`, phase-gated, model-packets only.
+- `packages/kernel/src/orchestrator.ts` — **modify:** recorder in `finalizeRun`, model packets only (`packet.model !== undefined`); infra-failure path out of scope (Phase 3).
 - `BuildplaneStoragePort` test doubles (grep to locate) — **modify:** add the two new methods.
 - `packages/storage/test/run-outcomes.test.ts` — **new.**
 - `packages/kernel/test/…` — **new:** recorder integration tests (success / hint / infra-failure / command-packet / pre-execution).
@@ -173,50 +173,47 @@ grain appends a *new* row (different `source_run_id`); add an assertion that the
 
 - [ ] **Step 7 — commit:** `feat(storage): append-only run_outcomes table + appendRunOutcome/listRunOutcomes`
 
-### Task 4 — shared phase-gated recorder across all terminal-commit paths
+### Task 4 — recorder at finalizeRun (model packets only)
 
-**Files:** Modify `packages/kernel/src/orchestrator.ts` (`finalizeRun` :762 **and** `finalizeInfrastructureFailure` :1023/:1227); new kernel integration test
+**Files:** Modify `packages/kernel/src/orchestrator.ts` (`finalizeRun` :762); new kernel integration test
 
-> **R3 P1:** a worker that starts then throws commits via `finalizeInfrastructureFailure`, not
-> `finalizeRun`. Recording only in `finalizeRun` drops those failures and biases scores upward. And
-> command/`execution` packets (run via `commandExecutor`, `run-cli.ts:1328`) ran no model worker, so
-> they must record nothing. The recorder is therefore one shared helper, phase-gated, model-packets
-> only — see VF-5/VF-6.
+> **R4 P1 (corrected from R3):** `UnitPacket` has both `execution?` and **`model?`** (`run-loop.ts:32-33`);
+> the model-packet predicate is **`packet.model !== undefined`** (a packet with neither field still
+> falls through to the SDK default at `run-cli.ts:1369`, so `execution===undefined` is not enough).
+> There is **no `ctx.workerStarted` flag**, and `finalizeInfrastructureFailure` receives only `run`.
+> So V1 records at the single post-execution terminal commit **`finalizeRun`** (D6) — clean success
+> *and* quality-failure both land there. Executor **infra crashes** (the `finalizeInfrastructureFailure`
+> path) are **out of scope for V1** (Phase 3). No invented flag, no 15-site classification.
 
 - [ ] **Step 1 — failing integration tests** (existing orchestrator harness):
-  1. model run, terminal **success**, no `routingHints` ⇒ exactly one row `worker==="sdk"`, `success===true`, `taskType===unit.kind`, `sourceRunId===run.id`.
+  1. model run (`packet.model` set), terminal **success**, no `routingHints` ⇒ exactly one row `worker==="sdk"`, `success===true`, `taskType===unit.kind`, `sourceRunId===run.id`.
   2. model run with `preferredWorker==="codex"` ⇒ row `worker==="codex"`.
-  3. model run whose executor **throws** (routes through `finalizeInfrastructureFailure` post-execution) ⇒ a row with `success===false` (NOT dropped).
-  4. a **command packet** (`execution` set) ⇒ **no** row.
-  5. a pre-execution failure (profile-resolution/admission, no worker started) ⇒ **no** row.
+  3. model run that reaches `finalizeRun` with a **failed/rejected** terminal status (worker ran, output rejected) ⇒ a row with `success===false`.
+  4. a **command packet** (`execution` set, `model` unset) ⇒ **no** row.
+  5. a packet with **no `model`** ⇒ **no** row.
 
 - [ ] **Step 2 — run, expect FAIL.**
 
-- [ ] **Step 3 — implement a single helper** `recordRunOutcome(ctx, { success })` and call it from every terminal-commit path, behind the phase + model-packet gate (predicate from VF-5/VF-6):
+- [ ] **Step 3 — implement** the recorder in `finalizeRun`, once the terminal status is known (VF-4/VF-6):
 
 ```ts
-function recordRunOutcome(ctx, opts: { success: boolean }): void {
-	const packet = ctx.validatedPacket;                 // == routedPacket == unit_snapshot
-	if (packet.execution !== undefined) return;         // command packet — not a model worker (D5)
-	if (!ctx.workerStarted) return;                     // no model worker ran (VF-5 phase predicate)
-	storage.appendRunOutcome({                          // idempotent (uq_run_outcomes_run)
+// finalizeRun, terminal status known:
+const packet = ctx.validatedPacket;                  // == routedPacket == unit_snapshot
+if (packet.model !== undefined) {                    // model packet only (D5; run-loop.ts:33)
+	storage.appendRunOutcome({                       // idempotent (uq_run_outcomes_run)
 		taskType: packet.intent?.taskType ?? packet.unit.kind,
 		worker: packet.routingHints?.preferredWorker ?? "sdk",
-		success: opts.success,
+		success: isTerminalSuccess(status),          // VF-4 status mapping
 		sourceRunId: ctx.run.id,
 	});
 }
-// finalizeRun (terminal success/clean failure):           recordRunOutcome(ctx, { success: isTerminalSuccess(status) });
-// finalizeInfrastructureFailure (post-execution throw):    recordRunOutcome(ctx, { success: false });
 ```
 
-`ctx.workerStarted` is whatever the VF-5 phase predicate resolves to (a flag the orchestrator
-already tracks, or derivable from the execution phase). Pin it before coding — do not invent a flag
-if one exists.
+Do **not** add recording to `finalizeInfrastructureFailure` in V1 (D6 — Phase 3).
 
 - [ ] **Step 4 — run, expect PASS.**
 
-- [ ] **Step 5 — commit:** `feat(kernel): shared phase-gated run-outcome recorder (model packets, all terminal paths)`
+- [ ] **Step 5 — commit:** `feat(kernel): record model-run outcomes at finalizeRun`
 
 ### Task 4b — barrel exports + test doubles
 
@@ -236,7 +233,7 @@ if one exists.
 
 - `run_outcomes` table + grain index + `uq_run_outcomes_run` unique index created and registered in both schema-assertion fns; **no existing DDL altered**.
 - `appendRunOutcome` → `listRunOutcomes` round-trips; append-only across *distinct* runs (repeat grain, new `source_run_id` ⇒ +1 row); **idempotent** for a repeated `source_run_id` (no second row); `repo_id = root`; `success` boolean; scoped by `task_type`/`worker`.
-- The shared recorder appends exactly one row per **in-scope** terminal run from **every** terminal-commit path (incl. `finalizeInfrastructureFailure`); `worker = snapshot.preferredWorker ?? "sdk"`. **Command/`execution` packets and pre-execution failures append none.**
+- The `finalizeRun` recorder appends exactly one row per **model** terminal run (`packet.model !== undefined`); `worker = snapshot.preferredWorker ?? "sdk"`. **Command/non-model packets append none**; executor infra-crashes are not recorded in V1 (Phase 3).
 - Grain = `(repoId, taskType, worker)`, `worker ∈ {sdk,claude-code,codex}`. Routing unchanged (a write-only row is added).
 - New types exported from `index.ts`; storage-port test doubles updated; suite type-checks.
 - Schema + recorder passed `/codex challenge` (R4). Full suite + lint green; changeset added.

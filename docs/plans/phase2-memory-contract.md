@@ -102,25 +102,27 @@ a `<runId>` arg), reuse `formatters.ts` with `--json` parity.
 > **REDESIGNED 2026-05-28** (operator-approved) — authority:
 > `docs/superpowers/specs/2026-05-28-track2-outcome-memory-redesign-design.md`. The accumulator
 > model below was replaced with **raw append-only per-run rows aggregated at read time** after
-> Codex gate R2 found 7 P1s; Codex R3 then found 4 P1 + 3 P2, all addressed in the current spec +
-> plans. The two slice plans (`phase2-s4-*`, `phase2-s5-*`) are rewritten and await the **R4**
-> `/codex challenge` re-gate.
+> Codex gate R2 found 7 P1s; R3 found 4 P1 + 3 P2; R4 found 2 P1 + 2 P2 — all addressed in the
+> current spec + plans. The two slice plans (`phase2-s4-*`, `phase2-s5-*`) are rewritten and await
+> the **R5** `/codex challenge` re-gate.
 
-**Invariants (redesigned, R3-corrected):** `repoId = projectRoot`. Grain = `(repoId, taskType,
+**Invariants (redesigned, R3/R4-corrected):** `repoId = projectRoot`. Grain = `(repoId, taskType,
 worker)` where `worker ∈ {sdk, claude-code, codex}` (the 3-value reality; `preferredWorker` is only
 `claude-code|codex`, absent ⇒ `sdk`) and `taskType = intent?.taskType ?? unit.kind`. **Model packets
-only** (`execution`-bearing/command packets excluded from recording + routing). **One run = at most
-one row** (unique `(repo_id, source_run_id)` + idempotent insert). Routing is **opt-in, default OFF**,
-**fill-not-override**, with **seed-free cold-start rotation + optional ε + read-time recency decay**.
+only** — gate is **`packet.model !== undefined`** (not `execution`-absence; `UnitPacket` has both).
+Recording is **`finalizeRun`-only** (infra-failure crashes → Phase 3). **One run = at most one row**
+(unique `(repo_id, source_run_id)` + idempotent insert). Routing is **opt-in, default OFF**,
+**fill-not-override**, with **seed-free cold-start rotation on raw sample count + read-time recency
+decay** (ε steady-state defaults to 0 until a per-run seed is threaded).
 
 ### S4 — `run_outcomes` table + store + recorder  (was `outcome_scores`)
 **Do:** new **append-only** DDL `run_outcomes (id, repo_id, task_type, worker, success,
 source_run_id, created_at)` + grain index + **`uq_run_outcomes_run` unique `(repo_id, source_run_id)`**,
 in `bootstrapStorageProjectionSchema` (store.ts:433); **no supersession, no stored
 score/confidence/sample_count** (derived at read in S5). ADD idempotent `appendRunOutcome`/
-`listRunOutcomes` after `ports.ts:153` + barrel exports. A **shared phase-gated recorder** runs from
-**every** terminal-commit path (`finalizeRun` :762 + `finalizeInfrastructureFailure` :1023/:1227),
-**model-packets only**; `worker = snapshot.preferredWorker ?? "sdk"`.
+`listRunOutcomes` after `ports.ts:153` + barrel exports. A recorder at **`finalizeRun` (:762) only**
+— **model packets** (`packet.model !== undefined`); `worker = snapshot.preferredWorker ?? "sdk"`;
+idempotent. Executor infra-crashes (`finalizeInfrastructureFailure`) → Phase 3.
 **Codex target:** column set + append-only/idempotency + recorder placement + worker/taskType derivation.
 **Off-limits:** altering any existing table DDL — only ADD `run_outcomes`.
 
@@ -174,9 +176,9 @@ full-suite+lint+changeset gate.
 
 **Status after the second Codex gate (R2, 2026-05-26):**
 - **Track 1 (S3 → S2 → S1): SHIPPED on `origin/main`** (#146 / #148 / #149).
-- **Track 2 (S4, S5): REDESIGNED 2026-05-28 — Codex R3 FAIL addressed, pending R4 re-gate.** R2's
-  7 P1s were resolved by the raw-rows redesign; Codex **R3** then returned FAIL with 4 P1 + 3 P2
-  (command-packet score poisoning; infra-failure recording path; missing `source_run_id` uniqueness;
-  per-unit-frozen ε starvation) — all addressed in the current spec + plans (authority
-  `docs/superpowers/specs/2026-05-28-track2-outcome-memory-redesign-design.md`; see its "R3 findings
-  → resolution"). **Re-run `/codex challenge` (R4) against the spec + plans before Track 2 dispatch.**
+- **Track 2 (S4, S5): REDESIGNED 2026-05-28 — Codex R3+R4 FAILs addressed, pending R5 re-gate.**
+  R2 (7 P1) → raw-rows redesign; **R3** (4 P1 + 3 P2) → fixed; **R4** (2 P1 + 2 P2: model predicate
+  must be `packet.model !== undefined`; recording `finalizeRun`-only since there's no worker-started
+  signal; cold-start coverage on raw not decayed count; ε default 0) → all addressed in the current
+  spec + plans (authority `docs/superpowers/specs/2026-05-28-track2-outcome-memory-redesign-design.md`;
+  see its "R3/R4 findings → resolution"). **Re-run `/codex challenge` (R5) before Track 2 dispatch.**
