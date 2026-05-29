@@ -37,8 +37,9 @@ read time**, and moves the producer ahead of run persistence. Most P1s dissolve 
   per finished run. Scores/rates/confidence are *derived* at read time, never stored. (Resolves
   P1 #1, #2, #7.)
 - **D2 — Routing posture = full loop, opt-in, default OFF.** Aggregation + exploration + producer
-  all ship and are tested against seeded fixtures, gated behind a config flag. Default routing is
-  byte-for-byte unchanged. (Honors contract rule 2 "additive / opt-in, no silent behavior change".)
+  all ship and are tested against seeded fixtures, gated behind a config flag. Default **routing** is
+  unchanged (the S4 recorder still adds a write-only row — see Invariant 6). (Honors contract rule 2
+  "additive / opt-in, no silent *routing* change".)
 - **D3 — Recording lives in S4** (folded into the write path), so the table warms from real runs
   the moment S4 lands, before any steering logic exists.
 - **D4 — Cold start is a seed-free deterministic rotation; ε is optional steady-state.** Coverage is
