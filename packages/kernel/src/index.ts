@@ -109,6 +109,12 @@ export type {
 	OutcomeExtractionInput,
 } from "./outcome-extractor.js";
 export { extractLearnings } from "./outcome-extractor.js";
+export type { WorkerScore } from "./outcome-scoring.js";
+export {
+	aggregateOutcomeScores,
+	chooseWorker,
+	seededUnitInterval,
+} from "./outcome-scoring.js";
 export { parseStrategyPacket, parseUnitPacket } from "./packet.js";
 export type {
 	ArchitectureDiffScopeGate,
@@ -130,6 +136,11 @@ export type {
 	CreateRunOptions,
 	StoredLearning,
 } from "./ports.js";
+export type { OutcomeRoutingConfig } from "./routing-producer.js";
+export {
+	defaultOutcomeRoutingConfig,
+	fillRoutingHints,
+} from "./routing-producer.js";
 export type {
 	ApprovedPolicyDecision,
 	CommandExecutionBlock,
