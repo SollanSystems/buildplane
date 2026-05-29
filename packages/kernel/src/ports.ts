@@ -8,13 +8,16 @@ import type {
 	SearchableDocumentRetrievalQuery,
 } from "./memory-retrieval.js";
 import type {
+	AppendRunOutcomeInput,
 	CreateProcedureInput,
 	CreateSearchableDocumentInput,
 	MemoryScopeType,
 	ProcedureMemory,
 	RepoFact,
+	RunOutcome,
 	SearchableDocument,
 	UpsertRepoFactInput,
+	WorkerLabel,
 } from "./memory-types.js";
 import type {
 	ExtractedLearning,
@@ -154,6 +157,12 @@ export interface BuildplaneStoragePort {
 		runId: string;
 		limit?: number;
 	}): readonly ExecutionEvent[];
+	appendRunOutcome(input: AppendRunOutcomeInput): RunOutcome;
+	listRunOutcomes(options?: {
+		repoId?: string;
+		taskType?: string;
+		worker?: WorkerLabel;
+	}): readonly RunOutcome[];
 }
 
 export interface BuildplaneRuntimePort {
