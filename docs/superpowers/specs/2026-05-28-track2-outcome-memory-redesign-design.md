@@ -268,7 +268,7 @@ full suite + `pnpm -C <worktree> lint` + changeset. (Per the slice-verify-comman
 | R3 finding | Resolution |
 |---|---|
 | [P1] command packets mis-recorded as `sdk` | D5: model-packet scope — `execution` packets excluded from recording + routing. |
-| [P1] infra-failure path unrecorded → upward bias | Shared phase-gated recorder across `finalizeRun` + `finalizeInfrastructureFailure`. |
+| [P1] infra-failure path unrecorded → upward bias | (R4-corrected) Record at `finalizeRun` only; executor infra-crashes deferred to Phase 3 (D6) — `finalizeRun` covers success + quality-failure, which is the worker-quality signal. |
 | [P1] no `source_run_id` uniqueness | `uq_run_outcomes_run` + idempotent `INSERT … ON CONFLICT DO NOTHING`. |
 | [P1] frozen-per-unit ε starves | Seed-free cold-start rotation; ε per-run + optional. |
 | [P2] createRun sites misclassified | Corrected to profile-resolution (`:1063`) + approval-suspension (`:1095`), no row. |

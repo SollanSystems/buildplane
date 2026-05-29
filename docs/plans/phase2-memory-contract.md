@@ -15,7 +15,7 @@
 | S2 needs git-ancestry / new metadata (breaks DDL-off-limits) | **S2 rescoped to branch-only filtering** (operator decision). Commit-ancestry validity windows → Phase 3. No DDL change. |
 | S2 frozen surface incomplete (public `retrieveRepoFacts`/`RepoFactRetrievalQuery` have no branch param) | Public surface now pre-declared: `branch?` added to `RepoFactRetrievalQuery` + threaded through `retrieveRepoFacts` + the packet-enrichment local port type/call site. |
 | S2 & S3 not parallel on `ports.ts` | **S3 is the sole `ports.ts` editor.** S2 stays in memory-retrieval/store/packet-enrichment. Track-1 lands in a defined order (below), not "clean parallel." |
-| S5 `runtimeRouter` producer too late (route/record divergence poisons scores) | Producer moved **upstream to packet-prep** (`orchestrator.ts:1133`, before `validatedPacket.routingHints` is snapshotted). |
+| S5 `runtimeRouter` producer too late (route/record divergence poisons scores) | Producer moved upstream. **(R3/R4-corrected: the real snapshot point is `storage.createRun` at `orchestrator.ts:689`, not `:1133` — the producer runs in `prepareRun` *before* `createRun`. See the redesign spec.)** |
 | S5 `repoId` undefined | **`repoId = projectRoot`** (store.ts:1090 convention) — stated as a contract invariant. |
 | `listEvents` signature mismatch | `listEvents` now **runId-required**, implemented via `EventStore.getEventsByRunId`. |
 | Aggregation grain conflates model/effort | Grain = **`preferredWorker` only** for Phase 2 (the sole runtime branch). model/effort out of scope. |
@@ -34,7 +34,7 @@ promote writes       apps/cli/src/run-cli.ts                branch/commitSha at 
 Injection assembly   apps/cli/src/packet-enrichment.ts      local port type :26; retrieval call :302; assembly :442–446
 memory CLI dispatch  apps/cli/src/run-cli.ts                :3496 (facts :3675, procedures :3716)
 RoutingHints type    packages/kernel/src/run-loop.ts        :18–22 (preferredWorker | preferredModel | effort)
-packet-prep / snapshot packages/kernel/src/orchestrator.ts  records ctx.validatedPacket.routingHints :1133
+snapshot point        packages/kernel/src/orchestrator.ts   storage.createRun persists unit_snapshot :689 (NOT :1133; R3/R4-corrected)
 runtime worker branch apps/cli/src/run-cli.ts               selection branches on preferredWorker only :1358
 ```
 

@@ -30,7 +30,7 @@
 - [ ] **VF-1:** Re-confirm zero `run_outcomes`/`RunOutcome`/`appendRunOutcome` symbols on `origin/main`. Confirm the table does not exist.
 - [ ] **VF-2:** Read `repo_facts` DDL + its registration in the three schema fns (`store.ts:433/599/628`) and the `assertTableColumns` pattern (`:362`). Mirror the *style* only — `run_outcomes` is append-only (no `status`/`updated_at`).
 - [ ] **VF-3:** Confirm `repoId = projectRoot` via the `createBuildplaneStorage(root)` root (test: `provenance.repoId === root`, see `repo-facts.test.ts`). Confirm `appendRunOutcome` derives `repo_id` internally (like `upsertRepoFact`) — not from input.
-- [ ] **VF-4:** Pin the **run-status vocabulary** at `finalizeRun` (orchestrator.ts:762) and the `run-completed` payload status (`store.ts:1809`): which terminal states are *success* (→1) vs *failure* (→0). Confirm the run's `unit_snapshot` + `validatedPacket` are reachable at the recorder seam, and that `taskType = packet.intent?.taskType ?? packet.unit.kind` is resolvable there.
+- [ ] **VF-4:** Pin the **success vs failure commit points inside `finalizeRun`** (orchestrator.ts:762) — there is no single `status` local; the run commits success and failure in **separate branches**, so call `recordModelOutcome(ctx, true)` after the success commit and `recordModelOutcome(ctx, false)` after the failure/rejection commit. Confirm `ctx.validatedPacket` (== `unit_snapshot`) + `ctx.run.id` are in scope at both, and that `taskType = packet.intent?.taskType ?? packet.unit.kind` resolves there.
 - [ ] **VF-5 (R4 — recording site):** Confirm `finalizeRun` (:762) is reached **only post-execution**, and that **both** clean success and quality-failure (worker ran, output rejected) terminal-commit through it (with a status distinguishing the two for the VF-4 mapping). Confirm `finalizeInfrastructureFailure` (:613, callers incl. :1041/:1243/:1335) is the path for executor crashes — **out of scope for V1** (D6). Confirm `ctx.validatedPacket` (== the routed packet == `unit_snapshot`) and `ctx.run.id` are in scope at the recorder seam.
 - [ ] **VF-6 (R4 P1 / D5):** Pin the **model-packet predicate = `packet.model !== undefined`** against the live `UnitPacket` type (`run-loop.ts:30-39` — has both `execution?` and `model?`). Confirm `model` and `execution` are mutually exclusive on real packets, and that a packet with neither would otherwise default to the SDK executor (`run-cli.ts:1369`) — hence `model`-presence, not `execution`-absence, is the correct gate for recording + routing.
 
@@ -196,17 +196,22 @@ grain appends a *new* row (different `source_run_id`); add an assertion that the
 
 - [ ] **Step 3 — implement** the recorder in `finalizeRun`, once the terminal status is known (VF-4/VF-6):
 
+`finalizeRun` has no single `status` variable — it commits success vs failure in separate branches.
+So use a helper and call it from each branch with the known boolean (VF-4 pins the exact commit sites):
+
 ```ts
-// finalizeRun, terminal status known:
-const packet = ctx.validatedPacket;                  // == routedPacket == unit_snapshot
-if (packet.model !== undefined) {                    // model packet only (D5; run-loop.ts:33)
+function recordModelOutcome(ctx, success: boolean): void {
+	const packet = ctx.validatedPacket;              // == routedPacket == unit_snapshot
+	if (packet.model === undefined) return;          // model packet only (D5; run-loop.ts:33)
 	storage.appendRunOutcome({                       // idempotent (uq_run_outcomes_run)
 		taskType: packet.intent?.taskType ?? packet.unit.kind,
 		worker: packet.routingHints?.preferredWorker ?? "sdk",
-		success: isTerminalSuccess(status),          // VF-4 status mapping
+		success,
 		sourceRunId: ctx.run.id,
 	});
 }
+// in finalizeRun: after the success commit  → recordModelOutcome(ctx, true);
+//                 after the failure commit  → recordModelOutcome(ctx, false);
 ```
 
 Do **not** add recording to `finalizeInfrastructureFailure` in V1 (D6 — Phase 3).
