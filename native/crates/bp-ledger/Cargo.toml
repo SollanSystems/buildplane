@@ -40,3 +40,7 @@ bp-ledger = { path = ".", features = ["test-support"] }
 [[bin]]
 name = "bp-ledger-gen-fixtures"
 path = "src/bin/gen_fixtures.rs"
+
+[[bin]]
+name = "bp-ledger-gen-signed-tape"
+path = "src/bin/gen_signed_tape.rs"

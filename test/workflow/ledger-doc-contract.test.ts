@@ -19,4 +19,11 @@ describe("ledger docs contract", () => {
 			"buildplane ledger replay <run-id> --format",
 		);
 	});
+
+	it("documents the external signed-tape verifier command", () => {
+		expect(ledgerDoc).toContain("Verifying a signed tape");
+		expect(ledgerDoc).toContain(
+			"node scripts/verify-signed-tape.mjs --fixture <dir>",
+		);
+	});
 });
