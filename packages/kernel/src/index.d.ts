@@ -84,6 +84,7 @@ export {
 	rankMemoryResults,
 } from "./memory-retrieval.ts";
 export type {
+	AppendRunOutcomeInput,
 	CreateProcedureInput,
 	CreateSearchableDocumentInput,
 	MemoryCreatedBy,
@@ -94,8 +95,10 @@ export type {
 	MemoryValueType,
 	ProcedureMemory,
 	RepoFact,
+	RunOutcome,
 	SearchableDocument,
 	UpsertRepoFactInput,
+	WorkerLabel,
 } from "./memory-types.ts";
 export type {
 	BuildplaneOrchestrator,

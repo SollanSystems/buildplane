@@ -81,6 +81,7 @@ export {
 	rankMemoryResults,
 } from "./memory-retrieval.js";
 export type {
+	AppendRunOutcomeInput,
 	CreateProcedureInput,
 	CreateSearchableDocumentInput,
 	MemoryCreatedBy,
@@ -91,8 +92,10 @@ export type {
 	MemoryValueType,
 	ProcedureMemory,
 	RepoFact,
+	RunOutcome,
 	SearchableDocument,
 	UpsertRepoFactInput,
+	WorkerLabel,
 } from "./memory-types.js";
 export type {
 	BuildplaneOrchestrator,
