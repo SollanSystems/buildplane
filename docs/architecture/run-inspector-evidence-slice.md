@@ -50,6 +50,10 @@ Run Inspector's event vocabulary starts from the generated ledger `EventKind` en
 - `run_completed`
 - `run_failed`
 - `run_admission_recorded`
+- `plan_admitted`
+- `plan_receipt`
+- `activity_started`
+- `activity_completed`
 - `unit_started`
 - `unit_completed`
 - `unit_failed`

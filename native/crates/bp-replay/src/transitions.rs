@@ -22,6 +22,12 @@ pub fn apply(state: &mut ReplayState, event: &Event) {
         Payload::UnitCancelledV1(p) => apply_unit_cancelled(state, event, p),
         Payload::GitCheckpointV1(p) => apply_git_checkpoint(state, event, p),
         Payload::RunAdmissionRecordedV1(_)
+        // Plan lifecycle + activity bracket events are vocabulary-only in M2-S2;
+        // replay wiring lands in later slices (S7).
+        | Payload::PlanAdmittedV1(_)
+        | Payload::PlanReceiptRecordedV1(_)
+        | Payload::ActivityStartedV1(_)
+        | Payload::ActivityCompletedV1(_)
         | Payload::ModelRequestV1(_)
         | Payload::ModelResponseV1(_)
         // Tape-root checkpoints (M1-S6) are tape-integrity metadata, not
