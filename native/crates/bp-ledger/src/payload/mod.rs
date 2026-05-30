@@ -1,5 +1,6 @@
 //! Event payload definitions, versioned per kind.
 
+pub mod activity;
 pub mod checkpoint;
 pub mod git_checkpoint;
 pub mod model_io;
@@ -26,6 +27,8 @@ pub enum Payload {
     RunAdmissionRecordedV1(run_lifecycle::RunAdmissionRecordedV1),
     PlanAdmittedV1(plan_lifecycle::PlanAdmittedV1),
     PlanReceiptRecordedV1(plan_lifecycle::PlanReceiptRecordedV1),
+    ActivityStartedV1(activity::ActivityStartedV1),
+    ActivityCompletedV1(activity::ActivityCompletedV1),
     UnitStartedV1(unit_lifecycle::UnitStartedV1),
     UnitCompletedV1(unit_lifecycle::UnitCompletedV1),
     UnitFailedV1(unit_lifecycle::UnitFailedV1),
