@@ -6,9 +6,13 @@
 // See: native/crates/bp-ledger/src/payload/mod.rs
 
 import type {
+	ActivityCompletedV1,
+	ActivityStartedV1,
 	GitCheckpointV1,
 	ModelRequestV1,
 	ModelResponseV1,
+	PlanAdmittedV1,
+	PlanReceiptRecordedV1,
 	RunAdmissionRecordedV1,
 	RunCompletedV1,
 	RunFailedV1,
@@ -30,6 +34,10 @@ export type Payload =
 	| { RunCompletedV1: RunCompletedV1 }
 	| { RunFailedV1: RunFailedV1 }
 	| { RunAdmissionRecordedV1: RunAdmissionRecordedV1 }
+	| { PlanAdmittedV1: PlanAdmittedV1 }
+	| { PlanReceiptRecordedV1: PlanReceiptRecordedV1 }
+	| { ActivityStartedV1: ActivityStartedV1 }
+	| { ActivityCompletedV1: ActivityCompletedV1 }
 	| { UnitStartedV1: UnitStartedV1 }
 	| { UnitCompletedV1: UnitCompletedV1 }
 	| { UnitFailedV1: UnitFailedV1 }
