@@ -72,6 +72,7 @@ describe("payload drift alarm", () => {
 		expect(names).toContain("ActivityStartedV1");
 		expect(names).toContain("ActivityCompletedV1");
 		expect(EventKind.PlanAdmitted).toBe("plan_admitted");
+		expect(EventKind.PlanReceiptRecorded).toBe("plan_receipt");
 		expect(EventKind.ActivityCompleted).toBe("activity_completed");
 	});
 

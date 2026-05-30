@@ -5,9 +5,10 @@
 //!   valid/      — every signature valid, checkpoint root correct
 //!   tampered/   — one event's payload mutated AFTER signing (hash_mismatch)
 //!   bad-root/   — checkpoint validly signed over a deliberately wrong root
+//!   plan-cycle/ — full M2 PlanForge admission cycle on a DISTINCT run_id
 //!
 //! Usage: bp-ledger-gen-signed-tape <out-dir>
-//! Writes <out-dir>/{valid,tampered,bad-root}/tape.json.
+//! Writes <out-dir>/{valid,tampered,bad-root,plan-cycle}/tape.json.
 
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
@@ -34,6 +35,12 @@ fn fixed_event_id(n: u8) -> EventId {
 }
 fn fixed_run_id() -> RunId {
     RunId::from_uuid(uuid::Uuid::parse_str("01919000-0000-7000-8000-0000000000ff").unwrap())
+}
+/// Distinct deterministic run id for the M2 plan-cycle tape so it is isolated
+/// from the M1-S7 valid/tampered/bad-root fixtures at the run level, not just
+/// at the event-id level.
+fn fixed_plan_cycle_run_id() -> RunId {
+    RunId::from_uuid(uuid::Uuid::parse_str("01919000-0000-7000-8000-0000000000fe").unwrap())
 }
 fn at(s: &str) -> DateTime<Utc> {
     s.parse().unwrap()
@@ -110,7 +117,7 @@ fn checkpoint_event(tape_root: String) -> Event {
 }
 
 fn plan_cycle_events() -> Vec<Event> {
-    let run_id = fixed_run_id();
+    let run_id = fixed_plan_cycle_run_id();
     vec![
         Event {
             id: fixed_event_id(21),
@@ -196,13 +203,13 @@ fn plan_cycle_events() -> Vec<Event> {
 fn plan_cycle_checkpoint(tape_root: String) -> Event {
     Event {
         id: fixed_event_id(26),
-        run_id: fixed_run_id(),
+        run_id: fixed_plan_cycle_run_id(),
         parent_event_id: Some(fixed_event_id(25)),
         schema_version: 1,
         kind: EventKind::TapeCheckpoint,
         occurred_at: at("2026-05-30T00:00:05Z"),
         payload: Payload::TapeCheckpointV1(TapeCheckpointV1 {
-            run_id: fixed_run_id(),
+            run_id: fixed_plan_cycle_run_id(),
             checkpoint_index: 0,
             through_event_id: fixed_event_id(25),
             through_event_count: 5,
@@ -231,14 +238,14 @@ fn tampered_entry(event: &Event, sig: &EventSignatureV1) -> Value {
     json!({ "canonical_event_b64": STANDARD.encode(&bytes), "signature": serde_json::to_value(sig).unwrap() })
 }
 
-fn write_tape(out_dir: &Path, variant: &str, key: &SigningKey, entries: Vec<Value>) {
+fn write_tape(out_dir: &Path, variant: &str, run_id: RunId, key: &SigningKey, entries: Vec<Value>) {
     let trusted = json!([{
         "public_key_hash": public_key_hash(&key.verifying_key()),
         "public_key_b64": STANDARD.encode(key.verifying_key().to_bytes()),
     }]);
     let tape = json!({
         "format": "buildplane.signed-tape.v1",
-        "run_id": fixed_run_id().to_string(),
+        "run_id": run_id.to_string(),
         "trusted_keys": trusted,
         "events": entries,
     });
@@ -269,7 +276,7 @@ fn main() {
         let cp_sig = sign_event(&cp, &key, &signer(), signed_at).unwrap();
         let mut entries: Vec<Value> = covered.iter().zip(&covered_sigs).map(|(e, s)| entry(e, s)).collect();
         entries.push(entry(&cp, &cp_sig));
-        write_tape(&out_dir, "valid", &key, entries);
+        write_tape(&out_dir, "valid", fixed_run_id(), &key, entries);
     }
 
     // tampered: event #2 payload changed AFTER signing (hash_mismatch)
@@ -282,7 +289,7 @@ fn main() {
             entry(&covered[2], &covered_sigs[2]),
             entry(&cp, &cp_sig),
         ];
-        write_tape(&out_dir, "tampered", &key, entries);
+        write_tape(&out_dir, "tampered", fixed_run_id(), &key, entries);
     }
 
     // bad-root: checkpoint validly signed over a WRONG root
@@ -292,7 +299,7 @@ fn main() {
         let cp_sig = sign_event(&cp, &key, &signer(), signed_at).unwrap();
         let mut entries: Vec<Value> = covered.iter().zip(&covered_sigs).map(|(e, s)| entry(e, s)).collect();
         entries.push(entry(&cp, &cp_sig));
-        write_tape(&out_dir, "bad-root", &key, entries);
+        write_tape(&out_dir, "bad-root", fixed_run_id(), &key, entries);
     }
 
     // plan-cycle: a full PlanForge admission cycle (M2-S2) — every event signed,
@@ -307,7 +314,7 @@ fn main() {
         let cp_sig = sign_event(&cp, &key, &signer(), signed_at).unwrap();
         let mut entries: Vec<Value> = events.iter().zip(&sigs).map(|(e, s)| entry(e, s)).collect();
         entries.push(entry(&cp, &cp_sig));
-        write_tape(&out_dir, "plan-cycle", &key, entries);
+        write_tape(&out_dir, "plan-cycle", fixed_plan_cycle_run_id(), &key, entries);
     }
 
     eprintln!("wrote signed-tape fixtures to {}", out_dir.display());
