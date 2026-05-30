@@ -1,0 +1,24 @@
+{
+	"name": "@buildplane/planforge",
+	"private": true,
+	"version": "0.1.0",
+	"type": "module",
+	"description": "PlanForge plan compile/validate/preview contract and canonical digest for Buildplane",
+	"exports": {
+		".": {
+			"source": "./src/index.ts",
+			"types": "./src/index.d.ts",
+			"import": "./dist/index.js"
+		},
+		"./schema": {
+			"source": "./src/schema.ts",
+			"types": "./src/schema.d.ts",
+			"import": "./dist/schema.js"
+		},
+		"./digest": {
+			"source": "./src/digest.ts",
+			"types": "./src/digest.d.ts",
+			"import": "./dist/digest.js"
+		}
+	}
+}
