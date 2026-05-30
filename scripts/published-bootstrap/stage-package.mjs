@@ -161,6 +161,7 @@ export const INTERNAL_PACKAGE_ENTRYPOINTS = Object.freeze({
 	"@buildplane/adapters-git": "vendor/@buildplane/adapters-git/index.js",
 	"@buildplane/adapters-tools": "vendor/@buildplane/adapters-tools/index.js",
 	"@buildplane/ledger-client": "vendor/@buildplane/ledger-client/index.js",
+	"@buildplane/planforge": "vendor/@buildplane/planforge/index.js",
 });
 
 /**

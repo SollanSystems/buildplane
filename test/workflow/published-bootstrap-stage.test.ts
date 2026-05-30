@@ -55,6 +55,7 @@ const REQUIRED_BUILD_OUTPUTS = [
 	"packages/adapters-git/dist/index.js",
 	"packages/adapters-tools/dist/index.js",
 	"packages/ledger-client/dist/index.js",
+	"packages/planforge/dist/index.js",
 ] as const;
 const WORKSPACE_ROOTS = ["apps", "packages"] as const;
 const BOOTSTRAP_TIMEOUT_MS = 60_000;
@@ -535,6 +536,7 @@ describe("workspace build output preparation", () => {
 				"packages/kernel/dist",
 				"packages/kernel/tsconfig.tsbuildinfo",
 				"packages/ledger-client/dist",
+				"packages/planforge/dist",
 				"packages/policy/dist",
 				"packages/runtime/dist",
 				"packages/storage/dist",
