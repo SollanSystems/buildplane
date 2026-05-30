@@ -10,6 +10,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { fileURLToPath } from "node:url";
 import { createGitWorktreeAdapter as createActualGitWorkspaceAdapter } from "@buildplane/adapters-git";
 import {
 	type BuildplaneOrchestrator,
@@ -18,6 +19,7 @@ import {
 	type RunAdmissionLocalEvidenceStore,
 	type UnitPacket,
 } from "@buildplane/kernel";
+import { digest } from "@buildplane/planforge";
 import { evaluateRun } from "@buildplane/policy";
 import { executePacket } from "@buildplane/runtime";
 import {
@@ -5001,7 +5003,10 @@ describe("cli command surface", () => {
 });
 
 describe("planforge dry-run", () => {
-	const fixtureRoot = join(process.cwd(), "apps/cli/test/fixtures/planforge");
+	const fixtureRoot = join(
+		dirname(fileURLToPath(import.meta.url)),
+		"fixtures/planforge",
+	);
 	const inputFixture = join(fixtureRoot, "goal-input.md");
 	const expectedFixture = join(fixtureRoot, "expected-plan.json");
 
@@ -5036,9 +5041,7 @@ describe("planforge dry-run", () => {
 		expect(result.exitCode).toBe(0);
 		const payload = JSON.parse(result.stdout.join("\n"));
 		const { receiptPreview: _receiptPreview, ...reviewArtifact } = payload;
-		const expectedDigest = `sha256:${createHash("sha256")
-			.update(JSON.stringify(reviewArtifact))
-			.digest("hex")}`;
+		const expectedDigest = digest(reviewArtifact);
 
 		expect(payload.receiptPreview.planDigest).toBe(expectedDigest);
 		expect(payload.receiptPreview.planDigest).not.toBe(

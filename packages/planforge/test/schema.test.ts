@@ -10,7 +10,7 @@ import {
 	PLANFORGE_REQUIRED_EVIDENCE,
 	PLANFORGE_TASK_IDS,
 	PLANFORGE_VALIDATION_STATUSES,
-} from "../src/planforge-schema";
+} from "../src/schema.ts";
 
 interface ExpectedPlanFixture {
 	schemaVersion: string;
@@ -33,7 +33,7 @@ interface ExpectedPlanFixture {
 
 const fixturePath = join(
 	dirname(fileURLToPath(import.meta.url)),
-	"fixtures/planforge/expected-plan.json",
+	"../../../apps/cli/test/fixtures/planforge/expected-plan.json",
 );
 
 function loadExpectedPlanFixture(): ExpectedPlanFixture {

@@ -73,6 +73,9 @@ importers:
       '@buildplane/ledger-client':
         specifier: workspace:*
         version: link:../../packages/ledger-client
+      '@buildplane/planforge':
+        specifier: workspace:*
+        version: link:../../packages/planforge
       '@buildplane/policy':
         specifier: workspace:*
         version: link:../../packages/policy
@@ -149,6 +152,8 @@ importers:
       '@types/uuid':
         specifier: ^11
         version: 11.0.0
+
+  packages/planforge: {}
 
   packages/policy:
     dependencies:
