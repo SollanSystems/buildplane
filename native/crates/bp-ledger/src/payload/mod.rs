@@ -3,6 +3,7 @@
 pub mod checkpoint;
 pub mod git_checkpoint;
 pub mod model_io;
+pub mod plan_lifecycle;
 pub mod run_lifecycle;
 pub mod tool_io;
 pub mod unit_lifecycle;
@@ -23,6 +24,8 @@ pub enum Payload {
     RunCompletedV1(run_lifecycle::RunCompletedV1),
     RunFailedV1(run_lifecycle::RunFailedV1),
     RunAdmissionRecordedV1(run_lifecycle::RunAdmissionRecordedV1),
+    PlanAdmittedV1(plan_lifecycle::PlanAdmittedV1),
+    PlanReceiptRecordedV1(plan_lifecycle::PlanReceiptRecordedV1),
     UnitStartedV1(unit_lifecycle::UnitStartedV1),
     UnitCompletedV1(unit_lifecycle::UnitCompletedV1),
     UnitFailedV1(unit_lifecycle::UnitFailedV1),
