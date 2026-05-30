@@ -21,6 +21,11 @@ export function preview(
 	const normalizedGoal = goal ?? "";
 	const normalizedTrustedBase = trustedBase ?? "unknown";
 	const normalizedRemote = remote ?? "unknown";
+	// Deliberate exception to the M2-S1 canonical-digest migration: the
+	// idempotencyKey fingerprint MUST stay byte-identical to the pre-extraction
+	// derivation, so it keeps insertion-order JSON.stringify over this
+	// hand-ordered object rather than the canonical digest() helper. Switching
+	// to digest() would silently rotate every plan's idempotencyKey. Do not "fix".
 	const fingerprintInput = JSON.stringify({
 		constraints: {
 			dryRun: hasLine(safetyConstraints ?? "", "- Dry-run only."),
