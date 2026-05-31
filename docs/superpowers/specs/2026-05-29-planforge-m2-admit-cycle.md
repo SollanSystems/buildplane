@@ -51,6 +51,8 @@ M2 does **not** add (each deferred to the named milestone):
 
 Anything that gets **signed** (the admitted plan digest, the receipt digest) MUST use a **stable canonical serialization** shared by Rust and TypeScript — reuse the `bp-ledger` `canonicalize.rs` path (`serde_json::to_vec` of a frozen field order), not insertion-order `JSON.stringify`. The current `planDigest` (`run-cli.ts:5752`) is replaced in S1. Repeating the same input at the same trusted base with the same evidence MUST produce the same `idempotencyKey`, `inputDigest`, and `planDigest`, and therefore the same signed admission identity.
 
+**Lock this contract before S3 (hard pre-S3 gate, not a follow-up).** Once a `plan_admitted` event is signed and in production, a wrong wire shape forces a tape migration. Two concrete pre-flight requirements: (1) **map `u64` → TS `string` in typeshare** and regenerate fixtures — TS `number` cannot faithfully represent a Rust `u64`, so any signed payload field carrying one silently diverges across languages; (2) the **S2/S3 adversarial Codex pass must explicitly target byte-identical digest output** for the four new kinds (`plan_admitted`/`plan_receipt`/`activity_started`/`activity_completed`), not just "the tests pass."
+
 ## Tape event vocabulary (new kinds)
 
 M2 adds four signed event kinds, each via the M1 add-event-kind procedure:
@@ -339,4 +341,4 @@ M2 touches L0/L1 trust surfaces. Every implementation PR requires an independent
 
 ## First next task
 
-Do **M2-S1** first (`packages/planforge` extraction + runtime contract + canonical digest). S2 may be drafted in parallel but must rebase onto S1's canonical-digest contract — the digest that S2's `plan_admitted`/`plan_receipt` events sign is defined in S1. Do not begin S3 (admit) until both S1 and S2 land.
+S1 (#161) and S2 (#163) are merged on `main`. **M2-S3 (admit stage)** is next: operator approval → signed `plan_admitted` via `buildplane planforge admit <plan> --approve`. Before starting S3, **lock the cross-language digest contract** (see "Canonical digest contract (load-bearing)" above) — the `u64 → string` typeshare fix and byte-identical digest output are a hard pre-S3 gate, not a follow-up, because S3 is the first slice to sign an admission identity in production.
