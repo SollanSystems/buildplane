@@ -16,6 +16,12 @@ pub enum EventKind {
     RunCompleted,
     RunFailed,
     RunAdmissionRecorded,
+    // PlanForge lifecycle (M2)
+    PlanAdmitted,
+    #[serde(rename = "plan_receipt")]
+    PlanReceiptRecorded,
+    ActivityStarted,
+    ActivityCompleted,
     // Unit lifecycle
     UnitStarted,
     UnitCompleted,
@@ -44,6 +50,10 @@ impl EventKind {
             Self::RunCompleted => "run_completed",
             Self::RunFailed => "run_failed",
             Self::RunAdmissionRecorded => "run_admission_recorded",
+            Self::PlanAdmitted => "plan_admitted",
+            Self::PlanReceiptRecorded => "plan_receipt",
+            Self::ActivityStarted => "activity_started",
+            Self::ActivityCompleted => "activity_completed",
             Self::UnitStarted => "unit_started",
             Self::UnitCompleted => "unit_completed",
             Self::UnitFailed => "unit_failed",
@@ -75,6 +85,8 @@ mod tests {
         for kind in [
             EventKind::RunStarted, EventKind::RunCompleted, EventKind::RunFailed,
             EventKind::RunAdmissionRecorded,
+            EventKind::PlanAdmitted, EventKind::PlanReceiptRecorded,
+            EventKind::ActivityStarted, EventKind::ActivityCompleted,
             EventKind::UnitStarted, EventKind::UnitCompleted, EventKind::UnitFailed,
             EventKind::UnitCancelled, EventKind::GitCheckpoint,
             EventKind::ModelRequest, EventKind::ModelResponse,

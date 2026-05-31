@@ -3,12 +3,16 @@
 //! against this generated file in CI.
 
 use bp_ledger::id::{EventId, RunId};
+use bp_ledger::payload::activity::{ActivityCompletedV1, ActivityStartedV1, ActivityType};
 use bp_ledger::payload::checkpoint::{TapeCheckpointV1, TapeRootAlgorithm};
 use bp_ledger::payload::git_checkpoint::{
     CheckpointBoundary, GitCheckpointV1, GitStatus,
 };
 use bp_ledger::payload::model_io::{
     Message, ModelRequestV1, ModelResponseV1, SamplingParams, Usage,
+};
+use bp_ledger::payload::plan_lifecycle::{
+    PlanAdmittedV1, PlanReceiptOutcome, PlanReceiptRecordedV1,
 };
 use bp_ledger::payload::run_lifecycle::{
     RunAdmissionDecision, RunAdmissionEvidenceInputV1, RunAdmissionRecordedV1,
@@ -151,6 +155,40 @@ fn main() {
             previous_checkpoint_event_id: None,
             tape_root_hash: "sha256:aa".into(),
             algorithm: TapeRootAlgorithm::Sha256Linear,
+        })).unwrap(),
+
+        serde_json::to_value(Payload::PlanAdmittedV1(PlanAdmittedV1 {
+            plan_id: "pf-plan-fixture".into(),
+            plan_digest: "sha256:aa".into(),
+            input_digest: "sha256:bb".into(),
+            trusted_base: "deadbeef".into(),
+            decided_by: "operator:fixture".into(),
+            decided_at: "2026-05-30T00:00:00Z".into(),
+            idempotency_key: "planforge:v0:buildplane:deadbeef:fixture".into(),
+            authorized_next_step: "dispatch_admitted_plan".into(),
+        })).unwrap(),
+
+        serde_json::to_value(Payload::PlanReceiptRecordedV1(PlanReceiptRecordedV1 {
+            plan_id: "pf-plan-fixture".into(),
+            admission_event_id: fixed_event_id(5),
+            outcome: PlanReceiptOutcome::Completed,
+            side_effects: vec!["fs.write:declared_scope".into()],
+            result_digest: "sha256:cc".into(),
+            decided_at: "2026-05-30T00:00:10Z".into(),
+        })).unwrap(),
+
+        serde_json::to_value(Payload::ActivityStartedV1(ActivityStartedV1 {
+            run_id: fixed_run_id(),
+            activity_id: "act-1".into(),
+            activity_type: ActivityType::Model,
+            input_digest: "sha256:dd".into(),
+        })).unwrap(),
+
+        serde_json::to_value(Payload::ActivityCompletedV1(ActivityCompletedV1 {
+            run_id: fixed_run_id(),
+            activity_id: "act-1".into(),
+            result_digest: "sha256:ee".into(),
+            result: json!({"content": "ok"}),
         })).unwrap(),
     ];
 

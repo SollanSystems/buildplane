@@ -10,6 +10,36 @@ export type EventId = Uuid;
 /** Identifier for a run. UUIDv7 — time-ordered. */
 export type RunId = Uuid;
 
+/** `activity_completed` payload — records the activity result for replay. */
+export interface ActivityCompletedV1 {
+	run_id: RunId;
+	activity_id: string;
+	/** Canonical digest binding `result`, `sha256:<hex>`. */
+	result_digest: string;
+	/** Recorded model/tool/command output, replayed verbatim instead of re-invoking. */
+	result: Value;
+}
+
+/** Closed activity-type vocabulary. */
+export enum ActivityType {
+	Model = "model",
+	Tool = "tool",
+	Command = "command",
+}
+
+/**
+ * `activity_started` payload — write-ahead bracket appended (and signed) BEFORE
+ * an I/O activity is invoked, so a crash mid-invoke is recoverable.
+ */
+export interface ActivityStartedV1 {
+	run_id: RunId;
+	/** Stable per-run activity id; pairs with the completing event. */
+	activity_id: string;
+	activity_type: ActivityType;
+	/** Canonical digest of the activity input, `sha256:<hex>`. */
+	input_digest: string;
+}
+
 /** Stable reference to the actor key that produced a detached event signature. */
 export interface ActorKeyRef {
 	/** Stable actor identifier, for example `kernel`, `operator:<id>`, or `worker:<id>`. */
@@ -43,6 +73,10 @@ export enum EventKind {
 	RunCompleted = "run_completed",
 	RunFailed = "run_failed",
 	RunAdmissionRecorded = "run_admission_recorded",
+	PlanAdmitted = "plan_admitted",
+	PlanReceiptRecorded = "plan_receipt",
+	ActivityStarted = "activity_started",
+	ActivityCompleted = "activity_completed",
 	UnitStarted = "unit_started",
 	UnitCompleted = "unit_completed",
 	UnitFailed = "unit_failed",
@@ -158,6 +192,50 @@ export interface ModelResponseV1 {
 	usage: Usage;
 	stop_reason: string;
 	latency_ms: number;
+}
+
+/**
+ * `plan_admitted` payload — operator-approved PlanForge admission; the dispatch
+ * authority. Signed by the kernel key; the operator identity is `decided_by`.
+ */
+export interface PlanAdmittedV1 {
+	/** Stable PlanForge plan id (e.g. `pf-plan-<fingerprint>`). */
+	plan_id: string;
+	/** Canonical digest of the admitted plan, `sha256:<hex>`. */
+	plan_digest: string;
+	/** Canonical digest of the compiled input, `sha256:<hex>`. */
+	input_digest: string;
+	/** Trusted base commit the plan was admitted against. */
+	trusted_base: string;
+	/** Operator identity recorded as a payload field (kernel key signs the event). */
+	decided_by: string;
+	/** Admission timestamp, RFC3339. */
+	decided_at: string;
+	/** Deterministic idempotency key over normalized plan inputs. */
+	idempotency_key: string;
+	/** Next step this admission authorizes. */
+	authorized_next_step: string;
+}
+
+/** Closed terminal outcome vocabulary for a plan receipt. */
+export enum PlanReceiptOutcome {
+	Completed = "completed",
+	Failed = "failed",
+	Aborted = "aborted",
+}
+
+/** `plan_receipt` payload — terminal signed receipt chaining to the admission event. */
+export interface PlanReceiptRecordedV1 {
+	plan_id: string;
+	/** The `plan_admitted` event this receipt finalizes. */
+	admission_event_id: EventId;
+	outcome: PlanReceiptOutcome;
+	/** Actual side effects recorded for the completed plan. */
+	side_effects: string[];
+	/** Canonical digest binding the recorded result, `sha256:<hex>`. */
+	result_digest: string;
+	/** Receipt timestamp, RFC3339. */
+	decided_at: string;
 }
 
 /** Requested side effect denied by policy with a human-readable reason. */

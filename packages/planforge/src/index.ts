@@ -5,21 +5,11 @@ import { preview } from "./preview.js";
 import type { PlanForgePlan } from "./schema.js";
 import { validate } from "./validate.js";
 
-export {
-	compile,
-	hasLine,
-	listValue,
-	type PlanForgeCompileResult,
-	sectionText,
-} from "./compile.js";
+export { compile, type PlanForgeCompileResult } from "./compile.js";
 export { canonicalJson, digest } from "./digest.js";
 export { preview } from "./preview.js";
 export * from "./schema.js";
-export {
-	hasForbiddenPlanForgeGoalIntent,
-	type PlanForgeValidateResult,
-	validate,
-} from "./validate.js";
+export { type PlanForgeValidateResult, validate } from "./validate.js";
 
 export function createPlanForgeDryRunPlan(inputPath: string): PlanForgePlan {
 	const content = readFileSync(inputPath, "utf8");

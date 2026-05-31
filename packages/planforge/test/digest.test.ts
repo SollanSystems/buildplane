@@ -26,4 +26,13 @@ describe("canonical digest", () => {
 	it("distinguishes values that differ", () => {
 		expect(digest({ a: 1 })).not.toBe(digest({ a: 2 }));
 	});
+
+	it("canonicalJson coerces unsupported top-level values to null", () => {
+		expect(canonicalJson(undefined)).toBe("null");
+	});
+
+	it("digest does not throw on top-level undefined (coerced to null)", () => {
+		expect(() => digest(undefined)).not.toThrow();
+		expect(digest(undefined)).toBe(digest(null));
+	});
 });

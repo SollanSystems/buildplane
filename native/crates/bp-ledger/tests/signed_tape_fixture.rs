@@ -24,12 +24,7 @@ fn load_tape(path: &std::path::Path) -> Value {
     serde_json::from_slice(&bytes).expect("tape.json parses")
 }
 
-#[test]
-fn valid_fixture_is_a_real_signed_tape() {
-    let tmp = tempfile::tempdir().unwrap();
-    run_generator(tmp.path());
-    let tape = load_tape(&tmp.path().join("valid").join("tape.json"));
-
+fn assert_tape_is_a_real_signed_tape(tape: &Value) {
     assert_eq!(tape["format"], "buildplane.signed-tape.v1");
 
     let mut keys = TrustedPublicKeys::default();
@@ -73,5 +68,39 @@ fn valid_fixture_is_a_real_signed_tape() {
             assert_eq!(cp.tape_root_hash, recomputed, "checkpoint root recomputes");
             assert_eq!(cp.through_event_count as usize, ordered.len());
         }
+    }
+}
+
+#[test]
+fn valid_fixture_is_a_real_signed_tape() {
+    let tmp = tempfile::tempdir().unwrap();
+    run_generator(tmp.path());
+    let tape = load_tape(&tmp.path().join("valid").join("tape.json"));
+    assert_tape_is_a_real_signed_tape(&tape);
+}
+
+#[test]
+fn plan_cycle_fixture_is_a_real_signed_tape() {
+    let tmp = tempfile::tempdir().unwrap();
+    run_generator(tmp.path());
+    let tape = load_tape(&tmp.path().join("plan-cycle").join("tape.json"));
+    assert_tape_is_a_real_signed_tape(&tape);
+
+    // The plan-cycle tape must exercise all four new M2-S2 kinds.
+    let wire_kinds: Vec<String> = tape["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| {
+            let bytes = STANDARD.decode(entry["canonical_event_b64"].as_str().unwrap()).unwrap();
+            let event: Event = serde_json::from_slice(&bytes).unwrap();
+            event.kind.as_wire().to_string()
+        })
+        .collect();
+    for kind in ["plan_admitted", "activity_started", "activity_completed", "plan_receipt"] {
+        assert!(
+            wire_kinds.iter().any(|k| k == kind),
+            "plan-cycle tape must contain {kind}"
+        );
     }
 }

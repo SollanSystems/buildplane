@@ -28,7 +28,9 @@ function canonicalize(value: unknown): CanonicalValue {
 }
 
 export function canonicalJson(value: unknown): string {
-	return JSON.stringify(canonicalize(value));
+	// JSON.stringify returns undefined for a top-level undefined/function/symbol;
+	// coerce to "null" so digest() never throws on hash.update(undefined).
+	return JSON.stringify(canonicalize(value)) ?? "null";
 }
 
 export function digest(value: unknown): string {

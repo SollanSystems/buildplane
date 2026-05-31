@@ -184,5 +184,45 @@
 			"through_event_count": 2,
 			"through_event_id": "01919000-0000-7000-8000-000000000004"
 		}
+	},
+	{
+		"PlanAdmittedV1": {
+			"authorized_next_step": "dispatch_admitted_plan",
+			"decided_at": "2026-05-30T00:00:00Z",
+			"decided_by": "operator:fixture",
+			"idempotency_key": "planforge:v0:buildplane:deadbeef:fixture",
+			"input_digest": "sha256:bb",
+			"plan_digest": "sha256:aa",
+			"plan_id": "pf-plan-fixture",
+			"trusted_base": "deadbeef"
+		}
+	},
+	{
+		"PlanReceiptRecordedV1": {
+			"admission_event_id": "01919000-0000-7000-8000-000000000005",
+			"decided_at": "2026-05-30T00:00:10Z",
+			"outcome": "completed",
+			"plan_id": "pf-plan-fixture",
+			"result_digest": "sha256:cc",
+			"side_effects": ["fs.write:declared_scope"]
+		}
+	},
+	{
+		"ActivityStartedV1": {
+			"activity_id": "act-1",
+			"activity_type": "model",
+			"input_digest": "sha256:dd",
+			"run_id": "01919000-0000-7000-8000-0000000000ff"
+		}
+	},
+	{
+		"ActivityCompletedV1": {
+			"activity_id": "act-1",
+			"result": {
+				"content": "ok"
+			},
+			"result_digest": "sha256:ee",
+			"run_id": "01919000-0000-7000-8000-0000000000ff"
+		}
 	}
 ]
