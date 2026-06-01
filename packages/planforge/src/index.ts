@@ -14,6 +14,11 @@ export {
 } from "./admit.js";
 export { compile, type PlanForgeCompileResult } from "./compile.js";
 export { canonicalJson, digest } from "./digest.js";
+export {
+	type DispatchPlanInput,
+	type DispatchedUnitPacket,
+	dispatchAdmittedPlan,
+} from "./dispatch.js";
 export { preview } from "./preview.js";
 export * from "./schema.js";
 export { type PlanForgeValidateResult, validate } from "./validate.js";
