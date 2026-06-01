@@ -5331,9 +5331,7 @@ describe("planforge dry-run", () => {
 		]);
 		const nonDryRun = await runCliCapture(root, [
 			"planforge",
-			"admit",
-			"--input",
-			inputFixture,
+			"frobnicate",
 			"--json",
 		]);
 		const writeForm = await runCliCapture(root, [
@@ -5360,7 +5358,9 @@ describe("planforge dry-run", () => {
 		expect(missingInput.stdout.join("\n")).toContain(
 			"Missing required --input",
 		);
-		expect(nonDryRun.stdout.join("\n")).toContain("Only dry-run is available");
+		expect(nonDryRun.stdout.join("\n")).toContain(
+			"Only dry-run and admit are available",
+		);
 		expect(writeForm.stdout.join("\n")).toContain(
 			"side-effect forms are disabled",
 		);
