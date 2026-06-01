@@ -31,6 +31,11 @@ export {
 	RunAdmissionReceiptInputError,
 	recordRunAdmissionReceiptAttempt,
 } from "./admission-receipts.js";
+export {
+	type AdmittedPlanReader,
+	type AdmittedPlanRecord,
+	createDefaultAdmittedPlanReader,
+} from "./admitted-plan-reader.js";
 export type {
 	CommandExecutionCompleteEvent,
 	EventBus,

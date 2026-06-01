@@ -12,6 +12,11 @@ import {
 	recordRunAdmissionReceiptAttempt,
 	recordRunAdmissionReceiptAttemptSync,
 } from "./admission-receipts.js";
+import {
+	type AdmittedPlanReader,
+	type AdmittedPlanRecord,
+	createDefaultAdmittedPlanReader,
+} from "./admitted-plan-reader.js";
 import type { EventBus, EventContext } from "./events.js";
 import {
 	createGraphScheduler,
@@ -58,6 +63,9 @@ const noopBus: EventBus = {
 const DEFAULT_ADMISSION_STEM = "run_admission";
 const MAX_ADMISSION_STEM_LENGTH = 120;
 
+// Must equal @buildplane/planforge's PLANFORGE_AUTHORIZED_NEXT_STEP.
+const PLAN_ADMITTED_AUTHORIZED_NEXT_STEP = "dispatch_admitted_plan";
+
 export interface BuildplaneOrchestrator {
 	initializeProject(): ReturnType<BuildplaneStoragePort["initializeProject"]>;
 	runPacket(
@@ -88,6 +96,7 @@ export interface CreateBuildplaneOrchestratorOptions {
 	readonly policy: BuildplanePolicyPort;
 	readonly workspace: BuildplaneWorkspacePort;
 	readonly admissionStore?: RunAdmissionLocalEvidenceStore | null;
+	readonly admittedPlanReader?: AdmittedPlanReader;
 	readonly eventBus?: EventBus;
 	readonly profileRegistry?: BuildplaneProfileRegistryPort;
 	readonly budgets?: BudgetConstraints;
@@ -106,6 +115,8 @@ export function createBuildplaneOrchestrator(
 		options.admissionStore === undefined
 			? createDefaultRunAdmissionStore(projectRoot)
 			: options.admissionStore;
+	const admittedPlanReader =
+		options.admittedPlanReader ?? createDefaultAdmittedPlanReader();
 	const memoryPort = options.memoryPort;
 	const outcomeRouting = options.outcomeRouting ?? defaultOutcomeRoutingConfig;
 	const strategyWorkflowPromotionRule =
@@ -516,6 +527,48 @@ export function createBuildplaneOrchestrator(
 			};
 		}
 		try {
+			const provenanceRef = ctx.validatedPacket.provenance_ref;
+			if (provenanceRef) {
+				const eventsDbPath = resolve(
+					ctx.projectRoot,
+					".buildplane",
+					"ledger",
+					"events.db",
+				);
+				let admitted: AdmittedPlanRecord | undefined;
+				try {
+					admitted = await admittedPlanReader.read(eventsDbPath, provenanceRef);
+				} catch (err) {
+					return {
+						ok: false,
+						result: finalizeInfrastructureFailure(
+							ctx.run,
+							infrastructureFailure(
+								"plan-not-admitted",
+								`plan_admitted tape read failed for provenance_ref "${provenanceRef}": ${String(err)}`,
+							),
+							{ workspace: ctx.workspace, workspaceStatus: "retained" },
+						),
+					};
+				}
+				if (
+					!admitted ||
+					!admitted.signedByKernel ||
+					admitted.authorizedNextStep !== PLAN_ADMITTED_AUTHORIZED_NEXT_STEP
+				) {
+					return {
+						ok: false,
+						result: finalizeInfrastructureFailure(
+							ctx.run,
+							infrastructureFailure(
+								"plan-not-admitted",
+								`No signed plan_admitted authorizing dispatch found on the tape for provenance_ref "${provenanceRef}".`,
+							),
+							{ workspace: ctx.workspace, workspaceStatus: "retained" },
+						),
+					};
+				}
+			}
 			const receipt = createRunAdmissionReceiptLive(
 				createRunAdmissionReceiptInput(ctx),
 			);
