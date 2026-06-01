@@ -62,6 +62,7 @@ describe("operator suspension", () => {
 			},
 			workspace: {
 				assertRunnableRepository: () => ({ headSha: "abc123" }),
+				checkWorktreeClean: () => true,
 				prepareWorkspace: () => {
 					throw new Error(
 						"should not prepare workspace — run should be suspended",
@@ -124,6 +125,7 @@ describe("operator suspension", () => {
 			},
 			workspace: {
 				assertRunnableRepository: () => ({ headSha: "abc123" }),
+				checkWorktreeClean: () => true,
 				prepareWorkspace: () => ({ path: root, headSha: "abc123" }),
 				deleteWorkspace: () => ({ deleted: true }),
 			},

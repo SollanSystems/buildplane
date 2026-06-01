@@ -146,6 +146,7 @@ function createHarness(options: HarnessOptions = {}): Harness {
 
 	const workspace: BuildplaneWorkspacePort = {
 		assertRunnableRepository: vi.fn(() => ({ headSha: "abc123" })),
+		checkWorktreeClean: () => true,
 		prepareWorkspace: vi.fn((_projectRoot, runId, headSha) => {
 			runEvents.push("prepare-workspace");
 			const path = join(projectRoot, ".buildplane", "workspaces", runId);

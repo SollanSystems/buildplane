@@ -157,6 +157,7 @@ describe("budget enforcement across retries", () => {
 			policy: retryOnceThenApprove(),
 			workspace: {
 				assertRunnableRepository: () => ({ headSha: "abc123" }),
+				checkWorktreeClean: () => true,
 				prepareWorkspace: () => ({ path: root, headSha: "abc123" }),
 				deleteWorkspace: () => ({ deleted: true }),
 			},
@@ -210,6 +211,7 @@ describe("budget enforcement across retries", () => {
 			policy: retryOnceThenApprove(),
 			workspace: {
 				assertRunnableRepository: () => ({ headSha: "abc123" }),
+				checkWorktreeClean: () => true,
 				prepareWorkspace: () => ({ path: root, headSha: "abc123" }),
 				deleteWorkspace: () => ({ deleted: true }),
 			},

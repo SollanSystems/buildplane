@@ -75,6 +75,7 @@ function makeOrchestrator(opts?: { failUnits?: string[] }) {
 		},
 		workspace: {
 			assertRunnableRepository: () => ({ headSha: "abc123" }),
+			checkWorktreeClean: () => true,
 			prepareWorkspace: () => ({ path: "/tmp/ws", headSha: "abc123" }),
 			deleteWorkspace: () => ({ deleted: true }),
 		},
@@ -146,6 +147,7 @@ describe("runGraphAsync", () => {
 			},
 			workspace: {
 				assertRunnableRepository: () => ({ headSha: "abc123" }),
+				checkWorktreeClean: () => true,
 				prepareWorkspace: () => ({ path: "/tmp/ws", headSha: "abc123" }),
 				deleteWorkspace: () => ({ deleted: true }),
 			},

@@ -73,6 +73,7 @@ describe("async worktree isolation", () => {
 			policy: { evaluateRun, evaluateBudgets },
 			workspace: {
 				assertRunnableRepository: () => ({ headSha: "abc" }),
+				checkWorktreeClean: () => true,
 				prepareWorkspace: () => ({ path: worktreeRoot, headSha: "abc" }),
 				deleteWorkspace: () => ({ deleted: true }),
 			},
@@ -119,6 +120,7 @@ describe("async worktree isolation", () => {
 			policy: { evaluateRun, evaluateBudgets },
 			workspace: {
 				assertRunnableRepository: () => ({ headSha: "abc" }),
+				checkWorktreeClean: () => true,
 				prepareWorkspace: () => ({ path: worktreeRoot, headSha: "abc" }),
 				deleteWorkspace: ({ path }) => {
 					deletedPaths.push(path);
@@ -165,6 +167,7 @@ describe("async worktree isolation", () => {
 			policy: { evaluateRun, evaluateBudgets },
 			workspace: {
 				assertRunnableRepository: () => ({ headSha: "abc" }),
+				checkWorktreeClean: () => true,
 				prepareWorkspace: () => ({ path: worktreeRoot, headSha: "abc" }),
 				deleteWorkspace: ({ path }) => {
 					deletedPaths.push(path);
@@ -204,6 +207,7 @@ describe("async worktree isolation", () => {
 			policy: { evaluateRun, evaluateBudgets },
 			workspace: {
 				assertRunnableRepository: () => ({ headSha: "abc" }),
+				checkWorktreeClean: () => true,
 				prepareWorkspace: () => {
 					throw new Error("git worktree add failed");
 				},

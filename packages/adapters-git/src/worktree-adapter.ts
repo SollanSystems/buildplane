@@ -34,6 +34,31 @@ const DEFAULT_GIT_IDENTITY = Object.freeze({
 	email: "buildplane@local",
 });
 
+/**
+ * `.buildplane/**` paths excluded from worktree-cleanliness git checks: per-repo
+ * state + run-time artifacts (incl. ledger events.db + WAL) that are expected to
+ * change during a run and must not read as "dirty". Single source of truth shared
+ * by assertRunnableRepository (repo-root prefix) and checkWorktreeClean (worktree root).
+ */
+const BUILDPLANE_WORKTREE_CLEAN_EXCLUSIONS = [
+	"state.db",
+	"project.json",
+	"artifacts/**",
+	"evidence/**",
+	"runs/**",
+	"logs/**",
+	"workspaces/**",
+	"vcr/**",
+	"ledger/**",
+] as const;
+
+/** `:(exclude)<prefix>/<pattern>` pathspecs for the given `.buildplane` prefix. */
+function buildplaneCleanExcludePathspecs(buildplanePrefix: string): string[] {
+	return BUILDPLANE_WORKTREE_CLEAN_EXCLUSIONS.map(
+		(pattern) => `:(exclude)${buildplanePrefix}/${pattern}`,
+	);
+}
+
 export function createGitWorktreeAdapter(
 	options?: CreateGitWorkspaceAdapterOptions,
 ): BuildplaneWorkspacePort {
@@ -105,17 +130,7 @@ export function createGitWorktreeAdapter(
 				"--untracked-files=all",
 				"--",
 				".",
-				`:(exclude)${buildplanePrefix}/state.db`,
-				`:(exclude)${buildplanePrefix}/project.json`,
-				`:(exclude)${buildplanePrefix}/artifacts/**`,
-				`:(exclude)${buildplanePrefix}/evidence/**`,
-				`:(exclude)${buildplanePrefix}/runs/**`,
-				`:(exclude)${buildplanePrefix}/logs/**`,
-				`:(exclude)${buildplanePrefix}/workspaces/**`,
-				`:(exclude)${buildplanePrefix}/vcr/**`,
-				// Phase B: ledger writes events.db and WAL files under .buildplane/ledger/
-				// during runs; excluding them keeps the clean-worktree check honest.
-				`:(exclude)${buildplanePrefix}/ledger/**`,
+				...buildplaneCleanExcludePathspecs(buildplanePrefix),
 			]);
 			if (cleanlinessCheck.status !== 0) {
 				throw new Error(
@@ -132,6 +147,21 @@ export function createGitWorktreeAdapter(
 			return {
 				headSha: headResolution.stdout.trim(),
 			};
+		},
+
+		checkWorktreeClean(worktreePath: string): boolean {
+			const status = executeGitCommand(runGit, worktreePath, [
+				"status",
+				"--porcelain",
+				"--untracked-files=all",
+				"--",
+				".",
+				...buildplaneCleanExcludePathspecs(".buildplane"),
+			]);
+			if (status.status !== 0) {
+				return false;
+			}
+			return status.stdout.trim().length === 0;
 		},
 
 		prepareWorkspace(projectRoot: string, runId: string, headSha: string) {

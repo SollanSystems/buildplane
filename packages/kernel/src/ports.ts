@@ -219,6 +219,13 @@ export interface BuildplaneProfileRegistryPort {
 
 export interface BuildplaneWorkspacePort {
 	assertRunnableRepository(projectRoot: string): { headSha: string };
+	/**
+	 * Real `git status` of an already-prepared isolated worktree, with the same
+	 * `.buildplane/**` exclusions `assertRunnableRepository` uses (ledger WAL files
+	 * under `.buildplane/ledger/` would otherwise read as dirty). Returns false on
+	 * any git error — fail closed.
+	 */
+	checkWorktreeClean(worktreePath: string): boolean;
 	prepareWorkspace(
 		projectRoot: string,
 		runId: string,
