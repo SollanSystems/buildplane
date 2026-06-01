@@ -1,5 +1,11 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	mkdirSync,
+	readdirSync,
+	readFileSync,
+	writeFileSync,
+} from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -139,7 +145,9 @@ function readAdmissionReceipts(dir: string): AdmissionReceipt[] {
 		.filter((f) => f.endsWith(".json"))
 		.map(
 			(f) =>
-				JSON.parse(readFileSync(join(receiptsDir, f), "utf8")) as AdmissionReceipt,
+				JSON.parse(
+					readFileSync(join(receiptsDir, f), "utf8"),
+				) as AdmissionReceipt,
 		);
 }
 
