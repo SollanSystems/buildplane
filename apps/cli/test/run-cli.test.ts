@@ -5361,7 +5361,7 @@ describe("planforge dry-run", () => {
 			"Missing required --input",
 		);
 		expect(nonDryRun.stdout.join("\n")).toContain(
-			"Only dry-run and admit are available",
+			"Only dry-run, admit, and dispatch are available",
 		);
 		expect(writeForm.stdout.join("\n")).toContain(
 			"side-effect forms are disabled",
