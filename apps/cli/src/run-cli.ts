@@ -3324,8 +3324,15 @@ interface PlanAdmittedEventRow {
 
 /**
  * Event id of an existing signed `plan_admitted` on the tape for `runId` whose
- * payload carries `idempotencyKey`, or undefined if none. Keeps admit idempotent
- * so the same plan is never signed onto the tape twice.
+ * payload carries `idempotencyKey`, or undefined if none. Makes re-admitting the
+ * same plan a no-op.
+ *
+ * This is a read-then-append check, sound under buildplane's single-writer /
+ * single-operator model (the same assumption `bp-ledger`'s `validate_external_append`
+ * documents — one `serve` connection writes a given run). Two *concurrent* admits
+ * of the same plan could both pass this scan and append; that race is the ledger's
+ * documented multi-writer boundary (a DB-level uniqueness constraint), deliberately
+ * out of scope for M2-S3.
  */
 async function findExistingPlanAdmitted(
 	workspace: string,

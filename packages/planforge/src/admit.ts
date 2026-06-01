@@ -10,7 +10,10 @@ export const PLANFORGE_AUTHORIZED_NEXT_STEP = "dispatch_admitted_plan";
  * Wire shape of a `plan_admitted` tape-event payload. Structurally identical to
  * `@buildplane/ledger-client`'s generated `PlanAdmittedV1`. planforge stays a
  * zero-dependency leaf, so the canonical type is not imported here; the CLI emit
- * site binds this to `PlanAdmittedV1`, making any drift a typecheck failure.
+ * site binds this to `PlanAdmittedV1`, so a missing or mistyped field fails
+ * typecheck. (An extra field would not — but the Rust serde round-trip drops
+ * unknown fields before signing, and the Rust payload struct + the byte-stable
+ * fixtures remain the wire-shape source of truth, so it cannot reach the tape.)
  */
 export interface PlanAdmittedPayload {
 	readonly plan_id: string;
