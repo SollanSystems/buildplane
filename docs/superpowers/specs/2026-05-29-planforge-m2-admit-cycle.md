@@ -51,6 +51,8 @@ M2 does **not** add (each deferred to the named milestone):
 
 Anything that gets **signed** (the admitted plan digest, the receipt digest) MUST use a **stable canonical serialization** shared by Rust and TypeScript — reuse the `bp-ledger` `canonicalize.rs` path (`serde_json::to_vec` of a frozen field order), not insertion-order `JSON.stringify`. The current `planDigest` (`run-cli.ts:5752`) is replaced in S1. Repeating the same input at the same trusted base with the same evidence MUST produce the same `idempotencyKey`, `inputDigest`, and `planDigest`, and therefore the same signed admission identity.
 
+**Lock this contract before S3 (hard pre-S3 gate, not a follow-up).** Once a `plan_admitted` event is signed and in production, a wrong wire shape forces a tape migration. Two concrete pre-flight requirements: (1) **map `u64` → TS `string` in typeshare** and regenerate fixtures — TS `number` cannot faithfully represent a Rust `u64`, so any signed payload field carrying one silently diverges across languages; (2) the **S2/S3 adversarial Codex pass must explicitly target byte-identical digest output** for the four new kinds (`plan_admitted`/`plan_receipt`/`activity_started`/`activity_completed`), not just "the tests pass."
+
 ## Tape event vocabulary (new kinds)
 
 M2 adds four signed event kinds, each via the M1 add-event-kind procedure:
@@ -86,7 +88,7 @@ Write-ahead ordering is mandatory: `activity_started` is appended (and signed) *
 
 ## Implementation slices
 
-Critical path: **S1 ∥ S2 → S3 → S4 → S5 → S6 → S7 → S8**. S2 may start in parallel with S1 but rebases onto S1's canonical-digest contract before finalizing. Dependent slices stack on the prior slice branch (M1-style) or rebase on merge.
+Critical path: **S1 ∥ S2 → S3 → S4 → S5 → S6 → S7-HARNESS → S7a → S7b → S8**. S2 may start in parallel with S1 but rebases onto S1's canonical-digest contract before finalizing. Dependent slices stack on the prior slice branch (M1-style) or rebase on merge. S7 — the highest-complexity unbuilt slice and the literal precondition for the M6 crash-and-resume demo — is split into a test-harness task plus two implementation slices: the **crash-replay harness lands first** (so both halves and the M6 demo verify against it), then **S7a** (Rust `bp-replay` transitions) and **S7b** (kernel startup scan / resume / CLI).
 
 ### M2-S1 — `packages/planforge` extraction + runtime contract + canonical digest
 
@@ -225,14 +227,56 @@ buildplane ledger export-signed-tape --run-id <id> --out <dir> && node scripts/v
 
 Review: **2 (Opus + Codex)** — L0.
 
-### M2-S7 — Temporal replay engine + crash recovery
+### M2-S7-HARNESS — Crash-injection replay test harness (lands first)
+
+S7 is the highest-complexity unbuilt slice and the literal precondition for the M6 crash-and-resume demo, so the **deterministic crash-injection harness is written first as a standalone test-infrastructure task** — both S7a and S7b verify against it, and so does the S8 vertical slice. It changes no production code.
+
+Files likely to change:
+
+- `test/ledger-integration/crash-harness.ts` (new): a deterministic fault-injection utility that halts a run at named tape boundaries (`admit↔execute`, mid-execute after an `activity_completed`, `execute↔receipt`), then boots a **fresh kernel** against the same `events.db` and asserts tape state at each kill point
+- `test/ledger-integration/crash-harness.test.ts` (new): self-tests for the harness against fixture tapes
+- `test/fixtures/` (crash-point tapes)
+
+Acceptance:
+
+- the harness can deterministically stop a run at each named tape boundary and resume a fresh kernel against the same `events.db`, asserting the durable tape state at every kill point; **no production-code change**; the harness exposes a stable API consumed by S7a/S7b/S8.
+
+Verification:
+
+```bash
+pnpm -C <worktree> exec vitest run test/ledger-integration/crash-harness.test.ts
+```
+
+Review: **1 independent Reviewer** — test infrastructure only, no L0 trust surface, **no adversarial Codex** (per the tiered review ceremony).
+
+### M2-S7a — Replay engine: transitions + recorded-result state (Rust `bp-replay`)
 
 Files likely to change:
 
 - `native/crates/bp-replay/src/transitions.rs`, `src/state.rs` (transitions for the four new kinds; `ReplayState` cycle phase + recorded activity results)
-- `packages/kernel/src/orchestrator.ts` (startup scan for `running` runs; resume per the recovery contract; read activity result from the tape and **skip re-invocation**; re-establish `will_execute_worker` trust from the tape)
+- `native/crates/bp-replay/tests/transitions.rs`
+
+Acceptance:
+
+- replaying a tape containing `plan_admitted` / `activity_started` / `activity_completed` / `plan_receipt` deterministically reconstructs cycle phase + recorded activity results; the kind match is **exhaustive** (no `_` catch-all — guard against the #163-class break where a new kind silently no-ops); fast-forward is idempotent.
+
+Verification:
+
+```bash
+cargo test --manifest-path native/Cargo.toml -p bp-replay transitions
+# enum-variant slice → also run the whole workspace (no -p) to catch downstream match breaks:
+cargo test --manifest-path native/Cargo.toml
+```
+
+Review: **2 (Opus + Codex)** — L0 replay surface.
+
+### M2-S7b — Kernel crash recovery: startup scan + resume + skip-reinvocation
+
+Files likely to change:
+
+- `packages/kernel/src/orchestrator.ts` (startup scan for `running` runs; resume per the recovery contract; read activity result from the tape and **skip re-invocation**; re-establish `will_execute_worker` trust from the tape `plan_admitted` event)
 - `apps/cli/src/run-cli.ts` (startup recovery entry / `buildplane resume`)
-- tests (simulated mid-cycle crash)
+- crash-replay integration tests built on the **S7-HARNESS**
 
 Acceptance:
 
@@ -241,7 +285,6 @@ Acceptance:
 Verification:
 
 ```bash
-cargo test --manifest-path native/Cargo.toml -p bp-replay transitions
 pnpm -C <worktree> exec vitest run test/ledger-integration/crash-replay.test.ts
 ```
 
@@ -294,8 +337,8 @@ Per-slice process: TDD (RED → GREEN → commit); local tests via `pnpm -C <wor
 
 ## Review requirements
 
-M2 touches L0/L1 trust surfaces. Every implementation PR requires an independent read-only Reviewer (Opus, fresh session) verdict `PASS` with the reviewed SHA equal to the PR head. **L0 slices (S2, S3, S5, S6, S7)** additionally require an **adversarial Codex reviewer** and are **not auto-merge eligible** — do not apply `buildplane:auto-merge`. Docs/fixture-only changes may follow the operating-model auto-merge criteria.
+M2 touches L0/L1 trust surfaces. Every implementation PR requires an independent read-only Reviewer (Opus, fresh session) verdict `PASS` with the reviewed SHA equal to the PR head. **L0 slices (S2, S3, S5, S6, S7a, S7b)** additionally require an **adversarial Codex reviewer** and are **not auto-merge eligible** — do not apply `buildplane:auto-merge`. The **S7-HARNESS** task is test-infrastructure only (no L0 trust surface) and takes a single independent Reviewer — no adversarial Codex. Docs/fixture-only changes may follow the operating-model auto-merge criteria.
 
 ## First next task
 
-Do **M2-S1** first (`packages/planforge` extraction + runtime contract + canonical digest). S2 may be drafted in parallel but must rebase onto S1's canonical-digest contract — the digest that S2's `plan_admitted`/`plan_receipt` events sign is defined in S1. Do not begin S3 (admit) until both S1 and S2 land.
+S1 (#161) and S2 (#163) are merged on `main`. **M2-S3 (admit stage)** is next: operator approval → signed `plan_admitted` via `buildplane planforge admit <plan> --approve`. Before starting S3, **lock the cross-language digest contract** (see "Canonical digest contract (load-bearing)" above) — the `u64 → string` typeshare fix and byte-identical digest output are a hard pre-S3 gate, not a follow-up, because S3 is the first slice to sign an admission identity in production.
