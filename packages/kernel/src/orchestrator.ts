@@ -1467,6 +1467,7 @@ export function createBuildplaneOrchestrator(
 							intent: graphNode.intent,
 							verification: graphNode.verification,
 							routingHints: graphNode.routingHints,
+							provenance_ref: graphNode.provenance_ref,
 						};
 						scheduler.markRunning(unitId);
 						const promise = orchestrator
@@ -1575,6 +1576,7 @@ export function createBuildplaneOrchestrator(
 							},
 							execution: { command: "", args: [] },
 							verification: { requiredOutputs: [] },
+							provenance_ref: "",
 						},
 						strategyResult,
 					});

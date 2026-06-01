@@ -70,6 +70,22 @@ export function parseUnitPacket(input: string): UnitPacket {
 	const intent = parseTaskIntent(packet.intent);
 	const routingHints = parseRoutingHints(packet.routingHints);
 
+	const provenance_ref =
+		packet.provenance_ref === undefined
+			? ""
+			: readRequiredString(packet, "provenance_ref", "packet");
+	const reserved = {
+		...(packet.capability_bundle === undefined
+			? {}
+			: { capability_bundle: packet.capability_bundle }),
+		...(packet.acceptance_contract === undefined
+			? {}
+			: { acceptance_contract: packet.acceptance_contract }),
+		...(packet.trust_scope === undefined
+			? {}
+			: { trust_scope: packet.trust_scope }),
+	};
+
 	if (hasExecution) {
 		return {
 			unit,
@@ -77,6 +93,8 @@ export function parseUnitPacket(input: string): UnitPacket {
 			...(intent === undefined ? {} : { intent }),
 			verification,
 			...(routingHints === undefined ? {} : { routingHints }),
+			provenance_ref,
+			...reserved,
 		};
 	}
 
@@ -86,6 +104,8 @@ export function parseUnitPacket(input: string): UnitPacket {
 		...(intent === undefined ? {} : { intent }),
 		verification,
 		...(routingHints === undefined ? {} : { routingHints }),
+		provenance_ref,
+		...reserved,
 	};
 }
 
