@@ -70,6 +70,7 @@ interface HarnessOptions {
 	readonly admissionStore?: RunAdmissionLocalEvidenceStore | null;
 	readonly appendAdmissionEvent?: RunAdmissionLocalEvidenceStore["appendAdmissionEvent"];
 	readonly writeReceiptArtifact?: RunAdmissionLocalEvidenceStore["writeReceiptArtifact"];
+	readonly worktreeClean?: boolean;
 }
 
 interface Harness {
@@ -146,7 +147,7 @@ function createHarness(options: HarnessOptions = {}): Harness {
 
 	const workspace: BuildplaneWorkspacePort = {
 		assertRunnableRepository: vi.fn(() => ({ headSha: "abc123" })),
-		checkWorktreeClean: () => true,
+		checkWorktreeClean: vi.fn(() => options.worktreeClean ?? true),
 		prepareWorkspace: vi.fn((_projectRoot, runId, headSha) => {
 			runEvents.push("prepare-workspace");
 			const path = join(projectRoot, ".buildplane", "workspaces", runId);
@@ -434,6 +435,25 @@ describe("orchestrator run admission", () => {
 		expect(harness.artifacts).toHaveLength(1);
 		expect(harness.admissionEvents).toHaveLength(0);
 		expect(harness.runEvents).toContain("write-admission-artifact");
+		expect(harness.runEvents).not.toContain("execution-started");
+		expect(harness.runEvents).not.toContain("runtime");
+	});
+
+	it("denies admission when the worktree is dirty", async () => {
+		const harness = createHarness({ worktreeClean: false });
+		cleanup.push(harness.cleanup);
+
+		const result = await harness.orchestrator.runPacketAsync(harness.packet);
+
+		expect(result.run.status).not.toBe("passed");
+		expect(harness.artifacts[0]?.receipt.admission).toMatchObject({
+			decision: "INSUFFICIENT_EVIDENCE",
+			will_execute_worker: false,
+		});
+		expect(harness.artifacts[0]?.receipt.admission.missing_evidence).toContain(
+			"repo.worktree_clean",
+		);
+		expect(harness.runtime.executePacketAsync).not.toHaveBeenCalled();
 		expect(harness.runEvents).not.toContain("execution-started");
 		expect(harness.runEvents).not.toContain("runtime");
 	});

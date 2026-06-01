@@ -322,6 +322,7 @@ export function createBuildplaneOrchestrator(
 		run: Run;
 		validatedPacket: UnitPacket;
 		workspace: WorkspaceSnapshot;
+		worktreeClean: boolean;
 	}): readonly RunAdmissionEvidenceInput[] {
 		const scope = {
 			allowed_paths: collectDeclaredScopeAllowedPaths(ctx.validatedPacket),
@@ -334,7 +335,7 @@ export function createBuildplaneOrchestrator(
 				digest: createRunAdmissionDigest({
 					run_id: ctx.run.id,
 					worktree_path: ctx.workspace.path,
-					status: "clean",
+					status: ctx.worktreeClean ? "clean" : "dirty",
 				}),
 				required: true,
 				status: "present",
@@ -366,6 +367,7 @@ export function createBuildplaneOrchestrator(
 		projectRoot: string;
 	}): CreateRunAdmissionReceiptDryRunInput {
 		const { run, validatedPacket, workspace: preparedWorkspace } = ctx;
+		const worktreeClean = workspace.checkWorktreeClean(preparedWorkspace.path);
 		const declaredScope = {
 			allowed_paths: collectDeclaredScopeAllowedPaths(validatedPacket),
 			network_allowed: false,
@@ -390,7 +392,7 @@ export function createBuildplaneOrchestrator(
 				base_ref: "HEAD",
 				base_commit: preparedWorkspace.headSha,
 				head_commit: preparedWorkspace.headSha,
-				worktree_clean: true,
+				worktree_clean: worktreeClean,
 			},
 			request: {
 				requested_capabilities: requestedSideEffects,
@@ -402,6 +404,7 @@ export function createBuildplaneOrchestrator(
 				run,
 				validatedPacket,
 				workspace: preparedWorkspace,
+				worktreeClean,
 			}),
 			actor: "kernel.orchestrator",
 			source: "run-loop",
