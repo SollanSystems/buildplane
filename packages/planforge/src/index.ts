@@ -5,6 +5,13 @@ import { preview } from "./preview.js";
 import type { PlanForgePlan } from "./schema.js";
 import { validate } from "./validate.js";
 
+export {
+	type AdmitPlanInput,
+	buildPlanAdmittedPayload,
+	PLANFORGE_AUTHORIZED_NEXT_STEP,
+	type PlanAdmittedPayload,
+	PlanForgeAdmitRejectedError,
+} from "./admit.js";
 export { compile, type PlanForgeCompileResult } from "./compile.js";
 export { canonicalJson, digest } from "./digest.js";
 export { preview } from "./preview.js";

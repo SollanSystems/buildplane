@@ -20,6 +20,7 @@ import {
 	createTapeEmitter,
 	type LedgerFailure,
 	newEventId,
+	type PlanAdmittedV1,
 	type TapeEmitter,
 } from "@buildplane/ledger-client";
 import {
@@ -56,6 +57,7 @@ import type {
 	preparePacketMemoryEnrichment,
 } from "./packet-enrichment.js";
 import {
+	buildPlanAdmittedPayload,
 	createPlanForgeDryRunPlan,
 	PLANFORGE_VALIDATION_STATUS_PASS,
 } from "./planforge-schema.js";
@@ -736,6 +738,20 @@ function formatPlanForgeHelp(): string[] {
 		"  Options:",
 		"    --input <file>  Markdown PlanForge goal fixture to validate",
 		"    --json          Required; prints the dry-run plan as JSON",
+		"",
+		"buildplane planforge admit --input <file> --approve --operator <id> [--json]",
+		"",
+		"  Records an operator-approved admission for a PASS plan as a signed",
+		"  plan_admitted event on the L0 tape (kernel key; --operator is the",
+		"  decided_by payload field). Fails closed with no tape write on a non-PASS",
+		"  plan, a missing --approve, or a missing --operator. Idempotent: a plan",
+		"  already admitted is a no-op.",
+		"",
+		"  Options:",
+		"    --input <file>   Markdown PlanForge goal fixture to admit",
+		"    --approve        Required; explicit operator approval to sign the admission",
+		"    --operator <id>  Required; deciding operator identity (decided_by)",
+		"    --json           Prints the admission result as JSON",
 	];
 }
 
@@ -3242,25 +3258,30 @@ function spawnLedgerSubprocess(
 	binary: string,
 	runId: string,
 	workspace: string,
+	options: { sign?: boolean; signingKeyId?: string } = {},
 ): LedgerChild {
 	const spawnCwd = deriveLedgerSpawnCwd(binary, workspace);
-	const child = spawn(
-		binary,
-		[
-			"ledger",
-			"serve",
-			"--run-id",
-			runId,
-			"--workspace",
-			workspace,
-			"--schema-version",
-			"1",
-		],
-		{
-			stdio: ["pipe", "inherit", "pipe"],
-			cwd: spawnCwd,
-		},
-	);
+	const serveArgs = [
+		"ledger",
+		"serve",
+		"--run-id",
+		runId,
+		"--workspace",
+		workspace,
+		"--schema-version",
+		"1",
+	];
+	if (options.sign) {
+		serveArgs.push(
+			"--sign",
+			"--signing-key-id",
+			options.signingKeyId ?? "kernel-main",
+		);
+	}
+	const child = spawn(binary, serveArgs, {
+		stdio: ["pipe", "inherit", "pipe"],
+		cwd: spawnCwd,
+	});
 	if (!child.stdin || !child.stderr) {
 		throw new Error("ledger subprocess stdio unexpectedly missing");
 	}
@@ -3279,6 +3300,190 @@ function spawnLedgerSubprocess(
 		stderr: child.stderr as Readable,
 		exit,
 	};
+}
+
+const PLANFORGE_KERNEL_SIGNING_KEY_ID = "kernel-main";
+
+/**
+ * Deterministic plan-scoped run id for a PlanForge admission, derived from the
+ * plan's idempotency key so re-admitting the same plan resolves to the same run
+ * — the idempotency check (and, later, dispatch) finds the admission by run id.
+ * Syntactically a UUID, the only constraint the envelope `run_id` imposes.
+ */
+function planAdmitRunId(idempotencyKey: string): string {
+	const h = createHash("sha256")
+		.update(`planforge.admit.run:${idempotencyKey}`)
+		.digest("hex");
+	return `${h.slice(0, 8)}-${h.slice(8, 12)}-8${h.slice(13, 16)}-${h.slice(16, 20)}-${h.slice(20, 32)}`;
+}
+
+interface PlanAdmittedEventRow {
+	id: string;
+	payload: string;
+}
+
+/**
+ * Event id of an existing signed `plan_admitted` on the tape for `runId` whose
+ * payload carries `idempotencyKey`, or undefined if none. Makes re-admitting the
+ * same plan a no-op.
+ *
+ * This is a read-then-append check, sound under buildplane's single-writer /
+ * single-operator model (the same assumption `bp-ledger`'s `validate_external_append`
+ * documents — one `serve` connection writes a given run). Two *concurrent* admits
+ * of the same plan could both pass this scan and append; that race is the ledger's
+ * documented multi-writer boundary (a DB-level uniqueness constraint), deliberately
+ * out of scope for M2-S3.
+ */
+async function findExistingPlanAdmitted(
+	workspace: string,
+	runId: string,
+	idempotencyKey: string,
+): Promise<string | undefined> {
+	const eventsDbPath = resolve(workspace, ".buildplane", "ledger", "events.db");
+	if (!existsSync(eventsDbPath)) {
+		return undefined;
+	}
+	const { DatabaseSync } = await import("node:sqlite");
+	const db = new DatabaseSync(eventsDbPath, { readOnly: true });
+	try {
+		const rows = db
+			.prepare(
+				"SELECT id, payload FROM events WHERE run_id = ? AND kind = 'plan_admitted'",
+			)
+			.all(runId) as unknown as PlanAdmittedEventRow[];
+		for (const row of rows) {
+			const payload = JSON.parse(row.payload) as {
+				PlanAdmittedV1?: { idempotency_key?: string };
+			};
+			if (payload.PlanAdmittedV1?.idempotency_key === idempotencyKey) {
+				return row.id;
+			}
+		}
+		return undefined;
+	} finally {
+		db.close();
+	}
+}
+
+/**
+ * `buildplane planforge admit --input <file> --approve --operator <id>`:
+ * record an operator-approved admission as a signed `plan_admitted` event on the
+ * L0 tape (kernel key; the operator is the `decided_by` payload field). Fails
+ * closed with no tape write on a non-PASS plan, a missing --approve, or a missing
+ * operator. Idempotent: a plan already admitted is a no-op.
+ */
+async function runPlanForgeAdmitCommand(
+	args: readonly string[],
+	cwd: string,
+	stdout: (line: string) => void,
+): Promise<number> {
+	if (!args.includes("--approve")) {
+		throw new Error(
+			"PlanForge admit requires explicit --approve to record a signed admission.",
+		);
+	}
+	const operator = readFlag(args, "--operator")?.trim();
+	if (!operator) {
+		throw new Error(
+			"PlanForge admit requires --operator <id> to record the deciding operator identity.",
+		);
+	}
+	const inputPath = readFlag(args, "--input");
+	if (!inputPath) {
+		throw new Error(
+			"Missing required --input <file> argument for PlanForge admit.",
+		);
+	}
+	const jsonOut = args.includes("--json");
+
+	const plan = createPlanForgeDryRunPlan(resolve(cwd, inputPath));
+	const decidedBy = operator.startsWith("operator:")
+		? operator
+		: `operator:${operator}`;
+
+	// Throws PlanForgeAdmitRejectedError on a non-PASS plan — fail closed BEFORE
+	// resolving the binary or spawning the signed ledger.
+	const payload: PlanAdmittedV1 = buildPlanAdmittedPayload({
+		plan,
+		decidedBy,
+		decidedAt: new Date().toISOString(),
+	});
+
+	const workspace = resolve(cwd);
+	const runId = planAdmitRunId(payload.idempotency_key);
+
+	const existingEventId = await findExistingPlanAdmitted(
+		workspace,
+		runId,
+		payload.idempotency_key,
+	);
+	if (existingEventId) {
+		stdout(
+			jsonOut
+				? formatJson({
+						status: "already_admitted",
+						plan_id: payload.plan_id,
+						idempotency_key: payload.idempotency_key,
+						run_id: runId,
+						event_id: existingEventId,
+					})
+				: `PlanForge plan ${payload.plan_id} is already admitted; no new tape event written.`,
+		);
+		return 0;
+	}
+
+	const binary = resolveLedgerBinary(cwd);
+	const ledgerChild = spawnLedgerSubprocess(binary, runId, workspace, {
+		sign: true,
+		signingKeyId: PLANFORGE_KERNEL_SIGNING_KEY_ID,
+	});
+
+	let emitter: TapeEmitter;
+	try {
+		emitter = await createTapeEmitter({
+			childStdin: ledgerChild.stdin,
+			childStderr: ledgerChild.stderr,
+			childExit: ledgerChild.exit,
+			workspacePath: workspace,
+			runId,
+		});
+	} catch (err) {
+		if (ledgerChild.child.exitCode === null) {
+			ledgerChild.child.kill("SIGTERM");
+		}
+		throw new Error(
+			`PlanForge admit: signed ledger handshake failed: ${String(err)}`,
+		);
+	}
+
+	try {
+		emitter.emit("plan_admitted", { PlanAdmittedV1: payload });
+		await emitter.flush();
+		await emitter.close();
+	} catch (err) {
+		if (ledgerChild.child.exitCode === null) {
+			ledgerChild.child.kill("SIGTERM");
+		}
+		throw new Error(
+			`PlanForge admit: failed to append signed plan_admitted: ${String(err)}`,
+		);
+	}
+
+	const eventId = emitter.stats().lastAckedEventId ?? undefined;
+	stdout(
+		jsonOut
+			? formatJson({
+					status: "admitted",
+					plan_id: payload.plan_id,
+					idempotency_key: payload.idempotency_key,
+					decided_by: payload.decided_by,
+					run_id: runId,
+					event_id: eventId,
+					payload,
+				})
+			: `Admitted PlanForge plan ${payload.plan_id} (signed plan_admitted on run ${runId}).`,
+	);
+	return 0;
 }
 
 async function runNativeCommand(
@@ -3443,9 +3648,12 @@ export async function runCli(
 				}
 				return 0;
 			}
+			if (subcommand === "admit") {
+				return await runPlanForgeAdmitCommand(rest.slice(1), cwd, stdout);
+			}
 			if (subcommand !== "dry-run") {
 				throw new Error(
-					"Unsupported PlanForge command. Only dry-run is available; non-dry-run PlanForge forms are intentionally disabled.",
+					"Unsupported PlanForge command. Only dry-run and admit are available; other non-dry-run PlanForge forms are intentionally disabled.",
 				);
 			}
 			const subRest = rest.slice(1);
