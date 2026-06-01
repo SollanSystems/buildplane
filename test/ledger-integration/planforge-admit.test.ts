@@ -194,6 +194,15 @@ describe("planforge admit — signed plan_admitted append", () => {
 		expect(existsSync(env.eventsDbPath)).toBe(false);
 	});
 
+	it("fails closed with no tape write when --operator is missing", async () => {
+		const { code, threw } = await runAdmit(
+			["planforge", "admit", "--input", GOAL_INPUT, "--approve"],
+			env.dir,
+		);
+		expect(threw || code !== 0).toBe(true);
+		expect(existsSync(env.eventsDbPath)).toBe(false);
+	});
+
 	it("fails closed with no tape write on a non-PASS plan", async () => {
 		const badInput = join(env.dir, "bad-goal.md");
 		writeFileSync(
