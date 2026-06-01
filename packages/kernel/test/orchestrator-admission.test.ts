@@ -493,6 +493,24 @@ describe("orchestrator run admission", () => {
 		expect(result.run.status).toBe("passed");
 	});
 
+	it("records provenance_ref on the admission receipt run record", async () => {
+		const harness = createHarness({
+			packet: createPacket({ provenance_ref: "evt-prov" }),
+			admittedPlanReader: {
+				read: async () => ({
+					authorizedNextStep: "dispatch_admitted_plan",
+					signedByKernel: true,
+				}),
+			},
+		});
+		cleanup.push(harness.cleanup);
+
+		const result = await harness.orchestrator.runPacketAsync(harness.packet);
+
+		expect(result.run.status).toBe("passed");
+		expect(harness.artifacts[0]?.receipt.run.provenance_ref).toBe("evt-prov");
+	});
+
 	it("rejects dispatch when the admission is unsigned or mis-authorized", async () => {
 		const harness = createHarness({
 			packet: createPacket({ provenance_ref: "evt-1" }),

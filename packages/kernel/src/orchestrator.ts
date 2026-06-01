@@ -395,6 +395,7 @@ export function createBuildplaneOrchestrator(
 				unit_scope: validatedPacket.unit.scope,
 				policy_profile: validatedPacket.unit.policyProfile,
 				verification_contract: validatedPacket.unit.verificationContract,
+				provenance_ref: validatedPacket.provenance_ref,
 			} satisfies JsonRecord,
 			repo: {
 				path: ctx.projectRoot,
