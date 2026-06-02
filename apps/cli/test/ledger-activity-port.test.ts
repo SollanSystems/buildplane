@@ -1,7 +1,10 @@
 import type { TapeEmitter } from "@buildplane/ledger-client";
 import { digest } from "@buildplane/planforge";
 import { describe, expect, it } from "vitest";
-import { createLedgerActivityPort } from "../src/ledger-activity-port.js";
+import {
+	createDeferredLedgerActivityPort,
+	createLedgerActivityPort,
+} from "../src/ledger-activity-port.js";
 
 interface RecordedEmit {
 	readonly kind: string;
@@ -108,5 +111,49 @@ describe("createLedgerActivityPort", () => {
 		expect(payload.ActivityCompletedV1.result_digest).toMatch(
 			/^sha256:[0-9a-f]+$/,
 		);
+	});
+});
+
+describe("createDeferredLedgerActivityPort", () => {
+	it("no-ops when the emitter getter returns null (non-ledger run)", async () => {
+		const emitter = createFakeEmitter();
+		const bound: TapeEmitter | null = null;
+		const port = createDeferredLedgerActivityPort(() => bound);
+
+		await port.activityStarted({
+			runId: "run-1",
+			activityId: "act-1",
+			activityType: "model",
+			input: { model: "x" },
+		});
+		await port.activityCompleted({
+			runId: "run-1",
+			activityId: "act-1",
+			result: {},
+		});
+
+		expect(emitter.emits).toHaveLength(0);
+		expect(emitter.flushCount).toBe(0);
+	});
+
+	it("emits + write-ahead flushes once the signed emitter is bound", async () => {
+		const emitter = createFakeEmitter();
+		let bound: TapeEmitter | null = null;
+		const port = createDeferredLedgerActivityPort(() => bound);
+
+		// run block binds the signed emitter before any activity fires
+		bound = emitter.emitter;
+
+		await port.activityStarted({
+			runId: "run-1",
+			activityId: "act-1",
+			activityType: "model",
+			input: { model: "x" },
+		});
+
+		expect(emitter.emits).toHaveLength(1);
+		expect(emitter.emits[0]?.kind).toBe("activity_started");
+		expect(emitter.flushCount).toBe(1);
+		expect(emitter.flushAtSeq[0]).toBe(1);
 	});
 });

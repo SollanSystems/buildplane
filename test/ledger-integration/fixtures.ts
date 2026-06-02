@@ -1,6 +1,6 @@
 import { type ChildProcess, spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
-import { existsSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -199,11 +199,22 @@ export async function makeBuildplaneRunFixture(opts: {
 
 	const originalCwd = process.cwd();
 	const originalNativeBin = process.env.BUILDPLANE_NATIVE_BIN;
+	const originalHome = process.env.HOME;
 	let exitCode = 1;
 	try {
 		process.chdir(dir);
 		// Inject resolved binary path so run-cli can find it from the tempdir.
 		process.env.BUILDPLANE_NATIVE_BIN = nativeBinary;
+
+		// The run-path ledger subprocess now signs with the kernel key (M2-S5). Point
+		// HOME at an isolated temp dir and provision a kernel ed25519 seed so the signed
+		// `ledger serve --sign` subprocess + assertKernelSigningKey resolve it (value is
+		// irrelevant — only that the key exists).
+		const home = join(dir, "home");
+		process.env.HOME = home;
+		const keyDir = join(home, ".buildplane", "keys", "kernel");
+		mkdirSync(keyDir, { recursive: true });
+		writeFileSync(join(keyDir, "kernel-main.ed25519"), Buffer.alloc(32, 7));
 
 		// 1. Initialize the Buildplane project (creates .buildplane/ structure).
 		await runCli(["init"], {
@@ -237,6 +248,11 @@ export async function makeBuildplaneRunFixture(opts: {
 			delete process.env.BUILDPLANE_NATIVE_BIN;
 		} else {
 			process.env.BUILDPLANE_NATIVE_BIN = originalNativeBin;
+		}
+		if (originalHome === undefined) {
+			delete process.env.HOME;
+		} else {
+			process.env.HOME = originalHome;
 		}
 	}
 

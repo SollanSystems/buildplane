@@ -54,7 +54,10 @@ import {
 	formatWorkspaceCleanupResult,
 	formatWorkspaceList,
 } from "./formatters.js";
-import { createLedgerActivityPort } from "./ledger-activity-port.js";
+import {
+	createDeferredLedgerActivityPort,
+	createLedgerActivityPort,
+} from "./ledger-activity-port.js";
 import { runGitCheckpoint } from "./ledger-git-checkpoint.js";
 import { wrapToolRegistryForLedger } from "./ledger-tool-wrapper.js";
 import type {
@@ -4715,6 +4718,15 @@ export async function runCli(
 			);
 		}
 
+		// Deferred activity-bracket port (M2-S5): the run orchestrator is constructed
+		// here, BEFORE the run-block signed ledger emitter is spawned (~200 lines down,
+		// gated on `useLedger`). The port reads the emitter lazily at activity time, by
+		// which point the run block has bound it (or left it null for a non-ledger run,
+		// in which case bracketing is skipped — byte-unchanged).
+		let runActivityEmitter: TapeEmitter | null = null;
+		const runLedgerActivityPort = createDeferredLedgerActivityPort(
+			() => runActivityEmitter,
+		);
 		const bundle: CliOrchestratorBundle = deps?.createOrchestrator
 			? {
 					orchestrator: deps.createOrchestrator(),
@@ -4726,7 +4738,9 @@ export async function runCli(
 						},
 					},
 				}
-			: await loadCliOrchestrator(cwd);
+			: await loadCliOrchestrator(cwd, {
+					ledgerActivityPort: runLedgerActivityPort,
+				});
 		const {
 			orchestrator,
 			eventBus: cliEventBus,
@@ -4942,11 +4956,16 @@ export async function runCli(
 
 				if (useLedger) {
 					try {
+						// Activity bracketing rides a kernel-signed tape (D2). Fail fast if
+						// the kernel key is missing rather than letting the signed subprocess
+						// die opaquely.
+						assertKernelSigningKey();
 						const binary = resolveLedgerBinary(cwd);
 						ledgerChild = spawnLedgerSubprocess(
 							binary,
 							ledgerRunId,
 							resolvedCwd,
+							{ sign: true, signingKeyId: PLANFORGE_KERNEL_SIGNING_KEY_ID },
 						);
 						ledgerEmitter = await createTapeEmitter({
 							childStdin: ledgerChild.stdin,
@@ -4955,6 +4974,9 @@ export async function runCli(
 							workspacePath: resolvedCwd,
 							runId: ledgerRunId,
 						});
+						// Bind the signed emitter so the deferred activity-bracket port
+						// (passed into the orchestrator above) emits onto this tape.
+						runActivityEmitter = ledgerEmitter;
 						ledgerEmitter.onFailure((failure: LedgerFailure) => {
 							// Best-effort: record that the ledger itself failed into the existing
 							// state.db event store so there's a durable trace.
