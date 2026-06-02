@@ -1,5 +1,13 @@
 # @buildplane/kernel
 
+## 0.3.0
+
+### Minor Changes
+
+- b1b7842: M2-S4: PlanForge dispatch stage — admitted plans dispatch one run per task,
+  gated on a signed plan_admitted tape event (kernel-enforced), with provenance_ref
+  on the packet + admission receipt and a verified worktree_clean git status.
+
 ## 0.2.0
 
 ### Minor Changes
