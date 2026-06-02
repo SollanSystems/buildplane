@@ -1,5 +1,11 @@
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+	chmodSync,
+	mkdirSync,
+	mkdtempSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -95,6 +101,18 @@ describe("claude-code e2e smoke test", () => {
 		const originalNativeBin = process.env.BUILDPLANE_NATIVE_BIN;
 		process.env.PATH = `${stubBinDir}:${origPath}`;
 		process.env.BUILDPLANE_NATIVE_BIN = resolveNativeBinaryForLedgerTests();
+
+		// M2-S5: `buildplane run --raw` now signs the tape with the kernel key (D2),
+		// so provision a temp-HOME kernel ed25519 seed (value irrelevant — only that
+		// it resolves); otherwise the signed ledger init is skipped and events.db is
+		// never created.
+		const originalHome = process.env.HOME;
+		const home = mkdtempSync(join(tmpdir(), "bp-claude-smoke-home-"));
+		cleanupPaths.push(home);
+		process.env.HOME = home;
+		const keyDir = join(home, ".buildplane", "keys", "kernel");
+		mkdirSync(keyDir, { recursive: true });
+		writeFileSync(join(keyDir, "kernel-main.ed25519"), Buffer.alloc(32, 7));
 
 		try {
 			// Write the model packet with routingHints
@@ -198,6 +216,11 @@ describe("claude-code e2e smoke test", () => {
 				delete process.env.BUILDPLANE_NATIVE_BIN;
 			} else {
 				process.env.BUILDPLANE_NATIVE_BIN = originalNativeBin;
+			}
+			if (originalHome === undefined) {
+				delete process.env.HOME;
+			} else {
+				process.env.HOME = originalHome;
 			}
 		}
 	});
