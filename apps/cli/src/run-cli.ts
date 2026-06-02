@@ -59,6 +59,7 @@ import type {
 import {
 	buildPlanAdmittedPayload,
 	createPlanForgeDryRunPlan,
+	dispatchAdmittedPlan,
 	PLANFORGE_VALIDATION_STATUS_PASS,
 } from "./planforge-schema.js";
 import {
@@ -752,6 +753,17 @@ function formatPlanForgeHelp(): string[] {
 		"    --approve        Required; explicit operator approval to sign the admission",
 		"    --operator <id>  Required; deciding operator identity (decided_by)",
 		"    --json           Prints the admission result as JSON",
+		"",
+		"buildplane planforge dispatch --input <file> [--json]",
+		"",
+		"  Dispatches an operator-admitted plan as one run per PlanForgeTask through",
+		"  the kernel run loop. Fails closed (plan-not-admitted) with no run when no",
+		"  signed plan_admitted exists on the tape. Tasks run sequentially so a",
+		"  dependent task does not start if its predecessor fails.",
+		"",
+		"  Options:",
+		"    --input <file>  Markdown PlanForge goal fixture to dispatch",
+		"    --json          Prints the dispatch result (per-task run ids) as JSON",
 	];
 }
 
@@ -3486,6 +3498,85 @@ async function runPlanForgeAdmitCommand(
 	return 0;
 }
 
+const DEFAULT_DISPATCH_POLICY_PROFILE = "default";
+
+/**
+ * `buildplane planforge dispatch --input <file>`: dispatch an operator-admitted
+ * plan as one run per PlanForgeTask. Fails closed (exit 1, `plan-not-admitted`)
+ * when no signed plan_admitted exists on the tape — a fast CLI-side pre-check; the
+ * kernel admission gate is the load-bearing enforcement. Tasks run sequentially so
+ * a dependent task does not start if its predecessor fails.
+ */
+async function runPlanForgeDispatchCommand(
+	args: readonly string[],
+	cwd: string,
+	stdout: (line: string) => void,
+): Promise<number> {
+	const inputPath = readFlag(args, "--input");
+	if (!inputPath) {
+		throw new Error(
+			"Missing required --input <file> argument for PlanForge dispatch.",
+		);
+	}
+	const jsonOut = args.includes("--json");
+
+	const plan = createPlanForgeDryRunPlan(resolve(cwd, inputPath));
+	const workspace = resolve(cwd);
+	const runId = planAdmitRunId(plan.idempotencyKey);
+	const admittedEventId = await findExistingPlanAdmitted(
+		workspace,
+		runId,
+		plan.idempotencyKey,
+	);
+	if (!admittedEventId) {
+		throw new Error(
+			`plan-not-admitted: PlanForge plan ${plan.id} has no signed plan_admitted on the tape. Run \`buildplane planforge admit\` first.`,
+		);
+	}
+
+	const packets = dispatchAdmittedPlan({
+		plan,
+		admittedEventId: String(admittedEventId),
+		policyProfile: DEFAULT_DISPATCH_POLICY_PROFILE,
+	});
+
+	const { parseUnitPacket } = (await cliImport("@buildplane/kernel")) as {
+		parseUnitPacket: (input: string) => unknown;
+	};
+	const { orchestrator, eventBus: cliEventBus } =
+		await loadCliOrchestrator(workspace);
+
+	const runs: Array<{ task: string; run_id: string; status: string }> = [];
+	for (const packet of packets) {
+		const result = await orchestrator.runPacketAsync(
+			parseUnitPacket(JSON.stringify(packet)),
+			cliEventBus,
+		);
+		runs.push({
+			task: packet.unit.id,
+			run_id: result.run.id,
+			status: result.run.status,
+		});
+		if (result.run.status !== "passed") {
+			break; // PF2 dependsOn PF1: stop the chain on first failure.
+		}
+	}
+
+	const allPassed =
+		runs.length === packets.length && runs.every((r) => r.status === "passed");
+	stdout(
+		jsonOut
+			? formatJson({
+					status: allPassed ? "dispatched" : "failed",
+					plan_id: plan.id,
+					admitted_event_id: String(admittedEventId),
+					runs,
+				})
+			: `Dispatched PlanForge plan ${plan.id}: ${runs.length}/${packets.length} task(s).`,
+	);
+	return allPassed ? 0 : 1;
+}
+
 async function runNativeCommand(
 	argv: string[],
 	options: {
@@ -3651,9 +3742,12 @@ export async function runCli(
 			if (subcommand === "admit") {
 				return await runPlanForgeAdmitCommand(rest.slice(1), cwd, stdout);
 			}
+			if (subcommand === "dispatch") {
+				return await runPlanForgeDispatchCommand(rest.slice(1), cwd, stdout);
+			}
 			if (subcommand !== "dry-run") {
 				throw new Error(
-					"Unsupported PlanForge command. Only dry-run and admit are available; other non-dry-run PlanForge forms are intentionally disabled.",
+					"Unsupported PlanForge command. Only dry-run, admit, and dispatch are available; other non-dry-run PlanForge forms are intentionally disabled.",
 				);
 			}
 			const subRest = rest.slice(1);

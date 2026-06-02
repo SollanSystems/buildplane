@@ -2261,6 +2261,7 @@ describe("cli command surface", () => {
 				assertRunnableRepository() {
 					return { headSha: "abc123" };
 				},
+				checkWorktreeClean: () => true,
 				prepareWorkspace(projectRoot, runId, headSha) {
 					const path = join(projectRoot, ".buildplane", "workspaces", runId);
 					mkdirSync(path, { recursive: true });
@@ -3110,6 +3111,7 @@ describe("cli command surface", () => {
 				assertRunnableRepository() {
 					return { headSha: "abc123" };
 				},
+				checkWorktreeClean: () => true,
 				prepareWorkspace() {
 					throw new Error("git worktree add failed");
 				},
@@ -5359,7 +5361,7 @@ describe("planforge dry-run", () => {
 			"Missing required --input",
 		);
 		expect(nonDryRun.stdout.join("\n")).toContain(
-			"Only dry-run and admit are available",
+			"Only dry-run, admit, and dispatch are available",
 		);
 		expect(writeForm.stdout.join("\n")).toContain(
 			"side-effect forms are disabled",

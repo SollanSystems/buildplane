@@ -180,6 +180,7 @@ function createHarness(packet: UnitPacket, options: HarnessOptions = {}) {
 		assertRunnableRepository() {
 			return { headSha: "abc123" };
 		},
+		checkWorktreeClean: () => true,
 		prepareWorkspace() {
 			return { path: workspacePath, headSha: "abc123" };
 		},

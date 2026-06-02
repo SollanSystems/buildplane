@@ -12,6 +12,11 @@ import {
 	recordRunAdmissionReceiptAttempt,
 	recordRunAdmissionReceiptAttemptSync,
 } from "./admission-receipts.js";
+import {
+	type AdmittedPlanReader,
+	type AdmittedPlanRecord,
+	createDefaultAdmittedPlanReader,
+} from "./admitted-plan-reader.js";
 import type { EventBus, EventContext } from "./events.js";
 import {
 	createGraphScheduler,
@@ -58,6 +63,9 @@ const noopBus: EventBus = {
 const DEFAULT_ADMISSION_STEM = "run_admission";
 const MAX_ADMISSION_STEM_LENGTH = 120;
 
+// Must equal @buildplane/planforge's PLANFORGE_AUTHORIZED_NEXT_STEP.
+const PLAN_ADMITTED_AUTHORIZED_NEXT_STEP = "dispatch_admitted_plan";
+
 export interface BuildplaneOrchestrator {
 	initializeProject(): ReturnType<BuildplaneStoragePort["initializeProject"]>;
 	runPacket(
@@ -88,6 +96,7 @@ export interface CreateBuildplaneOrchestratorOptions {
 	readonly policy: BuildplanePolicyPort;
 	readonly workspace: BuildplaneWorkspacePort;
 	readonly admissionStore?: RunAdmissionLocalEvidenceStore | null;
+	readonly admittedPlanReader?: AdmittedPlanReader;
 	readonly eventBus?: EventBus;
 	readonly profileRegistry?: BuildplaneProfileRegistryPort;
 	readonly budgets?: BudgetConstraints;
@@ -106,6 +115,8 @@ export function createBuildplaneOrchestrator(
 		options.admissionStore === undefined
 			? createDefaultRunAdmissionStore(projectRoot)
 			: options.admissionStore;
+	const admittedPlanReader =
+		options.admittedPlanReader ?? createDefaultAdmittedPlanReader();
 	const memoryPort = options.memoryPort;
 	const outcomeRouting = options.outcomeRouting ?? defaultOutcomeRoutingConfig;
 	const strategyWorkflowPromotionRule =
@@ -322,6 +333,7 @@ export function createBuildplaneOrchestrator(
 		run: Run;
 		validatedPacket: UnitPacket;
 		workspace: WorkspaceSnapshot;
+		worktreeClean: boolean;
 	}): readonly RunAdmissionEvidenceInput[] {
 		const scope = {
 			allowed_paths: collectDeclaredScopeAllowedPaths(ctx.validatedPacket),
@@ -334,7 +346,7 @@ export function createBuildplaneOrchestrator(
 				digest: createRunAdmissionDigest({
 					run_id: ctx.run.id,
 					worktree_path: ctx.workspace.path,
-					status: "clean",
+					status: ctx.worktreeClean ? "clean" : "dirty",
 				}),
 				required: true,
 				status: "present",
@@ -366,6 +378,7 @@ export function createBuildplaneOrchestrator(
 		projectRoot: string;
 	}): CreateRunAdmissionReceiptDryRunInput {
 		const { run, validatedPacket, workspace: preparedWorkspace } = ctx;
+		const worktreeClean = workspace.checkWorktreeClean(preparedWorkspace.path);
 		const declaredScope = {
 			allowed_paths: collectDeclaredScopeAllowedPaths(validatedPacket),
 			network_allowed: false,
@@ -382,6 +395,7 @@ export function createBuildplaneOrchestrator(
 				unit_scope: validatedPacket.unit.scope,
 				policy_profile: validatedPacket.unit.policyProfile,
 				verification_contract: validatedPacket.unit.verificationContract,
+				provenance_ref: validatedPacket.provenance_ref,
 			} satisfies JsonRecord,
 			repo: {
 				path: ctx.projectRoot,
@@ -390,7 +404,7 @@ export function createBuildplaneOrchestrator(
 				base_ref: "HEAD",
 				base_commit: preparedWorkspace.headSha,
 				head_commit: preparedWorkspace.headSha,
-				worktree_clean: true,
+				worktree_clean: worktreeClean,
 			},
 			request: {
 				requested_capabilities: requestedSideEffects,
@@ -402,6 +416,7 @@ export function createBuildplaneOrchestrator(
 				run,
 				validatedPacket,
 				workspace: preparedWorkspace,
+				worktreeClean,
 			}),
 			actor: "kernel.orchestrator",
 			source: "run-loop",
@@ -513,6 +528,48 @@ export function createBuildplaneOrchestrator(
 			};
 		}
 		try {
+			const provenanceRef = ctx.validatedPacket.provenance_ref;
+			if (provenanceRef) {
+				const eventsDbPath = resolve(
+					ctx.projectRoot,
+					".buildplane",
+					"ledger",
+					"events.db",
+				);
+				let admitted: AdmittedPlanRecord | undefined;
+				try {
+					admitted = await admittedPlanReader.read(eventsDbPath, provenanceRef);
+				} catch (err) {
+					return {
+						ok: false,
+						result: finalizeInfrastructureFailure(
+							ctx.run,
+							infrastructureFailure(
+								"plan-not-admitted",
+								`plan_admitted tape read failed for provenance_ref "${provenanceRef}": ${String(err)}`,
+							),
+							{ workspace: ctx.workspace, workspaceStatus: "retained" },
+						),
+					};
+				}
+				if (
+					!admitted ||
+					!admitted.signedByKernel ||
+					admitted.authorizedNextStep !== PLAN_ADMITTED_AUTHORIZED_NEXT_STEP
+				) {
+					return {
+						ok: false,
+						result: finalizeInfrastructureFailure(
+							ctx.run,
+							infrastructureFailure(
+								"plan-not-admitted",
+								`No signed plan_admitted authorizing dispatch found on the tape for provenance_ref "${provenanceRef}".`,
+							),
+							{ workspace: ctx.workspace, workspaceStatus: "retained" },
+						),
+					};
+				}
+			}
 			const receipt = createRunAdmissionReceiptLive(
 				createRunAdmissionReceiptInput(ctx),
 			);
@@ -1467,6 +1524,7 @@ export function createBuildplaneOrchestrator(
 							intent: graphNode.intent,
 							verification: graphNode.verification,
 							routingHints: graphNode.routingHints,
+							provenance_ref: graphNode.provenance_ref,
 						};
 						scheduler.markRunning(unitId);
 						const promise = orchestrator
@@ -1575,6 +1633,7 @@ export function createBuildplaneOrchestrator(
 							},
 							execution: { command: "", args: [] },
 							verification: { requiredOutputs: [] },
+							provenance_ref: "",
 						},
 						strategyResult,
 					});

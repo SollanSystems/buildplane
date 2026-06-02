@@ -133,6 +133,7 @@ function createMergeFailureHarness() {
 		assertRunnableRepository() {
 			return { headSha: "abc123" };
 		},
+		checkWorktreeClean: () => true,
 		prepareWorkspace() {
 			runEvents.push("prepare-workspace");
 			return { path: workspacePath, headSha: "abc123" };

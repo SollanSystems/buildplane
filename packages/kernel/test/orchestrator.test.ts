@@ -270,6 +270,7 @@ function createHarness(options: HarnessOptions = {}) {
 			runEvents.push("assert-repo");
 			return { headSha: "abc123" };
 		},
+		checkWorktreeClean: () => true,
 		prepareWorkspace() {
 			runEvents.push("prepare-workspace");
 			if (shouldThrow("prepareWorkspace")) {

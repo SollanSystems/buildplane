@@ -100,6 +100,7 @@ function makeWorkspace(root: string) {
 	mkdirSync(ws, { recursive: true });
 	return {
 		assertRunnableRepository: vi.fn().mockReturnValue({ headSha: "abc123" }),
+		checkWorktreeClean: vi.fn().mockReturnValue(true),
 		prepareWorkspace: vi.fn().mockReturnValue({ path: ws, headSha: "abc123" }),
 		deleteWorkspace: vi.fn().mockReturnValue({ deleted: true }),
 	} as unknown as BuildplaneWorkspacePort;

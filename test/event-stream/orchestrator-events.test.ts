@@ -141,6 +141,7 @@ function createMockPolicy(): BuildplanePolicyPort {
 function createMockWorkspace(): BuildplaneWorkspacePort {
 	return {
 		assertRunnableRepository: () => ({ headSha: "mock-sha" }),
+		checkWorktreeClean: () => true,
 		prepareWorkspace: (_root, _runId, headSha) => {
 			const wsPath = mkdtempSync(join(tmpdir(), "bp-ws-"));
 			return { path: wsPath, headSha };

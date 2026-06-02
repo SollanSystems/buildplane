@@ -86,6 +86,7 @@ describe("budget enforcement end-to-end", () => {
 
 		const mockWorkspace = {
 			assertRunnableRepository: () => ({ headSha: "abc123" }),
+			checkWorktreeClean: () => true,
 			prepareWorkspace: () => ({ path: root, headSha: "abc123" }),
 			deleteWorkspace: () => ({ deleted: true }),
 		};
@@ -159,6 +160,7 @@ describe("budget enforcement end-to-end", () => {
 			},
 			workspace: {
 				assertRunnableRepository: () => ({ headSha: "abc123" }),
+				checkWorktreeClean: () => true,
 				prepareWorkspace: () => ({ path: root, headSha: "abc123" }),
 				deleteWorkspace: () => ({ deleted: true }),
 			},
@@ -199,6 +201,7 @@ describe("budget enforcement end-to-end", () => {
 			policy: { evaluateRun },
 			workspace: {
 				assertRunnableRepository: () => ({ headSha: "abc123" }),
+				checkWorktreeClean: () => true,
 				prepareWorkspace: () => ({ path: root, headSha: "abc123" }),
 				deleteWorkspace: () => ({ deleted: true }),
 			},

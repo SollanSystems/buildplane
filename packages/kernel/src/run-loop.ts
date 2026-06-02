@@ -36,6 +36,19 @@ export interface UnitPacket {
 		readonly requiredOutputs: readonly string[];
 	};
 	readonly routingHints?: RoutingHints;
+	/**
+	 * Tape pointer to the signed `plan_admitted` event id authorizing this
+	 * packet's dispatch. Empty string for packets not dispatched via PlanForge
+	 * admission; when non-empty, the kernel admission gate (added later in this
+	 * slice) verifies this pointer before dispatch.
+	 */
+	readonly provenance_ref: string;
+	/** Reserved for M3 capability broker — typed but unused in M2. */
+	readonly capability_bundle?: unknown;
+	/** Reserved for M4 acceptance contract — typed but unused in M2. */
+	readonly acceptance_contract?: unknown;
+	/** Reserved for M3 trust scoping — typed but unused in M2. */
+	readonly trust_scope?: unknown;
 }
 
 export interface OutputCheck {

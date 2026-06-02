@@ -134,6 +134,7 @@ describe("retry enforcement end-to-end", () => {
 			policy: { evaluateRun, evaluateBudgets },
 			workspace: {
 				assertRunnableRepository: () => ({ headSha: "abc" }),
+				checkWorktreeClean: () => true,
 				prepareWorkspace: () => ({ path: root, headSha: "abc" }),
 				deleteWorkspace: () => ({ deleted: true }),
 			},
@@ -228,6 +229,7 @@ describe("retry enforcement end-to-end", () => {
 			policy: { evaluateRun, evaluateBudgets },
 			workspace: {
 				assertRunnableRepository: () => ({ headSha: "abc" }),
+				checkWorktreeClean: () => true,
 				prepareWorkspace: () => ({ path: root, headSha: "abc" }),
 				deleteWorkspace: () => ({ deleted: true }),
 			},

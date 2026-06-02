@@ -364,3 +364,50 @@ describe("routingHints", () => {
 		).toThrow("packet.routingHints.effort must be one of: low, medium, high");
 	});
 });
+
+describe("provenance_ref", () => {
+	const base = {
+		unit: {
+			id: "u1",
+			kind: "task",
+			scope: "src",
+			verificationContract: "tsc",
+			policyProfile: "default",
+		},
+		execution: { command: "true" },
+		verification: { requiredOutputs: [] },
+	};
+
+	it("parses provenance_ref when present", () => {
+		const packet = parseUnitPacket(
+			JSON.stringify({ ...base, provenance_ref: "evt-123" }),
+		);
+		expect(packet.provenance_ref).toBe("evt-123");
+	});
+
+	it("defaults provenance_ref to empty string when absent", () => {
+		const packet = parseUnitPacket(JSON.stringify(base));
+		expect(packet.provenance_ref).toBe("");
+	});
+
+	it("throws when provenance_ref is present but empty", () => {
+		expect(() =>
+			parseUnitPacket(JSON.stringify({ ...base, provenance_ref: "" })),
+		).toThrow(/provenance_ref/);
+	});
+
+	it("passes through reserved M3/M4 fields when present", () => {
+		const packet = parseUnitPacket(
+			JSON.stringify({
+				...base,
+				provenance_ref: "evt-1",
+				capability_bundle: { id: "cb" },
+				acceptance_contract: { version: 1 },
+				trust_scope: "isolated",
+			}),
+		);
+		expect(packet.capability_bundle).toEqual({ id: "cb" });
+		expect(packet.acceptance_contract).toEqual({ version: 1 });
+		expect(packet.trust_scope).toBe("isolated");
+	});
+});
