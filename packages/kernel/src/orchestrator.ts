@@ -33,6 +33,7 @@ import type {
 	BuildplaneStoragePort,
 	BuildplaneWorkspacePort,
 	CreateRunOptions,
+	LedgerActivityPort,
 } from "./ports.js";
 import {
 	defaultOutcomeRoutingConfig,
@@ -62,6 +63,33 @@ const noopBus: EventBus = {
 
 const DEFAULT_ADMISSION_STEM = "run_admission";
 const MAX_ADMISSION_STEM_LENGTH = 120;
+
+/**
+ * Minimal deterministic descriptor of a packet's activity input, digested into
+ * `ActivityStartedV1.input_digest`. Command packets describe the command line;
+ * model packets describe the model block (or intent, when present).
+ */
+function activityInputDescriptor(p: UnitPacket): unknown {
+	if (p.model) {
+		return p.intent ? { intent: p.intent } : { model: p.model };
+	}
+	return {
+		command: p.execution?.command ?? "",
+		args: p.execution?.args ?? [],
+	};
+}
+
+/**
+ * Deterministic descriptor of an execution receipt, digested into
+ * `ActivityCompletedV1.result_digest` and stored inline as the recorded result.
+ */
+function activityResultDescriptor(r: ExecutionReceipt): unknown {
+	return {
+		exitCode: r.exitCode,
+		stdout: r.stdout,
+		stderr: r.stderr,
+	};
+}
 
 // Must equal @buildplane/planforge's PLANFORGE_AUTHORIZED_NEXT_STEP.
 const PLAN_ADMITTED_AUTHORIZED_NEXT_STEP = "dispatch_admitted_plan";
@@ -102,6 +130,7 @@ export interface CreateBuildplaneOrchestratorOptions {
 	readonly budgets?: BudgetConstraints;
 	readonly memoryPort?: BuildplaneMemoryPort;
 	readonly outcomeRouting?: OutcomeRoutingConfig;
+	readonly ledgerActivityPort?: LedgerActivityPort;
 }
 
 export function createBuildplaneOrchestrator(
@@ -118,6 +147,7 @@ export function createBuildplaneOrchestrator(
 	const admittedPlanReader =
 		options.admittedPlanReader ?? createDefaultAdmittedPlanReader();
 	const memoryPort = options.memoryPort;
+	const ledgerActivityPort = options.ledgerActivityPort;
 	const outcomeRouting = options.outcomeRouting ?? defaultOutcomeRoutingConfig;
 	const strategyWorkflowPromotionRule =
 		"multi-round-strategy-workflow->procedure";
@@ -1297,31 +1327,53 @@ export function createBuildplaneOrchestrator(
 			}
 
 			async function executeOnce(p: UnitPacket): Promise<ExecutionReceipt> {
+				const activityType = p.model
+					? ("model" as const)
+					: ("command" as const);
 				scopedBus.emit({
 					kind: "execution-started",
 					runId: ctx.run.id,
 					timestamp: new Date().toISOString(),
-					executionType: p.model ? ("model" as const) : ("command" as const),
+					executionType: activityType,
 				});
+				const activityId = randomUUID();
+				if (ledgerActivityPort) {
+					// write-ahead: resolves only once activity_started is durable on the tape
+					await ledgerActivityPort.activityStarted({
+						runId: ctx.run.id,
+						activityId,
+						activityType,
+						input: activityInputDescriptor(p),
+					});
+				}
+				let r: ExecutionReceipt;
 				if (runtime.executePacketAsync) {
-					return runtime.executePacketAsync(
+					r = await runtime.executePacketAsync(
 						p,
 						ctx.workspace.path,
 						scopedBus,
 						abortController.signal,
 					);
+				} else {
+					r = runtime.executePacket(p, ctx.workspace.path);
+					scopedBus.emit({
+						kind: "command-execution-complete",
+						runId: ctx.run.id,
+						timestamp: new Date().toISOString(),
+						exitCode: r.exitCode,
+						outputChecks: r.outputChecks.map((c) => ({
+							path: c.path,
+							exists: c.exists,
+						})),
+					});
 				}
-				const r = runtime.executePacket(p, ctx.workspace.path);
-				scopedBus.emit({
-					kind: "command-execution-complete",
-					runId: ctx.run.id,
-					timestamp: new Date().toISOString(),
-					exitCode: r.exitCode,
-					outputChecks: r.outputChecks.map((c) => ({
-						path: c.path,
-						exists: c.exists,
-					})),
-				});
+				if (ledgerActivityPort) {
+					await ledgerActivityPort.activityCompleted({
+						runId: ctx.run.id,
+						activityId,
+						result: activityResultDescriptor(r),
+					});
+				}
 				return r;
 			}
 
