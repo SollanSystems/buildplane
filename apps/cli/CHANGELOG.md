@@ -1,5 +1,28 @@
 # buildplane
 
+## 0.7.0
+
+### Minor Changes
+
+- b1b7842: M2-S4: PlanForge dispatch stage — admitted plans dispatch one run per task,
+  gated on a signed plan_admitted tape event (kernel-enforced), with provenance_ref
+  on the packet + admission receipt and a verified worktree_clean git status.
+
+### Patch Changes
+
+- Updated dependencies [b1b7842]
+  - @buildplane/kernel@0.3.0
+  - @buildplane/planforge@0.4.0
+  - @buildplane/adapters-git@0.2.0
+  - @buildplane/adapters-codex@0.1.2
+  - @buildplane/adapters-honcho@0.1.2
+  - @buildplane/adapters-models@0.1.2
+  - @buildplane/adapters-tools@0.1.2
+  - @buildplane/policy@0.1.2
+  - @buildplane/runtime@0.1.2
+  - @buildplane/storage@0.2.1
+  - @buildplane/ui-tui@0.1.2
+
 ## 0.6.0
 
 ### Minor Changes
