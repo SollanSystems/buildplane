@@ -4723,6 +4723,14 @@ export async function runCli(
 		// gated on `useLedger`). The port reads the emitter lazily at activity time, by
 		// which point the run block has bound it (or left it null for a non-ledger run,
 		// in which case bracketing is skipped — byte-unchanged).
+		//
+		// SCOPE NOTE: the default strategy path (`!useRaw`) returns before the emitter
+		// bind, and is unledgered by construction (pre-existing — `events.db` is empty
+		// without `--raw`), so its activities are intentionally NOT bracketed: the
+		// deferred port no-ops there. S5 bracketing covers the `--raw` run path +
+		// `planforge dispatch`. Bracketing the strategy/default run path would require
+		// giving it a signed ledger subprocess (a tracked follow-up; it also gates
+		// whether default runs are crash-recoverable for the M6 demo).
 		let runActivityEmitter: TapeEmitter | null = null;
 		const runLedgerActivityPort = createDeferredLedgerActivityPort(
 			() => runActivityEmitter,

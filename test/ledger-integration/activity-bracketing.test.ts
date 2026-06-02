@@ -208,8 +208,11 @@ describe("planforge dispatch — signed activity bracketing end-to-end", () => {
 		for (const s of started) {
 			const sPayload = JSON.parse(s.payload).ActivityStartedV1 as {
 				activity_id: string;
+				activity_type: string;
 				input_digest: string;
 			};
+			// PlanForge dispatch packets run a no-op command → command activity type.
+			expect(sPayload.activity_type).toBe("command");
 			const c = completed.find(
 				(x) =>
 					(
@@ -238,8 +241,12 @@ describe("planforge dispatch — signed activity bracketing end-to-end", () => {
 		for (const c of completed) {
 			const cPayload = JSON.parse(c.payload).ActivityCompletedV1 as {
 				result_digest: string;
+				result: { exitCode?: number };
 			};
 			expect(cPayload.result_digest).toMatch(/^sha256:/);
+			// Inline recorded result (D3): the no-op command exits 0.
+			expect(cPayload.result).toBeDefined();
+			expect(cPayload.result.exitCode).toBe(0);
 			const sig = await signatureFor(env.eventsDbPath, c.id);
 			expect(sig).toMatchObject({
 				actor_id: "kernel",
