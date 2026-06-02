@@ -197,6 +197,24 @@ describe("claude-code e2e smoke test", () => {
 			expect(kinds).toContain("unit_started");
 			expect(kinds).toContain("unit_completed");
 			expect(kinds).toContain("git_checkpoint");
+			// M2-S5: the run-path brackets the model activity with signed
+			// activity_started/activity_completed. This is the run-path counterpart to
+			// the dispatch-path e2e (activity-bracketing.test.ts) — and proves MODEL
+			// bracketing on a real run tape (the packet uses preferredWorker=claude-code).
+			expect(kinds).toContain("activity_started");
+			expect(kinds).toContain("activity_completed");
+			const startedRow = rows.find((r) => r.kind === "activity_started");
+			expect(startedRow).toBeDefined();
+			const started = JSON.parse(startedRow?.payload ?? "{}") as {
+				ActivityStartedV1?: { activity_type?: string; activity_id?: string };
+			};
+			expect(started.ActivityStartedV1?.activity_type).toBe("model");
+			// write-ahead: activity_started precedes its paired activity_completed
+			const startedIdx = rows.findIndex((r) => r.kind === "activity_started");
+			const completedIdx = rows.findIndex(
+				(r) => r.kind === "activity_completed",
+			);
+			expect(startedIdx).toBeLessThan(completedIdx);
 			const checkpointBoundaries = rows
 				.filter((row) => row.kind === "git_checkpoint")
 				.map(
