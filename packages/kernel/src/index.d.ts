@@ -137,6 +137,10 @@ export type {
 	BuildplaneStoragePort,
 	BuildplaneWorkspacePort,
 	CreateRunOptions,
+	LedgerActivityCompleteInput,
+	LedgerActivityPort,
+	LedgerActivityStartInput,
+	LedgerActivityType,
 	StoredLearning,
 } from "./ports.ts";
 export type { OutcomeRoutingConfig } from "./routing-producer.ts";

@@ -165,6 +165,34 @@ export interface BuildplaneStoragePort {
 	}): readonly RunOutcome[];
 }
 
+export type LedgerActivityType = "model" | "tool" | "command";
+
+export interface LedgerActivityStartInput {
+	readonly runId: string;
+	readonly activityId: string;
+	readonly activityType: LedgerActivityType;
+	/** Deterministic activity input; the impl digests it into ActivityStartedV1.input_digest. */
+	readonly input: unknown;
+}
+
+export interface LedgerActivityCompleteInput {
+	readonly runId: string;
+	readonly activityId: string;
+	/** Recorded activity result; the impl digests it into result_digest and stores it inline. */
+	readonly result: unknown;
+}
+
+/**
+ * Kernel-facing seam for emitting signed activity bracket events. The concrete
+ * impl (CLI layer) wraps a signed ledger TapeEmitter. `activityStarted` MUST
+ * resolve only once the event is durably on the tape (write-ahead), so the
+ * orchestrator can `await` it before invoking the activity.
+ */
+export interface LedgerActivityPort {
+	activityStarted(input: LedgerActivityStartInput): Promise<void>;
+	activityCompleted(input: LedgerActivityCompleteInput): Promise<void>;
+}
+
 export interface BuildplaneRuntimePort {
 	executePacket(packet: UnitPacket, projectRoot: string): ExecutionReceipt;
 	executePacketAsync?(

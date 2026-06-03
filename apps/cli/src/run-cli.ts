@@ -11,11 +11,15 @@ import {
 	statSync,
 	writeFileSync,
 } from "node:fs";
-import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import { homedir } from "node:os";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { Readable, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { createToolRegistry } from "@buildplane/adapters-tools";
-import type { BuildplaneStoragePort } from "@buildplane/kernel";
+import type {
+	BuildplaneStoragePort,
+	LedgerActivityPort,
+} from "@buildplane/kernel";
 import {
 	createTapeEmitter,
 	type LedgerFailure,
@@ -50,6 +54,10 @@ import {
 	formatWorkspaceCleanupResult,
 	formatWorkspaceList,
 } from "./formatters.js";
+import {
+	createDeferredLedgerActivityPort,
+	createLedgerActivityPort,
+} from "./ledger-activity-port.js";
 import { runGitCheckpoint } from "./ledger-git-checkpoint.js";
 import { wrapToolRegistryForLedger } from "./ledger-tool-wrapper.js";
 import type {
@@ -1043,6 +1051,7 @@ interface CliOrchestratorBundle {
 
 async function loadCliOrchestrator(
 	projectRoot: string,
+	opts?: { readonly ledgerActivityPort?: LedgerActivityPort },
 ): Promise<CliOrchestratorBundle> {
 	const kernel = (await cliImport("@buildplane/kernel")) as unknown as {
 		createBuildplaneOrchestrator: (options: {
@@ -1061,6 +1070,7 @@ async function loadCliOrchestrator(
 			admissionStore?: RunAdmissionStoreLike;
 			eventBus?: unknown;
 			memoryPort?: unknown;
+			ledgerActivityPort?: unknown;
 		}) => BuildplaneCliOrchestrator;
 		createEventBus: () => {
 			subscribe: (listener: (event: unknown) => void) => () => void;
@@ -1391,6 +1401,7 @@ async function loadCliOrchestrator(
 		admissionStore: createCliRunAdmissionStore(projectRoot),
 		eventBus,
 		memoryPort: orchestratorMemoryPortRef, // READ-WRITE port for post-run writes
+		ledgerActivityPort: opts?.ledgerActivityPort,
 	});
 
 	return {
@@ -3317,6 +3328,39 @@ function spawnLedgerSubprocess(
 const PLANFORGE_KERNEL_SIGNING_KEY_ID = "kernel-main";
 
 /**
+ * Resolve the per-machine kernel signing-key path the native `ledger serve --sign`
+ * subprocess reads. Honors `HOME` (then `USERPROFILE`, then `os.homedir()`) so it
+ * matches the test harness's temp-HOME injection and the Rust key resolver.
+ */
+function kernelSigningKeyPath(): string {
+	const home = process.env.HOME ?? process.env.USERPROFILE ?? homedir() ?? "";
+	return join(
+		home,
+		".buildplane",
+		"keys",
+		"kernel",
+		`${PLANFORGE_KERNEL_SIGNING_KEY_ID}.ed25519`,
+	);
+}
+
+/**
+ * Fail-fast precondition for any signed-tape path (run / dispatch). When the
+ * kernel signing key is absent, a `ledger serve --sign` subprocess would fail
+ * opaquely mid-handshake; throw an actionable error here instead. We never
+ * auto-generate signing-key material (operator decision, M2-S5 flag #2).
+ */
+function assertKernelSigningKey(): void {
+	const keyPath = kernelSigningKeyPath();
+	if (!existsSync(keyPath)) {
+		throw new Error(
+			`signed ledger requires a kernel signing key at ${keyPath}. ` +
+				'Provision a kernel ed25519 key (actor "kernel", key-id "kernel-main") before running a signed run/dispatch. ' +
+				"Buildplane does not auto-generate signing-key material.",
+		);
+	}
+}
+
+/**
  * Deterministic plan-scoped run id for a PlanForge admission, derived from the
  * plan's idempotency key so re-admitting the same plan resolves to the same run
  * — the idempotency check (and, later, dispatch) finds the admission by run id.
@@ -3543,22 +3587,62 @@ async function runPlanForgeDispatchCommand(
 	const { parseUnitPacket } = (await cliImport("@buildplane/kernel")) as {
 		parseUnitPacket: (input: string) => unknown;
 	};
-	const { orchestrator, eventBus: cliEventBus } =
-		await loadCliOrchestrator(workspace);
+
+	// Activity bracketing rides a kernel-signed tape (D2). Fail fast if the kernel
+	// key is missing rather than letting the signed subprocess die opaquely.
+	assertKernelSigningKey();
+	const binary = resolveLedgerBinary(cwd);
+	const ledgerChild = spawnLedgerSubprocess(binary, runId, workspace, {
+		sign: true,
+		signingKeyId: PLANFORGE_KERNEL_SIGNING_KEY_ID,
+	});
+	let emitter: TapeEmitter;
+	try {
+		emitter = await createTapeEmitter({
+			childStdin: ledgerChild.stdin,
+			childStderr: ledgerChild.stderr,
+			childExit: ledgerChild.exit,
+			workspacePath: workspace,
+			runId,
+		});
+	} catch (err) {
+		if (ledgerChild.child.exitCode === null) {
+			ledgerChild.child.kill("SIGTERM");
+		}
+		throw new Error(
+			`PlanForge dispatch: signed ledger handshake failed: ${String(err)}`,
+		);
+	}
 
 	const runs: Array<{ task: string; run_id: string; status: string }> = [];
-	for (const packet of packets) {
-		const result = await orchestrator.runPacketAsync(
-			parseUnitPacket(JSON.stringify(packet)),
-			cliEventBus,
+	try {
+		const ledgerActivityPort = createLedgerActivityPort(emitter);
+		const { orchestrator, eventBus: cliEventBus } = await loadCliOrchestrator(
+			workspace,
+			{ ledgerActivityPort },
 		);
-		runs.push({
-			task: packet.unit.id,
-			run_id: result.run.id,
-			status: result.run.status,
-		});
-		if (result.run.status !== "passed") {
-			break; // PF2 dependsOn PF1: stop the chain on first failure.
+
+		for (const packet of packets) {
+			const result = await orchestrator.runPacketAsync(
+				parseUnitPacket(JSON.stringify(packet)),
+				cliEventBus,
+			);
+			runs.push({
+				task: packet.unit.id,
+				run_id: result.run.id,
+				status: result.run.status,
+			});
+			if (result.run.status !== "passed") {
+				break; // PF2 dependsOn PF1: stop the chain on first failure.
+			}
+		}
+	} finally {
+		try {
+			await emitter.close(); // flushes + closes the signed subprocess
+		} catch {
+			if (ledgerChild.child.exitCode === null) {
+				ledgerChild.child.kill("SIGTERM");
+			}
 		}
 	}
 
@@ -4634,6 +4718,23 @@ export async function runCli(
 			);
 		}
 
+		// Deferred activity-bracket port (M2-S5): the run orchestrator is constructed
+		// here, BEFORE the run-block signed ledger emitter is spawned (~200 lines down,
+		// gated on `useLedger`). The port reads the emitter lazily at activity time, by
+		// which point the run block has bound it (or left it null for a non-ledger run,
+		// in which case bracketing is skipped — byte-unchanged).
+		//
+		// SCOPE NOTE: the default strategy path (`!useRaw`) returns before the emitter
+		// bind, and is unledgered by construction (pre-existing — `events.db` is empty
+		// without `--raw`), so its activities are intentionally NOT bracketed: the
+		// deferred port no-ops there. S5 bracketing covers the `--raw` run path +
+		// `planforge dispatch`. Bracketing the strategy/default run path would require
+		// giving it a signed ledger subprocess (a tracked follow-up; it also gates
+		// whether default runs are crash-recoverable for the M6 demo).
+		let runActivityEmitter: TapeEmitter | null = null;
+		const runLedgerActivityPort = createDeferredLedgerActivityPort(
+			() => runActivityEmitter,
+		);
 		const bundle: CliOrchestratorBundle = deps?.createOrchestrator
 			? {
 					orchestrator: deps.createOrchestrator(),
@@ -4645,7 +4746,9 @@ export async function runCli(
 						},
 					},
 				}
-			: await loadCliOrchestrator(cwd);
+			: await loadCliOrchestrator(cwd, {
+					ledgerActivityPort: runLedgerActivityPort,
+				});
 		const {
 			orchestrator,
 			eventBus: cliEventBus,
@@ -4861,11 +4964,16 @@ export async function runCli(
 
 				if (useLedger) {
 					try {
+						// Activity bracketing rides a kernel-signed tape (D2). Fail fast if
+						// the kernel key is missing rather than letting the signed subprocess
+						// die opaquely.
+						assertKernelSigningKey();
 						const binary = resolveLedgerBinary(cwd);
 						ledgerChild = spawnLedgerSubprocess(
 							binary,
 							ledgerRunId,
 							resolvedCwd,
+							{ sign: true, signingKeyId: PLANFORGE_KERNEL_SIGNING_KEY_ID },
 						);
 						ledgerEmitter = await createTapeEmitter({
 							childStdin: ledgerChild.stdin,
@@ -4874,6 +4982,9 @@ export async function runCli(
 							workspacePath: resolvedCwd,
 							runId: ledgerRunId,
 						});
+						// Bind the signed emitter so the deferred activity-bracket port
+						// (passed into the orchestrator above) emits onto this tape.
+						runActivityEmitter = ledgerEmitter;
 						ledgerEmitter.onFailure((failure: LedgerFailure) => {
 							// Best-effort: record that the ledger itself failed into the existing
 							// state.db event store so there's a durable trace.
