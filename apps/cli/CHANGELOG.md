@@ -1,5 +1,31 @@
 # buildplane
 
+## 0.8.0
+
+### Minor Changes
+
+- 6156fbf: M2-S5: activity bracketing — `executeOnce` emits a write-ahead, kernel-signed
+  `activity_started` (durably flushed before invoke) and an `activity_completed`
+  (recorded result + canonical `result_digest`) via a new kernel `LedgerActivityPort`,
+  for both model and command activities. The CLI supplies the concrete signed-emitter
+  adapter (`createLedgerActivityPort` / `createDeferredLedgerActivityPort`) and wires
+  it into both `planforge dispatch` and `buildplane run` on a kernel-signed tape; a
+  fail-fast `assertKernelSigningKey()` precondition guards every signed-ledger path.
+
+### Patch Changes
+
+- Updated dependencies [6156fbf]
+  - @buildplane/kernel@0.4.0
+  - @buildplane/adapters-codex@0.1.3
+  - @buildplane/adapters-git@0.2.1
+  - @buildplane/adapters-honcho@0.1.3
+  - @buildplane/adapters-models@0.1.3
+  - @buildplane/adapters-tools@0.1.3
+  - @buildplane/policy@0.1.3
+  - @buildplane/runtime@0.1.3
+  - @buildplane/storage@0.2.2
+  - @buildplane/ui-tui@0.1.3
+
 ## 0.7.0
 
 ### Minor Changes
