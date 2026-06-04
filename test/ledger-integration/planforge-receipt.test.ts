@@ -23,7 +23,10 @@ const GOAL_INPUT = resolve(
 	LEDGER_TEST_REPO_ROOT,
 	"apps/cli/test/fixtures/planforge/goal-input.md",
 );
-const VERIFIER = resolve(LEDGER_TEST_REPO_ROOT, "scripts/verify-signed-tape.mjs");
+const VERIFIER = resolve(
+	LEDGER_TEST_REPO_ROOT,
+	"scripts/verify-signed-tape.mjs",
+);
 
 interface DispatchEnv {
 	dir: string;
@@ -224,7 +227,8 @@ describe("planforge dispatch — signed plan_receipt + live-tape export end-to-e
 		expect(admitted).toHaveLength(1);
 		expect(receipts).toHaveLength(1);
 		const receipt = receipts[0];
-		const receiptPayload = JSON.parse(receipt.payload).PlanReceiptRecordedV1 as {
+		const receiptPayload = JSON.parse(receipt.payload)
+			.PlanReceiptRecordedV1 as {
 			admission_event_id: string;
 			outcome: string;
 			result_digest: string;
@@ -289,7 +293,9 @@ describe("planforge dispatch — signed plan_receipt + live-tape export end-to-e
 			"plan_receipt",
 		]) {
 			const matched = report.events.filter((e) => e.kind === kind);
-			expect(matched.length, `expected at least one ${kind}`).toBeGreaterThan(0);
+			expect(matched.length, `expected at least one ${kind}`).toBeGreaterThan(
+				0,
+			);
 			for (const e of matched) {
 				expect(e.status, `${kind} should verify`).toBe("verified");
 			}

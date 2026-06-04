@@ -68,9 +68,9 @@ describe("buildPlanReceiptPayload", () => {
 	});
 
 	it("accepts an empty side_effects list (honest, not a stub)", () => {
-		expect(buildPlanReceiptPayload(baseInput({ sideEffects: [] })).side_effects).toEqual(
-			[],
-		);
+		expect(
+			buildPlanReceiptPayload(baseInput({ sideEffects: [] })).side_effects,
+		).toEqual([]);
 	});
 
 	it("produces different result_digests for different results", () => {
