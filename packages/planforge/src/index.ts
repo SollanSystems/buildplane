@@ -20,6 +20,12 @@ export {
 	dispatchAdmittedPlan,
 } from "./dispatch.js";
 export { preview } from "./preview.js";
+export {
+	type BuildPlanReceiptInput,
+	buildPlanReceiptPayload,
+	type PlanReceiptOutcome,
+	type PlanReceiptPayload,
+} from "./receipt.js";
 export * from "./schema.js";
 export { type PlanForgeValidateResult, validate } from "./validate.js";
 

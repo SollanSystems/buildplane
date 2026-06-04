@@ -59,6 +59,7 @@ import {
 	createLedgerActivityPort,
 } from "./ledger-activity-port.js";
 import { runGitCheckpoint } from "./ledger-git-checkpoint.js";
+import { createLedgerReceiptPort } from "./ledger-receipt-port.js";
 import { wrapToolRegistryForLedger } from "./ledger-tool-wrapper.js";
 import type {
 	PacketMemoryEnrichmentResult,
@@ -66,9 +67,11 @@ import type {
 } from "./packet-enrichment.js";
 import {
 	buildPlanAdmittedPayload,
+	buildPlanReceiptPayload,
 	createPlanForgeDryRunPlan,
 	dispatchAdmittedPlan,
 	PLANFORGE_VALIDATION_STATUS_PASS,
+	type PlanForgePlan,
 } from "./planforge-schema.js";
 import {
 	defaultPrCheckRequest,
@@ -680,6 +683,7 @@ function formatTopLevelHelp(): string[] {
 		"    pr-comment dry-run --run <id> --repo <owner/repo> --pr <n> --sha <head> [--json]  Preview PR evidence comment",
 		"    replay <id> [--json]   Re-execute the stored packet snapshot",
 		"    ledger replay --run-id <id> --workspace <path>  Read-only tape replay",
+		"    ledger export-signed-tape --run-id <id> --workspace <path> --out <dir>  Export buildplane.signed-tape.v1",
 		"    fork <id> --at <event> --packet <file>          Recover from a unit boundary",
 		"    planforge dry-run --input <file> --json          Emit dry-run plan artifact",
 		"",
@@ -3545,6 +3549,21 @@ async function runPlanForgeAdmitCommand(
 const DEFAULT_DISPATCH_POLICY_PROFILE = "default";
 
 /**
+ * Declared side-effect scopes for the plan receipt (M2-S6, D4): the union of every
+ * task's `allowedSideEffects`, deduped and stably ordered. Declared scopes are the
+ * deterministic S6 grain; reconciling observed `workspace_write` events is M4 work.
+ */
+function collectDeclaredSideEffects(plan: PlanForgePlan): string[] {
+	const scopes = new Set<string>();
+	for (const task of plan.tasks) {
+		for (const scope of task.allowedSideEffects) {
+			scopes.add(scope);
+		}
+	}
+	return [...scopes].sort();
+}
+
+/**
  * `buildplane planforge dispatch --input <file>`: dispatch an operator-admitted
  * plan as one run per PlanForgeTask. Fails closed (exit 1, `plan-not-admitted`)
  * when no signed plan_admitted exists on the tape — a fast CLI-side pre-check; the
@@ -3615,6 +3634,7 @@ async function runPlanForgeDispatchCommand(
 	}
 
 	const runs: Array<{ task: string; run_id: string; status: string }> = [];
+	let allPassed = false;
 	try {
 		const ledgerActivityPort = createLedgerActivityPort(emitter);
 		const { orchestrator, eventBus: cliEventBus } = await loadCliOrchestrator(
@@ -3636,6 +3656,30 @@ async function runPlanForgeDispatchCommand(
 				break; // PF2 dependsOn PF1: stop the chain on first failure.
 			}
 		}
+
+		allPassed =
+			runs.length === packets.length &&
+			runs.every((r) => r.status === "passed");
+
+		// Terminal plan receipt (M2-S6): one signed plan_receipt per admitted plan,
+		// chaining to the plan_admitted event, emitted after all activities and made
+		// durable (flush) before the signed emitter closes in the finally.
+		const result = {
+			status: allPassed ? "dispatched" : "failed",
+			plan_id: plan.id,
+			admitted_event_id: String(admittedEventId),
+			runs,
+		};
+		await createLedgerReceiptPort(emitter).emitPlanReceipt(
+			buildPlanReceiptPayload({
+				planId: plan.id,
+				admissionEventId: String(admittedEventId),
+				outcome: allPassed ? "completed" : "failed",
+				sideEffects: collectDeclaredSideEffects(plan),
+				result,
+				decidedAt: new Date().toISOString(),
+			}),
+		);
 	} finally {
 		try {
 			await emitter.close(); // flushes + closes the signed subprocess
@@ -3646,8 +3690,6 @@ async function runPlanForgeDispatchCommand(
 		}
 	}
 
-	const allPassed =
-		runs.length === packets.length && runs.every((r) => r.status === "passed");
 	stdout(
 		jsonOut
 			? formatJson({

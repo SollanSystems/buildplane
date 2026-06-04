@@ -69,4 +69,22 @@ Reference fixtures live under `test/fixtures/signed-tape/` and are regenerated b
 
 The `trusted_keys` are read from the tape itself, so a passing result proves the tape is **internally consistent** — every event is signed by, and the checkpoint roots agree with, the keys the tape carries. It does **not** establish that those keys are authentic. Treat a pass as integrity/consistency unless you independently trust the embedded keys via an out-of-band channel; operator-supplied / pinned key provenance is deferred work.
 
-> Not yet implemented: exporting a live `.buildplane/ledger/events.db` into the `buildplane.signed-tape.v1` format (`buildplane ledger export-signed-tape`). Until that lands, the verifier runs against exported/fixture tapes only.
+## Exporting a live tape
+
+`buildplane ledger export-signed-tape` serializes a run from a live
+`.buildplane/ledger/events.db` into the `buildplane.signed-tape.v1` format the
+verifier consumes:
+
+```bash
+buildplane ledger export-signed-tape --run-id <id> --workspace <path> --out <dir>
+node scripts/verify-signed-tape.mjs --fixture <dir>
+```
+
+It is read-only — it opens `events.db`, emits each event's exact signed canonical
+bytes alongside its detached signature, and materializes `trusted_keys` by
+deriving each signer's public key from the local keyring
+(`~/.buildplane/keys/<actor>/<key-id>.ed25519`). The result is written to
+`<dir>/tape.json`. Because the export carries the bytes that were signed (not a
+re-serialization), the verifier's per-event hash check holds, and a full
+PlanForge admission cycle (`plan_admitted → activity_started/completed →
+plan_receipt`) round-trips through the external verifier.

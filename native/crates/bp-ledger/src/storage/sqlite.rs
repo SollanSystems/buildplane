@@ -634,6 +634,27 @@ impl SqliteStore {
             .map_err(LedgerError::from)
     }
 
+    /// Read every event of `run_id` in tape order (`id ASC`), each paired with
+    /// its detached signature if present. Powers the signed-tape export, which
+    /// needs the reconstructed event (to recompute the exact signed canonical
+    /// bytes) alongside its stored signature.
+    pub fn signed_events_for_run(
+        &self,
+        run_id: &str,
+    ) -> Result<Vec<(Event, Option<EventSignatureV1>)>> {
+        let rows = self.events_for_run(run_id)?;
+        rows.into_iter()
+            .map(|row| {
+                let event = row.to_event()?;
+                let signature = match self.signature_for_event(&row.id)? {
+                    Some(sig_row) => Some(sig_row.to_event_signature()?),
+                    None => None,
+                };
+                Ok((event, signature))
+            })
+            .collect()
+    }
+
     /// Count events in the store (for test convenience).
     pub fn event_count(&self) -> Result<u64> {
         let n: i64 = self
