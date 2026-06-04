@@ -683,6 +683,7 @@ function formatTopLevelHelp(): string[] {
 		"    pr-comment dry-run --run <id> --repo <owner/repo> --pr <n> --sha <head> [--json]  Preview PR evidence comment",
 		"    replay <id> [--json]   Re-execute the stored packet snapshot",
 		"    ledger replay --run-id <id> --workspace <path>  Read-only tape replay",
+		"    ledger export-signed-tape --run-id <id> --workspace <path> --out <dir>  Export buildplane.signed-tape.v1",
 		"    fork <id> --at <event> --packet <file>          Recover from a unit boundary",
 		"    planforge dry-run --input <file> --json          Emit dry-run plan artifact",
 		"",

@@ -17,6 +17,7 @@ const DEFAULT_KERNEL_KEY_ID: &str = "kernel-main";
 pub enum LedgerCommand {
     Serve(ServeArgs),
     Replay(ReplayArgs),
+    ExportSignedTape(ExportSignedTapeArgs),
     Help,
 }
 
@@ -46,6 +47,14 @@ pub enum ReplayFormat {
     Human,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExportSignedTapeArgs {
+    pub run_id: String,
+    pub workspace: PathBuf,
+    /// Directory the `tape.json` export is written into.
+    pub out: PathBuf,
+}
+
 /// Parse `ledger <subcommand> [args...]` into a LedgerCommand.
 pub fn parse_ledger_command(args: &[String]) -> Result<LedgerCommand, String> {
     match args.first().map(String::as_str) {
@@ -60,6 +69,12 @@ pub fn parse_ledger_command(args: &[String]) -> Result<LedgerCommand, String> {
                 return Ok(LedgerCommand::Help);
             }
             parse_replay(&args[1..]).map(LedgerCommand::Replay)
+        }
+        Some("export-signed-tape") => {
+            if args.iter().any(|arg| matches!(arg.as_str(), "--help" | "-h" | "help")) {
+                return Ok(LedgerCommand::Help);
+            }
+            parse_export_signed_tape(&args[1..]).map(LedgerCommand::ExportSignedTape)
         }
         Some("--help" | "-h" | "help") | None => Ok(LedgerCommand::Help),
         Some(other) => Err(format!("unknown ledger subcommand: {other}")),
@@ -179,6 +194,45 @@ fn parse_replay(args: &[String]) -> Result<ReplayArgs, String> {
     })
 }
 
+fn parse_export_signed_tape(args: &[String]) -> Result<ExportSignedTapeArgs, String> {
+    let mut run_id: Option<String> = None;
+    let mut workspace: Option<PathBuf> = None;
+    let mut out: Option<PathBuf> = None;
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--run-id" => {
+                i += 1;
+                run_id = Some(args.get(i).ok_or("--run-id requires a value")?.clone());
+            }
+            "--workspace" => {
+                i += 1;
+                workspace =
+                    Some(PathBuf::from(args.get(i).ok_or("--workspace requires a value")?));
+            }
+            "--out" => {
+                i += 1;
+                out = Some(PathBuf::from(args.get(i).ok_or("--out requires a value")?));
+            }
+            other => return Err(format!("unknown flag: {other}")),
+        }
+        i += 1;
+    }
+    let workspace = workspace.ok_or("missing --workspace")?;
+    if !workspace.is_absolute() {
+        return Err(format!(
+            "--workspace must be an absolute path; got: {}",
+            workspace.display()
+        ));
+    }
+    Ok(ExportSignedTapeArgs {
+        run_id: run_id.ok_or("missing --run-id")?,
+        workspace,
+        out: out.ok_or("missing --out")?,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -294,6 +348,71 @@ mod tests {
         ];
         let err = parse_replay(&args).unwrap_err();
         assert!(err.contains("xml"), "expected format name in error: {err}");
+    }
+
+    #[test]
+    fn parse_export_signed_tape_requires_all_flags() {
+        let args = vec![
+            "--run-id".to_string(),
+            "run-1".to_string(),
+            "--workspace".to_string(),
+            "/tmp/ws".to_string(),
+            "--out".to_string(),
+            "/tmp/out".to_string(),
+        ];
+        let out = parse_export_signed_tape(&args).unwrap();
+        assert_eq!(out.run_id, "run-1");
+        assert_eq!(out.workspace.to_str().unwrap(), "/tmp/ws");
+        assert_eq!(out.out.to_str().unwrap(), "/tmp/out");
+    }
+
+    #[test]
+    fn parse_export_signed_tape_rejects_relative_workspace() {
+        let args = vec![
+            "--run-id".to_string(),
+            "run-1".to_string(),
+            "--workspace".to_string(),
+            "./ws".to_string(),
+            "--out".to_string(),
+            "/tmp/out".to_string(),
+        ];
+        let err = parse_export_signed_tape(&args).unwrap_err();
+        assert!(err.contains("absolute"), "expected 'absolute' in error: {err}");
+    }
+
+    #[test]
+    fn parse_export_signed_tape_requires_out() {
+        let args = vec![
+            "--run-id".to_string(),
+            "run-1".to_string(),
+            "--workspace".to_string(),
+            "/tmp/ws".to_string(),
+        ];
+        let err = parse_export_signed_tape(&args).unwrap_err();
+        assert!(err.contains("out"), "expected missing --out error: {err}");
+    }
+
+    #[test]
+    fn parse_ledger_command_routes_export_signed_tape() {
+        let args = vec![
+            "export-signed-tape".to_string(),
+            "--run-id".to_string(),
+            "r".to_string(),
+            "--workspace".to_string(),
+            "/tmp/ws".to_string(),
+            "--out".to_string(),
+            "/tmp/out".to_string(),
+        ];
+        assert!(matches!(
+            parse_ledger_command(&args).unwrap(),
+            LedgerCommand::ExportSignedTape(_)
+        ));
+    }
+
+    #[test]
+    fn parse_ledger_command_routes_export_help_to_help() {
+        let args = vec!["export-signed-tape".to_string(), "--help".to_string()];
+        assert_eq!(parse_ledger_command(&args).unwrap(), LedgerCommand::Help);
     }
 
     #[test]
@@ -424,6 +543,34 @@ pub fn run_replay(args: ReplayArgs) -> Result<(), String> {
     Ok(())
 }
 
+/// Execute the `ledger export-signed-tape` command.
+///
+/// Read-only: opens the run's `events.db`, serializes its signed tape into the
+/// `buildplane.signed-tape.v1` envelope, and writes `<out>/tape.json`. The
+/// external verifier (`scripts/verify-signed-tape.mjs`) validates the result.
+pub fn run_export_signed_tape(args: ExportSignedTapeArgs) -> Result<(), String> {
+    let db_path = args
+        .workspace
+        .join(".buildplane")
+        .join("ledger")
+        .join("events.db");
+    let store = SqliteStore::open(&db_path).map_err(|e| format!("opening events.db: {e}"))?;
+    let keyring_root = bp_ledger::keyring::default_keyring_root()
+        .map_err(|e| format!("resolving keyring root: {e}"))?;
+    let tape = bp_ledger::tape_export::export_signed_tape(&store, &args.run_id, &keyring_root)
+        .map_err(|e| format!("exporting signed tape: {e}"))?;
+
+    std::fs::create_dir_all(&args.out).map_err(|e| format!("creating out dir: {e}"))?;
+    let out_path = args.out.join("tape.json");
+    let mut content =
+        serde_json::to_string_pretty(&tape).map_err(|e| format!("serializing tape: {e}"))?;
+    content.push('\n');
+    std::fs::write(&out_path, content)
+        .map_err(|e| format!("writing {}: {e}", out_path.display()))?;
+    println!("wrote signed tape to {}", out_path.display());
+    Ok(())
+}
+
 fn emit_step(step: &bp_replay::engine::ReplayStep, format: ReplayFormat) -> Result<(), String> {
     match format {
         ReplayFormat::Json => {
@@ -455,8 +602,9 @@ pub fn usage_text() -> String {
     r#"usage: buildplane-native ledger <subcommand>
 
 subcommands:
-  serve   Run a ledger ingest loop against stdin (JSONL events).
-  replay  Replay a run's events with optional fast-forward.
+  serve               Run a ledger ingest loop against stdin (JSONL events).
+  replay              Replay a run's events with optional fast-forward.
+  export-signed-tape  Export a run's signed tape (buildplane.signed-tape.v1).
 
 flags for `serve`:
   --run-id <id>             run identifier (required)
@@ -471,6 +619,11 @@ flags for `replay`:
   --format <json|human>     output format (default: json)
   --limit <n>               stop after n events
   --at <event-id>           fast-forward to event-id, emit state there, exit
+
+flags for `export-signed-tape`:
+  --run-id <id>             run identifier (required)
+  --workspace <path>        absolute path to the workspace root (required)
+  --out <dir>               directory to write tape.json into (required)
 "#
     .to_string()
 }
