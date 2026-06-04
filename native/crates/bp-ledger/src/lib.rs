@@ -10,6 +10,7 @@ pub mod payload;
 pub mod serve;
 pub mod signing;
 pub mod storage;
+pub mod tape_export;
 pub mod types;
 
 pub use error::{LedgerError, Result};
