@@ -1,6 +1,6 @@
 ---
 "@buildplane/planforge": minor
-"@buildplane/cli": minor
+"buildplane": minor
 ---
 
 M2-S6: receipt stage — a completed `planforge dispatch` emits one kernel-signed
