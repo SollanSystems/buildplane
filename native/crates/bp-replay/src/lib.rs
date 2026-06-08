@@ -6,4 +6,7 @@ pub mod state;
 pub mod transitions;
 
 pub use engine::{ReplayEngine, ReplayStep};
-pub use state::{CheckpointRef, FileObservation, ReplayIssue, ReplayState};
+pub use state::{
+    CheckpointRef, FileObservation, PlanAdmissionReplayState, PlanReceiptReplayState,
+    RecordedActivityState, ReplayIssue, ReplayState,
+};

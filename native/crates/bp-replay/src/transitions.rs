@@ -1,9 +1,14 @@
 //! Per-EventKind state transition functions.
 
-use crate::state::{CheckpointRef, FileObservation, ReplayIssue, ReplayState};
+use crate::state::{
+    CheckpointRef, FileObservation, PlanAdmissionReplayState, PlanReceiptReplayState,
+    RecordedActivityState, ReplayIssue, ReplayState,
+};
 use bp_ledger::event::Event;
 use bp_ledger::payload::{
+    activity::{ActivityCompletedV1, ActivityStartedV1, ActivityType},
     git_checkpoint::{CheckpointBoundary, GitCheckpointV1, GitStatus},
+    plan_lifecycle::{PlanAdmittedV1, PlanReceiptOutcome, PlanReceiptRecordedV1},
     run_lifecycle::{RunCompletedV1, RunFailedV1, RunStartedV1},
     tool_io::{ToolRequestStoredV1, ToolResultV1},
     unit_lifecycle::{UnitCancelledV1, UnitCompletedV1, UnitFailedV1, UnitStartedV1},
@@ -21,14 +26,12 @@ pub fn apply(state: &mut ReplayState, event: &Event) {
         Payload::UnitFailedV1(p) => apply_unit_failed(state, event, p),
         Payload::UnitCancelledV1(p) => apply_unit_cancelled(state, event, p),
         Payload::GitCheckpointV1(p) => apply_git_checkpoint(state, event, p),
-        Payload::RunAdmissionRecordedV1(_)
-        // Plan lifecycle + activity bracket events are vocabulary-only in M2-S2;
-        // replay wiring lands in later slices (S7).
-        | Payload::PlanAdmittedV1(_)
-        | Payload::PlanReceiptRecordedV1(_)
-        | Payload::ActivityStartedV1(_)
-        | Payload::ActivityCompletedV1(_)
-        | Payload::ModelRequestV1(_)
+        Payload::RunAdmissionRecordedV1(_) => {}
+        Payload::PlanAdmittedV1(p) => apply_plan_admitted(state, event, p),
+        Payload::PlanReceiptRecordedV1(p) => apply_plan_receipt(state, event, p),
+        Payload::ActivityStartedV1(p) => apply_activity_started(state, event, p),
+        Payload::ActivityCompletedV1(p) => apply_activity_completed(state, event, p),
+        Payload::ModelRequestV1(_)
         | Payload::ModelResponseV1(_)
         // Tape-root checkpoints (M1-S6) are tape-integrity metadata, not
         // replayable state transitions — no-op during replay.
@@ -96,6 +99,80 @@ fn apply_git_checkpoint(state: &mut ReplayState, event: &Event, p: &GitCheckpoin
                 error: error.clone(),
             });
         }
+    }
+}
+
+fn apply_plan_admitted(state: &mut ReplayState, event: &Event, p: &PlanAdmittedV1) {
+    state.plan_cycle_phase = "plan_admitted".to_string();
+    state.plan_admission = Some(PlanAdmissionReplayState {
+        event_id: event.id,
+        plan_id: p.plan_id.clone(),
+        plan_digest: p.plan_digest.clone(),
+        input_digest: p.input_digest.clone(),
+        trusted_base: p.trusted_base.clone(),
+        decided_by: p.decided_by.clone(),
+        decided_at: p.decided_at.clone(),
+        idempotency_key: p.idempotency_key.clone(),
+        authorized_next_step: p.authorized_next_step.clone(),
+    });
+}
+
+fn apply_activity_started(state: &mut ReplayState, event: &Event, p: &ActivityStartedV1) {
+    state.plan_cycle_phase = "activity_started".to_string();
+    let entry = state
+        .activities
+        .entry(p.activity_id.clone())
+        .or_insert_with(|| RecordedActivityState {
+            activity_id: p.activity_id.clone(),
+            ..RecordedActivityState::default()
+        });
+    entry.run_id = Some(p.run_id.to_string());
+    entry.activity_type = Some(activity_type_wire(p.activity_type).to_string());
+    entry.input_digest = Some(p.input_digest.clone());
+    entry.started_event_id = Some(event.id);
+}
+
+fn apply_activity_completed(state: &mut ReplayState, event: &Event, p: &ActivityCompletedV1) {
+    state.plan_cycle_phase = "activity_completed".to_string();
+    let entry = state
+        .activities
+        .entry(p.activity_id.clone())
+        .or_insert_with(|| RecordedActivityState {
+            activity_id: p.activity_id.clone(),
+            ..RecordedActivityState::default()
+        });
+    entry.run_id = Some(p.run_id.to_string());
+    entry.completed_event_id = Some(event.id);
+    entry.result_digest = Some(p.result_digest.clone());
+    entry.result = Some(p.result.clone());
+}
+
+fn apply_plan_receipt(state: &mut ReplayState, event: &Event, p: &PlanReceiptRecordedV1) {
+    state.plan_cycle_phase = "plan_receipt".to_string();
+    state.plan_receipt = Some(PlanReceiptReplayState {
+        event_id: event.id,
+        plan_id: p.plan_id.clone(),
+        admission_event_id: p.admission_event_id,
+        outcome: plan_receipt_outcome_wire(p.outcome).to_string(),
+        side_effects: p.side_effects.clone(),
+        result_digest: p.result_digest.clone(),
+        decided_at: p.decided_at.clone(),
+    });
+}
+
+fn activity_type_wire(activity_type: ActivityType) -> &'static str {
+    match activity_type {
+        ActivityType::Model => "model",
+        ActivityType::Tool => "tool",
+        ActivityType::Command => "command",
+    }
+}
+
+fn plan_receipt_outcome_wire(outcome: PlanReceiptOutcome) -> &'static str {
+    match outcome {
+        PlanReceiptOutcome::Completed => "completed",
+        PlanReceiptOutcome::Failed => "failed",
+        PlanReceiptOutcome::Aborted => "aborted",
     }
 }
 
