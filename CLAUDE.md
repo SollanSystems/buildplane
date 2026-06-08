@@ -14,13 +14,13 @@ The build is **trust-first sequenced**: the signed, append-only event tape (L0) 
 
 ## Current state & roadmap
 
-Milestone map (status as of 2026-05-31):
+Milestone map (status as of 2026-06-08):
 
 | Milestone | Scope | Status |
 |---|---|---|
 | **M0** | Foundations | ✅ complete |
 | **M1** | Signed Ed25519 per-event tape (S1–S7) + external verifier + GATE receipt | ✅ complete (`main` tip `8a98ea6`) |
-| **M2** | PlanForge admission cycle: `compile → validate → preview → admit → dispatch → execute → receipt` + Temporal-style crash recovery | 🔶 in progress |
+| **M2** | PlanForge admission cycle: `compile → validate → preview → admit → dispatch → execute → receipt` + Temporal-style crash recovery | 🔶 in progress — S1 through S7a merged; **S7b is next** |
 | **M3** | Capability broker (sealed capability bundles, per-tool-call capability validation) | planned |
 | **M4** | Acceptance contract (diff-scope + CI + lint gating on finalization) | planned |
 | **M5** | Web Mission Control (approval inbox, run inspector) | planned |
@@ -30,8 +30,14 @@ Milestone map (status as of 2026-05-31):
 
 - **S1 ✅ merged** (PR #161): `packages/planforge` extraction + runtime contract + canonical digest (with a one-time, documented golden-fixture digest update from the canonicalization change).
 - **S2 ✅ merged** (PR #163): four signed event kinds (`plan_admitted`, `plan_receipt`, `activity_started`, `activity_completed`). The Codex GH-agent commit also fixed a `bp-replay` exhaustive-match break (added no-op arms; real replay deferred to S7a).
-- **S3 is next** (admit stage): operator approval → signed `plan_admitted` via `buildplane planforge admit <plan> --approve`. Do **not** start S3 until both S1 and S2 are on `main` (both now are). Lock the cross-language digest contract first (see §"L0 trust surface").
-- S4 dispatch → S5 activity bracketing → S6 receipt + live-tape export → S7-HARNESS (crash-injection test infra, lands first, no prod code) → S7a (Rust `bp-replay` transitions) → S7b (kernel startup scan / resume / skip-reinvocation) → S8 M2-GATE.
+- **S3 ✅ merged** (PR #166): operator-approved `plan_admitted` via `buildplane planforge admit <plan> --approve`.
+- **S4 ✅ merged** (PR #168): admitted plans dispatch into signed-gated kernel runs.
+- **S5 ✅ merged** (PR #171): signed `activity_started` / `activity_completed` bracketing for PlanForge dispatch.
+- **S6 ✅ merged** (PR #173): signed `plan_receipt` plus live `ledger export-signed-tape`; post-merge receipt correction is in `docs/operations/2026-06-04-m2-s6-receipt-live-tape-export-slice-receipt.md`.
+- **S7-HARNESS ✅ merged** (PR #174): deterministic crash-injection harness and read-only durable tape probe; receipt in `docs/operations/2026-06-07-m2-s7-harness-crash-injection-receipt.md`. This is test infrastructure only — production kernel startup/resume remains S7b.
+- **S7a ✅ merged** (PR #177): Rust `bp-replay` PlanForge cycle transitions and recorded activity state; receipt in `docs/operations/2026-06-08-m2-s7a-replay-transitions-receipt.md`.
+- **S7b is next**: kernel startup scan / resume / skip-reinvocation. Before implementation, resolve whether the first shippable boundary is explicit-input PlanForge resume or full automatic startup scan with a durable plan-cycle snapshot.
+- **S8 planned**: M2-GATE vertical slice + gate receipt.
 
 **Parallel memory program (frozen):** Phase 1 (`buildplane@0.3.0`) + Phase 2 outcome memory (Track 1 gap-fixes + Track 2 `run_outcomes`) shipped to `main`. It is **hard-frozen at Phase 2 S5 until M2-GATE** — outcome routing is opt-in / default-OFF with no consumer. See §"Memory program status".
 
