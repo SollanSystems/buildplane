@@ -36,7 +36,7 @@ Milestone map (status as of 2026-06-08):
 - **S6 ✅ merged** (PR #173): signed `plan_receipt` plus live `ledger export-signed-tape`; post-merge receipt correction is in `docs/operations/2026-06-04-m2-s6-receipt-live-tape-export-slice-receipt.md`.
 - **S7-HARNESS ✅ merged** (PR #174): deterministic crash-injection harness and read-only durable tape probe; receipt in `docs/operations/2026-06-07-m2-s7-harness-crash-injection-receipt.md`. This is test infrastructure only — production kernel startup/resume remains S7b.
 - **S7a ✅ merged** (PR #177): Rust `bp-replay` PlanForge cycle transitions and recorded activity state; receipt in `docs/operations/2026-06-08-m2-s7a-replay-transitions-receipt.md`.
-- **S7b is next**: kernel startup scan / resume / skip-reinvocation. Before implementation, resolve whether the first shippable boundary is explicit-input PlanForge resume or full automatic startup scan with a durable plan-cycle snapshot.
+- **S7b 🔶 in progress** (branch `feat/m2-s7b-explicit-resume`): **phase 1** explicit-input `planforge resume` (CLI + ledger-integration tests). **Phase 2** still required: kernel orchestrator startup scan / automatic resume / S7-HARNESS kill-point replay per spec lines 273–291.
 - **S8 planned**: M2-GATE vertical slice + gate receipt.
 
 **Parallel memory program (frozen):** Phase 1 (`buildplane@0.3.0`) + Phase 2 outcome memory (Track 1 gap-fixes + Track 2 `run_outcomes`) shipped to `main`. It is **hard-frozen at Phase 2 S5 until M2-GATE** — outcome routing is opt-in / default-OFF with no consumer. See §"Memory program status".
