@@ -1,5 +1,11 @@
 # buildplane
 
+## 0.10.0
+
+### Minor Changes
+
+- 7ac334d: Add PlanForge explicit-input resume: verify signed `plan_admitted`, skip recorded activities on the tape, execute suffix tasks, emit missing `plan_receipt`.
+
 ## 0.9.0
 
 ### Minor Changes
