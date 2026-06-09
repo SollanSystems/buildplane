@@ -70,6 +70,7 @@ import {
 	buildPlanReceiptPayload,
 	createPlanForgeDryRunPlan,
 	dispatchAdmittedPlan,
+	PLANFORGE_AUTHORIZED_NEXT_STEP,
 	PLANFORGE_VALIDATION_STATUS_PASS,
 	type PlanForgePlan,
 } from "./planforge-schema.js";
@@ -776,6 +777,17 @@ function formatPlanForgeHelp(): string[] {
 		"  Options:",
 		"    --input <file>  Markdown PlanForge goal fixture to dispatch",
 		"    --json          Prints the dispatch result (per-task run ids) as JSON",
+		"",
+		"buildplane planforge resume --input <file> [--json]",
+		"",
+		"  Reconstructs the admitted plan cycle from the signed tape, verifies the",
+		"  plan_admitted digest/idempotency against --input, skips already completed",
+		"  activities, executes only the remaining suffix, and emits a missing",
+		"  plan_receipt when the plan reaches a terminal state.",
+		"",
+		"  Options:",
+		"    --input <file>  Markdown PlanForge goal fixture to resume",
+		"    --json          Prints the resume result (recorded/executed runs) as JSON",
 	];
 }
 
@@ -3382,6 +3394,41 @@ interface PlanAdmittedEventRow {
 	payload: string;
 }
 
+interface PlanForgeEventRow {
+	id: string;
+	kind: string;
+	payload: string;
+}
+
+interface KernelSignatureRow {
+	actor_id?: string;
+	key_id?: string;
+	algorithm?: string;
+}
+
+interface VerifiedPlanAdmission {
+	eventId: string;
+	payload: PlanAdmittedV1;
+}
+
+interface RecordedPlanActivity {
+	eventId: string;
+	activityId: string;
+	runId: string;
+	resultDigest: string;
+	result: unknown;
+}
+
+interface RecordedPlanReceipt {
+	eventId: string;
+	outcome: string;
+}
+
+interface PlanForgeReplayState {
+	completedActivities: RecordedPlanActivity[];
+	receipt?: RecordedPlanReceipt;
+}
+
 /**
  * Event id of an existing signed `plan_admitted` on the tape for `runId` whose
  * payload carries `idempotencyKey`, or undefined if none. Makes re-admitting the
@@ -3408,7 +3455,7 @@ async function findExistingPlanAdmitted(
 	try {
 		const rows = db
 			.prepare(
-				"SELECT id, payload FROM events WHERE run_id = ? AND kind = 'plan_admitted'",
+				"SELECT id, payload FROM events WHERE run_id = ? AND kind = 'plan_admitted' ORDER BY id ASC",
 			)
 			.all(runId) as unknown as PlanAdmittedEventRow[];
 		for (const row of rows) {
@@ -3420,6 +3467,150 @@ async function findExistingPlanAdmitted(
 			}
 		}
 		return undefined;
+	} finally {
+		db.close();
+	}
+}
+
+function assertKernelSignature(
+	signature: KernelSignatureRow | undefined,
+	eventId: string,
+): void {
+	if (
+		signature?.actor_id !== "kernel" ||
+		signature.key_id !== PLANFORGE_KERNEL_SIGNING_KEY_ID ||
+		signature.algorithm !== "ed25519"
+	) {
+		throw new Error(
+			`plan-not-admitted: plan_admitted event ${eventId} is not signed by kernel/${PLANFORGE_KERNEL_SIGNING_KEY_ID}.`,
+		);
+	}
+}
+
+function assertPlanAdmissionMatchesInput(
+	payload: PlanAdmittedV1,
+	plan: PlanForgePlan,
+): void {
+	const expected: Record<string, string> = {
+		plan_id: plan.id,
+		plan_digest: plan.receiptPreview.planDigest,
+		input_digest: plan.receiptPreview.inputDigest,
+		trusted_base: plan.trustedBase,
+		idempotency_key: plan.idempotencyKey,
+		authorized_next_step: PLANFORGE_AUTHORIZED_NEXT_STEP,
+	};
+	const actual = payload as unknown as Record<string, string>;
+	for (const [field, expectedValue] of Object.entries(expected)) {
+		if (actual[field] !== expectedValue) {
+			throw new Error(
+				`plan-admission-mismatch: signed plan_admitted ${field} does not match --input plan (expected ${expectedValue}, got ${String(actual[field])}).`,
+			);
+		}
+	}
+}
+
+async function findVerifiedPlanAdmission(
+	workspace: string,
+	runId: string,
+	plan: PlanForgePlan,
+): Promise<VerifiedPlanAdmission | undefined> {
+	const eventsDbPath = resolve(workspace, ".buildplane", "ledger", "events.db");
+	if (!existsSync(eventsDbPath)) {
+		return undefined;
+	}
+	const { DatabaseSync } = await import("node:sqlite");
+	const db = new DatabaseSync(eventsDbPath, { readOnly: true });
+	try {
+		const rows = db
+			.prepare(
+				"SELECT id, payload FROM events WHERE run_id = ? AND kind = 'plan_admitted' ORDER BY id ASC",
+			)
+			.all(runId) as unknown as PlanAdmittedEventRow[];
+		for (const row of rows) {
+			const payload = JSON.parse(row.payload) as {
+				PlanAdmittedV1?: PlanAdmittedV1;
+			};
+			const admitted = payload.PlanAdmittedV1;
+			if (!admitted || admitted.idempotency_key !== plan.idempotencyKey) {
+				continue;
+			}
+			assertPlanAdmissionMatchesInput(admitted, plan);
+			const signature = db
+				.prepare(
+					"SELECT actor_id, key_id, algorithm FROM event_signatures WHERE event_id = ?",
+				)
+				.get(row.id) as KernelSignatureRow | undefined;
+			assertKernelSignature(signature, row.id);
+			return { eventId: row.id, payload: admitted };
+		}
+		return undefined;
+	} finally {
+		db.close();
+	}
+}
+
+async function readPlanForgeReplayState(
+	workspace: string,
+	runId: string,
+	plan: PlanForgePlan,
+	admittedEventId: string,
+): Promise<PlanForgeReplayState> {
+	const eventsDbPath = resolve(workspace, ".buildplane", "ledger", "events.db");
+	if (!existsSync(eventsDbPath)) {
+		return { completedActivities: [] };
+	}
+	const { DatabaseSync } = await import("node:sqlite");
+	const db = new DatabaseSync(eventsDbPath, { readOnly: true });
+	try {
+		const rows = db
+			.prepare(
+				"SELECT id, kind, payload FROM events WHERE run_id = ? AND kind IN ('activity_completed', 'plan_receipt') ORDER BY id ASC",
+			)
+			.all(runId) as unknown as PlanForgeEventRow[];
+		const completedActivities: RecordedPlanActivity[] = [];
+		let receipt: RecordedPlanReceipt | undefined;
+		for (const row of rows) {
+			const payload = JSON.parse(row.payload) as {
+				ActivityCompletedV1?: {
+					activity_id?: string;
+					run_id?: string;
+					result_digest?: string;
+					result?: unknown;
+				};
+				PlanReceiptRecordedV1?: {
+					plan_id?: string;
+					admission_event_id?: string;
+					outcome?: string;
+				};
+			};
+			if (row.kind === "activity_completed") {
+				const completed = payload.ActivityCompletedV1;
+				if (!completed?.activity_id || !completed.run_id) {
+					throw new Error(
+						`plan-resume-invalid-tape: activity_completed ${row.id} is missing activity_id or run_id.`,
+					);
+				}
+				completedActivities.push({
+					eventId: row.id,
+					activityId: completed.activity_id,
+					runId: completed.run_id,
+					resultDigest: completed.result_digest ?? "",
+					result: completed.result,
+				});
+				continue;
+			}
+			const receiptPayload = payload.PlanReceiptRecordedV1;
+			if (
+				receiptPayload?.plan_id === plan.id &&
+				receiptPayload.admission_event_id === admittedEventId
+			) {
+				receipt = {
+					eventId: row.id,
+					outcome: receiptPayload.outcome ?? "unknown",
+				};
+			}
+		}
+		return { completedActivities, receipt };
 	} finally {
 		db.close();
 	}
@@ -3563,6 +3754,51 @@ function collectDeclaredSideEffects(plan: PlanForgePlan): string[] {
 	return [...scopes].sort();
 }
 
+interface PlanForgeResumeRunResult {
+	task: string;
+	run_id: string;
+	status: string;
+	source: "recorded" | "executed";
+	activity_id?: string;
+	completed_event_id?: string;
+}
+
+function recordedActivityStatus(result: unknown): string {
+	if (result && typeof result === "object") {
+		const record = result as { exitCode?: unknown; status?: unknown };
+		if (typeof record.exitCode === "number") {
+			return record.exitCode === 0 ? "passed" : "failed";
+		}
+		if (typeof record.status === "string") {
+			return record.status;
+		}
+	}
+	return "unknown";
+}
+
+function isPassedPlanForgeRun(status: string): boolean {
+	return status === "passed";
+}
+
+async function emitPlanForgeTerminalReceipt(input: {
+	emitter: TapeEmitter;
+	plan: PlanForgePlan;
+	admittedEventId: string;
+	outcome: "completed" | "failed";
+	result: unknown;
+}): Promise<void> {
+	await createLedgerReceiptPort(input.emitter).emitPlanReceipt(
+		buildPlanReceiptPayload({
+			planId: input.plan.id,
+			admissionEventId: input.admittedEventId,
+			outcome: input.outcome,
+			sideEffects: collectDeclaredSideEffects(input.plan),
+			result: input.result,
+			decidedAt: new Date().toISOString(),
+		}),
+	);
+}
+
 /**
  * `buildplane planforge dispatch --input <file>`: dispatch an operator-admitted
  * plan as one run per PlanForgeTask. Fails closed (exit 1, `plan-not-admitted`)
@@ -3586,11 +3822,8 @@ async function runPlanForgeDispatchCommand(
 	const plan = createPlanForgeDryRunPlan(resolve(cwd, inputPath));
 	const workspace = resolve(cwd);
 	const runId = planAdmitRunId(plan.idempotencyKey);
-	const admittedEventId = await findExistingPlanAdmitted(
-		workspace,
-		runId,
-		plan.idempotencyKey,
-	);
+	const admission = await findVerifiedPlanAdmission(workspace, runId, plan);
+	const admittedEventId = admission?.eventId;
 	if (!admittedEventId) {
 		throw new Error(
 			`plan-not-admitted: PlanForge plan ${plan.id} has no signed plan_admitted on the tape. Run \`buildplane planforge admit\` first.`,
@@ -3699,6 +3932,187 @@ async function runPlanForgeDispatchCommand(
 					runs,
 				})
 			: `Dispatched PlanForge plan ${plan.id}: ${runs.length}/${packets.length} task(s).`,
+	);
+	return allPassed ? 0 : 1;
+}
+
+/**
+ * `buildplane planforge resume --input <file>`: explicit-input S7b recovery.
+ * Rebuilds the PlanForge plan from input, verifies the signed admission payload,
+ * replays durable activity completions from the tape, skips those completed
+ * activities, executes only the remaining suffix, and appends a terminal receipt
+ * if the prior run crashed after execution but before `plan_receipt`.
+ */
+async function runPlanForgeResumeCommand(
+	args: readonly string[],
+	cwd: string,
+	stdout: (line: string) => void,
+): Promise<number> {
+	const inputPath = readFlag(args, "--input");
+	if (!inputPath) {
+		throw new Error(
+			"Missing required --input <file> argument for PlanForge resume.",
+		);
+	}
+	const jsonOut = args.includes("--json");
+
+	const plan = createPlanForgeDryRunPlan(resolve(cwd, inputPath));
+	const workspace = resolve(cwd);
+	const runId = planAdmitRunId(plan.idempotencyKey);
+	const admission = await findVerifiedPlanAdmission(workspace, runId, plan);
+	if (!admission) {
+		throw new Error(
+			`plan-not-admitted: PlanForge plan ${plan.id} has no signed plan_admitted on the tape. Run \`buildplane planforge admit\` first.`,
+		);
+	}
+	const admittedEventId = admission.eventId;
+	const replay = await readPlanForgeReplayState(
+		workspace,
+		runId,
+		plan,
+		admittedEventId,
+	);
+	const packets = dispatchAdmittedPlan({
+		plan,
+		admittedEventId,
+		policyProfile: DEFAULT_DISPATCH_POLICY_PROFILE,
+	});
+	if (replay.completedActivities.length > packets.length) {
+		throw new Error(
+			`plan-resume-invalid-tape: found ${replay.completedActivities.length} completed activities for ${packets.length} PlanForge task(s).`,
+		);
+	}
+
+	const runs: PlanForgeResumeRunResult[] = [];
+	for (let i = 0; i < replay.completedActivities.length; i += 1) {
+		const recorded = replay.completedActivities[i];
+		runs.push({
+			task: packets[i].unit.id,
+			run_id: recorded.runId,
+			status: recordedActivityStatus(recorded.result),
+			source: "recorded",
+			activity_id: recorded.activityId,
+			completed_event_id: recorded.eventId,
+		});
+	}
+
+	if (replay.receipt) {
+		const terminalOk = replay.receipt.outcome === "completed";
+		stdout(
+			jsonOut
+				? formatJson({
+						status: "already_receipted",
+						plan_id: plan.id,
+						admitted_event_id: admittedEventId,
+						receipt_event_id: replay.receipt.eventId,
+						receipt_outcome: replay.receipt.outcome,
+						runs,
+					})
+				: `PlanForge plan ${plan.id} already has terminal plan_receipt ${replay.receipt.eventId}.`,
+		);
+		return terminalOk ? 0 : 1;
+	}
+
+	const recordedFailure = runs.find((run) => !isPassedPlanForgeRun(run.status));
+	let allPassed = false;
+	let emitter: TapeEmitter | undefined;
+	let ledgerChild: ReturnType<typeof spawnLedgerSubprocess> | undefined;
+	try {
+		assertKernelSigningKey();
+		const binary = resolveLedgerBinary(cwd);
+		ledgerChild = spawnLedgerSubprocess(binary, runId, workspace, {
+			sign: true,
+			signingKeyId: PLANFORGE_KERNEL_SIGNING_KEY_ID,
+		});
+		emitter = await createTapeEmitter({
+			childStdin: ledgerChild.stdin,
+			childStderr: ledgerChild.stderr,
+			childExit: ledgerChild.exit,
+			workspacePath: workspace,
+			runId,
+		});
+
+		if (!recordedFailure) {
+			const { parseUnitPacket } = (await cliImport("@buildplane/kernel")) as {
+				parseUnitPacket: (input: string) => unknown;
+			};
+			const ledgerActivityPort = createLedgerActivityPort(emitter);
+			const { orchestrator, eventBus: cliEventBus } = await loadCliOrchestrator(
+				workspace,
+				{ ledgerActivityPort },
+			);
+			for (
+				let i = replay.completedActivities.length;
+				i < packets.length;
+				i += 1
+			) {
+				const packet = packets[i];
+				const result = await orchestrator.runPacketAsync(
+					parseUnitPacket(JSON.stringify(packet)),
+					cliEventBus,
+				);
+				runs.push({
+					task: packet.unit.id,
+					run_id: result.run.id,
+					status: result.run.status,
+					source: "executed",
+				});
+				if (result.run.status !== "passed") {
+					break;
+				}
+			}
+		}
+
+		allPassed =
+			runs.length === packets.length &&
+			runs.every((run) => isPassedPlanForgeRun(run.status));
+		const result = {
+			status: allPassed ? "resumed" : "failed",
+			plan_id: plan.id,
+			admitted_event_id: admittedEventId,
+			resume: true,
+			recorded_activity_count: replay.completedActivities.length,
+			executed_activity_count: runs.filter((run) => run.source === "executed")
+				.length,
+			runs,
+		};
+		await emitPlanForgeTerminalReceipt({
+			emitter,
+			plan,
+			admittedEventId,
+			outcome: allPassed ? "completed" : "failed",
+			result,
+		});
+	} catch (err) {
+		if (ledgerChild?.child.exitCode === null) {
+			ledgerChild.child.kill("SIGTERM");
+		}
+		throw new Error(`PlanForge resume failed: ${String(err)}`);
+	} finally {
+		if (emitter) {
+			try {
+				await emitter.close();
+			} catch {
+				if (ledgerChild?.child.exitCode === null) {
+					ledgerChild.child.kill("SIGTERM");
+				}
+			}
+		}
+	}
+
+	stdout(
+		jsonOut
+			? formatJson({
+					status: allPassed ? "resumed" : "failed",
+					plan_id: plan.id,
+					admitted_event_id: admittedEventId,
+					recorded_activity_count: replay.completedActivities.length,
+					executed_activity_count: runs.filter(
+						(run) => run.source === "executed",
+					).length,
+					runs,
+				})
+			: `Resumed PlanForge plan ${plan.id}: ${runs.length}/${packets.length} task(s).`,
 	);
 	return allPassed ? 0 : 1;
 }
@@ -3871,9 +4285,12 @@ export async function runCli(
 			if (subcommand === "dispatch") {
 				return await runPlanForgeDispatchCommand(rest.slice(1), cwd, stdout);
 			}
+			if (subcommand === "resume") {
+				return await runPlanForgeResumeCommand(rest.slice(1), cwd, stdout);
+			}
 			if (subcommand !== "dry-run") {
 				throw new Error(
-					"Unsupported PlanForge command. Only dry-run, admit, and dispatch are available; other non-dry-run PlanForge forms are intentionally disabled.",
+					"Unsupported PlanForge command. Only dry-run, admit, dispatch, and resume are available; other non-dry-run PlanForge forms are intentionally disabled.",
 				);
 			}
 			const subRest = rest.slice(1);
