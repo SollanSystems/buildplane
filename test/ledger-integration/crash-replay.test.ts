@@ -37,8 +37,7 @@ interface Env {
 	cleanup: () => Promise<void>;
 }
 
-interface EventRow {
-	id: string;
+interface KindRow {
 	kind: string;
 }
 
@@ -231,7 +230,7 @@ async function readEventKinds(eventsDbPath: string): Promise<string[]> {
 	try {
 		const rows = db
 			.prepare("SELECT kind FROM events ORDER BY id ASC")
-			.all() as EventRow[];
+			.all() as KindRow[];
 		return rows.map((r) => r.kind);
 	} finally {
 		db.close();
