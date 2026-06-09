@@ -9,9 +9,9 @@ Evidence packet for the M2-S6 buildout slice. Per `docs/operations/slice-receipt
 - Goal: (1) a completed `planforge dispatch` emits **one** kernel-signed `plan_receipt` per admitted plan, chaining to the `plan_admitted` event id (`admission_event_id`), recording the terminal `outcome`, declared `side_effects`, and a canonical `result_digest`, on the already-signed S5 dispatch tape; (2) `buildplane ledger export-signed-tape` serializes a live `events.db` run into the `buildplane.signed-tape.v1` format the external verifier validates end-to-end (admit → activities → receipt).
 - Non-goals: kernel `finalizeRun` orchestrator change (receipt is CLI-emitted per D1); observed-side-effects reconciliation (M4); S7b recovery re-emit; fork-path receipts; new event kind / typeshare / fixtures (S2 shipped `PlanReceiptRecordedV1`); `bp-replay` reads of `plan_receipt` (S7a); operator-key signing.
 - Operator approval scope: both flagged decisions confirmed at the plan-review gate — **D1 = CLI per-plan emit** (deviates from spec line 213 "finalizeRun hook"; kernel untouched), **D4 = declared side-effect scopes** (observed deferred to M4).
-- Steward / agent: Claude Opus 4.8 (orchestrator, in-session TDD execution). **Independent L0 review (Opus reviewer + adversarial Codex) NOT yet run — see Review gate.**
+- Steward / agent: Claude Opus 4.8 (orchestrator, in-session TDD execution). Historical receipt note: this file was first written before the review/PR/merge gate completed; see the post-merge reconciliation sections below.
 - Started at: 2026-06-04
-- Completed at: 2026-06-04 (implementation complete + locally verified; L0 review pending; no PR opened yet)
+- Completed at: 2026-06-04 (implementation complete + locally verified); merged by PR #173 at `148ad7333d15f7ddc2246f76fbc18cb2046cf01a` on 2026-06-04T18:31:17Z.
 
 ## Source of truth
 
@@ -67,21 +67,24 @@ Evidence packet for the M2-S6 buildout slice. Per `docs/operations/slice-receipt
 ### Ceremony tier
 
 - Tier: **L0 — Opus + adversarial Codex** (spec line 228). S6 emits a signed terminal event onto the L0 tape and ships the external-verifier's live-export path.
-- Roles satisfied: implementer TDD self-verify ✓ (RED→GREEN per task, all local tests green). **Independent Opus reviewer: PENDING. Adversarial Codex: PENDING.**
+- Roles satisfied: implementer TDD self-verify ✓ (RED→GREEN per task, all local tests green). Historical first-write state had independent Opus reviewer / adversarial Codex pending; PR #173 later merged and the docs reconciliation did not reconstruct the full reviewer artifacts.
 - Tier justification: a wrong export byte source or a broken receipt chain would void the external-verifier guarantee and the S7 recovery contract.
 
-- Verdict: **PENDING** — implementation complete and locally verified; the independent L0 review has not been run. The reviewer must specifically cover (per the plan's Review section): export byte-identity, trusted-keys soundness, receipt chaining + cardinality (one per plan), the canonical digest contract, the skip path (generic `run` emits no receipt), and the exhaustive-match guard.
-- Reviewed commit SHA: n/a (review pending).
-- Current head SHA: `8be9983` (+ this receipt).
+- Verdict: **MERGED / POST-MERGE RECONCILED** — implementation completed locally, then landed through PR #173. Reviewer provenance remains a reconstructed-evidence gap in this receipt; do not treat this line as a GitHub `APPROVED` review object.
+- Reviewed commit SHA: not reconstructed in this docs pass.
+- Current PR head SHA: `1ee79dcbb3cba7318cc82beba0755d56146a78a4`; merge commit `148ad7333d15f7ddc2246f76fbc18cb2046cf01a`.
 
 ## PR gate
 
-- PR URL: n/a (not opened).
+- PR URL: https://github.com/SollanSystems/buildplane/pull/173
 - Auto-merge eligibility: **not eligible** (solo L0 PR — no `buildplane:auto-merge`); operator admin-merge after the L0 review passes + CI `verify` + `Analyze` green.
 
 ## Post-merge verification
 
-- (pending review + operator admin-merge). After merge: confirm `origin/main` contains the merge commit, default-branch CI green, then cut **S7-HARNESS** (crash-injection replay test harness, test-infra only) fresh from `origin/main`.
+- PR #173 merged at `148ad7333d15f7ddc2246f76fbc18cb2046cf01a` on 2026-06-04T18:31:17Z.
+- Later `origin/main` advanced through S7-HARNESS (#174) and S7a (#177) to `93b5eaf40fee6d7540c5b65414e314816725a7d3`, which contains the S6 merge.
+- Post-merge DWF receipts on 2026-06-08 rechecked the release/package state: the M2-S6 changeset was consumed/absent, `apps/cli` was `buildplane@0.9.0`, `packages/planforge` was `@buildplane/planforge@0.5.0`, default-branch check-runs were green, and deployments were zero.
+- S7-HARNESS has since landed by PR #174; S7a has since landed by PR #177.
 
 ## Exceptions / caveats
 
@@ -92,6 +95,5 @@ Evidence packet for the M2-S6 buildout slice. Per `docs/operations/slice-receipt
 
 ## Next gate
 
-- Next allowed action: run the **L0 review ceremony** (independent fresh-session Opus reviewer + adversarial Codex) against head `8be9983`; on PASS, push the branch + open a solo (non-auto-merge) PR routed through a fresh subagent (biome-OOM + push guard); operator admin-merges after CI `verify` + `Analyze` green.
-- After S6 lands on `main`: cut **S7-HARNESS** (crash-injection replay test harness — test-infra only, no prod code) fresh from `origin/main`.
-- Actions explicitly not authorized: applying `buildplane:auto-merge`; merging before the L0 review passes; starting S7 before S6 lands.
+- Next allowed action: already advanced — S7-HARNESS (#174) and S7a (#177) are merged. The next live M2 slice is **S7b** (kernel startup scan / resume / skip-reinvocation), fresh from `origin/main`.
+- Actions explicitly not authorized: treating the historical pending-review text above as current; cleanup of stale local worktrees/branches without explicit cleanup approval; widening S7b beyond the M2 spec without a fresh plan/review gate.
