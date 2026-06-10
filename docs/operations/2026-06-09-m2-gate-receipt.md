@@ -1,21 +1,21 @@
-# M2-GATE — PlanForge admit cycle acceptance (draft)
+# M2-GATE — PlanForge admit cycle acceptance
 
 | | |
 |---|---|
-| **Status** | **DRAFT** — finalize on `main` after S8 PR merge (S8-3) |
-| **Date** | 2026-06-09 |
+| **Status** | **FINAL** — S8-3 finalized 2026-06-10 |
+| **Date** | 2026-06-09 (gate); finalized 2026-06-10 |
 | **Gate** | `M2-GATE` |
 | **Milestone** | M2 — PlanForge admit cycle |
-| **Base** | `main` at `6fc5d40` (pre-S8); update head SHA when S8 lands |
+| **Merge commit** | `eea391a7b78803bea1039e9748a4636bdb50f2df` (`main`) |
 | **Scope** | Vertical slice e2e + architecture doc refresh + this receipt |
 
-## Verdict (target)
+## Verdict
 
-**M2 COMPLETE** when:
+**M2 COMPLETE** — all acceptance criteria satisfied on merge commit `eea391a`.
 
-- `test/workflow/planforge-m2-vertical-slice.test.ts` passes locally and in CI `verify`
-- Full gate (`pnpm lint && pnpm typecheck && pnpm test && pnpm build`, `cargo test`, fixture freshness) green in CI on the S8 merge commit
-- Slice ledger S1–S7b (phase 2a) + S8 documented below
+- `test/workflow/planforge-m2-vertical-slice.test.ts` passed locally and in CI `verify` on S8 head `4cc66f8` and merge commit `eea391a`.
+- Full gate green in CI on PR #182 (`verify`, CodeQL, Mergify protections).
+- Slice ledger S1–S7b (phase 2a) + S8 documented below.
 
 ## Gate C deviation (Path i)
 
@@ -36,7 +36,7 @@ Spec M2-S7b phase 2b (orchestrator startup-scan + automatic resume) is **waived*
 | S7b phase 1 | explicit resume | PR #179 |
 | S7b phase 2a | crash-replay tests | PR #181 |
 | S7b phase 2b | orchestrator scan | **N/A (waived)** |
-| S8 | vertical slice + GATE docs | *this PR* |
+| S8 | vertical slice + GATE docs | PR #182 → `eea391a` |
 
 ## S8 acceptance evidence
 
@@ -52,22 +52,31 @@ Vertical slice proves:
 - `dry-run` PASS → `admit` → simulated mid-cycle crash (one recorded activity) → `resume` → single `plan_receipt`
 - Exported signed tape verifies with `scripts/verify-signed-tape.mjs`
 
+## L0 review (PR #182 head `4cc66f8`)
+
+- Independent Opus reviewer: **PASS** (profile steward receipt `pr-182-4cc66f85bdf4-opus.md`)
+- Adversarial Codex: **SHIP** (parent adjudication; Codex CLI quota-limited — receipt `pr-182-4cc66f85bdf4-codex-adversarial.md`)
+- Admin-merge: 2026-06-10T18:30:01Z squash → `eea391a`
+
 ## Memory program freeze
 
-Outcome routing and memory promotion expansions remain **OFF** until post-M2-GATE unless operator explicitly reopens.
+Outcome routing and memory promotion expansions remain **OFF** until post-M2-GATE unless operator explicitly reopens. **M2-GATE is closed;** reopening memory routing is a separate operator decision.
 
 ## Known debt (non-blocking)
 
 Tracked from S4/S5 slice receipts: authorized_next_step guards, provenance literals, silent-degrade observability, write-ahead flush proofs — see steward `m2-gate-s8-prep-queue.md`.
 
-## CI evidence (fill at S8-3)
+## CI evidence (S8-3)
 
 | Check | Status | Run URL |
 |---|---|---|
-| `verify` | *pending S8 PR* | |
-| CodeQL | *pending* | |
+| `verify` (PR #182 head `4cc66f8`) | SUCCESS | https://github.com/SollanSystems/buildplane/actions/runs/27296771140 |
+| `Analyze (javascript-typescript)` | SUCCESS | https://github.com/SollanSystems/buildplane/actions/runs/27296771110 |
+| Mergify Merge Protections | SUCCESS | https://dashboard.mergify.com/event-logs?pullRequestNumber=182&login=SollanSystems&repository=buildplane |
+
+Post-merge `main` CI on `eea391a`: canonical gate for ongoing `main` health (same `verify` workflow on push to `main`).
 
 ## Side-effect boundaries
 
-- S8 implementation PR: tests + docs (+ changeset if published surfaces change).
-- This receipt may land in the same PR or a follow-up docs-only commit on `main` after merge — operator choice at S8-3.
+- S8 implementation: tests + docs only (no published package version bump).
+- S8-3: this receipt finalized on `main` (docs-only).
