@@ -23,6 +23,7 @@ use bp_ledger::payload::unit_lifecycle::{
     ArtifactRef, CancelCause, UnitCancelledV1, UnitCompletedV1, UnitFailedV1, UnitOutcome,
     UnitStartedV1,
 };
+use bp_ledger::payload::capability_broker::CapabilityDeniedV1;
 use bp_ledger::payload::workspace::{PostWriteState, WorkspaceReadV1, WorkspaceWriteV1};
 use bp_ledger::payload::Payload;
 use serde_json::{json, Value};
@@ -189,6 +190,14 @@ fn main() {
             activity_id: "act-1".into(),
             result_digest: "sha256:ee".into(),
             result: json!({"content": "ok"}),
+        })).unwrap(),
+
+        serde_json::to_value(Payload::CapabilityDeniedV1(CapabilityDeniedV1 {
+            run_id: fixed_run_id().to_string(),
+            bundle_digest: "sha256:ff".into(),
+            tool: "write_file".into(),
+            reason: "capability broker: outside fsWrite allowlist".into(),
+            target: "docs/readme.md".into(),
         })).unwrap(),
     ];
 

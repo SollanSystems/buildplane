@@ -58,6 +58,26 @@ describe("write_file capability broker (src/** test/**)", () => {
 		expect(denied.error).toMatch(/capability broker/i);
 	});
 
+	it("invokes onCapabilityDenied without writing when broker denies", () => {
+		const root = makeWorktree();
+		const deniedEvents: Array<{ tool: string; target: string }> = [];
+		const result = writeFile(
+			{ path: "docs/readme.md", content: "nope" },
+			root,
+			{
+				capabilityBundle: m6DemoBundle(),
+				onCapabilityDenied: (detail) => {
+					deniedEvents.push({ tool: detail.tool, target: detail.target });
+				},
+			},
+		);
+		expect(result.success).toBe(false);
+		expect(deniedEvents).toEqual([
+			{ tool: "write_file", target: "docs/readme.md" },
+		]);
+		expect(existsSync(join(root, "docs/readme.md"))).toBe(false);
+	});
+
 	it("without bundle, only sandbox applies (backward compatible)", () => {
 		const root = makeWorktree();
 		const result = writeFile({ path: "anywhere.txt", content: "ok" }, root);

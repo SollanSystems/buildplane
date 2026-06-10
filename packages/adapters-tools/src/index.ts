@@ -1,6 +1,10 @@
 import type { CapabilityBundleV0 } from "@buildplane/capability-broker";
 import { type RunCommandResult, runCommand } from "./run-command.js";
-import { type WriteFileResult, writeFile } from "./write-file.js";
+import {
+	type WriteFileOptions,
+	type WriteFileResult,
+	writeFile,
+} from "./write-file.js";
 
 export {
 	type RunCommandInput,
@@ -17,6 +21,7 @@ export {
 
 export interface ToolRegistryOptions {
 	readonly capabilityBundle?: CapabilityBundleV0;
+	readonly onCapabilityDenied?: WriteFileOptions["onCapabilityDenied"];
 }
 
 export interface ToolRegistry {
@@ -37,9 +42,13 @@ export function createToolRegistry(
 	worktreeRoot: string,
 	options?: ToolRegistryOptions,
 ): ToolRegistry {
-	const writeOpts = options?.capabilityBundle
-		? { capabilityBundle: options.capabilityBundle }
-		: undefined;
+	const writeOpts =
+		options?.capabilityBundle || options?.onCapabilityDenied
+			? {
+					capabilityBundle: options.capabilityBundle,
+					onCapabilityDenied: options.onCapabilityDenied,
+				}
+			: undefined;
 	return {
 		write_file(input) {
 			return writeFile(input, worktreeRoot, writeOpts);
