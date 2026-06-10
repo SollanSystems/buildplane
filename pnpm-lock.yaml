@@ -135,6 +135,9 @@ importers:
 
   packages/adapters-tools:
     dependencies:
+      '@buildplane/capability-broker':
+        specifier: workspace:*
+        version: link:../capability-broker
       '@buildplane/kernel':
         specifier: workspace:*
         version: link:../kernel

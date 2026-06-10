@@ -15,7 +15,10 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { Readable, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
-import { createToolRegistry } from "@buildplane/adapters-tools";
+import {
+	createToolRegistry,
+	type ToolRegistryOptions,
+} from "@buildplane/adapters-tools";
 import type {
 	BuildplaneStoragePort,
 	LedgerActivityPort,
@@ -1062,6 +1065,19 @@ interface CliOrchestratorBundle {
 	/** Mutable slot — swapped per-run to route through the ledger-wrapped ToolRegistry. */
 	commandExecutor: {
 		executePacket: (packet: unknown, root: string) => unknown;
+	};
+}
+
+function toolRegistryOptionsForPacket(
+	packetUnknown: unknown,
+): ToolRegistryOptions | undefined {
+	const bundle = (packetUnknown as { capability_bundle?: unknown })
+		.capability_bundle;
+	if (bundle === undefined) {
+		return undefined;
+	}
+	return {
+		capabilityBundle: bundle as ToolRegistryOptions["capabilityBundle"],
 	};
 }
 
@@ -2863,7 +2879,10 @@ async function runForkExecution(
 				verification: { requiredOutputs: readonly string[] };
 			};
 			const worktreeRoot = pathResolve(executionRoot);
-			const perCallRawRegistry = createToolRegistry(worktreeRoot);
+			const perCallRawRegistry = createToolRegistry(
+				worktreeRoot,
+				toolRegistryOptionsForPacket(packetUnknown),
+			);
 			const perCallRegistry = wrapToolRegistryForLedger(
 				perCallRawRegistry,
 				emitter,
@@ -5572,7 +5591,10 @@ export async function runCli(
 						verification: { requiredOutputs: readonly string[] };
 					};
 					const workspaceRoot = pathResolve(executionRoot);
-					const perCallRawRegistry = createToolRegistry(workspaceRoot);
+					const perCallRawRegistry = createToolRegistry(
+						workspaceRoot,
+						toolRegistryOptionsForPacket(packetUnknown),
+					);
 					const perCallRegistry = wrapToolRegistryForLedger(
 						perCallRawRegistry,
 						ledgerEmitterForCommand,
