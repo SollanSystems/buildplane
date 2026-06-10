@@ -150,7 +150,11 @@ importers:
 
   packages/compat-gsd: {}
 
-  packages/kernel: {}
+  packages/kernel:
+    dependencies:
+      '@buildplane/capability-broker':
+        specifier: workspace:*
+        version: link:../capability-broker
 
   packages/ledger-client:
     dependencies:
