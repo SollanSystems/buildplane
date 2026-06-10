@@ -144,6 +144,9 @@ importers:
       '@buildplane/planforge':
         specifier: workspace:*
         version: link:../planforge
+      minimatch:
+        specifier: ^10.0.1
+        version: 10.2.4
 
   packages/compat-gsd: {}
 
