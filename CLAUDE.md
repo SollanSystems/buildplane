@@ -14,32 +14,23 @@ The build is **trust-first sequenced**: the signed, append-only event tape (L0) 
 
 ## Current state & roadmap
 
-Milestone map (status as of 2026-06-08):
+Milestone map (status as of 2026-06-10):
 
 | Milestone | Scope | Status |
 |---|---|---|
 | **M0** | Foundations | ✅ complete |
 | **M1** | Signed Ed25519 per-event tape (S1–S7) + external verifier + GATE receipt | ✅ complete (`main` tip `8a98ea6`) |
-| **M2** | PlanForge admission cycle: `compile → validate → preview → admit → dispatch → execute → receipt` + Temporal-style crash recovery | 🔶 in progress — S1 through S7a merged; **S7b is next** |
-| **M3** | Capability broker (sealed capability bundles, per-tool-call capability validation) | planned |
+| **M2** | PlanForge admission cycle: `compile → validate → preview → admit → dispatch → execute → receipt` + explicit-input resume (Gate C Path i) | ✅ complete (M2-GATE `fd598da` / #182–#183) |
+| **M3** | Capability broker (digest-referenced bundles, per-tool-call validation) | 🔶 **next** — spec `docs/superpowers/specs/2026-06-10-capability-broker-m3.md` |
 | **M4** | Acceptance contract (diff-scope + CI + lint gating on finalization) | planned |
 | **M5** | Web Mission Control (approval inbox, run inspector) | planned |
 | **M6** | End-to-end demo (incl. crash-and-resume) + cut **v0.5.0** | planned |
 
-**M2 slice status & critical path:** `S1 ∥ S2 → S3 → S4 → S5 → S6 → S7-HARNESS → S7a → S7b → S8`.
+**M2:** closed at M2-GATE. **M3 critical path:** `S1 → S2 → S3 → S4 → S5 → S6 → S7 → S8` — see `docs/superpowers/specs/2026-06-10-capability-broker-m3.md`. **M3-S1** is next (`packages/capability-broker` schema + digest + validate).
 
-- **S1 ✅ merged** (PR #161): `packages/planforge` extraction + runtime contract + canonical digest (with a one-time, documented golden-fixture digest update from the canonicalization change).
-- **S2 ✅ merged** (PR #163): four signed event kinds (`plan_admitted`, `plan_receipt`, `activity_started`, `activity_completed`). The Codex GH-agent commit also fixed a `bp-replay` exhaustive-match break (added no-op arms; real replay deferred to S7a).
-- **S3 ✅ merged** (PR #166): operator-approved `plan_admitted` via `buildplane planforge admit <plan> --approve`.
-- **S4 ✅ merged** (PR #168): admitted plans dispatch into signed-gated kernel runs.
-- **S5 ✅ merged** (PR #171): signed `activity_started` / `activity_completed` bracketing for PlanForge dispatch.
-- **S6 ✅ merged** (PR #173): signed `plan_receipt` plus live `ledger export-signed-tape`; post-merge receipt correction is in `docs/operations/2026-06-04-m2-s6-receipt-live-tape-export-slice-receipt.md`.
-- **S7-HARNESS ✅ merged** (PR #174): deterministic crash-injection harness and read-only durable tape probe; receipt in `docs/operations/2026-06-07-m2-s7-harness-crash-injection-receipt.md`. This is test infrastructure only — production kernel startup/resume remains S7b.
-- **S7a ✅ merged** (PR #177): Rust `bp-replay` PlanForge cycle transitions and recorded activity state; receipt in `docs/operations/2026-06-08-m2-s7a-replay-transitions-receipt.md`.
-- **S7b 🔶 in progress** — **phase 1 ✅ merged** (PR #179 @ `7ac334d`): explicit-input `planforge resume`. **Phase 2a** (open): `crash-replay.test.ts` at S7-HARNESS boundaries. **Phase 2b** still required: kernel `orchestrator.ts` startup scan / automatic resume per spec 273–291.
-- **S8 planned**: M2-GATE vertical slice + gate receipt.
+**M2 slice archive (complete):** S1–S8 + M2-GATE — ledger in `docs/operations/2026-06-09-m2-gate-receipt.md` (S7b phase 2b waived, Path i explicit resume).
 
-**Parallel memory program (frozen):** Phase 1 (`buildplane@0.3.0`) + Phase 2 outcome memory (Track 1 gap-fixes + Track 2 `run_outcomes`) shipped to `main`. It is **hard-frozen at Phase 2 S5 until M2-GATE** — outcome routing is opt-in / default-OFF with no consumer. See §"Memory program status".
+**Parallel memory program (frozen):** Phase 1 (`buildplane@0.3.0`) + Phase 2 outcome memory shipped to `main`. **Hard-frozen until operator reopens post–M2-GATE** — outcome routing opt-in / default-OFF. See §"Memory program status".
 
 ---
 
