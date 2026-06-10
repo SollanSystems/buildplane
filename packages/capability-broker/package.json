@@ -1,0 +1,17 @@
+{
+	"name": "@buildplane/capability-broker",
+	"private": true,
+	"version": "0.1.0",
+	"type": "module",
+	"description": "Capability bundle schema, validation, and digest for Buildplane M3 broker",
+	"exports": {
+		".": {
+			"source": "./src/index.ts",
+			"types": "./src/index.d.ts",
+			"import": "./dist/index.js"
+		}
+	},
+	"dependencies": {
+		"@buildplane/planforge": "workspace:*"
+	}
+}

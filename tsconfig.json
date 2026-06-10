@@ -2,6 +2,7 @@
 	"files": [],
 	"references": [
 		{ "path": "packages/kernel" },
+		{ "path": "packages/capability-broker" },
 		{ "path": "packages/planforge" },
 		{ "path": "packages/policy" },
 		{ "path": "packages/runtime" },
