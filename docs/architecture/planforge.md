@@ -2,24 +2,25 @@
 
 ## Status
 
-PlanForge currently has a narrow, repo-local dry-run implementation. This document reconciles the architecture contract with that implementation and continues to reserve all admission and materialization behavior for future explicit commands.
+PlanForge M2 (admit cycle) is implemented on the Buildplane kernel/CLI path documented here. Dry-run review (`compile → validate → preview`) remains side-effect-free; operator-gated `admit`, `dispatch`, `resume`, and signed ledger events implement the durable admit→execute→receipt cycle.
 
-Implemented now:
+Implemented now (M2):
 
-- repo-local `planforge dry-run --input <file> --json` review artifact generation
-- fail-closed validation for the current documented fixture shape
-- receipt preview output with `dryRun: true` and `sideEffects: []`
+- `planforge dry-run --input <file> --json` — deterministic compile/validate/preview artifact (`@buildplane/planforge`)
+- `planforge admit --input <file> --approve --operator <id>` — signed `plan_admitted` on the ledger tape
+- `planforge dispatch --input <file>` — executes admitted plan tasks, brackets activities, emits `plan_receipt`
+- `planforge resume --input <file>` — **explicit-input** recovery (Gate C Path i): replays signed admission, skips durable recorded activities, executes suffix only, emits missing receipt
+- `ledger export-signed-tape` + `scripts/verify-signed-tape.mjs` — external verification of exported cycles
+- Rust `bp-replay` transitions for plan/activity/receipt kinds (deterministic replay state)
 
-Explicitly not implemented now:
+Explicitly not implemented (post-M2 / out of scope):
 
-- board writes
-- GSD2/Kanban materialization
-- worker dispatch
-- GitHub writes
-- push, PR, merge, or deploy behavior
-- hosted service behavior
-- non-dry-run admission
-- durable receipt or state writes beyond the dry-run preview artifact
+- board writes, GSD2/Kanban materialization, GitHub writes, push/PR/merge/deploy automation
+- kernel orchestrator **startup-scan** auto-resume (M2-S7b phase 2b waived per Gate C Path i)
+- hosted PlanForge service behavior
+- memory outcome routing (frozen until post-M2-GATE)
+
+Legacy dry-run-only notes below remain accurate for the **dry-run** command boundary; they do not describe the admitted execution path.
 
 ## Product sentence
 
