@@ -20,7 +20,7 @@ Explicitly not implemented (post-M2 / out of scope):
 - hosted PlanForge service behavior
 - memory outcome routing (frozen until post-M2-GATE)
 
-Legacy dry-run-only notes below remain accurate for the **dry-run** command boundary; they do not describe the admitted execution path.
+Sections below titled **PF1** and **Dry-run contract** describe the original dry-run-only slice (`planforge dry-run`). They are **not** a catalog of current product capabilities — see **Status** and **Implemented now (M2)** for admit/dispatch/resume.
 
 ## Product sentence
 
@@ -32,9 +32,9 @@ PlanForge belongs on the trusted Buildplane/kernel side of the system. It may pa
 
 Coding agents remain untrusted workers. They may help draft candidate prose or implementation details, but their output is untrusted input until the kernel validates it and records a receipt. A PlanForge receipt is not merge approval, deploy approval, or permission for a worker to write outside the admitted envelope.
 
-## Non-goals for PF1
+## Non-goals for PF1 (historical dry-run slice)
 
-The dry-run command exists, but PF1/PF2 still must not implement non-dry-run admission or materialization. PlanForge must not implement:
+PF1 delivered `planforge dry-run` only. At PF1 time, non-dry-run admission and materialization were out of scope. M2 added operator-gated `admit` / `dispatch` / `resume` as **separate commands** (see Status). The PF1 dry-run command itself must still not implement:
 
 - code execution
 - worker spawn, worker dispatch, swarm routing, or hosted service behavior
@@ -46,9 +46,9 @@ The dry-run command exists, but PF1/PF2 still must not implement non-dry-run adm
 
 ## Dry-run contract
 
-The implemented PlanForge command is dry-run only. A dry run may read the operator-provided input and repo metadata needed for deterministic validation. It must not create tasks, grant capabilities, start agents, push commits, call hosted APIs, open PRs, deploy, modify board state, create worktrees, create GitHub artifacts, or write ledger/project state.
+The `planforge dry-run` subcommand is dry-run only (side-effect-free). A dry run may read the operator-provided input and repo metadata needed for deterministic validation. It must not create tasks, grant capabilities, start agents, push commits, call hosted APIs, open PRs, deploy, modify board state, create worktrees, create GitHub artifacts, or write ledger/project state.
 
-Later implementation slices may write local receipt artifacts only when a separate command name and destination make that write explicit and the operator has approved that path. Even then, the receipt records admission evidence; it does not execute the admitted plan.
+Admission and execution receipts are recorded on the signed ledger tape via `planforge admit` / `dispatch` / `resume` (M2). The dry-run path returns a JSON receipt **preview** only and must not write ledger state.
 
 ## Machine-parseable invocation
 
