@@ -38,6 +38,8 @@ pub enum EventKind {
     // Workspace observation
     WorkspaceRead,
     WorkspaceWrite,
+    // M3 capability broker
+    CapabilityDenied,
     // Tape-root checkpoint (M1-S6) — unrelated to the unit-boundary GitCheckpoint.
     TapeCheckpoint,
 }
@@ -65,6 +67,7 @@ impl EventKind {
             Self::ToolResult => "tool_result",
             Self::WorkspaceRead => "workspace_read",
             Self::WorkspaceWrite => "workspace_write",
+            Self::CapabilityDenied => "capability_denied",
             Self::TapeCheckpoint => "tape_checkpoint",
         }
     }
@@ -92,6 +95,7 @@ mod tests {
             EventKind::ModelRequest, EventKind::ModelResponse,
             EventKind::ToolRequest, EventKind::ToolResult,
             EventKind::WorkspaceRead, EventKind::WorkspaceWrite,
+            EventKind::CapabilityDenied,
             EventKind::TapeCheckpoint,
         ] {
             let json = serde_json::to_string(&kind).unwrap();

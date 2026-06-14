@@ -12,6 +12,7 @@
 		}
 	},
 	"dependencies": {
+		"@buildplane/capability-broker": "workspace:*",
 		"@buildplane/kernel": "workspace:*"
 	}
 }

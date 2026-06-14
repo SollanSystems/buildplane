@@ -1,0 +1,85 @@
+import { digest } from "./digest.js";
+import type { PlanForgePlan, PlanForgeTask } from "./schema.js";
+
+/** Wire shape attached at dispatch; validated by @buildplane/capability-broker at parse time. */
+export const PLANFORGE_CAPABILITY_BUNDLE_SCHEMA_VERSION =
+	"buildplane.capability_bundle.v0" as const;
+
+export interface PlanForgeAttachedCapabilityBundle {
+	readonly schemaVersion: typeof PLANFORGE_CAPABILITY_BUNDLE_SCHEMA_VERSION;
+	readonly bundleId: string;
+	readonly fsWrite?: readonly string[];
+	readonly tools?: {
+		readonly write_file?: { readonly enabled?: boolean };
+		readonly run_command?: { readonly allowlist?: readonly string[] };
+	};
+}
+
+const SIDE_EFFECT_FS_WRITE_GLOBS: Record<string, readonly string[]> = {
+	"local-doc": ["docs/**"],
+	"local-fixture": [
+		"apps/cli/test/fixtures/**",
+		"packages/**/test/fixtures/**",
+	],
+	"local-receipt": ["docs/operations/**"],
+};
+
+function allowlistFromVerificationCommands(
+	commands: readonly string[],
+): string[] {
+	const seen = new Set<string>();
+	for (const line of commands) {
+		const trimmed = line.trim();
+		if (!trimmed) {
+			continue;
+		}
+		const argv0 = trimmed.split(/\s+/)[0];
+		if (argv0) {
+			seen.add(argv0);
+		}
+	}
+	return [...seen];
+}
+
+function fsWriteGlobsFromTask(task: PlanForgeTask): string[] {
+	const globs = new Set<string>();
+	for (const effect of task.allowedSideEffects) {
+		const mapped = SIDE_EFFECT_FS_WRITE_GLOBS[effect];
+		if (mapped) {
+			for (const g of mapped) {
+				globs.add(g);
+			}
+		}
+	}
+	return [...globs];
+}
+
+/**
+ * Deterministic default capability bundle for one PlanForge task (M3-S3).
+ * Full plan-level overrides land in M3-S7; this maps allowedSideEffects and
+ * verificationCommands from the admitted plan shape.
+ */
+export function buildDefaultCapabilityBundleForTask(
+	plan: PlanForgePlan,
+	task: PlanForgeTask,
+): PlanForgeAttachedCapabilityBundle {
+	const fsWrite = fsWriteGlobsFromTask(task);
+	const allowlist = allowlistFromVerificationCommands(
+		task.verificationCommands,
+	);
+	return {
+		schemaVersion: PLANFORGE_CAPABILITY_BUNDLE_SCHEMA_VERSION,
+		bundleId: `${plan.id}:${task.id}`,
+		...(fsWrite.length > 0 ? { fsWrite } : {}),
+		tools: {
+			write_file: { enabled: fsWrite.length > 0 },
+			...(allowlist.length > 0 ? { run_command: { allowlist } } : {}),
+		},
+	};
+}
+
+export function capabilityBundleDigest(
+	bundle: PlanForgeAttachedCapabilityBundle,
+): string {
+	return digest(bundle);
+}

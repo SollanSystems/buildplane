@@ -224,5 +224,14 @@
 			"result_digest": "sha256:ee",
 			"run_id": "01919000-0000-7000-8000-0000000000ff"
 		}
+	},
+	{
+		"CapabilityDeniedV1": {
+			"bundle_digest": "sha256:ff",
+			"reason": "capability broker: outside fsWrite allowlist",
+			"run_id": "01919000-0000-7000-8000-0000000000ff",
+			"target": "docs/readme.md",
+			"tool": "write_file"
+		}
 	}
 ]

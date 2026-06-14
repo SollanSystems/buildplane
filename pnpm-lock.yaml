@@ -88,6 +88,9 @@ importers:
       '@buildplane/ui-tui':
         specifier: workspace:*
         version: link:../../packages/ui-tui
+      minimatch:
+        specifier: ^10.0.1
+        version: 10.2.4
       uuid:
         specifier: ^14
         version: 14.0.0
@@ -135,6 +138,9 @@ importers:
 
   packages/adapters-tools:
     dependencies:
+      '@buildplane/capability-broker':
+        specifier: workspace:*
+        version: link:../capability-broker
       '@buildplane/kernel':
         specifier: workspace:*
         version: link:../kernel
@@ -144,10 +150,17 @@ importers:
       '@buildplane/planforge':
         specifier: workspace:*
         version: link:../planforge
+      minimatch:
+        specifier: ^10.0.1
+        version: 10.2.4
 
   packages/compat-gsd: {}
 
-  packages/kernel: {}
+  packages/kernel:
+    dependencies:
+      '@buildplane/capability-broker':
+        specifier: workspace:*
+        version: link:../capability-broker
 
   packages/ledger-client:
     dependencies:

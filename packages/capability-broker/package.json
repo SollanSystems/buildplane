@@ -12,6 +12,7 @@
 		}
 	},
 	"dependencies": {
-		"@buildplane/planforge": "workspace:*"
+		"@buildplane/planforge": "workspace:*",
+		"minimatch": "^10.0.1"
 	}
 }

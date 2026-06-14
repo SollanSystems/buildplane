@@ -1,5 +1,11 @@
 export { bundleDigest } from "./digest.js";
 export {
+	type EvaluateToolContext,
+	type EvaluateToolResult,
+	evaluateToolInvocation,
+	type ToolInvocation,
+} from "./evaluate.js";
+export {
 	type ParseCapabilityBundleResult,
 	parseCapabilityBundle,
 } from "./parse.js";

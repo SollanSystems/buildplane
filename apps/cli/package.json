@@ -28,6 +28,7 @@
 		"@buildplane/runtime": "workspace:*",
 		"@buildplane/storage": "workspace:*",
 		"@buildplane/ui-tui": "workspace:*",
+		"minimatch": "^10.0.1",
 		"uuid": "^14"
 	}
 }

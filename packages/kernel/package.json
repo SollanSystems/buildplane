@@ -35,5 +35,8 @@
 			"types": "./dist/events.d.ts",
 			"import": "./dist/events.js"
 		}
+	},
+	"dependencies": {
+		"@buildplane/capability-broker": "workspace:*"
 	}
 }

@@ -1,3 +1,8 @@
+import {
+	buildDefaultCapabilityBundleForTask,
+	capabilityBundleDigest,
+	type PlanForgeAttachedCapabilityBundle,
+} from "./bundle.js";
 import type { PlanForgePlan } from "./schema.js";
 
 /**
@@ -19,6 +24,8 @@ export interface DispatchedUnitPacket {
 	readonly execution: { readonly command: string };
 	readonly verification: { readonly requiredOutputs: readonly string[] };
 	readonly provenance_ref: string;
+	readonly capability_bundle: PlanForgeAttachedCapabilityBundle;
+	readonly capability_bundle_digest: string;
 }
 
 export interface DispatchPlanInput {
@@ -40,21 +47,26 @@ export function dispatchAdmittedPlan(
 	input: DispatchPlanInput,
 ): DispatchedUnitPacket[] {
 	const { plan, admittedEventId, policyProfile } = input;
-	return plan.tasks.map((task) => ({
-		unit: {
-			id: `${plan.id}:${task.id}`,
-			kind: "planforge-task",
-			scope: task.workspace,
-			inputRefs: [],
-			expectedOutputs: [],
-			verificationContract:
-				task.verificationCommands.length > 0
-					? task.verificationCommands.join(" && ")
-					: "true",
-			policyProfile,
-		},
-		execution: { command: "true" },
-		verification: { requiredOutputs: [] },
-		provenance_ref: admittedEventId,
-	}));
+	return plan.tasks.map((task) => {
+		const capability_bundle = buildDefaultCapabilityBundleForTask(plan, task);
+		return {
+			unit: {
+				id: `${plan.id}:${task.id}`,
+				kind: "planforge-task",
+				scope: task.workspace,
+				inputRefs: [],
+				expectedOutputs: [],
+				verificationContract:
+					task.verificationCommands.length > 0
+						? task.verificationCommands.join(" && ")
+						: "true",
+				policyProfile,
+			},
+			execution: { command: "true" },
+			verification: { requiredOutputs: [] },
+			provenance_ref: admittedEventId,
+			capability_bundle,
+			capability_bundle_digest: capabilityBundleDigest(capability_bundle),
+		};
+	});
 }

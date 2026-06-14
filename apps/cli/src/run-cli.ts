@@ -15,7 +15,10 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { Readable, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
-import { createToolRegistry } from "@buildplane/adapters-tools";
+import {
+	createToolRegistry,
+	type ToolRegistryOptions,
+} from "@buildplane/adapters-tools";
 import type {
 	BuildplaneStoragePort,
 	LedgerActivityPort,
@@ -58,6 +61,7 @@ import {
 	createDeferredLedgerActivityPort,
 	createLedgerActivityPort,
 } from "./ledger-activity-port.js";
+import { emitCapabilityDenied } from "./ledger-capability-denied.js";
 import { runGitCheckpoint } from "./ledger-git-checkpoint.js";
 import { createLedgerReceiptPort } from "./ledger-receipt-port.js";
 import { wrapToolRegistryForLedger } from "./ledger-tool-wrapper.js";
@@ -1062,6 +1066,40 @@ interface CliOrchestratorBundle {
 	/** Mutable slot — swapped per-run to route through the ledger-wrapped ToolRegistry. */
 	commandExecutor: {
 		executePacket: (packet: unknown, root: string) => unknown;
+	};
+}
+
+interface ToolRegistryTapeContext {
+	readonly emitter: TapeEmitter;
+	readonly runId: string;
+}
+
+function toolRegistryOptionsForPacket(
+	packetUnknown: unknown,
+	tape?: ToolRegistryTapeContext,
+): ToolRegistryOptions | undefined {
+	const packet = packetUnknown as {
+		capability_bundle?: ToolRegistryOptions["capabilityBundle"];
+		capability_bundle_digest?: string;
+	};
+	const bundle = packet.capability_bundle;
+	const digest = packet.capability_bundle_digest;
+	if (bundle === undefined && tape === undefined) {
+		return undefined;
+	}
+	const onCapabilityDenied =
+		tape && digest
+			? (detail: { tool: string; reason: string; target: string }) => {
+					emitCapabilityDenied(tape.emitter, {
+						runId: tape.runId,
+						bundleDigest: digest,
+						...detail,
+					});
+				}
+			: undefined;
+	return {
+		...(bundle !== undefined ? { capabilityBundle: bundle } : {}),
+		...(onCapabilityDenied ? { onCapabilityDenied } : {}),
 	};
 }
 
@@ -2863,7 +2901,13 @@ async function runForkExecution(
 				verification: { requiredOutputs: readonly string[] };
 			};
 			const worktreeRoot = pathResolve(executionRoot);
-			const perCallRawRegistry = createToolRegistry(worktreeRoot);
+			const perCallRawRegistry = createToolRegistry(
+				worktreeRoot,
+				toolRegistryOptionsForPacket(packetUnknown, {
+					emitter,
+					runId: plan.new_run_id,
+				}),
+			);
 			const perCallRegistry = wrapToolRegistryForLedger(
 				perCallRawRegistry,
 				emitter,
@@ -5572,7 +5616,13 @@ export async function runCli(
 						verification: { requiredOutputs: readonly string[] };
 					};
 					const workspaceRoot = pathResolve(executionRoot);
-					const perCallRawRegistry = createToolRegistry(workspaceRoot);
+					const perCallRawRegistry = createToolRegistry(
+						workspaceRoot,
+						toolRegistryOptionsForPacket(packetUnknown, {
+							emitter: ledgerEmitterForCommand,
+							runId: ledgerRunId,
+						}),
+					);
 					const perCallRegistry = wrapToolRegistryForLedger(
 						perCallRawRegistry,
 						ledgerEmitterForCommand,
