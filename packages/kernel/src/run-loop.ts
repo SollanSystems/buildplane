@@ -1,3 +1,4 @@
+import type { CapabilityBundleV0 } from "@buildplane/capability-broker";
 import type { MemoryStatus } from "./memory-types.js";
 import type { Run, RunStatus, Unit } from "./types.js";
 
@@ -43,8 +44,10 @@ export interface UnitPacket {
 	 * slice) verifies this pointer before dispatch.
 	 */
 	readonly provenance_ref: string;
-	/** Reserved for M3 capability broker — typed but unused in M2. */
-	readonly capability_bundle?: unknown;
+	/** M3 capability broker bundle attached at PlanForge dispatch (optional elsewhere). */
+	readonly capability_bundle?: CapabilityBundleV0;
+	/** Canonical digest of `capability_bundle` when present (`bundleDigest`). */
+	readonly capability_bundle_digest?: string;
 	/** Reserved for M4 acceptance contract — typed but unused in M2. */
 	readonly acceptance_contract?: unknown;
 	/** Reserved for M3 trust scoping — typed but unused in M2. */

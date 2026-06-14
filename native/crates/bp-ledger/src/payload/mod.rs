@@ -1,6 +1,7 @@
 //! Event payload definitions, versioned per kind.
 
 pub mod activity;
+pub mod capability_broker;
 pub mod checkpoint;
 pub mod git_checkpoint;
 pub mod model_io;
@@ -41,4 +42,5 @@ pub enum Payload {
     WorkspaceReadV1(workspace::WorkspaceReadV1),
     WorkspaceWriteV1(workspace::WorkspaceWriteV1),
     TapeCheckpointV1(checkpoint::TapeCheckpointV1),
+    CapabilityDeniedV1(capability_broker::CapabilityDeniedV1),
 }

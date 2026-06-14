@@ -797,6 +797,17 @@ describe("published bootstrap staging", () => {
 					staged.packageRoot,
 					"vendor",
 					"@buildplane",
+					"capability-broker",
+					"index.js",
+				),
+			),
+		).toBe(true);
+		expect(
+			existsSync(
+				join(
+					staged.packageRoot,
+					"vendor",
+					"@buildplane",
 					"adapters-tools",
 					"index.js",
 				),

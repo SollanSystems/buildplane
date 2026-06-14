@@ -1,5 +1,10 @@
+import type { CapabilityBundleV0 } from "@buildplane/capability-broker";
 import { type RunCommandResult, runCommand } from "./run-command.js";
-import { type WriteFileResult, writeFile } from "./write-file.js";
+import {
+	type WriteFileOptions,
+	type WriteFileResult,
+	writeFile,
+} from "./write-file.js";
 
 export {
 	type RunCommandInput,
@@ -9,9 +14,15 @@ export {
 export { resolveSandboxedPath } from "./sandbox.js";
 export {
 	type WriteFileInput,
+	type WriteFileOptions,
 	type WriteFileResult,
 	writeFile,
 } from "./write-file.js";
+
+export interface ToolRegistryOptions {
+	readonly capabilityBundle?: CapabilityBundleV0;
+	readonly onCapabilityDenied?: WriteFileOptions["onCapabilityDenied"];
+}
 
 export interface ToolRegistry {
 	write_file(input: { path: string; content: string }): WriteFileResult;
@@ -25,13 +36,22 @@ export interface ToolRegistry {
 /**
  * Create a tool registry scoped to a worktree root.
  *
- * Each tool function is pre-bound to the worktree, so callers
- * don't need to pass the root on every invocation.
+ * When `capabilityBundle` is provided, write_file enforces fsWrite allowlists (M3-S4).
  */
-export function createToolRegistry(worktreeRoot: string): ToolRegistry {
+export function createToolRegistry(
+	worktreeRoot: string,
+	options?: ToolRegistryOptions,
+): ToolRegistry {
+	const writeOpts =
+		options?.capabilityBundle || options?.onCapabilityDenied
+			? {
+					capabilityBundle: options.capabilityBundle,
+					onCapabilityDenied: options.onCapabilityDenied,
+				}
+			: undefined;
 	return {
 		write_file(input) {
-			return writeFile(input, worktreeRoot);
+			return writeFile(input, worktreeRoot, writeOpts);
 		},
 		run_command(input) {
 			return runCommand(input, worktreeRoot);

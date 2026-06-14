@@ -1,3 +1,9 @@
+import {
+	bundleDigest,
+	type CapabilityBundleV0,
+	type ValidateCapabilityBundleResult,
+	validateCapabilityBundle,
+} from "@buildplane/capability-broker";
 import type {
 	CommandExecutionBlock,
 	ModelExecutionBlock,
@@ -74,10 +80,10 @@ export function parseUnitPacket(input: string): UnitPacket {
 		packet.provenance_ref === undefined
 			? ""
 			: readRequiredString(packet, "provenance_ref", "packet");
+
+	const capabilityFields = parseCapabilityBundleFields(packet);
+
 	const reserved = {
-		...(packet.capability_bundle === undefined
-			? {}
-			: { capability_bundle: packet.capability_bundle }),
 		...(packet.acceptance_contract === undefined
 			? {}
 			: { acceptance_contract: packet.acceptance_contract }),
@@ -94,6 +100,7 @@ export function parseUnitPacket(input: string): UnitPacket {
 			verification,
 			...(routingHints === undefined ? {} : { routingHints }),
 			provenance_ref,
+			...capabilityFields,
 			...reserved,
 		};
 	}
@@ -105,7 +112,46 @@ export function parseUnitPacket(input: string): UnitPacket {
 		verification,
 		...(routingHints === undefined ? {} : { routingHints }),
 		provenance_ref,
+		...capabilityFields,
 		...reserved,
+	};
+}
+
+function parseCapabilityBundleFields(packet: Record<string, unknown>): {
+	capability_bundle?: CapabilityBundleV0;
+	capability_bundle_digest?: string;
+} {
+	if (packet.capability_bundle === undefined) {
+		return {};
+	}
+	const validated: ValidateCapabilityBundleResult = validateCapabilityBundle(
+		packet.capability_bundle,
+	);
+	if (!validated.ok) {
+		throw new TypeError(
+			`packet.capability_bundle invalid: ${validated.errors.join("; ")}`,
+		);
+	}
+	const digestField = packet.capability_bundle_digest;
+	if (digestField === undefined) {
+		throw new TypeError(
+			"packet.capability_bundle_digest is required when capability_bundle is set",
+		);
+	}
+	if (typeof digestField !== "string" || !digestField.startsWith("sha256:")) {
+		throw new TypeError(
+			"packet.capability_bundle_digest must be a sha256-prefixed digest string",
+		);
+	}
+	const expected = bundleDigest(validated.bundle);
+	if (digestField !== expected) {
+		throw new TypeError(
+			"packet.capability_bundle_digest does not match capability_bundle canonical digest",
+		);
+	}
+	return {
+		capability_bundle: validated.bundle,
+		capability_bundle_digest: digestField,
 	};
 }
 

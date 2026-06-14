@@ -8,6 +8,7 @@
 import type {
 	ActivityCompletedV1,
 	ActivityStartedV1,
+	CapabilityDeniedV1,
 	GitCheckpointV1,
 	ModelRequestV1,
 	ModelResponseV1,
@@ -49,4 +50,5 @@ export type Payload =
 	| { ToolResultV1: ToolResultV1 }
 	| { WorkspaceReadV1: WorkspaceReadV1 }
 	| { WorkspaceWriteV1: WorkspaceWriteV1 }
-	| { TapeCheckpointV1: TapeCheckpointV1 };
+	| { TapeCheckpointV1: TapeCheckpointV1 }
+	| { CapabilityDeniedV1: CapabilityDeniedV1 };

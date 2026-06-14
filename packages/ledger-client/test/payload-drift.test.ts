@@ -47,6 +47,7 @@ function kindName(p: Payload): string {
 		case "WorkspaceReadV1":
 		case "WorkspaceWriteV1":
 		case "TapeCheckpointV1":
+		case "CapabilityDeniedV1":
 			return k;
 		default: {
 			const _exhaustive: never = k as never;
@@ -58,7 +59,7 @@ function kindName(p: Payload): string {
 describe("payload drift alarm", () => {
 	it("every fixture parses as a known variant", () => {
 		const fixtures = loadFixtures();
-		expect(fixtures.length).toBe(20);
+		expect(fixtures.length).toBe(21);
 		const names: string[] = [];
 		for (const fx of fixtures) {
 			const name = kindName(fx as Payload);
@@ -74,6 +75,7 @@ describe("payload drift alarm", () => {
 		expect(EventKind.PlanAdmitted).toBe("plan_admitted");
 		expect(EventKind.PlanReceiptRecorded).toBe("plan_receipt");
 		expect(EventKind.ActivityCompleted).toBe("activity_completed");
+		expect(EventKind.CapabilityDenied).toBe("capability_denied");
 	});
 
 	it("run admission fixture matches the generated wire contract", () => {

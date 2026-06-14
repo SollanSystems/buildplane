@@ -56,6 +56,20 @@ export interface ArtifactRef {
 	size_bytes: number;
 }
 
+/** `capability_denied` payload — broker rejected a tool invocation (fail closed). */
+export interface CapabilityDeniedV1 {
+	/** Run id for export/quarantine correlation (duplicates envelope for verifiers). */
+	run_id: string;
+	/** Canonical digest of the admitted capability bundle, `sha256:<hex>`. */
+	bundle_digest: string;
+	/** Tool surface: `write_file` or `run_command`. */
+	tool: string;
+	/** Human-readable broker denial reason. */
+	reason: string;
+	/** Path or command target that was denied. */
+	target: string;
+}
+
 export interface EnvRedaction {
 	redacted: boolean;
 	hash: string;
@@ -88,6 +102,7 @@ export enum EventKind {
 	ToolResult = "tool_result",
 	WorkspaceRead = "workspace_read",
 	WorkspaceWrite = "workspace_write",
+	CapabilityDenied = "capability_denied",
 	TapeCheckpoint = "tape_checkpoint",
 }
 

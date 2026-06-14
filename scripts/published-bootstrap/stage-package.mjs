@@ -154,6 +154,8 @@ export function resolveSafeStagingParentDirectory() {
 }
 
 export const INTERNAL_PACKAGE_ENTRYPOINTS = Object.freeze({
+	"@buildplane/capability-broker":
+		"vendor/@buildplane/capability-broker/index.js",
 	"@buildplane/kernel": "vendor/@buildplane/kernel/index.js",
 	"@buildplane/runtime": "vendor/@buildplane/runtime/index.js",
 	"@buildplane/policy": "vendor/@buildplane/policy/index.js",

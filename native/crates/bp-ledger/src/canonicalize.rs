@@ -100,6 +100,7 @@ fn payload_variant_name(payload: &Payload) -> &'static str {
         Payload::WorkspaceReadV1(_) => "WorkspaceReadV1",
         Payload::WorkspaceWriteV1(_) => "WorkspaceWriteV1",
         Payload::TapeCheckpointV1(_) => "TapeCheckpointV1",
+        Payload::CapabilityDeniedV1(_) => "CapabilityDeniedV1",
     }
 }
 
@@ -125,6 +126,7 @@ fn kind_to_variant(kind: &str) -> Result<&'static str> {
         "workspace_read" => "WorkspaceReadV1",
         "workspace_write" => "WorkspaceWriteV1",
         "tape_checkpoint" => "TapeCheckpointV1",
+        "capability_denied" => "CapabilityDeniedV1",
         other => {
             return Err(LedgerError::InvalidPayload {
                 kind: other.to_string(),

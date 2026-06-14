@@ -12,6 +12,12 @@ export {
 	type PlanAdmittedPayload,
 	PlanForgeAdmitRejectedError,
 } from "./admit.js";
+export {
+	buildDefaultCapabilityBundleForTask,
+	capabilityBundleDigest,
+	PLANFORGE_CAPABILITY_BUNDLE_SCHEMA_VERSION,
+	type PlanForgeAttachedCapabilityBundle,
+} from "./bundle.js";
 export { compile, type PlanForgeCompileResult } from "./compile.js";
 export { canonicalJson, digest } from "./digest.js";
 export {

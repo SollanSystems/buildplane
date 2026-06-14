@@ -40,6 +40,7 @@ pub fn apply(state: &mut ReplayState, event: &Event) {
         Payload::ToolResultV1(p) => apply_tool_result(state, event, p),
         Payload::WorkspaceReadV1(_) => {}
         Payload::WorkspaceWriteV1(p) => apply_workspace_write(state, event, p),
+        Payload::CapabilityDeniedV1(_) => {}
     }
 }
 
