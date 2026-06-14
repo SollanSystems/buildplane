@@ -48,7 +48,7 @@ function validateAllowlist(allowlist: string[] | undefined): string[] {
 	}
 	for (let i = 0; i < allowlist.length; i++) {
 		const entry = allowlist[i];
-		if (entry.length === 0 || entry.includes("\0")) {
+		if (entry.trim().length === 0 || entry.includes("\0")) {
 			errors.push(
 				`tools.run_command.allowlist[${i}] must be a non-empty string without NUL`,
 			);
