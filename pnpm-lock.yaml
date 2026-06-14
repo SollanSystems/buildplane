@@ -139,6 +139,12 @@ importers:
         specifier: workspace:*
         version: link:../kernel
 
+  packages/capability-broker:
+    dependencies:
+      '@buildplane/planforge':
+        specifier: workspace:*
+        version: link:../planforge
+
   packages/compat-gsd: {}
 
   packages/kernel: {}
