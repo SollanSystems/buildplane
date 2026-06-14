@@ -4,7 +4,7 @@ import type { CapabilityBundleV0 } from "./schema.js";
 
 export type ToolInvocation =
 	| { tool: "write_file"; path: string }
-	| { tool: "run_command"; command: string; args?: string[] };
+	| { tool: "run_command"; command: string; args?: readonly string[] };
 
 export type EvaluateToolContext = {
 	worktreeRoot: string;
@@ -47,28 +47,20 @@ function pathMatchesFsWriteGlobs(
 
 function commandMatchesAllowlist(
 	command: string,
-	args: string[] | undefined,
+	_args: readonly string[] | undefined,
 	allowlist: string[],
 ): boolean {
 	const trimmed = command.trim();
 	if (trimmed.length === 0) {
 		return false;
 	}
-	const parts = trimmed.split(/\s+/);
-	const argv0 = parts[0];
+	const argv0 = trimmed.split(/\s+/)[0];
 	for (const entry of allowlist) {
 		if (entry === argv0) {
 			return true;
 		}
 		if (trimmed === entry || trimmed.startsWith(`${entry} `)) {
 			return true;
-		}
-	}
-	if (args && args.length > 0) {
-		for (const entry of allowlist) {
-			if (entry === args[0]) {
-				return true;
-			}
 		}
 	}
 	return false;

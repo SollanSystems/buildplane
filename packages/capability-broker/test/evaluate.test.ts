@@ -86,7 +86,7 @@ describe("evaluateToolInvocation run_command allowlist", () => {
 	it("allows allowlisted npm test command prefix", () => {
 		const result = evaluateToolInvocation(
 			demoBundle(),
-			{ tool: "run_command", command: "npm test" },
+			{ tool: "run_command", command: "npm", args: ["test"] },
 			{ worktreeRoot },
 		);
 		expect(result).toEqual({ decision: "allow" });
@@ -95,7 +95,7 @@ describe("evaluateToolInvocation run_command allowlist", () => {
 	it("allows git subcommand via argv0", () => {
 		const result = evaluateToolInvocation(
 			demoBundle(),
-			{ tool: "run_command", command: "git status" },
+			{ tool: "run_command", command: "git", args: ["status"] },
 			{ worktreeRoot },
 		);
 		expect(result).toEqual({ decision: "allow" });
@@ -104,7 +104,24 @@ describe("evaluateToolInvocation run_command allowlist", () => {
 	it("denies forbidden command not on allowlist", () => {
 		const result = evaluateToolInvocation(
 			demoBundle(),
-			{ tool: "run_command", command: "curl https://evil.example" },
+			{
+				tool: "run_command",
+				command: "curl",
+				args: ["https://evil.example"],
+			},
+			{ worktreeRoot },
+		);
+		expect(result).toMatchObject({
+			decision: "deny",
+			quarantine: true,
+			reason: expect.stringContaining("allowlist"),
+		});
+	});
+
+	it("denies forbidden command even when args[0] is allowlisted", () => {
+		const result = evaluateToolInvocation(
+			demoBundle(),
+			{ tool: "run_command", command: "curl", args: ["npm"] },
 			{ worktreeRoot },
 		);
 		expect(result).toMatchObject({
