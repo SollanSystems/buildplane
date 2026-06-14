@@ -1,5 +1,20 @@
 # buildplane
 
+## 0.10.1
+
+### Patch Changes
+
+- @buildplane/adapters-tools@0.1.4
+- @buildplane/kernel@0.4.1
+- @buildplane/adapters-models@0.1.4
+- @buildplane/adapters-codex@0.1.4
+- @buildplane/adapters-git@0.2.2
+- @buildplane/adapters-honcho@0.1.4
+- @buildplane/policy@0.1.4
+- @buildplane/runtime@0.1.4
+- @buildplane/storage@0.2.3
+- @buildplane/ui-tui@0.1.4
+
 ## 0.10.0
 
 ### Minor Changes

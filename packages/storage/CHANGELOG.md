@@ -1,5 +1,11 @@
 # @buildplane/storage
 
+## 0.2.3
+
+### Patch Changes
+
+- @buildplane/kernel@0.4.1
+
 ## 0.2.2
 
 ### Patch Changes
