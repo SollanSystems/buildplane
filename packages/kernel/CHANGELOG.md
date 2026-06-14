@@ -1,5 +1,12 @@
 # @buildplane/kernel
 
+## 0.4.1
+
+### Patch Changes
+
+- Updated dependencies [6e11495]
+  - @buildplane/capability-broker@0.2.0
+
 ## 0.4.0
 
 ### Minor Changes
