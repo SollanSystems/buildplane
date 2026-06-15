@@ -21,14 +21,16 @@ Milestone map (status as of 2026-06-10):
 | **M0** | Foundations | ✅ complete |
 | **M1** | Signed Ed25519 per-event tape (S1–S7) + external verifier + GATE receipt | ✅ complete (`main` tip `8a98ea6`) |
 | **M2** | PlanForge admission cycle: `compile → validate → preview → admit → dispatch → execute → receipt` + explicit-input resume (Gate C Path i) | ✅ complete (M2-GATE `fd598da` / #182–#183) |
-| **M3** | Capability broker (digest-referenced bundles, per-tool-call validation) | 🔶 **next** — spec `docs/superpowers/specs/2026-06-10-capability-broker-m3.md` |
-| **M4** | Acceptance contract (diff-scope + CI + lint gating on finalization) | planned |
+| **M3** | Capability broker (digest-referenced bundles, per-tool-call validation — `write_file` + `run_command`) | ✅ complete (M3-GATE `docs/operations/2026-06-15-m3-gate-receipt.md`) |
+| **M4** | Acceptance contract (diff-scope + CI + lint gating on finalization) | 🔶 **next** — planned |
 | **M5** | Web Mission Control (approval inbox, run inspector) | planned |
 | **M6** | End-to-end demo (incl. crash-and-resume) + cut **v0.5.0** | planned |
 
-**M2:** closed at M2-GATE. **M3 critical path:** `S1 → S2 → S3 → S4 → S5 → S6 → S7 → S8` — see `docs/superpowers/specs/2026-06-10-capability-broker-m3.md`. **M3-S1** is next (`packages/capability-broker` schema + digest + validate).
+**M2 & M3:** both closed at their GATEs. **M4** (acceptance contract — diff-scope + CI + lint gating on finalization) is next; it is the first rent-paying consumer of the frozen memory `run_outcomes` (see §"Memory program status").
 
 **M2 slice archive (complete):** S1–S8 + M2-GATE — ledger in `docs/operations/2026-06-09-m2-gate-receipt.md` (S7b phase 2b waived, Path i explicit resume).
+
+**M3 slice archive (complete):** S1 schema/digest (#185) · S2 evaluate (#186) · S3–S6 attach/enforce-write/`capability_denied`/runtime-hook (#187) · S7 plan-level bundle envelope · **S7b run_command enforcement** (gap-closure: the allowlist was defined+evaluable since S2 but unenforced on the tool surface — now both `write_file` and `run_command` fail-closed) · S8 GATE — ledger in `docs/operations/2026-06-15-m3-gate-receipt.md`. Architecture: `docs/architecture/capability-broker.md`. **Follow-up:** extend the PlanForge side-effect vocabulary (`code-edit`→`src/**`/`test/**`) to let admitted plans authorize code edits — this also unblocks genuine `planforge admit` dogfooding (open fork).
 
 **Parallel memory program (frozen):** Phase 1 (`buildplane@0.3.0`) + Phase 2 outcome memory shipped to `main`. **Hard-frozen until operator reopens post–M2-GATE** — outcome routing opt-in / default-OFF. See §"Memory program status".
 
@@ -285,7 +287,7 @@ Stated as imperatives — these have each burned a session:
 These are unresolved operator-level decisions. Surface them; don't silently pick.
 
 - **Why v0.5 / what does success unlock?** This gates the license call below. If the answer is "raise first," sequencing changes.
-- **Dogfooding reframe (decided in principle, needs a slice):** Buildplane is currently **not** built using Buildplane — which falsifies its own thesis. Build at least one real M3/M4 slice **through the actual `planforge admit` path** so the M6 demo can credibly show *"the last features of this tool were built and verified by this tool."* Open question: which feature is the dogfood slice.
+- **Dogfooding reframe (decided in principle, needs a slice):** Buildplane is currently **not** built using Buildplane — which falsifies its own thesis. Build at least one real M3/M4 slice **through the actual `planforge admit` path** so the M6 demo can credibly show *"the last features of this tool were built and verified by this tool."* Open question: which feature is the dogfood slice. **Concrete blocker found during M3:** `PLANFORGE_ALLOWED_SIDE_EFFECTS` has no `code-edit`/`packages/**` kind, so an admitted plan cannot authorize editing source — dogfooding a code-editing slice requires first extending the side-effect vocabulary (→ `src/**`/`test/**` globs) + the capability-bundle mapping. That vocabulary slice is the natural unblocker and a good M4-adjacent first dogfood.
 - **License inconsistency:** the competitive doc says "open source / free," but there is **no `LICENSE` file** and changesets is `access:restricted`. Resolve it — ship **MIT now** *unless* the answer to "what does v0.5 success unlock" is "raise first."
 - **Run Inspector web UI:** thin read-only pull into the M3 window, or defer post-M6? (undecided)
 - **Adversarial Codex productization bar:** the adversarial Codex reviewer currently scores **43.75% on the reviewer-rescue benchmark** (a local stub over 4 fixtures) — what's the bar before it can be the README front door?
