@@ -81,7 +81,9 @@ describe("buildDefaultCapabilityBundleForPlan", () => {
 			}
 		}
 		expect(new Set(envelope.fsWrite)).toEqual(expectedWrite);
-		expect(new Set(envelope.tools?.run_command?.allowlist)).toEqual(expectedAllow);
+		expect(new Set(envelope.tools?.run_command?.allowlist)).toEqual(
+			expectedAllow,
+		);
 		// PF2 alone declares `local-receipt`; its presence proves PF2 was not dropped.
 		expect(envelope.fsWrite).toContain("docs/operations/**");
 	});
