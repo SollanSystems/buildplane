@@ -67,13 +67,14 @@ The receipt is an evidence packet, not a status claim.
 
 - Tier: `L2` (2-role).
 - Tier justification: PlanForge derivation logic over already-landed broker primitives; no tape/signing/replay/digest-algorithm change (it reuses the existing canonical digest), so below L0. Per the M3 spec review table (S7 = L2).
-- Roles satisfied: implementer TDD self-verify ✅ · independent reviewer + acceptance verifier — **pending** (checkpoint before S8).
-- Review task id / reviewer: pending
-- Reviewed commit SHA: pending (= `d9fccd4` at request time)
-- Current PR head SHA: `d9fccd4` (+ docs commit)
-- Verdict: pending
-- Significant issues found: pending
-- Review notes / link: pending
+- Roles satisfied: implementer TDD self-verify ✅ · independent reviewer (fresh-context Sonnet) ✅ · independent acceptance verifier (fresh-context Sonnet) ✅.
+- Review task id / reviewer: orchestration `reviewer` (a4b77f8) + `verifier` (a83f164), fresh context.
+- Reviewed commit SHA: `d9fccd4` (impl) + docs commit at request time.
+- Current PR head SHA: post-review-response commit (union test made independent + empty-plan deny-all added).
+- Verdict: reviewer **PASS** (no blockers); verifier **FAIL on one criterion** — "TDD RED-first not independently provable from git history" (test+impl in one commit). Disposition: single green commit is the correct TDD pattern (a knowingly-RED commit is an anti-pattern; the repo squash-merges); RED was watched in-session and is recorded under §Verification. Treated as a process-evidence note, not a code defect.
+- Significant issues found: R-002 (union test was tautological — recomputed expected via the same internal helper) and R-001 (no empty-plan deny-all coverage). Both medium, both **fixed** in the review-response commit. R-003 (per-task allowlist insertion-order vs plan-level sorted) and R-004 (changeset `access:restricted` + private `buildplane` package) are low nits; R-004 is a pre-existing project-level issue, not introduced here.
+- Issues reconciled by follow-up commit: review-response commit `test(planforge): make plan-bundle union test independent + cover empty-plan deny-all (M3-S7 review)` — union test now derives expected surface from raw task fields via an independent contract table + asserts the PF2-only `docs/operations/**` glob (catches a dropped task); empty-plan test asserts the deny-all shape + broker deny outcome. `vitest run packages/planforge/test/bundle.test.ts` → 6 passed.
+- Review notes / link: both reviewers confirmed the "M6 demo constraints = enforceability principle on the doc-oriented fixture" reading is a correct, non-dodging interpretation of the spec.
 
 ## PR gate
 
