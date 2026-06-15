@@ -78,6 +78,41 @@ export function buildDefaultCapabilityBundleForTask(
 	};
 }
 
+/**
+ * Run-wide capability envelope for an admitted plan (M3-S7): the deterministic
+ * (sorted) union of every task's default bundle. `bundleId` is the plan id.
+ * This is the auditable "what can this plan's workers touch in aggregate" view;
+ * dispatch still attaches the tighter per-task bundle to each UnitPacket.
+ */
+export function buildDefaultCapabilityBundleForPlan(
+	plan: PlanForgePlan,
+): PlanForgeAttachedCapabilityBundle {
+	const fsWrite = new Set<string>();
+	const allowlist = new Set<string>();
+	for (const task of plan.tasks) {
+		const taskBundle = buildDefaultCapabilityBundleForTask(plan, task);
+		for (const glob of taskBundle.fsWrite ?? []) {
+			fsWrite.add(glob);
+		}
+		for (const entry of taskBundle.tools?.run_command?.allowlist ?? []) {
+			allowlist.add(entry);
+		}
+	}
+	const fsWriteSorted = [...fsWrite].sort();
+	const allowlistSorted = [...allowlist].sort();
+	return {
+		schemaVersion: PLANFORGE_CAPABILITY_BUNDLE_SCHEMA_VERSION,
+		bundleId: plan.id,
+		...(fsWriteSorted.length > 0 ? { fsWrite: fsWriteSorted } : {}),
+		tools: {
+			write_file: { enabled: fsWriteSorted.length > 0 },
+			...(allowlistSorted.length > 0
+				? { run_command: { allowlist: allowlistSorted } }
+				: {}),
+		},
+	};
+}
+
 export function capabilityBundleDigest(
 	bundle: PlanForgeAttachedCapabilityBundle,
 ): string {
