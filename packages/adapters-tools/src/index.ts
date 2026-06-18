@@ -8,6 +8,7 @@ import {
 
 export {
 	type RunCommandInput,
+	type RunCommandOptions,
 	type RunCommandResult,
 	runCommand,
 } from "./run-command.js";
@@ -42,7 +43,7 @@ export function createToolRegistry(
 	worktreeRoot: string,
 	options?: ToolRegistryOptions,
 ): ToolRegistry {
-	const writeOpts =
+	const toolOpts =
 		options?.capabilityBundle || options?.onCapabilityDenied
 			? {
 					capabilityBundle: options.capabilityBundle,
@@ -51,10 +52,10 @@ export function createToolRegistry(
 			: undefined;
 	return {
 		write_file(input) {
-			return writeFile(input, worktreeRoot, writeOpts);
+			return writeFile(input, worktreeRoot, toolOpts);
 		},
 		run_command(input) {
-			return runCommand(input, worktreeRoot);
+			return runCommand(input, worktreeRoot, toolOpts);
 		},
 	};
 }

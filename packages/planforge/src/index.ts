@@ -13,6 +13,7 @@ export {
 	PlanForgeAdmitRejectedError,
 } from "./admit.js";
 export {
+	buildDefaultCapabilityBundleForPlan,
 	buildDefaultCapabilityBundleForTask,
 	capabilityBundleDigest,
 	PLANFORGE_CAPABILITY_BUNDLE_SCHEMA_VERSION,
