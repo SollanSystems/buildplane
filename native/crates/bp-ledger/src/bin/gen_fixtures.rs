@@ -24,6 +24,7 @@ use bp_ledger::payload::unit_lifecycle::{
     UnitStartedV1,
 };
 use bp_ledger::payload::capability_broker::CapabilityDeniedV1;
+use bp_ledger::payload::acceptance::{AcceptanceCheckResultV1, AcceptanceRecordedV1};
 use bp_ledger::payload::workspace::{PostWriteState, WorkspaceReadV1, WorkspaceWriteV1};
 use bp_ledger::payload::Payload;
 use serde_json::{json, Value};
@@ -198,6 +199,21 @@ fn main() {
             tool: "write_file".into(),
             reason: "capability broker: outside fsWrite allowlist".into(),
             target: "docs/readme.md".into(),
+        })).unwrap(),
+
+        serde_json::to_value(Payload::AcceptanceRecordedV1(AcceptanceRecordedV1 {
+            plan_id: "pf-plan-fixture".into(),
+            admission_event_id: fixed_event_id(5).to_string(),
+            contract_digest: "sha256:gg".into(),
+            outcome: "passed".into(),
+            diff_scope_status: "passed".into(),
+            out_of_scope_files: vec![],
+            checks: vec![AcceptanceCheckResultV1 {
+                command: "pnpm lint".into(),
+                exit_code: "0".into(),
+                status: "passed".into(),
+            }],
+            evaluated_at: "2026-06-19T12:00:00Z".into(),
         })).unwrap(),
     ];
 

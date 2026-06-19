@@ -51,6 +51,7 @@ describe("M2 signed-identity digest contract (wire boundary)", () => {
 			"PlanAdmittedV1",
 			"PlanReceiptRecordedV1",
 			"ActivityStartedV1",
+			"AcceptanceRecordedV1",
 		]) {
 			const found: string[] = [];
 			numericPaths(variant(name), "", found);

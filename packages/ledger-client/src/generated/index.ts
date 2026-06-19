@@ -10,6 +10,30 @@ export type EventId = Uuid;
 /** Identifier for a run. UUIDv7 — time-ordered. */
 export type RunId = Uuid;
 
+/** One independent check result recorded at finalization (all fields are strings on the wire). */
+export interface AcceptanceCheckResultV1 {
+	command: string;
+	exit_code: string;
+	status: string;
+}
+
+/** `acceptance_recorded` payload — kernel verdict before merge/quarantine. */
+export interface AcceptanceRecordedV1 {
+	plan_id: string;
+	/** Chains to `plan_admitted` (string event id on the wire). */
+	admission_event_id: string;
+	/** Canonical digest of the evaluated contract, `sha256:<hex>`. */
+	contract_digest: string;
+	/** `passed` | `rejected` */
+	outcome: string;
+	/** `passed` | `blocked` */
+	diff_scope_status: string;
+	out_of_scope_files: string[];
+	checks: AcceptanceCheckResultV1[];
+	/** RFC3339 */
+	evaluated_at: string;
+}
+
 /** `activity_completed` payload — records the activity result for replay. */
 export interface ActivityCompletedV1 {
 	run_id: RunId;
@@ -103,6 +127,7 @@ export enum EventKind {
 	WorkspaceRead = "workspace_read",
 	WorkspaceWrite = "workspace_write",
 	CapabilityDenied = "capability_denied",
+	AcceptanceRecorded = "acceptance_recorded",
 	TapeCheckpoint = "tape_checkpoint",
 }
 

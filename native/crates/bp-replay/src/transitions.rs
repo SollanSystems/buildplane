@@ -1,12 +1,13 @@
 //! Per-EventKind state transition functions.
 
 use crate::state::{
-    CheckpointRef, FileObservation, PlanAdmissionReplayState, PlanReceiptReplayState,
-    RecordedActivityState, ReplayIssue, ReplayState,
+    CheckpointRef, FileObservation, PlanAcceptanceReplayState, PlanAdmissionReplayState,
+    PlanReceiptReplayState, RecordedActivityState, ReplayIssue, ReplayState,
 };
 use bp_ledger::event::Event;
 use bp_ledger::payload::{
     activity::{ActivityCompletedV1, ActivityStartedV1, ActivityType},
+    acceptance::AcceptanceRecordedV1,
     git_checkpoint::{CheckpointBoundary, GitCheckpointV1, GitStatus},
     plan_lifecycle::{PlanAdmittedV1, PlanReceiptOutcome, PlanReceiptRecordedV1},
     run_lifecycle::{RunCompletedV1, RunFailedV1, RunStartedV1},
@@ -40,7 +41,8 @@ pub fn apply(state: &mut ReplayState, event: &Event) {
         Payload::ToolResultV1(p) => apply_tool_result(state, event, p),
         Payload::WorkspaceReadV1(_) => {}
         Payload::WorkspaceWriteV1(p) => apply_workspace_write(state, event, p),
-        Payload::CapabilityDeniedV1(_) => {}
+        Payload::CapabilityDeniedV1(_) => {},
+        Payload::AcceptanceRecordedV1(p) => apply_acceptance_recorded(state, event, p),
     }
 }
 
@@ -115,6 +117,24 @@ fn apply_plan_admitted(state: &mut ReplayState, event: &Event, p: &PlanAdmittedV
         decided_at: p.decided_at.clone(),
         idempotency_key: p.idempotency_key.clone(),
         authorized_next_step: p.authorized_next_step.clone(),
+    });
+}
+
+fn apply_acceptance_recorded(
+    state: &mut ReplayState,
+    event: &Event,
+    p: &AcceptanceRecordedV1,
+) {
+    state.plan_cycle_phase = "acceptance_recorded".to_string();
+    state.plan_acceptance = Some(PlanAcceptanceReplayState {
+        event_id: event.id,
+        plan_id: p.plan_id.clone(),
+        admission_event_id: p.admission_event_id.clone(),
+        contract_digest: p.contract_digest.clone(),
+        outcome: p.outcome.clone(),
+        diff_scope_status: p.diff_scope_status.clone(),
+        out_of_scope_files: p.out_of_scope_files.clone(),
+        evaluated_at: p.evaluated_at.clone(),
     });
 }
 

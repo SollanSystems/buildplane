@@ -233,5 +233,23 @@
 			"target": "docs/readme.md",
 			"tool": "write_file"
 		}
+	},
+	{
+		"AcceptanceRecordedV1": {
+			"admission_event_id": "01919000-0000-7000-8000-000000000005",
+			"checks": [
+				{
+					"command": "pnpm lint",
+					"exit_code": "0",
+					"status": "passed"
+				}
+			],
+			"contract_digest": "sha256:gg",
+			"diff_scope_status": "passed",
+			"evaluated_at": "2026-06-19T12:00:00Z",
+			"out_of_scope_files": [],
+			"outcome": "passed",
+			"plan_id": "pf-plan-fixture"
+		}
 	}
 ]

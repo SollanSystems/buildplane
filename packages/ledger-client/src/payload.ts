@@ -6,6 +6,7 @@
 // See: native/crates/bp-ledger/src/payload/mod.rs
 
 import type {
+	AcceptanceRecordedV1,
 	ActivityCompletedV1,
 	ActivityStartedV1,
 	CapabilityDeniedV1,
@@ -51,4 +52,5 @@ export type Payload =
 	| { WorkspaceReadV1: WorkspaceReadV1 }
 	| { WorkspaceWriteV1: WorkspaceWriteV1 }
 	| { TapeCheckpointV1: TapeCheckpointV1 }
-	| { CapabilityDeniedV1: CapabilityDeniedV1 };
+	| { CapabilityDeniedV1: CapabilityDeniedV1 }
+	| { AcceptanceRecordedV1: AcceptanceRecordedV1 };

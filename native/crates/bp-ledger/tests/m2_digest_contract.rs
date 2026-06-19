@@ -13,6 +13,7 @@
 
 use bp_ledger::id::{EventId, RunId};
 use bp_ledger::payload::activity::{ActivityCompletedV1, ActivityStartedV1, ActivityType};
+use bp_ledger::payload::acceptance::AcceptanceRecordedV1;
 use bp_ledger::payload::plan_lifecycle::{
     PlanAdmittedV1, PlanReceiptOutcome, PlanReceiptRecordedV1,
 };
@@ -103,6 +104,27 @@ fn activity_completed_v1_typed_fields_have_no_numeric_field() {
             activity_id: "act-1".into(),
             result_digest: "sha256:ee".into(),
             result: serde_json::json!({ "content": "ok", "tool_calls": [] }),
+        },
+    );
+}
+
+#[test]
+fn acceptance_recorded_v1_has_no_numeric_field() {
+    assert_no_numeric_fields(
+        "AcceptanceRecordedV1",
+        &AcceptanceRecordedV1 {
+            plan_id: "pf-plan-001".into(),
+            admission_event_id: "01919000-0000-7000-8000-000000000005".into(),
+            contract_digest: "sha256:aa".into(),
+            outcome: "passed".into(),
+            diff_scope_status: "passed".into(),
+            out_of_scope_files: vec![],
+            checks: vec![bp_ledger::payload::acceptance::AcceptanceCheckResultV1 {
+                command: "pnpm lint".into(),
+                exit_code: "0".into(),
+                status: "passed".into(),
+            }],
+            evaluated_at: "2026-06-19T12:00:00Z".into(),
         },
     );
 }
