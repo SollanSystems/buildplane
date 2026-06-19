@@ -10,6 +10,30 @@ export type EventId = Uuid;
 /** Identifier for a run. UUIDv7 — time-ordered. */
 export type RunId = Uuid;
 
+/** One independent check result recorded at finalization (all fields are strings on the wire). */
+export interface AcceptanceCheckResultV1 {
+	command: string;
+	exit_code: string;
+	status: string;
+}
+
+/** `acceptance_recorded` payload — kernel verdict before merge/quarantine. */
+export interface AcceptanceRecordedV1 {
+	plan_id: string;
+	/** Chains to `plan_admitted` (string event id on the wire). */
+	admission_event_id: string;
+	/** Canonical digest of the evaluated contract, `sha256:<hex>`. */
+	contract_digest: string;
+	/** `passed` | `rejected` */
+	outcome: string;
+	/** `passed` | `blocked` */
+	diff_scope_status: string;
+	out_of_scope_files: string[];
+	checks: AcceptanceCheckResultV1[];
+	/** RFC3339 */
+	evaluated_at: string;
+}
+
 /** `activity_completed` payload — records the activity result for replay. */
 export interface ActivityCompletedV1 {
 	run_id: RunId;
@@ -78,7 +102,7 @@ export interface EnvRedaction {
 
 /**
  * The kind discriminator identifies which payload variant an event carries.
- *
+ * 
  * Kinds are grouped: run lifecycle, unit lifecycle, git checkpoint, model I/O,
  * tool I/O, workspace observation.
  */
@@ -103,6 +127,7 @@ export enum EventKind {
 	WorkspaceRead = "workspace_read",
 	WorkspaceWrite = "workspace_write",
 	CapabilityDenied = "capability_denied",
+	AcceptanceRecorded = "acceptance_recorded",
 	TapeCheckpoint = "tape_checkpoint",
 }
 
@@ -146,14 +171,11 @@ export enum CheckpointBoundary {
 	PostUnit = "post-unit",
 }
 
-export type GitStatus =
-	| { kind: "ok"; data?: undefined }
-	| {
-			kind: "failed";
-			data: {
-				error: string;
-			};
-	  };
+export type GitStatus = 
+	| { kind: "ok", data?: undefined }
+	| { kind: "failed", data: {
+	error: string;
+}};
 
 export interface GitCheckpointV1 {
 	/** Boundary position relative to the unit. */
@@ -280,7 +302,7 @@ export enum RunAdmissionDecision {
 
 /**
  * `run_admission_recorded` payload — compact kernel-owned admission summary.
- *
+ * 
  * The full admission receipt is stored out-of-band and bound by
  * `receipt_digest`/`receipt_ref`. This event repeats only the deterministic
  * gating summary needed for inspection, replay, and dispatch decisions.
@@ -460,20 +482,14 @@ export interface WorkspaceReadV1 {
 	size_bytes: number;
 }
 
-export type PostWriteState =
-	| {
-			status: "captured";
-			data: {
-				hash: string;
-				size_bytes: number;
-			};
-	  }
-	| {
-			status: "unreadable";
-			data: {
-				reason: string;
-			};
-	  };
+export type PostWriteState = 
+	| { status: "captured", data: {
+	hash: string;
+	size_bytes: number;
+}}
+	| { status: "unreadable", data: {
+	reason: string;
+}};
 
 export interface WorkspaceWriteV1 {
 	tool_request_id: EventId;
@@ -487,17 +503,12 @@ export interface WorkspaceWriteV1 {
 	after: PostWriteState;
 }
 
-export type HeaderValue =
-	| {
-			kind: "raw";
-			data: {
-				value: string;
-			};
-	  }
-	| {
-			kind: "redacted";
-			data: {
-				hash: string;
-				hint: string;
-			};
-	  };
+export type HeaderValue = 
+	| { kind: "raw", data: {
+	value: string;
+}}
+	| { kind: "redacted", data: {
+	hash: string;
+	hint: string;
+}};
+

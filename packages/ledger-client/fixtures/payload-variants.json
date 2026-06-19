@@ -1,237 +1,261 @@
 [
-	{
-		"RunStartedV1": {
-			"config": {},
-			"git_head": "dead",
-			"packet_hash": "sha256:aa",
-			"parent_event_id": null,
-			"parent_run_id": null,
-			"workspace_path": "/ws"
-		}
-	},
-	{
-		"RunCompletedV1": {
-			"duration_ms": 0,
-			"event_count": 0,
-			"outcome": "passed",
-			"unit_count": 0
-		}
-	},
-	{
-		"RunFailedV1": {
-			"reason": "fixture",
-			"terminating_event_id": null
-		}
-	},
-	{
-		"RunAdmissionRecordedV1": {
-			"allowed_side_effects": ["fs.write:declared_scope"],
-			"authorized_next_step": "dispatch_after_admission_append",
-			"decided_at": "2026-05-24T22:41:16Z",
-			"decided_by": "buildplane.kernel.admission",
-			"decision": "PASS",
-			"denied_side_effects": [],
-			"evidence_inputs": [
-				{
-					"digest": "sha256:bb",
-					"kind": "git.status",
-					"reference": "evidence/git-status.txt",
-					"required": true,
-					"status": "present"
-				}
-			],
-			"idempotency_key": "run.admission:v0:fixture",
-			"missing_evidence": [],
-			"policy_profile_id": "reviewed-green",
-			"quarantine": false,
-			"receipt_digest": "sha256:aa",
-			"receipt_id": "receipt-fixture",
-			"receipt_ref": "cas:sha256:aa",
-			"requested_side_effects": ["fs.write:declared_scope"],
-			"unsafe_requests": [],
-			"will_execute_worker": true
-		}
-	},
-	{
-		"UnitStartedV1": {
-			"parent_unit_id": null,
-			"policy": {},
-			"unit_id": "u",
-			"unit_kind": "command"
-		}
-	},
-	{
-		"UnitCompletedV1": {
-			"artifacts": [
-				{
-					"hash": "sha256:aa",
-					"path": "out",
-					"size_bytes": 0
-				}
-			],
-			"outcome": "passed",
-			"unit_id": "u"
-		}
-	},
-	{
-		"UnitFailedV1": {
-			"reason": "fixture",
-			"terminating_event_id": null,
-			"unit_id": "u"
-		}
-	},
-	{
-		"UnitCancelledV1": {
-			"cause": "timeout",
-			"unit_id": "u"
-		}
-	},
-	{
-		"GitCheckpointV1": {
-			"boundary": "pre-unit",
-			"commit_sha": "0000000000000000000000000000000000000000",
-			"git_status": {
-				"kind": "ok"
-			},
-			"reference": "refs/...",
-			"unit_id": "u"
-		}
-	},
-	{
-		"ModelRequestV1": {
-			"headers": {},
-			"messages": [
-				{
-					"content": "hi",
-					"role": "user"
-				}
-			],
-			"model": "claude-opus-4-7",
-			"provider": "anthropic",
-			"sampling": {
-				"max_tokens": 100,
-				"temperature": 0.0,
-				"top_p": null
-			},
-			"system": null,
-			"tools": []
-		}
-	},
-	{
-		"ModelResponseV1": {
-			"content": "ok",
-			"latency_ms": 0,
-			"stop_reason": "end_turn",
-			"tool_calls": [],
-			"usage": {
-				"input_tokens": 1,
-				"output_tokens": 1
-			}
-		}
-	},
-	{
-		"ToolRequestStoredV1": {
-			"arguments": {},
-			"env": {
-				"hash": "sha256:aa",
-				"hint": "env_var",
-				"redacted": true
-			},
-			"tool_name": "shell",
-			"unit_id": "u",
-			"working_directory": "/"
-		}
-	},
-	{
-		"ToolResultV1": {
-			"duration_ms": 0,
-			"exit_code": 0,
-			"output": null,
-			"stderr": "",
-			"stdout": "",
-			"tool_request_id": "01919000-0000-7000-8000-000000000001"
-		}
-	},
-	{
-		"WorkspaceReadV1": {
-			"content_hash": "sha256:aa",
-			"path": "x",
-			"size_bytes": 0,
-			"tool_request_id": "01919000-0000-7000-8000-000000000002"
-		}
-	},
-	{
-		"WorkspaceWriteV1": {
-			"after": {
-				"data": {
-					"hash": "sha256:aa",
-					"size_bytes": 0
-				},
-				"status": "captured"
-			},
-			"hash_before": null,
-			"path": "x",
-			"tool_request_id": "01919000-0000-7000-8000-000000000003"
-		}
-	},
-	{
-		"TapeCheckpointV1": {
-			"algorithm": "sha256_linear",
-			"checkpoint_index": 0,
-			"previous_checkpoint_event_id": null,
-			"run_id": "01919000-0000-7000-8000-0000000000ff",
-			"tape_root_hash": "sha256:aa",
-			"through_event_count": 2,
-			"through_event_id": "01919000-0000-7000-8000-000000000004"
-		}
-	},
-	{
-		"PlanAdmittedV1": {
-			"authorized_next_step": "dispatch_admitted_plan",
-			"decided_at": "2026-05-30T00:00:00Z",
-			"decided_by": "operator:fixture",
-			"idempotency_key": "planforge:v0:buildplane:deadbeef:fixture",
-			"input_digest": "sha256:bb",
-			"plan_digest": "sha256:aa",
-			"plan_id": "pf-plan-fixture",
-			"trusted_base": "deadbeef"
-		}
-	},
-	{
-		"PlanReceiptRecordedV1": {
-			"admission_event_id": "01919000-0000-7000-8000-000000000005",
-			"decided_at": "2026-05-30T00:00:10Z",
-			"outcome": "completed",
-			"plan_id": "pf-plan-fixture",
-			"result_digest": "sha256:cc",
-			"side_effects": ["fs.write:declared_scope"]
-		}
-	},
-	{
-		"ActivityStartedV1": {
-			"activity_id": "act-1",
-			"activity_type": "model",
-			"input_digest": "sha256:dd",
-			"run_id": "01919000-0000-7000-8000-0000000000ff"
-		}
-	},
-	{
-		"ActivityCompletedV1": {
-			"activity_id": "act-1",
-			"result": {
-				"content": "ok"
-			},
-			"result_digest": "sha256:ee",
-			"run_id": "01919000-0000-7000-8000-0000000000ff"
-		}
-	},
-	{
-		"CapabilityDeniedV1": {
-			"bundle_digest": "sha256:ff",
-			"reason": "capability broker: outside fsWrite allowlist",
-			"run_id": "01919000-0000-7000-8000-0000000000ff",
-			"target": "docs/readme.md",
-			"tool": "write_file"
-		}
-	}
+  {
+    "RunStartedV1": {
+      "config": {},
+      "git_head": "dead",
+      "packet_hash": "sha256:aa",
+      "parent_event_id": null,
+      "parent_run_id": null,
+      "workspace_path": "/ws"
+    }
+  },
+  {
+    "RunCompletedV1": {
+      "duration_ms": 0,
+      "event_count": 0,
+      "outcome": "passed",
+      "unit_count": 0
+    }
+  },
+  {
+    "RunFailedV1": {
+      "reason": "fixture",
+      "terminating_event_id": null
+    }
+  },
+  {
+    "RunAdmissionRecordedV1": {
+      "allowed_side_effects": [
+        "fs.write:declared_scope"
+      ],
+      "authorized_next_step": "dispatch_after_admission_append",
+      "decided_at": "2026-05-24T22:41:16Z",
+      "decided_by": "buildplane.kernel.admission",
+      "decision": "PASS",
+      "denied_side_effects": [],
+      "evidence_inputs": [
+        {
+          "digest": "sha256:bb",
+          "kind": "git.status",
+          "reference": "evidence/git-status.txt",
+          "required": true,
+          "status": "present"
+        }
+      ],
+      "idempotency_key": "run.admission:v0:fixture",
+      "missing_evidence": [],
+      "policy_profile_id": "reviewed-green",
+      "quarantine": false,
+      "receipt_digest": "sha256:aa",
+      "receipt_id": "receipt-fixture",
+      "receipt_ref": "cas:sha256:aa",
+      "requested_side_effects": [
+        "fs.write:declared_scope"
+      ],
+      "unsafe_requests": [],
+      "will_execute_worker": true
+    }
+  },
+  {
+    "UnitStartedV1": {
+      "parent_unit_id": null,
+      "policy": {},
+      "unit_id": "u",
+      "unit_kind": "command"
+    }
+  },
+  {
+    "UnitCompletedV1": {
+      "artifacts": [
+        {
+          "hash": "sha256:aa",
+          "path": "out",
+          "size_bytes": 0
+        }
+      ],
+      "outcome": "passed",
+      "unit_id": "u"
+    }
+  },
+  {
+    "UnitFailedV1": {
+      "reason": "fixture",
+      "terminating_event_id": null,
+      "unit_id": "u"
+    }
+  },
+  {
+    "UnitCancelledV1": {
+      "cause": "timeout",
+      "unit_id": "u"
+    }
+  },
+  {
+    "GitCheckpointV1": {
+      "boundary": "pre-unit",
+      "commit_sha": "0000000000000000000000000000000000000000",
+      "git_status": {
+        "kind": "ok"
+      },
+      "reference": "refs/...",
+      "unit_id": "u"
+    }
+  },
+  {
+    "ModelRequestV1": {
+      "headers": {},
+      "messages": [
+        {
+          "content": "hi",
+          "role": "user"
+        }
+      ],
+      "model": "claude-opus-4-7",
+      "provider": "anthropic",
+      "sampling": {
+        "max_tokens": 100,
+        "temperature": 0.0,
+        "top_p": null
+      },
+      "system": null,
+      "tools": []
+    }
+  },
+  {
+    "ModelResponseV1": {
+      "content": "ok",
+      "latency_ms": 0,
+      "stop_reason": "end_turn",
+      "tool_calls": [],
+      "usage": {
+        "input_tokens": 1,
+        "output_tokens": 1
+      }
+    }
+  },
+  {
+    "ToolRequestStoredV1": {
+      "arguments": {},
+      "env": {
+        "hash": "sha256:aa",
+        "hint": "env_var",
+        "redacted": true
+      },
+      "tool_name": "shell",
+      "unit_id": "u",
+      "working_directory": "/"
+    }
+  },
+  {
+    "ToolResultV1": {
+      "duration_ms": 0,
+      "exit_code": 0,
+      "output": null,
+      "stderr": "",
+      "stdout": "",
+      "tool_request_id": "01919000-0000-7000-8000-000000000001"
+    }
+  },
+  {
+    "WorkspaceReadV1": {
+      "content_hash": "sha256:aa",
+      "path": "x",
+      "size_bytes": 0,
+      "tool_request_id": "01919000-0000-7000-8000-000000000002"
+    }
+  },
+  {
+    "WorkspaceWriteV1": {
+      "after": {
+        "data": {
+          "hash": "sha256:aa",
+          "size_bytes": 0
+        },
+        "status": "captured"
+      },
+      "hash_before": null,
+      "path": "x",
+      "tool_request_id": "01919000-0000-7000-8000-000000000003"
+    }
+  },
+  {
+    "TapeCheckpointV1": {
+      "algorithm": "sha256_linear",
+      "checkpoint_index": 0,
+      "previous_checkpoint_event_id": null,
+      "run_id": "01919000-0000-7000-8000-0000000000ff",
+      "tape_root_hash": "sha256:aa",
+      "through_event_count": 2,
+      "through_event_id": "01919000-0000-7000-8000-000000000004"
+    }
+  },
+  {
+    "PlanAdmittedV1": {
+      "authorized_next_step": "dispatch_admitted_plan",
+      "decided_at": "2026-05-30T00:00:00Z",
+      "decided_by": "operator:fixture",
+      "idempotency_key": "planforge:v0:buildplane:deadbeef:fixture",
+      "input_digest": "sha256:bb",
+      "plan_digest": "sha256:aa",
+      "plan_id": "pf-plan-fixture",
+      "trusted_base": "deadbeef"
+    }
+  },
+  {
+    "PlanReceiptRecordedV1": {
+      "admission_event_id": "01919000-0000-7000-8000-000000000005",
+      "decided_at": "2026-05-30T00:00:10Z",
+      "outcome": "completed",
+      "plan_id": "pf-plan-fixture",
+      "result_digest": "sha256:cc",
+      "side_effects": [
+        "fs.write:declared_scope"
+      ]
+    }
+  },
+  {
+    "ActivityStartedV1": {
+      "activity_id": "act-1",
+      "activity_type": "model",
+      "input_digest": "sha256:dd",
+      "run_id": "01919000-0000-7000-8000-0000000000ff"
+    }
+  },
+  {
+    "ActivityCompletedV1": {
+      "activity_id": "act-1",
+      "result": {
+        "content": "ok"
+      },
+      "result_digest": "sha256:ee",
+      "run_id": "01919000-0000-7000-8000-0000000000ff"
+    }
+  },
+  {
+    "CapabilityDeniedV1": {
+      "bundle_digest": "sha256:ff",
+      "reason": "capability broker: outside fsWrite allowlist",
+      "run_id": "01919000-0000-7000-8000-0000000000ff",
+      "target": "docs/readme.md",
+      "tool": "write_file"
+    }
+  },
+  {
+    "AcceptanceRecordedV1": {
+      "admission_event_id": "01919000-0000-7000-8000-000000000005",
+      "checks": [
+        {
+          "command": "pnpm lint",
+          "exit_code": "0",
+          "status": "passed"
+        }
+      ],
+      "contract_digest": "sha256:gg",
+      "diff_scope_status": "passed",
+      "evaluated_at": "2026-06-19T12:00:00Z",
+      "out_of_scope_files": [],
+      "outcome": "passed",
+      "plan_id": "pf-plan-fixture"
+    }
+  }
 ]

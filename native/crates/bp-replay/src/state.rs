@@ -34,6 +34,9 @@ pub struct ReplayState {
     /// Terminal signed `plan_receipt` state, if emitted.
     #[serde(default)]
     pub plan_receipt: Option<PlanReceiptReplayState>,
+    /// Last signed `acceptance_recorded` verdict for this run, if emitted.
+    #[serde(default)]
+    pub plan_acceptance: Option<PlanAcceptanceReplayState>,
     /// Last known content hash per observed file path.
     pub observed_files: BTreeMap<String, FileObservation>,
     /// All git checkpoints reachable from the run.
@@ -65,6 +68,18 @@ pub struct RecordedActivityState {
     pub completed_event_id: Option<EventId>,
     pub result_digest: Option<String>,
     pub result: Option<serde_json::Value>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PlanAcceptanceReplayState {
+    pub event_id: EventId,
+    pub plan_id: String,
+    pub admission_event_id: String,
+    pub contract_digest: String,
+    pub outcome: String,
+    pub diff_scope_status: String,
+    pub out_of_scope_files: Vec<String>,
+    pub evaluated_at: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
