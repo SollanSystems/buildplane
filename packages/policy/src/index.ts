@@ -1,3 +1,4 @@
+export { evaluateAcceptanceContract } from "./acceptance.js";
 export { evaluateBudgets } from "./budgets.js";
 export { evaluateRun } from "./decision.js";
 export {

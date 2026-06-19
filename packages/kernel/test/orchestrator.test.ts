@@ -3,6 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import type {
+	AcceptanceContractV0,
+	AcceptanceEvidence,
 	BuildplanePolicyPort,
 	BuildplaneRuntimePort,
 	BuildplaneStoragePort,
@@ -10,6 +12,7 @@ import type {
 	ExecutionReceipt,
 	InspectSnapshot,
 	PolicyDecision,
+	PolicyProfile,
 	RunAdmissionLocalEvidenceStore,
 	StatusSnapshot,
 	UnitPacket,
@@ -77,6 +80,9 @@ interface HarnessOptions {
 		readonly cleanupError?: string;
 	};
 	readonly inspectWorkspace?: WorkspaceSnapshot;
+	readonly acceptanceEvidence?: AcceptanceEvidence;
+	readonly omitAcceptanceEvaluator?: boolean;
+	readonly policyProfile?: PolicyProfile;
 }
 
 function createHarness(options: HarnessOptions = {}) {
@@ -85,9 +91,13 @@ function createHarness(options: HarnessOptions = {}) {
 		throwOn = [],
 		deleteResult = { deleted: true },
 		inspectWorkspace,
+		acceptanceEvidence,
+		omitAcceptanceEvaluator = false,
+		policyProfile,
 	} = options;
 	const runEvents: string[] = [];
 	const runtimeRoots: string[] = [];
+	const acceptanceEvidenceCalls: AcceptanceEvidence[] = [];
 	const failurePayloads: Parameters<
 		BuildplaneStoragePort["commitRunFailureOutcome"]
 	>[1][] = [];
@@ -106,6 +116,7 @@ function createHarness(options: HarnessOptions = {}) {
 		outputChecks: [
 			{ path: "tmp/out.txt", exists: policyOutcome === "approved" },
 		],
+		acceptanceEvidence,
 	};
 	const statusSnapshot: StatusSnapshot = {
 		initialized: true,
@@ -249,6 +260,33 @@ function createHarness(options: HarnessOptions = {}) {
 	};
 
 	const policy: BuildplanePolicyPort = {
+		...(omitAcceptanceEvaluator
+			? {}
+			: {
+					evaluateAcceptanceContract(
+						contract: AcceptanceContractV0,
+						evidence: AcceptanceEvidence,
+					) {
+						runEvents.push("evaluate-acceptance-contract");
+						acceptanceEvidenceCalls.push(evidence);
+						const failedCheck = contract.checks.find((check) => {
+							const result = evidence.checkResults?.find(
+								(entry) => entry.command === check.command,
+							);
+							return !result || result.exitCode !== 0;
+						});
+						if (failedCheck) {
+							return {
+								kind: "acceptance.contract" as const,
+								outcome: "rejected" as const,
+								reasons: [
+									`acceptance.contract missing or failed check evidence for ${failedCheck.command}`,
+								],
+							};
+						}
+						return null;
+					},
+				}),
 		evaluateRun() {
 			runEvents.push("evaluate-run");
 			if (shouldThrow("policy")) {
@@ -307,6 +345,7 @@ function createHarness(options: HarnessOptions = {}) {
 		workspacePath,
 		runEvents,
 		runtimeRoots,
+		acceptanceEvidenceCalls,
 		failurePayloads,
 		cleanupErrors,
 		statusSnapshot,
@@ -318,6 +357,17 @@ function createHarness(options: HarnessOptions = {}) {
 			policy,
 			workspace,
 			admissionStore,
+			profileRegistry: policyProfile
+				? {
+						resolve(name) {
+							runEvents.push("resolve-profile");
+							if (name !== policyProfile.name) {
+								throw new Error(`unknown profile: ${name}`);
+							}
+							return policyProfile;
+						},
+					}
+				: undefined,
 		}),
 		cleanup() {
 			rmSync(root, { recursive: true, force: true });
@@ -777,6 +827,179 @@ describe("kernel orchestrator", () => {
 			expect(result.run.status).toBe("passed");
 			expect(result.decision?.outcome).toBe("approved");
 			expect(result.workspace).toBeUndefined();
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("blocks async finalization when configured acceptance evidence is missing", async () => {
+		const acceptanceContract: AcceptanceContractV0 = {
+			contract_version: "v0",
+			diff_scope: { allowed_globs: ["**"] },
+			checks: [{ command: "pnpm lint" }],
+		};
+		const {
+			orchestrator,
+			runEvents,
+			acceptanceEvidenceCalls,
+			failurePayloads,
+			workspacePath,
+			cleanup,
+		} = createHarness({
+			policyOutcome: "approved",
+			policyProfile: {
+				name: "default",
+				trustGates: { acceptanceContract },
+			},
+		});
+
+		try {
+			const result = await orchestrator.runPacketAsync(packet);
+
+			expect(runEvents).toContain("evaluate-acceptance-contract");
+			expect(acceptanceEvidenceCalls).toEqual([
+				expect.objectContaining({
+					checkResults: undefined,
+				}),
+			]);
+			expect(runEvents).not.toContain("evaluate-run");
+			expect(runEvents).not.toContain("commit-run-success-outcome");
+			expect(runEvents).not.toContain("delete-workspace");
+			expect(failurePayloads).toEqual([
+				expect.objectContaining({
+					decision: expect.objectContaining({
+						kind: "acceptance.contract",
+						outcome: "rejected",
+					}),
+					workspaceStatus: "retained",
+				}),
+			]);
+			expect(result.run.status).toBe("failed");
+			expect(result.decision).toMatchObject({
+				kind: "acceptance.contract",
+				outcome: "rejected",
+			});
+			expect(result.workspace).toMatchObject({
+				path: workspacePath,
+				status: "retained",
+			});
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("allows async finalization when configured acceptance evidence is present", async () => {
+		const acceptanceContract: AcceptanceContractV0 = {
+			contract_version: "v0",
+			diff_scope: { allowed_globs: ["**"] },
+			checks: [{ command: "pnpm lint" }],
+		};
+		const {
+			orchestrator,
+			runEvents,
+			acceptanceEvidenceCalls,
+			workspacePath,
+			cleanup,
+		} = createHarness({
+			acceptanceEvidence: {
+				checkResults: [{ command: "pnpm lint", exitCode: 0 }],
+			},
+			policyOutcome: "approved",
+			policyProfile: {
+				name: "default",
+				trustGates: { acceptanceContract },
+			},
+		});
+
+		try {
+			const result = await orchestrator.runPacketAsync(packet);
+
+			expect(runEvents).toContain("evaluate-acceptance-contract");
+			expect(acceptanceEvidenceCalls).toEqual([
+				expect.objectContaining({
+					checkResults: [{ command: "pnpm lint", exitCode: 0 }],
+				}),
+			]);
+			expect(validationEvents).toEqual(["validate-packet-for-workspace-root"]);
+			expect(runEvents).toEqual([
+				"resolve-profile",
+				"get-status-snapshot-for-init-preflight",
+				"assert-repo",
+				"create-run",
+				"prepare-workspace",
+				"record-workspace-prepared",
+				"mark-run-running",
+				"execute-packet",
+				"record-execution-evidence",
+				"evaluate-acceptance-contract",
+				"evaluate-run",
+				"commit-run-success-outcome",
+				"delete-workspace",
+				"record-workspace-deleted",
+			]);
+			expect(result.run.status).toBe("passed");
+			expect(result.decision?.outcome).toBe("approved");
+			expect(result.workspace).toBeUndefined();
+			expect(workspacePath).toContain(".buildplane");
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("fails closed when an acceptance contract is configured without an evaluator", async () => {
+		const acceptanceContract: AcceptanceContractV0 = {
+			contract_version: "v0",
+			diff_scope: { allowed_globs: ["**"] },
+			checks: [{ command: "pnpm lint" }],
+		};
+		const {
+			orchestrator,
+			runEvents,
+			acceptanceEvidenceCalls,
+			failurePayloads,
+			workspacePath,
+			cleanup,
+		} = createHarness({
+			acceptanceEvidence: {
+				checkResults: [{ command: "pnpm lint", exitCode: 0 }],
+			},
+			omitAcceptanceEvaluator: true,
+			policyOutcome: "approved",
+			policyProfile: {
+				name: "default",
+				trustGates: { acceptanceContract },
+			},
+		});
+
+		try {
+			const result = await orchestrator.runPacketAsync(packet);
+
+			expect(runEvents).not.toContain("evaluate-acceptance-contract");
+			expect(acceptanceEvidenceCalls).toEqual([]);
+			expect(runEvents).not.toContain("evaluate-run");
+			expect(runEvents).not.toContain("commit-run-success-outcome");
+			expect(runEvents).not.toContain("delete-workspace");
+			expect(failurePayloads).toEqual([
+				expect.objectContaining({
+					decision: expect.objectContaining({
+						kind: "acceptance.contract",
+						outcome: "rejected",
+						reasons: [
+							"acceptance.contract configured but no evaluator is available.",
+						],
+					}),
+					workspaceStatus: "retained",
+				}),
+			]);
+			expect(result.run.status).toBe("failed");
+			expect(result.decision).toMatchObject({
+				kind: "acceptance.contract",
+				outcome: "rejected",
+			});
+			expect(result.workspace).toMatchObject({
+				path: workspacePath,
+				status: "retained",
+			});
 		} finally {
 			cleanup();
 		}

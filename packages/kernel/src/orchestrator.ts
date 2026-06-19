@@ -1434,6 +1434,48 @@ export function createBuildplaneOrchestrator(
 						}
 					}
 
+					const acceptanceContract =
+						resolvedProfile?.trustGates?.acceptanceContract;
+					if (acceptanceContract) {
+						if (!policy.evaluateAcceptanceContract) {
+							return finalizeRun(
+								{
+									run: ctx.run,
+									validatedPacket: currentPacket,
+									workspace: ctx.workspace,
+									attemptCount,
+								},
+								currentReceipt,
+								{
+									kind: "acceptance.contract",
+									outcome: "rejected",
+									reasons: [
+										"acceptance.contract configured but no evaluator is available.",
+									],
+								},
+							);
+						}
+						const acceptanceDecision = policy.evaluateAcceptanceContract(
+							acceptanceContract,
+							{
+								changedFiles: currentReceipt.changedFiles,
+								checkResults: currentReceipt.acceptanceEvidence?.checkResults,
+							},
+						);
+						if (acceptanceDecision) {
+							return finalizeRun(
+								{
+									run: ctx.run,
+									validatedPacket: currentPacket,
+									workspace: ctx.workspace,
+									attemptCount,
+								},
+								currentReceipt,
+								acceptanceDecision,
+							);
+						}
+					}
+
 					const decision = policy.evaluateRun(
 						currentPacket,
 						currentReceipt,

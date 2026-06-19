@@ -25,6 +25,8 @@ import type {
 	LearningScope,
 } from "./outcome-extractor.js";
 import type {
+	AcceptanceContractV0,
+	AcceptanceEvidence,
 	ArchitectureDiffScopeGate,
 	BudgetConstraints,
 	PolicyProfile,
@@ -229,6 +231,16 @@ export interface BuildplanePolicyPort {
 	evaluateArchitectureDiffScope?(
 		changedFiles: readonly string[],
 		gate: ArchitectureDiffScopeGate,
+	): RejectedPolicyDecision | null;
+
+	/**
+	 * Finalization-time acceptance contract gate.
+	 * Returns a rejected decision when required acceptance evidence is missing
+	 * or failing. Returns null when finalization may continue.
+	 */
+	evaluateAcceptanceContract?(
+		contract: AcceptanceContractV0,
+		evidence: AcceptanceEvidence,
 	): RejectedPolicyDecision | null;
 
 	/**

@@ -41,6 +41,28 @@ export interface ArchitectureDiffScopeGate {
 	readonly deniedPaths?: readonly string[];
 }
 
+// ── Acceptance Contract (M4) ───────────────────────────────
+
+/** Per-task acceptance contract evaluated before success finalization. */
+export interface AcceptanceContractV0 {
+	readonly contract_version: "v0";
+	readonly diff_scope: {
+		readonly allowed_globs: readonly string[];
+		readonly denied_globs?: readonly string[];
+	};
+	readonly checks: readonly { readonly command: string }[];
+}
+
+export interface AcceptanceCheckResult {
+	readonly command: string;
+	readonly exitCode: number;
+}
+
+export interface AcceptanceEvidence {
+	readonly changedFiles?: readonly string[];
+	readonly checkResults?: readonly AcceptanceCheckResult[];
+}
+
 // ── Policy Profiles ─────────────────────────────────────────
 
 export interface PolicyProfile {
@@ -69,6 +91,11 @@ export interface TrustGateConfig {
 	 * A rejected result blocks the run without asking an LLM to judge architecture.
 	 */
 	readonly architectureDiffScope?: ArchitectureDiffScopeGate;
+	/**
+	 * Per-task acceptance contract evaluated before success finalization.
+	 * Absent = opt-in gate disabled.
+	 */
+	readonly acceptanceContract?: AcceptanceContractV0;
 }
 
 // ── Retry Policy ────────────────────────────────────────────

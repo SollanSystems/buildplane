@@ -120,6 +120,9 @@ export {
 } from "./outcome-scoring.ts";
 export { parseStrategyPacket, parseUnitPacket } from "./packet.ts";
 export type {
+	AcceptanceCheckResult,
+	AcceptanceContractV0,
+	AcceptanceEvidence,
 	ArchitectureDiffScopeGate,
 	BudgetConstraints,
 	CapabilityGrant,

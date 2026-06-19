@@ -122,6 +122,9 @@ export {
 } from "./outcome-scoring.js";
 export { parseStrategyPacket, parseUnitPacket } from "./packet.js";
 export type {
+	AcceptanceCheckResult,
+	AcceptanceContractV0,
+	AcceptanceEvidence,
 	ArchitectureDiffScopeGate,
 	BudgetConstraints,
 	CapabilityGrant,

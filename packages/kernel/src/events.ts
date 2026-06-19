@@ -119,7 +119,8 @@ export interface PolicyDecisionEvent extends BaseEvent {
 		| "advance-run"
 		| "reject-run"
 		| "retry-run"
-		| "architecture.diff_scope";
+		| "architecture.diff_scope"
+		| "acceptance.contract";
 	readonly outcome: "approved" | "rejected" | "retrying";
 	readonly reasons: readonly string[];
 }
