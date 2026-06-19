@@ -13,3 +13,7 @@ coverage/
 native/target/
 .hermes/
 .claude/settings.local.json
+.claude/worktrees/
+.codegraph/
+.gstack/
+.planning/

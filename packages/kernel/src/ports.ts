@@ -215,6 +215,44 @@ export interface BuildplaneAcceptanceEvidencePort {
 	): readonly AcceptanceCheckResult[];
 }
 
+/** Structured diff-scope arm of an acceptance verdict (for the signed event). */
+export interface AcceptanceDiffScopeResult {
+	readonly status: "passed" | "blocked";
+	readonly outOfScopeFiles: readonly string[];
+}
+
+/**
+ * Verdict the kernel independently computed for an acceptance contract at
+ * finalization. The kernel supplies what it observed against reality; the plan
+ * identity (`plan_id`, `contract_digest`) is held by the CLI port closure that
+ * built the per-task profile, so it is not re-derived here. `outcome ===
+ * "rejected"` carries the diff-scope status and the escaping files; a pass
+ * leaves them empty.
+ */
+export interface AcceptanceRecordInput {
+	readonly runId: string;
+	/** Tape pointer to the signed `plan_admitted` (the packet's `provenance_ref`). */
+	readonly admissionEventId: string;
+	readonly outcome: "passed" | "rejected";
+	readonly diffScopeStatus: "passed" | "blocked";
+	readonly outOfScopeFiles: readonly string[];
+	readonly checkResults: readonly AcceptanceCheckResult[];
+	/** RFC3339 evaluation timestamp. */
+	readonly evaluatedAt: string;
+}
+
+/**
+ * Kernel-facing seam for appending the signed `acceptance_recorded` finalization
+ * verdict. The concrete impl (CLI layer) wraps a signed ledger TapeEmitter and
+ * supplies the plan identity it closed over. `recordAcceptance` MUST resolve only
+ * once the event is durably on the tape (write-ahead — mirrors
+ * `LedgerActivityPort.activityStarted`), so the kernel can `await` it before the
+ * workspace is merged or quarantined.
+ */
+export interface BuildplaneAcceptancePort {
+	recordAcceptance(input: AcceptanceRecordInput): Promise<void>;
+}
+
 export interface BuildplaneRuntimePort {
 	executePacket(packet: UnitPacket, projectRoot: string): ExecutionReceipt;
 	executePacketAsync?(
@@ -262,6 +300,17 @@ export interface BuildplanePolicyPort {
 		contract: AcceptanceContractV0,
 		evidence: AcceptanceEvidence,
 	): RejectedPolicyDecision | null;
+
+	/**
+	 * Structured diff-scope arm of the acceptance verdict, used to populate the
+	 * `acceptance_recorded` event's `diff_scope_status` + `out_of_scope_files`.
+	 * Separate from {@link evaluateAcceptanceContract} (which collapses to a
+	 * reason list) because the signed event records the escaping files verbatim.
+	 */
+	evaluateAcceptanceDiffScope?(
+		changedFiles: readonly string[],
+		contract: AcceptanceContractV0,
+	): AcceptanceDiffScopeResult;
 
 	/**
 	 * Pre-execution trust gate for tool calls.

@@ -20,8 +20,11 @@ import {
 	type ToolRegistryOptions,
 } from "@buildplane/adapters-tools";
 import type {
+	BuildplaneAcceptancePort,
+	BuildplaneProfileRegistryPort,
 	BuildplaneStoragePort,
 	LedgerActivityPort,
+	PolicyProfile,
 } from "@buildplane/kernel";
 import {
 	createTapeEmitter,
@@ -58,6 +61,10 @@ import {
 	formatWorkspaceList,
 } from "./formatters.js";
 import {
+	createAcceptancePort,
+	evaluateAcceptanceDiffScope,
+} from "./ledger-acceptance.js";
+import {
 	createDeferredLedgerActivityPort,
 	createLedgerActivityPort,
 } from "./ledger-activity-port.js";
@@ -70,9 +77,11 @@ import type {
 	preparePacketMemoryEnrichment,
 } from "./packet-enrichment.js";
 import {
+	acceptanceContractDigest,
 	buildPlanAdmittedPayload,
 	buildPlanReceiptPayload,
 	createPlanForgeDryRunPlan,
+	deriveAcceptanceContract,
 	dispatchAdmittedPlan,
 	PLANFORGE_AUTHORIZED_NEXT_STEP,
 	PLANFORGE_VALIDATION_STATUS_PASS,
@@ -1105,7 +1114,11 @@ function toolRegistryOptionsForPacket(
 
 async function loadCliOrchestrator(
 	projectRoot: string,
-	opts?: { readonly ledgerActivityPort?: LedgerActivityPort },
+	opts?: {
+		readonly ledgerActivityPort?: LedgerActivityPort;
+		readonly profileRegistry?: BuildplaneProfileRegistryPort;
+		readonly acceptancePort?: BuildplaneAcceptancePort;
+	},
 ): Promise<CliOrchestratorBundle> {
 	const kernel = (await cliImport("@buildplane/kernel")) as unknown as {
 		createBuildplaneOrchestrator: (options: {
@@ -1119,12 +1132,24 @@ async function loadCliOrchestrator(
 					eventBus: unknown,
 				) => Promise<unknown>;
 			};
-			policy: { evaluateRun: (packet: unknown, receipt: unknown) => unknown };
+			policy: {
+				evaluateRun: (packet: unknown, receipt: unknown) => unknown;
+				evaluateAcceptanceContract?: (
+					contract: unknown,
+					evidence: unknown,
+				) => unknown;
+				evaluateAcceptanceDiffScope?: (
+					changedFiles: readonly string[],
+					contract: unknown,
+				) => unknown;
+			};
 			workspace?: unknown;
 			admissionStore?: RunAdmissionStoreLike;
 			eventBus?: unknown;
 			memoryPort?: unknown;
 			ledgerActivityPort?: unknown;
+			profileRegistry?: BuildplaneProfileRegistryPort;
+			acceptancePort?: BuildplaneAcceptancePort;
 		}) => BuildplaneCliOrchestrator;
 		createEventBus: () => {
 			subscribe: (listener: (event: unknown) => void) => () => void;
@@ -1137,6 +1162,10 @@ async function loadCliOrchestrator(
 	};
 	const policy = (await cliImport("@buildplane/policy")) as unknown as {
 		evaluateRun: (packet: unknown, receipt: unknown) => unknown;
+		evaluateAcceptanceContract: (
+			contract: unknown,
+			evidence: unknown,
+		) => unknown;
 	};
 	const storage = (await cliImport("@buildplane/storage")) as unknown as {
 		createBuildplaneStorage: (root: string) => unknown;
@@ -1450,12 +1479,21 @@ async function loadCliOrchestrator(
 		projectRoot,
 		storage: storage.createBuildplaneStorage(projectRoot),
 		runtime: runtimeRouter,
-		policy: { evaluateRun: policy.evaluateRun },
+		policy: {
+			evaluateRun: policy.evaluateRun,
+			evaluateAcceptanceContract: policy.evaluateAcceptanceContract,
+			evaluateAcceptanceDiffScope: evaluateAcceptanceDiffScope as (
+				changedFiles: readonly string[],
+				contract: unknown,
+			) => unknown,
+		},
 		workspace: adaptersGit.createGitWorktreeAdapter(),
 		admissionStore: createCliRunAdmissionStore(projectRoot),
 		eventBus,
 		memoryPort: orchestratorMemoryPortRef, // READ-WRITE port for post-run writes
 		ledgerActivityPort: opts?.ledgerActivityPort,
+		profileRegistry: opts?.profileRegistry,
+		acceptancePort: opts?.acceptancePort,
 	});
 
 	return {
@@ -3880,6 +3918,41 @@ async function runPlanForgeDispatchCommand(
 		policyProfile: DEFAULT_DISPATCH_POLICY_PROFILE,
 	});
 
+	// M4 acceptance contract: derive one fail-closed contract per task (diff-scope
+	// = the task's capability bundle fsWrite; checks = its verificationCommands),
+	// expose them through a per-task policy profile the kernel resolves at the
+	// finalization gate. `plan.tasks[i]` maps 1:1 (in order) to `packets[i]`.
+	const acceptanceProfiles = new Map<
+		string,
+		{
+			readonly profileName: string;
+			readonly contractDigest: string;
+			readonly profile: PolicyProfile;
+		}
+	>();
+	plan.tasks.forEach((task, index) => {
+		const contract = deriveAcceptanceContract(plan, task);
+		const profileName = `planforge-${plan.id}-${task.id}`;
+		acceptanceProfiles.set(packets[index].unit.id, {
+			profileName,
+			contractDigest: acceptanceContractDigest(contract),
+			profile: {
+				name: profileName,
+				trustGates: { acceptanceContract: contract },
+			},
+		});
+	});
+	const profileRegistry: BuildplaneProfileRegistryPort = {
+		resolve(name) {
+			for (const entry of acceptanceProfiles.values()) {
+				if (entry.profile.name === name) {
+					return entry.profile;
+				}
+			}
+			throw new Error(`unknown policy profile: ${name}`);
+		},
+	};
+
 	const { parseUnitPacket } = (await cliImport("@buildplane/kernel")) as {
 		parseUnitPacket: (input: string) => unknown;
 	};
@@ -3914,14 +3987,35 @@ async function runPlanForgeDispatchCommand(
 	let allPassed = false;
 	try {
 		const ledgerActivityPort = createLedgerActivityPort(emitter);
+		// Tasks dispatch sequentially, so a single mutable identity holder safely
+		// scopes the acceptance verdict's plan identity to the task in flight.
+		const acceptanceIdentity = { planId: plan.id, contractDigest: "" };
+		const acceptancePort = createAcceptancePort(emitter, {
+			get planId() {
+				return acceptanceIdentity.planId;
+			},
+			get contractDigest() {
+				return acceptanceIdentity.contractDigest;
+			},
+		});
 		const { orchestrator, eventBus: cliEventBus } = await loadCliOrchestrator(
 			workspace,
-			{ ledgerActivityPort },
+			{ ledgerActivityPort, profileRegistry, acceptancePort },
 		);
 
 		for (const packet of packets) {
+			const acceptance = acceptanceProfiles.get(packet.unit.id);
+			acceptanceIdentity.contractDigest = acceptance?.contractDigest ?? "";
+			// Route the packet through its per-task acceptance profile so the kernel
+			// resolves the contract at the finalization gate.
+			const dispatchedPacket = acceptance
+				? {
+						...packet,
+						unit: { ...packet.unit, policyProfile: acceptance.profileName },
+					}
+				: packet;
 			const result = await orchestrator.runPacketAsync(
-				parseUnitPacket(JSON.stringify(packet)),
+				parseUnitPacket(JSON.stringify(dispatchedPacket)),
 				cliEventBus,
 			);
 			runs.push({

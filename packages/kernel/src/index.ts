@@ -136,7 +136,10 @@ export type {
 export { createResourceUsageSnapshot } from "./policy.js";
 export type {
 	AcceptanceCheckCollectionInput,
+	AcceptanceDiffScopeResult,
+	AcceptanceRecordInput,
 	BuildplaneAcceptanceEvidencePort,
+	BuildplaneAcceptancePort,
 	BuildplaneMemoryPort,
 	BuildplanePolicyPort,
 	BuildplaneProfileRegistryPort,
