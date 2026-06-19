@@ -12,6 +12,15 @@ import { createTapeEmitter, type TapeEmitter } from "@buildplane/ledger-client";
 const LEDGER_FIXTURES_DIR = dirname(fileURLToPath(import.meta.url));
 export const LEDGER_TEST_REPO_ROOT = resolve(LEDGER_FIXTURES_DIR, "../..");
 
+const cleanupTempDir = async (dir: string) => {
+	await rm(dir, {
+		recursive: true,
+		force: true,
+		maxRetries: 5,
+		retryDelay: 100,
+	});
+};
+
 export function resolveNativeBinaryForLedgerTests(): string {
 	const explicit = process.env.BUILDPLANE_NATIVE_BIN;
 	if (explicit) {
@@ -130,7 +139,7 @@ export async function makeLedgerFixture(options?: {
 			child.kill("SIGTERM");
 			await once(child, "exit");
 		}
-		await rm(dir, { recursive: true, force: true });
+		await cleanupTempDir(dir);
 	};
 
 	return { dir, binary, child, emitter, cleanup };
@@ -259,7 +268,7 @@ export async function makeBuildplaneRunFixture(opts: {
 	const eventsDbPath = join(dir, ".buildplane", "ledger", "events.db");
 
 	const cleanup = async () => {
-		await rm(dir, { recursive: true, force: true });
+		await cleanupTempDir(dir);
 	};
 
 	return { dir, eventsDbPath, exitCode, cleanup };
