@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import type {
+	AcceptanceCheckResult,
 	AcceptanceContractV0,
 	AcceptanceEvidence,
 	BuildplanePolicyPort,
@@ -81,6 +82,8 @@ interface HarnessOptions {
 	};
 	readonly inspectWorkspace?: WorkspaceSnapshot;
 	readonly acceptanceEvidence?: AcceptanceEvidence;
+	readonly trustedAcceptanceCheckResults?: readonly AcceptanceCheckResult[];
+	readonly policyDecisions?: readonly PolicyDecision[];
 	readonly omitAcceptanceEvaluator?: boolean;
 	readonly policyProfile?: PolicyProfile;
 }
@@ -92,10 +95,14 @@ function createHarness(options: HarnessOptions = {}) {
 		deleteResult = { deleted: true },
 		inspectWorkspace,
 		acceptanceEvidence,
+		trustedAcceptanceCheckResults = [],
+		policyDecisions,
 		omitAcceptanceEvaluator = false,
 		policyProfile,
 	} = options;
 	const runEvents: string[] = [];
+	const evidencePayloads: ExecutionReceipt[] = [];
+	let evaluateRunCallCount = 0;
 	const runtimeRoots: string[] = [];
 	const acceptanceEvidenceCalls: AcceptanceEvidence[] = [];
 	const failurePayloads: Parameters<
@@ -166,8 +173,9 @@ function createHarness(options: HarnessOptions = {}) {
 				throw new Error("markRunRunning persistence failed");
 			}
 		},
-		recordExecutionEvidence() {
+		recordExecutionEvidence(_runId, receipt) {
 			runEvents.push("record-execution-evidence");
+			evidencePayloads.push(receipt);
 			if (shouldThrow("recordExecutionEvidence")) {
 				throw new Error("recordExecutionEvidence persistence failed");
 			}
@@ -293,6 +301,15 @@ function createHarness(options: HarnessOptions = {}) {
 				throw new Error("policy evaluation failed");
 			}
 
+			if (policyDecisions) {
+				const decision =
+					policyDecisions[
+						Math.min(evaluateRunCallCount, policyDecisions.length - 1)
+					];
+				evaluateRunCallCount += 1;
+				return decision;
+			}
+
 			return policyOutcome === "approved"
 				? { kind: "advance-run", outcome: "approved", reasons: [] }
 				: {
@@ -345,6 +362,7 @@ function createHarness(options: HarnessOptions = {}) {
 		workspacePath,
 		runEvents,
 		runtimeRoots,
+		evidencePayloads,
 		acceptanceEvidenceCalls,
 		failurePayloads,
 		cleanupErrors,
@@ -357,6 +375,12 @@ function createHarness(options: HarnessOptions = {}) {
 			policy,
 			workspace,
 			admissionStore,
+			acceptanceEvidencePort: {
+				collectCheckResults() {
+					runEvents.push("collect-acceptance-checks");
+					return trustedAcceptanceCheckResults;
+				},
+			},
 			profileRegistry: policyProfile
 				? {
 						resolve(name) {
@@ -856,10 +880,11 @@ describe("kernel orchestrator", () => {
 		try {
 			const result = await orchestrator.runPacketAsync(packet);
 
+			expect(runEvents).toContain("collect-acceptance-checks");
 			expect(runEvents).toContain("evaluate-acceptance-contract");
 			expect(acceptanceEvidenceCalls).toEqual([
 				expect.objectContaining({
-					checkResults: undefined,
+					checkResults: [],
 				}),
 			]);
 			expect(runEvents).not.toContain("evaluate-run");
@@ -888,6 +913,64 @@ describe("kernel orchestrator", () => {
 		}
 	});
 
+	it("blocks sync finalization from trusted acceptance checks instead of receipt self-attestation", () => {
+		const acceptanceContract: AcceptanceContractV0 = {
+			contract_version: "v0",
+			diff_scope: { allowed_globs: ["**"] },
+			checks: [{ command: "pnpm lint" }],
+		};
+		const {
+			orchestrator,
+			runEvents,
+			acceptanceEvidenceCalls,
+			failurePayloads,
+			workspacePath,
+			cleanup,
+		} = createHarness({
+			acceptanceEvidence: {
+				checkResults: [{ command: "pnpm lint", exitCode: 0 }],
+			},
+			trustedAcceptanceCheckResults: [{ command: "pnpm lint", exitCode: 1 }],
+			policyOutcome: "approved",
+			policyProfile: {
+				name: "default",
+				trustGates: { acceptanceContract },
+			},
+		});
+
+		try {
+			const result = orchestrator.runPacket(packet);
+
+			expect(runEvents).toContain("resolve-profile");
+			expect(runEvents).toContain("collect-acceptance-checks");
+			expect(runEvents).toContain("evaluate-acceptance-contract");
+			expect(runEvents).not.toContain("evaluate-run");
+			expect(runEvents).not.toContain("commit-run-success-outcome");
+			expect(runEvents).not.toContain("delete-workspace");
+			expect(acceptanceEvidenceCalls).toEqual([
+				expect.objectContaining({
+					checkResults: [{ command: "pnpm lint", exitCode: 1 }],
+				}),
+			]);
+			expect(failurePayloads).toEqual([
+				expect.objectContaining({
+					decision: expect.objectContaining({
+						kind: "acceptance.contract",
+						outcome: "rejected",
+					}),
+					workspaceStatus: "retained",
+				}),
+			]);
+			expect(result.run.status).toBe("failed");
+			expect(result.workspace).toMatchObject({
+				path: workspacePath,
+				status: "retained",
+			});
+		} finally {
+			cleanup();
+		}
+	});
+
 	it("allows async finalization when configured acceptance evidence is present", async () => {
 		const acceptanceContract: AcceptanceContractV0 = {
 			contract_version: "v0",
@@ -901,9 +984,7 @@ describe("kernel orchestrator", () => {
 			workspacePath,
 			cleanup,
 		} = createHarness({
-			acceptanceEvidence: {
-				checkResults: [{ command: "pnpm lint", exitCode: 0 }],
-			},
+			trustedAcceptanceCheckResults: [{ command: "pnpm lint", exitCode: 0 }],
 			policyOutcome: "approved",
 			policyProfile: {
 				name: "default",
@@ -931,6 +1012,7 @@ describe("kernel orchestrator", () => {
 				"mark-run-running",
 				"execute-packet",
 				"record-execution-evidence",
+				"collect-acceptance-checks",
 				"evaluate-acceptance-contract",
 				"evaluate-run",
 				"commit-run-success-outcome",
@@ -941,6 +1023,36 @@ describe("kernel orchestrator", () => {
 			expect(result.decision?.outcome).toBe("approved");
 			expect(result.workspace).toBeUndefined();
 			expect(workspacePath).toContain(".buildplane");
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("reattaches changedFiles evidence after retry execution", async () => {
+		const { orchestrator, evidencePayloads, cleanup } = createHarness({
+			policyDecisions: [
+				{
+					kind: "retry-run",
+					outcome: "retrying",
+					reasons: ["first attempt needs retry"],
+					attemptNumber: 1,
+					feedbackContext: ["fix and retry"],
+				},
+				{ kind: "advance-run", outcome: "approved", reasons: [] },
+			],
+		});
+
+		try {
+			const result = await orchestrator.runPacketAsync(packet);
+
+			expect(result.run.status).toBe("passed");
+			expect(evidencePayloads).toHaveLength(2);
+			expect(evidencePayloads[0].changedFiles).toEqual([
+				"../buildplane-diff-unavailable",
+			]);
+			expect(evidencePayloads[1].changedFiles).toEqual([
+				"../buildplane-diff-unavailable",
+			]);
 		} finally {
 			cleanup();
 		}

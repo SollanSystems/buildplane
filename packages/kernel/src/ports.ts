@@ -25,6 +25,7 @@ import type {
 	LearningScope,
 } from "./outcome-extractor.js";
 import type {
+	AcceptanceCheckResult,
 	AcceptanceContractV0,
 	AcceptanceEvidence,
 	ArchitectureDiffScopeGate,
@@ -193,6 +194,25 @@ export interface LedgerActivityCompleteInput {
 export interface LedgerActivityPort {
 	activityStarted(input: LedgerActivityStartInput): Promise<void>;
 	activityCompleted(input: LedgerActivityCompleteInput): Promise<void>;
+}
+
+export interface AcceptanceCheckCollectionInput {
+	readonly contract: AcceptanceContractV0;
+	readonly workspacePath: string;
+	readonly packet: UnitPacket;
+	readonly receipt: ExecutionReceipt;
+	readonly attemptCount: number;
+}
+
+/**
+ * Kernel-owned finalization seam for collecting acceptance-check evidence.
+ * Runtime receipts are worker-produced evidence; acceptance checks must be
+ * gathered by the finalization path before a run may be marked successful.
+ */
+export interface BuildplaneAcceptanceEvidencePort {
+	collectCheckResults(
+		input: AcceptanceCheckCollectionInput,
+	): readonly AcceptanceCheckResult[];
 }
 
 export interface BuildplaneRuntimePort {

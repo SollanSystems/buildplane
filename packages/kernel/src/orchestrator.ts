@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -24,8 +24,14 @@ import {
 	type UnitGraph,
 } from "./graph.js";
 import { extractLearnings } from "./outcome-extractor.js";
-import type { BudgetConstraints, PolicyProfile } from "./policy.js";
 import type {
+	AcceptanceCheckResult,
+	AcceptanceContractV0,
+	BudgetConstraints,
+	PolicyProfile,
+} from "./policy.js";
+import type {
+	BuildplaneAcceptanceEvidencePort,
 	BuildplaneMemoryPort,
 	BuildplanePolicyPort,
 	BuildplaneProfileRegistryPort,
@@ -131,6 +137,7 @@ export interface CreateBuildplaneOrchestratorOptions {
 	readonly memoryPort?: BuildplaneMemoryPort;
 	readonly outcomeRouting?: OutcomeRoutingConfig;
 	readonly ledgerActivityPort?: LedgerActivityPort;
+	readonly acceptanceEvidencePort?: BuildplaneAcceptanceEvidencePort;
 }
 
 export function createBuildplaneOrchestrator(
@@ -148,6 +155,8 @@ export function createBuildplaneOrchestrator(
 		options.admittedPlanReader ?? createDefaultAdmittedPlanReader();
 	const memoryPort = options.memoryPort;
 	const ledgerActivityPort = options.ledgerActivityPort;
+	const acceptanceEvidencePort =
+		options.acceptanceEvidencePort ?? createDefaultAcceptanceEvidencePort();
 	const outcomeRouting = options.outcomeRouting ?? defaultOutcomeRoutingConfig;
 	const strategyWorkflowPromotionRule =
 		"multi-round-strategy-workflow->procedure";
@@ -323,6 +332,87 @@ export function createBuildplaneOrchestrator(
 		} catch {
 			return ["../buildplane-diff-unavailable"];
 		}
+	}
+
+	function createDefaultAcceptanceEvidencePort(): BuildplaneAcceptanceEvidencePort {
+		return {
+			collectCheckResults(input) {
+				return collectAcceptanceCheckResults(
+					input.contract,
+					input.workspacePath,
+				);
+			},
+		};
+	}
+
+	function collectAcceptanceCheckResults(
+		contract: AcceptanceContractV0,
+		workspacePath: string,
+	): readonly AcceptanceCheckResult[] {
+		return contract.checks.map((check) => {
+			const result = spawnSync(check.command, {
+				cwd: workspacePath,
+				encoding: "utf8",
+				shell: true,
+				stdio: ["ignore", "pipe", "pipe"],
+				windowsHide: true,
+			});
+
+			return {
+				command: check.command,
+				exitCode: result.status ?? 1,
+			};
+		});
+	}
+
+	function evaluateAcceptanceBeforeFinalization(input: {
+		readonly resolvedProfile: PolicyProfile | undefined;
+		readonly workspacePath: string;
+		readonly currentPacket: UnitPacket;
+		readonly currentReceipt: ExecutionReceipt;
+		readonly attemptCount: number;
+	}): PolicyDecision | null {
+		const acceptanceContract =
+			input.resolvedProfile?.trustGates?.acceptanceContract;
+		if (!acceptanceContract) {
+			return null;
+		}
+
+		if (!policy.evaluateAcceptanceContract) {
+			return {
+				kind: "acceptance.contract",
+				outcome: "rejected",
+				reasons: [
+					"acceptance.contract configured but no evaluator is available.",
+				],
+			};
+		}
+
+		let checkResults: readonly AcceptanceCheckResult[];
+		try {
+			checkResults = acceptanceEvidencePort.collectCheckResults({
+				contract: acceptanceContract,
+				workspacePath: input.workspacePath,
+				packet: input.currentPacket,
+				receipt: input.currentReceipt,
+				attemptCount: input.attemptCount,
+			});
+		} catch (error) {
+			return {
+				kind: "acceptance.contract",
+				outcome: "rejected",
+				reasons: [
+					`acceptance.contract check collection failed: ${
+						error instanceof Error ? error.message : String(error)
+					}`,
+				],
+			};
+		}
+
+		return policy.evaluateAcceptanceContract(acceptanceContract, {
+			changedFiles: input.currentReceipt.changedFiles,
+			checkResults,
+		});
 	}
 
 	function createRunAdmissionDigest(
@@ -1147,6 +1237,23 @@ export function createBuildplaneOrchestrator(
 			const admitted = admitPreparedRunSync(ctx);
 			if (admitted.ok === false) return admitted.result;
 
+			const profileName = ctx.validatedPacket.unit.policyProfile;
+			let resolvedProfile: PolicyProfile | undefined;
+			if (profileRegistry && profileName) {
+				try {
+					resolvedProfile = profileRegistry.resolve(profileName);
+				} catch (error) {
+					return finalizeInfrastructureFailure(
+						ctx.run,
+						infrastructureFailure("profile-resolution-failed", error),
+						{
+							workspace: ctx.workspace,
+							workspaceStatus: "retained",
+						},
+					);
+				}
+			}
+
 			bus.emit({
 				kind: "execution-started",
 				runId: ctx.run.id,
@@ -1160,6 +1267,10 @@ export function createBuildplaneOrchestrator(
 					ctx.validatedPacket,
 					ctx.workspace.path,
 				);
+				receipt = {
+					...receipt,
+					changedFiles: collectWorkspaceChangedFiles(ctx.workspace.path),
+				};
 			} catch (error) {
 				bus.emit({
 					kind: "execution-error",
@@ -1188,6 +1299,37 @@ export function createBuildplaneOrchestrator(
 					exists: c.exists,
 				})),
 			});
+
+			const acceptanceDecision = evaluateAcceptanceBeforeFinalization({
+				resolvedProfile,
+				workspacePath: ctx.workspace.path,
+				currentPacket: ctx.validatedPacket,
+				currentReceipt: receipt,
+				attemptCount: 0,
+			});
+			if (acceptanceDecision) {
+				try {
+					storage.recordExecutionEvidence(ctx.run.id, receipt);
+				} catch (error) {
+					return finalizeInfrastructureFailure(
+						ctx.run,
+						infrastructureFailure(
+							"execution-evidence-persistence-failed",
+							error,
+						),
+						{
+							receipt,
+							workspace: ctx.workspace,
+							workspaceStatus: "retained",
+						},
+					);
+				}
+				return finalizeRun(
+					{ ...ctx, attemptCount: 0 },
+					receipt,
+					acceptanceDecision,
+				);
+			}
 
 			return finalizeRun(ctx, receipt);
 		},
@@ -1377,15 +1519,21 @@ export function createBuildplaneOrchestrator(
 				return r;
 			}
 
+			async function executeOnceWithChangedFiles(
+				p: UnitPacket,
+			): Promise<ExecutionReceipt> {
+				const receipt = await executeOnce(p);
+				return {
+					...receipt,
+					changedFiles: collectWorkspaceChangedFiles(ctx.workspace.path),
+				};
+			}
+
 			let currentPacket = ctx.validatedPacket;
 			let currentReceipt: ExecutionReceipt;
 
 			try {
-				currentReceipt = await executeOnce(currentPacket);
-				currentReceipt = {
-					...currentReceipt,
-					changedFiles: collectWorkspaceChangedFiles(ctx.workspace.path),
-				};
+				currentReceipt = await executeOnceWithChangedFiles(currentPacket);
 			} catch (error) {
 				budgetUnsubscribe?.();
 				const message = error instanceof Error ? error.message : String(error);
@@ -1434,46 +1582,24 @@ export function createBuildplaneOrchestrator(
 						}
 					}
 
-					const acceptanceContract =
-						resolvedProfile?.trustGates?.acceptanceContract;
-					if (acceptanceContract) {
-						if (!policy.evaluateAcceptanceContract) {
-							return finalizeRun(
-								{
-									run: ctx.run,
-									validatedPacket: currentPacket,
-									workspace: ctx.workspace,
-									attemptCount,
-								},
-								currentReceipt,
-								{
-									kind: "acceptance.contract",
-									outcome: "rejected",
-									reasons: [
-										"acceptance.contract configured but no evaluator is available.",
-									],
-								},
-							);
-						}
-						const acceptanceDecision = policy.evaluateAcceptanceContract(
-							acceptanceContract,
+					const acceptanceDecision = evaluateAcceptanceBeforeFinalization({
+						resolvedProfile,
+						workspacePath: ctx.workspace.path,
+						currentPacket,
+						currentReceipt,
+						attemptCount,
+					});
+					if (acceptanceDecision) {
+						return finalizeRun(
 							{
-								changedFiles: currentReceipt.changedFiles,
-								checkResults: currentReceipt.acceptanceEvidence?.checkResults,
+								run: ctx.run,
+								validatedPacket: currentPacket,
+								workspace: ctx.workspace,
+								attemptCount,
 							},
+							currentReceipt,
+							acceptanceDecision,
 						);
-						if (acceptanceDecision) {
-							return finalizeRun(
-								{
-									run: ctx.run,
-									validatedPacket: currentPacket,
-									workspace: ctx.workspace,
-									attemptCount,
-								},
-								currentReceipt,
-								acceptanceDecision,
-							);
-						}
 					}
 
 					const decision = policy.evaluateRun(
@@ -1519,7 +1645,7 @@ export function createBuildplaneOrchestrator(
 					}
 
 					try {
-						currentReceipt = await executeOnce(currentPacket);
+						currentReceipt = await executeOnceWithChangedFiles(currentPacket);
 					} catch (error) {
 						const message =
 							error instanceof Error ? error.message : String(error);
