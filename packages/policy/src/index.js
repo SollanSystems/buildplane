@@ -1,4 +1,4 @@
-import { evaluateAcceptanceContract as evaluateAcceptanceContractImpl } from "./acceptance.ts";
+import { evaluateAcceptanceContract as evaluateAcceptanceContractImpl } from "./acceptance.js";
 import { evaluateRun as evaluateRunImpl } from "./decision.ts";
 
 /** @type {typeof import('./acceptance.ts').evaluateAcceptanceContract} */
