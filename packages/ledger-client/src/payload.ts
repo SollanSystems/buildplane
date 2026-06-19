@@ -6,9 +6,9 @@
 // See: native/crates/bp-ledger/src/payload/mod.rs
 
 import type {
+	AcceptanceRecordedV1,
 	ActivityCompletedV1,
 	ActivityStartedV1,
-	AcceptanceRecordedV1,
 	CapabilityDeniedV1,
 	GitCheckpointV1,
 	ModelRequestV1,

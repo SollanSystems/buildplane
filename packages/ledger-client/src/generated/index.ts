@@ -102,7 +102,7 @@ export interface EnvRedaction {
 
 /**
  * The kind discriminator identifies which payload variant an event carries.
- * 
+ *
  * Kinds are grouped: run lifecycle, unit lifecycle, git checkpoint, model I/O,
  * tool I/O, workspace observation.
  */
@@ -171,11 +171,14 @@ export enum CheckpointBoundary {
 	PostUnit = "post-unit",
 }
 
-export type GitStatus = 
-	| { kind: "ok", data?: undefined }
-	| { kind: "failed", data: {
-	error: string;
-}};
+export type GitStatus =
+	| { kind: "ok"; data?: undefined }
+	| {
+			kind: "failed";
+			data: {
+				error: string;
+			};
+	  };
 
 export interface GitCheckpointV1 {
 	/** Boundary position relative to the unit. */
@@ -302,7 +305,7 @@ export enum RunAdmissionDecision {
 
 /**
  * `run_admission_recorded` payload — compact kernel-owned admission summary.
- * 
+ *
  * The full admission receipt is stored out-of-band and bound by
  * `receipt_digest`/`receipt_ref`. This event repeats only the deterministic
  * gating summary needed for inspection, replay, and dispatch decisions.
@@ -482,14 +485,20 @@ export interface WorkspaceReadV1 {
 	size_bytes: number;
 }
 
-export type PostWriteState = 
-	| { status: "captured", data: {
-	hash: string;
-	size_bytes: number;
-}}
-	| { status: "unreadable", data: {
-	reason: string;
-}};
+export type PostWriteState =
+	| {
+			status: "captured";
+			data: {
+				hash: string;
+				size_bytes: number;
+			};
+	  }
+	| {
+			status: "unreadable";
+			data: {
+				reason: string;
+			};
+	  };
 
 export interface WorkspaceWriteV1 {
 	tool_request_id: EventId;
@@ -503,12 +512,17 @@ export interface WorkspaceWriteV1 {
 	after: PostWriteState;
 }
 
-export type HeaderValue = 
-	| { kind: "raw", data: {
-	value: string;
-}}
-	| { kind: "redacted", data: {
-	hash: string;
-	hint: string;
-}};
-
+export type HeaderValue =
+	| {
+			kind: "raw";
+			data: {
+				value: string;
+			};
+	  }
+	| {
+			kind: "redacted";
+			data: {
+				hash: string;
+				hint: string;
+			};
+	  };
