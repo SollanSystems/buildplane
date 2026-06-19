@@ -1,72 +1,72 @@
 {
-  "events": [
-    {
-      "canonical_event_b64": "eyJpZCI6IjAxOTE5MDAwLTAwMDAtNzAwMC04MDAwLTAwMDAwMDAwMDAwMSIsInJ1bl9pZCI6IjAxOTE5MDAwLTAwMDAtNzAwMC04MDAwLTAwMDAwMDAwMDBmZiIsInBhcmVudF9ldmVudF9pZCI6bnVsbCwic2NoZW1hX3ZlcnNpb24iOjEsImtpbmQiOiJydW5fc3RhcnRlZCIsIm9jY3VycmVkX2F0IjoiMjAyNi0wNS0yOVQwMDowMDowMFoiLCJwYXlsb2FkIjp7IlJ1blN0YXJ0ZWRWMSI6eyJwYWNrZXRfaGFzaCI6InNoYTI1NjphYSIsImdpdF9oZWFkIjoiZGVhZCIsIndvcmtzcGFjZV9wYXRoIjoiL3dzIiwiY29uZmlnIjp7fSwicGFyZW50X3J1bl9pZCI6bnVsbCwicGFyZW50X2V2ZW50X2lkIjpudWxsfX19",
-      "signature": {
-        "algorithm": "ed25519",
-        "canonical_event_hash": "sha256:4f9de0739d9260fdc78af257bf4bb006bd659431c9b699ea2d637bb024b7482e",
-        "event_id": "01919000-0000-7000-8000-000000000001",
-        "signature": "VzGUsJ52TGvlwKIyIYTmrT-1C-Jb6dsg5aH87Aw_NZA6DbzgVcJztUdbT1IjiVFlDvB0MxOIZjoGeAssn8vaCA",
-        "signed_at": "2026-05-29T00:00:05Z",
-        "signer": {
-          "actor_id": "kernel",
-          "key_id": "kernel-main",
-          "public_key_hash": "sha256:fe812c12f3ab4ce6ac5db69ac352f906cb1b11ef43fb33e252ef7ff552263889"
-        }
-      }
-    },
-    {
-      "canonical_event_b64": "eyJpZCI6IjAxOTE5MDAwLTAwMDAtNzAwMC04MDAwLTAwMDAwMDAwMDAwMiIsInJ1bl9pZCI6IjAxOTE5MDAwLTAwMDAtNzAwMC04MDAwLTAwMDAwMDAwMDBmZiIsInBhcmVudF9ldmVudF9pZCI6IjAxOTE5MDAwLTAwMDAtNzAwMC04MDAwLTAwMDAwMDAwMDAwMSIsInNjaGVtYV92ZXJzaW9uIjoxLCJraW5kIjoidW5pdF9zdGFydGVkIiwib2NjdXJyZWRfYXQiOiIyMDI2LTA1LTI5VDAwOjAwOjAxWiIsInBheWxvYWQiOnsiVW5pdFN0YXJ0ZWRWMSI6eyJ1bml0X2lkIjoidS1UQU1QRVJFRCIsInBhcmVudF91bml0X2lkIjpudWxsLCJ1bml0X2tpbmQiOiJjb21tYW5kIiwicG9saWN5Ijp7fX19fQ==",
-      "signature": {
-        "algorithm": "ed25519",
-        "canonical_event_hash": "sha256:d01fbed51e6bf23915e8744342df6b8ffdeb951051dfdec074fd22c2443586d2",
-        "event_id": "01919000-0000-7000-8000-000000000002",
-        "signature": "RBmn06X4FQMdniR5Gw8KRO25pY4h7tx15sDsgd7OAONcnSBxoZUkXQpb5L-JnEmX58Iz6xmsPTLJnAMMbFakDA",
-        "signed_at": "2026-05-29T00:00:05Z",
-        "signer": {
-          "actor_id": "kernel",
-          "key_id": "kernel-main",
-          "public_key_hash": "sha256:fe812c12f3ab4ce6ac5db69ac352f906cb1b11ef43fb33e252ef7ff552263889"
-        }
-      }
-    },
-    {
-      "canonical_event_b64": "eyJpZCI6IjAxOTE5MDAwLTAwMDAtNzAwMC04MDAwLTAwMDAwMDAwMDAwMyIsInJ1bl9pZCI6IjAxOTE5MDAwLTAwMDAtNzAwMC04MDAwLTAwMDAwMDAwMDBmZiIsInBhcmVudF9ldmVudF9pZCI6IjAxOTE5MDAwLTAwMDAtNzAwMC04MDAwLTAwMDAwMDAwMDAwMiIsInNjaGVtYV92ZXJzaW9uIjoxLCJraW5kIjoicnVuX2NvbXBsZXRlZCIsIm9jY3VycmVkX2F0IjoiMjAyNi0wNS0yOVQwMDowMDowMloiLCJwYXlsb2FkIjp7IlJ1bkNvbXBsZXRlZFYxIjp7Im91dGNvbWUiOiJwYXNzZWQiLCJkdXJhdGlvbl9tcyI6MiwiZXZlbnRfY291bnQiOjMsInVuaXRfY291bnQiOjF9fX0=",
-      "signature": {
-        "algorithm": "ed25519",
-        "canonical_event_hash": "sha256:b2cee431cd6b11d8360053022ecc3a645e635bba6ae4b2c1e6495535a4df6126",
-        "event_id": "01919000-0000-7000-8000-000000000003",
-        "signature": "8t85dkxaqap2Us3xsuZYxme8mMT2VqvA8eY_4sluVgC6S9Hnxfwm8FFXMPZYnxIcXGTGu0YuU6yw0Efr1zmUAw",
-        "signed_at": "2026-05-29T00:00:05Z",
-        "signer": {
-          "actor_id": "kernel",
-          "key_id": "kernel-main",
-          "public_key_hash": "sha256:fe812c12f3ab4ce6ac5db69ac352f906cb1b11ef43fb33e252ef7ff552263889"
-        }
-      }
-    },
-    {
-      "canonical_event_b64": "eyJpZCI6IjAxOTE5MDAwLTAwMDAtNzAwMC04MDAwLTAwMDAwMDAwMDAxMCIsInJ1bl9pZCI6IjAxOTE5MDAwLTAwMDAtNzAwMC04MDAwLTAwMDAwMDAwMDBmZiIsInBhcmVudF9ldmVudF9pZCI6IjAxOTE5MDAwLTAwMDAtNzAwMC04MDAwLTAwMDAwMDAwMDAwMyIsInNjaGVtYV92ZXJzaW9uIjoxLCJraW5kIjoidGFwZV9jaGVja3BvaW50Iiwib2NjdXJyZWRfYXQiOiIyMDI2LTA1LTI5VDAwOjAwOjAzWiIsInBheWxvYWQiOnsiVGFwZUNoZWNrcG9pbnRWMSI6eyJydW5faWQiOiIwMTkxOTAwMC0wMDAwLTcwMDAtODAwMC0wMDAwMDAwMDAwZmYiLCJjaGVja3BvaW50X2luZGV4IjowLCJ0aHJvdWdoX2V2ZW50X2lkIjoiMDE5MTkwMDAtMDAwMC03MDAwLTgwMDAtMDAwMDAwMDAwMDAzIiwidGhyb3VnaF9ldmVudF9jb3VudCI6MywicHJldmlvdXNfY2hlY2twb2ludF9ldmVudF9pZCI6bnVsbCwidGFwZV9yb290X2hhc2giOiJzaGEyNTY6YWRhMjEyNmFlZmQyMjg2MjRmOWI0OGI1Y2ZmMDFjZGRkZWIzNDhjN2QzMTU0YWQzMGY4ZjJkYjIwM2RkMzhkZSIsImFsZ29yaXRobSI6InNoYTI1Nl9saW5lYXIifX19",
-      "signature": {
-        "algorithm": "ed25519",
-        "canonical_event_hash": "sha256:ead3ed39b231562beac006e6860d6ec1599f541c1f46b033844e120e25ceab72",
-        "event_id": "01919000-0000-7000-8000-000000000010",
-        "signature": "vK6GY3aAV0Fo02wBbXPqiZVU634jUWpXKqNmMU38k96CXhg5BAs17JDORYKJVC_NB2SScVMNOQ8DUYwHVK3DAQ",
-        "signed_at": "2026-05-29T00:00:05Z",
-        "signer": {
-          "actor_id": "kernel",
-          "key_id": "kernel-main",
-          "public_key_hash": "sha256:fe812c12f3ab4ce6ac5db69ac352f906cb1b11ef43fb33e252ef7ff552263889"
-        }
-      }
-    }
-  ],
-  "format": "buildplane.signed-tape.v1",
-  "run_id": "01919000-0000-7000-8000-0000000000ff",
-  "trusted_keys": [
-    {
-      "public_key_b64": "6kpsY+KcUgq+9VB7Ey7F+ZVHdq6+vnuSQh7qaRRG0iw=",
-      "public_key_hash": "sha256:fe812c12f3ab4ce6ac5db69ac352f906cb1b11ef43fb33e252ef7ff552263889"
-    }
-  ]
+	"events": [
+		{
+			"canonical_event_b64": "eyJpZCI6IjAxOTE5MDAwLTAwMDAtNzAwMC04MDAwLTAwMDAwMDAwMDAwMSIsInJ1bl9pZCI6IjAxOTE5MDAwLTAwMDAtNzAwMC04MDAwLTAwMDAwMDAwMDBmZiIsInBhcmVudF9ldmVudF9pZCI6bnVsbCwic2NoZW1hX3ZlcnNpb24iOjEsImtpbmQiOiJydW5fc3RhcnRlZCIsIm9jY3VycmVkX2F0IjoiMjAyNi0wNS0yOVQwMDowMDowMFoiLCJwYXlsb2FkIjp7IlJ1blN0YXJ0ZWRWMSI6eyJwYWNrZXRfaGFzaCI6InNoYTI1NjphYSIsImdpdF9oZWFkIjoiZGVhZCIsIndvcmtzcGFjZV9wYXRoIjoiL3dzIiwiY29uZmlnIjp7fSwicGFyZW50X3J1bl9pZCI6bnVsbCwicGFyZW50X2V2ZW50X2lkIjpudWxsfX19",
+			"signature": {
+				"algorithm": "ed25519",
+				"canonical_event_hash": "sha256:4f9de0739d9260fdc78af257bf4bb006bd659431c9b699ea2d637bb024b7482e",
+				"event_id": "01919000-0000-7000-8000-000000000001",
+				"signature": "VzGUsJ52TGvlwKIyIYTmrT-1C-Jb6dsg5aH87Aw_NZA6DbzgVcJztUdbT1IjiVFlDvB0MxOIZjoGeAssn8vaCA",
+				"signed_at": "2026-05-29T00:00:05Z",
+				"signer": {
+					"actor_id": "kernel",
+					"key_id": "kernel-main",
+					"public_key_hash": "sha256:fe812c12f3ab4ce6ac5db69ac352f906cb1b11ef43fb33e252ef7ff552263889"
+				}
+			}
+		},
+		{
+			"canonical_event_b64": "eyJpZCI6IjAxOTE5MDAwLTAwMDAtNzAwMC04MDAwLTAwMDAwMDAwMDAwMiIsInJ1bl9pZCI6IjAxOTE5MDAwLTAwMDAtNzAwMC04MDAwLTAwMDAwMDAwMDBmZiIsInBhcmVudF9ldmVudF9pZCI6IjAxOTE5MDAwLTAwMDAtNzAwMC04MDAwLTAwMDAwMDAwMDAwMSIsInNjaGVtYV92ZXJzaW9uIjoxLCJraW5kIjoidW5pdF9zdGFydGVkIiwib2NjdXJyZWRfYXQiOiIyMDI2LTA1LTI5VDAwOjAwOjAxWiIsInBheWxvYWQiOnsiVW5pdFN0YXJ0ZWRWMSI6eyJ1bml0X2lkIjoidS1UQU1QRVJFRCIsInBhcmVudF91bml0X2lkIjpudWxsLCJ1bml0X2tpbmQiOiJjb21tYW5kIiwicG9saWN5Ijp7fX19fQ==",
+			"signature": {
+				"algorithm": "ed25519",
+				"canonical_event_hash": "sha256:d01fbed51e6bf23915e8744342df6b8ffdeb951051dfdec074fd22c2443586d2",
+				"event_id": "01919000-0000-7000-8000-000000000002",
+				"signature": "RBmn06X4FQMdniR5Gw8KRO25pY4h7tx15sDsgd7OAONcnSBxoZUkXQpb5L-JnEmX58Iz6xmsPTLJnAMMbFakDA",
+				"signed_at": "2026-05-29T00:00:05Z",
+				"signer": {
+					"actor_id": "kernel",
+					"key_id": "kernel-main",
+					"public_key_hash": "sha256:fe812c12f3ab4ce6ac5db69ac352f906cb1b11ef43fb33e252ef7ff552263889"
+				}
+			}
+		},
+		{
+			"canonical_event_b64": "eyJpZCI6IjAxOTE5MDAwLTAwMDAtNzAwMC04MDAwLTAwMDAwMDAwMDAwMyIsInJ1bl9pZCI6IjAxOTE5MDAwLTAwMDAtNzAwMC04MDAwLTAwMDAwMDAwMDBmZiIsInBhcmVudF9ldmVudF9pZCI6IjAxOTE5MDAwLTAwMDAtNzAwMC04MDAwLTAwMDAwMDAwMDAwMiIsInNjaGVtYV92ZXJzaW9uIjoxLCJraW5kIjoicnVuX2NvbXBsZXRlZCIsIm9jY3VycmVkX2F0IjoiMjAyNi0wNS0yOVQwMDowMDowMloiLCJwYXlsb2FkIjp7IlJ1bkNvbXBsZXRlZFYxIjp7Im91dGNvbWUiOiJwYXNzZWQiLCJkdXJhdGlvbl9tcyI6MiwiZXZlbnRfY291bnQiOjMsInVuaXRfY291bnQiOjF9fX0=",
+			"signature": {
+				"algorithm": "ed25519",
+				"canonical_event_hash": "sha256:b2cee431cd6b11d8360053022ecc3a645e635bba6ae4b2c1e6495535a4df6126",
+				"event_id": "01919000-0000-7000-8000-000000000003",
+				"signature": "8t85dkxaqap2Us3xsuZYxme8mMT2VqvA8eY_4sluVgC6S9Hnxfwm8FFXMPZYnxIcXGTGu0YuU6yw0Efr1zmUAw",
+				"signed_at": "2026-05-29T00:00:05Z",
+				"signer": {
+					"actor_id": "kernel",
+					"key_id": "kernel-main",
+					"public_key_hash": "sha256:fe812c12f3ab4ce6ac5db69ac352f906cb1b11ef43fb33e252ef7ff552263889"
+				}
+			}
+		},
+		{
+			"canonical_event_b64": "eyJpZCI6IjAxOTE5MDAwLTAwMDAtNzAwMC04MDAwLTAwMDAwMDAwMDAxMCIsInJ1bl9pZCI6IjAxOTE5MDAwLTAwMDAtNzAwMC04MDAwLTAwMDAwMDAwMDBmZiIsInBhcmVudF9ldmVudF9pZCI6IjAxOTE5MDAwLTAwMDAtNzAwMC04MDAwLTAwMDAwMDAwMDAwMyIsInNjaGVtYV92ZXJzaW9uIjoxLCJraW5kIjoidGFwZV9jaGVja3BvaW50Iiwib2NjdXJyZWRfYXQiOiIyMDI2LTA1LTI5VDAwOjAwOjAzWiIsInBheWxvYWQiOnsiVGFwZUNoZWNrcG9pbnRWMSI6eyJydW5faWQiOiIwMTkxOTAwMC0wMDAwLTcwMDAtODAwMC0wMDAwMDAwMDAwZmYiLCJjaGVja3BvaW50X2luZGV4IjowLCJ0aHJvdWdoX2V2ZW50X2lkIjoiMDE5MTkwMDAtMDAwMC03MDAwLTgwMDAtMDAwMDAwMDAwMDAzIiwidGhyb3VnaF9ldmVudF9jb3VudCI6MywicHJldmlvdXNfY2hlY2twb2ludF9ldmVudF9pZCI6bnVsbCwidGFwZV9yb290X2hhc2giOiJzaGEyNTY6YWRhMjEyNmFlZmQyMjg2MjRmOWI0OGI1Y2ZmMDFjZGRkZWIzNDhjN2QzMTU0YWQzMGY4ZjJkYjIwM2RkMzhkZSIsImFsZ29yaXRobSI6InNoYTI1Nl9saW5lYXIifX19",
+			"signature": {
+				"algorithm": "ed25519",
+				"canonical_event_hash": "sha256:ead3ed39b231562beac006e6860d6ec1599f541c1f46b033844e120e25ceab72",
+				"event_id": "01919000-0000-7000-8000-000000000010",
+				"signature": "vK6GY3aAV0Fo02wBbXPqiZVU634jUWpXKqNmMU38k96CXhg5BAs17JDORYKJVC_NB2SScVMNOQ8DUYwHVK3DAQ",
+				"signed_at": "2026-05-29T00:00:05Z",
+				"signer": {
+					"actor_id": "kernel",
+					"key_id": "kernel-main",
+					"public_key_hash": "sha256:fe812c12f3ab4ce6ac5db69ac352f906cb1b11ef43fb33e252ef7ff552263889"
+				}
+			}
+		}
+	],
+	"format": "buildplane.signed-tape.v1",
+	"run_id": "01919000-0000-7000-8000-0000000000ff",
+	"trusted_keys": [
+		{
+			"public_key_b64": "6kpsY+KcUgq+9VB7Ey7F+ZVHdq6+vnuSQh7qaRRG0iw=",
+			"public_key_hash": "sha256:fe812c12f3ab4ce6ac5db69ac352f906cb1b11ef43fb33e252ef7ff552263889"
+		}
+	]
 }
