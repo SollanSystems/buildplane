@@ -1,5 +1,6 @@
 import type { CapabilityBundleV0 } from "@buildplane/capability-broker";
 import type { MemoryStatus } from "./memory-types.js";
+import type { AcceptanceEvidence } from "./policy.js";
 import type { Run, RunStatus, Unit } from "./types.js";
 
 export interface ToolDefinition {
@@ -84,6 +85,8 @@ export interface ExecutionReceipt {
 	readonly outputChecks: readonly OutputCheck[];
 	/** Deterministic repo-relative diff paths captured after execution when available. */
 	readonly changedFiles?: readonly string[];
+	/** Acceptance evidence collected before finalization when an acceptance contract is configured. */
+	readonly acceptanceEvidence?: AcceptanceEvidence;
 	readonly sideEffects?: readonly SideEffectReceipt[];
 }
 
@@ -94,7 +97,10 @@ export interface ApprovedPolicyDecision {
 }
 
 export interface RejectedPolicyDecision {
-	readonly kind: "reject-run" | "architecture.diff_scope";
+	readonly kind:
+		| "reject-run"
+		| "architecture.diff_scope"
+		| "acceptance.contract";
 	readonly outcome: "rejected";
 	readonly reasons: readonly string[];
 }
