@@ -1,6 +1,7 @@
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import type {
 	AcceptanceCheckResult,
@@ -90,6 +91,14 @@ interface HarnessOptions {
 	readonly policyProfile?: PolicyProfile;
 	readonly withAcceptancePort?: boolean;
 	readonly diffScope?: AcceptanceDiffScopeResult;
+	/** Initialize the workspace path as a real git repo so changedFiles capture
+	 * reflects on-disk mutations (lets a check mutate the worktree). */
+	readonly gitWorkspace?: boolean;
+	/** Relative paths a simulated acceptance check writes into the workspace when
+	 * `collectCheckResults` runs (mutation-after-execution). */
+	readonly mutateOnCollectChecks?: readonly string[];
+	/** Reject inside the acceptance port to exercise the write-ahead fail-closed path. */
+	readonly throwOnRecordAcceptance?: boolean;
 }
 
 function createHarness(options: HarnessOptions = {}) {
@@ -105,6 +114,9 @@ function createHarness(options: HarnessOptions = {}) {
 		policyProfile,
 		withAcceptancePort = false,
 		diffScope,
+		gitWorkspace = false,
+		mutateOnCollectChecks = [],
+		throwOnRecordAcceptance = false,
 	} = options;
 	const runEvents: string[] = [];
 	const evidencePayloads: ExecutionReceipt[] = [];
@@ -112,12 +124,24 @@ function createHarness(options: HarnessOptions = {}) {
 	const runtimeRoots: string[] = [];
 	const acceptanceEvidenceCalls: AcceptanceEvidence[] = [];
 	const acceptanceRecords: AcceptanceRecordInput[] = [];
+	const diffScopeChangedFiles: (readonly string[])[] = [];
 	const failurePayloads: Parameters<
 		BuildplaneStoragePort["commitRunFailureOutcome"]
 	>[1][] = [];
 	const cleanupErrors: string[] = [];
 	const root = mkdtempSync(join(tmpdir(), "buildplane-orchestrator-"));
 	const workspacePath = join(root, ".buildplane", "workspaces", "run-1");
+	if (gitWorkspace) {
+		mkdirSync(workspacePath, { recursive: true });
+		const git = (...args: string[]) =>
+			execFileSync("git", ["-C", workspacePath, ...args], { stdio: "ignore" });
+		git("init", "-q");
+		git("config", "user.email", "test@example.com");
+		git("config", "user.name", "test");
+		writeFileSync(join(workspacePath, "seed.txt"), "seed\n");
+		git("add", "-A");
+		git("commit", "-q", "-m", "seed");
+	}
 	const baseReceipt: ExecutionReceipt = {
 		command: "node",
 		args: [],
@@ -278,7 +302,8 @@ function createHarness(options: HarnessOptions = {}) {
 		...(omitAcceptanceEvaluator
 			? {}
 			: {
-					evaluateAcceptanceDiffScope() {
+					evaluateAcceptanceDiffScope(changedFiles: readonly string[]) {
+						diffScopeChangedFiles.push(changedFiles);
 						return diffScope ?? { status: "passed", outOfScopeFiles: [] };
 					},
 					evaluateAcceptanceContract(
@@ -384,6 +409,7 @@ function createHarness(options: HarnessOptions = {}) {
 		evidencePayloads,
 		acceptanceEvidenceCalls,
 		acceptanceRecords,
+		diffScopeChangedFiles,
 		failurePayloads,
 		cleanupErrors,
 		statusSnapshot,
@@ -398,6 +424,16 @@ function createHarness(options: HarnessOptions = {}) {
 			acceptanceEvidencePort: {
 				collectCheckResults() {
 					runEvents.push("collect-acceptance-checks");
+					for (const relPath of mutateOnCollectChecks) {
+						const target = join(workspacePath, relPath);
+						mkdirSync(dirname(target), { recursive: true });
+						writeFileSync(target, "mutated-by-check\n");
+						if (gitWorkspace) {
+							execFileSync("git", ["-C", workspacePath, "add", "-A"], {
+								stdio: "ignore",
+							});
+						}
+					}
 					return trustedAcceptanceCheckResults;
 				},
 			},
@@ -406,6 +442,9 @@ function createHarness(options: HarnessOptions = {}) {
 						async recordAcceptance(input: AcceptanceRecordInput) {
 							runEvents.push("acceptance-recorded");
 							acceptanceRecords.push(input);
+							if (throwOnRecordAcceptance) {
+								throw new Error("ledger flush rejected");
+							}
 						},
 					}
 				: undefined,
@@ -1193,6 +1232,94 @@ describe("kernel orchestrator", () => {
 				}),
 			]);
 			expect(result.run.status).toBe("failed");
+			expect(result.workspace).toMatchObject({
+				path: workspacePath,
+				status: "retained",
+			});
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("recomputes diff scope after acceptance checks mutate the worktree", async () => {
+		const acceptanceContract: AcceptanceContractV0 = {
+			contract_version: "v0",
+			diff_scope: { allowed_globs: ["docs/**"] },
+			checks: [{ command: "pnpm lint --fix" }],
+		};
+		const { orchestrator, acceptanceRecords, diffScopeChangedFiles, cleanup } =
+			createHarness({
+				gitWorkspace: true,
+				// The check writes an out-of-scope file AFTER worker execution captured
+				// changedFiles — the regression is that this file is invisible to the gate.
+				mutateOnCollectChecks: ["src/sneaky.ts"],
+				trustedAcceptanceCheckResults: [
+					{ command: "pnpm lint --fix", exitCode: 0 },
+				],
+				policyOutcome: "approved",
+				withAcceptancePort: true,
+				diffScope: { status: "blocked", outOfScopeFiles: ["src/sneaky.ts"] },
+				policyProfile: {
+					name: "default",
+					trustGates: { acceptanceContract },
+				},
+			});
+
+		try {
+			await orchestrator.runPacketAsync(packet);
+
+			// The diff-scope evaluation must see the check-created out-of-scope file.
+			expect(diffScopeChangedFiles.at(-1)).toContain("src/sneaky.ts");
+			expect(acceptanceRecords).toEqual([
+				expect.objectContaining({
+					outcome: "rejected",
+					diffScopeStatus: "blocked",
+					outOfScopeFiles: ["src/sneaky.ts"],
+				}),
+			]);
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("finalizes the run when acceptance recording fails (write-ahead fail-closed)", async () => {
+		const acceptanceContract: AcceptanceContractV0 = {
+			contract_version: "v0",
+			diff_scope: { allowed_globs: ["**"] },
+			checks: [{ command: "pnpm lint" }],
+		};
+		const { orchestrator, runEvents, failurePayloads, workspacePath, cleanup } =
+			createHarness({
+				trustedAcceptanceCheckResults: [{ command: "pnpm lint", exitCode: 0 }],
+				policyOutcome: "approved",
+				withAcceptancePort: true,
+				throwOnRecordAcceptance: true,
+				policyProfile: {
+					name: "default",
+					trustGates: { acceptanceContract },
+				},
+			});
+
+		try {
+			const result = await orchestrator.runPacketAsync(packet);
+
+			// A rejected ledger flush must NOT escape unfinalized — it routes through
+			// the infrastructure-failure path and quarantines the workspace.
+			expect(runEvents).toContain("acceptance-recorded");
+			expect(runEvents).not.toContain("commit-run-success-outcome");
+			expect(runEvents).not.toContain("delete-workspace");
+			expect(failurePayloads.at(-1)).toMatchObject({
+				infrastructureFailure: {
+					kind: "acceptance-record-failed",
+					message: "ledger flush rejected",
+				},
+				workspaceStatus: "retained",
+			});
+			expect(result.run.status).toBe("failed");
+			expect(result.failure).toMatchObject({
+				kind: "acceptance-record-failed",
+				message: "ledger flush rejected",
+			});
 			expect(result.workspace).toMatchObject({
 				path: workspacePath,
 				status: "retained",

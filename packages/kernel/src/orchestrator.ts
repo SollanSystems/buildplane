@@ -473,14 +473,19 @@ export function createBuildplaneOrchestrator(
 			};
 		}
 
+		// Re-capture changed files AFTER the checks ran: a check (e.g. `lint --fix`
+		// or a snapshot update) can mutate the worktree, and those files must be in
+		// the diff-scope decision or out-of-scope writes could merge on a zero exit.
+		const changedFiles = collectWorkspaceChangedFiles(input.workspacePath);
+
 		const decision = policy.evaluateAcceptanceContract(acceptanceContract, {
-			changedFiles: input.currentReceipt.changedFiles,
+			changedFiles,
 			checkResults,
 		});
 
 		if (acceptancePort) {
 			const diffScope = policy.evaluateAcceptanceDiffScope?.(
-				input.currentReceipt.changedFiles ?? [],
+				changedFiles,
 				acceptanceContract,
 			) ?? { status: "passed" as const, outOfScopeFiles: [] };
 			const record: AcceptanceRecordInput = {
@@ -1665,14 +1670,29 @@ export function createBuildplaneOrchestrator(
 						}
 					}
 
-					const acceptanceDecision = await evaluateAndRecordAcceptanceAsync({
-						resolvedProfile,
-						workspacePath: ctx.workspace.path,
-						currentPacket,
-						currentReceipt,
-						attemptCount,
-						runId: ctx.run.id,
-					});
+					let acceptanceDecision: PolicyDecision | null;
+					try {
+						acceptanceDecision = await evaluateAndRecordAcceptanceAsync({
+							resolvedProfile,
+							workspacePath: ctx.workspace.path,
+							currentPacket,
+							currentReceipt,
+							attemptCount,
+							runId: ctx.run.id,
+						});
+					} catch (error) {
+						// Recording the signed verdict is a write-ahead gate. If it fails
+						// the run must NOT escape unfinalized — fail closed and quarantine.
+						return finalizeInfrastructureFailure(
+							ctx.run,
+							infrastructureFailure("acceptance-record-failed", error),
+							{
+								receipt: currentReceipt,
+								workspace: ctx.workspace,
+								workspaceStatus: "retained",
+							},
+						);
+					}
 					if (acceptanceDecision) {
 						return finalizeRun(
 							{
