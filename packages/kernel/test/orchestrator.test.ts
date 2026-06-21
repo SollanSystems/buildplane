@@ -97,6 +97,10 @@ interface HarnessOptions {
 	/** Relative paths a simulated acceptance check writes into the workspace when
 	 * `collectCheckResults` runs (mutation-after-execution). */
 	readonly mutateOnCollectChecks?: readonly string[];
+	/** Relative paths a simulated worker/check writes AND commits inside the
+	 * worktree during `collectCheckResults`, advancing HEAD off the recorded base
+	 * (exercises the diff-scope HEAD-advance fail-open). Requires gitWorkspace. */
+	readonly commitOnCollectChecks?: readonly string[];
 	/** Reject inside the acceptance port to exercise the write-ahead fail-closed path. */
 	readonly throwOnRecordAcceptance?: boolean;
 }
@@ -116,6 +120,7 @@ function createHarness(options: HarnessOptions = {}) {
 		diffScope,
 		gitWorkspace = false,
 		mutateOnCollectChecks = [],
+		commitOnCollectChecks = [],
 		throwOnRecordAcceptance = false,
 	} = options;
 	const runEvents: string[] = [];
@@ -131,6 +136,11 @@ function createHarness(options: HarnessOptions = {}) {
 	const cleanupErrors: string[] = [];
 	const root = mkdtempSync(join(tmpdir(), "buildplane-orchestrator-"));
 	const workspacePath = join(root, ".buildplane", "workspaces", "run-1");
+	// The recorded base SHA the acceptance gate's HEAD-advance guard compares
+	// against. For a real git workspace it is the actual seed commit so the guard
+	// sees an unchanged HEAD on normal runs; "abc123" is the inert placeholder the
+	// non-git mock workspaces use.
+	let workspaceHeadSha = "abc123";
 	if (gitWorkspace) {
 		mkdirSync(workspacePath, { recursive: true });
 		const git = (...args: string[]) =>
@@ -141,6 +151,11 @@ function createHarness(options: HarnessOptions = {}) {
 		writeFileSync(join(workspacePath, "seed.txt"), "seed\n");
 		git("add", "-A");
 		git("commit", "-q", "-m", "seed");
+		workspaceHeadSha = execFileSync(
+			"git",
+			["-C", workspacePath, "rev-parse", "HEAD"],
+			{ encoding: "utf8" },
+		).trim();
 	}
 	const baseReceipt: ExecutionReceipt = {
 		command: "node",
@@ -367,7 +382,7 @@ function createHarness(options: HarnessOptions = {}) {
 	const workspace: BuildplaneWorkspacePort = {
 		assertRunnableRepository() {
 			runEvents.push("assert-repo");
-			return { headSha: "abc123" };
+			return { headSha: workspaceHeadSha };
 		},
 		checkWorktreeClean: () => true,
 		prepareWorkspace() {
@@ -375,7 +390,7 @@ function createHarness(options: HarnessOptions = {}) {
 			if (shouldThrow("prepareWorkspace")) {
 				throw new Error("git worktree add failed");
 			}
-			return { path: workspacePath, headSha: "abc123" };
+			return { path: workspacePath, headSha: workspaceHeadSha };
 		},
 		deleteWorkspace() {
 			runEvents.push("delete-workspace");
@@ -433,6 +448,19 @@ function createHarness(options: HarnessOptions = {}) {
 								stdio: "ignore",
 							});
 						}
+					}
+					for (const relPath of commitOnCollectChecks) {
+						const target = join(workspacePath, relPath);
+						mkdirSync(dirname(target), { recursive: true });
+						writeFileSync(target, "committed-by-worker\n");
+						execFileSync("git", ["-C", workspacePath, "add", "-A"], {
+							stdio: "ignore",
+						});
+						execFileSync(
+							"git",
+							["-C", workspacePath, "commit", "-q", "-m", "worker commit"],
+							{ stdio: "ignore" },
+						);
 					}
 					return trustedAcceptanceCheckResults;
 				},
@@ -1277,6 +1305,59 @@ describe("kernel orchestrator", () => {
 					outOfScopeFiles: ["src/sneaky.ts"],
 				}),
 			]);
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("rejects fail-closed when a worker commits inside the worktree (HEAD advances off the recorded base)", async () => {
+		const acceptanceContract: AcceptanceContractV0 = {
+			contract_version: "v0",
+			diff_scope: { allowed_globs: ["docs/**"] },
+			checks: [{ command: "true" }],
+		};
+		const {
+			orchestrator,
+			runEvents,
+			acceptanceRecords,
+			workspacePath,
+			cleanup,
+		} = createHarness({
+			gitWorkspace: true,
+			// A worker commits an out-of-scope file INSIDE the detached worktree.
+			// The commit advances HEAD, so `git diff HEAD` reports an empty diff —
+			// the bypass the HEAD-advance guard closes.
+			commitOnCollectChecks: ["src/sneaky.ts"],
+			trustedAcceptanceCheckResults: [{ command: "true", exitCode: 0 }],
+			policyOutcome: "approved",
+			withAcceptancePort: true,
+			// The (now-empty) diff WOULD pass diff-scope; the guard rejects anyway
+			// because HEAD no longer equals the recorded base SHA.
+			diffScope: { status: "passed", outOfScopeFiles: [] },
+			policyProfile: {
+				name: "default",
+				trustGates: { acceptanceContract },
+			},
+		});
+
+		try {
+			const result = await orchestrator.runPacketAsync(packet);
+
+			// The committed out-of-scope delta must be quarantined, never merged.
+			expect(runEvents).toContain("acceptance-recorded");
+			expect(runEvents).not.toContain("commit-run-success-outcome");
+			expect(runEvents).not.toContain("delete-workspace");
+			expect(acceptanceRecords).toEqual([
+				expect.objectContaining({
+					outcome: "rejected",
+					diffScopeStatus: "blocked",
+				}),
+			]);
+			expect(result.run.status).toBe("failed");
+			expect(result.workspace).toMatchObject({
+				path: workspacePath,
+				status: "retained",
+			});
 		} finally {
 			cleanup();
 		}
