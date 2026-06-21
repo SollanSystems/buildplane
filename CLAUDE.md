@@ -22,15 +22,17 @@ Milestone map (status as of 2026-06-10):
 | **M1** | Signed Ed25519 per-event tape (S1–S7) + external verifier + GATE receipt | ✅ complete (`main` tip `8a98ea6`) |
 | **M2** | PlanForge admission cycle: `compile → validate → preview → admit → dispatch → execute → receipt` + explicit-input resume (Gate C Path i) | ✅ complete (M2-GATE `fd598da` / #182–#183) |
 | **M3** | Capability broker (digest-referenced bundles, per-tool-call validation — `write_file` + `run_command`) | ✅ complete (M3-GATE `docs/operations/2026-06-15-m3-gate-receipt.md`) |
-| **M4** | Acceptance contract (diff-scope + CI + lint gating on finalization) | 🔶 **next** — planned |
-| **M5** | Web Mission Control (approval inbox, run inspector) | planned |
+| **M4** | Acceptance contract (diff-scope + CI + lint gating on finalization) | ✅ complete (M4-GATE `docs/operations/2026-06-18-m4-gate-receipt.md`) |
+| **M5** | Web Mission Control (approval inbox, run inspector) | 🔶 **next** — planned |
 | **M6** | End-to-end demo (incl. crash-and-resume) + cut **v0.5.0** | planned |
 
-**M2 & M3:** both closed at their GATEs. **M4** (acceptance contract — diff-scope + CI + lint gating on finalization) is next; it is the first rent-paying consumer of the frozen memory `run_outcomes` (see §"Memory program status").
+**M2–M4:** all closed at their GATEs. **M5** (Web Mission Control — approval inbox, run inspector) is next; it has no spec yet (plan-then-build). Note: **M4 core is memory-neutral** — the `run_outcomes` trust-scoring consumer (the designated first rent-payer) is a *later, deferred* M4 slice, **not** M4 core (see §"Memory program status").
 
 **M2 slice archive (complete):** S1–S8 + M2-GATE — ledger in `docs/operations/2026-06-09-m2-gate-receipt.md` (S7b phase 2b waived, Path i explicit resume).
 
 **M3 slice archive (complete):** S1 schema/digest (#185) · S2 evaluate (#186) · S3–S6 attach/enforce-write/`capability_denied`/runtime-hook (#187) · S7 plan-level bundle envelope · **S7b run_command enforcement** (gap-closure: the allowlist was defined+evaluable since S2 but unenforced on the tool surface — now both `write_file` and `run_command` fail-closed) · S8 GATE — ledger in `docs/operations/2026-06-15-m3-gate-receipt.md`. Architecture: `docs/architecture/capability-broker.md`. **Follow-up:** extend the PlanForge side-effect vocabulary (`code-edit`→`src/**`/`test/**`) to let admitted plans authorize code edits — this also unblocks genuine `planforge admit` dogfooding (open fork).
+
+**M4 slice archive (complete):** S1 `packages/policy` schema + pure evaluator (#192) · S2 L0 signed `acceptance_recorded` event (#194) · S3 finalization gate + check runner + emit + quarantine + CLI `--enforce-acceptance` (#196) · **S3-fix** diff-scope fail-open closed — reject when the worktree HEAD advances off the recorded base SHA (#198 `2704f4f`, CRITICAL surfaced by the S3 adversarial bypass review) · S4 GATE — ledger in `docs/operations/2026-06-18-m4-gate-receipt.md`. Architecture: `docs/architecture/acceptance-contract.md`. **Memory-neutral** (the `run_outcomes` consumer is a deferred slice). **Follow-up:** the sync `runPacket` acceptance path is unguarded (not reachable today — PlanForge routes through `runPacketAsync` only); keep it from diverging from the async guard.
 
 **Parallel memory program (frozen):** Phase 1 (`buildplane@0.3.0`) + Phase 2 outcome memory shipped to `main`. **Hard-frozen until operator reopens post–M2-GATE** — outcome routing opt-in / default-OFF. See §"Memory program status".
 
