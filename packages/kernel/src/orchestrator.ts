@@ -338,6 +338,26 @@ export function createBuildplaneOrchestrator(
 		}
 	}
 
+	/**
+	 * Current HEAD of the worktree, or null if it cannot be read. The acceptance
+	 * gate diffs against `HEAD`, so a worker (or an unsandboxed check) that
+	 * `git commit`s inside the detached worktree during execution advances HEAD and
+	 * makes `git diff HEAD` report an empty diff — blinding the diff-scope arm to a
+	 * committed, possibly out-of-scope delta the merge would still ship. The gate
+	 * compares this against the immutable recorded base SHA and rejects fail-closed
+	 * on any advance.
+	 */
+	function readWorkspaceHeadSha(workspaceRoot: string): string | null {
+		try {
+			return execFileSync("git", ["-C", workspaceRoot, "rev-parse", "HEAD"], {
+				encoding: "utf8",
+				stdio: ["ignore", "pipe", "ignore"],
+			}).trim();
+		} catch {
+			return null;
+		}
+	}
+
 	function createDefaultAcceptanceEvidencePort(): BuildplaneAcceptanceEvidencePort {
 		return {
 			collectCheckResults(input) {
@@ -431,6 +451,7 @@ export function createBuildplaneOrchestrator(
 	async function evaluateAndRecordAcceptanceAsync(input: {
 		readonly resolvedProfile: PolicyProfile | undefined;
 		readonly workspacePath: string;
+		readonly baseSha: string;
 		readonly currentPacket: UnitPacket;
 		readonly currentReceipt: ExecutionReceipt;
 		readonly attemptCount: number;
@@ -478,16 +499,42 @@ export function createBuildplaneOrchestrator(
 		// the diff-scope decision or out-of-scope writes could merge on a zero exit.
 		const changedFiles = collectWorkspaceChangedFiles(input.workspacePath);
 
-		const decision = policy.evaluateAcceptanceContract(acceptanceContract, {
-			changedFiles,
-			checkResults,
-		});
+		// Fail closed if the worktree HEAD advanced from the recorded base SHA. A
+		// worker (or an unsandboxed check) that committed inside the detached
+		// worktree moves HEAD, so the `git diff HEAD` above reports an empty diff and
+		// the diff-scope arm would let a committed — possibly out-of-scope — delta
+		// merge on a zero exit. The recorded base SHA is the only trustworthy anchor;
+		// any advance is rejected rather than trusted.
+		// A null HEAD (worktree not a readable git repo) is already fail-closed by
+		// collectWorkspaceChangedFiles, which returns an out-of-scope
+		// "diff-unavailable" sentinel in that case; this guard closes the distinct
+		// bypass where HEAD is readable but has moved off the recorded base.
+		const currentHeadSha = readWorkspaceHeadSha(input.workspacePath);
+		const headAdvanced =
+			currentHeadSha !== null && currentHeadSha !== input.baseSha;
+
+		const decision: PolicyDecision | null = headAdvanced
+			? {
+					kind: "acceptance.contract",
+					outcome: "rejected",
+					reasons: [
+						`acceptance.contract: worktree HEAD advanced from ${input.baseSha} to ${
+							currentHeadSha ?? "unreadable"
+						} during execution — a committed in-worktree change escapes the diff-scope gate; rejecting fail-closed.`,
+					],
+				}
+			: policy.evaluateAcceptanceContract(acceptanceContract, {
+					changedFiles,
+					checkResults,
+				});
 
 		if (acceptancePort) {
-			const diffScope = policy.evaluateAcceptanceDiffScope?.(
-				changedFiles,
-				acceptanceContract,
-			) ?? { status: "passed" as const, outOfScopeFiles: [] };
+			const diffScope = headAdvanced
+				? { status: "blocked" as const, outOfScopeFiles: [] }
+				: (policy.evaluateAcceptanceDiffScope?.(
+						changedFiles,
+						acceptanceContract,
+					) ?? { status: "passed" as const, outOfScopeFiles: [] });
 			const record: AcceptanceRecordInput = {
 				runId: input.runId,
 				admissionEventId: input.currentPacket.provenance_ref,
@@ -1675,6 +1722,7 @@ export function createBuildplaneOrchestrator(
 						acceptanceDecision = await evaluateAndRecordAcceptanceAsync({
 							resolvedProfile,
 							workspacePath: ctx.workspace.path,
+							baseSha: ctx.workspace.headSha,
 							currentPacket,
 							currentReceipt,
 							attemptCount,
