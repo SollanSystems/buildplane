@@ -780,7 +780,7 @@ function formatPlanForgeHelp(): string[] {
 		"    --operator <id>  Required; deciding operator identity (decided_by)",
 		"    --json           Prints the admission result as JSON",
 		"",
-		"buildplane planforge dispatch --input <file> [--json]",
+		"buildplane planforge dispatch --input <file> [--json] [--enforce-acceptance]",
 		"",
 		"  Dispatches an operator-admitted plan as one run per PlanForgeTask through",
 		"  the kernel run loop. Fails closed (plan-not-admitted) with no run when no",
@@ -788,8 +788,11 @@ function formatPlanForgeHelp(): string[] {
 		"  dependent task does not start if its predecessor fails.",
 		"",
 		"  Options:",
-		"    --input <file>  Markdown PlanForge goal fixture to dispatch",
-		"    --json          Prints the dispatch result (per-task run ids) as JSON",
+		"    --input <file>        Markdown PlanForge goal fixture to dispatch",
+		"    --json                Prints the dispatch result (per-task run ids) as JSON",
+		"    --enforce-acceptance  Run the finalization acceptance gate per task",
+		"                          (diff-scope + verificationCommands); reject + quarantine",
+		"                          on failure. Off by default.",
 		"",
 		"buildplane planforge resume --input <file> [--json]",
 		"",
@@ -3900,6 +3903,13 @@ async function runPlanForgeDispatchCommand(
 		);
 	}
 	const jsonOut = args.includes("--json");
+	// Opt-in acceptance gate. A freshly-created worktree has no installed
+	// dependencies, so a task's `verificationCommands` (`pnpm lint`/`pnpm
+	// typecheck`/…) cannot run there yet; enforcing the gate on every dispatch
+	// would reject every run. Default dispatch is byte-for-byte unchanged;
+	// `--enforce-acceptance` opts a run into the finalization gate. Provisioning
+	// worktree dependencies so real checks run on every dispatch is a later slice.
+	const enforceAcceptance = args.includes("--enforce-acceptance");
 
 	const plan = createPlanForgeDryRunPlan(resolve(cwd, inputPath));
 	const workspace = resolve(cwd);
@@ -3930,18 +3940,20 @@ async function runPlanForgeDispatchCommand(
 			readonly profile: PolicyProfile;
 		}
 	>();
-	plan.tasks.forEach((task, index) => {
-		const contract = deriveAcceptanceContract(plan, task);
-		const profileName = `planforge-${plan.id}-${task.id}`;
-		acceptanceProfiles.set(packets[index].unit.id, {
-			profileName,
-			contractDigest: acceptanceContractDigest(contract),
-			profile: {
-				name: profileName,
-				trustGates: { acceptanceContract: contract },
-			},
+	if (enforceAcceptance) {
+		plan.tasks.forEach((task, index) => {
+			const contract = deriveAcceptanceContract(plan, task);
+			const profileName = `planforge-${plan.id}-${task.id}`;
+			acceptanceProfiles.set(packets[index].unit.id, {
+				profileName,
+				contractDigest: acceptanceContractDigest(contract),
+				profile: {
+					name: profileName,
+					trustGates: { acceptanceContract: contract },
+				},
+			});
 		});
-	});
+	}
 	const profileRegistry: BuildplaneProfileRegistryPort = {
 		resolve(name) {
 			for (const entry of acceptanceProfiles.values()) {
@@ -3990,17 +4002,21 @@ async function runPlanForgeDispatchCommand(
 		// Tasks dispatch sequentially, so a single mutable identity holder safely
 		// scopes the acceptance verdict's plan identity to the task in flight.
 		const acceptanceIdentity = { planId: plan.id, contractDigest: "" };
-		const acceptancePort = createAcceptancePort(emitter, {
-			get planId() {
-				return acceptanceIdentity.planId;
-			},
-			get contractDigest() {
-				return acceptanceIdentity.contractDigest;
-			},
-		});
+		const acceptancePort = enforceAcceptance
+			? createAcceptancePort(emitter, {
+					get planId() {
+						return acceptanceIdentity.planId;
+					},
+					get contractDigest() {
+						return acceptanceIdentity.contractDigest;
+					},
+				})
+			: undefined;
 		const { orchestrator, eventBus: cliEventBus } = await loadCliOrchestrator(
 			workspace,
-			{ ledgerActivityPort, profileRegistry, acceptancePort },
+			enforceAcceptance
+				? { ledgerActivityPort, profileRegistry, acceptancePort }
+				: { ledgerActivityPort },
 		);
 
 		for (const packet of packets) {
