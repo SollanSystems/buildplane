@@ -178,6 +178,15 @@ vi.mock("@buildplane/runtime", () => ({
 
 vi.mock("@buildplane/policy", () => ({
 	evaluateRun: vi.fn(() => ({ outcome: "accepted" })),
+	// run-cli reads these off the policy module on every orchestrator load (the
+	// finalization acceptance gate, M4-S3) — the mock must expose the same surface
+	// or vitest throws "No <export> is defined on the mock" before fork even runs.
+	evaluateAcceptanceContract: vi.fn(() => null),
+	evaluateArchitectureDiffScope: vi.fn(() => ({
+		status: "passed",
+		outOfScopeFiles: [],
+		deniedFiles: [],
+	})),
 }));
 
 vi.mock("@buildplane/storage", () => ({

@@ -31,7 +31,9 @@ import type {
 	PolicyProfile,
 } from "./policy.js";
 import type {
+	AcceptanceRecordInput,
 	BuildplaneAcceptanceEvidencePort,
+	BuildplaneAcceptancePort,
 	BuildplaneMemoryPort,
 	BuildplanePolicyPort,
 	BuildplaneProfileRegistryPort,
@@ -138,6 +140,7 @@ export interface CreateBuildplaneOrchestratorOptions {
 	readonly outcomeRouting?: OutcomeRoutingConfig;
 	readonly ledgerActivityPort?: LedgerActivityPort;
 	readonly acceptanceEvidencePort?: BuildplaneAcceptanceEvidencePort;
+	readonly acceptancePort?: BuildplaneAcceptancePort;
 }
 
 export function createBuildplaneOrchestrator(
@@ -157,6 +160,7 @@ export function createBuildplaneOrchestrator(
 	const ledgerActivityPort = options.ledgerActivityPort;
 	const acceptanceEvidencePort =
 		options.acceptanceEvidencePort ?? createDefaultAcceptanceEvidencePort();
+	const acceptancePort = options.acceptancePort;
 	const outcomeRouting = options.outcomeRouting ?? defaultOutcomeRoutingConfig;
 	const strategyWorkflowPromotionRule =
 		"multi-round-strategy-workflow->procedure";
@@ -413,6 +417,90 @@ export function createBuildplaneOrchestrator(
 			changedFiles: input.currentReceipt.changedFiles,
 			checkResults,
 		});
+	}
+
+	/**
+	 * Finalization-time acceptance gate for the async run loop. When a contract is
+	 * configured it (1) collects independent check evidence, (2) evaluates the
+	 * pass/reject decision, (3) appends a signed `acceptance_recorded` verdict via
+	 * the acceptance port **before** the workspace is merged or quarantined
+	 * (write-ahead), and (4) returns the rejection decision (or `null` to proceed).
+	 * Returns `{ decision: null }` with no side effects when no contract is set —
+	 * the opt-in, fail-open-when-unconfigured contract.
+	 */
+	async function evaluateAndRecordAcceptanceAsync(input: {
+		readonly resolvedProfile: PolicyProfile | undefined;
+		readonly workspacePath: string;
+		readonly currentPacket: UnitPacket;
+		readonly currentReceipt: ExecutionReceipt;
+		readonly attemptCount: number;
+		readonly runId: string;
+	}): Promise<PolicyDecision | null> {
+		const acceptanceContract =
+			input.resolvedProfile?.trustGates?.acceptanceContract;
+		if (!acceptanceContract) {
+			return null;
+		}
+
+		if (!policy.evaluateAcceptanceContract) {
+			return {
+				kind: "acceptance.contract",
+				outcome: "rejected",
+				reasons: [
+					"acceptance.contract configured but no evaluator is available.",
+				],
+			};
+		}
+
+		let checkResults: readonly AcceptanceCheckResult[];
+		try {
+			checkResults = acceptanceEvidencePort.collectCheckResults({
+				contract: acceptanceContract,
+				workspacePath: input.workspacePath,
+				packet: input.currentPacket,
+				receipt: input.currentReceipt,
+				attemptCount: input.attemptCount,
+			});
+		} catch (error) {
+			return {
+				kind: "acceptance.contract",
+				outcome: "rejected",
+				reasons: [
+					`acceptance.contract check collection failed: ${
+						error instanceof Error ? error.message : String(error)
+					}`,
+				],
+			};
+		}
+
+		// Re-capture changed files AFTER the checks ran: a check (e.g. `lint --fix`
+		// or a snapshot update) can mutate the worktree, and those files must be in
+		// the diff-scope decision or out-of-scope writes could merge on a zero exit.
+		const changedFiles = collectWorkspaceChangedFiles(input.workspacePath);
+
+		const decision = policy.evaluateAcceptanceContract(acceptanceContract, {
+			changedFiles,
+			checkResults,
+		});
+
+		if (acceptancePort) {
+			const diffScope = policy.evaluateAcceptanceDiffScope?.(
+				changedFiles,
+				acceptanceContract,
+			) ?? { status: "passed" as const, outOfScopeFiles: [] };
+			const record: AcceptanceRecordInput = {
+				runId: input.runId,
+				admissionEventId: input.currentPacket.provenance_ref,
+				outcome: decision ? "rejected" : "passed",
+				diffScopeStatus: diffScope.status,
+				outOfScopeFiles: diffScope.outOfScopeFiles,
+				checkResults,
+				evaluatedAt: new Date().toISOString(),
+			};
+			await acceptancePort.recordAcceptance(record);
+		}
+
+		return decision;
 	}
 
 	function createRunAdmissionDigest(
@@ -1582,13 +1670,29 @@ export function createBuildplaneOrchestrator(
 						}
 					}
 
-					const acceptanceDecision = evaluateAcceptanceBeforeFinalization({
-						resolvedProfile,
-						workspacePath: ctx.workspace.path,
-						currentPacket,
-						currentReceipt,
-						attemptCount,
-					});
+					let acceptanceDecision: PolicyDecision | null;
+					try {
+						acceptanceDecision = await evaluateAndRecordAcceptanceAsync({
+							resolvedProfile,
+							workspacePath: ctx.workspace.path,
+							currentPacket,
+							currentReceipt,
+							attemptCount,
+							runId: ctx.run.id,
+						});
+					} catch (error) {
+						// Recording the signed verdict is a write-ahead gate. If it fails
+						// the run must NOT escape unfinalized — fail closed and quarantine.
+						return finalizeInfrastructureFailure(
+							ctx.run,
+							infrastructureFailure("acceptance-record-failed", error),
+							{
+								receipt: currentReceipt,
+								workspace: ctx.workspace,
+								workspaceStatus: "retained",
+							},
+						);
+					}
 					if (acceptanceDecision) {
 						return finalizeRun(
 							{

@@ -6,12 +6,14 @@
 	"description": "Policy enforcement for autonomy, budgets, trust, and retries in Buildplane",
 	"exports": {
 		".": {
+			"source": "./src/index.ts",
 			"types": "./src/index.d.ts",
-			"import": "./src/index.js"
+			"import": "./dist/index.js"
 		},
 		"./decision": {
-			"types": "./src/decision.ts",
-			"import": "./src/decision.ts"
+			"source": "./src/decision.ts",
+			"types": "./dist/decision.d.ts",
+			"import": "./dist/decision.js"
 		}
 	},
 	"dependencies": {

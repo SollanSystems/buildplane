@@ -134,7 +134,10 @@ export type {
 export { createResourceUsageSnapshot } from "./policy.ts";
 export type {
 	AcceptanceCheckCollectionInput,
+	AcceptanceDiffScopeResult,
+	AcceptanceRecordInput,
 	BuildplaneAcceptanceEvidencePort,
+	BuildplaneAcceptancePort,
 	BuildplaneMemoryPort,
 	BuildplanePolicyPort,
 	BuildplaneProfileRegistryPort,

@@ -301,4 +301,72 @@ describe("planforge dispatch — signed plan_receipt + live-tape export end-to-e
 			}
 		}
 	}, 30_000);
+
+	it("with --enforce-acceptance, the finalization gate rejects + records a signed acceptance_recorded{rejected} when worktree checks fail", async () => {
+		await initBuildplaneProject(env.dir);
+
+		const admit = await runCliCapture(
+			[
+				"planforge",
+				"admit",
+				"--input",
+				GOAL_INPUT,
+				"--approve",
+				"--operator",
+				"op1",
+				"--json",
+			],
+			env.dir,
+		);
+		expect(admit.code).toBe(0);
+
+		// The first task's verificationCommands (`pnpm lint`, …) cannot run in the
+		// freshly-created git worktree (no installed deps), so the gate rejects the
+		// run before any merge: exit 1, terminal outcome "failed".
+		const dispatch = await runCliCapture(
+			[
+				"planforge",
+				"dispatch",
+				"--input",
+				GOAL_INPUT,
+				"--enforce-acceptance",
+				"--json",
+			],
+			env.dir,
+		);
+		expect(dispatch.code).toBe(1);
+		const result = JSON.parse(dispatch.out) as {
+			status: string;
+			runs: Array<{ status: string }>;
+		};
+		expect(result.status).toBe("failed");
+		expect(result.runs[0]?.status).not.toBe("passed");
+
+		const rows = await readEvents(env.eventsDbPath);
+		// PF2 dependsOn PF1, so the chain breaks after PF1 is rejected: exactly one
+		// recorded verdict, and it is the rejection.
+		const accepted = rows.filter((r) => r.kind === "acceptance_recorded");
+		expect(accepted).toHaveLength(1);
+		const payload = JSON.parse(accepted[0].payload).AcceptanceRecordedV1 as {
+			outcome: string;
+			checks: Array<{ status: string }>;
+		};
+		expect(payload.outcome).toBe("rejected");
+		expect(payload.checks.some((c) => c.status === "failed")).toBe(true);
+
+		// The verdict is appended write-ahead (before any merge) and kernel-signed.
+		expect(await signatureFor(env.eventsDbPath, accepted[0].id)).toMatchObject({
+			actor_id: "kernel",
+			key_id: "kernel-main",
+			algorithm: "ed25519",
+		});
+
+		// Quarantined, not merged: no plan_receipt reports a "completed" outcome.
+		for (const r of rows.filter((r) => r.kind === "plan_receipt")) {
+			const p = JSON.parse(r.payload).PlanReceiptRecordedV1 as {
+				outcome: string;
+			};
+			expect(p.outcome).not.toBe("completed");
+		}
+	}, 30_000);
 });

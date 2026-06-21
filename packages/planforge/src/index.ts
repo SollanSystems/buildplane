@@ -6,6 +6,11 @@ import type { PlanForgePlan } from "./schema.js";
 import { validate } from "./validate.js";
 
 export {
+	type AcceptanceContractV0,
+	acceptanceContractDigest,
+	deriveAcceptanceContract,
+} from "./acceptance-contract.js";
+export {
 	type AdmitPlanInput,
 	buildPlanAdmittedPayload,
 	PLANFORGE_AUTHORIZED_NEXT_STEP,
