@@ -1,5 +1,38 @@
 # @buildplane/kernel
 
+## 0.4.2
+
+### Patch Changes
+
+- 4e29efd: feat(m4): wire the acceptance-contract finalization gate
+
+  The kernel now records an independent acceptance verdict before a PlanForge run
+  is merged. `planforge dispatch --enforce-acceptance` derives a per-task
+  acceptance contract (`deriveAcceptanceContract`: diff-scope = the task
+  capability-bundle fsWrite, checks = its verificationCommands), resolves it
+  through a per-task policy profile, and the kernel runs the checks in the
+  worktree, evaluates the contract, and appends a signed `acceptance_recorded`
+  event via an injected acceptance port **before** the merge (write-ahead). A
+  passed verdict proceeds to the existing merge; a rejected verdict short-circuits
+  with no merge and preserves the worktree as the quarantine artifact.
+
+  Opt-in: the gate is off by default, so plain `planforge dispatch` is
+  byte-for-byte unchanged. (A freshly-created worktree has no installed
+  dependencies yet, so a task's `pnpm`-based verificationCommands cannot run there
+  until a later slice provisions worktree dependencies — until then the gate is
+  opt-in via the flag.)
+
+- 2704f4f: fix(kernel): reject the acceptance gate when the worktree HEAD advances off the recorded base SHA
+
+  The M4 acceptance finalization gate diffs the worktree against `HEAD`. A worker (or an
+  unsandboxed check) that `git commit`s inside the detached worktree during execution
+  advances HEAD, so `git diff HEAD` reports an empty diff and the diff-scope arm would let a
+  committed — possibly out-of-scope — delta merge on a zero exit. The gate now compares the
+  live worktree HEAD against the immutable recorded base SHA and rejects fail-closed on any
+  advance, closing the diff-scope fail-open surfaced by the M4-S3 adversarial bypass review.
+
+  - @buildplane/capability-broker@0.2.1
+
 ## 0.4.1
 
 ### Patch Changes
