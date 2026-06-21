@@ -1,5 +1,12 @@
 # buildplane
 
+## 0.11.1
+
+### Patch Changes
+
+- Updated dependencies [e61e3f2]
+  - @buildplane/ledger-client@0.1.2
+
 ## 0.11.0
 
 ### Minor Changes
