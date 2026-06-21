@@ -1,7 +1,7 @@
 {
 	"name": "@buildplane/kernel",
 	"private": true,
-	"version": "0.4.1",
+	"version": "0.4.2",
 	"type": "module",
 	"description": "Core units, scheduler, and orchestration primitives for Buildplane",
 	"exports": {

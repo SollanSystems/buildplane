@@ -1,5 +1,41 @@
 # buildplane
 
+## 0.11.2
+
+### Patch Changes
+
+- 4e29efd: feat(m4): wire the acceptance-contract finalization gate
+
+  The kernel now records an independent acceptance verdict before a PlanForge run
+  is merged. `planforge dispatch --enforce-acceptance` derives a per-task
+  acceptance contract (`deriveAcceptanceContract`: diff-scope = the task
+  capability-bundle fsWrite, checks = its verificationCommands), resolves it
+  through a per-task policy profile, and the kernel runs the checks in the
+  worktree, evaluates the contract, and appends a signed `acceptance_recorded`
+  event via an injected acceptance port **before** the merge (write-ahead). A
+  passed verdict proceeds to the existing merge; a rejected verdict short-circuits
+  with no merge and preserves the worktree as the quarantine artifact.
+
+  Opt-in: the gate is off by default, so plain `planforge dispatch` is
+  byte-for-byte unchanged. (A freshly-created worktree has no installed
+  dependencies yet, so a task's `pnpm`-based verificationCommands cannot run there
+  until a later slice provisions worktree dependencies — until then the gate is
+  opt-in via the flag.)
+
+- Updated dependencies [4e29efd]
+- Updated dependencies [2704f4f]
+  - @buildplane/kernel@0.4.2
+  - @buildplane/planforge@0.5.1
+  - @buildplane/adapters-codex@0.1.5
+  - @buildplane/adapters-git@0.2.3
+  - @buildplane/adapters-honcho@0.1.5
+  - @buildplane/adapters-models@0.1.5
+  - @buildplane/adapters-tools@0.1.5
+  - @buildplane/policy@0.1.5
+  - @buildplane/runtime@0.1.5
+  - @buildplane/storage@0.2.4
+  - @buildplane/ui-tui@0.1.5
+
 ## 0.11.1
 
 ### Patch Changes

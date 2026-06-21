@@ -1,5 +1,13 @@
 # @buildplane/policy
 
+## 0.1.5
+
+### Patch Changes
+
+- Updated dependencies [4e29efd]
+- Updated dependencies [2704f4f]
+  - @buildplane/kernel@0.4.2
+
 ## 0.1.4
 
 ### Patch Changes
