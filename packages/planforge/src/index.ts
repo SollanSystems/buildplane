@@ -37,6 +37,10 @@ export {
 	type PlanSummary,
 	summarizePlanReceipt,
 } from "./plan-summary.js";
+export {
+	type BuildPlannerPlanMarkdownInput,
+	buildPlannerPlanMarkdown,
+} from "./planner.js";
 export { preview } from "./preview.js";
 export {
 	type BuildPlanReceiptInput,
@@ -44,6 +48,14 @@ export {
 	type PlanReceiptOutcome,
 	type PlanReceiptPayload,
 } from "./receipt.js";
+export {
+	loadRoadmapFromString,
+	PLANFORGE_ROADMAP_SCHEMA_VERSION,
+	type RoadmapDoc,
+	type RoadmapSlice,
+	type RoadmapSliceStatus,
+	selectNextRoadmapSlice,
+} from "./roadmap.js";
 export * from "./schema.js";
 export { type PlanForgeValidateResult, validate } from "./validate.js";
 
