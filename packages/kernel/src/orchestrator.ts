@@ -1266,13 +1266,15 @@ export function createBuildplaneOrchestrator(
 
 		// Merge workspace changes first — if this fails we must not mark the run as passed
 		// and must retain the workspace so changes are not lost.
+		let mergedHeadSha: string | undefined;
 		if (workspace.commitAndMergeWorkspace) {
 			try {
-				workspace.commitAndMergeWorkspace({
+				const mergeResult = workspace.commitAndMergeWorkspace({
 					path: preparedWorkspace.path,
 					runId: run.id,
 					projectRoot,
 				});
+				mergedHeadSha = mergeResult.mergedHeadSha;
 			} catch (error) {
 				return finalizeInfrastructureFailure(
 					run,
@@ -1389,6 +1391,7 @@ export function createBuildplaneOrchestrator(
 			run: completedRun,
 			receipt,
 			decision,
+			mergedHeadSha,
 		};
 	}
 

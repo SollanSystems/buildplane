@@ -300,4 +300,6 @@ export interface RunPacketResult {
 	readonly workspace?: WorkspaceSnapshot;
 	readonly injectedMemories?: readonly PersistedInjectedMemoryRecord[];
 	readonly suspended?: boolean;
+	/** Project-root HEAD after the --no-ff merge; the canonical base for the next serial unit (GAP-8). */
+	readonly mergedHeadSha?: string;
 }
