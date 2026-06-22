@@ -7,6 +7,7 @@ import {
 	canonicalEnvelopeJson,
 } from "@buildplane/policy";
 import {
+	assertKernelSigningKey,
 	PLANFORGE_KERNEL_SIGNING_KEY_ID,
 	resolveLedgerBinary,
 	spawnLedgerSubprocess,
@@ -193,6 +194,7 @@ export async function runPlanForgeAuthorizeEnvelopeCommand(
 		return 0;
 	}
 
+	assertKernelSigningKey();
 	const binary = resolveLedgerBinary(cwd);
 	const ledgerChild = spawnLedgerSubprocess(binary, payload.run_id, workspace, {
 		sign: true,
