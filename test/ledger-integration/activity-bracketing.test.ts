@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -26,6 +26,7 @@ const GOAL_INPUT = resolve(
 interface DispatchEnv {
 	dir: string;
 	home: string;
+	binDir: string;
 	eventsDbPath: string;
 	cleanup: () => Promise<void>;
 }
@@ -78,6 +79,7 @@ async function runCliCapture(
 async function makeDispatchEnv(): Promise<DispatchEnv> {
 	const dir = await mkdtemp(join(tmpdir(), "bp-activity-ws-"));
 	const home = await mkdtemp(join(tmpdir(), "bp-activity-home-"));
+	const binDir = await mkdtemp(join(tmpdir(), "bp-activity-bin-"));
 	const keyDir = join(home, ".buildplane", "keys", "kernel");
 	mkdirSync(keyDir, { recursive: true });
 	// Raw 32-byte ed25519 seed — value irrelevant; only that the kernel key resolves.
@@ -91,12 +93,43 @@ async function makeDispatchEnv(): Promise<DispatchEnv> {
 	return {
 		dir,
 		home,
+		binDir,
 		eventsDbPath: join(dir, ".buildplane", "ledger", "events.db"),
 		cleanup: async () => {
 			await rm(dir, { recursive: true, force: true });
 			await rm(home, { recursive: true, force: true });
+			await rm(binDir, { recursive: true, force: true });
 		},
 	};
+}
+
+/**
+ * Install a `claude` shim on PATH. PlanForge dispatch spawns a real claude-code
+ * model worker; without a binary the worker exits non-zero and the run fails.
+ * The shim emits a valid result and exits 0 so the model packet succeeds.
+ */
+function installClaudeShim(binDir: string): void {
+	const shim = join(binDir, "claude");
+	writeFileSync(shim, '#!/bin/sh\necho \'{"result":"ok"}\'\nexit 0\n', "utf8");
+	chmodSync(shim, 0o755);
+}
+
+/**
+ * Install a `pnpm` shim on PATH. The acceptance gate is ON by default (GAP-3), so
+ * `pnpm` is invoked for worktree provisioning (`pnpm install --frozen-lockfile`)
+ * AND the gate's `pnpm lint` check. The `install` invocation is intercepted to
+ * exit 0; `body` is the shell body for the CHECK invocation. A green shim
+ * (`exit 0`) lets the default-on gate pass so this test exercises activity
+ * bracketing, not the gate verdict.
+ */
+function installPnpmShim(binDir: string, body: string): void {
+	const shim = join(binDir, "pnpm");
+	writeFileSync(
+		shim,
+		`#!/bin/sh\nif [ "$1" = "install" ]; then exit 0; fi\n${body}\n`,
+		"utf8",
+	);
+	chmodSync(shim, 0o755);
 }
 
 async function initBuildplaneProject(dir: string): Promise<void> {
@@ -150,13 +183,22 @@ describe("planforge dispatch — signed activity bracketing end-to-end", () => {
 	let env: DispatchEnv;
 	let originalHome: string | undefined;
 	let originalNativeBin: string | undefined;
+	let originalPath: string | undefined;
 
 	beforeEach(async () => {
 		env = await makeDispatchEnv();
 		originalHome = process.env.HOME;
 		originalNativeBin = process.env.BUILDPLANE_NATIVE_BIN;
+		originalPath = process.env.PATH;
 		process.env.HOME = env.home;
 		process.env.BUILDPLANE_NATIVE_BIN = resolveNativeBinaryForLedgerTests();
+		// Dispatch spawns a real claude-code model worker; shim it so the model
+		// packet succeeds (no `claude` binary exists in the test sandbox). The
+		// acceptance gate is ON by default (GAP-3), so a green `pnpm` shim lets
+		// provisioning + checks pass and this test stays focused on bracketing.
+		process.env.PATH = `${env.binDir}:${originalPath ?? ""}`;
+		installClaudeShim(env.binDir);
+		installPnpmShim(env.binDir, "exit 0");
 	});
 
 	afterEach(async () => {
@@ -169,6 +211,11 @@ describe("planforge dispatch — signed activity bracketing end-to-end", () => {
 			delete process.env.BUILDPLANE_NATIVE_BIN;
 		} else {
 			process.env.BUILDPLANE_NATIVE_BIN = originalNativeBin;
+		}
+		if (originalPath === undefined) {
+			delete process.env.PATH;
+		} else {
+			process.env.PATH = originalPath;
 		}
 		await env.cleanup();
 	});
@@ -211,8 +258,9 @@ describe("planforge dispatch — signed activity bracketing end-to-end", () => {
 				activity_type: string;
 				input_digest: string;
 			};
-			// PlanForge dispatch packets run a no-op command → command activity type.
-			expect(sPayload.activity_type).toBe("command");
+			// PlanForge dispatch packets are claude-code MODEL packets (GAP-4) → model
+			// activity type.
+			expect(sPayload.activity_type).toBe("model");
 			const c = completed.find(
 				(x) =>
 					(
