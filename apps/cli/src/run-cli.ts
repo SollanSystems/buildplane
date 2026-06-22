@@ -3825,6 +3825,35 @@ async function runPlanForgeAdmitCommand(
 const DEFAULT_DISPATCH_POLICY_PROFILE = "default";
 
 /**
+ * Runs `pnpm install --frozen-lockfile` inside an isolated git worktree so the
+ * acceptance gate's `verificationCommands` (which invoke workspace tooling) have
+ * their binaries and packages available. Synchronous to match the existing sync
+ * git operations in `prepareRun`. Throws on a non-zero exit (or a spawn error)
+ * with captured stderr so the orchestrator can surface a
+ * `workspace-provision-failed` infrastructure failure and retain the worktree.
+ */
+export function provisionWorktreeDeps(workspacePath: string): void {
+	const result = spawnSync("pnpm", ["install", "--frozen-lockfile"], {
+		cwd: workspacePath,
+		encoding: "utf8",
+		stdio: ["ignore", "pipe", "pipe"],
+	});
+	if (result.error) {
+		throw new Error(
+			`pnpm install failed in worktree ${workspacePath}: ${result.error.message}`,
+		);
+	}
+	if (result.status !== 0) {
+		const detail = (result.stderr ?? result.stdout ?? "").trim();
+		throw new Error(
+			`pnpm install failed in worktree ${workspacePath} (exit ${
+				result.status ?? "null"
+			}): ${detail}`,
+		);
+	}
+}
+
+/**
  * Declared side-effect scopes for the plan receipt (M2-S6, D4): the union of every
  * task's `allowedSideEffects`, deduped and stably ordered. Declared scopes are the
  * deterministic S6 grain; reconciling observed `workspace_write` events is M4 work.
