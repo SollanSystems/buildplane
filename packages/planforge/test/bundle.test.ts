@@ -47,7 +47,13 @@ describe("buildDefaultCapabilityBundleForPlan", () => {
 			"packages/**/test/fixtures/**",
 		]);
 		expect(bundle.tools?.write_file?.enabled).toBe(true);
-		expect(bundle.tools?.run_command?.allowlist).toEqual(["git", "pnpm"]);
+		// `claude` is seeded into every task's allowlist (GAP-4 worker binary), so
+		// the plan-wide sorted union carries it alongside the verification argv0s.
+		expect(bundle.tools?.run_command?.allowlist).toEqual([
+			"claude",
+			"git",
+			"pnpm",
+		]);
 	});
 
 	it("covers every task's declared surface and nothing beyond it (no task dropped, no extras)", () => {
@@ -66,7 +72,9 @@ describe("buildDefaultCapabilityBundleForPlan", () => {
 			"local-receipt": ["docs/operations/**"],
 		};
 		const expectedWrite = new Set<string>();
-		const expectedAllow = new Set<string>();
+		// `claude` is seeded into every task's run_command allowlist (GAP-4 worker
+		// binary), independent of the verification-command argv0s derived below.
+		const expectedAllow = new Set<string>(["claude"]);
 		for (const task of plan.tasks) {
 			for (const effect of task.allowedSideEffects) {
 				for (const g of sideEffectGlobs[effect] ?? []) {
@@ -170,6 +178,35 @@ describe("buildDefaultCapabilityBundleForPlan", () => {
 				ctx,
 			).decision,
 		).toBe("deny");
+	});
+});
+
+describe("buildDefaultCapabilityBundleForTask — worker binary", () => {
+	it("always allows the `claude` worker binary in the run_command allowlist", () => {
+		const plan = createPlanForgeDryRunPlan(inputFixture);
+		const task = {
+			...plan.tasks[0],
+			allowedSideEffects: ["local-doc"] as const,
+			forbiddenSideEffects: [],
+			verificationCommands: ["pnpm vitest run"],
+		};
+		const bundle = buildDefaultCapabilityBundleForTask(plan, task);
+		expect(bundle.tools?.run_command?.allowlist).toContain("claude");
+		// Verification-derived entries are still present.
+		expect(bundle.tools?.run_command?.allowlist).toContain("pnpm");
+	});
+
+	it("includes `claude` even when the task declares zero verification commands", () => {
+		const plan = createPlanForgeDryRunPlan(inputFixture);
+		const task = {
+			...plan.tasks[0],
+			allowedSideEffects: ["local-doc"] as const,
+			forbiddenSideEffects: [],
+			verificationCommands: [],
+		};
+		const bundle = buildDefaultCapabilityBundleForTask(plan, task);
+		// run_command is now always present (never empty) because of the seed.
+		expect(bundle.tools?.run_command?.allowlist).toEqual(["claude"]);
 	});
 });
 
