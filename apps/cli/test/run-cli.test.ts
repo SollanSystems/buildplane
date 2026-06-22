@@ -5393,7 +5393,7 @@ describe("planforge dry-run", () => {
 			"Missing required --input",
 		);
 		expect(nonDryRun.stdout.join("\n")).toContain(
-			"Only dry-run, admit, dispatch, resume, and recover are available",
+			"Only dry-run, admit, dispatch, resume, recover, and plan are available",
 		);
 		expect(writeForm.stdout.join("\n")).toContain(
 			"side-effect forms are disabled",
@@ -5402,5 +5402,51 @@ describe("planforge dry-run", () => {
 			"side-effect forms are disabled",
 		);
 		expect(existsSync(join(root, ".buildplane"))).toBe(false);
+	});
+
+	it("planforge plan emits the next-slice plan.md and exits 0 (PASS) from the committed roadmap", async () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-planforge-plan-"));
+		const roadmap = join(
+			dirname(fileURLToPath(import.meta.url)),
+			"../../../docs/roadmap.json",
+		);
+		const outPath = join(root, "plan.md");
+		const result = await runCliCapture(root, [
+			"planforge",
+			"plan",
+			"--roadmap",
+			roadmap,
+			"--out",
+			outPath,
+			"--trusted-base",
+			"15dbb32db0e1f0024687533755805fc23f3ef6d4",
+			"--json",
+		]);
+		expect(result.exitCode).toBe(0);
+		const payload = JSON.parse(result.stdout.join("\n"));
+		expect(payload.slice_id).toBe("M5-S2");
+		expect(payload.status).toBe("PASS");
+		expect(existsSync(outPath)).toBe(true);
+		expect(readFileSync(outPath, "utf8")).toContain("### M5-S2:");
+	});
+
+	it("planforge plan fails closed without --out / --trusted-base", async () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-planforge-plan-bad-"));
+		const roadmap = join(
+			dirname(fileURLToPath(import.meta.url)),
+			"../../../docs/roadmap.json",
+		);
+		const missingOut = await runCliCapture(root, [
+			"planforge",
+			"plan",
+			"--roadmap",
+			roadmap,
+			"--trusted-base",
+			"15dbb32db0e1f0024687533755805fc23f3ef6d4",
+		]);
+		expect(missingOut.exitCode).toBe(1);
+		expect([...missingOut.stdout, ...missingOut.stderr].join("\n")).toContain(
+			"Missing required --out",
+		);
 	});
 });

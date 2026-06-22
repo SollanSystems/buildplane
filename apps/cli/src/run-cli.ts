@@ -76,6 +76,7 @@ import type {
 	PacketMemoryEnrichmentResult,
 	preparePacketMemoryEnrichment,
 } from "./packet-enrichment.js";
+import { runPlannerProposal } from "./planforge-planner.js";
 import {
 	acceptanceContractDigest,
 	buildPlanAdmittedPayload,
@@ -819,6 +820,21 @@ function formatPlanForgeHelp(): string[] {
 		"",
 		"  Options:",
 		"    --json          Prints the recovery result (per-plan status) as JSON",
+		"",
+		"buildplane planforge plan --roadmap <file> --out <plan.md> --trusted-base <sha> [--remote <url>] [--json]",
+		"",
+		"  Reads the L0 tape's completed roadmap slices, selects the next eligible",
+		"  slice whose dependencies are satisfied, deterministically emits its plan.md",
+		"  in the PlanForge ## Tasks grammar, and validates it. Writes the plan.md and",
+		"  exits 0 iff the emitted plan validates PASS. The --once loop path uses this",
+		"  deterministic emitter; the LLM planning-worker path is gated behind a later flag.",
+		"",
+		"  Options:",
+		"    --roadmap <file>     Machine-readable roadmap (default docs/roadmap.json)",
+		"    --out <plan.md>      Required; where to write the emitted plan.md",
+		"    --trusted-base <sha> Required; the trusted base commit recorded in the plan",
+		"    --remote <url>       Repository remote (default the buildplane origin)",
+		"    --json               Prints the proposal (slice id + status) as JSON",
 	];
 }
 
@@ -4421,6 +4437,56 @@ async function runPlanForgeDispatchCommand(
 }
 
 /**
+ * `buildplane planforge plan --roadmap <file> --out <plan.md> --trusted-base <sha>`:
+ * read the L0 tape's completed slices, select the next eligible roadmap slice,
+ * deterministically emit its `plan.md`, and validate it through the dry-run
+ * pipeline. Writes the plan.md and exits 0 iff the emitted plan validates PASS —
+ * the gate that proves the plan is real is `planforge validate`, not a worker
+ * exit code. The `--once` loop path drives this deterministic emitter; the
+ * LLM-authored-plan worker path is gated behind a later flag.
+ */
+async function runPlanForgePlanCommand(
+	args: readonly string[],
+	cwd: string,
+	stdout: (line: string) => void,
+): Promise<number> {
+	const roadmapPath = readFlag(args, "--roadmap") ?? "docs/roadmap.json";
+	const outPath = readFlag(args, "--out");
+	if (!outPath) {
+		throw new Error(
+			"Missing required --out <plan.md> argument for PlanForge plan.",
+		);
+	}
+	const trustedBase = readFlag(args, "--trusted-base");
+	if (!trustedBase) {
+		throw new Error(
+			"Missing required --trusted-base <sha> argument for PlanForge plan.",
+		);
+	}
+	const jsonOut = args.includes("--json");
+	const remote =
+		readFlag(args, "--remote") ??
+		"https://github.com/SollanSystems/buildplane.git";
+	const proposal = await runPlannerProposal({
+		roadmapPath: resolve(cwd, roadmapPath),
+		workspace: resolve(cwd),
+		remote,
+		trustedBase,
+	});
+	writeFileSync(resolve(cwd, outPath), proposal.planMarkdown, "utf8");
+	stdout(
+		jsonOut
+			? formatJson({
+					slice_id: proposal.sliceId,
+					status: proposal.status,
+					out: outPath,
+				})
+			: `PlanForge planner proposed ${proposal.sliceId} -> ${outPath} (${proposal.status}).`,
+	);
+	return proposal.status === PLANFORGE_VALIDATION_STATUS_PASS ? 0 : 1;
+}
+
+/**
  * `buildplane planforge resume --input <file>`: explicit-input S7b recovery.
  * Rebuilds the PlanForge plan from input, verifies the signed admission payload,
  * replays durable activity completions from the tape, skips those completed
@@ -4855,9 +4921,12 @@ export async function runCli(
 			if (subcommand === "recover") {
 				return await runPlanForgeRecoverCommand(rest.slice(1), cwd, stdout);
 			}
+			if (subcommand === "plan") {
+				return await runPlanForgePlanCommand(rest.slice(1), cwd, stdout);
+			}
 			if (subcommand !== "dry-run") {
 				throw new Error(
-					"Unsupported PlanForge command. Only dry-run, admit, dispatch, resume, and recover are available; other non-dry-run PlanForge forms are intentionally disabled.",
+					"Unsupported PlanForge command. Only dry-run, admit, dispatch, resume, recover, and plan are available; other non-dry-run PlanForge forms are intentionally disabled.",
 				);
 			}
 			const subRest = rest.slice(1);
