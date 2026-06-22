@@ -3479,6 +3479,57 @@ function planAdmitRunId(idempotencyKey: string): string {
 	return `${h.slice(0, 8)}-${h.slice(8, 12)}-8${h.slice(13, 16)}-${h.slice(16, 20)}-${h.slice(20, 32)}`;
 }
 
+export interface PlanForgeDispatchManifest {
+	readonly runId: string;
+	readonly inputPath: string;
+	readonly planId: string;
+	readonly idempotencyKey: string;
+	readonly createdAt: string;
+}
+
+function planForgeDispatchDir(workspace: string): string {
+	return resolve(workspace, ".buildplane", "planforge", "dispatch");
+}
+
+/**
+ * Persist a dispatch manifest BEFORE the run loop so a crash mid-dispatch leaves
+ * an on-disk pointer from the (deterministic) tape runId back to the --input plan
+ * file. Crash recovery cannot reconstruct the plan otherwise: storage `running`
+ * rows carry kernel-generated run ids, not the tape runId, and no input path.
+ */
+export function writePlanForgeDispatchManifest(
+	workspace: string,
+	manifest: PlanForgeDispatchManifest,
+): void {
+	const dir = planForgeDispatchDir(workspace);
+	mkdirSync(dir, { recursive: true });
+	writeFileSync(
+		resolve(dir, `${manifest.runId}.json`),
+		`${JSON.stringify(manifest, null, 2)}\n`,
+		"utf8",
+	);
+}
+
+export function readPlanForgeDispatchManifests(
+	workspace: string,
+): PlanForgeDispatchManifest[] {
+	const dir = planForgeDispatchDir(workspace);
+	if (!existsSync(dir)) {
+		return [];
+	}
+	const manifests: PlanForgeDispatchManifest[] = [];
+	for (const entry of readdirSync(dir)) {
+		if (!entry.endsWith(".json")) {
+			continue;
+		}
+		const parsed = JSON.parse(
+			readFileSync(resolve(dir, entry), "utf8"),
+		) as PlanForgeDispatchManifest;
+		manifests.push(parsed);
+	}
+	return manifests;
+}
+
 interface PlanAdmittedEventRow {
 	id: string;
 	payload: string;
@@ -3955,6 +4006,17 @@ async function runPlanForgeDispatchCommand(
 			`plan-not-admitted: PlanForge plan ${plan.id} has no signed plan_admitted on the tape. Run \`buildplane planforge admit\` first.`,
 		);
 	}
+
+	// S7 crash-recovery sidecar: pin the deterministic tape runId to the --input
+	// plan file BEFORE the run loop so `planforge recover` can reconstruct the plan
+	// if the process dies mid-dispatch (storage `running` rows carry no input path).
+	writePlanForgeDispatchManifest(workspace, {
+		runId,
+		inputPath: resolve(cwd, inputPath),
+		planId: plan.id,
+		idempotencyKey: plan.idempotencyKey,
+		createdAt: new Date().toISOString(),
+	});
 
 	const packets = dispatchAdmittedPlan({
 		plan,
