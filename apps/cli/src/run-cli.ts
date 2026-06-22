@@ -780,7 +780,7 @@ function formatPlanForgeHelp(): string[] {
 		"    --operator <id>  Required; deciding operator identity (decided_by)",
 		"    --json           Prints the admission result as JSON",
 		"",
-		"buildplane planforge dispatch --input <file> [--json] [--enforce-acceptance]",
+		"buildplane planforge dispatch --input <file> [--json] [--no-enforce-acceptance]",
 		"",
 		"  Dispatches an operator-admitted plan as one run per PlanForgeTask through",
 		"  the kernel run loop. Fails closed (plan-not-admitted) with no run when no",
@@ -788,11 +788,13 @@ function formatPlanForgeHelp(): string[] {
 		"  dependent task does not start if its predecessor fails.",
 		"",
 		"  Options:",
-		"    --input <file>        Markdown PlanForge goal fixture to dispatch",
-		"    --json                Prints the dispatch result (per-task run ids) as JSON",
-		"    --enforce-acceptance  Run the finalization acceptance gate per task",
-		"                          (diff-scope + verificationCommands); reject + quarantine",
-		"                          on failure. Off by default.",
+		"    --input <file>           Markdown PlanForge goal fixture to dispatch",
+		"    --json                   Prints the dispatch result (per-task run ids) as JSON",
+		"    --no-enforce-acceptance  Skip the finalization acceptance gate (diff-scope +",
+		"                             verificationCommands). The gate is ON by default and",
+		"                             worktree deps are provisioned (pnpm install) before",
+		"                             checks run; use this flag only when worktree",
+		"                             dependencies cannot be provisioned.",
 		"",
 		"buildplane planforge resume --input <file> [--json]",
 		"",
@@ -1121,6 +1123,7 @@ async function loadCliOrchestrator(
 		readonly ledgerActivityPort?: LedgerActivityPort;
 		readonly profileRegistry?: BuildplaneProfileRegistryPort;
 		readonly acceptancePort?: BuildplaneAcceptancePort;
+		readonly provisionDeps?: (workspacePath: string) => void;
 	},
 ): Promise<CliOrchestratorBundle> {
 	const kernel = (await cliImport("@buildplane/kernel")) as unknown as {
@@ -1153,6 +1156,7 @@ async function loadCliOrchestrator(
 			ledgerActivityPort?: unknown;
 			profileRegistry?: BuildplaneProfileRegistryPort;
 			acceptancePort?: BuildplaneAcceptancePort;
+			provisionDeps?: (workspacePath: string) => void;
 		}) => BuildplaneCliOrchestrator;
 		createEventBus: () => {
 			subscribe: (listener: (event: unknown) => void) => () => void;
@@ -1497,6 +1501,7 @@ async function loadCliOrchestrator(
 		ledgerActivityPort: opts?.ledgerActivityPort,
 		profileRegistry: opts?.profileRegistry,
 		acceptancePort: opts?.acceptancePort,
+		provisionDeps: opts?.provisionDeps,
 	});
 
 	return {
@@ -3932,13 +3937,13 @@ async function runPlanForgeDispatchCommand(
 		);
 	}
 	const jsonOut = args.includes("--json");
-	// Opt-in acceptance gate. A freshly-created worktree has no installed
-	// dependencies, so a task's `verificationCommands` (`pnpm lint`/`pnpm
-	// typecheck`/…) cannot run there yet; enforcing the gate on every dispatch
-	// would reject every run. Default dispatch is byte-for-byte unchanged;
-	// `--enforce-acceptance` opts a run into the finalization gate. Provisioning
-	// worktree dependencies so real checks run on every dispatch is a later slice.
-	const enforceAcceptance = args.includes("--enforce-acceptance");
+	// The acceptance gate is ON by default. Worktree dependencies are provisioned
+	// (`pnpm install --frozen-lockfile`) before the gate runs, so a task's
+	// `verificationCommands` (`pnpm lint`/`pnpm typecheck`/…) have their binaries.
+	// `--no-enforce-acceptance` opts OUT (e.g. during initial dogfood bringup or
+	// when the worktree has no pnpm workspace). The legacy `--enforce-acceptance`
+	// flag is still accepted but redundant — the gate is already on.
+	const enforceAcceptance = !args.includes("--no-enforce-acceptance");
 
 	const plan = createPlanForgeDryRunPlan(resolve(cwd, inputPath));
 	const workspace = resolve(cwd);
@@ -4044,7 +4049,12 @@ async function runPlanForgeDispatchCommand(
 		const { orchestrator, eventBus: cliEventBus } = await loadCliOrchestrator(
 			workspace,
 			enforceAcceptance
-				? { ledgerActivityPort, profileRegistry, acceptancePort }
+				? {
+						ledgerActivityPort,
+						profileRegistry,
+						acceptancePort,
+						provisionDeps: provisionWorktreeDeps,
+					}
 				: { ledgerActivityPort },
 		);
 
