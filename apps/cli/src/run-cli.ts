@@ -83,9 +83,12 @@ import {
 	createPlanForgeDryRunPlan,
 	deriveAcceptanceContract,
 	dispatchAdmittedPlan,
+	formatPriorWorkEntry,
 	PLANFORGE_AUTHORIZED_NEXT_STEP,
 	PLANFORGE_VALIDATION_STATUS_PASS,
 	type PlanForgePlan,
+	type PlanSummary,
+	summarizePlanReceipt,
 } from "./planforge-schema.js";
 import {
 	defaultPrCheckRequest,
@@ -4107,6 +4110,75 @@ async function planForgeReceiptExists(
 }
 
 /**
+ * Persist a structured plan summary as a searchable document after `plan_receipt`,
+ * so the supervisor (GAP-7) can inject it as `TaskIntent.context.priorWork` into the
+ * next iteration's packet. Best-effort metadata; the caller wraps this in its own
+ * try/catch so a storage failure cannot shadow the signed receipt flush. No-op when
+ * storage is unavailable (pre-cold-path project).
+ */
+export function writePlanSummaryToStorage(
+	storage: Pick<BuildplaneStoragePort, "createSearchableDocument"> | undefined,
+	plan: PlanForgePlan,
+	runs: ReadonlyArray<{ task: string; status: string }>,
+	outcome: "completed" | "failed",
+	mergedSha?: string,
+): void {
+	if (!storage) {
+		return;
+	}
+	const summary: PlanSummary = summarizePlanReceipt(
+		plan,
+		runs,
+		outcome,
+		mergedSha,
+	);
+	storage.createSearchableDocument({
+		sourceTable: "planforge_receipts",
+		sourceId: plan.id,
+		documentKind: "plan-summary",
+		title: plan.title,
+		bodyText: formatPriorWorkEntry(summary),
+		metadata: {
+			planId: summary.planId,
+			outcome: summary.outcome,
+			taskCount: summary.taskCount,
+			passedCount: summary.passedCount,
+			mergedSha: summary.mergedSha,
+			decidedAt: summary.decidedAt,
+		},
+	});
+}
+
+/**
+ * Load the full Buildplane storage port for plan-summary persistence. Unlike
+ * `loadStoragePort` (narrowed to memory-list reads), this exposes
+ * `createSearchableDocument`. Returns undefined for a pre-cold-path project.
+ */
+async function loadSearchableDocumentStoragePort(
+	projectRoot: string,
+): Promise<
+	Pick<BuildplaneStoragePort, "createSearchableDocument"> | undefined
+> {
+	try {
+		const { resolveProjectLayout, createBuildplaneStorage } = (await import(
+			"@buildplane/storage"
+		)) as unknown as {
+			resolveProjectLayout: (root: string) => { stateDbPath: string };
+			createBuildplaneStorage: (
+				root: string,
+			) => Pick<BuildplaneStoragePort, "createSearchableDocument">;
+		};
+		const layout = resolveProjectLayout(projectRoot);
+		if (existsSync(layout.stateDbPath)) {
+			return createBuildplaneStorage(projectRoot);
+		}
+	} catch {
+		// Storage port unavailable (pre-cold-path project)
+	}
+	return undefined;
+}
+
+/**
  * `buildplane planforge dispatch --input <file>`: dispatch an operator-admitted
  * plan as one run per PlanForgeTask. Fails closed (exit 1, `plan-not-admitted`)
  * when no signed plan_admitted exists on the tape — a fast CLI-side pre-check; the
@@ -4135,6 +4207,11 @@ async function runPlanForgeDispatchCommand(
 
 	const plan = createPlanForgeDryRunPlan(resolve(cwd, inputPath));
 	const workspace = resolve(cwd);
+	// priorWork handoff (GAP-5): a second storage connection for the single
+	// post-receipt summary INSERT. SQLite WAL mode allows it to coexist with the
+	// orchestrator's primary connection — the write executes after emitPlanReceipt
+	// returns, so there is no concurrent-writer window in the sequential dispatch loop.
+	const summaryStore = await loadSearchableDocumentStoragePort(workspace);
 	const runId = planAdmitRunId(plan.idempotencyKey);
 	const admission = await findVerifiedPlanAdmission(workspace, runId, plan);
 	const admittedEventId = admission?.eventId;
@@ -4305,6 +4382,21 @@ async function runPlanForgeDispatchCommand(
 				decidedAt: new Date().toISOString(),
 			}),
 		);
+
+		// priorWork handoff (GAP-5): persist a structured plan summary for the next
+		// iteration. Best-effort and wrapped so a storage failure cannot shadow the
+		// already-flushed plan_receipt. mergedSha is undefined here; GAP-7 passes
+		// result.mergedHeadSha after commitAndMergeWorkspace.
+		try {
+			writePlanSummaryToStorage(
+				summaryStore,
+				plan,
+				runs,
+				allPassed ? "completed" : "failed",
+			);
+		} catch (summaryErr) {
+			stdout(`[warn] failed to persist plan summary: ${String(summaryErr)}`);
+		}
 	} finally {
 		try {
 			await emitter.close(); // flushes + closes the signed subprocess

@@ -1,7 +1,8 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import type { PlanForgePlan } from "../src/planforge-schema";
 import {
 	PLANFORGE_ALLOWED_SIDE_EFFECTS,
 	PLANFORGE_FORBIDDEN_SIDE_EFFECTS,
@@ -10,6 +11,7 @@ import {
 	PLANFORGE_REQUIRED_EVIDENCE,
 	PLANFORGE_VALIDATION_STATUSES,
 } from "../src/planforge-schema";
+import { writePlanSummaryToStorage } from "../src/run-cli.js";
 
 interface ExpectedPlanFixture {
 	schemaVersion: string;
@@ -85,5 +87,53 @@ describe("planforge schema constants", () => {
 		expect([...PLANFORGE_FORBIDDEN_SIDE_EFFECTS]).toEqual(
 			fixtureForbiddenSideEffects,
 		);
+	});
+});
+
+describe("writePlanSummaryToStorage", () => {
+	it("calls createSearchableDocument with the formatted summary", () => {
+		const mockStorage = {
+			createSearchableDocument: vi.fn().mockReturnValue({ id: "doc-1" }),
+		};
+
+		const plan = {
+			id: "plan-xyz",
+			title: "M5-S1",
+			goal: "inbox",
+			tasks: [{ id: "PF1" }, { id: "PF2" }],
+		} as unknown as PlanForgePlan;
+		const runs = [
+			{ task: "PF1", status: "passed" },
+			{ task: "PF2", status: "passed" },
+		];
+
+		writePlanSummaryToStorage(mockStorage, plan, runs, "completed", "sha-abc");
+
+		expect(mockStorage.createSearchableDocument).toHaveBeenCalledOnce();
+		const arg = mockStorage.createSearchableDocument.mock.calls[0][0];
+		expect(arg.sourceTable).toBe("planforge_receipts");
+		expect(arg.sourceId).toBe("plan-xyz");
+		expect(arg.documentKind).toBe("plan-summary");
+		expect(arg.title).toBe("M5-S1");
+		expect(arg.bodyText).toContain("completed");
+		expect(arg.bodyText).toContain("2/2");
+		expect(arg.metadata?.planId).toBe("plan-xyz");
+		expect(arg.metadata?.outcome).toBe("completed");
+	});
+
+	it("is a no-op when storage is undefined", () => {
+		expect(() =>
+			writePlanSummaryToStorage(
+				undefined,
+				{
+					id: "p",
+					title: "t",
+					goal: "g",
+					tasks: [],
+				} as unknown as PlanForgePlan,
+				[],
+				"failed",
+			),
+		).not.toThrow();
 	});
 });
