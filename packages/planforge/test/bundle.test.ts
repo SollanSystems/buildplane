@@ -39,7 +39,7 @@ describe("buildDefaultCapabilityBundleForPlan", () => {
 
 		expect(bundle.schemaVersion).toBe("buildplane.capability_bundle.v0");
 		expect(bundle.bundleId).toBe(plan.id);
-		// toy plan: PF1 {local-doc, local-fixture}, PF2 {local-doc, local-fixture, local-receipt}
+		// task[0]: {local-doc, local-fixture}, task[1]: {local-doc, local-fixture, local-receipt}
 		expect(bundle.fsWrite).toEqual([
 			"apps/cli/test/fixtures/**",
 			"docs/**",
@@ -84,7 +84,7 @@ describe("buildDefaultCapabilityBundleForPlan", () => {
 		expect(new Set(envelope.tools?.run_command?.allowlist)).toEqual(
 			expectedAllow,
 		);
-		// PF2 alone declares `local-receipt`; its presence proves PF2 was not dropped.
+		// task[1] alone declares `local-receipt`; its presence proves task[1] was not dropped.
 		expect(envelope.fsWrite).toContain("docs/operations/**");
 	});
 

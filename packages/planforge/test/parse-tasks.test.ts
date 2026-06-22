@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { parseTasks } from "../src/parse-tasks.ts";
+import * as planforgeSchema from "../src/schema.ts";
 
 const MINIMAL_TASK = `## Tasks\n\n### T1: Write the spec\n\n- Objective: Define the PlanForge contracts at documentation level.\n- Assignee-hint: auto-coder\n- Workspace: isolated-worktree\n- Allowed-side-effects: local-doc, local-fixture\n- Forbidden-side-effects: execute-code, board-write, network-write, push, deploy, merge\n- Depends-on:\n- Acceptance-criteria:\n  - All PlanForge types are defined.\n  - Dry-run semantics are documented.\n- Verification-commands:\n  - pnpm lint\n  - git diff --check\n`;
 
@@ -85,5 +86,21 @@ describe("parseTasks", () => {
 			"## Tasks\n\n### T1: Incomplete\n\n- Assignee-hint: auto-coder\n- Workspace: isolated-worktree\n- Allowed-side-effects: local-doc\n- Forbidden-side-effects: execute-code\n- Depends-on:\n- Acceptance-criteria:\n  - ok\n- Verification-commands:\n  - pnpm lint\n";
 		// Tasks with missing required fields are dropped (fail-safe: validate.ts catches empty tasks[])
 		expect(parseTasks(content)).toEqual([]);
+	});
+});
+
+describe("ParsedTask id is open string (not closed union)", () => {
+	it("accepts task ids with hyphens and numbers beyond PF1/PF2", () => {
+		const content =
+			"## Tasks\n\n### M5-S1-T1: Scaffold the web surface\n\n- Objective: Create the initial Next.js app scaffold.\n- Assignee-hint: auto-coder\n- Workspace: isolated-worktree\n- Allowed-side-effects: local-doc, local-fixture\n- Forbidden-side-effects: execute-code, board-write, network-write, push, deploy, merge\n- Depends-on:\n- Acceptance-criteria:\n  - App directory exists.\n- Verification-commands:\n  - pnpm typecheck\n";
+		const [task] = parseTasks(content);
+		expect(task.id).toBe("M5-S1-T1");
+		// TypeScript: task.id is string, not 'PF1'|'PF2'
+		const id: string = task.id;
+		expect(id).toBeDefined();
+	});
+
+	it("PLANFORGE_TASK_IDS is no longer exported from schema", () => {
+		expect("PLANFORGE_TASK_IDS" in planforgeSchema).toBe(false);
 	});
 });

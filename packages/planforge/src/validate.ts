@@ -1,5 +1,6 @@
 import type { PlanForgeCompileResult } from "./compile.js";
 import { hasLine } from "./compile.js";
+import type { ParsedTask } from "./parse-tasks.js";
 import {
 	PLANFORGE_REQUIRED_EVIDENCE,
 	PLANFORGE_VALIDATION_STATUS_INSUFFICIENT_EVIDENCE,
@@ -82,6 +83,12 @@ export function validate(
 	if (hasForbiddenPlanForgeGoalIntent(goal)) {
 		unsafeReasons.push("goal requests a forbidden side effect");
 	}
+	if (compiled.parsedTasks.length === 0) {
+		// 'tasks' is not yet in PLANFORGE_REQUIRED_EVIDENCE (extending that public
+		// const tuple is a breaking change deferred to GAP-9); the runtime cast is
+		// narrowly scoped to this push.
+		missingEvidence.push("tasks" as PlanForgeRequiredEvidence);
+	}
 
 	const status: PlanForgeValidationStatus =
 		unsafeReasons.length > 0
@@ -119,6 +126,27 @@ export function validate(
 			message:
 				"Operator goal, repository remote, trusted base, worktree policy, and safety constraints are present.",
 			evidenceRefs: [compiled.evidenceRefs[1]],
+		},
+		{
+			id: "tasks-present",
+			status:
+				compiled.parsedTasks.length === 0 ? "INSUFFICIENT_EVIDENCE" : "PASS",
+			message: "Plan declares at least one task with verification commands.",
+			evidenceRefs: [compiled.evidenceRefs[0]],
+		},
+		{
+			id: "tasks-valid",
+			status:
+				compiled.parsedTasks.length > 0 &&
+				compiled.parsedTasks.every(
+					(t: ParsedTask) => t.verificationCommands.length > 0,
+				)
+					? "PASS"
+					: compiled.parsedTasks.length === 0
+						? "INSUFFICIENT_EVIDENCE"
+						: "UNSAFE_TO_RUN",
+			message: "Every declared task carries at least one verification command.",
+			evidenceRefs: [compiled.evidenceRefs[0]],
 		},
 	];
 
