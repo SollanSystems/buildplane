@@ -243,7 +243,7 @@ export interface OperatorDecisionRecordedV1 {
 	run_id: string;
 	/** `approved` | `rejected` */
 	decision: string;
-	/** `merge` | `resume` */
+	/** `merge` | `resume` (M5) | `authorize-envelope` (GAP-10) */
 	subject: string;
 	/** Chains to the `acceptance_recorded` event, when present (string event id). */
 	acceptance_event_id?: string;
@@ -251,6 +251,13 @@ export interface OperatorDecisionRecordedV1 {
 	admission_event_id?: string;
 	/** Merge commit SHA, present when an approved merge produced one. */
 	merge_commit?: string;
+	/**
+	 * Canonical-JSON of the `AuthorizationEnvelopeV0` when `subject` is
+	 * `authorize-envelope` (GAP-10); `None` otherwise. A string, not a nested
+	 * typeshared struct — `max_iterations`/`token_budget` integers live inside
+	 * the JSON string, so the wire shape stays all-string (no `u64` hazard).
+	 */
+	envelope?: string;
 	/** Operator identity (payload field; the event is kernel-signed). */
 	decided_by: string;
 	/** RFC3339 */
