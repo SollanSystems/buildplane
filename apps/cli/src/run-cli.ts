@@ -4082,24 +4082,25 @@ async function planForgeReceiptExists(
 	const { DatabaseSync } = await import("node:sqlite");
 	const db = new DatabaseSync(eventsDbPath, { readOnly: true });
 	try {
-		const rows = db
+		const row = db
 			.prepare(
-				"SELECT payload FROM events WHERE run_id = ? AND kind = 'plan_receipt'",
+				"SELECT payload FROM events WHERE run_id = ? AND kind = 'plan_receipt' LIMIT 1",
 			)
-			.all(runId) as { payload: string }[];
-		return rows.some((row) => {
-			const payload = JSON.parse(row.payload) as {
-				PlanReceiptRecordedV1?: {
-					plan_id?: string;
-					admission_event_id?: string;
-				};
+			.get(runId) as { payload: string } | undefined;
+		if (!row) {
+			return false;
+		}
+		const payload = JSON.parse(row.payload) as {
+			PlanReceiptRecordedV1?: {
+				plan_id?: string;
+				admission_event_id?: string;
 			};
-			const receipt = payload.PlanReceiptRecordedV1;
-			return (
-				receipt?.plan_id === planId &&
-				receipt.admission_event_id === admittedEventId
-			);
-		});
+		};
+		const receipt = payload.PlanReceiptRecordedV1;
+		return (
+			receipt?.plan_id === planId &&
+			receipt.admission_event_id === admittedEventId
+		);
 	} finally {
 		db.close();
 	}
