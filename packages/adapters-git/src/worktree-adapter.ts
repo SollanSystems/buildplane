@@ -50,6 +50,7 @@ const BUILDPLANE_WORKTREE_CLEAN_EXCLUSIONS = [
 	"workspaces/**",
 	"vcr/**",
 	"ledger/**",
+	"planforge/**",
 ] as const;
 
 /** `:(exclude)<prefix>/<pattern>` pathspecs for the given `.buildplane` prefix. */
