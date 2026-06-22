@@ -4209,7 +4209,26 @@ async function runPlanForgeResumeCommand(
 			"Missing required --input <file> argument for PlanForge resume.",
 		);
 	}
-	const jsonOut = args.includes("--json");
+	return resumePlanForgePlanFromInput(inputPath, cwd, stdout, {
+		json: args.includes("--json"),
+	});
+}
+
+/**
+ * Shared replay-skip-resume body, extracted from `runPlanForgeResumeCommand` so
+ * both `planforge resume --input` and `planforge recover` (S7 crash recovery)
+ * drive the identical path: reconstruct the plan from `inputPath`, re-verify the
+ * signed `plan_admitted`, replay durable activity completions from the tape, skip
+ * the recorded prefix, execute only the remaining suffix, and append the terminal
+ * receipt if the prior run crashed after execution but before `plan_receipt`.
+ */
+export async function resumePlanForgePlanFromInput(
+	inputPath: string,
+	cwd: string,
+	stdout: (line: string) => void,
+	opts: { json: boolean },
+): Promise<number> {
+	const jsonOut = opts.json;
 
 	const plan = createPlanForgeDryRunPlan(resolve(cwd, inputPath));
 	const workspace = resolve(cwd);
