@@ -32,6 +32,11 @@ export {
 	dispatchAdmittedPlan,
 } from "./dispatch.js";
 export { type ParsedTask, parseTasks } from "./parse-tasks.js";
+export {
+	formatPriorWorkEntry,
+	type PlanSummary,
+	summarizePlanReceipt,
+} from "./plan-summary.js";
 export { preview } from "./preview.js";
 export {
 	type BuildPlanReceiptInput,
