@@ -198,3 +198,49 @@ describe("buildDefaultCapabilityBundleForTask — code-edit", () => {
 		expect(capabilityBundleDigest(bundle)).toBe(bundleDigest(bundle));
 	});
 });
+
+describe("code-edit bundle is broker-enforceable", () => {
+	it("confines a code-edit worker to source/test and denies everything else", () => {
+		const plan = createPlanForgeDryRunPlan(inputFixture);
+		const task = {
+			...plan.tasks[0],
+			allowedSideEffects: ["code-edit"] as const,
+			verificationCommands: ["cargo test", "pnpm vitest"],
+		};
+		const validated = validateCapabilityBundle(
+			buildDefaultCapabilityBundleForTask(plan, task),
+		);
+		if (!validated.ok) {
+			throw new Error(validated.errors.join("; "));
+		}
+		const ctx = { worktreeRoot: "/tmp/wt" };
+		expect(
+			evaluateToolInvocation(
+				validated.bundle,
+				{ tool: "write_file", path: "src/kernel/x.ts" },
+				ctx,
+			).decision,
+		).toBe("allow");
+		expect(
+			evaluateToolInvocation(
+				validated.bundle,
+				{ tool: "write_file", path: "packages/kernel/src/orchestrator.ts" },
+				ctx,
+			).decision,
+		).toBe("allow");
+		expect(
+			evaluateToolInvocation(
+				validated.bundle,
+				{ tool: "write_file", path: "docs/note.md" },
+				ctx,
+			).decision,
+		).toBe("deny");
+		expect(
+			evaluateToolInvocation(
+				validated.bundle,
+				{ tool: "write_file", path: "../escape.ts" },
+				ctx,
+			).decision,
+		).toBe("deny");
+	});
+});
