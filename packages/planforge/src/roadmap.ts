@@ -132,11 +132,16 @@ export function selectNextRoadmapSlice(
 	completedSliceIds: readonly string[],
 ): RoadmapSlice | undefined {
 	const completed = new Set(completedSliceIds);
+	// A dependency is satisfied when it is recorded complete on the tape OR
+	// declared `done` in the roadmap (a build-time prerequisite like M5-S1, which
+	// is `done` by declaration and never appears on the loop's own tape).
 	for (const slice of doc.slices) {
-		if (slice.status === "done" || completed.has(slice.id)) {
-			continue;
+		if (slice.status === "done") {
+			completed.add(slice.id);
 		}
-		if (slice.status !== "pending") {
+	}
+	for (const slice of doc.slices) {
+		if (slice.status !== "pending" || completed.has(slice.id)) {
 			continue;
 		}
 		if (slice.dependsOn.every((dep) => completed.has(dep))) {
