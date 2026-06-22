@@ -82,7 +82,11 @@ function runGit(cwd: string, args: string[]): void {
 
 function installPnpmShim(binDir: string, body: string): void {
 	const shim = join(binDir, "pnpm");
-	writeFileSync(shim, `#!/bin/sh\n${body}\n`, "utf8");
+	writeFileSync(
+		shim,
+		`#!/bin/sh\nif [ "$1" = "install" ]; then exit 0; fi\n${body}\n`,
+		"utf8",
+	);
 	chmodSync(shim, 0o755);
 }
 
