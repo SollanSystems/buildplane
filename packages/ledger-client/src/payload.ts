@@ -13,6 +13,7 @@ import type {
 	GitCheckpointV1,
 	ModelRequestV1,
 	ModelResponseV1,
+	OperatorDecisionRecordedV1,
 	PlanAdmittedV1,
 	PlanReceiptRecordedV1,
 	RunAdmissionRecordedV1,
@@ -53,4 +54,5 @@ export type Payload =
 	| { WorkspaceWriteV1: WorkspaceWriteV1 }
 	| { TapeCheckpointV1: TapeCheckpointV1 }
 	| { CapabilityDeniedV1: CapabilityDeniedV1 }
-	| { AcceptanceRecordedV1: AcceptanceRecordedV1 };
+	| { AcceptanceRecordedV1: AcceptanceRecordedV1 }
+	| { OperatorDecisionRecordedV1: OperatorDecisionRecordedV1 };

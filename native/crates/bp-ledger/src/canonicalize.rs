@@ -102,6 +102,7 @@ fn payload_variant_name(payload: &Payload) -> &'static str {
         Payload::TapeCheckpointV1(_) => "TapeCheckpointV1",
         Payload::CapabilityDeniedV1(_) => "CapabilityDeniedV1",
         Payload::AcceptanceRecordedV1(_) => "AcceptanceRecordedV1",
+        Payload::OperatorDecisionRecordedV1(_) => "OperatorDecisionRecordedV1",
     }
 }
 
@@ -129,6 +130,7 @@ fn kind_to_variant(kind: &str) -> Result<&'static str> {
         "tape_checkpoint" => "TapeCheckpointV1",
         "capability_denied" => "CapabilityDeniedV1",
         "acceptance_recorded" => "AcceptanceRecordedV1",
+        "operator_decision_recorded" => "OperatorDecisionRecordedV1",
         other => {
             return Err(LedgerError::InvalidPayload {
                 kind: other.to_string(),

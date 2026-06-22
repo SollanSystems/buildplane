@@ -6,6 +6,7 @@ pub mod capability_broker;
 pub mod checkpoint;
 pub mod git_checkpoint;
 pub mod model_io;
+pub mod operator_decision;
 pub mod plan_lifecycle;
 pub mod run_lifecycle;
 pub mod tool_io;
@@ -45,4 +46,5 @@ pub enum Payload {
     TapeCheckpointV1(checkpoint::TapeCheckpointV1),
     CapabilityDeniedV1(capability_broker::CapabilityDeniedV1),
     AcceptanceRecordedV1(acceptance::AcceptanceRecordedV1),
+    OperatorDecisionRecordedV1(operator_decision::OperatorDecisionRecordedV1),
 }
