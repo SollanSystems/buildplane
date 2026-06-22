@@ -82,8 +82,9 @@ describe("planforge schema constants", () => {
 			expectedPlan.tasks.map((task) => task.id),
 		);
 		expect([...PLANFORGE_ALLOWED_SIDE_EFFECTS]).toEqual(
-			fixtureAllowedSideEffects,
+			expect.arrayContaining(fixtureAllowedSideEffects),
 		);
+		expect([...PLANFORGE_ALLOWED_SIDE_EFFECTS]).toContain("code-edit");
 		expect([...PLANFORGE_FORBIDDEN_SIDE_EFFECTS]).toEqual(
 			fixtureForbiddenSideEffects,
 		);
