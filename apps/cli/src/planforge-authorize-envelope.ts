@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import type { AuthorizationEnvelopeV0 } from "@buildplane/kernel";
 import { createTapeEmitter, type TapeEmitter } from "@buildplane/ledger-client";
@@ -85,13 +86,15 @@ export function parseEnvelopeArgs(args: readonly string[]): ParsedEnvelopeArgs {
 }
 
 /**
- * Deterministic run id from the envelope digest — re-authorizing the IDENTICAL
- * envelope resolves to the same run id, so the repo-root tape de-dups it. This
- * is the envelope's OWN signed emit, NOT the M5-S4 recordOperatorDecision path.
+ * Deterministic, UUID-shaped run id from the envelope digest — re-authorizing
+ * the IDENTICAL envelope resolves to the same run id, so the repo-root tape
+ * de-dups it. The native `ledger serve --run-id` parses this as a `RunId(Uuid)`,
+ * so it MUST be syntactically a UUID (mirrors run-cli's planAdmitRunId). This is
+ * the envelope's OWN signed emit, NOT the M5-S4 recordOperatorDecision path.
  */
 export function envelopeRunId(envelope: AuthorizationEnvelopeV0): string {
-	const hex = authorizationEnvelopeDigest(envelope).slice("sha256:".length);
-	return `pf-envelope-${hex.slice(0, 16)}`;
+	const h = authorizationEnvelopeDigest(envelope).slice("sha256:".length);
+	return `${h.slice(0, 8)}-${h.slice(8, 12)}-8${h.slice(13, 16)}-${h.slice(16, 20)}-${h.slice(20, 32)}`;
 }
 
 export function buildAuthorizeEnvelopePayload(
@@ -108,6 +111,56 @@ export function buildAuthorizeEnvelopePayload(
 	};
 }
 
+interface OperatorDecisionEventRow {
+	id: string;
+	payload: string;
+}
+
+/**
+ * Probe the repo-root tape for an already-recorded authorize-envelope decision
+ * on this run id whose envelope matches byte-for-byte. The native ledger does
+ * not dedupe by run id, so re-authorizing the identical envelope is made a
+ * no-op here (mirrors run-cli's findExistingPlanAdmitted), keyed on the
+ * deterministic envelope digest -> run id.
+ */
+async function findExistingAuthorizeEnvelope(
+	workspace: string,
+	runId: string,
+	canonicalEnvelope: string,
+): Promise<string | undefined> {
+	const eventsDbPath = resolve(workspace, ".buildplane", "ledger", "events.db");
+	if (!existsSync(eventsDbPath)) {
+		return undefined;
+	}
+	const { DatabaseSync } = await import("node:sqlite");
+	const db = new DatabaseSync(eventsDbPath, { readOnly: true });
+	try {
+		const rows = db
+			.prepare(
+				"SELECT id, payload FROM events WHERE run_id = ? AND kind = 'operator_decision_recorded' ORDER BY id ASC",
+			)
+			.all(runId) as unknown as OperatorDecisionEventRow[];
+		for (const row of rows) {
+			const payload = JSON.parse(row.payload) as {
+				OperatorDecisionRecordedV1?: {
+					subject?: string;
+					envelope?: string;
+				};
+			};
+			const record = payload.OperatorDecisionRecordedV1;
+			if (
+				record?.subject === "authorize-envelope" &&
+				record.envelope === canonicalEnvelope
+			) {
+				return row.id;
+			}
+		}
+		return undefined;
+	} finally {
+		db.close();
+	}
+}
+
 export async function runPlanForgeAuthorizeEnvelopeCommand(
 	args: readonly string[],
 	cwd: string,
@@ -116,6 +169,30 @@ export async function runPlanForgeAuthorizeEnvelopeCommand(
 	const parsed = parseEnvelopeArgs(args);
 	const payload = buildAuthorizeEnvelopePayload(parsed, new Date());
 	const workspace = resolve(cwd);
+
+	const existingEventId = await findExistingAuthorizeEnvelope(
+		workspace,
+		payload.run_id,
+		payload.envelope,
+	);
+	if (existingEventId) {
+		stdout(
+			parsed.json
+				? JSON.stringify(
+						{
+							status: "already_authorized",
+							run_id: payload.run_id,
+							event_id: existingEventId,
+							payload,
+						},
+						null,
+						2,
+					)
+				: `Envelope for ${parsed.envelope.milestone} is already authorized; no new tape event written.`,
+		);
+		return 0;
+	}
+
 	const binary = resolveLedgerBinary(cwd);
 	const ledgerChild = spawnLedgerSubprocess(binary, payload.run_id, workspace, {
 		sign: true,
