@@ -45,7 +45,7 @@ import type {
 	StatusSnapshot,
 	UnitPacket,
 } from "./run-loop.js";
-import type { Run } from "./types.js";
+import type { Run, RunStatus } from "./types.js";
 
 export interface CreateRunOptions {
 	readonly runId?: string;
@@ -154,6 +154,16 @@ export interface BuildplaneStoragePort {
 		records: readonly InjectedMemoryRecord[],
 	): void;
 	listInjectedMemories(runId: string): readonly PersistedInjectedMemoryRecord[];
+	/**
+	 * Every run currently in `status`, oldest first. Used by S7 crash recovery to
+	 * find orphaned `running` runs whose process died before a terminal status.
+	 * `options` (limit/cursor) is a forward-compatible pagination surface extended
+	 * by M5-S2; this implementation ignores it and returns all matching runs.
+	 */
+	listRunsByStatus(
+		status: RunStatus,
+		options?: { limit?: number; cursor?: string },
+	): readonly Run[];
 	getStatusSnapshot(): StatusSnapshot;
 	inspectTarget(id: string): InspectSnapshot;
 	listEvents(options: {

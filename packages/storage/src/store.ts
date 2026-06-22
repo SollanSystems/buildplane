@@ -3188,6 +3188,32 @@ export function createStorageStore(
 			}
 		},
 
+		listRunsByStatus(
+			status: RunStatus,
+			_options?: { limit?: number; cursor?: string },
+		): readonly Run[] {
+			ensureInitialized();
+			const database = openStoreDatabase();
+			try {
+				const rows = database
+					.prepare(
+						`SELECT id, unit_id, status FROM runs WHERE status = ? ORDER BY created_at ASC, rowid ASC`,
+					)
+					.all(status) as {
+					id: string;
+					unit_id: string;
+					status: string;
+				}[];
+				return rows.map((row) => ({
+					id: row.id,
+					unitId: row.unit_id,
+					status: row.status as RunStatus,
+				}));
+			} finally {
+				database.close();
+			}
+		},
+
 		inspectTarget(id: string): WorkspaceAwareInspectSnapshot {
 			ensureInitialized();
 			const database = openStoreDatabase();
