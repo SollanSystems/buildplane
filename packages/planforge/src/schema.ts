@@ -24,6 +24,7 @@ export const PLANFORGE_REQUIRED_EVIDENCE = [
 	"worktree_policy",
 	"dry_run_constraints",
 	"trusted_boundary",
+	"tasks",
 ] as const;
 
 export const PLANFORGE_ALLOWED_SIDE_EFFECTS = [

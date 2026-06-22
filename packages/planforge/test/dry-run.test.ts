@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { compile } from "../src/compile.ts";
 import { digest } from "../src/digest.ts";
 import { createPlanForgeDryRunPlan } from "../src/index.ts";
-import { validate } from "../src/validate.ts";
+import { hasForbiddenPlanForgeGoalIntent, validate } from "../src/validate.ts";
 
 const fixtureRoot = join(
 	dirname(fileURLToPath(import.meta.url)),
@@ -115,5 +115,48 @@ describe("validate: tasks-present check", () => {
 		const plan = createPlanForgeDryRunPlan(inputFixture);
 		const check = plan.validation.checks.find((c) => c.id === "tasks-present");
 		expect(check?.status).toBe("PASS");
+	});
+});
+
+describe("hasForbiddenPlanForgeGoalIntent — self-build narrowing", () => {
+	it("allows a goal that edits source and runs verification commands", () => {
+		expect(
+			hasForbiddenPlanForgeGoalIntent(
+				"Edit packages/kernel/src to add the approval inbox and run cargo test and pnpm vitest to verify.",
+			),
+		).toBe(false);
+	});
+
+	it("allows the literal phrase 'run commands' in a verification context", () => {
+		expect(
+			hasForbiddenPlanForgeGoalIntent(
+				"Implement the slice; the worker may run commands listed in verificationCommands.",
+			),
+		).toBe(false);
+	});
+
+	it("allows the literal phrase 'execute code' in a verification context", () => {
+		expect(
+			hasForbiddenPlanForgeGoalIntent(
+				"The untrusted worker will execute code in an isolated worktree to verify the slice.",
+			),
+		).toBe(false);
+	});
+
+	it("still rejects push", () => {
+		expect(
+			hasForbiddenPlanForgeGoalIntent(
+				"Implement the feature and push to origin.",
+			),
+		).toBe(true);
+	});
+
+	it("still rejects deploy / merge / open PR / worker-spawn", () => {
+		expect(hasForbiddenPlanForgeGoalIntent("deploy to prod")).toBe(true);
+		expect(hasForbiddenPlanForgeGoalIntent("merge the branch")).toBe(true);
+		expect(hasForbiddenPlanForgeGoalIntent("open a pull request")).toBe(true);
+		expect(hasForbiddenPlanForgeGoalIntent("spawn a worker to do it")).toBe(
+			true,
+		);
 	});
 });

@@ -1,6 +1,5 @@
 import type { PlanForgeCompileResult } from "./compile.js";
 import { hasLine } from "./compile.js";
-import type { ParsedTask } from "./parse-tasks.js";
 import {
 	PLANFORGE_REQUIRED_EVIDENCE,
 	PLANFORGE_VALIDATION_STATUS_INSUFFICIENT_EVIDENCE,
@@ -18,8 +17,14 @@ export function hasForbiddenPlanForgeGoalIntent(
 	if (!goal) {
 		return false;
 	}
+	// The verification surface is governed by the declared verificationCommands +
+	// the capability-bundle allowlist, not by goal prose — so 'run commands' /
+	// 'execute code' are intentionally NOT forbidden here (a benign self-build goal
+	// legitimately mentions running its verification commands). The truly-unsafe
+	// boundary-crossing phrasings (push/deploy/merge/PR/network/board/worker-spawn)
+	// stay rejected.
 	const forbiddenGoalIntent =
-		/\b(push(?:es)?|deploys?|merges?|open\s+(?:prs?|pull\s+requests?)|pull\s+requests?|network\s+writes?|board\s+writes?|kanban|gsd2|github|worker[-\s]+spawns?|spawn\s+(?:a\s+)?workers?|execute\s+code|code\s+executions?|run\s+commands?)\b/gi;
+		/\b(push(?:es)?|deploys?|merges?|open\s+(?:prs?|pull\s+requests?)|pull\s+requests?|network\s+writes?|board\s+writes?|kanban|gsd2|github|worker[-\s]+spawns?|spawn\s+(?:a\s+)?workers?)\b/gi;
 	for (const match of goal.matchAll(forbiddenGoalIntent)) {
 		const index = match.index ?? 0;
 		const prefix = goal.slice(Math.max(0, index - 24), index).toLowerCase();
@@ -84,10 +89,7 @@ export function validate(
 		unsafeReasons.push("goal requests a forbidden side effect");
 	}
 	if (compiled.parsedTasks.length === 0) {
-		// 'tasks' is not yet in PLANFORGE_REQUIRED_EVIDENCE (extending that public
-		// const tuple is a breaking change deferred to GAP-9); the runtime cast is
-		// narrowly scoped to this push.
-		missingEvidence.push("tasks" as PlanForgeRequiredEvidence);
+		missingEvidence.push("tasks");
 	}
 
 	const status: PlanForgeValidationStatus =
@@ -122,7 +124,12 @@ export function validate(
 		},
 		{
 			id: "evidence-present",
-			status: missingEvidence.length > 0 ? "INSUFFICIENT_EVIDENCE" : "PASS",
+			// 'tasks' is reported by the dedicated tasks-present check; this structural
+			// guard only covers the operator-boundary evidence, so a tasks-only
+			// absence does not misreport structural evidence as missing.
+			status: missingEvidence.some((e) => e !== "tasks")
+				? "INSUFFICIENT_EVIDENCE"
+				: "PASS",
 			message:
 				"Operator goal, repository remote, trusted base, worktree policy, and safety constraints are present.",
 			evidenceRefs: [compiled.evidenceRefs[1]],
@@ -136,15 +143,12 @@ export function validate(
 		},
 		{
 			id: "tasks-valid",
+			// parseTasks() already drops any task with zero verification commands, so a
+			// parsed task is invariably valid here — the only states are PASS (>=1 task)
+			// and INSUFFICIENT_EVIDENCE (no tasks). The former UNSAFE_TO_RUN arm was
+			// unreachable and has been collapsed.
 			status:
-				compiled.parsedTasks.length > 0 &&
-				compiled.parsedTasks.every(
-					(t: ParsedTask) => t.verificationCommands.length > 0,
-				)
-					? "PASS"
-					: compiled.parsedTasks.length === 0
-						? "INSUFFICIENT_EVIDENCE"
-						: "UNSAFE_TO_RUN",
+				compiled.parsedTasks.length > 0 ? "PASS" : "INSUFFICIENT_EVIDENCE",
 			message: "Every declared task carries at least one verification command.",
 			evidenceRefs: [compiled.evidenceRefs[0]],
 		},

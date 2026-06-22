@@ -99,7 +99,7 @@ export function preview(
 			dryRun: true,
 			sideEffects: [],
 			notes: [
-				"Receipt preview is documentation/fixture only for PF1.",
+				"Receipt preview is documentation/fixture only.",
 				"PASS does not create tasks, grant write capabilities, merge, deploy, or start workers.",
 				"Non-PASS statuses fail closed: BLOCKED, FAILED, INSUFFICIENT_EVIDENCE, UNSAFE_TO_RUN.",
 			],
