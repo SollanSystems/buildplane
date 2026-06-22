@@ -347,7 +347,7 @@ export interface BuildplaneWorkspacePort {
 		path: string;
 		runId: string;
 		projectRoot?: string;
-	}): void;
+	}): { mergedHeadSha: string };
 	deleteWorkspace(workspace: { path: string; projectRoot?: string }): {
 		deleted: boolean;
 		cleanupError?: string;
