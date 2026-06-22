@@ -6,7 +6,7 @@
  * Recovery path: Gate C Path i (explicit `planforge resume`, not kernel startup-scan).
  */
 import { type ChildProcess, spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -32,8 +32,33 @@ const VERIFIER = resolve(
 interface SliceEnv {
 	dir: string;
 	home: string;
+	binDir: string;
 	eventsDbPath: string;
 	cleanup: () => Promise<void>;
+}
+
+function installClaudeShim(binDir: string): void {
+	const shim = join(binDir, "claude");
+	writeFileSync(shim, '#!/bin/sh\necho \'{"result":"ok"}\'\nexit 0\n', "utf8");
+	chmodSync(shim, 0o755);
+}
+
+/**
+ * Install a `pnpm` shim on PATH. Dispatch/resume spawns a real claude-code model
+ * worker (GAP-4) and the acceptance gate is ON by default (GAP-3), so `pnpm` is
+ * invoked for worktree provisioning (`pnpm install --frozen-lockfile`) AND the
+ * gate's `pnpm lint` check. The `install` invocation is intercepted to exit 0;
+ * `body` is the shell body for the CHECK invocation. A green shim (`exit 0`) lets
+ * the default-on gate pass so this slice exercises the resume behavior.
+ */
+function installPnpmShim(binDir: string, body: string): void {
+	const shim = join(binDir, "pnpm");
+	writeFileSync(
+		shim,
+		`#!/bin/sh\nif [ "$1" = "install" ]; then exit 0; fi\n${body}\n`,
+		"utf8",
+	);
+	chmodSync(shim, 0o755);
 }
 
 async function loadRunCli() {
@@ -81,6 +106,7 @@ function runGit(cwd: string, args: string[]): void {
 async function makeSliceEnv(): Promise<SliceEnv> {
 	const dir = await mkdtemp(join(tmpdir(), "bp-m2-slice-ws-"));
 	const home = await mkdtemp(join(tmpdir(), "bp-m2-slice-home-"));
+	const binDir = await mkdtemp(join(tmpdir(), "bp-m2-slice-bin-"));
 	const keyDir = join(home, ".buildplane", "keys", "kernel");
 	mkdirSync(keyDir, { recursive: true });
 	writeFileSync(join(keyDir, "kernel-main.ed25519"), Buffer.alloc(32, 7));
@@ -91,10 +117,12 @@ async function makeSliceEnv(): Promise<SliceEnv> {
 	return {
 		dir,
 		home,
+		binDir,
 		eventsDbPath: join(dir, ".buildplane", "ledger", "events.db"),
 		cleanup: async () => {
 			await rm(dir, { recursive: true, force: true });
 			await rm(home, { recursive: true, force: true });
+			await rm(binDir, { recursive: true, force: true });
 		},
 	};
 }
@@ -217,13 +245,22 @@ describe("M2-GATE — PlanForge vertical slice with recovered mid-cycle crash", 
 	let env: SliceEnv;
 	let originalHome: string | undefined;
 	let originalNativeBin: string | undefined;
+	let originalPath: string | undefined;
 
 	beforeEach(async () => {
 		env = await makeSliceEnv();
 		originalHome = process.env.HOME;
 		originalNativeBin = process.env.BUILDPLANE_NATIVE_BIN;
+		originalPath = process.env.PATH;
 		process.env.HOME = env.home;
 		process.env.BUILDPLANE_NATIVE_BIN = resolveNativeBinaryForLedgerTests();
+		// Dispatch/resume spawns a real claude-code model worker (GAP-4); shim it so
+		// the model packet succeeds (no `claude` binary exists in the test sandbox).
+		// The acceptance gate is ON by default (GAP-3), so a green `pnpm` shim lets
+		// provisioning + checks pass and this slice exercises the resume path.
+		process.env.PATH = `${env.binDir}:${originalPath ?? ""}`;
+		installClaudeShim(env.binDir);
+		installPnpmShim(env.binDir, "exit 0");
 	});
 
 	afterEach(async () => {
@@ -232,6 +269,8 @@ describe("M2-GATE — PlanForge vertical slice with recovered mid-cycle crash", 
 		if (originalNativeBin === undefined)
 			delete process.env.BUILDPLANE_NATIVE_BIN;
 		else process.env.BUILDPLANE_NATIVE_BIN = originalNativeBin;
+		if (originalPath === undefined) delete process.env.PATH;
+		else process.env.PATH = originalPath;
 		await env.cleanup();
 	});
 
