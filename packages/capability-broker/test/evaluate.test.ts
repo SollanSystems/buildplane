@@ -131,3 +131,94 @@ describe("evaluateToolInvocation run_command allowlist", () => {
 		});
 	});
 });
+
+describe("evaluateToolInvocation worker binary argv constraint (GAP-4 carry-forward)", () => {
+	const worktreeRoot = "/tmp/worktree";
+
+	function workerBundle(): CapabilityBundleV0 {
+		return {
+			schemaVersion: CAPABILITY_BUNDLE_SCHEMA_VERSION,
+			bundleId: "self-build-loop",
+			tools: {
+				run_command: { allowlist: ["claude", "pnpm", "git"] },
+			},
+		};
+	}
+
+	it("denies claude --dangerously-skip-permissions passed via args", () => {
+		const result = evaluateToolInvocation(
+			workerBundle(),
+			{
+				tool: "run_command",
+				command: "claude",
+				args: ["--dangerously-skip-permissions", "-p", "do the thing"],
+			},
+			{ worktreeRoot },
+		);
+		expect(result).toMatchObject({
+			decision: "deny",
+			quarantine: true,
+			reason: expect.stringContaining("dangerously-skip-permissions"),
+		});
+	});
+
+	it("denies claude --dangerously-skip-permissions packed into the command string", () => {
+		const result = evaluateToolInvocation(
+			workerBundle(),
+			{
+				tool: "run_command",
+				command: "claude --dangerously-skip-permissions -p go",
+			},
+			{ worktreeRoot },
+		);
+		expect(result).toMatchObject({
+			decision: "deny",
+			quarantine: true,
+			reason: expect.stringContaining("dangerously-skip-permissions"),
+		});
+	});
+
+	it("denies the --dangerouslySkipPermissions camelCase / = forms", () => {
+		const camel = evaluateToolInvocation(
+			workerBundle(),
+			{
+				tool: "run_command",
+				command: "claude",
+				args: ["--dangerouslySkipPermissions"],
+			},
+			{ worktreeRoot },
+		);
+		expect(camel.decision).toBe("deny");
+		const eq = evaluateToolInvocation(
+			workerBundle(),
+			{
+				tool: "run_command",
+				command: "claude --permission-mode=bypassPermissions -p go",
+			},
+			{ worktreeRoot },
+		);
+		expect(eq.decision).toBe("deny");
+	});
+
+	it("allows a known-safe claude -p invocation", () => {
+		const result = evaluateToolInvocation(
+			workerBundle(),
+			{
+				tool: "run_command",
+				command: "claude",
+				args: ["-p", "--model", "sonnet", "implement the slice"],
+			},
+			{ worktreeRoot },
+		);
+		expect(result).toEqual({ decision: "allow" });
+	});
+
+	it("does not constrain a non-worker allowlisted binary", () => {
+		const result = evaluateToolInvocation(
+			workerBundle(),
+			{ tool: "run_command", command: "pnpm", args: ["test"] },
+			{ worktreeRoot },
+		);
+		expect(result).toEqual({ decision: "allow" });
+	});
+});

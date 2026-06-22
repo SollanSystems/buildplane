@@ -45,6 +45,23 @@ function pathMatchesFsWriteGlobs(
 	);
 }
 
+/**
+ * The loop worker binary (`claude`) is allowlisted so a dispatched worker can
+ * recursively invoke it through `run_command`. But `claude` accepts flags that
+ * disable its OWN nested tool-permission prompts — an unattended worker that
+ * could pass them would escape every downstream sandbox boundary. These flag
+ * tokens are rejected for the worker binary regardless of allowlisting; the
+ * check is case/`=`-insensitive over the full token set (GAP-4 carry-forward).
+ */
+const WORKER_BINARY = "claude" as const;
+const WORKER_FORBIDDEN_ARGV_TOKENS = [
+	"--dangerously-skip-permissions",
+	"--dangerouslyskippermissions",
+	"--permission-mode=bypasspermissions",
+	"--bypass-permissions",
+	"--bypasspermissions",
+] as const;
+
 function commandMatchesAllowlist(
 	command: string,
 	_args: readonly string[] | undefined,
@@ -64,6 +81,41 @@ function commandMatchesAllowlist(
 		}
 	}
 	return false;
+}
+
+/**
+ * Is this run_command invocation the worker binary attempting to disable its
+ * own nested permission prompts? `commandMatchesAllowlist` matches argv0/prefix
+ * and ignores args, so without this guard a `claude --dangerously-skip-permissions`
+ * invocation would be permitted purely because `claude` is allowlisted.
+ */
+function forbiddenWorkerArgvToken(
+	command: string,
+	args: readonly string[] | undefined,
+): string | undefined {
+	const tokens = command.trim().split(/\s+/);
+	if (tokens[0] !== WORKER_BINARY) {
+		return undefined;
+	}
+	const candidate = [...tokens.slice(1), ...(args ?? [])];
+	for (const token of candidate) {
+		const normalized = token.trim().toLowerCase();
+		if (normalized.length === 0) {
+			continue;
+		}
+		for (const forbidden of WORKER_FORBIDDEN_ARGV_TOKENS) {
+			if (normalized === forbidden || normalized.startsWith(`${forbidden}=`)) {
+				return token.trim();
+			}
+		}
+		if (
+			normalized === "bypasspermissions" ||
+			normalized.endsWith("=bypasspermissions")
+		) {
+			return token.trim();
+		}
+	}
+	return undefined;
 }
 
 export function evaluateToolInvocation(
@@ -94,6 +146,16 @@ export function evaluateToolInvocation(
 	const allowlist = bundle.tools?.run_command?.allowlist ?? [];
 	if (allowlist.length === 0) {
 		return deny("no run_command allowlist in capability bundle");
+	}
+	const forbiddenToken = forbiddenWorkerArgvToken(
+		invocation.command,
+		invocation.args,
+	);
+	if (forbiddenToken !== undefined) {
+		return deny(
+			`worker binary "${WORKER_BINARY}" may not pass permission-escape flag "${forbiddenToken}" ` +
+				"(e.g. --dangerously-skip-permissions); it would bypass nested tool-permission prompts",
+		);
 	}
 	if (
 		!commandMatchesAllowlist(invocation.command, invocation.args, allowlist)

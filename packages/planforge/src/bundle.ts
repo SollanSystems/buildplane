@@ -19,10 +19,12 @@ export interface PlanForgeAttachedCapabilityBundle {
  * which spawns `claude` directly; but the worker (claude, running in the
  * worktree) may recursively invoke `claude`/sub-tooling through the run_command
  * tool, which is gated by this allowlist. Adding it here authorizes that path.
- * CAPABILITY TRUST SURFACE — reviewed under L1/L2 2-role + adversarial. Note:
- * `commandMatchesAllowlist` (evaluate.ts) matches argv0 OR entry-prefix, so this
- * entry also permits `claude --dangerously-skip-permissions ...`; whether it
- * should relocate to an envelope-gated worker-binary field is a GAP-10 question. */
+ * CAPABILITY TRUST SURFACE — reviewed under L1/L2 2-role + adversarial. The
+ * GAP-4 escape (allowlisting `claude` would otherwise permit
+ * `claude --dangerously-skip-permissions ...`, since `commandMatchesAllowlist`
+ * matches argv0/prefix) is closed in @buildplane/capability-broker's
+ * evaluate.ts: a worker-binary invocation carrying any permission-escape flag is
+ * denied + quarantined regardless of allowlisting (GAP-10). */
 const WORKER_RUN_COMMAND_BINARY = "claude" as const;
 
 const SIDE_EFFECT_FS_WRITE_GLOBS: Record<string, readonly string[]> = {
