@@ -1,6 +1,6 @@
 ---
 "@buildplane/planforge": minor
-"@buildplane/cli": minor
+"buildplane": minor
 ---
 
 Add the PlanForge planning worker: a roadmap-driven next-slice plan.md generator gated by `planforge validate`.
