@@ -806,6 +806,16 @@ function formatPlanForgeHelp(): string[] {
 		"  Options:",
 		"    --input <file>  Markdown PlanForge goal fixture to resume",
 		"    --json          Prints the resume result (recorded/executed runs) as JSON",
+		"",
+		"buildplane planforge recover [--json]",
+		"",
+		"  Scans storage for orphaned `running` PlanForge dispatches (via the dispatch",
+		"  manifest sidecar) and replays the signed tape to resume each, re-establishing",
+		"  worker trust FROM THE TAPE and emitting any missing plan_receipt. The tape is",
+		"  authoritative over the storage status field. No --input required.",
+		"",
+		"  Options:",
+		"    --json          Prints the recovery result (per-plan status) as JSON",
 	];
 }
 
@@ -3530,6 +3540,70 @@ export function readPlanForgeDispatchManifests(
 	return manifests;
 }
 
+/**
+ * S7 crash-recovery scan: a dispatch manifest is orphaned iff a `running` storage
+ * row's `unitId` begins with `${planId}:` (the dispatch died before a terminal
+ * status) AND the tape carries no terminal `plan_receipt` for the manifest's tape
+ * `runId`. The tape is authoritative over the storage status field, so a receipted
+ * run is never an orphan even if a storage row is stale-`running`.
+ */
+export async function findOrphanedPlanForgeDispatches(
+	workspace: string,
+): Promise<PlanForgeDispatchManifest[]> {
+	const manifests = readPlanForgeDispatchManifests(workspace);
+	if (manifests.length === 0) {
+		return [];
+	}
+	const { createBuildplaneStorage } = (await cliImport(
+		"@buildplane/storage",
+	)) as {
+		createBuildplaneStorage: (root: string) => {
+			listRunsByStatus: (status: string) => readonly { unitId: string }[];
+		};
+	};
+	const storage = createBuildplaneStorage(workspace);
+	const runningUnitIds = storage
+		.listRunsByStatus("running")
+		.map((r) => r.unitId);
+	const orphans: PlanForgeDispatchManifest[] = [];
+	for (const manifest of manifests) {
+		const hasRunningTask = runningUnitIds.some((unitId) =>
+			unitId.startsWith(`${manifest.planId}:`),
+		);
+		if (!hasRunningTask) {
+			continue;
+		}
+		// Tape is authoritative: a terminal plan_receipt on this run_id means the
+		// dispatch already finished even if a storage row is stale-`running`; not an
+		// orphan. Probe events.db directly for ANY plan_receipt on the tape run_id
+		// (independent of admission_event_id, which is unknown here).
+		const eventsDbPath = resolve(
+			workspace,
+			".buildplane",
+			"ledger",
+			"events.db",
+		);
+		if (existsSync(eventsDbPath)) {
+			const { DatabaseSync } = await import("node:sqlite");
+			const db = new DatabaseSync(eventsDbPath, { readOnly: true });
+			try {
+				const receipted = db
+					.prepare(
+						"SELECT 1 FROM events WHERE run_id = ? AND kind = 'plan_receipt' LIMIT 1",
+					)
+					.get(manifest.runId);
+				if (receipted) {
+					continue;
+				}
+			} finally {
+				db.close();
+			}
+		}
+		orphans.push(manifest);
+	}
+	return orphans;
+}
+
 interface PlanAdmittedEventRow {
 	id: string;
 	payload: string;
@@ -3952,11 +4026,31 @@ function isPassedPlanForgeRun(status: string): boolean {
 
 async function emitPlanForgeTerminalReceipt(input: {
 	emitter: TapeEmitter;
+	workspace: string;
+	runId: string;
 	plan: PlanForgePlan;
 	admittedEventId: string;
 	outcome: "completed" | "failed";
 	result: unknown;
 }): Promise<void> {
+	// Dedup-on-append (D5/S7): a crash between emitting and flushing the receipt
+	// must not double-receipt on resume. The tape is authoritative — if a
+	// plan_receipt for this plan identity already exists on the run, the prior
+	// emit succeeded. The receipt is keyed on the tape `run_id`, which is the
+	// deterministic `planAdmitRunId(idempotency_key)` (a 1:1 function of the
+	// idempotency key), further disambiguated by the payload's plan_id +
+	// admission_event_id. The read-path `already_receipted` short-circuit covers
+	// the durable case; this closes the partial-flush race it cannot see.
+	if (
+		await planForgeReceiptExists(
+			input.workspace,
+			input.runId,
+			input.plan.id,
+			input.admittedEventId,
+		)
+	) {
+		return;
+	}
 	await createLedgerReceiptPort(input.emitter).emitPlanReceipt(
 		buildPlanReceiptPayload({
 			planId: input.plan.id,
@@ -3967,6 +4061,48 @@ async function emitPlanForgeTerminalReceipt(input: {
 			decidedAt: new Date().toISOString(),
 		}),
 	);
+}
+
+/**
+ * True iff the signed tape already carries a `plan_receipt` for this plan
+ * identity on `runId`. Direct `node:sqlite` probe on `events.db` — the dedup key
+ * is the deterministic tape `run_id` (derived 1:1 from `idempotency_key`), with
+ * the payload's `plan_id` + `admission_event_id` disambiguating within the run.
+ */
+async function planForgeReceiptExists(
+	workspace: string,
+	runId: string,
+	planId: string,
+	admittedEventId: string,
+): Promise<boolean> {
+	const eventsDbPath = resolve(workspace, ".buildplane", "ledger", "events.db");
+	if (!existsSync(eventsDbPath)) {
+		return false;
+	}
+	const { DatabaseSync } = await import("node:sqlite");
+	const db = new DatabaseSync(eventsDbPath, { readOnly: true });
+	try {
+		const rows = db
+			.prepare(
+				"SELECT payload FROM events WHERE run_id = ? AND kind = 'plan_receipt'",
+			)
+			.all(runId) as { payload: string }[];
+		return rows.some((row) => {
+			const payload = JSON.parse(row.payload) as {
+				PlanReceiptRecordedV1?: {
+					plan_id?: string;
+					admission_event_id?: string;
+				};
+			};
+			const receipt = payload.PlanReceiptRecordedV1;
+			return (
+				receipt?.plan_id === planId &&
+				receipt.admission_event_id === admittedEventId
+			);
+		});
+	} finally {
+		db.close();
+	}
 }
 
 /**
@@ -4352,6 +4488,8 @@ export async function resumePlanForgePlanFromInput(
 		};
 		await emitPlanForgeTerminalReceipt({
 			emitter,
+			workspace,
+			runId,
 			plan,
 			admittedEventId,
 			outcome: allPassed ? "completed" : "failed",
@@ -4389,6 +4527,65 @@ export async function resumePlanForgePlanFromInput(
 			: `Resumed PlanForge plan ${plan.id}: ${runs.length}/${packets.length} task(s).`,
 	);
 	return allPassed ? 0 : 1;
+}
+
+/**
+ * `buildplane planforge recover [--json]`: S7 startup crash recovery with NO
+ * `--input`. Scans storage for orphaned `running` PlanForge dispatches (via the
+ * dispatch-manifest sidecar), then replays the signed tape for each to resume the
+ * remaining suffix and emit any missing terminal receipt — re-establishing
+ * `will_execute_worker` trust FROM THE TAPE, not the lost in-memory WeakSet. The
+ * tape is authoritative over the storage status field; recover re-runs the suffix
+ * and emits the receipt on the TAPE, and does NOT rewrite the storage `running`
+ * row. Exit 0 iff every orphan resumes to completion (or there are no orphans).
+ */
+async function runPlanForgeRecoverCommand(
+	args: readonly string[],
+	cwd: string,
+	stdout: (line: string) => void,
+): Promise<number> {
+	const jsonOut = args.includes("--json");
+	const workspace = resolve(cwd);
+	const orphans = await findOrphanedPlanForgeDispatches(workspace);
+	if (orphans.length === 0) {
+		stdout(
+			jsonOut
+				? formatJson({ status: "no_orphans", recovered: [] })
+				: "PlanForge recover: no orphaned running dispatches found.",
+		);
+		return 0;
+	}
+	const recovered: Array<{
+		plan_id: string;
+		run_id: string;
+		status: "resumed" | "failed";
+	}> = [];
+	let allOk = true;
+	for (const orphan of orphans) {
+		const captured: string[] = [];
+		const code = await resumePlanForgePlanFromInput(
+			orphan.inputPath,
+			cwd,
+			(line) => captured.push(line),
+			{ json: true },
+		);
+		const ok = code === 0;
+		allOk = allOk && ok;
+		recovered.push({
+			plan_id: orphan.planId,
+			run_id: orphan.runId,
+			status: ok ? "resumed" : "failed",
+		});
+	}
+	stdout(
+		jsonOut
+			? formatJson({
+					status: allOk ? "recovered" : "failed",
+					recovered,
+				})
+			: `PlanForge recover: ${recovered.length} orphan(s) processed.`,
+	);
+	return allOk ? 0 : 1;
 }
 
 async function runNativeCommand(
@@ -4562,9 +4759,12 @@ export async function runCli(
 			if (subcommand === "resume") {
 				return await runPlanForgeResumeCommand(rest.slice(1), cwd, stdout);
 			}
+			if (subcommand === "recover") {
+				return await runPlanForgeRecoverCommand(rest.slice(1), cwd, stdout);
+			}
 			if (subcommand !== "dry-run") {
 				throw new Error(
-					"Unsupported PlanForge command. Only dry-run, admit, dispatch, and resume are available; other non-dry-run PlanForge forms are intentionally disabled.",
+					"Unsupported PlanForge command. Only dry-run, admit, dispatch, resume, and recover are available; other non-dry-run PlanForge forms are intentionally disabled.",
 				);
 			}
 			const subRest = rest.slice(1);
