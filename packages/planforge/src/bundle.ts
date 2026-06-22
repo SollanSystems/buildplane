@@ -22,6 +22,12 @@ const SIDE_EFFECT_FS_WRITE_GLOBS: Record<string, readonly string[]> = {
 		"packages/**/test/fixtures/**",
 	],
 	"local-receipt": ["docs/operations/**"],
+	"code-edit": [
+		"src/**",
+		"test/**",
+		"packages/**/src/**",
+		"packages/**/test/**",
+	],
 };
 
 function allowlistFromVerificationCommands(

@@ -172,3 +172,29 @@ describe("buildDefaultCapabilityBundleForPlan", () => {
 		).toBe("deny");
 	});
 });
+
+describe("buildDefaultCapabilityBundleForTask — code-edit", () => {
+	it("maps a code-edit task to the source/test globs and enables write_file", () => {
+		const plan = createPlanForgeDryRunPlan(inputFixture);
+		const task = {
+			...plan.tasks[0],
+			id: plan.tasks[0].id,
+			allowedSideEffects: ["code-edit"] as const,
+			verificationCommands: ["cargo test", "pnpm vitest"],
+		};
+		const bundle = buildDefaultCapabilityBundleForTask(plan, task);
+		expect(new Set(bundle.fsWrite)).toEqual(
+			new Set([
+				"src/**",
+				"test/**",
+				"packages/**/src/**",
+				"packages/**/test/**",
+			]),
+		);
+		expect(bundle.tools?.write_file?.enabled).toBe(true);
+		expect(bundle.tools?.run_command?.allowlist).toEqual(
+			expect.arrayContaining(["cargo", "pnpm"]),
+		);
+		expect(capabilityBundleDigest(bundle)).toBe(bundleDigest(bundle));
+	});
+});

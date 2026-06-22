@@ -32,6 +32,7 @@ export const PLANFORGE_ALLOWED_SIDE_EFFECTS = [
 	"local-doc",
 	"local-fixture",
 	"local-receipt",
+	"code-edit",
 ] as const;
 
 export const PLANFORGE_FORBIDDEN_SIDE_EFFECTS = [
