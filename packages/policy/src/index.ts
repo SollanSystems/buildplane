@@ -1,4 +1,12 @@
 export { evaluateAcceptanceContract } from "./acceptance.js";
+export {
+	authorizationEnvelopeDigest,
+	canonicalEnvelopeJson,
+	type EnvelopeAdmissionEvaluation,
+	type EnvelopePausedDecision,
+	envelopeAdmissionDecision,
+	evaluateEnvelopeAdmission,
+} from "./authorization-envelope.js";
 export { evaluateBudgets } from "./budgets.js";
 export { evaluateRun } from "./decision.js";
 export {
