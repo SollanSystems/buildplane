@@ -14,7 +14,7 @@ pub struct OperatorDecisionRecordedV1 {
     pub run_id: String,
     /// `approved` | `rejected`
     pub decision: String,
-    /// `merge` | `resume`
+    /// `merge` | `resume` (M5) | `authorize-envelope` (GAP-10)
     pub subject: String,
     /// Chains to the `acceptance_recorded` event, when present (string event id).
     pub acceptance_event_id: Option<String>,
@@ -22,6 +22,12 @@ pub struct OperatorDecisionRecordedV1 {
     pub admission_event_id: Option<String>,
     /// Merge commit SHA, present when an approved merge produced one.
     pub merge_commit: Option<String>,
+    /// Canonical-JSON of the `AuthorizationEnvelopeV0` when `subject` is
+    /// `authorize-envelope` (GAP-10); `None` otherwise. A string, not a nested
+    /// typeshared struct — `max_iterations`/`token_budget` integers live inside
+    /// the JSON string, so the wire shape stays all-string (no `u64` hazard).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub envelope: Option<String>,
     /// Operator identity (payload field; the event is kernel-signed).
     pub decided_by: String,
     /// RFC3339
@@ -40,6 +46,7 @@ mod tests {
             acceptance_event_id: Some("01919000-0000-7000-8000-000000000005".into()),
             admission_event_id: Some("01919000-0000-7000-8000-000000000004".into()),
             merge_commit: Some("deadbeef".into()),
+            envelope: None,
             decided_by: "operator@buildplane".into(),
             decided_at: "2026-06-22T12:00:00Z".into(),
         }

@@ -224,6 +224,7 @@ fn main() {
             acceptance_event_id: Some(fixed_event_id(5).to_string()),
             admission_event_id: Some(fixed_event_id(4).to_string()),
             merge_commit: Some("deadbeef".into()),
+            envelope: None,
             decided_by: "operator@buildplane".into(),
             decided_at: "2026-06-22T12:00:00Z".into(),
         })).unwrap(),

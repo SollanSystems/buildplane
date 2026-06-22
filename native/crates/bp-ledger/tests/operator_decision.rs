@@ -22,9 +22,66 @@ fn operator_decision_payload() -> OperatorDecisionRecordedV1 {
         acceptance_event_id: Some("01919000-0000-7000-8000-000000000005".into()),
         admission_event_id: Some("01919000-0000-7000-8000-000000000004".into()),
         merge_commit: Some("deadbeef".into()),
+        envelope: None,
         decided_by: "operator@buildplane".into(),
         decided_at: "2026-06-22T12:00:00Z".into(),
     }
+}
+
+fn envelope_fixture() -> OperatorDecisionRecordedV1 {
+    OperatorDecisionRecordedV1 {
+        run_id: "pf-envelope-fixture".into(),
+        decision: "approved".into(),
+        subject: "authorize-envelope".into(),
+        acceptance_event_id: None,
+        admission_event_id: None,
+        merge_commit: None,
+        envelope: Some(
+            "{\"allowed_side_effects\":[\"code-edit\"],\"allowed_verification_cmds\":[\"pnpm\",\"cargo\",\"tsc\"],\"envelope_version\":\"v0\",\"expires_at\":\"2026-07-01T00:00:00Z\",\"max_iterations\":8,\"milestone\":\"M5\",\"path_globs\":[\"src/**\"],\"token_budget\":4000000}"
+                .into(),
+        ),
+        decided_by: "operator:khall".into(),
+        decided_at: "2026-06-22T00:00:00Z".into(),
+    }
+}
+
+#[test]
+fn operator_decision_envelope_round_trips() {
+    let p = envelope_fixture();
+    let s = serde_json::to_string(&p).unwrap();
+    assert_eq!(
+        p,
+        serde_json::from_str::<OperatorDecisionRecordedV1>(&s).unwrap()
+    );
+    // subject carries the GAP-10 authorize-envelope value; the canonical-JSON
+    // envelope is a string field (no nested typeshared struct, no u64 hazard),
+    // so its inner JSON is escaped on the wire.
+    assert_eq!(p.subject, "authorize-envelope");
+    assert!(s.contains("\"envelope\":"));
+    assert!(p.envelope.as_deref().unwrap().contains("\"milestone\":\"M5\""));
+}
+
+#[test]
+fn operator_decision_envelope_canonicalizes() {
+    let payload = Payload::OperatorDecisionRecordedV1(envelope_fixture());
+    let value = serde_json::to_value(&payload).unwrap();
+    match canonicalize_payload("operator_decision_recorded", 1, value).unwrap() {
+        Payload::OperatorDecisionRecordedV1(p) => {
+            assert_eq!(p, envelope_fixture());
+            assert_eq!(p.subject, "authorize-envelope");
+            assert!(p.envelope.is_some());
+        }
+        other => panic!("unexpected payload {other:?}"),
+    }
+}
+
+#[test]
+fn operator_decision_none_envelope_omits_field_on_wire() {
+    // A merge/resume record (envelope = None) must keep the M5-S1 wire shape:
+    // `skip_serializing_if` drops the new field so existing signed records and
+    // fixtures stay byte-identical.
+    let s = serde_json::to_string(&operator_decision_payload()).unwrap();
+    assert!(!s.contains("\"envelope\""));
 }
 
 #[test]
