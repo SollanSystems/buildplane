@@ -20,9 +20,11 @@ import {
 	type ToolRegistryOptions,
 } from "@buildplane/adapters-tools";
 import type {
+	AuthorizationEnvelopeV0,
 	BuildplaneAcceptancePort,
 	BuildplaneProfileRegistryPort,
 	BuildplaneStoragePort,
+	EnvelopeProposal,
 	LedgerActivityPort,
 	PolicyProfile,
 } from "@buildplane/kernel";
@@ -33,6 +35,7 @@ import {
 	type PlanAdmittedV1,
 	type TapeEmitter,
 } from "@buildplane/ledger-client";
+import { evaluateEnvelopeAdmission } from "@buildplane/policy";
 import {
 	type BootstrapDoctorReport,
 	inspectBootstrapDoctor,
@@ -81,24 +84,42 @@ import {
 import { runGitCheckpoint } from "./ledger-git-checkpoint.js";
 import { createLedgerReceiptPort } from "./ledger-receipt-port.js";
 import { wrapToolRegistryForLedger } from "./ledger-tool-wrapper.js";
+import {
+	buildEnvelopeProposal,
+	initialLoopState,
+	type LoopState,
+	loopStatePath,
+	nextLoopState,
+	readLoopState,
+	runawayGuardProfile,
+	stopFileRequested,
+	writeLoopStateAtomic,
+} from "./loop-supervisor.js";
 import type {
 	PacketMemoryEnrichmentResult,
 	preparePacketMemoryEnrichment,
 } from "./packet-enrichment.js";
-import { runPlanForgeAuthorizeEnvelopeCommand } from "./planforge-authorize-envelope.js";
+import {
+	loadActiveAuthorizationEnvelope,
+	runPlanForgeAuthorizeEnvelopeCommand,
+} from "./planforge-authorize-envelope.js";
 import { runPlannerProposal } from "./planforge-planner.js";
 import {
 	acceptanceContractDigest,
 	buildPlanAdmittedPayload,
+	buildPlannerPlanMarkdown,
 	buildPlanReceiptPayload,
 	createPlanForgeDryRunPlan,
 	deriveAcceptanceContract,
 	dispatchAdmittedPlan,
 	formatPriorWorkEntry,
+	loadRoadmapFromString,
 	PLANFORGE_AUTHORIZED_NEXT_STEP,
 	PLANFORGE_VALIDATION_STATUS_PASS,
 	type PlanForgePlan,
 	type PlanSummary,
+	type RoadmapDoc,
+	selectNextRoadmapSlice,
 	summarizePlanReceipt,
 } from "./planforge-schema.js";
 import {
@@ -209,7 +230,58 @@ interface StructuredMemoryStoragePortLike extends StructuredMemoryPortLike {
 	recordRunStrategyId(runId: string, strategyId: string): void;
 }
 
-export interface RunCliDependencies {
+/** Planner port output: the next slice's plan path + slice id + milestone. */
+export interface LoopSliceProposal {
+	readonly planPath: string;
+	readonly sliceId: string;
+	readonly milestone: string;
+}
+
+/** Rich dispatch outcome the supervisor loop reads for re-anchoring (D3). */
+export interface LoopDispatchResult {
+	readonly allPassed: boolean;
+	readonly mergedHeadSha: string | null;
+	readonly runs: readonly unknown[];
+}
+
+/**
+ * Injectable supervisor-loop ports (all optional — the real planforge
+ * helpers GAP-9/10/8 produce the defaults). The test seam injects fakes so a
+ * loop iteration runs end-to-end with no claude/ledger spawns.
+ */
+export interface LoopRunCliDeps {
+	loopPlanner?: (ctx: {
+		workspace: string;
+		lastMergedHeadSha: string | null;
+		trustedBase: string | null;
+	}) => Promise<LoopSliceProposal | { done: true }>;
+	loopEnvelope?: {
+		load: (
+			workspace: string,
+		) => Promise<{ envelope: AuthorizationEnvelopeV0 } | null>;
+		check: (
+			proposal: EnvelopeProposal,
+			envelope: AuthorizationEnvelopeV0 | null,
+		) => { ok: true } | { ok: false; reason: string };
+	};
+	loopDryRun?: (
+		planPath: string,
+		cwd: string,
+	) => Promise<
+		{ ok: true; plan: PlanForgePlan } | { ok: false; reason: string }
+	>;
+	loopAdmit?: (
+		planPath: string,
+		cwd: string,
+	) => Promise<{ admittedEventId: string }>;
+	loopDispatch?: (
+		planPath: string,
+		cwd: string,
+		guard: PolicyProfile,
+	) => Promise<LoopDispatchResult>;
+}
+
+export interface RunCliDependencies extends LoopRunCliDeps {
 	createOrchestrator?: () => BuildplaneCliOrchestrator;
 	parsePacket?: (packetPath: string) => unknown;
 	inspectBootstrapDoctor?: () => BootstrapDoctorReport;
@@ -865,6 +937,22 @@ function formatPlanForgeHelp(): string[] {
 		"    --approve               Required; explicit operator approval to sign",
 		"    --operator <id>         Required; deciding operator identity (decided_by)",
 		"    --json                  Prints the authorization result as JSON",
+		"",
+		"buildplane planforge loop [--once | --max-iterations=N] [--max-turns=N] [--max-tokens=N] [--wall-clock-ms=N] [--json]",
+		"",
+		"  Supervisor: drive plan -> dry-run -> envelope-check -> admit -> dispatch ->",
+		"  accept -> merge -> re-anchor across iterations, persisting loop-state.json",
+		"  atomically after every transition and resuming from a persisted state.",
+		"  Stops on terminal condition / .buildplane/loop.stop / acceptance-FAIL /",
+		"  envelope breach / cumulative token budget / max-iterations / planner error.",
+		"",
+		"  Options:",
+		"    --once                  Run exactly one slice (equivalent to --max-iterations=1)",
+		"    --max-iterations=N      Cap the number of slices the loop builds",
+		"    --max-turns=N           Lowered worker --max-turns (runaway guard; default 12)",
+		"    --max-tokens=N          Per-iteration token budget for the abort guard",
+		"    --wall-clock-ms=N       Per-iteration wall-clock cap for the abort guard",
+		"    --json                  Prints the loop summary as JSON",
 	];
 }
 
@@ -4189,10 +4277,26 @@ async function loadSearchableDocumentStoragePort(
  * kernel admission gate is the load-bearing enforcement. Tasks run sequentially so
  * a dependent task does not start if its predecessor fails.
  */
+interface PlanForgeDispatchOutcome {
+	readonly allPassed: boolean;
+	readonly mergedHeadSha: string | null;
+	readonly runs: ReadonlyArray<{
+		task: string;
+		run_id: string;
+		status: string;
+	}>;
+}
+
 async function runPlanForgeDispatchCommand(
 	args: readonly string[],
 	cwd: string,
 	stdout: (line: string) => void,
+	opts?: {
+		/** Lowered worker turn cap for the supervisor loop's runaway guard. */
+		readonly claudeMaxTurns?: number;
+		/** Receives the rich dispatch outcome (incl. mergedHeadSha) for the loop. */
+		readonly onOutcome?: (outcome: PlanForgeDispatchOutcome) => void;
+	},
 ): Promise<number> {
 	const inputPath = readFlag(args, "--input");
 	if (!inputPath) {
@@ -4311,6 +4415,11 @@ async function runPlanForgeDispatchCommand(
 
 	const runs: Array<{ task: string; run_id: string; status: string }> = [];
 	let allPassed = false;
+	// The squash-merge happens INSIDE orchestrator.runPacketAsync (GAP-8); track
+	// the most recent merged HEAD so the supervisor loop can re-anchor without a
+	// second merge (D3). Tasks run sequentially, so the last passing task's
+	// merged HEAD is the slice's merged tip.
+	let lastMergedHeadSha: string | null = null;
 	try {
 		const ledgerActivityPort = createLedgerActivityPort(emitter);
 		// Tasks dispatch sequentially, so a single mutable identity holder safely
@@ -4334,8 +4443,9 @@ async function runPlanForgeDispatchCommand(
 						profileRegistry,
 						acceptancePort,
 						provisionDeps: provisionWorktreeDeps,
+						claudeMaxTurns: opts?.claudeMaxTurns,
 					}
-				: { ledgerActivityPort },
+				: { ledgerActivityPort, claudeMaxTurns: opts?.claudeMaxTurns },
 		);
 
 		for (const packet of packets) {
@@ -4349,15 +4459,21 @@ async function runPlanForgeDispatchCommand(
 						unit: { ...packet.unit, policyProfile: acceptance.profileName },
 					}
 				: packet;
-			const result = await orchestrator.runPacketAsync(
+			const result = (await orchestrator.runPacketAsync(
 				parseUnitPacket(JSON.stringify(dispatchedPacket)),
 				cliEventBus,
-			);
+			)) as {
+				run: { id: string; status: string };
+				mergedHeadSha?: string;
+			};
 			runs.push({
 				task: packet.unit.id,
 				run_id: result.run.id,
 				status: result.run.status,
 			});
+			if (result.mergedHeadSha) {
+				lastMergedHeadSha = result.mergedHeadSha;
+			}
 			if (result.run.status !== "passed") {
 				break; // PF2 dependsOn PF1: stop the chain on first failure.
 			}
@@ -4366,6 +4482,8 @@ async function runPlanForgeDispatchCommand(
 		allPassed =
 			runs.length === packets.length &&
 			runs.every((r) => r.status === "passed");
+
+		opts?.onOutcome?.({ allPassed, mergedHeadSha: lastMergedHeadSha, runs });
 
 		// Terminal plan receipt (M2-S6): one signed plan_receipt per admitted plan,
 		// chaining to the plan_admitted event, emitted after all activities and made
@@ -4472,6 +4590,344 @@ async function runPlanForgePlanCommand(
 			: `PlanForge planner proposed ${proposal.sliceId} -> ${outPath} (${proposal.status}).`,
 	);
 	return proposal.status === PLANFORGE_VALIDATION_STATUS_PASS ? 0 : 1;
+}
+
+/**
+ * Strict positive-integer flag parse for the loop's runaway-guard bounds.
+ * Accepts both `--flag=N` and `--flag N`. Rejects non-positive / non-integer.
+ */
+function parseIntFlag(
+	args: readonly string[],
+	flag: string,
+	fallback: number | null,
+): number | null {
+	const eq = args.find((a) => a.startsWith(`${flag}=`));
+	const raw = eq ? eq.slice(flag.length + 1) : readFlag(args, flag);
+	if (raw === undefined) return fallback;
+	const n = Number(raw);
+	if (!Number.isSafeInteger(n) || n <= 0) {
+		throw new Error(`${flag} must be a positive integer.`);
+	}
+	return n;
+}
+
+const LOOP_DEFAULT_REMOTE = "https://github.com/SollanSystems/buildplane.git";
+
+/**
+ * Default planner port: load `docs/roadmap.json`, select the next eligible
+ * slice relative to the loop's pinned `trustedBase`, deterministically emit its
+ * `plan.md` into `.buildplane/loop/<sliceId>.plan.md`, and return its path +
+ * slice id + the roadmap milestone. A roadmap-exhausted / dependency-blocked
+ * roadmap reports `{ done: true }` (terminal roadmap-complete).
+ */
+async function defaultLoopPlanner(ctx: {
+	workspace: string;
+	lastMergedHeadSha: string | null;
+	trustedBase: string | null;
+}): Promise<LoopSliceProposal | { done: true }> {
+	const roadmapPath = resolve(ctx.workspace, "docs", "roadmap.json");
+	if (!existsSync(roadmapPath)) {
+		return { done: true };
+	}
+	// Pin one base for the loop's lifetime (GAP-9 carry-forward): the planner
+	// reads completed-slice ids relative to this base, so it must not move
+	// across iterations or completed slices read as not-done.
+	const trustedBase = ctx.trustedBase ?? ctx.lastMergedHeadSha ?? "";
+	const doc: RoadmapDoc = loadRoadmapFromString(
+		readFileSync(roadmapPath, "utf8"),
+	);
+	const proposal = await runPlannerProposal({
+		roadmapPath,
+		workspace: ctx.workspace,
+		remote: LOOP_DEFAULT_REMOTE,
+		trustedBase,
+	}).catch((err) => {
+		// selectNextRoadmapSlice throws when the roadmap is exhausted /
+		// dependency-blocked — that is "done", not a planner error.
+		if (
+			err instanceof Error &&
+			/no eligible roadmap slice|roadmap exhausted/i.test(err.message)
+		) {
+			return null;
+		}
+		throw err;
+	});
+	if (!proposal) {
+		return { done: true };
+	}
+	const loopDir = resolve(ctx.workspace, ".buildplane", "loop");
+	mkdirSync(loopDir, { recursive: true });
+	const planPath = join(loopDir, `${proposal.sliceId}.plan.md`);
+	writeFileSync(planPath, proposal.planMarkdown, "utf8");
+	return { planPath, sliceId: proposal.sliceId, milestone: doc.milestone };
+}
+
+/** Default envelope port: load the active signed envelope + subset-check. */
+const defaultLoopEnvelope = {
+	async load(
+		workspace: string,
+	): Promise<{ envelope: AuthorizationEnvelopeV0 } | null> {
+		const active = await loadActiveAuthorizationEnvelope(resolve(workspace));
+		return active ? { envelope: active.envelope } : null;
+	},
+	check(
+		proposal: EnvelopeProposal,
+		envelope: AuthorizationEnvelopeV0 | null,
+	): { ok: true } | { ok: false; reason: string } {
+		if (!envelope) {
+			return {
+				ok: false,
+				reason:
+					"no active kernel-signed authorization envelope — run `buildplane planforge authorize-envelope` first.",
+			};
+		}
+		const evaluation = evaluateEnvelopeAdmission(
+			proposal,
+			envelope,
+			new Date(),
+		);
+		if (evaluation.status === "admitted") {
+			return { ok: true };
+		}
+		return { ok: false, reason: evaluation.reasons.join(" ") };
+	},
+};
+
+/** Default dry-run port: validate the plan.md through the dry-run pipeline. */
+async function defaultLoopDryRun(
+	planPath: string,
+	cwd: string,
+): Promise<{ ok: true; plan: PlanForgePlan } | { ok: false; reason: string }> {
+	const plan = createPlanForgeDryRunPlan(resolve(cwd, planPath));
+	if (plan.validation.status !== PLANFORGE_VALIDATION_STATUS_PASS) {
+		return {
+			ok: false,
+			reason: `plan validation ${plan.validation.status}`,
+		};
+	}
+	return { ok: true, plan };
+}
+
+/** Default admit port: route through the existing signed-admit command. */
+async function defaultLoopAdmit(
+	planPath: string,
+	cwd: string,
+): Promise<{ admittedEventId: string }> {
+	const code = await runPlanForgeAdmitCommand(
+		[
+			"--input",
+			planPath,
+			"--approve",
+			"--operator",
+			"loop-supervisor",
+			"--json",
+		],
+		cwd,
+		() => {},
+	);
+	if (code !== 0) {
+		throw new Error(`planforge admit failed (exit ${code}).`);
+	}
+	return { admittedEventId: "" };
+}
+
+/** Default dispatch port: route through the existing dispatch command with the
+ * runaway-guard turn cap, capturing the rich outcome (incl. mergedHeadSha). The
+ * lowered worker turn cap is bound by the loop command (closure over maxTurns).
+ */
+function makeDefaultLoopDispatch(
+	maxTurns: number,
+): (
+	planPath: string,
+	cwd: string,
+	guard: PolicyProfile,
+) => Promise<LoopDispatchResult> {
+	return async (planPath, cwd, _guard) => {
+		let outcome: LoopDispatchResult = {
+			allPassed: false,
+			mergedHeadSha: null,
+			runs: [],
+		};
+		await runPlanForgeDispatchCommand(
+			["--input", planPath, "--json"],
+			cwd,
+			() => {},
+			{
+				claudeMaxTurns: maxTurns,
+				onOutcome: (o) => {
+					outcome = o;
+				},
+			},
+		);
+		return outcome;
+	};
+}
+
+/**
+ * `buildplane planforge loop`: the supervisor FSM. Each iteration runs
+ * plan → dry-run → envelope-check → admit → dispatch → accept → merge →
+ * re-anchor → advance, persisting `loop-state.json` atomically after every
+ * transition. Resumes from a persisted non-terminal state. Halts on any
+ * terminal condition: roadmap-complete, `.buildplane/loop.stop`, acceptance
+ * FAIL, envelope breach, cumulative token budget, max-iterations, planner
+ * error. The squash-merge happens INSIDE the dispatch (GAP-8); the re-anchor
+ * phase only READS the merged HEAD (D3) — no second merge.
+ */
+async function runPlanForgeLoopCommand(
+	args: readonly string[],
+	cwd: string,
+	stdout: (line: string) => void,
+	_stderr: (line: string) => void,
+	deps: RunCliDependencies | undefined,
+): Promise<number> {
+	const workspace = resolve(cwd);
+	const jsonOut = args.includes("--json");
+	const once = args.includes("--once");
+	const maxIterations = once ? 1 : parseIntFlag(args, "--max-iterations", null);
+	const maxTurns = parseIntFlag(args, "--max-turns", 12) ?? 12;
+	const maxTokens = parseIntFlag(args, "--max-tokens", 200_000) ?? 200_000;
+	const wallClockMs =
+		parseIntFlag(args, "--wall-clock-ms", 30 * 60_000) ?? 30 * 60_000;
+
+	const planner = deps?.loopPlanner ?? defaultLoopPlanner;
+	const envelope = deps?.loopEnvelope ?? defaultLoopEnvelope;
+	const dryRun = deps?.loopDryRun ?? defaultLoopDryRun;
+	const admit = deps?.loopAdmit ?? defaultLoopAdmit;
+	const dispatch = deps?.loopDispatch ?? makeDefaultLoopDispatch(maxTurns);
+
+	// Per-iteration runaway guard (distinct from the cumulative token budget):
+	// maxTurns is the lowered worker turn cap; maxTokens/wallClockMs drive the
+	// orchestrator's per-packet AbortController.
+	const guard = runawayGuardProfile({
+		profileName: "planforge-loop-guard",
+		maxTokens,
+		maxComputeTimeMs: wallClockMs,
+	});
+
+	// Resume from a persisted non-terminal state, else start fresh. tokenBudget
+	// is the envelope's cumulative cross-iteration cap (D6), pinned at start.
+	const loadedEnvelope = await envelope.load(workspace);
+	let state: LoopState =
+		readLoopState(workspace) ??
+		initialLoopState({
+			maxIterations,
+			tokenBudget: loadedEnvelope?.envelope?.token_budget ?? null,
+			trustedBase: null,
+		});
+	let exitCode = 0;
+	const commit = (s: LoopState): void => {
+		state = s;
+		writeLoopStateAtomic(workspace, state);
+	};
+
+	while (!state.terminal) {
+		if (stopFileRequested(workspace)) {
+			commit(nextLoopState(state, { type: "stop-file" }));
+			break;
+		}
+		// Stop BEFORE starting another slice once the completed-iteration count
+		// has reached the cap (`--once` => maxIterations 1 runs exactly one slice).
+		if (
+			state.maxIterations !== null &&
+			state.iteration >= state.maxIterations
+		) {
+			commit(
+				nextLoopState({ ...state, phase: "advance" }, { type: "advance" }),
+			);
+			break;
+		}
+		const env = await envelope.load(workspace);
+		let proposal: LoopSliceProposal | { done: true };
+		try {
+			proposal = await planner({
+				workspace,
+				lastMergedHeadSha: state.lastMergedHeadSha,
+				trustedBase: state.trustedBase,
+			});
+		} catch (err) {
+			commit(
+				nextLoopState(state, {
+					type: "planner-error",
+					detail: err instanceof Error ? err.message : String(err),
+				}),
+			);
+			exitCode = 1;
+			break;
+		}
+		if ("done" in proposal) {
+			commit(nextLoopState(state, { type: "roadmap-complete" }));
+			break;
+		}
+		commit(
+			nextLoopState(state, {
+				type: "slice-selected",
+				sliceId: proposal.sliceId,
+				planPath: proposal.planPath,
+			}),
+		);
+
+		const dr = await dryRun(proposal.planPath, cwd);
+		if (!dr.ok) {
+			commit(
+				nextLoopState(state, { type: "acceptance-failed", detail: dr.reason }),
+			);
+			exitCode = 1;
+			break;
+		}
+		commit(nextLoopState(state, { type: "dry-run-ok" }));
+
+		const check = envelope.check(
+			buildEnvelopeProposal(dr.plan, proposal.milestone),
+			env?.envelope ?? null,
+		);
+		if (!check.ok) {
+			commit(
+				nextLoopState(state, { type: "envelope-breach", detail: check.reason }),
+			);
+			exitCode = 2;
+			break;
+		}
+		commit(nextLoopState(state, { type: "envelope-ok" }));
+
+		await admit(proposal.planPath, cwd);
+		commit(nextLoopState(state, { type: "admitted" }));
+
+		const d = await dispatch(proposal.planPath, cwd, guard);
+		commit(nextLoopState(state, { type: "dispatched" }));
+		if (!d.allPassed) {
+			commit(
+				nextLoopState(state, {
+					type: "acceptance-failed",
+					detail: "dispatch/acceptance failed",
+				}),
+			);
+			exitCode = 1;
+			break;
+		}
+		commit(nextLoopState(state, { type: "accepted" }));
+
+		// D3: the squash-merge already happened inside the dispatch; read the
+		// merged HEAD, never merge again.
+		const headSha = d.mergedHeadSha ?? state.lastMergedHeadSha ?? "";
+		commit(nextLoopState(state, { type: "merged", headSha }));
+		commit(nextLoopState({ ...state, phase: "advance" }, { type: "advance" }));
+	}
+
+	const summary = {
+		status: state.terminal?.reason ?? "stopped",
+		iterations: state.iteration,
+		terminal: state.terminal,
+		statePath: loopStatePath(workspace),
+	};
+	stdout(
+		jsonOut
+			? formatJson(summary)
+			: `loop terminated: ${summary.status} after ${state.iteration} iteration(s).`,
+	);
+	if (state.terminal?.reason === "acceptance-fail") exitCode = exitCode || 1;
+	if (state.terminal?.reason === "planner-error") exitCode = exitCode || 1;
+	if (state.terminal?.reason === "envelope-breach") exitCode = 2;
+	return exitCode;
 }
 
 /**
@@ -4919,9 +5375,18 @@ export async function runCli(
 					stdout,
 				);
 			}
+			if (subcommand === "loop") {
+				return await runPlanForgeLoopCommand(
+					rest.slice(1),
+					cwd,
+					stdout,
+					stderr,
+					deps,
+				);
+			}
 			if (subcommand !== "dry-run") {
 				throw new Error(
-					"Unsupported PlanForge command. Only dry-run, admit, dispatch, resume, recover, plan, and authorize-envelope are available; other non-dry-run PlanForge forms are intentionally disabled.",
+					"Unsupported PlanForge command. Only dry-run, admit, dispatch, resume, recover, plan, loop, and authorize-envelope are available; other non-dry-run PlanForge forms are intentionally disabled.",
 				);
 			}
 			const subRest = rest.slice(1);

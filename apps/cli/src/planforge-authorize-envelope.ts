@@ -222,6 +222,71 @@ export async function findExistingAuthorizeEnvelope(
 	}
 }
 
+/**
+ * Load the active authorization envelope the supervisor loop runs under: the
+ * LATEST (by `decided_at`) kernel-signed `authorize-envelope` decision on the
+ * repo-root tape that has not yet expired at `now`. A forged/unsigned row is
+ * rejected (GAP-10 P2) — the loop must never run under an unsigned envelope —
+ * and an expired-only row returns null so the loop pauses for re-authorization.
+ */
+export async function loadActiveAuthorizationEnvelope(
+	workspace: string,
+	now: Date = new Date(),
+): Promise<{ envelope: AuthorizationEnvelopeV0; eventId: string } | null> {
+	const eventsDbPath = resolve(workspace, ".buildplane", "ledger", "events.db");
+	if (!existsSync(eventsDbPath)) {
+		return null;
+	}
+	const { DatabaseSync } = await import("node:sqlite");
+	const db = new DatabaseSync(eventsDbPath, { readOnly: true });
+	try {
+		const rows = db
+			.prepare(
+				"SELECT id, payload FROM events WHERE kind = 'operator_decision_recorded' ORDER BY id ASC",
+			)
+			.all() as unknown as OperatorDecisionEventRow[];
+		let best:
+			| {
+					envelope: AuthorizationEnvelopeV0;
+					eventId: string;
+					decidedAt: number;
+			  }
+			| undefined;
+		for (const row of rows) {
+			const payload = JSON.parse(row.payload) as {
+				OperatorDecisionRecordedV1?: {
+					subject?: string;
+					envelope?: string;
+					decided_at?: string;
+				};
+			};
+			const record = payload.OperatorDecisionRecordedV1;
+			if (record?.subject !== "authorize-envelope" || !record.envelope) {
+				continue;
+			}
+			const signature = db
+				.prepare(
+					"SELECT actor_id, key_id, algorithm FROM event_signatures WHERE event_id = ?",
+				)
+				.get(row.id) as KernelSignatureRow | undefined;
+			if (!isKernelSigned(signature)) {
+				continue;
+			}
+			const envelope = JSON.parse(record.envelope) as AuthorizationEnvelopeV0;
+			if (!(now.getTime() < Date.parse(envelope.expires_at))) {
+				continue; // expired — does not authorize.
+			}
+			const decidedAt = Date.parse(record.decided_at ?? "") || 0;
+			if (!best || decidedAt >= best.decidedAt) {
+				best = { envelope, eventId: row.id, decidedAt };
+			}
+		}
+		return best ? { envelope: best.envelope, eventId: best.eventId } : null;
+	} finally {
+		db.close();
+	}
+}
+
 export async function runPlanForgeAuthorizeEnvelopeCommand(
 	args: readonly string[],
 	cwd: string,
