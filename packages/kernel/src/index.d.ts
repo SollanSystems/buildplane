@@ -138,6 +138,7 @@ export type {
 	AcceptanceCheckCollectionInput,
 	AcceptanceDiffScopeResult,
 	AcceptanceRecordInput,
+	AcceptanceShadowOutcome,
 	BuildplaneAcceptanceEvidencePort,
 	BuildplaneAcceptancePort,
 	BuildplaneMemoryPort,
@@ -151,6 +152,8 @@ export type {
 	LedgerActivityPort,
 	LedgerActivityStartInput,
 	LedgerActivityType,
+	PendingOperatorDecision,
+	RunPage,
 	StoredLearning,
 } from "./ports.ts";
 export type { OutcomeRoutingConfig } from "./routing-producer.ts";

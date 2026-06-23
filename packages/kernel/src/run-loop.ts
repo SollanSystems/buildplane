@@ -245,7 +245,7 @@ export interface InspectEventTapeSummary {
 export interface InspectSnapshot {
 	readonly kind: "run" | "unit";
 	readonly unit: Unit;
-	readonly run: Run;
+	readonly run: Run & { readonly parentRunId?: string };
 	readonly eventTape?: InspectEventTapeSummary;
 	readonly provenance?: {
 		readonly route: {

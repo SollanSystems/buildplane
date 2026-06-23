@@ -51,4 +51,31 @@ describe("listRunsByStatus", () => {
 		expect(storage.listRunsByStatus("passed").map((r) => r.id)).toEqual([b.id]);
 		expect(storage.listRunsByStatus("pending")).toEqual([]);
 	});
+
+	it("paginates by limit and advances with the returned cursor", () => {
+		const ids: string[] = [];
+		for (let i = 0; i < 5; i += 1) {
+			const run = storage.createRun(packet(`plan-${i}:PF1`));
+			storage.markRunRunning(run.id);
+			ids.push(run.id);
+		}
+
+		const firstPage = storage.listRunsByStatus("running", { limit: 2 });
+		expect(firstPage.map((r) => r.id)).toEqual([ids[0], ids[1]]);
+		expect(firstPage.cursor).toBeDefined();
+
+		const secondPage = storage.listRunsByStatus("running", {
+			limit: 2,
+			cursor: firstPage.cursor,
+		});
+		expect(secondPage.map((r) => r.id)).toEqual([ids[2], ids[3]]);
+		expect(secondPage.cursor).toBeDefined();
+
+		const thirdPage = storage.listRunsByStatus("running", {
+			limit: 2,
+			cursor: secondPage.cursor,
+		});
+		expect(thirdPage.map((r) => r.id)).toEqual([ids[4]]);
+		expect(thirdPage.cursor).toBeUndefined();
+	});
 });

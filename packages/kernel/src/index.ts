@@ -140,6 +140,7 @@ export type {
 	AcceptanceCheckCollectionInput,
 	AcceptanceDiffScopeResult,
 	AcceptanceRecordInput,
+	AcceptanceShadowOutcome,
 	BuildplaneAcceptanceEvidencePort,
 	BuildplaneAcceptancePort,
 	BuildplaneMemoryPort,
@@ -153,6 +154,8 @@ export type {
 	LedgerActivityPort,
 	LedgerActivityStartInput,
 	LedgerActivityType,
+	PendingOperatorDecision,
+	RunPage,
 	StoredLearning,
 } from "./ports.js";
 export type { OutcomeRoutingConfig } from "./routing-producer.js";

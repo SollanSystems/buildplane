@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import {
+	type AcceptanceShadowOutcome,
 	type AppendRunOutcomeInput,
 	type ApprovedPolicyDecision,
 	type BuildplaneStoragePort,
@@ -16,6 +17,7 @@ import {
 	type InjectedMemoryRecord,
 	type InspectSnapshot,
 	type MemoryScopeType,
+	type PendingOperatorDecision,
 	type PersistedInjectedMemoryRecord,
 	type PolicyDecision,
 	type ProcedureMemory,
@@ -30,6 +32,7 @@ import {
 	type RepoFactScopeCandidate,
 	type Run,
 	type RunOutcome,
+	type RunPage,
 	type RunStatus,
 	type SearchableDocument,
 	type SearchableDocumentRetrievalQuery,
@@ -224,6 +227,22 @@ interface WorkspaceAwareStorageStore
 	getPacketSnapshot(runId: string): UnitPacket | null;
 }
 
+function encodeRunCursor(rowid: number): string {
+	return Buffer.from(`run:${rowid}`, "utf8").toString("base64url");
+}
+
+function decodeRunCursor(cursor: string | undefined): number | undefined {
+	if (cursor === undefined) {
+		return undefined;
+	}
+	const decoded = Buffer.from(cursor, "base64url").toString("utf8");
+	const match = decoded.match(/^run:(\d+)$/);
+	if (!match) {
+		throw new Error(`Invalid run cursor: '${cursor}'`);
+	}
+	return Number(match[1]);
+}
+
 function tableHasColumn(
 	database: DatabaseSync,
 	tableName: string,
@@ -269,6 +288,12 @@ function ensureRunsStrategyColumns(database: DatabaseSync): void {
 		database.exec(
 			"CREATE INDEX IF NOT EXISTS idx_runs_strategy_id ON runs (strategy_id)",
 		);
+	}
+}
+
+function ensureRunsAcceptanceShadowColumn(database: DatabaseSync): void {
+	if (!tableHasColumn(database, "runs", "acceptance_outcome")) {
+		database.exec("ALTER TABLE runs ADD COLUMN acceptance_outcome TEXT");
 	}
 }
 
@@ -629,6 +654,7 @@ export function bootstrapStorageProjectionSchema(database: DatabaseSync): void {
 	ensureEvidenceMessageColumn(database);
 	ensureRunsUsedWorkspaceColumn(database);
 	ensureRunsStrategyColumns(database);
+	ensureRunsAcceptanceShadowColumn(database);
 	ensureRunLearningsTable(database);
 	ensureSeenCountColumn(database);
 	ensureRunsStepColumns(database);
@@ -710,6 +736,7 @@ function assertStorageProjectionSchema(database: DatabaseSync): void {
 		["runs", "used_workspace"],
 		["runs", "parent_run_id"],
 		["runs", "strategy_id"],
+		["runs", "acceptance_outcome"],
 		["evidence", "message"],
 	] as const) {
 		if (!tableHasColumn(database, tableName, columnName)) {
@@ -914,6 +941,7 @@ export function createStorageStore(
 			id: row.id,
 			unitId: row.unit_id,
 			status: row.status,
+			...(row.parent_run_id ? { parentRunId: row.parent_run_id } : {}),
 		};
 	}
 
@@ -3190,24 +3218,104 @@ export function createStorageStore(
 
 		listRunsByStatus(
 			status: RunStatus,
-			_options?: { limit?: number; cursor?: string },
-		): readonly Run[] {
+			options?: { limit?: number; cursor?: string },
+		): RunPage {
+			ensureInitialized();
+			const database = openStoreDatabase();
+			try {
+				const limit = options?.limit;
+				const afterRowid = decodeRunCursor(options?.cursor);
+
+				const clauses = ["status = ?"];
+				const params: (string | number)[] = [status];
+				if (afterRowid !== undefined) {
+					clauses.push("rowid > ?");
+					params.push(afterRowid);
+				}
+				// Over-fetch one row so a non-empty next page is detectable without a
+				// second COUNT query; the sentinel is trimmed before returning.
+				const limitClause =
+					limit !== undefined && limit > 0 ? ` LIMIT ${limit + 1}` : "";
+
+				const rows = database
+					.prepare(
+						`SELECT rowid AS rowid, id, unit_id, status, parent_run_id FROM runs WHERE ${clauses.join(
+							" AND ",
+						)} ORDER BY created_at ASC, rowid ASC${limitClause}`,
+					)
+					.all(...params) as {
+					rowid: number;
+					id: string;
+					unit_id: string;
+					status: string;
+					parent_run_id: string | null;
+				}[];
+
+				const hasMore = limit !== undefined && limit > 0 && rows.length > limit;
+				const pageRows = hasMore ? rows.slice(0, limit) : rows;
+				const lastRow = pageRows[pageRows.length - 1];
+
+				const runs = pageRows.map((row) => ({
+					id: row.id,
+					unitId: row.unit_id,
+					status: row.status as RunStatus,
+					...(row.parent_run_id ? { parentRunId: row.parent_run_id } : {}),
+				})) as Run[] & { cursor?: string };
+
+				if (hasMore && lastRow) {
+					runs.cursor = encodeRunCursor(lastRow.rowid);
+				}
+				return runs;
+			} finally {
+				database.close();
+			}
+		},
+
+		recordAcceptanceShadow(
+			runId: string,
+			outcome: AcceptanceShadowOutcome,
+		): void {
+			ensureInitialized();
+			const database = openStoreDatabase();
+			try {
+				database
+					.prepare(`UPDATE runs SET acceptance_outcome = ? WHERE id = ?`)
+					.run(outcome, runId);
+			} finally {
+				database.close();
+			}
+		},
+
+		listPendingOperatorDecisions(): readonly PendingOperatorDecision[] {
 			ensureInitialized();
 			const database = openStoreDatabase();
 			try {
 				const rows = database
 					.prepare(
-						`SELECT id, unit_id, status FROM runs WHERE status = ? ORDER BY created_at ASC, rowid ASC`,
+						`SELECT r.id AS id, r.status AS status, r.acceptance_outcome AS acceptance_outcome, r.updated_at AS updated_at
+						 FROM runs r
+						 WHERE r.status = 'suspended'
+						    OR (
+						       r.acceptance_outcome = 'passed'
+						       AND NOT EXISTS (
+						          SELECT 1 FROM events e
+						          WHERE e.kind = 'operator_decision_recorded'
+						            AND json_extract(e.payload, '$.runId') = r.id
+						       )
+						    )
+						 ORDER BY r.created_at ASC, r.rowid ASC`,
 					)
-					.all(status) as {
+					.all() as {
 					id: string;
-					unit_id: string;
 					status: string;
+					acceptance_outcome: string | null;
+					updated_at: string;
 				}[];
+
 				return rows.map((row) => ({
-					id: row.id,
-					unitId: row.unit_id,
-					status: row.status as RunStatus,
+					runId: row.id,
+					subject: row.status === "suspended" ? "resume" : "merge",
+					since: row.updated_at,
 				}));
 			} finally {
 				database.close();
