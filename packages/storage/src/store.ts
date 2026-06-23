@@ -11,12 +11,14 @@ import {
 	type CreateRunOptions,
 	type CreateSearchableDocumentInput,
 	createRankedMemoryResult,
+	type DecidedUnexecutedDecision,
 	dedupeRankedMemoryResults,
 	type ExecutionEvent,
 	type ExecutionReceipt,
 	type InjectedMemoryRecord,
 	type InspectSnapshot,
 	type MemoryScopeType,
+	type OperatorDecisionShadow,
 	type PendingOperatorDecision,
 	type PersistedInjectedMemoryRecord,
 	type PolicyDecision,
@@ -2613,6 +2615,37 @@ export function createStorageStore(
 			}
 		},
 
+		rejectMergeDecision(runId: string): Run {
+			ensureInitialized();
+			const database = openStoreDatabase();
+			const updatedAt = new Date().toISOString();
+
+			try {
+				// M5-S4 D3 quarantine: a merge-subject run is `passed` (acceptance
+				// gate), not `suspended`. Mark it failed and leave the worktree
+				// retained (no workspace transition here).
+				const runRow = readRun(runId, database);
+				database
+					.prepare(
+						`UPDATE runs SET status = ?, updated_at = ?, completed_at = ? WHERE id = ?`,
+					)
+					.run("failed", updatedAt, updatedAt, runId);
+				appendEvent(
+					"run-completed",
+					{
+						runId,
+						unitId: runRow.unit_id,
+						status: "failed",
+						reason: "merge-rejected-by-operator",
+					},
+					database,
+				);
+				return toRun({ ...runRow, status: "failed" });
+			} finally {
+				database.close();
+			}
+		},
+
 		upsertRepoFact(input: UpsertRepoFactInput): RepoFact {
 			ensureInitialized();
 			const database = openStoreDatabase();
@@ -3316,6 +3349,89 @@ export function createStorageStore(
 					runId: row.id,
 					subject: row.status === "suspended" ? "resume" : "merge",
 					since: row.updated_at,
+				}));
+			} finally {
+				database.close();
+			}
+		},
+
+		recordOperatorDecisionShadow(shadow: OperatorDecisionShadow): void {
+			ensureInitialized();
+			const database = openStoreDatabase();
+			try {
+				// Tier-1 mirror of the signed Tier-2 event. The payload carries
+				// camelCase `runId` (M5-S4 D2) — `listPendingOperatorDecisions`
+				// excludes on `json_extract(payload, '$.runId')`, and the reconciler
+				// reads it back here.
+				appendEvent(
+					"operator_decision_recorded",
+					{
+						runId: shadow.runId,
+						decision: shadow.decision,
+						subject: shadow.subject,
+						decidedBy: shadow.decidedBy,
+						decidedAt: shadow.decidedAt,
+					},
+					database,
+				);
+			} finally {
+				database.close();
+			}
+		},
+
+		markOperatorDecisionExecuted(
+			runId: string,
+			outcome?: { mergedHeadSha?: string },
+		): void {
+			ensureInitialized();
+			const database = openStoreDatabase();
+			try {
+				// The exactly-once gate (M5-S4 D2/D4): once present, the run drops
+				// out of `listDecidedUnexecutedDecisions`, so the reconciler can never
+				// re-drive (or double-merge) it.
+				appendEvent(
+					"operator_decision_executed",
+					{
+						runId,
+						...(outcome?.mergedHeadSha
+							? { mergedHeadSha: outcome.mergedHeadSha }
+							: {}),
+					},
+					database,
+				);
+			} finally {
+				database.close();
+			}
+		},
+
+		listDecidedUnexecutedDecisions(): readonly DecidedUnexecutedDecision[] {
+			ensureInitialized();
+			const database = openStoreDatabase();
+			try {
+				const rows = database
+					.prepare(
+						`SELECT json_extract(e.payload, '$.runId')   AS run_id,
+						        json_extract(e.payload, '$.decision') AS decision,
+						        json_extract(e.payload, '$.subject')  AS subject
+						 FROM events e
+						 WHERE e.kind = 'operator_decision_recorded'
+						   AND NOT EXISTS (
+						      SELECT 1 FROM events x
+						      WHERE x.kind = 'operator_decision_executed'
+						        AND json_extract(x.payload, '$.runId') = json_extract(e.payload, '$.runId')
+						   )
+						 ORDER BY e.occurred_at ASC, e.rowid ASC`,
+					)
+					.all() as {
+					run_id: string;
+					decision: string;
+					subject: string;
+				}[];
+
+				return rows.map((row) => ({
+					runId: row.run_id,
+					decision: row.decision as DecidedUnexecutedDecision["decision"],
+					subject: row.subject as DecidedUnexecutedDecision["subject"],
 				}));
 			} finally {
 				database.close();

@@ -69,6 +69,35 @@ export interface PendingOperatorDecision {
 	readonly since: string;
 }
 
+export type OperatorDecisionSubject = "resume" | "merge";
+export type OperatorDecisionVerdict = "approved" | "rejected";
+
+/**
+ * The Tier-1 mirror of one operator decision. Written to the state.db `events`
+ * table under kind `operator_decision_recorded` with a camelCase `runId` so
+ * `listPendingOperatorDecisions` excludes the decided run AND the reconciler
+ * (which cannot read the Tier-2 `events.db`) can detect a decided-but-unexecuted
+ * side effect. Distinct from the signed Tier-2 wire payload (snake_case
+ * `run_id`).
+ */
+export interface OperatorDecisionShadow {
+	readonly runId: string;
+	readonly decision: OperatorDecisionVerdict;
+	readonly subject: OperatorDecisionSubject;
+	readonly decidedBy: string;
+	readonly decidedAt: string;
+}
+
+/**
+ * A decided run whose side effect did not complete (no `operator_decision_executed`
+ * Tier-1 marker). The reconciler re-drives the side effect exactly once.
+ */
+export interface DecidedUnexecutedDecision {
+	readonly runId: string;
+	readonly decision: OperatorDecisionVerdict;
+	readonly subject: OperatorDecisionSubject;
+}
+
 export interface BuildplaneStoragePort {
 	initializeProject(): {
 		created: boolean;
@@ -109,6 +138,13 @@ export interface BuildplaneStoragePort {
 	suspendRun(runId: string): Run;
 	approveRun(runId: string): Run;
 	rejectSuspendedRun(runId: string): Run;
+	/**
+	 * Quarantine a passed-acceptance run whose merge the operator REJECTED (M5-S4
+	 * D3): mark it failed and leave the worktree retained. Distinct from
+	 * `rejectSuspendedRun` (which requires a suspended run); a merge-subject run is
+	 * `passed`, not `suspended`.
+	 */
+	rejectMergeDecision(runId: string): Run;
 	upsertRepoFact(input: UpsertRepoFactInput): RepoFact;
 	getRepoFact(
 		factKey: string,
@@ -194,6 +230,30 @@ export interface BuildplaneStoragePort {
 	 * event yet on the Tier-1 events mirror (subject `merge`). Oldest first.
 	 */
 	listPendingOperatorDecisions(): readonly PendingOperatorDecision[];
+	/**
+	 * Tier-1 mirror of a signed `operator_decision_recorded` event. The
+	 * TS-readable exactly-once anchor (M5-S4 D2): excludes the run from
+	 * `listPendingOperatorDecisions` and lets the reconciler — which cannot read
+	 * the Tier-2 `events.db` — detect a decided run. Recorded AFTER the Tier-2
+	 * flush, BEFORE the side effect.
+	 */
+	recordOperatorDecisionShadow(shadow: OperatorDecisionShadow): void;
+	/**
+	 * Tier-1 side-effect-completion marker for an operator decision (M5-S4 D2/D4).
+	 * Recorded after the side effect succeeds; carries the merge HEAD when an
+	 * approved merge produced one. Its presence is the exactly-once gate the
+	 * reconciler checks before re-driving — and the no-double-merge guard.
+	 */
+	markOperatorDecisionExecuted(
+		runId: string,
+		outcome?: { mergedHeadSha?: string },
+	): void;
+	/**
+	 * The reconciler feed: every run with an `operator_decision_recorded` Tier-1
+	 * mirror but no `operator_decision_executed` marker — a decided-but-unexecuted
+	 * side effect. Oldest first.
+	 */
+	listDecidedUnexecutedDecisions(): readonly DecidedUnexecutedDecision[];
 	getStatusSnapshot(): StatusSnapshot;
 	inspectTarget(id: string): InspectSnapshot;
 	listEvents(options: {
@@ -291,6 +351,38 @@ export interface AcceptanceRecordInput {
  */
 export interface BuildplaneAcceptancePort {
 	recordAcceptance(input: AcceptanceRecordInput): Promise<void>;
+}
+
+/**
+ * One operator decision to record on the tape (M5-S4). `subject=resume` resumes
+ * or rejects a suspended run; `subject=merge` merges or quarantines a retained
+ * worktree whose acceptance passed. The write-ahead path emits with
+ * `mergeCommit` absent (the merge has not happened at emit time, D1); a present
+ * `mergeCommit` is reserved for post-hoc decision recording and must be a full
+ * 40-hex sha.
+ */
+export interface RecordOperatorDecisionInput {
+	readonly runId: string;
+	readonly decision: OperatorDecisionVerdict;
+	readonly subject: OperatorDecisionSubject;
+	readonly decidedBy: string;
+	/** RFC3339 / ISO-8601 decision timestamp. */
+	readonly decidedAt: string;
+	readonly acceptanceEventId?: string;
+	readonly admissionEventId?: string;
+	/** Full 40-hex sha when post-hoc recording a completed merge; omitted in the live write-ahead path. */
+	readonly mergeCommit?: string;
+}
+
+/**
+ * Kernel-facing seam for appending the signed `operator_decision_recorded`
+ * event. The concrete impl (CLI layer) wraps a signed ledger TapeEmitter.
+ * `recordDecision` MUST resolve only once the event is durably on the tape
+ * (write-ahead — mirrors `BuildplaneAcceptancePort.recordAcceptance`), so the
+ * orchestrator can `await` it before the side effect (merge / resume).
+ */
+export interface OperatorDecisionPort {
+	recordDecision(input: RecordOperatorDecisionInput): Promise<void>;
 }
 
 export interface BuildplaneRuntimePort {

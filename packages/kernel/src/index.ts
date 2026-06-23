@@ -108,7 +108,10 @@ export type {
 	BuildplaneOrchestrator,
 	CreateBuildplaneOrchestratorOptions,
 } from "./orchestrator.js";
-export { createBuildplaneOrchestrator } from "./orchestrator.js";
+export {
+	createBuildplaneOrchestrator,
+	OperatorDecisionValidationError,
+} from "./orchestrator.js";
 export type {
 	ExtractedLearning,
 	LearningKind,
@@ -152,11 +155,17 @@ export type {
 	BuildplaneStoragePort,
 	BuildplaneWorkspacePort,
 	CreateRunOptions,
+	DecidedUnexecutedDecision,
 	LedgerActivityCompleteInput,
 	LedgerActivityPort,
 	LedgerActivityStartInput,
 	LedgerActivityType,
+	OperatorDecisionPort,
+	OperatorDecisionShadow,
+	OperatorDecisionSubject,
+	OperatorDecisionVerdict,
 	PendingOperatorDecision,
+	RecordOperatorDecisionInput,
 	RunPage,
 	StoredLearning,
 } from "./ports.js";

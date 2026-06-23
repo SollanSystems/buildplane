@@ -106,7 +106,10 @@ export type {
 	BuildplaneOrchestrator,
 	CreateBuildplaneOrchestratorOptions,
 } from "./orchestrator.ts";
-export { createBuildplaneOrchestrator } from "./orchestrator.ts";
+export {
+	createBuildplaneOrchestrator,
+	OperatorDecisionValidationError,
+} from "./orchestrator.ts";
 export type {
 	ExtractedLearning,
 	LearningKind,
@@ -150,11 +153,17 @@ export type {
 	BuildplaneStoragePort,
 	BuildplaneWorkspacePort,
 	CreateRunOptions,
+	DecidedUnexecutedDecision,
 	LedgerActivityCompleteInput,
 	LedgerActivityPort,
 	LedgerActivityStartInput,
 	LedgerActivityType,
+	OperatorDecisionPort,
+	OperatorDecisionShadow,
+	OperatorDecisionSubject,
+	OperatorDecisionVerdict,
 	PendingOperatorDecision,
+	RecordOperatorDecisionInput,
 	RunPage,
 	StoredLearning,
 } from "./ports.ts";
