@@ -1,5 +1,21 @@
 # buildplane
 
+## 0.12.2
+
+### Patch Changes
+
+- Updated dependencies [6e6cf64]
+  - @buildplane/kernel@0.7.0
+  - @buildplane/storage@0.4.0
+  - @buildplane/adapters-git@0.4.0
+  - @buildplane/adapters-codex@0.1.8
+  - @buildplane/adapters-honcho@0.1.8
+  - @buildplane/adapters-models@0.2.2
+  - @buildplane/adapters-tools@0.1.8
+  - @buildplane/policy@0.2.2
+  - @buildplane/runtime@0.1.8
+  - @buildplane/ui-tui@0.1.8
+
 ## 0.12.1
 
 ### Patch Changes
