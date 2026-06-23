@@ -312,11 +312,25 @@ export function createBuildplaneOrchestrator(
 				`resume decision requires a suspended run, got '${status}'.`,
 			);
 		}
-		// F2 — a merge decision is only signable when acceptance PASSED and a
-		// retained worktree still exists to merge. Any other state (failed/pending/
-		// running/cancelled, or passed-without-workspace) must throw BEFORE the emit
-		// so a state-malformed merge decision can never reach the immutable tape.
+		// F2 — a merge decision is only signable when the run is in the legitimate
+		// merge-eligible state: status `passed` (the only post-state that sets
+		// acceptance_outcome='passed' is commitRunSuccessOutcome, which transitions
+		// running→passed; recordAcceptanceShadow then sets the shadow without
+		// touching status), acceptance PASSED, AND a retained worktree to merge. The
+		// status gate is load-bearing on its own: a degenerate run can carry
+		// acceptance_outcome='passed' + a retained workspace while its status was
+		// later flipped (e.g. `failed` from an infra failure) — without this gate
+		// such a run would sign a merge decision and the merge-reject status gate
+		// would then false-heal it. Any other state (failed/pending/running/
+		// cancelled/suspended, or passed-without-acceptance, or passed-without-
+		// workspace) must throw BEFORE the emit so a state-malformed merge decision
+		// can never reach the immutable tape.
 		if (input.subject === "merge") {
+			if (status !== "passed") {
+				throw new OperatorDecisionValidationError(
+					`merge decision requires a passed run, got '${status}'.`,
+				);
+			}
 			if (storage.getRunAcceptanceOutcome(input.runId) !== "passed") {
 				throw new OperatorDecisionValidationError(
 					"merge decision requires a run whose acceptance passed.",

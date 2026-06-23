@@ -355,7 +355,53 @@ describe("recordOperatorDecision — F3 reject mergeCommit in the live path", ()
 });
 
 describe("recordOperatorDecision — F2 merge eligibility (acceptance passed + workspace)", () => {
-	it("rejects merge on a failed/pending/running/cancelled run BEFORE any emit", async () => {
+	// Round-3 finding: a degenerate run can carry status NOT in the legitimate
+	// merge-eligible state (`passed`) yet still have acceptance_outcome='passed' +
+	// a retained workspace (e.g. a later infra failure flipped status to `failed`
+	// while the acceptance shadow row persisted). Acceptance-passed + workspace
+	// alone is NOT sufficient — the run's own status must also be the merge-eligible
+	// `passed`, or the merge-reject status gate would false-heal it onto the tape.
+	it("rejects merge on a failed run that carries acceptance='passed' + workspace BEFORE any emit", async () => {
+		const h = makeHarness({
+			initialStatus: "failed",
+			withWorkspace: true,
+			acceptanceOutcome: "passed",
+		});
+		await expect(
+			h.orchestrator.recordOperatorDecision(input({ subject: "merge" })),
+		).rejects.toBeInstanceOf(OperatorDecisionValidationError);
+		// No emit, no Tier-1 shadow, no merge side effect — the malformed merge
+		// decision must never reach the immutable tape.
+		expect(h.decisionEmits).toHaveLength(0);
+		expect(h.shadows).toHaveLength(0);
+		expect(h.mergeCalls).toHaveLength(0);
+	});
+
+	it("rejects merge on a non-'passed' run even when acceptance='passed' + workspace BEFORE any emit", async () => {
+		// Every non-`passed` run status carrying acceptance='passed' + a retained
+		// workspace must still be rejected on the status gate.
+		for (const status of [
+			"failed",
+			"pending",
+			"running",
+			"cancelled",
+			"suspended",
+		] as RunStatus[]) {
+			const h = makeHarness({
+				initialStatus: status,
+				withWorkspace: true,
+				acceptanceOutcome: "passed",
+			});
+			await expect(
+				h.orchestrator.recordOperatorDecision(input({ subject: "merge" })),
+			).rejects.toBeInstanceOf(OperatorDecisionValidationError);
+			expect(h.decisionEmits).toHaveLength(0);
+			expect(h.shadows).toHaveLength(0);
+			expect(h.mergeCalls).toHaveLength(0);
+		}
+	});
+
+	it("rejects merge on a failed/pending/running/cancelled run with null acceptance BEFORE any emit", async () => {
 		for (const status of [
 			"failed",
 			"pending",
