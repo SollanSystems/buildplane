@@ -172,6 +172,10 @@ export function createClaudeCodeExecutor(
 				let aborted = false;
 				let exitCode = 0;
 				let resultText: string | undefined;
+				// Real total token usage (input + output) from the terminal `result`
+				// line's `usage` object — the accurate figure the supervisor loop's
+				// cumulative token budget consumes (vs. the per-text-block delta proxy).
+				let tokenUsage: number | undefined;
 
 				const onAbort = () => {
 					aborted = true;
@@ -188,8 +192,15 @@ export function createClaudeCodeExecutor(
 
 				// NDJSON (`--output-format stream-json`): one JSON object per line.
 				// `assistant` lines carry incremental text blocks → emit a
-				// `model-token-delta` per block so the orchestrator's budget
-				// AbortController can count tokens and abort a runaway worker.
+				// `model-token-delta` per TEXT block so the orchestrator's budget
+				// AbortController can abort a runaway worker.
+				//
+				// NOTE: one delta == one assistant text block, NOT one token. A worker
+				// emitting mostly tool_use blocks under-counts, so the orchestrator's
+				// per-iteration `--max-tokens` cap is an APPROXIMATE response-volume
+				// proxy. The precise per-iteration bound is `--wall-clock-ms`
+				// (maxComputeTimeMs). The accurate cumulative figure is the terminal
+				// `result.usage` parsed below (used by the supervisor's token-budget cap).
 				const consumeLine = (raw: string): void => {
 					const line = raw.trim();
 					if (!line) return;
@@ -213,8 +224,20 @@ export function createClaudeCodeExecutor(
 								});
 							}
 						}
-					} else if (obj.type === "result" && typeof obj.result === "string") {
-						resultText = obj.result;
+					} else if (obj.type === "result") {
+						if (typeof obj.result === "string") {
+							resultText = obj.result;
+						}
+						// The stream-json terminal `result` line carries a `usage` object
+						// ({ input_tokens, output_tokens, cache_*_input_tokens }). Sum the
+						// real input + output token cost for the supervisor's cumulative cap.
+						const usage = obj.usage as
+							| { input_tokens?: number; output_tokens?: number }
+							| undefined;
+						if (usage) {
+							tokenUsage =
+								(usage.input_tokens ?? 0) + (usage.output_tokens ?? 0);
+						}
 					}
 				};
 
@@ -263,6 +286,15 @@ export function createClaudeCodeExecutor(
 								resultText = parsed.text;
 							} else if (typeof parsed.content === "string") {
 								resultText = parsed.content;
+							}
+							if (tokenUsage === undefined) {
+								const usage = parsed.usage as
+									| { input_tokens?: number; output_tokens?: number }
+									| undefined;
+								if (usage) {
+									tokenUsage =
+										(usage.input_tokens ?? 0) + (usage.output_tokens ?? 0);
+								}
 							}
 						} catch {
 							// Malformed JSON — skip event, don't fabricate.
@@ -315,6 +347,7 @@ export function createClaudeCodeExecutor(
 						stdout: stdoutBuf,
 						stderr: stderrBuf,
 						outputChecks,
+						...(tokenUsage !== undefined ? { tokenUsage } : {}),
 					});
 				});
 			});

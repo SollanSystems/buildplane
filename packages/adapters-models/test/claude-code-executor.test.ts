@@ -414,6 +414,47 @@ describe("ClaudeCodeExecutor", () => {
 		expect(spawnArgs).toContain("--verbose");
 	});
 
+	it("stream-json result line usage → receipt.tokenUsage = input + output tokens", async () => {
+		const lines = `${[
+			JSON.stringify({
+				type: "assistant",
+				message: { content: [{ type: "text", text: "hi" }] },
+			}),
+			JSON.stringify({
+				type: "result",
+				subtype: "success",
+				result: "done",
+				usage: { input_tokens: 120, output_tokens: 30 },
+			}),
+		].join("\n")}\n`;
+		const mockSpawn = createMockSpawn({ stdout: lines, exitCode: 0 });
+		const executor = createClaudeCodeExecutor({ spawnFn: mockSpawn as never });
+		const eventBus = createEventBus();
+
+		const receipt = await executor.executePacketAsync(
+			makePacket(),
+			PROJECT_ROOT,
+			eventBus,
+		);
+
+		expect(receipt.tokenUsage).toBe(150);
+	});
+
+	it("no usage on the result line → receipt.tokenUsage is undefined", async () => {
+		const lines = `${JSON.stringify({ type: "result", subtype: "success", result: "ok" })}\n`;
+		const mockSpawn = createMockSpawn({ stdout: lines, exitCode: 0 });
+		const executor = createClaudeCodeExecutor({ spawnFn: mockSpawn as never });
+		const eventBus = createEventBus();
+
+		const receipt = await executor.executePacketAsync(
+			makePacket(),
+			PROJECT_ROOT,
+			eventBus,
+		);
+
+		expect(receipt.tokenUsage).toBeUndefined();
+	});
+
 	it("pre-aborted signal → child killed, non-zero receipt, no token deltas", async () => {
 		const mockSpawn = createMockSpawn({ stdout: "", exitCode: 0, delay: 50 });
 		const executor = createClaudeCodeExecutor({ spawnFn: mockSpawn as never });
