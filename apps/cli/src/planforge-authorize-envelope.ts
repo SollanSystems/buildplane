@@ -117,14 +117,39 @@ interface OperatorDecisionEventRow {
 	payload: string;
 }
 
+interface KernelSignatureRow {
+	actor_id?: string;
+	key_id?: string;
+	algorithm?: string;
+}
+
+/**
+ * A matching events row may only suppress emission if it carries a kernel
+ * Ed25519 signature. Structural signature check only (actor / key / algorithm
+ * columns) — full byte verification is the external verifier's job (M3), and the
+ * CLI has no in-process Ed25519 verifier. This mirrors run-cli's
+ * `assertKernelSignature`. Without it, a forged/unsigned local `events` row
+ * (no `event_signatures` entry, or a wrong actor/key) would make the probe
+ * report `already_authorized` and suppress a real authorization (GAP-10 P2).
+ */
+function isKernelSigned(signature: KernelSignatureRow | undefined): boolean {
+	return (
+		signature?.actor_id === "kernel" &&
+		signature.key_id === PLANFORGE_KERNEL_SIGNING_KEY_ID &&
+		signature.algorithm === "ed25519"
+	);
+}
+
 /**
  * Probe the repo-root tape for an already-recorded authorize-envelope decision
- * on this run id whose envelope matches byte-for-byte. The native ledger does
- * not dedupe by run id, so re-authorizing the identical envelope is made a
- * no-op here (mirrors run-cli's findExistingPlanAdmitted), keyed on the
- * deterministic envelope digest -> run id.
+ * on this run id whose envelope matches byte-for-byte AND carries a kernel
+ * signature. The native ledger does not dedupe by run id, so re-authorizing the
+ * identical envelope is made a no-op here (mirrors run-cli's
+ * findExistingPlanAdmitted), keyed on the deterministic envelope digest -> run
+ * id. An unsigned or non-kernel-signed matching row is NOT treated as
+ * authorized — it must not suppress a real signed emit.
  */
-async function findExistingAuthorizeEnvelope(
+export async function findExistingAuthorizeEnvelope(
 	workspace: string,
 	runId: string,
 	canonicalEnvelope: string,
@@ -150,9 +175,17 @@ async function findExistingAuthorizeEnvelope(
 			};
 			const record = payload.OperatorDecisionRecordedV1;
 			if (
-				record?.subject === "authorize-envelope" &&
-				record.envelope === canonicalEnvelope
+				record?.subject !== "authorize-envelope" ||
+				record.envelope !== canonicalEnvelope
 			) {
+				continue;
+			}
+			const signature = db
+				.prepare(
+					"SELECT actor_id, key_id, algorithm FROM event_signatures WHERE event_id = ?",
+				)
+				.get(row.id) as KernelSignatureRow | undefined;
+			if (isKernelSigned(signature)) {
 				return row.id;
 			}
 		}

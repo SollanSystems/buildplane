@@ -191,4 +191,16 @@ describe.sequential("authorize-envelope signed tape", () => {
 		expect(threw || code !== 0).toBe(true);
 		expect(existsSync(env.eventsDbPath)).toBe(false);
 	});
+
+	it("re-authorizing the SIGNED envelope is idempotent (kernel-signed row suppresses)", async () => {
+		// Companion to the unit-level GAP-10 P2 test: a real kernel-signed row DOES
+		// suppress a second emit. Together they prove the signature gate distinguishes
+		// signed from unsigned matching rows end-to-end.
+		const first = await runEnvelope(ENVELOPE_ARGS, env.dir);
+		expect(first.code).toBe(0);
+		const second = await runEnvelope(ENVELOPE_ARGS, env.dir);
+		expect(second.code).toBe(0);
+		const { decisions } = await readTape(env.eventsDbPath);
+		expect(decisions).toHaveLength(1);
+	});
 });

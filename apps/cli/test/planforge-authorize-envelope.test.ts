@@ -1,6 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
 	buildAuthorizeEnvelopePayload,
+	findExistingAuthorizeEnvelope,
 	parseEnvelopeArgs,
 } from "../src/planforge-authorize-envelope.js";
 
@@ -92,5 +97,111 @@ describe("planforge authorize-envelope", () => {
 			new Date("2026-06-23T11:00:00Z"),
 		);
 		expect(pa.run_id).toBe(pb.run_id);
+	});
+});
+
+describe("findExistingAuthorizeEnvelope signature gate (GAP-10 P2)", () => {
+	let workspace: string;
+
+	function seedRow(opts: {
+		runId: string;
+		envelope: string;
+		signature?: { actor_id: string; key_id: string; algorithm: string };
+	}): void {
+		const ledgerDir = join(workspace, ".buildplane", "ledger");
+		mkdirSync(ledgerDir, { recursive: true });
+		const db = new DatabaseSync(join(ledgerDir, "events.db"));
+		db.exec(
+			"CREATE TABLE IF NOT EXISTS events (id TEXT PRIMARY KEY, run_id TEXT NOT NULL, parent_event_id TEXT, schema_version INTEGER NOT NULL, kind TEXT NOT NULL, occurred_at TEXT NOT NULL, payload TEXT NOT NULL)",
+		);
+		db.exec(
+			"CREATE TABLE IF NOT EXISTS event_signatures (event_id TEXT PRIMARY KEY, canonical_event_hash TEXT NOT NULL, actor_id TEXT NOT NULL, key_id TEXT NOT NULL, public_key_hash TEXT, algorithm TEXT NOT NULL, signature TEXT NOT NULL, signed_at TEXT NOT NULL)",
+		);
+		const eventId = "evt-1";
+		db.prepare(
+			"INSERT INTO events (id, run_id, schema_version, kind, occurred_at, payload) VALUES (?, ?, 1, 'operator_decision_recorded', ?, ?)",
+		).run(
+			eventId,
+			opts.runId,
+			"2026-06-22T00:00:00Z",
+			JSON.stringify({
+				OperatorDecisionRecordedV1: {
+					subject: "authorize-envelope",
+					envelope: opts.envelope,
+				},
+			}),
+		);
+		if (opts.signature) {
+			db.prepare(
+				"INSERT INTO event_signatures (event_id, canonical_event_hash, actor_id, key_id, algorithm, signature, signed_at) VALUES (?, 'sha256:0', ?, ?, ?, 'sig', ?)",
+			).run(
+				eventId,
+				opts.signature.actor_id,
+				opts.signature.key_id,
+				opts.signature.algorithm,
+				"2026-06-22T00:00:00Z",
+			);
+		}
+		db.close();
+	}
+
+	beforeEach(() => {
+		workspace = mkdtempSync(join(tmpdir(), "bp-envprobe-"));
+	});
+
+	afterEach(() => {
+		rmSync(workspace, { recursive: true, force: true });
+	});
+
+	it("does NOT suppress on an unsigned matching row", async () => {
+		const parsed = parseEnvelopeArgs(baseArgs);
+		const payload = buildAuthorizeEnvelopePayload(parsed, new Date());
+		seedRow({ runId: payload.run_id, envelope: payload.envelope });
+		const found = await findExistingAuthorizeEnvelope(
+			workspace,
+			payload.run_id,
+			payload.envelope,
+		);
+		expect(found).toBeUndefined();
+	});
+
+	it("does NOT suppress on a forged non-kernel-signed matching row", async () => {
+		const parsed = parseEnvelopeArgs(baseArgs);
+		const payload = buildAuthorizeEnvelopePayload(parsed, new Date());
+		seedRow({
+			runId: payload.run_id,
+			envelope: payload.envelope,
+			signature: {
+				actor_id: "attacker",
+				key_id: "evil",
+				algorithm: "ed25519",
+			},
+		});
+		const found = await findExistingAuthorizeEnvelope(
+			workspace,
+			payload.run_id,
+			payload.envelope,
+		);
+		expect(found).toBeUndefined();
+	});
+
+	it("suppresses on a kernel-signed matching row", async () => {
+		const parsed = parseEnvelopeArgs(baseArgs);
+		const payload = buildAuthorizeEnvelopePayload(parsed, new Date());
+		seedRow({
+			runId: payload.run_id,
+			envelope: payload.envelope,
+			signature: {
+				actor_id: "kernel",
+				key_id: "kernel-main",
+				algorithm: "ed25519",
+			},
+		});
+		const found = await findExistingAuthorizeEnvelope(
+			workspace,
+			payload.run_id,
+			payload.envelope,
+		);
+		expect(found).toBe("evt-1");
 	});
 });
