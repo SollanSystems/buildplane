@@ -24,7 +24,9 @@ import type {
 	BuildplaneStoragePort,
 	EnvelopeProposal,
 	LedgerActivityPort,
+	OperatorDecisionPort,
 	PolicyProfile,
+	RecordOperatorDecisionInput,
 } from "@buildplane/kernel";
 import {
 	createTapeEmitter,
@@ -79,6 +81,7 @@ import {
 	spawnLedgerSubprocess,
 } from "./ledger-emit.js";
 import { runGitCheckpoint } from "./ledger-git-checkpoint.js";
+import { createOperatorDecisionPort } from "./ledger-operator-decision.js";
 import { createLedgerReceiptPort } from "./ledger-receipt-port.js";
 import { wrapToolRegistryForLedger } from "./ledger-tool-wrapper.js";
 import {
@@ -1163,6 +1166,8 @@ interface BuildplaneCliOrchestrator {
 	inspect(
 		id: string,
 	): { kind: string; run: { id: string } } & Record<string, unknown>;
+	recordOperatorDecision(input: RecordOperatorDecisionInput): Promise<void>;
+	recoverPendingDecisions(): Promise<void>;
 }
 
 interface HonchoPortLike {
@@ -1382,6 +1387,7 @@ async function loadCliOrchestrator(
 		readonly ledgerActivityPort?: LedgerActivityPort;
 		readonly profileRegistry?: BuildplaneProfileRegistryPort;
 		readonly acceptancePort?: BuildplaneAcceptancePort;
+		readonly operatorDecisionPort?: OperatorDecisionPort;
 		readonly provisionDeps?: (workspacePath: string) => void;
 		/** Lowered worker turn cap for the supervisor loop's runaway guard. */
 		readonly claudeMaxTurns?: number;
@@ -1430,6 +1436,7 @@ async function loadCliOrchestrator(
 			ledgerActivityPort?: unknown;
 			profileRegistry?: BuildplaneProfileRegistryPort;
 			acceptancePort?: BuildplaneAcceptancePort;
+			operatorDecisionPort?: OperatorDecisionPort;
 			provisionDeps?: (workspacePath: string) => void;
 			budgets?: BudgetConstraints;
 		}) => BuildplaneCliOrchestrator;
@@ -1747,6 +1754,10 @@ async function loadCliOrchestrator(
 		ledgerActivityPort: opts?.ledgerActivityPort,
 		profileRegistry: opts?.profileRegistry,
 		acceptancePort: opts?.acceptancePort,
+		// Signed `operator_decision_recorded` emit path (M5-S4). Defaults to the
+		// real ledger-backed port; tests inject a fake via opts.
+		operatorDecisionPort:
+			opts?.operatorDecisionPort ?? createOperatorDecisionPort(projectRoot),
 		provisionDeps: opts?.provisionDeps,
 		// Runaway-guard budgets (loop dispatch); undefined for non-loop callers.
 		budgets: opts?.budgets,

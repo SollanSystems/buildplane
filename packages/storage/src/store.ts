@@ -11,12 +11,14 @@ import {
 	type CreateRunOptions,
 	type CreateSearchableDocumentInput,
 	createRankedMemoryResult,
+	type DecidedUnexecutedDecision,
 	dedupeRankedMemoryResults,
 	type ExecutionEvent,
 	type ExecutionReceipt,
 	type InjectedMemoryRecord,
 	type InspectSnapshot,
 	type MemoryScopeType,
+	type OperatorDecisionShadow,
 	type PendingOperatorDecision,
 	type PersistedInjectedMemoryRecord,
 	type PolicyDecision,
@@ -2613,6 +2615,37 @@ export function createStorageStore(
 			}
 		},
 
+		rejectMergeDecision(runId: string): Run {
+			ensureInitialized();
+			const database = openStoreDatabase();
+			const updatedAt = new Date().toISOString();
+
+			try {
+				// M5-S4 D3 quarantine: a merge-subject run is `passed` (acceptance
+				// gate), not `suspended`. Mark it failed and leave the worktree
+				// retained (no workspace transition here).
+				const runRow = readRun(runId, database);
+				database
+					.prepare(
+						`UPDATE runs SET status = ?, updated_at = ?, completed_at = ? WHERE id = ?`,
+					)
+					.run("failed", updatedAt, updatedAt, runId);
+				appendEvent(
+					"run-completed",
+					{
+						runId,
+						unitId: runRow.unit_id,
+						status: "failed",
+						reason: "merge-rejected-by-operator",
+					},
+					database,
+				);
+				return toRun({ ...runRow, status: "failed" });
+			} finally {
+				database.close();
+			}
+		},
+
 		upsertRepoFact(input: UpsertRepoFactInput): RepoFact {
 			ensureInitialized();
 			const database = openStoreDatabase();
@@ -3294,15 +3327,12 @@ export function createStorageStore(
 					.prepare(
 						`SELECT r.id AS id, r.status AS status, r.acceptance_outcome AS acceptance_outcome, r.updated_at AS updated_at
 						 FROM runs r
-						 WHERE r.status = 'suspended'
-						    OR (
-						       r.acceptance_outcome = 'passed'
-						       AND NOT EXISTS (
-						          SELECT 1 FROM events e
-						          WHERE e.kind = 'operator_decision_recorded'
-						            AND json_extract(e.payload, '$.runId') = r.id
-						       )
-						    )
+						 WHERE (r.status = 'suspended' OR r.acceptance_outcome = 'passed')
+						   AND NOT EXISTS (
+						      SELECT 1 FROM events e
+						      WHERE e.kind = 'operator_decision_recorded'
+						        AND json_extract(e.payload, '$.runId') = r.id
+						   )
 						 ORDER BY r.created_at ASC, r.rowid ASC`,
 					)
 					.all() as {
@@ -3316,6 +3346,125 @@ export function createStorageStore(
 					runId: row.id,
 					subject: row.status === "suspended" ? "resume" : "merge",
 					since: row.updated_at,
+				}));
+			} finally {
+				database.close();
+			}
+		},
+
+		recordOperatorDecisionShadow(shadow: OperatorDecisionShadow): void {
+			ensureInitialized();
+			const database = openStoreDatabase();
+			try {
+				// Tier-1 mirror of the signed Tier-2 event. The payload carries
+				// camelCase `runId` (M5-S4 D2) — `listPendingOperatorDecisions`
+				// excludes on `json_extract(payload, '$.runId')`, and the reconciler
+				// reads it back here.
+				appendEvent(
+					"operator_decision_recorded",
+					{
+						runId: shadow.runId,
+						decision: shadow.decision,
+						subject: shadow.subject,
+						decidedBy: shadow.decidedBy,
+						decidedAt: shadow.decidedAt,
+					},
+					database,
+				);
+			} finally {
+				database.close();
+			}
+		},
+
+		markOperatorDecisionExecuted(
+			runId: string,
+			outcome?: { mergedHeadSha?: string },
+		): void {
+			ensureInitialized();
+			const database = openStoreDatabase();
+			try {
+				// The exactly-once gate (M5-S4 D2/D4): once present, the run drops
+				// out of `listDecidedUnexecutedDecisions`, so the reconciler can never
+				// re-drive (or double-merge) it.
+				appendEvent(
+					"operator_decision_executed",
+					{
+						runId,
+						...(outcome?.mergedHeadSha
+							? { mergedHeadSha: outcome.mergedHeadSha }
+							: {}),
+					},
+					database,
+				);
+			} finally {
+				database.close();
+			}
+		},
+
+		isOperatorDecisionExecuted(runId: string): boolean {
+			ensureInitialized();
+			const database = openStoreDatabase();
+			try {
+				const row = database
+					.prepare(
+						`SELECT 1 FROM events
+						 WHERE kind = 'operator_decision_executed'
+						   AND json_extract(payload, '$.runId') = ?
+						 LIMIT 1`,
+					)
+					.get(runId);
+				return row !== undefined;
+			} finally {
+				database.close();
+			}
+		},
+
+		getRunAcceptanceOutcome(runId: string): "passed" | "rejected" | null {
+			ensureInitialized();
+			const database = openStoreDatabase();
+			try {
+				const row = database
+					.prepare(`SELECT acceptance_outcome FROM runs WHERE id = ?`)
+					.get(runId) as { acceptance_outcome: string | null } | undefined;
+				const outcome = row?.acceptance_outcome ?? null;
+				return outcome === "passed" || outcome === "rejected" ? outcome : null;
+			} finally {
+				database.close();
+			}
+		},
+
+		listDecidedUnexecutedDecisions(): readonly DecidedUnexecutedDecision[] {
+			ensureInitialized();
+			const database = openStoreDatabase();
+			try {
+				// At most one row per run (M5-S4 F5): a duplicate Tier-1 shadow (e.g.
+				// the residual crash-window operator re-decide) must not double-feed
+				// the reconciler. GROUP BY runId keeps the earliest decision row.
+				const rows = database
+					.prepare(
+						`SELECT json_extract(e.payload, '$.runId')   AS run_id,
+						        json_extract(e.payload, '$.decision') AS decision,
+						        json_extract(e.payload, '$.subject')  AS subject
+						 FROM events e
+						 WHERE e.kind = 'operator_decision_recorded'
+						   AND NOT EXISTS (
+						      SELECT 1 FROM events x
+						      WHERE x.kind = 'operator_decision_executed'
+						        AND json_extract(x.payload, '$.runId') = json_extract(e.payload, '$.runId')
+						   )
+						 GROUP BY json_extract(e.payload, '$.runId')
+						 ORDER BY MIN(e.rowid) ASC`,
+					)
+					.all() as {
+					run_id: string;
+					decision: string;
+					subject: string;
+				}[];
+
+				return rows.map((row) => ({
+					runId: row.run_id,
+					decision: row.decision as DecidedUnexecutedDecision["decision"],
+					subject: row.subject as DecidedUnexecutedDecision["subject"],
 				}));
 			} finally {
 				database.close();

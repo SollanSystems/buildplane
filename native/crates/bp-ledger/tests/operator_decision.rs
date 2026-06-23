@@ -102,6 +102,55 @@ fn operator_decision_recorded_canonical_bytes_are_stable() {
     assert_eq!(first, second);
 }
 
+/// A resume/rejected decision: every optional is `None`. With `envelope`'s
+/// `skip_serializing_if` the field drops off the wire entirely, while the other
+/// optionals (`acceptance_event_id`/`admission_event_id`/`merge_commit`) carry
+/// `null` (no skip). Pins the M5-S4 write-ahead None-optionals shape.
+fn resume_rejected_payload() -> OperatorDecisionRecordedV1 {
+    OperatorDecisionRecordedV1 {
+        run_id: "01919000-0000-7000-8000-0000000000bb".into(),
+        decision: "rejected".into(),
+        subject: "resume".into(),
+        acceptance_event_id: None,
+        admission_event_id: None,
+        merge_commit: None,
+        envelope: None,
+        decided_by: "operator:khall".into(),
+        decided_at: "2026-06-23T00:00:00Z".into(),
+    }
+}
+
+/// M5-S4 golden: pin the canonical-byte sha256 of the signed
+/// `operator_decision_recorded` payload for BOTH a populated approved/merge case
+/// and a None-optionals rejected/resume case. Byte-stability is enforced HERE by
+/// a test (not only by CI fixture-freshness): a change to the wire field order /
+/// presence flips a hash and trips this test, surfacing the tape-migration
+/// hazard before it ships.
+#[test]
+fn operator_decision_recorded_canonical_bytes_golden() {
+    let merge_bytes =
+        serde_json::to_vec(&Payload::OperatorDecisionRecordedV1(operator_decision_payload()))
+            .unwrap();
+    let merge_hash = format!("sha256:{:x}", Sha256::digest(&merge_bytes));
+    assert_eq!(
+        merge_hash,
+        "sha256:c6ae60dbfccd48e9e7141b7b903c671673ac7903cb153c0afc82d853bf65f2cb",
+        "approved/merge canonical bytes drifted: {}",
+        String::from_utf8_lossy(&merge_bytes)
+    );
+
+    let resume_bytes =
+        serde_json::to_vec(&Payload::OperatorDecisionRecordedV1(resume_rejected_payload()))
+            .unwrap();
+    let resume_hash = format!("sha256:{:x}", Sha256::digest(&resume_bytes));
+    assert_eq!(
+        resume_hash,
+        "sha256:e64ff273654c915e82802fba5a288e3df5db3f9cb5cee972e08ef5eb360802a5",
+        "rejected/resume canonical bytes drifted: {}",
+        String::from_utf8_lossy(&resume_bytes)
+    );
+}
+
 #[test]
 fn operator_decision_recorded_wire_kind_matches_payload_variant() {
     assert_eq!(

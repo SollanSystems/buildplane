@@ -42,6 +42,10 @@ import type {
 	BuildplaneWorkspacePort,
 	CreateRunOptions,
 	LedgerActivityPort,
+	OperatorDecisionPort,
+	OperatorDecisionSubject,
+	OperatorDecisionVerdict,
+	RecordOperatorDecisionInput,
 } from "./ports.js";
 import {
 	defaultOutcomeRoutingConfig,
@@ -102,6 +106,30 @@ function activityResultDescriptor(r: ExecutionReceipt): unknown {
 // Must equal @buildplane/planforge's PLANFORGE_AUTHORIZED_NEXT_STEP.
 const PLAN_ADMITTED_AUTHORIZED_NEXT_STEP = "dispatch_admitted_plan";
 
+const UUID_PATTERN =
+	/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// Strict RFC3339 timestamp (M5-S4 F7): `Date.parse` accepts non-RFC3339 forms
+// like "06/23/2026", so a decision's `decidedAt` is matched against this regex
+// AND round-tripped through Date before it can be signed. Named groups capture the
+// wall-clock fields for the calendar round-trip (P1.7): the regex matches the
+// SHAPE but not the calendar, and `Date.parse` silently normalizes rolled-over
+// fields (Feb 31 → Mar 3), so an impossible calendar date could otherwise sign.
+const RFC3339_PATTERN =
+	/^(?<year>\d{4})-(?<month>\d{2})-(?<day>\d{2})[Tt](?<hour>\d{2}):(?<minute>\d{2}):(?<second>\d{2})(\.\d+)?([Zz]|[+-]\d{2}:\d{2})$/;
+
+/**
+ * Thrown by `recordOperatorDecision` validation (M5-S4 D5) BEFORE any tape emit,
+ * so a malformed decision can never be signed. A typed error class lets callers
+ * distinguish a rejected-input from an infrastructure failure.
+ */
+export class OperatorDecisionValidationError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "OperatorDecisionValidationError";
+	}
+}
+
 export interface BuildplaneOrchestrator {
 	initializeProject(): ReturnType<BuildplaneStoragePort["initializeProject"]>;
 	runPacket(
@@ -118,6 +146,19 @@ export interface BuildplaneOrchestrator {
 	inspect(id: string): InspectSnapshot;
 	approveRun(runId: string): Run;
 	rejectSuspendedRun(runId: string): Run;
+	/**
+	 * Record one operator decision on the tape and apply its side effect (M5-S4).
+	 * Validate → emit + flush the signed `operator_decision_recorded` (write-ahead)
+	 * → Tier-1 mirror → side effect (resume / reject / merge / quarantine) → mark
+	 * the decision executed. Resolves once the side effect is complete.
+	 */
+	recordOperatorDecision(input: RecordOperatorDecisionInput): Promise<void>;
+	/**
+	 * Startup reconciler (M5-S4 D2): re-drive any decided-but-unexecuted side
+	 * effect EXACTLY ONCE, gated on a missing execution marker. Never re-emits the
+	 * Tier-2 signed event and never double-merges.
+	 */
+	recoverPendingDecisions(): Promise<void>;
 	runGraphAsync(graph: UnitGraph, eventBus?: EventBus): Promise<GraphResult>;
 	runStrategy(
 		strategy: StrategyPacket,
@@ -141,6 +182,7 @@ export interface CreateBuildplaneOrchestratorOptions {
 	readonly ledgerActivityPort?: LedgerActivityPort;
 	readonly acceptanceEvidencePort?: BuildplaneAcceptanceEvidencePort;
 	readonly acceptancePort?: BuildplaneAcceptancePort;
+	readonly operatorDecisionPort?: OperatorDecisionPort;
 	/**
 	 * Optional hook invoked after the isolated worktree is created and before
 	 * the workspace row is recorded / admission proceeds. Intended for dependency
@@ -170,6 +212,7 @@ export function createBuildplaneOrchestrator(
 	const acceptanceEvidencePort =
 		options.acceptanceEvidencePort ?? createDefaultAcceptanceEvidencePort();
 	const acceptancePort = options.acceptancePort;
+	const operatorDecisionPort = options.operatorDecisionPort;
 	const provisionDeps = options.provisionDeps;
 	const outcomeRouting = options.outcomeRouting ?? defaultOutcomeRoutingConfig;
 	const strategyWorkflowPromotionRule =
@@ -183,6 +226,205 @@ export function createBuildplaneOrchestrator(
 			kind,
 			message: error instanceof Error ? error.message : String(error),
 		};
+	}
+
+	// M5-S4 D5 — validate BEFORE any emit, so a malformed decision can never be
+	// signed onto the tape. Throws a typed error on the first violation.
+	function validateOperatorDecisionInput(
+		input: RecordOperatorDecisionInput,
+	): void {
+		if (input.decision !== "approved" && input.decision !== "rejected") {
+			throw new OperatorDecisionValidationError(
+				`decision must be 'approved' or 'rejected', got '${input.decision}'.`,
+			);
+		}
+		if (input.subject !== "merge" && input.subject !== "resume") {
+			throw new OperatorDecisionValidationError(
+				`subject must be 'merge' or 'resume', got '${input.subject}'.`,
+			);
+		}
+		if (!UUID_PATTERN.test(input.runId)) {
+			throw new OperatorDecisionValidationError(
+				`runId must be a UUID, got '${input.runId}'.`,
+			);
+		}
+		// F3 — the live write-ahead path must NEVER carry a mergeCommit: at emit
+		// time the merge has not happened (D1), so a present SHA would sign a
+		// false/pre-merge value onto the immutable tape. `mergeCommit` stays on the
+		// input type for a future post-hoc decision API, but this live path rejects it.
+		if (input.mergeCommit !== undefined) {
+			throw new OperatorDecisionValidationError(
+				"mergeCommit must be absent in the live write-ahead path (the merge has not happened at emit time, D1).",
+			);
+		}
+		if (input.decidedBy.trim().length === 0) {
+			throw new OperatorDecisionValidationError("decidedBy must be non-empty.");
+		}
+		// F7 / P1.7 — strict RFC3339: regex SHAPE + parseable instant + a real
+		// calendar round-trip. The shape regex and `Date.parse` both accept
+		// calendar-impossible dates (`2026-02-31` parses and normalizes to Mar 3),
+		// so an invalid date could be signed onto the immutable tape. After the shape
+		// matches, rebuild the captured wall-clock fields through `Date.UTC` and
+		// confirm no field rolled over — month 00/13, day 32, hour 24, minute 60, or
+		// Feb 31 all fail this equality (offset just shifts the instant, never the
+		// captured wall-clock components, so this is offset-independent).
+		const match = RFC3339_PATTERN.exec(input.decidedAt);
+		if (match === null || Number.isNaN(Date.parse(input.decidedAt))) {
+			throw new OperatorDecisionValidationError(
+				`decidedAt must be RFC3339, got '${input.decidedAt}'.`,
+			);
+		}
+		const fields = match.groups as {
+			year: string;
+			month: string;
+			day: string;
+			hour: string;
+			minute: string;
+			second: string;
+		};
+		const year = Number(fields.year);
+		const month = Number(fields.month);
+		const day = Number(fields.day);
+		const hour = Number(fields.hour);
+		const minute = Number(fields.minute);
+		const second = Number(fields.second);
+		const roundTrip = new Date(
+			Date.UTC(year, month - 1, day, hour, minute, second),
+		);
+		if (
+			roundTrip.getUTCFullYear() !== year ||
+			roundTrip.getUTCMonth() !== month - 1 ||
+			roundTrip.getUTCDate() !== day ||
+			roundTrip.getUTCHours() !== hour ||
+			roundTrip.getUTCMinutes() !== minute ||
+			roundTrip.getUTCSeconds() !== second
+		) {
+			throw new OperatorDecisionValidationError(
+				`decidedAt must be a real calendar date, got '${input.decidedAt}'.`,
+			);
+		}
+
+		// Run state must match the subject (D5): resume → suspended.
+		const snapshot = storage.inspectTarget(input.runId);
+		const status = snapshot.run.status;
+		if (input.subject === "resume" && status !== "suspended") {
+			throw new OperatorDecisionValidationError(
+				`resume decision requires a suspended run, got '${status}'.`,
+			);
+		}
+		// F2 — a merge decision is only signable when the run is in the legitimate
+		// merge-eligible state: status `passed` (the only post-state that sets
+		// acceptance_outcome='passed' is commitRunSuccessOutcome, which transitions
+		// running→passed; recordAcceptanceShadow then sets the shadow without
+		// touching status), acceptance PASSED, AND a retained worktree to merge. The
+		// status gate is load-bearing on its own: a degenerate run can carry
+		// acceptance_outcome='passed' + a retained workspace while its status was
+		// later flipped (e.g. `failed` from an infra failure) — without this gate
+		// such a run would sign a merge decision and the merge-reject status gate
+		// would then false-heal it. Any other state (failed/pending/running/
+		// cancelled/suspended, or passed-without-acceptance, or passed-without-
+		// workspace) must throw BEFORE the emit so a state-malformed merge decision
+		// can never reach the immutable tape.
+		if (input.subject === "merge") {
+			if (status !== "passed") {
+				throw new OperatorDecisionValidationError(
+					`merge decision requires a passed run, got '${status}'.`,
+				);
+			}
+			if (storage.getRunAcceptanceOutcome(input.runId) !== "passed") {
+				throw new OperatorDecisionValidationError(
+					"merge decision requires a run whose acceptance passed.",
+				);
+			}
+			if (!snapshot.workspace?.path) {
+				throw new OperatorDecisionValidationError(
+					`merge decision requires a retained worktree for run '${input.runId}'.`,
+				);
+			}
+		}
+	}
+
+	// Shared by recordOperatorDecision and the reconciler. The execution marker is
+	// the exactly-once gate (D2/D4): we record it only after the side effect
+	// succeeds, so a re-drive of an already-merged run is impossible.
+	function applyOperatorDecisionSideEffect(
+		runId: string,
+		subject: OperatorDecisionSubject,
+		decision: OperatorDecisionVerdict,
+	): void {
+		// F1/F5 — marker check-and-claim. If the side effect already completed for
+		// this run (post-marker reconciler re-drive, operator re-decide, or a
+		// duplicate shadow that escaped the DISTINCT feed), no-op. Combined with the
+		// adapter's runId-keyed merge idempotency, this closes the
+		// crash-after-merge-before-marker double-merge window: even if the merge ran
+		// but the marker write was lost, the adapter detects the prior merge and
+		// returns its SHA without creating a second commit.
+		if (storage.isOperatorDecisionExecuted(runId)) {
+			return;
+		}
+
+		// Fix B (D2) — the marker fast-path covers the post-marker re-drive, but a
+		// crash AFTER the side effect ran and BEFORE the marker write leaves the run
+		// in `listDecidedUnexecutedDecisions` with no marker. Re-driving the
+		// transition unguarded would throw (approveRun/rejectSuspendedRun require a
+		// suspended run) or DUPLICATE a terminal event (rejectMergeDecision is
+		// unguarded). So gate each transition on the run not already being in its
+		// post-side-effect state (the crash-surviving signal, analogous to the
+		// merge-approved git-history probe), then ALWAYS heal the marker. A second
+		// pass therefore neither throws nor creates a second state transition.
+		const currentStatus = storage.inspectTarget(runId).run.status;
+
+		if (subject === "resume") {
+			if (decision === "approved") {
+				// Post-state of approveRun is `pending`; only transition if still suspended.
+				if (currentStatus === "suspended") {
+					storage.approveRun(runId);
+				}
+			} else {
+				// Post-state of rejectSuspendedRun is `failed`; only transition if still suspended.
+				if (currentStatus === "suspended") {
+					storage.rejectSuspendedRun(runId);
+				}
+			}
+			storage.markOperatorDecisionExecuted(runId);
+			return;
+		}
+
+		// subject === "merge"
+		if (decision === "rejected") {
+			// Quarantine: no merge, worktree retained, run marked failed. Post-state
+			// is `failed`; only transition if not already failed (rejectMergeDecision
+			// is unguarded in storage, so a re-drive would append a duplicate terminal).
+			if (currentStatus !== "failed") {
+				storage.rejectMergeDecision(runId);
+			}
+			storage.markOperatorDecisionExecuted(runId);
+			return;
+		}
+
+		// merge + approved — merge the retained worktree, then record the marker
+		// carrying the merge HEAD (D4 no-double-merge: the marker's presence keeps
+		// listDecidedUnexecutedDecisions from ever returning this run again).
+		const snapshot = storage.inspectTarget(runId);
+		const workspacePath = snapshot.workspace?.path;
+		if (!workspacePath) {
+			throw new Error(
+				`merge decision for run '${runId}' has no retained worktree to merge.`,
+			);
+		}
+		if (!workspace.commitAndMergeWorkspace) {
+			throw new Error(
+				"merge decision requires a workspace adapter with commitAndMergeWorkspace.",
+			);
+		}
+		const mergeResult = workspace.commitAndMergeWorkspace({
+			path: workspacePath,
+			runId,
+			projectRoot,
+		});
+		storage.markOperatorDecisionExecuted(runId, {
+			mergedHeadSha: mergeResult.mergedHeadSha,
+		});
 	}
 
 	function createDefaultRunAdmissionStore(
@@ -1885,6 +2127,60 @@ export function createBuildplaneOrchestrator(
 
 		rejectSuspendedRun(runId) {
 			return storage.rejectSuspendedRun(runId);
+		},
+
+		async recordOperatorDecision(
+			input: RecordOperatorDecisionInput,
+		): Promise<void> {
+			// F4 — fail-closed: an L0 side effect must never run unsigned. Without a
+			// port there is no way to emit the write-ahead record, so reject BEFORE
+			// validation/shadow/side-effect rather than silently applying it unsigned.
+			if (!operatorDecisionPort) {
+				throw new OperatorDecisionValidationError(
+					"recordOperatorDecision requires an operatorDecisionPort (an L0 side effect must never run unsigned).",
+				);
+			}
+
+			validateOperatorDecisionInput(input);
+
+			// D1 — write-ahead is primary. Emit + flush the signed decision BEFORE
+			// any side effect; the merge has not happened, so `mergeCommit` is
+			// absent in the live path (the merge SHA is captured downstream, never
+			// written back into the immutable signed event).
+			await operatorDecisionPort.recordDecision(input);
+
+			// D2 step 3 — the TS-readable exactly-once anchor. The reconciler cannot
+			// read the Tier-2 events.db, so the Tier-1 mirror is what makes a decided
+			// run detectable (and excludes it from the pending inbox).
+			storage.recordOperatorDecisionShadow({
+				runId: input.runId,
+				decision: input.decision,
+				subject: input.subject,
+				decidedBy: input.decidedBy,
+				decidedAt: input.decidedAt,
+			});
+
+			// D3 — side effect, gated on no prior execution marker (so a crash
+			// between the mirror and the marker, then an operator re-decide, never
+			// double-applies). Then D2 step 5 — mark the decision executed.
+			applyOperatorDecisionSideEffect(
+				input.runId,
+				input.subject,
+				input.decision,
+			);
+		},
+
+		async recoverPendingDecisions(): Promise<void> {
+			// D2 — re-drive every decided-but-unexecuted side effect EXACTLY ONCE.
+			// `listDecidedUnexecutedDecisions` returns only runs with a Tier-1
+			// decision mirror and no execution marker; NEVER re-emit Tier-2.
+			for (const pending of storage.listDecidedUnexecutedDecisions()) {
+				applyOperatorDecisionSideEffect(
+					pending.runId,
+					pending.subject,
+					pending.decision,
+				);
+			}
 		},
 
 		async runGraphAsync(
