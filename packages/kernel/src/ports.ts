@@ -53,6 +53,22 @@ export interface CreateRunOptions {
 	readonly strategyId?: string;
 }
 
+export type AcceptanceShadowOutcome = "passed" | "rejected";
+
+/**
+ * A page of runs. Extends `readonly Run[]` so existing callers keep `.map`,
+ * iteration, and `.length`; `cursor` is the opaque token to fetch the next page.
+ */
+export interface RunPage extends ReadonlyArray<Run> {
+	readonly cursor?: string;
+}
+
+export interface PendingOperatorDecision {
+	readonly runId: string;
+	readonly subject: "resume" | "merge";
+	readonly since: string;
+}
+
 export interface BuildplaneStoragePort {
 	initializeProject(): {
 		created: boolean;
@@ -156,14 +172,28 @@ export interface BuildplaneStoragePort {
 	listInjectedMemories(runId: string): readonly PersistedInjectedMemoryRecord[];
 	/**
 	 * Every run currently in `status`, oldest first. Used by S7 crash recovery to
-	 * find orphaned `running` runs whose process died before a terminal status.
-	 * `options` (limit/cursor) is a forward-compatible pagination surface extended
-	 * by M5-S2; this implementation ignores it and returns all matching runs.
+	 * find orphaned `running` runs whose process died before a terminal status and
+	 * by Mission Control's run lists. The result is an array (iterable, `.map`,
+	 * `.length`) carrying an opaque `cursor` when more rows remain past `limit`;
+	 * pass it back as `options.cursor` to fetch the next page. Without `limit` the
+	 * full set is returned and `cursor` is `undefined`.
 	 */
 	listRunsByStatus(
 		status: RunStatus,
 		options?: { limit?: number; cursor?: string },
-	): readonly Run[];
+	): RunPage;
+	/**
+	 * Write the Tier-1 acceptance shadow for a run — the only read-back source for
+	 * "this run passed acceptance." Set from the M4 acceptance path alongside the
+	 * signed `acceptance_recorded` event; additive and idempotent per run.
+	 */
+	recordAcceptanceShadow(runId: string, outcome: AcceptanceShadowOutcome): void;
+	/**
+	 * The operator inbox feed: every suspended run (subject `resume`) plus every
+	 * run whose acceptance shadow `passed` with no `operator_decision_recorded`
+	 * event yet on the Tier-1 events mirror (subject `merge`). Oldest first.
+	 */
+	listPendingOperatorDecisions(): readonly PendingOperatorDecision[];
 	getStatusSnapshot(): StatusSnapshot;
 	inspectTarget(id: string): InspectSnapshot;
 	listEvents(options: {

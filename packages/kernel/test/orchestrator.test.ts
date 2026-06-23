@@ -132,6 +132,7 @@ function createHarness(options: HarnessOptions = {}) {
 	const runtimeRoots: string[] = [];
 	const acceptanceEvidenceCalls: AcceptanceEvidence[] = [];
 	const acceptanceRecords: AcceptanceRecordInput[] = [];
+	const acceptanceShadowRecords: { runId: string; outcome: string }[] = [];
 	const diffScopeChangedFiles: (readonly string[])[] = [];
 	const failurePayloads: Parameters<
 		BuildplaneStoragePort["commitRunFailureOutcome"]
@@ -193,6 +194,7 @@ function createHarness(options: HarnessOptions = {}) {
 			id: "run-1",
 			unitId: packet.unit.id,
 			status: inspectWorkspace?.status === "deleted" ? "passed" : "failed",
+			parentRunId: "parent-run-1",
 		},
 		workspace: inspectWorkspace,
 		runHistory: [{ id: "run-1", status: "failed" }],
@@ -276,6 +278,13 @@ function createHarness(options: HarnessOptions = {}) {
 		inspectTarget() {
 			runEvents.push("inspect-target");
 			return inspectSnapshot;
+		},
+		recordAcceptanceShadow(runId, outcome) {
+			runEvents.push("record-acceptance-shadow");
+			acceptanceShadowRecords.push({ runId, outcome });
+		},
+		listPendingOperatorDecisions() {
+			return [];
 		},
 		getChildRuns() {
 			return [];
@@ -427,6 +436,7 @@ function createHarness(options: HarnessOptions = {}) {
 		evidencePayloads,
 		acceptanceEvidenceCalls,
 		acceptanceRecords,
+		acceptanceShadowRecords,
 		diffScopeChangedFiles,
 		failurePayloads,
 		cleanupErrors,
@@ -565,6 +575,16 @@ describe("kernel orchestrator", () => {
 		} finally {
 			cleanup();
 			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("surfaces parentRunId on the inspect snapshot run", () => {
+		const { orchestrator, cleanup } = createHarness({});
+		try {
+			const snapshot = orchestrator.inspect("run-1");
+			expect(snapshot.run.parentRunId).toBe("parent-run-1");
+		} finally {
+			cleanup();
 		}
 	});
 
@@ -1164,6 +1184,7 @@ describe("kernel orchestrator", () => {
 				"record-execution-evidence",
 				"collect-acceptance-checks",
 				"evaluate-acceptance-contract",
+				"record-acceptance-shadow",
 				"evaluate-run",
 				"commit-run-success-outcome",
 				"delete-workspace",
@@ -1214,6 +1235,32 @@ describe("kernel orchestrator", () => {
 				}),
 			]);
 			expect(result.run.status).toBe("passed");
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("writes the Tier-1 acceptance shadow when acceptance is recorded", async () => {
+		const acceptanceContract: AcceptanceContractV0 = {
+			contract_version: "v0",
+			diff_scope: { allowed_globs: ["**"] },
+			checks: [{ command: "pnpm lint" }],
+		};
+		const { orchestrator, acceptanceShadowRecords, cleanup } = createHarness({
+			trustedAcceptanceCheckResults: [{ command: "pnpm lint", exitCode: 0 }],
+			policyOutcome: "approved",
+			withAcceptancePort: true,
+			policyProfile: {
+				name: "default",
+				trustGates: { acceptanceContract },
+			},
+		});
+
+		try {
+			await orchestrator.runPacketAsync(packet);
+			expect(acceptanceShadowRecords).toEqual([
+				{ runId: "run-1", outcome: "passed" },
+			]);
 		} finally {
 			cleanup();
 		}

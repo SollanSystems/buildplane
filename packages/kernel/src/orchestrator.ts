@@ -557,6 +557,11 @@ export function createBuildplaneOrchestrator(
 			await acceptancePort.recordAcceptance(record);
 		}
 
+		storage.recordAcceptanceShadow(
+			input.runId,
+			decision ? "rejected" : "passed",
+		);
+
 		return decision;
 	}
 
