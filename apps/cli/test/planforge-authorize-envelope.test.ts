@@ -54,6 +54,34 @@ describe("planforge authorize-envelope", () => {
 		expect(() => parseEnvelopeArgs(bad)).toThrow(/max-iterations/);
 	});
 
+	it("rejects --max-iterations with trailing garbage (8xyz)", () => {
+		const bad = baseArgs.map((a) => (a === "8" ? "8xyz" : a));
+		expect(() => parseEnvelopeArgs(bad)).toThrow(/max-iterations/);
+	});
+
+	it("rejects --token-budget with trailing garbage (4000000xyz)", () => {
+		const bad = baseArgs.map((a) => (a === "4000000" ? "4000000xyz" : a));
+		expect(() => parseEnvelopeArgs(bad)).toThrow(/token-budget/);
+	});
+
+	it("rejects --max-iterations above Number.MAX_SAFE_INTEGER", () => {
+		const huge = "9007199254740993"; // MAX_SAFE_INTEGER + 2
+		const bad = baseArgs.map((a) => (a === "8" ? huge : a));
+		expect(() => parseEnvelopeArgs(bad)).toThrow(/max-iterations/);
+	});
+
+	it("rejects --token-budget above Number.MAX_SAFE_INTEGER", () => {
+		const huge = "99999999999999999999"; // far beyond MAX_SAFE_INTEGER
+		const bad = baseArgs.map((a) => (a === "4000000" ? huge : a));
+		expect(() => parseEnvelopeArgs(bad)).toThrow(/token-budget/);
+	});
+
+	it("accepts a clean integer --max-iterations 8", () => {
+		const parsed = parseEnvelopeArgs(baseArgs);
+		expect(parsed.envelope.max_iterations).toBe(8);
+		expect(parsed.envelope.token_budget).toBe(4000000);
+	});
+
 	it("rejects a non-RFC3339 --expires-at", () => {
 		const bad = baseArgs.map((a) =>
 			a === "2026-07-01T00:00:00Z" ? "not-a-date" : a,

@@ -49,6 +49,27 @@ function splitCsv(v: string): string[] {
 		.filter((s) => s.length > 0);
 }
 
+/**
+ * Strict non-negative decimal integer parse for signed-envelope budget bounds.
+ * `Number.parseInt` accepts trailing garbage (`8xyz` -> 8) and silently rounds
+ * values above `Number.MAX_SAFE_INTEGER` before canonical-JSON signing, so the
+ * signed wire shape would diverge from the operator's stated bound. Reject
+ * anything that is not a plain run of decimal digits, or that exceeds the
+ * safe-integer range, BEFORE the envelope is built or signed.
+ */
+function parseStrictBudget(raw: string, flag: string): number {
+	if (!/^\d+$/.test(raw)) {
+		throw new Error(`${flag} must be a non-negative decimal integer.`);
+	}
+	const value = Number(raw);
+	if (!Number.isSafeInteger(value)) {
+		throw new Error(
+			`${flag} must be at most ${Number.MAX_SAFE_INTEGER} (a safe integer).`,
+		);
+	}
+	return value;
+}
+
 export function parseEnvelopeArgs(args: readonly string[]): ParsedEnvelopeArgs {
 	if (!args.includes("--approve")) {
 		throw new Error(
@@ -61,8 +82,14 @@ export function parseEnvelopeArgs(args: readonly string[]): ParsedEnvelopeArgs {
 		milestone: requireFlag(args, "--milestone"),
 		allowed_side_effects: splitCsv(requireFlag(args, "--side-effects")),
 		path_globs: splitCsv(requireFlag(args, "--path-globs")),
-		max_iterations: Number.parseInt(requireFlag(args, "--max-iterations"), 10),
-		token_budget: Number.parseInt(requireFlag(args, "--token-budget"), 10),
+		max_iterations: parseStrictBudget(
+			requireFlag(args, "--max-iterations"),
+			"--max-iterations",
+		),
+		token_budget: parseStrictBudget(
+			requireFlag(args, "--token-budget"),
+			"--token-budget",
+		),
 		allowed_verification_cmds: splitCsv(
 			requireFlag(args, "--verification-cmds"),
 		).map((c) => c.split(/\s+/)[0] ?? c),
