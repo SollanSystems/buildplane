@@ -29,7 +29,11 @@ import {
 	resolveProjectLayout,
 } from "@buildplane/storage";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { type RunCliDependencies, runCli } from "../src/run-cli";
+import {
+	buildRuntimeRouter,
+	type RunCliDependencies,
+	runCli,
+} from "../src/run-cli";
 
 async function runCliCapture(
 	cwd: string,
@@ -5448,5 +5452,70 @@ describe("planforge dry-run", () => {
 		expect([...missingOut.stdout, ...missingOut.stderr].join("\n")).toContain(
 			"Missing required --out",
 		);
+	});
+});
+
+describe("runtime router signal forwarding", () => {
+	function fakeExecutor(seen: { hasSignal: boolean }[]) {
+		return {
+			executePacketAsync: (
+				_p: unknown,
+				_r: string,
+				_bus: unknown,
+				signal?: AbortSignal,
+			) => {
+				seen.push({ hasSignal: signal instanceof AbortSignal });
+				return Promise.resolve({
+					command: "claude",
+					args: [],
+					cwd: "",
+					startedAt: "",
+					completedAt: "",
+					exitCode: 0,
+					stdout: "",
+					stderr: "",
+					outputChecks: [],
+				});
+			},
+		};
+	}
+
+	it("forwards AbortSignal to the claude executor", async () => {
+		const seen: { hasSignal: boolean }[] = [];
+		const router = buildRuntimeRouter({
+			commandExecutor: { executePacket: () => ({}) },
+			getClaudeExecutor: async () => fakeExecutor(seen),
+			getCodexExecutor: async () => fakeExecutor([]),
+			getSdkExecutor: async () => fakeExecutor([]),
+		});
+		const controller = new AbortController();
+		await router.executePacketAsync(
+			{
+				routingHints: { preferredWorker: "claude-code" },
+				model: { model: "m" },
+			},
+			"/tmp",
+			{ emit() {}, subscribe: () => () => {} },
+			controller.signal,
+		);
+		expect(seen[0]?.hasSignal).toBe(true);
+	});
+
+	it("forwards AbortSignal to the codex executor", async () => {
+		const seen: { hasSignal: boolean }[] = [];
+		const router = buildRuntimeRouter({
+			commandExecutor: { executePacket: () => ({}) },
+			getClaudeExecutor: async () => fakeExecutor([]),
+			getCodexExecutor: async () => fakeExecutor(seen),
+			getSdkExecutor: async () => fakeExecutor([]),
+		});
+		const controller = new AbortController();
+		await router.executePacketAsync(
+			{ routingHints: { preferredWorker: "codex" }, model: { model: "m" } },
+			"/tmp",
+			{ emit() {}, subscribe: () => () => {} },
+			controller.signal,
+		);
+		expect(seen[0]?.hasSignal).toBe(true);
 	});
 });

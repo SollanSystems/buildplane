@@ -1176,6 +1176,116 @@ function toolRegistryOptionsForPacket(
 	};
 }
 
+/** Minimal async executor shape the runtime router dispatches to. */
+interface RouterAsyncExecutor {
+	executePacketAsync: (
+		packet: unknown,
+		root: string,
+		eventBus: unknown,
+		signal?: AbortSignal,
+	) => Promise<unknown>;
+}
+
+/** Command (sync) executor the router uses for `execution` packets. */
+interface RouterCommandExecutor {
+	executePacket: (packet: unknown, root: string) => unknown;
+}
+
+export interface RuntimeRouterPorts {
+	readonly commandExecutor: RouterCommandExecutor;
+	readonly getClaudeExecutor: () => Promise<RouterAsyncExecutor>;
+	readonly getCodexExecutor: () => Promise<RouterAsyncExecutor>;
+	readonly getSdkExecutor: () => Promise<RouterAsyncExecutor>;
+}
+
+/**
+ * Pure runtime router: routes a packet to the command executor (`execution`),
+ * the claude-code worker, the codex worker, or the sdk executor by
+ * `routingHints.preferredWorker`. The 4th `signal` arg threads the
+ * orchestrator's budget AbortController through to the worker so the runaway
+ * guard can abort a streaming model worker (GAP-7). Extracted so the routing +
+ * signal-forwarding contract is unit-testable without a full orchestrator.
+ */
+export function buildRuntimeRouter(ports: RuntimeRouterPorts) {
+	const {
+		commandExecutor,
+		getClaudeExecutor,
+		getCodexExecutor,
+		getSdkExecutor,
+	} = ports;
+	return {
+		executePacket(packet: unknown, root: string) {
+			const p = packet as { execution?: unknown };
+			if (p.execution) return commandExecutor.executePacket(packet, root);
+			throw new Error("Model packets require async execution path");
+		},
+		async executePacketAsync(
+			packet: unknown,
+			root: string,
+			bus: unknown,
+			signal?: AbortSignal,
+		) {
+			const p = packet as {
+				execution?: unknown;
+				routingHints?: { preferredWorker?: string };
+			};
+			if (p.execution) {
+				const receipt = commandExecutor.executePacket(packet, root) as {
+					exitCode: number;
+					outputChecks: Array<{ path: string; exists: boolean }>;
+				};
+				if (
+					typeof bus === "object" &&
+					bus !== null &&
+					typeof (bus as { emit?: unknown }).emit === "function"
+				) {
+					(
+						bus as {
+							emit: (event: {
+								kind: "command-execution-complete";
+								timestamp: string;
+								exitCode: number;
+								outputChecks: Array<{ path: string; exists: boolean }>;
+							}) => void;
+						}
+					).emit({
+						kind: "command-execution-complete",
+						timestamp: new Date().toISOString(),
+						exitCode: receipt.exitCode,
+						outputChecks: receipt.outputChecks.map((check) => ({
+							path: check.path,
+							exists: check.exists,
+						})),
+					});
+				}
+				return receipt;
+			}
+			if (p.routingHints?.preferredWorker === "claude-code") {
+				return (await getClaudeExecutor()).executePacketAsync(
+					packet,
+					root,
+					bus,
+					signal,
+				);
+			}
+			if (p.routingHints?.preferredWorker === "codex") {
+				return (await getCodexExecutor()).executePacketAsync(
+					packet,
+					root,
+					bus,
+					signal,
+				);
+			}
+			return (await getSdkExecutor()).executePacketAsync(
+				packet,
+				root,
+				bus,
+				signal,
+			);
+		},
+	};
+}
+
 async function loadCliOrchestrator(
 	projectRoot: string,
 	opts?: {
@@ -1183,6 +1293,8 @@ async function loadCliOrchestrator(
 		readonly profileRegistry?: BuildplaneProfileRegistryPort;
 		readonly acceptancePort?: BuildplaneAcceptancePort;
 		readonly provisionDeps?: (workspacePath: string) => void;
+		/** Lowered worker turn cap for the supervisor loop's runaway guard. */
+		readonly claudeMaxTurns?: number;
 	},
 ): Promise<CliOrchestratorBundle> {
 	const kernel = (await cliImport("@buildplane/kernel")) as unknown as {
@@ -1359,14 +1471,16 @@ async function loadCliOrchestrator(
 						packet: unknown,
 						root: string,
 						eventBus: unknown,
+						signal?: AbortSignal,
 					) => Promise<unknown>;
 				};
-				createClaudeCodeExecutor: () => {
+				createClaudeCodeExecutor: (options?: { maxTurns?: number }) => {
 					executePacket: (packet: unknown, root: string) => unknown;
 					executePacketAsync: (
 						packet: unknown,
 						root: string,
 						eventBus: unknown,
+						signal?: AbortSignal,
 					) => Promise<unknown>;
 				};
 		  }>
@@ -1390,6 +1504,7 @@ async function loadCliOrchestrator(
 					packet: unknown,
 					root: string,
 					eventBus: unknown,
+					signal?: AbortSignal,
 				) => Promise<unknown>;
 		  }>
 		| undefined;
@@ -1400,6 +1515,7 @@ async function loadCliOrchestrator(
 					packet: unknown,
 					root: string,
 					eventBus: unknown,
+					signal?: AbortSignal,
 				) => Promise<unknown>;
 		  }>
 		| undefined;
@@ -1410,6 +1526,7 @@ async function loadCliOrchestrator(
 					packet: unknown,
 					root: string,
 					eventBus: unknown,
+					signal?: AbortSignal,
 				) => Promise<unknown>;
 		  }>
 		| undefined;
@@ -1425,14 +1542,16 @@ async function loadCliOrchestrator(
 						packet: unknown,
 						root: string,
 						eventBus: unknown,
+						signal?: AbortSignal,
 					) => Promise<unknown>;
 				};
-				createClaudeCodeExecutor: () => {
+				createClaudeCodeExecutor: (options?: { maxTurns?: number }) => {
 					executePacket: (packet: unknown, root: string) => unknown;
 					executePacketAsync: (
 						packet: unknown,
 						root: string,
 						eventBus: unknown,
+						signal?: AbortSignal,
 					) => Promise<unknown>;
 				};
 			}>;
@@ -1469,8 +1588,13 @@ async function loadCliOrchestrator(
 
 	const getClaudeExecutor = async () => {
 		if (!claudeExecutorPromise) {
+			const claudeMaxTurns = opts?.claudeMaxTurns;
 			claudeExecutorPromise = loadAdaptersModels().then((mod) =>
-				mod.createClaudeCodeExecutor(),
+				mod.createClaudeCodeExecutor(
+					claudeMaxTurns !== undefined
+						? { maxTurns: claudeMaxTurns }
+						: undefined,
+				),
 			);
 		}
 		return claudeExecutorPromise;
@@ -1485,61 +1609,12 @@ async function loadCliOrchestrator(
 		return codexExecutorPromise;
 	};
 
-	const runtimeRouter = {
-		executePacket(packet: unknown, root: string) {
-			const p = packet as { execution?: unknown };
-			if (p.execution) return commandExecutor.executePacket(packet, root);
-			throw new Error("Model packets require async execution path");
-		},
-		async executePacketAsync(packet: unknown, root: string, bus: unknown) {
-			const p = packet as {
-				execution?: unknown;
-				routingHints?: { preferredWorker?: string };
-			};
-			if (p.execution) {
-				const receipt = commandExecutor.executePacket(packet, root) as {
-					exitCode: number;
-					outputChecks: Array<{ path: string; exists: boolean }>;
-				};
-				if (
-					typeof bus === "object" &&
-					bus !== null &&
-					typeof (bus as { emit?: unknown }).emit === "function"
-				) {
-					(
-						bus as {
-							emit: (event: {
-								kind: "command-execution-complete";
-								timestamp: string;
-								exitCode: number;
-								outputChecks: Array<{ path: string; exists: boolean }>;
-							}) => void;
-						}
-					).emit({
-						kind: "command-execution-complete",
-						timestamp: new Date().toISOString(),
-						exitCode: receipt.exitCode,
-						outputChecks: receipt.outputChecks.map((check) => ({
-							path: check.path,
-							exists: check.exists,
-						})),
-					});
-				}
-				return receipt;
-			}
-			if (p.routingHints?.preferredWorker === "claude-code") {
-				return (await getClaudeExecutor()).executePacketAsync(
-					packet,
-					root,
-					bus,
-				);
-			}
-			if (p.routingHints?.preferredWorker === "codex") {
-				return (await getCodexExecutor()).executePacketAsync(packet, root, bus);
-			}
-			return (await getSdkExecutor()).executePacketAsync(packet, root, bus);
-		},
-	};
+	const runtimeRouter = buildRuntimeRouter({
+		commandExecutor,
+		getClaudeExecutor,
+		getCodexExecutor,
+		getSdkExecutor,
+	});
 
 	const orchestrator = kernel.createBuildplaneOrchestrator({
 		projectRoot,
