@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type { InspectSnapshot } from "@buildplane/kernel";
 import { createInspectorProjection } from "./formatters.js";
 
 type AttributeValue =
@@ -233,7 +234,9 @@ export function createOtelTraceExport(
 		decisions: snapshot.decisions,
 		artifacts: snapshot.artifacts,
 	};
-	const inspector = createInspectorProjection(inspectorSnapshot);
+	const inspector = createInspectorProjection(
+		inspectorSnapshot as unknown as InspectSnapshot,
+	);
 	const id = traceId(snapshot.run.id);
 	const rootSpanId = spanId(`${snapshot.run.id}:root`);
 	const startMillis = timeUnixMillis(snapshot.eventTape?.firstOccurredAt);

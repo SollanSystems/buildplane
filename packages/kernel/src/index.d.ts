@@ -64,6 +64,8 @@ export type {
 	UnitGraphNode,
 } from "./graph.ts";
 export { createGraphScheduler } from "./graph.ts";
+export type { InspectorProjection } from "./inspector-projection.ts";
+export { createInspectorProjection } from "./inspector-projection.ts";
 export type {
 	ProcedureRetrievalQuery,
 	RankedMemoryResult,

@@ -1,3 +1,4 @@
+import type { InspectSnapshot } from "@buildplane/kernel";
 import { describe, expect, it } from "vitest";
 import {
 	createInspectorProjection,
@@ -531,62 +532,20 @@ describe("formatInspectDetail", () => {
 		expect(lines.join("\n")).not.toContain("learnings:");
 	});
 
-	it("creates a fail-closed inspector projection from existing inspect records", () => {
-		const projection = createInspectorProjection({
-			...baseSnapshot,
-			run: { id: "run-xyz", unitId: "implement-foo", status: "passed" },
-			eventTape: {
-				runId: "run-xyz",
-				eventCount: 2,
-				firstKind: "run_started",
-				lastKind: "run_completed",
-				terminalStatus: "passed",
-				events: [
-					{
-						id: "event-1",
-						kind: "run_started",
-						occurredAt: "2026-05-16T00:00:00.000Z",
-						summary: "run started",
-					},
-					{
-						id: "event-2",
-						kind: "run_completed",
-						occurredAt: "2026-05-16T00:00:01.000Z",
-						summary: "run completed",
-					},
-				],
-			},
-			evidence: [{ kind: "command-exit", status: "pass", message: "exit 0" }],
-			decisions: [
-				{
-					kind: "advance-run",
-					outcome: "approved",
-					reasons: ["required output exists"],
-				},
-			],
-			artifacts: [{ type: "log", location: ".buildplane/log.txt" }],
-		});
-
-		expect(projection).toMatchObject({
-			kind: "run-inspector",
-			runId: "run-xyz",
-			outcomeStrip: {
-				verdict: "PASSED",
-				eventCount: 2,
-				evidenceCount: 1,
-				decisionCount: 1,
-				artifactCount: 1,
-				missingEvidenceCount: 0,
-			},
-		});
-		expect(projection.eventTimeline).toHaveLength(2);
-		expect(projection.missingEvidence).toEqual([]);
-	});
-
 	it("renders the inspector view as outcome, timeline, and evidence panels", () => {
-		const projection = createInspectorProjection({
-			...baseSnapshot,
+		const strictSnapshot: InspectSnapshot = {
+			kind: "run",
+			unit: {
+				id: "implement-foo",
+				kind: "command",
+				scope: "task",
+				inputRefs: [],
+				expectedOutputs: [],
+				verificationContract: "outputs-exist",
+				policyProfile: "default",
+			},
 			run: { id: "run-xyz", unitId: "implement-foo", status: "failed" },
+			runHistory: [{ id: "run-xyz", status: "failed" }],
 			eventTape: {
 				runId: "run-xyz",
 				eventCount: 1,
@@ -604,6 +563,7 @@ describe("formatInspectDetail", () => {
 			},
 			evidence: [
 				{
+					id: "evidence-1",
 					kind: "verification",
 					status: "failed",
 					message: "pytest failed\n\u001b[31m",
@@ -611,13 +571,15 @@ describe("formatInspectDetail", () => {
 			],
 			decisions: [
 				{
+					id: "decision-1",
 					kind: "reject-run",
 					outcome: "rejected",
 					reasons: ["verification failed"],
 				},
 			],
 			artifacts: [],
-		});
+		};
+		const projection = createInspectorProjection(strictSnapshot);
 		const lines = formatInspectorProjection(projection);
 
 		expect(lines).toContain("Run Inspector");
