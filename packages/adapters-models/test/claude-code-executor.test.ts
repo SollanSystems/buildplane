@@ -367,4 +367,93 @@ describe("ClaudeCodeExecutor", () => {
 			/async/i,
 		);
 	});
+
+	it("stream-json output → one model-token-delta per assistant stream line + terminal complete", async () => {
+		const lines = `${[
+			JSON.stringify({ type: "system", subtype: "init" }),
+			JSON.stringify({
+				type: "assistant",
+				message: { content: [{ type: "text", text: "hello " }] },
+			}),
+			JSON.stringify({
+				type: "assistant",
+				message: { content: [{ type: "text", text: "world" }] },
+			}),
+			JSON.stringify({
+				type: "result",
+				subtype: "success",
+				result: "hello world",
+			}),
+		].join("\n")}\n`;
+		const mockSpawn = createMockSpawn({ stdout: lines, exitCode: 0 });
+		const executor = createClaudeCodeExecutor({ spawnFn: mockSpawn as never });
+		const eventBus = createEventBus();
+		const kinds: string[] = [];
+		eventBus.subscribe((ev) => kinds.push(ev.kind));
+
+		await executor.executePacketAsync(makePacket(), PROJECT_ROOT, eventBus);
+
+		expect(kinds.filter((k) => k === "model-token-delta")).toHaveLength(2);
+		expect(kinds.filter((k) => k === "model-response-complete")).toHaveLength(
+			1,
+		);
+	});
+
+	it("stream-json args contain --output-format stream-json --verbose", async () => {
+		const lines = `${JSON.stringify({ type: "result", subtype: "success", result: "ok" })}\n`;
+		const mockSpawn = createMockSpawn({ stdout: lines, exitCode: 0 });
+		const executor = createClaudeCodeExecutor({ spawnFn: mockSpawn as never });
+		const eventBus = createEventBus();
+
+		await executor.executePacketAsync(makePacket(), PROJECT_ROOT, eventBus);
+
+		const spawnArgs: string[] = mockSpawn.mock.calls[0][1] as string[];
+		const fmtIndex = spawnArgs.indexOf("--output-format");
+		expect(fmtIndex).toBeGreaterThanOrEqual(0);
+		expect(spawnArgs[fmtIndex + 1]).toBe("stream-json");
+		expect(spawnArgs).toContain("--verbose");
+	});
+
+	it("pre-aborted signal → child killed, non-zero receipt, no token deltas", async () => {
+		const mockSpawn = createMockSpawn({ stdout: "", exitCode: 0, delay: 50 });
+		const executor = createClaudeCodeExecutor({ spawnFn: mockSpawn as never });
+		const eventBus = createEventBus();
+		const kinds: string[] = [];
+		eventBus.subscribe((ev) => kinds.push(ev.kind));
+		const controller = new AbortController();
+		controller.abort();
+
+		const receipt = await executor.executePacketAsync(
+			makePacket(),
+			PROJECT_ROOT,
+			eventBus,
+			controller.signal,
+		);
+
+		expect(receipt.exitCode).not.toBe(0);
+		expect(kinds.filter((k) => k === "model-token-delta")).toHaveLength(0);
+	});
+
+	it("mid-flight abort → child killed, non-zero receipt", async () => {
+		const lines = `${JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "partial" }] } })}\n`;
+		const mockSpawn = createMockSpawn({
+			stdout: lines,
+			exitCode: 0,
+			delay: 50,
+		});
+		const executor = createClaudeCodeExecutor({ spawnFn: mockSpawn as never });
+		const eventBus = createEventBus();
+		const controller = new AbortController();
+
+		const promise = executor.executePacketAsync(
+			makePacket(),
+			PROJECT_ROOT,
+			eventBus,
+			controller.signal,
+		);
+		controller.abort();
+		const receipt = await promise;
+
+		expect(receipt.exitCode).not.toBe(0);
+	});
 });
