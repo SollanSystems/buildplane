@@ -222,3 +222,139 @@ describe("evaluateToolInvocation worker binary argv constraint (GAP-4 carry-forw
 		expect(result).toEqual({ decision: "allow" });
 	});
 });
+
+describe("evaluateToolInvocation wrapped permission-escape bypass (GAP-10 P1)", () => {
+	const worktreeRoot = "/tmp/worktree";
+
+	function wrapperBundle(): CapabilityBundleV0 {
+		return {
+			schemaVersion: CAPABILITY_BUNDLE_SCHEMA_VERSION,
+			bundleId: "self-build-loop",
+			tools: {
+				run_command: {
+					allowlist: ["claude", "pnpm", "npx", "env", "cargo", "git"],
+				},
+			},
+		};
+	}
+
+	it("denies pnpm exec claude --dangerously-skip-permissions (wrapped, packed)", () => {
+		const result = evaluateToolInvocation(
+			wrapperBundle(),
+			{
+				tool: "run_command",
+				command: "pnpm exec claude --dangerously-skip-permissions -p go",
+			},
+			{ worktreeRoot },
+		);
+		expect(result).toMatchObject({
+			decision: "deny",
+			quarantine: true,
+			reason: expect.stringContaining("dangerously-skip-permissions"),
+		});
+	});
+
+	it("denies npx claude --dangerously-skip-permissions (wrapped via args)", () => {
+		const result = evaluateToolInvocation(
+			wrapperBundle(),
+			{
+				tool: "run_command",
+				command: "npx",
+				args: ["claude", "--dangerously-skip-permissions", "-p", "go"],
+			},
+			{ worktreeRoot },
+		);
+		expect(result).toMatchObject({
+			decision: "deny",
+			quarantine: true,
+			reason: expect.stringContaining("dangerously-skip-permissions"),
+		});
+	});
+
+	it("denies env FOO=1 claude --dangerously-skip-permissions (env prefix)", () => {
+		const result = evaluateToolInvocation(
+			wrapperBundle(),
+			{
+				tool: "run_command",
+				command: "env FOO=1 claude --dangerously-skip-permissions -p go",
+			},
+			{ worktreeRoot },
+		);
+		expect(result).toMatchObject({
+			decision: "deny",
+			quarantine: true,
+			reason: expect.stringContaining("dangerously-skip-permissions"),
+		});
+	});
+
+	it("denies pnpm exec claude --permission-mode bypassPermissions (wrapped, two-token)", () => {
+		const result = evaluateToolInvocation(
+			wrapperBundle(),
+			{
+				tool: "run_command",
+				command: "pnpm",
+				args: ["exec", "claude", "--permission-mode", "bypassPermissions"],
+			},
+			{ worktreeRoot },
+		);
+		expect(result).toMatchObject({
+			decision: "deny",
+			quarantine: true,
+		});
+	});
+
+	it("denies the wrapped =/mixed-case --permission-mode=bypassPermissions", () => {
+		const result = evaluateToolInvocation(
+			wrapperBundle(),
+			{
+				tool: "run_command",
+				command: "pnpm exec claude --permission-mode=BYPASSpermissions -p go",
+			},
+			{ worktreeRoot },
+		);
+		expect(result.decision).toBe("deny");
+	});
+
+	it("allows pnpm vitest (no escape flag)", () => {
+		const result = evaluateToolInvocation(
+			wrapperBundle(),
+			{ tool: "run_command", command: "pnpm", args: ["vitest"] },
+			{ worktreeRoot },
+		);
+		expect(result).toEqual({ decision: "allow" });
+	});
+
+	it("allows cargo test (no escape flag)", () => {
+		const result = evaluateToolInvocation(
+			wrapperBundle(),
+			{ tool: "run_command", command: "cargo", args: ["test"] },
+			{ worktreeRoot },
+		);
+		expect(result).toEqual({ decision: "allow" });
+	});
+
+	it("allows pnpm exec claude -p --model sonnet (wrapped, no escape flag)", () => {
+		const result = evaluateToolInvocation(
+			wrapperBundle(),
+			{
+				tool: "run_command",
+				command: "pnpm exec claude -p --model sonnet",
+			},
+			{ worktreeRoot },
+		);
+		expect(result).toEqual({ decision: "allow" });
+	});
+
+	it("allows direct claude -p --model sonnet (no escape flag)", () => {
+		const result = evaluateToolInvocation(
+			wrapperBundle(),
+			{
+				tool: "run_command",
+				command: "claude",
+				args: ["-p", "--model", "sonnet"],
+			},
+			{ worktreeRoot },
+		);
+		expect(result).toEqual({ decision: "allow" });
+	});
+});

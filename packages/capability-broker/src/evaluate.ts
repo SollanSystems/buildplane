@@ -46,15 +46,19 @@ function pathMatchesFsWriteGlobs(
 }
 
 /**
- * The loop worker binary (`claude`) is allowlisted so a dispatched worker can
- * recursively invoke it through `run_command`. But `claude` accepts flags that
- * disable its OWN nested tool-permission prompts — an unattended worker that
- * could pass them would escape every downstream sandbox boundary. These flag
- * tokens are rejected for the worker binary regardless of allowlisting; the
- * check is case/`=`-insensitive over the full token set (GAP-4 carry-forward).
+ * Permission-escape flags that disable a nested worker's OWN tool-permission
+ * prompts. The loop worker binary (`claude`) is allowlisted so a dispatched
+ * worker can recursively invoke it through `run_command`, but these flags would
+ * let an unattended worker escape every downstream sandbox boundary. They have
+ * NO legitimate use in any loop command, so they are denied UNCONDITIONALLY —
+ * wrapper- and position-agnostic — not only when `claude` is argv0. A wrapped
+ * invocation (`pnpm exec claude …`, `npx claude …`, `env X=1 claude …`) routes
+ * through an allowlisted verification runner, so a worker-binary-only check let
+ * the escape flag through (GAP-10 P1). The scan is case/`=`-insensitive over the
+ * full token set: the packed `command` split on whitespace AND every `args[]`
+ * entry (GAP-4 carry-forward, generalized).
  */
-const WORKER_BINARY = "claude" as const;
-const WORKER_FORBIDDEN_ARGV_TOKENS = [
+const FORBIDDEN_ESCAPE_TOKENS = [
 	"--dangerously-skip-permissions",
 	"--dangerouslyskippermissions",
 	"--permission-mode=bypasspermissions",
@@ -84,26 +88,26 @@ function commandMatchesAllowlist(
 }
 
 /**
- * Is this run_command invocation the worker binary attempting to disable its
- * own nested permission prompts? `commandMatchesAllowlist` matches argv0/prefix
- * and ignores args, so without this guard a `claude --dangerously-skip-permissions`
- * invocation would be permitted purely because `claude` is allowlisted.
+ * Does this run_command invocation carry a permission-escape flag anywhere?
+ * `commandMatchesAllowlist` matches argv0/prefix and ignores args, and `pnpm` /
+ * `npx` / `env` are allowlisted runners, so a wrapped `pnpm exec claude
+ * --dangerously-skip-permissions` would otherwise be permitted. The scan is
+ * wrapper- and position-agnostic: it fires on ANY token — across the packed
+ * `command` string split on whitespace AND the `args[]` array — regardless of
+ * argv0 (GAP-10 P1). The `bypasspermissions` value token is denied standalone so
+ * the two-token `--permission-mode bypassPermissions` form is also caught.
  */
-function forbiddenWorkerArgvToken(
+function forbiddenEscapeToken(
 	command: string,
 	args: readonly string[] | undefined,
 ): string | undefined {
-	const tokens = command.trim().split(/\s+/);
-	if (tokens[0] !== WORKER_BINARY) {
-		return undefined;
-	}
-	const candidate = [...tokens.slice(1), ...(args ?? [])];
+	const candidate = [...command.trim().split(/\s+/), ...(args ?? [])];
 	for (const token of candidate) {
 		const normalized = token.trim().toLowerCase();
 		if (normalized.length === 0) {
 			continue;
 		}
-		for (const forbidden of WORKER_FORBIDDEN_ARGV_TOKENS) {
+		for (const forbidden of FORBIDDEN_ESCAPE_TOKENS) {
 			if (normalized === forbidden || normalized.startsWith(`${forbidden}=`)) {
 				return token.trim();
 			}
@@ -147,14 +151,15 @@ export function evaluateToolInvocation(
 	if (allowlist.length === 0) {
 		return deny("no run_command allowlist in capability bundle");
 	}
-	const forbiddenToken = forbiddenWorkerArgvToken(
+	const forbiddenToken = forbiddenEscapeToken(
 		invocation.command,
 		invocation.args,
 	);
 	if (forbiddenToken !== undefined) {
 		return deny(
-			`worker binary "${WORKER_BINARY}" may not pass permission-escape flag "${forbiddenToken}" ` +
-				"(e.g. --dangerously-skip-permissions); it would bypass nested tool-permission prompts",
+			`run_command may not pass permission-escape flag "${forbiddenToken}" ` +
+				"(e.g. --dangerously-skip-permissions); it would bypass nested tool-permission prompts " +
+				"regardless of wrapper (pnpm/npx/env) or argv position",
 		);
 	}
 	if (
