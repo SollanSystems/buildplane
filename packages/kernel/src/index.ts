@@ -66,6 +66,8 @@ export type {
 	UnitGraphNode,
 } from "./graph.js";
 export { createGraphScheduler } from "./graph.js";
+export type { InspectorProjection } from "./inspector-projection.js";
+export { createInspectorProjection } from "./inspector-projection.js";
 export type {
 	ProcedureRetrievalQuery,
 	RankedMemoryResult,
