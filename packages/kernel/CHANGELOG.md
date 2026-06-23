@@ -1,5 +1,11 @@
 # @buildplane/kernel
 
+## 0.6.0
+
+### Minor Changes
+
+- 676ecda: Add createInspectorProjection / InspectorProjection to @buildplane/kernel (extracted from apps/cli, retyped against the strict InspectSnapshot).
+
 ## 0.5.0
 
 ### Minor Changes

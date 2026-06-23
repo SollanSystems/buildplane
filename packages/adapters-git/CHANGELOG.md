@@ -1,5 +1,12 @@
 # @buildplane/adapters-git
 
+## 0.3.1
+
+### Patch Changes
+
+- Updated dependencies [676ecda]
+  - @buildplane/kernel@0.6.0
+
 ## 0.3.0
 
 ### Minor Changes

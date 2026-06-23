@@ -1,5 +1,12 @@
 # @buildplane/adapters-honcho
 
+## 0.1.7
+
+### Patch Changes
+
+- Updated dependencies [676ecda]
+  - @buildplane/kernel@0.6.0
+
 ## 0.1.6
 
 ### Patch Changes
