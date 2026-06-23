@@ -49,6 +49,7 @@ function kindName(p: Payload): string {
 		case "TapeCheckpointV1":
 		case "CapabilityDeniedV1":
 		case "AcceptanceRecordedV1":
+		case "OperatorDecisionRecordedV1":
 			return k;
 		default: {
 			const _exhaustive: never = k as never;
@@ -60,7 +61,7 @@ function kindName(p: Payload): string {
 describe("payload drift alarm", () => {
 	it("every fixture parses as a known variant", () => {
 		const fixtures = loadFixtures();
-		expect(fixtures.length).toBe(22);
+		expect(fixtures.length).toBe(23);
 		const names: string[] = [];
 		for (const fx of fixtures) {
 			const name = kindName(fx as Payload);
@@ -78,6 +79,10 @@ describe("payload drift alarm", () => {
 		expect(EventKind.ActivityCompleted).toBe("activity_completed");
 		expect(EventKind.CapabilityDenied).toBe("capability_denied");
 		expect(EventKind.AcceptanceRecorded).toBe("acceptance_recorded");
+		expect(names).toContain("OperatorDecisionRecordedV1");
+		expect(EventKind.OperatorDecisionRecorded).toBe(
+			"operator_decision_recorded",
+		);
 	});
 
 	it("run admission fixture matches the generated wire contract", () => {

@@ -43,6 +43,8 @@ pub fn apply(state: &mut ReplayState, event: &Event) {
         Payload::WorkspaceWriteV1(p) => apply_workspace_write(state, event, p),
         Payload::CapabilityDeniedV1(_) => {},
         Payload::AcceptanceRecordedV1(p) => apply_acceptance_recorded(state, event, p),
+        // M5 operator decisions are tape metadata, not replayable state — no-op.
+        Payload::OperatorDecisionRecordedV1(_) => {}
     }
 }
 

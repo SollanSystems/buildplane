@@ -73,6 +73,33 @@ export interface PolicyProfile {
 	readonly trustGates?: TrustGateConfig;
 }
 
+// ── Authorization Envelope (GAP-10 — self-build loop) ───────
+
+/**
+ * A one-time operator-authorized bounded envelope. Recorded as a signed
+ * `operator_decision_recorded` event (subject="authorize-envelope"). The
+ * supervisor auto-admits a planner proposal iff it is a SUBSET of this envelope.
+ */
+export interface AuthorizationEnvelopeV0 {
+	readonly envelope_version: "v0";
+	readonly milestone: string;
+	readonly allowed_side_effects: readonly string[];
+	readonly path_globs: readonly string[];
+	readonly max_iterations: number;
+	readonly token_budget: number;
+	readonly allowed_verification_cmds: readonly string[];
+	/** RFC3339 — after this instant the envelope no longer authorizes admission. */
+	readonly expires_at: string;
+}
+
+/** What a planner proposal presents for the envelope subset check (GAP-9). */
+export interface EnvelopeProposal {
+	readonly milestone: string;
+	readonly sideEffects: readonly string[];
+	readonly pathGlobs: readonly string[];
+	readonly verificationCommands: readonly string[];
+}
+
 // ── Trust Gates ─────────────────────────────────────────────
 
 export interface TrustGateConfig {

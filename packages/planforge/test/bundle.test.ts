@@ -39,7 +39,7 @@ describe("buildDefaultCapabilityBundleForPlan", () => {
 
 		expect(bundle.schemaVersion).toBe("buildplane.capability_bundle.v0");
 		expect(bundle.bundleId).toBe(plan.id);
-		// toy plan: PF1 {local-doc, local-fixture}, PF2 {local-doc, local-fixture, local-receipt}
+		// task[0]: {local-doc, local-fixture}, task[1]: {local-doc, local-fixture, local-receipt}
 		expect(bundle.fsWrite).toEqual([
 			"apps/cli/test/fixtures/**",
 			"docs/**",
@@ -47,7 +47,13 @@ describe("buildDefaultCapabilityBundleForPlan", () => {
 			"packages/**/test/fixtures/**",
 		]);
 		expect(bundle.tools?.write_file?.enabled).toBe(true);
-		expect(bundle.tools?.run_command?.allowlist).toEqual(["git", "pnpm"]);
+		// `claude` is seeded into every task's allowlist (GAP-4 worker binary), so
+		// the plan-wide sorted union carries it alongside the verification argv0s.
+		expect(bundle.tools?.run_command?.allowlist).toEqual([
+			"claude",
+			"git",
+			"pnpm",
+		]);
 	});
 
 	it("covers every task's declared surface and nothing beyond it (no task dropped, no extras)", () => {
@@ -66,7 +72,9 @@ describe("buildDefaultCapabilityBundleForPlan", () => {
 			"local-receipt": ["docs/operations/**"],
 		};
 		const expectedWrite = new Set<string>();
-		const expectedAllow = new Set<string>();
+		// `claude` is seeded into every task's run_command allowlist (GAP-4 worker
+		// binary), independent of the verification-command argv0s derived below.
+		const expectedAllow = new Set<string>(["claude"]);
 		for (const task of plan.tasks) {
 			for (const effect of task.allowedSideEffects) {
 				for (const g of sideEffectGlobs[effect] ?? []) {
@@ -84,7 +92,7 @@ describe("buildDefaultCapabilityBundleForPlan", () => {
 		expect(new Set(envelope.tools?.run_command?.allowlist)).toEqual(
 			expectedAllow,
 		);
-		// PF2 alone declares `local-receipt`; its presence proves PF2 was not dropped.
+		// task[1] alone declares `local-receipt`; its presence proves task[1] was not dropped.
 		expect(envelope.fsWrite).toContain("docs/operations/**");
 	});
 
@@ -167,6 +175,107 @@ describe("buildDefaultCapabilityBundleForPlan", () => {
 			evaluateToolInvocation(
 				validated.bundle,
 				{ tool: "run_command", command: "curl http://evil.example" },
+				ctx,
+			).decision,
+		).toBe("deny");
+	});
+});
+
+describe("buildDefaultCapabilityBundleForTask — worker binary", () => {
+	it("always allows the `claude` worker binary in the run_command allowlist", () => {
+		const plan = createPlanForgeDryRunPlan(inputFixture);
+		const task = {
+			...plan.tasks[0],
+			allowedSideEffects: ["local-doc"] as const,
+			forbiddenSideEffects: [],
+			verificationCommands: ["pnpm vitest run"],
+		};
+		const bundle = buildDefaultCapabilityBundleForTask(plan, task);
+		expect(bundle.tools?.run_command?.allowlist).toContain("claude");
+		// Verification-derived entries are still present.
+		expect(bundle.tools?.run_command?.allowlist).toContain("pnpm");
+	});
+
+	it("includes `claude` even when the task declares zero verification commands", () => {
+		const plan = createPlanForgeDryRunPlan(inputFixture);
+		const task = {
+			...plan.tasks[0],
+			allowedSideEffects: ["local-doc"] as const,
+			forbiddenSideEffects: [],
+			verificationCommands: [],
+		};
+		const bundle = buildDefaultCapabilityBundleForTask(plan, task);
+		// run_command is now always present (never empty) because of the seed.
+		expect(bundle.tools?.run_command?.allowlist).toEqual(["claude"]);
+	});
+});
+
+describe("buildDefaultCapabilityBundleForTask — code-edit", () => {
+	it("maps a code-edit task to the source/test globs and enables write_file", () => {
+		const plan = createPlanForgeDryRunPlan(inputFixture);
+		const task = {
+			...plan.tasks[0],
+			id: plan.tasks[0].id,
+			allowedSideEffects: ["code-edit"] as const,
+			verificationCommands: ["cargo test", "pnpm vitest"],
+		};
+		const bundle = buildDefaultCapabilityBundleForTask(plan, task);
+		expect(new Set(bundle.fsWrite)).toEqual(
+			new Set([
+				"src/**",
+				"test/**",
+				"packages/**/src/**",
+				"packages/**/test/**",
+			]),
+		);
+		expect(bundle.tools?.write_file?.enabled).toBe(true);
+		expect(bundle.tools?.run_command?.allowlist).toEqual(
+			expect.arrayContaining(["cargo", "pnpm"]),
+		);
+		expect(capabilityBundleDigest(bundle)).toBe(bundleDigest(bundle));
+	});
+});
+
+describe("code-edit bundle is broker-enforceable", () => {
+	it("confines a code-edit worker to source/test and denies everything else", () => {
+		const plan = createPlanForgeDryRunPlan(inputFixture);
+		const task = {
+			...plan.tasks[0],
+			allowedSideEffects: ["code-edit"] as const,
+			verificationCommands: ["cargo test", "pnpm vitest"],
+		};
+		const validated = validateCapabilityBundle(
+			buildDefaultCapabilityBundleForTask(plan, task),
+		);
+		if (!validated.ok) {
+			throw new Error(validated.errors.join("; "));
+		}
+		const ctx = { worktreeRoot: "/tmp/wt" };
+		expect(
+			evaluateToolInvocation(
+				validated.bundle,
+				{ tool: "write_file", path: "src/kernel/x.ts" },
+				ctx,
+			).decision,
+		).toBe("allow");
+		expect(
+			evaluateToolInvocation(
+				validated.bundle,
+				{ tool: "write_file", path: "packages/kernel/src/orchestrator.ts" },
+				ctx,
+			).decision,
+		).toBe("allow");
+		expect(
+			evaluateToolInvocation(
+				validated.bundle,
+				{ tool: "write_file", path: "docs/note.md" },
+				ctx,
+			).decision,
+		).toBe("deny");
+		expect(
+			evaluateToolInvocation(
+				validated.bundle,
+				{ tool: "write_file", path: "../escape.ts" },
 				ctx,
 			).decision,
 		).toBe("deny");

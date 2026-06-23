@@ -1,4 +1,3 @@
-import type { ChildProcess } from "node:child_process";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import {
@@ -11,18 +10,19 @@ import {
 	statSync,
 	writeFileSync,
 } from "node:fs";
-import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import type { Readable, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import {
 	createToolRegistry,
 	type ToolRegistryOptions,
 } from "@buildplane/adapters-tools";
 import type {
+	AuthorizationEnvelopeV0,
+	BudgetConstraints,
 	BuildplaneAcceptancePort,
 	BuildplaneProfileRegistryPort,
 	BuildplaneStoragePort,
+	EnvelopeProposal,
 	LedgerActivityPort,
 	PolicyProfile,
 } from "@buildplane/kernel";
@@ -33,6 +33,7 @@ import {
 	type PlanAdmittedV1,
 	type TapeEmitter,
 } from "@buildplane/ledger-client";
+import { evaluateEnvelopeAdmission } from "@buildplane/policy";
 import {
 	type BootstrapDoctorReport,
 	inspectBootstrapDoctor,
@@ -69,13 +70,37 @@ import {
 	createLedgerActivityPort,
 } from "./ledger-activity-port.js";
 import { emitCapabilityDenied } from "./ledger-capability-denied.js";
+import {
+	assertKernelSigningKey,
+	deriveLedgerSpawnCwd,
+	type LedgerChild,
+	PLANFORGE_KERNEL_SIGNING_KEY_ID,
+	resolveLedgerBinary,
+	spawnLedgerSubprocess,
+} from "./ledger-emit.js";
 import { runGitCheckpoint } from "./ledger-git-checkpoint.js";
 import { createLedgerReceiptPort } from "./ledger-receipt-port.js";
 import { wrapToolRegistryForLedger } from "./ledger-tool-wrapper.js";
+import {
+	buildEnvelopeProposal,
+	initialLoopState,
+	type LoopState,
+	loopStatePath,
+	nextLoopState,
+	readLoopState,
+	runawayGuardProfile,
+	stopFileRequested,
+	writeLoopStateAtomic,
+} from "./loop-supervisor.js";
 import type {
 	PacketMemoryEnrichmentResult,
 	preparePacketMemoryEnrichment,
 } from "./packet-enrichment.js";
+import {
+	loadActiveAuthorizationEnvelope,
+	runPlanForgeAuthorizeEnvelopeCommand,
+} from "./planforge-authorize-envelope.js";
+import { runPlannerProposal } from "./planforge-planner.js";
 import {
 	acceptanceContractDigest,
 	buildPlanAdmittedPayload,
@@ -83,9 +108,14 @@ import {
 	createPlanForgeDryRunPlan,
 	deriveAcceptanceContract,
 	dispatchAdmittedPlan,
+	formatPriorWorkEntry,
+	loadRoadmapFromString,
 	PLANFORGE_AUTHORIZED_NEXT_STEP,
 	PLANFORGE_VALIDATION_STATUS_PASS,
 	type PlanForgePlan,
+	type PlanSummary,
+	type RoadmapDoc,
+	summarizePlanReceipt,
 } from "./planforge-schema.js";
 import {
 	defaultPrCheckRequest,
@@ -195,7 +225,65 @@ interface StructuredMemoryStoragePortLike extends StructuredMemoryPortLike {
 	recordRunStrategyId(runId: string, strategyId: string): void;
 }
 
-export interface RunCliDependencies {
+/** Planner port output: the next slice's plan path + slice id + milestone. */
+export interface LoopSliceProposal {
+	readonly planPath: string;
+	readonly sliceId: string;
+	readonly milestone: string;
+}
+
+/** Rich dispatch outcome the supervisor loop reads for re-anchoring (D3). */
+export interface LoopDispatchResult {
+	readonly allPassed: boolean;
+	readonly mergedHeadSha: string | null;
+	/**
+	 * Real total token usage (input + output) summed across this dispatch's model
+	 * activities, extracted from each executor's terminal result `usage`. Fed to
+	 * the supervisor's cumulative `token_budget` cap (GAP-7 CRITICAL-2). 0 when no
+	 * model activity reported usage (e.g. command-only dispatch).
+	 */
+	readonly tokenUsage: number;
+	readonly runs: readonly unknown[];
+}
+
+/**
+ * Injectable supervisor-loop ports (all optional — the real planforge
+ * helpers GAP-9/10/8 produce the defaults). The test seam injects fakes so a
+ * loop iteration runs end-to-end with no claude/ledger spawns.
+ */
+export interface LoopRunCliDeps {
+	loopPlanner?: (ctx: {
+		workspace: string;
+		lastMergedHeadSha: string | null;
+		trustedBase: string | null;
+	}) => Promise<LoopSliceProposal | { done: true }>;
+	loopEnvelope?: {
+		load: (
+			workspace: string,
+		) => Promise<{ envelope: AuthorizationEnvelopeV0 } | null>;
+		check: (
+			proposal: EnvelopeProposal,
+			envelope: AuthorizationEnvelopeV0 | null,
+		) => { ok: true } | { ok: false; reason: string };
+	};
+	loopDryRun?: (
+		planPath: string,
+		cwd: string,
+	) => Promise<
+		{ ok: true; plan: PlanForgePlan } | { ok: false; reason: string }
+	>;
+	loopAdmit?: (
+		planPath: string,
+		cwd: string,
+	) => Promise<{ admittedEventId: string }>;
+	loopDispatch?: (
+		planPath: string,
+		cwd: string,
+		guard: PolicyProfile,
+	) => Promise<LoopDispatchResult>;
+}
+
+export interface RunCliDependencies extends LoopRunCliDeps {
 	createOrchestrator?: () => BuildplaneCliOrchestrator;
 	parsePacket?: (packetPath: string) => unknown;
 	inspectBootstrapDoctor?: () => BootstrapDoctorReport;
@@ -780,7 +868,7 @@ function formatPlanForgeHelp(): string[] {
 		"    --operator <id>  Required; deciding operator identity (decided_by)",
 		"    --json           Prints the admission result as JSON",
 		"",
-		"buildplane planforge dispatch --input <file> [--json] [--enforce-acceptance]",
+		"buildplane planforge dispatch --input <file> [--json] [--no-enforce-acceptance]",
 		"",
 		"  Dispatches an operator-admitted plan as one run per PlanForgeTask through",
 		"  the kernel run loop. Fails closed (plan-not-admitted) with no run when no",
@@ -788,11 +876,13 @@ function formatPlanForgeHelp(): string[] {
 		"  dependent task does not start if its predecessor fails.",
 		"",
 		"  Options:",
-		"    --input <file>        Markdown PlanForge goal fixture to dispatch",
-		"    --json                Prints the dispatch result (per-task run ids) as JSON",
-		"    --enforce-acceptance  Run the finalization acceptance gate per task",
-		"                          (diff-scope + verificationCommands); reject + quarantine",
-		"                          on failure. Off by default.",
+		"    --input <file>           Markdown PlanForge goal fixture to dispatch",
+		"    --json                   Prints the dispatch result (per-task run ids) as JSON",
+		"    --no-enforce-acceptance  Skip the finalization acceptance gate (diff-scope +",
+		"                             verificationCommands). The gate is ON by default and",
+		"                             worktree deps are provisioned (pnpm install) before",
+		"                             checks run; use this flag only when worktree",
+		"                             dependencies cannot be provisioned.",
 		"",
 		"buildplane planforge resume --input <file> [--json]",
 		"",
@@ -804,6 +894,67 @@ function formatPlanForgeHelp(): string[] {
 		"  Options:",
 		"    --input <file>  Markdown PlanForge goal fixture to resume",
 		"    --json          Prints the resume result (recorded/executed runs) as JSON",
+		"",
+		"buildplane planforge recover [--json]",
+		"",
+		"  Scans storage for orphaned `running` PlanForge dispatches (via the dispatch",
+		"  manifest sidecar) and replays the signed tape to resume each, re-establishing",
+		"  worker trust FROM THE TAPE and emitting any missing plan_receipt. The tape is",
+		"  authoritative over the storage status field. No --input required.",
+		"",
+		"  Options:",
+		"    --json          Prints the recovery result (per-plan status) as JSON",
+		"",
+		"buildplane planforge plan --roadmap <file> --out <plan.md> --trusted-base <sha> [--remote <url>] [--json]",
+		"",
+		"  Reads the L0 tape's completed roadmap slices, selects the next eligible",
+		"  slice whose dependencies are satisfied, deterministically emits its plan.md",
+		"  in the PlanForge ## Tasks grammar, and validates it. Writes the plan.md and",
+		"  exits 0 iff the emitted plan validates PASS. The --once loop path uses this",
+		"  deterministic emitter; the LLM planning-worker path is gated behind a later flag.",
+		"",
+		"  Options:",
+		"    --roadmap <file>     Machine-readable roadmap (default docs/roadmap.json)",
+		"    --out <plan.md>      Required; where to write the emitted plan.md",
+		"    --trusted-base <sha> Required; the trusted base commit recorded in the plan",
+		"    --remote <url>       Repository remote (default the buildplane origin)",
+		"    --json               Prints the proposal (slice id + status) as JSON",
+		"",
+		"buildplane planforge authorize-envelope --milestone <m> --side-effects code-edit --path-globs '<csv>' --max-iterations N --token-budget N --verification-cmds '<csv>' --expires-at <rfc3339> --approve --operator <id> [--json]",
+		"",
+		"  Records a one-time operator-authorized bounded envelope as a signed",
+		"  operator_decision_recorded event (subject=authorize-envelope, kernel key).",
+		"  The supervisor auto-admits a planner proposal iff it is a SUBSET of this",
+		"  envelope. Fails closed without --approve/--operator. Idempotent on the",
+		"  envelope digest: re-authorizing the identical envelope is a no-op.",
+		"",
+		"  Options:",
+		"    --milestone <m>         Required; roadmap milestone the envelope authorizes",
+		"    --side-effects <csv>    Required; allowed side-effect kinds (e.g. code-edit)",
+		"    --path-globs <csv>      Required; allowed worktree path globs",
+		"    --max-iterations N      Required; positive cap on loop iterations",
+		"    --token-budget N        Required; positive cumulative token budget",
+		"    --verification-cmds <csv>  Required; allowed verification command argv0s",
+		"    --expires-at <rfc3339>  Required; envelope expiry instant",
+		"    --approve               Required; explicit operator approval to sign",
+		"    --operator <id>         Required; deciding operator identity (decided_by)",
+		"    --json                  Prints the authorization result as JSON",
+		"",
+		"buildplane planforge loop [--once | --max-iterations=N] [--max-turns=N] [--max-tokens=N] [--wall-clock-ms=N] [--json]",
+		"",
+		"  Supervisor: drive plan -> dry-run -> envelope-check -> admit -> dispatch ->",
+		"  accept -> merge -> re-anchor across iterations, persisting loop-state.json",
+		"  atomically after every transition and resuming from a persisted state.",
+		"  Stops on terminal condition / .buildplane/loop.stop / acceptance-FAIL /",
+		"  envelope breach / cumulative token budget / max-iterations / planner error.",
+		"",
+		"  Options:",
+		"    --once                  Run exactly one slice (equivalent to --max-iterations=1)",
+		"    --max-iterations=N      Cap the number of slices the loop builds",
+		"    --max-turns=N           Lowered worker --max-turns (runaway guard; default 12)",
+		"    --max-tokens=N          Per-iteration token budget for the abort guard",
+		"    --wall-clock-ms=N       Per-iteration wall-clock cap for the abort guard",
+		"    --json                  Prints the loop summary as JSON",
 	];
 }
 
@@ -1115,12 +1266,133 @@ function toolRegistryOptionsForPacket(
 	};
 }
 
+/** Minimal async executor shape the runtime router dispatches to. */
+interface RouterAsyncExecutor {
+	executePacketAsync: (
+		packet: unknown,
+		root: string,
+		eventBus: unknown,
+		signal?: AbortSignal,
+	) => Promise<unknown>;
+}
+
+/** Command (sync) executor the router uses for `execution` packets. */
+interface RouterCommandExecutor {
+	executePacket: (packet: unknown, root: string) => unknown;
+}
+
+export interface RuntimeRouterPorts {
+	readonly commandExecutor: RouterCommandExecutor;
+	readonly getClaudeExecutor: () => Promise<RouterAsyncExecutor>;
+	readonly getCodexExecutor: () => Promise<RouterAsyncExecutor>;
+	readonly getSdkExecutor: () => Promise<RouterAsyncExecutor>;
+}
+
+/**
+ * Pure runtime router: routes a packet to the command executor (`execution`),
+ * the claude-code worker, the codex worker, or the sdk executor by
+ * `routingHints.preferredWorker`. The 4th `signal` arg threads the
+ * orchestrator's budget AbortController through to the worker so the runaway
+ * guard can abort a streaming model worker (GAP-7). Extracted so the routing +
+ * signal-forwarding contract is unit-testable without a full orchestrator.
+ */
+export function buildRuntimeRouter(ports: RuntimeRouterPorts) {
+	const {
+		commandExecutor,
+		getClaudeExecutor,
+		getCodexExecutor,
+		getSdkExecutor,
+	} = ports;
+	return {
+		executePacket(packet: unknown, root: string) {
+			const p = packet as { execution?: unknown };
+			if (p.execution) return commandExecutor.executePacket(packet, root);
+			throw new Error("Model packets require async execution path");
+		},
+		async executePacketAsync(
+			packet: unknown,
+			root: string,
+			bus: unknown,
+			signal?: AbortSignal,
+		) {
+			const p = packet as {
+				execution?: unknown;
+				routingHints?: { preferredWorker?: string };
+			};
+			if (p.execution) {
+				const receipt = commandExecutor.executePacket(packet, root) as {
+					exitCode: number;
+					outputChecks: Array<{ path: string; exists: boolean }>;
+				};
+				if (
+					typeof bus === "object" &&
+					bus !== null &&
+					typeof (bus as { emit?: unknown }).emit === "function"
+				) {
+					(
+						bus as {
+							emit: (event: {
+								kind: "command-execution-complete";
+								timestamp: string;
+								exitCode: number;
+								outputChecks: Array<{ path: string; exists: boolean }>;
+							}) => void;
+						}
+					).emit({
+						kind: "command-execution-complete",
+						timestamp: new Date().toISOString(),
+						exitCode: receipt.exitCode,
+						outputChecks: receipt.outputChecks.map((check) => ({
+							path: check.path,
+							exists: check.exists,
+						})),
+					});
+				}
+				return receipt;
+			}
+			if (p.routingHints?.preferredWorker === "claude-code") {
+				return (await getClaudeExecutor()).executePacketAsync(
+					packet,
+					root,
+					bus,
+					signal,
+				);
+			}
+			if (p.routingHints?.preferredWorker === "codex") {
+				return (await getCodexExecutor()).executePacketAsync(
+					packet,
+					root,
+					bus,
+					signal,
+				);
+			}
+			return (await getSdkExecutor()).executePacketAsync(
+				packet,
+				root,
+				bus,
+				signal,
+			);
+		},
+	};
+}
+
 async function loadCliOrchestrator(
 	projectRoot: string,
 	opts?: {
 		readonly ledgerActivityPort?: LedgerActivityPort;
 		readonly profileRegistry?: BuildplaneProfileRegistryPort;
 		readonly acceptancePort?: BuildplaneAcceptancePort;
+		readonly provisionDeps?: (workspacePath: string) => void;
+		/** Lowered worker turn cap for the supervisor loop's runaway guard. */
+		readonly claudeMaxTurns?: number;
+		/**
+		 * Per-packet budget caps for the supervisor loop's runaway guard. When set,
+		 * the orchestrator installs the budget subscription whose AbortController
+		 * aborts a streaming model worker once it crosses maxTokens / maxComputeTimeMs.
+		 * Resolved as the orchestrator's top-level budgets; a dispatched packet's
+		 * acceptance profile carries no budgets, so it falls through to these.
+		 */
+		readonly budgets?: BudgetConstraints;
 	},
 ): Promise<CliOrchestratorBundle> {
 	const kernel = (await cliImport("@buildplane/kernel")) as unknown as {
@@ -1145,6 +1417,11 @@ async function loadCliOrchestrator(
 					changedFiles: readonly string[],
 					contract: unknown,
 				) => unknown;
+				evaluateBudgets?: (
+					packet: unknown,
+					usage: unknown,
+					budgets?: unknown,
+				) => unknown;
 			};
 			workspace?: unknown;
 			admissionStore?: RunAdmissionStoreLike;
@@ -1153,6 +1430,8 @@ async function loadCliOrchestrator(
 			ledgerActivityPort?: unknown;
 			profileRegistry?: BuildplaneProfileRegistryPort;
 			acceptancePort?: BuildplaneAcceptancePort;
+			provisionDeps?: (workspacePath: string) => void;
+			budgets?: BudgetConstraints;
 		}) => BuildplaneCliOrchestrator;
 		createEventBus: () => {
 			subscribe: (listener: (event: unknown) => void) => () => void;
@@ -1168,6 +1447,11 @@ async function loadCliOrchestrator(
 		evaluateAcceptanceContract: (
 			contract: unknown,
 			evidence: unknown,
+		) => unknown;
+		evaluateBudgets: (
+			packet: unknown,
+			usage: unknown,
+			budgets?: unknown,
 		) => unknown;
 	};
 	const storage = (await cliImport("@buildplane/storage")) as unknown as {
@@ -1296,14 +1580,16 @@ async function loadCliOrchestrator(
 						packet: unknown,
 						root: string,
 						eventBus: unknown,
+						signal?: AbortSignal,
 					) => Promise<unknown>;
 				};
-				createClaudeCodeExecutor: () => {
+				createClaudeCodeExecutor: (options?: { maxTurns?: number }) => {
 					executePacket: (packet: unknown, root: string) => unknown;
 					executePacketAsync: (
 						packet: unknown,
 						root: string,
 						eventBus: unknown,
+						signal?: AbortSignal,
 					) => Promise<unknown>;
 				};
 		  }>
@@ -1327,6 +1613,7 @@ async function loadCliOrchestrator(
 					packet: unknown,
 					root: string,
 					eventBus: unknown,
+					signal?: AbortSignal,
 				) => Promise<unknown>;
 		  }>
 		| undefined;
@@ -1337,6 +1624,7 @@ async function loadCliOrchestrator(
 					packet: unknown,
 					root: string,
 					eventBus: unknown,
+					signal?: AbortSignal,
 				) => Promise<unknown>;
 		  }>
 		| undefined;
@@ -1347,6 +1635,7 @@ async function loadCliOrchestrator(
 					packet: unknown,
 					root: string,
 					eventBus: unknown,
+					signal?: AbortSignal,
 				) => Promise<unknown>;
 		  }>
 		| undefined;
@@ -1362,14 +1651,16 @@ async function loadCliOrchestrator(
 						packet: unknown,
 						root: string,
 						eventBus: unknown,
+						signal?: AbortSignal,
 					) => Promise<unknown>;
 				};
-				createClaudeCodeExecutor: () => {
+				createClaudeCodeExecutor: (options?: { maxTurns?: number }) => {
 					executePacket: (packet: unknown, root: string) => unknown;
 					executePacketAsync: (
 						packet: unknown,
 						root: string,
 						eventBus: unknown,
+						signal?: AbortSignal,
 					) => Promise<unknown>;
 				};
 			}>;
@@ -1406,8 +1697,13 @@ async function loadCliOrchestrator(
 
 	const getClaudeExecutor = async () => {
 		if (!claudeExecutorPromise) {
+			const claudeMaxTurns = opts?.claudeMaxTurns;
 			claudeExecutorPromise = loadAdaptersModels().then((mod) =>
-				mod.createClaudeCodeExecutor(),
+				mod.createClaudeCodeExecutor(
+					claudeMaxTurns !== undefined
+						? { maxTurns: claudeMaxTurns }
+						: undefined,
+				),
 			);
 		}
 		return claudeExecutorPromise;
@@ -1422,61 +1718,12 @@ async function loadCliOrchestrator(
 		return codexExecutorPromise;
 	};
 
-	const runtimeRouter = {
-		executePacket(packet: unknown, root: string) {
-			const p = packet as { execution?: unknown };
-			if (p.execution) return commandExecutor.executePacket(packet, root);
-			throw new Error("Model packets require async execution path");
-		},
-		async executePacketAsync(packet: unknown, root: string, bus: unknown) {
-			const p = packet as {
-				execution?: unknown;
-				routingHints?: { preferredWorker?: string };
-			};
-			if (p.execution) {
-				const receipt = commandExecutor.executePacket(packet, root) as {
-					exitCode: number;
-					outputChecks: Array<{ path: string; exists: boolean }>;
-				};
-				if (
-					typeof bus === "object" &&
-					bus !== null &&
-					typeof (bus as { emit?: unknown }).emit === "function"
-				) {
-					(
-						bus as {
-							emit: (event: {
-								kind: "command-execution-complete";
-								timestamp: string;
-								exitCode: number;
-								outputChecks: Array<{ path: string; exists: boolean }>;
-							}) => void;
-						}
-					).emit({
-						kind: "command-execution-complete",
-						timestamp: new Date().toISOString(),
-						exitCode: receipt.exitCode,
-						outputChecks: receipt.outputChecks.map((check) => ({
-							path: check.path,
-							exists: check.exists,
-						})),
-					});
-				}
-				return receipt;
-			}
-			if (p.routingHints?.preferredWorker === "claude-code") {
-				return (await getClaudeExecutor()).executePacketAsync(
-					packet,
-					root,
-					bus,
-				);
-			}
-			if (p.routingHints?.preferredWorker === "codex") {
-				return (await getCodexExecutor()).executePacketAsync(packet, root, bus);
-			}
-			return (await getSdkExecutor()).executePacketAsync(packet, root, bus);
-		},
-	};
+	const runtimeRouter = buildRuntimeRouter({
+		commandExecutor,
+		getClaudeExecutor,
+		getCodexExecutor,
+		getSdkExecutor,
+	});
 
 	const orchestrator = kernel.createBuildplaneOrchestrator({
 		projectRoot,
@@ -1489,6 +1736,9 @@ async function loadCliOrchestrator(
 				changedFiles: readonly string[],
 				contract: unknown,
 			) => unknown,
+			// Wired so the orchestrator's runaway-guard budget subscription can
+			// evaluate mid-stream token/time usage against the loop guard's budgets.
+			evaluateBudgets: policy.evaluateBudgets,
 		},
 		workspace: adaptersGit.createGitWorktreeAdapter(),
 		admissionStore: createCliRunAdmissionStore(projectRoot),
@@ -1497,6 +1747,9 @@ async function loadCliOrchestrator(
 		ledgerActivityPort: opts?.ledgerActivityPort,
 		profileRegistry: opts?.profileRegistry,
 		acceptancePort: opts?.acceptancePort,
+		provisionDeps: opts?.provisionDeps,
+		// Runaway-guard budgets (loop dispatch); undefined for non-loop callers.
+		budgets: opts?.budgets,
 	});
 
 	return {
@@ -2113,12 +2366,6 @@ function resolveNativeBinary(cwd: string): string {
 		}
 	}
 	return "buildplane-native";
-}
-
-function resolveLedgerBinary(cwd: string): string {
-	// The ledger binary is the same `buildplane-native` — just invoke with a
-	// different subcommand. Reuse the existing resolution chain.
-	return resolveNativeBinary(cwd);
 }
 
 // ---------------------------------------------------------------------------
@@ -3344,122 +3591,11 @@ async function runFork(
 	return exitCode;
 }
 
-interface LedgerChild {
-	child: ChildProcess;
-	stdin: Writable;
-	stderr: Readable;
-	exit: Promise<number>;
-}
-
-/**
- * Derive a suitable cwd for the ledger subprocess so the native binary can
- * resolve its default native-root. The binary looks for `native/Cargo.toml`
- * and `native/packs` relative to its cwd.
- *
- * Resolution order:
- *  1. If the binary lives inside a `.../native/target/{debug,release}/` tree,
- *     the project root is 4 directories up — use that.
- *  2. Otherwise fall back to `workspace` (the user's project root).  In a
- *     production install the binary is on PATH and the workspace itself may
- *     not have a native subtree; the binary is expected to degrade gracefully
- *     in that configuration.
- */
-function deriveLedgerSpawnCwd(binary: string, workspace: string): string {
-	// Walk up: debug/release → target → native → <project-root>
-	const parts = binary.replace(/\\/g, "/").split("/");
-	const nativeIdx = parts.lastIndexOf("native");
-	if (
-		nativeIdx >= 0 &&
-		parts[nativeIdx + 1] === "target" &&
-		(parts[nativeIdx + 2] === "debug" || parts[nativeIdx + 2] === "release")
-	) {
-		return parts.slice(0, nativeIdx).join("/") || workspace;
-	}
-	return workspace;
-}
-
-function spawnLedgerSubprocess(
-	binary: string,
-	runId: string,
-	workspace: string,
-	options: { sign?: boolean; signingKeyId?: string } = {},
-): LedgerChild {
-	const spawnCwd = deriveLedgerSpawnCwd(binary, workspace);
-	const serveArgs = [
-		"ledger",
-		"serve",
-		"--run-id",
-		runId,
-		"--workspace",
-		workspace,
-		"--schema-version",
-		"1",
-	];
-	if (options.sign) {
-		serveArgs.push(
-			"--sign",
-			"--signing-key-id",
-			options.signingKeyId ?? "kernel-main",
-		);
-	}
-	const child = spawn(binary, serveArgs, {
-		stdio: ["pipe", "inherit", "pipe"],
-		cwd: spawnCwd,
-	});
-	if (!child.stdin || !child.stderr) {
-		throw new Error("ledger subprocess stdio unexpectedly missing");
-	}
-	const exit = new Promise<number>((resolve, reject) => {
-		child.on("exit", (code) => resolve(code ?? -1));
-		// Handle spawn errors (e.g. binary not found) so they surface as a
-		// rejected promise rather than an unhandled 'error' event.
-		child.on("error", (err) => reject(err));
-	});
-	// Suppress unhandled-rejection noise for consumers that only attach .then()
-	// (e.g. createTapeEmitter adds .then but no .catch on childExit).
-	exit.catch(() => {});
-	return {
-		child,
-		stdin: child.stdin as Writable,
-		stderr: child.stderr as Readable,
-		exit,
-	};
-}
-
-const PLANFORGE_KERNEL_SIGNING_KEY_ID = "kernel-main";
-
-/**
- * Resolve the per-machine kernel signing-key path the native `ledger serve --sign`
- * subprocess reads. Honors `HOME` (then `USERPROFILE`, then `os.homedir()`) so it
- * matches the test harness's temp-HOME injection and the Rust key resolver.
- */
-function kernelSigningKeyPath(): string {
-	const home = process.env.HOME ?? process.env.USERPROFILE ?? homedir() ?? "";
-	return join(
-		home,
-		".buildplane",
-		"keys",
-		"kernel",
-		`${PLANFORGE_KERNEL_SIGNING_KEY_ID}.ed25519`,
-	);
-}
-
-/**
- * Fail-fast precondition for any signed-tape path (run / dispatch). When the
- * kernel signing key is absent, a `ledger serve --sign` subprocess would fail
- * opaquely mid-handshake; throw an actionable error here instead. We never
- * auto-generate signing-key material (operator decision, M2-S5 flag #2).
- */
-function assertKernelSigningKey(): void {
-	const keyPath = kernelSigningKeyPath();
-	if (!existsSync(keyPath)) {
-		throw new Error(
-			`signed ledger requires a kernel signing key at ${keyPath}. ` +
-				'Provision a kernel ed25519 key (actor "kernel", key-id "kernel-main") before running a signed run/dispatch. ' +
-				"Buildplane does not auto-generate signing-key material.",
-		);
-	}
-}
+// LedgerChild / deriveLedgerSpawnCwd / spawnLedgerSubprocess /
+// PLANFORGE_KERNEL_SIGNING_KEY_ID / kernelSigningKeyPath / assertKernelSigningKey
+// were lifted verbatim to ./ledger-emit.ts (GAP-10) so the new
+// `planforge authorize-envelope` command can reuse them without importing
+// run-cli.ts (circular). They are re-imported at the top of this file.
 
 /**
  * Deterministic plan-scoped run id for a PlanForge admission, derived from the
@@ -3472,6 +3608,121 @@ function planAdmitRunId(idempotencyKey: string): string {
 		.update(`planforge.admit.run:${idempotencyKey}`)
 		.digest("hex");
 	return `${h.slice(0, 8)}-${h.slice(8, 12)}-8${h.slice(13, 16)}-${h.slice(16, 20)}-${h.slice(20, 32)}`;
+}
+
+export interface PlanForgeDispatchManifest {
+	readonly runId: string;
+	readonly inputPath: string;
+	readonly planId: string;
+	readonly idempotencyKey: string;
+	readonly createdAt: string;
+}
+
+function planForgeDispatchDir(workspace: string): string {
+	return resolve(workspace, ".buildplane", "planforge", "dispatch");
+}
+
+/**
+ * Persist a dispatch manifest BEFORE the run loop so a crash mid-dispatch leaves
+ * an on-disk pointer from the (deterministic) tape runId back to the --input plan
+ * file. Crash recovery cannot reconstruct the plan otherwise: storage `running`
+ * rows carry kernel-generated run ids, not the tape runId, and no input path.
+ */
+export function writePlanForgeDispatchManifest(
+	workspace: string,
+	manifest: PlanForgeDispatchManifest,
+): void {
+	const dir = planForgeDispatchDir(workspace);
+	mkdirSync(dir, { recursive: true });
+	writeFileSync(
+		resolve(dir, `${manifest.runId}.json`),
+		`${JSON.stringify(manifest, null, 2)}\n`,
+		"utf8",
+	);
+}
+
+export function readPlanForgeDispatchManifests(
+	workspace: string,
+): PlanForgeDispatchManifest[] {
+	const dir = planForgeDispatchDir(workspace);
+	if (!existsSync(dir)) {
+		return [];
+	}
+	const manifests: PlanForgeDispatchManifest[] = [];
+	for (const entry of readdirSync(dir)) {
+		if (!entry.endsWith(".json")) {
+			continue;
+		}
+		const parsed = JSON.parse(
+			readFileSync(resolve(dir, entry), "utf8"),
+		) as PlanForgeDispatchManifest;
+		manifests.push(parsed);
+	}
+	return manifests;
+}
+
+/**
+ * S7 crash-recovery scan: a dispatch manifest is orphaned iff a `running` storage
+ * row's `unitId` begins with `${planId}:` (the dispatch died before a terminal
+ * status) AND the tape carries no terminal `plan_receipt` for the manifest's tape
+ * `runId`. The tape is authoritative over the storage status field, so a receipted
+ * run is never an orphan even if a storage row is stale-`running`.
+ */
+export async function findOrphanedPlanForgeDispatches(
+	workspace: string,
+): Promise<PlanForgeDispatchManifest[]> {
+	const manifests = readPlanForgeDispatchManifests(workspace);
+	if (manifests.length === 0) {
+		return [];
+	}
+	const { createBuildplaneStorage } = (await cliImport(
+		"@buildplane/storage",
+	)) as {
+		createBuildplaneStorage: (root: string) => {
+			listRunsByStatus: (status: string) => readonly { unitId: string }[];
+		};
+	};
+	const storage = createBuildplaneStorage(workspace);
+	const runningUnitIds = storage
+		.listRunsByStatus("running")
+		.map((r) => r.unitId);
+	const orphans: PlanForgeDispatchManifest[] = [];
+	for (const manifest of manifests) {
+		const hasRunningTask = runningUnitIds.some((unitId) =>
+			unitId.startsWith(`${manifest.planId}:`),
+		);
+		if (!hasRunningTask) {
+			continue;
+		}
+		// Tape is authoritative: a terminal plan_receipt on this run_id means the
+		// dispatch already finished even if a storage row is stale-`running`; not an
+		// orphan. Probe events.db directly for ANY plan_receipt on the tape run_id
+		// (independent of admission_event_id, which is unknown here).
+		const eventsDbPath = resolve(
+			workspace,
+			".buildplane",
+			"ledger",
+			"events.db",
+		);
+		if (existsSync(eventsDbPath)) {
+			const { DatabaseSync } = await import("node:sqlite");
+			const db = new DatabaseSync(eventsDbPath, { readOnly: true });
+			try {
+				const receipted = db
+					.prepare(
+						"SELECT 1 FROM events WHERE run_id = ? AND kind = 'plan_receipt' LIMIT 1",
+					)
+					.get(manifest.runId);
+				if (receipted) {
+					continue;
+				}
+			} finally {
+				db.close();
+			}
+		}
+		orphans.push(manifest);
+	}
+	return orphans;
 }
 
 interface PlanAdmittedEventRow {
@@ -3825,6 +4076,35 @@ async function runPlanForgeAdmitCommand(
 const DEFAULT_DISPATCH_POLICY_PROFILE = "default";
 
 /**
+ * Runs `pnpm install --frozen-lockfile` inside an isolated git worktree so the
+ * acceptance gate's `verificationCommands` (which invoke workspace tooling) have
+ * their binaries and packages available. Synchronous to match the existing sync
+ * git operations in `prepareRun`. Throws on a non-zero exit (or a spawn error)
+ * with captured stderr so the orchestrator can surface a
+ * `workspace-provision-failed` infrastructure failure and retain the worktree.
+ */
+export function provisionWorktreeDeps(workspacePath: string): void {
+	const result = spawnSync("pnpm", ["install", "--frozen-lockfile"], {
+		cwd: workspacePath,
+		encoding: "utf8",
+		stdio: ["ignore", "pipe", "pipe"],
+	});
+	if (result.error) {
+		throw new Error(
+			`pnpm install failed in worktree ${workspacePath}: ${result.error.message}`,
+		);
+	}
+	if (result.status !== 0) {
+		const detail = (result.stderr ?? result.stdout ?? "").trim();
+		throw new Error(
+			`pnpm install failed in worktree ${workspacePath} (exit ${
+				result.status ?? "null"
+			}): ${detail}`,
+		);
+	}
+}
+
+/**
  * Declared side-effect scopes for the plan receipt (M2-S6, D4): the union of every
  * task's `allowedSideEffects`, deduped and stably ordered. Declared scopes are the
  * deterministic S6 grain; reconciling observed `workspace_write` events is M4 work.
@@ -3867,11 +4147,31 @@ function isPassedPlanForgeRun(status: string): boolean {
 
 async function emitPlanForgeTerminalReceipt(input: {
 	emitter: TapeEmitter;
+	workspace: string;
+	runId: string;
 	plan: PlanForgePlan;
 	admittedEventId: string;
 	outcome: "completed" | "failed";
 	result: unknown;
 }): Promise<void> {
+	// Dedup-on-append (D5/S7): a crash between emitting and flushing the receipt
+	// must not double-receipt on resume. The tape is authoritative — if a
+	// plan_receipt for this plan identity already exists on the run, the prior
+	// emit succeeded. The receipt is keyed on the tape `run_id`, which is the
+	// deterministic `planAdmitRunId(idempotency_key)` (a 1:1 function of the
+	// idempotency key), further disambiguated by the payload's plan_id +
+	// admission_event_id. The read-path `already_receipted` short-circuit covers
+	// the durable case; this closes the partial-flush race it cannot see.
+	if (
+		await planForgeReceiptExists(
+			input.workspace,
+			input.runId,
+			input.plan.id,
+			input.admittedEventId,
+		)
+	) {
+		return;
+	}
 	await createLedgerReceiptPort(input.emitter).emitPlanReceipt(
 		buildPlanReceiptPayload({
 			planId: input.plan.id,
@@ -3885,16 +4185,153 @@ async function emitPlanForgeTerminalReceipt(input: {
 }
 
 /**
+ * True iff the signed tape already carries a `plan_receipt` for this plan
+ * identity on `runId`. Direct `node:sqlite` probe on `events.db` — the dedup key
+ * is the deterministic tape `run_id` (derived 1:1 from `idempotency_key`), with
+ * the payload's `plan_id` + `admission_event_id` disambiguating within the run.
+ */
+async function planForgeReceiptExists(
+	workspace: string,
+	runId: string,
+	planId: string,
+	admittedEventId: string,
+): Promise<boolean> {
+	const eventsDbPath = resolve(workspace, ".buildplane", "ledger", "events.db");
+	if (!existsSync(eventsDbPath)) {
+		return false;
+	}
+	const { DatabaseSync } = await import("node:sqlite");
+	const db = new DatabaseSync(eventsDbPath, { readOnly: true });
+	try {
+		const row = db
+			.prepare(
+				"SELECT payload FROM events WHERE run_id = ? AND kind = 'plan_receipt' LIMIT 1",
+			)
+			.get(runId) as { payload: string } | undefined;
+		if (!row) {
+			return false;
+		}
+		const payload = JSON.parse(row.payload) as {
+			PlanReceiptRecordedV1?: {
+				plan_id?: string;
+				admission_event_id?: string;
+			};
+		};
+		const receipt = payload.PlanReceiptRecordedV1;
+		return (
+			receipt?.plan_id === planId &&
+			receipt.admission_event_id === admittedEventId
+		);
+	} finally {
+		db.close();
+	}
+}
+
+/**
+ * Persist a structured plan summary as a searchable document after `plan_receipt`,
+ * so the supervisor (GAP-7) can inject it as `TaskIntent.context.priorWork` into the
+ * next iteration's packet. Best-effort metadata; the caller wraps this in its own
+ * try/catch so a storage failure cannot shadow the signed receipt flush. No-op when
+ * storage is unavailable (pre-cold-path project).
+ */
+export function writePlanSummaryToStorage(
+	storage: Pick<BuildplaneStoragePort, "createSearchableDocument"> | undefined,
+	plan: PlanForgePlan,
+	runs: ReadonlyArray<{ task: string; status: string }>,
+	outcome: "completed" | "failed",
+	mergedSha?: string,
+): void {
+	if (!storage) {
+		return;
+	}
+	const summary: PlanSummary = summarizePlanReceipt(
+		plan,
+		runs,
+		outcome,
+		mergedSha,
+	);
+	storage.createSearchableDocument({
+		sourceTable: "planforge_receipts",
+		sourceId: plan.id,
+		documentKind: "plan-summary",
+		title: plan.title,
+		bodyText: formatPriorWorkEntry(summary),
+		metadata: {
+			planId: summary.planId,
+			outcome: summary.outcome,
+			taskCount: summary.taskCount,
+			passedCount: summary.passedCount,
+			mergedSha: summary.mergedSha,
+			decidedAt: summary.decidedAt,
+		},
+	});
+}
+
+/**
+ * Load the full Buildplane storage port for plan-summary persistence. Unlike
+ * `loadStoragePort` (narrowed to memory-list reads), this exposes
+ * `createSearchableDocument`. Returns undefined for a pre-cold-path project.
+ */
+async function loadSearchableDocumentStoragePort(
+	projectRoot: string,
+): Promise<
+	Pick<BuildplaneStoragePort, "createSearchableDocument"> | undefined
+> {
+	try {
+		const { resolveProjectLayout, createBuildplaneStorage } = (await import(
+			"@buildplane/storage"
+		)) as unknown as {
+			resolveProjectLayout: (root: string) => { stateDbPath: string };
+			createBuildplaneStorage: (
+				root: string,
+			) => Pick<BuildplaneStoragePort, "createSearchableDocument">;
+		};
+		const layout = resolveProjectLayout(projectRoot);
+		if (existsSync(layout.stateDbPath)) {
+			return createBuildplaneStorage(projectRoot);
+		}
+	} catch {
+		// Storage port unavailable (pre-cold-path project)
+	}
+	return undefined;
+}
+
+/**
  * `buildplane planforge dispatch --input <file>`: dispatch an operator-admitted
  * plan as one run per PlanForgeTask. Fails closed (exit 1, `plan-not-admitted`)
  * when no signed plan_admitted exists on the tape — a fast CLI-side pre-check; the
  * kernel admission gate is the load-bearing enforcement. Tasks run sequentially so
  * a dependent task does not start if its predecessor fails.
  */
+interface PlanForgeDispatchOutcome {
+	readonly allPassed: boolean;
+	readonly mergedHeadSha: string | null;
+	/** Real total token usage (input + output) summed across this dispatch's tasks. */
+	readonly tokenUsage: number;
+	readonly runs: ReadonlyArray<{
+		task: string;
+		run_id: string;
+		status: string;
+	}>;
+}
+
 async function runPlanForgeDispatchCommand(
 	args: readonly string[],
 	cwd: string,
 	stdout: (line: string) => void,
+	opts?: {
+		/** Lowered worker turn cap for the supervisor loop's runaway guard. */
+		readonly claudeMaxTurns?: number;
+		/**
+		 * Per-packet budget caps for the supervisor loop's runaway guard. Threaded
+		 * to the orchestrator so the AbortController aborts a runaway model worker
+		 * mid-stream. The dispatched packet's acceptance profile has no budgets, so
+		 * the orchestrator falls through to these top-level budgets.
+		 */
+		readonly budgets?: BudgetConstraints;
+		/** Receives the rich dispatch outcome (incl. mergedHeadSha) for the loop. */
+		readonly onOutcome?: (outcome: PlanForgeDispatchOutcome) => void;
+	},
 ): Promise<number> {
 	const inputPath = readFlag(args, "--input");
 	if (!inputPath) {
@@ -3903,16 +4340,21 @@ async function runPlanForgeDispatchCommand(
 		);
 	}
 	const jsonOut = args.includes("--json");
-	// Opt-in acceptance gate. A freshly-created worktree has no installed
-	// dependencies, so a task's `verificationCommands` (`pnpm lint`/`pnpm
-	// typecheck`/…) cannot run there yet; enforcing the gate on every dispatch
-	// would reject every run. Default dispatch is byte-for-byte unchanged;
-	// `--enforce-acceptance` opts a run into the finalization gate. Provisioning
-	// worktree dependencies so real checks run on every dispatch is a later slice.
-	const enforceAcceptance = args.includes("--enforce-acceptance");
+	// The acceptance gate is ON by default. Worktree dependencies are provisioned
+	// (`pnpm install --frozen-lockfile`) before the gate runs, so a task's
+	// `verificationCommands` (`pnpm lint`/`pnpm typecheck`/…) have their binaries.
+	// `--no-enforce-acceptance` opts OUT (e.g. during initial dogfood bringup or
+	// when the worktree has no pnpm workspace). The legacy `--enforce-acceptance`
+	// flag is still accepted but redundant — the gate is already on.
+	const enforceAcceptance = !args.includes("--no-enforce-acceptance");
 
 	const plan = createPlanForgeDryRunPlan(resolve(cwd, inputPath));
 	const workspace = resolve(cwd);
+	// priorWork handoff (GAP-5): a second storage connection for the single
+	// post-receipt summary INSERT. SQLite WAL mode allows it to coexist with the
+	// orchestrator's primary connection — the write executes after emitPlanReceipt
+	// returns, so there is no concurrent-writer window in the sequential dispatch loop.
+	const summaryStore = await loadSearchableDocumentStoragePort(workspace);
 	const runId = planAdmitRunId(plan.idempotencyKey);
 	const admission = await findVerifiedPlanAdmission(workspace, runId, plan);
 	const admittedEventId = admission?.eventId;
@@ -3921,6 +4363,17 @@ async function runPlanForgeDispatchCommand(
 			`plan-not-admitted: PlanForge plan ${plan.id} has no signed plan_admitted on the tape. Run \`buildplane planforge admit\` first.`,
 		);
 	}
+
+	// S7 crash-recovery sidecar: pin the deterministic tape runId to the --input
+	// plan file BEFORE the run loop so `planforge recover` can reconstruct the plan
+	// if the process dies mid-dispatch (storage `running` rows carry no input path).
+	writePlanForgeDispatchManifest(workspace, {
+		runId,
+		inputPath: resolve(cwd, inputPath),
+		planId: plan.id,
+		idempotencyKey: plan.idempotencyKey,
+		createdAt: new Date().toISOString(),
+	});
 
 	const packets = dispatchAdmittedPlan({
 		plan,
@@ -3997,6 +4450,14 @@ async function runPlanForgeDispatchCommand(
 
 	const runs: Array<{ task: string; run_id: string; status: string }> = [];
 	let allPassed = false;
+	// The squash-merge happens INSIDE orchestrator.runPacketAsync (GAP-8); track
+	// the most recent merged HEAD so the supervisor loop can re-anchor without a
+	// second merge (D3). Tasks run sequentially, so the last passing task's
+	// merged HEAD is the slice's merged tip.
+	let lastMergedHeadSha: string | null = null;
+	// Real total token usage (input + output) summed across this dispatch's model
+	// activities, surfaced to the supervisor's cumulative token-budget cap (GAP-7).
+	let totalTokenUsage = 0;
 	try {
 		const ledgerActivityPort = createLedgerActivityPort(emitter);
 		// Tasks dispatch sequentially, so a single mutable identity holder safely
@@ -4015,8 +4476,19 @@ async function runPlanForgeDispatchCommand(
 		const { orchestrator, eventBus: cliEventBus } = await loadCliOrchestrator(
 			workspace,
 			enforceAcceptance
-				? { ledgerActivityPort, profileRegistry, acceptancePort }
-				: { ledgerActivityPort },
+				? {
+						ledgerActivityPort,
+						profileRegistry,
+						acceptancePort,
+						provisionDeps: provisionWorktreeDeps,
+						claudeMaxTurns: opts?.claudeMaxTurns,
+						budgets: opts?.budgets,
+					}
+				: {
+						ledgerActivityPort,
+						claudeMaxTurns: opts?.claudeMaxTurns,
+						budgets: opts?.budgets,
+					},
 		);
 
 		for (const packet of packets) {
@@ -4030,15 +4502,25 @@ async function runPlanForgeDispatchCommand(
 						unit: { ...packet.unit, policyProfile: acceptance.profileName },
 					}
 				: packet;
-			const result = await orchestrator.runPacketAsync(
+			const result = (await orchestrator.runPacketAsync(
 				parseUnitPacket(JSON.stringify(dispatchedPacket)),
 				cliEventBus,
-			);
+			)) as {
+				run: { id: string; status: string };
+				mergedHeadSha?: string;
+				receipt?: { tokenUsage?: number };
+			};
 			runs.push({
 				task: packet.unit.id,
 				run_id: result.run.id,
 				status: result.run.status,
 			});
+			if (result.mergedHeadSha) {
+				lastMergedHeadSha = result.mergedHeadSha;
+			}
+			// Accumulate the real per-task token usage (terminal `usage`), even for a
+			// failed task — the worker still consumed those tokens against the budget.
+			totalTokenUsage += result.receipt?.tokenUsage ?? 0;
 			if (result.run.status !== "passed") {
 				break; // PF2 dependsOn PF1: stop the chain on first failure.
 			}
@@ -4047,6 +4529,13 @@ async function runPlanForgeDispatchCommand(
 		allPassed =
 			runs.length === packets.length &&
 			runs.every((r) => r.status === "passed");
+
+		opts?.onOutcome?.({
+			allPassed,
+			mergedHeadSha: lastMergedHeadSha,
+			tokenUsage: totalTokenUsage,
+			runs,
+		});
 
 		// Terminal plan receipt (M2-S6): one signed plan_receipt per admitted plan,
 		// chaining to the plan_admitted event, emitted after all activities and made
@@ -4067,6 +4556,21 @@ async function runPlanForgeDispatchCommand(
 				decidedAt: new Date().toISOString(),
 			}),
 		);
+
+		// priorWork handoff (GAP-5): persist a structured plan summary for the next
+		// iteration. Best-effort and wrapped so a storage failure cannot shadow the
+		// already-flushed plan_receipt. mergedSha is undefined here; GAP-7 passes
+		// result.mergedHeadSha after commitAndMergeWorkspace.
+		try {
+			writePlanSummaryToStorage(
+				summaryStore,
+				plan,
+				runs,
+				allPassed ? "completed" : "failed",
+			);
+		} catch (summaryErr) {
+			stdout(`[warn] failed to persist plan summary: ${String(summaryErr)}`);
+		}
 	} finally {
 		try {
 			await emitter.close(); // flushes + closes the signed subprocess
@@ -4091,6 +4595,420 @@ async function runPlanForgeDispatchCommand(
 }
 
 /**
+ * `buildplane planforge plan --roadmap <file> --out <plan.md> --trusted-base <sha>`:
+ * read the L0 tape's completed slices, select the next eligible roadmap slice,
+ * deterministically emit its `plan.md`, and validate it through the dry-run
+ * pipeline. Writes the plan.md and exits 0 iff the emitted plan validates PASS —
+ * the gate that proves the plan is real is `planforge validate`, not a worker
+ * exit code. The `--once` loop path drives this deterministic emitter; the
+ * LLM-authored-plan worker path is gated behind a later flag.
+ */
+async function runPlanForgePlanCommand(
+	args: readonly string[],
+	cwd: string,
+	stdout: (line: string) => void,
+): Promise<number> {
+	const roadmapPath = readFlag(args, "--roadmap") ?? "docs/roadmap.json";
+	const outPath = readFlag(args, "--out");
+	if (!outPath) {
+		throw new Error(
+			"Missing required --out <plan.md> argument for PlanForge plan.",
+		);
+	}
+	const trustedBase = readFlag(args, "--trusted-base");
+	if (!trustedBase) {
+		throw new Error(
+			"Missing required --trusted-base <sha> argument for PlanForge plan.",
+		);
+	}
+	const jsonOut = args.includes("--json");
+	const remote =
+		readFlag(args, "--remote") ??
+		"https://github.com/SollanSystems/buildplane.git";
+	const proposal = await runPlannerProposal({
+		roadmapPath: resolve(cwd, roadmapPath),
+		workspace: resolve(cwd),
+		remote,
+		trustedBase,
+	});
+	writeFileSync(resolve(cwd, outPath), proposal.planMarkdown, "utf8");
+	stdout(
+		jsonOut
+			? formatJson({
+					slice_id: proposal.sliceId,
+					status: proposal.status,
+					out: outPath,
+				})
+			: `PlanForge planner proposed ${proposal.sliceId} -> ${outPath} (${proposal.status}).`,
+	);
+	return proposal.status === PLANFORGE_VALIDATION_STATUS_PASS ? 0 : 1;
+}
+
+/**
+ * Strict positive-integer flag parse for the loop's runaway-guard bounds.
+ * Accepts both `--flag=N` and `--flag N`. Rejects non-positive / non-integer.
+ */
+function parseIntFlag(
+	args: readonly string[],
+	flag: string,
+	fallback: number | null,
+): number | null {
+	const eq = args.find((a) => a.startsWith(`${flag}=`));
+	const raw = eq ? eq.slice(flag.length + 1) : readFlag(args, flag);
+	if (raw === undefined) return fallback;
+	const n = Number(raw);
+	if (!Number.isSafeInteger(n) || n <= 0) {
+		throw new Error(`${flag} must be a positive integer.`);
+	}
+	return n;
+}
+
+const LOOP_DEFAULT_REMOTE = "https://github.com/SollanSystems/buildplane.git";
+
+/**
+ * Default planner port: load `docs/roadmap.json`, select the next eligible
+ * slice relative to the loop's pinned `trustedBase`, deterministically emit its
+ * `plan.md` into `.buildplane/loop/<sliceId>.plan.md`, and return its path +
+ * slice id + the roadmap milestone. A roadmap-exhausted / dependency-blocked
+ * roadmap reports `{ done: true }` (terminal roadmap-complete).
+ */
+async function defaultLoopPlanner(ctx: {
+	workspace: string;
+	lastMergedHeadSha: string | null;
+	trustedBase: string | null;
+}): Promise<LoopSliceProposal | { done: true }> {
+	const roadmapPath = resolve(ctx.workspace, "docs", "roadmap.json");
+	if (!existsSync(roadmapPath)) {
+		return { done: true };
+	}
+	// Pin one base for the loop's lifetime (GAP-9 carry-forward): the planner
+	// reads completed-slice ids relative to this base, so it must not move
+	// across iterations or completed slices read as not-done.
+	const trustedBase = ctx.trustedBase ?? ctx.lastMergedHeadSha ?? "";
+	const doc: RoadmapDoc = loadRoadmapFromString(
+		readFileSync(roadmapPath, "utf8"),
+	);
+	const proposal = await runPlannerProposal({
+		roadmapPath,
+		workspace: ctx.workspace,
+		remote: LOOP_DEFAULT_REMOTE,
+		trustedBase,
+	}).catch((err) => {
+		// selectNextRoadmapSlice throws when the roadmap is exhausted /
+		// dependency-blocked — that is "done", not a planner error.
+		if (
+			err instanceof Error &&
+			/no eligible roadmap slice|roadmap exhausted/i.test(err.message)
+		) {
+			return null;
+		}
+		throw err;
+	});
+	if (!proposal) {
+		return { done: true };
+	}
+	const loopDir = resolve(ctx.workspace, ".buildplane", "loop");
+	mkdirSync(loopDir, { recursive: true });
+	const planPath = join(loopDir, `${proposal.sliceId}.plan.md`);
+	writeFileSync(planPath, proposal.planMarkdown, "utf8");
+	return { planPath, sliceId: proposal.sliceId, milestone: doc.milestone };
+}
+
+/** Default envelope port: load the active signed envelope + subset-check. */
+const defaultLoopEnvelope = {
+	async load(
+		workspace: string,
+	): Promise<{ envelope: AuthorizationEnvelopeV0 } | null> {
+		const active = await loadActiveAuthorizationEnvelope(resolve(workspace));
+		return active ? { envelope: active.envelope } : null;
+	},
+	check(
+		proposal: EnvelopeProposal,
+		envelope: AuthorizationEnvelopeV0 | null,
+	): { ok: true } | { ok: false; reason: string } {
+		if (!envelope) {
+			return {
+				ok: false,
+				reason:
+					"no active kernel-signed authorization envelope — run `buildplane planforge authorize-envelope` first.",
+			};
+		}
+		const evaluation = evaluateEnvelopeAdmission(
+			proposal,
+			envelope,
+			new Date(),
+		);
+		if (evaluation.status === "admitted") {
+			return { ok: true };
+		}
+		return { ok: false, reason: evaluation.reasons.join(" ") };
+	},
+};
+
+/** Default dry-run port: validate the plan.md through the dry-run pipeline. */
+async function defaultLoopDryRun(
+	planPath: string,
+	cwd: string,
+): Promise<{ ok: true; plan: PlanForgePlan } | { ok: false; reason: string }> {
+	const plan = createPlanForgeDryRunPlan(resolve(cwd, planPath));
+	if (plan.validation.status !== PLANFORGE_VALIDATION_STATUS_PASS) {
+		return {
+			ok: false,
+			reason: `plan validation ${plan.validation.status}`,
+		};
+	}
+	return { ok: true, plan };
+}
+
+/** Default admit port: route through the existing signed-admit command. */
+async function defaultLoopAdmit(
+	planPath: string,
+	cwd: string,
+): Promise<{ admittedEventId: string }> {
+	const code = await runPlanForgeAdmitCommand(
+		[
+			"--input",
+			planPath,
+			"--approve",
+			"--operator",
+			"loop-supervisor",
+			"--json",
+		],
+		cwd,
+		() => {},
+	);
+	if (code !== 0) {
+		throw new Error(`planforge admit failed (exit ${code}).`);
+	}
+	return { admittedEventId: "" };
+}
+
+/** Default dispatch port: route through the existing dispatch command with the
+ * runaway-guard turn cap AND budgets, capturing the rich outcome (incl.
+ * mergedHeadSha + real token usage). The lowered worker turn cap is bound by the
+ * loop command (closure over maxTurns).
+ *
+ * The guard's `budgets` are threaded to the orchestrator so its per-packet
+ * AbortController aborts a runaway model worker mid-stream once it crosses
+ * maxTokens / maxComputeTimeMs (GAP-7 CRITICAL-1). `dispatchCommand` is injected
+ * so the budget-threading contract is unit-testable without a full dispatch.
+ */
+export function makeDefaultLoopDispatch(
+	maxTurns: number,
+	dispatchCommand: typeof runPlanForgeDispatchCommand = runPlanForgeDispatchCommand,
+): (
+	planPath: string,
+	cwd: string,
+	guard: PolicyProfile,
+) => Promise<LoopDispatchResult> {
+	return async (planPath, cwd, guard) => {
+		let outcome: LoopDispatchResult = {
+			allPassed: false,
+			mergedHeadSha: null,
+			tokenUsage: 0,
+			runs: [],
+		};
+		await dispatchCommand(["--input", planPath, "--json"], cwd, () => {}, {
+			claudeMaxTurns: maxTurns,
+			// Deliver the guard's budgets so the orchestrator installs the
+			// per-packet AbortController budget subscription for this dispatch.
+			budgets: guard.budgets,
+			onOutcome: (o) => {
+				outcome = o;
+			},
+		});
+		return outcome;
+	};
+}
+
+/**
+ * `buildplane planforge loop`: the supervisor FSM. Each iteration runs
+ * plan → dry-run → envelope-check → admit → dispatch → accept → merge →
+ * re-anchor → advance, persisting `loop-state.json` atomically after every
+ * transition. Resumes from a persisted non-terminal state. Halts on any
+ * terminal condition: roadmap-complete, `.buildplane/loop.stop`, acceptance
+ * FAIL, envelope breach, cumulative token budget, max-iterations, planner
+ * error. The squash-merge happens INSIDE the dispatch (GAP-8); the re-anchor
+ * phase only READS the merged HEAD (D3) — no second merge.
+ */
+async function runPlanForgeLoopCommand(
+	args: readonly string[],
+	cwd: string,
+	stdout: (line: string) => void,
+	_stderr: (line: string) => void,
+	deps: RunCliDependencies | undefined,
+): Promise<number> {
+	const workspace = resolve(cwd);
+	const jsonOut = args.includes("--json");
+	const once = args.includes("--once");
+	const maxIterations = once ? 1 : parseIntFlag(args, "--max-iterations", null);
+	const maxTurns = parseIntFlag(args, "--max-turns", 12) ?? 12;
+	const maxTokens = parseIntFlag(args, "--max-tokens", 200_000) ?? 200_000;
+	const wallClockMs =
+		parseIntFlag(args, "--wall-clock-ms", 30 * 60_000) ?? 30 * 60_000;
+
+	const planner = deps?.loopPlanner ?? defaultLoopPlanner;
+	const envelope = deps?.loopEnvelope ?? defaultLoopEnvelope;
+	const dryRun = deps?.loopDryRun ?? defaultLoopDryRun;
+	const admit = deps?.loopAdmit ?? defaultLoopAdmit;
+	const dispatch = deps?.loopDispatch ?? makeDefaultLoopDispatch(maxTurns);
+
+	// Per-iteration runaway guard (distinct from the cumulative token budget):
+	// maxTurns is the lowered worker turn cap; maxTokens/wallClockMs drive the
+	// orchestrator's per-packet AbortController.
+	const guard = runawayGuardProfile({
+		profileName: "planforge-loop-guard",
+		maxTokens,
+		maxComputeTimeMs: wallClockMs,
+	});
+
+	// Resume from a persisted non-terminal state, else start fresh. tokenBudget
+	// is the envelope's cumulative cross-iteration cap (D6), pinned at start.
+	const loadedEnvelope = await envelope.load(workspace);
+	let state: LoopState =
+		readLoopState(workspace) ??
+		initialLoopState({
+			maxIterations,
+			tokenBudget: loadedEnvelope?.envelope?.token_budget ?? null,
+			trustedBase: null,
+		});
+	let exitCode = 0;
+	const commit = (s: LoopState): void => {
+		state = s;
+		writeLoopStateAtomic(workspace, state);
+	};
+
+	// The driver always re-enters at the planner each iteration; it does NOT
+	// resume from a persisted mid-iteration `phase`. A crash mid-iteration simply
+	// re-runs the whole iteration — which is idempotent (admit dedupes on the
+	// signed tape, dispatch re-derives the verified admission), so `state.phase`
+	// is informational (an observability breadcrumb), not resume-driving.
+	while (!state.terminal) {
+		if (stopFileRequested(workspace)) {
+			commit(nextLoopState(state, { type: "stop-file" }));
+			break;
+		}
+		// Stop BEFORE starting another slice once the completed-iteration count
+		// has reached the cap (`--once` => maxIterations 1 runs exactly one slice).
+		if (
+			state.maxIterations !== null &&
+			state.iteration >= state.maxIterations
+		) {
+			commit(
+				nextLoopState({ ...state, phase: "advance" }, { type: "advance" }),
+			);
+			break;
+		}
+		const env = await envelope.load(workspace);
+		let proposal: LoopSliceProposal | { done: true };
+		try {
+			proposal = await planner({
+				workspace,
+				lastMergedHeadSha: state.lastMergedHeadSha,
+				trustedBase: state.trustedBase,
+			});
+		} catch (err) {
+			commit(
+				nextLoopState(state, {
+					type: "planner-error",
+					detail: err instanceof Error ? err.message : String(err),
+				}),
+			);
+			exitCode = 1;
+			break;
+		}
+		if ("done" in proposal) {
+			commit(nextLoopState(state, { type: "roadmap-complete" }));
+			break;
+		}
+		commit(
+			nextLoopState(state, {
+				type: "slice-selected",
+				sliceId: proposal.sliceId,
+				planPath: proposal.planPath,
+			}),
+		);
+
+		const dr = await dryRun(proposal.planPath, cwd);
+		if (!dr.ok) {
+			commit(
+				nextLoopState(state, { type: "acceptance-failed", detail: dr.reason }),
+			);
+			exitCode = 1;
+			break;
+		}
+		commit(nextLoopState(state, { type: "dry-run-ok" }));
+
+		const check = envelope.check(
+			buildEnvelopeProposal(dr.plan, proposal.milestone),
+			env?.envelope ?? null,
+		);
+		if (!check.ok) {
+			commit(
+				nextLoopState(state, { type: "envelope-breach", detail: check.reason }),
+			);
+			exitCode = 2;
+			break;
+		}
+		commit(nextLoopState(state, { type: "envelope-ok" }));
+
+		await admit(proposal.planPath, cwd);
+		commit(nextLoopState(state, { type: "admitted" }));
+
+		const d = await dispatch(proposal.planPath, cwd, guard);
+		commit(nextLoopState(state, { type: "dispatched" }));
+
+		// Feed the REAL per-dispatch token usage into the cumulative cross-iteration
+		// token-budget cap (GAP-7 CRITICAL-2). Tokens are consumed even when the
+		// dispatch failed, so account for them before the acceptance branch. If the
+		// cumulative total exceeds the envelope's token_budget, the loop terminates
+		// `token-budget` here and stops.
+		if (d.tokenUsage > 0) {
+			const afterTokens = nextLoopState(state, {
+				type: "token-deltas-observed",
+				count: d.tokenUsage,
+			});
+			commit(afterTokens);
+			if (afterTokens.terminal?.reason === "token-budget") break;
+		}
+
+		if (!d.allPassed) {
+			commit(
+				nextLoopState(state, {
+					type: "acceptance-failed",
+					detail: "dispatch/acceptance failed",
+				}),
+			);
+			exitCode = 1;
+			break;
+		}
+		commit(nextLoopState(state, { type: "accepted" }));
+
+		// D3: the squash-merge already happened inside the dispatch; read the
+		// merged HEAD, never merge again.
+		const headSha = d.mergedHeadSha ?? state.lastMergedHeadSha ?? "";
+		commit(nextLoopState(state, { type: "merged", headSha }));
+		commit(nextLoopState({ ...state, phase: "advance" }, { type: "advance" }));
+	}
+
+	const summary = {
+		status: state.terminal?.reason ?? "stopped",
+		iterations: state.iteration,
+		terminal: state.terminal,
+		statePath: loopStatePath(workspace),
+	};
+	stdout(
+		jsonOut
+			? formatJson(summary)
+			: `loop terminated: ${summary.status} after ${state.iteration} iteration(s).`,
+	);
+	if (state.terminal?.reason === "acceptance-fail") exitCode = exitCode || 1;
+	if (state.terminal?.reason === "planner-error") exitCode = exitCode || 1;
+	if (state.terminal?.reason === "envelope-breach") exitCode = 2;
+	return exitCode;
+}
+
+/**
  * `buildplane planforge resume --input <file>`: explicit-input S7b recovery.
  * Rebuilds the PlanForge plan from input, verifies the signed admission payload,
  * replays durable activity completions from the tape, skips those completed
@@ -4108,7 +5026,26 @@ async function runPlanForgeResumeCommand(
 			"Missing required --input <file> argument for PlanForge resume.",
 		);
 	}
-	const jsonOut = args.includes("--json");
+	return resumePlanForgePlanFromInput(inputPath, cwd, stdout, {
+		json: args.includes("--json"),
+	});
+}
+
+/**
+ * Shared replay-skip-resume body, extracted from `runPlanForgeResumeCommand` so
+ * both `planforge resume --input` and `planforge recover` (S7 crash recovery)
+ * drive the identical path: reconstruct the plan from `inputPath`, re-verify the
+ * signed `plan_admitted`, replay durable activity completions from the tape, skip
+ * the recorded prefix, execute only the remaining suffix, and append the terminal
+ * receipt if the prior run crashed after execution but before `plan_receipt`.
+ */
+export async function resumePlanForgePlanFromInput(
+	inputPath: string,
+	cwd: string,
+	stdout: (line: string) => void,
+	opts: { json: boolean },
+): Promise<number> {
+	const jsonOut = opts.json;
 
 	const plan = createPlanForgeDryRunPlan(resolve(cwd, inputPath));
 	const workspace = resolve(cwd);
@@ -4232,6 +5169,8 @@ async function runPlanForgeResumeCommand(
 		};
 		await emitPlanForgeTerminalReceipt({
 			emitter,
+			workspace,
+			runId,
 			plan,
 			admittedEventId,
 			outcome: allPassed ? "completed" : "failed",
@@ -4269,6 +5208,65 @@ async function runPlanForgeResumeCommand(
 			: `Resumed PlanForge plan ${plan.id}: ${runs.length}/${packets.length} task(s).`,
 	);
 	return allPassed ? 0 : 1;
+}
+
+/**
+ * `buildplane planforge recover [--json]`: S7 startup crash recovery with NO
+ * `--input`. Scans storage for orphaned `running` PlanForge dispatches (via the
+ * dispatch-manifest sidecar), then replays the signed tape for each to resume the
+ * remaining suffix and emit any missing terminal receipt — re-establishing
+ * `will_execute_worker` trust FROM THE TAPE, not the lost in-memory WeakSet. The
+ * tape is authoritative over the storage status field; recover re-runs the suffix
+ * and emits the receipt on the TAPE, and does NOT rewrite the storage `running`
+ * row. Exit 0 iff every orphan resumes to completion (or there are no orphans).
+ */
+async function runPlanForgeRecoverCommand(
+	args: readonly string[],
+	cwd: string,
+	stdout: (line: string) => void,
+): Promise<number> {
+	const jsonOut = args.includes("--json");
+	const workspace = resolve(cwd);
+	const orphans = await findOrphanedPlanForgeDispatches(workspace);
+	if (orphans.length === 0) {
+		stdout(
+			jsonOut
+				? formatJson({ status: "no_orphans", recovered: [] })
+				: "PlanForge recover: no orphaned running dispatches found.",
+		);
+		return 0;
+	}
+	const recovered: Array<{
+		plan_id: string;
+		run_id: string;
+		status: "resumed" | "failed";
+	}> = [];
+	let allOk = true;
+	for (const orphan of orphans) {
+		const captured: string[] = [];
+		const code = await resumePlanForgePlanFromInput(
+			orphan.inputPath,
+			cwd,
+			(line) => captured.push(line),
+			{ json: true },
+		);
+		const ok = code === 0;
+		allOk = allOk && ok;
+		recovered.push({
+			plan_id: orphan.planId,
+			run_id: orphan.runId,
+			status: ok ? "resumed" : "failed",
+		});
+	}
+	stdout(
+		jsonOut
+			? formatJson({
+					status: allOk ? "recovered" : "failed",
+					recovered,
+				})
+			: `PlanForge recover: ${recovered.length} orphan(s) processed.`,
+	);
+	return allOk ? 0 : 1;
 }
 
 async function runNativeCommand(
@@ -4442,9 +5440,31 @@ export async function runCli(
 			if (subcommand === "resume") {
 				return await runPlanForgeResumeCommand(rest.slice(1), cwd, stdout);
 			}
+			if (subcommand === "recover") {
+				return await runPlanForgeRecoverCommand(rest.slice(1), cwd, stdout);
+			}
+			if (subcommand === "plan") {
+				return await runPlanForgePlanCommand(rest.slice(1), cwd, stdout);
+			}
+			if (subcommand === "authorize-envelope") {
+				return await runPlanForgeAuthorizeEnvelopeCommand(
+					rest.slice(1),
+					cwd,
+					stdout,
+				);
+			}
+			if (subcommand === "loop") {
+				return await runPlanForgeLoopCommand(
+					rest.slice(1),
+					cwd,
+					stdout,
+					stderr,
+					deps,
+				);
+			}
 			if (subcommand !== "dry-run") {
 				throw new Error(
-					"Unsupported PlanForge command. Only dry-run, admit, dispatch, and resume are available; other non-dry-run PlanForge forms are intentionally disabled.",
+					"Unsupported PlanForge command. Only dry-run, admit, dispatch, resume, recover, plan, loop, and authorize-envelope are available; other non-dry-run PlanForge forms are intentionally disabled.",
 				);
 			}
 			const subRest = rest.slice(1);

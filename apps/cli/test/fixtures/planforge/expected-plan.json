@@ -2,7 +2,7 @@
 	"schemaVersion": "planforge.plan.v0",
 	"id": "pf-plan-95d7132e",
 	"idempotencyKey": "planforge:v0:buildplane:15dbb32db0e1f0024687533755805fc23f3ef6d4:95d7132e",
-	"title": "PlanForge dry-run admission slice",
+	"title": "PlanForge plan",
 	"goal": "Create a local-first PlanForge dry-run slice for Buildplane that accepts this goal fixture, validates the trusted boundary, and emits a reviewable plan JSON fixture without executing code or writing board tasks.",
 	"trustedBase": "15dbb32db0e1f0024687533755805fc23f3ef6d4",
 	"tasks": [
@@ -84,6 +84,18 @@
 				"status": "PASS",
 				"message": "Operator goal, repository remote, trusted base, worktree policy, and safety constraints are present.",
 				"evidenceRefs": ["goal-input.md#repository-context"]
+			},
+			{
+				"id": "tasks-present",
+				"status": "PASS",
+				"message": "Plan declares at least one task with verification commands.",
+				"evidenceRefs": ["goal-input.md#safety-constraints"]
+			},
+			{
+				"id": "tasks-valid",
+				"status": "PASS",
+				"message": "Every declared task carries at least one verification command.",
+				"evidenceRefs": ["goal-input.md#safety-constraints"]
 			}
 		],
 		"requiredEvidence": [
@@ -92,7 +104,8 @@
 			"trusted_base",
 			"worktree_policy",
 			"dry_run_constraints",
-			"trusted_boundary"
+			"trusted_boundary",
+			"tasks"
 		],
 		"missingEvidence": [],
 		"unsafeReasons": []
@@ -102,15 +115,15 @@
 		"status": "PASS",
 		"planId": "pf-plan-95d7132e",
 		"idempotencyKey": "planforge:v0:buildplane:15dbb32db0e1f0024687533755805fc23f3ef6d4:95d7132e",
-		"inputDigest": "sha256:ac29ab0bacb4b72fd4b31bebb228ea30982e7f9e4be7701aef9972c6ff57a838",
-		"planDigest": "sha256:510fa97554e5c087126764aa73438ad4571c9016bdf00a416e5938a171364f60",
+		"inputDigest": "sha256:7a98a05fc70a6447c71e8c06c8737d79eb8c969d0bbe180bb2383f676dabf041",
+		"planDigest": "sha256:1804e391006396e282c05a8b46c4262a1a9f528327521c2da555fd721de698c0",
 		"trustedBase": "15dbb32db0e1f0024687533755805fc23f3ef6d4",
 		"admittedBy": "buildplane-kernel",
 		"generatedAt": "2026-05-07T00:00:00.000Z",
 		"dryRun": true,
 		"sideEffects": [],
 		"notes": [
-			"Receipt preview is documentation/fixture only for PF1.",
+			"Receipt preview is documentation/fixture only.",
 			"PASS does not create tasks, grant write capabilities, merge, deploy, or start workers.",
 			"Non-PASS statuses fail closed: BLOCKED, FAILED, INSUFFICIENT_EVIDENCE, UNSAFE_TO_RUN."
 		]

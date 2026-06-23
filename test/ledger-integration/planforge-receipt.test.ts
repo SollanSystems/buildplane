@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -31,6 +31,7 @@ const VERIFIER = resolve(
 interface DispatchEnv {
 	dir: string;
 	home: string;
+	binDir: string;
 	eventsDbPath: string;
 	cleanup: () => Promise<void>;
 }
@@ -83,6 +84,7 @@ async function runCliCapture(
 async function makeDispatchEnv(): Promise<DispatchEnv> {
 	const dir = await mkdtemp(join(tmpdir(), "bp-receipt-ws-"));
 	const home = await mkdtemp(join(tmpdir(), "bp-receipt-home-"));
+	const binDir = await mkdtemp(join(tmpdir(), "bp-receipt-bin-"));
 	const keyDir = join(home, ".buildplane", "keys", "kernel");
 	mkdirSync(keyDir, { recursive: true });
 	// Raw 32-byte ed25519 seed — export derives the verifying key from this same
@@ -97,12 +99,42 @@ async function makeDispatchEnv(): Promise<DispatchEnv> {
 	return {
 		dir,
 		home,
+		binDir,
 		eventsDbPath: join(dir, ".buildplane", "ledger", "events.db"),
 		cleanup: async () => {
 			await rm(dir, { recursive: true, force: true });
 			await rm(home, { recursive: true, force: true });
+			await rm(binDir, { recursive: true, force: true });
 		},
 	};
+}
+
+/**
+ * Install a `claude` shim on PATH. PlanForge dispatch spawns a real claude-code
+ * model worker; without a binary the worker exits non-zero and the run fails.
+ * The shim emits a valid result and exits 0 so the model packet succeeds.
+ */
+function installClaudeShim(binDir: string): void {
+	const shim = join(binDir, "claude");
+	writeFileSync(shim, '#!/bin/sh\necho \'{"result":"ok"}\'\nexit 0\n', "utf8");
+	chmodSync(shim, 0o755);
+}
+
+/**
+ * Install a `pnpm` shim on PATH. With --enforce-acceptance, `pnpm` is invoked
+ * for TWO purposes: GAP-3 worktree provisioning (`pnpm install --frozen-lockfile`,
+ * which must succeed cleanly before the gate) and the gate's `pnpm lint` check.
+ * The `install` invocation is intercepted to exit 0; `body` is the shell body for
+ * the CHECK invocation, letting a test steer the gate's verdict.
+ */
+function installPnpmShim(binDir: string, body: string): void {
+	const shim = join(binDir, "pnpm");
+	writeFileSync(
+		shim,
+		`#!/bin/sh\nif [ "$1" = "install" ]; then exit 0; fi\n${body}\n`,
+		"utf8",
+	);
+	chmodSync(shim, 0o755);
 }
 
 async function initBuildplaneProject(dir: string): Promise<void> {
@@ -170,13 +202,24 @@ describe("planforge dispatch — signed plan_receipt + live-tape export end-to-e
 	let env: DispatchEnv;
 	let originalHome: string | undefined;
 	let originalNativeBin: string | undefined;
+	let originalPath: string | undefined;
 
 	beforeEach(async () => {
 		env = await makeDispatchEnv();
 		originalHome = process.env.HOME;
 		originalNativeBin = process.env.BUILDPLANE_NATIVE_BIN;
+		originalPath = process.env.PATH;
 		process.env.HOME = env.home;
 		process.env.BUILDPLANE_NATIVE_BIN = resolveNativeBinaryForLedgerTests();
+		// Dispatch spawns a real claude-code model worker; shim it so the model
+		// packet succeeds (no `claude` binary exists in the test sandbox). The shim
+		// dir is first on PATH so the gate's `pnpm` check also resolves it. The
+		// acceptance gate is ON by default (GAP-3); a green `pnpm` shim is the
+		// default so the first test's plain dispatch passes the gate. The
+		// rejection test overrides it with a failing-check shim.
+		process.env.PATH = `${env.binDir}:${originalPath ?? ""}`;
+		installClaudeShim(env.binDir);
+		installPnpmShim(env.binDir, "exit 0");
 	});
 
 	afterEach(async () => {
@@ -189,6 +232,11 @@ describe("planforge dispatch — signed plan_receipt + live-tape export end-to-e
 			delete process.env.BUILDPLANE_NATIVE_BIN;
 		} else {
 			process.env.BUILDPLANE_NATIVE_BIN = originalNativeBin;
+		}
+		if (originalPath === undefined) {
+			delete process.env.PATH;
+		} else {
+			process.env.PATH = originalPath;
 		}
 		await env.cleanup();
 	});
@@ -320,9 +368,10 @@ describe("planforge dispatch — signed plan_receipt + live-tape export end-to-e
 		);
 		expect(admit.code).toBe(0);
 
-		// The first task's verificationCommands (`pnpm lint`, …) cannot run in the
-		// freshly-created git worktree (no installed deps), so the gate rejects the
-		// run before any merge: exit 1, terminal outcome "failed".
+		// Provisioning (`pnpm install`) exits 0 cleanly; the gate's `pnpm lint`
+		// check exits non-zero, so the gate rejects the run before any merge:
+		// exit 1, terminal outcome "failed".
+		installPnpmShim(env.binDir, "exit 1");
 		const dispatch = await runCliCapture(
 			[
 				"planforge",

@@ -24,14 +24,14 @@ export const PLANFORGE_REQUIRED_EVIDENCE = [
 	"worktree_policy",
 	"dry_run_constraints",
 	"trusted_boundary",
+	"tasks",
 ] as const;
-
-export const PLANFORGE_TASK_IDS = ["PF1", "PF2"] as const;
 
 export const PLANFORGE_ALLOWED_SIDE_EFFECTS = [
 	"local-doc",
 	"local-fixture",
 	"local-receipt",
+	"code-edit",
 ] as const;
 
 export const PLANFORGE_FORBIDDEN_SIDE_EFFECTS = [
@@ -59,7 +59,6 @@ export type PlanForgeValidationStatus =
 	(typeof PLANFORGE_VALIDATION_STATUSES)[number];
 export type PlanForgeRequiredEvidence =
 	(typeof PLANFORGE_REQUIRED_EVIDENCE)[number];
-export type PlanForgeTaskId = (typeof PLANFORGE_TASK_IDS)[number];
 export type PlanForgeAllowedSideEffect =
 	(typeof PLANFORGE_ALLOWED_SIDE_EFFECTS)[number];
 export type PlanForgeForbiddenSideEffect =
@@ -109,12 +108,12 @@ export interface PlanForgeValidation {
 }
 
 export interface PlanForgeTask {
-	id: PlanForgeTaskId;
+	id: string;
 	title: string;
 	objective: string;
 	assigneeHint: string;
 	workspace: string;
-	dependsOn: PlanForgeTaskId[];
+	dependsOn: string[];
 	allowedSideEffects: PlanForgeAllowedSideEffect[];
 	forbiddenSideEffects: PlanForgeForbiddenSideEffect[];
 	acceptanceCriteria: string[];

@@ -1,3 +1,5 @@
+import { type ParsedTask, parseTasks } from "./parse-tasks.js";
+
 export interface PlanForgeCompileResult {
 	content: string;
 	goal: string | undefined;
@@ -7,6 +9,7 @@ export interface PlanForgeCompileResult {
 	safetyConstraints: string | undefined;
 	inputEvidenceName: string;
 	evidenceRefs: string[];
+	parsedTasks: ParsedTask[];
 }
 
 export function sectionText(
@@ -56,6 +59,7 @@ export function compile(
 	const remote = listValue(repositoryContext, "Remote");
 	const trustedBase = listValue(repositoryContext, "Trusted base");
 	const worktreePolicy = listValue(repositoryContext, "Worktree policy");
+	const parsedTasks = parseTasks(content);
 	return {
 		content,
 		goal,
@@ -65,5 +69,6 @@ export function compile(
 		safetyConstraints,
 		inputEvidenceName,
 		evidenceRefs,
+		parsedTasks,
 	};
 }

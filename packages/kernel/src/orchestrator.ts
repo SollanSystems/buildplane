@@ -141,6 +141,15 @@ export interface CreateBuildplaneOrchestratorOptions {
 	readonly ledgerActivityPort?: LedgerActivityPort;
 	readonly acceptanceEvidencePort?: BuildplaneAcceptanceEvidencePort;
 	readonly acceptancePort?: BuildplaneAcceptancePort;
+	/**
+	 * Optional hook invoked after the isolated worktree is created and before
+	 * the workspace row is recorded / admission proceeds. Intended for dependency
+	 * provisioning (e.g. `pnpm install --frozen-lockfile`) so acceptance-check
+	 * commands that invoke workspace tooling have their binaries and packages
+	 * available. Any thrown error surfaces as a `workspace-provision-failed`
+	 * infrastructure failure; the worktree is retained for operator inspection.
+	 */
+	readonly provisionDeps?: (workspacePath: string) => void;
 }
 
 export function createBuildplaneOrchestrator(
@@ -161,6 +170,7 @@ export function createBuildplaneOrchestrator(
 	const acceptanceEvidencePort =
 		options.acceptanceEvidencePort ?? createDefaultAcceptanceEvidencePort();
 	const acceptancePort = options.acceptancePort;
+	const provisionDeps = options.provisionDeps;
 	const outcomeRouting = options.outcomeRouting ?? defaultOutcomeRoutingConfig;
 	const strategyWorkflowPromotionRule =
 		"multi-round-strategy-workflow->procedure";
@@ -808,8 +818,7 @@ export function createBuildplaneOrchestrator(
 					};
 				}
 				if (
-					!admitted ||
-					!admitted.signedByKernel ||
+					!admitted?.signedByKernel ||
 					admitted.authorizedNextStep !== PLAN_ADMITTED_AUTHORIZED_NEXT_STEP
 				) {
 					return {
@@ -1033,6 +1042,28 @@ export function createBuildplaneOrchestrator(
 			return { ok: false, result: finalizeInfrastructureFailure(run, failure) };
 		}
 
+		if (provisionDeps) {
+			try {
+				provisionDeps(preparedWorkspace.path);
+			} catch (error) {
+				// The worktree exists but its dependencies could not be provisioned.
+				// Retain it so the operator can inspect the failed state; do not
+				// record the workspace row or proceed to admission/execution — a run
+				// whose acceptance checks cannot execute must never reach the gate.
+				const failure = infrastructureFailure(
+					"workspace-provision-failed",
+					error,
+				);
+				return {
+					ok: false,
+					result: finalizeInfrastructureFailure(run, failure, {
+						workspace: preparedWorkspace,
+						workspaceStatus: "retained",
+					}),
+				};
+			}
+		}
+
 		try {
 			storage.recordWorkspacePrepared(run.id, {
 				path: preparedWorkspace.path,
@@ -1234,13 +1265,15 @@ export function createBuildplaneOrchestrator(
 
 		// Merge workspace changes first — if this fails we must not mark the run as passed
 		// and must retain the workspace so changes are not lost.
+		let mergedHeadSha: string | undefined;
 		if (workspace.commitAndMergeWorkspace) {
 			try {
-				workspace.commitAndMergeWorkspace({
+				const mergeResult = workspace.commitAndMergeWorkspace({
 					path: preparedWorkspace.path,
 					runId: run.id,
 					projectRoot,
 				});
+				mergedHeadSha = mergeResult.mergedHeadSha;
 			} catch (error) {
 				return finalizeInfrastructureFailure(
 					run,
@@ -1357,6 +1390,7 @@ export function createBuildplaneOrchestrator(
 			run: completedRun,
 			receipt,
 			decision,
+			mergedHeadSha,
 		};
 	}
 

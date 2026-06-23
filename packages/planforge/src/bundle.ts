@@ -15,6 +15,18 @@ export interface PlanForgeAttachedCapabilityBundle {
 	};
 }
 
+/** The loop worker binary. Dispatched packets route to the ClaudeCodeExecutor,
+ * which spawns `claude` directly; but the worker (claude, running in the
+ * worktree) may recursively invoke `claude`/sub-tooling through the run_command
+ * tool, which is gated by this allowlist. Adding it here authorizes that path.
+ * CAPABILITY TRUST SURFACE — reviewed under L1/L2 2-role + adversarial. The
+ * GAP-4 escape (allowlisting `claude` would otherwise permit
+ * `claude --dangerously-skip-permissions ...`, since `commandMatchesAllowlist`
+ * matches argv0/prefix) is closed in @buildplane/capability-broker's
+ * evaluate.ts: a worker-binary invocation carrying any permission-escape flag is
+ * denied + quarantined regardless of allowlisting (GAP-10). */
+const WORKER_RUN_COMMAND_BINARY = "claude" as const;
+
 const SIDE_EFFECT_FS_WRITE_GLOBS: Record<string, readonly string[]> = {
 	"local-doc": ["docs/**"],
 	"local-fixture": [
@@ -22,6 +34,12 @@ const SIDE_EFFECT_FS_WRITE_GLOBS: Record<string, readonly string[]> = {
 		"packages/**/test/fixtures/**",
 	],
 	"local-receipt": ["docs/operations/**"],
+	"code-edit": [
+		"src/**",
+		"test/**",
+		"packages/**/src/**",
+		"packages/**/test/**",
+	],
 };
 
 function allowlistFromVerificationCommands(
@@ -64,9 +82,12 @@ export function buildDefaultCapabilityBundleForTask(
 	task: PlanForgeTask,
 ): PlanForgeAttachedCapabilityBundle {
 	const fsWrite = fsWriteGlobsFromTask(task);
-	const allowlist = allowlistFromVerificationCommands(
-		task.verificationCommands,
-	);
+	const allowlist = [
+		WORKER_RUN_COMMAND_BINARY,
+		...allowlistFromVerificationCommands(task.verificationCommands).filter(
+			(c) => c !== WORKER_RUN_COMMAND_BINARY,
+		),
+	];
 	return {
 		schemaVersion: PLANFORGE_CAPABILITY_BUNDLE_SCHEMA_VERSION,
 		bundleId: `${plan.id}:${task.id}`,

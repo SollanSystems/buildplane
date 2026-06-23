@@ -1,12 +1,12 @@
 import { createHash } from "node:crypto";
 import type { PlanForgeCompileResult } from "./compile.js";
-import { hasLine } from "./compile.js";
+import { hasLine, sectionText } from "./compile.js";
 import { digest } from "./digest.js";
 import {
 	PLANFORGE_PLAN_SCHEMA_VERSION,
 	PLANFORGE_RECEIPT_SCHEMA_VERSION,
-	PLANFORGE_TASK_IDS,
 	type PlanForgePlan,
+	type PlanForgeTask,
 } from "./schema.js";
 import type { PlanForgeValidateResult } from "./validate.js";
 
@@ -21,11 +21,14 @@ export function preview(
 	const normalizedGoal = goal ?? "";
 	const normalizedTrustedBase = trustedBase ?? "unknown";
 	const normalizedRemote = remote ?? "unknown";
+
 	// Deliberate exception to the M2-S1 canonical-digest migration: the
 	// idempotencyKey fingerprint MUST stay byte-identical to the pre-extraction
 	// derivation, so it keeps insertion-order JSON.stringify over this
 	// hand-ordered object rather than the canonical digest() helper. Switching
 	// to digest() would silently rotate every plan's idempotencyKey. Do not "fix".
+	// Task content is intentionally excluded: task lists evolve within a plan
+	// identity; the fingerprint covers the operator boundary (goal, base, policy).
 	const fingerprintInput = JSON.stringify({
 		constraints: {
 			dryRun: hasLine(safetyConstraints ?? "", "- Dry-run only."),
@@ -58,74 +61,30 @@ export function preview(
 	const canonicalInput = compiled.content.replace(/\r\n/g, "\n");
 	const inputDigest = digest(canonicalInput);
 
+	const titleSection = sectionText(compiled.content, "Title");
+	const planTitle = titleSection?.split("\n")[0]?.trim() ?? "PlanForge plan";
+
+	const tasks: PlanForgeTask[] = compiled.parsedTasks.map((t) => ({
+		id: t.id,
+		title: t.title,
+		objective: t.objective,
+		assigneeHint: t.assigneeHint,
+		workspace: t.workspace,
+		dependsOn: [...t.dependsOn],
+		allowedSideEffects: [...t.allowedSideEffects],
+		forbiddenSideEffects: [...t.forbiddenSideEffects],
+		acceptanceCriteria: [...t.acceptanceCriteria],
+		verificationCommands: [...t.verificationCommands],
+	}));
+
 	const plan: PlanForgePlan = {
 		schemaVersion: PLANFORGE_PLAN_SCHEMA_VERSION,
 		id: `pf-plan-${planFingerprint}`,
 		idempotencyKey,
-		title: "PlanForge dry-run admission slice",
+		title: planTitle,
 		goal: normalizedGoal,
 		trustedBase: normalizedTrustedBase,
-		tasks: [
-			{
-				id: PLANFORGE_TASK_IDS[0],
-				title: "Spec PlanForge contracts and fixture artifacts",
-				objective:
-					"Define the narrow documentation-level PlanForge contracts plus deterministic dry-run fixtures.",
-				assigneeHint: "auto-coder",
-				workspace: "isolated-worktree",
-				dependsOn: [],
-				allowedSideEffects: ["local-doc", "local-fixture"],
-				forbiddenSideEffects: [
-					"execute-code",
-					"board-write",
-					"network-write",
-					"push",
-					"deploy",
-					"merge",
-				],
-				acceptanceCriteria: [
-					"Define PlanForgeInput, PlanForgePlan, PlanForgeTask, PlanForgeValidation, and PlanForgeReceipt at documentation/fixture level.",
-					"State that the Buildplane kernel validates and admits plans while coding agents remain untrusted workers.",
-					"State dry-run/no-side-effect behavior.",
-					"Define PASS, BLOCKED, FAILED, INSUFFICIENT_EVIDENCE, and UNSAFE_TO_RUN failure/pass states.",
-					"Define idempotency key semantics for repeated planning.",
-				],
-				verificationCommands: [
-					"git status --short --branch",
-					"git diff --check",
-					"pnpm lint",
-				],
-			},
-			{
-				id: PLANFORGE_TASK_IDS[1],
-				title: "Implement PlanForge dry-run CLI and schema validation",
-				objective:
-					"Add a later dry-run command that validates local input and emits stable JSON without storage, board, network, or worker side effects.",
-				assigneeHint: "auto-coder",
-				workspace: "isolated-worktree",
-				dependsOn: [PLANFORGE_TASK_IDS[0]],
-				allowedSideEffects: ["local-doc", "local-fixture", "local-receipt"],
-				forbiddenSideEffects: [
-					"execute-code",
-					"board-write",
-					"network-write",
-					"push",
-					"deploy",
-					"merge",
-				],
-				acceptanceCriteria: [
-					"Missing input fails closed before any write.",
-					"Invalid input fails closed before any write.",
-					"Unsupported non-dry-run forms fail with a clear message.",
-					"Output is stable JSON suitable for review.",
-				],
-				verificationCommands: [
-					"pnpm vitest --run apps/cli/test/run-cli.test.ts -t planforge",
-					"pnpm typecheck",
-					"git diff --check",
-				],
-			},
-		],
+		tasks,
 		validation,
 		receiptPreview: {
 			schemaVersion: PLANFORGE_RECEIPT_SCHEMA_VERSION,
@@ -140,7 +99,7 @@ export function preview(
 			dryRun: true,
 			sideEffects: [],
 			notes: [
-				"Receipt preview is documentation/fixture only for PF1.",
+				"Receipt preview is documentation/fixture only.",
 				"PASS does not create tasks, grant write capabilities, merge, deploy, or start workers.",
 				"Non-PASS statuses fail closed: BLOCKED, FAILED, INSUFFICIENT_EVIDENCE, UNSAFE_TO_RUN.",
 			],

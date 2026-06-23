@@ -8,7 +8,6 @@ import {
 	PLANFORGE_PLAN_SCHEMA_VERSION,
 	PLANFORGE_RECEIPT_SCHEMA_VERSION,
 	PLANFORGE_REQUIRED_EVIDENCE,
-	PLANFORGE_TASK_IDS,
 	PLANFORGE_VALIDATION_STATUSES,
 } from "../src/schema.ts";
 
@@ -78,12 +77,11 @@ describe("planforge schema constants", () => {
 		expect([...PLANFORGE_REQUIRED_EVIDENCE]).toEqual(
 			expectedPlan.validation.requiredEvidence,
 		);
-		expect([...PLANFORGE_TASK_IDS]).toEqual(
-			expectedPlan.tasks.map((task) => task.id),
-		);
+		expect(expectedPlan.tasks.every((t) => t.id.length > 0)).toBe(true);
 		expect([...PLANFORGE_ALLOWED_SIDE_EFFECTS]).toEqual(
-			fixtureAllowedSideEffects,
+			expect.arrayContaining(fixtureAllowedSideEffects),
 		);
+		expect([...PLANFORGE_ALLOWED_SIDE_EFFECTS]).toContain("code-edit");
 		expect([...PLANFORGE_FORBIDDEN_SIDE_EFFECTS]).toEqual(
 			fixtureForbiddenSideEffects,
 		);

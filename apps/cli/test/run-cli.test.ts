@@ -29,7 +29,11 @@ import {
 	resolveProjectLayout,
 } from "@buildplane/storage";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { type RunCliDependencies, runCli } from "../src/run-cli";
+import {
+	buildRuntimeRouter,
+	type RunCliDependencies,
+	runCli,
+} from "../src/run-cli";
 
 async function runCliCapture(
 	cwd: string,
@@ -5085,6 +5089,7 @@ describe("planforge dry-run", () => {
 			"dry_run_constraints",
 			"trusted_boundary",
 			"worktree_policy",
+			"tasks",
 		]);
 		expect(payload.validation.requiredEvidence).toContain("trusted_boundary");
 		expect(existsSync(join(root, ".buildplane"))).toBe(false);
@@ -5115,6 +5120,21 @@ describe("planforge dry-run", () => {
 				"- Buildplane kernel validates and admits plans.",
 				"- Coding agents are untrusted workers.",
 				"- No Kanban, GSD2, GitHub, network, push, PR, deploy, merge, or worker-spawn side effects.",
+				"",
+				"## Tasks",
+				"",
+				"### A1: Alternate task",
+				"",
+				"- Objective: Produce the alternate dry-run plan artifact.",
+				"- Assignee-hint: auto-coder",
+				"- Workspace: isolated-worktree",
+				"- Allowed-side-effects: local-doc",
+				"- Forbidden-side-effects: execute-code",
+				"- Depends-on:",
+				"- Acceptance-criteria:",
+				"  - Alternate artifact is produced.",
+				"- Verification-commands:",
+				"  - pnpm lint",
 				"",
 			].join("\n"),
 			"utf8",
@@ -5242,6 +5262,21 @@ describe("planforge dry-run", () => {
 				"- Coding agents are untrusted workers.",
 				"- No Kanban, GSD2, GitHub, network, push, PR, deploy, merge, or worker-spawn side effects.",
 				"",
+				"## Tasks",
+				"",
+				"### S1: Safe negated task",
+				"",
+				"- Objective: Produce the safe negated dry-run plan artifact.",
+				"- Assignee-hint: auto-coder",
+				"- Workspace: isolated-worktree",
+				"- Allowed-side-effects: local-doc",
+				"- Forbidden-side-effects: execute-code",
+				"- Depends-on:",
+				"- Acceptance-criteria:",
+				"  - Safe negated artifact is produced.",
+				"- Verification-commands:",
+				"  - pnpm lint",
+				"",
 			].join("\n"),
 			"utf8",
 		);
@@ -5304,6 +5339,7 @@ describe("planforge dry-run", () => {
 			"dry_run_constraints",
 			"trusted_boundary",
 			"worktree_policy",
+			"tasks",
 		]);
 		expect(
 			misplacedPayload.validation.checks.find(
@@ -5361,7 +5397,7 @@ describe("planforge dry-run", () => {
 			"Missing required --input",
 		);
 		expect(nonDryRun.stdout.join("\n")).toContain(
-			"Only dry-run, admit, dispatch, and resume are available",
+			"Only dry-run, admit, dispatch, resume, recover, plan, loop, and authorize-envelope are available",
 		);
 		expect(writeForm.stdout.join("\n")).toContain(
 			"side-effect forms are disabled",
@@ -5370,5 +5406,116 @@ describe("planforge dry-run", () => {
 			"side-effect forms are disabled",
 		);
 		expect(existsSync(join(root, ".buildplane"))).toBe(false);
+	});
+
+	it("planforge plan emits the next-slice plan.md and exits 0 (PASS) from the committed roadmap", async () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-planforge-plan-"));
+		const roadmap = join(
+			dirname(fileURLToPath(import.meta.url)),
+			"../../../docs/roadmap.json",
+		);
+		const outPath = join(root, "plan.md");
+		const result = await runCliCapture(root, [
+			"planforge",
+			"plan",
+			"--roadmap",
+			roadmap,
+			"--out",
+			outPath,
+			"--trusted-base",
+			"15dbb32db0e1f0024687533755805fc23f3ef6d4",
+			"--json",
+		]);
+		expect(result.exitCode).toBe(0);
+		const payload = JSON.parse(result.stdout.join("\n"));
+		expect(payload.slice_id).toBe("M5-S2");
+		expect(payload.status).toBe("PASS");
+		expect(existsSync(outPath)).toBe(true);
+		expect(readFileSync(outPath, "utf8")).toContain("### M5-S2:");
+	});
+
+	it("planforge plan fails closed without --out / --trusted-base", async () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-planforge-plan-bad-"));
+		const roadmap = join(
+			dirname(fileURLToPath(import.meta.url)),
+			"../../../docs/roadmap.json",
+		);
+		const missingOut = await runCliCapture(root, [
+			"planforge",
+			"plan",
+			"--roadmap",
+			roadmap,
+			"--trusted-base",
+			"15dbb32db0e1f0024687533755805fc23f3ef6d4",
+		]);
+		expect(missingOut.exitCode).toBe(1);
+		expect([...missingOut.stdout, ...missingOut.stderr].join("\n")).toContain(
+			"Missing required --out",
+		);
+	});
+});
+
+describe("runtime router signal forwarding", () => {
+	function fakeExecutor(seen: { hasSignal: boolean }[]) {
+		return {
+			executePacketAsync: (
+				_p: unknown,
+				_r: string,
+				_bus: unknown,
+				signal?: AbortSignal,
+			) => {
+				seen.push({ hasSignal: signal instanceof AbortSignal });
+				return Promise.resolve({
+					command: "claude",
+					args: [],
+					cwd: "",
+					startedAt: "",
+					completedAt: "",
+					exitCode: 0,
+					stdout: "",
+					stderr: "",
+					outputChecks: [],
+				});
+			},
+		};
+	}
+
+	it("forwards AbortSignal to the claude executor", async () => {
+		const seen: { hasSignal: boolean }[] = [];
+		const router = buildRuntimeRouter({
+			commandExecutor: { executePacket: () => ({}) },
+			getClaudeExecutor: async () => fakeExecutor(seen),
+			getCodexExecutor: async () => fakeExecutor([]),
+			getSdkExecutor: async () => fakeExecutor([]),
+		});
+		const controller = new AbortController();
+		await router.executePacketAsync(
+			{
+				routingHints: { preferredWorker: "claude-code" },
+				model: { model: "m" },
+			},
+			"/tmp",
+			{ emit() {}, subscribe: () => () => {} },
+			controller.signal,
+		);
+		expect(seen[0]?.hasSignal).toBe(true);
+	});
+
+	it("forwards AbortSignal to the codex executor", async () => {
+		const seen: { hasSignal: boolean }[] = [];
+		const router = buildRuntimeRouter({
+			commandExecutor: { executePacket: () => ({}) },
+			getClaudeExecutor: async () => fakeExecutor([]),
+			getCodexExecutor: async () => fakeExecutor(seen),
+			getSdkExecutor: async () => fakeExecutor([]),
+		});
+		const controller = new AbortController();
+		await router.executePacketAsync(
+			{ routingHints: { preferredWorker: "codex" }, model: { model: "m" } },
+			"/tmp",
+			{ emit() {}, subscribe: () => () => {} },
+			controller.signal,
+		);
+		expect(seen[0]?.hasSignal).toBe(true);
 	});
 });

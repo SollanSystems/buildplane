@@ -649,3 +649,77 @@ export async function enrichStrategyWithMemories(
 		)
 	).strategy;
 }
+
+/**
+ * Merge prior-plan summary entries into packet.intent.context.priorWork.
+ * Returns the original packet unchanged when entries is empty or intent is absent.
+ * Deduplicates by normalized (trim + lowercase) value; existing entries win on conflict.
+ * Never mutates the input packet.
+ */
+export function injectPriorWorkIntoPacket(
+	packet: unknown,
+	priorWorkEntries: readonly string[],
+): unknown {
+	const p = packet as PacketWithIntent;
+	if (!p.intent || priorWorkEntries.length === 0) {
+		return packet;
+	}
+
+	const existing: readonly string[] =
+		(p.intent.context as { priorWork?: readonly string[] } | undefined)
+			?.priorWork ?? [];
+
+	const seen = new Set<string>(existing.map((e) => e.trim().toLowerCase()));
+	const toAdd: string[] = [];
+	for (const entry of priorWorkEntries) {
+		const key = entry.trim().toLowerCase();
+		if (!seen.has(key)) {
+			seen.add(key);
+			toAdd.push(entry.trim());
+		}
+	}
+
+	if (toAdd.length === 0) {
+		return packet;
+	}
+
+	return {
+		...(packet as object),
+		intent: {
+			...(p.intent as object),
+			context: {
+				...(p.intent.context as object),
+				priorWork: [...existing, ...toAdd],
+			},
+		},
+	};
+}
+
+interface StoragePriorWorkPort {
+	listSearchableDocuments(options: {
+		documentKind?: string;
+		sourceTable?: string;
+		limit?: number;
+	}): ReadonlyArray<{ readonly bodyText: string }>;
+}
+
+/**
+ * Read the most recent plan-summary entries from storage for injection as priorWork.
+ * Uses listSearchableDocuments (deterministic list, no FTS5 ranking) filtered by
+ * documentKind='plan-summary'. The supervisor (GAP-7) calls this before building
+ * the next iteration's packet and passes the result to injectPriorWorkIntoPacket.
+ */
+export function loadPriorWorkEntries(
+	storage: StoragePriorWorkPort | undefined,
+	options: { limit?: number },
+): string[] {
+	if (!storage) {
+		return [];
+	}
+	const docs = storage.listSearchableDocuments({
+		documentKind: "plan-summary",
+		sourceTable: "planforge_receipts",
+		limit: options.limit ?? 10,
+	});
+	return docs.map((d) => d.bodyText).filter((t) => t.trim().length > 0);
+}

@@ -128,6 +128,7 @@ export enum EventKind {
 	WorkspaceWrite = "workspace_write",
 	CapabilityDenied = "capability_denied",
 	AcceptanceRecorded = "acceptance_recorded",
+	OperatorDecisionRecorded = "operator_decision_recorded",
 	TapeCheckpoint = "tape_checkpoint",
 }
 
@@ -232,6 +233,35 @@ export interface ModelResponseV1 {
 	usage: Usage;
 	stop_reason: string;
 	latency_ms: number;
+}
+
+/**
+ * `operator_decision_recorded` payload — records one operator decision on the
+ * tape. All fields are strings on the wire (no `u64` precision hazard).
+ */
+export interface OperatorDecisionRecordedV1 {
+	run_id: string;
+	/** `approved` | `rejected` */
+	decision: string;
+	/** `merge` | `resume` (M5) | `authorize-envelope` (GAP-10) */
+	subject: string;
+	/** Chains to the `acceptance_recorded` event, when present (string event id). */
+	acceptance_event_id?: string;
+	/** Chains to the `plan_admitted` event, when present (string event id). */
+	admission_event_id?: string;
+	/** Merge commit SHA, present when an approved merge produced one. */
+	merge_commit?: string;
+	/**
+	 * Canonical-JSON of the `AuthorizationEnvelopeV0` when `subject` is
+	 * `authorize-envelope` (GAP-10); `None` otherwise. A string, not a nested
+	 * typeshared struct — `max_iterations`/`token_budget` integers live inside
+	 * the JSON string, so the wire shape stays all-string (no `u64` hazard).
+	 */
+	envelope?: string;
+	/** Operator identity (payload field; the event is kernel-signed). */
+	decided_by: string;
+	/** RFC3339 */
+	decided_at: string;
 }
 
 /**

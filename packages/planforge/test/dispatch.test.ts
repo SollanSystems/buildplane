@@ -29,4 +29,43 @@ describe("dispatchAdmittedPlan", () => {
 		}
 		expect(packets[0].unit.id).toContain(plan.tasks[0].id);
 	});
+
+	it("emits a claude-code model packet with no execution field (real worker, not the `true` placeholder)", () => {
+		const plan = createPlanForgeDryRunPlan(inputFixture);
+		const packets = dispatchAdmittedPlan({
+			plan,
+			admittedEventId: "evt-42",
+			policyProfile: "default",
+		});
+		expect(packets.length).toBeGreaterThan(0);
+		for (const p of packets) {
+			// The router short-circuits any packet with `execution` to the command
+			// executor BEFORE checking preferredWorker (run-cli.ts:1436), so it MUST be absent.
+			expect((p as Record<string, unknown>).execution).toBeUndefined();
+			expect(p.model.provider).toBe("anthropic");
+			expect(p.model.model).toBe("claude-sonnet-4-20250514");
+			expect(p.model.prompt.length).toBeGreaterThan(0);
+			expect(p.routingHints.preferredWorker).toBe("claude-code");
+		}
+	});
+
+	it("populates intent from the task and keeps prompt load-bearing (no renderer wired)", () => {
+		const plan = createPlanForgeDryRunPlan(inputFixture);
+		const packets = dispatchAdmittedPlan({
+			plan,
+			admittedEventId: "evt-42",
+			policyProfile: "default",
+		});
+		const [first] = packets;
+		const task = plan.tasks[0];
+		expect(first.intent.taskType).toBe("implement");
+		expect(first.intent.objective).toBe(task.objective);
+		expect(first.intent.constraints.scope).toContain(task.workspace);
+		expect(first.intent.constraints.verification).toEqual(
+			task.verificationCommands,
+		);
+		expect(first.intent.features.verifierStrength).toBe("strong");
+		// prompt must reflect the objective — it, not intent, drives `claude -p` today.
+		expect(first.model.prompt).toContain(task.objective);
+	});
 });

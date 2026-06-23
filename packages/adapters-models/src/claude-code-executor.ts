@@ -44,7 +44,30 @@ export interface ClaudeCodeExecutorPort {
 		packet: UnitPacket,
 		projectRoot: string,
 		eventBus: EventBus,
+		signal?: AbortSignal,
 	): Promise<ExecutionReceipt>;
+}
+
+/**
+ * Receipt for a run aborted before the child was ever spawned. exitCode -1 so the
+ * policy evaluator rejects it; carries no output checks because nothing executed.
+ */
+function abortedReceipt(
+	cliBinary: string,
+	args: readonly string[],
+): ExecutionReceipt {
+	const now = new Date().toISOString();
+	return {
+		command: cliBinary,
+		args: [...args],
+		cwd: "",
+		startedAt: now,
+		completedAt: now,
+		exitCode: -1,
+		stdout: "",
+		stderr: "aborted before spawn",
+		outputChecks: [],
+	};
 }
 
 export function createClaudeCodeExecutor(
@@ -66,6 +89,7 @@ export function createClaudeCodeExecutor(
 			packet: UnitPacket,
 			projectRoot: string,
 			eventBus: EventBus,
+			signal?: AbortSignal,
 		): Promise<ExecutionReceipt> {
 			const startedAt = new Date().toISOString();
 
@@ -113,7 +137,8 @@ export function createClaudeCodeExecutor(
 				"-p",
 				foldedPrompt,
 				"--output-format",
-				"json",
+				"stream-json",
+				"--verbose",
 				"--model",
 				packet.model.model,
 				"--max-turns",
@@ -132,12 +157,31 @@ export function createClaudeCodeExecutor(
 			}
 
 			return new Promise<ExecutionReceipt>((resolvePromise) => {
+				// Already aborted before spawn: never start the child.
+				if (signal?.aborted) {
+					resolvePromise(abortedReceipt(cliBinary, args));
+					return;
+				}
+
 				const child = spawnFn(cliBinary, args, { cwd: projectRoot });
 
 				let stdoutBuf = "";
+				let lineBuf = "";
 				let stderrBuf = "";
 				let timedOut = false;
+				let aborted = false;
 				let exitCode = 0;
+				let resultText: string | undefined;
+				// Real total token usage (input + output) from the terminal `result`
+				// line's `usage` object — the accurate figure the supervisor loop's
+				// cumulative token budget consumes (vs. the per-text-block delta proxy).
+				let tokenUsage: number | undefined;
+
+				const onAbort = () => {
+					aborted = true;
+					child.kill();
+				};
+				signal?.addEventListener("abort", onAbort, { once: true });
 
 				const timer = setTimeout(() => {
 					timedOut = true;
@@ -146,8 +190,67 @@ export function createClaudeCodeExecutor(
 					exitCode = -1;
 				}, timeoutMs);
 
+				// NDJSON (`--output-format stream-json`): one JSON object per line.
+				// `assistant` lines carry incremental text blocks → emit a
+				// `model-token-delta` per TEXT block so the orchestrator's budget
+				// AbortController can abort a runaway worker.
+				//
+				// NOTE: one delta == one assistant text block, NOT one token. A worker
+				// emitting mostly tool_use blocks under-counts, so the orchestrator's
+				// per-iteration `--max-tokens` cap is an APPROXIMATE response-volume
+				// proxy. The precise per-iteration bound is `--wall-clock-ms`
+				// (maxComputeTimeMs). The accurate cumulative figure is the terminal
+				// `result.usage` parsed below (used by the supervisor's token-budget cap).
+				const consumeLine = (raw: string): void => {
+					const line = raw.trim();
+					if (!line) return;
+					let obj: Record<string, unknown>;
+					try {
+						obj = JSON.parse(line) as Record<string, unknown>;
+					} catch {
+						return;
+					}
+					if (obj.type === "assistant") {
+						const msg = obj.message as
+							| { content?: Array<{ type?: string; text?: string }> }
+							| undefined;
+						for (const block of msg?.content ?? []) {
+							if (block.type === "text" && typeof block.text === "string") {
+								eventBus.emit({
+									kind: "model-token-delta",
+									runId: "",
+									timestamp: new Date().toISOString(),
+									delta: block.text,
+								});
+							}
+						}
+					} else if (obj.type === "result") {
+						if (typeof obj.result === "string") {
+							resultText = obj.result;
+						}
+						// The stream-json terminal `result` line carries a `usage` object
+						// ({ input_tokens, output_tokens, cache_*_input_tokens }). Sum the
+						// real input + output token cost for the supervisor's cumulative cap.
+						const usage = obj.usage as
+							| { input_tokens?: number; output_tokens?: number }
+							| undefined;
+						if (usage) {
+							tokenUsage =
+								(usage.input_tokens ?? 0) + (usage.output_tokens ?? 0);
+						}
+					}
+				};
+
 				child.stdout?.on("data", (chunk: Buffer | string) => {
-					stdoutBuf += chunk.toString();
+					const s = chunk.toString();
+					stdoutBuf += s;
+					lineBuf += s;
+					let nl: number;
+					// biome-ignore lint/suspicious/noAssignInExpressions: stream line-buffer drain
+					while ((nl = lineBuf.indexOf("\n")) !== -1) {
+						consumeLine(lineBuf.slice(0, nl));
+						lineBuf = lineBuf.slice(nl + 1);
+					}
 				});
 
 				child.stderr?.on("data", (chunk: Buffer | string) => {
@@ -156,39 +259,57 @@ export function createClaudeCodeExecutor(
 
 				child.on("close", (code: number | null) => {
 					clearTimeout(timer);
+					signal?.removeEventListener("abort", onAbort);
 
-					if (!timedOut) {
-						exitCode = code ?? 0;
+					// Drain any trailing partial line (no terminating newline).
+					if (lineBuf.trim()) {
+						consumeLine(lineBuf);
+						lineBuf = "";
 					}
 
-					// Try to parse stdout as JSON and emit event
-					if (stdoutBuf.trim()) {
+					if (!timedOut && !aborted) {
+						exitCode = code ?? 0;
+					}
+					if (aborted) {
+						exitCode = -1;
+					}
+
+					// Fallback: a single buffered JSON object (legacy
+					// `--output-format json`, or a stub that prints one object). Keeps
+					// the existing buffered-JSON tests + smoke test green.
+					if (resultText === undefined && stdoutBuf.trim()) {
 						try {
 							const parsed = JSON.parse(stdoutBuf) as Record<string, unknown>;
-							// Look for .result or text content
-							let text: string | undefined;
 							if (typeof parsed.result === "string") {
-								text = parsed.result;
+								resultText = parsed.result;
 							} else if (typeof parsed.text === "string") {
-								text = parsed.text;
+								resultText = parsed.text;
 							} else if (typeof parsed.content === "string") {
-								text = parsed.content;
+								resultText = parsed.content;
 							}
-
-							if (text !== undefined) {
-								const completedAt = new Date().toISOString();
-								eventBus.emit({
-									kind: "model-response-complete",
-									runId: "",
-									timestamp: completedAt,
-									text,
-									finishReason: "stop",
-									usage: undefined,
-								});
+							if (tokenUsage === undefined) {
+								const usage = parsed.usage as
+									| { input_tokens?: number; output_tokens?: number }
+									| undefined;
+								if (usage) {
+									tokenUsage =
+										(usage.input_tokens ?? 0) + (usage.output_tokens ?? 0);
+								}
 							}
 						} catch {
-							// Malformed JSON — skip event, don't fabricate
+							// Malformed JSON — skip event, don't fabricate.
 						}
+					}
+
+					if (resultText !== undefined) {
+						eventBus.emit({
+							kind: "model-response-complete",
+							runId: "",
+							timestamp: new Date().toISOString(),
+							text: resultText,
+							finishReason: aborted ? "abort" : "stop",
+							usage: undefined,
+						});
 					}
 
 					const completedAt = new Date().toISOString();
@@ -204,10 +325,12 @@ export function createClaudeCodeExecutor(
 					// Claude Code returns exit 1 for max-turns, plugin warnings,
 					// and hook errors — none of which mean the task failed.
 					// If all required outputs exist, treat the run as successful.
+					// An aborted or timed-out run is never normalized to success.
 					let normalizedExitCode = exitCode;
 					if (
 						exitCode !== 0 &&
 						!timedOut &&
+						!aborted &&
 						outputChecks.length > 0 &&
 						outputChecks.every((c) => c.exists)
 					) {
@@ -224,6 +347,7 @@ export function createClaudeCodeExecutor(
 						stdout: stdoutBuf,
 						stderr: stderrBuf,
 						outputChecks,
+						...(tokenUsage !== undefined ? { tokenUsage } : {}),
 					});
 				});
 			});

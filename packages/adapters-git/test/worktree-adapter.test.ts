@@ -258,6 +258,50 @@ describe("git worktree adapter", () => {
 		});
 		expect(existsSync(workspace.path)).toBe(true);
 	});
+
+	it("returns the project-root post-merge HEAD as mergedHeadSha", () => {
+		const repo = createCommittedRepo();
+		const adapter = createGitWorktreeAdapter();
+		const { headSha: baseSha } = adapter.assertRunnableRepository(repo);
+		const workspace = adapter.prepareWorkspace(repo, "run-merge", baseSha);
+		writeFileSync(join(workspace.path, "feature.txt"), "feature\n");
+
+		const result = adapter.commitAndMergeWorkspace({
+			path: workspace.path,
+			runId: "run-merge",
+			projectRoot: repo,
+		});
+
+		const projectHeadAfterMerge = readGitHead(repo);
+		expect(result).toEqual({ mergedHeadSha: projectHeadAfterMerge });
+		// --no-ff always creates a new merge commit, so the anchor advanced off base
+		expect(result.mergedHeadSha).not.toBe(baseSha);
+		// and it is the project root tip, not the worktree's own commit tip
+		expect(result.mergedHeadSha).not.toBe(readGitHead(workspace.path));
+	});
+
+	it("rejects a base sha that does not resolve to a commit before cutting a worktree", () => {
+		const repo = createCommittedRepo();
+		const adapter = createGitWorktreeAdapter();
+		const bogusSha = "0000000000000000000000000000000000000000";
+
+		expect(() => adapter.prepareWorkspace(repo, "run-bogus", bogusSha)).toThrow(
+			/base commit .* does not resolve to a commit/i,
+		);
+		// and it must NOT leave a half-created worktree behind
+		expect(
+			existsSync(join(repo, ".buildplane", "workspaces", "run-bogus")),
+		).toBe(false);
+	});
+
+	it("accepts the pinned base sha from assertRunnableRepository", () => {
+		const repo = createCommittedRepo();
+		const adapter = createGitWorktreeAdapter();
+		const { headSha } = adapter.assertRunnableRepository(repo);
+
+		const workspace = adapter.prepareWorkspace(repo, "run-ok", headSha);
+		expect(readGitHead(workspace.path)).toBe(headSha);
+	});
 });
 
 function createCommittedRepo(): string {

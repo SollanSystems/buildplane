@@ -50,6 +50,7 @@ const BUILDPLANE_WORKTREE_CLEAN_EXCLUSIONS = [
 	"workspaces/**",
 	"vcr/**",
 	"ledger/**",
+	"planforge/**",
 ] as const;
 
 /** `:(exclude)<prefix>/<pattern>` pathspecs for the given `.buildplane` prefix. */
@@ -165,6 +166,18 @@ export function createGitWorktreeAdapter(
 		},
 
 		prepareWorkspace(projectRoot: string, runId: string, headSha: string) {
+			const baseCheck = executeGitCommand(runGit, projectRoot, [
+				"rev-parse",
+				"--verify",
+				"--quiet",
+				`${headSha}^{commit}`,
+			]);
+			if (baseCheck.status !== 0) {
+				throw new Error(
+					`prepareWorkspace: base commit ${headSha} does not resolve to a commit in ${projectRoot} (stale or detached anchor): ${formatGitFailure(baseCheck)}.`,
+				);
+			}
+
 			const workspacePath = join(
 				projectRoot,
 				".buildplane",
@@ -196,7 +209,7 @@ export function createGitWorktreeAdapter(
 			path: string;
 			runId: string;
 			projectRoot?: string;
-		}) {
+		}): { mergedHeadSha: string } {
 			const projectRoot =
 				workspace.projectRoot ?? dirname(dirname(dirname(workspace.path)));
 
@@ -251,6 +264,18 @@ export function createGitWorktreeAdapter(
 					`Git merge failed in project root ${projectRoot}: ${formatGitFailure(mergeRes)}`,
 				);
 			}
+
+			const mergedHeadRes = executeGitCommand(runGit, projectRoot, [
+				"rev-parse",
+				"HEAD",
+			]);
+			if (mergedHeadRes.status !== 0) {
+				throw new Error(
+					`Git rev-parse HEAD failed in project root ${projectRoot} after merge: ${formatGitFailure(mergedHeadRes)}`,
+				);
+			}
+
+			return { mergedHeadSha: mergedHeadRes.stdout.trim() };
 		},
 
 		deleteWorkspace(workspace: { path: string; projectRoot?: string }) {

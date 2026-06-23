@@ -88,6 +88,13 @@ export interface ExecutionReceipt {
 	/** Acceptance evidence collected before finalization when an acceptance contract is configured. */
 	readonly acceptanceEvidence?: AcceptanceEvidence;
 	readonly sideEffects?: readonly SideEffectReceipt[];
+	/**
+	 * Real total token usage (input + output) reported by the model worker's
+	 * terminal result, when available. Distinct from the orchestrator's mid-stream
+	 * `model-token-delta` count (a response-volume proxy): this is the accurate
+	 * per-dispatch figure the supervisor loop's cumulative token budget consumes.
+	 */
+	readonly tokenUsage?: number;
 }
 
 export interface ApprovedPolicyDecision {
@@ -300,4 +307,6 @@ export interface RunPacketResult {
 	readonly workspace?: WorkspaceSnapshot;
 	readonly injectedMemories?: readonly PersistedInjectedMemoryRecord[];
 	readonly suspended?: boolean;
+	/** Project-root HEAD after the --no-ff merge; the canonical base for the next serial unit (GAP-8). */
+	readonly mergedHeadSha?: string;
 }

@@ -103,6 +103,8 @@ interface HarnessOptions {
 	readonly commitOnCollectChecks?: readonly string[];
 	/** Reject inside the acceptance port to exercise the write-ahead fail-closed path. */
 	readonly throwOnRecordAcceptance?: boolean;
+	/** Optional dependency-provisioning hook forwarded to the orchestrator. */
+	readonly provisionDeps?: (workspacePath: string) => void;
 }
 
 function createHarness(options: HarnessOptions = {}) {
@@ -117,6 +119,7 @@ function createHarness(options: HarnessOptions = {}) {
 		omitAcceptanceEvaluator = false,
 		policyProfile,
 		withAcceptancePort = false,
+		provisionDeps,
 		diffScope,
 		gitWorkspace = false,
 		mutateOnCollectChecks = [],
@@ -436,6 +439,7 @@ function createHarness(options: HarnessOptions = {}) {
 			policy,
 			workspace,
 			admissionStore,
+			provisionDeps,
 			acceptanceEvidencePort: {
 				collectCheckResults() {
 					runEvents.push("collect-acceptance-checks");
@@ -588,6 +592,57 @@ describe("kernel orchestrator", () => {
 				message: "git worktree add failed",
 			});
 			expect(result.workspace).toBeUndefined();
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("calls provisionDeps with the workspace path after prepare succeeds", () => {
+		const provisionedPaths: string[] = [];
+		const { orchestrator, runEvents, workspacePath, cleanup } = createHarness({
+			provisionDeps: (p) => {
+				provisionedPaths.push(p);
+			},
+		});
+
+		try {
+			const result = orchestrator.runPacket(packet);
+
+			expect(provisionedPaths).toEqual([workspacePath]);
+			// provisioning happens after the worktree is cut and before the
+			// workspace row is recorded / admission proceeds.
+			expect(runEvents).toContain("record-workspace-prepared");
+			expect(result.run.status).toBe("passed");
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("fails the run with workspace-provision-failed when provisionDeps throws", () => {
+		const { orchestrator, runEvents, failurePayloads, cleanup } = createHarness(
+			{
+				provisionDeps: () => {
+					throw new Error("pnpm install failed: exit 1");
+				},
+			},
+		);
+
+		try {
+			const result = orchestrator.runPacket(packet);
+
+			expect(result.run.status).toBe("failed");
+			expect(result.failure?.kind).toBe("workspace-provision-failed");
+			expect(result.failure?.message).toContain("pnpm install failed");
+			// the failed worktree is retained for operator inspection...
+			expect(result.workspace?.status).toBe("retained");
+			expect(failurePayloads[0]).toEqual(
+				expect.objectContaining({ workspaceStatus: "retained" }),
+			);
+			// ...and provisioning fails BEFORE the workspace row is recorded and
+			// before any admission/execution step runs.
+			expect(runEvents).not.toContain("record-workspace-prepared");
+			expect(runEvents).not.toContain("mark-run-running");
+			expect(runEvents).not.toContain("execute-packet");
 		} finally {
 			cleanup();
 		}

@@ -45,6 +45,27 @@ function pathMatchesFsWriteGlobs(
 	);
 }
 
+/**
+ * Permission-escape flags that disable a nested worker's OWN tool-permission
+ * prompts. The loop worker binary (`claude`) is allowlisted so a dispatched
+ * worker can recursively invoke it through `run_command`, but these flags would
+ * let an unattended worker escape every downstream sandbox boundary. They have
+ * NO legitimate use in any loop command, so they are denied UNCONDITIONALLY —
+ * wrapper- and position-agnostic — not only when `claude` is argv0. A wrapped
+ * invocation (`pnpm exec claude …`, `npx claude …`, `env X=1 claude …`) routes
+ * through an allowlisted verification runner, so a worker-binary-only check let
+ * the escape flag through (GAP-10 P1). The scan is case/`=`-insensitive over the
+ * full token set: the packed `command` split on whitespace AND every `args[]`
+ * entry (GAP-4 carry-forward, generalized).
+ */
+const FORBIDDEN_ESCAPE_TOKENS = [
+	"--dangerously-skip-permissions",
+	"--dangerouslyskippermissions",
+	"--permission-mode=bypasspermissions",
+	"--bypass-permissions",
+	"--bypasspermissions",
+] as const;
+
 function commandMatchesAllowlist(
 	command: string,
 	_args: readonly string[] | undefined,
@@ -64,6 +85,41 @@ function commandMatchesAllowlist(
 		}
 	}
 	return false;
+}
+
+/**
+ * Does this run_command invocation carry a permission-escape flag anywhere?
+ * `commandMatchesAllowlist` matches argv0/prefix and ignores args, and `pnpm` /
+ * `npx` / `env` are allowlisted runners, so a wrapped `pnpm exec claude
+ * --dangerously-skip-permissions` would otherwise be permitted. The scan is
+ * wrapper- and position-agnostic: it fires on ANY token — across the packed
+ * `command` string split on whitespace AND the `args[]` array — regardless of
+ * argv0 (GAP-10 P1). The `bypasspermissions` value token is denied standalone so
+ * the two-token `--permission-mode bypassPermissions` form is also caught.
+ */
+function forbiddenEscapeToken(
+	command: string,
+	args: readonly string[] | undefined,
+): string | undefined {
+	const candidate = [...command.trim().split(/\s+/), ...(args ?? [])];
+	for (const token of candidate) {
+		const normalized = token.trim().toLowerCase();
+		if (normalized.length === 0) {
+			continue;
+		}
+		for (const forbidden of FORBIDDEN_ESCAPE_TOKENS) {
+			if (normalized === forbidden || normalized.startsWith(`${forbidden}=`)) {
+				return token.trim();
+			}
+		}
+		if (
+			normalized === "bypasspermissions" ||
+			normalized.endsWith("=bypasspermissions")
+		) {
+			return token.trim();
+		}
+	}
+	return undefined;
 }
 
 export function evaluateToolInvocation(
@@ -94,6 +150,17 @@ export function evaluateToolInvocation(
 	const allowlist = bundle.tools?.run_command?.allowlist ?? [];
 	if (allowlist.length === 0) {
 		return deny("no run_command allowlist in capability bundle");
+	}
+	const forbiddenToken = forbiddenEscapeToken(
+		invocation.command,
+		invocation.args,
+	);
+	if (forbiddenToken !== undefined) {
+		return deny(
+			`run_command may not pass permission-escape flag "${forbiddenToken}" ` +
+				"(e.g. --dangerously-skip-permissions); it would bypass nested tool-permission prompts " +
+				"regardless of wrapper (pnpm/npx/env) or argv position",
+		);
 	}
 	if (
 		!commandMatchesAllowlist(invocation.command, invocation.args, allowlist)

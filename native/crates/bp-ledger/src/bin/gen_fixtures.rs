@@ -25,6 +25,7 @@ use bp_ledger::payload::unit_lifecycle::{
 };
 use bp_ledger::payload::capability_broker::CapabilityDeniedV1;
 use bp_ledger::payload::acceptance::{AcceptanceCheckResultV1, AcceptanceRecordedV1};
+use bp_ledger::payload::operator_decision::OperatorDecisionRecordedV1;
 use bp_ledger::payload::workspace::{PostWriteState, WorkspaceReadV1, WorkspaceWriteV1};
 use bp_ledger::payload::Payload;
 use serde_json::{json, Value};
@@ -214,6 +215,18 @@ fn main() {
                 status: "passed".into(),
             }],
             evaluated_at: "2026-06-19T12:00:00Z".into(),
+        })).unwrap(),
+
+        serde_json::to_value(Payload::OperatorDecisionRecordedV1(OperatorDecisionRecordedV1 {
+            run_id: fixed_run_id().to_string(),
+            decision: "approved".into(),
+            subject: "merge".into(),
+            acceptance_event_id: Some(fixed_event_id(5).to_string()),
+            admission_event_id: Some(fixed_event_id(4).to_string()),
+            merge_commit: Some("deadbeef".into()),
+            envelope: None,
+            decided_by: "operator@buildplane".into(),
+            decided_at: "2026-06-22T12:00:00Z".into(),
         })).unwrap(),
     ];
 

@@ -121,14 +121,35 @@ async function makeGateEnv(): Promise<GateEnv> {
 }
 
 /**
- * Install a `pnpm` shim on PATH that the gate's check runner will invoke for the
- * toy plan's `pnpm lint` check. `body` is the shell body of the script (it runs
- * in the worktree cwd), letting a test make the check pass, fail, or pass while
- * writing an out-of-scope file.
+ * Install a `pnpm` shim on PATH. `pnpm` is invoked for TWO distinct purposes:
+ *   1. worktree dependency provisioning (`pnpm install --frozen-lockfile`),
+ *      which GAP-3 runs before the gate — this must always succeed cleanly with
+ *      no side effects, or the run fails at provisioning before the gate runs;
+ *   2. the toy plan's `pnpm lint` check, which the gate's check runner invokes.
+ * `body` is the shell body for the CHECK invocation only (it runs in the
+ * worktree cwd), letting a test make the check pass, fail, or pass while writing
+ * an out-of-scope file. The `install` invocation is intercepted to exit 0.
  */
 function installPnpmShim(binDir: string, body: string): void {
 	const shim = join(binDir, "pnpm");
-	writeFileSync(shim, `#!/bin/sh\n${body}\n`, "utf8");
+	writeFileSync(
+		shim,
+		`#!/bin/sh\nif [ "$1" = "install" ]; then exit 0; fi\n${body}\n`,
+		"utf8",
+	);
+	chmodSync(shim, 0o755);
+}
+
+/**
+ * Install a `claude` shim on PATH. Dispatch spawns a real claude-code model
+ * worker; without a binary the worker exits non-zero and the run fails before
+ * the acceptance verdict governs the outcome. The shim emits a valid
+ * `--output-format json` result and exits 0 so the model packet succeeds and the
+ * run's pass/fail is governed purely by the acceptance gate (the surface here).
+ */
+function installClaudeShim(binDir: string): void {
+	const shim = join(binDir, "claude");
+	writeFileSync(shim, '#!/bin/sh\necho \'{"result":"ok"}\'\nexit 0\n', "utf8");
 	chmodSync(shim, 0o755);
 }
 
@@ -253,6 +274,9 @@ describe("M4 GATE — acceptance contract finalization gate (end-to-end)", () =>
 		process.env.BUILDPLANE_NATIVE_BIN = resolveNativeBinaryForLedgerTests();
 		// The shim dir is first on PATH so the gate's `pnpm lint` check resolves it.
 		process.env.PATH = `${env.binDir}:${originalPath ?? ""}`;
+		// Dispatch spawns a real claude-code model worker; shim it so the model
+		// packet succeeds and the run outcome is governed by the acceptance gate.
+		installClaudeShim(env.binDir);
 	});
 
 	afterEach(async () => {
