@@ -111,9 +111,12 @@ const UUID_PATTERN =
 
 // Strict RFC3339 timestamp (M5-S4 F7): `Date.parse` accepts non-RFC3339 forms
 // like "06/23/2026", so a decision's `decidedAt` is matched against this regex
-// AND round-tripped through Date before it can be signed.
+// AND round-tripped through Date before it can be signed. Named groups capture the
+// wall-clock fields for the calendar round-trip (P1.7): the regex matches the
+// SHAPE but not the calendar, and `Date.parse` silently normalizes rolled-over
+// fields (Feb 31 → Mar 3), so an impossible calendar date could otherwise sign.
 const RFC3339_PATTERN =
-	/^\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(\.\d+)?([Zz]|[+-]\d{2}:\d{2})$/;
+	/^(?<year>\d{4})-(?<month>\d{2})-(?<day>\d{2})[Tt](?<hour>\d{2}):(?<minute>\d{2}):(?<second>\d{2})(\.\d+)?([Zz]|[+-]\d{2}:\d{2})$/;
 
 /**
  * Thrown by `recordOperatorDecision` validation (M5-S4 D5) BEFORE any tape emit,
@@ -257,13 +260,47 @@ export function createBuildplaneOrchestrator(
 		if (input.decidedBy.trim().length === 0) {
 			throw new OperatorDecisionValidationError("decidedBy must be non-empty.");
 		}
-		// F7 — strict RFC3339 (regex + Date round-trip), not lenient `Date.parse`.
-		if (
-			!RFC3339_PATTERN.test(input.decidedAt) ||
-			Number.isNaN(Date.parse(input.decidedAt))
-		) {
+		// F7 / P1.7 — strict RFC3339: regex SHAPE + parseable instant + a real
+		// calendar round-trip. The shape regex and `Date.parse` both accept
+		// calendar-impossible dates (`2026-02-31` parses and normalizes to Mar 3),
+		// so an invalid date could be signed onto the immutable tape. After the shape
+		// matches, rebuild the captured wall-clock fields through `Date.UTC` and
+		// confirm no field rolled over — month 00/13, day 32, hour 24, minute 60, or
+		// Feb 31 all fail this equality (offset just shifts the instant, never the
+		// captured wall-clock components, so this is offset-independent).
+		const match = RFC3339_PATTERN.exec(input.decidedAt);
+		if (match === null || Number.isNaN(Date.parse(input.decidedAt))) {
 			throw new OperatorDecisionValidationError(
 				`decidedAt must be RFC3339, got '${input.decidedAt}'.`,
+			);
+		}
+		const fields = match.groups as {
+			year: string;
+			month: string;
+			day: string;
+			hour: string;
+			minute: string;
+			second: string;
+		};
+		const year = Number(fields.year);
+		const month = Number(fields.month);
+		const day = Number(fields.day);
+		const hour = Number(fields.hour);
+		const minute = Number(fields.minute);
+		const second = Number(fields.second);
+		const roundTrip = new Date(
+			Date.UTC(year, month - 1, day, hour, minute, second),
+		);
+		if (
+			roundTrip.getUTCFullYear() !== year ||
+			roundTrip.getUTCMonth() !== month - 1 ||
+			roundTrip.getUTCDate() !== day ||
+			roundTrip.getUTCHours() !== hour ||
+			roundTrip.getUTCMinutes() !== minute ||
+			roundTrip.getUTCSeconds() !== second
+		) {
+			throw new OperatorDecisionValidationError(
+				`decidedAt must be a real calendar date, got '${input.decidedAt}'.`,
 			);
 		}
 
@@ -312,11 +349,28 @@ export function createBuildplaneOrchestrator(
 			return;
 		}
 
+		// Fix B (D2) — the marker fast-path covers the post-marker re-drive, but a
+		// crash AFTER the side effect ran and BEFORE the marker write leaves the run
+		// in `listDecidedUnexecutedDecisions` with no marker. Re-driving the
+		// transition unguarded would throw (approveRun/rejectSuspendedRun require a
+		// suspended run) or DUPLICATE a terminal event (rejectMergeDecision is
+		// unguarded). So gate each transition on the run not already being in its
+		// post-side-effect state (the crash-surviving signal, analogous to the
+		// merge-approved git-history probe), then ALWAYS heal the marker. A second
+		// pass therefore neither throws nor creates a second state transition.
+		const currentStatus = storage.inspectTarget(runId).run.status;
+
 		if (subject === "resume") {
 			if (decision === "approved") {
-				storage.approveRun(runId);
+				// Post-state of approveRun is `pending`; only transition if still suspended.
+				if (currentStatus === "suspended") {
+					storage.approveRun(runId);
+				}
 			} else {
-				storage.rejectSuspendedRun(runId);
+				// Post-state of rejectSuspendedRun is `failed`; only transition if still suspended.
+				if (currentStatus === "suspended") {
+					storage.rejectSuspendedRun(runId);
+				}
 			}
 			storage.markOperatorDecisionExecuted(runId);
 			return;
@@ -324,8 +378,12 @@ export function createBuildplaneOrchestrator(
 
 		// subject === "merge"
 		if (decision === "rejected") {
-			// Quarantine: no merge, worktree retained, run marked failed.
-			storage.rejectMergeDecision(runId);
+			// Quarantine: no merge, worktree retained, run marked failed. Post-state
+			// is `failed`; only transition if not already failed (rejectMergeDecision
+			// is unguarded in storage, so a re-drive would append a duplicate terminal).
+			if (currentStatus !== "failed") {
+				storage.rejectMergeDecision(runId);
+			}
 			storage.markOperatorDecisionExecuted(runId);
 			return;
 		}

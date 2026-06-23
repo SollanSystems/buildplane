@@ -39,6 +39,11 @@ interface Harness {
 	rejectMergeCalls: string[];
 	decisionEmits: RecordOperatorDecisionInput[];
 	emitOrder: string[];
+	// Crash-idempotency probes (Fix B): count the storage-level state-transition
+	// events the real store would append, so a re-drive can be proven to NOT
+	// create a second `run-resumed` / `run-completed` terminal event.
+	runResumedEvents: { count: number };
+	runCompletedEvents: { count: number };
 }
 
 function makeHarness(
@@ -67,6 +72,8 @@ function makeHarness(
 	const rejectMergeCalls: string[] = [];
 	const decisionEmits: RecordOperatorDecisionInput[] = [];
 	const emitOrder: string[] = [];
+	const runResumedEvents = { count: 0 };
+	const runCompletedEvents = { count: 0 };
 
 	const statusSnapshot: StatusSnapshot = {
 		initialized: true,
@@ -134,19 +141,38 @@ function makeHarness(
 		approveRun(runId): Run {
 			emitOrder.push("approveRun");
 			approveCalls.push(runId);
+			// Mirror real storage (store.ts:2566): a non-suspended run throws, so a
+			// crash-before-marker re-drive without the orchestrator status gate would
+			// throw here and never heal the marker.
+			if (state.status !== "suspended") {
+				throw new Error(
+					`approveRun requires a suspended run, got '${state.status}'.`,
+				);
+			}
 			state.status = "pending";
+			runResumedEvents.count += 1; // real store appends a `run-resumed` event
 			return { id: runId, unitId: "u", status: "pending" };
 		},
 		rejectSuspendedRun(runId): Run {
 			emitOrder.push("rejectSuspendedRun");
 			rejectSuspendedCalls.push(runId);
+			// Mirror real storage (store.ts:2592): non-suspended throws.
+			if (state.status !== "suspended") {
+				throw new Error(
+					`rejectSuspendedRun requires a suspended run, got '${state.status}'.`,
+				);
+			}
 			state.status = "failed";
+			runCompletedEvents.count += 1; // real store appends a `run-completed` event
 			return { id: runId, unitId: "u", status: "failed" };
 		},
 		rejectMergeDecision(runId): Run {
 			emitOrder.push("rejectMergeDecision");
 			rejectMergeCalls.push(runId);
+			// Mirror real storage (store.ts:2618): NO status guard — each call appends
+			// a `run-completed` terminal event, so an unguarded re-drive DUPLICATES it.
 			state.status = "failed";
+			runCompletedEvents.count += 1;
 			return { id: runId, unitId: "u", status: "failed" };
 		},
 		recordOperatorDecisionShadow(shadow) {
@@ -241,6 +267,8 @@ function makeHarness(
 		rejectMergeCalls,
 		decisionEmits,
 		emitOrder,
+		runResumedEvents,
+		runCompletedEvents,
 	};
 }
 
@@ -435,6 +463,39 @@ describe("recordOperatorDecision — F7 strict RFC3339 decidedAt", () => {
 			expect(h.decisionEmits).toHaveLength(1);
 		}
 	});
+
+	// Fix A — P1.7 strict calendar round-trip. The regex matches the SHAPE but not
+	// the calendar; `Date.parse` silently normalizes rolled-over fields (Feb 31 →
+	// Mar 3), so a calendar-impossible date could be signed onto the immutable tape.
+	it("rejects regex-shaped but calendar-impossible dates BEFORE any emit", async () => {
+		for (const bad of [
+			"2026-02-31T00:00:00Z", // Feb has no 31st (Date normalizes to Mar 3)
+			"2026-13-01T00:00:00Z", // month 13
+			"2026-00-10T00:00:00Z", // month 00
+			"2026-01-32T00:00:00Z", // day 32
+			"2026-01-01T24:00:00Z", // hour 24
+			"2026-01-01T23:60:00Z", // minute 60
+		]) {
+			const h = makeHarness({ initialStatus: "suspended" });
+			await expect(
+				h.orchestrator.recordOperatorDecision(input({ decidedAt: bad })),
+			).rejects.toBeInstanceOf(OperatorDecisionValidationError);
+			expect(h.decisionEmits).toHaveLength(0);
+			expect(h.shadows).toHaveLength(0);
+		}
+	});
+
+	it("accepts real calendar dates incl. an offset that shifts the UTC day", async () => {
+		for (const good of [
+			"2026-06-23T00:00:00Z",
+			"2026-06-23T12:34:56+05:30", // offset shifts UTC clock but is a real instant
+			"2026-06-23T12:34:56.789Z", // fractional seconds
+		]) {
+			const h = makeHarness({ initialStatus: "suspended" });
+			await h.orchestrator.recordOperatorDecision(input({ decidedAt: good }));
+			expect(h.decisionEmits).toHaveLength(1);
+		}
+	});
 });
 
 describe("recordOperatorDecision — F8 port awaited before side effects", () => {
@@ -611,6 +672,76 @@ describe("recoverPendingDecisions — exactly-once reconciler (D2/D4)", () => {
 		});
 		await h.orchestrator.recoverPendingDecisions();
 		expect(h.approveCalls).toEqual([RUN_ID]);
+		expect(h.decisionEmits).toHaveLength(0);
+	});
+});
+
+// Fix B — crash-after-side-effect-before-marker idempotency for the three
+// non-merge-approved paths. The crash window is modeled by an `initialStatus`
+// already in the post-side-effect state (the side effect ran) while the run is
+// still in `decidedUnexecuted` (the marker write was lost). A re-drive must NOT
+// re-apply the transition (no throw, no duplicate terminal event) and must heal
+// the marker exactly once.
+describe("recoverPendingDecisions — crash-idempotent non-merge side effects (Fix B / D2)", () => {
+	it("resume-approve: re-drive after the run already resumed heals the marker without re-applying", async () => {
+		// approveRun already ran (status pending), marker lost. A re-drive that
+		// re-called approveRun would THROW (`requires a suspended run`).
+		const h = makeHarness({
+			initialStatus: "pending",
+			decidedUnexecuted: () => [
+				{ runId: RUN_ID, decision: "approved", subject: "resume" },
+			],
+		});
+		await expect(
+			h.orchestrator.recoverPendingDecisions(),
+		).resolves.toBeUndefined();
+		// approveRun NOT re-applied: no second call, no second `run-resumed` event.
+		expect(h.approveCalls).toHaveLength(0);
+		expect(h.runResumedEvents.count).toBe(0);
+		expect(h.state.status).toBe("pending");
+		// Marker healed exactly once.
+		expect(h.executed).toEqual([{ runId: RUN_ID, mergedHeadSha: undefined }]);
+		expect(h.decisionEmits).toHaveLength(0);
+	});
+
+	it("resume-reject: re-drive after the run already failed heals the marker without re-applying", async () => {
+		// rejectSuspendedRun already ran (status failed), marker lost. A re-drive
+		// that re-called rejectSuspendedRun would THROW.
+		const h = makeHarness({
+			initialStatus: "failed",
+			decidedUnexecuted: () => [
+				{ runId: RUN_ID, decision: "rejected", subject: "resume" },
+			],
+		});
+		await expect(
+			h.orchestrator.recoverPendingDecisions(),
+		).resolves.toBeUndefined();
+		expect(h.rejectSuspendedCalls).toHaveLength(0);
+		// No second terminal event.
+		expect(h.runCompletedEvents.count).toBe(0);
+		expect(h.executed).toEqual([{ runId: RUN_ID, mergedHeadSha: undefined }]);
+		expect(h.decisionEmits).toHaveLength(0);
+	});
+
+	it("merge-reject: re-drive after the run already failed does NOT duplicate the run-completed event", async () => {
+		// rejectMergeDecision already ran (status failed, ONE run-completed), marker
+		// lost. rejectMergeDecision is UNGUARDED in storage, so an unguarded re-drive
+		// would append a SECOND run-completed terminal event.
+		const h = makeHarness({
+			initialStatus: "failed",
+			withWorkspace: true,
+			acceptanceOutcome: "passed",
+			decidedUnexecuted: () => [
+				{ runId: RUN_ID, decision: "rejected", subject: "merge" },
+			],
+		});
+		await expect(
+			h.orchestrator.recoverPendingDecisions(),
+		).resolves.toBeUndefined();
+		expect(h.rejectMergeCalls).toHaveLength(0);
+		// EXACTLY ZERO new run-completed events (the first one ran pre-crash).
+		expect(h.runCompletedEvents.count).toBe(0);
+		expect(h.executed).toEqual([{ runId: RUN_ID, mergedHeadSha: undefined }]);
 		expect(h.decisionEmits).toHaveLength(0);
 	});
 });
