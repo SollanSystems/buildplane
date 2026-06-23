@@ -17,3 +17,5 @@ native/target/
 .codegraph/
 .gstack/
 .planning/
+.loop/
+.tmp/
