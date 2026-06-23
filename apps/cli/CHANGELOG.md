@@ -1,5 +1,50 @@
 # buildplane
 
+## 0.12.0
+
+### Minor Changes
+
+- a5de446: GAP-5: add `PlanSummary`, `summarizePlanReceipt`, and `formatPriorWorkEntry` to planforge; add `injectPriorWorkIntoPacket`, `loadPriorWorkEntries`, and `writePlanSummaryToStorage` to cli. The dispatch path now persists a structured plan summary to storage after `plan_receipt`, and the supervisor can inject it as `TaskIntent.context.priorWork` into the next iteration's packet.
+- a5de446: Add the PlanForge planning worker: a roadmap-driven next-slice plan.md generator gated by `planforge validate`.
+
+  - New `buildplane planforge plan` command reads a dedicated machine-readable roadmap (`docs/roadmap.json`, schema id `buildplane.roadmap.v0`) plus the L0 tape's completed slices, deterministically emits the next eligible slice's `plan.md` in the canonical `## Tasks` grammar, and exits 0 only when the emitted plan validates PASS.
+  - New `@buildplane/planforge` exports: `loadRoadmapFromString`, `selectNextRoadmapSlice`, `buildPlannerPlanMarkdown`, `PLANFORGE_ROADMAP_SCHEMA_VERSION`, and the `RoadmapDoc` / `RoadmapSlice` / `RoadmapSliceStatus` types.
+  - Narrows the `forbiddenGoalIntent` guard so benign self-build goals that mention running their verification commands are no longer falsely rejected `UNSAFE_TO_RUN`; the truly-unsafe boundary-crossing phrasings (push/deploy/merge/PR/network/board/worker-spawn) stay rejected.
+  - Extends the public `PLANFORGE_REQUIRED_EVIDENCE` tuple with `tasks` (a plan with no parsed tasks now reports `tasks` as missing evidence directly rather than via a runtime cast). The `done`-status roadmap slice is treated as a satisfied dependency so a hand-built prerequisite unblocks the next slice.
+
+- a5de446: add S7 crash recovery: `buildplane planforge recover` scans storage for orphaned `running` runs, replays the signed tape, and auto-resumes each dispatch (the tape is authoritative over the storage status field — recover re-runs the suffix and emits the receipt on the tape, never rewriting the `running` row). Adds `BuildplaneStoragePort.listRunsByStatus` and a `.buildplane/planforge/dispatch` manifest sidecar so recovery can map a `running` run back to its admitted `--input` plan, plus a `plan_receipt` dedup-on-append guard keyed on the deterministic tape run id (derived from `idempotency_key`) so a partial-flush crash cannot double-receipt on resume. The worktree clean-tree check now excludes `.buildplane/planforge/**` (ephemeral dispatch state, like `runs/**` and `ledger/**`).
+- a5de446: Add the `buildplane planforge loop` supervisor (an FSM over `.buildplane/loop-state.json`, persisted atomically per transition) that drives plan → dry-run → envelope-check → admit → dispatch → accept → merge → re-anchor across iterations, bounded by an operator-authorized envelope. Flags: `--once`, `--max-iterations=N`, `--max-turns=N`, `--max-tokens=N`, `--wall-clock-ms=N`, `--json`. The loop resumes from a persisted non-terminal state and halts on a distinct terminal reason (roadmap-complete, stop-file, acceptance-fail, envelope-breach, token-budget, max-iterations, planner-error). It enforces both the envelope's `max_iterations` and cumulative `token_budget` as cross-iteration caps and verifies the active envelope's kernel signature on read.
+
+  To make the runaway guard fire, `ClaudeCodeExecutor.executePacketAsync` now accepts an `AbortSignal`, streams `--output-format stream-json`, emits one `model-token-delta` per assistant text block (so the orchestrator's budget `AbortController` can count tokens and abort a runaway worker), and honors abort — with a buffered-JSON fallback that keeps the legacy single-object output path working. The runtime router forwards the signal and a lowered `--max-turns` to the worker.
+
+### Patch Changes
+
+- a5de446: `planforge dispatch` now enforces the M4 acceptance gate by default. Pass `--no-enforce-acceptance` to opt out (e.g. during initial dogfood bringup or when the worktree has no pnpm workspace); the legacy `--enforce-acceptance` flag is still accepted but redundant. When the gate is active, worktree dependencies are provisioned via `pnpm install --frozen-lockfile` before checks run, so a task's `verificationCommands` have their binaries.
+- Updated dependencies [a5de446]
+- Updated dependencies [a5de446]
+- Updated dependencies [a5de446]
+- Updated dependencies [a5de446]
+- Updated dependencies [a5de446]
+- Updated dependencies [a5de446]
+- Updated dependencies [a5de446]
+- Updated dependencies [a5de446]
+- Updated dependencies [a5de446]
+- Updated dependencies [716b8db]
+- Updated dependencies [a5de446]
+- Updated dependencies [a5de446]
+  - @buildplane/planforge@1.0.0
+  - @buildplane/policy@0.2.0
+  - @buildplane/kernel@0.5.0
+  - @buildplane/ledger-client@0.2.0
+  - @buildplane/storage@0.3.0
+  - @buildplane/adapters-git@0.3.0
+  - @buildplane/adapters-models@0.2.0
+  - @buildplane/adapters-codex@0.1.6
+  - @buildplane/adapters-honcho@0.1.6
+  - @buildplane/adapters-tools@0.1.6
+  - @buildplane/runtime@0.1.6
+  - @buildplane/ui-tui@0.1.6
+
 ## 0.11.2
 
 ### Patch Changes

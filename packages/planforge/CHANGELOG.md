@@ -1,5 +1,58 @@
 # @buildplane/planforge
 
+## 1.0.0
+
+### Major Changes
+
+- a5de446: Dynamic task generation from ## Tasks Markdown section.
+
+  Breaking changes:
+
+  - `PLANFORGE_TASK_IDS` constant removed.
+  - `PlanForgeTaskId` type removed.
+  - `PlanForgeTask.id` widened from `PlanForgeTaskId` to `string`.
+  - `PlanForgeTask.dependsOn` widened from `PlanForgeTaskId[]` to `string[]`.
+
+  New exports:
+
+  - `parseTasks(content: string): ParsedTask[]` — parses the `## Tasks` Markdown section.
+  - `ParsedTask` interface.
+  - `PlanForgeCompileResult.parsedTasks` field.
+
+  Validation changes:
+
+  - Plans without a `## Tasks` section now produce `INSUFFICIENT_EVIDENCE`.
+  - New checks `tasks-present` and `tasks-valid` added to `PlanForgeValidation`.
+
+### Minor Changes
+
+- a5de446: GAP-5: add `PlanSummary`, `summarizePlanReceipt`, and `formatPriorWorkEntry` to planforge; add `injectPriorWorkIntoPacket`, `loadPriorWorkEntries`, and `writePlanSummaryToStorage` to cli. The dispatch path now persists a structured plan summary to storage after `plan_receipt`, and the supervisor can inject it as `TaskIntent.context.priorWork` into the next iteration's packet.
+- a5de446: Add the PlanForge planning worker: a roadmap-driven next-slice plan.md generator gated by `planforge validate`.
+
+  - New `buildplane planforge plan` command reads a dedicated machine-readable roadmap (`docs/roadmap.json`, schema id `buildplane.roadmap.v0`) plus the L0 tape's completed slices, deterministically emits the next eligible slice's `plan.md` in the canonical `## Tasks` grammar, and exits 0 only when the emitted plan validates PASS.
+  - New `@buildplane/planforge` exports: `loadRoadmapFromString`, `selectNextRoadmapSlice`, `buildPlannerPlanMarkdown`, `PLANFORGE_ROADMAP_SCHEMA_VERSION`, and the `RoadmapDoc` / `RoadmapSlice` / `RoadmapSliceStatus` types.
+  - Narrows the `forbiddenGoalIntent` guard so benign self-build goals that mention running their verification commands are no longer falsely rejected `UNSAFE_TO_RUN`; the truly-unsafe boundary-crossing phrasings (push/deploy/merge/PR/network/board/worker-spawn) stay rejected.
+  - Extends the public `PLANFORGE_REQUIRED_EVIDENCE` tuple with `tasks` (a plan with no parsed tasks now reports `tasks` as missing evidence directly rather than via a runtime cast). The `done`-status roadmap slice is treated as a satisfied dependency so a hand-built prerequisite unblocks the next slice.
+
+- a5de446: Dispatch real claude-code coding workers instead of the `true` placeholder.
+
+  - `DispatchedUnitPacket` drops the `execution: { command }` field and gains `model`
+    (`{ provider, model, prompt }`), `intent` (an inlined `DispatchTaskIntent`), and
+    `routingHints: { preferredWorker: 'claude-code' }`. The run-loop router short-circuits
+    any packet carrying `execution` to the command executor before checking
+    `preferredWorker`, so removing it is what lets the real worker be selected.
+  - New exports: `DISPATCH_WORKER_PROVIDER`, `DISPATCH_WORKER_MODEL`, `DispatchTaskIntent`,
+    and `buildTaskIntent`.
+  - `buildDefaultCapabilityBundleForTask` now always seeds `'claude'` into the
+    `run_command` allowlist (the worker binary), so `run_command` is always present and
+    the capability-bundle canonical digest changes.
+  - `verification.requiredOutputs` and `unit.expectedOutputs` stay empty by design; the
+    real assertion is `verificationCommands` run by the M4 acceptance gate.
+
+### Patch Changes
+
+- a5de446: add a `code-edit` side-effect kind mapping to `src/**`, `test/**`, `packages/**/src/**`, and `packages/**/test/**`, so an admitted plan can authorize source edits through the capability bundle. Extends `PLANFORGE_ALLOWED_SIDE_EFFECTS` and `SIDE_EFFECT_FS_WRITE_GLOBS`; no change to the toy dry-run plan or its golden fixture.
+
 ## 0.5.1
 
 ### Patch Changes

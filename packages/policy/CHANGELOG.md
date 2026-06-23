@@ -1,5 +1,20 @@
 # @buildplane/policy
 
+## 0.2.0
+
+### Minor Changes
+
+- a5de446: GAP-10: authorization envelope. Add `AuthorizationEnvelopeV0` + `EnvelopeProposal` policy vocabulary, a pure `evaluateEnvelopeAdmission` subset-admission gate, a canonical envelope digest + canonical-JSON, and carry the `authorize-envelope` subject + `envelope` field on the `operator_decision_recorded` ledger payload. The capability broker now denies a worker-binary (`claude`) `run_command` invocation that carries a permission-escape flag (e.g. `--dangerously-skip-permissions`), closing the GAP-4 carry-forward where argv0/prefix matching ignored args.
+
+### Patch Changes
+
+- Updated dependencies [a5de446]
+- Updated dependencies [a5de446]
+- Updated dependencies [a5de446]
+- Updated dependencies [a5de446]
+- Updated dependencies [716b8db]
+  - @buildplane/kernel@0.5.0
+
 ## 0.1.5
 
 ### Patch Changes
