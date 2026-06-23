@@ -280,6 +280,67 @@ describe("git worktree adapter", () => {
 		expect(result.mergedHeadSha).not.toBe(readGitHead(workspace.path));
 	});
 
+	// M5-S4 F1 — crash-window idempotency. A SECOND commitAndMergeWorkspace for
+	// the same run (the reconciler re-drive after a crash between merge and the
+	// execution marker) MUST detect the prior merge in the project git history
+	// and return its SHA WITHOUT creating a second merge commit.
+	it("is idempotent by runId: a second merge for the same run creates no new commit", () => {
+		const repo = createCommittedRepo();
+		const adapter = createGitWorktreeAdapter();
+		const { headSha: baseSha } = adapter.assertRunnableRepository(repo);
+		const workspace = adapter.prepareWorkspace(repo, "run-idem", baseSha);
+		writeFileSync(join(workspace.path, "feature.txt"), "feature\n");
+
+		const first = adapter.commitAndMergeWorkspace({
+			path: workspace.path,
+			runId: "run-idem",
+			projectRoot: repo,
+		});
+		const headAfterFirst = readGitHead(repo);
+		const logCountAfterFirst = mergeCommitCount(repo, "run-idem");
+		expect(logCountAfterFirst).toBe(1);
+
+		// Re-drive: must NOT advance HEAD or add a second merge commit.
+		const second = adapter.commitAndMergeWorkspace({
+			path: workspace.path,
+			runId: "run-idem",
+			projectRoot: repo,
+		});
+
+		expect(second).toEqual({ mergedHeadSha: first.mergedHeadSha });
+		expect(readGitHead(repo)).toBe(headAfterFirst);
+		expect(mergeCommitCount(repo, "run-idem")).toBe(1);
+	});
+
+	// The idempotency probe must be runId-scoped: a different run's prior merge
+	// must not be mistaken for this run's, so a genuine second run still merges.
+	it("does not treat another run's merge as this run's", () => {
+		const repo = createCommittedRepo();
+		const adapter = createGitWorktreeAdapter();
+		const { headSha: baseSha } = adapter.assertRunnableRepository(repo);
+
+		const wsA = adapter.prepareWorkspace(repo, "run-a", baseSha);
+		writeFileSync(join(wsA.path, "a.txt"), "a\n");
+		adapter.commitAndMergeWorkspace({
+			path: wsA.path,
+			runId: "run-a",
+			projectRoot: repo,
+		});
+		const headAfterA = readGitHead(repo);
+
+		const wsB = adapter.prepareWorkspace(repo, "run-b", baseSha);
+		writeFileSync(join(wsB.path, "b.txt"), "b\n");
+		adapter.commitAndMergeWorkspace({
+			path: wsB.path,
+			runId: "run-b",
+			projectRoot: repo,
+		});
+
+		expect(readGitHead(repo)).not.toBe(headAfterA);
+		expect(mergeCommitCount(repo, "run-a")).toBe(1);
+		expect(mergeCommitCount(repo, "run-b")).toBe(1);
+	});
+
 	it("rejects a base sha that does not resolve to a commit before cutting a worktree", () => {
 		const repo = createCommittedRepo();
 		const adapter = createGitWorktreeAdapter();
@@ -332,6 +393,16 @@ function readGitHead(cwd: string): string {
 		throw new Error(result.stderr.trim() || result.stdout.trim());
 	}
 	return result.stdout.trim();
+}
+
+function mergeCommitCount(cwd: string, runId: string): number {
+	const result = runGit(cwd, ["log", "--format=%s", "HEAD"]);
+	if (result.status !== 0) {
+		throw new Error(result.stderr.trim() || result.stdout.trim());
+	}
+	const needle = `feat: merge buildplane run ${runId}`;
+	return result.stdout.split("\n").filter((subject) => subject === needle)
+		.length;
 }
 
 function runGitOrThrow(cwd: string, args: string[]): void {

@@ -163,6 +163,8 @@ describe.sequential("recordOperatorDecision merge — signed tape + real merge",
 			outcome: "approved",
 			reasons: [],
 		});
+		// A merge decision is only signable once acceptance passed (M5-S4 F2).
+		storage.recordAcceptanceShadow(run.id, "passed");
 
 		const orchestrator = createBuildplaneOrchestrator({
 			projectRoot: env.dir,
@@ -216,5 +218,114 @@ describe.sequential("recordOperatorDecision merge — signed tape + real merge",
 		expect(sig?.actor_id).toBe("kernel");
 		expect(sig?.key_id).toBe("kernel-main");
 		expect(sig?.algorithm).toBe("ed25519");
+	});
+
+	// M5-S4 F1 — crash-after-merge-before-marker. Simulate a crash where the merge
+	// COMMITTED into real git but the execution marker was never written: record
+	// the Tier-1 decision shadow + do the real merge, omit the marker, then run the
+	// reconciler. The adapter's runId-keyed git-history idempotency MUST prevent a
+	// second merge commit. A unit fake cannot prove git non-idempotency — this
+	// drives the REAL git adapter.
+	it("does not double-merge when the reconciler re-drives after a lost marker", async () => {
+		const { createBuildplaneStorage } = await import(
+			"../../packages/storage/src/index.ts"
+		);
+		const { createGitWorktreeAdapter } = await import(
+			"../../packages/adapters-git/src/index.ts"
+		);
+		const { createBuildplaneOrchestrator } = await import(
+			"../../packages/kernel/src/index.ts"
+		);
+
+		const storage = createBuildplaneStorage(env.dir);
+		storage.initializeProject();
+		const workspace = createGitWorktreeAdapter();
+
+		const baseHead = git(env.dir, ["rev-parse", "HEAD"]).stdout.trim();
+		const runId = "01919000-0000-7000-8000-0000000000bb";
+
+		const packet = {
+			unit: {
+				id: "merge-unit",
+				kind: "command" as const,
+				scope: "task" as const,
+				inputRefs: [],
+				expectedOutputs: [],
+				verificationContract: "exit-0-and-required-outputs" as const,
+				policyProfile: "default",
+			},
+			execution: { command: "node", cwd: "." },
+			verification: { requiredOutputs: [] },
+		};
+		const run = storage.createRun(packet, { runId });
+		const prepared = workspace.prepareWorkspace(env.dir, run.id, baseHead);
+		storage.recordWorkspacePrepared(run.id, {
+			path: prepared.path,
+			headSha: prepared.headSha,
+			sourceProjectRoot: env.dir,
+		});
+		writeFileSync(join(prepared.path, "FEATURE.md"), "added by run\n");
+		storage.markRunRunning(run.id);
+		storage.commitRunSuccessOutcome(run.id, {
+			kind: "advance-run",
+			outcome: "approved",
+			reasons: [],
+		});
+		storage.recordAcceptanceShadow(run.id, "passed");
+
+		// Simulate the crash window: the decision was signed + Tier-1 shadowed and
+		// the merge COMMITTED, but the executed marker write was lost.
+		storage.recordOperatorDecisionShadow({
+			runId: run.id,
+			decision: "approved",
+			subject: "merge",
+			decidedBy: "operator:khall",
+			decidedAt: "2026-06-23T00:00:00Z",
+		});
+		const firstMerge = workspace.commitAndMergeWorkspace({
+			path: prepared.path,
+			runId: run.id,
+			projectRoot: env.dir,
+		});
+		// Marker intentionally NOT written → the run is decided-but-unexecuted.
+		expect(storage.isOperatorDecisionExecuted(run.id)).toBe(false);
+		const headAfterFirstMerge = git(env.dir, [
+			"rev-parse",
+			"HEAD",
+		]).stdout.trim();
+		expect(headAfterFirstMerge).toBe(firstMerge.mergedHeadSha);
+
+		const orchestrator = createBuildplaneOrchestrator({
+			projectRoot: env.dir,
+			storage,
+			runtime: {
+				executePacket() {
+					throw new Error("unused");
+				},
+			},
+			policy: {
+				evaluateRun() {
+					return { kind: "advance-run", outcome: "approved", reasons: [] };
+				},
+			},
+			workspace,
+			admissionStore: null,
+			// No port needed: the reconciler completes an already-signed decision.
+			operatorDecisionPort: { async recordDecision() {} },
+		});
+
+		await orchestrator.recoverPendingDecisions();
+
+		// Exactly ONE merge commit for this run in the project git log.
+		const subjects = git(env.dir, ["log", "--format=%s", "HEAD"])
+			.stdout.split("\n")
+			.filter((s) => s === `feat: merge buildplane run ${run.id}`);
+		expect(subjects).toHaveLength(1);
+		// HEAD did not advance off the first merge.
+		expect(git(env.dir, ["rev-parse", "HEAD"]).stdout.trim()).toBe(
+			headAfterFirstMerge,
+		);
+		// And the reconciler healed the window by writing the marker.
+		expect(storage.isOperatorDecisionExecuted(run.id)).toBe(true);
 	});
 });

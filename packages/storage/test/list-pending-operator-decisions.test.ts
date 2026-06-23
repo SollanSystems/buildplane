@@ -87,6 +87,18 @@ describe("listPendingOperatorDecisions", () => {
 		expect(storage.listPendingOperatorDecisions()).toEqual([]);
 	});
 
+	it("excludes a suspended run once an operator_decision_recorded event exists (F6)", () => {
+		const a = storage.createRun(packet("plan-a:PF1"));
+		storage.markRunRunning(a.id);
+		storage.suspendRun(a.id);
+		insertEventRow(root, "operator_decision_recorded", a.id);
+
+		// A crash after the Tier-2 flush + Tier-1 shadow but before the resume
+		// side effect leaves the run suspended; without this exclusion the operator
+		// would re-decide and produce a duplicate signed decision.
+		expect(storage.listPendingOperatorDecisions()).toEqual([]);
+	});
+
 	it("excludes runs whose acceptance shadow did not pass", () => {
 		const a = storage.createRun(packet("plan-a:PF1"));
 		storage.markRunRunning(a.id);

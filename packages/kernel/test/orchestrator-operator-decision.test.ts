@@ -47,12 +47,18 @@ function makeHarness(
 		withWorkspace?: boolean;
 		operatorDecisionPort?: OperatorDecisionPort;
 		decidedUnexecuted?: () => readonly DecidedUnexecutedDecision[];
+		acceptanceOutcome?: "passed" | "rejected" | null;
+		preExecutedMarker?: boolean;
+		omitOperatorDecisionPort?: boolean;
 	} = {},
 ): Harness {
 	const state: FakeRunState = {
 		status: options.initialStatus ?? "suspended",
 		workspacePath: options.withWorkspace ? WORKSPACE_PATH : undefined,
 	};
+	const executedMarkers = new Set<string>(
+		options.preExecutedMarker ? [RUN_ID] : [],
+	);
 	const shadows: OperatorDecisionShadow[] = [];
 	const executed: { runId: string; mergedHeadSha?: string }[] = [];
 	const mergeCalls: { path: string; runId: string }[] = [];
@@ -149,7 +155,18 @@ function makeHarness(
 		},
 		markOperatorDecisionExecuted(runId, outcome) {
 			emitOrder.push("markExecuted");
+			executedMarkers.add(runId);
 			executed.push({ runId, mergedHeadSha: outcome?.mergedHeadSha });
+		},
+		isOperatorDecisionExecuted(runId) {
+			return executedMarkers.has(runId);
+		},
+		getRunAcceptanceOutcome(runId) {
+			void runId;
+			if ("acceptanceOutcome" in options) {
+				return options.acceptanceOutcome ?? null;
+			}
+			return options.withWorkspace ? "passed" : null;
 		},
 		listDecidedUnexecutedDecisions() {
 			return options.decidedUnexecuted?.() ?? [];
@@ -210,7 +227,7 @@ function makeHarness(
 		policy,
 		workspace,
 		admissionStore: null,
-		operatorDecisionPort,
+		...(options.omitOperatorDecisionPort ? {} : { operatorDecisionPort }),
 	});
 
 	return {
@@ -261,6 +278,192 @@ describe("recordOperatorDecision — write-ahead ordering (D1/D2)", () => {
 		const h = makeHarness({ initialStatus: "suspended" });
 		await h.orchestrator.recordOperatorDecision(input());
 		expect(h.decisionEmits[0].mergeCommit).toBeUndefined();
+	});
+});
+
+describe("recordOperatorDecision — F4 unsigned-side-effect hole (port absent)", () => {
+	it("throws BEFORE any side effect when operatorDecisionPort is absent", async () => {
+		const h = makeHarness({
+			initialStatus: "suspended",
+			omitOperatorDecisionPort: true,
+		});
+		await expect(
+			h.orchestrator.recordOperatorDecision(input()),
+		).rejects.toBeInstanceOf(OperatorDecisionValidationError);
+		// No side effect (an L0 side effect must never run unsigned).
+		expect(h.shadows).toHaveLength(0);
+		expect(h.approveCalls).toHaveLength(0);
+		expect(h.executed).toHaveLength(0);
+	});
+
+	it("reconciler re-drives an already-signed decision without a port (never re-emits)", async () => {
+		// The reconciler only completes a side effect for a decision already signed
+		// onto the tape at decision time — it never re-emits Tier-2, so it does not
+		// need a port. This must NOT throw the F4 fail-closed guard.
+		const h = makeHarness({
+			initialStatus: "suspended",
+			omitOperatorDecisionPort: true,
+			decidedUnexecuted: () => [
+				{ runId: RUN_ID, decision: "approved", subject: "resume" },
+			],
+		});
+		await h.orchestrator.recoverPendingDecisions();
+		expect(h.approveCalls).toEqual([RUN_ID]);
+		expect(h.decisionEmits).toHaveLength(0);
+	});
+});
+
+describe("recordOperatorDecision — F3 reject mergeCommit in the live path", () => {
+	it("rejects a present mergeCommit (40-hex) BEFORE any emit", async () => {
+		const h = makeHarness({ initialStatus: "suspended" });
+		await expect(
+			h.orchestrator.recordOperatorDecision(
+				input({ mergeCommit: "a".repeat(40) }),
+			),
+		).rejects.toBeInstanceOf(OperatorDecisionValidationError);
+		expect(h.decisionEmits).toHaveLength(0);
+		expect(h.shadows).toHaveLength(0);
+	});
+});
+
+describe("recordOperatorDecision — F2 merge eligibility (acceptance passed + workspace)", () => {
+	it("rejects merge on a failed/pending/running/cancelled run BEFORE any emit", async () => {
+		for (const status of [
+			"failed",
+			"pending",
+			"running",
+			"cancelled",
+		] as RunStatus[]) {
+			const h = makeHarness({
+				initialStatus: status,
+				withWorkspace: true,
+				acceptanceOutcome: null,
+			});
+			await expect(
+				h.orchestrator.recordOperatorDecision(input({ subject: "merge" })),
+			).rejects.toBeInstanceOf(OperatorDecisionValidationError);
+			expect(h.decisionEmits).toHaveLength(0);
+			expect(h.shadows).toHaveLength(0);
+			expect(h.mergeCalls).toHaveLength(0);
+		}
+	});
+
+	it("rejects merge on a passed run with NO retained workspace BEFORE any emit", async () => {
+		const h = makeHarness({
+			initialStatus: "passed",
+			withWorkspace: false,
+			acceptanceOutcome: "passed",
+		});
+		await expect(
+			h.orchestrator.recordOperatorDecision(input({ subject: "merge" })),
+		).rejects.toBeInstanceOf(OperatorDecisionValidationError);
+		expect(h.decisionEmits).toHaveLength(0);
+		expect(h.shadows).toHaveLength(0);
+	});
+
+	it("accepts merge on a passed run with a retained workspace", async () => {
+		const h = makeHarness({
+			initialStatus: "passed",
+			withWorkspace: true,
+			acceptanceOutcome: "passed",
+		});
+		await h.orchestrator.recordOperatorDecision(input({ subject: "merge" }));
+		expect(h.decisionEmits).toHaveLength(1);
+		expect(h.mergeCalls).toHaveLength(1);
+	});
+});
+
+describe("recordOperatorDecision — F1/F5 marker check-and-claim", () => {
+	it("no-ops the side effect when an execution marker already exists", async () => {
+		const h = makeHarness({
+			initialStatus: "passed",
+			withWorkspace: true,
+			acceptanceOutcome: "passed",
+			preExecutedMarker: true,
+			decidedUnexecuted: () => [
+				{ runId: RUN_ID, decision: "approved", subject: "merge" },
+			],
+		});
+		// Reconciler re-drive after the marker already landed must not re-merge.
+		await h.orchestrator.recoverPendingDecisions();
+		expect(h.mergeCalls).toHaveLength(0);
+		expect(h.executed).toHaveLength(0);
+	});
+
+	it("F5: two shadows for one run apply the side effect exactly once", async () => {
+		const h = makeHarness({
+			initialStatus: "passed",
+			withWorkspace: true,
+			acceptanceOutcome: "passed",
+			// Snapshot returns the SAME run twice (no DISTINCT in the fake) — the
+			// orchestrator's marker claim must still apply the merge only once.
+			decidedUnexecuted: () => [
+				{ runId: RUN_ID, decision: "approved", subject: "merge" },
+				{ runId: RUN_ID, decision: "approved", subject: "merge" },
+			],
+		});
+		await h.orchestrator.recoverPendingDecisions();
+		expect(h.mergeCalls).toHaveLength(1);
+		expect(h.executed).toHaveLength(1);
+	});
+});
+
+describe("recordOperatorDecision — F7 strict RFC3339 decidedAt", () => {
+	it("rejects non-RFC3339 dates that Date.parse would accept", async () => {
+		for (const bad of [
+			"06/23/2026",
+			"June 23, 2026",
+			"2026-06-23",
+			"2026/06/23T00:00:00Z",
+		]) {
+			const h = makeHarness({ initialStatus: "suspended" });
+			await expect(
+				h.orchestrator.recordOperatorDecision(input({ decidedAt: bad })),
+			).rejects.toBeInstanceOf(OperatorDecisionValidationError);
+			expect(h.decisionEmits).toHaveLength(0);
+		}
+	});
+
+	it("accepts valid RFC3339 timestamps (Z and numeric offset)", async () => {
+		for (const good of [
+			"2026-06-23T00:00:00Z",
+			"2026-06-23T00:00:00.123Z",
+			"2026-06-23T00:00:00+02:00",
+		]) {
+			const h = makeHarness({ initialStatus: "suspended" });
+			await h.orchestrator.recordOperatorDecision(input({ decidedAt: good }));
+			expect(h.decisionEmits).toHaveLength(1);
+		}
+	});
+});
+
+describe("recordOperatorDecision — F8 port awaited before side effects", () => {
+	it("does not shadow or apply the side effect until the port promise resolves", async () => {
+		let resolvePort: (() => void) | undefined;
+		const gate = new Promise<void>((res) => {
+			resolvePort = res;
+		});
+		const deferredPort: OperatorDecisionPort = {
+			async recordDecision() {
+				await gate;
+			},
+		};
+		const h = makeHarness({
+			initialStatus: "suspended",
+			operatorDecisionPort: deferredPort,
+		});
+		const pending = h.orchestrator.recordOperatorDecision(input());
+
+		// Let any microtasks flush; the port has not resolved, so nothing after it.
+		await Promise.resolve();
+		await Promise.resolve();
+		expect(h.shadows).toHaveLength(0);
+		expect(h.approveCalls).toHaveLength(0);
+
+		resolvePort?.();
+		await pending;
+		expect(h.shadows).toHaveLength(1);
+		expect(h.approveCalls).toEqual([RUN_ID]);
 	});
 });
 

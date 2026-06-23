@@ -249,9 +249,22 @@ export interface BuildplaneStoragePort {
 		outcome?: { mergedHeadSha?: string },
 	): void;
 	/**
+	 * Whether an `operator_decision_executed` Tier-1 marker already exists for the
+	 * run (M5-S4 F1/F5). The orchestrator check-and-claims this immediately before
+	 * each side effect so a post-marker re-drive (reconciler or operator re-decide)
+	 * never re-applies it.
+	 */
+	isOperatorDecisionExecuted(runId: string): boolean;
+	/**
+	 * The run's recorded acceptance shadow outcome (`passed` / `rejected`), or
+	 * `null` if none. Read during merge-eligibility validation (M5-S4 F2): a merge
+	 * decision is only signable when acceptance `passed`.
+	 */
+	getRunAcceptanceOutcome(runId: string): "passed" | "rejected" | null;
+	/**
 	 * The reconciler feed: every run with an `operator_decision_recorded` Tier-1
 	 * mirror but no `operator_decision_executed` marker — a decided-but-unexecuted
-	 * side effect. Oldest first.
+	 * side effect. At most one row per run. Oldest first.
 	 */
 	listDecidedUnexecutedDecisions(): readonly DecidedUnexecutedDecision[];
 	getStatusSnapshot(): StatusSnapshot;

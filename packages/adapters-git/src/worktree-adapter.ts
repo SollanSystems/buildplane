@@ -213,6 +213,21 @@ export function createGitWorktreeAdapter(
 			const projectRoot =
 				workspace.projectRoot ?? dirname(dirname(dirname(workspace.path)));
 
+			// M5-S4 F1 — crash-window idempotency. The reconciler may re-drive this
+			// merge after a crash between the merge and the execution marker. Git
+			// history survives the crash, so probe the project root for a prior merge
+			// commit carrying THIS run's merge message and, if present, return its SHA
+			// without creating a second commit/merge. The merge message embeds the
+			// runId (`feat: merge buildplane run {runId}`), so the probe is run-scoped.
+			const existingMergeSha = findExistingRunMergeSha(
+				runGit,
+				projectRoot,
+				workspace.runId,
+			);
+			if (existingMergeSha !== null) {
+				return { mergedHeadSha: existingMergeSha };
+			}
+
 			// Commit changes made in the worktree, excluding .buildplane/ state.
 			// The worktree may contain its own .buildplane/ artifacts from nested
 			// runs or the host project's state — these must not be merged back
@@ -300,6 +315,38 @@ export function createGitWorktreeAdapter(
 	};
 
 	return adapter;
+}
+
+/**
+ * Returns the SHA of the most recent reachable commit whose subject is exactly
+ * this run's merge message, or `null` if none. Used by `commitAndMergeWorkspace`
+ * to stay idempotent across the crash-after-merge-before-marker window (M5-S4 F1):
+ * the merge message embeds the runId, so a prior merge is detected run-scoped.
+ */
+function findExistingRunMergeSha(
+	runGit: GitCommandRunner,
+	projectRoot: string,
+	runId: string,
+): string | null {
+	const subject = `feat: merge buildplane run ${runId}`;
+	// Each line is `<40-hex-sha> <subject>`; split at the first space to match
+	// the subject (the runId-embedded merge message) exactly.
+	const log = executeGitCommand(runGit, projectRoot, [
+		"log",
+		"--format=%H %s",
+		"HEAD",
+	]);
+	if (log.status !== 0) {
+		return null;
+	}
+	for (const line of log.stdout.split("\n")) {
+		const sep = line.indexOf(" ");
+		if (sep === -1) continue;
+		if (line.slice(sep + 1) === subject) {
+			return line.slice(0, sep);
+		}
+	}
+	return null;
 }
 
 function executeGitCommand(

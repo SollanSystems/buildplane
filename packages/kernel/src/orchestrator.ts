@@ -109,6 +109,12 @@ const PLAN_ADMITTED_AUTHORIZED_NEXT_STEP = "dispatch_admitted_plan";
 const UUID_PATTERN =
 	/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+// Strict RFC3339 timestamp (M5-S4 F7): `Date.parse` accepts non-RFC3339 forms
+// like "06/23/2026", so a decision's `decidedAt` is matched against this regex
+// AND round-tripped through Date before it can be signed.
+const RFC3339_PATTERN =
+	/^\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(\.\d+)?([Zz]|[+-]\d{2}:\d{2})$/;
+
 /**
  * Thrown by `recordOperatorDecision` validation (M5-S4 D5) BEFORE any tape emit,
  * so a malformed decision can never be signed. A typed error class lets callers
@@ -239,25 +245,29 @@ export function createBuildplaneOrchestrator(
 				`runId must be a UUID, got '${input.runId}'.`,
 			);
 		}
-		if (
-			input.mergeCommit !== undefined &&
-			!/^[0-9a-f]{40}$/i.test(input.mergeCommit)
-		) {
+		// F3 — the live write-ahead path must NEVER carry a mergeCommit: at emit
+		// time the merge has not happened (D1), so a present SHA would sign a
+		// false/pre-merge value onto the immutable tape. `mergeCommit` stays on the
+		// input type for a future post-hoc decision API, but this live path rejects it.
+		if (input.mergeCommit !== undefined) {
 			throw new OperatorDecisionValidationError(
-				`mergeCommit must be a 40-hex sha when present, got '${input.mergeCommit}'.`,
+				"mergeCommit must be absent in the live write-ahead path (the merge has not happened at emit time, D1).",
 			);
 		}
 		if (input.decidedBy.trim().length === 0) {
 			throw new OperatorDecisionValidationError("decidedBy must be non-empty.");
 		}
-		if (Number.isNaN(Date.parse(input.decidedAt))) {
+		// F7 — strict RFC3339 (regex + Date round-trip), not lenient `Date.parse`.
+		if (
+			!RFC3339_PATTERN.test(input.decidedAt) ||
+			Number.isNaN(Date.parse(input.decidedAt))
+		) {
 			throw new OperatorDecisionValidationError(
-				`decidedAt must be ISO-8601, got '${input.decidedAt}'.`,
+				`decidedAt must be RFC3339, got '${input.decidedAt}'.`,
 			);
 		}
 
-		// Run state must match the subject (D5): resume → suspended; merge → a run
-		// whose acceptance passed (the only state with a retained worktree to merge).
+		// Run state must match the subject (D5): resume → suspended.
 		const snapshot = storage.inspectTarget(input.runId);
 		const status = snapshot.run.status;
 		if (input.subject === "resume" && status !== "suspended") {
@@ -265,10 +275,21 @@ export function createBuildplaneOrchestrator(
 				`resume decision requires a suspended run, got '${status}'.`,
 			);
 		}
-		if (input.subject === "merge" && status === "suspended") {
-			throw new OperatorDecisionValidationError(
-				"merge decision requires a run whose acceptance passed, not a suspended run.",
-			);
+		// F2 — a merge decision is only signable when acceptance PASSED and a
+		// retained worktree still exists to merge. Any other state (failed/pending/
+		// running/cancelled, or passed-without-workspace) must throw BEFORE the emit
+		// so a state-malformed merge decision can never reach the immutable tape.
+		if (input.subject === "merge") {
+			if (storage.getRunAcceptanceOutcome(input.runId) !== "passed") {
+				throw new OperatorDecisionValidationError(
+					"merge decision requires a run whose acceptance passed.",
+				);
+			}
+			if (!snapshot.workspace?.path) {
+				throw new OperatorDecisionValidationError(
+					`merge decision requires a retained worktree for run '${input.runId}'.`,
+				);
+			}
 		}
 	}
 
@@ -280,6 +301,17 @@ export function createBuildplaneOrchestrator(
 		subject: OperatorDecisionSubject,
 		decision: OperatorDecisionVerdict,
 	): void {
+		// F1/F5 — marker check-and-claim. If the side effect already completed for
+		// this run (post-marker reconciler re-drive, operator re-decide, or a
+		// duplicate shadow that escaped the DISTINCT feed), no-op. Combined with the
+		// adapter's runId-keyed merge idempotency, this closes the
+		// crash-after-merge-before-marker double-merge window: even if the merge ran
+		// but the marker write was lost, the adapter detects the prior merge and
+		// returns its SHA without creating a second commit.
+		if (storage.isOperatorDecisionExecuted(runId)) {
+			return;
+		}
+
 		if (subject === "resume") {
 			if (decision === "approved") {
 				storage.approveRun(runId);
@@ -2028,15 +2060,22 @@ export function createBuildplaneOrchestrator(
 		async recordOperatorDecision(
 			input: RecordOperatorDecisionInput,
 		): Promise<void> {
+			// F4 — fail-closed: an L0 side effect must never run unsigned. Without a
+			// port there is no way to emit the write-ahead record, so reject BEFORE
+			// validation/shadow/side-effect rather than silently applying it unsigned.
+			if (!operatorDecisionPort) {
+				throw new OperatorDecisionValidationError(
+					"recordOperatorDecision requires an operatorDecisionPort (an L0 side effect must never run unsigned).",
+				);
+			}
+
 			validateOperatorDecisionInput(input);
 
 			// D1 — write-ahead is primary. Emit + flush the signed decision BEFORE
 			// any side effect; the merge has not happened, so `mergeCommit` is
 			// absent in the live path (the merge SHA is captured downstream, never
 			// written back into the immutable signed event).
-			if (operatorDecisionPort) {
-				await operatorDecisionPort.recordDecision(input);
-			}
+			await operatorDecisionPort.recordDecision(input);
 
 			// D2 step 3 — the TS-readable exactly-once anchor. The reconciler cannot
 			// read the Tier-2 events.db, so the Tier-1 mirror is what makes a decided

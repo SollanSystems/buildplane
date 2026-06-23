@@ -3327,15 +3327,12 @@ export function createStorageStore(
 					.prepare(
 						`SELECT r.id AS id, r.status AS status, r.acceptance_outcome AS acceptance_outcome, r.updated_at AS updated_at
 						 FROM runs r
-						 WHERE r.status = 'suspended'
-						    OR (
-						       r.acceptance_outcome = 'passed'
-						       AND NOT EXISTS (
-						          SELECT 1 FROM events e
-						          WHERE e.kind = 'operator_decision_recorded'
-						            AND json_extract(e.payload, '$.runId') = r.id
-						       )
-						    )
+						 WHERE (r.status = 'suspended' OR r.acceptance_outcome = 'passed')
+						   AND NOT EXISTS (
+						      SELECT 1 FROM events e
+						      WHERE e.kind = 'operator_decision_recorded'
+						        AND json_extract(e.payload, '$.runId') = r.id
+						   )
 						 ORDER BY r.created_at ASC, r.rowid ASC`,
 					)
 					.all() as {
@@ -3404,10 +3401,45 @@ export function createStorageStore(
 			}
 		},
 
+		isOperatorDecisionExecuted(runId: string): boolean {
+			ensureInitialized();
+			const database = openStoreDatabase();
+			try {
+				const row = database
+					.prepare(
+						`SELECT 1 FROM events
+						 WHERE kind = 'operator_decision_executed'
+						   AND json_extract(payload, '$.runId') = ?
+						 LIMIT 1`,
+					)
+					.get(runId);
+				return row !== undefined;
+			} finally {
+				database.close();
+			}
+		},
+
+		getRunAcceptanceOutcome(runId: string): "passed" | "rejected" | null {
+			ensureInitialized();
+			const database = openStoreDatabase();
+			try {
+				const row = database
+					.prepare(`SELECT acceptance_outcome FROM runs WHERE id = ?`)
+					.get(runId) as { acceptance_outcome: string | null } | undefined;
+				const outcome = row?.acceptance_outcome ?? null;
+				return outcome === "passed" || outcome === "rejected" ? outcome : null;
+			} finally {
+				database.close();
+			}
+		},
+
 		listDecidedUnexecutedDecisions(): readonly DecidedUnexecutedDecision[] {
 			ensureInitialized();
 			const database = openStoreDatabase();
 			try {
+				// At most one row per run (M5-S4 F5): a duplicate Tier-1 shadow (e.g.
+				// the residual crash-window operator re-decide) must not double-feed
+				// the reconciler. GROUP BY runId keeps the earliest decision row.
 				const rows = database
 					.prepare(
 						`SELECT json_extract(e.payload, '$.runId')   AS run_id,
@@ -3420,7 +3452,8 @@ export function createStorageStore(
 						      WHERE x.kind = 'operator_decision_executed'
 						        AND json_extract(x.payload, '$.runId') = json_extract(e.payload, '$.runId')
 						   )
-						 ORDER BY e.occurred_at ASC, e.rowid ASC`,
+						 GROUP BY json_extract(e.payload, '$.runId')
+						 ORDER BY MIN(e.rowid) ASC`,
 					)
 					.all() as {
 					run_id: string;
