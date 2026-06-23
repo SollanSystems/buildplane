@@ -162,4 +162,17 @@ describe("orchestrator serial re-anchor", () => {
 		expect(result.run.status).toBe("passed");
 		expect(result.mergedHeadSha).toBe(MERGED);
 	});
+
+	// GAP-7 TASK 0: PlanForge dispatch routes through runPacketAsync ONLY, so the
+	// supervisor loop's re-anchor reads result.mergedHeadSha off the ASYNC path.
+	// Both paths funnel through the shared finalizeRun, but pin the async surface
+	// explicitly so a future refactor can't drop the merged HEAD on it.
+	it("surfaces the post-merge HEAD as result.mergedHeadSha on the async path", async () => {
+		const { orchestrator } = createMergeAnchorHarness();
+
+		const result = await orchestrator.runPacketAsync(packet);
+
+		expect(result.run.status).toBe("passed");
+		expect(result.mergedHeadSha).toBe(MERGED);
+	});
 });
