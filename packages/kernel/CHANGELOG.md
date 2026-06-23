@@ -1,5 +1,20 @@
 # @buildplane/kernel
 
+## 0.5.0
+
+### Minor Changes
+
+- a5de446: GAP-10: authorization envelope. Add `AuthorizationEnvelopeV0` + `EnvelopeProposal` policy vocabulary, a pure `evaluateEnvelopeAdmission` subset-admission gate, a canonical envelope digest + canonical-JSON, and carry the `authorize-envelope` subject + `envelope` field on the `operator_decision_recorded` ledger payload. The capability broker now denies a worker-binary (`claude`) `run_command` invocation that carries a permission-escape flag (e.g. `--dangerously-skip-permissions`), closing the GAP-4 carry-forward where argv0/prefix matching ignored args.
+- a5de446: add S7 crash recovery: `buildplane planforge recover` scans storage for orphaned `running` runs, replays the signed tape, and auto-resumes each dispatch (the tape is authoritative over the storage status field — recover re-runs the suffix and emits the receipt on the tape, never rewriting the `running` row). Adds `BuildplaneStoragePort.listRunsByStatus` and a `.buildplane/planforge/dispatch` manifest sidecar so recovery can map a `running` run back to its admitted `--input` plan, plus a `plan_receipt` dedup-on-append guard keyed on the deterministic tape run id (derived from `idempotency_key`) so a partial-flush crash cannot double-receipt on resume. The worktree clean-tree check now excludes `.buildplane/planforge/**` (ephemeral dispatch state, like `runs/**` and `ledger/**`).
+- a5de446: Serial worktree re-anchor (GAP-8): commitAndMergeWorkspace now returns the project-root post-merge HEAD ({ mergedHeadSha }), surfaced on RunPacketResult.mergedHeadSha so a serial loop driver anchors the next unit on the just-merged commit. prepareWorkspace now asserts the requested base commit resolves before cutting a worktree. Closes the PR #198 stale-base risk class for serial multi-unit runs.
+- 716b8db: add the Mission Control storage read surface and the Tier-1 acceptance shadow. `listRunsByStatus` now returns a paginated `RunPage` (array carrying an opaque `cursor`) with `limit`/`cursor` support; `recordAcceptanceShadow` writes the additive `runs.acceptance_outcome` column from the M4 acceptance path; `listPendingOperatorDecisions` returns the operator inbox feed (suspended runs as `resume`, accepted-undecided runs as `merge`, excluding runs with an `operator_decision_recorded` event). `parentRunId` is now threaded through `toRun` → `inspectTarget` → `InspectSnapshot.run`.
+
+### Patch Changes
+
+- a5de446: add optional `provisionDeps` hook to `CreateBuildplaneOrchestratorOptions`. When provided, the orchestrator invokes it with the isolated worktree path after `prepareWorkspace` succeeds and before the workspace row is recorded / admission proceeds, so dependency provisioning (e.g. `pnpm install --frozen-lockfile`) runs before acceptance-check commands. A thrown error surfaces as a `workspace-provision-failed` infrastructure failure with the worktree retained for inspection.
+- Updated dependencies [a5de446]
+  - @buildplane/capability-broker@0.2.2
+
 ## 0.4.2
 
 ### Patch Changes
