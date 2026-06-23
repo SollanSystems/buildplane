@@ -1,5 +1,12 @@
 # @buildplane/ui-tui
 
+## 0.1.8
+
+### Patch Changes
+
+- Updated dependencies [6e6cf64]
+  - @buildplane/kernel@0.7.0
+
 ## 0.1.7
 
 ### Patch Changes
