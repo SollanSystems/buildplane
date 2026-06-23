@@ -818,8 +818,7 @@ export function createBuildplaneOrchestrator(
 					};
 				}
 				if (
-					!admitted ||
-					!admitted.signedByKernel ||
+					!admitted?.signedByKernel ||
 					admitted.authorizedNextStep !== PLAN_ADMITTED_AUTHORIZED_NEXT_STEP
 				) {
 					return {

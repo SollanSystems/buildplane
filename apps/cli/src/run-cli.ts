@@ -1,4 +1,3 @@
-import type { ChildProcess } from "node:child_process";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import {
@@ -11,9 +10,7 @@ import {
 	statSync,
 	writeFileSync,
 } from "node:fs";
-import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import type { Readable, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import {
 	createToolRegistry,
@@ -21,6 +18,7 @@ import {
 } from "@buildplane/adapters-tools";
 import type {
 	AuthorizationEnvelopeV0,
+	BudgetConstraints,
 	BuildplaneAcceptancePort,
 	BuildplaneProfileRegistryPort,
 	BuildplaneStoragePort,
@@ -75,7 +73,6 @@ import { emitCapabilityDenied } from "./ledger-capability-denied.js";
 import {
 	assertKernelSigningKey,
 	deriveLedgerSpawnCwd,
-	kernelSigningKeyPath,
 	type LedgerChild,
 	PLANFORGE_KERNEL_SIGNING_KEY_ID,
 	resolveLedgerBinary,
@@ -107,7 +104,6 @@ import { runPlannerProposal } from "./planforge-planner.js";
 import {
 	acceptanceContractDigest,
 	buildPlanAdmittedPayload,
-	buildPlannerPlanMarkdown,
 	buildPlanReceiptPayload,
 	createPlanForgeDryRunPlan,
 	deriveAcceptanceContract,
@@ -119,7 +115,6 @@ import {
 	type PlanForgePlan,
 	type PlanSummary,
 	type RoadmapDoc,
-	selectNextRoadmapSlice,
 	summarizePlanReceipt,
 } from "./planforge-schema.js";
 import {
@@ -241,6 +236,13 @@ export interface LoopSliceProposal {
 export interface LoopDispatchResult {
 	readonly allPassed: boolean;
 	readonly mergedHeadSha: string | null;
+	/**
+	 * Real total token usage (input + output) summed across this dispatch's model
+	 * activities, extracted from each executor's terminal result `usage`. Fed to
+	 * the supervisor's cumulative `token_budget` cap (GAP-7 CRITICAL-2). 0 when no
+	 * model activity reported usage (e.g. command-only dispatch).
+	 */
+	readonly tokenUsage: number;
 	readonly runs: readonly unknown[];
 }
 
@@ -1383,6 +1385,14 @@ async function loadCliOrchestrator(
 		readonly provisionDeps?: (workspacePath: string) => void;
 		/** Lowered worker turn cap for the supervisor loop's runaway guard. */
 		readonly claudeMaxTurns?: number;
+		/**
+		 * Per-packet budget caps for the supervisor loop's runaway guard. When set,
+		 * the orchestrator installs the budget subscription whose AbortController
+		 * aborts a streaming model worker once it crosses maxTokens / maxComputeTimeMs.
+		 * Resolved as the orchestrator's top-level budgets; a dispatched packet's
+		 * acceptance profile carries no budgets, so it falls through to these.
+		 */
+		readonly budgets?: BudgetConstraints;
 	},
 ): Promise<CliOrchestratorBundle> {
 	const kernel = (await cliImport("@buildplane/kernel")) as unknown as {
@@ -1407,6 +1417,11 @@ async function loadCliOrchestrator(
 					changedFiles: readonly string[],
 					contract: unknown,
 				) => unknown;
+				evaluateBudgets?: (
+					packet: unknown,
+					usage: unknown,
+					budgets?: unknown,
+				) => unknown;
 			};
 			workspace?: unknown;
 			admissionStore?: RunAdmissionStoreLike;
@@ -1416,6 +1431,7 @@ async function loadCliOrchestrator(
 			profileRegistry?: BuildplaneProfileRegistryPort;
 			acceptancePort?: BuildplaneAcceptancePort;
 			provisionDeps?: (workspacePath: string) => void;
+			budgets?: BudgetConstraints;
 		}) => BuildplaneCliOrchestrator;
 		createEventBus: () => {
 			subscribe: (listener: (event: unknown) => void) => () => void;
@@ -1431,6 +1447,11 @@ async function loadCliOrchestrator(
 		evaluateAcceptanceContract: (
 			contract: unknown,
 			evidence: unknown,
+		) => unknown;
+		evaluateBudgets: (
+			packet: unknown,
+			usage: unknown,
+			budgets?: unknown,
 		) => unknown;
 	};
 	const storage = (await cliImport("@buildplane/storage")) as unknown as {
@@ -1715,6 +1736,9 @@ async function loadCliOrchestrator(
 				changedFiles: readonly string[],
 				contract: unknown,
 			) => unknown,
+			// Wired so the orchestrator's runaway-guard budget subscription can
+			// evaluate mid-stream token/time usage against the loop guard's budgets.
+			evaluateBudgets: policy.evaluateBudgets,
 		},
 		workspace: adaptersGit.createGitWorktreeAdapter(),
 		admissionStore: createCliRunAdmissionStore(projectRoot),
@@ -1724,6 +1748,8 @@ async function loadCliOrchestrator(
 		profileRegistry: opts?.profileRegistry,
 		acceptancePort: opts?.acceptancePort,
 		provisionDeps: opts?.provisionDeps,
+		// Runaway-guard budgets (loop dispatch); undefined for non-loop callers.
+		budgets: opts?.budgets,
 	});
 
 	return {
@@ -4280,6 +4306,8 @@ async function loadSearchableDocumentStoragePort(
 interface PlanForgeDispatchOutcome {
 	readonly allPassed: boolean;
 	readonly mergedHeadSha: string | null;
+	/** Real total token usage (input + output) summed across this dispatch's tasks. */
+	readonly tokenUsage: number;
 	readonly runs: ReadonlyArray<{
 		task: string;
 		run_id: string;
@@ -4294,6 +4322,13 @@ async function runPlanForgeDispatchCommand(
 	opts?: {
 		/** Lowered worker turn cap for the supervisor loop's runaway guard. */
 		readonly claudeMaxTurns?: number;
+		/**
+		 * Per-packet budget caps for the supervisor loop's runaway guard. Threaded
+		 * to the orchestrator so the AbortController aborts a runaway model worker
+		 * mid-stream. The dispatched packet's acceptance profile has no budgets, so
+		 * the orchestrator falls through to these top-level budgets.
+		 */
+		readonly budgets?: BudgetConstraints;
 		/** Receives the rich dispatch outcome (incl. mergedHeadSha) for the loop. */
 		readonly onOutcome?: (outcome: PlanForgeDispatchOutcome) => void;
 	},
@@ -4420,6 +4455,9 @@ async function runPlanForgeDispatchCommand(
 	// second merge (D3). Tasks run sequentially, so the last passing task's
 	// merged HEAD is the slice's merged tip.
 	let lastMergedHeadSha: string | null = null;
+	// Real total token usage (input + output) summed across this dispatch's model
+	// activities, surfaced to the supervisor's cumulative token-budget cap (GAP-7).
+	let totalTokenUsage = 0;
 	try {
 		const ledgerActivityPort = createLedgerActivityPort(emitter);
 		// Tasks dispatch sequentially, so a single mutable identity holder safely
@@ -4444,8 +4482,13 @@ async function runPlanForgeDispatchCommand(
 						acceptancePort,
 						provisionDeps: provisionWorktreeDeps,
 						claudeMaxTurns: opts?.claudeMaxTurns,
+						budgets: opts?.budgets,
 					}
-				: { ledgerActivityPort, claudeMaxTurns: opts?.claudeMaxTurns },
+				: {
+						ledgerActivityPort,
+						claudeMaxTurns: opts?.claudeMaxTurns,
+						budgets: opts?.budgets,
+					},
 		);
 
 		for (const packet of packets) {
@@ -4465,6 +4508,7 @@ async function runPlanForgeDispatchCommand(
 			)) as {
 				run: { id: string; status: string };
 				mergedHeadSha?: string;
+				receipt?: { tokenUsage?: number };
 			};
 			runs.push({
 				task: packet.unit.id,
@@ -4474,6 +4518,9 @@ async function runPlanForgeDispatchCommand(
 			if (result.mergedHeadSha) {
 				lastMergedHeadSha = result.mergedHeadSha;
 			}
+			// Accumulate the real per-task token usage (terminal `usage`), even for a
+			// failed task — the worker still consumed those tokens against the budget.
+			totalTokenUsage += result.receipt?.tokenUsage ?? 0;
 			if (result.run.status !== "passed") {
 				break; // PF2 dependsOn PF1: stop the chain on first failure.
 			}
@@ -4483,7 +4530,12 @@ async function runPlanForgeDispatchCommand(
 			runs.length === packets.length &&
 			runs.every((r) => r.status === "passed");
 
-		opts?.onOutcome?.({ allPassed, mergedHeadSha: lastMergedHeadSha, runs });
+		opts?.onOutcome?.({
+			allPassed,
+			mergedHeadSha: lastMergedHeadSha,
+			tokenUsage: totalTokenUsage,
+			runs,
+		});
 
 		// Terminal plan receipt (M2-S6): one signed plan_receipt per admitted plan,
 		// chaining to the plan_admitted event, emitted after all activities and made
@@ -4732,33 +4784,39 @@ async function defaultLoopAdmit(
 }
 
 /** Default dispatch port: route through the existing dispatch command with the
- * runaway-guard turn cap, capturing the rich outcome (incl. mergedHeadSha). The
- * lowered worker turn cap is bound by the loop command (closure over maxTurns).
+ * runaway-guard turn cap AND budgets, capturing the rich outcome (incl.
+ * mergedHeadSha + real token usage). The lowered worker turn cap is bound by the
+ * loop command (closure over maxTurns).
+ *
+ * The guard's `budgets` are threaded to the orchestrator so its per-packet
+ * AbortController aborts a runaway model worker mid-stream once it crosses
+ * maxTokens / maxComputeTimeMs (GAP-7 CRITICAL-1). `dispatchCommand` is injected
+ * so the budget-threading contract is unit-testable without a full dispatch.
  */
-function makeDefaultLoopDispatch(
+export function makeDefaultLoopDispatch(
 	maxTurns: number,
+	dispatchCommand: typeof runPlanForgeDispatchCommand = runPlanForgeDispatchCommand,
 ): (
 	planPath: string,
 	cwd: string,
 	guard: PolicyProfile,
 ) => Promise<LoopDispatchResult> {
-	return async (planPath, cwd, _guard) => {
+	return async (planPath, cwd, guard) => {
 		let outcome: LoopDispatchResult = {
 			allPassed: false,
 			mergedHeadSha: null,
+			tokenUsage: 0,
 			runs: [],
 		};
-		await runPlanForgeDispatchCommand(
-			["--input", planPath, "--json"],
-			cwd,
-			() => {},
-			{
-				claudeMaxTurns: maxTurns,
-				onOutcome: (o) => {
-					outcome = o;
-				},
+		await dispatchCommand(["--input", planPath, "--json"], cwd, () => {}, {
+			claudeMaxTurns: maxTurns,
+			// Deliver the guard's budgets so the orchestrator installs the
+			// per-packet AbortController budget subscription for this dispatch.
+			budgets: guard.budgets,
+			onOutcome: (o) => {
+				outcome = o;
 			},
-		);
+		});
 		return outcome;
 	};
 }
@@ -4820,6 +4878,11 @@ async function runPlanForgeLoopCommand(
 		writeLoopStateAtomic(workspace, state);
 	};
 
+	// The driver always re-enters at the planner each iteration; it does NOT
+	// resume from a persisted mid-iteration `phase`. A crash mid-iteration simply
+	// re-runs the whole iteration — which is idempotent (admit dedupes on the
+	// signed tape, dispatch re-derives the verified admission), so `state.phase`
+	// is informational (an observability breadcrumb), not resume-driving.
 	while (!state.terminal) {
 		if (stopFileRequested(workspace)) {
 			commit(nextLoopState(state, { type: "stop-file" }));
@@ -4894,6 +4957,21 @@ async function runPlanForgeLoopCommand(
 
 		const d = await dispatch(proposal.planPath, cwd, guard);
 		commit(nextLoopState(state, { type: "dispatched" }));
+
+		// Feed the REAL per-dispatch token usage into the cumulative cross-iteration
+		// token-budget cap (GAP-7 CRITICAL-2). Tokens are consumed even when the
+		// dispatch failed, so account for them before the acceptance branch. If the
+		// cumulative total exceeds the envelope's token_budget, the loop terminates
+		// `token-budget` here and stops.
+		if (d.tokenUsage > 0) {
+			const afterTokens = nextLoopState(state, {
+				type: "token-deltas-observed",
+				count: d.tokenUsage,
+			});
+			commit(afterTokens);
+			if (afterTokens.terminal?.reason === "token-budget") break;
+		}
+
 		if (!d.allPassed) {
 			commit(
 				nextLoopState(state, {

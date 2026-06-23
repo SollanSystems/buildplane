@@ -200,6 +200,44 @@ describe("buildplane planforge loop", () => {
 		}
 	});
 
+	it("cumulative per-dispatch token usage past the envelope token_budget terminates token-budget", async () => {
+		// GAP-7 CRITICAL-2: each dispatch reports real token usage; the supervisor
+		// accumulates it across iterations and STOPS once the cumulative total
+		// exceeds the envelope's token_budget.
+		const ws = mkdtempSync(join(tmpdir(), "bp-looptok-"));
+		const deps = loopDeps([]);
+		// Envelope pins a cumulative token budget of 100.
+		deps.loopEnvelope.load = async () =>
+			({ envelope: { token_budget: 100 } }) as never;
+		// Each dispatch burns 60 tokens → iteration 1 = 60 (under), iteration 2 = 120 (over).
+		deps.loopDispatch = async () =>
+			({
+				allPassed: true,
+				mergedHeadSha: "head-sha-1",
+				tokenUsage: 60,
+				runs: [{ task: "PF1", run_id: "r1", status: "passed" }],
+			}) as never;
+		// Never roadmap-complete; only the token budget should stop the loop.
+		try {
+			const code = await runCli(
+				["planforge", "loop", "--max-iterations=10", "--json"],
+				{
+					cwd: ws,
+					stdout: () => {},
+					dependencies: deps as never,
+				},
+			);
+			const state = JSON.parse(
+				readFileSync(join(ws, ".buildplane", "loop-state.json"), "utf8"),
+			);
+			expect(state.terminal.reason).toBe("token-budget");
+			expect(state.cumulativeTokenDeltas).toBeGreaterThan(100);
+			expect(code).toBe(0);
+		} finally {
+			rmSync(ws, { recursive: true, force: true });
+		}
+	});
+
 	it("planforge --help lists the loop command", async () => {
 		const out: string[] = [];
 		await runCli(["planforge", "--help"], {

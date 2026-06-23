@@ -249,6 +249,13 @@ export function stopFileRequested(workspace: string): boolean {
  * orchestrator's `AbortController` aborts a single runaway model worker once it
  * crosses `maxTokens` / `maxComputeTimeMs`. Distinct from the supervisor's
  * cumulative cross-iteration `tokenBudget` cap (tracked in `loop-state.json`).
+ *
+ * Precision note: the orchestrator counts `model-token-delta` events, which the
+ * claude executor emits one-per-assistant-text-block (NOT one-per-token), so
+ * `maxTokens` here is an APPROXIMATE response-volume proxy — a worker emitting
+ * mostly tool_use blocks under-counts. `maxComputeTimeMs` is the precise time
+ * bound. The accurate token figure is the cumulative `tokenBudget` cap, fed from
+ * each dispatch's real terminal `result.usage`.
  */
 export function runawayGuardProfile(opts: {
 	profileName: string;
