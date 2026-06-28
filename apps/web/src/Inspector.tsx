@@ -93,7 +93,7 @@ export function Inspector() {
 				<EvidencePane
 					evidencePane={projection.evidencePane}
 					missingEvidence={projection.missingEvidence}
-					missingEvidenceCount={projection.outcomeStrip.missingEvidenceCount}
+					missingEvidenceCount={projection.missingEvidence.length}
 				/>
 			</>
 		);

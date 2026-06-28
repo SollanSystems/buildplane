@@ -17,6 +17,19 @@ export type OperatorDecisionVerdict = "approved" | "rejected";
 
 export type OperatorDecisionSubject = "resume" | "merge";
 
+// mirrors @buildplane/kernel PolicyDecision["kind"] — keep in sync with
+// packages/kernel/src/run-loop.ts (ApprovedPolicyDecision | RejectedPolicyDecision | RetryPolicyDecision)
+export type PolicyDecisionKind =
+	| "advance-run"
+	| "reject-run"
+	| "architecture.diff_scope"
+	| "acceptance.contract"
+	| "retry-run";
+
+// mirrors @buildplane/kernel PolicyDecision["outcome"] — keep in sync with
+// packages/kernel/src/run-loop.ts
+export type PolicyDecisionOutcome = "approved" | "rejected" | "retrying";
+
 export interface RunListItem {
 	id: string;
 	unitId: string;
@@ -54,8 +67,8 @@ export interface InspectorProjection {
 		}[];
 		decisions: readonly {
 			id: string;
-			kind: string;
-			outcome: string;
+			kind: PolicyDecisionKind;
+			outcome: PolicyDecisionOutcome;
 			reasons: readonly string[];
 		}[];
 		artifacts: readonly { id: string; type: string; location: string }[];
@@ -77,8 +90,8 @@ export interface InspectorProjection {
 		policy: {
 			profile: string;
 			decisions?: readonly {
-				kind: string;
-				outcome: string;
+				kind: PolicyDecisionKind;
+				outcome: PolicyDecisionOutcome;
 				reasons: readonly string[];
 			}[];
 		};

@@ -87,13 +87,14 @@ export async function postDecision(
 		subject: OperatorDecisionSubject;
 	},
 ): Promise<{ ok: true; runId: string }> {
+	const token = getAuthToken();
 	const response = await fetch(
 		`/api/runs/${encodeURIComponent(runId)}/decision`,
 		{
 			method: "POST",
 			headers: {
 				"Content-Type": "application/json",
-				Authorization: `Bearer ${getAuthToken() ?? ""}`,
+				...(token ? { Authorization: `Bearer ${token}` } : {}),
 			},
 			body: JSON.stringify(body),
 		},

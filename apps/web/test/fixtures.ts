@@ -49,7 +49,7 @@ export function makeProjection(
 			decisions: [
 				{
 					id: "d1",
-					kind: "acceptance",
+					kind: "acceptance.contract",
 					outcome: "approved",
 					reasons: ["diff in scope", "ci passed"],
 				},
@@ -94,13 +94,16 @@ export function makeBlockedProjection(): InspectorProjection {
 			decisions: [
 				{
 					id: "d1",
-					kind: "acceptance",
-					outcome: "blocked",
+					kind: "acceptance.contract",
+					outcome: "rejected",
 					reasons: ["missing evidence: ci", "missing evidence: lint"],
 				},
 			],
 			artifacts: [],
 		},
+		// NOTE: real kernel `missingEvidence` entries are formatted "<kind>: <status|message>"
+		// (e.g. "ci: failed") by createMissingEvidence; these bare ids are a fixture shorthand,
+		// not the projection's real output shape.
 		missingEvidence: ["ci", "lint"],
 	});
 }

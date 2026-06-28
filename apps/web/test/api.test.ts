@@ -66,6 +66,19 @@ describe("api client", () => {
 		});
 	});
 
+	it("postDecision omits the Authorization header when the token is null", async () => {
+		// beforeEach already resets the token to null.
+		const fetchMock = vi
+			.fn()
+			.mockResolvedValue(jsonResponse({ ok: true, runId: "r1" }, 200));
+		vi.stubGlobal("fetch", fetchMock);
+
+		await postDecision("r1", { decision: "approved", subject: "merge" });
+
+		const [, init] = fetchMock.mock.calls[0];
+		expect("Authorization" in init.headers).toBe(false);
+	});
+
 	it("postDecision rejects with UnauthorizedError on HTTP 401", async () => {
 		setAuthToken("t");
 		const fetchMock = vi
