@@ -13,6 +13,9 @@ const workspaceAliases = {
 	"@buildplane/adapters-tools": pkg("packages/adapters-tools/src/index.ts"),
 	"@buildplane/kernel": pkg("packages/kernel/src/index.ts"),
 	"@buildplane/ledger-client": pkg("packages/ledger-client/src/index.ts"),
+	"@buildplane/mission-control-server": pkg(
+		"packages/mission-control-server/src/index.ts",
+	),
 	"@buildplane/capability-broker": pkg(
 		"packages/capability-broker/src/index.ts",
 	),
