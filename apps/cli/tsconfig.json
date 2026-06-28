@@ -17,6 +17,7 @@
 		{ "path": "../../packages/adapters-tools" },
 		{ "path": "../../packages/adapters-models" },
 		{ "path": "../../packages/ledger-client" },
+		{ "path": "../../packages/mission-control-server" },
 		{ "path": "../../packages/planforge" },
 		{ "path": "../../packages/adapters-honcho" },
 		{ "path": "../../packages/adapters-codex" },

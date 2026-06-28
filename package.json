@@ -11,7 +11,7 @@
 		"node": "24.13.1"
 	},
 	"scripts": {
-		"build": "tsc --build",
+		"build": "pnpm -C apps/web build && tsc --build",
 		"buildplane": "node --conditions=source --import tsx ./apps/cli/src/index.ts",
 		"gsd2": "node --conditions=source --import tsx ./apps/cli/src/gsd2-index.ts",
 		"native:build": "cargo build --manifest-path native/Cargo.toml -p bp-cli",
