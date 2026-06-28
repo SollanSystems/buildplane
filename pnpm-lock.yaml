@@ -172,6 +172,12 @@ importers:
         specifier: ^11
         version: 11.0.0
 
+  packages/mission-control-server:
+    dependencies:
+      '@buildplane/kernel':
+        specifier: workspace:*
+        version: link:../kernel
+
   packages/planforge: {}
 
   packages/policy:

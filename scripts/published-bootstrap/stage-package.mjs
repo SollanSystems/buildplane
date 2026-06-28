@@ -176,6 +176,7 @@ export const OPTIONAL_INTERNAL_PACKAGES = Object.freeze([
 	"@buildplane/adapters-models",
 	"@buildplane/adapters-codex",
 	"@buildplane/adapters-honcho",
+	"@buildplane/mission-control-server",
 ]);
 
 function listInternalPackageNames() {
