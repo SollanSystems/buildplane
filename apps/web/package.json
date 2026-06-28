@@ -1,0 +1,28 @@
+{
+	"name": "@buildplane/web",
+	"private": true,
+	"version": "0.1.0",
+	"type": "module",
+	"description": "Buildplane Web Mission Control SPA",
+	"scripts": {
+		"dev": "vite",
+		"build": "vite build",
+		"typecheck": "tsc --noEmit"
+	},
+	"dependencies": {
+		"@buildplane/kernel": "workspace:*",
+		"react": "19.2.7",
+		"react-dom": "19.2.7"
+	},
+	"devDependencies": {
+		"@testing-library/jest-dom": "^6.9.0",
+		"@testing-library/react": "^16.3.0",
+		"@testing-library/user-event": "^14.6.0",
+		"@types/react": "^19.2.14",
+		"@types/react-dom": "^19.2.0",
+		"@vitejs/plugin-react": "^6.0.0",
+		"jsdom": "^29.1.0",
+		"typescript": "^5.9.3",
+		"vite": "^8.0.5"
+	}
+}
