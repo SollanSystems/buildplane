@@ -73,6 +73,9 @@ importers:
       '@buildplane/ledger-client':
         specifier: workspace:*
         version: link:../../packages/ledger-client
+      '@buildplane/mission-control-server':
+        specifier: workspace:*
+        version: link:../../packages/mission-control-server
       '@buildplane/planforge':
         specifier: workspace:*
         version: link:../../packages/planforge

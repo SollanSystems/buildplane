@@ -35,6 +35,10 @@ import {
 	type PlanAdmittedV1,
 	type TapeEmitter,
 } from "@buildplane/ledger-client";
+import type {
+	MissionControlOrchestrator,
+	MissionControlStore,
+} from "@buildplane/mission-control-server";
 import { evaluateEnvelopeAdmission } from "@buildplane/policy";
 import {
 	type BootstrapDoctorReport,
@@ -140,6 +144,11 @@ import {
 	seedRepoFactsFromInspection,
 } from "./repo-fact-seeding.js";
 import { createOtelTraceExport } from "./trace-export.js";
+import {
+	DEFAULT_WEB_PORT,
+	executeWebCommand,
+	type WebCommandOptions,
+} from "./web-command.js";
 import { scanWorkflowPreview } from "./workflow-scan.js";
 
 // Monotonic UUIDv7 generator for TS-side event ids.
@@ -303,6 +312,7 @@ export interface RunCliDependencies extends LoopRunCliDeps {
 			stderr: (line: string) => void;
 		},
 	) => Promise<number> | number;
+	runWebCommand?: (options: WebCommandOptions) => Promise<number>;
 }
 
 export interface RunCliOptions {
@@ -783,6 +793,7 @@ function formatTopLevelHelp(): string[] {
 		"    inspect <id> [--json] [--view inspector]  Deep-dive into a run and event tape",
 		"    verify --run <id> [--json]  Final receipt-backed verdict",
 		"    evidence export --run <id> --out <file>  Export Mission Control bundle",
+		"    web [--port N] [--check] [--allow-external]  Serve the Mission Control web UI",
 		"    trace export --run <id> --format otel-json --out <file>  Export local trace artifact",
 		"    pr-check dry-run --run <id> --repo <owner/repo> --sha <head> [--json]  Preview GitHub check-run publish",
 		"    pr-comment dry-run --run <id> --repo <owner/repo> --pr <n> --sha <head> [--json]  Preview PR evidence comment",
@@ -6360,6 +6371,69 @@ export async function runCli(
 			throw new Error(
 				`Unknown workspace command: ${subcommand ?? "(missing subcommand)"}`,
 			);
+		}
+
+		if (command === "web") {
+			const check = rest.includes("--check");
+			const allowExternal = rest.includes("--allow-external");
+			const portRaw = readFlag(rest, "--port");
+			let port = DEFAULT_WEB_PORT;
+			if (portRaw !== undefined) {
+				port = Number.parseInt(portRaw, 10);
+				if (!Number.isInteger(port) || port < 0 || port > 65535) {
+					stderr(`Invalid --port value: ${portRaw}`);
+					return 1;
+				}
+			}
+
+			const webOptions: WebCommandOptions = {
+				cwd: resolvedCwd,
+				port,
+				check,
+				allowExternal,
+				stdout,
+				stderr,
+			};
+			if (deps?.runWebCommand) {
+				return deps.runWebCommand(webOptions);
+			}
+
+			// SIGINT/SIGTERM ⇒ graceful close (the served process otherwise runs
+			// until the host is terminated). `--check` never reaches the wait.
+			const controller = new AbortController();
+			const onSignal = () => controller.abort();
+			process.once("SIGINT", onSignal);
+			process.once("SIGTERM", onSignal);
+			try {
+				return await executeWebCommand(
+					{ ...webOptions, signal: controller.signal },
+					{
+						loadServerModule: () =>
+							import("@buildplane/mission-control-server"),
+						loadDeps: async (root) => {
+							const { orchestrator } = await loadCliOrchestrator(root);
+							const storageModule = (await cliImport(
+								"@buildplane/storage",
+							)) as {
+								createBuildplaneStorage: (dir: string) => MissionControlStore;
+							};
+							// The orchestrator from `loadCliOrchestrator` already owns the
+							// ledger-backed OperatorDecisionPort (it defaults to
+							// `createOperatorDecisionPort(root)`); the decision route emits
+							// through `orchestrator.recordOperatorDecision`, so the server
+							// deps intentionally carry no separate port (see web-command.ts).
+							return {
+								orchestrator:
+									orchestrator as unknown as MissionControlOrchestrator,
+								store: storageModule.createBuildplaneStorage(root),
+							};
+						},
+					},
+				);
+			} finally {
+				process.removeListener("SIGINT", onSignal);
+				process.removeListener("SIGTERM", onSignal);
+			}
 		}
 
 		// Deferred activity-bracket port (M2-S5): the run orchestrator is constructed

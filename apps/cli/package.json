@@ -23,6 +23,7 @@
 		"@buildplane/adapters-models": "workspace:*",
 		"@buildplane/kernel": "workspace:*",
 		"@buildplane/ledger-client": "workspace:*",
+		"@buildplane/mission-control-server": "workspace:*",
 		"@buildplane/planforge": "workspace:*",
 		"@buildplane/policy": "workspace:*",
 		"@buildplane/runtime": "workspace:*",
