@@ -6,6 +6,7 @@ import {
 	PLANFORGE_VALIDATION_STATUS_PASS,
 	PLANFORGE_VALIDATION_STATUS_UNSAFE_TO_RUN,
 	type PlanForgeRequiredEvidence,
+	type PlanForgeRiskClass,
 	type PlanForgeValidation,
 	type PlanForgeValidationCheck,
 	type PlanForgeValidationStatus,
@@ -98,6 +99,19 @@ export function validate(
 			: missingEvidence.length > 0
 				? PLANFORGE_VALIDATION_STATUS_INSUFFICIENT_EVIDENCE
 				: PLANFORGE_VALIDATION_STATUS_PASS;
+	const hasAllowedSideEffects = compiled.parsedTasks.some(
+		(task) => task.allowedSideEffects.length > 0,
+	);
+	const riskClass: PlanForgeRiskClass =
+		unsafeReasons.length > 0 ||
+		status === PLANFORGE_VALIDATION_STATUS_UNSAFE_TO_RUN
+			? "high"
+			: missingEvidence.length > 0 ||
+					status === PLANFORGE_VALIDATION_STATUS_INSUFFICIENT_EVIDENCE
+				? "medium"
+				: hasAllowedSideEffects
+					? "medium"
+					: "low";
 	const checks: PlanForgeValidationCheck[] = [
 		{
 			id: "trusted-boundary",
@@ -158,6 +172,7 @@ export function validate(
 		status,
 		validation: {
 			status,
+			riskClass,
 			checks,
 			requiredEvidence: PLANFORGE_REQUIRED_EVIDENCE,
 			missingEvidence,
