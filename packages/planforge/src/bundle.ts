@@ -39,6 +39,8 @@ const SIDE_EFFECT_FS_WRITE_GLOBS: Record<string, readonly string[]> = {
 		"test/**",
 		"packages/**/src/**",
 		"packages/**/test/**",
+		"native/crates/**/src/**",
+		"native/crates/**/tests/**",
 	],
 };
 
