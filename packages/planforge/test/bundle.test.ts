@@ -226,6 +226,8 @@ describe("buildDefaultCapabilityBundleForTask — code-edit", () => {
 				"test/**",
 				"packages/**/src/**",
 				"packages/**/test/**",
+				"native/crates/**/src/**",
+				"native/crates/**/tests/**",
 			]),
 		);
 		expect(bundle.tools?.write_file?.enabled).toBe(true);
