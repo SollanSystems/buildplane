@@ -9,6 +9,14 @@ export interface PlanForgeAttachedCapabilityBundle {
 	readonly schemaVersion: typeof PLANFORGE_CAPABILITY_BUNDLE_SCHEMA_VERSION;
 	readonly bundleId: string;
 	readonly fsWrite?: readonly string[];
+	/**
+	 * Declarative network-egress allowlist (host names) derived from the task's
+	 * allowedSideEffects (M6-S9). Always present so the declared posture is
+	 * explicit; an empty array means default-deny ("no network egress declared").
+	 * Declarative-only in v0 — surfaced + digest-covered, not yet enforced at the
+	 * worker boundary.
+	 */
+	readonly netEgress: readonly string[];
 	readonly tools?: {
 		readonly write_file?: { readonly enabled?: boolean };
 		readonly run_command?: { readonly allowlist?: readonly string[] };
@@ -43,6 +51,34 @@ const SIDE_EFFECT_FS_WRITE_GLOBS: Record<string, readonly string[]> = {
 		"native/crates/**/tests/**",
 	],
 };
+
+/**
+ * Declarative network-egress allowlist per side-effect (M6-S9). v0 is
+ * declarative-only: surfaced on the bundle + plan preview, NOT yet enforced
+ * at the worker boundary (Claude Code exposes no verified subprocess
+ * network-restriction flag — see docs/architecture/capability-broker.md).
+ * Every current side-effect declares ZERO egress (default-deny). This map is
+ * the single extension point: e.g. a future `npm-install` side-effect would map
+ * to ["registry.npmjs.org"].
+ */
+const SIDE_EFFECT_NET_EGRESS: Record<string, readonly string[]> = {
+	"local-doc": [],
+	"local-fixture": [],
+	"local-receipt": [],
+	"code-edit": [],
+};
+
+/** Deterministic (sorted, de-duped) union of declared egress hosts for the
+ * given side-effects. Returns `[]` when nothing maps (default-deny). */
+export function netEgressFromSideEffects(effects: readonly string[]): string[] {
+	const hosts = new Set<string>();
+	for (const effect of effects) {
+		for (const host of SIDE_EFFECT_NET_EGRESS[effect] ?? []) {
+			hosts.add(host);
+		}
+	}
+	return [...hosts].sort();
+}
 
 function allowlistFromVerificationCommands(
 	commands: readonly string[],
@@ -84,6 +120,7 @@ export function buildDefaultCapabilityBundleForTask(
 	task: PlanForgeTask,
 ): PlanForgeAttachedCapabilityBundle {
 	const fsWrite = fsWriteGlobsFromTask(task);
+	const netEgress = netEgressFromSideEffects(task.allowedSideEffects);
 	const allowlist = [
 		WORKER_RUN_COMMAND_BINARY,
 		...allowlistFromVerificationCommands(task.verificationCommands).filter(
@@ -94,6 +131,7 @@ export function buildDefaultCapabilityBundleForTask(
 		schemaVersion: PLANFORGE_CAPABILITY_BUNDLE_SCHEMA_VERSION,
 		bundleId: `${plan.id}:${task.id}`,
 		...(fsWrite.length > 0 ? { fsWrite } : {}),
+		netEgress,
 		tools: {
 			write_file: { enabled: fsWrite.length > 0 },
 			...(allowlist.length > 0 ? { run_command: { allowlist } } : {}),
@@ -112,6 +150,7 @@ export function buildDefaultCapabilityBundleForPlan(
 ): PlanForgeAttachedCapabilityBundle {
 	const fsWrite = new Set<string>();
 	const allowlist = new Set<string>();
+	const netEgress = new Set<string>();
 	for (const task of plan.tasks) {
 		const taskBundle = buildDefaultCapabilityBundleForTask(plan, task);
 		for (const glob of taskBundle.fsWrite ?? []) {
@@ -120,13 +159,18 @@ export function buildDefaultCapabilityBundleForPlan(
 		for (const entry of taskBundle.tools?.run_command?.allowlist ?? []) {
 			allowlist.add(entry);
 		}
+		for (const host of taskBundle.netEgress) {
+			netEgress.add(host);
+		}
 	}
 	const fsWriteSorted = [...fsWrite].sort();
 	const allowlistSorted = [...allowlist].sort();
+	const netEgressSorted = [...netEgress].sort();
 	return {
 		schemaVersion: PLANFORGE_CAPABILITY_BUNDLE_SCHEMA_VERSION,
 		bundleId: plan.id,
 		...(fsWriteSorted.length > 0 ? { fsWrite: fsWriteSorted } : {}),
+		netEgress: netEgressSorted,
 		tools: {
 			write_file: { enabled: fsWriteSorted.length > 0 },
 			...(allowlistSorted.length > 0
