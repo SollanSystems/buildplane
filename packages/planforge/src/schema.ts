@@ -57,6 +57,7 @@ export type PlanForgeReceiptSchemaVersion =
 	typeof PLANFORGE_RECEIPT_SCHEMA_VERSION;
 export type PlanForgeValidationStatus =
 	(typeof PLANFORGE_VALIDATION_STATUSES)[number];
+export type PlanForgeRiskClass = "low" | "medium" | "high";
 export type PlanForgeRequiredEvidence =
 	(typeof PLANFORGE_REQUIRED_EVIDENCE)[number];
 export type PlanForgeAllowedSideEffect =
@@ -101,6 +102,7 @@ export interface PlanForgeValidationCheck {
 
 export interface PlanForgeValidation {
 	status: PlanForgeValidationStatus;
+	riskClass: PlanForgeRiskClass;
 	checks: PlanForgeValidationCheck[];
 	requiredEvidence: readonly PlanForgeRequiredEvidence[];
 	missingEvidence: PlanForgeRequiredEvidence[];
@@ -123,6 +125,7 @@ export interface PlanForgeTask {
 export interface PlanForgeReceiptPreview {
 	schemaVersion: PlanForgeReceiptSchemaVersion;
 	status: PlanForgeValidationStatus;
+	riskClass: PlanForgeRiskClass;
 	planId: string;
 	idempotencyKey: string;
 	inputDigest: string;
