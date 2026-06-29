@@ -29,7 +29,7 @@ function sha256(bytes: Buffer | string): string {
 /** Hash of an empty env map `{}`. Used when no env vars are captured —
  * a real digest rather than the misleading bare-prefix placeholder "sha256:".
  */
-const EMPTY_ENV_HASH = `sha256:${createHash("sha256").update("{}").digest("hex")}`;
+export const EMPTY_ENV_HASH = `sha256:${createHash("sha256").update("{}").digest("hex")}`;
 
 /** Wrap a ToolRegistry so every call emits tool_request / tool_result (and
  * workspace_write for write_file) to the ledger emitter. The original
