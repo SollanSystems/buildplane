@@ -9,8 +9,10 @@ import { dirname, join } from "node:path";
 import type {
 	BudgetConstraints,
 	EnvelopeProposal,
+	LedgerActivityPort,
 	PolicyProfile,
 } from "@buildplane/kernel";
+import type { TapeEmitter } from "@buildplane/ledger-client";
 import {
 	buildDefaultCapabilityBundleForPlan,
 	type PlanForgePlan,
@@ -268,4 +270,38 @@ export function runawayGuardProfile(opts: {
 		maxComputeTimeMs: opts.maxComputeTimeMs,
 	};
 	return { ...(opts.baseProfile ?? {}), name: opts.profileName, budgets };
+}
+
+/**
+ * Demo crash-injection guard (M6 Property 1: crash-and-resume). When the
+ * `BUILDPLANE_CRASH_AFTER_ACTIVITY=1` environment variable is set, wrap a
+ * {@link LedgerActivityPort} so the process aborts HARD immediately after the
+ * first `activity_completed` is appended AND flushed durable+signed to the tape —
+ * before any terminal `plan_receipt`. This deterministically reproduces a worker
+ * crashing mid-dispatch so `planforge recover`/`resume` can be exercised against a
+ * real signed tape.
+ *
+ * NO-OP by default: with the env var unset (the production case) this returns the
+ * port unchanged, so dispatch behaviour is byte-identical. It reads ONLY the env
+ * var — it adds no CLI flag and never touches the argument parser. `abort` is
+ * injectable so a unit test can assert the guard fires without killing the runner.
+ */
+export function withCrashAfterActivityGuard(
+	port: LedgerActivityPort,
+	emitter: Pick<TapeEmitter, "flush">,
+	abort: () => never = () => process.exit(137),
+): LedgerActivityPort {
+	if (process.env.BUILDPLANE_CRASH_AFTER_ACTIVITY !== "1") {
+		return port;
+	}
+	return {
+		...port,
+		async activityCompleted(input) {
+			await port.activityCompleted(input);
+			// Make the completion durable+signed on the tape before the crash so the
+			// recovered run reuses the recorded result instead of re-invoking.
+			await emitter.flush();
+			abort();
+		},
+	};
 }
