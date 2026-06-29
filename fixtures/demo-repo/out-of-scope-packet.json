@@ -1,0 +1,27 @@
+{
+	"unit": {
+		"id": "m6-s10-out-of-scope-write",
+		"kind": "command",
+		"scope": "task",
+		"inputRefs": [],
+		"expectedOutputs": [],
+		"verificationContract": "exit-0-and-required-outputs",
+		"policyProfile": "default"
+	},
+	"execution": {
+		"command": "node",
+		"args": ["-e", "process.exit(0)"]
+	},
+	"verification": { "requiredOutputs": [] },
+	"capability_bundle": {
+		"schemaVersion": "buildplane.capability_bundle.v0",
+		"bundleId": "m6-s10-out-of-scope",
+		"fsWrite": ["src/**", "test/**"],
+		"tools": { "write_file": { "enabled": true } }
+	},
+	"capability_bundle_digest": "sha256:531d38edbb68b143b07f0b80729a0c67a3bba965873e78f4d28075c5f33bbcfe",
+	"outOfScopeWrite": {
+		"path": "docs/out-of-scope.txt",
+		"content": "this write must be denied + quarantined by the capability broker\n"
+	}
+}
