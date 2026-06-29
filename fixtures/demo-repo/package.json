@@ -1,0 +1,18 @@
+{
+  "name": "buildplane-demo-repo",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Toy Express app used as the target of the Buildplane v0.5 killer demo.",
+  "type": "commonjs",
+  "main": "src/server.js",
+  "scripts": {
+    "test": "node --test"
+  },
+  "dependencies": {
+    "express": "4.21.2"
+  },
+  "devDependencies": {
+    "express-rate-limit": "7.5.0",
+    "supertest": "7.1.0"
+  }
+}
