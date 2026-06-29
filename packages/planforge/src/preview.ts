@@ -89,6 +89,7 @@ export function preview(
 		receiptPreview: {
 			schemaVersion: PLANFORGE_RECEIPT_SCHEMA_VERSION,
 			status: validationStatus,
+			riskClass: validation.riskClass,
 			planId: `pf-plan-${planFingerprint}`,
 			idempotencyKey,
 			inputDigest,

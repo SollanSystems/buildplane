@@ -66,6 +66,7 @@
 	],
 	"validation": {
 		"status": "PASS",
+		"riskClass": "medium",
 		"checks": [
 			{
 				"id": "trusted-boundary",
@@ -113,10 +114,11 @@
 	"receiptPreview": {
 		"schemaVersion": "planforge.receipt.v0",
 		"status": "PASS",
+		"riskClass": "medium",
 		"planId": "pf-plan-95d7132e",
 		"idempotencyKey": "planforge:v0:buildplane:15dbb32db0e1f0024687533755805fc23f3ef6d4:95d7132e",
 		"inputDigest": "sha256:7a98a05fc70a6447c71e8c06c8737d79eb8c969d0bbe180bb2383f676dabf041",
-		"planDigest": "sha256:1804e391006396e282c05a8b46c4262a1a9f528327521c2da555fd721de698c0",
+		"planDigest": "sha256:69973b53c7f7ff7639b60b312742fdf08a17a584cfbdac18d4f57cba1047c1f4",
 		"trustedBase": "15dbb32db0e1f0024687533755805fc23f3ef6d4",
 		"admittedBy": "buildplane-kernel",
 		"generatedAt": "2026-05-07T00:00:00.000Z",
