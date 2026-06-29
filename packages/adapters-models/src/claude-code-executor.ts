@@ -15,6 +15,29 @@ const CLAUDE_UNSAFE_PERMISSION_FLAG = [
 	"permissions",
 ].join("-");
 
+/**
+ * Per-tool-call event parsed out of the Claude Code `stream-json` worker
+ * output. The executor stays transport-agnostic: it emits the parsed shape to
+ * the `onToolEvent` callback and never constructs ledger payloads itself.
+ *
+ * - `request` mirrors an `assistant` message `tool_use` content block.
+ * - `result` mirrors the matching `user` message `tool_result` content block,
+ *   correlated by `toolUseId` (== claude's `tool_use_id`).
+ */
+export type ClaudeToolEvent =
+	| {
+			readonly phase: "request";
+			readonly toolUseId: string;
+			readonly toolName: string;
+			readonly input: Record<string, unknown>;
+	  }
+	| {
+			readonly phase: "result";
+			readonly toolUseId: string;
+			readonly content: string;
+			readonly isError: boolean;
+	  };
+
 export interface ClaudeCodeExecutorOptions {
 	/** default: "claude" */
 	cliBinary?: string;
@@ -36,6 +59,45 @@ export interface ClaudeCodeExecutorOptions {
 	 * precedence over packet.model.prompt.
 	 */
 	renderer?: TaskRenderer;
+	/**
+	 * Per-tool-call sink, invoked once per parsed `tool_use` / `tool_result`
+	 * stream-json block. Mirrors the `onCapabilityDenied` callback shape: the
+	 * executor parses + forwards, the caller maps it onto the ledger. Absent →
+	 * tool blocks are parsed only for the existing token-delta path.
+	 */
+	onToolEvent?: (event: ClaudeToolEvent) => void;
+}
+
+/** One content block inside a stream-json `assistant`/`user` message. */
+interface ClaudeContentBlock {
+	type?: string;
+	text?: string;
+	id?: string;
+	name?: string;
+	input?: unknown;
+	tool_use_id?: string;
+	content?: unknown;
+	is_error?: boolean;
+}
+
+/**
+ * Normalize a `tool_result` block's `content` to a flat string. Claude emits it
+ * either as a bare string or as an array of `{ type: "text", text }` blocks.
+ */
+function normalizeToolResultContent(content: unknown): string {
+	if (typeof content === "string") return content;
+	if (Array.isArray(content)) {
+		return content
+			.map((block) =>
+				block &&
+				typeof block === "object" &&
+				typeof (block as { text?: unknown }).text === "string"
+					? (block as { text: string }).text
+					: "",
+			)
+			.join("");
+	}
+	return "";
 }
 
 export interface ClaudeCodeExecutorPort {
@@ -79,6 +141,7 @@ export function createClaudeCodeExecutor(
 	const spawnFn = options?.spawnFn ?? spawn;
 	const unsafeMode = options?.unsafeMode ?? false;
 	const renderer = options?.renderer;
+	const onToolEvent = options?.onToolEvent;
 
 	return {
 		executePacket(_packet: UnitPacket, _projectRoot: string): ExecutionReceipt {
@@ -212,7 +275,7 @@ export function createClaudeCodeExecutor(
 					}
 					if (obj.type === "assistant") {
 						const msg = obj.message as
-							| { content?: Array<{ type?: string; text?: string }> }
+							| { content?: ClaudeContentBlock[] }
 							| undefined;
 						for (const block of msg?.content ?? []) {
 							if (block.type === "text" && typeof block.text === "string") {
@@ -222,6 +285,42 @@ export function createClaudeCodeExecutor(
 									timestamp: new Date().toISOString(),
 									delta: block.text,
 								});
+							} else if (
+								onToolEvent &&
+								block.type === "tool_use" &&
+								typeof block.id === "string" &&
+								typeof block.name === "string"
+							) {
+								onToolEvent({
+									phase: "request",
+									toolUseId: block.id,
+									toolName: block.name,
+									input:
+										block.input && typeof block.input === "object"
+											? (block.input as Record<string, unknown>)
+											: {},
+								});
+							}
+						}
+					} else if (obj.type === "user") {
+						// `tool_result` content arrives on a `user` message in the
+						// stream-json schema; correlated to its `tool_use` by tool_use_id.
+						if (onToolEvent) {
+							const msg = obj.message as
+								| { content?: ClaudeContentBlock[] }
+								| undefined;
+							for (const block of msg?.content ?? []) {
+								if (
+									block.type === "tool_result" &&
+									typeof block.tool_use_id === "string"
+								) {
+									onToolEvent({
+										phase: "result",
+										toolUseId: block.tool_use_id,
+										content: normalizeToolResultContent(block.content),
+										isError: block.is_error === true,
+									});
+								}
 							}
 						}
 					} else if (obj.type === "result") {

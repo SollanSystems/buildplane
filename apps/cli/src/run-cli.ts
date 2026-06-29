@@ -12,6 +12,7 @@ import {
 } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { ClaudeToolEvent } from "@buildplane/adapters-models";
 import {
 	createToolRegistry,
 	type ToolRegistryOptions,
@@ -45,6 +46,7 @@ import {
 	inspectBootstrapDoctor,
 } from "./bootstrap-doctor.js";
 import { type CapabilityReport, inspectCapabilities } from "./capabilities.js";
+import { createClaudeToolLedgerEmitter } from "./claude-tool-ledger-emitter.js";
 import {
 	createInspectorProjection,
 	formatBootstrapDoctorReport,
@@ -1403,6 +1405,13 @@ async function loadCliOrchestrator(
 		/** Lowered worker turn cap for the supervisor loop's runaway guard. */
 		readonly claudeMaxTurns?: number;
 		/**
+		 * Per-tool-call sink threaded into the Claude Code executor so the worker's
+		 * `tool_use`/`tool_result` stream blocks land on the signed tape (M6-S8).
+		 * The run block binds the concrete ledger-backed sink after its emitter is
+		 * spawned; this stable wrapper reads it lazily.
+		 */
+		readonly onClaudeToolEvent?: (event: ClaudeToolEvent) => void;
+		/**
 		 * Per-packet budget caps for the supervisor loop's runaway guard. When set,
 		 * the orchestrator installs the budget subscription whose AbortController
 		 * aborts a streaming model worker once it crosses maxTokens / maxComputeTimeMs.
@@ -1601,7 +1610,10 @@ async function loadCliOrchestrator(
 						signal?: AbortSignal,
 					) => Promise<unknown>;
 				};
-				createClaudeCodeExecutor: (options?: { maxTurns?: number }) => {
+				createClaudeCodeExecutor: (options?: {
+					maxTurns?: number;
+					onToolEvent?: (event: ClaudeToolEvent) => void;
+				}) => {
 					executePacket: (packet: unknown, root: string) => unknown;
 					executePacketAsync: (
 						packet: unknown,
@@ -1672,7 +1684,10 @@ async function loadCliOrchestrator(
 						signal?: AbortSignal,
 					) => Promise<unknown>;
 				};
-				createClaudeCodeExecutor: (options?: { maxTurns?: number }) => {
+				createClaudeCodeExecutor: (options?: {
+					maxTurns?: number;
+					onToolEvent?: (event: ClaudeToolEvent) => void;
+				}) => {
 					executePacket: (packet: unknown, root: string) => unknown;
 					executePacketAsync: (
 						packet: unknown,
@@ -1716,12 +1731,20 @@ async function loadCliOrchestrator(
 	const getClaudeExecutor = async () => {
 		if (!claudeExecutorPromise) {
 			const claudeMaxTurns = opts?.claudeMaxTurns;
+			const onClaudeToolEvent = opts?.onClaudeToolEvent;
+			const executorOptions =
+				claudeMaxTurns !== undefined || onClaudeToolEvent !== undefined
+					? {
+							...(claudeMaxTurns !== undefined
+								? { maxTurns: claudeMaxTurns }
+								: {}),
+							...(onClaudeToolEvent !== undefined
+								? { onToolEvent: onClaudeToolEvent }
+								: {}),
+						}
+					: undefined;
 			claudeExecutorPromise = loadAdaptersModels().then((mod) =>
-				mod.createClaudeCodeExecutor(
-					claudeMaxTurns !== undefined
-						? { maxTurns: claudeMaxTurns }
-						: undefined,
-				),
+				mod.createClaudeCodeExecutor(executorOptions),
 			);
 		}
 		return claudeExecutorPromise;
@@ -6453,6 +6476,11 @@ export async function runCli(
 		const runLedgerActivityPort = createDeferredLedgerActivityPort(
 			() => runActivityEmitter,
 		);
+		// Per-tool-call ledger sink for the Claude worker (M6-S8). Bound to the
+		// concrete ledger-backed emitter once the run-block tape is spawned
+		// (~200 lines down); this stable wrapper reads it lazily, mirroring
+		// `runActivityEmitter`. Null on a non-ledger run → tool blocks no-op.
+		let runClaudeToolSink: ((event: ClaudeToolEvent) => void) | null = null;
 		const bundle: CliOrchestratorBundle = deps?.createOrchestrator
 			? {
 					orchestrator: deps.createOrchestrator(),
@@ -6466,6 +6494,7 @@ export async function runCli(
 				}
 			: await loadCliOrchestrator(cwd, {
 					ledgerActivityPort: runLedgerActivityPort,
+					onClaudeToolEvent: (event) => runClaudeToolSink?.(event),
 				});
 		const {
 			orchestrator,
@@ -6703,6 +6732,15 @@ export async function runCli(
 						// Bind the signed emitter so the deferred activity-bracket port
 						// (passed into the orchestrator above) emits onto this tape.
 						runActivityEmitter = ledgerEmitter;
+						// Bind the per-tool-call sink so the Claude worker's stream
+						// `tool_use`/`tool_result` blocks land on this signed tape (M6-S8).
+						// `ledgerWorkspacePath` (== resolvedCwd) is the run's workspace
+						// cwd the worker's tools execute against → `working_directory`.
+						runClaudeToolSink = createClaudeToolLedgerEmitter(
+							ledgerEmitter,
+							getUnitCtx,
+							ledgerWorkspacePath,
+						);
 						ledgerEmitter.onFailure((failure: LedgerFailure) => {
 							// Best-effort: record that the ledger itself failed into the existing
 							// state.db event store so there's a durable trace.

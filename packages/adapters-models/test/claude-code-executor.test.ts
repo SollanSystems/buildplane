@@ -475,6 +475,199 @@ describe("ClaudeCodeExecutor", () => {
 		expect(kinds.filter((k) => k === "model-token-delta")).toHaveLength(0);
 	});
 
+	it("stream-json tool_use block → one onToolEvent request emission", async () => {
+		const lines = `${[
+			JSON.stringify({
+				type: "assistant",
+				message: {
+					content: [
+						{
+							type: "tool_use",
+							id: "toolu_abc",
+							name: "Bash",
+							input: { command: "ls -la" },
+						},
+					],
+				},
+			}),
+			JSON.stringify({ type: "result", subtype: "success", result: "ok" }),
+		].join("\n")}\n`;
+		const mockSpawn = createMockSpawn({ stdout: lines, exitCode: 0 });
+		const toolEvents: unknown[] = [];
+		const executor = createClaudeCodeExecutor({
+			spawnFn: mockSpawn as never,
+			onToolEvent: (ev) => toolEvents.push(ev),
+		});
+		const eventBus = createEventBus();
+
+		await executor.executePacketAsync(makePacket(), PROJECT_ROOT, eventBus);
+
+		expect(toolEvents).toEqual([
+			{
+				phase: "request",
+				toolUseId: "toolu_abc",
+				toolName: "Bash",
+				input: { command: "ls -la" },
+			},
+		]);
+	});
+
+	it("stream-json tool_result block → one onToolEvent result emission", async () => {
+		const lines = `${[
+			JSON.stringify({
+				type: "user",
+				message: {
+					content: [
+						{
+							type: "tool_result",
+							tool_use_id: "toolu_abc",
+							content: "total 0",
+							is_error: false,
+						},
+					],
+				},
+			}),
+			JSON.stringify({ type: "result", subtype: "success", result: "ok" }),
+		].join("\n")}\n`;
+		const mockSpawn = createMockSpawn({ stdout: lines, exitCode: 0 });
+		const toolEvents: unknown[] = [];
+		const executor = createClaudeCodeExecutor({
+			spawnFn: mockSpawn as never,
+			onToolEvent: (ev) => toolEvents.push(ev),
+		});
+		const eventBus = createEventBus();
+
+		await executor.executePacketAsync(makePacket(), PROJECT_ROOT, eventBus);
+
+		expect(toolEvents).toEqual([
+			{
+				phase: "result",
+				toolUseId: "toolu_abc",
+				content: "total 0",
+				isError: false,
+			},
+		]);
+	});
+
+	it("tool_result content as block array → normalized to flat string; is_error true preserved", async () => {
+		const lines = `${[
+			JSON.stringify({
+				type: "user",
+				message: {
+					content: [
+						{
+							type: "tool_result",
+							tool_use_id: "toolu_x",
+							content: [
+								{ type: "text", text: "line1\n" },
+								{ type: "text", text: "line2" },
+							],
+							is_error: true,
+						},
+					],
+				},
+			}),
+			JSON.stringify({ type: "result", subtype: "success", result: "ok" }),
+		].join("\n")}\n`;
+		const mockSpawn = createMockSpawn({ stdout: lines, exitCode: 0 });
+		const toolEvents: Array<{ content?: string; isError?: boolean }> = [];
+		const executor = createClaudeCodeExecutor({
+			spawnFn: mockSpawn as never,
+			onToolEvent: (ev) => toolEvents.push(ev),
+		});
+		const eventBus = createEventBus();
+
+		await executor.executePacketAsync(makePacket(), PROJECT_ROOT, eventBus);
+
+		expect(toolEvents).toHaveLength(1);
+		expect(toolEvents[0].content).toBe("line1\nline2");
+		expect(toolEvents[0].isError).toBe(true);
+	});
+
+	it("tool_use/tool_result parsing leaves token-delta + result handling unchanged", async () => {
+		const lines = `${[
+			JSON.stringify({
+				type: "assistant",
+				message: {
+					content: [
+						{ type: "text", text: "thinking " },
+						{
+							type: "tool_use",
+							id: "toolu_1",
+							name: "Write",
+							input: { path: "a.txt" },
+						},
+					],
+				},
+			}),
+			JSON.stringify({
+				type: "user",
+				message: {
+					content: [
+						{ type: "tool_result", tool_use_id: "toolu_1", content: "done" },
+					],
+				},
+			}),
+			JSON.stringify({
+				type: "result",
+				subtype: "success",
+				result: "all done",
+				usage: { input_tokens: 100, output_tokens: 20 },
+			}),
+		].join("\n")}\n`;
+		const mockSpawn = createMockSpawn({ stdout: lines, exitCode: 0 });
+		const toolEvents: unknown[] = [];
+		const executor = createClaudeCodeExecutor({
+			spawnFn: mockSpawn as never,
+			onToolEvent: (ev) => toolEvents.push(ev),
+		});
+		const eventBus = createEventBus();
+		const kinds: string[] = [];
+		eventBus.subscribe((ev) => kinds.push(ev.kind));
+
+		const receipt = await executor.executePacketAsync(
+			makePacket(),
+			PROJECT_ROOT,
+			eventBus,
+		);
+
+		// Existing behavior unchanged: one text delta, one terminal complete, usage summed.
+		expect(kinds.filter((k) => k === "model-token-delta")).toHaveLength(1);
+		expect(kinds.filter((k) => k === "model-response-complete")).toHaveLength(
+			1,
+		);
+		expect(receipt.tokenUsage).toBe(120);
+		// And both tool phases captured.
+		expect(toolEvents).toHaveLength(2);
+	});
+
+	it("no onToolEvent callback → tool blocks parsed silently, token-delta path intact", async () => {
+		const lines = `${[
+			JSON.stringify({
+				type: "assistant",
+				message: {
+					content: [
+						{ type: "text", text: "hi" },
+						{ type: "tool_use", id: "t1", name: "Bash", input: {} },
+					],
+				},
+			}),
+			JSON.stringify({ type: "result", subtype: "success", result: "ok" }),
+		].join("\n")}\n`;
+		const mockSpawn = createMockSpawn({ stdout: lines, exitCode: 0 });
+		const executor = createClaudeCodeExecutor({ spawnFn: mockSpawn as never });
+		const eventBus = createEventBus();
+		const kinds: string[] = [];
+		eventBus.subscribe((ev) => kinds.push(ev.kind));
+
+		await executor.executePacketAsync(makePacket(), PROJECT_ROOT, eventBus);
+
+		expect(kinds.filter((k) => k === "model-token-delta")).toHaveLength(1);
+		expect(kinds.filter((k) => k === "model-response-complete")).toHaveLength(
+			1,
+		);
+	});
+
 	it("mid-flight abort → child killed, non-zero receipt", async () => {
 		const lines = `${JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "partial" }] } })}\n`;
 		const mockSpawn = createMockSpawn({

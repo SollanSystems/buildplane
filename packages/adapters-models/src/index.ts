@@ -1,6 +1,7 @@
 export type {
 	ClaudeCodeExecutorOptions,
 	ClaudeCodeExecutorPort,
+	ClaudeToolEvent,
 } from "./claude-code-executor.js";
 export { createClaudeCodeExecutor } from "./claude-code-executor.js";
 export type {
