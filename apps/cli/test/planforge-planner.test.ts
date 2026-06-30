@@ -28,17 +28,17 @@ describe("readCompletedSliceIds", () => {
 });
 
 describe("runPlannerProposal", () => {
-	it("proposes M5-S2 as a PASS plan from the committed roadmap (M5-S1 done)", async () => {
+	it("proposes M6-S6 as a PASS plan from the committed roadmap (no prior slices done)", async () => {
 		const proposal = await runPlannerProposal({
 			roadmapPath: ROADMAP,
 			workspace: ws,
 			remote: REMOTE,
 			trustedBase: TRUSTED_BASE,
 		});
-		expect(proposal.sliceId).toBe("M5-S2");
+		expect(proposal.sliceId).toBe("M6-S6");
 		expect(proposal.status).toBe("PASS");
 		expect(proposal.planMarkdown).toContain("## Tasks");
-		expect(proposal.planMarkdown).toContain("### M5-S2:");
+		expect(proposal.planMarkdown).toContain("### M6-S6:");
 	});
 
 	it("round-trips the emitted plan back through compile() to the intended slice", async () => {
@@ -56,7 +56,7 @@ describe("runPlannerProposal", () => {
 describe("buildPlannerWorkerPacket", () => {
 	it("builds a model packet routed to claude-code with no execution block", () => {
 		const packet = buildPlannerWorkerPacket({
-			sliceId: "M5-S2",
+			sliceId: "M6-S6",
 			roadmapPath: ROADMAP,
 			outputPlanPath: join(ws, "plan.md"),
 			model: "claude-sonnet-latest",

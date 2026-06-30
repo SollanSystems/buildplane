@@ -42,13 +42,13 @@ describe("@buildplane/planforge public surface", () => {
 		expect(typeof selectNextRoadmapSlice).toBe("function");
 	});
 
-	it("the committed docs/roadmap.json is valid; M5-S1 is done and M5-S2 is the first runtime slice", () => {
+	it("the committed docs/roadmap.json is valid; M6-S6 is the first runtime slice", () => {
 		const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "../../..");
 		const doc = loadRoadmapFromString(
 			readFileSync(join(repoRoot, "docs/roadmap.json"), "utf8"),
 		);
-		expect(doc.milestone).toBe("M5");
-		expect(doc.slices.find((s) => s.id === "M5-S1")?.status).toBe("done");
-		expect(selectNextRoadmapSlice(doc, ["M5-S1"])?.id).toBe("M5-S2");
+		expect(doc.milestone).toBe("M6");
+		expect(doc.slices.find((s) => s.id === "M6-S6")?.status).toBe("pending");
+		expect(selectNextRoadmapSlice(doc, [])?.id).toBe("M6-S6");
 	});
 });

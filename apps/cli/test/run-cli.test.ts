@@ -5428,10 +5428,10 @@ describe("planforge dry-run", () => {
 		]);
 		expect(result.exitCode).toBe(0);
 		const payload = JSON.parse(result.stdout.join("\n"));
-		expect(payload.slice_id).toBe("M5-S2");
+		expect(payload.slice_id).toBe("M6-S6");
 		expect(payload.status).toBe("PASS");
 		expect(existsSync(outPath)).toBe(true);
-		expect(readFileSync(outPath, "utf8")).toContain("### M5-S2:");
+		expect(readFileSync(outPath, "utf8")).toContain("### M6-S6:");
 	});
 
 	it("planforge plan fails closed without --out / --trusted-base", async () => {
