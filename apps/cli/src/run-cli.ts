@@ -3665,6 +3665,26 @@ export interface PlanForgeDispatchManifest {
 	readonly planId: string;
 	readonly idempotencyKey: string;
 	readonly createdAt: string;
+	/**
+	 * Worker model the loop dispatched with (`planforge loop --model <id>`),
+	 * persisted so a crash-and-resume re-dispatches the remaining suffix on the
+	 * same model. Absent when no override was set (the resume falls back to the
+	 * dispatch default `DISPATCH_WORKER_MODEL`). `recover` has no `--input` flags,
+	 * so the manifest is the only place the override survives a crash.
+	 */
+	readonly model?: string;
+}
+
+/**
+ * Recover the worker-model override for a resuming/recovering dispatch from its
+ * crash-recovery manifest (R-001): the matching manifest's `model`, or undefined
+ * when none recorded (⇒ the dispatch default `DISPATCH_WORKER_MODEL`, unchanged).
+ */
+export function resolvePlanForgeResumeModel(
+	manifests: readonly PlanForgeDispatchManifest[],
+	runId: string,
+): string | undefined {
+	return manifests.find((m) => m.runId === runId)?.model;
 }
 
 function planForgeDispatchDir(workspace: string): string {
@@ -4425,6 +4445,9 @@ async function runPlanForgeDispatchCommand(
 		planId: plan.id,
 		idempotencyKey: plan.idempotencyKey,
 		createdAt: new Date().toISOString(),
+		// Persist the worker-model override BEFORE the run loop so a crash-and-resume
+		// re-dispatches the suffix on the same model (R-001). Omitted when undefined.
+		model: opts?.model,
 	});
 
 	const packets = dispatchAdmittedPlan({
@@ -5118,6 +5141,13 @@ export async function resumePlanForgePlanFromInput(
 	const plan = createPlanForgeDryRunPlan(resolve(cwd, inputPath));
 	const workspace = resolve(cwd);
 	const runId = planAdmitRunId(plan.idempotencyKey);
+	// R-001: recover the worker-model override the original dispatch ran with from
+	// the crash-recovery manifest, so the re-dispatched suffix keeps the same model
+	// (recover has no flags — the manifest is the only place it survives a crash).
+	const recoveredModel = resolvePlanForgeResumeModel(
+		readPlanForgeDispatchManifests(workspace),
+		runId,
+	);
 	const admission = await findVerifiedPlanAdmission(workspace, runId, plan);
 	if (!admission) {
 		throw new Error(
@@ -5135,6 +5165,7 @@ export async function resumePlanForgePlanFromInput(
 		plan,
 		admittedEventId,
 		policyProfile: DEFAULT_DISPATCH_POLICY_PROFILE,
+		model: recoveredModel,
 	});
 	if (replay.completedActivities.length > packets.length) {
 		throw new Error(
