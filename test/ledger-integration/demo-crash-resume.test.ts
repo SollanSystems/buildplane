@@ -315,12 +315,14 @@ describe("demo crash-and-resume — Property 1", () => {
 		await admitPlan(crashed.dir);
 
 		const crashExit = await spawnDispatch(crashed, true);
-		// Hard abort: non-zero exit, an activity recorded, but NO terminal receipt.
-		expect(crashExit).not.toBe(0);
+		// Hard abort: the guard calls process.exit(137) right after the first
+		// activity_completed is durable+signed, so exactly one activity is recorded
+		// and NO terminal receipt exists.
+		expect(crashExit).toBe(137);
 		const afterCrash = await readEvents(crashed.eventsDbPath);
 		expect(
 			afterCrash.filter((r) => r.kind === "activity_completed").length,
-		).toBeGreaterThanOrEqual(1);
+		).toBe(1);
 		expect(afterCrash.filter((r) => r.kind === "plan_receipt")).toHaveLength(0);
 		// Only the first task's model ran before the crash.
 		expect(claudeCalls(crashed)).toBe(1);
