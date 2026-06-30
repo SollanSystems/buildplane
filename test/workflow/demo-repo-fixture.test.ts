@@ -47,7 +47,10 @@ describe("demo-repo fixture (M6 killer-demo target)", () => {
 		expect(goal).toContain("## Safety constraints");
 
 		const tasksMatch = goal.match(/##\s+Tasks\s*\n([\s\S]*?)(?:\n##\s|$)/);
-		expect(tasksMatch, "goal.md must contain a ## Tasks section").not.toBeNull();
+		expect(
+			tasksMatch,
+			"goal.md must contain a ## Tasks section",
+		).not.toBeNull();
 
 		const tasksBody = (tasksMatch?.[1] ?? "").trim();
 		expect(tasksBody.length).toBeGreaterThan(0);
