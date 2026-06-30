@@ -10,13 +10,13 @@ app.use(express.json());
 // not authentication. The live demo worker will add express-rate-limit
 // middleware (max 5 req/min per IP) to this route.
 app.post("/api/login", (req, res) => {
-  const { username, password } = req.body ?? {};
+	const { username, password } = req.body ?? {};
 
-  if (username === "demo" && password === "demo") {
-    return res.status(200).json({ ok: true });
-  }
+	if (username === "demo" && password === "demo") {
+		return res.status(200).json({ ok: true });
+	}
 
-  return res.status(401).json({ ok: false });
+	return res.status(401).json({ ok: false });
 });
 
 module.exports = { app };
