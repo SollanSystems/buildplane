@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { runCli } from "../src/run-cli.ts";
 
@@ -68,7 +68,9 @@ describe("bp goal", () => {
 		expect(json.goal).toBe(DEMO_GOAL);
 		expect(json.planDigest).toMatch(/^sha256:[0-9a-f]{64}$/);
 		expect(json.trustedBase).toBe(headSha);
-		expect(["low", "medium", "high"]).toContain(json.riskClass);
+		// A bare goal is INSUFFICIENT_EVIDENCE, which the riskClass rubric pins to
+		// medium — assert the exact class so a silent drop is caught.
+		expect(json.riskClass).toBe("medium");
 		expect(json.remote).toBe("https://example.com/acme/widget.git");
 	});
 
@@ -125,7 +127,26 @@ describe("bp goal", () => {
 		expect(stderr.join("\n")).toMatch(/goal/i);
 	});
 
-	it("resolves the workspace literally", () => {
-		expect(resolve(dir)).toBe(dir);
+	it("flags repository_remote missing and reports no remote when origin is absent", async () => {
+		const noRemote = mkdtempSync(join(tmpdir(), "bp-goal-noremote-"));
+		try {
+			git(noRemote, "init", "-q");
+			git(noRemote, "config", "user.email", "test@test");
+			git(noRemote, "config", "user.name", "test");
+			writeFileSync(join(noRemote, "init.txt"), "init");
+			git(noRemote, "add", ".");
+			git(noRemote, "commit", "-q", "-m", "init");
+			const { exitCode, stdout } = await runGoal(noRemote, [DEMO_GOAL]);
+			expect(exitCode).toBe(0);
+			const json = JSON.parse(stdout.join("\n")) as {
+				remote?: string;
+				missingEvidence: string[];
+			};
+			// No origin → the JSON `remote` and missingEvidence agree: both say absent.
+			expect(json.missingEvidence).toContain("repository_remote");
+			expect(json.remote ?? null).toBeNull();
+		} finally {
+			rmSync(noRemote, { recursive: true, force: true });
+		}
 	});
 });

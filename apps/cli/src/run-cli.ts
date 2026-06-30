@@ -5951,7 +5951,13 @@ export async function runCli(
 			const goalParts: string[] = [];
 			for (let i = 0; i < rest.length; i++) {
 				if (rest[i] === "--trusted-base") {
-					i++; // skip the flag value
+					// Mirror readFlag: only consume the next token as the value when
+					// it isn't itself a flag, so `--trusted-base --other` doesn't
+					// silently swallow `--other` from the goal text.
+					const next = rest[i + 1];
+					if (next !== undefined && !next.startsWith("--")) {
+						i++;
+					}
 					continue;
 				}
 				goalParts.push(rest[i]);

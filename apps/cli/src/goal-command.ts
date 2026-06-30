@@ -114,7 +114,10 @@ export function buildGoalPlan(options: GoalCommandOptions): GoalCommandResult {
 
 	const markdown = buildGoalPlanMarkdown({
 		goal: options.goal,
-		remote: remote ?? "unknown",
+		// Empty (not a "unknown" placeholder) when there is no origin, so compile()
+		// reads it as absent and validate() flags `repository_remote` missing — the
+		// JSON `remote: undefined` and the missingEvidence then tell one story.
+		remote: remote ?? "",
 		trustedBase,
 	});
 
