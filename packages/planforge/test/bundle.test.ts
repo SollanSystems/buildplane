@@ -10,6 +10,7 @@ import {
 	buildDefaultCapabilityBundleForPlan,
 	buildDefaultCapabilityBundleForTask,
 	capabilityBundleDigest,
+	netEgressFromSideEffects,
 } from "../src/bundle.ts";
 import { createPlanForgeDryRunPlan } from "../src/index.ts";
 
@@ -30,9 +31,46 @@ describe("buildDefaultCapabilityBundleForTask", () => {
 		);
 		expect(capabilityBundleDigest(bundle)).toBe(bundleDigest(bundle));
 	});
+
+	it("attaches a declarative netEgress allowlist derived from the task's side-effects (M6-S9)", () => {
+		const plan = createPlanForgeDryRunPlan(inputFixture);
+		const task = plan.tasks[0];
+		const bundle = buildDefaultCapabilityBundleForTask(plan, task);
+		// Every current side-effect maps to zero egress → explicit default-deny.
+		expect(bundle.netEgress).toEqual([]);
+		// netEgress is digest-covered: planforge + broker digests still agree.
+		expect(capabilityBundleDigest(bundle)).toBe(bundleDigest(bundle));
+		// The bundle round-trips through the broker with netEgress preserved.
+		const validated = validateCapabilityBundle(bundle);
+		if (!validated.ok) {
+			throw new Error(validated.errors.join("; "));
+		}
+		expect(validated.bundle.netEgress).toEqual([]);
+	});
+});
+
+describe("netEgressFromSideEffects", () => {
+	it("is the deterministic sorted, de-duped union of per-side-effect egress hosts", () => {
+		// Mechanism check: the mapping is a pure union over side-effects. The
+		// current vocabulary all maps to zero egress (default-deny); the union of
+		// an unknown effect is also empty, never throws.
+		expect(netEgressFromSideEffects(["code-edit"])).toEqual([]);
+		expect(
+			netEgressFromSideEffects(["local-doc", "local-fixture", "code-edit"]),
+		).toEqual([]);
+		expect(netEgressFromSideEffects([])).toEqual([]);
+		expect(netEgressFromSideEffects(["unknown-effect"])).toEqual([]);
+	});
 });
 
 describe("buildDefaultCapabilityBundleForPlan", () => {
+	it("attaches the plan-wide netEgress union (default-deny for the local-only fixture) (M6-S9)", () => {
+		const plan = createPlanForgeDryRunPlan(inputFixture);
+		const bundle = buildDefaultCapabilityBundleForPlan(plan);
+		expect(bundle.netEgress).toEqual([]);
+		expect(capabilityBundleDigest(bundle)).toBe(bundleDigest(bundle));
+	});
+
 	it("derives the run-wide envelope as the sorted union of every task's capabilities", () => {
 		const plan = createPlanForgeDryRunPlan(inputFixture);
 		const bundle = buildDefaultCapabilityBundleForPlan(plan);

@@ -69,6 +69,7 @@ import {
 	formatWorkspaceCleanupResult,
 	formatWorkspaceList,
 } from "./formatters.js";
+import { buildGoalPlan } from "./goal-command.js";
 import {
 	createAcceptancePort,
 	evaluateAcceptanceDiffScope,
@@ -99,6 +100,7 @@ import {
 	readLoopState,
 	runawayGuardProfile,
 	stopFileRequested,
+	withCrashAfterActivityGuard,
 	writeLoopStateAtomic,
 } from "./loop-supervisor.js";
 import type {
@@ -787,6 +789,7 @@ function formatTopLevelHelp(): string[] {
 		"",
 		"  Execute:",
 		"    run --packet <path>    Run with implement-then-review (default)",
+		'    goal "<text>" [--trusted-base <sha>]  Compile + preview a raw goal into plan JSON',
 		"    demo [--model]         Prove the flywheel in 30 seconds",
 		"",
 		"  Observe:",
@@ -4504,7 +4507,13 @@ async function runPlanForgeDispatchCommand(
 	// activities, surfaced to the supervisor's cumulative token-budget cap (GAP-7).
 	let totalTokenUsage = 0;
 	try {
-		const ledgerActivityPort = createLedgerActivityPort(emitter);
+		// Demo crash-injection (M6 Property 1): NO-OP unless BUILDPLANE_CRASH_AFTER_ACTIVITY=1,
+		// in which case the dispatch aborts hard right after the first activity_completed
+		// is durable+signed on the tape — never reaching the terminal plan_receipt.
+		const ledgerActivityPort = withCrashAfterActivityGuard(
+			createLedgerActivityPort(emitter),
+			emitter,
+		);
 		// Tasks dispatch sequentially, so a single mutable identity holder safely
 		// scopes the acceptance verdict's plan identity to the task in flight.
 		const acceptanceIdentity = { planId: plan.id, contractDigest: "" };
@@ -5941,6 +5950,38 @@ export async function runCli(
 			const modelFlag = rest.includes("--model");
 			const { runDemo } = await import("./demo.js");
 			await runDemo({ model: modelFlag });
+			return 0;
+		}
+
+		if (command === "goal") {
+			const trustedBaseOverride = readFlag(rest, "--trusted-base");
+			const goalParts: string[] = [];
+			for (let i = 0; i < rest.length; i++) {
+				if (rest[i] === "--trusted-base") {
+					// Mirror readFlag: only consume the next token as the value when
+					// it isn't itself a flag, so `--trusted-base --other` doesn't
+					// silently swallow `--other` from the goal text.
+					const next = rest[i + 1];
+					if (next !== undefined && !next.startsWith("--")) {
+						i++;
+					}
+					continue;
+				}
+				goalParts.push(rest[i]);
+			}
+			const goalText = goalParts.join(" ").trim();
+			if (!goalText) {
+				stderr('Missing required goal text. Usage: bp goal "<text>"');
+				return 1;
+			}
+			const result = buildGoalPlan({
+				goal: goalText,
+				cwd,
+				trustedBaseOverride,
+				stdout,
+				stderr,
+			});
+			stdout(formatJson(result));
 			return 0;
 		}
 

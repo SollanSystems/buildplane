@@ -1,0 +1,3 @@
+# buildplane-demo-repo
+
+A toy Express application that serves as the target of the Buildplane v0.5 killer demo. It exposes a single `POST /api/login` endpoint with a dummy credential check and **no rate limiting**. Running `npm install && npm test` is **RED by design**: `test/login.test.js` fires six login attempts from one IP and expects the sixth to return HTTP `429` with a `Retry-After` header, but the un-modified server never rate limits. The demo's job is to drive a Buildplane worker that adds the missing protection — max 5 requests/min per IP on `/api/login`, returning `429` plus `Retry-After` — turning the test green.
