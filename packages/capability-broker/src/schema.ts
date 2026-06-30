@@ -22,5 +22,14 @@ export interface CapabilityBundleV0 {
 	bundleId: string;
 	fsRead?: string[];
 	fsWrite?: string[];
+	/**
+	 * Declarative network-egress allowlist (host names). v0 is declarative-only:
+	 * the field is parsed, validated, surfaced on the plan preview, and covered by
+	 * the bundle digest — but NOT yet enforced at the worker boundary (no verified
+	 * Claude Code subprocess network-restriction flag exists; see
+	 * docs/architecture/capability-broker.md `net_egress`). An empty array is the
+	 * explicit default-deny posture: "this bundle declares zero network egress".
+	 */
+	netEgress?: string[];
 	tools?: CapabilityBundleToolsV0;
 }

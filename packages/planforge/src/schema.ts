@@ -126,6 +126,14 @@ export interface PlanForgeReceiptPreview {
 	schemaVersion: PlanForgeReceiptSchemaVersion;
 	status: PlanForgeValidationStatus;
 	riskClass: PlanForgeRiskClass;
+	/**
+	 * Declarative network-egress allowlist (host names) for the admitted plan —
+	 * the deterministic union of every task's declared egress (M6-S9).
+	 * Declarative-only / not yet enforced; `[]` = default-deny. Surfaced here for
+	 * preview rendering, mirroring `riskClass`. Excluded from `planDigest`
+	 * (receiptPreview is documentation/fixture only).
+	 */
+	netEgress: string[];
 	planId: string;
 	idempotencyKey: string;
 	inputDigest: string;

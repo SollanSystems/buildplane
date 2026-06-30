@@ -35,6 +35,17 @@ describe("createPlanForgeDryRunPlan", () => {
 		expect(plan.receiptPreview.planDigest).toBe(digest(reviewArtifact));
 	});
 
+	it("surfaces a declarative netEgress allowlist on the receipt preview (M6-S9)", () => {
+		const plan = createPlanForgeDryRunPlan(inputFixture);
+		// The goal fixture's tasks declare only local-* side-effects, all of which
+		// map to zero egress — so the declared posture is explicit default-deny.
+		expect(plan.receiptPreview.netEgress).toEqual([]);
+		// netEgress lives on the receiptPreview (excluded from planDigest), so it
+		// must NOT perturb the review-artifact digest.
+		const { receiptPreview: _receiptPreview, ...reviewArtifact } = plan;
+		expect(plan.receiptPreview.planDigest).toBe(digest(reviewArtifact));
+	});
+
 	it("preserves the input-basename evidence anchor in evidence refs", () => {
 		const plan = createPlanForgeDryRunPlan(inputFixture);
 		const refs = plan.validation.checks.flatMap((check) => check.evidenceRefs);
