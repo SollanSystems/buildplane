@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { netEgressFromSideEffects } from "./bundle.js";
 import type { PlanForgeCompileResult } from "./compile.js";
 import { hasLine, sectionText } from "./compile.js";
 import { digest } from "./digest.js";
@@ -77,6 +78,13 @@ export function preview(
 		verificationCommands: [...t.verificationCommands],
 	}));
 
+	// Plan-wide declarative network-egress allowlist: the deterministic union of
+	// every task's declared egress (M6-S9). Surfaced on the receipt preview for
+	// rendering; declarative-only / not yet enforced.
+	const netEgress = netEgressFromSideEffects(
+		tasks.flatMap((t) => t.allowedSideEffects),
+	);
+
 	const plan: PlanForgePlan = {
 		schemaVersion: PLANFORGE_PLAN_SCHEMA_VERSION,
 		id: `pf-plan-${planFingerprint}`,
@@ -90,6 +98,7 @@ export function preview(
 			schemaVersion: PLANFORGE_RECEIPT_SCHEMA_VERSION,
 			status: validationStatus,
 			riskClass: validation.riskClass,
+			netEgress,
 			planId: `pf-plan-${planFingerprint}`,
 			idempotencyKey,
 			inputDigest,

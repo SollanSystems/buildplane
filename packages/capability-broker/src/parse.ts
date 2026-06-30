@@ -103,6 +103,7 @@ export function parseCapabilityBundle(
 
 	const fsRead = parseStringArray("fsRead", input.fsRead, errors);
 	const fsWrite = parseStringArray("fsWrite", input.fsWrite, errors);
+	const netEgress = parseStringArray("netEgress", input.netEgress, errors);
 	const tools = parseTools(input.tools, errors);
 
 	if (errors.length > 0) {
@@ -116,6 +117,7 @@ export function parseCapabilityBundle(
 			bundleId: bundleId as string,
 			...(fsRead !== undefined ? { fsRead } : {}),
 			...(fsWrite !== undefined ? { fsWrite } : {}),
+			...(netEgress !== undefined ? { netEgress } : {}),
 			...(tools !== undefined && Object.keys(tools).length > 0
 				? { tools }
 				: {}),

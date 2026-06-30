@@ -69,6 +69,7 @@ import {
 	formatWorkspaceCleanupResult,
 	formatWorkspaceList,
 } from "./formatters.js";
+import { buildGoalPlan } from "./goal-command.js";
 import {
 	createAcceptancePort,
 	evaluateAcceptanceDiffScope,
@@ -788,6 +789,7 @@ function formatTopLevelHelp(): string[] {
 		"",
 		"  Execute:",
 		"    run --packet <path>    Run with implement-then-review (default)",
+		'    goal "<text>" [--trusted-base <sha>]  Compile + preview a raw goal into plan JSON',
 		"    demo [--model]         Prove the flywheel in 30 seconds",
 		"",
 		"  Observe:",
@@ -5948,6 +5950,38 @@ export async function runCli(
 			const modelFlag = rest.includes("--model");
 			const { runDemo } = await import("./demo.js");
 			await runDemo({ model: modelFlag });
+			return 0;
+		}
+
+		if (command === "goal") {
+			const trustedBaseOverride = readFlag(rest, "--trusted-base");
+			const goalParts: string[] = [];
+			for (let i = 0; i < rest.length; i++) {
+				if (rest[i] === "--trusted-base") {
+					// Mirror readFlag: only consume the next token as the value when
+					// it isn't itself a flag, so `--trusted-base --other` doesn't
+					// silently swallow `--other` from the goal text.
+					const next = rest[i + 1];
+					if (next !== undefined && !next.startsWith("--")) {
+						i++;
+					}
+					continue;
+				}
+				goalParts.push(rest[i]);
+			}
+			const goalText = goalParts.join(" ").trim();
+			if (!goalText) {
+				stderr('Missing required goal text. Usage: bp goal "<text>"');
+				return 1;
+			}
+			const result = buildGoalPlan({
+				goal: goalText,
+				cwd,
+				trustedBaseOverride,
+				stdout,
+				stderr,
+			});
+			stdout(formatJson(result));
 			return 0;
 		}
 

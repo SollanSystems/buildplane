@@ -41,6 +41,27 @@ function validateGlobList(
 	return errors;
 }
 
+function validateNetEgress(hosts: string[] | undefined): string[] {
+	const errors: string[] = [];
+	if (hosts === undefined) {
+		return errors;
+	}
+	for (let i = 0; i < hosts.length; i++) {
+		const host = hosts[i];
+		if (
+			host.trim().length === 0 ||
+			host.includes("\0") ||
+			/\s/.test(host) ||
+			host.includes("/")
+		) {
+			errors.push(
+				`netEgress[${i}] must be a non-empty host name without whitespace, "/", or NUL`,
+			);
+		}
+	}
+	return errors;
+}
+
 function validateAllowlist(allowlist: string[] | undefined): string[] {
 	const errors: string[] = [];
 	if (allowlist === undefined) {
@@ -68,6 +89,7 @@ export function validateCapabilityBundle(
 	const errors: string[] = [
 		...validateGlobList("fsRead", parsed.bundle.fsRead),
 		...validateGlobList("fsWrite", parsed.bundle.fsWrite),
+		...validateNetEgress(parsed.bundle.netEgress),
 		...validateAllowlist(parsed.bundle.tools?.run_command?.allowlist),
 	];
 
