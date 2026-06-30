@@ -3,8 +3,9 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 // GAP-9 authors docs/roadmap.json (D1); GAP-10 only READS it. The envelope's
-// `milestone` field resolves against this single-milestone roadmap. This guard
-// pins the flat-shape consumption contract GAP-7's selection rule depends on.
+// `milestone` field resolves against this single-milestone roadmap (now M6).
+// This guard pins the flat-shape consumption contract GAP-7's selection rule
+// depends on.
 describe("docs/roadmap.json (authored by GAP-9)", () => {
 	const raw = readFileSync(
 		resolve(__dirname, "../../../docs/roadmap.json"),
@@ -21,8 +22,8 @@ describe("docs/roadmap.json (authored by GAP-9)", () => {
 		expect(Array.isArray(roadmap.slices)).toBe(true);
 	});
 
-	it("carries the M5 milestone the envelope resolves against", () => {
-		expect(roadmap.milestone).toBe("M5");
-		expect(roadmap.slices.map((s) => s.id)).toContain("M5-S1");
+	it("carries the M6 milestone the envelope resolves against", () => {
+		expect(roadmap.milestone).toBe("M6");
+		expect(roadmap.slices.map((s) => s.id)).toContain("M6-S6");
 	});
 });

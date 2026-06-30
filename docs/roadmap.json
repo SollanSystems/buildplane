@@ -1,20 +1,21 @@
 {
 	"schemaVersion": "buildplane.roadmap.v0",
-	"milestone": "M5",
+	"milestone": "M6",
 	"slices": [
 		{
-			"id": "M5-S1",
-			"title": "operator_decision_recorded signed ledger event kind",
-			"status": "done",
-			"objective": "Add the signed operator_decision_recorded L0 event kind (kind.rs, payload, canonicalize, replay no-op arm, round-trip + canonicalize tests, typeshare TS union, byte-stable fixtures) as the shared trust infra both the approval inbox and the loop authorization envelope consume. Hand-built build-time prerequisite of the self-build loop.",
+			"id": "M6-S6",
+			"title": "result_ready signed L0 event kind",
+			"status": "pending",
+			"objective": "Add the signed result_ready L0 event kind end to end across Rust and TypeScript so a completed, acceptance-passed run carries a terminal result_ready fact on the tape. Derivation per CLAUDE.md Adding a new event kind: add the Kind variant in native/crates/bp-ledger/src/kind.rs with its kind_str and as_wire mapping; add the ResultReadyV1 payload struct in native/crates/bp-ledger/src/payload/run_lifecycle.rs with fields runId, admissionEventId, acceptanceEventId all String and typeshare annotated with no u64; register Payload ResultReadyV1 in payload/mod.rs; add the kind_to_variant and payload_variant_name arms in canonicalize.rs; add the mandatory exhaustive no-op transition arm in native/crates/bp-replay/src/transitions.rs with no wildcard; add round-trip and canonicalize byte-stability tests with a golden sha256 in native/crates/bp-ledger/tests/run_lifecycle.rs; regenerate typeshare TS into packages/ledger-client/src/generated; hand-extend the TS payload union in packages/ledger-client/src/payload.ts; regenerate fixtures with ledger gen-fixtures.",
 			"allowedSideEffects": ["code-edit"],
 			"verificationCommands": [
 				"cargo test --manifest-path native/Cargo.toml",
 				"pnpm -C . exec vitest run packages/ledger-client/test"
 			],
 			"acceptanceCriteria": [
-				"A signed operator_decision_recorded event round-trips and canonicalizes byte-stably across Rust and TypeScript.",
-				"bp-replay carries an exhaustive no-op arm for the new kind so no sibling crate match silently breaks."
+				"A signed result_ready event round-trips and canonicalizes byte-stably across Rust and TypeScript with a pinned golden sha256.",
+				"bp-replay carries an exhaustive no-op transition arm for result_ready so no sibling crate match silently breaks.",
+				"git diff --exit-code is clean on packages/ledger-client/src/generated and packages/ledger-client/fixtures after regeneration."
 			],
 			"dependsOn": [],
 			"pathGlobs": [
@@ -22,146 +23,6 @@
 				"native/crates/bp-ledger/tests/**",
 				"packages/ledger-client/src/**"
 			]
-		},
-		{
-			"id": "M5-S2",
-			"title": "Storage read surface and Tier-1 acceptance-shadow",
-			"status": "pending",
-			"objective": "Add the read surface for Mission Control: a single aggregating listRunsByStatus with cursor pagination, a Tier-1 acceptance-shadow set when the M4 gate records acceptance, listPendingOperatorDecisions for the inbox feed, and parentRunId surfaced end to end through the inspect snapshot.",
-			"allowedSideEffects": ["code-edit"],
-			"verificationCommands": [
-				"pnpm -C . exec vitest run packages/storage/test packages/kernel/test",
-				"pnpm typecheck"
-			],
-			"acceptanceCriteria": [
-				"listRunsByStatus filters by status and paginates with a cursor via one aggregating query.",
-				"A run with a matching operator_decision_recorded row is excluded from the pending-decisions feed; a passed acceptance-shadow run with no decision is included.",
-				"inspect on a child run reports a non-null parentRunId."
-			],
-			"dependsOn": ["M5-S1"],
-			"pathGlobs": [
-				"packages/kernel/src/**",
-				"packages/storage/src/**",
-				"packages/storage/test/**",
-				"packages/kernel/test/**"
-			]
-		},
-		{
-			"id": "M5-S3",
-			"title": "Extract createInspectorProjection to the kernel",
-			"status": "pending",
-			"objective": "Move createInspectorProjection into the kernel re-expressed against the strict InspectSnapshot type (no loose Like interfaces), re-export it from the kernel, and have the CLI formatter import it with behavior unchanged.",
-			"allowedSideEffects": ["code-edit"],
-			"verificationCommands": [
-				"pnpm -C . exec vitest run packages/kernel/test apps/cli/test",
-				"pnpm typecheck"
-			],
-			"acceptanceCriteria": [
-				"createInspectorProjection accepts the strict InspectSnapshot and defines or imports no Like type.",
-				"Existing CLI inspector tests stay green importing the projection from the kernel."
-			],
-			"dependsOn": ["M5-S2"],
-			"pathGlobs": [
-				"packages/kernel/src/**",
-				"packages/kernel/test/**",
-				"apps/cli/src/**"
-			]
-		},
-		{
-			"id": "M5-S4",
-			"title": "OperatorDecisionPort and orchestrator.recordOperatorDecision",
-			"status": "pending",
-			"objective": "Add the sole writer of the operator_decision_recorded tape fact with write-ahead ordering: validate run state, emit and flush the signed event before the side effect, drive the resume or merge or quarantine side effect, and idempotently re-drive a decided-but-unexecuted decision exactly once on startup.",
-			"allowedSideEffects": ["code-edit"],
-			"verificationCommands": [
-				"pnpm -C . exec vitest run packages/kernel/test test/ledger-integration",
-				"cargo test --manifest-path native/Cargo.toml"
-			],
-			"acceptanceCriteria": [
-				"The signed event is emitted and flushed before the irreversible side effect; a crash between flush-ack and side effect resumes the side effect exactly once with no double-merge.",
-				"recordOperatorDecision validates decision and subject and ID shape before emit so malformed values can never be signed.",
-				"A golden canonical-bytes plus sha256 fixture pins byte-stability for an approved/merge and a rejected/resume case."
-			],
-			"dependsOn": ["M5-S1", "M5-S2"],
-			"pathGlobs": [
-				"packages/kernel/src/**",
-				"packages/kernel/test/**",
-				"apps/cli/src/**",
-				"native/crates/bp-ledger/tests/**"
-			]
-		},
-		{
-			"id": "M5-S5",
-			"title": "mission-control-server HTTP read and write API",
-			"status": "pending",
-			"objective": "Add a new private mission-control-server package exposing a node http typed router over the kernel and storage read surface plus a token-gated decision write endpoint, bound to loopback by default, with the package registered in the workspace aliases and the optional-internal-packages bootstrap list.",
-			"allowedSideEffects": ["code-edit"],
-			"verificationCommands": [
-				"pnpm -C . exec vitest run packages/mission-control-server/test test/workflow/published-bootstrap-stage.test.ts",
-				"pnpm typecheck"
-			],
-			"acceptanceCriteria": [
-				"Each read endpoint returns the expected shape against a mock store and the decision endpoint 401s without a valid token and calls recordOperatorDecision exactly once on success.",
-				"The default bind is loopback and the published-bootstrap snapshot does not require the server's dist."
-			],
-			"dependsOn": ["M5-S2", "M5-S3", "M5-S4"],
-			"pathGlobs": [
-				"packages/mission-control-server/src/**",
-				"packages/mission-control-server/test/**",
-				"scripts/published-bootstrap/**",
-				"test/workflow/**"
-			]
-		},
-		{
-			"id": "M5-S6",
-			"title": "Web Run Inspector UI",
-			"status": "pending",
-			"objective": "Add a new Vite web SPA Run Inspector that renders only InspectorProjection fields across the event timeline, evidence pane, and outcome strip plus a run list, reusing the projection's fail-closed verdict with no verdict logic in the UI.",
-			"allowedSideEffects": ["code-edit"],
-			"verificationCommands": [
-				"pnpm -C . exec vitest run apps/web/test packages/kernel/test",
-				"pnpm typecheck"
-			],
-			"acceptanceCriteria": [
-				"Each panel renders from a fixture InspectorProjection and the outcome strip shows BLOCKED for a missing-evidence fixture.",
-				"The kernel test suite stays green after the web app is added (node-env tests unperturbed)."
-			],
-			"dependsOn": ["M5-S3", "M5-S5"],
-			"pathGlobs": ["apps/web/src/**", "apps/web/test/**"]
-		},
-		{
-			"id": "M5-S7",
-			"title": "Web Approval Inbox UI",
-			"status": "pending",
-			"objective": "Add the web Approval Inbox that lists the pending feed for resume and merge flows with inspector links, posts approve and reject decisions to the API, and surfaces an optimistic-concurrency conflict explicitly instead of silently succeeding.",
-			"allowedSideEffects": ["code-edit"],
-			"verificationCommands": [
-				"pnpm -C . exec vitest run apps/web/test",
-				"pnpm typecheck"
-			],
-			"acceptanceCriteria": [
-				"The inbox renders both the resume and merge flows and approve/reject calls the API with the correct decision and subject.",
-				"A conflict response renders an explicit error rather than a success."
-			],
-			"dependsOn": ["M5-S5", "M5-S6"],
-			"pathGlobs": ["apps/web/src/**", "apps/web/test/**"]
-		},
-		{
-			"id": "M5-S8",
-			"title": "bp web subcommand and build/CI/bootstrap wiring",
-			"status": "pending",
-			"objective": "Add the bp web subcommand that lazy-imports the mission-control-server, injects the ledger-backed OperatorDecisionPort, serves the web build output with a no-listen self-test mode and loopback default, and wire the web build into the root build and CI without adding the web app to the root tsconfig references.",
-			"allowedSideEffects": ["code-edit"],
-			"verificationCommands": [
-				"pnpm -C . exec vitest run apps/cli/test test/workflow/published-bootstrap-stage.test.ts",
-				"pnpm typecheck"
-			],
-			"acceptanceCriteria": [
-				"bp web --check exits 0 and binds loopback and the published-bootstrap snapshot stays green with the server in the optional-internal-packages list.",
-				"A test asserts apps/web is not in the root tsconfig references and is covered by a tsc noEmit step."
-			],
-			"dependsOn": ["M5-S5", "M5-S6", "M5-S7"],
-			"pathGlobs": ["apps/cli/src/**", "apps/web/**", "test/workflow/**"]
 		}
 	]
 }
