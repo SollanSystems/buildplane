@@ -959,7 +959,7 @@ function formatPlanForgeHelp(): string[] {
 		"    --operator <id>         Required; deciding operator identity (decided_by)",
 		"    --json                  Prints the authorization result as JSON",
 		"",
-		"buildplane planforge loop [--once | --max-iterations=N] [--max-turns=N] [--max-tokens=N] [--wall-clock-ms=N] [--json]",
+		"buildplane planforge loop [--once | --max-iterations=N] [--max-turns=N] [--max-tokens=N] [--wall-clock-ms=N] [--model <id>] [--json]",
 		"",
 		"  Supervisor: drive plan -> dry-run -> envelope-check -> admit -> dispatch ->",
 		"  accept -> merge -> re-anchor across iterations, persisting loop-state.json",
@@ -973,6 +973,7 @@ function formatPlanForgeHelp(): string[] {
 		"    --max-turns=N           Lowered worker --max-turns (runaway guard; default 12)",
 		"    --max-tokens=N          Per-iteration token budget for the abort guard",
 		"    --wall-clock-ms=N       Per-iteration wall-clock cap for the abort guard",
+		"    --model <id>            Worker model override for dispatched packets (default claude-sonnet-4)",
 		"    --json                  Prints the loop summary as JSON",
 	];
 }
@@ -4379,6 +4380,9 @@ async function runPlanForgeDispatchCommand(
 		readonly budgets?: BudgetConstraints;
 		/** Receives the rich dispatch outcome (incl. mergedHeadSha) for the loop. */
 		readonly onOutcome?: (outcome: PlanForgeDispatchOutcome) => void;
+		/** Worker model override stamped onto every dispatched packet. Defaults to
+		 * planforge's `DISPATCH_WORKER_MODEL` when omitted. */
+		readonly model?: string;
 	},
 ): Promise<number> {
 	const inputPath = readFlag(args, "--input");
@@ -4427,6 +4431,7 @@ async function runPlanForgeDispatchCommand(
 		plan,
 		admittedEventId: String(admittedEventId),
 		policyProfile: DEFAULT_DISPATCH_POLICY_PROFILE,
+		model: opts?.model,
 	});
 
 	// M4 acceptance contract: derive one fail-closed contract per task (diff-scope
@@ -4850,6 +4855,7 @@ async function defaultLoopAdmit(
 export function makeDefaultLoopDispatch(
 	maxTurns: number,
 	dispatchCommand: typeof runPlanForgeDispatchCommand = runPlanForgeDispatchCommand,
+	model?: string,
 ): (
 	planPath: string,
 	cwd: string,
@@ -4867,6 +4873,9 @@ export function makeDefaultLoopDispatch(
 			// Deliver the guard's budgets so the orchestrator installs the
 			// per-packet AbortController budget subscription for this dispatch.
 			budgets: guard.budgets,
+			// Worker model override (`planforge loop --model <id>`); undefined keeps
+			// the dispatch default (`DISPATCH_WORKER_MODEL`).
+			model,
 			onOutcome: (o) => {
 				outcome = o;
 			},
@@ -4900,12 +4909,17 @@ async function runPlanForgeLoopCommand(
 	const maxTokens = parseIntFlag(args, "--max-tokens", 200_000) ?? 200_000;
 	const wallClockMs =
 		parseIntFlag(args, "--wall-clock-ms", 30 * 60_000) ?? 30 * 60_000;
+	// Optional worker-model override threaded to every dispatched packet; omitted
+	// leaves the dispatch default (`DISPATCH_WORKER_MODEL`) untouched.
+	const model = readFlag(args, "--model");
 
 	const planner = deps?.loopPlanner ?? defaultLoopPlanner;
 	const envelope = deps?.loopEnvelope ?? defaultLoopEnvelope;
 	const dryRun = deps?.loopDryRun ?? defaultLoopDryRun;
 	const admit = deps?.loopAdmit ?? defaultLoopAdmit;
-	const dispatch = deps?.loopDispatch ?? makeDefaultLoopDispatch(maxTurns);
+	const dispatch =
+		deps?.loopDispatch ??
+		makeDefaultLoopDispatch(maxTurns, runPlanForgeDispatchCommand, model);
 
 	// Per-iteration runaway guard (distinct from the cumulative token budget):
 	// maxTurns is the lowered worker turn cap; maxTokens/wallClockMs drive the

@@ -9,7 +9,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { runCli } from "../src/run-cli.js";
+import { makeDefaultLoopDispatch, runCli } from "../src/run-cli.js";
 
 function loopDeps(calls: string[]) {
 	return {
@@ -245,5 +245,55 @@ describe("buildplane planforge loop", () => {
 			stdout: (l) => out.push(l),
 		});
 		expect(out.join("\n")).toMatch(/planforge loop/);
+	});
+
+	it("planforge loop --help documents the --model override", async () => {
+		const out: string[] = [];
+		await runCli(["planforge", "--help"], {
+			cwd: process.cwd(),
+			stdout: (l) => out.push(l),
+		});
+		expect(out.join("\n")).toMatch(/--model/);
+	});
+});
+
+describe("makeDefaultLoopDispatch — model override", () => {
+	const guard = { budgets: undefined } as never;
+
+	it("threads the model override into the dispatch command opts", async () => {
+		const captured: Array<Record<string, unknown> | undefined> = [];
+		const spyDispatch = (async (
+			_args: readonly string[],
+			_cwd: string,
+			_stdout: (line: string) => void,
+			opts?: Record<string, unknown>,
+		) => {
+			captured.push(opts);
+			return 0;
+		}) as never;
+		const dispatch = makeDefaultLoopDispatch(
+			12,
+			spyDispatch,
+			"claude-opus-4-8",
+		);
+		await dispatch("/tmp/plan.md", "/tmp/ws", guard);
+		expect(captured).toHaveLength(1);
+		expect(captured[0]?.model).toBe("claude-opus-4-8");
+	});
+
+	it("passes model undefined when no override is given (default resolves in dispatchAdmittedPlan)", async () => {
+		const captured: Array<Record<string, unknown> | undefined> = [];
+		const spyDispatch = (async (
+			_args: readonly string[],
+			_cwd: string,
+			_stdout: (line: string) => void,
+			opts?: Record<string, unknown>,
+		) => {
+			captured.push(opts);
+			return 0;
+		}) as never;
+		const dispatch = makeDefaultLoopDispatch(12, spyDispatch);
+		await dispatch("/tmp/plan.md", "/tmp/ws", guard);
+		expect(captured[0]?.model).toBeUndefined();
 	});
 });

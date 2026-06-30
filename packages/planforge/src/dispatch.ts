@@ -56,7 +56,7 @@ export interface DispatchedUnitPacket {
 	};
 	readonly model: {
 		readonly provider: typeof DISPATCH_WORKER_PROVIDER;
-		readonly model: typeof DISPATCH_WORKER_MODEL;
+		readonly model: string;
 		readonly prompt: string;
 	};
 	readonly intent: DispatchTaskIntent;
@@ -73,6 +73,13 @@ export interface DispatchPlanInput {
 	readonly admittedEventId: string;
 	/** Policy profile each dispatched unit runs under. */
 	readonly policyProfile: string;
+	/**
+	 * Worker model stamped onto every dispatched packet's `model.model` (the
+	 * `--model` flag the ClaudeCodeExecutor passes to `claude -p`). Defaults to
+	 * `DISPATCH_WORKER_MODEL` so the global default is unchanged; the loop's
+	 * `--model` override threads through here.
+	 */
+	readonly model?: string;
 }
 
 /** Map a PlanForgeTask to a kernel-shaped TaskIntent. GAP-5 threads priorWork
@@ -139,6 +146,7 @@ export function dispatchAdmittedPlan(
 	input: DispatchPlanInput,
 ): DispatchedUnitPacket[] {
 	const { plan, admittedEventId, policyProfile } = input;
+	const model = input.model ?? DISPATCH_WORKER_MODEL;
 	return plan.tasks.map((task) => {
 		const capability_bundle = buildDefaultCapabilityBundleForTask(plan, task);
 		return {
@@ -156,7 +164,7 @@ export function dispatchAdmittedPlan(
 			},
 			model: {
 				provider: DISPATCH_WORKER_PROVIDER,
-				model: DISPATCH_WORKER_MODEL,
+				model,
 				prompt: buildWorkerPrompt(plan, task),
 			},
 			intent: buildTaskIntent(plan, task),
