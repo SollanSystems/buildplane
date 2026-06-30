@@ -100,6 +100,7 @@ import {
 	readLoopState,
 	runawayGuardProfile,
 	stopFileRequested,
+	withCrashAfterActivityGuard,
 	writeLoopStateAtomic,
 } from "./loop-supervisor.js";
 import type {
@@ -4506,7 +4507,13 @@ async function runPlanForgeDispatchCommand(
 	// activities, surfaced to the supervisor's cumulative token-budget cap (GAP-7).
 	let totalTokenUsage = 0;
 	try {
-		const ledgerActivityPort = createLedgerActivityPort(emitter);
+		// Demo crash-injection (M6 Property 1): NO-OP unless BUILDPLANE_CRASH_AFTER_ACTIVITY=1,
+		// in which case the dispatch aborts hard right after the first activity_completed
+		// is durable+signed on the tape — never reaching the terminal plan_receipt.
+		const ledgerActivityPort = withCrashAfterActivityGuard(
+			createLedgerActivityPort(emitter),
+			emitter,
+		);
 		// Tasks dispatch sequentially, so a single mutable identity holder safely
 		// scopes the acceptance verdict's plan identity to the task in flight.
 		const acceptanceIdentity = { planId: plan.id, contractDigest: "" };
