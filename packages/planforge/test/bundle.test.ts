@@ -6,6 +6,7 @@ import {
 	validateCapabilityBundle,
 } from "@buildplane/capability-broker";
 import { describe, expect, it } from "vitest";
+import { deriveAcceptanceContract } from "../src/acceptance-contract.ts";
 import {
 	buildDefaultCapabilityBundleForPlan,
 	buildDefaultCapabilityBundleForTask,
@@ -264,6 +265,7 @@ describe("buildDefaultCapabilityBundleForTask — code-edit", () => {
 				"test/**",
 				"packages/**/src/**",
 				"packages/**/test/**",
+				"packages/**/fixtures/**",
 				"native/crates/**/src/**",
 				"native/crates/**/tests/**",
 			]),
@@ -273,6 +275,43 @@ describe("buildDefaultCapabilityBundleForTask — code-edit", () => {
 			expect.arrayContaining(["cargo", "pnpm"]),
 		);
 		expect(capabilityBundleDigest(bundle)).toBe(bundleDigest(bundle));
+	});
+
+	it("covers regenerated ledger fixtures so a code-edit worker's committed fixtures stay in diff-scope", () => {
+		const plan = createPlanForgeDryRunPlan(inputFixture);
+		const task = {
+			...plan.tasks[0],
+			allowedSideEffects: ["code-edit"] as const,
+			verificationCommands: ["pnpm ledger:gen-fixtures"],
+		};
+		const bundle = buildDefaultCapabilityBundleForTask(plan, task);
+		// The `result_ready` derivation regenerates+commits
+		// packages/ledger-client/fixtures/payload-variants.json — that path MUST be
+		// inside the bundle's fsWrite (symmetric with packages/**/src/**).
+		expect(bundle.fsWrite).toContain("packages/**/fixtures/**");
+
+		const validated = validateCapabilityBundle(bundle);
+		if (!validated.ok) {
+			throw new Error(validated.errors.join("; "));
+		}
+		const ctx = { worktreeRoot: "/tmp/wt" };
+		expect(
+			evaluateToolInvocation(
+				validated.bundle,
+				{
+					tool: "write_file",
+					path: "packages/ledger-client/fixtures/payload-variants.json",
+				},
+				ctx,
+			).decision,
+		).toBe("allow");
+
+		// The M4 acceptance diff-scope is derived from the same fsWrite, so a
+		// committed fixtures diff is no longer rejected as out-of-scope.
+		const contract = deriveAcceptanceContract(plan, task);
+		expect(contract.diff_scope.allowed_globs).toContain(
+			"packages/**/fixtures/**",
+		);
 	});
 });
 

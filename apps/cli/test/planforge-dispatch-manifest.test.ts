@@ -1,13 +1,24 @@
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import {
+	createPlanForgeDryRunPlan,
+	dispatchAdmittedPlan,
+} from "@buildplane/planforge";
 import { createBuildplaneStorage } from "@buildplane/storage";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
 	findOrphanedPlanForgeDispatches,
 	readPlanForgeDispatchManifests,
+	resolvePlanForgeResumeModel,
 	writePlanForgeDispatchManifest,
 } from "../src/run-cli.js";
+
+const inputFixture = join(
+	dirname(fileURLToPath(import.meta.url)),
+	"fixtures/planforge/goal-input.md",
+);
 
 describe("planforge dispatch manifest", () => {
 	let ws: string;
@@ -37,6 +48,83 @@ describe("planforge dispatch manifest", () => {
 
 	it("returns [] when no dispatch dir exists", () => {
 		expect(readPlanForgeDispatchManifests(ws)).toEqual([]);
+	});
+
+	it("round-trips the optional model override (R-001 crash-resume durability)", () => {
+		const m = {
+			runId: "00000000-0000-8000-8000-0000000000ab",
+			inputPath: "/abs/goal.md",
+			planId: "pf-plan-95d7132e",
+			idempotencyKey: "idem-1",
+			createdAt: "2026-06-22T00:00:00.000Z",
+			model: "claude-opus-4-8",
+		};
+		writePlanForgeDispatchManifest(ws, m);
+		const onDisk = JSON.parse(
+			readFileSync(
+				join(ws, ".buildplane", "planforge", "dispatch", `${m.runId}.json`),
+				"utf8",
+			),
+		);
+		expect(onDisk.model).toBe("claude-opus-4-8");
+		expect(readPlanForgeDispatchManifests(ws)[0].model).toBe("claude-opus-4-8");
+	});
+});
+
+describe("resolvePlanForgeResumeModel (R-001: model durable across resume/recover)", () => {
+	let ws: string;
+	beforeEach(() => {
+		ws = mkdtempSync(join(tmpdir(), "bp-resume-model-"));
+	});
+	afterEach(() => rmSync(ws, { recursive: true, force: true }));
+
+	it("recovers the dispatched model from the matching manifest and threads it into re-dispatched packets", () => {
+		const plan = createPlanForgeDryRunPlan(inputFixture);
+		const runId = "00000000-0000-8000-8000-00000000abcd";
+		writePlanForgeDispatchManifest(ws, {
+			runId,
+			inputPath: inputFixture,
+			planId: plan.id,
+			idempotencyKey: plan.idempotencyKey,
+			createdAt: "2026-06-22T00:00:00.000Z",
+			model: "claude-opus-4-8",
+		});
+
+		const model = resolvePlanForgeResumeModel(
+			readPlanForgeDispatchManifests(ws),
+			runId,
+		);
+		expect(model).toBe("claude-opus-4-8");
+
+		// The recovered model must reach the re-dispatched suffix packets — the
+		// exact crash-and-resume path R-001 was dropping it on.
+		const packets = dispatchAdmittedPlan({
+			plan,
+			admittedEventId: "evt-1",
+			policyProfile: "default",
+			model,
+		});
+		expect(packets.length).toBeGreaterThan(0);
+		for (const p of packets) {
+			expect(p.model.model).toBe("claude-opus-4-8");
+		}
+	});
+
+	it("returns undefined when no manifest matches the runId (suffix keeps the dispatch default)", () => {
+		writePlanForgeDispatchManifest(ws, {
+			runId: "some-other-run",
+			inputPath: "/abs/a.md",
+			planId: "pf-plan-x",
+			idempotencyKey: "k",
+			createdAt: "t",
+			model: "claude-opus-4-8",
+		});
+		expect(
+			resolvePlanForgeResumeModel(
+				readPlanForgeDispatchManifests(ws),
+				"missing-run",
+			),
+		).toBeUndefined();
 	});
 });
 

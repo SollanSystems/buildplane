@@ -2,7 +2,10 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { bundleDigest } from "@buildplane/capability-broker";
 import { describe, expect, it } from "vitest";
-import { dispatchAdmittedPlan } from "../src/dispatch.ts";
+import {
+	DISPATCH_WORKER_MODEL,
+	dispatchAdmittedPlan,
+} from "../src/dispatch.ts";
 import { createPlanForgeDryRunPlan } from "../src/index.ts";
 
 const inputFixture = join(
@@ -67,5 +70,32 @@ describe("dispatchAdmittedPlan", () => {
 		expect(first.intent.features.verifierStrength).toBe("strong");
 		// prompt must reflect the objective — it, not intent, drives `claude -p` today.
 		expect(first.model.prompt).toContain(task.objective);
+	});
+
+	it("stamps an explicit model override onto every packet when provided", () => {
+		const plan = createPlanForgeDryRunPlan(inputFixture);
+		const packets = dispatchAdmittedPlan({
+			plan,
+			admittedEventId: "evt-42",
+			policyProfile: "default",
+			model: "claude-opus-4-8",
+		});
+		expect(packets.length).toBeGreaterThan(0);
+		for (const p of packets) {
+			expect(p.model.model).toBe("claude-opus-4-8");
+		}
+	});
+
+	it("falls back to DISPATCH_WORKER_MODEL when no model override is given", () => {
+		const plan = createPlanForgeDryRunPlan(inputFixture);
+		const packets = dispatchAdmittedPlan({
+			plan,
+			admittedEventId: "evt-42",
+			policyProfile: "default",
+		});
+		expect(packets.length).toBeGreaterThan(0);
+		for (const p of packets) {
+			expect(p.model.model).toBe(DISPATCH_WORKER_MODEL);
+		}
 	});
 });
