@@ -127,7 +127,12 @@ vi.mock("@buildplane/adapters-tools", () => ({
 	})),
 }));
 
-vi.mock("@buildplane/ledger-client", () => ({
+vi.mock("@buildplane/ledger-client", async (importOriginal) => ({
+	// Spread the real module so value imports (e.g. the `RunOutcome` enum
+	// dereferenced at module-eval by run-cli's RUN_OUTCOME_WIRE) resolve — mocking
+	// only the two functions below left `RunOutcome` undefined and crashed the whole
+	// fork-cli suite before any test ran.
+	...(await importOriginal<typeof import("@buildplane/ledger-client")>()),
 	createTapeEmitter: hoisted.createTapeEmitterMock,
 	newEventId: vi.fn(() => "01900000-0000-7000-8000-000000000000"),
 }));

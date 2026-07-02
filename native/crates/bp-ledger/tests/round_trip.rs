@@ -59,9 +59,9 @@ fn events_for_run_returns_in_insert_order() {
         EventKind::RunCompleted,
         Payload::RunCompletedV1(RunCompletedV1 {
             outcome: RunOutcome::Passed,
-            duration_ms: 1,
-            event_count: 3,
-            unit_count: 1,
+            duration_ms: "1".into(),
+            event_count: "3".into(),
+            unit_count: "1".into(),
         }),
     );
 
@@ -86,9 +86,9 @@ fn unsigned_event_remains_readable_after_signature_table_is_added() {
         EventKind::RunCompleted,
         Payload::RunCompletedV1(RunCompletedV1 {
             outcome: RunOutcome::Passed,
-            duration_ms: 1,
-            event_count: 1,
-            unit_count: 0,
+            duration_ms: "1".into(),
+            event_count: "1".into(),
+            unit_count: "0".into(),
         }),
     );
     store.append(&event).unwrap();

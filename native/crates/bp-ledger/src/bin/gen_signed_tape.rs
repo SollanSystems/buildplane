@@ -88,9 +88,9 @@ fn covered_events() -> Vec<Event> {
             occurred_at: at("2026-05-29T00:00:02Z"),
             payload: Payload::RunCompletedV1(RunCompletedV1 {
                 outcome: RunOutcome::Passed,
-                duration_ms: 2,
-                event_count: 3,
-                unit_count: 1,
+                duration_ms: "2".into(),
+                event_count: "3".into(),
+                unit_count: "1".into(),
             }),
         },
     ]

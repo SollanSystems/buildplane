@@ -11,10 +11,10 @@
 	},
 	{
 		"RunCompletedV1": {
-			"duration_ms": 0,
-			"event_count": 0,
+			"duration_ms": "0",
+			"event_count": "0",
 			"outcome": "passed",
-			"unit_count": 0
+			"unit_count": "0"
 		}
 	},
 	{

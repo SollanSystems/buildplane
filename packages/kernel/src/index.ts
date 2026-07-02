@@ -168,6 +168,10 @@ export type {
 	OperatorDecisionVerdict,
 	PendingOperatorDecision,
 	RecordOperatorDecisionInput,
+	RecordRunCompletedInput,
+	ResultReadyPort,
+	RunCompletionOutcome,
+	RunCompletionPort,
 	RunPage,
 	StoredLearning,
 } from "./ports.js";

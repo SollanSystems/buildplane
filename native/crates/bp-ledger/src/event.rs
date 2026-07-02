@@ -47,9 +47,9 @@ mod tests {
             occurred_at: Utc::now(),
             payload: Payload::RunCompletedV1(RunCompletedV1 {
                 outcome: RunOutcome::Passed,
-                duration_ms: 10,
-                event_count: 2,
-                unit_count: 1,
+                duration_ms: "10".into(),
+                event_count: "2".into(),
+                unit_count: "1".into(),
             }),
         };
         let s = serde_json::to_string(&e).unwrap();

@@ -73,6 +73,13 @@ Run Inspector's event vocabulary starts from the generated ledger `EventKind` en
 
 If a new visual state needs a new kind, add it to the ledger/runtime schema first and verify it through storage/tests. Do not add UI-only event kinds for model reasoning, vibes, confidence, or inferred progress.
 
+### `result_ready` emit ordering (M6-S7)
+
+`result_ready` is emitted at the `finalizeRun` terminal `passed` advance, chained to `plan_admitted` + `acceptance_recorded`. Its ordering relative to the worktree merge differs per flow — the signed event is byte-identical either way:
+
+- **Auto-merge flow** — `finalizeRun` merges the worktree *internally* before returning terminal `passed`, so `result_ready` is a **post-merge terminal signal**; it is not written ahead of that merge.
+- **Operator-gated flow** — the terminal merge/quarantine is driven later by `recordOperatorDecision`; there the write-ahead completion signal is the signed `run_completed` (see `applyOperatorDecisionSideEffect`), and `result_ready`, when emitted, precedes the operator's decision.
+
 ## Evidence Pane
 
 The Evidence Pane answers: "What raw record supports the selected event?"

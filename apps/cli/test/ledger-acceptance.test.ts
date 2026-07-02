@@ -65,14 +65,21 @@ describe("createAcceptancePort", () => {
 	it("appends plan identity and flushes write-ahead before resolving", async () => {
 		const emit = vi.fn();
 		const flush = vi.fn().mockResolvedValue(undefined);
-		const emitter = { emit, flush } as never;
+		// M6-S7: recordAcceptance reads the post-flush ack to return the acceptance
+		// event id, so the emitter double must implement `stats()`.
+		const stats = vi.fn().mockReturnValue({
+			eventsEmitted: 1,
+			lastAckedEventId: "acc-event-9",
+			queueDepth: 0,
+		});
+		const emitter = { emit, flush, stats } as never;
 
 		const port = createAcceptancePort(emitter, {
 			planId: "plan-1",
 			contractDigest: "sha256:dd",
 		});
 
-		await port.recordAcceptance({
+		const acceptanceEventId = await port.recordAcceptance({
 			runId: "run-9",
 			admissionEventId: "7",
 			outcome: "passed",
@@ -81,6 +88,9 @@ describe("createAcceptancePort", () => {
 			checkResults: [],
 			evaluatedAt: "2026-06-19T00:00:00.000Z",
 		});
+
+		// The signed acceptance event id is surfaced for terminal result_ready chaining.
+		expect(acceptanceEventId).toBe("acc-event-9");
 
 		expect(emit).toHaveBeenCalledWith(
 			"acceptance_recorded",

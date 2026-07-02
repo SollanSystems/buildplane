@@ -46,6 +46,10 @@ import type {
 	OperatorDecisionSubject,
 	OperatorDecisionVerdict,
 	RecordOperatorDecisionInput,
+	RecordRunCompletedInput,
+	ResultReadyPort,
+	RunCompletionOutcome,
+	RunCompletionPort,
 } from "./ports.js";
 import {
 	defaultOutcomeRoutingConfig,
@@ -202,6 +206,16 @@ export interface CreateBuildplaneOrchestratorOptions {
 	readonly acceptancePort?: BuildplaneAcceptancePort;
 	readonly operatorDecisionPort?: OperatorDecisionPort;
 	/**
+	 * Signed `result_ready` emit seam (M6-S7). When present, the orchestrator emits
+	 * a write-ahead `result_ready` once a run reaches its terminal `passed` outcome.
+	 */
+	readonly resultReadyPort?: ResultReadyPort;
+	/**
+	 * Signed `run_completed` emit seam (M6-S7). When present, the orchestrator emits
+	 * a write-ahead `run_completed` after an operator decision's terminal side effect.
+	 */
+	readonly runCompletionPort?: RunCompletionPort;
+	/**
 	 * Optional hook invoked after the isolated worktree is created and before
 	 * the workspace row is recorded / admission proceeds. Intended for dependency
 	 * provisioning (e.g. `pnpm install --frozen-lockfile`) so acceptance-check
@@ -231,6 +245,8 @@ export function createBuildplaneOrchestrator(
 		options.acceptanceEvidencePort ?? createDefaultAcceptanceEvidencePort();
 	const acceptancePort = options.acceptancePort;
 	const operatorDecisionPort = options.operatorDecisionPort;
+	const resultReadyPort = options.resultReadyPort;
+	const runCompletionPort = options.runCompletionPort;
 	const provisionDeps = options.provisionDeps;
 	const outcomeRouting = options.outcomeRouting ?? defaultOutcomeRoutingConfig;
 	const strategyWorkflowPromotionRule =
@@ -362,6 +378,83 @@ export function createBuildplaneOrchestrator(
 		}
 	}
 
+	// M6-S7 — captured by `applyOperatorDecisionSideEffect` (which stays
+	// synchronous/`void` so the D2–D4 marker ordering is preserved and its callers
+	// are NOT promoted to `await` the side effect) and awaited by those async
+	// callers so a signed `run_completed` is durable before control returns.
+	let pendingRunCompletedEmit: Promise<void> | null = null;
+
+	// M6-S7 (pre-build resolution 8) — build the `run_completed` fields SYNCHRONOUSLY
+	// from the already-loaded inspect snapshot: `duration_ms` from the first tape
+	// event's timestamp (the `run_started` occurrence — the synchronous run-start
+	// proxy, since `Run` carries no createdAt), `event_count` from the tape summary,
+	// `unit_count` from the run history. All strings on the wire (the U64 → TS-number
+	// hazard).
+	function buildRunCompletedInput(
+		runId: string,
+		outcome: RunCompletionOutcome,
+	): RecordRunCompletedInput {
+		const snapshot = storage.inspectTarget(runId);
+		const startedAt = snapshot.eventTape?.firstOccurredAt;
+		const startedMs = startedAt ? Date.parse(startedAt) : Number.NaN;
+		const durationMs = Number.isNaN(startedMs)
+			? 0
+			: Math.max(0, Date.now() - startedMs);
+		return {
+			runId,
+			outcome,
+			durationMs: String(durationMs),
+			eventCount: String(snapshot.eventTape?.eventCount ?? 0),
+			unitCount: String(snapshot.runHistory.length),
+		};
+	}
+
+	// Await and clear the write-ahead `run_completed` emit captured by the last
+	// synchronous `applyOperatorDecisionSideEffect` call (M6-S7).
+	async function flushPendingRunCompletedEmit(): Promise<void> {
+		const emit = pendingRunCompletedEmit;
+		pendingRunCompletedEmit = null;
+		if (emit) {
+			await emit;
+		}
+	}
+
+	// M6-S7 (A1) — emit the signed `result_ready` at the finalizeRun terminal `passed`
+	// advance (NOT the per-attempt acceptance pass), chaining it to the plan_admitted +
+	// acceptance_recorded events. A non-passed terminal, or a run with no recorded
+	// acceptance/admission id, emits nothing.
+	//
+	// Per-flow ordering vs the worktree merge (F4 — the signed event is identical either
+	// way; only the point at which it fires differs):
+	//   • Auto-merge flow (this runPacketAsync path): finalizeRun merges the worktree
+	//     INTERNALLY before returning terminal `passed`, so `result_ready` is a
+	//     POST-MERGE terminal signal — it is NOT write-ahead of that merge.
+	//   • Operator-gated flow: the terminal merge/quarantine is driven later by
+	//     recordOperatorDecision, where the write-ahead completion signal is the signed
+	//     `run_completed` (see applyOperatorDecisionSideEffect); `result_ready`, when
+	//     emitted, precedes that operator decision.
+	async function finalizeWithResultReady(
+		result: RunPacketResult,
+		chain: {
+			readonly admissionEventId?: string;
+			readonly acceptanceEventId?: string;
+		},
+	): Promise<RunPacketResult> {
+		if (
+			resultReadyPort &&
+			result.run.status === "passed" &&
+			chain.admissionEventId &&
+			chain.acceptanceEventId
+		) {
+			await resultReadyPort.recordResultReady(
+				result.run.id,
+				chain.admissionEventId,
+				chain.acceptanceEventId,
+			);
+		}
+		return result;
+	}
+
 	// Shared by recordOperatorDecision and the reconciler. The execution marker is
 	// the exactly-once gate (D2/D4): we record it only after the side effect
 	// succeeds, so a re-drive of an already-merged run is impossible.
@@ -370,6 +463,10 @@ export function createBuildplaneOrchestrator(
 		subject: OperatorDecisionSubject,
 		decision: OperatorDecisionVerdict,
 	): void {
+		// Reset the write-ahead slot: an already-executed decision (fast-path below)
+		// must not leave a prior iteration's emit for the caller to re-await.
+		pendingRunCompletedEmit = null;
+
 		// F1/F5 — marker check-and-claim. If the side effect already completed for
 		// this run (post-marker reconciler re-drive, operator re-decide, or a
 		// duplicate shadow that escaped the DISTINCT feed), no-op. Combined with the
@@ -392,57 +489,89 @@ export function createBuildplaneOrchestrator(
 		// pass therefore neither throws nor creates a second state transition.
 		const currentStatus = storage.inspectTarget(runId).run.status;
 
+		// M6-S7 (A2) — the terminal run outcome this decision produces, or null for a
+		// non-terminal transition (resume+approved re-dispatches → `pending`). Emitted
+		// ONCE at the single exit so no branch silently skips the signed completion.
+		let terminalOutcome: RunCompletionOutcome | null = null;
+		// The Tier-1 execution marker payload to write once the side effect (and, for a
+		// terminal decision, the signed run_completed) has durably landed. Carries the
+		// merge HEAD for an approved merge; `undefined` otherwise.
+		let markerOutcome: { mergedHeadSha?: string } | undefined;
+
 		if (subject === "resume") {
 			if (decision === "approved") {
 				// Post-state of approveRun is `pending`; only transition if still suspended.
 				if (currentStatus === "suspended") {
 					storage.approveRun(runId);
 				}
+				// resume+approved re-dispatches the run — not a terminal completion.
 			} else {
 				// Post-state of rejectSuspendedRun is `failed`; only transition if still suspended.
 				if (currentStatus === "suspended") {
 					storage.rejectSuspendedRun(runId);
 				}
+				terminalOutcome = "failed";
 			}
-			storage.markOperatorDecisionExecuted(runId);
-			return;
-		}
-
-		// subject === "merge"
-		if (decision === "rejected") {
-			// Quarantine: no merge, worktree retained, run marked failed. Post-state
-			// is `failed`; only transition if not already failed (rejectMergeDecision
-			// is unguarded in storage, so a re-drive would append a duplicate terminal).
+		} else if (decision === "rejected") {
+			// merge + rejected — quarantine: no merge, worktree retained, run marked
+			// failed. Post-state is `failed`; only transition if not already failed
+			// (rejectMergeDecision is unguarded in storage, so a re-drive would append
+			// a duplicate terminal).
 			if (currentStatus !== "failed") {
 				storage.rejectMergeDecision(runId);
 			}
-			storage.markOperatorDecisionExecuted(runId);
-			return;
+			terminalOutcome = "failed";
+		} else {
+			// merge + approved — merge the retained worktree, then record the marker
+			// carrying the merge HEAD (D4 no-double-merge: the marker's presence keeps
+			// listDecidedUnexecutedDecisions from ever returning this run again).
+			const snapshot = storage.inspectTarget(runId);
+			const workspacePath = snapshot.workspace?.path;
+			if (!workspacePath) {
+				throw new Error(
+					`merge decision for run '${runId}' has no retained worktree to merge.`,
+				);
+			}
+			if (!workspace.commitAndMergeWorkspace) {
+				throw new Error(
+					"merge decision requires a workspace adapter with commitAndMergeWorkspace.",
+				);
+			}
+			const mergeResult = workspace.commitAndMergeWorkspace({
+				path: workspacePath,
+				runId,
+				projectRoot,
+			});
+			markerOutcome = { mergedHeadSha: mergeResult.mergedHeadSha };
+			terminalOutcome = "passed";
 		}
 
-		// merge + approved — merge the retained worktree, then record the marker
-		// carrying the merge HEAD (D4 no-double-merge: the marker's presence keeps
-		// listDecidedUnexecutedDecisions from ever returning this run again).
-		const snapshot = storage.inspectTarget(runId);
-		const workspacePath = snapshot.workspace?.path;
-		if (!workspacePath) {
-			throw new Error(
-				`merge decision for run '${runId}' has no retained worktree to merge.`,
-			);
+		// M6-S7 (F2) — for a terminal decision, emit + FLUSH the signed run_completed
+		// BEFORE writing the execution marker, then write the marker in the post-flush
+		// continuation. Ordering is load-bearing: if the marker were written first, a
+		// transient emit failure would leave the run marked-executed — so the
+		// reconciler's listDecidedUnexecutedDecisions would never re-drive it — and
+		// permanently lose the run_completed. Emitting first means a crash between the
+		// emit and the marker leaves the run in the pending set for the reconciler to
+		// re-drive; the git merge is runId-keyed idempotent (see the marker check-and-
+		// claim above) and recordRunCompleted dedups on the tape, so the re-drive neither
+		// double-merges nor double-emits. Captured (not awaited) so this function stays
+		// synchronous; the async callers await `pendingRunCompletedEmit`.
+		if (terminalOutcome !== null && runCompletionPort) {
+			const outcome = terminalOutcome;
+			const marker = markerOutcome;
+			pendingRunCompletedEmit = (async () => {
+				await runCompletionPort.recordRunCompleted(
+					buildRunCompletedInput(runId, outcome),
+				);
+				storage.markOperatorDecisionExecuted(runId, marker);
+			})();
+		} else {
+			// Non-terminal (resume+approved re-dispatch), or no completion port wired:
+			// there is no run_completed to flush, so the marker is safe to write
+			// synchronously — preserving the original ordering for those paths.
+			storage.markOperatorDecisionExecuted(runId, markerOutcome);
 		}
-		if (!workspace.commitAndMergeWorkspace) {
-			throw new Error(
-				"merge decision requires a workspace adapter with commitAndMergeWorkspace.",
-			);
-		}
-		const mergeResult = workspace.commitAndMergeWorkspace({
-			path: workspacePath,
-			runId,
-			projectRoot,
-		});
-		storage.markOperatorDecisionExecuted(runId, {
-			mergedHeadSha: mergeResult.mergedHeadSha,
-		});
 	}
 
 	function createDefaultRunAdmissionStore(
@@ -726,20 +855,27 @@ export function createBuildplaneOrchestrator(
 		readonly currentReceipt: ExecutionReceipt;
 		readonly attemptCount: number;
 		readonly runId: string;
-	}): Promise<PolicyDecision | null> {
+		// M6-S7: the signed `acceptance_recorded` event id (when a port recorded one)
+		// is returned so the caller can chain a terminal `result_ready` to it.
+	}): Promise<{
+		decision: PolicyDecision | null;
+		acceptanceEventId?: string;
+	}> {
 		const acceptanceContract =
 			input.resolvedProfile?.trustGates?.acceptanceContract;
 		if (!acceptanceContract) {
-			return null;
+			return { decision: null };
 		}
 
 		if (!policy.evaluateAcceptanceContract) {
 			return {
-				kind: "acceptance.contract",
-				outcome: "rejected",
-				reasons: [
-					"acceptance.contract configured but no evaluator is available.",
-				],
+				decision: {
+					kind: "acceptance.contract",
+					outcome: "rejected",
+					reasons: [
+						"acceptance.contract configured but no evaluator is available.",
+					],
+				},
 			};
 		}
 
@@ -754,13 +890,15 @@ export function createBuildplaneOrchestrator(
 			});
 		} catch (error) {
 			return {
-				kind: "acceptance.contract",
-				outcome: "rejected",
-				reasons: [
-					`acceptance.contract check collection failed: ${
-						error instanceof Error ? error.message : String(error)
-					}`,
-				],
+				decision: {
+					kind: "acceptance.contract",
+					outcome: "rejected",
+					reasons: [
+						`acceptance.contract check collection failed: ${
+							error instanceof Error ? error.message : String(error)
+						}`,
+					],
+				},
 			};
 		}
 
@@ -798,6 +936,7 @@ export function createBuildplaneOrchestrator(
 					checkResults,
 				});
 
+		let acceptanceEventId: string | undefined;
 		if (acceptancePort) {
 			const diffScope = headAdvanced
 				? { status: "blocked" as const, outOfScopeFiles: [] }
@@ -814,7 +953,8 @@ export function createBuildplaneOrchestrator(
 				checkResults,
 				evaluatedAt: new Date().toISOString(),
 			};
-			await acceptancePort.recordAcceptance(record);
+			const recorded = await acceptancePort.recordAcceptance(record);
+			acceptanceEventId = typeof recorded === "string" ? recorded : undefined;
 		}
 
 		storage.recordAcceptanceShadow(
@@ -822,7 +962,7 @@ export function createBuildplaneOrchestrator(
 			decision ? "rejected" : "passed",
 		);
 
-		return decision;
+		return { decision, acceptanceEventId };
 	}
 
 	function createRunAdmissionDigest(
@@ -1991,6 +2131,9 @@ export function createBuildplaneOrchestrator(
 			// so token usage accumulates cumulatively. budgetUnsubscribe is called in the
 			// finally block after ALL attempts complete (success, rejection, or error).
 			let attemptCount = 0;
+			// M6-S7 — the signed `acceptance_recorded` event id from the latest
+			// attempt, chained onto a terminal `result_ready` (A1).
+			let acceptanceEventId: string | undefined;
 			try {
 				while (true) {
 					storage.recordExecutionEvidence(ctx.run.id, currentReceipt);
@@ -2003,22 +2146,28 @@ export function createBuildplaneOrchestrator(
 							architectureGate,
 						);
 						if (architectureDecision) {
-							return finalizeRun(
+							return finalizeWithResultReady(
+								finalizeRun(
+									{
+										run: ctx.run,
+										validatedPacket: currentPacket,
+										workspace: ctx.workspace,
+										attemptCount,
+									},
+									currentReceipt,
+									architectureDecision,
+								),
 								{
-									run: ctx.run,
-									validatedPacket: currentPacket,
-									workspace: ctx.workspace,
-									attemptCount,
+									admissionEventId: currentPacket.provenance_ref,
+									acceptanceEventId,
 								},
-								currentReceipt,
-								architectureDecision,
 							);
 						}
 					}
 
 					let acceptanceDecision: PolicyDecision | null;
 					try {
-						acceptanceDecision = await evaluateAndRecordAcceptanceAsync({
+						const acceptance = await evaluateAndRecordAcceptanceAsync({
 							resolvedProfile,
 							workspacePath: ctx.workspace.path,
 							baseSha: ctx.workspace.headSha,
@@ -2027,6 +2176,10 @@ export function createBuildplaneOrchestrator(
 							attemptCount,
 							runId: ctx.run.id,
 						});
+						acceptanceDecision = acceptance.decision;
+						if (acceptance.acceptanceEventId) {
+							acceptanceEventId = acceptance.acceptanceEventId;
+						}
 					} catch (error) {
 						// Recording the signed verdict is a write-ahead gate. If it fails
 						// the run must NOT escape unfinalized — fail closed and quarantine.
@@ -2041,15 +2194,21 @@ export function createBuildplaneOrchestrator(
 						);
 					}
 					if (acceptanceDecision) {
-						return finalizeRun(
+						return finalizeWithResultReady(
+							finalizeRun(
+								{
+									run: ctx.run,
+									validatedPacket: currentPacket,
+									workspace: ctx.workspace,
+									attemptCount,
+								},
+								currentReceipt,
+								acceptanceDecision,
+							),
 							{
-								run: ctx.run,
-								validatedPacket: currentPacket,
-								workspace: ctx.workspace,
-								attemptCount,
+								admissionEventId: currentPacket.provenance_ref,
+								acceptanceEventId,
 							},
-							currentReceipt,
-							acceptanceDecision,
 						);
 					}
 
@@ -2070,10 +2229,12 @@ export function createBuildplaneOrchestrator(
 					});
 
 					if (decision.kind !== "retry-run") {
-						return finalizeRun(
-							{ ...ctx, attemptCount },
-							currentReceipt,
-							decision,
+						return finalizeWithResultReady(
+							finalizeRun({ ...ctx, attemptCount }, currentReceipt, decision),
+							{
+								admissionEventId: currentPacket.provenance_ref,
+								acceptanceEventId,
+							},
 						);
 					}
 
@@ -2186,6 +2347,10 @@ export function createBuildplaneOrchestrator(
 				input.subject,
 				input.decision,
 			);
+
+			// M6-S7 — flush the signed `run_completed` the (synchronous) side effect
+			// captured for a terminal decision, so it is durable before returning.
+			await flushPendingRunCompletedEmit();
 		},
 
 		async recoverPendingDecisions(): Promise<PendingDecisionRecovery> {
@@ -2206,6 +2371,7 @@ export function createBuildplaneOrchestrator(
 						pending.subject,
 						pending.decision,
 					);
+					await flushPendingRunCompletedEmit();
 					recovered += 1;
 				} catch (error) {
 					failed.push({

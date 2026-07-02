@@ -26,9 +26,9 @@ fn sample_event() -> Event {
         occurred_at: Utc::now(),
         payload: Payload::RunCompletedV1(RunCompletedV1 {
             outcome: RunOutcome::Passed,
-            duration_ms: 1,
-            event_count: 1,
-            unit_count: 0,
+            duration_ms: "1".into(),
+            event_count: "1".into(),
+            unit_count: "0".into(),
         }),
     }
 }
