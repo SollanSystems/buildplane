@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import {
 	existsSync,
 	mkdirSync,
@@ -360,6 +361,46 @@ describe("buildplane planforge loop", () => {
 		expect(out.join("\n")).toMatch(/planforge loop/);
 	});
 
+	it("a fresh loop seeds trustedBase from git HEAD (R7 FIX 3: bare --reset then re-fire has a base)", async () => {
+		const ws = mkdtempSync(join(tmpdir(), "bp-loopseed-"));
+		// A real git repo with one commit → a resolvable HEAD sha.
+		execFileSync("git", ["-C", ws, "init", "-q"]);
+		execFileSync("git", ["-C", ws, "config", "user.email", "t@example.com"]);
+		execFileSync("git", ["-C", ws, "config", "user.name", "t"]);
+		writeFileSync(join(ws, "a.txt"), "x");
+		execFileSync("git", ["-C", ws, "add", "-A"]);
+		execFileSync("git", ["-C", ws, "commit", "-qm", "init"]);
+		const head = execFileSync("git", ["-C", ws, "rev-parse", "HEAD"], {
+			encoding: "utf8",
+		}).trim();
+		let seenTrustedBase: string | null | undefined;
+		try {
+			await runCli(["planforge", "loop", "--once", "--json"], {
+				cwd: ws,
+				stdout: () => {},
+				dependencies: {
+					loopPlanner: async ({
+						trustedBase,
+					}: {
+						trustedBase: string | null;
+					}) => {
+						seenTrustedBase = trustedBase;
+						return { done: true };
+					},
+				} as never,
+			});
+			// The planner saw the seeded base (not null → not INSUFFICIENT_EVIDENCE)…
+			expect(seenTrustedBase).toBe(head);
+			// …and it is persisted so a resume/re-fire keeps the same base.
+			const state = JSON.parse(
+				readFileSync(join(ws, ".buildplane", "loop-state.json"), "utf8"),
+			);
+			expect(state.trustedBase).toBe(head);
+		} finally {
+			rmSync(ws, { recursive: true, force: true });
+		}
+	});
+
 	it("planforge loop --help documents the --model override", async () => {
 		const out: string[] = [];
 		await runCli(["planforge", "--help"], {
@@ -367,6 +408,17 @@ describe("buildplane planforge loop", () => {
 			stdout: (l) => out.push(l),
 		});
 		expect(out.join("\n")).toMatch(/--model/);
+	});
+
+	it("planforge loop --help documents the worker permission + timeout flags (R7)", async () => {
+		const out: string[] = [];
+		await runCli(["planforge", "--help"], {
+			cwd: process.cwd(),
+			stdout: (l) => out.push(l),
+		});
+		const help = out.join("\n");
+		expect(help).toMatch(/--worker-allowed-tools/);
+		expect(help).toMatch(/--worker-timeout-ms/);
 	});
 });
 
@@ -408,5 +460,28 @@ describe("makeDefaultLoopDispatch — model override", () => {
 		const dispatch = makeDefaultLoopDispatch(12, spyDispatch);
 		await dispatch("/tmp/plan.md", "/tmp/ws", guard);
 		expect(captured[0]?.model).toBeUndefined();
+	});
+
+	it("threads the worker allowedTools grant + timeout into the dispatch command opts (R7 FIX 1/2)", async () => {
+		const captured: Array<Record<string, unknown> | undefined> = [];
+		const spyDispatch = (async (
+			_args: readonly string[],
+			_cwd: string,
+			_stdout: (line: string) => void,
+			opts?: Record<string, unknown>,
+		) => {
+			captured.push(opts);
+			return 0;
+		}) as never;
+		const dispatch = makeDefaultLoopDispatch(
+			12,
+			spyDispatch,
+			undefined,
+			["Edit", "Write", "Bash"],
+			900_000,
+		);
+		await dispatch("/tmp/plan.md", "/tmp/ws", guard);
+		expect(captured[0]?.claudeAllowedTools).toEqual(["Edit", "Write", "Bash"]);
+		expect(captured[0]?.claudeTimeoutMs).toBe(900_000);
 	});
 });

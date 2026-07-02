@@ -9,6 +9,7 @@ import {
 	loopStatePath,
 	nextLoopState,
 	readLoopState,
+	seedTrustedBaseFromHead,
 	stopFileRequested,
 	writeLoopStateAtomic,
 } from "../src/loop-supervisor.js";
@@ -134,6 +135,20 @@ describe("loop-supervisor FSM", () => {
 		} finally {
 			rmSync(ws, { recursive: true, force: true });
 		}
+	});
+
+	// ── trustedBase re-seed on fresh init / --reset (R7 FIX 3) ───────
+	it("seedTrustedBaseFromHead returns the trimmed HEAD sha when git resolves", () => {
+		const sha = "0123456789abcdef0123456789abcdef01234567";
+		expect(seedTrustedBaseFromHead(() => `${sha}\n`)).toBe(sha);
+	});
+
+	it("seedTrustedBaseFromHead returns null when HEAD cannot be resolved (non-git workspace)", () => {
+		expect(seedTrustedBaseFromHead(() => null)).toBeNull();
+	});
+
+	it("seedTrustedBaseFromHead treats a blank HEAD result as null", () => {
+		expect(seedTrustedBaseFromHead(() => "   \n")).toBeNull();
 	});
 
 	it("buildEnvelopeProposal unions task allowedSideEffects + verificationCommands and derives pathGlobs", () => {

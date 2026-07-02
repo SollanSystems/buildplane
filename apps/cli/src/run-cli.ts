@@ -69,6 +69,7 @@ import {
 	formatWorkspaceCleanupResult,
 	formatWorkspaceList,
 } from "./formatters.js";
+import { tryGitInWorkspace } from "./git-in-workspace.js";
 import { buildGoalPlan } from "./goal-command.js";
 import {
 	createAcceptancePort,
@@ -100,6 +101,7 @@ import {
 	nextLoopState,
 	readLoopState,
 	runawayGuardProfile,
+	seedTrustedBaseFromHead,
 	stopFileRequested,
 	withCrashAfterActivityGuard,
 	writeLoopStateAtomic,
@@ -993,6 +995,8 @@ function formatPlanForgeHelp(): string[] {
 		"    --max-turns=N           Lowered worker --max-turns (runaway guard; default 12)",
 		"    --max-tokens=N          Per-iteration token budget for the abort guard",
 		"    --wall-clock-ms=N       Per-iteration wall-clock cap for the abort guard",
+		"    --worker-timeout-ms=N   Hard per-dispatch worker timeout (default: --wall-clock-ms; min 60000)",
+		"    --worker-allowed-tools  Comma-separated worker tool grant (default Edit,Write,Read,Glob,Grep,Bash)",
 		"    --model <id>            Worker model override for dispatched packets (default claude-sonnet-4)",
 		"    --reset                 Clear .buildplane/loop-state.json and exit (re-fire a terminated loop)",
 		"    --json                  Prints the loop summary as JSON",
@@ -1444,6 +1448,18 @@ async function loadCliOrchestrator(
 		 * acceptance profile carries no budgets, so it falls through to these.
 		 */
 		readonly budgets?: BudgetConstraints;
+		/**
+		 * Claude Code tool-permission grant threaded into the Claude executor
+		 * (`--allowedTools <tool...>`, R7 FIX 1). Without it a headless dogfood
+		 * worker's Edit/Write/Bash calls are all denied and it makes zero edits.
+		 */
+		readonly claudeAllowedTools?: readonly string[];
+		/**
+		 * Hard per-dispatch worker timeout in ms threaded into the Claude executor
+		 * (R7 FIX 2). Defaults inside the executor to 300000ms — too short for a real
+		 * multi-file derivation, so the loop threads its wall-clock budget here.
+		 */
+		readonly claudeTimeoutMs?: number;
 	},
 ): Promise<CliOrchestratorBundle> {
 	const kernel = (await cliImport("@buildplane/kernel")) as unknown as {
@@ -1638,6 +1654,8 @@ async function loadCliOrchestrator(
 				createClaudeCodeExecutor: (options?: {
 					maxTurns?: number;
 					onToolEvent?: (event: ClaudeToolEvent) => void;
+					allowedTools?: readonly string[];
+					timeoutMs?: number;
 				}) => {
 					executePacket: (packet: unknown, root: string) => unknown;
 					executePacketAsync: (
@@ -1712,6 +1730,8 @@ async function loadCliOrchestrator(
 				createClaudeCodeExecutor: (options?: {
 					maxTurns?: number;
 					onToolEvent?: (event: ClaudeToolEvent) => void;
+					allowedTools?: readonly string[];
+					timeoutMs?: number;
 				}) => {
 					executePacket: (packet: unknown, root: string) => unknown;
 					executePacketAsync: (
@@ -1757,14 +1777,25 @@ async function loadCliOrchestrator(
 		if (!claudeExecutorPromise) {
 			const claudeMaxTurns = opts?.claudeMaxTurns;
 			const onClaudeToolEvent = opts?.onClaudeToolEvent;
+			const claudeAllowedTools = opts?.claudeAllowedTools;
+			const claudeTimeoutMs = opts?.claudeTimeoutMs;
 			const executorOptions =
-				claudeMaxTurns !== undefined || onClaudeToolEvent !== undefined
+				claudeMaxTurns !== undefined ||
+				onClaudeToolEvent !== undefined ||
+				claudeAllowedTools !== undefined ||
+				claudeTimeoutMs !== undefined
 					? {
 							...(claudeMaxTurns !== undefined
 								? { maxTurns: claudeMaxTurns }
 								: {}),
 							...(onClaudeToolEvent !== undefined
 								? { onToolEvent: onClaudeToolEvent }
+								: {}),
+							...(claudeAllowedTools !== undefined
+								? { allowedTools: claudeAllowedTools }
+								: {}),
+							...(claudeTimeoutMs !== undefined
+								? { timeoutMs: claudeTimeoutMs }
 								: {}),
 						}
 					: undefined;
@@ -4499,6 +4530,12 @@ async function runPlanForgeDispatchCommand(
 		/** Worker model override stamped onto every dispatched packet. Defaults to
 		 * planforge's `DISPATCH_WORKER_MODEL` when omitted. */
 		readonly model?: string;
+		/** Claude Code tool-permission grant threaded to the executor so the worker
+		 * can Edit/Write/Read/Glob/Grep/Bash (R7 FIX 1). Omitted → default-deny. */
+		readonly claudeAllowedTools?: readonly string[];
+		/** Hard per-dispatch worker timeout in ms threaded to the executor (R7 FIX 2).
+		 * Omitted → the executor's 300000ms default. */
+		readonly claudeTimeoutMs?: number;
 	},
 ): Promise<number> {
 	const inputPath = readFlag(args, "--input");
@@ -4658,11 +4695,15 @@ async function runPlanForgeDispatchCommand(
 						provisionDeps: provisionWorktreeDeps,
 						claudeMaxTurns: opts?.claudeMaxTurns,
 						budgets: opts?.budgets,
+						claudeAllowedTools: opts?.claudeAllowedTools,
+						claudeTimeoutMs: opts?.claudeTimeoutMs,
 					}
 				: {
 						ledgerActivityPort,
 						claudeMaxTurns: opts?.claudeMaxTurns,
 						budgets: opts?.budgets,
+						claudeAllowedTools: opts?.claudeAllowedTools,
+						claudeTimeoutMs: opts?.claudeTimeoutMs,
 					},
 		);
 
@@ -4963,6 +5004,27 @@ async function defaultLoopAdmit(
 	return { admittedEventId: "" };
 }
 
+/**
+ * Default Claude Code tool-permission grant for a `planforge loop` dogfood
+ * worker (R7 FIX 1). Live-spike-proven: a headless `claude -p` with exactly this
+ * `--allowedTools` set writes files AND runs bash with zero permission denials;
+ * without it every Edit/Write is denied (`haven't granted it yet`). Overridable
+ * per-run via `--worker-allowed-tools`. NOT `--dangerously-skip-permissions`
+ * (denied by the GAP-10 guard) — this names the exact tools instead.
+ */
+const PLANFORGE_LOOP_DEFAULT_ALLOWED_TOOLS: readonly string[] = [
+	"Edit",
+	"Write",
+	"Read",
+	"Glob",
+	"Grep",
+	"Bash",
+];
+
+/** Floor for the per-dispatch worker timeout (R7 FIX 2) so a mistakenly tiny
+ * `--worker-timeout-ms` can't kill a worker before it starts. */
+const MIN_WORKER_TIMEOUT_MS = 60_000;
+
 /** Default dispatch port: route through the existing dispatch command with the
  * runaway-guard turn cap AND budgets, capturing the rich outcome (incl.
  * mergedHeadSha + real token usage). The lowered worker turn cap is bound by the
@@ -4977,6 +5039,8 @@ export function makeDefaultLoopDispatch(
 	maxTurns: number,
 	dispatchCommand: typeof runPlanForgeDispatchCommand = runPlanForgeDispatchCommand,
 	model?: string,
+	allowedTools?: readonly string[],
+	timeoutMs?: number,
 ): (
 	planPath: string,
 	cwd: string,
@@ -5002,6 +5066,9 @@ export function makeDefaultLoopDispatch(
 			// Worker model override (`planforge loop --model <id>`); undefined keeps
 			// the dispatch default (`DISPATCH_WORKER_MODEL`).
 			model,
+			// Tool-permission grant + hard timeout for the worker (R7 FIX 1/2).
+			claudeAllowedTools: allowedTools,
+			claudeTimeoutMs: timeoutMs,
 			onOutcome: (o) => {
 				outcome = o;
 			},
@@ -5054,6 +5121,27 @@ async function runPlanForgeLoopCommand(
 	// Optional worker-model override threaded to every dispatched packet; omitted
 	// leaves the dispatch default (`DISPATCH_WORKER_MODEL`) untouched.
 	const model = readFlag(args, "--model");
+	// Worker tool-permission grant (R7 FIX 1). The default lets the dogfood worker
+	// Edit/Write/Read/Glob/Grep/Bash — the spike-proven headless grant, without
+	// which every Write is denied and the worker makes zero edits. Override with
+	// `--worker-allowed-tools Edit,Write,...` (a value that resolves to no tool
+	// names falls through to Claude's default-deny). Scope stays bounded post-hoc by
+	// the M4 diff-scope + acceptance contract, NOT by withholding the grant.
+	const allowedToolsFlag = readFlag(args, "--worker-allowed-tools");
+	const workerAllowedTools =
+		allowedToolsFlag !== undefined
+			? allowedToolsFlag
+					.split(",")
+					.map((t) => t.trim())
+					.filter((t) => t.length > 0)
+			: PLANFORGE_LOOP_DEFAULT_ALLOWED_TOOLS;
+	// Hard per-dispatch worker timeout (R7 FIX 2). A real multi-file derivation
+	// needs >> the executor's 300000ms default, so default to the wall-clock budget;
+	// `--worker-timeout-ms` overrides, min-capped so a tiny value can't insta-kill.
+	const workerTimeoutMs = Math.max(
+		parseIntFlag(args, "--worker-timeout-ms", null) ?? wallClockMs,
+		MIN_WORKER_TIMEOUT_MS,
+	);
 
 	const planner = deps?.loopPlanner ?? defaultLoopPlanner;
 	const envelope = deps?.loopEnvelope ?? defaultLoopEnvelope;
@@ -5061,7 +5149,13 @@ async function runPlanForgeLoopCommand(
 	const admit = deps?.loopAdmit ?? defaultLoopAdmit;
 	const dispatch =
 		deps?.loopDispatch ??
-		makeDefaultLoopDispatch(maxTurns, runPlanForgeDispatchCommand, model);
+		makeDefaultLoopDispatch(
+			maxTurns,
+			runPlanForgeDispatchCommand,
+			model,
+			workerAllowedTools,
+			workerTimeoutMs,
+		);
 
 	// Per-iteration runaway guard (distinct from the cumulative token budget):
 	// maxTurns is the lowered worker turn cap; maxTokens/wallClockMs drive the
@@ -5080,7 +5174,12 @@ async function runPlanForgeLoopCommand(
 		initialLoopState({
 			maxIterations,
 			tokenBudget: loadedEnvelope?.envelope?.token_budget ?? null,
-			trustedBase: null,
+			// Seed the pinned base from the workspace HEAD (R7 FIX 3) so a bare
+			// `--reset` then re-fire has a trusted base — otherwise the planner reports
+			// INSUFFICIENT_EVIDENCE and the loop dies before dispatch. Mirrors `bp goal`.
+			trustedBase: seedTrustedBaseFromHead(() =>
+				tryGitInWorkspace(workspace, ["rev-parse", "HEAD"]),
+			),
 		});
 	let exitCode = 0;
 	const commit = (s: LoopState): void => {
