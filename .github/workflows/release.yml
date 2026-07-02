@@ -45,7 +45,7 @@ jobs:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           if [ -z "${NPM_TOKEN}" ]; then
-            echo "::error::NPM_TOKEN is not configured; refusing to run changeset publish without registry credentials."
+            echo "::error::NPM_TOKEN is not configured; refusing to publish to npm without registry credentials."
             exit 1
           fi
 
@@ -56,9 +56,15 @@ jobs:
           # With pending changesets this opens/updates the "chore: version
           # packages" PR (no publish, no NPM_TOKEN needed). Once that PR merges
           # the changesets are consumed, so this run instead publishes the bumped
-          # package. `changeset publish` no-ops when nothing new is unpublished.
+          # package.
+          #
+          # `release:publish` publishes the vendored, self-contained staged
+          # artifact from stage-package.mjs — NOT apps/cli/package.json AS-IS,
+          # whose `workspace:*` deps on unpublished @buildplane/* packages would
+          # ship an uninstallable tarball (O6). It prints the changesets `New
+          # tag:` line so the action still creates the git tag + GitHub release.
           version: pnpm exec changeset version
-          publish: pnpm exec changeset publish
+          publish: pnpm release:publish
           commit: "chore: version packages"
           title: "chore: version packages"
         env:

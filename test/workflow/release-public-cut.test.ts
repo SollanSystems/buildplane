@@ -132,7 +132,8 @@ describe("M6-S13 public release cut", () => {
 
 	it("wires the release workflow to publish with a guarded npm credential", () => {
 		const workflow = readText(".github/workflows/release.yml");
-		expect(workflow).toContain("changeset publish");
+		// M6-O6: publish the vendored staged artifact, not the raw apps/cli package.
+		expect(workflow).toContain("release:publish");
 		expect(workflow).toContain("NPM_TOKEN");
 		expect(workflow).toContain("secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN");
 		// A missing NPM_TOKEN on a release-landing push must fail loud.

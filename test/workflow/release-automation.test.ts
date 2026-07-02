@@ -30,8 +30,10 @@ describe("release automation scaffolding", () => {
 		expect(workflow).toContain("changesets/action");
 		expect(workflow).toContain("Create Release PR");
 		expect(workflow).toContain("permissions:");
-		// M6-S13 wired the publish path guarded by NPM_TOKEN.
-		expect(workflow).toContain("changeset publish");
+		// M6-S13 wired the publish path guarded by NPM_TOKEN; M6-O6 repointed it at
+		// the vendored staged artifact (release:publish) instead of the raw
+		// `changeset publish` of apps/cli/package.json.
+		expect(workflow).toContain("release:publish");
 		expect(workflow).toContain("NPM_TOKEN");
 	});
 });
