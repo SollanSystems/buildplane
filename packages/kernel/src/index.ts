@@ -107,6 +107,8 @@ export type {
 export type {
 	BuildplaneOrchestrator,
 	CreateBuildplaneOrchestratorOptions,
+	PendingDecisionRecovery,
+	PendingDecisionRecoveryFailure,
 } from "./orchestrator.js";
 export {
 	createBuildplaneOrchestrator,

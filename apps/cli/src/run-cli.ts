@@ -1205,7 +1205,7 @@ interface BuildplaneCliOrchestrator {
 		id: string,
 	): { kind: string; run: { id: string } } & Record<string, unknown>;
 	recordOperatorDecision(input: RecordOperatorDecisionInput): Promise<void>;
-	recoverPendingDecisions(): Promise<void>;
+	recoverPendingDecisions(): Promise<unknown>;
 }
 
 interface HonchoPortLike {

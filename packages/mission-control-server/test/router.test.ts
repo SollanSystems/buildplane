@@ -54,6 +54,9 @@ function makeDeps(
 		orchestrator: {
 			inspect: vi.fn(() => inspectSnapshot("run-1")),
 			recordOperatorDecision: vi.fn(() => Promise.resolve()),
+			recoverPendingDecisions: vi.fn(() =>
+				Promise.resolve({ recovered: 0, failed: [] }),
+			),
 		},
 		store: {
 			listRunsByStatus: vi.fn(() => runPage([{ id: "run-1" }])),
@@ -277,6 +280,9 @@ describe("POST /api/runs/:id/decision", () => {
 			orchestrator: {
 				inspect: vi.fn(() => inspectSnapshot("run-1")),
 				recordOperatorDecision: vi.fn(() => Promise.reject(validationError)),
+				recoverPendingDecisions: vi.fn(() =>
+					Promise.resolve({ recovered: 0, failed: [] }),
+				),
 			},
 		});
 		const response = await handleApiRequest(

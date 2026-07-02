@@ -12,7 +12,7 @@ import { type BearerTokenSource, isAuthorizedWrite } from "./auth.js";
 
 export type MissionControlOrchestrator = Pick<
 	BuildplaneOrchestrator,
-	"inspect" | "recordOperatorDecision"
+	"inspect" | "recordOperatorDecision" | "recoverPendingDecisions"
 >;
 
 export type MissionControlStore = Pick<
