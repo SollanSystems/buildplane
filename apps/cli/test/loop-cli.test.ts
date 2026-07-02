@@ -116,10 +116,14 @@ describe("buildplane planforge loop", () => {
 	it("dispatch/acceptance failure sets terminal acceptance-fail, exit 1", async () => {
 		const ws = mkdtempSync(join(tmpdir(), "bp-loopfail-"));
 		const deps = loopDeps([]);
+		// A genuine acceptance failure: the worker ran and produced side effects
+		// (a diff) that the acceptance contract then rejected.
 		deps.loopDispatch = async () =>
 			({
 				allPassed: false,
 				mergedHeadSha: null,
+				producedSideEffects: true,
+				reasons: [],
 				runs: [{ task: "PF1", run_id: "r1", status: "failed" }],
 			}) as never;
 		try {
@@ -136,6 +140,115 @@ describe("buildplane planforge loop", () => {
 		} finally {
 			rmSync(ws, { recursive: true, force: true });
 		}
+	});
+
+	it("worker with no side effects + non-zero exit terminates dispatch-error (not acceptance-fail), threading reasons, exit 1", async () => {
+		// R1: a 429 rejection (worker rejected, 0 tokens, 0 turns, no side effects)
+		// is an infra/dispatch failure, NOT an acceptance failure — it must be
+		// honestly labelled so the loop is re-fireable rather than looking like the
+		// worker built a rejected diff.
+		const ws = mkdtempSync(join(tmpdir(), "bp-loopdisp-"));
+		const deps = loopDeps([]);
+		deps.loopDispatch = async () =>
+			({
+				allPassed: false,
+				mergedHeadSha: null,
+				tokenUsage: 0,
+				producedSideEffects: false,
+				reasons: ["worker rejected: 429 rate_limit_error (0 tokens, 0 turns)"],
+				runs: [{ task: "PF1", run_id: "r1", status: "failed" }],
+			}) as never;
+		try {
+			const code = await runCli(["planforge", "loop", "--once", "--json"], {
+				cwd: ws,
+				stdout: () => {},
+				dependencies: deps as never,
+			});
+			expect(code).toBe(1);
+			const state = JSON.parse(
+				readFileSync(join(ws, ".buildplane", "loop-state.json"), "utf8"),
+			);
+			expect(state.terminal.reason).toBe("dispatch-error");
+			// decision.reasons threaded into the terminal detail (no longer a hardcoded string).
+			expect(state.terminal.detail).toContain("429");
+		} finally {
+			rmSync(ws, { recursive: true, force: true });
+		}
+	});
+
+	it("worker that produced side effects but failed acceptance stays acceptance-fail, threading reasons", async () => {
+		const ws = mkdtempSync(join(tmpdir(), "bp-loopacc-"));
+		const deps = loopDeps([]);
+		deps.loopDispatch = async () =>
+			({
+				allPassed: false,
+				mergedHeadSha: null,
+				tokenUsage: 4200,
+				producedSideEffects: true,
+				reasons: ["acceptance.contract: out-of-scope file src/secret.ts"],
+				runs: [{ task: "PF1", run_id: "r1", status: "failed" }],
+			}) as never;
+		try {
+			const code = await runCli(["planforge", "loop", "--once", "--json"], {
+				cwd: ws,
+				stdout: () => {},
+				dependencies: deps as never,
+			});
+			expect(code).toBe(1);
+			const state = JSON.parse(
+				readFileSync(join(ws, ".buildplane", "loop-state.json"), "utf8"),
+			);
+			expect(state.terminal.reason).toBe("acceptance-fail");
+			expect(state.terminal.detail).toContain("out-of-scope");
+		} finally {
+			rmSync(ws, { recursive: true, force: true });
+		}
+	});
+
+	it("planforge loop --reset clears a terminal loop-state file, exit 0", async () => {
+		const ws = mkdtempSync(join(tmpdir(), "bp-loopresetcli-"));
+		mkdirSync(join(ws, ".buildplane"), { recursive: true });
+		const terminalState = {
+			version: 1,
+			iteration: 1,
+			maxIterations: 1,
+			envelopeRef: null,
+			trustedBase: null,
+			lastMergedHeadSha: null,
+			cumulativeTokenDeltas: 0,
+			tokenBudget: null,
+			phase: "accept",
+			currentSliceId: "M6-R1",
+			currentPlanPath: "/tmp/plan.md",
+			terminal: { reason: "dispatch-error", detail: "429 rate limit" },
+			updatedAt: new Date().toISOString(),
+		};
+		writeFileSync(
+			join(ws, ".buildplane", "loop-state.json"),
+			JSON.stringify(terminalState),
+		);
+		try {
+			const code = await runCli(["planforge", "loop", "--reset", "--json"], {
+				cwd: ws,
+				stdout: () => {},
+				dependencies: loopDeps([]) as never,
+			});
+			expect(code).toBe(0);
+			expect(existsSync(join(ws, ".buildplane", "loop-state.json"))).toBe(
+				false,
+			);
+		} finally {
+			rmSync(ws, { recursive: true, force: true });
+		}
+	});
+
+	it("planforge loop --help documents --reset", async () => {
+		const out: string[] = [];
+		await runCli(["planforge", "--help"], {
+			cwd: process.cwd(),
+			stdout: (l) => out.push(l),
+		});
+		expect(out.join("\n")).toMatch(/--reset/);
 	});
 
 	it("planner reporting done terminates roadmap-complete, exit 0", async () => {

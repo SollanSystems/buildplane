@@ -93,6 +93,7 @@ import { createLedgerReceiptPort } from "./ledger-receipt-port.js";
 import { wrapToolRegistryForLedger } from "./ledger-tool-wrapper.js";
 import {
 	buildEnvelopeProposal,
+	clearLoopState,
 	initialLoopState,
 	type LoopState,
 	loopStatePath,
@@ -259,6 +260,24 @@ export interface LoopDispatchResult {
 	 * model activity reported usage (e.g. command-only dispatch).
 	 */
 	readonly tokenUsage: number;
+	/**
+	 * Whether the FAILING task produced durable side effects — a non-empty worktree
+	 * diff (`receipt.changedFiles`) or a merged HEAD. R1: this is the failing task's
+	 * OWN evidence, NOT an OR across the dispatch, so a passing predecessor's merge
+	 * cannot mask a later infra death. `false` fingerprints an infra/dispatch death
+	 * where the worker never ran (e.g. a 429 rejection: 0 tokens, 0 turns, empty
+	 * diff). The supervisor uses this to label a failed dispatch `dispatch-error`
+	 * (worker never produced work) vs `acceptance-fail` (worker built a diff the
+	 * acceptance contract rejected).
+	 */
+	readonly producedSideEffects: boolean;
+	/**
+	 * The failing task's policy-decision reasons (acceptance/dispatch), threaded
+	 * verbatim into the supervisor's terminal detail so a halt carries the real
+	 * cause instead of a hardcoded placeholder. Empty when the dispatch passed or
+	 * reported no reasons.
+	 */
+	readonly reasons: readonly string[];
 	readonly runs: readonly unknown[];
 }
 
@@ -959,13 +978,14 @@ function formatPlanForgeHelp(): string[] {
 		"    --operator <id>         Required; deciding operator identity (decided_by)",
 		"    --json                  Prints the authorization result as JSON",
 		"",
-		"buildplane planforge loop [--once | --max-iterations=N] [--max-turns=N] [--max-tokens=N] [--wall-clock-ms=N] [--model <id>] [--json]",
+		"buildplane planforge loop [--once | --max-iterations=N] [--max-turns=N] [--max-tokens=N] [--wall-clock-ms=N] [--model <id>] [--reset] [--json]",
 		"",
 		"  Supervisor: drive plan -> dry-run -> envelope-check -> admit -> dispatch ->",
 		"  accept -> merge -> re-anchor across iterations, persisting loop-state.json",
 		"  atomically after every transition and resuming from a persisted state.",
 		"  Stops on terminal condition / .buildplane/loop.stop / acceptance-FAIL /",
-		"  envelope breach / cumulative token budget / max-iterations / planner error.",
+		"  dispatch-error (infra death: no side effects + non-zero exit) / envelope",
+		"  breach / cumulative token budget / max-iterations / planner error.",
 		"",
 		"  Options:",
 		"    --once                  Run exactly one slice (equivalent to --max-iterations=1)",
@@ -974,6 +994,7 @@ function formatPlanForgeHelp(): string[] {
 		"    --max-tokens=N          Per-iteration token budget for the abort guard",
 		"    --wall-clock-ms=N       Per-iteration wall-clock cap for the abort guard",
 		"    --model <id>            Worker model override for dispatched packets (default claude-sonnet-4)",
+		"    --reset                 Clear .buildplane/loop-state.json and exit (re-fire a terminated loop)",
 		"    --json                  Prints the loop summary as JSON",
 	];
 }
@@ -4214,7 +4235,7 @@ function isPassedPlanForgeRun(status: string): boolean {
 	return status === "passed";
 }
 
-async function emitPlanForgeTerminalReceipt(input: {
+export async function emitPlanForgeTerminalReceipt(input: {
 	emitter: TapeEmitter;
 	workspace: string;
 	runId: string;
@@ -4259,7 +4280,7 @@ async function emitPlanForgeTerminalReceipt(input: {
  * is the deterministic tape `run_id` (derived 1:1 from `idempotency_key`), with
  * the payload's `plan_id` + `admission_event_id` disambiguating within the run.
  */
-async function planForgeReceiptExists(
+export async function planForgeReceiptExists(
 	workspace: string,
 	runId: string,
 	planId: string,
@@ -4372,16 +4393,91 @@ async function loadSearchableDocumentStoragePort(
  * kernel admission gate is the load-bearing enforcement. Tasks run sequentially so
  * a dependent task does not start if its predecessor fails.
  */
-interface PlanForgeDispatchOutcome {
+export interface PlanForgeDispatchOutcome {
 	readonly allPassed: boolean;
 	readonly mergedHeadSha: string | null;
 	/** Real total token usage (input + output) summed across this dispatch's tasks. */
 	readonly tokenUsage: number;
+	/**
+	 * The FAILING task's OWN side-effect evidence — a merged HEAD or a non-empty
+	 * worktree diff. R1: NOT an OR across every task, so a pass-then-infra-fail
+	 * chain (an earlier task merged, then the failing task died with no diff/merge —
+	 * the 429 fingerprint) reports `false` and the supervisor labels it
+	 * `dispatch-error` rather than `acceptance-fail`. `false` when the dispatch
+	 * passed (the supervisor does not read it on the success path).
+	 */
+	readonly producedSideEffects: boolean;
+	/** The failing task's policy-decision reasons (see LoopDispatchResult). */
+	readonly reasons: readonly string[];
 	readonly runs: ReadonlyArray<{
 		task: string;
 		run_id: string;
 		status: string;
 	}>;
+}
+
+/**
+ * Per-task evidence the dispatch fold consumes — a projection of the kernel's
+ * `runPacketAsync` result for one packet.
+ */
+interface DispatchTaskResult {
+	readonly task: string;
+	readonly runId: string;
+	readonly status: string;
+	readonly mergedHeadSha: string | null;
+	readonly changedFilesCount: number;
+	readonly tokenUsage: number;
+	readonly reasons: readonly string[];
+}
+
+/**
+ * Fold the per-task dispatch results into the supervisor's terminal outcome.
+ *
+ * R1 terminal-reason fidelity: `producedSideEffects` reflects the FAILING task's
+ * OWN evidence (a merged HEAD or a non-empty worktree diff), never an OR across
+ * every task. Tasks dispatch sequentially and the loop breaks on the first
+ * failure, so the failing task is the last recorded result; a pass-then-infra-fail
+ * chain (PF1 merges, then PF2 dies with a 429 — no diff, no merge) therefore
+ * reports `false`, so the supervisor labels it `dispatch-error`, not
+ * `acceptance-fail`. `mergedHeadSha` and `tokenUsage` still aggregate across the
+ * whole dispatch (last merged tip; summed usage).
+ */
+export function summarizeDispatchOutcome(
+	results: readonly DispatchTaskResult[],
+	packetCount: number,
+): PlanForgeDispatchOutcome {
+	let mergedHeadSha: string | null = null;
+	let tokenUsage = 0;
+	let producedSideEffects = false;
+	let reasons: readonly string[] = [];
+	let sawFailure = false;
+	for (const result of results) {
+		if (result.mergedHeadSha) {
+			mergedHeadSha = result.mergedHeadSha;
+		}
+		tokenUsage += result.tokenUsage;
+		if (result.status !== "passed" && !sawFailure) {
+			sawFailure = true;
+			producedSideEffects =
+				result.mergedHeadSha != null || result.changedFilesCount > 0;
+			reasons = result.reasons;
+		}
+	}
+	const runs = results.map((result) => ({
+		task: result.task,
+		run_id: result.runId,
+		status: result.status,
+	}));
+	const allPassed =
+		runs.length === packetCount && runs.every((run) => run.status === "passed");
+	return {
+		allPassed,
+		mergedHeadSha,
+		tokenUsage,
+		producedSideEffects,
+		reasons,
+		runs,
+	};
 }
 
 async function runPlanForgeDispatchCommand(
@@ -4524,16 +4620,13 @@ async function runPlanForgeDispatchCommand(
 		);
 	}
 
-	const runs: Array<{ task: string; run_id: string; status: string }> = [];
+	let runs: PlanForgeDispatchOutcome["runs"] = [];
 	let allPassed = false;
-	// The squash-merge happens INSIDE orchestrator.runPacketAsync (GAP-8); track
-	// the most recent merged HEAD so the supervisor loop can re-anchor without a
-	// second merge (D3). Tasks run sequentially, so the last passing task's
-	// merged HEAD is the slice's merged tip.
-	let lastMergedHeadSha: string | null = null;
-	// Real total token usage (input + output) summed across this dispatch's model
-	// activities, surfaced to the supervisor's cumulative token-budget cap (GAP-7).
-	let totalTokenUsage = 0;
+	// The squash-merge happens INSIDE orchestrator.runPacketAsync (GAP-8). Collect
+	// each task's OWN evidence (merged HEAD, diff size, usage, reasons) and fold it
+	// once via summarizeDispatchOutcome, so the terminal reason keys off the FAILING
+	// task's side effects rather than an OR across passing predecessors (R1).
+	const taskResults: DispatchTaskResult[] = [];
 	try {
 		// Demo crash-injection (M6 Property 1): NO-OP unless BUILDPLANE_CRASH_AFTER_ACTIVITY=1,
 		// in which case the dispatch aborts hard right after the first activity_completed
@@ -4590,54 +4683,59 @@ async function runPlanForgeDispatchCommand(
 			)) as {
 				run: { id: string; status: string };
 				mergedHeadSha?: string;
-				receipt?: { tokenUsage?: number };
+				receipt?: { tokenUsage?: number; changedFiles?: readonly string[] };
+				decision?: { reasons?: readonly string[] };
 			};
-			runs.push({
+			// Record this task's OWN evidence. A non-empty worktree diff or a merged
+			// HEAD means the worker ran and mutated the tree — a durable side effect,
+			// even if acceptance later rejected it. Attributing side effects per-task
+			// (vs a shared OR) lets the fold key the terminal reason off the FAILING
+			// task, so a passing predecessor's merge cannot mask an infra death (R1).
+			taskResults.push({
 				task: packet.unit.id,
-				run_id: result.run.id,
+				runId: result.run.id,
 				status: result.run.status,
+				mergedHeadSha: result.mergedHeadSha ?? null,
+				changedFilesCount: result.receipt?.changedFiles?.length ?? 0,
+				// Real per-task usage (terminal `usage`), summed even for a failed task —
+				// the worker still consumed those tokens against the budget.
+				tokenUsage: result.receipt?.tokenUsage ?? 0,
+				// The failing task's decision reasons feed the supervisor's terminal
+				// detail (verbatim; empty when the run reported none).
+				reasons: result.decision?.reasons ?? [],
 			});
-			if (result.mergedHeadSha) {
-				lastMergedHeadSha = result.mergedHeadSha;
-			}
-			// Accumulate the real per-task token usage (terminal `usage`), even for a
-			// failed task — the worker still consumed those tokens against the budget.
-			totalTokenUsage += result.receipt?.tokenUsage ?? 0;
 			if (result.run.status !== "passed") {
 				break; // PF2 dependsOn PF1: stop the chain on first failure.
 			}
 		}
 
-		allPassed =
-			runs.length === packets.length &&
-			runs.every((r) => r.status === "passed");
+		const outcome = summarizeDispatchOutcome(taskResults, packets.length);
+		allPassed = outcome.allPassed;
+		runs = outcome.runs;
 
-		opts?.onOutcome?.({
-			allPassed,
-			mergedHeadSha: lastMergedHeadSha,
-			tokenUsage: totalTokenUsage,
-			runs,
-		});
+		opts?.onOutcome?.(outcome);
 
 		// Terminal plan receipt (M2-S6): one signed plan_receipt per admitted plan,
 		// chaining to the plan_admitted event, emitted after all activities and made
-		// durable (flush) before the signed emitter closes in the finally.
+		// durable (flush) before the signed emitter closes in the finally. Routed
+		// through emitPlanForgeTerminalReceipt so it is gated on planForgeReceiptExists:
+		// re-firing the same plan/idempotencyKey (e.g. `planforge loop --once` twice,
+		// same deterministic runId) can never append a second plan_receipt for the run.
 		const result = {
 			status: allPassed ? "dispatched" : "failed",
 			plan_id: plan.id,
 			admitted_event_id: String(admittedEventId),
 			runs,
 		};
-		await createLedgerReceiptPort(emitter).emitPlanReceipt(
-			buildPlanReceiptPayload({
-				planId: plan.id,
-				admissionEventId: String(admittedEventId),
-				outcome: allPassed ? "completed" : "failed",
-				sideEffects: collectDeclaredSideEffects(plan),
-				result,
-				decidedAt: new Date().toISOString(),
-			}),
-		);
+		await emitPlanForgeTerminalReceipt({
+			emitter,
+			workspace,
+			runId,
+			plan,
+			admittedEventId: String(admittedEventId),
+			outcome: allPassed ? "completed" : "failed",
+			result,
+		});
 
 		// priorWork handoff (GAP-5): persist a structured plan summary for the next
 		// iteration. Best-effort and wrapped so a storage failure cannot shadow the
@@ -4885,10 +4983,15 @@ export function makeDefaultLoopDispatch(
 	guard: PolicyProfile,
 ) => Promise<LoopDispatchResult> {
 	return async (planPath, cwd, guard) => {
+		// Default stands only if `onOutcome` never fires (the dispatch aborted before
+		// reporting) — that IS an infra death (no worker work), so `producedSideEffects`
+		// defaults false → a failed dispatch with no outcome maps to `dispatch-error`.
 		let outcome: LoopDispatchResult = {
 			allPassed: false,
 			mergedHeadSha: null,
 			tokenUsage: 0,
+			producedSideEffects: false,
+			reasons: [],
 			runs: [],
 		};
 		await dispatchCommand(["--input", planPath, "--json"], cwd, () => {}, {
@@ -4926,6 +5029,22 @@ async function runPlanForgeLoopCommand(
 ): Promise<number> {
 	const workspace = resolve(cwd);
 	const jsonOut = args.includes("--json");
+
+	// `--reset`: clear the persisted loop-state and exit before starting a run. A
+	// loop that halted on a sticky terminal (e.g. `dispatch-error` from a 429)
+	// otherwise resumes straight back into it; this is the re-fire path.
+	if (args.includes("--reset")) {
+		const cleared = clearLoopState(workspace);
+		stdout(
+			jsonOut
+				? formatJson({ reset: cleared, statePath: loopStatePath(workspace) })
+				: cleared
+					? `loop state cleared: ${loopStatePath(workspace)}`
+					: "no loop state to clear.",
+		);
+		return 0;
+	}
+
 	const once = args.includes("--once");
 	const maxIterations = once ? 1 : parseIntFlag(args, "--max-iterations", null);
 	const maxTurns = parseIntFlag(args, "--max-turns", 12) ?? 12;
@@ -5064,11 +5183,24 @@ async function runPlanForgeLoopCommand(
 		}
 
 		if (!d.allPassed) {
+			// Thread the real decision reasons into the terminal detail (verbatim);
+			// fall back to a placeholder only when the dispatch reported none.
+			const detail =
+				d.reasons.length > 0
+					? d.reasons.join("; ")
+					: "dispatch/acceptance failed";
+			// Distinguish an infra/dispatch death (worker produced NO side effects —
+			// e.g. a 429 rejection: 0 tokens, 0 turns, empty diff) from a genuine
+			// acceptance failure (worker built a diff the contract rejected). Only the
+			// explicit `producedSideEffects === false` negative signal downgrades to
+			// `dispatch-error`; anything else stays `acceptance-fail`.
 			commit(
-				nextLoopState(state, {
-					type: "acceptance-failed",
-					detail: "dispatch/acceptance failed",
-				}),
+				nextLoopState(
+					state,
+					d.producedSideEffects
+						? { type: "acceptance-failed", detail }
+						: { type: "dispatch-error", detail },
+				),
 			);
 			exitCode = 1;
 			break;
@@ -5094,6 +5226,7 @@ async function runPlanForgeLoopCommand(
 			: `loop terminated: ${summary.status} after ${state.iteration} iteration(s).`,
 	);
 	if (state.terminal?.reason === "acceptance-fail") exitCode = exitCode || 1;
+	if (state.terminal?.reason === "dispatch-error") exitCode = exitCode || 1;
 	if (state.terminal?.reason === "planner-error") exitCode = exitCode || 1;
 	if (state.terminal?.reason === "envelope-breach") exitCode = 2;
 	return exitCode;
