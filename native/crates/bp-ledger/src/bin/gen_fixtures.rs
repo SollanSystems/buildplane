@@ -15,7 +15,7 @@ use bp_ledger::payload::plan_lifecycle::{
     PlanAdmittedV1, PlanReceiptOutcome, PlanReceiptRecordedV1,
 };
 use bp_ledger::payload::run_lifecycle::{
-    RunAdmissionDecision, RunAdmissionEvidenceInputV1, RunAdmissionRecordedV1,
+    ResultReadyV1, RunAdmissionDecision, RunAdmissionEvidenceInputV1, RunAdmissionRecordedV1,
     RunCompletedV1, RunFailedV1, RunOutcome, RunStartedV1,
 };
 use bp_ledger::payload::tool_io::{EnvRedaction, ToolRequestStoredV1, ToolResultV1};
@@ -64,6 +64,12 @@ fn main() {
 
         serde_json::to_value(Payload::RunFailedV1(RunFailedV1 {
             reason: "fixture".into(), terminating_event_id: None,
+        })).unwrap(),
+
+        serde_json::to_value(Payload::ResultReadyV1(ResultReadyV1 {
+            run_id: fixed_run_id().to_string(),
+            admission_event_id: fixed_event_id(4).to_string(),
+            acceptance_event_id: fixed_event_id(5).to_string(),
         })).unwrap(),
 
         serde_json::to_value(Payload::RunAdmissionRecordedV1(RunAdmissionRecordedV1 {
