@@ -24,6 +24,13 @@
 		}
 	},
 	{
+		"ResultReadyV1": {
+			"acceptance_event_id": "01919000-0000-7000-8000-000000000005",
+			"admission_event_id": "01919000-0000-7000-8000-000000000004",
+			"run_id": "01919000-0000-7000-8000-0000000000ff"
+		}
+	},
+	{
 		"RunAdmissionRecordedV1": {
 			"allowed_side_effects": ["fs.write:declared_scope"],
 			"authorized_next_step": "dispatch_after_admission_append",

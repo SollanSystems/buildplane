@@ -16,6 +16,7 @@ import type {
 	OperatorDecisionRecordedV1,
 	PlanAdmittedV1,
 	PlanReceiptRecordedV1,
+	ResultReadyV1,
 	RunAdmissionRecordedV1,
 	RunCompletedV1,
 	RunFailedV1,
@@ -36,6 +37,7 @@ export type Payload =
 	| { RunStartedV1: RunStartedV1 }
 	| { RunCompletedV1: RunCompletedV1 }
 	| { RunFailedV1: RunFailedV1 }
+	| { ResultReadyV1: ResultReadyV1 }
 	| { RunAdmissionRecordedV1: RunAdmissionRecordedV1 }
 	| { PlanAdmittedV1: PlanAdmittedV1 }
 	| { PlanReceiptRecordedV1: PlanReceiptRecordedV1 }

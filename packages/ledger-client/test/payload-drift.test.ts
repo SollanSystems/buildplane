@@ -35,6 +35,7 @@ const KNOWN_VARIANT_KEYS = {
 	RunStartedV1: true,
 	RunCompletedV1: true,
 	RunFailedV1: true,
+	ResultReadyV1: true,
 	RunAdmissionRecordedV1: true,
 	PlanAdmittedV1: true,
 	PlanReceiptRecordedV1: true,
@@ -85,7 +86,7 @@ function kindName(p: Payload): PayloadKey {
 describe("payload drift alarm", () => {
 	it("every fixture parses as a known variant", () => {
 		const fixtures = loadFixtures();
-		expect(KNOWN_KEYS.size).toBe(23);
+		expect(KNOWN_KEYS.size).toBe(24);
 		expect(fixtures.length).toBe(KNOWN_KEYS.size);
 		const names: string[] = [];
 		for (const fx of fixtures) {
