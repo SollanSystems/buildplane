@@ -44,6 +44,8 @@ pub enum EventKind {
     AcceptanceRecorded,
     // M5 operator decision
     OperatorDecisionRecorded,
+    // M6 result-ready signal
+    ResultReady,
     // Tape-root checkpoint (M1-S6) — unrelated to the unit-boundary GitCheckpoint.
     TapeCheckpoint,
 }
@@ -74,6 +76,7 @@ impl EventKind {
             Self::CapabilityDenied => "capability_denied",
             Self::AcceptanceRecorded => "acceptance_recorded",
             Self::OperatorDecisionRecorded => "operator_decision_recorded",
+            Self::ResultReady => "result_ready",
             Self::TapeCheckpoint => "tape_checkpoint",
         }
     }
@@ -104,6 +107,7 @@ mod tests {
             EventKind::CapabilityDenied,
             EventKind::AcceptanceRecorded,
             EventKind::OperatorDecisionRecorded,
+            EventKind::ResultReady,
             EventKind::TapeCheckpoint,
         ] {
             let json = serde_json::to_string(&kind).unwrap();

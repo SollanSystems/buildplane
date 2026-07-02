@@ -45,6 +45,8 @@ pub fn apply(state: &mut ReplayState, event: &Event) {
         Payload::AcceptanceRecordedV1(p) => apply_acceptance_recorded(state, event, p),
         // M5 operator decisions are tape metadata, not replayable state — no-op.
         Payload::OperatorDecisionRecordedV1(_) => {}
+        // M6 result-ready is a terminal tape signal, not replayable state — no-op.
+        Payload::ResultReadyV1(_) => {}
     }
 }
 

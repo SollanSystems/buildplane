@@ -36,6 +36,21 @@ pub struct RunCompletedV1 {
     pub unit_count: U64,
 }
 
+/// `result_ready` payload (M6-S6) — signals that a run reached a terminal,
+/// operator-reviewable accepted result. Chains to the `plan_admitted` and
+/// `acceptance_recorded` events that authorized and accepted the run. All fields
+/// are strings on the wire (no `u64` precision hazard) so Rust↔TS digests are
+/// byte-identical.
+#[typeshare]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResultReadyV1 {
+    pub run_id: String,
+    /// Chains to the `plan_admitted` event (string event id).
+    pub admission_event_id: String,
+    /// Chains to the `acceptance_recorded` event (string event id).
+    pub acceptance_event_id: String,
+}
+
 /// `run_failed` payload — a terminal failure that the run can't recover from.
 #[typeshare]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -176,6 +191,18 @@ mod tests {
         };
         let s = serde_json::to_string(&payload).unwrap();
         let back: RunCompletedV1 = serde_json::from_str(&s).unwrap();
+        assert_eq!(payload, back);
+    }
+
+    #[test]
+    fn result_ready_v1_round_trips() {
+        let payload = ResultReadyV1 {
+            run_id: "01919000-0000-7000-8000-0000000000ff".into(),
+            admission_event_id: "01919000-0000-7000-8000-000000000004".into(),
+            acceptance_event_id: "01919000-0000-7000-8000-000000000005".into(),
+        };
+        let s = serde_json::to_string(&payload).unwrap();
+        let back: ResultReadyV1 = serde_json::from_str(&s).unwrap();
         assert_eq!(payload, back);
     }
 

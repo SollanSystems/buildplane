@@ -129,6 +129,7 @@ export enum EventKind {
 	CapabilityDenied = "capability_denied",
 	AcceptanceRecorded = "acceptance_recorded",
 	OperatorDecisionRecorded = "operator_decision_recorded",
+	ResultReady = "result_ready",
 	TapeCheckpoint = "tape_checkpoint",
 }
 
@@ -306,6 +307,21 @@ export interface PlanReceiptRecordedV1 {
 	result_digest: string;
 	/** Receipt timestamp, RFC3339. */
 	decided_at: string;
+}
+
+/**
+ * `result_ready` payload (M6-S6) — signals that a run reached a terminal,
+ * operator-reviewable accepted result. Chains to the `plan_admitted` and
+ * `acceptance_recorded` events that authorized and accepted the run. All fields
+ * are strings on the wire (no `u64` precision hazard) so Rust↔TS digests are
+ * byte-identical.
+ */
+export interface ResultReadyV1 {
+	run_id: string;
+	/** Chains to the `plan_admitted` event (string event id). */
+	admission_event_id: string;
+	/** Chains to the `acceptance_recorded` event (string event id). */
+	acceptance_event_id: string;
 }
 
 /** Requested side effect denied by policy with a human-readable reason. */
