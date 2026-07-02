@@ -19,3 +19,11 @@ native/target/
 .planning/
 .loop/
 .tmp/
+
+# Local operator scratch — not product source (O5, R6 hygiene).
+# AGENTS.md: stale WARP-oriented doc, superseded by CLAUDE.md.
+# memory/: local session journal + decisions; repo goes public at S13.
+# .superpowers/: loop-engineer harness contract + SDD progress scratch.
+AGENTS.md
+memory/
+.superpowers/
