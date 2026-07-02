@@ -191,7 +191,21 @@ export function createMissionControlServer(
 
 	return {
 		server,
-		listen(port: number): Promise<ListeningAddress> {
+		async listen(port: number): Promise<ListeningAddress> {
+			// Crash reconciler (M5-S4 D2 / R2) — re-drive any decided-but-unexecuted
+			// operator decision EXACTLY ONCE before this server starts serving.
+			// Per-item isolation means the call never throws: a record that fails to
+			// re-drive is reported under `failed` and boot proceeds.
+			const recovery = await deps.orchestrator.recoverPendingDecisions();
+			logger(
+				`mission-control: recovered ${recovery.recovered} pending operator decision(s) on boot.`,
+			);
+			for (const failure of recovery.failed) {
+				logger(
+					`mission-control: failed to recover operator decision for run ${failure.runId}: ${failure.error}`,
+				);
+			}
+
 			if (host === EXTERNAL_HOST) {
 				logger(
 					`mission-control-server binding on ${host}:${port} — external access enabled (BUILDPLANE_WEB_ALLOW_EXTERNAL=1).`,

@@ -14,6 +14,9 @@ function makeServerDeps(
 		orchestrator: {
 			inspect: vi.fn(),
 			recordOperatorDecision: vi.fn(() => Promise.resolve()),
+			recoverPendingDecisions: vi.fn(() =>
+				Promise.resolve({ recovered: 0, failed: [] }),
+			),
 		},
 		store: {
 			listRunsByStatus: vi.fn(() => [] as never),
@@ -71,6 +74,26 @@ describe("createMissionControlServer", () => {
 
 		const bound = running.server.address() as AddressInfo;
 		expect(bound.address).toBe("127.0.0.1");
+	});
+
+	it("runs the crash reconciler exactly once on boot and logs the recovered count", async () => {
+		const logs: string[] = [];
+		const recoverPendingDecisions = vi.fn(() =>
+			Promise.resolve({ recovered: 2, failed: [] }),
+		);
+		const deps = makeServerDeps({
+			orchestrator: {
+				inspect: vi.fn(),
+				recordOperatorDecision: vi.fn(() => Promise.resolve()),
+				recoverPendingDecisions,
+			},
+			logger: (message) => logs.push(message),
+		});
+		running = createMissionControlServer(deps);
+		await running.listen(0);
+
+		expect(recoverPendingDecisions).toHaveBeenCalledTimes(1);
+		expect(logs.join("\n")).toMatch(/recovered 2 pending operator decision/i);
 	});
 
 	it("serves a read endpoint over real HTTP", async () => {

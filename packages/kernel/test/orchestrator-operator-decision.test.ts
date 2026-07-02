@@ -738,9 +738,10 @@ describe("recoverPendingDecisions — crash-idempotent non-merge side effects (F
 				{ runId: RUN_ID, decision: "approved", subject: "resume" },
 			],
 		});
-		await expect(
-			h.orchestrator.recoverPendingDecisions(),
-		).resolves.toBeUndefined();
+		await expect(h.orchestrator.recoverPendingDecisions()).resolves.toEqual({
+			recovered: 1,
+			failed: [],
+		});
 		// approveRun NOT re-applied: no second call, no second `run-resumed` event.
 		expect(h.approveCalls).toHaveLength(0);
 		expect(h.runResumedEvents.count).toBe(0);
@@ -759,9 +760,10 @@ describe("recoverPendingDecisions — crash-idempotent non-merge side effects (F
 				{ runId: RUN_ID, decision: "rejected", subject: "resume" },
 			],
 		});
-		await expect(
-			h.orchestrator.recoverPendingDecisions(),
-		).resolves.toBeUndefined();
+		await expect(h.orchestrator.recoverPendingDecisions()).resolves.toEqual({
+			recovered: 1,
+			failed: [],
+		});
 		expect(h.rejectSuspendedCalls).toHaveLength(0);
 		// No second terminal event.
 		expect(h.runCompletedEvents.count).toBe(0);
@@ -781,13 +783,46 @@ describe("recoverPendingDecisions — crash-idempotent non-merge side effects (F
 				{ runId: RUN_ID, decision: "rejected", subject: "merge" },
 			],
 		});
-		await expect(
-			h.orchestrator.recoverPendingDecisions(),
-		).resolves.toBeUndefined();
+		await expect(h.orchestrator.recoverPendingDecisions()).resolves.toEqual({
+			recovered: 1,
+			failed: [],
+		});
 		expect(h.rejectMergeCalls).toHaveLength(0);
 		// EXACTLY ZERO new run-completed events (the first one ran pre-crash).
 		expect(h.runCompletedEvents.count).toBe(0);
 		expect(h.executed).toEqual([{ runId: RUN_ID, mergedHeadSha: undefined }]);
+		expect(h.decisionEmits).toHaveLength(0);
+	});
+});
+
+// R2 — per-item isolation: one poisoned record must not wedge the batch. The
+// reconciler catches a per-item side-effect throw, records it under `failed`, and
+// continues to the next decided-but-unexecuted record.
+describe("recoverPendingDecisions — per-item isolation (R2)", () => {
+	it("continues past a throwing record and re-drives the healthy one", async () => {
+		const POISON_RUN_ID = "01919000-0000-7000-8000-0000000000aa";
+		// First record is a merge-approved decision with NO retained worktree, which
+		// `applyOperatorDecisionSideEffect` rejects by throwing. The second is a
+		// healthy resume-approve on the suspended run.
+		const h = makeHarness({
+			initialStatus: "suspended",
+			decidedUnexecuted: () => [
+				{ runId: POISON_RUN_ID, decision: "approved", subject: "merge" },
+				{ runId: RUN_ID, decision: "approved", subject: "resume" },
+			],
+		});
+
+		const summary = await h.orchestrator.recoverPendingDecisions();
+
+		// The healthy record still ran despite the earlier throw.
+		expect(h.approveCalls).toEqual([RUN_ID]);
+		expect(summary.recovered).toBe(1);
+		expect(summary.failed).toHaveLength(1);
+		expect(summary.failed[0].runId).toBe(POISON_RUN_ID);
+		expect(summary.failed[0].error).toMatch(/no retained worktree/i);
+		// The poisoned record was never marked executed; the healthy one was.
+		expect(h.executed).toEqual([{ runId: RUN_ID, mergedHeadSha: undefined }]);
+		// Never re-emits Tier-2.
 		expect(h.decisionEmits).toHaveLength(0);
 	});
 });

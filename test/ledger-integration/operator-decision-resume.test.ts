@@ -298,9 +298,10 @@ describe.sequential("recordOperatorDecision resume — signed tape + suspended-r
 
 		// approveRun already ran (status pending). A re-drive that re-called
 		// approveRun would THROW; recoverPendingDecisions must skip the transition.
-		await expect(
-			orchestrator.recoverPendingDecisions(),
-		).resolves.toBeUndefined();
+		await expect(orchestrator.recoverPendingDecisions()).resolves.toEqual({
+			recovered: 1,
+			failed: [],
+		});
 
 		const state = await readState(env.stateDbPath);
 		// EXACTLY ONE run-resumed event — no double-apply.

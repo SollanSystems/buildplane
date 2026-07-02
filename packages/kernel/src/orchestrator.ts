@@ -130,6 +130,22 @@ export class OperatorDecisionValidationError extends Error {
 	}
 }
 
+/** One decided-but-unexecuted record the startup reconciler failed to re-drive. */
+export interface PendingDecisionRecoveryFailure {
+	readonly runId: string;
+	readonly error: string;
+}
+
+/**
+ * Summary of a `recoverPendingDecisions` pass: how many decided-but-unexecuted
+ * side effects were re-driven, and any records whose re-drive threw (per-item
+ * isolation — one bad record never wedges the batch).
+ */
+export interface PendingDecisionRecovery {
+	readonly recovered: number;
+	readonly failed: readonly PendingDecisionRecoveryFailure[];
+}
+
 export interface BuildplaneOrchestrator {
 	initializeProject(): ReturnType<BuildplaneStoragePort["initializeProject"]>;
 	runPacket(
@@ -156,9 +172,11 @@ export interface BuildplaneOrchestrator {
 	/**
 	 * Startup reconciler (M5-S4 D2): re-drive any decided-but-unexecuted side
 	 * effect EXACTLY ONCE, gated on a missing execution marker. Never re-emits the
-	 * Tier-2 signed event and never double-merges.
+	 * Tier-2 signed event and never double-merges. Per-item isolation (R2): a
+	 * record whose re-drive throws is captured under `failed`, and the batch
+	 * continues. Resolves with a summary of what was recovered.
 	 */
-	recoverPendingDecisions(): Promise<void>;
+	recoverPendingDecisions(): Promise<PendingDecisionRecovery>;
 	runGraphAsync(graph: UnitGraph, eventBus?: EventBus): Promise<GraphResult>;
 	runStrategy(
 		strategy: StrategyPacket,
@@ -2170,17 +2188,33 @@ export function createBuildplaneOrchestrator(
 			);
 		},
 
-		async recoverPendingDecisions(): Promise<void> {
+		async recoverPendingDecisions(): Promise<PendingDecisionRecovery> {
 			// D2 — re-drive every decided-but-unexecuted side effect EXACTLY ONCE.
 			// `listDecidedUnexecutedDecisions` returns only runs with a Tier-1
 			// decision mirror and no execution marker; NEVER re-emit Tier-2.
+			//
+			// R2 — per-item isolation: one poisoned record (a re-drive that throws)
+			// must not wedge the batch, or a single bad row would block startup
+			// recovery for every other pending decision. Catch, record, and continue;
+			// the failed record keeps its missing marker, so a later pass retries it.
+			let recovered = 0;
+			const failed: PendingDecisionRecoveryFailure[] = [];
 			for (const pending of storage.listDecidedUnexecutedDecisions()) {
-				applyOperatorDecisionSideEffect(
-					pending.runId,
-					pending.subject,
-					pending.decision,
-				);
+				try {
+					applyOperatorDecisionSideEffect(
+						pending.runId,
+						pending.subject,
+						pending.decision,
+					);
+					recovered += 1;
+				} catch (error) {
+					failed.push({
+						runId: pending.runId,
+						error: error instanceof Error ? error.message : String(error),
+					});
+				}
 			}
+			return { recovered, failed };
 		},
 
 		async runGraphAsync(
