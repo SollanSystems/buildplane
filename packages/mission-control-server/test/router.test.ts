@@ -229,6 +229,82 @@ describe("GET /api/inbox", () => {
 	});
 });
 
+describe("host/origin allowlist (DNS-rebinding guard)", () => {
+	const allowedHosts: ReadonlySet<string> = new Set([
+		"localhost",
+		"127.0.0.1",
+		"::1",
+	]);
+
+	it("rejects a foreign Host header with 403 before touching the store", async () => {
+		const deps = makeDeps({ allowedHosts });
+		const response = await handleApiRequest(
+			deps,
+			request({
+				method: "GET",
+				pathname: "/api/status",
+				host: "evil.com",
+			}),
+		);
+
+		expect(response.status).toBe(403);
+		expect(deps.store.getStatusSnapshot).not.toHaveBeenCalled();
+	});
+
+	it("rejects a foreign Origin even when the Host is loopback", async () => {
+		const deps = makeDeps({ allowedHosts });
+		const response = await handleApiRequest(
+			deps,
+			request({
+				method: "GET",
+				pathname: "/api/status",
+				host: "127.0.0.1:7420",
+				origin: "http://evil.com",
+			}),
+		);
+
+		expect(response.status).toBe(403);
+	});
+
+	it("allows a loopback Host and Origin with 200", async () => {
+		const deps = makeDeps({ allowedHosts });
+		const response = await handleApiRequest(
+			deps,
+			request({
+				method: "GET",
+				pathname: "/api/status",
+				host: "127.0.0.1:7420",
+				origin: "http://localhost:7420",
+			}),
+		);
+
+		expect(response.status).toBe(200);
+	});
+
+	it("allows an IPv6 loopback Host", async () => {
+		const deps = makeDeps({ allowedHosts });
+		const response = await handleApiRequest(
+			deps,
+			request({
+				method: "GET",
+				pathname: "/api/status",
+				host: "[::1]:7420",
+			}),
+		);
+
+		expect(response.status).toBe(200);
+	});
+
+	it("skips the check when no allowlist is configured (external-bind opt-in)", async () => {
+		const response = await handleApiRequest(
+			makeDeps(),
+			request({ method: "GET", pathname: "/api/status", host: "evil.com" }),
+		);
+
+		expect(response.status).toBe(200);
+	});
+});
+
 describe("POST /api/runs/:id/decision", () => {
 	it("returns 401 without a valid bearer token", async () => {
 		const deps = makeDeps();

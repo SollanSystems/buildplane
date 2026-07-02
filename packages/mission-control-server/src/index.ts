@@ -12,6 +12,7 @@ import {
 } from "./auth.js";
 import {
 	handleApiRequest,
+	isHostAllowed,
 	type MissionControlOrchestrator,
 	type MissionControlStore,
 } from "./router.js";
@@ -25,6 +26,7 @@ export {
 } from "./auth.js";
 export {
 	handleApiRequest,
+	isHostAllowed,
 	type MissionControlOrchestrator,
 	type MissionControlRouterDeps,
 	type MissionControlStore,
@@ -36,6 +38,36 @@ export { resolveStaticAsset, type StaticAsset } from "./static.js";
 const LOOPBACK_HOST = "127.0.0.1";
 const EXTERNAL_HOST = "0.0.0.0";
 const MAX_BODY_BYTES = 1_048_576;
+const LOOPBACK_HOST_NAMES: readonly string[] = [
+	"localhost",
+	"127.0.0.1",
+	"::1",
+];
+
+/**
+ * The `Host`/`Origin` allowlist for the DNS-rebinding guard. Enforced only for a
+ * loopback bind (the default); an external bind is an explicit operator opt-in
+ * whose legitimate hostnames cannot be enumerated, so the guard is disabled.
+ */
+function resolveAllowedHosts(host: string): ReadonlySet<string> | undefined {
+	if (host === EXTERNAL_HOST) {
+		return undefined;
+	}
+	return new Set([...LOOPBACK_HOST_NAMES, host]);
+}
+
+function firstHeaderValue(
+	value: string | string[] | undefined,
+): string | undefined {
+	return Array.isArray(value) ? value[0] : value;
+}
+
+interface DispatchContext {
+	readonly deps: MissionControlServerDeps;
+	readonly tokenSource: BearerTokenSource;
+	readonly allowedHosts: ReadonlySet<string> | undefined;
+	readonly logger: (message: string) => void;
+}
 
 export interface MissionControlServerDeps {
 	readonly orchestrator: MissionControlOrchestrator;
@@ -125,14 +157,25 @@ function readJsonBody(req: IncomingMessage): Promise<unknown> {
 }
 
 async function dispatch(
-	deps: MissionControlServerDeps,
-	tokenSource: BearerTokenSource,
+	ctx: DispatchContext,
 	req: IncomingMessage,
 	res: ServerResponse,
 ): Promise<void> {
+	const { deps, tokenSource, allowedHosts, logger } = ctx;
 	try {
 		const url = new URL(req.url ?? "/", "http://localhost");
 		const { pathname } = url;
+
+		const hostHeader = firstHeaderValue(req.headers.host);
+		const originHeader = firstHeaderValue(req.headers.origin);
+
+		if (
+			allowedHosts !== undefined &&
+			!isHostAllowed(hostHeader, originHeader, allowedHosts)
+		) {
+			writeJson(res, 403, { error: "forbidden_host" });
+			return;
+		}
 
 		if (pathname.startsWith("/api/")) {
 			const body = await readJsonBody(req);
@@ -143,12 +186,15 @@ async function dispatch(
 					tokenSource,
 					operatorDecisionPort: deps.operatorDecisionPort,
 					decidedBy: deps.decidedBy,
+					allowedHosts,
 				},
 				{
 					method: req.method ?? "GET",
 					pathname,
 					query: url.searchParams,
 					authorizationHeader: req.headers.authorization,
+					host: hostHeader,
+					origin: originHeader,
 					body,
 				},
 			);
@@ -170,10 +216,12 @@ async function dispatch(
 
 		writeJson(res, 404, { error: "not_found" });
 	} catch (error) {
-		writeJson(res, 500, {
-			error: "internal_error",
-			message: error instanceof Error ? error.message : String(error),
-		});
+		logger(
+			`mission-control-server request failed: ${
+				error instanceof Error ? (error.stack ?? error.message) : String(error)
+			}`,
+		);
+		writeJson(res, 500, { error: "internal_error" });
 	}
 }
 
@@ -184,9 +232,11 @@ export function createMissionControlServer(
 		deps.tokenSource ?? fileBearerTokenSource(defaultWebTokenPath());
 	const logger = deps.logger ?? (() => {});
 	const host = resolveBindHost(deps);
+	const allowedHosts = resolveAllowedHosts(host);
+	const ctx: DispatchContext = { deps, tokenSource, allowedHosts, logger };
 
 	const server = createServer((req, res) => {
-		void dispatch(deps, tokenSource, req, res);
+		void dispatch(ctx, req, res);
 	});
 
 	return {

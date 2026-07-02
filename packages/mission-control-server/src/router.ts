@@ -32,6 +32,13 @@ export interface MissionControlRouterDeps {
 	readonly operatorDecisionPort?: OperatorDecisionPort;
 	/** Operator identity stamped onto recorded decisions. */
 	readonly decidedBy?: string;
+	/**
+	 * Hostnames permitted in the `Host`/`Origin` headers (DNS-rebinding guard).
+	 * When set, every request whose Host — or, if present, Origin — falls outside
+	 * this set is rejected with 403. `undefined` disables the check (the server
+	 * omits it when bound to an external interface, where the operator opted in).
+	 */
+	readonly allowedHosts?: ReadonlySet<string>;
 }
 
 export interface RouterRequest {
@@ -39,6 +46,10 @@ export interface RouterRequest {
 	readonly pathname: string;
 	readonly query: URLSearchParams;
 	readonly authorizationHeader?: string;
+	/** The request `Host` header, used by the DNS-rebinding allowlist. */
+	readonly host?: string;
+	/** The request `Origin` header, used by the DNS-rebinding allowlist. */
+	readonly origin?: string;
 	readonly body?: unknown;
 }
 
@@ -199,16 +210,80 @@ async function recordDecision(
 	}
 }
 
+function normalizeHostname(raw: string): string {
+	const lower = raw.trim().toLowerCase();
+	return lower.startsWith("[") && lower.endsWith("]")
+		? lower.slice(1, -1)
+		: lower;
+}
+
+function hostnameFromHostHeader(hostHeader: string): string | undefined {
+	const trimmed = hostHeader.trim();
+	if (trimmed.length === 0) {
+		return undefined;
+	}
+	if (trimmed.startsWith("[")) {
+		const end = trimmed.indexOf("]");
+		return end > 0 ? normalizeHostname(trimmed.slice(0, end + 1)) : undefined;
+	}
+	const colon = trimmed.indexOf(":");
+	return normalizeHostname(colon === -1 ? trimmed : trimmed.slice(0, colon));
+}
+
+function hostnameFromOrigin(origin: string): string | undefined {
+	try {
+		return normalizeHostname(new URL(origin).hostname);
+	} catch {
+		return undefined;
+	}
+}
+
 /**
- * Dispatch one parsed `/api/*` request to its handler. Reads are open; the
- * decision write is bearer-token gated. Unmatched paths return 404 so the HTTP
- * layer can fall through to static serving.
+ * DNS-rebinding guard. The `Host` header must be present and in `allowedHosts`;
+ * if an `Origin` header is present its host must be allowed too. A browser page
+ * on a rebound attacker domain carries that domain in Host/Origin, so pinning
+ * the allowlist to the loopback names plus the configured bind host blocks the
+ * cross-origin read while genuine same-origin reads pass.
+ */
+export function isHostAllowed(
+	hostHeader: string | undefined,
+	originHeader: string | undefined,
+	allowedHosts: ReadonlySet<string>,
+): boolean {
+	if (hostHeader === undefined) {
+		return false;
+	}
+	const host = hostnameFromHostHeader(hostHeader);
+	if (host === undefined || !allowedHosts.has(host)) {
+		return false;
+	}
+	if (originHeader !== undefined) {
+		const originHost = hostnameFromOrigin(originHeader);
+		if (originHost === undefined || !allowedHosts.has(originHost)) {
+			return false;
+		}
+	}
+	return true;
+}
+
+/**
+ * Dispatch one parsed `/api/*` request to its handler. Every route is first run
+ * through the DNS-rebinding allowlist (when configured). Reads are otherwise
+ * open; the decision write is bearer-token gated. Unmatched paths return 404 so
+ * the HTTP layer can fall through to static serving.
  */
 export function handleApiRequest(
 	deps: MissionControlRouterDeps,
 	request: RouterRequest,
 ): Promise<RouterResponse> {
 	const { method, pathname } = request;
+
+	if (
+		deps.allowedHosts !== undefined &&
+		!isHostAllowed(request.host, request.origin, deps.allowedHosts)
+	) {
+		return Promise.resolve({ status: 403, body: { error: "forbidden_host" } });
+	}
 
 	if (method === "GET" && pathname === "/api/runs") {
 		return Promise.resolve(listRuns(deps, request));
