@@ -419,11 +419,20 @@ export function createBuildplaneOrchestrator(
 		}
 	}
 
-	// M6-S7 (A1) — emit the signed `result_ready` write-ahead once a run reaches its
-	// terminal `passed` outcome (the finalizeRun terminal advance, NOT the per-attempt
-	// acceptance pass), chaining it to the plan_admitted + acceptance_recorded events.
-	// A non-passed terminal, or a run with no recorded acceptance/admission id, emits
-	// nothing — this is write-ahead of the later operator merge/quarantine decision.
+	// M6-S7 (A1) — emit the signed `result_ready` at the finalizeRun terminal `passed`
+	// advance (NOT the per-attempt acceptance pass), chaining it to the plan_admitted +
+	// acceptance_recorded events. A non-passed terminal, or a run with no recorded
+	// acceptance/admission id, emits nothing.
+	//
+	// Per-flow ordering vs the worktree merge (F4 — the signed event is identical either
+	// way; only the point at which it fires differs):
+	//   • Auto-merge flow (this runPacketAsync path): finalizeRun merges the worktree
+	//     INTERNALLY before returning terminal `passed`, so `result_ready` is a
+	//     POST-MERGE terminal signal — it is NOT write-ahead of that merge.
+	//   • Operator-gated flow: the terminal merge/quarantine is driven later by
+	//     recordOperatorDecision, where the write-ahead completion signal is the signed
+	//     `run_completed` (see applyOperatorDecisionSideEffect); `result_ready`, when
+	//     emitted, precedes that operator decision.
 	async function finalizeWithResultReady(
 		result: RunPacketResult,
 		chain: {
@@ -484,6 +493,10 @@ export function createBuildplaneOrchestrator(
 		// non-terminal transition (resume+approved re-dispatches → `pending`). Emitted
 		// ONCE at the single exit so no branch silently skips the signed completion.
 		let terminalOutcome: RunCompletionOutcome | null = null;
+		// The Tier-1 execution marker payload to write once the side effect (and, for a
+		// terminal decision, the signed run_completed) has durably landed. Carries the
+		// merge HEAD for an approved merge; `undefined` otherwise.
+		let markerOutcome: { mergedHeadSha?: string } | undefined;
 
 		if (subject === "resume") {
 			if (decision === "approved") {
@@ -499,7 +512,6 @@ export function createBuildplaneOrchestrator(
 				}
 				terminalOutcome = "failed";
 			}
-			storage.markOperatorDecisionExecuted(runId);
 		} else if (decision === "rejected") {
 			// merge + rejected — quarantine: no merge, worktree retained, run marked
 			// failed. Post-state is `failed`; only transition if not already failed
@@ -508,7 +520,6 @@ export function createBuildplaneOrchestrator(
 			if (currentStatus !== "failed") {
 				storage.rejectMergeDecision(runId);
 			}
-			storage.markOperatorDecisionExecuted(runId);
 			terminalOutcome = "failed";
 		} else {
 			// merge + approved — merge the retained worktree, then record the marker
@@ -531,19 +542,35 @@ export function createBuildplaneOrchestrator(
 				runId,
 				projectRoot,
 			});
-			storage.markOperatorDecisionExecuted(runId, {
-				mergedHeadSha: mergeResult.mergedHeadSha,
-			});
+			markerOutcome = { mergedHeadSha: mergeResult.mergedHeadSha };
 			terminalOutcome = "passed";
 		}
 
-		// Single exit — emit the signed `run_completed` write-ahead for a terminal
-		// decision. Captured (not awaited) so this function stays synchronous; the
-		// async callers await `pendingRunCompletedEmit`.
+		// M6-S7 (F2) — for a terminal decision, emit + FLUSH the signed run_completed
+		// BEFORE writing the execution marker, then write the marker in the post-flush
+		// continuation. Ordering is load-bearing: if the marker were written first, a
+		// transient emit failure would leave the run marked-executed — so the
+		// reconciler's listDecidedUnexecutedDecisions would never re-drive it — and
+		// permanently lose the run_completed. Emitting first means a crash between the
+		// emit and the marker leaves the run in the pending set for the reconciler to
+		// re-drive; the git merge is runId-keyed idempotent (see the marker check-and-
+		// claim above) and recordRunCompleted dedups on the tape, so the re-drive neither
+		// double-merges nor double-emits. Captured (not awaited) so this function stays
+		// synchronous; the async callers await `pendingRunCompletedEmit`.
 		if (terminalOutcome !== null && runCompletionPort) {
-			pendingRunCompletedEmit = runCompletionPort.recordRunCompleted(
-				buildRunCompletedInput(runId, terminalOutcome),
-			);
+			const outcome = terminalOutcome;
+			const marker = markerOutcome;
+			pendingRunCompletedEmit = (async () => {
+				await runCompletionPort.recordRunCompleted(
+					buildRunCompletedInput(runId, outcome),
+				);
+				storage.markOperatorDecisionExecuted(runId, marker);
+			})();
+		} else {
+			// Non-terminal (resume+approved re-dispatch), or no completion port wired:
+			// there is no run_completed to flush, so the marker is safe to write
+			// synchronously — preserving the original ordering for those paths.
+			storage.markOperatorDecisionExecuted(runId, markerOutcome);
 		}
 	}
 

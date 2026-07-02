@@ -1,3 +1,5 @@
+import { existsSync } from "node:fs";
+import { resolve } from "node:path";
 import type {
 	RecordRunCompletedInput,
 	RunCompletionOutcome,
@@ -11,6 +13,37 @@ import {
 	resolveLedgerBinary,
 	spawnLedgerSubprocess,
 } from "./ledger-emit.js";
+
+/**
+ * True iff the signed tape already carries a `run_completed` for `runId`. Direct
+ * read-only `node:sqlite` probe on `events.db` — mirrors `planForgeReceiptExists`
+ * (run-cli.ts). `run_completed` is terminal and keyed on the tape `run_id` (at most
+ * one per run), so existence-by-run_id is the dedup key. Lets `recordRunCompleted`
+ * skip a re-driven emit (M6-S7 F2): the marker is now written only AFTER this emit
+ * durably lands, so a crash between emit and marker leaves the run in the reconciler's
+ * pending set; the re-drive must not double-append the completion.
+ */
+export async function runCompletedExists(
+	cwd: string,
+	runId: string,
+): Promise<boolean> {
+	const eventsDbPath = resolve(cwd, ".buildplane", "ledger", "events.db");
+	if (!existsSync(eventsDbPath)) {
+		return false;
+	}
+	const { DatabaseSync } = await import("node:sqlite");
+	const db = new DatabaseSync(eventsDbPath, { readOnly: true });
+	try {
+		const row = db
+			.prepare(
+				"SELECT id FROM events WHERE run_id = ? AND kind = 'run_completed' LIMIT 1",
+			)
+			.get(runId) as { id: string } | undefined;
+		return row !== undefined;
+	} finally {
+		db.close();
+	}
+}
 
 const RUN_OUTCOME_WIRE: Record<RunCompletionOutcome, RunOutcome> = {
 	passed: RunOutcome.Passed,
@@ -49,6 +82,12 @@ export function createRunCompletionPort(cwd: string): RunCompletionPort {
 	return {
 		async recordRunCompleted(input: RecordRunCompletedInput): Promise<void> {
 			assertKernelSigningKey();
+			// Dedup-on-append (M6-S7 F2): the tape is authoritative — if a
+			// `run_completed` for this run already landed, a prior emit succeeded, so a
+			// reconciler re-drive (marker lost after emit) must not double-append.
+			if (await runCompletedExists(cwd, input.runId)) {
+				return;
+			}
 			const payload = toRunCompletedWirePayload(input);
 			const binary = resolveLedgerBinary(cwd);
 			const ledgerChild = spawnLedgerSubprocess(binary, input.runId, cwd, {

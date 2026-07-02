@@ -5,6 +5,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import type {
+	RecordRunCompletedInput,
+	RunCompletionPort,
+} from "../../packages/kernel/src/index.ts";
 import { resolveNativeBinaryForLedgerTests } from "./fixtures.ts";
 
 // M6-S7 (A2/A3): recordOperatorDecision emits a kernel-signed `run_completed`
@@ -121,6 +125,38 @@ async function loadDeps() {
 		createBuildplaneOrchestrator,
 		createOperatorDecisionPort,
 		createRunCompletionPort,
+	};
+}
+
+/**
+ * Wrap a real {@link RunCompletionPort} so its FIRST `recordRunCompleted` call
+ * simulates a transient failure (M6-S7 F2 crash-timing). `throw-before` rejects
+ * WITHOUT appending; `throw-after` appends the signed run_completed and THEN rejects —
+ * the execution marker is never written either way (the reorder puts it after the
+ * emit). Subsequent calls delegate cleanly, exercising the reconciler re-drive.
+ */
+function flakyRunCompletionPort(
+	inner: RunCompletionPort,
+	mode: "throw-before" | "throw-after",
+): RunCompletionPort & { callCount: () => number } {
+	let calls = 0;
+	return {
+		callCount: () => calls,
+		async recordRunCompleted(input: RecordRunCompletedInput): Promise<void> {
+			calls += 1;
+			if (calls === 1) {
+				if (mode === "throw-before") {
+					throw new Error(
+						"injected transient run_completed failure (pre-append)",
+					);
+				}
+				await inner.recordRunCompleted(input);
+				throw new Error(
+					"injected transient run_completed failure (post-append)",
+				);
+			}
+			await inner.recordRunCompleted(input);
+		},
 	};
 }
 
@@ -343,5 +379,230 @@ describe.sequential("recordOperatorDecision — signed run_completed (M6-S7)", (
 		// resume+approved re-dispatches (→ pending): not a run completion.
 		const { rows } = await readRunCompleted(env.eventsDbPath);
 		expect(rows).toHaveLength(0);
+	});
+
+	it("emits run_completed(failed) after a rejected resume (A2 coverage)", async () => {
+		const {
+			createBuildplaneStorage,
+			createGitWorktreeAdapter,
+			createBuildplaneOrchestrator,
+			createOperatorDecisionPort,
+			createRunCompletionPort,
+		} = await loadDeps();
+
+		const storage = createBuildplaneStorage(env.dir);
+		storage.initializeProject();
+		const workspace = createGitWorktreeAdapter();
+		const runId = "01919000-0000-7000-8000-0000000000c4";
+
+		const run = storage.createRun(PACKET, { runId });
+		storage.markRunRunning(run.id);
+		storage.suspendRun(run.id);
+
+		const orchestrator = createBuildplaneOrchestrator({
+			projectRoot: env.dir,
+			storage,
+			runtime: {
+				executePacket() {
+					throw new Error("unused");
+				},
+			},
+			policy: {
+				evaluateRun() {
+					return { kind: "advance-run", outcome: "approved", reasons: [] };
+				},
+			},
+			workspace,
+			admissionStore: null,
+			operatorDecisionPort: createOperatorDecisionPort(env.dir),
+			runCompletionPort: createRunCompletionPort(env.dir),
+		});
+
+		await orchestrator.recordOperatorDecision({
+			runId: run.id,
+			decision: "rejected",
+			subject: "resume",
+			decidedBy: "operator:khall",
+			decidedAt: "2026-06-23T00:00:00Z",
+		});
+
+		// resume+rejected is terminal (→ failed): exactly one run_completed(failed).
+		const { rows } = await readRunCompleted(env.eventsDbPath);
+		expect(rows).toHaveLength(1);
+		expect(JSON.parse(rows[0].payload).RunCompletedV1.outcome).toBe("failed");
+	});
+
+	it("recovers a lost run_completed: emit fails pre-append → marker unset → reconciler re-drives exactly one (F2)", async () => {
+		const {
+			createBuildplaneStorage,
+			createGitWorktreeAdapter,
+			createBuildplaneOrchestrator,
+			createOperatorDecisionPort,
+			createRunCompletionPort,
+		} = await loadDeps();
+
+		const storage = createBuildplaneStorage(env.dir);
+		storage.initializeProject();
+		const workspace = createGitWorktreeAdapter();
+		const baseHead = git(env.dir, ["rev-parse", "HEAD"]).stdout.trim();
+		const runId = "01919000-0000-7000-8000-0000000000c5";
+
+		const run = storage.createRun(PACKET, { runId });
+		const prepared = workspace.prepareWorkspace(env.dir, run.id, baseHead);
+		storage.recordWorkspacePrepared(run.id, {
+			path: prepared.path,
+			headSha: prepared.headSha,
+			sourceProjectRoot: env.dir,
+		});
+		writeFileSync(join(prepared.path, "FEATURE.md"), "added by run\n");
+		storage.markRunRunning(run.id);
+		storage.commitRunSuccessOutcome(run.id, {
+			kind: "advance-run",
+			outcome: "approved",
+			reasons: [],
+		});
+		storage.recordAcceptanceShadow(run.id, "passed");
+
+		const flaky = flakyRunCompletionPort(
+			createRunCompletionPort(env.dir),
+			"throw-before",
+		);
+
+		const orchestrator = createBuildplaneOrchestrator({
+			projectRoot: env.dir,
+			storage,
+			runtime: {
+				executePacket() {
+					throw new Error("unused");
+				},
+			},
+			policy: {
+				evaluateRun() {
+					return { kind: "advance-run", outcome: "approved", reasons: [] };
+				},
+			},
+			workspace,
+			admissionStore: null,
+			operatorDecisionPort: createOperatorDecisionPort(env.dir),
+			runCompletionPort: flaky,
+		});
+
+		// The transient emit failure propagates out of recordOperatorDecision.
+		await expect(
+			orchestrator.recordOperatorDecision({
+				runId: run.id,
+				decision: "approved",
+				subject: "merge",
+				decidedBy: "operator:khall",
+				decidedAt: "2026-06-23T00:00:00Z",
+			}),
+		).rejects.toThrow(/injected transient run_completed failure/);
+
+		// The merge landed, but the completion did NOT — and crucially the execution
+		// marker was NOT written (the reorder puts it after the emit), so the reconciler
+		// still sees this decision as pending. Under the pre-F2 ordering the marker would
+		// be set here and the completion permanently lost.
+		expect(git(env.dir, ["log", "--oneline"]).stdout).toContain(
+			`merge buildplane run ${run.id}`,
+		);
+		expect(storage.isOperatorDecisionExecuted(run.id)).toBe(false);
+		expect((await readRunCompleted(env.eventsDbPath)).rows).toHaveLength(0);
+
+		// The reconciler re-drives the pending decision exactly once.
+		const recovery = await orchestrator.recoverPendingDecisions();
+		expect(recovery.recovered).toBe(1);
+		expect(recovery.failed).toHaveLength(0);
+
+		// Exactly ONE run_completed(passed) landed, the merge stayed idempotent (a single
+		// merge commit), and the marker is now set.
+		const { rows } = await readRunCompleted(env.eventsDbPath);
+		expect(rows).toHaveLength(1);
+		expect(JSON.parse(rows[0].payload).RunCompletedV1.outcome).toBe("passed");
+		const mergeCommits = git(env.dir, ["log", "--oneline"])
+			.stdout.split("\n")
+			.filter((line) => line.includes(`merge buildplane run ${run.id}`));
+		expect(mergeCommits).toHaveLength(1);
+		expect(storage.isOperatorDecisionExecuted(run.id)).toBe(true);
+	});
+
+	it("dedups on re-drive: emit appends then fails post-append → reconciler re-drive skips the duplicate (F2)", async () => {
+		const {
+			createBuildplaneStorage,
+			createGitWorktreeAdapter,
+			createBuildplaneOrchestrator,
+			createOperatorDecisionPort,
+			createRunCompletionPort,
+		} = await loadDeps();
+
+		const storage = createBuildplaneStorage(env.dir);
+		storage.initializeProject();
+		const workspace = createGitWorktreeAdapter();
+		const baseHead = git(env.dir, ["rev-parse", "HEAD"]).stdout.trim();
+		const runId = "01919000-0000-7000-8000-0000000000c6";
+
+		const run = storage.createRun(PACKET, { runId });
+		const prepared = workspace.prepareWorkspace(env.dir, run.id, baseHead);
+		storage.recordWorkspacePrepared(run.id, {
+			path: prepared.path,
+			headSha: prepared.headSha,
+			sourceProjectRoot: env.dir,
+		});
+		writeFileSync(join(prepared.path, "FEATURE.md"), "added by run\n");
+		storage.markRunRunning(run.id);
+		storage.commitRunSuccessOutcome(run.id, {
+			kind: "advance-run",
+			outcome: "approved",
+			reasons: [],
+		});
+		storage.recordAcceptanceShadow(run.id, "passed");
+
+		const flaky = flakyRunCompletionPort(
+			createRunCompletionPort(env.dir),
+			"throw-after",
+		);
+
+		const orchestrator = createBuildplaneOrchestrator({
+			projectRoot: env.dir,
+			storage,
+			runtime: {
+				executePacket() {
+					throw new Error("unused");
+				},
+			},
+			policy: {
+				evaluateRun() {
+					return { kind: "advance-run", outcome: "approved", reasons: [] };
+				},
+			},
+			workspace,
+			admissionStore: null,
+			operatorDecisionPort: createOperatorDecisionPort(env.dir),
+			runCompletionPort: flaky,
+		});
+
+		await expect(
+			orchestrator.recordOperatorDecision({
+				runId: run.id,
+				decision: "approved",
+				subject: "merge",
+				decidedBy: "operator:khall",
+				decidedAt: "2026-06-23T00:00:00Z",
+			}),
+		).rejects.toThrow(/post-append/);
+
+		// The run_completed DID land on the first attempt, but the marker was not written
+		// (the post-append throw is before the marker), so the decision stays pending.
+		expect(storage.isOperatorDecisionExecuted(run.id)).toBe(false);
+		expect((await readRunCompleted(env.eventsDbPath)).rows).toHaveLength(1);
+
+		// Re-drive: recordRunCompleted is invoked again, but the tape-existence dedup
+		// skips the append — still exactly one run_completed, and the marker is now set.
+		const recovery = await orchestrator.recoverPendingDecisions();
+		expect(recovery.recovered).toBe(1);
+		expect(recovery.failed).toHaveLength(0);
+		expect(flaky.callCount()).toBe(2);
+		const { rows } = await readRunCompleted(env.eventsDbPath);
+		expect(rows).toHaveLength(1);
+		expect(storage.isOperatorDecisionExecuted(run.id)).toBe(true);
 	});
 });
