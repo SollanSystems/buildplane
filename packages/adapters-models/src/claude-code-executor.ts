@@ -54,6 +54,18 @@ export interface ClaudeCodeExecutorOptions {
 	 */
 	unsafeMode?: boolean;
 	/**
+	 * Claude Code tool-permission grant, passed as `--allowedTools <tool...>`. In
+	 * headless `-p` mode Claude denies Edit/Write/Bash unless the tool is granted,
+	 * so a dogfood worker with no grant makes zero edits (every Write is denied).
+	 * Absent or empty → the flag is omitted and Claude's default-deny stands. This
+	 * grants a worker the authority to act; scope stays bounded post-hoc by the M4
+	 * diff-scope + acceptance contract, NOT by withholding the grant. This is the
+	 * safe alternative to `unsafeMode`/`--dangerously-skip-permissions` (denied by
+	 * the GAP-10 guard) — it names the exact allowed tools instead of bypassing all
+	 * permission checks.
+	 */
+	allowedTools?: readonly string[];
+	/**
 	 * Renderer used to convert packet.intent into a prompt.
 	 * When present and packet.intent exists, the rendered prompt takes
 	 * precedence over packet.model.prompt.
@@ -140,6 +152,7 @@ export function createClaudeCodeExecutor(
 	const maxTurns = options?.maxTurns ?? 50;
 	const spawnFn = options?.spawnFn ?? spawn;
 	const unsafeMode = options?.unsafeMode ?? false;
+	const allowedTools = options?.allowedTools;
 	const renderer = options?.renderer;
 	const onToolEvent = options?.onToolEvent;
 
@@ -207,6 +220,13 @@ export function createClaudeCodeExecutor(
 				"--max-turns",
 				String(maxTurns),
 			];
+
+			// Tool-permission grant (R7 FIX 1). Naming the allowed tools lets a
+			// headless worker Edit/Write/Read/Glob/Grep/Bash without bypassing all
+			// permission checks. Omitted when unset/empty so default-deny stands.
+			if (allowedTools && allowedTools.length > 0) {
+				args.push("--allowedTools", ...allowedTools);
+			}
 
 			if (unsafeMode) {
 				args.push(CLAUDE_UNSAFE_PERMISSION_FLAG);

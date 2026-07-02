@@ -361,6 +361,117 @@ describe("ClaudeCodeExecutor", () => {
 		expect(mockSpawn.mock.calls[0][0]).toBe("/usr/local/bin/claude-custom");
 	});
 
+	// ── Tool-permission grant (R7 FIX 1) ─────────────────────────────
+	// A headless `claude -p` worker denies Edit/Write/Bash unless the tool is
+	// granted via `--allowedTools`; the dogfood loop worker made zero edits until
+	// this grant was threaded. Scope stays bounded post-hoc by M4 diff-scope +
+	// acceptance, NOT by withholding the grant.
+
+	it("allowedTools option → passed as --allowedTools followed by each tool name", async () => {
+		const mockSpawn = createMockSpawn({
+			stdout: JSON.stringify({ result: "done" }),
+		});
+		const executor = createClaudeCodeExecutor({
+			spawnFn: mockSpawn as never,
+			allowedTools: ["Edit", "Write", "Read", "Glob", "Grep", "Bash"],
+		});
+		const eventBus = createEventBus();
+
+		await executor.executePacketAsync(makePacket(), PROJECT_ROOT, eventBus);
+
+		const spawnArgs: string[] = mockSpawn.mock.calls[0][1] as string[];
+		const idx = spawnArgs.indexOf("--allowedTools");
+		expect(idx).toBeGreaterThanOrEqual(0);
+		expect(spawnArgs.slice(idx + 1, idx + 7)).toEqual([
+			"Edit",
+			"Write",
+			"Read",
+			"Glob",
+			"Grep",
+			"Bash",
+		]);
+	});
+
+	it("absent allowedTools omits the --allowedTools flag (Claude default-deny stands)", async () => {
+		const mockSpawn = createMockSpawn({
+			stdout: JSON.stringify({ result: "done" }),
+		});
+		const executor = createClaudeCodeExecutor({ spawnFn: mockSpawn as never });
+		const eventBus = createEventBus();
+
+		await executor.executePacketAsync(makePacket(), PROJECT_ROOT, eventBus);
+
+		const spawnArgs: string[] = mockSpawn.mock.calls[0][1] as string[];
+		expect(spawnArgs).not.toContain("--allowedTools");
+	});
+
+	it("empty allowedTools array omits the --allowedTools flag", async () => {
+		const mockSpawn = createMockSpawn({
+			stdout: JSON.stringify({ result: "done" }),
+		});
+		const executor = createClaudeCodeExecutor({
+			spawnFn: mockSpawn as never,
+			allowedTools: [],
+		});
+		const eventBus = createEventBus();
+
+		await executor.executePacketAsync(makePacket(), PROJECT_ROOT, eventBus);
+
+		const spawnArgs: string[] = mockSpawn.mock.calls[0][1] as string[];
+		expect(spawnArgs).not.toContain("--allowedTools");
+	});
+
+	it("granting allowedTools does NOT enable the dangerous skip-permissions flag", async () => {
+		const mockSpawn = createMockSpawn({
+			stdout: JSON.stringify({ result: "done" }),
+		});
+		const executor = createClaudeCodeExecutor({
+			spawnFn: mockSpawn as never,
+			allowedTools: ["Write", "Bash"],
+		});
+		const eventBus = createEventBus();
+
+		await executor.executePacketAsync(makePacket(), PROJECT_ROOT, eventBus);
+
+		const spawnArgs: string[] = mockSpawn.mock.calls[0][1] as string[];
+		expect(spawnArgs).not.toContain(UNSAFE_PERMISSION_FLAG);
+	});
+
+	// ── Configurable timeout (R7 FIX 2) ──────────────────────────────
+	// The worker timeout must be threadable — a hardcoded 300000ms killed a real
+	// nine-file derivation mid-flight. A never-closing child proves the configured
+	// value drives the kill (a hardcoded 300000ms would hang past vitest's 15s cap).
+
+	it("custom timeoutMs is honored (worker killed with the configured value, not the 300000ms default)", async () => {
+		const neverClosing = vi.fn((..._args: unknown[]) => {
+			const emitter = new EventEmitter();
+			const stdoutStream = new Readable({ read() {} });
+			const stderrStream = new Readable({ read() {} });
+			(emitter as Record<string, unknown>).stdout = stdoutStream;
+			(emitter as Record<string, unknown>).stderr = stderrStream;
+			// Real ChildProcess.kill() fires `close` on a later tick, so the timeout
+			// handler finishes setting exitCode/stderr before close is observed.
+			(emitter as Record<string, unknown>).kill = () => {
+				setImmediate(() => emitter.emit("close", -1));
+			};
+			return emitter;
+		});
+		const executor = createClaudeCodeExecutor({
+			spawnFn: neverClosing as never,
+			timeoutMs: 25,
+		});
+		const eventBus = createEventBus();
+
+		const receipt = await executor.executePacketAsync(
+			makePacket(),
+			PROJECT_ROOT,
+			eventBus,
+		);
+
+		expect(receipt.exitCode).toBe(-1);
+		expect(receipt.stderr).toBe("Timeout after 25ms");
+	});
+
 	it("sync executePacket throws", () => {
 		const executor = createClaudeCodeExecutor();
 		expect(() => executor.executePacket(makePacket(), PROJECT_ROOT)).toThrow(

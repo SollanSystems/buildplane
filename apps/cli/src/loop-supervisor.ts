@@ -136,6 +136,25 @@ export function buildEnvelopeProposal(
 
 // ── Pure reducer ────────────────────────────────────────────
 
+/**
+ * Seed a fresh loop's `trustedBase` from the workspace git HEAD (R7 FIX 3). A
+ * bare `planforge loop --reset` deletes `loop-state.json`; the next fresh init
+ * otherwise starts with `trustedBase: null`, which makes the planner report
+ * INSUFFICIENT_EVIDENCE and the loop die before it ever dispatches. Mirroring
+ * `bp goal`'s HEAD auto-detect closes that gap so `--reset` then re-fire works.
+ *
+ * `resolveHead` is injected (rather than reading git directly) so this stays a
+ * pure, unit-testable function. Returns `null` when HEAD cannot be resolved
+ * (e.g. a non-git workspace) — the caller keeps the prior null-base behaviour
+ * rather than crashing.
+ */
+export function seedTrustedBaseFromHead(
+	resolveHead: () => string | null,
+): string | null {
+	const head = resolveHead()?.trim();
+	return head && head.length > 0 ? head : null;
+}
+
 export function initialLoopState(opts: {
 	maxIterations: number | null;
 	tokenBudget: number | null;
