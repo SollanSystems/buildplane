@@ -84,6 +84,26 @@ to a worktree and runs the broker **before** the side effect:
 `emitCapabilityDenied` → a signed `capability_denied` tape event carrying `run_id`,
 `bundle_digest`, `tool`, `reason`, `target`. The tape event is the M6 verifier story.
 
+## Enforcement scope
+
+The broker gates only packets that dispatch through the **command-executor** path.
+`apps/cli` `run-cli.ts` splits execution on `packet.execution`: an `execution` packet
+routes to the command executor, which builds a per-call registry
+(`toolRegistryOptionsForPacket` → `createToolRegistry`) carrying the bundle — so its
+`write_file` / `run_command` calls are checked fail-closed. **Model / claude-code worker
+packets take the other branch** and get no capability-scoped tool registry; the broker
+does not gate their edits. Those workers are constrained instead by **M4 post-hoc
+diff-scope + acceptance** — the finalization gate rejects out-of-scope changes after the
+fact rather than blocking the tool call before it.
+
+This is exactly the M6 demo's honest **Property 2** scoping: the fail-closed enforcement
+is demonstrated against a *command packet* (the real M3 boundary), not the Claude
+subprocess, whose hard enforcement is not feasible under the spawn model (soft
+system-prompt / `--allowed-tools` hints are best-effort additive only, never the
+property-demonstrating path — v0.5 demo spec §Property 2). Extending broker enforcement
+to the model-worker tool surface (host/model tool catalogs) is **post-v0.5 backlog**,
+tracked with the side-effect-vocabulary follow-up below.
+
 ## L0 quarantine event — `capability_denied`
 
 `CapabilityDeniedV1` (`bundle_digest`, `tool`, `reason`, `target`, `run_id`): a signed,
