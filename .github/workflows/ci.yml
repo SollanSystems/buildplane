@@ -28,10 +28,20 @@ jobs:
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      # Pinned to match the version that produced the committed generated TS
+      # (see scripts/ledger/generate-schema.sh). Bump both together.
+      - name: Install typeshare CLI
+        run: cargo install typeshare-cli --version 1.13.4 --locked
+
       - name: Verify ledger payload fixtures are fresh
         run: |
           pnpm ledger:gen-fixtures
           git diff --exit-code -- packages/ledger-client/fixtures/payload-variants.json
+
+      - name: Verify generated ledger TS is fresh
+        run: |
+          pnpm ledger:gen
+          git diff --exit-code -- packages/ledger-client/src/generated
 
       - name: Assert no dist directories before build
         run: |
