@@ -1,12 +1,13 @@
 {
 	"name": "buildplane",
-	"private": true,
 	"version": "0.12.2",
 	"type": "module",
 	"description": "Buildplane CLI",
+	"publishConfig": {
+		"access": "public"
+	},
 	"bin": {
-		"buildplane": "./dist/index.js",
-		"gsd2": "./dist/gsd2-index.js"
+		"buildplane": "./dist/index.js"
 	},
 	"engines": {
 		"node": ">=24.13.1 <25"

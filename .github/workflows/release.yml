@@ -31,15 +31,37 @@ jobs:
         with:
           node-version-file: .node-version
           cache: pnpm
+          registry-url: https://registry.npmjs.org
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Create or update release PR
+      - name: Require npm credentials on a release-landing push
+        # When the "chore: version packages" release PR merges, this push is the
+        # one that publishes. Fail loud (not silently) if NPM_TOKEN was never
+        # configured, so a merged release can't quietly skip the npm publish.
+        if: "${{ startsWith(github.event.head_commit.message, 'chore: version packages') }}"
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "${NPM_TOKEN}" ]; then
+            echo "::error::NPM_TOKEN is not configured; refusing to run changeset publish without registry credentials."
+            exit 1
+          fi
+
+      - name: Create Release PR or publish to npm
+        id: changesets
         uses: changesets/action@v1
         with:
+          # With pending changesets this opens/updates the "chore: version
+          # packages" PR (no publish, no NPM_TOKEN needed). Once that PR merges
+          # the changesets are consumed, so this run instead publishes the bumped
+          # package. `changeset publish` no-ops when nothing new is unpublished.
           version: pnpm exec changeset version
+          publish: pnpm exec changeset publish
           commit: "chore: version packages"
           title: "chore: version packages"
         env:
           GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

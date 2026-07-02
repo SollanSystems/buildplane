@@ -30,8 +30,9 @@ describe("published bootstrap contract", () => {
 			expect(cliPkg.name).toBe("buildplane");
 		});
 
-		it("remains private in the repo", () => {
-			expect(cliPkg.private).toBe(true);
+		it("is publishable — no private flag, public access (M6-S13)", () => {
+			expect(cliPkg.private).toBeUndefined();
+			expect(cliPkg.publishConfig?.access).toBe("public");
 		});
 
 		it("points bin.buildplane at the built artifact", () => {
