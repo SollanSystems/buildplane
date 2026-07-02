@@ -9,6 +9,7 @@ import type {
 	AcceptanceDiffScopeResult,
 	AcceptanceEvidence,
 	AcceptanceRecordInput,
+	AdmittedPlanReader,
 	BuildplanePolicyPort,
 	BuildplaneRuntimePort,
 	BuildplaneStoragePort,
@@ -105,7 +106,14 @@ interface HarnessOptions {
 	readonly throwOnRecordAcceptance?: boolean;
 	/** Optional dependency-provisioning hook forwarded to the orchestrator. */
 	readonly provisionDeps?: (workspacePath: string) => void;
+	/** Wire a recording {@link ResultReadyPort} to assert the M6-S7 terminal gate. */
+	readonly withResultReadyPort?: boolean;
+	/** Override the admitted-plan reader so a packet carrying `provenance_ref` passes
+	 * the admission gate without a real signed events.db. */
+	readonly admittedPlanReader?: AdmittedPlanReader;
 }
+
+const ACCEPTANCE_EVENT_FIXTURE_ID = "01919000-0000-7000-8000-0000000000ac";
 
 function createHarness(options: HarnessOptions = {}) {
 	const {
@@ -125,8 +133,15 @@ function createHarness(options: HarnessOptions = {}) {
 		mutateOnCollectChecks = [],
 		commitOnCollectChecks = [],
 		throwOnRecordAcceptance = false,
+		withResultReadyPort = false,
+		admittedPlanReader,
 	} = options;
 	const runEvents: string[] = [];
+	const resultReadyRecords: {
+		runId: string;
+		admissionEventId: string;
+		acceptanceEventId: string;
+	}[] = [];
 	const evidencePayloads: ExecutionReceipt[] = [];
 	let evaluateRunCallCount = 0;
 	const runtimeRoots: string[] = [];
@@ -437,6 +452,7 @@ function createHarness(options: HarnessOptions = {}) {
 		acceptanceEvidenceCalls,
 		acceptanceRecords,
 		acceptanceShadowRecords,
+		resultReadyRecords,
 		diffScopeChangedFiles,
 		failurePayloads,
 		cleanupErrors,
@@ -449,6 +465,7 @@ function createHarness(options: HarnessOptions = {}) {
 			policy,
 			workspace,
 			admissionStore,
+			...(admittedPlanReader ? { admittedPlanReader } : {}),
 			provisionDeps,
 			acceptanceEvidencePort: {
 				collectCheckResults() {
@@ -487,6 +504,23 @@ function createHarness(options: HarnessOptions = {}) {
 							if (throwOnRecordAcceptance) {
 								throw new Error("ledger flush rejected");
 							}
+							return ACCEPTANCE_EVENT_FIXTURE_ID;
+						},
+					}
+				: undefined,
+			resultReadyPort: withResultReadyPort
+				? {
+						async recordResultReady(
+							runId: string,
+							admissionEventId: string,
+							acceptanceEventId: string,
+						) {
+							runEvents.push("result-ready");
+							resultReadyRecords.push({
+								runId,
+								admissionEventId,
+								acceptanceEventId,
+							});
 						},
 					}
 				: undefined,
@@ -1261,6 +1295,95 @@ describe("kernel orchestrator", () => {
 			expect(acceptanceShadowRecords).toEqual([
 				{ runId: "run-1", outcome: "passed" },
 			]);
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("emits result_ready chained to admission + acceptance when a run terminates passed (M6-S7 A1)", async () => {
+		const acceptanceContract: AcceptanceContractV0 = {
+			contract_version: "v0",
+			diff_scope: { allowed_globs: ["**"] },
+			checks: [{ command: "pnpm lint" }],
+		};
+		const { orchestrator, resultReadyRecords, acceptanceRecords, cleanup } =
+			createHarness({
+				trustedAcceptanceCheckResults: [{ command: "pnpm lint", exitCode: 0 }],
+				policyOutcome: "approved",
+				withAcceptancePort: true,
+				withResultReadyPort: true,
+				admittedPlanReader: {
+					async read() {
+						return {
+							authorizedNextStep: "dispatch_admitted_plan",
+							signedByKernel: true,
+						};
+					},
+				},
+				policyProfile: {
+					name: "default",
+					trustGates: { acceptanceContract },
+				},
+			});
+
+		try {
+			const admittedPacket = { ...packet, provenance_ref: "admit-event-1" };
+			const result = await orchestrator.runPacketAsync(admittedPacket);
+
+			expect(result.run.status).toBe("passed");
+			expect(acceptanceRecords[0]?.outcome).toBe("passed");
+			// result_ready fires exactly once at the terminal passed outcome, chaining
+			// the plan_admitted (provenance_ref) + the acceptance_recorded event id.
+			expect(resultReadyRecords).toEqual([
+				{
+					runId: "run-1",
+					admissionEventId: "admit-event-1",
+					acceptanceEventId: ACCEPTANCE_EVENT_FIXTURE_ID,
+				},
+			]);
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("emits NO result_ready when a run passes acceptance on an attempt but terminates failed (M6-S7 A1 negative)", async () => {
+		const acceptanceContract: AcceptanceContractV0 = {
+			contract_version: "v0",
+			diff_scope: { allowed_globs: ["**"] },
+			checks: [{ command: "pnpm lint" }],
+		};
+		const { orchestrator, resultReadyRecords, acceptanceRecords, cleanup } =
+			createHarness({
+				// Acceptance checks PASS (exit 0) → acceptance_recorded(passed) ...
+				trustedAcceptanceCheckResults: [{ command: "pnpm lint", exitCode: 0 }],
+				// ... but the terminal policy.evaluateRun REJECTS → run terminates failed.
+				// This reproduces the 2026-07-01 dogfood acceptance(passed)+receipt(failed)
+				// pair: emitting result_ready at the per-attempt acceptance pass would sign
+				// a false result_ready; the terminal gate must suppress it.
+				policyOutcome: "rejected",
+				withAcceptancePort: true,
+				withResultReadyPort: true,
+				admittedPlanReader: {
+					async read() {
+						return {
+							authorizedNextStep: "dispatch_admitted_plan",
+							signedByKernel: true,
+						};
+					},
+				},
+				policyProfile: {
+					name: "default",
+					trustGates: { acceptanceContract },
+				},
+			});
+
+		try {
+			const admittedPacket = { ...packet, provenance_ref: "admit-event-1" };
+			const result = await orchestrator.runPacketAsync(admittedPacket);
+
+			expect(acceptanceRecords[0]?.outcome).toBe("passed");
+			expect(result.run.status).not.toBe("passed");
+			expect(resultReadyRecords).toEqual([]);
 		} finally {
 			cleanup();
 		}

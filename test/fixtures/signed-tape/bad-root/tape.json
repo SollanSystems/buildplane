@@ -31,12 +31,12 @@
 			}
 		},
 		{
-			"canonical_event_b64": "eyJpZCI6IjAxOTE5MDAwLTAwMDAtNzAwMC04MDAwLTAwMDAwMDAwMDAwMyIsInJ1bl9pZCI6IjAxOTE5MDAwLTAwMDAtNzAwMC04MDAwLTAwMDAwMDAwMDBmZiIsInBhcmVudF9ldmVudF9pZCI6IjAxOTE5MDAwLTAwMDAtNzAwMC04MDAwLTAwMDAwMDAwMDAwMiIsInNjaGVtYV92ZXJzaW9uIjoxLCJraW5kIjoicnVuX2NvbXBsZXRlZCIsIm9jY3VycmVkX2F0IjoiMjAyNi0wNS0yOVQwMDowMDowMloiLCJwYXlsb2FkIjp7IlJ1bkNvbXBsZXRlZFYxIjp7Im91dGNvbWUiOiJwYXNzZWQiLCJkdXJhdGlvbl9tcyI6MiwiZXZlbnRfY291bnQiOjMsInVuaXRfY291bnQiOjF9fX0=",
+			"canonical_event_b64": "eyJpZCI6IjAxOTE5MDAwLTAwMDAtNzAwMC04MDAwLTAwMDAwMDAwMDAwMyIsInJ1bl9pZCI6IjAxOTE5MDAwLTAwMDAtNzAwMC04MDAwLTAwMDAwMDAwMDBmZiIsInBhcmVudF9ldmVudF9pZCI6IjAxOTE5MDAwLTAwMDAtNzAwMC04MDAwLTAwMDAwMDAwMDAwMiIsInNjaGVtYV92ZXJzaW9uIjoxLCJraW5kIjoicnVuX2NvbXBsZXRlZCIsIm9jY3VycmVkX2F0IjoiMjAyNi0wNS0yOVQwMDowMDowMloiLCJwYXlsb2FkIjp7IlJ1bkNvbXBsZXRlZFYxIjp7Im91dGNvbWUiOiJwYXNzZWQiLCJkdXJhdGlvbl9tcyI6IjIiLCJldmVudF9jb3VudCI6IjMiLCJ1bml0X2NvdW50IjoiMSJ9fX0=",
 			"signature": {
 				"algorithm": "ed25519",
-				"canonical_event_hash": "sha256:b2cee431cd6b11d8360053022ecc3a645e635bba6ae4b2c1e6495535a4df6126",
+				"canonical_event_hash": "sha256:1cae78eccbc833d52567183c8043c52fb546611c34787dcfc2823593f5152c8d",
 				"event_id": "01919000-0000-7000-8000-000000000003",
-				"signature": "8t85dkxaqap2Us3xsuZYxme8mMT2VqvA8eY_4sluVgC6S9Hnxfwm8FFXMPZYnxIcXGTGu0YuU6yw0Efr1zmUAw",
+				"signature": "4lElWCeezTYavGT0RQXk6g_Wzeg8UmTVfEtDyC74ZL-F2rc5mUmeuguUUcln96t1hX6XyInozBQXrRk8JTrNCg",
 				"signed_at": "2026-05-29T00:00:05Z",
 				"signer": {
 					"actor_id": "kernel",

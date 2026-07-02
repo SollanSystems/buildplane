@@ -106,9 +106,9 @@ fn write_parent_tape() -> (TempDir, std::path::PathBuf, RunId, EventId, String) 
         EventId::new(), run_id, Some(run_start_id), EventKind::RunCompleted,
         Payload::RunCompletedV1(RunCompletedV1 {
             outcome: RunOutcome::Passed,
-            duration_ms: 10,
-            event_count: 6,
-            unit_count: 1,
+            duration_ms: "10".into(),
+            event_count: "6".into(),
+            unit_count: "1".into(),
         }),
     )).unwrap();
 

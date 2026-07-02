@@ -87,9 +87,9 @@ describe("happy path", () => {
 				{
 					RunCompletedV1: {
 						outcome: "passed",
-						duration_ms: 42,
-						event_count: 6,
-						unit_count: 1,
+						duration_ms: "42",
+						event_count: "6",
+						unit_count: "1",
 					},
 				},
 				{ parent: runStartedId },

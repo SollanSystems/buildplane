@@ -78,9 +78,9 @@ fn event_after_handshake_is_stored() {
         occurred_at: Utc::now(),
         payload: Payload::RunCompletedV1(RunCompletedV1 {
             outcome: RunOutcome::Passed,
-            duration_ms: 0,
-            event_count: 1,
-            unit_count: 0,
+            duration_ms: "0".into(),
+            event_count: "1".into(),
+            unit_count: "0".into(),
         }),
     };
     let stdin = format!(
@@ -151,9 +151,9 @@ fn flush_ack_carries_seq() {
         occurred_at: Utc::now(),
         payload: Payload::RunCompletedV1(RunCompletedV1 {
             outcome: RunOutcome::Passed,
-            duration_ms: 0,
-            event_count: 1,
-            unit_count: 0,
+            duration_ms: "0".into(),
+            event_count: "1".into(),
+            unit_count: "0".into(),
         }),
     };
     let stdin = format!(
@@ -212,9 +212,9 @@ fn signed_mode_ingests_and_reads_back_verified() {
         occurred_at: Utc::now(),
         payload: Payload::RunCompletedV1(RunCompletedV1 {
             outcome: RunOutcome::Passed,
-            duration_ms: 0,
-            event_count: 1,
-            unit_count: 0,
+            duration_ms: "0".into(),
+            event_count: "1".into(),
+            unit_count: "0".into(),
         }),
     };
     let stdin = format!(

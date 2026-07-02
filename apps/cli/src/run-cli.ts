@@ -28,6 +28,8 @@ import type {
 	OperatorDecisionPort,
 	PolicyProfile,
 	RecordOperatorDecisionInput,
+	ResultReadyPort,
+	RunCompletionPort,
 } from "@buildplane/kernel";
 import {
 	createTapeEmitter,
@@ -91,6 +93,8 @@ import {
 import { runGitCheckpoint } from "./ledger-git-checkpoint.js";
 import { createOperatorDecisionPort } from "./ledger-operator-decision.js";
 import { createLedgerReceiptPort } from "./ledger-receipt-port.js";
+import { createResultReadyPort } from "./ledger-result-ready.js";
+import { createRunCompletionPort } from "./ledger-run-completed.js";
 import { wrapToolRegistryForLedger } from "./ledger-tool-wrapper.js";
 import {
 	buildEnvelopeProposal,
@@ -1430,6 +1434,8 @@ async function loadCliOrchestrator(
 		readonly profileRegistry?: BuildplaneProfileRegistryPort;
 		readonly acceptancePort?: BuildplaneAcceptancePort;
 		readonly operatorDecisionPort?: OperatorDecisionPort;
+		readonly resultReadyPort?: ResultReadyPort;
+		readonly runCompletionPort?: RunCompletionPort;
 		readonly provisionDeps?: (workspacePath: string) => void;
 		/** Lowered worker turn cap for the supervisor loop's runaway guard. */
 		readonly claudeMaxTurns?: number;
@@ -1498,6 +1504,8 @@ async function loadCliOrchestrator(
 			profileRegistry?: BuildplaneProfileRegistryPort;
 			acceptancePort?: BuildplaneAcceptancePort;
 			operatorDecisionPort?: OperatorDecisionPort;
+			resultReadyPort?: ResultReadyPort;
+			runCompletionPort?: RunCompletionPort;
 			provisionDeps?: (workspacePath: string) => void;
 			budgets?: BudgetConstraints;
 		}) => BuildplaneCliOrchestrator;
@@ -1848,6 +1856,13 @@ async function loadCliOrchestrator(
 		// real ledger-backed port; tests inject a fake via opts.
 		operatorDecisionPort:
 			opts?.operatorDecisionPort ?? createOperatorDecisionPort(projectRoot),
+		// M6-S7 — signed `result_ready` (write-ahead at terminal `passed`) rides the
+		// dispatch's shared signed emitter, injected by the dispatch caller; absent
+		// for non-dispatch callers. `run_completed` fires from the operator-decision
+		// path (a separate invocation), so it owns a subprocess like the decision port.
+		resultReadyPort: opts?.resultReadyPort,
+		runCompletionPort:
+			opts?.runCompletionPort ?? createRunCompletionPort(projectRoot),
 		provisionDeps: opts?.provisionDeps,
 		// Runaway-guard budgets (loop dispatch); undefined for non-loop callers.
 		budgets: opts?.budgets,
@@ -2710,10 +2725,11 @@ function emitLedgerRunCompleted(
 	}
 	emitter.emit("run_completed", {
 		RunCompletedV1: {
+			// M6-S7 (A3): counts are strings on the wire (the U64 → TS-number hazard).
 			outcome,
-			duration_ms: durationMs,
-			event_count: 0,
-			unit_count: 1,
+			duration_ms: String(durationMs),
+			event_count: "0",
+			unit_count: "1",
 		},
 	});
 }
@@ -4692,6 +4708,9 @@ async function runPlanForgeDispatchCommand(
 						ledgerActivityPort,
 						profileRegistry,
 						acceptancePort,
+						// M6-S7 — `result_ready` rides the same signed dispatch emitter
+						// as acceptance/activity events (one serialized writer).
+						resultReadyPort: createResultReadyPort(emitter),
 						provisionDeps: provisionWorktreeDeps,
 						claudeMaxTurns: opts?.claudeMaxTurns,
 						budgets: opts?.budgets,

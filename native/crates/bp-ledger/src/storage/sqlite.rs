@@ -728,9 +728,9 @@ mod flush_fsync_tests {
             occurred_at: Utc::now(),
             payload: Payload::RunCompletedV1(RunCompletedV1 {
                 outcome: RunOutcome::Passed,
-                duration_ms: 0,
-                event_count: 0,
-                unit_count: 0,
+                duration_ms: "0".into(),
+                event_count: "0".into(),
+                unit_count: "0".into(),
             }),
         };
         store.append(&event).unwrap();

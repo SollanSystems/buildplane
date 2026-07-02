@@ -361,9 +361,59 @@ export interface AcceptanceRecordInput {
  * once the event is durably on the tape (write-ahead — mirrors
  * `LedgerActivityPort.activityStarted`), so the kernel can `await` it before the
  * workspace is merged or quarantined.
+ *
+ * Resolves to the signed `acceptance_recorded` event id (M6-S7) so the kernel can
+ * chain a `result_ready` to it at terminal `passed`; `undefined` when no port
+ * recorded one (existing await-only callers ignore the value).
  */
 export interface BuildplaneAcceptancePort {
-	recordAcceptance(input: AcceptanceRecordInput): Promise<void>;
+	recordAcceptance(input: AcceptanceRecordInput): Promise<string | undefined>;
+}
+
+/**
+ * Kernel-facing seam for appending the signed `result_ready` event (M6-S7). A
+ * SEPARATE port from {@link BuildplaneAcceptancePort} (pre-build resolution 7) —
+ * the orchestrator emits it write-ahead of the operator merge/quarantine decision
+ * once the run reaches its terminal `passed` outcome (A1: after `policy.evaluateRun`
+ * decides the terminal advance, NOT when a per-attempt acceptance resolves
+ * `passed`). `recordResultReady` MUST resolve only once the event is durably on the
+ * tape. The three ids chain the run to the `plan_admitted` and `acceptance_recorded`
+ * events that authorized and accepted it.
+ */
+export interface ResultReadyPort {
+	recordResultReady(
+		runId: string,
+		admissionEventId: string,
+		acceptanceEventId: string,
+	): Promise<void>;
+}
+
+export type RunCompletionOutcome = "passed" | "failed" | "cancelled";
+
+/**
+ * The signed `run_completed` summary (M6-S7). All three counts are strings on the
+ * wire (the U64 → TS-number hazard) and are supplied synchronously by the
+ * orchestrator from the already-loaded inspect snapshot (pre-build resolution 8).
+ */
+export interface RecordRunCompletedInput {
+	readonly runId: string;
+	readonly outcome: RunCompletionOutcome;
+	/** Wall-clock run duration in ms (`Date.now() - run.createdAt`), as a string. */
+	readonly durationMs: string;
+	/** Signed-tape event count for the run, as a string. */
+	readonly eventCount: string;
+	/** Units/runs in the run's history, as a string. */
+	readonly unitCount: string;
+}
+
+/**
+ * Kernel-facing seam for appending the signed `run_completed` event (M6-S7),
+ * emitted write-ahead after the operator decision's terminal side effect
+ * (merge+approved → `passed`; merge/resume rejection → `failed`). `recordRunCompleted`
+ * MUST resolve only once the event is durably on the tape.
+ */
+export interface RunCompletionPort {
+	recordRunCompleted(input: RecordRunCompletedInput): Promise<void>;
 }
 
 /**

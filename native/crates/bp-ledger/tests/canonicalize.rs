@@ -10,8 +10,12 @@ use bp_ledger::payload::Payload;
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
+// M6-S7 (A3): `RunCompletedV1.{duration_ms,event_count,unit_count}` now serialize
+// as strings on the wire (per-field override, matching `ResultReadyV1`), so the
+// canonical hash of this fixture changed by design. Safe with no tape migration —
+// `run_completed` was never emitted/signed onto any real tape.
 const SIGNED_EVENT_FIXTURE_HASH: &str =
-    "sha256:71ad93c5d6863d077cbdd5f885275e2ebac705364c44631875c9044eaffe6a08";
+    "sha256:cf4d98cefe28f6257bcb290e3aac9664efc8c7756d85d8bf2d597eed91ae2f65";
 
 fn fixed_signed_event_fixture() -> Event {
     Event {
@@ -25,9 +29,9 @@ fn fixed_signed_event_fixture() -> Event {
         occurred_at: "2026-05-21T21:29:00Z".parse::<DateTime<Utc>>().unwrap(),
         payload: Payload::RunCompletedV1(RunCompletedV1 {
             outcome: RunOutcome::Passed,
-            duration_ms: 1234,
-            event_count: 7,
-            unit_count: 2,
+            duration_ms: "1234".into(),
+            event_count: "7".into(),
+            unit_count: "2".into(),
         }),
     }
 }
@@ -43,9 +47,9 @@ fn v1_passes_through_unchanged() {
         occurred_at: Utc::now(),
         payload: Payload::RunCompletedV1(RunCompletedV1 {
             outcome: RunOutcome::Passed,
-            duration_ms: 0,
-            event_count: 0,
-            unit_count: 0,
+            duration_ms: "0".into(),
+            event_count: "0".into(),
+            unit_count: "0".into(),
         }),
     };
     let out = canonicalize(original.clone()).unwrap();
@@ -71,9 +75,9 @@ fn unsupported_schema_version_errors() {
         occurred_at: Utc::now(),
         payload: Payload::RunCompletedV1(RunCompletedV1 {
             outcome: RunOutcome::Passed,
-            duration_ms: 0,
-            event_count: 0,
-            unit_count: 0,
+            duration_ms: "0".into(),
+            event_count: "0".into(),
+            unit_count: "0".into(),
         }),
     };
     let err = canonicalize(event).unwrap_err();

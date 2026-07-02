@@ -75,9 +75,9 @@ fn run_completed_clears_parent_chain() {
         EventKind::RunCompleted,
         Payload::RunCompletedV1(RunCompletedV1 {
             outcome: RunOutcome::Passed,
-            duration_ms: 0,
-            event_count: 0,
-            unit_count: 0,
+            duration_ms: "0".into(),
+            event_count: "0".into(),
+            unit_count: "0".into(),
         }),
     );
     apply(&mut state, &event);

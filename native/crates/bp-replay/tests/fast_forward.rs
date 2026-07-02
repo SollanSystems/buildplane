@@ -64,9 +64,9 @@ fn write_multistep_tape(db_path: &std::path::Path, run_id: RunId) -> Vec<EventId
         occurred_at: Utc::now(),
         payload: Payload::RunCompletedV1(RunCompletedV1 {
             outcome: RunOutcome::Passed,
-            duration_ms: 10,
-            event_count: 3,
-            unit_count: 1,
+            duration_ms: "10".into(),
+            event_count: "3".into(),
+            unit_count: "1".into(),
         }),
     }).unwrap();
 

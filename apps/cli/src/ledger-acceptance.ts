@@ -50,14 +50,19 @@ export function emitAcceptanceRecorded(
  * The kernel supplies the verdict it independently observed; this closure adds
  * the plan identity it derived per task, emits the signed event, and `flush`es so
  * `recordAcceptance` resolves only once the verdict is durably on the tape
- * (write-ahead — before the kernel merges or quarantines the workspace).
+ * (write-ahead — before the kernel merges or quarantines the workspace). Resolves
+ * to the signed `acceptance_recorded` event id (M6-S7) — captured from the emitter's
+ * post-flush ack, since the acceptance emit is the last write before the flush — so
+ * the kernel can chain a terminal `result_ready` to it.
  */
 export function createAcceptancePort(
 	emitter: TapeEmitter,
 	identity: { readonly planId: string; readonly contractDigest: string },
 ): BuildplaneAcceptancePort {
 	return {
-		async recordAcceptance(input: AcceptanceRecordInput): Promise<void> {
+		async recordAcceptance(
+			input: AcceptanceRecordInput,
+		): Promise<string | undefined> {
 			emitAcceptanceRecorded(emitter, {
 				planId: identity.planId,
 				admissionEventId: input.admissionEventId,
@@ -69,6 +74,7 @@ export function createAcceptancePort(
 				evaluatedAt: input.evaluatedAt,
 			});
 			await emitter.flush();
+			return emitter.stats().lastAckedEventId ?? undefined;
 		},
 	};
 }

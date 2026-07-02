@@ -59,7 +59,7 @@ fn main() {
         })).unwrap(),
 
         serde_json::to_value(Payload::RunCompletedV1(RunCompletedV1 {
-            outcome: RunOutcome::Passed, duration_ms: 0, event_count: 0, unit_count: 0,
+            outcome: RunOutcome::Passed, duration_ms: "0".into(), event_count: "0".into(), unit_count: "0".into(),
         })).unwrap(),
 
         serde_json::to_value(Payload::RunFailedV1(RunFailedV1 {

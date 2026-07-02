@@ -399,12 +399,18 @@ export enum RunOutcome {
 	Cancelled = "cancelled",
 }
 
-/** `run_completed` payload. */
+/**
+ * `run_completed` payload. `duration_ms`/`event_count`/`unit_count` are strings
+ * on the wire (per-field override on this struct only — the global `U64 = number`
+ * typeshare mapping is untouched for `TapeCheckpointV1`/`ModelResponseV1`) so
+ * Rust↔TS digests are byte-identical, matching `ResultReadyV1`'s all-string shape
+ * (M6-S7 A3). Safe with no tape migration: this struct was never emitted/signed.
+ */
 export interface RunCompletedV1 {
 	outcome: RunOutcome;
-	duration_ms: number;
-	event_count: number;
-	unit_count: number;
+	duration_ms: string;
+	event_count: string;
+	unit_count: string;
 }
 
 /** `run_failed` payload — a terminal failure that the run can't recover from. */

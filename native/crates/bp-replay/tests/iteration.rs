@@ -42,9 +42,9 @@ fn write_sample_tape(db_path: &std::path::Path, run_id: RunId) {
         EventKind::RunCompleted,
         Payload::RunCompletedV1(RunCompletedV1 {
             outcome: RunOutcome::Passed,
-            duration_ms: 10,
-            event_count: 2,
-            unit_count: 0,
+            duration_ms: "10".into(),
+            event_count: "2".into(),
+            unit_count: "0".into(),
         }),
     )).unwrap();
 }

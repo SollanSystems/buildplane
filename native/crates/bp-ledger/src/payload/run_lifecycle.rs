@@ -1,7 +1,6 @@
 //! Run lifecycle payloads: RunStarted, RunCompleted, RunFailed, RunAdmissionRecorded.
 
 use crate::id::{EventId, RunId};
-use crate::types::U64;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use typeshare::typeshare;
@@ -26,14 +25,18 @@ pub struct RunStartedV1 {
     pub parent_event_id: Option<EventId>,
 }
 
-/// `run_completed` payload.
+/// `run_completed` payload. `duration_ms`/`event_count`/`unit_count` are strings
+/// on the wire (per-field override on this struct only — the global `U64 = number`
+/// typeshare mapping is untouched for `TapeCheckpointV1`/`ModelResponseV1`) so
+/// Rust↔TS digests are byte-identical, matching `ResultReadyV1`'s all-string shape
+/// (M6-S7 A3). Safe with no tape migration: this struct was never emitted/signed.
 #[typeshare]
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunCompletedV1 {
     pub outcome: RunOutcome,
-    pub duration_ms: U64,
-    pub event_count: U64,
-    pub unit_count: U64,
+    pub duration_ms: String,
+    pub event_count: String,
+    pub unit_count: String,
 }
 
 /// `result_ready` payload (M6-S6) — signals that a run reached a terminal,
@@ -185,9 +188,9 @@ mod tests {
     fn run_completed_v1_round_trips() {
         let payload = RunCompletedV1 {
             outcome: RunOutcome::Passed,
-            duration_ms: 1234,
-            event_count: 42,
-            unit_count: 3,
+            duration_ms: "1234".into(),
+            event_count: "42".into(),
+            unit_count: "3".into(),
         };
         let s = serde_json::to_string(&payload).unwrap();
         let back: RunCompletedV1 = serde_json::from_str(&s).unwrap();
