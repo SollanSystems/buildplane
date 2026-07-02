@@ -93,6 +93,7 @@ import { createLedgerReceiptPort } from "./ledger-receipt-port.js";
 import { wrapToolRegistryForLedger } from "./ledger-tool-wrapper.js";
 import {
 	buildEnvelopeProposal,
+	clearLoopState,
 	initialLoopState,
 	type LoopState,
 	loopStatePath,
@@ -259,6 +260,22 @@ export interface LoopDispatchResult {
 	 * model activity reported usage (e.g. command-only dispatch).
 	 */
 	readonly tokenUsage: number;
+	/**
+	 * Whether any task in this dispatch produced durable side effects — a non-empty
+	 * worktree diff (`receipt.changedFiles`) or a merged HEAD. `false` fingerprints
+	 * an infra/dispatch death where the worker never ran (e.g. a 429 rejection:
+	 * 0 tokens, 0 turns, empty diff). The supervisor uses this to label a failed
+	 * dispatch `dispatch-error` (worker never produced work) vs `acceptance-fail`
+	 * (worker built a diff the acceptance contract rejected).
+	 */
+	readonly producedSideEffects: boolean;
+	/**
+	 * The failing task's policy-decision reasons (acceptance/dispatch), threaded
+	 * verbatim into the supervisor's terminal detail so a halt carries the real
+	 * cause instead of a hardcoded placeholder. Empty when the dispatch passed or
+	 * reported no reasons.
+	 */
+	readonly reasons: readonly string[];
 	readonly runs: readonly unknown[];
 }
 
@@ -959,13 +976,14 @@ function formatPlanForgeHelp(): string[] {
 		"    --operator <id>         Required; deciding operator identity (decided_by)",
 		"    --json                  Prints the authorization result as JSON",
 		"",
-		"buildplane planforge loop [--once | --max-iterations=N] [--max-turns=N] [--max-tokens=N] [--wall-clock-ms=N] [--model <id>] [--json]",
+		"buildplane planforge loop [--once | --max-iterations=N] [--max-turns=N] [--max-tokens=N] [--wall-clock-ms=N] [--model <id>] [--reset] [--json]",
 		"",
 		"  Supervisor: drive plan -> dry-run -> envelope-check -> admit -> dispatch ->",
 		"  accept -> merge -> re-anchor across iterations, persisting loop-state.json",
 		"  atomically after every transition and resuming from a persisted state.",
 		"  Stops on terminal condition / .buildplane/loop.stop / acceptance-FAIL /",
-		"  envelope breach / cumulative token budget / max-iterations / planner error.",
+		"  dispatch-error (infra death: no side effects + non-zero exit) / envelope",
+		"  breach / cumulative token budget / max-iterations / planner error.",
 		"",
 		"  Options:",
 		"    --once                  Run exactly one slice (equivalent to --max-iterations=1)",
@@ -974,6 +992,7 @@ function formatPlanForgeHelp(): string[] {
 		"    --max-tokens=N          Per-iteration token budget for the abort guard",
 		"    --wall-clock-ms=N       Per-iteration wall-clock cap for the abort guard",
 		"    --model <id>            Worker model override for dispatched packets (default claude-sonnet-4)",
+		"    --reset                 Clear .buildplane/loop-state.json and exit (re-fire a terminated loop)",
 		"    --json                  Prints the loop summary as JSON",
 	];
 }
@@ -4377,6 +4396,10 @@ interface PlanForgeDispatchOutcome {
 	readonly mergedHeadSha: string | null;
 	/** Real total token usage (input + output) summed across this dispatch's tasks. */
 	readonly tokenUsage: number;
+	/** True if any task produced a non-empty diff or a merged HEAD (see LoopDispatchResult). */
+	readonly producedSideEffects: boolean;
+	/** The failing task's policy-decision reasons (see LoopDispatchResult). */
+	readonly reasons: readonly string[];
 	readonly runs: ReadonlyArray<{
 		task: string;
 		run_id: string;
@@ -4534,6 +4557,13 @@ async function runPlanForgeDispatchCommand(
 	// Real total token usage (input + output) summed across this dispatch's model
 	// activities, surfaced to the supervisor's cumulative token-budget cap (GAP-7).
 	let totalTokenUsage = 0;
+	// R1 terminal-reason fidelity: track whether any task produced durable side
+	// effects (a non-empty worktree diff or a merged HEAD) and capture the failing
+	// task's policy-decision reasons. The supervisor labels a failed dispatch
+	// `dispatch-error` when NO side effects were produced (worker never ran — e.g. a
+	// 429 rejection) vs `acceptance-fail` when the worker built a rejected diff.
+	let producedSideEffects = false;
+	const failureReasons: string[] = [];
 	try {
 		// Demo crash-injection (M6 Property 1): NO-OP unless BUILDPLANE_CRASH_AFTER_ACTIVITY=1,
 		// in which case the dispatch aborts hard right after the first activity_completed
@@ -4590,7 +4620,8 @@ async function runPlanForgeDispatchCommand(
 			)) as {
 				run: { id: string; status: string };
 				mergedHeadSha?: string;
-				receipt?: { tokenUsage?: number };
+				receipt?: { tokenUsage?: number; changedFiles?: readonly string[] };
+				decision?: { reasons?: readonly string[] };
 			};
 			runs.push({
 				task: packet.unit.id,
@@ -4599,11 +4630,22 @@ async function runPlanForgeDispatchCommand(
 			});
 			if (result.mergedHeadSha) {
 				lastMergedHeadSha = result.mergedHeadSha;
+				producedSideEffects = true;
+			}
+			// A non-empty worktree diff means the worker actually ran and mutated the
+			// tree — a durable side effect — even if acceptance later rejected it.
+			if ((result.receipt?.changedFiles?.length ?? 0) > 0) {
+				producedSideEffects = true;
 			}
 			// Accumulate the real per-task token usage (terminal `usage`), even for a
 			// failed task — the worker still consumed those tokens against the budget.
 			totalTokenUsage += result.receipt?.tokenUsage ?? 0;
 			if (result.run.status !== "passed") {
+				// Capture the failing task's decision reasons for the supervisor's
+				// terminal detail (verbatim; empty when the run reported none).
+				for (const reason of result.decision?.reasons ?? []) {
+					failureReasons.push(reason);
+				}
 				break; // PF2 dependsOn PF1: stop the chain on first failure.
 			}
 		}
@@ -4616,6 +4658,8 @@ async function runPlanForgeDispatchCommand(
 			allPassed,
 			mergedHeadSha: lastMergedHeadSha,
 			tokenUsage: totalTokenUsage,
+			producedSideEffects,
+			reasons: failureReasons,
 			runs,
 		});
 
@@ -4885,10 +4929,15 @@ export function makeDefaultLoopDispatch(
 	guard: PolicyProfile,
 ) => Promise<LoopDispatchResult> {
 	return async (planPath, cwd, guard) => {
+		// Default stands only if `onOutcome` never fires (the dispatch aborted before
+		// reporting) — that IS an infra death (no worker work), so `producedSideEffects`
+		// defaults false → a failed dispatch with no outcome maps to `dispatch-error`.
 		let outcome: LoopDispatchResult = {
 			allPassed: false,
 			mergedHeadSha: null,
 			tokenUsage: 0,
+			producedSideEffects: false,
+			reasons: [],
 			runs: [],
 		};
 		await dispatchCommand(["--input", planPath, "--json"], cwd, () => {}, {
@@ -4926,6 +4975,22 @@ async function runPlanForgeLoopCommand(
 ): Promise<number> {
 	const workspace = resolve(cwd);
 	const jsonOut = args.includes("--json");
+
+	// `--reset`: clear the persisted loop-state and exit before starting a run. A
+	// loop that halted on a sticky terminal (e.g. `dispatch-error` from a 429)
+	// otherwise resumes straight back into it; this is the re-fire path.
+	if (args.includes("--reset")) {
+		const cleared = clearLoopState(workspace);
+		stdout(
+			jsonOut
+				? formatJson({ reset: cleared, statePath: loopStatePath(workspace) })
+				: cleared
+					? `loop state cleared: ${loopStatePath(workspace)}`
+					: "no loop state to clear.",
+		);
+		return 0;
+	}
+
 	const once = args.includes("--once");
 	const maxIterations = once ? 1 : parseIntFlag(args, "--max-iterations", null);
 	const maxTurns = parseIntFlag(args, "--max-turns", 12) ?? 12;
@@ -5064,11 +5129,24 @@ async function runPlanForgeLoopCommand(
 		}
 
 		if (!d.allPassed) {
+			// Thread the real decision reasons into the terminal detail (verbatim);
+			// fall back to a placeholder only when the dispatch reported none.
+			const detail =
+				d.reasons.length > 0
+					? d.reasons.join("; ")
+					: "dispatch/acceptance failed";
+			// Distinguish an infra/dispatch death (worker produced NO side effects —
+			// e.g. a 429 rejection: 0 tokens, 0 turns, empty diff) from a genuine
+			// acceptance failure (worker built a diff the contract rejected). Only the
+			// explicit `producedSideEffects === false` negative signal downgrades to
+			// `dispatch-error`; anything else stays `acceptance-fail`.
 			commit(
-				nextLoopState(state, {
-					type: "acceptance-failed",
-					detail: "dispatch/acceptance failed",
-				}),
+				nextLoopState(
+					state,
+					d.producedSideEffects
+						? { type: "acceptance-failed", detail }
+						: { type: "dispatch-error", detail },
+				),
 			);
 			exitCode = 1;
 			break;
@@ -5094,6 +5172,7 @@ async function runPlanForgeLoopCommand(
 			: `loop terminated: ${summary.status} after ${state.iteration} iteration(s).`,
 	);
 	if (state.terminal?.reason === "acceptance-fail") exitCode = exitCode || 1;
+	if (state.terminal?.reason === "dispatch-error") exitCode = exitCode || 1;
 	if (state.terminal?.reason === "planner-error") exitCode = exitCode || 1;
 	if (state.terminal?.reason === "envelope-breach") exitCode = 2;
 	return exitCode;

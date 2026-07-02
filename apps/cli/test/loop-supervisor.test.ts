@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
 	buildEnvelopeProposal,
+	clearLoopState,
 	initialLoopState,
 	loopStatePath,
 	nextLoopState,
@@ -57,6 +58,36 @@ describe("loop-supervisor FSM", () => {
 			detail: "pnpm vitest exit 1",
 		});
 		expect(t.terminal?.reason).toBe("acceptance-fail");
+	});
+
+	it("dispatch-error sets a terminal distinct from acceptance-fail, threading detail", () => {
+		const s = {
+			...initialLoopState({ maxIterations: null, tokenBudget: null }),
+			phase: "accept" as const,
+		};
+		const t = nextLoopState(s, {
+			type: "dispatch-error",
+			detail: "worker rejected: 429 rate_limit_error (0 tokens, 0 turns)",
+		});
+		expect(t.terminal?.reason).toBe("dispatch-error");
+		expect(t.terminal?.detail).toContain("429");
+	});
+
+	it("clearLoopState removes an existing state file and is idempotent", () => {
+		const ws = mkdtempSync(join(tmpdir(), "bp-loopreset-"));
+		try {
+			writeLoopStateAtomic(
+				ws,
+				initialLoopState({ maxIterations: 1, tokenBudget: null }),
+			);
+			expect(readLoopState(ws)).not.toBeNull();
+			expect(clearLoopState(ws)).toBe(true);
+			expect(readLoopState(ws)).toBeNull();
+			// Idempotent: a second reset with no file reports false, does not throw.
+			expect(clearLoopState(ws)).toBe(false);
+		} finally {
+			rmSync(ws, { recursive: true, force: true });
+		}
 	});
 
 	it("cumulative token deltas crossing tokenBudget sets terminal token-budget", () => {

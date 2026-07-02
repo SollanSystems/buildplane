@@ -3,6 +3,7 @@ import {
 	mkdirSync,
 	readFileSync,
 	renameSync,
+	rmSync,
 	writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
@@ -36,6 +37,13 @@ export type LoopTerminalReason =
 	| "roadmap-complete"
 	| "stop-file"
 	| "acceptance-fail"
+	// Infra/dispatch failure: the worker never produced side effects (e.g. a 429
+	// rejection — 0 tokens, 0 turns, empty diff) and exited non-zero. Kept distinct
+	// from `acceptance-fail`, where the worker DID run and built a diff the
+	// acceptance contract then rejected. The distinction makes an infra death
+	// honestly labelled and the loop re-fireable rather than looking like a real
+	// build attempt that failed review.
+	| "dispatch-error"
 	| "envelope-breach"
 	| "token-budget"
 	| "planner-error";
@@ -77,6 +85,7 @@ export type LoopTransition =
 	| { type: "admitted" }
 	| { type: "dispatched" }
 	| { type: "acceptance-failed"; detail: string }
+	| { type: "dispatch-error"; detail: string }
 	| { type: "accepted" }
 	| { type: "merged"; headSha: string }
 	| { type: "token-deltas-observed"; count: number }
@@ -170,6 +179,8 @@ export function nextLoopState(prev: LoopState, t: LoopTransition): LoopState {
 			return terminate(prev, { reason: "envelope-breach", detail: t.detail });
 		case "acceptance-failed":
 			return terminate(prev, { reason: "acceptance-fail", detail: t.detail });
+		case "dispatch-error":
+			return terminate(prev, { reason: "dispatch-error", detail: t.detail });
 		case "token-deltas-observed": {
 			const cumulativeTokenDeltas = prev.cumulativeTokenDeltas + t.count;
 			if (
@@ -229,6 +240,20 @@ export function readLoopState(workspace: string): LoopState | null {
 	const p = loopStatePath(workspace);
 	if (!existsSync(p)) return null;
 	return JSON.parse(readFileSync(p, "utf8")) as LoopState;
+}
+
+/**
+ * `planforge loop --reset`: delete the persisted `loop-state.json` so the next
+ * loop invocation starts a fresh run. A loop that halted on a terminal state
+ * (e.g. `dispatch-error` from a 429) otherwise resumes straight back into that
+ * sticky terminal; clearing the file is the re-fire path. Returns `true` if a
+ * file was removed, `false` if none existed (idempotent — never throws).
+ */
+export function clearLoopState(workspace: string): boolean {
+	const p = loopStatePath(workspace);
+	if (!existsSync(p)) return false;
+	rmSync(p, { force: true });
+	return true;
 }
 
 export function writeLoopStateAtomic(
