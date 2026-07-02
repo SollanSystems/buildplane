@@ -6,27 +6,17 @@ const root = process.cwd();
 const readRepoFile = (path: string) => readFileSync(join(root, path), "utf8");
 
 describe("GSD-2 Milestone 1 operator contract", () => {
-	it("documents the non-executing GSD-2 CLI skeleton in the README", () => {
-		const readme = readRepoFile("README.md");
+	it("drops the stale gsd2 surface from the published v0.5 cut (M6-S13 / O5)", () => {
+		// Operator decision O5: gsd2 is a stale pre-M2 experiment dropped from the
+		// published surface — the bin is removed and the README no longer advertises
+		// it. The source (apps/cli/src/gsd2*.ts) + its unit tests stay in place;
+		// source cleanup is post-v0.5.
+		const cliPkg = JSON.parse(readRepoFile("apps/cli/package.json"));
+		expect(cliPkg.bin?.gsd2).toBeUndefined();
+		expect(cliPkg.bin?.buildplane).toBe("./dist/index.js");
 
-		expect(readme).toContain("## GSD-2 repo-local task state");
-		expect(readme).toContain("pnpm gsd2 status");
-		expect(readme).toContain('pnpm gsd2 new "<goal>" --route planning_only');
-		expect(readme).toContain("pnpm gsd2 validate");
-		expect(readme).toContain("pnpm gsd2 run --dry-run <task-id>");
-		expect(readme).toContain("pnpm gsd2 admit --dry-run <task-id>");
-		expect(readme).toContain("pnpm gsd2 admit <task-id>");
-		expect(readme).toContain("pnpm gsd2 recover --dry-run <task-id>");
-		expect(readme).toContain("pnpm gsd2 recover <task-id>");
-		expect(readme).toContain(
-			"Admission is still non-executing: it moves a valid `NEW` task envelope to `READY`, records a local `task.admitted` receipt, estimates gates/capabilities/evidence, and does not dispatch Buildplane, worktree-kernel, tmux, or model workers.",
-		);
-		expect(readme).toContain(
-			"Milestone 1 is intentionally non-executing: it writes and validates `.gsd2` state and previews routes or recovery plans, but it does not dispatch Buildplane runs, worktree-kernel slices, tmux sessions, or model workers.",
-		);
-		expect(readme).toContain(
-			"`gsd2 recover` records a bounded `RecoveryPlan` for a reviewed Buildplane fork packet and leaves the task receipt `BLOCKED` until an operator explicitly approves execution and a later verifier receipt proves the fork/replay outcome.",
-		);
+		const readme = readRepoFile("README.md");
+		expect(readme).not.toContain("## GSD-2 repo-local task state");
 	});
 
 	it("marks Milestone 1 CLI skeleton tasks as implemented in the GSD-2 plan", () => {

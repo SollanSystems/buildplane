@@ -6,6 +6,8 @@
 
 *Operator-first autonomy for serious builders.*
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 </div>
 
 Buildplane by **SollanSystems** is the deterministic control plane for autonomous software execution. It treats language models and agent shells as bounded workers inside a kernel that owns scheduling, state, policies, verification, and recovery. Instead of treating one long-running chat session as the system, Buildplane dispatches typed units of work in isolated contexts, captures evidence for every meaningful action, and advances only when reality matches the contract.
@@ -27,6 +29,16 @@ Build software with autonomy you can inspect, verify, reroute, and resume.
 Buildplane already has a real repo-local control-plane path: typed runs, durable state, evidence capture, policy evaluation, status/inspect surfaces, replay-oriented execution flows, strategy execution, and structured memory foundations. The current best-supported operator paths are the repo-development and in-repo built CLI flows documented below.
 
 Near-term work is focused on trust-surface hardening rather than broader agent-shell breadth: stabilizing the verified published install contract, tightening provenance and inspect surfaces, and making replay/review/recovery easier to operate. Published/global install remains intentionally narrower than repo-local development, with native-backed memory currently packaged for Linux x64 first.
+
+## The v0.5 control plane
+
+Buildplane's surface is layered trust-first on a signed, append-only event tape (L0):
+
+- **PlanForge admission cycle** — every unit runs `compile → validate → preview → admit → dispatch → execute → receipt`. Nothing executes until an admitted, signed plan authorizes it.
+- **Capability broker (M3)** — digest-referenced capability bundles gate each tool call; out-of-scope `write_file` / `run_command` attempts fail closed and are recorded as signed `capability_denied` events.
+- **Acceptance contract (M4)** — finalization is gated on diff-scope + CI + lint, so a run advances only when the recorded evidence matches the contract.
+- **Mission Control web (M5)** — a read-only run inspector plus an operator approval inbox, served by `bp web` (source/dev only).
+- **End-to-end demo (M6)** — `node scripts/run-demo.mjs` drives the full ten-step flow on a toy repo, including kill-and-resume recovery, and the external `scripts/verify-signed-tape.mjs` re-checks the signed tape.
 
 ## Benchmarks
 
@@ -161,7 +173,7 @@ buildplane memory doctor --json
 
 > **Precondition:** `run` expects a clean git working tree. Commit or stash uncommitted changes before dispatching work.
 
-Published/global native memory is packaged and verified on Linux x64. Windows and macOS packages currently report `published_memory` as optional/unavailable instead of silently trying a broken native path. You can still supply `BUILDPLANE_NATIVE_BIN` explicitly on any platform, but that is reported as a supplied native binary, not as the published package memory contract.
+The published npm package bundles a **prebuilt native binary for linux-x64 only**. Published/global native memory is packaged and verified on Linux x64. Windows and macOS packages currently report `published_memory` as optional/unavailable instead of silently trying a broken native path. You can still supply `BUILDPLANE_NATIVE_BIN` explicitly on any platform, but that is reported as a supplied native binary, not as the published package memory contract.
 
 The capability doctor also reports required host/runtime features such as `node:sqlite`, npm, git, and the supported Node range, so global-install operators can see which prerequisite failed without reading the source.
 
@@ -210,27 +222,12 @@ Example packet:
 
 This example is intentionally narrow: one packet, one run, one local command step, one persisted decision path. Broader repo-local surfaces already include history/status/inspect, workspace retention and cleanup, replay-oriented flows, strategy execution, policy decisions, and model-worker routing where the documented repo-development and in-repo built CLI paths support them. Published/global install remains intentionally narrower, with native-backed memory packaged for Linux x64 first and wider native targets still explicit/unavailable.
 
-## GSD-2 repo-local task state
+## Known limitations
 
-GSD-2 is the repo-local state layer for turning ambiguous work into bounded task envelopes before execution. It complements Buildplane's high-trust run/inspect/replay/fork loop; it does not replace `/auto-coder` as the serious coding front door and does not make a dry-run into a verified run.
+- The adversarial-Codex reviewer role currently scores **43.75%** on the internal `reviewer-rescue` benchmark (a local stub over four fixtures). It is an internal review aid, not a production-ready gate, and is disclosed as such rather than presented as finished.
+- Published/global native memory ships a prebuilt binary for **linux-x64 only**; other platforms report the native-memory contract as optional/unavailable.
+- `bp web` (Mission Control) is source/dev only — the web assets and the optional server package are not vendored into the published npm artifact.
 
-Milestone 1 is intentionally non-executing: it writes and validates `.gsd2` state and previews routes or recovery plans, but it does not dispatch Buildplane runs, worktree-kernel slices, tmux sessions, or model workers.
+## License
 
-Current repo-development commands:
-
-```bash
-pnpm gsd2 status
-pnpm gsd2 new "<goal>" --route planning_only
-pnpm gsd2 validate
-pnpm gsd2 run --dry-run <task-id>
-pnpm gsd2 admit --dry-run <task-id>
-pnpm gsd2 admit <task-id>
-pnpm gsd2 recover --dry-run <task-id> --parent-run <run-id> --at <event-id> --reason "<why>" --packet <file> --expected-evidence "<evidence>"
-pnpm gsd2 recover <task-id> --parent-run <run-id> --at <event-id> --reason "<why>" --packet <file> --expected-evidence "<evidence>"
-```
-
-Admission is still non-executing: it moves a valid `NEW` task envelope to `READY`, records a local `task.admitted` receipt, estimates gates/capabilities/evidence, and does not dispatch Buildplane, worktree-kernel, tmux, or model workers.
-
-`gsd2 recover` records a bounded `RecoveryPlan` for a reviewed Buildplane fork packet and leaves the task receipt `BLOCKED` until an operator explicitly approves execution and a later verifier receipt proves the fork/replay outcome. The command hashes the packet and writes local state only; it does not run Buildplane replay/fork by itself.
-
-The first implementation target is only the state skeleton: `.gsd2/PROJECT.md`, `.gsd2/STATE.md`, `.gsd2/QUEUE.md`, `.gsd2/config.yaml`, and per-task `task.md`, `envelope.yaml`, `receipt.yaml`, and optional `recovery-plan.yaml`. Later milestones may bridge those envelopes to worktree-kernel or Buildplane after the dry-run contract is accepted.
+Buildplane is released under the [MIT License](LICENSE).
