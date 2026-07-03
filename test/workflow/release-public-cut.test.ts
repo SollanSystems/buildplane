@@ -123,8 +123,14 @@ describe("M6-S13 public release cut", () => {
 		expect(compareSemver(current, "0.12.2")).toBeGreaterThanOrEqual(0);
 
 		const bump = highestBuildplaneBump();
-		expect(bump).not.toBeNull();
-		const next = applyBump(current, bump as Bump);
+		if (bump === null) {
+			// Post-version state: `changeset version` has consumed the pending
+			// changesets, so the cut version itself must already sit at or above
+			// the 0.13.0 public-cut floor.
+			expect(compareSemver(current, "0.13.0")).toBeGreaterThanOrEqual(0);
+			return;
+		}
+		const next = applyBump(current, bump);
 		expect(next).not.toBe("0.5.0");
 		expect(compareSemver(next, "0.12.2")).toBeGreaterThan(0);
 		expect(compareSemver(next, "0.13.0")).toBeGreaterThanOrEqual(0);
@@ -140,7 +146,13 @@ describe("M6-S13 public release cut", () => {
 		expect(workflow).toMatch(/::error::/);
 	});
 
-	it("carries a coordinating changeset that bumps buildplane", () => {
-		expect(highestBuildplaneBump()).not.toBeNull();
+	it("coordinates the buildplane cut — pending changeset or applied version", () => {
+		if (highestBuildplaneBump() !== null) {
+			return;
+		}
+		// No pending changeset: the coordinated cut must already be applied.
+		expect(
+			compareSemver(cliPkg.version as string, "0.13.0"),
+		).toBeGreaterThanOrEqual(0);
 	});
 });
