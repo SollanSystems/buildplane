@@ -15,7 +15,7 @@
 // Dependency-free: node: builtins only.
 
 import { execFileSync } from "node:child_process";
-import { cpSync, mkdtempSync } from "node:fs";
+import { cpSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -244,9 +244,30 @@ function printFlow(out, { stagedDir } = {}) {
 	);
 }
 
+const TRUSTED_BASE_PLACEHOLDER = "<stamped-at-staging>";
+
 function stageToyRepo(out) {
 	const stagedDir = mkdtempSync(join(tmpdir(), "buildplane-demo-"));
 	cpSync(FIXTURE_DIR, stagedDir, { recursive: true });
+	// Demo inputs + run state stay git-ignored so stamping the trusted base
+	// AFTER the seed commit leaves the staged tree clean (the run loop
+	// requires a clean tree, and the seed SHA cannot be known before it exists).
+	// `.claude/` + `.gsd/` cover host-session tool state the spawned worker's
+	// `claude` process may drop into its worktree — diff-scope honors
+	// `--exclude-standard`, so ignoring them keeps the acceptance gate on the
+	// task's real writes instead of the operator machine's hook droppings.
+	writeFileSync(
+		join(stagedDir, ".gitignore"),
+		[
+			"node_modules/",
+			".buildplane/",
+			".claude/",
+			".gsd/",
+			"goal.md",
+			"out-of-scope-packet.json",
+			"",
+		].join("\n"),
+	);
 	// git-init the copy so `bp goal` can auto-detect trustedBase via
 	// `git rev-parse HEAD`. Failure is non-fatal — the operator can init by hand.
 	const env = { ...process.env };
@@ -256,12 +277,28 @@ function stageToyRepo(out) {
 	env.GIT_COMMITTER_EMAIL ??= "buildplane@local";
 	try {
 		const git = (args) =>
-			execFileSync("git", args, { cwd: stagedDir, env, stdio: "ignore" });
+			execFileSync("git", args, {
+				cwd: stagedDir,
+				env,
+				stdio: ["ignore", "pipe", "ignore"],
+			});
 		git(["init", "-q"]);
 		git(["add", "-A"]);
 		git(["commit", "-q", "-m", "chore: seed demo toy repo"]);
+		const trustedBase = git(["rev-parse", "HEAD"]).toString().trim();
+		const goalPath = join(stagedDir, "goal.md");
+		writeFileSync(
+			goalPath,
+			readFileSync(goalPath, "utf8").replace(
+				TRUSTED_BASE_PLACEHOLDER,
+				trustedBase,
+			),
+		);
+		out(`Stamped trusted base ${trustedBase} into the staged goal.md.`);
 	} catch {
-		out("  (warning: could not git-init the staged copy — init it by hand)");
+		out(
+			"  (warning: could not git-init/stamp the staged copy — init it and stamp goal.md's Trusted base by hand)",
+		);
 	}
 	return stagedDir;
 }
