@@ -1,5 +1,13 @@
 # @buildplane/storage
 
+## 0.4.1
+
+### Patch Changes
+
+- Updated dependencies [0f1b42e]
+- Updated dependencies [fb96406]
+  - @buildplane/kernel@0.8.0
+
 ## 0.4.0
 
 ### Minor Changes

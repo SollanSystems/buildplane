@@ -1,5 +1,67 @@
 # buildplane
 
+## 0.13.0
+
+### Minor Changes
+
+- 20e0a7e: add the `bp web` subcommand — serve the Mission Control web UI. It lazy-imports `@buildplane/mission-control-server`, constructs the ledger-backed `OperatorDecisionPort` + the orchestrator/store deps, and static-serves `apps/web/dist` (loopback by default; `--allow-external`/`BUILDPLANE_WEB_ALLOW_EXTERNAL=1` to widen, `--port N` to choose the port, default 4173). `--check` runs a no-listen self-test that proves the dependency graph wires up (synthetic `GET /api/status`) without binding a socket; SIGINT/SIGTERM trigger a graceful close. The root `build` script now also builds `apps/web` (vite), and `apps/web` is typechecked as its own `tsc --noEmit` step (kept out of the root project-reference graph).
+- a22712f: cut the public v0.5 release wiring (M6-S13): add an MIT `LICENSE`, flip changesets `access` to `public`, remove `apps/cli`'s `private` flag + add `publishConfig.access: public`, and drop the stale `gsd2` bin from the published surface (operator decision O5 — `src/gsd2*.ts` + its tests stay, source cleanup is post-v0.5). The release workflow now wires `changeset publish` guarded by `NPM_TOKEN` (fails loud on a release-landing push when the token is missing), with `RELEASE_TOKEN` fed to checkout + the changesets step and a `GITHUB_TOKEN` fallback. The GitHub-release tag `v0.5.0` is independent of npm semver — the published npm version continues upward from `0.12.2` (npm rejects downgrades), so this bump lands as `>=0.13.0`, not `0.5.0`.
+- c71628d: add the `bp goal "<text>"` subcommand (M6 demo step 1) — turn a raw operator goal into a compiled-and-previewed PlanForge plan JSON. It auto-detects the trusted base from git `HEAD` and the remote from `origin` (overridable with `--trusted-base <sha>`), synthesizes the PlanForge input markdown (`## Goal` / `## Repository context` incl. a `Trusted base:` line / `## Safety constraints` / `## Tasks`), runs the `compile → validate → preview` pipeline, and emits JSON surfacing `planDigest`, `trustedBase`, `remote`, `riskClass`, `status`, `missingEvidence`, and the full plan. A dirty worktree warns (and pins to HEAD) unless `--trusted-base` is given. A bare goal validates to `INSUFFICIENT_EVIDENCE` (empty `## Tasks`) — `bp goal` is display-only and exits 0 regardless of validation status; it never admits, executes, or causes side effects.
+- ba49394: thread an optional worker-model override through the PlanForge loop and dispatch. `dispatchAdmittedPlan` accepts a new optional `model` on its input and stamps it onto every dispatched packet's `model.model` (defaulting to the unchanged `DISPATCH_WORKER_MODEL`). The CLI exposes it as `buildplane planforge loop --model <id>`: the flag is parsed in the loop command and passed through `makeDefaultLoopDispatch` → `runPlanForgeDispatchCommand` → `dispatchAdmittedPlan`, so the dogfood can run workers on `claude-opus-4-8` without changing the global default. Omitting `--model` leaves dispatch byte-for-byte unchanged.
+
+  The override is also **durable across `planforge resume`/`recover`**: the model is persisted in the dispatch crash-recovery manifest (`PlanForgeDispatchManifest.model`) before the run loop, and `resumePlanForgePlanFromInput` recovers it (via `resolvePlanForgeResumeModel`) so a crashed-and-resumed run re-dispatches its remaining suffix on the same model rather than silently reverting to the default — the exact crash-and-resume path the M6 demo exercises.
+
+### Patch Changes
+
+- eb7b2ec: give the `planforge loop` supervisor honest terminal-reason fidelity plus a reset path (M6 R1). A failed dispatch is now split into two terminal reasons: `dispatch-error` when the worker produced NO durable side effects (empty worktree diff + no merged HEAD) — the fingerprint of an infra death such as a 429 rejection (0 tokens, 0 turns) — versus the existing `acceptance-fail` when the worker ran and built a diff the acceptance contract rejected. The dispatch outcome now surfaces `producedSideEffects` (derived from `receipt.changedFiles` / a merged HEAD) and the failing task's `decision.reasons`, which are threaded verbatim into the terminal `detail` instead of the previous hardcoded `"dispatch/acceptance failed"` string. A new `planforge loop --reset` clears `.buildplane/loop-state.json` and exits, so a loop that halted on a sticky terminal (e.g. `dispatch-error` from the 2026-07-01 dogfood 429) can be re-fired without manually deleting state.
+- 9075722: make the PlanForge dogfood worker able to actually work (R7). Three fixes surfaced by a live loop dispatch whose worker made ten `Write` requests, all denied (`Claude requested permissions to write … but you haven't granted it yet`), zero edits, then killed by a hardcoded 300000ms timeout:
+
+  - **Tool-permission grant.** `createClaudeCodeExecutor` gains an `allowedTools?: readonly string[]` option, emitted as `--allowedTools <tool...>`. The `planforge loop` dispatch defaults it to the spike-proven headless grant `Edit,Write,Read,Glob,Grep,Bash` (overridable via `--worker-allowed-tools`), so a headless worker can edit files and run bash. This is the safe alternative to `--dangerously-skip-permissions` (still denied by the GAP-10 guard) — it names the exact allowed tools instead of bypassing all permission checks. Scope stays bounded post-hoc by the M4 diff-scope + acceptance contract, not by withholding the grant.
+  - **Configurable worker timeout.** The executor's `timeoutMs` is now threaded from the loop through `runPlanForgeDispatchCommand` → `loadCliOrchestrator`. `planforge loop` defaults the per-dispatch worker timeout to its `--wall-clock-ms` budget (overridable via `--worker-timeout-ms`, floored at 60000ms) instead of the executor's 300000ms default, which is far too short for a real multi-file derivation.
+  - **Reset re-seed.** A fresh `planforge loop` (including after a bare `--reset`) now seeds `trustedBase` from the workspace git HEAD (mirroring `bp goal`), so a bare `--reset` then re-fire has a trusted base rather than dying with the planner reporting INSUFFICIENT_EVIDENCE before dispatch.
+
+  Omitting the new flags leaves the executor/dispatch behaviour unchanged for callers that pass no grant or timeout.
+
+- 96c866e: emit per-tool-call tape events from the Claude Code worker (M6-S8, demo step 7).
+
+  The `claude-code-executor` now parses `tool_use` (assistant) and `tool_result`
+  (user) content blocks out of the `--output-format stream-json` worker stream and
+  forwards them to a new optional `onToolEvent` callback (`ClaudeToolEvent`),
+  mirroring the `onCapabilityDenied` shape. The executor stays transport-agnostic
+  — it never builds ledger payloads. Existing token-delta, terminal-result, and
+  usage handling is unchanged; absent the callback the tool blocks are parsed
+  silently.
+
+  `apps/cli` wires the concrete emitter (`createClaudeToolLedgerEmitter`) that maps
+  the callback data onto the signed tape as `ToolRequestStoredV1` / `ToolResultV1`,
+  correlating each result to its request event id by `tool_use_id`. The sink is
+  bound per-run alongside the activity emitter, so a non-ledger run is a no-op.
+
+- Updated dependencies [ba49394]
+- Updated dependencies [0f1b42e]
+- Updated dependencies [790ff11]
+- Updated dependencies [9075722]
+- Updated dependencies [2ce5e9d]
+- Updated dependencies [18bccd0]
+- Updated dependencies [b197580]
+- Updated dependencies [fb96406]
+- Updated dependencies [96c866e]
+- Updated dependencies [7c77a39]
+- Updated dependencies [ba49394]
+  - @buildplane/planforge@1.1.0
+  - @buildplane/kernel@0.8.0
+  - @buildplane/mission-control-server@0.1.1
+  - @buildplane/adapters-models@0.2.3
+  - @buildplane/ledger-client@0.3.0
+  - @buildplane/adapters-codex@0.1.9
+  - @buildplane/adapters-git@0.4.1
+  - @buildplane/adapters-honcho@0.1.9
+  - @buildplane/adapters-tools@0.1.9
+  - @buildplane/policy@0.2.3
+  - @buildplane/runtime@0.1.9
+  - @buildplane/storage@0.4.1
+  - @buildplane/ui-tui@0.1.9
+
 ## 0.12.2
 
 ### Patch Changes

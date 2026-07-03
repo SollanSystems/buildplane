@@ -1,5 +1,13 @@
 # @buildplane/runtime
 
+## 0.1.9
+
+### Patch Changes
+
+- Updated dependencies [0f1b42e]
+- Updated dependencies [fb96406]
+  - @buildplane/kernel@0.8.0
+
 ## 0.1.8
 
 ### Patch Changes
