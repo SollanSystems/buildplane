@@ -1,5 +1,17 @@
 # @buildplane/capability-broker
 
+## 0.2.3
+
+### Patch Changes
+
+- 7c77a39: add a declarative `netEgress` host allowlist to the capability bundle. The broker schema parses, validates (non-empty hosts, no whitespace/`/`/NUL), and digest-covers the field; PlanForge maps each task's `allowedSideEffects` to a deterministic egress union (every current side-effect declares zero egress — explicit default-deny — with the map as the single extension point, e.g. a future `npm-install` → `["registry.npmjs.org"]`) and surfaces the plan-wide union on the receipt preview alongside `riskClass`. Declarative-only in v0: the field is visible and digest-covered but NOT yet enforced at the worker boundary (no verified Claude Code subprocess network-restriction flag exists).
+- Updated dependencies [ba49394]
+- Updated dependencies [2ce5e9d]
+- Updated dependencies [18bccd0]
+- Updated dependencies [7c77a39]
+- Updated dependencies [ba49394]
+  - @buildplane/planforge@1.1.0
+
 ## 0.2.2
 
 ### Patch Changes

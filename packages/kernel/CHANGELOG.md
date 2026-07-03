@@ -1,5 +1,41 @@
 # @buildplane/kernel
 
+## 0.8.0
+
+### Minor Changes
+
+- fb96406: emit the signed `result_ready` and `run_completed` L0 events write-ahead at a run's
+  terminal outcome (M6-S7). New kernel seams `ResultReadyPort.recordResultReady(runId,
+admissionEventId, acceptanceEventId)` and `RunCompletionPort.recordRunCompleted(...)`
+  are injected into the orchestrator; `BuildplaneAcceptancePort.recordAcceptance` now
+  resolves to the signed `acceptance_recorded` event id so a terminal `result_ready`
+  can chain to it.
+
+  `result_ready` fires only once a run reaches its terminal `passed` outcome (after
+  `policy.evaluateRun`'s terminal advance — NOT when a per-attempt acceptance resolves
+  `passed`, A1), so a run that passes acceptance on an attempt but terminates `failed`
+  signs no false `result_ready`. `run_completed` fires write-ahead on every terminal
+  branch of the operator decision (merge+approved → `passed`; merge/resume rejection →
+  `failed`; A2); the emit stays synchronous/`void` and its fields are supplied
+  synchronously from the inspect snapshot.
+
+  `RunCompletedV1.{duration_ms,event_count,unit_count}` now serialize as strings on the
+  wire (per-field override on that struct only — the global `U64 = number` typeshare
+  mapping is untouched), matching `ResultReadyV1`'s all-string shape for byte-identical
+  Rust↔TS digests (A3). Safe with no tape migration: `run_completed` was never emitted
+  onto any real tape.
+
+### Patch Changes
+
+- 0f1b42e: wire the M5-S4 crash reconciler into startup and isolate its records per-item (R2).
+
+  The `recoverPendingDecisions` reconciler previously had no production call site — it was interface + tests only, so a crash between an operator decision's Tier-1 mirror and its execution marker was never re-driven on the next boot. The mission-control-server now invokes it exactly once on boot (inside `listen`, before binding) and logs the recovered count; a failed record is logged and startup proceeds.
+
+  `recoverPendingDecisions` now resolves with a `PendingDecisionRecovery` summary (`{ recovered, failed }`) instead of `void`, and wraps each record's side-effect re-drive in a try/catch so one poisoned record can no longer wedge the whole batch. A record whose re-drive throws is reported under `failed` (keeping its missing execution marker so a later pass retries it) while the remaining records still recover.
+
+- Updated dependencies [7c77a39]
+  - @buildplane/capability-broker@0.2.3
+
 ## 0.7.0
 
 ### Minor Changes

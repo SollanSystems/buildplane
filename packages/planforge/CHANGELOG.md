@@ -1,5 +1,20 @@
 # @buildplane/planforge
 
+## 1.1.0
+
+### Minor Changes
+
+- ba49394: thread an optional worker-model override through the PlanForge loop and dispatch. `dispatchAdmittedPlan` accepts a new optional `model` on its input and stamps it onto every dispatched packet's `model.model` (defaulting to the unchanged `DISPATCH_WORKER_MODEL`). The CLI exposes it as `buildplane planforge loop --model <id>`: the flag is parsed in the loop command and passed through `makeDefaultLoopDispatch` → `runPlanForgeDispatchCommand` → `dispatchAdmittedPlan`, so the dogfood can run workers on `claude-opus-4-8` without changing the global default. Omitting `--model` leaves dispatch byte-for-byte unchanged.
+
+  The override is also **durable across `planforge resume`/`recover`**: the model is persisted in the dispatch crash-recovery manifest (`PlanForgeDispatchManifest.model`) before the run loop, and `resumePlanForgePlanFromInput` recovers it (via `resolvePlanForgeResumeModel`) so a crashed-and-resumed run re-dispatches its remaining suffix on the same model rather than silently reverting to the default — the exact crash-and-resume path the M6 demo exercises.
+
+### Patch Changes
+
+- ba49394: cover the ledger fixtures directory in the `code-edit` diff-scope. The `code-edit` side-effect now maps to `packages/**/fixtures/**` (symmetric with the existing `packages/**/src/**` / `packages/**/test/**`), so an admitted code-edit plan can authorize the regenerated `packages/ledger-client/fixtures/payload-variants.json` that `pnpm ledger:gen-fixtures` produces. Because the M4 acceptance diff-scope (`deriveAcceptanceContract`) is derived from the same `capability_bundle.fsWrite`, a worker that regenerates and commits ledger fixtures (e.g. the `result_ready` dogfood derivation) no longer fails acceptance with an out-of-scope diff.
+- 2ce5e9d: add a `riskClass` (`low` | `medium` | `high`) attribute to PlanForge validation and surface it on the receipt preview. It is computed during `validate`: `high` when the plan is unsafe to run, `medium` when evidence is missing or a clean plan declares allowed side effects, and `low` for a clean plan with no side effects. The field is additive — `riskClass` participates in the signed `planDigest` (validation is part of the digested review artifact), so the golden plan fixture's digest was regenerated.
+- 18bccd0: map the `code-edit` side-effect to `native/crates/**/src/**` and `native/crates/**/tests/**` so admitted plans can authorize edits to native crate sources and tests (unblocks the dogfood worker writing ledger payloads/tests).
+- 7c77a39: add a declarative `netEgress` host allowlist to the capability bundle. The broker schema parses, validates (non-empty hosts, no whitespace/`/`/NUL), and digest-covers the field; PlanForge maps each task's `allowedSideEffects` to a deterministic egress union (every current side-effect declares zero egress — explicit default-deny — with the map as the single extension point, e.g. a future `npm-install` → `["registry.npmjs.org"]`) and surfaces the plan-wide union on the receipt preview alongside `riskClass`. Declarative-only in v0: the field is visible and digest-covered but NOT yet enforced at the worker boundary (no verified Claude Code subprocess network-restriction flag exists).
+
 ## 1.0.0
 
 ### Major Changes

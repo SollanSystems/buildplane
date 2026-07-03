@@ -1,7 +1,7 @@
 {
 	"name": "@buildplane/ledger-client",
 	"private": true,
-	"version": "0.2.0",
+	"version": "0.3.0",
 	"type": "module",
 	"description": "Typed TS client for the bp-ledger event store (IPC protocol wired in Phase B)",
 	"exports": {
