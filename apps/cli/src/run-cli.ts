@@ -49,6 +49,7 @@ import {
 } from "./bootstrap-doctor.js";
 import { type CapabilityReport, inspectCapabilities } from "./capabilities.js";
 import { createClaudeToolLedgerEmitter } from "./claude-tool-ledger-emitter.js";
+import { createDispatchToolUnitTracker } from "./dispatch-tool-unit-tracker.js";
 import {
 	createInspectorProjection,
 	formatBootstrapDoctorReport,
@@ -4684,9 +4685,23 @@ async function runPlanForgeDispatchCommand(
 		// Demo crash-injection (M6 Property 1): NO-OP unless BUILDPLANE_CRASH_AFTER_ACTIVITY=1,
 		// in which case the dispatch aborts hard right after the first activity_completed
 		// is durable+signed on the tape — never reaching the terminal plan_receipt.
+		// M6-F2: per-tool-call tape events on the dispatch path. The Claude worker's
+		// tool_use/tool_result stream must land on THIS signed dispatch tape, stamped
+		// with the in-flight packet's unit id + the `activity_started` event id as the
+		// tool_request parent. The tracker observes the emitter feeding the activity
+		// port to capture that auto-assigned id; the dispatch loop feeds it each
+		// packet's unit id via `beginUnit` before `runPacketAsync`.
+		const dispatchToolUnitTracker = createDispatchToolUnitTracker();
 		const ledgerActivityPort = withCrashAfterActivityGuard(
-			createLedgerActivityPort(emitter),
+			createLedgerActivityPort(dispatchToolUnitTracker.observe(emitter)),
 			emitter,
+		);
+		// The tool sink writes onto the SAME serialized signed writer as the activity
+		// and acceptance events (the raw `emitter`), so its ordering is preserved.
+		const dispatchClaudeToolSink = createClaudeToolLedgerEmitter(
+			emitter,
+			dispatchToolUnitTracker.getUnitCtx,
+			workspace,
 		);
 		// Tasks dispatch sequentially, so a single mutable identity holder safely
 		// scopes the acceptance verdict's plan identity to the task in flight.
@@ -4711,6 +4726,9 @@ async function runPlanForgeDispatchCommand(
 						// M6-S7 — `result_ready` rides the same signed dispatch emitter
 						// as acceptance/activity events (one serialized writer).
 						resultReadyPort: createResultReadyPort(emitter),
+						// M6-F2 — per-tool-call events from the Claude worker stream ride
+						// the same signed dispatch tape as activity/acceptance events.
+						onClaudeToolEvent: dispatchClaudeToolSink,
 						provisionDeps: provisionWorktreeDeps,
 						claudeMaxTurns: opts?.claudeMaxTurns,
 						budgets: opts?.budgets,
@@ -4719,6 +4737,8 @@ async function runPlanForgeDispatchCommand(
 					}
 				: {
 						ledgerActivityPort,
+						// M6-F2 — per-tool-call events also captured on the no-enforce path.
+						onClaudeToolEvent: dispatchClaudeToolSink,
 						claudeMaxTurns: opts?.claudeMaxTurns,
 						budgets: opts?.budgets,
 						claudeAllowedTools: opts?.claudeAllowedTools,
@@ -4737,6 +4757,10 @@ async function runPlanForgeDispatchCommand(
 						unit: { ...packet.unit, policyProfile: acceptance.profileName },
 					}
 				: packet;
+			// M6-F2: scope the tool sink's unit ctx to the packet in flight BEFORE
+			// dispatch, so its `activity_started` (emitted inside runPacketAsync) is
+			// recorded against this unit id. Packets dispatch sequentially.
+			dispatchToolUnitTracker.beginUnit(packet.unit.id);
 			const result = (await orchestrator.runPacketAsync(
 				parseUnitPacket(JSON.stringify(dispatchedPacket)),
 				cliEventBus,
