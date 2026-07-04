@@ -219,6 +219,19 @@ export interface BuildplaneStoragePort {
 		options?: { limit?: number; cursor?: string },
 	): RunPage;
 	/**
+	 * S7 / M6-F1 crash-recovery reconcile: flip every `running` run whose `unit_id`
+	 * begins with `${planId}:` — the exact set `findOrphanedPlanForgeDispatches`
+	 * keys on — to a terminal `status` consistent with the recovered plan_receipt
+	 * outcome. Closes the M2 contract line "receipt on tape but running in storage
+	 * → reconcile": without it the storage status field lies forever and every
+	 * `recover` pass re-scans the same orphan. Returns the reconciled run ids;
+	 * idempotent — a second pass finds none still `running`.
+	 */
+	reconcilePlanForgeDispatchRuns(
+		planId: string,
+		status: "passed" | "failed",
+	): readonly string[];
+	/**
 	 * Write the Tier-1 acceptance shadow for a run — the only read-back source for
 	 * "this run passed acceptance." Set from the M4 acceptance path alongside the
 	 * signed `acceptance_recorded` event; additive and idempotent per run.

@@ -928,26 +928,35 @@ function formatPlanForgeHelp(): string[] {
 		"                             checks run; use this flag only when worktree",
 		"                             dependencies cannot be provisioned.",
 		"",
-		"buildplane planforge resume --input <file> [--json]",
+		"buildplane planforge resume --input <file> [--no-enforce-acceptance] [--json]",
 		"",
 		"  Reconstructs the admitted plan cycle from the signed tape, verifies the",
 		"  plan_admitted digest/idempotency against --input, skips already completed",
-		"  activities, executes only the remaining suffix, and emits a missing",
-		"  plan_receipt when the plan reaches a terminal state.",
+		"  activities, executes only the remaining suffix under the M4 acceptance gate,",
+		"  and emits a missing plan_receipt when the plan reaches a terminal state. A",
+		"  recorded activity only counts toward a `completed` receipt when the tape",
+		"  carries a matching passed `acceptance_recorded` verdict; otherwise the run",
+		"  fail-closes (`failed`, reason `acceptance-not-evaluated`).",
 		"",
 		"  Options:",
-		"    --input <file>  Markdown PlanForge goal fixture to resume",
-		"    --json          Prints the resume result (recorded/executed runs) as JSON",
+		"    --input <file>           Markdown PlanForge goal fixture to resume",
+		"    --no-enforce-acceptance  Skip the acceptance gate + recorded-prefix evidence",
+		"                             check (default = enforce). Opt out only when the",
+		"                             original dispatch also ran without acceptance.",
+		"    --json                   Prints the resume result (recorded/executed) as JSON",
 		"",
-		"buildplane planforge recover [--json]",
+		"buildplane planforge recover [--no-enforce-acceptance] [--json]",
 		"",
 		"  Scans storage for orphaned `running` PlanForge dispatches (via the dispatch",
 		"  manifest sidecar) and replays the signed tape to resume each, re-establishing",
-		"  worker trust FROM THE TAPE and emitting any missing plan_receipt. The tape is",
-		"  authoritative over the storage status field. No --input required.",
+		"  worker trust FROM THE TAPE, emitting any missing plan_receipt, and reconciling",
+		"  the orphaned `running` storage row to the receipt outcome. The tape is",
+		"  authoritative over the storage status field. No --input required. Acceptance",
+		"  enforcement is ON by default (per the resume rules above).",
 		"",
 		"  Options:",
-		"    --json          Prints the recovery result (per-plan status) as JSON",
+		"    --no-enforce-acceptance  Resume every orphan without the acceptance gate",
+		"    --json                   Prints the recovery result (per-plan status) as JSON",
 		"",
 		"buildplane planforge plan --roadmap <file> --out <plan.md> --trusted-base <sha> [--remote <url>] [--json]",
 		"",
@@ -3897,8 +3906,25 @@ interface RecordedPlanReceipt {
 	outcome: string;
 }
 
+/**
+ * A signed `acceptance_recorded` finalization verdict read back from the tape.
+ * The M6-F1 fail-closed resume correlates recorded-prefix activities to these by
+ * `(planId, admissionEventId, contractDigest, outcome)` — a recorded activity is
+ * only counted `passed` toward a `completed` receipt when a matching `passed`
+ * verdict exists, closing the fail-open where a crash before the acceptance gate
+ * was minted as `completed` on resume.
+ */
+interface RecordedPlanAcceptance {
+	eventId: string;
+	planId: string;
+	admissionEventId: string;
+	contractDigest: string;
+	outcome: string;
+}
+
 interface PlanForgeReplayState {
 	completedActivities: RecordedPlanActivity[];
+	acceptances: RecordedPlanAcceptance[];
 	receipt?: RecordedPlanReceipt;
 }
 
@@ -4030,17 +4056,18 @@ async function readPlanForgeReplayState(
 ): Promise<PlanForgeReplayState> {
 	const eventsDbPath = resolve(workspace, ".buildplane", "ledger", "events.db");
 	if (!existsSync(eventsDbPath)) {
-		return { completedActivities: [] };
+		return { completedActivities: [], acceptances: [] };
 	}
 	const { DatabaseSync } = await import("node:sqlite");
 	const db = new DatabaseSync(eventsDbPath, { readOnly: true });
 	try {
 		const rows = db
 			.prepare(
-				"SELECT id, kind, payload FROM events WHERE run_id = ? AND kind IN ('activity_completed', 'plan_receipt') ORDER BY id ASC",
+				"SELECT id, kind, payload FROM events WHERE run_id = ? AND kind IN ('activity_completed', 'acceptance_recorded', 'plan_receipt') ORDER BY id ASC",
 			)
 			.all(runId) as unknown as PlanForgeEventRow[];
 		const completedActivities: RecordedPlanActivity[] = [];
+		const acceptances: RecordedPlanAcceptance[] = [];
 		let receipt: RecordedPlanReceipt | undefined;
 		for (const row of rows) {
 			const payload = JSON.parse(row.payload) as {
@@ -4049,6 +4076,12 @@ async function readPlanForgeReplayState(
 					run_id?: string;
 					result_digest?: string;
 					result?: unknown;
+				};
+				AcceptanceRecordedV1?: {
+					plan_id?: string;
+					admission_event_id?: string;
+					contract_digest?: string;
+					outcome?: string;
 				};
 				PlanReceiptRecordedV1?: {
 					plan_id?: string;
@@ -4072,6 +4105,20 @@ async function readPlanForgeReplayState(
 				});
 				continue;
 			}
+			if (row.kind === "acceptance_recorded") {
+				const accepted = payload.AcceptanceRecordedV1;
+				if (!accepted) {
+					continue;
+				}
+				acceptances.push({
+					eventId: row.id,
+					planId: accepted.plan_id ?? "",
+					admissionEventId: accepted.admission_event_id ?? "",
+					contractDigest: accepted.contract_digest ?? "",
+					outcome: accepted.outcome ?? "unknown",
+				});
+				continue;
+			}
 			const receiptPayload = payload.PlanReceiptRecordedV1;
 			if (
 				receiptPayload?.plan_id === plan.id &&
@@ -4083,7 +4130,7 @@ async function readPlanForgeReplayState(
 				};
 			}
 		}
-		return { completedActivities, receipt };
+		return { completedActivities, acceptances, receipt };
 	} finally {
 		db.close();
 	}
@@ -4256,6 +4303,56 @@ function collectDeclaredSideEffects(plan: PlanForgePlan): string[] {
 	return [...scopes].sort();
 }
 
+interface DispatchAcceptanceProfile {
+	readonly profileName: string;
+	readonly contractDigest: string;
+	readonly profile: PolicyProfile;
+}
+
+/**
+ * M4 acceptance contract per-task profiles (D1): derive one fail-closed contract
+ * per task (diff-scope = the task's capability bundle fsWrite; checks = its
+ * verificationCommands), keyed by the packet unit id, plus a `profileRegistry` the
+ * kernel resolves at the finalization gate. `plan.tasks[i]` maps 1:1 (in order) to
+ * `packets[i]`. A pure extraction of the dispatch block — byte-equivalent — so
+ * dispatch AND fail-closed resume wire the IDENTICAL acceptance gate.
+ */
+function deriveDispatchAcceptanceProfiles(
+	plan: PlanForgePlan,
+	packets: ReturnType<typeof dispatchAdmittedPlan>,
+	enforceAcceptance: boolean,
+): {
+	acceptanceProfiles: Map<string, DispatchAcceptanceProfile>;
+	profileRegistry: BuildplaneProfileRegistryPort;
+} {
+	const acceptanceProfiles = new Map<string, DispatchAcceptanceProfile>();
+	if (enforceAcceptance) {
+		plan.tasks.forEach((task, index) => {
+			const contract = deriveAcceptanceContract(plan, task);
+			const profileName = `planforge-${plan.id}-${task.id}`;
+			acceptanceProfiles.set(packets[index].unit.id, {
+				profileName,
+				contractDigest: acceptanceContractDigest(contract),
+				profile: {
+					name: profileName,
+					trustGates: { acceptanceContract: contract },
+				},
+			});
+		});
+	}
+	const profileRegistry: BuildplaneProfileRegistryPort = {
+		resolve(name) {
+			for (const entry of acceptanceProfiles.values()) {
+				if (entry.profile.name === name) {
+					return entry.profile;
+				}
+			}
+			throw new Error(`unknown policy profile: ${name}`);
+		},
+	};
+	return { acceptanceProfiles, profileRegistry };
+}
+
 interface PlanForgeResumeRunResult {
 	task: string;
 	run_id: string;
@@ -4263,6 +4360,14 @@ interface PlanForgeResumeRunResult {
 	source: "recorded" | "executed";
 	activity_id?: string;
 	completed_event_id?: string;
+	/**
+	 * Machine-readable per-task failure reason. `acceptance-not-evaluated` marks a
+	 * recorded-prefix activity that carries NO matching signed `acceptance_recorded`
+	 * verdict on the tape (M6-F1 fail-closed): the crash happened before the
+	 * acceptance gate ran, so the work was never verified and must not be minted
+	 * `completed` on resume.
+	 */
+	reason?: string;
 }
 
 function recordedActivityStatus(result: unknown): string {
@@ -4606,42 +4711,10 @@ async function runPlanForgeDispatchCommand(
 		model: opts?.model,
 	});
 
-	// M4 acceptance contract: derive one fail-closed contract per task (diff-scope
-	// = the task's capability bundle fsWrite; checks = its verificationCommands),
-	// expose them through a per-task policy profile the kernel resolves at the
-	// finalization gate. `plan.tasks[i]` maps 1:1 (in order) to `packets[i]`.
-	const acceptanceProfiles = new Map<
-		string,
-		{
-			readonly profileName: string;
-			readonly contractDigest: string;
-			readonly profile: PolicyProfile;
-		}
-	>();
-	if (enforceAcceptance) {
-		plan.tasks.forEach((task, index) => {
-			const contract = deriveAcceptanceContract(plan, task);
-			const profileName = `planforge-${plan.id}-${task.id}`;
-			acceptanceProfiles.set(packets[index].unit.id, {
-				profileName,
-				contractDigest: acceptanceContractDigest(contract),
-				profile: {
-					name: profileName,
-					trustGates: { acceptanceContract: contract },
-				},
-			});
-		});
-	}
-	const profileRegistry: BuildplaneProfileRegistryPort = {
-		resolve(name) {
-			for (const entry of acceptanceProfiles.values()) {
-				if (entry.profile.name === name) {
-					return entry.profile;
-				}
-			}
-			throw new Error(`unknown policy profile: ${name}`);
-		},
-	};
+	// M4 acceptance contract: per-task fail-closed profiles the kernel resolves at
+	// the finalization gate (D1 shared helper — identical wiring to resume).
+	const { acceptanceProfiles, profileRegistry } =
+		deriveDispatchAcceptanceProfiles(plan, packets, enforceAcceptance);
 
 	const { parseUnitPacket } = (await cliImport("@buildplane/kernel")) as {
 		parseUnitPacket: (input: string) => unknown;
@@ -5351,6 +5424,44 @@ async function runPlanForgeLoopCommand(
 }
 
 /**
+ * D4 storage reconcile: flip the `running` rows this dispatch orphaned (the exact
+ * set `findOrphanedPlanForgeDispatches` keys on — `unit_id` prefixed `${planId}:`)
+ * to a terminal status consistent with the recovered receipt outcome, closing the
+ * M2 "receipt on tape but running in storage → reconcile" line and making a second
+ * `recover` pass report `no_orphans`. Best-effort and guarded on an initialized
+ * `state.db` — the signed `plan_receipt` is already flushed, so a storage-only
+ * failure must never shadow the terminal outcome.
+ */
+async function reconcilePlanForgeRunningRuns(
+	workspace: string,
+	planId: string,
+	status: "passed" | "failed",
+): Promise<void> {
+	if (!existsSync(resolve(workspace, ".buildplane", "state.db"))) {
+		return;
+	}
+	try {
+		const { createBuildplaneStorage } = (await cliImport(
+			"@buildplane/storage",
+		)) as {
+			createBuildplaneStorage: (root: string) => {
+				reconcilePlanForgeDispatchRuns: (
+					planId: string,
+					status: "passed" | "failed",
+				) => readonly string[];
+			};
+		};
+		createBuildplaneStorage(workspace).reconcilePlanForgeDispatchRuns(
+			planId,
+			status,
+		);
+	} catch {
+		// Best-effort: the terminal receipt is already durable on the tape (the
+		// authoritative record); a storage-reconcile failure is non-fatal.
+	}
+}
+
+/**
  * `buildplane planforge resume --input <file>`: explicit-input S7b recovery.
  * Rebuilds the PlanForge plan from input, verifies the signed admission payload,
  * replays durable activity completions from the tape, skips those completed
@@ -5368,26 +5479,39 @@ async function runPlanForgeResumeCommand(
 			"Missing required --input <file> argument for PlanForge resume.",
 		);
 	}
+	// D3: enforcement is ON by default; `--no-enforce-acceptance` opts out. The
+	// decision comes ONLY from this CLI flag — never from the unsigned dispatch
+	// manifest sidecar (an attacker who can write the sidecar must not be able to
+	// downgrade the trust gate).
 	return resumePlanForgePlanFromInput(inputPath, cwd, stdout, {
 		json: args.includes("--json"),
+		enforceAcceptance: !args.includes("--no-enforce-acceptance"),
 	});
 }
 
 /**
  * Shared replay-skip-resume body, extracted from `runPlanForgeResumeCommand` so
  * both `planforge resume --input` and `planforge recover` (S7 crash recovery)
- * drive the identical path: reconstruct the plan from `inputPath`, re-verify the
- * signed `plan_admitted`, replay durable activity completions from the tape, skip
- * the recorded prefix, execute only the remaining suffix, and append the terminal
- * receipt if the prior run crashed after execution but before `plan_receipt`.
+ * drive the identical fail-closed path (M6-F1): reconstruct the plan from
+ * `inputPath`, re-verify the signed `plan_admitted`, replay durable activity
+ * completions from the tape, and — when enforcing (default) — count a recorded
+ * activity toward a `completed` receipt ONLY if the tape carries a matching signed
+ * `acceptance_recorded` verdict (D2). The remaining suffix executes under the same
+ * M4 acceptance gate as dispatch (D1); missing/rejected recorded-prefix evidence
+ * fail-closes (`failed` receipt, exit 1, reason `acceptance-not-evaluated`). After
+ * the terminal receipt the orphaned `running` storage rows are reconciled (D4).
  */
 export async function resumePlanForgePlanFromInput(
 	inputPath: string,
 	cwd: string,
 	stdout: (line: string) => void,
-	opts: { json: boolean },
+	opts: { json: boolean; enforceAcceptance?: boolean },
 ): Promise<number> {
 	const jsonOut = opts.json;
+	// D3: enforcement defaults ON. The suffix runs under the same M4 acceptance gate
+	// as dispatch, AND every recorded-prefix activity must carry tape evidence that
+	// acceptance actually passed (D2) before it counts toward a `completed` receipt.
+	const enforceAcceptance = opts.enforceAcceptance ?? true;
 
 	const plan = createPlanForgeDryRunPlan(resolve(cwd, inputPath));
 	const workspace = resolve(cwd);
@@ -5395,6 +5519,8 @@ export async function resumePlanForgePlanFromInput(
 	// R-001: recover the worker-model override the original dispatch ran with from
 	// the crash-recovery manifest, so the re-dispatched suffix keeps the same model
 	// (recover has no flags — the manifest is the only place it survives a crash).
+	// The manifest is consulted ONLY for the non-security worker-model hint, never
+	// for the enforcement decision (D3) — it is an unsigned sidecar.
 	const recoveredModel = resolvePlanForgeResumeModel(
 		readPlanForgeDispatchManifests(workspace),
 		runId,
@@ -5424,21 +5550,71 @@ export async function resumePlanForgePlanFromInput(
 		);
 	}
 
+	// D1/D2: the per-task acceptance profiles (shared verbatim with dispatch) also
+	// give us each task's re-derived `contractDigest`. Contracts re-derive
+	// deterministically from the admitted plan, so this digest is byte-stable and
+	// can correlate a recorded activity to its signed `acceptance_recorded` verdict.
+	const { acceptanceProfiles, profileRegistry } =
+		deriveDispatchAcceptanceProfiles(plan, packets, enforceAcceptance);
+	// D2: the set of contract digests that a signed `acceptance_recorded` verdict
+	// on THIS run marked `passed` for THIS plan/admission. A recorded-prefix
+	// activity only counts toward a `completed` receipt when its task's contract
+	// digest is in this set — closing the fail-open where a crash before the
+	// acceptance gate was minted `completed` on resume.
+	const acceptedContractDigests = new Set<string>(
+		replay.acceptances
+			.filter(
+				(a) =>
+					a.planId === plan.id &&
+					a.admissionEventId === admittedEventId &&
+					a.outcome === "passed",
+			)
+			.map((a) => a.contractDigest),
+	);
+
 	const runs: PlanForgeResumeRunResult[] = [];
 	for (let i = 0; i < replay.completedActivities.length; i += 1) {
 		const recorded = replay.completedActivities[i];
+		const recordedStatus = recordedActivityStatus(recorded.result);
+		// A recorded activity that itself did not pass is a genuine activity failure —
+		// no acceptance question arises. Only a recorded *passed* activity must, when
+		// enforcing, prove its acceptance verdict from the tape (D2). `acceptanceProfiles`
+		// is empty when not enforcing, so `expectedDigest` is undefined and the
+		// evidence gate is skipped (opt-out path).
+		const expectedDigest = acceptanceProfiles.get(
+			packets[i].unit.id,
+		)?.contractDigest;
+		const acceptanceMissing =
+			enforceAcceptance &&
+			isPassedPlanForgeRun(recordedStatus) &&
+			!(
+				expectedDigest !== undefined &&
+				acceptedContractDigests.has(expectedDigest)
+			);
 		runs.push({
 			task: packets[i].unit.id,
 			run_id: recorded.runId,
-			status: recordedActivityStatus(recorded.result),
+			// D2 fail-closed: a recorded-passed activity with no matching acceptance
+			// verdict is NOT counted passed — it becomes a non-passed status carrying a
+			// machine-readable reason so the terminal receipt fails.
+			status: acceptanceMissing ? "acceptance-not-evaluated" : recordedStatus,
 			source: "recorded",
 			activity_id: recorded.activityId,
 			completed_event_id: recorded.eventId,
+			...(acceptanceMissing ? { reason: "acceptance-not-evaluated" } : {}),
 		});
 	}
 
 	if (replay.receipt) {
 		const terminalOk = replay.receipt.outcome === "completed";
+		// D4: reconcile the orphaned `running` storage rows even on the
+		// already-receipted short-circuit, so the storage status stops lying about a
+		// run the tape already terminated.
+		await reconcilePlanForgeRunningRuns(
+			workspace,
+			plan.id,
+			terminalOk ? "passed" : "failed",
+		);
 		stdout(
 			jsonOut
 				? formatJson({
@@ -5478,9 +5654,32 @@ export async function resumePlanForgePlanFromInput(
 				parseUnitPacket: (input: string) => unknown;
 			};
 			const ledgerActivityPort = createLedgerActivityPort(emitter);
+			// AC1/D1: the suffix executes under acceptance enforcement equivalent to
+			// dispatch — per-task profileRegistry + a per-task-identity acceptancePort,
+			// resultReadyPort (AC5), and provisioned worktree deps. When not enforcing,
+			// wire only the activity port (the legacy opt-out behavior).
+			const acceptanceIdentity = { planId: plan.id, contractDigest: "" };
+			const acceptancePort = enforceAcceptance
+				? createAcceptancePort(emitter, {
+						get planId() {
+							return acceptanceIdentity.planId;
+						},
+						get contractDigest() {
+							return acceptanceIdentity.contractDigest;
+						},
+					})
+				: undefined;
 			const { orchestrator, eventBus: cliEventBus } = await loadCliOrchestrator(
 				workspace,
-				{ ledgerActivityPort },
+				enforceAcceptance
+					? {
+							ledgerActivityPort,
+							profileRegistry,
+							acceptancePort,
+							resultReadyPort: createResultReadyPort(emitter),
+							provisionDeps: provisionWorktreeDeps,
+						}
+					: { ledgerActivityPort },
 			);
 			for (
 				let i = replay.completedActivities.length;
@@ -5488,8 +5687,18 @@ export async function resumePlanForgePlanFromInput(
 				i += 1
 			) {
 				const packet = packets[i];
+				const acceptance = acceptanceProfiles.get(packet.unit.id);
+				acceptanceIdentity.contractDigest = acceptance?.contractDigest ?? "";
+				// Route the packet through its per-task acceptance profile so the kernel
+				// resolves the contract at the finalization gate (mirrors dispatch).
+				const dispatchedPacket = acceptance
+					? {
+							...packet,
+							unit: { ...packet.unit, policyProfile: acceptance.profileName },
+						}
+					: packet;
 				const result = await orchestrator.runPacketAsync(
-					parseUnitPacket(JSON.stringify(packet)),
+					parseUnitPacket(JSON.stringify(dispatchedPacket)),
 					cliEventBus,
 				);
 				runs.push({
@@ -5543,6 +5752,15 @@ export async function resumePlanForgePlanFromInput(
 		}
 	}
 
+	// D4: after the terminal receipt is durable, reconcile the orphaned `running`
+	// storage rows to a terminal status consistent with the outcome, so a second
+	// `recover` pass reports `no_orphans`.
+	await reconcilePlanForgeRunningRuns(
+		workspace,
+		plan.id,
+		allPassed ? "passed" : "failed",
+	);
+
 	stdout(
 		jsonOut
 			? formatJson({
@@ -5566,9 +5784,10 @@ export async function resumePlanForgePlanFromInput(
  * dispatch-manifest sidecar), then replays the signed tape for each to resume the
  * remaining suffix and emit any missing terminal receipt — re-establishing
  * `will_execute_worker` trust FROM THE TAPE, not the lost in-memory WeakSet. The
- * tape is authoritative over the storage status field; recover re-runs the suffix
- * and emits the receipt on the TAPE, and does NOT rewrite the storage `running`
- * row. Exit 0 iff every orphan resumes to completion (or there are no orphans).
+ * tape is authoritative over the storage status field; recover re-runs the suffix,
+ * emits the receipt on the TAPE, and (D4) reconciles the orphaned `running` storage
+ * row to a terminal status consistent with that receipt. Exit 0 iff every orphan
+ * resumes to completion (or there are no orphans).
  */
 async function runPlanForgeRecoverCommand(
 	args: readonly string[],
@@ -5576,6 +5795,9 @@ async function runPlanForgeRecoverCommand(
 	stdout: (line: string) => void,
 ): Promise<number> {
 	const jsonOut = args.includes("--json");
+	// D3: enforcement is ON by default; `--no-enforce-acceptance` opts every orphan
+	// out. Never sourced from the unsigned dispatch manifest.
+	const enforceAcceptance = !args.includes("--no-enforce-acceptance");
 	const workspace = resolve(cwd);
 	const orphans = await findOrphanedPlanForgeDispatches(workspace);
 	if (orphans.length === 0) {
@@ -5598,7 +5820,7 @@ async function runPlanForgeRecoverCommand(
 			orphan.inputPath,
 			cwd,
 			(line) => captured.push(line),
-			{ json: true },
+			{ json: true, enforceAcceptance },
 		);
 		const ok = code === 0;
 		allOk = allOk && ok;
