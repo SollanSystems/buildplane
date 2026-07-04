@@ -28,9 +28,19 @@ const GOAL_INPUT = resolve(
 	LEDGER_TEST_REPO_ROOT,
 	"apps/cli/test/fixtures/planforge/goal-input.md",
 );
+// A two-task plan whose tasks share IDENTICAL allowed-side-effects +
+// verification-commands, so they re-derive the SAME acceptance contract digest.
+// Used to prove one passed acceptance verdict cannot clear BOTH tasks (M6-F1
+// consume-once).
+const SHARED_DIGEST_INPUT = resolve(
+	LEDGER_TEST_REPO_ROOT,
+	"apps/cli/test/fixtures/planforge/goal-input-shared-digest.md",
+);
 const RECORDED_TASK_RUN_ID = "01919000-0000-7000-8000-000000000801";
 const RECORDED_ACTIVITY_ID = "recorded-pf1";
 const RECORDED_ACTIVITY_RESULT = { exitCode: 0, stdout: "", stderr: "" };
+const SHARED_TASK_RUN_ID_1 = "01919000-0000-7000-8000-000000000901";
+const SHARED_TASK_RUN_ID_2 = "01919000-0000-7000-8000-000000000902";
 
 interface ResumeEnv {
 	dir: string;
@@ -209,6 +219,116 @@ function pf1AcceptanceContractDigest(): string {
 	return acceptanceContractDigest(
 		deriveAcceptanceContract(plan, plan.tasks[0]),
 	);
+}
+
+/**
+ * The acceptance contract digest shared by BOTH tasks of the shared-digest
+ * fixture. Both tasks re-derive the identical contract, so this single digest
+ * matches either task's re-derived digest.
+ */
+function sharedAcceptanceContractDigest(): string {
+	const plan = createPlanForgeDryRunPlan(SHARED_DIGEST_INPUT);
+	return acceptanceContractDigest(
+		deriveAcceptanceContract(plan, plan.tasks[0]),
+	);
+}
+
+/**
+ * Append a crash prefix for the shared-digest plan: two durable, signed, PASSED
+ * recorded activities (one per task) plus EXACTLY ONE matching signed
+ * `acceptance_recorded` verdict carrying the shared contract digest. This is the
+ * M6-F1 collision case — a single passed verdict must clear at most one of the
+ * two same-digest tasks; the other resumes as `acceptance-not-evaluated`.
+ */
+async function appendSharedDigestCrashPrefix(input: {
+	dir: string;
+	home: string;
+	runId: string;
+	admittedEventId: string;
+}): Promise<void> {
+	const child = spawn(
+		resolveNativeBinaryForLedgerTests(),
+		[
+			"ledger",
+			"serve",
+			"--run-id",
+			input.runId,
+			"--workspace",
+			input.dir,
+			"--schema-version",
+			"1",
+			"--sign",
+			"--signing-key-id",
+			"kernel-main",
+		],
+		{
+			stdio: ["pipe", "inherit", "pipe"],
+			cwd: LEDGER_TEST_REPO_ROOT,
+			env: { ...process.env, HOME: input.home },
+		},
+	);
+	if (!child.stdin || !child.stderr) {
+		throw new Error("signed ledger subprocess stdio unexpectedly missing");
+	}
+	const exit = waitForExit(child);
+	const emitter = await createTapeEmitter({
+		childStdin: child.stdin as Writable,
+		childStderr: child.stderr as Readable,
+		childExit: exit,
+		workspacePath: input.dir,
+		runId: input.runId,
+		handshakeTimeoutMs: 5_000,
+	});
+	const activities = [
+		{ runId: SHARED_TASK_RUN_ID_1, activityId: "recorded-sd1" },
+		{ runId: SHARED_TASK_RUN_ID_2, activityId: "recorded-sd2" },
+	];
+	try {
+		for (const activity of activities) {
+			emitter.emit("activity_started", {
+				ActivityStartedV1: {
+					run_id: activity.runId,
+					activity_id: activity.activityId,
+					activity_type: "command",
+					input_digest: digest({
+						activity: activity.activityId,
+						input: "shared-digest-fixture",
+					}),
+				},
+			});
+			await emitter.flush();
+			emitter.emit("activity_completed", {
+				ActivityCompletedV1: {
+					run_id: activity.runId,
+					activity_id: activity.activityId,
+					result_digest: digest(RECORDED_ACTIVITY_RESULT),
+					result: RECORDED_ACTIVITY_RESULT,
+				},
+			});
+			await emitter.flush();
+		}
+		// Exactly ONE acceptance verdict for the shared digest — enough for one task,
+		// never both.
+		emitter.emit("acceptance_recorded", {
+			AcceptanceRecordedV1: {
+				plan_id: createPlanForgeDryRunPlan(SHARED_DIGEST_INPUT).id,
+				admission_event_id: input.admittedEventId,
+				contract_digest: sharedAcceptanceContractDigest(),
+				outcome: "passed",
+				diff_scope_status: "passed",
+				out_of_scope_files: [],
+				checks: [],
+				evaluated_at: new Date().toISOString(),
+			},
+		});
+		await emitter.flush();
+		await emitter.close();
+	} catch (err) {
+		if (child.exitCode === null) {
+			child.kill("SIGTERM");
+		}
+		throw err;
+	}
 }
 
 /**
@@ -516,6 +636,76 @@ describe("planforge resume — explicit-input replay-skip recovery", () => {
 		expect(receiptPayload.PlanReceiptRecordedV1.result_digest).toMatch(
 			/^sha256:/,
 		);
+	}, 30_000);
+
+	it("fail-closes the second of two same-digest recorded tasks when only ONE acceptance verdict exists (M6-F1 consume-once)", async () => {
+		await initBuildplaneProject(env.dir);
+
+		// Precondition: the fixture's two tasks re-derive the SAME acceptance digest,
+		// so a single passed verdict is fungible under set-membership — the exact hole
+		// consume-once cardinality closes.
+		const plan = createPlanForgeDryRunPlan(SHARED_DIGEST_INPUT);
+		expect(plan.tasks).toHaveLength(2);
+		const d0 = acceptanceContractDigest(
+			deriveAcceptanceContract(plan, plan.tasks[0]),
+		);
+		const d1 = acceptanceContractDigest(
+			deriveAcceptanceContract(plan, plan.tasks[1]),
+		);
+		expect(d0).toBe(d1);
+
+		const admit = await runCliCapture(
+			[
+				"planforge",
+				"admit",
+				"--input",
+				SHARED_DIGEST_INPUT,
+				"--approve",
+				"--operator",
+				"op1",
+				"--json",
+			],
+			env.dir,
+		);
+		expect(admit.code).toBe(0);
+		const admitted = JSON.parse(admit.out) as {
+			event_id: string;
+			run_id: string;
+		};
+
+		// Crash prefix: BOTH tasks recorded a PASSED activity, but only ONE acceptance
+		// verdict for the shared digest reached the tape (crash after the 2nd activity,
+		// before its acceptance gate).
+		await appendSharedDigestCrashPrefix({
+			dir: env.dir,
+			home: env.home,
+			runId: admitted.run_id,
+			admittedEventId: admitted.event_id,
+		});
+
+		const resume = await runCliCapture(
+			["planforge", "resume", "--input", SHARED_DIGEST_INPUT, "--json"],
+			env.dir,
+		);
+		// One verdict clears exactly one task; the other fail-closes, so the run fails.
+		expect(resume.code).toBe(1);
+		const result = JSON.parse(resume.out) as PlanForgeJson;
+		expect(result.status).toBe("failed");
+		const recordedRuns = result.runs.filter((r) => r.source === "recorded");
+		expect(recordedRuns).toHaveLength(2);
+		expect(recordedRuns.filter((r) => r.status === "passed")).toHaveLength(1);
+		const unevaluated = recordedRuns.filter(
+			(r) => r.status === "acceptance-not-evaluated",
+		);
+		expect(unevaluated).toHaveLength(1);
+		expect(unevaluated[0]?.reason).toBe("acceptance-not-evaluated");
+		// The suffix never runs once a recorded prefix fail-closes.
+		expect(result.executed_activity_count).toBe(0);
+
+		// Exactly one terminal plan_receipt, outcome failed.
+		const rows = await readEvents(env.eventsDbPath);
+		expect(rows.filter((r) => r.kind === "plan_receipt")).toHaveLength(1);
+		expect(receiptOutcomes(rows)).toEqual(["failed"]);
 	}, 30_000);
 
 	it("--no-enforce-acceptance restores the legacy recorded-passed-on-activity-result behavior", async () => {

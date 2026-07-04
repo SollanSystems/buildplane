@@ -16,7 +16,12 @@ Now the resumed suffix runs under acceptance enforcement equivalent to `dispatch
 `acceptancePort`, `resultReadyPort`, and provisioned worktree deps), and a recorded
 activity only counts toward a `completed` receipt when the tape carries a matching
 signed `acceptance_recorded` verdict (`plan_id` + `admission_event_id` + the re-derived
-`contract_digest` + `outcome == "passed"`). Missing/rejected evidence, with enforcement
+`contract_digest` + `outcome == "passed"`). Passed verdicts are consumed once, counted as
+a multiset keyed by `contract_digest`: because the digest intentionally excludes the task
+id, sibling tasks with identical allowed-side-effects + verification-commands share a
+digest, so N recorded-passed tasks with digest D require N distinct passed verdicts for D —
+one verdict can never clear a sibling task whose acceptance never ran. Missing/rejected
+evidence, with enforcement
 on, fail-closes: receipt outcome `failed`, exit 1, and a machine-readable per-task reason
 `acceptance-not-evaluated` in both the JSON output and the receipt's committed result.
 

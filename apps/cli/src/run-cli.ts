@@ -5556,21 +5556,30 @@ export async function resumePlanForgePlanFromInput(
 	// can correlate a recorded activity to its signed `acceptance_recorded` verdict.
 	const { acceptanceProfiles, profileRegistry } =
 		deriveDispatchAcceptanceProfiles(plan, packets, enforceAcceptance);
-	// D2: the set of contract digests that a signed `acceptance_recorded` verdict
-	// on THIS run marked `passed` for THIS plan/admission. A recorded-prefix
-	// activity only counts toward a `completed` receipt when its task's contract
-	// digest is in this set — closing the fail-open where a crash before the
-	// acceptance gate was minted `completed` on resume.
-	const acceptedContractDigests = new Set<string>(
-		replay.acceptances
-			.filter(
-				(a) =>
-					a.planId === plan.id &&
-					a.admissionEventId === admittedEventId &&
-					a.outcome === "passed",
-			)
-			.map((a) => a.contractDigest),
-	);
+	// D2: how many signed `acceptance_recorded` verdicts on THIS run marked
+	// `passed` for THIS plan/admission, counted PER contract digest. A
+	// recorded-prefix activity only counts toward a `completed` receipt when it
+	// can CONSUME one such verdict for its task's contract digest — a strict
+	// consume-once multiset, not set membership. `acceptanceContractDigest`
+	// intentionally excludes the task id, so two tasks with identical
+	// allowed-side-effects + verification-commands share a digest D; N
+	// recorded-passed tasks with digest D therefore require N distinct `passed`
+	// verdicts for D. Counting (rather than `Set.has`) stops one verdict from
+	// satisfying multiple tasks — the fail-open where a single acceptance minted
+	// `completed` for sibling tasks whose acceptance never ran.
+	const acceptedContractDigestCounts = new Map<string, number>();
+	for (const a of replay.acceptances) {
+		if (
+			a.planId === plan.id &&
+			a.admissionEventId === admittedEventId &&
+			a.outcome === "passed"
+		) {
+			acceptedContractDigestCounts.set(
+				a.contractDigest,
+				(acceptedContractDigestCounts.get(a.contractDigest) ?? 0) + 1,
+			);
+		}
+	}
 
 	const runs: PlanForgeResumeRunResult[] = [];
 	for (let i = 0; i < replay.completedActivities.length; i += 1) {
@@ -5584,13 +5593,23 @@ export async function resumePlanForgePlanFromInput(
 		const expectedDigest = acceptanceProfiles.get(
 			packets[i].unit.id,
 		)?.contractDigest;
-		const acceptanceMissing =
-			enforceAcceptance &&
-			isPassedPlanForgeRun(recordedStatus) &&
-			!(
-				expectedDigest !== undefined &&
-				acceptedContractDigests.has(expectedDigest)
-			);
+		let acceptanceMissing = false;
+		if (enforceAcceptance && isPassedPlanForgeRun(recordedStatus)) {
+			const available =
+				expectedDigest !== undefined
+					? (acceptedContractDigestCounts.get(expectedDigest) ?? 0)
+					: 0;
+			if (available > 0) {
+				// Consume-once: this task's passed verdict is now spent and cannot
+				// clear a sibling task that shares the same contract digest.
+				acceptedContractDigestCounts.set(
+					expectedDigest as string,
+					available - 1,
+				);
+			} else {
+				acceptanceMissing = true;
+			}
+		}
 		runs.push({
 			task: packets[i].unit.id,
 			run_id: recorded.runId,
