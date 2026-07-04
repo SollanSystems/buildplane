@@ -5677,6 +5677,13 @@ export async function resumePlanForgePlanFromInput(
 			// dispatch — per-task profileRegistry + a per-task-identity acceptancePort,
 			// resultReadyPort (AC5), and provisioned worktree deps. When not enforcing,
 			// wire only the activity port (the legacy opt-out behavior).
+			// AC5/D5: only these executed-suffix packets emit `result_ready` /
+			// `run_completed` (via the threaded ports, exactly as dispatch does).
+			// Recorded-prefix activities are replayed from the tape without an
+			// orchestrator run, and deliberately get NO synthetic `result_ready`:
+			// fabricating one would assert a terminal outcome the kernel never
+			// produced in this process — their evidence is the recorded
+			// `activity_completed` + the consumed `acceptance_recorded` verdict.
 			const acceptanceIdentity = { planId: plan.id, contractDigest: "" };
 			const acceptancePort = enforceAcceptance
 				? createAcceptancePort(emitter, {
