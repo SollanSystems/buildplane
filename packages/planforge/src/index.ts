@@ -27,6 +27,7 @@ export {
 export { compile, type PlanForgeCompileResult } from "./compile.js";
 export { canonicalJson, digest } from "./digest.js";
 export {
+	DISPATCH_WORKER_MODEL,
 	type DispatchedUnitPacket,
 	type DispatchPlanInput,
 	dispatchAdmittedPlan,

@@ -1,4 +1,6 @@
-import { join } from "node:path";
+import { existsSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import type {
 	MissionControlOrchestrator,
 	MissionControlRouterDeps,
@@ -13,6 +15,25 @@ import type {
 export const DEFAULT_WEB_PORT = 4173;
 
 const WEB_DIST_SUBPATH = "apps/web/dist";
+
+/**
+ * The static web root `bp web` serves. Anchored to the buildplane checkout
+ * this CLI module runs from — `apps/cli/{src,dist}/web-command.*` is three
+ * levels below the repo root — so the UI serves when the operator runs
+ * `bp web` from ANY target repo (the M6 demo runs it from the staged toy
+ * repo). Falls back to the cwd-relative dist for layouts where the CLI tree
+ * carries no built web app.
+ */
+export function resolveWebRoot(
+	cwd: string,
+	moduleDir = dirname(fileURLToPath(import.meta.url)),
+): string {
+	const installRoot = join(moduleDir, "..", "..", "..", WEB_DIST_SUBPATH);
+	if (existsSync(installRoot)) {
+		return installRoot;
+	}
+	return join(cwd, WEB_DIST_SUBPATH);
+}
 
 export interface WebCommandOptions {
 	readonly cwd: string;
@@ -87,7 +108,7 @@ export async function executeWebCommand(
 	const server = mod.createMissionControlServer({
 		orchestrator,
 		store,
-		webRoot: join(options.cwd, WEB_DIST_SUBPATH),
+		webRoot: resolveWebRoot(options.cwd),
 		allowExternal: options.allowExternal,
 		logger: options.stderr,
 	});
