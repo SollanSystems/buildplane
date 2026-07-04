@@ -113,7 +113,7 @@ plus a signed `run_completed` final-outcome event, and merges the branch.
 
 ## The three properties
 
-### Property 1 — Replay / crash-resume
+### Property 1 — Replay / crash-resume (fail-closed)
 
 Between steps 7 and 8, set the crash-injection env var and SIGKILL the kernel
 right after an `activity_completed` lands:
@@ -125,9 +125,25 @@ bp planforge recover                                         # replay + resume
 
 `BUILDPLANE_CRASH_AFTER_ACTIVITY=1` is a deterministic test-only hook (env var, not
 a published CLI flag). After the kill, restart and run `bp planforge recover`: the
-tape is replayed, the completed activity is **reused (never re-invoked)**, execution
-resumes at step 8, and the final state is identical — exactly one `plan_receipt`,
-no re-execution.
+tape is replayed and the completed activity is **reused (never re-invoked)**. Recovery
+is **fail-closed on trust**, not merely receipt-grade:
+
+- **Recorded work that was verified** — a recorded activity carrying a matching signed
+  `acceptance_recorded` verdict on the tape — is counted toward a `completed` receipt,
+  and execution resumes at step 8. The recorded activity is reused, never re-run.
+- **Recorded work that was never verified** — the crash landed *before* the acceptance
+  gate ran, so no `acceptance_recorded` verdict exists — is **not** minted `completed`.
+  `recover` fail-closes: the terminal receipt outcome is `failed`, the process exits 1,
+  and each such task carries the machine-readable reason `acceptance-not-evaluated`. The
+  suffix is not executed. (The `BUILDPLANE_CRASH_AFTER_ACTIVITY=1` kill point lands in
+  exactly this window, so the injected-crash demo shows the honest fail-closed path.)
+
+Enforcement is ON by default; `bp planforge recover --no-enforce-acceptance` (and
+`bp planforge resume --no-enforce-acceptance`) opts out for a dispatch that itself ran
+without acceptance. The decision comes only from the flag — never the unsigned dispatch
+manifest. Either way the tape ends with **exactly one `plan_receipt`** (no
+re-execution), and the orphaned `running` storage row is **reconciled** to a terminal
+status matching that receipt, so a second `recover` reports `no_orphans`.
 
 ### Property 2 — Policy enforcement
 
@@ -165,6 +181,6 @@ third-party authenticity.
 | 3 | `bp planforge dry-run --input goal.md --json` → PASS |
 | 4 | `bp planforge admit --input goal.md --approve --operator <id>` |
 | 5 | `pnpm build && bp web` → http://localhost:4173 |
-| P1 | `bp planforge recover` after `BUILDPLANE_CRASH_AFTER_ACTIVITY=1` kill |
+| P1 | `bp planforge recover` after `BUILDPLANE_CRASH_AFTER_ACTIVITY=1` kill → fail-closed `failed` receipt (crash before acceptance), exactly one `plan_receipt` |
 | P2 | out-of-scope command packet → `capability_denied` |
 | P3 | `node scripts/verify-signed-tape.mjs --fixture <dir>` → exit 0 |
