@@ -13,7 +13,12 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { Readable, Writable } from "node:stream";
 import { createTapeEmitter } from "@buildplane/ledger-client";
-import { digest } from "@buildplane/planforge";
+import {
+	acceptanceContractDigest,
+	createPlanForgeDryRunPlan,
+	deriveAcceptanceContract,
+	digest,
+} from "@buildplane/planforge";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
@@ -174,10 +179,19 @@ function waitForExit(child: ChildProcess): Promise<number> {
 	return exit;
 }
 
+/** Re-derived acceptance contract digest for PlanForge task `index` (0 = PF1). */
+function acceptanceDigestForTask(index: number): string {
+	const plan = createPlanForgeDryRunPlan(GOAL_INPUT);
+	return acceptanceContractDigest(
+		deriveAcceptanceContract(plan, plan.tasks[index]),
+	);
+}
+
 async function appendRecordedActivities(
 	env: Env,
 	runId: string,
 	count: 1 | 2,
+	admittedEventId: string,
 ): Promise<void> {
 	const child = spawn(
 		resolveNativeBinaryForLedgerTests(),
@@ -242,6 +256,22 @@ async function appendRecordedActivities(
 					activity_id: spec.activityId,
 					result_digest: digest(spec.result),
 					result: spec.result,
+				},
+			});
+			await emitter.flush();
+			// M6-F1: each recorded activity models a crash AFTER its acceptance gate
+			// ran, so seed the matching signed verdict — the recorded prefix is
+			// verified work and resume must count it toward a `completed` receipt.
+			emitter.emit("acceptance_recorded", {
+				AcceptanceRecordedV1: {
+					plan_id: createPlanForgeDryRunPlan(GOAL_INPUT).id,
+					admission_event_id: admittedEventId,
+					contract_digest: acceptanceDigestForTask(i),
+					outcome: "passed",
+					diff_scope_status: "passed",
+					out_of_scope_files: [],
+					checks: [],
+					evaluated_at: new Date().toISOString(),
 				},
 			});
 			await emitter.flush();
@@ -323,7 +353,12 @@ describe("M2-S7b crash-replay — planforge resume at harness boundaries", () =>
 		const admitted = await admitGoal(env);
 		const recorded = recordedCountForBoundary(boundary);
 		if (recorded > 0) {
-			await appendRecordedActivities(env, admitted.run_id, recorded);
+			await appendRecordedActivities(
+				env,
+				admitted.run_id,
+				recorded,
+				admitted.event_id,
+			);
 		}
 
 		const kindsBefore = await readEventKinds(env.eventsDbPath);

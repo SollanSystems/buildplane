@@ -5,7 +5,12 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { Readable, Writable } from "node:stream";
 import { createTapeEmitter } from "@buildplane/ledger-client";
-import { digest } from "@buildplane/planforge";
+import {
+	acceptanceContractDigest,
+	createPlanForgeDryRunPlan,
+	deriveAcceptanceContract,
+	digest,
+} from "@buildplane/planforge";
 import { createBuildplaneStorage } from "@buildplane/storage";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
@@ -163,10 +168,18 @@ function waitForExit(child: ChildProcess): Promise<number> {
 	return exit;
 }
 
+function pf1AcceptanceContractDigest(): string {
+	const plan = createPlanForgeDryRunPlan(GOAL_INPUT);
+	return acceptanceContractDigest(
+		deriveAcceptanceContract(plan, plan.tasks[0]),
+	);
+}
+
 async function appendRecordedCompletedActivity(input: {
 	dir: string;
 	home: string;
 	runId: string;
+	acceptance?: { admittedEventId: string };
 }): Promise<void> {
 	const child = spawn(
 		resolveNativeBinaryForLedgerTests(),
@@ -223,6 +236,23 @@ async function appendRecordedCompletedActivity(input: {
 			},
 		});
 		await emitter.flush();
+		if (input.acceptance) {
+			// M6-F1: seed the matching signed acceptance verdict so the recorded PF1
+			// counts as accepted on resume/recover (default enforcement ON).
+			emitter.emit("acceptance_recorded", {
+				AcceptanceRecordedV1: {
+					plan_id: createPlanForgeDryRunPlan(GOAL_INPUT).id,
+					admission_event_id: input.acceptance.admittedEventId,
+					contract_digest: pf1AcceptanceContractDigest(),
+					outcome: "passed",
+					diff_scope_status: "passed",
+					out_of_scope_files: [],
+					checks: [],
+					evaluated_at: new Date().toISOString(),
+				},
+			});
+			await emitter.flush();
+		}
 		await emitter.close();
 	} catch (err) {
 		if (child.exitCode === null) {
@@ -296,6 +326,7 @@ describe("planforge recover — startup crash auto-resume", () => {
 			dir: env.dir,
 			home: env.home,
 			runId: admitted.run_id,
+			acceptance: { admittedEventId: admitted.event_id },
 		});
 		const first = await runCliCapture(
 			["planforge", "resume", "--input", GOAL_INPUT, "--json"],
@@ -338,11 +369,13 @@ describe("planforge recover — startup crash auto-resume", () => {
 		};
 
 		// Simulate a crash mid-dispatch: suffix incomplete, manifest written, a
-		// storage row left `running`.
+		// storage row left `running`. The recorded PF1 carries its acceptance verdict
+		// so recover resumes it to completion (default enforcement ON).
 		await appendRecordedCompletedActivity({
 			dir: env.dir,
 			home: env.home,
 			runId: admitted.run_id,
+			acceptance: { admittedEventId: admitted.event_id },
 		});
 		writePlanForgeDispatchManifest(env.dir, {
 			runId: admitted.run_id,
@@ -387,11 +420,32 @@ describe("planforge recover — startup crash auto-resume", () => {
 		const rows = await readEvents(env.eventsDbPath);
 		expect(rows.filter((r) => r.kind === "plan_receipt")).toHaveLength(1);
 
-		// Tape-authoritative: recover does NOT rewrite the orphaned storage row.
+		// D4 reconcile: the orphaned `running` storage row is flipped to a terminal
+		// status consistent with the receipt — no longer `running` (closes the M2
+		// "receipt on tape but running in storage → reconcile" contract line).
 		const stillRunning = createBuildplaneStorage(env.dir)
 			.listRunsByStatus("running")
 			.map((r) => r.id);
-		expect(stillRunning).toContain(orphan.id);
+		expect(stillRunning).not.toContain(orphan.id);
+		const reconciled = createBuildplaneStorage(env.dir)
+			.listRunsByStatus("passed")
+			.map((r) => r.id);
+		expect(reconciled).toContain(orphan.id);
+
+		// AC4 idempotency: a second recover pass finds no orphans (the reconciled row
+		// is no longer `running`, and the tape already carries the terminal receipt).
+		const secondPass = await runCliCapture(
+			["planforge", "recover", "--json"],
+			env.dir,
+		);
+		expect(secondPass.code).toBe(0);
+		const secondResult = JSON.parse(secondPass.out) as { status: string };
+		expect(secondResult.status).toBe("no_orphans");
+		expect(
+			(await readEvents(env.eventsDbPath)).filter(
+				(r) => r.kind === "plan_receipt",
+			),
+		).toHaveLength(1);
 	}, 30_000);
 
 	it("recover is a no-op when there are no orphans", async () => {

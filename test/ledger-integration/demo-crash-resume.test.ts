@@ -36,13 +36,6 @@ const GOAL_INPUT = resolve(
 const CLI_ENTRY = resolve(LEDGER_TEST_REPO_ROOT, "apps/cli/src/index.ts");
 const TSX_BIN = resolve(LEDGER_TEST_REPO_ROOT, "node_modules", ".bin", "tsx");
 
-const LIFECYCLE_KINDS = new Set([
-	"plan_admitted",
-	"activity_started",
-	"activity_completed",
-	"plan_receipt",
-]);
-
 interface CrashEnv {
 	dir: string;
 	home: string;
@@ -205,10 +198,6 @@ async function readEvents(eventsDbPath: string): Promise<EventRow[]> {
 	}
 }
 
-function lifecycleKinds(rows: EventRow[]): string[] {
-	return rows.map((r) => r.kind).filter((k) => LIFECYCLE_KINDS.has(k));
-}
-
 function receiptOutcomes(rows: EventRow[]): string[] {
 	return rows
 		.filter((r) => r.kind === "plan_receipt")
@@ -288,7 +277,7 @@ describe("demo crash-and-resume — Property 1", () => {
 		}
 	});
 
-	it("crash right after activity_completed → recover reuses the recorded result, emits exactly one plan_receipt, and matches a clean run", async () => {
+	it("crash right after activity_completed → recover fail-closes the unverified recorded prefix (acceptance never evaluated), emitting exactly one failed plan_receipt without re-invoking the model", async () => {
 		// ── Clean baseline run (never crashes) ──────────────────────────────
 		const clean = await makeCrashEnv();
 		envs.push(clean);
@@ -327,33 +316,34 @@ describe("demo crash-and-resume — Property 1", () => {
 		// Only the first task's model ran before the crash.
 		expect(claudeCalls(crashed)).toBe(1);
 
-		// ── Recover ─────────────────────────────────────────────────────────
+		// ── Recover (M6-F1: fail-closed) ───────────────────────────────────
+		// The crash landed BEFORE the acceptance gate, so the recorded PF1 carries no
+		// signed `acceptance_recorded` verdict. `recover` enforces acceptance by
+		// default, so the unverified recorded prefix fail-closes rather than being
+		// minted `completed` — the honest semantics this slice restores.
 		bindProcessEnv(crashed);
 		const recover = await runCliCapture(
 			["planforge", "recover", "--json"],
 			crashed.dir,
 		);
 		expect(recover.err).toBe("");
-		expect(recover.code).toBe(0);
+		expect(recover.code).toBe(1);
 		const recoverResult = JSON.parse(recover.out) as {
 			status: string;
 			recovered: Array<{ status: string }>;
 		};
-		expect(recoverResult.status).toBe("recovered");
+		expect(recoverResult.status).toBe("failed");
 		expect(recoverResult.recovered).toHaveLength(1);
-		expect(recoverResult.recovered[0].status).toBe("resumed");
+		expect(recoverResult.recovered[0].status).toBe("failed");
 
 		const afterRecover = await readEvents(crashed.eventsDbPath);
-		// Idempotent terminal emit: exactly one plan_receipt, outcome completed.
+		// Still exactly one terminal plan_receipt — outcome `failed`, not `completed`.
 		expect(afterRecover.filter((r) => r.kind === "plan_receipt")).toHaveLength(
 			1,
 		);
-		expect(receiptOutcomes(afterRecover)).toEqual(["completed"]);
-		// The recorded activity was REUSED, not re-invoked: only the suffix task
-		// (PF2) ran during recover, so the model was invoked 2x total (never 3x).
-		expect(claudeCalls(crashed)).toBe(2);
-
-		// Final PlanForge lifecycle is structurally identical to the clean run.
-		expect(lifecycleKinds(afterRecover)).toEqual(lifecycleKinds(cleanRows));
+		expect(receiptOutcomes(afterRecover)).toEqual(["failed"]);
+		// The recorded activity was REUSED for the verdict (never re-invoked) and the
+		// suffix never ran, so the model call count stays at 1 (the pre-crash PF1).
+		expect(claudeCalls(crashed)).toBe(1);
 	}, 120_000);
 });
