@@ -1,9 +1,12 @@
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { type RunCliDependencies, runCli } from "../src/run-cli";
 import {
 	DEFAULT_WEB_PORT,
 	executeWebCommand,
+	resolveWebRoot,
 	type WebCommandOptions,
 	type WebCommandRuntime,
 } from "../src/web-command";
@@ -138,7 +141,7 @@ describe("executeWebCommand — serve (listen)", () => {
 		expect(code).toBe(0);
 		expect(createMissionControlServer).toHaveBeenCalledWith(
 			expect.objectContaining({
-				webRoot: join("/proj", "apps/web/dist"),
+				webRoot: resolveWebRoot("/proj"),
 				allowExternal: true,
 			}),
 		);
@@ -177,6 +180,37 @@ describe("executeWebCommand — serve (listen)", () => {
 
 		expect(code).toBe(0);
 		expect(close).toHaveBeenCalledOnce();
+	});
+});
+
+describe("resolveWebRoot — the served UI anchors to the CLI installation, not the operator's cwd", () => {
+	it("serves the CLI checkout's apps/web/dist when it exists (bp web run from a target repo)", () => {
+		const root = mkdtempSync(join(tmpdir(), "bp-webroot-"));
+		try {
+			const moduleDir = join(root, "apps", "cli", "dist");
+			const webDist = join(root, "apps", "web", "dist");
+			mkdirSync(moduleDir, { recursive: true });
+			mkdirSync(webDist, { recursive: true });
+			writeFileSync(join(webDist, "index.html"), "<!doctype html>");
+
+			expect(resolveWebRoot("/some/target-repo", moduleDir)).toBe(webDist);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("falls back to the cwd-relative dist when the CLI checkout has none", () => {
+		const root = mkdtempSync(join(tmpdir(), "bp-webroot-"));
+		try {
+			const moduleDir = join(root, "apps", "cli", "dist");
+			mkdirSync(moduleDir, { recursive: true });
+
+			expect(resolveWebRoot("/some/target-repo", moduleDir)).toBe(
+				join("/some/target-repo", "apps/web/dist"),
+			);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
 	});
 });
 

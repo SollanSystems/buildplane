@@ -21,8 +21,18 @@ pnpm native:build     # builds buildplane-native (the signed ledger)
 - The web Mission Control surface is **source/dev-only** for v0.5: `bp web` serves
   `apps/web/dist`, so `pnpm build` must run first. There is no published web install.
 - Stage a throwaway copy of the toy repo with `node scripts/run-demo.mjs` (copies
-  `fixtures/demo-repo/` to a temp dir and `git init`s it so `trustedBase` resolves).
+  `fixtures/demo-repo/` to a temp dir, `git init`s it, and **stamps the seed commit
+  SHA into `goal.md`'s `Trusted base:` line** — the dry-run/admit path reads the
+  trusted base from the input markdown, never from `git rev-parse`).
   Run the step commands from that staged directory.
+- **From the staged directory, `bp` is the buildplane CLI run out of the checkout**
+  (`node <checkout>/apps/cli/dist/index.js …`), and two per-command preconditions
+  apply (the 2026-07-03 watched run hit both):
+  - `export BUILDPLANE_NATIVE_BIN=<checkout>/native/target/debug/buildplane-native`
+    — the staged repo has no `native/` subtree, so the default resolution chain
+    cannot find the signed-ledger binary from there.
+  - Run `bp init` once in the staged directory before `admit`/`web` — the tape
+    write works without it, but `bp web` and the run loop need `.buildplane/state.db`.
 
 ---
 
@@ -85,8 +95,15 @@ Open the run inspector in the browser. (Source/dev-only; see Setup.)
 
 ### Step 6 — worker dispatched into an isolated worktree
 
+```
+bp planforge dispatch --input goal.md --json --model <worker-model> --worker-timeout-ms 900000
+```
+
 The worker runs in a fresh git worktree with writable `src/` + `test/`, tools
-`Read/Write/Edit/Bash`, and net-egress scoped to the NPM registry only.
+`Read/Write/Edit/Bash` (the R7 grant — the dispatch default), and a
+default-deny declared net-egress posture (declarative-only in v0.5).
+Worktree dependencies are provisioned lockfile-aware before the worker starts
+(`pnpm install --frozen-lockfile` / `npm ci` / `npm install`).
 
 ### Step 7 — every tool call becomes a signed, policy-checked tape event
 
@@ -115,12 +132,12 @@ plus a signed `run_completed` final-outcome event, and merges the branch.
 
 ### Property 1 — Replay / crash-resume (fail-closed)
 
-Between steps 7 and 8, set the crash-injection env var and SIGKILL the kernel
-right after an `activity_completed` lands:
+Between steps 7 and 8, arm the crash-injection env var — the kernel aborts hard
+right after the first `activity_completed` is durable + signed:
 
 ```
-BUILDPLANE_CRASH_AFTER_ACTIVITY=1 bp planforge loop --once   # kernel dies after the activity
-bp planforge recover                                         # replay + resume
+BUILDPLANE_CRASH_AFTER_ACTIVITY=1 bp planforge dispatch --input goal.md --json …  # kernel dies after the activity
+bp planforge recover                                                              # replay + re-emit the receipt
 ```
 
 `BUILDPLANE_CRASH_AFTER_ACTIVITY=1` is a deterministic test-only hook (env var, not
@@ -172,6 +189,15 @@ recomputes. Honesty note: the §7 sketch said "50-line script"; the real verifie
 third-party authenticity.
 
 ---
+
+## Operational notes
+
+- **Host-machine Claude hooks can dirty the worker worktree.** A `claude`
+  worker inherits the operator machine's global hooks; anything they write
+  (e.g. `.claude/`, `.gsd/`) lands in the worktree and is correctly counted by
+  diff-scope as an out-of-scope write. The stager git-ignores both dirs
+  (diff-scope honors `--exclude-standard`); do the same in any real target repo
+  run from a hook-carrying machine.
 
 ## Quick reference
 

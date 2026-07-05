@@ -49,6 +49,7 @@ import {
 } from "./bootstrap-doctor.js";
 import { type CapabilityReport, inspectCapabilities } from "./capabilities.js";
 import { createClaudeToolLedgerEmitter } from "./claude-tool-ledger-emitter.js";
+import { createDispatchToolUnitTracker } from "./dispatch-tool-unit-tracker.js";
 import {
 	createInspectorProjection,
 	formatBootstrapDoctorReport,
@@ -124,6 +125,7 @@ import {
 	buildPlanAdmittedPayload,
 	buildPlanReceiptPayload,
 	createPlanForgeDryRunPlan,
+	DISPATCH_WORKER_MODEL,
 	deriveAcceptanceContract,
 	dispatchAdmittedPlan,
 	formatPriorWorkEntry,
@@ -924,9 +926,15 @@ function formatPlanForgeHelp(): string[] {
 		"    --json                   Prints the dispatch result (per-task run ids) as JSON",
 		"    --no-enforce-acceptance  Skip the finalization acceptance gate (diff-scope +",
 		"                             verificationCommands). The gate is ON by default and",
-		"                             worktree deps are provisioned (pnpm install) before",
-		"                             checks run; use this flag only when worktree",
-		"                             dependencies cannot be provisioned.",
+		"                             worktree deps are provisioned (lockfile-aware:",
+		"                             pnpm/npm ci/npm install) before checks run; use this",
+		"                             flag only when worktree dependencies cannot be",
+		"                             provisioned.",
+		"    --model <id>             Worker model override (default: the dispatch default)",
+		"    --max-turns <n>          Worker turn cap threaded to the executor",
+		"    --worker-allowed-tools <a,b>  Claude Code tool grant (default: Edit,Write,",
+		"                             Read,Glob,Grep,Bash — the loop's R7 grant)",
+		"    --worker-timeout-ms <ms> Hard per-dispatch worker timeout (floor 60000)",
 		"",
 		"buildplane planforge resume --input <file> [--no-enforce-acceptance] [--json]",
 		"",
@@ -4259,29 +4267,71 @@ async function runPlanForgeAdmitCommand(
 
 const DEFAULT_DISPATCH_POLICY_PROFILE = "default";
 
+export interface ProvisionCommand {
+	readonly command: string;
+	readonly args: readonly string[];
+}
+
 /**
- * Runs `pnpm install --frozen-lockfile` inside an isolated git worktree so the
- * acceptance gate's `verificationCommands` (which invoke workspace tooling) have
- * their binaries and packages available. Synchronous to match the existing sync
+ * Lockfile-aware dependency-provisioning command for a worktree:
+ * `pnpm-lock.yaml` → `pnpm install --frozen-lockfile`; `package-lock.json` →
+ * `npm ci`; a bare `package.json` (the M6 demo-repo shape) → `npm install`;
+ * no `package.json` → `undefined` (nothing to provision — e.g. a non-Node
+ * target repo).
+ */
+export function resolveProvisionCommand(
+	workspacePath: string,
+): ProvisionCommand | undefined {
+	if (!existsSync(join(workspacePath, "package.json"))) {
+		return undefined;
+	}
+	if (existsSync(join(workspacePath, "pnpm-lock.yaml"))) {
+		return { command: "pnpm", args: ["install", "--frozen-lockfile"] };
+	}
+	if (existsSync(join(workspacePath, "package-lock.json"))) {
+		return { command: "npm", args: ["ci"] };
+	}
+	// --no-package-lock: a generated lockfile would dirty the worktree and
+	// retrip the run-admission worktree_clean gate.
+	return {
+		command: "npm",
+		args: ["install", "--no-audit", "--no-fund", "--no-package-lock"],
+	};
+}
+
+/**
+ * Provisions dependencies inside an isolated git worktree so the acceptance
+ * gate's `verificationCommands` (which invoke workspace tooling) have their
+ * binaries and packages available. Synchronous to match the existing sync
  * git operations in `prepareRun`. Throws on a non-zero exit (or a spawn error)
  * with captured stderr so the orchestrator can surface a
  * `workspace-provision-failed` infrastructure failure and retain the worktree.
  */
 export function provisionWorktreeDeps(workspacePath: string): void {
-	const result = spawnSync("pnpm", ["install", "--frozen-lockfile"], {
+	if (!existsSync(workspacePath)) {
+		throw new Error(
+			`worktree dependency provisioning failed: worktree ${workspacePath} does not exist`,
+		);
+	}
+	const resolved = resolveProvisionCommand(workspacePath);
+	if (!resolved) {
+		return;
+	}
+	const label = `${resolved.command} ${resolved.args.join(" ")}`;
+	const result = spawnSync(resolved.command, [...resolved.args], {
 		cwd: workspacePath,
 		encoding: "utf8",
 		stdio: ["ignore", "pipe", "pipe"],
 	});
 	if (result.error) {
 		throw new Error(
-			`pnpm install failed in worktree ${workspacePath}: ${result.error.message}`,
+			`${label} failed in worktree ${workspacePath}: ${result.error.message}`,
 		);
 	}
 	if (result.status !== 0) {
 		const detail = (result.stderr ?? result.stdout ?? "").trim();
 		throw new Error(
-			`pnpm install failed in worktree ${workspacePath} (exit ${
+			`${label} failed in worktree ${workspacePath} (exit ${
 				result.status ?? "null"
 			}): ${detail}`,
 		);
@@ -4632,6 +4682,44 @@ export function summarizeDispatchOutcome(
 	};
 }
 
+export interface DispatchWorkerFlags {
+	readonly model?: string;
+	readonly claudeMaxTurns?: number;
+	readonly claudeAllowedTools: readonly string[];
+	readonly claudeTimeoutMs?: number;
+}
+
+/**
+ * Worker flags for standalone `planforge dispatch` — `--model`, `--max-turns`,
+ * `--worker-allowed-tools`, `--worker-timeout-ms` — the same worker contract
+ * the loop threads (R7). Without the tool grant a dispatched worker is
+ * default-denied and makes zero edits, so the grant defaults to the loop's
+ * spike-proven set. Loop-provided opts take precedence over these flags, so
+ * the supervisor path is unchanged.
+ */
+export function parseDispatchWorkerFlags(
+	args: readonly string[],
+): DispatchWorkerFlags {
+	const allowedToolsFlag = readFlag(args, "--worker-allowed-tools");
+	const claudeAllowedTools =
+		allowedToolsFlag !== undefined
+			? allowedToolsFlag
+					.split(",")
+					.map((t) => t.trim())
+					.filter((t) => t.length > 0)
+			: PLANFORGE_LOOP_DEFAULT_ALLOWED_TOOLS;
+	const timeoutFlag = parseIntFlag(args, "--worker-timeout-ms", null);
+	return {
+		model: readFlag(args, "--model"),
+		claudeMaxTurns: parseIntFlag(args, "--max-turns", null) ?? undefined,
+		claudeAllowedTools,
+		claudeTimeoutMs:
+			timeoutFlag !== null
+				? Math.max(timeoutFlag, MIN_WORKER_TIMEOUT_MS)
+				: undefined,
+	};
+}
+
 async function runPlanForgeDispatchCommand(
 	args: readonly string[],
 	cwd: string,
@@ -4674,6 +4762,14 @@ async function runPlanForgeDispatchCommand(
 	// flag is still accepted but redundant — the gate is already on.
 	const enforceAcceptance = !args.includes("--no-enforce-acceptance");
 
+	// Loop-provided opts win; CLI flags cover the standalone dispatch path.
+	const workerFlags = parseDispatchWorkerFlags(args);
+	const workerModel = opts?.model ?? workerFlags.model;
+	const workerMaxTurns = opts?.claudeMaxTurns ?? workerFlags.claudeMaxTurns;
+	const workerAllowedTools =
+		opts?.claudeAllowedTools ?? workerFlags.claudeAllowedTools;
+	const workerTimeoutMs = opts?.claudeTimeoutMs ?? workerFlags.claudeTimeoutMs;
+
 	const plan = createPlanForgeDryRunPlan(resolve(cwd, inputPath));
 	const workspace = resolve(cwd);
 	// priorWork handoff (GAP-5): a second storage connection for the single
@@ -4701,14 +4797,14 @@ async function runPlanForgeDispatchCommand(
 		createdAt: new Date().toISOString(),
 		// Persist the worker-model override BEFORE the run loop so a crash-and-resume
 		// re-dispatches the suffix on the same model (R-001). Omitted when undefined.
-		model: opts?.model,
+		model: workerModel,
 	});
 
 	const packets = dispatchAdmittedPlan({
 		plan,
 		admittedEventId: String(admittedEventId),
 		policyProfile: DEFAULT_DISPATCH_POLICY_PROFILE,
-		model: opts?.model,
+		model: workerModel,
 	});
 
 	// M4 acceptance contract: per-task fail-closed profiles the kernel resolves at
@@ -4757,9 +4853,23 @@ async function runPlanForgeDispatchCommand(
 		// Demo crash-injection (M6 Property 1): NO-OP unless BUILDPLANE_CRASH_AFTER_ACTIVITY=1,
 		// in which case the dispatch aborts hard right after the first activity_completed
 		// is durable+signed on the tape — never reaching the terminal plan_receipt.
+		// M6-F2: per-tool-call tape events on the dispatch path. The Claude worker's
+		// tool_use/tool_result stream must land on THIS signed dispatch tape, stamped
+		// with the in-flight packet's unit id + the `activity_started` event id as the
+		// tool_request parent. The tracker observes the emitter feeding the activity
+		// port to capture that auto-assigned id; the dispatch loop feeds it each
+		// packet's unit id via `beginUnit` before `runPacketAsync`.
+		const dispatchToolUnitTracker = createDispatchToolUnitTracker();
 		const ledgerActivityPort = withCrashAfterActivityGuard(
-			createLedgerActivityPort(emitter),
+			createLedgerActivityPort(dispatchToolUnitTracker.observe(emitter)),
 			emitter,
+		);
+		// The tool sink writes onto the SAME serialized signed writer as the activity
+		// and acceptance events (the raw `emitter`), so its ordering is preserved.
+		const dispatchClaudeToolSink = createClaudeToolLedgerEmitter(
+			emitter,
+			dispatchToolUnitTracker.getUnitCtx,
+			workspace,
 		);
 		// Tasks dispatch sequentially, so a single mutable identity holder safely
 		// scopes the acceptance verdict's plan identity to the task in flight.
@@ -4784,18 +4894,23 @@ async function runPlanForgeDispatchCommand(
 						// M6-S7 — `result_ready` rides the same signed dispatch emitter
 						// as acceptance/activity events (one serialized writer).
 						resultReadyPort: createResultReadyPort(emitter),
+						// M6-F2 — per-tool-call events from the Claude worker stream ride
+						// the same signed dispatch tape as activity/acceptance events.
+						onClaudeToolEvent: dispatchClaudeToolSink,
 						provisionDeps: provisionWorktreeDeps,
-						claudeMaxTurns: opts?.claudeMaxTurns,
+						claudeMaxTurns: workerMaxTurns,
 						budgets: opts?.budgets,
-						claudeAllowedTools: opts?.claudeAllowedTools,
-						claudeTimeoutMs: opts?.claudeTimeoutMs,
+						claudeAllowedTools: workerAllowedTools,
+						claudeTimeoutMs: workerTimeoutMs,
 					}
 				: {
 						ledgerActivityPort,
-						claudeMaxTurns: opts?.claudeMaxTurns,
+						// M6-F2 — per-tool-call events also captured on the no-enforce path.
+						onClaudeToolEvent: dispatchClaudeToolSink,
+						claudeMaxTurns: workerMaxTurns,
 						budgets: opts?.budgets,
-						claudeAllowedTools: opts?.claudeAllowedTools,
-						claudeTimeoutMs: opts?.claudeTimeoutMs,
+						claudeAllowedTools: workerAllowedTools,
+						claudeTimeoutMs: workerTimeoutMs,
 					},
 		);
 
@@ -4810,6 +4925,10 @@ async function runPlanForgeDispatchCommand(
 						unit: { ...packet.unit, policyProfile: acceptance.profileName },
 					}
 				: packet;
+			// M6-F2: scope the tool sink's unit ctx to the packet in flight BEFORE
+			// dispatch, so its `activity_started` (emitted inside runPacketAsync) is
+			// recorded against this unit id. Packets dispatch sequentially.
+			dispatchToolUnitTracker.beginUnit(packet.unit.id);
 			const result = (await orchestrator.runPacketAsync(
 				parseUnitPacket(JSON.stringify(dispatchedPacket)),
 				cliEventBus,
@@ -4900,9 +5019,17 @@ async function runPlanForgeDispatchCommand(
 					status: allPassed ? "dispatched" : "failed",
 					plan_id: plan.id,
 					admitted_event_id: String(admittedEventId),
+					// The effective worker contract, so the operator sees what the
+					// dispatched worker was actually granted (printed-output only —
+					// deliberately NOT part of the signed receipt's result digest).
+					worker: {
+						model: workerModel ?? DISPATCH_WORKER_MODEL,
+						allowed_tools: workerAllowedTools,
+						timeout_ms: workerTimeoutMs ?? null,
+					},
 					runs,
 				})
-			: `Dispatched PlanForge plan ${plan.id}: ${runs.length}/${packets.length} task(s).`,
+			: `Dispatched PlanForge plan ${plan.id}: ${runs.length}/${packets.length} task(s) [worker ${workerModel ?? DISPATCH_WORKER_MODEL}; tools ${workerAllowedTools.join(",")}].`,
 	);
 	return allPassed ? 0 : 1;
 }
