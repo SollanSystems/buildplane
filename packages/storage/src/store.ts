@@ -2122,6 +2122,49 @@ export function createStorageStore(
 			}
 		},
 
+		reconcilePlanForgeDispatchRuns(
+			planId: string,
+			status: "passed" | "failed",
+		): readonly string[] {
+			ensureInitialized();
+			const database = openStoreDatabase();
+			const now = new Date().toISOString();
+			try {
+				// Mirror `findOrphanedPlanForgeDispatches`'s predicate EXACTLY
+				// (`unit_id.startsWith(`${planId}:`)`) in JS rather than a SQL LIKE, so a
+				// planId containing `%`/`_` can neither over- nor under-match. Only rows
+				// still `running` are reconciled — never a row already terminal.
+				const prefix = `${planId}:`;
+				const rows = database
+					.prepare(`SELECT id, unit_id FROM runs WHERE status = 'running'`)
+					.all() as { id: string; unit_id: string }[];
+				const update = database.prepare(
+					`UPDATE runs SET status = ?, updated_at = ?, completed_at = ? WHERE id = ?`,
+				);
+				const reconciled: string[] = [];
+				for (const row of rows) {
+					if (!row.unit_id.startsWith(prefix)) {
+						continue;
+					}
+					update.run(status, now, now, row.id);
+					appendEvent(
+						"run-completed",
+						{
+							runId: row.id,
+							unitId: row.unit_id,
+							status,
+							reason: "planforge-recover-reconcile",
+						},
+						database,
+					);
+					reconciled.push(row.id);
+				}
+				return reconciled;
+			} finally {
+				database.close();
+			}
+		},
+
 		recordExecutionEvidence(runId: string, receipt: ExecutionReceipt) {
 			ensureInitialized();
 			const database = openStoreDatabase();

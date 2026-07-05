@@ -12,7 +12,12 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { Readable, Writable } from "node:stream";
 import { createTapeEmitter } from "@buildplane/ledger-client";
-import { digest } from "@buildplane/planforge";
+import {
+	acceptanceContractDigest,
+	createPlanForgeDryRunPlan,
+	deriveAcceptanceContract,
+	digest,
+} from "@buildplane/planforge";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
@@ -146,6 +151,7 @@ function waitForExit(child: ChildProcess): Promise<number> {
 async function appendOneRecordedActivity(
 	env: SliceEnv,
 	runId: string,
+	admittedEventId: string,
 ): Promise<void> {
 	const child = spawn(
 		resolveNativeBinaryForLedgerTests(),
@@ -199,6 +205,24 @@ async function appendOneRecordedActivity(
 				activity_id: activityId,
 				result_digest: digest(result),
 				result,
+			},
+		});
+		await emitter.flush();
+		// M6-F1: the recorded PF1 models a crash AFTER its acceptance gate ran, so
+		// seed the matching signed verdict — resume counts it toward the receipt.
+		const plan = createPlanForgeDryRunPlan(GOAL_INPUT);
+		emitter.emit("acceptance_recorded", {
+			AcceptanceRecordedV1: {
+				plan_id: plan.id,
+				admission_event_id: admittedEventId,
+				contract_digest: acceptanceContractDigest(
+					deriveAcceptanceContract(plan, plan.tasks[0]),
+				),
+				outcome: "passed",
+				diff_scope_status: "passed",
+				out_of_scope_files: [],
+				checks: [],
+				evaluated_at: new Date().toISOString(),
 			},
 		});
 		await emitter.flush();
@@ -310,7 +334,7 @@ describe("M2-GATE — PlanForge vertical slice with recovered mid-cycle crash", 
 			run_id: string;
 		};
 
-		await appendOneRecordedActivity(env, admitted.run_id);
+		await appendOneRecordedActivity(env, admitted.run_id, admitted.event_id);
 
 		const kindsMid = await readEventKinds(env.eventsDbPath);
 		expect(kindsMid.filter((k) => k === "plan_receipt")).toHaveLength(0);

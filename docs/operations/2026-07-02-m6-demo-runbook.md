@@ -130,7 +130,7 @@ plus a signed `run_completed` final-outcome event, and merges the branch.
 
 ## The three properties
 
-### Property 1 — Replay / crash-resume
+### Property 1 — Replay / crash-resume (fail-closed)
 
 Between steps 7 and 8, arm the crash-injection env var — the kernel aborts hard
 right after the first `activity_completed` is durable + signed:
@@ -141,15 +141,26 @@ bp planforge recover                                                            
 ```
 
 `BUILDPLANE_CRASH_AFTER_ACTIVITY=1` is a deterministic test-only hook (env var, not
-a published CLI flag). After the kill, run `bp planforge recover`: the tape is
-replayed and the completed activity is **reused (never re-invoked)** — exactly one
-`activity_completed` and exactly one `plan_receipt` on the tape, proven live
-2026-07-03. **Honesty caveat (surfaced by the watched run):** the v0.5 recover
-path restores *tape* integrity, not the full pipeline — the recorded-prefix
-branch re-emits the terminal receipt WITHOUT re-entering the acceptance gate,
-the squash-merge, or the `result_ready`/`run_completed` emits, and the storage
-`running` row is deliberately not rewritten. Narrate Property 1 as
-"crash-safe tape + no double execution", not "identical final state".
+a published CLI flag). After the kill, restart and run `bp planforge recover`: the
+tape is replayed and the completed activity is **reused (never re-invoked)**. Recovery
+is **fail-closed on trust**, not merely receipt-grade:
+
+- **Recorded work that was verified** — a recorded activity carrying a matching signed
+  `acceptance_recorded` verdict on the tape — is counted toward a `completed` receipt,
+  and execution resumes at step 8. The recorded activity is reused, never re-run.
+- **Recorded work that was never verified** — the crash landed *before* the acceptance
+  gate ran, so no `acceptance_recorded` verdict exists — is **not** minted `completed`.
+  `recover` fail-closes: the terminal receipt outcome is `failed`, the process exits 1,
+  and each such task carries the machine-readable reason `acceptance-not-evaluated`. The
+  suffix is not executed. (The `BUILDPLANE_CRASH_AFTER_ACTIVITY=1` kill point lands in
+  exactly this window, so the injected-crash demo shows the honest fail-closed path.)
+
+Enforcement is ON by default; `bp planforge recover --no-enforce-acceptance` (and
+`bp planforge resume --no-enforce-acceptance`) opts out for a dispatch that itself ran
+without acceptance. The decision comes only from the flag — never the unsigned dispatch
+manifest. Either way the tape ends with **exactly one `plan_receipt`** (no
+re-execution), and the orphaned `running` storage row is **reconciled** to a terminal
+status matching that receipt, so a second `recover` reports `no_orphans`.
 
 ### Property 2 — Policy enforcement
 
@@ -179,16 +190,8 @@ third-party authenticity.
 
 ---
 
-## Known limitations (surfaced by the 2026-07-03 watched run)
+## Operational notes
 
-- **Step 7's per-tool-call tape events do not ride the demo path.** The M6-S8
-  sink (`createClaudeToolLedgerEmitter`) is wired into the `bp run` surface
-  only; `planforge dispatch` emits activity bracketing (`activity_started`/
-  `activity_completed`) but no `tool_request_stored`/`tool_result` rows.
-  Narrate step 7 at the activity grain until the sink is wired into dispatch.
-- **Recover is receipt-grade, not pipeline-grade** (see Property 1 caveat):
-  acceptance, merge, `result_ready`, and storage reconciliation do not re-run
-  on the recorded-prefix recovery branch.
 - **Host-machine Claude hooks can dirty the worker worktree.** A `claude`
   worker inherits the operator machine's global hooks; anything they write
   (e.g. `.claude/`, `.gsd/`) lands in the worktree and is correctly counted by
@@ -204,6 +207,6 @@ third-party authenticity.
 | 3 | `bp planforge dry-run --input goal.md --json` → PASS |
 | 4 | `bp planforge admit --input goal.md --approve --operator <id>` |
 | 5 | `pnpm build && bp web` → http://localhost:4173 |
-| P1 | `bp planforge recover` after `BUILDPLANE_CRASH_AFTER_ACTIVITY=1` kill |
+| P1 | `bp planforge recover` after `BUILDPLANE_CRASH_AFTER_ACTIVITY=1` kill → fail-closed `failed` receipt (crash before acceptance), exactly one `plan_receipt` |
 | P2 | out-of-scope command packet → `capability_denied` |
 | P3 | `node scripts/verify-signed-tape.mjs --fixture <dir>` → exit 0 |
