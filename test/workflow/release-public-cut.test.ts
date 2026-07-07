@@ -141,7 +141,8 @@ describe("M6-S13 public release cut", () => {
 		// M6-O6: publish the vendored staged artifact, not the raw apps/cli package.
 		expect(workflow).toContain("release:publish");
 		expect(workflow).toContain("NPM_TOKEN");
-		expect(workflow).toContain("secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN");
+		expect(workflow).toContain("secrets.RELEASE_TOKEN || github.token");
+		expect(workflow).not.toContain("secrets.GITHUB_TOKEN");
 		// A missing NPM_TOKEN on a release-landing push must fail loud.
 		expect(workflow).toMatch(/::error::/);
 	});
