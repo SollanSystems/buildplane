@@ -1,5 +1,13 @@
 # buildplane
 
+## 0.14.1
+
+### Patch Changes
+
+- c539eff: unify path-glob semantics across the envelope admission gate and the acceptance diff-scope gate on the broker's minimatch semantics: a new shared `segment-glob` module in `@buildplane/policy` decides matching (differentially tested against real minimatch) and language-inclusion subset (brute-force verified), so middle-wildcard vocabulary globs like `packages/**/src/**` now cover concrete proposals at admission and match changed files at acceptance instead of being dead patterns
+- 0079caa: fail closed with source-checkout guidance when `bp web` runs from a published install (the optional `@buildplane/mission-control-server` package is not bundled), surface a `bootstrap doctor` note that the published native binary is packaged for linux-x64 only, and report entrypoint promise rejections as a clean exit 1 instead of an unhandled rejection
+- 824b9a6: wire the per-tool-call ledger sink into the PlanForge resume/recover executed-suffix path, so a cold-resumed run's worker tool_use/tool_result events land on the signed tape (stamped with the executed suffix packet's unit id and parented to its activity bracket) instead of recording zero tool activity — closing the resume-path evidence-trail gap left open at the M6 gate
+
 ## 0.14.0
 
 ### Minor Changes
