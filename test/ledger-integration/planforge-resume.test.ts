@@ -54,6 +54,7 @@ interface EventRow {
 	id: string;
 	kind: string;
 	payload: string;
+	parent_event_id: string | null;
 }
 
 interface PlanForgeJson {
@@ -168,6 +169,29 @@ function installClaudeShim(binDir: string): void {
 	chmodSync(shim, 0o755);
 }
 
+const RESUME_TOOL_USE_ID = "toolu_resume_f2";
+
+/**
+ * Install a `claude` shim that emits a stream-json tool_use/tool_result pair
+ * (the schema the claude-code executor parses into `onToolEvent`) before its
+ * terminal success `result`. Overwrites {@link installClaudeShim}. Drives the
+ * executed-suffix worker's per-tool-call callback so the RESUME tape gains
+ * tool_request/tool_result events (the resume-path analogue of M6-F2 dispatch
+ * capture).
+ */
+function installToolEmittingClaudeShim(binDir: string): void {
+	const shim = join(binDir, "claude");
+	const assistant = `{"type":"assistant","message":{"content":[{"type":"tool_use","id":"${RESUME_TOOL_USE_ID}","name":"Bash","input":{"command":"echo hi"}}]}}`;
+	const user = `{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"${RESUME_TOOL_USE_ID}","content":"hi","is_error":false}]}}`;
+	const result = `{"type":"result","subtype":"success","is_error":false,"result":"ok","usage":{"input_tokens":1,"output_tokens":1}}`;
+	writeFileSync(
+		shim,
+		`#!/bin/sh\necho '${assistant}'\necho '${user}'\necho '${result}'\nexit 0\n`,
+		"utf8",
+	);
+	chmodSync(shim, 0o755);
+}
+
 /**
  * Install a `pnpm` shim on PATH. The acceptance gate is ON by default (GAP-3), so
  * `pnpm` is invoked for worktree provisioning (`pnpm install --frozen-lockfile`)
@@ -201,7 +225,9 @@ async function readEvents(eventsDbPath: string): Promise<EventRow[]> {
 	const db = new DatabaseSync(eventsDbPath, { readOnly: true });
 	try {
 		return db
-			.prepare("SELECT id, kind, payload FROM events ORDER BY id ASC")
+			.prepare(
+				"SELECT id, kind, payload, parent_event_id FROM events ORDER BY id ASC",
+			)
 			.all() as unknown as EventRow[];
 	} finally {
 		db.close();
@@ -753,6 +779,89 @@ describe("planforge resume — explicit-input replay-skip recovery", () => {
 		expect(pf1?.status).toBe("passed");
 		expect(pf1?.reason).toBeUndefined();
 	}, 30_000);
+
+	it("lands the executed suffix's tool_request/tool_result on the resume tape", async () => {
+		// Resume-path analogue of the M6-F2 dispatch tool capture. Before this
+		// slice the resume executed-suffix wired only the activity port (no unit
+		// tracker, no `onClaudeToolEvent` sink), so a cold-resumed run recorded
+		// ZERO tool activity on the signed tape — a real evidence-trail hole. The
+		// recorded PF1 prefix is accepted (matching verdict), so PF2 executes; its
+		// Claude worker emits a tool_use/tool_result pair that must land on the
+		// RESUME tape, correlated to PF2's activity bracket + unit.
+		await initBuildplaneProject(env.dir);
+		installToolEmittingClaudeShim(env.binDir);
+
+		const admit = await runCliCapture(
+			[
+				"planforge",
+				"admit",
+				"--input",
+				GOAL_INPUT,
+				"--approve",
+				"--operator",
+				"op1",
+				"--json",
+			],
+			env.dir,
+		);
+		expect(admit.code).toBe(0);
+		const admitted = JSON.parse(admit.out) as {
+			event_id: string;
+			run_id: string;
+		};
+
+		await appendRecordedCompletedActivity({
+			dir: env.dir,
+			home: env.home,
+			runId: admitted.run_id,
+			acceptance: { admittedEventId: admitted.event_id },
+		});
+
+		const resume = await runCliCapture(
+			["planforge", "resume", "--input", GOAL_INPUT, "--json"],
+			env.dir,
+		);
+		expect(resume.err).toBe("");
+		expect(resume.code).toBe(0);
+		const result = JSON.parse(resume.out) as PlanForgeJson;
+		expect(result.status).toBe("resumed");
+		const executed = result.runs.find((run) => run.source === "executed");
+		expect(executed).toBeDefined();
+		const executedTaskId = executed?.task as string;
+
+		const rows = await readEvents(env.eventsDbPath);
+		const activityStartedIds = new Set(
+			rows.filter((r) => r.kind === "activity_started").map((r) => r.id),
+		);
+		const toolRequests = rows.filter((r) => r.kind === "tool_request");
+		const toolResults = rows.filter((r) => r.kind === "tool_result");
+		// The core fix: the executed suffix now produces per-tool-call events.
+		expect(toolRequests.length).toBeGreaterThan(0);
+		expect(toolResults.length).toBeGreaterThan(0);
+
+		const toolRequestIds = new Set(toolRequests.map((r) => r.id));
+		for (const req of toolRequests) {
+			const stored = (
+				JSON.parse(req.payload) as {
+					ToolRequestStoredV1: { unit_id: string; tool_name: string };
+				}
+			).ToolRequestStoredV1;
+			// Stamped with the EXECUTED suffix packet's unit (never the recorded
+			// prefix — that activity replays from the tape without a worker run).
+			expect(stored.unit_id).toBe(executedTaskId);
+			expect(stored.tool_name).toBe("Bash");
+			// Parented to an activity_started event id on the resume tape.
+			expect(activityStartedIds.has(req.parent_event_id ?? "")).toBe(true);
+		}
+		for (const res of toolResults) {
+			const out = (
+				JSON.parse(res.payload) as {
+					ToolResultV1: { tool_request_id: string };
+				}
+			).ToolResultV1;
+			expect(toolRequestIds.has(out.tool_request_id)).toBe(true);
+		}
+	}, 60_000);
 
 	it("fail-closes the executed suffix when its acceptance checks fail (AC1)", async () => {
 		await initBuildplaneProject(env.dir);
