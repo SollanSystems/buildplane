@@ -1,10 +1,8 @@
-# M6-GATE — end-to-end demo + v0.5.0 public cut milestone gate receipt (DRAFT)
+# M6-GATE — end-to-end demo + v0.5.0 public cut milestone gate receipt
 
-> **STATUS: DRAFT — do not treat as a closed gate.** Every `TBD(operator)` slot below is an
-> operator-only action still outstanding. This receipt finalizes (and this banner is removed)
-> only when those slots carry real SHAs / tags. Evidence packet closing **Milestone M6**:
-> the watched end-to-end demo (10 steps, 3 properties, incl. crash-and-resume) plus the
-> **v0.5.0** public cut (MIT license, repo→public, npm publish of the vendored artifact).
+> **STATUS: CLOSED 2026-07-08.** Evidence packet closing **Milestone M6**: the watched
+> end-to-end demo (10 steps, 3 properties, incl. crash-and-resume) plus the **v0.5.0**
+> public cut (MIT license, repo→public, npm publish of the vendored artifact).
 
 ## Milestone identity
 
@@ -15,7 +13,8 @@
   `docs/superpowers/plans/2026-07-01-m6-completion-and-improvements.md` (its completion
   ledger rides this receipt's commit)
 - **Demo runbook:** `docs/operations/2026-07-02-m6-demo-runbook.md`
-- **Completed at:** TBD(operator) — gate closes at the v0.5.0 publish
+- **Completed at:** 2026-07-08 — `buildplane@0.14.0` published to npm (15:24Z), repo flipped
+  PUBLIC, GitHub release **v0.5.0** cut at `4b1c065` and marked latest
 
 ## Per-slice ledger
 
@@ -42,6 +41,7 @@
 | **Demo watched-run fixes** (runner stages temp repo + stamps trusted base; web-token mechanics; dispatch worker flags) | L2 | #242 | `74dc5f1` | PASS |
 | **F1** fail-closed `planforge resume`/`recover` (gate-finding fix) | **L0-adjacent · 4-role-style** | #244 | `3c0c348` | PASS — adversarial reviewer CONFIRMED one HIGH (same-digest acceptance evidence was fungible; repaired via consume-once multiset `231fe1b` + regression test, re-review clean); acceptance verifier 7/7 after `2419e05`; merged after final review |
 | **F2** per-tool-call tape events on the dispatch path (gate-finding fix) | L1 · 2-role | #243 | `e7b6af6` | PASS — verifier 5/5, zero review findings |
+| **Release-infra fix** publish tag creation + already-published skip guard | L3 | #248 | `4b1c065` | PASS — 12/12 workflow tests (RED→GREEN), registry guard verified live, skip path proven green on the merge push |
 
 ## Watched demo evidence (LOCKED operator-watched gate — executed 2026-07-03)
 
@@ -96,12 +96,12 @@
 
 | Item | Status |
 |---|---|
-| O1 `RELEASE_TOKEN` PAT | TBD(operator) — secret exists but latest release run still fails at checkout, so the PAT is not usable; fallback expression bug fixed locally in this receipt branch (`github.token`, not `secrets.GITHUB_TOKEN`) for the absent-token case, with a regression test and CLAUDE.md gotcha update, but the current stale token still must be replaced or removed |
-| O2 `NPM_TOKEN` secret | TBD(operator) — absent in `gh secret list` |
-| O3 secret scan (gitleaks, full history, 1001 commits, 0 findings) | DONE 2026-07-02 |
-| O3b repo→public flip | TBD(operator) — open dependabot alerts reduced to 1 (#241) |
+| O1 `RELEASE_TOKEN` PAT | DONE 2026-07-08 — fresh fine-grained PAT set (14:40Z); the failed release run re-ran green, and version PR #247 opened **with its required checks triggering** (the dead-token failure mode — PAT-authored pushes with no CI — is gone) |
+| O2 `NPM_TOKEN` secret | DONE 2026-07-08 — set (14:49Z); the fail-loud guard passed on the release-landing push |
+| O3 secret scan (gitleaks, full history, 1001 commits, 0 findings) | DONE 2026-07-02 · re-scanned 2026-07-08 across **all refs** (gitleaks 8.24.3, incl. `prototype-main`): no leaks |
+| O3b repo→public flip | DONE 2026-07-08 — repo PUBLIC; **0** open dependabot alerts at the flip; stale `prototype-main` branch deleted (its classic branch protection removed first) |
 | Merge #242 / #243 / #244 | DONE — #242 `74dc5f1`, #243 `e7b6af6`, #244 `3c0c348` |
-| Publish + tag **v0.5.0** (release.yml re-run publishes the vendored artifact) | TBD(operator) — confirm the release job has a Rust toolchain for `pnpm native:build` at first publish (fails loud if absent) |
+| Publish + tag **v0.5.0** (release.yml re-run publishes the vendored artifact) | DONE 2026-07-08 — version PR #247 (`587a9fe`, buildplane 0.13.0→0.14.0, 5 changesets) merged; `buildplane@0.14.0` published 15:24:13Z (runner Rust toolchain sufficed for `pnpm native:build`). The run then failed post-publish: the publisher printed `New tag:` without creating the git ref, so the action's tag push died — tag + GitHub release `buildplane@0.14.0` repaired manually; defect fixed in #248 (`4b1c065`: idempotent `git tag` + already-published registry skip, proven live green on its own merge push). GitHub release **v0.5.0** cut at `4b1c065`, marked latest |
 
 ## Next gate
 
