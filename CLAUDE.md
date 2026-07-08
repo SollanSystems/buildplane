@@ -266,7 +266,7 @@ Stated as imperatives — these have each burned a session:
 - **Solo-PR merge:** solo PRs need admin-merge; L0 slices are **not** auto-merge eligible (no `buildplane:auto-merge` label). gh's default OAuth token **cannot write rulesets** (PATCH/DELETE 404 despite admin) — use the GitHub web UI or a classic/fine-grained PAT.
 - **Worktree-push corruption:** the `process.chdir` race in `test/ledger-integration/fixtures.ts` can corrupt worktree branches on push under vitest parallel workers. Mitigation today: `git push --no-verify`. Root-cause fix (remove `process.chdir`, extend explicit-cwd discipline) is deferred.
 - **Mergify ruleset scope:** scope any branch-deletion ruleset to `~DEFAULT_BRANCH`, **not** `~ALL` (`~ALL` blocks all branch deletion repo-wide). Enable `delete_branch_on_merge` for auto-clean of merged head branches.
-- **Changesets release CI:** release PRs authored by `GITHUB_TOKEN` never re-trigger CI (GitHub anti-recursion). Feed a `RELEASE_TOKEN` PAT to both `actions/checkout` and the changesets step env, with a `|| secrets.GITHUB_TOKEN` fallback.
+- **Changesets release CI:** release PRs authored by `GITHUB_TOKEN` never re-trigger CI (GitHub anti-recursion). Feed a `RELEASE_TOKEN` PAT to both `actions/checkout` and the changesets step env, with a `|| github.token` fallback; `secrets.GITHUB_TOKEN` is not the safe fallback for this workflow.
 
 ---
 

@@ -20,7 +20,7 @@ jobs:
           # GITHUB_TOKEN. Pushes made with GITHUB_TOKEN don't trigger pull_request/
           # push workflows, which left every changeset release PR permanently
           # missing its required checks (verify, Analyze) and stuck BLOCKED.
-          token: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.RELEASE_TOKEN || github.token }}
           persist-credentials: true
 
       - name: Setup pnpm
@@ -68,6 +68,6 @@ jobs:
           commit: "chore: version packages"
           title: "chore: version packages"
         env:
-          GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN || github.token }}
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
