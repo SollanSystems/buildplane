@@ -46,6 +46,26 @@ describe("O6 vendored publish", () => {
 		expect(publisher).toContain("New tag:");
 	});
 
+	it("creates the local git tag the changesets action pushes", () => {
+		const publisher = read("scripts/published-bootstrap/publish-npm.mjs");
+		// The action reacts to `New tag:` by running `git push origin <tag>` —
+		// against the local ref. The 0.14.0 publish failed exactly here (`src
+		// refspec buildplane@0.14.0 does not match any`): the line was printed
+		// but the tag was never created. The publisher must create the tag
+		// before announcing it.
+		expect(publisher).toContain("ensureReleaseTag");
+		expect(publisher).toMatch(/execFileSync\(\s*"git",\s*\["tag"/);
+	});
+
+	it("skips republish when the version is already on the registry", () => {
+		const publisher = read("scripts/published-bootstrap/publish-npm.mjs");
+		// With no pending changesets, every push to main re-runs the publish
+		// command for the current version; npm rejects republishing (E403), so
+		// without a registry check every post-release push turns main red.
+		expect(publisher).toContain("isVersionPublished");
+		expect(publisher).toMatch(/\["view",/);
+	});
+
 	it("derives a published manifest with no workspace:* / internal @buildplane deps", async () => {
 		const { derivePublishManifest } = await import(
 			"../../scripts/published-bootstrap/manifest.mjs"
