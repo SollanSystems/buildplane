@@ -15,14 +15,24 @@ export { runCli };
 export function runCliIfExecutedDirectly(
 	entryUrl: string,
 	argv = process.argv,
+	runCliFn: (argv: string[]) => Promise<number> = runCli,
 ): void {
 	if (!isExecutedDirectly(entryUrl, argv[1])) {
 		return;
 	}
 
-	void runCli(argv.slice(2)).then((exitCode: number) => {
-		process.exitCode = exitCode;
-	});
+	// A rejection here would otherwise crash the process as an unhandled
+	// promise rejection — runCli formats its own errors, so anything arriving
+	// here escaped that path and gets a plain message + exit 1.
+	void runCliFn(argv.slice(2)).then(
+		(exitCode: number) => {
+			process.exitCode = exitCode;
+		},
+		(error: unknown) => {
+			console.error(error instanceof Error ? error.message : String(error));
+			process.exitCode = 1;
+		},
+	);
 }
 
 function isExecutedDirectly(

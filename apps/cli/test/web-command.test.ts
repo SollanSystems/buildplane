@@ -100,6 +100,84 @@ describe("executeWebCommand — --check (no-listen self-test)", () => {
 	});
 });
 
+describe("executeWebCommand — published-install contract (server module absent)", () => {
+	function moduleNotFoundError(): Error {
+		const error = new Error(
+			"Cannot find module '@buildplane/mission-control-server' imported from /install/apps/cli/dist/run-cli.js",
+		) as NodeJS.ErrnoException;
+		error.code = "ERR_MODULE_NOT_FOUND";
+		return error;
+	}
+
+	function absentModuleRuntime(): WebCommandRuntime {
+		return {
+			loadServerModule: async () => {
+				throw moduleNotFoundError();
+			},
+			loadDeps: async () => fakeDeps(),
+		};
+	}
+
+	it("returns 1 with source-checkout guidance instead of a raw module error", async () => {
+		const cap = capture();
+		const code = await executeWebCommand(
+			{
+				cwd: "/proj",
+				port: DEFAULT_WEB_PORT,
+				check: false,
+				allowExternal: false,
+				...cap.options,
+			},
+			absentModuleRuntime(),
+		);
+
+		expect(code).toBe(1);
+		const err = cap.stderr.join("\n");
+		expect(err).toContain("@buildplane/mission-control-server");
+		expect(err).toMatch(/source checkout/i);
+	});
+
+	it("applies the same contract under --check", async () => {
+		const cap = capture();
+		const code = await executeWebCommand(
+			{
+				cwd: "/proj",
+				port: DEFAULT_WEB_PORT,
+				check: true,
+				allowExternal: false,
+				...cap.options,
+			},
+			absentModuleRuntime(),
+		);
+
+		expect(code).toBe(1);
+		expect(cap.stderr.join("\n")).toMatch(/source checkout/i);
+	});
+
+	it("rethrows non-module-not-found load failures to the generic CLI error path", async () => {
+		const cap = capture();
+		const runtime: WebCommandRuntime = {
+			loadServerModule: async () => {
+				throw new Error("server module exploded");
+			},
+			loadDeps: async () => fakeDeps(),
+		};
+
+		await expect(
+			executeWebCommand(
+				{
+					cwd: "/proj",
+					port: DEFAULT_WEB_PORT,
+					check: true,
+					allowExternal: false,
+					...cap.options,
+				},
+				runtime,
+			),
+		).rejects.toThrow("server module exploded");
+	});
+});
+
 describe("executeWebCommand — serve (listen)", () => {
 	it("creates the server with the apps/web/dist root + allowExternal, listens, logs, and closes on abort", async () => {
 		const cap = capture();

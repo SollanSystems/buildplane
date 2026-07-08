@@ -248,6 +248,82 @@ describe("Buildplane capability primitives", () => {
 		}
 	});
 
+	it("warns that the published native binary is linux-x64-only on other platforms", () => {
+		const report = inspectCapabilities({
+			currentNodeVersion: "24.13.2",
+			cwd: "/repo",
+			platform: "darwin",
+			arch: "arm64",
+			detectNodeSqlite: () => ({
+				ok: true,
+				available: true,
+				message: "node:sqlite import available",
+			}),
+			probeCommand: createProbe({
+				npm: {
+					ok: true,
+					available: true,
+					command: "npm --version",
+					message: "10.0.0",
+				},
+				git: {
+					ok: true,
+					available: true,
+					command: "git --version",
+					message: "git version 2.49.0",
+				},
+			}),
+			resolveNativeBinary: () => undefined,
+			resolvePackagedNativeBinary: () => undefined,
+		});
+
+		expect(
+			report.notes.some(
+				(note) =>
+					note.includes("linux-x64 only") && note.includes("darwin-arm64"),
+			),
+		).toBe(true);
+		expect(
+			report.capabilities.find(
+				(capability) => capability.id === "published_memory",
+			)?.message,
+		).toContain("darwin-arm64");
+	});
+
+	it("emits no platform packaging warning on linux-x64", () => {
+		const report = inspectCapabilities({
+			currentNodeVersion: "24.13.2",
+			cwd: "/repo",
+			platform: "linux",
+			arch: "x64",
+			detectNodeSqlite: () => ({
+				ok: true,
+				available: true,
+				message: "node:sqlite import available",
+			}),
+			probeCommand: createProbe({
+				npm: {
+					ok: true,
+					available: true,
+					command: "npm --version",
+					message: "10.0.0",
+				},
+				git: {
+					ok: true,
+					available: true,
+					command: "git --version",
+					message: "git version 2.49.0",
+				},
+			}),
+			resolveNativeBinary: () => undefined,
+			resolvePackagedNativeBinary: () => undefined,
+		});
+
+		expect(report.notes.some((note) => note.includes("linux-x64 only"))).toBe(
+			false,
+		);
+	});
+
 	it("fails the capability report when a required feature is missing", () => {
 		const report = inspectCapabilities({
 			currentNodeVersion: "24.13.2",

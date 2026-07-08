@@ -83,7 +83,21 @@ export async function executeWebCommand(
 	options: WebCommandOptions,
 	runtime: WebCommandRuntime,
 ): Promise<number> {
-	const mod = await runtime.loadServerModule();
+	let mod: WebServerModule;
+	try {
+		mod = await runtime.loadServerModule();
+	} catch (error) {
+		if (!isServerModuleNotFound(error)) {
+			throw error;
+		}
+		options.stderr(
+			"bp web is not available in this installation: the optional @buildplane/mission-control-server package is not bundled with the published npm artifact.",
+		);
+		options.stderr(
+			"Run bp web from a Buildplane source checkout (pnpm install && pnpm build).",
+		);
+		return 1;
+	}
 	const { orchestrator, store } = await runtime.loadDeps(options.cwd);
 
 	if (options.check) {
@@ -121,6 +135,20 @@ export async function executeWebCommand(
 	await waitForShutdown(options.signal);
 	await server.close();
 	return 0;
+}
+
+/**
+ * True only when the failure is the mission-control-server package itself
+ * being absent (the published-install layout). A missing TRANSITIVE dep also
+ * raises ERR_MODULE_NOT_FOUND but names the transitive specifier, so it falls
+ * through to the generic CLI error path instead of this contract message.
+ */
+function isServerModuleNotFound(error: unknown): boolean {
+	return (
+		error instanceof Error &&
+		(error as NodeJS.ErrnoException).code === "ERR_MODULE_NOT_FOUND" &&
+		error.message.includes("'@buildplane/mission-control-server'")
+	);
 }
 
 function waitForShutdown(signal: AbortSignal | undefined): Promise<void> {

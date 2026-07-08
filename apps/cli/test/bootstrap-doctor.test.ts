@@ -36,6 +36,42 @@ afterEach(() => {
 });
 
 describe("bootstrap doctor report", () => {
+	it("surfaces the linux-x64-only native packaging warning on other platforms", () => {
+		const report = inspectBootstrapDoctor({
+			currentNodeVersion: "24.13.2",
+			platform: "darwin",
+			arch: "arm64",
+			detectNodeSqlite: () => ({
+				ok: true,
+				available: true,
+				message: "node:sqlite import available",
+			}),
+			probeCommand: createProbe({
+				npm: {
+					ok: true,
+					available: true,
+					command: "npm --version",
+					detected: "10.9.0",
+					message: "npm 10.9.0",
+				},
+				git: {
+					ok: true,
+					available: true,
+					command: "git --version",
+					detected: "git version 2.49.0",
+					message: "git version 2.49.0",
+				},
+			}),
+		});
+
+		expect(
+			report.notes.some(
+				(note) =>
+					note.includes("linux-x64 only") && note.includes("darwin-arm64"),
+			),
+		).toBe(true);
+	});
+
 	it("returns a deterministic passing report when all required checks succeed", () => {
 		const report = inspectBootstrapDoctor({
 			currentNodeVersion: "24.13.2",
