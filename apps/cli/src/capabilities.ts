@@ -54,6 +54,9 @@ export interface InspectCapabilitiesOptions {
 	readonly currentNodeVersion?: string;
 	readonly cwd?: string;
 	readonly env?: NodeJS.ProcessEnv;
+	/** Host platform/arch used for packaged-native-target reporting (defaults to this process). */
+	readonly platform?: string;
+	readonly arch?: string;
 	readonly probeCommand?: (
 		command: string,
 		args: readonly string[],
@@ -232,10 +235,11 @@ function isExecutableFile(path: string): boolean {
 	}
 }
 
-function currentPackagedNativeTarget():
-	| { readonly binaryName: string; readonly platform: "linux-x64" }
-	| undefined {
-	if (process.platform !== "linux" || process.arch !== "x64") {
+function currentPackagedNativeTarget(
+	platform: string,
+	arch: string,
+): { readonly binaryName: string; readonly platform: "linux-x64" } | undefined {
+	if (platform !== "linux" || arch !== "x64") {
 		return undefined;
 	}
 
@@ -245,18 +249,34 @@ function currentPackagedNativeTarget():
 	};
 }
 
-function packagedNativeUnavailableMessage(): string {
-	if (process.platform === "linux" && process.arch === "x64") {
+function packagedNativeUnavailableMessage(
+	platform: string,
+	arch: string,
+): string {
+	if (platform === "linux" && arch === "x64") {
 		return "packaged linux-x64 native binary not found in vendor/native";
 	}
 
-	return `packaged native memory unavailable for ${process.platform}-${process.arch}; linux-x64 is currently the only packaged native target`;
+	return `packaged native memory unavailable for ${platform}-${arch}; linux-x64 is currently the only packaged native target`;
+}
+
+export function packagedNativePlatformWarning(
+	platform: string,
+	arch: string,
+): string | undefined {
+	if (platform === "linux" && arch === "x64") {
+		return undefined;
+	}
+
+	return `the published npm package bundles a native binary for linux-x64 only; native-backed commands (memory, pack) are unavailable on ${platform}-${arch} installs`;
 }
 
 function defaultResolvePackagedNativeBinary(
 	_env: NodeJS.ProcessEnv,
+	platform: string,
+	arch: string,
 ): string | undefined {
-	const target = currentPackagedNativeTarget();
+	const target = currentPackagedNativeTarget(platform, arch);
 	if (!target) {
 		return undefined;
 	}
@@ -279,12 +299,18 @@ function defaultResolvePackagedNativeBinary(
 function defaultResolveNativeBinary(
 	cwd: string,
 	env: NodeJS.ProcessEnv,
+	platform: string,
+	arch: string,
 ): string | undefined {
 	if (env.BUILDPLANE_NATIVE_BIN) {
 		return findExecutableOnPath(env.BUILDPLANE_NATIVE_BIN, env);
 	}
 
-	const packagedNative = defaultResolvePackagedNativeBinary(env);
+	const packagedNative = defaultResolvePackagedNativeBinary(
+		env,
+		platform,
+		arch,
+	);
 	if (packagedNative) {
 		return packagedNative;
 	}
@@ -332,6 +358,8 @@ export function inspectCapabilities(
 		options.currentNodeVersion ?? process.versions.node;
 	const cwd = options.cwd ?? process.cwd();
 	const env = options.env ?? process.env;
+	const platform = options.platform ?? process.platform;
+	const arch = options.arch ?? process.arch;
 	const probeCommand =
 		options.probeCommand ??
 		((command: string, args: readonly string[]) =>
@@ -339,9 +367,13 @@ export function inspectCapabilities(
 	const detectNodeSqlite =
 		options.detectNodeSqlite ?? detectNodeSqliteCapability;
 	const resolveNativeBinary =
-		options.resolveNativeBinary ?? defaultResolveNativeBinary;
+		options.resolveNativeBinary ??
+		((binaryCwd: string, binaryEnv: NodeJS.ProcessEnv) =>
+			defaultResolveNativeBinary(binaryCwd, binaryEnv, platform, arch));
 	const resolvePackagedNativeBinary =
-		options.resolvePackagedNativeBinary ?? defaultResolvePackagedNativeBinary;
+		options.resolvePackagedNativeBinary ??
+		((binaryEnv: NodeJS.ProcessEnv) =>
+			defaultResolvePackagedNativeBinary(binaryEnv, platform, arch));
 	const packagedNativeBinary = resolvePackagedNativeBinary(env);
 	const nativeBinary = resolveNativeBinary(cwd, env);
 	const nodeOk = isSupportedNodeVersion(currentNodeVersion);
@@ -421,9 +453,18 @@ export function inspectCapabilities(
 			detected: packagedNativeBinary,
 			message: packagedNativeBinary
 				? `published memory can use packaged native binary at ${packagedNativeBinary}`
-				: packagedNativeUnavailableMessage(),
+				: packagedNativeUnavailableMessage(platform, arch),
 		},
 	];
+
+	const notes = [
+		".node-version pins the tested development baseline; the published CLI accepts compatible Node 24 runtimes.",
+		"Published memory is available only when the installed package includes a packaged native binary for this platform.",
+	];
+	const platformWarning = packagedNativePlatformWarning(platform, arch);
+	if (platformWarning) {
+		notes.push(platformWarning);
+	}
 
 	return {
 		ok: capabilities.every(
@@ -434,9 +475,6 @@ export function inspectCapabilities(
 			supportedNodeRange: SUPPORTED_NODE_RANGE,
 		},
 		capabilities,
-		notes: [
-			".node-version pins the tested development baseline; the published CLI accepts compatible Node 24 runtimes.",
-			"Published memory is available only when the installed package includes a packaged native binary for this platform.",
-		],
+		notes,
 	};
 }

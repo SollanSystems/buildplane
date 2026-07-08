@@ -73,15 +73,22 @@
 2. **Tier-2 signature read-back** — **still deferred**; the demo surfaces authenticity via the
    external verifier (Property 3), not in-UI.
 3. **Web plan-admit (Flow 2)** — **still deferred**.
-4. **SSE/live push** — **still deferred** (poll-based MVP stands).
+4. **SSE/live push** — **still deferred** (the fetch-on-load MVP stands; *corrected
+   2026-07-08* — this receipt originally said "poll-based MVP", but the web UI has never
+   polled: it fetches once on load plus user-triggered refreshes).
 5. **Published-install web serving** — **still deferred**; `bp web` remains source/dev-only
-   (handled exit-1 from a published install, consistent with the `ui-tui` contract).
+   (*corrected 2026-07-08* — at gate time the published-install failure exited 1 only via
+   the generic top-level CLI error path, printing a raw module-not-found message; the
+   explicit, tested fail-closed contract — source-checkout guidance + staged-install
+   assertion in `verify-positive.mjs` — shipped post-gate in the honesty patch).
 
 ## Known limitations disclosed at this gate (R6 honesty items)
 
-- **Adversarial-Codex reviewer benchmark: 43.75%** on the reviewer-rescue stub (4 fixtures).
-  The adversarial-Codex role remains an internal review aid, not a README front door, until
-  it clears an agreed bar.
+- **Adversarial-Codex reviewer benchmark: 43.75%, measured against a deterministic local
+  stub** (reviewer-rescue, 4 fixtures) — the real Codex CLI has never been benchmarked
+  (`BUILDPLANE_EVAL_MODEL=1` never run), so the number characterizes the stub harness, not
+  Codex. The adversarial-Codex role remains an internal review aid, not a README front
+  door, until it clears an agreed bar.
 - **Broker enforcement scope** is command-executor-only (see Property 2 above); extending to
   the model-worker tool surface is post-v0.5 backlog.
 - **Recorded-prefix runs get no synthetic `result_ready` on resume** (deliberate — their
