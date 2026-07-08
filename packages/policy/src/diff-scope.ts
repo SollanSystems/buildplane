@@ -2,6 +2,7 @@ import type {
 	ArchitectureDiffScopeGate,
 	RejectedPolicyDecision,
 } from "@buildplane/kernel";
+import { segmentGlobMatches } from "./segment-glob.js";
 
 export interface ArchitectureDiffScopeEvaluation {
 	readonly gate: "architecture.diff_scope";
@@ -121,27 +122,20 @@ function normalizeChangedPath(path: string): string | null {
 	return normalized;
 }
 
+/**
+ * Any pattern containing `*` routes through the shared segment-glob matcher
+ * (the broker's minimatch semantics), so middle-wildcard vocabulary globs
+ * like `packages/**\/src/**` match here exactly as they do at broker
+ * enforcement. Trailing-`/` directory prefixes and bare literals keep their
+ * historical behavior.
+ */
 function matchesPattern(path: string, pattern: string): boolean {
-	if (pattern === "**" || pattern === "*") return true;
-	if (pattern.endsWith("/**")) {
-		const prefix = pattern.slice(0, -3);
-		return path === prefix || path.startsWith(`${prefix}/`);
-	}
+	if (pattern === "**") return true;
 	if (pattern.endsWith("/")) {
 		return path.startsWith(pattern);
 	}
 	if (pattern.includes("*")) {
-		return globToRegex(pattern).test(path);
+		return segmentGlobMatches(path, pattern);
 	}
 	return path === pattern;
-}
-
-function globToRegex(pattern: string): RegExp {
-	const escaped = pattern
-		.split("**")
-		.map((part) =>
-			part.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, "[^/]*"),
-		)
-		.join(".*");
-	return new RegExp(`^${escaped}$`);
 }
