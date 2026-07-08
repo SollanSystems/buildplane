@@ -46,8 +46,8 @@
 1. **`result_ready` tape event** — deferred (Decision A), NOT removed from the v0.5 demo (demo steps 9–10). M6 must decide whether the demo needs the explicit signal or keeps the derived feed.
 2. **Tier-2 signature read-back** — deferred (Decision C). No TS read-back path for the signed ledger; the inspector renders only the Tier-1 storage projection. M6 must decide if the demo surfaces signature authenticity in-UI (vs. the out-of-band external verifier).
 3. **Web plan-admit (Flow 2)** — deferred (Decision B). The inbox covers RESUME + MERGE, not web-initiated plan admission.
-4. **SSE/WebSocket live push** — MVP polls (`GET /api/status` + list). In-process EventBus push was deferred (in-process-only; not worth the coupling for v1).
-5. **`bp web` is source/dev-only.** The web UI is served from `apps/web/dist` and `@buildplane/mission-control-server` is an optional (un-vendored) package, so `bp web` is not available from a published-install of the CLI (consistent with the `ui-tui` optional-package contract; error is a handled exit-1, not a crash). M6/v0.5 packaging must decide whether published web serving is in scope.
+4. **SSE/WebSocket live push** — the MVP renders fetch-on-load snapshots (`GET /api/status` + list; *corrected 2026-07-08* — originally recorded as "MVP polls", but the UI has never polled). In-process EventBus push was deferred (in-process-only; not worth the coupling for v1).
+5. **`bp web` is source/dev-only.** The web UI is served from `apps/web/dist` and `@buildplane/mission-control-server` is an optional (un-vendored) package, so `bp web` is not available from a published-install of the CLI (consistent with the `ui-tui` optional-package contract). *Corrected 2026-07-08:* at the time of this receipt the exit-1 came only from the generic top-level CLI error catch (raw module-not-found message, no dedicated handling or test); the explicit fail-closed contract with source-checkout guidance shipped in the post-v0.5 honesty patch. M6/v0.5 packaging must decide whether published web serving is in scope.
 
 ## SC1 / SC4 evidence
 

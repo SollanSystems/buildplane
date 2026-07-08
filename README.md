@@ -224,9 +224,9 @@ This example is intentionally narrow: one packet, one run, one local command ste
 
 ## Known limitations
 
-- The adversarial-Codex reviewer role currently scores **43.75%** on the internal `reviewer-rescue` benchmark (a local stub over four fixtures). It is an internal review aid, not a production-ready gate, and is disclosed as such rather than presented as finished.
+- The adversarial-Codex reviewer role scores **43.75%** on the internal `reviewer-rescue` benchmark — measured against a **deterministic local stub** over four fixtures, never against the real Codex CLI, so the number characterizes the stub harness rather than Codex. It is an internal review aid, not a production-ready gate, and is disclosed as such rather than presented as finished.
 - Published/global native memory ships a prebuilt binary for **linux-x64 only**; other platforms report the native-memory contract as optional/unavailable.
-- `bp web` (Mission Control) is source/dev only — the web assets and the optional server package are not vendored into the published npm artifact.
+- `bp web` (Mission Control) is source/dev only — the web assets and the optional server package are not vendored into the published npm artifact. On a published install `bp web` fails closed: exit 1 with guidance to run from a source checkout.
 
 ## License
 

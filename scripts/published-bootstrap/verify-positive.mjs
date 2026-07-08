@@ -441,6 +441,51 @@ function assertPublishedMemoryContract(label, cli, options) {
 	}
 }
 
+function assertPublishedWebContract(label, cli, options) {
+	const { cwd, env } = options;
+	const command = cliCommandName(cli);
+	const webArgs = cliCommandArgs(cli, ["web", "--check"]);
+	const formattedCommand = formatCommand(command, webArgs);
+	const result = spawnSync(command, webArgs, {
+		cwd,
+		encoding: "utf8",
+		env,
+		shell: process.platform === "win32" && /\.(cmd|bat)$/i.test(command),
+	});
+
+	if (result.error) {
+		fail(
+			`${label}: command failed to start: ${formattedCommand} (cwd: ${cwd})\n${getErrorMessage(result.error)}`,
+		);
+	}
+
+	// The published artifact does not bundle @buildplane/mission-control-server,
+	// so `bp web` must fail CLOSED: exit 1 with the source-checkout guidance,
+	// never an unhandled rejection or a raw module-resolution error.
+	if (result.status !== 1) {
+		fail(
+			`${label}: expected \`web --check\` to exit 1 on a published install; got status ${result.status}\n${result.stdout ?? ""}${result.stderr ?? ""}`,
+		);
+	}
+	const stderr = result.stderr ?? "";
+	if (
+		!stderr.includes("@buildplane/mission-control-server") ||
+		!/source checkout/i.test(stderr)
+	) {
+		fail(
+			`${label}: \`web --check\` must fail with the source-checkout guidance; stderr was:\n${stderr}`,
+		);
+	}
+	if (stderr.includes("ERR_MODULE_NOT_FOUND")) {
+		fail(
+			`${label}: \`web --check\` leaked a raw module-resolution error:\n${stderr}`,
+		);
+	}
+	console.log(
+		`${label}: web --check fails closed with source-checkout guidance`,
+	);
+}
+
 function createCommandShimDirectory(tempPaths, commandName, targetPath) {
 	const shimRoot = mkdtempSync(
 		join(
@@ -560,6 +605,10 @@ function runExternalPackedInstallSmoke(tarballPath, tempPaths) {
 		packetPath,
 	});
 	assertPublishedMemoryContract("external packed-install smoke", publishedCli, {
+		cwd: externalRepoRoot,
+		env: runEnv,
+	});
+	assertPublishedWebContract("external packed-install smoke", publishedCli, {
 		cwd: externalRepoRoot,
 		env: runEnv,
 	});
