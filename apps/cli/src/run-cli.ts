@@ -5799,7 +5799,26 @@ export async function resumePlanForgePlanFromInput(
 			const { parseUnitPacket } = (await cliImport("@buildplane/kernel")) as {
 				parseUnitPacket: (input: string) => unknown;
 			};
-			const ledgerActivityPort = createLedgerActivityPort(emitter);
+			// Per-tool-call tape capture for the executed suffix (mirrors the M6-F2
+			// dispatch wiring). The tracker observes the emitter feeding the activity
+			// port to capture each suffix packet's auto-assigned `activity_started`
+			// event id, and the sink stamps every worker tool_use/tool_result with the
+			// in-flight packet's unit id + that parent id on THIS signed resume tape.
+			// Recorded-prefix activities replay from the tape without a worker run, so
+			// they get no re-emitted tool events — their tool evidence is already on the
+			// tape from the original dispatch (the resultReadyPort scoping precedent).
+			const resumeToolUnitTracker = createDispatchToolUnitTracker();
+			// No `withCrashAfterActivityGuard` here (unlike dispatch): the crash
+			// injection is a dispatch-only demo property, not part of the resume
+			// contract — the omission is deliberate, not a missing mirror piece.
+			const ledgerActivityPort = createLedgerActivityPort(
+				resumeToolUnitTracker.observe(emitter),
+			);
+			const resumeClaudeToolSink = createClaudeToolLedgerEmitter(
+				emitter,
+				resumeToolUnitTracker.getUnitCtx,
+				workspace,
+			);
 			// AC1/D1: the suffix executes under acceptance enforcement equivalent to
 			// dispatch — per-task profileRegistry + a per-task-identity acceptancePort,
 			// resultReadyPort (AC5), and provisioned worktree deps. When not enforcing,
@@ -5830,9 +5849,10 @@ export async function resumePlanForgePlanFromInput(
 							profileRegistry,
 							acceptancePort,
 							resultReadyPort: createResultReadyPort(emitter),
+							onClaudeToolEvent: resumeClaudeToolSink,
 							provisionDeps: provisionWorktreeDeps,
 						}
-					: { ledgerActivityPort },
+					: { ledgerActivityPort, onClaudeToolEvent: resumeClaudeToolSink },
 			);
 			for (
 				let i = replay.completedActivities.length;
@@ -5850,6 +5870,10 @@ export async function resumePlanForgePlanFromInput(
 							unit: { ...packet.unit, policyProfile: acceptance.profileName },
 						}
 					: packet;
+				// Feed the tracker the in-flight suffix packet's unit id immediately
+				// before the run, so the tool sink stamps its tool events with this
+				// unit (matches the dispatch loop's beginUnit placement).
+				resumeToolUnitTracker.beginUnit(packet.unit.id);
 				const result = await orchestrator.runPacketAsync(
 					parseUnitPacket(JSON.stringify(dispatchedPacket)),
 					cliEventBus,
