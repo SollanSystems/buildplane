@@ -1,7 +1,7 @@
 {
 	"name": "@buildplane/capability-broker",
 	"private": true,
-	"version": "0.2.3",
+	"version": "0.2.4",
 	"type": "module",
 	"description": "Capability bundle schema, validation, and digest for Buildplane M3 broker",
 	"exports": {

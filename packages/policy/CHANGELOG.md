@@ -1,5 +1,12 @@
 # @buildplane/policy
 
+## 0.2.4
+
+### Patch Changes
+
+- Updated dependencies [3c0c348]
+  - @buildplane/kernel@0.8.1
+
 ## 0.2.3
 
 ### Patch Changes
