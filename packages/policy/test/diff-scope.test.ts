@@ -29,6 +29,54 @@ describe("architecture.diff_scope gate", () => {
 		expect(architectureDiffScopeDecision(result)).toBeUndefined();
 	});
 
+	it("matches middle-wildcard allowed globs the way the broker's minimatch does", () => {
+		const result = evaluateArchitectureDiffScope(
+			[
+				"packages/kernel/src/orchestrator.ts",
+				"native/crates/bp-ledger/src/kind.rs",
+				"packages/kernel/test/loop.test.ts",
+			],
+			{
+				allowedPaths: ["packages/**/src/**", "native/crates/**/src/**"],
+			},
+		);
+		expect(result.status).toBe("blocked");
+		expect(result.outOfScopeFiles).toEqual([
+			"packages/kernel/test/loop.test.ts",
+		]);
+	});
+
+	it("applies middle-wildcard denied globs", () => {
+		const result = evaluateArchitectureDiffScope(
+			["packages/kernel/src/generated/types.ts"],
+			{
+				allowedPaths: ["packages/**"],
+				deniedPaths: ["packages/**/generated/**"],
+			},
+		);
+		expect(result.status).toBe("blocked");
+		expect(result.deniedFiles).toEqual([
+			"packages/kernel/src/generated/types.ts",
+		]);
+	});
+
+	it("no longer matches the bare prefix as a file for trailing /** (minimatch semantics)", () => {
+		const result = evaluateArchitectureDiffScope(["src"], {
+			allowedPaths: ["src/**"],
+		});
+		expect(result.status).toBe("blocked");
+		expect(result.outOfScopeFiles).toEqual(["src"]);
+	});
+
+	it("treats * as a single top-level segment (minimatch semantics)", () => {
+		const result = evaluateArchitectureDiffScope(["readme.md", "docs/x.md"], {
+			allowedPaths: ["*"],
+		});
+		expect(result.status).toBe("blocked");
+		expect(result.changedFiles).toEqual(["readme.md", "docs/x.md"]);
+		expect(result.outOfScopeFiles).toEqual(["docs/x.md"]);
+	});
+
 	it("blocks out-of-scope or denied diffs without LLM judgment", () => {
 		const result = evaluateArchitectureDiffScope(
 			[

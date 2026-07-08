@@ -74,6 +74,48 @@ describe("evaluateEnvelopeAdmission", () => {
 		expect(e.status).toBe("paused");
 		expect(e.outOfEnvelopePathGlobs).toEqual(["../etc/**"]);
 	});
+	it("admits a concrete proposal under a middle-wildcard envelope glob", () => {
+		const e = evaluateEnvelopeAdmission(
+			proposal({ pathGlobs: ["packages/kernel/src/**"] }),
+			envelope,
+			now,
+		);
+		expect(e.status).toBe("admitted");
+	});
+	it("admits a literal file path under a middle-wildcard envelope glob", () => {
+		const e = evaluateEnvelopeAdmission(
+			proposal({ pathGlobs: ["packages/policy/src/segment-glob.ts"] }),
+			envelope,
+			now,
+		);
+		expect(e.status).toBe("admitted");
+	});
+	it("admits a narrower double-wildcard proposal under a middle-wildcard envelope glob", () => {
+		const e = evaluateEnvelopeAdmission(
+			proposal({ pathGlobs: ["packages/**/src/lib/**"] }),
+			envelope,
+			now,
+		);
+		expect(e.status).toBe("admitted");
+	});
+	it("pauses on a sibling subtree that escapes the middle-wildcard suffix", () => {
+		const e = evaluateEnvelopeAdmission(
+			proposal({ pathGlobs: ["packages/kernel/dist/**"] }),
+			envelope,
+			now,
+		);
+		expect(e.status).toBe("paused");
+		expect(e.outOfEnvelopePathGlobs).toEqual(["packages/kernel/dist/**"]);
+	});
+	it("pauses on a proposal wildcard broader than every envelope glob", () => {
+		const e = evaluateEnvelopeAdmission(
+			proposal({ pathGlobs: ["packages/**"] }),
+			envelope,
+			now,
+		);
+		expect(e.status).toBe("paused");
+		expect(e.outOfEnvelopePathGlobs).toEqual(["packages/**"]);
+	});
 	it("pauses on a verification command argv0 outside the allowlist", () => {
 		const e = evaluateEnvelopeAdmission(
 			proposal({ verificationCommands: ["curl http://x"] }),

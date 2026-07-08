@@ -227,6 +227,10 @@ importers:
       '@buildplane/kernel':
         specifier: workspace:*
         version: link:../kernel
+    devDependencies:
+      minimatch:
+        specifier: ^10.0.1
+        version: 10.2.4
 
   packages/runtime:
     dependencies:

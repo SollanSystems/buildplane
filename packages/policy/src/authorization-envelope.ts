@@ -3,6 +3,7 @@ import type {
 	AuthorizationEnvelopeV0,
 	EnvelopeProposal,
 } from "@buildplane/kernel";
+import { segmentGlobIsSubset } from "./segment-glob.js";
 
 export interface EnvelopeAdmissionEvaluation {
 	readonly gate: "authorization.envelope";
@@ -111,48 +112,16 @@ function argv0(command: string): string {
 }
 
 /**
- * Reject traversal/absolute/NUL globs (fail closed) before any subset check,
- * mirroring diff-scope's normalizePattern null-rejection. A glob that does not
- * normalize is never a subset of anything, so a malformed proposal glob pauses.
- */
-function normalizeGlob(glob: string): string | null {
-	const trimmed = glob.trim().replace(/\\/g, "/").replace(/^\.\//, "");
-	if (
-		!trimmed ||
-		trimmed.includes("\0") ||
-		trimmed.startsWith("/") ||
-		trimmed.startsWith("../") ||
-		trimmed.includes("/../")
-	) {
-		return null;
-	}
-	return trimmed;
-}
-
-/**
- * A proposal glob `child` is covered by an envelope glob `parent` iff, after
- * fail-closed normalization, `parent` is `**`, `parent` equals `child`, or
- * `parent` is a `<prefix>/**` whose prefix is a path-prefix of `child` (so
- * `src/**` covers `src/kernel/**`).
+ * A proposal glob `child` is covered by an envelope glob `parent` iff every
+ * path `child` matches is also matched by `parent` under the shared
+ * segment-glob semantics (the broker's minimatch semantics) — so a
+ * middle-wildcard envelope glob like `packages/**\/src/**` covers the
+ * concrete `packages/kernel/src/**`. Fail-closed normalization
+ * (absolute/traversal/NUL rejection) lives inside `segmentGlobIsSubset`;
+ * a glob that does not normalize is never a subset of anything.
  */
 function globIsSubset(child: string, parent: string): boolean {
-	const c = normalizeGlob(child);
-	const p = normalizeGlob(parent);
-	if (c === null || p === null) {
-		return false;
-	}
-	if (p === "**") {
-		return true;
-	}
-	if (p === c) {
-		return true;
-	}
-	if (p.endsWith("/**")) {
-		const prefix = p.slice(0, -3);
-		const cPrefix = c.endsWith("/**") ? c.slice(0, -3) : c;
-		return cPrefix === prefix || cPrefix.startsWith(`${prefix}/`);
-	}
-	return false;
+	return segmentGlobIsSubset(child, parent);
 }
 
 function canonical(value: unknown): unknown {
