@@ -1,7 +1,7 @@
 {
 	"name": "@buildplane/storage",
 	"private": true,
-	"version": "0.4.1",
+	"version": "0.4.2",
 	"type": "module",
 	"description": "Durable state, artifacts, evidence, and run history for Buildplane",
 	"exports": {

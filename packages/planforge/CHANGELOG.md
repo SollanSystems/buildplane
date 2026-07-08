@@ -1,5 +1,11 @@
 # @buildplane/planforge
 
+## 1.1.1
+
+### Patch Changes
+
+- 74dc5f1: Re-export `DISPATCH_WORKER_MODEL` from the package root so CLI surfaces can report the effective worker model without duplicating the constant.
+
 ## 1.1.0
 
 ### Minor Changes

@@ -1,5 +1,12 @@
 # @buildplane/adapters-codex
 
+## 0.1.10
+
+### Patch Changes
+
+- Updated dependencies [3c0c348]
+  - @buildplane/kernel@0.8.1
+
 ## 0.1.9
 
 ### Patch Changes

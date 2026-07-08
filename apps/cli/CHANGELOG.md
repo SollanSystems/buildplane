@@ -1,5 +1,61 @@
 # buildplane
 
+## 0.14.0
+
+### Minor Changes
+
+- 74dc5f1: M6 watched-demo fixes for running the admit → dispatch cycle against an external target repo: lockfile-aware worktree dependency provisioning (`pnpm install --frozen-lockfile` / `npm ci` / `npm install`, skip when no `package.json`), standalone `planforge dispatch` worker flags (`--model`, `--max-turns`, `--worker-allowed-tools`, `--worker-timeout-ms` — R7 parity with the loop, tool grant defaults to the spike-proven set), and `bp web` serving the UI from the CLI checkout's `apps/web/dist` instead of the operator's cwd.
+- e7b6af6: M6-F2: emit per-tool-call tape events (`tool_request`/`ToolRequestStoredV1`, `tool_result`/`ToolResultV1`) on the `planforge dispatch` path. S8 wired the Claude worker's tool-stream sink only on the `bp run` path, so the dispatch tape showed activity bracketing but no per-tool-call events. `runPlanForgeDispatchCommand` now threads `onClaudeToolEvent` into `loadCliOrchestrator` on both the acceptance-enforced and no-enforce branches, bound to `createClaudeToolLedgerEmitter` over the same serialized signed dispatch emitter. A new dispatch unit-ctx tracker observes the activity-bracketing emitter to capture each in-flight packet's `activity_started` event id and unit id, so tool_request events carry the correct `unit_id` and parent event id. The resume path (`resumePlanForgePlanFromInput`) is a deliberate residual (M6-F1 rewires that region).
+
+### Patch Changes
+
+- 3c0c348: fail-close PlanForge `resume`/`recover` on unverified recorded work (M6-F1).
+
+  Crash recovery was receipt-grade, not pipeline-grade: `resume`/`recover` executed the
+  remaining suffix with ZERO acceptance machinery and counted every recorded-prefix
+  activity as `passed` without checking that acceptance ever evaluated, then minted a
+  `completed` receipt — a fail-open on the product's core trust surface.
+
+  Now the resumed suffix runs under acceptance enforcement equivalent to `dispatch`
+  (per-task `deriveAcceptanceContract` profiles + `profileRegistry`, a per-task-identity
+  `acceptancePort`, `resultReadyPort`, and provisioned worktree deps), and a recorded
+  activity only counts toward a `completed` receipt when the tape carries a matching
+  signed `acceptance_recorded` verdict (`plan_id` + `admission_event_id` + the re-derived
+  `contract_digest` + `outcome == "passed"`). Passed verdicts are consumed once, counted as
+  a multiset keyed by `contract_digest`: because the digest intentionally excludes the task
+  id, sibling tasks with identical allowed-side-effects + verification-commands share a
+  digest, so N recorded-passed tasks with digest D require N distinct passed verdicts for D —
+  one verdict can never clear a sibling task whose acceptance never ran. Missing/rejected
+  evidence, with enforcement
+  on, fail-closes: receipt outcome `failed`, exit 1, and a machine-readable per-task reason
+  `acceptance-not-evaluated` in both the JSON output and the receipt's committed result.
+
+  Enforcement is ON by default for both `resume` and `recover`; a new
+  `--no-enforce-acceptance` flag opts out. The decision comes only from the CLI flag —
+  never the unsigned dispatch-manifest sidecar. At the terminal receipt (and in the
+  `already_receipted` short-circuit) the orphaned `running` storage rows are reconciled to
+  a terminal status consistent with the outcome (new
+  `BuildplaneStoragePort.reconcilePlanForgeDispatchRuns`), closing the M2 "receipt on tape
+  but running in storage → reconcile" line and making a second `recover` pass report
+  `no_orphans`. Recorded-prefix reused runs still get no synthetic `result_ready` — only
+  executed-suffix packets emit it via the threaded ports, exactly as dispatch does.
+
+- Updated dependencies [3c0c348]
+- Updated dependencies [74dc5f1]
+- Updated dependencies [74dc5f1]
+  - @buildplane/kernel@0.8.1
+  - @buildplane/storage@0.4.2
+  - @buildplane/mission-control-server@0.1.2
+  - @buildplane/planforge@1.1.1
+  - @buildplane/adapters-codex@0.1.10
+  - @buildplane/adapters-git@0.4.2
+  - @buildplane/adapters-honcho@0.1.10
+  - @buildplane/adapters-models@0.2.4
+  - @buildplane/adapters-tools@0.1.10
+  - @buildplane/policy@0.2.4
+  - @buildplane/runtime@0.1.10
+  - @buildplane/ui-tui@0.1.10
+
 ## 0.13.0
 
 ### Minor Changes

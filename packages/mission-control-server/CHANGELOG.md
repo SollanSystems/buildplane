@@ -1,5 +1,13 @@
 # @buildplane/mission-control-server
 
+## 0.1.2
+
+### Patch Changes
+
+- 74dc5f1: Fix the package exports map: `import` now targets `./dist/index.js` (the emitted file) and a `source` condition covers tsx dev mode. The prior `./src/index.js` target never existed on disk, so `bp web` failed from the built CLI with `Cannot find module`.
+- Updated dependencies [3c0c348]
+  - @buildplane/kernel@0.8.1
+
 ## 0.1.1
 
 ### Patch Changes
