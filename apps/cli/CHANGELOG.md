@@ -1,5 +1,23 @@
 # buildplane
 
+## 0.14.2
+
+### Patch Changes
+
+- Updated dependencies [096d314]
+  - @buildplane/planforge@1.1.2
+  - @buildplane/adapters-tools@0.1.11
+  - @buildplane/kernel@0.8.2
+  - @buildplane/adapters-models@0.2.5
+  - @buildplane/adapters-codex@0.1.11
+  - @buildplane/adapters-git@0.4.3
+  - @buildplane/adapters-honcho@0.1.11
+  - @buildplane/mission-control-server@0.1.3
+  - @buildplane/policy@0.2.5
+  - @buildplane/runtime@0.1.11
+  - @buildplane/storage@0.4.3
+  - @buildplane/ui-tui@0.1.11
+
 ## 0.14.1
 
 ### Patch Changes

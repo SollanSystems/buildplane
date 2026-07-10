@@ -1,7 +1,7 @@
 {
 	"name": "@buildplane/adapters-models",
 	"private": true,
-	"version": "0.2.4",
+	"version": "0.2.5",
 	"type": "module",
 	"description": "Model and provider adapter layer for Buildplane",
 	"exports": {

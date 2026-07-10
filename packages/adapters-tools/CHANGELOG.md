@@ -1,5 +1,12 @@
 # @buildplane/adapters-tools
 
+## 0.1.11
+
+### Patch Changes
+
+- @buildplane/capability-broker@0.2.5
+- @buildplane/kernel@0.8.2
+
 ## 0.1.10
 
 ### Patch Changes

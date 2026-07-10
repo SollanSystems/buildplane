@@ -1,5 +1,11 @@
 # @buildplane/policy
 
+## 0.2.5
+
+### Patch Changes
+
+- @buildplane/kernel@0.8.2
+
 ## 0.2.4
 
 ### Patch Changes

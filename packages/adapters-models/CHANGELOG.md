@@ -1,5 +1,13 @@
 # @buildplane/adapters-models
 
+## 0.2.5
+
+### Patch Changes
+
+- @buildplane/adapters-tools@0.1.11
+- @buildplane/kernel@0.8.2
+- @buildplane/runtime@0.1.11
+
 ## 0.2.4
 
 ### Patch Changes

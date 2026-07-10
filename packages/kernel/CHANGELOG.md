@@ -1,5 +1,11 @@
 # @buildplane/kernel
 
+## 0.8.2
+
+### Patch Changes
+
+- @buildplane/capability-broker@0.2.5
+
 ## 0.8.1
 
 ### Patch Changes

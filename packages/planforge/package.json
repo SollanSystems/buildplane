@@ -1,7 +1,7 @@
 {
 	"name": "@buildplane/planforge",
 	"private": true,
-	"version": "1.1.1",
+	"version": "1.1.2",
 	"type": "module",
 	"description": "PlanForge plan compile/validate/preview contract and canonical digest for Buildplane",
 	"exports": {

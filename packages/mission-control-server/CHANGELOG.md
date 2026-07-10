@@ -1,5 +1,11 @@
 # @buildplane/mission-control-server
 
+## 0.1.3
+
+### Patch Changes
+
+- @buildplane/kernel@0.8.2
+
 ## 0.1.2
 
 ### Patch Changes
