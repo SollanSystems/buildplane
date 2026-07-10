@@ -46,7 +46,7 @@ describe("dispatchAdmittedPlan", () => {
 			// executor BEFORE checking preferredWorker (run-cli.ts:1436), so it MUST be absent.
 			expect((p as Record<string, unknown>).execution).toBeUndefined();
 			expect(p.model.provider).toBe("anthropic");
-			expect(p.model.model).toBe("claude-sonnet-4-20250514");
+			expect(p.model.model).toBe("claude-sonnet-5");
 			expect(p.model.prompt.length).toBeGreaterThan(0);
 			expect(p.routingHints.preferredWorker).toBe("claude-code");
 		}
