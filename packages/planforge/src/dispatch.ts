@@ -9,7 +9,7 @@ import type { PlanForgePlan, PlanForgeTask } from "./schema.js";
  * ClaudeCodeExecutor ignores `provider` (it spawns the `claude` CLI directly)
  * but `parseModelBlock` requires it non-empty; `model` becomes the `--model` flag. */
 export const DISPATCH_WORKER_PROVIDER = "anthropic" as const;
-export const DISPATCH_WORKER_MODEL = "claude-sonnet-4-20250514" as const;
+export const DISPATCH_WORKER_MODEL = "claude-sonnet-5" as const;
 
 /** Kernel TaskIntent shape, inlined to keep planforge a zero-dependency leaf.
  * Structurally a subset of `@buildplane/kernel`'s TaskIntent; the CLI re-validates
