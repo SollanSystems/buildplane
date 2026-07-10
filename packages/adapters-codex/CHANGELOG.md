@@ -1,5 +1,11 @@
 # @buildplane/adapters-codex
 
+## 0.1.11
+
+### Patch Changes
+
+- @buildplane/kernel@0.8.2
+
 ## 0.1.10
 
 ### Patch Changes

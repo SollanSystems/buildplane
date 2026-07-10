@@ -1,5 +1,11 @@
 # @buildplane/adapters-git
 
+## 0.4.3
+
+### Patch Changes
+
+- @buildplane/kernel@0.8.2
+
 ## 0.4.2
 
 ### Patch Changes

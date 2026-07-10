@@ -1,5 +1,11 @@
 # @buildplane/planforge
 
+## 1.1.2
+
+### Patch Changes
+
+- 096d314: update the stale default dispatch worker model id (`claude-sonnet-4-20250514` → `claude-sonnet-5`) so default dispatches keep working when the old snapshot is retired
+
 ## 1.1.1
 
 ### Patch Changes

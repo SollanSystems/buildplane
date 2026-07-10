@@ -1,5 +1,12 @@
 # @buildplane/capability-broker
 
+## 0.2.5
+
+### Patch Changes
+
+- Updated dependencies [096d314]
+  - @buildplane/planforge@1.1.2
+
 ## 0.2.4
 
 ### Patch Changes
