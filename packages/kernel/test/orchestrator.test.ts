@@ -804,35 +804,43 @@ describe("kernel orchestrator", () => {
 		],
 		["runtime", "runtime-execution-failed", "runtime execution failed"],
 		["policy", "policy-evaluation-failed", "policy evaluation failed"],
-	] as const)("retains prepared workspaces when %s fails after preparation", (failurePoint, expectedKind, expectedMessage) => {
-		const { orchestrator, runEvents, failurePayloads, workspacePath, cleanup } =
-			createHarness({ throwOn: [failurePoint] });
+	] as const)(
+		"retains prepared workspaces when %s fails after preparation",
+		(failurePoint, expectedKind, expectedMessage) => {
+			const {
+				orchestrator,
+				runEvents,
+				failurePayloads,
+				workspacePath,
+				cleanup,
+			} = createHarness({ throwOn: [failurePoint] });
 
-		try {
-			const result = orchestrator.runPacket(packet);
+			try {
+				const result = orchestrator.runPacket(packet);
 
-			expect(runEvents).not.toContain("delete-workspace");
-			expect(failurePayloads).toEqual([
-				expect.objectContaining({
-					infrastructureFailure: {
-						kind: expectedKind,
-						message: expectedMessage,
-					},
-					workspaceStatus: "retained",
-				}),
-			]);
-			expect(result.failure).toEqual({
-				kind: expectedKind,
-				message: expectedMessage,
-			});
-			expect(result.workspace).toMatchObject({
-				path: workspacePath,
-				status: "retained",
-			});
-		} finally {
-			cleanup();
-		}
-	});
+				expect(runEvents).not.toContain("delete-workspace");
+				expect(failurePayloads).toEqual([
+					expect.objectContaining({
+						infrastructureFailure: {
+							kind: expectedKind,
+							message: expectedMessage,
+						},
+						workspaceStatus: "retained",
+					}),
+				]);
+				expect(result.failure).toEqual({
+					kind: expectedKind,
+					message: expectedMessage,
+				});
+				expect(result.workspace).toMatchObject({
+					path: workspacePath,
+					status: "retained",
+				});
+			} finally {
+				cleanup();
+			}
+		},
+	);
 
 	it("surfaces an infrastructure error when failed-path finalization cannot be persisted", () => {
 		const { orchestrator, failurePayloads, cleanup } = createHarness({

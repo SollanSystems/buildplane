@@ -346,48 +346,50 @@ describe("M2-S7b crash-replay — planforge resume at harness boundaries", () =>
 		await env.cleanup();
 	});
 
-	it.each(
-		PLANFORGE_CRASH_BOUNDARIES,
-	)("resumes after %s without duplicate admission and finishes with one receipt", async (boundary) => {
-		await initProject(env.dir);
-		const admitted = await admitGoal(env);
-		const recorded = recordedCountForBoundary(boundary);
-		if (recorded > 0) {
-			await appendRecordedActivities(
-				env,
-				admitted.run_id,
-				recorded,
-				admitted.event_id,
+	it.each(PLANFORGE_CRASH_BOUNDARIES)(
+		"resumes after %s without duplicate admission and finishes with one receipt",
+		async (boundary) => {
+			await initProject(env.dir);
+			const admitted = await admitGoal(env);
+			const recorded = recordedCountForBoundary(boundary);
+			if (recorded > 0) {
+				await appendRecordedActivities(
+					env,
+					admitted.run_id,
+					recorded,
+					admitted.event_id,
+				);
+			}
+
+			const kindsBefore = await readEventKinds(env.eventsDbPath);
+			expect(kindsBefore.filter((k) => k === "plan_receipt")).toHaveLength(0);
+
+			const resume = await runCliCapture(
+				["planforge", "resume", "--input", GOAL_INPUT, "--json"],
+				env.dir,
 			);
-		}
+			expect(resume.err).toBe("");
+			expect(resume.code).toBe(0);
+			const body = JSON.parse(resume.out) as {
+				status: string;
+				recorded_activity_count?: number;
+				executed_activity_count?: number;
+				runs: Array<{ source?: string }>;
+			};
+			expect(body.status).toBe("resumed");
+			expect(body.recorded_activity_count).toBe(recorded);
+			expect(body.executed_activity_count).toBe(2 - recorded);
 
-		const kindsBefore = await readEventKinds(env.eventsDbPath);
-		expect(kindsBefore.filter((k) => k === "plan_receipt")).toHaveLength(0);
-
-		const resume = await runCliCapture(
-			["planforge", "resume", "--input", GOAL_INPUT, "--json"],
-			env.dir,
-		);
-		expect(resume.err).toBe("");
-		expect(resume.code).toBe(0);
-		const body = JSON.parse(resume.out) as {
-			status: string;
-			recorded_activity_count?: number;
-			executed_activity_count?: number;
-			runs: Array<{ source?: string }>;
-		};
-		expect(body.status).toBe("resumed");
-		expect(body.recorded_activity_count).toBe(recorded);
-		expect(body.executed_activity_count).toBe(2 - recorded);
-
-		const kindsAfter = await readEventKinds(env.eventsDbPath);
-		expect(kindsAfter.filter((k) => k === "plan_admitted")).toHaveLength(1);
-		expect(kindsAfter.filter((k) => k === "activity_completed")).toHaveLength(
-			2,
-		);
-		expect(kindsAfter.filter((k) => k === "plan_receipt")).toHaveLength(1);
-		expect(body.runs.filter((r) => r.source === "recorded")).toHaveLength(
-			recorded,
-		);
-	}, 45_000);
+			const kindsAfter = await readEventKinds(env.eventsDbPath);
+			expect(kindsAfter.filter((k) => k === "plan_admitted")).toHaveLength(1);
+			expect(kindsAfter.filter((k) => k === "activity_completed")).toHaveLength(
+				2,
+			);
+			expect(kindsAfter.filter((k) => k === "plan_receipt")).toHaveLength(1);
+			expect(body.runs.filter((r) => r.source === "recorded")).toHaveLength(
+				recorded,
+			);
+		},
+		45_000,
+	);
 });
