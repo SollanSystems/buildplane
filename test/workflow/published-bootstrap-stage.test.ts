@@ -434,15 +434,14 @@ describe("workspace build output preparation", () => {
 		{ platform: "linux", packageManager: "npm", expected: "npm" },
 		{ platform: "win32", packageManager: "pnpm", expected: "pnpm.cmd" },
 		{ platform: "win32", packageManager: "npm", expected: "npm.cmd" },
-	])("resolves $packageManager for $platform as $expected", ({
-		expected,
-		packageManager,
-		platform,
-	}) => {
-		expect(resolvePackageManagerCommand(packageManager, platform)).toBe(
-			expected,
-		);
-	});
+	])(
+		"resolves $packageManager for $platform as $expected",
+		({ expected, packageManager, platform }) => {
+			expect(resolvePackageManagerCommand(packageManager, platform)).toBe(
+				expected,
+			);
+		},
+	);
 
 	it("forces a fresh build even when the required published outputs already exist", () => {
 		const tempRoot = mkdtempSync(
@@ -1190,27 +1189,30 @@ describe("published bootstrap staging", () => {
 		"/tmp/buildplane-runtime-leak.js",
 		"C:\\temp\\buildplane-runtime-leak.js",
 		"\\\\server\\share\\buildplane-runtime-leak.js",
-	])("rejects absolute filesystem runtime import specifiers (%s)", (specifier) => {
-		const tempRoot = mkdtempSync(
-			join(safeTmpdir(), "published-bootstrap-runtime-specifier-"),
-		);
+	])(
+		"rejects absolute filesystem runtime import specifiers (%s)",
+		(specifier) => {
+			const tempRoot = mkdtempSync(
+				join(safeTmpdir(), "published-bootstrap-runtime-specifier-"),
+			);
 
-		try {
-			const runtimeRoot = join(tempRoot, "dist");
-			const entryPath = join(runtimeRoot, "index.js");
+			try {
+				const runtimeRoot = join(tempRoot, "dist");
+				const entryPath = join(runtimeRoot, "index.js");
 
-			mkdirSync(runtimeRoot, { recursive: true });
-			writeFileSync(entryPath, `import ${JSON.stringify(specifier)};\n`);
+				mkdirSync(runtimeRoot, { recursive: true });
+				writeFileSync(entryPath, `import ${JSON.stringify(specifier)};\n`);
 
-			expect(() =>
-				assertRuntimeImportClosure([entryPath], {
-					rootBoundaryPaths: [runtimeRoot],
-				}),
-			).toThrow(/absolute filesystem specifier/i);
-		} finally {
-			rmSync(tempRoot, { force: true, recursive: true });
-		}
-	});
+				expect(() =>
+					assertRuntimeImportClosure([entryPath], {
+						rootBoundaryPaths: [runtimeRoot],
+					}),
+				).toThrow(/absolute filesystem specifier/i);
+			} finally {
+				rmSync(tempRoot, { force: true, recursive: true });
+			}
+		},
+	);
 
 	it("cleans up published staging temp directories when staging fails after creation", () => {
 		const manifestPath = join(process.cwd(), "apps", "cli", "package.json");
@@ -2083,63 +2085,67 @@ describe("published bootstrap staging", () => {
 			invalidValue: "chalk",
 			label: "a string",
 		},
-	])("rejects a staged manifest when package.json.$field is $label instead of a plain object", ({
-		field,
-		invalidValue,
-	}) => {
-		const staged = stagePublishedPackage();
-		cleanupPaths.push(staged.stagingRoot);
-		const baseManifest = JSON.parse(
-			readFileSync(join(staged.packageRoot, "package.json"), "utf8"),
-		) as Record<string, unknown>;
+	])(
+		"rejects a staged manifest when package.json.$field is $label instead of a plain object",
+		({ field, invalidValue }) => {
+			const staged = stagePublishedPackage();
+			cleanupPaths.push(staged.stagingRoot);
+			const baseManifest = JSON.parse(
+				readFileSync(join(staged.packageRoot, "package.json"), "utf8"),
+			) as Record<string, unknown>;
 
-		writeFileSync(
-			join(staged.packageRoot, "package.json"),
-			`${JSON.stringify(
-				{
-					...baseManifest,
-					[field]: invalidValue,
-				},
-				null,
-				2,
-			)}\n`,
-		);
+			writeFileSync(
+				join(staged.packageRoot, "package.json"),
+				`${JSON.stringify(
+					{
+						...baseManifest,
+						[field]: invalidValue,
+					},
+					null,
+					2,
+				)}\n`,
+			);
 
-		expect(() => inspectPublishedPackage(staged.packageRoot)).toThrow(
-			new RegExp(`package\\.json\\.${field} must be a plain object`, "i"),
-		);
-	}, 60_000);
+			expect(() => inspectPublishedPackage(staged.packageRoot)).toThrow(
+				new RegExp(`package\\.json\\.${field} must be a plain object`, "i"),
+			);
+		},
+		60_000,
+	);
 
 	it.each([
 		"dependencies",
 		"optionalDependencies",
 		"peerDependencies",
 		"devDependencies",
-	] as const)("rejects a staged manifest when package.json.%s aliases an internal @buildplane package through npm:", (field) => {
-		const staged = stagePublishedPackage();
-		cleanupPaths.push(staged.stagingRoot);
-		const baseManifest = JSON.parse(
-			readFileSync(join(staged.packageRoot, "package.json"), "utf8"),
-		) as Record<string, unknown>;
+	] as const)(
+		"rejects a staged manifest when package.json.%s aliases an internal @buildplane package through npm:",
+		(field) => {
+			const staged = stagePublishedPackage();
+			cleanupPaths.push(staged.stagingRoot);
+			const baseManifest = JSON.parse(
+				readFileSync(join(staged.packageRoot, "package.json"), "utf8"),
+			) as Record<string, unknown>;
 
-		writeFileSync(
-			join(staged.packageRoot, "package.json"),
-			`${JSON.stringify(
-				{
-					...baseManifest,
-					[field]: {
-						aliasedKernel: "npm:@buildplane/kernel@0.1.0",
+			writeFileSync(
+				join(staged.packageRoot, "package.json"),
+				`${JSON.stringify(
+					{
+						...baseManifest,
+						[field]: {
+							aliasedKernel: "npm:@buildplane/kernel@0.1.0",
+						},
 					},
-				},
-				null,
-				2,
-			)}\n`,
-		);
+					null,
+					2,
+				)}\n`,
+			);
 
-		expect(() => inspectPublishedPackage(staged.packageRoot)).toThrow(
-			new RegExp(`package\\.json\\.${field}\\.aliasedKernel`, "i"),
-		);
-	});
+			expect(() => inspectPublishedPackage(staged.packageRoot)).toThrow(
+				new RegExp(`package\\.json\\.${field}\\.aliasedKernel`, "i"),
+			);
+		},
+	);
 
 	it.each([
 		{
@@ -2150,31 +2156,32 @@ describe("published bootstrap staging", () => {
 			invalidValue: "node ./scripts/build-from-source.js",
 			label: "a string",
 		},
-	])("rejects a staged manifest when package.json.scripts is $label instead of a plain object", ({
-		invalidValue,
-	}) => {
-		const staged = stagePublishedPackage();
-		cleanupPaths.push(staged.stagingRoot);
-		const baseManifest = JSON.parse(
-			readFileSync(join(staged.packageRoot, "package.json"), "utf8"),
-		) as Record<string, unknown>;
+	])(
+		"rejects a staged manifest when package.json.scripts is $label instead of a plain object",
+		({ invalidValue }) => {
+			const staged = stagePublishedPackage();
+			cleanupPaths.push(staged.stagingRoot);
+			const baseManifest = JSON.parse(
+				readFileSync(join(staged.packageRoot, "package.json"), "utf8"),
+			) as Record<string, unknown>;
 
-		writeFileSync(
-			join(staged.packageRoot, "package.json"),
-			`${JSON.stringify(
-				{
-					...baseManifest,
-					scripts: invalidValue,
-				},
-				null,
-				2,
-			)}\n`,
-		);
+			writeFileSync(
+				join(staged.packageRoot, "package.json"),
+				`${JSON.stringify(
+					{
+						...baseManifest,
+						scripts: invalidValue,
+					},
+					null,
+					2,
+				)}\n`,
+			);
 
-		expect(() => inspectPublishedPackage(staged.packageRoot)).toThrow(
-			/package\.json\.scripts must be a plain object/i,
-		);
-	});
+			expect(() => inspectPublishedPackage(staged.packageRoot)).toThrow(
+				/package\.json\.scripts must be a plain object/i,
+			);
+		},
+	);
 
 	it.each([
 		{
@@ -2201,35 +2208,35 @@ describe("published bootstrap staging", () => {
 			field: "bundledDependencies",
 			leakedPath: "@buildplane/kernel",
 		},
-	])("rejects a staged manifest when package.json.$field includes forbidden staged payloads or internal package names", ({
-		field,
-		leakedPath,
-	}) => {
-		const staged = stagePublishedPackage();
-		cleanupPaths.push(staged.stagingRoot);
-		const baseManifest = JSON.parse(
-			readFileSync(join(staged.packageRoot, "package.json"), "utf8"),
-		) as Record<string, unknown>;
+	])(
+		"rejects a staged manifest when package.json.$field includes forbidden staged payloads or internal package names",
+		({ field, leakedPath }) => {
+			const staged = stagePublishedPackage();
+			cleanupPaths.push(staged.stagingRoot);
+			const baseManifest = JSON.parse(
+				readFileSync(join(staged.packageRoot, "package.json"), "utf8"),
+			) as Record<string, unknown>;
 
-		writeFileSync(
-			join(staged.packageRoot, "package.json"),
-			`${JSON.stringify(
-				{
-					...baseManifest,
-					[field]: [leakedPath],
-				},
-				null,
-				2,
-			)}\n`,
-		);
+			writeFileSync(
+				join(staged.packageRoot, "package.json"),
+				`${JSON.stringify(
+					{
+						...baseManifest,
+						[field]: [leakedPath],
+					},
+					null,
+					2,
+				)}\n`,
+			);
 
-		expect(() => inspectPublishedPackage(staged.packageRoot)).toThrow(
-			new RegExp(
-				`package\\.json\\.${field}.*${leakedPath.replace("/", "[\\\\/]")}`,
-				"i",
-			),
-		);
-	});
+			expect(() => inspectPublishedPackage(staged.packageRoot)).toThrow(
+				new RegExp(
+					`package\\.json\\.${field}.*${leakedPath.replace("/", "[\\\\/]")}`,
+					"i",
+				),
+			);
+		},
+	);
 
 	it("rejects package.json.files when the published manifest omits it entirely", () => {
 		const staged = stagePublishedPackage();
@@ -2413,22 +2420,22 @@ describe("published bootstrap staging", () => {
 		);
 	});
 
-	it.each([
-		"debug.mjs",
-		"debug.cjs",
-	])("fails inspection when dist/ ships extra runtime file %s outside the dist/index.js closure", (fileName) => {
-		const staged = stagePublishedPackage();
-		cleanupPaths.push(staged.stagingRoot);
+	it.each(["debug.mjs", "debug.cjs"])(
+		"fails inspection when dist/ ships extra runtime file %s outside the dist/index.js closure",
+		(fileName) => {
+			const staged = stagePublishedPackage();
+			cleanupPaths.push(staged.stagingRoot);
 
-		writeFileSync(
-			join(staged.packageRoot, "dist", fileName),
-			"export const debug = true;\n",
-		);
+			writeFileSync(
+				join(staged.packageRoot, "dist", fileName),
+				"export const debug = true;\n",
+			);
 
-		expect(() => inspectPublishedPackage(staged.packageRoot)).toThrow(
-			`dist/${fileName}`,
-		);
-	});
+			expect(() => inspectPublishedPackage(staged.packageRoot)).toThrow(
+				`dist/${fileName}`,
+			);
+		},
+	);
 
 	it("fails inspection when vendor/ ships extra runtime files outside the dist/index.js closure", () => {
 		const staged = stagePublishedPackage();
@@ -2711,26 +2718,33 @@ export { loadKernel };
 			label: "a top-level expression statement",
 			trailingStatement: '(async () => import("./extra.js"))();',
 		},
-	])("fails inspection when the wrapper leaves a nested local dynamic import inside $label after the required boundary", ({
-		trailingStatement,
-	}) => {
-		const staged = stagePublishedPackage();
-		cleanupPaths.push(staged.stagingRoot);
-		const distIndexPath = join(staged.packageRoot, "dist", "index.js");
+	])(
+		"fails inspection when the wrapper leaves a nested local dynamic import inside $label after the required boundary",
+		({ trailingStatement }) => {
+			const staged = stagePublishedPackage();
+			cleanupPaths.push(staged.stagingRoot);
+			const distIndexPath = join(staged.packageRoot, "dist", "index.js");
 
-		writeFileSync(join(staged.packageRoot, "dist", "extra.js"), "export {}\n");
-		writeFileSync(
-			distIndexPath,
-			readFileSync(distIndexPath, "utf8").replace(
-				'const cli = await import("./cli.js");',
-				['const cli = await import("./cli.js");', trailingStatement].join("\n"),
-			),
-		);
+			writeFileSync(
+				join(staged.packageRoot, "dist", "extra.js"),
+				"export {}\n",
+			);
+			writeFileSync(
+				distIndexPath,
+				readFileSync(distIndexPath, "utf8").replace(
+					'const cli = await import("./cli.js");',
+					['const cli = await import("./cli.js");', trailingStatement].join(
+						"\n",
+					),
+				),
+			);
 
-		expect(() => inspectPublishedPackage(staged.packageRoot)).toThrow(
-			/top-level dynamic import|runtime boundary|\.\/extra\.js/i,
-		);
-	}, 60_000);
+			expect(() => inspectPublishedPackage(staged.packageRoot)).toThrow(
+				/top-level dynamic import|runtime boundary|\.\/extra\.js/i,
+			);
+		},
+		60_000,
+	);
 
 	it("fails inspection when the wrapper imports its runtime boundary before asserting the Node version", () => {
 		const staged = stagePublishedPackage();
