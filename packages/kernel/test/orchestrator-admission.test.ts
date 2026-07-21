@@ -1,6 +1,10 @@
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import {
+	bundleDigest,
+	CAPABILITY_BUNDLE_SCHEMA_VERSION,
+} from "@buildplane/capability-broker";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	type AdmittedPlanReader,
@@ -17,6 +21,7 @@ import {
 	type RunAdmissionLocalEvidenceStore,
 	type RunAdmissionReceiptArtifactWriteInput,
 	type RunAdmissionRecordedPayload,
+	type RunPacketOptions,
 	type UnitPacket,
 } from "../src/index.js";
 
@@ -28,6 +33,41 @@ const FAKE_OPERATOR_TOKEN = credentialShapedSentinel([
 	"gh",
 	"p_FAKE_SECRET_SENTINEL_DO_NOT_USE_1234567890",
 ]);
+
+const GOVERNANCE_CAPABILITY_BUNDLE = {
+	schemaVersion: CAPABILITY_BUNDLE_SCHEMA_VERSION,
+	bundleId: "direct-packet-governance",
+	fsWrite: ["packages/kernel/src/**"],
+	tools: { run_command: { allowlist: ["node"] } },
+};
+
+const GOVERNANCE_FIELD_VARIANTS = [
+	["provenance_ref", { provenance_ref: "event://admission/direct-packet" }],
+	[
+		"capability_bundle",
+		{
+			capability_bundle: GOVERNANCE_CAPABILITY_BUNDLE,
+			capability_bundle_digest: bundleDigest(GOVERNANCE_CAPABILITY_BUNDLE),
+		},
+	],
+	[
+		"capability_bundle_digest",
+		{ capability_bundle_digest: `sha256:${"a".repeat(64)}` },
+	],
+	[
+		"acceptance_contract",
+		{ acceptance_contract: { checks: [{ command: "node --version" }] } },
+	],
+	["trust_scope", { trust_scope: { principal: "direct-packet-test" } }],
+] as const satisfies readonly (readonly [string, Partial<UnitPacket>])[];
+
+const NON_GOVERNED_OPTION_VARIANTS = [
+	["omitted run options", undefined],
+	["empty run options", {}],
+] as const satisfies readonly (readonly [
+	string,
+	RunPacketOptions | undefined,
+])[];
 
 function createPacket(overrides: Partial<UnitPacket> = {}): UnitPacket {
 	return {
@@ -367,6 +407,70 @@ describe("orchestrator run admission", () => {
 		);
 	});
 
+	it.each(
+		GOVERNANCE_FIELD_VARIANTS,
+	)("rejects direct unsafe sync execution of a packet carrying %s before ambient runtime", (_field, governanceFields) => {
+		const packet = createPacket(governanceFields);
+		const harness = createHarness({ packet });
+		cleanup.push(harness.cleanup);
+
+		expect(() =>
+			harness.orchestrator.runPacket(packet, undefined, {
+				trustLane: "unsafe",
+			}),
+		).toThrow(/governance fields.*verified sealed_v3 dispatch/i);
+		expect(harness.runtime.executePacket).not.toHaveBeenCalled();
+		expect(harness.runEvents).toEqual([]);
+	});
+
+	it.each(
+		GOVERNANCE_FIELD_VARIANTS,
+	)("rejects direct unsafe async execution of a packet carrying %s before ambient runtime", async (_field, governanceFields) => {
+		const packet = createPacket(governanceFields);
+		const harness = createHarness({ packet });
+		cleanup.push(harness.cleanup);
+
+		await expect(
+			harness.orchestrator.runPacketAsync(packet, undefined, {
+				trustLane: "unsafe",
+			}),
+		).rejects.toThrow(/governance fields.*verified sealed_v3 dispatch/i);
+		expect(harness.runtime.executePacketAsync).not.toHaveBeenCalled();
+		expect(harness.runEvents).toEqual([]);
+	});
+
+	it.each(
+		GOVERNANCE_FIELD_VARIANTS,
+	)("rejects sync execution of a packet carrying %s without a verified V3 dispatch", (_field, governanceFields) => {
+		for (const [_optionsLabel, runOptions] of NON_GOVERNED_OPTION_VARIANTS) {
+			const packet = createPacket(governanceFields);
+			const harness = createHarness({ packet });
+			cleanup.push(harness.cleanup);
+
+			expect(() =>
+				harness.orchestrator.runPacket(packet, undefined, runOptions),
+			).toThrow(/governance fields.*verified sealed_v3 dispatch/i);
+			expect(harness.runtime.executePacket).not.toHaveBeenCalled();
+			expect(harness.runEvents).toEqual([]);
+		}
+	});
+
+	it.each(
+		GOVERNANCE_FIELD_VARIANTS,
+	)("rejects async execution of a packet carrying %s without a verified V3 dispatch", async (_field, governanceFields) => {
+		for (const [_optionsLabel, runOptions] of NON_GOVERNED_OPTION_VARIANTS) {
+			const packet = createPacket(governanceFields);
+			const harness = createHarness({ packet });
+			cleanup.push(harness.cleanup);
+
+			await expect(
+				harness.orchestrator.runPacketAsync(packet, undefined, runOptions),
+			).rejects.toThrow(/governance fields.*verified sealed_v3 dispatch/i);
+			expect(harness.runtime.executePacketAsync).not.toHaveBeenCalled();
+			expect(harness.runEvents).toEqual([]);
+		}
+	});
+
 	it("fails closed before sync or async runtime when no admission store is configured", async () => {
 		const syncHarness = createHarness({ admissionStore: null });
 		cleanup.push(syncHarness.cleanup);
@@ -461,113 +565,55 @@ describe("orchestrator run admission", () => {
 		expect(harness.runEvents).not.toContain("runtime");
 	});
 
-	it("rejects dispatch when provenance_ref has no signed plan_admitted on the tape", async () => {
-		const harness = createHarness({
-			packet: createPacket({ provenance_ref: "evt-missing" }),
-			admittedPlanReader: { read: async () => undefined },
-		});
-		cleanup.push(harness.cleanup);
-
-		const result = await harness.orchestrator.runPacketAsync(harness.packet);
-
-		expect(result.run.status).not.toBe("passed");
-		expect(result.failure?.kind).toBe("plan-not-admitted");
-		expect(harness.runtime.executePacketAsync).not.toHaveBeenCalled();
-		expect(harness.runEvents).not.toContain("runtime");
-	});
-
-	it("allows dispatch when provenance_ref resolves to a kernel-signed admission", async () => {
+	it.each([
+		["missing", async () => undefined],
+		[
+			"kernel-signed",
+			async () => ({
+				authorizedNextStep: "dispatch_admitted_plan",
+				signedByKernel: true,
+			}),
+		],
+		[
+			"unsigned",
+			async () => ({
+				authorizedNextStep: "dispatch_admitted_plan",
+				signedByKernel: false,
+			}),
+		],
+		[
+			"mis-authorized",
+			async () => ({
+				authorizedNextStep: "some_other_step",
+				signedByKernel: true,
+			}),
+		],
+		[
+			"unavailable",
+			async () => {
+				throw new Error("corrupt tape");
+			},
+		],
+	] as const satisfies readonly (readonly [
+		string,
+		AdmittedPlanReader["read"],
+	])[])("rejects a legacy provenance_ref with a %s historic admission before consulting the tape reader", async (_admissionState, read) => {
+		const readSpy = vi.fn(read);
 		const harness = createHarness({
 			packet: createPacket({ provenance_ref: "evt-1" }),
-			admittedPlanReader: {
-				read: async () => ({
-					authorizedNextStep: "dispatch_admitted_plan",
-					signedByKernel: true,
-				}),
-			},
+			admittedPlanReader: { read: readSpy },
 		});
 		cleanup.push(harness.cleanup);
 
-		const result = await harness.orchestrator.runPacketAsync(harness.packet);
+		await expect(
+			harness.orchestrator.runPacketAsync(harness.packet),
+		).rejects.toThrow(/governance fields.*verified sealed_v3 dispatch/i);
 
-		expect(result.run.status).toBe("passed");
-	});
-
-	it("records provenance_ref on the admission receipt run record", async () => {
-		const harness = createHarness({
-			packet: createPacket({ provenance_ref: "evt-prov" }),
-			admittedPlanReader: {
-				read: async () => ({
-					authorizedNextStep: "dispatch_admitted_plan",
-					signedByKernel: true,
-				}),
-			},
-		});
-		cleanup.push(harness.cleanup);
-
-		const result = await harness.orchestrator.runPacketAsync(harness.packet);
-
-		expect(result.run.status).toBe("passed");
-		expect(harness.artifacts[0]?.receipt.run.provenance_ref).toBe("evt-prov");
-	});
-
-	it("rejects dispatch when the admission is unsigned or mis-authorized", async () => {
-		const harness = createHarness({
-			packet: createPacket({ provenance_ref: "evt-1" }),
-			admittedPlanReader: {
-				read: async () => ({
-					authorizedNextStep: "dispatch_admitted_plan",
-					signedByKernel: false,
-				}),
-			},
-		});
-		cleanup.push(harness.cleanup);
-
-		const result = await harness.orchestrator.runPacketAsync(harness.packet);
-
-		expect(result.run.status).not.toBe("passed");
-		expect(result.failure?.kind).toBe("plan-not-admitted");
+		expect(readSpy).not.toHaveBeenCalled();
 		expect(harness.runtime.executePacketAsync).not.toHaveBeenCalled();
-		expect(harness.runEvents).not.toContain("runtime");
-	});
-
-	it("rejects dispatch when admission is kernel-signed but authorizedNextStep is wrong", async () => {
-		const harness = createHarness({
-			packet: createPacket({ provenance_ref: "evt-1" }),
-			admittedPlanReader: {
-				read: async () => ({
-					authorizedNextStep: "some_other_step",
-					signedByKernel: true,
-				}),
-			},
-		});
-		cleanup.push(harness.cleanup);
-
-		const result = await harness.orchestrator.runPacketAsync(harness.packet);
-
-		expect(result.run.status).not.toBe("passed");
-		expect(result.failure?.kind).toBe("plan-not-admitted");
-		expect(harness.runtime.executePacketAsync).not.toHaveBeenCalled();
-		expect(harness.runEvents).not.toContain("runtime");
-	});
-
-	it("fails closed (plan-not-admitted) when the tape reader throws", async () => {
-		const harness = createHarness({
-			packet: createPacket({ provenance_ref: "evt-1" }),
-			admittedPlanReader: {
-				read: async () => {
-					throw new Error("corrupt tape");
-				},
-			},
-		});
-		cleanup.push(harness.cleanup);
-
-		const result = await harness.orchestrator.runPacketAsync(harness.packet);
-
-		expect(result.run.status).not.toBe("passed");
-		expect(result.failure?.kind).toBe("plan-not-admitted");
-		expect(harness.runtime.executePacketAsync).not.toHaveBeenCalled();
-		expect(harness.runEvents).not.toContain("runtime");
+		expect(harness.artifacts).toHaveLength(0);
+		expect(harness.admissionEvents).toHaveLength(0);
+		expect(harness.runEvents).toEqual([]);
 	});
 
 	it("skips the tape gate for non-PlanForge packets (empty provenance_ref)", async () => {

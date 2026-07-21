@@ -15,6 +15,7 @@ import type {
 	BuildplaneStoragePort,
 	BuildplaneWorkspacePort,
 	ExecutionReceipt,
+	GovernedV3RetryContextResolverPort,
 	InspectSnapshot,
 	PolicyDecision,
 	PolicyProfile,
@@ -111,6 +112,8 @@ interface HarnessOptions {
 	/** Override the admitted-plan reader so a packet carrying `provenance_ref` passes
 	 * the admission gate without a real signed events.db. */
 	readonly admittedPlanReader?: AdmittedPlanReader;
+	/** Injected only to prove legacy retries never consult a V3-only resolver. */
+	readonly governedRetryContextResolverPort?: GovernedV3RetryContextResolverPort;
 }
 
 const ACCEPTANCE_EVENT_FIXTURE_ID = "01919000-0000-7000-8000-0000000000ac";
@@ -135,6 +138,7 @@ function createHarness(options: HarnessOptions = {}) {
 		throwOnRecordAcceptance = false,
 		withResultReadyPort = false,
 		admittedPlanReader,
+		governedRetryContextResolverPort,
 	} = options;
 	const runEvents: string[] = [];
 	const resultReadyRecords: {
@@ -466,6 +470,9 @@ function createHarness(options: HarnessOptions = {}) {
 			workspace,
 			admissionStore,
 			...(admittedPlanReader ? { admittedPlanReader } : {}),
+			...(governedRetryContextResolverPort
+				? { governedRetryContextResolverPort }
+				: {}),
 			provisionDeps,
 			acceptanceEvidencePort: {
 				collectCheckResults() {
@@ -1300,7 +1307,7 @@ describe("kernel orchestrator", () => {
 		}
 	});
 
-	it("emits result_ready chained to admission + acceptance when a run terminates passed (M6-S7 A1)", async () => {
+	it("rejects ambient provenance before acceptance or result_ready", async () => {
 		const acceptanceContract: AcceptanceContractV0 = {
 			contract_version: "v0",
 			diff_scope: { allowed_globs: ["**"] },
@@ -1328,62 +1335,65 @@ describe("kernel orchestrator", () => {
 
 		try {
 			const admittedPacket = { ...packet, provenance_ref: "admit-event-1" };
-			const result = await orchestrator.runPacketAsync(admittedPacket);
+			await expect(orchestrator.runPacketAsync(admittedPacket)).rejects.toThrow(
+				/require a verified sealed_v3 dispatch/i,
+			);
 
-			expect(result.run.status).toBe("passed");
-			expect(acceptanceRecords[0]?.outcome).toBe("passed");
-			// result_ready fires exactly once at the terminal passed outcome, chaining
-			// the plan_admitted (provenance_ref) + the acceptance_recorded event id.
-			expect(resultReadyRecords).toEqual([
-				{
-					runId: "run-1",
-					admissionEventId: "admit-event-1",
-					acceptanceEventId: ACCEPTANCE_EVENT_FIXTURE_ID,
-				},
-			]);
+			expect(acceptanceRecords).toEqual([]);
+			expect(resultReadyRecords).toEqual([]);
 		} finally {
 			cleanup();
 		}
 	});
 
-	it("emits NO result_ready when a run passes acceptance on an attempt but terminates failed (M6-S7 A1 negative)", async () => {
+	it("keeps a raw run failed when policy rejects after acceptance passes", async () => {
 		const acceptanceContract: AcceptanceContractV0 = {
 			contract_version: "v0",
 			diff_scope: { allowed_globs: ["**"] },
 			checks: [{ command: "pnpm lint" }],
 		};
-		const { orchestrator, resultReadyRecords, acceptanceRecords, cleanup } =
-			createHarness({
-				// Acceptance checks PASS (exit 0) → acceptance_recorded(passed) ...
-				trustedAcceptanceCheckResults: [{ command: "pnpm lint", exitCode: 0 }],
-				// ... but the terminal policy.evaluateRun REJECTS → run terminates failed.
-				// This reproduces the 2026-07-01 dogfood acceptance(passed)+receipt(failed)
-				// pair: emitting result_ready at the per-attempt acceptance pass would sign
-				// a false result_ready; the terminal gate must suppress it.
-				policyOutcome: "rejected",
-				withAcceptancePort: true,
-				withResultReadyPort: true,
-				admittedPlanReader: {
-					async read() {
-						return {
-							authorizedNextStep: "dispatch_admitted_plan",
-							signedByKernel: true,
-						};
-					},
+		const {
+			orchestrator,
+			acceptanceRecords,
+			evidencePayloads,
+			runEvents,
+			cleanup,
+		} = createHarness({
+			// A healthy worker receipt and deterministic checks record a passed
+			// acceptance verdict before the terminal policy decision is evaluated.
+			trustedAcceptanceCheckResults: [{ command: "pnpm lint", exitCode: 0 }],
+			policyOutcome: "approved",
+			policyDecisions: [
+				{
+					kind: "reject-run",
+					outcome: "rejected",
+					reasons: ["terminal policy rejected the otherwise accepted run"],
 				},
-				policyProfile: {
-					name: "default",
-					trustGates: { acceptanceContract },
-				},
-			});
+			],
+			withAcceptancePort: true,
+			policyProfile: {
+				name: "default",
+				trustGates: { acceptanceContract },
+			},
+		});
 
 		try {
-			const admittedPacket = { ...packet, provenance_ref: "admit-event-1" };
-			const result = await orchestrator.runPacketAsync(admittedPacket);
+			const result = await orchestrator.runPacketAsync(packet, undefined, {
+				trustLane: "unsafe",
+				finalizationMode: "auto-merge",
+			});
 
+			expect(acceptanceRecords).toHaveLength(1);
 			expect(acceptanceRecords[0]?.outcome).toBe("passed");
-			expect(result.run.status).not.toBe("passed");
-			expect(resultReadyRecords).toEqual([]);
+			expect(evidencePayloads[0]?.exitCode).toBe(0);
+			expect(runEvents.indexOf("acceptance-recorded")).toBeLessThan(
+				runEvents.indexOf("evaluate-run"),
+			);
+			expect(result.decision).toMatchObject({
+				kind: "reject-run",
+				outcome: "rejected",
+			});
+			expect(result.run.status).toBe("failed");
 		} finally {
 			cleanup();
 		}
@@ -1688,6 +1698,34 @@ describe("kernel orchestrator", () => {
 		}
 	});
 
+	it("never consults a V3 retry-context resolver during a legacy retry", async () => {
+		const resolveUntrustedAttemptContext = vi.fn(async () => {
+			throw new Error("legacy retries must not invoke the V3 context resolver");
+		});
+		const { orchestrator, cleanup } = createHarness({
+			policyDecisions: [
+				{
+					kind: "retry-run",
+					outcome: "retrying",
+					reasons: ["legacy retry"],
+					attemptNumber: 1,
+					feedbackContext: ["retry without a V3 dispatch"],
+				},
+				{ kind: "advance-run", outcome: "approved", reasons: [] },
+			],
+			governedRetryContextResolverPort: { resolveUntrustedAttemptContext },
+		});
+
+		try {
+			const result = await orchestrator.runPacketAsync(packet);
+
+			expect(result.run.status).toBe("passed");
+			expect(resolveUntrustedAttemptContext).not.toHaveBeenCalled();
+		} finally {
+			cleanup();
+		}
+	});
+
 	it("fails closed when an acceptance contract is configured without an evaluator", async () => {
 		const acceptanceContract: AcceptanceContractV0 = {
 			contract_version: "v0",
@@ -1880,7 +1918,7 @@ describe("kernel orchestrator", () => {
 			expect(orchestrator.initializeProject()).toEqual({
 				created: true,
 				projectRoot: expect.any(String),
-				stateDbPath: expect.stringContaining(".buildplane/state.db"),
+				stateDbPath: expect.stringMatching(/[\\/]\.buildplane[\\/]state\.db$/),
 			});
 			expect(orchestrator.getStatus()).toBe(statusSnapshot);
 			expect(runEvents).toContain("initialize-project");

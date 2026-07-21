@@ -23,11 +23,7 @@ use std::path::Path;
 /// Serialize every event of `run_id` from `store` into the
 /// `buildplane.signed-tape.v1` export envelope, resolving each distinct signer's
 /// public key from the keyring rooted at `keyring_root`.
-pub fn export_signed_tape(
-    store: &SqliteStore,
-    run_id: &str,
-    keyring_root: &Path,
-) -> Result<Value> {
+pub fn export_signed_tape(store: &SqliteStore, run_id: &str, keyring_root: &Path) -> Result<Value> {
     let signed = store.signed_events_for_run(run_id)?;
 
     let mut entries: Vec<Value> = Vec::with_capacity(signed.len());
@@ -102,9 +98,7 @@ mod tests {
     }
 
     fn event_id(n: u8) -> EventId {
-        EventId::from_uuid(
-            Uuid::parse_str(&format!("01919000-0000-7000-8000-{:012}", n)).unwrap(),
-        )
+        EventId::from_uuid(Uuid::parse_str(&format!("01919000-0000-7000-8000-{:012}", n)).unwrap())
     }
 
     fn sha256_hex(bytes: &[u8]) -> String {
@@ -118,9 +112,8 @@ mod tests {
         let signing_key = SigningKey::from_bytes(&SEED);
 
         let store = SqliteStore::open_in_memory().unwrap();
-        let run_id = RunId::from_uuid(
-            Uuid::parse_str("01919000-0000-7000-8000-0000000000ff").unwrap(),
-        );
+        let run_id =
+            RunId::from_uuid(Uuid::parse_str("01919000-0000-7000-8000-0000000000ff").unwrap());
 
         let started = Event {
             id: event_id(1),
@@ -190,7 +183,10 @@ mod tests {
                 sha256_hex(&bytes),
                 sig["canonical_event_hash"].as_str().unwrap()
             );
-            assert_eq!(sig["signer"]["public_key_hash"], trusted[0]["public_key_hash"]);
+            assert_eq!(
+                sig["signer"]["public_key_hash"],
+                trusted[0]["public_key_hash"]
+            );
         }
     }
 }

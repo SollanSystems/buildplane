@@ -42,7 +42,20 @@ export type {
 	VerifyRunFinalVerdictOptions,
 } from "./run-bundle.js";
 export { exportRunBundle, verifyRunFinalVerdict } from "./run-bundle.js";
-export type { RunHistoryEntry } from "./store.js";
+export type {
+	CandidateAcceptanceRecord,
+	CandidateArtifactProjection,
+	CandidateArtifactProjectionInput,
+	CandidateOutcomeInput,
+	CandidatePromotionExecutionClaimStateV1,
+	CandidatePromotionExecutionLeaseV1,
+	CandidatePromotionIntent,
+	CandidatePromotionIntentInput,
+	CandidatePromotionOutcome,
+	CandidatePromotionState,
+	CandidateReviewRecord,
+	RunHistoryEntry,
+} from "./store.js";
 
 export interface ProjectInitializationResult {
 	readonly created: boolean;
@@ -80,6 +93,39 @@ export interface BuildplaneStorage extends BuildplaneStoragePort {
 			  },
 	): Run;
 	commitRunSuccessOutcome(runId: string, decision: ApprovedPolicyDecision): Run;
+	commitRunCandidateOutcome(
+		runId: string,
+		input: import("./store.js").CandidateOutcomeInput,
+	): Run;
+	getCandidateArtifact(
+		runId: string,
+	): import("./store.js").CandidateArtifactProjection | null;
+	prepareCandidatePromotion(
+		input: import("./store.js").CandidatePromotionIntentInput,
+	): import("./store.js").CandidatePromotionIntent;
+	markCandidatePromotionRecorded(
+		candidateDigest: string,
+		idempotencyKey: string,
+	): void;
+	claimCandidatePromotionExecution(
+		candidateDigest: string,
+		idempotencyKey: string,
+	): import("./store.js").CandidatePromotionExecutionLeaseV1;
+	getCandidatePromotionExecutionClaimState(
+		candidateDigest: string,
+		idempotencyKey: string,
+	): import("./store.js").CandidatePromotionExecutionClaimStateV1;
+	markCandidatePromotionExecuted(
+		candidateDigest: string,
+		idempotencyKey: string,
+		outcome: {
+			outcome: import("./store.js").CandidatePromotionOutcome;
+			mergedHeadSha?: string;
+			promotionGitBinding?: import("@buildplane/kernel").PromotionGitBindingV1;
+		},
+		executionLeaseToken?: string,
+	): void;
+	listPendingCandidatePromotions(): readonly import("./store.js").CandidatePromotionIntent[];
 	recordWorkspaceDeleted(runId: string): void;
 	recordWorkspaceCleanupFailed(runId: string, message: string): void;
 	recordWorkspaceCleanedUp(runId: string): void;

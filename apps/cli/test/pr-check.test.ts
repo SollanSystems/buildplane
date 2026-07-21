@@ -17,6 +17,7 @@ import {
 const report = {
 	runId: "run-pr-check-pass",
 	verdict: "PASSED",
+	trustedReceipt: true,
 	receipts: { verifier: 2, approvals: 1, rejections: 0 },
 	criteria: [{ id: "command-exit:0", status: "PASSED" }],
 	issues: [],
@@ -83,6 +84,39 @@ describe("pr-check planning and publishing", () => {
 		expect(dryRun.operation.body.output.text).toContain(
 			"| Run Inspector | https://example.test/runs/run-pr-check-pass |",
 		);
+	});
+
+	it("refuses to project an explicitly untrusted receipt into PR evidence", () => {
+		const unsafeReport = { ...report, trustedReceipt: false };
+		expect(() =>
+			planPrCheckOperation({
+				report: unsafeReport,
+				repository: "SollanSystems/buildplane",
+				headSha: HEAD_SHA,
+			}),
+		).toThrow(/UNTRUSTED_RECEIPT/);
+		expect(() =>
+			planPrCommentOperation({
+				report: unsafeReport,
+				repository: "SollanSystems/buildplane",
+				prNumber: 42,
+				headSha: HEAD_SHA,
+			}),
+		).toThrow(/UNTRUSTED_RECEIPT/);
+	});
+
+	it("refuses a report that omits the governed receipt marker", () => {
+		const legacyShapedReport = {
+			runId: "run-pr-check-legacy",
+			verdict: "PASSED",
+		} as never;
+		expect(() =>
+			planPrCheckOperation({
+				report: legacyShapedReport,
+				repository: "SollanSystems/buildplane",
+				headSha: HEAD_SHA,
+			}),
+		).toThrow(/UNTRUSTED_RECEIPT/);
 	});
 
 	it("rejects repositories that could alter GitHub request URL semantics", () => {
@@ -194,6 +228,7 @@ describe("pr-check planning and publishing", () => {
 			report: {
 				runId: "run-pr-check-blocked",
 				verdict: "BLOCKED",
+				trustedReceipt: true,
 				issues: [
 					{ code: "MISSING_VERIFIER_RECEIPT", message: "No verifier event" },
 					{ code: "UNRESOLVED_BLOCKER", message: "architecture.diff_scope" },
@@ -217,6 +252,7 @@ describe("pr-check planning and publishing", () => {
 			report: {
 				runId: "run--> @here | `boom`",
 				verdict: "BLOCKED",
+				trustedReceipt: true,
 				receipts: { verifier: 0, approvals: 0, rejections: 0 },
 				criteria: [
 					{
@@ -524,6 +560,7 @@ describe("pr-check planning and publishing", () => {
 			report: {
 				runId: "run-pr-check-blocked",
 				verdict: "BLOCKED",
+				trustedReceipt: true,
 				receipts: { verifier: 0, approvals: 0, rejections: 0 },
 				criteria: [{ id: "command-exit:0", status: "INSUFFICIENT_EVIDENCE" }],
 				issues: [

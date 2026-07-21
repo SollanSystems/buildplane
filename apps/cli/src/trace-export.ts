@@ -78,6 +78,15 @@ interface InspectSnapshotForTrace {
 
 export interface TraceExportResult {
 	readonly format: "otel-json";
+	/**
+	 * Inspector snapshots are local observations, not signed tape projections.
+	 * They must never be presented as governed telemetry or promotion evidence.
+	 */
+	readonly governance: "unsafe";
+	readonly authority: {
+		readonly tape: "unverified";
+		readonly export: "none";
+	};
 	readonly runId: string;
 	readonly spanCount: number;
 	readonly outPath: string;
@@ -89,22 +98,43 @@ export interface TraceExportResult {
 			readonly scopeSpans: readonly {
 				readonly scope: {
 					readonly name: "buildplane";
-					readonly version: "0.1.0";
+					readonly version: "1.0.0";
 				};
 				readonly spans: readonly TraceSpan[];
 			}[];
 		}[];
 	};
 	readonly traceGrading: {
-		readonly schema: "buildplane.trace_grading.v0";
+		readonly schema: "buildplane.trace_grading.v1";
 		readonly runId: string;
-		readonly candidateTraceRef: string;
-		readonly rubrics: readonly string[];
 	};
 }
 
-const SECRET_KEY_PATTERN =
-	/(api[_-]?key|authorization|bearer|credential|password|secret|token)/iu;
+const TRACE_ATTRIBUTE_KEY = {
+	authority: "buildplane.authority",
+	artifactCount: "buildplane.artifact_count",
+	decisionCount: "buildplane.decision_count",
+	decisionKind: "buildplane.policy.decision_kind",
+	decisionOutcome: "buildplane.policy.outcome",
+	eventCount: "buildplane.event_count",
+	eventId: "buildplane.event_id",
+	eventKind: "buildplane.event.kind",
+	governance: "buildplane.governance",
+	evidenceCount: "buildplane.evidence_count",
+	evidenceKind: "buildplane.evidence.kind",
+	evidenceStatus: "buildplane.evidence.status",
+	format: "buildplane.trace.format",
+	missingEvidenceCount: "buildplane.missing_evidence_count",
+	projectionSchema: "buildplane.trace.schema",
+	runId: "buildplane.run_id",
+	runStatus: "buildplane.run_status",
+	serviceName: "service.name",
+	unitId: "buildplane.unit_id",
+	verdict: "buildplane.verdict",
+} as const;
+
+type TraceAttributeKey =
+	(typeof TRACE_ATTRIBUTE_KEY)[keyof typeof TRACE_ATTRIBUTE_KEY];
 
 function digestHex(value: string, bytes: number): string {
 	return createHash("sha256")
@@ -131,85 +161,18 @@ function timeUnixNanoFromMillis(millis: number): string {
 	return (BigInt(millis) * 1_000_000n).toString();
 }
 
-function stringAttr(key: string, value: string): TraceAttribute {
+function stringAttr(key: TraceAttributeKey, value: string): TraceAttribute {
 	return {
 		key,
 		value: { stringValue: value },
 	};
 }
 
-function intAttr(key: string, value: number): TraceAttribute {
+function intAttr(key: TraceAttributeKey, value: number): TraceAttribute {
 	return {
 		key,
 		value: { intValue: Math.trunc(value).toString() },
 	};
-}
-
-function doubleAttr(key: string, value: number): TraceAttribute {
-	return {
-		key,
-		value: { doubleValue: value },
-	};
-}
-
-function boolAttr(key: string, value: boolean): TraceAttribute {
-	return {
-		key,
-		value: { boolValue: value },
-	};
-}
-
-function safeString(value: string): string {
-	let sanitized = "";
-	for (const char of value) {
-		const code = char.charCodeAt(0);
-		sanitized += code < 32 || (code >= 127 && code <= 159) ? " " : char;
-		if (sanitized.length >= 500) {
-			return sanitized.slice(0, 500);
-		}
-	}
-	return sanitized;
-}
-
-function safeMetadataAttributes(
-	prefix: string,
-	metadata: Readonly<Record<string, string | number | boolean>> | undefined,
-): TraceAttribute[] {
-	if (!metadata) return [];
-	const attributes: TraceAttribute[] = [];
-	for (const [key, value] of Object.entries(metadata).sort(([a], [b]) =>
-		a.localeCompare(b),
-	)) {
-		if (SECRET_KEY_PATTERN.test(key)) {
-			attributes.push(stringAttr(`${prefix}.${key}`, "[REDACTED]"));
-			continue;
-		}
-		if (typeof value === "boolean") {
-			attributes.push(boolAttr(`${prefix}.${key}`, value));
-		} else if (typeof value === "number") {
-			attributes.push(
-				Number.isInteger(value)
-					? intAttr(`${prefix}.${key}`, value)
-					: doubleAttr(`${prefix}.${key}`, value),
-			);
-		} else {
-			attributes.push(stringAttr(`${prefix}.${key}`, safeString(value)));
-		}
-	}
-	return attributes;
-}
-
-function eventGenAiAttributes(kind: string): TraceAttribute[] {
-	if (kind === "model_request") {
-		return [stringAttr("gen_ai.operation.name", "chat")];
-	}
-	if (kind === "model_response") {
-		return [stringAttr("gen_ai.operation.name", "chat.response")];
-	}
-	if (kind === "tool_request" || kind === "tool_result") {
-		return [stringAttr("gen_ai.operation.name", "tool")];
-	}
-	return [];
 }
 
 export function createOtelTraceExport(
@@ -255,52 +218,31 @@ export function createOtelTraceExport(
 			startTimeUnixNano: start,
 			endTimeUnixNano: end,
 			attributes: [
-				stringAttr("buildplane.run_id", snapshot.run.id),
-				stringAttr("buildplane.unit_id", snapshot.run.unitId),
-				stringAttr("buildplane.unit_kind", snapshot.unit.kind),
-				stringAttr("buildplane.run_status", snapshot.run.status),
-				stringAttr("buildplane.verdict", inspector.outcomeStrip.verdict),
-				intAttr("buildplane.event_count", inspector.outcomeStrip.eventCount),
+				stringAttr(TRACE_ATTRIBUTE_KEY.runId, snapshot.run.id),
+				stringAttr(TRACE_ATTRIBUTE_KEY.unitId, snapshot.run.unitId),
+				stringAttr(TRACE_ATTRIBUTE_KEY.runStatus, snapshot.run.status),
+				stringAttr(TRACE_ATTRIBUTE_KEY.verdict, inspector.outcomeStrip.verdict),
 				intAttr(
-					"buildplane.missing_evidence_count",
+					TRACE_ATTRIBUTE_KEY.eventCount,
+					inspector.outcomeStrip.eventCount,
+				),
+				intAttr(
+					TRACE_ATTRIBUTE_KEY.missingEvidenceCount,
 					inspector.outcomeStrip.missingEvidenceCount,
 				),
-				...(snapshot.provenance?.route?.worker
-					? [
-							stringAttr(
-								"buildplane.route.worker",
-								snapshot.provenance.route.worker,
-							),
-						]
-					: []),
-				...(snapshot.provenance?.route?.provider
-					? [stringAttr("gen_ai.system", snapshot.provenance.route.provider)]
-					: []),
-				...(snapshot.provenance?.route?.model
-					? [
-							stringAttr(
-								"gen_ai.request.model",
-								snapshot.provenance.route.model,
-							),
-						]
-					: []),
-				...(snapshot.provenance?.policy?.profile
-					? [
-							stringAttr(
-								"buildplane.policy.profile",
-								snapshot.provenance.policy.profile,
-							),
-						]
-					: []),
+				intAttr(
+					TRACE_ATTRIBUTE_KEY.evidenceCount,
+					inspector.outcomeStrip.evidenceCount,
+				),
+				intAttr(
+					TRACE_ATTRIBUTE_KEY.decisionCount,
+					inspector.outcomeStrip.decisionCount,
+				),
+				intAttr(
+					TRACE_ATTRIBUTE_KEY.artifactCount,
+					inspector.outcomeStrip.artifactCount,
+				),
 			],
-			events: inspector.missingEvidence.map((missing, index) => ({
-				name: "buildplane.missing_evidence",
-				timeUnixNano: end,
-				attributes: [
-					intAttr("buildplane.index", index),
-					stringAttr("buildplane.reason", safeString(missing)),
-				],
-			})),
 		},
 	];
 
@@ -310,16 +252,13 @@ export function createOtelTraceExport(
 			traceId: id,
 			spanId: spanId(`${snapshot.run.id}:event:${event.id}`),
 			parentSpanId: rootSpanId,
-			name: `buildplane.event.${event.kind}`,
+			name: "buildplane.event",
 			kind: 1,
 			startTimeUnixNano: eventTime,
 			endTimeUnixNano: eventTime,
 			attributes: [
-				stringAttr("buildplane.event_id", event.id),
-				stringAttr("buildplane.event.kind", event.kind),
-				stringAttr("buildplane.event.summary", safeString(event.summary)),
-				...eventGenAiAttributes(event.kind),
-				...safeMetadataAttributes("buildplane.event.metadata", event.metadata),
+				stringAttr(TRACE_ATTRIBUTE_KEY.eventId, event.id),
+				stringAttr(TRACE_ATTRIBUTE_KEY.eventKind, event.kind),
 			],
 		});
 	}
@@ -329,21 +268,13 @@ export function createOtelTraceExport(
 			traceId: id,
 			spanId: spanId(`${snapshot.run.id}:evidence:${index}`),
 			parentSpanId: rootSpanId,
-			name: `buildplane.evidence.${evidence.kind}`,
+			name: "buildplane.evidence",
 			kind: 1,
 			startTimeUnixNano: end,
 			endTimeUnixNano: end,
 			attributes: [
-				stringAttr("buildplane.evidence.kind", evidence.kind),
-				stringAttr("buildplane.evidence.status", evidence.status),
-				...(evidence.message
-					? [
-							stringAttr(
-								"buildplane.evidence.message",
-								safeString(evidence.message),
-							),
-						]
-					: []),
+				stringAttr(TRACE_ATTRIBUTE_KEY.evidenceKind, evidence.kind),
+				stringAttr(TRACE_ATTRIBUTE_KEY.evidenceStatus, evidence.status),
 			],
 		});
 	});
@@ -353,36 +284,13 @@ export function createOtelTraceExport(
 			traceId: id,
 			spanId: spanId(`${snapshot.run.id}:decision:${index}`),
 			parentSpanId: rootSpanId,
-			name: `buildplane.policy.${decision.kind}`,
+			name: "buildplane.decision",
 			kind: 1,
 			startTimeUnixNano: end,
 			endTimeUnixNano: end,
 			attributes: [
-				stringAttr("buildplane.policy.decision_kind", decision.kind),
-				stringAttr("buildplane.policy.outcome", decision.outcome),
-				stringAttr(
-					"buildplane.policy.reasons",
-					safeString(decision.reasons.join("; ")),
-				),
-			],
-		});
-	});
-
-	snapshot.artifacts.forEach((artifact, index) => {
-		spans.push({
-			traceId: id,
-			spanId: spanId(`${snapshot.run.id}:artifact:${index}`),
-			parentSpanId: rootSpanId,
-			name: `buildplane.artifact.${artifact.type}`,
-			kind: 1,
-			startTimeUnixNano: end,
-			endTimeUnixNano: end,
-			attributes: [
-				stringAttr("buildplane.artifact.type", artifact.type),
-				stringAttr(
-					"buildplane.artifact.location",
-					safeString(artifact.location),
-				),
+				stringAttr(TRACE_ATTRIBUTE_KEY.decisionKind, decision.kind),
+				stringAttr(TRACE_ATTRIBUTE_KEY.decisionOutcome, decision.outcome),
 			],
 		});
 	});
@@ -392,13 +300,19 @@ export function createOtelTraceExport(
 			{
 				resource: {
 					attributes: [
-						stringAttr("service.name", "buildplane"),
-						stringAttr("buildplane.trace.format", "otel-json"),
+						stringAttr(TRACE_ATTRIBUTE_KEY.serviceName, "buildplane"),
+						stringAttr(TRACE_ATTRIBUTE_KEY.format, "otel-json"),
+						stringAttr(
+							TRACE_ATTRIBUTE_KEY.projectionSchema,
+							"buildplane.local-inspector-trace.v1",
+						),
+						stringAttr(TRACE_ATTRIBUTE_KEY.governance, "unsafe"),
+						stringAttr(TRACE_ATTRIBUTE_KEY.authority, "none"),
 					],
 				},
 				scopeSpans: [
 					{
-						scope: { name: "buildplane" as const, version: "0.1.0" as const },
+						scope: { name: "buildplane" as const, version: "1.0.0" as const },
 						spans,
 					},
 				],
@@ -408,19 +322,15 @@ export function createOtelTraceExport(
 
 	return {
 		format: "otel-json",
+		governance: "unsafe",
+		authority: { tape: "unverified", export: "none" },
 		runId: snapshot.run.id,
 		spanCount: spans.length,
 		outPath,
 		trace,
 		traceGrading: {
-			schema: "buildplane.trace_grading.v0",
+			schema: "buildplane.trace_grading.v1",
 			runId: snapshot.run.id,
-			candidateTraceRef: outPath,
-			rubrics: [
-				"verdict is backed by recorded evidence",
-				"missing evidence is surfaced explicitly",
-				"policy and admission decisions are traceable",
-			],
 		},
 	};
 }

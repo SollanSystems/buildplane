@@ -414,7 +414,7 @@ describe("workspace build artifact discovery", () => {
 
 			expect(
 				listWorkspaceBuildArtifacts(tempRoot).map((path) =>
-					relative(tempRoot, path),
+					relative(tempRoot, path).replaceAll("\\", "/"),
 				),
 			).toEqual([
 				"apps/cli/dist",

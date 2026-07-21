@@ -56,7 +56,10 @@ mod tests {
             tool_request_id: EventId::new(),
             path: "out.txt".into(),
             hash_before: None,
-            after: PostWriteState::Captured { hash: "sha256:bb".into(), size_bytes: 3 },
+            after: PostWriteState::Captured {
+                hash: "sha256:bb".into(),
+                size_bytes: 3,
+            },
         };
         let s = serde_json::to_string(&p).unwrap();
         assert_eq!(p, serde_json::from_str::<WorkspaceWriteV1>(&s).unwrap());
@@ -68,7 +71,9 @@ mod tests {
             tool_request_id: EventId::new(),
             path: "locked.txt".into(),
             hash_before: Some("sha256:aa".into()),
-            after: PostWriteState::Unreadable { reason: "EACCES".into() },
+            after: PostWriteState::Unreadable {
+                reason: "EACCES".into(),
+            },
         };
         let s = serde_json::to_string(&p).unwrap();
         assert_eq!(p, serde_json::from_str::<WorkspaceWriteV1>(&s).unwrap());

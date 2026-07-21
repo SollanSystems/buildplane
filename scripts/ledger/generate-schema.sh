@@ -4,6 +4,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 OUT="$ROOT/packages/ledger-client/src/generated/index.ts"
+RELEASE_EVALUATION_SHIM="$ROOT/packages/ledger-client/src/generated/release-evaluation-shim.ts.in"
 
 mkdir -p "$(dirname "$OUT")"
 
@@ -20,6 +21,11 @@ import type { BTreeMap, DateTime, Utc, Uuid, Value } from "../shims.js";'
 TMP="$(mktemp)"
 printf '%s\n' "$SHIMS_IMPORT" > "$TMP"
 cat "$OUT" >> "$TMP"
+# Typeshare cannot represent the ledger's deliberately untagged closed claim
+# union. Its leaf structs/enums are generated from Rust; this generated-module
+# shim supplies only the stable TypeScript union and its containing evidence
+# record without changing the signed wire schema.
+cat "$RELEASE_EVALUATION_SHIM" >> "$TMP"
 mv "$TMP" "$OUT"
 
 echo "wrote $OUT"

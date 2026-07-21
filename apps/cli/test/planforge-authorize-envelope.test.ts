@@ -2,12 +2,50 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import {
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+const localAuthorityPath = vi.hoisted(() => {
+	const emit = vi.fn();
+	const createTapeEmitter = vi.fn(async () => ({
+		emit,
+		flush: vi.fn(async () => undefined),
+		close: vi.fn(async () => undefined),
+		stats: () => ({ lastAckedEventId: "event-local-authority" }),
+	}));
+	return {
+		emit,
+		createTapeEmitter,
+		assertKernelSigningKey: vi.fn(),
+		resolveLedgerBinary: vi.fn(() => "buildplane-native-test"),
+		spawnLedgerSubprocess: vi.fn(() => ({
+			child: { exitCode: 0, kill: vi.fn() },
+			stdin: {},
+			stderr: {},
+			exit: Promise.resolve(0),
+		})),
+	};
+});
+
+vi.mock("@buildplane/ledger-client", () => ({
+	createTapeEmitter: localAuthorityPath.createTapeEmitter,
+}));
+
+vi.mock("../src/ledger-emit.js", () => ({
+	assertKernelSigningKey: localAuthorityPath.assertKernelSigningKey,
+	PLANFORGE_KERNEL_SIGNING_KEY_ID: "kernel-main",
+	resolveLedgerBinary: localAuthorityPath.resolveLedgerBinary,
+	spawnLedgerSubprocess: localAuthorityPath.spawnLedgerSubprocess,
+}));
+
+const {
 	buildAuthorizeEnvelopePayload,
 	findExistingAuthorizeEnvelope,
 	parseEnvelopeArgs,
-} from "../src/planforge-authorize-envelope.js";
+	runPlanForgeAuthorizeEnvelopeCommand,
+} = await import("../src/planforge-authorize-envelope.js");
+const { GOVERNED_AUTHORITY_BROKER_REQUIRED } = await import(
+	"../src/governed-ledger-authority.js"
+);
 
 const baseArgs = [
 	"--milestone",
@@ -23,13 +61,43 @@ const baseArgs = [
 	"--verification-cmds",
 	"pnpm vitest run,cargo test,tsc --noEmit",
 	"--expires-at",
-	"2026-07-01T00:00:00Z",
+	"2027-07-01T00:00:00Z",
 	"--approve",
 	"--operator",
 	"khall",
 ];
 
 describe("planforge authorize-envelope", () => {
+	it("fails closed before local tape append when no verifier-backed V3 broker is available", async () => {
+		localAuthorityPath.emit.mockClear();
+		localAuthorityPath.createTapeEmitter.mockClear();
+		localAuthorityPath.assertKernelSigningKey.mockClear();
+		localAuthorityPath.resolveLedgerBinary.mockClear();
+		localAuthorityPath.spawnLedgerSubprocess.mockClear();
+		const stdout: string[] = [];
+		const commandWorkspace = mkdtempSync(
+			join(tmpdir(), "bp-planforge-no-broker-"),
+		);
+		try {
+			await expect(
+				runPlanForgeAuthorizeEnvelopeCommand(
+					baseArgs,
+					commandWorkspace,
+					(line) => stdout.push(line),
+				),
+			).rejects.toThrow(GOVERNED_AUTHORITY_BROKER_REQUIRED);
+
+			expect(localAuthorityPath.assertKernelSigningKey).not.toHaveBeenCalled();
+			expect(localAuthorityPath.resolveLedgerBinary).not.toHaveBeenCalled();
+			expect(localAuthorityPath.spawnLedgerSubprocess).not.toHaveBeenCalled();
+			expect(localAuthorityPath.createTapeEmitter).not.toHaveBeenCalled();
+			expect(localAuthorityPath.emit).not.toHaveBeenCalled();
+			expect(stdout).toEqual([]);
+		} finally {
+			rmSync(commandWorkspace, { recursive: true, force: true });
+		}
+	});
+
 	it("fails closed without --approve", () => {
 		expect(() =>
 			parseEnvelopeArgs(baseArgs.filter((a) => a !== "--approve")),
@@ -84,9 +152,27 @@ describe("planforge authorize-envelope", () => {
 
 	it("rejects a non-RFC3339 --expires-at", () => {
 		const bad = baseArgs.map((a) =>
-			a === "2026-07-01T00:00:00Z" ? "not-a-date" : a,
+			a === "2027-07-01T00:00:00Z" ? "not-a-date" : a,
 		);
 		expect(() => parseEnvelopeArgs(bad)).toThrow(/expires-at/);
+	});
+
+	it("rejects unknown, duplicate, and expired authorization inputs", () => {
+		expect(() => parseEnvelopeArgs([...baseArgs, "--unrecognized"])).toThrow(
+			/Unsupported/,
+		);
+		expect(() => parseEnvelopeArgs([...baseArgs, "--milestone", "M6"])).toThrow(
+			/Duplicate --milestone/,
+		);
+		expect(() =>
+			parseEnvelopeArgs(
+				baseArgs.map((argument) =>
+					argument === "2027-07-01T00:00:00Z"
+						? "2020-01-01T00:00:00Z"
+						: argument,
+				),
+			),
+		).toThrow(/in the future/);
 	});
 
 	it("builds a v0 envelope payload with canonical-JSON envelope + authorize-envelope subject", () => {
@@ -213,7 +299,7 @@ describe("findExistingAuthorizeEnvelope signature gate (GAP-10 P2)", () => {
 		expect(found).toBeUndefined();
 	});
 
-	it("suppresses on a kernel-signed matching row", async () => {
+	it("does not trust forged kernel-labelled metadata without detached verification", async () => {
 		const parsed = parseEnvelopeArgs(baseArgs);
 		const payload = buildAuthorizeEnvelopePayload(parsed, new Date());
 		seedRow({
@@ -230,6 +316,6 @@ describe("findExistingAuthorizeEnvelope signature gate (GAP-10 P2)", () => {
 			payload.run_id,
 			payload.envelope,
 		);
-		expect(found).toBe("evt-1");
+		expect(found).toBeUndefined();
 	});
 });

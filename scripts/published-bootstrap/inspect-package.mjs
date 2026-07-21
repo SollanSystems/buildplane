@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
 	existsSync,
 	mkdtempSync,
@@ -64,6 +65,7 @@ const RUNTIME_TREE_ROOTS = Object.freeze(["dist", "vendor"]);
 const REQUIRED_WRAPPER_RUNTIME_BOUNDARY_SPECIFIER = "./cli.js";
 const PACKAGED_NATIVE_RELATIVE_PATHS = new Set([
 	"vendor/native/linux-x64/buildplane-native",
+	"vendor/native/linux-x64/buildplane-native.sha256",
 ]);
 const ALLOWED_STAGED_PACKAGE_ROOT_ENTRIES = new Set([
 	"README.md",
@@ -362,6 +364,13 @@ function assertPackagedNativePayload(packageRoot, platform) {
 		"linux-x64",
 		"buildplane-native",
 	);
+	const linuxNativeIntegrityPath = join(
+		packageRoot,
+		"vendor",
+		"native",
+		"linux-x64",
+		"buildplane-native.sha256",
+	);
 	if (!existsSync(nativeRoot)) {
 		fail(`Missing packaged linux-x64 native binary: ${linuxNativePath}`);
 	}
@@ -397,6 +406,36 @@ function assertPackagedNativePayload(packageRoot, platform) {
 	) {
 		fail(
 			`Packaged linux-x64 native binary must be executable: ${linuxNativePath}`,
+		);
+	}
+
+	if (!existsSync(linuxNativeIntegrityPath)) {
+		fail(
+			`Missing packaged linux-x64 native integrity manifest: ${linuxNativeIntegrityPath}`,
+		);
+	}
+	const integrityStats = statSync(linuxNativeIntegrityPath);
+	if (!integrityStats.isFile()) {
+		fail(
+			`Packaged linux-x64 native integrity manifest must be a file: ${linuxNativeIntegrityPath}`,
+		);
+	}
+	const expectedDigest = readFileSync(linuxNativeIntegrityPath, "utf8");
+	if (
+		expectedDigest.length !== "sha256:".length + 64 + 1 ||
+		!expectedDigest.endsWith("\n") ||
+		!/^sha256:[0-9a-f]{64}$/.test(expectedDigest.slice(0, -1))
+	) {
+		fail(
+			`Packaged linux-x64 native integrity manifest is malformed: ${linuxNativeIntegrityPath}`,
+		);
+	}
+	const actualDigest = `sha256:${createHash("sha256")
+		.update(readFileSync(linuxNativePath))
+		.digest("hex")}`;
+	if (actualDigest !== expectedDigest.slice(0, -1)) {
+		fail(
+			`Packaged linux-x64 native binary digest does not match integrity manifest: ${linuxNativePath}`,
 		);
 	}
 }

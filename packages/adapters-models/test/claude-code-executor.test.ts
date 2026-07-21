@@ -1,6 +1,10 @@
 import { EventEmitter } from "node:events";
 import { Readable } from "node:stream";
-import type { ExecutionEvent, UnitPacket } from "@buildplane/kernel";
+import type {
+	ExecutionEvent,
+	TaskRenderer,
+	UnitPacket,
+} from "@buildplane/kernel";
 import { createEventBus } from "@buildplane/kernel";
 import { describe, expect, it, vi } from "vitest";
 import { createClaudeCodeExecutor } from "../src/claude-code-executor.js";
@@ -75,6 +79,7 @@ function makePacket(overrides: Partial<UnitPacket> = {}): UnitPacket {
 			model: "claude-opus-4-5",
 			prompt: "Write a hello world file.",
 		},
+		execution_role: "implementer",
 		verification: {
 			requiredOutputs: [],
 		},
@@ -112,6 +117,25 @@ describe("ClaudeCodeExecutor", () => {
 		expect(events.filter((k) => k === "model-response-complete")).toHaveLength(
 			1,
 		);
+	});
+
+	it("governed packet → rejects before spawning the ambient Claude Code CLI", async () => {
+		const mockSpawn = createMockSpawn({
+			stdout: JSON.stringify({ result: "must not execute" }),
+			exitCode: 0,
+		});
+		const executor = createClaudeCodeExecutor({ spawnFn: mockSpawn as never });
+		const eventBus = createEventBus();
+
+		await expect(
+			executor.executePacketAsync(
+				makePacket({ provenance_ref: "admission:governed-run" }),
+				PROJECT_ROOT,
+				eventBus,
+			),
+		).rejects.toThrow(/AMBIENT_HOST_WORKER_FORBIDDEN/);
+
+		expect(mockSpawn).not.toHaveBeenCalled();
 	});
 
 	it("malformed JSON → receipt built, no crash, no model-response-complete event", async () => {
@@ -191,6 +215,7 @@ describe("ClaudeCodeExecutor", () => {
 				policyProfile: "default",
 			},
 			execution: { command: "echo", args: ["hi"] },
+			execution_role: "implementer",
 			verification: { requiredOutputs: [] },
 		};
 
@@ -800,5 +825,42 @@ describe("ClaudeCodeExecutor", () => {
 		const receipt = await promise;
 
 		expect(receipt.exitCode).not.toBe(0);
+	});
+
+	it.each([
+		"reviewer",
+		"adversary",
+	] as const)("passes the %s packet role to its renderer", async (execution_role) => {
+		const mockSpawn = createMockSpawn({
+			stdout: JSON.stringify({ result: "done" }),
+		});
+		const renderer: TaskRenderer = {
+			provider: "test",
+			render: vi.fn(() => ({ prompt: "rendered task" })),
+		};
+		const executor = createClaudeCodeExecutor({
+			renderer,
+			spawnFn: mockSpawn as never,
+		});
+		const eventBus = createEventBus();
+		const packet = makePacket({
+			execution_role,
+			intent: {
+				objective: "Review the task.",
+				taskType: "review",
+				context: { files: [] },
+				constraints: { scope: [], verification: [] },
+				features: {
+					ambiguity: "low",
+					reversibility: "easy",
+					verifierStrength: "strong",
+				},
+			},
+			model: { provider: "claude-code", model: "claude-opus-4-5" },
+		});
+
+		await executor.executePacketAsync(packet, PROJECT_ROOT, eventBus);
+
+		expect(renderer.render).toHaveBeenCalledWith(packet.intent, execution_role);
 	});
 });

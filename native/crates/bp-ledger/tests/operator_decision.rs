@@ -58,7 +58,11 @@ fn operator_decision_envelope_round_trips() {
     // so its inner JSON is escaped on the wire.
     assert_eq!(p.subject, "authorize-envelope");
     assert!(s.contains("\"envelope\":"));
-    assert!(p.envelope.as_deref().unwrap().contains("\"milestone\":\"M5\""));
+    assert!(p
+        .envelope
+        .as_deref()
+        .unwrap()
+        .contains("\"milestone\":\"M5\""));
 }
 
 #[test]
@@ -128,9 +132,10 @@ fn resume_rejected_payload() -> OperatorDecisionRecordedV1 {
 /// hazard before it ships.
 #[test]
 fn operator_decision_recorded_canonical_bytes_golden() {
-    let merge_bytes =
-        serde_json::to_vec(&Payload::OperatorDecisionRecordedV1(operator_decision_payload()))
-            .unwrap();
+    let merge_bytes = serde_json::to_vec(&Payload::OperatorDecisionRecordedV1(
+        operator_decision_payload(),
+    ))
+    .unwrap();
     let merge_hash = format!("sha256:{:x}", Sha256::digest(&merge_bytes));
     assert_eq!(
         merge_hash,
@@ -139,9 +144,10 @@ fn operator_decision_recorded_canonical_bytes_golden() {
         String::from_utf8_lossy(&merge_bytes)
     );
 
-    let resume_bytes =
-        serde_json::to_vec(&Payload::OperatorDecisionRecordedV1(resume_rejected_payload()))
-            .unwrap();
+    let resume_bytes = serde_json::to_vec(&Payload::OperatorDecisionRecordedV1(
+        resume_rejected_payload(),
+    ))
+    .unwrap();
     let resume_hash = format!("sha256:{:x}", Sha256::digest(&resume_bytes));
     assert_eq!(
         resume_hash,

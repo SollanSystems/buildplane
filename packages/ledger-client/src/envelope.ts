@@ -1,4 +1,5 @@
 import { v7 as uuidv7 } from "uuid";
+import { assertActionReceiptRecordedV2SafeIntegerResources } from "./payload.js";
 
 export interface EnvelopeArgs {
 	runId: string;
@@ -22,11 +23,19 @@ export interface Envelope {
 	payload: any;
 }
 
+/** Generate a UUIDv7 for ledger-local correlation identifiers. */
+export function newLedgerEventId(): string {
+	return uuidv7();
+}
+
 /** Build a canonical v1 envelope for an event. Auto-generates id and
  * occurred_at unless overridden (overrides are intended for tests).
  */
 export function buildEnvelope(args: EnvelopeArgs): Envelope {
-	const id = args.id ?? uuidv7();
+	if (args.kind === "action_receipt_recorded_v2") {
+		assertActionReceiptRecordedV2SafeIntegerResources(args.payload);
+	}
+	const id = args.id ?? newLedgerEventId();
 	const occurredAt = args.occurredAt ?? new Date().toISOString();
 	return {
 		id,

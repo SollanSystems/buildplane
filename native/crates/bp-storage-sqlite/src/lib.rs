@@ -286,7 +286,16 @@ impl SqliteMemoryStore {
         orphan_promoted_item_ids.sort();
 
         // Key: (kind, title, body, scope_type, scope_key, origin_pack, tags, packs)
-        type DupKey = (String, String, String, String, String, String, Vec<String>, Vec<String>);
+        type DupKey = (
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            Vec<String>,
+            Vec<String>,
+        );
         let mut duplicate_promoted_groups: BTreeMap<DupKey, Vec<String>> = BTreeMap::new();
         for item in global_items.iter().chain(workspace_items.iter()) {
             let Some(promoted_from_id) = item.promoted_from_id.as_ref() else {
@@ -399,7 +408,16 @@ impl SqliteMemoryStore {
     fn promoted_duplicate_key(
         item: &MemoryItem,
         promoted_from_id: &str,
-    ) -> (String, String, String, String, String, String, Vec<String>, Vec<String>) {
+    ) -> (
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        Vec<String>,
+        Vec<String>,
+    ) {
         (
             promoted_from_id.to_string(),
             item.scope.to_string(),

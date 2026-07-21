@@ -19,56 +19,62 @@ fn write_multistep_tape(db_path: &std::path::Path, run_id: RunId) -> Vec<EventId
 
     let run_start_id = EventId::new();
     ids.push(run_start_id);
-    store.append(&Event {
-        id: run_start_id,
-        run_id,
-        parent_event_id: None,
-        schema_version: 1,
-        kind: EventKind::RunStarted,
-        occurred_at: Utc::now(),
-        payload: Payload::RunStartedV1(RunStartedV1 {
-            packet_hash: "sha256:aa".into(),
-            git_head: "dead".into(),
-            workspace_path: "/ws".into(),
-            config: BTreeMap::new(),
-            parent_run_id: None,
+    store
+        .append(&Event {
+            id: run_start_id,
+            run_id,
             parent_event_id: None,
-        }),
-    }).unwrap();
+            schema_version: 1,
+            kind: EventKind::RunStarted,
+            occurred_at: Utc::now(),
+            payload: Payload::RunStartedV1(RunStartedV1 {
+                packet_hash: "sha256:aa".into(),
+                git_head: "dead".into(),
+                workspace_path: "/ws".into(),
+                config: BTreeMap::new(),
+                parent_run_id: None,
+                parent_event_id: None,
+            }),
+        })
+        .unwrap();
 
     let unit_start_id = EventId::new();
     ids.push(unit_start_id);
-    store.append(&Event {
-        id: unit_start_id,
-        run_id,
-        parent_event_id: Some(run_start_id),
-        schema_version: 1,
-        kind: EventKind::UnitStarted,
-        occurred_at: Utc::now(),
-        payload: Payload::UnitStartedV1(UnitStartedV1 {
-            unit_id: "u-1".into(),
-            parent_unit_id: None,
-            unit_kind: "command".into(),
-            policy: serde_json::json!({}),
-        }),
-    }).unwrap();
+    store
+        .append(&Event {
+            id: unit_start_id,
+            run_id,
+            parent_event_id: Some(run_start_id),
+            schema_version: 1,
+            kind: EventKind::UnitStarted,
+            occurred_at: Utc::now(),
+            payload: Payload::UnitStartedV1(UnitStartedV1 {
+                unit_id: "u-1".into(),
+                parent_unit_id: None,
+                unit_kind: "command".into(),
+                policy: serde_json::json!({}),
+            }),
+        })
+        .unwrap();
 
     let run_complete_id = EventId::new();
     ids.push(run_complete_id);
-    store.append(&Event {
-        id: run_complete_id,
-        run_id,
-        parent_event_id: Some(run_start_id),
-        schema_version: 1,
-        kind: EventKind::RunCompleted,
-        occurred_at: Utc::now(),
-        payload: Payload::RunCompletedV1(RunCompletedV1 {
-            outcome: RunOutcome::Passed,
-            duration_ms: "10".into(),
-            event_count: "3".into(),
-            unit_count: "1".into(),
-        }),
-    }).unwrap();
+    store
+        .append(&Event {
+            id: run_complete_id,
+            run_id,
+            parent_event_id: Some(run_start_id),
+            schema_version: 1,
+            kind: EventKind::RunCompleted,
+            occurred_at: Utc::now(),
+            payload: Payload::RunCompletedV1(RunCompletedV1 {
+                outcome: RunOutcome::Passed,
+                duration_ms: "10".into(),
+                event_count: "3".into(),
+                unit_count: "1".into(),
+            }),
+        })
+        .unwrap();
 
     ids
 }

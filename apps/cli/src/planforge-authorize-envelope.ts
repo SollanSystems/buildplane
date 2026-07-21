@@ -1,17 +1,11 @@
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import type { AuthorizationEnvelopeV0 } from "@buildplane/kernel";
-import { createTapeEmitter, type TapeEmitter } from "@buildplane/ledger-client";
 import {
 	authorizationEnvelopeDigest,
 	canonicalEnvelopeJson,
 } from "@buildplane/policy";
-import {
-	assertKernelSigningKey,
-	PLANFORGE_KERNEL_SIGNING_KEY_ID,
-	resolveLedgerBinary,
-	spawnLedgerSubprocess,
-} from "./ledger-emit.js";
+import { GOVERNED_AUTHORITY_BROKER_REQUIRED } from "./governed-ledger-authority.js";
 
 export interface ParsedEnvelopeArgs {
 	readonly envelope: AuthorizationEnvelopeV0;
@@ -26,20 +20,6 @@ export interface AuthorizeEnvelopePayload {
 	readonly envelope: string;
 	readonly decided_by: string;
 	readonly decided_at: string;
-}
-
-function readFlag(args: readonly string[], flag: string): string | undefined {
-	const index = args.indexOf(flag);
-	const value = index === -1 ? undefined : args[index + 1];
-	return value && !value.startsWith("--") ? value : undefined;
-}
-
-function requireFlag(args: readonly string[], flag: string): string {
-	const v = readFlag(args, flag)?.trim();
-	if (!v) {
-		throw new Error(`planforge authorize-envelope requires ${flag}.`);
-	}
-	return v;
 }
 
 function splitCsv(v: string): string[] {
@@ -71,29 +51,83 @@ function parseStrictBudget(raw: string, flag: string): number {
 }
 
 export function parseEnvelopeArgs(args: readonly string[]): ParsedEnvelopeArgs {
-	if (!args.includes("--approve")) {
+	const valueFlags = new Set([
+		"--operator",
+		"--milestone",
+		"--side-effects",
+		"--path-globs",
+		"--max-iterations",
+		"--token-budget",
+		"--verification-cmds",
+		"--expires-at",
+	]);
+	const values = new Map<string, string>();
+	let approve = false;
+	let json = false;
+
+	for (let index = 0; index < args.length; index += 1) {
+		const argument = args[index];
+		if (argument === "--approve") {
+			if (approve) {
+				throw new Error("Duplicate --approve flag.");
+			}
+			approve = true;
+			continue;
+		}
+		if (argument === "--json") {
+			if (json) {
+				throw new Error("Duplicate --json flag.");
+			}
+			json = true;
+			continue;
+		}
+		if (!valueFlags.has(argument)) {
+			throw new Error(
+				`Unsupported planforge authorize-envelope argument: ${argument}.`,
+			);
+		}
+		if (values.has(argument)) {
+			throw new Error(`Duplicate ${argument} flag.`);
+		}
+		const value = args[index + 1];
+		if (!value || value.startsWith("--")) {
+			throw new Error(`planforge authorize-envelope requires ${argument}.`);
+		}
+		values.set(argument, value.trim());
+		index += 1;
+	}
+
+	const requireFlag = (flag: string): string => {
+		const value = values.get(flag);
+		if (!value) {
+			throw new Error(`planforge authorize-envelope requires ${flag}.`);
+		}
+		return value;
+	};
+
+	if (!approve) {
 		throw new Error(
 			"planforge authorize-envelope requires explicit --approve to record a signed envelope.",
 		);
 	}
-	const operator = requireFlag(args, "--operator");
+	const operator = requireFlag("--operator");
 	const envelope: AuthorizationEnvelopeV0 = {
 		envelope_version: "v0",
-		milestone: requireFlag(args, "--milestone"),
-		allowed_side_effects: splitCsv(requireFlag(args, "--side-effects")),
-		path_globs: splitCsv(requireFlag(args, "--path-globs")),
+		milestone: requireFlag("--milestone"),
+		allowed_side_effects: splitCsv(requireFlag("--side-effects")),
+		path_globs: splitCsv(requireFlag("--path-globs")),
 		max_iterations: parseStrictBudget(
-			requireFlag(args, "--max-iterations"),
+			requireFlag("--max-iterations"),
 			"--max-iterations",
 		),
 		token_budget: parseStrictBudget(
-			requireFlag(args, "--token-budget"),
+			requireFlag("--token-budget"),
 			"--token-budget",
 		),
-		allowed_verification_cmds: splitCsv(
-			requireFlag(args, "--verification-cmds"),
-		).map((c) => c.split(/\s+/)[0] ?? c),
-		expires_at: requireFlag(args, "--expires-at"),
+		allowed_verification_cmds: splitCsv(requireFlag("--verification-cmds")).map(
+			(c) => c.split(/\s+/)[0] ?? c,
+		),
+		expires_at: requireFlag("--expires-at"),
 	};
 	if (
 		!Number.isInteger(envelope.max_iterations) ||
@@ -104,13 +138,21 @@ export function parseEnvelopeArgs(args: readonly string[]): ParsedEnvelopeArgs {
 	if (!Number.isInteger(envelope.token_budget) || envelope.token_budget <= 0) {
 		throw new Error("--token-budget must be a positive integer.");
 	}
-	if (Number.isNaN(Date.parse(envelope.expires_at))) {
+	if (
+		!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/.test(
+			envelope.expires_at,
+		) ||
+		Number.isNaN(Date.parse(envelope.expires_at))
+	) {
 		throw new Error("--expires-at must be RFC3339.");
+	}
+	if (Date.parse(envelope.expires_at) <= Date.now()) {
+		throw new Error("--expires-at must be in the future.");
 	}
 	const decidedBy = operator.startsWith("operator:")
 		? operator
 		: `operator:${operator}`;
-	return { envelope, decidedBy, json: args.includes("--json") };
+	return { envelope, decidedBy, json };
 }
 
 /**
@@ -151,30 +193,22 @@ interface KernelSignatureRow {
 }
 
 /**
- * A matching events row may only suppress emission if it carries a kernel
- * Ed25519 signature. Structural signature check only (actor / key / algorithm
- * columns) — full byte verification is the external verifier's job (M3), and the
- * CLI has no in-process Ed25519 verifier. This mirrors run-cli's
- * `assertKernelSignature`. Without it, a forged/unsigned local `events` row
- * (no `event_signatures` entry, or a wrong actor/key) would make the probe
- * report `already_authorized` and suppress a real authorization (GAP-10 P2).
+ * `event_signatures` is mutable SQLite metadata, not a trust root. The CLI has
+ * neither the native canonical-event serializer nor a trusted public-key
+ * registry, so it cannot safely establish a detached Ed25519 verification from
+ * this row. Fail closed until a reducer-verified projection is supplied by the
+ * native ledger; actor/key/algorithm labels alone never authorize anything.
  */
-function isKernelSigned(signature: KernelSignatureRow | undefined): boolean {
-	return (
-		signature?.actor_id === "kernel" &&
-		signature.key_id === PLANFORGE_KERNEL_SIGNING_KEY_ID &&
-		signature.algorithm === "ed25519"
-	);
+function isKernelSigned(_signature: KernelSignatureRow | undefined): boolean {
+	return false;
 }
 
 /**
  * Probe the repo-root tape for an already-recorded authorize-envelope decision
- * on this run id whose envelope matches byte-for-byte AND carries a kernel
- * signature. The native ledger does not dedupe by run id, so re-authorizing the
- * identical envelope is made a no-op here (mirrors run-cli's
- * findExistingPlanAdmitted), keyed on the deterministic envelope digest -> run
- * id. An unsigned or non-kernel-signed matching row is NOT treated as
- * authorized — it must not suppress a real signed emit.
+ * on this run id whose envelope matches byte-for-byte and has been
+ * cryptographically verified by the native ledger. The current CLI deliberately
+ * has no such verifier, so this returns no trusted match rather than treating
+ * mutable signature metadata as authority.
  */
 export async function findExistingAuthorizeEnvelope(
 	workspace: string,
@@ -224,10 +258,10 @@ export async function findExistingAuthorizeEnvelope(
 
 /**
  * Load the active authorization envelope the supervisor loop runs under: the
- * LATEST (by `decided_at`) kernel-signed `authorize-envelope` decision on the
- * repo-root tape that has not yet expired at `now`. A forged/unsigned row is
- * rejected (GAP-10 P2) — the loop must never run under an unsigned envelope —
- * and an expired-only row returns null so the loop pauses for re-authorization.
+ * LATEST (by `decided_at`) cryptographically verified `authorize-envelope`
+ * decision on the repo-root tape that has not yet expired at `now`. Until the
+ * native reducer exposes that verification result, no mutable SQLite row is
+ * considered active authority.
  */
 export async function loadActiveAuthorizationEnvelope(
 	workspace: string,
@@ -288,88 +322,15 @@ export async function loadActiveAuthorizationEnvelope(
 }
 
 export async function runPlanForgeAuthorizeEnvelopeCommand(
-	args: readonly string[],
-	cwd: string,
-	stdout: (line: string) => void,
-): Promise<number> {
-	const parsed = parseEnvelopeArgs(args);
-	const payload = buildAuthorizeEnvelopePayload(parsed, new Date());
-	const workspace = resolve(cwd);
-
-	const existingEventId = await findExistingAuthorizeEnvelope(
-		workspace,
-		payload.run_id,
-		payload.envelope,
-	);
-	if (existingEventId) {
-		stdout(
-			parsed.json
-				? JSON.stringify(
-						{
-							status: "already_authorized",
-							run_id: payload.run_id,
-							event_id: existingEventId,
-							payload,
-						},
-						null,
-						2,
-					)
-				: `Envelope for ${parsed.envelope.milestone} is already authorized; no new tape event written.`,
-		);
-		return 0;
-	}
-
-	assertKernelSigningKey();
-	const binary = resolveLedgerBinary(cwd);
-	const ledgerChild = spawnLedgerSubprocess(binary, payload.run_id, workspace, {
-		sign: true,
-		signingKeyId: PLANFORGE_KERNEL_SIGNING_KEY_ID,
-	});
-	let emitter: TapeEmitter;
-	try {
-		emitter = await createTapeEmitter({
-			childStdin: ledgerChild.stdin,
-			childStderr: ledgerChild.stderr,
-			childExit: ledgerChild.exit,
-			workspacePath: workspace,
-			runId: payload.run_id,
-		});
-	} catch (err) {
-		if (ledgerChild.child.exitCode === null) {
-			ledgerChild.child.kill("SIGTERM");
-		}
-		throw new Error(
-			`authorize-envelope: signed ledger handshake failed: ${String(err)}`,
-		);
-	}
-	try {
-		emitter.emit("operator_decision_recorded", {
-			OperatorDecisionRecordedV1: payload,
-		});
-		await emitter.flush();
-		await emitter.close();
-	} catch (err) {
-		if (ledgerChild.child.exitCode === null) {
-			ledgerChild.child.kill("SIGTERM");
-		}
-		throw new Error(
-			`authorize-envelope: failed to append signed operator_decision_recorded: ${String(err)}`,
-		);
-	}
-	const eventId = emitter.stats().lastAckedEventId ?? undefined;
-	stdout(
-		parsed.json
-			? JSON.stringify(
-					{
-						status: "authorized",
-						run_id: payload.run_id,
-						event_id: eventId,
-						payload,
-					},
-					null,
-					2,
-				)
-			: `Authorized envelope for ${parsed.envelope.milestone} (signed operator_decision_recorded on run ${payload.run_id}).`,
-	);
-	return 0;
+	_args: readonly string[],
+	_cwd: string,
+	_stdout: (line: string) => void,
+): Promise<never> {
+	/**
+	 * A V0 CLI-generated envelope is not an externally verified V3 dispatch
+	 * authority. The controller must never use its own native subprocess as a
+	 * signing substitute: until the isolated broker returns a verified V3
+	 * authority statement, do not parse, probe, append, or report authority.
+	 */
+	throw new Error(GOVERNED_AUTHORITY_BROKER_REQUIRED);
 }

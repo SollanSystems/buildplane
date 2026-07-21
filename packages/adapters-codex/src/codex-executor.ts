@@ -1,11 +1,12 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { delimiter, dirname, join, resolve } from "node:path";
-import type {
-	EventBus,
-	ExecutionReceipt,
-	TaskRenderer,
-	UnitPacket,
+import {
+	carriesGovernanceFields,
+	type EventBus,
+	type ExecutionReceipt,
+	type TaskRenderer,
+	type UnitPacket,
 } from "@buildplane/kernel";
 
 export interface CodexExecutorOptions {
@@ -122,6 +123,7 @@ export function createCodexExecutor(
 			projectRoot: string,
 			eventBus: EventBus,
 		): Promise<ExecutionReceipt> {
+			assertAmbientHostWorkerIsRawOnly(packet, "Codex");
 			const startedAt = new Date().toISOString();
 
 			if (packet.execution) {
@@ -139,7 +141,7 @@ export function createCodexExecutor(
 			// Resolve prompt: intent + renderer takes precedence over model.prompt
 			let prompt: string;
 			if (packet.intent && renderer) {
-				const rendered = renderer.render(packet.intent, "implementer");
+				const rendered = renderer.render(packet.intent, packet.execution_role);
 				const systemParts = [packet.model.systemPrompt, rendered.system].filter(
 					(part): part is string => typeof part === "string" && part.length > 0,
 				);
@@ -262,4 +264,15 @@ export function createCodexExecutor(
 			});
 		},
 	};
+}
+
+function assertAmbientHostWorkerIsRawOnly(
+	packet: UnitPacket,
+	workerName: string,
+): void {
+	if (carriesGovernanceFields(packet)) {
+		throw new Error(
+			`AMBIENT_HOST_WORKER_FORBIDDEN: ${workerName} CLI is raw-only and cannot execute a packet carrying governed authority fields.`,
+		);
+	}
 }

@@ -49,7 +49,10 @@ fn result_ready_canonicalizes_by_kind_and_variant() {
         Payload::ResultReadyV1(p) => {
             assert_eq!(p, result_ready_payload());
             assert_eq!(p.admission_event_id, "01919000-0000-7000-8000-000000000004");
-            assert_eq!(p.acceptance_event_id, "01919000-0000-7000-8000-000000000005");
+            assert_eq!(
+                p.acceptance_event_id,
+                "01919000-0000-7000-8000-000000000005"
+            );
         }
         other => panic!("unexpected payload {other:?}"),
     }
@@ -131,7 +134,10 @@ fn signed_result_ready_appends_and_verifies() {
         Payload::ResultReadyV1(p) => {
             assert_eq!(p.run_id, "01919000-0000-7000-8000-0000000000ff");
             assert_eq!(p.admission_event_id, "01919000-0000-7000-8000-000000000004");
-            assert_eq!(p.acceptance_event_id, "01919000-0000-7000-8000-000000000005");
+            assert_eq!(
+                p.acceptance_event_id,
+                "01919000-0000-7000-8000-000000000005"
+            );
         }
         other => panic!("unexpected payload {other:?}"),
     }

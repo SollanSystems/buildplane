@@ -34,6 +34,244 @@ export interface AcceptanceRecordedV1 {
 	evaluated_at: string;
 }
 
+/**
+ * Structured failure information for failed, denied, or unknown actions.
+ * Human-readable error text remains out of the signed tape; callers store a
+ * redacted evidence reference instead.
+ */
+export interface ActionFailureV1 {
+	code: string;
+	message_digest: string;
+	retryable: boolean;
+}
+
+/** The signed execution role determines the permitted worker surface. */
+export enum ExecutionRoleV1 {
+	Implementer = "implementer",
+	Reviewer = "reviewer",
+	Adversary = "adversary",
+	Judge = "judge",
+	Candidate = "candidate",
+}
+
+/**
+ * Terminality of an action receipt. `Unknown` is a durable reconciliation
+ * state, not permission to retry the effect: it blocks candidate sealing.
+ */
+export enum ActionReceiptOutcomeV2 {
+	Succeeded = "succeeded",
+	Failed = "failed",
+	Denied = "denied",
+	Unknown = "unknown",
+}
+
+/**
+ * Bounded resource observations attached to an action receipt. These values
+ * are evidence only; resource enforcement happens in the action gateway.
+ * JSON representations fail closed above [`TYPESCRIPT_SAFE_INTEGER_MAX`] so
+ * TypeScript consumers never silently round a sealed evidence value.
+ */
+export interface ActionResourceUsageV1 {
+	wall_time_ms: number;
+	cpu_time_ms?: number;
+	peak_memory_bytes?: number;
+	input_bytes?: number;
+	output_bytes?: number;
+	/**
+	 * Provider-observed prompt token count. This remains optional for
+	 * historical receipts; newly governed sealed_v3 model success receipts
+	 * under a signed `max_tokens` budget must carry this together with
+	 * `output_tokens` before replay will admit them.
+	 */
+	input_tokens?: number;
+	/**
+	 * Provider-observed completion token count. It is intentionally a
+	 * separate optional field so old receipt bytes and digests remain stable
+	 * when both token observations are absent.
+	 */
+	output_tokens?: number;
+}
+
+/**
+ * One intentionally redacted action-output field. The raw secret/content is
+ * never carried by the tape; an optional digest lets an evidence store prove
+ * what was withheld without making it replay-visible.
+ */
+export interface ActionRedactionV1 {
+	field: string;
+	reason: string;
+	redacted_digest?: string;
+}
+
+/**
+ * `action_receipt_recorded_v2` payload — the immutable terminal result for a
+ * V3 action request. It binds the canonical request digest but never names a
+ * candidate, preventing the worker from self-attesting its own output.
+ */
+export interface ActionReceiptRecordedV2 {
+	run_id: string;
+	workflow_id: string;
+	unit_id: string;
+	attempt: number;
+	provenance_ref: string;
+	action_id: string;
+	idempotency_key: string;
+	action_request_digest: string;
+	dispatch_envelope_digest: string;
+	capability_bundle_digest: string;
+	policy_digest: string;
+	context_manifest_digest: string;
+	worker_manifest_digest: string;
+	sandbox_profile_digest: string;
+	authority_actor: string;
+	execution_role: ExecutionRoleV1;
+	outcome: ActionReceiptOutcomeV2;
+	result_digest?: string;
+	result_ref?: string;
+	evidence_digest: string;
+	evidence_ref: string;
+	resource_usage: ActionResourceUsageV1;
+	redactions: ActionRedactionV1[];
+	failure?: ActionFailureV1;
+	/**
+	 * Immutable reference to the ActionGateway authorization decision that
+	 * permitted this effect. It remains optional on the V2 wire shape so
+	 * already-recorded tapes stay readable; reducer semantics require it for
+	 * governed V3 model actions and new writers must always emit it there.
+	 */
+	authorization_ref?: string;
+	/**
+	 * Stable external/CAS reference for this exact receipt. Set-seal entries
+	 * bind this string and the canonical receipt digest together.
+	 */
+	action_receipt_ref: string;
+	/** RFC3339 UTC timestamp. */
+	completed_at: string;
+}
+
+/**
+ * One canonical entry in a sealed action-receipt set. Entries must be sorted
+ * strictly by `action_id` and map one-for-one to immutable receipt records.
+ */
+export interface ActionReceiptSetEntryV1 {
+	action_id: string;
+	action_receipt_ref: string;
+	action_receipt_digest: string;
+}
+
+/**
+ * `action_receipt_set_recorded` payload — the kernel-sealed, sorted and
+ * complete action evidence set for exactly one V3 workflow attempt.
+ */
+export interface ActionReceiptSetRecordedV1 {
+	run_id: string;
+	workflow_id: string;
+	unit_id: string;
+	attempt: number;
+	provenance_ref: string;
+	dispatch_envelope_digest: string;
+	action_receipt_set_ref: string;
+	action_receipt_set_digest: string;
+	receipts: ActionReceiptSetEntryV1[];
+	/** RFC3339 UTC timestamp. */
+	sealed_at: string;
+}
+
+/** Closed typed effect vocabulary admitted through the V3 action gateway. */
+export enum ActionKindV1 {
+	Filesystem = "filesystem",
+	Process = "process",
+	Git = "git",
+	Model = "model",
+	Network = "network",
+	Secret = "secret",
+	Mcp = "mcp",
+	A2a = "a2a",
+	ExternalService = "external_service",
+}
+
+/**
+ * `action_requested_v2` payload — the immutable write-ahead intent for one
+ * typed gateway effect. It deliberately has no candidate digest because a
+ * candidate is created only after the sealed set proves which effects ran.
+ */
+export interface ActionRequestedV2 {
+	run_id: string;
+	workflow_id: string;
+	unit_id: string;
+	attempt: number;
+	provenance_ref: string;
+	action_id: string;
+	idempotency_key: string;
+	action_kind: ActionKindV1;
+	canonical_input_digest: string;
+	canonical_input_ref: string;
+	dispatch_envelope_digest: string;
+	/** Exact repository binding copied from the signed V3 dispatch envelope. */
+	repository_binding_digest: string;
+	/** Exact protected ledger realm copied from the V3 dispatch envelope. */
+	ledger_authority_realm_digest: string;
+	/**
+	 * Exact admitted packet binding copied from a sealed_v3 dispatch. It is
+	 * optional only for replaying action records predating packet binding.
+	 */
+	governed_packet_digest?: string;
+	capability_bundle_digest: string;
+	policy_digest: string;
+	context_manifest_digest: string;
+	worker_manifest_digest: string;
+	sandbox_profile_digest: string;
+	authority_actor: string;
+	execution_role: ExecutionRoleV1;
+	/** RFC3339 UTC timestamp. */
+	requested_at: string;
+}
+
+/**
+ * Immutable purpose of a signed activity reservation.
+ *
+ * The omitted/default `Generic` value preserves canonical replay of
+ * historical `ActivityClaimedV1` records. New purpose-specific lanes must
+ * write an explicit non-generic value, which becomes part of the signed
+ * claim event rather than a mutable projection-side interpretation.
+ */
+export enum ActivityClaimPurposeV1 {
+	Generic = "generic",
+	GovernedVerifierV1 = "governed_verifier_v1",
+	/**
+	 * A provider model lease issued only by the protected native
+	 * model-authority transaction. Generic claim controls must never mint
+	 * this purpose because a sealed V3 model effect additionally requires a
+	 * parented `ModelActionIntentV1` and `ModelActionAuthorizedV2`.
+	 */
+	GovernedModelActionV1 = "governed_model_action_v1",
+}
+
+/** Signed write-ahead execution reservation for one action request. */
+export interface ActivityClaimedV1 {
+	run_id: RunId;
+	activity_id: string;
+	idempotency_key: string;
+	action_kind: ActionKindV1;
+	action_request_event_id: EventId;
+	action_request_digest: string;
+	dispatch_event_id: EventId;
+	dispatch_envelope_digest: string;
+	/** Kernel-owned signer identity that issued this reservation. */
+	authority_actor: string;
+	/**
+	 * Fixed-purpose lanes must bind their purpose into the signed claim.
+	 * Omitted historical claims are deliberately interpreted as `generic`.
+	 */
+	purpose?: ActivityClaimPurposeV1;
+	/** Opaque lease token. It is never returned to a duplicate claimant. */
+	lease_id: string;
+	/** RFC3339 UTC timestamp. */
+	lease_expires_at: string;
+	/** RFC3339 UTC timestamp. */
+	claimed_at: string;
+}
+
 /** `activity_completed` payload — records the activity result for replay. */
 export interface ActivityCompletedV1 {
 	run_id: RunId;
@@ -42,6 +280,86 @@ export interface ActivityCompletedV1 {
 	result_digest: string;
 	/** Recorded model/tool/command output, replayed verbatim instead of re-invoking. */
 	result: Value;
+}
+
+/**
+ * Signed liveness record that extends one already-issued activity lease.
+ *
+ * A heartbeat is never a second claim: it repeats the immutable claim,
+ * dispatch, activity, and idempotency bindings, retains the original lease
+ * token, and can only move the current expiry forward during replay. New
+ * heartbeats also bind the caller's exact idempotency identity and closed
+ * request digest into the signed event, so a mutable cache cannot remap one
+ * recorded extension to another request.
+ */
+export interface ActivityHeartbeatRecordedV1 {
+	run_id: RunId;
+	activity_id: string;
+	idempotency_key: string;
+	/**
+	 * Caller-chosen exactly-once identity for this one lease extension.
+	 *
+	 * Omitted only by historical heartbeat records, whose canonical signed
+	 * representation must remain replayable. Governed issuance requires it.
+	 */
+	heartbeat_id?: string;
+	/**
+	 * Canonical domain-separated SHA-256 digest of the complete closed
+	 * heartbeat request, including [`Self::heartbeat_id`].
+	 *
+	 * Omitted only by historical heartbeat records. Governed issuance and
+	 * idempotency replay require it.
+	 */
+	heartbeat_request_digest?: string;
+	claim_event_id: EventId;
+	/** Canonical event digest of the exact signed claim being extended. */
+	claim_event_digest: string;
+	/**
+	 * The immutable lease token issued by the claim; heartbeats cannot swap
+	 * to a neighbouring activity's reservation.
+	 */
+	lease_id: string;
+	dispatch_event_id: EventId;
+	dispatch_envelope_digest: string;
+	/**
+	 * Requested new RFC3339 UTC lease expiry. Replay additionally requires
+	 * it to be later than the currently effective expiry and within dispatch
+	 * authority.
+	 */
+	lease_expires_at: string;
+	/** RFC3339 UTC timestamp bound to the enclosing event in sealed V3 mode. */
+	heartbeat_at: string;
+}
+
+/**
+ * Terminal reconciliation outcome for one claimed activity.
+ *
+ * `Unknown` is deliberately terminal and non-retryable. It records that a
+ * lease expired or an effect could not be reconciled, rather than granting a
+ * second attempt that could duplicate an external side effect.
+ */
+export enum ActivityResultOutcomeV1 {
+	Succeeded = "succeeded",
+	Failed = "failed",
+	Unknown = "unknown",
+}
+
+/** Signed terminal activity result or reconciliation record. */
+export interface ActivityResultRecordedV1 {
+	run_id: RunId;
+	activity_id: string;
+	idempotency_key: string;
+	claim_event_id: EventId;
+	/** Canonical event digest from the signed claim's detached signature. */
+	claim_event_digest: string;
+	lease_id: string;
+	outcome: ActivityResultOutcomeV1;
+	result_digest?: string;
+	result_ref?: string;
+	evidence_digest: string;
+	evidence_ref: string;
+	/** RFC3339 UTC timestamp. */
+	recorded_at: string;
 }
 
 /** Closed activity-type vocabulary. */
@@ -80,6 +398,182 @@ export interface ArtifactRef {
 	size_bytes: number;
 }
 
+/**
+ * `attempt_context_recorded_v1` payload — the kernel-signed retry lineage
+ * decision for one otherwise terminal sealed_v3 unit attempt. The retry is
+ * bound to an exact future dispatch envelope rather than changing the stable
+ * `DispatchEnvelopeV3` bytes.
+ */
+export interface AttemptContextRecordedV1 {
+	run_id: string;
+	workflow_id: string;
+	workflow_revision: string;
+	unit_id: string;
+	prior_attempt: number;
+	next_attempt: number;
+	prior_dispatch_envelope_digest: string;
+	/** Exact terminal `workflow_terminal` event that closed the prior attempt. */
+	prior_terminal_event_ref: string;
+	/**
+	 * Canonical hash of the exact terminal event, preventing an event-id-only
+	 * reference from being rebound to substituted terminal evidence.
+	 */
+	prior_terminal_event_digest: string;
+	/** Exact failed action receipt from the terminal prior attempt. */
+	prior_action_receipt_ref: string;
+	prior_action_receipt_digest: string;
+	/** Required immutable feedback artifact explaining this new decision. */
+	feedback_ref: string;
+	feedback_digest: string;
+	/** Exact future sealed_v3 dispatch to which this context grants lineage. */
+	next_dispatch_envelope_digest: string;
+	next_dispatch_idempotency_key: string;
+	/**
+	 * Namespace for all effects in the replacement attempt. It must not reuse
+	 * the prior attempt's dispatch/action idempotency namespace.
+	 */
+	retry_action_namespace: string;
+	/**
+	 * Idempotency key for this one context decision, distinct from dispatch
+	 * and effect idempotency keys.
+	 */
+	idempotency_key: string;
+	/** RFC3339 UTC timestamp. */
+	recorded_at: string;
+	/** Canonical digest of every field above except this field itself. */
+	attempt_context_digest: string;
+}
+
+/** Candidate-bound deterministic acceptance outcome. */
+export enum CandidateAcceptanceOutcomeV1 {
+	Passed = "passed",
+	Rejected = "rejected",
+}
+
+/**
+ * `candidate_acceptance_recorded` payload — one deterministic acceptance
+ * record for an immutable candidate, never for a mutable workspace.
+ */
+export interface CandidateAcceptanceRecordedV1 {
+	candidate_digest: string;
+	/** Full SHA-1 or SHA-256 Git object ID the deterministic checks evaluated. */
+	candidate_commit_sha: string;
+	acceptance_ref: string;
+	/** Exact acceptance contract digest from the signed dispatch envelope. */
+	acceptance_contract_digest: string;
+	acceptance_digest: string;
+	outcome: CandidateAcceptanceOutcomeV1;
+	/** RFC3339 UTC timestamp. */
+	evaluated_at: string;
+}
+
+/**
+ * `candidate_completion_recorded_v1` payload — an immutable, closed proof
+ * that the action which created a sealed V3 candidate completed through its
+ * exact request, activity claim/result, and receipt lineage. It deliberately
+ * stays in the candidate-created lifecycle phase: promotion remains a later,
+ * separately authorized state transition.
+ */
+export interface CandidateCompletionRecordedV1 {
+	run_id: string;
+	workflow_id: string;
+	unit_id: string;
+	attempt: number;
+	provenance_ref: string;
+	/** Exact signed `candidate_created_v2` event this proof closes. */
+	candidate_created_event_ref: EventId;
+	candidate_digest: string;
+	candidate_create_action_id: string;
+	/**
+	 * Exact signed `action_requested_v2` event and its detached request
+	 * digest. Both are present so neither identity can be rebound alone.
+	 */
+	action_request_ref: EventId;
+	action_request_digest: string;
+	/**
+	 * Exact signed lease claim and terminal result events for the candidate
+	 * creation activity.
+	 */
+	activity_claim_event_ref: EventId;
+	activity_claim_event_digest: string;
+	activity_result_event_ref: EventId;
+	activity_result_event_digest: string;
+	/**
+	 * Exact receipt entry that is also required to be in the candidate's
+	 * sealed receipt set.
+	 */
+	action_receipt_ref: string;
+	action_receipt_digest: string;
+	/** Canonical digest of every field above except this field itself. */
+	completion_digest: string;
+	/** RFC3339 UTC timestamp. */
+	completed_at: string;
+}
+
+/**
+ * `candidate_created` payload — immutable implementation output. The Git
+ * adapter owns the raw candidate ref; this record binds it to governed lineage.
+ */
+export interface CandidateCreatedV1 {
+	candidate_id: string;
+	candidate_ref: string;
+	workflow_id: string;
+	unit_id: string;
+	attempt: number;
+	provenance_ref: string;
+	candidate_digest: string;
+	base_commit_sha: string;
+	candidate_commit_sha: string;
+	commit_digest: string;
+	tree_digest: string;
+	patch_digest: string;
+	changed_files_digest: string;
+	envelope_digest: string;
+	action_receipt_digest: string;
+}
+
+/**
+ * `candidate_created_v2` payload — immutable Git output whose action lineage
+ * is an exact previously sealed V3 receipt set rather than a worker-provided
+ * single receipt digest.
+ */
+export interface CandidateCreatedV2 {
+	run_id: string;
+	candidate_id: string;
+	candidate_ref: string;
+	workflow_id: string;
+	unit_id: string;
+	attempt: number;
+	provenance_ref: string;
+	candidate_digest: string;
+	base_commit_sha: string;
+	candidate_commit_sha: string;
+	commit_digest: string;
+	tree_digest: string;
+	patch_digest: string;
+	changed_files_digest: string;
+	envelope_digest: string;
+	action_receipt_set_ref: string;
+	action_receipt_set_digest: string;
+}
+
+/**
+ * Canonical read-only candidate view supplied to a reviewer. The actual
+ * mounted path and context remain outside the tape; their immutable digests
+ * make the view reconstructible without exposing host filesystem details.
+ */
+export interface CandidateViewV1 {
+	candidate_ref: string;
+	candidate_digest: string;
+	candidate_commit_sha: string;
+	tree_digest: string;
+	reviewer_context_manifest_digest: string;
+	reviewer_sandbox_profile_digest: string;
+	mount_path_digest: string;
+	read_only: boolean;
+	network_disabled: boolean;
+}
+
 /** `capability_denied` payload — broker rejected a tool invocation (fail closed). */
 export interface CapabilityDeniedV1 {
 	/** Run id for export/quarantine correlation (duplicates envelope for verifiers). */
@@ -92,6 +586,169 @@ export interface CapabilityDeniedV1 {
 	reason: string;
 	/** Path or command target that was denied. */
 	target: string;
+}
+
+/** Bounded worker budget. `u32` keeps the generated TypeScript number exact. */
+export interface DispatchBudgetV1 {
+	max_tokens?: number;
+	max_compute_time_ms?: number;
+}
+
+/**
+ * Commit semantics carried by a dispatch envelope. Governed admission may
+ * support only `atomic` while still preserving the closed wire vocabulary.
+ */
+export enum CommitModeV1 {
+	Atomic = "atomic",
+	Incremental = "incremental",
+	Saga = "saga",
+}
+
+/** Trust lane selected by the caller before admission. */
+export enum TrustTierV1 {
+	Raw = "raw",
+	Governed = "governed",
+}
+
+/**
+ * The authority-bearing portion of a V2 dispatch envelope. It deliberately
+ * carries every V1 authority field except the envelope digest and detached
+ * signature reference so those bytes can be hashed without a circular
+ * dependency.
+ */
+export interface DispatchEnvelopeBodyV2 {
+	workflow_id: string;
+	workflow_revision: string;
+	unit_id: string;
+	attempt: number;
+	execution_role: ExecutionRoleV1;
+	commit_mode: CommitModeV1;
+	provenance_ref: string;
+	base_commit_sha: string;
+	capability_bundle_digest: string;
+	acceptance_contract_digest: string;
+	context_manifest_digest: string;
+	worker_manifest_digest: string;
+	sandbox_profile_digest: string;
+	budget: DispatchBudgetV1;
+	trust_tier: TrustTierV1;
+	idempotency_key: string;
+	/** RFC3339 UTC timestamp. */
+	issued_at: string;
+	/** RFC3339 UTC timestamp. */
+	expires_at: string;
+}
+
+/**
+ * Signature reference carried by a dispatch envelope. This is a reference
+ * shape only; validation happens at the admission/signing boundary.
+ */
+export interface SignatureRefV1 {
+	algorithm: string;
+	key_id: string;
+	signature: string;
+}
+
+/**
+ * `dispatch_envelope` payload — the durable, signed admission boundary for
+ * one unit attempt. A valid payload is not itself proof that the referenced
+ * signature or policy authority is trusted.
+ */
+export interface DispatchEnvelopeV1 {
+	workflow_id: string;
+	workflow_revision: string;
+	unit_id: string;
+	attempt: number;
+	execution_role: ExecutionRoleV1;
+	commit_mode: CommitModeV1;
+	provenance_ref: string;
+	base_commit_sha: string;
+	capability_bundle_digest: string;
+	acceptance_contract_digest: string;
+	context_manifest_digest: string;
+	worker_manifest_digest: string;
+	sandbox_profile_digest: string;
+	budget: DispatchBudgetV1;
+	trust_tier: TrustTierV1;
+	idempotency_key: string;
+	/** RFC3339 UTC timestamp. */
+	issued_at: string;
+	/** RFC3339 UTC timestamp. */
+	expires_at: string;
+	envelope_digest: string;
+	signature_ref: SignatureRefV1;
+}
+
+/**
+ * `dispatch_envelope_v2` payload — a signed detached event wrapping a
+ * non-circular, deterministically hashed authority body.
+ */
+export interface DispatchEnvelopeV2 {
+	body: DispatchEnvelopeBodyV2;
+	envelope_digest: string;
+}
+
+/**
+ * Action-evidence sealing protocol selected by an additive V3 dispatch
+ * envelope. The wire value is part of the signed authority bytes. Keep the
+ * V2 spelling readable for existing tapes, while the V3 spelling is an
+ * explicit underscore-delimited protocol revision rather than an implicit
+ * serde naming convention.
+ */
+export enum ActionEvidenceVersionV1 {
+	SealedV2 = "sealed-v2",
+	SealedV3 = "sealed_v3",
+}
+
+/**
+ * `dispatch_envelope_v3` payload — the V2 admission body plus an explicit
+ * sealed action-evidence contract. The detached envelope digest covers both
+ * the exact V2 authority body and this protocol selector.
+ */
+export interface DispatchEnvelopeV3 {
+	body: DispatchEnvelopeBodyV2;
+	action_evidence_version: ActionEvidenceVersionV1;
+	/**
+	 * Canonical binding of the target repository instance. A base object id
+	 * alone can be present in another clone or fork and is not authority.
+	 */
+	repository_binding_digest: string;
+	/** Host-owned realm which holds the non-workspace activity claim register. */
+	ledger_authority_realm_digest: string;
+	/**
+	 * Present on sealed_v3 envelopes to bind the exact normalized admitted
+	 * packet before a worker can choose an action. It stays optional on the
+	 * wire solely so pre-binding sealed-v2 history remains replay-readable.
+	 */
+	governed_packet_digest?: string;
+	envelope_digest: string;
+}
+
+/**
+ * `dispatch_envelope_v4` payload — an additive, graph-bound governed
+ * dispatch. The complete V3 envelope remains a nested immutable value rather
+ * than being copied field-by-field, so V4 cannot accidentally omit a V3
+ * authority component when it binds the exact workflow topology.
+ *
+ * The referenced graph declaration is not resolved by payload
+ * canonicalization: that requires the signed tape order and is enforced by
+ * the replay reducer. The detached V4 digest nevertheless binds both the
+ * graph digest and the exact declaration event identity before recovery can
+ * project authority.
+ */
+export interface DispatchEnvelopeV4 {
+	/** The unchanged V3 authority material this revision extends. */
+	dispatch_v3: DispatchEnvelopeV3;
+	/** Canonical digest of the immutable `workflow_graph_declared_v2` graph. */
+	workflow_graph_digest: string;
+	/**
+	 * Exact signed graph declaration event. Event identity is required in
+	 * addition to the graph digest so an equivalent graph cannot be rebound
+	 * from another run, declaration delivery, or workflow revision.
+	 */
+	workflow_graph_declaration_event_ref: EventId;
+	/** Detached V4 digest over the nested V3 material and graph binding. */
+	envelope_digest: string;
 }
 
 export interface EnvRedaction {
@@ -130,6 +787,39 @@ export enum EventKind {
 	AcceptanceRecorded = "acceptance_recorded",
 	OperatorDecisionRecorded = "operator_decision_recorded",
 	ResultReady = "result_ready",
+	DispatchEnvelope = "dispatch_envelope",
+	DispatchEnvelopeV2 = "dispatch_envelope_v2",
+	DispatchEnvelopeV3 = "dispatch_envelope_v3",
+	DispatchEnvelopeV4 = "dispatch_envelope_v4",
+	WorkflowGraphDeclaredV1 = "workflow_graph_declared_v1",
+	WorkflowGraphDeclaredV2 = "workflow_graph_declared_v2",
+	ActionRequestedV2 = "action_requested_v2",
+	ModelActionIntentV1 = "model_action_intent_v1",
+	ModelActionAuthorizedV1 = "model_action_authorized_v1",
+	ModelActionAuthorizedV2 = "model_action_authorized_v2",
+	ActivityClaimedV1 = "activity_claimed_v1",
+	ActivityHeartbeatRecordedV1 = "activity_heartbeat_recorded_v1",
+	ActivityResultRecordedV1 = "activity_result_recorded_v1",
+	ActionReceiptRecordedV2 = "action_receipt_recorded_v2",
+	ActionReceiptSetRecordedV1 = "action_receipt_set_recorded_v1",
+	AttemptContextRecordedV1 = "attempt_context_recorded_v1",
+	CandidateCreated = "candidate_created",
+	CandidateCreatedV2 = "candidate_created_v2",
+	CandidateCompletionRecordedV1 = "candidate_completion_recorded_v1",
+	CandidateAcceptanceRecorded = "candidate_acceptance_recorded",
+	ReviewVerdictRecorded = "review_verdict_recorded",
+	ReviewVerdictRecordedV2 = "review_verdict_recorded_v2",
+	PromotionApprovalRequested = "promotion_approval_requested",
+	PromotionDecisionRecorded = "promotion_decision_recorded",
+	PromotionExecutionClaimedV1 = "promotion_execution_claimed_v1",
+	PromotionResultRecorded = "promotion_result_recorded",
+	PromotionReconciliationResolved = "promotion_reconciliation_resolved",
+	ReleaseEvaluationEvidenceV1 = "release_evaluation_evidence_v1",
+	WorkflowTimerScheduledV1 = "workflow_timer_scheduled_v1",
+	WorkflowTimerFiredV1 = "workflow_timer_fired_v1",
+	WorkflowCancellationRequestedV1 = "workflow_cancellation_requested_v1",
+	WorkflowTerminal = "workflow_terminal",
+	WorkflowTerminalV2 = "workflow_terminal_v2",
 	TapeCheckpoint = "tape_checkpoint",
 }
 
@@ -198,6 +888,183 @@ export interface GitCheckpointV1 {
 export interface Message {
 	role: string;
 	content: string;
+}
+
+/**
+ * `model_action_authorized_v1` payload — the native, immutable authority
+ * record issued after a model action's V3 write-ahead request and before the
+ * provider effect. It binds the signed dispatch and every post-write-ahead
+ * digest the host model gateway evaluates. The record is intentionally
+ * separate from the terminal receipt so a successful model effect cannot be
+ * replayed as authorized merely because a worker supplied an opaque reference.
+ */
+export interface ModelActionAuthorizedV1 {
+	run_id: string;
+	workflow_id: string;
+	unit_id: string;
+	attempt: number;
+	provenance_ref: string;
+	action_id: string;
+	idempotency_key: string;
+	/** Exact event id of the governed V3 dispatch envelope. */
+	dispatch_event_ref: string;
+	dispatch_envelope_digest: string;
+	/** Exact event id and canonical digest of the immutable V3 action request. */
+	action_request_ref: string;
+	action_request_digest: string;
+	/** Digest of the fully parsed governed packet, never raw packet content. */
+	packet_digest: string;
+	canonical_input_digest: string;
+	/** Credential-free canonical digest of the exact provider request. */
+	model_request_digest: string;
+	trust_scope_digest: string;
+	context_manifest_digest: string;
+	policy_digest: string;
+	sandbox_profile_digest: string;
+	execution_role: ExecutionRoleV1;
+	/**
+	 * Present only when a model action is explicitly candidate/view-bound.
+	 * These fields are paired so a view can never be detached from its
+	 * immutable candidate identity.
+	 */
+	candidate_digest?: string;
+	candidate_view_digest?: string;
+	/** Identity of the kernel-owned authority actor, not a worker assertion. */
+	authorization_actor: string;
+	/** RFC3339 UTC timestamp. Authority is invalid at or after this instant. */
+	expires_at: string;
+	/**
+	 * Stable reference to this native authorization record. A successful
+	 * model receipt must repeat this exact value.
+	 */
+	authorization_ref: string;
+	/** Canonical detached digest of this record excluding this field itself. */
+	authorization_digest: string;
+}
+
+/**
+ * Closed, content-addressed evidence of the canonical provider request that
+ * a model gateway evaluated. The payload keeps the request out of the tape:
+ * callers must resolve the immutable CAS object, parse this schema version,
+ * and recompute `digest` before a kernel signs a model-action intent.
+ */
+export interface ModelRequestEvidenceV1 {
+	/** The schema of the CAS object, not the ledger envelope schema. */
+	schema_version: number;
+	/**
+	 * Canonical content-addressed storage reference for the credential-free
+	 * normalized provider request.
+	 */
+	cas_ref: string;
+	/** Digest of the canonical CAS object bytes, `sha256:<hex>`. */
+	digest: string;
+}
+
+/**
+ * Closed, content-addressed evidence of the trust scope that was evaluated
+ * with a model request. Its independent schema version prevents a future
+ * reducer from silently treating a new trust policy shape as V1.
+ */
+export interface TrustScopeEvidenceV1 {
+	/** The schema of the CAS object, not the ledger envelope schema. */
+	schema_version: number;
+	/**
+	 * Canonical content-addressed storage reference for the normalized trust
+	 * scope evidence.
+	 */
+	cas_ref: string;
+	/** Digest of the canonical CAS object bytes, `sha256:<hex>`. */
+	digest: string;
+}
+
+/**
+ * All-or-none proof that a model action was authorized against a particular
+ * immutable candidate and read-only candidate view. Keeping this as one
+ * nested object prevents a caller from presenting a candidate digest without
+ * the event/commit/view evidence that gives it meaning.
+ */
+export interface ModelActionCandidateBindingV1 {
+	candidate_created_event_ref: EventId;
+	candidate_digest: string;
+	candidate_commit_sha: string;
+	candidate_view_ref: string;
+	candidate_view_digest: string;
+	/**
+	 * The complete replay-verifiable read-only view. The accompanying CAS
+	 * reference is durable external evidence; this closed copy lets replay
+	 * reject a forged writable/networked or wrong-context view without
+	 * dereferencing external storage.
+	 */
+	candidate_view: CandidateViewV1;
+}
+
+/**
+ * `model_action_authorized_v2` payload — the kernel-signed authorization
+ * which follows one exact [`ModelActionIntentV1`]. The event must parent to
+ * `intent_event_ref`; the repeated evidence is deliberate and must equal the
+ * intent exactly, preventing an authorization from swapping a model request,
+ * trust scope, or candidate view after intent creation.
+ */
+export interface ModelActionAuthorizedV2 {
+	intent_event_ref: EventId;
+	intent_digest: string;
+	model_request_evidence: ModelRequestEvidenceV1;
+	trust_scope_evidence: TrustScopeEvidenceV1;
+	candidate_binding?: ModelActionCandidateBindingV1;
+	/**
+	 * Identity of the kernel actor that issued this authorization. ReplayEngine
+	 * requires the verified detached kernel signer to equal this value.
+	 */
+	authorization_actor: string;
+	/** RFC3339 UTC timestamp. Authority is invalid at or after this instant. */
+	expires_at: string;
+	/** Stable reference the terminal action receipt must repeat exactly. */
+	authorization_ref: string;
+	/** Domain-separated digest of this record excluding this field itself. */
+	authorization_digest: string;
+}
+
+/**
+ * `model_action_intent_v1` payload — the kernel-signed, write-ahead intent
+ * for one model action. It parents directly to the immutable
+ * `action_requested_v2` event and binds all dynamic provider/trust/candidate
+ * evidence before any authorization can be issued.
+ *
+ * Dispatch context, policy, sandbox profile, execution role, and governed
+ * packet are intentionally absent: replay derives them from the already
+ * signed dispatch and action request rather than trusting a second mutable
+ * copy in this payload.
+ */
+export interface ModelActionIntentV1 {
+	run_id: string;
+	workflow_id: string;
+	unit_id: string;
+	attempt: number;
+	provenance_ref: string;
+	action_id: string;
+	idempotency_key: string;
+	dispatch_event_ref: EventId;
+	dispatch_envelope_digest: string;
+	action_request_event_ref: EventId;
+	action_request_digest: string;
+	canonical_input_ref: string;
+	canonical_input_digest: string;
+	model_request_evidence: ModelRequestEvidenceV1;
+	trust_scope_evidence: TrustScopeEvidenceV1;
+	/**
+	 * Candidate evidence is present only for model actions which are
+	 * intentionally candidate/view-bound (reviewer, adversary, or judge).
+	 */
+	candidate_binding?: ModelActionCandidateBindingV1;
+	/**
+	 * Identity of the kernel actor that prepared this intent. ReplayEngine
+	 * requires the verified detached kernel signer to equal this value.
+	 */
+	intent_actor: string;
+	/** RFC3339 UTC timestamp, equal to the signed event's `occurred_at`. */
+	intended_at: string;
+	/** Domain-separated digest of this record excluding this field itself. */
+	intent_digest: string;
 }
 
 export interface SamplingParams {
@@ -310,6 +1177,365 @@ export interface PlanReceiptRecordedV1 {
 }
 
 /**
+ * `promotion_approval_requested` payload — kernel-signed, candidate-bound
+ * operator work item. This is deliberately not a promotion decision and
+ * never authorizes a target-branch mutation by itself.
+ */
+export interface PromotionApprovalRequestedV1 {
+	candidate_digest: string;
+	base_commit_sha: string;
+	/**
+	 * New approval requests always bind the exact target branch. Historical
+	 * unbound promotion decisions remain readable separately.
+	 */
+	target_ref: string;
+	envelope_digest: string;
+	acceptance_ref: string;
+	review_refs: string[];
+	/** Must equal the detached kernel signer actor during verified replay. */
+	requested_by: string;
+	/** RFC3339 UTC timestamp. */
+	requested_at: string;
+	/**
+	 * Stable identity shared with the operator decision that resolves this
+	 * request. It is an idempotency namespace, never a bearer credential.
+	 */
+	idempotency_key: string;
+}
+
+/**
+ * Closed promotion decision vocabulary. `Promote` still requires a signed
+ * decision-port authority check before any target-branch effect.
+ */
+export enum PromotionDecisionKindV1 {
+	Promote = "promote",
+	Reject = "reject",
+}
+
+/**
+ * `promotion_decision_recorded` payload — candidate-bound write-ahead intent.
+ * It intentionally contains no live-worktree reference.
+ */
+export interface PromotionDecisionRecordedV1 {
+	candidate_digest: string;
+	base_commit_sha: string;
+	/**
+	 * Canonical branch ref authorized by this decision. Absent only on
+	 * historical tapes written before target-bound promotion existed; a
+	 * present value opts the reducer into strict Git-binding validation.
+	 */
+	target_ref?: string;
+	envelope_digest: string;
+	acceptance_ref: string;
+	review_refs: string[];
+	/**
+	 * Exact kernel-signed `promotion_approval_requested` event when the
+	 * decision resolves a durable request. Absent only for historical direct
+	 * decisions written before the request protocol existed.
+	 */
+	promotion_approval_request_ref?: string;
+	decision: PromotionDecisionKindV1;
+	authority: string;
+	decided_by: string;
+	/** RFC3339 UTC timestamp. */
+	decided_at: string;
+	idempotency_key: string;
+}
+
+/**
+ * `promotion_execution_claimed_v1` payload — a kernel-owned, write-ahead
+ * lease for the one target-branch promotion effect. It repeats every immutable
+ * decision, dispatch, candidate, and Git binding needed for replay to reject
+ * a claim that was transplanted from a neighbouring promotion.
+ */
+export interface PromotionExecutionClaimedV1 {
+	/**
+	 * Must equal the enclosing event's run ID when the event envelope is
+	 * available during canonicalization.
+	 */
+	run_id: string;
+	/** Exact signed promotion decision that authorized this one effect. */
+	promotion_decision_event_ref: EventId;
+	promotion_decision_event_digest: string;
+	/** Exact governed dispatch that supplied the candidate authority. */
+	dispatch_event_ref: EventId;
+	dispatch_envelope_digest: string;
+	candidate_digest: string;
+	candidate_ref: string;
+	candidate_commit_sha: string;
+	candidate_tree_digest: string;
+	base_commit_sha: string;
+	target_ref: string;
+	/** Stable exactly-once identity for this candidate promotion. */
+	idempotency_key: string;
+	/** Kernel-owned signer identity that issued this promotion lease. */
+	authority_actor: string;
+	/** Opaque token retained verbatim by the terminal promotion result. */
+	lease_id: string;
+	/** RFC3339 UTC timestamp. */
+	claimed_at: string;
+	/** RFC3339 UTC timestamp; it must be later than `claimed_at`. */
+	lease_expires_at: string;
+	/** Canonical domain-separated digest of every field above except itself. */
+	promotion_execution_claim_digest: string;
+}
+
+/**
+ * Exact lease proof repeated by a promotion effect result. It is optional so
+ * existing result tapes retain their canonical JSON and remain readable;
+ * governed promotion issuance requires it at the storage boundary.
+ */
+export interface PromotionExecutionLeaseBindingV1 {
+	promotion_execution_claim_event_ref: EventId;
+	promotion_execution_claim_event_digest: string;
+	lease_id: string;
+}
+
+/**
+ * Observed post-CAS target/worktree state. Governed promotion never resets a
+ * user worktree after moving the target ref; reconciliation is explicit.
+ */
+export enum PromotionWorktreeSyncStateV1 {
+	/**
+	 * The target still contains the immutable merge, but the checkout was
+	 * deliberately left untouched and requires explicit reconciliation.
+	 */
+	PendingReconciliation = "pending_reconciliation",
+	/**
+	 * The target still contains the immutable merge, but the root checkout
+	 * remains at the pre-promotion base. This is a durable suspension, never
+	 * a successful workflow completion: a separately authorized reconciler
+	 * must prove that updating the checkout remains safe.
+	 */
+	RootCheckoutStale = "root_checkout_stale",
+	/** The target moved after the CAS and no longer contains the merge. */
+	TargetAdvanced = "target_advanced",
+}
+
+/**
+ * Git facts observed by the adapter while it performed the one permitted
+ * compare-and-swap target-ref mutation. The result repeats the signed target
+ * ref so replay can prove the effect stayed on the intended branch rather
+ * than merely naming an arbitrary merge object.
+ */
+export interface PromotionGitBindingV1 {
+	target_ref: string;
+	target_head_before_sha: string;
+	/**
+	 * Exact target-ref value observed after the CAS. Optional only so a newer
+	 * reader can decode historical bindings; strict target-bound decisions
+	 * require it.
+	 */
+	target_head_after_sha?: string;
+	/**
+	 * The exact merge object written by the CAS. It must equal the enclosing
+	 * promotion result's `merged_head_sha` in strict governed records.
+	 */
+	merged_head_sha?: string;
+	candidate_commit_sha: string;
+	/**
+	 * Ordered parents read from the actual merge object, not inferred from
+	 * candidate inputs. Strict records require exactly [base, candidate].
+	 */
+	merge_parent_shas?: string[];
+	/**
+	 * Raw Git tree object ID read from the actual merge object. This is kept
+	 * alongside the semantic tree digest below so replay can bind both forms
+	 * of evidence without reconstructing a repository.
+	 */
+	merged_tree_sha?: string;
+	merged_tree_digest: string;
+	/**
+	 * Candidate-keyed immutable receipt ref created atomically with the target
+	 * compare-and-swap. Strict records require it so recovery can find the
+	 * exact merge even if the target branch is replaced before tape result
+	 * recording completes.
+	 */
+	promotion_receipt_ref?: string;
+	/**
+	 * Post-CAS checkout state. Strict records require this explicit result so
+	 * a post-CAS checkout or target-ref mismatch is never silently treated as
+	 * a completed promotion.
+	 */
+	worktree_sync_state?: PromotionWorktreeSyncStateV1;
+}
+
+/**
+ * Closed operator resolution vocabulary for a promotion whose target advanced
+ * after the compare-and-swap. Neither outcome promotes the original merge:
+ * the immutable result remains historical evidence and terminalization is
+ * explicit.
+ */
+export enum ReconciliationResolutionOutcomeV1 {
+	Abandon = "abandon",
+	Reject = "reject",
+}
+
+/**
+ * `promotion_reconciliation_resolved` payload — a distinct, operator-owned
+ * resolution for a recorded `reconciliation_required` promotion result. All
+ * three durable references are repeated so replay can prove the operator did
+ * not resolve a substituted decision, result, or receipt.
+ */
+export interface PromotionReconciliationResolvedV1 {
+	candidate_digest: string;
+	promotion_decision_ref: string;
+	promotion_result_ref: string;
+	promotion_receipt_ref: string;
+	outcome: ReconciliationResolutionOutcomeV1;
+	/** Operator actor authorized to resolve the target-advanced result. */
+	authority: string;
+	/** Must equal the detached operator signer actor during verified replay. */
+	resolved_by: string;
+	/** Distinct idempotency key for this resolution event. */
+	idempotency_key: string;
+	/** RFC3339 UTC timestamp. */
+	resolved_at: string;
+}
+
+/**
+ * Terminal promotion result vocabulary. Exactly one result is expected for a
+ * candidate/idempotency-key pair, reconciled by the workflow reducer.
+ */
+export enum PromotionResultOutcomeV1 {
+	Promoted = "promoted",
+	/**
+	 * The target ref moved after the promotion CAS and no longer contains the
+	 * immutable merge. The effect is terminal (must not be retried), but an
+	 * operator must reconcile the target before the workflow can complete.
+	 */
+	ReconciliationRequired = "reconciliation_required",
+	Rejected = "rejected",
+}
+
+/**
+ * `promotion_result_recorded` payload — effect outcome after a candidate-bound
+ * compare-and-swap promotion attempt.
+ */
+export interface PromotionResultRecordedV1 {
+	candidate_digest: string;
+	idempotency_key: string;
+	promotion_decision_ref: string;
+	outcome: PromotionResultOutcomeV1;
+	/**
+	 * Present only when `outcome` is `promoted`; semantic validation belongs to
+	 * the reducer/promotion adapter, not serde shape parsing.
+	 */
+	merged_head_sha?: string;
+	/**
+	 * Required for promoted results when the linked decision carries a
+	 * `target_ref`. Optional preserves replay of historical unbound records.
+	 */
+	promotion_git_binding?: PromotionGitBindingV1;
+	/**
+	 * Exact claim event and immutable lease token used for this effect.
+	 * Omitted records are historical pre-claim results; new governed storage
+	 * requires a value before it records an effect-bearing result.
+	 */
+	promotion_execution_lease_binding?: PromotionExecutionLeaseBindingV1;
+	/** RFC3339 UTC timestamp. */
+	completed_at: string;
+}
+
+/** An exact source event on a separately verified signed tape. */
+export interface ReleaseEvaluationSourceEventRefV1 {
+	source_event_id: EventId;
+	source_canonical_event_hash: string;
+}
+
+/** Backward replay compatibility for the release commit. */
+export interface ReleaseEvaluationBackwardReplayCompatibilityClaimV1 {
+	compatible: boolean;
+	source: ReleaseEvaluationSourceEventRefV1;
+}
+
+/**
+ * Closed conclusion vocabulary for a required release check.
+ *
+ * The release gate treats only `success` as resolved; every other conclusion
+ * remains an unresolved required check.
+ */
+export enum ReleaseEvaluationCheckConclusionV1 {
+	Success = "success",
+	Failure = "failure",
+	Cancelled = "cancelled",
+	Skipped = "skipped",
+	TimedOut = "timed_out",
+	Neutral = "neutral",
+	ActionRequired = "action_required",
+}
+
+/** One required CI/check conclusion for the release commit. */
+export interface ReleaseEvaluationRequiredCheckClaimV1 {
+	name: string;
+	conclusion: ReleaseEvaluationCheckConclusionV1;
+	source: ReleaseEvaluationSourceEventRefV1;
+}
+
+/** The target branch was immutable at the release binding. */
+export interface ReleaseEvaluationTargetBranchImmutabilityClaimV1 {
+	immutable: boolean;
+	source: ReleaseEvaluationSourceEventRefV1;
+}
+
+/** Closed governance lane recorded for one evaluation trial. */
+export enum ReleaseEvaluationGovernanceV1 {
+	Governed = "governed",
+	Raw = "raw",
+}
+
+/**
+ * Source-event roles required to support a complete trial claim.
+ *
+ * Keeping the roles named rather than using an open map prevents an evaluator
+ * from silently treating an incomplete or differently-shaped source set as a
+ * complete trial.
+ */
+export interface ReleaseEvaluationTrialSourcesV1 {
+	model_request: ReleaseEvaluationSourceEventRefV1;
+	candidate: ReleaseEvaluationSourceEventRefV1;
+	acceptance: ReleaseEvaluationSourceEventRefV1;
+	review: ReleaseEvaluationSourceEventRefV1;
+	recovery: ReleaseEvaluationSourceEventRefV1;
+	terminal: ReleaseEvaluationSourceEventRefV1;
+}
+
+/**
+ * All report inputs for one evaluation trial.
+ *
+ * `cost_usd_micros` is an exact integer amount; TypeScript derives
+ * `costUsd` by dividing by 1,000,000. Integer metric fields avoid a
+ * cross-runtime floating-point serialization ambiguity in the signed digest.
+ */
+export interface ReleaseEvaluationTrialClaimV1 {
+	task_id: string;
+	provider: string;
+	trust_tier: string;
+	/** Closed by validation to 1, 2, or 3. */
+	trial: number;
+	governance: ReleaseEvaluationGovernanceV1;
+	passed: boolean;
+	cost_usd_micros: number;
+	latency_ms: number;
+	tokens: number;
+	tool_calls: number;
+	candidate_count: number;
+	reviewer_disagreed: boolean;
+	false_approval: boolean;
+	/**
+	 * Any effect attempted or completed without matching authority. This is
+	 * deliberately distinct from broader safety findings because GA requires
+	 * this count to be exactly zero.
+	 */
+	unauthorized_effects: number;
+	duplicate_effects: number;
+	safety_violations: number;
+	recovery_correct: boolean;
+	illegitimate_success: boolean;
+	sources: ReleaseEvaluationTrialSourcesV1;
+}
+
+/**
  * `result_ready` payload (M6-S6) — signals that a run reached a terminal,
  * operator-reviewable accepted result. Chains to the `plan_admitted` and
  * `acceptance_recorded` events that authorized and accepted the run. All fields
@@ -322,6 +1548,142 @@ export interface ResultReadyV1 {
 	admission_event_id: string;
 	/** Chains to the `acceptance_recorded` event (string event id). */
 	acceptance_event_id: string;
+}
+
+/** Closed severity vocabulary for structured review findings. */
+export enum ReviewFindingSeverityV1 {
+	Info = "info",
+	Low = "low",
+	Medium = "medium",
+	High = "high",
+	Critical = "critical",
+}
+
+/** One structured, evidence-backed review finding. */
+export interface ReviewFindingV1 {
+	severity: ReviewFindingSeverityV1;
+	check_id: string;
+	file: string;
+	line: number;
+	explanation: string;
+	evidence_refs: string[];
+}
+
+/** Closed semantic-review verdict vocabulary. */
+export enum ReviewDecisionV1 {
+	Approve = "approve",
+	RequestChanges = "request_changes",
+	Reject = "reject",
+	Abstain = "abstain",
+}
+
+/**
+ * The closed semantic result that a review model action returns. Its digest is
+ * carried by `ReviewVerdictRecordedV2` and must also be the succeeded review
+ * action receipt's result digest, so a sealed but unrelated action cannot
+ * authorize a separately minted verdict.
+ */
+export interface ReviewVerdictOutputV1 {
+	candidate_digest: string;
+	candidate_commit_sha: string;
+	decision: ReviewDecisionV1;
+	findings: ReviewFindingV1[];
+	confidence: number;
+	candidate_view_digest: string;
+}
+
+/**
+ * `review_verdict_recorded` payload — closed semantic verdict over exactly one
+ * candidate digest. Tape verification does not turn an `approve` into merge
+ * authority without the separate promotion decision.
+ */
+export interface ReviewVerdictRecordedV1 {
+	candidate_digest: string;
+	/** Full SHA-1 or SHA-256 Git object ID the reviewer received read-only. */
+	candidate_commit_sha: string;
+	review_ref: string;
+	/**
+	 * Legacy V1 tapes may carry action/output references, but they are not a
+	 * promotion proof. V2 makes the whole evidence set mandatory and binds it
+	 * to a separate reviewer dispatch.
+	 */
+	review_verdict_action_id?: string;
+	review_action_request_digest?: string;
+	review_action_receipt_ref?: string;
+	review_action_receipt_digest?: string;
+	review_output_ref?: string;
+	review_output_digest?: string;
+	decision: ReviewDecisionV1;
+	findings: ReviewFindingV1[];
+	confidence: number;
+	reviewer_manifest_digest: string;
+	/** RFC3339 UTC timestamp. */
+	reviewed_at: string;
+}
+
+/**
+ * `review_verdict_recorded_v2` payload — a closed semantic review that is
+ * bound to both sides of the governed transaction: the accepted immutable
+ * candidate and the independent read-only V3 reviewer activity lineage.
+ *
+ * Unlike V1, this record cannot be treated as a free-standing model claim.
+ * Replay verifies that the named acceptance record passed for the exact
+ * candidate, that the reviewer dispatch is a governed V3 read-only role, and
+ * that its sealed action evidence set is complete before this verdict can
+ * advance promotion eligibility.
+ */
+export interface ReviewVerdictRecordedV2 {
+	/** Run containing both the candidate and reviewer dispatch records. */
+	run_id: string;
+	/** Candidate-producing workflow identity. */
+	workflow_id: string;
+	unit_id: string;
+	attempt: number;
+	provenance_ref: string;
+	candidate_digest: string;
+	/** Full SHA-1 or SHA-256 Git object ID mounted read-only for review. */
+	candidate_commit_sha: string;
+	review_ref: string;
+	/** Exact succeeded model action that produced the closed verdict output. */
+	review_verdict_action_id: string;
+	review_action_request_digest: string;
+	review_action_receipt_ref: string;
+	review_action_receipt_digest: string;
+	review_output_ref: string;
+	review_output_digest: string;
+	decision: ReviewDecisionV1;
+	findings: ReviewFindingV1[];
+	confidence: number;
+	/** Exact deterministic acceptance record that passed for this candidate. */
+	acceptance_ref: string;
+	acceptance_digest: string;
+	acceptance_contract_digest: string;
+	/** Dispatch that created the immutable candidate overlay. */
+	candidate_envelope_digest: string;
+	/** Independent governed V3 reviewer dispatch identity. */
+	reviewer_workflow_id: string;
+	reviewer_dispatch_envelope_digest: string;
+	reviewer_unit_id: string;
+	reviewer_attempt: number;
+	reviewer_execution_role: ExecutionRoleV1;
+	/**
+	 * Complete sealed action evidence for the reviewer activity, not the
+	 * implementer's candidate evidence set.
+	 */
+	review_action_receipt_set_ref: string;
+	review_action_receipt_set_digest: string;
+	candidate_view: CandidateViewV1;
+	/**
+	 * Digest of the candidate ref/mount/context view supplied read-only to
+	 * the reviewer. The concrete mount is intentionally not serialized.
+	 */
+	candidate_view_ref: string;
+	candidate_view_digest: string;
+	reviewer_manifest_digest: string;
+	/** Identity that must match the detached reviewer event signer. */
+	reviewer_authority: string;
+	/** RFC3339 UTC timestamp. */
+	reviewed_at: string;
 }
 
 /** Requested side effect denied by policy with a human-readable reason. */
@@ -530,6 +1892,239 @@ export interface UnitStartedV1 {
 	policy: Value;
 }
 
+/**
+ * Closed cancellation sources. An operator may request an interrupt, while a
+ * deadline cancellation must be backed by an exact elapsed timer record.
+ */
+export enum WorkflowCancellationCauseV1 {
+	OperatorRequested = "operator_requested",
+	TimerElapsed = "timer_elapsed",
+}
+
+/**
+ * Signed request to stop a workflow before it reaches a target-branch effect.
+ * This is a durable reducer state, not a terminal record: the kernel must
+ * append a bound `workflow_terminal_v2` event after it has stopped further
+ * advancement and reconciled in-flight work.
+ */
+export interface WorkflowCancellationRequestedV1 {
+	run_id: string;
+	workflow_id: string;
+	workflow_revision: string;
+	unit_id: string;
+	attempt: number;
+	dispatch_event_ref: EventId;
+	dispatch_envelope_digest: string;
+	cancellation_id: string;
+	cause: WorkflowCancellationCauseV1;
+	/**
+	 * Required only for a `timer_elapsed` cancellation. It must name the exact
+	 * `workflow_timer_fired_v1` event that made the cancellation eligible.
+	 */
+	timer_fired_event_ref?: EventId;
+	/** Canonical digest of `timer_fired_event_ref`, required together with it. */
+	timer_fired_event_digest?: string;
+	/**
+	 * Must equal the detached operator or kernel signer actor during verified
+	 * replay, according to `cause`.
+	 */
+	requested_by: string;
+	idempotency_key: string;
+	/** RFC3339 UTC timestamp bound to the enclosing event. */
+	requested_at: string;
+}
+
+/**
+ * One node in a declared workflow graph. Both this list and each node's
+ * `depends_on` list are ordered authority bytes: canonicalization rejects any
+ * duplicate or non-lexical order rather than normalizing caller input.
+ */
+export interface WorkflowGraphNodeV1 {
+	unit_id: string;
+	depends_on: string[];
+}
+
+/**
+ * `workflow_graph_declared_v1` payload — the durable, signed topology for a
+ * workflow revision. It records a graph before dispatch but deliberately does
+ * not bind a graph digest into `DispatchEnvelopeV3`; dispatch gating requires
+ * a later additive envelope revision.
+ */
+export interface WorkflowGraphDeclaredV1 {
+	run_id: string;
+	workflow_id: string;
+	workflow_revision: string;
+	nodes: WorkflowGraphNodeV1[];
+	max_concurrent: number;
+	/**
+	 * Canonical digest of the immutable graph material below, excluding this
+	 * detached digest and declaration-delivery metadata.
+	 */
+	graph_digest: string;
+	idempotency_key: string;
+	/** RFC3339 UTC timestamp. */
+	declared_at: string;
+}
+
+/**
+ * One node in a graph-bound V2 workflow declaration. The node carries the
+ * role and normalized governed-packet digest which a V4 dispatch must repeat
+ * exactly. `nodes` and `depends_on` remain ordered authority bytes: callers
+ * must supply strict lexical order rather than relying on normalization.
+ */
+export interface WorkflowGraphNodeV2 {
+	unit_id: string;
+	depends_on: string[];
+	execution_role: ExecutionRoleV1;
+	governed_packet_digest: string;
+}
+
+/**
+ * `workflow_graph_declared_v2` payload — a V2 graph carries the per-node
+ * governed dispatch material required for an additive V4 envelope to prove
+ * its place in an immutable workflow topology. V1 remains readable and
+ * intentionally stays unbound to V3 dispatches.
+ */
+export interface WorkflowGraphDeclaredV2 {
+	run_id: string;
+	workflow_id: string;
+	workflow_revision: string;
+	nodes: WorkflowGraphNodeV2[];
+	max_concurrent: number;
+	/**
+	 * Canonical digest of the immutable graph material below, excluding this
+	 * detached digest and declaration-delivery metadata.
+	 */
+	graph_digest: string;
+	idempotency_key: string;
+	/** RFC3339 UTC timestamp. */
+	declared_at: string;
+}
+
+/** Closed terminal workflow state vocabulary. */
+export enum WorkflowTerminalOutcomeV1 {
+	Completed = "completed",
+	Failed = "failed",
+	Cancelled = "cancelled",
+}
+
+/**
+ * `workflow_terminal` payload — reducer-owned terminal workflow snapshot.
+ * Optional candidate/result links make failed pre-candidate workflows
+ * representable without introducing an untyped terminal event.
+ */
+export interface WorkflowTerminalV1 {
+	workflow_id: string;
+	workflow_revision: string;
+	/**
+	 * Exact unit attempt so a pre-candidate failure remains unambiguous when
+	 * a workflow dispatches several graph children concurrently.
+	 */
+	unit_id: string;
+	attempt: number;
+	outcome: WorkflowTerminalOutcomeV1;
+	candidate_digest?: string;
+	promotion_result_ref?: string;
+	/**
+	 * Exact operator-owned reconciliation resolution required to terminalize a
+	 * `reconciliation_required` promotion result. It is absent for all other terminal
+	 * paths, preserving older terminal tapes.
+	 */
+	reconciliation_resolution_ref?: string;
+	reason?: string;
+	idempotency_key: string;
+	/** RFC3339 UTC timestamp. */
+	completed_at: string;
+}
+
+/**
+ * `workflow_terminal_v2` adds exact cancellation evidence without changing
+ * the readable V1 terminal contract. Only V2 `cancelled` records can close a
+ * newly requested cancellation; V1 tapes retain their historical semantics.
+ */
+export interface WorkflowTerminalV2 {
+	workflow_id: string;
+	workflow_revision: string;
+	unit_id: string;
+	attempt: number;
+	outcome: WorkflowTerminalOutcomeV1;
+	candidate_digest?: string;
+	promotion_result_ref?: string;
+	reconciliation_resolution_ref?: string;
+	/**
+	 * Required for `cancelled`, absent for all other outcomes. This exact
+	 * event reference prevents a terminal event from borrowing a neighboring
+	 * cancellation request.
+	 */
+	cancellation_request_event_ref?: EventId;
+	/**
+	 * Canonical hash of `cancellation_request_event_ref`, required together
+	 * with it for a cancelled terminal.
+	 */
+	cancellation_request_event_digest?: string;
+	reason?: string;
+	idempotency_key: string;
+	/** RFC3339 UTC timestamp. */
+	completed_at: string;
+}
+
+/**
+ * Kernel-signed observation that an exact scheduled timer elapsed. The event
+ * repeats the canonical schedule-event digest so a neighboring deadline cannot
+ * be substituted during recovery.
+ */
+export interface WorkflowTimerFiredV1 {
+	run_id: string;
+	workflow_id: string;
+	workflow_revision: string;
+	unit_id: string;
+	attempt: number;
+	timer_id: string;
+	timer_schedule_event_ref: EventId;
+	timer_schedule_event_digest: string;
+	dispatch_event_ref: EventId;
+	dispatch_envelope_digest: string;
+	idempotency_key: string;
+	/** Must equal the detached kernel signer actor during verified replay. */
+	fired_by: string;
+	/** RFC3339 UTC timestamp bound to the enclosing event. */
+	fired_at: string;
+}
+
+/**
+ * Closed timer purposes for reducer-owned workflow lifecycle control. The
+ * first revision deliberately supports only a workflow deadline; future timer
+ * families require a new versioned schema instead of untyped timer metadata.
+ */
+export enum WorkflowTimerKindV1 {
+	WorkflowDeadline = "workflow_deadline",
+}
+
+/**
+ * Kernel-signed write-ahead declaration of one workflow deadline. A timer is
+ * only durable scheduling state: it cannot directly perform an effect or
+ * terminalize a workflow.
+ */
+export interface WorkflowTimerScheduledV1 {
+	run_id: string;
+	workflow_id: string;
+	workflow_revision: string;
+	unit_id: string;
+	attempt: number;
+	/** Exact dispatch event that supplied the timer authority. */
+	dispatch_event_ref: EventId;
+	dispatch_envelope_digest: string;
+	timer_id: string;
+	timer_kind: WorkflowTimerKindV1;
+	/** RFC3339 UTC deadline. */
+	due_at: string;
+	idempotency_key: string;
+	/** Must equal the detached kernel signer actor during verified replay. */
+	scheduled_by: string;
+	/** RFC3339 UTC timestamp bound to the enclosing event. */
+	scheduled_at: string;
+}
+
 export interface WorkspaceReadV1 {
 	tool_request_id: EventId;
 	path: string;
@@ -578,3 +2173,37 @@ export type HeaderValue =
 				hint: string;
 			};
 	  };
+
+/** Closed vocabulary for one release-evaluation claim. */
+export enum ReleaseEvaluationClaimKindV1 {
+	Trial = "trial",
+	TargetBranchImmutability = "target_branch_immutability",
+	BackwardReplayCompatibility = "backward_replay_compatibility",
+	RequiredCheck = "required_check",
+}
+
+/**
+ * Typeshare does not support serde's deliberately untagged closed enum used
+ * by ReleaseEvaluationEvidenceV1. The enum's leaf types are generated from
+ * Rust; this companion declaration preserves the exact wire union in the
+ * generated public module.
+ */
+export type ReleaseEvaluationClaimV1 =
+	| ReleaseEvaluationTrialClaimV1
+	| ReleaseEvaluationTargetBranchImmutabilityClaimV1
+	| ReleaseEvaluationBackwardReplayCompatibilityClaimV1
+	| ReleaseEvaluationRequiredCheckClaimV1;
+
+/**
+ * Signed release-evaluation evidence. `claim_kind` is the closed wire
+ * discriminator; native validation rejects a mismatched untagged claim body.
+ */
+export interface ReleaseEvaluationEvidenceV1 {
+	schema_version: number;
+	release_commit: string;
+	release_ref: string;
+	policy_digest: string;
+	claim_kind: ReleaseEvaluationClaimKindV1;
+	claim: ReleaseEvaluationClaimV1;
+	claim_digest: string;
+}

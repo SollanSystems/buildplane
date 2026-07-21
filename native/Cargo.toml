@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+  "crates/bp-authority-broker",
   "crates/bp-cli",
   "crates/bp-config",
   "crates/bp-core",
@@ -49,6 +50,7 @@ base64 = "0.22"
 ed25519-dalek = "2"
 
 bp-fork = { path = "crates/bp-fork" }
+bp-authority-broker = { path = "crates/bp-authority-broker" }
 bp-ledger = { path = "crates/bp-ledger" }
 bp-ledger-macros = { path = "crates/bp-ledger-macros" }
 bp-replay = { path = "crates/bp-replay" }

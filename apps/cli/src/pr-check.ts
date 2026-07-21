@@ -23,6 +23,13 @@ export interface PrCheckCriterionLike {
 export interface PrCheckFinalVerdictReport {
 	readonly runId: string;
 	readonly verdict: string;
+	/**
+	 * A PR-facing report is admissible only when the durable verifier explicitly
+	 * marks it as a governed receipt. This is required rather than optional so a
+	 * hand-built or legacy report cannot regain publication authority merely by
+	 * omitting the field.
+	 */
+	readonly trustedReceipt: boolean;
 	readonly receipts?: unknown;
 	readonly criteria?: readonly PrCheckCriterionLike[];
 	readonly issues?: readonly PrCheckIssueLike[];
@@ -154,9 +161,24 @@ const GITHUB_REPO_PATTERN = /^[A-Za-z0-9._-]{1,100}$/;
 const GIT_COMMIT_SHA_PATTERN = /^[0-9a-f]{40}$/i;
 const URL_SEMANTIC_DELIMITERS = new Set(["/", "?", "#", "%", "\\"]);
 
+/**
+ * A raw/legacy run may be useful diagnostic evidence, but it must not be
+ * projected into a GitHub check or comment as if it were a governed receipt.
+ * Keep this check at the shared planner boundary so dry-run, publish, and any
+ * future caller all fail closed on the durable storage marker.
+ */
+function assertTrustedReceipt(report: PrCheckFinalVerdictReport): void {
+	if (report.trustedReceipt !== true) {
+		throw new Error(
+			"UNTRUSTED_RECEIPT: this run was not executed in the governed trust lane and cannot be published as PR evidence.",
+		);
+	}
+}
+
 export function planPrCheckOperation(
 	options: PlanPrCheckOptions,
 ): PlannedPrCheck {
+	assertTrustedReceipt(options.report);
 	const repository = parseRepository(options.repository);
 	const headSha = parseHeadSha(options.headSha);
 	const name = options.name?.trim() || "Buildplane";
@@ -200,6 +222,7 @@ export function planPrCheckOperation(
 export function planPrCommentOperation(
 	options: PlanPrCommentOptions,
 ): PlannedPrComment {
+	assertTrustedReceipt(options.report);
 	const repository = parseRepository(options.repository);
 	const prNumber = parsePrNumber(options.prNumber);
 	const headSha = parseHeadSha(options.headSha);

@@ -49,6 +49,22 @@ jobs:
             exit 1
           fi
 
+      - name: Verify Trust Spine release evidence
+        # A protected release host must place an immutable, signed campaign
+        # bundle at this absolute path. An absent bundle/root intentionally
+        # blocks publication; normal pushes still create or update the release PR.
+        # This is an early diagnostic only: release:publish repeats the gate at
+        # the command boundary, so changesets cannot bypass it by skipping here.
+        if: "${{ startsWith(github.event.head_commit.message, 'chore: version packages') }}"
+        env:
+          TRUST_SPINE_CAMPAIGN_BUNDLE: ${{ vars.TRUST_SPINE_CAMPAIGN_BUNDLE }}
+        run: |
+          if [ -z "${TRUST_SPINE_CAMPAIGN_BUNDLE}" ]; then
+            echo "::error::TRUST_SPINE_CAMPAIGN_BUNDLE is not configured; refusing to publish without a host-issued campaign bundle."
+            exit 1
+          fi
+          pnpm eval:trust-spine:gate -- --bundle "${TRUST_SPINE_CAMPAIGN_BUNDLE}" --commit "${GITHUB_SHA}" --ref "${GITHUB_REF}"
+
       - name: Create Release PR or publish to npm
         id: changesets
         uses: changesets/action@v1
@@ -71,3 +87,4 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN || github.token }}
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          TRUST_SPINE_CAMPAIGN_BUNDLE: ${{ vars.TRUST_SPINE_CAMPAIGN_BUNDLE }}

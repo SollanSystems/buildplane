@@ -112,9 +112,20 @@ export function createGraphScheduler(
 	options?: Partial<GraphSchedulerOptions>,
 ): GraphScheduler {
 	const maxConcurrent = options?.maxConcurrent ?? graph.maxConcurrent ?? 2;
+	if (!Number.isSafeInteger(maxConcurrent) || maxConcurrent <= 0) {
+		throw new Error(
+			`UnitGraph: maxConcurrent must be a positive safe integer, got ${String(maxConcurrent)}`,
+		);
+	}
 
 	// Validate: all dependsOn references must resolve to existing unit IDs
-	const nodeIds = new Set(graph.nodes.map((n) => n.unit.id));
+	const nodeIds = new Set<string>();
+	for (const node of graph.nodes) {
+		if (nodeIds.has(node.unit.id)) {
+			throw new Error(`UnitGraph: duplicate unit id '${node.unit.id}'`);
+		}
+		nodeIds.add(node.unit.id);
+	}
 	for (const node of graph.nodes) {
 		for (const dep of node.dependsOn ?? []) {
 			if (!nodeIds.has(dep)) {

@@ -270,5 +270,709 @@
 			"run_id": "01919000-0000-7000-8000-0000000000ff",
 			"subject": "merge"
 		}
+	},
+	{
+		"DispatchEnvelopeV1": {
+			"acceptance_contract_digest": "sha256:bb",
+			"attempt": 1,
+			"base_commit_sha": "0000000000000000000000000000000000000000",
+			"budget": {
+				"max_compute_time_ms": 1000,
+				"max_tokens": 100
+			},
+			"capability_bundle_digest": "sha256:aa",
+			"commit_mode": "atomic",
+			"context_manifest_digest": "sha256:cc",
+			"envelope_digest": "sha256:ff",
+			"execution_role": "implementer",
+			"expires_at": "2026-07-17T01:00:00Z",
+			"idempotency_key": "dispatch:fixture",
+			"issued_at": "2026-07-17T00:00:00Z",
+			"provenance_ref": "admission:fixture",
+			"sandbox_profile_digest": "sha256:ee",
+			"signature_ref": {
+				"algorithm": "ed25519",
+				"key_id": "kernel-fixture",
+				"signature": "fixture"
+			},
+			"trust_tier": "governed",
+			"unit_id": "unit-fixture",
+			"worker_manifest_digest": "sha256:dd",
+			"workflow_id": "workflow-fixture",
+			"workflow_revision": "r1"
+		}
+	},
+	{
+		"DispatchEnvelopeV2": {
+			"body": {
+				"acceptance_contract_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+				"attempt": 1,
+				"base_commit_sha": "0000000000000000000000000000000000000000",
+				"budget": {
+					"max_compute_time_ms": 1000,
+					"max_tokens": 100
+				},
+				"capability_bundle_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+				"commit_mode": "atomic",
+				"context_manifest_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+				"execution_role": "implementer",
+				"expires_at": "2026-07-17T01:00:00Z",
+				"idempotency_key": "dispatch:fixture-v2",
+				"issued_at": "2026-07-17T00:00:00Z",
+				"provenance_ref": "admission:fixture-v2",
+				"sandbox_profile_digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+				"trust_tier": "governed",
+				"unit_id": "unit-fixture-v2",
+				"worker_manifest_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+				"workflow_id": "workflow-fixture-v2",
+				"workflow_revision": "r1"
+			},
+			"envelope_digest": "sha256:0fb2df7763b2d4be8ee2b1fce203e77fed4fa317ba88602a4d3d6ba4e9f4ec6c"
+		}
+	},
+	{
+		"CandidateCreatedV1": {
+			"action_receipt_digest": "sha256:aa",
+			"attempt": 1,
+			"base_commit_sha": "0000000000000000000000000000000000000000",
+			"candidate_commit_sha": "1111111111111111111111111111111111111111",
+			"candidate_digest": "sha256:aa",
+			"candidate_id": "candidate-fixture",
+			"candidate_ref": "refs/buildplane/candidates/candidate-fixture/run-fixture/1",
+			"changed_files_digest": "sha256:ee",
+			"commit_digest": "sha256:bb",
+			"envelope_digest": "sha256:ff",
+			"patch_digest": "sha256:dd",
+			"provenance_ref": "admission:fixture",
+			"tree_digest": "sha256:cc",
+			"unit_id": "unit-fixture",
+			"workflow_id": "workflow-fixture"
+		}
+	},
+	{
+		"CandidateAcceptanceRecordedV1": {
+			"acceptance_contract_digest": "sha256:acceptance-contract",
+			"acceptance_digest": "sha256:bb",
+			"acceptance_ref": "acceptance:fixture",
+			"candidate_commit_sha": "1111111111111111111111111111111111111111",
+			"candidate_digest": "sha256:aa",
+			"evaluated_at": "2026-07-17T00:01:00Z",
+			"outcome": "passed"
+		}
+	},
+	{
+		"ReviewVerdictRecordedV1": {
+			"candidate_commit_sha": "1111111111111111111111111111111111111111",
+			"candidate_digest": "sha256:aa",
+			"confidence": 1.0,
+			"decision": "approve",
+			"findings": [
+				{
+					"check_id": "lint",
+					"evidence_refs": ["evidence:lint"],
+					"explanation": "fixture",
+					"file": "src/index.ts",
+					"line": 1,
+					"severity": "info"
+				}
+			],
+			"review_ref": "review:fixture",
+			"reviewed_at": "2026-07-17T00:02:00Z",
+			"reviewer_manifest_digest": "sha256:cc"
+		}
+	},
+	{
+		"PromotionApprovalRequestedV1": {
+			"acceptance_ref": "acceptance:fixture",
+			"base_commit_sha": "0000000000000000000000000000000000000000",
+			"candidate_digest": "sha256:aa",
+			"envelope_digest": "sha256:ff",
+			"idempotency_key": "promotion:fixture",
+			"requested_at": "2026-07-17T00:02:30Z",
+			"requested_by": "kernel",
+			"review_refs": ["review:fixture"],
+			"target_ref": "refs/heads/main"
+		}
+	},
+	{
+		"PromotionDecisionRecordedV1": {
+			"acceptance_ref": "acceptance:fixture",
+			"authority": "operator",
+			"base_commit_sha": "0000000000000000000000000000000000000000",
+			"candidate_digest": "sha256:aa",
+			"decided_at": "2026-07-17T00:03:00Z",
+			"decided_by": "operator",
+			"decision": "promote",
+			"envelope_digest": "sha256:ff",
+			"idempotency_key": "promotion:fixture",
+			"review_refs": ["review:fixture"],
+			"target_ref": "refs/heads/main"
+		}
+	},
+	{
+		"PromotionExecutionClaimedV1": {
+			"authority_actor": "kernel",
+			"base_commit_sha": "0000000000000000000000000000000000000000",
+			"candidate_commit_sha": "1111111111111111111111111111111111111111",
+			"candidate_digest": "sha256:aa",
+			"candidate_ref": "refs/buildplane/candidates/candidate-fixture/run-fixture",
+			"candidate_tree_digest": "sha256:dd",
+			"claimed_at": "2026-07-17T00:03:30Z",
+			"dispatch_envelope_digest": "sha256:ff",
+			"dispatch_event_ref": "01919000-0000-7000-8000-000000000094",
+			"idempotency_key": "promotion:fixture",
+			"lease_expires_at": "2026-07-17T00:08:30Z",
+			"lease_id": "lease:fixture",
+			"promotion_decision_event_digest": "sha256:decision-event",
+			"promotion_decision_event_ref": "01919000-0000-7000-8000-000000000093",
+			"promotion_execution_claim_digest": "sha256:claim",
+			"run_id": "01919000-0000-7000-8000-0000000000ff",
+			"target_ref": "refs/heads/main"
+		}
+	},
+	{
+		"PromotionResultRecordedV1": {
+			"candidate_digest": "sha256:aa",
+			"completed_at": "2026-07-17T00:04:00Z",
+			"idempotency_key": "promotion:fixture",
+			"merged_head_sha": "2222222222222222222222222222222222222222",
+			"outcome": "reconciliation_required",
+			"promotion_decision_ref": "decision:fixture",
+			"promotion_git_binding": {
+				"candidate_commit_sha": "1111111111111111111111111111111111111111",
+				"merge_parent_shas": [
+					"0000000000000000000000000000000000000000",
+					"1111111111111111111111111111111111111111"
+				],
+				"merged_head_sha": "2222222222222222222222222222222222222222",
+				"merged_tree_digest": "sha256:dd",
+				"merged_tree_sha": "3333333333333333333333333333333333333333",
+				"promotion_receipt_ref": "refs/buildplane/promotions/candidate-fixture/run-fixture/1",
+				"target_head_after_sha": "2222222222222222222222222222222222222222",
+				"target_head_before_sha": "0000000000000000000000000000000000000000",
+				"target_ref": "refs/heads/main",
+				"worktree_sync_state": "root_checkout_stale"
+			}
+		}
+	},
+	{
+		"PromotionReconciliationResolvedV1": {
+			"authority": "operator",
+			"candidate_digest": "sha256:aa",
+			"idempotency_key": "reconcile:fixture",
+			"outcome": "abandon",
+			"promotion_decision_ref": "decision:fixture",
+			"promotion_receipt_ref": "refs/buildplane/promotions/candidate-fixture/run-fixture/1",
+			"promotion_result_ref": "result:fixture",
+			"resolved_at": "2026-07-17T00:04:30Z",
+			"resolved_by": "operator"
+		}
+	},
+	{
+		"WorkflowTerminalV1": {
+			"attempt": 1,
+			"candidate_digest": "sha256:aa",
+			"completed_at": "2026-07-17T00:05:00Z",
+			"idempotency_key": "workflow-terminal:fixture",
+			"outcome": "completed",
+			"promotion_result_ref": "result:fixture",
+			"unit_id": "unit-fixture",
+			"workflow_id": "workflow-fixture",
+			"workflow_revision": "r1"
+		}
+	},
+	{
+		"WorkflowGraphDeclaredV1": {
+			"declared_at": "2026-07-19T00:00:00Z",
+			"graph_digest": "sha256:7448f846869abf45142ccb22d8cab9470ca904ada847f1842c8eae50b6f06ec0",
+			"idempotency_key": "workflow-graph:fixture",
+			"max_concurrent": 2,
+			"nodes": [
+				{
+					"depends_on": [],
+					"unit_id": "unit-a"
+				},
+				{
+					"depends_on": ["unit-a"],
+					"unit_id": "unit-b"
+				}
+			],
+			"run_id": "01919000-0000-7000-8000-0000000000ff",
+			"workflow_id": "workflow-graph-fixture",
+			"workflow_revision": "r1"
+		}
+	},
+	{
+		"WorkflowGraphDeclaredV2": {
+			"declared_at": "2026-07-19T00:00:00Z",
+			"graph_digest": "sha256:9ff8846a2551e1c7d5e6b65a4f285a46f8109029435b4047f98d07341084815d",
+			"idempotency_key": "graph-v2:fixture-v4:r1",
+			"max_concurrent": 1,
+			"nodes": [
+				{
+					"depends_on": [],
+					"execution_role": "implementer",
+					"governed_packet_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+					"unit_id": "unit-fixture-v4"
+				}
+			],
+			"run_id": "01919000-0000-7000-8000-0000000000ff",
+			"workflow_id": "workflow-fixture-v4",
+			"workflow_revision": "r1"
+		}
+	},
+	{
+		"DispatchEnvelopeV4": {
+			"dispatch_v3": {
+				"action_evidence_version": "sealed_v3",
+				"body": {
+					"acceptance_contract_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+					"attempt": 1,
+					"base_commit_sha": "0000000000000000000000000000000000000000",
+					"budget": {
+						"max_compute_time_ms": 1000,
+						"max_tokens": 100
+					},
+					"capability_bundle_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+					"commit_mode": "atomic",
+					"context_manifest_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+					"execution_role": "implementer",
+					"expires_at": "2026-07-19T01:01:00Z",
+					"idempotency_key": "dispatch:fixture-v4:unit-fixture-v4:1",
+					"issued_at": "2026-07-19T00:01:00Z",
+					"provenance_ref": "admission:fixture-v4",
+					"sandbox_profile_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+					"trust_tier": "governed",
+					"unit_id": "unit-fixture-v4",
+					"worker_manifest_digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+					"workflow_id": "workflow-fixture-v4",
+					"workflow_revision": "r1"
+				},
+				"envelope_digest": "sha256:9a110c419661187de2ab0e4cd8e3ca3d14013ebeada04f94fac7b1e8359a3f8a",
+				"governed_packet_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+				"ledger_authority_realm_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+				"repository_binding_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+			},
+			"envelope_digest": "sha256:68c8b94c2d9ff58666814dd33c5ffa77c19a001fc55191b5f1c0084e1657a74c",
+			"workflow_graph_declaration_event_ref": "01919000-0000-7000-8000-000000000060",
+			"workflow_graph_digest": "sha256:9ff8846a2551e1c7d5e6b65a4f285a46f8109029435b4047f98d07341084815d"
+		}
+	},
+	{
+		"ActivityClaimedV1": {
+			"action_kind": "process",
+			"action_request_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			"action_request_event_id": "01919000-0000-7000-8000-000000000042",
+			"activity_id": "activity-claim-fixture",
+			"authority_actor": "kernel:fixture",
+			"claimed_at": "2026-07-17T00:00:00Z",
+			"dispatch_envelope_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			"dispatch_event_id": "01919000-0000-7000-8000-000000000043",
+			"idempotency_key": "activity-claim:fixture",
+			"lease_expires_at": "2026-07-17T00:05:00Z",
+			"lease_id": "lease:fixture",
+			"run_id": "01919000-0000-7000-8000-0000000000ff"
+		}
+	},
+	{
+		"ActivityHeartbeatRecordedV1": {
+			"activity_id": "activity-claim-fixture",
+			"claim_event_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+			"claim_event_id": "01919000-0000-7000-8000-000000000044",
+			"dispatch_envelope_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			"dispatch_event_id": "01919000-0000-7000-8000-000000000043",
+			"heartbeat_at": "2026-07-17T00:00:00.500Z",
+			"heartbeat_id": "heartbeat:fixture",
+			"heartbeat_request_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			"idempotency_key": "activity-claim:fixture",
+			"lease_expires_at": "2026-07-17T00:10:00Z",
+			"lease_id": "lease:fixture",
+			"run_id": "01919000-0000-7000-8000-0000000000ff"
+		}
+	},
+	{
+		"ActivityResultRecordedV1": {
+			"activity_id": "activity-claim-fixture",
+			"claim_event_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+			"claim_event_id": "01919000-0000-7000-8000-000000000044",
+			"evidence_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			"evidence_ref": "cas:activity-evidence:fixture",
+			"idempotency_key": "activity-claim:fixture",
+			"lease_id": "lease:fixture",
+			"outcome": "succeeded",
+			"recorded_at": "2026-07-17T00:00:01Z",
+			"result_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+			"result_ref": "cas:activity-result:fixture",
+			"run_id": "01919000-0000-7000-8000-0000000000ff"
+		}
+	},
+	{
+		"DispatchEnvelopeV3": {
+			"action_evidence_version": "sealed-v2",
+			"body": {
+				"acceptance_contract_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+				"attempt": 1,
+				"base_commit_sha": "0000000000000000000000000000000000000000",
+				"budget": {
+					"max_compute_time_ms": 1000,
+					"max_tokens": 100
+				},
+				"capability_bundle_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+				"commit_mode": "atomic",
+				"context_manifest_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+				"execution_role": "implementer",
+				"expires_at": "2026-07-17T01:00:00Z",
+				"idempotency_key": "dispatch:fixture-v3",
+				"issued_at": "2026-07-17T00:00:00Z",
+				"provenance_ref": "admission:fixture-v3",
+				"sandbox_profile_digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+				"trust_tier": "governed",
+				"unit_id": "unit-fixture-v3",
+				"worker_manifest_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+				"workflow_id": "workflow-fixture-v3",
+				"workflow_revision": "r1"
+			},
+			"envelope_digest": "sha256:6feb096f077a3b5c01187afae91d56d7892a2e560e61fa807892a3be02cf4841",
+			"ledger_authority_realm_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			"repository_binding_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		}
+	},
+	{
+		"ActionRequestedV2": {
+			"action_id": "action-fixture-v3",
+			"action_kind": "model",
+			"attempt": 1,
+			"authority_actor": "kernel",
+			"canonical_input_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			"canonical_input_ref": "cas:input:fixture-v3",
+			"capability_bundle_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			"context_manifest_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+			"dispatch_envelope_digest": "sha256:6feb096f077a3b5c01187afae91d56d7892a2e560e61fa807892a3be02cf4841",
+			"execution_role": "implementer",
+			"idempotency_key": "action:fixture-v3",
+			"ledger_authority_realm_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			"policy_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			"provenance_ref": "admission:fixture-v3",
+			"repository_binding_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			"requested_at": "2026-07-17T00:00:01Z",
+			"run_id": "01919000-0000-7000-8000-0000000000ff",
+			"sandbox_profile_digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+			"unit_id": "unit-fixture-v3",
+			"worker_manifest_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+			"workflow_id": "workflow-fixture-v3"
+		}
+	},
+	{
+		"ModelActionAuthorizedV1": {
+			"action_id": "action-fixture-v3",
+			"action_request_digest": "sha256:a85f732d4f92503b57e50130c8fd9d3d7b0e4e64239c4e2a7d8a4042f11029d9",
+			"action_request_ref": "01919000-0000-7000-8000-000000000041",
+			"attempt": 1,
+			"authorization_actor": "kernel",
+			"authorization_digest": "sha256:441ef9d4c2b07c7756fe468a01a6f7be1f7b14f1c4ef687a7b92e02ab84f2fd0",
+			"authorization_ref": "authorization:fixture-v3",
+			"canonical_input_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			"context_manifest_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+			"dispatch_envelope_digest": "sha256:6feb096f077a3b5c01187afae91d56d7892a2e560e61fa807892a3be02cf4841",
+			"dispatch_event_ref": "01919000-0000-7000-8000-000000000040",
+			"execution_role": "implementer",
+			"expires_at": "2026-07-17T00:30:00Z",
+			"idempotency_key": "action:fixture-v3",
+			"model_request_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+			"packet_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+			"policy_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			"provenance_ref": "admission:fixture-v3",
+			"run_id": "01919000-0000-7000-8000-0000000000ff",
+			"sandbox_profile_digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+			"trust_scope_digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+			"unit_id": "unit-fixture-v3",
+			"workflow_id": "workflow-fixture-v3"
+		}
+	},
+	{
+		"ModelActionIntentV1": {
+			"action_id": "action-fixture-v3",
+			"action_request_digest": "sha256:a85f732d4f92503b57e50130c8fd9d3d7b0e4e64239c4e2a7d8a4042f11029d9",
+			"action_request_event_ref": "01919000-0000-7000-8000-000000000043",
+			"attempt": 1,
+			"canonical_input_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			"canonical_input_ref": "cas:input:fixture-v3",
+			"dispatch_envelope_digest": "sha256:6feb096f077a3b5c01187afae91d56d7892a2e560e61fa807892a3be02cf4841",
+			"dispatch_event_ref": "01919000-0000-7000-8000-000000000042",
+			"idempotency_key": "action:fixture-v3",
+			"intended_at": "2026-07-17T00:00:03Z",
+			"intent_actor": "kernel",
+			"intent_digest": "sha256:51b8d8388272930737e7bb2d08e83180c5f963bf991868f67f22b802d05ef158",
+			"model_request_evidence": {
+				"cas_ref": "cas:sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+				"digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+				"schema_version": 1
+			},
+			"provenance_ref": "admission:fixture-v3",
+			"run_id": "01919000-0000-7000-8000-0000000000ff",
+			"trust_scope_evidence": {
+				"cas_ref": "cas:sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+				"digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+				"schema_version": 1
+			},
+			"unit_id": "unit-fixture-v3",
+			"workflow_id": "workflow-fixture-v3"
+		}
+	},
+	{
+		"ModelActionAuthorizedV2": {
+			"authorization_actor": "kernel",
+			"authorization_digest": "sha256:555b24af1e5c707f0777504fe695332679e9ae6d88cbb149f9b748e944af2e5f",
+			"authorization_ref": "authorization:fixture-v3:v2",
+			"expires_at": "2026-07-17T00:30:00Z",
+			"intent_digest": "sha256:51b8d8388272930737e7bb2d08e83180c5f963bf991868f67f22b802d05ef158",
+			"intent_event_ref": "01919000-0000-7000-8000-000000000044",
+			"model_request_evidence": {
+				"cas_ref": "cas:sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+				"digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+				"schema_version": 1
+			},
+			"trust_scope_evidence": {
+				"cas_ref": "cas:sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+				"digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+				"schema_version": 1
+			}
+		}
+	},
+	{
+		"ActionReceiptRecordedV2": {
+			"action_id": "action-fixture-v3",
+			"action_receipt_ref": "receipt:fixture-v3",
+			"action_request_digest": "sha256:a85f732d4f92503b57e50130c8fd9d3d7b0e4e64239c4e2a7d8a4042f11029d9",
+			"attempt": 1,
+			"authority_actor": "kernel",
+			"authorization_ref": "authorization:fixture-v3",
+			"capability_bundle_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			"completed_at": "2026-07-17T00:00:02Z",
+			"context_manifest_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+			"dispatch_envelope_digest": "sha256:6feb096f077a3b5c01187afae91d56d7892a2e560e61fa807892a3be02cf4841",
+			"evidence_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+			"evidence_ref": "cas:evidence:fixture-v3",
+			"execution_role": "implementer",
+			"idempotency_key": "action:fixture-v3",
+			"outcome": "succeeded",
+			"policy_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			"provenance_ref": "admission:fixture-v3",
+			"redactions": [],
+			"resource_usage": {
+				"cpu_time_ms": 9007199254740991,
+				"input_bytes": 9007199254740991,
+				"output_bytes": 9007199254740991,
+				"peak_memory_bytes": 9007199254740991,
+				"wall_time_ms": 9007199254740991
+			},
+			"result_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+			"result_ref": "cas:result:fixture-v3",
+			"run_id": "01919000-0000-7000-8000-0000000000ff",
+			"sandbox_profile_digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+			"unit_id": "unit-fixture-v3",
+			"worker_manifest_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+			"workflow_id": "workflow-fixture-v3"
+		}
+	},
+	{
+		"ActionReceiptSetRecordedV1": {
+			"action_receipt_set_digest": "sha256:f43508cec129abb2cc50acf15f414a29ed03af5eebbd2013e65da1540cf7c425",
+			"action_receipt_set_ref": "receipt-set:fixture-v3",
+			"attempt": 1,
+			"dispatch_envelope_digest": "sha256:6feb096f077a3b5c01187afae91d56d7892a2e560e61fa807892a3be02cf4841",
+			"provenance_ref": "admission:fixture-v3",
+			"receipts": [
+				{
+					"action_id": "action-fixture-v3",
+					"action_receipt_digest": "sha256:56f675f5aa6eaf0dcdb323e76acd6f51f9e212070154e94ef50463a9250628fe",
+					"action_receipt_ref": "receipt:fixture-v3"
+				}
+			],
+			"run_id": "01919000-0000-7000-8000-0000000000ff",
+			"sealed_at": "2026-07-17T00:00:03Z",
+			"unit_id": "unit-fixture-v3",
+			"workflow_id": "workflow-fixture-v3"
+		}
+	},
+	{
+		"AttemptContextRecordedV1": {
+			"attempt_context_digest": "sha256:4ccdaf8078c0b235e4ce092c4a4e41ad82eb45129568875bb8745606cdaed230",
+			"feedback_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			"feedback_ref": "cas:retry-feedback:fixture",
+			"idempotency_key": "retry-context:fixture:1:2",
+			"next_attempt": 2,
+			"next_dispatch_envelope_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+			"next_dispatch_idempotency_key": "dispatch:fixture:2",
+			"prior_action_receipt_digest": "sha256:56f675f5aa6eaf0dcdb323e76acd6f51f9e212070154e94ef50463a9250628fe",
+			"prior_action_receipt_ref": "receipt:fixture-v3",
+			"prior_attempt": 1,
+			"prior_dispatch_envelope_digest": "sha256:6feb096f077a3b5c01187afae91d56d7892a2e560e61fa807892a3be02cf4841",
+			"prior_terminal_event_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			"prior_terminal_event_ref": "01919000-0000-7000-8000-000000000045",
+			"recorded_at": "2026-07-17T00:00:04Z",
+			"retry_action_namespace": "retry-action:fixture:2",
+			"run_id": "01919000-0000-7000-8000-0000000000ff",
+			"unit_id": "unit-fixture-v3",
+			"workflow_id": "workflow-fixture-v3",
+			"workflow_revision": "r1"
+		}
+	},
+	{
+		"CandidateCreatedV2": {
+			"action_receipt_set_digest": "sha256:f43508cec129abb2cc50acf15f414a29ed03af5eebbd2013e65da1540cf7c425",
+			"action_receipt_set_ref": "receipt-set:fixture-v3",
+			"attempt": 1,
+			"base_commit_sha": "0000000000000000000000000000000000000000",
+			"candidate_commit_sha": "1111111111111111111111111111111111111111",
+			"candidate_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			"candidate_id": "candidate-fixture-v3",
+			"candidate_ref": "refs/buildplane/candidates/candidate-fixture-v3/run-fixture/1",
+			"changed_files_digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+			"commit_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			"envelope_digest": "sha256:6feb096f077a3b5c01187afae91d56d7892a2e560e61fa807892a3be02cf4841",
+			"patch_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+			"provenance_ref": "admission:fixture-v3",
+			"run_id": "01919000-0000-7000-8000-0000000000ff",
+			"tree_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+			"unit_id": "unit-fixture-v3",
+			"workflow_id": "workflow-fixture-v3"
+		}
+	},
+	{
+		"CandidateCompletionRecordedV1": {
+			"action_receipt_digest": "sha256:56f675f5aa6eaf0dcdb323e76acd6f51f9e212070154e94ef50463a9250628fe",
+			"action_receipt_ref": "receipt:fixture-v3",
+			"action_request_digest": "sha256:a85f732d4f92503b57e50130c8fd9d3d7b0e4e64239c4e2a7d8a4042f11029d9",
+			"action_request_ref": "01919000-0000-7000-8000-000000000041",
+			"activity_claim_event_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+			"activity_claim_event_ref": "01919000-0000-7000-8000-000000000047",
+			"activity_result_event_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+			"activity_result_event_ref": "01919000-0000-7000-8000-000000000048",
+			"attempt": 1,
+			"candidate_create_action_id": "action-fixture-v3",
+			"candidate_created_event_ref": "01919000-0000-7000-8000-000000000046",
+			"candidate_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			"completed_at": "2026-07-17T00:00:04Z",
+			"completion_digest": "sha256:3b07fd7a5aafbf1cdd99cb755ac2015619c03eeef7b77306bc2fa67286069a27",
+			"provenance_ref": "admission:fixture-v3",
+			"run_id": "01919000-0000-7000-8000-0000000000ff",
+			"unit_id": "unit-fixture-v3",
+			"workflow_id": "workflow-fixture-v3"
+		}
+	},
+	{
+		"ReviewVerdictRecordedV2": {
+			"acceptance_contract_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			"acceptance_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			"acceptance_ref": "acceptance:fixture-v3",
+			"attempt": 1,
+			"candidate_commit_sha": "1111111111111111111111111111111111111111",
+			"candidate_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			"candidate_envelope_digest": "sha256:6feb096f077a3b5c01187afae91d56d7892a2e560e61fa807892a3be02cf4841",
+			"candidate_view": {
+				"candidate_commit_sha": "1111111111111111111111111111111111111111",
+				"candidate_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+				"candidate_ref": "refs/buildplane/candidates/candidate-fixture-v3/run-fixture/1",
+				"mount_path_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+				"network_disabled": true,
+				"read_only": true,
+				"reviewer_context_manifest_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+				"reviewer_sandbox_profile_digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+				"tree_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+			},
+			"candidate_view_digest": "sha256:fbe6e46799c46ab3cdcb6f2086ac6841622e993d90364c77d502dbec9fec10be",
+			"candidate_view_ref": "candidate-view:fixture-v2",
+			"confidence": 0.99,
+			"decision": "approve",
+			"findings": [],
+			"provenance_ref": "admission:fixture-v3",
+			"review_action_receipt_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			"review_action_receipt_ref": "receipt:review-action:fixture-v2",
+			"review_action_receipt_set_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+			"review_action_receipt_set_ref": "receipt-set:review:fixture-v2",
+			"review_action_request_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			"review_output_digest": "sha256:db1309382bd98c39e46d8b24d86c19a53d3d04fdfadea4ee96dda87d8e1350ee",
+			"review_output_ref": "cas:sha256:db1309382bd98c39e46d8b24d86c19a53d3d04fdfadea4ee96dda87d8e1350ee",
+			"review_ref": "review:fixture-v2",
+			"review_verdict_action_id": "review-action:fixture-v2",
+			"reviewed_at": "2026-07-17T00:02:00Z",
+			"reviewer_attempt": 1,
+			"reviewer_authority": "reviewer",
+			"reviewer_dispatch_envelope_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			"reviewer_execution_role": "reviewer",
+			"reviewer_manifest_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+			"reviewer_unit_id": "review-unit-fixture-v3",
+			"reviewer_workflow_id": "workflow-review-fixture-v3",
+			"run_id": "01919000-0000-7000-8000-0000000000ff",
+			"unit_id": "unit-fixture-v3",
+			"workflow_id": "workflow-fixture-v3"
+		}
+	},
+	{
+		"WorkflowTimerScheduledV1": {
+			"attempt": 1,
+			"dispatch_envelope_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			"dispatch_event_ref": "01919000-0000-7000-8000-000000000089",
+			"due_at": "2026-07-17T00:10:00Z",
+			"idempotency_key": "timer:fixture",
+			"run_id": "01919000-0000-7000-8000-0000000000ff",
+			"scheduled_at": "2026-07-17T00:00:00Z",
+			"scheduled_by": "kernel:fixture",
+			"timer_id": "deadline:fixture",
+			"timer_kind": "workflow_deadline",
+			"unit_id": "unit-lifecycle-fixture",
+			"workflow_id": "workflow-lifecycle-fixture",
+			"workflow_revision": "r1"
+		}
+	},
+	{
+		"WorkflowTimerFiredV1": {
+			"attempt": 1,
+			"dispatch_envelope_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			"dispatch_event_ref": "01919000-0000-7000-8000-000000000089",
+			"fired_at": "2026-07-17T00:10:00Z",
+			"fired_by": "kernel:fixture",
+			"idempotency_key": "timer:fixture",
+			"run_id": "01919000-0000-7000-8000-0000000000ff",
+			"timer_id": "deadline:fixture",
+			"timer_schedule_event_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			"timer_schedule_event_ref": "01919000-0000-7000-8000-000000000090",
+			"unit_id": "unit-lifecycle-fixture",
+			"workflow_id": "workflow-lifecycle-fixture",
+			"workflow_revision": "r1"
+		}
+	},
+	{
+		"WorkflowCancellationRequestedV1": {
+			"attempt": 1,
+			"cancellation_id": "cancellation:fixture",
+			"cause": "timer_elapsed",
+			"dispatch_envelope_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			"dispatch_event_ref": "01919000-0000-7000-8000-000000000089",
+			"idempotency_key": "cancellation:fixture",
+			"requested_at": "2026-07-17T00:10:01Z",
+			"requested_by": "kernel:fixture",
+			"run_id": "01919000-0000-7000-8000-0000000000ff",
+			"timer_fired_event_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+			"timer_fired_event_ref": "01919000-0000-7000-8000-000000000091",
+			"unit_id": "unit-lifecycle-fixture",
+			"workflow_id": "workflow-lifecycle-fixture",
+			"workflow_revision": "r1"
+		}
+	},
+	{
+		"WorkflowTerminalV2": {
+			"attempt": 1,
+			"cancellation_request_event_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			"cancellation_request_event_ref": "01919000-0000-7000-8000-000000000092",
+			"completed_at": "2026-07-17T00:10:02Z",
+			"idempotency_key": "workflow-terminal-v2:fixture",
+			"outcome": "cancelled",
+			"reason": "deadline elapsed",
+			"unit_id": "unit-lifecycle-fixture",
+			"workflow_id": "workflow-lifecycle-fixture",
+			"workflow_revision": "r1"
+		}
 	}
 ]

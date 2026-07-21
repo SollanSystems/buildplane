@@ -74,6 +74,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "bp-authority-broker"
+version = "0.1.0"
+dependencies = [
+ "bp-ledger",
+ "bp-replay",
+ "chrono",
+ "ed25519-dalek",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "bp-cli"
 version = "0.1.0"
 dependencies = [
@@ -85,9 +97,13 @@ dependencies = [
  "bp-replay",
  "bp-storage-sqlite",
  "bp-ui-terminal",
+ "chrono",
+ "ed25519-dalek",
  "futures",
  "serde",
  "serde_json",
+ "sha2",
+ "tempfile",
  "uuid",
 ]
 
@@ -257,6 +273,7 @@ version = "0.1.0"
 dependencies = [
  "bp-ledger",
  "chrono",
+ "ed25519-dalek",
  "rusqlite",
  "serde",
  "serde_json",

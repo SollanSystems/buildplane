@@ -25,3 +25,20 @@ export {
 } from "./failure.js";
 export * from "./generated/index.js";
 export type { Payload } from "./payload.js";
+export {
+	ACTION_RESOURCE_USAGE_MAX_SAFE_INTEGER,
+	assertActionReceiptRecordedV2SafeIntegerResources,
+	assertActionResourceUsageV1SafeIntegers,
+} from "./payload.js";
+export {
+	type ActivityClaimResultLine,
+	type ActivityHeartbeatResultLine,
+	type ActivityResultOutcomeWireV1,
+	type ActivityResultResultLine,
+	buildClaimActivityV1,
+	buildHeartbeatActivityV1,
+	buildRecordActivityResultV1,
+	type ClaimActivityV1Args,
+	type HeartbeatActivityV1Args,
+	type RecordActivityResultV1Args,
+} from "./wire.js";

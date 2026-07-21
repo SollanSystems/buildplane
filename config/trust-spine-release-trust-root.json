@@ -1,0 +1,9 @@
+{
+	"format": "buildplane.trust-spine.release-trust-root.v1",
+	"schemaVersion": 1,
+	"maxCampaignAgeHours": 24,
+	"trustedHosts": [],
+	"trustedTapeSigners": [],
+	"trustedCheckpointSigners": [],
+	"releasePolicy": null
+}

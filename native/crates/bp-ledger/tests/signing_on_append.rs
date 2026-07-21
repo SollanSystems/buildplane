@@ -62,7 +62,8 @@ fn trusted_for(signing_key: &SigningKey) -> TrustedPublicKeys {
 fn signed_append_persists_event_and_signature_and_reads_verified() {
     let tmp = tempfile::tempdir().unwrap();
     write_fixture_key(tmp.path(), "kernel", "kernel-main");
-    let signing_key = load_signing_key_at(tmp.path(), &KeyringRef::new("kernel", "kernel-main")).unwrap();
+    let signing_key =
+        load_signing_key_at(tmp.path(), &KeyringRef::new("kernel", "kernel-main")).unwrap();
 
     let store = SqliteStore::open_in_memory().unwrap();
     let run_id = RunId::new();
@@ -94,7 +95,8 @@ fn signed_append_persists_event_and_signature_and_reads_verified() {
 fn signing_failure_fails_closed_event_not_persisted() {
     let tmp = tempfile::tempdir().unwrap();
     write_fixture_key(tmp.path(), "kernel", "kernel-main");
-    let signing_key = load_signing_key_at(tmp.path(), &KeyringRef::new("kernel", "kernel-main")).unwrap();
+    let signing_key =
+        load_signing_key_at(tmp.path(), &KeyringRef::new("kernel", "kernel-main")).unwrap();
 
     let store = SqliteStore::open_in_memory().unwrap();
     let run_id = RunId::new();
@@ -184,7 +186,10 @@ fn signature_insert_failure_rolls_back_event_row_atomically() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(this_event_rows, 0, "no orphaned event row for the failed append");
+    assert_eq!(
+        this_event_rows, 0,
+        "no orphaned event row for the failed append"
+    );
 
     // (c) no partial state: only the single pre-seeded signature row remains.
     let sig_count: i64 = store
@@ -195,14 +200,18 @@ fn signature_insert_failure_rolls_back_event_row_atomically() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(sig_count, 1, "only the pre-seeded signature row should remain");
+    assert_eq!(
+        sig_count, 1,
+        "only the pre-seeded signature row should remain"
+    );
 }
 
 #[test]
 fn signed_append_errors_never_contain_private_key_bytes() {
     let tmp = tempfile::tempdir().unwrap();
     write_fixture_key(tmp.path(), "kernel", "kernel-main");
-    let signing_key = load_signing_key_at(tmp.path(), &KeyringRef::new("kernel", "kernel-main")).unwrap();
+    let signing_key =
+        load_signing_key_at(tmp.path(), &KeyringRef::new("kernel", "kernel-main")).unwrap();
 
     let store = SqliteStore::open_in_memory().unwrap();
     let run_id = RunId::new();

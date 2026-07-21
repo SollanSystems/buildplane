@@ -9,6 +9,10 @@ use bp_ledger::payload::plan_lifecycle::{
     PlanAdmittedV1, PlanReceiptOutcome, PlanReceiptRecordedV1,
 };
 use bp_ledger::payload::run_lifecycle::{RunCompletedV1, RunOutcome, RunStartedV1};
+use bp_ledger::payload::trust_spine::{
+    CommitModeV1, DispatchBudgetV1, DispatchEnvelopeV1, ExecutionRoleV1, SignatureRefV1,
+    TrustTierV1,
+};
 use bp_ledger::payload::unit_lifecycle::UnitStartedV1;
 use bp_ledger::payload::workspace::{PostWriteState, WorkspaceWriteV1};
 use bp_ledger::payload::Payload;
@@ -18,15 +22,58 @@ use chrono::Utc;
 use std::collections::BTreeMap;
 
 fn event_of(kind: EventKind, payload: Payload) -> Event {
+    event_for_run(RunId::new(), kind, payload)
+}
+
+fn event_for_run(run_id: RunId, kind: EventKind, payload: Payload) -> Event {
     Event {
         id: EventId::new(),
-        run_id: RunId::new(),
+        run_id,
         parent_event_id: None,
         schema_version: 1,
         kind,
         occurred_at: Utc::now(),
         payload,
     }
+}
+
+fn governed_dispatch_event(run_id: RunId) -> Event {
+    let digest_a = format!("sha256:{}", "a".repeat(64));
+    let digest_b = format!("sha256:{}", "b".repeat(64));
+    let digest_c = format!("sha256:{}", "c".repeat(64));
+    event_for_run(
+        run_id,
+        EventKind::DispatchEnvelope,
+        Payload::DispatchEnvelopeV1(DispatchEnvelopeV1 {
+            workflow_id: "workflow-activity".into(),
+            workflow_revision: "r1".into(),
+            unit_id: "unit-activity".into(),
+            attempt: 1,
+            execution_role: ExecutionRoleV1::Implementer,
+            commit_mode: CommitModeV1::Atomic,
+            provenance_ref: "admission:activity".into(),
+            base_commit_sha: "1".repeat(40),
+            capability_bundle_digest: digest_a.clone(),
+            acceptance_contract_digest: digest_b.clone(),
+            context_manifest_digest: digest_c.clone(),
+            worker_manifest_digest: digest_a,
+            sandbox_profile_digest: digest_b,
+            budget: DispatchBudgetV1 {
+                max_tokens: Some(1),
+                max_compute_time_ms: Some(1),
+            },
+            trust_tier: TrustTierV1::Governed,
+            idempotency_key: "dispatch:workflow-activity:unit-activity:1".into(),
+            issued_at: "2026-07-18T00:00:00Z".into(),
+            expires_at: "2026-07-18T01:00:00Z".into(),
+            envelope_digest: digest_c,
+            signature_ref: SignatureRefV1 {
+                algorithm: "ed25519".into(),
+                key_id: "kernel-main".into(),
+                signature: "detached-signature".into(),
+            },
+        }),
+    )
 }
 
 #[test]
@@ -190,6 +237,7 @@ fn replay_state_deserializes_without_plan_cycle_fields_for_old_receipts() {
     assert_eq!(state.plan_admission, None);
     assert_eq!(state.activities.len(), 0);
     assert_eq!(state.plan_receipt, None);
+    assert_eq!(state.workflow_instance, None);
 }
 
 #[test]
@@ -344,6 +392,199 @@ fn duplicate_activity_completion_uses_last_recorded_result_deterministically() {
     assert_eq!(activity.completed_event_id, Some(second.id));
     assert_eq!(activity.result_digest.as_deref(), Some("sha256:second"));
     assert_eq!(activity.result, Some(serde_json::json!({ "attempt": 2 })));
+}
+
+#[test]
+fn governed_activity_rejects_orphan_completion() {
+    let mut state = ReplayState::default();
+    let run_id = RunId::new();
+    let dispatch = governed_dispatch_event(run_id);
+    let completed = event_for_run(
+        run_id,
+        EventKind::ActivityCompleted,
+        Payload::ActivityCompletedV1(ActivityCompletedV1 {
+            run_id,
+            activity_id: "governed-orphan".into(),
+            result_digest: "sha256:orphan-result".into(),
+            result: serde_json::json!({ "status": "passed" }),
+        }),
+    );
+
+    apply(&mut state, &dispatch);
+    assert_eq!(state.workflow_instances.len(), 1);
+    apply(&mut state, &completed);
+
+    assert!(!state.activities.contains_key("governed-orphan"));
+    assert!(matches!(
+        state.issues.last(),
+        Some(ReplayIssue::ActivityTransitionRejected { activity_id, .. })
+            if activity_id == "governed-orphan"
+    ));
+}
+
+#[test]
+fn governed_activity_rejects_cross_run_completion() {
+    let mut state = ReplayState::default();
+    let governed_run_id = RunId::new();
+    let unrelated_run_id = RunId::new();
+    let dispatch = governed_dispatch_event(governed_run_id);
+    let started = event_for_run(
+        governed_run_id,
+        EventKind::ActivityStarted,
+        Payload::ActivityStartedV1(ActivityStartedV1 {
+            run_id: governed_run_id,
+            activity_id: "governed-cross-run".into(),
+            activity_type: ActivityType::Tool,
+            input_digest: "sha256:cross-run-input".into(),
+        }),
+    );
+    let cross_run_completion = event_for_run(
+        unrelated_run_id,
+        EventKind::ActivityCompleted,
+        Payload::ActivityCompletedV1(ActivityCompletedV1 {
+            run_id: unrelated_run_id,
+            activity_id: "governed-cross-run".into(),
+            result_digest: "sha256:cross-run-result".into(),
+            result: serde_json::json!({ "status": "passed" }),
+        }),
+    );
+
+    apply(&mut state, &dispatch);
+    apply(&mut state, &started);
+    apply(&mut state, &cross_run_completion);
+
+    let activity = state
+        .activities
+        .get("governed-cross-run")
+        .expect("governed activity state");
+    let governed_run_id_text = governed_run_id.to_string();
+    assert_eq!(
+        activity.run_id.as_deref(),
+        Some(governed_run_id_text.as_str())
+    );
+    assert_eq!(activity.started_event_id, Some(started.id));
+    assert_eq!(activity.completed_event_id, None);
+    assert!(matches!(
+        state.issues.last(),
+        Some(ReplayIssue::ActivityTransitionRejected { activity_id, .. })
+            if activity_id == "governed-cross-run"
+    ));
+}
+
+#[test]
+fn governed_activity_rejects_divergent_duplicate_completion() {
+    let mut state = ReplayState::default();
+    let run_id = RunId::new();
+    let dispatch = governed_dispatch_event(run_id);
+    let started = event_for_run(
+        run_id,
+        EventKind::ActivityStarted,
+        Payload::ActivityStartedV1(ActivityStartedV1 {
+            run_id,
+            activity_id: "governed-divergent-duplicate".into(),
+            activity_type: ActivityType::Command,
+            input_digest: "sha256:duplicate-input".into(),
+        }),
+    );
+    let first = event_for_run(
+        run_id,
+        EventKind::ActivityCompleted,
+        Payload::ActivityCompletedV1(ActivityCompletedV1 {
+            run_id,
+            activity_id: "governed-divergent-duplicate".into(),
+            result_digest: "sha256:first-result".into(),
+            result: serde_json::json!({ "attempt": 1 }),
+        }),
+    );
+    let divergent_duplicate = event_for_run(
+        run_id,
+        EventKind::ActivityCompleted,
+        Payload::ActivityCompletedV1(ActivityCompletedV1 {
+            run_id,
+            activity_id: "governed-divergent-duplicate".into(),
+            result_digest: "sha256:second-result".into(),
+            result: serde_json::json!({ "attempt": 2 }),
+        }),
+    );
+
+    apply(&mut state, &dispatch);
+    apply(&mut state, &started);
+    apply(&mut state, &first);
+    apply(&mut state, &divergent_duplicate);
+
+    let activity = state
+        .activities
+        .get("governed-divergent-duplicate")
+        .expect("governed activity state");
+    assert_eq!(activity.completed_event_id, Some(first.id));
+    assert_eq!(
+        activity.result_digest.as_deref(),
+        Some("sha256:first-result")
+    );
+    assert_eq!(activity.result, Some(serde_json::json!({ "attempt": 1 })));
+    assert!(matches!(
+        state.issues.last(),
+        Some(ReplayIssue::ActivityTransitionRejected { activity_id, .. })
+            if activity_id == "governed-divergent-duplicate"
+    ));
+}
+
+#[test]
+fn governed_activity_ignores_identical_duplicate_completion() {
+    let mut state = ReplayState::default();
+    let run_id = RunId::new();
+    let dispatch = governed_dispatch_event(run_id);
+    let started = event_for_run(
+        run_id,
+        EventKind::ActivityStarted,
+        Payload::ActivityStartedV1(ActivityStartedV1 {
+            run_id,
+            activity_id: "governed-identical-duplicate".into(),
+            activity_type: ActivityType::Model,
+            input_digest: "sha256:duplicate-input".into(),
+        }),
+    );
+    let first = event_for_run(
+        run_id,
+        EventKind::ActivityCompleted,
+        Payload::ActivityCompletedV1(ActivityCompletedV1 {
+            run_id,
+            activity_id: "governed-identical-duplicate".into(),
+            result_digest: "sha256:stable-result".into(),
+            result: serde_json::json!({ "status": "passed" }),
+        }),
+    );
+    let identical_duplicate = event_for_run(
+        run_id,
+        EventKind::ActivityCompleted,
+        Payload::ActivityCompletedV1(ActivityCompletedV1 {
+            run_id,
+            activity_id: "governed-identical-duplicate".into(),
+            result_digest: "sha256:stable-result".into(),
+            result: serde_json::json!({ "status": "passed" }),
+        }),
+    );
+
+    apply(&mut state, &dispatch);
+    apply(&mut state, &started);
+    apply(&mut state, &first);
+    let issues_before_duplicate = state.issues.len();
+    apply(&mut state, &identical_duplicate);
+
+    let activity = state
+        .activities
+        .get("governed-identical-duplicate")
+        .expect("governed activity state");
+    assert_eq!(activity.completed_event_id, Some(first.id));
+    assert_eq!(
+        activity.result_digest.as_deref(),
+        Some("sha256:stable-result")
+    );
+    assert_eq!(
+        activity.result,
+        Some(serde_json::json!({ "status": "passed" }))
+    );
+    assert_eq!(state.issues.len(), issues_before_duplicate);
 }
 
 #[test]

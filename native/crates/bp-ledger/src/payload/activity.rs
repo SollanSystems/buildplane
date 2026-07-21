@@ -73,6 +73,9 @@ mod tests {
 
     #[test]
     fn activity_type_serializes_snake_case() {
-        assert_eq!(serde_json::to_string(&ActivityType::Command).unwrap(), r#""command""#);
+        assert_eq!(
+            serde_json::to_string(&ActivityType::Command).unwrap(),
+            r#""command""#
+        );
     }
 }

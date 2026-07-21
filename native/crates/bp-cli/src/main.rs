@@ -1,4 +1,5 @@
 mod fork_cli;
+mod governed_authority;
 mod ledger_cli;
 mod memory_cli;
 mod pack_export;
@@ -78,8 +79,32 @@ fn run() -> Result<(), String> {
         Command::Ledger(ledger_cli::LedgerCommand::Serve(serve_args)) => {
             ledger_cli::run_serve(serve_args)
         }
+        Command::Ledger(ledger_cli::LedgerCommand::ServeGovernedV1(serve_args)) => {
+            ledger_cli::run_serve_governed_v1(serve_args)
+        }
         Command::Ledger(ledger_cli::LedgerCommand::Replay(replay_args)) => {
             ledger_cli::run_replay(replay_args)
+        }
+        Command::Ledger(ledger_cli::LedgerCommand::ResolveGovernedDispatchV3(resolve_args)) => {
+            ledger_cli::run_resolve_governed_dispatch_v3(resolve_args)
+        }
+        Command::Ledger(ledger_cli::LedgerCommand::GovernedVerifierV1(verifier_args)) => {
+            ledger_cli::run_governed_verifier_v1(verifier_args)
+        }
+        Command::Ledger(ledger_cli::LedgerCommand::GovernedModelIntentV1(intent_args)) => {
+            ledger_cli::run_governed_model_intent_v1(intent_args)
+        }
+        Command::Ledger(ledger_cli::LedgerCommand::GovernedAuthorityV1) => {
+            ledger_cli::run_governed_authority_v1()
+        }
+        Command::Ledger(ledger_cli::LedgerCommand::ProvisionGovernedAuthorityV1) => {
+            ledger_cli::run_provision_governed_authority_v1()
+        }
+        Command::Ledger(ledger_cli::LedgerCommand::ProvisionGovernedReviewerAuthorityV1) => {
+            ledger_cli::run_provision_governed_reviewer_authority_v1()
+        }
+        Command::Ledger(ledger_cli::LedgerCommand::ProvisionGovernedOperatorAuthorityV1) => {
+            ledger_cli::run_provision_governed_operator_authority_v1()
         }
         Command::Ledger(ledger_cli::LedgerCommand::ExportSignedTape(export_args)) => {
             ledger_cli::run_export_signed_tape(export_args)
@@ -757,6 +782,42 @@ mod tests {
                 reason: Some("validated across packs".to_string()),
                 json: false,
             }))
+        );
+    }
+
+    #[test]
+    fn routes_closed_governed_reviewer_authority_provision_command() {
+        let command = parse_args_with_default_native_root(
+            vec![
+                "ledger",
+                "provision-governed-reviewer-authority-v1",
+                "--confirm",
+            ],
+            PathBuf::from("/tmp/buildplane/native"),
+        )
+        .expect("closed reviewer authority provision command should parse");
+
+        assert_eq!(
+            command,
+            Command::Ledger(ledger_cli::LedgerCommand::ProvisionGovernedReviewerAuthorityV1)
+        );
+    }
+
+    #[test]
+    fn routes_closed_governed_operator_authority_provision_command() {
+        let command = parse_args_with_default_native_root(
+            vec![
+                "ledger",
+                "provision-governed-operator-authority-v1",
+                "--confirm",
+            ],
+            PathBuf::from("/tmp/buildplane/native"),
+        )
+        .expect("closed operator authority provision command should parse");
+
+        assert_eq!(
+            command,
+            Command::Ledger(ledger_cli::LedgerCommand::ProvisionGovernedOperatorAuthorityV1)
         );
     }
 }

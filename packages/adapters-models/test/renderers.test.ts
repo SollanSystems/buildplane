@@ -96,8 +96,9 @@ describe("createClaudeRenderer", () => {
 		// Reviewer autonomy contract is different
 		expect(prompt).toContain("reviewer");
 		expect(prompt).toContain(
-			"Do NOT modify source files unless explicitly correcting",
+			"Do NOT modify source files or create persistent files",
 		);
+		expect(prompt).toContain("Do NOT run mutating or destructive commands");
 		// Instructions are review-focused
 		expect(prompt).toContain("Produce a verdict");
 	});
@@ -107,6 +108,19 @@ describe("createClaudeRenderer", () => {
 
 		expect(prompt).toContain("Adversarial Review Task");
 		expect(prompt).toContain("adversary");
+		expect(prompt).toContain(
+			"Do NOT modify source files or create persistent files",
+		);
+		expect(prompt).toContain("Do NOT run mutating or destructive commands");
+	});
+
+	it("treats the judge role as read-only evaluation", () => {
+		const { prompt } = renderer.render(minimalIntent, "judge");
+
+		expect(prompt).toContain("Judge Task");
+		expect(prompt).toContain("Do NOT modify source files");
+		expect(prompt).toContain("Produce a verdict");
+		expect(prompt).not.toContain("You may autonomously:");
 	});
 
 	it("includes codebase hints when present", () => {
@@ -212,6 +226,8 @@ describe("createCodexRenderer", () => {
 		expect(prompt).toContain('role="reviewer"');
 		expect(prompt).toContain("work-to-review");
 		expect(prompt).toContain("Produce a verdict");
+		expect(prompt).toContain("Do not modify files, create persistent files");
+		expect(prompt).toContain("run mutating commands");
 	});
 
 	it("adapts for adversary role", () => {
@@ -219,6 +235,16 @@ describe("createCodexRenderer", () => {
 
 		expect(prompt).toContain('role="adversary"');
 		expect(prompt).toContain("adversarial reviewer");
+		expect(prompt).toContain("Do not modify files, create persistent files");
+		expect(prompt).toContain("run mutating commands");
+	});
+
+	it("treats the judge role as read-only arbitration", () => {
+		const { prompt } = renderer.render(richIntent, "judge");
+
+		expect(prompt).toContain('role="judge"');
+		expect(prompt).toContain("do not modify files");
+		expect(prompt).toContain("<work-to-review>");
 	});
 
 	it("includes codebase-hints block when present", () => {

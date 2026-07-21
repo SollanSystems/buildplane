@@ -96,7 +96,9 @@ describe("runGraphAsync", () => {
 			maxConcurrent: 2,
 		};
 
-		const result = await orchestrator.runGraphAsync(graph, bus);
+		const result = await orchestrator.runGraphAsync(graph, bus, {
+			lane: "raw-legacy",
+		});
 
 		expect(result.outcome).toBe("passed");
 		expect(result.nodes).toHaveLength(2);
@@ -159,7 +161,9 @@ describe("runGraphAsync", () => {
 			maxConcurrent: 3,
 		};
 
-		const result = await orchestrator.runGraphAsync(graph, bus);
+		const result = await orchestrator.runGraphAsync(graph, bus, {
+			lane: "raw-legacy",
+		});
 		expect(result.outcome).toBe("passed");
 
 		// C must have started after both A and B were dispatched (at least one of them)
@@ -186,7 +190,9 @@ describe("runGraphAsync", () => {
 			maxConcurrent: 3,
 		};
 
-		const result = await orchestrator.runGraphAsync(graph, bus);
+		const result = await orchestrator.runGraphAsync(graph, bus, {
+			lane: "raw-legacy",
+		});
 		expect(result.outcome).toBe("failed");
 
 		const a = result.nodes.find((n) => n.unitId === "A");
@@ -219,7 +225,7 @@ describe("runGraphAsync", () => {
 			maxConcurrent: 2,
 		};
 
-		await orchestrator.runGraphAsync(graph, bus);
+		await orchestrator.runGraphAsync(graph, bus, { lane: "raw-legacy" });
 
 		const started = events.find((e) => e.kind === "graph-started");
 		expect(started).toBeDefined();
@@ -237,7 +243,9 @@ describe("runGraphAsync", () => {
 			maxConcurrent: 2,
 		};
 
-		const result = await orchestrator.runGraphAsync(graph, bus);
+		const result = await orchestrator.runGraphAsync(graph, bus, {
+			lane: "raw-legacy",
+		});
 
 		for (const node of result.nodes) {
 			expect(node.runId).toBeDefined();

@@ -2,11 +2,14 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 
 const root = resolve(__dirname, "../..");
 const cliSourceEntrypoint = resolve(root, "apps/cli/src/index.ts");
-const tsxLoaderEntrypoint = resolve(root, "node_modules/tsx/dist/loader.mjs");
+const tsxLoaderEntrypoint = pathToFileURL(
+	resolve(root, "node_modules/tsx/dist/loader.mjs"),
+).href;
 const cleanupPaths: string[] = [];
 
 afterEach(() => {
@@ -56,8 +59,8 @@ describe("CLI run-graph command", () => {
 					dependencies: [],
 					execution: {
 						kind: "command",
-						entrypoint: "echo",
-						args: ["A"],
+						entrypoint: process.execPath,
+						args: ["-e", "process.stdout.write('A\\n')"],
 					},
 				},
 			],
@@ -80,6 +83,7 @@ describe("CLI run-graph command", () => {
 					tsxLoaderEntrypoint,
 					cliSourceEntrypoint,
 					"run-graph",
+					"--raw",
 					"--graph",
 					graphPath,
 				],

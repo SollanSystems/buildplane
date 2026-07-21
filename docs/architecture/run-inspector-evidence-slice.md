@@ -69,6 +69,31 @@ Run Inspector's event vocabulary starts from the generated ledger `EventKind` en
 - `acceptance_recorded`
 - `operator_decision_recorded`
 - `result_ready`
+- `dispatch_envelope`
+- `dispatch_envelope_v2`
+- `dispatch_envelope_v3`
+- `workflow_graph_declared_v1`
+- `action_requested_v2`
+- `model_action_intent_v1`
+- `model_action_authorized_v1`
+- `model_action_authorized_v2`
+- `activity_claimed_v1`
+- `activity_heartbeat_recorded_v1`
+- `activity_result_recorded_v1`
+- `action_receipt_recorded_v2`
+- `action_receipt_set_recorded_v1`
+- `attempt_context_recorded_v1`
+- `candidate_created`
+- `candidate_created_v2`
+- `candidate_completion_recorded_v1`
+- `candidate_acceptance_recorded`
+- `review_verdict_recorded`
+- `review_verdict_recorded_v2`
+- `promotion_approval_requested`
+- `promotion_decision_recorded`
+- `promotion_result_recorded`
+- `promotion_reconciliation_resolved`
+- `workflow_terminal`
 - `tape_checkpoint`
 
 If a new visual state needs a new kind, add it to the ledger/runtime schema first and verify it through storage/tests. Do not add UI-only event kinds for model reasoning, vibes, confidence, or inferred progress.

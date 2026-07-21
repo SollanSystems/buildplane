@@ -66,12 +66,10 @@ mod tests {
             schema_version: 1,
             kind: EventKind::UnitCancelled,
             occurred_at: Utc::now(),
-            payload: Payload::UnitCancelledV1(
-                crate::payload::unit_lifecycle::UnitCancelledV1 {
-                    unit_id: "u-1".into(),
-                    cause: crate::payload::unit_lifecycle::CancelCause::Timeout,
-                },
-            ),
+            payload: Payload::UnitCancelledV1(crate::payload::unit_lifecycle::UnitCancelledV1 {
+                unit_id: "u-1".into(),
+                cause: crate::payload::unit_lifecycle::CancelCause::Timeout,
+            }),
         };
         assert_eq!(e.kind_str(), "unit_cancelled");
     }

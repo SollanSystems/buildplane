@@ -129,6 +129,31 @@ describe("parseStrategyPacket", () => {
 		);
 	});
 
+	it("rejects duplicate child unit ids before graph scheduling", () => {
+		expect(() =>
+			parseStrategyPacket({
+				id: "strategy-duplicate-child-id",
+				mode: "implement-then-review",
+				mergePolicy: "reviewer-must-approve",
+				children: [
+					{ role: "implementer", packet: minimalChildPacket },
+					{
+						role: "reviewer",
+						packet: {
+							...minimalReviewerPacket,
+							unit: {
+								...minimalReviewerPacket.unit,
+								id: "unit-impl",
+							},
+						},
+					},
+				],
+			}),
+		).toThrow(
+			'strategyPacket.children[1].packet.unit.id duplicates child unit id "unit-impl"',
+		);
+	});
+
 	it("validates nested child packets via parseUnitPacket", () => {
 		const badChildPacket = {
 			unit: {
@@ -154,5 +179,35 @@ describe("parseStrategyPacket", () => {
 		expect(() => parseStrategyPacket(raw)).toThrow(
 			"packet.unit.verificationContract must be a non-empty string",
 		);
+	});
+
+	it("normalizes an omitted child packet role to its declared strategy role", () => {
+		const result = parseStrategyPacket({
+			id: "strategy-role-normalization",
+			mode: "single",
+			mergePolicy: "direct",
+			children: [{ role: "reviewer", packet: minimalChildPacket }],
+		});
+
+		expect(result.children[0].packet.execution_role).toBe("reviewer");
+	});
+
+	it("rejects a child packet role that conflicts with its declared strategy role", () => {
+		expect(() =>
+			parseStrategyPacket({
+				id: "strategy-role-mismatch",
+				mode: "single",
+				mergePolicy: "direct",
+				children: [
+					{
+						role: "reviewer",
+						packet: {
+							...minimalChildPacket,
+							execution_role: "adversary",
+						},
+					},
+				],
+			}),
+		).toThrow(/execution_role.*does not match.*role/i);
 	});
 });

@@ -59,4 +59,19 @@ describe("buildEnvelope", () => {
 		const sorted = [...ids].sort();
 		expect(ids).toEqual(sorted);
 	});
+
+	it("rejects action receipt resource values outside JavaScript's safe integer range", () => {
+		expect(() =>
+			buildEnvelope({
+				runId,
+				schemaVersion: 1,
+				kind: "action_receipt_recorded_v2",
+				payload: {
+					resource_usage: {
+						wall_time_ms: Number.MAX_SAFE_INTEGER + 1,
+					},
+				},
+			}),
+		).toThrow(/wall_time_ms/);
+	});
 });

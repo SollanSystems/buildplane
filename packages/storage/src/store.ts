@@ -10,6 +10,7 @@ import {
 	type CreateProcedureInput,
 	type CreateRunOptions,
 	type CreateSearchableDocumentInput,
+	canonicalSha256Digest,
 	createRankedMemoryResult,
 	type DecidedUnexecutedDecision,
 	dedupeRankedMemoryResults,
@@ -25,6 +26,10 @@ import {
 	type ProcedureMemory,
 	type ProcedureRetrievalQuery,
 	type PromotedStructuredMemoryRecord,
+	type PromotionGitBindingV1,
+	parsePromotionDecisionV1,
+	parseReviewVerdictV1,
+	parseUnitPacket,
 	type RankedProcedureResult,
 	type RankedRepoFactResult,
 	type RankedSearchableDocumentResult,
@@ -46,6 +51,17 @@ import {
 	type WorkerLabel,
 	type WorkspaceSnapshot,
 } from "@buildplane/kernel";
+import type {
+	CandidateAcceptanceRecord as KernelCandidateAcceptanceRecord,
+	CandidateArtifactProjection as KernelCandidateArtifactProjection,
+	CandidateArtifactProjectionInput as KernelCandidateArtifactProjectionInput,
+	CandidateOutcomeInput as KernelCandidateOutcomeInput,
+	CandidatePromotionIntent as KernelCandidatePromotionIntent,
+	CandidatePromotionIntentInput as KernelCandidatePromotionIntentInput,
+	CandidatePromotionOutcome as KernelCandidatePromotionOutcome,
+	CandidatePromotionState as KernelCandidatePromotionState,
+	CandidateReviewRecord as KernelCandidateReviewRecord,
+} from "@buildplane/kernel/ports";
 import {
 	assertBuildplaneDatabaseIsInitialized,
 	openBuildplaneDatabase,
@@ -67,6 +83,7 @@ interface StoredRunRow {
 	readonly used_workspace: number;
 	readonly parent_run_id: string | null;
 	readonly strategy_id: string | null;
+	readonly trust_lane: "legacy" | "unsafe" | "governed";
 }
 
 interface StoredDecisionRow {
@@ -85,6 +102,60 @@ interface StoredWorkspaceRow {
 	readonly created_at: string;
 	readonly finalized_at: string | null;
 	readonly cleanup_error: string | null;
+}
+
+interface StoredCandidateArtifactRow {
+	readonly run_id: string;
+	readonly schema_version: number;
+	readonly candidate_id: string;
+	readonly candidate_key: string;
+	readonly candidate_ref: string;
+	readonly workflow_id: string | null;
+	readonly unit_id: string;
+	readonly attempt: number;
+	readonly provenance_ref: string | null;
+	readonly candidate_digest: string;
+	readonly base_commit_sha: string;
+	readonly candidate_commit_sha: string;
+	readonly commit_digest: string;
+	readonly tree_digest: string;
+	readonly patch_digest: string;
+	readonly changed_files_digest: string;
+	readonly envelope_digest: string | null;
+	readonly acceptance_contract_digest: string | null;
+	readonly action_receipt_digest: string | null;
+	readonly action_receipt_set_ref: string | null;
+	readonly action_receipt_set_digest: string | null;
+	readonly action_evidence_version: string | null;
+	readonly candidate_created_ref: string | null;
+	readonly created_at: string;
+}
+
+/**
+ * Tier-1 candidate-promotion write-ahead projection. The signed ledger remains
+ * the authority for a promotion decision; this row only gives recovery a
+ * durable, candidate-bound intent and terminal-effect marker.
+ */
+interface StoredCandidatePromotionRow {
+	readonly candidate_digest: string;
+	readonly idempotency_key: string;
+	readonly run_id: string;
+	readonly state: string;
+	readonly candidate_json: string;
+	readonly decision_json: string;
+	readonly acceptance_json: string;
+	readonly review_json: string;
+	readonly intent_canonical_json: string;
+	readonly prepared_at: string;
+	readonly recorded_at: string | null;
+	readonly executed_at: string | null;
+	readonly executed_outcome: string | null;
+	readonly merged_head_sha: string | null;
+	readonly promotion_git_binding_json: string | null;
+	readonly execution_claim_token: string | null;
+	readonly execution_claimed_at: string | null;
+	readonly execution_lease_expires_at: string | null;
+	readonly execution_claim_epoch: number;
 }
 
 interface StoredRepoFactRow {
@@ -170,10 +241,76 @@ interface StoredInspectEventRow {
 
 export interface StorageTestingHooks {
 	readonly failpoint?: (name: string) => void;
+	/** Deterministic clock for storage transition tests. */
+	readonly now?: () => Date;
 }
 
 export interface CreateStorageStoreOptions {
 	readonly testingHooks?: StorageTestingHooks;
+}
+
+/**
+ * Storage's immutable candidate projection input.
+ *
+ * `candidateId`, `candidateKey`, `candidateRef`, `attempt`, and
+ * `commitDigest` are the recovery identity emitted by the Git adapter. They
+ * let a later promotion/recovery path reconstruct the exact candidate without
+ * treating a run record as merge authority.
+ *
+ * This is deliberately not an admission or promotion contract. Governed
+ * callers may supply every V1 lineage field; raw and legacy callers may leave
+ * the V1-only fields absent while still retaining an immutable Git candidate.
+ * The storage adapter never treats these values as a signature or authority.
+ */
+export type CandidateArtifactProjectionInput =
+	KernelCandidateArtifactProjectionInput;
+
+/**
+ * Durable, immutable candidate metadata associated with one run.
+ *
+ * Optional governance lineage is present only when supplied by the caller;
+ * this projection does not infer authority for legacy/raw execution.
+ */
+export type CandidateArtifactProjection = KernelCandidateArtifactProjection;
+
+export type CandidateOutcomeInput = KernelCandidateOutcomeInput;
+
+export type CandidateAcceptanceRecord = KernelCandidateAcceptanceRecord;
+export type CandidateReviewRecord = KernelCandidateReviewRecord;
+export type CandidatePromotionState = KernelCandidatePromotionState;
+export type CandidatePromotionOutcome = KernelCandidatePromotionOutcome;
+export type CandidatePromotionIntentInput = KernelCandidatePromotionIntentInput;
+export type CandidatePromotionIntent = KernelCandidatePromotionIntent;
+
+/**
+ * Opaque, single-owner capability required to record a promotion effect after
+ * the write-ahead decision has been claimed. It is deliberately local to the
+ * durable projection: the signed decision/tape remains the authority for the
+ * decision itself, while this lease prevents two recoverers from entering the
+ * same Git effect concurrently.
+ */
+export interface CandidatePromotionExecutionLeaseV1 {
+	readonly schemaVersion: 1;
+	readonly state: "active";
+	readonly candidateDigest: string;
+	readonly idempotencyKey: string;
+	readonly leaseToken: string;
+	readonly claimedAt: string;
+	readonly leaseExpiresAt: string;
+	readonly claimEpoch: number;
+}
+
+/** Durable recovery view for a candidate-promotion execution lease. */
+export interface CandidatePromotionExecutionClaimStateV1 {
+	readonly schemaVersion: 1;
+	readonly state: "pending" | "active" | "expired" | "completed";
+	readonly candidateDigest: string;
+	readonly idempotencyKey: string;
+	readonly claimEpoch: number;
+	readonly claimedAt?: string;
+	readonly leaseExpiresAt?: string;
+	readonly executedAt?: string;
+	readonly executedOutcome?: CandidatePromotionOutcome;
 }
 
 type WorkspaceAwareStatusSnapshot = StatusSnapshot & {
@@ -184,12 +321,20 @@ type WorkspaceAwareStatusSnapshot = StatusSnapshot & {
 
 type WorkspaceAwareInspectSnapshot = InspectSnapshot & {
 	readonly workspace?: WorkspaceSnapshot;
+	readonly candidate?: CandidateArtifactProjection;
 	readonly strategy?: {
 		readonly strategyId: string;
 	};
 	readonly injectedMemories?: readonly PersistedInjectedMemoryRecord[];
 	readonly promotedStructuredMemories?: readonly PromotedStructuredMemoryRecord[];
 };
+
+const RAW_CANDIDATE_DIGEST_PATTERN = /^[a-f0-9]{64}$/;
+const GOVERNED_DIGEST_PATTERN = /^sha256:[a-f0-9]{64}$/;
+const FULL_GIT_COMMIT_SHA_PATTERN = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i;
+const PROMOTION_EXECUTION_LEASE_MS = 5 * 60 * 1000;
+const PROMOTION_EXECUTION_LEASE_TOKEN_PATTERN =
+	/^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 
 interface WorkspaceAwareStorageStore
 	extends Omit<BuildplaneStoragePort, "initializeProject"> {
@@ -219,6 +364,34 @@ interface WorkspaceAwareStorageStore
 			  },
 	): Run;
 	commitRunSuccessOutcome(runId: string, decision: ApprovedPolicyDecision): Run;
+	commitRunCandidateOutcome(runId: string, input: CandidateOutcomeInput): Run;
+	getCandidateArtifact(runId: string): CandidateArtifactProjection | null;
+	prepareCandidatePromotion(
+		input: CandidatePromotionIntentInput,
+	): CandidatePromotionIntent;
+	markCandidatePromotionRecorded(
+		candidateDigest: string,
+		idempotencyKey: string,
+	): void;
+	claimCandidatePromotionExecution(
+		candidateDigest: string,
+		idempotencyKey: string,
+	): CandidatePromotionExecutionLeaseV1;
+	getCandidatePromotionExecutionClaimState(
+		candidateDigest: string,
+		idempotencyKey: string,
+	): CandidatePromotionExecutionClaimStateV1;
+	markCandidatePromotionExecuted(
+		candidateDigest: string,
+		idempotencyKey: string,
+		outcome: {
+			outcome: CandidatePromotionOutcome;
+			mergedHeadSha?: string;
+			promotionGitBinding?: PromotionGitBindingV1;
+		},
+		executionLeaseToken?: string,
+	): void;
+	listPendingCandidatePromotions(): readonly CandidatePromotionIntent[];
 	recordWorkspaceDeleted(runId: string): void;
 	recordWorkspaceCleanupFailed(runId: string, message: string): void;
 	recordWorkspaceCleanedUp(runId: string): void;
@@ -296,6 +469,174 @@ function ensureRunsStrategyColumns(database: DatabaseSync): void {
 function ensureRunsAcceptanceShadowColumn(database: DatabaseSync): void {
 	if (!tableHasColumn(database, "runs", "acceptance_outcome")) {
 		database.exec("ALTER TABLE runs ADD COLUMN acceptance_outcome TEXT");
+	}
+}
+
+/**
+ * Execution authority is durable state, not a presentation flag. Historical
+ * rows are deliberately `legacy`; raw invocations are written as `unsafe` and
+ * can never acquire a trusted final verdict later in the run lifecycle.
+ */
+function ensureRunsTrustLaneColumn(database: DatabaseSync): void {
+	if (!tableHasColumn(database, "runs", "trust_lane")) {
+		database.exec(
+			"ALTER TABLE runs ADD COLUMN trust_lane TEXT NOT NULL DEFAULT 'legacy'",
+		);
+	}
+}
+
+/**
+ * Candidate artifacts predate the explicit acceptance-contract binding. Keep
+ * the column nullable for raw/legacy candidates, while governed promotion
+ * requires the value below. This migration must run before the strict schema
+ * assertion so existing state databases remain readable.
+ */
+function ensureCandidateArtifactAcceptanceContractDigestColumn(
+	database: DatabaseSync,
+): void {
+	if (
+		tableExists(database, "candidate_artifacts") &&
+		!tableHasColumn(
+			database,
+			"candidate_artifacts",
+			"acceptance_contract_digest",
+		)
+	) {
+		database.exec(
+			"ALTER TABLE candidate_artifacts ADD COLUMN acceptance_contract_digest TEXT",
+		);
+	}
+}
+
+/**
+ * V3 governed candidates replace the single pre-effect receipt digest with a
+ * sealed receipt-set reference and digest. These columns are deliberately
+ * nullable: rows written by V1/raw/legacy paths remain readable and cannot be
+ * retroactively represented as V3 evidence.
+ */
+function ensureCandidateArtifactActionEvidenceColumns(
+	database: DatabaseSync,
+): void {
+	if (!tableExists(database, "candidate_artifacts")) return;
+
+	for (const statement of [
+		"ALTER TABLE candidate_artifacts ADD COLUMN action_receipt_set_ref TEXT",
+		"ALTER TABLE candidate_artifacts ADD COLUMN action_receipt_set_digest TEXT",
+		"ALTER TABLE candidate_artifacts ADD COLUMN action_evidence_version TEXT",
+		"ALTER TABLE candidate_artifacts ADD COLUMN candidate_created_ref TEXT",
+	] as const) {
+		const columnName = statement.match(/ADD COLUMN ([^ ]+)/)?.[1];
+		if (
+			columnName &&
+			!tableHasColumn(database, "candidate_artifacts", columnName)
+		) {
+			database.exec(statement);
+		}
+	}
+}
+
+/**
+ * SQLite cannot widen the old executed_outcome CHECK constraint in place.
+ * Rebuild the narrow promotion projection transactionally so pre-existing
+ * prepared/recorded/promoted/rejected rows remain readable while every newly
+ * written strict result can retain its Git binding and reconciliation state.
+ */
+function ensureCandidatePromotionsReconciliationSchema(
+	database: DatabaseSync,
+): void {
+	if (!tableExists(database, "candidate_promotions")) return;
+	const schema = database
+		.prepare(
+			`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'candidate_promotions'`,
+		)
+		.get() as { sql?: string } | undefined;
+	const hasBinding = tableHasColumn(
+		database,
+		"candidate_promotions",
+		"promotion_git_binding_json",
+	);
+	if (hasBinding && schema?.sql?.includes("reconciliation_required")) {
+		return;
+	}
+
+	database.exec("BEGIN IMMEDIATE");
+	try {
+		database.exec(
+			"ALTER TABLE candidate_promotions RENAME TO candidate_promotions_pre_reconciliation",
+		);
+		database.exec(`
+			CREATE TABLE candidate_promotions (
+				candidate_digest TEXT NOT NULL,
+				idempotency_key TEXT NOT NULL,
+				run_id TEXT NOT NULL,
+				state TEXT NOT NULL CHECK (state IN ('prepared', 'recorded', 'executed')),
+				candidate_json TEXT NOT NULL,
+				decision_json TEXT NOT NULL,
+				acceptance_json TEXT NOT NULL,
+				review_json TEXT NOT NULL,
+				intent_canonical_json TEXT NOT NULL,
+				prepared_at TEXT NOT NULL,
+				recorded_at TEXT,
+				executed_at TEXT,
+				executed_outcome TEXT CHECK (executed_outcome IN ('promoted', 'reconciliation_required', 'rejected')),
+				merged_head_sha TEXT,
+				promotion_git_binding_json TEXT,
+				execution_claim_token TEXT,
+				execution_claimed_at TEXT,
+				execution_lease_expires_at TEXT,
+				execution_claim_epoch INTEGER NOT NULL DEFAULT 0,
+				PRIMARY KEY (candidate_digest, idempotency_key),
+				UNIQUE (candidate_digest),
+				UNIQUE (idempotency_key)
+			);
+		`);
+		database.exec(`
+			INSERT INTO candidate_promotions (
+				candidate_digest, idempotency_key, run_id, state, candidate_json,
+				decision_json, acceptance_json, review_json, intent_canonical_json,
+				prepared_at, recorded_at, executed_at, executed_outcome,
+				merged_head_sha, promotion_git_binding_json, execution_claim_token,
+				execution_claimed_at, execution_lease_expires_at, execution_claim_epoch
+			)
+			SELECT
+				candidate_digest, idempotency_key, run_id, state, candidate_json,
+				decision_json, acceptance_json, review_json, intent_canonical_json,
+				prepared_at, recorded_at, executed_at, executed_outcome,
+				merged_head_sha, ${hasBinding ? "promotion_git_binding_json" : "NULL"},
+				NULL, NULL, NULL, 0
+			FROM candidate_promotions_pre_reconciliation;
+		`);
+		database.exec("DROP TABLE candidate_promotions_pre_reconciliation");
+		database.exec("COMMIT");
+	} catch (error) {
+		database.exec("ROLLBACK");
+		throw error;
+	}
+}
+
+/**
+ * Promotion execution leases are additive to the existing write-ahead
+ * projection. Historical rows remain replayable: a recorded row with no lease
+ * is pending and must acquire a fresh owner before it can enter the Git path.
+ */
+function ensureCandidatePromotionExecutionLeaseColumns(
+	database: DatabaseSync,
+): void {
+	if (!tableExists(database, "candidate_promotions")) return;
+
+	for (const statement of [
+		"ALTER TABLE candidate_promotions ADD COLUMN execution_claim_token TEXT",
+		"ALTER TABLE candidate_promotions ADD COLUMN execution_claimed_at TEXT",
+		"ALTER TABLE candidate_promotions ADD COLUMN execution_lease_expires_at TEXT",
+		"ALTER TABLE candidate_promotions ADD COLUMN execution_claim_epoch INTEGER NOT NULL DEFAULT 0",
+	] as const) {
+		const columnName = statement.match(/ADD COLUMN ([^ ]+)/)?.[1];
+		if (
+			columnName &&
+			!tableHasColumn(database, "candidate_promotions", columnName)
+		) {
+			database.exec(statement);
+		}
 	}
 }
 
@@ -398,6 +739,59 @@ function assertWorkspaceTableColumns(database: DatabaseSync): void {
 	] as const);
 }
 
+function assertCandidateArtifactsTableColumns(database: DatabaseSync): void {
+	assertTableColumns(database, "candidate_artifacts", [
+		"run_id",
+		"schema_version",
+		"candidate_id",
+		"candidate_key",
+		"candidate_ref",
+		"workflow_id",
+		"unit_id",
+		"attempt",
+		"provenance_ref",
+		"candidate_digest",
+		"base_commit_sha",
+		"candidate_commit_sha",
+		"commit_digest",
+		"tree_digest",
+		"patch_digest",
+		"changed_files_digest",
+		"envelope_digest",
+		"acceptance_contract_digest",
+		"action_receipt_digest",
+		"action_receipt_set_ref",
+		"action_receipt_set_digest",
+		"action_evidence_version",
+		"candidate_created_ref",
+		"created_at",
+	] as const);
+}
+
+function assertCandidatePromotionsTableColumns(database: DatabaseSync): void {
+	assertTableColumns(database, "candidate_promotions", [
+		"candidate_digest",
+		"idempotency_key",
+		"run_id",
+		"state",
+		"candidate_json",
+		"decision_json",
+		"acceptance_json",
+		"review_json",
+		"intent_canonical_json",
+		"prepared_at",
+		"recorded_at",
+		"executed_at",
+		"executed_outcome",
+		"merged_head_sha",
+		"promotion_git_binding_json",
+		"execution_claim_token",
+		"execution_claimed_at",
+		"execution_lease_expires_at",
+		"execution_claim_epoch",
+	] as const);
+}
+
 function assertRepoFactsTableColumns(database: DatabaseSync): void {
 	assertTableColumns(database, "repo_facts", [
 		"id",
@@ -483,10 +877,14 @@ function assertRunOutcomesTableColumns(database: DatabaseSync): void {
 }
 
 export function bootstrapStorageProjectionSchema(database: DatabaseSync): void {
+	ensureCandidateArtifactAcceptanceContractDigestColumn(database);
+	ensureCandidateArtifactActionEvidenceColumns(database);
 	if (tableExists(database, "workspaces")) {
 		assertWorkspaceTableColumns(database);
 	}
-
+	if (tableExists(database, "candidate_artifacts")) {
+		assertCandidateArtifactsTableColumns(database);
+	}
 	database.exec(`
 		CREATE TABLE IF NOT EXISTS units (
 			id TEXT PRIMARY KEY,
@@ -506,7 +904,8 @@ export function bootstrapStorageProjectionSchema(database: DatabaseSync): void {
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL,
 			completed_at TEXT,
-			used_workspace INTEGER NOT NULL DEFAULT 0
+			used_workspace INTEGER NOT NULL DEFAULT 0,
+			trust_lane TEXT NOT NULL DEFAULT 'legacy'
 		);
 
 		CREATE TABLE IF NOT EXISTS evidence (
@@ -541,6 +940,58 @@ export function bootstrapStorageProjectionSchema(database: DatabaseSync): void {
 			created_at TEXT NOT NULL,
 			finalized_at TEXT,
 			cleanup_error TEXT
+		);
+
+		CREATE TABLE IF NOT EXISTS candidate_artifacts (
+			run_id TEXT PRIMARY KEY,
+			schema_version INTEGER NOT NULL,
+			candidate_id TEXT NOT NULL,
+			candidate_key TEXT NOT NULL UNIQUE,
+			candidate_ref TEXT NOT NULL UNIQUE,
+			workflow_id TEXT,
+			unit_id TEXT NOT NULL,
+			attempt INTEGER NOT NULL,
+			provenance_ref TEXT,
+			candidate_digest TEXT NOT NULL UNIQUE,
+			base_commit_sha TEXT NOT NULL,
+			candidate_commit_sha TEXT NOT NULL,
+			commit_digest TEXT NOT NULL,
+			tree_digest TEXT NOT NULL,
+			patch_digest TEXT NOT NULL,
+			changed_files_digest TEXT NOT NULL,
+			envelope_digest TEXT,
+			acceptance_contract_digest TEXT,
+			action_receipt_digest TEXT,
+			action_receipt_set_ref TEXT,
+			action_receipt_set_digest TEXT,
+			action_evidence_version TEXT,
+			candidate_created_ref TEXT,
+			created_at TEXT NOT NULL
+		);
+
+		CREATE TABLE IF NOT EXISTS candidate_promotions (
+			candidate_digest TEXT NOT NULL,
+			idempotency_key TEXT NOT NULL,
+			run_id TEXT NOT NULL,
+			state TEXT NOT NULL CHECK (state IN ('prepared', 'recorded', 'executed')),
+			candidate_json TEXT NOT NULL,
+			decision_json TEXT NOT NULL,
+			acceptance_json TEXT NOT NULL,
+			review_json TEXT NOT NULL,
+			intent_canonical_json TEXT NOT NULL,
+			prepared_at TEXT NOT NULL,
+			recorded_at TEXT,
+			executed_at TEXT,
+			executed_outcome TEXT CHECK (executed_outcome IN ('promoted', 'reconciliation_required', 'rejected')),
+			merged_head_sha TEXT,
+			promotion_git_binding_json TEXT,
+			execution_claim_token TEXT,
+			execution_claimed_at TEXT,
+			execution_lease_expires_at TEXT,
+			execution_claim_epoch INTEGER NOT NULL DEFAULT 0,
+			PRIMARY KEY (candidate_digest, idempotency_key),
+			UNIQUE (candidate_digest),
+			UNIQUE (idempotency_key)
 		);
 
 		CREATE TABLE IF NOT EXISTS steps (
@@ -629,9 +1080,34 @@ export function bootstrapStorageProjectionSchema(database: DatabaseSync): void {
 		);
 	`);
 
+	ensureCandidatePromotionsReconciliationSchema(database);
+	ensureCandidatePromotionExecutionLeaseColumns(database);
+
 	database.exec(`
 		CREATE INDEX IF NOT EXISTS injected_memories_run_id_idx
 		ON injected_memories (run_id);
+	`);
+
+	database.exec(`
+		CREATE UNIQUE INDEX IF NOT EXISTS uq_candidate_artifacts_workflow_unit_attempt
+		ON candidate_artifacts (workflow_id, unit_id, attempt)
+		WHERE workflow_id IS NOT NULL AND attempt IS NOT NULL;
+	`);
+
+	database.exec(`
+		CREATE INDEX IF NOT EXISTS idx_candidate_promotions_pending
+		ON candidate_promotions (state, prepared_at, candidate_digest, idempotency_key);
+	`);
+
+	database.exec(`
+		CREATE UNIQUE INDEX IF NOT EXISTS uq_candidate_promotions_execution_claim_token
+		ON candidate_promotions (execution_claim_token)
+		WHERE execution_claim_token IS NOT NULL;
+	`);
+
+	database.exec(`
+		CREATE INDEX IF NOT EXISTS idx_candidate_promotions_execution_lease
+		ON candidate_promotions (state, execution_lease_expires_at, candidate_digest, idempotency_key);
 	`);
 
 	database.exec(`
@@ -657,12 +1133,15 @@ export function bootstrapStorageProjectionSchema(database: DatabaseSync): void {
 	ensureRunsUsedWorkspaceColumn(database);
 	ensureRunsStrategyColumns(database);
 	ensureRunsAcceptanceShadowColumn(database);
+	ensureRunsTrustLaneColumn(database);
 	ensureRunLearningsTable(database);
 	ensureSeenCountColumn(database);
 	ensureRunsStepColumns(database);
 	ensureRepoFactColumns(database);
 	ensureProcedureColumns(database);
 	assertWorkspaceTableColumns(database);
+	assertCandidateArtifactsTableColumns(database);
+	assertCandidatePromotionsTableColumns(database);
 	assertRepoFactsTableColumns(database);
 	assertProceduresTableColumns(database);
 	assertSearchableDocumentsTableColumns(database);
@@ -739,6 +1218,7 @@ function assertStorageProjectionSchema(database: DatabaseSync): void {
 		["runs", "parent_run_id"],
 		["runs", "strategy_id"],
 		["runs", "acceptance_outcome"],
+		["runs", "trust_lane"],
 		["evidence", "message"],
 	] as const) {
 		if (!tableHasColumn(database, tableName, columnName)) {
@@ -801,7 +1281,12 @@ export function createStorageStore(
 	}
 
 	function runInTransaction<T>(database: DatabaseSync, operation: () => T): T {
-		database.exec("BEGIN");
+		// This store owns write-ahead workflow state. Reserve SQLite's writer slot
+		// before any read/check/update sequence so another process cannot insert a
+		// recorded promotion claim between a terminal-state check and its update.
+		// Contention fails before an effect is authorized rather than admitting a
+		// split terminal/promotion projection.
+		database.exec("BEGIN IMMEDIATE");
 		try {
 			const result = operation();
 			database.exec("COMMIT");
@@ -818,6 +1303,16 @@ export function createStorageStore(
 
 	function hitFailpoint(name: string): void {
 		options.testingHooks?.failpoint?.(name);
+	}
+
+	function promotionExecutionNow(): Date {
+		const source = options.testingHooks?.now?.() ?? new Date();
+		if (!(source instanceof Date) || Number.isNaN(source.getTime())) {
+			throw new Error(
+				"Candidate promotion execution clock must return a valid Date.",
+			);
+		}
+		return new Date(source.getTime());
 	}
 
 	function appendEvent(
@@ -854,7 +1349,10 @@ export function createStorageStore(
 		const destinationPath = join(layout.artifactsDir, runId, outputPath);
 		mkdirSync(dirname(destinationPath), { recursive: true });
 		writeFileSync(destinationPath, readFileSync(sourcePath));
-		return relative(projectRoot, destinationPath);
+		// Artifact locations are persisted in receipts and therefore form part of
+		// cross-host evidence. Keep the serialized form platform-neutral instead of
+		// leaking the host path separator into a digest-bound record.
+		return relative(projectRoot, destinationPath).replaceAll("\\", "/");
 	}
 
 	function readUnit(unitId: string, database: DatabaseSync): Unit {
@@ -892,7 +1390,7 @@ export function createStorageStore(
 	function readRun(runId: string, database: DatabaseSync): StoredRunRow {
 		const row = database
 			.prepare(
-				`SELECT id, unit_id, status, unit_snapshot, used_workspace, parent_run_id, strategy_id FROM runs WHERE id = ?`,
+				`SELECT id, unit_id, status, unit_snapshot, used_workspace, parent_run_id, strategy_id, trust_lane FROM runs WHERE id = ?`,
 			)
 			.get(runId) as unknown as StoredRunRow | undefined;
 
@@ -901,6 +1399,79 @@ export function createStorageStore(
 		}
 
 		return row;
+	}
+
+	/**
+	 * Candidate artifacts may be retained for raw and historical runs, but they
+	 * never acquire promotion authority. Every write-ahead or recovery path
+	 * must re-read this durable lane rather than trusting the caller's packet or
+	 * a previously prepared marker.
+	 */
+	function requireGovernedCandidatePromotionRun(
+		runId: string,
+		database: DatabaseSync,
+		operation: string,
+	): StoredRunRow {
+		const run = readRun(runId, database);
+		if (run.trust_lane !== "governed") {
+			throw new Error(
+				`${operation} requires a governed run; ${run.trust_lane} runs cannot promote candidates.`,
+			);
+		}
+		return run;
+	}
+
+	/**
+	 * A recorded promotion decision is the durable, pre-Git execution claim. A
+	 * candidate may only acquire that claim while its run is active; after the
+	 * claim, generic terminal/cancellation paths must leave it running so the
+	 * exact candidate can be reconciled rather than accidentally promoted from a
+	 * terminal run.
+	 */
+	function requireActiveGovernedCandidatePromotionRun(
+		runId: string,
+		database: DatabaseSync,
+		operation: string,
+	): StoredRunRow {
+		const run = requireGovernedCandidatePromotionRun(
+			runId,
+			database,
+			operation,
+		);
+		if (run.status !== "running") {
+			throw new Error(
+				`${operation} requires an active candidate run; got '${run.status}'.`,
+			);
+		}
+		return run;
+	}
+
+	function hasRecordedCandidatePromotionClaim(
+		runId: string,
+		database: DatabaseSync,
+	): boolean {
+		if (!tableExists(database, "candidate_promotions")) return false;
+		const row = database
+			.prepare(
+				`SELECT 1 AS claimed
+				 FROM candidate_promotions
+				 WHERE run_id = ? AND state = 'recorded'
+				 LIMIT 1`,
+			)
+			.get(runId) as { claimed: number } | undefined;
+		return row?.claimed === 1;
+	}
+
+	function assertNoRecordedCandidatePromotionClaim(
+		runId: string,
+		database: DatabaseSync,
+		operation: string,
+	): void {
+		if (hasRecordedCandidatePromotionClaim(runId, database)) {
+			throw new Error(
+				`${operation} is blocked by an active candidate promotion claim; reconcile the exact candidate before cancelling or completing the run.`,
+			);
+		}
 	}
 
 	function readWorkspaceRow(
@@ -912,6 +1483,1269 @@ export function createStorageStore(
 				`SELECT run_id, source_project_root, path, head_sha, status, created_at, finalized_at, cleanup_error FROM workspaces WHERE run_id = ?`,
 			)
 			.get(runId) as unknown as StoredWorkspaceRow | undefined;
+	}
+
+	function hasCandidateArtifactsProjection(database: DatabaseSync): boolean {
+		if (!tableExists(database, "candidate_artifacts")) {
+			return false;
+		}
+		assertCandidateArtifactsTableColumns(database);
+		return true;
+	}
+
+	function requireCandidateArtifactsProjection(database: DatabaseSync): void {
+		if (!hasCandidateArtifactsProjection(database)) {
+			throw new Error(
+				"Buildplane state is missing the candidate projection schema. Run `buildplane init` before recording a candidate.",
+			);
+		}
+	}
+
+	function readCandidateArtifactRow(
+		runId: string,
+		database: DatabaseSync,
+	): StoredCandidateArtifactRow | undefined {
+		if (!hasCandidateArtifactsProjection(database)) {
+			return undefined;
+		}
+
+		return database
+			.prepare(
+				`SELECT run_id, schema_version, candidate_id, candidate_key, candidate_ref, workflow_id, unit_id, attempt, provenance_ref, candidate_digest, base_commit_sha, candidate_commit_sha, commit_digest, tree_digest, patch_digest, changed_files_digest, envelope_digest, acceptance_contract_digest, action_receipt_digest, action_receipt_set_ref, action_receipt_set_digest, action_evidence_version, candidate_created_ref, created_at FROM candidate_artifacts WHERE run_id = ?`,
+			)
+			.get(runId) as unknown as StoredCandidateArtifactRow | undefined;
+	}
+
+	function toCandidateArtifactProjection(
+		row: StoredCandidateArtifactRow,
+	): CandidateArtifactProjection {
+		if (row.schema_version !== 1 && row.schema_version !== 2) {
+			throw new Error(
+				`Unsupported stored candidate schema version '${row.schema_version}'.`,
+			);
+		}
+
+		const identity = {
+			runId: row.run_id,
+			candidateId: row.candidate_id,
+			candidateKey: row.candidate_key,
+			candidateRef: row.candidate_ref,
+			unitId: row.unit_id,
+			attempt: row.attempt,
+			candidateDigest: row.candidate_digest,
+			baseSha: row.base_commit_sha,
+			candidateCommitSha: row.candidate_commit_sha,
+			commitDigest: row.commit_digest,
+			treeDigest: row.tree_digest,
+			patchDigest: row.patch_digest,
+			changedFilesDigest: row.changed_files_digest,
+			createdAt: row.created_at,
+		};
+
+		if (row.schema_version === 2) {
+			const workflowId = readOptionalCandidateText(
+				row.workflow_id ?? undefined,
+				"workflowId",
+			);
+			const provenanceRef = readOptionalCandidateText(
+				row.provenance_ref ?? undefined,
+				"provenanceRef",
+			);
+			const envelopeDigest = readOptionalGovernedDigest(
+				row.envelope_digest ?? undefined,
+				"envelopeDigest",
+			);
+			const acceptanceContractDigest = readOptionalGovernedDigest(
+				row.acceptance_contract_digest ?? undefined,
+				"acceptanceContractDigest",
+			);
+			const actionReceiptSetRef = readOptionalCandidateText(
+				row.action_receipt_set_ref ?? undefined,
+				"actionReceiptSetRef",
+			);
+			const actionReceiptSetDigest = readOptionalGovernedDigest(
+				row.action_receipt_set_digest ?? undefined,
+				"actionReceiptSetDigest",
+			);
+			const candidateCreatedRef = readOptionalCandidateText(
+				row.candidate_created_ref ?? undefined,
+				"candidateCreatedRef",
+			);
+			if (
+				(row.action_evidence_version !== "sealed-v2" &&
+					row.action_evidence_version !== "sealed_v3") ||
+				!workflowId ||
+				!provenanceRef ||
+				!envelopeDigest ||
+				!acceptanceContractDigest ||
+				!actionReceiptSetRef ||
+				!actionReceiptSetDigest ||
+				!candidateCreatedRef
+			) {
+				throw new Error(
+					"Stored V3 candidate projection is missing required governed action-evidence lineage.",
+				);
+			}
+			if (row.action_receipt_digest !== null) {
+				throw new Error(
+					"Stored V3 candidate projection must not carry a legacy actionReceiptDigest.",
+				);
+			}
+			return {
+				...identity,
+				schemaVersion: 2,
+				workflowId,
+				provenanceRef,
+				envelopeDigest,
+				acceptanceContractDigest,
+				actionEvidenceVersion: row.action_evidence_version,
+				actionReceiptSetRef,
+				actionReceiptSetDigest,
+				candidateCreatedRef,
+			};
+		}
+
+		if (
+			row.action_receipt_set_ref !== null ||
+			row.action_receipt_set_digest !== null ||
+			row.action_evidence_version !== null ||
+			row.candidate_created_ref !== null
+		) {
+			throw new Error(
+				"Stored V1 candidate projection must not carry V3 action-evidence lineage.",
+			);
+		}
+
+		return {
+			...identity,
+			schemaVersion: 1,
+			...(row.workflow_id ? { workflowId: row.workflow_id } : {}),
+			...(row.provenance_ref ? { provenanceRef: row.provenance_ref } : {}),
+			...(row.envelope_digest ? { envelopeDigest: row.envelope_digest } : {}),
+			...(row.acceptance_contract_digest
+				? { acceptanceContractDigest: row.acceptance_contract_digest }
+				: {}),
+			...(row.action_receipt_digest
+				? { actionReceiptDigest: row.action_receipt_digest }
+				: {}),
+		};
+	}
+
+	function readRequiredCandidateText(value: unknown, field: string): string {
+		if (typeof value !== "string" || value.trim().length === 0) {
+			throw new Error(`Candidate ${field} must be a non-empty string.`);
+		}
+		return value;
+	}
+
+	function readOptionalCandidateText(
+		value: unknown,
+		field: string,
+	): string | undefined {
+		if (value === undefined) {
+			return undefined;
+		}
+		return readRequiredCandidateText(value, field);
+	}
+
+	function readRawCandidateDigest(value: unknown, field: string): string {
+		const digest = readRequiredCandidateText(value, field);
+		if (!RAW_CANDIDATE_DIGEST_PATTERN.test(digest)) {
+			throw new Error(`Candidate ${field} must be a lowercase SHA-256 digest.`);
+		}
+		return digest;
+	}
+
+	function readOptionalGovernedDigest(
+		value: unknown,
+		field: string,
+	): string | undefined {
+		const digest = readOptionalCandidateText(value, field);
+		if (digest !== undefined && !GOVERNED_DIGEST_PATTERN.test(digest)) {
+			throw new Error(`Candidate ${field} must be a canonical sha256 digest.`);
+		}
+		return digest;
+	}
+
+	function normalizeCandidateArtifactInput(
+		input: CandidateArtifactProjectionInput,
+		runId: string,
+		runUnitId: string,
+	): CandidateArtifactProjectionInput {
+		if (input.schemaVersion !== 1 && input.schemaVersion !== 2) {
+			throw new Error("Candidate schemaVersion must be 1 or 2.");
+		}
+		if (input.runId !== runId) {
+			throw new Error(
+				`Candidate run '${input.runId}' does not match storage run '${runId}'.`,
+			);
+		}
+
+		const unitId = readOptionalCandidateText(input.unitId, "unitId");
+		if (unitId !== undefined && unitId !== runUnitId) {
+			throw new Error(
+				`Candidate unit '${unitId}' does not match run unit '${runUnitId}'.`,
+			);
+		}
+
+		const attempt = input.attempt;
+		if (!Number.isSafeInteger(attempt) || attempt <= 0) {
+			throw new Error("Candidate attempt must be a positive safe integer.");
+		}
+
+		const baseSha = readRequiredCandidateText(input.baseSha, "baseSha");
+		const candidateCommitSha = readRequiredCandidateText(
+			input.candidateCommitSha,
+			"candidateCommitSha",
+		);
+		const workflowId = readOptionalCandidateText(
+			input.workflowId,
+			"workflowId",
+		);
+		const provenanceRef = readOptionalCandidateText(
+			input.provenanceRef,
+			"provenanceRef",
+		);
+		const envelopeDigest = readOptionalGovernedDigest(
+			input.envelopeDigest,
+			"envelopeDigest",
+		);
+		const acceptanceContractDigest = readOptionalGovernedDigest(
+			input.acceptanceContractDigest,
+			"acceptanceContractDigest",
+		);
+		const actionReceiptDigest = readOptionalGovernedDigest(
+			input.actionReceiptDigest,
+			"actionReceiptDigest",
+		);
+		const actionEvidenceVersion = readOptionalCandidateText(
+			input.actionEvidenceVersion,
+			"actionEvidenceVersion",
+		);
+		const actionReceiptSetRef = readOptionalCandidateText(
+			input.actionReceiptSetRef,
+			"actionReceiptSetRef",
+		);
+		const actionReceiptSetDigest = readOptionalGovernedDigest(
+			input.actionReceiptSetDigest,
+			"actionReceiptSetDigest",
+		);
+		const candidateCreatedRef = readOptionalCandidateText(
+			input.candidateCreatedRef,
+			"candidateCreatedRef",
+		);
+		if (!FULL_GIT_COMMIT_SHA_PATTERN.test(baseSha)) {
+			throw new Error("Candidate baseSha must be a full Git commit SHA.");
+		}
+		if (!FULL_GIT_COMMIT_SHA_PATTERN.test(candidateCommitSha)) {
+			throw new Error(
+				"Candidate candidateCommitSha must be a full Git commit SHA.",
+			);
+		}
+
+		const identity = {
+			runId,
+			candidateId: readRequiredCandidateText(input.candidateId, "candidateId"),
+			candidateKey: readRequiredCandidateText(
+				input.candidateKey,
+				"candidateKey",
+			),
+			candidateRef: readRequiredCandidateText(
+				input.candidateRef,
+				"candidateRef",
+			),
+			attempt,
+			candidateDigest: readRawCandidateDigest(
+				input.candidateDigest,
+				"candidateDigest",
+			),
+			baseSha,
+			candidateCommitSha,
+			commitDigest: readRawCandidateDigest(input.commitDigest, "commitDigest"),
+			treeDigest: readRawCandidateDigest(input.treeDigest, "treeDigest"),
+			patchDigest: readRawCandidateDigest(input.patchDigest, "patchDigest"),
+			changedFilesDigest: readRawCandidateDigest(
+				input.changedFilesDigest,
+				"changedFilesDigest",
+			),
+		};
+
+		const hasV3ActionEvidence =
+			actionEvidenceVersion !== undefined ||
+			actionReceiptSetRef !== undefined ||
+			actionReceiptSetDigest !== undefined ||
+			candidateCreatedRef !== undefined;
+		if (input.schemaVersion === 1) {
+			if (hasV3ActionEvidence) {
+				throw new Error(
+					"Candidate schemaVersion 1 must not carry V3 action-evidence lineage.",
+				);
+			}
+			return {
+				...identity,
+				schemaVersion: 1,
+				...(workflowId ? { workflowId } : {}),
+				...(provenanceRef ? { provenanceRef } : {}),
+				...(envelopeDigest ? { envelopeDigest } : {}),
+				...(acceptanceContractDigest ? { acceptanceContractDigest } : {}),
+				...(actionReceiptDigest ? { actionReceiptDigest } : {}),
+			};
+		}
+
+		if (
+			actionEvidenceVersion !== "sealed-v2" &&
+			actionEvidenceVersion !== "sealed_v3"
+		) {
+			throw new Error(
+				'Candidate schemaVersion 2 requires actionEvidenceVersion "sealed-v2" or "sealed_v3".',
+			);
+		}
+		if (
+			!workflowId ||
+			!provenanceRef ||
+			!envelopeDigest ||
+			!acceptanceContractDigest ||
+			!actionReceiptSetRef ||
+			!actionReceiptSetDigest ||
+			!candidateCreatedRef
+		) {
+			throw new Error(
+				"Candidate schemaVersion 2 requires governed workflow, provenance, envelope, acceptance-contract, action receipt-set, and candidate-created bindings.",
+			);
+		}
+		if (actionReceiptDigest !== undefined) {
+			throw new Error(
+				"Candidate schemaVersion 2 must not carry a legacy actionReceiptDigest.",
+			);
+		}
+		return {
+			...identity,
+			schemaVersion: 2,
+			workflowId,
+			provenanceRef,
+			envelopeDigest,
+			acceptanceContractDigest,
+			actionEvidenceVersion,
+			actionReceiptSetRef,
+			actionReceiptSetDigest,
+			candidateCreatedRef,
+		};
+	}
+
+	function hasCandidatePromotionsProjection(database: DatabaseSync): boolean {
+		if (!tableExists(database, "candidate_promotions")) {
+			return false;
+		}
+		assertCandidatePromotionsTableColumns(database);
+		return true;
+	}
+
+	function requireCandidatePromotionsProjection(database: DatabaseSync): void {
+		if (!hasCandidatePromotionsProjection(database)) {
+			throw new Error(
+				"Buildplane state is missing the candidate-promotion projection schema. Run `buildplane init` before preparing a promotion.",
+			);
+		}
+	}
+
+	/**
+	 * Canonical JSON for the Tier-1 intent key. This intentionally does not use
+	 * `JSON.stringify` on caller objects: getters, sparse arrays, custom
+	 * prototypes, and `toJSON` hooks could otherwise make duplicate detection
+	 * depend on caller-controlled behavior. The result is a stable byte-for-byte
+	 * representation of plain data only.
+	 */
+	function canonicalPromotionJson(
+		value: unknown,
+		stack = new Set<object>(),
+	): string {
+		if (value === null) {
+			return "null";
+		}
+
+		switch (typeof value) {
+			case "string":
+				return JSON.stringify(value);
+			case "boolean":
+				return value ? "true" : "false";
+			case "number":
+				if (!Number.isFinite(value)) {
+					throw new TypeError(
+						"Candidate promotion intent cannot contain a non-finite number.",
+					);
+				}
+				return JSON.stringify(value);
+			case "undefined":
+			case "bigint":
+			case "function":
+			case "symbol":
+				throw new TypeError(
+					"Candidate promotion intent must contain only JSON data.",
+				);
+			case "object":
+				break;
+			default:
+				throw new TypeError(
+					"Candidate promotion intent must contain only JSON data.",
+				);
+		}
+
+		const object = value as object;
+		if (stack.has(object)) {
+			throw new TypeError("Candidate promotion intent cannot contain a cycle.");
+		}
+		if (Object.getOwnPropertySymbols(object).length > 0) {
+			throw new TypeError(
+				"Candidate promotion intent cannot contain symbol properties.",
+			);
+		}
+
+		stack.add(object);
+		try {
+			if (Array.isArray(object)) {
+				const ownNames = Object.getOwnPropertyNames(object);
+				if (
+					ownNames.length !== object.length + 1 ||
+					!ownNames.includes("length")
+				) {
+					throw new TypeError(
+						"Candidate promotion intent arrays must be dense and free of extra properties.",
+					);
+				}
+				const items: string[] = [];
+				for (let index = 0; index < object.length; index += 1) {
+					const key = String(index);
+					const descriptor = Object.getOwnPropertyDescriptor(object, key);
+					if (
+						descriptor === undefined ||
+						!("value" in descriptor) ||
+						!descriptor.enumerable
+					) {
+						throw new TypeError(
+							"Candidate promotion intent arrays must contain plain values.",
+						);
+					}
+					items.push(canonicalPromotionJson(descriptor.value, stack));
+				}
+				return `[${items.join(",")}]`;
+			}
+
+			const prototype = Object.getPrototypeOf(object);
+			if (prototype !== Object.prototype && prototype !== null) {
+				throw new TypeError(
+					"Candidate promotion intent objects must use the plain object prototype.",
+				);
+			}
+
+			const entries: string[] = [];
+			for (const key of Object.getOwnPropertyNames(object).sort()) {
+				const descriptor = Object.getOwnPropertyDescriptor(object, key);
+				if (
+					descriptor === undefined ||
+					!("value" in descriptor) ||
+					!descriptor.enumerable
+				) {
+					throw new TypeError(
+						"Candidate promotion intent objects must contain enumerable plain values.",
+					);
+				}
+				entries.push(
+					`${JSON.stringify(key)}:${canonicalPromotionJson(descriptor.value, stack)}`,
+				);
+			}
+			return `{${entries.join(",")}}`;
+		} finally {
+			stack.delete(object);
+		}
+	}
+
+	function parseCanonicalPromotionJson(value: unknown, label: string): unknown {
+		try {
+			return JSON.parse(canonicalPromotionJson(value));
+		} catch (error) {
+			throw new TypeError(
+				`${label} must be canonical JSON data: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
+			);
+		}
+	}
+
+	function readClosedPromotionRecord(
+		value: unknown,
+		label: string,
+		expectedKeys: readonly string[],
+	): Record<string, unknown> {
+		if (value === null || typeof value !== "object" || Array.isArray(value)) {
+			throw new TypeError(`${label} must be an object.`);
+		}
+		const record = value as Record<string, unknown>;
+		const actualKeys = Object.keys(record).sort();
+		const allowedKeys = [...expectedKeys].sort();
+		if (
+			actualKeys.length !== allowedKeys.length ||
+			actualKeys.some((key, index) => key !== allowedKeys[index])
+		) {
+			throw new TypeError(
+				`${label} must contain exactly: ${allowedKeys.join(", ")}.`,
+			);
+		}
+		return record;
+	}
+
+	function readRequiredPromotionText(value: unknown, label: string): string {
+		if (typeof value !== "string" || value.trim().length === 0) {
+			throw new TypeError(`${label} must be a non-empty string.`);
+		}
+		return value;
+	}
+
+	function readPromotionTimestamp(value: unknown, label: string): string {
+		const timestamp = readRequiredPromotionText(value, label);
+		if (!timestamp.endsWith("Z") || Number.isNaN(Date.parse(timestamp))) {
+			throw new TypeError(`${label} must be an RFC3339 UTC timestamp.`);
+		}
+		return timestamp;
+	}
+
+	function readPromotionCandidateCommitSha(
+		value: unknown,
+		label: string,
+	): string {
+		const commitSha = readRequiredPromotionText(value, label);
+		if (!FULL_GIT_COMMIT_SHA_PATTERN.test(commitSha)) {
+			throw new TypeError(`${label} must be a full Git commit SHA.`);
+		}
+		return commitSha.toLowerCase();
+	}
+
+	function parseCandidateAcceptanceRecord(
+		value: unknown,
+	): CandidateAcceptanceRecord {
+		const record = readClosedPromotionRecord(value, "candidate acceptance", [
+			"candidateDigest",
+			"candidateCommitSha",
+			"acceptanceRef",
+			"acceptanceContractDigest",
+			"outcome",
+		]);
+		const outcome = record.outcome;
+		if (outcome !== "passed" && outcome !== "rejected") {
+			throw new TypeError(
+				'candidate acceptance outcome must be "passed" or "rejected".',
+			);
+		}
+		return {
+			candidateDigest: readRequiredPromotionText(
+				record.candidateDigest,
+				"candidate acceptance candidateDigest",
+			),
+			candidateCommitSha: readPromotionCandidateCommitSha(
+				record.candidateCommitSha,
+				"candidate acceptance candidateCommitSha",
+			),
+			acceptanceRef: readRequiredPromotionText(
+				record.acceptanceRef,
+				"candidate acceptance acceptanceRef",
+			),
+			acceptanceContractDigest: (() => {
+				const digest = readOptionalGovernedDigest(
+					record.acceptanceContractDigest,
+					"candidate acceptance acceptanceContractDigest",
+				);
+				if (!digest) {
+					throw new TypeError(
+						"candidate acceptance acceptanceContractDigest must be a canonical sha256 digest.",
+					);
+				}
+				return digest;
+			})(),
+			outcome,
+		};
+	}
+
+	function parseCandidateReviewRecord(value: unknown): CandidateReviewRecord {
+		const record = readClosedPromotionRecord(value, "candidate review", [
+			"candidateDigest",
+			"candidateCommitSha",
+			"reviewRef",
+			"verdict",
+		]);
+		return {
+			candidateDigest: readRequiredPromotionText(
+				record.candidateDigest,
+				"candidate review candidateDigest",
+			),
+			candidateCommitSha: readPromotionCandidateCommitSha(
+				record.candidateCommitSha,
+				"candidate review candidateCommitSha",
+			),
+			reviewRef: readRequiredPromotionText(
+				record.reviewRef,
+				"candidate review reviewRef",
+			),
+			// Structural parsing deliberately does not prove that the verdict came
+			// from a trusted reviewer. The signed decision port owns that check.
+			verdict: parseReviewVerdictV1(record.verdict),
+		};
+	}
+
+	function parsePromotionGitBinding(
+		value: unknown,
+		label: string,
+	): PromotionGitBindingV1 {
+		const record = readClosedPromotionRecord(value, label, [
+			"targetRef",
+			"targetHeadBeforeSha",
+			"targetHeadAfterSha",
+			"mergedHeadSha",
+			"candidateCommitSha",
+			"mergeParentShas",
+			"mergedTreeSha",
+			"mergedTreeDigest",
+			"promotionReceiptRef",
+			"worktreeSyncState",
+		]);
+		if (
+			!Array.isArray(record.mergeParentShas) ||
+			record.mergeParentShas.length !== 2
+		) {
+			throw new TypeError(
+				`${label}.mergeParentShas must contain exactly two Git commit SHAs.`,
+			);
+		}
+		const targetRef = readRequiredPromotionText(
+			record.targetRef,
+			`${label}.targetRef`,
+		);
+		if (!targetRef.startsWith("refs/heads/")) {
+			throw new TypeError(
+				`${label}.targetRef must be a canonical refs/heads branch ref.`,
+			);
+		}
+		const targetHeadBeforeSha = readPromotionCandidateCommitSha(
+			record.targetHeadBeforeSha,
+			`${label}.targetHeadBeforeSha`,
+		);
+		const candidateCommitSha = readPromotionCandidateCommitSha(
+			record.candidateCommitSha,
+			`${label}.candidateCommitSha`,
+		);
+		const mergeParentShas = [
+			readPromotionCandidateCommitSha(
+				record.mergeParentShas[0],
+				`${label}.mergeParentShas[0]`,
+			),
+			readPromotionCandidateCommitSha(
+				record.mergeParentShas[1],
+				`${label}.mergeParentShas[1]`,
+			),
+		] as const;
+		if (
+			mergeParentShas[0] !== targetHeadBeforeSha ||
+			mergeParentShas[1] !== candidateCommitSha
+		) {
+			throw new TypeError(
+				`${label}.mergeParentShas must bind the target base and immutable candidate commit in order.`,
+			);
+		}
+		const mergedTreeDigest = readOptionalGovernedDigest(
+			record.mergedTreeDigest,
+			`${label}.mergedTreeDigest`,
+		);
+		if (!mergedTreeDigest) {
+			throw new TypeError(
+				`${label}.mergedTreeDigest must be a canonical sha256 digest.`,
+			);
+		}
+		const promotionReceiptRef = readRequiredPromotionText(
+			record.promotionReceiptRef,
+			`${label}.promotionReceiptRef`,
+		);
+		if (!promotionReceiptRef.startsWith("refs/buildplane/promotions/")) {
+			throw new TypeError(
+				`${label}.promotionReceiptRef must be a candidate-keyed promotion receipt ref.`,
+			);
+		}
+		const worktreeSyncState = record.worktreeSyncState;
+		if (
+			worktreeSyncState !== "pending_reconciliation" &&
+			worktreeSyncState !== "root_checkout_stale" &&
+			worktreeSyncState !== "target_advanced"
+		) {
+			throw new TypeError(
+				`${label}.worktreeSyncState must be pending_reconciliation, root_checkout_stale, or target_advanced.`,
+			);
+		}
+		return {
+			targetRef,
+			targetHeadBeforeSha,
+			targetHeadAfterSha: readPromotionCandidateCommitSha(
+				record.targetHeadAfterSha,
+				`${label}.targetHeadAfterSha`,
+			),
+			mergedHeadSha: readPromotionCandidateCommitSha(
+				record.mergedHeadSha,
+				`${label}.mergedHeadSha`,
+			),
+			candidateCommitSha,
+			mergeParentShas,
+			mergedTreeSha: readPromotionCandidateCommitSha(
+				record.mergedTreeSha,
+				`${label}.mergedTreeSha`,
+			),
+			mergedTreeDigest,
+			promotionReceiptRef,
+			worktreeSyncState,
+		};
+	}
+
+	function normalizePromotionGitBinding(
+		value: unknown,
+		label: string,
+	): {
+		readonly binding: PromotionGitBindingV1;
+		readonly canonicalJson: string;
+	} {
+		const binding = parsePromotionGitBinding(
+			parseCanonicalPromotionJson(value, label),
+			label,
+		);
+		return {
+			binding,
+			canonicalJson: canonicalPromotionJson(binding),
+		};
+	}
+
+	interface NormalizedCandidatePromotionIntent {
+		readonly intent: CandidatePromotionIntent;
+		readonly canonicalCandidateDigest: string;
+		readonly idempotencyKey: string;
+		readonly candidateJson: string;
+		readonly decisionJson: string;
+		readonly acceptanceJson: string;
+		readonly reviewJson: string;
+		readonly canonicalIntentJson: string;
+		/** Duplicate identity deliberately excludes the write-ahead timestamp. */
+		readonly canonicalIdentityJson: string;
+	}
+
+	interface StoredCandidatePromotionExecutionLease {
+		readonly leaseToken: string;
+		readonly claimedAt: string;
+		readonly leaseExpiresAt: string;
+		readonly claimEpoch: number;
+	}
+
+	function canonicalCandidatePromotionIdentity(
+		intent: CandidatePromotionIntentInput,
+	): string {
+		return canonicalPromotionJson({
+			runId: intent.runId,
+			candidate: intent.candidate,
+			decision: intent.decision,
+			acceptance: intent.acceptance,
+			review: intent.review,
+		});
+	}
+
+	function normalizeCandidatePromotionIntent(
+		input: CandidatePromotionIntentInput | unknown,
+		database: DatabaseSync,
+	): NormalizedCandidatePromotionIntent {
+		const source = parseCanonicalPromotionJson(
+			input,
+			"Candidate promotion intent",
+		);
+		const record = readClosedPromotionRecord(
+			source,
+			"Candidate promotion intent",
+			["runId", "candidate", "decision", "acceptance", "review", "preparedAt"],
+		);
+		const runId = readRequiredPromotionText(
+			record.runId,
+			"Candidate promotion runId",
+		);
+		const preparedAt = readPromotionTimestamp(
+			record.preparedAt,
+			"Candidate promotion preparedAt",
+		);
+		if (
+			record.candidate === null ||
+			typeof record.candidate !== "object" ||
+			Array.isArray(record.candidate)
+		) {
+			throw new TypeError("Candidate promotion candidate must be an object.");
+		}
+
+		const candidateRow = readCandidateArtifactRow(runId, database);
+		if (!candidateRow) {
+			throw new Error(
+				`No immutable candidate artifact is recorded for run '${runId}'.`,
+			);
+		}
+		const candidate = toCandidateArtifactProjection(candidateRow);
+		const candidateJson = canonicalPromotionJson(candidate);
+		if (canonicalPromotionJson(record.candidate) !== candidateJson) {
+			throw new Error(
+				"Candidate promotion candidate must exactly match the stored immutable candidate artifact.",
+			);
+		}
+
+		// Raw/legacy candidates are intentionally not promotable through this
+		// protocol. Requiring governed lineage here is a consistency check only;
+		// it neither verifies nor infers the envelope's signature or authority.
+		const hasV1ActionLineage =
+			candidate.schemaVersion === 1 &&
+			candidate.actionReceiptDigest !== undefined;
+		const hasV3ActionLineage =
+			candidate.schemaVersion === 2 &&
+			(candidate.actionEvidenceVersion === "sealed-v2" ||
+				candidate.actionEvidenceVersion === "sealed_v3") &&
+			candidate.actionReceiptSetRef !== undefined &&
+			candidate.actionReceiptSetDigest !== undefined &&
+			candidate.candidateCreatedRef !== undefined;
+		if (
+			!candidate.workflowId ||
+			!candidate.provenanceRef ||
+			!candidate.envelopeDigest ||
+			!candidate.acceptanceContractDigest ||
+			(!hasV1ActionLineage && !hasV3ActionLineage)
+		) {
+			throw new Error(
+				"Candidate promotion requires a governed candidate with workflow, provenance, envelope, acceptance-contract, and version-matched action-evidence bindings.",
+			);
+		}
+
+		let canonicalCandidateDigest: string;
+		try {
+			canonicalCandidateDigest = canonicalSha256Digest(
+				candidate.candidateDigest,
+			);
+		} catch (error) {
+			throw new TypeError(
+				`Candidate promotion candidateDigest is invalid: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
+			);
+		}
+
+		// Parsers establish closed structural form. They do not validate signed
+		// tape records, credentials, authority, or promotion policy.
+		const decision = parsePromotionDecisionV1(record.decision);
+		const acceptance = parseCandidateAcceptanceRecord(record.acceptance);
+		const review = parseCandidateReviewRecord(record.review);
+		if (
+			acceptance.acceptanceContractDigest !== candidate.acceptanceContractDigest
+		) {
+			throw new Error(
+				"Candidate acceptance acceptanceContractDigest must match the immutable candidate's signed dispatch acceptance-contract binding.",
+			);
+		}
+
+		if (decision.candidateDigest !== canonicalCandidateDigest) {
+			throw new Error(
+				"Promotion decision candidateDigest must match the immutable candidate.",
+			);
+		}
+		if (
+			acceptance.candidateDigest !== canonicalCandidateDigest ||
+			review.candidateDigest !== canonicalCandidateDigest ||
+			review.verdict.candidateDigest !== canonicalCandidateDigest
+		) {
+			throw new Error(
+				"Candidate acceptance and review records must bind the exact immutable candidate.",
+			);
+		}
+		const canonicalCandidateCommitSha =
+			candidate.candidateCommitSha.toLowerCase();
+		if (
+			acceptance.candidateCommitSha !== canonicalCandidateCommitSha ||
+			review.candidateCommitSha !== canonicalCandidateCommitSha
+		) {
+			throw new Error(
+				"Candidate acceptance and review records must bind the exact immutable candidate commit SHA.",
+			);
+		}
+		if (decision.baseCommitSha !== candidate.baseSha.toLowerCase()) {
+			throw new Error(
+				"Promotion decision baseCommitSha must match the immutable candidate base SHA.",
+			);
+		}
+		if (decision.envelopeDigest !== candidate.envelopeDigest) {
+			throw new Error(
+				"Promotion decision envelopeDigest must match the candidate envelope binding.",
+			);
+		}
+		if (decision.acceptanceRef !== acceptance.acceptanceRef) {
+			throw new Error(
+				"Promotion decision acceptanceRef must match the supplied acceptance record.",
+			);
+		}
+		if (!decision.reviewRefs.includes(review.reviewRef)) {
+			throw new Error(
+				"Promotion decision reviewRefs must include the supplied review record.",
+			);
+		}
+		if (
+			decision.decision === "promote" &&
+			(acceptance.outcome !== "passed" || review.verdict.decision !== "approve")
+		) {
+			throw new Error(
+				"A promotion decision requires passed acceptance and an approving review verdict.",
+			);
+		}
+
+		const normalizedIntent: CandidatePromotionIntentInput = {
+			runId,
+			candidate,
+			decision,
+			acceptance,
+			review,
+			preparedAt,
+		};
+		const decisionJson = canonicalPromotionJson(decision);
+		const acceptanceJson = canonicalPromotionJson(acceptance);
+		const reviewJson = canonicalPromotionJson(review);
+		const canonicalIntentJson = canonicalPromotionJson(normalizedIntent);
+		const canonicalIdentityJson =
+			canonicalCandidatePromotionIdentity(normalizedIntent);
+		return {
+			intent: {
+				...normalizedIntent,
+				state: "prepared",
+			},
+			canonicalCandidateDigest,
+			idempotencyKey: decision.idempotencyKey,
+			candidateJson,
+			decisionJson,
+			acceptanceJson,
+			reviewJson,
+			canonicalIntentJson,
+			canonicalIdentityJson,
+		};
+	}
+
+	function readCandidatePromotionRowsByIdentity(
+		candidateDigest: string,
+		idempotencyKey: string,
+		database: DatabaseSync,
+	): readonly StoredCandidatePromotionRow[] {
+		requireCandidatePromotionsProjection(database);
+		return database
+			.prepare(
+				`SELECT candidate_digest, idempotency_key, run_id, state, candidate_json, decision_json, acceptance_json, review_json, intent_canonical_json, prepared_at, recorded_at, executed_at, executed_outcome, merged_head_sha, promotion_git_binding_json, execution_claim_token, execution_claimed_at, execution_lease_expires_at, execution_claim_epoch
+				 FROM candidate_promotions
+				 WHERE candidate_digest = ? OR idempotency_key = ?
+				 ORDER BY rowid ASC`,
+			)
+			.all(
+				candidateDigest,
+				idempotencyKey,
+			) as unknown as StoredCandidatePromotionRow[];
+	}
+
+	function readCandidatePromotionExecutionLease(
+		row: StoredCandidatePromotionRow,
+	): StoredCandidatePromotionExecutionLease | null {
+		if (
+			!Number.isInteger(row.execution_claim_epoch) ||
+			row.execution_claim_epoch < 0
+		) {
+			throw new Error(
+				"Candidate promotion projection is corrupt: execution claim epoch is invalid.",
+			);
+		}
+
+		const fields = [
+			row.execution_claim_token,
+			row.execution_claimed_at,
+			row.execution_lease_expires_at,
+		] as const;
+		const present = fields.filter((field) => field !== null).length;
+		if (present === 0) {
+			if (row.state !== "executed" && row.execution_claim_epoch !== 0) {
+				throw new Error(
+					"Candidate promotion projection is corrupt: a non-terminal execution claim epoch lacks lease evidence.",
+				);
+			}
+			return null;
+		}
+		if (present !== fields.length) {
+			throw new Error(
+				"Candidate promotion projection is corrupt: execution lease fields are incomplete.",
+			);
+		}
+		if (row.state !== "recorded") {
+			throw new Error(
+				"Candidate promotion projection is corrupt: only a recorded intent may retain an execution lease.",
+			);
+		}
+		if (
+			!PROMOTION_EXECUTION_LEASE_TOKEN_PATTERN.test(
+				row.execution_claim_token ?? "",
+			)
+		) {
+			throw new Error(
+				"Candidate promotion projection is corrupt: execution lease token is invalid.",
+			);
+		}
+		const claimedAt = readPromotionTimestamp(
+			row.execution_claimed_at,
+			"Candidate promotion execution claimedAt",
+		);
+		const leaseExpiresAt = readPromotionTimestamp(
+			row.execution_lease_expires_at,
+			"Candidate promotion execution leaseExpiresAt",
+		);
+		if (Date.parse(leaseExpiresAt) <= Date.parse(claimedAt)) {
+			throw new Error(
+				"Candidate promotion projection is corrupt: execution lease expiry must follow its claim time.",
+			);
+		}
+		if (row.execution_claim_epoch < 1) {
+			throw new Error(
+				"Candidate promotion projection is corrupt: execution lease requires a positive claim epoch.",
+			);
+		}
+		return {
+			leaseToken: row.execution_claim_token as string,
+			claimedAt,
+			leaseExpiresAt,
+			claimEpoch: row.execution_claim_epoch,
+		};
+	}
+
+	function toCandidatePromotionExecutionClaimState(
+		row: StoredCandidatePromotionRow,
+		now: Date,
+	): CandidatePromotionExecutionClaimStateV1 {
+		const lease = readCandidatePromotionExecutionLease(row);
+		const identity = {
+			schemaVersion: 1 as const,
+			candidateDigest: row.candidate_digest,
+			idempotencyKey: row.idempotency_key,
+			claimEpoch: row.execution_claim_epoch,
+		};
+		if (row.state === "executed") {
+			if (
+				row.executed_at === null ||
+				(row.executed_outcome !== "promoted" &&
+					row.executed_outcome !== "reconciliation_required" &&
+					row.executed_outcome !== "rejected")
+			) {
+				throw new Error(
+					"Candidate promotion projection is corrupt: completed execution lacks terminal evidence.",
+				);
+			}
+			return {
+				...identity,
+				state: "completed",
+				executedAt: readPromotionTimestamp(
+					row.executed_at,
+					"Candidate promotion executedAt",
+				),
+				executedOutcome: row.executed_outcome,
+			};
+		}
+		if (row.state === "prepared" || lease === null) {
+			return { ...identity, state: "pending" };
+		}
+		return {
+			...identity,
+			state:
+				Date.parse(lease.leaseExpiresAt) > now.getTime() ? "active" : "expired",
+			claimedAt: lease.claimedAt,
+			leaseExpiresAt: lease.leaseExpiresAt,
+		};
+	}
+
+	function toCandidatePromotionIntent(
+		row: StoredCandidatePromotionRow,
+		database: DatabaseSync,
+	): CandidatePromotionIntent {
+		let source: unknown;
+		try {
+			source = JSON.parse(row.intent_canonical_json);
+		} catch {
+			throw new Error(
+				"Candidate promotion projection is corrupt: intent_canonical_json is not valid JSON.",
+			);
+		}
+
+		const normalized = normalizeCandidatePromotionIntent(source, database);
+		if (
+			normalized.canonicalCandidateDigest !== row.candidate_digest ||
+			normalized.idempotencyKey !== row.idempotency_key ||
+			normalized.intent.runId !== row.run_id ||
+			normalized.candidateJson !== row.candidate_json ||
+			normalized.decisionJson !== row.decision_json ||
+			normalized.acceptanceJson !== row.acceptance_json ||
+			normalized.reviewJson !== row.review_json ||
+			normalized.canonicalIntentJson !== row.intent_canonical_json ||
+			normalized.intent.preparedAt !== row.prepared_at
+		) {
+			throw new Error(
+				"Candidate promotion projection is corrupt: durable promotion fields do not agree.",
+			);
+		}
+
+		if (
+			row.state !== "prepared" &&
+			row.state !== "recorded" &&
+			row.state !== "executed"
+		) {
+			throw new Error(
+				`Candidate promotion projection is corrupt: unsupported state '${row.state}'.`,
+			);
+		}
+		readCandidatePromotionExecutionLease(row);
+		if (row.state === "prepared") {
+			if (
+				row.recorded_at !== null ||
+				row.executed_at !== null ||
+				row.executed_outcome !== null ||
+				row.merged_head_sha !== null ||
+				row.promotion_git_binding_json !== null
+			) {
+				throw new Error(
+					"Candidate promotion projection is corrupt: a prepared intent has effect markers.",
+				);
+			}
+			return normalized.intent;
+		}
+		if (row.recorded_at === null) {
+			throw new Error(
+				"Candidate promotion projection is corrupt: recorded intent lacks a recorded timestamp.",
+			);
+		}
+		if (row.state === "recorded") {
+			if (
+				row.executed_at !== null ||
+				row.executed_outcome !== null ||
+				row.merged_head_sha !== null ||
+				row.promotion_git_binding_json !== null
+			) {
+				throw new Error(
+					"Candidate promotion projection is corrupt: a recorded intent has terminal effect markers.",
+				);
+			}
+			return {
+				...normalized.intent,
+				state: "recorded",
+			};
+		}
+
+		if (
+			row.executed_at === null ||
+			(row.executed_outcome !== "promoted" &&
+				row.executed_outcome !== "reconciliation_required" &&
+				row.executed_outcome !== "rejected")
+		) {
+			throw new Error(
+				"Candidate promotion projection is corrupt: executed intent lacks a terminal outcome.",
+			);
+		}
+		if (
+			normalized.intent.decision.decision === "reject" &&
+			row.executed_outcome !== "rejected"
+		) {
+			throw new Error(
+				"Candidate promotion projection is corrupt: a rejected decision recorded a merge-producing terminal outcome.",
+			);
+		}
+		if (
+			(row.executed_outcome === "promoted" ||
+				row.executed_outcome === "reconciliation_required") &&
+			(row.merged_head_sha === null ||
+				!FULL_GIT_COMMIT_SHA_PATTERN.test(row.merged_head_sha))
+		) {
+			throw new Error(
+				"Candidate promotion projection is corrupt: promotion effect lacks a merge commit SHA.",
+			);
+		}
+		if (
+			row.executed_outcome === "rejected" &&
+			(row.merged_head_sha !== null || row.promotion_git_binding_json !== null)
+		) {
+			throw new Error(
+				"Candidate promotion projection is corrupt: rejected intent has Git promotion evidence.",
+			);
+		}
+		const promotionGitBinding = (() => {
+			if (row.promotion_git_binding_json === null) return undefined;
+			let source: unknown;
+			try {
+				source = JSON.parse(row.promotion_git_binding_json);
+			} catch {
+				throw new Error(
+					"Candidate promotion projection is corrupt: promotion_git_binding_json is not valid JSON.",
+				);
+			}
+			const normalizedBinding = normalizePromotionGitBinding(
+				source,
+				"stored candidate promotion Git binding",
+			);
+			if (normalizedBinding.canonicalJson !== row.promotion_git_binding_json) {
+				throw new Error(
+					"Candidate promotion projection is corrupt: promotion_git_binding_json is not canonical.",
+				);
+			}
+			return normalizedBinding.binding;
+		})();
+		if (
+			row.executed_outcome === "reconciliation_required" &&
+			promotionGitBinding === undefined
+		) {
+			throw new Error(
+				"Candidate promotion projection is corrupt: reconciliation-required intent lacks immutable Git binding evidence.",
+			);
+		}
+		if (promotionGitBinding) {
+			if (promotionGitBinding.mergedHeadSha !== row.merged_head_sha) {
+				throw new Error(
+					"Candidate promotion projection is corrupt: Git binding merge SHA does not match the terminal marker.",
+				);
+			}
+			const syncStateMatchesOutcome =
+				row.executed_outcome === "promoted"
+					? promotionGitBinding.worktreeSyncState === "pending_reconciliation"
+					: row.executed_outcome === "reconciliation_required"
+						? promotionGitBinding.worktreeSyncState === "target_advanced" ||
+							promotionGitBinding.worktreeSyncState === "root_checkout_stale"
+						: false;
+			if (!syncStateMatchesOutcome) {
+				throw new Error(
+					"Candidate promotion projection is corrupt: Git binding sync state does not match the terminal outcome.",
+				);
+			}
+			if (
+				row.executed_outcome === "reconciliation_required" &&
+				promotionGitBinding.worktreeSyncState === "target_advanced" &&
+				promotionGitBinding.targetHeadAfterSha === row.merged_head_sha
+			) {
+				throw new Error(
+					"Candidate promotion projection is corrupt: target-advanced reconciliation must not still point at the merge.",
+				);
+			}
+			if (
+				row.executed_outcome === "reconciliation_required" &&
+				promotionGitBinding.worktreeSyncState === "root_checkout_stale" &&
+				promotionGitBinding.targetHeadAfterSha !== row.merged_head_sha
+			) {
+				throw new Error(
+					"Candidate promotion projection is corrupt: root-checkout-stale reconciliation must retain the candidate merge on the target ref.",
+				);
+			}
+		}
+
+		return {
+			...normalized.intent,
+			state: "executed",
+			executedOutcome: row.executed_outcome,
+			...(row.merged_head_sha ? { mergedHeadSha: row.merged_head_sha } : {}),
+			...(promotionGitBinding ? { promotionGitBinding } : {}),
+		};
 	}
 
 	function toWorkspaceSnapshot(row: StoredWorkspaceRow): WorkspaceSnapshot {
@@ -2028,6 +3862,14 @@ export function createStorageStore(
 			const runId = options?.runId ?? randomUUID();
 			const parentRunId = options?.parentRunId ?? null;
 			const strategyId = options?.strategyId ?? null;
+			const trustLane = options?.trustLane ?? "legacy";
+			if (
+				trustLane !== "legacy" &&
+				trustLane !== "unsafe" &&
+				trustLane !== "governed"
+			) {
+				throw new Error(`Unsupported run trust lane '${String(trustLane)}'.`);
+			}
 
 			try {
 				database
@@ -2046,7 +3888,7 @@ export function createStorageStore(
 
 				database
 					.prepare(
-						`INSERT INTO runs (id, unit_id, status, unit_snapshot, created_at, updated_at, completed_at, used_workspace, parent_run_id, strategy_id) VALUES (?, ?, ?, ?, ?, ?, NULL, 0, ?, ?)`,
+						`INSERT INTO runs (id, unit_id, status, unit_snapshot, created_at, updated_at, completed_at, used_workspace, parent_run_id, strategy_id, trust_lane) VALUES (?, ?, ?, ?, ?, ?, NULL, 0, ?, ?, ?)`,
 					)
 					.run(
 						runId,
@@ -2057,11 +3899,17 @@ export function createStorageStore(
 						createdAt,
 						parentRunId,
 						strategyId,
+						trustLane,
 					);
 
 				appendEvent(
 					"run-created",
-					{ runId, unitId: packet.unit.id, status: "pending" },
+					{
+						runId,
+						unitId: packet.unit.id,
+						status: "pending",
+						trustLane,
+					},
 					database,
 				);
 
@@ -2105,18 +3953,21 @@ export function createStorageStore(
 			const updatedAt = new Date().toISOString();
 
 			try {
-				const runRow = readRun(runId, database);
-				if (runRow.status !== "pending") {
-					throw new Error("Run start requires a pending run.");
-				}
-				database
-					.prepare(`UPDATE runs SET status = ?, updated_at = ? WHERE id = ?`)
-					.run("running", updatedAt, runId);
-				appendEvent(
-					"run-started",
-					{ runId, unitId: runRow.unit_id, status: "running" },
-					database,
-				);
+				runInTransaction(database, () => {
+					const runRow = readRun(runId, database);
+					if (runRow.status !== "pending") {
+						throw new Error("Run start requires a pending run.");
+					}
+					assertNoRecordedCandidatePromotionClaim(runId, database, "Run start");
+					database
+						.prepare(`UPDATE runs SET status = ?, updated_at = ? WHERE id = ?`)
+						.run("running", updatedAt, runId);
+					appendEvent(
+						"run-started",
+						{ runId, unitId: runRow.unit_id, status: "running" },
+						database,
+					);
+				});
 			} finally {
 				database.close();
 			}
@@ -2130,36 +3981,47 @@ export function createStorageStore(
 			const database = openStoreDatabase();
 			const now = new Date().toISOString();
 			try {
-				// Mirror `findOrphanedPlanForgeDispatches`'s predicate EXACTLY
-				// (`unit_id.startsWith(`${planId}:`)`) in JS rather than a SQL LIKE, so a
-				// planId containing `%`/`_` can neither over- nor under-match. Only rows
-				// still `running` are reconciled — never a row already terminal.
-				const prefix = `${planId}:`;
-				const rows = database
-					.prepare(`SELECT id, unit_id FROM runs WHERE status = 'running'`)
-					.all() as { id: string; unit_id: string }[];
-				const update = database.prepare(
-					`UPDATE runs SET status = ?, updated_at = ?, completed_at = ? WHERE id = ?`,
-				);
-				const reconciled: string[] = [];
-				for (const row of rows) {
-					if (!row.unit_id.startsWith(prefix)) {
-						continue;
-					}
-					update.run(status, now, now, row.id);
-					appendEvent(
-						"run-completed",
-						{
-							runId: row.id,
-							unitId: row.unit_id,
-							status,
-							reason: "planforge-recover-reconcile",
-						},
-						database,
+				return runInTransaction(database, () => {
+					// Mirror `findOrphanedPlanForgeDispatches`'s predicate EXACTLY
+					// (`unit_id.startsWith(`${planId}:`)`) in JS rather than a SQL LIKE, so a
+					// planId containing `%`/`_` can neither over- nor under-match. Only rows
+					// still `running` are reconciled — never a row already terminal.
+					const prefix = `${planId}:`;
+					const rows = database
+						.prepare(`SELECT id, unit_id FROM runs WHERE status = 'running'`)
+						.all() as { id: string; unit_id: string }[];
+					const update = database.prepare(
+						`UPDATE runs SET status = ?, updated_at = ?, completed_at = ? WHERE id = ?`,
 					);
-					reconciled.push(row.id);
-				}
-				return reconciled;
+					const reconciled: string[] = [];
+					for (const row of rows) {
+						if (!row.unit_id.startsWith(prefix)) {
+							continue;
+						}
+						// A PlanForge reconciliation is a generic terminal transition. It
+						// must not race a recorded promotion write-ahead marker into a
+						// terminal run: the candidate transaction owns that terminal state
+						// until the exact Git effect is reconciled.
+						assertNoRecordedCandidatePromotionClaim(
+							row.id,
+							database,
+							"PlanForge dispatch reconciliation",
+						);
+						update.run(status, now, now, row.id);
+						appendEvent(
+							"run-completed",
+							{
+								runId: row.id,
+								unitId: row.unit_id,
+								status,
+								reason: "planforge-recover-reconcile",
+							},
+							database,
+						);
+						reconciled.push(row.id);
+					}
+					return reconciled;
+				});
 			} finally {
 				database.close();
 			}
@@ -2243,23 +4105,35 @@ export function createStorageStore(
 			const completedAt = new Date().toISOString();
 
 			try {
-				const runRow = readRun(runId, database);
-				if (runRow.status !== "pending" && runRow.status !== "running") {
-					throw new Error("Run completion requires a pending or running run.");
-				}
-				if (runRow.used_workspace === 1 || readWorkspaceRow(runId, database)) {
-					throw new Error(
-						"Workspace-backed runs must use commitRunSuccessOutcome or commitRunFailureOutcome.",
+				return runInTransaction(database, () => {
+					const runRow = readRun(runId, database);
+					if (runRow.status !== "pending" && runRow.status !== "running") {
+						throw new Error(
+							"Run completion requires a pending or running run.",
+						);
+					}
+					assertNoRecordedCandidatePromotionClaim(
+						runId,
+						database,
+						"Run completion",
 					);
-				}
-				database
-					.prepare(
-						`UPDATE runs SET status = ?, updated_at = ?, completed_at = ? WHERE id = ?`,
-					)
-					.run(status, completedAt, completedAt, runId);
-				appendEvent("run-completed", { runId, status }, database);
+					if (
+						runRow.used_workspace === 1 ||
+						readWorkspaceRow(runId, database)
+					) {
+						throw new Error(
+							"Workspace-backed runs must use commitRunSuccessOutcome or commitRunFailureOutcome.",
+						);
+					}
+					database
+						.prepare(
+							`UPDATE runs SET status = ?, updated_at = ?, completed_at = ? WHERE id = ?`,
+						)
+						.run(status, completedAt, completedAt, runId);
+					appendEvent("run-completed", { runId, status }, database);
 
-				return toRun(readRun(runId, database));
+					return toRun(readRun(runId, database));
+				});
 			} finally {
 				database.close();
 			}
@@ -2336,6 +4210,11 @@ export function createStorageStore(
 							"Failure outcomes can only be recorded for pending or running runs.",
 						);
 					}
+					assertNoRecordedCandidatePromotionClaim(
+						runId,
+						database,
+						"Failure outcome",
+					);
 					const workspaceRow = readWorkspaceRow(runId, database);
 
 					if (payload.decision) {
@@ -2439,6 +4318,11 @@ export function createStorageStore(
 					if (runRow.status !== "running") {
 						throw new Error("Success outcomes require a running run.");
 					}
+					assertNoRecordedCandidatePromotionClaim(
+						runId,
+						database,
+						"Success outcome",
+					);
 					insertDecisionRecord(runId, decision, database);
 					database
 						.prepare(
@@ -2449,6 +4333,986 @@ export function createStorageStore(
 
 					return toRun(readRun(runId, database));
 				});
+			} finally {
+				database.close();
+			}
+		},
+
+		commitRunCandidateOutcome(runId, input) {
+			ensureInitialized();
+			const database = openStoreDatabase();
+			const completedAt = new Date().toISOString();
+
+			if (
+				input.decision.kind !== "advance-run" ||
+				input.decision.outcome !== "approved"
+			) {
+				throw new Error(
+					"Candidate outcomes only accept approved policy decisions.",
+				);
+			}
+
+			try {
+				return runInTransaction(database, () => {
+					requireCandidateArtifactsProjection(database);
+					const runRow = readRun(runId, database);
+					if (runRow.status !== "running") {
+						throw new Error("Candidate outcomes require a running run.");
+					}
+
+					const workspaceRow = readWorkspaceRow(runId, database);
+					if (!workspaceRow || workspaceRow.status !== "active") {
+						throw new Error(
+							"Candidate outcomes require an active workspace to retain.",
+						);
+					}
+
+					const candidate = normalizeCandidateArtifactInput(
+						input.candidate,
+						runId,
+						runRow.unit_id,
+					);
+					if (
+						candidate.schemaVersion === 2 &&
+						runRow.trust_lane !== "governed"
+					) {
+						throw new Error(
+							"Candidate schemaVersion 2 requires a governed run.",
+						);
+					}
+					// A packet with provenance is governed input. Preserve the raw lane for
+					// legacy packets, but never allow its candidate to replace the known
+					// provenance pointer with a different one.
+					let packet: UnitPacket | undefined;
+					if (runRow.unit_snapshot) {
+						try {
+							packet = parseUnitPacket(runRow.unit_snapshot);
+						} catch {
+							// Older or raw packet snapshots cannot establish a governed
+							// provenance binding. Do not infer one while recording the
+							// candidate projection.
+						}
+					}
+					if (
+						candidate.schemaVersion === 2 &&
+						packet?.provenance_ref !== candidate.provenanceRef
+					) {
+						throw new Error(
+							"Candidate schemaVersion 2 requires matching governed packet provenance.",
+						);
+					}
+					if (
+						packet?.provenance_ref &&
+						candidate.provenanceRef !== packet.provenance_ref
+					) {
+						throw new Error(
+							"Candidate provenanceRef must match the run's governed provenance reference.",
+						);
+					}
+					if (
+						candidate.baseSha.toLowerCase() !==
+						workspaceRow.head_sha.toLowerCase()
+					) {
+						throw new Error(
+							"Candidate baseSha must match the workspace base SHA.",
+						);
+					}
+
+					if (readCandidateArtifactRow(runId, database)) {
+						throw new Error(
+							`A candidate artifact already exists for run '${runId}'. Create a new attempt before recording another candidate.`,
+						);
+					}
+
+					if (candidate.workflowId !== undefined) {
+						const duplicateAttempt = database
+							.prepare(
+								`SELECT run_id FROM candidate_artifacts WHERE workflow_id = ? AND unit_id = ? AND attempt = ?`,
+							)
+							.get(candidate.workflowId, runRow.unit_id, candidate.attempt) as
+							| { run_id: string }
+							| undefined;
+						if (duplicateAttempt) {
+							throw new Error(
+								`A candidate already exists for workflow '${candidate.workflowId}', unit '${runRow.unit_id}', attempt ${candidate.attempt}. Create a new attempt before recording another candidate.`,
+							);
+						}
+					}
+
+					const duplicateIdentity = database
+						.prepare(
+							`SELECT run_id FROM candidate_artifacts WHERE candidate_key = ? OR candidate_ref = ? OR candidate_digest = ?`,
+						)
+						.get(
+							candidate.candidateKey,
+							candidate.candidateRef,
+							candidate.candidateDigest,
+						) as { run_id: string } | undefined;
+					if (duplicateIdentity) {
+						throw new Error(
+							`Candidate identity is already recorded for run '${duplicateIdentity.run_id}'.`,
+						);
+					}
+
+					database
+						.prepare(
+							`INSERT INTO candidate_artifacts (run_id, schema_version, candidate_id, candidate_key, candidate_ref, workflow_id, unit_id, attempt, provenance_ref, candidate_digest, base_commit_sha, candidate_commit_sha, commit_digest, tree_digest, patch_digest, changed_files_digest, envelope_digest, acceptance_contract_digest, action_receipt_digest, action_receipt_set_ref, action_receipt_set_digest, action_evidence_version, candidate_created_ref, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+						)
+						.run(
+							runId,
+							candidate.schemaVersion,
+							candidate.candidateId,
+							candidate.candidateKey,
+							candidate.candidateRef,
+							candidate.workflowId ?? null,
+							runRow.unit_id,
+							candidate.attempt,
+							candidate.provenanceRef ?? null,
+							candidate.candidateDigest,
+							candidate.baseSha,
+							candidate.candidateCommitSha,
+							candidate.commitDigest,
+							candidate.treeDigest,
+							candidate.patchDigest,
+							candidate.changedFilesDigest,
+							candidate.envelopeDigest ?? null,
+							candidate.acceptanceContractDigest ?? null,
+							candidate.actionReceiptDigest ?? null,
+							candidate.actionReceiptSetRef ?? null,
+							candidate.actionReceiptSetDigest ?? null,
+							candidate.actionEvidenceVersion ?? null,
+							candidate.candidateCreatedRef ?? null,
+							completedAt,
+						);
+					hitFailpoint("commitRunCandidateOutcome:after-candidate-insert");
+					appendEvent(
+						"candidate-recorded",
+						{
+							runId,
+							candidateId: candidate.candidateId,
+							candidateKey: candidate.candidateKey,
+							candidateRef: candidate.candidateRef,
+							candidateDigest: candidate.candidateDigest,
+							commitDigest: candidate.commitDigest,
+							baseSha: candidate.baseSha,
+							candidateCommitSha: candidate.candidateCommitSha,
+							schemaVersion: candidate.schemaVersion,
+							...(candidate.workflowId
+								? { workflowId: candidate.workflowId }
+								: {}),
+							...(candidate.schemaVersion === 2
+								? {
+										actionEvidenceVersion: candidate.actionEvidenceVersion,
+										actionReceiptSetRef: candidate.actionReceiptSetRef,
+										actionReceiptSetDigest: candidate.actionReceiptSetDigest,
+										candidateCreatedRef: candidate.candidateCreatedRef,
+									}
+								: {}),
+							attempt: candidate.attempt,
+						},
+						database,
+					);
+
+					insertDecisionRecord(runId, input.decision, database);
+					// Candidate creation is deliberately non-terminal. The policy decision
+					// proves only that deterministic execution/acceptance may advance to
+					// review; it is not a review verdict or a promotion decision. Leaving
+					// the run active prevents local status/receipt projections from treating
+					// an unreviewed candidate as a completed, promotable result.
+					database
+						.prepare(
+							`UPDATE runs SET status = ?, updated_at = ?, completed_at = NULL WHERE id = ?`,
+						)
+						.run("running", completedAt, runId);
+					appendEvent(
+						"candidate-awaiting-promotion",
+						{ runId, status: "running", reason: "candidate-pending-promotion" },
+						database,
+					);
+					database
+						.prepare(
+							`UPDATE workspaces SET status = ?, finalized_at = ?, cleanup_error = NULL WHERE run_id = ?`,
+						)
+						.run("retained", completedAt, runId);
+					appendEvent(
+						"workspace-retained",
+						{
+							runId,
+							status: "retained",
+							reason: "candidate-pending-promotion",
+						},
+						database,
+					);
+
+					return toRun(readRun(runId, database));
+				});
+			} finally {
+				database.close();
+			}
+		},
+
+		getCandidateArtifact(runId) {
+			ensureInitialized();
+			const database = openStoreDatabase();
+			try {
+				const candidate = readCandidateArtifactRow(runId, database);
+				return candidate ? toCandidateArtifactProjection(candidate) : null;
+			} finally {
+				database.close();
+			}
+		},
+
+		prepareCandidatePromotion(input) {
+			ensureInitialized();
+			const database = openStoreDatabase();
+
+			try {
+				return runInTransaction(database, () => {
+					const normalized = normalizeCandidatePromotionIntent(input, database);
+					// Replays may read an already-executed governed intent after it
+					// terminally completed, but no raw/legacy run can acquire even that
+					// read-through identity.
+					requireGovernedCandidatePromotionRun(
+						normalized.intent.runId,
+						database,
+						"Candidate promotion preparation",
+					);
+					const matchingRows = readCandidatePromotionRowsByIdentity(
+						normalized.canonicalCandidateDigest,
+						normalized.idempotencyKey,
+						database,
+					);
+
+					for (const row of matchingRows) {
+						if (
+							row.candidate_digest === normalized.canonicalCandidateDigest &&
+							row.idempotency_key === normalized.idempotencyKey
+						) {
+							const existing = toCandidatePromotionIntent(row, database);
+							if (
+								canonicalCandidatePromotionIdentity(existing) !==
+								normalized.canonicalIdentityJson
+							) {
+								throw new Error(
+									"Candidate promotion idempotency key already exists with a different canonical intent.",
+								);
+							}
+							return existing;
+						}
+
+						if (row.idempotency_key === normalized.idempotencyKey) {
+							throw new Error(
+								"Candidate promotion idempotency key is already bound to a different candidate digest.",
+							);
+						}
+						if (row.candidate_digest === normalized.canonicalCandidateDigest) {
+							throw new Error(
+								"Candidate digest already has a promotion intent with a different idempotency key.",
+							);
+						}
+					}
+					requireActiveGovernedCandidatePromotionRun(
+						normalized.intent.runId,
+						database,
+						"Candidate promotion preparation",
+					);
+
+					database
+						.prepare(
+							`INSERT INTO candidate_promotions (candidate_digest, idempotency_key, run_id, state, candidate_json, decision_json, acceptance_json, review_json, intent_canonical_json, prepared_at, recorded_at, executed_at, executed_outcome, merged_head_sha, promotion_git_binding_json)
+							 VALUES (?, ?, ?, 'prepared', ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL)`,
+						)
+						.run(
+							normalized.canonicalCandidateDigest,
+							normalized.idempotencyKey,
+							normalized.intent.runId,
+							normalized.candidateJson,
+							normalized.decisionJson,
+							normalized.acceptanceJson,
+							normalized.reviewJson,
+							normalized.canonicalIntentJson,
+							normalized.intent.preparedAt,
+						);
+					hitFailpoint("prepareCandidatePromotion:after-intent-insert");
+					appendEvent(
+						"candidate-promotion-prepared",
+						{
+							runId: normalized.intent.runId,
+							candidateDigest: normalized.canonicalCandidateDigest,
+							idempotencyKey: normalized.idempotencyKey,
+							state: "prepared",
+						},
+						database,
+					);
+					return normalized.intent;
+				});
+			} finally {
+				database.close();
+			}
+		},
+
+		markCandidatePromotionRecorded(candidateDigest, idempotencyKey) {
+			ensureInitialized();
+			const database = openStoreDatabase();
+
+			try {
+				runInTransaction(database, () => {
+					let canonicalCandidateDigest: string;
+					try {
+						canonicalCandidateDigest = canonicalSha256Digest(candidateDigest);
+					} catch (error) {
+						throw new TypeError(
+							`Candidate promotion candidateDigest is invalid: ${
+								error instanceof Error ? error.message : String(error)
+							}`,
+						);
+					}
+					const key = readRequiredPromotionText(
+						idempotencyKey,
+						"Candidate promotion idempotencyKey",
+					);
+					const rows = readCandidatePromotionRowsByIdentity(
+						canonicalCandidateDigest,
+						key,
+						database,
+					);
+					const row = rows.find(
+						(candidate) =>
+							candidate.candidate_digest === canonicalCandidateDigest &&
+							candidate.idempotency_key === key,
+					);
+					if (!row) {
+						throw new Error(
+							"Candidate promotion marker does not match a prepared candidate intent.",
+						);
+					}
+					// Validate the persisted binding before moving the write-ahead marker.
+					const intent = toCandidatePromotionIntent(row, database);
+					requireGovernedCandidatePromotionRun(
+						intent.runId,
+						database,
+						"Candidate promotion recording",
+					);
+					if (intent.state === "executed" || intent.state === "recorded") {
+						return;
+					}
+					requireActiveGovernedCandidatePromotionRun(
+						intent.runId,
+						database,
+						"Candidate promotion recording",
+					);
+
+					const recordedAt = new Date().toISOString();
+					const transition = database
+						.prepare(
+							`UPDATE candidate_promotions
+							 SET state = 'recorded', recorded_at = ?
+							 WHERE candidate_digest = ? AND idempotency_key = ? AND state = 'prepared'`,
+						)
+						.run(recordedAt, canonicalCandidateDigest, key) as {
+						changes: number;
+					};
+					if (transition.changes !== 1) {
+						const latest = readCandidatePromotionRowsByIdentity(
+							canonicalCandidateDigest,
+							key,
+							database,
+						).find(
+							(candidate) =>
+								candidate.candidate_digest === canonicalCandidateDigest &&
+								candidate.idempotency_key === key,
+						);
+						if (!latest) {
+							throw new Error(
+								"Candidate promotion disappeared while recording its write-ahead marker.",
+							);
+						}
+						const latestIntent = toCandidatePromotionIntent(latest, database);
+						if (
+							latestIntent.state === "recorded" ||
+							latestIntent.state === "executed"
+						) {
+							return;
+						}
+						throw new Error(
+							"Candidate promotion state changed while recording its write-ahead marker.",
+						);
+					}
+					hitFailpoint("markCandidatePromotionRecorded:after-marker-update");
+					appendEvent(
+						"candidate-promotion-recorded",
+						{
+							candidateDigest: canonicalCandidateDigest,
+							idempotencyKey: key,
+							state: "recorded",
+						},
+						database,
+					);
+				});
+			} finally {
+				database.close();
+			}
+		},
+
+		claimCandidatePromotionExecution(candidateDigest, idempotencyKey) {
+			ensureInitialized();
+			const database = openStoreDatabase();
+
+			try {
+				return runInTransaction(database, () => {
+					let canonicalCandidateDigest: string;
+					try {
+						canonicalCandidateDigest = canonicalSha256Digest(candidateDigest);
+					} catch (error) {
+						throw new TypeError(
+							`Candidate promotion candidateDigest is invalid: ${
+								error instanceof Error ? error.message : String(error)
+							}`,
+						);
+					}
+					const key = readRequiredPromotionText(
+						idempotencyKey,
+						"Candidate promotion idempotencyKey",
+					);
+					const row = readCandidatePromotionRowsByIdentity(
+						canonicalCandidateDigest,
+						key,
+						database,
+					).find(
+						(candidate) =>
+							candidate.candidate_digest === canonicalCandidateDigest &&
+							candidate.idempotency_key === key,
+					);
+					if (!row) {
+						throw new Error(
+							"Candidate promotion execution claim does not match a recorded candidate intent.",
+						);
+					}
+					const intent = toCandidatePromotionIntent(row, database);
+					if (intent.state !== "recorded") {
+						throw new Error(
+							"Candidate promotion execution requires a recorded write-ahead intent.",
+						);
+					}
+					requireActiveGovernedCandidatePromotionRun(
+						intent.runId,
+						database,
+						"Candidate promotion execution claim",
+					);
+					const now = promotionExecutionNow();
+					const previousLease = readCandidatePromotionExecutionLease(row);
+					if (
+						previousLease !== null &&
+						Date.parse(previousLease.leaseExpiresAt) > now.getTime()
+					) {
+						throw new Error(
+							`An active candidate promotion execution lease remains valid until ${previousLease.leaseExpiresAt}; only its current owner may enter the Git effect path.`,
+						);
+					}
+
+					const claimedAt = now.toISOString();
+					const leaseExpiresAt = new Date(
+						now.getTime() + PROMOTION_EXECUTION_LEASE_MS,
+					).toISOString();
+					const leaseToken = randomUUID();
+					const claimEpoch = row.execution_claim_epoch + 1;
+					// `BEGIN IMMEDIATE` reserves the SQLite writer before the row is read.
+					// The predicate still makes an accidental stale update fail closed if
+					// this code is ever called from a different transaction wrapper.
+					const claim = database
+						.prepare(
+							`UPDATE candidate_promotions
+							 SET execution_claim_token = ?, execution_claimed_at = ?, execution_lease_expires_at = ?, execution_claim_epoch = ?
+							 WHERE candidate_digest = ? AND idempotency_key = ? AND state = 'recorded'
+							   AND (
+								(execution_claim_token IS NULL AND execution_claimed_at IS NULL AND execution_lease_expires_at IS NULL)
+								OR execution_lease_expires_at <= ?
+							   )`,
+						)
+						.run(
+							leaseToken,
+							claimedAt,
+							leaseExpiresAt,
+							claimEpoch,
+							canonicalCandidateDigest,
+							key,
+							claimedAt,
+						) as { changes: number };
+					if (claim.changes !== 1) {
+						throw new Error(
+							"Candidate promotion execution lease changed before the Git effect could begin.",
+						);
+					}
+					hitFailpoint("claimCandidatePromotionExecution:after-lease-update");
+					appendEvent(
+						"candidate-promotion-execution-claimed",
+						{
+							candidateDigest: canonicalCandidateDigest,
+							idempotencyKey: key,
+							claimEpoch,
+							claimedAt,
+							leaseExpiresAt,
+						},
+						database,
+					);
+					return {
+						schemaVersion: 1 as const,
+						state: "active" as const,
+						candidateDigest: canonicalCandidateDigest,
+						idempotencyKey: key,
+						leaseToken,
+						claimedAt,
+						leaseExpiresAt,
+						claimEpoch,
+					};
+				});
+			} finally {
+				database.close();
+			}
+		},
+
+		getCandidatePromotionExecutionClaimState(candidateDigest, idempotencyKey) {
+			ensureInitialized();
+			const database = openStoreDatabase();
+
+			try {
+				let canonicalCandidateDigest: string;
+				try {
+					canonicalCandidateDigest = canonicalSha256Digest(candidateDigest);
+				} catch (error) {
+					throw new TypeError(
+						`Candidate promotion candidateDigest is invalid: ${
+							error instanceof Error ? error.message : String(error)
+						}`,
+					);
+				}
+				const key = readRequiredPromotionText(
+					idempotencyKey,
+					"Candidate promotion idempotencyKey",
+				);
+				const row = readCandidatePromotionRowsByIdentity(
+					canonicalCandidateDigest,
+					key,
+					database,
+				).find(
+					(candidate) =>
+						candidate.candidate_digest === canonicalCandidateDigest &&
+						candidate.idempotency_key === key,
+				);
+				if (!row) {
+					throw new Error(
+						"Candidate promotion execution state does not match a recorded candidate intent.",
+					);
+				}
+				// Validate all candidate/decision bindings before exposing the recovery
+				// state. A local projection never becomes execution authority merely
+				// because its lease fields are syntactically well-formed.
+				toCandidatePromotionIntent(row, database);
+				return toCandidatePromotionExecutionClaimState(
+					row,
+					promotionExecutionNow(),
+				);
+			} finally {
+				database.close();
+			}
+		},
+
+		markCandidatePromotionExecuted(
+			candidateDigest,
+			idempotencyKey,
+			outcome,
+			executionLeaseToken,
+		) {
+			ensureInitialized();
+			const database = openStoreDatabase();
+
+			try {
+				runInTransaction(database, () => {
+					let canonicalCandidateDigest: string;
+					try {
+						canonicalCandidateDigest = canonicalSha256Digest(candidateDigest);
+					} catch (error) {
+						throw new TypeError(
+							`Candidate promotion candidateDigest is invalid: ${
+								error instanceof Error ? error.message : String(error)
+							}`,
+						);
+					}
+					const key = readRequiredPromotionText(
+						idempotencyKey,
+						"Candidate promotion idempotencyKey",
+					);
+					if (
+						outcome.outcome !== "promoted" &&
+						outcome.outcome !== "reconciliation_required" &&
+						outcome.outcome !== "rejected"
+					) {
+						throw new TypeError(
+							'Candidate promotion outcome must be "promoted", "reconciliation_required", or "rejected".',
+						);
+					}
+					const hasPromotionEffect = outcome.outcome !== "rejected";
+					const mergedHeadSha = hasPromotionEffect
+						? readPromotionCandidateCommitSha(
+								outcome.mergedHeadSha,
+								"Candidate promotion mergedHeadSha",
+							)
+						: undefined;
+					if (
+						hasPromotionEffect &&
+						(typeof mergedHeadSha !== "string" ||
+							!FULL_GIT_COMMIT_SHA_PATTERN.test(mergedHeadSha))
+					) {
+						throw new TypeError(
+							"A promotion effect requires a full merge commit SHA.",
+						);
+					}
+					if (outcome.outcome === "rejected" && mergedHeadSha !== undefined) {
+						throw new TypeError(
+							"A rejected candidate promotion cannot carry a merge commit SHA.",
+						);
+					}
+					if (
+						outcome.outcome === "rejected" &&
+						outcome.promotionGitBinding !== undefined
+					) {
+						throw new TypeError(
+							"A rejected candidate promotion cannot carry Git-binding evidence.",
+						);
+					}
+					const normalizedPromotionGitBinding = hasPromotionEffect
+						? normalizePromotionGitBinding(
+								outcome.promotionGitBinding,
+								"Candidate promotion Git binding",
+							)
+						: undefined;
+					if (
+						normalizedPromotionGitBinding &&
+						normalizedPromotionGitBinding.binding.mergedHeadSha !==
+							mergedHeadSha
+					) {
+						throw new TypeError(
+							"Candidate promotion Git binding mergedHeadSha must match the terminal effect.",
+						);
+					}
+					const hasMatchingSyncState =
+						normalizedPromotionGitBinding === undefined ||
+						(outcome.outcome === "promoted"
+							? normalizedPromotionGitBinding.binding.worktreeSyncState ===
+								"pending_reconciliation"
+							: outcome.outcome === "reconciliation_required"
+								? normalizedPromotionGitBinding.binding.worktreeSyncState ===
+										"target_advanced" ||
+									normalizedPromotionGitBinding.binding.worktreeSyncState ===
+										"root_checkout_stale"
+								: true);
+					if (!hasMatchingSyncState) {
+						throw new TypeError(
+							"Candidate promotion Git binding sync state must match the terminal effect.",
+						);
+					}
+
+					const rows = readCandidatePromotionRowsByIdentity(
+						canonicalCandidateDigest,
+						key,
+						database,
+					);
+					const row = rows.find(
+						(candidate) =>
+							candidate.candidate_digest === canonicalCandidateDigest &&
+							candidate.idempotency_key === key,
+					);
+					if (!row) {
+						throw new Error(
+							"Candidate promotion marker does not match a recorded candidate intent.",
+						);
+					}
+					const intent = toCandidatePromotionIntent(row, database);
+					if (
+						intent.decision.decision === "reject" &&
+						outcome.outcome !== "rejected"
+					) {
+						throw new Error(
+							"A rejected candidate promotion decision cannot record a merge-producing effect.",
+						);
+					}
+					if (normalizedPromotionGitBinding) {
+						const binding = normalizedPromotionGitBinding.binding;
+						const candidateRefPrefix = "refs/buildplane/candidates/";
+						const expectedReceiptRef = intent.candidate.candidateRef.startsWith(
+							candidateRefPrefix,
+						)
+							? `refs/buildplane/promotions/${intent.candidate.candidateRef.slice(candidateRefPrefix.length)}`
+							: "";
+						if (
+							binding.targetRef !== intent.decision.targetRef ||
+							binding.targetHeadBeforeSha !== intent.decision.baseCommitSha ||
+							binding.candidateCommitSha !==
+								intent.candidate.candidateCommitSha ||
+							binding.mergedTreeDigest !==
+								canonicalSha256Digest(intent.candidate.treeDigest) ||
+							binding.promotionReceiptRef !== expectedReceiptRef
+						) {
+							throw new Error(
+								"Candidate promotion Git binding does not match the immutable candidate and signed decision.",
+							);
+						}
+						if (outcome.outcome === "reconciliation_required") {
+							if (
+								binding.worktreeSyncState === "target_advanced" &&
+								binding.targetHeadAfterSha === mergedHeadSha
+							) {
+								throw new Error(
+									"Target-advanced promotion evidence must show that the target no longer equals the candidate merge.",
+								);
+							}
+							if (
+								binding.worktreeSyncState === "root_checkout_stale" &&
+								binding.targetHeadAfterSha !== mergedHeadSha
+							) {
+								throw new Error(
+									"Root-checkout-stale promotion evidence must retain the candidate merge on the target ref.",
+								);
+							}
+						}
+					}
+					requireGovernedCandidatePromotionRun(
+						intent.runId,
+						database,
+						"Candidate promotion execution",
+					);
+					if (intent.state === "executed") {
+						if (
+							intent.executedOutcome !== outcome.outcome ||
+							intent.mergedHeadSha !== mergedHeadSha ||
+							canonicalPromotionJson(intent.promotionGitBinding ?? null) !==
+								(normalizedPromotionGitBinding?.canonicalJson ?? "null")
+						) {
+							throw new Error(
+								"Candidate promotion is already executed with a different terminal outcome.",
+							);
+						}
+						return;
+					}
+					if (intent.state !== "recorded") {
+						throw new Error(
+							"Candidate promotion must be recorded before its effect can be marked executed.",
+						);
+					}
+					const executionLease = readCandidatePromotionExecutionLease(row);
+					if (executionLease === null) {
+						throw new Error(
+							"Candidate promotion execution requires an active execution lease before its terminal effect can be recorded.",
+						);
+					}
+					if (
+						typeof executionLeaseToken !== "string" ||
+						!PROMOTION_EXECUTION_LEASE_TOKEN_PATTERN.test(executionLeaseToken)
+					) {
+						throw new Error(
+							"Candidate promotion execution requires the exact active execution lease token.",
+						);
+					}
+					if (executionLeaseToken !== executionLease.leaseToken) {
+						throw new Error(
+							"Candidate promotion execution lease token does not match the active owner.",
+						);
+					}
+					const executionNow = promotionExecutionNow();
+					if (
+						Date.parse(executionLease.leaseExpiresAt) <= executionNow.getTime()
+					) {
+						throw new Error(
+							"Candidate promotion execution lease expired before its terminal effect could be recorded; acquire a new lease and reconcile the Git effect first.",
+						);
+					}
+					// Check durable activity immediately before writing a terminal marker.
+					// This must precede the promotion-row update so a stale recovery cannot
+					// make a terminal run look executed after its Git effect was denied.
+					requireActiveGovernedCandidatePromotionRun(
+						intent.runId,
+						database,
+						"Candidate promotion execution",
+					);
+
+					const executedAt = executionNow.toISOString();
+					const transition = database
+						.prepare(
+							`UPDATE candidate_promotions
+							 SET state = 'executed', executed_at = ?, executed_outcome = ?, merged_head_sha = ?, promotion_git_binding_json = ?, execution_claim_token = NULL, execution_claimed_at = NULL, execution_lease_expires_at = NULL
+							 WHERE candidate_digest = ? AND idempotency_key = ? AND state = 'recorded'
+							   AND execution_claim_token = ? AND execution_lease_expires_at > ?`,
+						)
+						.run(
+							executedAt,
+							outcome.outcome,
+							mergedHeadSha ?? null,
+							normalizedPromotionGitBinding?.canonicalJson ?? null,
+							canonicalCandidateDigest,
+							key,
+							executionLeaseToken,
+							executedAt,
+						) as { changes: number };
+					if (transition.changes !== 1) {
+						const latest = readCandidatePromotionRowsByIdentity(
+							canonicalCandidateDigest,
+							key,
+							database,
+						).find(
+							(candidate) =>
+								candidate.candidate_digest === canonicalCandidateDigest &&
+								candidate.idempotency_key === key,
+						);
+						if (!latest) {
+							throw new Error(
+								"Candidate promotion disappeared while recording its terminal effect marker.",
+							);
+						}
+						const latestIntent = toCandidatePromotionIntent(latest, database);
+						if (
+							latestIntent.state === "executed" &&
+							latestIntent.executedOutcome === outcome.outcome &&
+							latestIntent.mergedHeadSha === mergedHeadSha &&
+							canonicalPromotionJson(
+								latestIntent.promotionGitBinding ?? null,
+							) === (normalizedPromotionGitBinding?.canonicalJson ?? "null")
+						) {
+							return;
+						}
+						throw new Error(
+							"Candidate promotion execution lease changed while recording its terminal effect marker.",
+						);
+					}
+					hitFailpoint("markCandidatePromotionExecuted:after-marker-update");
+					const candidateRow = database
+						.prepare(
+							`SELECT candidate_digest FROM candidate_artifacts WHERE run_id = ?`,
+						)
+						.get(intent.runId) as { candidate_digest: string } | undefined;
+					if (
+						!candidateRow ||
+						canonicalSha256Digest(candidateRow.candidate_digest) !==
+							canonicalCandidateDigest
+					) {
+						throw new Error(
+							"Candidate promotion terminal state does not bind the recorded candidate run.",
+						);
+					}
+					const runStatus =
+						outcome.outcome === "promoted"
+							? "passed"
+							: outcome.outcome === "rejected"
+								? "failed"
+								: "suspended";
+					const terminalTransition = database
+						.prepare(
+							`UPDATE runs
+							 SET status = ?, updated_at = ?, completed_at = ?
+							 WHERE id = ? AND status = 'running'`,
+						)
+						.run(
+							runStatus,
+							executedAt,
+							outcome.outcome === "reconciliation_required" ? null : executedAt,
+							intent.runId,
+						) as {
+						changes: number;
+					};
+					if (terminalTransition.changes !== 1) {
+						throw new Error(
+							"Candidate promotion can complete only an active candidate run.",
+						);
+					}
+					appendEvent(
+						"candidate-promotion-executed",
+						{
+							candidateDigest: canonicalCandidateDigest,
+							idempotencyKey: key,
+							outcome: outcome.outcome,
+							...(mergedHeadSha ? { mergedHeadSha } : {}),
+							...(normalizedPromotionGitBinding
+								? {
+										promotionGitBinding: normalizedPromotionGitBinding.binding,
+									}
+								: {}),
+							state: "executed",
+						},
+						database,
+					);
+					if (outcome.outcome === "reconciliation_required") {
+						appendEvent(
+							"candidate-promotion-reconciliation-required",
+							{
+								runId: intent.runId,
+								status: "suspended",
+								reason:
+									normalizedPromotionGitBinding?.binding.worktreeSyncState ===
+									"root_checkout_stale"
+										? "candidate-promotion-root-checkout-stale"
+										: "candidate-promotion-target-advanced",
+							},
+							database,
+						);
+					} else {
+						appendEvent(
+							"run-completed",
+							{
+								runId: intent.runId,
+								status: runStatus,
+								reason:
+									outcome.outcome === "promoted"
+										? "candidate-promoted"
+										: "candidate-promotion-rejected",
+							},
+							database,
+						);
+					}
+				});
+			} finally {
+				database.close();
+			}
+		},
+
+		listPendingCandidatePromotions() {
+			ensureInitialized();
+			// Historical initialized databases can predate the authority-lane
+			// column. They cannot contain a provably governed recovery action, so
+			// return no work before opening the strict write-capable projection.
+			// This keeps recovery reads backward-compatible without treating an old
+			// row as promotion authority or mutating a database from a read path.
+			const compatibilityDatabase = openBuildplaneDatabase(layout.stateDbPath);
+			try {
+				if (!tableHasColumn(compatibilityDatabase, "runs", "trust_lane")) {
+					return [];
+				}
+			} finally {
+				compatibilityDatabase.close();
+			}
+			const database = openStoreDatabase();
+			try {
+				requireCandidatePromotionsProjection(database);
+				// Projection recovery is deliberately fail-closed for rows that
+				// predate the durable authority lane. Avoid a read-time migration:
+				// absent `trust_lane` means legacy, never governed.
+				const governedRunPredicate = tableHasColumn(
+					database,
+					"runs",
+					"trust_lane",
+				)
+					? "runs.trust_lane = 'governed'"
+					: "'legacy' = 'governed'";
+				const rows = database
+					.prepare(
+						`SELECT candidate_digest, idempotency_key, run_id, state, candidate_json, decision_json, acceptance_json, review_json, intent_canonical_json, prepared_at, recorded_at, executed_at, executed_outcome, merged_head_sha, promotion_git_binding_json, execution_claim_token, execution_claimed_at, execution_lease_expires_at, execution_claim_epoch
+						 FROM candidate_promotions
+						 INNER JOIN runs ON runs.id = candidate_promotions.run_id
+						 WHERE candidate_promotions.state IN ('prepared', 'recorded')
+						   AND ${governedRunPredicate}
+						   AND runs.status = 'running'
+						 ORDER BY candidate_promotions.prepared_at ASC, candidate_promotions.rowid ASC`,
+					)
+					.all() as unknown as StoredCandidatePromotionRow[];
+				return rows.map((row) => toCandidatePromotionIntent(row, database));
 			} finally {
 				database.close();
 			}
@@ -2579,21 +5443,28 @@ export function createStorageStore(
 			const updatedAt = new Date().toISOString();
 
 			try {
-				const runRow = readRun(runId, database);
-				if (runRow.status !== "running") {
-					throw new Error(
-						`suspendRun requires a running run, got '${runRow.status}'.`,
+				return runInTransaction(database, () => {
+					const runRow = readRun(runId, database);
+					if (runRow.status !== "running") {
+						throw new Error(
+							`suspendRun requires a running run, got '${runRow.status}'.`,
+						);
+					}
+					assertNoRecordedCandidatePromotionClaim(
+						runId,
+						database,
+						"Run suspension",
 					);
-				}
-				database
-					.prepare(`UPDATE runs SET status = ?, updated_at = ? WHERE id = ?`)
-					.run("suspended", updatedAt, runId);
-				appendEvent(
-					"run-suspended",
-					{ runId, unitId: runRow.unit_id, status: "suspended" },
-					database,
-				);
-				return toRun({ ...runRow, status: "suspended" });
+					database
+						.prepare(`UPDATE runs SET status = ?, updated_at = ? WHERE id = ?`)
+						.run("suspended", updatedAt, runId);
+					appendEvent(
+						"run-suspended",
+						{ runId, unitId: runRow.unit_id, status: "suspended" },
+						database,
+					);
+					return toRun({ ...runRow, status: "suspended" });
+				});
 			} finally {
 				database.close();
 			}
@@ -2605,21 +5476,28 @@ export function createStorageStore(
 			const updatedAt = new Date().toISOString();
 
 			try {
-				const runRow = readRun(runId, database);
-				if (runRow.status !== "suspended") {
-					throw new Error(
-						`approveRun requires a suspended run, got '${runRow.status}'.`,
+				return runInTransaction(database, () => {
+					const runRow = readRun(runId, database);
+					if (runRow.status !== "suspended") {
+						throw new Error(
+							`approveRun requires a suspended run, got '${runRow.status}'.`,
+						);
+					}
+					assertNoRecordedCandidatePromotionClaim(
+						runId,
+						database,
+						"Run approval",
 					);
-				}
-				database
-					.prepare(`UPDATE runs SET status = ?, updated_at = ? WHERE id = ?`)
-					.run("pending", updatedAt, runId);
-				appendEvent(
-					"run-resumed",
-					{ runId, unitId: runRow.unit_id, status: "pending" },
-					database,
-				);
-				return toRun({ ...runRow, status: "pending" });
+					database
+						.prepare(`UPDATE runs SET status = ?, updated_at = ? WHERE id = ?`)
+						.run("pending", updatedAt, runId);
+					appendEvent(
+						"run-resumed",
+						{ runId, unitId: runRow.unit_id, status: "pending" },
+						database,
+					);
+					return toRun({ ...runRow, status: "pending" });
+				});
 			} finally {
 				database.close();
 			}
@@ -2631,28 +5509,35 @@ export function createStorageStore(
 			const updatedAt = new Date().toISOString();
 
 			try {
-				const runRow = readRun(runId, database);
-				if (runRow.status !== "suspended") {
-					throw new Error(
-						`rejectSuspendedRun requires a suspended run, got '${runRow.status}'.`,
-					);
-				}
-				database
-					.prepare(
-						`UPDATE runs SET status = ?, updated_at = ?, completed_at = ? WHERE id = ?`,
-					)
-					.run("failed", updatedAt, updatedAt, runId);
-				appendEvent(
-					"run-completed",
-					{
+				return runInTransaction(database, () => {
+					const runRow = readRun(runId, database);
+					if (runRow.status !== "suspended") {
+						throw new Error(
+							`rejectSuspendedRun requires a suspended run, got '${runRow.status}'.`,
+						);
+					}
+					assertNoRecordedCandidatePromotionClaim(
 						runId,
-						unitId: runRow.unit_id,
-						status: "failed",
-						reason: "rejected-by-operator",
-					},
-					database,
-				);
-				return toRun({ ...runRow, status: "failed" });
+						database,
+						"Suspended-run rejection",
+					);
+					database
+						.prepare(
+							`UPDATE runs SET status = ?, updated_at = ?, completed_at = ? WHERE id = ?`,
+						)
+						.run("failed", updatedAt, updatedAt, runId);
+					appendEvent(
+						"run-completed",
+						{
+							runId,
+							unitId: runRow.unit_id,
+							status: "failed",
+							reason: "rejected-by-operator",
+						},
+						database,
+					);
+					return toRun({ ...runRow, status: "failed" });
+				});
 			} finally {
 				database.close();
 			}
@@ -2664,26 +5549,33 @@ export function createStorageStore(
 			const updatedAt = new Date().toISOString();
 
 			try {
-				// M5-S4 D3 quarantine: a merge-subject run is `passed` (acceptance
-				// gate), not `suspended`. Mark it failed and leave the worktree
-				// retained (no workspace transition here).
-				const runRow = readRun(runId, database);
-				database
-					.prepare(
-						`UPDATE runs SET status = ?, updated_at = ?, completed_at = ? WHERE id = ?`,
-					)
-					.run("failed", updatedAt, updatedAt, runId);
-				appendEvent(
-					"run-completed",
-					{
+				return runInTransaction(database, () => {
+					// M5-S4 D3 quarantine: a merge-subject run is `passed` (acceptance
+					// gate), not `suspended`. Mark it failed and leave the worktree
+					// retained (no workspace transition here).
+					const runRow = readRun(runId, database);
+					assertNoRecordedCandidatePromotionClaim(
 						runId,
-						unitId: runRow.unit_id,
-						status: "failed",
-						reason: "merge-rejected-by-operator",
-					},
-					database,
-				);
-				return toRun({ ...runRow, status: "failed" });
+						database,
+						"Merge-decision rejection",
+					);
+					database
+						.prepare(
+							`UPDATE runs SET status = ?, updated_at = ?, completed_at = ? WHERE id = ?`,
+						)
+						.run("failed", updatedAt, updatedAt, runId);
+					appendEvent(
+						"run-completed",
+						{
+							runId,
+							unitId: runRow.unit_id,
+							status: "failed",
+							reason: "merge-rejected-by-operator",
+						},
+						database,
+					);
+					return toRun({ ...runRow, status: "failed" });
+				});
 			} finally {
 				database.close();
 			}
@@ -3537,6 +6429,7 @@ export function createStorageStore(
 								: readUnit(runRow.unit_id, database);
 					const injectedMemories = readInjectedMemoryRows(runRow.id, database);
 					const decisions = readDecisions(runRow.id, database);
+					const candidate = readCandidateArtifactRow(runRow.id, database);
 					const snapshot = {
 						kind: "run",
 						unit,
@@ -3551,6 +6444,9 @@ export function createStorageStore(
 							decisions,
 						),
 						workspace: readWorkspaceSnapshot(runRow.id, database),
+						...(candidate
+							? { candidate: toCandidateArtifactProjection(candidate) }
+							: {}),
 						strategy: toStrategySummary(runRow),
 						injectedMemories,
 						promotedStructuredMemories: readPromotedStructuredMemoryRows(
@@ -3584,6 +6480,7 @@ export function createStorageStore(
 						: null;
 					const injectedMemories = readInjectedMemoryRows(run.id, database);
 					const decisions = readDecisions(run.id, database);
+					const candidate = readCandidateArtifactRow(run.id, database);
 					const snapshot = {
 						kind: "unit",
 						unit,
@@ -3598,6 +6495,9 @@ export function createStorageStore(
 							decisions,
 						),
 						workspace: readWorkspaceSnapshot(run.id, database),
+						...(candidate
+							? { candidate: toCandidateArtifactProjection(candidate) }
+							: {}),
 						strategy: toStrategySummary(run),
 						injectedMemories,
 						promotedStructuredMemories: readPromotedStructuredMemoryRows(
@@ -3796,11 +6696,11 @@ export function createStorageStore(
 
 			if (!row?.unit_snapshot) return null;
 
-			const parsed = JSON.parse(row.unit_snapshot);
-			if (parsed && "unit" in parsed && "verification" in parsed) {
-				return parsed as UnitPacket;
+			try {
+				return parseUnitPacket(row.unit_snapshot);
+			} catch {
+				return null;
 			}
-			return null;
 		},
 	};
 }

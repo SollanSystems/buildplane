@@ -46,13 +46,22 @@ export interface MergeDecision {
 export interface StrategyResult {
 	readonly strategyId: string;
 	readonly mode: StrategyMode;
-	readonly outcome: "passed" | "failed" | "mixed";
+	/** A reviewed candidate is not a completed strategy until promotion occurs. */
+	readonly outcome: "passed" | "failed" | "mixed" | "awaiting-promotion";
 	readonly childResults: Map<string, import("./run-loop.js").RunPacketResult>;
 	/** Per-round audit trail for multi-round strategies (e.g. implement-then-review). */
 	readonly rounds?: ReadonlyArray<
 		Map<string, import("./run-loop.js").RunPacketResult>
 	>;
 	readonly winnerRunId?: string;
+	/** The immutable candidate retained for a separate promotion decision. */
+	readonly candidate?: import("./run-loop.js").WorkspaceCandidateArtifact;
+	/** Candidate-bound deterministic acceptance required before promotion. */
+	readonly candidateAcceptance?: import("./ports.js").CandidateAcceptanceRecord;
+	/** The parsed semantic verdict that made `candidate` eligible to promote. */
+	readonly reviewVerdict?: import("./trust-spine.js").ReviewVerdictV1;
+	/** Durable review evidence, not merely the reviewer's process output. */
+	readonly reviewRecord?: import("./ports.js").CandidateReviewRecord;
 	readonly mergeDecision: MergeDecision;
 }
 

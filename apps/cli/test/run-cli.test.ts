@@ -4,7 +4,9 @@ import {
 	existsSync,
 	mkdirSync,
 	mkdtempSync,
+	readdirSync,
 	readFileSync,
+	statSync,
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -13,8 +15,14 @@ import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import { createGitWorktreeAdapter as createActualGitWorkspaceAdapter } from "@buildplane/adapters-git";
 import {
+	bundleDigest,
+	CAPABILITY_BUNDLE_SCHEMA_VERSION,
+} from "@buildplane/capability-broker";
+import {
 	type BuildplaneOrchestrator,
 	type BuildplaneWorkspacePort,
+	canonicalDispatchEnvelopeV3Digest,
+	canonicalGovernedUnitPacketV1Digest,
 	createBuildplaneOrchestrator,
 	type RunAdmissionLocalEvidenceStore,
 	type UnitPacket,
@@ -31,6 +39,7 @@ import {
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	buildRuntimeRouter,
+	createScopedCommandExecutor,
 	type RunCliDependencies,
 	runCli,
 } from "../src/run-cli";
@@ -140,6 +149,67 @@ function loadAdmissionFixture(name: string): unknown {
 	);
 }
 
+/**
+ * This file is emitted by the Rust `bp-ledger-gen-fixtures` binary. Loading
+ * the actual externally tagged payload here prevents the CLI's native V2
+ * preview adapter from drifting behind the ledger wire contract.
+ */
+function loadNativeDispatchEnvelopeV2Fixture(): Record<string, unknown> {
+	const fixtures: unknown = JSON.parse(
+		readFileSync(
+			join(
+				process.cwd(),
+				"packages",
+				"ledger-client",
+				"fixtures",
+				"payload-variants.json",
+			),
+			"utf8",
+		),
+	);
+	if (!Array.isArray(fixtures)) {
+		throw new Error("Native ledger payload fixture is not an array.");
+	}
+	const dispatch = fixtures.find(
+		(fixture): fixture is Record<string, unknown> =>
+			typeof fixture === "object" &&
+			fixture !== null &&
+			Object.hasOwn(fixture, "DispatchEnvelopeV2"),
+	);
+	if (!dispatch) {
+		throw new Error("Native DispatchEnvelopeV2 fixture is missing.");
+	}
+	return dispatch;
+}
+
+function loadNativeDispatchEnvelopeV3Fixture(): Record<string, unknown> {
+	const fixtures: unknown = JSON.parse(
+		readFileSync(
+			join(
+				process.cwd(),
+				"packages",
+				"ledger-client",
+				"fixtures",
+				"payload-variants.json",
+			),
+			"utf8",
+		),
+	);
+	if (!Array.isArray(fixtures)) {
+		throw new Error("Native ledger payload fixture is not an array.");
+	}
+	const dispatch = fixtures.find(
+		(fixture): fixture is Record<string, unknown> =>
+			typeof fixture === "object" &&
+			fixture !== null &&
+			Object.hasOwn(fixture, "DispatchEnvelopeV3"),
+	);
+	if (!dispatch) {
+		throw new Error("Native DispatchEnvelopeV3 fixture is missing.");
+	}
+	return dispatch;
+}
+
 function loadAdmissionFixtureWithoutEvidence(
 	name: string,
 	kind: string,
@@ -190,6 +260,34 @@ function writeCommittedPacket(
 	git(root, ["add", name]);
 	git(root, ["commit", "-m", `add ${name} fixture`]);
 	return packetPath;
+}
+
+function snapshotBuildplaneState(root: string): Record<string, string> {
+	const stateRoot = join(root, ".buildplane");
+	const snapshot: Record<string, string> = {};
+	if (!existsSync(stateRoot)) return snapshot;
+
+	function visit(directory: string): void {
+		for (const entry of readdirSync(directory)) {
+			const path = join(directory, entry);
+			const relativePath = path
+				.slice(stateRoot.length + 1)
+				.replaceAll("\\", "/");
+			const stats = statSync(path);
+			if (stats.isDirectory()) {
+				visit(path);
+				continue;
+			}
+			if (stats.isFile()) {
+				snapshot[relativePath] = createHash("sha256")
+					.update(readFileSync(path))
+					.digest("hex");
+			}
+		}
+	}
+
+	visit(stateRoot);
+	return snapshot;
 }
 
 function extractRunId(lines: readonly string[]): string {
@@ -252,6 +350,29 @@ function createPassingPacket(unitId = "unit-pass") {
 			requiredOutputs: ["tmp/pass.txt"],
 		},
 	};
+}
+
+function createGovernedPreviewPacket(unitId: string) {
+	const capabilityBundle = {
+		schemaVersion: CAPABILITY_BUNDLE_SCHEMA_VERSION,
+		bundleId: `preview-${unitId}`,
+		fsRead: ["**"],
+		fsWrite: ["tmp/**"],
+		tools: { run_command: { allowlist: ["node"] } },
+	};
+	return {
+		...createPassingPacket(unitId),
+		execution_role: "implementer",
+		provenance_ref: `ledger://admission/${unitId}`,
+		capability_bundle: capabilityBundle,
+		capability_bundle_digest: bundleDigest(capabilityBundle),
+		acceptance_contract: { id: `acceptance-${unitId}` },
+		trust_scope: { id: `scope-${unitId}` },
+	};
+}
+
+function digestFixture(seed: string): string {
+	return `sha256:${seed.repeat(64).slice(0, 64)}`;
 }
 
 function createFailingPacket(unitId = "unit-fail") {
@@ -554,7 +675,7 @@ describe("cli command surface", () => {
 		expect(result.stderr).toEqual([]);
 		expect(result.stdout.join("\n")).toContain("Execute:");
 		expect(result.stdout.join("\n")).toContain("run --packet <path>");
-		expect(result.stdout.join("\n")).toContain("replay <id> [--json]");
+		expect(result.stdout.join("\n")).toContain("replay <id> --raw [--json]");
 		expect(result.stdout.join("\n")).toContain(
 			"fork <id> --at <event> --packet <file>",
 		);
@@ -571,8 +692,10 @@ describe("cli command surface", () => {
 		expect(result.exitCode).toBe(0);
 		expect(result.stderr).toEqual([]);
 		const output = result.stdout.join("\n");
-		expect(output).toContain("buildplane replay <run-id> [options]");
+		expect(output).toContain("buildplane replay <run-id> --raw [options]");
 		expect(output).toContain("Re-executes the stored packet snapshot");
+		expect(output).toContain("unsafe legacy execution lane");
+		expect(output).toContain("--raw");
 		expect(output).toContain("--policy <profile>");
 		expect(output).toContain(
 			"buildplane ledger replay --run-id <run-id> --workspace <path>",
@@ -589,7 +712,7 @@ describe("cli command surface", () => {
 		expect(replayResult.exitCode).toBe(0);
 		expect(replayResult.stderr).toEqual([]);
 		expect(replayResult.stdout.join("\n")).toContain(
-			"buildplane replay <run-id> [options]",
+			"buildplane replay <run-id> --raw [options]",
 		);
 		expect(replayResult.stdout.join("\n")).toContain("--policy <profile>");
 		expect(existsSync(join(replayRoot, ".buildplane"))).toBe(false);
@@ -603,6 +726,40 @@ describe("cli command surface", () => {
 		expect(forkResult.stderr).toEqual([]);
 		expect(forkResult.stdout.join("\n")).toContain(
 			"buildplane fork <parent-run-id> --at <event-id> --packet <file>",
+		);
+		expect(existsSync(join(forkRoot, ".buildplane"))).toBe(false);
+	});
+
+	it("requires explicit --raw acknowledgement before replay or fork can re-execute", async () => {
+		const replayRoot = mkdtempSync(
+			join(tmpdir(), "buildplane-cli-replay-raw-required-"),
+		);
+		const replayResult = await runCliCapture(replayRoot, [
+			"replay",
+			"previous-run",
+		]);
+
+		expect(replayResult.exitCode).toBe(1);
+		expect(replayResult.stderr.join("\n")).toContain(
+			"replay re-executes a legacy ambient-worker packet",
+		);
+		expect(existsSync(join(replayRoot, ".buildplane"))).toBe(false);
+
+		const forkRoot = mkdtempSync(
+			join(tmpdir(), "buildplane-cli-fork-raw-required-"),
+		);
+		const forkResult = await runCliCapture(forkRoot, [
+			"fork",
+			"parent-run",
+			"--at",
+			"unit-started-event",
+			"--packet",
+			"packet.json",
+		]);
+
+		expect(forkResult.exitCode).toBe(1);
+		expect(forkResult.stderr.join("\n")).toContain(
+			"fork re-executes a legacy ambient-worker packet",
 		);
 		expect(existsSync(join(forkRoot, ".buildplane"))).toBe(false);
 	});
@@ -682,24 +839,48 @@ describe("cli command surface", () => {
 		try {
 			const equalsResult = await runCliCapture(
 				root,
-				["replay", "run-policy-equals", "--policy=safe"],
+				["replay", "run-policy-equals", "--policy=safe", "--raw"],
 				dependencies,
 			);
 			expect(equalsResult.exitCode).toBe(0);
+			expect(equalsResult.stdout.join("\n")).toContain("governance: unsafe");
+			expect(equalsResult.stdout.join("\n")).toContain(
+				"trusted-receipt: false",
+			);
 
 			const spaceResult = await runCliCapture(
 				root,
-				["replay", "run-policy-space", "--policy", "safe"],
+				["replay", "run-policy-space", "--policy", "safe", "--raw"],
 				dependencies,
 			);
 			expect(spaceResult.exitCode).toBe(0);
 
 			const helpValueResult = await runCliCapture(
 				root,
-				["replay", "run-policy-help-value", "--policy", "help"],
+				["replay", "run-policy-help-value", "--policy", "help", "--raw"],
 				dependencies,
 			);
 			expect(helpValueResult.exitCode).toBe(0);
+
+			const policyFlagValueResult = await runCliCapture(
+				root,
+				["replay", "run-policy-flag-value", "--policy", "--raw"],
+				dependencies,
+			);
+			expect(policyFlagValueResult.exitCode).toBe(1);
+			expect(policyFlagValueResult.stderr.join("\n")).toContain(
+				"Missing required value after --policy",
+			);
+
+			const modelFlagValueResult = await runCliCapture(
+				root,
+				["replay", "run-model-flag-value", "--model", "--raw"],
+				dependencies,
+			);
+			expect(modelFlagValueResult.exitCode).toBe(1);
+			expect(modelFlagValueResult.stderr.join("\n")).toContain(
+				"Missing required value after --model",
+			);
 
 			expect(capturedPolicies).toEqual(["safe", "safe", "help"]);
 		} finally {
@@ -966,8 +1147,10 @@ describe("cli command surface", () => {
 
 		expect(result.exitCode).toBe(0);
 		// Lock the machine-readable run-id token the verifier parses via ^run-id: (.+)$
-		expect(result.stdout[0]).toBe("run-id: run-parse-packet");
+		expect(result.stdout[2]).toBe("run-id: run-parse-packet");
 		expect(result.stdout).toEqual([
+			"governance: unsafe",
+			"trusted-receipt: false",
 			"run-id: run-parse-packet",
 			"status: passed",
 		]);
@@ -1242,7 +1425,7 @@ describe("cli command surface", () => {
 		expect(existsSync(join(root, ".buildplane"))).toBe(false);
 	});
 
-	it("persists CLI-created run admission receipts with kernel contents and digest refs", async () => {
+	it("keeps raw CLI runs out of the governed admission evidence lane", async () => {
 		const root = createGitRepo();
 		await runCliCapture(root, ["init"]);
 		const packetPath = writeCommittedPacket(
@@ -1267,52 +1450,21 @@ describe("cli command surface", () => {
 			"admission",
 			"events.jsonl",
 		);
-		expect(existsSync(eventsPath)).toBe(true);
-		const events = readFileSync(eventsPath, "utf8")
-			.trim()
-			.split("\n")
-			.filter(Boolean)
-			.map(
-				(line) =>
-					JSON.parse(line) as {
-						kind?: string;
-						payload?: {
-							receipt_id?: string;
-							receipt_digest?: string;
-							receipt_ref?: string;
-							unit_id?: string;
-						};
-					},
-			);
-		const recordedEvent = events.find(
-			(event) =>
-				event.kind === "run_admission_recorded" &&
-				event.payload?.unit_id === "unit-cli-store-integrity",
-		);
-		if (!recordedEvent?.payload?.receipt_id) {
-			throw new Error("missing run admission receipt event");
-		}
-		const payload = recordedEvent.payload;
-		expect(payload.receipt_digest).toMatch(/^sha256:[a-f0-9]{64}$/);
-		expect(payload.receipt_ref).toBe(
-			`artifact://run-admission/${payload.receipt_digest}`,
-		);
-		const receiptPath = join(
-			root,
-			".git",
-			"buildplane",
-			"admission",
-			"receipts",
-			`${payload.receipt_id}.json`,
-		);
-		expect(existsSync(receiptPath)).toBe(true);
-		const receiptContents = readFileSync(receiptPath, "utf8");
+		expect(existsSync(eventsPath)).toBe(false);
 		expect(
-			`sha256:${createHash("sha256").update(receiptContents).digest("hex")}`,
-		).toBe(payload.receipt_digest);
-		expect(JSON.parse(receiptContents)).toMatchObject({
-			receipt_id: payload.receipt_id,
-			run: { unit_id: "unit-cli-store-integrity" },
+			existsSync(join(root, ".git", "buildplane", "admission", "receipts")),
+		).toBe(false);
+		const verification = await runCliCapture(root, [
+			"verify",
+			"--run",
+			extractRunId(result.stdout),
+			"--json",
+		]);
+		expect(verification.exitCode).toBe(1);
+		expect(JSON.parse(verification.stdout.join("\n"))).toMatchObject({
+			governance: "unsafe",
+			trustedReceipt: false,
+			verdict: "UNSAFE_TO_RUN",
 		});
 	});
 
@@ -1387,6 +1539,8 @@ describe("cli command surface", () => {
 
 		const parsedRun = JSON.parse(runJson.stdout.join("\n"));
 		expect(parsedRun).toMatchObject({
+			governance: "unsafe",
+			trustedReceipt: false,
 			run: { id: expect.any(String), status: "passed" },
 			injectedMemories: [
 				{
@@ -1401,6 +1555,7 @@ describe("cli command surface", () => {
 				},
 			],
 		});
+		expect(parsedRun).not.toHaveProperty("receipt");
 
 		expect(inspectHuman.stdout).toEqual(
 			expect.arrayContaining([
@@ -1555,6 +1710,7 @@ describe("cli command surface", () => {
 
 		const runGraph = await runCliCapture(root, [
 			"run-graph",
+			"--raw",
 			"--graph",
 			graphPath,
 		]);
@@ -1633,6 +1789,7 @@ describe("cli command surface", () => {
 
 		const runStrategy = await runCliCapture(root, [
 			"run-strategy",
+			"--raw",
 			"--strategy",
 			strategyPath,
 		]);
@@ -1660,17 +1817,9 @@ describe("cli command surface", () => {
 		});
 	});
 
-	it("persists reviewer-leg injected memories for implement-then-review strategies", async () => {
+	it("blocks raw reviewer-leg execution before any reviewer memory can be injected", async () => {
 		const root = createGitRepo();
 		await runCliCapture(root, ["init"]);
-
-		const storage = createBuildplaneStorage(root);
-		storage.createProcedure({
-			name: "How to review a change",
-			taskType: "review",
-			bodyMarkdown: "Confirm the objective is satisfied before approving.",
-			createdBy: "worker",
-		});
 
 		const strategyPath = writeCommittedPacket(
 			root,
@@ -1710,7 +1859,7 @@ describe("cli command surface", () => {
 								verificationContract: "exit-0-and-required-outputs",
 								policyProfile: "default",
 							},
-							execution: { command: "true", args: [] },
+							execution: { command: process.execPath, args: ["-e", ""] },
 							intent: {
 								objective:
 									"Review whether the implementer satisfied: Write a parser",
@@ -1732,41 +1881,21 @@ describe("cli command surface", () => {
 
 		const runStrategy = await runCliCapture(root, [
 			"run-strategy",
+			"--raw",
 			"--strategy",
 			strategyPath,
 		]);
-		const reviewerInspect = await runCliCapture(root, [
-			"inspect",
-			"reviewer-injected-reviewer",
-			"--json",
-		]);
 
-		expect(runStrategy.exitCode).toBe(0);
-		const reviewerRun = JSON.parse(reviewerInspect.stdout.join("\n"));
-		expect(reviewerRun).toMatchObject({
-			run: { unitId: "reviewer-injected-reviewer", status: "passed" },
-			injectedMemories: [
-				{ memoryKind: "procedure", matchReason: "exact-task-type" },
-			],
-		});
-
-		const reviewerRunId = reviewerRun.run.id as string;
-		expect(storage.listInjectedMemories(reviewerRunId).length).toBeGreaterThan(
-			0,
+		expect(runStrategy.exitCode).toBe(1);
+		expect(runStrategy.stdout.join("\n")).toContain("governance: unsafe");
+		expect(runStrategy.stdout.join("\n")).toMatch(
+			/raw review strategies are blocked.*pre-promotion review/i,
 		);
 	});
 
-	it("persists reviewer-leg injected memories on the default run --packet path", async () => {
+	it("blocks the default run path as a governed preview without creating a run", async () => {
 		const root = createGitRepo();
 		await runCliCapture(root, ["init"]);
-
-		const storage = createBuildplaneStorage(root);
-		storage.createProcedure({
-			name: "How to review a change",
-			taskType: "review",
-			bodyMarkdown: "Confirm the objective is satisfied before approving.",
-			createdBy: "worker",
-		});
 
 		const packetPath = writeCommittedPacket(
 			root,
@@ -1787,28 +1916,542 @@ describe("cli command surface", () => {
 			},
 		);
 
-		const run = await runCliCapture(root, ["run", "--packet", packetPath]);
-		expect(run.exitCode).toBe(0);
-
-		const reviewerInspect = await runCliCapture(root, [
-			"inspect",
-			"default-packet-reviewer-impl-reviewer",
+		const headBefore = git(root, ["rev-parse", "HEAD"]).trim();
+		const statusBefore = git(root, ["status", "--porcelain"]);
+		const refsBefore = git(root, ["show-ref", "--head"]);
+		const buildplaneStateBefore = snapshotBuildplaneState(root);
+		const run = await runCliCapture(root, [
+			"run",
+			"--packet",
+			packetPath,
 			"--json",
 		]);
-		const reviewerRun = JSON.parse(reviewerInspect.stdout.join("\n"));
-		expect(reviewerRun).toMatchObject({
-			run: {
-				unitId: "default-packet-reviewer-impl-reviewer",
-				status: "passed",
+		expect(run.exitCode).toBe(2);
+		expect(run.stderr).toEqual([]);
+		expect(JSON.parse(run.stdout.join("\n"))).toMatchObject({
+			governance: "preview",
+			status: "blocked",
+			executionStarted: false,
+			approval: {
+				requested: false,
+				state: "not-recorded",
 			},
-			injectedMemories: [
-				{ memoryKind: "procedure", matchReason: "exact-task-type" },
-			],
+			authorityBroker: {
+				state: "unavailable",
+				code: "GOVERNED_AUTHORITY_BROKER_REQUIRED",
+			},
+			sandbox: {
+				governedWorkerExecution: "not_implemented",
+			},
+			packet: {
+				unitId: "default-packet-reviewer-impl",
+				executionRoleExplicit: false,
+				provenancePresent: false,
+				capabilityBundlePresent: false,
+				acceptanceContractPresent: false,
+				trustScopePresent: false,
+			},
 		});
+		expect(JSON.parse(run.stdout.join("\n")).blockers).toEqual(
+			expect.arrayContaining([
+				"Packet does not contain a declared execution role.",
+			]),
+		);
+		const approvalRequested = await runCliCapture(root, [
+			"run",
+			"--approve",
+			"--packet",
+			packetPath,
+			"--json",
+		]);
+		expect(approvalRequested.exitCode).toBe(2);
+		expect(JSON.parse(approvalRequested.stdout.join("\n"))).toMatchObject({
+			approval: {
+				requested: true,
+				state: "not-recorded",
+			},
+			authorityBroker: {
+				state: "unavailable",
+				code: "GOVERNED_AUTHORITY_BROKER_REQUIRED",
+			},
+		});
+		expect(JSON.parse(approvalRequested.stdout.join("\n")).blockers).toEqual(
+			expect.arrayContaining([
+				"Governed admission was requested, but no DispatchEnvelopeV1, V2, or V3 was supplied.",
+			]),
+		);
+		expect(git(root, ["rev-parse", "HEAD"]).trim()).toBe(headBefore);
+		expect(git(root, ["status", "--porcelain"])).toBe(statusBefore);
+		expect(git(root, ["show-ref", "--head"])).toBe(refsBefore);
+		expect(snapshotBuildplaneState(root)).toEqual(buildplaneStateBefore);
+		const status = await runCliCapture(root, ["status", "--json"]);
+		expect(JSON.parse(status.stdout.join("\n")).runCounts).toMatchObject({
+			pending: 0,
+			running: 0,
+			passed: 0,
+			failed: 0,
+			cancelled: 0,
+		});
+	});
 
-		const reviewerRunId = reviewerRun.run.id as string;
-		expect(storage.listInjectedMemories(reviewerRunId).length).toBeGreaterThan(
-			0,
+	it("inspects a non-circular V2 dispatch proposal without granting execution authority", async () => {
+		const root = createGitRepo();
+		await runCliCapture(root, ["init"]);
+		const unitId = "governed-v2-preview";
+		const packet = createGovernedPreviewPacket(unitId);
+		const packetPath = writeCommittedPacket(
+			root,
+			".buildplane/test-packets/governed-v2-preview-packet.json",
+			packet,
+		);
+		const envelopePath = writeCommittedPacket(
+			root,
+			".buildplane/test-packets/governed-v2-preview-envelope.json",
+			{
+				schemaVersion: 2,
+				body: {
+					workflowId: "workflow-governed-v2-preview",
+					workflowRevision: "r1",
+					unitId,
+					attempt: 1,
+					executionRole: "implementer",
+					commitMode: "atomic",
+					provenanceRef: packet.provenance_ref,
+					baseCommitSha: "a".repeat(40),
+					capabilityBundleDigest: packet.capability_bundle_digest,
+					acceptanceContractDigest: digestFixture("a"),
+					contextManifestDigest: digestFixture("b"),
+					workerManifestDigest: digestFixture("c"),
+					sandboxProfileDigest: digestFixture("d"),
+					budget: { maxTokens: 10_000, maxComputeTimeMs: 60_000 },
+					trustTier: "governed",
+					idempotencyKey: "dispatch:governed-v2-preview:1",
+					issuedAt: "2026-07-17T12:00:00Z",
+					expiresAt: "2099-07-17T12:15:00Z",
+				},
+				envelopeDigest: digestFixture("e"),
+			},
+		);
+		const headBefore = git(root, ["rev-parse", "HEAD"]).trim();
+
+		const run = await runCliCapture(root, [
+			"run",
+			"--approve",
+			"--packet",
+			packetPath,
+			"--envelope",
+			envelopePath,
+			"--json",
+		]);
+
+		expect(run.exitCode).toBe(2);
+		const preview = JSON.parse(run.stdout.join("\n"));
+		expect(preview).toMatchObject({
+			governance: "preview",
+			status: "blocked",
+			executionStarted: false,
+			packet: {
+				unitId,
+				executionRoleExplicit: true,
+				provenancePresent: true,
+				capabilityBundlePresent: true,
+				acceptanceContractPresent: true,
+				trustScopePresent: true,
+			},
+			envelope: {
+				schemaVersion: 2,
+				verification: "structural_only",
+				unitId,
+				executionRole: "implementer",
+				trustTier: "governed",
+			},
+		});
+		expect(preview.blockers).toEqual(
+			expect.arrayContaining([
+				expect.stringContaining("Governed execution is unavailable"),
+			]),
+		);
+		expect(preview.blockers).not.toEqual(
+			expect.arrayContaining([
+				expect.stringContaining(
+					"no DispatchEnvelopeV1, V2, or V3 was supplied",
+				),
+			]),
+		);
+		const humanRun = await runCliCapture(root, [
+			"run",
+			"--approve",
+			"--packet",
+			packetPath,
+			"--envelope",
+			envelopePath,
+		]);
+		expect(humanRun.exitCode).toBe(2);
+		const humanPreview = humanRun.stdout.join("\n");
+		expect(humanPreview).toContain("envelope-schema: DispatchEnvelopeV2");
+		expect(humanPreview).toContain("envelope-version: 2");
+		expect(humanPreview).toContain(`envelope-digest: ${digestFixture("e")}`);
+		expect(humanPreview).toContain("envelope-verification: structural_only");
+		expect(git(root, ["rev-parse", "HEAD"]).trim()).toBe(headBefore);
+		const status = await runCliCapture(root, ["status", "--json"]);
+		expect(JSON.parse(status.stdout.join("\n")).runCounts).toMatchObject({
+			pending: 0,
+			running: 0,
+			passed: 0,
+			failed: 0,
+			cancelled: 0,
+		});
+	});
+
+	it("renders V1 envelope identity and structural-only verification in the human governed preview", async () => {
+		const root = createGitRepo();
+		await runCliCapture(root, ["init"]);
+		const unitId = "governed-v1-human-preview";
+		const packet = createGovernedPreviewPacket(unitId);
+		const packetPath = writeCommittedPacket(
+			root,
+			".buildplane/test-packets/governed-v1-human-preview-packet.json",
+			packet,
+		);
+		const envelopeDigest = digestFixture("f");
+		const envelopePath = writeCommittedPacket(
+			root,
+			".buildplane/test-packets/governed-v1-human-preview-envelope.json",
+			{
+				schemaVersion: 1,
+				workflowId: "workflow-governed-v1-human-preview",
+				workflowRevision: "r1",
+				unitId,
+				attempt: 1,
+				executionRole: "implementer",
+				commitMode: "atomic",
+				provenanceRef: packet.provenance_ref,
+				baseCommitSha: "a".repeat(40),
+				capabilityBundleDigest: packet.capability_bundle_digest,
+				acceptanceContractDigest: digestFixture("a"),
+				contextManifestDigest: digestFixture("b"),
+				workerManifestDigest: digestFixture("c"),
+				sandboxProfileDigest: digestFixture("d"),
+				budget: { maxTokens: 10_000, maxComputeTimeMs: 60_000 },
+				trustTier: "governed",
+				idempotencyKey: "dispatch:governed-v1-human-preview:1",
+				issuedAt: "2026-07-17T12:00:00Z",
+				expiresAt: "2099-07-17T12:15:00Z",
+				envelopeDigest,
+				signatureRef: {
+					algorithm: "ed25519",
+					keyId: "preview-only",
+					signature: "unverified-preview-signature",
+				},
+			},
+		);
+
+		const run = await runCliCapture(root, [
+			"run",
+			"--approve",
+			"--packet",
+			packetPath,
+			"--envelope",
+			envelopePath,
+		]);
+
+		expect(run.exitCode).toBe(2);
+		const humanPreview = run.stdout.join("\n");
+		expect(humanPreview).toContain("envelope-schema: DispatchEnvelopeV1");
+		expect(humanPreview).toContain("envelope-version: 1");
+		expect(humanPreview).toContain(`envelope-digest: ${envelopeDigest}`);
+		expect(humanPreview).toContain("envelope-verification: structural_only");
+	});
+
+	it("inspects the externally tagged native V2 tape payload without granting authority", async () => {
+		const root = createGitRepo();
+		await runCliCapture(root, ["init"]);
+		const unitId = "governed-native-v2-preview";
+		const packet = createGovernedPreviewPacket(unitId);
+		const packetPath = writeCommittedPacket(
+			root,
+			".buildplane/test-packets/governed-native-v2-preview-packet.json",
+			packet,
+		);
+		const envelopePath = writeCommittedPacket(
+			root,
+			".buildplane/test-packets/governed-native-v2-preview-envelope.json",
+			{
+				DispatchEnvelopeV2: {
+					body: {
+						workflow_id: "workflow-governed-native-v2-preview",
+						workflow_revision: "r1",
+						unit_id: unitId,
+						attempt: 1,
+						execution_role: "implementer",
+						commit_mode: "atomic",
+						provenance_ref: packet.provenance_ref,
+						base_commit_sha: "a".repeat(40),
+						capability_bundle_digest: packet.capability_bundle_digest,
+						acceptance_contract_digest: digestFixture("a"),
+						context_manifest_digest: digestFixture("b"),
+						worker_manifest_digest: digestFixture("c"),
+						sandbox_profile_digest: digestFixture("d"),
+						budget: {
+							max_tokens: 10_000,
+							max_compute_time_ms: 60_000,
+						},
+						trust_tier: "governed",
+						idempotency_key: "dispatch:governed-native-v2-preview:1",
+						issued_at: "2026-07-17T12:00:00Z",
+						expires_at: "2099-07-17T12:15:00Z",
+					},
+					envelope_digest: digestFixture("e"),
+				},
+			},
+		);
+		const headBefore = git(root, ["rev-parse", "HEAD"]).trim();
+
+		const run = await runCliCapture(root, [
+			"run",
+			"--approve",
+			"--packet",
+			packetPath,
+			"--envelope",
+			envelopePath,
+			"--json",
+		]);
+
+		expect(run.exitCode).toBe(2);
+		const preview = JSON.parse(run.stdout.join("\n"));
+		expect(preview).toMatchObject({
+			governance: "preview",
+			status: "blocked",
+			executionStarted: false,
+			envelope: {
+				schemaVersion: 2,
+				verification: "structural_only",
+				unitId,
+				executionRole: "implementer",
+				trustTier: "governed",
+			},
+		});
+		expect(preview.blockers).toEqual(
+			expect.arrayContaining([
+				expect.stringContaining("Governed execution is unavailable"),
+			]),
+		);
+		expect(git(root, ["rev-parse", "HEAD"]).trim()).toBe(headBefore);
+	});
+
+	it("inspects the generated native V2 fixture without granting authority", async () => {
+		const root = createGitRepo();
+		await runCliCapture(root, ["init"]);
+		const nativeFixture = loadNativeDispatchEnvelopeV2Fixture();
+		const nativeEnvelope = nativeFixture.DispatchEnvelopeV2 as {
+			readonly body: {
+				readonly unit_id: string;
+				readonly provenance_ref: string;
+			};
+			readonly envelope_digest: string;
+		};
+		const packet = {
+			...createGovernedPreviewPacket(nativeEnvelope.body.unit_id),
+			provenance_ref: nativeEnvelope.body.provenance_ref,
+		};
+		const packetPath = writeCommittedPacket(
+			root,
+			".buildplane/test-packets/governed-native-v2-generated-packet.json",
+			packet,
+		);
+		const envelopePath = writeCommittedPacket(
+			root,
+			".buildplane/test-packets/governed-native-v2-generated-envelope.json",
+			nativeFixture,
+		);
+		const headBefore = git(root, ["rev-parse", "HEAD"]).trim();
+
+		const run = await runCliCapture(root, [
+			"run",
+			"--approve",
+			"--packet",
+			packetPath,
+			"--envelope",
+			envelopePath,
+			"--json",
+		]);
+
+		expect(run.exitCode).toBe(2);
+		const preview = JSON.parse(run.stdout.join("\n"));
+		expect(preview).toMatchObject({
+			governance: "preview",
+			status: "blocked",
+			executionStarted: false,
+			envelope: {
+				schemaVersion: 2,
+				verification: "structural_only",
+				unitId: nativeEnvelope.body.unit_id,
+				executionRole: "implementer",
+				trustTier: "governed",
+				envelopeDigest: nativeEnvelope.envelope_digest,
+			},
+		});
+		expect(preview.blockers).toEqual(
+			expect.arrayContaining([
+				expect.stringContaining("Dispatch envelope is expired"),
+				expect.stringContaining("Governed execution is unavailable"),
+			]),
+		);
+		expect(git(root, ["rev-parse", "HEAD"]).trim()).toBe(headBefore);
+	});
+
+	it("labels a legacy sealed-v2 native V3 dispatch proposal as preview-only", async () => {
+		const root = createGitRepo();
+		await runCliCapture(root, ["init"]);
+		const nativeFixture = loadNativeDispatchEnvelopeV3Fixture();
+		const nativeEnvelope = nativeFixture.DispatchEnvelopeV3 as {
+			readonly body: {
+				readonly unit_id: string;
+				readonly provenance_ref: string;
+			};
+			readonly envelope_digest: string;
+		};
+		const packet = {
+			...createGovernedPreviewPacket(nativeEnvelope.body.unit_id),
+			provenance_ref: nativeEnvelope.body.provenance_ref,
+		};
+		const packetPath = writeCommittedPacket(
+			root,
+			".buildplane/test-packets/governed-native-v3-generated-packet.json",
+			packet,
+		);
+		const envelopePath = writeCommittedPacket(
+			root,
+			".buildplane/test-packets/governed-native-v3-generated-envelope.json",
+			nativeFixture,
+		);
+
+		const run = await runCliCapture(root, [
+			"run",
+			"--approve",
+			"--packet",
+			packetPath,
+			"--envelope",
+			envelopePath,
+			"--json",
+		]);
+
+		expect(run.exitCode).toBe(2);
+		const preview = JSON.parse(run.stdout.join("\n"));
+		expect(preview).toMatchObject({
+			governance: "preview",
+			status: "blocked",
+			executionStarted: false,
+			envelope: {
+				schemaVersion: 3,
+				verification: "structural_only",
+				unitId: nativeEnvelope.body.unit_id,
+				actionEvidenceVersion: "sealed-v2",
+				envelopeDigest: nativeEnvelope.envelope_digest,
+			},
+		});
+		expect(preview.blockers).not.toEqual(
+			expect.arrayContaining([
+				expect.stringContaining("V1 and V2 envelopes are preview-only"),
+			]),
+		);
+		expect(preview.blockers).toEqual(
+			expect.arrayContaining([
+				expect.stringContaining(
+					"actionEvidenceVersion sealed-v2 is a preview-only compatibility artifact",
+				),
+				expect.stringContaining("Dispatch envelope is expired"),
+				expect.stringContaining("Governed execution is unavailable"),
+			]),
+		);
+	});
+
+	it("accepts a sealed_v3 V3 dispatch proposal for structural preview without the legacy blocker", async () => {
+		const root = createGitRepo();
+		await runCliCapture(root, ["init"]);
+		const unitId = "governed-sealed-v3-preview";
+		const packet = createGovernedPreviewPacket(unitId);
+		const body = {
+			workflowId: "workflow-governed-sealed-v3-preview",
+			workflowRevision: "r1",
+			unitId,
+			attempt: 1,
+			executionRole: "implementer",
+			commitMode: "atomic",
+			provenanceRef: packet.provenance_ref,
+			baseCommitSha: "a".repeat(40),
+			capabilityBundleDigest: packet.capability_bundle_digest,
+			acceptanceContractDigest: digestFixture("a"),
+			contextManifestDigest: digestFixture("b"),
+			workerManifestDigest: digestFixture("c"),
+			sandboxProfileDigest: digestFixture("d"),
+			budget: { maxTokens: 10_000, maxComputeTimeMs: 60_000 },
+			trustTier: "governed",
+			idempotencyKey: "dispatch:governed-sealed-v3-preview:1",
+			issuedAt: "2026-07-17T12:00:00Z",
+			expiresAt: "2099-07-17T12:15:00Z",
+		} as const;
+		const envelope = {
+			schemaVersion: 3,
+			body,
+			actionEvidenceVersion: "sealed_v3" as const,
+			repositoryBindingDigest: digestFixture("e"),
+			ledgerAuthorityRealmDigest: digestFixture("f"),
+			governedPacketDigest: canonicalGovernedUnitPacketV1Digest(packet),
+			envelopeDigest: canonicalDispatchEnvelopeV3Digest({
+				body,
+				actionEvidenceVersion: "sealed_v3",
+				repositoryBindingDigest: digestFixture("e"),
+				ledgerAuthorityRealmDigest: digestFixture("f"),
+				governedPacketDigest: canonicalGovernedUnitPacketV1Digest(packet),
+			}),
+		};
+		const packetPath = writeCommittedPacket(
+			root,
+			".buildplane/test-packets/governed-sealed-v3-preview-packet.json",
+			packet,
+		);
+		const envelopePath = writeCommittedPacket(
+			root,
+			".buildplane/test-packets/governed-sealed-v3-preview-envelope.json",
+			envelope,
+		);
+
+		const run = await runCliCapture(root, [
+			"run",
+			"--approve",
+			"--packet",
+			packetPath,
+			"--envelope",
+			envelopePath,
+			"--json",
+		]);
+
+		expect(run.exitCode).toBe(2);
+		const preview = JSON.parse(run.stdout.join("\n"));
+		expect(preview).toMatchObject({
+			governance: "preview",
+			status: "blocked",
+			executionStarted: false,
+			envelope: {
+				schemaVersion: 3,
+				verification: "structural_only",
+				unitId,
+				actionEvidenceVersion: "sealed_v3",
+				envelopeDigest: envelope.envelopeDigest,
+			},
+		});
+		expect(preview.blockers).not.toEqual(
+			expect.arrayContaining([
+				expect.stringContaining(
+					"actionEvidenceVersion sealed-v2 is a preview-only compatibility artifact",
+				),
+			]),
+		);
+		expect(preview.blockers).toEqual(
+			expect.arrayContaining([
+				expect.stringContaining("Governed execution is unavailable"),
+			]),
 		);
 	});
 
@@ -1865,6 +2508,7 @@ describe("cli command surface", () => {
 
 		const runStrategy = await runCliCapture(root, [
 			"run-strategy",
+			"--raw",
 			"--strategy",
 			strategyPath,
 		]);
@@ -2154,16 +2798,18 @@ describe("cli command surface", () => {
 		]);
 
 		expect(passResult.exitCode).toBe(0);
-		expect(passResult.stdout).toHaveLength(2);
-		expect(passResult.stdout[0]).toMatch(/^run-id: /);
-		expect(passResult.stdout[1]).toBe("status: passed");
+		expect(passResult.stdout).toHaveLength(4);
+		expect(passResult.stdout[0]).toBe("governance: unsafe");
+		expect(passResult.stdout[1]).toBe("trusted-receipt: false");
+		expect(passResult.stdout[2]).toMatch(/^run-id: /);
+		expect(passResult.stdout[3]).toBe("status: passed");
 
 		expect(firstFailure.exitCode).toBe(1);
 		expect(firstFailure.stdout).toEqual(
 			expect.arrayContaining([
 				expect.stringMatching(/^run-id: /),
 				"status: failed",
-				expect.stringMatching(/^workspace: .+\.buildplane\/workspaces\//),
+				expect.stringMatching(/^workspace: .+\.buildplane[\\/]workspaces[\\/]/),
 			]),
 		);
 		expect(firstFailure.stderr).toEqual([]);
@@ -2173,7 +2819,7 @@ describe("cli command surface", () => {
 			expect.arrayContaining([
 				expect.stringMatching(/^run-id: /),
 				"status: failed",
-				expect.stringMatching(/^workspace: .+\.buildplane\/workspaces\//),
+				expect.stringMatching(/^workspace: .+\.buildplane[\\/]workspaces[\\/]/),
 			]),
 		);
 
@@ -2188,7 +2834,7 @@ describe("cli command surface", () => {
 				),
 				"run-counts: pending=0 running=0 passed=1 failed=2 cancelled=0",
 				expect.stringMatching(
-					/^workspace: .+\.buildplane\/workspaces\/.* \(retained\)$/,
+					/^workspace: .+\.buildplane[\\/]workspaces[\\/].* \(retained\)$/,
 				),
 				"actionable-workspaces: 2",
 			]),
@@ -2206,14 +2852,14 @@ describe("cli command surface", () => {
 			latestWorkspace: {
 				runId: secondFailureRunId,
 				status: "retained",
-				path: expect.stringMatching(/\.buildplane\/workspaces\//),
+				path: expect.stringMatching(/\.buildplane[\\/]workspaces[\\/]/),
 				headSha: expect.any(String),
 			},
 		});
 		expect(parsedStatus.actionableWorkspaces).toHaveLength(2);
 		expect(parsedStatus.actionableWorkspaces[0]).toMatchObject({
 			status: "retained",
-			path: expect.stringMatching(/\.buildplane\/workspaces\//),
+			path: expect.stringMatching(/\.buildplane[\\/]workspaces[\\/]/),
 			headSha: expect.any(String),
 		});
 
@@ -2225,7 +2871,7 @@ describe("cli command surface", () => {
 				"unit-id: unit-fail",
 				"status: failed",
 				"workspace-status: retained",
-				expect.stringMatching(/^workspace: .+\.buildplane\/workspaces\//),
+				expect.stringMatching(/^workspace: .+\.buildplane[\\/]workspaces[\\/]/),
 				expect.stringMatching(/^workspace-head: [0-9a-f]+$/),
 				expect.stringMatching(/^workspace-exists-on-disk: true$/),
 			]),
@@ -2237,7 +2883,7 @@ describe("cli command surface", () => {
 			run: { id: secondFailureRunId, status: "failed" },
 			workspace: {
 				status: "retained",
-				path: expect.stringMatching(/\.buildplane\/workspaces\//),
+				path: expect.stringMatching(/\.buildplane[\\/]workspaces[\\/]/),
 				headSha: expect.any(String),
 				existsOnDisk: true,
 			},
@@ -2249,7 +2895,7 @@ describe("cli command surface", () => {
 			run: { id: secondFailureRunId, status: "failed" },
 			workspace: {
 				status: "retained",
-				path: expect.stringMatching(/\.buildplane\/workspaces\//),
+				path: expect.stringMatching(/\.buildplane[\\/]workspaces[\\/]/),
 				headSha: expect.any(String),
 			},
 		});
@@ -2312,7 +2958,7 @@ describe("cli command surface", () => {
 			expect.arrayContaining([
 				expect.stringMatching(/^run-id: /),
 				"status: passed",
-				expect.stringMatching(/^workspace: .+\.buildplane\/workspaces\//),
+				expect.stringMatching(/^workspace: .+\.buildplane[\\/]workspaces[\\/]/),
 			]),
 		);
 
@@ -2320,7 +2966,7 @@ describe("cli command surface", () => {
 			expect.arrayContaining([
 				"initialized: true",
 				expect.stringMatching(
-					/^workspace: .+\.buildplane\/workspaces\/.* \(cleanup-failed\)$/,
+					/^workspace: .+\.buildplane[\\/]workspaces[\\/].* \(cleanup-failed\)$/,
 				),
 				"actionable-workspaces: 1",
 			]),
@@ -2331,7 +2977,7 @@ describe("cli command surface", () => {
 			latestWorkspace: {
 				runId: runId,
 				status: "cleanup-failed",
-				path: expect.stringMatching(/\.buildplane\/workspaces\//),
+				path: expect.stringMatching(/\.buildplane[\\/]workspaces[\\/]/),
 				headSha: "abc123",
 				cleanupError: "disk busy",
 			},
@@ -2339,7 +2985,7 @@ describe("cli command surface", () => {
 				{
 					runId: runId,
 					status: "cleanup-failed",
-					path: expect.stringMatching(/\.buildplane\/workspaces\//),
+					path: expect.stringMatching(/\.buildplane[\\/]workspaces[\\/]/),
 					headSha: "abc123",
 					cleanupError: "disk busy",
 				},
@@ -2351,7 +2997,7 @@ describe("cli command surface", () => {
 				`run-id: ${runId}`,
 				"status: passed",
 				"workspace-status: cleanup-failed",
-				expect.stringMatching(/^workspace: .+\.buildplane\/workspaces\//),
+				expect.stringMatching(/^workspace: .+\.buildplane[\\/]workspaces[\\/]/),
 				"workspace-head: abc123",
 				expect.stringMatching(/^workspace-finalized-at: /),
 				"workspace-cleanup-error: disk busy",
@@ -2361,7 +3007,7 @@ describe("cli command surface", () => {
 		expect(JSON.parse(inspectJson.stdout.join("\n"))).toMatchObject({
 			workspace: {
 				status: "cleanup-failed",
-				path: expect.stringMatching(/\.buildplane\/workspaces\//),
+				path: expect.stringMatching(/\.buildplane[\\/]workspaces[\\/]/),
 				headSha: "abc123",
 				cleanupError: "disk busy",
 				finalizedAt: expect.any(String),
@@ -2653,7 +3299,7 @@ describe("cli command surface", () => {
 			expect.arrayContaining([
 				expect.stringMatching(/^run-id: /),
 				"status: failed",
-				expect.stringMatching(/^workspace: .+\.buildplane\/workspaces\//),
+				expect.stringMatching(/^workspace: .+\.buildplane[\\/]workspaces[\\/]/),
 			]),
 		);
 		expect(result.stderr).toEqual(["runtime crashed before completion"]);
@@ -2841,7 +3487,7 @@ describe("cli command surface", () => {
 			expect.arrayContaining([
 				"initialized: true",
 				expect.stringMatching(
-					/^workspace: .+\.buildplane\/workspaces\/run-active \(active\)$/,
+					/^workspace: .+\.buildplane[\\/]workspaces[\\/]run-active \(active\)$/,
 				),
 			]),
 		);
@@ -2950,7 +3596,8 @@ describe("cli command surface", () => {
 
 		expect(result.exitCode).toBe(0);
 		expect(calls).toEqual(["runPacketAsync"]);
-		expect(result.stdout[0]).toBe("run-id: run-async");
+		expect(result.stdout[0]).toBe("governance: unsafe");
+		expect(result.stdout[2]).toBe("run-id: run-async");
 	});
 
 	it("reuses the existing CLI event bus for TUI execution instead of creating a separate TUI bus", async () => {
@@ -3103,7 +3750,8 @@ describe("cli command surface", () => {
 
 		expect(result.exitCode).toBe(0);
 		expect(calls).toEqual(["runPacket"]);
-		expect(result.stdout[0]).toBe("run-id: run-sync");
+		expect(result.stdout[0]).toBe("governance: unsafe");
+		expect(result.stdout[2]).toBe("run-id: run-sync");
 	});
 
 	it("returns stable operator-facing errors for setup failures and git preflight failures", async () => {
@@ -3161,7 +3809,9 @@ describe("cli command surface", () => {
 			nonGitPacketPath,
 		]);
 		expect(nonGit.exitCode).toBe(1);
-		expect(nonGit.stderr.join("\n")).toMatch(/not a git repository/i);
+		expect(nonGit.stderr.join("\n")).toMatch(
+			/(not a git repository|does not appear to be inside a git repository)/i,
+		);
 
 		const dirtyRoot = createGitRepo();
 		const dirtyPacketPath = writePacket(
@@ -3515,6 +4165,7 @@ describe("cli command surface", () => {
 		const storage = createBuildplaneStorage(root);
 		const run = storage.createRun(createPassingPacket(options.runId), {
 			runId: options.runId,
+			trustLane: "governed",
 		});
 		storage.markRunRunning(run.id);
 		if (options.withVerifierReceipt) {
@@ -3579,7 +4230,7 @@ describe("cli command surface", () => {
 		);
 	});
 
-	it("promotes source-backed fact learnings only from accepted receipts", async () => {
+	it("refuses to promote learnings from a local governed projection without signed tape verification", async () => {
 		const { root, runId } = await createProjectWithReceiptBackedLearning({
 			prefix: "buildplane-cli-memory-promote-pass-",
 			runId: "run-cli-memory-promote-pass",
@@ -3594,37 +4245,18 @@ describe("cli command surface", () => {
 			"--json",
 		]);
 
-		expect(result.exitCode).toBe(0);
+		expect(result.exitCode).toBe(1);
 		expect(result.stderr).toEqual([]);
 		const report = JSON.parse(result.stdout.join("\n"));
 		expect(report).toMatchObject({
-			receiptId: runId,
-			verdict: "PASSED",
-			promoted: 1,
-			skipped: 0,
+			error: { code: "RECEIPT_NOT_ACCEPTED" },
+			receipt: {
+				runId,
+				verdict: "BLOCKED",
+				trustedReceipt: false,
+			},
 		});
-		expect(report.records).toEqual([
-			expect.objectContaining({
-				memoryType: "repo-fact",
-				factKey: "Repo uses receipt backed memory",
-				sourceRunId: runId,
-				createdBy: "system",
-			}),
-		]);
-
-		const facts = createBuildplaneStorage(root).listRepoFacts();
-		expect(facts).toHaveLength(1);
-		expect(facts[0]).toMatchObject({
-			factKey: "Repo uses receipt backed memory",
-			factValue: "Durable facts must cite accepted Buildplane receipts.",
-			memoryType: "repo-fact",
-			scopeType: "repo",
-			provenance: expect.objectContaining({
-				sourceRunId: runId,
-				createdBy: "system",
-				confidence: 1,
-			}),
-		});
+		expect(createBuildplaneStorage(root).listRepoFacts()).toHaveLength(0);
 	});
 
 	it("fails closed when memory promotion lacks an accepted receipt", async () => {
@@ -3657,7 +4289,7 @@ describe("cli command surface", () => {
 		expect(createBuildplaneStorage(root).listRepoFacts()).toHaveLength(0);
 	});
 
-	it("keeps receipt-backed memory promotion idempotent", async () => {
+	it("keeps unverified receipt promotion fail-closed across retries", async () => {
 		const { root, runId } = await createProjectWithReceiptBackedLearning({
 			prefix: "buildplane-cli-memory-promote-idempotent-",
 			runId: "run-cli-memory-promote-idempotent",
@@ -3679,19 +4311,17 @@ describe("cli command surface", () => {
 			"--json",
 		]);
 
-		expect(first.exitCode).toBe(0);
-		expect(second.exitCode).toBe(0);
+		expect(first.exitCode).toBe(1);
+		expect(second.exitCode).toBe(1);
 		const secondReport = JSON.parse(second.stdout.join("\n"));
 		expect(secondReport).toMatchObject({
-			receiptId: runId,
-			verdict: "PASSED",
-			promoted: 0,
-			skipped: 1,
+			error: { code: "RECEIPT_NOT_ACCEPTED" },
+			receipt: { runId, verdict: "BLOCKED", trustedReceipt: false },
 		});
-		expect(createBuildplaneStorage(root).listRepoFacts()).toHaveLength(1);
+		expect(createBuildplaneStorage(root).listRepoFacts()).toHaveLength(0);
 	});
 
-	it("skips receipt learning rows that changed after the accepted run", async () => {
+	it("does not inspect receipt learning rows before tape verification succeeds", async () => {
 		const { root, runId } = await createProjectWithReceiptBackedLearning({
 			prefix: "buildplane-cli-memory-promote-mutated-",
 			runId: "run-cli-memory-promote-mutated",
@@ -3718,25 +4348,16 @@ describe("cli command surface", () => {
 			"--json",
 		]);
 
-		expect(result.exitCode).toBe(0);
+		expect(result.exitCode).toBe(1);
 		const report = JSON.parse(result.stdout.join("\n"));
 		expect(report).toMatchObject({
-			receiptId: runId,
-			verdict: "PASSED",
-			promoted: 0,
-			skipped: 1,
-		});
-		expect(report.records[0]).toMatchObject({
-			status: "skipped",
-			reason: "learning changed after receipt capture",
+			error: { code: "RECEIPT_NOT_ACCEPTED" },
+			receipt: { runId, verdict: "BLOCKED", trustedReceipt: false },
 		});
 		expect(createBuildplaneStorage(root).listRepoFacts()).toHaveLength(0);
 	});
 
-	it("sanitizes promoted fact content idempotently before storage and human output", async () => {
-		const neutralizedMention = "@\u200bhere";
-		const escapedPipe = "\\|";
-		const doubleEscapedPipe = "\\\\|";
+	it("does not persist sanitized facts until the receipt is cryptographically verified", async () => {
 		const { root, runId } = await createProjectWithReceiptBackedLearning({
 			prefix: "buildplane-cli-memory-promote-sanitize-",
 			runId: "run-cli-memory-promote-sanitize",
@@ -3756,34 +4377,15 @@ describe("cli command surface", () => {
 			runId,
 		]);
 
-		expect(result.exitCode).toBe(0);
-		const humanOutput = result.stdout.join("\n");
-		expect(humanOutput).not.toContain("\u001b");
-		expect(humanOutput).not.toContain("@here");
-		expect(humanOutput).toContain(neutralizedMention);
-		expect(humanOutput).toContain(escapedPipe);
-		expect(humanOutput).not.toContain(doubleEscapedPipe);
-
-		const facts = createBuildplaneStorage(root).listRepoFacts();
-		expect(facts).toHaveLength(1);
-		expect(facts[0].factKey).not.toContain("\n");
-		expect(facts[0].factKey).not.toContain("\u001b");
-		expect(facts[0].factKey).not.toContain("@here");
-		expect(facts[0].factKey).toContain(neutralizedMention);
-		expect(facts[0].factKey).toContain(escapedPipe);
-		expect(facts[0].factKey).not.toContain(doubleEscapedPipe);
-		expect(facts[0].factValue).not.toContain("\n");
-		expect(facts[0].factValue).not.toContain("\u001b");
-		expect(facts[0].factValue).not.toContain("@here");
-		expect(facts[0].factValue).not.toContain("`");
-		expect(facts[0].factValue).not.toContain("<!--");
-		expect(facts[0].factValue).not.toContain("-->");
-		expect(facts[0].factValue).toContain(neutralizedMention);
-		expect(facts[0].factValue).toContain(escapedPipe);
-		expect(facts[0].factValue).not.toContain(doubleEscapedPipe);
+		expect(result.exitCode).toBe(1);
+		expect(result.stdout).toEqual([]);
+		expect(result.stderr.join("\n")).toContain(
+			"signed, verified governed tape",
+		);
+		expect(createBuildplaneStorage(root).listRepoFacts()).toHaveLength(0);
 	});
 
-	it("skips conflicting repo facts from different provenance", async () => {
+	it("does not let locally projected evidence bypass receipt verification when facts conflict", async () => {
 		const { root, runId } = await createProjectWithReceiptBackedLearning({
 			prefix: "buildplane-cli-memory-promote-conflict-",
 			runId: "run-cli-memory-promote-conflict",
@@ -3806,12 +4408,11 @@ describe("cli command surface", () => {
 			"--json",
 		]);
 
-		expect(result.exitCode).toBe(0);
+		expect(result.exitCode).toBe(1);
 		const report = JSON.parse(result.stdout.join("\n"));
-		expect(report).toMatchObject({ promoted: 0, skipped: 1 });
-		expect(report.records[0]).toMatchObject({
-			status: "skipped",
-			reason: "active fact exists from different provenance",
+		expect(report).toMatchObject({
+			error: { code: "RECEIPT_NOT_ACCEPTED" },
+			receipt: { runId, verdict: "BLOCKED", trustedReceipt: false },
 		});
 		const facts = createBuildplaneStorage(root).listRepoFacts();
 		expect(facts).toHaveLength(1);
@@ -3962,12 +4563,13 @@ describe("cli command surface", () => {
 		]);
 	});
 
-	it("reports receipt-backed final verdicts from verify --run --json", async () => {
+	it("blocks locally projected governed verdicts from verify --run --json until signed tape verification", async () => {
 		const root = mkdtempSync(join(tmpdir(), "buildplane-cli-verify-pass-"));
 		await runCliCapture(root, ["init"]);
 		const storage = createBuildplaneStorage(root);
 		const run = storage.createRun(createPassingPacket("unit-cli-verify-pass"), {
 			runId: "run-cli-verify-pass",
+			trustLane: "governed",
 		});
 		storage.markRunRunning(run.id);
 		storage.recordExecutionEvidence(run.id, {
@@ -3995,12 +4597,13 @@ describe("cli command surface", () => {
 			"--json",
 		]);
 
-		expect(result.exitCode).toBe(0);
+		expect(result.exitCode).toBe(1);
 		expect(result.stderr).toEqual([]);
 		const report = JSON.parse(result.stdout.join("\n"));
 		expect(report).toMatchObject({
 			runId: run.id,
-			verdict: "PASSED",
+			verdict: "BLOCKED",
+			trustedReceipt: false,
 			receipts: { verifier: 2, approvals: 1, rejections: 0 },
 		});
 		expect(report.criteria).toEqual(
@@ -4010,6 +4613,14 @@ describe("cli command surface", () => {
 					status: "PASSED",
 				}),
 				expect.objectContaining({ id: "command-exit:0", status: "PASSED" }),
+			]),
+		);
+		expect(report.issues).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({ code: "MISSING_PROMOTION_RECEIPT" }),
+				expect.objectContaining({
+					code: "MISSING_SIGNED_TAPE_VERIFICATION",
+				}),
 			]),
 		);
 	});
@@ -4022,6 +4633,7 @@ describe("cli command surface", () => {
 			createPassingPacket("unit-cli-verify-blocked"),
 			{
 				runId: "run-cli-verify-blocked",
+				trustLane: "governed",
 			},
 		);
 		storage.markRunRunning(run.id);
@@ -4110,7 +4722,7 @@ describe("cli command surface", () => {
 		const report = JSON.parse(result.stdout.join("\n"));
 		expect(report).toMatchObject({
 			runId: run.id,
-			verdict: "BLOCKED",
+			verdict: "FAILED",
 		});
 		expect(report.issues).toEqual(
 			expect.arrayContaining([
@@ -4313,10 +4925,12 @@ describe("cli command surface", () => {
 		const summary = JSON.parse(result.stdout.join("\n"));
 		expect(summary).toMatchObject({
 			format: "otel-json",
+			governance: "unsafe",
+			authority: { tape: "unverified", export: "none" },
 			runId: run.id,
 			outPath,
 			traceGrading: {
-				schema: "buildplane.trace_grading.v0",
+				schema: "buildplane.trace_grading.v1",
 				runId: run.id,
 			},
 		});
@@ -4325,8 +4939,8 @@ describe("cli command surface", () => {
 		expect(spans.map((span: { name: string }) => span.name)).toEqual(
 			expect.arrayContaining([
 				"buildplane.run",
-				"buildplane.evidence.command-exit",
-				"buildplane.policy.advance-run",
+				"buildplane.evidence",
+				"buildplane.decision",
 			]),
 		);
 		expect(spans[0].kind).toBe(1);
@@ -4334,7 +4948,7 @@ describe("cli command surface", () => {
 		expect(trace.traceGrading).toBeUndefined();
 	});
 
-	it("previews the exact GitHub check-run payload from pr-check dry-run", async () => {
+	it("blocks pr-check dry-run when its local receipt lacks signed-tape verification", async () => {
 		const root = mkdtempSync(
 			join(tmpdir(), "buildplane-cli-pr-check-dry-run-"),
 		);
@@ -4342,6 +4956,7 @@ describe("cli command surface", () => {
 		const storage = createBuildplaneStorage(root);
 		const run = storage.createRun(createPassingPacket("unit-cli-pr-check"), {
 			runId: "run-cli-pr-check-dry-run",
+			trustLane: "governed",
 		});
 		storage.markRunRunning(run.id);
 		storage.recordExecutionEvidence(run.id, {
@@ -4376,31 +4991,14 @@ describe("cli command surface", () => {
 			"--json",
 		]);
 
-		expect(result.exitCode).toBe(0);
+		expect(result.exitCode).toBe(1);
 		expect(result.stderr).toEqual([]);
-		const preview = JSON.parse(result.stdout.join("\n"));
-		expect(preview).toMatchObject({
-			mode: "dry-run",
-			operation: {
-				method: "POST",
-				path: "/repos/SollanSystems/buildplane/check-runs",
-				body: {
-					name: "Buildplane Evidence",
-					head_sha: "0123456789abcdef0123456789abcdef01234567",
-					status: "completed",
-					conclusion: "success",
-					external_id: run.id,
-				},
-			},
-			sideEffect: {
-				capability: "github.pr_check",
-				action: "publish",
-				target: "repo:SollanSystems/buildplane",
-			},
+		expect(JSON.parse(result.stdout.join("\n"))).toMatchObject({
+			error: { message: expect.stringContaining("UNTRUSTED_RECEIPT") },
 		});
 	});
 
-	it("fails closed before network when pr-check publish lacks a matching grant", async () => {
+	it("fails closed before reading credentials or grants when pr-check receipt is untrusted", async () => {
 		const root = mkdtempSync(join(tmpdir(), "buildplane-cli-pr-check-denied-"));
 		await runCliCapture(root, ["init"]);
 		const storage = createBuildplaneStorage(root);
@@ -4408,6 +5006,7 @@ describe("cli command surface", () => {
 			createPassingPacket("unit-cli-pr-check-denied"),
 			{
 				runId: "run-cli-pr-check-denied",
+				trustLane: "governed",
 			},
 		);
 		storage.markRunRunning(run.id);
@@ -4474,13 +5073,13 @@ describe("cli command surface", () => {
 		expect(result.exitCode).toBe(1);
 		expect(result.stderr).toEqual([]);
 		expect(JSON.parse(result.stdout.join("\n"))).toMatchObject({
-			error: { message: expect.stringContaining("UNSAFE_TO_RUN") },
+			error: { message: expect.stringContaining("UNTRUSTED_RECEIPT") },
 		});
 		expect(request).not.toHaveBeenCalled();
 		expect(credentialReads).toEqual([]);
 	});
 
-	it("publishes pr-check only after a matching grant and credential are present", async () => {
+	it("does not publish pr-check even with a grant when its receipt is not tape-verified", async () => {
 		const root = mkdtempSync(
 			join(tmpdir(), "buildplane-cli-pr-check-publish-"),
 		);
@@ -4490,6 +5089,7 @@ describe("cli command surface", () => {
 			createPassingPacket("unit-cli-pr-check-publish"),
 			{
 				runId: "run-cli-pr-check-publish",
+				trustLane: "governed",
 			},
 		);
 		storage.markRunRunning(run.id);
@@ -4550,30 +5150,15 @@ describe("cli command surface", () => {
 			{ publishPrCheckRequest: request },
 		);
 
-		expect(result.exitCode).toBe(0);
+		expect(result.exitCode).toBe(1);
 		expect(result.stderr).toEqual([]);
-		const published = JSON.parse(result.stdout.join("\n"));
-		expect(published).toMatchObject({
-			mode: "published",
-			grantId: "grant-pr-check-publish",
-			sideEffect: {
-				grantId: "grant-pr-check-publish",
-				capability: "github.pr_check",
-				action: "publish",
-				target: "repo:SollanSystems/buildplane",
-			},
-			response: { status: 201, ok: true },
+		expect(JSON.parse(result.stdout.join("\n"))).toMatchObject({
+			error: { message: expect.stringContaining("UNTRUSTED_RECEIPT") },
 		});
-		expect(request).toHaveBeenCalledTimes(1);
-		expect(request).toHaveBeenCalledWith(
-			expect.objectContaining({
-				path: "/repos/SollanSystems/buildplane/check-runs",
-			}),
-			{ credential: "cred" },
-		);
+		expect(request).not.toHaveBeenCalled();
 	});
 
-	it("previews a compact PR evidence comment from pr-comment dry-run", async () => {
+	it("blocks pr-comment dry-run when its local receipt lacks signed-tape verification", async () => {
 		const root = mkdtempSync(
 			join(tmpdir(), "buildplane-cli-pr-comment-dry-run-"),
 		);
@@ -4581,6 +5166,7 @@ describe("cli command surface", () => {
 		const storage = createBuildplaneStorage(root);
 		const run = storage.createRun(createPassingPacket("unit-cli-pr-comment"), {
 			runId: "run-cli-pr-comment-dry-run",
+			trustLane: "governed",
 		});
 		storage.markRunRunning(run.id);
 		storage.recordExecutionEvidence(run.id, {
@@ -4619,43 +5205,11 @@ describe("cli command surface", () => {
 			"--json",
 		]);
 
-		expect(result.exitCode).toBe(0);
+		expect(result.exitCode).toBe(1);
 		expect(result.stderr).toEqual([]);
-		const preview = JSON.parse(result.stdout.join("\n"));
-		expect(preview).toMatchObject({
-			mode: "dry-run",
-			preflight: {
-				method: "GET",
-				path: "/repos/SollanSystems/buildplane/pulls/42",
-			},
-			operation: {
-				method: "POST",
-				path: "/repos/SollanSystems/buildplane/issues/42/comments",
-			},
-			sideEffect: {
-				capability: "github.pr_comment",
-				action: "publish",
-				target: "repo:SollanSystems/buildplane#pr:42",
-				metadata: {
-					headSha: "0123456789abcdef0123456789abcdef01234567",
-					prNumber: 42,
-				},
-			},
+		expect(JSON.parse(result.stdout.join("\n"))).toMatchObject({
+			error: { message: expect.stringContaining("UNTRUSTED_RECEIPT") },
 		});
-		expect(preview.operation.body.body).toContain(
-			"<!-- buildplane:pr-evidence run=run-cli-pr-comment-dry-run sha=0123456789abcdef0123456789abcdef01234567 pr=42 -->",
-		);
-		expect(preview.operation.body.body).toContain("| Final verdict | PASSED |");
-		expect(preview.operation.body.body).toContain("| Pull request | #42 |");
-		expect(preview.operation.body.body).toContain(
-			"| Head SHA | `0123456789abcdef0123456789abcdef01234567` |",
-		);
-		expect(preview.operation.body.body).toContain(
-			"| Pass authority | verifier receipts only; worker claims are not authoritative |",
-		);
-		expect(preview.operation.body.body).toContain(
-			"| Evidence bundle | https://artifacts.example/run-cli-pr-comment-dry-run.json |",
-		);
 	});
 
 	it("rejects non-canonical PR numbers before loading evidence", async () => {
@@ -4690,7 +5244,7 @@ describe("cli command surface", () => {
 		}
 	});
 
-	it("fails closed before network when pr-comment publish lacks a matching grant", async () => {
+	it("fails closed before reading credentials or grants when pr-comment receipt is untrusted", async () => {
 		const root = mkdtempSync(
 			join(tmpdir(), "buildplane-cli-pr-comment-denied-"),
 		);
@@ -4700,6 +5254,7 @@ describe("cli command surface", () => {
 			createPassingPacket("unit-cli-pr-comment-denied"),
 			{
 				runId: "run-cli-pr-comment-denied",
+				trustLane: "governed",
 			},
 		);
 		storage.markRunRunning(run.id);
@@ -4768,7 +5323,7 @@ describe("cli command surface", () => {
 		expect(result.exitCode).toBe(1);
 		expect(result.stderr).toEqual([]);
 		expect(JSON.parse(result.stdout.join("\n"))).toMatchObject({
-			error: { message: expect.stringContaining("UNSAFE_TO_RUN") },
+			error: { message: expect.stringContaining("UNTRUSTED_RECEIPT") },
 		});
 		expect(request).not.toHaveBeenCalled();
 		expect(credentialReads).toEqual([]);
@@ -5031,6 +5586,54 @@ describe("planforge dry-run", () => {
 		expect(JSON.parse(result.stdout.join("\n"))).toEqual(
 			JSON.parse(readFileSync(expectedFixture, "utf8")),
 		);
+		expect(existsSync(join(root, ".buildplane"))).toBe(false);
+	});
+
+	it("blocks non-broker PlanForge authority and legacy worker operations before they create governed-looking state", async () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-planforge-blocked-"));
+		const brokerAdmissionWithoutHost = [
+			"planforge",
+			"admit",
+			"--input",
+			inputFixture,
+			"--approve",
+			"--json",
+		] as const;
+		const legacyOperatorAdmission = [
+			...brokerAdmissionWithoutHost.slice(0, -1),
+			"--operator",
+			"test",
+			"--json",
+		] as const;
+		const invocations = [
+			[brokerAdmissionWithoutHost, "PlanForge governed broker is unavailable"],
+			[
+				legacyOperatorAdmission,
+				"Unsupported PlanForge governed admit argument: --operator",
+			],
+			[
+				["planforge", "dispatch", "--input", inputFixture, "--json"],
+				"PlanForge legacy execution is blocked",
+			],
+			[
+				["planforge", "resume", "--input", inputFixture, "--json"],
+				"PlanForge legacy execution is blocked",
+			],
+			[
+				["planforge", "recover", "--json"],
+				"PlanForge legacy execution is blocked",
+			],
+			[
+				["planforge", "loop", "--once", "--json"],
+				"PlanForge legacy execution is blocked",
+			],
+		] as const;
+
+		for (const [invocation, blockedMessage] of invocations) {
+			const result = await runCliCapture(root, [...invocation]);
+			expect(result.exitCode).toBe(1);
+			expect(result.stdout.join("\n")).toContain(blockedMessage);
+		}
 		expect(existsSync(join(root, ".buildplane"))).toBe(false);
 	});
 
@@ -5455,6 +6058,50 @@ describe("planforge dry-run", () => {
 	});
 });
 
+describe("legacy execution lanes", () => {
+	it("requires explicit --raw acknowledgement for run-strategy", async () => {
+		const root = createGitRepo();
+		const result = await runCliCapture(root, ["run-strategy"]);
+
+		expect(result.exitCode).toBe(1);
+		expect(result.stderr.join("\n")).toContain("legacy ambient-worker path");
+	});
+
+	it("requires explicit --raw acknowledgement for run-graph", async () => {
+		const root = createGitRepo();
+		const result = await runCliCapture(root, ["run-graph"]);
+
+		expect(result.exitCode).toBe(1);
+		expect(result.stderr.join("\n")).toContain("legacy ambient-worker path");
+	});
+
+	it("does not treat a --graph flag value as a standalone raw acknowledgement", async () => {
+		const root = createGitRepo();
+		const result = await runCliCapture(root, ["run-graph", "--graph", "--raw"]);
+
+		expect(result.exitCode).toBe(1);
+		expect(result.stderr.join("\n")).toContain(
+			"Missing required value after --graph",
+		);
+		expect(existsSync(join(root, ".buildplane"))).toBe(false);
+	});
+
+	it("does not treat a --strategy flag value as a standalone raw acknowledgement", async () => {
+		const root = createGitRepo();
+		const result = await runCliCapture(root, [
+			"run-strategy",
+			"--strategy",
+			"--raw",
+		]);
+
+		expect(result.exitCode).toBe(1);
+		expect(result.stderr.join("\n")).toContain(
+			"Missing required value after --strategy",
+		);
+		expect(existsSync(join(root, ".buildplane"))).toBe(false);
+	});
+});
+
 describe("runtime router signal forwarding", () => {
 	function fakeExecutor(seen: { hasSignal: boolean }[]) {
 		return {
@@ -5517,5 +6164,36 @@ describe("runtime router signal forwarding", () => {
 			controller.signal,
 		);
 		expect(seen[0]?.hasSignal).toBe(true);
+	});
+
+	it("scopes immutable command gateways to their own concurrent run", async () => {
+		const scoped = createScopedCommandExecutor({
+			executePacket: () => ({ gateway: "default" }),
+		});
+		const router = buildRuntimeRouter({
+			commandExecutor: scoped.commandExecutor,
+			getClaudeExecutor: async () => fakeExecutor([]),
+			getCodexExecutor: async () => fakeExecutor([]),
+			getSdkExecutor: async () => fakeExecutor([]),
+		});
+		const invoke = (gateway: string) =>
+			scoped.runWithGateway(
+				{ executePacket: () => ({ gateway }) },
+				async () => {
+					await Promise.resolve();
+					return router.executePacket({ execution: {} }, "/tmp") as {
+						gateway: string;
+					};
+				},
+			);
+
+		const [first, second] = await Promise.all([
+			invoke("first"),
+			invoke("second"),
+		]);
+
+		expect(first.gateway).toBe("first");
+		expect(second.gateway).toBe("second");
+		expect(Object.isFrozen(scoped.commandExecutor)).toBe(true);
 	});
 });

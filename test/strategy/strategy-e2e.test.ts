@@ -5,7 +5,7 @@
  * to avoid direct package imports that may not resolve in the root test context.
  */
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -90,13 +90,17 @@ describe("strategy executor end-to-end", () => {
 			children: [
 				{
 					role: "implementer",
-					packet: makeCommandPacket("unit-impl", "echo", ["hello"]),
+					packet: makeCommandPacket("unit-impl", "node", [
+						"-e",
+						"process.stdout.write('hello')",
+					]),
 				},
 			],
 		});
 
 		const { exitCode, stdout } = await runCliCapture(root, [
 			"run-strategy",
+			"--raw",
 			"--strategy",
 			strategyPath,
 		]);
@@ -124,6 +128,7 @@ describe("strategy executor end-to-end", () => {
 
 		const { exitCode, stdout } = await runCliCapture(root, [
 			"run-strategy",
+			"--raw",
 			"--strategy",
 			strategyPath,
 		]);
@@ -133,7 +138,7 @@ describe("strategy executor end-to-end", () => {
 		expect(stdout.join("\n")).toContain("rejected");
 	});
 
-	it("implement-then-review: both pass → accepted", async () => {
+	it("run-strategy blocks a raw review strategy before either child dispatches", async () => {
 		const root = createGitRepo();
 		await runCliCapture(root, ["init"]);
 
@@ -144,11 +149,17 @@ describe("strategy executor end-to-end", () => {
 			children: [
 				{
 					role: "implementer",
-					packet: makeCommandPacket("unit-impl-itr", "echo", ["implemented"]),
+					packet: makeCommandPacket("unit-impl-itr", "node", [
+						"-e",
+						"process.stdout.write('implemented')",
+					]),
 				},
 				{
 					role: "reviewer",
-					packet: makeCommandPacket("unit-reviewer-itr", "echo", ["approved"]),
+					packet: makeCommandPacket("unit-reviewer-itr", "node", [
+						"-e",
+						"process.stdout.write('approved')",
+					]),
 					dependsOn: ["unit-impl-itr"],
 				},
 			],
@@ -156,16 +167,20 @@ describe("strategy executor end-to-end", () => {
 
 		const { exitCode, stdout } = await runCliCapture(root, [
 			"run-strategy",
+			"--raw",
 			"--strategy",
 			strategyPath,
 		]);
 
-		expect(exitCode).toBe(0);
-		expect(stdout.join("\n")).toContain("passed");
-		expect(stdout.join("\n")).toContain("accepted");
+		expect(exitCode).toBe(1);
+		expect(stdout.join("\n")).toContain("governance: unsafe");
+		expect(stdout.join("\n")).toContain("failed");
+		expect(stdout.join("\n")).toMatch(
+			/raw review strategies are blocked.*pre-promotion review/i,
+		);
 	});
 
-	it("implement-then-review: reviewer always rejects → failed after max rounds", async () => {
+	it("raw review strategy does not run an implementer before a rejecting reviewer", async () => {
 		const root = createGitRepo();
 		await runCliCapture(root, ["init"]);
 
@@ -176,8 +191,9 @@ describe("strategy executor end-to-end", () => {
 			children: [
 				{
 					role: "implementer",
-					packet: makeCommandPacket("unit-impl-reject", "echo", [
-						"implemented",
+					packet: makeCommandPacket("unit-impl-reject", "node", [
+						"-e",
+						"require('fs').writeFileSync('implemented.txt', 'candidate')",
 					]),
 				},
 				{
@@ -187,20 +203,23 @@ describe("strategy executor end-to-end", () => {
 				},
 			],
 		});
-
 		const { exitCode, stdout } = await runCliCapture(root, [
 			"run-strategy",
+			"--raw",
 			"--strategy",
 			strategyPath,
 		]);
 
 		expect(exitCode).toBe(1);
 		expect(stdout.join("\n")).toContain("rejected");
-		// Should contain a "rounds" message from the max-rounds logic
-		expect(stdout.join("\n")).toMatch(/round/);
+		expect(stdout.join("\n")).toContain("governance: unsafe");
+		expect(stdout.join("\n")).toMatch(
+			/raw review strategies are blocked.*pre-promotion review/i,
+		);
+		expect(existsSync(join(root, "implemented.txt"))).toBe(false);
 	});
 
-	it("implement-then-review: implementer fails → immediately rejected without review", async () => {
+	it("raw review strategy blocks before an otherwise failing implementer dispatches", async () => {
 		const root = createGitRepo();
 		await runCliCapture(root, ["init"]);
 
@@ -223,12 +242,15 @@ describe("strategy executor end-to-end", () => {
 
 		const { exitCode, stdout } = await runCliCapture(root, [
 			"run-strategy",
+			"--raw",
 			"--strategy",
 			strategyPath,
 		]);
 
 		expect(exitCode).toBe(1);
 		expect(stdout.join("\n")).toContain("rejected");
-		expect(stdout.join("\n")).toContain("implementer did not pass");
+		expect(stdout.join("\n")).toMatch(
+			/raw review strategies are blocked.*pre-promotion review/i,
+		);
 	});
 });

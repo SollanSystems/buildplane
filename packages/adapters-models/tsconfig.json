@@ -3,9 +3,17 @@
 	"compilerOptions": {
 		"outDir": "dist",
 		"rootDir": "src",
-		"composite": true
+		"composite": true,
+		"baseUrl": "../..",
+		"paths": {
+			"@buildplane/ledger-client": ["packages/ledger-client/src/index.ts"]
+		}
 	},
 	"include": ["src"],
 	"exclude": ["dist", "test"],
-	"references": [{ "path": "../kernel" }, { "path": "../runtime" }]
+	"references": [
+		{ "path": "../kernel" },
+		{ "path": "../ledger-client" },
+		{ "path": "../runtime" }
+	]
 }

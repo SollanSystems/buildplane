@@ -103,8 +103,8 @@ function buildAutonomyContract(
 			? `\n\nYou MUST NOT modify:\n${intent.constraints.forbidden.map((p) => `- ${p}`).join("\n")}`
 			: "";
 
-	if (role === "reviewer" || role === "adversary") {
-		return `## Safe Autonomy Contract\n\nYou are acting as a **${role}**. Your task is to evaluate existing work, not produce new code.\n\n- Read files freely within scope\n- Do NOT modify source files unless explicitly correcting a critical defect\n- Do NOT run destructive commands\n- Produce a verdict: approve, request-changes, or reject${forbidden}`;
+	if (isReadOnlyEvaluationRole(role)) {
+		return `## Safe Autonomy Contract\n\nYou are acting as a **${role}**. Your task is to evaluate existing work, not produce new code.\n\n- Read files freely within scope\n- Do NOT modify source files or create persistent files\n- Do NOT run mutating or destructive commands\n- Produce a verdict: approve, request-changes, or reject${forbidden}`;
 	}
 
 	return `## Safe Autonomy Contract\n\nYou may autonomously:\n- Read any file in scope\n- Write and edit files within the allowed scope\n- Run verification commands listed in the Preset section\n- Create new files if required by the task\n\nYou MUST NOT:\n- Modify files outside the allowed scope\n- Run destructive git operations (force push, reset --hard, branch -D)\n- Skip verification gates${forbidden}`;
@@ -113,7 +113,7 @@ function buildAutonomyContract(
 function buildInstructions(role: ExecutionRole, intent: TaskIntent): string {
 	const header = "## Instructions";
 
-	if (role === "reviewer" || role === "adversary") {
+	if (isReadOnlyEvaluationRole(role)) {
 		const reviewSteps = [
 			"1. Read all files in the scope listed under Preset.",
 			"2. Review the Prior Work section to understand what the implementer produced.",
@@ -127,13 +127,20 @@ function buildInstructions(role: ExecutionRole, intent: TaskIntent): string {
 		return `${header}\n\n${reviewSteps}`;
 	}
 
-	// Implementer / candidate / judge
+	// Implementer / candidate
 	const typeInstructions = taskTypeInstructions(intent.taskType);
 	const fileList =
 		intent.context.files.length > 0
 			? `\n\nRelevant files:\n${intent.context.files.map((f) => `- ${f}`).join("\n")}`
 			: "";
 	return `${header}\n\n${typeInstructions}${fileList}`;
+}
+
+/** Judge decisions are evaluative evidence, never an implementation request. */
+function isReadOnlyEvaluationRole(
+	role: ExecutionRole,
+): role is "reviewer" | "adversary" | "judge" {
+	return role === "reviewer" || role === "adversary" || role === "judge";
 }
 
 function taskTypeInstructions(taskType: string): string {

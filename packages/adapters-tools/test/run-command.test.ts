@@ -11,7 +11,10 @@ describe("run_command tool", () => {
 
 	it("runs a command in the worktree root", () => {
 		const root = makeWorktree();
-		const result = runCommand({ command: "echo", args: ["hello"] }, root);
+		const result = runCommand(
+			{ command: "node", args: ["-e", "console.log('hello')"] },
+			root,
+		);
 
 		expect(result.success).toBe(true);
 		expect(result.exitCode).toBe(0);

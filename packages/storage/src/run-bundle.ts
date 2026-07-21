@@ -64,6 +64,9 @@ export interface RunBundleRunRecord {
 	readonly constraints: readonly string[];
 	readonly status: RunBundleStatus;
 	readonly verdict: RunBundleVerdict;
+	/** The durable authority lane; only governed records may be trusted receipts. */
+	readonly governance: "legacy" | "unsafe" | "governed";
+	readonly trusted_receipt: boolean;
 	readonly summary: string;
 	readonly changed_files: readonly string[];
 	readonly verified_criteria: readonly RunBundleCriterion[];
@@ -140,6 +143,10 @@ export interface FinalVerdictIssue {
 	readonly code:
 		| "MISSING_VERIFIER_RECEIPT"
 		| "FAILED_VERIFIER_RECEIPT"
+		| "UNTRUSTED_EXECUTION_LANE"
+		| "MISSING_PROMOTION_RECEIPT"
+		| "PROMOTION_RECONCILIATION_REQUIRED"
+		| "MISSING_SIGNED_TAPE_VERIFICATION"
 		| "MISSING_APPROVAL"
 		| "UNRESOLVED_BLOCKER"
 		| "UNSAFE_TO_RUN";
@@ -151,6 +158,8 @@ export interface FinalVerdictIssue {
 export interface FinalVerdictReport {
 	readonly runId: string;
 	readonly verdict: FinalRunVerdict;
+	readonly governance: "legacy" | "unsafe" | "governed";
+	readonly trustedReceipt: boolean;
 	readonly criteria: readonly FinalVerdictCriterion[];
 	readonly issues: readonly FinalVerdictIssue[];
 	readonly receipts: {
@@ -167,6 +176,7 @@ interface StoredRunBundleRunRow {
 	readonly unit_snapshot: string;
 	readonly created_at: string;
 	readonly completed_at: string | null;
+	readonly trust_lane: "legacy" | "unsafe" | "governed";
 }
 
 interface StoredRunBundleEventRow {
@@ -187,6 +197,17 @@ interface StoredRunBundleDecisionRow {
 	readonly kind: string;
 	readonly outcome: string;
 	readonly reasons: string;
+}
+
+/** Local projection of the immutable candidate's terminal promotion state. */
+interface StoredCandidatePromotionReceiptRow {
+	readonly candidate_digest: string;
+	readonly state: "prepared" | "recorded" | "executed" | null;
+	readonly executed_outcome:
+		| "promoted"
+		| "reconciliation_required"
+		| "rejected"
+		| null;
 }
 
 interface OutputCheckLike {
@@ -240,7 +261,14 @@ export function verifyRunFinalVerdict(
 		const packet = parseUnitPacket(run.unit_snapshot);
 		const eventRows = readEventRows(database, run.id);
 		const decisionRows = readDecisionRows(database, run.id);
-		return buildFinalVerdictReport(run, packet, eventRows, decisionRows);
+		const candidatePromotion = readCandidatePromotionReceipt(database, run.id);
+		return buildFinalVerdictReport(
+			run,
+			packet,
+			eventRows,
+			decisionRows,
+			candidatePromotion,
+		);
 	} finally {
 		database.close();
 	}
@@ -256,12 +284,14 @@ function buildRunBundle(
 	const eventRows = readEventRows(database, run.id);
 	const artifactRows = readArtifactRows(database, run.id);
 	const decisionRows = readDecisionRows(database, run.id);
+	const candidatePromotion = readCandidatePromotionReceipt(database, run.id);
 	const outputChecks = latestOutputChecks(eventRows);
 	const finalReport = buildFinalVerdictReport(
 		run,
 		packet,
 		eventRows,
 		decisionRows,
+		candidatePromotion,
 	);
 	const executionEventRow = latestExecutionEventRow(eventRows);
 	const decisionEventRows = eventRows.filter(
@@ -589,7 +619,9 @@ function buildRunBundle(
 		id: toBundleArtifactId(`${haltEventId}-receipt`),
 		kind: "receipt",
 		producedByEventId: haltEventId,
-		title: "Final run receipt",
+		title: finalReport.trustedReceipt
+			? "Final governed run receipt"
+			: "Untrusted execution evidence",
 		bytes: finalReceiptText(
 			mapped.verdict,
 			verifiedCriteria.length,
@@ -638,6 +670,8 @@ function buildRunBundle(
 		constraints: collectConstraints(packet),
 		status: mapped.status,
 		verdict: mapped.verdict,
+		governance: finalReport.governance,
+		trusted_receipt: finalReport.trustedReceipt,
 		summary: finalSummary(
 			mapped.verdict,
 			verifiedCriteria.length,
@@ -678,6 +712,7 @@ function buildFinalVerdictReport(
 	packet: UnitPacket,
 	eventRows: readonly StoredRunBundleEventRow[],
 	decisionRows: readonly StoredRunBundleDecisionRow[],
+	candidatePromotion: StoredCandidatePromotionReceiptRow | undefined,
 ): FinalVerdictReport {
 	const executionEventRow = latestExecutionEventRow(eventRows);
 	const outputChecks = latestOutputChecks(eventRows);
@@ -699,6 +734,23 @@ function buildFinalVerdictReport(
 		(decision) => decision.outcome === "rejected",
 	);
 	const unsafeRejection = rejections.find(isUnsafeDecision);
+	const unsafeExecutionLane = run.trust_lane === "unsafe";
+	const completedGovernedPromotion =
+		run.trust_lane === "governed" &&
+		candidatePromotion?.state === "executed" &&
+		candidatePromotion.executed_outcome === "promoted";
+	const rejectedCandidatePromotion =
+		candidatePromotion?.state === "executed" &&
+		candidatePromotion.executed_outcome === "rejected";
+	const reconciliationRequiredPromotion =
+		candidatePromotion?.state === "executed" &&
+		candidatePromotion.executed_outcome === "reconciliation_required";
+	// `state.db` is a local shadow/projection, not the signed-tape trust
+	// authority. It intentionally has no keyring or tape-root verifier, so it
+	// cannot mint a trusted receipt by itself. A future verified tape projection
+	// must supply this signal; until then every locally built report stays
+	// non-publishable even if the local candidate state looks complete.
+	const signedTapeVerified = false;
 
 	for (const outputPath of requiredOutputs) {
 		const checkIndex = outputChecks.findIndex(
@@ -805,6 +857,37 @@ function buildFinalVerdictReport(
 			severity: "critical",
 		});
 	}
+	if (unsafeExecutionLane) {
+		issues.push({
+			code: "UNTRUSTED_EXECUTION_LANE",
+			message:
+				"This run was executed through the explicit unsafe raw lane and cannot produce a trusted receipt.",
+			severity: "critical",
+		});
+	}
+	if (reconciliationRequiredPromotion) {
+		issues.push({
+			code: "PROMOTION_RECONCILIATION_REQUIRED",
+			message:
+				"The candidate promotion compare-and-swap was observed, but the target branch advanced before the result was durably reconciled. The candidate must be explicitly abandoned or revalidated; it must not be retried as a fresh merge.",
+			severity: "critical",
+		});
+	} else if (run.trust_lane === "governed" && !completedGovernedPromotion) {
+		issues.push({
+			code: "MISSING_PROMOTION_RECEIPT",
+			message:
+				"A governed run cannot produce a trusted receipt until its immutable candidate has one recorded promoted terminal result.",
+			severity: "critical",
+		});
+	}
+	if (run.trust_lane === "governed" && !signedTapeVerified) {
+		issues.push({
+			code: "MISSING_SIGNED_TAPE_VERIFICATION",
+			message:
+				"The local run projection cannot verify the signed dispatch, evidence, and promotion tape; it cannot issue a trusted receipt.",
+			severity: "critical",
+		});
+	}
 
 	const hasFailedCriteria = criteria.some(
 		(criterion) => criterion.status === "FAILED",
@@ -823,10 +906,24 @@ function buildFinalVerdictReport(
 	}
 
 	const verdict: FinalRunVerdict = (() => {
-		if (unsafeRejection) return "UNSAFE_TO_RUN";
+		if (unsafeExecutionLane || unsafeRejection) return "UNSAFE_TO_RUN";
+		if (rejectedCandidatePromotion) return "FAILED";
+		// A deterministic failure is stronger evidence than the absence of a
+		// promotion or tape receipt. Do not mask a failed check as merely blocked:
+		// callers need the distinction to avoid retrying or approving a known-bad
+		// candidate.
 		if (hasFailedCriteria) return "FAILED";
-		if (hasMissingCriteria || approvals === 0 || rejections.length > 0)
+		// A policy rejection is an unresolved authority gate, even when the
+		// legacy run-loop recorded its terminal status as `failed`. Keep that
+		// distinction in the exported verdict: callers must not treat a blocked
+		// scope/acceptance decision as a deterministic candidate failure that is
+		// safe to retry or override without a new decision.
+		if (rejections.length > 0) return "BLOCKED";
+		if (run.status === "failed" || run.status === "cancelled") return "FAILED";
+		if (run.trust_lane === "governed" && !completedGovernedPromotion)
 			return "BLOCKED";
+		if (run.trust_lane === "governed" && !signedTapeVerified) return "BLOCKED";
+		if (hasMissingCriteria || approvals === 0) return "BLOCKED";
 		if (
 			run.status === "pending" ||
 			run.status === "running" ||
@@ -834,13 +931,15 @@ function buildFinalVerdictReport(
 		) {
 			return "BLOCKED";
 		}
-		if (run.status === "failed" || run.status === "cancelled") return "FAILED";
 		return "PASSED";
 	})();
 
 	return {
 		runId: run.id,
 		verdict,
+		governance: run.trust_lane,
+		trustedReceipt:
+			completedGovernedPromotion && signedTapeVerified && verdict === "PASSED",
 		criteria,
 		issues,
 		receipts: {
@@ -855,15 +954,33 @@ function readRunRow(
 	database: DatabaseSync,
 	runId: string,
 ): StoredRunBundleRunRow {
+	// Final-verdict/export reads must remain available for initialized databases
+	// created before `trust_lane` was introduced. Do not silently migrate from a
+	// read path: historical rows have no durable governed authority and must be
+	// treated as legacy instead.
+	const trustLaneProjection = tableHasColumn(database, "runs", "trust_lane")
+		? "trust_lane"
+		: "'legacy' AS trust_lane";
 	const row = database
 		.prepare(
-			`SELECT id, unit_id, status, unit_snapshot, created_at, completed_at FROM runs WHERE id = ?`,
+			`SELECT id, unit_id, status, unit_snapshot, created_at, completed_at, ${trustLaneProjection} FROM runs WHERE id = ?`,
 		)
 		.get(runId) as unknown as StoredRunBundleRunRow | undefined;
 	if (!row) {
 		throw new Error(`No run found for id '${runId}'`);
 	}
 	return row;
+}
+
+function tableHasColumn(
+	database: DatabaseSync,
+	tableName: string,
+	columnName: string,
+): boolean {
+	const columns = database.prepare(`PRAGMA table_info(${tableName})`).all() as {
+		name: string;
+	}[];
+	return columns.some((column) => column.name === columnName);
 }
 
 function readEventRows(
@@ -897,6 +1014,36 @@ function readDecisionRows(
 			`SELECT id, kind, outcome, reasons FROM decisions WHERE run_id = ? ORDER BY rowid ASC`,
 		)
 		.all(runId) as unknown as StoredRunBundleDecisionRow[];
+}
+
+/**
+ * Read only the immutable candidate's own promotion row. Historical databases
+ * predating this additive projection remain exportable: their absence simply
+ * means there is no candidate-bound receipt to trust.
+ */
+function readCandidatePromotionReceipt(
+	database: DatabaseSync,
+	runId: string,
+): StoredCandidatePromotionReceiptRow | undefined {
+	try {
+		return database
+			.prepare(
+				`SELECT ca.candidate_digest, cp.state, cp.executed_outcome
+				 FROM candidate_artifacts ca
+				 LEFT JOIN candidate_promotions cp
+				   -- Candidate artifacts retain their raw 64-hex Git-facing digest,
+				   -- whereas the promotion protocol stores canonical sha256: values.
+				   -- Join across that representation boundary explicitly; an implicit
+				   -- raw-vs-prefixed comparison would make a completed promotion look
+				   -- absent and could never form a receipt.
+				   ON cp.candidate_digest = ('sha256:' || ca.candidate_digest)
+				 WHERE ca.run_id = ?
+				 LIMIT 1`,
+			)
+			.get(runId) as unknown as StoredCandidatePromotionReceiptRow | undefined;
+	} catch {
+		return undefined;
+	}
 }
 
 function parseUnitPacket(raw: string): UnitPacket {

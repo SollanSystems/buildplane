@@ -1,11 +1,41 @@
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
+	ActionKindV1,
+	type ActionReceiptRecordedV2,
+	type ActionReceiptSetRecordedV1,
+	type ActionRequestedV2,
+	type ActivityClaimedV1,
+	type ActivityHeartbeatRecordedV1,
+	ActivityResultOutcomeV1,
+	type ActivityResultRecordedV1,
+	type AttemptContextRecordedV1,
+	type CandidateCompletionRecordedV1,
+	type CandidateCreatedV2,
+	type CandidateViewV1,
+	type DispatchEnvelopeV2,
+	type DispatchEnvelopeV3,
+	type DispatchEnvelopeV4,
 	EventKind,
+	type ModelActionAuthorizedV1,
+	type ModelActionAuthorizedV2,
+	type ModelActionCandidateBindingV1,
+	type ModelActionIntentV1,
+	type PromotionApprovalRequestedV1,
+	type PromotionDecisionRecordedV1,
+	type PromotionExecutionClaimedV1,
+	type ReviewVerdictRecordedV2,
 	RunAdmissionDecision,
 	type RunAdmissionRecordedV1,
+	type WorkflowCancellationRequestedV1,
+	type WorkflowGraphDeclaredV1,
+	type WorkflowGraphDeclaredV2,
+	type WorkflowTerminalV2,
+	type WorkflowTimerFiredV1,
+	type WorkflowTimerScheduledV1,
 } from "../src/generated/index.js";
 import type { Payload } from "../src/payload.js";
 
@@ -15,7 +45,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
  * `keyof Payload` intersects the members' keys down to `never` because each
  * union member is a single-key object; distributing `keyof` over each member
  * (via the naked type parameter `T`, which is what makes the conditional
- * distributive) instead yields the union of all 23 variant names. */
+ * distributive) instead yields the union of all payload variant names. */
 type KeysOfUnion<T> = T extends unknown ? keyof T : never;
 type PayloadKey = KeysOfUnion<Payload>;
 
@@ -56,6 +86,38 @@ const KNOWN_VARIANT_KEYS = {
 	CapabilityDeniedV1: true,
 	AcceptanceRecordedV1: true,
 	OperatorDecisionRecordedV1: true,
+	DispatchEnvelopeV1: true,
+	DispatchEnvelopeV2: true,
+	DispatchEnvelopeV3: true,
+	DispatchEnvelopeV4: true,
+	WorkflowGraphDeclaredV1: true,
+	WorkflowGraphDeclaredV2: true,
+	ActionRequestedV2: true,
+	ModelActionIntentV1: true,
+	ModelActionAuthorizedV1: true,
+	ModelActionAuthorizedV2: true,
+	ActivityClaimedV1: true,
+	ActivityHeartbeatRecordedV1: true,
+	ActivityResultRecordedV1: true,
+	ActionReceiptRecordedV2: true,
+	ActionReceiptSetRecordedV1: true,
+	AttemptContextRecordedV1: true,
+	CandidateCreatedV1: true,
+	CandidateCreatedV2: true,
+	CandidateCompletionRecordedV1: true,
+	CandidateAcceptanceRecordedV1: true,
+	ReviewVerdictRecordedV1: true,
+	ReviewVerdictRecordedV2: true,
+	PromotionApprovalRequestedV1: true,
+	PromotionDecisionRecordedV1: true,
+	PromotionExecutionClaimedV1: true,
+	PromotionResultRecordedV1: true,
+	PromotionReconciliationResolvedV1: true,
+	WorkflowTimerScheduledV1: true,
+	WorkflowTimerFiredV1: true,
+	WorkflowCancellationRequestedV1: true,
+	WorkflowTerminalV1: true,
+	WorkflowTerminalV2: true,
 } satisfies Record<PayloadKey, true>;
 
 /** Runtime view of the compile-checked table, so the drift alarm below is
@@ -83,10 +145,141 @@ function kindName(p: Payload): PayloadKey {
 	return k as PayloadKey;
 }
 
+function fixturePayload<T>(fixtures: unknown[], variant: string): T {
+	const fixture = fixtures.find(
+		(value): value is Record<string, T> =>
+			typeof value === "object" && value !== null && variant in value,
+	);
+	if (!fixture) throw new Error(`${variant} fixture is missing.`);
+	return fixture[variant];
+}
+
+function nativeDigest(domain: string, material: unknown): string {
+	return `sha256:${createHash("sha256")
+		.update(domain)
+		.update(JSON.stringify(material))
+		.digest("hex")}`;
+}
+
+function nativeModelRequestEvidenceV1(
+	evidence: ModelActionIntentV1["model_request_evidence"],
+) {
+	return {
+		schema_version: evidence.schema_version,
+		cas_ref: evidence.cas_ref,
+		digest: evidence.digest,
+	};
+}
+
+function nativeCandidateViewV1(view: CandidateViewV1) {
+	return {
+		candidate_ref: view.candidate_ref,
+		candidate_digest: view.candidate_digest,
+		candidate_commit_sha: view.candidate_commit_sha,
+		tree_digest: view.tree_digest,
+		reviewer_context_manifest_digest: view.reviewer_context_manifest_digest,
+		reviewer_sandbox_profile_digest: view.reviewer_sandbox_profile_digest,
+		mount_path_digest: view.mount_path_digest,
+		read_only: view.read_only,
+		network_disabled: view.network_disabled,
+	};
+}
+
+function nativeModelActionCandidateBindingV1(
+	binding: ModelActionCandidateBindingV1,
+) {
+	return {
+		candidate_created_event_ref: binding.candidate_created_event_ref,
+		candidate_digest: binding.candidate_digest,
+		candidate_commit_sha: binding.candidate_commit_sha,
+		candidate_view_ref: binding.candidate_view_ref,
+		candidate_view_digest: binding.candidate_view_digest,
+		candidate_view: nativeCandidateViewV1(binding.candidate_view),
+	};
+}
+
+function nativeModelActionIntentV1Digest(intent: ModelActionIntentV1): string {
+	return nativeDigest("buildplane.model-action-intent.v1\0", {
+		run_id: intent.run_id,
+		workflow_id: intent.workflow_id,
+		unit_id: intent.unit_id,
+		attempt: intent.attempt,
+		provenance_ref: intent.provenance_ref,
+		action_id: intent.action_id,
+		idempotency_key: intent.idempotency_key,
+		dispatch_event_ref: intent.dispatch_event_ref,
+		dispatch_envelope_digest: intent.dispatch_envelope_digest,
+		action_request_event_ref: intent.action_request_event_ref,
+		action_request_digest: intent.action_request_digest,
+		canonical_input_ref: intent.canonical_input_ref,
+		canonical_input_digest: intent.canonical_input_digest,
+		model_request_evidence: nativeModelRequestEvidenceV1(
+			intent.model_request_evidence,
+		),
+		trust_scope_evidence: nativeModelRequestEvidenceV1(
+			intent.trust_scope_evidence,
+		),
+		candidate_binding:
+			intent.candidate_binding === undefined
+				? null
+				: nativeModelActionCandidateBindingV1(intent.candidate_binding),
+		intent_actor: intent.intent_actor,
+		intended_at: intent.intended_at,
+	});
+}
+
+function nativeModelActionAuthorizedV2Digest(
+	authorization: ModelActionAuthorizedV2,
+): string {
+	return nativeDigest("buildplane.model-action-authorized.v2\0", {
+		intent_event_ref: authorization.intent_event_ref,
+		intent_digest: authorization.intent_digest,
+		model_request_evidence: nativeModelRequestEvidenceV1(
+			authorization.model_request_evidence,
+		),
+		trust_scope_evidence: nativeModelRequestEvidenceV1(
+			authorization.trust_scope_evidence,
+		),
+		candidate_binding:
+			authorization.candidate_binding === undefined
+				? null
+				: nativeModelActionCandidateBindingV1(authorization.candidate_binding),
+		authorization_actor: authorization.authorization_actor,
+		expires_at: authorization.expires_at,
+		authorization_ref: authorization.authorization_ref,
+	});
+}
+
+function nativeDispatchBody(body: DispatchEnvelopeV2["body"]) {
+	return {
+		workflow_id: body.workflow_id,
+		workflow_revision: body.workflow_revision,
+		unit_id: body.unit_id,
+		attempt: body.attempt,
+		execution_role: body.execution_role,
+		commit_mode: body.commit_mode,
+		provenance_ref: body.provenance_ref,
+		base_commit_sha: body.base_commit_sha,
+		capability_bundle_digest: body.capability_bundle_digest,
+		acceptance_contract_digest: body.acceptance_contract_digest,
+		context_manifest_digest: body.context_manifest_digest,
+		worker_manifest_digest: body.worker_manifest_digest,
+		sandbox_profile_digest: body.sandbox_profile_digest,
+		budget: {
+			max_tokens: body.budget.max_tokens,
+			max_compute_time_ms: body.budget.max_compute_time_ms,
+		},
+		trust_tier: body.trust_tier,
+		idempotency_key: body.idempotency_key,
+		issued_at: body.issued_at,
+		expires_at: body.expires_at,
+	};
+}
+
 describe("payload drift alarm", () => {
 	it("every fixture parses as a known variant", () => {
 		const fixtures = loadFixtures();
-		expect(KNOWN_KEYS.size).toBe(24);
+		expect(KNOWN_KEYS.size).toBe(56);
 		expect(fixtures.length).toBe(KNOWN_KEYS.size);
 		const names: string[] = [];
 		for (const fx of fixtures) {
@@ -109,6 +302,146 @@ describe("payload drift alarm", () => {
 		expect(EventKind.OperatorDecisionRecorded).toBe(
 			"operator_decision_recorded",
 		);
+		expect(EventKind.DispatchEnvelope).toBe("dispatch_envelope");
+		expect(names).toContain("DispatchEnvelopeV2");
+		expect(EventKind.DispatchEnvelopeV2).toBe("dispatch_envelope_v2");
+		expect(names).toContain("DispatchEnvelopeV3");
+		expect(EventKind.DispatchEnvelopeV3).toBe("dispatch_envelope_v3");
+		expect(names).toContain("DispatchEnvelopeV4");
+		expect(EventKind.DispatchEnvelopeV4).toBe("dispatch_envelope_v4");
+		expect(names).toContain("WorkflowGraphDeclaredV1");
+		expect(EventKind.WorkflowGraphDeclaredV1).toBe(
+			"workflow_graph_declared_v1",
+		);
+		expect(names).toContain("WorkflowGraphDeclaredV2");
+		expect(EventKind.WorkflowGraphDeclaredV2).toBe(
+			"workflow_graph_declared_v2",
+		);
+		expect(names).toContain("ActionRequestedV2");
+		expect(EventKind.ActionRequestedV2).toBe("action_requested_v2");
+		expect(names).toContain("ModelActionIntentV1");
+		expect(EventKind.ModelActionIntentV1).toBe("model_action_intent_v1");
+		expect(names).toContain("ModelActionAuthorizedV1");
+		expect(EventKind.ModelActionAuthorizedV1).toBe(
+			"model_action_authorized_v1",
+		);
+		expect(names).toContain("ModelActionAuthorizedV2");
+		expect(EventKind.ModelActionAuthorizedV2).toBe(
+			"model_action_authorized_v2",
+		);
+		expect(names).toContain("ActivityClaimedV1");
+		expect(EventKind.ActivityClaimedV1).toBe("activity_claimed_v1");
+		expect(names).toContain("ActivityHeartbeatRecordedV1");
+		expect(EventKind.ActivityHeartbeatRecordedV1).toBe(
+			"activity_heartbeat_recorded_v1",
+		);
+		expect(names).toContain("ActivityResultRecordedV1");
+		expect(EventKind.ActivityResultRecordedV1).toBe(
+			"activity_result_recorded_v1",
+		);
+		expect(names).toContain("ActionReceiptRecordedV2");
+		expect(EventKind.ActionReceiptRecordedV2).toBe(
+			"action_receipt_recorded_v2",
+		);
+		expect(names).toContain("ActionReceiptSetRecordedV1");
+		expect(EventKind.ActionReceiptSetRecordedV1).toBe(
+			"action_receipt_set_recorded_v1",
+		);
+		expect(names).toContain("AttemptContextRecordedV1");
+		expect(EventKind.AttemptContextRecordedV1).toBe(
+			"attempt_context_recorded_v1",
+		);
+		expect(EventKind.CandidateCreated).toBe("candidate_created");
+		expect(names).toContain("CandidateCreatedV2");
+		expect(EventKind.CandidateCreatedV2).toBe("candidate_created_v2");
+		expect(names).toContain("CandidateCompletionRecordedV1");
+		expect(EventKind.CandidateCompletionRecordedV1).toBe(
+			"candidate_completion_recorded_v1",
+		);
+		expect(EventKind.CandidateAcceptanceRecorded).toBe(
+			"candidate_acceptance_recorded",
+		);
+		expect(EventKind.ReviewVerdictRecorded).toBe("review_verdict_recorded");
+		expect(names).toContain("ReviewVerdictRecordedV2");
+		expect(EventKind.ReviewVerdictRecordedV2).toBe(
+			"review_verdict_recorded_v2",
+		);
+		expect(names).toContain("PromotionApprovalRequestedV1");
+		expect(EventKind.PromotionApprovalRequested).toBe(
+			"promotion_approval_requested",
+		);
+		expect(EventKind.PromotionDecisionRecorded).toBe(
+			"promotion_decision_recorded",
+		);
+		expect(names).toContain("PromotionExecutionClaimedV1");
+		expect(EventKind.PromotionExecutionClaimedV1).toBe(
+			"promotion_execution_claimed_v1",
+		);
+		expect(EventKind.PromotionResultRecorded).toBe("promotion_result_recorded");
+		expect(names).toContain("PromotionReconciliationResolvedV1");
+		expect(EventKind.PromotionReconciliationResolved).toBe(
+			"promotion_reconciliation_resolved",
+		);
+		expect(names).toContain("WorkflowTimerScheduledV1");
+		expect(EventKind.WorkflowTimerScheduledV1).toBe(
+			"workflow_timer_scheduled_v1",
+		);
+		expect(names).toContain("WorkflowTimerFiredV1");
+		expect(EventKind.WorkflowTimerFiredV1).toBe("workflow_timer_fired_v1");
+		expect(names).toContain("WorkflowCancellationRequestedV1");
+		expect(EventKind.WorkflowCancellationRequestedV1).toBe(
+			"workflow_cancellation_requested_v1",
+		);
+		expect(EventKind.WorkflowTerminal).toBe("workflow_terminal");
+		expect(names).toContain("WorkflowTerminalV2");
+		expect(EventKind.WorkflowTerminalV2).toBe("workflow_terminal_v2");
+	});
+
+	it("promotion approval request fixture is a candidate-bound kernel request", () => {
+		const fixtures = loadFixtures();
+		const request = fixturePayload<PromotionApprovalRequestedV1>(
+			fixtures,
+			"PromotionApprovalRequestedV1",
+		);
+		const decision = fixturePayload<PromotionDecisionRecordedV1>(
+			fixtures,
+			"PromotionDecisionRecordedV1",
+		);
+
+		expect(request.candidate_digest).toBe("sha256:aa");
+		expect(request.base_commit_sha).toBe(
+			"0000000000000000000000000000000000000000",
+		);
+		expect(request.target_ref).toBe("refs/heads/main");
+		expect(request.envelope_digest).toBe("sha256:ff");
+		expect(request.acceptance_ref).toBe("acceptance:fixture");
+		expect(request.review_refs).toEqual(["review:fixture"]);
+		expect(request.requested_by).toBe("kernel");
+		expect(request.idempotency_key).toBe("promotion:fixture");
+		expect(request.idempotency_key).toBe(decision.idempotency_key);
+		expect(decision.promotion_approval_request_ref).toBeUndefined();
+	});
+
+	it("promotion execution claim fixture is a tape-only binding", () => {
+		const claim = fixturePayload<PromotionExecutionClaimedV1>(
+			loadFixtures(),
+			"PromotionExecutionClaimedV1",
+		);
+
+		expect(claim.run_id).toBe("01919000-0000-7000-8000-0000000000ff");
+		expect(claim.promotion_decision_event_ref).toMatch(
+			/^01919000-0000-7000-8000-000000[0-9a-f]{6}$/,
+		);
+		expect(claim.dispatch_event_ref).toMatch(
+			/^01919000-0000-7000-8000-000000[0-9a-f]{6}$/,
+		);
+		expect(claim.promotion_decision_event_ref).not.toBe(
+			claim.dispatch_event_ref,
+		);
+		expect(claim.promotion_decision_event_digest).toMatch(/^sha256:.+$/);
+		expect(claim.dispatch_envelope_digest).toMatch(/^sha256:.+$/);
+		expect(claim.target_ref).toBe("refs/heads/main");
+		expect(claim.lease_id).toBe("lease:fixture");
 	});
 
 	it("run admission fixture matches the generated wire contract", () => {
@@ -128,5 +461,586 @@ describe("payload drift alarm", () => {
 		expect(Object.hasOwn(payload?.evidence_inputs[0] ?? {}, "reason")).toBe(
 			false,
 		);
+	});
+
+	it("activity-claim fixtures preserve the durable claim-to-result links", () => {
+		const fixtures = loadFixtures();
+		const claim = fixturePayload<ActivityClaimedV1>(
+			fixtures,
+			"ActivityClaimedV1",
+		);
+		const result = fixturePayload<ActivityResultRecordedV1>(
+			fixtures,
+			"ActivityResultRecordedV1",
+		);
+		const heartbeat = fixturePayload<ActivityHeartbeatRecordedV1>(
+			fixtures,
+			"ActivityHeartbeatRecordedV1",
+		);
+
+		expect(claim.action_kind).toBe(ActionKindV1.Process);
+		expect(claim.action_request_event_id).toMatch(
+			/^01919000-0000-7000-8000-000000[0-9a-f]{6}$/,
+		);
+		expect(claim.dispatch_event_id).toMatch(
+			/^01919000-0000-7000-8000-000000[0-9a-f]{6}$/,
+		);
+		expect(claim.action_request_event_id).not.toBe(claim.dispatch_event_id);
+		expect(claim.action_request_digest).toMatch(/^sha256:.+$/);
+		expect(claim.purpose).toBeUndefined();
+		expect(heartbeat.run_id).toBe(claim.run_id);
+		expect(heartbeat.activity_id).toBe(claim.activity_id);
+		expect(heartbeat.idempotency_key).toBe(claim.idempotency_key);
+		expect(heartbeat.heartbeat_id).toBe("heartbeat:fixture");
+		expect(heartbeat.heartbeat_request_digest).toMatch(/^sha256:.+$/);
+		expect(heartbeat.claim_event_id).toMatch(
+			/^01919000-0000-7000-8000-000000[0-9a-f]{6}$/,
+		);
+		expect(heartbeat.claim_event_digest).toMatch(/^sha256:.+$/);
+		expect(heartbeat.lease_id).toBe(claim.lease_id);
+		expect(heartbeat.dispatch_event_id).toBe(claim.dispatch_event_id);
+		expect(heartbeat.dispatch_envelope_digest).toBe(
+			claim.dispatch_envelope_digest,
+		);
+		expect(heartbeat.heartbeat_at).toBe("2026-07-17T00:00:00.500Z");
+		expect(heartbeat.lease_expires_at).toBe("2026-07-17T00:10:00Z");
+		expect(result.run_id).toBe(claim.run_id);
+		expect(result.activity_id).toBe(claim.activity_id);
+		expect(result.idempotency_key).toBe(claim.idempotency_key);
+		expect(result.lease_id).toBe(claim.lease_id);
+		expect(result.claim_event_id).toBe(heartbeat.claim_event_id);
+		expect(result.outcome).toBe(ActivityResultOutcomeV1.Succeeded);
+		expect(result.result_digest).toMatch(/^sha256:.+$/);
+		expect(result.result_ref).toBe("cas:activity-result:fixture");
+	});
+
+	it("workflow lifecycle fixtures bind timer, cancellation, and terminal evidence", () => {
+		const fixtures = loadFixtures();
+		const schedule = fixturePayload<WorkflowTimerScheduledV1>(
+			fixtures,
+			"WorkflowTimerScheduledV1",
+		);
+		const fired = fixturePayload<WorkflowTimerFiredV1>(
+			fixtures,
+			"WorkflowTimerFiredV1",
+		);
+		const cancellation = fixturePayload<WorkflowCancellationRequestedV1>(
+			fixtures,
+			"WorkflowCancellationRequestedV1",
+		);
+		const terminal = fixturePayload<WorkflowTerminalV2>(
+			fixtures,
+			"WorkflowTerminalV2",
+		);
+
+		expect(schedule.timer_kind).toBe("workflow_deadline");
+		expect(fired.run_id).toBe(schedule.run_id);
+		expect(fired.workflow_id).toBe(schedule.workflow_id);
+		expect(fired.workflow_revision).toBe(schedule.workflow_revision);
+		expect(fired.unit_id).toBe(schedule.unit_id);
+		expect(fired.attempt).toBe(schedule.attempt);
+		expect(fired.timer_id).toBe(schedule.timer_id);
+		expect(cancellation.cause).toBe("timer_elapsed");
+		expect(cancellation.timer_fired_event_ref).toBeDefined();
+		expect(cancellation.timer_fired_event_digest).toBeDefined();
+		expect(terminal.outcome).toBe("cancelled");
+		expect(terminal.cancellation_request_event_ref).toBeDefined();
+		expect(terminal.cancellation_request_event_digest).toBeDefined();
+	});
+
+	it("attempt-context fixture exposes the native retry-lineage contract", () => {
+		const context = fixturePayload<AttemptContextRecordedV1>(
+			loadFixtures(),
+			"AttemptContextRecordedV1",
+		);
+
+		expect(context.prior_attempt).toBe(1);
+		expect(context.next_attempt).toBe(2);
+		expect(context.retry_action_namespace).toBe("retry-action:fixture:2");
+		expect(context.next_dispatch_idempotency_key).toBe("dispatch:fixture:2");
+		expect(context.attempt_context_digest).toBe(
+			nativeDigest("buildplane.attempt-context-recorded.v1\0", {
+				run_id: context.run_id,
+				workflow_id: context.workflow_id,
+				workflow_revision: context.workflow_revision,
+				unit_id: context.unit_id,
+				prior_attempt: context.prior_attempt,
+				next_attempt: context.next_attempt,
+				prior_dispatch_envelope_digest: context.prior_dispatch_envelope_digest,
+				prior_terminal_event_ref: context.prior_terminal_event_ref,
+				prior_terminal_event_digest: context.prior_terminal_event_digest,
+				prior_action_receipt_ref: context.prior_action_receipt_ref,
+				prior_action_receipt_digest: context.prior_action_receipt_digest,
+				feedback_ref: context.feedback_ref,
+				feedback_digest: context.feedback_digest,
+				next_dispatch_envelope_digest: context.next_dispatch_envelope_digest,
+				next_dispatch_idempotency_key: context.next_dispatch_idempotency_key,
+				retry_action_namespace: context.retry_action_namespace,
+				idempotency_key: context.idempotency_key,
+				recorded_at: context.recorded_at,
+			}),
+		);
+	});
+
+	it("workflow-graph fixture retains the native canonical graph digest", () => {
+		const graph = fixturePayload<WorkflowGraphDeclaredV1>(
+			loadFixtures(),
+			"WorkflowGraphDeclaredV1",
+		);
+
+		expect(graph.graph_digest).toBe(
+			nativeDigest("buildplane.workflow-graph.v1\0", {
+				run_id: graph.run_id,
+				workflow_id: graph.workflow_id,
+				workflow_revision: graph.workflow_revision,
+				nodes: graph.nodes.map((node) => ({
+					unit_id: node.unit_id,
+					depends_on: node.depends_on,
+				})),
+				max_concurrent: graph.max_concurrent,
+			}),
+		);
+	});
+
+	it("graph-bound V4 fixtures retain native V2 topology and nested envelope digests", () => {
+		const fixtures = loadFixtures();
+		const graph = fixturePayload<WorkflowGraphDeclaredV2>(
+			fixtures,
+			"WorkflowGraphDeclaredV2",
+		);
+		const dispatch = fixturePayload<DispatchEnvelopeV4>(
+			fixtures,
+			"DispatchEnvelopeV4",
+		);
+
+		expect(graph.graph_digest).toBe(
+			nativeDigest("buildplane.workflow-graph.v2\0", {
+				run_id: graph.run_id,
+				workflow_id: graph.workflow_id,
+				workflow_revision: graph.workflow_revision,
+				nodes: graph.nodes.map((node) => ({
+					unit_id: node.unit_id,
+					depends_on: node.depends_on,
+					execution_role: node.execution_role,
+					governed_packet_digest: node.governed_packet_digest,
+				})),
+				max_concurrent: graph.max_concurrent,
+			}),
+		);
+		expect(dispatch.workflow_graph_digest).toBe(graph.graph_digest);
+		expect(dispatch.dispatch_v3.action_evidence_version).toBe("sealed_v3");
+		expect(dispatch.dispatch_v3.governed_packet_digest).toBe(
+			graph.nodes[0]?.governed_packet_digest,
+		);
+		expect(dispatch.dispatch_v3.envelope_digest).toBe(
+			nativeDigest("buildplane.dispatch-envelope.v3\0", {
+				body: nativeDispatchBody(dispatch.dispatch_v3.body),
+				action_evidence_version: dispatch.dispatch_v3.action_evidence_version,
+				repository_binding_digest:
+					dispatch.dispatch_v3.repository_binding_digest,
+				ledger_authority_realm_digest:
+					dispatch.dispatch_v3.ledger_authority_realm_digest,
+				governed_packet_digest: dispatch.dispatch_v3.governed_packet_digest,
+			}),
+		);
+		expect(dispatch.envelope_digest).toBe(
+			nativeDigest("buildplane.dispatch-envelope.v4\0", {
+				dispatch_v3: {
+					body: nativeDispatchBody(dispatch.dispatch_v3.body),
+					action_evidence_version: dispatch.dispatch_v3.action_evidence_version,
+					repository_binding_digest:
+						dispatch.dispatch_v3.repository_binding_digest,
+					ledger_authority_realm_digest:
+						dispatch.dispatch_v3.ledger_authority_realm_digest,
+					governed_packet_digest: dispatch.dispatch_v3.governed_packet_digest,
+					envelope_digest: dispatch.dispatch_v3.envelope_digest,
+				},
+				workflow_graph_digest: dispatch.workflow_graph_digest,
+				workflow_graph_declaration_event_ref:
+					dispatch.workflow_graph_declaration_event_ref,
+			}),
+		);
+	});
+
+	it("dispatch V2 fixture retains the native declaration-ordered body digest", () => {
+		const fixtures = loadFixtures();
+		const dispatch = fixtures.find(
+			(fixture): fixture is { DispatchEnvelopeV2: DispatchEnvelopeV2 } =>
+				typeof fixture === "object" &&
+				fixture !== null &&
+				"DispatchEnvelopeV2" in fixture,
+		);
+		expect(dispatch).toBeDefined();
+		const envelope = dispatch?.DispatchEnvelopeV2;
+		if (!envelope) throw new Error("DispatchEnvelopeV2 fixture is missing.");
+		const body = envelope.body;
+		const nativeBodyJson = JSON.stringify({
+			workflow_id: body.workflow_id,
+			workflow_revision: body.workflow_revision,
+			unit_id: body.unit_id,
+			attempt: body.attempt,
+			execution_role: body.execution_role,
+			commit_mode: body.commit_mode,
+			provenance_ref: body.provenance_ref,
+			base_commit_sha: body.base_commit_sha,
+			capability_bundle_digest: body.capability_bundle_digest,
+			acceptance_contract_digest: body.acceptance_contract_digest,
+			context_manifest_digest: body.context_manifest_digest,
+			worker_manifest_digest: body.worker_manifest_digest,
+			sandbox_profile_digest: body.sandbox_profile_digest,
+			budget: {
+				max_tokens: body.budget.max_tokens,
+				max_compute_time_ms: body.budget.max_compute_time_ms,
+			},
+			trust_tier: body.trust_tier,
+			idempotency_key: body.idempotency_key,
+			issued_at: body.issued_at,
+			expires_at: body.expires_at,
+		});
+		const expectedDigest = `sha256:${createHash("sha256")
+			.update("buildplane.dispatch-envelope.v2\0")
+			.update(nativeBodyJson)
+			.digest("hex")}`;
+
+		expect(envelope.envelope_digest).toBe(expectedDigest);
+	});
+
+	it("V3 action-evidence fixtures retain the Rust canonical digest bindings", () => {
+		const fixtures = loadFixtures();
+		const dispatch = fixturePayload<DispatchEnvelopeV3>(
+			fixtures,
+			"DispatchEnvelopeV3",
+		);
+		const request = fixturePayload<ActionRequestedV2>(
+			fixtures,
+			"ActionRequestedV2",
+		);
+		const authorization = fixturePayload<ModelActionAuthorizedV1>(
+			fixtures,
+			"ModelActionAuthorizedV1",
+		);
+		const modelIntent = fixturePayload<ModelActionIntentV1>(
+			fixtures,
+			"ModelActionIntentV1",
+		);
+		const authorizationV2 = fixturePayload<ModelActionAuthorizedV2>(
+			fixtures,
+			"ModelActionAuthorizedV2",
+		);
+		const receipt = fixturePayload<ActionReceiptRecordedV2>(
+			fixtures,
+			"ActionReceiptRecordedV2",
+		);
+		const receiptSet = fixturePayload<ActionReceiptSetRecordedV1>(
+			fixtures,
+			"ActionReceiptSetRecordedV1",
+		);
+		const candidate = fixturePayload<CandidateCreatedV2>(
+			fixtures,
+			"CandidateCreatedV2",
+		);
+		const completion = fixturePayload<CandidateCompletionRecordedV1>(
+			fixtures,
+			"CandidateCompletionRecordedV1",
+		);
+		const review = fixturePayload<ReviewVerdictRecordedV2>(
+			fixtures,
+			"ReviewVerdictRecordedV2",
+		);
+
+		expect(dispatch.action_evidence_version).toBe("sealed-v2");
+		expect(dispatch.governed_packet_digest).toBeUndefined();
+		expect(request.repository_binding_digest).toBe(
+			dispatch.repository_binding_digest,
+		);
+		expect(request.ledger_authority_realm_digest).toBe(
+			dispatch.ledger_authority_realm_digest,
+		);
+		expect(request.governed_packet_digest).toBeUndefined();
+
+		expect(dispatch.envelope_digest).toBe(
+			nativeDigest("buildplane.dispatch-envelope.v3\0", {
+				body: nativeDispatchBody(dispatch.body),
+				action_evidence_version: dispatch.action_evidence_version,
+				repository_binding_digest: dispatch.repository_binding_digest,
+				ledger_authority_realm_digest: dispatch.ledger_authority_realm_digest,
+				...(dispatch.governed_packet_digest === undefined
+					? {}
+					: { governed_packet_digest: dispatch.governed_packet_digest }),
+			}),
+		);
+
+		expect(receipt.action_request_digest).toBe(
+			nativeDigest("buildplane.action-request.v2\0", {
+				run_id: request.run_id,
+				workflow_id: request.workflow_id,
+				unit_id: request.unit_id,
+				attempt: request.attempt,
+				provenance_ref: request.provenance_ref,
+				action_id: request.action_id,
+				idempotency_key: request.idempotency_key,
+				action_kind: request.action_kind,
+				canonical_input_digest: request.canonical_input_digest,
+				canonical_input_ref: request.canonical_input_ref,
+				dispatch_envelope_digest: request.dispatch_envelope_digest,
+				repository_binding_digest: request.repository_binding_digest,
+				ledger_authority_realm_digest: request.ledger_authority_realm_digest,
+				...(request.governed_packet_digest === undefined
+					? {}
+					: { governed_packet_digest: request.governed_packet_digest }),
+				capability_bundle_digest: request.capability_bundle_digest,
+				policy_digest: request.policy_digest,
+				context_manifest_digest: request.context_manifest_digest,
+				worker_manifest_digest: request.worker_manifest_digest,
+				sandbox_profile_digest: request.sandbox_profile_digest,
+				authority_actor: request.authority_actor,
+				execution_role: request.execution_role,
+				requested_at: request.requested_at,
+			}),
+		);
+
+		expect(authorization.authorization_digest).toBe(
+			nativeDigest("buildplane.model-action-authorized.v1\0", {
+				run_id: authorization.run_id,
+				workflow_id: authorization.workflow_id,
+				unit_id: authorization.unit_id,
+				attempt: authorization.attempt,
+				provenance_ref: authorization.provenance_ref,
+				action_id: authorization.action_id,
+				idempotency_key: authorization.idempotency_key,
+				dispatch_event_ref: authorization.dispatch_event_ref,
+				dispatch_envelope_digest: authorization.dispatch_envelope_digest,
+				action_request_ref: authorization.action_request_ref,
+				action_request_digest: authorization.action_request_digest,
+				packet_digest: authorization.packet_digest,
+				canonical_input_digest: authorization.canonical_input_digest,
+				model_request_digest: authorization.model_request_digest,
+				trust_scope_digest: authorization.trust_scope_digest,
+				context_manifest_digest: authorization.context_manifest_digest,
+				policy_digest: authorization.policy_digest,
+				sandbox_profile_digest: authorization.sandbox_profile_digest,
+				execution_role: authorization.execution_role,
+				candidate_digest: authorization.candidate_digest ?? null,
+				candidate_view_digest: authorization.candidate_view_digest ?? null,
+				authorization_actor: authorization.authorization_actor,
+				expires_at: authorization.expires_at,
+				authorization_ref: authorization.authorization_ref,
+			}),
+		);
+		expect(authorization.action_request_digest).toBe(
+			receipt.action_request_digest,
+		);
+		expect(receipt.authorization_ref).toBe(authorization.authorization_ref);
+
+		expect(modelIntent.model_request_evidence.cas_ref).toBe(
+			`cas:${modelIntent.model_request_evidence.digest}`,
+		);
+		expect(modelIntent.trust_scope_evidence.cas_ref).toBe(
+			`cas:${modelIntent.trust_scope_evidence.digest}`,
+		);
+		expect(modelIntent.intent_digest).toBe(
+			nativeModelActionIntentV1Digest(modelIntent),
+		);
+		expect(authorizationV2.intent_event_ref).toBe(
+			"01919000-0000-7000-8000-000000000044",
+		);
+		expect(authorizationV2.intent_digest).toBe(modelIntent.intent_digest);
+		expect(authorizationV2.model_request_evidence).toEqual(
+			modelIntent.model_request_evidence,
+		);
+		expect(authorizationV2.trust_scope_evidence).toEqual(
+			modelIntent.trust_scope_evidence,
+		);
+		expect(authorizationV2.authorization_digest).toBe(
+			nativeModelActionAuthorizedV2Digest(authorizationV2),
+		);
+
+		const receiptDigest = nativeDigest("buildplane.action-receipt.v2\0", {
+			run_id: receipt.run_id,
+			workflow_id: receipt.workflow_id,
+			unit_id: receipt.unit_id,
+			attempt: receipt.attempt,
+			provenance_ref: receipt.provenance_ref,
+			action_id: receipt.action_id,
+			idempotency_key: receipt.idempotency_key,
+			action_request_digest: receipt.action_request_digest,
+			dispatch_envelope_digest: receipt.dispatch_envelope_digest,
+			capability_bundle_digest: receipt.capability_bundle_digest,
+			policy_digest: receipt.policy_digest,
+			context_manifest_digest: receipt.context_manifest_digest,
+			worker_manifest_digest: receipt.worker_manifest_digest,
+			sandbox_profile_digest: receipt.sandbox_profile_digest,
+			authority_actor: receipt.authority_actor,
+			execution_role: receipt.execution_role,
+			outcome: receipt.outcome,
+			result_digest: receipt.result_digest,
+			result_ref: receipt.result_ref,
+			evidence_digest: receipt.evidence_digest,
+			evidence_ref: receipt.evidence_ref,
+			resource_usage: {
+				wall_time_ms: receipt.resource_usage.wall_time_ms,
+				cpu_time_ms: receipt.resource_usage.cpu_time_ms,
+				peak_memory_bytes: receipt.resource_usage.peak_memory_bytes,
+				input_bytes: receipt.resource_usage.input_bytes,
+				output_bytes: receipt.resource_usage.output_bytes,
+				...(receipt.resource_usage.input_tokens === undefined
+					? {}
+					: { input_tokens: receipt.resource_usage.input_tokens }),
+				...(receipt.resource_usage.output_tokens === undefined
+					? {}
+					: { output_tokens: receipt.resource_usage.output_tokens }),
+			},
+			redactions: receipt.redactions.map((redaction) => ({
+				field: redaction.field,
+				reason: redaction.reason,
+				redacted_digest: redaction.redacted_digest,
+			})),
+			failure:
+				receipt.failure === undefined
+					? undefined
+					: {
+							code: receipt.failure.code,
+							message_digest: receipt.failure.message_digest,
+							retryable: receipt.failure.retryable,
+						},
+			authorization_ref: receipt.authorization_ref,
+			action_receipt_ref: receipt.action_receipt_ref,
+			completed_at: receipt.completed_at,
+		});
+		expect(receiptSet.receipts[0]?.action_receipt_digest).toBe(receiptDigest);
+
+		expect(receiptSet.action_receipt_set_digest).toBe(
+			nativeDigest("buildplane.action-receipt-set.v1\0", {
+				run_id: receiptSet.run_id,
+				workflow_id: receiptSet.workflow_id,
+				unit_id: receiptSet.unit_id,
+				attempt: receiptSet.attempt,
+				provenance_ref: receiptSet.provenance_ref,
+				dispatch_envelope_digest: receiptSet.dispatch_envelope_digest,
+				action_receipt_set_ref: receiptSet.action_receipt_set_ref,
+				receipts: receiptSet.receipts.map((entry) => ({
+					action_id: entry.action_id,
+					action_receipt_ref: entry.action_receipt_ref,
+					action_receipt_digest: entry.action_receipt_digest,
+				})),
+				sealed_at: receiptSet.sealed_at,
+			}),
+		);
+		expect(candidate.action_receipt_set_ref).toBe(
+			receiptSet.action_receipt_set_ref,
+		);
+		expect(candidate.action_receipt_set_digest).toBe(
+			receiptSet.action_receipt_set_digest,
+		);
+		expect(completion.candidate_digest).toBe(candidate.candidate_digest);
+		expect(completion.candidate_create_action_id).toBe(request.action_id);
+		expect(completion.action_request_digest).toBe(
+			receipt.action_request_digest,
+		);
+		expect(completion.action_receipt_ref).toBe(receipt.action_receipt_ref);
+		expect(completion.action_receipt_digest).toBe(receiptDigest);
+		expect(completion.completion_digest).toBe(
+			nativeDigest("buildplane.candidate-completion-recorded.v1\0", {
+				run_id: completion.run_id,
+				workflow_id: completion.workflow_id,
+				unit_id: completion.unit_id,
+				attempt: completion.attempt,
+				provenance_ref: completion.provenance_ref,
+				candidate_created_event_ref: completion.candidate_created_event_ref,
+				candidate_digest: completion.candidate_digest,
+				candidate_create_action_id: completion.candidate_create_action_id,
+				action_request_ref: completion.action_request_ref,
+				action_request_digest: completion.action_request_digest,
+				activity_claim_event_ref: completion.activity_claim_event_ref,
+				activity_claim_event_digest: completion.activity_claim_event_digest,
+				activity_result_event_ref: completion.activity_result_event_ref,
+				activity_result_event_digest: completion.activity_result_event_digest,
+				action_receipt_ref: completion.action_receipt_ref,
+				action_receipt_digest: completion.action_receipt_digest,
+				completed_at: completion.completed_at,
+			}),
+		);
+
+		const candidateView: CandidateViewV1 = review.candidate_view;
+		expect(candidateView).toMatchObject({
+			candidate_ref: candidate.candidate_ref,
+			candidate_digest: candidate.candidate_digest,
+			candidate_commit_sha: candidate.candidate_commit_sha,
+			tree_digest: candidate.tree_digest,
+			read_only: true,
+			network_disabled: true,
+		});
+		expect(review.candidate_view_digest).toBe(
+			nativeDigest("buildplane.candidate-view.v1\0", {
+				candidate_ref: candidateView.candidate_ref,
+				candidate_digest: candidateView.candidate_digest,
+				candidate_commit_sha: candidateView.candidate_commit_sha,
+				tree_digest: candidateView.tree_digest,
+				reviewer_context_manifest_digest:
+					candidateView.reviewer_context_manifest_digest,
+				reviewer_sandbox_profile_digest:
+					candidateView.reviewer_sandbox_profile_digest,
+				mount_path_digest: candidateView.mount_path_digest,
+				read_only: candidateView.read_only,
+				network_disabled: candidateView.network_disabled,
+			}),
+		);
+		expect(review.review_output_digest).toBe(
+			nativeDigest("buildplane.review-verdict-output.v1\0", {
+				candidate_digest: review.candidate_digest,
+				candidate_commit_sha: review.candidate_commit_sha,
+				decision: review.decision,
+				findings: review.findings.map((finding) => ({
+					severity: finding.severity,
+					check_id: finding.check_id,
+					file: finding.file,
+					line: finding.line,
+					explanation: finding.explanation,
+					evidence_refs: finding.evidence_refs,
+				})),
+				confidence: review.confidence,
+				candidate_view_digest: review.candidate_view_digest,
+			}),
+		);
+
+		const candidateBinding = {
+			candidate_created_event_ref: "01919000-0000-7000-8000-000000000046",
+			candidate_digest: candidate.candidate_digest,
+			candidate_commit_sha: candidate.candidate_commit_sha,
+			candidate_view_ref: review.candidate_view_ref,
+			candidate_view_digest: review.candidate_view_digest,
+			candidate_view: review.candidate_view,
+		} satisfies ModelActionCandidateBindingV1;
+		const candidateBoundIntent: ModelActionIntentV1 = {
+			...modelIntent,
+			candidate_binding: candidateBinding,
+			intent_digest: "",
+		};
+		const candidateBoundIntentDigest =
+			nativeModelActionIntentV1Digest(candidateBoundIntent);
+		expect(candidateBoundIntentDigest).toBe(
+			"sha256:18ea3f86d423fac454fe69762736a82e0f55c1b9862aa372245eb9f72ca326d4",
+		);
+		const candidateBoundAuthorization: ModelActionAuthorizedV2 = {
+			...authorizationV2,
+			intent_digest: candidateBoundIntentDigest,
+			candidate_binding: candidateBinding,
+			authorization_digest: "",
+		};
+		expect(
+			nativeModelActionAuthorizedV2Digest(candidateBoundAuthorization),
+		).toBe(
+			"sha256:7ca28ed40970c213682ed97ab98792bd932c13a5ef37fb25074891d890de17cd",
+		);
+		expect(receipt.resource_usage).toEqual({
+			wall_time_ms: Number.MAX_SAFE_INTEGER,
+			cpu_time_ms: Number.MAX_SAFE_INTEGER,
+			peak_memory_bytes: Number.MAX_SAFE_INTEGER,
+			input_bytes: Number.MAX_SAFE_INTEGER,
+			output_bytes: Number.MAX_SAFE_INTEGER,
+		});
+		for (const value of Object.values(receipt.resource_usage)) {
+			expect(Number.isSafeInteger(value)).toBe(true);
+		}
 	});
 });

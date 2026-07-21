@@ -53,8 +53,14 @@ function makeHarness(
 		operatorDecisionPort?: OperatorDecisionPort;
 		decidedUnexecuted?: () => readonly DecidedUnexecutedDecision[];
 		acceptanceOutcome?: "passed" | "rejected" | null;
+		hasCandidateArtifact?: boolean;
+		sealedV3Candidate?: boolean;
 		preExecutedMarker?: boolean;
 		omitOperatorDecisionPort?: boolean;
+		unsafeLegacyMergeDecisionMode?: boolean;
+		/** `null` deliberately omits the raw construction lane. */
+		unsafeLegacyExecutionLane?: "raw-legacy" | null;
+		governedWorkspaceBoundary?: boolean;
 	} = {},
 ): Harness {
 	const state: FakeRunState = {
@@ -194,6 +200,15 @@ function makeHarness(
 			}
 			return options.withWorkspace ? "passed" : null;
 		},
+		getCandidateArtifact() {
+			if (options.sealedV3Candidate) {
+				return {
+					schemaVersion: 2,
+					actionEvidenceVersion: "sealed_v3",
+				} as never;
+			}
+			return options.hasCandidateArtifact ? ({} as never) : null;
+		},
 		listDecidedUnexecutedDecisions() {
 			return options.decidedUnexecuted?.() ?? [];
 		},
@@ -221,6 +236,9 @@ function makeHarness(
 		},
 	};
 	const workspace: BuildplaneWorkspacePort = {
+		...(options.governedWorkspaceBoundary
+			? { governedWorkspaceBoundary: "pinned-governed-git-v1" as const }
+			: {}),
 		assertRunnableRepository() {
 			return { headSha: "b".repeat(40) };
 		},
@@ -246,6 +264,8 @@ function makeHarness(
 			},
 		};
 
+	const unsafeLegacyMergeDecisionMode =
+		options.unsafeLegacyMergeDecisionMode ?? true;
 	const orchestrator = createBuildplaneOrchestrator({
 		projectRoot: ROOT,
 		storage,
@@ -253,6 +273,17 @@ function makeHarness(
 		policy,
 		workspace,
 		admissionStore: null,
+		// This suite exercises the deliberately quarantined legacy compatibility
+		// surface. Production callers do not set this flag, so Mission Control
+		// and normal CLI startup cannot replay a mutable local merge shadow.
+		unsafeLegacyMergeDecisionMode,
+		...(unsafeLegacyMergeDecisionMode &&
+		options.unsafeLegacyExecutionLane !== null
+			? {
+					unsafeLegacyExecutionLane:
+						options.unsafeLegacyExecutionLane ?? "raw-legacy",
+				}
+			: {}),
 		...(options.omitOperatorDecisionPort ? {} : { operatorDecisionPort }),
 	});
 
@@ -286,6 +317,25 @@ function input(
 }
 
 describe("recordOperatorDecision — write-ahead ordering (D1/D2)", () => {
+	it("requires an explicit raw construction before enabling legacy merge decisions", () => {
+		expect(() =>
+			makeHarness({
+				unsafeLegacyMergeDecisionMode: true,
+				unsafeLegacyExecutionLane: null,
+			}),
+		).toThrow(/unsafe legacy.*explicit raw-legacy/i);
+	});
+
+	it("refuses to construct a raw legacy merge lane with a governed V3 workspace boundary", () => {
+		expect(() =>
+			makeHarness({
+				unsafeLegacyMergeDecisionMode: true,
+				unsafeLegacyExecutionLane: "raw-legacy",
+				governedWorkspaceBoundary: true,
+			}),
+		).toThrow(/unsafe legacy.*governed/i);
+	});
+
 	it("emits + flushes Tier-2, mirrors Tier-1, then applies the side effect", async () => {
 		const h = makeHarness({ initialStatus: "suspended" });
 		await h.orchestrator.recordOperatorDecision(input());
@@ -355,6 +405,22 @@ describe("recordOperatorDecision — F3 reject mergeCommit in the live path", ()
 });
 
 describe("recordOperatorDecision — F2 merge eligibility (acceptance passed + workspace)", () => {
+	it("blocks legacy merge by default before it can enter the signed decision or recovery path", async () => {
+		const h = makeHarness({
+			initialStatus: "passed",
+			withWorkspace: true,
+			acceptanceOutcome: "passed",
+			unsafeLegacyMergeDecisionMode: false,
+		});
+
+		await expect(
+			h.orchestrator.recordOperatorDecision(input({ subject: "merge" })),
+		).rejects.toThrow(/legacy run-level merge decisions are disabled/i);
+		expect(h.decisionEmits).toHaveLength(0);
+		expect(h.shadows).toHaveLength(0);
+		expect(h.mergeCalls).toHaveLength(0);
+	});
+
 	// Round-3 finding: a degenerate run can carry status NOT in the legitimate
 	// merge-eligible state (`passed`) yet still have acceptance_outcome='passed' +
 	// a retained workspace (e.g. a later infra failure flipped status to `failed`
@@ -444,6 +510,41 @@ describe("recordOperatorDecision — F2 merge eligibility (acceptance passed + w
 		await h.orchestrator.recordOperatorDecision(input({ subject: "merge" }));
 		expect(h.decisionEmits).toHaveLength(1);
 		expect(h.mergeCalls).toHaveLength(1);
+	});
+
+	it("blocks every governed candidate from the legacy merge path", async () => {
+		const h = makeHarness({
+			initialStatus: "passed",
+			withWorkspace: true,
+			acceptanceOutcome: "passed",
+			hasCandidateArtifact: true,
+		});
+
+		await expect(
+			h.orchestrator.recordOperatorDecision(input({ subject: "merge" })),
+		).rejects.toBeInstanceOf(OperatorDecisionValidationError);
+		expect(h.decisionEmits).toHaveLength(0);
+		expect(h.shadows).toHaveLength(0);
+		expect(h.mergeCalls).toHaveLength(0);
+	});
+
+	it("rejects an explicitly raw legacy merge switch for sealed V3 lineage before target mutation", async () => {
+		const h = makeHarness({
+			initialStatus: "passed",
+			withWorkspace: true,
+			acceptanceOutcome: "passed",
+			sealedV3Candidate: true,
+			unsafeLegacyMergeDecisionMode: true,
+			unsafeLegacyExecutionLane: "raw-legacy",
+		});
+
+		await expect(
+			h.orchestrator.recordOperatorDecision(input({ subject: "merge" })),
+		).rejects.toThrow(/unsafe legacy.*sealed V3/i);
+
+		expect(h.decisionEmits).toHaveLength(0);
+		expect(h.shadows).toHaveLength(0);
+		expect(h.mergeCalls).toHaveLength(0);
 	});
 });
 
@@ -670,6 +771,56 @@ describe("recordOperatorDecision — validation before sign (D5)", () => {
 });
 
 describe("recoverPendingDecisions — exactly-once reconciler (D2/D4)", () => {
+	it("does not re-drive an explicitly raw legacy merge shadow for sealed V3 lineage", async () => {
+		const h = makeHarness({
+			initialStatus: "passed",
+			withWorkspace: true,
+			sealedV3Candidate: true,
+			unsafeLegacyMergeDecisionMode: true,
+			unsafeLegacyExecutionLane: "raw-legacy",
+			decidedUnexecuted: () => [
+				{ runId: RUN_ID, decision: "approved", subject: "merge" },
+			],
+		});
+
+		await expect(h.orchestrator.recoverPendingDecisions()).resolves.toEqual({
+			recovered: 0,
+			failed: [
+				expect.objectContaining({
+					runId: RUN_ID,
+					error: expect.stringMatching(/unsafe legacy.*sealed V3/i),
+				}),
+			],
+		});
+
+		expect(h.mergeCalls).toHaveLength(0);
+		expect(h.executed).toHaveLength(0);
+	});
+
+	it("never re-drives a local legacy merge shadow unless the explicit unsafe compatibility mode is enabled", async () => {
+		const h = makeHarness({
+			initialStatus: "passed",
+			withWorkspace: true,
+			unsafeLegacyMergeDecisionMode: false,
+			decidedUnexecuted: () => [
+				{ runId: RUN_ID, decision: "approved", subject: "merge" },
+			],
+		});
+
+		await expect(h.orchestrator.recoverPendingDecisions()).resolves.toEqual({
+			recovered: 0,
+			failed: [
+				{
+					runId: RUN_ID,
+					error:
+						"legacy merge recovery is disabled; reconcile only a verified candidate promotion.",
+				},
+			],
+		});
+		expect(h.mergeCalls).toHaveLength(0);
+		expect(h.executed).toHaveLength(0);
+	});
+
 	it("completes a decided-but-unexecuted side effect exactly once, no Tier-2 re-emit", async () => {
 		const h = makeHarness({
 			initialStatus: "passed",

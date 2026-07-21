@@ -13,6 +13,7 @@
 	},
 	"dependencies": {
 		"@buildplane/kernel": "workspace:*",
+		"@buildplane/ledger-client": "workspace:*",
 		"@buildplane/runtime": "workspace:*",
 		"@buildplane/adapters-tools": "workspace:*"
 	},

@@ -24,7 +24,7 @@ Replay is read-only — no model calls, no tool invocations, no side effects. Re
 
 ## Forking a run
 
-`buildplane fork <parent-run-id> --at <unit-started-event-id> --packet <file> [--workspace <path>]` resumes from a unit boundary in a prior run with a new packet. The workspace is git-checked-out to the parent's pre-unit checkpoint; a new run_id records events with `parent_run_id` pointing at the parent. Re-executes tools; does NOT replay recorded outputs (Phase F adds `--vcr` for that).
+`buildplane fork <parent-run-id> --at <unit-started-event-id> --packet <file> --raw [--workspace <path>]` re-executes an unsafe legacy packet from a unit boundary in a prior run. The workspace is git-checked-out to the parent's pre-unit checkpoint; a new run_id records events with `parent_run_id` pointing at the parent. It does not replay recorded outputs (Phase F adds `--vcr`) and cannot produce a governed receipt.
 
 Preconditions:
 - Workspace git state must be clean (same as `buildplane run`).
@@ -38,7 +38,7 @@ Examples:
 ```bash
 # After a `buildplane run` that produced run_id=RRR with a failing unit
 # whose unit_started event id is UUU, try again with a corrected packet:
-buildplane fork RRR --at UUU --packet fixed-packet.json --workspace /path/to/ws
+buildplane fork RRR --at UUU --packet fixed-packet.json --raw --workspace /path/to/ws
 
 # Inspect the fork's tape:
 buildplane ledger replay --run-id <fork-run-id> --workspace /path/to/ws --format human
@@ -51,7 +51,7 @@ replay is Phase F+.
 
 ## Verifying a signed tape
 
-Every event on the tape is recorded with a detached Ed25519 signature, and periodic `tape_checkpoint` events pin a `tape_root_hash` over the run's signed events. An operator can verify a tape's authenticity independently of the kernel with a dependency-free Node script:
+Governed tape events are recorded with detached Ed25519 signatures, and periodic `tape_checkpoint` events pin a `tape_root_hash` over the run's signed events. Legacy/unsafe tapes may be unsigned and cannot serve as governed authority. An operator can verify a signed tape's integrity independently of the kernel with a dependency-free Node script:
 
 ```bash
 node scripts/verify-signed-tape.mjs --fixture <dir>

@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
-import type { UnitPacket } from "@buildplane/kernel";
+import type { TaskRenderer, UnitPacket } from "@buildplane/kernel";
 import { createEventBus } from "@buildplane/kernel";
 import { describe, expect, it, vi } from "vitest";
 import { createCodexRenderer } from "../../adapters-models/src/renderers/index.js";
@@ -76,6 +76,7 @@ function makePacket(overrides: Partial<UnitPacket> = {}): UnitPacket {
 			model: "o4-mini",
 			prompt: "Write a hello world file.",
 		},
+		execution_role: "implementer",
 		verification: {
 			requiredOutputs: [],
 		},
@@ -106,6 +107,25 @@ describe("CodexExecutor", () => {
 		expect(receipt.stderr).toBe("");
 		expect(receipt.cwd).toBe(PROJECT_ROOT);
 		expect(receipt.command).toBe("codex");
+	});
+
+	it("governed packet → rejects before spawning the ambient Codex CLI", async () => {
+		const mockSpawn = createMockSpawn({
+			stdout: "must not execute",
+			exitCode: 0,
+		});
+		const executor = createCodexExecutor({ spawnFn: mockSpawn as never });
+		const eventBus = createEventBus();
+
+		await expect(
+			executor.executePacketAsync(
+				makePacket({ provenance_ref: "admission:governed-run" }),
+				PROJECT_ROOT,
+				eventBus,
+			),
+		).rejects.toThrow(/AMBIENT_HOST_WORKER_FORBIDDEN/);
+
+		expect(mockSpawn).not.toHaveBeenCalled();
 	});
 
 	it("non-zero exit code → receipt has correct exitCode", async () => {
@@ -394,6 +414,7 @@ describe("CodexExecutor", () => {
 				policyProfile: "default",
 			},
 			execution: { command: "echo", args: ["hi"] },
+			execution_role: "implementer",
 			verification: { requiredOutputs: [] },
 		};
 
@@ -409,5 +430,40 @@ describe("CodexExecutor", () => {
 		expect(() => executor.executePacket(makePacket(), PROJECT_ROOT)).toThrow(
 			/async/i,
 		);
+	});
+
+	it.each([
+		"reviewer",
+		"adversary",
+	] as const)("passes the %s packet role to its renderer", async (execution_role) => {
+		const mockSpawn = createMockSpawn({ exitCode: 0 });
+		const renderer: TaskRenderer = {
+			provider: "test",
+			render: vi.fn(() => ({ prompt: "rendered task" })),
+		};
+		const executor = createCodexExecutor({
+			renderer,
+			spawnFn: mockSpawn as never,
+		});
+		const eventBus = createEventBus();
+		const packet = makePacket({
+			execution_role,
+			intent: {
+				objective: "Challenge the task.",
+				taskType: "review",
+				context: { files: [] },
+				constraints: { scope: [], verification: [] },
+				features: {
+					ambiguity: "low",
+					reversibility: "easy",
+					verifierStrength: "strong",
+				},
+			},
+			model: { provider: "codex", model: "o4-mini" },
+		});
+
+		await executor.executePacketAsync(packet, PROJECT_ROOT, eventBus);
+
+		expect(renderer.render).toHaveBeenCalledWith(packet.intent, execution_role);
 	});
 });

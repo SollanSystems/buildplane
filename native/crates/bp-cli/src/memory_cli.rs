@@ -1540,11 +1540,9 @@ mod tests {
         let native_root = unique_temp_root("bp-memory-policy");
         write_pack_manifest(&native_root, false, true, false);
 
-        let policy = bp_pack_inspection::effective_memory_policy_for_pack(
-            &native_root,
-            Some("superclaude"),
-        )
-        .expect("policy should load from pack manifest");
+        let policy =
+            bp_pack_inspection::effective_memory_policy_for_pack(&native_root, Some("superclaude"))
+                .expect("policy should load from pack manifest");
 
         assert!(!policy.include_user);
         assert!(policy.include_workspace);
@@ -1733,7 +1731,10 @@ mod tests {
 
         assert!(payload.is_object());
         assert_eq!(payload["nativeRoot"], native_root.display().to_string());
-        assert_eq!(payload["workspaceRoot"], workspace_root.display().to_string());
+        assert_eq!(
+            payload["workspaceRoot"],
+            workspace_root.display().to_string()
+        );
         assert_eq!(payload["packId"], "superclaude");
         assert_eq!(payload["includeForgotten"], false);
         assert_eq!(payload["effectiveMemoryPolicy"]["includeUser"], false);
@@ -1834,7 +1835,10 @@ mod tests {
 
         assert!(payload.is_object());
         assert_eq!(payload["nativeRoot"], native_root.display().to_string());
-        assert_eq!(payload["workspaceRoot"], workspace_root.display().to_string());
+        assert_eq!(
+            payload["workspaceRoot"],
+            workspace_root.display().to_string()
+        );
         assert_eq!(payload["packId"], "superclaude");
         assert_eq!(payload["includeForgotten"], false);
         assert_eq!(payload["effectiveMemoryPolicy"]["includeUser"], false);

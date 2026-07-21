@@ -27,11 +27,13 @@
 		"changeset": "changeset",
 		"changeset:status": "changeset status --verbose",
 		"stage:published-bootstrap": "node ./scripts/published-bootstrap/stage-package.mjs",
-		"release:publish": "pnpm build && pnpm native:build && node ./scripts/published-bootstrap/publish-npm.mjs",
+		"verify:trust-spine:release-evidence": "node ./scripts/trust-spine/verify-release-evidence.mjs",
+		"release:publish": "pnpm verify:trust-spine:release-evidence && pnpm build && pnpm native:build && node ./scripts/published-bootstrap/publish-npm.mjs",
 		"verify:published-bootstrap": "node ./scripts/published-bootstrap/verify-positive.mjs",
 		"auto-merge:eligibility": "node ./scripts/ci/pr-auto-merge-eligibility.mjs",
 		"auto-merge:opt-in": "node ./scripts/ci/pr-auto-merge-opt-in.mjs",
-		"eval": "node --import tsx ./eval/runner.ts"
+		"eval": "node --import tsx ./eval/runner.ts",
+		"eval:trust-spine:gate": "node --import tsx ./eval/trust-spine-release-gate-cli.ts"
 	},
 	"devDependencies": {
 		"@biomejs/biome": "^2.4.13",

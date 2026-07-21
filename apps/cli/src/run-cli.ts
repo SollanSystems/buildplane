@@ -1,4 +1,5 @@
-import { spawn, spawnSync } from "node:child_process";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import {
 	appendFileSync,
@@ -7,6 +8,7 @@ import {
 	mkdirSync,
 	readdirSync,
 	readFileSync,
+	realpathSync,
 	statSync,
 	writeFileSync,
 } from "node:fs";
@@ -17,19 +19,24 @@ import {
 	createToolRegistry,
 	type ToolRegistryOptions,
 } from "@buildplane/adapters-tools";
-import type {
-	AuthorizationEnvelopeV0,
-	BudgetConstraints,
-	BuildplaneAcceptancePort,
-	BuildplaneProfileRegistryPort,
-	BuildplaneStoragePort,
-	EnvelopeProposal,
-	LedgerActivityPort,
-	OperatorDecisionPort,
-	PolicyProfile,
-	RecordOperatorDecisionInput,
-	ResultReadyPort,
-	RunCompletionPort,
+
+import {
+	type AuthorizationEnvelopeV0,
+	type BudgetConstraints,
+	type BuildplaneAcceptancePort,
+	type BuildplaneProfileRegistryPort,
+	type BuildplaneStoragePort,
+	type CandidateCreatedV2,
+	canonicalGovernedUnitPacketV1Digest,
+	type EnvelopeProposal,
+	type LedgerActivityPort,
+	type OperatorDecisionPort,
+	type PolicyProfile,
+	parseCandidateCreatedV2,
+	parseGovernedUnitPacket,
+	type RecordOperatorDecisionInput,
+	type ResultReadyPort,
+	type RunCompletionPort,
 } from "@buildplane/kernel";
 import {
 	createTapeEmitter,
@@ -74,6 +81,13 @@ import {
 } from "./formatters.js";
 import { tryGitInWorkspace } from "./git-in-workspace.js";
 import { buildGoalPlan } from "./goal-command.js";
+import {
+	type HostOwnedCandidateApprovalV1,
+	type HostOwnedCandidateSessionV1,
+	type HostOwnedPlanForgeCandidateSessionV1,
+	resolveHostOwnedGovernedBroker,
+} from "./governed-authority-broker-host.js";
+import { GOVERNED_AUTHORITY_BROKER_REQUIRED_CODE } from "./governed-ledger-authority.js";
 import {
 	createAcceptancePort,
 	evaluateAcceptanceDiffScope,
@@ -122,7 +136,6 @@ import {
 import { runPlannerProposal } from "./planforge-planner.js";
 import {
 	acceptanceContractDigest,
-	buildPlanAdmittedPayload,
 	buildPlanReceiptPayload,
 	createPlanForgeDryRunPlan,
 	DISPATCH_WORKER_MODEL,
@@ -815,9 +828,9 @@ function formatTopLevelHelp(): string[] {
 		BUILDPLANE_BANNER,
 		"",
 		"  Execute:",
-		"    run --packet <path>    Run with implement-then-review (default)",
+		"    run --packet <path>    Compile and validate a governed-run preview (default)",
 		'    goal "<text>" [--trusted-base <sha>]  Compile + preview a raw goal into plan JSON',
-		"    demo [--model]         Prove the flywheel in 30 seconds",
+		"    demo --raw [--model]   Run the unsafe local flywheel demo",
 		"",
 		"  Observe:",
 		"    status [--json]        Project health snapshot",
@@ -826,18 +839,18 @@ function formatTopLevelHelp(): string[] {
 		"    verify --run <id> [--json]  Final receipt-backed verdict",
 		"    evidence export --run <id> --out <file>  Export Mission Control bundle",
 		"    web [--port N] [--check] [--allow-external]  Serve the Mission Control web UI",
-		"    trace export --run <id> --format otel-json --out <file>  Export local trace artifact",
+		"    trace export --run <id> --format otel-json --out <file>  Export unsafe local trace artifact",
 		"    pr-check dry-run --run <id> --repo <owner/repo> --sha <head> [--json]  Preview GitHub check-run publish",
 		"    pr-comment dry-run --run <id> --repo <owner/repo> --pr <n> --sha <head> [--json]  Preview PR evidence comment",
-		"    replay <id> [--json]   Re-execute the stored packet snapshot",
+		"    replay <id> --raw [--json]  Re-execute an unsafe legacy packet snapshot",
 		"    ledger replay --run-id <id> --workspace <path>  Read-only tape replay",
 		"    ledger export-signed-tape --run-id <id> --workspace <path> --out <dir>  Export buildplane.signed-tape.v1",
-		"    fork <id> --at <event> --packet <file>          Recover from a unit boundary",
+		"    fork <id> --at <event> --packet <file> --raw    Unsafe legacy unit-boundary re-execution",
 		"    planforge dry-run --input <file> --json          Emit dry-run plan artifact",
 		"",
 		"  Advanced:",
-		"    run-graph --graph <p>  Execute a DAG of tasks",
-		"    run-strategy --strat   Run a custom multi-role strategy",
+		"    run-graph --raw --graph <p>  Execute a DAG of tasks (unsafe legacy lane)",
+		"    run-strategy --raw     Run a custom multi-role strategy (unsafe legacy lane)",
 		"",
 		"  Project:",
 		"    init                   Initialize .buildplane in this repo",
@@ -853,36 +866,2217 @@ function formatTopLevelHelp(): string[] {
 		"    pack show <id>         Inspect a pack",
 		"    pack export <id> --target github-agent|github-skill --out <path>  Export pack guidance",
 		"",
-		"  buildplane run --help    Show run options (--raw, --tui)",
+		"  buildplane run --help    Show governed-run options (--raw is unsafe)",
 	];
 }
 
 function formatRunHelp(): string[] {
 	return [
 		"buildplane run --packet <path> [options]",
+		"buildplane run --resume <opaque-recovery-reference> --approve [--json]",
 		"",
-		"  By default, runs implement-then-review: an implementer executes the task,",
-		"  then a reviewer verifies the output. This is what makes Buildplane runs",
-		"  self-correcting.",
+		"  By default, Buildplane enters the governed front door.",
+		"  It blocks in preview until a privileged host verifies the signed envelope,",
+		"  tape, ActionGateway, and sandbox path; it never falls back to raw execution.",
 		"",
 		"  Options:",
-		"    --raw            Single-shot execution (no review loop)",
-		"    --tui            Interactive terminal UI",
+		"    --approve        Request host-brokered governed admission; blocks until a privileged authority broker is available",
+		"    --resume <ref>   Ask the privileged host to reconcile an existing workflow; requires --approve and cannot take a packet or envelope",
+		"    --envelope <path> Supply a sealed DispatchEnvelopeV3 for host-verified preauthorized admission; the CLI checks only closed shape/digest and the host must verify its signed tape",
+		"    --raw            Explicitly unsafe legacy execution; emits no trusted receipt",
+		"    --tui            Interactive terminal UI (unsafe --raw lane only)",
 		"    --json           Machine-readable output",
 	];
 }
 
+interface PacketRunCommandArguments {
+	readonly kind: "packet";
+	readonly packetPath: string;
+	readonly raw: boolean;
+	readonly tui: boolean;
+	readonly json: boolean;
+	readonly approve: boolean;
+	readonly envelopePath?: string;
+}
+
+/**
+ * A recovery handle is resolved only by the privileged host. It intentionally
+ * excludes packet and envelope source, which could otherwise replace the
+ * recorded workflow identity or authority during reconciliation.
+ */
+interface RecoveryRunCommandArguments {
+	readonly kind: "recovery-resume";
+	readonly raw: false;
+	readonly tui: false;
+	readonly json: boolean;
+	readonly approve: true;
+	readonly recoveryReference: string;
+}
+
+type RunCommandArguments =
+	| PacketRunCommandArguments
+	| RecoveryRunCommandArguments;
+
+interface DispatchEnvelopePreview {
+	readonly schemaVersion: 1 | 2 | 3;
+	/** Parsing is structural only; the native tape/reducer has not verified authority. */
+	readonly verification: "structural_only";
+	readonly workflowId: string;
+	readonly unitId: string;
+	readonly executionRole: string;
+	readonly commitMode: string;
+	readonly provenanceRef: string;
+	readonly trustTier: string;
+	readonly baseCommitSha: string;
+	readonly expiresAt: string;
+	readonly envelopeDigest: string;
+	/** V3 binds this protocol selector into the envelope digest. */
+	readonly actionEvidenceVersion?: "sealed-v2" | "sealed_v3";
+	/** Required for newly issued sealed_v3 authority; compared with the original packet bytes before broker resolution. */
+	readonly governedPacketDigest?: string;
+}
+
+interface LoadedDispatchEnvelopePreview {
+	/** Exact bytes passed to the host after local structural validation. */
+	readonly source: string;
+	readonly preview: DispatchEnvelopePreview;
+}
+
+interface GovernedSandboxPreview {
+	readonly state: "feasible" | "blocked";
+	readonly governedWorkerExecution: "not_implemented";
+	readonly host: {
+		readonly platform: string;
+		readonly environment: string;
+		readonly isWsl: boolean;
+	};
+	readonly failures: readonly {
+		readonly code: string;
+	}[];
+}
+
+interface GovernedRunPreview {
+	readonly governance: "preview";
+	readonly status: "blocked";
+	readonly executionStarted: false;
+	readonly approval: {
+		readonly requested: boolean;
+		readonly state: "not-recorded";
+	};
+	readonly authorityBroker: {
+		readonly state: "unavailable";
+		readonly code: typeof GOVERNED_AUTHORITY_BROKER_REQUIRED_CODE;
+	};
+	readonly packet: {
+		readonly unitId: string | null;
+		readonly executionRole: string | null;
+		/** Whether the raw source explicitly named the role, rather than inheriting the legacy parser default. */
+		readonly executionRoleExplicit: boolean;
+		readonly provenancePresent: boolean;
+		readonly capabilityBundlePresent: boolean;
+		readonly acceptanceContractPresent: boolean;
+		readonly trustScopePresent: boolean;
+	};
+	readonly envelope?: DispatchEnvelopePreview;
+	readonly sandbox: GovernedSandboxPreview;
+	readonly blockers: readonly string[];
+}
+
+/**
+ * The unsafe lane is intentionally opt-in. Keep this parser closed so a typo
+ * cannot silently select an execution path with different authority.
+ */
+function parseRunCommandArguments(
+	args: readonly string[],
+): RunCommandArguments {
+	const booleans = new Set(["--raw", "--tui", "--json", "--approve"]);
+	const values = new Set(["--packet", "--envelope", "--resume"]);
+	const seen = new Set<string>();
+	let packetPath: string | undefined;
+	let envelopePath: string | undefined;
+	let recoveryReference: string | undefined;
+
+	for (let index = 0; index < args.length; index += 1) {
+		const arg = args[index];
+		if (booleans.has(arg)) {
+			if (seen.has(arg)) {
+				throw new Error(`Duplicate run argument: ${arg}`);
+			}
+			seen.add(arg);
+			continue;
+		}
+
+		if (values.has(arg)) {
+			if (seen.has(arg)) {
+				throw new Error(`Duplicate run argument: ${arg}`);
+			}
+			const value = args[index + 1];
+			if (!value || value.startsWith("--")) {
+				throw new Error(`Missing required value after ${arg}.`);
+			}
+			seen.add(arg);
+			index += 1;
+			if (arg === "--packet") {
+				packetPath = value;
+			} else if (arg === "--envelope") {
+				envelopePath = value;
+			} else {
+				recoveryReference = value;
+			}
+			continue;
+		}
+
+		throw new Error(`Unsupported run argument: ${arg}`);
+	}
+
+	const raw = seen.has("--raw");
+	const approve = seen.has("--approve");
+	if (recoveryReference !== undefined) {
+		if (
+			recoveryReference.length > 256 ||
+			!/^[A-Za-z0-9][A-Za-z0-9._:/-]*$/.test(recoveryReference) ||
+			recoveryReference.includes("..") ||
+			recoveryReference.includes("//") ||
+			recoveryReference.includes("@{")
+		) {
+			throw new Error(
+				"--resume must be an opaque host-issued recovery reference, not a path or serialized authority.",
+			);
+		}
+		if (!approve) {
+			throw new Error(
+				"--resume requires --approve to acknowledge host-mediated reconciliation.",
+			);
+		}
+		if (
+			packetPath !== undefined ||
+			envelopePath !== undefined ||
+			raw ||
+			seen.has("--tui")
+		) {
+			throw new Error(
+				"--resume cannot be combined with --packet, --envelope, --raw, or --tui because recovered authority comes only from the privileged host.",
+			);
+		}
+		return {
+			kind: "recovery-resume",
+			raw: false,
+			tui: false,
+			json: seen.has("--json"),
+			approve: true,
+			recoveryReference,
+		};
+	}
+
+	if (!packetPath) {
+		throw new Error("Missing required --packet <path> argument.");
+	}
+
+	if (raw && (approve || envelopePath !== undefined)) {
+		throw new Error(
+			"--raw cannot be combined with --approve or --envelope because raw execution is outside the governed trust boundary.",
+		);
+	}
+	if (!raw && seen.has("--tui")) {
+		throw new Error(
+			"--tui is available only with --raw until the governed worker action plane is configured.",
+		);
+	}
+
+	return {
+		kind: "packet",
+		packetPath,
+		raw,
+		tui: seen.has("--tui"),
+		json: seen.has("--json"),
+		approve,
+		...(envelopePath === undefined ? {} : { envelopePath }),
+	};
+}
+
+interface RawLegacyPathCommandArguments {
+	readonly path: string;
+	readonly json: boolean;
+}
+
+/**
+ * Parse legacy graph/strategy invocation without treating a flag value as a
+ * separate acknowledgement.  `--raw` is an explicit unsafe authority choice,
+ * not a filename that may be consumed by `--graph` or `--strategy`.
+ */
+function parseRawLegacyPathCommandArguments(
+	args: readonly string[],
+	input: {
+		readonly command: "run-graph" | "run-strategy";
+		readonly pathFlag: "--graph" | "--strategy";
+		readonly supportsJson: boolean;
+	},
+): RawLegacyPathCommandArguments {
+	const seen = new Set<string>();
+	let path: string | undefined;
+
+	for (let index = 0; index < args.length; index += 1) {
+		const arg = args[index];
+		if (arg === "--raw" || (input.supportsJson && arg === "--json")) {
+			if (seen.has(arg)) {
+				throw new Error(`Duplicate ${input.command} argument: ${arg}`);
+			}
+			seen.add(arg);
+			continue;
+		}
+		if (arg === input.pathFlag) {
+			if (seen.has(arg)) {
+				throw new Error(`Duplicate ${input.command} argument: ${arg}`);
+			}
+			const value = args[index + 1];
+			if (!value || value.startsWith("--")) {
+				throw new Error(`Missing required value after ${input.pathFlag}.`);
+			}
+			seen.add(arg);
+			path = value;
+			index += 1;
+			continue;
+		}
+		throw new Error(`Unsupported ${input.command} argument: ${arg}`);
+	}
+
+	if (!seen.has("--raw")) {
+		throw new Error(
+			`${input.command} is a legacy ambient-worker path. Pass --raw to acknowledge unsafe execution; use buildplane run for governed preview/admission.`,
+		);
+	}
+	if (path === undefined) {
+		throw new Error(`Missing required ${input.pathFlag} <path> argument.`);
+	}
+	return { path, json: seen.has("--json") };
+}
+
+interface UnsafeReplayArguments {
+	readonly runId: string;
+	readonly json: boolean;
+	readonly policyProfile?: string;
+	readonly model?: string;
+}
+
+/**
+ * Replay executes ambient workers, so parse it before touching storage or an
+ * orchestrator. In particular a required option value can never double as
+ * the standalone `--raw` acknowledgement.
+ */
+function parseUnsafeReplayArguments(
+	args: readonly string[],
+): UnsafeReplayArguments {
+	const seen = new Set<string>();
+	let runId: string | undefined;
+	let policyProfile: string | undefined;
+	let model: string | undefined;
+
+	const readValue = (flag: "--policy" | "--model", index: number): string => {
+		const value = args[index + 1];
+		if (!value || value.startsWith("--")) {
+			throw new Error(`Missing required value after ${flag}.`);
+		}
+		return value;
+	};
+
+	for (let index = 0; index < args.length; index += 1) {
+		const arg = args[index];
+		if (arg === "--raw" || arg === "--json") {
+			if (seen.has(arg)) {
+				throw new Error(`Duplicate replay argument: ${arg}`);
+			}
+			seen.add(arg);
+			continue;
+		}
+		if (arg === "--policy" || arg === "--model") {
+			if (seen.has(arg)) {
+				throw new Error(`Duplicate replay argument: ${arg}`);
+			}
+			const value = readValue(arg, index);
+			seen.add(arg);
+			if (arg === "--policy") policyProfile = value;
+			else model = value;
+			index += 1;
+			continue;
+		}
+		if (arg.startsWith("--policy=") || arg.startsWith("--model=")) {
+			const equalsIndex = arg.indexOf("=");
+			const flag = arg.slice(0, equalsIndex) as "--policy" | "--model";
+			const value = arg.slice(equalsIndex + 1);
+			if (!value || value.startsWith("--") || seen.has(flag)) {
+				throw new Error(
+					!value || value.startsWith("--")
+						? `Missing required value after ${flag}.`
+						: `Duplicate replay argument: ${flag}`,
+				);
+			}
+			seen.add(flag);
+			if (flag === "--policy") policyProfile = value;
+			else model = value;
+			continue;
+		}
+		if (arg.startsWith("--")) {
+			throw new Error(`Unsupported replay argument: ${arg}`);
+		}
+		if (runId !== undefined) {
+			throw new Error(`Unexpected replay argument: ${arg}`);
+		}
+		runId = arg;
+	}
+
+	if (!seen.has("--raw")) {
+		throw new Error(
+			"replay re-executes a legacy ambient-worker packet. Pass --raw to acknowledge unsafe execution; use buildplane ledger replay for read-only tape reconstruction.",
+		);
+	}
+	if (runId === undefined) {
+		throw new Error("Missing required run id for replay.");
+	}
+	return {
+		runId,
+		json: seen.has("--json"),
+		...(policyProfile === undefined ? {} : { policyProfile }),
+		...(model === undefined ? {} : { model }),
+	};
+}
+
+function asPreviewRecord(value: unknown): Record<string, unknown> | null {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) {
+		return null;
+	}
+	return value as Record<string, unknown>;
+}
+
+const SHA256_DIGEST = /^sha256:[a-f0-9]{64}$/;
+const GIT_OBJECT_ID = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
+const EVENT_ID =
+	/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const OPAQUE_HOST_REFERENCE = /^[A-Za-z0-9][A-Za-z0-9._:/-]*$/;
+const PLANFORGE_HOST_REFERENCE_DIGEST_DOMAIN =
+	"buildplane.planforge-host-reference.v1\0";
+const PLANFORGE_REPOSITORY_IDENTITY_DIGEST_DOMAIN =
+	"buildplane.planforge-repository-identity.v1\0";
+
+const HOST_CANDIDATE_RECEIPT_V1_FIELDS = [
+	"schemaVersion",
+	"recoveryRef",
+	"targetRef",
+	"candidate",
+	"candidateCreatedEventRef",
+	"candidateCompletionEventRef",
+	"candidateCompletionDigest",
+	"tapeRootDigest",
+	"nativeReceiptRef",
+	"nativeReceiptDigest",
+] as const;
+
+const HOST_CANDIDATE_RECEIPT_V2_FIELDS = [
+	...HOST_CANDIDATE_RECEIPT_V1_FIELDS,
+	"governedPacketDigest",
+] as const;
+
+const HOST_CANDIDATE_RESULT_FIELDS = [
+	"kind",
+	"recoveryRef",
+	"candidateReceipt",
+] as const;
+
+const HOST_CANDIDATE_SESSION_FIELDS = ["kind", "recoveryRef", "run"] as const;
+
+const HOST_PLANFORGE_ADMISSION_FIELDS = [
+	"kind",
+	"admissionRef",
+	"taskRefs",
+	"planSourceDigest",
+	"admissionDigest",
+] as const;
+
+const HOST_PLANFORGE_CANDIDATE_BINDING_FIELDS = [
+	"schemaVersion",
+	"admissionRefDigest",
+	"taskRefDigest",
+	"repositoryIdentityDigest",
+] as const;
+
+const HOST_PLANFORGE_CANDIDATE_RECEIPT_FIELDS = [
+	...HOST_CANDIDATE_RECEIPT_V2_FIELDS,
+	"planForgeBinding",
+] as const;
+
+const HOST_PLANFORGE_CANDIDATE_RESULT_FIELDS = [
+	"kind",
+	"schemaVersion",
+	"recoveryRef",
+	"candidateReceipt",
+] as const;
+
+const HOST_PLANFORGE_CANDIDATE_SESSION_FIELDS = [
+	"kind",
+	"schemaVersion",
+	"recoveryRef",
+	"run",
+] as const;
+
+interface GovernedRootSnapshot {
+	readonly canonicalProjectRoot: string;
+	readonly targetRef: string;
+	readonly head: string;
+	readonly tree: string;
+	readonly commitCount: string;
+	readonly status: string;
+}
+
+interface ParsedHostCandidateSession {
+	readonly recoveryRef: string;
+	readonly run: () => Promise<unknown>;
+}
+
+interface ParsedHostCandidateReceipt {
+	readonly recoveryRef: string;
+	readonly targetRef: string;
+	readonly candidate: CandidateCreatedV2;
+	readonly candidateCreatedEventRef: string;
+	readonly candidateCompletionEventRef: string;
+	readonly candidateCompletionDigest: string;
+	readonly tapeRootDigest: string;
+	readonly nativeReceiptRef: string;
+	readonly nativeReceiptDigest: string;
+	/** Present on V2 fresh-run receipts and bound to the original packet bytes. */
+	readonly governedPacketDigest?: string;
+}
+
+interface ParsedHostPlanForgeCandidateBinding {
+	readonly admissionRefDigest: string;
+	readonly taskRefDigest: string;
+	readonly repositoryIdentityDigest: string;
+}
+
+interface ParsedHostPlanForgeCandidateReceipt
+	extends ParsedHostCandidateReceipt {
+	readonly planForgeBinding: ParsedHostPlanForgeCandidateBinding;
+}
+
+interface ParsedHostCandidateResult {
+	readonly recoveryRef: string;
+	readonly candidateReceipt: ParsedHostCandidateReceipt;
+}
+
+interface ParsedHostPlanForgeCandidateSession {
+	readonly recoveryRef: string;
+	readonly run: () => Promise<unknown>;
+}
+
+interface ParsedHostPlanForgeCandidateResult {
+	readonly recoveryRef: string;
+	readonly candidateReceipt: ParsedHostPlanForgeCandidateReceipt;
+}
+
+interface ParsedHostPlanForgeAdmission {
+	readonly admissionRef: string;
+	readonly taskRefs: readonly string[];
+	readonly planSourceDigest: string;
+	readonly admissionDigest: string;
+}
+
+/**
+ * Host replies cross a privilege boundary. Keep the CLI-side check closed and
+ * descriptor-based so a malformed object cannot use inherited/accessor fields
+ * to masquerade as a verified completion receipt. This validates shape only;
+ * detached receipt/tape signature verification remains host/native-owned.
+ */
+function readClosedHostDataRecord(
+	value: unknown,
+	label: string,
+	fields: readonly string[],
+	requiredFields: readonly string[] = fields,
+): Record<string, unknown> {
+	if (
+		typeof value !== "object" ||
+		value === null ||
+		Array.isArray(value) ||
+		(Object.getPrototypeOf(value) !== Object.prototype &&
+			Object.getPrototypeOf(value) !== null)
+	) {
+		throw new TypeError(`${label} must be a plain data object.`);
+	}
+
+	const expected = new Set(fields);
+	const propertyNames = Object.getOwnPropertyNames(value);
+	const propertySymbols = Object.getOwnPropertySymbols(value);
+	if (propertySymbols.length > 0) {
+		throw new TypeError(`${label} contains unsupported symbol field(s).`);
+	}
+	const unexpected = propertyNames.filter((key) => !expected.has(key));
+	if (unexpected.length > 0) {
+		throw new TypeError(
+			`${label} contains unsupported field(s): ${unexpected.join(", ")}.`,
+		);
+	}
+	const missing = requiredFields.filter((key) => !Object.hasOwn(value, key));
+	if (missing.length > 0) {
+		throw new TypeError(
+			`${label} is missing required field(s): ${missing.join(", ")}.`,
+		);
+	}
+
+	const normalized: Record<string, unknown> = {};
+	for (const key of propertyNames) {
+		const descriptor = Object.getOwnPropertyDescriptor(value, key);
+		if (!descriptor || !("value" in descriptor)) {
+			throw new TypeError(`${label}.${key} must be a data property.`);
+		}
+		normalized[key] = descriptor.value;
+	}
+	return normalized;
+}
+
+function readHostOpaqueReference(value: unknown, label: string): string {
+	if (
+		typeof value !== "string" ||
+		value.length === 0 ||
+		value.length > 256 ||
+		!OPAQUE_HOST_REFERENCE.test(value) ||
+		value.includes("..") ||
+		value.includes("//") ||
+		value.includes("@{")
+	) {
+		throw new TypeError(`${label} must be an opaque host-issued reference.`);
+	}
+	return value;
+}
+
+function parseHostPlanForgeAdmission(
+	value: unknown,
+): ParsedHostPlanForgeAdmission {
+	const record = readClosedHostDataRecord(
+		value,
+		"host PlanForge admission",
+		HOST_PLANFORGE_ADMISSION_FIELDS,
+	);
+	if (record.kind !== "host-owned-planforge-admission-v1") {
+		throw new TypeError(
+			"host-owned governed broker returned an invalid PlanForge admission.",
+		);
+	}
+	if (!Array.isArray(record.taskRefs) || record.taskRefs.length > 1_000) {
+		throw new TypeError(
+			"host PlanForge admission.taskRefs must be a bounded array of opaque host-issued references.",
+		);
+	}
+	const taskRefs = record.taskRefs.map((taskRef, index) =>
+		readHostOpaqueReference(
+			taskRef,
+			`host PlanForge admission.taskRefs[${index}]`,
+		),
+	);
+	if (new Set(taskRefs).size !== taskRefs.length) {
+		throw new TypeError(
+			"host PlanForge admission.taskRefs must not contain duplicate references.",
+		);
+	}
+	return Object.freeze({
+		admissionRef: readHostOpaqueReference(
+			record.admissionRef,
+			"host PlanForge admission.admissionRef",
+		),
+		taskRefs: Object.freeze(taskRefs),
+		planSourceDigest: readHostDigest(
+			record.planSourceDigest,
+			"host PlanForge admission.planSourceDigest",
+		),
+		admissionDigest: readHostDigest(
+			record.admissionDigest,
+			"host PlanForge admission.admissionDigest",
+		),
+	});
+}
+
+function readHostDigest(value: unknown, label: string): string {
+	if (typeof value !== "string" || !SHA256_DIGEST.test(value)) {
+		throw new TypeError(`${label} must be a sha256 digest.`);
+	}
+	return value;
+}
+
+function readHostEventId(value: unknown, label: string): string {
+	if (typeof value !== "string" || !EVENT_ID.test(value)) {
+		throw new TypeError(`${label} must be a UUID event identity.`);
+	}
+	return value;
+}
+
+function isCanonicalTargetBranchRef(value: unknown): value is string {
+	if (
+		typeof value !== "string" ||
+		!value.startsWith("refs/heads/") ||
+		value.trim() !== value ||
+		value.includes("..") ||
+		value.includes("//") ||
+		value.includes("@{")
+	) {
+		return false;
+	}
+	const suffix = value.slice("refs/heads/".length);
+	return (
+		suffix.length > 0 &&
+		suffix
+			.split("/")
+			.every(
+				(segment) =>
+					/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(segment) &&
+					!segment.endsWith(".") &&
+					!segment.endsWith(".lock"),
+			)
+	);
+}
+
+function parseHostCandidateSession(value: unknown): ParsedHostCandidateSession {
+	const record = readClosedHostDataRecord(
+		value,
+		"host candidate session",
+		HOST_CANDIDATE_SESSION_FIELDS,
+	);
+	if (
+		record.kind !== "host-owned-governed-candidate-session-v1" ||
+		typeof record.run !== "function"
+	) {
+		throw new TypeError(
+			"host-owned governed broker returned an invalid candidate-only session.",
+		);
+	}
+	return Object.freeze({
+		recoveryRef: readHostOpaqueReference(
+			record.recoveryRef,
+			"host candidate session recoveryRef",
+		),
+		run: record.run as () => Promise<unknown>,
+	});
+}
+
+function parseHostCandidateReceiptRecord(
+	record: Record<string, unknown>,
+): ParsedHostCandidateReceipt {
+	if (record.schemaVersion !== 1 && record.schemaVersion !== 2) {
+		throw new TypeError("host candidate receipt.schemaVersion must be 1 or 2.");
+	}
+	if (
+		record.schemaVersion === 1 &&
+		Object.hasOwn(record, "governedPacketDigest")
+	) {
+		throw new TypeError(
+			"host candidate receipt.schemaVersion 1 must not contain governedPacketDigest.",
+		);
+	}
+	if (!isCanonicalTargetBranchRef(record.targetRef)) {
+		throw new TypeError(
+			"host candidate receipt.targetRef must be a canonical target branch ref.",
+		);
+	}
+	const governedPacketDigest =
+		record.schemaVersion === 2
+			? readHostDigest(
+					record.governedPacketDigest,
+					"host candidate receipt.governedPacketDigest",
+				)
+			: undefined;
+	return Object.freeze({
+		recoveryRef: readHostOpaqueReference(
+			record.recoveryRef,
+			"host candidate receipt.recoveryRef",
+		),
+		targetRef: record.targetRef,
+		candidate: parseCandidateCreatedV2(record.candidate),
+		candidateCreatedEventRef: readHostEventId(
+			record.candidateCreatedEventRef,
+			"host candidate receipt.candidateCreatedEventRef",
+		),
+		candidateCompletionEventRef: readHostEventId(
+			record.candidateCompletionEventRef,
+			"host candidate receipt.candidateCompletionEventRef",
+		),
+		candidateCompletionDigest: readHostDigest(
+			record.candidateCompletionDigest,
+			"host candidate receipt.candidateCompletionDigest",
+		),
+		tapeRootDigest: readHostDigest(
+			record.tapeRootDigest,
+			"host candidate receipt.tapeRootDigest",
+		),
+		nativeReceiptRef: readHostOpaqueReference(
+			record.nativeReceiptRef,
+			"host candidate receipt.nativeReceiptRef",
+		),
+		nativeReceiptDigest: readHostDigest(
+			record.nativeReceiptDigest,
+			"host candidate receipt.nativeReceiptDigest",
+		),
+		...(governedPacketDigest === undefined ? {} : { governedPacketDigest }),
+	});
+}
+
+function parseHostCandidateReceipt(value: unknown): ParsedHostCandidateReceipt {
+	return parseHostCandidateReceiptRecord(
+		readClosedHostDataRecord(
+			value,
+			"host candidate receipt",
+			HOST_CANDIDATE_RECEIPT_V2_FIELDS,
+			HOST_CANDIDATE_RECEIPT_V1_FIELDS,
+		),
+	);
+}
+
+function parseHostPlanForgeCandidateBinding(
+	value: unknown,
+): ParsedHostPlanForgeCandidateBinding {
+	const record = readClosedHostDataRecord(
+		value,
+		"host PlanForge candidate binding",
+		HOST_PLANFORGE_CANDIDATE_BINDING_FIELDS,
+	);
+	if (record.schemaVersion !== 1) {
+		throw new TypeError(
+			"host PlanForge candidate binding.schemaVersion must be 1.",
+		);
+	}
+	return Object.freeze({
+		admissionRefDigest: readHostDigest(
+			record.admissionRefDigest,
+			"host PlanForge candidate binding.admissionRefDigest",
+		),
+		taskRefDigest: readHostDigest(
+			record.taskRefDigest,
+			"host PlanForge candidate binding.taskRefDigest",
+		),
+		repositoryIdentityDigest: readHostDigest(
+			record.repositoryIdentityDigest,
+			"host PlanForge candidate binding.repositoryIdentityDigest",
+		),
+	});
+}
+
+function parseHostPlanForgeCandidateReceipt(
+	value: unknown,
+): ParsedHostPlanForgeCandidateReceipt {
+	const record = readClosedHostDataRecord(
+		value,
+		"host PlanForge candidate receipt",
+		HOST_PLANFORGE_CANDIDATE_RECEIPT_FIELDS,
+		[...HOST_CANDIDATE_RECEIPT_V1_FIELDS, "planForgeBinding"],
+	);
+	return Object.freeze({
+		...parseHostCandidateReceiptRecord(record),
+		planForgeBinding: parseHostPlanForgeCandidateBinding(
+			record.planForgeBinding,
+		),
+	});
+}
+
+function parseHostCandidateResult(value: unknown): ParsedHostCandidateResult {
+	const record = readClosedHostDataRecord(
+		value,
+		"host candidate result",
+		HOST_CANDIDATE_RESULT_FIELDS,
+	);
+	if (record.kind !== "host-owned-governed-candidate-run-result-v1") {
+		throw new TypeError(
+			"host-owned governed broker returned an invalid candidate-only result.",
+		);
+	}
+	const recoveryRef = readHostOpaqueReference(
+		record.recoveryRef,
+		"host candidate result.recoveryRef",
+	);
+	const candidateReceipt = parseHostCandidateReceipt(record.candidateReceipt);
+	if (candidateReceipt.recoveryRef !== recoveryRef) {
+		throw new TypeError(
+			"host candidate result and receipt must bind the same recovery identity.",
+		);
+	}
+	return Object.freeze({ recoveryRef, candidateReceipt });
+}
+
+function parseHostPlanForgeCandidateSession(
+	value: unknown,
+): ParsedHostPlanForgeCandidateSession {
+	const record = readClosedHostDataRecord(
+		value,
+		"host PlanForge candidate session",
+		HOST_PLANFORGE_CANDIDATE_SESSION_FIELDS,
+	);
+	if (
+		record.kind !== "host-owned-planforge-candidate-session-v1" ||
+		record.schemaVersion !== 1 ||
+		typeof record.run !== "function"
+	) {
+		throw new TypeError(
+			"host-owned governed broker returned an invalid PlanForge candidate-only session.",
+		);
+	}
+	return Object.freeze({
+		recoveryRef: readHostOpaqueReference(
+			record.recoveryRef,
+			"host PlanForge candidate session recoveryRef",
+		),
+		run: record.run as () => Promise<unknown>,
+	});
+}
+
+function parseHostPlanForgeCandidateResult(
+	value: unknown,
+): ParsedHostPlanForgeCandidateResult {
+	const record = readClosedHostDataRecord(
+		value,
+		"host PlanForge candidate result",
+		HOST_PLANFORGE_CANDIDATE_RESULT_FIELDS,
+	);
+	if (
+		record.kind !== "host-owned-planforge-candidate-run-result-v1" ||
+		record.schemaVersion !== 1
+	) {
+		throw new TypeError(
+			"host-owned governed broker returned an invalid PlanForge candidate-only result.",
+		);
+	}
+	const recoveryRef = readHostOpaqueReference(
+		record.recoveryRef,
+		"host PlanForge candidate result.recoveryRef",
+	);
+	const candidateReceipt = parseHostPlanForgeCandidateReceipt(
+		record.candidateReceipt,
+	);
+	if (candidateReceipt.recoveryRef !== recoveryRef) {
+		throw new TypeError(
+			"host PlanForge candidate result and receipt must bind the same recovery identity.",
+		);
+	}
+	return Object.freeze({ recoveryRef, candidateReceipt });
+}
+
+function captureGovernedRootSnapshot(
+	projectRoot: string,
+): GovernedRootSnapshot | null {
+	let canonicalProjectRoot: string;
+	try {
+		canonicalProjectRoot = realpathSync(projectRoot).split(sep).join("/");
+	} catch {
+		return null;
+	}
+	const targetRef = tryGitInWorkspace(projectRoot, [
+		"symbolic-ref",
+		"--quiet",
+		"HEAD",
+	])?.trim();
+	if (!isCanonicalTargetBranchRef(targetRef)) return null;
+	const head = tryGitInWorkspace(projectRoot, ["rev-parse", "HEAD"])?.trim();
+	const targetHead = tryGitInWorkspace(projectRoot, [
+		"rev-parse",
+		targetRef,
+	])?.trim();
+	const tree = tryGitInWorkspace(projectRoot, [
+		"rev-parse",
+		"HEAD^{tree}",
+	])?.trim();
+	const commitCount = tryGitInWorkspace(projectRoot, [
+		"rev-list",
+		"--count",
+		"HEAD",
+	])?.trim();
+	const status = tryGitInWorkspace(projectRoot, [
+		"status",
+		"--porcelain=v1",
+		"--untracked-files=all",
+	]);
+	if (
+		!head ||
+		!targetHead ||
+		!tree ||
+		!commitCount ||
+		status === null ||
+		!GIT_OBJECT_ID.test(head) ||
+		!GIT_OBJECT_ID.test(targetHead) ||
+		!GIT_OBJECT_ID.test(tree) ||
+		!/^\d+$/.test(commitCount) ||
+		head !== targetHead
+	) {
+		return null;
+	}
+	return Object.freeze({
+		canonicalProjectRoot,
+		targetRef,
+		head,
+		tree,
+		commitCount,
+		status,
+	});
+}
+
+function rootSnapshotMatches(
+	before: GovernedRootSnapshot,
+	projectRoot: string,
+): boolean {
+	const after = captureGovernedRootSnapshot(projectRoot);
+	return (
+		after !== null &&
+		after.canonicalProjectRoot === before.canonicalProjectRoot &&
+		after.targetRef === before.targetRef &&
+		after.head === before.head &&
+		after.tree === before.tree &&
+		after.commitCount === before.commitCount &&
+		after.status === before.status
+	);
+}
+
+function assertCandidateReceiptMatchesInvocation(
+	receipt: ParsedHostCandidateReceipt,
+	before: GovernedRootSnapshot,
+	sourcePacket: unknown | undefined,
+	expectedEnvelopeDigest?: string,
+): void {
+	if (
+		receipt.targetRef !== before.targetRef ||
+		receipt.candidate.baseCommitSha !== before.head
+	) {
+		throw new TypeError(
+			"host candidate receipt is stale or not bound to the checked-out target base.",
+		);
+	}
+	if (
+		expectedEnvelopeDigest !== undefined &&
+		receipt.candidate.envelopeDigest !== expectedEnvelopeDigest
+	) {
+		throw new TypeError(
+			"host candidate receipt is not bound to the supplied preauthorized dispatch envelope.",
+		);
+	}
+	if (sourcePacket === undefined) return;
+	const source = asPreviewRecord(sourcePacket);
+	const unit = asPreviewRecord(source?.unit);
+	const sourceUnitId = previewString(unit, "id");
+	const sourceProvenanceRef = previewString(source, "provenance_ref");
+	if (
+		sourceUnitId === null ||
+		sourceProvenanceRef === null ||
+		receipt.candidate.unitId !== sourceUnitId ||
+		receipt.candidate.provenanceRef !== sourceProvenanceRef
+	) {
+		throw new TypeError(
+			"host candidate receipt is not bound to the original governed packet identity.",
+		);
+	}
+	let expectedGovernedPacketDigest: string;
+	try {
+		expectedGovernedPacketDigest =
+			strictGovernedSourcePacketDigest(sourcePacket);
+	} catch {
+		throw new GovernedCandidatePacketBindingViolation();
+	}
+	if (receipt.governedPacketDigest !== expectedGovernedPacketDigest) {
+		throw new GovernedCandidatePacketBindingViolation();
+	}
+}
+
+/**
+ * A raw JSON value is not necessarily a governed packet. Digest binding must
+ * first cross the closed source-admission boundary so unknown fields and
+ * legacy defaults cannot become part of an authority-bearing packet digest.
+ */
+function strictGovernedSourcePacketDigest(sourcePacket: unknown): string {
+	const serialized = JSON.stringify(sourcePacket);
+	if (typeof serialized !== "string") {
+		throw new TypeError("governed source packet must be JSON-serializable.");
+	}
+	return canonicalGovernedUnitPacketV1Digest(
+		parseGovernedUnitPacket(serialized),
+	);
+}
+
+function governedSourcePacketAdmissionBlocker(
+	sourcePacket: unknown,
+): string | undefined {
+	try {
+		strictGovernedSourcePacketDigest(sourcePacket);
+	} catch {
+		return "Governed packet source must pass strict admission before authority resolution.";
+	}
+	return undefined;
+}
+
+function previewString(
+	record: Record<string, unknown> | null,
+	key: string,
+): string | null {
+	const value = record?.[key];
+	return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+const NATIVE_DISPATCH_ENVELOPE_V2_BODY_FIELDS = [
+	"workflow_id",
+	"workflow_revision",
+	"unit_id",
+	"attempt",
+	"execution_role",
+	"commit_mode",
+	"provenance_ref",
+	"base_commit_sha",
+	"capability_bundle_digest",
+	"acceptance_contract_digest",
+	"context_manifest_digest",
+	"worker_manifest_digest",
+	"sandbox_profile_digest",
+	"budget",
+	"trust_tier",
+	"idempotency_key",
+	"issued_at",
+	"expires_at",
+] as const;
+
+const NATIVE_DISPATCH_ENVELOPE_V3_FIELDS = [
+	"body",
+	"action_evidence_version",
+	"repository_binding_digest",
+	"ledger_authority_realm_digest",
+	"governed_packet_digest",
+	"envelope_digest",
+] as const;
+
+function readClosedPreviewRecord(
+	value: unknown,
+	label: string,
+	allowedFields: readonly string[],
+	requiredFields: readonly string[] = allowedFields,
+): Record<string, unknown> {
+	const record = asPreviewRecord(value);
+	if (!record) {
+		throw new TypeError(`${label} must be an object`);
+	}
+	const allowed = new Set(allowedFields);
+	const unexpected = Object.keys(record).filter((key) => !allowed.has(key));
+	if (unexpected.length > 0) {
+		throw new TypeError(
+			`${label} contains unsupported field(s): ${unexpected.join(", ")}`,
+		);
+	}
+	const missing = requiredFields.filter((key) => !Object.hasOwn(record, key));
+	if (missing.length > 0) {
+		throw new TypeError(
+			`${label} is missing required field(s): ${missing.join(", ")}`,
+		);
+	}
+	return record;
+}
+
+/**
+ * The Rust tape uses externally tagged, snake_case payloads. Translate that
+ * presentation-only wire form into the kernel's closed camelCase V2 proposal
+ * before parsing it. This does not verify the detached tape signature or
+ * grant authority; governed execution remains blocked without the native
+ * admission/replay bridge.
+ */
+function translateNativeDispatchEnvelopeV2Body(
+	value: unknown,
+	label: string,
+): Record<string, unknown> {
+	const body = readClosedPreviewRecord(
+		value,
+		label,
+		NATIVE_DISPATCH_ENVELOPE_V2_BODY_FIELDS,
+	);
+	const budget = readClosedPreviewRecord(
+		body.budget,
+		`${label}.budget`,
+		["max_tokens", "max_compute_time_ms"],
+		[],
+	);
+
+	return {
+		workflowId: body.workflow_id,
+		workflowRevision: body.workflow_revision,
+		unitId: body.unit_id,
+		attempt: body.attempt,
+		executionRole: body.execution_role,
+		commitMode: body.commit_mode,
+		provenanceRef: body.provenance_ref,
+		baseCommitSha: body.base_commit_sha,
+		capabilityBundleDigest: body.capability_bundle_digest,
+		acceptanceContractDigest: body.acceptance_contract_digest,
+		contextManifestDigest: body.context_manifest_digest,
+		workerManifestDigest: body.worker_manifest_digest,
+		sandboxProfileDigest: body.sandbox_profile_digest,
+		budget: {
+			...(Object.hasOwn(budget, "max_tokens")
+				? { maxTokens: budget.max_tokens }
+				: {}),
+			...(Object.hasOwn(budget, "max_compute_time_ms")
+				? { maxComputeTimeMs: budget.max_compute_time_ms }
+				: {}),
+		},
+		trustTier: body.trust_tier,
+		idempotencyKey: body.idempotency_key,
+		issuedAt: body.issued_at,
+		expiresAt: body.expires_at,
+	};
+}
+
+function translateNativeDispatchEnvelopeV2Preview(
+	raw: unknown,
+): unknown | undefined {
+	const outer = asPreviewRecord(raw);
+	if (!outer) return undefined;
+
+	let envelopeValue: unknown;
+	if (Object.hasOwn(outer, "DispatchEnvelopeV2")) {
+		envelopeValue = readClosedPreviewRecord(
+			outer,
+			"DispatchEnvelopeV2 payload",
+			["DispatchEnvelopeV2"],
+		).DispatchEnvelopeV2;
+	} else if (
+		Object.hasOwn(outer, "body") ||
+		Object.hasOwn(outer, "envelope_digest")
+	) {
+		// Accept the inner native payload too, which is useful when inspecting a
+		// ledger export that has already removed the external event tag.
+		envelopeValue = outer;
+	} else {
+		return undefined;
+	}
+
+	const envelope = readClosedPreviewRecord(
+		envelopeValue,
+		"DispatchEnvelopeV2",
+		["body", "envelope_digest"],
+	);
+	return {
+		schemaVersion: 2,
+		body: translateNativeDispatchEnvelopeV2Body(
+			envelope.body,
+			"DispatchEnvelopeV2.body",
+		),
+		envelopeDigest: envelope.envelope_digest,
+	};
+}
+
+/**
+ * V3 keeps the V2 authority body and additionally binds the sealed action
+ * evidence protocol. This translation is preview-only: it recognizes the
+ * exact native wire schema but never treats an on-disk JSON proposal as a
+ * trusted signed tape record.
+ */
+function translateNativeDispatchEnvelopeV3Preview(
+	raw: unknown,
+): unknown | undefined {
+	const outer = asPreviewRecord(raw);
+	if (!outer) return undefined;
+
+	let envelopeValue: unknown;
+	if (Object.hasOwn(outer, "DispatchEnvelopeV3")) {
+		envelopeValue = readClosedPreviewRecord(
+			outer,
+			"DispatchEnvelopeV3 payload",
+			["DispatchEnvelopeV3"],
+		).DispatchEnvelopeV3;
+	} else if (
+		Object.hasOwn(outer, "action_evidence_version") ||
+		Object.hasOwn(outer, "envelope_digest")
+	) {
+		envelopeValue = outer;
+	} else {
+		return undefined;
+	}
+
+	const envelope = readClosedPreviewRecord(
+		envelopeValue,
+		"DispatchEnvelopeV3",
+		NATIVE_DISPATCH_ENVELOPE_V3_FIELDS,
+		[
+			"body",
+			"action_evidence_version",
+			"repository_binding_digest",
+			"ledger_authority_realm_digest",
+			"envelope_digest",
+		],
+	);
+	return {
+		schemaVersion: 3,
+		body: translateNativeDispatchEnvelopeV2Body(
+			envelope.body,
+			"DispatchEnvelopeV3.body",
+		),
+		actionEvidenceVersion: envelope.action_evidence_version,
+		repositoryBindingDigest: envelope.repository_binding_digest,
+		ledgerAuthorityRealmDigest: envelope.ledger_authority_realm_digest,
+		...(Object.hasOwn(envelope, "governed_packet_digest")
+			? { governedPacketDigest: envelope.governed_packet_digest }
+			: {}),
+		envelopeDigest: envelope.envelope_digest,
+	};
+}
+
+async function loadDispatchEnvelopePreview(
+	path: string,
+): Promise<LoadedDispatchEnvelopePreview> {
+	const kernel = (await cliImport("@buildplane/kernel")) as unknown as {
+		parseDispatchEnvelopeV1: (
+			input: unknown,
+		) => Omit<DispatchEnvelopePreview, "schemaVersion" | "verification">;
+		parseDispatchEnvelopeV2: (input: unknown) => {
+			readonly schemaVersion: 2;
+			readonly body: Omit<
+				DispatchEnvelopePreview,
+				"schemaVersion" | "verification" | "envelopeDigest"
+			>;
+			readonly envelopeDigest: string;
+		};
+		parseDispatchEnvelopeV3: (input: unknown) => {
+			readonly schemaVersion: 3;
+			readonly body: Omit<
+				DispatchEnvelopePreview,
+				| "schemaVersion"
+				| "verification"
+				| "envelopeDigest"
+				| "actionEvidenceVersion"
+			>;
+			readonly actionEvidenceVersion: "sealed-v2" | "sealed_v3";
+			readonly governedPacketDigest?: string;
+			readonly envelopeDigest: string;
+		};
+	};
+	const source = readFileSync(path, "utf8");
+	const raw: unknown = JSON.parse(source);
+	const loaded = (
+		preview: DispatchEnvelopePreview,
+	): LoadedDispatchEnvelopePreview => Object.freeze({ source, preview });
+	if (asPreviewRecord(raw)?.schemaVersion === 3) {
+		const parsed = kernel.parseDispatchEnvelopeV3(raw);
+		return loaded({
+			schemaVersion: 3,
+			verification: "structural_only",
+			...parsed.body,
+			actionEvidenceVersion: parsed.actionEvidenceVersion,
+			...(parsed.governedPacketDigest === undefined
+				? {}
+				: { governedPacketDigest: parsed.governedPacketDigest }),
+			envelopeDigest: parsed.envelopeDigest,
+		});
+	}
+	if (asPreviewRecord(raw)?.schemaVersion === 2) {
+		const parsed = kernel.parseDispatchEnvelopeV2(raw);
+		return loaded({
+			schemaVersion: 2,
+			verification: "structural_only",
+			...parsed.body,
+			envelopeDigest: parsed.envelopeDigest,
+		});
+	}
+	const nativeV3Preview = translateNativeDispatchEnvelopeV3Preview(raw);
+	if (nativeV3Preview !== undefined) {
+		const parsed = kernel.parseDispatchEnvelopeV3(nativeV3Preview);
+		return loaded({
+			schemaVersion: 3,
+			verification: "structural_only",
+			...parsed.body,
+			actionEvidenceVersion: parsed.actionEvidenceVersion,
+			...(parsed.governedPacketDigest === undefined
+				? {}
+				: { governedPacketDigest: parsed.governedPacketDigest }),
+			envelopeDigest: parsed.envelopeDigest,
+		});
+	}
+	const nativeV2Preview = translateNativeDispatchEnvelopeV2Preview(raw);
+	if (nativeV2Preview !== undefined) {
+		const parsed = kernel.parseDispatchEnvelopeV2(nativeV2Preview);
+		return loaded({
+			schemaVersion: 2,
+			verification: "structural_only",
+			...parsed.body,
+			envelopeDigest: parsed.envelopeDigest,
+		});
+	}
+	return loaded({
+		schemaVersion: 1,
+		verification: "structural_only",
+		...kernel.parseDispatchEnvelopeV1(raw),
+	});
+}
+
+async function probeGovernedSandboxForPreview(): Promise<GovernedSandboxPreview> {
+	const runtime = (await cliImport("@buildplane/runtime")) as unknown as {
+		probeGovernedSandbox: () => GovernedSandboxPreview;
+	};
+	return runtime.probeGovernedSandbox();
+}
+
+function buildGovernedRunPreview(
+	packet: unknown,
+	options: {
+		readonly approvalRequested: boolean;
+		readonly envelope?: DispatchEnvelopePreview;
+		readonly sandbox: GovernedSandboxPreview;
+		/** Original JSON packet, used to distinguish omitted legacy fields from parser defaults. */
+		readonly sourcePacket?: unknown;
+	},
+): GovernedRunPreview {
+	const packetRecord = asPreviewRecord(packet);
+	const sourcePacketRecord = asPreviewRecord(options.sourcePacket);
+	const unitRecord = asPreviewRecord(packetRecord?.unit);
+	const unitId = previewString(unitRecord, "id");
+	const executionRole = previewString(packetRecord, "execution_role");
+	const explicitExecutionRole = previewString(
+		sourcePacketRecord,
+		"execution_role",
+	);
+	const executionRoleExplicit = explicitExecutionRole !== null;
+	const provenanceRef = previewString(packetRecord, "provenance_ref");
+	const capabilityDigest = previewString(
+		packetRecord,
+		"capability_bundle_digest",
+	);
+	const capabilityBundlePresent =
+		packetRecord?.capability_bundle !== undefined && capabilityDigest !== null;
+	const acceptanceContractPresent =
+		packetRecord?.acceptance_contract !== undefined;
+	const trustScopePresent = packetRecord?.trust_scope !== undefined;
+	const blockers: string[] = [];
+
+	if (!unitId) blockers.push("Packet does not contain a valid unit id.");
+	if (!executionRole || !executionRoleExplicit) {
+		blockers.push("Packet does not contain a declared execution role.");
+	}
+	if (!provenanceRef) {
+		blockers.push(
+			"Packet is missing provenance_ref required for governed admission.",
+		);
+	}
+	if (!capabilityBundlePresent) {
+		blockers.push(
+			"Packet is missing a capability_bundle and matching capability_bundle_digest.",
+		);
+	}
+	if (!acceptanceContractPresent) {
+		blockers.push(
+			"Packet is missing acceptance_contract required for governed admission.",
+		);
+	}
+	if (!trustScopePresent) {
+		blockers.push(
+			"Packet is missing trust_scope required for governed admission.",
+		);
+	}
+
+	const envelope = options.envelope;
+	if (!envelope) {
+		blockers.push(
+			options.approvalRequested
+				? "Governed admission was requested, but no DispatchEnvelopeV1, V2, or V3 was supplied."
+				: "No signed DispatchEnvelopeV1, V2, or V3 or explicit operator approval was supplied.",
+		);
+	} else {
+		if (envelope.schemaVersion !== 3) {
+			blockers.push(
+				"Governed execution requires a sealed DispatchEnvelopeV3; V1 and V2 envelopes are preview-only compatibility artifacts.",
+			);
+		}
+		if (envelope.schemaVersion === 3) {
+			if (envelope.actionEvidenceVersion === "sealed-v2") {
+				blockers.push(
+					"DispatchEnvelopeV3 actionEvidenceVersion sealed-v2 is a preview-only compatibility artifact; newly governed execution requires sealed_v3.",
+				);
+			} else if (envelope.actionEvidenceVersion !== "sealed_v3") {
+				blockers.push(
+					"DispatchEnvelopeV3 must bind actionEvidenceVersion sealed_v3.",
+				);
+			}
+		}
+		if (envelope.trustTier !== "governed") {
+			blockers.push("Dispatch envelope trustTier must be governed.");
+		}
+		if (envelope.commitMode !== "atomic") {
+			blockers.push("Governed admission supports only atomic commitMode.");
+		}
+		if (unitId && envelope.unitId !== unitId) {
+			blockers.push("Dispatch envelope unitId does not match the packet.");
+		}
+		if (executionRole && envelope.executionRole !== executionRole) {
+			blockers.push(
+				"Dispatch envelope executionRole does not match the packet.",
+			);
+		}
+		if (provenanceRef && envelope.provenanceRef !== provenanceRef) {
+			blockers.push(
+				"Dispatch envelope provenanceRef does not match the packet.",
+			);
+		}
+		if (Date.parse(envelope.expiresAt) <= Date.now()) {
+			blockers.push("Dispatch envelope is expired.");
+		}
+	}
+	if (options.sandbox.state !== "feasible") {
+		const codes = options.sandbox.failures.map((failure) => failure.code);
+		blockers.push(
+			`Governed sandbox is unavailable (${codes.join(", ") || "unknown sandbox failure"}); no host fallback is permitted.`,
+		);
+	}
+
+	// This is deliberately a permanent blocker until execution is delegated to
+	// the signed tape + ActionGateway + OCI sandbox path. A syntactically valid
+	// envelope is not proof of a verified signature or usable authority.
+	blockers.push(
+		"Governed execution is unavailable until signed-tape verification, ActionGateway authorization, and OCI sandbox initialization are configured.",
+	);
+	blockers.push(
+		"Governed authority broker is unavailable; no approval was recorded and no execution authority was created.",
+	);
+
+	return {
+		governance: "preview",
+		status: "blocked",
+		executionStarted: false,
+		approval: {
+			requested: options.approvalRequested,
+			state: "not-recorded",
+		},
+		authorityBroker: {
+			state: "unavailable",
+			code: GOVERNED_AUTHORITY_BROKER_REQUIRED_CODE,
+		},
+		packet: {
+			unitId,
+			executionRole,
+			executionRoleExplicit,
+			provenancePresent: provenanceRef !== null,
+			capabilityBundlePresent,
+			acceptanceContractPresent,
+			trustScopePresent,
+		},
+		...(envelope === undefined ? {} : { envelope }),
+		sandbox: options.sandbox,
+		blockers,
+	};
+}
+
+function formatGovernedRunPreview(preview: GovernedRunPreview): string[] {
+	const envelopeLines =
+		preview.envelope === undefined
+			? []
+			: [
+					`envelope-schema: DispatchEnvelopeV${preview.envelope.schemaVersion}`,
+					`envelope-version: ${preview.envelope.schemaVersion}`,
+					`envelope-digest: ${preview.envelope.envelopeDigest}`,
+					`envelope-verification: ${preview.envelope.verification}`,
+					...(preview.envelope.actionEvidenceVersion === undefined
+						? []
+						: [
+								`envelope-action-evidence: ${preview.envelope.actionEvidenceVersion}`,
+							]),
+				];
+
+	return [
+		"Governed run preview: execution blocked",
+		`unit: ${preview.packet.unitId ?? "(invalid)"}`,
+		`role: ${preview.packet.executionRole ?? "(invalid)"}${
+			preview.packet.executionRoleExplicit ? "" : " (legacy default; blocked)"
+		}`,
+		`provenance: ${preview.packet.provenancePresent ? "present" : "missing"}`,
+		`capability: ${preview.packet.capabilityBundlePresent ? "present" : "missing"}`,
+		`acceptance: ${preview.packet.acceptanceContractPresent ? "present" : "missing"}`,
+		`trust-scope: ${preview.packet.trustScopePresent ? "present" : "missing"}`,
+		`approval: ${preview.approval.requested ? "requested" : "not requested"} (${preview.approval.state})`,
+		`authority-broker: ${preview.authorityBroker.state} (${preview.authorityBroker.code})`,
+		...envelopeLines,
+		`governed-sandbox: ${preview.sandbox.state} (${preview.sandbox.host.environment})`,
+		"blockers:",
+		...preview.blockers.map((blocker) => `  - ${blocker}`),
+		"Use --raw only when you explicitly accept unsafe, legacy execution.",
+	];
+}
+
+/**
+ * The candidate-producing result deliberately carries no target-branch or
+ * promotion authority. The privileged host keeps the candidate identity and
+ * signed evidence opaque until the separate review and promotion stages.
+ */
+interface GovernedCandidateRunOutput {
+	readonly governance: "governed";
+	readonly status: "candidate-awaiting-review";
+	readonly executionStarted: true;
+	readonly promotion: {
+		readonly state: "not-authorized";
+	};
+}
+
+function buildGovernedCandidateRunOutput(): GovernedCandidateRunOutput {
+	return Object.freeze({
+		governance: "governed" as const,
+		status: "candidate-awaiting-review" as const,
+		executionStarted: true as const,
+		promotion: Object.freeze({ state: "not-authorized" as const }),
+	});
+}
+
+function formatGovernedCandidateRun(
+	output: GovernedCandidateRunOutput,
+): readonly string[] {
+	return [
+		"Governed candidate created: awaiting review",
+		`execution-started: ${output.executionStarted}`,
+		"promotion: not authorized (candidate review and a bound promotion decision are required)",
+	];
+}
+
+function emitGovernedRunPreview(
+	preview: GovernedRunPreview,
+	json: boolean,
+	stdout: (line: string) => void,
+): number {
+	if (json) {
+		stdout(formatJson(preview));
+	} else {
+		for (const line of formatGovernedRunPreview(preview)) {
+			stdout(line);
+		}
+	}
+	return 2;
+}
+
+/**
+ * A host call can fail after admission or after an external effect. The CLI
+ * deliberately cannot collapse that into a failed preview or retry locally:
+ * only the privileged host has the activity identity and tape state needed to
+ * reconcile the outcome safely.
+ */
+interface GovernedHostRecoveryOutput {
+	readonly governance: "governed";
+	readonly status: "recovery-required";
+	readonly executionStarted: "unknown";
+	readonly promotion: {
+		readonly state: "not-authorized";
+	};
+	readonly recovery: {
+		readonly action: "contact-host";
+		readonly retry: "blocked";
+		/** Present only for a locally observable host-result integrity failure. */
+		readonly reason?: "root-integrity-violation" | "packet-binding-violation";
+	};
+}
+
+type GovernedHostRecoveryReason = NonNullable<
+	GovernedHostRecoveryOutput["recovery"]["reason"]
+>;
+
+function buildGovernedHostRecoveryOutput(
+	reason?: GovernedHostRecoveryReason,
+): GovernedHostRecoveryOutput {
+	return Object.freeze({
+		governance: "governed" as const,
+		status: "recovery-required" as const,
+		executionStarted: "unknown" as const,
+		promotion: Object.freeze({ state: "not-authorized" as const }),
+		recovery: Object.freeze({
+			action: "contact-host" as const,
+			retry: "blocked" as const,
+			...(reason === undefined ? {} : { reason }),
+		}),
+	});
+}
+
+function emitGovernedHostRecovery(
+	json: boolean,
+	stdout: (line: string) => void,
+	reason?: GovernedHostRecoveryReason,
+): number {
+	const output = buildGovernedHostRecoveryOutput(reason);
+	if (json) {
+		stdout(formatJson(output));
+	} else {
+		stdout("Governed host outcome is unknown: recovery required");
+		stdout("execution-started: unknown");
+		stdout("promotion: not authorized");
+		stdout(
+			"retry: blocked; contact the privileged host to reconcile this session",
+		);
+		if (reason === "root-integrity-violation") {
+			stdout(
+				"root-integrity: changed target observed; do not retry until the privileged host reconciles it",
+			);
+		} else if (reason === "packet-binding-violation") {
+			stdout(
+				"packet-binding: host result does not match the exact governed packet; do not retry until the privileged host reconciles it",
+			);
+		}
+	}
+	return 2;
+}
+
+function assertGovernedProjectInitialized(projectRoot: string): void {
+	const stateDirectory = join(projectRoot, ".buildplane");
+	if (
+		!existsSync(join(stateDirectory, "project.json")) ||
+		!existsSync(join(stateDirectory, "state.db"))
+	) {
+		throw new Error(
+			"Buildplane project is not initialized. Run `buildplane init` first.",
+		);
+	}
+}
+
+/**
+ * The CLI can observe only whether its checked-out target remained unchanged.
+ * The privileged host is responsible for verifying detached signatures,
+ * reducer state, and the native completion receipt before it returns this
+ * candidate-only result. Any malformed result, root mutation, or unavailable
+ * observation is an unknown-effect recovery condition—not a retry signal.
+ *
+ * The post-outcome check is containment rather than authorization: the shipped
+ * resolver remains unavailable until a native host can put the target root
+ * behind a read-only OCI mount. It makes a mutation observable even if the
+ * host throws or returns malformed data, but it cannot roll a target change
+ * back safely from the CLI process.
+ */
+class GovernedRootIntegrityViolation extends Error {
+	constructor() {
+		super(
+			"checked-out target changed during governed candidate execution; host reconciliation is required.",
+		);
+		this.name = "GovernedRootIntegrityViolation";
+	}
+}
+
+class GovernedCandidatePacketBindingViolation extends Error {
+	constructor() {
+		super(
+			"host candidate receipt is not bound to the exact original governed packet.",
+		);
+		this.name = "GovernedCandidatePacketBindingViolation";
+	}
+}
+
+class GovernedPlanForgeAdmissionRootIntegrityViolation extends Error {
+	constructor() {
+		super(
+			"checked-out target changed during governed PlanForge admission; host reconciliation is required.",
+		);
+		this.name = "GovernedPlanForgeAdmissionRootIntegrityViolation";
+	}
+}
+
+class GovernedPlanForgeAdmissionSourceIntegrityViolation extends Error {
+	constructor() {
+		super(
+			"PlanForge input source changed during governed admission; host reconciliation is required.",
+		);
+		this.name = "GovernedPlanForgeAdmissionSourceIntegrityViolation";
+	}
+}
+
+class GovernedPlanForgeAdmissionSourceBindingViolation extends Error {
+	constructor() {
+		super(
+			"host PlanForge admission is not bound to the exact input source bytes.",
+		);
+		this.name = "GovernedPlanForgeAdmissionSourceBindingViolation";
+	}
+}
+
+function contentDigest(value: Uint8Array): string {
+	return `sha256:${createHash("sha256").update(value).digest("hex")}`;
+}
+
+function canonicalPlanForgeHostReferenceDigest(reference: string): string {
+	return `sha256:${createHash("sha256")
+		.update(`${PLANFORGE_HOST_REFERENCE_DIGEST_DOMAIN}${reference}`)
+		.digest("hex")}`;
+}
+
+function canonicalPlanForgeRepositoryIdentityDigest(
+	root: GovernedRootSnapshot,
+): string {
+	return `sha256:${createHash("sha256")
+		.update(
+			`${PLANFORGE_REPOSITORY_IDENTITY_DIGEST_DOMAIN}${JSON.stringify({
+				schema_version: 1,
+				project_root: root.canonicalProjectRoot,
+				target_ref: root.targetRef,
+				base_commit_sha: root.head,
+				base_tree: root.tree,
+			})}`,
+		)
+		.digest("hex")}`;
+}
+
+/**
+ * `openSession` and `admit` are legacy structural JavaScript callbacks. Their
+ * input carries the checked-out project root, so invoking either would hand an
+ * untrusted host a target checkout capable of mutation before any sealed
+ * PromotionDecision V3 exists. There is deliberately no JavaScript escape
+ * hatch here: a future implementation must replace this with a native,
+ * capability-bound host contract that never exposes a writable target
+ * checkout.
+ */
+function requireNativeGovernedHostContract(): void {
+	throw new Error(
+		"Governed host execution is unavailable: no native trusted host contract can keep the target checkout immutable before a sealed PromotionDecision V3.",
+	);
+}
+
+async function executeHostCandidateSession(
+	projectRoot: string,
+	openSession: () => Promise<HostOwnedCandidateSessionV1>,
+	sourcePacket?: unknown,
+	expectedEnvelopeDigest?: string,
+): Promise<void> {
+	// This must precede both `openSession()` and `session.run()`. The callback
+	// receives `projectRoot` only below, after a native contract exists.
+	requireNativeGovernedHostContract();
+	const before = captureGovernedRootSnapshot(projectRoot);
+	if (!before) {
+		throw new Error(
+			"governed root integrity snapshot is unavailable; the host candidate session was not opened.",
+		);
+	}
+	let sessionFailure: unknown;
+	try {
+		const session = parseHostCandidateSession(await openSession());
+		const result = parseHostCandidateResult(await session.run());
+		if (result.recoveryRef !== session.recoveryRef) {
+			throw new TypeError(
+				"host candidate session and completion result must bind the same recovery identity.",
+			);
+		}
+		assertCandidateReceiptMatchesInvocation(
+			result.candidateReceipt,
+			before,
+			sourcePacket,
+			expectedEnvelopeDigest,
+		);
+	} catch (error) {
+		sessionFailure = error;
+	}
+	if (!rootSnapshotMatches(before, projectRoot)) {
+		throw new GovernedRootIntegrityViolation();
+	}
+	if (sessionFailure !== undefined) {
+		throw sessionFailure;
+	}
+}
+
+function assertPlanForgeCandidateReceiptMatchesInvocation(
+	receipt: ParsedHostPlanForgeCandidateReceipt,
+	before: GovernedRootSnapshot,
+	admissionRef: string,
+	taskRef: string,
+	repositoryIdentityDigest: string,
+): void {
+	assertCandidateReceiptMatchesInvocation(receipt, before, undefined);
+	const expectedAdmissionRefDigest =
+		canonicalPlanForgeHostReferenceDigest(admissionRef);
+	const expectedTaskRefDigest = canonicalPlanForgeHostReferenceDigest(taskRef);
+	if (
+		receipt.planForgeBinding.admissionRefDigest !==
+			expectedAdmissionRefDigest ||
+		receipt.planForgeBinding.taskRefDigest !== expectedTaskRefDigest ||
+		receipt.planForgeBinding.repositoryIdentityDigest !==
+			repositoryIdentityDigest
+	) {
+		throw new TypeError(
+			"host PlanForge candidate receipt is not bound to the requested admission, task, and repository identity.",
+		);
+	}
+}
+
+/**
+ * This is intentionally separate from generic candidate execution. A
+ * PlanForge task has no CLI-visible packet, so its signed completion must
+ * prove the opaque admission/task pair and registered repository identity.
+ */
+async function executeHostPlanForgeCandidateSession(
+	projectRoot: string,
+	admissionRef: string,
+	taskRef: string,
+	openSession: () => Promise<HostOwnedPlanForgeCandidateSessionV1>,
+): Promise<void> {
+	// PlanForge uses the same legacy callback boundary and therefore cannot be
+	// opened until the native capability-bound host contract is available.
+	requireNativeGovernedHostContract();
+	const before = captureGovernedRootSnapshot(projectRoot);
+	if (!before) {
+		throw new Error(
+			"governed root integrity snapshot is unavailable; the host PlanForge candidate session was not opened.",
+		);
+	}
+	const repositoryIdentityDigest =
+		canonicalPlanForgeRepositoryIdentityDigest(before);
+	let sessionFailure: unknown;
+	try {
+		const session = parseHostPlanForgeCandidateSession(await openSession());
+		const result = parseHostPlanForgeCandidateResult(await session.run());
+		if (result.recoveryRef !== session.recoveryRef) {
+			throw new TypeError(
+				"host PlanForge candidate session and completion result must bind the same recovery identity.",
+			);
+		}
+		assertPlanForgeCandidateReceiptMatchesInvocation(
+			result.candidateReceipt,
+			before,
+			admissionRef,
+			taskRef,
+			repositoryIdentityDigest,
+		);
+	} catch (error) {
+		sessionFailure = error;
+	}
+	if (!rootSnapshotMatches(before, projectRoot)) {
+		throw new GovernedRootIntegrityViolation();
+	}
+	if (sessionFailure !== undefined) {
+		throw sessionFailure;
+	}
+}
+
+/**
+ * PlanForge admission is itself a privileged host activity. The CLI cannot
+ * roll a root change back, but it can ensure a changed target always wins over
+ * a host return or host error so no local caller observes a successful
+ * admission after an unknown effect.
+ */
+async function executeHostPlanForgeAdmission(
+	projectRoot: string,
+	sourcePath: string,
+	expectedSourceDigest: string,
+	admit: () => Promise<unknown>,
+): Promise<ParsedHostPlanForgeAdmission> {
+	// PlanForge admission also receives `projectRoot` through a legacy callback.
+	// Do not invoke it until a native capability-bound contract exists.
+	requireNativeGovernedHostContract();
+	const before = captureGovernedRootSnapshot(projectRoot);
+	if (!before) {
+		throw new Error(
+			"governed root integrity snapshot is unavailable; the host PlanForge admission was not opened.",
+		);
+	}
+
+	let admission: ParsedHostPlanForgeAdmission | undefined;
+	let admissionFailure: unknown;
+	try {
+		admission = parseHostPlanForgeAdmission(await admit());
+	} catch (error) {
+		admissionFailure = error;
+	}
+	if (!rootSnapshotMatches(before, projectRoot)) {
+		throw new GovernedPlanForgeAdmissionRootIntegrityViolation();
+	}
+	let sourceMatches = false;
+	try {
+		sourceMatches =
+			contentDigest(new Uint8Array(readFileSync(sourcePath))) ===
+			expectedSourceDigest;
+	} catch {
+		// A removed or unreadable input is just as unsafe as a changed input.
+	}
+	if (!sourceMatches) {
+		throw new GovernedPlanForgeAdmissionSourceIntegrityViolation();
+	}
+	if (admissionFailure !== undefined) {
+		throw admissionFailure;
+	}
+	if (admission === undefined) {
+		throw new Error(
+			"host PlanForge admission completed without an admission result.",
+		);
+	}
+	if (admission.planSourceDigest !== expectedSourceDigest) {
+		throw new GovernedPlanForgeAdmissionSourceBindingViolation();
+	}
+	return admission;
+}
+
+function governedHostRecoveryReason(
+	error: unknown,
+): GovernedHostRecoveryReason | undefined {
+	return error instanceof GovernedRootIntegrityViolation
+		? "root-integrity-violation"
+		: error instanceof GovernedCandidatePacketBindingViolation
+			? "packet-binding-violation"
+			: undefined;
+}
+
+/**
+ * A caller-provided envelope is never authority in this process. Before its
+ * exact bytes cross to the privileged host, reject cheap deterministic
+ * mismatches so an unrelated or stale proposal cannot even open a broker
+ * session. Detached-signature, signed-tape, realm, and final policy checks
+ * remain mandatory host-owned work.
+ */
+async function preauthorizedEnvelopeBlocker(
+	projectRoot: string,
+	sourcePacket: unknown,
+	envelope: DispatchEnvelopePreview | undefined,
+): Promise<string | undefined> {
+	if (!envelope) {
+		return "Preauthorized governed admission requires --envelope <path>.";
+	}
+	if (
+		envelope.schemaVersion !== 3 ||
+		envelope.actionEvidenceVersion !== "sealed_v3"
+	) {
+		return "Preauthorized governed admission requires a sealed DispatchEnvelopeV3 with actionEvidenceVersion sealed_v3.";
+	}
+	if (envelope.trustTier !== "governed" || envelope.commitMode !== "atomic") {
+		return "Preauthorized governed admission requires a governed, atomic dispatch envelope.";
+	}
+	if (envelope.executionRole !== "implementer") {
+		return "Preauthorized governed admission requires an implementer dispatch envelope; reviewer, adversary, and judge roles are read-only.";
+	}
+	let expectedGovernedPacketDigest: string;
+	try {
+		expectedGovernedPacketDigest =
+			strictGovernedSourcePacketDigest(sourcePacket);
+	} catch {
+		return "Preauthorized dispatch envelope packet binding could not be verified.";
+	}
+	const expiresAt = Date.parse(envelope.expiresAt);
+	if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
+		return "Preauthorized dispatch envelope is expired or has an invalid expiry.";
+	}
+	const source = asPreviewRecord(sourcePacket);
+	const unit = asPreviewRecord(source?.unit);
+	const unitId = previewString(unit, "id");
+	const executionRole = previewString(source, "execution_role");
+	const provenanceRef = previewString(source, "provenance_ref");
+	const capabilityDigest = previewString(source, "capability_bundle_digest");
+	if (
+		unitId === null ||
+		executionRole === null ||
+		provenanceRef === null ||
+		capabilityDigest === null ||
+		source?.capability_bundle === undefined ||
+		source.acceptance_contract === undefined ||
+		source.trust_scope === undefined
+	) {
+		return "Preauthorized governed admission requires an explicit governed packet identity and contracts.";
+	}
+	if (
+		envelope.unitId !== unitId ||
+		envelope.executionRole !== executionRole ||
+		envelope.provenanceRef !== provenanceRef
+	) {
+		return "Preauthorized dispatch envelope does not match the original packet identity.";
+	}
+	const root = captureGovernedRootSnapshot(projectRoot);
+	if (!root || envelope.baseCommitSha !== root.head) {
+		return "Preauthorized dispatch envelope is stale or not bound to the checked-out target base.";
+	}
+	if (envelope.governedPacketDigest === undefined) {
+		return "Preauthorized sealed DispatchEnvelopeV3 is missing governedPacketDigest.";
+	}
+	if (envelope.governedPacketDigest !== expectedGovernedPacketDigest) {
+		return "Preauthorized dispatch envelope does not bind the original packet digest.";
+	}
+	return undefined;
+}
+
+function withGovernedPreviewBlocker(
+	preview: GovernedRunPreview,
+	blocker: string,
+): GovernedRunPreview {
+	return Object.freeze({
+		...preview,
+		blockers: Object.freeze([...preview.blockers, blocker]),
+	});
+}
+
+/**
+ * Handle the governed front door before the generic legacy orchestrator is
+ * constructed. The host sees the original packet bytes and is solely
+ * responsible for strict parsing, CAS publication, signed admission, replay
+ * resolution, and OCI initialization. This CLI never creates a signer,
+ * resolver, raw worker, or promotion capability as a fallback.
+ */
+async function runGovernedRunCommand(
+	args: readonly string[],
+	options: {
+		readonly cwd: string;
+		readonly stdout: (line: string) => void;
+		readonly dependencies?: RunCliDependencies;
+	},
+): Promise<number> {
+	if (args.includes("--help")) {
+		for (const line of formatRunHelp()) {
+			options.stdout(line);
+		}
+		return 0;
+	}
+
+	const runArguments = parseRunCommandArguments(args);
+	if (runArguments.raw) {
+		throw new Error(
+			"The governed run front door cannot execute --raw packets.",
+		);
+	}
+
+	assertGovernedProjectInitialized(options.cwd);
+	const projectRoot = resolve(options.cwd);
+	if (runArguments.kind === "recovery-resume") {
+		const broker = await resolveHostOwnedGovernedBroker();
+		if (!broker) {
+			return emitGovernedHostRecovery(runArguments.json, options.stdout);
+		}
+		try {
+			await executeHostCandidateSession(projectRoot, () =>
+				broker.openRecoverySession({
+					projectRoot,
+					recoveryReference: runArguments.recoveryReference,
+					approval: "operator-requested",
+				}),
+			);
+		} catch (error) {
+			return emitGovernedHostRecovery(
+				runArguments.json,
+				options.stdout,
+				governedHostRecoveryReason(error),
+			);
+		}
+
+		const output = buildGovernedCandidateRunOutput();
+		if (runArguments.json) {
+			options.stdout(formatJson(output));
+		} else {
+			for (const line of formatGovernedCandidateRun(output)) {
+				options.stdout(line);
+			}
+		}
+		return 0;
+	}
+
+	const packetPath = resolve(options.cwd, runArguments.packetPath);
+	const packetSource = readFileSync(packetPath, "utf8");
+	const sourcePacket = JSON.parse(packetSource);
+	const packet = options.dependencies?.parsePacket
+		? options.dependencies.parsePacket(packetPath)
+		: await loadPacket(packetPath);
+	const loadedEnvelope = runArguments.envelopePath
+		? await loadDispatchEnvelopePreview(
+				resolve(options.cwd, runArguments.envelopePath),
+			)
+		: undefined;
+	const envelope = loadedEnvelope?.preview;
+	const sandbox = await probeGovernedSandboxForPreview();
+	const preview = buildGovernedRunPreview(packet, {
+		approvalRequested: runArguments.approve,
+		sandbox,
+		sourcePacket,
+		...(envelope === undefined ? {} : { envelope }),
+	});
+	const sourceAdmissionBlocker =
+		governedSourcePacketAdmissionBlocker(sourcePacket);
+	if (sourceAdmissionBlocker !== undefined) {
+		return emitGovernedRunPreview(
+			withGovernedPreviewBlocker(preview, sourceAdmissionBlocker),
+			runArguments.json,
+			options.stdout,
+		);
+	}
+
+	if (loadedEnvelope !== undefined) {
+		const blocker = await preauthorizedEnvelopeBlocker(
+			projectRoot,
+			sourcePacket,
+			envelope,
+		);
+		if (blocker !== undefined) {
+			return emitGovernedRunPreview(
+				withGovernedPreviewBlocker(preview, blocker),
+				runArguments.json,
+				options.stdout,
+			);
+		}
+	}
+
+	// An operator request asks the host to establish fresh authority. Without
+	// one, the exact structural V3 envelope bytes are the sole preauthorization
+	// input; the host must still verify their detached signature and tape
+	// binding before it may open an activity session.
+	if (!runArguments.approve && loadedEnvelope === undefined) {
+		return emitGovernedRunPreview(preview, runArguments.json, options.stdout);
+	}
+
+	const broker = await resolveHostOwnedGovernedBroker();
+	if (!broker) {
+		return emitGovernedRunPreview(preview, runArguments.json, options.stdout);
+	}
+
+	try {
+		let approval: HostOwnedCandidateApprovalV1;
+		if (runArguments.approve) {
+			approval = "operator-requested";
+		} else {
+			const preauthorizedEnvelope = loadedEnvelope;
+			if (preauthorizedEnvelope === undefined) {
+				return emitGovernedRunPreview(
+					preview,
+					runArguments.json,
+					options.stdout,
+				);
+			}
+			approval = {
+				preauthorizedEnvelopeSource: preauthorizedEnvelope.source,
+			};
+		}
+		await executeHostCandidateSession(
+			projectRoot,
+			() =>
+				broker.openCandidateSession({
+					kind: "new-candidate",
+					packetSource,
+					projectRoot,
+					approval,
+				}),
+			sourcePacket,
+			runArguments.approve ? undefined : loadedEnvelope?.preview.envelopeDigest,
+		);
+	} catch (error) {
+		return emitGovernedHostRecovery(
+			runArguments.json,
+			options.stdout,
+			governedHostRecoveryReason(error),
+		);
+	}
+
+	const output = buildGovernedCandidateRunOutput();
+	if (runArguments.json) {
+		options.stdout(formatJson(output));
+	} else {
+		for (const line of formatGovernedCandidateRun(output)) {
+			options.stdout(line);
+		}
+	}
+	return 0;
+}
+
+function withUnsafeRunGovernance(
+	result: Record<string, unknown>,
+): Record<string, unknown> {
+	const { receipt: _legacyReceipt, ...unsafeResult } = result;
+	return {
+		...unsafeResult,
+		governance: "unsafe",
+		trustedReceipt: false,
+	};
+}
+
 function formatReplayHelp(): string[] {
 	return [
-		"buildplane replay <run-id> [options]",
+		"buildplane replay <run-id> --raw [options]",
 		"",
 		"  Re-executes the stored packet snapshot from a prior run and records a new run.",
+		"  This is an unsafe legacy execution lane: it is not a governed replay and",
+		"  cannot produce a trusted receipt. Pass --raw to acknowledge that boundary.",
 		"  Use this when you want to try the same unit again with a changed policy or",
 		"  runtime setting. For read-only event-tape reconstruction, use:",
 		"",
 		"    buildplane ledger replay --run-id <run-id> --workspace <path>",
 		"",
 		"  Options:",
+		"    --raw               Required acknowledgement for unsafe legacy execution",
 		"    --json              Machine-readable replay result",
 		"    --policy <profile>  Override the policy profile for the replay run",
 	];
@@ -900,51 +3094,38 @@ function formatPlanForgeHelp(): string[] {
 		"    --input <file>  Markdown PlanForge goal fixture to validate",
 		"    --json          Required; prints the dry-run plan as JSON",
 		"",
-		"buildplane planforge admit --input <file> --approve --operator <id> [--json]",
+		"buildplane planforge admit --input <file> --approve [--json]",
 		"",
-		"  Records an operator-approved admission for a PASS plan as a signed",
-		"  plan_admitted event on the L0 tape (kernel key; --operator is the",
-		"  decided_by payload field). Fails closed with no tape write on a non-PASS",
-		"  plan, a missing --approve, or a missing --operator. Idempotent: a plan",
-		"  already admitted is a no-op.",
-		"",
-		"  Options:",
-		"    --input <file>   Markdown PlanForge goal fixture to admit",
-		"    --approve        Required; explicit operator approval to sign the admission",
-		"    --operator <id>  Required; deciding operator identity (decided_by)",
-		"    --json           Prints the admission result as JSON",
-		"",
-		"buildplane planforge dispatch --input <file> [--json] [--no-enforce-acceptance]",
-		"",
-		"  Dispatches an operator-admitted plan as one run per PlanForgeTask through",
-		"  the kernel run loop. Fails closed (plan-not-admitted) with no run when no",
-		"  signed plan_admitted exists on the tape. Tasks run sequentially so a",
-		"  dependent task does not start if its predecessor fails.",
+		"  Sends the original untrusted plan bytes to a privileged host authority",
+		"  broker. The host owns operator identity, task binding, signed-tape and",
+		"  repository verification, expiry, and all admission authority. The CLI",
+		"  returns only opaque admission/task references and digests.",
 		"",
 		"  Options:",
-		"    --input <file>           Markdown PlanForge goal fixture to dispatch",
-		"    --json                   Prints the dispatch result (per-task run ids) as JSON",
-		"    --no-enforce-acceptance  Skip the finalization acceptance gate (diff-scope +",
-		"                             verificationCommands). The gate is ON by default and",
-		"                             worktree deps are provisioned (lockfile-aware:",
-		"                             pnpm/npm ci/npm install) before checks run; use this",
-		"                             flag only when worktree dependencies cannot be",
-		"                             provisioned.",
-		"    --model <id>             Worker model override (default: the dispatch default)",
-		"    --max-turns <n>          Worker turn cap threaded to the executor",
-		"    --worker-allowed-tools <a,b>  Claude Code tool grant (default: Edit,Write,",
-		"                             Read,Glob,Grep,Bash — the loop's R7 grant)",
-		"    --worker-timeout-ms <ms> Hard per-dispatch worker timeout (floor 60000)",
+		"    --input <file>   Untrusted PlanForge source to hand to the host unchanged",
+		"    --approve        Required; requests host-authenticated admission",
+		"    --json           Prints opaque references and host-returned digests as JSON",
+		"",
+		"buildplane planforge dispatch --admission-ref <opaque-host-ref> --task-ref <opaque-host-ref> [--json]",
+		"",
+		"  Opens one immutable candidate for a task already admitted by the",
+		"  privileged host. The CLI forwards only opaque host-issued references;",
+		"  it never compiles a PlanForge packet, runs an ambient model worker, or",
+		"  exposes promotion authority.",
+		"",
+		"  Options:",
+		"    --admission-ref <ref>  Opaque host-issued PlanForge admission reference",
+		"    --task-ref <ref>       Opaque host-issued task reference from that admission",
+		"    --json                 Machine-readable candidate status",
+		"",
+		"  Legacy `planforge dispatch --input ...` remains blocked because it launches",
+		"  ambient model workers. There is deliberately no PlanForge --raw fallback.",
 		"",
 		"buildplane planforge resume --input <file> [--no-enforce-acceptance] [--json]",
 		"",
-		"  Reconstructs the admitted plan cycle from the signed tape, verifies the",
-		"  plan_admitted digest/idempotency against --input, skips already completed",
-		"  activities, executes only the remaining suffix under the M4 acceptance gate,",
-		"  and emits a missing plan_receipt when the plan reaches a terminal state. A",
-		"  recorded activity only counts toward a `completed` receipt when the tape",
-		"  carries a matching passed `acceptance_recorded` verdict; otherwise the run",
-		"  fail-closes (`failed`, reason `acceptance-not-evaluated`).",
+		"  Currently blocked with dispatch. The legacy recovery path can resume an",
+		"  ambient worker and write a signed plan_receipt without a candidate-bound",
+		"  promotion transaction.",
 		"",
 		"  Options:",
 		"    --input <file>           Markdown PlanForge goal fixture to resume",
@@ -955,12 +3136,8 @@ function formatPlanForgeHelp(): string[] {
 		"",
 		"buildplane planforge recover [--no-enforce-acceptance] [--json]",
 		"",
-		"  Scans storage for orphaned `running` PlanForge dispatches (via the dispatch",
-		"  manifest sidecar) and replays the signed tape to resume each, re-establishing",
-		"  worker trust FROM THE TAPE, emitting any missing plan_receipt, and reconciling",
-		"  the orphaned `running` storage row to the receipt outcome. The tape is",
-		"  authoritative over the storage status field. No --input required. Acceptance",
-		"  enforcement is ON by default (per the resume rules above).",
+		"  Currently blocked with dispatch/resume until PlanForge recovery is driven",
+		"  by the candidate/promotion reducer rather than legacy activity records.",
 		"",
 		"  Options:",
 		"    --no-enforce-acceptance  Resume every orphan without the acceptance gate",
@@ -968,11 +3145,11 @@ function formatPlanForgeHelp(): string[] {
 		"",
 		"buildplane planforge plan --roadmap <file> --out <plan.md> --trusted-base <sha> [--remote <url>] [--json]",
 		"",
-		"  Reads the L0 tape's completed roadmap slices, selects the next eligible",
-		"  slice whose dependencies are satisfied, deterministically emits its plan.md",
-		"  in the PlanForge ## Tasks grammar, and validates it. Writes the plan.md and",
-		"  exits 0 iff the emitted plan validates PASS. The --once loop path uses this",
-		"  deterministic emitter; the LLM planning-worker path is gated behind a later flag.",
+		"  Selects the next eligible slice from the governed workflow projection and",
+		"  deterministically emits its plan.md in the PlanForge ## Tasks grammar.",
+		"  Legacy plan_receipt rows are ignored because they do not bind a candidate",
+		"  promotion. Until PlanForge is migrated, this conservatively treats prior",
+		"  legacy executions as unfinished.",
 		"",
 		"  Options:",
 		"    --roadmap <file>     Machine-readable roadmap (default docs/roadmap.json)",
@@ -983,32 +3160,16 @@ function formatPlanForgeHelp(): string[] {
 		"",
 		"buildplane planforge authorize-envelope --milestone <m> --side-effects code-edit --path-globs '<csv>' --max-iterations N --token-budget N --verification-cmds '<csv>' --expires-at <rfc3339> --approve --operator <id> [--json]",
 		"",
-		"  Records a one-time operator-authorized bounded envelope as a signed",
-		"  operator_decision_recorded event (subject=authorize-envelope, kernel key).",
-		"  The supervisor auto-admits a planner proposal iff it is a SUBSET of this",
-		"  envelope. Fails closed without --approve/--operator. Idempotent on the",
-		"  envelope digest: re-authorizing the identical envelope is a no-op.",
-		"",
-		"  Options:",
-		"    --milestone <m>         Required; roadmap milestone the envelope authorizes",
-		"    --side-effects <csv>    Required; allowed side-effect kinds (e.g. code-edit)",
-		"    --path-globs <csv>      Required; allowed worktree path globs",
-		"    --max-iterations N      Required; positive cap on loop iterations",
-		"    --token-budget N        Required; positive cumulative token budget",
-		"    --verification-cmds <csv>  Required; allowed verification command argv0s",
-		"    --expires-at <rfc3339>  Required; envelope expiry instant",
-		"    --approve               Required; explicit operator approval to sign",
-		"    --operator <id>         Required; deciding operator identity (decided_by)",
-		"    --json                  Prints the authorization result as JSON",
+		"  Currently blocked. This CLI cannot mint a local signed envelope or append",
+		"  authority-looking PlanForge tape records. A verifier-backed V3 authority",
+		"  broker must establish admission before this command can be enabled.",
 		"",
 		"buildplane planforge loop [--once | --max-iterations=N] [--max-turns=N] [--max-tokens=N] [--wall-clock-ms=N] [--model <id>] [--reset] [--json]",
 		"",
-		"  Supervisor: drive plan -> dry-run -> envelope-check -> admit -> dispatch ->",
-		"  accept -> merge -> re-anchor across iterations, persisting loop-state.json",
-		"  atomically after every transition and resuming from a persisted state.",
-		"  Stops on terminal condition / .buildplane/loop.stop / acceptance-FAIL /",
-		"  dispatch-error (infra death: no side effects + non-zero exit) / envelope",
-		"  breach / cumulative token budget / max-iterations / planner error.",
+		"  The normal CLI loop is currently blocked before admission or dispatch: its",
+		"  legacy worker step auto-merges before structured review. `--reset` remains",
+		"  available because it only removes local loop state. Internally injected",
+		"  dispatch implementations may still exercise the deterministic supervisor.",
 		"",
 		"  Options:",
 		"    --once                  Run exactly one slice (equivalent to --max-iterations=1)",
@@ -1055,8 +3216,9 @@ function formatTraceHelp(): string[] {
 	return [
 		"buildplane trace export --run <run-id> --format otel-json --out <file> [--json]",
 		"",
-		"  Exports a local OpenTelemetry-shaped trace artifact from stored",
-		"  run evidence. This command never sends telemetry to a vendor.",
+		"  Exports an unsafe local OpenTelemetry-shaped trace artifact from stored",
+		"  run evidence. It is not a signed-tape projection or governed receipt,",
+		"  and this command never sends telemetry to a vendor.",
 		"",
 		"  Options:",
 		"    --run <id>           Run id to export",
@@ -1185,6 +3347,7 @@ interface BuildplaneCliOrchestrator {
 			runId?: string;
 			parentRunId?: string;
 			strategyId?: string;
+			trustLane?: "legacy" | "unsafe" | "governed";
 		},
 	): {
 		run: { id: string; status: string };
@@ -1198,6 +3361,7 @@ interface BuildplaneCliOrchestrator {
 			runId?: string;
 			parentRunId?: string;
 			strategyId?: string;
+			trustLane?: "legacy" | "unsafe" | "governed";
 		},
 	): Promise<{
 		run: { id: string; status: string };
@@ -1207,6 +3371,7 @@ interface BuildplaneCliOrchestrator {
 	runGraphAsync(
 		graph: unknown,
 		eventBus?: unknown,
+		options?: { lane?: "raw-legacy" },
 	): Promise<{
 		outcome: "passed" | "failed";
 		nodes: Array<{ unitId: string; status: string; runId?: string }>;
@@ -1214,10 +3379,11 @@ interface BuildplaneCliOrchestrator {
 	runStrategy(
 		strategy: unknown,
 		eventBus?: unknown,
+		options?: { lane?: "raw-legacy" | "governed-candidate" },
 	): Promise<{
 		strategyId: string;
 		mode: string;
-		outcome: "passed" | "failed" | "mixed";
+		outcome: "passed" | "failed" | "mixed" | "awaiting-promotion";
 		childResults: Map<string, { run: { id: string; status: string } }>;
 		rounds?: ReadonlyArray<
 			Map<string, { run: { id: string; status: string } }>
@@ -1294,10 +3460,15 @@ interface CliOrchestratorBundle {
 	honchoAdapter?: HonchoPortLike;
 	userId?: string;
 	currentBranch?: string;
-	/** Mutable slot — swapped per-run to route through the ledger-wrapped ToolRegistry. */
-	commandExecutor: {
-		executePacket: (packet: unknown, root: string) => unknown;
-	};
+	/**
+	 * Scope a command execution gateway to one asynchronous run. The router sees
+	 * only the immutable gateway captured for that run; no shared executor slot
+	 * is ever replaced while another run may be in flight.
+	 */
+	runWithCommandGateway: <T>(
+		gateway: RouterCommandExecutor,
+		operation: () => T,
+	) => T;
 }
 
 interface ToolRegistryTapeContext {
@@ -1346,7 +3517,45 @@ interface RouterAsyncExecutor {
 
 /** Command (sync) executor the router uses for `execution` packets. */
 interface RouterCommandExecutor {
-	executePacket: (packet: unknown, root: string) => unknown;
+	readonly executePacket: (packet: unknown, root: string) => unknown;
+}
+
+interface ScopedCommandExecutor {
+	readonly commandExecutor: RouterCommandExecutor;
+	runWithGateway<T>(gateway: RouterCommandExecutor, operation: () => T): T;
+}
+
+/**
+ * Builds the command-executor seam used by the legacy raw lane.  It is
+ * intentionally scoped with AsyncLocalStorage rather than mutating a router
+ * dependency: a ledger/tool gateway belongs to exactly one run and is never
+ * observable by a concurrent run. Governed runs do not use this legacy seam.
+ */
+export function createScopedCommandExecutor(
+	defaultExecutor: RouterCommandExecutor,
+): ScopedCommandExecutor {
+	const context = new AsyncLocalStorage<RouterCommandExecutor>();
+	const immutableDefault = Object.freeze({
+		executePacket: defaultExecutor.executePacket,
+	});
+	const commandExecutor: RouterCommandExecutor = Object.freeze({
+		executePacket(packet: unknown, root: string): unknown {
+			return (context.getStore() ?? immutableDefault).executePacket(
+				packet,
+				root,
+			);
+		},
+	});
+
+	return Object.freeze({
+		commandExecutor,
+		runWithGateway<T>(gateway: RouterCommandExecutor, operation: () => T): T {
+			const immutableGateway: RouterCommandExecutor = Object.freeze({
+				executePacket: gateway.executePacket,
+			});
+			return context.run(immutableGateway, operation);
+		},
+	});
 }
 
 export interface RuntimeRouterPorts {
@@ -1664,7 +3873,13 @@ async function loadCliOrchestrator(
 		createGitWorktreeAdapter: () => unknown;
 	};
 
-	const commandExecutor = { executePacket: runtime.executePacket };
+	// The router keeps this stable forever. Individual legacy/raw runs receive a
+	// scoped immutable command gateway through `runWithCommandGateway` below;
+	// governed runs never inherit this ambient legacy route.
+	const scopedCommandExecutor = createScopedCommandExecutor({
+		executePacket: runtime.executePacket,
+	});
+	const commandExecutor = scopedCommandExecutor.commandExecutor;
 	let adaptersModelsPromise:
 		| Promise<{
 				createModelExecutor: () => {
@@ -1894,7 +4109,7 @@ async function loadCliOrchestrator(
 		honchoAdapter: honchoAdapterRef,
 		userId: userIdRef,
 		currentBranch: currentBranchRef,
-		commandExecutor,
+		runWithCommandGateway: scopedCommandExecutor.runWithGateway,
 	};
 }
 
@@ -2227,13 +4442,17 @@ async function promoteMemoryFromReceipt(
 	const receipt = storageModule.verifyRunFinalVerdict(projectRoot, {
 		runId: receiptId,
 	});
-	if (receipt.verdict !== "PASSED") {
+	if (receipt.verdict !== "PASSED" || receipt.trustedReceipt !== true) {
 		return {
 			ok: false,
 			report: {
 				...formatJsonError(
 					"RECEIPT_NOT_ACCEPTED",
-					`Receipt ${receiptId} has verdict ${receipt.verdict}; only PASSED receipts can promote memory.`,
+					receipt.trustedReceipt === false
+						? `Receipt ${receiptId} does not contain a signed, verified governed tape; only trusted PASSED receipts can promote memory.`
+						: receipt.verdict !== "PASSED"
+							? `Receipt ${receiptId} has verdict ${receipt.verdict}; only trusted PASSED receipts can promote memory.`
+							: `Receipt ${receiptId} is missing signed-tape verification; only trusted PASSED receipts can promote memory.`,
 				),
 				receipt,
 			},
@@ -2521,6 +4740,7 @@ interface ForkArgs {
 	packet: string;
 	vcr: boolean;
 	vcrMiss: "fail" | "reexecute";
+	raw: boolean;
 }
 
 function parseForkArgs(
@@ -2533,6 +4753,7 @@ function parseForkArgs(
 	let vcr = false;
 	let vcrMiss: "fail" | "reexecute" = "fail";
 	let vcrMissProvided = false;
+	let raw = false;
 	const setVcrMiss = (value: string | undefined): string | undefined => {
 		if (!value || value.startsWith("--")) {
 			return "missing --vcr-miss <fail|reexecute> value";
@@ -2555,6 +4776,9 @@ function parseForkArgs(
 		switch (arg) {
 			case "--vcr":
 				vcr = true;
+				break;
+			case "--raw":
+				raw = true;
 				break;
 			case "--vcr-miss":
 				i += 1;
@@ -2608,19 +4832,24 @@ function parseForkArgs(
 		};
 	if (!at) return { ok: false, error: "missing --at <event-id>" };
 	if (!packet) return { ok: false, error: "missing --packet <file>" };
-	return { ok: true, value: { runId, at, workspace, packet, vcr, vcrMiss } };
+	return {
+		ok: true,
+		value: { runId, at, workspace, packet, vcr, vcrMiss, raw },
+	};
 }
 
 function forkUsageText(): string {
-	return `usage: buildplane fork <parent-run-id> --at <event-id> --packet <file> [--workspace <path>] [--vcr] [--vcr-miss <fail|reexecute>]
+	return `usage: buildplane fork <parent-run-id> --at <event-id> --packet <file> --raw [--workspace <path>] [--vcr] [--vcr-miss <fail|reexecute>]
 
   Fork resumes from a unit boundary in a prior run with a replacement packet.
+  It is an unsafe legacy execution lane and cannot produce a trusted receipt.
   The workspace git state must be clean before fork execution.
   Target event must be a unit_started event.
 
   --run-id       parent run id (or positional first arg)
   --at           parent unit_started event id to fork at
   --packet       path to the new packet json
+	  --raw          required acknowledgement for unsafe legacy execution
   --workspace    workspace root (defaults to cwd)
   --vcr          reuse deterministic parent tool outputs when the tape matches
   --vcr-miss     fail (default) or reexecute with a visible miss receipt
@@ -3034,18 +5263,6 @@ async function runForkExecution(
 	const ledgerWorkspacePath = resolve(workspace);
 	let vcrCassette = new Map<string, VcrToolResult[]>();
 	let unsubscribeFork: (() => void) | null = null;
-	let forkCommandExecutor:
-		| {
-				executePacket: (
-					packetUnknown: unknown,
-					executionRoot: string,
-				) => unknown;
-		  }
-		| undefined;
-	let originalForkExecutePacket:
-		| ((packetUnknown: unknown, executionRoot: string) => unknown)
-		| undefined;
-
 	try {
 		vcrCassette = new Map(
 			vcr.enabled && vcr.cassette
@@ -3057,9 +5274,8 @@ async function runForkExecution(
 		const {
 			orchestrator: forkOrchestrator,
 			eventBus: forkEventBus,
-			commandExecutor: loadedForkCommandExecutor,
+			runWithCommandGateway: runForkWithCommandGateway,
 		} = bundle;
-		forkCommandExecutor = loadedForkCommandExecutor;
 
 		// Wire bus subscription for unit-boundary events (mirrors run command handler).
 		unsubscribeFork = forkEventBus.subscribe((evt: unknown) => {
@@ -3121,7 +5337,8 @@ async function runForkExecution(
 			}
 		});
 
-		// Wrap the commandExecutor so tool calls are instrumented through the ledger.
+		// Build one immutable fork command gateway so tool calls are instrumented
+		// through this fork's ledger without mutating a shared runtime router.
 		const {
 			copyFileSync,
 			existsSync: fsExistsSync,
@@ -3313,199 +5530,204 @@ async function runForkExecution(
 			});
 			return { outputChecks, materializationReceipts };
 		};
-		originalForkExecutePacket = forkCommandExecutor.executePacket;
-		forkCommandExecutor.executePacket = (
-			packetUnknown: unknown,
-			executionRoot: string,
-		): unknown => {
-			const p = packetUnknown as {
-				execution: { command: string; args?: readonly string[]; cwd?: string };
-				verification: { requiredOutputs: readonly string[] };
-			};
-			const worktreeRoot = pathResolve(executionRoot);
-			const perCallRawRegistry = createToolRegistry(
-				worktreeRoot,
-				toolRegistryOptionsForPacket(packetUnknown, {
-					emitter,
-					runId: plan.new_run_id,
-				}),
-			);
-			const perCallRegistry = wrapToolRegistryForLedger(
-				perCallRawRegistry,
-				emitter,
-				getForkUnitCtx,
-			);
-			const effectiveCwd = p.execution.cwd
-				? pathResolve(worktreeRoot, p.execution.cwd)
-				: worktreeRoot;
-			const startedAt = new Date().toISOString();
-			const vcrKey = toolRequestKey({
-				tool_name: "run_command",
-				arguments: {
-					command: p.execution.command,
-					args: p.execution.args ?? [],
-				},
-				working_directory: p.execution.cwd ?? "",
-			});
-			if (vcr.enabled) {
-				const ctx = getForkUnitCtx();
-				const toolReqId = newEventId();
-				emitter.emit(
-					"tool_request",
-					{
-						ToolRequestStoredV1: {
-							tool_name: "run_command",
-							arguments: {
-								command: p.execution.command,
-								args: p.execution.args ?? [],
-							},
-							env: {
-								redacted: true,
-								hash: `sha256:${createHash("sha256")
-									.update("{}")
-									.digest("hex")}`,
-								hint: "env_var",
-							},
-							working_directory: p.execution.cwd ?? "",
-							unit_id: ctx?.unitId ?? "",
-						},
-					},
-					{ parent: ctx?.parentEventId, id: toolReqId },
-				);
-				const recordedQueue = vcrCassette.get(vcrKey);
-				const recorded = recordedQueue?.shift();
-				if (recordedQueue?.length === 0) {
-					vcrCassette.delete(vcrKey);
-				}
-				if (recorded) {
-					const { outputChecks, materializationReceipts } =
-						materializeVcrOutputChecks(
-							p.verification.requiredOutputs,
-							worktreeRoot,
-							toolReqId,
-						);
-					emitter.emit(
-						"tool_result",
-						{
-							ToolResultV1: {
-								tool_request_id: toolReqId,
-								stdout: recorded.stdout,
-								stderr: recorded.stderr,
-								exit_code: recorded.exitCode,
-								output: {
-									vcr: "hit",
-									parent_tool_request_id: recorded.parentToolRequestId,
-									parent_output: recorded.output,
-									materialized_outputs: materializationReceipts,
-								},
-								duration_ms: 0,
-							},
-						},
-						{ parent: toolReqId },
-					);
-					return {
-						command: p.execution.command,
-						args: [...(p.execution.args ?? [])],
-						cwd: effectiveCwd,
-						startedAt,
-						completedAt: new Date().toISOString(),
-						exitCode: recorded.exitCode,
-						stdout: recorded.stdout,
-						stderr: recorded.stderr,
-						outputChecks,
+		const forkCommandGateway: RouterCommandExecutor = Object.freeze({
+			executePacket: (
+				packetUnknown: unknown,
+				executionRoot: string,
+			): unknown => {
+				const p = packetUnknown as {
+					execution: {
+						command: string;
+						args?: readonly string[];
+						cwd?: string;
 					};
-				}
-				if (vcr.miss === "fail") {
-					const reason = `VCR miss for deterministic tool call ${p.execution.command}`;
+					verification: { requiredOutputs: readonly string[] };
+				};
+				const worktreeRoot = pathResolve(executionRoot);
+				const perCallRawRegistry = createToolRegistry(
+					worktreeRoot,
+					toolRegistryOptionsForPacket(packetUnknown, {
+						emitter,
+						runId: plan.new_run_id,
+					}),
+				);
+				const perCallRegistry = wrapToolRegistryForLedger(
+					perCallRawRegistry,
+					emitter,
+					getForkUnitCtx,
+				);
+				const effectiveCwd = p.execution.cwd
+					? pathResolve(worktreeRoot, p.execution.cwd)
+					: worktreeRoot;
+				const startedAt = new Date().toISOString();
+				const vcrKey = toolRequestKey({
+					tool_name: "run_command",
+					arguments: {
+						command: p.execution.command,
+						args: p.execution.args ?? [],
+					},
+					working_directory: p.execution.cwd ?? "",
+				});
+				if (vcr.enabled) {
+					const ctx = getForkUnitCtx();
+					const toolReqId = newEventId();
+					emitter.emit(
+						"tool_request",
+						{
+							ToolRequestStoredV1: {
+								tool_name: "run_command",
+								arguments: {
+									command: p.execution.command,
+									args: p.execution.args ?? [],
+								},
+								env: {
+									redacted: true,
+									hash: `sha256:${createHash("sha256")
+										.update("{}")
+										.digest("hex")}`,
+									hint: "env_var",
+								},
+								working_directory: p.execution.cwd ?? "",
+								unit_id: ctx?.unitId ?? "",
+							},
+						},
+						{ parent: ctx?.parentEventId, id: toolReqId },
+					);
+					const recordedQueue = vcrCassette.get(vcrKey);
+					const recorded = recordedQueue?.shift();
+					if (recordedQueue?.length === 0) {
+						vcrCassette.delete(vcrKey);
+					}
+					if (recorded) {
+						const { outputChecks, materializationReceipts } =
+							materializeVcrOutputChecks(
+								p.verification.requiredOutputs,
+								worktreeRoot,
+								toolReqId,
+							);
+						emitter.emit(
+							"tool_result",
+							{
+								ToolResultV1: {
+									tool_request_id: toolReqId,
+									stdout: recorded.stdout,
+									stderr: recorded.stderr,
+									exit_code: recorded.exitCode,
+									output: {
+										vcr: "hit",
+										parent_tool_request_id: recorded.parentToolRequestId,
+										parent_output: recorded.output,
+										materialized_outputs: materializationReceipts,
+									},
+									duration_ms: 0,
+								},
+							},
+							{ parent: toolReqId },
+						);
+						return {
+							command: p.execution.command,
+							args: [...(p.execution.args ?? [])],
+							cwd: effectiveCwd,
+							startedAt,
+							completedAt: new Date().toISOString(),
+							exitCode: recorded.exitCode,
+							stdout: recorded.stdout,
+							stderr: recorded.stderr,
+							outputChecks,
+						};
+					}
+					if (vcr.miss === "fail") {
+						const reason = `VCR miss for deterministic tool call ${p.execution.command}`;
+						emitter.emit(
+							"tool_result",
+							{
+								ToolResultV1: {
+									tool_request_id: toolReqId,
+									stdout: "",
+									stderr: reason,
+									exit_code: 97,
+									output: { vcr: "miss", policy: "fail" },
+									duration_ms: 0,
+								},
+							},
+							{ parent: toolReqId },
+						);
+						return {
+							command: p.execution.command,
+							args: [...(p.execution.args ?? [])],
+							cwd: effectiveCwd,
+							startedAt,
+							completedAt: new Date().toISOString(),
+							exitCode: 97,
+							stdout: "",
+							stderr: reason,
+							outputChecks: p.verification.requiredOutputs.map(
+								(outputPath: string) => ({
+									path: outputPath,
+									exists: (() => {
+										const outputResult = resolveContainedPath(
+											worktreeRoot,
+											outputPath,
+										);
+										return outputResult.ok && fsExistsSync(outputResult.path);
+									})(),
+								}),
+							),
+						};
+					}
 					emitter.emit(
 						"tool_result",
 						{
 							ToolResultV1: {
 								tool_request_id: toolReqId,
 								stdout: "",
-								stderr: reason,
-								exit_code: 97,
-								output: { vcr: "miss", policy: "fail" },
+								stderr: "VCR miss; explicit reexecute policy selected",
+								exit_code: null,
+								output: { vcr: "miss", policy: "reexecute" },
 								duration_ms: 0,
 							},
 						},
 						{ parent: toolReqId },
 					);
-					return {
-						command: p.execution.command,
-						args: [...(p.execution.args ?? [])],
-						cwd: effectiveCwd,
-						startedAt,
-						completedAt: new Date().toISOString(),
-						exitCode: 97,
-						stdout: "",
-						stderr: reason,
-						outputChecks: p.verification.requiredOutputs.map(
-							(outputPath: string) => ({
-								path: outputPath,
-								exists: (() => {
-									const outputResult = resolveContainedPath(
-										worktreeRoot,
-										outputPath,
-									);
-									return outputResult.ok && fsExistsSync(outputResult.path);
-								})(),
-							}),
-						),
-					};
 				}
-				emitter.emit(
-					"tool_result",
-					{
-						ToolResultV1: {
-							tool_request_id: toolReqId,
-							stdout: "",
-							stderr: "VCR miss; explicit reexecute policy selected",
-							exit_code: null,
-							output: { vcr: "miss", policy: "reexecute" },
-							duration_ms: 0,
-						},
-					},
-					{ parent: toolReqId },
-				);
-			}
-			const result = perCallRegistry.run_command({
-				command: p.execution.command,
-				args: p.execution.args,
-				cwd: p.execution.cwd,
-			});
-			const completedAt = new Date().toISOString();
-			return {
-				command: p.execution.command,
-				args: [...(p.execution.args ?? [])],
-				cwd: effectiveCwd,
-				startedAt,
-				completedAt,
-				exitCode: result.exitCode,
-				stdout: result.stdout,
-				stderr: result.stderr,
-				outputChecks: p.verification.requiredOutputs.map(
-					(outputPath: string) => ({
-						path: outputPath,
-						exists: (() => {
-							const outputResult = resolveContainedPath(
-								safeRealpath(worktreeRoot),
-								outputPath,
-							);
-							return outputResult.ok && fsExistsSync(outputResult.path);
-						})(),
-					}),
-				),
-				...(vcr.enabled
-					? {
-							vcr: {
-								miss: "reexecute",
-								reason: "no deterministic parent tape match",
-							},
-						}
-					: {}),
-			};
-		};
+				const result = perCallRegistry.run_command({
+					command: p.execution.command,
+					args: p.execution.args,
+					cwd: p.execution.cwd,
+				});
+				const completedAt = new Date().toISOString();
+				return {
+					command: p.execution.command,
+					args: [...(p.execution.args ?? [])],
+					cwd: effectiveCwd,
+					startedAt,
+					completedAt,
+					exitCode: result.exitCode,
+					stdout: result.stdout,
+					stderr: result.stderr,
+					outputChecks: p.verification.requiredOutputs.map(
+						(outputPath: string) => ({
+							path: outputPath,
+							exists: (() => {
+								const outputResult = resolveContainedPath(
+									safeRealpath(worktreeRoot),
+									outputPath,
+								);
+								return outputResult.ok && fsExistsSync(outputResult.path);
+							})(),
+						}),
+					),
+					...(vcr.enabled
+						? {
+								vcr: {
+									miss: "reexecute",
+									reason: "no deterministic parent tape match",
+								},
+							}
+						: {}),
+				};
+			},
+		});
 
 		const runStartMs = Date.now();
 		const forkPacket = await parsePlannedForkPacket(plan.packet_json);
@@ -3522,10 +5744,12 @@ async function runForkExecution(
 		);
 
 		// Invoke the orchestrator with the normalized fork packet.
-		const orchResult = await forkOrchestrator.runPacketAsync(
-			forkPacket as never,
-			forkEventBus,
-			{ runId: plan.new_run_id, parentRunId: plan.parent_run_id },
+		const orchResult = await runForkWithCommandGateway(forkCommandGateway, () =>
+			forkOrchestrator.runPacketAsync(forkPacket as never, forkEventBus, {
+				runId: plan.new_run_id,
+				parentRunId: plan.parent_run_id,
+				trustLane: "unsafe",
+			}),
 		);
 		const status = (orchResult as { run?: { status?: string } }).run?.status;
 		exitCode = status === "passed" ? 0 : 1;
@@ -3564,9 +5788,6 @@ async function runForkExecution(
 			forkCurrentUnit,
 			exitCode === 0 ? "passed" : "failed",
 		);
-		if (forkCommandExecutor && originalForkExecutePacket) {
-			forkCommandExecutor.executePacket = originalForkExecutePacket;
-		}
 		try {
 			await emitter.close();
 		} catch {
@@ -3597,6 +5818,14 @@ async function runFork(
 		opts.stderr(forkUsageText());
 		return 1;
 	}
+	if (!args.value.raw) {
+		opts.stderr(
+			"buildplane fork: fork re-executes a legacy ambient-worker packet. Pass --raw to acknowledge unsafe execution; use buildplane ledger replay for read-only tape reconstruction.\n",
+		);
+		return 1;
+	}
+	opts.stdout("governance: unsafe\n");
+	opts.stdout("trusted-receipt: false\n");
 
 	const workspace = resolve(args.value.workspace ?? opts.cwd);
 	// Resolve the packet path against the user's cwd BEFORE spawning the native
@@ -3721,7 +5950,6 @@ async function runFork(
 	if (currentBranch === "HEAD") {
 		opts.stdout(`(detached HEAD)\n`);
 	}
-
 	return exitCode;
 }
 
@@ -3936,62 +6164,14 @@ interface PlanForgeReplayState {
 	receipt?: RecordedPlanReceipt;
 }
 
-/**
- * Event id of an existing signed `plan_admitted` on the tape for `runId` whose
- * payload carries `idempotencyKey`, or undefined if none. Makes re-admitting the
- * same plan a no-op.
- *
- * This is a read-then-append check, sound under buildplane's single-writer /
- * single-operator model (the same assumption `bp-ledger`'s `validate_external_append`
- * documents — one `serve` connection writes a given run). Two *concurrent* admits
- * of the same plan could both pass this scan and append; that race is the ledger's
- * documented multi-writer boundary (a DB-level uniqueness constraint), deliberately
- * out of scope for M2-S3.
- */
-async function findExistingPlanAdmitted(
-	workspace: string,
-	runId: string,
-	idempotencyKey: string,
-): Promise<string | undefined> {
-	const eventsDbPath = resolve(workspace, ".buildplane", "ledger", "events.db");
-	if (!existsSync(eventsDbPath)) {
-		return undefined;
-	}
-	const { DatabaseSync } = await import("node:sqlite");
-	const db = new DatabaseSync(eventsDbPath, { readOnly: true });
-	try {
-		const rows = db
-			.prepare(
-				"SELECT id, payload FROM events WHERE run_id = ? AND kind = 'plan_admitted' ORDER BY id ASC",
-			)
-			.all(runId) as unknown as PlanAdmittedEventRow[];
-		for (const row of rows) {
-			const payload = JSON.parse(row.payload) as {
-				PlanAdmittedV1?: { idempotency_key?: string };
-			};
-			if (payload.PlanAdmittedV1?.idempotency_key === idempotencyKey) {
-				return row.id;
-			}
-		}
-		return undefined;
-	} finally {
-		db.close();
-	}
-}
-
 function assertKernelSignature(
 	signature: KernelSignatureRow | undefined,
 	eventId: string,
 ): void {
-	if (
-		signature?.actor_id !== "kernel" ||
-		signature.key_id !== PLANFORGE_KERNEL_SIGNING_KEY_ID ||
-		signature.algorithm !== "ed25519"
-	) {
-		throw new Error(
-			`plan-not-admitted: plan_admitted event ${eventId} is not signed by kernel/${PLANFORGE_KERNEL_SIGNING_KEY_ID}.`,
-		);
-	}
+	void signature;
+	throw new Error(
+		`plan-not-admitted: plan_admitted event ${eventId} cannot be trusted without a reducer-verified detached signature.`,
+	);
 }
 
 function assertPlanAdmissionMatchesInput(
@@ -4144,124 +6324,261 @@ async function readPlanForgeReplayState(
 	}
 }
 
+const PLANFORGE_GOVERNED_BROKER_REQUIRED =
+	"PlanForge governed broker is unavailable; no admission was recorded. Connect a privileged host authority broker and retry this broker-owned admission view.";
+
+const PLANFORGE_GOVERNED_DISPATCH_BROKER_REQUIRED =
+	"PlanForge governed broker is unavailable; no candidate was started. Connect a privileged host authority broker and retry this broker-owned dispatch view.";
+
+interface PlanForgeBrokerAdmitArguments {
+	readonly inputPath: string;
+	readonly json: boolean;
+}
+
 /**
- * `buildplane planforge admit --input <file> --approve --operator <id>`:
- * record an operator-approved admission as a signed `plan_admitted` event on the
- * L0 tape (kernel key; the operator is the `decided_by` payload field). Fails
- * closed with no tape write on a non-PASS plan, a missing --approve, or a missing
- * operator. Idempotent: a plan already admitted is a no-op.
+ * Keep this command's surface closed so legacy operator identities, envelopes,
+ * packet fields, and worker controls cannot be smuggled into a host admission.
+ * The authenticated host supplies the operator identity and validates all
+ * authority state itself.
+ */
+function parsePlanForgeBrokerAdmitArguments(
+	args: readonly string[],
+): PlanForgeBrokerAdmitArguments {
+	let inputPath: string | undefined;
+	let approved = false;
+	let json = false;
+	for (let index = 0; index < args.length; index += 1) {
+		const argument = args[index];
+		switch (argument) {
+			case "--input": {
+				if (inputPath !== undefined) {
+					throw new Error(
+						"PlanForge governed admit accepts --input exactly once.",
+					);
+				}
+				const value = args[index + 1];
+				if (!value || value.startsWith("--")) {
+					throw new Error(
+						"Missing required --input <file> argument for PlanForge governed admit.",
+					);
+				}
+				inputPath = value;
+				index += 1;
+				break;
+			}
+			case "--approve":
+				if (approved) {
+					throw new Error(
+						"PlanForge governed admit accepts --approve exactly once.",
+					);
+				}
+				approved = true;
+				break;
+			case "--json":
+				if (json) {
+					throw new Error(
+						"PlanForge governed admit accepts --json at most once.",
+					);
+				}
+				json = true;
+				break;
+			default:
+				throw new Error(
+					`Unsupported PlanForge governed admit argument: ${argument}. Use only --input <file>, --approve, and --json.`,
+				);
+		}
+	}
+	if (!approved) {
+		throw new Error(
+			"PlanForge governed admit requires explicit --approve for host-authenticated admission.",
+		);
+	}
+	if (inputPath === undefined) {
+		throw new Error(
+			"Missing required --input <file> argument for PlanForge governed admit.",
+		);
+	}
+	return Object.freeze({ inputPath, json });
+}
+
+/**
+ * `buildplane planforge admit --input <file> --approve [--json]` is a thin
+ * broker-owned view. It reads and forwards the original bytes only; it never
+ * compiles a plan, derives an authority reference, opens a ledger, or mints a
+ * local `plan_admitted` record.
  */
 async function runPlanForgeAdmitCommand(
 	args: readonly string[],
 	cwd: string,
 	stdout: (line: string) => void,
 ): Promise<number> {
-	if (!args.includes("--approve")) {
-		throw new Error(
-			"PlanForge admit requires explicit --approve to record a signed admission.",
-		);
+	const parsed = parsePlanForgeBrokerAdmitArguments(args);
+	const broker = await resolveHostOwnedGovernedBroker();
+	if (!broker) {
+		throw new Error(PLANFORGE_GOVERNED_BROKER_REQUIRED);
 	}
-	const operator = readFlag(args, "--operator")?.trim();
-	if (!operator) {
-		throw new Error(
-			"PlanForge admit requires --operator <id> to record the deciding operator identity.",
-		);
-	}
-	const inputPath = readFlag(args, "--input");
-	if (!inputPath) {
-		throw new Error(
-			"Missing required --input <file> argument for PlanForge admit.",
-		);
-	}
-	const jsonOut = args.includes("--json");
 
-	const plan = createPlanForgeDryRunPlan(resolve(cwd, inputPath));
-	const decidedBy = operator.startsWith("operator:")
-		? operator
-		: `operator:${operator}`;
-
-	// Throws PlanForgeAdmitRejectedError on a non-PASS plan — fail closed BEFORE
-	// resolving the binary or spawning the signed ledger.
-	const payload: PlanAdmittedV1 = buildPlanAdmittedPayload({
-		plan,
-		decidedBy,
-		decidedAt: new Date().toISOString(),
-	});
-
-	const workspace = resolve(cwd);
-	const runId = planAdmitRunId(payload.idempotency_key);
-
-	const existingEventId = await findExistingPlanAdmitted(
-		workspace,
-		runId,
-		payload.idempotency_key,
+	const projectRoot = resolve(cwd);
+	const sourcePath = resolve(cwd, parsed.inputPath);
+	// Copy the exact file bytes rather than decoding or compiling untrusted source
+	// in the CLI. The host must reject unsupported encodings or malformed plans.
+	const planSource = new Uint8Array(readFileSync(sourcePath));
+	const admission = await executeHostPlanForgeAdmission(
+		projectRoot,
+		sourcePath,
+		contentDigest(planSource),
+		() =>
+			broker.admitPlanForge({
+				kind: "planforge-admission",
+				planSource,
+				projectRoot,
+				approval: "operator-requested",
+			}),
 	);
-	if (existingEventId) {
-		stdout(
-			jsonOut
-				? formatJson({
-						status: "already_admitted",
-						plan_id: payload.plan_id,
-						idempotency_key: payload.idempotency_key,
-						run_id: runId,
-						event_id: existingEventId,
-					})
-				: `PlanForge plan ${payload.plan_id} is already admitted; no new tape event written.`,
-		);
-		return 0;
-	}
-
-	const binary = resolveLedgerBinary(cwd);
-	const ledgerChild = spawnLedgerSubprocess(binary, runId, workspace, {
-		sign: true,
-		signingKeyId: PLANFORGE_KERNEL_SIGNING_KEY_ID,
+	const output = Object.freeze({
+		governance: "governed" as const,
+		status: "admitted" as const,
+		admission_ref: admission.admissionRef,
+		task_refs: admission.taskRefs,
+		plan_source_digest: admission.planSourceDigest,
+		admission_digest: admission.admissionDigest,
 	});
-
-	let emitter: TapeEmitter;
-	try {
-		emitter = await createTapeEmitter({
-			childStdin: ledgerChild.stdin,
-			childStderr: ledgerChild.stderr,
-			childExit: ledgerChild.exit,
-			workspacePath: workspace,
-			runId,
-		});
-	} catch (err) {
-		if (ledgerChild.child.exitCode === null) {
-			ledgerChild.child.kill("SIGTERM");
+	if (parsed.json) {
+		stdout(formatJson(output));
+	} else {
+		stdout("PlanForge admission accepted by the privileged host.");
+		stdout(`admission-ref: ${output.admission_ref}`);
+		for (const taskRef of output.task_refs) {
+			stdout(`task-ref: ${taskRef}`);
 		}
+		stdout(`plan-source-digest: ${output.plan_source_digest}`);
+		stdout(`admission-digest: ${output.admission_digest}`);
+	}
+	return 0;
+}
+
+interface PlanForgeBrokerDispatchArguments {
+	readonly admissionRef: string;
+	readonly taskRef: string;
+	readonly json: boolean;
+}
+
+/**
+ * This parser is deliberately separate from the legacy `--input` dispatch
+ * parser. The CLI never turns PlanForge source into a packet: it can only ask
+ * the privileged host to recover one task it already admitted.
+ */
+function parsePlanForgeBrokerDispatchArguments(
+	args: readonly string[],
+): PlanForgeBrokerDispatchArguments {
+	let admissionRef: string | undefined;
+	let taskRef: string | undefined;
+	let json = false;
+	for (let index = 0; index < args.length; index += 1) {
+		const argument = args[index];
+		switch (argument) {
+			case "--admission-ref": {
+				if (admissionRef !== undefined) {
+					throw new Error(
+						"PlanForge governed dispatch accepts --admission-ref exactly once.",
+					);
+				}
+				const value = args[index + 1];
+				if (!value || value.startsWith("--")) {
+					throw new Error(
+						"Missing required --admission-ref <opaque-host-ref> argument for PlanForge governed dispatch.",
+					);
+				}
+				admissionRef = readHostOpaqueReference(
+					value,
+					"PlanForge governed dispatch admissionRef",
+				);
+				index += 1;
+				break;
+			}
+			case "--task-ref": {
+				if (taskRef !== undefined) {
+					throw new Error(
+						"PlanForge governed dispatch accepts --task-ref exactly once.",
+					);
+				}
+				const value = args[index + 1];
+				if (!value || value.startsWith("--")) {
+					throw new Error(
+						"Missing required --task-ref <opaque-host-ref> argument for PlanForge governed dispatch.",
+					);
+				}
+				taskRef = readHostOpaqueReference(
+					value,
+					"PlanForge governed dispatch taskRef",
+				);
+				index += 1;
+				break;
+			}
+			case "--json":
+				if (json) {
+					throw new Error(
+						"PlanForge governed dispatch accepts --json at most once.",
+					);
+				}
+				json = true;
+				break;
+			default:
+				throw new Error(
+					`Unsupported PlanForge governed dispatch argument: ${argument}. Use only --admission-ref <opaque-host-ref>, --task-ref <opaque-host-ref>, and --json.`,
+				);
+		}
+	}
+	if (admissionRef === undefined || taskRef === undefined) {
 		throw new Error(
-			`PlanForge admit: signed ledger handshake failed: ${String(err)}`,
+			"PlanForge governed dispatch requires both --admission-ref <opaque-host-ref> and --task-ref <opaque-host-ref>.",
+		);
+	}
+	return Object.freeze({ admissionRef, taskRef, json });
+}
+
+async function runPlanForgeBrokerDispatchCommand(
+	args: readonly string[],
+	cwd: string,
+	stdout: (line: string) => void,
+): Promise<number> {
+	const parsed = parsePlanForgeBrokerDispatchArguments(args);
+	const broker = await resolveHostOwnedGovernedBroker();
+	if (!broker) {
+		throw new Error(PLANFORGE_GOVERNED_DISPATCH_BROKER_REQUIRED);
+	}
+
+	const projectRoot = resolve(cwd);
+	try {
+		await executeHostPlanForgeCandidateSession(
+			projectRoot,
+			parsed.admissionRef,
+			parsed.taskRef,
+			() =>
+				broker.openPlanForgeCandidateSession({
+					kind: "planforge-candidate-session-open-v1",
+					schemaVersion: 1,
+					projectRoot,
+					admissionRef: parsed.admissionRef,
+					taskRef: parsed.taskRef,
+				}),
+		);
+	} catch (error) {
+		return emitGovernedHostRecovery(
+			parsed.json,
+			stdout,
+			governedHostRecoveryReason(error),
 		);
 	}
 
-	try {
-		emitter.emit("plan_admitted", { PlanAdmittedV1: payload });
-		await emitter.flush();
-		await emitter.close();
-	} catch (err) {
-		if (ledgerChild.child.exitCode === null) {
-			ledgerChild.child.kill("SIGTERM");
+	const output = buildGovernedCandidateRunOutput();
+	if (parsed.json) {
+		stdout(formatJson(output));
+	} else {
+		for (const line of formatGovernedCandidateRun(output)) {
+			stdout(line);
 		}
-		throw new Error(
-			`PlanForge admit: failed to append signed plan_admitted: ${String(err)}`,
-		);
 	}
-
-	const eventId = emitter.stats().lastAckedEventId ?? undefined;
-	stdout(
-		jsonOut
-			? formatJson({
-					status: "admitted",
-					plan_id: payload.plan_id,
-					idempotency_key: payload.idempotency_key,
-					decided_by: payload.decided_by,
-					run_id: runId,
-					event_id: eventId,
-					payload,
-				})
-			: `Admitted PlanForge plan ${payload.plan_id} (signed plan_admitted on run ${runId}).`,
-	);
 	return 0;
 }
 
@@ -4689,6 +7006,19 @@ export interface DispatchWorkerFlags {
 	readonly claudeTimeoutMs?: number;
 }
 
+const PLANFORGE_LEGACY_EXECUTION_BLOCKED =
+	"PlanForge legacy execution is blocked: dispatch, resume, recover, and the default loop launch ambient workers that can auto-merge before an immutable candidate receives deterministic checks, structured review, and a candidate-bound promotion decision. Migrate this operation to the governed workflow path.";
+
+/**
+ * This is deliberately a hard stop rather than a `--raw` compatibility flag.
+ * The legacy PlanForge lane writes signed activity and plan-receipt events, so
+ * merely labelling its console output unsafe would still let an ambient merge
+ * look governed to recovery and planner consumers.
+ */
+function blockPlanForgeLegacyExecution(): void {
+	throw new Error(PLANFORGE_LEGACY_EXECUTION_BLOCKED);
+}
+
 /**
  * Worker flags for standalone `planforge dispatch` — `--model`, `--max-turns`,
  * `--worker-allowed-tools`, `--worker-timeout-ms` — the same worker contract
@@ -4747,6 +7077,11 @@ async function runPlanForgeDispatchCommand(
 		readonly claudeTimeoutMs?: number;
 	},
 ): Promise<number> {
+	if (args.includes("--admission-ref") || args.includes("--task-ref")) {
+		return runPlanForgeBrokerDispatchCommand(args, cwd, stdout);
+	}
+	blockPlanForgeLegacyExecution();
+
 	const inputPath = readFlag(args, "--input");
 	if (!inputPath) {
 		throw new Error(
@@ -5330,6 +7665,11 @@ async function runPlanForgeLoopCommand(
 		);
 		return 0;
 	}
+	// The legacy loop can inject an arbitrary dispatcher through the exported
+	// library dependencies. That was a production bypass around the CLI's normal
+	// containment gate. Until the loop is an explicit reducer view over governed
+	// candidates, block it regardless of dependency injection.
+	blockPlanForgeLegacyExecution();
 
 	const once = args.includes("--once");
 	const maxIterations = once ? 1 : parseIntFlag(args, "--max-iterations", null);
@@ -5634,6 +7974,8 @@ export async function resumePlanForgePlanFromInput(
 	stdout: (line: string) => void,
 	opts: { json: boolean; enforceAcceptance?: boolean },
 ): Promise<number> {
+	blockPlanForgeLegacyExecution();
+
 	const jsonOut = opts.json;
 	// D3: enforcement defaults ON. The suffix runs under the same M4 acceptance gate
 	// as dispatch, AND every recorded-prefix activity must carry tape evidence that
@@ -5971,6 +8313,8 @@ async function runPlanForgeRecoverCommand(
 	cwd: string,
 	stdout: (line: string) => void,
 ): Promise<number> {
+	blockPlanForgeLegacyExecution();
+
 	const jsonOut = args.includes("--json");
 	// D3: enforcement is ON by default; `--no-enforce-acceptance` opts every orphan
 	// out. Never sourced from the unsigned dispatch manifest.
@@ -6642,9 +8986,14 @@ export async function runCli(
 		}
 
 		if (command === "demo") {
+			if (!rest.includes("--raw")) {
+				throw new Error(
+					"demo uses an ambient local command lane. Pass --raw to acknowledge unsafe execution; it cannot produce a trusted receipt.",
+				);
+			}
 			const modelFlag = rest.includes("--model");
 			const { runDemo } = await import("./demo.js");
-			await runDemo({ model: modelFlag });
+			await runDemo({ model: modelFlag, raw: true });
 			return 0;
 		}
 
@@ -6717,7 +9066,11 @@ export async function runCli(
 				verifyRunFinalVerdict: (
 					root: string,
 					options: { runId: string },
-				) => { verdict: string; runId: string } & Record<string, unknown>;
+				) => {
+					verdict: string;
+					runId: string;
+					trustedReceipt: boolean;
+				} & Record<string, unknown>;
 			};
 			const report = storage.verifyRunFinalVerdict(cwd, { runId });
 			if (json) {
@@ -6725,8 +9078,11 @@ export async function runCli(
 			} else {
 				stdout(`verify: ${report.verdict}`);
 				stdout(`run-id: ${report.runId}`);
+				stdout(`trusted-receipt: ${report.trustedReceipt === true}`);
 			}
-			return report.verdict === "PASSED" ? 0 : 1;
+			return report.verdict === "PASSED" && report.trustedReceipt === true
+				? 0
+				: 1;
 		}
 
 		if (command === "evidence") {
@@ -6824,6 +9180,8 @@ export async function runCli(
 				);
 				const summary = {
 					format: exportResult.format,
+					governance: exportResult.governance,
+					authority: exportResult.authority,
 					runId: exportResult.runId,
 					spanCount: exportResult.spanCount,
 					outPath: exportResult.outPath,
@@ -6871,7 +9229,11 @@ export async function runCli(
 				verifyRunFinalVerdict: (
 					root: string,
 					options: { runId: string },
-				) => { verdict: string; runId: string } & Record<string, unknown>;
+				) => {
+					verdict: string;
+					runId: string;
+					trustedReceipt: boolean;
+				} & Record<string, unknown>;
 			};
 			const report = storage.verifyRunFinalVerdict(cwd, { runId });
 
@@ -6951,7 +9313,11 @@ export async function runCli(
 				verifyRunFinalVerdict: (
 					root: string,
 					options: { runId: string },
-				) => { verdict: string; runId: string } & Record<string, unknown>;
+				) => {
+					verdict: string;
+					runId: string;
+					trustedReceipt: boolean;
+				} & Record<string, unknown>;
 			};
 			const report = storage.verifyRunFinalVerdict(cwd, { runId });
 
@@ -7195,19 +9561,42 @@ export async function runCli(
 			}
 		}
 
+		// Parse every non-help run before the generic legacy orchestrator is
+		// constructed. Besides routing governed work early, this ensures a malformed
+		// `--resume ... --raw` request cannot instantiate the ambient worker router
+		// before its cross-lane authority conflict is rejected.
+		if (command === "run") {
+			if (rest.includes("--help")) {
+				if (!rest.includes("--raw")) {
+					return await runGovernedRunCommand(rest, {
+						cwd,
+						stdout,
+						...(deps === undefined ? {} : { dependencies: deps }),
+					});
+				}
+			} else {
+				const parsedRunArguments = parseRunCommandArguments(rest);
+				if (!parsedRunArguments.raw) {
+					return await runGovernedRunCommand(rest, {
+						cwd,
+						stdout,
+						...(deps === undefined ? {} : { dependencies: deps }),
+					});
+				}
+			}
+		}
+
 		// Deferred activity-bracket port (M2-S5): the run orchestrator is constructed
 		// here, BEFORE the run-block signed ledger emitter is spawned (~200 lines down,
 		// gated on `useLedger`). The port reads the emitter lazily at activity time, by
 		// which point the run block has bound it (or left it null for a non-ledger run,
 		// in which case bracketing is skipped — byte-unchanged).
 		//
-		// SCOPE NOTE: the default strategy path (`!useRaw`) returns before the emitter
-		// bind, and is unledgered by construction (pre-existing — `events.db` is empty
-		// without `--raw`), so its activities are intentionally NOT bracketed: the
-		// deferred port no-ops there. S5 bracketing covers the `--raw` run path +
-		// `planforge dispatch`. Bracketing the strategy/default run path would require
-		// giving it a signed ledger subprocess (a tracked follow-up; it also gates
-		// whether default runs are crash-recoverable for the M6 demo).
+		// SCOPE NOTE: the default `run` path now returns a governed preview before an
+		// emitter can be bound. The only execution path below is explicit `--raw`,
+		// which is marked unsafe and does not make governed guarantees. A future
+		// governed dispatcher must establish its signed tape before constructing a
+		// worker/action authority, rather than reusing this deferred raw-run emitter.
 		let runActivityEmitter: TapeEmitter | null = null;
 		const runLedgerActivityPort = createDeferredLedgerActivityPort(
 			() => runActivityEmitter,
@@ -7222,11 +9611,7 @@ export async function runCli(
 					orchestrator: deps.createOrchestrator(),
 					eventBus: { subscribe: () => () => {}, emit: () => {} },
 					eventStore: { persistEvent: () => {} },
-					commandExecutor: {
-						executePacket: (_p: unknown, _r: string) => {
-							throw new Error("mock bundle: executePacket not wired");
-						},
-					},
+					runWithCommandGateway: (_gateway, operation) => operation(),
 				}
 			: await loadCliOrchestrator(cwd, {
 					ledgerActivityPort: runLedgerActivityPort,
@@ -7241,7 +9626,7 @@ export async function runCli(
 			honchoAdapter,
 			userId,
 			currentBranch,
-			commandExecutor,
+			runWithCommandGateway,
 		} = bundle;
 
 		switch (command) {
@@ -7261,152 +9646,31 @@ export async function runCli(
 					return 0;
 				}
 
-				// Pre-flight: ensure project is initialized before packet loading
-				orchestrator.getStatus();
-
-				const packetIndex = rest.indexOf("--packet");
-				if (packetIndex === -1 || !rest[packetIndex + 1]) {
-					throw new Error("Missing required --packet <path> argument.");
+				const runArguments = parseRunCommandArguments(rest);
+				if (runArguments.kind !== "packet" || !runArguments.raw) {
+					throw new Error(
+						"governed run arguments must be routed before constructing the legacy execution bundle.",
+					);
 				}
 
-				const packetPath = resolve(cwd, rest[packetIndex + 1]);
+				// Pre-flight: raw execution retains the legacy project-state check. The
+				// governed lane was handled above before this ambient bundle existed.
+				orchestrator.getStatus();
+
+				const packetPath = resolve(cwd, runArguments.packetPath);
 				const packet = deps?.parsePacket
 					? deps.parsePacket(packetPath)
 					: await loadPacket(packetPath);
 
-				const useRaw = rest.includes("--raw");
-				const useJson = rest.includes("--json");
+				const useRaw = runArguments.raw;
+				const useJson = runArguments.json;
 
-				// ── Strategy path (default) ──────────────────────────────
 				if (!useRaw) {
-					const { wrapAsStrategy } = await import("./strategy-wrapper.js");
-					const { preparePacketMemoryEnrichment } =
-						await loadPacketEnrichmentModule();
-
-					// Enrich the implementer packet exactly as the single-packet
-					// path does, then wrap it so the executed implementer leg carries
-					// its memory context. The reviewer child is enriched on top below
-					// without re-enriching the implementer.
-					const preparedImplementer = await preparePacketMemoryEnrichment(
-						packet,
-						memoryPort,
-						honchoAdapter,
-						userId,
-						structuredMemoryPort,
-						currentBranch,
-					);
-					const enrichedImplementer = preparedImplementer.packet;
-					const implementerUnitId =
-						(enrichedImplementer as { unit?: { id?: string } }).unit?.id ??
-						(packet as { unit?: { id?: string } }).unit?.id ??
-						"";
-
-					const baseStrategy = wrapAsStrategy(
-						enrichedImplementer as Parameters<typeof wrapAsStrategy>[0],
-					) as unknown as {
-						children: Array<{ role: string; packet: unknown }>;
-					};
-
-					const injectedMemoriesByUnitId: InjectedMemoryRecordsByUnitId = {};
-					if (preparedImplementer.injectedMemories.length > 0) {
-						injectedMemoriesByUnitId[implementerUnitId] =
-							preparedImplementer.injectedMemories;
-					}
-
-					const enrichedChildren = await Promise.all(
-						baseStrategy.children.map(async (child) => {
-							if (child.role !== "reviewer") {
-								return child;
-							}
-							const preparedReviewer = await preparePacketMemoryEnrichment(
-								child.packet,
-								memoryPort,
-								honchoAdapter,
-								userId,
-								structuredMemoryPort,
-								currentBranch,
-							);
-							const reviewerUnitId = (
-								child.packet as { unit?: { id?: string } }
-							).unit?.id;
-							if (
-								reviewerUnitId &&
-								preparedReviewer.injectedMemories.length > 0
-							) {
-								injectedMemoriesByUnitId[reviewerUnitId] =
-									preparedReviewer.injectedMemories;
-							}
-							return { ...child, packet: preparedReviewer.packet };
-						}),
-					);
-					const preparedStrategy = {
-						strategy: {
-							...baseStrategy,
-							children: enrichedChildren,
-						} as unknown as Record<string, unknown>,
-						injectedMemoriesByUnitId,
-					};
-
-					const kernel = (await cliImport("@buildplane/kernel")) as unknown as {
-						createEventBus: () => {
-							subscribe: (listener: (event: unknown) => void) => () => void;
-							emit: (event: unknown) => void;
-						};
-					};
-					const strategyBus = kernel.createEventBus();
-
-					const useTui = rest.includes("--tui");
-					if (useTui) {
-						const tui = (await cliImport("@buildplane/ui-tui")) as unknown as {
-							renderTui: (eventBus: unknown) => {
-								waitUntilExit(): Promise<void>;
-								unmount(): void;
-								clear(): void;
-							};
-						};
-						tui.renderTui(strategyBus);
-					}
-
-					const strategyResult = await orchestrator.runStrategy(
-						preparedStrategy.strategy,
-						strategyBus,
-					);
-					const strategyTargets = collectStrategyRunTargets(
-						strategyResult as {
-							childResults: Map<string, { run?: { id?: string } }>;
-							rounds?: ReadonlyArray<Map<string, { run?: { id?: string } }>>;
-						},
-					);
-					recordStrategyIdForTargets(
-						structuredMemoryPort,
-						strategyTargets,
-						strategyResult.strategyId,
-					);
-					const injectedMemories = persistInjectedMemoriesForTargets(
-						structuredMemoryPort,
-						strategyTargets,
-						preparedStrategy.injectedMemoriesByUnitId,
-						strategyResult.winnerRunId,
-					);
-					const strategyOutput =
-						injectedMemories.length > 0
-							? {
-									...strategyResult,
-									injectedMemories,
-								}
-							: strategyResult;
-
-					if (useJson) {
-						stdout(formatJson(strategyOutput as Record<string, unknown>));
-					} else {
-						for (const line of formatStrategyRunResult(
-							strategyOutput as Parameters<typeof formatStrategyRunResult>[0],
-						)) {
-							stdout(line);
-						}
-					}
-
-					return strategyResult.outcome === "passed" ? 0 : 1;
+					return await runGovernedRunCommand(rest, {
+						cwd,
+						stdout,
+						...(deps === undefined ? {} : { dependencies: deps }),
+					});
 				}
 
 				// Raw path enriches the single packet directly (no strategy children).
@@ -7424,15 +9688,17 @@ export async function runCli(
 
 				// ── Raw path (single-shot, backward compat) ─────────────
 				// Everything below is the EXISTING code, with ledger integration added
-				const useTui = rest.includes("--tui");
+				const useTui = runArguments.tui;
 				const isModelPacket = !!(enrichedPacket as { model?: unknown }).model;
 				const useAsync = useTui || isModelPacket;
 
-				// --- begin ledger integration ---
-				// Disable when BUILDPLANE_LEDGER=0 or when running under test mocks
-				// (deps.createOrchestrator present means the caller is injecting a mock).
-				const useLedger =
-					process.env.BUILDPLANE_LEDGER !== "0" && !deps?.createOrchestrator;
+				// --- raw-lane evidence boundary ---
+				// `--raw` is deliberately incompatible with the governed signed tape and
+				// result-ready ports. Keeping a per-run ledger here made unsafe execution
+				// indistinguishable from governed work to downstream readers. Raw still
+				// records local diagnostic evidence, but it cannot create a signed tape
+				// authority or a trusted receipt.
+				const useLedger = false;
 				let ledgerChild: LedgerChild | null = null;
 				let ledgerEmitter: TapeEmitter | null = null;
 				let unsubscribeLedger: (() => void) | null = null;
@@ -7566,9 +9832,10 @@ export async function runCli(
 					}
 				}
 				// --- end ledger integration ---
-				const ledgerRunOptions = ledgerEmitter
-					? { runId: ledgerRunId }
-					: undefined;
+				const ledgerRunOptions = {
+					...(ledgerEmitter ? { runId: ledgerRunId } : {}),
+					trustLane: "unsafe" as const,
+				};
 
 				// Capture the current ledgerEmitter reference so the closure below
 				// captures the per-run emitter (not a shared mutable variable that
@@ -7576,21 +9843,14 @@ export async function runCli(
 				const runLedgerEmitter = ledgerEmitter;
 				const runGetUnitCtx = getUnitCtx;
 
-				// Thread the (possibly ledger-wrapped) registry into the execution
-				// adapter by swapping the mutable commandExecutor slot.  The
-				// runtimeRouter in loadCliOrchestrator reads commandExecutor.executePacket
-				// by reference on every call, so swapping the property here is sufficient
-				// to route all subsequent command packets through the wrapper.
-				//
-				// The registry is created per-call from executionRoot (the Git worktree
-				// path) so that sandbox path validation inside run_command uses the
-				// correct workspace root, not the project-root cwd.
+				// Build one immutable command gateway for this raw run. The router reads
+				// it only through AsyncLocalStorage while `withRawCommandGateway` is
+				// active, so concurrent runs cannot cross-wire emitters or tool policies.
+				// The registry is still created per call from executionRoot so sandbox
+				// path validation uses the worktree rather than the project root.
 				const { existsSync: fsExistsSync, realpathSync: fsRealpathSync } =
 					await import("node:fs");
 				const { resolve: pathResolve } = await import("node:path");
-				let originalExecutePacket:
-					| ((packetUnknown: unknown, executionRoot: string) => unknown)
-					| undefined;
 				const makeReceipt = (
 					packetUnknown: unknown,
 					executionRoot: string,
@@ -7710,14 +9970,20 @@ export async function runCli(
 						outputChecks,
 					};
 				};
-				if (runLedgerEmitter) {
-					const activeLedgerEmitter = runLedgerEmitter;
-					originalExecutePacket = commandExecutor.executePacket;
-					commandExecutor.executePacket = (
-						packetUnknown: unknown,
-						root: string,
-					) => makeReceipt(packetUnknown, root, activeLedgerEmitter);
-				}
+				const rawCommandGateway: RouterCommandExecutor | undefined =
+					runLedgerEmitter === null
+						? undefined
+						: Object.freeze({
+								executePacket: (
+									packetUnknown: unknown,
+									root: string,
+								): unknown =>
+									makeReceipt(packetUnknown, root, runLedgerEmitter),
+							});
+				const withRawCommandGateway = <T>(operation: () => T): T =>
+					rawCommandGateway
+						? runWithCommandGateway(rawCommandGateway, operation)
+						: operation();
 				const runStartMs = Date.now();
 
 				if (useAsync && !useTui) {
@@ -7736,10 +10002,12 @@ export async function runCli(
 							resolvedCwd,
 							null,
 						);
-						asyncOrchestratorResult = await orchestrator.runPacketAsync(
-							enrichedPacket,
-							cliEventBus,
-							ledgerRunOptions,
+						asyncOrchestratorResult = await withRawCommandGateway(() =>
+							orchestrator.runPacketAsync(
+								enrichedPacket,
+								cliEventBus,
+								ledgerRunOptions,
+							),
 						);
 						asyncResultUnknown = withPersistedInjectedMemories(
 							asyncOrchestratorResult,
@@ -7774,11 +10042,6 @@ export async function runCli(
 								// Cleanup best-effort; the orchestrator result is the authoritative outcome.
 							}
 						}
-						// Restore the original commandExecutor.executePacket so a subsequent
-						// invocation of the orchestrator doesn't inherit this run's closed emitter.
-						if (originalExecutePacket) {
-							commandExecutor.executePacket = originalExecutePacket;
-						}
 						// --- end ledger cleanup ---
 					}
 					// asyncResultUnknown is set here: if try threw, finally re-throws and we never reach this line.
@@ -7793,8 +10056,10 @@ export async function runCli(
 					>;
 
 					if (useJson) {
-						stdout(formatJson(resultRecord));
+						stdout(formatJson(withUnsafeRunGovernance(resultRecord)));
 					} else {
+						stdout("governance: unsafe");
+						stdout("trusted-receipt: false");
 						for (const line of formatRunResult(asyncResult)) {
 							stdout(line);
 						}
@@ -7805,6 +10070,8 @@ export async function runCli(
 
 				if (useTui) {
 					// Lazy-load TUI — only imported when --tui is requested
+					stdout("governance: unsafe");
+					stdout("trusted-receipt: false");
 					const tui = (await cliImport("@buildplane/ui-tui")) as unknown as {
 						renderTui: (eventBus: unknown) => {
 							waitUntilExit(): Promise<void>;
@@ -7831,10 +10098,12 @@ export async function runCli(
 							resolvedCwd,
 							null,
 						);
-						tuiResult = await orchestrator.runPacketAsync(
-							enrichedPacket,
-							tuiBus,
-							ledgerRunOptions,
+						tuiResult = await withRawCommandGateway(() =>
+							orchestrator.runPacketAsync(
+								enrichedPacket,
+								tuiBus,
+								ledgerRunOptions,
+							),
 						);
 						emitLedgerRunCompleted(
 							ledgerEmitter,
@@ -7859,11 +10128,6 @@ export async function runCli(
 							} catch {
 								// Cleanup best-effort; the orchestrator result is the authoritative outcome.
 							}
-						}
-						// Restore the original commandExecutor.executePacket so a subsequent
-						// invocation of the orchestrator doesn't inherit this run's closed emitter.
-						if (originalExecutePacket) {
-							commandExecutor.executePacket = originalExecutePacket;
 						}
 						// --- end ledger cleanup ---
 					}
@@ -7893,15 +10157,19 @@ export async function runCli(
 					);
 					syncResultUnknown = withPersistedInjectedMemories(
 						useAsync
-							? await orchestrator.runPacketAsync(
-									enrichedPacket,
-									cliEventBus,
-									ledgerRunOptions,
+							? await withRawCommandGateway(() =>
+									orchestrator.runPacketAsync(
+										enrichedPacket,
+										cliEventBus,
+										ledgerRunOptions,
+									),
 								)
-							: orchestrator.runPacket(
-									enrichedPacket,
-									cliEventBus,
-									ledgerRunOptions,
+							: withRawCommandGateway(() =>
+									orchestrator.runPacket(
+										enrichedPacket,
+										cliEventBus,
+										ledgerRunOptions,
+									),
 								),
 						structuredMemoryPort,
 						preparedPacket.injectedMemories,
@@ -7936,11 +10204,6 @@ export async function runCli(
 							// Cleanup best-effort; the orchestrator result is the authoritative outcome.
 						}
 					}
-					// Restore the original commandExecutor.executePacket so a subsequent
-					// invocation of the orchestrator doesn't inherit this run's closed emitter.
-					if (originalExecutePacket) {
-						commandExecutor.executePacket = originalExecutePacket;
-					}
 					// --- end ledger cleanup ---
 				}
 				// syncResultUnknown is set here: if try threw, finally re-throws and we never arrive.
@@ -7954,8 +10217,10 @@ export async function runCli(
 				const hasFailed =
 					resultRecord.failure && typeof resultRecord.failure === "object";
 				if (useJson) {
-					stdout(formatJson(resultRecord));
+					stdout(formatJson(withUnsafeRunGovernance(resultRecord)));
 				} else {
+					stdout("governance: unsafe");
+					stdout("trusted-receipt: false");
 					for (const line of formatRunResult(syncResult)) {
 						stdout(line);
 					}
@@ -8132,12 +10397,8 @@ export async function runCli(
 				return 0;
 			}
 			case "replay": {
-				const runId = rest.find((v) => !v.startsWith("--"));
-				if (!runId) {
-					throw new Error("Missing required run id for replay.");
-				}
-
-				const json = rest.includes("--json");
+				const replayArguments = parseUnsafeReplayArguments(rest);
+				const { runId, json } = replayArguments;
 
 				// Load packet snapshot from storage
 				const storage = (await cliImport("@buildplane/storage")) as unknown as {
@@ -8157,7 +10418,7 @@ export async function runCli(
 				// Apply overrides
 				const replayPacket = applyReplayOverrides(
 					packet as Record<string, unknown>,
-					rest,
+					replayArguments,
 				);
 
 				// Create event bus with storage persistence
@@ -8191,12 +10452,15 @@ export async function runCli(
 				const result = await orchestrator.runPacketAsync(
 					replayPacket,
 					replayBus,
+					{ trustLane: "unsafe" },
 				);
 
 				if (json) {
 					stdout(
 						formatJson({
 							originalRunId: runId,
+							governance: "unsafe",
+							trustedReceipt: false,
 							replay: {
 								runId: result.run.id,
 								status: result.run.status,
@@ -8205,6 +10469,8 @@ export async function runCli(
 					);
 				} else {
 					stdout(`replay of: ${runId}`);
+					stdout("governance: unsafe");
+					stdout("trusted-receipt: false");
 					for (const line of formatRunResult(
 						result as { run: { id: string; status: string } },
 					)) {
@@ -8215,11 +10481,12 @@ export async function runCli(
 				return result.run.status === "passed" ? 0 : 1;
 			}
 			case "run-graph": {
-				const graphIndex = rest.indexOf("--graph");
-				if (graphIndex === -1 || !rest[graphIndex + 1]) {
-					throw new Error("Missing required --graph <path> argument.");
-				}
-				const graphPath = resolve(cwd, rest[graphIndex + 1]);
+				const graphArguments = parseRawLegacyPathCommandArguments(rest, {
+					command: "run-graph",
+					pathFlag: "--graph",
+					supportsJson: false,
+				});
+				const graphPath = resolve(cwd, graphArguments.path);
 				const rawGraph = JSON.parse(readFileSync(graphPath, "utf8")) as Record<
 					string,
 					unknown
@@ -8247,6 +10514,7 @@ export async function runCli(
 				const graphResult = await orchestrator.runGraphAsync(
 					preparedGraph.graph,
 					graphBus,
+					{ lane: "raw-legacy" },
 				);
 				persistInjectedMemoriesForTargets(
 					structuredMemoryPort,
@@ -8257,6 +10525,8 @@ export async function runCli(
 					preparedGraph.injectedMemoriesByUnitId,
 				);
 
+				stdout("governance: unsafe");
+				stdout("trusted-receipt: false");
 				stdout(`Graph Outcome: ${graphResult.outcome}`);
 				for (const node of graphResult.nodes) {
 					stdout(` - ${node.unitId}: ${node.status}`);
@@ -8264,11 +10534,12 @@ export async function runCli(
 				return graphResult.outcome === "passed" ? 0 : 1;
 			}
 			case "run-strategy": {
-				const strategyIndex = rest.indexOf("--strategy");
-				if (strategyIndex === -1 || !rest[strategyIndex + 1]) {
-					throw new Error("Missing required --strategy <path> argument.");
-				}
-				const strategyPath = resolve(cwd, rest[strategyIndex + 1]);
+				const strategyArguments = parseRawLegacyPathCommandArguments(rest, {
+					command: "run-strategy",
+					pathFlag: "--strategy",
+					supportsJson: true,
+				});
+				const strategyPath = resolve(cwd, strategyArguments.path);
 
 				const kernel = (await cliImport("@buildplane/kernel")) as unknown as {
 					parseStrategyPacket: (raw: unknown) => unknown;
@@ -8295,23 +10566,9 @@ export async function runCli(
 				const strategyResult = await orchestrator.runStrategy(
 					preparedStrategy.strategy,
 					strategyBus,
+					{ lane: "raw-legacy" },
 				);
-				const strategyTargets = [
-					...Array.from(
-						(strategyResult.rounds ?? []).flatMap((round) =>
-							Array.from(round.entries()).map(([unitId, childResult]) => ({
-								unitId,
-								runId: childResult.run.id,
-							})),
-						),
-					),
-					...Array.from(strategyResult.childResults.entries()).map(
-						([unitId, childResult]) => ({
-							unitId,
-							runId: childResult.run.id,
-						}),
-					),
-				];
+				const strategyTargets = collectStrategyRunTargets(strategyResult);
 				recordStrategyIdForTargets(
 					structuredMemoryPort,
 					strategyTargets,
@@ -8330,11 +10587,18 @@ export async function runCli(
 								injectedMemories,
 							}
 						: strategyResult;
+				const unsafeStrategyOutput = {
+					...strategyOutput,
+					governance: "unsafe" as const,
+					trustedReceipt: false,
+				};
 
-				const json = rest.includes("--json");
+				const json = strategyArguments.json;
 				if (json) {
-					stdout(formatJson(strategyOutput as Record<string, unknown>));
+					stdout(formatJson(unsafeStrategyOutput as Record<string, unknown>));
 				} else {
+					stdout("governance: unsafe");
+					stdout("trusted-receipt: false");
 					for (const line of formatStrategyRunResult(
 						strategyOutput as Parameters<typeof formatStrategyRunResult>[0],
 					)) {
@@ -8415,42 +10679,30 @@ function normalizeGraphNode(node: Record<string, unknown>): unknown {
 
 function applyReplayOverrides(
 	packet: Record<string, unknown>,
-	args: string[],
+	arguments_: UnsafeReplayArguments,
 ): unknown {
 	const result = { ...packet };
 
-	for (let index = 0; index < args.length; index += 1) {
-		const arg = args[index];
-		if (arg.startsWith("--model=")) {
-			const modelValue = arg.slice("--model=".length);
-			const slashIndex = modelValue.indexOf("/");
-
-			if (slashIndex > 0) {
-				// --model=provider/model-name
-				const provider = modelValue.slice(0, slashIndex);
-				const model = modelValue.slice(slashIndex + 1);
-				const existing = (result.model as Record<string, unknown>) ?? {};
-				result.model = { ...existing, provider, model };
-				// If switching to model execution, remove command execution
-				delete result.execution;
-			} else {
-				// --model=model-name (keep existing provider)
-				const existing = (result.model as Record<string, unknown>) ?? {};
-				result.model = { ...existing, model: modelValue };
-				delete result.execution;
-			}
-		} else if (arg.startsWith("--policy=")) {
-			const policyProfile = arg.slice("--policy=".length);
-			const unit = (result.unit as Record<string, unknown>) ?? {};
-			result.unit = { ...unit, policyProfile };
-		} else if (arg === "--policy") {
-			const policyProfile = args[index + 1];
-			if (policyProfile && !policyProfile.startsWith("--")) {
-				const unit = (result.unit as Record<string, unknown>) ?? {};
-				result.unit = { ...unit, policyProfile };
-				index += 1;
-			}
+	if (arguments_.model !== undefined) {
+		const slashIndex = arguments_.model.indexOf("/");
+		if (slashIndex > 0) {
+			// provider/model-name
+			const provider = arguments_.model.slice(0, slashIndex);
+			const model = arguments_.model.slice(slashIndex + 1);
+			const existing = (result.model as Record<string, unknown>) ?? {};
+			result.model = { ...existing, provider, model };
+			// If switching to model execution, remove command execution.
+			delete result.execution;
+		} else {
+			// model-name (keep existing provider)
+			const existing = (result.model as Record<string, unknown>) ?? {};
+			result.model = { ...existing, model: arguments_.model };
+			delete result.execution;
 		}
+	}
+	if (arguments_.policyProfile !== undefined) {
+		const unit = (result.unit as Record<string, unknown>) ?? {};
+		result.unit = { ...unit, policyProfile: arguments_.policyProfile };
 	}
 
 	return result;

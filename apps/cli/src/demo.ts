@@ -77,6 +77,8 @@ export interface DemoPacket {
 	readonly verification: {
 		readonly requiredOutputs: readonly string[];
 	};
+	/** Explicitly stamp the role so demo packets exercise the governed shape. */
+	readonly execution_role: "implementer";
 	readonly intent: {
 		readonly objective: string;
 		readonly taskType: string;
@@ -112,6 +114,7 @@ export function createCommandPacket1(): DemoPacket {
 			],
 		},
 		verification: { requiredOutputs: ["output/result.txt"] },
+		execution_role: "implementer",
 		intent: {
 			objective: "Compute and write result",
 			taskType: "implement",
@@ -145,6 +148,7 @@ export function createCommandPacket2(): DemoPacket {
 			],
 		},
 		verification: { requiredOutputs: ["output/summary.txt"] },
+		execution_role: "implementer",
 		intent: {
 			objective: "Summarize workspace state",
 			taskType: "implement",
@@ -160,10 +164,29 @@ export function createCommandPacket2(): DemoPacket {
 }
 
 // ── Main demo runner ─────────────────────────────────────────
-export async function runDemo(options: { model?: boolean }): Promise<void> {
+/**
+ * The flywheel demo intentionally uses local command execution in a disposable
+ * repository. It is useful for development, but it is not a governed worker
+ * or an ActionGateway/OCI sandbox demonstration. Require an explicit caller
+ * acknowledgement so it cannot be mistaken for the normal trusted front door.
+ */
+export async function runDemo(options: {
+	readonly model?: boolean;
+	readonly raw?: boolean;
+}): Promise<void> {
+	if (options.raw !== true) {
+		throw new Error(
+			"The flywheel demo uses an unsafe ambient command lane. Pass raw: true (CLI: buildplane demo --raw) to acknowledge it.",
+		);
+	}
 	// ── Setup ──────────────────────────────────────────────────
 	log("");
 	logBold("━━━ Buildplane Flywheel Demo ━━━━━━━━━━━━━━━━━━");
+	// Keep these machine-detectable raw-lane markers separate from the human
+	// explanation. Demo output must never be mistaken for governed evidence.
+	log("governance: unsafe");
+	log("trusted-receipt: false");
+	logDim("development demo; no trusted receipt");
 	log("");
 	log("Setting up temporary workspace...");
 
@@ -180,7 +203,11 @@ export async function runDemo(options: { model?: boolean }): Promise<void> {
 	const kernel = (await import("@buildplane/kernel")) as unknown as {
 		createBuildplaneOrchestrator: (opts: Record<string, unknown>) => {
 			initializeProject: () => { created: boolean; projectRoot: string };
-			runPacket: (packet: unknown) => {
+			runPacket: (
+				packet: unknown,
+				eventBus?: unknown,
+				runOptions?: { trustLane?: "unsafe" },
+			) => {
 				run: { id: string; status: string };
 				receipt: unknown;
 				decision?: { outcome: string; reasons: string[] };
@@ -241,7 +268,9 @@ export async function runDemo(options: { model?: boolean }): Promise<void> {
 	const packet1 = createCommandPacket1();
 	log(`Running: "${packet1.intent.objective}"`);
 
-	const result1 = orchestrator.runPacket(packet1);
+	const result1 = orchestrator.runPacket(packet1, undefined, {
+		trustLane: "unsafe",
+	});
 	logSuccess(`Passed — exit 0, ${packet1.unit.expectedOutputs[0]} created`);
 	const decision1 = result1.decision as { outcome: string } | undefined;
 	log(`  Policy: ${decision1?.outcome ?? "N/A"}`);
@@ -279,7 +308,9 @@ export async function runDemo(options: { model?: boolean }): Promise<void> {
 	log("");
 
 	log(`Running: "${packet2.intent.objective}"`);
-	const result2 = orchestrator.runPacket(enrichedPacket);
+	const result2 = orchestrator.runPacket(enrichedPacket, undefined, {
+		trustLane: "unsafe",
+	});
 	logSuccess(`Passed — exit 0, ${packet2.unit.expectedOutputs[0]} created`);
 	const decision2 = result2.decision as { outcome: string } | undefined;
 	log(`  Policy: ${decision2?.outcome ?? "N/A"}`);

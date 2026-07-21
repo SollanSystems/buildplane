@@ -84,7 +84,10 @@ fn impl_redact_secrets(ast: &DeriveInput) -> syn::Result<TokenStream2> {
                 if let Meta::List(list) = &attr.meta {
                     if let Ok(nv) = syn::parse2::<syn::MetaNameValue>(list.tokens.clone()) {
                         if nv.path.is_ident("hint") {
-                            if let Expr::Lit(ExprLit { lit: Lit::Str(s), .. }) = &nv.value {
+                            if let Expr::Lit(ExprLit {
+                                lit: Lit::Str(s), ..
+                            }) = &nv.value
+                            {
                                 hint = s.value();
                             }
                         }
@@ -94,7 +97,11 @@ fn impl_redact_secrets(ast: &DeriveInput) -> syn::Result<TokenStream2> {
             }
         }
 
-        field_infos.push(FieldInfo { ident, is_secret, hint });
+        field_infos.push(FieldInfo {
+            ident,
+            is_secret,
+            hint,
+        });
     }
 
     // Generate per-secret-field helper modules with the hash/redact function.

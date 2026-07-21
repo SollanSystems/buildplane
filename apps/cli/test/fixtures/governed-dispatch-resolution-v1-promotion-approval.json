@@ -1,0 +1,78 @@
+{
+	"schema_version": 1,
+	"dispatch_event_ref": "00000000-0000-7000-8000-000000000012",
+	"trusted_kernel_signer": {
+		"actor_id": "kernel",
+		"key_id": "kernel-main",
+		"public_key_hash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	},
+	"dispatch": {
+		"run_id": "00000000-0000-7000-8000-000000000011",
+		"workflow_id": "workflow-trust-spine",
+		"workflow_revision": "1",
+		"unit_id": "unit-trust-spine",
+		"attempt": 1,
+		"dispatch_version": 3,
+		"event_id": "00000000-0000-7000-8000-000000000012",
+		"envelope_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+		"provenance_ref": "plan-admitted:fixture",
+		"base_commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		"repository_binding_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		"ledger_authority_realm_digest": "sha256:9999999999999999999999999999999999999999999999999999999999999999",
+		"governed_packet_digest": "sha256:8888888888888888888888888888888888888888888888888888888888888888",
+		"capability_bundle_digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+		"acceptance_contract_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		"context_manifest_digest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+		"worker_manifest_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+		"sandbox_profile_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+		"execution_role": "implementer",
+		"commit_mode": "atomic",
+		"budget": {
+			"max_tokens": 12,
+			"max_compute_time_ms": 30000
+		},
+		"trust_tier": "governed",
+		"idempotency_key": "dispatch:fixture",
+		"issued_at": "2026-07-18T12:00:00Z",
+		"expires_at": "2099-07-18T12:00:00Z",
+		"action_evidence_version": "sealed_v3"
+	},
+	"tape_integrity": {
+		"schema_version": 1,
+		"checkpoint_event_ref": "00000000-0000-7000-8000-000000000015",
+		"checkpoint_event_digest": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+		"through_event_ref": "00000000-0000-7000-8000-000000000012",
+		"signed_non_checkpoint_event_count": "1",
+		"tape_root_hash": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+		"algorithm": "sha256_linear"
+	},
+	"recovery": {
+		"phase": "promotion_approval_pending",
+		"requests": [],
+		"activity_claims": [],
+		"receipts": [],
+		"receipt_set": null,
+		"candidates": [],
+		"acceptance": null,
+		"reviews": [],
+		"promotion_approval": {
+			"event_id": "00000000-0000-7000-8000-0000000000aa",
+			"candidate_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+			"base_commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			"target_ref": "refs/heads/main",
+			"envelope_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+			"acceptance_ref": "acceptance:fixture",
+			"review_refs": ["review:fixture"],
+			"requested_by": "kernel",
+			"requested_at": "2026-07-18T12:02:00Z",
+			"idempotency_key": "promotion:fixture"
+		},
+		"promotion": null,
+		"terminal": null,
+		"timers": [],
+		"cancellation": null,
+		"pending_action_ids": [],
+		"unknown_action_ids": [],
+		"failed_action_ids": []
+	}
+}
