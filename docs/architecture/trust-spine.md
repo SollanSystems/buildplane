@@ -543,8 +543,13 @@ cross-wiring.
 
 The OCI provider action plane is deliberately fail-closed: the feasibility
 probe requires Linux/WSL, rootless Podman, user namespaces, read-only mounts,
-network controls, dropped capabilities, and security options. A missing probe
-or executor does not permit host-shell fallback.
+network controls, dropped capabilities, and security options. The production
+executor also launches a bounded, no-mount, `--pull=never` canary using the
+same read-only, no-network, capability, user-namespace, resource, and scrubbed
+environment baseline as an action before it emits its OCI attestation. A
+runtime that merely advertises those flags but cannot launch the isolated image
+is therefore blocked before worker execution. A missing probe or executor does
+not permit host-shell fallback.
 
 A governed dispatch's `maxComputeTimeMs` is enforced as one immutable absolute
 deadline: `min(expiresAt, issuedAt + maxComputeTimeMs)`. The worker rejects an

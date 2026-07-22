@@ -69,6 +69,14 @@ function probeResult(args: readonly string[]) {
 			stderr: "",
 		};
 	}
+	if (
+		args[0] === "run" &&
+		args.includes("--pull=never") &&
+		args.at(-2) === IMAGE &&
+		args.at(-1) === "/bin/true"
+	) {
+		return { status: 0, stdout: "", stderr: "" };
+	}
 	throw new Error(`unexpected Podman probe: ${args.join(" ")}`);
 }
 
@@ -92,7 +100,7 @@ describe("production Podman governed executor construction", () => {
 
 		expect(runtime.realpathSync).toHaveBeenCalledWith("/usr/bin/podman");
 		expect(runtime.lstatSync).toHaveBeenCalledWith("/usr/bin/podman");
-		expect(runtime.spawnSync).toHaveBeenCalledTimes(4);
+		expect(runtime.spawnSync).toHaveBeenCalledTimes(5);
 		for (const [binary, _args, options] of runtime.spawnSync.mock.calls) {
 			expect(binary).toBe("/usr/bin/podman");
 			expect(options).toMatchObject({
@@ -102,5 +110,18 @@ describe("production Podman governed executor construction", () => {
 				},
 			});
 		}
+		expect(runtime.spawnSync.mock.calls[4]?.[1]).toEqual(
+			expect.arrayContaining([
+				"run",
+				"--pull=never",
+				"--read-only",
+				"--network=none",
+				"--cap-drop=ALL",
+				"--security-opt=no-new-privileges",
+				"--userns=keep-id",
+				IMAGE,
+				"/bin/true",
+			]),
+		);
 	});
 });

@@ -297,7 +297,7 @@ function createPodmanGovernedActionExecutorWithRuntime(
 	hostPlatform: string,
 	afterOverlayPromotion?: () => void,
 ): GovernedActionExecutor {
-	assertRootlessPodmanPrerequisites(runner, hostPlatform);
+	assertRootlessPodmanPrerequisites(normalized, runner, hostPlatform);
 	const sandbox: GovernedSandboxAttestationV1 = Object.freeze({
 		schemaVersion: 1,
 		runtime: "rootless-oci",
@@ -511,6 +511,7 @@ function normalizeTestHostPlatform(
  * rootless.
  */
 function assertRootlessPodmanPrerequisites(
+	options: NormalizedOptions,
 	runner: PodmanCommandRunner,
 	hostPlatform: string,
 ): void {
@@ -555,15 +556,37 @@ function assertRootlessPodmanPrerequisites(
 			"Rootless Podman prerequisite check failed: required isolation flags are unavailable.",
 		);
 	}
+
+	// Help text only establishes that a runtime advertises the flags. Before the
+	// host may attest that it can run governed actions, prove that the exact
+	// no-network/read-only isolation baseline can start against the declared
+	// digest-pinned image. The canary has no host mounts or writable overlay, so
+	// it cannot observe or mutate a candidate worktree. `--pull=never` also
+	// prevents feasibility probing from fetching an image or using the network.
+	const canary = runPodmanProbe(
+		runner,
+		[...governedPodmanRunBaselineArgs(options), options.image, "/bin/true"],
+		PODMAN_TIMEOUT_MS,
+	);
+	if (!probeSucceeded(canary)) {
+		throw new Error(
+			"Rootless Podman prerequisite check failed: the isolated governed OCI canary could not start.",
+		);
+	}
 }
 
 function runPodmanProbe(
 	runner: PodmanCommandRunner,
 	args: readonly string[],
+	timeoutMs?: number,
 ): PodmanCommandResult {
 	try {
 		return normalizeRunnerResult(
-			runner("podman", Object.freeze([...args]), Object.freeze({})),
+			runner(
+				"podman",
+				Object.freeze([...args]),
+				Object.freeze(timeoutMs === undefined ? {} : { timeoutMs }),
+			),
 		);
 	} catch (error) {
 		return {
@@ -1238,33 +1261,7 @@ function runPodman(
 			);
 		}
 		const args = [
-			"run",
-			"--rm",
-			"--pull=never",
-			"--read-only",
-			"--network=none",
-			// Podman otherwise forwards proxy environment variables by default.
-			// Governed actions must never inherit an ambient proxy configuration,
-			// even when a future runner changes its own process environment.
-			"--http-proxy=false",
-			// Do not synthesize container /etc/hosts or /etc/hostname from host
-			// topology. `--network=none` limits connectivity, but it does not by
-			// itself prevent disclosure of host aliases to the worker.
-			"--no-hosts",
-			"--no-hostname",
-			"--cap-drop=ALL",
-			"--security-opt=no-new-privileges",
-			"--userns=keep-id",
-			"--entrypoint=",
-			`--cpus=${options.profile.cpuCores}`,
-			`--memory=${options.profile.memoryBytes}b`,
-			`--pids-limit=${options.profile.pidsLimit}`,
-			`--tmpfs=/tmp:rw,nosuid,nodev,noexec,size=${options.profile.tmpfsBytes}`,
-			"--env=HOME=/tmp",
-			"--env=TMPDIR=/tmp",
-			"--env=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-			"--env=LANG=C.UTF-8",
-			"--env=LC_ALL=C.UTF-8",
+			...governedPodmanRunBaselineArgs(options),
 			...containerMounts(readSnapshots, overlay).map(
 				(mount) =>
 					`--volume=${mount.hostPath}:${mount.containerPath}:${mount.mode},rprivate`,
@@ -1317,6 +1314,46 @@ function runPodman(
 		throw new Error("Governed Podman action completed without a result.");
 	}
 	return actionResult;
+}
+
+/**
+ * The immutable isolation baseline shared by the preflight canary and every
+ * governed action. Mount and working-directory arguments remain action-local:
+ * their source paths are verified against the signed capability scope after a
+ * dispatch has been admitted.
+ */
+function governedPodmanRunBaselineArgs(
+	options: NormalizedOptions,
+): readonly string[] {
+	return [
+		"run",
+		"--rm",
+		"--pull=never",
+		"--read-only",
+		"--network=none",
+		// Podman otherwise forwards proxy environment variables by default.
+		// Governed actions must never inherit an ambient proxy configuration,
+		// even when a future runner changes its own process environment.
+		"--http-proxy=false",
+		// Do not synthesize container /etc/hosts or /etc/hostname from host
+		// topology. `--network=none` limits connectivity, but it does not by
+		// itself prevent disclosure of host aliases to the worker.
+		"--no-hosts",
+		"--no-hostname",
+		"--cap-drop=ALL",
+		"--security-opt=no-new-privileges",
+		"--userns=keep-id",
+		"--entrypoint=",
+		`--cpus=${options.profile.cpuCores}`,
+		`--memory=${options.profile.memoryBytes}b`,
+		`--pids-limit=${options.profile.pidsLimit}`,
+		`--tmpfs=/tmp:rw,nosuid,nodev,noexec,size=${options.profile.tmpfsBytes}`,
+		"--env=HOME=/tmp",
+		"--env=TMPDIR=/tmp",
+		"--env=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+		"--env=LANG=C.UTF-8",
+		"--env=LC_ALL=C.UTF-8",
+	];
 }
 
 /**

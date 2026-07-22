@@ -660,6 +660,24 @@ function campaignEvidenceRefs(payload: JsonObject): JsonObject[] {
 }
 
 describe("Trust Spine release-gate CLI evidence boundary", () => {
+	it("accepts pnpm's optional argument delimiter", () => {
+		const stderr: string[] = [];
+		const exitCode = runTrustSpineReleaseGateCli(
+			[
+				"--",
+				"--bundle",
+				"/missing/campaign.json",
+				"--commit",
+				COMMIT,
+				"--ref",
+				REF,
+			],
+			{ stderr: (line) => stderr.push(line) },
+		);
+
+		expect(exitCode).toBe(2);
+		expect(stderr.join("\n")).toMatch(/unable to read campaign bundle/i);
+	});
 	it("accepts a complete signed campaign only when every gate input derives from bound evidence", () => {
 		const { bundle, trustRoot } = signedFixture();
 

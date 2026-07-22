@@ -266,7 +266,7 @@ export function evaluateTrustSpineReleaseCampaignBundle(
 		options.releaseRef,
 		"requested release",
 	);
-	const root = parseTrustRoot(trustRootValue);
+	const root = parseTrustSpineReleaseTrustRoot(trustRootValue);
 	const policy = root.releasePolicy;
 	if (!policy) {
 		throw new GateError("Pinned release policy is not configured.");
@@ -354,9 +354,9 @@ export function runTrustSpineReleaseGateCli(
 	const stdout = io.stdout ?? ((line: string) => console.log(line));
 	const stderr = io.stderr ?? ((line: string) => console.error(line));
 	try {
-		const args = parseCliArgs(argv);
+		const args = parseCliArgs(stripPnpmArgumentDelimiter(argv));
 		const bundle = readBundleAtImmutablePath(args.bundlePath);
-		const root = readJson(TRUST_ROOT_PATH, "pinned trust root");
+		const root = readPinnedTrustSpineReleaseTrustRoot();
 		const result = evaluateTrustSpineReleaseCampaignBundle(bundle, root, {
 			releaseCommit: args.releaseCommit,
 			releaseRef: args.releaseRef,
@@ -373,6 +373,13 @@ export function runTrustSpineReleaseGateCli(
 		stderr(`trust-spine-release-gate: ${errorMessage(error)}`);
 		return error instanceof UsageError ? 2 : 1;
 	}
+}
+
+/** pnpm forwards an optional command delimiter as a literal argv entry. */
+function stripPnpmArgumentDelimiter(
+	argv: readonly string[],
+): readonly string[] {
+	return argv[0] === "--" ? argv.slice(1) : argv;
 }
 
 function parseCliArgs(argv: readonly string[]): {
@@ -603,7 +610,20 @@ function assertNoDuplicateJsonKeys(source: string, label: string): void {
 	}
 }
 
-function parseTrustRoot(value: unknown): TrustSpineReleaseTrustRootV1 {
+/**
+ * Reads and closes the source-controlled release root used by every campaign
+ * verification. Operator tooling may inspect this public projection, but can
+ * never select a different root for a release decision.
+ */
+export function readPinnedTrustSpineReleaseTrustRoot(): TrustSpineReleaseTrustRootV1 {
+	return parseTrustSpineReleaseTrustRoot(
+		readJson(TRUST_ROOT_PATH, "pinned trust root"),
+	);
+}
+
+export function parseTrustSpineReleaseTrustRoot(
+	value: unknown,
+): TrustSpineReleaseTrustRootV1 {
 	const root = asRecord(value, "trust root");
 	validateKeys(
 		root,

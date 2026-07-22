@@ -160,6 +160,41 @@ substitute.
 
 ### Required operator and infrastructure work
 
+#### Protected-host checkout prerequisite
+
+Run campaign and preflight commands from a native Linux filesystem on the
+protected host (for example, `/srv/buildplane`), using Node `24.13.1` and
+pnpm `10.0.0`. Do not reuse `node_modules` installed from Windows or another
+OS: native dependencies such as `esbuild` are platform-specific and a
+cross-platform mount can prevent the preflight from starting before it can
+report OCI readiness. Clone or create a Linux-native worktree and install its
+dependencies on that host:
+
+```sh
+git clone <approved-buildplane-remote> /srv/buildplane
+cd /srv/buildplane
+corepack pnpm install --frozen-lockfile
+```
+
+Before campaign work, run the read-only preflight against the pinned root on
+the protected host using its **public** host binding:
+
+```sh
+pnpm trust-spine:release-preflight -- \
+  --stage host \
+  --realm <realm> \
+  --key-id <host-key-id> \
+  --actor-id <host-actor-id> \
+  --public-key-hash <sha256:host-public-key>
+```
+
+It reports whether the binding, ordinary tape signer role, checkpoint signer
+role, release policy, and local rootless-OCI prerequisites are already
+enrolled/proven. It does not generate keys, prove private-key custody or
+protected-host separation, edit the root, or grant authority. The production
+executor separately runs a bounded no-network OCI canary before it emits an
+attestation.
+
 1. Deploy a separate protected release host. It must use a distinct
    OS/hardware-backed authority boundary from workers, retain its private host
    and tape-signing keys, and expose only the native capability-bound host
@@ -192,6 +227,18 @@ substitute.
    bundle. Hosted runners therefore need a separately operated immutable
    artifact-delivery step or trusted runner mount. Do not use a URL, a
    workspace-relative path, a symlink, or a mutable checkout copy.
+
+After provisioning, run the runner-stage preflight on that exact runner before
+publication. It delegates to the same pinned-root cryptographic campaign gate
+that publication uses and makes no network request or artifact copy:
+
+```sh
+pnpm trust-spine:release-preflight -- \
+  --stage runner \
+  --bundle /protected-mount/trust-spine-campaign.json \
+  --commit <exact-release-sha> \
+  --ref refs/heads/main
+```
 
 The first four bullets above are code-enforced containment. The five numbered
 items are remaining release-operator and infrastructure gates; satisfying only

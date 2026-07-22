@@ -253,7 +253,19 @@ function rootlessPrerequisiteResult(
 			stderr: "",
 		};
 	}
+	if (isGovernedCanary(args)) {
+		return { status: 0, stdout: "", stderr: "" };
+	}
 	return undefined;
+}
+
+function isGovernedCanary(args: readonly string[]): boolean {
+	return (
+		args[0] === "run" &&
+		args.includes("--pull=never") &&
+		args.at(-2) === IMAGE &&
+		args.at(-1) === "/bin/true"
+	);
 }
 
 describe("rootless Podman governed ActionGateway executor", () => {
@@ -292,7 +304,7 @@ describe("rootless Podman governed ActionGateway executor", () => {
 		);
 
 		expect(executor.sandbox.runtime).toBe("rootless-oci");
-		expect(runner).toHaveBeenCalledTimes(4);
+		expect(runner).toHaveBeenCalledTimes(5);
 	});
 
 	it("binds the sandbox profile digest to the digest-pinned image and resource limits", () => {
@@ -1609,6 +1621,52 @@ describe("rootless Podman governed ActionGateway executor", () => {
 		expect(calls.some((args) => args[0] === "run")).toBe(false);
 	});
 
+	it("rejects a runtime that advertises isolation flags but cannot launch the governed canary", () => {
+		const calls: string[][] = [];
+		const runner = vi.fn<PodmanCommandRunner>((_binary, args) => {
+			calls.push([...args]);
+			if (isGovernedCanary(args)) {
+				return {
+					status: 125,
+					stdout: "",
+					stderr: "runtime policy rejected --security-opt",
+				};
+			}
+			return (
+				rootlessPrerequisiteResult(args) ?? {
+					status: 1,
+					stdout: "",
+					stderr: "unexpected command",
+				}
+			);
+		});
+
+		expect(() =>
+			createPodmanGovernedActionExecutor(
+				{
+					image: IMAGE,
+					profile: profile(),
+					runner,
+				},
+				LINUX_TEST_HOST,
+			),
+		).toThrow(/isolated governed OCI canary/i);
+		expect(calls).toHaveLength(5);
+		expect(calls[4]).toEqual(
+			expect.arrayContaining([
+				"run",
+				"--pull=never",
+				"--read-only",
+				"--network=none",
+				"--cap-drop=ALL",
+				"--security-opt=no-new-privileges",
+				"--userns=keep-id",
+				IMAGE,
+				"/bin/true",
+			]),
+		);
+	});
+
 	it("does not permit a test host override without an injected runner", () => {
 		expect(() =>
 			createPodmanGovernedActionExecutor(
@@ -1652,8 +1710,8 @@ describe("rootless Podman governed ActionGateway executor", () => {
 				cwd: "src",
 			}),
 		).toThrow(/ambiguous Podman control-plane outcome/i);
-		expect(runner).toHaveBeenCalledTimes(5);
-		expect(runner.mock.calls[4]?.[1]).toContain("git");
+		expect(runner).toHaveBeenCalledTimes(6);
+		expect(runner.mock.calls[5]?.[1]).toContain("git");
 	});
 
 	it("throws when the Podman runner reports a control-plane error", () => {
@@ -1685,7 +1743,7 @@ describe("rootless Podman governed ActionGateway executor", () => {
 				cwd: "src",
 			}),
 		).toThrow(/ambiguous Podman control-plane outcome/i);
-		expect(runner).toHaveBeenCalledTimes(5);
+		expect(runner).toHaveBeenCalledTimes(6);
 	});
 
 	it("throws when the Podman runner times out after an action may have started", () => {
@@ -1713,7 +1771,7 @@ describe("rootless Podman governed ActionGateway executor", () => {
 				cwd: "src",
 			}),
 		).toThrow(/ambiguous Podman control-plane outcome.*ETIMEDOUT/i);
-		expect(runner).toHaveBeenCalledTimes(5);
+		expect(runner).toHaveBeenCalledTimes(6);
 	});
 
 	it("keeps an ordinary nonzero container exit as a deterministic failure", () => {
@@ -1746,7 +1804,7 @@ describe("rootless Podman governed ActionGateway executor", () => {
 		).toMatchObject({
 			outcome: "failed",
 		});
-		expect(runner).toHaveBeenCalledTimes(5);
-		expect(runner.mock.calls[4]?.[1]).toContain("git");
+		expect(runner).toHaveBeenCalledTimes(6);
+		expect(runner.mock.calls[5]?.[1]).toContain("git");
 	});
 });
