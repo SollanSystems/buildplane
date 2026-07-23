@@ -167,6 +167,9 @@ importers:
       '@buildplane/kernel':
         specifier: workspace:*
         version: link:../kernel
+      '@buildplane/ledger-client':
+        specifier: workspace:*
+        version: link:../ledger-client
       '@buildplane/runtime':
         specifier: workspace:*
         version: link:../runtime
