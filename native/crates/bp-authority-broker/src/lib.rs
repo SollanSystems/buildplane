@@ -31,6 +31,8 @@ use ed25519_dalek::SigningKey;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
+#[allow(dead_code)]
+mod admission_protocol;
 mod confinement;
 mod promotion_execution;
 mod promotion_git;

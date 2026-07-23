@@ -82,6 +82,9 @@ dependencies = [
  "chrono",
  "ed25519-dalek",
  "libc",
+ "serde",
+ "serde_json",
+ "sha2",
  "tempfile",
  "thiserror",
 ]

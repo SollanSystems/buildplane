@@ -69,6 +69,145 @@ const DIGEST_B: &str = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 const DIGEST_C: &str = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
 const DIGEST_D: &str = "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
 const DIGEST_E: &str = "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+const AUTHORITY_BROKER_TS_ADMISSION_DIGEST: &str =
+    "sha256:a8eba84025a9f3b6c6d44a9b4fe8446de7c9d7b75cfa335a6e83af202df38ed5";
+const AUTHORITY_BROKER_TS_LOOKUP_DIGEST: &str =
+    "sha256:157768414de8d5e557af7345a3fe28eb8e52b434da8bb732aef0af8372069978";
+
+fn authority_broker_digest(character: char) -> String {
+    format!("sha256:{}", character.to_string().repeat(64))
+}
+
+/// This wire fixture is emitted by the TypeScript `admissionInput()` contract
+/// in `apps/cli/test/governed-authority-broker-client.test.ts`. Its digest was
+/// recorded by invoking the TypeScript request builder, not by native code.
+fn authority_broker_admission_wire() -> String {
+    format!(
+        r#"{{"schema_version":1,"operation":"admit","request_id":"123e4567-e89b-12d3-a456-426614174000","request":{{"run_id":"123e4567-e89b-12d3-a456-426614174003","workflow_id":"workflow-trust-spine","workflow_revision":"v1","unit_id":"unit-admit","attempt":1,"idempotency_key":"workflow-trust-spine:unit-admit:1","repository_target_ref":"broker://repositories/trust-spine","expected_repository_binding_digest":"{binding_digest}","governed_packet_ref":"cas://packets/trust-spine/admit","governed_packet_digest":"{packet_digest}"}},"request_digest":"{request_digest}"}}"#,
+        binding_digest = authority_broker_digest('f'),
+        packet_digest = authority_broker_digest('2'),
+        request_digest = AUTHORITY_BROKER_TS_ADMISSION_DIGEST,
+    )
+}
+
+fn authority_broker_lookup_wire() -> String {
+    format!(
+        r#"{{"schema_version":1,"operation":"lookup_preauthorized","request_id":"123e4567-e89b-12d3-a456-426614174000","request":{{"run_id":"123e4567-e89b-12d3-a456-426614174003","workflow_id":"workflow-trust-spine","workflow_revision":"v1","unit_id":"unit-admit","attempt":1,"idempotency_key":"workflow-trust-spine:unit-admit:1","repository_target_ref":"broker://repositories/trust-spine","expected_repository_binding_digest":"{binding_digest}","preauthorization_ref":"broker://preauthorizations/approved-123","governed_packet_ref":"cas://packets/trust-spine/admit","governed_packet_digest":"{packet_digest}"}},"request_digest":"{request_digest}"}}"#,
+        binding_digest = authority_broker_digest('f'),
+        packet_digest = authority_broker_digest('2'),
+        request_digest = AUTHORITY_BROKER_TS_LOOKUP_DIGEST,
+    )
+}
+
+#[test]
+fn authority_broker_parser_accepts_the_typescript_admission_fixture_digest() {
+    let parsed = super::admission_protocol::parse_authority_broker_request_v1(
+        authority_broker_admission_wire().as_bytes(),
+    )
+    .expect("the TypeScript admission fixture must have its recorded digest");
+
+    assert!(matches!(
+        parsed,
+        super::admission_protocol::ParsedAuthorityBrokerRequestV1 {
+            operation: super::admission_protocol::AuthorityBrokerOperationV1::Admit,
+            request: super::admission_protocol::ParsedAuthorityBrokerRequestBodyV1::Admit(_),
+            request_digest,
+            ..
+        } if request_digest == AUTHORITY_BROKER_TS_ADMISSION_DIGEST
+    ));
+}
+
+#[test]
+fn authority_broker_parser_accepts_the_typescript_lookup_contract() {
+    let parsed = super::admission_protocol::parse_authority_broker_request_v1(
+        authority_broker_lookup_wire().as_bytes(),
+    )
+    .expect("the TypeScript lookup fixture must have its recorded digest");
+
+    assert!(matches!(
+        parsed,
+        super::admission_protocol::ParsedAuthorityBrokerRequestV1 {
+            operation: super::admission_protocol::AuthorityBrokerOperationV1::LookupPreauthorized,
+            request:
+                super::admission_protocol::ParsedAuthorityBrokerRequestBodyV1::LookupPreauthorized(_),
+            request_digest,
+            ..
+        } if request_digest == AUTHORITY_BROKER_TS_LOOKUP_DIGEST
+    ));
+}
+
+#[test]
+fn authority_broker_parser_rejects_an_extra_outer_field() {
+    let wire = authority_broker_admission_wire().replacen(
+        r#","request_digest":"#,
+        r#","unexpected_authority_input":"ignored","request_digest":"#,
+        1,
+    );
+
+    assert!(matches!(
+        super::admission_protocol::parse_authority_broker_request_v1(wire.as_bytes()),
+        Err(super::admission_protocol::AdmissionProtocolError::Json(_))
+    ));
+}
+
+#[test]
+fn authority_broker_parser_rejects_a_request_digest_mismatch() {
+    let wrong_digest = authority_broker_digest('0');
+    let wire = authority_broker_admission_wire().replacen(
+        AUTHORITY_BROKER_TS_ADMISSION_DIGEST,
+        wrong_digest.as_str(),
+        1,
+    );
+
+    assert!(matches!(
+        super::admission_protocol::parse_authority_broker_request_v1(wire.as_bytes()),
+        Err(super::admission_protocol::AdmissionProtocolError::RequestDigestMismatch)
+    ));
+}
+
+#[test]
+fn authority_broker_parser_rejects_a_path_shaped_opaque_reference() {
+    let wire = authority_broker_admission_wire().replacen(
+        "cas://packets/trust-spine/admit",
+        "cas://C:/workspace/packet.json",
+        1,
+    );
+
+    assert!(matches!(
+        super::admission_protocol::parse_authority_broker_request_v1(wire.as_bytes()),
+        Err(
+            super::admission_protocol::AdmissionProtocolError::InvalidOpaqueReference {
+                field: "governed_packet_ref"
+            }
+        )
+    ));
+}
+
+#[test]
+fn authority_broker_parser_rejects_an_admit_operation_with_a_lookup_body() {
+    let wire = authority_broker_lookup_wire().replacen(
+        r#""operation":"lookup_preauthorized""#,
+        r#""operation":"admit""#,
+        1,
+    );
+
+    assert!(matches!(
+        super::admission_protocol::parse_authority_broker_request_v1(wire.as_bytes()),
+        Err(super::admission_protocol::AdmissionProtocolError::OperationRequestMismatch)
+    ));
+}
+
+#[test]
+fn authority_broker_parser_accepts_only_bytes_and_returns_parsed_data() {
+    type ParseResult = Result<
+        super::admission_protocol::ParsedAuthorityBrokerRequestV1,
+        super::admission_protocol::AdmissionProtocolError,
+    >;
+
+    let parser: fn(&[u8]) -> ParseResult =
+        super::admission_protocol::parse_authority_broker_request_v1;
+    assert!(parser(authority_broker_admission_wire().as_bytes()).is_ok());
+}
 
 #[cfg(target_os = "linux")]
 #[test]
