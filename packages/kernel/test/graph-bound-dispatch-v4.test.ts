@@ -9,9 +9,11 @@ import {
 	canonicalGovernedUnitPacketV1Digest,
 	canonicalWorkflowGraphV2Digest,
 	compileGovernedWorkflowGraphV2,
+	createGovernedV3RetryRequestV1,
 	type DispatchEnvelopeV3,
 	type DispatchEnvelopeV4,
 	type ExecutionRoleV1,
+	type GovernedDispatchLineageV3,
 	parseDispatchEnvelopeV3,
 	parseDispatchEnvelopeV4,
 	parseWorkflowGraphDeclaredV2,
@@ -22,6 +24,14 @@ import { describe, expect, it } from "vitest";
 const digest = (hex: string): string => `sha256:${hex.repeat(64)}`;
 
 const eventRef = "018f1c7a-51c0-7000-8000-000000000001";
+const GENERATED_EXECUTION_ROLES: readonly ExecutionRoleV1[] = [
+	"implementer",
+	"reviewer",
+	"adversary",
+	"judge",
+	"candidate",
+];
+const PROPERTY_CASE_COUNT = 64;
 
 function nativeDigest(domain: string, value: unknown): string {
 	return `sha256:${createHash("sha256")
@@ -71,21 +81,33 @@ function packet(
 	};
 }
 
+interface DispatchV3Options {
+	readonly attempt?: number;
+	readonly workflowId?: string;
+	readonly workflowRevision?: string;
+	readonly provenanceRef?: string;
+}
+
 function dispatchV3(
 	unitId: string,
 	governedPacketDigest = digest("a"),
 	executionRole: ExecutionRoleV1 = "implementer",
+	options: DispatchV3Options = {},
 ): DispatchEnvelopeV3 {
+	const attempt = options.attempt ?? 1;
+	const workflowId = options.workflowId ?? "workflow-v4";
+	const workflowRevision = options.workflowRevision ?? "r1";
+	const provenanceRef = options.provenanceRef ?? `admission:${workflowId}`;
 	const draft = {
 		schemaVersion: 3 as const,
 		body: {
-			workflowId: "workflow-v4",
-			workflowRevision: "r1",
+			workflowId,
+			workflowRevision,
 			unitId,
-			attempt: 1,
+			attempt,
 			executionRole,
 			commitMode: "atomic" as const,
-			provenanceRef: "admission:workflow-v4",
+			provenanceRef,
 			baseCommitSha: "1".repeat(40),
 			capabilityBundleDigest: digest("b"),
 			acceptanceContractDigest: digest("c"),
@@ -94,7 +116,7 @@ function dispatchV3(
 			sandboxProfileDigest: digest("f"),
 			budget: { maxTokens: 100, maxComputeTimeMs: 1_000 },
 			trustTier: "governed" as const,
-			idempotencyKey: `dispatch:workflow-v4:${unitId}:1`,
+			idempotencyKey: `dispatch:${workflowId}:${unitId}:${attempt}`,
 			issuedAt: "2026-07-19T00:01:00Z",
 			expiresAt: "2026-07-19T01:01:00Z",
 		},
@@ -107,6 +129,121 @@ function dispatchV3(
 		...draft,
 		envelopeDigest: canonicalDispatchEnvelopeV3Digest(draft),
 	});
+}
+
+function dispatchLineage(
+	dispatch: DispatchEnvelopeV3,
+	runId = "run-v4",
+): GovernedDispatchLineageV3 {
+	if (
+		dispatch.actionEvidenceVersion !== "sealed_v3" ||
+		dispatch.governedPacketDigest === undefined ||
+		dispatch.body.commitMode !== "atomic" ||
+		dispatch.body.trustTier !== "governed"
+	) {
+		throw new TypeError(
+			"graph retry fixture requires a governed atomic sealed_v3 dispatch with a packet digest",
+		);
+	}
+	return {
+		schemaVersion: 3,
+		runId,
+		workflowId: dispatch.body.workflowId,
+		workflowRevision: dispatch.body.workflowRevision,
+		unitId: dispatch.body.unitId,
+		attempt: dispatch.body.attempt,
+		provenanceRef: dispatch.body.provenanceRef,
+		dispatchEnvelopeRef: `event://dispatch/${dispatch.body.idempotencyKey}`,
+		envelopeDigest: dispatch.envelopeDigest,
+		baseCommitSha: dispatch.body.baseCommitSha,
+		repositoryBindingDigest: dispatch.repositoryBindingDigest,
+		ledgerAuthorityRealmDigest: dispatch.ledgerAuthorityRealmDigest,
+		governedPacketDigest: dispatch.governedPacketDigest,
+		executionRole: dispatch.body.executionRole,
+		commitMode: dispatch.body.commitMode,
+		trustTier: dispatch.body.trustTier,
+		capabilityBundleDigest: dispatch.body.capabilityBundleDigest,
+		acceptanceContractDigest: dispatch.body.acceptanceContractDigest,
+		policyDigest: digest("a"),
+		contextManifestDigest: dispatch.body.contextManifestDigest,
+		workerManifestDigest: dispatch.body.workerManifestDigest,
+		sandboxProfileDigest: dispatch.body.sandboxProfileDigest,
+		budget: dispatch.body.budget,
+		idempotencyKey: dispatch.body.idempotencyKey,
+		authorityActor: "kernel:graph-v4-property-test",
+		actionEvidenceVersion: dispatch.actionEvidenceVersion,
+		issuedAt: dispatch.body.issuedAt,
+		expiresAt: dispatch.body.expiresAt,
+	};
+}
+
+function generatedGovernedPacket(seed: number): Record<string, unknown> {
+	const unitId = `unit-property-${seed}`;
+	const executionRole =
+		GENERATED_EXECUTION_ROLES[seed % GENERATED_EXECUTION_ROLES.length] ??
+		"implementer";
+	const capabilityBundle = {
+		schemaVersion: CAPABILITY_BUNDLE_SCHEMA_VERSION,
+		bundleId: `graph-property-${seed}`,
+		fsWrite: [`src/property-${seed}/**`],
+		tools: { run_command: { allowlist: ["echo", "printf"] } },
+	};
+	return {
+		unit: {
+			id: unitId,
+			kind: "implementation",
+			scope: "repo",
+			inputRefs: [`cas://input/${seed}`],
+			expectedOutputs: [`property-output-${seed}`],
+			verificationContract: `verify-${seed}`,
+			policyProfile: "governed",
+		},
+		execution_role: executionRole,
+		...(seed % 2 === 0
+			? { execution: { command: "echo", args: [unitId, String(seed)] } }
+			: {
+					model: {
+						provider: "openai",
+						model: `gpt-5-property-${seed}`,
+						prompt: `make property change ${seed}`,
+					},
+				}),
+		intent: {
+			objective: `make property change ${seed}`,
+			taskType: "implement",
+			context: { files: [`src/property-${seed}.ts`] },
+			constraints: {
+				scope: [`src/property-${seed}/**`],
+				verification: [`echo verify-${seed}`],
+			},
+			features: {
+				ambiguity: "low",
+				reversibility: "high",
+				verifierStrength: "strong",
+			},
+		},
+		routingHints: {
+			preferredWorker: seed % 2 === 0 ? "codex" : "claude-code",
+			preferredModel: `gpt-5-property-${seed}`,
+			effort: "high",
+		},
+		verification: { requiredOutputs: [`property-output-${seed}`] },
+		provenance_ref: `admission:property:${seed}`,
+		capability_bundle: capabilityBundle,
+		capability_bundle_digest: bundleDigest(capabilityBundle),
+		acceptance_contract: {
+			schemaVersion: 1,
+			contract_version: "v0",
+			diff_scope: { allowed_globs: [`src/property-${seed}/**`] },
+			checks: [{ command: `echo verify-${seed}` }],
+		},
+		trust_scope: {
+			schemaVersion: 1,
+			lane: "governed",
+			principal: `kernel:property:${seed}`,
+			scope: `graph-v4:property:${seed}`,
+		},
+	};
 }
 
 function graphDeclaration() {
@@ -656,6 +793,119 @@ describe("graph-bound V4 dispatch contracts", () => {
 				node?.governedPacketDigest,
 			);
 			expect(v4.workflowGraphDigest, variant.name).toBe(compiled.graphDigest);
+		}
+	});
+
+	it("property: preserves generated governed packet commitments through graph JSON round-trips, V4 envelope construction, and retry-request commitments", () => {
+		for (let seed = 1; seed <= PROPERTY_CASE_COUNT; seed += 1) {
+			const source = generatedGovernedPacket(seed);
+			const sourceAfterJsonRoundTrip = JSON.parse(JSON.stringify(source));
+			const expectedPacketDigest = canonicalGovernedUnitPacketV1Digest(source);
+			const unitId = (source.unit as { id: string }).id;
+			const executionRole = source.execution_role as ExecutionRoleV1;
+
+			expect(
+				canonicalGovernedUnitPacketV1Digest(sourceAfterJsonRoundTrip),
+				`seed ${seed}: packet JSON round-trip`,
+			).toBe(expectedPacketDigest);
+
+			const compiled = compileGovernedWorkflowGraphV2({
+				runId: `run-property-${seed}`,
+				workflowId: `workflow-property-${seed}`,
+				workflowRevision: "r1",
+				graph: { nodes: [source as never] },
+				declaredAt: "2026-07-19T00:00:00Z",
+			});
+			const replayed = parseWorkflowGraphDeclaredV2(
+				JSON.parse(JSON.stringify(compiled)),
+			);
+			const node = replayed.nodes[0];
+
+			expect(node, `seed ${seed}: graph node`).toMatchObject({
+				unitId,
+				executionRole,
+				governedPacketDigest: expectedPacketDigest,
+			});
+			expect(replayed, `seed ${seed}: graph JSON round-trip`).toEqual(compiled);
+			const dispatchOptions = {
+				workflowId: replayed.workflowId,
+				workflowRevision: replayed.workflowRevision,
+				provenanceRef: `admission:property:${seed}`,
+			};
+
+			const initial = dispatchV3(unitId, expectedPacketDigest, executionRole, {
+				...dispatchOptions,
+				attempt: 1,
+			});
+			const retry = dispatchV3(unitId, expectedPacketDigest, executionRole, {
+				...dispatchOptions,
+				attempt: 2,
+			});
+			for (const dispatch of [initial, retry]) {
+				const v4Draft = {
+					schemaVersion: 4 as const,
+					dispatchV3: dispatch,
+					workflowGraphDigest: replayed.graphDigest,
+					workflowGraphDeclarationEventRef: eventRef,
+				};
+				const bound = parseDispatchEnvelopeV4({
+					...v4Draft,
+					envelopeDigest: canonicalDispatchEnvelopeV4Digest(v4Draft),
+				});
+
+				expect(
+					bound.dispatchV3.governedPacketDigest,
+					`seed ${seed}: attempt ${dispatch.body.attempt} packet binding`,
+				).toBe(expectedPacketDigest);
+				expect(
+					bound.workflowGraphDigest,
+					`seed ${seed}: attempt ${dispatch.body.attempt} graph binding`,
+				).toBe(replayed.graphDigest);
+				expect(
+					bound.dispatchV3.body.workflowId,
+					`seed ${seed}: attempt ${dispatch.body.attempt} workflow identity`,
+				).toBe(replayed.workflowId);
+				expect(
+					bound.dispatchV3.body.workflowRevision,
+					`seed ${seed}: attempt ${dispatch.body.attempt} workflow revision`,
+				).toBe(replayed.workflowRevision);
+				expect(
+					bound.dispatchV3.body.unitId,
+					`seed ${seed}: attempt ${dispatch.body.attempt} unit identity`,
+				).toBe(node?.unitId);
+				expect(
+					bound.dispatchV3.body.executionRole,
+					`seed ${seed}: attempt ${dispatch.body.attempt} execution role`,
+				).toBe(node?.executionRole);
+				expect(
+					bound.dispatchV3.body.provenanceRef,
+					`seed ${seed}: attempt ${dispatch.body.attempt} provenance`,
+				).toBe(dispatchOptions.provenanceRef);
+			}
+
+			const retryRequest = createGovernedV3RetryRequestV1({
+				dispatch: dispatchLineage(initial, replayed.runId),
+				nextAttempt: 2,
+				feedbackContext: [`retry property seed ${seed}`],
+				predecessorActions: [
+					{
+						actionId: `worker-property-${seed}`,
+						actionReceiptRef: `event://action/worker-property-${seed}`,
+						actionReceiptDigest: digest("b"),
+					},
+				],
+			});
+			expect(retryRequest, `seed ${seed}: retry request`).toMatchObject({
+				runId: replayed.runId,
+				workflowId: retry.body.workflowId,
+				workflowRevision: retry.body.workflowRevision,
+				unitId: retry.body.unitId,
+				priorAttempt: 1,
+				nextAttempt: retry.body.attempt,
+				governedPacketDigest: retry.governedPacketDigest,
+				priorDispatchEnvelopeDigest: initial.envelopeDigest,
+				priorDispatchIdempotencyKey: initial.body.idempotencyKey,
+			});
 		}
 	});
 

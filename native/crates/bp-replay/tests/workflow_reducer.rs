@@ -18,26 +18,27 @@ use bp_ledger::payload::trust_spine::{
     action_receipt_recorded_v2_digest, action_receipt_set_v1_digest, action_requested_v2_digest,
     attempt_context_recorded_v1_digest, candidate_completion_recorded_v1_digest,
     candidate_view_v1_digest, dispatch_envelope_v2_body_digest, dispatch_envelope_v3_body_digest,
-    governed_dispatch_policy_digest_v1, model_action_authorized_v1_digest,
-    model_action_authorized_v2_digest, model_action_intent_v1_digest,
-    promotion_execution_claimed_v1_digest, review_verdict_output_v1_digest,
-    ActionEvidenceVersionV1, ActionFailureV1, ActionKindV1, ActionReceiptOutcomeV2,
-    ActionReceiptRecordedV2, ActionReceiptSetEntryV1, ActionReceiptSetRecordedV1,
-    ActionRequestedV2, ActionResourceUsageV1, AttemptContextRecordedV1,
-    CandidateAcceptanceOutcomeV1, CandidateAcceptanceRecordedV1, CandidateCompletionRecordedV1,
-    CandidateCreatedV1, CandidateCreatedV2, CandidateViewV1, CommitModeV1, DispatchBudgetV1,
-    DispatchEnvelopeBodyV2, DispatchEnvelopeV1, DispatchEnvelopeV2, DispatchEnvelopeV3,
-    ExecutionRoleV1, ModelActionAuthorizedV1, ModelActionAuthorizedV2,
-    ModelActionCandidateBindingV1, ModelActionIntentV1, ModelRequestEvidenceV1,
-    PromotionApprovalRequestedV1, PromotionDecisionKindV1, PromotionDecisionRecordedV1,
-    PromotionExecutionClaimedV1, PromotionExecutionLeaseBindingV1, PromotionGitBindingV1,
-    PromotionReconciliationResolvedV1, PromotionResultOutcomeV1, PromotionResultRecordedV1,
-    PromotionWorktreeSyncStateV1, ReconciliationResolutionOutcomeV1, ReviewDecisionV1,
-    ReviewVerdictOutputV1, ReviewVerdictRecordedV1, ReviewVerdictRecordedV2, SignatureRefV1,
-    TrustScopeEvidenceV1, TrustTierV1, WorkflowCancellationCauseV1,
-    WorkflowCancellationRequestedV1, WorkflowTerminalOutcomeV1, WorkflowTerminalV1,
-    WorkflowTerminalV2, WorkflowTimerFiredV1, WorkflowTimerKindV1, WorkflowTimerScheduledV1,
-    MODEL_REQUEST_EVIDENCE_V1_SCHEMA_VERSION, TRUST_SCOPE_EVIDENCE_V1_SCHEMA_VERSION,
+    dispatch_envelope_v4_digest, governed_dispatch_policy_digest_v1,
+    model_action_authorized_v1_digest, model_action_authorized_v2_digest,
+    model_action_intent_v1_digest, promotion_execution_claimed_v1_digest,
+    review_verdict_output_v1_digest, workflow_graph_v2_digest, ActionEvidenceVersionV1,
+    ActionFailureV1, ActionKindV1, ActionReceiptOutcomeV2, ActionReceiptRecordedV2,
+    ActionReceiptSetEntryV1, ActionReceiptSetRecordedV1, ActionRequestedV2, ActionResourceUsageV1,
+    AttemptContextRecordedV1, CandidateAcceptanceOutcomeV1, CandidateAcceptanceRecordedV1,
+    CandidateCompletionRecordedV1, CandidateCreatedV1, CandidateCreatedV2, CandidateViewV1,
+    CommitModeV1, DispatchBudgetV1, DispatchEnvelopeBodyV2, DispatchEnvelopeV1, DispatchEnvelopeV2,
+    DispatchEnvelopeV3, DispatchEnvelopeV4, ExecutionRoleV1, ModelActionAuthorizedV1,
+    ModelActionAuthorizedV2, ModelActionCandidateBindingV1, ModelActionIntentV1,
+    ModelRequestEvidenceV1, PromotionApprovalRequestedV1, PromotionDecisionKindV1,
+    PromotionDecisionRecordedV1, PromotionExecutionClaimedV1, PromotionExecutionLeaseBindingV1,
+    PromotionGitBindingV1, PromotionReconciliationResolvedV1, PromotionResultOutcomeV1,
+    PromotionResultRecordedV1, PromotionWorktreeSyncStateV1, ReconciliationResolutionOutcomeV1,
+    ReviewDecisionV1, ReviewVerdictOutputV1, ReviewVerdictRecordedV1, ReviewVerdictRecordedV2,
+    SignatureRefV1, TrustScopeEvidenceV1, TrustTierV1, WorkflowCancellationCauseV1,
+    WorkflowCancellationRequestedV1, WorkflowGraphDeclaredV2, WorkflowGraphNodeV2,
+    WorkflowTerminalOutcomeV1, WorkflowTerminalV1, WorkflowTerminalV2, WorkflowTimerFiredV1,
+    WorkflowTimerKindV1, WorkflowTimerScheduledV1, MODEL_REQUEST_EVIDENCE_V1_SCHEMA_VERSION,
+    TRUST_SCOPE_EVIDENCE_V1_SCHEMA_VERSION,
 };
 use bp_ledger::payload::Payload;
 use bp_ledger::signing::{public_key_hash, ActorKeyRef, TrustedPublicKeys, VerificationStatus};
@@ -1821,6 +1822,161 @@ fn sealed_v3_retry_dispatch_projects_a_second_attempt_after_valid_lineage() {
     assert_eq!(
         consumed_context.context.next_dispatch_envelope_digest,
         retry_workflow.dispatch.envelope_digest
+    );
+}
+
+#[test]
+fn graph_bound_v4_retry_replays_json_round_tripped_authority_and_outer_envelope_context() {
+    let run_id = RunId::new();
+    let mut state = ReplayState::default();
+    let fixture = apply_failed_retry_attempt(&mut state, run_id);
+    let retry_v3 = retry_dispatch(&fixture.prior_dispatch);
+    let mut graph = WorkflowGraphDeclaredV2 {
+        run_id: run_id.to_string(),
+        workflow_id: retry_v3.body.workflow_id.clone(),
+        workflow_revision: retry_v3.body.workflow_revision.clone(),
+        nodes: vec![WorkflowGraphNodeV2 {
+            unit_id: retry_v3.body.unit_id.clone(),
+            depends_on: vec![],
+            execution_role: retry_v3.body.execution_role,
+            governed_packet_digest: retry_v3
+                .governed_packet_digest
+                .clone()
+                .expect("sealed_v3 retry carries its packet digest"),
+        }],
+        max_concurrent: 1,
+        graph_digest: String::new(),
+        idempotency_key: "graph-v2:workflow-1:r1".into(),
+        declared_at: "2026-07-17T00:00:03Z".into(),
+    };
+    graph.graph_digest = workflow_graph_v2_digest(&graph).expect("hash graph declaration");
+    let graph_event = event_of(
+        run_id,
+        EventKind::WorkflowGraphDeclaredV2,
+        Payload::WorkflowGraphDeclaredV2(graph.clone()),
+    );
+
+    let mut retry_v4 = DispatchEnvelopeV4 {
+        dispatch_v3: retry_v3.clone(),
+        workflow_graph_digest: graph.graph_digest.clone(),
+        workflow_graph_declaration_event_ref: graph_event.id,
+        envelope_digest: String::new(),
+    };
+    retry_v4.envelope_digest = dispatch_envelope_v4_digest(
+        &retry_v4.dispatch_v3,
+        &retry_v4.workflow_graph_digest,
+        &retry_v4.workflow_graph_declaration_event_ref,
+    )
+    .expect("hash graph-bound retry envelope");
+    let mut retry_v4_event = event_of(
+        run_id,
+        EventKind::DispatchEnvelopeV4,
+        Payload::DispatchEnvelopeV4(retry_v4.clone()),
+    );
+    retry_v4_event.parent_event_id = Some(graph_event.id);
+
+    let mut context = retry_attempt_context(run_id, &fixture, &retry_v3);
+    context.next_dispatch_envelope_digest = retry_v4.envelope_digest.clone();
+    context.next_dispatch_idempotency_key = retry_v4.dispatch_v3.body.idempotency_key.clone();
+    context.attempt_context_digest =
+        attempt_context_recorded_v1_digest(&context).expect("hash V4 retry context");
+    let context_event = event_of(
+        run_id,
+        EventKind::AttemptContextRecordedV1,
+        Payload::AttemptContextRecordedV1(context),
+    );
+
+    let persisted_graph_event: Event =
+        serde_json::from_str(&serde_json::to_string(&graph_event).expect("serialize graph event"))
+            .expect("deserialize graph event");
+    let persisted_context_event: Event = serde_json::from_str(
+        &serde_json::to_string(&context_event).expect("serialize retry context event"),
+    )
+    .expect("deserialize retry context event");
+    let persisted_retry_event: Event = serde_json::from_str(
+        &serde_json::to_string(&retry_v4_event).expect("serialize V4 retry event"),
+    )
+    .expect("deserialize V4 retry event");
+
+    apply(&mut state, &persisted_graph_event);
+    apply(&mut state, &persisted_context_event);
+    apply(&mut state, &persisted_retry_event);
+
+    assert!(
+        state.issues.is_empty(),
+        "JSON-round-tripped V4 retry lineage: {:#?}",
+        state.issues
+    );
+    let workflow = state
+        .workflow_instances
+        .values()
+        .find(|workflow| workflow.dispatch.envelope_digest == retry_v4.envelope_digest)
+        .expect("replayed V4 retry workflow");
+    let body = &retry_v4.dispatch_v3.body;
+    assert_eq!(workflow.attempt, 2);
+    assert_eq!(workflow.dispatch.dispatch_version, 4);
+    assert_eq!(workflow.dispatch.envelope_digest, retry_v4.envelope_digest);
+    assert_eq!(workflow.dispatch.provenance_ref, body.provenance_ref);
+    assert_eq!(workflow.dispatch.base_commit_sha, body.base_commit_sha);
+    assert_eq!(
+        workflow.dispatch.repository_binding_digest.as_deref(),
+        Some(retry_v4.dispatch_v3.repository_binding_digest.as_str())
+    );
+    assert_eq!(
+        workflow.dispatch.ledger_authority_realm_digest.as_deref(),
+        Some(retry_v4.dispatch_v3.ledger_authority_realm_digest.as_str())
+    );
+    assert_eq!(
+        workflow.dispatch.governed_packet_digest.as_deref(),
+        retry_v4.dispatch_v3.governed_packet_digest.as_deref()
+    );
+    assert_eq!(
+        workflow.dispatch.workflow_graph_digest.as_deref(),
+        Some(retry_v4.workflow_graph_digest.as_str())
+    );
+    assert_eq!(
+        workflow.dispatch.workflow_graph_declaration_event_ref,
+        Some(graph_event.id)
+    );
+    assert_eq!(
+        workflow.dispatch.capability_bundle_digest,
+        body.capability_bundle_digest
+    );
+    assert_eq!(
+        workflow.dispatch.acceptance_contract_digest,
+        body.acceptance_contract_digest
+    );
+    assert_eq!(
+        workflow.dispatch.context_manifest_digest,
+        body.context_manifest_digest
+    );
+    assert_eq!(
+        workflow.dispatch.worker_manifest_digest,
+        body.worker_manifest_digest
+    );
+    assert_eq!(
+        workflow.dispatch.sandbox_profile_digest,
+        body.sandbox_profile_digest
+    );
+    assert_eq!(workflow.dispatch.execution_role, body.execution_role);
+    assert_eq!(workflow.dispatch.commit_mode, body.commit_mode);
+    assert_eq!(workflow.dispatch.budget, body.budget);
+    assert_eq!(workflow.dispatch.trust_tier, body.trust_tier);
+    assert_eq!(workflow.dispatch.idempotency_key, body.idempotency_key);
+    assert_eq!(workflow.dispatch.issued_at, body.issued_at);
+    assert_eq!(workflow.dispatch.expires_at, body.expires_at);
+    assert_eq!(
+        workflow.dispatch.action_evidence_version,
+        Some(retry_v4.dispatch_v3.action_evidence_version)
+    );
+    assert_eq!(
+        workflow
+            .retry_context
+            .as_ref()
+            .expect("replayed retry context")
+            .context
+            .next_dispatch_envelope_digest,
+        retry_v4.envelope_digest
     );
 }
 
