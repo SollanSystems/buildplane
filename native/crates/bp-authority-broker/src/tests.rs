@@ -20,26 +20,24 @@ use bp_ledger::canonicalize::canonical_event_hash;
 use bp_ledger::event::Event;
 use bp_ledger::kind::EventKind;
 use bp_ledger::payload::activity_claim::{
-    ActivityClaimedV1, ActivityClaimPurposeV1, ActivityResultOutcomeV1, ActivityResultRecordedV1,
+    ActivityClaimPurposeV1, ActivityClaimedV1, ActivityResultOutcomeV1, ActivityResultRecordedV1,
 };
 use bp_ledger::payload::trust_spine::{
-    action_receipt_recorded_v2_digest, action_receipt_set_v1_digest,
-    action_requested_v2_digest, candidate_completion_recorded_v1_digest,
-    candidate_view_v1_digest, dispatch_envelope_v3_body_digest,
-    governed_dispatch_policy_digest_v1, model_action_authorized_v2_digest,
-    model_action_intent_v1_digest, review_verdict_output_v1_digest,
-    ActionEvidenceVersionV1, ActionKindV1, ActionReceiptOutcomeV2,
+    action_receipt_recorded_v2_digest, action_receipt_set_v1_digest, action_requested_v2_digest,
+    candidate_completion_recorded_v1_digest, candidate_view_v1_digest,
+    dispatch_envelope_v3_body_digest, governed_dispatch_policy_digest_v1,
+    model_action_authorized_v2_digest, model_action_intent_v1_digest,
+    review_verdict_output_v1_digest, ActionEvidenceVersionV1, ActionKindV1, ActionReceiptOutcomeV2,
     ActionReceiptRecordedV2, ActionReceiptSetEntryV1, ActionReceiptSetRecordedV1,
     ActionRequestedV2, ActionResourceUsageV1, CandidateAcceptanceOutcomeV1,
     CandidateAcceptanceRecordedV1, CandidateCompletionRecordedV1, CandidateCreatedV2,
     CandidateViewV1, CommitModeV1, DispatchBudgetV1, DispatchEnvelopeBodyV2, DispatchEnvelopeV3,
-    ExecutionRoleV1, ModelActionAuthorizedV2, ModelActionCandidateBindingV1,
-    ModelActionIntentV1, ModelRequestEvidenceV1, PromotionApprovalRequestedV1,
-    PromotionDecisionKindV1, TrustScopeEvidenceV1, MODEL_REQUEST_EVIDENCE_V1_SCHEMA_VERSION,
-    TRUST_SCOPE_EVIDENCE_V1_SCHEMA_VERSION,
+    ExecutionRoleV1, ModelActionAuthorizedV2, ModelActionCandidateBindingV1, ModelActionIntentV1,
+    ModelRequestEvidenceV1, PromotionApprovalRequestedV1, PromotionDecisionKindV1,
     PromotionExecutionClaimedV1, PromotionGitBindingV1, PromotionResultOutcomeV1,
-    PromotionWorktreeSyncStateV1, ReviewDecisionV1, ReviewVerdictOutputV1,
-    ReviewVerdictRecordedV2, TrustTierV1,
+    PromotionWorktreeSyncStateV1, ReviewDecisionV1, ReviewVerdictOutputV1, ReviewVerdictRecordedV2,
+    TrustScopeEvidenceV1, TrustTierV1, MODEL_REQUEST_EVIDENCE_V1_SCHEMA_VERSION,
+    TRUST_SCOPE_EVIDENCE_V1_SCHEMA_VERSION,
 };
 use bp_ledger::payload::Payload;
 use bp_ledger::signing::{public_key_hash, ActorKeyRef, TrustedPublicKeys};
@@ -47,7 +45,11 @@ use bp_ledger::storage::sqlite::{
     CheckpointPolicy, GovernedPromotionAuthorityV1, GovernedPromotionDecisionRequestV1, SqliteStore,
 };
 use bp_ledger::{EventId, LedgerError, RunId};
-use bp_replay::{TrustSpineSignerRole, TrustedReplayAuthorities};
+use bp_replay::{
+    engine::EngineError, reader::ReaderError,
+    trusted_recovery::TRUSTED_GOVERNED_RECOVERY_MAX_EVENTS_V1, TrustSpineSignerRole,
+    TrustedGovernedRecoveryError, TrustedReplayAuthorities,
+};
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use ed25519_dalek::SigningKey;
 use std::cell::RefCell;
@@ -68,6 +70,12 @@ fn request() -> BrokerModelActionRequest {
         dispatch_event_id: EventId::new(),
         action_request_event_id: EventId::new(),
     }
+}
+
+fn bounded_recovery_error() -> TrustedGovernedRecoveryError {
+    TrustedGovernedRecoveryError::Replay(EngineError::Reader(ReaderError::EventLimitExceeded {
+        max_events: TRUSTED_GOVERNED_RECOVERY_MAX_EVENTS_V1,
+    }))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -551,6 +559,49 @@ fn replay_mismatch_is_rejected_before_storage_or_gateway() {
 }
 
 #[test]
+fn trusted_snapshot_failure_never_claims_or_invokes_the_model_gateway() {
+    // A bounded recovery refusal is also surfaced as this snapshot error, so
+    // no recovery failure may become an authority claim or provider effect.
+    let run_id = RunId::new();
+    let request = request();
+    let verifier_calls = Rc::new(RefCell::new(Vec::new()));
+    let backend_state = Rc::new(RefCell::new(BackendState::default()));
+    let gateway_state = Rc::new(RefCell::new(GatewayState::default()));
+    let mut authority = BrokerModelAuthority::new(
+        run_id,
+        FakeVerifier {
+            calls: Rc::clone(&verifier_calls),
+            results: [Err(TrustedReplayVerificationError::Snapshot(
+                bounded_recovery_error(),
+            ))]
+            .into_iter()
+            .collect(),
+        },
+        FakeBackend {
+            state: Rc::clone(&backend_state),
+            grants: VecDeque::new(),
+            results: VecDeque::new(),
+        },
+        FakeGateway {
+            state: Rc::clone(&gateway_state),
+            completion: None,
+        },
+        LeasePolicy::from_startup_config(30_000).unwrap(),
+    );
+
+    assert!(matches!(
+        authority.authorize_and_execute(request),
+        Err(AuthorityBackendError::TrustedReplay(
+            TrustedReplayVerificationError::Snapshot(_)
+        ))
+    ));
+    assert_eq!(verifier_calls.borrow().len(), 1);
+    assert!(backend_state.borrow().authorize_calls.is_empty());
+    assert!(backend_state.borrow().result_calls.is_empty());
+    assert_eq!(gateway_state.borrow().calls, 0);
+}
+
+#[test]
 fn non_implementer_replay_binding_is_rejected_before_storage() {
     let run_id = RunId::new();
     let request = request();
@@ -1009,8 +1060,10 @@ fn append_promotion_action_evidence(
         ledger_authority_realm_digest: dispatch.ledger_authority_realm_digest.clone(),
         governed_packet_digest: dispatch.governed_packet_digest.clone(),
         capability_bundle_digest: dispatch.body.capability_bundle_digest.clone(),
-        policy_digest: governed_dispatch_policy_digest_v1(&dispatch.body.acceptance_contract_digest)
-            .expect("derive governed action policy"),
+        policy_digest: governed_dispatch_policy_digest_v1(
+            &dispatch.body.acceptance_contract_digest,
+        )
+        .expect("derive governed action policy"),
         context_manifest_digest: dispatch.body.context_manifest_digest.clone(),
         worker_manifest_digest: dispatch.body.worker_manifest_digest.clone(),
         sandbox_profile_digest: dispatch.body.sandbox_profile_digest.clone(),
@@ -2018,6 +2071,23 @@ impl TrustedPromotionVerifier for FakePromotionVerifier {
     }
 }
 
+struct FailingPromotionVerifier {
+    error: Option<PromotionExecutionError>,
+}
+
+impl TrustedPromotionVerifier for FailingPromotionVerifier {
+    fn verify_exact_promotion(
+        &mut self,
+        _run_id: RunId,
+        _request: &BrokerPromotionExecutionRequest,
+    ) -> Result<TrustedPromotionBinding, PromotionExecutionError> {
+        Err(self
+            .error
+            .take()
+            .expect("test configured a trusted promotion replay error"))
+    }
+}
+
 #[derive(Default)]
 struct FakePromotionBackendState {
     claim_calls: usize,
@@ -2162,6 +2232,40 @@ fn promotion_execution_moves_one_sealed_claim_through_git_and_result_recording()
     assert_eq!(backend_state.borrow().claim_calls, 1);
     assert_eq!(backend_state.borrow().result_calls, 1);
     assert_eq!(gateway_state.borrow().calls, 1);
+}
+
+#[test]
+fn trusted_promotion_snapshot_failure_never_claims_or_enters_git() {
+    // A bounded recovery refusal is also surfaced as this replay error, so
+    // it cannot be downgraded into reconciliation or a new Git attempt.
+    let run_id = RunId::new();
+    let request = promotion_execution_request();
+    let backend_state = Rc::new(RefCell::new(FakePromotionBackendState::default()));
+    let gateway_state = Rc::new(RefCell::new(FakePromotionGatewayState::default()));
+    let mut authority = BrokerPromotionExecutionAuthority::new(
+        run_id,
+        FailingPromotionVerifier {
+            error: Some(PromotionExecutionError::Replay(bounded_recovery_error())),
+        },
+        FakePromotionBackend {
+            state: Rc::clone(&backend_state),
+            grants: VecDeque::new(),
+            results: VecDeque::new(),
+        },
+        FakePromotionGateway {
+            state: Rc::clone(&gateway_state),
+            outcome: None,
+        },
+        LeasePolicy::from_startup_config(30_000).expect("valid promotion lease policy"),
+    );
+
+    assert!(matches!(
+        authority.claim_execute_and_record(request),
+        Err(PromotionExecutionError::Replay(_))
+    ));
+    assert_eq!(backend_state.borrow().claim_calls, 0);
+    assert_eq!(backend_state.borrow().result_calls, 0);
+    assert_eq!(gateway_state.borrow().calls, 0);
 }
 
 #[test]

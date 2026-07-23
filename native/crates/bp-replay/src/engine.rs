@@ -131,8 +131,34 @@ impl ReplayEngine {
         db_path: impl AsRef<Path>,
         authorities: &TrustedReplayAuthorities,
     ) -> Result<Self, EngineError> {
+        Self::open_with_trusted_authorities_limit(run_id, db_path, authorities, None)
+    }
+
+    /// Crate-owned bounded open used only by governed recovery. This remains
+    /// non-public so a caller cannot choose a partial verified tape boundary
+    /// and present it as a trusted recovery view.
+    pub(crate) fn open_with_trusted_authorities_bounded(
+        run_id: &str,
+        db_path: impl AsRef<Path>,
+        authorities: &TrustedReplayAuthorities,
+        max_events: usize,
+    ) -> Result<Self, EngineError> {
+        Self::open_with_trusted_authorities_limit(run_id, db_path, authorities, Some(max_events))
+    }
+
+    fn open_with_trusted_authorities_limit(
+        run_id: &str,
+        db_path: impl AsRef<Path>,
+        authorities: &TrustedReplayAuthorities,
+        max_events: Option<usize>,
+    ) -> Result<Self, EngineError> {
         let reader = EventReader::open(run_id, db_path)?;
-        let events = reader.all_with_verification(authorities.trusted_keys())?;
+        let events = match max_events {
+            Some(max_events) => {
+                reader.all_with_verification_bounded(authorities.trusted_keys(), max_events)?
+            }
+            None => reader.all_with_verification(authorities.trusted_keys())?,
+        };
         let predeclared_governed_runs = authorized_governed_runs(&events, authorities);
         Ok(Self {
             events,
@@ -171,31 +197,32 @@ impl ReplayEngine {
     pub fn verified_events(&self) -> &[VerifiedEvent] {
         &self.events
     }
-}
 
-impl Iterator for ReplayEngine {
-    type Item = ReplayStep;
+    /// Exhaust replay without materializing [`ReplayStep`] values. Governed
+    /// recovery consumes the whole tape before exposing any state, so cloning
+    /// `ReplayState` for each discarded public iterator step is unnecessary.
+    pub(crate) fn replay_to_end(&mut self) {
+        while self.advance_one().is_some() {}
+    }
 
-    fn next(&mut self) -> Option<ReplayStep> {
-        if self.cursor >= self.events.len() {
-            return None;
-        }
-        let verified_event = self.events[self.cursor].clone();
+    fn advance_one(&mut self) -> Option<usize> {
+        let index = self.cursor;
+        let verified_event = self.events.get(index)?;
         self.cursor += 1;
-        let event = verified_event.event;
+        let event = &verified_event.event;
         let predeclared_governed_run = self
             .predeclared_governed_runs
             .contains(&event.run_id.to_string());
         if let Some(required_role) =
-            required_signer_role(&self.state, &event, predeclared_governed_run)
+            required_signer_role(&self.state, event, predeclared_governed_run)
         {
             if verified_event.verification != VerificationStatus::Verified {
                 self.state
                     .issues
                     .push(ReplayIssue::UnverifiedTrustSpineEvent {
-                        event_id: event.id,
+                        event_id: event.id.clone(),
                         event_kind: event.kind.as_wire().to_string(),
-                        verification: verified_event.verification,
+                        verification: verified_event.verification.clone(),
                     });
             } else if let Err(reason) = trust_spine_authorization(
                 &event.payload,
@@ -210,7 +237,7 @@ impl Iterator for ReplayEngine {
                 self.state
                     .issues
                     .push(ReplayIssue::UnauthorizedTrustSpineSigner {
-                        event_id: event.id,
+                        event_id: event.id.clone(),
                         event_kind: event.kind.as_wire().to_string(),
                         required_role: signer_role_wire(required_role).to_string(),
                         signer_actor_id: signer.map(|value| value.actor_id.clone()),
@@ -220,7 +247,7 @@ impl Iterator for ReplayEngine {
             } else {
                 transitions::apply_with_verified_signer(
                     &mut self.state,
-                    &event,
+                    event,
                     verified_event
                         .signature
                         .as_ref()
@@ -230,15 +257,24 @@ impl Iterator for ReplayEngine {
         } else {
             transitions::apply_with_verified_signer(
                 &mut self.state,
-                &event,
+                event,
                 verified_event
                     .signature
                     .as_ref()
                     .map(|signature| &signature.signer),
             );
         }
+        Some(index)
+    }
+}
+
+impl Iterator for ReplayEngine {
+    type Item = ReplayStep;
+
+    fn next(&mut self) -> Option<ReplayStep> {
+        let index = self.advance_one()?;
         Some(ReplayStep {
-            event,
+            event: self.events[index].event.clone(),
             state_after: self.state.clone(),
         })
     }

@@ -4487,7 +4487,7 @@ fn resolve_governed_dispatch_v3_at(
         .join(".buildplane")
         .join("ledger")
         .join("events.db");
-    let snapshot = TrustedGovernedRecoverySnapshot::open(
+    let snapshot = TrustedGovernedRecoverySnapshot::open_bounded_v1(
         &args.run_id,
         &db_path,
         authorities,
@@ -4961,7 +4961,7 @@ pub fn run_export_verified_otel_v1(args: ExportVerifiedOtelV1Args) -> Result<(),
         .join(".buildplane")
         .join("ledger")
         .join("events.db");
-    let snapshot = TrustedGovernedRecoverySnapshot::open(
+    let snapshot = TrustedGovernedRecoverySnapshot::open_bounded_v1(
         &run_id,
         &events_db,
         &authorities,

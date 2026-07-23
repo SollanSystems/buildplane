@@ -532,7 +532,7 @@ impl TrustedReplayVerifier for ReplaySnapshotVerifier<'_> {
         request: &BrokerModelActionRequest,
     ) -> Result<TrustedReplayBinding, TrustedReplayVerificationError> {
         let run_id_text = run_id.to_string();
-        let snapshot = TrustedGovernedRecoverySnapshot::open(
+        let snapshot = TrustedGovernedRecoverySnapshot::open_bounded_v1(
             &run_id_text,
             &self.database_path,
             self.authorities,

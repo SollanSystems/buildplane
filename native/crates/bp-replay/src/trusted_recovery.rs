@@ -219,18 +219,54 @@ pub struct TrustedGovernedRecoverySnapshot {
     promotion_decision_dispatch_index: BTreeMap<String, String>,
 }
 
+/// Fixed host-owned cap for a complete trusted recovery scan. It is not a CLI
+/// or caller-selected setting: exceeding it fails before a partial recovery
+/// snapshot can be created or used as authority.
+pub const TRUSTED_GOVERNED_RECOVERY_MAX_EVENTS_V1: usize = 100_000;
+
 impl TrustedGovernedRecoverySnapshot {
-    /// Open, fully replay, and integrity-check one governed recovery tape.
-    ///
-    /// The whole replay is consumed before the root chain is verified, and
-    /// both operations use the same immutable event snapshot loaded by
-    /// [`ReplayEngine`]. A partial replay state can therefore never be paired
-    /// with a full-tape integrity report.
+    /// Compatibility entry point for fully verified governed recovery. It
+    /// delegates to the fixed bounded V1 path so existing trusted callers
+    /// cannot accidentally open an unbounded authority snapshot.
     pub fn open(
         run_id: &str,
         db_path: impl AsRef<Path>,
         authorities: &TrustedReplayAuthorities,
         pinned_kernel_signer: &ActorKeyRef,
+    ) -> Result<Self, TrustedGovernedRecoveryError> {
+        Self::open_bounded_v1(run_id, db_path, authorities, pinned_kernel_signer)
+    }
+
+    /// Open, fully replay, and integrity-check one governed recovery tape
+    /// within the fixed host-owned V1 event bound.
+    ///
+    /// The whole replay is consumed before the root chain is verified, and
+    /// both operations use the same immutable event snapshot loaded by
+    /// [`ReplayEngine`]. A partial replay state can therefore never be paired
+    /// with a full-tape integrity report. This API deliberately takes no
+    /// event-limit argument: a caller-controlled bound could turn a partial
+    /// tape into apparent recovery authority.
+    pub fn open_bounded_v1(
+        run_id: &str,
+        db_path: impl AsRef<Path>,
+        authorities: &TrustedReplayAuthorities,
+        pinned_kernel_signer: &ActorKeyRef,
+    ) -> Result<Self, TrustedGovernedRecoveryError> {
+        Self::open_with_event_limit(
+            run_id,
+            db_path,
+            authorities,
+            pinned_kernel_signer,
+            TRUSTED_GOVERNED_RECOVERY_MAX_EVENTS_V1,
+        )
+    }
+
+    fn open_with_event_limit(
+        run_id: &str,
+        db_path: impl AsRef<Path>,
+        authorities: &TrustedReplayAuthorities,
+        pinned_kernel_signer: &ActorKeyRef,
+        max_events: usize,
     ) -> Result<Self, TrustedGovernedRecoveryError> {
         if !authorities.permits(TrustSpineSignerRole::Kernel, pinned_kernel_signer) {
             return Err(
@@ -240,8 +276,13 @@ impl TrustedGovernedRecoverySnapshot {
             );
         }
 
-        let mut replay = ReplayEngine::open_with_trusted_authorities(run_id, db_path, authorities)?;
-        for _ in replay.by_ref() {}
+        let mut replay = ReplayEngine::open_with_trusted_authorities_bounded(
+            run_id,
+            db_path,
+            authorities,
+            max_events,
+        )?;
+        replay.replay_to_end();
         reject_governed_replay_issues(replay.state().issues.as_slice())?;
 
         // Never expose a projection until the same tape snapshot that formed
@@ -1079,18 +1120,29 @@ mod tests {
         ActionDecisionBlockReasonV1, RecordedActionDecisionQueryV1, RecordedActionIdentityV1,
         RECORDED_ACTION_DECISION_SCHEMA_VERSION_V1,
     };
+    use crate::reader::ReaderError;
     use crate::state::{
         CandidateArtifactReplayState, PromotionDecisionReplayState,
         PromotionReconciliationReplayState, PromotionReplayState, PromotionResultReplayState,
         WorkflowDispatchReplayState, WorkflowPhaseV1,
     };
-    use bp_ledger::id::EventId;
+    use bp_ledger::event::Event;
+    use bp_ledger::id::{EventId, RunId};
+    use bp_ledger::kind::EventKind;
     use bp_ledger::payload::checkpoint::TapeRootAlgorithm;
+    use bp_ledger::payload::run_lifecycle::RunStartedV1;
     use bp_ledger::payload::trust_spine::{
         ActionEvidenceVersionV1, DispatchBudgetV1, ExecutionRoleV1, PromotionDecisionKindV1,
         PromotionGitBindingV1, PromotionResultOutcomeV1, PromotionWorktreeSyncStateV1,
         ReconciliationResolutionOutcomeV1,
     };
+    use bp_ledger::payload::Payload;
+    use bp_ledger::signing::{public_key_hash, TrustedPublicKeys};
+    use bp_ledger::storage::sqlite::SqliteStore;
+    use chrono::Utc;
+    use ed25519_dalek::SigningKey;
+    use std::collections::BTreeMap;
+    use tempfile::TempDir;
 
     const DIGEST_A: &str =
         "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -1115,6 +1167,64 @@ mod tests {
             tape_root_hash: DIGEST_B.into(),
             algorithm: TapeRootAlgorithm::Sha256Linear,
         }
+    }
+
+    fn run_started_event(run_id: RunId) -> Event {
+        Event {
+            id: EventId::new(),
+            run_id,
+            parent_event_id: None,
+            schema_version: 1,
+            kind: EventKind::RunStarted,
+            occurred_at: Utc::now(),
+            payload: Payload::RunStartedV1(RunStartedV1 {
+                packet_hash: "sha256:fixture".into(),
+                git_head: "fixture".into(),
+                workspace_path: "/fixture".into(),
+                config: BTreeMap::new(),
+                parent_run_id: None,
+                parent_event_id: None,
+            }),
+        }
+    }
+
+    #[test]
+    fn bounded_open_rejects_limit_plus_one_before_constructing_a_snapshot() {
+        let temp = TempDir::new().expect("temporary ledger directory");
+        let db_path = temp.path().join("events.db");
+        let store = SqliteStore::open(&db_path).expect("ledger store");
+        let run_id = RunId::new();
+        let signing_key = SigningKey::from_bytes(&[89; 32]);
+        let key_hash = public_key_hash(&signing_key.verifying_key());
+        let signer = ActorKeyRef {
+            actor_id: "kernel".into(),
+            key_id: "kernel-main".into(),
+            public_key_hash: Some(key_hash.clone()),
+        };
+        let mut trusted_keys = TrustedPublicKeys::default();
+        trusted_keys.insert_public_key(key_hash, signing_key.verifying_key().to_bytes().to_vec());
+        let mut authorities = TrustedReplayAuthorities::new(trusted_keys);
+        authorities.allow_signer(TrustSpineSignerRole::Kernel, signer.clone());
+        for event in [run_started_event(run_id), run_started_event(run_id)] {
+            store
+                .append_signed(&event, &signing_key, &signer)
+                .expect("append signed event");
+        }
+
+        let error = TrustedGovernedRecoverySnapshot::open_with_event_limit(
+            &run_id.to_string(),
+            &db_path,
+            &authorities,
+            &signer,
+            1,
+        )
+        .expect_err("limit plus one must not construct a trusted recovery snapshot");
+        assert!(matches!(
+            error,
+            TrustedGovernedRecoveryError::Replay(EngineError::Reader(
+                ReaderError::EventLimitExceeded { max_events: 1 }
+            ))
+        ));
     }
 
     fn workflow(

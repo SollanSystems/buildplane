@@ -312,6 +312,75 @@ fn trusted_recovery_returns_only_a_fully_checkpointed_sealed_v3_workflow() {
 }
 
 #[test]
+fn bounded_trusted_recovery_matches_verified_iteration_for_a_valid_tape() {
+    let temp = TempDir::new().expect("temporary ledger directory");
+    let db_path = temp.path().join("events.db");
+    let store = SqliteStore::open(&db_path).expect("ledger store");
+    let run_id = RunId::new();
+    let signing_key = SigningKey::from_bytes(&[15; 32]);
+    let (authorities, pinned_kernel) = trusted_authorities(&signing_key);
+    let dispatch = sealed_v3_dispatch();
+    let dispatch_event = dispatch_event_with(run_id, dispatch.clone());
+    let action_event = action_request_event(run_id, &dispatch_event, &dispatch, "action-1");
+    store
+        .append_signed_with_checkpoint(
+            &dispatch_event,
+            &signing_key,
+            &kernel_signer(),
+            &CheckpointPolicy::every(1),
+        )
+        .expect("append checkpointed signed dispatch");
+    store
+        .append_signed_with_checkpoint(
+            &action_event,
+            &signing_key,
+            &kernel_signer(),
+            &CheckpointPolicy::every(1),
+        )
+        .expect("append checkpointed signed action request");
+
+    let mut iterator_replay =
+        ReplayEngine::open_with_trusted_authorities(&run_id.to_string(), &db_path, &authorities)
+            .expect("open verified iterator replay");
+    for _ in iterator_replay.by_ref() {}
+    assert!(iterator_replay.state().issues.is_empty());
+    let expected = iterator_replay
+        .state()
+        .workflow_instances
+        .values()
+        .find(|workflow| workflow.dispatch.event_id == dispatch_event.id)
+        .expect("iterator reconstructed the signed governed workflow");
+
+    let bounded = TrustedGovernedRecoverySnapshot::open_bounded_v1(
+        &run_id.to_string(),
+        &db_path,
+        &authorities,
+        &pinned_kernel,
+    )
+    .expect("bounded trusted recovery");
+    let compatible = TrustedGovernedRecoverySnapshot::open(
+        &run_id.to_string(),
+        &db_path,
+        &authorities,
+        &pinned_kernel,
+    )
+    .expect("compatibility trusted recovery");
+
+    assert_eq!(
+        bounded.workflow_for_dispatch_event_ref(&dispatch_event.id.to_string()),
+        Some(expected)
+    );
+    assert_eq!(
+        compatible.workflow_for_dispatch_event_ref(&dispatch_event.id.to_string()),
+        Some(expected)
+    );
+    assert_eq!(
+        bounded.tape_integrity().tape_root_hash,
+        compatible.tape_integrity().tape_root_hash
+    );
+}
+
+#[test]
 fn trusted_recovery_projects_a_verified_redacted_otel_view() {
     let temp = TempDir::new().expect("temporary ledger directory");
     let db_path = temp.path().join("events.db");
