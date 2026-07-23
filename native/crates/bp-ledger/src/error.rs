@@ -111,6 +111,24 @@ pub enum LedgerError {
         reason: String,
     },
 
+    #[error("governed dispatch admission authority rejected: {reason}")]
+    GovernedDispatchAdmissionAuthorityRejected { reason: String },
+
+    #[error("governed dispatch admission conflict for run {run_id} and key {idempotency_key}")]
+    GovernedDispatchAdmissionConflict {
+        run_id: String,
+        idempotency_key: String,
+    },
+
+    #[error(
+        "governed dispatch admission requires reconciliation for run {run_id} and key {idempotency_key}: {reason}"
+    )]
+    GovernedDispatchAdmissionReconciliationRequired {
+        run_id: String,
+        idempotency_key: String,
+        reason: String,
+    },
+
     #[error("governed promotion authority rejected: {reason}")]
     PromotionAuthorityRejected { reason: String },
 
