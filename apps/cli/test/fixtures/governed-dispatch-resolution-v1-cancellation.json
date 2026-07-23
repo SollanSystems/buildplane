@@ -50,6 +50,7 @@
 		"phase": "cancellation_requested",
 		"requests": [],
 		"activity_claims": [],
+		"pending_activity_recovery_work": [],
 		"receipts": [],
 		"receipt_set": null,
 		"candidates": [],

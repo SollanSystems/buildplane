@@ -30,18 +30,22 @@ import {
 	type GovernedRecoveredActivityClaimV1,
 	type GovernedRecoveredCandidateCompletionV1,
 } from "./ledger-trust-spine-port.js";
+import {
+	addNativeRfc3339UtcMilliseconds,
+	parseNativeRfc3339Utc,
+} from "./native-rfc3339-utc.js";
 
 const EVENT_ID =
 	/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const SHA256_DIGEST = /^sha256:[0-9a-f]{64}$/;
 const COMMIT_SHA = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
-const RFC3339_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/;
 const CANONICAL_U64_DECIMAL = /^(?:0|[1-9][0-9]*)$/;
 const MAX_U64_DECIMAL = "18446744073709551615";
 const NATIVE_RECOVERY_FIELDS = [
 	"phase",
 	"requests",
 	"activity_claims",
+	"pending_activity_recovery_work",
 	"receipts",
 	"receipt_set",
 	"candidates",
@@ -123,6 +127,12 @@ export interface ResolvedGovernedDispatchSnapshot {
 	readonly recovery: GovernedActionEvidenceRecoverySnapshot;
 	readonly phase: string;
 	/**
+	 * Immutable observation of an already-claimed, non-terminal activity from
+	 * the native verified replay. This status has no resolver, lease, retry,
+	 * execution, or promotion authority.
+	 */
+	readonly pendingActivityRecoveryWork: readonly GovernedPendingActivityRecoveryWorkStatusV1[];
+	/**
 	 * Persisted operator work item, present only while the signed reducer is
 	 * awaiting a durable decision. This is status data only.
 	 */
@@ -178,6 +188,58 @@ export interface GovernedWorkflowLifecycleStatusV1 {
 	readonly timers: readonly GovernedWorkflowTimerStatusV1[];
 	readonly cancellation?: GovernedWorkflowCancellationStatusV1;
 }
+
+/**
+ * Exact immutable replay lineage for one pending activity observation. It is
+ * intentionally an identity record rather than an executable instruction.
+ */
+export interface GovernedPendingActivityRecoveryIdentityV1 {
+	readonly runId: string;
+	readonly workflowId: string;
+	readonly workflowRevision: string;
+	readonly unitId: string;
+	readonly attempt: number;
+	readonly dispatchEventRef: string;
+	readonly dispatchEnvelopeDigest: string;
+	readonly actionId: string;
+	readonly idempotencyKey: string;
+	readonly actionRequestEventRef: string;
+	readonly actionRequestDigest: string;
+	readonly activityClaimEventRef: string;
+	readonly activityClaimEventDigest: string;
+	readonly leaseId: string;
+}
+
+/**
+ * A closed, status-only handoff from the native pending-activity reducer. It
+ * may explain why a future broker must wait or reconcile, but cannot renew a
+ * lease, retry an action, or invoke a host.
+ */
+export interface GovernedPendingActivityRecoveryWorkStatusV1 {
+	readonly schemaVersion: 1;
+	readonly identity: GovernedPendingActivityRecoveryIdentityV1;
+	readonly actionKind: PendingActivityRecoveryActionKindV1;
+	readonly claimPurpose:
+		| "generic"
+		| "governed_verifier_v1"
+		| "governed_model_action_v1";
+	readonly state: "wait_for_active_lease" | "reconciliation_required";
+	readonly effectiveLeaseExpiresAt?: string;
+	readonly reason?: "lease_expired" | "unknown_terminal_state";
+}
+
+type PendingActivityRecoveryActionKindV1 = Extract<
+	ActionRequestedV2["actionKind"],
+	| "filesystem"
+	| "process"
+	| "git"
+	| "model"
+	| "network"
+	| "secret"
+	| "mcp"
+	| "a2a"
+	| "external_service"
+>;
 
 /**
  * Read-only projection of a kernel-signed promotion approval request. It has
@@ -388,6 +450,7 @@ function parseNativeResolution(
 		dispatch,
 		recovery: recovery.snapshot,
 		phase: recovery.phase,
+		pendingActivityRecoveryWork: recovery.pendingActivityRecoveryWork,
 		...(recovery.promotionApproval === undefined
 			? {}
 			: { promotionApproval: recovery.promotionApproval }),
@@ -562,14 +625,23 @@ function parseNativeDispatch(
 	if (dispatch.trust_tier !== "governed") {
 		throw new TypeError("resolved dispatch trust_tier must be governed.");
 	}
-	const issuedAt = requireTimestamp(dispatch.issued_at, "dispatch.issued_at");
-	const expiresAt = requireTimestamp(
+	const issuedAt = requireTimestampNanos(
+		dispatch.issued_at,
+		"dispatch.issued_at",
+	);
+	const expiresAt = requireTimestampNanos(
 		dispatch.expires_at,
 		"dispatch.expires_at",
 	);
+	const now = parseNativeRfc3339Utc(new Date().toISOString());
+	if (now === undefined) {
+		throw new Error(
+			"current UTC time must satisfy the native RFC3339 grammar.",
+		);
+	}
 	if (
-		Date.parse(issuedAt) >= Date.parse(expiresAt) ||
-		Date.parse(expiresAt) <= Date.now()
+		issuedAt.value >= expiresAt.value ||
+		expiresAt.value <= now.orderingNanos
 	) {
 		throw new TypeError(
 			"resolved governed dispatch is expired or has an invalid authority window.",
@@ -648,8 +720,8 @@ function parseNativeDispatch(
 		),
 		authorityActor,
 		actionEvidenceVersion: "sealed_v3",
-		issuedAt,
-		expiresAt,
+		issuedAt: issuedAt.text,
+		expiresAt: expiresAt.text,
 	});
 }
 
@@ -679,6 +751,7 @@ function parseNativeRecovery(
 	readonly snapshot: GovernedActionEvidenceRecoverySnapshot;
 	readonly phase: string;
 	readonly promotionApproval?: GovernedPromotionApprovalHandoffStatusV1;
+	readonly pendingActivityRecoveryWork: readonly GovernedPendingActivityRecoveryWorkStatusV1[];
 	readonly lifecycle: GovernedWorkflowLifecycleStatusV1;
 	readonly pendingActionIds: readonly string[];
 	readonly unknownActionIds: readonly string[];
@@ -713,6 +786,12 @@ function parseNativeRecovery(
 		recovery.activity_claims,
 		dispatch,
 		requests,
+	);
+	const pendingActivityRecoveryWork = parseNativePendingActivityRecoveryWork(
+		recovery.pending_activity_recovery_work,
+		dispatch,
+		requests,
+		activityClaims,
 	);
 	const candidateCompletion =
 		recovery.candidate_completion === null ||
@@ -789,12 +868,342 @@ function parseNativeRecovery(
 	return {
 		phase,
 		...(promotionApproval === undefined ? {} : { promotionApproval }),
+		pendingActivityRecoveryWork,
 		lifecycle,
 		pendingActionIds,
 		unknownActionIds,
 		failedActionIds,
 		snapshot,
 	};
+}
+
+/**
+ * Parse the native reducer's non-authorizing observation of already-claimed
+ * work. The item must bind the exact dispatch, recovered request, and
+ * recovered non-terminal claim; otherwise it cannot be safely presented even
+ * as status. This function intentionally returns frozen data only.
+ */
+function parseNativePendingActivityRecoveryWork(
+	value: unknown,
+	dispatch: GovernedDispatchLineageV3,
+	requests: readonly DurableActionRequestV2[],
+	activityClaims: readonly GovernedRecoveredActivityClaimV1[],
+): readonly GovernedPendingActivityRecoveryWorkStatusV1[] {
+	const requestsByRef = new Map(
+		requests.map((request) => [request.actionRequestRef, request] as const),
+	);
+	const claimsByRef = new Map(
+		activityClaims.map((claim) => [claim.claimEventRef, claim] as const),
+	);
+	const seenClaimRefs = new Set<string>();
+	const seenActionIds = new Set<string>();
+	return Object.freeze(
+		requireArray(value, "recovery.pending_activity_recovery_work").map(
+			(entry, index) => {
+				const label = `recovery.pending_activity_recovery_work[${index}]`;
+				const work = closedRecord(
+					entry,
+					label,
+					[
+						"schema_version",
+						"identity",
+						"action_kind",
+						"claim_purpose",
+						"state",
+						"effective_lease_expires_at",
+						"reason",
+					],
+					[
+						"schema_version",
+						"identity",
+						"action_kind",
+						"claim_purpose",
+						"state",
+					],
+				);
+				if (work.schema_version !== 1) {
+					throw new TypeError(`${label}.schema_version must be 1.`);
+				}
+				const identity = parseNativePendingActivityRecoveryIdentity(
+					work.identity,
+					dispatch,
+					`${label}.identity`,
+				);
+				const actionKind = requirePendingActivityRecoveryActionKind(
+					work.action_kind,
+					`${label}.action_kind`,
+				);
+				const claimPurpose = requirePendingActivityClaimPurpose(
+					work.claim_purpose,
+					`${label}.claim_purpose`,
+				);
+				assertActivityClaimPurposeMatchesActionKind(
+					claimPurpose,
+					actionKind,
+					label,
+				);
+				if (
+					seenClaimRefs.has(identity.activityClaimEventRef) ||
+					seenActionIds.has(identity.actionId)
+				) {
+					throw new TypeError(
+						"recovery.pending_activity_recovery_work contains duplicate action or activity-claim identity.",
+					);
+				}
+				seenClaimRefs.add(identity.activityClaimEventRef);
+				seenActionIds.add(identity.actionId);
+
+				const request = requestsByRef.get(identity.actionRequestEventRef);
+				if (
+					request === undefined ||
+					request.actionRequest.actionId !== identity.actionId ||
+					request.actionRequest.idempotencyKey !== identity.idempotencyKey ||
+					request.actionRequest.actionKind !== actionKind ||
+					request.actionRequestDigest !== identity.actionRequestDigest
+				) {
+					throw new TypeError(
+						`${label} does not bind the exact recovered action request.`,
+					);
+				}
+				const claim = claimsByRef.get(identity.activityClaimEventRef);
+				if (
+					claim === undefined ||
+					claim.activityId !== identity.actionId ||
+					claim.idempotencyKey !== identity.idempotencyKey ||
+					claim.claimEventDigest !== identity.activityClaimEventDigest ||
+					claim.actionRequestRef !== identity.actionRequestEventRef ||
+					claim.actionRequestDigest !== identity.actionRequestDigest ||
+					claim.leaseId !== identity.leaseId ||
+					claim.claimPurpose !== claimPurpose ||
+					claim.result !== undefined
+				) {
+					throw new TypeError(
+						`${label} does not bind the exact recovered non-terminal activity claim.`,
+					);
+				}
+
+				const state = requirePendingActivityRecoveryState(work.state, label);
+				if (state === "wait_for_active_lease") {
+					if (!Object.hasOwn(work, "effective_lease_expires_at")) {
+						throw new TypeError(
+							`${label} active lease status requires an effective lease expiry.`,
+						);
+					}
+					if (Object.hasOwn(work, "reason")) {
+						throw new TypeError(
+							`${label} active lease status must not include a reconciliation reason.`,
+						);
+					}
+					const effectiveLeaseExpiresAt = requireTimestamp(
+						work.effective_lease_expires_at,
+						`${label}.effective_lease_expires_at`,
+					);
+					if (effectiveLeaseExpiresAt !== claim.leaseExpiresAt) {
+						throw new TypeError(
+							`${label} does not bind the exact verified effective activity lease expiry.`,
+						);
+					}
+					return Object.freeze({
+						schemaVersion: 1 as const,
+						identity,
+						actionKind,
+						claimPurpose,
+						state,
+						effectiveLeaseExpiresAt,
+					});
+				}
+				if (Object.hasOwn(work, "effective_lease_expires_at")) {
+					throw new TypeError(
+						`${label} reconciliation status must not include an active lease expiry.`,
+					);
+				}
+				if (!Object.hasOwn(work, "reason")) {
+					throw new TypeError(
+						`${label} reconciliation status requires a closed reason.`,
+					);
+				}
+				return Object.freeze({
+					schemaVersion: 1 as const,
+					identity,
+					actionKind,
+					claimPurpose,
+					state,
+					reason: requirePendingActivityRecoveryReason(
+						work.reason,
+						`${label}.reason`,
+					),
+				});
+			},
+		),
+	);
+}
+
+function parseNativePendingActivityRecoveryIdentity(
+	value: unknown,
+	dispatch: GovernedDispatchLineageV3,
+	label: string,
+): GovernedPendingActivityRecoveryIdentityV1 {
+	const identity = closedRecord(value, label, [
+		"run_id",
+		"workflow_id",
+		"workflow_revision",
+		"unit_id",
+		"attempt",
+		"dispatch_event_ref",
+		"dispatch_envelope_digest",
+		"action_id",
+		"idempotency_key",
+		"action_request_event_ref",
+		"action_request_digest",
+		"activity_claim_event_ref",
+		"activity_claim_event_digest",
+		"lease_id",
+	]);
+	const parsed: GovernedPendingActivityRecoveryIdentityV1 = Object.freeze({
+		runId: requireEventId(identity.run_id, `${label}.run_id`),
+		workflowId: requireNonEmpty(identity.workflow_id, `${label}.workflow_id`),
+		workflowRevision: requireNonEmpty(
+			identity.workflow_revision,
+			`${label}.workflow_revision`,
+		),
+		unitId: requireNonEmpty(identity.unit_id, `${label}.unit_id`),
+		attempt: requirePositiveInteger(identity.attempt, `${label}.attempt`),
+		dispatchEventRef: requireEventId(
+			identity.dispatch_event_ref,
+			`${label}.dispatch_event_ref`,
+		),
+		dispatchEnvelopeDigest: requireDigest(
+			identity.dispatch_envelope_digest,
+			`${label}.dispatch_envelope_digest`,
+		),
+		actionId: requireNonEmpty(identity.action_id, `${label}.action_id`),
+		idempotencyKey: requireNonEmpty(
+			identity.idempotency_key,
+			`${label}.idempotency_key`,
+		),
+		actionRequestEventRef: requireEventId(
+			identity.action_request_event_ref,
+			`${label}.action_request_event_ref`,
+		),
+		actionRequestDigest: requireDigest(
+			identity.action_request_digest,
+			`${label}.action_request_digest`,
+		),
+		activityClaimEventRef: requireEventId(
+			identity.activity_claim_event_ref,
+			`${label}.activity_claim_event_ref`,
+		),
+		activityClaimEventDigest: requireDigest(
+			identity.activity_claim_event_digest,
+			`${label}.activity_claim_event_digest`,
+		),
+		leaseId: requireNonEmpty(identity.lease_id, `${label}.lease_id`),
+	});
+	if (
+		parsed.runId !== dispatch.runId ||
+		parsed.workflowId !== dispatch.workflowId ||
+		parsed.workflowRevision !== dispatch.workflowRevision ||
+		parsed.unitId !== dispatch.unitId ||
+		parsed.attempt !== dispatch.attempt ||
+		parsed.dispatchEventRef !== dispatch.dispatchEnvelopeRef ||
+		parsed.dispatchEnvelopeDigest !== dispatch.envelopeDigest
+	) {
+		throw new TypeError(
+			`${label} does not bind the exact verified dispatch lineage.`,
+		);
+	}
+	return parsed;
+}
+
+function requirePendingActivityClaimPurpose(
+	value: unknown,
+	label: string,
+): GovernedPendingActivityRecoveryWorkStatusV1["claimPurpose"] {
+	if (
+		value !== "generic" &&
+		value !== "governed_verifier_v1" &&
+		value !== "governed_model_action_v1"
+	) {
+		throw new TypeError(`${label} is not a supported activity claim purpose.`);
+	}
+	return value;
+}
+
+function requireNativeActivityClaimPurpose(
+	value: unknown,
+	actionKind: ActionRequestedV2["actionKind"],
+	label: string,
+): GovernedPendingActivityRecoveryWorkStatusV1["claimPurpose"] {
+	const purpose =
+		value === undefined
+			? "generic"
+			: requirePendingActivityClaimPurpose(value, label);
+	assertActivityClaimPurposeMatchesActionKind(purpose, actionKind, label);
+	return purpose;
+}
+
+function assertActivityClaimPurposeMatchesActionKind(
+	purpose: GovernedPendingActivityRecoveryWorkStatusV1["claimPurpose"],
+	actionKind: ActionRequestedV2["actionKind"],
+	label: string,
+): void {
+	// The native reducer requires the governed-model purpose only for model
+	// actions. Its replayed non-model recovery records preserve fixed purposes
+	// as status metadata, so this reader must not invent additional lane rules.
+	if (actionKind === "model" && purpose !== "governed_model_action_v1") {
+		throw new TypeError(
+			`${label} model activity claim must use governed_model_action_v1.`,
+		);
+	}
+}
+
+function requirePendingActivityRecoveryActionKind(
+	value: unknown,
+	label: string,
+): PendingActivityRecoveryActionKindV1 {
+	if (
+		value !== "filesystem" &&
+		value !== "process" &&
+		value !== "git" &&
+		value !== "model" &&
+		value !== "network" &&
+		value !== "secret" &&
+		value !== "mcp" &&
+		value !== "a2a" &&
+		value !== "external_service"
+	) {
+		throw new TypeError(
+			`${label} is not a supported pending activity action kind.`,
+		);
+	}
+	return value;
+}
+
+function requirePendingActivityRecoveryState(
+	value: unknown,
+	label: string,
+): GovernedPendingActivityRecoveryWorkStatusV1["state"] {
+	if (
+		value !== "wait_for_active_lease" &&
+		value !== "reconciliation_required"
+	) {
+		throw new TypeError(
+			`${label}.state is not a supported pending activity state.`,
+		);
+	}
+	return value;
+}
+
+function requirePendingActivityRecoveryReason(
+	value: unknown,
+	label: string,
+): NonNullable<GovernedPendingActivityRecoveryWorkStatusV1["reason"]> {
+	if (value !== "lease_expired" && value !== "unknown_terminal_state") {
+		throw new TypeError(
+			`${label} is not a supported pending activity reconciliation reason.`,
+		);
+	}
+	return value;
 }
 
 function parseNativeLifecycle(
@@ -916,12 +1325,12 @@ function parseNativeTimers(
 			if (timer.timer_kind !== "workflow_deadline") {
 				throw new TypeError(`${label}.timer_kind is not supported.`);
 			}
-			const dueAt = requireTimestamp(timer.due_at, `${label}.due_at`);
-			const scheduledAt = requireTimestamp(
+			const dueAt = requireTimestampNanos(timer.due_at, `${label}.due_at`);
+			const scheduledAt = requireTimestampNanos(
 				timer.scheduled_at,
 				`${label}.scheduled_at`,
 			);
-			if (Date.parse(dueAt) < Date.parse(scheduledAt)) {
+			if (dueAt.value < scheduledAt.value) {
 				throw new TypeError(`${label}.due_at precedes scheduled_at.`);
 			}
 			const status: GovernedWorkflowTimerStatusV1 = {
@@ -929,13 +1338,13 @@ function parseNativeTimers(
 				eventDigest: requireDigest(timer.event_digest, `${label}.event_digest`),
 				timerId,
 				timerKind: "workflow_deadline",
-				dueAt,
+				dueAt: dueAt.text,
 				idempotencyKey: requireNonEmpty(
 					timer.idempotency_key,
 					`${label}.idempotency_key`,
 				),
 				scheduledBy: dispatch.authorityActor,
-				scheduledAt,
+				scheduledAt: scheduledAt.text,
 			};
 			if (timer.fired === undefined || timer.fired === null) {
 				return Object.freeze(status);
@@ -991,11 +1400,14 @@ function parseNativeTimerFiring(
 			"recovered timer firing does not exactly bind its schedule and dispatch authority.",
 		);
 	}
-	const firedAt = requireTimestamp(
+	const firedAt = requireTimestampNanos(
 		fired.fired_at,
 		`${timerLabel}.fired.fired_at`,
 	);
-	if (Date.parse(firedAt) < Date.parse(timer.dueAt)) {
+	if (
+		firedAt.value <
+		requireTimestampNanos(timer.dueAt, `${timerLabel}.due_at`).value
+	) {
 		throw new TypeError(`${timerLabel}.fired.fired_at precedes due_at.`);
 	}
 	return Object.freeze({
@@ -1007,7 +1419,7 @@ function parseNativeTimerFiring(
 		timerScheduleEventRef: timer.eventRef,
 		timerScheduleEventDigest: timer.eventDigest,
 		firedBy: dispatch.authorityActor,
-		firedAt,
+		firedAt: firedAt.text,
 	});
 }
 
@@ -1085,7 +1497,10 @@ function parseNativeCancellation(
 				"timer-elapsed cancellation does not bind an exact recovered timer firing.",
 			);
 		}
-		if (Date.parse(requestedAt) < Date.parse(firing.firedAt)) {
+		if (
+			requireTimestampNanos(requestedAt, "cancellation.requested_at").value <
+			requireTimestampNanos(firing.firedAt, "timer.fired_at").value
+		) {
 			throw new TypeError(
 				"timer-elapsed cancellation precedes its bound timer firing.",
 			);
@@ -1725,6 +2140,9 @@ function parseNativeActivityClaims(
 	const activityIds = new Set<string>();
 	const idempotencyKeys = new Set<string>();
 	const eventRefs = new Set<string>();
+	const heartbeatEventRefs = new Set<string>();
+	const effectiveDispatchDeadline =
+		effectiveNativeDispatchEffectDeadline(dispatch);
 	return Object.freeze(
 		entries.map((entry, index) => {
 			const claim = closedRecord(
@@ -1742,10 +2160,12 @@ function parseNativeActivityClaims(
 					"dispatch_event_id",
 					"dispatch_envelope_digest",
 					"authority_actor",
+					"purpose",
 					"lease_id",
 					"lease_expires_at",
 					"claimed_at",
 					"signer",
+					"heartbeats",
 					"result",
 				],
 				[
@@ -1799,13 +2219,18 @@ function parseNativeActivityClaims(
 			activityIds.add(activityId);
 			idempotencyKeys.add(idempotencyKey);
 			eventRefs.add(claimEventRef);
+			const actionKind = requireActionKind(claim.action_kind);
+			const claimPurpose = requireNativeActivityClaimPurpose(
+				claim.purpose,
+				actionKind,
+				"activity_claim.purpose",
+			);
 			if (
 				requireNonEmpty(claim.run_id, "activity_claim.run_id") !==
 					dispatch.runId ||
 				activityId !== request.actionRequest.actionId ||
 				idempotencyKey !== request.actionRequest.idempotencyKey ||
-				requireActionKind(claim.action_kind) !==
-					request.actionRequest.actionKind ||
+				actionKind !== request.actionRequest.actionKind ||
 				requireDigest(
 					claim.action_request_digest,
 					"activity_claim.action_request_digest",
@@ -1828,37 +2253,273 @@ function parseNativeActivityClaims(
 				);
 			}
 			validateNativeActivityClaimSigner(claim.signer);
+			const claimEventDigest = requireDigest(
+				claim.claim_event_digest,
+				"activity_claim.claim_event_digest",
+			);
+			const leaseId = requireNonEmpty(
+				claim.lease_id,
+				"activity_claim.lease_id",
+			);
+			const claimedAt = requireTimestampNanos(
+				claim.claimed_at,
+				"activity_claim.claimed_at",
+			);
+			const leaseExpiresAt = requireTimestampNanos(
+				claim.lease_expires_at,
+				"activity_claim.lease_expires_at",
+			);
+			parseNativeActivityClaimHeartbeats(
+				claim.heartbeats,
+				{
+					claimEventRef,
+					claimEventDigest,
+					runId: dispatch.runId,
+					activityId,
+					idempotencyKey,
+					leaseId,
+					dispatchEventRef: dispatch.dispatchEnvelopeRef,
+					dispatchEnvelopeDigest: dispatch.envelopeDigest,
+					claimedAt,
+					leaseExpiresAt,
+					effectiveDispatchDeadline,
+				},
+				heartbeatEventRefs,
+				`recovery.activity_claims[${index}].heartbeats`,
+			);
 			const result = parseNativeActivityResult(
 				claim.result,
 				claimEventRef,
-				requireDigest(
-					claim.claim_event_digest,
-					"activity_claim.claim_event_digest",
-				),
+				claimEventDigest,
 				dispatch,
 				activityId,
 				idempotencyKey,
-				requireNonEmpty(claim.lease_id, "activity_claim.lease_id"),
+				leaseId,
 			);
 			return Object.freeze({
 				activityId,
 				idempotencyKey,
 				claimEventRef,
-				claimEventDigest: requireDigest(
-					claim.claim_event_digest,
-					"activity_claim.claim_event_digest",
-				),
+				claimEventDigest,
 				actionRequestRef,
 				actionRequestDigest: request.actionRequestDigest,
-				leaseId: requireNonEmpty(claim.lease_id, "activity_claim.lease_id"),
-				leaseExpiresAt: requireTimestamp(
-					claim.lease_expires_at,
-					"activity_claim.lease_expires_at",
-				),
+				leaseId,
+				leaseExpiresAt: leaseExpiresAt.text,
+				claimPurpose,
 				...(result === undefined ? {} : { result }),
 			});
 		}),
 	);
+}
+
+interface ParsedTimestampNanos {
+	readonly text: string;
+	readonly value: bigint;
+}
+
+interface NativeActivityClaimHeartbeatLineage {
+	readonly claimEventRef: string;
+	readonly claimEventDigest: string;
+	readonly runId: string;
+	readonly activityId: string;
+	readonly idempotencyKey: string;
+	readonly leaseId: string;
+	readonly dispatchEventRef: string;
+	readonly dispatchEnvelopeDigest: string;
+	readonly claimedAt: ParsedTimestampNanos;
+	readonly leaseExpiresAt: ParsedTimestampNanos;
+	readonly effectiveDispatchDeadline: bigint;
+}
+
+/**
+ * Heartbeats are immutable replay evidence, not a local lease-renewal API.
+ * Validate the full native history before exposing the claim's already-verified
+ * effective expiry to the status-only pending-work projection.
+ */
+function parseNativeActivityClaimHeartbeats(
+	value: unknown,
+	lineage: NativeActivityClaimHeartbeatLineage,
+	seenHeartbeatEventRefs: Set<string>,
+	label: string,
+): void {
+	if (value === undefined) return;
+	const entries = requireArray(value, label);
+	if (entries.length === 0) {
+		throw new TypeError(
+			`${label} must be omitted when no heartbeat extensions are recorded.`,
+		);
+	}
+	let previousExpiry: ParsedTimestampNanos | undefined;
+	let previousHeartbeatAt: ParsedTimestampNanos | undefined;
+	for (const [index, entry] of entries.entries()) {
+		const heartbeatLabel = `${label}[${index}]`;
+		const heartbeat = closedRecord(
+			entry,
+			heartbeatLabel,
+			[
+				"event_id",
+				"event_digest",
+				"run_id",
+				"activity_id",
+				"idempotency_key",
+				"heartbeat_id",
+				"heartbeat_request_digest",
+				"claim_event_id",
+				"claim_event_digest",
+				"lease_id",
+				"dispatch_event_id",
+				"dispatch_envelope_digest",
+				"prior_lease_expires_at",
+				"lease_expires_at",
+				"heartbeat_at",
+			],
+			[
+				"event_id",
+				"event_digest",
+				"run_id",
+				"activity_id",
+				"idempotency_key",
+				"claim_event_id",
+				"claim_event_digest",
+				"lease_id",
+				"dispatch_event_id",
+				"dispatch_envelope_digest",
+				"prior_lease_expires_at",
+				"lease_expires_at",
+				"heartbeat_at",
+			],
+		);
+		const heartbeatEventRef = requireEventId(
+			heartbeat.event_id,
+			`${heartbeatLabel}.event_id`,
+		);
+		if (seenHeartbeatEventRefs.has(heartbeatEventRef)) {
+			throw new TypeError(
+				"recovery.activity_claims contains duplicate heartbeat event identity.",
+			);
+		}
+		seenHeartbeatEventRefs.add(heartbeatEventRef);
+		requireDigest(heartbeat.event_digest, `${heartbeatLabel}.event_digest`);
+
+		const hasHeartbeatId = Object.hasOwn(heartbeat, "heartbeat_id");
+		const hasHeartbeatRequestDigest = Object.hasOwn(
+			heartbeat,
+			"heartbeat_request_digest",
+		);
+		if (hasHeartbeatId !== hasHeartbeatRequestDigest) {
+			throw new TypeError(
+				`${heartbeatLabel} heartbeat_id and heartbeat_request_digest must be present together.`,
+			);
+		}
+		if (hasHeartbeatId) {
+			requireNonEmpty(heartbeat.heartbeat_id, `${heartbeatLabel}.heartbeat_id`);
+			requireDigest(
+				heartbeat.heartbeat_request_digest,
+				`${heartbeatLabel}.heartbeat_request_digest`,
+			);
+		}
+
+		if (
+			requireNonEmpty(heartbeat.run_id, `${heartbeatLabel}.run_id`) !==
+				lineage.runId ||
+			requireNonEmpty(
+				heartbeat.activity_id,
+				`${heartbeatLabel}.activity_id`,
+			) !== lineage.activityId ||
+			requireNonEmpty(
+				heartbeat.idempotency_key,
+				`${heartbeatLabel}.idempotency_key`,
+			) !== lineage.idempotencyKey ||
+			requireEventId(
+				heartbeat.claim_event_id,
+				`${heartbeatLabel}.claim_event_id`,
+			) !== lineage.claimEventRef ||
+			requireDigest(
+				heartbeat.claim_event_digest,
+				`${heartbeatLabel}.claim_event_digest`,
+			) !== lineage.claimEventDigest ||
+			requireNonEmpty(heartbeat.lease_id, `${heartbeatLabel}.lease_id`) !==
+				lineage.leaseId ||
+			requireEventId(
+				heartbeat.dispatch_event_id,
+				`${heartbeatLabel}.dispatch_event_id`,
+			) !== lineage.dispatchEventRef ||
+			requireDigest(
+				heartbeat.dispatch_envelope_digest,
+				`${heartbeatLabel}.dispatch_envelope_digest`,
+			) !== lineage.dispatchEnvelopeDigest
+		) {
+			throw new TypeError(
+				`${heartbeatLabel} does not bind the exact recovered activity claim lineage.`,
+			);
+		}
+
+		const priorLeaseExpiresAt = requireTimestampNanos(
+			heartbeat.prior_lease_expires_at,
+			`${heartbeatLabel}.prior_lease_expires_at`,
+		);
+		const leaseExpiresAt = requireTimestampNanos(
+			heartbeat.lease_expires_at,
+			`${heartbeatLabel}.lease_expires_at`,
+		);
+		const heartbeatAt = requireTimestampNanos(
+			heartbeat.heartbeat_at,
+			`${heartbeatLabel}.heartbeat_at`,
+		);
+		if (
+			priorLeaseExpiresAt.value <= lineage.claimedAt.value ||
+			heartbeatAt.value < lineage.claimedAt.value ||
+			heartbeatAt.value >= priorLeaseExpiresAt.value ||
+			leaseExpiresAt.value <= priorLeaseExpiresAt.value ||
+			leaseExpiresAt.value > lineage.effectiveDispatchDeadline ||
+			(previousExpiry !== undefined &&
+				priorLeaseExpiresAt.value !== previousExpiry.value) ||
+			(previousHeartbeatAt !== undefined &&
+				heartbeatAt.value <= previousHeartbeatAt.value)
+		) {
+			throw new TypeError(
+				`${heartbeatLabel} does not form a valid forward-only activity lease heartbeat chain within the signed compute deadline.`,
+			);
+		}
+		previousExpiry = leaseExpiresAt;
+		previousHeartbeatAt = heartbeatAt;
+	}
+	if (
+		previousExpiry === undefined ||
+		previousExpiry.value !== lineage.leaseExpiresAt.value
+	) {
+		throw new TypeError(
+			`${label} does not prove the recovered activity claim effective lease expiry.`,
+		);
+	}
+}
+
+/**
+ * The signed native reducer bounds effects at the earlier of dispatch expiry
+ * and `issued_at + max_compute_time_ms`. Keep the JSON boundary equally
+ * fail-closed by using the same Chrono duration behavior for the latter.
+ */
+function effectiveNativeDispatchEffectDeadline(
+	dispatch: GovernedDispatchLineageV3,
+): bigint {
+	const dispatchExpiresAt = requireTimestampNanos(
+		dispatch.expiresAt,
+		"dispatch.expires_at",
+	);
+	const maxComputeTimeMs = dispatch.budget.maxComputeTimeMs;
+	if (maxComputeTimeMs === undefined) return dispatchExpiresAt.value;
+	const computeDeadline = addNativeRfc3339UtcMilliseconds(
+		dispatch.issuedAt,
+		maxComputeTimeMs,
+	);
+	if (computeDeadline === undefined) {
+		throw new TypeError(
+			"dispatch issued_at cannot form its native signed compute deadline.",
+		);
+	}
+	return computeDeadline < dispatchExpiresAt.value
+		? computeDeadline
+		: dispatchExpiresAt.value;
 }
 
 function validateNativeActivityClaimSigner(value: unknown): void {
@@ -2885,14 +3546,25 @@ function optionalNonEmpty(value: unknown, label: string): string | undefined {
 }
 
 function requireTimestamp(value: unknown, label: string): string {
-	if (
-		typeof value !== "string" ||
-		!RFC3339_UTC.test(value) ||
-		!Number.isFinite(Date.parse(value))
-	) {
+	const timestamp = parseNativeRfc3339Utc(value);
+	if (timestamp === undefined) {
 		throw new TypeError(`${label} must be a RFC3339 UTC timestamp.`);
 	}
-	return value;
+	return timestamp.text;
+}
+
+function requireTimestampNanos(
+	value: unknown,
+	label: string,
+): ParsedTimestampNanos {
+	const timestamp = parseNativeRfc3339Utc(value);
+	if (timestamp === undefined) {
+		throw new TypeError(`${label} must be a RFC3339 UTC timestamp.`);
+	}
+	return Object.freeze({
+		text: timestamp.text,
+		value: timestamp.orderingNanos,
+	});
 }
 
 function requireCommitSha(value: unknown, label: string): string {

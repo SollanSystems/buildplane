@@ -27,11 +27,12 @@ use bp_replay::ReplayIssue;
 use bp_replay::{
     ActionReceiptReplayState, ActionReceiptSetReplayState, ActionRequestReplayState,
     ActivityClaimReplayState, CandidateAcceptanceReplayState, CandidateArtifactReplayState,
-    CandidateCompletionReplayState, PromotionApprovalRequestReplayState, PromotionReplayState,
-    ReviewVerdictReplayState, TapeIntegrityReportV1, TrustedGovernedRecoverySnapshot,
-    WorkflowDispatchReplayState, WorkflowInstanceV1, WorkflowPhaseV1, WorkflowTerminalReplayState,
+    CandidateCompletionReplayState, PendingActivityRecoveryWorkV1,
+    PromotionApprovalRequestReplayState, PromotionReplayState, ReviewVerdictReplayState,
+    TapeIntegrityReportV1, TrustedGovernedRecoverySnapshot, WorkflowDispatchReplayState,
+    WorkflowInstanceV1, WorkflowPhaseV1, WorkflowTerminalReplayState,
 };
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, SecondsFormat, Utc};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -232,6 +233,10 @@ struct GovernedDispatchRecoveryV1 {
     phase: WorkflowPhaseV1,
     requests: Vec<ActionRequestReplayState>,
     activity_claims: Vec<ActivityClaimReplayState>,
+    /// Fully verified, non-authorizing status for already-claimed,
+    /// non-terminal activity. This never grants a retry, lease, or host
+    /// execution path.
+    pending_activity_recovery_work: Vec<PendingActivityRecoveryWorkV1>,
     receipts: Vec<ActionReceiptReplayState>,
     receipt_set: Option<ActionReceiptSetReplayState>,
     candidates: Vec<CandidateArtifactReplayState>,
@@ -1909,6 +1914,16 @@ mod tests {
     fn governed_dispatch_resolution_v1_fixture_from_workflow(
         workflow: WorkflowInstanceV1,
     ) -> GovernedDispatchResolutionV1 {
+        governed_dispatch_resolution_v1_fixture_from_workflow_with_pending_activity_recovery_work(
+            workflow,
+            Vec::new(),
+        )
+    }
+
+    fn governed_dispatch_resolution_v1_fixture_from_workflow_with_pending_activity_recovery_work(
+        workflow: WorkflowInstanceV1,
+        pending_activity_recovery_work: Vec<PendingActivityRecoveryWorkV1>,
+    ) -> GovernedDispatchResolutionV1 {
         use bp_ledger::payload::checkpoint::TapeRootAlgorithm;
 
         project_governed_dispatch_resolution(
@@ -1935,6 +1950,7 @@ mod tests {
                         .to_string(),
                 algorithm: TapeRootAlgorithm::Sha256Linear,
             },
+            pending_activity_recovery_work,
         )
     }
 
@@ -1951,6 +1967,173 @@ mod tests {
             actual, expected,
             "the TypeScript resolver fixture must stay exactly aligned with the native closed projection"
         );
+    }
+
+    fn governed_dispatch_resolution_v1_pending_activity_recovery_fixture_projection(
+    ) -> GovernedDispatchResolutionV1 {
+        governed_dispatch_resolution_v1_pending_activity_recovery_fixture_projection_with_heartbeat(
+            false,
+        )
+    }
+
+    fn governed_dispatch_resolution_v1_pending_activity_recovery_heartbeat_fixture_projection(
+    ) -> GovernedDispatchResolutionV1 {
+        governed_dispatch_resolution_v1_pending_activity_recovery_fixture_projection_with_heartbeat(
+            true,
+        )
+    }
+
+    fn governed_dispatch_resolution_v1_pending_activity_recovery_fixture_projection_with_heartbeat(
+        with_heartbeat: bool,
+    ) -> GovernedDispatchResolutionV1 {
+        use bp_replay::{
+            state::ActivityHeartbeatReplayState, PendingActivityRecoveryStateV1,
+            RecordedActionIdentityV1, PENDING_ACTIVITY_RECOVERY_WORK_SCHEMA_VERSION_V1,
+        };
+
+        let mut workflow = governed_dispatch_resolution_v1_completed_candidate_fixture_workflow();
+        workflow.phase = WorkflowPhaseV1::Dispatched;
+        workflow.candidate = None;
+        workflow.candidate_completion = None;
+        workflow.dispatch.budget.max_compute_time_ms = Some(120_000);
+        let (request, claim) = {
+            let evidence = workflow
+                .action_evidence
+                .as_mut()
+                .expect("completed candidate fixture must retain action evidence");
+            evidence.sealed_receipt_set = None;
+            let action = evidence
+                .actions
+                .values_mut()
+                .next()
+                .expect("completed candidate fixture must retain its action");
+            action.receipt = None;
+            let claim = action
+                .activity_claim
+                .as_mut()
+                .expect("completed candidate fixture must retain its activity claim");
+            claim.result = None;
+            claim.lease_expires_at = "2026-07-18T12:01:45Z".to_string();
+            if with_heartbeat {
+                claim.heartbeats.push(ActivityHeartbeatReplayState {
+                    event_id: governed_fixture_event_id("00000000-0000-7000-8000-000000000018"),
+                    event_digest: governed_fixture_digest('5'),
+                    run_id: claim.run_id.clone(),
+                    activity_id: claim.activity_id.clone(),
+                    idempotency_key: claim.idempotency_key.clone(),
+                    heartbeat_id: Some("heartbeat:candidate-create:1".to_string()),
+                    heartbeat_request_digest: Some(governed_fixture_digest('6')),
+                    claim_event_id: claim.event_id.clone(),
+                    claim_event_digest: claim.claim_event_digest.clone(),
+                    lease_id: claim.lease_id.clone(),
+                    dispatch_event_id: claim.dispatch_event_id.clone(),
+                    dispatch_envelope_digest: claim.dispatch_envelope_digest.clone(),
+                    prior_lease_expires_at: claim.lease_expires_at.clone(),
+                    lease_expires_at: "2026-07-18T12:01:55Z".to_string(),
+                    heartbeat_at: "2026-07-18T12:01:40Z".to_string(),
+                });
+                claim.lease_expires_at = "2026-07-18T12:01:55Z".to_string();
+            }
+            (action.request.clone(), claim.clone())
+        };
+        let pending = PendingActivityRecoveryWorkV1 {
+            schema_version: PENDING_ACTIVITY_RECOVERY_WORK_SCHEMA_VERSION_V1,
+            identity: RecordedActionIdentityV1 {
+                run_id: workflow.run_id.clone(),
+                workflow_id: workflow.workflow_id.clone(),
+                workflow_revision: workflow.workflow_revision.clone(),
+                unit_id: workflow.unit_id.clone(),
+                attempt: workflow.attempt,
+                dispatch_event_ref: workflow.dispatch.event_id.to_string(),
+                dispatch_envelope_digest: workflow.dispatch.envelope_digest.clone(),
+                action_id: request.action_id,
+                idempotency_key: request.idempotency_key,
+                action_request_event_ref: request.event_id.to_string(),
+                action_request_digest: request.action_request_digest,
+                activity_claim_event_ref: claim.event_id.to_string(),
+                activity_claim_event_digest: claim.claim_event_digest.clone(),
+                lease_id: claim.lease_id.clone(),
+            },
+            action_kind: claim.action_kind,
+            claim_purpose: claim.purpose,
+            state: PendingActivityRecoveryStateV1::WaitForActiveLease,
+            effective_lease_expires_at: Some(claim.lease_expires_at),
+            reason: None,
+        };
+        governed_dispatch_resolution_v1_fixture_from_workflow_with_pending_activity_recovery_work(
+            workflow,
+            vec![pending],
+        )
+    }
+
+    #[test]
+    fn governed_dispatch_resolution_v1_pending_activity_recovery_fixture_matches_native_serialization(
+    ) {
+        let expected: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../apps/cli/test/fixtures/governed-dispatch-resolution-v1-pending-activity-recovery.json"
+        ))
+        .expect("pending activity recovery cross-language fixture must be valid JSON");
+        let actual = serde_json::to_value(
+            governed_dispatch_resolution_v1_pending_activity_recovery_fixture_projection(),
+        )
+        .expect("native pending activity recovery projection must serialize");
+
+        assert_eq!(
+            actual, expected,
+            "the TypeScript pending activity recovery fixture must stay exactly aligned with the native closed projection"
+        );
+    }
+
+    #[test]
+    fn governed_dispatch_resolution_v1_pending_activity_recovery_heartbeat_fixture_matches_native_serialization(
+    ) {
+        let expected: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../apps/cli/test/fixtures/governed-dispatch-resolution-v1-pending-activity-recovery-heartbeat.json"
+        ))
+        .expect("pending activity heartbeat recovery cross-language fixture must be valid JSON");
+        let actual = serde_json::to_value(
+            governed_dispatch_resolution_v1_pending_activity_recovery_heartbeat_fixture_projection(
+            ),
+        )
+        .expect("native pending activity heartbeat recovery projection must serialize");
+
+        assert_eq!(
+            actual, expected,
+            "the TypeScript pending activity heartbeat recovery fixture must stay exactly aligned with the native closed projection"
+        );
+    }
+
+    #[test]
+    fn pending_activity_recovery_work_filters_foreign_dispatches_and_rejects_same_dispatch_rebinding(
+    ) {
+        let workflow = governed_dispatch_resolution_v1_fixture_workflow();
+        let projection =
+            governed_dispatch_resolution_v1_pending_activity_recovery_fixture_projection();
+        let pending = projection
+            .recovery
+            .pending_activity_recovery_work
+            .into_iter()
+            .next()
+            .expect("fixture must contain one pending activity status");
+        let mut foreign = pending.clone();
+        foreign.identity.dispatch_event_ref = "00000000-0000-7000-8000-000000000099".to_string();
+        let bound = pending_activity_recovery_work_for_dispatch(
+            vec![foreign, pending.clone()],
+            &workflow,
+            &workflow.dispatch.event_id.to_string(),
+        )
+        .expect("foreign dispatch status must be omitted rather than rebound");
+        assert_eq!(bound, vec![pending.clone()]);
+
+        let mut rebound = pending;
+        rebound.identity.dispatch_envelope_digest = governed_fixture_digest('f');
+        let error = pending_activity_recovery_work_for_dispatch(
+            vec![rebound],
+            &workflow,
+            &workflow.dispatch.event_id.to_string(),
+        )
+        .expect_err("same-dispatch status with a foreign lineage must fail closed");
+        assert!(error.contains("exact requested governed dispatch identity"));
     }
 
     fn governed_fixture_event_id(value: &str) -> bp_ledger::id::EventId {
@@ -2462,7 +2645,7 @@ mod tests {
             idempotency_key: "promotion:1".to_string(),
         });
 
-        let recovery = project_governed_dispatch_recovery(&workflow);
+        let recovery = project_governed_dispatch_recovery(&workflow, Vec::new());
 
         assert_eq!(recovery.phase, WorkflowPhaseV1::PromotionApprovalPending);
         assert_eq!(
@@ -2542,7 +2725,7 @@ mod tests {
             requested_at: "2026-01-01T00:10:00Z".to_string(),
         });
 
-        let recovery = project_governed_dispatch_recovery(&workflow);
+        let recovery = project_governed_dispatch_recovery(&workflow, Vec::new());
 
         assert_eq!(recovery.phase, WorkflowPhaseV1::CancellationRequested);
         assert_eq!(recovery.timers.len(), 1);
@@ -2615,7 +2798,7 @@ mod tests {
             },
         });
 
-        let recovery = project_governed_dispatch_recovery(&workflow);
+        let recovery = project_governed_dispatch_recovery(&workflow, Vec::new());
 
         let completion = recovery
             .candidate_completion
@@ -4495,8 +4678,19 @@ fn resolve_governed_dispatch_v3_at(
         &trusted_kernel_signer,
     )
     .map_err(|error| format!("trusted governed recovery snapshot: {error}"))?;
+    let dispatch_event_ref = dispatch_event_id.to_string();
+    // The pending-work projection scans the same fully verified snapshot as
+    // the resolver. Query it before narrowing to one dispatch so malformed
+    // incomplete evidence cannot be hidden by returning a partial status
+    // projection. `now` is resolver-owned wall-clock input, never dispatch
+    // metadata or caller-selected recovery authority.
+    let pending_activity_recovery_work = snapshot
+        .pending_activity_recovery_work_v1(&now.to_rfc3339_opts(SecondsFormat::Nanos, true))
+        .map_err(|error| {
+            format!("trusted governed pending activity recovery projection is blocked: {error:?}")
+        })?;
     let workflow = snapshot
-        .workflow_for_dispatch_event_ref(&dispatch_event_id.to_string())
+        .workflow_for_dispatch_event_ref(&dispatch_event_ref)
         .cloned()
         .ok_or_else(|| {
             format!(
@@ -4515,12 +4709,55 @@ fn resolve_governed_dispatch_v3_at(
                 .to_string(),
         );
     }
+    let pending_activity_recovery_work = pending_activity_recovery_work_for_dispatch(
+        pending_activity_recovery_work,
+        &workflow,
+        &dispatch_event_ref,
+    )?;
     Ok(project_governed_dispatch_resolution(
-        dispatch_event_id.to_string(),
+        dispatch_event_ref,
         trusted_kernel_signer,
         workflow,
         snapshot.tape_integrity().clone(),
+        pending_activity_recovery_work,
     ))
+}
+
+/// Keep the response scoped to the requested immutable workflow while
+/// treating any same-dispatch identity mismatch as a resolver failure. A
+/// foreign dispatch is absent from this response, never rewritten or merged.
+fn pending_activity_recovery_work_for_dispatch(
+    work: Vec<PendingActivityRecoveryWorkV1>,
+    workflow: &WorkflowInstanceV1,
+    dispatch_event_ref: &str,
+) -> Result<Vec<PendingActivityRecoveryWorkV1>, String> {
+    if workflow.dispatch.event_id.to_string() != dispatch_event_ref {
+        return Err(
+            "verified governed workflow did not retain the requested dispatch event reference"
+                .to_string(),
+        );
+    }
+
+    let mut bound = Vec::new();
+    for item in work {
+        if item.identity.dispatch_event_ref != dispatch_event_ref {
+            continue;
+        }
+        if item.identity.run_id != workflow.run_id
+            || item.identity.workflow_id != workflow.workflow_id
+            || item.identity.workflow_revision != workflow.workflow_revision
+            || item.identity.unit_id != workflow.unit_id
+            || item.identity.attempt != workflow.attempt
+            || item.identity.dispatch_envelope_digest != workflow.dispatch.envelope_digest
+        {
+            return Err(
+                "trusted pending activity recovery work did not bind the exact requested governed dispatch identity"
+                    .to_string(),
+            );
+        }
+        bound.push(item);
+    }
+    Ok(bound)
 }
 
 /// Ordinary legacy replay records can retain non-fatal diagnostics, but a
@@ -4773,8 +5010,9 @@ fn project_governed_dispatch_resolution(
     trusted_kernel_signer: ActorKeyRef,
     workflow: WorkflowInstanceV1,
     tape_integrity: TapeIntegrityReportV1,
+    pending_activity_recovery_work: Vec<PendingActivityRecoveryWorkV1>,
 ) -> GovernedDispatchResolutionV1 {
-    let recovery = project_governed_dispatch_recovery(&workflow);
+    let recovery = project_governed_dispatch_recovery(&workflow, pending_activity_recovery_work);
 
     GovernedDispatchResolutionV1 {
         schema_version: 1,
@@ -4793,7 +5031,10 @@ fn project_governed_dispatch_resolution(
     }
 }
 
-fn project_governed_dispatch_recovery(workflow: &WorkflowInstanceV1) -> GovernedDispatchRecoveryV1 {
+fn project_governed_dispatch_recovery(
+    workflow: &WorkflowInstanceV1,
+    pending_activity_recovery_work: Vec<PendingActivityRecoveryWorkV1>,
+) -> GovernedDispatchRecoveryV1 {
     let action_evidence = workflow.action_evidence.as_ref();
     let mut requests = Vec::new();
     let mut activity_claims = Vec::new();
@@ -4814,6 +5055,7 @@ fn project_governed_dispatch_recovery(workflow: &WorkflowInstanceV1) -> Governed
         phase: workflow.phase,
         requests,
         activity_claims,
+        pending_activity_recovery_work,
         receipts,
         receipt_set: action_evidence.and_then(|evidence| evidence.sealed_receipt_set.clone()),
         candidates: workflow.candidate.clone().into_iter().collect(),

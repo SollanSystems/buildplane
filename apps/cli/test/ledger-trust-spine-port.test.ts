@@ -1865,7 +1865,7 @@ describe("governed action evidence ledger port", () => {
 					actionRequestRef: durableRequest.actionRequestRef,
 					actionRequestDigest: durableRequest.actionRequestDigest,
 					leaseId: "candidate-create-lease",
-					leaseExpiresAt: "2026-07-18T12:10:00.000Z",
+					leaseExpiresAt: "2016-12-31t23:59:60.000000001123Z",
 					result: {
 						resultEventRef: completion.activityResultEventRef,
 						resultEventDigest: completion.activityResultEventDigest,

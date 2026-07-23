@@ -69,9 +69,9 @@ import {
 	type TapeEmitter,
 } from "@buildplane/ledger-client";
 import { digest } from "@buildplane/planforge";
+import { isNativeRfc3339Utc } from "./native-rfc3339-utc.js";
 
 const FULL_GIT_OBJECT_ID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
-const RFC3339_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/;
 
 /**
  * The protected native authority service is currently a single writer per
@@ -503,10 +503,7 @@ function toPromotionWorktreeSyncStateWire(
 }
 
 function requireRfc3339Utc(value: unknown, field: string): string {
-	if (typeof value !== "string" || !RFC3339_UTC.test(value)) {
-		throw new TypeError(`${field} must be an RFC3339 UTC timestamp.`);
-	}
-	if (Number.isNaN(Date.parse(value))) {
+	if (!isNativeRfc3339Utc(value)) {
 		throw new TypeError(`${field} must be a valid RFC3339 UTC timestamp.`);
 	}
 	return value;
@@ -2237,6 +2234,14 @@ export interface GovernedRecoveredActivityClaimV1 {
 	readonly actionRequestDigest: string;
 	readonly leaseId: string;
 	readonly leaseExpiresAt: string;
+	/**
+	 * Optional for hand-built legacy snapshots. Native parsed claims always
+	 * normalize an omitted wire field to `generic` before exposing it.
+	 */
+	readonly claimPurpose?:
+		| "generic"
+		| "governed_verifier_v1"
+		| "governed_model_action_v1";
 	readonly result?: GovernedRecoveredActivityResultV1;
 }
 
@@ -3736,11 +3741,7 @@ function candidateCreateActionId(candidate: KernelCandidateCreatedV2): string {
 }
 
 function isRfc3339Utc(value: unknown): value is string {
-	return (
-		typeof value === "string" &&
-		RFC3339_UTC.test(value) &&
-		Number.isFinite(Date.parse(value))
-	);
+	return isNativeRfc3339Utc(value);
 }
 
 function registerRecoveredActionRequest(

@@ -11,6 +11,7 @@ import {
 const RUN_ID = "00000000-0000-7000-8000-000000000011";
 const DISPATCH_EVENT_ID = "00000000-0000-7000-8000-000000000012";
 const DIGEST = (character: string) => `sha256:${character.repeat(64)}`;
+const SHA256_DIGEST = /^sha256:[0-9a-f]{64}$/;
 const NATIVE_GOVERNED_DISPATCH_RESOLUTION_V1_FIXTURE = new URL(
 	"./fixtures/governed-dispatch-resolution-v1.json",
 	import.meta.url,
@@ -27,6 +28,16 @@ const NATIVE_GOVERNED_DISPATCH_RESOLUTION_V1_CANCELLATION_FIXTURE = new URL(
 const NATIVE_GOVERNED_DISPATCH_RESOLUTION_V1_PROMOTION_APPROVAL_FIXTURE =
 	new URL(
 		"./fixtures/governed-dispatch-resolution-v1-promotion-approval.json",
+		import.meta.url,
+	);
+const NATIVE_GOVERNED_DISPATCH_RESOLUTION_V1_PENDING_ACTIVITY_RECOVERY_FIXTURE =
+	new URL(
+		"./fixtures/governed-dispatch-resolution-v1-pending-activity-recovery.json",
+		import.meta.url,
+	);
+const NATIVE_GOVERNED_DISPATCH_RESOLUTION_V1_PENDING_ACTIVITY_RECOVERY_HEARTBEAT_FIXTURE =
+	new URL(
+		"./fixtures/governed-dispatch-resolution-v1-pending-activity-recovery-heartbeat.json",
 		import.meta.url,
 	);
 const TEST_SNAPSHOT_CONTEXT = {
@@ -194,6 +205,477 @@ describe("native governed dispatch resolver", () => {
 			receipts: [],
 			candidates: [],
 		});
+	});
+
+	it("exposes pending activity recovery only as frozen, exact read-only status", () => {
+		expect(
+			existsSync(
+				NATIVE_GOVERNED_DISPATCH_RESOLUTION_V1_PENDING_ACTIVITY_RECOVERY_FIXTURE,
+			),
+		).toBe(true);
+		const resolved = parseNativeFixture(
+			nativeFixture(
+				NATIVE_GOVERNED_DISPATCH_RESOLUTION_V1_PENDING_ACTIVITY_RECOVERY_FIXTURE,
+			),
+		);
+
+		expect(resolved.pendingActivityRecoveryWork).toEqual([
+			{
+				schemaVersion: 1,
+				identity: {
+					runId: RUN_ID,
+					workflowId: "workflow-trust-spine",
+					workflowRevision: "1",
+					unitId: "unit-trust-spine",
+					attempt: 1,
+					dispatchEventRef: DISPATCH_EVENT_ID,
+					dispatchEnvelopeDigest: DIGEST("d"),
+					actionId: "git-candidate-create:candidate-1/run-1/1",
+					idempotencyKey: "git-candidate-create:candidate-1/run-1/1",
+					actionRequestEventRef: "00000000-0000-7000-8000-000000000013",
+					actionRequestDigest: expect.stringMatching(SHA256_DIGEST),
+					activityClaimEventRef: "00000000-0000-7000-8000-000000000017",
+					activityClaimEventDigest: DIGEST("4"),
+					leaseId: "candidate-create-lease",
+				},
+				actionKind: "git",
+				claimPurpose: "generic",
+				state: "wait_for_active_lease",
+				effectiveLeaseExpiresAt: "2026-07-18T12:01:45Z",
+			},
+		]);
+		const [status] = resolved.pendingActivityRecoveryWork;
+		expect(status).toBeDefined();
+		expect(Object.isFrozen(resolved.pendingActivityRecoveryWork)).toBe(true);
+		expect(Object.isFrozen(status)).toBe(true);
+		expect(Object.isFrozen(status?.identity)).toBe(true);
+		expect(status).not.toHaveProperty("execute");
+		expect(status).not.toHaveProperty("retry");
+		expect(status).not.toHaveProperty("issueLease");
+		expect(() => {
+			(status as { state: string }).state = "reconciliation_required";
+		}).toThrow(TypeError);
+	});
+
+	it("consumes a native heartbeated pending activity as frozen status with its effective expiry", () => {
+		expect(
+			existsSync(
+				NATIVE_GOVERNED_DISPATCH_RESOLUTION_V1_PENDING_ACTIVITY_RECOVERY_HEARTBEAT_FIXTURE,
+			),
+		).toBe(true);
+		const resolved = parseNativeFixture(
+			nativeFixture(
+				NATIVE_GOVERNED_DISPATCH_RESOLUTION_V1_PENDING_ACTIVITY_RECOVERY_HEARTBEAT_FIXTURE,
+			),
+		);
+		const [status] = resolved.pendingActivityRecoveryWork;
+
+		expect(status).toMatchObject({
+			state: "wait_for_active_lease",
+			effectiveLeaseExpiresAt: "2026-07-18T12:01:55Z",
+		});
+		expect(resolved.recovery.activityClaims).toEqual([
+			expect.objectContaining({ leaseExpiresAt: "2026-07-18T12:01:55Z" }),
+		]);
+		expect(Object.isFrozen(resolved.pendingActivityRecoveryWork)).toBe(true);
+		expect(Object.isFrozen(status)).toBe(true);
+	});
+
+	it("accepts Chrono-compatible leap-second recovery timestamps", () => {
+		const fixture = nativeFixture(
+			NATIVE_GOVERNED_DISPATCH_RESOLUTION_V1_PENDING_ACTIVITY_RECOVERY_HEARTBEAT_FIXTURE,
+		);
+		const recovery = fixture.recovery as Record<string, unknown>;
+		const [claim] = recovery.activity_claims as Record<string, unknown>[];
+		const [heartbeat] = claim.heartbeats as Record<string, unknown>[];
+		const [status] = recovery.pending_activity_recovery_work as Record<
+			string,
+			unknown
+		>[];
+		const effectiveLeaseExpiresAt = "2026-07-18t12:01:60.223456789123Z";
+
+		const resolved = parseNativeFixture({
+			...fixture,
+			recovery: {
+				...recovery,
+				activity_claims: [
+					{
+						...claim,
+						claimed_at: "2026-07-18t12:01:58.123456789123Z",
+						lease_expires_at: effectiveLeaseExpiresAt,
+						heartbeats: [
+							{
+								...heartbeat,
+								prior_lease_expires_at: "2026-07-18 12:01:60.123456789123Z",
+								lease_expires_at: effectiveLeaseExpiresAt,
+								heartbeat_at: "2026-07-18t12:01:59.999999999123Z",
+							},
+						],
+					},
+				],
+				pending_activity_recovery_work: [
+					{ ...status, effective_lease_expires_at: effectiveLeaseExpiresAt },
+				],
+			},
+		});
+
+		expect(resolved.pendingActivityRecoveryWork[0]).toMatchObject({
+			effectiveLeaseExpiresAt,
+		});
+	});
+
+	it("uses Chrono duration arithmetic at a midnight compute deadline", () => {
+		const fixture = nativeFixture(
+			NATIVE_GOVERNED_DISPATCH_RESOLUTION_V1_PENDING_ACTIVITY_RECOVERY_HEARTBEAT_FIXTURE,
+		);
+		const dispatch = fixture.dispatch as Record<string, unknown>;
+		const budget = dispatch.budget as Record<string, unknown>;
+		const recovery = fixture.recovery as Record<string, unknown>;
+		const [claim] = recovery.activity_claims as Record<string, unknown>[];
+		const [heartbeat] = claim.heartbeats as Record<string, unknown>[];
+		const [status] = recovery.pending_activity_recovery_work as Record<
+			string,
+			unknown
+		>[];
+		const effectiveLeaseExpiresAt = "2026-07-19T00:00:00.100000000Z";
+
+		const resolved = parseNativeFixture({
+			...fixture,
+			dispatch: {
+				...dispatch,
+				budget: { ...budget, max_compute_time_ms: 600 },
+				issued_at: "2026-07-18T23:59:59.500000000Z",
+			},
+			recovery: {
+				...recovery,
+				activity_claims: [
+					{
+						...claim,
+						claimed_at: "2026-07-18T23:59:59.500000000Z",
+						lease_expires_at: effectiveLeaseExpiresAt,
+						heartbeats: [
+							{
+								...heartbeat,
+								prior_lease_expires_at: "2026-07-18T23:59:59.800000000Z",
+								lease_expires_at: effectiveLeaseExpiresAt,
+								heartbeat_at: "2026-07-18T23:59:59.700000000Z",
+							},
+						],
+					},
+				],
+				pending_activity_recovery_work: [
+					{ ...status, effective_lease_expires_at: effectiveLeaseExpiresAt },
+				],
+			},
+		});
+
+		expect(resolved.pendingActivityRecoveryWork[0]).toMatchObject({
+			effectiveLeaseExpiresAt,
+		});
+	});
+
+	it("rejects timestamp forms excluded by the native Chrono boundary", () => {
+		const fixture = nativeFixture(
+			NATIVE_GOVERNED_DISPATCH_RESOLUTION_V1_PENDING_ACTIVITY_RECOVERY_HEARTBEAT_FIXTURE,
+		);
+		const recovery = fixture.recovery as Record<string, unknown>;
+		const [claim] = recovery.activity_claims as Record<string, unknown>[];
+
+		for (const timestamp of [
+			"2026-07-18T12:01:61Z",
+			"2026-02-30T12:01:30Z",
+			"2026-07-18t12:01:30.123456789123z",
+		]) {
+			expect(() =>
+				parseNativeFixture({
+					...fixture,
+					recovery: {
+						...recovery,
+						activity_claims: [{ ...claim, claimed_at: timestamp }],
+					},
+				}),
+			).toThrow(/activity_claim\.claimed_at must be a RFC3339 UTC timestamp/i);
+		}
+	});
+
+	it("preserves native nanosecond dispatch ordering", () => {
+		const fixture = nativeFixture(
+			NATIVE_GOVERNED_DISPATCH_RESOLUTION_V1_PENDING_ACTIVITY_RECOVERY_HEARTBEAT_FIXTURE,
+		);
+		const dispatch = fixture.dispatch as Record<string, unknown>;
+
+		expect(() =>
+			parseNativeFixture({
+				...fixture,
+				dispatch: {
+					...dispatch,
+					issued_at: "2099-07-18T12:00:00.000000001Z",
+					expires_at: "2099-07-18T12:00:00.000000002Z",
+				},
+			}),
+		).not.toThrow();
+	});
+
+	it("fails closed on malformed or foreign native activity heartbeats", () => {
+		const fixture = nativeFixture(
+			NATIVE_GOVERNED_DISPATCH_RESOLUTION_V1_PENDING_ACTIVITY_RECOVERY_HEARTBEAT_FIXTURE,
+		);
+		const recovery = fixture.recovery as Record<string, unknown>;
+		const [claim] = recovery.activity_claims as Record<string, unknown>[];
+		const [heartbeat] = claim.heartbeats as Record<string, unknown>[];
+
+		for (const [mutate, expected] of [
+			[
+				(value: Record<string, unknown>) => ({
+					...value,
+					forged_authority: "never",
+				}),
+				/heartbeats\[0\] contains unsupported field.*forged_authority/i,
+			],
+			[
+				(value: Record<string, unknown>) => {
+					const { heartbeat_request_digest: _requestDigest, ...withoutDigest } =
+						value;
+					return withoutDigest;
+				},
+				/heartbeat_id and heartbeat_request_digest must be present together/i,
+			],
+			[
+				(value: Record<string, unknown>) => ({
+					...value,
+					run_id: "00000000-0000-7000-8000-000000000099",
+				}),
+				/does not bind the exact recovered activity claim lineage/i,
+			],
+		] as const) {
+			expect(() =>
+				parseNativeFixture({
+					...fixture,
+					recovery: {
+						...recovery,
+						activity_claims: [
+							{ ...claim, heartbeats: [mutate({ ...heartbeat })] },
+						],
+					},
+				}),
+			).toThrow(expected);
+		}
+		expect(() =>
+			parseNativeFixture({
+				...fixture,
+				recovery: {
+					...recovery,
+					activity_claims: [
+						{ ...claim, heartbeats: [{ ...heartbeat }, { ...heartbeat }] },
+					],
+				},
+			}),
+		).toThrow(/duplicate heartbeat event identity/i);
+	});
+
+	it("rejects a heartbeat extension beyond the signed compute deadline", () => {
+		const fixture = nativeFixture(
+			NATIVE_GOVERNED_DISPATCH_RESOLUTION_V1_PENDING_ACTIVITY_RECOVERY_HEARTBEAT_FIXTURE,
+		);
+		const recovery = fixture.recovery as Record<string, unknown>;
+		const [claim] = recovery.activity_claims as Record<string, unknown>[];
+		const [heartbeat] = claim.heartbeats as Record<string, unknown>[];
+		const [status] = recovery.pending_activity_recovery_work as Record<
+			string,
+			unknown
+		>[];
+		const forgedExpiry = "2026-07-18T12:02:00.000000001Z";
+
+		expect(() =>
+			parseNativeFixture({
+				...fixture,
+				recovery: {
+					...recovery,
+					activity_claims: [
+						{
+							...claim,
+							lease_expires_at: forgedExpiry,
+							heartbeats: [{ ...heartbeat, lease_expires_at: forgedExpiry }],
+						},
+					],
+					pending_activity_recovery_work: [
+						{ ...status, effective_lease_expires_at: forgedExpiry },
+					],
+				},
+			}),
+		).toThrow(/within the signed compute deadline/i);
+	});
+
+	it("rejects a pending active-lease expiry that differs from the verified heartbeat expiry", () => {
+		const fixture = nativeFixture(
+			NATIVE_GOVERNED_DISPATCH_RESOLUTION_V1_PENDING_ACTIVITY_RECOVERY_HEARTBEAT_FIXTURE,
+		);
+		const recovery = fixture.recovery as Record<string, unknown>;
+		const [status] = recovery.pending_activity_recovery_work as Record<
+			string,
+			unknown
+		>[];
+
+		expect(() =>
+			parseNativeFixture({
+				...fixture,
+				recovery: {
+					...recovery,
+					pending_activity_recovery_work: [
+						{
+							...status,
+							effective_lease_expires_at: "2026-07-18T12:02:00Z",
+						},
+					],
+				},
+			}),
+		).toThrow(/exact verified effective activity lease expiry/i);
+	});
+
+	it("requires the closed pending activity recovery shape and exact replay lineage", () => {
+		const fixture = nativeFixture(
+			NATIVE_GOVERNED_DISPATCH_RESOLUTION_V1_PENDING_ACTIVITY_RECOVERY_FIXTURE,
+		);
+		const recovery = fixture.recovery as Record<string, unknown>;
+		const [status] = recovery.pending_activity_recovery_work as Record<
+			string,
+			unknown
+		>[];
+		const identity = status.identity as Record<string, unknown>;
+
+		for (const [_label, mutate, expected] of [
+			[
+				"an unsupported field",
+				(value: Record<string, unknown>) => ({
+					...value,
+					forged_authority: "never",
+				}),
+				/contains unsupported field.*forged_authority/i,
+			],
+			[
+				"a foreign dispatch envelope digest",
+				(value: Record<string, unknown>) => ({
+					...value,
+					identity: {
+						...(value.identity as Record<string, unknown>),
+						dispatch_envelope_digest: DIGEST("f"),
+					},
+				}),
+				/exact verified dispatch lineage/i,
+			],
+			[
+				"a generic model claim",
+				(value: Record<string, unknown>) => ({
+					...value,
+					action_kind: "model",
+					claim_purpose: "generic",
+				}),
+				/governed_model_action_v1/i,
+			],
+			[
+				"a native-supported action kind mismatched to its recovered request",
+				(value: Record<string, unknown>) => ({
+					...value,
+					action_kind: "network",
+				}),
+				/exact recovered action request/i,
+			],
+			[
+				"a native-compatible fixed purpose mismatched to its recovered claim",
+				(value: Record<string, unknown>) => ({
+					...value,
+					claim_purpose: "governed_model_action_v1",
+				}),
+				/exact recovered non-terminal activity claim/i,
+			],
+			[
+				"a native-compatible verifier purpose mismatched to its recovered claim",
+				(value: Record<string, unknown>) => ({
+					...value,
+					claim_purpose: "governed_verifier_v1",
+				}),
+				/exact recovered non-terminal activity claim/i,
+			],
+			[
+				"an active-lease status with a reconciliation reason",
+				(value: Record<string, unknown>) => ({
+					...value,
+					reason: "lease_expired",
+				}),
+				/active lease status must not include a reconciliation reason/i,
+			],
+			[
+				"a reconciliation status without a reason",
+				(value: Record<string, unknown>) => {
+					const { effective_lease_expires_at: _expiresAt, ...withoutExpiry } =
+						value;
+					return {
+						...withoutExpiry,
+						state: "reconciliation_required",
+					};
+				},
+				/reconciliation status requires a closed reason/i,
+			],
+		] as const) {
+			const mutatedStatus = mutate({ ...status, identity: { ...identity } });
+			expect(() =>
+				parseNativeFixture({
+					...fixture,
+					recovery: {
+						...recovery,
+						pending_activity_recovery_work: [mutatedStatus],
+					},
+				}),
+			).toThrow(expected);
+		}
+	});
+
+	it("consumes fixed-purpose non-model native recovery status without authority", () => {
+		const fixture = nativeFixture(
+			NATIVE_GOVERNED_DISPATCH_RESOLUTION_V1_PENDING_ACTIVITY_RECOVERY_FIXTURE,
+		);
+		const recovery = fixture.recovery as Record<string, unknown>;
+		const [claim] = recovery.activity_claims as Record<string, unknown>[];
+		const [status] = recovery.pending_activity_recovery_work as Record<
+			string,
+			unknown
+		>[];
+
+		for (const claimPurpose of [
+			"governed_model_action_v1",
+			"governed_verifier_v1",
+		] as const) {
+			const resolved = parseNativeFixture({
+				...fixture,
+				recovery: {
+					...recovery,
+					activity_claims: [{ ...claim, purpose: claimPurpose }],
+					pending_activity_recovery_work: [
+						{ ...status, claim_purpose: claimPurpose },
+					],
+				},
+			});
+			expect(resolved.pendingActivityRecoveryWork[0]).toMatchObject({
+				claimPurpose,
+			});
+		}
+	});
+
+	it("requires every native resolver fixture to carry an explicit pending activity status array", () => {
+		for (const url of [
+			NATIVE_GOVERNED_DISPATCH_RESOLUTION_V1_FIXTURE,
+			NATIVE_GOVERNED_DISPATCH_RESOLUTION_V1_COMPLETED_CANDIDATE_FIXTURE,
+			NATIVE_GOVERNED_DISPATCH_RESOLUTION_V1_CANCELLATION_FIXTURE,
+			NATIVE_GOVERNED_DISPATCH_RESOLUTION_V1_PROMOTION_APPROVAL_FIXTURE,
+			NATIVE_GOVERNED_DISPATCH_RESOLUTION_V1_PENDING_ACTIVITY_RECOVERY_FIXTURE,
+		]) {
+			const fixture = nativeFixture(url);
+			const recovery = fixture.recovery as Record<string, unknown>;
+			expect(recovery.pending_activity_recovery_work).toBeInstanceOf(Array);
+			expect(
+				parseNativeFixture(fixture).pendingActivityRecoveryWork,
+			).toBeDefined();
+		}
 	});
 
 	it("fails closed when a V3 native resolution omits the tape-integrity attestation", () => {
