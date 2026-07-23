@@ -137,6 +137,54 @@ fn authority_broker_parser_accepts_the_typescript_lookup_contract() {
 }
 
 #[test]
+fn authority_broker_parser_rejects_noncanonical_integer_wire_spellings() {
+    for (label, source, replacement) in [
+        (
+            "decimal schema version",
+            r#""schema_version":1"#,
+            r#""schema_version":1.0"#,
+        ),
+        (
+            "exponent schema version",
+            r#""schema_version":1"#,
+            r#""schema_version":1e0"#,
+        ),
+        ("decimal attempt", r#""attempt":1"#, r#""attempt":1.0"#),
+        ("exponent attempt", r#""attempt":1"#, r#""attempt":1e0"#),
+    ] {
+        let wire = authority_broker_admission_wire().replacen(source, replacement, 1);
+
+        assert!(
+            matches!(
+                super::admission_protocol::parse_authority_broker_request_v1(wire.as_bytes()),
+                Err(super::admission_protocol::AdmissionProtocolError::Json(_))
+            ),
+            "{label} must not normalize into a canonical integer request"
+        );
+    }
+}
+
+#[test]
+fn authority_broker_parser_rejects_fractional_and_unsafe_attempt_values() {
+    let fractional =
+        authority_broker_admission_wire().replacen(r#""attempt":1"#, r#""attempt":1.5"#, 1);
+    assert!(matches!(
+        super::admission_protocol::parse_authority_broker_request_v1(fractional.as_bytes()),
+        Err(super::admission_protocol::AdmissionProtocolError::Json(_))
+    ));
+
+    let unsafe_attempt = authority_broker_admission_wire().replacen(
+        r#""attempt":1"#,
+        r#""attempt":9007199254740992"#,
+        1,
+    );
+    assert!(matches!(
+        super::admission_protocol::parse_authority_broker_request_v1(unsafe_attempt.as_bytes()),
+        Err(super::admission_protocol::AdmissionProtocolError::InvalidAttempt { field: "attempt" })
+    ));
+}
+
+#[test]
 fn authority_broker_parser_rejects_an_extra_outer_field() {
     let wire = authority_broker_admission_wire().replacen(
         r#","request_digest":"#,

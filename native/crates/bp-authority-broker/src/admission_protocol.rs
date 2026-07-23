@@ -11,7 +11,7 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-const MAX_JS_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+const MAX_JS_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
 /// The two closed operations accepted by authority-broker request wire V1.
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
@@ -106,7 +106,7 @@ pub(crate) enum AdmissionProtocolError {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct WireAuthorityBrokerRequestV1 {
-    schema_version: f64,
+    schema_version: u8,
     operation: AuthorityBrokerOperationV1,
     request_id: String,
     request: WireAuthorityBrokerRequestBodyV1,
@@ -127,7 +127,7 @@ struct WireAuthorityBrokerAdmitRequestV1 {
     workflow_id: String,
     workflow_revision: String,
     unit_id: String,
-    attempt: f64,
+    attempt: u64,
     idempotency_key: String,
     repository_target_ref: String,
     expected_repository_binding_digest: String,
@@ -142,7 +142,7 @@ struct WireAuthorityBrokerPreauthorizedLookupRequestV1 {
     workflow_id: String,
     workflow_revision: String,
     unit_id: String,
-    attempt: f64,
+    attempt: u64,
     idempotency_key: String,
     repository_target_ref: String,
     expected_repository_binding_digest: String,
@@ -160,7 +160,7 @@ pub(crate) fn parse_authority_broker_request_v1(
     wire: &[u8],
 ) -> Result<ParsedAuthorityBrokerRequestV1, AdmissionProtocolError> {
     let wire: WireAuthorityBrokerRequestV1 = serde_json::from_slice(wire)?;
-    if wire.schema_version != 1.0 {
+    if wire.schema_version != 1 {
         return Err(AdmissionProtocolError::UnsupportedSchemaVersion);
     }
 
@@ -284,11 +284,11 @@ fn is_lower_hex(byte: u8) -> bool {
 }
 
 fn require_positive_safe_integer(
-    value: f64,
+    value: u64,
     field: &'static str,
 ) -> Result<u64, AdmissionProtocolError> {
-    if value.is_finite() && value >= 1.0 && value <= MAX_JS_SAFE_INTEGER && value.fract() == 0.0 {
-        Ok(value as u64)
+    if (1..=MAX_JS_SAFE_INTEGER).contains(&value) {
+        Ok(value)
     } else {
         Err(AdmissionProtocolError::InvalidAttempt { field })
     }
