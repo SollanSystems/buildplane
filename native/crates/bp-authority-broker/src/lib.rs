@@ -31,6 +31,7 @@ use ed25519_dalek::SigningKey;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
+mod confinement;
 mod promotion_execution;
 mod promotion_git;
 

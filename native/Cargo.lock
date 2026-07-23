@@ -81,6 +81,7 @@ dependencies = [
  "bp-replay",
  "chrono",
  "ed25519-dalek",
+ "libc",
  "tempfile",
  "thiserror",
 ]

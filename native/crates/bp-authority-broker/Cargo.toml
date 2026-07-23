@@ -8,6 +8,7 @@ license.workspace = true
 bp-ledger.workspace = true
 bp-replay.workspace = true
 ed25519-dalek.workspace = true
+libc.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

@@ -1,3 +1,4 @@
+use super::confinement::{BrokerHostConfinementErrorV1, BrokerHostConfinementPolicyV1};
 use super::promotion_execution::{
     BrokerPromotionExecutionAuthority, BrokerPromotionExecutionRequest,
     BrokerPromotionExecutionStatus, PromotionEffectGateway, PromotionExecutionBackend,
@@ -68,6 +69,56 @@ const DIGEST_B: &str = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 const DIGEST_C: &str = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
 const DIGEST_D: &str = "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
 const DIGEST_E: &str = "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+
+#[cfg(target_os = "linux")]
+#[test]
+fn broker_host_confinement_rejects_a_same_uid_unix_socket_peer() {
+    use std::os::unix::net::UnixStream;
+
+    let broker_uid = unsafe { libc::geteuid() };
+    let configured_worker_uid = broker_uid.checked_add(1).unwrap_or(broker_uid - 1);
+    let policy = BrokerHostConfinementPolicyV1::new(broker_uid, [configured_worker_uid])
+        .expect("a distinct configured worker identity is valid");
+    let attestation = policy
+        .attest_current_broker_process()
+        .expect("the test process is the configured broker identity");
+    let (broker_stream, _same_uid_worker_stream) =
+        UnixStream::pair().expect("create a local Unix socket pair");
+
+    assert!(matches!(
+        policy.verify_linux_connected_worker(&attestation, &broker_stream),
+        Err(BrokerHostConfinementErrorV1::PeerUsesBrokerUid { uid }) if uid == broker_uid
+    ));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn broker_host_confinement_rejects_an_attestation_from_a_different_policy() {
+    use std::os::unix::net::UnixStream;
+
+    let current_uid = unsafe { libc::geteuid() };
+    let other_uid = current_uid.checked_add(1).unwrap_or(current_uid - 1);
+    let broker_policy = BrokerHostConfinementPolicyV1::new(current_uid, [other_uid])
+        .expect("a separately configured worker identity is valid");
+    let attestation = broker_policy
+        .attest_current_broker_process()
+        .expect("the test process is the configured broker identity");
+    let different_policy = BrokerHostConfinementPolicyV1::new(other_uid, [current_uid])
+        .expect("the current process is a distinct configured worker for this policy");
+    let (broker_stream, _worker_stream) =
+        UnixStream::pair().expect("create a local Unix socket pair");
+
+    let result = std::panic::catch_unwind(|| {
+        different_policy.verify_linux_connected_worker(&attestation, &broker_stream)
+    });
+    assert!(matches!(
+        result,
+        Ok(Err(BrokerHostConfinementErrorV1::AttestationPolicyMismatch {
+            attested_broker_uid,
+            configured_broker_uid,
+        })) if attested_broker_uid == current_uid && configured_broker_uid == other_uid
+    ));
+}
 
 fn request() -> BrokerModelActionRequest {
     BrokerModelActionRequest {
