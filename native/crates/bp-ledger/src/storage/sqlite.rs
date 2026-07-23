@@ -1,6 +1,9 @@
 //! SQLite-backed event store — append-only, trigger-enforced.
 
-use crate::canonicalize::{canonical_event_hash, canonicalize, canonicalize_payload};
+use crate::canonicalize::{
+    canonical_event_hash, canonicalize, canonicalize_payload,
+    is_canonical_buildplane_candidate_ref, BUILDPANE_CANDIDATE_REF_PREFIX,
+};
 use crate::error::{LedgerError, Result};
 use crate::event::Event;
 use crate::id::{EventId, RunId};
@@ -21,11 +24,13 @@ use crate::payload::model_evidence::{
     ModelRequestEvidenceDocumentV1, TrustScopeEvidenceDocumentV1,
 };
 use crate::payload::trust_spine::{
-    action_requested_v2_digest, governed_dispatch_policy_digest_v1,
+    action_receipt_recorded_v2_digest, action_receipt_set_v1_digest, action_requested_v2_digest,
+    candidate_completion_recorded_v1_digest, governed_dispatch_policy_digest_v1,
     model_action_authorized_v2_digest, model_action_intent_v1_digest,
     promotion_execution_claimed_v1_digest, ActionEvidenceVersionV1, ActionKindV1,
-    ActionReceiptRecordedV2, ActionReceiptSetRecordedV1, ActionRequestedV2,
-    CandidateAcceptanceOutcomeV1, CandidateAcceptanceRecordedV1, CandidateCreatedV2, CommitModeV1,
+    ActionReceiptOutcomeV2, ActionReceiptRecordedV2, ActionReceiptSetEntryV1,
+    ActionReceiptSetRecordedV1, ActionRequestedV2, CandidateAcceptanceOutcomeV1,
+    CandidateAcceptanceRecordedV1, CandidateCompletionRecordedV1, CandidateCreatedV2, CommitModeV1,
     DispatchEnvelopeV3, ExecutionRoleV1, ModelActionAuthorizedV1, ModelActionAuthorizedV2,
     ModelActionIntentV1, ModelRequestEvidenceV1, PromotionApprovalRequestedV1,
     PromotionDecisionKindV1, PromotionDecisionRecordedV1, PromotionExecutionClaimedV1,
@@ -46,7 +51,7 @@ use sha2::{Digest, Sha256};
 #[cfg(any(test, feature = "test-support"))]
 use std::cell::Cell;
 use std::cell::RefCell;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 use uuid::Uuid;
 
@@ -346,6 +351,18 @@ pub struct GovernedModelActionResultRequestV1 {
     pub evidence_ref: String,
 }
 
+/// Broker-private request to record the one closed candidate-completion proof
+/// for an immutable governed candidate. Callers can name only prior tape
+/// records; the ledger reconstructs every completion field from verified
+/// dispatch, candidate, action, claim, result, receipt, and receipt-set
+/// evidence before it signs anything.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GovernedCandidateCompletionRequestV1 {
+    pub run_id: RunId,
+    pub dispatch_event_id: EventId,
+    pub candidate_created_event_id: EventId,
+}
+
 /// Broker-private request to record one candidate-bound operator promotion
 /// decision. The caller may name immutable tape records and choose only the
 /// closed `promote | reject` outcome. Candidate, base, target, acceptance,
@@ -464,6 +481,24 @@ pub enum GovernedModelActionAuthorizeAndClaimDispositionV1 {
         authorization_ref: String,
         claim_event_id: EventId,
         lease_expires_at: String,
+    },
+}
+
+/// Result of atomically recording or resolving one candidate-completion proof.
+/// The durable projection is keyed by the exact candidate-created event, so a
+/// retry can return the same proof after a crash without minting a second
+/// completion event or caller-selected timestamp.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GovernedCandidateCompletionDispositionV1 {
+    Recorded {
+        candidate_completion_event_id: EventId,
+        candidate_completion_event_digest: String,
+        completion_digest: String,
+    },
+    Existing {
+        candidate_completion_event_id: EventId,
+        candidate_completion_event_digest: String,
+        completion_digest: String,
     },
 }
 
@@ -949,6 +984,55 @@ impl SqliteStore {
                     SELECT RAISE(ABORT, 'model_action_authorizations are tape-backed: DELETE forbidden');
                 END;
 
+            -- Broker-private, immutable projection for one closed candidate
+            -- materialization proof. The signed completion event remains the
+            -- authority; this row makes `(run_id, candidate_created_event_id)`
+            -- a durable cross-process idempotency boundary. The row stores
+            -- every re-derived lineage reference so retry reads can detect a
+            -- missing, substituted, or corrupted tape proof before returning
+            -- an Existing disposition.
+            CREATE TABLE IF NOT EXISTS governed_candidate_completions (
+                run_id                              TEXT NOT NULL,
+                dispatch_event_id                   TEXT NOT NULL,
+                candidate_created_event_id          TEXT NOT NULL,
+                candidate_digest                    TEXT NOT NULL,
+                candidate_create_action_id          TEXT NOT NULL,
+                action_request_event_id             TEXT NOT NULL,
+                action_request_digest               TEXT NOT NULL,
+                activity_claim_event_id             TEXT NOT NULL,
+                activity_claim_event_digest         TEXT NOT NULL,
+                activity_result_event_id            TEXT NOT NULL,
+                activity_result_event_digest        TEXT NOT NULL,
+                action_receipt_ref                  TEXT NOT NULL,
+                action_receipt_digest               TEXT NOT NULL,
+                candidate_completion_event_id       TEXT NOT NULL UNIQUE,
+                candidate_completion_event_digest   TEXT NOT NULL,
+                completion_digest                   TEXT NOT NULL,
+                completed_at                        TEXT NOT NULL,
+                PRIMARY KEY (run_id, candidate_created_event_id),
+                FOREIGN KEY(dispatch_event_id) REFERENCES events(id),
+                FOREIGN KEY(candidate_created_event_id) REFERENCES events(id),
+                FOREIGN KEY(action_request_event_id) REFERENCES events(id),
+                FOREIGN KEY(activity_claim_event_id) REFERENCES events(id),
+                FOREIGN KEY(activity_result_event_id) REFERENCES events(id),
+                FOREIGN KEY(candidate_completion_event_id) REFERENCES events(id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_governed_candidate_completions_digest
+                ON governed_candidate_completions(run_id, candidate_digest);
+
+            CREATE TRIGGER IF NOT EXISTS governed_candidate_completions_no_update
+                BEFORE UPDATE ON governed_candidate_completions
+                BEGIN
+                    SELECT RAISE(ABORT, 'governed candidate completions are tape-backed: UPDATE forbidden');
+                END;
+
+            CREATE TRIGGER IF NOT EXISTS governed_candidate_completions_no_delete
+                BEFORE DELETE ON governed_candidate_completions
+                BEGIN
+                    SELECT RAISE(ABORT, 'governed candidate completions are tape-backed: DELETE forbidden');
+                END;
+
             -- Broker-private projection for one operator promotion decision.
             -- It is intentionally separate from any Git effect receipt: the
             -- first state is merely write-ahead evidence and cannot authorize a
@@ -1316,24 +1400,76 @@ impl SqliteStore {
             return Ok(vec![]);
         };
 
-        // Step 3: decide whether a checkpoint is due over the run's signed
-        // ordinary events. `prior` is the last checkpoint for this run, if any.
-        let prior = self.latest_checkpoint(&event.run_id)?;
+        // Step 3: inspect the current signed prefix and emit a checkpoint
+        // under one immediate writer transaction. The ordinary event above is
+        // intentionally durable before this step, but every checkpoint writer
+        // must serialize its prior/snapshot/insert sequence with every other
+        // checkpoint writer. Otherwise a cadence writer and governed sealer
+        // could both derive the same predecessor and fork the immutable chain.
+        let checkpoint = self.emit_checkpoint_if_due_for_current_signed_prefix(
+            &event.run_id,
+            cadence,
+            event.kind == EventKind::RunCompleted,
+            signing_key,
+            signer,
+        )?;
+        Ok(checkpoint.into_iter().collect())
+    }
+
+    /// Serialize cadence accounting with every other checkpoint writer. The
+    /// ordinary event was committed before this method is called, so a failed
+    /// checkpoint leaves it durable and a later append can retry sealing the
+    /// same prefix. The checkpoint snapshot, predecessor, and insert are all
+    /// nevertheless one `BEGIN IMMEDIATE` transaction.
+    fn emit_checkpoint_if_due_for_current_signed_prefix(
+        &self,
+        run_id: &RunId,
+        cadence: u64,
+        is_final: bool,
+        signing_key: &SigningKey,
+        signer: &ActorKeyRef,
+    ) -> Result<Option<EventId>> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let prior = latest_checkpoint_for_connection(&tx, run_id)?;
         let already_checkpointed = prior.as_ref().map(|p| p.through_event_count).unwrap_or(0);
-        let covered = self.signed_ordinary_events(&event.run_id)?;
+        let covered = signed_ordinary_events_for_connection(&tx, run_id)?;
         let total = covered.len() as u64;
         let uncheckpointed = total.saturating_sub(already_checkpointed);
-
-        let is_final = event.kind == EventKind::RunCompleted;
         let cadence_due = uncheckpointed >= cadence;
         let final_due = is_final && uncheckpointed >= 1;
         if !cadence_due && !final_due {
-            return Ok(vec![]);
+            tx.commit()?;
+            return Ok(None);
         }
 
-        let checkpoint_id =
-            self.emit_checkpoint(&event.run_id, &covered, prior, signing_key, signer)?;
-        Ok(vec![checkpoint_id])
+        let checkpoint_event_id =
+            self.emit_checkpoint_in_transaction(&tx, run_id, &covered, prior, signing_key, signer)?;
+        tx.commit()?;
+        Ok(Some(checkpoint_event_id))
+    }
+
+    /// Emit a checkpoint over the current non-empty signed prefix with the
+    /// same snapshot/insert serialization used by cadence checkpoints. This
+    /// is for governed callers which already determined that their particular
+    /// control record needs coverage; it intentionally does not infer a
+    /// cadence policy.
+    fn emit_checkpoint_for_current_signed_prefix(
+        &self,
+        run_id: &RunId,
+        signing_key: &SigningKey,
+        signer: &ActorKeyRef,
+    ) -> Result<Option<EventId>> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let covered = signed_ordinary_events_for_connection(&tx, run_id)?;
+        if covered.is_empty() {
+            tx.commit()?;
+            return Ok(None);
+        }
+        let prior = latest_checkpoint_for_connection(&tx, run_id)?;
+        let checkpoint_event_id =
+            self.emit_checkpoint_in_transaction(&tx, run_id, &covered, prior, signing_key, signer)?;
+        tx.commit()?;
+        Ok(Some(checkpoint_event_id))
     }
 
     /// Seal the current complete signed ordinary-event prefix for a governed
@@ -1351,23 +1487,54 @@ impl SqliteStore {
         signing_key: &SigningKey,
         signer: &ActorKeyRef,
     ) -> Result<GovernedCheckpointSealOutcome> {
-        let covered = self.signed_ordinary_events(run_id)?;
+        // Keep the observed prefix, chain validation, prior checkpoint, and
+        // next checkpoint insertion under one writer transaction. Without
+        // this boundary two broker connections could validate the same prior
+        // checkpoint and permanently append competing checkpoint indexes.
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let outcome =
+            self.seal_governed_signed_prefix_in_transaction(&tx, run_id, signing_key, signer)?;
+        tx.commit()?;
+        Ok(outcome)
+    }
+
+    /// Governed checkpoint sealing after the caller has already acquired the
+    /// run's immediate writer transaction. Keeping this separate lets a
+    /// candidate-completion retry prove that no sibling completion was appended
+    /// immediately before it seals the proof.
+    fn seal_governed_signed_prefix_in_transaction(
+        &self,
+        tx: &Transaction<'_>,
+        run_id: &RunId,
+        signing_key: &SigningKey,
+        signer: &ActorKeyRef,
+    ) -> Result<GovernedCheckpointSealOutcome> {
+        let covered = signed_ordinary_events_for_connection(tx, run_id)?;
         let Some(through) = covered.last() else {
             return Ok(GovernedCheckpointSealOutcome::EmptyPrefix);
         };
-        let expected_root = tape_root_hash(
-            &covered
-                .iter()
-                .map(|event| event.canonical_event_hash.clone())
-                .collect::<Vec<_>>(),
-        );
-        self.verify_governed_checkpoint_chain_for_seal(run_id, &covered, signing_key, signer)?;
-        let prior = self.latest_checkpoint(run_id)?;
+        // Compute every prefix root once. Rebuilding `tape_root_hash` for each
+        // historical checkpoint turns a dense checkpoint chain into quadratic
+        // work per seal; this rolling representation preserves the exact
+        // newline-joined wire contract while making validation linear.
+        let prefix_roots = tape_prefix_roots(&covered);
+        let expected_root = prefix_roots
+            .last()
+            .expect("a non-empty signed prefix has a root");
+        Self::verify_governed_checkpoint_chain_for_seal(
+            tx,
+            run_id,
+            &covered,
+            &prefix_roots,
+            signing_key,
+            signer,
+        )?;
+        let prior = latest_checkpoint_for_connection(tx, run_id)?;
         if let Some(checkpoint) = prior.as_ref() {
             if checkpoint.algorithm == TapeRootAlgorithm::Sha256Linear
                 && checkpoint.through_event_count == covered.len() as u64
                 && checkpoint.through_event_id == through.event_id
-                && checkpoint.tape_root_hash == expected_root
+                && checkpoint.tape_root_hash == *expected_root
             {
                 return Ok(GovernedCheckpointSealOutcome::AlreadySealed {
                     checkpoint_event_id: checkpoint.event_id,
@@ -1376,10 +1543,38 @@ impl SqliteStore {
         }
 
         let checkpoint_event_id =
-            self.emit_checkpoint(run_id, &covered, prior, signing_key, signer)?;
+            self.emit_checkpoint_in_transaction(tx, run_id, &covered, prior, signing_key, signer)?;
         Ok(GovernedCheckpointSealOutcome::Emitted {
             checkpoint_event_id,
         })
+    }
+
+    /// Recheck the append-only candidate-completion lane after acquiring the
+    /// same writer transaction that seals its tape prefix. A generic signed
+    /// append may have produced a sibling completion after the proof/projection
+    /// committed but before a retry reaches this method; that ambiguity must
+    /// block rather than become a sealed success.
+    fn seal_governed_candidate_completion_prefix(
+        &self,
+        request: &GovernedCandidateCompletionRequestV1,
+        expected_completion_event_id: EventId,
+        signing_key: &SigningKey,
+        signer: &ActorKeyRef,
+    ) -> Result<GovernedCheckpointSealOutcome> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        require_candidate_completion_event_projection(
+            &tx,
+            request,
+            Some(expected_completion_event_id),
+        )?;
+        let outcome = self.seal_governed_signed_prefix_in_transaction(
+            &tx,
+            &request.run_id,
+            signing_key,
+            signer,
+        )?;
+        tx.commit()?;
+        Ok(outcome)
     }
 
     /// Verify every checkpoint in the governed run before a control response
@@ -1387,9 +1582,10 @@ impl SqliteStore {
     /// insufficient: recovery verifies the complete checkpoint chain and must
     /// not discover an earlier corrupt checkpoint after protocol success.
     fn verify_governed_checkpoint_chain_for_seal(
-        &self,
+        conn: &Connection,
         run_id: &RunId,
         covered: &[SignedOrdinaryEvent],
+        prefix_roots: &[String],
         signing_key: &SigningKey,
         signer: &ActorKeyRef,
     ) -> Result<()> {
@@ -1407,10 +1603,15 @@ impl SqliteStore {
             expected_public_key_hash,
             signing_key.verifying_key().to_bytes().to_vec(),
         );
+        if prefix_roots.len() != covered.len() {
+            return Err(rejected(
+                "checkpoint root index does not cover the signed ordinary-event prefix",
+            ));
+        }
 
         let mut expected_index = 0_u64;
         let mut previous_checkpoint: Option<(EventId, usize)> = None;
-        for (event, signature) in self.signed_events_for_run(&run_id.to_string())? {
+        for (event, signature) in signed_events_for_run_for_connection(conn, &run_id.to_string())? {
             if event.kind != EventKind::TapeCheckpoint {
                 continue;
             }
@@ -1451,13 +1652,7 @@ impl SqliteStore {
                     "checkpoint through-event does not match the signed prefix",
                 ));
             }
-            let expected_root = tape_root_hash(
-                &covered[..prefix_len]
-                    .iter()
-                    .map(|event| event.canonical_event_hash.clone())
-                    .collect::<Vec<_>>(),
-            );
-            if payload.tape_root_hash != expected_root {
+            if payload.tape_root_hash != prefix_roots[through_position] {
                 return Err(rejected(
                     "checkpoint root does not match the signed ordinary-event prefix",
                 ));
@@ -2209,6 +2404,129 @@ impl SqliteStore {
         })
     }
 
+    /// Record (or resolve) the one closed materialization proof for an
+    /// immutable governed candidate. This is deliberately not a generic
+    /// append: callers supply only pre-existing event IDs, while the native
+    /// transaction reconstructs every completion field from signed tape and
+    /// writes its event, detached signature, and unique projection together.
+    ///
+    /// A retry resolves the durable projection before it inspects any current
+    /// execution window. That makes a crash after commit safe: the caller gets
+    /// the original immutable proof, never a fresh completion timestamp or a
+    /// second event. If the tape contains a completion event without a trusted
+    /// projection, the operation blocks for reconciliation instead of trying
+    /// to infer which cross-process append won.
+    pub fn record_governed_candidate_completion_v1(
+        &self,
+        request: &GovernedCandidateCompletionRequestV1,
+        authority: &GovernedPromotionAuthorityV1,
+        kernel_signing_key: &SigningKey,
+        kernel_signer: &ActorKeyRef,
+    ) -> Result<GovernedCandidateCompletionDispositionV1> {
+        validate_governed_candidate_completion_request(request)?;
+        validate_governed_promotion_signer(
+            authority,
+            kernel_signing_key,
+            kernel_signer,
+            PromotionSignerRoleV1::Kernel,
+        )?;
+
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let disposition = if let Some(existing) = governed_candidate_completion_by_candidate(
+            &tx,
+            request.run_id,
+            request.candidate_created_event_id,
+        )? {
+            let disposition =
+                resolve_existing_governed_candidate_completion(&tx, &existing, request, authority)?;
+            tx.commit()?;
+            disposition
+        } else {
+            require_candidate_completion_event_projection(&tx, request, None)?;
+
+            let evidence = verify_governed_candidate_completion_evidence(&tx, request, authority)?;
+            let completed_at = parse_claim_timestamp(&evidence.completion.completed_at).map_err(
+                |_| LedgerError::CandidateCompletionAuthorityRejected {
+                    reason:
+                        "candidate completion immutable candidate timestamp is not canonical RFC3339 UTC"
+                            .into(),
+                },
+            )?;
+            let event = canonicalize(Event {
+                id: EventId::new(),
+                run_id: request.run_id,
+                parent_event_id: Some(request.candidate_created_event_id),
+                schema_version: Event::CURRENT_SCHEMA_VERSION,
+                kind: EventKind::CandidateCompletionRecordedV1,
+                occurred_at: completed_at,
+                payload: Payload::CandidateCompletionRecordedV1(evidence.completion.clone()),
+            })?;
+            validate_new_ordinary_event_id(&tx, &event)?;
+            let signature = sign_event(&event, kernel_signing_key, kernel_signer, Utc::now())?;
+            let candidate_completion_event_digest = signature.canonical_event_hash.clone();
+
+            insert_event(&tx, &event)?;
+            insert_event_signature(&tx, &signature)?;
+            insert_governed_candidate_completion(
+                &tx,
+                request,
+                &evidence.completion,
+                &event,
+                &candidate_completion_event_digest,
+            )?;
+            tx.commit()?;
+            self.record_ordinary_append(&event);
+
+            GovernedCandidateCompletionDispositionV1::Recorded {
+                candidate_completion_event_id: event.id,
+                candidate_completion_event_digest,
+                completion_digest: evidence.completion.completion_digest,
+            }
+        };
+
+        let expected_completion_event_id = match &disposition {
+            GovernedCandidateCompletionDispositionV1::Recorded {
+                candidate_completion_event_id,
+                ..
+            }
+            | GovernedCandidateCompletionDispositionV1::Existing {
+                candidate_completion_event_id,
+                ..
+            } => *candidate_completion_event_id,
+        };
+
+        // A candidate completion is not execution authority, but later
+        // acceptance/review/promotion consumers must reopen a complete signed
+        // tape. A post-commit seal failure is reconciliation-only: retrying
+        // this operation reuses the existing proof and seals it rather than
+        // issuing a new completion event. The guarded seal rechecks the
+        // candidate-completion projection after it owns the writer lock, so a
+        // direct sibling append in the post-commit gap cannot be sealed.
+        let seal = self
+            .seal_governed_candidate_completion_prefix(
+                request,
+                expected_completion_event_id,
+                kernel_signing_key,
+                kernel_signer,
+            )
+            .map_err(|error| {
+                candidate_completion_reconciliation_required(
+                    request,
+                    format!("candidate completion checkpoint sealing did not complete: {error}"),
+                )
+            })?;
+        match seal {
+            GovernedCheckpointSealOutcome::AlreadySealed { .. }
+            | GovernedCheckpointSealOutcome::Emitted { .. } => Ok(disposition),
+            GovernedCheckpointSealOutcome::EmptyPrefix => {
+                Err(candidate_completion_reconciliation_required(
+                    request,
+                    "candidate completion sealing found no signed governed prefix",
+                ))
+            }
+        }
+    }
+
     /// Record (or resolve) the one operator decision for an immutable governed
     /// candidate. This is a write-ahead decision only: it does not invoke Git,
     /// issue an action lease, return merge authority, or claim that a target
@@ -2431,7 +2749,6 @@ impl SqliteStore {
             Some(checkpoint) => checkpoint,
             None => {
                 let covered = self.signed_ordinary_events(&request.run_id)?;
-                let prior = self.latest_checkpoint(&request.run_id)?;
                 if covered.is_empty()
                     || !covered
                         .iter()
@@ -2445,13 +2762,19 @@ impl SqliteStore {
                                 .into(),
                     });
                 }
-                let checkpoint_event_id = self.emit_checkpoint(
-                    &request.run_id,
-                    &covered,
-                    prior,
-                    kernel_signing_key,
-                    kernel_signer,
-                )?;
+                let checkpoint_event_id = self
+                    .emit_checkpoint_for_current_signed_prefix(
+                        &request.run_id,
+                        kernel_signing_key,
+                        kernel_signer,
+                    )?
+                    .ok_or_else(|| LedgerError::PromotionDecisionReconciliationRequired {
+                        run_id: request.run_id.to_string(),
+                        candidate_digest: stored.candidate_digest.clone(),
+                        reason:
+                            "promotion decision checkpoint snapshot became empty before sealing"
+                                .into(),
+                    })?;
                 self.record_sealed_checkpoint_for_promotion_decision(
                     request,
                     &stored,
@@ -3407,10 +3730,13 @@ impl SqliteStore {
         self.record_activity_result_v1_at(&derived, authority, signing_key, signer, now)
     }
 
-    /// Build, sign, and atomically append a tape-root checkpoint over the full
-    /// prefix of `covered` (the run's signed ordinary events, id-ordered).
-    fn emit_checkpoint(
+    /// Append one already-derived checkpoint inside the caller's transaction.
+    /// Every caller acquires an immediate transaction spanning its prefix
+    /// snapshot and this insertion, so checkpoint predecessor selection cannot
+    /// race another checkpoint writer.
+    fn emit_checkpoint_in_transaction(
         &self,
+        tx: &Transaction<'_>,
         run_id: &RunId,
         covered: &[SignedOrdinaryEvent],
         prior: Option<StoredCheckpoint>,
@@ -3449,11 +3775,11 @@ impl SqliteStore {
             payload: Payload::TapeCheckpointV1(payload),
         };
 
-        // Sign the checkpoint before opening the transaction.
+        // Sign the exact checkpoint payload before inserting it into the
+        // caller-owned transaction.
         let signature = sign_event(&checkpoint_event, signing_key, signer, Utc::now())?;
 
-        let tx = self.conn.unchecked_transaction()?;
-        insert_event(&tx, &checkpoint_event)?;
+        insert_event(tx, &checkpoint_event)?;
         #[cfg(any(test, feature = "test-support"))]
         if self.fail_next_checkpoint_signature_insert.replace(false) {
             // Test-only injected fault: drop the tx without committing so the
@@ -3463,8 +3789,7 @@ impl SqliteStore {
                 "injected checkpoint signature insert failure (test only)".into(),
             ));
         }
-        insert_event_signature(&tx, &signature)?;
-        tx.commit()?;
+        insert_event_signature(tx, &signature)?;
         Ok(checkpoint_event.id)
     }
 
@@ -3507,91 +3832,21 @@ impl SqliteStore {
         }
     }
 
-    /// The latest tape-root checkpoint for a run, if any.
-    ///
-    /// Defense-in-depth (Codex gate round 2, fix #3): only SIGNED checkpoint
-    /// rows are trusted for cadence accounting. The `JOIN event_signatures`
-    /// means a hypothetical unsigned `tape_checkpoint` row (one without a
-    /// matching signature) is never returned, so it can never drive cadence,
-    /// chaining, or `previous_checkpoint_event_id`. After fix #1 the raw wire
-    /// injection of a checkpoint is already closed; this closes the read side.
-    fn latest_checkpoint(&self, run_id: &RunId) -> Result<Option<StoredCheckpoint>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT e.id, e.payload FROM events e
-             JOIN event_signatures s ON s.event_id = e.id
-             WHERE e.run_id = ?1 AND e.kind = 'tape_checkpoint'
-             ORDER BY e.id DESC LIMIT 1",
-        )?;
-        let row = stmt
-            .query_row(params![run_id.to_string()], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-            })
-            .optional()?;
-        let Some((id, payload_json)) = row else {
-            return Ok(None);
-        };
-        let event_id = parse_event_id(&id, "tape_checkpoint")?;
-        let payload: Payload = serde_json::from_str(&payload_json)?;
-        let Payload::TapeCheckpointV1(cp) = payload else {
-            return Err(invalid_payload(
-                "tape_checkpoint",
-                "checkpoint row payload is not a TapeCheckpointV1".into(),
-            ));
-        };
-        Ok(Some(StoredCheckpoint {
-            event_id,
-            checkpoint_index: cp.checkpoint_index,
-            through_event_id: cp.through_event_id,
-            through_event_count: cp.through_event_count,
-            tape_root_hash: cp.tape_root_hash,
-            algorithm: cp.algorithm,
-        }))
-    }
-
     /// All signed, non-checkpoint events for a run, id-ordered (tape order),
     /// paired with their stored canonical event hash. Only events with a
     /// persisted signature row are returned — checkpoints cover signed events.
     fn signed_ordinary_events(&self, run_id: &RunId) -> Result<Vec<SignedOrdinaryEvent>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT e.id, s.canonical_event_hash
-             FROM events e
-             JOIN event_signatures s ON s.event_id = e.id
-             WHERE e.run_id = ?1 AND e.kind != 'tape_checkpoint'
-             ORDER BY e.id ASC",
-        )?;
-        let rows = stmt.query_map(params![run_id.to_string()], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-        })?;
-        let mut out = Vec::new();
-        for row in rows {
-            let (id, canonical_event_hash) = row?;
-            out.push(SignedOrdinaryEvent {
-                event_id: parse_event_id(&id, "events")?,
-                canonical_event_hash,
-            });
-        }
-        Ok(out)
+        signed_ordinary_events_for_connection(&self.conn, run_id)
+    }
+
+    #[cfg(test)]
+    fn latest_checkpoint(&self, run_id: &RunId) -> Result<Option<StoredCheckpoint>> {
+        latest_checkpoint_for_connection(&self.conn, run_id)
     }
 
     /// Read all events for a run, ordered by id (UUIDv7 = time-ordered).
     pub fn events_for_run(&self, run_id: &str) -> Result<Vec<StoredEventRow>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, run_id, parent_event_id, schema_version, kind, occurred_at, payload
-             FROM events WHERE run_id = ?1 ORDER BY id ASC",
-        )?;
-        let rows = stmt.query_map(params![run_id], |r| {
-            Ok(StoredEventRow {
-                id: r.get(0)?,
-                run_id: r.get(1)?,
-                parent_event_id: r.get(2)?,
-                schema_version: r.get(3)?,
-                kind: r.get(4)?,
-                occurred_at: r.get(5)?,
-                payload: r.get(6)?,
-            })
-        })?;
-        rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(LedgerError::from)
+        events_for_run_for_connection(&self.conn, run_id)
     }
 
     /// Read events with explicit detached-signature verification status.
@@ -3632,35 +3887,7 @@ impl SqliteStore {
     }
 
     fn signature_for_event(&self, event_id: &str) -> Result<Option<StoredEventSignatureRow>> {
-        self.conn
-            .query_row(
-                r#"SELECT
-                    event_id,
-                    canonical_event_hash,
-                    actor_id,
-                    key_id,
-                    public_key_hash,
-                    algorithm,
-                    signature,
-                    signed_at
-                FROM event_signatures
-                WHERE event_id = ?1"#,
-                params![event_id],
-                |row| {
-                    Ok(StoredEventSignatureRow {
-                        event_id: row.get(0)?,
-                        canonical_event_hash: row.get(1)?,
-                        actor_id: row.get(2)?,
-                        key_id: row.get(3)?,
-                        public_key_hash: row.get(4)?,
-                        algorithm: row.get(5)?,
-                        signature: row.get(6)?,
-                        signed_at: row.get(7)?,
-                    })
-                },
-            )
-            .optional()
-            .map_err(LedgerError::from)
+        signature_for_event_for_connection(&self.conn, event_id)
     }
 
     /// Read every event of `run_id` in tape order (`id ASC`), each paired with
@@ -3671,17 +3898,7 @@ impl SqliteStore {
         &self,
         run_id: &str,
     ) -> Result<Vec<(Event, Option<EventSignatureV1>)>> {
-        let rows = self.events_for_run(run_id)?;
-        rows.into_iter()
-            .map(|row| {
-                let event = row.to_event()?;
-                let signature = match self.signature_for_event(&row.id)? {
-                    Some(sig_row) => Some(sig_row.to_event_signature()?),
-                    None => None,
-                };
-                Ok((event, signature))
-            })
-            .collect()
+        signed_events_for_run_for_connection(&self.conn, run_id)
     }
 
     /// Count events in the store (for test convenience).
@@ -3954,6 +4171,42 @@ mod latest_checkpoint_signature_tests {
             .unwrap()
             .expect("a signed checkpoint must be returned");
         assert_eq!(latest.event_id, emitted[0]);
+    }
+}
+
+#[cfg(test)]
+mod tape_prefix_root_tests {
+    use super::*;
+
+    #[test]
+    fn prefix_roots_match_the_canonical_tape_root_contract() {
+        let hashes = vec![
+            "sha256:one".to_owned(),
+            "sha256:two\nwith-newline".to_owned(),
+            "sha256:three".to_owned(),
+        ];
+        let covered = hashes
+            .iter()
+            .map(|canonical_event_hash| SignedOrdinaryEvent {
+                event_id: EventId::new(),
+                canonical_event_hash: canonical_event_hash.clone(),
+            })
+            .collect::<Vec<_>>();
+
+        assert!(
+            tape_prefix_roots(&[]).is_empty(),
+            "the empty signed prefix has no checkpointable root"
+        );
+
+        let actual = tape_prefix_roots(&covered);
+        assert_eq!(actual.len(), hashes.len());
+        for (index, root) in actual.iter().enumerate() {
+            assert_eq!(
+                root,
+                &tape_root_hash(&hashes[..=index]),
+                "rolling prefix {index} must preserve the exact newline-joined tape-root wire contract",
+            );
+        }
     }
 }
 
@@ -7942,6 +8195,77 @@ fn signed_ordinary_events_for_connection(
     .collect()
 }
 
+fn events_for_run_for_connection(conn: &Connection, run_id: &str) -> Result<Vec<StoredEventRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, run_id, parent_event_id, schema_version, kind, occurred_at, payload
+         FROM events WHERE run_id = ?1 ORDER BY id ASC",
+    )?;
+    let rows = stmt.query_map(params![run_id], |row| {
+        Ok(StoredEventRow {
+            id: row.get(0)?,
+            run_id: row.get(1)?,
+            parent_event_id: row.get(2)?,
+            schema_version: row.get(3)?,
+            kind: row.get(4)?,
+            occurred_at: row.get(5)?,
+            payload: row.get(6)?,
+        })
+    })?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(LedgerError::from)
+}
+
+fn signature_for_event_for_connection(
+    conn: &Connection,
+    event_id: &str,
+) -> Result<Option<StoredEventSignatureRow>> {
+    conn.query_row(
+        r#"SELECT
+                event_id,
+                canonical_event_hash,
+                actor_id,
+                key_id,
+                public_key_hash,
+                algorithm,
+                signature,
+                signed_at
+            FROM event_signatures
+            WHERE event_id = ?1"#,
+        params![event_id],
+        |row| {
+            Ok(StoredEventSignatureRow {
+                event_id: row.get(0)?,
+                canonical_event_hash: row.get(1)?,
+                actor_id: row.get(2)?,
+                key_id: row.get(3)?,
+                public_key_hash: row.get(4)?,
+                algorithm: row.get(5)?,
+                signature: row.get(6)?,
+                signed_at: row.get(7)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(LedgerError::from)
+}
+
+fn signed_events_for_run_for_connection(
+    conn: &Connection,
+    run_id: &str,
+) -> Result<Vec<(Event, Option<EventSignatureV1>)>> {
+    events_for_run_for_connection(conn, run_id)?
+        .into_iter()
+        .map(|row| {
+            let event = row.to_event()?;
+            let signature = match signature_for_event_for_connection(conn, &row.id)? {
+                Some(signature_row) => Some(signature_row.to_event_signature()?),
+                None => None,
+            };
+            Ok((event, signature))
+        })
+        .collect()
+}
+
 fn promotion_decision_kind_wire(decision: PromotionDecisionKindV1) -> &'static str {
     match decision {
         PromotionDecisionKindV1::Promote => "promote",
@@ -9262,6 +9586,24 @@ struct SignedOrdinaryEvent {
     canonical_event_hash: String,
 }
 
+/// Compute the exact `tape_root_hash` for every non-empty signed prefix in
+/// one forward pass. `tape_root_hash` is SHA-256 over canonical-hash strings
+/// joined with one newline and no trailing separator, so cloning the rolling
+/// hasher at each prefix preserves the wire result without rehashing prior
+/// entries for every checkpoint.
+fn tape_prefix_roots(covered: &[SignedOrdinaryEvent]) -> Vec<String> {
+    let mut hasher = Sha256::new();
+    let mut roots = Vec::with_capacity(covered.len());
+    for (index, event) in covered.iter().enumerate() {
+        if index > 0 {
+            hasher.update(b"\n");
+        }
+        hasher.update(event.canonical_event_hash.as_bytes());
+        roots.push(format!("sha256:{:x}", hasher.clone().finalize()));
+    }
+    roots
+}
+
 fn signature_algorithm_wire(algorithm: SignatureAlgorithm) -> &'static str {
     match algorithm {
         SignatureAlgorithm::Ed25519 => "ed25519",
@@ -9307,6 +9649,1526 @@ fn insert_event_signature(conn: &Connection, signature: &EventSignatureV1) -> Re
             signature_algorithm_wire(signature.algorithm),
             signature.signature,
             signature.signed_at.to_rfc3339(),
+        ],
+    )?;
+    Ok(())
+}
+
+#[derive(Clone, Debug)]
+struct StoredGovernedCandidateCompletion {
+    run_id: String,
+    dispatch_event_id: String,
+    candidate_created_event_id: String,
+    candidate_digest: String,
+    candidate_create_action_id: String,
+    action_request_event_id: String,
+    action_request_digest: String,
+    activity_claim_event_id: String,
+    activity_claim_event_digest: String,
+    activity_result_event_id: String,
+    activity_result_event_digest: String,
+    action_receipt_ref: String,
+    action_receipt_digest: String,
+    candidate_completion_event_id: String,
+    candidate_completion_event_digest: String,
+    completion_digest: String,
+    completed_at: String,
+}
+
+#[derive(Clone, Debug)]
+struct VerifiedGovernedCandidateCompletionEvidence {
+    completion: CandidateCompletionRecordedV1,
+}
+
+fn validate_governed_candidate_completion_request(
+    _request: &GovernedCandidateCompletionRequestV1,
+) -> Result<()> {
+    // Every identifier is a strongly typed UUID. The remaining shape and
+    // lineage checks happen against the signed records inside the immediate
+    // transaction, rather than accepting a caller-selected completion body.
+    Ok(())
+}
+
+fn candidate_completion_authority_rejected<T>(reason: impl Into<String>) -> Result<T> {
+    Err(LedgerError::CandidateCompletionAuthorityRejected {
+        reason: reason.into(),
+    })
+}
+
+fn candidate_completion_reconciliation_required(
+    request: &GovernedCandidateCompletionRequestV1,
+    reason: impl Into<String>,
+) -> LedgerError {
+    LedgerError::CandidateCompletionReconciliationRequired {
+        run_id: request.run_id.to_string(),
+        candidate_created_event_id: request.candidate_created_event_id.to_string(),
+        reason: reason.into(),
+    }
+}
+
+fn validate_static_governed_candidate_completion_dispatch(
+    dispatch: &DispatchEnvelopeV3,
+    authority: &GovernedPromotionAuthorityV1,
+) -> Result<()> {
+    if dispatch.body.trust_tier != TrustTierV1::Governed
+        || !matches!(
+            dispatch.body.execution_role,
+            ExecutionRoleV1::Implementer | ExecutionRoleV1::Candidate
+        )
+        || dispatch.body.commit_mode != CommitModeV1::Atomic
+        || dispatch.action_evidence_version != ActionEvidenceVersionV1::SealedV3
+        || dispatch.ledger_authority_realm_digest != authority.ledger_authority_realm_digest
+        || dispatch
+            .governed_packet_digest
+            .as_deref()
+            .is_none_or(|digest| digest.trim().is_empty())
+    {
+        return candidate_completion_authority_rejected(
+            "candidate completion requires a sealed-V3 governed atomic implementer or candidate dispatch in this protected realm",
+        );
+    }
+    // Retry dispatches carry an additional closed AttemptContext plus a
+    // namespace rule for every action identity. The native candidate lane has
+    // not yet received those replay inputs, so treating a signed retry packet
+    // as first-attempt evidence would let it certify a tape that trusted
+    // replay rejects. Preserve safety and make the capability boundary
+    // explicit until the complete retry reducer is shared here.
+    if dispatch.body.attempt != 1 {
+        return candidate_completion_authority_rejected(
+            "candidate completion currently supports only attempt 1; governed retries require native AttemptContext and action-namespace verification",
+        );
+    }
+    Ok(())
+}
+
+fn candidate_create_action_id_for(candidate: &CandidateCreatedV2) -> Result<String> {
+    if candidate.candidate_id.trim().is_empty()
+        || !is_canonical_buildplane_candidate_ref(&candidate.candidate_ref)
+    {
+        return candidate_completion_authority_rejected(
+            "candidate completion requires a non-empty candidate id and canonical Buildplane candidate ref",
+        );
+    }
+    let suffix = candidate
+        .candidate_ref
+        .strip_prefix(BUILDPANE_CANDIDATE_REF_PREFIX)
+        .ok_or_else(|| LedgerError::CandidateCompletionAuthorityRejected {
+            reason:
+                "candidate completion candidate ref is outside the Buildplane candidate namespace"
+                    .into(),
+        })?;
+    Ok(format!("git-candidate-create:{suffix}"))
+}
+
+/// Tape order is the canonical UUIDv7 event-id order used by the ledger's
+/// event queries. A candidate-completion proof may only close evidence that
+/// was already durably present in that order; payload timestamps alone are
+/// not an ordering authority.
+fn tape_event_precedes(before: &Event, after: &Event) -> bool {
+    before.id.as_uuid() < after.id.as_uuid()
+}
+
+/// Reconstruct the effective lease for a terminal action from its signed
+/// claim and every signed heartbeat that extends that exact claim. The
+/// candidate-completion lane cannot use the mutable heartbeat projection: a
+/// damaged or stale cache must not shorten or lengthen authority when it is
+/// deciding whether an already-recorded result is certifiable.
+#[allow(clippy::too_many_arguments)]
+fn effective_governed_candidate_activity_lease_expiry(
+    conn: &Connection,
+    request: &GovernedCandidateCompletionRequestV1,
+    authority: &GovernedPromotionAuthorityV1,
+    dispatch_event: &Event,
+    dispatch_envelope_digest: &str,
+    effective_deadline: DateTime<Utc>,
+    action_event: &Event,
+    action: &ActionRequestedV2,
+    claim_event: &Event,
+    claim: &ActivityClaimedV1,
+    result_event: &Event,
+) -> Result<DateTime<Utc>> {
+    let claimed_at = parse_claim_timestamp(&claim.claimed_at).map_err(|_| {
+        LedgerError::CandidateCompletionAuthorityRejected {
+            reason: "candidate completion activity claim timestamp is not canonical RFC3339 UTC"
+                .into(),
+        }
+    })?;
+    let mut current_lease_expires_at =
+        parse_claim_timestamp(&claim.lease_expires_at).map_err(|_| {
+            LedgerError::CandidateCompletionAuthorityRejected {
+                reason:
+                    "candidate completion activity claim lease expiry is not canonical RFC3339 UTC"
+                        .into(),
+            }
+        })?;
+    let claim_event_digest = canonical_event_hash(claim_event).map_err(|error| {
+        LedgerError::CandidateCompletionAuthorityRejected {
+            reason: format!(
+                "could not canonicalize candidate action claim while reconstructing lease heartbeats: {error}"
+            ),
+        }
+    })?;
+    let mut prior_heartbeat_at = None;
+    for heartbeat_event in verified_kernel_events_for_run_kind(
+        conn,
+        request.run_id,
+        EventKind::ActivityHeartbeatRecordedV1,
+        authority,
+        "candidate action lease heartbeat",
+    )? {
+        if heartbeat_event.parent_event_id != Some(claim_event.id) {
+            continue;
+        }
+        let Payload::ActivityHeartbeatRecordedV1(heartbeat) = &heartbeat_event.payload else {
+            unreachable!(
+                "activity-heartbeat kind only returns ActivityHeartbeatRecordedV1 payloads"
+            )
+        };
+        let heartbeat_at = parse_claim_timestamp(&heartbeat.heartbeat_at).map_err(|_| {
+            LedgerError::CandidateCompletionAuthorityRejected {
+                reason: "candidate completion heartbeat timestamp is not canonical RFC3339 UTC"
+                    .into(),
+            }
+        })?;
+        let next_lease_expires_at =
+            parse_claim_timestamp(&heartbeat.lease_expires_at).map_err(|_| {
+                LedgerError::CandidateCompletionAuthorityRejected {
+                    reason:
+                        "candidate completion heartbeat lease expiry is not canonical RFC3339 UTC"
+                            .into(),
+                }
+            })?;
+        let heartbeat_identity_is_closed = match (
+            heartbeat.heartbeat_id.as_deref(),
+            heartbeat.heartbeat_request_digest.as_deref(),
+        ) {
+            (Some(heartbeat_id), Some(request_digest)) => {
+                !heartbeat_id.trim().is_empty() && is_canonical_sha256_digest(request_digest)
+            }
+            // Historical records predate heartbeat-request identity. Replay
+            // remains able to read them, so retain that narrow compatibility
+            // shape while rejecting partial or malformed identities below.
+            (None, None) => true,
+            _ => false,
+        };
+        if !heartbeat_identity_is_closed
+            || heartbeat.run_id != request.run_id
+            || heartbeat.activity_id != action.action_id
+            || heartbeat.idempotency_key != action.idempotency_key
+            || heartbeat.claim_event_id != claim_event.id
+            || heartbeat.claim_event_digest != claim_event_digest
+            || heartbeat.lease_id != claim.lease_id
+            || heartbeat.dispatch_event_id != dispatch_event.id
+            || heartbeat.dispatch_envelope_digest != dispatch_envelope_digest
+            || heartbeat_event.parent_event_id != Some(claim_event.id)
+            || !tape_event_precedes(action_event, claim_event)
+            || !tape_event_precedes(claim_event, &heartbeat_event)
+            || !tape_event_precedes(&heartbeat_event, result_event)
+            || heartbeat_at != heartbeat_event.occurred_at
+            || heartbeat_at < claimed_at
+            || heartbeat_at >= current_lease_expires_at
+            || next_lease_expires_at <= current_lease_expires_at
+            || next_lease_expires_at > effective_deadline
+            || prior_heartbeat_at.is_some_and(|previous| previous >= heartbeat_at)
+        {
+            return candidate_completion_authority_rejected(
+                "candidate completion heartbeat does not form one forward, signed lease extension inside its governed dispatch deadline",
+            );
+        }
+        current_lease_expires_at = next_lease_expires_at;
+        prior_heartbeat_at = Some(heartbeat_at);
+    }
+    Ok(current_lease_expires_at)
+}
+
+/// A candidate-completion proof is only valid while its workflow remains in
+/// the reducer's `CandidateCreated` phase. We do not trust a mutable phase
+/// projection for that decision: scan the append-only tape for authoritative
+/// lifecycle records that would have made candidate creation or completion
+/// replay-invalid before this immutable candidate record.
+fn ensure_governed_candidate_completion_lifecycle_is_open(
+    conn: &Connection,
+    request: &GovernedCandidateCompletionRequestV1,
+    dispatch_event: &Event,
+    dispatch: &DispatchEnvelopeV3,
+    candidate_event: &Event,
+    candidate: &CandidateCreatedV2,
+    receipt_set_event: &Event,
+) -> Result<()> {
+    let mut statement = conn.prepare(
+        "SELECT id, run_id, parent_event_id, schema_version, kind, occurred_at, payload \
+         FROM events WHERE run_id = ?1 ORDER BY id ASC",
+    )?;
+    let rows = statement.query_map(params![request.run_id.to_string()], |row| {
+        Ok(StoredEventRow {
+            id: row.get(0)?,
+            run_id: row.get(1)?,
+            parent_event_id: row.get(2)?,
+            schema_version: row.get(3)?,
+            kind: row.get(4)?,
+            occurred_at: row.get(5)?,
+            payload: row.get(6)?,
+        })
+    })?;
+    for row in rows {
+        let event = row?.to_event()?;
+        // Candidate completion may be appended only while the reducer is
+        // still in `CandidateCreated`. Therefore lifecycle evidence recorded
+        // either before *or after* the candidate (but before this atomic
+        // operation) can block it. The candidate record itself is the one
+        // expected transition and is excluded by identity, not by a loose
+        // timestamp/order predicate.
+        if event.id == candidate_event.id {
+            continue;
+        }
+        let conflict = match &event.payload {
+            Payload::WorkflowCancellationRequestedV1(cancellation)
+                if cancellation.run_id == request.run_id.to_string()
+                    && cancellation.workflow_id == dispatch.body.workflow_id
+                    && cancellation.workflow_revision == dispatch.body.workflow_revision
+                    && cancellation.unit_id == dispatch.body.unit_id
+                    && cancellation.attempt == dispatch.body.attempt
+                    && cancellation.dispatch_event_ref == dispatch_event.id
+                    && cancellation.dispatch_envelope_digest == dispatch.envelope_digest =>
+            {
+                Some("a workflow cancellation was already requested")
+            }
+            Payload::WorkflowTerminalV1(terminal)
+                if terminal.workflow_id == dispatch.body.workflow_id
+                    && terminal.workflow_revision == dispatch.body.workflow_revision
+                    && terminal.unit_id == dispatch.body.unit_id
+                    && terminal.attempt == dispatch.body.attempt =>
+            {
+                Some("the workflow already has a terminal record")
+            }
+            Payload::WorkflowTerminalV2(terminal)
+                if terminal.workflow_id == dispatch.body.workflow_id
+                    && terminal.workflow_revision == dispatch.body.workflow_revision
+                    && terminal.unit_id == dispatch.body.unit_id
+                    && terminal.attempt == dispatch.body.attempt =>
+            {
+                Some("the workflow already has a terminal record")
+            }
+            Payload::CandidateCreatedV1(prior_candidate)
+                if prior_candidate.workflow_id == dispatch.body.workflow_id
+                    && prior_candidate.unit_id == dispatch.body.unit_id
+                    && prior_candidate.attempt == dispatch.body.attempt
+                    && prior_candidate.provenance_ref == dispatch.body.provenance_ref =>
+            {
+                Some("a prior candidate artifact already exists for this workflow attempt")
+            }
+            Payload::CandidateCreatedV2(prior_candidate)
+                if prior_candidate.workflow_id == dispatch.body.workflow_id
+                    && prior_candidate.unit_id == dispatch.body.unit_id
+                    && prior_candidate.attempt == dispatch.body.attempt
+                    && prior_candidate.provenance_ref == dispatch.body.provenance_ref =>
+            {
+                Some("a prior candidate artifact already exists for this workflow attempt")
+            }
+            Payload::ActionReceiptSetRecordedV1(prior_set)
+                if event.id != receipt_set_event.id
+                    && prior_set.run_id == request.run_id.to_string()
+                    && prior_set.workflow_id == dispatch.body.workflow_id
+                    && prior_set.unit_id == dispatch.body.unit_id
+                    && prior_set.attempt == dispatch.body.attempt
+                    && prior_set.provenance_ref == dispatch.body.provenance_ref
+                    && prior_set.dispatch_envelope_digest == dispatch.envelope_digest =>
+            {
+                Some("a different receipt set was already sealed for this workflow attempt")
+            }
+            Payload::CandidateAcceptanceRecordedV1(acceptance)
+                if acceptance.candidate_digest == candidate.candidate_digest =>
+            {
+                Some("candidate acceptance exists before the candidate lifecycle is complete")
+            }
+            Payload::ReviewVerdictRecordedV1(review)
+                if review.candidate_digest == candidate.candidate_digest =>
+            {
+                Some("candidate review exists before the candidate lifecycle is complete")
+            }
+            Payload::ReviewVerdictRecordedV2(review)
+                if review.candidate_digest == candidate.candidate_digest =>
+            {
+                Some("candidate review exists before the candidate lifecycle is complete")
+            }
+            Payload::PromotionApprovalRequestedV1(approval)
+                if approval.candidate_digest == candidate.candidate_digest =>
+            {
+                Some("promotion approval exists before the candidate lifecycle is complete")
+            }
+            Payload::PromotionDecisionRecordedV1(decision)
+                if decision.candidate_digest == candidate.candidate_digest =>
+            {
+                Some("promotion decision exists before the candidate lifecycle is complete")
+            }
+            Payload::PromotionExecutionClaimedV1(claim)
+                if claim.candidate_digest == candidate.candidate_digest =>
+            {
+                Some("promotion execution exists before the candidate lifecycle is complete")
+            }
+            Payload::PromotionResultRecordedV1(result)
+                if result.candidate_digest == candidate.candidate_digest =>
+            {
+                Some("promotion result exists before the candidate lifecycle is complete")
+            }
+            _ => None,
+        };
+        if let Some(conflict) = conflict {
+            return candidate_completion_authority_rejected(format!(
+                "candidate completion cannot certify replay-invalid lifecycle evidence: {conflict} (event {})",
+                event.id
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn verified_kernel_events_for_run_kind(
+    conn: &Connection,
+    run_id: RunId,
+    kind: EventKind,
+    authority: &GovernedPromotionAuthorityV1,
+    label: &str,
+) -> Result<Vec<Event>> {
+    let mut statement =
+        conn.prepare("SELECT id FROM events WHERE run_id = ?1 AND kind = ?2 ORDER BY id ASC")?;
+    let ids = statement
+        .query_map(params![run_id.to_string(), kind.as_wire()], |row| {
+            row.get::<_, String>(0)
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    ids.into_iter()
+        .map(|id| {
+            let event_id = parse_event_id(&id, label)?;
+            load_verified_promotion_event(
+                conn,
+                event_id,
+                &authority.trusted_keys,
+                &authority.kernel_signer,
+                label,
+            )
+        })
+        .collect()
+}
+
+fn unique_verified_kernel_event_matching<F>(
+    conn: &Connection,
+    run_id: RunId,
+    kind: EventKind,
+    authority: &GovernedPromotionAuthorityV1,
+    label: &str,
+    mut matches: F,
+) -> Result<Event>
+where
+    F: FnMut(&Event) -> bool,
+{
+    let mut matched = None;
+    for event in verified_kernel_events_for_run_kind(conn, run_id, kind, authority, label)? {
+        if !matches(&event) {
+            continue;
+        }
+        if matched.replace(event).is_some() {
+            return candidate_completion_authority_rejected(format!(
+                "candidate completion found more than one matching {label} event"
+            ));
+        }
+    }
+    matched.ok_or_else(|| LedgerError::CandidateCompletionAuthorityRejected {
+        reason: format!("candidate completion requires exactly one matching {label} event"),
+    })
+}
+
+/// Reconstruct the complete sealed V3 action set that produced a candidate.
+/// Candidate completion deliberately fails closed rather than treating the
+/// receipt-set payload as an advisory list: every request in the dispatch
+/// attempt must reach one successful claimed/result/receipt chain, and the
+/// signed set must name those exact receipts in canonical action-id order.
+///
+/// Model actions are rejected here until this narrow native operation receives
+/// the protected CAS/model-authority inputs needed to replay their intent,
+/// authorization, and aggregate token-budget contract. A successful model
+/// receipt by itself is not authority to certify an implementation candidate.
+#[allow(clippy::too_many_arguments)]
+fn verify_governed_candidate_receipt_set_completeness(
+    conn: &Connection,
+    request: &GovernedCandidateCompletionRequestV1,
+    authority: &GovernedPromotionAuthorityV1,
+    dispatch_event: &Event,
+    dispatch: &DispatchEnvelopeV3,
+    dispatch_envelope_digest: &str,
+    receipt_set_event: &Event,
+    receipt_set: &ActionReceiptSetRecordedV1,
+    candidate_create_action_id: &str,
+) -> Result<()> {
+    let expected_policy_digest = governed_dispatch_policy_digest_v1(
+        &dispatch.body.acceptance_contract_digest,
+    )
+    .map_err(|error| LedgerError::CandidateCompletionAuthorityRejected {
+        reason: format!(
+            "could not derive governed action-set policy binding for candidate completion: {error}"
+        ),
+    })?;
+    let dispatch_issued_at = parse_claim_timestamp(&dispatch.body.issued_at).map_err(|_| {
+        LedgerError::CandidateCompletionAuthorityRejected {
+            reason: "candidate completion dispatch issued_at is not canonical RFC3339 UTC".into(),
+        }
+    })?;
+    let effective_deadline = validate_governed_dispatch(dispatch, dispatch_issued_at)
+        .map_err(|error| LedgerError::CandidateCompletionAuthorityRejected {
+            reason: format!(
+                "candidate completion could not derive the sealed action-set deadline: {error}"
+            ),
+        })?
+        .effective_deadline;
+    let receipt_set_sealed_at = parse_claim_timestamp(&receipt_set.sealed_at).map_err(|_| {
+        LedgerError::CandidateCompletionAuthorityRejected {
+            reason: "candidate completion receipt set sealed_at is not canonical RFC3339 UTC"
+                .into(),
+        }
+    })?;
+
+    let mut actions = BTreeMap::<String, (Event, ActionRequestedV2, String)>::new();
+    let mut idempotency_keys = HashSet::new();
+    for event in verified_kernel_events_for_run_kind(
+        conn,
+        request.run_id,
+        EventKind::ActionRequestedV2,
+        authority,
+        "sealed candidate action request",
+    )? {
+        let Payload::ActionRequestedV2(action) = &event.payload else {
+            unreachable!("action-request kind only returns ActionRequestedV2 payloads")
+        };
+        let action = action.clone();
+        // Replay keys V3 action requests by the workflow attempt and signed
+        // lineage fields, not by parent alone. A same-attempt request with a
+        // substituted parent therefore poisons the replayed workflow even if
+        // it is absent from the candidate's receipt-set payload. Detect that
+        // before the ordinary parent filter instead of silently skipping it.
+        let same_workflow_attempt = action.run_id == request.run_id.to_string()
+            && action.workflow_id == dispatch.body.workflow_id
+            && action.unit_id == dispatch.body.unit_id
+            && action.attempt == dispatch.body.attempt;
+        if !same_workflow_attempt {
+            continue;
+        }
+        if event.parent_event_id != Some(dispatch_event.id) {
+            return candidate_completion_authority_rejected(
+                "candidate completion found a same-attempt action request that is not parented to its governed dispatch",
+            );
+        }
+        let requested_at = parse_claim_timestamp(&action.requested_at).map_err(|_| {
+            LedgerError::CandidateCompletionAuthorityRejected {
+                reason:
+                    "candidate completion action request timestamp is not canonical RFC3339 UTC"
+                        .into(),
+            }
+        })?;
+        let action_digest = action_requested_v2_digest(&action).map_err(|error| {
+            LedgerError::CandidateCompletionAuthorityRejected {
+                reason: format!(
+                    "could not canonicalize candidate action request while sealing receipt set: {error}"
+                ),
+            }
+        })?;
+        if action.run_id != request.run_id.to_string()
+            || action.workflow_id != dispatch.body.workflow_id
+            || action.unit_id != dispatch.body.unit_id
+            || action.attempt != dispatch.body.attempt
+            || action.provenance_ref != dispatch.body.provenance_ref
+            || action.action_id.trim().is_empty()
+            || action.idempotency_key.trim().is_empty()
+            || action.dispatch_envelope_digest != dispatch_envelope_digest
+            || action.repository_binding_digest != dispatch.repository_binding_digest
+            || action.ledger_authority_realm_digest != dispatch.ledger_authority_realm_digest
+            || action.governed_packet_digest != dispatch.governed_packet_digest
+            || action.capability_bundle_digest != dispatch.body.capability_bundle_digest
+            || action.policy_digest != expected_policy_digest
+            || action.context_manifest_digest != dispatch.body.context_manifest_digest
+            || action.worker_manifest_digest != dispatch.body.worker_manifest_digest
+            || action.sandbox_profile_digest != dispatch.body.sandbox_profile_digest
+            || action.authority_actor != authority.kernel_signer.actor_id
+            || action.execution_role != dispatch.body.execution_role
+            || requested_at != event.occurred_at
+            || requested_at < dispatch_issued_at
+            || !tape_event_precedes(dispatch_event, &event)
+            || !tape_event_precedes(&event, receipt_set_event)
+        {
+            return candidate_completion_authority_rejected(
+                "candidate completion receipt set contains an action request outside its exact sealed dispatch lineage",
+            );
+        }
+        if !idempotency_keys.insert(action.idempotency_key.clone())
+            || actions
+                .insert(action.action_id.clone(), (event, action, action_digest))
+                .is_some()
+        {
+            return candidate_completion_authority_rejected(
+                "candidate completion receipt set has duplicate action identity or idempotency evidence",
+            );
+        }
+    }
+    if actions.is_empty() || !actions.contains_key(candidate_create_action_id) {
+        return candidate_completion_authority_rejected(
+            "candidate completion receipt set does not derive the candidate-create action from the signed dispatch",
+        );
+    }
+
+    let mut expected_entries = BTreeMap::<String, &ActionReceiptSetEntryV1>::new();
+    let mut previous_action_id: Option<&str> = None;
+    for entry in &receipt_set.receipts {
+        if entry.action_id.trim().is_empty()
+            || entry.action_receipt_ref.trim().is_empty()
+            || !is_canonical_sha256_digest(&entry.action_receipt_digest)
+            || previous_action_id.is_some_and(|previous| previous >= entry.action_id.as_str())
+            || expected_entries
+                .insert(entry.action_id.clone(), entry)
+                .is_some()
+        {
+            return candidate_completion_authority_rejected(
+                "candidate completion receipt set entries are not a strict canonical action-id map",
+            );
+        }
+        previous_action_id = Some(entry.action_id.as_str());
+    }
+    if expected_entries.len() != actions.len()
+        || !actions
+            .keys()
+            .zip(receipt_set.receipts.iter())
+            .all(|(action_id, entry)| action_id == &entry.action_id)
+    {
+        return candidate_completion_authority_rejected(
+            "candidate completion receipt set does not name every signed dispatch action exactly once",
+        );
+    }
+
+    let claims = verified_kernel_events_for_run_kind(
+        conn,
+        request.run_id,
+        EventKind::ActivityClaimedV1,
+        authority,
+        "sealed candidate activity claim",
+    )?;
+    let results = verified_kernel_events_for_run_kind(
+        conn,
+        request.run_id,
+        EventKind::ActivityResultRecordedV1,
+        authority,
+        "sealed candidate activity result",
+    )?;
+    let receipts = verified_kernel_events_for_run_kind(
+        conn,
+        request.run_id,
+        EventKind::ActionReceiptRecordedV2,
+        authority,
+        "sealed candidate action receipt",
+    )?;
+
+    let mut claims_by_request = HashMap::<EventId, Vec<Event>>::new();
+    for event in claims {
+        if let Some(parent) = event.parent_event_id {
+            claims_by_request.entry(parent).or_default().push(event);
+        }
+    }
+    let mut results_by_claim = HashMap::<EventId, Vec<Event>>::new();
+    for event in results {
+        if let Some(parent) = event.parent_event_id {
+            results_by_claim.entry(parent).or_default().push(event);
+        }
+    }
+    let mut receipts_by_ref = HashMap::<String, Vec<Event>>::new();
+    for event in &receipts {
+        let Payload::ActionReceiptRecordedV2(receipt) = &event.payload else {
+            unreachable!("action-receipt kind only returns ActionReceiptRecordedV2 payloads")
+        };
+        receipts_by_ref
+            .entry(receipt.action_receipt_ref.clone())
+            .or_default()
+            .push(event.clone());
+    }
+
+    for (action_id, (action_event, action, action_digest)) in &actions {
+        if action.action_kind == ActionKindV1::Model {
+            return candidate_completion_authority_rejected(
+                "candidate completion cannot certify a sealed receipt set containing a model action without protected model-authority and CAS replay inputs",
+            );
+        }
+        let entry = expected_entries.get(action_id).copied().ok_or_else(|| {
+            LedgerError::CandidateCompletionAuthorityRejected {
+                reason: "candidate completion receipt set omitted a signed dispatch action".into(),
+            }
+        })?;
+        let claim_events = claims_by_request
+            .get(&action_event.id)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let [claim_event] = claim_events else {
+            return candidate_completion_authority_rejected(
+                "candidate completion receipt set action does not have exactly one terminal activity claim",
+            );
+        };
+        let Payload::ActivityClaimedV1(claim) = &claim_event.payload else {
+            unreachable!("activity-claim kind only returns ActivityClaimedV1 payloads")
+        };
+        let claim_digest = canonical_event_hash(claim_event).map_err(|error| {
+            LedgerError::CandidateCompletionAuthorityRejected {
+                reason: format!(
+                    "could not canonicalize candidate action claim while sealing receipt set: {error}"
+                ),
+            }
+        })?;
+        let claimed_at = parse_claim_timestamp(&claim.claimed_at).map_err(|_| {
+            LedgerError::CandidateCompletionAuthorityRejected {
+                reason:
+                    "candidate completion activity claim timestamp is not canonical RFC3339 UTC"
+                        .into(),
+            }
+        })?;
+        let lease_expires_at = parse_claim_timestamp(&claim.lease_expires_at).map_err(|_| {
+            LedgerError::CandidateCompletionAuthorityRejected {
+                reason:
+                    "candidate completion activity claim lease expiry is not canonical RFC3339 UTC"
+                        .into(),
+            }
+        })?;
+        let requested_at = parse_claim_timestamp(&action.requested_at).map_err(|_| {
+            LedgerError::CandidateCompletionAuthorityRejected {
+                reason:
+                    "candidate completion action request timestamp is not canonical RFC3339 UTC"
+                        .into(),
+            }
+        })?;
+        if claim.run_id != request.run_id
+            || claim.activity_id != *action_id
+            || claim.idempotency_key != action.idempotency_key
+            || claim.action_kind != action.action_kind
+            || claim.action_request_event_id != action_event.id
+            || claim.action_request_digest != *action_digest
+            || claim.dispatch_event_id != dispatch_event.id
+            || claim.dispatch_envelope_digest != dispatch_envelope_digest
+            || claim.authority_actor != authority.kernel_signer.actor_id
+            || claim.purpose != ActivityClaimPurposeV1::Generic
+            || claimed_at != claim_event.occurred_at
+            || claimed_at < requested_at
+            || lease_expires_at <= claimed_at
+            || lease_expires_at > effective_deadline
+            || !tape_event_precedes(action_event, claim_event)
+        {
+            return candidate_completion_authority_rejected(
+                "candidate completion receipt set action claim does not bind the signed governed request",
+            );
+        }
+
+        let result_events = results_by_claim
+            .get(&claim_event.id)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let [result_event] = result_events else {
+            return candidate_completion_authority_rejected(
+                "candidate completion receipt set action does not have exactly one terminal activity result",
+            );
+        };
+        let Payload::ActivityResultRecordedV1(result) = &result_event.payload else {
+            unreachable!("activity-result kind only returns ActivityResultRecordedV1 payloads")
+        };
+        let result_recorded_at = parse_claim_timestamp(&result.recorded_at).map_err(|_| {
+            LedgerError::CandidateCompletionAuthorityRejected {
+                reason:
+                    "candidate completion activity result timestamp is not canonical RFC3339 UTC"
+                        .into(),
+            }
+        })?;
+        let effective_lease_expires_at = effective_governed_candidate_activity_lease_expiry(
+            conn,
+            request,
+            authority,
+            dispatch_event,
+            dispatch_envelope_digest,
+            effective_deadline,
+            action_event,
+            action,
+            claim_event,
+            claim,
+            result_event,
+        )?;
+        if result.run_id != request.run_id
+            || result.activity_id != *action_id
+            || result.idempotency_key != action.idempotency_key
+            || result.claim_event_id != claim_event.id
+            || result.claim_event_digest != claim_digest
+            || result.lease_id != claim.lease_id
+            || result.outcome != ActivityResultOutcomeV1::Succeeded
+            || result_recorded_at != result_event.occurred_at
+            || result_recorded_at < claimed_at
+            || result_recorded_at >= effective_lease_expires_at
+            || !tape_event_precedes(claim_event, result_event)
+        {
+            return candidate_completion_authority_rejected(
+                "candidate completion receipt set action result is not one successful terminal claim result",
+            );
+        }
+
+        let receipt_events = receipts_by_ref
+            .get(&entry.action_receipt_ref)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let [receipt_event] = receipt_events else {
+            return candidate_completion_authority_rejected(
+                "candidate completion receipt set action does not have exactly one recorded receipt",
+            );
+        };
+        let Payload::ActionReceiptRecordedV2(receipt) = &receipt_event.payload else {
+            unreachable!("action-receipt kind only returns ActionReceiptRecordedV2 payloads")
+        };
+        let receipt_digest = action_receipt_recorded_v2_digest(receipt).map_err(|error| {
+            LedgerError::CandidateCompletionAuthorityRejected {
+                reason: format!(
+                    "could not canonicalize candidate action receipt while sealing receipt set: {error}"
+                ),
+            }
+        })?;
+        let receipt_completed_at = parse_claim_timestamp(&receipt.completed_at).map_err(|_| {
+            LedgerError::CandidateCompletionAuthorityRejected {
+                reason:
+                    "candidate completion action receipt timestamp is not canonical RFC3339 UTC"
+                        .into(),
+            }
+        })?;
+        if receipt_digest != entry.action_receipt_digest
+            || receipt.run_id != request.run_id.to_string()
+            || receipt.workflow_id != dispatch.body.workflow_id
+            || receipt.unit_id != dispatch.body.unit_id
+            || receipt.attempt != dispatch.body.attempt
+            || receipt.provenance_ref != dispatch.body.provenance_ref
+            || receipt.action_id != *action_id
+            || receipt.idempotency_key != action.idempotency_key
+            || receipt.action_request_digest != *action_digest
+            || receipt.dispatch_envelope_digest != dispatch_envelope_digest
+            || receipt.capability_bundle_digest != dispatch.body.capability_bundle_digest
+            || receipt.policy_digest != expected_policy_digest
+            || receipt.context_manifest_digest != dispatch.body.context_manifest_digest
+            || receipt.worker_manifest_digest != dispatch.body.worker_manifest_digest
+            || receipt.sandbox_profile_digest != dispatch.body.sandbox_profile_digest
+            || receipt.authority_actor != authority.kernel_signer.actor_id
+            || receipt.execution_role != dispatch.body.execution_role
+            || receipt.outcome != ActionReceiptOutcomeV2::Succeeded
+            || receipt.result_digest != result.result_digest
+            || receipt.result_ref != result.result_ref
+            || receipt.evidence_digest != result.evidence_digest
+            || receipt.evidence_ref != result.evidence_ref
+            || receipt_event.parent_event_id != Some(result_event.id)
+            || receipt_completed_at < claimed_at
+            || receipt_completed_at > result_recorded_at
+            || receipt_set_sealed_at < receipt_completed_at
+            || !tape_event_precedes(result_event, receipt_event)
+            || !tape_event_precedes(receipt_event, receipt_set_event)
+        {
+            return candidate_completion_authority_rejected(
+                "candidate completion receipt set receipt does not bind one succeeded terminal action",
+            );
+        }
+    }
+
+    // Do not let a second receipt for an already-derived action hide outside
+    // the sealed set. Replay would reject that competing terminal record; the
+    // native proof must fail before it can checkpoint the same ambiguity.
+    for receipt_event in receipts {
+        let Payload::ActionReceiptRecordedV2(receipt) = &receipt_event.payload else {
+            unreachable!("action-receipt kind only returns ActionReceiptRecordedV2 payloads")
+        };
+        if receipt.run_id != request.run_id.to_string()
+            || receipt.workflow_id != dispatch.body.workflow_id
+            || receipt.unit_id != dispatch.body.unit_id
+            || receipt.attempt != dispatch.body.attempt
+            || receipt.provenance_ref != dispatch.body.provenance_ref
+            || receipt.dispatch_envelope_digest != dispatch_envelope_digest
+        {
+            continue;
+        }
+        let Some(entry) = expected_entries.get(&receipt.action_id) else {
+            return candidate_completion_authority_rejected(
+                "candidate completion found a terminal receipt for an action absent from its sealed set",
+            );
+        };
+        let receipt_digest = action_receipt_recorded_v2_digest(receipt).map_err(|error| {
+            LedgerError::CandidateCompletionAuthorityRejected {
+                reason: format!(
+                    "could not canonicalize competing candidate action receipt: {error}"
+                ),
+            }
+        })?;
+        if receipt.action_receipt_ref != entry.action_receipt_ref
+            || receipt_digest != entry.action_receipt_digest
+        {
+            return candidate_completion_authority_rejected(
+                "candidate completion found a competing terminal receipt outside its sealed set",
+            );
+        }
+    }
+    Ok(())
+}
+
+fn verify_governed_candidate_completion_evidence(
+    conn: &Connection,
+    request: &GovernedCandidateCompletionRequestV1,
+    authority: &GovernedPromotionAuthorityV1,
+) -> Result<VerifiedGovernedCandidateCompletionEvidence> {
+    let dispatch_event = load_verified_promotion_event(
+        conn,
+        request.dispatch_event_id,
+        &authority.trusted_keys,
+        &authority.kernel_signer,
+        "governed candidate-completion dispatch",
+    )?;
+    if dispatch_event.run_id != request.run_id {
+        return candidate_completion_authority_rejected(
+            "candidate completion dispatch belongs to a different run",
+        );
+    }
+    let dispatch_material = dispatch_authority_material(&dispatch_event.payload).ok_or_else(|| {
+        LedgerError::CandidateCompletionAuthorityRejected {
+            reason: "candidate completion requires a signed sealed-V3 or graph-bound V4 dispatch envelope".into(),
+        }
+    })?;
+    if dispatch_material.is_graph_bound_v4 {
+        // V4 validity depends on tape-global graph declaration, node
+        // scheduling, and retry-context admission. Candidate completion has
+        // not yet reconstructed that reducer state from the signed tape, so
+        // accepting only the nested V3 authority here could seal a candidate
+        // that trusted replay rejects. Until the native verifier ports those
+        // V4 admission checks, graph-bound dispatches must fail closed.
+        return candidate_completion_authority_rejected(
+            "candidate completion does not yet reconstruct graph-bound V4 admission; V4 dispatches are unsupported",
+        );
+    }
+    let dispatch = dispatch_material.dispatch;
+    let dispatch_envelope_digest = dispatch_material.lineage_envelope_digest;
+    validate_static_governed_candidate_completion_dispatch(&dispatch, authority)?;
+    let expected_policy_digest = governed_dispatch_policy_digest_v1(
+        &dispatch.body.acceptance_contract_digest,
+    )
+    .map_err(|error| LedgerError::CandidateCompletionAuthorityRejected {
+        reason: format!("could not derive governed candidate-create policy binding: {error}"),
+    })?;
+
+    let candidate_event = load_verified_promotion_event(
+        conn,
+        request.candidate_created_event_id,
+        &authority.trusted_keys,
+        &authority.kernel_signer,
+        "candidate artifact",
+    )?;
+    if candidate_event.run_id != request.run_id {
+        return candidate_completion_authority_rejected(
+            "candidate completion candidate artifact belongs to a different run",
+        );
+    }
+    let Payload::CandidateCreatedV2(candidate) = &candidate_event.payload else {
+        return candidate_completion_authority_rejected(
+            "candidate completion requires an immutable candidate_created_v2 record",
+        );
+    };
+    let candidate = candidate.clone();
+    if candidate.run_id != request.run_id.to_string()
+        || candidate.workflow_id != dispatch.body.workflow_id
+        || candidate.unit_id != dispatch.body.unit_id
+        || candidate.attempt != dispatch.body.attempt
+        || candidate.provenance_ref != dispatch.body.provenance_ref
+        || candidate.base_commit_sha != dispatch.body.base_commit_sha
+        || candidate.envelope_digest != dispatch_envelope_digest
+    {
+        return candidate_completion_authority_rejected(
+            "candidate completion candidate artifact does not exactly bind the governed dispatch lineage",
+        );
+    }
+    let candidate_create_action_id = candidate_create_action_id_for(&candidate)?;
+
+    let receipt_set_event = unique_verified_kernel_event_matching(
+        conn,
+        request.run_id,
+        EventKind::ActionReceiptSetRecordedV1,
+        authority,
+        "candidate receipt set",
+        |event| {
+            matches!(
+                &event.payload,
+                Payload::ActionReceiptSetRecordedV1(receipt_set)
+                    if receipt_set.run_id == request.run_id.to_string()
+                        && receipt_set.workflow_id == candidate.workflow_id
+                        && receipt_set.unit_id == candidate.unit_id
+                        && receipt_set.attempt == candidate.attempt
+                        && receipt_set.provenance_ref == candidate.provenance_ref
+                        && receipt_set.dispatch_envelope_digest == dispatch_envelope_digest
+                        && receipt_set.action_receipt_set_ref == candidate.action_receipt_set_ref
+                        && receipt_set.action_receipt_set_digest == candidate.action_receipt_set_digest
+            )
+        },
+    )?;
+    let Payload::ActionReceiptSetRecordedV1(receipt_set) = &receipt_set_event.payload else {
+        unreachable!("receipt-set event matcher returns only the expected payload")
+    };
+    if action_receipt_set_v1_digest(receipt_set).map_err(|error| {
+        LedgerError::CandidateCompletionAuthorityRejected {
+            reason: format!("could not canonicalize candidate receipt set: {error}"),
+        }
+    })? != receipt_set.action_receipt_set_digest
+    {
+        return candidate_completion_authority_rejected(
+            "candidate completion receipt set digest does not bind its canonical contents",
+        );
+    }
+    let receipt_set_sealed_at = parse_claim_timestamp(&receipt_set.sealed_at).map_err(|_| {
+        LedgerError::CandidateCompletionAuthorityRejected {
+            reason: "candidate completion receipt set sealed_at is not canonical RFC3339 UTC"
+                .into(),
+        }
+    })?;
+    if candidate_event.parent_event_id != Some(receipt_set_event.id)
+        || !tape_event_precedes(&receipt_set_event, &candidate_event)
+        || receipt_set_sealed_at > candidate_event.occurred_at
+    {
+        return candidate_completion_authority_rejected(
+            "candidate completion candidate artifact must directly follow its sealed receipt set in tape order",
+        );
+    }
+    ensure_governed_candidate_completion_lifecycle_is_open(
+        conn,
+        request,
+        &dispatch_event,
+        &dispatch,
+        &candidate_event,
+        &candidate,
+        &receipt_set_event,
+    )?;
+    // A candidate must be the result of the entire sealed V3 action set, not
+    // just the one Git action whose ref becomes the candidate. Reconstruct the
+    // complete request/claim/result/receipt set before deriving the focused
+    // candidate-create proof below; otherwise a set could omit a pending or
+    // failed sibling action and become certifiable here even though trusted
+    // replay rejects it.
+    verify_governed_candidate_receipt_set_completeness(
+        conn,
+        request,
+        authority,
+        &dispatch_event,
+        &dispatch,
+        &dispatch_envelope_digest,
+        &receipt_set_event,
+        receipt_set,
+        &candidate_create_action_id,
+    )?;
+    let matching_receipt_entries = receipt_set
+        .receipts
+        .iter()
+        .filter(|entry| entry.action_id == candidate_create_action_id)
+        .collect::<Vec<_>>();
+    if matching_receipt_entries.len() != 1 {
+        return candidate_completion_authority_rejected(
+            "candidate completion receipt set must contain exactly one candidate-create receipt entry",
+        );
+    }
+    let receipt_entry = matching_receipt_entries[0];
+
+    let receipt_event = unique_verified_kernel_event_matching(
+        conn,
+        request.run_id,
+        EventKind::ActionReceiptRecordedV2,
+        authority,
+        "candidate-create receipt",
+        |event| {
+            matches!(
+                &event.payload,
+                Payload::ActionReceiptRecordedV2(receipt)
+                    if receipt.action_receipt_ref == receipt_entry.action_receipt_ref
+            )
+        },
+    )?;
+    let Payload::ActionReceiptRecordedV2(receipt) = &receipt_event.payload else {
+        unreachable!("receipt event matcher returns only the expected payload")
+    };
+    let receipt_digest = action_receipt_recorded_v2_digest(receipt).map_err(|error| {
+        LedgerError::CandidateCompletionAuthorityRejected {
+            reason: format!("could not canonicalize candidate-create receipt: {error}"),
+        }
+    })?;
+    if receipt_digest != receipt_entry.action_receipt_digest
+        || receipt.run_id != request.run_id.to_string()
+        || receipt.workflow_id != candidate.workflow_id
+        || receipt.unit_id != candidate.unit_id
+        || receipt.attempt != candidate.attempt
+        || receipt.provenance_ref != candidate.provenance_ref
+        || receipt.action_id != candidate_create_action_id
+        || receipt.dispatch_envelope_digest != dispatch_envelope_digest
+        || receipt.capability_bundle_digest != dispatch.body.capability_bundle_digest
+        || receipt.policy_digest != expected_policy_digest
+        || receipt.context_manifest_digest != dispatch.body.context_manifest_digest
+        || receipt.worker_manifest_digest != dispatch.body.worker_manifest_digest
+        || receipt.sandbox_profile_digest != dispatch.body.sandbox_profile_digest
+        || receipt.authority_actor != authority.kernel_signer.actor_id
+        || receipt.execution_role != dispatch.body.execution_role
+        || receipt.outcome != ActionReceiptOutcomeV2::Succeeded
+    {
+        return candidate_completion_authority_rejected(
+            "candidate completion receipt does not bind the succeeded candidate-create action",
+        );
+    }
+
+    let action_request_event = unique_verified_kernel_event_matching(
+        conn,
+        request.run_id,
+        EventKind::ActionRequestedV2,
+        authority,
+        "candidate-create action request",
+        |event| {
+            matches!(
+                &event.payload,
+                Payload::ActionRequestedV2(action_request)
+                    if action_request.run_id == request.run_id.to_string()
+                        && action_request.action_id == candidate_create_action_id
+            )
+        },
+    )?;
+    let Payload::ActionRequestedV2(action_request) = &action_request_event.payload else {
+        unreachable!("action-request event matcher returns only the expected payload")
+    };
+    let action_request_digest = action_requested_v2_digest(action_request).map_err(|error| {
+        LedgerError::CandidateCompletionAuthorityRejected {
+            reason: format!("could not canonicalize candidate-create action request: {error}"),
+        }
+    })?;
+    let requested_at = parse_claim_timestamp(&action_request.requested_at).map_err(|_| {
+        LedgerError::CandidateCompletionAuthorityRejected {
+            reason: "candidate completion action request timestamp is not canonical RFC3339 UTC"
+                .into(),
+        }
+    })?;
+    let dispatch_issued_at = parse_claim_timestamp(&dispatch.body.issued_at).map_err(|_| {
+        LedgerError::CandidateCompletionAuthorityRejected {
+            reason: "candidate completion dispatch issued_at is not canonical RFC3339 UTC".into(),
+        }
+    })?;
+    // Candidate completion is historical verification, so do not require the
+    // dispatch to still be live now. Do re-derive the immutable effective
+    // deadline from its issued_at/expiry/compute budget: the original lease
+    // must have remained inside that authority window when it was issued.
+    let effective_deadline = validate_governed_dispatch(&dispatch, dispatch_issued_at)
+        .map_err(|error| LedgerError::CandidateCompletionAuthorityRejected {
+            reason: format!(
+                "candidate completion could not derive the governed dispatch effect deadline: {error}"
+            ),
+        })?
+        .effective_deadline;
+    if action_request_digest != receipt.action_request_digest
+        || action_request_event.parent_event_id != Some(dispatch_event.id)
+        || !tape_event_precedes(&dispatch_event, &action_request_event)
+        || action_request.action_kind != ActionKindV1::Git
+        || action_request.idempotency_key != receipt.idempotency_key
+        || action_request.workflow_id != dispatch.body.workflow_id
+        || action_request.unit_id != dispatch.body.unit_id
+        || action_request.attempt != dispatch.body.attempt
+        || action_request.provenance_ref != dispatch.body.provenance_ref
+        || action_request.dispatch_envelope_digest != dispatch_envelope_digest
+        || action_request.repository_binding_digest != dispatch.repository_binding_digest
+        || action_request.ledger_authority_realm_digest != dispatch.ledger_authority_realm_digest
+        || action_request.governed_packet_digest != dispatch.governed_packet_digest
+        || action_request.capability_bundle_digest != dispatch.body.capability_bundle_digest
+        || action_request.policy_digest != expected_policy_digest
+        || action_request.context_manifest_digest != dispatch.body.context_manifest_digest
+        || action_request.worker_manifest_digest != dispatch.body.worker_manifest_digest
+        || action_request.sandbox_profile_digest != dispatch.body.sandbox_profile_digest
+        || action_request.authority_actor != authority.kernel_signer.actor_id
+        || action_request.execution_role != dispatch.body.execution_role
+        || requested_at != action_request_event.occurred_at
+        || requested_at < dispatch_issued_at
+    {
+        return candidate_completion_authority_rejected(
+            "candidate completion request does not exactly bind the governed candidate-create action",
+        );
+    }
+
+    let claim_event = unique_verified_kernel_event_matching(
+        conn,
+        request.run_id,
+        EventKind::ActivityClaimedV1,
+        authority,
+        "candidate-create activity claim",
+        |event| event.parent_event_id == Some(action_request_event.id),
+    )?;
+    let Payload::ActivityClaimedV1(claim) = &claim_event.payload else {
+        unreachable!("claim event matcher returns only the expected payload")
+    };
+    let claim_event_digest = canonical_event_hash(&claim_event).map_err(|error| {
+        LedgerError::CandidateCompletionAuthorityRejected {
+            reason: format!("could not canonicalize candidate-create activity claim: {error}"),
+        }
+    })?;
+    let claimed_at = parse_claim_timestamp(&claim.claimed_at).map_err(|_| {
+        LedgerError::CandidateCompletionAuthorityRejected {
+            reason: "candidate completion activity claim timestamp is not canonical RFC3339 UTC"
+                .into(),
+        }
+    })?;
+    let lease_expires_at = parse_claim_timestamp(&claim.lease_expires_at).map_err(|_| {
+        LedgerError::CandidateCompletionAuthorityRejected {
+            reason: "candidate completion activity claim lease expiry is not canonical RFC3339 UTC"
+                .into(),
+        }
+    })?;
+    if claim.run_id != request.run_id
+        || claim_event.parent_event_id != Some(action_request_event.id)
+        || !tape_event_precedes(&action_request_event, &claim_event)
+        || claim.activity_id != candidate_create_action_id
+        || claim.idempotency_key != action_request.idempotency_key
+        || claim.action_kind != ActionKindV1::Git
+        || claim.action_request_event_id != action_request_event.id
+        || claim.action_request_digest != action_request_digest
+        || claim.dispatch_event_id != request.dispatch_event_id
+        || claim.dispatch_envelope_digest != dispatch_envelope_digest
+        || claim.authority_actor != authority.kernel_signer.actor_id
+        || claim.purpose != ActivityClaimPurposeV1::Generic
+        || claimed_at != claim_event.occurred_at
+        || claimed_at < requested_at
+        || lease_expires_at <= claimed_at
+        || lease_expires_at > effective_deadline
+    {
+        return candidate_completion_authority_rejected(
+            "candidate completion claim does not bind a live governed candidate-create request",
+        );
+    }
+
+    let result_event = unique_verified_kernel_event_matching(
+        conn,
+        request.run_id,
+        EventKind::ActivityResultRecordedV1,
+        authority,
+        "candidate-create activity result",
+        |event| event.parent_event_id == Some(claim_event.id),
+    )?;
+    let Payload::ActivityResultRecordedV1(result) = &result_event.payload else {
+        unreachable!("result event matcher returns only the expected payload")
+    };
+    let result_event_digest = canonical_event_hash(&result_event).map_err(|error| {
+        LedgerError::CandidateCompletionAuthorityRejected {
+            reason: format!("could not canonicalize candidate-create activity result: {error}"),
+        }
+    })?;
+    let result_recorded_at = parse_claim_timestamp(&result.recorded_at).map_err(|_| {
+        LedgerError::CandidateCompletionAuthorityRejected {
+            reason: "candidate completion activity result timestamp is not canonical RFC3339 UTC"
+                .into(),
+        }
+    })?;
+    let effective_lease_expires_at = effective_governed_candidate_activity_lease_expiry(
+        conn,
+        request,
+        authority,
+        &dispatch_event,
+        &dispatch_envelope_digest,
+        effective_deadline,
+        &action_request_event,
+        action_request,
+        &claim_event,
+        claim,
+        &result_event,
+    )?;
+    if result.run_id != request.run_id
+        || result_event.parent_event_id != Some(claim_event.id)
+        || !tape_event_precedes(&claim_event, &result_event)
+        || result.activity_id != candidate_create_action_id
+        || result.idempotency_key != action_request.idempotency_key
+        || result.claim_event_id != claim_event.id
+        || result.claim_event_digest != claim_event_digest
+        || result.lease_id != claim.lease_id
+        || result.outcome != ActivityResultOutcomeV1::Succeeded
+        || result_recorded_at != result_event.occurred_at
+        || result_recorded_at < claimed_at
+        || result_recorded_at >= effective_lease_expires_at
+        || receipt.result_digest != result.result_digest
+        || receipt.result_ref != result.result_ref
+        || receipt.evidence_digest != result.evidence_digest
+        || receipt.evidence_ref != result.evidence_ref
+    {
+        return candidate_completion_authority_rejected(
+            "candidate completion result and receipt do not bind one succeeded candidate-create lease",
+        );
+    }
+    let receipt_completed_at = parse_claim_timestamp(&receipt.completed_at).map_err(|_| {
+        LedgerError::CandidateCompletionAuthorityRejected {
+            reason: "candidate completion receipt timestamp is not canonical RFC3339 UTC".into(),
+        }
+    })?;
+    if receipt_event.parent_event_id != Some(result_event.id)
+        || !tape_event_precedes(&result_event, &receipt_event)
+        || !tape_event_precedes(&receipt_event, &receipt_set_event)
+        || receipt_completed_at < claimed_at
+        || receipt_completed_at > result_recorded_at
+        || receipt_set_sealed_at < receipt_completed_at
+    {
+        return candidate_completion_authority_rejected(
+            "candidate completion receipt-set timestamps do not follow the candidate-create activity",
+        );
+    }
+
+    let mut completion = CandidateCompletionRecordedV1 {
+        run_id: request.run_id.to_string(),
+        workflow_id: candidate.workflow_id,
+        unit_id: candidate.unit_id,
+        attempt: candidate.attempt,
+        provenance_ref: candidate.provenance_ref,
+        candidate_created_event_ref: request.candidate_created_event_id,
+        candidate_digest: candidate.candidate_digest,
+        candidate_create_action_id,
+        action_request_ref: action_request_event.id,
+        action_request_digest,
+        activity_claim_event_ref: claim_event.id,
+        activity_claim_event_digest: claim_event_digest,
+        activity_result_event_ref: result_event.id,
+        activity_result_event_digest: result_event_digest,
+        action_receipt_ref: receipt.action_receipt_ref.clone(),
+        action_receipt_digest: receipt_digest,
+        completion_digest: String::new(),
+        // Anchor completion to the already-signed candidate event, not wall
+        // clock time or an earlier receipt-set timestamp. Preserve its full
+        // nanosecond precision: the generic signed append boundary accepts
+        // candidate events more precise than the kernel's usual millisecond
+        // clock, and truncating here would create a completion before its
+        // parent that trusted promotion replay must reject.
+        completed_at: candidate_event
+            .occurred_at
+            .to_rfc3339_opts(SecondsFormat::Nanos, true),
+    };
+    completion.completion_digest =
+        candidate_completion_recorded_v1_digest(&completion).map_err(|error| {
+            LedgerError::CandidateCompletionAuthorityRejected {
+                reason: format!("could not canonicalize candidate completion proof: {error}"),
+            }
+        })?;
+    Ok(VerifiedGovernedCandidateCompletionEvidence { completion })
+}
+
+fn governed_candidate_completion_by_candidate(
+    conn: &Connection,
+    run_id: RunId,
+    candidate_created_event_id: EventId,
+) -> Result<Option<StoredGovernedCandidateCompletion>> {
+    conn.query_row(
+        "SELECT run_id, dispatch_event_id, candidate_created_event_id, candidate_digest, \
+                candidate_create_action_id, action_request_event_id, action_request_digest, \
+                activity_claim_event_id, activity_claim_event_digest, activity_result_event_id, \
+                activity_result_event_digest, action_receipt_ref, action_receipt_digest, \
+                candidate_completion_event_id, candidate_completion_event_digest, completion_digest, completed_at \
+         FROM governed_candidate_completions \
+         WHERE run_id = ?1 AND candidate_created_event_id = ?2",
+        params![run_id.to_string(), candidate_created_event_id.to_string()],
+        |row| {
+            Ok(StoredGovernedCandidateCompletion {
+                run_id: row.get(0)?,
+                dispatch_event_id: row.get(1)?,
+                candidate_created_event_id: row.get(2)?,
+                candidate_digest: row.get(3)?,
+                candidate_create_action_id: row.get(4)?,
+                action_request_event_id: row.get(5)?,
+                action_request_digest: row.get(6)?,
+                activity_claim_event_id: row.get(7)?,
+                activity_claim_event_digest: row.get(8)?,
+                activity_result_event_id: row.get(9)?,
+                activity_result_event_digest: row.get(10)?,
+                action_receipt_ref: row.get(11)?,
+                action_receipt_digest: row.get(12)?,
+                candidate_completion_event_id: row.get(13)?,
+                candidate_completion_event_digest: row.get(14)?,
+                completion_digest: row.get(15)?,
+                completed_at: row.get(16)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(LedgerError::from)
+}
+
+/// Reconciliation guard for the append-only completion lane. A projection may
+/// name exactly one completion event; an unprojected or sibling event is
+/// ambiguous evidence and must never be silently sealed or ignored.
+fn require_candidate_completion_event_projection(
+    conn: &Connection,
+    request: &GovernedCandidateCompletionRequestV1,
+    expected_event_id: Option<EventId>,
+) -> Result<()> {
+    let mut statement = conn.prepare(
+        "SELECT id, run_id, parent_event_id, schema_version, kind, occurred_at, payload \
+         FROM events \
+         WHERE run_id = ?1 \
+           AND kind = 'candidate_completion_recorded_v1' \
+         ORDER BY id ASC",
+    )?;
+    let event_ids = statement
+        .query_map(params![request.run_id.to_string()], |row| {
+            Ok(StoredEventRow {
+                id: row.get(0)?,
+                run_id: row.get(1)?,
+                parent_event_id: row.get(2)?,
+                schema_version: row.get(3)?,
+                kind: row.get(4)?,
+                occurred_at: row.get(5)?,
+                payload: row.get(6)?,
+            })
+        })?
+        .map(|row| -> Result<Option<EventId>> {
+            let event = row?.to_event().map_err(|error| {
+                candidate_completion_reconciliation_required(
+                    request,
+                    format!(
+                        "candidate completion reconciliation scan could not canonicalize a completion event: {error}"
+                    ),
+                )
+            })?;
+            let directly_parented = event.parent_event_id == Some(request.candidate_created_event_id);
+            let payload_names_candidate = matches!(
+                &event.payload,
+                Payload::CandidateCompletionRecordedV1(completion)
+                    if completion.candidate_created_event_ref == request.candidate_created_event_id
+            );
+            Ok((directly_parented || payload_names_candidate).then_some(event.id))
+        })
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    match expected_event_id {
+        None if event_ids.is_empty() => Ok(()),
+        Some(expected) if event_ids.as_slice() == [expected] => Ok(()),
+        None => Err(candidate_completion_reconciliation_required(
+            request,
+            "a candidate completion event exists without a trusted native completion projection",
+        )),
+        Some(_) => Err(candidate_completion_reconciliation_required(
+            request,
+            "candidate completion projection does not name the only tape completion event for its candidate",
+        )),
+    }
+}
+
+fn stored_governed_candidate_completion_matches(
+    stored: &StoredGovernedCandidateCompletion,
+    request: &GovernedCandidateCompletionRequestV1,
+    completion: &CandidateCompletionRecordedV1,
+) -> bool {
+    stored.run_id == request.run_id.to_string()
+        && stored.dispatch_event_id == request.dispatch_event_id.to_string()
+        && stored.candidate_created_event_id == request.candidate_created_event_id.to_string()
+        && stored.candidate_digest == completion.candidate_digest
+        && stored.candidate_create_action_id == completion.candidate_create_action_id
+        && stored.action_request_event_id == completion.action_request_ref.to_string()
+        && stored.action_request_digest == completion.action_request_digest
+        && stored.activity_claim_event_id == completion.activity_claim_event_ref.to_string()
+        && stored.activity_claim_event_digest == completion.activity_claim_event_digest
+        && stored.activity_result_event_id == completion.activity_result_event_ref.to_string()
+        && stored.activity_result_event_digest == completion.activity_result_event_digest
+        && stored.action_receipt_ref == completion.action_receipt_ref
+        && stored.action_receipt_digest == completion.action_receipt_digest
+        && stored.completion_digest == completion.completion_digest
+        && stored.completed_at == completion.completed_at
+}
+
+fn resolve_existing_governed_candidate_completion(
+    conn: &Connection,
+    stored: &StoredGovernedCandidateCompletion,
+    request: &GovernedCandidateCompletionRequestV1,
+    authority: &GovernedPromotionAuthorityV1,
+) -> Result<GovernedCandidateCompletionDispositionV1> {
+    let evidence = verify_governed_candidate_completion_evidence(conn, request, authority)?;
+    if !stored_governed_candidate_completion_matches(stored, request, &evidence.completion) {
+        return Err(candidate_completion_reconciliation_required(
+            request,
+            "candidate-completion projection does not exactly match the re-derived immutable lineage",
+        ));
+    }
+    let completion_event_id = parse_event_id(
+        &stored.candidate_completion_event_id,
+        "governed_candidate_completions",
+    )?;
+    let completion_event = load_verified_promotion_event(
+        conn,
+        completion_event_id,
+        &authority.trusted_keys,
+        &authority.kernel_signer,
+        "candidate completion",
+    )?;
+    let completion_event_digest = canonical_event_hash(&completion_event).map_err(|error| {
+        LedgerError::CandidateCompletionReconciliationRequired {
+            run_id: request.run_id.to_string(),
+            candidate_created_event_id: request.candidate_created_event_id.to_string(),
+            reason: format!("could not canonicalize stored candidate-completion event: {error}"),
+        }
+    })?;
+    let Payload::CandidateCompletionRecordedV1(completion) = &completion_event.payload else {
+        return Err(candidate_completion_reconciliation_required(
+            request,
+            "candidate-completion projection points to a non-completion tape event",
+        ));
+    };
+    if completion_event.run_id != request.run_id
+        || completion_event.parent_event_id != Some(request.candidate_created_event_id)
+        || completion_event.occurred_at
+            != parse_claim_timestamp(&evidence.completion.completed_at).map_err(|_| {
+                candidate_completion_reconciliation_required(
+                    request,
+                    "re-derived candidate completion timestamp is invalid",
+                )
+            })?
+        || completion != &evidence.completion
+        || completion_event_digest != stored.candidate_completion_event_digest
+    {
+        return Err(candidate_completion_reconciliation_required(
+            request,
+            "candidate-completion projection or signed tape event is substituted or corrupt",
+        ));
+    }
+    require_candidate_completion_event_projection(conn, request, Some(completion_event_id))?;
+    Ok(GovernedCandidateCompletionDispositionV1::Existing {
+        candidate_completion_event_id: completion_event_id,
+        candidate_completion_event_digest: completion_event_digest,
+        completion_digest: evidence.completion.completion_digest,
+    })
+}
+
+fn insert_governed_candidate_completion(
+    conn: &Connection,
+    request: &GovernedCandidateCompletionRequestV1,
+    completion: &CandidateCompletionRecordedV1,
+    event: &Event,
+    event_digest: &str,
+) -> Result<()> {
+    conn.execute(
+        r#"INSERT INTO governed_candidate_completions (
+                run_id, dispatch_event_id, candidate_created_event_id, candidate_digest,
+                candidate_create_action_id, action_request_event_id, action_request_digest,
+                activity_claim_event_id, activity_claim_event_digest,
+                activity_result_event_id, activity_result_event_digest,
+                action_receipt_ref, action_receipt_digest,
+                candidate_completion_event_id, candidate_completion_event_digest,
+                completion_digest, completed_at
+            ) VALUES (
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17
+            )"#,
+        params![
+            request.run_id.to_string(),
+            request.dispatch_event_id.to_string(),
+            request.candidate_created_event_id.to_string(),
+            &completion.candidate_digest,
+            &completion.candidate_create_action_id,
+            completion.action_request_ref.to_string(),
+            &completion.action_request_digest,
+            completion.activity_claim_event_ref.to_string(),
+            &completion.activity_claim_event_digest,
+            completion.activity_result_event_ref.to_string(),
+            &completion.activity_result_event_digest,
+            &completion.action_receipt_ref,
+            &completion.action_receipt_digest,
+            event.id.to_string(),
+            event_digest,
+            &completion.completion_digest,
+            &completion.completed_at,
         ],
     )?;
     Ok(())

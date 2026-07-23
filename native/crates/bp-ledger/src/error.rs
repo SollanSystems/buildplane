@@ -101,6 +101,16 @@ pub enum LedgerError {
         reason: String,
     },
 
+    #[error("governed candidate completion authority rejected: {reason}")]
+    CandidateCompletionAuthorityRejected { reason: String },
+
+    #[error("governed candidate completion requires reconciliation for run {run_id} and candidate-created event {candidate_created_event_id}: {reason}")]
+    CandidateCompletionReconciliationRequired {
+        run_id: String,
+        candidate_created_event_id: String,
+        reason: String,
+    },
+
     #[error("governed promotion authority rejected: {reason}")]
     PromotionAuthorityRejected { reason: String },
 
