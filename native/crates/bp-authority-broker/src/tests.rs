@@ -387,7 +387,10 @@ fn verified_grant_moves_one_private_capability_and_pairs_the_gateway_result() {
             lease_id: "private-lease".into(),
             authorization_ref: "authorization://opaque".into(),
         })],
-        [Ok(ResultDisposition::Recorded { run_id })],
+        [Ok(ResultDisposition::Recorded {
+            run_id,
+            outcome: ActivityResultOutcomeV1::Succeeded,
+        })],
         succeeded_completion(),
     );
 
@@ -480,9 +483,12 @@ fn checkpointed_sqlite_replay_gate_binds_the_exact_run_dispatch_and_model_action
             })]
             .into_iter()
             .collect(),
-            results: [Ok(ResultDisposition::Recorded { run_id })]
-                .into_iter()
-                .collect(),
+            results: [Ok(ResultDisposition::Recorded {
+                run_id,
+                outcome: ActivityResultOutcomeV1::Succeeded,
+            })]
+            .into_iter()
+            .collect(),
         },
         FakeGateway {
             state: Rc::clone(&gateway_state),
@@ -596,8 +602,25 @@ fn durable_retry_states_are_status_only_and_never_reenter_the_gateway() {
             BrokerModelActionStatus::Pending,
         ),
         (
-            AuthorityGrant::Recorded { run_id },
+            AuthorityGrant::Recorded {
+                run_id,
+                outcome: ActivityResultOutcomeV1::Succeeded,
+            },
             BrokerModelActionStatus::Recorded,
+        ),
+        (
+            AuthorityGrant::Recorded {
+                run_id,
+                outcome: ActivityResultOutcomeV1::Failed,
+            },
+            BrokerModelActionStatus::Failed,
+        ),
+        (
+            AuthorityGrant::Recorded {
+                run_id,
+                outcome: ActivityResultOutcomeV1::Unknown,
+            },
+            BrokerModelActionStatus::ReconciliationRequired,
         ),
         (
             AuthorityGrant::LeaseExpired { run_id },
@@ -689,6 +712,53 @@ fn preexisting_replayed_claim_can_only_resolve_to_a_status_not_a_fresh_gateway_c
 }
 
 #[test]
+fn replayed_unknown_result_requires_reconciliation_without_gateway_reentry() {
+    let run_id = RunId::new();
+    let request = request();
+    let backend_state = Rc::new(RefCell::new(BackendState::default()));
+    let gateway_state = Rc::new(RefCell::new(GatewayState::default()));
+    let mut authority = BrokerModelAuthority::new(
+        run_id,
+        FakeVerifier {
+            calls: Rc::new(RefCell::new(Vec::new())),
+            results: [Ok(TrustedReplayBinding {
+                run_id,
+                dispatch_event_id: request.dispatch_event_id,
+                action_request_event_id: request.action_request_event_id,
+                dispatch_role: ExecutionRoleV1::Implementer,
+                action_role: ExecutionRoleV1::Implementer,
+                has_existing_claim: true,
+            })]
+            .into_iter()
+            .collect(),
+        },
+        FakeBackend {
+            state: Rc::clone(&backend_state),
+            grants: [Ok(AuthorityGrant::Recorded {
+                run_id,
+                outcome: ActivityResultOutcomeV1::Unknown,
+            })]
+            .into_iter()
+            .collect(),
+            results: VecDeque::new(),
+        },
+        FakeGateway {
+            state: Rc::clone(&gateway_state),
+            completion: Some(succeeded_completion()),
+        },
+        LeasePolicy::from_startup_config(30_000).unwrap(),
+    );
+
+    assert_eq!(
+        authority.authorize_and_execute(request).unwrap(),
+        BrokerModelActionStatus::ReconciliationRequired
+    );
+    assert_eq!(backend_state.borrow().authorize_calls.len(), 1);
+    assert!(backend_state.borrow().result_calls.is_empty());
+    assert_eq!(gateway_state.borrow().calls, 0);
+}
+
+#[test]
 fn provider_failure_after_grant_is_paired_and_durably_recorded_unknown() {
     let run_id = RunId::new();
     let request = request();
@@ -700,13 +770,16 @@ fn provider_failure_after_grant_is_paired_and_durably_recorded_unknown() {
             lease_id: "ambiguous-lease".into(),
             authorization_ref: "authorization://ambiguous".into(),
         })],
-        [Ok(ResultDisposition::Recorded { run_id })],
+        [Ok(ResultDisposition::Recorded {
+            run_id,
+            outcome: ActivityResultOutcomeV1::Unknown,
+        })],
         unknown_completion(),
     );
 
     assert_eq!(
         authority.authorize_and_execute(request).unwrap(),
-        BrokerModelActionStatus::Recorded
+        BrokerModelActionStatus::ReconciliationRequired
     );
     assert_eq!(gateway_state.borrow().calls, 1);
     assert_eq!(

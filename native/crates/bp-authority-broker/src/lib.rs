@@ -210,9 +210,23 @@ impl<'a> BrokerPromotionDecisionAuthority<'a> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum BrokerModelActionStatus {
     Pending,
+    /// A durable successful terminal result. This is the only completion state
+    /// that a controller may treat as reusable success.
     Recorded,
+    /// A durable, known terminal failure. It is not a retry permit.
+    Failed,
     LeaseExpired,
     ReconciliationRequired,
+}
+
+fn status_for_terminal_outcome(outcome: ActivityResultOutcomeV1) -> BrokerModelActionStatus {
+    match outcome {
+        ActivityResultOutcomeV1::Succeeded => BrokerModelActionStatus::Recorded,
+        ActivityResultOutcomeV1::Failed => BrokerModelActionStatus::Failed,
+        // Unknown effects are durable evidence of ambiguity, never successful
+        // completion and never permission to repeat the provider call.
+        ActivityResultOutcomeV1::Unknown => BrokerModelActionStatus::ReconciliationRequired,
+    }
 }
 
 /// Terminal material produced inside the credential-owning gateway.
@@ -333,6 +347,7 @@ pub(crate) enum AuthorityGrant {
     },
     Recorded {
         run_id: RunId,
+        outcome: ActivityResultOutcomeV1,
     },
     LeaseExpired {
         run_id: RunId,
@@ -340,8 +355,13 @@ pub(crate) enum AuthorityGrant {
 }
 
 pub(crate) enum ResultDisposition {
-    Recorded { run_id: RunId },
-    LeaseExpired { run_id: RunId },
+    Recorded {
+        run_id: RunId,
+        outcome: ActivityResultOutcomeV1,
+    },
+    LeaseExpired {
+        run_id: RunId,
+    },
 }
 
 #[derive(Debug, Error)]
@@ -444,8 +464,8 @@ where
             AuthorityGrant::Pending { run_id } if run_id == self.run_id => {
                 return Ok(BrokerModelActionStatus::Pending)
             }
-            AuthorityGrant::Recorded { run_id } if run_id == self.run_id => {
-                return Ok(BrokerModelActionStatus::Recorded)
+            AuthorityGrant::Recorded { run_id, outcome } if run_id == self.run_id => {
+                return Ok(status_for_terminal_outcome(outcome))
             }
             AuthorityGrant::LeaseExpired { run_id } if run_id == self.run_id => {
                 return Ok(BrokerModelActionStatus::LeaseExpired)
@@ -466,8 +486,8 @@ where
             Err(_) => return Ok(BrokerModelActionStatus::ReconciliationRequired),
         };
         Ok(match disposition {
-            ResultDisposition::Recorded { run_id } if run_id == self.run_id => {
-                BrokerModelActionStatus::Recorded
+            ResultDisposition::Recorded { run_id, outcome } if run_id == self.run_id => {
+                status_for_terminal_outcome(outcome)
             }
             // This expiry is observed only after the credential gateway has
             // crossed the provider-effect boundary. It is therefore
@@ -630,8 +650,8 @@ impl AuthorityBackend for LedgerAuthorityBackend<'_> {
             GovernedModelActionAuthorizeAndClaimDispositionV1::Pending { .. } => {
                 AuthorityGrant::Pending { run_id }
             }
-            GovernedModelActionAuthorizeAndClaimDispositionV1::Recorded { .. } => {
-                AuthorityGrant::Recorded { run_id }
+            GovernedModelActionAuthorizeAndClaimDispositionV1::Recorded { outcome, .. } => {
+                AuthorityGrant::Recorded { run_id, outcome }
             }
             GovernedModelActionAuthorizeAndClaimDispositionV1::LeaseExpired { .. } => {
                 AuthorityGrant::LeaseExpired { run_id }
@@ -666,7 +686,9 @@ impl AuthorityBackend for LedgerAuthorityBackend<'_> {
             .map_err(AuthorityBackendError::from_ledger)?;
 
         Ok(match disposition {
-            ActivityResultDispositionV1::Recorded { .. } => ResultDisposition::Recorded { run_id },
+            ActivityResultDispositionV1::Recorded { outcome, .. } => {
+                ResultDisposition::Recorded { run_id, outcome }
+            }
             ActivityResultDispositionV1::LeaseExpired { .. } => {
                 ResultDisposition::LeaseExpired { run_id }
             }
