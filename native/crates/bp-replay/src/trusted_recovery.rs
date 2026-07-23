@@ -15,6 +15,7 @@ use crate::activity_decision::{
 };
 use crate::engine::{EngineError, ReplayEngine, TrustSpineSignerRole, TrustedReplayAuthorities};
 use crate::otel_projection::{VerifiedOtelProjectionErrorV1, VerifiedOtelProjectionV1};
+use crate::reader::VerifiedEvent;
 use crate::state::{ReplayIssue, WorkflowInstanceV1};
 use crate::tape_integrity::{
     verify_full_tape_integrity_v1, TapeIntegrityError, TapeIntegrityReportV1,
@@ -22,12 +23,24 @@ use crate::tape_integrity::{
 use bp_ledger::canonicalize::{
     is_canonical_buildplane_candidate_ref, BUILDPANE_CANDIDATE_REF_PREFIX,
 };
+use bp_ledger::id::{EventId, RunId};
 use bp_ledger::payload::trust_spine::{
     ActionEvidenceVersionV1, CommitModeV1, PromotionDecisionKindV1, PromotionResultOutcomeV1,
     ReconciliationResolutionOutcomeV1, TrustTierV1,
 };
 use bp_ledger::signing::ActorKeyRef;
+use bp_ledger::storage::sqlite::{
+    ensure_workflow_instance_snapshot_cache_schema_v1,
+    workflow_instance_snapshot_cache_workflow_json_digest_v1,
+    WorkflowInstanceSnapshotCacheAuthorityV1, WorkflowInstanceSnapshotCacheEntryV1,
+    WORKFLOW_INSTANCE_SNAPSHOT_CACHE_MAX_ROWS_V1,
+    WORKFLOW_INSTANCE_SNAPSHOT_CACHE_MAX_WORKFLOW_JSON_BYTES_V1,
+    WORKFLOW_INSTANCE_SNAPSHOT_CACHE_SCHEMA_VERSION_V1,
+};
 use chrono::DateTime;
+use rusqlite::{
+    params, Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -70,6 +83,81 @@ pub enum TrustedGovernedRecoveryError {
         "promotion evidence for candidate {candidate_digest} is not bound to its immutable candidate"
     )]
     PromotionCandidateConflict { candidate_digest: String },
+}
+
+/// Why an explicit non-authoritative workflow snapshot-cache projection could
+/// not be emitted from a recovery snapshot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum WorkflowInstanceSnapshotCacheProjectionErrorV1 {
+    #[error("workflow snapshot-cache projection requires an immutable full-replay source anchor")]
+    MissingImmutableReplaySourceAnchor,
+    #[error("workflow replay projection could not serialize canonical cache JSON")]
+    WorkflowJsonSerialization,
+    #[error("workflow replay projection canonical cache JSON could not be digested")]
+    WorkflowJsonDigest,
+}
+
+/// Why a trusted recovery snapshot could not publish its non-authoritative
+/// workflow cache projection.
+///
+/// Cache publication is intentionally stricter than projection: it must prove
+/// that the normal append-only tape high-water (event count plus final UUIDv7
+/// id) still matches the private source anchor captured during full trusted
+/// replay. It does not revalidate source-content identity; every governed
+/// recovery independently verifies the full signed tape. A cache row is never
+/// replay, recovery, effect, or authorization input.
+#[derive(Debug, thiserror::Error)]
+pub enum WorkflowInstanceSnapshotCachePersistenceErrorV1 {
+    #[error("workflow snapshot-cache persistence requires an immutable full-replay source anchor")]
+    MissingImmutableReplaySourceAnchor,
+    #[error("workflow snapshot-cache projection failed: {0}")]
+    Projection(#[from] WorkflowInstanceSnapshotCacheProjectionErrorV1),
+    #[error(
+        "workflow snapshot-cache persistence received {entry_count} entries, exceeding the fixed maximum of {max_entries}"
+    )]
+    EntryLimitExceeded {
+        entry_count: usize,
+        max_entries: usize,
+    },
+    #[error(
+        "workflow snapshot-cache entry for dispatch {dispatch_event_id} exceeds the fixed JSON limit of {max_workflow_json_bytes} bytes"
+    )]
+    WorkflowJsonTooLarge {
+        dispatch_event_id: String,
+        max_workflow_json_bytes: usize,
+    },
+    #[error(
+        "workflow snapshot-cache capacity would exceed its fixed maximum of {max_rows}: {current_rows} existing rows plus {new_rows} new rows"
+    )]
+    CacheCapacityExceeded {
+        current_rows: usize,
+        new_rows: usize,
+        max_rows: usize,
+    },
+    #[error(
+        "workflow snapshot-cache source changed for run {run_id}: expected {expected_event_count} events through {expected_last_event_id}, found {actual_event_count} events through {actual_last_event_id:?}"
+    )]
+    SourceChanged {
+        run_id: String,
+        expected_event_count: u64,
+        expected_last_event_id: String,
+        actual_event_count: u64,
+        actual_last_event_id: Option<String>,
+    },
+    #[error(
+        "workflow snapshot-cache conflict for run {run_id}, dispatch {dispatch_event_id}, reducer {reducer_schema_version}: existing source {existing_source_event_count} through {existing_source_last_event_id} is not an exact repeat or an older source"
+    )]
+    Conflict {
+        run_id: String,
+        dispatch_event_id: String,
+        reducer_schema_version: u32,
+        existing_source_event_count: u64,
+        existing_source_last_event_id: String,
+    },
+    #[error("workflow snapshot-cache schema initialization failed: {0}")]
+    Initialize(#[source] bp_ledger::LedgerError),
+    #[error("workflow snapshot-cache persistence database operation failed: {0}")]
+    Sqlite(#[from] rusqlite::Error),
 }
 
 /// Immutable, tape-derived identity for a governed promotion decision.
@@ -213,6 +301,9 @@ pub struct TrustedGovernedRecoverySnapshot {
     run_id: String,
     pinned_kernel_signer: ActorKeyRef,
     tape_integrity: TapeIntegrityReportV1,
+    /// Private, immutable anchor for the exact verified event slice consumed
+    /// before this snapshot was constructed. It is never caller supplied.
+    snapshot_cache_source_anchor: Option<TrustedReplaySourceAnchorV1>,
     workflows_by_dispatch_event_ref: BTreeMap<String, WorkflowInstanceV1>,
     candidate_dispatch_index: BTreeMap<String, String>,
     promotion_dispatch_index: BTreeMap<PromotionIdentity, String>,
@@ -225,6 +316,202 @@ pub struct TrustedGovernedRecoverySnapshot {
 /// or caller-selected setting: exceeding it fails before a partial recovery
 /// snapshot can be created or used as authority.
 pub const TRUSTED_GOVERNED_RECOVERY_MAX_EVENTS_V1: usize = 100_000;
+
+/// The only reducer schema admitted by the V1 non-authoritative cache table.
+///
+/// A cache reader must treat a different reducer schema as stale data, never
+/// as recovery authority. A future reducer must introduce a new bounded cache
+/// table or an explicit migration rather than incrementing this value in place.
+pub const WORKFLOW_INSTANCE_SNAPSHOT_CACHE_REDUCER_SCHEMA_VERSION_V1: u32 = 1;
+
+/// Typed anchors copied only from the immutable verified event slice used to
+/// create a trusted recovery snapshot. This remains private so callers cannot
+/// fabricate source coverage for a cache projection.
+#[derive(Clone, Copy, Debug)]
+struct TrustedReplaySourceAnchorV1 {
+    run_id: RunId,
+    source_event_count: u64,
+    source_last_event_id: EventId,
+    checkpoint_event_ref: EventId,
+    through_event_ref: EventId,
+}
+
+impl TrustedReplaySourceAnchorV1 {
+    fn from_verified_events(
+        events: &[VerifiedEvent],
+        tape_integrity: &TapeIntegrityReportV1,
+    ) -> Self {
+        let first_event = events
+            .first()
+            .expect("full trusted tape integrity requires at least one source event");
+        let last_event = events
+            .last()
+            .expect("full trusted tape integrity requires a last source event");
+        let event_id_for_ref = |event_ref: &str| {
+            events
+                .iter()
+                .find(|verified| verified.event.id.to_string() == event_ref)
+                .map(|verified| verified.event.id)
+                .expect("verified tape integrity reference must resolve inside the source slice")
+        };
+
+        Self {
+            run_id: first_event.event.run_id,
+            source_event_count: u64::try_from(events.len())
+                .expect("trusted recovery source event count must fit u64"),
+            source_last_event_id: last_event.event.id,
+            checkpoint_event_ref: event_id_for_ref(&tape_integrity.checkpoint_event_ref),
+            through_event_ref: event_id_for_ref(&tape_integrity.through_event_ref),
+        }
+    }
+}
+
+macro_rules! with_workflow_instance_snapshot_cache_entry_params_v1 {
+    ($entry:expr, $sql_params:ident => $body:expr) => {{
+        let entry = $entry;
+        let run_id = entry.run_id.to_string();
+        let dispatch_event_id = entry.dispatch_event_id.to_string();
+        let reducer_schema_version = i64::from(entry.reducer_schema_version);
+        let authority = entry.authority.as_wire();
+        let cache_schema_version = i64::from(entry.cache_schema_version);
+        let attempt = i64::from(entry.attempt);
+        // All real entries originate from a trusted recovery scan bounded by
+        // TRUSTED_GOVERNED_RECOVERY_MAX_EVENTS_V1, so these conversions remain
+        // representable by SQLite's signed INTEGER domain.
+        let source_event_count = i64::try_from(entry.source_event_count)
+            .expect("bounded trusted recovery source count fits SQLite INTEGER");
+        let source_last_event_id = entry.source_last_event_id.to_string();
+        let checkpoint_event_ref = entry.checkpoint_event_ref.to_string();
+        let through_event_ref = entry.through_event_ref.to_string();
+        let signed_non_checkpoint_event_count =
+            i64::try_from(entry.signed_non_checkpoint_event_count)
+                .expect("bounded trusted recovery signed count fits SQLite INTEGER");
+        let tape_root_algorithm = workflow_instance_snapshot_cache_tape_root_algorithm_v1(entry);
+        let $sql_params = params![
+            run_id,
+            dispatch_event_id,
+            reducer_schema_version,
+            authority,
+            cache_schema_version,
+            entry.workflow_id,
+            entry.workflow_revision,
+            entry.unit_id,
+            attempt,
+            source_event_count,
+            source_last_event_id,
+            checkpoint_event_ref,
+            entry.checkpoint_event_digest,
+            through_event_ref,
+            signed_non_checkpoint_event_count,
+            entry.tape_root_hash,
+            tape_root_algorithm,
+            entry.pinned_kernel_signer_actor_id,
+            entry.pinned_kernel_signer_key_id,
+            entry.pinned_kernel_signer_public_key_hash,
+            entry.workflow_json,
+            entry.workflow_json_digest,
+        ];
+        $body
+    }};
+}
+
+fn workflow_instance_snapshot_cache_entry_matches_v1(
+    tx: &Transaction<'_>,
+    entry: &WorkflowInstanceSnapshotCacheEntryV1,
+) -> Result<bool, rusqlite::Error> {
+    with_workflow_instance_snapshot_cache_entry_params_v1!(entry, sql_params => tx.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM workflow_instance_snapshot_cache_v1
+            WHERE run_id = ?1
+              AND dispatch_event_id = ?2
+              AND reducer_schema_version = ?3
+              AND authority = ?4
+              AND cache_schema_version = ?5
+              AND workflow_id = ?6
+              AND workflow_revision = ?7
+              AND unit_id = ?8
+              AND attempt = ?9
+              AND source_event_count = ?10
+              AND source_last_event_id = ?11
+              AND checkpoint_event_ref = ?12
+              AND checkpoint_event_digest = ?13
+              AND through_event_ref = ?14
+              AND signed_non_checkpoint_event_count = ?15
+              AND tape_root_hash = ?16
+              AND tape_root_algorithm = ?17
+              AND pinned_kernel_signer_actor_id = ?18
+              AND pinned_kernel_signer_key_id = ?19
+              AND pinned_kernel_signer_public_key_hash IS ?20
+              AND workflow_json = ?21
+              AND workflow_json_digest = ?22
+        )",
+        sql_params,
+        |row| row.get(0),
+    ))
+}
+
+fn insert_workflow_instance_snapshot_cache_entry_v1(
+    tx: &Transaction<'_>,
+    entry: &WorkflowInstanceSnapshotCacheEntryV1,
+) -> Result<(), rusqlite::Error> {
+    with_workflow_instance_snapshot_cache_entry_params_v1!(entry, sql_params => tx.execute(
+        "INSERT INTO workflow_instance_snapshot_cache_v1 (
+            run_id, dispatch_event_id, reducer_schema_version, authority,
+            cache_schema_version, workflow_id, workflow_revision, unit_id,
+            attempt, source_event_count, source_last_event_id,
+            checkpoint_event_ref, checkpoint_event_digest, through_event_ref,
+            signed_non_checkpoint_event_count, tape_root_hash,
+            tape_root_algorithm, pinned_kernel_signer_actor_id,
+            pinned_kernel_signer_key_id, pinned_kernel_signer_public_key_hash,
+            workflow_json, workflow_json_digest
+        ) VALUES (
+            ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
+            ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22
+        )",
+        sql_params,
+    ))?;
+    Ok(())
+}
+
+fn update_workflow_instance_snapshot_cache_entry_v1(
+    tx: &Transaction<'_>,
+    entry: &WorkflowInstanceSnapshotCacheEntryV1,
+) -> Result<(), rusqlite::Error> {
+    let changed = with_workflow_instance_snapshot_cache_entry_params_v1!(entry, sql_params => tx.execute(
+        "UPDATE workflow_instance_snapshot_cache_v1 SET
+            authority = ?4,
+            cache_schema_version = ?5,
+            workflow_id = ?6,
+            workflow_revision = ?7,
+            unit_id = ?8,
+            attempt = ?9,
+            source_event_count = ?10,
+            source_last_event_id = ?11,
+            checkpoint_event_ref = ?12,
+            checkpoint_event_digest = ?13,
+            through_event_ref = ?14,
+            signed_non_checkpoint_event_count = ?15,
+            tape_root_hash = ?16,
+            tape_root_algorithm = ?17,
+            pinned_kernel_signer_actor_id = ?18,
+            pinned_kernel_signer_key_id = ?19,
+            pinned_kernel_signer_public_key_hash = ?20,
+            workflow_json = ?21,
+            workflow_json_digest = ?22
+          WHERE run_id = ?1 AND dispatch_event_id = ?2 AND reducer_schema_version = ?3",
+        sql_params,
+    ))?;
+    debug_assert_eq!(changed, 1, "existing cache key must update exactly one row");
+    Ok(())
+}
+
+fn workflow_instance_snapshot_cache_tape_root_algorithm_v1(
+    entry: &WorkflowInstanceSnapshotCacheEntryV1,
+) -> &'static str {
+    match entry.tape_root_algorithm {
+        bp_ledger::payload::checkpoint::TapeRootAlgorithm::Sha256Linear => "sha256_linear",
+    }
+}
 
 impl TrustedGovernedRecoverySnapshot {
     /// Compatibility entry point for fully verified governed recovery. It
@@ -292,10 +579,19 @@ impl TrustedGovernedRecoverySnapshot {
         let tape_integrity =
             verify_full_tape_integrity_v1(replay.verified_events(), run_id, pinned_kernel_signer)?;
 
-        Self::from_verified_replay(
+        // Keep the exact immutable replay source anchor private with the
+        // snapshot. In particular, no cache projector accepts an event count
+        // or last-event reference from its caller.
+        let snapshot_cache_source_anchor = TrustedReplaySourceAnchorV1::from_verified_events(
+            replay.verified_events(),
+            &tape_integrity,
+        );
+
+        Self::from_verified_replay_with_source_anchor(
             run_id,
             pinned_kernel_signer.clone(),
             tape_integrity,
+            Some(snapshot_cache_source_anchor),
             replay.state().workflow_instances.values(),
         )
     }
@@ -313,6 +609,231 @@ impl TrustedGovernedRecoverySnapshot {
     /// Full-prefix tape-root evidence for this immutable recovery view.
     pub fn tape_integrity(&self) -> &TapeIntegrityReportV1 {
         &self.tape_integrity
+    }
+
+    /// Project already verified workflows into explicit, non-authoritative
+    /// cache records.
+    ///
+    /// This is a deterministic serialization of this snapshot's private
+    /// trusted map and immutable source anchors. It neither persists anything
+    /// nor reads cache state, and an entry must never be treated as a replay,
+    /// recovery, effect, or authorization input.
+    pub fn workflow_instance_snapshot_cache_entries_v1(
+        &self,
+    ) -> Result<
+        Vec<WorkflowInstanceSnapshotCacheEntryV1>,
+        WorkflowInstanceSnapshotCacheProjectionErrorV1,
+    > {
+        let snapshot_cache_source_anchor = self.snapshot_cache_source_anchor.as_ref().ok_or(
+            WorkflowInstanceSnapshotCacheProjectionErrorV1::MissingImmutableReplaySourceAnchor,
+        )?;
+        self.workflows_by_dispatch_event_ref
+            .values()
+            .map(|workflow| {
+                let workflow_json = serde_json::to_value(workflow)
+                    .and_then(|value| serde_json::to_string(&value))
+                    .map_err(|_| {
+                        WorkflowInstanceSnapshotCacheProjectionErrorV1::WorkflowJsonSerialization
+                    })?;
+                let workflow_json_digest =
+                    workflow_instance_snapshot_cache_workflow_json_digest_v1(&workflow_json)
+                        .map_err(|_| {
+                            WorkflowInstanceSnapshotCacheProjectionErrorV1::WorkflowJsonDigest
+                        })?;
+
+                Ok(WorkflowInstanceSnapshotCacheEntryV1 {
+                    authority: WorkflowInstanceSnapshotCacheAuthorityV1::NonAuthoritative,
+                    cache_schema_version: WORKFLOW_INSTANCE_SNAPSHOT_CACHE_SCHEMA_VERSION_V1,
+                    reducer_schema_version:
+                        WORKFLOW_INSTANCE_SNAPSHOT_CACHE_REDUCER_SCHEMA_VERSION_V1,
+                    run_id: snapshot_cache_source_anchor.run_id,
+                    dispatch_event_id: workflow.dispatch.event_id,
+                    workflow_id: workflow.workflow_id.clone(),
+                    workflow_revision: workflow.workflow_revision.clone(),
+                    unit_id: workflow.unit_id.clone(),
+                    attempt: workflow.attempt,
+                    source_event_count: snapshot_cache_source_anchor.source_event_count,
+                    source_last_event_id: snapshot_cache_source_anchor.source_last_event_id,
+                    checkpoint_event_ref: snapshot_cache_source_anchor.checkpoint_event_ref,
+                    checkpoint_event_digest: self.tape_integrity.checkpoint_event_digest.clone(),
+                    through_event_ref: snapshot_cache_source_anchor.through_event_ref,
+                    signed_non_checkpoint_event_count: self
+                        .tape_integrity
+                        .signed_non_checkpoint_event_count,
+                    tape_root_hash: self.tape_integrity.tape_root_hash.clone(),
+                    tape_root_algorithm: self.tape_integrity.algorithm.clone(),
+                    pinned_kernel_signer_actor_id: self.pinned_kernel_signer.actor_id.clone(),
+                    pinned_kernel_signer_key_id: self.pinned_kernel_signer.key_id.clone(),
+                    pinned_kernel_signer_public_key_hash: self
+                        .pinned_kernel_signer
+                        .public_key_hash
+                        .clone(),
+                    workflow_json,
+                    workflow_json_digest,
+                })
+            })
+            .collect()
+    }
+
+    /// Publish this fully verified snapshot's bounded, non-authoritative cache
+    /// projection.
+    ///
+    /// The publisher opens an existing ledger database and enters one
+    /// `IMMEDIATE` transaction. Before cache-schema initialization or any cache
+    /// write, that transaction proves the live append-only ledger tape has the
+    /// exact event count and final UUIDv7 id captured by this snapshot's private
+    /// replay anchor. Under the ledger's normal append-only writer invariant,
+    /// this rejects a source that advanced after replay with
+    /// [`WorkflowInstanceSnapshotCachePersistenceErrorV1::SourceChanged`].
+    /// It is deliberately not a replacement for full signed-tape integrity
+    /// verification, which every governed recovery still performs.
+    ///
+    /// This method has no cache-read counterpart and its rows remain a
+    /// best-effort optimization only; trusted recovery always reopens and
+    /// verifies the live signed tape.
+    pub fn persist_workflow_instance_snapshot_cache_v1(
+        &self,
+        db_path: impl AsRef<Path>,
+    ) -> Result<(), WorkflowInstanceSnapshotCachePersistenceErrorV1> {
+        let source_anchor = self.snapshot_cache_source_anchor.as_ref().ok_or(
+            WorkflowInstanceSnapshotCachePersistenceErrorV1::MissingImmutableReplaySourceAnchor,
+        )?;
+        let entries = self.workflow_instance_snapshot_cache_entries_v1()?;
+
+        if entries.len() > WORKFLOW_INSTANCE_SNAPSHOT_CACHE_MAX_ROWS_V1 {
+            return Err(
+                WorkflowInstanceSnapshotCachePersistenceErrorV1::EntryLimitExceeded {
+                    entry_count: entries.len(),
+                    max_entries: WORKFLOW_INSTANCE_SNAPSHOT_CACHE_MAX_ROWS_V1,
+                },
+            );
+        }
+        if let Some(entry) = entries.iter().find(|entry| {
+            entry.workflow_json.len() > WORKFLOW_INSTANCE_SNAPSHOT_CACHE_MAX_WORKFLOW_JSON_BYTES_V1
+        }) {
+            return Err(
+                WorkflowInstanceSnapshotCachePersistenceErrorV1::WorkflowJsonTooLarge {
+                    dispatch_event_id: entry.dispatch_event_id.to_string(),
+                    max_workflow_json_bytes:
+                        WORKFLOW_INSTANCE_SNAPSHOT_CACHE_MAX_WORKFLOW_JSON_BYTES_V1,
+                },
+            );
+        }
+
+        let db_path = db_path.as_ref();
+        // READ_WRITE deliberately omits CREATE: a stale publication must not
+        // make a missing database or cache schema observable as a side effect.
+        let mut conn = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+        conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+
+        let (actual_event_count, actual_last_event_id): (i64, Option<String>) = tx.query_row(
+            "SELECT COUNT(*), MAX(id) FROM events WHERE run_id = ?1",
+            params![source_anchor.run_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let actual_event_count = u64::try_from(actual_event_count)
+            .expect("SQLite COUNT(*) is always non-negative and fits u64");
+        let expected_last_event_id = source_anchor.source_last_event_id.to_string();
+        if actual_event_count != source_anchor.source_event_count
+            || actual_last_event_id.as_deref() != Some(expected_last_event_id.as_str())
+        {
+            return Err(
+                WorkflowInstanceSnapshotCachePersistenceErrorV1::SourceChanged {
+                    run_id: source_anchor.run_id.to_string(),
+                    expected_event_count: source_anchor.source_event_count,
+                    expected_last_event_id,
+                    actual_event_count,
+                    actual_last_event_id,
+                },
+            );
+        }
+
+        // Only a live tape that still matches this private source anchor may
+        // initialize the non-authoritative cache schema, and initialization is
+        // retained inside the same write transaction as subsequent publication.
+        ensure_workflow_instance_snapshot_cache_schema_v1(&tx)
+            .map_err(WorkflowInstanceSnapshotCachePersistenceErrorV1::Initialize)?;
+
+        let current_cache_rows: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM workflow_instance_snapshot_cache_v1",
+            [],
+            |row| row.get(0),
+        )?;
+        let current_cache_rows = usize::try_from(current_cache_rows)
+            .expect("SQLite COUNT(*) is always non-negative and fits usize");
+        let mut new_rows = 0_usize;
+        for entry in &entries {
+            let exists: bool = tx.query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM workflow_instance_snapshot_cache_v1
+                    WHERE run_id = ?1 AND dispatch_event_id = ?2 AND reducer_schema_version = ?3
+                )",
+                params![
+                    entry.run_id.to_string(),
+                    entry.dispatch_event_id.to_string(),
+                    i64::from(entry.reducer_schema_version),
+                ],
+                |row| row.get(0),
+            )?;
+            if !exists {
+                new_rows += 1;
+            }
+        }
+        if new_rows > 0
+            && current_cache_rows.saturating_add(new_rows)
+                > WORKFLOW_INSTANCE_SNAPSHOT_CACHE_MAX_ROWS_V1
+        {
+            return Err(
+                WorkflowInstanceSnapshotCachePersistenceErrorV1::CacheCapacityExceeded {
+                    current_rows: current_cache_rows,
+                    new_rows,
+                    max_rows: WORKFLOW_INSTANCE_SNAPSHOT_CACHE_MAX_ROWS_V1,
+                },
+            );
+        }
+
+        for entry in &entries {
+            let existing: Option<(i64, String)> = tx
+                .query_row(
+                    "SELECT source_event_count, source_last_event_id
+                     FROM workflow_instance_snapshot_cache_v1
+                     WHERE run_id = ?1 AND dispatch_event_id = ?2 AND reducer_schema_version = ?3",
+                    params![
+                        entry.run_id.to_string(),
+                        entry.dispatch_event_id.to_string(),
+                        i64::from(entry.reducer_schema_version),
+                    ],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+
+            match existing {
+                None => insert_workflow_instance_snapshot_cache_entry_v1(&tx, entry)?,
+                Some((existing_count, existing_last_event_id)) => {
+                    let existing_count = existing_count as u64;
+                    if existing_count < entry.source_event_count {
+                        update_workflow_instance_snapshot_cache_entry_v1(&tx, entry)?;
+                    } else if existing_count == entry.source_event_count
+                        && existing_last_event_id == entry.source_last_event_id.to_string()
+                        && workflow_instance_snapshot_cache_entry_matches_v1(&tx, entry)?
+                    {
+                        // Exact repeated publication is intentionally idempotent.
+                    } else {
+                        return Err(WorkflowInstanceSnapshotCachePersistenceErrorV1::Conflict {
+                            run_id: entry.run_id.to_string(),
+                            dispatch_event_id: entry.dispatch_event_id.to_string(),
+                            reducer_schema_version: entry.reducer_schema_version,
+                            existing_source_event_count: existing_count,
+                            existing_source_last_event_id: existing_last_event_id,
+                        });
+                    }
+                }
+            }
+        }
+
+        tx.commit()?;
+        Ok(())
     }
 
     /// Project this already verified recovery snapshot as redacted,
@@ -567,10 +1088,30 @@ impl TrustedGovernedRecoverySnapshot {
         classify_replayed_governed_promotion_recovery_v1(workflow, query)
     }
 
+    /// Test-only constructor for reducer fixtures. It deliberately has no
+    /// immutable event-slice anchor, so cache projection fails closed instead
+    /// of exposing fixture data as cacheable evidence.
+    #[cfg(test)]
     fn from_verified_replay<'a>(
         run_id: &str,
         pinned_kernel_signer: ActorKeyRef,
         tape_integrity: TapeIntegrityReportV1,
+        workflows: impl Iterator<Item = &'a WorkflowInstanceV1>,
+    ) -> Result<Self, TrustedGovernedRecoveryError> {
+        Self::from_verified_replay_with_source_anchor(
+            run_id,
+            pinned_kernel_signer,
+            tape_integrity,
+            None,
+            workflows,
+        )
+    }
+
+    fn from_verified_replay_with_source_anchor<'a>(
+        run_id: &str,
+        pinned_kernel_signer: ActorKeyRef,
+        tape_integrity: TapeIntegrityReportV1,
+        snapshot_cache_source_anchor: Option<TrustedReplaySourceAnchorV1>,
         workflows: impl Iterator<Item = &'a WorkflowInstanceV1>,
     ) -> Result<Self, TrustedGovernedRecoveryError> {
         let mut workflows_by_dispatch_event_ref = BTreeMap::new();
@@ -643,6 +1184,7 @@ impl TrustedGovernedRecoverySnapshot {
             run_id: run_id.to_string(),
             pinned_kernel_signer,
             tape_integrity,
+            snapshot_cache_source_anchor,
             workflows_by_dispatch_event_ref,
             candidate_dispatch_index,
             promotion_dispatch_index,
@@ -1431,6 +1973,56 @@ mod tests {
             }),
             terminal: None,
         }
+    }
+
+    #[test]
+    fn cache_projection_rejects_a_unit_fixture_without_an_immutable_source_anchor() {
+        let workflow = workflow(DIGEST_A, None);
+        let snapshot = TrustedGovernedRecoverySnapshot::from_verified_replay(
+            "run",
+            kernel(),
+            integrity(),
+            [&workflow].into_iter(),
+        )
+        .expect("fixture forms a trusted recovery snapshot for reducer tests");
+
+        let error = snapshot
+            .workflow_instance_snapshot_cache_entries_v1()
+            .expect_err(
+                "fixture data must not become a cache projection without a real tape slice",
+            );
+
+        assert_eq!(
+            error,
+            WorkflowInstanceSnapshotCacheProjectionErrorV1::MissingImmutableReplaySourceAnchor
+        );
+    }
+
+    #[test]
+    fn cache_persistence_rejects_a_unit_fixture_without_an_immutable_source_anchor() {
+        let temp = tempfile::TempDir::new().expect("temporary ledger directory");
+        let db_path = temp.path().join("events.db");
+        let workflow = workflow(DIGEST_A, None);
+        let snapshot = TrustedGovernedRecoverySnapshot::from_verified_replay(
+            "run",
+            kernel(),
+            integrity(),
+            [&workflow].into_iter(),
+        )
+        .expect("fixture forms a trusted recovery snapshot for reducer tests");
+
+        let error = snapshot
+            .persist_workflow_instance_snapshot_cache_v1(&db_path)
+            .expect_err("fixture data must not become persistent cache material");
+
+        assert!(matches!(
+            error,
+            WorkflowInstanceSnapshotCachePersistenceErrorV1::MissingImmutableReplaySourceAnchor
+        ));
+        assert!(
+            !db_path.exists(),
+            "fixture rejection occurs before the persistence path initializes a database"
+        );
     }
 
     fn pending_activity_workflow(action_id: &str, idempotency_key: &str) -> WorkflowInstanceV1 {

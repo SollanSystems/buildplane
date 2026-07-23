@@ -58,7 +58,8 @@ pub use trusted_recovery::{
     RecordedPromotionReconciliationV1, RecordedPromotionRecoveryDecisionV1,
     RecordedPromotionRecoveryIdentityV1, RecordedPromotionRecoveryQueryV1,
     RecordedPromotionResultV1, TrustedGovernedRecoveryError, TrustedGovernedRecoverySnapshot,
-    RECORDED_PROMOTION_RECOVERY_SCHEMA_VERSION_V1,
+    WorkflowInstanceSnapshotCachePersistenceErrorV1,
+    WorkflowInstanceSnapshotCacheProjectionErrorV1, RECORDED_PROMOTION_RECOVERY_SCHEMA_VERSION_V1,
 };
 
 #[cfg(test)]

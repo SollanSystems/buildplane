@@ -10,14 +10,19 @@ use bp_ledger::payload::trust_spine::{
 };
 use bp_ledger::payload::Payload;
 use bp_ledger::signing::{public_key_hash, ActorKeyRef, TrustedPublicKeys};
-use bp_ledger::storage::sqlite::{CheckpointPolicy, SqliteStore};
+use bp_ledger::storage::sqlite::{
+    workflow_instance_snapshot_cache_workflow_json_digest_v1, CheckpointPolicy, SqliteStore,
+    WorkflowInstanceSnapshotCacheAuthorityV1, WORKFLOW_INSTANCE_SNAPSHOT_CACHE_SCHEMA_VERSION_V1,
+};
 use bp_replay::engine::{ReplayEngine, TrustSpineSignerRole, TrustedReplayAuthorities};
+use bp_replay::trusted_recovery::WORKFLOW_INSTANCE_SNAPSHOT_CACHE_REDUCER_SCHEMA_VERSION_V1;
 use bp_replay::{
     ReplayIssue, TrustedGovernedRecoveryError, TrustedGovernedRecoverySnapshot,
     VerifiedOtelProjectionErrorV1,
 };
 use chrono::{SecondsFormat, Utc};
 use ed25519_dalek::SigningKey;
+use rusqlite::{params, Connection};
 use tempfile::TempDir;
 
 const DIGEST_A: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -27,6 +32,69 @@ const WORKFLOW_ID_SENTINEL: &str = "forbidden-workflow-id-sentinel";
 const WORKFLOW_REVISION_SENTINEL: &str = "forbidden-workflow-revision-sentinel";
 const UNIT_ID_SENTINEL: &str = "forbidden-unit-id-sentinel";
 const ACTION_ID_SENTINEL: &str = "forbidden-action-id-sentinel";
+
+fn cache_row_count(db_path: &std::path::Path) -> i64 {
+    let conn = Connection::open(db_path).expect("open cache inspection connection");
+    conn.query_row(
+        "SELECT COUNT(*) FROM workflow_instance_snapshot_cache_v1",
+        [],
+        |row| row.get(0),
+    )
+    .expect("count non-authoritative cache rows")
+}
+
+fn cache_schema_exists(db_path: &std::path::Path) -> bool {
+    let conn = Connection::open(db_path).expect("open schema inspection connection");
+    conn.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM sqlite_master
+            WHERE type = 'table' AND name = 'workflow_instance_snapshot_cache_v1'
+        )",
+        [],
+        |row| row.get(0),
+    )
+    .expect("inspect non-authoritative cache schema")
+}
+
+fn drop_cache_schema_for_legacy_fixture(db_path: &std::path::Path) {
+    let conn = Connection::open(db_path).expect("open legacy-schema fixture connection");
+    conn.execute_batch(
+        "DROP TRIGGER IF EXISTS workflow_instance_snapshot_cache_v1_row_cap;
+         DROP TABLE workflow_instance_snapshot_cache_v1;",
+    )
+    .expect("remove cache schema from a legacy ledger fixture");
+}
+
+/// Populate the bounded, non-authoritative cache directly only to exercise
+/// the SQLite row-cap trigger. These rows are deliberately never passed to a
+/// replay, recovery, promotion, or effect path.
+fn insert_cache_capacity_fixture_row(
+    conn: &Connection,
+    run_id: &str,
+    existing_event_id: EventId,
+) -> rusqlite::Result<usize> {
+    conn.execute(
+        "INSERT INTO workflow_instance_snapshot_cache_v1 (
+            authority, cache_schema_version, reducer_schema_version,
+            run_id, dispatch_event_id, workflow_id, workflow_revision, unit_id,
+            attempt, source_event_count, source_last_event_id,
+            checkpoint_event_ref, checkpoint_event_digest, through_event_ref,
+            signed_non_checkpoint_event_count, tape_root_hash,
+            tape_root_algorithm, pinned_kernel_signer_actor_id,
+            pinned_kernel_signer_key_id, pinned_kernel_signer_public_key_hash,
+            workflow_json, workflow_json_digest
+        ) VALUES (
+            'non_authoritative', 1, 1,
+            ?1, ?2, 'capacity-fixture-workflow', 'capacity-fixture-revision', 'capacity-fixture-unit',
+            1, 1, ?2,
+            ?2, ?3, ?2,
+            1, ?3,
+            'sha256_linear', 'capacity-fixture-actor', 'capacity-fixture-key', NULL,
+            '{}', ?3
+        )",
+        params![run_id, existing_event_id.to_string(), DIGEST_A],
+    )
+}
 
 fn kernel_signer() -> ActorKeyRef {
     ActorKeyRef {
@@ -596,6 +664,357 @@ fn trusted_recovery_returns_a_fully_checkpointed_graph_bound_v4_workflow() {
 }
 
 #[test]
+fn trusted_recovery_persists_only_a_verified_non_authoritative_cache_projection() {
+    let temp = TempDir::new().expect("temporary ledger directory");
+    let db_path = temp.path().join("events.db");
+    let store = SqliteStore::open(&db_path).expect("ledger store");
+    let run_id = RunId::new();
+    let signing_key = SigningKey::from_bytes(&[26; 32]);
+    let (authorities, pinned_kernel) = trusted_authorities(&signing_key);
+    let dispatch = dispatch_event(run_id);
+    store
+        .append_signed_with_checkpoint(
+            &dispatch,
+            &signing_key,
+            &kernel_signer(),
+            &CheckpointPolicy::every(1),
+        )
+        .expect("append checkpointed signed dispatch");
+
+    let snapshot = TrustedGovernedRecoverySnapshot::open(
+        &run_id.to_string(),
+        &db_path,
+        &authorities,
+        &pinned_kernel,
+    )
+    .expect("fully checkpointed trusted recovery");
+
+    assert_eq!(
+        cache_row_count(&db_path),
+        0,
+        "opening does not write cache rows"
+    );
+    let entries = snapshot
+        .workflow_instance_snapshot_cache_entries_v1()
+        .expect("project a non-authoritative cache entry");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(
+        cache_row_count(&db_path),
+        0,
+        "projection does not write cache rows"
+    );
+    assert_eq!(
+        entries[0].workflow_json_digest,
+        workflow_instance_snapshot_cache_workflow_json_digest_v1(&entries[0].workflow_json)
+            .expect("projection JSON digest")
+    );
+    assert_eq!(
+        entries[0].authority,
+        WorkflowInstanceSnapshotCacheAuthorityV1::NonAuthoritative
+    );
+    assert_eq!(
+        entries[0].cache_schema_version,
+        WORKFLOW_INSTANCE_SNAPSHOT_CACHE_SCHEMA_VERSION_V1
+    );
+    assert_eq!(
+        entries[0].reducer_schema_version,
+        WORKFLOW_INSTANCE_SNAPSHOT_CACHE_REDUCER_SCHEMA_VERSION_V1
+    );
+
+    snapshot
+        .persist_workflow_instance_snapshot_cache_v1(&db_path)
+        .expect("a fully verified snapshot persists its cache projection");
+    assert_eq!(cache_row_count(&db_path), 1);
+    snapshot
+        .persist_workflow_instance_snapshot_cache_v1(&db_path)
+        .expect("exact cache persistence repeat is idempotent");
+    assert_eq!(cache_row_count(&db_path), 1);
+}
+
+#[test]
+fn trusted_recovery_bounds_cache_growth_and_refreshes_an_existing_key_at_capacity() {
+    let temp = TempDir::new().expect("temporary ledger directory");
+    let db_path = temp.path().join("events.db");
+    let store = SqliteStore::open(&db_path).expect("ledger store");
+    let run_id = RunId::new();
+    let signing_key = SigningKey::from_bytes(&[35; 32]);
+    let (authorities, pinned_kernel) = trusted_authorities(&signing_key);
+    let dispatch_envelope = sealed_v3_dispatch();
+    let dispatch = dispatch_event_with(run_id, dispatch_envelope.clone());
+    store
+        .append_signed_with_checkpoint(
+            &dispatch,
+            &signing_key,
+            &kernel_signer(),
+            &CheckpointPolicy::every(1),
+        )
+        .expect("append checkpointed signed dispatch");
+
+    let initial_snapshot = TrustedGovernedRecoverySnapshot::open(
+        &run_id.to_string(),
+        &db_path,
+        &authorities,
+        &pinned_kernel,
+    )
+    .expect("initial trusted recovery");
+    let initial_source_event_count = initial_snapshot
+        .workflow_instance_snapshot_cache_entries_v1()
+        .expect("initial cache projection")[0]
+        .source_event_count;
+    initial_snapshot
+        .persist_workflow_instance_snapshot_cache_v1(&db_path)
+        .expect("persist initial cache entry");
+
+    // The real persisted entry plus 127 inert rows fills the hard table cap.
+    // The fixtures use a real event id for their foreign keys but can never be
+    // opened as a trusted recovery snapshot.
+    let conn = Connection::open(&db_path).expect("open cache fixture connection");
+    conn.execute_batch("PRAGMA foreign_keys = ON;")
+        .expect("enable cache fixture foreign keys");
+    for index in 0..127 {
+        insert_cache_capacity_fixture_row(
+            &conn,
+            &format!("cache-fixture-run-{index}"),
+            dispatch.id,
+        )
+        .expect("fill a bounded cache fixture row");
+    }
+    assert_eq!(cache_row_count(&db_path), 128);
+    assert!(
+        insert_cache_capacity_fixture_row(&conn, "cache-fixture-overflow", dispatch.id).is_err(),
+        "the SQLite trigger rejects a 129th distinct cache key"
+    );
+    drop(conn);
+
+    // A newer verified source keeps the same cache key, so it updates in
+    // place even when the fixed cache capacity has been reached.
+    let action = action_request_event(run_id, &dispatch, &dispatch_envelope, "cache-refresh");
+    store
+        .append_signed_with_checkpoint(
+            &action,
+            &signing_key,
+            &kernel_signer(),
+            &CheckpointPolicy::every(1),
+        )
+        .expect("append a newer checkpointed workflow fact");
+    let refreshed_snapshot = TrustedGovernedRecoverySnapshot::open(
+        &run_id.to_string(),
+        &db_path,
+        &authorities,
+        &pinned_kernel,
+    )
+    .expect("newer trusted recovery");
+    refreshed_snapshot
+        .persist_workflow_instance_snapshot_cache_v1(&db_path)
+        .expect("refresh an existing cache key at capacity");
+    assert_eq!(cache_row_count(&db_path), 128);
+    let refreshed_source_event_count: i64 = Connection::open(&db_path)
+        .expect("open cache inspection connection")
+        .query_row(
+            "SELECT source_event_count FROM workflow_instance_snapshot_cache_v1
+             WHERE run_id = ?1 AND dispatch_event_id = ?2 AND reducer_schema_version = 1",
+            params![run_id.to_string(), dispatch.id.to_string()],
+            |row| row.get(0),
+        )
+        .expect("read refreshed cache high-water");
+    assert!(
+        u64::try_from(refreshed_source_event_count).expect("non-negative cache source count")
+            > initial_source_event_count,
+        "refresh must replace the stale non-authoritative projection"
+    );
+
+    let overflow_run_id = RunId::new();
+    let overflow_dispatch = dispatch_event(overflow_run_id);
+    store
+        .append_signed_with_checkpoint(
+            &overflow_dispatch,
+            &signing_key,
+            &kernel_signer(),
+            &CheckpointPolicy::every(1),
+        )
+        .expect("append a distinct checkpointed dispatch");
+    let overflow_snapshot = TrustedGovernedRecoverySnapshot::open(
+        &overflow_run_id.to_string(),
+        &db_path,
+        &authorities,
+        &pinned_kernel,
+    )
+    .expect("distinct trusted recovery");
+    let error = overflow_snapshot
+        .persist_workflow_instance_snapshot_cache_v1(&db_path)
+        .expect_err("a distinct cache key must fail closed at capacity");
+    assert!(matches!(
+        error,
+        bp_replay::WorkflowInstanceSnapshotCachePersistenceErrorV1::CacheCapacityExceeded {
+            current_rows: 128,
+            new_rows: 1,
+            max_rows: 128,
+        }
+    ));
+    assert_eq!(
+        cache_row_count(&db_path),
+        128,
+        "capacity failure cannot partially persist the distinct snapshot"
+    );
+}
+
+#[test]
+fn trusted_recovery_rejects_snapshot_cache_persistence_after_an_uncheckpointed_signed_tail() {
+    let temp = TempDir::new().expect("temporary ledger directory");
+    let db_path = temp.path().join("events.db");
+    let store = SqliteStore::open(&db_path).expect("ledger store");
+    let run_id = RunId::new();
+    let signing_key = SigningKey::from_bytes(&[27; 32]);
+    let (authorities, pinned_kernel) = trusted_authorities(&signing_key);
+    let dispatch_envelope = sealed_v3_dispatch();
+    let dispatch = dispatch_event_with(run_id, dispatch_envelope.clone());
+    store
+        .append_signed_with_checkpoint(
+            &dispatch,
+            &signing_key,
+            &kernel_signer(),
+            &CheckpointPolicy::every(1),
+        )
+        .expect("append checkpointed signed dispatch");
+
+    let snapshot = TrustedGovernedRecoverySnapshot::open(
+        &run_id.to_string(),
+        &db_path,
+        &authorities,
+        &pinned_kernel,
+    )
+    .expect("initial fully checkpointed trusted recovery");
+    snapshot
+        .persist_workflow_instance_snapshot_cache_v1(&db_path)
+        .expect("persist initial verified cache projection");
+    assert_eq!(cache_row_count(&db_path), 1);
+
+    let uncheckpointed_tail =
+        action_request_event(run_id, &dispatch, &dispatch_envelope, "tail-action");
+    store
+        .append_signed(&uncheckpointed_tail, &signing_key, &kernel_signer())
+        .expect("append signed tail without a checkpoint");
+    let persist_error = snapshot
+        .persist_workflow_instance_snapshot_cache_v1(&db_path)
+        .expect_err("a changed live tape cannot accept an old snapshot cache projection");
+    assert!(matches!(
+        persist_error,
+        bp_replay::trusted_recovery::WorkflowInstanceSnapshotCachePersistenceErrorV1::SourceChanged { .. }
+    ));
+    assert_eq!(
+        cache_row_count(&db_path),
+        1,
+        "failed persistence does not mutate cache rows"
+    );
+
+    let error = TrustedGovernedRecoverySnapshot::open(
+        &run_id.to_string(),
+        &db_path,
+        &authorities,
+        &pinned_kernel,
+    )
+    .expect_err("a cache entry must not substitute for full signed-tape verification");
+
+    assert!(matches!(
+        error,
+        TrustedGovernedRecoveryError::TapeIntegrity(_)
+    ));
+}
+
+#[test]
+fn verified_snapshot_initializes_a_legacy_cache_schema_only_after_freshness_validation() {
+    let temp = TempDir::new().expect("temporary ledger directory");
+    let db_path = temp.path().join("events.db");
+    let store = SqliteStore::open(&db_path).expect("ledger store");
+    let run_id = RunId::new();
+    let signing_key = SigningKey::from_bytes(&[36; 32]);
+    let (authorities, pinned_kernel) = trusted_authorities(&signing_key);
+    let dispatch = dispatch_event(run_id);
+    store
+        .append_signed_with_checkpoint(
+            &dispatch,
+            &signing_key,
+            &kernel_signer(),
+            &CheckpointPolicy::every(1),
+        )
+        .expect("append checkpointed signed dispatch");
+    let snapshot = TrustedGovernedRecoverySnapshot::open(
+        &run_id.to_string(),
+        &db_path,
+        &authorities,
+        &pinned_kernel,
+    )
+    .expect("fresh trusted recovery");
+
+    drop_cache_schema_for_legacy_fixture(&db_path);
+    assert!(
+        !cache_schema_exists(&db_path),
+        "fixture must begin without the optional cache schema"
+    );
+
+    snapshot
+        .persist_workflow_instance_snapshot_cache_v1(&db_path)
+        .expect("a fresh verified snapshot may initialize and publish the cache");
+    assert!(
+        cache_schema_exists(&db_path),
+        "fresh publication creates the optional cache schema inside its transaction"
+    );
+    assert_eq!(cache_row_count(&db_path), 1);
+}
+
+#[test]
+fn stale_snapshot_cache_publication_does_not_recreate_a_legacy_cache_schema() {
+    let temp = TempDir::new().expect("temporary ledger directory");
+    let db_path = temp.path().join("events.db");
+    let store = SqliteStore::open(&db_path).expect("ledger store");
+    let run_id = RunId::new();
+    let signing_key = SigningKey::from_bytes(&[37; 32]);
+    let (authorities, pinned_kernel) = trusted_authorities(&signing_key);
+    let dispatch_envelope = sealed_v3_dispatch();
+    let dispatch = dispatch_event_with(run_id, dispatch_envelope.clone());
+    store
+        .append_signed_with_checkpoint(
+            &dispatch,
+            &signing_key,
+            &kernel_signer(),
+            &CheckpointPolicy::every(1),
+        )
+        .expect("append checkpointed signed dispatch");
+
+    let snapshot = TrustedGovernedRecoverySnapshot::open(
+        &run_id.to_string(),
+        &db_path,
+        &authorities,
+        &pinned_kernel,
+    )
+    .expect("initial fully checkpointed trusted recovery");
+
+    drop_cache_schema_for_legacy_fixture(&db_path);
+    assert!(
+        !cache_schema_exists(&db_path),
+        "fixture must begin without the optional cache schema"
+    );
+
+    let uncheckpointed_tail =
+        action_request_event(run_id, &dispatch, &dispatch_envelope, "tail-action");
+    store
+        .append_signed(&uncheckpointed_tail, &signing_key, &kernel_signer())
+        .expect("append signed tail without a checkpoint");
+
+    let error = snapshot
+        .persist_workflow_instance_snapshot_cache_v1(&db_path)
+        .expect_err("a stale snapshot must fail before cache-schema initialization");
+    assert!(matches!(
+        error,
+        bp_replay::WorkflowInstanceSnapshotCachePersistenceErrorV1::SourceChanged { .. }
+    ));
+    assert!(
+        !cache_schema_exists(&db_path),
+        "rejected stale publication must not recreate optional cache schema"
+    );
+}
+
+#[test]
 fn trusted_recovery_rejects_a_signed_v4_dispatch_without_a_prior_graph_declaration() {
     let temp = TempDir::new().expect("temporary ledger directory");
     let db_path = temp.path().join("events.db");
@@ -631,7 +1050,7 @@ fn trusted_recovery_rejects_a_signed_v4_dispatch_without_a_prior_graph_declarati
 }
 
 #[test]
-fn trusted_recovery_rejects_an_uncheckpointed_signed_tail() {
+fn trusted_recovery_rejects_an_uncheckpointed_signed_tail_before_cache_projection() {
     let temp = TempDir::new().expect("temporary ledger directory");
     let db_path = temp.path().join("events.db");
     let store = SqliteStore::open(&db_path).expect("ledger store");
@@ -643,16 +1062,16 @@ fn trusted_recovery_rejects_an_uncheckpointed_signed_tail() {
         .append_signed(&dispatch, &signing_key, &kernel_signer())
         .expect("append signed dispatch without checkpoint");
 
-    let error = TrustedGovernedRecoverySnapshot::open(
+    let snapshot = TrustedGovernedRecoverySnapshot::open(
         &run_id.to_string(),
         &db_path,
         &authorities,
         &pinned_kernel,
     )
-    .expect_err("uncheckpointed signed tail must not expose recovery authority");
+    .expect_err("uncheckpointed signed tail must not construct a cache-projectable snapshot");
 
     assert!(matches!(
-        error,
+        snapshot,
         TrustedGovernedRecoveryError::TapeIntegrity(_)
     ));
 }

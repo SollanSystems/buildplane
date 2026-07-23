@@ -680,6 +680,164 @@ pub(crate) enum GovernedCheckpointSealOutcome {
     Emitted { checkpoint_event_id: EventId },
 }
 
+/// Fixed schema revision for the non-authoritative workflow replay cache.
+///
+/// The row schema is shared with `bp-replay`, but this crate intentionally
+/// exposes no production cache writer: only a fully verified recovery snapshot
+/// may publish it.
+pub const WORKFLOW_INSTANCE_SNAPSHOT_CACHE_SCHEMA_VERSION_V1: u32 = 1;
+
+/// The fixed, explicit authority marker retained in every cache row.
+pub const WORKFLOW_INSTANCE_SNAPSHOT_CACHE_AUTHORITY_V1: &str = "non_authoritative";
+
+const WORKFLOW_INSTANCE_SNAPSHOT_CACHE_KIND: &str = "workflow_instance_snapshot_cache_v1";
+const WORKFLOW_INSTANCE_SNAPSHOT_CACHE_WORKFLOW_JSON_DIGEST_DOMAIN_V1: &[u8] =
+    b"buildplane.workflow-instance-snapshot-cache.workflow-json.v1\0";
+/// Maximum serialized workflow size accepted by the bounded cache table.
+///
+/// The `bp-replay` publisher checks this before opening its transaction; the
+/// table repeats the limit as a SQLite `CHECK` constraint.
+pub const WORKFLOW_INSTANCE_SNAPSHOT_CACHE_MAX_WORKFLOW_JSON_BYTES_V1: usize = 256 * 1024;
+
+/// Maximum number of best-effort workflow snapshots retained in one ledger DB.
+///
+/// The table trigger below repeats this limit so a direct SQLite write cannot
+/// exhaust the authoritative event store by bypassing the replay publisher.
+pub const WORKFLOW_INSTANCE_SNAPSHOT_CACHE_MAX_ROWS_V1: usize = 128;
+
+/// Closed authority marker for [`WorkflowInstanceSnapshotCacheEntryV1`].
+///
+/// Cache data is an observation-only optimization. It is never an effect,
+/// replay, recovery, promotion, or authorization capability.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowInstanceSnapshotCacheAuthorityV1 {
+    NonAuthoritative,
+}
+
+impl WorkflowInstanceSnapshotCacheAuthorityV1 {
+    /// Canonical storage representation for the fixed closed authority marker.
+    pub const fn as_wire(self) -> &'static str {
+        match self {
+            Self::NonAuthoritative => WORKFLOW_INSTANCE_SNAPSHOT_CACHE_AUTHORITY_V1,
+        }
+    }
+}
+
+/// A closed, evidence-only workflow cache record emitted by trusted replay.
+///
+/// Constructing this value grants no ability to persist it in production;
+/// `TrustedGovernedRecoverySnapshot` in `bp-replay` owns the only supported
+/// publication path after complete signed-tape verification.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowInstanceSnapshotCacheEntryV1 {
+    pub authority: WorkflowInstanceSnapshotCacheAuthorityV1,
+    pub cache_schema_version: u32,
+    pub reducer_schema_version: u32,
+    pub run_id: RunId,
+    pub dispatch_event_id: EventId,
+    pub workflow_id: String,
+    pub workflow_revision: String,
+    pub unit_id: String,
+    pub attempt: u32,
+    pub source_event_count: u64,
+    pub source_last_event_id: EventId,
+    pub checkpoint_event_ref: EventId,
+    pub checkpoint_event_digest: String,
+    pub through_event_ref: EventId,
+    pub signed_non_checkpoint_event_count: u64,
+    pub tape_root_hash: String,
+    pub tape_root_algorithm: TapeRootAlgorithm,
+    pub pinned_kernel_signer_actor_id: String,
+    pub pinned_kernel_signer_key_id: String,
+    pub pinned_kernel_signer_public_key_hash: Option<String>,
+    pub workflow_json: String,
+    pub workflow_json_digest: String,
+}
+
+/// Validate canonical workflow JSON and derive its domain-separated digest.
+/// This detects cache corruption only; it conveys no authority.
+pub fn workflow_instance_snapshot_cache_workflow_json_digest_v1(
+    workflow_json: &str,
+) -> Result<String> {
+    let _ = canonical_workflow_instance_snapshot_cache_json(workflow_json)?;
+    let mut hasher = Sha256::new();
+    hasher.update(WORKFLOW_INSTANCE_SNAPSHOT_CACHE_WORKFLOW_JSON_DIGEST_DOMAIN_V1);
+    hasher.update(workflow_json.as_bytes());
+    Ok(format!("sha256:{:x}", hasher.finalize()))
+}
+
+/// Create the bounded V1 workflow-snapshot cache schema on an already-open
+/// ledger connection.
+///
+/// This only creates cache storage; it accepts no cache record and grants no
+/// authority. The trusted replay publisher calls it only after it has acquired
+/// its write transaction and validated its private replay high-water, so a
+/// stale publication cannot initialize cache state before rejection.
+pub fn ensure_workflow_instance_snapshot_cache_schema_v1(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        r#"
+        -- Mutable replay optimization only. This table intentionally has
+        -- NO append-only triggers and never participates in an authority
+        -- or effect path: every governed decision must still reopen a live
+        -- trusted replay over the signed event tape.
+        CREATE TABLE IF NOT EXISTS workflow_instance_snapshot_cache_v1 (
+            authority                              TEXT NOT NULL CHECK(authority = 'non_authoritative'),
+            cache_schema_version                   INTEGER NOT NULL CHECK(cache_schema_version = 1),
+            -- V1 deliberately admits only the V1 reducer. A future reducer
+            -- requires a new bounded cache table or an explicit migration;
+            -- silently widening this cache would blur historical projection
+            -- semantics.
+            reducer_schema_version                 INTEGER NOT NULL CHECK(reducer_schema_version = 1),
+            run_id                                 TEXT NOT NULL,
+            dispatch_event_id                      TEXT NOT NULL,
+            workflow_id                            TEXT NOT NULL,
+            workflow_revision                      TEXT NOT NULL,
+            unit_id                                TEXT NOT NULL,
+            attempt                                INTEGER NOT NULL CHECK(attempt > 0),
+            source_event_count                     INTEGER NOT NULL CHECK(source_event_count > 0),
+            source_last_event_id                   TEXT NOT NULL,
+            checkpoint_event_ref                   TEXT NOT NULL,
+            checkpoint_event_digest                TEXT NOT NULL,
+            through_event_ref                      TEXT NOT NULL,
+            signed_non_checkpoint_event_count      INTEGER NOT NULL CHECK(signed_non_checkpoint_event_count > 0),
+            tape_root_hash                          TEXT NOT NULL,
+            tape_root_algorithm                    TEXT NOT NULL CHECK(tape_root_algorithm = 'sha256_linear'),
+            pinned_kernel_signer_actor_id          TEXT NOT NULL,
+            pinned_kernel_signer_key_id            TEXT NOT NULL,
+            pinned_kernel_signer_public_key_hash   TEXT,
+            workflow_json                          TEXT NOT NULL CHECK(length(CAST(workflow_json AS BLOB)) <= 262144),
+            workflow_json_digest                   TEXT NOT NULL,
+            PRIMARY KEY (run_id, dispatch_event_id, reducer_schema_version),
+            FOREIGN KEY(dispatch_event_id) REFERENCES events(id),
+            FOREIGN KEY(source_last_event_id) REFERENCES events(id),
+            FOREIGN KEY(checkpoint_event_ref) REFERENCES events(id),
+            FOREIGN KEY(through_event_ref) REFERENCES events(id)
+        );
+
+        -- The cache shares the authoritative ledger database, so retain a
+        -- small bounded working set even if another local process writes
+        -- directly to SQLite. Newer verified replay replaces an existing
+        -- key instead of consuming an additional row.
+        CREATE TRIGGER IF NOT EXISTS workflow_instance_snapshot_cache_v1_row_cap
+            BEFORE INSERT ON workflow_instance_snapshot_cache_v1
+            WHEN (SELECT COUNT(*) FROM workflow_instance_snapshot_cache_v1) >= 128
+             AND NOT EXISTS (
+                SELECT 1
+                FROM workflow_instance_snapshot_cache_v1
+                WHERE run_id = NEW.run_id
+                  AND dispatch_event_id = NEW.dispatch_event_id
+                  AND reducer_schema_version = NEW.reducer_schema_version
+             )
+        BEGIN
+            SELECT RAISE(ABORT, 'workflow snapshot cache capacity exceeded');
+        END;
+        "#,
+    )?;
+    Ok(())
+}
+
 /// SQLite connection wrapping the events + runs schema.
 pub struct SqliteStore {
     conn: Connection,
@@ -1200,9 +1358,10 @@ impl SqliteStore {
                 BEGIN
                     SELECT RAISE(ABORT, 'governed promotion results are tape-backed: DELETE forbidden');
                 END;
+
             "#,
         )?;
-        Ok(())
+        ensure_workflow_instance_snapshot_cache_schema_v1(conn)
     }
 
     /// Append an event to the log. Fails if the id already exists.
@@ -4042,6 +4201,44 @@ impl SqliteStore {
             None => Ok(None),
         }
     }
+}
+
+fn workflow_instance_snapshot_cache_error(reason: impl Into<String>) -> LedgerError {
+    LedgerError::InvalidPayload {
+        kind: WORKFLOW_INSTANCE_SNAPSHOT_CACHE_KIND.to_string(),
+        reason: reason.into(),
+    }
+}
+
+fn canonical_workflow_instance_snapshot_cache_json(
+    workflow_json: &str,
+) -> Result<serde_json::Value> {
+    if workflow_json.is_empty()
+        || workflow_json.len() > WORKFLOW_INSTANCE_SNAPSHOT_CACHE_MAX_WORKFLOW_JSON_BYTES_V1
+    {
+        return Err(workflow_instance_snapshot_cache_error(
+            "workflow_json must be non-empty and within the cache size limit",
+        ));
+    }
+    let value: serde_json::Value = serde_json::from_str(workflow_json).map_err(|error| {
+        workflow_instance_snapshot_cache_error(format!("workflow_json is not valid JSON: {error}"))
+    })?;
+    let canonical = serde_json::to_string(&value).map_err(|error| {
+        workflow_instance_snapshot_cache_error(format!(
+            "workflow_json could not be serialized canonically: {error}"
+        ))
+    })?;
+    if canonical != workflow_json {
+        return Err(workflow_instance_snapshot_cache_error(
+            "workflow_json must use the canonical JSON representation",
+        ));
+    }
+    if !value.is_object() {
+        return Err(workflow_instance_snapshot_cache_error(
+            "workflow_json must be a JSON object",
+        ));
+    }
+    Ok(value)
 }
 
 #[cfg(test)]
