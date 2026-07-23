@@ -690,6 +690,30 @@ export interface WorkerManifestV1 {
 	readonly manifestDigest: string;
 }
 
+/**
+ * Closed, content-addressed identity of the concrete runtime selected for one
+ * worker. This is intentionally separate from `WorkerManifestV1`: the legacy
+ * record remains a backwards-compatible reference while this record exposes
+ * the immutable provider, harness, image, tool, skill, capability, and
+ * sandbox bindings a protected host needs to verify.
+ */
+export interface WorkerRuntimeManifestV1 {
+	readonly schemaVersion: 1;
+	readonly workerId: string;
+	readonly executionRole: ExecutionRoleV1;
+	readonly provider: string;
+	readonly model: string;
+	readonly providerVersion: string;
+	readonly harness: string;
+	readonly harnessVersion: string;
+	readonly imageDigest: string;
+	readonly toolCatalogDigest: string;
+	readonly skillSetDigest: string;
+	readonly capabilityBundleDigest: string;
+	readonly sandboxProfileDigest: string;
+	readonly runtimeManifestDigest: string;
+}
+
 /** Closed injected-context manifest reference. */
 export interface ContextManifestV1 {
 	readonly schemaVersion: 1;
@@ -1177,6 +1201,22 @@ const WORKER_MANIFEST_FIELDS = [
 	"workerId",
 	"provider",
 	"manifestDigest",
+] as const;
+const WORKER_RUNTIME_MANIFEST_V1_FIELDS = [
+	"schemaVersion",
+	"workerId",
+	"executionRole",
+	"provider",
+	"model",
+	"providerVersion",
+	"harness",
+	"harnessVersion",
+	"imageDigest",
+	"toolCatalogDigest",
+	"skillSetDigest",
+	"capabilityBundleDigest",
+	"sandboxProfileDigest",
+	"runtimeManifestDigest",
 ] as const;
 const CONTEXT_MANIFEST_FIELDS = [
 	"schemaVersion",
@@ -3186,6 +3226,89 @@ export function parseWorkerManifestV1(input: unknown): WorkerManifestV1 {
 	};
 }
 
+/**
+ * Parse a closed, self-addressing runtime identity. The digest validates the
+ * immutable runtime fields at the untrusted boundary but remains evidence,
+ * never execution authority.
+ */
+export function parseWorkerRuntimeManifestV1(
+	input: unknown,
+): WorkerRuntimeManifestV1 {
+	const record = readClosedRecord(
+		input,
+		"workerRuntimeManifest",
+		WORKER_RUNTIME_MANIFEST_V1_FIELDS,
+	);
+	const parsed: WorkerRuntimeManifestV1 = {
+		...readWorkerRuntimeManifestV1Fields(record),
+		runtimeManifestDigest: readSha256Digest(
+			record,
+			"runtimeManifestDigest",
+			"workerRuntimeManifest",
+		),
+	};
+	const expected = canonicalWorkerRuntimeManifestV1Digest(parsed);
+	if (parsed.runtimeManifestDigest !== expected) {
+		throw new TypeError(
+			"workerRuntimeManifest.runtimeManifestDigest must equal the canonical runtime manifest digest",
+		);
+	}
+	return parsed;
+}
+
+function readWorkerRuntimeManifestV1Fields(
+	record: Record<string, unknown>,
+): Omit<WorkerRuntimeManifestV1, "runtimeManifestDigest"> {
+	return {
+		schemaVersion: readSchemaVersion(record, "workerRuntimeManifest"),
+		workerId: readNonBlankString(record, "workerId", "workerRuntimeManifest"),
+		executionRole: readEnum(
+			record,
+			"executionRole",
+			"workerRuntimeManifest",
+			EXECUTION_ROLES,
+		),
+		provider: readNonBlankString(record, "provider", "workerRuntimeManifest"),
+		model: readNonBlankString(record, "model", "workerRuntimeManifest"),
+		providerVersion: readNonBlankString(
+			record,
+			"providerVersion",
+			"workerRuntimeManifest",
+		),
+		harness: readNonBlankString(record, "harness", "workerRuntimeManifest"),
+		harnessVersion: readNonBlankString(
+			record,
+			"harnessVersion",
+			"workerRuntimeManifest",
+		),
+		imageDigest: readSha256Digest(
+			record,
+			"imageDigest",
+			"workerRuntimeManifest",
+		),
+		toolCatalogDigest: readSha256Digest(
+			record,
+			"toolCatalogDigest",
+			"workerRuntimeManifest",
+		),
+		skillSetDigest: readSha256Digest(
+			record,
+			"skillSetDigest",
+			"workerRuntimeManifest",
+		),
+		capabilityBundleDigest: readSha256Digest(
+			record,
+			"capabilityBundleDigest",
+			"workerRuntimeManifest",
+		),
+		sandboxProfileDigest: readSha256Digest(
+			record,
+			"sandboxProfileDigest",
+			"workerRuntimeManifest",
+		),
+	};
+}
+
 export function parseContextManifestV1(input: unknown): ContextManifestV1 {
 	const record = readClosedRecord(
 		input,
@@ -3333,8 +3456,71 @@ export function assertGovernedExecutionV1(
 	}
 }
 
+/**
+ * Pure, V3-only runtime binding check for a protected host. It validates
+ * already-parsed values again to fail closed after mutation, but it does not
+ * verify signatures, resolve a host, authorize a worker, or execute anything.
+ * `DispatchEnvelopeV4` is deliberately unsupported here: callers must bind
+ * the exact parsed nested V3 envelope explicitly. The descriptor-safe V3
+ * parser remains the first operation, so untrusted accessors never run here.
+ */
+export function assertDispatchWorkerRuntimeManifestV1(
+	dispatch: DispatchEnvelopeV3,
+	runtime: WorkerRuntimeManifestV1,
+): void {
+	const parsedDispatch = parseDispatchEnvelopeV3(dispatch);
+	const parsedRuntime = parseWorkerRuntimeManifestV1(runtime);
+
+	if (parsedDispatch.body.trustTier !== "governed") {
+		throw new TypeError(
+			'Worker runtime manifest binding requires trustTier "governed".',
+		);
+	}
+	if (parsedDispatch.actionEvidenceVersion !== "sealed_v3") {
+		throw new TypeError(
+			'Worker runtime manifest binding requires actionEvidenceVersion "sealed_v3".',
+		);
+	}
+	if (parsedDispatch.body.commitMode !== "atomic") {
+		throw new TypeError(
+			'Worker runtime manifest binding requires commitMode "atomic".',
+		);
+	}
+	if (
+		parsedDispatch.body.workerManifestDigest !==
+		parsedRuntime.runtimeManifestDigest
+	) {
+		throw new TypeError(
+			"Worker runtime manifest binding requires dispatch workerManifestDigest to equal runtimeManifestDigest.",
+		);
+	}
+	if (parsedDispatch.body.executionRole !== parsedRuntime.executionRole) {
+		throw new TypeError(
+			"Worker runtime manifest binding requires matching executionRole values.",
+		);
+	}
+	if (
+		parsedDispatch.body.capabilityBundleDigest !==
+		parsedRuntime.capabilityBundleDigest
+	) {
+		throw new TypeError(
+			"Worker runtime manifest binding requires matching capabilityBundleDigest values.",
+		);
+	}
+	if (
+		parsedDispatch.body.sandboxProfileDigest !==
+		parsedRuntime.sandboxProfileDigest
+	) {
+		throw new TypeError(
+			"Worker runtime manifest binding requires matching sandboxProfileDigest values.",
+		);
+	}
+}
+
 const DISPATCH_ENVELOPE_V3_DIGEST_DOMAIN = "buildplane.dispatch-envelope.v3\0";
 const DISPATCH_ENVELOPE_V4_DIGEST_DOMAIN = "buildplane.dispatch-envelope.v4\0";
+const WORKER_RUNTIME_MANIFEST_V1_DIGEST_DOMAIN =
+	"buildplane.worker-runtime-manifest.v1\0";
 const WORKFLOW_GRAPH_V2_DIGEST_DOMAIN = "buildplane.workflow-graph.v2\0";
 const ACTION_REQUEST_V2_DIGEST_DOMAIN = "buildplane.action-request.v2\0";
 const ACTION_RECEIPT_V2_DIGEST_DOMAIN = "buildplane.action-receipt.v2\0";
@@ -3386,6 +3572,38 @@ export function canonicalPromotionApprovalRequestedV1Digest(
 		requested_by: request.requestedBy,
 		requested_at: request.requestedAt,
 		idempotency_key: request.idempotencyKey,
+	});
+}
+
+/**
+ * Stable, domain-separated identity for immutable worker runtime material.
+ * `runtimeManifestDigest` is deliberately excluded to avoid a circular claim.
+ */
+export function canonicalWorkerRuntimeManifestV1Digest(
+	input:
+		| Omit<WorkerRuntimeManifestV1, "runtimeManifestDigest">
+		| WorkerRuntimeManifestV1,
+): string {
+	const record = readClosedRecord(
+		input,
+		"workerRuntimeManifest",
+		WORKER_RUNTIME_MANIFEST_V1_FIELDS,
+	);
+	const runtime = readWorkerRuntimeManifestV1Fields(record);
+	return canonicalDigest(WORKER_RUNTIME_MANIFEST_V1_DIGEST_DOMAIN, {
+		schema_version: runtime.schemaVersion,
+		worker_id: runtime.workerId,
+		execution_role: runtime.executionRole,
+		provider: runtime.provider,
+		model: runtime.model,
+		provider_version: runtime.providerVersion,
+		harness: runtime.harness,
+		harness_version: runtime.harnessVersion,
+		image_digest: runtime.imageDigest,
+		tool_catalog_digest: runtime.toolCatalogDigest,
+		skill_set_digest: runtime.skillSetDigest,
+		capability_bundle_digest: runtime.capabilityBundleDigest,
+		sandbox_profile_digest: runtime.sandboxProfileDigest,
 	});
 }
 

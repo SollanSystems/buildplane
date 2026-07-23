@@ -418,10 +418,12 @@ export type {
 	SignatureRefV1,
 	TrustTierV1,
 	WorkerManifestV1,
+	WorkerRuntimeManifestV1,
 	WorkflowGraphDeclaredV2,
 	WorkflowGraphNodeV2,
 } from "./trust-spine.js";
 export {
+	assertDispatchWorkerRuntimeManifestV1,
 	assertGovernedExecutionV1,
 	canonicalActionReceiptRecordedV2Digest,
 	canonicalActionReceiptSetRecordedV1Digest,
@@ -434,6 +436,7 @@ export {
 	canonicalPromotionApprovalRequestedV1Digest,
 	canonicalReviewVerdictOutputV1Digest,
 	canonicalSha256Digest,
+	canonicalWorkerRuntimeManifestV1Digest,
 	canonicalWorkflowGraphV2Digest,
 	compileGovernedWorkflowGraphV2,
 	GovernedExecutionError,
@@ -461,6 +464,7 @@ export {
 	parseSandboxProfileV1,
 	parseSignablePromotionDecisionV1,
 	parseWorkerManifestV1,
+	parseWorkerRuntimeManifestV1,
 	parseWorkflowGraphDeclaredV2,
 	UNSUPPORTED_COMMIT_MODE,
 	UNSUPPORTED_COMMIT_MODE_MESSAGE,

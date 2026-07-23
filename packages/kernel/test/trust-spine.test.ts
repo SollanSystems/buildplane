@@ -22,9 +22,11 @@ import type {
 	ReviewVerdictV1,
 	SandboxProfileV1,
 	WorkerManifestV1,
+	WorkerRuntimeManifestV1,
 } from "@buildplane/kernel";
 import * as kernelPublicApi from "@buildplane/kernel";
 import {
+	assertDispatchWorkerRuntimeManifestV1,
 	assertGovernedExecutionV1,
 	canonicalActionReceiptRecordedV2Digest,
 	canonicalActionReceiptSetRecordedV1Digest,
@@ -36,6 +38,7 @@ import {
 	canonicalPromotionApprovalRequestedV1Digest,
 	canonicalReviewVerdictOutputV1Digest,
 	canonicalSha256Digest,
+	canonicalWorkerRuntimeManifestV1Digest,
 	isCanonicalBuildplaneCandidateRef,
 	parseActionReceiptRecordedV2,
 	parseActionReceiptSetRecordedV1,
@@ -59,6 +62,7 @@ import {
 	parseSandboxProfileV1,
 	parseSignablePromotionDecisionV1,
 	parseWorkerManifestV1,
+	parseWorkerRuntimeManifestV1,
 	UNSUPPORTED_COMMIT_MODE,
 	UNSUPPORTED_COMMIT_MODE_MESSAGE,
 } from "@buildplane/kernel";
@@ -493,6 +497,84 @@ function workerManifest(
 		provider: "openai",
 		manifestDigest: digest("f"),
 		...overrides,
+	};
+}
+
+function workerRuntimeManifest(
+	overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+	const {
+		runtimeManifestDigest: suppliedRuntimeManifestDigest,
+		...runtimeFields
+	} = overrides;
+	const runtimeManifest = {
+		schemaVersion: 1,
+		workerId: "openai-api:gpt-test",
+		executionRole: "implementer",
+		provider: "openai",
+		model: "gpt-test",
+		providerVersion: "2026-07-17",
+		harness: "codex",
+		harnessVersion: "0.1.0",
+		imageDigest: digest("a"),
+		toolCatalogDigest: digest("b"),
+		skillSetDigest: digest("c"),
+		capabilityBundleDigest: digest("c"),
+		sandboxProfileDigest: digest("1"),
+		...runtimeFields,
+	};
+	return {
+		...runtimeManifest,
+		runtimeManifestDigest:
+			suppliedRuntimeManifestDigest ??
+			canonicalWorkerRuntimeManifestV1Digest(
+				runtimeManifest as Omit<
+					WorkerRuntimeManifestV1,
+					"runtimeManifestDigest"
+				>,
+			),
+	};
+}
+
+function dispatchEnvelopeV3ForRuntime(
+	runtime: WorkerRuntimeManifestV1,
+	bodyOverrides: Record<string, unknown> = {},
+	dispatchOverrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+	const raw = dispatchEnvelopeV3();
+	const {
+		actionEvidenceVersion = "sealed_v3",
+		repositoryBindingDigest = raw.repositoryBindingDigest,
+		ledgerAuthorityRealmDigest = raw.ledgerAuthorityRealmDigest,
+		governedPacketDigest = raw.governedPacketDigest,
+		...remainingOverrides
+	} = dispatchOverrides;
+	const body = {
+		...(raw.body as Record<string, unknown>),
+		workerManifestDigest: runtime.runtimeManifestDigest,
+		executionRole: runtime.executionRole,
+		capabilityBundleDigest: runtime.capabilityBundleDigest,
+		sandboxProfileDigest: runtime.sandboxProfileDigest,
+		...bodyOverrides,
+	};
+	const envelope = {
+		schemaVersion: 3,
+		body,
+		actionEvidenceVersion,
+		repositoryBindingDigest,
+		ledgerAuthorityRealmDigest,
+		governedPacketDigest,
+		...remainingOverrides,
+	};
+	return {
+		...envelope,
+		envelopeDigest: canonicalDispatchEnvelopeV3Digest({
+			body: body as DispatchEnvelopeBodyV2,
+			actionEvidenceVersion: actionEvidenceVersion as "sealed-v2" | "sealed_v3",
+			repositoryBindingDigest: repositoryBindingDigest as string,
+			ledgerAuthorityRealmDigest: ledgerAuthorityRealmDigest as string,
+			governedPacketDigest: governedPacketDigest as string,
+		}),
 	};
 }
 
@@ -1528,6 +1610,238 @@ describe("trust-spine V1 contracts", () => {
 			targetRef: string;
 			requestedBy: string;
 		}>();
+	});
+});
+
+describe("trust-spine worker runtime manifests", () => {
+	it("parses a canonical runtime identity and binds it to governed sealed V3", () => {
+		const runtime = parseWorkerRuntimeManifestV1(workerRuntimeManifest());
+		const dispatch = parseDispatchEnvelopeV3(
+			dispatchEnvelopeV3ForRuntime(runtime),
+		);
+
+		expect(runtime.runtimeManifestDigest).toBe(
+			canonicalWorkerRuntimeManifestV1Digest(runtime),
+		);
+		expect(() =>
+			assertDispatchWorkerRuntimeManifestV1(dispatch, runtime),
+		).not.toThrow();
+		expect(kernelPublicApi.parseWorkerRuntimeManifestV1).toBe(
+			parseWorkerRuntimeManifestV1,
+		);
+		expect(kernelPublicApi.assertDispatchWorkerRuntimeManifestV1).toBe(
+			assertDispatchWorkerRuntimeManifestV1,
+		);
+		expectTypeOf<WorkerRuntimeManifestV1>().toMatchTypeOf<{
+			schemaVersion: 1;
+			workerId: string;
+			executionRole:
+				| "implementer"
+				| "reviewer"
+				| "adversary"
+				| "judge"
+				| "candidate";
+			model: string;
+			runtimeManifestDigest: string;
+		}>();
+	});
+
+	it("rejects a runtime manifest whose immutable fields were tampered after digesting", () => {
+		const raw = workerRuntimeManifest();
+		raw.model = "gpt-substituted";
+
+		expect(() => parseWorkerRuntimeManifestV1(raw)).toThrow(
+			"workerRuntimeManifest.runtimeManifestDigest must equal the canonical runtime manifest digest",
+		);
+	});
+
+	it("excludes only runtimeManifestDigest from its canonical runtime identity", () => {
+		const runtime = parseWorkerRuntimeManifestV1(workerRuntimeManifest());
+		const rebound = { ...runtime, runtimeManifestDigest: digest("f") };
+
+		expect(canonicalWorkerRuntimeManifestV1Digest(rebound)).toBe(
+			runtime.runtimeManifestDigest,
+		);
+		expect(
+			canonicalWorkerRuntimeManifestV1Digest({
+				...runtime,
+				model: "gpt-substituted",
+			}),
+		).not.toBe(runtime.runtimeManifestDigest);
+		expect(() => parseWorkerRuntimeManifestV1(rebound)).toThrow(
+			"workerRuntimeManifest.runtimeManifestDigest must equal the canonical runtime manifest digest",
+		);
+	});
+
+	it("uses a domain distinct from unrelated canonical data", () => {
+		const runtime = parseWorkerRuntimeManifestV1(workerRuntimeManifest());
+
+		expect(canonicalWorkerRuntimeManifestV1Digest(runtime)).not.toBe(
+			canonicalGovernedUnitPacketV1Digest({
+				schema_version: runtime.schemaVersion,
+				worker_id: runtime.workerId,
+				execution_role: runtime.executionRole,
+				provider: runtime.provider,
+				model: runtime.model,
+				provider_version: runtime.providerVersion,
+				harness: runtime.harness,
+				harness_version: runtime.harnessVersion,
+				image_digest: runtime.imageDigest,
+				tool_catalog_digest: runtime.toolCatalogDigest,
+				skill_set_digest: runtime.skillSetDigest,
+				capability_bundle_digest: runtime.capabilityBundleDigest,
+				sandbox_profile_digest: runtime.sandboxProfileDigest,
+			}),
+		);
+	});
+
+	it.each([
+		[
+			"a missing required runtime field",
+			() => {
+				const raw = workerRuntimeManifest();
+				delete raw.harness;
+				return raw;
+			},
+			"workerRuntimeManifest.harness must be a non-empty string",
+		],
+		[
+			"an invalid runtime digest format",
+			() => workerRuntimeManifest({ runtimeManifestDigest: "sha256:short" }),
+			"workerRuntimeManifest.runtimeManifestDigest must be a sha256 digest",
+		],
+	])("rejects %s", (_label, build, message) => {
+		expect(() => parseWorkerRuntimeManifestV1(build())).toThrow(message);
+	});
+
+	it.each([
+		[
+			"an unknown field",
+			() => {
+				const raw = workerRuntimeManifest();
+				raw.unexpected = true;
+				return raw;
+			},
+			'workerRuntimeManifest has unknown field "unexpected"',
+		],
+		[
+			"an unknown role",
+			() => {
+				const raw = workerRuntimeManifest();
+				raw.executionRole = "operator";
+				return raw;
+			},
+			"workerRuntimeManifest.executionRole must be one of",
+		],
+		[
+			"an accessor field",
+			() => {
+				const raw = workerRuntimeManifest();
+				Object.defineProperty(raw, "provider", {
+					get: () => {
+						throw new Error("runtime-provider-secret");
+					},
+				});
+				return raw;
+			},
+			"workerRuntimeManifest.provider must be a data property",
+		],
+		[
+			"an inherited worker id",
+			() => {
+				const raw = workerRuntimeManifest();
+				const inherited = Object.create({ workerId: raw.workerId }) as Record<
+					string,
+					unknown
+				>;
+				Object.assign(inherited, raw);
+				delete inherited.workerId;
+				return inherited;
+			},
+			"workerRuntimeManifest.workerId must be a non-empty string",
+		],
+	])("rejects %s", (_label, build, message) => {
+		expect(() => parseWorkerRuntimeManifestV1(build())).toThrow(message);
+	});
+
+	it.each([
+		["a raw dispatch", { trustTier: "raw" }, {}, 'trustTier "governed"'],
+		[
+			"a sealed-v2 dispatch",
+			{},
+			{ actionEvidenceVersion: "sealed-v2" },
+			'actionEvidenceVersion "sealed_v3"',
+		],
+		[
+			"a non-atomic dispatch",
+			{ commitMode: "incremental" },
+			{},
+			'commitMode "atomic"',
+		],
+		[
+			"a different worker manifest digest",
+			{ workerManifestDigest: digest("d") },
+			{},
+			"workerManifestDigest",
+		],
+		[
+			"a different execution role",
+			{ executionRole: "reviewer" },
+			{},
+			"executionRole",
+		],
+		[
+			"a different capability bundle",
+			{ capabilityBundleDigest: digest("d") },
+			{},
+			"capabilityBundleDigest",
+		],
+		[
+			"a different sandbox profile",
+			{ sandboxProfileDigest: digest("e") },
+			{},
+			"sandboxProfileDigest",
+		],
+	])("fails closed for %s", (_label, bodyOverrides, dispatchOverrides, message) => {
+		const runtime = parseWorkerRuntimeManifestV1(workerRuntimeManifest());
+		const dispatch = parseDispatchEnvelopeV3(
+			dispatchEnvelopeV3ForRuntime(runtime, bodyOverrides, dispatchOverrides),
+		);
+
+		expect(() =>
+			assertDispatchWorkerRuntimeManifestV1(dispatch, runtime),
+		).toThrow(message);
+	});
+
+	it("rejects a V4-shaped value instead of falling back to a different binding", () => {
+		const runtime = parseWorkerRuntimeManifestV1(workerRuntimeManifest());
+
+		expect(() =>
+			assertDispatchWorkerRuntimeManifestV1(
+				{ schemaVersion: 4 } as unknown as DispatchEnvelopeV3,
+				runtime,
+			),
+		).toThrow("dispatchEnvelopeV3.schemaVersion must be 3");
+	});
+
+	it("rejects a dispatch schemaVersion accessor without invoking it", () => {
+		const runtime = parseWorkerRuntimeManifestV1(workerRuntimeManifest());
+		const dispatch = dispatchEnvelopeV3ForRuntime(runtime);
+		let accessorReads = 0;
+		Object.defineProperty(dispatch, "schemaVersion", {
+			get: () => {
+				accessorReads += 1;
+				throw new Error("dispatch-schema-version-secret");
+			},
+		});
+
+		expect(() =>
+			assertDispatchWorkerRuntimeManifestV1(
+				dispatch as unknown as DispatchEnvelopeV3,
+				runtime,
+			),
+		).toThrow("dispatchEnvelopeV3.schemaVersion must be a data property");
+		expect(accessorReads).toBe(0);
 	});
 });
 
