@@ -54,7 +54,8 @@ type Scenario = {
 		| "review-abstain"
 		| "review-malformed"
 		| "failed-acceptance"
-		| "cancelled";
+		| "cancelled"
+		| "provider-failure";
 	readonly reviewDecision?: "reject" | "request_changes" | "abstain";
 };
 
@@ -80,6 +81,10 @@ const SCENARIOS: readonly Scenario[] = [
 	},
 	{ label: "failed deterministic acceptance", kind: "failed-acceptance" },
 	{ label: "cancelled implementer", kind: "cancelled" },
+	{
+		label: "failed implementer provider execution",
+		kind: "provider-failure",
+	},
 ];
 
 function git(cwd: string, args: readonly string[], input?: string): string {
@@ -547,6 +552,18 @@ describe("governed candidate root invariants", () => {
 						},
 					};
 				}
+				if (scenario.kind === "provider-failure") {
+					// A provider failure has no immutable candidate and therefore cannot
+					// reach review or promotion. The root snapshot below guards against
+					// accidental target mutation while the failed result is handled.
+					return {
+						run: {
+							id: "root-invariant-implementer",
+							unitId: "implement",
+							status: "failed",
+						},
+					};
+				}
 				return {
 					run: {
 						id: "root-invariant-implementer",
@@ -580,11 +597,20 @@ describe("governed candidate root invariants", () => {
 			expect(result.mergeDecision.outcome).toBe("rejected");
 			expect(candidateResult).toHaveBeenCalledTimes(1);
 			expect(reviewerAttempt).not.toHaveBeenCalled();
+			if (scenario.kind === "provider-failure") {
+				expect(result.candidate).toBeUndefined();
+				expect(result.candidateAcceptance).toBeUndefined();
+				expect(result.reviewVerdict).toBeUndefined();
+				expect(result.reviewRecord).toBeUndefined();
+			}
 			if (scenario.kind === "failed-acceptance") {
 				expect(result.mergeDecision.reasons.join(" ")).toMatch(
 					/deterministic acceptance/i,
 				);
-			} else if (scenario.kind === "cancelled") {
+			} else if (
+				scenario.kind === "cancelled" ||
+				scenario.kind === "provider-failure"
+			) {
 				expect(result.mergeDecision.reasons.join(" ")).toMatch(
 					/implementer did not pass/i,
 				);
