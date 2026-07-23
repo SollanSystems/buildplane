@@ -163,6 +163,45 @@ fn fully_checkpointed_chain() -> Vec<VerifiedEvent> {
     vec![first, second, first_checkpoint, third, second_checkpoint]
 }
 
+fn dense_event_id(n: u16) -> EventId {
+    EventId::from_uuid(Uuid::parse_str(&format!("01919000-0000-7000-8000-{n:012}")).unwrap())
+}
+
+/// Produce a valid cadence-one checkpoint chain without relying on the
+/// verifier under test. Each checkpoint covers exactly one additional signed
+/// ordinary event, which is the densest valid chain and the historical
+/// quadratic-work case.
+fn dense_cadence_one_chain(ordinary_count: u16) -> Vec<VerifiedEvent> {
+    assert!(
+        ordinary_count > 0,
+        "a checkpoint must cover an ordinary event"
+    );
+    let key = SigningKey::from_bytes(&[7; 32]);
+    let mut tape = Vec::with_capacity(usize::from(ordinary_count) * 2);
+    let mut ordinary_signatures = Vec::with_capacity(usize::from(ordinary_count));
+    let mut previous_checkpoint_event_id = None;
+
+    for index in 0..ordinary_count {
+        let ordinary = verified(ordinary_event(dense_event_id(index * 2 + 1)), &key);
+        ordinary_signatures.push(ordinary.signature.clone().unwrap());
+        let checkpoint = verified(
+            checkpoint_event_with_chain_metadata(
+                dense_event_id(index * 2 + 2),
+                ordinary.event.id,
+                &ordinary_signatures,
+                Some(ordinary.event.id),
+                u64::from(index),
+                previous_checkpoint_event_id,
+            ),
+            &key,
+        );
+        previous_checkpoint_event_id = Some(checkpoint.event.id);
+        tape.push(ordinary);
+        tape.push(checkpoint);
+    }
+    tape
+}
+
 fn checkpoint_payload_mut(verified: &mut VerifiedEvent) -> &mut TapeCheckpointV1 {
     match &mut verified.event.payload {
         Payload::TapeCheckpointV1(payload) => payload,
@@ -238,6 +277,37 @@ fn reports_the_latest_full_cover_checkpoint_from_a_valid_chain() {
     assert_eq!(report.checkpoint_event_ref, event_id(5).to_string());
     assert_eq!(report.through_event_ref, event_id(4).to_string());
     assert_eq!(report.signed_non_checkpoint_event_count, 3);
+}
+
+#[test]
+fn accepts_a_dense_cadence_one_checkpoint_chain() {
+    const ORDINARY_EVENT_COUNT: u16 = 512;
+    let tape = dense_cadence_one_chain(ORDINARY_EVENT_COUNT);
+
+    let report =
+        verify_full_tape_integrity_v1(&tape, RUN_ID, &tape[0].signature.as_ref().unwrap().signer)
+            .expect("a dense, fully covered checkpoint chain remains valid");
+
+    assert_eq!(
+        report.signed_non_checkpoint_event_count,
+        u64::from(ORDINARY_EVENT_COUNT)
+    );
+    assert_eq!(
+        report.checkpoint_event_ref,
+        dense_event_id(ORDINARY_EVENT_COUNT * 2).to_string()
+    );
+}
+
+#[test]
+fn rejects_a_tampered_intermediate_root_in_a_dense_checkpoint_chain() {
+    let mut tape = dense_cadence_one_chain(512);
+    checkpoint_payload_mut(&mut tape[255]).tape_root_hash = "sha256:tampered".to_string();
+
+    let error =
+        verify_full_tape_integrity_v1(&tape, RUN_ID, &tape[0].signature.as_ref().unwrap().signer)
+            .expect_err("a corrupt intermediate checkpoint must block the complete chain");
+
+    assert!(matches!(error, TapeIntegrityError::TapeRootMismatch { .. }));
 }
 
 #[test]

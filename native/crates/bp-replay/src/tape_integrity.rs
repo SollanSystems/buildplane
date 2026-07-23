@@ -8,10 +8,12 @@
 //! performs effects.
 
 use crate::reader::VerifiedEvent;
-use bp_ledger::payload::checkpoint::{tape_root_hash, TapeCheckpointV1, TapeRootAlgorithm};
+use bp_ledger::payload::checkpoint::{TapeCheckpointV1, TapeRootAlgorithm};
 use bp_ledger::payload::Payload;
 use bp_ledger::signing::{ActorKeyRef, EventSignatureV1, VerificationStatus};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use thiserror::Error;
 
 /// Closed integrity facts for one recovery snapshot.
@@ -144,6 +146,30 @@ pub enum TapeIntegrityError {
     },
 }
 
+/// Incremental implementation of the `sha256_linear` checkpoint-root wire
+/// contract. Each signed ordinary-event hash is appended exactly once; a
+/// checkpoint clones and finalizes the current state, preserving the
+/// newline-separated/no-trailing-newline input used by `tape_root_hash`.
+#[derive(Clone, Default)]
+struct TapeRootHasher {
+    hasher: Sha256,
+    count: usize,
+}
+
+impl TapeRootHasher {
+    fn push(&mut self, canonical_event_hash: &str) {
+        if self.count != 0 {
+            self.hasher.update(b"\n");
+        }
+        self.hasher.update(canonical_event_hash.as_bytes());
+        self.count += 1;
+    }
+
+    fn root(&self) -> String {
+        format!("sha256:{:x}", self.hasher.clone().finalize())
+    }
+}
+
 /// Verify that the complete signed, non-checkpoint prefix used by a governed
 /// recovery snapshot is covered by a directly anchored, pinned-kernel-signed
 /// checkpoint chain. Every checkpoint in the supplied snapshot is validated
@@ -181,6 +207,7 @@ pub fn verify_full_tape_integrity_v1(
     }
 
     let mut signed_ordinary = Vec::new();
+    let mut signed_ordinary_positions = HashMap::new();
     let mut checkpoints = Vec::new();
     for verified in events {
         if verified.event.kind == bp_ledger::EventKind::TapeCheckpoint {
@@ -201,6 +228,13 @@ pub fn verify_full_tape_integrity_v1(
                 event_id: verified.event.id.to_string(),
             }
         })?;
+        // Preserve the prior `iter().position(...)` behavior if a malformed
+        // snapshot contains duplicate event IDs: the first occurrence is the
+        // only one that can satisfy a `through_event_id` lookup.
+        let signed_ordinary_position = signed_ordinary.len();
+        signed_ordinary_positions
+            .entry(verified.event.id)
+            .or_insert(signed_ordinary_position);
         signed_ordinary.push((verified, signature));
     }
 
@@ -215,6 +249,7 @@ pub fn verify_full_tape_integrity_v1(
         &EventSignatureV1,
         usize,
     )> = None;
+    let mut rolling_root = TapeRootHasher::default();
 
     for (position, checkpoint) in checkpoints.into_iter().enumerate() {
         let event_id = checkpoint.event.id.to_string();
@@ -256,15 +291,14 @@ pub fn verify_full_tape_integrity_v1(
             });
         }
 
-        let through_position = signed_ordinary
-            .iter()
-            .position(|(verified, _)| verified.event.id == payload.through_event_id)
+        let through_position = signed_ordinary_positions
+            .get(&payload.through_event_id)
+            .copied()
             .ok_or_else(|| TapeIntegrityError::ThroughEventMissing {
                 event_id: checkpoint.event.id.to_string(),
                 through_event_id: payload.through_event_id.to_string(),
             })?;
-        let covered = &signed_ordinary[..=through_position];
-        let covered_count = covered.len() as u64;
+        let covered_count = (through_position + 1) as u64;
         if payload.through_event_count != covered_count {
             return Err(TapeIntegrityError::CoverageCountMismatch {
                 event_id: checkpoint.event.id.to_string(),
@@ -272,11 +306,20 @@ pub fn verify_full_tape_integrity_v1(
                 actual: covered_count,
             });
         }
-        let hashes = covered
-            .iter()
-            .map(|(_, signature)| signature.canonical_event_hash.clone())
-            .collect::<Vec<_>>();
-        if payload.tape_root_hash != tape_root_hash(&hashes) {
+
+        if let Some((previous, previous_through_position)) = previous_checkpoint {
+            if through_position <= previous_through_position {
+                return Err(TapeIntegrityError::CheckpointCoverageNotAdvanced {
+                    event_id: checkpoint.event.id.to_string(),
+                    previous_checkpoint_event_id: previous.event.id.to_string(),
+                });
+            }
+        }
+
+        while rolling_root.count <= through_position {
+            rolling_root.push(&signed_ordinary[rolling_root.count].1.canonical_event_hash);
+        }
+        if payload.tape_root_hash != rolling_root.root() {
             return Err(TapeIntegrityError::TapeRootMismatch {
                 event_id: checkpoint.event.id.to_string(),
             });
@@ -299,14 +342,6 @@ pub fn verify_full_tape_integrity_v1(
                     .previous_checkpoint_event_id
                     .map(|id| id.to_string()),
             });
-        }
-        if let Some((previous, previous_through_position)) = previous_checkpoint {
-            if through_position <= previous_through_position {
-                return Err(TapeIntegrityError::CheckpointCoverageNotAdvanced {
-                    event_id: checkpoint.event.id.to_string(),
-                    previous_checkpoint_event_id: previous.event.id.to_string(),
-                });
-            }
         }
 
         previous_checkpoint = Some((checkpoint, through_position));
@@ -332,4 +367,26 @@ pub fn verify_full_tape_integrity_v1(
         tape_root_hash: payload.tape_root_hash.clone(),
         algorithm: payload.algorithm,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TapeRootHasher;
+    use bp_ledger::payload::checkpoint::tape_root_hash;
+
+    #[test]
+    fn rolling_tape_root_matches_the_wire_contract_for_every_prefix() {
+        let hashes = vec![
+            "sha256:0000000000000000000000000000000000000000000000000000000000000001".to_string(),
+            "sha256:0000000000000000000000000000000000000000000000000000000000000002".to_string(),
+            "sha256:0000000000000000000000000000000000000000000000000000000000000003".to_string(),
+        ];
+        let mut rolling = TapeRootHasher::default();
+
+        assert_eq!(rolling.root(), tape_root_hash(&[]));
+        for (index, hash) in hashes.iter().enumerate() {
+            rolling.push(hash);
+            assert_eq!(rolling.root(), tape_root_hash(&hashes[..=index]));
+        }
+    }
 }
