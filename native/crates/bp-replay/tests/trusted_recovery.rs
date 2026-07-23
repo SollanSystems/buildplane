@@ -2,8 +2,9 @@ use bp_ledger::event::Event;
 use bp_ledger::id::{EventId, RunId};
 use bp_ledger::kind::EventKind;
 use bp_ledger::payload::trust_spine::{
-    dispatch_envelope_v3_body_digest, dispatch_envelope_v4_digest, workflow_graph_v2_digest,
-    ActionEvidenceVersionV1, CommitModeV1, DispatchBudgetV1, DispatchEnvelopeBodyV2,
+    dispatch_envelope_v3_body_digest, dispatch_envelope_v4_digest,
+    governed_dispatch_policy_digest_v1, workflow_graph_v2_digest, ActionEvidenceVersionV1,
+    ActionKindV1, ActionRequestedV2, CommitModeV1, DispatchBudgetV1, DispatchEnvelopeBodyV2,
     DispatchEnvelopeV3, DispatchEnvelopeV4, ExecutionRoleV1, TrustTierV1, WorkflowGraphDeclaredV2,
     WorkflowGraphNodeV2,
 };
@@ -11,14 +12,21 @@ use bp_ledger::payload::Payload;
 use bp_ledger::signing::{public_key_hash, ActorKeyRef, TrustedPublicKeys};
 use bp_ledger::storage::sqlite::{CheckpointPolicy, SqliteStore};
 use bp_replay::engine::{ReplayEngine, TrustSpineSignerRole, TrustedReplayAuthorities};
-use bp_replay::{ReplayIssue, TrustedGovernedRecoveryError, TrustedGovernedRecoverySnapshot};
-use chrono::Utc;
+use bp_replay::{
+    ReplayIssue, TrustedGovernedRecoveryError, TrustedGovernedRecoverySnapshot,
+    VerifiedOtelProjectionErrorV1,
+};
+use chrono::{SecondsFormat, Utc};
 use ed25519_dalek::SigningKey;
 use tempfile::TempDir;
 
 const DIGEST_A: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const DIGEST_B: &str = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const DIGEST_C: &str = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+const WORKFLOW_ID_SENTINEL: &str = "forbidden-workflow-id-sentinel";
+const WORKFLOW_REVISION_SENTINEL: &str = "forbidden-workflow-revision-sentinel";
+const UNIT_ID_SENTINEL: &str = "forbidden-unit-id-sentinel";
+const ACTION_ID_SENTINEL: &str = "forbidden-action-id-sentinel";
 
 fn kernel_signer() -> ActorKeyRef {
     ActorKeyRef {
@@ -84,6 +92,30 @@ fn sealed_v3_dispatch() -> DispatchEnvelopeV3 {
     }
 }
 
+fn sealed_v3_dispatch_with_identity_and_timestamps(
+    workflow_id: &str,
+    workflow_revision: &str,
+    unit_id: &str,
+    issued_at: &str,
+    expires_at: &str,
+) -> DispatchEnvelopeV3 {
+    let mut dispatch = sealed_v3_dispatch();
+    dispatch.body.workflow_id = workflow_id.to_string();
+    dispatch.body.workflow_revision = workflow_revision.to_string();
+    dispatch.body.unit_id = unit_id.to_string();
+    dispatch.body.issued_at = issued_at.to_string();
+    dispatch.body.expires_at = expires_at.to_string();
+    dispatch.envelope_digest = dispatch_envelope_v3_body_digest(
+        &dispatch.body,
+        dispatch.action_evidence_version,
+        &dispatch.repository_binding_digest,
+        &dispatch.ledger_authority_realm_digest,
+        dispatch.governed_packet_digest.as_deref(),
+    )
+    .expect("canonical sealed V3 dispatch with test identity");
+    dispatch
+}
+
 fn dispatch_event(run_id: RunId) -> Event {
     dispatch_event_with(run_id, sealed_v3_dispatch())
 }
@@ -97,6 +129,51 @@ fn dispatch_event_with(run_id: RunId, dispatch: DispatchEnvelopeV3) -> Event {
         kind: EventKind::DispatchEnvelopeV3,
         occurred_at: Utc::now(),
         payload: Payload::DispatchEnvelopeV3(dispatch),
+    }
+}
+
+fn action_request_event(
+    run_id: RunId,
+    dispatch_event: &Event,
+    dispatch: &DispatchEnvelopeV3,
+    action_id: &str,
+) -> Event {
+    let occurred_at = Utc::now();
+    let request = ActionRequestedV2 {
+        run_id: run_id.to_string(),
+        workflow_id: dispatch.body.workflow_id.clone(),
+        unit_id: dispatch.body.unit_id.clone(),
+        attempt: dispatch.body.attempt,
+        provenance_ref: dispatch.body.provenance_ref.clone(),
+        action_id: action_id.to_string(),
+        idempotency_key: "action:fixture:1".to_string(),
+        action_kind: ActionKindV1::Process,
+        canonical_input_digest: DIGEST_A.to_string(),
+        canonical_input_ref: "cas:input:fixture".to_string(),
+        dispatch_envelope_digest: dispatch.envelope_digest.clone(),
+        repository_binding_digest: dispatch.repository_binding_digest.clone(),
+        ledger_authority_realm_digest: dispatch.ledger_authority_realm_digest.clone(),
+        governed_packet_digest: dispatch.governed_packet_digest.clone(),
+        capability_bundle_digest: dispatch.body.capability_bundle_digest.clone(),
+        policy_digest: governed_dispatch_policy_digest_v1(
+            &dispatch.body.acceptance_contract_digest,
+        )
+        .expect("fixture dispatch has a canonical acceptance-contract digest"),
+        context_manifest_digest: dispatch.body.context_manifest_digest.clone(),
+        worker_manifest_digest: dispatch.body.worker_manifest_digest.clone(),
+        sandbox_profile_digest: dispatch.body.sandbox_profile_digest.clone(),
+        authority_actor: "kernel".to_string(),
+        execution_role: dispatch.body.execution_role,
+        requested_at: occurred_at.to_rfc3339_opts(SecondsFormat::Nanos, true),
+    };
+    Event {
+        id: EventId::new(),
+        run_id,
+        parent_event_id: Some(dispatch_event.id),
+        schema_version: Event::CURRENT_SCHEMA_VERSION,
+        kind: EventKind::ActionRequestedV2,
+        occurred_at,
+        payload: Payload::ActionRequestedV2(request),
     }
 }
 
@@ -232,6 +309,169 @@ fn trusted_recovery_returns_only_a_fully_checkpointed_sealed_v3_workflow() {
     assert!(snapshot
         .workflow_for_promotion_identity(DIGEST_A, "promotion:1")
         .is_none());
+}
+
+#[test]
+fn trusted_recovery_projects_a_verified_redacted_otel_view() {
+    let temp = TempDir::new().expect("temporary ledger directory");
+    let db_path = temp.path().join("events.db");
+    let store = SqliteStore::open(&db_path).expect("ledger store");
+    let run_id = RunId::new();
+    let signing_key = SigningKey::from_bytes(&[16; 32]);
+    let (authorities, pinned_kernel) = trusted_authorities(&signing_key);
+    let dispatch = dispatch_event(run_id);
+    store
+        .append_signed_with_checkpoint(
+            &dispatch,
+            &signing_key,
+            &kernel_signer(),
+            &CheckpointPolicy::every(1),
+        )
+        .expect("append checkpointed signed dispatch");
+
+    let snapshot = TrustedGovernedRecoverySnapshot::open(
+        &run_id.to_string(),
+        &db_path,
+        &authorities,
+        &pinned_kernel,
+    )
+    .expect("fully checkpointed trusted V3 tape");
+
+    let projection = snapshot
+        .verified_otel_projection_v1()
+        .expect("project a verified redacted OTel view");
+    let encoded = serde_json::to_value(projection).expect("serialize verified OTel projection");
+
+    assert_eq!(encoded["schema_version"], 1);
+    assert_eq!(encoded["authority"]["tape"], "verified");
+    assert_eq!(encoded["authority"]["export"], "none");
+    assert_eq!(
+        encoded["resource"]["tape_integrity"]["signed_non_checkpoint_event_count"],
+        "1"
+    );
+    assert_eq!(encoded["spans"].as_array().map(Vec::len), Some(1));
+    assert_eq!(encoded["spans"][0]["name"], "buildplane.workflow");
+    assert_eq!(
+        encoded["spans"][0]["attributes"]["workflow"]["dispatch_event_ref"],
+        dispatch.id.to_string()
+    );
+    assert_eq!(
+        encoded["spans"][0]["attributes"]["workflow"]["context_manifest_digest"],
+        DIGEST_A
+    );
+    assert!(!encoded.to_string().contains("admission:1"));
+    assert!(!encoded.to_string().contains(&"1".repeat(40)));
+    assert!(!encoded.to_string().contains("dispatch:workflow-1:unit-1:1"));
+}
+
+#[test]
+fn trusted_recovery_otel_projection_never_serializes_opaque_workflow_or_action_ids() {
+    let temp = TempDir::new().expect("temporary ledger directory");
+    let db_path = temp.path().join("events.db");
+    let store = SqliteStore::open(&db_path).expect("ledger store");
+    let run_id = RunId::new();
+    let signing_key = SigningKey::from_bytes(&[24; 32]);
+    let (authorities, pinned_kernel) = trusted_authorities(&signing_key);
+    let dispatch = sealed_v3_dispatch_with_identity_and_timestamps(
+        WORKFLOW_ID_SENTINEL,
+        WORKFLOW_REVISION_SENTINEL,
+        UNIT_ID_SENTINEL,
+        "2026-07-17T00:00:00Z",
+        "2026-07-17T01:00:00Z",
+    );
+    let dispatch_event = dispatch_event_with(run_id, dispatch.clone());
+    let action_event = action_request_event(run_id, &dispatch_event, &dispatch, ACTION_ID_SENTINEL);
+
+    store
+        .append_signed_with_checkpoint(
+            &dispatch_event,
+            &signing_key,
+            &kernel_signer(),
+            &CheckpointPolicy::every(1),
+        )
+        .expect("append checkpointed signed dispatch");
+    store
+        .append_signed_with_checkpoint(
+            &action_event,
+            &signing_key,
+            &kernel_signer(),
+            &CheckpointPolicy::every(1),
+        )
+        .expect("append checkpointed signed action request");
+
+    let snapshot = TrustedGovernedRecoverySnapshot::open(
+        &run_id.to_string(),
+        &db_path,
+        &authorities,
+        &pinned_kernel,
+    )
+    .expect("fully checkpointed trusted V3 tape with a governed action");
+    let projection = snapshot
+        .verified_otel_projection_v1()
+        .expect("project a verified redacted OTel view");
+    let encoded = serde_json::to_string(&projection).expect("serialize verified OTel projection");
+
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&encoded).expect("read projection JSON")["spans"]
+            .as_array()
+            .map(Vec::len),
+        Some(2),
+        "the signed fixture must project both workflow and action spans"
+    );
+    for forbidden in [
+        WORKFLOW_ID_SENTINEL,
+        WORKFLOW_REVISION_SENTINEL,
+        UNIT_ID_SENTINEL,
+        ACTION_ID_SENTINEL,
+    ] {
+        assert!(
+            !encoded.contains(forbidden),
+            "verified OTel projection leaked an arbitrary opaque identifier: {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn trusted_recovery_otel_projection_fails_closed_for_a_valid_out_of_range_timestamp() {
+    let temp = TempDir::new().expect("temporary ledger directory");
+    let db_path = temp.path().join("events.db");
+    let store = SqliteStore::open(&db_path).expect("ledger store");
+    let run_id = RunId::new();
+    let signing_key = SigningKey::from_bytes(&[25; 32]);
+    let (authorities, pinned_kernel) = trusted_authorities(&signing_key);
+    let dispatch = sealed_v3_dispatch_with_identity_and_timestamps(
+        "workflow-1",
+        "r1",
+        "unit-1",
+        "2263-01-01T00:00:00Z",
+        "2263-01-01T01:00:00Z",
+    );
+    let dispatch_event = dispatch_event_with(run_id, dispatch);
+    store
+        .append_signed_with_checkpoint(
+            &dispatch_event,
+            &signing_key,
+            &kernel_signer(),
+            &CheckpointPolicy::every(1),
+        )
+        .expect("append checkpointed signed out-of-range dispatch");
+
+    let snapshot = TrustedGovernedRecoverySnapshot::open(
+        &run_id.to_string(),
+        &db_path,
+        &authorities,
+        &pinned_kernel,
+    )
+    .expect("trusted replay must open a valid RFC3339 tape before OTel projection");
+    let error = snapshot
+        .verified_otel_projection_v1()
+        .expect_err("an out-of-range OTel timestamp must fail closed");
+
+    assert_eq!(
+        error,
+        VerifiedOtelProjectionErrorV1::TimestampOutsideOpenTelemetryRange
+    );
+    assert!(!error.to_string().contains("2263"));
 }
 
 #[test]

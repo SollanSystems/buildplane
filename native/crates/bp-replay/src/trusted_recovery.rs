@@ -12,6 +12,7 @@ use crate::activity_decision::{
     RECORDED_ACTION_DECISION_SCHEMA_VERSION_V1,
 };
 use crate::engine::{EngineError, ReplayEngine, TrustSpineSignerRole, TrustedReplayAuthorities};
+use crate::otel_projection::{VerifiedOtelProjectionErrorV1, VerifiedOtelProjectionV1};
 use crate::state::{ReplayIssue, WorkflowInstanceV1};
 use crate::tape_integrity::{
     verify_full_tape_integrity_v1, TapeIntegrityError, TapeIntegrityReportV1,
@@ -269,6 +270,29 @@ impl TrustedGovernedRecoverySnapshot {
     /// Full-prefix tape-root evidence for this immutable recovery view.
     pub fn tape_integrity(&self) -> &TapeIntegrityReportV1 {
         &self.tape_integrity
+    }
+
+    /// Project this already verified recovery snapshot as redacted,
+    /// evidence-only OpenTelemetry facts.
+    ///
+    /// There is intentionally no free projector taking caller facts, replay
+    /// state, JSON, or raw tape data. This snapshot exists only after
+    /// [`Self::open`] has exhausted trusted replay and verified the same
+    /// immutable tape's complete checkpoint chain. The result carries no
+    /// action, promotion, receipt, or export authority.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed error when a verified RFC3339 timestamp cannot be
+    /// represented as an OpenTelemetry `i64` nanosecond timestamp. The error
+    /// contains no timestamp or raw replay facts.
+    pub fn verified_otel_projection_v1(
+        &self,
+    ) -> Result<VerifiedOtelProjectionV1, VerifiedOtelProjectionErrorV1> {
+        crate::otel_projection::project_verified_snapshot_v1(
+            &self.tape_integrity,
+            self.workflows_by_dispatch_event_ref.values(),
+        )
     }
 
     /// Find an exact governed recovery workflow by its signed dispatch event.

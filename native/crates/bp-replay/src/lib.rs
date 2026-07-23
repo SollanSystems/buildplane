@@ -2,6 +2,7 @@
 
 mod activity_decision;
 pub mod engine;
+mod otel_projection;
 pub mod reader;
 pub mod state;
 pub mod tape_integrity;
@@ -20,6 +21,14 @@ pub use activity_decision::{
     RECORDED_ACTION_DECISION_SCHEMA_VERSION_V1,
 };
 pub use engine::{ReplayEngine, ReplayStep, TrustSpineSignerRole, TrustedReplayAuthorities};
+pub use otel_projection::{
+    VerifiedOtelActionFactsV1, VerifiedOtelActionOutcomeV1, VerifiedOtelAuthorityV1,
+    VerifiedOtelDecisionFactsV1, VerifiedOtelDecisionKindV1, VerifiedOtelDecisionOutcomeV1,
+    VerifiedOtelExportAuthorityV1, VerifiedOtelProjectionErrorV1, VerifiedOtelProjectionV1,
+    VerifiedOtelResourceV1, VerifiedOtelSpanAttributesV1, VerifiedOtelSpanNameV1,
+    VerifiedOtelSpanV1, VerifiedOtelTapeAuthorityV1, VerifiedOtelTapeIntegrityFactsV1,
+    VerifiedOtelWorkflowFactsV1, VERIFIED_OTEL_PROJECTION_SCHEMA_VERSION_V1,
+};
 pub use state::{
     ActionEvidenceReplayState, ActionReceiptReplayState, ActionReceiptSetReplayState,
     ActionReplayState, ActionRequestReplayState, ActivityClaimReplayState,
