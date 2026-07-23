@@ -36,6 +36,9 @@ mod admission_protocol;
 mod confinement;
 mod promotion_execution;
 mod promotion_git;
+#[cfg(target_os = "linux")]
+#[allow(dead_code)]
+mod protocol;
 
 /// The complete request surface accepted from a run-bound broker controller.
 ///

@@ -280,6 +280,51 @@ fn broker_host_confinement_rejects_a_same_uid_unix_socket_peer() {
 
 #[cfg(target_os = "linux")]
 #[test]
+fn broker_protocol_rejects_a_same_uid_peer_before_consuming_its_framed_request() {
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
+    use std::time::Duration;
+
+    let broker_uid = unsafe { libc::geteuid() };
+    let configured_worker_uid = broker_uid.checked_add(1).unwrap_or(broker_uid - 1);
+    let policy = BrokerHostConfinementPolicyV1::new(broker_uid, [configured_worker_uid])
+        .expect("a distinct configured worker identity is valid");
+    let attestation = policy
+        .attest_current_broker_process()
+        .expect("the test process is the configured broker identity");
+    let (mut broker_stream, mut same_uid_worker_stream) =
+        UnixStream::pair().expect("create a local Unix socket pair");
+    let payload = authority_broker_admission_wire().into_bytes();
+    let mut frame = u32::try_from(payload.len())
+        .expect("the canonical fixture fits the V1 frame length")
+        .to_be_bytes()
+        .to_vec();
+    frame.extend_from_slice(&payload);
+    same_uid_worker_stream
+        .write_all(&frame)
+        .expect("queue a valid-looking framed request");
+
+    assert!(matches!(
+        super::protocol::read_authenticated_authority_broker_request_v1(
+            &policy,
+            &attestation,
+            &mut broker_stream,
+        ),
+        Err(super::protocol::BrokerProtocolErrorV1::PeerRejected)
+    ));
+
+    broker_stream
+        .set_read_timeout(Some(Duration::from_millis(250)))
+        .expect("bound an assertion failure if the gate consumed the frame");
+    let mut observed = vec![0; frame.len()];
+    broker_stream
+        .read_exact(&mut observed)
+        .expect("peer authentication must fail before any frame byte is read");
+    assert_eq!(observed, frame);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn broker_host_confinement_rejects_an_attestation_from_a_different_policy() {
     use std::os::unix::net::UnixStream;
 
