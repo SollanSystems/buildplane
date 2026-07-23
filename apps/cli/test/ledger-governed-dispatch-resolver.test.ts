@@ -314,19 +314,191 @@ describe("native governed dispatch resolver", () => {
 		expect(resolved).not.toHaveProperty("recoveryResolver");
 	});
 
-	it("blocks a native serialized pending promotion-approval recovery fixture", () => {
+	it("projects a native serialized pending promotion approval as a read-only operator handoff", () => {
 		expect(
 			existsSync(
 				NATIVE_GOVERNED_DISPATCH_RESOLUTION_V1_PROMOTION_APPROVAL_FIXTURE,
 			),
 		).toBe(true);
-		expect(() =>
-			parseNativeFixture(
-				nativeFixture(
-					NATIVE_GOVERNED_DISPATCH_RESOLUTION_V1_PROMOTION_APPROVAL_FIXTURE,
-				),
+		const resolved = parseNativeFixture(
+			nativeFixture(
+				NATIVE_GOVERNED_DISPATCH_RESOLUTION_V1_PROMOTION_APPROVAL_FIXTURE,
 			),
-		).toThrow(/pending promotion approval.*action recovery is blocked/i);
+		);
+
+		expect(resolved).toMatchObject({
+			phase: "promotion_approval_pending",
+			promotionApproval: {
+				state: "operator_decision_required",
+				authority: "none",
+				eventRef: "00000000-0000-7000-8000-0000000000aa",
+				candidateDigest: DIGEST("3"),
+				baseCommitSha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+				envelopeDigest: DIGEST("d"),
+				acceptanceRef: "acceptance:fixture",
+				reviewRefs: ["review:fixture"],
+				requestedBy: "kernel",
+				requestedAt: "2026-07-18T12:02:30Z",
+				idempotencyKey: "promotion:fixture",
+			},
+		});
+		const handoff = resolved.promotionApproval;
+		expect(handoff).toBeDefined();
+		expect(Object.isFrozen(handoff)).toBe(true);
+		expect(handoff).not.toHaveProperty("execute");
+		expect(handoff).not.toHaveProperty("retry");
+		expect(handoff).not.toHaveProperty("decision");
+		expect(resolved).not.toHaveProperty("promotionResolver");
+	});
+
+	it("requires a native full lineage for a pending promotion-approval handoff", () => {
+		const fixture = nativeFixture(
+			NATIVE_GOVERNED_DISPATCH_RESOLUTION_V1_PROMOTION_APPROVAL_FIXTURE,
+		);
+		const recovery = fixture.recovery as Record<string, unknown>;
+		const candidates = recovery.candidates as readonly Record<
+			string,
+			unknown
+		>[];
+		const acceptance = recovery.acceptance as Record<string, unknown> | null;
+		const reviews = recovery.reviews as readonly Record<string, unknown>[];
+		const resolved = parseNativeFixture(fixture);
+		const handoff = resolved.promotionApproval;
+
+		expect(resolved.phase).toBe("promotion_approval_pending");
+		expect(candidates).toHaveLength(1);
+		expect(recovery.candidate_completion).toBeDefined();
+		expect(acceptance).toMatchObject({
+			outcome: "passed",
+			candidate_digest: candidates[0]?.candidate_digest,
+		});
+		expect(reviews).toEqual([
+			expect.objectContaining({
+				decision: "approve",
+				candidate_digest: candidates[0]?.candidate_digest,
+				candidate_envelope_digest: fixture.dispatch
+					? (fixture.dispatch as Record<string, unknown>).envelope_digest
+					: undefined,
+			}),
+		]);
+		expect(handoff).toMatchObject({
+			candidateDigest: candidates[0]?.candidate_digest,
+			acceptanceRef: acceptance?.acceptance_ref,
+			reviewRefs: reviews.map((review) => review.review_ref),
+		});
+		expect(
+			resolved.recovery.candidateCompletion?.completion.candidateDigest,
+		).toBe(handoff?.candidateDigest);
+		expect(resolved).not.toHaveProperty("promotionResolver");
+	});
+
+	it.each([
+		[
+			"a foreign approval candidate digest",
+			(fixture: Record<string, unknown>) => {
+				const recovery = fixture.recovery as Record<string, unknown>;
+				const approval = recovery.promotion_approval as Record<string, unknown>;
+				recovery.promotion_approval = {
+					...approval,
+					candidate_digest: DIGEST("f"),
+				};
+			},
+			/promotion approval does not bind one exact recovered candidate/i,
+		],
+		[
+			"an approval acceptance-reference rebinding",
+			(fixture: Record<string, unknown>) => {
+				const recovery = fixture.recovery as Record<string, unknown>;
+				const approval = recovery.promotion_approval as Record<string, unknown>;
+				recovery.promotion_approval = {
+					...approval,
+					acceptance_ref: "acceptance:foreign",
+				};
+			},
+			/promotion approval does not bind the passed recovered acceptance/i,
+		],
+		[
+			"a missing approving review reference",
+			(fixture: Record<string, unknown>) => {
+				const recovery = fixture.recovery as Record<string, unknown>;
+				const approval = recovery.promotion_approval as Record<string, unknown>;
+				recovery.promotion_approval = {
+					...approval,
+					review_refs: ["review:foreign"],
+				};
+			},
+			/promotion approval review reference is not an approving recovered review/i,
+		],
+		[
+			"a review rebound to a foreign candidate envelope",
+			(fixture: Record<string, unknown>) => {
+				const recovery = fixture.recovery as Record<string, unknown>;
+				const reviews = recovery.reviews as readonly Record<string, unknown>[];
+				recovery.reviews = [
+					{
+						...reviews[0],
+						candidate_envelope_digest: DIGEST("f"),
+					},
+				];
+			},
+			/recovered approval review does not bind the verified dispatch envelope/i,
+		],
+	] as const)("fails closed on %s", (_label, rebind, expected) => {
+		const fixture = structuredClone(
+			nativeFixture(
+				NATIVE_GOVERNED_DISPATCH_RESOLUTION_V1_PROMOTION_APPROVAL_FIXTURE,
+			),
+		);
+		rebind(fixture);
+
+		expect(() => parseNativeFixture(fixture)).toThrow(expected);
+	});
+
+	it.each([
+		[
+			"omits approval evidence while phase is pending",
+			(fixture: Record<string, unknown>) => {
+				delete (fixture.recovery as Record<string, unknown>).promotion_approval;
+			},
+			/promotion_approval_pending without its approval evidence/i,
+		],
+		[
+			"retains approval evidence outside the pending phase",
+			(fixture: Record<string, unknown>) => {
+				(fixture.recovery as Record<string, unknown>).phase = "review_approved";
+			},
+			/promotion approval evidence outside promotion_approval_pending/i,
+		],
+	] as const)("fails closed when %s", (_label, mutate, expected) => {
+		const fixture = structuredClone(
+			nativeFixture(
+				NATIVE_GOVERNED_DISPATCH_RESOLUTION_V1_PROMOTION_APPROVAL_FIXTURE,
+			),
+		);
+		mutate(fixture);
+
+		expect(() => parseNativeFixture(fixture)).toThrow(expected);
+	});
+
+	it("fails closed when a pending promotion approval does not bind the dispatch base SHA", () => {
+		const fixture = nativeFixture(
+			NATIVE_GOVERNED_DISPATCH_RESOLUTION_V1_PROMOTION_APPROVAL_FIXTURE,
+		);
+		const recovery = fixture.recovery as Record<string, unknown>;
+		const approval = recovery.promotion_approval as Record<string, unknown>;
+
+		expect(() =>
+			parseNativeFixture({
+				...fixture,
+				recovery: {
+					...recovery,
+					promotion_approval: {
+						...approval,
+						base_commit_sha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+					},
+				},
+			}),
+		).toThrow(/promotion approval does not bind the verified dispatch base/i);
 	});
 
 	it("fails closed on an unknown field nested inside native promotion-approval evidence", () => {

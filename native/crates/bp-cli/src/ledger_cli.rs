@@ -1818,8 +1818,8 @@ mod tests {
         format!("sha256:{}", character.to_string().repeat(64))
     }
 
-    fn governed_dispatch_resolution_v1_completed_candidate_fixture_projection(
-    ) -> GovernedDispatchResolutionV1 {
+    fn governed_dispatch_resolution_v1_completed_candidate_fixture_workflow() -> WorkflowInstanceV1
+    {
         use bp_ledger::payload::activity_claim::ActivityResultOutcomeV1;
         use bp_ledger::payload::trust_spine::{
             action_receipt_recorded_v2_digest, action_receipt_set_v1_digest,
@@ -2081,7 +2081,14 @@ mod tests {
             completion,
         });
 
-        governed_dispatch_resolution_v1_fixture_from_workflow(workflow)
+        workflow
+    }
+
+    fn governed_dispatch_resolution_v1_completed_candidate_fixture_projection(
+    ) -> GovernedDispatchResolutionV1 {
+        governed_dispatch_resolution_v1_fixture_from_workflow(
+            governed_dispatch_resolution_v1_completed_candidate_fixture_workflow(),
+        )
     }
 
     fn governed_dispatch_resolution_v1_cancellation_fixture_projection(
@@ -2138,20 +2145,102 @@ mod tests {
 
     fn governed_dispatch_resolution_v1_promotion_approval_fixture_projection(
     ) -> GovernedDispatchResolutionV1 {
-        let mut workflow = governed_dispatch_resolution_v1_fixture_workflow();
-        workflow.phase = WorkflowPhaseV1::PromotionApprovalPending;
+        use bp_ledger::payload::trust_spine::{
+            candidate_view_v1_digest, review_verdict_output_v1_digest,
+            CandidateAcceptanceOutcomeV1, CandidateViewV1, ReviewDecisionV1, ReviewVerdictOutputV1,
+        };
+
+        let mut workflow = governed_dispatch_resolution_v1_completed_candidate_fixture_workflow();
+        let candidate = workflow
+            .candidate
+            .as_ref()
+            .expect("completed candidate fixture must retain candidate state")
+            .clone();
+        let acceptance = CandidateAcceptanceReplayState {
+            event_id: governed_fixture_event_id("00000000-0000-7000-8000-000000000021"),
+            candidate_digest: candidate.candidate_digest.clone(),
+            candidate_commit_sha: candidate.candidate_commit_sha.clone(),
+            acceptance_ref: "acceptance:fixture".to_string(),
+            acceptance_contract_digest: workflow.dispatch.acceptance_contract_digest.clone(),
+            acceptance_digest: governed_fixture_digest('8'),
+            outcome: CandidateAcceptanceOutcomeV1::Passed,
+            evaluated_at: "2026-07-18T12:02:10Z".to_string(),
+        };
+        workflow.acceptance = Some(acceptance.clone());
+
+        let candidate_view = CandidateViewV1 {
+            candidate_ref: candidate.candidate_ref.clone(),
+            candidate_digest: candidate.candidate_digest.clone(),
+            candidate_commit_sha: candidate.candidate_commit_sha.clone(),
+            tree_digest: candidate.tree_digest.clone(),
+            reviewer_context_manifest_digest: governed_fixture_digest('6'),
+            reviewer_sandbox_profile_digest: governed_fixture_digest('7'),
+            mount_path_digest: governed_fixture_digest('8'),
+            read_only: true,
+            network_disabled: true,
+        };
+        let candidate_view_digest = candidate_view_v1_digest(&candidate_view)
+            .expect("fixture candidate view must serialize");
+        let review_output_digest = review_verdict_output_v1_digest(&ReviewVerdictOutputV1 {
+            candidate_digest: candidate.candidate_digest.clone(),
+            candidate_commit_sha: candidate.candidate_commit_sha.clone(),
+            decision: ReviewDecisionV1::Approve,
+            findings: vec![],
+            confidence: 1.0,
+            candidate_view_digest: candidate_view_digest.clone(),
+        })
+        .expect("fixture review output must serialize");
+        let review_ref = "review:fixture".to_string();
+        workflow.reviews.insert(
+            review_ref.clone(),
+            ReviewVerdictReplayState {
+                review_version: 2,
+                event_id: governed_fixture_event_id("00000000-0000-7000-8000-000000000022"),
+                candidate_digest: candidate.candidate_digest.clone(),
+                candidate_commit_sha: candidate.candidate_commit_sha.clone(),
+                review_ref: review_ref.clone(),
+                decision: ReviewDecisionV1::Approve,
+                findings: vec![],
+                confidence: 1.0,
+                reviewer_manifest_digest: governed_fixture_digest('9'),
+                review_verdict_action_id: Some("review:fixture/action".to_string()),
+                review_action_request_digest: Some(governed_fixture_digest('1')),
+                review_action_receipt_ref: Some("receipt:review:fixture".to_string()),
+                review_action_receipt_digest: Some(governed_fixture_digest('2')),
+                review_output_ref: Some("cas://review/fixture-output".to_string()),
+                review_output_digest: Some(review_output_digest),
+                acceptance_ref: Some(acceptance.acceptance_ref.clone()),
+                acceptance_digest: Some(acceptance.acceptance_digest.clone()),
+                acceptance_contract_digest: Some(acceptance.acceptance_contract_digest.clone()),
+                candidate_envelope_digest: Some(candidate.envelope_digest.clone()),
+                reviewer_workflow_id: Some("review-workflow:fixture".to_string()),
+                reviewer_dispatch_envelope_digest: Some(governed_fixture_digest('4')),
+                reviewer_unit_id: Some("review-unit:fixture".to_string()),
+                reviewer_attempt: Some(1),
+                reviewer_execution_role: Some(ExecutionRoleV1::Reviewer),
+                review_action_receipt_set_ref: Some("receipt-set:review:fixture".to_string()),
+                review_action_receipt_set_digest: Some(governed_fixture_digest('5')),
+                candidate_view: Some(candidate_view),
+                candidate_view_ref: Some("candidate-view:fixture".to_string()),
+                candidate_view_digest: Some(candidate_view_digest),
+                reviewer_authority: Some("reviewer:fixture".to_string()),
+                reviewed_at: "2026-07-18T12:02:20Z".to_string(),
+            },
+        );
+        workflow.phase = WorkflowPhaseV1::ReviewApproved;
         workflow.promotion_approval = Some(PromotionApprovalRequestReplayState {
             event_id: governed_fixture_event_id("00000000-0000-7000-8000-0000000000aa"),
-            candidate_digest: governed_fixture_digest('3'),
-            base_commit_sha: workflow.dispatch.base_commit_sha.clone(),
+            candidate_digest: candidate.candidate_digest,
+            base_commit_sha: candidate.base_commit_sha,
             target_ref: "refs/heads/main".to_string(),
-            envelope_digest: workflow.dispatch.envelope_digest.clone(),
-            acceptance_ref: "acceptance:fixture".to_string(),
-            review_refs: vec!["review:fixture".to_string()],
+            envelope_digest: candidate.envelope_digest,
+            acceptance_ref: acceptance.acceptance_ref,
+            review_refs: vec![review_ref],
             requested_by: "kernel".to_string(),
-            requested_at: "2026-07-18T12:02:00Z".to_string(),
+            requested_at: "2026-07-18T12:02:30Z".to_string(),
             idempotency_key: "promotion:fixture".to_string(),
         });
+        workflow.phase = WorkflowPhaseV1::PromotionApprovalPending;
 
         governed_dispatch_resolution_v1_fixture_from_workflow(workflow)
     }
