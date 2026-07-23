@@ -1455,6 +1455,79 @@ describe("governed API worker execution port", () => {
 		expect(complete).not.toHaveBeenCalled();
 	});
 
+	it("records a denied cancellation after authority resolution before the provider boundary", async () => {
+		const events: string[] = [];
+		let receiptInput: RecordActionReceiptV2Input | undefined;
+		const evidence = actionEvidence(events, {
+			recordActionReceipt: async (input) => {
+				receiptInput = input;
+				events.push(`action-receipt:${input.outcome}`);
+				return durableActionReceipt(input);
+			},
+		});
+		const controller = new AbortController();
+		let notifyAuthorityStarted: (() => void) | undefined;
+		const authorityStarted = new Promise<void>((resolve) => {
+			notifyAuthorityStarted = resolve;
+		});
+		let releaseAuthority: (() => void) | undefined;
+		const authorityPort = createTestGovernedModelActionAuthorityPort({
+			resolver: {
+				async authorize(input) {
+					events.push("authority");
+					notifyAuthorityStarted?.();
+					await new Promise<void>((resolve) => {
+						releaseAuthority = resolve;
+					});
+					return nativeAuthorityGrant(input);
+				},
+			},
+		});
+		const complete = vi.fn(client(events).complete);
+		const authorizeAndComplete = vi.fn(async () => {
+			events.push("gateway");
+			throw new Error("ActionGateway must not run after cancellation.");
+		});
+		const port = createGovernedApiWorkerExecutionPort({
+			actionGateway: actionGateway(events, client(events, { complete }), {
+				authorizeAndComplete,
+			}),
+			modelActionAuthorityPort: authorityPort,
+			evidenceStore: evidenceStore(events),
+			activityClaimPort: activityClaimPort(events),
+		});
+
+		const pending = port.executeCandidatePacketAsync({
+			...request({ evidence }),
+			signal: controller.signal,
+		});
+		await authorityStarted;
+		controller.abort();
+		expect(releaseAuthority).toBeTypeOf("function");
+		releaseAuthority?.();
+
+		await expect(pending).rejects.toThrow(/cancelled before the API call/i);
+		expect(authorizeAndComplete).not.toHaveBeenCalled();
+		expect(complete).not.toHaveBeenCalled();
+		expect(events).toEqual([
+			"canonical-input",
+			"action-requested",
+			"activity-claim",
+			"authority",
+			"activity-result:failed",
+			"action-receipt:denied",
+		]);
+		expect(receiptInput).toMatchObject({
+			outcome: "denied",
+			failure: { code: "cancelled-before-api-call" },
+			authorizationRef: "authorization:fixture-v3:v2",
+			evidenceRef: "01919000-0000-7000-8000-0000000000e3",
+		});
+		expect(receiptInput?.evidenceDigest).toBe(
+			receiptInput?.actionRequestDigest,
+		);
+	});
+
 	it("denies an expired native activity lease before the provider boundary", async () => {
 		const events: string[] = [];
 		const evidence = actionEvidence(events);

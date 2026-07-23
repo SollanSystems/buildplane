@@ -1476,6 +1476,29 @@ export function createGovernedApiWorkerExecutionPort(
 				throw error;
 			}
 
+			if (input.signal.aborted) {
+				await persistTerminalFailureOrThrowUnknown({
+					actionEvidencePort: activityEvidencePort,
+					dispatch: prepared.dispatch,
+					actionId,
+					idempotencyKey,
+					actionRequestDigest: durableRequest.actionRequestDigest,
+					evidenceDigest: durableRequest.actionRequestDigest,
+					evidenceRef: durableRequest.actionRequestRef,
+					redactions: canonicalInput.redactions,
+					outcome: "denied",
+					failureCode: "cancelled-before-api-call",
+					failureMessage:
+						"governed API worker execution was cancelled before the API call.",
+					authorizationRef:
+						modelActionAuthority.authorization.authorization_ref,
+					completedAt: readTimestamp(now, "governed API worker completedAt"),
+				});
+				throw new TypeError(
+					"governed API worker execution was cancelled before the API call.",
+				);
+			}
+
 			let gatewayResult: GovernedModelActionGatewayResultV1;
 			try {
 				gatewayResult = normalizeGatewayResult(
