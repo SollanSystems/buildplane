@@ -1963,7 +1963,7 @@ mod tests {
 
     fn governed_dispatch_resolution_v1_completed_candidate_fixture_workflow() -> WorkflowInstanceV1
     {
-        use bp_ledger::payload::activity_claim::ActivityResultOutcomeV1;
+        use bp_ledger::payload::activity_claim::{ActivityClaimPurposeV1, ActivityResultOutcomeV1};
         use bp_ledger::payload::trust_spine::{
             action_receipt_recorded_v2_digest, action_receipt_set_v1_digest,
             action_requested_v2_digest, candidate_completion_recorded_v1_digest,
@@ -2131,6 +2131,7 @@ mod tests {
             dispatch_event_id: workflow.dispatch.event_id,
             dispatch_envelope_digest: workflow.dispatch.envelope_digest.clone(),
             authority_actor: "kernel".to_string(),
+            purpose: ActivityClaimPurposeV1::Generic,
             lease_id: "candidate-create-lease".to_string(),
             lease_expires_at: "2026-07-18T12:10:00Z".to_string(),
             claimed_at: "2026-07-18T12:01:30Z".to_string(),

@@ -2577,6 +2577,62 @@ fn v3_activity_claim_and_result_bind_one_exact_action_before_its_receipt() {
 }
 
 #[test]
+fn activity_claim_projection_preserves_purpose_and_rejects_a_same_event_purpose_swap() {
+    let run_id = RunId::new();
+    let dispatch = dispatch_v3();
+    let request = action_request(run_id, &dispatch, "purpose-bound-claim");
+    let mut state = ReplayState::default();
+    let dispatch_event = event_of(
+        run_id,
+        EventKind::DispatchEnvelopeV3,
+        Payload::DispatchEnvelopeV3(dispatch),
+    );
+    apply(&mut state, &dispatch_event);
+    let request_event = event_of(
+        run_id,
+        EventKind::ActionRequestedV2,
+        Payload::ActionRequestedV2(request.clone()),
+    );
+    apply(&mut state, &request_event);
+
+    let mut claim = activity_claim(run_id, &dispatch_event, &request_event, &request);
+    claim.purpose = ActivityClaimPurposeV1::GovernedVerifierV1;
+    let claim_event = activity_claim_event(run_id, &claim);
+    apply(&mut state, &claim_event);
+
+    let projected_claim = state
+        .workflow_instance
+        .as_ref()
+        .and_then(|workflow| workflow.action_evidence.as_ref())
+        .and_then(|evidence| evidence.actions.get("purpose-bound-claim"))
+        .and_then(|action| action.activity_claim.as_ref())
+        .expect("claim is projected");
+    assert_eq!(
+        projected_claim.purpose,
+        ActivityClaimPurposeV1::GovernedVerifierV1
+    );
+
+    // A legacy cached projection may have decoded the newly-added field as
+    // `Generic`. Replaying the exact purpose-bound signed event must not treat
+    // that cache entry as idempotent: the purpose is part of claim equality.
+    state
+        .workflow_instances
+        .values_mut()
+        .next()
+        .and_then(|workflow| workflow.action_evidence.as_mut())
+        .and_then(|evidence| evidence.actions.get_mut("purpose-bound-claim"))
+        .and_then(|action| action.activity_claim.as_mut())
+        .expect("claim remains projected")
+        .purpose = ActivityClaimPurposeV1::Generic;
+    apply(&mut state, &claim_event);
+
+    assert!(state.issues.iter().any(|issue| {
+        matches!(issue, ReplayIssue::ActivityTransitionRejected { reason, .. }
+            if reason.contains("attempts to replace an immutable execution lease"))
+    }));
+}
+
+#[test]
 fn sealed_v3_requires_a_terminal_activity_result_but_sealed_v2_replays_legacy_receipts() {
     let run_id = RunId::new();
     let dispatch = dispatch_v3_with_action_evidence(ActionEvidenceVersionV1::SealedV3);

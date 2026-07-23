@@ -1,7 +1,7 @@
 //! Replay state types.
 
 use bp_ledger::id::EventId;
-use bp_ledger::payload::activity_claim::ActivityResultOutcomeV1;
+use bp_ledger::payload::activity_claim::{ActivityClaimPurposeV1, ActivityResultOutcomeV1};
 use bp_ledger::payload::trust_spine::{
     ActionEvidenceVersionV1, ActionFailureV1, ActionKindV1, ActionReceiptOutcomeV2,
     ActionReceiptSetEntryV1, ActionRedactionV1, ActionResourceUsageV1, AttemptContextRecordedV1,
@@ -506,6 +506,10 @@ pub struct ActivityClaimReplayState {
     pub dispatch_event_id: EventId,
     pub dispatch_envelope_digest: String,
     pub authority_actor: String,
+    /// Signed activity reservation lane. Historical snapshots did not carry
+    /// this projection field and therefore decode as `Generic`.
+    #[serde(default, skip_serializing_if = "is_generic_activity_claim_purpose")]
+    pub purpose: ActivityClaimPurposeV1,
     pub lease_id: String,
     pub lease_expires_at: String,
     pub claimed_at: String,
@@ -521,6 +525,10 @@ pub struct ActivityClaimReplayState {
     pub heartbeats: Vec<ActivityHeartbeatReplayState>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result: Option<ActivityResultReplayState>,
+}
+
+fn is_generic_activity_claim_purpose(value: &ActivityClaimPurposeV1) -> bool {
+    *value == ActivityClaimPurposeV1::Generic
 }
 
 /// One accepted, immutable heartbeat extension for an activity claim.

@@ -8,7 +8,7 @@ use crate::{
     WorkflowInstanceV1, WorkflowPhaseV1,
 };
 use bp_ledger::id::EventId;
-use bp_ledger::payload::activity_claim::ActivityResultOutcomeV1;
+use bp_ledger::payload::activity_claim::{ActivityClaimPurposeV1, ActivityResultOutcomeV1};
 use bp_ledger::payload::trust_spine::{
     ActionEvidenceVersionV1, ActionKindV1, ActionReceiptOutcomeV2, ActionResourceUsageV1,
     DispatchBudgetV1, ExecutionRoleV1, ModelRequestEvidenceV1, TrustScopeEvidenceV1, TrustTierV1,
@@ -74,6 +74,7 @@ fn fixture(result: Option<ActivityResultOutcomeV1>) -> Fixture {
         dispatch_event_id,
         dispatch_envelope_digest: DIGEST_B.into(),
         authority_actor: "kernel".into(),
+        purpose: ActivityClaimPurposeV1::Generic,
         lease_id: "lease-1".into(),
         lease_expires_at: "2026-07-20T00:10:00Z".into(),
         claimed_at: "2026-07-20T00:00:01Z".into(),
@@ -198,6 +199,7 @@ fn model_success_fixture(
         .as_mut()
         .expect("successful fixture has a claim");
     claim.action_kind = ActionKindV1::Model;
+    claim.purpose = ActivityClaimPurposeV1::GovernedModelActionV1;
     claim.claimed_at = "2026-07-20T00:00:50Z".into();
     let result = claim
         .result
@@ -704,6 +706,63 @@ fn model_success_with_prior_live_authority_and_bound_success_receipt_is_reused()
         decision.disposition,
         ActionDecisionDispositionV1::ReuseRecordedResult
     );
+}
+
+#[test]
+fn model_action_with_a_generic_claim_purpose_is_not_trusted_as_a_governed_effect() {
+    let Fixture {
+        mut workflow,
+        query,
+    } = model_success_fixture(
+        "2026-07-20T00:00:30Z",
+        "2026-07-20T00:00:40Z",
+        "2026-07-20T00:10:00Z",
+        true,
+    );
+    workflow
+        .action_evidence
+        .as_mut()
+        .expect("fixture has evidence")
+        .actions
+        .get_mut("action-1")
+        .expect("fixture has action")
+        .activity_claim
+        .as_mut()
+        .expect("fixture has claim")
+        .purpose = ActivityClaimPurposeV1::Generic;
+
+    let decision = classify_replayed_governed_action_v1(&workflow, &query);
+
+    assert_eq!(decision.disposition, ActionDecisionDispositionV1::Blocked);
+    assert_eq!(
+        decision.reason,
+        Some(ActionDecisionBlockReasonV1::MalformedEvidence)
+    );
+}
+
+#[test]
+fn historical_claim_snapshot_without_a_purpose_defaults_to_generic() {
+    let Fixture { workflow, .. } = fixture(None);
+    let claim = workflow
+        .action_evidence
+        .as_ref()
+        .expect("fixture has evidence")
+        .actions
+        .get("action-1")
+        .expect("fixture has action")
+        .activity_claim
+        .as_ref()
+        .expect("fixture has claim");
+    let mut encoded = serde_json::to_value(claim).expect("claim serializes");
+    encoded
+        .as_object_mut()
+        .expect("claim serializes as an object")
+        .remove("purpose");
+
+    let decoded: ActivityClaimReplayState =
+        serde_json::from_value(encoded).expect("historical claim snapshot remains readable");
+
+    assert_eq!(decoded.purpose, ActivityClaimPurposeV1::Generic);
 }
 
 #[test]

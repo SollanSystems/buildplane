@@ -10,7 +10,7 @@ use crate::state::{
     ActionReplayState, ActionRequestReplayState, ActivityClaimReplayState,
     ActivityResultReplayState, WorkflowInstanceV1, WorkflowPhaseV1,
 };
-use bp_ledger::payload::activity_claim::ActivityResultOutcomeV1;
+use bp_ledger::payload::activity_claim::{ActivityClaimPurposeV1, ActivityResultOutcomeV1};
 use bp_ledger::payload::trust_spine::{
     ActionEvidenceVersionV1, ActionKindV1, ActionReceiptOutcomeV2, CommitModeV1, TrustTierV1,
 };
@@ -127,6 +127,53 @@ pub struct RecordedActionDecisionV1 {
     pub effective_lease_expires_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<ActionDecisionBlockReasonV1>,
+}
+
+/// Closed wire-schema revision for reducer-derived pending activity recovery
+/// work. This is observation-only data from a fully verified snapshot; it is
+/// never a capability to renew a lease, retry an effect, or contact a host.
+pub const PENDING_ACTIVITY_RECOVERY_WORK_SCHEMA_VERSION_V1: u16 = 1;
+
+/// The only incomplete activity states that may be re-emitted from trusted
+/// replay. Terminal success/failure/unknown evidence is deliberately absent:
+/// it is handled as recorded evidence, not fresh work.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PendingActivityRecoveryStateV1 {
+    WaitForActiveLease,
+    ReconciliationRequired,
+}
+
+/// Closed, versioned, evidence-only handoff for one already-claimed,
+/// non-terminal governed activity.
+///
+/// This structure carries identifiers and the signed claim lane only. It has
+/// no project path, tool arguments, capability, retry permission, or effect
+/// authority, so receiving it cannot authorize an external side effect.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PendingActivityRecoveryWorkV1 {
+    pub schema_version: u16,
+    pub identity: RecordedActionIdentityV1,
+    pub action_kind: ActionKindV1,
+    pub claim_purpose: ActivityClaimPurposeV1,
+    pub state: PendingActivityRecoveryStateV1,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_lease_expires_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<ActionDecisionBlockReasonV1>,
+}
+
+/// Closed failure vocabulary for a whole-snapshot pending-work query. A
+/// malformed incomplete claim returns an error instead of a partial list.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PendingActivityRecoveryErrorV1 {
+    InvalidObservedAt,
+    IncompleteClaimBlocked {
+        identity: RecordedActionIdentityV1,
+        reason: ActionDecisionBlockReasonV1,
+    },
 }
 
 /// Classify one action from a fully replayed workflow projection.
@@ -509,7 +556,8 @@ fn model_action_evidence_is_well_formed(
             || receipt.authorization_ref.as_deref()
                 == Some(authorization.authorization_ref.as_str())
     });
-    intent.dispatch_event_ref == workflow.dispatch.event_id
+    claim.purpose == ActivityClaimPurposeV1::GovernedModelActionV1
+        && intent.dispatch_event_ref == workflow.dispatch.event_id
         && intent.dispatch_envelope_digest == workflow.dispatch.envelope_digest
         && intent.action_request_event_ref == action.request.event_id
         && intent.action_request_digest == action.request.action_request_digest

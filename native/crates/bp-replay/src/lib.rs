@@ -16,9 +16,10 @@ pub mod transitions;
 pub mod trusted_recovery;
 
 pub use activity_decision::{
-    ActionDecisionBlockReasonV1, ActionDecisionDispositionV1, RecordedActionDecisionQueryV1,
+    ActionDecisionBlockReasonV1, ActionDecisionDispositionV1, PendingActivityRecoveryErrorV1,
+    PendingActivityRecoveryStateV1, PendingActivityRecoveryWorkV1, RecordedActionDecisionQueryV1,
     RecordedActionDecisionV1, RecordedActionIdentityV1, RecordedActivityResultV1,
-    RECORDED_ACTION_DECISION_SCHEMA_VERSION_V1,
+    PENDING_ACTIVITY_RECOVERY_WORK_SCHEMA_VERSION_V1, RECORDED_ACTION_DECISION_SCHEMA_VERSION_V1,
 };
 pub use engine::{ReplayEngine, ReplayStep, TrustSpineSignerRole, TrustedReplayAuthorities};
 pub use otel_projection::{

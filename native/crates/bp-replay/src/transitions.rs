@@ -2213,6 +2213,7 @@ fn apply_activity_claimed_v1(
         dispatch_event_id: p.dispatch_event_id,
         dispatch_envelope_digest: p.dispatch_envelope_digest.clone(),
         authority_actor: p.authority_actor.clone(),
+        purpose: p.purpose,
         lease_id: p.lease_id.clone(),
         lease_expires_at: p.lease_expires_at.clone(),
         claimed_at: p.claimed_at.clone(),
@@ -7489,6 +7490,7 @@ fn activity_claim_matches_existing(
         && existing.dispatch_event_id == claim.dispatch_event_id
         && existing.dispatch_envelope_digest == claim.dispatch_envelope_digest
         && existing.authority_actor == claim.authority_actor
+        && existing.purpose == claim.purpose
         && existing.lease_id == claim.lease_id
         && existing.lease_expires_at == claim.lease_expires_at
         && existing.claimed_at == claim.claimed_at

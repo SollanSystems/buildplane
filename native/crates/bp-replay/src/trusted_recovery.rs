@@ -8,8 +8,10 @@
 
 use crate::activity_decision::{
     blocked, classify_replayed_governed_action_v1, query_is_well_formed,
-    ActionDecisionBlockReasonV1, RecordedActionDecisionQueryV1, RecordedActionDecisionV1,
-    RECORDED_ACTION_DECISION_SCHEMA_VERSION_V1,
+    ActionDecisionBlockReasonV1, ActionDecisionDispositionV1, PendingActivityRecoveryErrorV1,
+    PendingActivityRecoveryStateV1, PendingActivityRecoveryWorkV1, RecordedActionDecisionQueryV1,
+    RecordedActionDecisionV1, RecordedActionIdentityV1,
+    PENDING_ACTIVITY_RECOVERY_WORK_SCHEMA_VERSION_V1, RECORDED_ACTION_DECISION_SCHEMA_VERSION_V1,
 };
 use crate::engine::{EngineError, ReplayEngine, TrustSpineSignerRole, TrustedReplayAuthorities};
 use crate::otel_projection::{VerifiedOtelProjectionErrorV1, VerifiedOtelProjectionV1};
@@ -422,6 +424,115 @@ impl TrustedGovernedRecoverySnapshot {
             return blocked(query, ActionDecisionBlockReasonV1::WorkflowNotFound);
         };
         classify_replayed_governed_action_v1(workflow, query)
+    }
+
+    /// Re-emit only existing, incomplete activity observations from this fully
+    /// verified snapshot.
+    ///
+    /// The result is a deterministic, read-only reducer projection. It does
+    /// not issue a lease, grant retry permission, execute an effect, or invoke
+    /// a host shell. An incomplete claim that cannot be classified safely
+    /// fails the whole query rather than allowing a caller to use a partial
+    /// list as recovery authority.
+    pub fn pending_activity_recovery_work_v1(
+        &self,
+        observed_at: &str,
+    ) -> Result<Vec<PendingActivityRecoveryWorkV1>, PendingActivityRecoveryErrorV1> {
+        if !is_rfc3339_utc(observed_at) {
+            return Err(PendingActivityRecoveryErrorV1::InvalidObservedAt);
+        }
+
+        let mut work = Vec::new();
+        for workflow in self.workflows_by_dispatch_event_ref.values() {
+            let Some(evidence) = workflow.action_evidence.as_ref() else {
+                continue;
+            };
+            for action in evidence.actions.values() {
+                let Some(claim) = action.activity_claim.as_ref() else {
+                    continue;
+                };
+                // A terminal result is immutable evidence, never pending work.
+                if claim.result.is_some() {
+                    continue;
+                }
+
+                let identity = RecordedActionIdentityV1 {
+                    run_id: workflow.run_id.clone(),
+                    workflow_id: workflow.workflow_id.clone(),
+                    workflow_revision: workflow.workflow_revision.clone(),
+                    unit_id: workflow.unit_id.clone(),
+                    attempt: workflow.attempt,
+                    dispatch_event_ref: workflow.dispatch.event_id.to_string(),
+                    dispatch_envelope_digest: workflow.dispatch.envelope_digest.clone(),
+                    action_id: action.request.action_id.clone(),
+                    idempotency_key: action.request.idempotency_key.clone(),
+                    action_request_event_ref: action.request.event_id.to_string(),
+                    action_request_digest: action.request.action_request_digest.clone(),
+                    activity_claim_event_ref: claim.event_id.to_string(),
+                    activity_claim_event_digest: claim.claim_event_digest.clone(),
+                    lease_id: claim.lease_id.clone(),
+                };
+                let decision =
+                    self.classify_recorded_governed_action_v1(&RecordedActionDecisionQueryV1 {
+                        schema_version: RECORDED_ACTION_DECISION_SCHEMA_VERSION_V1,
+                        identity: identity.clone(),
+                        observed_at: observed_at.into(),
+                    });
+
+                match decision.disposition {
+                    ActionDecisionDispositionV1::WaitForActiveLease => {
+                        let Some(effective_lease_expires_at) = decision.effective_lease_expires_at
+                        else {
+                            return Err(PendingActivityRecoveryErrorV1::IncompleteClaimBlocked {
+                                identity,
+                                reason: ActionDecisionBlockReasonV1::MalformedEvidence,
+                            });
+                        };
+                        work.push(PendingActivityRecoveryWorkV1 {
+                            schema_version: PENDING_ACTIVITY_RECOVERY_WORK_SCHEMA_VERSION_V1,
+                            identity,
+                            action_kind: claim.action_kind,
+                            claim_purpose: claim.purpose,
+                            state: PendingActivityRecoveryStateV1::WaitForActiveLease,
+                            effective_lease_expires_at: Some(effective_lease_expires_at),
+                            reason: None,
+                        });
+                    }
+                    ActionDecisionDispositionV1::ReconciliationRequired => {
+                        let Some(reason) = decision.reason else {
+                            return Err(PendingActivityRecoveryErrorV1::IncompleteClaimBlocked {
+                                identity,
+                                reason: ActionDecisionBlockReasonV1::MalformedEvidence,
+                            });
+                        };
+                        work.push(PendingActivityRecoveryWorkV1 {
+                            schema_version: PENDING_ACTIVITY_RECOVERY_WORK_SCHEMA_VERSION_V1,
+                            identity,
+                            action_kind: claim.action_kind,
+                            claim_purpose: claim.purpose,
+                            state: PendingActivityRecoveryStateV1::ReconciliationRequired,
+                            effective_lease_expires_at: None,
+                            reason: Some(reason),
+                        });
+                    }
+                    ActionDecisionDispositionV1::ReuseRecordedResult
+                    | ActionDecisionDispositionV1::TerminalFailure => {
+                        // Terminal evidence is intentionally excluded from
+                        // re-emittable incomplete activity work.
+                    }
+                    ActionDecisionDispositionV1::Blocked => {
+                        return Err(PendingActivityRecoveryErrorV1::IncompleteClaimBlocked {
+                            identity,
+                            reason: decision
+                                .reason
+                                .unwrap_or(ActionDecisionBlockReasonV1::MalformedEvidence),
+                        });
+                    }
+                }
+            }
+        }
+
+        Ok(work)
     }
 
     /// Classify only immutable promotion evidence from this fully verified
@@ -1122,6 +1233,8 @@ mod tests {
     };
     use crate::reader::ReaderError;
     use crate::state::{
+        ActionEvidenceReplayState, ActionReplayState, ActionRequestReplayState,
+        ActivityClaimReplayState, ActivityHeartbeatReplayState, ActivityResultReplayState,
         CandidateArtifactReplayState, PromotionDecisionReplayState,
         PromotionReconciliationReplayState, PromotionReplayState, PromotionResultReplayState,
         WorkflowDispatchReplayState, WorkflowPhaseV1,
@@ -1129,12 +1242,13 @@ mod tests {
     use bp_ledger::event::Event;
     use bp_ledger::id::{EventId, RunId};
     use bp_ledger::kind::EventKind;
+    use bp_ledger::payload::activity_claim::{ActivityClaimPurposeV1, ActivityResultOutcomeV1};
     use bp_ledger::payload::checkpoint::TapeRootAlgorithm;
     use bp_ledger::payload::run_lifecycle::RunStartedV1;
     use bp_ledger::payload::trust_spine::{
-        ActionEvidenceVersionV1, DispatchBudgetV1, ExecutionRoleV1, PromotionDecisionKindV1,
-        PromotionGitBindingV1, PromotionResultOutcomeV1, PromotionWorktreeSyncStateV1,
-        ReconciliationResolutionOutcomeV1,
+        ActionEvidenceVersionV1, ActionKindV1, DispatchBudgetV1, ExecutionRoleV1,
+        PromotionDecisionKindV1, PromotionGitBindingV1, PromotionResultOutcomeV1,
+        PromotionWorktreeSyncStateV1, ReconciliationResolutionOutcomeV1,
     };
     use bp_ledger::payload::Payload;
     use bp_ledger::signing::{public_key_hash, TrustedPublicKeys};
@@ -1319,6 +1433,83 @@ mod tests {
         }
     }
 
+    fn pending_activity_workflow(action_id: &str, idempotency_key: &str) -> WorkflowInstanceV1 {
+        let mut workflow = workflow(DIGEST_A, None);
+        workflow.phase = WorkflowPhaseV1::Dispatched;
+        workflow.candidate = None;
+        workflow.action_evidence = Some(ActionEvidenceReplayState {
+            action_evidence_version: ActionEvidenceVersionV1::SealedV3,
+            actions: BTreeMap::new(),
+            sealed_receipt_set: None,
+            pending_action_ids: Vec::new(),
+            unknown_action_ids: Vec::new(),
+            failed_action_ids: Vec::new(),
+        });
+        add_pending_activity_action(&mut workflow, action_id, idempotency_key, true);
+        workflow
+    }
+
+    fn add_pending_activity_action(
+        workflow: &mut WorkflowInstanceV1,
+        action_id: &str,
+        idempotency_key: &str,
+        with_claim: bool,
+    ) {
+        let request = ActionRequestReplayState {
+            event_id: EventId::new(),
+            action_id: action_id.into(),
+            idempotency_key: idempotency_key.into(),
+            action_kind: ActionKindV1::Process,
+            canonical_input_digest: DIGEST_A.into(),
+            canonical_input_ref: format!("cas:input:{action_id}"),
+            repository_binding_digest: DIGEST_A.into(),
+            ledger_authority_realm_digest: DIGEST_B.into(),
+            governed_packet_digest: Some(DIGEST_A.into()),
+            policy_digest: DIGEST_B.into(),
+            authority_actor: "kernel".into(),
+            execution_role: ExecutionRoleV1::Implementer,
+            requested_at: "2026-07-17T00:00:00Z".into(),
+            action_request_digest: DIGEST_A.into(),
+        };
+        let activity_claim = with_claim.then(|| ActivityClaimReplayState {
+            event_id: EventId::new(),
+            claim_event_digest: DIGEST_B.into(),
+            run_id: workflow.run_id.clone(),
+            activity_id: action_id.into(),
+            idempotency_key: idempotency_key.into(),
+            action_kind: ActionKindV1::Process,
+            action_request_event_id: request.event_id,
+            action_request_digest: request.action_request_digest.clone(),
+            dispatch_event_id: workflow.dispatch.event_id,
+            dispatch_envelope_digest: workflow.dispatch.envelope_digest.clone(),
+            authority_actor: "kernel".into(),
+            purpose: ActivityClaimPurposeV1::GovernedVerifierV1,
+            lease_id: format!("lease:{action_id}"),
+            lease_expires_at: "2026-07-17T00:10:00Z".into(),
+            claimed_at: "2026-07-17T00:00:01Z".into(),
+            signer: Some(kernel()),
+            heartbeats: Vec::new(),
+            result: None,
+        });
+        let evidence = workflow
+            .action_evidence
+            .as_mut()
+            .expect("pending activity fixture has action evidence");
+        evidence.actions.insert(
+            action_id.into(),
+            ActionReplayState {
+                request,
+                model_intent: None,
+                model_authorization: None,
+                activity_claim,
+                receipt: None,
+            },
+        );
+        if with_claim {
+            evidence.pending_action_ids.push(action_id.into());
+        }
+    }
+
     fn promotion_query(workflow: &WorkflowInstanceV1) -> RecordedPromotionRecoveryQueryV1 {
         let candidate = workflow
             .candidate
@@ -1464,6 +1655,294 @@ mod tests {
             idempotency_key: "reconciliation:1".into(),
             resolved_at: "2026-07-17T00:00:00Z".into(),
         });
+    }
+
+    #[test]
+    fn pending_activity_recovery_work_binds_only_claimed_work_to_its_exact_identity() {
+        let mut workflow = pending_activity_workflow("claimed-action", "claimed-key");
+        add_pending_activity_action(&mut workflow, "unclaimed-action", "unclaimed-key", false);
+        let snapshot = TrustedGovernedRecoverySnapshot::from_verified_replay(
+            "run",
+            kernel(),
+            integrity(),
+            [&workflow].into_iter(),
+        )
+        .expect("fixture forms a trusted recovery snapshot");
+
+        let work = snapshot
+            .pending_activity_recovery_work_v1("2026-07-17T00:05:00Z")
+            .expect("active claim is read-only recovery work");
+
+        assert_eq!(work.len(), 1, "unclaimed actions are never fabricated");
+        let work = &work[0];
+        let action = workflow
+            .action_evidence
+            .as_ref()
+            .expect("fixture has action evidence")
+            .actions
+            .get("claimed-action")
+            .expect("fixture has claimed action");
+        let claim = action
+            .activity_claim
+            .as_ref()
+            .expect("fixture has activity claim");
+        assert_eq!(
+            work.schema_version,
+            PENDING_ACTIVITY_RECOVERY_WORK_SCHEMA_VERSION_V1
+        );
+        assert_eq!(work.identity.run_id, workflow.run_id);
+        assert_eq!(work.identity.workflow_id, workflow.workflow_id);
+        assert_eq!(work.identity.workflow_revision, workflow.workflow_revision);
+        assert_eq!(work.identity.unit_id, workflow.unit_id);
+        assert_eq!(work.identity.attempt, workflow.attempt);
+        assert_eq!(
+            work.identity.dispatch_event_ref,
+            workflow.dispatch.event_id.to_string()
+        );
+        assert_eq!(
+            work.identity.dispatch_envelope_digest,
+            workflow.dispatch.envelope_digest
+        );
+        assert_eq!(work.identity.action_id, action.request.action_id);
+        assert_eq!(
+            work.identity.idempotency_key,
+            action.request.idempotency_key
+        );
+        assert_eq!(
+            work.identity.action_request_event_ref,
+            action.request.event_id.to_string()
+        );
+        assert_eq!(
+            work.identity.action_request_digest,
+            action.request.action_request_digest
+        );
+        assert_eq!(
+            work.identity.activity_claim_event_ref,
+            claim.event_id.to_string()
+        );
+        assert_eq!(
+            work.identity.activity_claim_event_digest,
+            claim.claim_event_digest
+        );
+        assert_eq!(work.identity.lease_id, claim.lease_id);
+        assert_eq!(work.action_kind, ActionKindV1::Process);
+        assert_eq!(
+            work.claim_purpose,
+            ActivityClaimPurposeV1::GovernedVerifierV1
+        );
+        assert_eq!(
+            work.state,
+            PendingActivityRecoveryStateV1::WaitForActiveLease
+        );
+        assert_eq!(
+            work.effective_lease_expires_at.as_deref(),
+            Some("2026-07-17T00:10:00Z")
+        );
+        assert!(work.reason.is_none());
+
+        let mut encoded = serde_json::to_value(work).expect("work serializes");
+        encoded["forged_authority"] = serde_json::Value::Bool(true);
+        assert!(serde_json::from_value::<PendingActivityRecoveryWorkV1>(encoded).is_err());
+    }
+
+    #[test]
+    fn pending_activity_recovery_work_maps_an_expired_claim_to_reconciliation() {
+        let workflow = pending_activity_workflow("expired-action", "expired-key");
+        let snapshot = TrustedGovernedRecoverySnapshot::from_verified_replay(
+            "run",
+            kernel(),
+            integrity(),
+            [&workflow].into_iter(),
+        )
+        .expect("fixture forms a trusted recovery snapshot");
+
+        let work = snapshot
+            .pending_activity_recovery_work_v1("2026-07-17T00:10:00Z")
+            .expect("expired claim becomes reconciliation work");
+
+        assert_eq!(work.len(), 1);
+        assert_eq!(
+            work[0].state,
+            PendingActivityRecoveryStateV1::ReconciliationRequired
+        );
+        assert_eq!(
+            work[0].reason,
+            Some(ActionDecisionBlockReasonV1::LeaseExpired)
+        );
+        assert!(work[0].effective_lease_expires_at.is_none());
+    }
+
+    #[test]
+    fn pending_activity_recovery_work_uses_the_verified_heartbeat_expiry() {
+        let mut workflow = pending_activity_workflow("heartbeat-action", "heartbeat-key");
+        let claim = workflow
+            .action_evidence
+            .as_mut()
+            .expect("fixture has action evidence")
+            .actions
+            .get_mut("heartbeat-action")
+            .expect("fixture has claimed action")
+            .activity_claim
+            .as_mut()
+            .expect("fixture has activity claim");
+        claim.heartbeats.push(ActivityHeartbeatReplayState {
+            event_id: EventId::new(),
+            event_digest: DIGEST_A.into(),
+            run_id: claim.run_id.clone(),
+            activity_id: claim.activity_id.clone(),
+            idempotency_key: claim.idempotency_key.clone(),
+            heartbeat_id: None,
+            heartbeat_request_digest: None,
+            claim_event_id: claim.event_id,
+            claim_event_digest: claim.claim_event_digest.clone(),
+            lease_id: claim.lease_id.clone(),
+            dispatch_event_id: claim.dispatch_event_id,
+            dispatch_envelope_digest: claim.dispatch_envelope_digest.clone(),
+            prior_lease_expires_at: claim.lease_expires_at.clone(),
+            lease_expires_at: "2026-07-17T00:20:00Z".into(),
+            heartbeat_at: "2026-07-17T00:05:00Z".into(),
+        });
+        claim.lease_expires_at = "2026-07-17T00:20:00Z".into();
+        let snapshot = TrustedGovernedRecoverySnapshot::from_verified_replay(
+            "run",
+            kernel(),
+            integrity(),
+            [&workflow].into_iter(),
+        )
+        .expect("fixture forms a trusted recovery snapshot");
+
+        let work = snapshot
+            .pending_activity_recovery_work_v1("2026-07-17T00:15:00Z")
+            .expect("heartbeat-extended claim remains active");
+
+        assert_eq!(work.len(), 1);
+        assert_eq!(
+            work[0].state,
+            PendingActivityRecoveryStateV1::WaitForActiveLease
+        );
+        assert_eq!(
+            work[0].effective_lease_expires_at.as_deref(),
+            Some("2026-07-17T00:20:00Z")
+        );
+    }
+
+    #[test]
+    fn pending_activity_recovery_work_excludes_terminal_results() {
+        let mut workflow = pending_activity_workflow("terminal-action", "terminal-key");
+        let claim = workflow
+            .action_evidence
+            .as_mut()
+            .expect("fixture has action evidence")
+            .actions
+            .get_mut("terminal-action")
+            .expect("fixture has claimed action")
+            .activity_claim
+            .as_mut()
+            .expect("fixture has activity claim");
+        claim.result = Some(ActivityResultReplayState {
+            event_id: EventId::new(),
+            event_digest: DIGEST_A.into(),
+            run_id: claim.run_id.clone(),
+            activity_id: claim.activity_id.clone(),
+            idempotency_key: claim.idempotency_key.clone(),
+            claim_event_id: claim.event_id,
+            claim_event_digest: claim.claim_event_digest.clone(),
+            lease_id: claim.lease_id.clone(),
+            outcome: ActivityResultOutcomeV1::Succeeded,
+            result_digest: Some(DIGEST_A.into()),
+            result_ref: Some("cas:terminal-result".into()),
+            evidence_digest: DIGEST_B.into(),
+            evidence_ref: "cas:terminal-evidence".into(),
+            recorded_at: "2026-07-17T00:01:00Z".into(),
+        });
+        let snapshot = TrustedGovernedRecoverySnapshot::from_verified_replay(
+            "run",
+            kernel(),
+            integrity(),
+            [&workflow].into_iter(),
+        )
+        .expect("fixture forms a trusted recovery snapshot");
+
+        let work = snapshot
+            .pending_activity_recovery_work_v1("2026-07-17T00:05:00Z")
+            .expect("terminal work is excluded rather than retried");
+
+        assert!(work.is_empty());
+    }
+
+    #[test]
+    fn pending_activity_recovery_work_fails_the_whole_query_for_incomplete_bad_evidence() {
+        let valid = pending_activity_workflow("valid-action", "valid-key");
+        let mut malformed = pending_activity_workflow("malformed-action", "malformed-key");
+        malformed
+            .action_evidence
+            .as_mut()
+            .expect("fixture has action evidence")
+            .actions
+            .get_mut("malformed-action")
+            .expect("fixture has claimed action")
+            .request
+            .policy_digest = "not-a-canonical-digest".into();
+        let snapshot = TrustedGovernedRecoverySnapshot::from_verified_replay(
+            "run",
+            kernel(),
+            integrity(),
+            [&valid, &malformed].into_iter(),
+        )
+        .expect("fixture forms a trusted recovery snapshot");
+
+        let error = snapshot
+            .pending_activity_recovery_work_v1("2026-07-17T00:05:00Z")
+            .expect_err("one incomplete malformed claim blocks the entire query");
+
+        assert!(matches!(
+            error,
+            PendingActivityRecoveryErrorV1::IncompleteClaimBlocked {
+                reason: ActionDecisionBlockReasonV1::MalformedEvidence,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn pending_activity_recovery_work_rejects_invalid_observation_time_and_is_stably_ordered() {
+        let first = pending_activity_workflow("first-action", "first-key");
+        let second = pending_activity_workflow("second-action", "second-key");
+        let snapshot = TrustedGovernedRecoverySnapshot::from_verified_replay(
+            "run",
+            kernel(),
+            integrity(),
+            [&second, &first].into_iter(),
+        )
+        .expect("fixture forms a trusted recovery snapshot");
+
+        let invalid_time = snapshot
+            .pending_activity_recovery_work_v1("not-a-rfc3339-timestamp")
+            .expect_err("observation time is a fail-closed query boundary");
+        assert_eq!(
+            invalid_time,
+            PendingActivityRecoveryErrorV1::InvalidObservedAt
+        );
+
+        let first_result = snapshot
+            .pending_activity_recovery_work_v1("2026-07-17T00:05:00Z")
+            .expect("valid observation produces work");
+        let second_result = snapshot
+            .pending_activity_recovery_work_v1("2026-07-17T00:05:00Z")
+            .expect("same immutable snapshot is deterministic");
+        assert_eq!(first_result, second_result);
+        let ordering = first_result
+            .iter()
+            .map(|work| {
+                (
+                    work.identity.dispatch_event_ref.clone(),
+                    work.identity.action_id.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut sorted = ordering.clone();
+        sorted.sort();
+        assert_eq!(ordering, sorted);
     }
 
     #[test]
