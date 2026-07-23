@@ -24,7 +24,11 @@ const RUN_ID = "123e4567-e89b-12d3-a456-426614174003";
 const ISSUED_AT = "2099-01-01T00:00:00.000Z";
 const EXPIRES_AT = "2099-01-01T01:00:00.000Z";
 
-function admissionInput() {
+function admissionInput(
+	overrides: Partial<
+		Parameters<typeof createAuthorityBrokerAdmitRequestV1>[0]
+	> = {},
+) {
 	return {
 		requestId: UUID,
 		runId: RUN_ID,
@@ -37,6 +41,7 @@ function admissionInput() {
 		expectedRepositoryBindingDigest: DIGEST("f"),
 		governedPacketRef: "cas://packets/trust-spine/admit",
 		governedPacketDigest: DIGEST("2"),
+		...overrides,
 	};
 }
 
@@ -309,6 +314,25 @@ describe("governed authority broker client", () => {
 		expect(admitted.dispatchEvent.envelopeDigest).toBe(
 			admitted.envelope.envelopeDigest,
 		);
+	});
+
+	it("rejects unpaired UTF-16 strings before it can generate a broker wire or digest", () => {
+		for (const [label, workflowId] of [
+			["unmatched high surrogate", "\uD800"],
+			["unmatched low surrogate", "\uDC00"],
+		] as const) {
+			expect(
+				() =>
+					createAuthorityBrokerAdmitRequestV1(admissionInput({ workflowId })),
+				label,
+			).toThrow(/non-empty string/i);
+		}
+
+		const paired = createAuthorityBrokerAdmitRequestV1(
+			admissionInput({ workflowId: "workflow-\uD83D\uDE80" }),
+		);
+		expect(paired.request.workflow_id).toBe("workflow-\uD83D\uDE80");
+		expect(paired.request_digest).toMatch(/^sha256:[0-9a-f]{64}$/);
 	});
 
 	it("rejects caller-selected authority, filesystem, and credential fields during request canonicalization", () => {
