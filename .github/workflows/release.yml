@@ -55,6 +55,8 @@ jobs:
         # blocks publication; normal pushes still create or update the release PR.
         # This is an early diagnostic only: release:publish repeats the gate at
         # the command boundary, so changesets cannot bypass it by skipping here.
+        # Use the runner-stage preflight for structured diagnostics while it
+        # delegates cryptographic validation to that same pinned-root gate.
         if: "${{ startsWith(github.event.head_commit.message, 'chore: version packages') }}"
         env:
           TRUST_SPINE_CAMPAIGN_BUNDLE: ${{ vars.TRUST_SPINE_CAMPAIGN_BUNDLE }}
@@ -63,7 +65,7 @@ jobs:
             echo "::error::TRUST_SPINE_CAMPAIGN_BUNDLE is not configured; refusing to publish without a host-issued campaign bundle."
             exit 1
           fi
-          pnpm eval:trust-spine:gate -- --bundle "${TRUST_SPINE_CAMPAIGN_BUNDLE}" --commit "${GITHUB_SHA}" --ref "${GITHUB_REF}"
+          pnpm trust-spine:release-preflight -- --stage runner --bundle "${TRUST_SPINE_CAMPAIGN_BUNDLE}" --commit "${GITHUB_SHA}" --ref "${GITHUB_REF}"
 
       - name: Create Release PR or publish to npm
         id: changesets

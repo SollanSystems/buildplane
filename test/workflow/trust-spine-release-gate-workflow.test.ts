@@ -116,16 +116,15 @@ describe("Trust Spine release gate workflow boundary", () => {
 			join(root, ".github", "workflows", "release.yml"),
 			"utf8",
 		);
-		const script = packageJson.scripts?.["eval:trust-spine:gate"];
+		const script = packageJson.scripts?.["trust-spine:release-preflight"];
 
-		expect(script).toContain("trust-spine-release-gate-cli.ts");
-		expect(script).not.toContain("runner");
+		expect(script).toContain("trust-spine-release-preflight-cli.ts");
 		expect(workflow).toContain("Verify Trust Spine release evidence");
 		expect(workflow).toContain(
 			"startsWith(github.event.head_commit.message, 'chore: version packages')",
 		);
 		expect(workflow).toContain(
-			`pnpm eval:trust-spine:gate -- --bundle "\${TRUST_SPINE_CAMPAIGN_BUNDLE}" --commit "\${GITHUB_SHA}" --ref "\${GITHUB_REF}"`,
+			`pnpm trust-spine:release-preflight -- --stage runner --bundle "\${TRUST_SPINE_CAMPAIGN_BUNDLE}" --commit "\${GITHUB_SHA}" --ref "\${GITHUB_REF}"`,
 		);
 		const changesetsAction = workflow.slice(
 			workflow.indexOf("uses: changesets/action"),
