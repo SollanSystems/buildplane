@@ -38,6 +38,15 @@ use std::collections::BTreeMap;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+#[cfg(target_os = "linux")]
+use std::{
+    ffi::CString,
+    fs::File,
+    os::{
+        fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
+        unix::ffi::OsStrExt,
+    },
+};
 
 use crate::governed_authority::{
     load_governed_authority_realm, load_governed_authority_signing_key,
@@ -68,6 +77,7 @@ pub enum LedgerCommand {
     ProvisionGovernedReviewerAuthorityV1,
     ProvisionGovernedOperatorAuthorityV1,
     ExportSignedTape(ExportSignedTapeArgs),
+    ExportVerifiedOtelV1(ExportVerifiedOtelV1Args),
     Help,
 }
 
@@ -312,6 +322,19 @@ pub struct ExportSignedTapeArgs {
     pub out: PathBuf,
 }
 
+/// Closed, read-only export of an OpenTelemetry-shaped projection that was
+/// derived only after full trusted governed recovery replay and tape
+/// verification. The caller names the protected realm workspace solely so the
+/// command can reject confused-deputy paths; it never selects ledger state or
+/// authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExportVerifiedOtelV1Args {
+    pub run_id: String,
+    pub workspace: PathBuf,
+    /// Absolute final JSON file, published with no-clobber semantics.
+    pub out: PathBuf,
+}
+
 /// Parse `ledger <subcommand> [args...]` into a LedgerCommand.
 pub fn parse_ledger_command(args: &[String]) -> Result<LedgerCommand, String> {
     match args.first().map(String::as_str) {
@@ -420,6 +443,15 @@ pub fn parse_ledger_command(args: &[String]) -> Result<LedgerCommand, String> {
                 return Ok(LedgerCommand::Help);
             }
             parse_export_signed_tape(&args[1..]).map(LedgerCommand::ExportSignedTape)
+        }
+        Some("export-verified-otel-v1") => {
+            if args
+                .iter()
+                .any(|arg| matches!(arg.as_str(), "--help" | "-h" | "help"))
+            {
+                return Ok(LedgerCommand::Help);
+            }
+            parse_export_verified_otel_v1(&args[1..]).map(LedgerCommand::ExportVerifiedOtelV1)
         }
         Some("--help" | "-h" | "help") | None => Ok(LedgerCommand::Help),
         Some(other) => Err(format!("unknown ledger subcommand: {other}")),
@@ -1083,10 +1115,121 @@ fn parse_export_signed_tape(args: &[String]) -> Result<ExportSignedTapeArgs, Str
     })
 }
 
+fn parse_export_verified_otel_v1(args: &[String]) -> Result<ExportVerifiedOtelV1Args, String> {
+    let mut run_id: Option<String> = None;
+    let mut workspace: Option<PathBuf> = None;
+    let mut out: Option<PathBuf> = None;
+
+    let mut i = 0;
+    while i < args.len() {
+        let flag = args[i].as_str();
+        match flag {
+            "--run-id" => {
+                if run_id.is_some() {
+                    return Err("duplicate --run-id".to_string());
+                }
+                run_id = Some(parse_closed_verified_otel_flag_value(args, &mut i, flag)?);
+            }
+            "--workspace" => {
+                if workspace.is_some() {
+                    return Err("duplicate --workspace".to_string());
+                }
+                workspace = Some(PathBuf::from(parse_closed_verified_otel_flag_value(
+                    args, &mut i, flag,
+                )?));
+            }
+            "--out" => {
+                if out.is_some() {
+                    return Err("duplicate --out".to_string());
+                }
+                let value = parse_closed_verified_otel_flag_value(args, &mut i, flag)?;
+                let path = PathBuf::from(&value);
+                if value.ends_with('/')
+                    || value.ends_with('\\')
+                    || path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .is_none_or(|name| name.is_empty() || matches!(name, "." | ".."))
+                {
+                    return Err("--out requires an output filename".to_string());
+                }
+                out = Some(path);
+            }
+            other => return Err(format!("unknown flag: {other}")),
+        }
+        i += 1;
+    }
+
+    let run_id = run_id.ok_or("missing --run-id")?;
+    parse_run_id_flag("--run-id", &run_id)?;
+
+    let workspace =
+        require_closed_verified_otel_path(workspace.ok_or("missing --workspace")?, "--workspace")?;
+    let out = require_closed_verified_otel_path(out.ok_or("missing --out")?, "--out")?;
+
+    Ok(ExportVerifiedOtelV1Args {
+        run_id,
+        workspace,
+        out,
+    })
+}
+
+/// The governed export never normalizes a caller-controlled path. A `.` or
+/// `..` component would make the user-visible path differ from the exact
+/// descriptor-walked path, so fail closed before protected-realm work begins.
+fn require_closed_verified_otel_path(path: PathBuf, flag: &str) -> Result<PathBuf, String> {
+    if !path.is_absolute() {
+        return Err(format!("{flag} must be an absolute path"));
+    }
+
+    let raw = path.as_os_str().to_string_lossy();
+    if raw
+        .split(['/', '\\'])
+        .any(|component| matches!(component, "." | ".."))
+    {
+        return Err(format!("{flag} must not contain dot or parent traversal"));
+    }
+
+    Ok(path)
+}
+
+fn parse_closed_verified_otel_flag_value(
+    args: &[String],
+    index: &mut usize,
+    flag: &str,
+) -> Result<String, String> {
+    *index += 1;
+    let value = args
+        .get(*index)
+        .ok_or_else(|| format!("{flag} requires a value"))?;
+    if value.starts_with("--") {
+        return Err(format!("{flag} requires a value"));
+    }
+    Ok(value.clone())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use bp_ledger::payload::trust_spine::governed_dispatch_policy_digest_v1;
+
+    /// Produce parser-only path inputs using the host platform's absolute
+    /// path syntax. The paths need not exist: parser coverage must not depend
+    /// on a Unix-shaped fixture when this crate is tested on Windows.
+    fn verified_otel_parser_test_path(relative: &str) -> String {
+        let root = std::env::temp_dir().join("buildplane-verified-otel-parser-tests");
+        if relative.is_empty() {
+            return format!("{}{}", root.display(), std::path::MAIN_SEPARATOR);
+        }
+        root.join(relative).to_string_lossy().into_owned()
+    }
+
+    fn verified_otel_parser_test_argument(value: &str) -> String {
+        value
+            .strip_prefix("$verified-otel-root/")
+            .map(verified_otel_parser_test_path)
+            .unwrap_or_else(|| value.to_string())
+    }
 
     #[test]
     fn parse_governed_verifier_claim_accepts_only_closed_host_realm_inputs() {
@@ -2872,6 +3015,390 @@ mod tests {
     }
 
     #[test]
+    fn parse_export_verified_otel_v1_accepts_exact_closed_inputs() {
+        let workspace = verified_otel_parser_test_path("protected-ledger");
+        let output = verified_otel_parser_test_path("verified-otel.json");
+        assert!(Path::new(&workspace).is_absolute());
+        assert!(Path::new(&output).is_absolute());
+        let args = vec![
+            "export-verified-otel-v1".to_string(),
+            "--run-id".to_string(),
+            "01919000-0000-7000-8000-0000000000ff".to_string(),
+            "--workspace".to_string(),
+            workspace.clone(),
+            "--out".to_string(),
+            output.clone(),
+        ];
+
+        let command = parse_ledger_command(&args).expect("closed export inputs should parse");
+        assert_eq!(
+            command,
+            LedgerCommand::ExportVerifiedOtelV1(ExportVerifiedOtelV1Args {
+                run_id: "01919000-0000-7000-8000-0000000000ff".to_string(),
+                workspace: PathBuf::from(workspace),
+                out: PathBuf::from(output),
+            })
+        );
+    }
+
+    #[test]
+    fn parse_export_verified_otel_v1_rejects_every_non_closed_input_shape() {
+        let valid = vec![
+            "export-verified-otel-v1".to_string(),
+            "--run-id".to_string(),
+            "01919000-0000-7000-8000-0000000000ff".to_string(),
+            "--workspace".to_string(),
+            verified_otel_parser_test_path("protected-ledger"),
+            "--out".to_string(),
+            verified_otel_parser_test_path("verified-otel.json"),
+        ];
+
+        for (name, args, expected) in [
+            (
+                "duplicate run id",
+                vec![
+                    "export-verified-otel-v1",
+                    "--run-id",
+                    "01919000-0000-7000-8000-0000000000ff",
+                    "--run-id",
+                    "01919000-0000-7000-8000-000000000001",
+                    "--workspace",
+                    "$verified-otel-root/protected-ledger",
+                    "--out",
+                    "$verified-otel-root/verified-otel.json",
+                ],
+                "duplicate --run-id",
+            ),
+            (
+                "duplicate workspace",
+                vec![
+                    "export-verified-otel-v1",
+                    "--run-id",
+                    "01919000-0000-7000-8000-0000000000ff",
+                    "--workspace",
+                    "$verified-otel-root/protected-ledger",
+                    "--workspace",
+                    "$verified-otel-root/other-ledger",
+                    "--out",
+                    "$verified-otel-root/verified-otel.json",
+                ],
+                "duplicate --workspace",
+            ),
+            (
+                "duplicate output",
+                vec![
+                    "export-verified-otel-v1",
+                    "--run-id",
+                    "01919000-0000-7000-8000-0000000000ff",
+                    "--workspace",
+                    "$verified-otel-root/protected-ledger",
+                    "--out",
+                    "$verified-otel-root/verified-otel.json",
+                    "--out",
+                    "$verified-otel-root/other.json",
+                ],
+                "duplicate --out",
+            ),
+            (
+                "unknown caller signer",
+                vec![
+                    "export-verified-otel-v1",
+                    "--run-id",
+                    "01919000-0000-7000-8000-0000000000ff",
+                    "--workspace",
+                    "$verified-otel-root/protected-ledger",
+                    "--out",
+                    "$verified-otel-root/verified-otel.json",
+                    "--signing-key-id",
+                    "caller-selected-key",
+                ],
+                "unknown flag: --signing-key-id",
+            ),
+            (
+                "unknown caller tape",
+                vec![
+                    "export-verified-otel-v1",
+                    "--run-id",
+                    "01919000-0000-7000-8000-0000000000ff",
+                    "--workspace",
+                    "$verified-otel-root/protected-ledger",
+                    "--out",
+                    "$verified-otel-root/verified-otel.json",
+                    "--tape-path",
+                    "$verified-otel-root/tape.json",
+                ],
+                "unknown flag: --tape-path",
+            ),
+            (
+                "relative workspace",
+                vec![
+                    "export-verified-otel-v1",
+                    "--run-id",
+                    "01919000-0000-7000-8000-0000000000ff",
+                    "--workspace",
+                    "relative-ledger",
+                    "--out",
+                    "$verified-otel-root/verified-otel.json",
+                ],
+                "--workspace must be an absolute path",
+            ),
+            (
+                "relative output",
+                vec![
+                    "export-verified-otel-v1",
+                    "--run-id",
+                    "01919000-0000-7000-8000-0000000000ff",
+                    "--workspace",
+                    "$verified-otel-root/protected-ledger",
+                    "--out",
+                    "verified-otel.json",
+                ],
+                "--out must be an absolute path",
+            ),
+            (
+                "output dot traversal",
+                vec![
+                    "export-verified-otel-v1",
+                    "--run-id",
+                    "01919000-0000-7000-8000-0000000000ff",
+                    "--workspace",
+                    "$verified-otel-root/protected-ledger",
+                    "--out",
+                    "$verified-otel-root/../verified-otel.json",
+                ],
+                "--out must not contain dot or parent traversal",
+            ),
+            (
+                "output directory without a file name",
+                vec![
+                    "export-verified-otel-v1",
+                    "--run-id",
+                    "01919000-0000-7000-8000-0000000000ff",
+                    "--workspace",
+                    "$verified-otel-root/protected-ledger",
+                    "--out",
+                    "$verified-otel-root/",
+                ],
+                "--out requires an output filename",
+            ),
+            (
+                "bad UUID",
+                vec![
+                    "export-verified-otel-v1",
+                    "--run-id",
+                    "not-a-uuid",
+                    "--workspace",
+                    "$verified-otel-root/protected-ledger",
+                    "--out",
+                    "$verified-otel-root/verified-otel.json",
+                ],
+                "--run-id must be a UUID",
+            ),
+            (
+                "missing output value",
+                vec![
+                    "export-verified-otel-v1",
+                    "--run-id",
+                    "01919000-0000-7000-8000-0000000000ff",
+                    "--workspace",
+                    "$verified-otel-root/protected-ledger",
+                    "--out",
+                ],
+                "--out requires a value",
+            ),
+            (
+                "missing output flag",
+                vec![
+                    "export-verified-otel-v1",
+                    "--run-id",
+                    "01919000-0000-7000-8000-0000000000ff",
+                    "--workspace",
+                    "$verified-otel-root/protected-ledger",
+                ],
+                "missing --out",
+            ),
+        ] {
+            let args = args
+                .into_iter()
+                .map(verified_otel_parser_test_argument)
+                .collect::<Vec<_>>();
+            let error = parse_ledger_command(&args).expect_err(name);
+            assert!(
+                error.contains(expected),
+                "{name}: expected {expected:?} in {error:?}"
+            );
+        }
+
+        let mut missing_run_id = valid.clone();
+        missing_run_id.drain(1..3);
+        let error = parse_ledger_command(&missing_run_id).expect_err("missing run id must fail");
+        assert!(error.contains("missing --run-id"), "error: {error}");
+
+        let mut missing_workspace = valid;
+        missing_workspace.drain(3..5);
+        let error =
+            parse_ledger_command(&missing_workspace).expect_err("missing workspace must fail");
+        assert!(error.contains("missing --workspace"), "error: {error}");
+    }
+
+    #[test]
+    fn parse_export_verified_otel_v1_help_routes_to_ledger_help() {
+        let args = vec!["export-verified-otel-v1".to_string(), "--help".to_string()];
+        assert_eq!(parse_ledger_command(&args).unwrap(), LedgerCommand::Help);
+    }
+
+    #[test]
+    fn ledger_usage_documents_the_closed_verified_otel_export() {
+        let usage = usage_text();
+        assert!(usage.contains("export-verified-otel-v1"));
+        let (_, flags) = usage
+            .split_once("flags for `export-verified-otel-v1`:\n")
+            .expect("verified OTel export flags should be documented");
+        assert!(flags.contains("--run-id <id>"));
+        assert!(flags.contains("--workspace <path>"));
+        assert!(flags.contains("--out <file>"));
+        assert!(flags.contains("No signer, keyring, tape path, or raw data flag is accepted."));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn publish_verified_otel_projection_file_is_no_clobber_and_cleans_its_temp_file() {
+        let temp = tempfile::tempdir().expect("temporary parent should exist");
+        let output = temp.path().join("verified-otel.json");
+
+        assert_eq!(
+            publish_verified_otel_projection_file(&output, b"{\n  \"authority\": {}\n}\n")
+                .expect("a new final path should publish"),
+            VerifiedOtelProjectionPublishOutcomeV1::Published
+        );
+
+        assert_eq!(
+            std::fs::read(&output).expect("published output should be readable"),
+            b"{\n  \"authority\": {}\n}\n"
+        );
+        let names = std::fs::read_dir(temp.path())
+            .expect("parent should remain readable")
+            .map(|entry| entry.expect("directory entry").file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec![std::ffi::OsString::from("verified-otel.json")]);
+
+        let error = publish_verified_otel_projection_file(&output, b"{}\n")
+            .expect_err("an existing final file must never be replaced");
+        assert!(error.contains("already exists"), "error: {error}");
+        assert_eq!(
+            std::fs::read(&output).expect("existing output must stay intact"),
+            b"{\n  \"authority\": {}\n}\n"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn publish_verified_otel_projection_file_fails_before_creating_a_final_output() {
+        let temp = tempfile::tempdir().expect("temporary parent should exist");
+        let output = temp
+            .path()
+            .join("missing-parent")
+            .join("verified-otel.json");
+
+        let error = publish_verified_otel_projection_file(&output, b"{}\n")
+            .expect_err("a nonexistent parent must not be created by export");
+        assert!(error.contains("parent"), "error: {error}");
+        assert!(
+            !output.exists(),
+            "a publication failure must not leave a final output behind"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn publish_verified_otel_projection_file_rejects_an_existing_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("temporary parent should exist");
+        let target = temp.path().join("existing-target.json");
+        std::fs::write(&target, b"existing\n").expect("target should exist");
+        let output = temp.path().join("verified-otel.json");
+        symlink(&target, &output).expect("symlink should be creatable in the test directory");
+
+        let error = publish_verified_otel_projection_file(&output, b"{}\n")
+            .expect_err("a symlink final path must be rejected");
+        assert!(error.contains("already exists"), "error: {error}");
+        assert_eq!(
+            std::fs::read(&target).expect("symlink target must stay intact"),
+            b"existing\n"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn publish_verified_otel_projection_file_rejects_a_symlinked_parent_without_touching_its_target(
+    ) {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("temporary root should exist");
+        let attacker_directory = temp.path().join("attacker-directory");
+        std::fs::create_dir(&attacker_directory).expect("attacker directory should exist");
+        let requested_parent = temp.path().join("requested-parent");
+        symlink(&attacker_directory, &requested_parent)
+            .expect("symlinked parent should be creatable in the test directory");
+        let output = requested_parent.join("verified-otel.json");
+
+        let error = publish_verified_otel_projection_file(&output, b"{}\n")
+            .expect_err("a symlinked parent must be rejected before publication");
+        assert!(error.contains("parent"), "error: {error}");
+        assert!(
+            !attacker_directory.join("verified-otel.json").exists(),
+            "the symlink target must not receive an output artifact"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn publish_verified_otel_projection_file_rejects_lexical_dot_segments_without_normalizing_them()
+    {
+        let temp = tempfile::tempdir().expect("temporary root should exist");
+        let attacker_directory = temp.path().join("attacker-directory");
+        std::fs::create_dir(&attacker_directory).expect("attacker directory should exist");
+        let output = temp
+            .path()
+            .join("safe-parent")
+            .join("..")
+            .join("attacker-directory")
+            .join("verified-otel.json");
+
+        let error = publish_verified_otel_projection_file(&output, b"{}\n")
+            .expect_err("lexical dot segments must be rejected rather than normalized");
+        assert!(error.contains("invalid"), "error: {error}");
+        assert!(
+            !attacker_directory.join("verified-otel.json").exists(),
+            "normalization must not redirect publication into the target directory"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn publish_verified_otel_projection_reports_post_link_durability_uncertainty_truthfully() {
+        let temp = tempfile::tempdir().expect("temporary parent should exist");
+        let output = temp.path().join("verified-otel.json");
+
+        let outcome = publish_verified_otel_projection_file_with_parent_sync_for_test(
+            &output,
+            b"{}\n",
+            || Err("injected parent sync failure".to_string()),
+        )
+        .expect("a post-link durability failure must remain a successful visible publication");
+
+        assert_eq!(
+            outcome,
+            VerifiedOtelProjectionPublishOutcomeV1::PublishedDurabilityUncertain
+        );
+        assert_eq!(
+            std::fs::read(&output).expect("the linked output must remain visible"),
+            b"{}\n"
+        );
+    }
+
+    #[test]
     fn parse_ledger_command_routes_governed_dispatch_resolution() {
         let args = vec![
             "resolve-governed-dispatch-v3".to_string(),
@@ -4378,6 +4905,305 @@ pub fn run_replay(args: ReplayArgs) -> Result<(), String> {
     Ok(())
 }
 
+/// Export a fully verified governed tape as its fixed, evidence-only OTel
+/// projection. This is intentionally a separate command from the legacy
+/// signed-tape export: it accepts no caller-selected signer, keyring, tape,
+/// CAS, or raw event input.
+pub fn run_export_verified_otel_v1(args: ExportVerifiedOtelV1Args) -> Result<(), String> {
+    let run_id = parse_run_id_flag("--run-id", &args.run_id)?.to_string();
+    let realm = load_governed_authority_realm()?;
+    require_governed_authority_workspace(&args.workspace, &realm.ledger_workspace)?;
+
+    // This is deliberately the same protected-realm authority derivation as
+    // `run_resolve_governed_dispatch_v3`: reviewer/operator roots are only
+    // loaded if this tape carries events assigned to those distinct roles, and
+    // the replay engine still verifies every event independently.
+    let signing_key = load_governed_authority_signing_key(&realm)?;
+    let reviewer_authority = if governed_run_requires_reviewer_authority(&realm, &run_id)? {
+        Some(load_optional_governed_reviewer_authority()?.ok_or_else(|| {
+            "governed reviewer evidence exists but no locally pinned reviewer authority is provisioned"
+                .to_string()
+        })?)
+    } else {
+        None
+    };
+    let operator_authority = if governed_run_requires_operator_authority(&realm, &run_id)? {
+        Some(load_optional_governed_operator_authority()?.ok_or_else(|| {
+            "governed operator evidence exists but no locally pinned operator authority is provisioned"
+                .to_string()
+        })?)
+    } else {
+        None
+    };
+    let reviewer_signing_key = reviewer_authority
+        .as_ref()
+        .map(load_governed_reviewer_authority_signing_key)
+        .transpose()?;
+    let operator_signing_key = operator_authority
+        .as_ref()
+        .map(load_governed_operator_authority_signing_key)
+        .transpose()?;
+    let (authorities, trusted_kernel_signer) =
+        trusted_kernel_reviewer_and_operator_replay_authorities(
+            &realm.kernel_signer.actor_id,
+            &realm.kernel_signer.key_id,
+            &signing_key,
+            reviewer_authority
+                .as_ref()
+                .zip(reviewer_signing_key.as_ref()),
+            operator_authority
+                .as_ref()
+                .zip(operator_signing_key.as_ref()),
+        )?;
+
+    let events_db = realm
+        .ledger_workspace
+        .join(".buildplane")
+        .join("ledger")
+        .join("events.db");
+    let snapshot = TrustedGovernedRecoverySnapshot::open(
+        &run_id,
+        &events_db,
+        &authorities,
+        &trusted_kernel_signer,
+    )
+    .map_err(|error| format!("trusted governed recovery snapshot: {error}"))?;
+    let projection = snapshot
+        .verified_otel_projection_v1()
+        .map_err(|error| format!("verified OpenTelemetry projection: {error}"))?;
+    let mut encoded = serde_json::to_string_pretty(&projection)
+        .map_err(|error| format!("serializing verified OpenTelemetry projection: {error}"))?;
+    encoded.push('\n');
+
+    // All trusted recovery, projection, and serialization work completes
+    // before this call creates even an unnamed temporary file.
+    match publish_verified_otel_projection_file(&args.out, encoded.as_bytes())? {
+        VerifiedOtelProjectionPublishOutcomeV1::Published => {
+            println!("wrote verified OpenTelemetry projection");
+        }
+        VerifiedOtelProjectionPublishOutcomeV1::PublishedDurabilityUncertain => {
+            // `linkat` already made the artifact visible. Returning an
+            // ordinary error here would falsely tell the operator that no
+            // output exists, so report the exact state without upgrading the
+            // projection into an authoritative record.
+            println!("wrote verified OpenTelemetry projection with durability uncertainty");
+            eprintln!(
+                "warning: the output is visible but parent-directory durability could not be confirmed; the signed tape remains authoritative and the projection must be reconciled before it is relied on"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// The exact terminal state of a descriptor-bound publication. A successful
+/// link followed by a failed directory `fsync` cannot truthfully be presented
+/// as a normal error: the final name may already be visible and survive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VerifiedOtelProjectionPublishOutcomeV1 {
+    Published,
+    PublishedDurabilityUncertain,
+}
+
+/// Publish a new evidence artifact without replacing an existing final path.
+/// Governed publication is Linux-only because it depends on descriptor-bound
+/// `openat`, `O_NOFOLLOW`, `O_TMPFILE`, and `linkat`; there is intentionally no
+/// path-based fallback on another host.
+#[cfg(target_os = "linux")]
+fn publish_verified_otel_projection_file(
+    path: &Path,
+    contents: &[u8],
+) -> Result<VerifiedOtelProjectionPublishOutcomeV1, String> {
+    publish_verified_otel_projection_file_with_parent_sync(
+        path,
+        contents,
+        sync_verified_otel_output_parent_fd,
+    )
+}
+
+/// A non-Linux host must not silently downgrade the governed publication
+/// boundary. In particular, Windows and macOS never create a temp or final
+/// output before reporting that the secure primitive set is unavailable.
+#[cfg(not(target_os = "linux"))]
+fn publish_verified_otel_projection_file(
+    path: &Path,
+    contents: &[u8],
+) -> Result<VerifiedOtelProjectionPublishOutcomeV1, String> {
+    let _ = (path, contents);
+    Err("secure verified OTel publication is supported only on Linux governed hosts".to_string())
+}
+
+/// The only production path to materialize a projection. All parent
+/// components are opened from `/` with `O_NOFOLLOW`; the final link is made
+/// relative to that held directory descriptor, so a pathname swap cannot
+/// redirect the artifact after validation.
+#[cfg(target_os = "linux")]
+fn publish_verified_otel_projection_file_with_parent_sync<F>(
+    path: &Path,
+    contents: &[u8],
+    parent_sync: F,
+) -> Result<VerifiedOtelProjectionPublishOutcomeV1, String>
+where
+    F: FnOnce(RawFd) -> Result<(), String>,
+{
+    let (parent_directory, file_name) = open_verified_otel_output_parent(path)?;
+    let mut temporary = create_verified_otel_unnamed_temporary_file(&parent_directory)?;
+
+    // Until `linkat` succeeds this has no directory entry. Any validation,
+    // write, or file-sync failure therefore leaves no reachable artifact.
+    temporary
+        .write_all(contents)
+        .and_then(|_| temporary.sync_all())
+        .map_err(|_| "writing secure verified OTel output failed".to_string())?;
+
+    link_verified_otel_output_without_replacement(&temporary, &parent_directory, &file_name)?;
+
+    // The name is now observable. Preserve it and model a failed durability
+    // confirmation as its own successful-but-non-authoritative outcome rather
+    // than trying an unreliable unlink followed by an ordinary error.
+    match parent_sync(parent_directory.as_raw_fd()) {
+        Ok(()) => Ok(VerifiedOtelProjectionPublishOutcomeV1::Published),
+        Err(_) => Ok(VerifiedOtelProjectionPublishOutcomeV1::PublishedDurabilityUncertain),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn open_verified_otel_output_parent(path: &Path) -> Result<(OwnedFd, CString), String> {
+    let raw_path = path.as_os_str().as_bytes();
+    if raw_path.first() != Some(&b'/') || raw_path.len() <= 1 || raw_path.ends_with(b"/") {
+        return Err("secure verified OTel output requires an absolute file path".to_string());
+    }
+
+    // Do not use `Path::components` here: it can normalize lexical dot
+    // segments before a policy has a chance to reject them.
+    let mut components = raw_path[1..]
+        .split(|byte| *byte == b'/')
+        .filter(|component| !component.is_empty())
+        .collect::<Vec<_>>();
+    if components.is_empty()
+        || components
+            .iter()
+            .any(|component| matches!(*component, b"." | b"..") || component.contains(&0))
+    {
+        return Err("secure verified OTel output path is invalid".to_string());
+    }
+
+    let file_name = components
+        .pop()
+        .ok_or_else(|| "secure verified OTel output requires a file name".to_string())?;
+    let file_name = CString::new(file_name)
+        .map_err(|_| "secure verified OTel output path is invalid".to_string())?;
+
+    let mut directory = open_verified_otel_directory_at(libc::AT_FDCWD, b"/")?;
+    for component in components {
+        directory = open_verified_otel_directory_at(directory.as_raw_fd(), component)?;
+    }
+    Ok((directory, file_name))
+}
+
+#[cfg(target_os = "linux")]
+fn open_verified_otel_directory_at(
+    directory_fd: RawFd,
+    component: &[u8],
+) -> Result<OwnedFd, String> {
+    let component = CString::new(component)
+        .map_err(|_| "secure verified OTel output parent is invalid".to_string())?;
+    let file_descriptor = unsafe {
+        libc::openat(
+            directory_fd,
+            component.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    owned_verified_otel_file_descriptor(
+        file_descriptor,
+        "secure verified OTel output parent cannot be opened",
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn create_verified_otel_unnamed_temporary_file(parent_directory: &OwnedFd) -> Result<File, String> {
+    let current_directory = CString::new(".").expect("a literal current-directory name has no NUL");
+    let file_descriptor = unsafe {
+        libc::openat(
+            parent_directory.as_raw_fd(),
+            current_directory.as_ptr(),
+            libc::O_WRONLY | libc::O_TMPFILE | libc::O_CLOEXEC,
+            0o600,
+        )
+    };
+    let file_descriptor = owned_verified_otel_file_descriptor(
+        file_descriptor,
+        "secure verified OTel publication requires unnamed temporary-file support",
+    )?;
+    Ok(File::from(file_descriptor))
+}
+
+#[cfg(target_os = "linux")]
+fn link_verified_otel_output_without_replacement(
+    temporary: &File,
+    parent_directory: &OwnedFd,
+    file_name: &CString,
+) -> Result<(), String> {
+    let source = CString::new(format!("/proc/self/fd/{}", temporary.as_raw_fd()))
+        .map_err(|_| "secure verified OTel output cannot be linked".to_string())?;
+    let linked = unsafe {
+        libc::linkat(
+            libc::AT_FDCWD,
+            source.as_ptr(),
+            parent_directory.as_raw_fd(),
+            file_name.as_ptr(),
+            libc::AT_SYMLINK_FOLLOW,
+        )
+    };
+    if linked == 0 {
+        Ok(())
+    } else {
+        // `linkat` never replaces a destination. This intentionally combines
+        // existing files, symlinks, and unsupported procfs/link operations so
+        // the operator output cannot disclose caller-selected path details.
+        Err("secure verified OTel output already exists or cannot be linked".to_string())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn sync_verified_otel_output_parent_fd(parent_directory_fd: RawFd) -> Result<(), String> {
+    let synced = unsafe { libc::fsync(parent_directory_fd) };
+    if synced == 0 {
+        Ok(())
+    } else {
+        Err("secure verified OTel output parent durability could not be confirmed".to_string())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn owned_verified_otel_file_descriptor(
+    file_descriptor: RawFd,
+    error: &'static str,
+) -> Result<OwnedFd, String> {
+    if file_descriptor < 0 {
+        return Err(error.to_string());
+    }
+    // SAFETY: `openat` returned a non-negative owned descriptor and this
+    // function immediately transfers that unique ownership into `OwnedFd`.
+    Ok(unsafe { OwnedFd::from_raw_fd(file_descriptor) })
+}
+
+/// Test-only seam for the post-link state. It cannot be called by production
+/// code and only replaces the final parent-directory durability confirmation;
+/// descriptor walking, O_TMPFILE creation, file sync, and no-replace linking
+/// remain exactly the production implementation.
+#[cfg(all(test, target_os = "linux"))]
+fn publish_verified_otel_projection_file_with_parent_sync_for_test<F>(
+    path: &Path,
+    contents: &[u8],
+    parent_sync: F,
+) -> Result<VerifiedOtelProjectionPublishOutcomeV1, String>
+where
+    F: FnOnce() -> Result<(), String>,
+{
+    publish_verified_otel_projection_file_with_parent_sync(path, contents, |_| parent_sync())
+}
+
 /// Execute the `ledger export-signed-tape` command.
 ///
 /// Read-only: opens the run's `events.db`, serializes its signed tape into the
@@ -4455,6 +5281,8 @@ subcommands:
   provision-governed-operator-authority-v1
                        Explicitly provision the separately protected operator signer.
   export-signed-tape  Export a run's signed tape (buildplane.signed-tape.v1).
+  export-verified-otel-v1
+                      Export only the verified, evidence-only OpenTelemetry projection.
 
 flags for `serve`:
   This is a legacy/non-governed ingest surface. It cannot create a trusted
@@ -4531,6 +5359,12 @@ flags for `export-signed-tape`:
   --run-id <id>             run identifier (required)
   --workspace <path>        absolute path to the workspace root (required)
   --out <dir>               directory to write tape.json into (required)
+
+flags for `export-verified-otel-v1`:
+  --run-id <id>             run identifier (required)
+  --workspace <path>        absolute protected realm workspace path (required)
+  --out <file>              absolute new JSON output file (required; no replacement)
+  No signer, keyring, tape path, or raw data flag is accepted.
 "#
     .to_string()
 }

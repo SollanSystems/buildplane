@@ -20,6 +20,7 @@ bp-ui-terminal.workspace = true
 chrono.workspace = true
 ed25519-dalek.workspace = true
 futures.workspace = true
+libc.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

@@ -109,6 +109,9 @@ fn run() -> Result<(), String> {
         Command::Ledger(ledger_cli::LedgerCommand::ExportSignedTape(export_args)) => {
             ledger_cli::run_export_signed_tape(export_args)
         }
+        Command::Ledger(ledger_cli::LedgerCommand::ExportVerifiedOtelV1(export_args)) => {
+            ledger_cli::run_export_verified_otel_v1(export_args)
+        }
         Command::Ledger(ledger_cli::LedgerCommand::Help) => {
             println!("{}", ledger_cli::usage_text());
             Ok(())
