@@ -248,6 +248,50 @@ fn governed_dispatch_admission_rejects_mismatched_idempotency_or_attempt_reuse_w
 }
 
 #[test]
+fn governed_dispatch_admission_rejects_changed_revision_and_idempotency_for_same_attempt() {
+    let store = SqliteStore::open_in_memory().expect("open in-memory ledger");
+    let dispatch_key = SigningKey::from_bytes(&[15_u8; 32]);
+    let checkpoint_key = SigningKey::from_bytes(&[17_u8; 32]);
+    let (authority, dispatch_signer, _) =
+        admission_authority(&dispatch_key, &checkpoint_key, DIGEST_B);
+    let request = GovernedDispatchAdmissionRequestV1 {
+        run_id: RunId::new(),
+        dispatch: governed_implementer_dispatch(Utc::now(), DIGEST_B),
+    };
+    store
+        .record_governed_dispatch_admission_v1(
+            &request,
+            &authority,
+            &dispatch_key,
+            &dispatch_signer,
+        )
+        .expect("record original admission");
+
+    let mut changed_revision_and_key = request.clone();
+    changed_revision_and_key.dispatch.body.workflow_revision = "r2".into();
+    changed_revision_and_key.dispatch.body.idempotency_key =
+        "dispatch:workflow-1:implement-unit-1:r2".into();
+    rehash_dispatch(&mut changed_revision_and_key.dispatch);
+    let error = store
+        .record_governed_dispatch_admission_v1(
+            &changed_revision_and_key,
+            &authority,
+            &dispatch_key,
+            &dispatch_signer,
+        )
+        .expect_err("one workflow/unit/attempt may not gain a changed-revision sibling");
+    assert!(matches!(
+        error,
+        LedgerError::GovernedDispatchAdmissionConflict { .. }
+    ));
+    assert_eq!(
+        store.event_count().unwrap(),
+        1,
+        "a changed revision and idempotency key must not append a second V3 dispatch"
+    );
+}
+
+#[test]
 fn governed_dispatch_admission_rejects_unsafe_v3_posture_without_write() {
     let store = SqliteStore::open_in_memory().expect("open in-memory ledger");
     let dispatch_key = SigningKey::from_bytes(&[17_u8; 32]);
@@ -333,7 +377,7 @@ fn governed_dispatch_admission_rejects_inactive_or_elapsed_authority_without_app
 }
 
 #[test]
-fn governed_dispatch_admission_blocks_matching_raw_v3_without_native_projection() {
+fn governed_dispatch_admission_blocks_changed_revision_raw_v3_without_native_projection() {
     let store = SqliteStore::open_in_memory().expect("open in-memory ledger");
     let dispatch_key = SigningKey::from_bytes(&[23_u8; 32]);
     let checkpoint_key = SigningKey::from_bytes(&[29_u8; 32]);
@@ -343,6 +387,10 @@ fn governed_dispatch_admission_blocks_matching_raw_v3_without_native_projection(
         run_id: RunId::new(),
         dispatch: governed_implementer_dispatch(Utc::now(), DIGEST_B),
     };
+    let mut raw_dispatch = request.dispatch.clone();
+    raw_dispatch.body.workflow_revision = "r2".into();
+    raw_dispatch.body.idempotency_key = "dispatch:workflow-1:implement-unit-1:r2".into();
+    rehash_dispatch(&mut raw_dispatch);
     let raw_event = Event {
         id: bp_ledger::EventId::new(),
         run_id: request.run_id,
@@ -350,7 +398,7 @@ fn governed_dispatch_admission_blocks_matching_raw_v3_without_native_projection(
         schema_version: Event::CURRENT_SCHEMA_VERSION,
         kind: EventKind::DispatchEnvelopeV3,
         occurred_at: Utc::now(),
-        payload: Payload::DispatchEnvelopeV3(request.dispatch.clone()),
+        payload: Payload::DispatchEnvelopeV3(raw_dispatch),
     };
     store
         .append_signed(&raw_event, &dispatch_key, &dispatch_signer)

@@ -1293,7 +1293,8 @@ impl SqliteStore {
             -- Broker-private projection for one signed governed V3 dispatch
             -- admission. The durable row is keyed by the dispatch
             -- idempotency key but also prevents two different envelopes from
-            -- claiming the same workflow/unit/attempt. It begins as
+            -- claiming the same workflow/unit/attempt, irrespective of
+            -- workflow revision. It begins as
             -- recovery-only evidence and may advance exactly once when a
             -- distinct kernel checkpoint seals the complete signed prefix.
             CREATE TABLE IF NOT EXISTS governed_dispatch_admissions (
@@ -1314,7 +1315,6 @@ impl SqliteStore {
                 created_at                          TEXT NOT NULL,
                 sealed_at                           TEXT,
                 PRIMARY KEY (run_id, idempotency_key),
-                UNIQUE (run_id, workflow_id, workflow_revision, unit_id, attempt),
                 UNIQUE (run_id, semantic_identity_digest),
                 FOREIGN KEY(dispatch_event_id) REFERENCES events(id),
                 FOREIGN KEY(sealed_checkpoint_event_id) REFERENCES events(id),
@@ -1330,6 +1330,12 @@ impl SqliteStore {
                         AND sealed_at IS NOT NULL)
                 )
             );
+
+            -- A named index enforces the durable V3 dispatch identity and
+            -- upgrades post-introduction stores without rewriting their
+            -- tape-backed projections. Existing conflicting rows fail closed.
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_governed_dispatch_admissions_workflow_attempt
+                ON governed_dispatch_admissions(run_id, workflow_id, unit_id, attempt);
 
             CREATE INDEX IF NOT EXISTS idx_governed_dispatch_admissions_state
                 ON governed_dispatch_admissions(run_id, state);
@@ -2774,7 +2780,6 @@ impl SqliteStore {
             &tx,
             request.run_id,
             &request.dispatch.body.workflow_id,
-            &request.dispatch.body.workflow_revision,
             &request.dispatch.body.unit_id,
             request.dispatch.body.attempt,
         )?
@@ -7472,25 +7477,17 @@ fn governed_dispatch_admission_by_workflow_attempt(
     conn: &Connection,
     run_id: RunId,
     workflow_id: &str,
-    workflow_revision: &str,
     unit_id: &str,
     attempt: u32,
 ) -> Result<Option<StoredGovernedDispatchAdmission>> {
     let query = format!(
         "SELECT {GOVERNED_DISPATCH_ADMISSION_COLUMNS} \
          FROM governed_dispatch_admissions \
-         WHERE run_id = ?1 AND workflow_id = ?2 AND workflow_revision = ?3 \
-           AND unit_id = ?4 AND attempt = ?5"
+         WHERE run_id = ?1 AND workflow_id = ?2 AND unit_id = ?3 AND attempt = ?4"
     );
     conn.query_row(
         &query,
-        params![
-            run_id.to_string(),
-            workflow_id,
-            workflow_revision,
-            unit_id,
-            attempt,
-        ],
+        params![run_id.to_string(), workflow_id, unit_id, attempt],
         stored_governed_dispatch_admission_from_row,
     )
     .optional()
@@ -7618,7 +7615,6 @@ fn require_governed_dispatch_admission_event_projection(
                 Payload::DispatchEnvelopeV3(dispatch)
                     if dispatch.body.idempotency_key == request.dispatch.body.idempotency_key
                         || (dispatch.body.workflow_id == request.dispatch.body.workflow_id
-                            && dispatch.body.workflow_revision == request.dispatch.body.workflow_revision
                             && dispatch.body.unit_id == request.dispatch.body.unit_id
                             && dispatch.body.attempt == request.dispatch.body.attempt)
             );
