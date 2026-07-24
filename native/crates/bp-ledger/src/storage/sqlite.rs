@@ -7978,6 +7978,15 @@ fn sealed_governed_dispatch_admission_disposition(
     stored: &StoredGovernedDispatchAdmission,
     authority: &GovernedDispatchAdmissionAuthorityV1,
 ) -> Result<GovernedDispatchAdmissionDispositionV1> {
+    let admission_request = GovernedDispatchAdmissionRequestV1 {
+        run_id: stored.run_id,
+        dispatch: verified_governed_dispatch_admission_dispatch(conn, stored, authority)?,
+    };
+    require_governed_dispatch_admission_event_projection(
+        conn,
+        &admission_request,
+        Some(stored.dispatch_event_id),
+    )?;
     let checkpoint = sealed_governed_dispatch_admission_checkpoint(conn, stored, authority)?;
     Ok(GovernedDispatchAdmissionDispositionV1::Sealed {
         dispatch_event_id: stored.dispatch_event_id,
