@@ -35,6 +35,8 @@ describe("fork basic", () => {
 
 		try {
 			expect(fixture.forkExitCode).toBe(0);
+			expect(fixture.forkStdout).toContain("governance: unsafe");
+			expect(fixture.forkStdout).toContain("trusted-receipt: false");
 			expect(fixture.forkRunId).not.toBe("");
 			expect(fixture.forkRunId).not.toBe(fixture.parentRunId);
 

@@ -58,6 +58,7 @@ export function resolveNativeBinaryForLedgerTests(): string {
 
 export interface LedgerFixture {
 	dir: string; // absolute tempdir path
+	runId: string;
 	binary: string; // resolved native binary
 	child: ChildProcess;
 	emitter: TapeEmitter;
@@ -146,7 +147,7 @@ export async function makeLedgerFixture(options?: {
 		await cleanupTempDir(dir);
 	};
 
-	return { dir, binary, child, emitter, cleanup };
+	return { dir, runId, binary, child, emitter, cleanup };
 }
 
 export interface LegacyReplayTapeFixture {
@@ -457,6 +458,206 @@ export interface ForkFixtureInputs {
 		| "tool_request";
 }
 
+interface LegacyForkExecutionTapeFixture {
+	dir: string;
+	eventsDbPath: string;
+	parentRunId: string;
+	targetId: string;
+	cleanup: () => Promise<void>;
+}
+
+interface LegacyCommandPacket {
+	readonly unit?: {
+		readonly id?: string;
+		readonly kind?: string;
+	};
+	readonly execution?: {
+		readonly command?: string;
+		readonly args?: readonly string[];
+		readonly cwd?: string;
+	};
+}
+
+function legacyCommandPacket(packet: unknown): {
+	readonly unitId: string;
+	readonly unitKind: string;
+	readonly command: string;
+	readonly args: readonly string[];
+	readonly cwd?: string;
+} {
+	const candidate = packet as LegacyCommandPacket;
+	const unitId = candidate.unit?.id;
+	const command = candidate.execution?.command;
+	if (!unitId || !command) {
+		throw new Error(
+			"legacy fork execution fixture requires a command packet with unit.id and execution.command",
+		);
+	}
+	return {
+		unitId,
+		unitKind: candidate.unit?.kind ?? "command",
+		command,
+		args: candidate.execution?.args ?? [],
+		cwd: candidate.execution?.cwd,
+	};
+}
+
+/**
+ * Produce the unsigned historical prefix required by the explicitly unsafe
+ * fork/VCR compatibility lane. This is intentionally separate from
+ * `run --raw`: raw execution must never manufacture a tape that could be
+ * mistaken for governed evidence. The generic ledger endpoint is unsigned,
+ * and the recorded command is represented only as legacy replay data.
+ */
+async function makeLegacyForkExecutionTapeFixture(
+	parentPacket: unknown,
+): Promise<LegacyForkExecutionTapeFixture> {
+	const parentRunId = "01919000-0000-7000-8000-000000000001";
+	const ledger = await makeLedgerFixture({ runId: parentRunId });
+	const { dir, emitter } = ledger;
+	const command = legacyCommandPacket(parentPacket);
+	const runGit = (args: readonly string[]): string => {
+		const result = spawnSync("git", args, { cwd: dir, encoding: "utf8" });
+		if (result.status !== 0) {
+			throw new Error(`git ${args.join(" ")} failed: ${result.stderr}`);
+		}
+		return result.stdout;
+	};
+
+	try {
+		runGit(["init", "-q"]);
+		runGit(["config", "user.email", "test@test"]);
+		runGit(["config", "user.name", "Buildplane Test"]);
+		runGit(["commit", "-q", "--allow-empty", "-m", "init"]);
+
+		const { runCli } = (await import("../../apps/cli/src/run-cli.js")) as {
+			runCli: (
+				argv: string[],
+				options?: {
+					cwd?: string;
+					stdout?: (line: string) => void;
+					stderr?: (line: string) => void;
+				},
+			) => Promise<number>;
+		};
+		const initExitCode = await runCli(["init"], {
+			cwd: dir,
+			stdout: () => {},
+			stderr: () => {},
+		});
+		if (initExitCode !== 0) {
+			throw new Error(
+				"legacy fork execution fixture could not initialize project",
+			);
+		}
+		runGit(["add", "-A"]);
+		runGit(["commit", "-q", "-m", "buildplane: init"]);
+
+		const baseSha = runGit(["rev-parse", "HEAD"]).trim();
+		const runStartedEventId = newEventId();
+		const targetId = newEventId();
+		const checkpointEventId = newEventId();
+		emitter.emit(
+			"run_started",
+			{
+				RunStartedV1: {
+					packet_hash: `sha256:${"a".repeat(64)}`,
+					git_head: baseSha,
+					workspace_path: dir,
+					config: {},
+					parent_run_id: null,
+				},
+			},
+			{ id: runStartedEventId },
+		);
+		emitter.emit(
+			"unit_started",
+			{
+				UnitStartedV1: {
+					unit_id: command.unitId,
+					parent_unit_id: null,
+					unit_kind: command.unitKind,
+					policy: {},
+				},
+			},
+			{ id: targetId, parent: runStartedEventId },
+		);
+		emitter.emit(
+			"git_checkpoint",
+			{
+				GitCheckpointV1: {
+					boundary: "pre-unit",
+					reference: `refs/buildplane/run/${parentRunId}`,
+					commit_sha: baseSha,
+					unit_id: command.unitId,
+					git_status: { kind: "ok" },
+				},
+			},
+			{ id: checkpointEventId, parent: targetId },
+		);
+
+		const commandResult = spawnSync(command.command, command.args, {
+			cwd: command.cwd ? resolve(dir, command.cwd) : dir,
+			encoding: "utf8",
+		});
+		if (commandResult.error) {
+			throw commandResult.error;
+		}
+		const toolRequestId = newEventId();
+		emitter.emit(
+			"tool_request",
+			{
+				ToolRequestStoredV1: {
+					tool_name: "run_command",
+					arguments: {
+						command: command.command,
+						args: [...command.args],
+					},
+					env: {
+						redacted: true,
+						hash: "sha256:e3b0c44298fc1c149afbf4c8996fb924",
+						hint: "env_var",
+					},
+					working_directory: command.cwd ?? "",
+					unit_id: command.unitId,
+				},
+			},
+			{ id: toolRequestId, parent: targetId },
+		);
+		emitter.emit(
+			"tool_result",
+			{
+				ToolResultV1: {
+					tool_request_id: toolRequestId,
+					stdout: commandResult.stdout ?? "",
+					stderr: commandResult.stderr ?? "",
+					exit_code: commandResult.status ?? 1,
+					output: null,
+					duration_ms: 0,
+				},
+			},
+			{ parent: toolRequestId },
+		);
+		await emitter.close();
+
+		// The legacy tape and the deliberately unsafe parent side effects must be
+		// committed so the real fork command's clean-worktree preflight can run.
+		runGit(["add", "-A"]);
+		runGit(["commit", "-q", "-m", "buildplane: legacy fork parent"]);
+
+		return {
+			dir,
+			eventsDbPath: join(dir, ".buildplane", "ledger", "events.db"),
+			parentRunId,
+			targetId,
+			cleanup: ledger.cleanup,
+		};
+	} catch (error) {
+		await ledger.cleanup();
+		throw error;
+	}
+}
+
 export interface ForkFixtureResult {
 	dir: string;
 	eventsDbPath: string;
@@ -475,27 +676,14 @@ export interface ForkFixtureResult {
 export async function makeForkFixture(
 	opts: ForkFixtureInputs,
 ): Promise<ForkFixtureResult> {
-	const parent = await makeBuildplaneRunFixture({ packet: opts.parentPacket });
-	const dir = parent.dir;
-	const eventsDbPath = parent.eventsDbPath;
-
-	// Read parent run_id + target event_id from events.db.
-	const { DatabaseSync } = await import("node:sqlite");
-	const db = new DatabaseSync(eventsDbPath);
-	const parentRunId = (
-		db.prepare("SELECT DISTINCT run_id FROM events LIMIT 1").get() as {
-			run_id: string;
-		}
-	).run_id;
-	const targetKind = opts.forkTargetKindHint ?? "unit_started";
-	const targetRow = db
-		.prepare("SELECT id FROM events WHERE kind = ? ORDER BY id ASC LIMIT 1")
-		.get(targetKind) as { id: string } | undefined;
-	db.close();
-	if (!targetRow) {
-		throw new Error(`fixture: no ${targetKind} event found in parent tape`);
+	const parent = await makeLegacyForkExecutionTapeFixture(opts.parentPacket);
+	const { dir, eventsDbPath, parentRunId, targetId } = parent;
+	if (opts.forkTargetKindHint && opts.forkTargetKindHint !== "unit_started") {
+		await parent.cleanup();
+		throw new Error(
+			"legacy fork execution fixture only supports unit_started targets; use makeLegacyForkPreflightTapeFixture for invalid-target coverage",
+		);
 	}
-	const targetId = targetRow.id;
 	await opts.beforeFork?.({ dir, eventsDbPath, parentRunId, targetId });
 
 	// The fork command requires a clean working tree. After makeBuildplaneRunFixture
@@ -555,6 +743,7 @@ export async function makeForkFixture(
 				forkPacketPath,
 				"--workspace",
 				dir,
+				"--raw",
 				...(opts.forkArgs ?? []),
 			],
 			{
