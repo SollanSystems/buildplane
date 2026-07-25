@@ -12,13 +12,16 @@ import {
 	type ActivityHeartbeatRecordedV1,
 	ActivityResultOutcomeV1,
 	type ActivityResultRecordedV1,
+	type AttemptContextDeclaredV1,
 	type AttemptContextRecordedV1,
 	type CandidateCompletionRecordedV1,
 	type CandidateCreatedV2,
 	type CandidateViewV1,
+	type ContextManifestDeclaredV1,
 	type DispatchEnvelopeV2,
 	type DispatchEnvelopeV3,
 	type DispatchEnvelopeV4,
+	type DispatchEnvelopeV5,
 	EventKind,
 	type ModelActionAuthorizedV1,
 	type ModelActionAuthorizedV2,
@@ -30,6 +33,8 @@ import {
 	type ReviewVerdictRecordedV2,
 	RunAdmissionDecision,
 	type RunAdmissionRecordedV1,
+	type SandboxProfileDeclaredV1,
+	type WorkerManifestDeclaredV1,
 	type WorkflowCancellationRequestedV1,
 	type WorkflowGraphDeclaredV1,
 	type WorkflowGraphDeclaredV2,
@@ -90,6 +95,11 @@ const KNOWN_VARIANT_KEYS = {
 	DispatchEnvelopeV2: true,
 	DispatchEnvelopeV3: true,
 	DispatchEnvelopeV4: true,
+	DispatchEnvelopeV5: true,
+	ContextManifestDeclaredV1: true,
+	WorkerManifestDeclaredV1: true,
+	SandboxProfileDeclaredV1: true,
+	AttemptContextDeclaredV1: true,
 	WorkflowGraphDeclaredV1: true,
 	WorkflowGraphDeclaredV2: true,
 	ActionRequestedV2: true,
@@ -279,7 +289,7 @@ function nativeDispatchBody(body: DispatchEnvelopeV2["body"]) {
 describe("payload drift alarm", () => {
 	it("every fixture parses as a known variant", () => {
 		const fixtures = loadFixtures();
-		expect(KNOWN_KEYS.size).toBe(56);
+		expect(KNOWN_KEYS.size).toBe(61);
 		expect(fixtures.length).toBe(KNOWN_KEYS.size);
 		const names: string[] = [];
 		for (const fx of fixtures) {
@@ -309,6 +319,24 @@ describe("payload drift alarm", () => {
 		expect(EventKind.DispatchEnvelopeV3).toBe("dispatch_envelope_v3");
 		expect(names).toContain("DispatchEnvelopeV4");
 		expect(EventKind.DispatchEnvelopeV4).toBe("dispatch_envelope_v4");
+		expect(names).toContain("DispatchEnvelopeV5");
+		expect(EventKind.DispatchEnvelopeV5).toBe("dispatch_envelope_v5");
+		expect(names).toContain("ContextManifestDeclaredV1");
+		expect(EventKind.ContextManifestDeclaredV1).toBe(
+			"context_manifest_declared_v1",
+		);
+		expect(names).toContain("WorkerManifestDeclaredV1");
+		expect(EventKind.WorkerManifestDeclaredV1).toBe(
+			"worker_manifest_declared_v1",
+		);
+		expect(names).toContain("SandboxProfileDeclaredV1");
+		expect(EventKind.SandboxProfileDeclaredV1).toBe(
+			"sandbox_profile_declared_v1",
+		);
+		expect(names).toContain("AttemptContextDeclaredV1");
+		expect(EventKind.AttemptContextDeclaredV1).toBe(
+			"attempt_context_declared_v1",
+		);
 		expect(names).toContain("WorkflowGraphDeclaredV1");
 		expect(EventKind.WorkflowGraphDeclaredV1).toBe(
 			"workflow_graph_declared_v1",
@@ -658,6 +686,136 @@ describe("payload drift alarm", () => {
 				workflow_graph_digest: dispatch.workflow_graph_digest,
 				workflow_graph_declaration_event_ref:
 					dispatch.workflow_graph_declaration_event_ref,
+			}),
+		);
+	});
+
+	it("manifest-bound V5 fixtures retain declaration and nested-envelope bindings", () => {
+		const fixtures = loadFixtures();
+		const context = fixturePayload<ContextManifestDeclaredV1>(
+			fixtures,
+			"ContextManifestDeclaredV1",
+		);
+		const worker = fixturePayload<WorkerManifestDeclaredV1>(
+			fixtures,
+			"WorkerManifestDeclaredV1",
+		);
+		const sandbox = fixturePayload<SandboxProfileDeclaredV1>(
+			fixtures,
+			"SandboxProfileDeclaredV1",
+		);
+		const retry = fixturePayload<AttemptContextDeclaredV1>(
+			fixtures,
+			"AttemptContextDeclaredV1",
+		);
+		const dispatch = fixturePayload<DispatchEnvelopeV5>(
+			fixtures,
+			"DispatchEnvelopeV5",
+		);
+
+		expect(context.context_manifest_digest).toBe(
+			nativeDigest("buildplane.context-manifest-content.v1\0", {
+				entries: context.context_manifest.entries.map((entry) => ({
+					kind: entry.kind,
+					reference: entry.reference,
+					digest: entry.digest,
+					provenance_ref: entry.provenance_ref,
+					trust: entry.trust,
+					taint: entry.taint,
+				})),
+			}),
+		);
+		expect(worker.worker_manifest_digest).toBe(
+			nativeDigest("buildplane.worker-manifest-content.v1\0", {
+				provider: worker.worker_manifest.provider,
+				model: worker.worker_manifest.model,
+				harness: worker.worker_manifest.harness,
+				image_digest: worker.worker_manifest.image_digest,
+				tool_manifest_digest: worker.worker_manifest.tool_manifest_digest,
+				skill_manifest_digest: worker.worker_manifest.skill_manifest_digest,
+				capability_bundle_digest:
+					worker.worker_manifest.capability_bundle_digest,
+				execution_role: worker.worker_manifest.execution_role,
+			}),
+		);
+		expect(sandbox.sandbox_profile_digest).toBe(
+			nativeDigest("buildplane.sandbox-profile-content.v1\0", {
+				runtime: sandbox.sandbox_profile.runtime,
+				rootless: sandbox.sandbox_profile.rootless,
+				image_digest: sandbox.sandbox_profile.image_digest,
+				read_only_rootfs: sandbox.sandbox_profile.read_only_rootfs,
+				writable_overlay_digest:
+					sandbox.sandbox_profile.writable_overlay_digest,
+				mount_manifest_digest: sandbox.sandbox_profile.mount_manifest_digest,
+				environment_manifest_digest:
+					sandbox.sandbox_profile.environment_manifest_digest,
+				network_policy_digest: sandbox.sandbox_profile.network_policy_digest,
+				resource_policy_digest: sandbox.sandbox_profile.resource_policy_digest,
+				secret_handle_manifest_digest:
+					sandbox.sandbox_profile.secret_handle_manifest_digest,
+			}),
+		);
+		expect(retry.attempt_context_digest).toBe(
+			nativeDigest("buildplane.attempt-context-content.v1\0", {
+				attempt: retry.attempt_context.attempt,
+				retry_feedback: retry.attempt_context.retry_feedback.map(
+					(feedback) => ({
+						feedback_ref: feedback.feedback_ref,
+						feedback_digest: feedback.feedback_digest,
+					}),
+				),
+				prior_candidates: retry.attempt_context.prior_candidates.map(
+					(candidate) => ({
+						candidate_ref: candidate.candidate_ref,
+						candidate_digest: candidate.candidate_digest,
+					}),
+				),
+			}),
+		);
+
+		const body = dispatch.dispatch_v4.dispatch_v3.body;
+		expect(dispatch.context_manifest_digest).toBe(
+			context.context_manifest_digest,
+		);
+		expect(dispatch.worker_manifest_digest).toBe(worker.worker_manifest_digest);
+		expect(dispatch.sandbox_profile_digest).toBe(
+			sandbox.sandbox_profile_digest,
+		);
+		expect(body.context_manifest_digest).toBe(context.context_manifest_digest);
+		expect(body.worker_manifest_digest).toBe(worker.worker_manifest_digest);
+		expect(body.sandbox_profile_digest).toBe(sandbox.sandbox_profile_digest);
+		expect(dispatch.attempt_context_declaration_event_ref).toBeUndefined();
+		expect(dispatch.attempt_context_digest).toBeUndefined();
+		expect(retry.attempt_context.attempt).toBe(retry.attempt);
+		expect(retry.workflow_revision).toBe(body.workflow_revision);
+
+		const v3 = dispatch.dispatch_v4.dispatch_v3;
+		const v4 = dispatch.dispatch_v4;
+		expect(dispatch.envelope_digest).toBe(
+			nativeDigest("buildplane.dispatch-envelope.v5\0", {
+				dispatch_v4: {
+					dispatch_v3: {
+						body: nativeDispatchBody(v3.body),
+						action_evidence_version: v3.action_evidence_version,
+						repository_binding_digest: v3.repository_binding_digest,
+						ledger_authority_realm_digest: v3.ledger_authority_realm_digest,
+						governed_packet_digest: v3.governed_packet_digest,
+						envelope_digest: v3.envelope_digest,
+					},
+					workflow_graph_digest: v4.workflow_graph_digest,
+					workflow_graph_declaration_event_ref:
+						v4.workflow_graph_declaration_event_ref,
+					envelope_digest: v4.envelope_digest,
+				},
+				context_manifest_declaration_event_ref:
+					dispatch.context_manifest_declaration_event_ref,
+				context_manifest_digest: dispatch.context_manifest_digest,
+				worker_manifest_declaration_event_ref:
+					dispatch.worker_manifest_declaration_event_ref,
+				worker_manifest_digest: dispatch.worker_manifest_digest,
+				sandbox_profile_declaration_event_ref:
+					dispatch.sandbox_profile_declaration_event_ref,
+				sandbox_profile_digest: dispatch.sandbox_profile_digest,
 			}),
 		);
 	});

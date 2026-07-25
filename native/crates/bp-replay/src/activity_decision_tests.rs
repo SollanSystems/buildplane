@@ -151,6 +151,7 @@ fn fixture(result: Option<ActivityResultOutcomeV1>) -> Fixture {
                 action_evidence_version: Some(ActionEvidenceVersionV1::SealedV3),
             },
             workflow_graph: None,
+            manifest_declarations: None,
             action_evidence: Some(ActionEvidenceReplayState {
                 action_evidence_version: ActionEvidenceVersionV1::SealedV3,
                 actions,
@@ -311,6 +312,26 @@ fn sealed_successful_activity_result_is_reused_without_authorizing_another_effec
         Some("cas:result-1")
     );
     assert!(decision.reason.is_none());
+}
+
+#[test]
+fn v5_action_recovery_fails_closed_when_manifest_witnesses_are_missing() {
+    let Fixture {
+        mut workflow,
+        query,
+    } = fixture(Some(ActivityResultOutcomeV1::Succeeded));
+    workflow.dispatch.dispatch_version = 5;
+    workflow.dispatch.workflow_graph_digest = Some(DIGEST_A.into());
+    workflow.dispatch.workflow_graph_declaration_event_ref = Some(EventId::new());
+    workflow.manifest_declarations = None;
+
+    let decision = classify_replayed_governed_action_v1(&workflow, &query);
+
+    assert_eq!(decision.disposition, ActionDecisionDispositionV1::Blocked);
+    assert_eq!(
+        decision.reason,
+        Some(ActionDecisionBlockReasonV1::UnsupportedDispatch)
+    );
 }
 
 #[test]

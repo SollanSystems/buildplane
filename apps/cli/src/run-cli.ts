@@ -9955,44 +9955,24 @@ export async function runCli(
 			}
 		}
 
-		// Parse every non-help run before the generic legacy orchestrator is
-		// constructed. Besides routing governed work early, this ensures a malformed
-		// `--resume ... --raw` request cannot instantiate the ambient worker router
-		// before its cross-lane authority conflict is rejected.
+		// Resolve terminal help and governed runs before constructing the generic
+		// legacy orchestrator. In particular, help cannot initialize ambient storage
+		// or Honcho integration, even when incompatible legacy flags are present.
 		if (command === "run") {
 			if (rest.includes("--help")) {
-				// Help must not turn a governed graph conflict into a route around the
-				// parser. In particular, `run --graph <path> --raw --help` cannot
-				// reach legacy bundle construction merely because the eventual output
-				// would be usage text. Strip only help for this closed validation; the
-				// governed handler below still owns successful help rendering.
-				const helpArguments = rest.filter((argument) => argument !== "--help");
-				if (helpArguments.includes("--graph")) {
-					const parsedRunArguments = parseRunCommandArguments(helpArguments);
-					if (parsedRunArguments.kind === "graph") {
-						return await runGovernedRunCommand(rest, {
-							cwd,
-							stdout,
-							...(deps === undefined ? {} : { dependencies: deps }),
-						});
-					}
+				for (const line of formatRunHelp()) {
+					stdout(line);
 				}
-				if (!rest.includes("--raw")) {
-					return await runGovernedRunCommand(rest, {
-						cwd,
-						stdout,
-						...(deps === undefined ? {} : { dependencies: deps }),
-					});
-				}
-			} else {
-				const parsedRunArguments = parseRunCommandArguments(rest);
-				if (!parsedRunArguments.raw) {
-					return await runGovernedRunCommand(rest, {
-						cwd,
-						stdout,
-						...(deps === undefined ? {} : { dependencies: deps }),
-					});
-				}
+				return 0;
+			}
+
+			const parsedRunArguments = parseRunCommandArguments(rest);
+			if (!parsedRunArguments.raw) {
+				return await runGovernedRunCommand(rest, {
+					cwd,
+					stdout,
+					...(deps === undefined ? {} : { dependencies: deps }),
+				});
 			}
 		}
 
@@ -10048,14 +10028,6 @@ export async function runCli(
 				return 0;
 			}
 			case "run": {
-				// --help BEFORE --packet validation (so `buildplane run --help` works without --packet)
-				if (rest.includes("--help")) {
-					for (const line of formatRunHelp()) {
-						stdout(line);
-					}
-					return 0;
-				}
-
 				const runArguments = parseRunCommandArguments(rest);
 				if (runArguments.kind !== "packet" || !runArguments.raw) {
 					throw new Error(

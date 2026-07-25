@@ -3,13 +3,16 @@
 use bp_ledger::id::EventId;
 use bp_ledger::payload::activity_claim::{ActivityClaimPurposeV1, ActivityResultOutcomeV1};
 use bp_ledger::payload::trust_spine::{
-    ActionEvidenceVersionV1, ActionFailureV1, ActionKindV1, ActionReceiptOutcomeV2,
-    ActionReceiptSetEntryV1, ActionRedactionV1, ActionResourceUsageV1, AttemptContextRecordedV1,
+    attempt_context_content_v1_digest, context_manifest_content_v1_digest,
+    sandbox_profile_content_v1_digest, worker_manifest_content_v1_digest, ActionEvidenceVersionV1,
+    ActionFailureV1, ActionKindV1, ActionReceiptOutcomeV2, ActionReceiptSetEntryV1,
+    ActionRedactionV1, ActionResourceUsageV1, AttemptContextContentV1, AttemptContextRecordedV1,
     CandidateAcceptanceOutcomeV1, CandidateCompletionRecordedV1, CandidateViewV1, CommitModeV1,
-    DispatchBudgetV1, ExecutionRoleV1, ModelActionCandidateBindingV1, ModelRequestEvidenceV1,
-    PromotionDecisionKindV1, PromotionExecutionClaimedV1, PromotionExecutionLeaseBindingV1,
-    PromotionGitBindingV1, PromotionResultOutcomeV1, ReconciliationResolutionOutcomeV1,
-    ReviewDecisionV1, ReviewFindingV1, SignatureRefV1, TrustScopeEvidenceV1, TrustTierV1,
+    ContextManifestContentV1, DispatchBudgetV1, ExecutionRoleV1, ModelActionCandidateBindingV1,
+    ModelRequestEvidenceV1, PromotionDecisionKindV1, PromotionExecutionClaimedV1,
+    PromotionExecutionLeaseBindingV1, PromotionGitBindingV1, PromotionResultOutcomeV1,
+    ReconciliationResolutionOutcomeV1, ReviewDecisionV1, ReviewFindingV1, SandboxProfileContentV1,
+    SignatureRefV1, TrustScopeEvidenceV1, TrustTierV1, WorkerManifestContentV1,
     WorkflowCancellationCauseV1, WorkflowGraphNodeV1, WorkflowGraphNodeV2,
     WorkflowTerminalOutcomeV1, WorkflowTimerKindV1,
 };
@@ -73,6 +76,24 @@ pub struct ReplayState {
     /// map; V3 history remains readable without graph gating.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub workflow_graphs_v2: BTreeMap<String, WorkflowGraphV2ReplayState>,
+    /// Immutable V5 context declarations keyed by their exact
+    /// `(run, workflow, revision, unit, attempt)` identity. A V5 dispatch
+    /// consumes only a declaration projected before it on the tape.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub context_manifest_declarations: BTreeMap<String, ContextManifestDeclarationReplayState>,
+    /// Immutable V5 worker declarations keyed by their exact workflow attempt
+    /// identity. Kept separate from the context projection so one event kind
+    /// cannot substitute for another authority witness.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub worker_manifest_declarations: BTreeMap<String, WorkerManifestDeclarationReplayState>,
+    /// Immutable V5 sandbox declarations keyed by their exact workflow attempt
+    /// identity.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub sandbox_profile_declarations: BTreeMap<String, SandboxProfileDeclarationReplayState>,
+    /// Immutable V5 retry-context declarations keyed by their exact workflow
+    /// attempt identity. First attempts deliberately have no entry.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub attempt_context_declarations: BTreeMap<String, AttemptContextDeclarationReplayState>,
     /// Immutable retry-lineage contexts keyed by the exact next V3 dispatch
     /// envelope digest. A context projects before its replacement dispatch,
     /// and can never be replaced by a distinct physical event.
@@ -195,6 +216,12 @@ pub struct WorkflowInstanceV1 {
     /// second authority store. Historical snapshots deserialize as `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workflow_graph: Option<WorkflowGraphV2ReplayState>,
+    /// Present only for manifest-bound V5 dispatches. The reducer copies the
+    /// exact declaration witnesses it consumed, including their verified
+    /// signers, so recovery cannot classify a V5 workflow after a cache or
+    /// migration has dropped one of those authority facts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest_declarations: Option<ManifestDispatchWitnessesReplayState>,
     /// Present only for V3 dispatches. The reducer derives this state solely
     /// from write-ahead requests, immutable receipts, and one sealed set so
     /// recovery code can expose pending/unknown effects without rerunning an
@@ -270,6 +297,229 @@ pub struct WorkflowGraphV2ReplayState {
     pub graph_digest: String,
     pub idempotency_key: String,
     pub declared_at: String,
+}
+
+/// Reducer projection of one signed V5 context-manifest declaration.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextManifestDeclarationReplayState {
+    pub event_id: EventId,
+    pub run_id: String,
+    pub workflow_id: String,
+    pub workflow_revision: String,
+    pub unit_id: String,
+    pub attempt: u32,
+    pub provenance_ref: String,
+    pub context_manifest: ContextManifestContentV1,
+    pub context_manifest_digest: String,
+    pub idempotency_key: String,
+    pub declared_at: String,
+    /// Set only by authoritative replay after the declaration's detached
+    /// kernel signature and signer-purpose authorization both succeed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verified_signer: Option<ActorKeyRef>,
+}
+
+/// Reducer projection of one signed V5 worker-manifest declaration.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerManifestDeclarationReplayState {
+    pub event_id: EventId,
+    pub run_id: String,
+    pub workflow_id: String,
+    pub workflow_revision: String,
+    pub unit_id: String,
+    pub attempt: u32,
+    pub provenance_ref: String,
+    pub worker_manifest: WorkerManifestContentV1,
+    pub worker_manifest_digest: String,
+    pub idempotency_key: String,
+    pub declared_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verified_signer: Option<ActorKeyRef>,
+}
+
+/// Reducer projection of one signed V5 sandbox-profile declaration.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SandboxProfileDeclarationReplayState {
+    pub event_id: EventId,
+    pub run_id: String,
+    pub workflow_id: String,
+    pub workflow_revision: String,
+    pub unit_id: String,
+    pub attempt: u32,
+    pub provenance_ref: String,
+    pub sandbox_profile: SandboxProfileContentV1,
+    pub sandbox_profile_digest: String,
+    pub idempotency_key: String,
+    pub declared_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verified_signer: Option<ActorKeyRef>,
+}
+
+/// Reducer projection of one signed V5 retry-context declaration.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AttemptContextDeclarationReplayState {
+    pub event_id: EventId,
+    pub run_id: String,
+    pub workflow_id: String,
+    pub workflow_revision: String,
+    pub unit_id: String,
+    pub attempt: u32,
+    pub provenance_ref: String,
+    pub attempt_context: AttemptContextContentV1,
+    pub attempt_context_digest: String,
+    pub idempotency_key: String,
+    pub declared_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verified_signer: Option<ActorKeyRef>,
+}
+
+/// Exact V5 declaration witnesses consumed by one manifest-bound dispatch.
+/// The copies are intentional: recovery snapshots are workflow-scoped and may
+/// not retain the full declaration maps from the source replay state.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManifestDispatchWitnessesReplayState {
+    /// Set only by an authoritative replay engine for the V5 dispatch itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatch_verified_signer: Option<ActorKeyRef>,
+    pub context_manifest: ContextManifestDeclarationReplayState,
+    pub worker_manifest: WorkerManifestDeclarationReplayState,
+    pub sandbox_profile: SandboxProfileDeclarationReplayState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_context: Option<AttemptContextDeclarationReplayState>,
+}
+
+/// Return whether a V5 workflow retains the complete signed, immutable
+/// manifest witnesses consumed by its dispatch. This deliberately validates
+/// the copied evidence again instead of treating the presence of a snapshot
+/// field as authority: recovery caches must fail closed if a migration or
+/// partial projection drops a signer, declaration, identity component, or
+/// content digest.
+///
+/// The replay engine establishes the signer *role* before projecting these
+/// values. This helper therefore checks that every bound signer survived the
+/// projection without assuming one fixed kernel actor or key across all
+/// events (key rotation is valid).
+pub(crate) fn has_complete_v5_manifest_dispatch_witnesses(workflow: &WorkflowInstanceV1) -> bool {
+    if workflow.dispatch.dispatch_version != 5 {
+        return false;
+    }
+    let Some(witnesses) = workflow.manifest_declarations.as_ref() else {
+        return false;
+    };
+    if !has_bound_signer(witnesses.dispatch_verified_signer.as_ref())
+        || !has_bound_signer(witnesses.context_manifest.verified_signer.as_ref())
+        || !has_bound_signer(witnesses.worker_manifest.verified_signer.as_ref())
+        || !has_bound_signer(witnesses.sandbox_profile.verified_signer.as_ref())
+    {
+        return false;
+    }
+
+    let dispatch = &workflow.dispatch;
+    let matches_dispatch_identity = |run_id: &str,
+                                     workflow_id: &str,
+                                     workflow_revision: &str,
+                                     unit_id: &str,
+                                     attempt: u32,
+                                     provenance_ref: &str| {
+        run_id == workflow.run_id.as_str()
+            && workflow_id == workflow.workflow_id.as_str()
+            && workflow_revision == workflow.workflow_revision.as_str()
+            && unit_id == workflow.unit_id.as_str()
+            && attempt == workflow.attempt
+            && provenance_ref == dispatch.provenance_ref.as_str()
+    };
+    if !matches_dispatch_identity(
+        &witnesses.context_manifest.run_id,
+        &witnesses.context_manifest.workflow_id,
+        &witnesses.context_manifest.workflow_revision,
+        &witnesses.context_manifest.unit_id,
+        witnesses.context_manifest.attempt,
+        &witnesses.context_manifest.provenance_ref,
+    ) || !matches_dispatch_identity(
+        &witnesses.worker_manifest.run_id,
+        &witnesses.worker_manifest.workflow_id,
+        &witnesses.worker_manifest.workflow_revision,
+        &witnesses.worker_manifest.unit_id,
+        witnesses.worker_manifest.attempt,
+        &witnesses.worker_manifest.provenance_ref,
+    ) || !matches_dispatch_identity(
+        &witnesses.sandbox_profile.run_id,
+        &witnesses.sandbox_profile.workflow_id,
+        &witnesses.sandbox_profile.workflow_revision,
+        &witnesses.sandbox_profile.unit_id,
+        witnesses.sandbox_profile.attempt,
+        &witnesses.sandbox_profile.provenance_ref,
+    ) {
+        return false;
+    }
+
+    let context_digest_matches =
+        context_manifest_content_v1_digest(&witnesses.context_manifest.context_manifest)
+            .ok()
+            .is_some_and(|digest| {
+                digest == witnesses.context_manifest.context_manifest_digest
+                    && digest == dispatch.context_manifest_digest
+            });
+    let worker_digest_matches =
+        worker_manifest_content_v1_digest(&witnesses.worker_manifest.worker_manifest)
+            .ok()
+            .is_some_and(|digest| {
+                digest == witnesses.worker_manifest.worker_manifest_digest
+                    && digest == dispatch.worker_manifest_digest
+            });
+    let sandbox_digest_matches =
+        sandbox_profile_content_v1_digest(&witnesses.sandbox_profile.sandbox_profile)
+            .ok()
+            .is_some_and(|digest| {
+                digest == witnesses.sandbox_profile.sandbox_profile_digest
+                    && digest == dispatch.sandbox_profile_digest
+            });
+    if !context_digest_matches
+        || !worker_digest_matches
+        || !sandbox_digest_matches
+        || witnesses.worker_manifest.worker_manifest.execution_role != dispatch.execution_role
+        || witnesses
+            .worker_manifest
+            .worker_manifest
+            .capability_bundle_digest
+            != dispatch.capability_bundle_digest
+        || witnesses.sandbox_profile.sandbox_profile.image_digest
+            != witnesses.worker_manifest.worker_manifest.image_digest
+    {
+        return false;
+    }
+
+    match (workflow.attempt, witnesses.attempt_context.as_ref()) {
+        (1, None) => true,
+        (1, Some(_)) => false,
+        (_, Some(attempt_context)) => {
+            has_bound_signer(attempt_context.verified_signer.as_ref())
+                && matches_dispatch_identity(
+                    &attempt_context.run_id,
+                    &attempt_context.workflow_id,
+                    &attempt_context.workflow_revision,
+                    &attempt_context.unit_id,
+                    attempt_context.attempt,
+                    &attempt_context.provenance_ref,
+                )
+                && attempt_context.attempt_context.attempt == workflow.attempt
+                && attempt_context_content_v1_digest(&attempt_context.attempt_context)
+                    .ok()
+                    .is_some_and(|digest| digest == attempt_context.attempt_context_digest)
+        }
+        (_, None) => false,
+    }
+}
+
+fn has_bound_signer(signer: Option<&ActorKeyRef>) -> bool {
+    signer.is_some_and(|signer| {
+        !signer.actor_id.trim().is_empty() && !signer.key_id.trim().is_empty()
+    })
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

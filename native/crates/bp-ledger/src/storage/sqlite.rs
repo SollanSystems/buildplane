@@ -1716,6 +1716,11 @@ impl SqliteStore {
             EventKind::WorkflowGraphDeclaredV1
                 | EventKind::WorkflowGraphDeclaredV2
                 | EventKind::DispatchEnvelopeV4
+                | EventKind::DispatchEnvelopeV5
+                | EventKind::ContextManifestDeclaredV1
+                | EventKind::WorkerManifestDeclaredV1
+                | EventKind::SandboxProfileDeclaredV1
+                | EventKind::AttemptContextDeclaredV1
         ) {
             canonicalize(event.clone())?;
         }
@@ -5165,6 +5170,12 @@ fn dispatch_authority_material(payload: &Payload) -> Option<DispatchAuthorityMat
             lineage_envelope_digest: dispatch.envelope_digest.clone(),
             is_graph_bound_v4: true,
         }),
+        // V5 is deliberately unsupported by storage authority writers until
+        // they can verify its complete signed declaration witness set through
+        // the authoritative reducer. Never downcast V5 to V4/V3 here: doing
+        // so would discard the manifest and retry-context bindings that V5
+        // exists to make mandatory before claims, completion, or promotion.
+        Payload::DispatchEnvelopeV5(_) => None,
         _ => None,
     }
 }

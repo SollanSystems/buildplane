@@ -6,27 +6,35 @@ use bp_ledger::id::{EventId, RunId};
 use bp_ledger::kind::EventKind;
 use bp_ledger::payload::trust_spine::{
     action_receipt_recorded_v2_digest, action_receipt_set_v1_digest, action_requested_v2_digest,
-    candidate_completion_recorded_v1_digest, candidate_view_v1_digest,
-    dispatch_envelope_v2_body_digest, dispatch_envelope_v3_body_digest,
+    attempt_context_content_v1_digest, candidate_completion_recorded_v1_digest,
+    candidate_view_v1_digest, context_manifest_content_v1_digest, dispatch_envelope_v2_body_digest,
+    dispatch_envelope_v3_body_digest, dispatch_envelope_v4_digest, dispatch_envelope_v5_digest,
     governed_dispatch_policy_digest_v1, model_action_authorized_v1_digest,
     model_action_authorized_v2_digest, model_action_intent_v1_digest,
-    review_verdict_output_v1_digest, ActionEvidenceVersionV1, ActionKindV1, ActionReceiptOutcomeV2,
-    ActionReceiptRecordedV2, ActionReceiptSetEntryV1, ActionReceiptSetRecordedV1,
-    ActionRequestedV2, ActionResourceUsageV1, CandidateAcceptanceOutcomeV1,
+    review_verdict_output_v1_digest, sandbox_profile_content_v1_digest,
+    worker_manifest_content_v1_digest, ActionEvidenceVersionV1, ActionKindV1,
+    ActionReceiptOutcomeV2, ActionReceiptRecordedV2, ActionReceiptSetEntryV1,
+    ActionReceiptSetRecordedV1, ActionRequestedV2, ActionResourceUsageV1, AttemptContextContentV1,
+    AttemptContextDeclaredV1, AttemptFeedbackV1, CandidateAcceptanceOutcomeV1,
     CandidateAcceptanceRecordedV1, CandidateCompletionRecordedV1, CandidateCreatedV1,
-    CandidateCreatedV2, CandidateViewV1, CommitModeV1, DispatchBudgetV1, DispatchEnvelopeBodyV2,
-    DispatchEnvelopeV1, DispatchEnvelopeV2, DispatchEnvelopeV3, ExecutionRoleV1,
-    ModelActionAuthorizedV1, ModelActionAuthorizedV2, ModelActionIntentV1, ModelRequestEvidenceV1,
-    PromotionApprovalRequestedV1, PromotionDecisionKindV1, PromotionDecisionRecordedV1,
-    PromotionGitBindingV1, PromotionReconciliationResolvedV1, PromotionResultOutcomeV1,
-    PromotionResultRecordedV1, PromotionWorktreeSyncStateV1, ReconciliationResolutionOutcomeV1,
-    ReviewDecisionV1, ReviewFindingSeverityV1, ReviewFindingV1, ReviewVerdictOutputV1,
-    ReviewVerdictRecordedV1, ReviewVerdictRecordedV2, SignatureRefV1, TrustScopeEvidenceV1,
-    TrustTierV1, WorkflowTerminalOutcomeV1, WorkflowTerminalV1,
+    CandidateCreatedV2, CandidateViewV1, CommitModeV1, ContextManifestContentV1,
+    ContextManifestDeclaredV1, ContextManifestEntryKindV1, ContextManifestEntryV1, ContextTaintV1,
+    ContextTrustLevelV1, DispatchBudgetV1, DispatchEnvelopeBodyV2, DispatchEnvelopeV1,
+    DispatchEnvelopeV2, DispatchEnvelopeV3, DispatchEnvelopeV4, DispatchEnvelopeV5,
+    ExecutionRoleV1, ModelActionAuthorizedV1, ModelActionAuthorizedV2, ModelActionIntentV1,
+    ModelRequestEvidenceV1, PriorCandidateRefV1, PromotionApprovalRequestedV1,
+    PromotionDecisionKindV1, PromotionDecisionRecordedV1, PromotionGitBindingV1,
+    PromotionReconciliationResolvedV1, PromotionResultOutcomeV1, PromotionResultRecordedV1,
+    PromotionWorktreeSyncStateV1, ReconciliationResolutionOutcomeV1, ReviewDecisionV1,
+    ReviewFindingSeverityV1, ReviewFindingV1, ReviewVerdictOutputV1, ReviewVerdictRecordedV1,
+    ReviewVerdictRecordedV2, SandboxProfileContentV1, SandboxProfileDeclaredV1, SandboxRuntimeV1,
+    SignatureRefV1, TrustScopeEvidenceV1, TrustTierV1, WorkerHarnessV1, WorkerManifestContentV1,
+    WorkerManifestDeclaredV1, WorkerProviderV1, WorkflowTerminalOutcomeV1, WorkflowTerminalV1,
     MODEL_REQUEST_EVIDENCE_V1_SCHEMA_VERSION, TRUST_SCOPE_EVIDENCE_V1_SCHEMA_VERSION,
     TYPESCRIPT_SAFE_INTEGER_MAX,
 };
 use bp_ledger::payload::Payload;
+use bp_ledger::storage::sqlite::SqliteStore;
 use chrono::Utc;
 use serde_json::json;
 
@@ -123,7 +131,13 @@ fn dispatch_v2() -> DispatchEnvelopeV2 {
 }
 
 fn dispatch_v3() -> DispatchEnvelopeV3 {
-    let body = dispatch_v2_body();
+    dispatch_v3_for_attempt(1)
+}
+
+fn dispatch_v3_for_attempt(attempt: u32) -> DispatchEnvelopeV3 {
+    let mut body = dispatch_v2_body();
+    body.attempt = attempt;
+    body.idempotency_key = format!("dispatch:workflow-1:unit-1:{attempt}");
     let action_evidence_version = ActionEvidenceVersionV1::SealedV3;
     DispatchEnvelopeV3 {
         envelope_digest: dispatch_envelope_v3_body_digest(
@@ -140,6 +154,237 @@ fn dispatch_v3() -> DispatchEnvelopeV3 {
         ledger_authority_realm_digest: DIGEST_B.into(),
         governed_packet_digest: Some(DIGEST_C.into()),
     }
+}
+
+fn dispatch_v4() -> DispatchEnvelopeV4 {
+    dispatch_v4_for_attempt(1)
+}
+
+fn dispatch_v4_for_attempt(attempt: u32) -> DispatchEnvelopeV4 {
+    let dispatch_v3 = dispatch_v3_for_attempt(attempt);
+    let workflow_graph_digest = DIGEST_C.to_owned();
+    let workflow_graph_declaration_event_ref = EventId::new();
+    let envelope_digest = dispatch_envelope_v4_digest(
+        &dispatch_v3,
+        &workflow_graph_digest,
+        &workflow_graph_declaration_event_ref,
+    )
+    .expect("serialize v4 body");
+    DispatchEnvelopeV4 {
+        dispatch_v3,
+        workflow_graph_digest,
+        workflow_graph_declaration_event_ref,
+        envelope_digest,
+    }
+}
+
+fn dispatch_v4_for_attempt_with_manifest_digests(
+    attempt: u32,
+    context_manifest_digest: String,
+    worker_manifest_digest: String,
+    sandbox_profile_digest: String,
+) -> DispatchEnvelopeV4 {
+    let mut dispatch_v3 = dispatch_v3_for_attempt(attempt);
+    dispatch_v3.body.context_manifest_digest = context_manifest_digest;
+    dispatch_v3.body.worker_manifest_digest = worker_manifest_digest;
+    dispatch_v3.body.sandbox_profile_digest = sandbox_profile_digest;
+    dispatch_v3.envelope_digest = dispatch_envelope_v3_body_digest(
+        &dispatch_v3.body,
+        dispatch_v3.action_evidence_version,
+        &dispatch_v3.repository_binding_digest,
+        &dispatch_v3.ledger_authority_realm_digest,
+        dispatch_v3.governed_packet_digest.as_deref(),
+    )
+    .expect("serialize V3 body with manifest-bound digests");
+
+    let workflow_graph_digest = DIGEST_C.to_owned();
+    let workflow_graph_declaration_event_ref = EventId::new();
+    let envelope_digest = dispatch_envelope_v4_digest(
+        &dispatch_v3,
+        &workflow_graph_digest,
+        &workflow_graph_declaration_event_ref,
+    )
+    .expect("serialize V4 body with manifest-bound digests");
+    DispatchEnvelopeV4 {
+        dispatch_v3,
+        workflow_graph_digest,
+        workflow_graph_declaration_event_ref,
+        envelope_digest,
+    }
+}
+
+fn context_manifest() -> ContextManifestContentV1 {
+    ContextManifestContentV1 {
+        entries: vec![ContextManifestEntryV1 {
+            kind: ContextManifestEntryKindV1::RepositoryFile,
+            reference: "repo:AGENTS.md".into(),
+            digest: DIGEST_A.into(),
+            provenance_ref: "provenance:repository".into(),
+            trust: ContextTrustLevelV1::Verified,
+            taint: ContextTaintV1::Clean,
+        }],
+    }
+}
+
+fn worker_manifest() -> WorkerManifestContentV1 {
+    WorkerManifestContentV1 {
+        provider: WorkerProviderV1::OpenAi,
+        model: "gpt-5".into(),
+        harness: WorkerHarnessV1::OpenAiApiSdk,
+        image_digest: DIGEST_A.into(),
+        tool_manifest_digest: DIGEST_B.into(),
+        skill_manifest_digest: DIGEST_C.into(),
+        capability_bundle_digest: DIGEST_A.into(),
+        execution_role: ExecutionRoleV1::Implementer,
+    }
+}
+
+fn sandbox_profile() -> SandboxProfileContentV1 {
+    SandboxProfileContentV1 {
+        runtime: SandboxRuntimeV1::RootlessOci,
+        rootless: true,
+        image_digest: DIGEST_A.into(),
+        read_only_rootfs: true,
+        writable_overlay_digest: DIGEST_B.into(),
+        mount_manifest_digest: DIGEST_C.into(),
+        environment_manifest_digest: DIGEST_A.into(),
+        network_policy_digest: DIGEST_B.into(),
+        resource_policy_digest: DIGEST_C.into(),
+        secret_handle_manifest_digest: DIGEST_A.into(),
+    }
+}
+
+fn attempt_context() -> AttemptContextContentV1 {
+    AttemptContextContentV1 {
+        attempt: 2,
+        retry_feedback: vec![AttemptFeedbackV1 {
+            feedback_ref: "cas:retry-feedback:1".into(),
+            feedback_digest: DIGEST_A.into(),
+        }],
+        prior_candidates: vec![PriorCandidateRefV1 {
+            candidate_ref: "refs/buildplane/candidates/workflow-1/unit-1/1".into(),
+            candidate_digest: DIGEST_B.into(),
+        }],
+    }
+}
+
+fn context_manifest_declaration() -> ContextManifestDeclaredV1 {
+    let context_manifest = context_manifest();
+    ContextManifestDeclaredV1 {
+        run_id: "run-1".into(),
+        workflow_id: "workflow-1".into(),
+        workflow_revision: "r1".into(),
+        unit_id: "unit-1".into(),
+        attempt: 2,
+        provenance_ref: "admission:1".into(),
+        context_manifest_digest: context_manifest_content_v1_digest(&context_manifest)
+            .expect("serialize context manifest"),
+        context_manifest,
+        idempotency_key: "context-manifest:workflow-1:unit-1:2".into(),
+        declared_at: "2026-07-17T00:00:01Z".into(),
+    }
+}
+
+fn worker_manifest_declaration() -> WorkerManifestDeclaredV1 {
+    let worker_manifest = worker_manifest();
+    WorkerManifestDeclaredV1 {
+        run_id: "run-1".into(),
+        workflow_id: "workflow-1".into(),
+        workflow_revision: "r1".into(),
+        unit_id: "unit-1".into(),
+        attempt: 2,
+        provenance_ref: "admission:1".into(),
+        worker_manifest_digest: worker_manifest_content_v1_digest(&worker_manifest)
+            .expect("serialize worker manifest"),
+        worker_manifest,
+        idempotency_key: "worker-manifest:workflow-1:unit-1:2".into(),
+        declared_at: "2026-07-17T00:00:01Z".into(),
+    }
+}
+
+fn sandbox_profile_declaration() -> SandboxProfileDeclaredV1 {
+    let sandbox_profile = sandbox_profile();
+    SandboxProfileDeclaredV1 {
+        run_id: "run-1".into(),
+        workflow_id: "workflow-1".into(),
+        workflow_revision: "r1".into(),
+        unit_id: "unit-1".into(),
+        attempt: 2,
+        provenance_ref: "admission:1".into(),
+        sandbox_profile_digest: sandbox_profile_content_v1_digest(&sandbox_profile)
+            .expect("serialize sandbox profile"),
+        sandbox_profile,
+        idempotency_key: "sandbox-profile:workflow-1:unit-1:2".into(),
+        declared_at: "2026-07-17T00:00:01Z".into(),
+    }
+}
+
+fn attempt_context_declaration() -> AttemptContextDeclaredV1 {
+    let attempt_context = attempt_context();
+    AttemptContextDeclaredV1 {
+        run_id: "run-1".into(),
+        workflow_id: "workflow-1".into(),
+        workflow_revision: "r1".into(),
+        unit_id: "unit-1".into(),
+        attempt: 2,
+        provenance_ref: "admission:1".into(),
+        attempt_context_digest: attempt_context_content_v1_digest(&attempt_context)
+            .expect("serialize attempt context"),
+        attempt_context,
+        idempotency_key: "attempt-context:workflow-1:unit-1:2".into(),
+        declared_at: "2026-07-17T00:00:01Z".into(),
+    }
+}
+
+fn dispatch_v5() -> DispatchEnvelopeV5 {
+    let context_manifest_declaration = context_manifest_declaration();
+    let worker_manifest_declaration = worker_manifest_declaration();
+    let sandbox_profile_declaration = sandbox_profile_declaration();
+    let attempt_context_declaration = attempt_context_declaration();
+    let mut envelope = DispatchEnvelopeV5 {
+        dispatch_v4: dispatch_v4_for_attempt_with_manifest_digests(
+            2,
+            context_manifest_declaration.context_manifest_digest.clone(),
+            worker_manifest_declaration.worker_manifest_digest.clone(),
+            sandbox_profile_declaration.sandbox_profile_digest.clone(),
+        ),
+        context_manifest_declaration_event_ref: EventId::new(),
+        context_manifest_digest: context_manifest_declaration.context_manifest_digest,
+        worker_manifest_declaration_event_ref: EventId::new(),
+        worker_manifest_digest: worker_manifest_declaration.worker_manifest_digest,
+        sandbox_profile_declaration_event_ref: EventId::new(),
+        sandbox_profile_digest: sandbox_profile_declaration.sandbox_profile_digest,
+        attempt_context_declaration_event_ref: Some(EventId::new()),
+        attempt_context_digest: Some(attempt_context_declaration.attempt_context_digest),
+        envelope_digest: String::new(),
+    };
+    envelope.envelope_digest = dispatch_envelope_v5_digest(&envelope).expect("serialize v5 body");
+    envelope
+}
+
+fn dispatch_v5_first_attempt() -> DispatchEnvelopeV5 {
+    let context_manifest_declaration = context_manifest_declaration();
+    let worker_manifest_declaration = worker_manifest_declaration();
+    let sandbox_profile_declaration = sandbox_profile_declaration();
+    let mut envelope = DispatchEnvelopeV5 {
+        dispatch_v4: dispatch_v4_for_attempt_with_manifest_digests(
+            1,
+            context_manifest_declaration.context_manifest_digest.clone(),
+            worker_manifest_declaration.worker_manifest_digest.clone(),
+            sandbox_profile_declaration.sandbox_profile_digest.clone(),
+        ),
+        context_manifest_declaration_event_ref: EventId::new(),
+        context_manifest_digest: context_manifest_declaration.context_manifest_digest,
+        worker_manifest_declaration_event_ref: EventId::new(),
+        worker_manifest_digest: worker_manifest_declaration.worker_manifest_digest,
+        sandbox_profile_declaration_event_ref: EventId::new(),
+        sandbox_profile_digest: sandbox_profile_declaration.sandbox_profile_digest,
+        attempt_context_declaration_event_ref: None,
+        attempt_context_digest: None,
+        envelope_digest: String::new(),
+    };
+    envelope.envelope_digest = dispatch_envelope_v5_digest(&envelope).expect("serialize V5 body");
+    envelope
 }
 
 fn action_request() -> ActionRequestedV2 {
@@ -549,6 +794,30 @@ fn trust_spine_kind_strings_are_stable() {
         "dispatch_envelope_v3"
     );
     assert_eq!(
+        EventKind::DispatchEnvelopeV4.as_wire(),
+        "dispatch_envelope_v4"
+    );
+    assert_eq!(
+        EventKind::DispatchEnvelopeV5.as_wire(),
+        "dispatch_envelope_v5"
+    );
+    assert_eq!(
+        EventKind::ContextManifestDeclaredV1.as_wire(),
+        "context_manifest_declared_v1"
+    );
+    assert_eq!(
+        EventKind::WorkerManifestDeclaredV1.as_wire(),
+        "worker_manifest_declared_v1"
+    );
+    assert_eq!(
+        EventKind::SandboxProfileDeclaredV1.as_wire(),
+        "sandbox_profile_declared_v1"
+    );
+    assert_eq!(
+        EventKind::AttemptContextDeclaredV1.as_wire(),
+        "attempt_context_declared_v1"
+    );
+    assert_eq!(
         EventKind::ActionRequestedV2.as_wire(),
         "action_requested_v2"
     );
@@ -613,6 +882,249 @@ fn trust_spine_kind_strings_are_stable() {
 }
 
 #[test]
+fn manifest_content_digests_are_domain_separated_and_content_sensitive() {
+    let context = context_manifest();
+    let worker = worker_manifest();
+    let sandbox = sandbox_profile();
+    let attempt = attempt_context();
+
+    let context_digest =
+        context_manifest_content_v1_digest(&context).expect("serialize context manifest");
+    let worker_digest =
+        worker_manifest_content_v1_digest(&worker).expect("serialize worker manifest");
+    let sandbox_digest =
+        sandbox_profile_content_v1_digest(&sandbox).expect("serialize sandbox profile");
+    let attempt_digest =
+        attempt_context_content_v1_digest(&attempt).expect("serialize attempt context");
+
+    assert_eq!(
+        context_digest,
+        context_manifest_content_v1_digest(&context).expect("re-serialize context manifest")
+    );
+    assert!(context_digest.starts_with("sha256:"));
+    assert!(worker_digest.starts_with("sha256:"));
+    assert!(sandbox_digest.starts_with("sha256:"));
+    assert!(attempt_digest.starts_with("sha256:"));
+    assert_ne!(context_digest, worker_digest);
+    assert_ne!(context_digest, sandbox_digest);
+    assert_ne!(context_digest, attempt_digest);
+
+    let mut changed_context = context;
+    changed_context.entries[0].reference = "repo:changed.md".into();
+    assert_ne!(
+        context_manifest_content_v1_digest(&changed_context)
+            .expect("serialize changed context manifest"),
+        context_digest
+    );
+}
+
+#[test]
+fn manifest_declaration_payloads_reject_unknown_fields_at_the_event_serde_boundary() {
+    let cases = [
+        (
+            EventKind::ContextManifestDeclaredV1,
+            Payload::ContextManifestDeclaredV1(context_manifest_declaration()),
+            "ContextManifestDeclaredV1",
+            "context_manifest",
+        ),
+        (
+            EventKind::WorkerManifestDeclaredV1,
+            Payload::WorkerManifestDeclaredV1(worker_manifest_declaration()),
+            "WorkerManifestDeclaredV1",
+            "worker_manifest",
+        ),
+        (
+            EventKind::SandboxProfileDeclaredV1,
+            Payload::SandboxProfileDeclaredV1(sandbox_profile_declaration()),
+            "SandboxProfileDeclaredV1",
+            "sandbox_profile",
+        ),
+        (
+            EventKind::AttemptContextDeclaredV1,
+            Payload::AttemptContextDeclaredV1(attempt_context_declaration()),
+            "AttemptContextDeclaredV1",
+            "attempt_context",
+        ),
+    ];
+
+    for (kind, payload, variant, nested_field) in cases {
+        let event = Event {
+            id: EventId::new(),
+            run_id: RunId::new(),
+            parent_event_id: None,
+            schema_version: 1,
+            kind,
+            occurred_at: Utc::now(),
+            payload,
+        };
+        let mut encoded = serde_json::to_value(event).expect("serialize declaration event");
+        encoded["payload"][variant][nested_field]["unknown_field"] = json!(true);
+        assert!(
+            serde_json::from_value::<Event>(encoded).is_err(),
+            "{variant} must reject unknown nested manifest fields"
+        );
+    }
+
+    let mut v5 = serde_json::to_value(Payload::DispatchEnvelopeV5(dispatch_v5()))
+        .expect("serialize V5 dispatch");
+    v5["DispatchEnvelopeV5"]["unknown_authority"] = json!(true);
+    assert!(serde_json::from_value::<Payload>(v5).is_err());
+}
+
+#[test]
+fn manifest_declaration_digests_reject_mutated_content_at_canonicalization() {
+    let mut declaration = context_manifest_declaration();
+    declaration.context_manifest.entries[0].reference = "repo:replacement.md".into();
+    let error = canonicalize_payload(
+        "context_manifest_declared_v1",
+        1,
+        serde_json::to_value(Payload::ContextManifestDeclaredV1(declaration))
+            .expect("serialize altered context declaration"),
+    )
+    .expect_err("a declaration cannot reuse a digest after context changes");
+    assert!(
+        error.to_string().contains("context_manifest_digest"),
+        "unexpected declaration-digest error: {error}"
+    );
+}
+
+#[test]
+fn dispatch_envelope_v5_binds_v4_and_manifest_declarations_and_detects_tampering() {
+    let envelope = dispatch_v5();
+    assert_eq!(
+        dispatch_envelope_v5_digest(&envelope).expect("serialize V5 dispatch"),
+        envelope.envelope_digest
+    );
+    assert_canonical_variant!(
+        "dispatch_envelope_v5",
+        Payload::DispatchEnvelopeV5(envelope.clone()),
+        DispatchEnvelopeV5
+    );
+
+    let mut tampered = envelope;
+    tampered.worker_manifest_digest = DIGEST_C.into();
+    assert_ne!(
+        dispatch_envelope_v5_digest(&tampered).expect("serialize tampered V5 dispatch"),
+        tampered.envelope_digest
+    );
+    let error = canonicalize_payload(
+        "dispatch_envelope_v5",
+        1,
+        serde_json::to_value(Payload::DispatchEnvelopeV5(tampered))
+            .expect("serialize tampered V5 dispatch"),
+    )
+    .expect_err("V5 manifest digest tampering must fail canonicalization");
+    assert!(
+        error.to_string().contains("envelope_digest")
+            || error.to_string().contains("V5 manifest digests"),
+        "unexpected tamper error: {error}"
+    );
+
+    let mut nested_v4_tampering = dispatch_v5();
+    nested_v4_tampering.dispatch_v4.dispatch_v3.body.unit_id = "unit-rebound".into();
+    nested_v4_tampering.envelope_digest = dispatch_envelope_v5_digest(&nested_v4_tampering)
+        .expect("re-seal outer V5 after nested tampering");
+    let error = canonicalize_payload(
+        "dispatch_envelope_v5",
+        1,
+        serde_json::to_value(Payload::DispatchEnvelopeV5(nested_v4_tampering))
+            .expect("serialize nested V4 tampering"),
+    )
+    .expect_err("V5 cannot bless a tampered nested V4 envelope");
+    assert!(
+        error.to_string().contains("V4") || error.to_string().contains("envelope_digest"),
+        "unexpected nested V4 error: {error}"
+    );
+
+    let mut rebound_manifest = dispatch_v5();
+    rebound_manifest.context_manifest_digest = DIGEST_C.into();
+    rebound_manifest.envelope_digest = dispatch_envelope_v5_digest(&rebound_manifest)
+        .expect("re-seal outer V5 after manifest rebinding");
+    let error = canonicalize_payload(
+        "dispatch_envelope_v5",
+        1,
+        serde_json::to_value(Payload::DispatchEnvelopeV5(rebound_manifest))
+            .expect("serialize V5 manifest rebinding"),
+    )
+    .expect_err("V5 cannot rebind a manifest digest away from nested V4 authority");
+    assert!(
+        error.to_string().contains("V5 manifest digests"),
+        "unexpected V5 manifest-rebinding error: {error}"
+    );
+
+    let first_attempt = dispatch_v5_first_attempt();
+    assert!(first_attempt
+        .attempt_context_declaration_event_ref
+        .is_none());
+    assert!(first_attempt.attempt_context_digest.is_none());
+    assert_canonical_variant!(
+        "dispatch_envelope_v5",
+        Payload::DispatchEnvelopeV5(first_attempt),
+        DispatchEnvelopeV5
+    );
+
+    let mut retry_without_context = dispatch_v5();
+    retry_without_context.attempt_context_declaration_event_ref = None;
+    retry_without_context.attempt_context_digest = None;
+    retry_without_context.envelope_digest =
+        dispatch_envelope_v5_digest(&retry_without_context).expect("re-seal retry without context");
+    let error = canonicalize_payload(
+        "dispatch_envelope_v5",
+        1,
+        serde_json::to_value(Payload::DispatchEnvelopeV5(retry_without_context))
+            .expect("serialize retry without context"),
+    )
+    .expect_err("a retry V5 dispatch must bind an attempt context");
+    assert!(
+        error.to_string().contains("attempt context"),
+        "unexpected retry-context error: {error}"
+    );
+}
+
+#[test]
+fn dispatch_envelope_v5_keeps_legacy_v3_and_v4_payloads_readable() {
+    for payload in [
+        Payload::DispatchEnvelopeV3(dispatch_v3()),
+        Payload::DispatchEnvelopeV4(dispatch_v4()),
+    ] {
+        let encoded = serde_json::to_value(&payload).expect("serialize legacy dispatch");
+        assert_eq!(
+            serde_json::from_value::<Payload>(encoded).expect("read legacy dispatch"),
+            payload
+        );
+    }
+}
+
+#[test]
+fn raw_append_rejects_malformed_v5_authority_before_persisting() {
+    let store = SqliteStore::open_in_memory().expect("open in-memory ledger");
+    let run_id = RunId::new();
+    let mut dispatch = dispatch_v5();
+    dispatch.envelope_digest = DIGEST_A.into();
+    let event = Event {
+        id: EventId::new(),
+        run_id,
+        parent_event_id: None,
+        schema_version: Event::CURRENT_SCHEMA_VERSION,
+        kind: EventKind::DispatchEnvelopeV5,
+        occurred_at: Utc::now(),
+        payload: Payload::DispatchEnvelopeV5(dispatch),
+    };
+
+    assert!(
+        store.append(&event).is_err(),
+        "raw append must validate V5 authority before persisting it"
+    );
+    assert!(
+        store
+            .events_for_run(&run_id.to_string())
+            .expect("read rejected run")
+            .is_empty(),
+        "malformed V5 authority must not leave an unreadable raw row behind"
+    );
+}
+
+#[test]
 fn every_trust_spine_payload_canonicalizes_through_its_own_kind() {
     assert_canonical_variant!(
         "dispatch_envelope",
@@ -623,6 +1135,26 @@ fn every_trust_spine_payload_canonicalizes_through_its_own_kind() {
         "dispatch_envelope_v2",
         Payload::DispatchEnvelopeV2(dispatch_v2()),
         DispatchEnvelopeV2
+    );
+    assert_canonical_variant!(
+        "context_manifest_declared_v1",
+        Payload::ContextManifestDeclaredV1(context_manifest_declaration()),
+        ContextManifestDeclaredV1
+    );
+    assert_canonical_variant!(
+        "worker_manifest_declared_v1",
+        Payload::WorkerManifestDeclaredV1(worker_manifest_declaration()),
+        WorkerManifestDeclaredV1
+    );
+    assert_canonical_variant!(
+        "sandbox_profile_declared_v1",
+        Payload::SandboxProfileDeclaredV1(sandbox_profile_declaration()),
+        SandboxProfileDeclaredV1
+    );
+    assert_canonical_variant!(
+        "attempt_context_declared_v1",
+        Payload::AttemptContextDeclaredV1(attempt_context_declaration()),
+        AttemptContextDeclaredV1
     );
     assert_canonical_variant!(
         "model_action_authorized_v1",

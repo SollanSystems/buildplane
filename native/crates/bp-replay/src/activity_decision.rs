@@ -7,8 +7,8 @@
 //! here ever means "issue an action" or "retry an effect".
 
 use crate::state::{
-    ActionReplayState, ActionRequestReplayState, ActivityClaimReplayState,
-    ActivityResultReplayState, WorkflowInstanceV1, WorkflowPhaseV1,
+    has_complete_v5_manifest_dispatch_witnesses, ActionReplayState, ActionRequestReplayState,
+    ActivityClaimReplayState, ActivityResultReplayState, WorkflowInstanceV1, WorkflowPhaseV1,
 };
 use bp_ledger::payload::activity_claim::{ActivityClaimPurposeV1, ActivityResultOutcomeV1};
 use bp_ledger::payload::trust_spine::{
@@ -423,7 +423,7 @@ fn is_supported_governed_sealed_dispatch(workflow: &WorkflowInstanceV1) -> bool 
     };
     let graph_binding_is_valid = match dispatch.dispatch_version {
         3 => true,
-        4 => {
+        4 | 5 => {
             dispatch
                 .workflow_graph_digest
                 .as_deref()
@@ -435,7 +435,12 @@ fn is_supported_governed_sealed_dispatch(workflow: &WorkflowInstanceV1) -> bool 
         }
         _ => false,
     };
-    matches!(dispatch.dispatch_version, 3 | 4)
+    let manifest_binding_is_valid = match dispatch.dispatch_version {
+        3 | 4 => true,
+        5 => has_complete_v5_manifest_dispatch_witnesses(workflow),
+        _ => false,
+    };
+    matches!(dispatch.dispatch_version, 3 | 4 | 5)
         && dispatch.trust_tier == TrustTierV1::Governed
         && dispatch.commit_mode == CommitModeV1::Atomic
         && dispatch.action_evidence_version == Some(ActionEvidenceVersionV1::SealedV3)
@@ -465,6 +470,7 @@ fn is_supported_governed_sealed_dispatch(workflow: &WorkflowInstanceV1) -> bool 
         ])
         && dispatch_times
         && graph_binding_is_valid
+        && manifest_binding_is_valid
 }
 
 fn action_identity_matches_query(

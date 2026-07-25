@@ -684,6 +684,29 @@ describe("cli command surface", () => {
 		);
 	});
 
+	it("returns run help before initializing the legacy raw bundle for graph/raw help", async () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-cli-run-help-"));
+		const createOrchestrator = vi.fn();
+
+		const result = await runCliCapture(
+			root,
+			["run", "--graph", "graph-that-must-not-be-read.json", "--raw", "--help"],
+			{
+				createOrchestrator: createOrchestrator as NonNullable<
+					RunCliDependencies["createOrchestrator"]
+				>,
+			},
+		);
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stderr).toEqual([]);
+		expect(result.stdout.join("\n")).toContain(
+			"buildplane run --packet <path> [options]",
+		);
+		expect(createOrchestrator).not.toHaveBeenCalled();
+		expect(existsSync(join(root, ".buildplane"))).toBe(false);
+	});
+
 	it("shows replay help without requiring init or a run id", async () => {
 		const root = mkdtempSync(join(tmpdir(), "buildplane-cli-replay-help-"));
 

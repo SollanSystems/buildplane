@@ -13,25 +13,32 @@ use crate::payload::activity_claim::{
 use crate::payload::release_evaluation::validate_release_evaluation_evidence_v1;
 use crate::payload::trust_spine::{
     action_receipt_recorded_v2_digest, action_receipt_set_v1_digest, action_requested_v2_digest,
-    attempt_context_recorded_v1_digest, candidate_completion_recorded_v1_digest,
-    candidate_view_v1_digest, dispatch_envelope_v2_body_digest, dispatch_envelope_v3_body_digest,
-    dispatch_envelope_v4_digest, model_action_authorized_v1_digest,
-    model_action_authorized_v2_digest, model_action_intent_v1_digest,
-    promotion_execution_claimed_v1_digest, review_verdict_output_v1_digest,
-    workflow_graph_v1_digest, workflow_graph_v2_digest, ActionEvidenceVersionV1,
-    ActionReceiptOutcomeV2, ActionReceiptRecordedV2, ActionReceiptSetRecordedV1, ActionRequestedV2,
-    AttemptContextRecordedV1, CandidateCompletionRecordedV1, CandidateCreatedV1,
-    CandidateCreatedV2, CandidateViewV1, CommitModeV1, DispatchEnvelopeBodyV2, DispatchEnvelopeV3,
-    DispatchEnvelopeV4, ExecutionRoleV1, ModelActionAuthorizedV1, ModelActionAuthorizedV2,
-    ModelActionCandidateBindingV1, ModelActionIntentV1, ModelRequestEvidenceV1,
-    PromotionApprovalRequestedV1, PromotionDecisionRecordedV1, PromotionExecutionClaimedV1,
-    PromotionExecutionLeaseBindingV1, PromotionGitBindingV1, PromotionReconciliationResolvedV1,
-    PromotionResultOutcomeV1, PromotionResultRecordedV1, PromotionWorktreeSyncStateV1,
-    ReviewVerdictOutputV1, ReviewVerdictRecordedV2, TrustScopeEvidenceV1, TrustTierV1,
-    WorkflowCancellationCauseV1, WorkflowCancellationRequestedV1, WorkflowGraphDeclaredV1,
-    WorkflowGraphDeclaredV2, WorkflowGraphNodeV1, WorkflowGraphNodeV2, WorkflowTerminalOutcomeV1,
-    WorkflowTerminalV2, WorkflowTimerFiredV1, WorkflowTimerScheduledV1,
-    MODEL_REQUEST_EVIDENCE_V1_SCHEMA_VERSION, TRUST_SCOPE_EVIDENCE_V1_SCHEMA_VERSION,
+    attempt_context_content_v1_digest, attempt_context_recorded_v1_digest,
+    candidate_completion_recorded_v1_digest, candidate_view_v1_digest,
+    context_manifest_content_v1_digest, dispatch_envelope_v2_body_digest,
+    dispatch_envelope_v3_body_digest, dispatch_envelope_v4_digest, dispatch_envelope_v5_digest,
+    model_action_authorized_v1_digest, model_action_authorized_v2_digest,
+    model_action_intent_v1_digest, promotion_execution_claimed_v1_digest,
+    review_verdict_output_v1_digest, sandbox_profile_content_v1_digest,
+    worker_manifest_content_v1_digest, workflow_graph_v1_digest, workflow_graph_v2_digest,
+    ActionEvidenceVersionV1, ActionReceiptOutcomeV2, ActionReceiptRecordedV2,
+    ActionReceiptSetRecordedV1, ActionRequestedV2, AttemptContextContentV1,
+    AttemptContextDeclaredV1, AttemptContextRecordedV1, CandidateCompletionRecordedV1,
+    CandidateCreatedV1, CandidateCreatedV2, CandidateViewV1, CommitModeV1,
+    ContextManifestContentV1, ContextManifestDeclaredV1, DispatchEnvelopeBodyV2,
+    DispatchEnvelopeV3, DispatchEnvelopeV4, DispatchEnvelopeV5, ExecutionRoleV1,
+    ModelActionAuthorizedV1, ModelActionAuthorizedV2, ModelActionCandidateBindingV1,
+    ModelActionIntentV1, ModelRequestEvidenceV1, PromotionApprovalRequestedV1,
+    PromotionDecisionRecordedV1, PromotionExecutionClaimedV1, PromotionExecutionLeaseBindingV1,
+    PromotionGitBindingV1, PromotionReconciliationResolvedV1, PromotionResultOutcomeV1,
+    PromotionResultRecordedV1, PromotionWorktreeSyncStateV1, ReviewVerdictOutputV1,
+    ReviewVerdictRecordedV2, SandboxProfileContentV1, SandboxProfileDeclaredV1, SandboxRuntimeV1,
+    TrustScopeEvidenceV1, TrustTierV1, WorkerHarnessV1, WorkerManifestContentV1,
+    WorkerManifestDeclaredV1, WorkerProviderV1, WorkflowCancellationCauseV1,
+    WorkflowCancellationRequestedV1, WorkflowGraphDeclaredV1, WorkflowGraphDeclaredV2,
+    WorkflowGraphNodeV1, WorkflowGraphNodeV2, WorkflowTerminalOutcomeV1, WorkflowTerminalV2,
+    WorkflowTimerFiredV1, WorkflowTimerScheduledV1, MODEL_REQUEST_EVIDENCE_V1_SCHEMA_VERSION,
+    TRUST_SCOPE_EVIDENCE_V1_SCHEMA_VERSION,
 };
 use crate::payload::Payload;
 use crate::storage::cas::CanonicalCasRef;
@@ -209,6 +216,38 @@ fn validate_event_semantics(event: &Event) -> Result<()> {
                 );
             }
         }
+        Payload::ContextManifestDeclaredV1(declaration) => {
+            if declaration.run_id != event.run_id.to_string() {
+                return invalid(
+                    event.kind_str(),
+                    "context manifest declaration run_id must match the enclosing event run_id",
+                );
+            }
+        }
+        Payload::WorkerManifestDeclaredV1(declaration) => {
+            if declaration.run_id != event.run_id.to_string() {
+                return invalid(
+                    event.kind_str(),
+                    "worker manifest declaration run_id must match the enclosing event run_id",
+                );
+            }
+        }
+        Payload::SandboxProfileDeclaredV1(declaration) => {
+            if declaration.run_id != event.run_id.to_string() {
+                return invalid(
+                    event.kind_str(),
+                    "sandbox profile declaration run_id must match the enclosing event run_id",
+                );
+            }
+        }
+        Payload::AttemptContextDeclaredV1(declaration) => {
+            if declaration.run_id != event.run_id.to_string() {
+                return invalid(
+                    event.kind_str(),
+                    "attempt context declaration run_id must match the enclosing event run_id",
+                );
+            }
+        }
         _ => {}
     }
     match &event.payload {
@@ -268,6 +307,21 @@ fn validate_payload_semantics(kind: &str, payload: &Payload) -> Result<()> {
         }
         Payload::DispatchEnvelopeV4(envelope) => {
             validate_dispatch_envelope_v4_shape(kind, envelope)?;
+        }
+        Payload::DispatchEnvelopeV5(envelope) => {
+            validate_dispatch_envelope_v5_shape(kind, envelope)?;
+        }
+        Payload::ContextManifestDeclaredV1(declaration) => {
+            validate_context_manifest_declared_v1_shape(kind, declaration)?;
+        }
+        Payload::WorkerManifestDeclaredV1(declaration) => {
+            validate_worker_manifest_declared_v1_shape(kind, declaration)?;
+        }
+        Payload::SandboxProfileDeclaredV1(declaration) => {
+            validate_sandbox_profile_declared_v1_shape(kind, declaration)?;
+        }
+        Payload::AttemptContextDeclaredV1(declaration) => {
+            validate_attempt_context_declared_v1_shape(kind, declaration)?;
         }
         Payload::ActionRequestedV2(request) => {
             validate_action_request_shape(kind, request)?;
@@ -1339,6 +1393,468 @@ fn validate_dispatch_envelope_v4_shape(kind: &str, envelope: &DispatchEnvelopeV4
         return invalid(
             kind,
             "envelope_digest does not match the canonical V4 dispatch body digest",
+        );
+    }
+    Ok(())
+}
+
+/// Validate a manifest-bound V5 dispatch without resolving its declaration
+/// references. Reference order, signature, run lineage, and exact declaration
+/// payloads are tape-local facts and therefore belong to the replay reducer.
+/// Canonicalization nevertheless proves that this envelope is self-consistent,
+/// remains governed/atomic/sealed through V4, and cannot carry an ambiguous
+/// retry binding.
+fn validate_dispatch_envelope_v5_shape(kind: &str, envelope: &DispatchEnvelopeV5) -> Result<()> {
+    validate_dispatch_envelope_v4_shape(kind, &envelope.dispatch_v4)?;
+
+    let body = &envelope.dispatch_v4.dispatch_v3.body;
+    if envelope.context_manifest_digest != body.context_manifest_digest
+        || envelope.worker_manifest_digest != body.worker_manifest_digest
+        || envelope.sandbox_profile_digest != body.sandbox_profile_digest
+    {
+        return invalid(
+            kind,
+            "V5 manifest digests must equal the complete nested V4 dispatch authority",
+        );
+    }
+
+    validate_sha256_fields(
+        kind,
+        [
+            (
+                "context_manifest_digest",
+                envelope.context_manifest_digest.as_str(),
+            ),
+            (
+                "worker_manifest_digest",
+                envelope.worker_manifest_digest.as_str(),
+            ),
+            (
+                "sandbox_profile_digest",
+                envelope.sandbox_profile_digest.as_str(),
+            ),
+        ],
+    )?;
+
+    let attempt = envelope.dispatch_v4.dispatch_v3.body.attempt;
+    match (
+        envelope.attempt_context_declaration_event_ref.as_ref(),
+        envelope.attempt_context_digest.as_deref(),
+    ) {
+        (None, None) if attempt == 1 => {}
+        (Some(_), Some(digest)) if attempt > 1 => {
+            validate_sha256_fields(kind, [("attempt_context_digest", digest)])?;
+        }
+        (None, None) => {
+            return invalid(
+                kind,
+                "retry V5 dispatch requires attempt context declaration and digest",
+            );
+        }
+        _ => {
+            return invalid(
+                kind,
+                "attempt context declaration reference and digest must be present together",
+            );
+        }
+    }
+
+    let mut declaration_refs = BTreeSet::new();
+    declaration_refs.insert(envelope.context_manifest_declaration_event_ref.to_string());
+    declaration_refs.insert(envelope.worker_manifest_declaration_event_ref.to_string());
+    declaration_refs.insert(envelope.sandbox_profile_declaration_event_ref.to_string());
+    if let Some(reference) = envelope.attempt_context_declaration_event_ref.as_ref() {
+        declaration_refs.insert(reference.to_string());
+    }
+    let expected_ref_count = if attempt > 1 { 4 } else { 3 };
+    if declaration_refs.len() != expected_ref_count {
+        return invalid(
+            kind,
+            "V5 manifest declaration event references must be pairwise distinct",
+        );
+    }
+
+    let expected =
+        dispatch_envelope_v5_digest(envelope).map_err(|error| LedgerError::InvalidPayload {
+            kind: kind.to_string(),
+            reason: format!("could not canonicalize V5 dispatch body: {error}"),
+        })?;
+    if envelope.envelope_digest != expected {
+        return invalid(
+            kind,
+            "envelope_digest does not match the canonical V5 dispatch body digest",
+        );
+    }
+    Ok(())
+}
+
+fn validate_manifest_declaration_header(
+    kind: &str,
+    run_id: &str,
+    workflow_id: &str,
+    workflow_revision: &str,
+    unit_id: &str,
+    attempt: u32,
+    provenance_ref: &str,
+    idempotency_key: &str,
+    declared_at: &str,
+) -> Result<()> {
+    validate_non_empty_fields(
+        kind,
+        [
+            ("run_id", run_id),
+            ("workflow_id", workflow_id),
+            ("workflow_revision", workflow_revision),
+            ("unit_id", unit_id),
+            ("provenance_ref", provenance_ref),
+            ("idempotency_key", idempotency_key),
+        ],
+    )?;
+    if attempt == 0 {
+        return invalid(
+            kind,
+            "manifest declaration attempt must be greater than zero",
+        );
+    }
+    validate_rfc3339_utc(kind, "declared_at", declared_at)
+}
+
+fn validate_context_manifest_content_v1_shape(
+    kind: &str,
+    manifest: &ContextManifestContentV1,
+) -> Result<()> {
+    let mut references = BTreeSet::new();
+    let mut prior_reference: Option<String> = None;
+    for entry in &manifest.entries {
+        validate_non_empty_fields(
+            kind,
+            [
+                (
+                    "context_manifest.entries.reference",
+                    entry.reference.as_str(),
+                ),
+                (
+                    "context_manifest.entries.provenance_ref",
+                    entry.provenance_ref.as_str(),
+                ),
+            ],
+        )?;
+        validate_sha256_fields(
+            kind,
+            [("context_manifest.entries.digest", entry.digest.as_str())],
+        )?;
+        if prior_reference
+            .as_deref()
+            .is_some_and(|previous| previous >= entry.reference.as_str())
+        {
+            return invalid(
+                kind,
+                "context manifest entries must be in strict lexical reference order",
+            );
+        }
+        if !references.insert(entry.reference.as_str()) {
+            return invalid(kind, "context manifest entry references must be unique");
+        }
+        prior_reference = Some(entry.reference.clone());
+    }
+    Ok(())
+}
+
+fn validate_worker_manifest_content_v1_shape(
+    kind: &str,
+    manifest: &WorkerManifestContentV1,
+) -> Result<()> {
+    validate_non_empty_fields(kind, [("worker_manifest.model", manifest.model.as_str())])?;
+    validate_sha256_fields(
+        kind,
+        [
+            (
+                "worker_manifest.image_digest",
+                manifest.image_digest.as_str(),
+            ),
+            (
+                "worker_manifest.tool_manifest_digest",
+                manifest.tool_manifest_digest.as_str(),
+            ),
+            (
+                "worker_manifest.skill_manifest_digest",
+                manifest.skill_manifest_digest.as_str(),
+            ),
+            (
+                "worker_manifest.capability_bundle_digest",
+                manifest.capability_bundle_digest.as_str(),
+            ),
+        ],
+    )?;
+    match (manifest.provider, manifest.harness) {
+        (WorkerProviderV1::Anthropic, WorkerHarnessV1::AnthropicApiSdk)
+        | (WorkerProviderV1::OpenAi, WorkerHarnessV1::OpenAiApiSdk) => Ok(()),
+        _ => invalid(
+            kind,
+            "worker manifest provider and harness must use the matching governed API SDK",
+        ),
+    }
+}
+
+fn validate_sandbox_profile_content_v1_shape(
+    kind: &str,
+    profile: &SandboxProfileContentV1,
+) -> Result<()> {
+    if profile.runtime != SandboxRuntimeV1::RootlessOci
+        || !profile.rootless
+        || !profile.read_only_rootfs
+    {
+        return invalid(
+            kind,
+            "governed sandbox profile requires rootless OCI with a read-only root filesystem",
+        );
+    }
+    validate_sha256_fields(
+        kind,
+        [
+            (
+                "sandbox_profile.image_digest",
+                profile.image_digest.as_str(),
+            ),
+            (
+                "sandbox_profile.writable_overlay_digest",
+                profile.writable_overlay_digest.as_str(),
+            ),
+            (
+                "sandbox_profile.mount_manifest_digest",
+                profile.mount_manifest_digest.as_str(),
+            ),
+            (
+                "sandbox_profile.environment_manifest_digest",
+                profile.environment_manifest_digest.as_str(),
+            ),
+            (
+                "sandbox_profile.network_policy_digest",
+                profile.network_policy_digest.as_str(),
+            ),
+            (
+                "sandbox_profile.resource_policy_digest",
+                profile.resource_policy_digest.as_str(),
+            ),
+            (
+                "sandbox_profile.secret_handle_manifest_digest",
+                profile.secret_handle_manifest_digest.as_str(),
+            ),
+        ],
+    )
+}
+
+fn validate_attempt_context_content_v1_shape(
+    kind: &str,
+    context: &AttemptContextContentV1,
+) -> Result<()> {
+    if context.attempt <= 1 {
+        return invalid(
+            kind,
+            "attempt context content is only valid for a retry attempt greater than one",
+        );
+    }
+    if context.retry_feedback.is_empty() {
+        return invalid(
+            kind,
+            "attempt context requires at least one retry feedback artifact",
+        );
+    }
+
+    let mut feedback_refs = BTreeSet::new();
+    let mut prior_feedback_ref: Option<String> = None;
+    for feedback in &context.retry_feedback {
+        validate_non_empty_fields(
+            kind,
+            [(
+                "attempt_context.retry_feedback.feedback_ref",
+                feedback.feedback_ref.as_str(),
+            )],
+        )?;
+        validate_sha256_fields(
+            kind,
+            [(
+                "attempt_context.retry_feedback.feedback_digest",
+                feedback.feedback_digest.as_str(),
+            )],
+        )?;
+        if prior_feedback_ref
+            .as_deref()
+            .is_some_and(|previous| previous >= feedback.feedback_ref.as_str())
+        {
+            return invalid(
+                kind,
+                "attempt context retry feedback must be in strict lexical feedback_ref order",
+            );
+        }
+        if !feedback_refs.insert(feedback.feedback_ref.as_str()) {
+            return invalid(kind, "attempt context retry feedback refs must be unique");
+        }
+        prior_feedback_ref = Some(feedback.feedback_ref.clone());
+    }
+
+    let mut candidate_refs = BTreeSet::new();
+    let mut prior_candidate_ref: Option<String> = None;
+    for candidate in &context.prior_candidates {
+        if !is_canonical_buildplane_candidate_ref(&candidate.candidate_ref) {
+            return invalid(
+                kind,
+                "attempt context prior candidate_ref must be a canonical Buildplane candidate ref",
+            );
+        }
+        validate_sha256_fields(
+            kind,
+            [(
+                "attempt_context.prior_candidates.candidate_digest",
+                candidate.candidate_digest.as_str(),
+            )],
+        )?;
+        if prior_candidate_ref
+            .as_deref()
+            .is_some_and(|previous| previous >= candidate.candidate_ref.as_str())
+        {
+            return invalid(
+                kind,
+                "attempt context prior candidates must be in strict lexical candidate_ref order",
+            );
+        }
+        if !candidate_refs.insert(candidate.candidate_ref.as_str()) {
+            return invalid(kind, "attempt context prior candidate refs must be unique");
+        }
+        prior_candidate_ref = Some(candidate.candidate_ref.clone());
+    }
+    Ok(())
+}
+
+fn validate_context_manifest_declared_v1_shape(
+    kind: &str,
+    declaration: &ContextManifestDeclaredV1,
+) -> Result<()> {
+    validate_manifest_declaration_header(
+        kind,
+        &declaration.run_id,
+        &declaration.workflow_id,
+        &declaration.workflow_revision,
+        &declaration.unit_id,
+        declaration.attempt,
+        &declaration.provenance_ref,
+        &declaration.idempotency_key,
+        &declaration.declared_at,
+    )?;
+    validate_context_manifest_content_v1_shape(kind, &declaration.context_manifest)?;
+    let expected =
+        context_manifest_content_v1_digest(&declaration.context_manifest).map_err(|error| {
+            LedgerError::InvalidPayload {
+                kind: kind.to_string(),
+                reason: format!("could not canonicalize context manifest content: {error}"),
+            }
+        })?;
+    if declaration.context_manifest_digest != expected {
+        return invalid(
+            kind,
+            "context_manifest_digest does not match the canonical context manifest content",
+        );
+    }
+    Ok(())
+}
+
+fn validate_worker_manifest_declared_v1_shape(
+    kind: &str,
+    declaration: &WorkerManifestDeclaredV1,
+) -> Result<()> {
+    validate_manifest_declaration_header(
+        kind,
+        &declaration.run_id,
+        &declaration.workflow_id,
+        &declaration.workflow_revision,
+        &declaration.unit_id,
+        declaration.attempt,
+        &declaration.provenance_ref,
+        &declaration.idempotency_key,
+        &declaration.declared_at,
+    )?;
+    validate_worker_manifest_content_v1_shape(kind, &declaration.worker_manifest)?;
+    let expected =
+        worker_manifest_content_v1_digest(&declaration.worker_manifest).map_err(|error| {
+            LedgerError::InvalidPayload {
+                kind: kind.to_string(),
+                reason: format!("could not canonicalize worker manifest content: {error}"),
+            }
+        })?;
+    if declaration.worker_manifest_digest != expected {
+        return invalid(
+            kind,
+            "worker_manifest_digest does not match the canonical worker manifest content",
+        );
+    }
+    Ok(())
+}
+
+fn validate_sandbox_profile_declared_v1_shape(
+    kind: &str,
+    declaration: &SandboxProfileDeclaredV1,
+) -> Result<()> {
+    validate_manifest_declaration_header(
+        kind,
+        &declaration.run_id,
+        &declaration.workflow_id,
+        &declaration.workflow_revision,
+        &declaration.unit_id,
+        declaration.attempt,
+        &declaration.provenance_ref,
+        &declaration.idempotency_key,
+        &declaration.declared_at,
+    )?;
+    validate_sandbox_profile_content_v1_shape(kind, &declaration.sandbox_profile)?;
+    let expected =
+        sandbox_profile_content_v1_digest(&declaration.sandbox_profile).map_err(|error| {
+            LedgerError::InvalidPayload {
+                kind: kind.to_string(),
+                reason: format!("could not canonicalize sandbox profile content: {error}"),
+            }
+        })?;
+    if declaration.sandbox_profile_digest != expected {
+        return invalid(
+            kind,
+            "sandbox_profile_digest does not match the canonical sandbox profile content",
+        );
+    }
+    Ok(())
+}
+
+fn validate_attempt_context_declared_v1_shape(
+    kind: &str,
+    declaration: &AttemptContextDeclaredV1,
+) -> Result<()> {
+    validate_manifest_declaration_header(
+        kind,
+        &declaration.run_id,
+        &declaration.workflow_id,
+        &declaration.workflow_revision,
+        &declaration.unit_id,
+        declaration.attempt,
+        &declaration.provenance_ref,
+        &declaration.idempotency_key,
+        &declaration.declared_at,
+    )?;
+    validate_attempt_context_content_v1_shape(kind, &declaration.attempt_context)?;
+    if declaration.attempt_context.attempt != declaration.attempt {
+        return invalid(
+            kind,
+            "attempt context content attempt must equal the enclosing declaration attempt",
+        );
+    }
+    let expected =
+        attempt_context_content_v1_digest(&declaration.attempt_context).map_err(|error| {
+            LedgerError::InvalidPayload {
+                kind: kind.to_string(),
+                reason: format!("could not canonicalize attempt context content: {error}"),
+            }
+        })?;
+    if declaration.attempt_context_digest != expected {
+        return invalid(
+            kind,
+            "attempt_context_digest does not match the canonical attempt context content",
         );
     }
     Ok(())
@@ -2772,6 +3288,11 @@ fn payload_variant_name(payload: &Payload) -> &'static str {
         Payload::DispatchEnvelopeV2(_) => "DispatchEnvelopeV2",
         Payload::DispatchEnvelopeV3(_) => "DispatchEnvelopeV3",
         Payload::DispatchEnvelopeV4(_) => "DispatchEnvelopeV4",
+        Payload::DispatchEnvelopeV5(_) => "DispatchEnvelopeV5",
+        Payload::ContextManifestDeclaredV1(_) => "ContextManifestDeclaredV1",
+        Payload::WorkerManifestDeclaredV1(_) => "WorkerManifestDeclaredV1",
+        Payload::SandboxProfileDeclaredV1(_) => "SandboxProfileDeclaredV1",
+        Payload::AttemptContextDeclaredV1(_) => "AttemptContextDeclaredV1",
         Payload::WorkflowGraphDeclaredV1(_) => "WorkflowGraphDeclaredV1",
         Payload::WorkflowGraphDeclaredV2(_) => "WorkflowGraphDeclaredV2",
         Payload::ActionRequestedV2(_) => "ActionRequestedV2",
@@ -2834,6 +3355,11 @@ fn kind_to_variant(kind: &str) -> Result<&'static str> {
         "dispatch_envelope_v2" => "DispatchEnvelopeV2",
         "dispatch_envelope_v3" => "DispatchEnvelopeV3",
         "dispatch_envelope_v4" => "DispatchEnvelopeV4",
+        "dispatch_envelope_v5" => "DispatchEnvelopeV5",
+        "context_manifest_declared_v1" => "ContextManifestDeclaredV1",
+        "worker_manifest_declared_v1" => "WorkerManifestDeclaredV1",
+        "sandbox_profile_declared_v1" => "SandboxProfileDeclaredV1",
+        "attempt_context_declared_v1" => "AttemptContextDeclaredV1",
         "workflow_graph_declared_v1" => "WorkflowGraphDeclaredV1",
         "workflow_graph_declared_v2" => "WorkflowGraphDeclaredV2",
         "action_requested_v2" => "ActionRequestedV2",

@@ -242,6 +242,11 @@ fn reject_caller_supplied_authority_event(event: &Event, signed_append: bool) ->
             | EventKind::DispatchEnvelopeV2
             | EventKind::DispatchEnvelopeV3
             | EventKind::DispatchEnvelopeV4
+            | EventKind::DispatchEnvelopeV5
+            | EventKind::ContextManifestDeclaredV1
+            | EventKind::WorkerManifestDeclaredV1
+            | EventKind::SandboxProfileDeclaredV1
+            | EventKind::AttemptContextDeclaredV1
             | EventKind::WorkflowGraphDeclaredV1
             | EventKind::WorkflowGraphDeclaredV2
             | EventKind::ActionRequestedV2

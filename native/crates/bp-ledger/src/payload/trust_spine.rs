@@ -283,6 +283,360 @@ pub fn dispatch_envelope_v4_digest(
     domain_separated_digest(DISPATCH_ENVELOPE_V4_DIGEST_DOMAIN, &material)
 }
 
+/// Closed kind vocabulary for one injected context entry. Context is an
+/// authority input, so callers cannot introduce a new kind and rely on an
+/// older reducer to interpret it permissively.
+#[typeshare]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextManifestEntryKindV1 {
+    RepositoryFile,
+    Memory,
+    Plan,
+    Policy,
+    Skill,
+    Document,
+    Artifact,
+    External,
+}
+
+/// Trust provenance assigned to one injected context entry before admission.
+#[typeshare]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextTrustLevelV1 {
+    Trusted,
+    Verified,
+    Untrusted,
+    Quarantined,
+}
+
+/// Taint classification carried with an injected context entry. Taint is
+/// evidence, not a grant of authority; admission and policy choose whether a
+/// given taint may reach a worker.
+#[typeshare]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextTaintV1 {
+    Clean,
+    External,
+    Retrieved,
+    Remote,
+    Skill,
+}
+
+/// One content-addressed input made available to a governed worker. The
+/// reference is deliberately separate from the digest so tape replay can
+/// prove both the source handle and exact immutable bytes.
+#[typeshare]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextManifestEntryV1 {
+    pub kind: ContextManifestEntryKindV1,
+    pub reference: String,
+    pub digest: String,
+    pub provenance_ref: String,
+    pub trust: ContextTrustLevelV1,
+    pub taint: ContextTaintV1,
+}
+
+/// Immutable, content-addressed set of all context injected into one worker
+/// attempt. The enclosing declaration event supplies run/unit lineage and
+/// delivery metadata; this type contains only semantic context material.
+#[typeshare]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextManifestContentV1 {
+    pub entries: Vec<ContextManifestEntryV1>,
+}
+
+/// Provider represented in a governed API-worker manifest. Ambient CLI hosts
+/// are intentionally absent from this closed GA vocabulary.
+#[typeshare]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerProviderV1 {
+    Anthropic,
+    OpenAi,
+}
+
+/// Credential-free worker harness selected by an immutable worker manifest.
+#[typeshare]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerHarnessV1 {
+    AnthropicApiSdk,
+    OpenAiApiSdk,
+}
+
+/// Immutable identity of the exact governed worker runtime. The signed role is
+/// carried here as an authority input in addition to the nested dispatch role,
+/// allowing admission to reject mismatches before work begins.
+#[typeshare]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerManifestContentV1 {
+    pub provider: WorkerProviderV1,
+    pub model: String,
+    pub harness: WorkerHarnessV1,
+    pub image_digest: String,
+    pub tool_manifest_digest: String,
+    pub skill_manifest_digest: String,
+    pub capability_bundle_digest: String,
+    pub execution_role: ExecutionRoleV1,
+}
+
+/// Runtime family required by a governed sandbox profile. Rootless OCI is the
+/// only currently admitted governed surface; a future expansion requires an
+/// additive enum revision rather than accepting a free-form runtime string.
+#[typeshare]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxRuntimeV1 {
+    RootlessOci,
+}
+
+/// Immutable sandbox policy for a worker attempt. All potentially mutable
+/// operational inputs are represented as content digests rather than ambient
+/// host configuration.
+#[typeshare]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SandboxProfileContentV1 {
+    pub runtime: SandboxRuntimeV1,
+    pub rootless: bool,
+    pub image_digest: String,
+    pub read_only_rootfs: bool,
+    pub writable_overlay_digest: String,
+    pub mount_manifest_digest: String,
+    pub environment_manifest_digest: String,
+    pub network_policy_digest: String,
+    pub resource_policy_digest: String,
+    pub secret_handle_manifest_digest: String,
+}
+
+/// One immutable retry-feedback artifact included in an attempt context.
+#[typeshare]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AttemptFeedbackV1 {
+    pub feedback_ref: String,
+    pub feedback_digest: String,
+}
+
+/// One prior immutable candidate referenced by a retry. This prevents worker
+/// narratives from becoming retry input without an independently addressable
+/// candidate artifact.
+#[typeshare]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PriorCandidateRefV1 {
+    pub candidate_ref: String,
+    pub candidate_digest: String,
+}
+
+/// Immutable retry context. It is absent only from a first attempt; a later
+/// V5 dispatch binds its declaration event and detached digest exactly.
+#[typeshare]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AttemptContextContentV1 {
+    pub attempt: u32,
+    pub retry_feedback: Vec<AttemptFeedbackV1>,
+    pub prior_candidates: Vec<PriorCandidateRefV1>,
+}
+
+/// `context_manifest_declared_v1` payload — a signed declaration of the
+/// complete immutable context supplied to one workflow unit attempt.
+#[typeshare]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextManifestDeclaredV1 {
+    pub run_id: String,
+    pub workflow_id: String,
+    pub workflow_revision: String,
+    pub unit_id: String,
+    pub attempt: u32,
+    pub provenance_ref: String,
+    pub context_manifest: ContextManifestContentV1,
+    pub context_manifest_digest: String,
+    pub idempotency_key: String,
+    /// RFC3339 UTC timestamp.
+    pub declared_at: String,
+}
+
+/// `worker_manifest_declared_v1` payload — the immutable API worker identity
+/// selected for one workflow unit attempt.
+#[typeshare]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerManifestDeclaredV1 {
+    pub run_id: String,
+    pub workflow_id: String,
+    pub workflow_revision: String,
+    pub unit_id: String,
+    pub attempt: u32,
+    pub provenance_ref: String,
+    pub worker_manifest: WorkerManifestContentV1,
+    pub worker_manifest_digest: String,
+    pub idempotency_key: String,
+    /// RFC3339 UTC timestamp.
+    pub declared_at: String,
+}
+
+/// `sandbox_profile_declared_v1` payload — the immutable rootless OCI profile
+/// for one workflow unit attempt.
+#[typeshare]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SandboxProfileDeclaredV1 {
+    pub run_id: String,
+    pub workflow_id: String,
+    pub workflow_revision: String,
+    pub unit_id: String,
+    pub attempt: u32,
+    pub provenance_ref: String,
+    pub sandbox_profile: SandboxProfileContentV1,
+    pub sandbox_profile_digest: String,
+    pub idempotency_key: String,
+    /// RFC3339 UTC timestamp.
+    pub declared_at: String,
+}
+
+/// `attempt_context_declared_v1` payload — the immutable retry feedback and
+/// candidate lineage admitted for one non-first workflow unit attempt.
+#[typeshare]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AttemptContextDeclaredV1 {
+    pub run_id: String,
+    pub workflow_id: String,
+    pub workflow_revision: String,
+    pub unit_id: String,
+    pub attempt: u32,
+    pub provenance_ref: String,
+    pub attempt_context: AttemptContextContentV1,
+    pub attempt_context_digest: String,
+    pub idempotency_key: String,
+    /// RFC3339 UTC timestamp.
+    pub declared_at: String,
+}
+
+/// Domain separator for [`context_manifest_content_v1_digest`].
+pub const CONTEXT_MANIFEST_CONTENT_V1_DIGEST_DOMAIN: &[u8] =
+    b"buildplane.context-manifest-content.v1\0";
+
+/// Domain separator for [`worker_manifest_content_v1_digest`].
+pub const WORKER_MANIFEST_CONTENT_V1_DIGEST_DOMAIN: &[u8] =
+    b"buildplane.worker-manifest-content.v1\0";
+
+/// Domain separator for [`sandbox_profile_content_v1_digest`].
+pub const SANDBOX_PROFILE_CONTENT_V1_DIGEST_DOMAIN: &[u8] =
+    b"buildplane.sandbox-profile-content.v1\0";
+
+/// Domain separator for [`attempt_context_content_v1_digest`].
+pub const ATTEMPT_CONTEXT_CONTENT_V1_DIGEST_DOMAIN: &[u8] =
+    b"buildplane.attempt-context-content.v1\0";
+
+/// Return the canonical digest of a closed context manifest.
+pub fn context_manifest_content_v1_digest(
+    manifest: &ContextManifestContentV1,
+) -> Result<String, serde_json::Error> {
+    domain_separated_digest(CONTEXT_MANIFEST_CONTENT_V1_DIGEST_DOMAIN, manifest)
+}
+
+/// Return the canonical digest of a closed worker manifest.
+pub fn worker_manifest_content_v1_digest(
+    manifest: &WorkerManifestContentV1,
+) -> Result<String, serde_json::Error> {
+    domain_separated_digest(WORKER_MANIFEST_CONTENT_V1_DIGEST_DOMAIN, manifest)
+}
+
+/// Return the canonical digest of a closed rootless OCI sandbox profile.
+pub fn sandbox_profile_content_v1_digest(
+    profile: &SandboxProfileContentV1,
+) -> Result<String, serde_json::Error> {
+    domain_separated_digest(SANDBOX_PROFILE_CONTENT_V1_DIGEST_DOMAIN, profile)
+}
+
+/// Return the canonical digest of closed retry feedback and prior-candidate
+/// lineage for a non-first attempt.
+pub fn attempt_context_content_v1_digest(
+    context: &AttemptContextContentV1,
+) -> Result<String, serde_json::Error> {
+    domain_separated_digest(ATTEMPT_CONTEXT_CONTENT_V1_DIGEST_DOMAIN, context)
+}
+
+/// `dispatch_envelope_v5` payload — an additive manifest-bound governed
+/// dispatch. V5 keeps the complete V4 envelope nested and binds the exact tape
+/// identities and content digests of context, worker, sandbox, and (after the
+/// first attempt) retry declarations. Nothing is copied field-by-field from a
+/// lower envelope revision, preventing authority fields from being lost.
+#[typeshare]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DispatchEnvelopeV5 {
+    pub dispatch_v4: DispatchEnvelopeV4,
+    pub context_manifest_declaration_event_ref: EventId,
+    pub context_manifest_digest: String,
+    pub worker_manifest_declaration_event_ref: EventId,
+    pub worker_manifest_digest: String,
+    pub sandbox_profile_declaration_event_ref: EventId,
+    pub sandbox_profile_digest: String,
+    /// Absent only when `dispatch_v4.dispatch_v3.body.attempt == 1`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_context_declaration_event_ref: Option<EventId>,
+    /// Detached digest matching [`Self::attempt_context_declaration_event_ref`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_context_digest: Option<String>,
+    /// Detached V5 digest over the complete nested V4 material and every
+    /// declaration binding above.
+    pub envelope_digest: String,
+}
+
+/// Domain separator for [`dispatch_envelope_v5_digest`].
+pub const DISPATCH_ENVELOPE_V5_DIGEST_DOMAIN: &[u8] = b"buildplane.dispatch-envelope.v5\0";
+
+#[derive(Serialize)]
+struct DispatchEnvelopeV5DigestMaterial<'a> {
+    dispatch_v4: &'a DispatchEnvelopeV4,
+    context_manifest_declaration_event_ref: &'a EventId,
+    context_manifest_digest: &'a str,
+    worker_manifest_declaration_event_ref: &'a EventId,
+    worker_manifest_digest: &'a str,
+    sandbox_profile_declaration_event_ref: &'a EventId,
+    sandbox_profile_digest: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    attempt_context_declaration_event_ref: Option<&'a EventId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    attempt_context_digest: Option<&'a str>,
+}
+
+/// Return the deterministic detached digest for a manifest-bound V5 dispatch.
+///
+/// The full V4 envelope is intentionally nested, including its own detached
+/// digest. Consequently V5 binds the exact lower-revision authority bytes plus
+/// every declaration event identity and content digest, rather than a
+/// reconstructed subset.
+pub fn dispatch_envelope_v5_digest(
+    envelope: &DispatchEnvelopeV5,
+) -> Result<String, serde_json::Error> {
+    let material = DispatchEnvelopeV5DigestMaterial {
+        dispatch_v4: &envelope.dispatch_v4,
+        context_manifest_declaration_event_ref: &envelope.context_manifest_declaration_event_ref,
+        context_manifest_digest: &envelope.context_manifest_digest,
+        worker_manifest_declaration_event_ref: &envelope.worker_manifest_declaration_event_ref,
+        worker_manifest_digest: &envelope.worker_manifest_digest,
+        sandbox_profile_declaration_event_ref: &envelope.sandbox_profile_declaration_event_ref,
+        sandbox_profile_digest: &envelope.sandbox_profile_digest,
+        attempt_context_declaration_event_ref: envelope
+            .attempt_context_declaration_event_ref
+            .as_ref(),
+        attempt_context_digest: envelope.attempt_context_digest.as_deref(),
+    };
+    domain_separated_digest(DISPATCH_ENVELOPE_V5_DIGEST_DOMAIN, &material)
+}
+
 /// One node in a declared workflow graph. Both this list and each node's
 /// `depends_on` list are ordered authority bytes: canonicalization rejects any
 /// duplicate or non-lexical order rather than normalizing caller input.

@@ -176,6 +176,187 @@ export interface DispatchEnvelopeV4 {
 	readonly envelopeDigest: string;
 }
 
+/**
+ * Closed V5 dispatch authority. V5 nests the complete graph-bound V4
+ * envelope, then pins every runtime manifest to both its content digest and
+ * immutable declaration event. This camelCase kernel-contract projection is
+ * canonicalized to the native snake_case material; it is not itself a raw
+ * ledger-wire type because nested legacy V4 remains a TypeScript adapter.
+ * The V5 projection itself has no `schemaVersion` field because the ledger
+ * event kind carries the version.
+ */
+export interface DispatchEnvelopeV5 {
+	readonly dispatchV4: DispatchEnvelopeV4;
+	readonly contextManifestDeclarationEventRef: string;
+	readonly contextManifestDigest: string;
+	readonly workerManifestDeclarationEventRef: string;
+	readonly workerManifestDigest: string;
+	readonly sandboxProfileDeclarationEventRef: string;
+	readonly sandboxProfileDigest: string;
+	readonly attemptContextDeclarationEventRef?: string;
+	readonly attemptContextDigest?: string;
+	readonly envelopeDigest: string;
+}
+
+/** Closed source vocabulary for one injected context entry. */
+export type ContextManifestEntryKindV1 =
+	| "repository_file"
+	| "memory"
+	| "plan"
+	| "policy"
+	| "skill"
+	| "document"
+	| "artifact"
+	| "external";
+
+/** Provenance trust assigned before an entry reaches a governed worker. */
+export type ContextTrustLevelV1 =
+	| "trusted"
+	| "verified"
+	| "untrusted"
+	| "quarantined";
+
+/** Taint classification that survives context selection and rendering. */
+export type ContextTaintV1 =
+	| "clean"
+	| "external"
+	| "retrieved"
+	| "remote"
+	| "skill";
+
+/** One immutable, provenance-labelled context input. */
+export interface ContextManifestEntryV1 {
+	readonly kind: ContextManifestEntryKindV1;
+	readonly reference: string;
+	readonly digest: string;
+	readonly provenanceRef: string;
+	readonly trust: ContextTrustLevelV1;
+	readonly taint: ContextTaintV1;
+}
+
+/** Exact content addressed by `contextManifestDigest`. */
+export interface ContextManifestContentV1 {
+	readonly entries: readonly ContextManifestEntryV1[];
+}
+
+/** Signed tape declaration of a content-addressed worker context. */
+export interface ContextManifestDeclaredV1 {
+	readonly runId: string;
+	readonly workflowId: string;
+	readonly workflowRevision: string;
+	readonly unitId: string;
+	readonly attempt: number;
+	readonly provenanceRef: string;
+	readonly contextManifest: ContextManifestContentV1;
+	readonly contextManifestDigest: string;
+	readonly idempotencyKey: string;
+	readonly declaredAt: string;
+}
+
+/** Provider APIs admitted to the governed typed-tool worker lane. */
+export type WorkerProviderV1 = "anthropic" | "open_ai";
+
+/** Provider-specific API SDK harness selected by the immutable manifest. */
+export type WorkerHarnessV1 = "anthropic_api_sdk" | "open_ai_api_sdk";
+
+/** Exact content addressed by `workerManifestDigest`. */
+export interface WorkerManifestContentV1 {
+	readonly provider: WorkerProviderV1;
+	readonly model: string;
+	readonly harness: WorkerHarnessV1;
+	readonly imageDigest: string;
+	readonly toolManifestDigest: string;
+	readonly skillManifestDigest: string;
+	readonly capabilityBundleDigest: string;
+	readonly executionRole: ExecutionRoleV1;
+}
+
+/** Signed tape declaration of an immutable API worker identity. */
+export interface WorkerManifestDeclaredV1 {
+	readonly runId: string;
+	readonly workflowId: string;
+	readonly workflowRevision: string;
+	readonly unitId: string;
+	readonly attempt: number;
+	readonly provenanceRef: string;
+	readonly workerManifest: WorkerManifestContentV1;
+	readonly workerManifestDigest: string;
+	readonly idempotencyKey: string;
+	readonly declaredAt: string;
+}
+
+/** The sole governed sandbox runtime in V1. */
+export type SandboxRuntimeV1 = "rootless_oci";
+
+/** Exact content addressed by `sandboxProfileDigest`. */
+export interface SandboxProfileContentV1 {
+	readonly runtime: SandboxRuntimeV1;
+	readonly rootless: boolean;
+	readonly imageDigest: string;
+	readonly readOnlyRootfs: boolean;
+	readonly writableOverlayDigest: string;
+	readonly mountManifestDigest: string;
+	readonly environmentManifestDigest: string;
+	readonly networkPolicyDigest: string;
+	readonly resourcePolicyDigest: string;
+	readonly secretHandleManifestDigest: string;
+}
+
+/** Signed tape declaration of a rootless OCI sandbox policy. */
+export interface SandboxProfileDeclaredV1 {
+	readonly runId: string;
+	readonly workflowId: string;
+	readonly workflowRevision: string;
+	readonly unitId: string;
+	readonly attempt: number;
+	readonly provenanceRef: string;
+	readonly sandboxProfile: SandboxProfileContentV1;
+	readonly sandboxProfileDigest: string;
+	readonly idempotencyKey: string;
+	readonly declaredAt: string;
+}
+
+/** One content-addressed retry-feedback object. */
+export interface AttemptFeedbackV1 {
+	readonly feedbackRef: string;
+	readonly feedbackDigest: string;
+}
+
+/** One immutable candidate supplied to a retry attempt. */
+export interface PriorCandidateRefV1 {
+	readonly candidateRef: string;
+	readonly candidateDigest: string;
+}
+
+/** Exact content addressed by `attemptContextDigest`. */
+export interface AttemptContextContentV1 {
+	readonly attempt: number;
+	readonly retryFeedback: readonly AttemptFeedbackV1[];
+	readonly priorCandidates: readonly PriorCandidateRefV1[];
+}
+
+/** Signed tape declaration of retry evidence and prior candidates. */
+export interface AttemptContextDeclaredV1 {
+	readonly runId: string;
+	readonly workflowId: string;
+	readonly workflowRevision: string;
+	readonly unitId: string;
+	readonly attempt: number;
+	readonly provenanceRef: string;
+	readonly attemptContext: AttemptContextContentV1;
+	readonly attemptContextDigest: string;
+	readonly idempotencyKey: string;
+	readonly declaredAt: string;
+}
+
+/** Exact declarations needed for local V5 cross-binding checks. */
+export interface DispatchEnvelopeV5ManifestDeclarationsV1 {
+	readonly context: ContextManifestDeclaredV1;
+	readonly worker: WorkerManifestDeclaredV1;
+	readonly sandbox: SandboxProfileDeclaredV1;
+	readonly attemptContext?: AttemptContextDeclaredV1;
+}
+
 /** One canonically ordered, packet-bound node in a V2 workflow topology. */
 export interface WorkflowGraphNodeV2 {
 	readonly unitId: string;
@@ -856,6 +1037,19 @@ const DISPATCH_ENVELOPE_V4_FIELDS = [
 	"envelopeDigest",
 ] as const;
 
+const DISPATCH_ENVELOPE_V5_FIELDS = [
+	"dispatchV4",
+	"contextManifestDeclarationEventRef",
+	"contextManifestDigest",
+	"workerManifestDeclarationEventRef",
+	"workerManifestDigest",
+	"sandboxProfileDeclarationEventRef",
+	"sandboxProfileDigest",
+	"attemptContextDeclarationEventRef",
+	"attemptContextDigest",
+	"envelopeDigest",
+] as const;
+
 const WORKFLOW_GRAPH_DECLARED_V2_FIELDS = [
 	"runId",
 	"workflowId",
@@ -1275,6 +1469,145 @@ const SANDBOX_PROFILE_FIELDS = [
 	"profileId",
 	"profileDigest",
 ] as const;
+const CONTEXT_MANIFEST_ENTRY_V1_FIELDS = [
+	"kind",
+	"reference",
+	"digest",
+	"provenanceRef",
+	"trust",
+	"taint",
+] as const;
+const CONTEXT_MANIFEST_CONTENT_V1_FIELDS = ["entries"] as const;
+const CONTEXT_MANIFEST_DECLARED_V1_FIELDS = [
+	"runId",
+	"workflowId",
+	"workflowRevision",
+	"unitId",
+	"attempt",
+	"provenanceRef",
+	"contextManifest",
+	"contextManifestDigest",
+	"idempotencyKey",
+	"declaredAt",
+] as const;
+const CONTEXT_MANIFEST_DECLARED_V1_DRAFT_FIELDS = [
+	"runId",
+	"workflowId",
+	"workflowRevision",
+	"unitId",
+	"attempt",
+	"provenanceRef",
+	"contextManifest",
+	"declaredAt",
+	"idempotencyKey",
+] as const;
+const WORKER_MANIFEST_CONTENT_V1_FIELDS = [
+	"provider",
+	"model",
+	"harness",
+	"imageDigest",
+	"toolManifestDigest",
+	"skillManifestDigest",
+	"capabilityBundleDigest",
+	"executionRole",
+] as const;
+const WORKER_MANIFEST_DECLARED_V1_FIELDS = [
+	"runId",
+	"workflowId",
+	"workflowRevision",
+	"unitId",
+	"attempt",
+	"provenanceRef",
+	"workerManifest",
+	"workerManifestDigest",
+	"idempotencyKey",
+	"declaredAt",
+] as const;
+const WORKER_MANIFEST_DECLARED_V1_DRAFT_FIELDS = [
+	"runId",
+	"workflowId",
+	"workflowRevision",
+	"unitId",
+	"attempt",
+	"provenanceRef",
+	"workerManifest",
+	"idempotencyKey",
+	"declaredAt",
+] as const;
+const SANDBOX_PROFILE_CONTENT_V1_FIELDS = [
+	"runtime",
+	"rootless",
+	"imageDigest",
+	"readOnlyRootfs",
+	"writableOverlayDigest",
+	"mountManifestDigest",
+	"environmentManifestDigest",
+	"networkPolicyDigest",
+	"resourcePolicyDigest",
+	"secretHandleManifestDigest",
+] as const;
+const SANDBOX_PROFILE_DECLARED_V1_FIELDS = [
+	"runId",
+	"workflowId",
+	"workflowRevision",
+	"unitId",
+	"attempt",
+	"provenanceRef",
+	"sandboxProfile",
+	"sandboxProfileDigest",
+	"idempotencyKey",
+	"declaredAt",
+] as const;
+const SANDBOX_PROFILE_DECLARED_V1_DRAFT_FIELDS = [
+	"runId",
+	"workflowId",
+	"workflowRevision",
+	"unitId",
+	"attempt",
+	"provenanceRef",
+	"sandboxProfile",
+	"idempotencyKey",
+	"declaredAt",
+] as const;
+const ATTEMPT_FEEDBACK_V1_FIELDS = ["feedbackRef", "feedbackDigest"] as const;
+const PRIOR_CANDIDATE_REF_V1_FIELDS = [
+	"candidateRef",
+	"candidateDigest",
+] as const;
+const ATTEMPT_CONTEXT_CONTENT_V1_FIELDS = [
+	"attempt",
+	"retryFeedback",
+	"priorCandidates",
+] as const;
+const ATTEMPT_CONTEXT_DECLARED_V1_FIELDS = [
+	"runId",
+	"workflowId",
+	"workflowRevision",
+	"unitId",
+	"attempt",
+	"provenanceRef",
+	"attemptContext",
+	"attemptContextDigest",
+	"idempotencyKey",
+	"declaredAt",
+] as const;
+const ATTEMPT_CONTEXT_DECLARED_V1_DRAFT_FIELDS = [
+	"runId",
+	"workflowId",
+	"workflowRevision",
+	"unitId",
+	"attempt",
+	"provenanceRef",
+	"attemptContext",
+	"idempotencyKey",
+	"declaredAt",
+] as const;
+const DISPATCH_ENVELOPE_V5_MANIFEST_DECLARATIONS_FIELDS = [
+	"context",
+	"worker",
+	"sandbox",
+	"attemptContext",
+] as const;
 const ACTION_OUTCOMES = new Set<ActionReceiptV1["outcome"]>([
 	"succeeded",
 	"failed",
@@ -1304,6 +1637,44 @@ const SEALED_ACTION_EVIDENCE_VERSIONS = new Set<ActionEvidenceVersionV1>([
 	"sealed-v2",
 	"sealed_v3",
 ]);
+
+const CONTEXT_MANIFEST_ENTRY_KINDS = new Set<ContextManifestEntryKindV1>([
+	"artifact",
+	"document",
+	"memory",
+	"plan",
+	"policy",
+	"repository_file",
+	"skill",
+	"external",
+]);
+
+const CONTEXT_MANIFEST_TRUSTS = new Set<ContextTrustLevelV1>([
+	"trusted",
+	"verified",
+	"untrusted",
+	"quarantined",
+]);
+
+const CONTEXT_MANIFEST_TAINTS = new Set<ContextTaintV1>([
+	"clean",
+	"external",
+	"retrieved",
+	"remote",
+	"skill",
+]);
+
+const WORKER_MANIFEST_PROVIDERS = new Set<WorkerProviderV1>([
+	"anthropic",
+	"open_ai",
+]);
+
+const WORKER_MANIFEST_HARNESSES = new Set<WorkerHarnessV1>([
+	"anthropic_api_sdk",
+	"open_ai_api_sdk",
+]);
+
+const SANDBOX_RUNTIMES = new Set<SandboxRuntimeV1>(["rootless_oci"]);
 
 /**
  * Structural parser only; the caller still needs to verify the referenced
@@ -1529,6 +1900,35 @@ export function parseDispatchEnvelopeV4(input: unknown): DispatchEnvelopeV4 {
 }
 
 /**
+ * Parse and canonically bind a manifest-bound V5 dispatch. The nested V4
+ * authority remains intact, while V5 makes the three worker-start manifests
+ * explicit tape-addressed dependencies. Retry context is deliberately absent
+ * from first attempts and mandatory for every later attempt.
+ */
+export function parseDispatchEnvelopeV5(input: unknown): DispatchEnvelopeV5 {
+	const record = readClosedRecord(
+		input,
+		"dispatchEnvelopeV5",
+		DISPATCH_ENVELOPE_V5_FIELDS,
+	);
+	const parsed: DispatchEnvelopeV5 = {
+		...readDispatchEnvelopeV5Fields(record),
+		envelopeDigest: readSha256Digest(
+			record,
+			"envelopeDigest",
+			"dispatchEnvelopeV5",
+		),
+	};
+	const expected = canonicalDispatchEnvelopeV5Digest(parsed);
+	if (parsed.envelopeDigest !== expected) {
+		throw new TypeError(
+			"dispatchEnvelopeV5.envelopeDigest must equal the canonical V5 manifest-bound digest",
+		);
+	}
+	return parsed;
+}
+
+/**
  * Parse a closed V2 workflow topology. The graph digest is checked against the
  * exact native snake_case material; declaration delivery and event ordering
  * remain signed-tape reducer concerns.
@@ -1668,6 +2068,121 @@ function readDispatchEnvelopeV4Fields(
 			"workflowGraphDeclarationEventRef",
 			"dispatchEnvelopeV4",
 		),
+	};
+}
+
+function readDispatchEnvelopeV5Fields(
+	record: Record<string, unknown>,
+): Omit<DispatchEnvelopeV5, "envelopeDigest"> {
+	const dispatchV4 = parseDispatchEnvelopeV4(record.dispatchV4);
+	const contextManifestDeclarationEventRef = readCanonicalUuid(
+		record,
+		"contextManifestDeclarationEventRef",
+		"dispatchEnvelopeV5",
+	);
+	const contextManifestDigest = readSha256Digest(
+		record,
+		"contextManifestDigest",
+		"dispatchEnvelopeV5",
+	);
+	const workerManifestDeclarationEventRef = readCanonicalUuid(
+		record,
+		"workerManifestDeclarationEventRef",
+		"dispatchEnvelopeV5",
+	);
+	const workerManifestDigest = readSha256Digest(
+		record,
+		"workerManifestDigest",
+		"dispatchEnvelopeV5",
+	);
+	const sandboxProfileDeclarationEventRef = readCanonicalUuid(
+		record,
+		"sandboxProfileDeclarationEventRef",
+		"dispatchEnvelopeV5",
+	);
+	const sandboxProfileDigest = readSha256Digest(
+		record,
+		"sandboxProfileDigest",
+		"dispatchEnvelopeV5",
+	);
+
+	const body = dispatchV4.dispatchV3.body;
+	if (contextManifestDigest !== body.contextManifestDigest) {
+		throw new TypeError(
+			"dispatchEnvelopeV5.contextManifestDigest must equal dispatchV4.dispatchV3.body.contextManifestDigest",
+		);
+	}
+	if (workerManifestDigest !== body.workerManifestDigest) {
+		throw new TypeError(
+			"dispatchEnvelopeV5.workerManifestDigest must equal dispatchV4.dispatchV3.body.workerManifestDigest",
+		);
+	}
+	if (sandboxProfileDigest !== body.sandboxProfileDigest) {
+		throw new TypeError(
+			"dispatchEnvelopeV5.sandboxProfileDigest must equal dispatchV4.dispatchV3.body.sandboxProfileDigest",
+		);
+	}
+
+	const hasAttemptContextEventRef = hasOwnField(
+		record,
+		"attemptContextDeclarationEventRef",
+	);
+	const hasAttemptContextDigest = hasOwnField(record, "attemptContextDigest");
+	if (hasAttemptContextEventRef !== hasAttemptContextDigest) {
+		throw new TypeError(
+			"dispatchEnvelopeV5.attemptContextDeclarationEventRef and dispatchEnvelopeV5.attemptContextDigest must be provided together",
+		);
+	}
+	if (body.attempt === 1 && hasAttemptContextEventRef) {
+		throw new TypeError(
+			"dispatchEnvelopeV5 attempt 1 must not include attempt context",
+		);
+	}
+	if (body.attempt > 1 && !hasAttemptContextEventRef) {
+		throw new TypeError(
+			"dispatchEnvelopeV5 retry attempts must include attempt context",
+		);
+	}
+	const attemptContextDeclarationEventRef =
+		hasAttemptContextEventRef && hasAttemptContextDigest
+			? readCanonicalUuid(
+					record,
+					"attemptContextDeclarationEventRef",
+					"dispatchEnvelopeV5",
+				)
+			: undefined;
+	const attemptContextDigest =
+		hasAttemptContextEventRef && hasAttemptContextDigest
+			? readSha256Digest(record, "attemptContextDigest", "dispatchEnvelopeV5")
+			: undefined;
+	const declarationEventRefs = [
+		contextManifestDeclarationEventRef,
+		workerManifestDeclarationEventRef,
+		sandboxProfileDeclarationEventRef,
+		...(attemptContextDeclarationEventRef === undefined
+			? []
+			: [attemptContextDeclarationEventRef]),
+	];
+	if (new Set(declarationEventRefs).size !== declarationEventRefs.length) {
+		throw new TypeError(
+			"dispatchEnvelopeV5 manifest declaration event references must be pairwise distinct",
+		);
+	}
+
+	return {
+		dispatchV4,
+		contextManifestDeclarationEventRef,
+		contextManifestDigest,
+		workerManifestDeclarationEventRef,
+		workerManifestDigest,
+		sandboxProfileDeclarationEventRef,
+		sandboxProfileDigest,
+		...(attemptContextDeclarationEventRef === undefined
+			? {}
+			: {
+					attemptContextDeclarationEventRef,
+					attemptContextDigest: attemptContextDigest as string,
+				}),
 	};
 }
 
@@ -3461,6 +3976,730 @@ export function parseSandboxProfileV1(input: unknown): SandboxProfileV1 {
 	};
 }
 
+/** Parse the closed kernel projection of native context declaration content. */
+export function parseContextManifestContentV1(
+	input: unknown,
+): ContextManifestContentV1 {
+	const record = readClosedRecord(
+		input,
+		"contextManifestContentV1",
+		CONTEXT_MANIFEST_CONTENT_V1_FIELDS,
+	);
+	const values = readDenseDataArray(
+		record.entries,
+		"contextManifestContentV1.entries",
+		"contextManifestContentV1.entries must be an array",
+		(index) =>
+			`contextManifestContentV1.entries[${index}] must be an own array element`,
+	);
+	const entries: ContextManifestEntryV1[] = [];
+	const references = new Set<string>();
+	let priorReference: string | undefined;
+	for (let index = 0; index < values.length; index += 1) {
+		const label = `contextManifestContentV1.entries[${index}]`;
+		const entry = readClosedRecord(
+			values[index],
+			label,
+			CONTEXT_MANIFEST_ENTRY_V1_FIELDS,
+		);
+		const reference = readNonBlankString(entry, "reference", label);
+		if (priorReference !== undefined && priorReference >= reference) {
+			throw new TypeError(
+				"contextManifestContentV1.entries must be in strict lexical reference order",
+			);
+		}
+		if (references.has(reference)) {
+			throw new TypeError(
+				"contextManifestContentV1.entries references must be unique",
+			);
+		}
+		references.add(reference);
+		priorReference = reference;
+		entries.push({
+			kind: readEnum(entry, "kind", label, CONTEXT_MANIFEST_ENTRY_KINDS),
+			reference,
+			digest: readSha256Digest(entry, "digest", label),
+			provenanceRef: readNonBlankString(entry, "provenanceRef", label),
+			trust: readEnum(entry, "trust", label, CONTEXT_MANIFEST_TRUSTS),
+			taint: readEnum(entry, "taint", label, CONTEXT_MANIFEST_TAINTS),
+		});
+	}
+	return { entries };
+}
+
+/** Parse the closed kernel projection of native worker declaration content. */
+export function parseWorkerManifestContentV1(
+	input: unknown,
+): WorkerManifestContentV1 {
+	const record = readClosedRecord(
+		input,
+		"workerManifestContentV1",
+		WORKER_MANIFEST_CONTENT_V1_FIELDS,
+	);
+	const provider = readEnum(
+		record,
+		"provider",
+		"workerManifestContentV1",
+		WORKER_MANIFEST_PROVIDERS,
+	);
+	const harness = readEnum(
+		record,
+		"harness",
+		"workerManifestContentV1",
+		WORKER_MANIFEST_HARNESSES,
+	);
+	if (
+		(provider === "anthropic" && harness !== "anthropic_api_sdk") ||
+		(provider === "open_ai" && harness !== "open_ai_api_sdk")
+	) {
+		throw new TypeError(
+			"workerManifestContentV1.provider and workerManifestContentV1.harness must identify the same API worker",
+		);
+	}
+	return {
+		provider,
+		model: readNonBlankString(record, "model", "workerManifestContentV1"),
+		harness,
+		imageDigest: readSha256Digest(
+			record,
+			"imageDigest",
+			"workerManifestContentV1",
+		),
+		toolManifestDigest: readSha256Digest(
+			record,
+			"toolManifestDigest",
+			"workerManifestContentV1",
+		),
+		skillManifestDigest: readSha256Digest(
+			record,
+			"skillManifestDigest",
+			"workerManifestContentV1",
+		),
+		capabilityBundleDigest: readSha256Digest(
+			record,
+			"capabilityBundleDigest",
+			"workerManifestContentV1",
+		),
+		executionRole: readEnum(
+			record,
+			"executionRole",
+			"workerManifestContentV1",
+			EXECUTION_ROLES,
+		),
+	};
+}
+
+/** Parse the closed kernel projection of native sandbox declaration content. */
+export function parseSandboxProfileContentV1(
+	input: unknown,
+): SandboxProfileContentV1 {
+	const record = readClosedRecord(
+		input,
+		"sandboxProfileContentV1",
+		SANDBOX_PROFILE_CONTENT_V1_FIELDS,
+	);
+	const rootless = readRequiredBoolean(
+		record,
+		"rootless",
+		"sandboxProfileContentV1",
+	);
+	const readOnlyRootfs = readRequiredBoolean(
+		record,
+		"readOnlyRootfs",
+		"sandboxProfileContentV1",
+	);
+	if (!rootless || !readOnlyRootfs) {
+		throw new TypeError(
+			"sandboxProfileContentV1 requires rootless execution and a read-only root filesystem",
+		);
+	}
+	return {
+		runtime: readEnum(
+			record,
+			"runtime",
+			"sandboxProfileContentV1",
+			SANDBOX_RUNTIMES,
+		),
+		rootless,
+		imageDigest: readSha256Digest(
+			record,
+			"imageDigest",
+			"sandboxProfileContentV1",
+		),
+		readOnlyRootfs,
+		writableOverlayDigest: readSha256Digest(
+			record,
+			"writableOverlayDigest",
+			"sandboxProfileContentV1",
+		),
+		mountManifestDigest: readSha256Digest(
+			record,
+			"mountManifestDigest",
+			"sandboxProfileContentV1",
+		),
+		environmentManifestDigest: readSha256Digest(
+			record,
+			"environmentManifestDigest",
+			"sandboxProfileContentV1",
+		),
+		networkPolicyDigest: readSha256Digest(
+			record,
+			"networkPolicyDigest",
+			"sandboxProfileContentV1",
+		),
+		resourcePolicyDigest: readSha256Digest(
+			record,
+			"resourcePolicyDigest",
+			"sandboxProfileContentV1",
+		),
+		secretHandleManifestDigest: readSha256Digest(
+			record,
+			"secretHandleManifestDigest",
+			"sandboxProfileContentV1",
+		),
+	};
+}
+
+/** Parse the closed kernel projection of native retry declaration content. */
+export function parseAttemptContextContentV1(
+	input: unknown,
+): AttemptContextContentV1 {
+	const record = readClosedRecord(
+		input,
+		"attemptContextContentV1",
+		ATTEMPT_CONTEXT_CONTENT_V1_FIELDS,
+	);
+	const attempt = readPositiveU32(record, "attempt", "attemptContextContentV1");
+	if (attempt <= 1) {
+		throw new TypeError(
+			"attemptContextContentV1.attempt must be greater than 1",
+		);
+	}
+	const feedbackValues = readDenseDataArray(
+		record.retryFeedback,
+		"attemptContextContentV1.retryFeedback",
+		"attemptContextContentV1.retryFeedback must be an array",
+		(index) =>
+			`attemptContextContentV1.retryFeedback[${index}] must be an own array element`,
+	);
+	if (feedbackValues.length === 0) {
+		throw new TypeError(
+			"attemptContextContentV1.retryFeedback must contain at least one feedback artifact",
+		);
+	}
+	const retryFeedback: AttemptFeedbackV1[] = [];
+	const feedbackRefs = new Set<string>();
+	let priorFeedbackRef: string | undefined;
+	for (let index = 0; index < feedbackValues.length; index += 1) {
+		const label = `attemptContextContentV1.retryFeedback[${index}]`;
+		const feedback = readClosedRecord(
+			feedbackValues[index],
+			label,
+			ATTEMPT_FEEDBACK_V1_FIELDS,
+		);
+		const feedbackRef = readNonBlankString(feedback, "feedbackRef", label);
+		if (priorFeedbackRef !== undefined && priorFeedbackRef >= feedbackRef) {
+			throw new TypeError(
+				"attemptContextContentV1.retryFeedback must be in strict lexical feedbackRef order",
+			);
+		}
+		if (feedbackRefs.has(feedbackRef)) {
+			throw new TypeError(
+				"attemptContextContentV1.retryFeedback refs must be unique",
+			);
+		}
+		feedbackRefs.add(feedbackRef);
+		priorFeedbackRef = feedbackRef;
+		retryFeedback.push({
+			feedbackRef,
+			feedbackDigest: readSha256Digest(feedback, "feedbackDigest", label),
+		});
+	}
+	const candidateValues = readDenseDataArray(
+		record.priorCandidates,
+		"attemptContextContentV1.priorCandidates",
+		"attemptContextContentV1.priorCandidates must be an array",
+		(index) =>
+			`attemptContextContentV1.priorCandidates[${index}] must be an own array element`,
+	);
+	const priorCandidates: PriorCandidateRefV1[] = [];
+	const candidateRefs = new Set<string>();
+	let priorCandidateRef: string | undefined;
+	for (let index = 0; index < candidateValues.length; index += 1) {
+		const label = `attemptContextContentV1.priorCandidates[${index}]`;
+		const candidate = readClosedRecord(
+			candidateValues[index],
+			label,
+			PRIOR_CANDIDATE_REF_V1_FIELDS,
+		);
+		const candidateRef = readCanonicalBuildplaneCandidateRef(
+			candidate,
+			"candidateRef",
+			label,
+		);
+		if (priorCandidateRef !== undefined && priorCandidateRef >= candidateRef) {
+			throw new TypeError(
+				"attemptContextContentV1.priorCandidates must be in strict lexical candidateRef order",
+			);
+		}
+		if (candidateRefs.has(candidateRef)) {
+			throw new TypeError(
+				"attemptContextContentV1.priorCandidates refs must be unique",
+			);
+		}
+		candidateRefs.add(candidateRef);
+		priorCandidateRef = candidateRef;
+		priorCandidates.push({
+			candidateRef,
+			candidateDigest: readSha256Digest(candidate, "candidateDigest", label),
+		});
+	}
+	return {
+		attempt,
+		retryFeedback,
+		priorCandidates,
+	};
+}
+
+/** Parse a content-addressed context declaration and verify its detached digest. */
+export function parseContextManifestDeclaredV1(
+	input: unknown,
+): ContextManifestDeclaredV1 {
+	const record = readClosedRecord(
+		input,
+		"contextManifestDeclaredV1",
+		CONTEXT_MANIFEST_DECLARED_V1_FIELDS,
+	);
+	const parsed: ContextManifestDeclaredV1 = {
+		...readManifestDeclarationIdentityV1(record, "contextManifestDeclaredV1"),
+		contextManifest: parseContextManifestContentV1(record.contextManifest),
+		contextManifestDigest: readSha256Digest(
+			record,
+			"contextManifestDigest",
+			"contextManifestDeclaredV1",
+		),
+		idempotencyKey: readNonBlankString(
+			record,
+			"idempotencyKey",
+			"contextManifestDeclaredV1",
+		),
+		declaredAt: readRfc3339UtcTimestamp(
+			record,
+			"declaredAt",
+			"contextManifestDeclaredV1",
+		).value,
+	};
+	if (
+		parsed.contextManifestDigest !==
+		canonicalContextManifestContentV1Digest(parsed.contextManifest)
+	) {
+		throw new TypeError(
+			"contextManifestDeclaredV1.contextManifestDigest must equal the canonical context manifest content digest",
+		);
+	}
+	return parsed;
+}
+
+/** Create a self-consistent context declaration from closed manifest content. */
+export function createContextManifestDeclaredV1(
+	input: Omit<ContextManifestDeclaredV1, "contextManifestDigest">,
+): ContextManifestDeclaredV1 {
+	const record = readClosedRecord(
+		input,
+		"contextManifestDeclaredV1Draft",
+		CONTEXT_MANIFEST_DECLARED_V1_DRAFT_FIELDS,
+	);
+	const contextManifest = parseContextManifestContentV1(record.contextManifest);
+	return parseContextManifestDeclaredV1({
+		...readManifestDeclarationIdentityV1(
+			record,
+			"contextManifestDeclaredV1Draft",
+		),
+		contextManifest,
+		contextManifestDigest:
+			canonicalContextManifestContentV1Digest(contextManifest),
+		idempotencyKey: readNonBlankString(
+			record,
+			"idempotencyKey",
+			"contextManifestDeclaredV1Draft",
+		),
+		declaredAt: readRfc3339UtcTimestamp(
+			record,
+			"declaredAt",
+			"contextManifestDeclaredV1Draft",
+		).value,
+	});
+}
+
+/** Parse a content-addressed worker declaration and verify its detached digest. */
+export function parseWorkerManifestDeclaredV1(
+	input: unknown,
+): WorkerManifestDeclaredV1 {
+	const record = readClosedRecord(
+		input,
+		"workerManifestDeclaredV1",
+		WORKER_MANIFEST_DECLARED_V1_FIELDS,
+	);
+	const parsed: WorkerManifestDeclaredV1 = {
+		...readManifestDeclarationIdentityV1(record, "workerManifestDeclaredV1"),
+		workerManifest: parseWorkerManifestContentV1(record.workerManifest),
+		workerManifestDigest: readSha256Digest(
+			record,
+			"workerManifestDigest",
+			"workerManifestDeclaredV1",
+		),
+		idempotencyKey: readNonBlankString(
+			record,
+			"idempotencyKey",
+			"workerManifestDeclaredV1",
+		),
+		declaredAt: readRfc3339UtcTimestamp(
+			record,
+			"declaredAt",
+			"workerManifestDeclaredV1",
+		).value,
+	};
+	if (
+		parsed.workerManifestDigest !==
+		canonicalWorkerManifestContentV1Digest(parsed.workerManifest)
+	) {
+		throw new TypeError(
+			"workerManifestDeclaredV1.workerManifestDigest must equal the canonical worker manifest content digest",
+		);
+	}
+	return parsed;
+}
+
+/** Create a self-consistent worker declaration from closed manifest content. */
+export function createWorkerManifestDeclaredV1(
+	input: Omit<WorkerManifestDeclaredV1, "workerManifestDigest">,
+): WorkerManifestDeclaredV1 {
+	const record = readClosedRecord(
+		input,
+		"workerManifestDeclaredV1Draft",
+		WORKER_MANIFEST_DECLARED_V1_DRAFT_FIELDS,
+	);
+	const workerManifest = parseWorkerManifestContentV1(record.workerManifest);
+	return parseWorkerManifestDeclaredV1({
+		...readManifestDeclarationIdentityV1(
+			record,
+			"workerManifestDeclaredV1Draft",
+		),
+		workerManifest,
+		workerManifestDigest:
+			canonicalWorkerManifestContentV1Digest(workerManifest),
+		idempotencyKey: readNonBlankString(
+			record,
+			"idempotencyKey",
+			"workerManifestDeclaredV1Draft",
+		),
+		declaredAt: readRfc3339UtcTimestamp(
+			record,
+			"declaredAt",
+			"workerManifestDeclaredV1Draft",
+		).value,
+	});
+}
+
+/** Parse a content-addressed sandbox declaration and verify its detached digest. */
+export function parseSandboxProfileDeclaredV1(
+	input: unknown,
+): SandboxProfileDeclaredV1 {
+	const record = readClosedRecord(
+		input,
+		"sandboxProfileDeclaredV1",
+		SANDBOX_PROFILE_DECLARED_V1_FIELDS,
+	);
+	const parsed: SandboxProfileDeclaredV1 = {
+		...readManifestDeclarationIdentityV1(record, "sandboxProfileDeclaredV1"),
+		sandboxProfile: parseSandboxProfileContentV1(record.sandboxProfile),
+		sandboxProfileDigest: readSha256Digest(
+			record,
+			"sandboxProfileDigest",
+			"sandboxProfileDeclaredV1",
+		),
+		idempotencyKey: readNonBlankString(
+			record,
+			"idempotencyKey",
+			"sandboxProfileDeclaredV1",
+		),
+		declaredAt: readRfc3339UtcTimestamp(
+			record,
+			"declaredAt",
+			"sandboxProfileDeclaredV1",
+		).value,
+	};
+	if (
+		parsed.sandboxProfileDigest !==
+		canonicalSandboxProfileContentV1Digest(parsed.sandboxProfile)
+	) {
+		throw new TypeError(
+			"sandboxProfileDeclaredV1.sandboxProfileDigest must equal the canonical sandbox profile content digest",
+		);
+	}
+	return parsed;
+}
+
+/** Create a self-consistent sandbox declaration from closed profile content. */
+export function createSandboxProfileDeclaredV1(
+	input: Omit<SandboxProfileDeclaredV1, "sandboxProfileDigest">,
+): SandboxProfileDeclaredV1 {
+	const record = readClosedRecord(
+		input,
+		"sandboxProfileDeclaredV1Draft",
+		SANDBOX_PROFILE_DECLARED_V1_DRAFT_FIELDS,
+	);
+	const sandboxProfile = parseSandboxProfileContentV1(record.sandboxProfile);
+	return parseSandboxProfileDeclaredV1({
+		...readManifestDeclarationIdentityV1(
+			record,
+			"sandboxProfileDeclaredV1Draft",
+		),
+		sandboxProfile,
+		sandboxProfileDigest:
+			canonicalSandboxProfileContentV1Digest(sandboxProfile),
+		idempotencyKey: readNonBlankString(
+			record,
+			"idempotencyKey",
+			"sandboxProfileDeclaredV1Draft",
+		),
+		declaredAt: readRfc3339UtcTimestamp(
+			record,
+			"declaredAt",
+			"sandboxProfileDeclaredV1Draft",
+		).value,
+	});
+}
+
+/** Parse a content-addressed retry declaration and verify its detached digest. */
+export function parseAttemptContextDeclaredV1(
+	input: unknown,
+): AttemptContextDeclaredV1 {
+	const record = readClosedRecord(
+		input,
+		"attemptContextDeclaredV1",
+		ATTEMPT_CONTEXT_DECLARED_V1_FIELDS,
+	);
+	const identity = readManifestDeclarationIdentityV1(
+		record,
+		"attemptContextDeclaredV1",
+	);
+	const attemptContext = parseAttemptContextContentV1(record.attemptContext);
+	if (attemptContext.attempt !== identity.attempt) {
+		throw new TypeError(
+			"attemptContext.attempt must equal attemptContextDeclaredV1.attempt",
+		);
+	}
+	if (identity.attempt === 1) {
+		throw new TypeError(
+			"attemptContextDeclaredV1.attempt must be greater than 1",
+		);
+	}
+	const parsed: AttemptContextDeclaredV1 = {
+		...identity,
+		attemptContext,
+		attemptContextDigest: readSha256Digest(
+			record,
+			"attemptContextDigest",
+			"attemptContextDeclaredV1",
+		),
+		idempotencyKey: readNonBlankString(
+			record,
+			"idempotencyKey",
+			"attemptContextDeclaredV1",
+		),
+		declaredAt: readRfc3339UtcTimestamp(
+			record,
+			"declaredAt",
+			"attemptContextDeclaredV1",
+		).value,
+	};
+	if (
+		parsed.attemptContextDigest !==
+		canonicalAttemptContextContentV1Digest(parsed.attemptContext)
+	) {
+		throw new TypeError(
+			"attemptContextDeclaredV1.attemptContextDigest must equal the canonical attempt context content digest",
+		);
+	}
+	return parsed;
+}
+
+/** Create a self-consistent retry declaration from closed retry content. */
+export function createAttemptContextDeclaredV1(
+	input: Omit<AttemptContextDeclaredV1, "attemptContextDigest">,
+): AttemptContextDeclaredV1 {
+	const record = readClosedRecord(
+		input,
+		"attemptContextDeclaredV1Draft",
+		ATTEMPT_CONTEXT_DECLARED_V1_DRAFT_FIELDS,
+	);
+	const attemptContext = parseAttemptContextContentV1(record.attemptContext);
+	return parseAttemptContextDeclaredV1({
+		...readManifestDeclarationIdentityV1(
+			record,
+			"attemptContextDeclaredV1Draft",
+		),
+		attemptContext,
+		attemptContextDigest:
+			canonicalAttemptContextContentV1Digest(attemptContext),
+		idempotencyKey: readNonBlankString(
+			record,
+			"idempotencyKey",
+			"attemptContextDeclaredV1Draft",
+		),
+		declaredAt: readRfc3339UtcTimestamp(
+			record,
+			"declaredAt",
+			"attemptContextDeclaredV1Draft",
+		).value,
+	});
+}
+
+/**
+ * Bind a parsed V5 dispatch to the actual tape declaration payloads. This is
+ * intentionally local and pure: native replay still proves that the supplied
+ * event identities occur in the signed tape at the required point in history.
+ */
+export function assertDispatchEnvelopeV5ManifestDeclarationsV1(
+	dispatchInput: DispatchEnvelopeV5,
+	declarationsInput: DispatchEnvelopeV5ManifestDeclarationsV1,
+): void {
+	const dispatch = parseDispatchEnvelopeV5(dispatchInput);
+	const record = readClosedRecord(
+		declarationsInput,
+		"dispatchEnvelopeV5.manifestDeclarations",
+		DISPATCH_ENVELOPE_V5_MANIFEST_DECLARATIONS_FIELDS,
+	);
+	const context = parseContextManifestDeclaredV1(record.context);
+	const worker = parseWorkerManifestDeclaredV1(record.worker);
+	const sandbox = parseSandboxProfileDeclaredV1(record.sandbox);
+	const body = dispatch.dispatchV4.dispatchV3.body;
+
+	assertV5DeclarationIdentity("context", context, body, context.runId);
+	assertV5DeclarationIdentity("worker", worker, body, context.runId);
+	assertV5DeclarationIdentity("sandbox", sandbox, body, context.runId);
+	if (context.contextManifestDigest !== dispatch.contextManifestDigest) {
+		throw new TypeError(
+			"dispatchEnvelopeV5 context declaration digest must equal contextManifestDigest",
+		);
+	}
+	if (worker.workerManifestDigest !== dispatch.workerManifestDigest) {
+		throw new TypeError(
+			"dispatchEnvelopeV5 worker declaration digest must equal workerManifestDigest",
+		);
+	}
+	if (sandbox.sandboxProfileDigest !== dispatch.sandboxProfileDigest) {
+		throw new TypeError(
+			"dispatchEnvelopeV5 sandbox declaration digest must equal sandboxProfileDigest",
+		);
+	}
+	if (worker.workerManifest.executionRole !== body.executionRole) {
+		throw new TypeError(
+			"dispatchEnvelopeV5 worker declaration executionRole must equal dispatch executionRole",
+		);
+	}
+	if (
+		worker.workerManifest.capabilityBundleDigest !== body.capabilityBundleDigest
+	) {
+		throw new TypeError(
+			"dispatchEnvelopeV5 worker declaration capabilityBundleDigest must equal dispatch capabilityBundleDigest",
+		);
+	}
+	if (
+		worker.workerManifest.imageDigest !== sandbox.sandboxProfile.imageDigest
+	) {
+		throw new TypeError(
+			"dispatchEnvelopeV5 worker and sandbox declarations must use the same imageDigest",
+		);
+	}
+
+	if (body.attempt === 1) {
+		if (hasOwnField(record, "attemptContext")) {
+			throw new TypeError(
+				"dispatchEnvelopeV5 attempt 1 must not carry an attempt context declaration",
+			);
+		}
+		return;
+	}
+	if (!hasOwnField(record, "attemptContext")) {
+		throw new TypeError(
+			"dispatchEnvelopeV5 retry attempts require an attempt context declaration",
+		);
+	}
+	const attemptContext = parseAttemptContextDeclaredV1(record.attemptContext);
+	assertV5DeclarationIdentity(
+		"attempt context",
+		attemptContext,
+		body,
+		context.runId,
+	);
+	if (attemptContext.attemptContextDigest !== dispatch.attemptContextDigest) {
+		throw new TypeError(
+			"dispatchEnvelopeV5 attempt context declaration digest must equal attemptContextDigest",
+		);
+	}
+}
+
+interface ManifestDeclarationIdentityV1 {
+	readonly runId: string;
+	readonly workflowId: string;
+	readonly workflowRevision: string;
+	readonly unitId: string;
+	readonly attempt: number;
+	readonly provenanceRef: string;
+}
+
+function readManifestDeclarationIdentityV1(
+	record: Record<string, unknown>,
+	label: string,
+): ManifestDeclarationIdentityV1 {
+	return {
+		runId: readNonBlankString(record, "runId", label),
+		workflowId: readNonBlankString(record, "workflowId", label),
+		workflowRevision: readNonBlankString(record, "workflowRevision", label),
+		unitId: readNonBlankString(record, "unitId", label),
+		attempt: readPositiveU32(record, "attempt", label),
+		provenanceRef: readNonBlankString(record, "provenanceRef", label),
+	};
+}
+
+function assertV5DeclarationIdentity(
+	label: string,
+	declaration:
+		| ContextManifestDeclaredV1
+		| WorkerManifestDeclaredV1
+		| SandboxProfileDeclaredV1
+		| AttemptContextDeclaredV1,
+	body: DispatchEnvelopeBodyV2,
+	runId: string,
+): void {
+	if (
+		declaration.runId !== runId ||
+		declaration.workflowId !== body.workflowId ||
+		declaration.workflowRevision !== body.workflowRevision ||
+		declaration.unitId !== body.unitId ||
+		declaration.attempt !== body.attempt ||
+		declaration.provenanceRef !== body.provenanceRef
+	) {
+		throw new TypeError(
+			`dispatchEnvelopeV5 ${label} declaration must match run, workflow, revision, unit, attempt, and provenance`,
+		);
+	}
+}
+
+function readRequiredBoolean(
+	record: Record<string, unknown>,
+	key: string,
+	label: string,
+): boolean {
+	const value = record[key];
+	if (!hasOwnField(record, key) || typeof value !== "boolean") {
+		throw new TypeError(`${label}.${key} must be a boolean`);
+	}
+	return value;
+}
+
 /** The only stable public failure code exposed by this initial contract slice. */
 export const UNSUPPORTED_COMMIT_MODE = "UNSUPPORTED_COMMIT_MODE";
 
@@ -3561,6 +4800,15 @@ export function assertDispatchWorkerRuntimeManifestV1(
 
 const DISPATCH_ENVELOPE_V3_DIGEST_DOMAIN = "buildplane.dispatch-envelope.v3\0";
 const DISPATCH_ENVELOPE_V4_DIGEST_DOMAIN = "buildplane.dispatch-envelope.v4\0";
+const DISPATCH_ENVELOPE_V5_DIGEST_DOMAIN = "buildplane.dispatch-envelope.v5\0";
+const CONTEXT_MANIFEST_CONTENT_V1_DIGEST_DOMAIN =
+	"buildplane.context-manifest-content.v1\0";
+const WORKER_MANIFEST_CONTENT_V1_DIGEST_DOMAIN =
+	"buildplane.worker-manifest-content.v1\0";
+const SANDBOX_PROFILE_CONTENT_V1_DIGEST_DOMAIN =
+	"buildplane.sandbox-profile-content.v1\0";
+const ATTEMPT_CONTEXT_CONTENT_V1_DIGEST_DOMAIN =
+	"buildplane.attempt-context-content.v1\0";
 const WORKER_RUNTIME_MANIFEST_V1_DIGEST_DOMAIN =
 	"buildplane.worker-runtime-manifest.v1\0";
 const WORKFLOW_GRAPH_V2_DIGEST_DOMAIN = "buildplane.workflow-graph.v2\0";
@@ -3785,6 +5033,116 @@ export function canonicalDispatchEnvelopeV4Digest(
 }
 
 /**
+ * Exact cross-language digest for immutable worker context content. Delivery
+ * identity belongs to the declaration event, so it is intentionally excluded
+ * from this digest.
+ */
+export function canonicalContextManifestContentV1Digest(
+	input: ContextManifestContentV1,
+): string {
+	const manifest = parseContextManifestContentV1(input);
+	return canonicalDigest(CONTEXT_MANIFEST_CONTENT_V1_DIGEST_DOMAIN, {
+		entries: manifest.entries.map((entry) => ({
+			kind: entry.kind,
+			reference: entry.reference,
+			digest: entry.digest,
+			provenance_ref: entry.provenanceRef,
+			trust: entry.trust,
+			taint: entry.taint,
+		})),
+	});
+}
+
+/** Exact cross-language digest for immutable governed API worker content. */
+export function canonicalWorkerManifestContentV1Digest(
+	input: WorkerManifestContentV1,
+): string {
+	const manifest = parseWorkerManifestContentV1(input);
+	return canonicalDigest(WORKER_MANIFEST_CONTENT_V1_DIGEST_DOMAIN, {
+		provider: manifest.provider,
+		model: manifest.model,
+		harness: manifest.harness,
+		image_digest: manifest.imageDigest,
+		tool_manifest_digest: manifest.toolManifestDigest,
+		skill_manifest_digest: manifest.skillManifestDigest,
+		capability_bundle_digest: manifest.capabilityBundleDigest,
+		execution_role: manifest.executionRole,
+	});
+}
+
+/** Exact cross-language digest for immutable rootless OCI sandbox content. */
+export function canonicalSandboxProfileContentV1Digest(
+	input: SandboxProfileContentV1,
+): string {
+	const profile = parseSandboxProfileContentV1(input);
+	return canonicalDigest(SANDBOX_PROFILE_CONTENT_V1_DIGEST_DOMAIN, {
+		runtime: profile.runtime,
+		rootless: profile.rootless,
+		image_digest: profile.imageDigest,
+		read_only_rootfs: profile.readOnlyRootfs,
+		writable_overlay_digest: profile.writableOverlayDigest,
+		mount_manifest_digest: profile.mountManifestDigest,
+		environment_manifest_digest: profile.environmentManifestDigest,
+		network_policy_digest: profile.networkPolicyDigest,
+		resource_policy_digest: profile.resourcePolicyDigest,
+		secret_handle_manifest_digest: profile.secretHandleManifestDigest,
+	});
+}
+
+/** Exact cross-language digest for immutable retry feedback and candidate lineage. */
+export function canonicalAttemptContextContentV1Digest(
+	input: AttemptContextContentV1,
+): string {
+	const context = parseAttemptContextContentV1(input);
+	return canonicalDigest(ATTEMPT_CONTEXT_CONTENT_V1_DIGEST_DOMAIN, {
+		attempt: context.attempt,
+		retry_feedback: context.retryFeedback.map((feedback) => ({
+			feedback_ref: feedback.feedbackRef,
+			feedback_digest: feedback.feedbackDigest,
+		})),
+		prior_candidates: context.priorCandidates.map((candidate) => ({
+			candidate_ref: candidate.candidateRef,
+			candidate_digest: candidate.candidateDigest,
+		})),
+	});
+}
+
+/**
+ * Exact cross-language V5 dispatch digest. The nested V4 envelope includes
+ * its detached V4 digest, and optional retry fields are omitted from the
+ * canonical wire material exactly when they are absent.
+ */
+export function canonicalDispatchEnvelopeV5Digest(
+	input: Omit<DispatchEnvelopeV5, "envelopeDigest"> | DispatchEnvelopeV5,
+): string {
+	const record = readClosedRecord(
+		input,
+		"dispatchEnvelopeV5",
+		DISPATCH_ENVELOPE_V5_FIELDS,
+	);
+	const dispatch = readDispatchEnvelopeV5Fields(record);
+	return canonicalDigest(DISPATCH_ENVELOPE_V5_DIGEST_DOMAIN, {
+		dispatch_v4: canonicalDispatchEnvelopeV4EnvelopeWire(dispatch.dispatchV4),
+		context_manifest_declaration_event_ref:
+			dispatch.contextManifestDeclarationEventRef,
+		context_manifest_digest: dispatch.contextManifestDigest,
+		worker_manifest_declaration_event_ref:
+			dispatch.workerManifestDeclarationEventRef,
+		worker_manifest_digest: dispatch.workerManifestDigest,
+		sandbox_profile_declaration_event_ref:
+			dispatch.sandboxProfileDeclarationEventRef,
+		sandbox_profile_digest: dispatch.sandboxProfileDigest,
+		...(dispatch.attemptContextDeclarationEventRef === undefined
+			? {}
+			: {
+					attempt_context_declaration_event_ref:
+						dispatch.attemptContextDeclarationEventRef,
+					attempt_context_digest: dispatch.attemptContextDigest,
+				}),
+	});
+}
+
+/**
  * Exact cross-language V2 workflow graph digest. Delivery metadata (`graphDigest`,
  * `idempotencyKey`, and `declaredAt`) deliberately remains outside the native
  * graph authority bytes.
@@ -3871,6 +5229,19 @@ function canonicalDispatchEnvelopeV3EnvelopeWire(
 	const parsed = parseDispatchEnvelopeV3(dispatch);
 	return {
 		...canonicalDispatchEnvelopeV3BodyWire(parsed),
+		envelope_digest: parsed.envelopeDigest,
+	};
+}
+
+function canonicalDispatchEnvelopeV4EnvelopeWire(
+	dispatch: DispatchEnvelopeV4,
+): Record<string, unknown> {
+	const parsed = parseDispatchEnvelopeV4(dispatch);
+	return {
+		dispatch_v3: canonicalDispatchEnvelopeV3EnvelopeWire(parsed.dispatchV3),
+		workflow_graph_digest: parsed.workflowGraphDigest,
+		workflow_graph_declaration_event_ref:
+			parsed.workflowGraphDeclarationEventRef,
 		envelope_digest: parsed.envelopeDigest,
 	};
 }

@@ -26,29 +26,36 @@ use bp_ledger::payload::run_lifecycle::{
 use bp_ledger::payload::tool_io::{EnvRedaction, ToolRequestStoredV1, ToolResultV1};
 use bp_ledger::payload::trust_spine::{
     action_receipt_recorded_v2_digest, action_receipt_set_v1_digest, action_requested_v2_digest,
-    attempt_context_recorded_v1_digest, candidate_completion_recorded_v1_digest,
-    candidate_view_v1_digest, dispatch_envelope_v2_body_digest, dispatch_envelope_v3_body_digest,
-    dispatch_envelope_v4_digest, model_action_authorized_v1_digest,
-    model_action_authorized_v2_digest, model_action_intent_v1_digest,
-    review_verdict_output_v1_digest, workflow_graph_v1_digest, workflow_graph_v2_digest,
-    ActionEvidenceVersionV1, ActionKindV1, ActionReceiptOutcomeV2, ActionReceiptRecordedV2,
-    ActionReceiptSetEntryV1, ActionReceiptSetRecordedV1, ActionRequestedV2, ActionResourceUsageV1,
-    AttemptContextRecordedV1, CandidateAcceptanceOutcomeV1, CandidateAcceptanceRecordedV1,
-    CandidateCompletionRecordedV1, CandidateCreatedV1, CandidateCreatedV2, CandidateViewV1,
-    CommitModeV1, DispatchBudgetV1, DispatchEnvelopeBodyV2, DispatchEnvelopeV1, DispatchEnvelopeV2,
-    DispatchEnvelopeV3, DispatchEnvelopeV4, ExecutionRoleV1, ModelActionAuthorizedV1,
-    ModelActionAuthorizedV2, ModelActionIntentV1, ModelRequestEvidenceV1,
-    PromotionApprovalRequestedV1, PromotionDecisionKindV1, PromotionDecisionRecordedV1,
-    PromotionExecutionClaimedV1, PromotionGitBindingV1, PromotionReconciliationResolvedV1,
-    PromotionResultOutcomeV1, PromotionResultRecordedV1, PromotionWorktreeSyncStateV1,
-    ReconciliationResolutionOutcomeV1, ReviewDecisionV1, ReviewFindingSeverityV1, ReviewFindingV1,
-    ReviewVerdictOutputV1, ReviewVerdictRecordedV1, ReviewVerdictRecordedV2, SignatureRefV1,
-    TrustScopeEvidenceV1, TrustTierV1, WorkflowCancellationCauseV1,
-    WorkflowCancellationRequestedV1, WorkflowGraphDeclaredV1, WorkflowGraphDeclaredV2,
-    WorkflowGraphNodeV1, WorkflowGraphNodeV2, WorkflowTerminalOutcomeV1, WorkflowTerminalV1,
-    WorkflowTerminalV2, WorkflowTimerFiredV1, WorkflowTimerKindV1, WorkflowTimerScheduledV1,
-    MODEL_REQUEST_EVIDENCE_V1_SCHEMA_VERSION, TRUST_SCOPE_EVIDENCE_V1_SCHEMA_VERSION,
-    TYPESCRIPT_SAFE_INTEGER_MAX,
+    attempt_context_content_v1_digest, attempt_context_recorded_v1_digest,
+    candidate_completion_recorded_v1_digest, candidate_view_v1_digest,
+    context_manifest_content_v1_digest, dispatch_envelope_v2_body_digest,
+    dispatch_envelope_v3_body_digest, dispatch_envelope_v4_digest, dispatch_envelope_v5_digest,
+    model_action_authorized_v1_digest, model_action_authorized_v2_digest,
+    model_action_intent_v1_digest, review_verdict_output_v1_digest,
+    sandbox_profile_content_v1_digest, worker_manifest_content_v1_digest, workflow_graph_v1_digest,
+    workflow_graph_v2_digest, ActionEvidenceVersionV1, ActionKindV1, ActionReceiptOutcomeV2,
+    ActionReceiptRecordedV2, ActionReceiptSetEntryV1, ActionReceiptSetRecordedV1,
+    ActionRequestedV2, ActionResourceUsageV1, AttemptContextContentV1, AttemptContextDeclaredV1,
+    AttemptContextRecordedV1, AttemptFeedbackV1, CandidateAcceptanceOutcomeV1,
+    CandidateAcceptanceRecordedV1, CandidateCompletionRecordedV1, CandidateCreatedV1,
+    CandidateCreatedV2, CandidateViewV1, CommitModeV1, ContextManifestContentV1,
+    ContextManifestDeclaredV1, ContextManifestEntryKindV1, ContextManifestEntryV1, ContextTaintV1,
+    ContextTrustLevelV1, DispatchBudgetV1, DispatchEnvelopeBodyV2, DispatchEnvelopeV1,
+    DispatchEnvelopeV2, DispatchEnvelopeV3, DispatchEnvelopeV4, DispatchEnvelopeV5,
+    ExecutionRoleV1, ModelActionAuthorizedV1, ModelActionAuthorizedV2, ModelActionIntentV1,
+    ModelRequestEvidenceV1, PriorCandidateRefV1, PromotionApprovalRequestedV1,
+    PromotionDecisionKindV1, PromotionDecisionRecordedV1, PromotionExecutionClaimedV1,
+    PromotionGitBindingV1, PromotionReconciliationResolvedV1, PromotionResultOutcomeV1,
+    PromotionResultRecordedV1, PromotionWorktreeSyncStateV1, ReconciliationResolutionOutcomeV1,
+    ReviewDecisionV1, ReviewFindingSeverityV1, ReviewFindingV1, ReviewVerdictOutputV1,
+    ReviewVerdictRecordedV1, ReviewVerdictRecordedV2, SandboxProfileContentV1,
+    SandboxProfileDeclaredV1, SandboxRuntimeV1, SignatureRefV1, TrustScopeEvidenceV1, TrustTierV1,
+    WorkerHarnessV1, WorkerManifestContentV1, WorkerManifestDeclaredV1, WorkerProviderV1,
+    WorkflowCancellationCauseV1, WorkflowCancellationRequestedV1, WorkflowGraphDeclaredV1,
+    WorkflowGraphDeclaredV2, WorkflowGraphNodeV1, WorkflowGraphNodeV2, WorkflowTerminalOutcomeV1,
+    WorkflowTerminalV1, WorkflowTerminalV2, WorkflowTimerFiredV1, WorkflowTimerKindV1,
+    WorkflowTimerScheduledV1, MODEL_REQUEST_EVIDENCE_V1_SCHEMA_VERSION,
+    TRUST_SCOPE_EVIDENCE_V1_SCHEMA_VERSION, TYPESCRIPT_SAFE_INTEGER_MAX,
 };
 use bp_ledger::payload::unit_lifecycle::{
     ArtifactRef, CancelCause, UnitCancelledV1, UnitCompletedV1, UnitFailedV1, UnitOutcome,
@@ -433,6 +440,209 @@ fn graph_bound_dispatch_v4_fixtures() -> Vec<Value> {
     vec![
         serde_json::to_value(Payload::WorkflowGraphDeclaredV2(graph)).unwrap(),
         serde_json::to_value(Payload::DispatchEnvelopeV4(dispatch)).unwrap(),
+    ]
+}
+
+/// Manifest-bound V5 fixtures cover every new externally-tagged payload while
+/// preserving the real ordering rule: context, worker, and sandbox declarations
+/// exist before the V5 dispatch that binds their exact event identities and
+/// content digests. The retry declaration is deliberately separate because the
+/// enclosed dispatch is attempt one and must not carry retry context.
+fn manifest_bound_dispatch_v5_fixtures() -> Vec<Value> {
+    const DIGEST_A: &str =
+        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const DIGEST_B: &str =
+        "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const DIGEST_C: &str =
+        "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+    const DIGEST_D: &str =
+        "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+
+    let run_id = fixed_run_id().to_string();
+    let workflow_id = "workflow-fixture-v5".to_string();
+    let workflow_revision = "r1".to_string();
+    let unit_id = "unit-fixture-v5".to_string();
+    let provenance_ref = "admission:fixture-v5".to_string();
+
+    let context_manifest = ContextManifestContentV1 {
+        entries: vec![ContextManifestEntryV1 {
+            kind: ContextManifestEntryKindV1::RepositoryFile,
+            reference: "repo:AGENTS.md".into(),
+            digest: DIGEST_A.into(),
+            provenance_ref: "provenance:repository".into(),
+            trust: ContextTrustLevelV1::Verified,
+            taint: ContextTaintV1::Clean,
+        }],
+    };
+    let context_manifest_digest = context_manifest_content_v1_digest(&context_manifest)
+        .expect("serialize deterministic V5 context manifest fixture");
+    let context_declaration = ContextManifestDeclaredV1 {
+        run_id: run_id.clone(),
+        workflow_id: workflow_id.clone(),
+        workflow_revision: workflow_revision.clone(),
+        unit_id: unit_id.clone(),
+        attempt: 1,
+        provenance_ref: provenance_ref.clone(),
+        context_manifest,
+        context_manifest_digest: context_manifest_digest.clone(),
+        idempotency_key: "context-manifest:fixture-v5:1".into(),
+        declared_at: "2026-07-20T00:00:00Z".into(),
+    };
+
+    let worker_manifest = WorkerManifestContentV1 {
+        provider: WorkerProviderV1::OpenAi,
+        model: "gpt-5".into(),
+        harness: WorkerHarnessV1::OpenAiApiSdk,
+        image_digest: DIGEST_A.into(),
+        tool_manifest_digest: DIGEST_B.into(),
+        skill_manifest_digest: DIGEST_C.into(),
+        capability_bundle_digest: DIGEST_D.into(),
+        execution_role: ExecutionRoleV1::Implementer,
+    };
+    let worker_manifest_digest = worker_manifest_content_v1_digest(&worker_manifest)
+        .expect("serialize deterministic V5 worker manifest fixture");
+    let worker_declaration = WorkerManifestDeclaredV1 {
+        run_id: run_id.clone(),
+        workflow_id: workflow_id.clone(),
+        workflow_revision: workflow_revision.clone(),
+        unit_id: unit_id.clone(),
+        attempt: 1,
+        provenance_ref: provenance_ref.clone(),
+        worker_manifest,
+        worker_manifest_digest: worker_manifest_digest.clone(),
+        idempotency_key: "worker-manifest:fixture-v5:1".into(),
+        declared_at: "2026-07-20T00:00:01Z".into(),
+    };
+
+    let sandbox_profile = SandboxProfileContentV1 {
+        runtime: SandboxRuntimeV1::RootlessOci,
+        rootless: true,
+        image_digest: DIGEST_A.into(),
+        read_only_rootfs: true,
+        writable_overlay_digest: DIGEST_B.into(),
+        mount_manifest_digest: DIGEST_C.into(),
+        environment_manifest_digest: DIGEST_D.into(),
+        network_policy_digest: DIGEST_A.into(),
+        resource_policy_digest: DIGEST_B.into(),
+        secret_handle_manifest_digest: DIGEST_C.into(),
+    };
+    let sandbox_profile_digest = sandbox_profile_content_v1_digest(&sandbox_profile)
+        .expect("serialize deterministic V5 sandbox profile fixture");
+    let sandbox_declaration = SandboxProfileDeclaredV1 {
+        run_id: run_id.clone(),
+        workflow_id: workflow_id.clone(),
+        workflow_revision: workflow_revision.clone(),
+        unit_id: unit_id.clone(),
+        attempt: 1,
+        provenance_ref: provenance_ref.clone(),
+        sandbox_profile,
+        sandbox_profile_digest: sandbox_profile_digest.clone(),
+        idempotency_key: "sandbox-profile:fixture-v5:1".into(),
+        declared_at: "2026-07-20T00:00:02Z".into(),
+    };
+
+    let body = DispatchEnvelopeBodyV2 {
+        workflow_id: workflow_id.clone(),
+        workflow_revision: workflow_revision.clone(),
+        unit_id: unit_id.clone(),
+        attempt: 1,
+        execution_role: ExecutionRoleV1::Implementer,
+        commit_mode: CommitModeV1::Atomic,
+        provenance_ref: provenance_ref.clone(),
+        base_commit_sha: "0".repeat(40),
+        capability_bundle_digest: DIGEST_D.into(),
+        acceptance_contract_digest: DIGEST_A.into(),
+        context_manifest_digest: context_manifest_digest.clone(),
+        worker_manifest_digest: worker_manifest_digest.clone(),
+        sandbox_profile_digest: sandbox_profile_digest.clone(),
+        budget: DispatchBudgetV1 {
+            max_tokens: Some(100),
+            max_compute_time_ms: Some(1_000),
+        },
+        trust_tier: TrustTierV1::Governed,
+        idempotency_key: "dispatch:fixture-v5:unit-fixture-v5:1".into(),
+        issued_at: "2026-07-20T00:01:00Z".into(),
+        expires_at: "2026-07-20T01:01:00Z".into(),
+    };
+    let dispatch_v3 = DispatchEnvelopeV3 {
+        envelope_digest: dispatch_envelope_v3_body_digest(
+            &body,
+            ActionEvidenceVersionV1::SealedV3,
+            DIGEST_B,
+            DIGEST_C,
+            Some(DIGEST_A),
+        )
+        .expect("serialize deterministic nested V3 V5 fixture"),
+        body,
+        action_evidence_version: ActionEvidenceVersionV1::SealedV3,
+        repository_binding_digest: DIGEST_B.into(),
+        ledger_authority_realm_digest: DIGEST_C.into(),
+        governed_packet_digest: Some(DIGEST_A.into()),
+    };
+    let mut dispatch_v4 = DispatchEnvelopeV4 {
+        dispatch_v3,
+        workflow_graph_digest: DIGEST_D.into(),
+        workflow_graph_declaration_event_ref: fixed_event_id(70),
+        envelope_digest: String::new(),
+    };
+    dispatch_v4.envelope_digest = dispatch_envelope_v4_digest(
+        &dispatch_v4.dispatch_v3,
+        &dispatch_v4.workflow_graph_digest,
+        &dispatch_v4.workflow_graph_declaration_event_ref,
+    )
+    .expect("serialize deterministic nested V4 V5 fixture");
+
+    let mut dispatch_v5 = DispatchEnvelopeV5 {
+        dispatch_v4,
+        context_manifest_declaration_event_ref: fixed_event_id(71),
+        context_manifest_digest,
+        worker_manifest_declaration_event_ref: fixed_event_id(72),
+        worker_manifest_digest,
+        sandbox_profile_declaration_event_ref: fixed_event_id(73),
+        sandbox_profile_digest,
+        attempt_context_declaration_event_ref: None,
+        attempt_context_digest: None,
+        envelope_digest: String::new(),
+    };
+    dispatch_v5.envelope_digest = dispatch_envelope_v5_digest(&dispatch_v5)
+        .expect("serialize deterministic manifest-bound V5 fixture");
+
+    let attempt_context = AttemptContextContentV1 {
+        attempt: 2,
+        retry_feedback: vec![AttemptFeedbackV1 {
+            feedback_ref: "cas:retry-feedback-fixture-v5".into(),
+            feedback_digest: DIGEST_A.into(),
+        }],
+        prior_candidates: vec![PriorCandidateRefV1 {
+            candidate_ref: "refs/buildplane/candidates/workflow-fixture-v5/unit-fixture-v5/1"
+                .into(),
+            candidate_digest: DIGEST_B.into(),
+        }],
+    };
+    let attempt_context_digest = attempt_context_content_v1_digest(&attempt_context)
+        .expect("serialize deterministic V5 retry context fixture");
+    let attempt_context_declaration = AttemptContextDeclaredV1 {
+        run_id,
+        workflow_id,
+        workflow_revision,
+        unit_id,
+        attempt: 2,
+        provenance_ref,
+        attempt_context,
+        attempt_context_digest,
+        idempotency_key: "attempt-context:fixture-v5:2".into(),
+        declared_at: "2026-07-20T00:02:00Z".into(),
+    };
+
+    vec![
+        serde_json::to_value(Payload::ContextManifestDeclaredV1(context_declaration)).unwrap(),
+        serde_json::to_value(Payload::WorkerManifestDeclaredV1(worker_declaration)).unwrap(),
+        serde_json::to_value(Payload::SandboxProfileDeclaredV1(sandbox_declaration)).unwrap(),
+        serde_json::to_value(Payload::DispatchEnvelopeV5(dispatch_v5)).unwrap(),
+        serde_json::to_value(Payload::AttemptContextDeclaredV1(
+            attempt_context_declaration,
+        ))
+        .unwrap(),
     ]
 }
 
@@ -1178,6 +1388,7 @@ fn main() {
     out.extend(trust_spine_fixtures());
     out.extend(workflow_graph_fixtures());
     out.extend(graph_bound_dispatch_v4_fixtures());
+    out.extend(manifest_bound_dispatch_v5_fixtures());
     out.extend(activity_claim_fixtures());
     out.extend(action_evidence_v3_fixtures());
     out.extend(workflow_lifecycle_fixtures());

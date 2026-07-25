@@ -410,31 +410,22 @@ describe("governed run front door", () => {
 		expectRootUnchanged(root, before);
 	});
 
-	it("rejects a graph/raw help request before the legacy bundle can be constructed", async () => {
+	it("returns help for a graph/raw request before the legacy bundle can be constructed", async () => {
 		const root = createGitProject();
 		const before = snapshotRoot(root);
 
 		const result = await runCliCapture(
 			root,
-			[
-				"run",
-				"--graph",
-				"nonexistent-governed-graph.json",
-				"--raw",
-				"--help",
-				"--json",
-			],
+			["run", "--graph", "nonexistent-governed-graph.json", "--raw", "--help"],
 			legacyBundleMustNotBeConstructed(),
 		);
 
-		expect(result.exitCode).toBe(1);
-		expect(JSON.parse(result.stdout.join("\n"))).toMatchObject({
-			error: {
-				code: "CLI_ERROR",
-				message:
-					"--graph cannot be combined with --raw, --envelope, or --tui because governed graph input is preview-only until host-backed graph admission exists.",
-			},
-		});
+		expect(result.exitCode).toBe(0);
+		expect(result.stderr).toEqual([]);
+		expect(result.stdout.join("\n")).toContain(
+			"buildplane run --packet <path> [options]",
+		);
+		expect(hostResolver.resolve).not.toHaveBeenCalled();
 		expectRootUnchanged(root, before);
 	});
 

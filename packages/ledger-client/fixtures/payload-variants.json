@@ -559,6 +559,153 @@
 		}
 	},
 	{
+		"ContextManifestDeclaredV1": {
+			"attempt": 1,
+			"context_manifest": {
+				"entries": [
+					{
+						"digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+						"kind": "repository_file",
+						"provenance_ref": "provenance:repository",
+						"reference": "repo:AGENTS.md",
+						"taint": "clean",
+						"trust": "verified"
+					}
+				]
+			},
+			"context_manifest_digest": "sha256:5c5abdfc22851095d0ce395c24a167a2ae56cb6b04dce2dbfdcf35eb514c6aff",
+			"declared_at": "2026-07-20T00:00:00Z",
+			"idempotency_key": "context-manifest:fixture-v5:1",
+			"provenance_ref": "admission:fixture-v5",
+			"run_id": "01919000-0000-7000-8000-0000000000ff",
+			"unit_id": "unit-fixture-v5",
+			"workflow_id": "workflow-fixture-v5",
+			"workflow_revision": "r1"
+		}
+	},
+	{
+		"WorkerManifestDeclaredV1": {
+			"attempt": 1,
+			"declared_at": "2026-07-20T00:00:01Z",
+			"idempotency_key": "worker-manifest:fixture-v5:1",
+			"provenance_ref": "admission:fixture-v5",
+			"run_id": "01919000-0000-7000-8000-0000000000ff",
+			"unit_id": "unit-fixture-v5",
+			"worker_manifest": {
+				"capability_bundle_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+				"execution_role": "implementer",
+				"harness": "open_ai_api_sdk",
+				"image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+				"model": "gpt-5",
+				"provider": "open_ai",
+				"skill_manifest_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+				"tool_manifest_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+			},
+			"worker_manifest_digest": "sha256:32bf096adf69b7e0d71969c4950fac86d0c5eae24fcbb13701e908a185f90778",
+			"workflow_id": "workflow-fixture-v5",
+			"workflow_revision": "r1"
+		}
+	},
+	{
+		"SandboxProfileDeclaredV1": {
+			"attempt": 1,
+			"declared_at": "2026-07-20T00:00:02Z",
+			"idempotency_key": "sandbox-profile:fixture-v5:1",
+			"provenance_ref": "admission:fixture-v5",
+			"run_id": "01919000-0000-7000-8000-0000000000ff",
+			"sandbox_profile": {
+				"environment_manifest_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+				"image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+				"mount_manifest_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+				"network_policy_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+				"read_only_rootfs": true,
+				"resource_policy_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+				"rootless": true,
+				"runtime": "rootless_oci",
+				"secret_handle_manifest_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+				"writable_overlay_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+			},
+			"sandbox_profile_digest": "sha256:7cfeca1ebca89e05aaaf35d9777f720db2d2cd4958d8c334b64e2b202db7c310",
+			"unit_id": "unit-fixture-v5",
+			"workflow_id": "workflow-fixture-v5",
+			"workflow_revision": "r1"
+		}
+	},
+	{
+		"DispatchEnvelopeV5": {
+			"context_manifest_declaration_event_ref": "01919000-0000-7000-8000-000000000071",
+			"context_manifest_digest": "sha256:5c5abdfc22851095d0ce395c24a167a2ae56cb6b04dce2dbfdcf35eb514c6aff",
+			"dispatch_v4": {
+				"dispatch_v3": {
+					"action_evidence_version": "sealed_v3",
+					"body": {
+						"acceptance_contract_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+						"attempt": 1,
+						"base_commit_sha": "0000000000000000000000000000000000000000",
+						"budget": {
+							"max_compute_time_ms": 1000,
+							"max_tokens": 100
+						},
+						"capability_bundle_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+						"commit_mode": "atomic",
+						"context_manifest_digest": "sha256:5c5abdfc22851095d0ce395c24a167a2ae56cb6b04dce2dbfdcf35eb514c6aff",
+						"execution_role": "implementer",
+						"expires_at": "2026-07-20T01:01:00Z",
+						"idempotency_key": "dispatch:fixture-v5:unit-fixture-v5:1",
+						"issued_at": "2026-07-20T00:01:00Z",
+						"provenance_ref": "admission:fixture-v5",
+						"sandbox_profile_digest": "sha256:7cfeca1ebca89e05aaaf35d9777f720db2d2cd4958d8c334b64e2b202db7c310",
+						"trust_tier": "governed",
+						"unit_id": "unit-fixture-v5",
+						"worker_manifest_digest": "sha256:32bf096adf69b7e0d71969c4950fac86d0c5eae24fcbb13701e908a185f90778",
+						"workflow_id": "workflow-fixture-v5",
+						"workflow_revision": "r1"
+					},
+					"envelope_digest": "sha256:184d04342c0cf2734f428ffa354996053ded738fe9b71fdf4a808e665cac2ca6",
+					"governed_packet_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+					"ledger_authority_realm_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+					"repository_binding_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+				},
+				"envelope_digest": "sha256:fdd3eb5bb94daaa95d070b001d3e82490beb0fcf1e3b4eee09e46accbf3617f6",
+				"workflow_graph_declaration_event_ref": "01919000-0000-7000-8000-000000000070",
+				"workflow_graph_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+			},
+			"envelope_digest": "sha256:367f81d60b26da0f5f190c73827bd14737136058b5df51cadab3f382db48ba26",
+			"sandbox_profile_declaration_event_ref": "01919000-0000-7000-8000-000000000073",
+			"sandbox_profile_digest": "sha256:7cfeca1ebca89e05aaaf35d9777f720db2d2cd4958d8c334b64e2b202db7c310",
+			"worker_manifest_declaration_event_ref": "01919000-0000-7000-8000-000000000072",
+			"worker_manifest_digest": "sha256:32bf096adf69b7e0d71969c4950fac86d0c5eae24fcbb13701e908a185f90778"
+		}
+	},
+	{
+		"AttemptContextDeclaredV1": {
+			"attempt": 2,
+			"attempt_context": {
+				"attempt": 2,
+				"prior_candidates": [
+					{
+						"candidate_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+						"candidate_ref": "refs/buildplane/candidates/workflow-fixture-v5/unit-fixture-v5/1"
+					}
+				],
+				"retry_feedback": [
+					{
+						"feedback_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+						"feedback_ref": "cas:retry-feedback-fixture-v5"
+					}
+				]
+			},
+			"attempt_context_digest": "sha256:fd733e8f7924042e801b4da90ffe478a56d7b55d03d38af1588bb20eb888234b",
+			"declared_at": "2026-07-20T00:02:00Z",
+			"idempotency_key": "attempt-context:fixture-v5:2",
+			"provenance_ref": "admission:fixture-v5",
+			"run_id": "01919000-0000-7000-8000-0000000000ff",
+			"unit_id": "unit-fixture-v5",
+			"workflow_id": "workflow-fixture-v5",
+			"workflow_revision": "r1"
+		}
+	},
+	{
 		"ActivityClaimedV1": {
 			"action_kind": "process",
 			"action_request_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",

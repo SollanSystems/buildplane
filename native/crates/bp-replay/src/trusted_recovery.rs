@@ -16,7 +16,7 @@ use crate::activity_decision::{
 use crate::engine::{EngineError, ReplayEngine, TrustSpineSignerRole, TrustedReplayAuthorities};
 use crate::otel_projection::{VerifiedOtelProjectionErrorV1, VerifiedOtelProjectionV1};
 use crate::reader::VerifiedEvent;
-use crate::state::{ReplayIssue, WorkflowInstanceV1};
+use crate::state::{has_complete_v5_manifest_dispatch_witnesses, ReplayIssue, WorkflowInstanceV1};
 use crate::tape_integrity::{
     verify_full_tape_integrity_v1, TapeIntegrityError, TapeIntegrityReportV1,
 };
@@ -1880,7 +1880,7 @@ fn is_trusted_governed_recovery_workflow(workflow: &WorkflowInstanceV1) -> bool 
         // succeeds in trusted replay. Require both persisted witnesses here so
         // an incomplete/migrated projection cannot be mistaken for graph-bound
         // recovery authority.
-        4 => {
+        4 | 5 => {
             dispatch.workflow_graph_digest.is_some()
                 && dispatch
                     .workflow_graph_digest
@@ -1890,6 +1890,8 @@ fn is_trusted_governed_recovery_workflow(workflow: &WorkflowInstanceV1) -> bool 
                     .workflow_graph_declaration_event_ref
                     .as_ref()
                     .is_some_and(|event_ref| !event_ref.to_string().trim().is_empty())
+                && (dispatch.dispatch_version != 5
+                    || has_complete_v5_manifest_dispatch_witnesses(workflow))
         }
         _ => false,
     }
@@ -2073,6 +2075,7 @@ mod tests {
                 action_evidence_version: Some(ActionEvidenceVersionV1::SealedV3),
             },
             workflow_graph: None,
+            manifest_declarations: None,
             action_evidence: None,
             retry_context: None,
             timers: BTreeMap::new(),
@@ -2122,6 +2125,17 @@ mod tests {
             }),
             terminal: None,
         }
+    }
+
+    #[test]
+    fn v5_recovery_fails_closed_without_the_complete_manifest_witnesses() {
+        let mut workflow = workflow(DIGEST_A, None);
+        workflow.dispatch.dispatch_version = 5;
+        workflow.dispatch.workflow_graph_digest = Some(DIGEST_A.into());
+        workflow.dispatch.workflow_graph_declaration_event_ref = Some(EventId::new());
+        workflow.manifest_declarations = None;
+
+        assert!(!is_trusted_governed_recovery_workflow(&workflow));
     }
 
     #[test]

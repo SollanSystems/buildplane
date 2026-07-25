@@ -3,16 +3,19 @@
 use crate::state::{
     ActionEvidenceReplayState, ActionReceiptReplayState, ActionReceiptSetReplayState,
     ActionReplayState, ActionRequestReplayState, ActivityClaimReplayState,
-    ActivityHeartbeatReplayState, ActivityResultReplayState, AttemptContextReplayState,
-    CandidateAcceptanceReplayState, CandidateArtifactReplayState, CandidateCompletionReplayState,
-    CheckpointRef, FileObservation, ModelActionAuthorizationReplayState,
+    ActivityHeartbeatReplayState, ActivityResultReplayState, AttemptContextDeclarationReplayState,
+    AttemptContextReplayState, CandidateAcceptanceReplayState, CandidateArtifactReplayState,
+    CandidateCompletionReplayState, CheckpointRef, ContextManifestDeclarationReplayState,
+    FileObservation, ManifestDispatchWitnessesReplayState, ModelActionAuthorizationReplayState,
     ModelActionIntentReplayState, PlanAcceptanceReplayState, PlanAdmissionReplayState,
     PlanReceiptReplayState, PromotionApprovalRequestReplayState, PromotionDecisionReplayState,
     PromotionExecutionClaimReplayState, PromotionReconciliationReplayState, PromotionReplayState,
     PromotionResultReplayState, RecordedActivityState, ReplayIssue, ReplayState,
-    ReviewVerdictReplayState, WorkflowCancellationReplayState, WorkflowDispatchReplayState,
-    WorkflowGraphReplayState, WorkflowGraphV2ReplayState, WorkflowInstanceV1, WorkflowPhaseV1,
-    WorkflowTerminalReplayState, WorkflowTimerFiredReplayState, WorkflowTimerReplayState,
+    ReviewVerdictReplayState, SandboxProfileDeclarationReplayState,
+    WorkerManifestDeclarationReplayState, WorkflowCancellationReplayState,
+    WorkflowDispatchReplayState, WorkflowGraphReplayState, WorkflowGraphV2ReplayState,
+    WorkflowInstanceV1, WorkflowPhaseV1, WorkflowTerminalReplayState,
+    WorkflowTimerFiredReplayState, WorkflowTimerReplayState,
 };
 use bp_ledger::canonicalize::{
     canonical_event_hash, canonicalize, is_canonical_buildplane_candidate_ref,
@@ -35,25 +38,26 @@ use bp_ledger::payload::{
         action_receipt_recorded_v2_digest, action_receipt_set_v1_digest,
         action_requested_v2_digest, candidate_completion_recorded_v1_digest,
         candidate_view_v1_digest, dispatch_envelope_v2_body_digest,
-        dispatch_envelope_v3_body_digest, dispatch_envelope_v4_digest,
+        dispatch_envelope_v3_body_digest, dispatch_envelope_v4_digest, dispatch_envelope_v5_digest,
         governed_dispatch_policy_digest_v1, model_action_authorized_v1_digest,
         model_action_authorized_v2_digest, model_action_intent_v1_digest,
         promotion_execution_claimed_v1_digest, review_verdict_output_v1_digest,
         ActionEvidenceVersionV1, ActionKindV1, ActionReceiptOutcomeV2, ActionReceiptRecordedV2,
         ActionReceiptSetRecordedV1, ActionRequestedV2, ActionResourceUsageV1,
-        AttemptContextRecordedV1, CandidateAcceptanceOutcomeV1, CandidateAcceptanceRecordedV1,
-        CandidateCompletionRecordedV1, CandidateCreatedV1, CandidateCreatedV2, CommitModeV1,
-        DispatchBudgetV1, DispatchEnvelopeBodyV2, DispatchEnvelopeV1, DispatchEnvelopeV2,
-        DispatchEnvelopeV3, DispatchEnvelopeV4, ExecutionRoleV1, ModelActionAuthorizedV1,
+        AttemptContextDeclaredV1, AttemptContextRecordedV1, CandidateAcceptanceOutcomeV1,
+        CandidateAcceptanceRecordedV1, CandidateCompletionRecordedV1, CandidateCreatedV1,
+        CandidateCreatedV2, CommitModeV1, ContextManifestDeclaredV1, DispatchBudgetV1,
+        DispatchEnvelopeBodyV2, DispatchEnvelopeV1, DispatchEnvelopeV2, DispatchEnvelopeV3,
+        DispatchEnvelopeV4, DispatchEnvelopeV5, ExecutionRoleV1, ModelActionAuthorizedV1,
         ModelActionAuthorizedV2, ModelActionCandidateBindingV1, ModelActionIntentV1,
         PromotionApprovalRequestedV1, PromotionDecisionKindV1, PromotionDecisionRecordedV1,
         PromotionExecutionClaimedV1, PromotionGitBindingV1, PromotionReconciliationResolvedV1,
         PromotionResultOutcomeV1, PromotionResultRecordedV1, PromotionWorktreeSyncStateV1,
         ReconciliationResolutionOutcomeV1, ReviewDecisionV1, ReviewVerdictOutputV1,
-        ReviewVerdictRecordedV1, ReviewVerdictRecordedV2, TrustTierV1, WorkflowCancellationCauseV1,
-        WorkflowCancellationRequestedV1, WorkflowGraphDeclaredV1, WorkflowGraphDeclaredV2,
-        WorkflowTerminalOutcomeV1, WorkflowTerminalV1, WorkflowTerminalV2, WorkflowTimerFiredV1,
-        WorkflowTimerScheduledV1,
+        ReviewVerdictRecordedV1, ReviewVerdictRecordedV2, SandboxProfileDeclaredV1, TrustTierV1,
+        WorkerManifestDeclaredV1, WorkflowCancellationCauseV1, WorkflowCancellationRequestedV1,
+        WorkflowGraphDeclaredV1, WorkflowGraphDeclaredV2, WorkflowTerminalOutcomeV1,
+        WorkflowTerminalV1, WorkflowTerminalV2, WorkflowTimerFiredV1, WorkflowTimerScheduledV1,
     },
     unit_lifecycle::{UnitCancelledV1, UnitCompletedV1, UnitFailedV1, UnitStartedV1},
     workspace::{PostWriteState, WorkspaceWriteV1},
@@ -124,6 +128,19 @@ pub(crate) fn apply_with_verified_signer(
         Payload::DispatchEnvelopeV2(p) => apply_dispatch_envelope_v2(state, event, p),
         Payload::DispatchEnvelopeV3(p) => apply_dispatch_envelope_v3(state, event, p),
         Payload::DispatchEnvelopeV4(p) => apply_dispatch_envelope_v4(state, event, p),
+        Payload::DispatchEnvelopeV5(p) => apply_dispatch_envelope_v5(state, event, p, signer),
+        Payload::ContextManifestDeclaredV1(p) => {
+            apply_context_manifest_declared_v1(state, event, p, signer)
+        }
+        Payload::WorkerManifestDeclaredV1(p) => {
+            apply_worker_manifest_declared_v1(state, event, p, signer)
+        }
+        Payload::SandboxProfileDeclaredV1(p) => {
+            apply_sandbox_profile_declared_v1(state, event, p, signer)
+        }
+        Payload::AttemptContextDeclaredV1(p) => {
+            apply_attempt_context_declared_v1(state, event, p, signer)
+        }
         Payload::WorkflowGraphDeclaredV1(p) => {
             apply_workflow_graph_declared_v1(state, event, p)
         }
@@ -611,7 +628,7 @@ fn workflow_graph_has_dispatched(
     })
 }
 
-/// V2 graph declarations gate only V4 dispatches. A V3 record is deliberately
+/// V2 graph declarations gate graph-bound V4/V5 dispatches. A V3 record is deliberately
 /// not retrofitted with a graph requirement, so it cannot make a later V2
 /// declaration invalid merely by sharing the same workflow identity.
 fn workflow_graph_v2_has_dispatched(
@@ -621,12 +638,12 @@ fn workflow_graph_v2_has_dispatched(
     workflow_revision: &str,
 ) -> bool {
     state.workflow_instances.values().any(|workflow| {
-        workflow.dispatch.dispatch_version == 4
+        matches!(workflow.dispatch.dispatch_version, 4 | 5)
             && workflow.run_id == run_id
             && workflow.workflow_id == workflow_id
             && workflow.workflow_revision == workflow_revision
     }) || state.workflow_instance.as_ref().is_some_and(|workflow| {
-        workflow.dispatch.dispatch_version == 4
+        matches!(workflow.dispatch.dispatch_version, 4 | 5)
             && workflow.run_id == run_id
             && workflow.workflow_id == workflow_id
             && workflow.workflow_revision == workflow_revision
@@ -835,6 +852,288 @@ fn apply_workflow_graph_declared_v2(
     );
 }
 
+/// V5 declaration identities include every immutable workflow-attempt field.
+/// In particular, the revision is part of the key: a declaration from another
+/// revision must never become interchangeable merely because the historical
+/// workflow-instance map predates revision-aware keys.
+fn manifest_declaration_key(
+    run_id: &str,
+    workflow_id: &str,
+    workflow_revision: &str,
+    unit_id: &str,
+    attempt: u32,
+) -> String {
+    format!("{run_id}\0{workflow_id}\0{workflow_revision}\0{unit_id}\0{attempt}")
+}
+
+fn manifest_declaration_arrived_after_v5_dispatch(
+    state: &ReplayState,
+    run_id: &str,
+    workflow_id: &str,
+    workflow_revision: &str,
+    unit_id: &str,
+    attempt: u32,
+) -> bool {
+    state
+        .workflow_instances
+        .values()
+        .chain(state.workflow_instance.iter())
+        .any(|workflow| {
+            workflow.dispatch.dispatch_version == 5
+                && workflow.run_id == run_id
+                && workflow.workflow_id == workflow_id
+                && workflow.workflow_revision == workflow_revision
+                && workflow.unit_id == unit_id
+                && workflow.attempt == attempt
+        })
+}
+
+fn validate_manifest_declaration_identity(
+    state: &ReplayState,
+    event: &Event,
+    run_id: &str,
+    workflow_id: &str,
+    workflow_revision: &str,
+    unit_id: &str,
+    attempt: u32,
+) -> Result<String, String> {
+    if run_id != event.run_id.to_string() {
+        return Err("manifest declaration run_id does not match its event run_id".into());
+    }
+    if manifest_declaration_arrived_after_v5_dispatch(
+        state,
+        run_id,
+        workflow_id,
+        workflow_revision,
+        unit_id,
+        attempt,
+    ) {
+        return Err(
+            "manifest declaration arrived after the V5 dispatch it could otherwise authorize"
+                .into(),
+        );
+    }
+    Ok(manifest_declaration_key(
+        run_id,
+        workflow_id,
+        workflow_revision,
+        unit_id,
+        attempt,
+    ))
+}
+
+fn apply_context_manifest_declared_v1(
+    state: &mut ReplayState,
+    event: &Event,
+    declaration: &ContextManifestDeclaredV1,
+    signer: Option<&ActorKeyRef>,
+) {
+    if let Err(reason) = validate_v5_event_payload(event) {
+        reject_workflow_transition(state, event, reason);
+        return;
+    }
+    let key = match validate_manifest_declaration_identity(
+        state,
+        event,
+        &declaration.run_id,
+        &declaration.workflow_id,
+        &declaration.workflow_revision,
+        &declaration.unit_id,
+        declaration.attempt,
+    ) {
+        Ok(key) => key,
+        Err(reason) => {
+            reject_workflow_transition(state, event, reason);
+            return;
+        }
+    };
+    let projected = ContextManifestDeclarationReplayState {
+        event_id: event.id,
+        run_id: declaration.run_id.clone(),
+        workflow_id: declaration.workflow_id.clone(),
+        workflow_revision: declaration.workflow_revision.clone(),
+        unit_id: declaration.unit_id.clone(),
+        attempt: declaration.attempt,
+        provenance_ref: declaration.provenance_ref.clone(),
+        context_manifest: declaration.context_manifest.clone(),
+        context_manifest_digest: declaration.context_manifest_digest.clone(),
+        idempotency_key: declaration.idempotency_key.clone(),
+        declared_at: declaration.declared_at.clone(),
+        verified_signer: signer.cloned(),
+    };
+    if let Some(existing) = state.context_manifest_declarations.get(&key) {
+        if existing == &projected {
+            return;
+        }
+        reject_workflow_transition(
+            state,
+            event,
+            "context manifest declaration conflicts with an existing immutable declaration".into(),
+        );
+        return;
+    }
+    state.context_manifest_declarations.insert(key, projected);
+}
+
+fn apply_worker_manifest_declared_v1(
+    state: &mut ReplayState,
+    event: &Event,
+    declaration: &WorkerManifestDeclaredV1,
+    signer: Option<&ActorKeyRef>,
+) {
+    if let Err(reason) = validate_v5_event_payload(event) {
+        reject_workflow_transition(state, event, reason);
+        return;
+    }
+    let key = match validate_manifest_declaration_identity(
+        state,
+        event,
+        &declaration.run_id,
+        &declaration.workflow_id,
+        &declaration.workflow_revision,
+        &declaration.unit_id,
+        declaration.attempt,
+    ) {
+        Ok(key) => key,
+        Err(reason) => {
+            reject_workflow_transition(state, event, reason);
+            return;
+        }
+    };
+    let projected = WorkerManifestDeclarationReplayState {
+        event_id: event.id,
+        run_id: declaration.run_id.clone(),
+        workflow_id: declaration.workflow_id.clone(),
+        workflow_revision: declaration.workflow_revision.clone(),
+        unit_id: declaration.unit_id.clone(),
+        attempt: declaration.attempt,
+        provenance_ref: declaration.provenance_ref.clone(),
+        worker_manifest: declaration.worker_manifest.clone(),
+        worker_manifest_digest: declaration.worker_manifest_digest.clone(),
+        idempotency_key: declaration.idempotency_key.clone(),
+        declared_at: declaration.declared_at.clone(),
+        verified_signer: signer.cloned(),
+    };
+    if let Some(existing) = state.worker_manifest_declarations.get(&key) {
+        if existing == &projected {
+            return;
+        }
+        reject_workflow_transition(
+            state,
+            event,
+            "worker manifest declaration conflicts with an existing immutable declaration".into(),
+        );
+        return;
+    }
+    state.worker_manifest_declarations.insert(key, projected);
+}
+
+fn apply_sandbox_profile_declared_v1(
+    state: &mut ReplayState,
+    event: &Event,
+    declaration: &SandboxProfileDeclaredV1,
+    signer: Option<&ActorKeyRef>,
+) {
+    if let Err(reason) = validate_v5_event_payload(event) {
+        reject_workflow_transition(state, event, reason);
+        return;
+    }
+    let key = match validate_manifest_declaration_identity(
+        state,
+        event,
+        &declaration.run_id,
+        &declaration.workflow_id,
+        &declaration.workflow_revision,
+        &declaration.unit_id,
+        declaration.attempt,
+    ) {
+        Ok(key) => key,
+        Err(reason) => {
+            reject_workflow_transition(state, event, reason);
+            return;
+        }
+    };
+    let projected = SandboxProfileDeclarationReplayState {
+        event_id: event.id,
+        run_id: declaration.run_id.clone(),
+        workflow_id: declaration.workflow_id.clone(),
+        workflow_revision: declaration.workflow_revision.clone(),
+        unit_id: declaration.unit_id.clone(),
+        attempt: declaration.attempt,
+        provenance_ref: declaration.provenance_ref.clone(),
+        sandbox_profile: declaration.sandbox_profile.clone(),
+        sandbox_profile_digest: declaration.sandbox_profile_digest.clone(),
+        idempotency_key: declaration.idempotency_key.clone(),
+        declared_at: declaration.declared_at.clone(),
+        verified_signer: signer.cloned(),
+    };
+    if let Some(existing) = state.sandbox_profile_declarations.get(&key) {
+        if existing == &projected {
+            return;
+        }
+        reject_workflow_transition(
+            state,
+            event,
+            "sandbox profile declaration conflicts with an existing immutable declaration".into(),
+        );
+        return;
+    }
+    state.sandbox_profile_declarations.insert(key, projected);
+}
+
+fn apply_attempt_context_declared_v1(
+    state: &mut ReplayState,
+    event: &Event,
+    declaration: &AttemptContextDeclaredV1,
+    signer: Option<&ActorKeyRef>,
+) {
+    if let Err(reason) = validate_v5_event_payload(event) {
+        reject_workflow_transition(state, event, reason);
+        return;
+    }
+    let key = match validate_manifest_declaration_identity(
+        state,
+        event,
+        &declaration.run_id,
+        &declaration.workflow_id,
+        &declaration.workflow_revision,
+        &declaration.unit_id,
+        declaration.attempt,
+    ) {
+        Ok(key) => key,
+        Err(reason) => {
+            reject_workflow_transition(state, event, reason);
+            return;
+        }
+    };
+    let projected = AttemptContextDeclarationReplayState {
+        event_id: event.id,
+        run_id: declaration.run_id.clone(),
+        workflow_id: declaration.workflow_id.clone(),
+        workflow_revision: declaration.workflow_revision.clone(),
+        unit_id: declaration.unit_id.clone(),
+        attempt: declaration.attempt,
+        provenance_ref: declaration.provenance_ref.clone(),
+        attempt_context: declaration.attempt_context.clone(),
+        attempt_context_digest: declaration.attempt_context_digest.clone(),
+        idempotency_key: declaration.idempotency_key.clone(),
+        declared_at: declaration.declared_at.clone(),
+        verified_signer: signer.cloned(),
+    };
+    if let Some(existing) = state.attempt_context_declarations.get(&key) {
+        if existing == &projected {
+            return;
+        }
+        reject_workflow_transition(
+            state,
+            event,
+            "attempt context declaration conflicts with an existing immutable declaration".into(),
+        );
+        return;
+    }
+    state.attempt_context_declarations.insert(key, projected);
+}
+
 fn find_workflow_key_for_candidate(
     state: &ReplayState,
     event: &Event,
@@ -998,6 +1297,7 @@ fn apply_dispatch_envelope(state: &mut ReplayState, event: &Event, p: &DispatchE
                 action_evidence_version: None,
             },
             workflow_graph: None,
+            manifest_declarations: None,
             action_evidence: None,
             retry_context: None,
             timers: Default::default(),
@@ -1089,6 +1389,7 @@ fn apply_dispatch_envelope_v2(state: &mut ReplayState, event: &Event, p: &Dispat
                 action_evidence_version: None,
             },
             workflow_graph: None,
+            manifest_declarations: None,
             action_evidence: None,
             retry_context: None,
             timers: Default::default(),
@@ -1189,7 +1490,7 @@ fn apply_attempt_context_recorded_v1(
         );
         return;
     }
-    if !matches!(prior.dispatch.dispatch_version, 3 | 4)
+    if !matches!(prior.dispatch.dispatch_version, 3 | 4 | 5)
         || prior.dispatch.action_evidence_version != Some(ActionEvidenceVersionV1::SealedV3)
         || prior.dispatch.trust_tier != TrustTierV1::Governed
     {
@@ -1417,6 +1718,84 @@ fn validate_retry_dispatch_context_v4(
     Ok(context.clone())
 }
 
+/// V5 retry lineage binds the complete manifest-bound envelope digest. The
+/// outer digest commits to the nested V4 graph authority *and* every exact
+/// manifest declaration reference/digest, so accepting the nested V4 digest
+/// here would authorize a weaker envelope than the one being dispatched.
+fn validate_retry_dispatch_context_v5(
+    state: &ReplayState,
+    event: &Event,
+    dispatch: &DispatchEnvelopeV5,
+    declared_attempt_context: Option<&AttemptContextDeclarationReplayState>,
+) -> Result<AttemptContextReplayState, String> {
+    let body = &dispatch.dispatch_v4.dispatch_v3.body;
+    let Some(declared_attempt_context) = declared_attempt_context else {
+        return Err(
+            "manifest-bound V5 retry dispatch is missing its bound attempt context declaration"
+                .into(),
+        );
+    };
+    if declared_attempt_context.run_id != event.run_id.to_string()
+        || declared_attempt_context.workflow_id != body.workflow_id
+        || declared_attempt_context.workflow_revision != body.workflow_revision
+        || declared_attempt_context.unit_id != body.unit_id
+        || declared_attempt_context.attempt != body.attempt
+        || declared_attempt_context.provenance_ref != body.provenance_ref
+        || declared_attempt_context.attempt_context.attempt != body.attempt
+    {
+        return Err(
+            "manifest-bound V5 retry declaration does not bind the exact run/workflow/revision/unit/attempt/provenance"
+                .into(),
+        );
+    }
+    let Some(context) = state.attempt_contexts.get(&dispatch.envelope_digest) else {
+        let has_same_retry_identity = state.attempt_contexts.values().any(|existing| {
+            let existing = &existing.context;
+            existing.run_id == event.run_id.to_string()
+                && existing.workflow_id == body.workflow_id
+                && existing.workflow_revision == body.workflow_revision
+                && existing.unit_id == body.unit_id
+                && existing.next_attempt == body.attempt
+        });
+        return Err(if has_same_retry_identity {
+            "recorded prior-attempt context does not bind the exact manifest-bound V5 dispatch envelope digest"
+                .into()
+        } else {
+            "governed manifest-bound V5 retry dispatch requires a recorded prior-attempt context"
+                .into()
+        });
+    };
+    let attempt_context = &context.context;
+    if attempt_context.run_id != event.run_id.to_string()
+        || attempt_context.workflow_id != body.workflow_id
+        || attempt_context.workflow_revision != body.workflow_revision
+        || attempt_context.unit_id != body.unit_id
+        || attempt_context.next_attempt != body.attempt
+        || attempt_context.next_dispatch_envelope_digest != dispatch.envelope_digest
+        || attempt_context.next_dispatch_idempotency_key != body.idempotency_key
+    {
+        return Err(
+            "recorded prior-attempt context does not bind the exact manifest-bound V5 dispatch envelope digest or idempotency key"
+                .into(),
+        );
+    }
+    if !declared_attempt_context
+        .attempt_context
+        .retry_feedback
+        .iter()
+        .any(|feedback| {
+            feedback.feedback_ref == attempt_context.feedback_ref
+                && feedback.feedback_digest == attempt_context.feedback_digest
+        })
+    {
+        return Err(
+            "recorded prior-attempt context retry feedback does not bind an exact manifest-bound V5 retry feedback artifact"
+                .into(),
+        );
+    }
+    Ok(context.clone())
+}
+
 /// Resolve the exact prior V2 topology for a graph-bound dispatch. The graph
 /// map is keyed by run/workflow/revision, but the signed event reference is
 /// independently checked so a same-content declaration cannot be rebound.
@@ -1513,7 +1892,7 @@ fn validate_v4_graph_schedule(
 
     let is_same_graph_workflow = |workflow: &WorkflowInstanceV1| {
         event_matches_workflow_run(workflow, event)
-            && workflow.dispatch.dispatch_version == 4
+            && matches!(workflow.dispatch.dispatch_version, 4 | 5)
             && workflow.workflow_id == body.workflow_id
             && workflow.workflow_revision == body.workflow_revision
             && workflow.dispatch.workflow_graph_digest.as_deref()
@@ -1647,6 +2026,7 @@ fn apply_dispatch_envelope_v3(state: &mut ReplayState, event: &Event, p: &Dispat
                 action_evidence_version: Some(p.action_evidence_version),
             },
             workflow_graph: None,
+            manifest_declarations: None,
             action_evidence: Some(ActionEvidenceReplayState {
                 action_evidence_version: p.action_evidence_version,
                 actions: Default::default(),
@@ -1787,6 +2167,337 @@ fn apply_dispatch_envelope_v4(state: &mut ReplayState, event: &Event, p: &Dispat
                 action_evidence_version: Some(nested.action_evidence_version),
             },
             workflow_graph: Some(workflow_graph),
+            manifest_declarations: None,
+            action_evidence: Some(ActionEvidenceReplayState {
+                action_evidence_version: nested.action_evidence_version,
+                actions: Default::default(),
+                sealed_receipt_set: None,
+                pending_action_ids: vec![],
+                unknown_action_ids: vec![],
+                failed_action_ids: vec![],
+            }),
+            retry_context,
+            timers: Default::default(),
+            cancellation: None,
+            candidate: None,
+            candidate_completion: None,
+            acceptance: None,
+            reviews: Default::default(),
+            promotion_approval: None,
+            promotion: None,
+            terminal: None,
+        },
+    );
+    sync_workflow_compatibility_view(state, &key);
+}
+
+/// Resolve the immutable V5 declaration witnesses before admitting a
+/// manifest-bound dispatch. The tape order is represented by the projection:
+/// only declarations already present in these maps can be consumed.
+fn validate_v5_manifest_binding(
+    state: &ReplayState,
+    event: &Event,
+    dispatch: &DispatchEnvelopeV5,
+    signer: Option<&ActorKeyRef>,
+) -> Result<ManifestDispatchWitnessesReplayState, String> {
+    let body = &dispatch.dispatch_v4.dispatch_v3.body;
+    let run_id = event.run_id.to_string();
+    let key = manifest_declaration_key(
+        &run_id,
+        &body.workflow_id,
+        &body.workflow_revision,
+        &body.unit_id,
+        body.attempt,
+    );
+    let identity_matches = |declaration_run_id: &str,
+                            declaration_workflow_id: &str,
+                            declaration_workflow_revision: &str,
+                            declaration_unit_id: &str,
+                            declaration_attempt: u32,
+                            declaration_provenance_ref: &str| {
+        declaration_run_id == run_id
+            && declaration_workflow_id == body.workflow_id
+            && declaration_workflow_revision == body.workflow_revision
+            && declaration_unit_id == body.unit_id
+            && declaration_attempt == body.attempt
+            && declaration_provenance_ref == body.provenance_ref
+    };
+
+    let context_manifest = state
+        .context_manifest_declarations
+        .get(&key)
+        .ok_or_else(|| {
+            "manifest-bound V5 dispatch requires a preceding context manifest declaration for the same run/workflow/revision/unit/attempt"
+                .to_string()
+        })?;
+    if context_manifest.event_id != dispatch.context_manifest_declaration_event_ref
+        || context_manifest.context_manifest_digest != dispatch.context_manifest_digest
+        || dispatch.context_manifest_digest != body.context_manifest_digest
+        || !identity_matches(
+            &context_manifest.run_id,
+            &context_manifest.workflow_id,
+            &context_manifest.workflow_revision,
+            &context_manifest.unit_id,
+            context_manifest.attempt,
+            &context_manifest.provenance_ref,
+        )
+    {
+        return Err(
+            "manifest-bound V5 dispatch context manifest declaration does not bind the exact preceding run/workflow/revision/unit/attempt/provenance digest"
+                .into(),
+        );
+    }
+
+    let worker_manifest = state.worker_manifest_declarations.get(&key).ok_or_else(|| {
+        "manifest-bound V5 dispatch requires a preceding worker manifest declaration for the same run/workflow/revision/unit/attempt"
+            .to_string()
+    })?;
+    if worker_manifest.event_id != dispatch.worker_manifest_declaration_event_ref
+        || worker_manifest.worker_manifest_digest != dispatch.worker_manifest_digest
+        || dispatch.worker_manifest_digest != body.worker_manifest_digest
+        || !identity_matches(
+            &worker_manifest.run_id,
+            &worker_manifest.workflow_id,
+            &worker_manifest.workflow_revision,
+            &worker_manifest.unit_id,
+            worker_manifest.attempt,
+            &worker_manifest.provenance_ref,
+        )
+    {
+        return Err(
+            "manifest-bound V5 dispatch worker manifest declaration does not bind the exact preceding run/workflow/revision/unit/attempt/provenance digest"
+                .into(),
+        );
+    }
+    if worker_manifest.worker_manifest.execution_role != body.execution_role
+        || worker_manifest.worker_manifest.capability_bundle_digest != body.capability_bundle_digest
+    {
+        return Err(
+            "manifest-bound V5 dispatch worker manifest execution role or capability bundle does not match its V4 authority"
+                .into(),
+        );
+    }
+
+    let sandbox_profile = state.sandbox_profile_declarations.get(&key).ok_or_else(|| {
+        "manifest-bound V5 dispatch requires a preceding sandbox profile declaration for the same run/workflow/revision/unit/attempt"
+            .to_string()
+    })?;
+    if sandbox_profile.event_id != dispatch.sandbox_profile_declaration_event_ref
+        || sandbox_profile.sandbox_profile_digest != dispatch.sandbox_profile_digest
+        || dispatch.sandbox_profile_digest != body.sandbox_profile_digest
+        || !identity_matches(
+            &sandbox_profile.run_id,
+            &sandbox_profile.workflow_id,
+            &sandbox_profile.workflow_revision,
+            &sandbox_profile.unit_id,
+            sandbox_profile.attempt,
+            &sandbox_profile.provenance_ref,
+        )
+    {
+        return Err(
+            "manifest-bound V5 dispatch sandbox profile declaration does not bind the exact preceding run/workflow/revision/unit/attempt/provenance digest"
+                .into(),
+        );
+    }
+    if sandbox_profile.sandbox_profile.image_digest != worker_manifest.worker_manifest.image_digest
+    {
+        return Err(
+            "manifest-bound V5 dispatch sandbox profile image does not match its worker manifest image"
+                .into(),
+        );
+    }
+
+    let attempt_context = match (
+        body.attempt,
+        dispatch.attempt_context_declaration_event_ref.as_ref(),
+        dispatch.attempt_context_digest.as_deref(),
+    ) {
+        (1, None, None) => None,
+        (1, _, _) => {
+            return Err(
+                "manifest-bound V5 first attempt must not bind an attempt context declaration"
+                    .into(),
+            )
+        }
+        (_, Some(event_ref), Some(digest)) => {
+            let declaration = state.attempt_context_declarations.get(&key).ok_or_else(|| {
+                "manifest-bound V5 retry dispatch requires a preceding attempt context declaration for the same run/workflow/revision/unit/attempt"
+                    .to_string()
+            })?;
+            if declaration.event_id != *event_ref
+                || declaration.attempt_context_digest != digest
+                || declaration.attempt_context.attempt != body.attempt
+                || !identity_matches(
+                    &declaration.run_id,
+                    &declaration.workflow_id,
+                    &declaration.workflow_revision,
+                    &declaration.unit_id,
+                    declaration.attempt,
+                    &declaration.provenance_ref,
+                )
+            {
+                return Err(
+                    "manifest-bound V5 retry declaration does not bind the exact preceding run/workflow/revision/unit/attempt/provenance digest"
+                        .into(),
+                );
+            }
+            Some(declaration.clone())
+        }
+        _ => {
+            return Err(
+                "manifest-bound V5 retry dispatch requires paired attempt context declaration reference and digest"
+                    .into(),
+            )
+        }
+    };
+
+    Ok(ManifestDispatchWitnessesReplayState {
+        dispatch_verified_signer: signer.cloned(),
+        context_manifest: context_manifest.clone(),
+        worker_manifest: worker_manifest.clone(),
+        sandbox_profile: sandbox_profile.clone(),
+        attempt_context,
+    })
+}
+
+/// Project a manifest-bound V5 dispatch after it proves the complete nested
+/// V4 graph authority *and* the exact preceding context/worker/sandbox (and
+/// retry, when applicable) declaration witnesses. V1–V4 paths remain
+/// deliberately untouched and never gain this requirement retroactively.
+fn apply_dispatch_envelope_v5(
+    state: &mut ReplayState,
+    event: &Event,
+    p: &DispatchEnvelopeV5,
+    signer: Option<&ActorKeyRef>,
+) {
+    if let Err(reason) = validate_v5_event_payload(event) {
+        reject_workflow_transition(state, event, reason);
+        return;
+    }
+    if let Err(reason) = validate_dispatch_envelope_v5(p) {
+        reject_workflow_transition(state, event, reason);
+        return;
+    }
+    let workflow_graph = match validate_v4_graph_binding(state, event, &p.dispatch_v4) {
+        Ok(graph) => graph,
+        Err(reason) => {
+            reject_workflow_transition(state, event, reason);
+            return;
+        }
+    };
+    let manifest_declarations = match validate_v5_manifest_binding(state, event, p, signer) {
+        Ok(witnesses) => witnesses,
+        Err(reason) => {
+            reject_workflow_transition(state, event, reason);
+            return;
+        }
+    };
+
+    ensure_workflow_instances(state);
+    let nested = &p.dispatch_v4.dispatch_v3;
+    let body = &nested.body;
+    if workflow_instance_has_cross_revision_identity(
+        state,
+        event,
+        &body.workflow_id,
+        &body.workflow_revision,
+        &body.unit_id,
+        body.attempt,
+    ) {
+        reject_workflow_transition(
+            state,
+            event,
+            "manifest-bound V5 dispatch cannot reuse a workflow/unit/attempt identity across revisions until workflow evidence keys include the revision"
+                .into(),
+        );
+        return;
+    }
+    let key = workflow_instance_key(&body.workflow_id, &body.unit_id, body.attempt);
+    if let Some(existing) = state.workflow_instances.get(&key) {
+        if !event_matches_workflow_run(existing, event) {
+            reject_workflow_transition(
+                state,
+                event,
+                "dispatch envelope v5 reuses a workflow/unit/attempt key from a different run"
+                    .into(),
+            );
+            return;
+        }
+        if dispatch_v5_matches(existing, p) {
+            sync_workflow_compatibility_view(state, &key);
+            return;
+        }
+        let reason = format!(
+            "dispatch envelope v5 does not match existing workflow/unit/attempt {}/{} unit {} attempt {}",
+            existing.workflow_id, existing.workflow_revision, existing.unit_id, existing.attempt
+        );
+        reject_workflow_transition(state, event, reason);
+        return;
+    }
+    if let Err(reason) = validate_dispatch_run_scope(state, event, body.trust_tier) {
+        reject_workflow_transition(state, event, reason);
+        return;
+    }
+    if let Err(reason) = validate_v4_graph_schedule(state, event, &p.dispatch_v4) {
+        reject_workflow_transition(state, event, reason);
+        return;
+    }
+    let retry_context = if body.attempt > 1 {
+        match validate_retry_dispatch_context_v5(
+            state,
+            event,
+            p,
+            manifest_declarations.attempt_context.as_ref(),
+        ) {
+            Ok(context) => Some(context),
+            Err(reason) => {
+                reject_workflow_transition(state, event, reason);
+                return;
+            }
+        }
+    } else {
+        None
+    };
+
+    state.workflow_instances.insert(
+        key.clone(),
+        WorkflowInstanceV1 {
+            run_id: event.run_id.to_string(),
+            workflow_id: body.workflow_id.clone(),
+            workflow_revision: body.workflow_revision.clone(),
+            unit_id: body.unit_id.clone(),
+            attempt: body.attempt,
+            phase: WorkflowPhaseV1::Dispatched,
+            dispatch: WorkflowDispatchReplayState {
+                dispatch_version: 5,
+                event_id: event.id,
+                envelope_digest: p.envelope_digest.clone(),
+                provenance_ref: body.provenance_ref.clone(),
+                base_commit_sha: body.base_commit_sha.clone(),
+                repository_binding_digest: Some(nested.repository_binding_digest.clone()),
+                ledger_authority_realm_digest: Some(nested.ledger_authority_realm_digest.clone()),
+                governed_packet_digest: nested.governed_packet_digest.clone(),
+                workflow_graph_digest: Some(p.dispatch_v4.workflow_graph_digest.clone()),
+                workflow_graph_declaration_event_ref: Some(
+                    p.dispatch_v4.workflow_graph_declaration_event_ref,
+                ),
+                capability_bundle_digest: body.capability_bundle_digest.clone(),
+                acceptance_contract_digest: body.acceptance_contract_digest.clone(),
+                context_manifest_digest: body.context_manifest_digest.clone(),
+                worker_manifest_digest: body.worker_manifest_digest.clone(),
+                sandbox_profile_digest: body.sandbox_profile_digest.clone(),
+                execution_role: body.execution_role,
+                commit_mode: body.commit_mode,
+                budget: body.budget.clone(),
+                trust_tier: body.trust_tier,
+                idempotency_key: body.idempotency_key.clone(),
+                issued_at: body.issued_at.clone(),
+                expires_at: body.expires_at.clone(),
+                signature_ref: None,
+                action_evidence_version: Some(nested.action_evidence_version),
+            },
+            workflow_graph: Some(workflow_graph),
+            manifest_declarations: Some(manifest_declarations),
             action_evidence: Some(ActionEvidenceReplayState {
                 action_evidence_version: nested.action_evidence_version,
                 actions: Default::default(),
@@ -6826,6 +7537,15 @@ fn validate_v4_event_payload(event: &Event) -> Result<(), String> {
         .map_err(|error| format!("graph-bound V4 dispatch payload is not canonical: {error}"))
 }
 
+/// Direct reducer callers bypass storage ingress, so V5 declaration and
+/// dispatch records repeat the canonical payload checks before they can become
+/// manifest witnesses. Cross-event order and identity remain reducer-owned.
+fn validate_v5_event_payload(event: &Event) -> Result<(), String> {
+    canonicalize(event.clone())
+        .map(|_| ())
+        .map_err(|error| format!("manifest-bound V5 payload is not canonical: {error}"))
+}
+
 /// Locate the governed V3 workflow named by a native model-authorization
 /// record. The remaining action-request fields are checked against the exact
 /// projected write-ahead event before the record is stored.
@@ -7099,7 +7819,7 @@ fn workflow_supports_native_activity_claim(workflow: &WorkflowInstanceV1) -> boo
 /// remains readable for historical tapes, while `sealed_v3` opts into the
 /// stronger native activity-claim/result protocol below.
 fn supports_sealed_action_evidence(workflow: &WorkflowInstanceV1) -> bool {
-    matches!(workflow.dispatch.dispatch_version, 3 | 4)
+    matches!(workflow.dispatch.dispatch_version, 3 | 4 | 5)
         && matches!(
             workflow.dispatch.action_evidence_version,
             Some(ActionEvidenceVersionV1::SealedV2 | ActionEvidenceVersionV1::SealedV3)
@@ -7165,7 +7885,7 @@ fn validate_retry_action_namespace(
     request: &ActionRequestedV2,
 ) -> Result<(), String> {
     let is_governed_sealed_v3_retry = workflow.attempt > 1
-        && matches!(workflow.dispatch.dispatch_version, 3 | 4)
+        && matches!(workflow.dispatch.dispatch_version, 3 | 4 | 5)
         && workflow.dispatch.trust_tier == TrustTierV1::Governed
         && workflow.dispatch.action_evidence_version == Some(ActionEvidenceVersionV1::SealedV3);
     if !is_governed_sealed_v3_retry {
@@ -8119,6 +8839,62 @@ fn dispatch_v4_matches(workflow: &WorkflowInstanceV1, p: &DispatchEnvelopeV4) ->
         && workflow.dispatch.action_evidence_version == Some(nested.action_evidence_version)
 }
 
+fn dispatch_v5_matches(workflow: &WorkflowInstanceV1, p: &DispatchEnvelopeV5) -> bool {
+    let nested = &p.dispatch_v4.dispatch_v3;
+    let body = &nested.body;
+    let Some(witnesses) = workflow.manifest_declarations.as_ref() else {
+        return false;
+    };
+    workflow.dispatch.dispatch_version == 5
+        && workflow.workflow_id == body.workflow_id
+        && workflow.workflow_revision == body.workflow_revision
+        && workflow.unit_id == body.unit_id
+        && workflow.attempt == body.attempt
+        && workflow.dispatch.envelope_digest == p.envelope_digest
+        && workflow.dispatch.provenance_ref == body.provenance_ref
+        && workflow.dispatch.base_commit_sha == body.base_commit_sha
+        && workflow.dispatch.repository_binding_digest.as_deref()
+            == Some(nested.repository_binding_digest.as_str())
+        && workflow.dispatch.ledger_authority_realm_digest.as_deref()
+            == Some(nested.ledger_authority_realm_digest.as_str())
+        && workflow.dispatch.governed_packet_digest == nested.governed_packet_digest
+        && workflow.dispatch.workflow_graph_digest.as_deref()
+            == Some(p.dispatch_v4.workflow_graph_digest.as_str())
+        && workflow.dispatch.workflow_graph_declaration_event_ref
+            == Some(p.dispatch_v4.workflow_graph_declaration_event_ref)
+        && workflow.dispatch.capability_bundle_digest == body.capability_bundle_digest
+        && workflow.dispatch.acceptance_contract_digest == body.acceptance_contract_digest
+        && workflow.dispatch.context_manifest_digest == body.context_manifest_digest
+        && workflow.dispatch.worker_manifest_digest == body.worker_manifest_digest
+        && workflow.dispatch.sandbox_profile_digest == body.sandbox_profile_digest
+        && workflow.dispatch.execution_role == body.execution_role
+        && workflow.dispatch.commit_mode == body.commit_mode
+        && workflow.dispatch.budget == body.budget
+        && workflow.dispatch.trust_tier == body.trust_tier
+        && workflow.dispatch.idempotency_key == body.idempotency_key
+        && workflow.dispatch.issued_at == body.issued_at
+        && workflow.dispatch.expires_at == body.expires_at
+        && workflow.dispatch.signature_ref.is_none()
+        && workflow.dispatch.action_evidence_version == Some(nested.action_evidence_version)
+        && witnesses.context_manifest.event_id == p.context_manifest_declaration_event_ref
+        && witnesses.context_manifest.context_manifest_digest == p.context_manifest_digest
+        && witnesses.worker_manifest.event_id == p.worker_manifest_declaration_event_ref
+        && witnesses.worker_manifest.worker_manifest_digest == p.worker_manifest_digest
+        && witnesses.sandbox_profile.event_id == p.sandbox_profile_declaration_event_ref
+        && witnesses.sandbox_profile.sandbox_profile_digest == p.sandbox_profile_digest
+        && match (
+            witnesses.attempt_context.as_ref(),
+            p.attempt_context_declaration_event_ref.as_ref(),
+            p.attempt_context_digest.as_deref(),
+        ) {
+            (None, None, None) => true,
+            (Some(witness), Some(event_ref), Some(digest)) => {
+                witness.event_id == *event_ref && witness.attempt_context_digest == digest
+            }
+            _ => false,
+        }
+}
+
 fn candidate_matches_dispatch(workflow: &WorkflowInstanceV1, p: &CandidateCreatedV1) -> bool {
     workflow.workflow_id == p.workflow_id
         && workflow.unit_id == p.unit_id
@@ -8995,6 +9771,57 @@ fn validate_dispatch_envelope_v4(p: &DispatchEnvelopeV4) -> Result<(), String> {
     if p.envelope_digest != expected_digest {
         return Err(
             "dispatch envelope v4 envelope_digest does not match the canonical body digest".into(),
+        );
+    }
+    Ok(())
+}
+
+/// Validate V5's self-contained authority bytes. Declaration lookup, tape
+/// order, and cross-event identity are intentionally performed separately by
+/// [`validate_v5_manifest_binding`].
+fn validate_dispatch_envelope_v5(p: &DispatchEnvelopeV5) -> Result<(), String> {
+    validate_dispatch_envelope_v4(&p.dispatch_v4)?;
+    let body = &p.dispatch_v4.dispatch_v3.body;
+    if p.context_manifest_digest != body.context_manifest_digest
+        || p.worker_manifest_digest != body.worker_manifest_digest
+        || p.sandbox_profile_digest != body.sandbox_profile_digest
+    {
+        return Err(
+            "manifest-bound V5 dispatch declaration digests must equal the nested V4 dispatch authority"
+                .into(),
+        );
+    }
+    match (
+        body.attempt,
+        p.attempt_context_declaration_event_ref.as_ref(),
+        p.attempt_context_digest.as_deref(),
+    ) {
+        (1, None, None) => {}
+        (1, _, _) => {
+            return Err(
+                "manifest-bound V5 first attempt must not include an attempt context declaration"
+                    .into(),
+            )
+        }
+        (_, Some(_), Some(digest)) if is_canonical_sha256_digest(digest) => {}
+        (_, Some(_), Some(_)) => {
+            return Err(
+                "manifest-bound V5 retry attempt context digest must be a canonical sha256 digest"
+                    .into(),
+            )
+        }
+        _ => {
+            return Err(
+                "manifest-bound V5 retry dispatch requires paired attempt context declaration reference and digest"
+                    .into(),
+            )
+        }
+    }
+    let expected_digest = dispatch_envelope_v5_digest(p)
+        .map_err(|error| format!("dispatch envelope v5 body could not be serialized: {error}"))?;
+    if p.envelope_digest != expected_digest {
+        return Err(
+            "dispatch envelope v5 envelope_digest does not match the canonical body digest".into(),
         );
     }
     Ok(())

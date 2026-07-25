@@ -16,16 +16,19 @@ import type {
 	ActivityHeartbeatRecordedV1,
 	ActivityResultRecordedV1,
 	ActivityStartedV1,
+	AttemptContextDeclaredV1,
 	AttemptContextRecordedV1,
 	CandidateAcceptanceRecordedV1,
 	CandidateCompletionRecordedV1,
 	CandidateCreatedV1,
 	CandidateCreatedV2,
 	CapabilityDeniedV1,
+	ContextManifestDeclaredV1,
 	DispatchEnvelopeV1,
 	DispatchEnvelopeV2,
 	DispatchEnvelopeV3,
 	DispatchEnvelopeV4,
+	DispatchEnvelopeV5,
 	GitCheckpointV1,
 	ModelActionAuthorizedV1,
 	ModelActionAuthorizedV2,
@@ -48,6 +51,7 @@ import type {
 	RunCompletedV1,
 	RunFailedV1,
 	RunStartedV1,
+	SandboxProfileDeclaredV1,
 	TapeCheckpointV1,
 	ToolRequestStoredV1,
 	ToolResultV1,
@@ -55,6 +59,7 @@ import type {
 	UnitCompletedV1,
 	UnitFailedV1,
 	UnitStartedV1,
+	WorkerManifestDeclaredV1,
 	WorkflowCancellationRequestedV1,
 	WorkflowGraphDeclaredV1,
 	WorkflowGraphDeclaredV2,
@@ -96,6 +101,11 @@ export type Payload =
 	| { DispatchEnvelopeV2: DispatchEnvelopeV2 }
 	| { DispatchEnvelopeV3: DispatchEnvelopeV3 }
 	| { DispatchEnvelopeV4: DispatchEnvelopeV4 }
+	| { DispatchEnvelopeV5: DispatchEnvelopeV5 }
+	| { ContextManifestDeclaredV1: ContextManifestDeclaredV1 }
+	| { WorkerManifestDeclaredV1: WorkerManifestDeclaredV1 }
+	| { SandboxProfileDeclaredV1: SandboxProfileDeclaredV1 }
+	| { AttemptContextDeclaredV1: AttemptContextDeclaredV1 }
 	| { WorkflowGraphDeclaredV1: WorkflowGraphDeclaredV1 }
 	| { WorkflowGraphDeclaredV2: WorkflowGraphDeclaredV2 }
 	| { ActionRequestedV2: ActionRequestedV2 }

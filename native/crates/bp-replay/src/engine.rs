@@ -321,6 +321,10 @@ fn is_governed_dispatch(payload: &Payload) -> bool {
             dispatch.dispatch_v3.body.trust_tier
                 == bp_ledger::payload::trust_spine::TrustTierV1::Governed
         }
+        Payload::DispatchEnvelopeV5(dispatch) => {
+            dispatch.dispatch_v4.dispatch_v3.body.trust_tier
+                == bp_ledger::payload::trust_spine::TrustTierV1::Governed
+        }
         _ => false,
     }
 }
@@ -450,6 +454,11 @@ fn required_signer_role(
         | Payload::DispatchEnvelopeV2(_)
         | Payload::DispatchEnvelopeV3(_)
         | Payload::DispatchEnvelopeV4(_)
+        | Payload::DispatchEnvelopeV5(_)
+        | Payload::ContextManifestDeclaredV1(_)
+        | Payload::WorkerManifestDeclaredV1(_)
+        | Payload::SandboxProfileDeclaredV1(_)
+        | Payload::AttemptContextDeclaredV1(_)
         | Payload::WorkflowGraphDeclaredV1(_)
         | Payload::WorkflowGraphDeclaredV2(_)
         | Payload::ActionRequestedV2(_)

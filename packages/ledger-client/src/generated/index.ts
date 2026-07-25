@@ -398,6 +398,50 @@ export interface ArtifactRef {
 	size_bytes: number;
 }
 
+/** One immutable retry-feedback artifact included in an attempt context. */
+export interface AttemptFeedbackV1 {
+	feedback_ref: string;
+	feedback_digest: string;
+}
+
+/**
+ * One prior immutable candidate referenced by a retry. This prevents worker
+ * narratives from becoming retry input without an independently addressable
+ * candidate artifact.
+ */
+export interface PriorCandidateRefV1 {
+	candidate_ref: string;
+	candidate_digest: string;
+}
+
+/**
+ * Immutable retry context. It is absent only from a first attempt; a later
+ * V5 dispatch binds its declaration event and detached digest exactly.
+ */
+export interface AttemptContextContentV1 {
+	attempt: number;
+	retry_feedback: AttemptFeedbackV1[];
+	prior_candidates: PriorCandidateRefV1[];
+}
+
+/**
+ * `attempt_context_declared_v1` payload — the immutable retry feedback and
+ * candidate lineage admitted for one non-first workflow unit attempt.
+ */
+export interface AttemptContextDeclaredV1 {
+	run_id: string;
+	workflow_id: string;
+	workflow_revision: string;
+	unit_id: string;
+	attempt: number;
+	provenance_ref: string;
+	attempt_context: AttemptContextContentV1;
+	attempt_context_digest: string;
+	idempotency_key: string;
+	/** RFC3339 UTC timestamp. */
+	declared_at: string;
+}
+
 /**
  * `attempt_context_recorded_v1` payload — the kernel-signed retry lineage
  * decision for one otherwise terminal sealed_v3 unit attempt. The retry is
@@ -588,6 +632,84 @@ export interface CapabilityDeniedV1 {
 	target: string;
 }
 
+/**
+ * Closed kind vocabulary for one injected context entry. Context is an
+ * authority input, so callers cannot introduce a new kind and rely on an
+ * older reducer to interpret it permissively.
+ */
+export enum ContextManifestEntryKindV1 {
+	RepositoryFile = "repository_file",
+	Memory = "memory",
+	Plan = "plan",
+	Policy = "policy",
+	Skill = "skill",
+	Document = "document",
+	Artifact = "artifact",
+	External = "external",
+}
+
+/** Trust provenance assigned to one injected context entry before admission. */
+export enum ContextTrustLevelV1 {
+	Trusted = "trusted",
+	Verified = "verified",
+	Untrusted = "untrusted",
+	Quarantined = "quarantined",
+}
+
+/**
+ * Taint classification carried with an injected context entry. Taint is
+ * evidence, not a grant of authority; admission and policy choose whether a
+ * given taint may reach a worker.
+ */
+export enum ContextTaintV1 {
+	Clean = "clean",
+	External = "external",
+	Retrieved = "retrieved",
+	Remote = "remote",
+	Skill = "skill",
+}
+
+/**
+ * One content-addressed input made available to a governed worker. The
+ * reference is deliberately separate from the digest so tape replay can
+ * prove both the source handle and exact immutable bytes.
+ */
+export interface ContextManifestEntryV1 {
+	kind: ContextManifestEntryKindV1;
+	reference: string;
+	digest: string;
+	provenance_ref: string;
+	trust: ContextTrustLevelV1;
+	taint: ContextTaintV1;
+}
+
+/**
+ * Immutable, content-addressed set of all context injected into one worker
+ * attempt. The enclosing declaration event supplies run/unit lineage and
+ * delivery metadata; this type contains only semantic context material.
+ */
+export interface ContextManifestContentV1 {
+	entries: ContextManifestEntryV1[];
+}
+
+/**
+ * `context_manifest_declared_v1` payload — a signed declaration of the
+ * complete immutable context supplied to one workflow unit attempt.
+ */
+export interface ContextManifestDeclaredV1 {
+	run_id: string;
+	workflow_id: string;
+	workflow_revision: string;
+	unit_id: string;
+	attempt: number;
+	provenance_ref: string;
+	context_manifest: ContextManifestContentV1;
+	context_manifest_digest: string;
+	idempotency_key: string;
+	/** RFC3339 UTC timestamp. */
+	declared_at: string;
+}
+
 /** Bounded worker budget. `u32` keeps the generated TypeScript number exact. */
 export interface DispatchBudgetV1 {
 	max_tokens?: number;
@@ -751,6 +873,32 @@ export interface DispatchEnvelopeV4 {
 	envelope_digest: string;
 }
 
+/**
+ * `dispatch_envelope_v5` payload — an additive manifest-bound governed
+ * dispatch. V5 keeps the complete V4 envelope nested and binds the exact tape
+ * identities and content digests of context, worker, sandbox, and (after the
+ * first attempt) retry declarations. Nothing is copied field-by-field from a
+ * lower envelope revision, preventing authority fields from being lost.
+ */
+export interface DispatchEnvelopeV5 {
+	dispatch_v4: DispatchEnvelopeV4;
+	context_manifest_declaration_event_ref: EventId;
+	context_manifest_digest: string;
+	worker_manifest_declaration_event_ref: EventId;
+	worker_manifest_digest: string;
+	sandbox_profile_declaration_event_ref: EventId;
+	sandbox_profile_digest: string;
+	/** Absent only when `dispatch_v4.dispatch_v3.body.attempt == 1`. */
+	attempt_context_declaration_event_ref?: EventId;
+	/** Detached digest matching [`Self::attempt_context_declaration_event_ref`]. */
+	attempt_context_digest?: string;
+	/**
+	 * Detached V5 digest over the complete nested V4 material and every
+	 * declaration binding above.
+	 */
+	envelope_digest: string;
+}
+
 export interface EnvRedaction {
 	redacted: boolean;
 	hash: string;
@@ -791,6 +939,11 @@ export enum EventKind {
 	DispatchEnvelopeV2 = "dispatch_envelope_v2",
 	DispatchEnvelopeV3 = "dispatch_envelope_v3",
 	DispatchEnvelopeV4 = "dispatch_envelope_v4",
+	DispatchEnvelopeV5 = "dispatch_envelope_v5",
+	ContextManifestDeclaredV1 = "context_manifest_declared_v1",
+	WorkerManifestDeclaredV1 = "worker_manifest_declared_v1",
+	SandboxProfileDeclaredV1 = "sandbox_profile_declared_v1",
+	AttemptContextDeclaredV1 = "attempt_context_declared_v1",
 	WorkflowGraphDeclaredV1 = "workflow_graph_declared_v1",
 	WorkflowGraphDeclaredV2 = "workflow_graph_declared_v2",
 	ActionRequestedV2 = "action_requested_v2",
@@ -1800,6 +1953,51 @@ export interface RunStartedV1 {
 	parent_event_id?: EventId;
 }
 
+/**
+ * Runtime family required by a governed sandbox profile. Rootless OCI is the
+ * only currently admitted governed surface; a future expansion requires an
+ * additive enum revision rather than accepting a free-form runtime string.
+ */
+export enum SandboxRuntimeV1 {
+	RootlessOci = "rootless_oci",
+}
+
+/**
+ * Immutable sandbox policy for a worker attempt. All potentially mutable
+ * operational inputs are represented as content digests rather than ambient
+ * host configuration.
+ */
+export interface SandboxProfileContentV1 {
+	runtime: SandboxRuntimeV1;
+	rootless: boolean;
+	image_digest: string;
+	read_only_rootfs: boolean;
+	writable_overlay_digest: string;
+	mount_manifest_digest: string;
+	environment_manifest_digest: string;
+	network_policy_digest: string;
+	resource_policy_digest: string;
+	secret_handle_manifest_digest: string;
+}
+
+/**
+ * `sandbox_profile_declared_v1` payload — the immutable rootless OCI profile
+ * for one workflow unit attempt.
+ */
+export interface SandboxProfileDeclaredV1 {
+	run_id: string;
+	workflow_id: string;
+	workflow_revision: string;
+	unit_id: string;
+	attempt: number;
+	provenance_ref: string;
+	sandbox_profile: SandboxProfileContentV1;
+	sandbox_profile_digest: string;
+	idempotency_key: string;
+	/** RFC3339 UTC timestamp. */
+	declared_at: string;
+}
+
 /** Closed vocabulary of tape-root algorithms. v0.5 ships exactly one. */
 export enum TapeRootAlgorithm {
 	/**
@@ -1890,6 +2088,55 @@ export interface UnitStartedV1 {
 	unit_kind: string;
 	/** Snapshot of policy at unit start (opaque JSON). */
 	policy: Value;
+}
+
+/**
+ * Provider represented in a governed API-worker manifest. Ambient CLI hosts
+ * are intentionally absent from this closed GA vocabulary.
+ */
+export enum WorkerProviderV1 {
+	Anthropic = "anthropic",
+	OpenAi = "open_ai",
+}
+
+/** Credential-free worker harness selected by an immutable worker manifest. */
+export enum WorkerHarnessV1 {
+	AnthropicApiSdk = "anthropic_api_sdk",
+	OpenAiApiSdk = "open_ai_api_sdk",
+}
+
+/**
+ * Immutable identity of the exact governed worker runtime. The signed role is
+ * carried here as an authority input in addition to the nested dispatch role,
+ * allowing admission to reject mismatches before work begins.
+ */
+export interface WorkerManifestContentV1 {
+	provider: WorkerProviderV1;
+	model: string;
+	harness: WorkerHarnessV1;
+	image_digest: string;
+	tool_manifest_digest: string;
+	skill_manifest_digest: string;
+	capability_bundle_digest: string;
+	execution_role: ExecutionRoleV1;
+}
+
+/**
+ * `worker_manifest_declared_v1` payload — the immutable API worker identity
+ * selected for one workflow unit attempt.
+ */
+export interface WorkerManifestDeclaredV1 {
+	run_id: string;
+	workflow_id: string;
+	workflow_revision: string;
+	unit_id: string;
+	attempt: number;
+	provenance_ref: string;
+	worker_manifest: WorkerManifestContentV1;
+	worker_manifest_digest: string;
+	idempotency_key: string;
+	/** RFC3339 UTC timestamp. */
+	declared_at: string;
 }
 
 /**
