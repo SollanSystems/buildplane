@@ -32,8 +32,8 @@ use crate::payload::trust_spine::{
     ActionKindV1, ActionReceiptOutcomeV2, ActionReceiptRecordedV2, ActionReceiptSetEntryV1,
     ActionReceiptSetRecordedV1, ActionRequestedV2, CandidateAcceptanceOutcomeV1,
     CandidateAcceptanceRecordedV1, CandidateCompletionRecordedV1, CandidateCreatedV2, CommitModeV1,
-    DispatchEnvelopeV3, DispatchEnvelopeV4, ExecutionRoleV1, ModelActionAuthorizedV1,
-    ModelActionAuthorizedV2, ModelActionIntentV1, ModelRequestEvidenceV1,
+    DispatchEnvelopeV3, DispatchEnvelopeV4, DispatchEnvelopeV5, ExecutionRoleV1,
+    ModelActionAuthorizedV1, ModelActionAuthorizedV2, ModelActionIntentV1, ModelRequestEvidenceV1,
     PromotionApprovalRequestedV1, PromotionDecisionKindV1, PromotionDecisionRecordedV1,
     PromotionExecutionClaimedV1, PromotionExecutionLeaseBindingV1, PromotionGitBindingV1,
     PromotionResultOutcomeV1, PromotionResultRecordedV1, PromotionWorktreeSyncStateV1,
@@ -45,6 +45,11 @@ use crate::signing::{
     SignatureAlgorithm, TrustedPublicKeys, VerificationStatus,
 };
 use crate::storage::cas::{CanonicalCasRef, Cas};
+use crate::v5_manifest_witness::{
+    validate_v5_manifest_declaration_witnesses, V5ContextManifestDeclarationWitness,
+    V5ManifestDeclarationWitnesses, V5SandboxProfileDeclarationWitness,
+    V5WorkerManifestDeclarationWitness,
+};
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use ed25519_dalek::SigningKey;
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
@@ -441,6 +446,20 @@ pub struct GovernedDispatchAdmissionSealRequestV1 {
     pub dispatch_event_id: EventId,
 }
 
+/// Closed, observation-only read of one already-persisted manifest-bound V5
+/// dispatch. The caller can name only the tape event; storage reconstructs and
+/// verifies every graph and manifest witness before it creates an immutable
+/// non-authoritative shadow row.
+///
+/// This is deliberately not a V5 admission or execution capability. In
+/// particular, it never signs a dispatch, emits a checkpoint, or enables a
+/// claim, candidate, promotion, or action path.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GovernedDispatchV5ObservationRequestV1 {
+    pub run_id: RunId,
+    pub dispatch_event_id: EventId,
+}
+
 /// Broker-private request to record one candidate-bound operator promotion
 /// decision. The caller may name immutable tape records and choose only the
 /// closed `promote | reject` outcome. Candidate, base, target, acceptance,
@@ -599,6 +618,24 @@ pub enum GovernedDispatchAdmissionDispositionV1 {
         idempotency_key: String,
         checkpoint_event_id: EventId,
         checkpoint_event_digest: String,
+    },
+}
+
+/// Result of resolving a tape-backed V5 observation shadow. Neither variant
+/// conveys live dispatch authority; a later protected-host proof must be
+/// designed as a distinct, explicit transition before V5 can reach any effect
+/// consumer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GovernedDispatchV5ObservationDispositionV1 {
+    Observed {
+        dispatch_event_id: EventId,
+        dispatch_event_digest: String,
+        v5_envelope_digest: String,
+    },
+    Existing {
+        dispatch_event_id: EventId,
+        dispatch_event_digest: String,
+        v5_envelope_digest: String,
     },
 }
 
@@ -1482,6 +1519,73 @@ impl SqliteStore {
                   OR OLD.created_at != NEW.created_at
                 BEGIN
                     SELECT RAISE(ABORT, 'governed dispatch admissions permit only one checkpoint-seal transition');
+                END;
+
+            -- Immutable, observation-only shadow for a manifest-bound V5
+            -- dispatch. It records fully re-verified tape witnesses for audit
+            -- and later protected-host proof, but cannot become dispatch or
+            -- effect authority: no state transition exists in this slice.
+            CREATE TABLE IF NOT EXISTS governed_dispatch_v5_observations (
+                authority                              TEXT NOT NULL CHECK(authority = 'non_authoritative_v5_observation'),
+                observation_schema_version             INTEGER NOT NULL CHECK(observation_schema_version = 1),
+                run_id                                 TEXT NOT NULL,
+                idempotency_key                        TEXT NOT NULL,
+                workflow_id                            TEXT NOT NULL,
+                workflow_revision                      TEXT NOT NULL,
+                unit_id                                TEXT NOT NULL,
+                attempt                                INTEGER NOT NULL CHECK(attempt > 0),
+                semantic_identity_digest               TEXT NOT NULL,
+                dispatch_event_id                      TEXT NOT NULL UNIQUE,
+                dispatch_event_digest                  TEXT NOT NULL,
+                v5_envelope_digest                     TEXT NOT NULL,
+                v4_envelope_digest                     TEXT NOT NULL,
+                v4_graph_declaration_event_id          TEXT NOT NULL,
+                v4_graph_declaration_event_digest      TEXT NOT NULL,
+                v4_graph_digest                        TEXT NOT NULL,
+                context_manifest_event_id              TEXT NOT NULL,
+                context_manifest_event_digest          TEXT NOT NULL,
+                context_manifest_digest                TEXT NOT NULL,
+                worker_manifest_event_id               TEXT NOT NULL,
+                worker_manifest_event_digest           TEXT NOT NULL,
+                worker_manifest_digest                 TEXT NOT NULL,
+                sandbox_profile_event_id               TEXT NOT NULL,
+                sandbox_profile_event_digest           TEXT NOT NULL,
+                sandbox_profile_digest                 TEXT NOT NULL,
+                retry_context_event_id                 TEXT,
+                retry_context_event_digest             TEXT,
+                retry_context_digest                   TEXT,
+                observed_at                            TEXT NOT NULL,
+                PRIMARY KEY (run_id, dispatch_event_id),
+                UNIQUE (run_id, idempotency_key),
+                UNIQUE (run_id, workflow_id, unit_id, attempt),
+                UNIQUE (run_id, semantic_identity_digest),
+                FOREIGN KEY(dispatch_event_id) REFERENCES events(id),
+                FOREIGN KEY(v4_graph_declaration_event_id) REFERENCES events(id),
+                FOREIGN KEY(context_manifest_event_id) REFERENCES events(id),
+                FOREIGN KEY(worker_manifest_event_id) REFERENCES events(id),
+                FOREIGN KEY(sandbox_profile_event_id) REFERENCES events(id),
+                FOREIGN KEY(retry_context_event_id) REFERENCES events(id),
+                CHECK(
+                    (retry_context_event_id IS NULL
+                        AND retry_context_event_digest IS NULL
+                        AND retry_context_digest IS NULL)
+                    OR
+                    (retry_context_event_id IS NOT NULL
+                        AND retry_context_event_digest IS NOT NULL
+                        AND retry_context_digest IS NOT NULL)
+                )
+            );
+
+            CREATE TRIGGER IF NOT EXISTS governed_dispatch_v5_observations_no_update
+                BEFORE UPDATE ON governed_dispatch_v5_observations
+                BEGIN
+                    SELECT RAISE(ABORT, 'governed V5 dispatch observations are immutable: UPDATE forbidden');
+                END;
+
+            CREATE TRIGGER IF NOT EXISTS governed_dispatch_v5_observations_no_delete
+                BEFORE DELETE ON governed_dispatch_v5_observations
+                BEGIN
+                    SELECT RAISE(ABORT, 'governed V5 dispatch observations are immutable: DELETE forbidden');
                 END;
 
             -- Broker-private projection for one operator promotion decision.
@@ -2872,6 +2976,81 @@ impl SqliteStore {
             result_event_id: event.id,
             result_event_digest,
             outcome: derived.outcome,
+        })
+    }
+
+    /// Record one immutable, non-authoritative observation shadow for a
+    /// manifest-bound V5 dispatch.
+    ///
+    /// This method intentionally does not share the V3 admission or any live
+    /// authority path. It re-verifies the V5 event plus its graph and manifest
+    /// witnesses from the signed tape, then writes an audit projection only.
+    /// In particular, it neither signs an event nor emits a checkpoint, so a
+    /// successful result cannot be replayed as dispatch, claim, candidate, or
+    /// promotion authority.
+    pub fn observe_governed_dispatch_v5_admission_v1(
+        &self,
+        request: &GovernedDispatchV5ObservationRequestV1,
+        authority: &GovernedDispatchAdmissionAuthorityV1,
+    ) -> Result<GovernedDispatchV5ObservationDispositionV1> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let evidence = verify_governed_dispatch_v5_observation_evidence(&tx, request, authority)?;
+
+        if let Some(stored) = governed_dispatch_v5_observation_by_event(
+            &tx,
+            request.run_id,
+            request.dispatch_event_id,
+        )? {
+            if !stored.matches(&evidence) {
+                return governed_dispatch_admission_authority_rejected(
+                    "stored V5 observation does not exactly match its re-verified tape witnesses",
+                );
+            }
+            tx.commit()?;
+            return Ok(GovernedDispatchV5ObservationDispositionV1::Existing {
+                dispatch_event_id: evidence.dispatch_event_id,
+                dispatch_event_digest: evidence.dispatch_event_digest,
+                v5_envelope_digest: evidence.v5_envelope_digest,
+            });
+        }
+
+        for collision in [
+            governed_dispatch_v5_observation_by_idempotency(
+                &tx,
+                request.run_id,
+                &evidence.idempotency_key,
+            )?,
+            governed_dispatch_v5_observation_by_workflow_attempt(
+                &tx,
+                request.run_id,
+                &evidence.workflow_id,
+                &evidence.unit_id,
+                evidence.attempt,
+            )?,
+            governed_dispatch_v5_observation_by_semantic_identity(
+                &tx,
+                request.run_id,
+                &evidence.semantic_identity_digest,
+            )?,
+        ] {
+            if let Some(stored) = collision {
+                if !stored.matches(&evidence) {
+                    return governed_dispatch_admission_authority_rejected(
+                        "V5 observation identity is already bound to different immutable tape evidence",
+                    );
+                }
+                return governed_dispatch_admission_authority_rejected(
+                    "V5 observation idempotency resolution did not find the exact dispatch event",
+                );
+            }
+        }
+
+        insert_governed_dispatch_v5_observation(&tx, &evidence)?;
+        tx.commit()?;
+        Ok(GovernedDispatchV5ObservationDispositionV1::Observed {
+            dispatch_event_id: evidence.dispatch_event_id,
+            dispatch_event_digest: evidence.dispatch_event_digest,
+            v5_envelope_digest: evidence.v5_envelope_digest,
         })
     }
 
@@ -8360,6 +8539,634 @@ fn insert_governed_dispatch_admission(
         ],
     )?;
     Ok(())
+}
+
+const GOVERNED_DISPATCH_V5_OBSERVATION_SEMANTIC_IDENTITY_DIGEST_DOMAIN_V1: &[u8] =
+    b"buildplane.governed-dispatch-v5-observation.semantic-identity.v1\0";
+
+/// Identity for an immutable V5 observation shadow. This is deliberately
+/// distinct from V3 admission identity: it binds the complete V5/V4 envelope
+/// lineage and exact declaration references, but does not expose any nested
+/// dispatch as executable authority.
+#[derive(serde::Serialize)]
+struct GovernedDispatchV5ObservationSemanticIdentityMaterial<'a> {
+    run_id: String,
+    workflow_id: &'a str,
+    workflow_revision: &'a str,
+    unit_id: &'a str,
+    attempt: u32,
+    idempotency_key: &'a str,
+    v5_envelope_digest: &'a str,
+    v4_envelope_digest: &'a str,
+    workflow_graph_digest: &'a str,
+    workflow_graph_declaration_event_ref: String,
+    context_manifest_declaration_event_ref: String,
+    context_manifest_digest: &'a str,
+    worker_manifest_declaration_event_ref: String,
+    worker_manifest_digest: &'a str,
+    sandbox_profile_declaration_event_ref: String,
+    sandbox_profile_digest: &'a str,
+}
+
+fn governed_dispatch_v5_observation_semantic_identity_digest_v1(
+    run_id: RunId,
+    dispatch: &DispatchEnvelopeV5,
+) -> Result<String> {
+    let body = &dispatch.dispatch_v4.dispatch_v3.body;
+    let material = GovernedDispatchV5ObservationSemanticIdentityMaterial {
+        run_id: run_id.to_string(),
+        workflow_id: &body.workflow_id,
+        workflow_revision: &body.workflow_revision,
+        unit_id: &body.unit_id,
+        attempt: body.attempt,
+        idempotency_key: &body.idempotency_key,
+        v5_envelope_digest: &dispatch.envelope_digest,
+        v4_envelope_digest: &dispatch.dispatch_v4.envelope_digest,
+        workflow_graph_digest: &dispatch.dispatch_v4.workflow_graph_digest,
+        workflow_graph_declaration_event_ref: dispatch
+            .dispatch_v4
+            .workflow_graph_declaration_event_ref
+            .to_string(),
+        context_manifest_declaration_event_ref: dispatch
+            .context_manifest_declaration_event_ref
+            .to_string(),
+        context_manifest_digest: &dispatch.context_manifest_digest,
+        worker_manifest_declaration_event_ref: dispatch
+            .worker_manifest_declaration_event_ref
+            .to_string(),
+        worker_manifest_digest: &dispatch.worker_manifest_digest,
+        sandbox_profile_declaration_event_ref: dispatch
+            .sandbox_profile_declaration_event_ref
+            .to_string(),
+        sandbox_profile_digest: &dispatch.sandbox_profile_digest,
+    };
+    let bytes = serde_json::to_vec(&material)?;
+    let mut hasher = Sha256::new();
+    hasher.update(GOVERNED_DISPATCH_V5_OBSERVATION_SEMANTIC_IDENTITY_DIGEST_DOMAIN_V1);
+    hasher.update(bytes);
+    Ok(format!("sha256:{:x}", hasher.finalize()))
+}
+
+#[derive(Clone, Debug)]
+struct VerifiedGovernedDispatchV5ObservationEvidence {
+    run_id: RunId,
+    idempotency_key: String,
+    workflow_id: String,
+    workflow_revision: String,
+    unit_id: String,
+    attempt: u32,
+    semantic_identity_digest: String,
+    dispatch_event_id: EventId,
+    dispatch_event_digest: String,
+    v5_envelope_digest: String,
+    v4_envelope_digest: String,
+    v4_graph_declaration_event_id: EventId,
+    v4_graph_declaration_event_digest: String,
+    v4_graph_digest: String,
+    context_manifest_event_id: EventId,
+    context_manifest_event_digest: String,
+    context_manifest_digest: String,
+    worker_manifest_event_id: EventId,
+    worker_manifest_event_digest: String,
+    worker_manifest_digest: String,
+    sandbox_profile_event_id: EventId,
+    sandbox_profile_event_digest: String,
+    sandbox_profile_digest: String,
+    retry_context_event_id: Option<EventId>,
+    retry_context_event_digest: Option<String>,
+    retry_context_digest: Option<String>,
+}
+
+/// Stored V5 observation material is deliberately string-backed: the shadow
+/// is an audit projection, and every use re-derives typed tape evidence before
+/// comparing these immutable bytes.
+#[derive(Clone, Debug)]
+struct StoredGovernedDispatchV5Observation {
+    authority: String,
+    observation_schema_version: i64,
+    run_id: String,
+    idempotency_key: String,
+    workflow_id: String,
+    workflow_revision: String,
+    unit_id: String,
+    attempt: u32,
+    semantic_identity_digest: String,
+    dispatch_event_id: String,
+    dispatch_event_digest: String,
+    v5_envelope_digest: String,
+    v4_envelope_digest: String,
+    v4_graph_declaration_event_id: String,
+    v4_graph_declaration_event_digest: String,
+    v4_graph_digest: String,
+    context_manifest_event_id: String,
+    context_manifest_event_digest: String,
+    context_manifest_digest: String,
+    worker_manifest_event_id: String,
+    worker_manifest_event_digest: String,
+    worker_manifest_digest: String,
+    sandbox_profile_event_id: String,
+    sandbox_profile_event_digest: String,
+    sandbox_profile_digest: String,
+    retry_context_event_id: Option<String>,
+    retry_context_event_digest: Option<String>,
+    retry_context_digest: Option<String>,
+}
+
+impl StoredGovernedDispatchV5Observation {
+    fn matches(&self, evidence: &VerifiedGovernedDispatchV5ObservationEvidence) -> bool {
+        self.authority == "non_authoritative_v5_observation"
+            && self.observation_schema_version == 1
+            && self.run_id == evidence.run_id.to_string()
+            && self.idempotency_key == evidence.idempotency_key
+            && self.workflow_id == evidence.workflow_id
+            && self.workflow_revision == evidence.workflow_revision
+            && self.unit_id == evidence.unit_id
+            && self.attempt == evidence.attempt
+            && self.semantic_identity_digest == evidence.semantic_identity_digest
+            && self.dispatch_event_id == evidence.dispatch_event_id.to_string()
+            && self.dispatch_event_digest == evidence.dispatch_event_digest
+            && self.v5_envelope_digest == evidence.v5_envelope_digest
+            && self.v4_envelope_digest == evidence.v4_envelope_digest
+            && self.v4_graph_declaration_event_id
+                == evidence.v4_graph_declaration_event_id.to_string()
+            && self.v4_graph_declaration_event_digest == evidence.v4_graph_declaration_event_digest
+            && self.v4_graph_digest == evidence.v4_graph_digest
+            && self.context_manifest_event_id == evidence.context_manifest_event_id.to_string()
+            && self.context_manifest_event_digest == evidence.context_manifest_event_digest
+            && self.context_manifest_digest == evidence.context_manifest_digest
+            && self.worker_manifest_event_id == evidence.worker_manifest_event_id.to_string()
+            && self.worker_manifest_event_digest == evidence.worker_manifest_event_digest
+            && self.worker_manifest_digest == evidence.worker_manifest_digest
+            && self.sandbox_profile_event_id == evidence.sandbox_profile_event_id.to_string()
+            && self.sandbox_profile_event_digest == evidence.sandbox_profile_event_digest
+            && self.sandbox_profile_digest == evidence.sandbox_profile_digest
+            && self.retry_context_event_id
+                == evidence
+                    .retry_context_event_id
+                    .map(|event_id| event_id.to_string())
+            && self.retry_context_event_digest == evidence.retry_context_event_digest
+            && self.retry_context_digest == evidence.retry_context_digest
+    }
+}
+
+const GOVERNED_DISPATCH_V5_OBSERVATION_COLUMNS: &str =
+    "authority, observation_schema_version, run_id, idempotency_key, workflow_id, \
+     workflow_revision, unit_id, attempt, semantic_identity_digest, dispatch_event_id, \
+     dispatch_event_digest, v5_envelope_digest, v4_envelope_digest, \
+     v4_graph_declaration_event_id, v4_graph_declaration_event_digest, v4_graph_digest, \
+     context_manifest_event_id, context_manifest_event_digest, context_manifest_digest, \
+     worker_manifest_event_id, worker_manifest_event_digest, worker_manifest_digest, \
+     sandbox_profile_event_id, sandbox_profile_event_digest, sandbox_profile_digest, \
+     retry_context_event_id, retry_context_event_digest, retry_context_digest";
+
+fn governed_dispatch_v5_observation_by_event(
+    conn: &Connection,
+    run_id: RunId,
+    dispatch_event_id: EventId,
+) -> Result<Option<StoredGovernedDispatchV5Observation>> {
+    let query = format!(
+        "SELECT {GOVERNED_DISPATCH_V5_OBSERVATION_COLUMNS} \
+         FROM governed_dispatch_v5_observations \
+         WHERE run_id = ?1 AND dispatch_event_id = ?2"
+    );
+    conn.query_row(
+        &query,
+        params![run_id.to_string(), dispatch_event_id.to_string()],
+        stored_governed_dispatch_v5_observation_from_row,
+    )
+    .optional()
+    .map_err(LedgerError::from)
+}
+
+fn governed_dispatch_v5_observation_by_idempotency(
+    conn: &Connection,
+    run_id: RunId,
+    idempotency_key: &str,
+) -> Result<Option<StoredGovernedDispatchV5Observation>> {
+    let query = format!(
+        "SELECT {GOVERNED_DISPATCH_V5_OBSERVATION_COLUMNS} \
+         FROM governed_dispatch_v5_observations \
+         WHERE run_id = ?1 AND idempotency_key = ?2"
+    );
+    conn.query_row(
+        &query,
+        params![run_id.to_string(), idempotency_key],
+        stored_governed_dispatch_v5_observation_from_row,
+    )
+    .optional()
+    .map_err(LedgerError::from)
+}
+
+fn governed_dispatch_v5_observation_by_workflow_attempt(
+    conn: &Connection,
+    run_id: RunId,
+    workflow_id: &str,
+    unit_id: &str,
+    attempt: u32,
+) -> Result<Option<StoredGovernedDispatchV5Observation>> {
+    let query = format!(
+        "SELECT {GOVERNED_DISPATCH_V5_OBSERVATION_COLUMNS} \
+         FROM governed_dispatch_v5_observations \
+         WHERE run_id = ?1 AND workflow_id = ?2 AND unit_id = ?3 AND attempt = ?4"
+    );
+    conn.query_row(
+        &query,
+        params![run_id.to_string(), workflow_id, unit_id, attempt],
+        stored_governed_dispatch_v5_observation_from_row,
+    )
+    .optional()
+    .map_err(LedgerError::from)
+}
+
+fn governed_dispatch_v5_observation_by_semantic_identity(
+    conn: &Connection,
+    run_id: RunId,
+    semantic_identity_digest: &str,
+) -> Result<Option<StoredGovernedDispatchV5Observation>> {
+    let query = format!(
+        "SELECT {GOVERNED_DISPATCH_V5_OBSERVATION_COLUMNS} \
+         FROM governed_dispatch_v5_observations \
+         WHERE run_id = ?1 AND semantic_identity_digest = ?2"
+    );
+    conn.query_row(
+        &query,
+        params![run_id.to_string(), semantic_identity_digest],
+        stored_governed_dispatch_v5_observation_from_row,
+    )
+    .optional()
+    .map_err(LedgerError::from)
+}
+
+fn stored_governed_dispatch_v5_observation_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<StoredGovernedDispatchV5Observation> {
+    let attempt: i64 = row.get(7)?;
+    let attempt = u32::try_from(attempt).map_err(|_| {
+        rusqlite::Error::FromSqlConversionFailure(
+            7,
+            rusqlite::types::Type::Integer,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "invalid governed V5 observation attempt",
+            )),
+        )
+    })?;
+    Ok(StoredGovernedDispatchV5Observation {
+        authority: row.get(0)?,
+        observation_schema_version: row.get(1)?,
+        run_id: row.get(2)?,
+        idempotency_key: row.get(3)?,
+        workflow_id: row.get(4)?,
+        workflow_revision: row.get(5)?,
+        unit_id: row.get(6)?,
+        attempt,
+        semantic_identity_digest: row.get(8)?,
+        dispatch_event_id: row.get(9)?,
+        dispatch_event_digest: row.get(10)?,
+        v5_envelope_digest: row.get(11)?,
+        v4_envelope_digest: row.get(12)?,
+        v4_graph_declaration_event_id: row.get(13)?,
+        v4_graph_declaration_event_digest: row.get(14)?,
+        v4_graph_digest: row.get(15)?,
+        context_manifest_event_id: row.get(16)?,
+        context_manifest_event_digest: row.get(17)?,
+        context_manifest_digest: row.get(18)?,
+        worker_manifest_event_id: row.get(19)?,
+        worker_manifest_event_digest: row.get(20)?,
+        worker_manifest_digest: row.get(21)?,
+        sandbox_profile_event_id: row.get(22)?,
+        sandbox_profile_event_digest: row.get(23)?,
+        sandbox_profile_digest: row.get(24)?,
+        retry_context_event_id: row.get(25)?,
+        retry_context_event_digest: row.get(26)?,
+        retry_context_digest: row.get(27)?,
+    })
+}
+
+fn insert_governed_dispatch_v5_observation(
+    conn: &Connection,
+    evidence: &VerifiedGovernedDispatchV5ObservationEvidence,
+) -> Result<()> {
+    let observed_at = canonical_ledger_timestamp(Utc::now())?.to_rfc3339();
+    conn.execute(
+        r#"INSERT INTO governed_dispatch_v5_observations (
+                authority, observation_schema_version, run_id, idempotency_key,
+                workflow_id, workflow_revision, unit_id, attempt,
+                semantic_identity_digest, dispatch_event_id, dispatch_event_digest,
+                v5_envelope_digest, v4_envelope_digest,
+                v4_graph_declaration_event_id, v4_graph_declaration_event_digest, v4_graph_digest,
+                context_manifest_event_id, context_manifest_event_digest, context_manifest_digest,
+                worker_manifest_event_id, worker_manifest_event_digest, worker_manifest_digest,
+                sandbox_profile_event_id, sandbox_profile_event_digest, sandbox_profile_digest,
+                retry_context_event_id, retry_context_event_digest, retry_context_digest, observed_at
+            ) VALUES (
+                'non_authoritative_v5_observation', 1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
+                ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24,
+                ?25, ?26, ?27
+            )"#,
+        params![
+            evidence.run_id.to_string(),
+            &evidence.idempotency_key,
+            &evidence.workflow_id,
+            &evidence.workflow_revision,
+            &evidence.unit_id,
+            evidence.attempt,
+            &evidence.semantic_identity_digest,
+            evidence.dispatch_event_id.to_string(),
+            &evidence.dispatch_event_digest,
+            &evidence.v5_envelope_digest,
+            &evidence.v4_envelope_digest,
+            evidence.v4_graph_declaration_event_id.to_string(),
+            &evidence.v4_graph_declaration_event_digest,
+            &evidence.v4_graph_digest,
+            evidence.context_manifest_event_id.to_string(),
+            &evidence.context_manifest_event_digest,
+            &evidence.context_manifest_digest,
+            evidence.worker_manifest_event_id.to_string(),
+            &evidence.worker_manifest_event_digest,
+            &evidence.worker_manifest_digest,
+            evidence.sandbox_profile_event_id.to_string(),
+            &evidence.sandbox_profile_event_digest,
+            &evidence.sandbox_profile_digest,
+            evidence.retry_context_event_id.map(|event_id| event_id.to_string()),
+            &evidence.retry_context_event_digest,
+            &evidence.retry_context_digest,
+            observed_at,
+        ],
+    )?;
+    Ok(())
+}
+
+/// Read an exact V5 observation witness from the tape. The returned event has
+/// been canonicalized again after SQLite deserialization, is signed by the
+/// configured dispatch identity, and has a detached signature over that exact
+/// canonical event hash.
+fn load_verified_governed_dispatch_v5_observation_event(
+    conn: &Connection,
+    event_id: EventId,
+    authority: &GovernedDispatchAdmissionAuthorityV1,
+    label: &str,
+) -> Result<(Event, String)> {
+    let Some((event, signature)) = event_and_signature_by_id(conn, event_id)? else {
+        return governed_dispatch_admission_authority_rejected(format!(
+            "{label} is missing from the tape"
+        ));
+    };
+    let Some(signature) = signature else {
+        return governed_dispatch_admission_authority_rejected(format!("{label} is unsigned"));
+    };
+    let event = canonicalize(event).map_err(|error| {
+        LedgerError::GovernedDispatchAdmissionAuthorityRejected {
+            reason: format!("{label} is not canonical: {error}"),
+        }
+    })?;
+    if !actor_matches(&authority.dispatch_signer, &signature.signer)
+        || verify_event_signature(&event, &signature, &authority.trusted_keys)
+            != VerificationStatus::Verified
+    {
+        return governed_dispatch_admission_authority_rejected(format!(
+            "{label} does not carry a verified detached signature from the configured dispatch authority"
+        ));
+    }
+    let event_digest = canonical_event_hash(&event).map_err(|error| {
+        LedgerError::GovernedDispatchAdmissionAuthorityRejected {
+            reason: format!("{label} could not produce a canonical event hash: {error}"),
+        }
+    })?;
+    if signature.canonical_event_hash != event_digest {
+        return governed_dispatch_admission_authority_rejected(format!(
+            "{label} detached signature hash does not match its canonical event"
+        ));
+    }
+    Ok((event, event_digest))
+}
+
+fn verify_governed_dispatch_v5_observation_evidence(
+    conn: &Connection,
+    request: &GovernedDispatchV5ObservationRequestV1,
+    authority: &GovernedDispatchAdmissionAuthorityV1,
+) -> Result<VerifiedGovernedDispatchV5ObservationEvidence> {
+    let (dispatch_event, dispatch_event_digest) =
+        load_verified_governed_dispatch_v5_observation_event(
+            conn,
+            request.dispatch_event_id,
+            authority,
+            "V5 dispatch",
+        )?;
+    if dispatch_event.run_id != request.run_id
+        || dispatch_event.kind != EventKind::DispatchEnvelopeV5
+    {
+        return governed_dispatch_admission_authority_rejected(
+            "V5 observation request does not name a V5 dispatch in its requested run",
+        );
+    }
+    let Payload::DispatchEnvelopeV5(dispatch) = &dispatch_event.payload else {
+        return governed_dispatch_admission_authority_rejected(
+            "V5 observation request does not name a manifest-bound V5 dispatch payload",
+        );
+    };
+    let body = &dispatch.dispatch_v4.dispatch_v3.body;
+    if dispatch
+        .dispatch_v4
+        .dispatch_v3
+        .ledger_authority_realm_digest
+        != authority.ledger_authority_realm_digest
+    {
+        return governed_dispatch_admission_authority_rejected(
+            "V5 observation dispatch does not belong to the configured protected ledger realm",
+        );
+    }
+
+    // No observation of a retry may be mistaken for proof that the complete
+    // outer-V5 retry lineage (including feedback inclusion) was verified.
+    // Keep all retries fail-closed until that reducer exists at this storage
+    // boundary. We deliberately do not issue a retry witness shadow here.
+    if body.attempt != 1 {
+        return governed_dispatch_admission_authority_rejected(
+            "V5 retry observations require complete outer-V5 retry proof and are unsupported",
+        );
+    }
+    if dispatch.attempt_context_declaration_event_ref.is_some()
+        || dispatch.attempt_context_digest.is_some()
+    {
+        return governed_dispatch_admission_authority_rejected(
+            "first-attempt V5 observation cannot carry retry declaration material",
+        );
+    }
+
+    let (graph_event, graph_event_digest) = load_verified_governed_dispatch_v5_observation_event(
+        conn,
+        dispatch.dispatch_v4.workflow_graph_declaration_event_ref,
+        authority,
+        "V5 workflow graph declaration",
+    )?;
+    if graph_event.run_id != request.run_id || !tape_event_precedes(&graph_event, &dispatch_event) {
+        return governed_dispatch_admission_authority_rejected(
+            "V5 workflow graph declaration must be a signed preceding event in the dispatch run",
+        );
+    }
+    let Payload::WorkflowGraphDeclaredV2(graph) = &graph_event.payload else {
+        return governed_dispatch_admission_authority_rejected(
+            "V5 workflow graph declaration witness does not carry WorkflowGraphDeclaredV2",
+        );
+    };
+    let expected_graph_digest = workflow_graph_v2_digest(graph).map_err(|error| {
+        LedgerError::GovernedDispatchAdmissionAuthorityRejected {
+            reason: format!("V5 workflow graph declaration digest is not canonical: {error}"),
+        }
+    })?;
+    if graph_event.kind != EventKind::WorkflowGraphDeclaredV2
+        || graph.run_id != request.run_id.to_string()
+        || graph.workflow_id != body.workflow_id
+        || graph.workflow_revision != body.workflow_revision
+        || graph.graph_digest != expected_graph_digest
+        || graph.graph_digest != dispatch.dispatch_v4.workflow_graph_digest
+    {
+        return governed_dispatch_admission_authority_rejected(
+            "V5 graph witness does not exactly bind the nested V4 workflow authority",
+        );
+    }
+    let mut graph_nodes = graph
+        .nodes
+        .iter()
+        .filter(|node| node.unit_id == body.unit_id);
+    let Some(graph_node) = graph_nodes.next() else {
+        return governed_dispatch_admission_authority_rejected(
+            "V5 graph witness has no node for the nested dispatch unit",
+        );
+    };
+    if graph_nodes.next().is_some()
+        || graph_node.execution_role != body.execution_role
+        || Some(graph_node.governed_packet_digest.as_str())
+            != dispatch
+                .dispatch_v4
+                .dispatch_v3
+                .governed_packet_digest
+                .as_deref()
+    {
+        return governed_dispatch_admission_authority_rejected(
+            "V5 graph witness node does not exactly bind the nested V4 dispatch role and governed packet",
+        );
+    }
+
+    let (context_event, context_event_digest) =
+        load_verified_governed_dispatch_v5_observation_event(
+            conn,
+            dispatch.context_manifest_declaration_event_ref,
+            authority,
+            "V5 context manifest declaration",
+        )?;
+    if context_event.run_id != request.run_id
+        || !tape_event_precedes(&context_event, &dispatch_event)
+        || context_event.kind != EventKind::ContextManifestDeclaredV1
+    {
+        return governed_dispatch_admission_authority_rejected(
+            "V5 context manifest declaration must be a signed preceding event in the dispatch run",
+        );
+    }
+    let Payload::ContextManifestDeclaredV1(context_manifest) = &context_event.payload else {
+        return governed_dispatch_admission_authority_rejected(
+            "V5 context manifest witness has the wrong payload kind",
+        );
+    };
+
+    let (worker_event, worker_event_digest) = load_verified_governed_dispatch_v5_observation_event(
+        conn,
+        dispatch.worker_manifest_declaration_event_ref,
+        authority,
+        "V5 worker manifest declaration",
+    )?;
+    if worker_event.run_id != request.run_id
+        || !tape_event_precedes(&worker_event, &dispatch_event)
+        || worker_event.kind != EventKind::WorkerManifestDeclaredV1
+    {
+        return governed_dispatch_admission_authority_rejected(
+            "V5 worker manifest declaration must be a signed preceding event in the dispatch run",
+        );
+    }
+    let Payload::WorkerManifestDeclaredV1(worker_manifest) = &worker_event.payload else {
+        return governed_dispatch_admission_authority_rejected(
+            "V5 worker manifest witness has the wrong payload kind",
+        );
+    };
+
+    let (sandbox_event, sandbox_event_digest) =
+        load_verified_governed_dispatch_v5_observation_event(
+            conn,
+            dispatch.sandbox_profile_declaration_event_ref,
+            authority,
+            "V5 sandbox profile declaration",
+        )?;
+    if sandbox_event.run_id != request.run_id
+        || !tape_event_precedes(&sandbox_event, &dispatch_event)
+        || sandbox_event.kind != EventKind::SandboxProfileDeclaredV1
+    {
+        return governed_dispatch_admission_authority_rejected(
+            "V5 sandbox profile declaration must be a signed preceding event in the dispatch run",
+        );
+    }
+    let Payload::SandboxProfileDeclaredV1(sandbox_profile) = &sandbox_event.payload else {
+        return governed_dispatch_admission_authority_rejected(
+            "V5 sandbox profile witness has the wrong payload kind",
+        );
+    };
+
+    validate_v5_manifest_declaration_witnesses(
+        dispatch,
+        &request.run_id.to_string(),
+        V5ManifestDeclarationWitnesses {
+            context_manifest: Some(V5ContextManifestDeclarationWitness::from_declaration(
+                &context_event.id,
+                context_manifest,
+            )),
+            worker_manifest: Some(V5WorkerManifestDeclarationWitness::from_declaration(
+                &worker_event.id,
+                worker_manifest,
+            )),
+            sandbox_profile: Some(V5SandboxProfileDeclarationWitness::from_declaration(
+                &sandbox_event.id,
+                sandbox_profile,
+            )),
+            attempt_context: None,
+        },
+    )
+    .map_err(
+        |error| LedgerError::GovernedDispatchAdmissionAuthorityRejected {
+            reason: format!("V5 manifest declaration witnesses do not bind the dispatch: {error}"),
+        },
+    )?;
+
+    Ok(VerifiedGovernedDispatchV5ObservationEvidence {
+        run_id: request.run_id,
+        idempotency_key: body.idempotency_key.clone(),
+        workflow_id: body.workflow_id.clone(),
+        workflow_revision: body.workflow_revision.clone(),
+        unit_id: body.unit_id.clone(),
+        attempt: body.attempt,
+        semantic_identity_digest: governed_dispatch_v5_observation_semantic_identity_digest_v1(
+            request.run_id,
+            dispatch,
+        )?,
+        dispatch_event_id: dispatch_event.id,
+        dispatch_event_digest,
+        v5_envelope_digest: dispatch.envelope_digest.clone(),
+        v4_envelope_digest: dispatch.dispatch_v4.envelope_digest.clone(),
+        v4_graph_declaration_event_id: graph_event.id,
+        v4_graph_declaration_event_digest: graph_event_digest,
+        v4_graph_digest: graph.graph_digest.clone(),
+        context_manifest_event_id: context_event.id,
+        context_manifest_event_digest: context_event_digest,
+        context_manifest_digest: context_manifest.context_manifest_digest.clone(),
+        worker_manifest_event_id: worker_event.id,
+        worker_manifest_event_digest: worker_event_digest,
+        worker_manifest_digest: worker_manifest.worker_manifest_digest.clone(),
+        sandbox_profile_event_id: sandbox_event.id,
+        sandbox_profile_event_digest: sandbox_event_digest,
+        sandbox_profile_digest: sandbox_profile.sandbox_profile_digest.clone(),
+        retry_context_event_id: None,
+        retry_context_event_digest: None,
+        retry_context_digest: None,
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
