@@ -269,22 +269,37 @@ function ports(
 function candidateResult(
 	dispatched: GovernedDispatchLineageV3,
 ): RunPacketResult {
+	const candidateId = candidateIdForDispatch(dispatched);
+	const candidateKey = `${candidateId}/${dispatched.runId}/${dispatched.attempt}`;
+	const candidate = {
+		schemaVersion: 1 as const,
+		candidateId,
+		runId: RUN_ID,
+		attempt: 1,
+		candidateKey,
+		candidateRef: `refs/buildplane/candidates/${candidateKey}`,
+		baseSha: BASE_SHA,
+		candidateCommitSha: "f".repeat(40),
+		commitDigest: DIGEST("3"),
+		treeDigest: DIGEST("4"),
+		patchDigest: DIGEST("5"),
+		changedFilesDigest: DIGEST("6"),
+		candidateDigest: DIGEST("7"),
+	};
 	return {
 		run: { id: RUN_ID, unitId: dispatched.unitId, status: "passed" },
-		candidate: {
-			schemaVersion: 1,
-			candidateId: candidateIdForDispatch(dispatched),
-			runId: RUN_ID,
-			attempt: 1,
-			candidateKey: "candidate-key",
-			candidateRef: "refs/buildplane/candidates/candidate-key",
-			baseSha: BASE_SHA,
-			candidateCommitSha: "f".repeat(40),
-			commitDigest: DIGEST("3"),
-			treeDigest: DIGEST("4"),
-			patchDigest: DIGEST("5"),
-			changedFilesDigest: DIGEST("6"),
-			candidateDigest: DIGEST("7"),
+		candidate,
+		decision: {
+			kind: "advance-run",
+			outcome: "approved",
+			reasons: ["deterministic acceptance passed"],
+		},
+		candidateAcceptance: {
+			candidateDigest: candidate.candidateDigest,
+			candidateCommitSha: candidate.candidateCommitSha,
+			acceptanceContractDigest: dispatched.acceptanceContractDigest,
+			acceptanceRef: "01919000-0000-7000-8000-000000000071",
+			outcome: "passed",
 		},
 	};
 }
@@ -379,6 +394,10 @@ describe("governed execution session", () => {
 		expect(result).toMatchObject({
 			state: "candidate-awaiting-review",
 			candidate: { candidateDigest: DIGEST("7") },
+			candidateAcceptance: {
+				candidateDigest: DIGEST("7"),
+				acceptanceContractDigest: dispatched.acceptanceContractDigest,
+			},
 			run: { id: RUN_ID },
 		});
 		expect(result).not.toHaveProperty("promotion");
@@ -529,6 +548,65 @@ describe("governed execution session", () => {
 					...candidateResult(dispatched).run,
 					id: "00000000-0000-7000-8000-000000000079",
 					unitId: "unit-substituted",
+				},
+			},
+		];
+
+		for (const invalidResult of invalidResults) {
+			const result = await runWithMockAuthority({
+				packet: source,
+				projectRoot: projectRoot(),
+				dispatch: dispatched,
+				resolution: resolution(dispatched),
+				...ports(),
+				oci: {
+					image: IMAGE,
+					profile: sandboxProfile,
+					executor: executor(sandboxProfile),
+				},
+				createOrchestrator() {
+					return {
+						async runPacketAsync() {
+							return invalidResult;
+						},
+					};
+				},
+			});
+			expect(result).toMatchObject({
+				state: "unavailable",
+				code: "CANDIDATE_EXECUTION_FAILED",
+			});
+		}
+	});
+
+	it("maps invalid candidate completion policy or acceptance evidence to CANDIDATE_EXECUTION_FAILED", async () => {
+		const source = packet();
+		const sandboxProfile = profile();
+		const dispatched = dispatch(source, sandboxProfile);
+		const complete = candidateResult(dispatched);
+		const acceptance = complete.candidateAcceptance!;
+		const invalidResults: readonly RunPacketResult[] = [
+			{
+				run: complete.run,
+				candidate: complete.candidate,
+			},
+			{
+				...complete,
+				decision: {
+					kind: "reject-run",
+					outcome: "rejected",
+					reasons: ["rejected"],
+				},
+			},
+			{
+				...complete,
+				candidateAcceptance: { ...acceptance, outcome: "rejected" },
+			},
+			{
+				...complete,
+				candidateAcceptance: {
+					...acceptance,
+					candidateDigest: DIGEST("8"),
 				},
 			},
 		];

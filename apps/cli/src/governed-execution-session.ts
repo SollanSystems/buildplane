@@ -7,6 +7,7 @@ import {
 	podmanGovernedSandboxProfileDigest,
 } from "@buildplane/adapters-tools";
 import {
+	type CandidateAcceptanceRecord,
 	type CandidateEvidencePort,
 	canonicalGovernedUnitPacketV1Digest,
 	type EventBus,
@@ -59,6 +60,7 @@ export type GovernedExecutionSessionResult =
 	| {
 			readonly state: "candidate-awaiting-review";
 			readonly candidate: WorkspaceCandidateArtifact;
+			readonly candidateAcceptance: CandidateAcceptanceRecord;
 			readonly run: Run;
 	  }
 	| GovernedExecutionUnavailableResult;
@@ -197,6 +199,7 @@ export async function runGovernedExecutionSession(
 		});
 		if (
 			!result.candidate ||
+			!result.candidateAcceptance ||
 			result.run.id !== preflight.dispatch.runId ||
 			result.run.unitId !== preflight.dispatch.unitId ||
 			result.candidate.candidateId !==
@@ -210,6 +213,7 @@ export async function runGovernedExecutionSession(
 		return Object.freeze({
 			state: "candidate-awaiting-review" as const,
 			candidate: result.candidate,
+			candidateAcceptance: result.candidateAcceptance,
 			run: result.run,
 		});
 	} catch {
