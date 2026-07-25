@@ -689,11 +689,12 @@ export async function makeForkFixture(
 	// The fork command requires a clean working tree. After makeBuildplaneRunFixture
 	// runs the packet, the workspace has modified/untracked files (ledger db, artifacts).
 	// Commit them so the pre-flight git status check passes.
-	const runGitForFork = (args: string[]) => {
+	const runGitForFork = (args: string[]): string => {
 		const r = spawnSync("git", args, { cwd: dir, encoding: "utf8" });
 		if (r.status !== 0) {
 			throw new Error(`git ${args.join(" ")} failed: ${r.stderr}`);
 		}
+		return r.stdout;
 	};
 	if (runGitForFork(["status", "--porcelain"]).trim().length > 0) {
 		runGitForFork(["add", "-A"]);
