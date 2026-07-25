@@ -1,14 +1,9 @@
-import { DatabaseSync } from "node:sqlite";
+import { existsSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { makeBuildplaneRunFixture } from "./fixtures.js";
 
-// Phase D: runPacket now emits execution-started / command-execution-complete
-// on the event bus, so unit-boundary events (unit_started, git_checkpoint,
-// unit_completed) now fire for sync command packets.  workspace_write remains
-// out of scope for Task 1.
-
-describe("shell-command-capture", () => {
-	it("captures run lifecycle events for a shell command packet", async () => {
+describe("unsafe shell command execution", () => {
+	it("completes without creating a tape authority", async () => {
 		const fixture = await makeBuildplaneRunFixture({
 			packet: {
 				unit: {
@@ -30,25 +25,7 @@ describe("shell-command-capture", () => {
 
 		try {
 			expect(fixture.exitCode).toBe(0);
-
-			const db = new DatabaseSync(fixture.eventsDbPath);
-			const kinds = (
-				db.prepare("SELECT kind FROM events ORDER BY id ASC").all() as {
-					kind: string;
-				}[]
-			).map((r) => r.kind);
-
-			// Run-lifecycle bookends.
-			expect(kinds).toContain("run_started");
-			expect(kinds).toContain("run_completed");
-
-			// Unit-boundary events now fire because runPacket emits execution-started
-			// and command-execution-complete on the cliEventBus (Phase D Task 1).
-			expect(kinds).toContain("unit_started");
-			expect(kinds).toContain("git_checkpoint");
-			expect(kinds).toContain("unit_completed");
-
-			db.close();
+			expect(existsSync(fixture.eventsDbPath)).toBe(false);
 		} finally {
 			await fixture.cleanup();
 		}
