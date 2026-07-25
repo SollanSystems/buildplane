@@ -306,6 +306,133 @@ describe("governed run front door", () => {
 		expectRootUnchanged(root, before);
 	});
 
+	it("compiles a governed graph into a blocked declaration preview without contacting a host or legacy worker", async () => {
+		const root = createGitProject();
+		const graphPath = join(root, "governed-graph.json");
+		writeFileSync(
+			graphPath,
+			JSON.stringify({
+				maxConcurrent: 1,
+				nodes: [
+					createGovernedPacket("graph-preview-implement"),
+					{
+						...createGovernedPacket("graph-preview-review"),
+						execution_role: "reviewer",
+						dependsOn: ["graph-preview-implement"],
+					},
+				],
+			}),
+			"utf8",
+		);
+		const before = snapshotRoot(root);
+		const stateBefore = readFileSync(
+			join(root, ".buildplane", "state.db"),
+			"utf8",
+		);
+		hostResolver.resolve.mockResolvedValue({
+			kind: "host-owned-governed-broker-v1",
+		} as unknown as HostOwnedGovernedBrokerV1);
+
+		const result = await runCliCapture(
+			root,
+			["run", "--approve", "--graph", graphPath, "--json"],
+			legacyBundleMustNotBeConstructed(),
+		);
+
+		expect(result.exitCode).toBe(2);
+		expect(result.stderr).toEqual([]);
+		expect(hostResolver.resolve).not.toHaveBeenCalled();
+		expect(JSON.parse(result.stdout.join("\n"))).toMatchObject({
+			governance: "preview",
+			status: "blocked",
+			executionStarted: false,
+			approval: { requested: true, state: "not-recorded" },
+			graph: {
+				nodeCount: 2,
+				maxConcurrent: 1,
+				declaration: {
+					nodes: [
+						{
+							unitId: "graph-preview-implement",
+							executionRole: "implementer",
+						},
+						{
+							unitId: "graph-preview-review",
+							executionRole: "reviewer",
+							dependsOn: ["graph-preview-implement"],
+						},
+					],
+				},
+			},
+		});
+		expectRootUnchanged(root, before);
+		expect(readFileSync(join(root, ".buildplane", "state.db"), "utf8")).toBe(
+			stateBefore,
+		);
+		expect(existsSync(join(root, ".buildplane", "events.db"))).toBe(false);
+	});
+
+	it.each([
+		["raw", ["--raw"]],
+		["envelope", ["--envelope", "forbidden-envelope.json"]],
+		["packet", ["--packet", "forbidden-packet.json"]],
+		["tui", ["--tui"]],
+		["resume", ["--resume", "host-recovery/graph", "--approve"]],
+	] as const)("rejects a governed graph preview combined with %s before any host or worker boundary", async (_label, incompatibleArguments) => {
+		const root = createGitProject();
+		const before = snapshotRoot(root);
+		hostResolver.resolve.mockResolvedValue({
+			kind: "host-owned-governed-broker-v1",
+		} as unknown as HostOwnedGovernedBrokerV1);
+
+		const result = await runCliCapture(
+			root,
+			[
+				"run",
+				"--graph",
+				"nonexistent-governed-graph.json",
+				...incompatibleArguments,
+				"--json",
+			],
+			legacyBundleMustNotBeConstructed(),
+		);
+
+		expect(result.exitCode).toBe(1);
+		expect(hostResolver.resolve).not.toHaveBeenCalled();
+		expect(JSON.parse(result.stdout.join("\n"))).toMatchObject({
+			error: { code: "CLI_ERROR" },
+		});
+		expectRootUnchanged(root, before);
+	});
+
+	it("rejects a graph/raw help request before the legacy bundle can be constructed", async () => {
+		const root = createGitProject();
+		const before = snapshotRoot(root);
+
+		const result = await runCliCapture(
+			root,
+			[
+				"run",
+				"--graph",
+				"nonexistent-governed-graph.json",
+				"--raw",
+				"--help",
+				"--json",
+			],
+			legacyBundleMustNotBeConstructed(),
+		);
+
+		expect(result.exitCode).toBe(1);
+		expect(JSON.parse(result.stdout.join("\n"))).toMatchObject({
+			error: {
+				code: "CLI_ERROR",
+				message:
+					"--graph cannot be combined with --raw, --envelope, or --tui because governed graph input is preview-only until host-backed graph admission exists.",
+			},
+		});
+		expectRootUnchanged(root, before);
+	});
+
 	it.each([
 		["without an operator approval", []],
 		["with an operator approval", ["--approve"]],

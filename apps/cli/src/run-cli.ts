@@ -829,6 +829,7 @@ function formatTopLevelHelp(): string[] {
 		"",
 		"  Execute:",
 		"    run --packet <path>    Compile and validate a governed-run preview (default)",
+		"    run --graph <path>     Compile a governed graph declaration preview (no execution)",
 		'    goal "<text>" [--trusted-base <sha>]  Compile + preview a raw goal into plan JSON',
 		"    demo --raw [--model]   Run the unsafe local flywheel demo",
 		"",
@@ -900,6 +901,20 @@ interface PacketRunCommandArguments {
 }
 
 /**
+ * A graph source can be compiled into a deterministic V2 declaration preview,
+ * but this CLI form intentionally creates no dispatch authority.  A protected
+ * host must independently recompile, record, and admit it before V4 dispatch.
+ */
+interface GraphRunCommandArguments {
+	readonly kind: "graph";
+	readonly graphPath: string;
+	readonly raw: false;
+	readonly tui: false;
+	readonly json: boolean;
+	readonly approve: boolean;
+}
+
+/**
  * A recovery handle is resolved only by the privileged host. It intentionally
  * excludes packet and envelope source, which could otherwise replace the
  * recorded workflow identity or authority during reconciliation.
@@ -915,6 +930,7 @@ interface RecoveryRunCommandArguments {
 
 type RunCommandArguments =
 	| PacketRunCommandArguments
+	| GraphRunCommandArguments
 	| RecoveryRunCommandArguments;
 
 interface DispatchEnvelopePreview {
@@ -982,6 +998,45 @@ interface GovernedRunPreview {
 	readonly blockers: readonly string[];
 }
 
+interface GovernedGraphDeclarationPreview {
+	readonly runId: string;
+	readonly workflowId: string;
+	readonly workflowRevision: string;
+	readonly nodes: readonly {
+		readonly unitId: string;
+		readonly dependsOn: readonly string[];
+		readonly executionRole: string;
+		readonly governedPacketDigest: string;
+	}[];
+	readonly maxConcurrent: number;
+	readonly graphDigest: string;
+	readonly idempotencyKey: string;
+	readonly declaredAt: string;
+}
+
+/** A non-authoritative, source-bound governed graph declaration preview. */
+interface GovernedGraphPreview {
+	readonly governance: "preview";
+	readonly status: "blocked";
+	readonly executionStarted: false;
+	readonly approval: {
+		readonly requested: boolean;
+		readonly state: "not-recorded";
+	};
+	readonly authorityBroker: {
+		readonly state: "unavailable";
+		readonly code: typeof GOVERNED_AUTHORITY_BROKER_REQUIRED_CODE;
+	};
+	readonly graph: {
+		/** Digest of the exact JSON source bytes compiled for this preview. */
+		readonly sourceDigest: string;
+		readonly nodeCount: number;
+		readonly maxConcurrent: number;
+		readonly declaration: GovernedGraphDeclarationPreview;
+	};
+	readonly blockers: readonly string[];
+}
+
 /**
  * The unsafe lane is intentionally opt-in. Keep this parser closed so a typo
  * cannot silently select an execution path with different authority.
@@ -990,9 +1045,10 @@ function parseRunCommandArguments(
 	args: readonly string[],
 ): RunCommandArguments {
 	const booleans = new Set(["--raw", "--tui", "--json", "--approve"]);
-	const values = new Set(["--packet", "--envelope", "--resume"]);
+	const values = new Set(["--packet", "--graph", "--envelope", "--resume"]);
 	const seen = new Set<string>();
 	let packetPath: string | undefined;
+	let graphPath: string | undefined;
 	let envelopePath: string | undefined;
 	let recoveryReference: string | undefined;
 
@@ -1018,6 +1074,8 @@ function parseRunCommandArguments(
 			index += 1;
 			if (arg === "--packet") {
 				packetPath = value;
+			} else if (arg === "--graph") {
+				graphPath = value;
 			} else if (arg === "--envelope") {
 				envelopePath = value;
 			} else {
@@ -1050,12 +1108,13 @@ function parseRunCommandArguments(
 		}
 		if (
 			packetPath !== undefined ||
+			graphPath !== undefined ||
 			envelopePath !== undefined ||
 			raw ||
 			seen.has("--tui")
 		) {
 			throw new Error(
-				"--resume cannot be combined with --packet, --envelope, --raw, or --tui because recovered authority comes only from the privileged host.",
+				"--resume cannot be combined with --packet, --graph, --envelope, --raw, or --tui because recovered authority comes only from the privileged host.",
 			);
 		}
 		return {
@@ -1068,8 +1127,29 @@ function parseRunCommandArguments(
 		};
 	}
 
+	if (packetPath !== undefined && graphPath !== undefined) {
+		throw new Error("--packet and --graph are mutually exclusive run sources.");
+	}
+	if (graphPath !== undefined) {
+		if (raw || envelopePath !== undefined || seen.has("--tui")) {
+			throw new Error(
+				"--graph cannot be combined with --raw, --envelope, or --tui because governed graph input is preview-only until host-backed graph admission exists.",
+			);
+		}
+		return {
+			kind: "graph",
+			graphPath,
+			raw: false,
+			tui: false,
+			json: seen.has("--json"),
+			approve,
+		};
+	}
+
 	if (!packetPath) {
-		throw new Error("Missing required --packet <path> argument.");
+		throw new Error(
+			"Missing required --packet <path> or --graph <path> argument.",
+		);
 	}
 
 	if (raw && (approve || envelopePath !== undefined)) {
@@ -2391,6 +2471,80 @@ function formatGovernedRunPreview(preview: GovernedRunPreview): string[] {
 }
 
 /**
+ * Derive preview-local identifiers exclusively from the exact graph source
+ * bytes. They are intentionally not host-issued authority and never leave the
+ * blocked preview; a protected host must choose and record real workflow
+ * identity before it can create a V2 declaration or V4 dispatch.
+ */
+function governedGraphPreviewIdentity(source: string): {
+	readonly sourceDigest: string;
+	readonly runId: string;
+	readonly workflowId: string;
+	readonly workflowRevision: string;
+	readonly idempotencyKey: string;
+	readonly declaredAt: string;
+} {
+	const sourceHash = createHash("sha256").update(source).digest("hex");
+	const variantNibble = (Number.parseInt(sourceHash[16], 16) & 0x3) | 0x8;
+	const runId = `${sourceHash.slice(0, 8)}-${sourceHash.slice(8, 12)}-5${sourceHash.slice(13, 16)}-${variantNibble.toString(16)}${sourceHash.slice(17, 20)}-${sourceHash.slice(20, 32)}`;
+	return Object.freeze({
+		sourceDigest: `sha256:${sourceHash}`,
+		runId,
+		workflowId: `preview-graph-${sourceHash}`,
+		workflowRevision: `source-${sourceHash}`,
+		idempotencyKey: `preview-graph-v2:${sourceHash}`,
+		declaredAt: "1970-01-01T00:00:00Z",
+	});
+}
+
+function buildGovernedGraphPreview(
+	sourceDigest: string,
+	declaration: GovernedGraphDeclarationPreview,
+	approvalRequested: boolean,
+): GovernedGraphPreview {
+	return Object.freeze({
+		governance: "preview" as const,
+		status: "blocked" as const,
+		executionStarted: false as const,
+		approval: Object.freeze({
+			requested: approvalRequested,
+			state: "not-recorded" as const,
+		}),
+		authorityBroker: Object.freeze({
+			state: "unavailable" as const,
+			code: GOVERNED_AUTHORITY_BROKER_REQUIRED_CODE,
+		}),
+		graph: Object.freeze({
+			sourceDigest,
+			nodeCount: declaration.nodes.length,
+			maxConcurrent: declaration.maxConcurrent,
+			declaration,
+		}),
+		blockers: Object.freeze([
+			"Governed graph preview is not a signed V2 graph declaration and grants no execution authority.",
+			approvalRequested
+				? "Operator approval was requested, but this CLI preview cannot record graph admission authority."
+				: "No host-backed graph admission has been requested or recorded.",
+			"A protected host must independently compile, record, and admit this graph before any V4 dispatch, action, candidate, review, or promotion.",
+		]),
+	});
+}
+
+function formatGovernedGraphPreview(preview: GovernedGraphPreview): string[] {
+	return [
+		"Governed graph preview: execution blocked",
+		`graph-source-digest: ${preview.graph.sourceDigest}`,
+		`graph-digest: ${preview.graph.declaration.graphDigest}`,
+		`graph-nodes: ${preview.graph.nodeCount}`,
+		`graph-max-concurrent: ${preview.graph.maxConcurrent}`,
+		`approval: ${preview.approval.requested ? "requested" : "not requested"} (${preview.approval.state})`,
+		`authority-broker: ${preview.authorityBroker.state} (${preview.authorityBroker.code})`,
+		"blockers:",
+		...preview.blockers.map((blocker) => `  - ${blocker}`),
+	];
+}
+
+/**
  * The candidate-producing result deliberately carries no target-branch or
  * promotion authority. The privileged host keeps the candidate identity and
  * signed evidence opaque until the separate review and promotion stages.
@@ -2432,6 +2586,21 @@ function emitGovernedRunPreview(
 		stdout(formatJson(preview));
 	} else {
 		for (const line of formatGovernedRunPreview(preview)) {
+			stdout(line);
+		}
+	}
+	return 2;
+}
+
+function emitGovernedGraphPreview(
+	preview: GovernedGraphPreview,
+	json: boolean,
+	stdout: (line: string) => void,
+): number {
+	if (json) {
+		stdout(formatJson(preview));
+	} else {
+		for (const line of formatGovernedGraphPreview(preview)) {
 			stdout(line);
 		}
 	}
@@ -2945,6 +3114,37 @@ async function runGovernedRunCommand(
 			}
 		}
 		return 0;
+	}
+	if (runArguments.kind === "graph") {
+		const graphPath = resolve(options.cwd, runArguments.graphPath);
+		// Read the attacker-controlled graph path exactly once. The preview compiler
+		// gets this immutable source snapshot, never a path it could reopen after
+		// displaying a digest to the operator.
+		const graphSource = readFileSync(graphPath, "utf8");
+		const normalizedGraph = normalizeGovernedGraphPreviewSource(
+			JSON.parse(graphSource),
+		);
+		const identity = governedGraphPreviewIdentity(graphSource);
+		const kernel = (await cliImport("@buildplane/kernel")) as unknown as {
+			compileGovernedWorkflowGraphV2: (input: unknown) => unknown;
+		};
+		const declaration = kernel.compileGovernedWorkflowGraphV2({
+			runId: identity.runId,
+			workflowId: identity.workflowId,
+			workflowRevision: identity.workflowRevision,
+			graph: normalizedGraph,
+			declaredAt: identity.declaredAt,
+			idempotencyKey: identity.idempotencyKey,
+		}) as GovernedGraphDeclarationPreview;
+		return emitGovernedGraphPreview(
+			buildGovernedGraphPreview(
+				identity.sourceDigest,
+				declaration,
+				runArguments.approve,
+			),
+			runArguments.json,
+			options.stdout,
+		);
 	}
 
 	const packetPath = resolve(options.cwd, runArguments.packetPath);
@@ -9573,6 +9773,22 @@ export async function runCli(
 		// before its cross-lane authority conflict is rejected.
 		if (command === "run") {
 			if (rest.includes("--help")) {
+				// Help must not turn a governed graph conflict into a route around the
+				// parser. In particular, `run --graph <path> --raw --help` cannot
+				// reach legacy bundle construction merely because the eventual output
+				// would be usage text. Strip only help for this closed validation; the
+				// governed handler below still owns successful help rendering.
+				const helpArguments = rest.filter((argument) => argument !== "--help");
+				if (helpArguments.includes("--graph")) {
+					const parsedRunArguments = parseRunCommandArguments(helpArguments);
+					if (parsedRunArguments.kind === "graph") {
+						return await runGovernedRunCommand(rest, {
+							cwd,
+							stdout,
+							...(deps === undefined ? {} : { dependencies: deps }),
+						});
+					}
+				}
 				if (!rest.includes("--raw")) {
 					return await runGovernedRunCommand(rest, {
 						cwd,
@@ -10639,6 +10855,41 @@ function normalizeGraph(raw: Record<string, unknown>): unknown {
 	return {
 		...raw,
 		nodes: nodes.map(normalizeGraphNode),
+	};
+}
+
+/**
+ * Canonicalize only legacy graph spelling before the governed V2 compiler
+ * validates the packet-bearing graph. Unlike the raw execution helper above,
+ * this refuses graph-level extras and strips the legacy `dependencies` alias
+ * so the compiler receives one closed topology surface.
+ */
+function normalizeGovernedGraphPreviewSource(raw: unknown): unknown {
+	const graph = readClosedPreviewRecord(
+		raw,
+		"governed graph source",
+		["nodes", "maxConcurrent"],
+		["nodes"],
+	);
+	if (!Array.isArray(graph.nodes)) {
+		throw new TypeError("governed graph source.nodes must be an array");
+	}
+	const nodes = graph.nodes.map((node, index) => {
+		const record = asPreviewRecord(node);
+		if (!record) {
+			throw new TypeError(
+				`governed graph source.nodes[${index}] must be an object`,
+			);
+		}
+		const normalized = normalizeGraphNode(record) as Record<string, unknown>;
+		const { dependencies: _dependencies, ...canonicalNode } = normalized;
+		return canonicalNode;
+	});
+	return {
+		nodes,
+		...(Object.hasOwn(graph, "maxConcurrent")
+			? { maxConcurrent: graph.maxConcurrent }
+			: {}),
 	};
 }
 
