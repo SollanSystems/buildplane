@@ -7,16 +7,18 @@ use bp_ledger::event::Event;
 use bp_ledger::id::{EventId, RunId};
 use bp_ledger::kind::EventKind;
 use bp_ledger::payload::trust_spine::{
-    attempt_context_content_v1_digest, context_manifest_content_v1_digest,
-    dispatch_envelope_v3_body_digest, dispatch_envelope_v4_digest, dispatch_envelope_v5_digest,
+    action_requested_v2_digest, attempt_context_content_v1_digest,
+    context_manifest_content_v1_digest, dispatch_envelope_v3_body_digest,
+    dispatch_envelope_v4_digest, dispatch_envelope_v5_digest, governed_dispatch_policy_digest_v1,
     sandbox_profile_content_v1_digest, worker_manifest_content_v1_digest, workflow_graph_v2_digest,
-    ActionEvidenceVersionV1, AttemptContextContentV1, AttemptContextDeclaredV1, AttemptFeedbackV1,
-    CommitModeV1, ContextManifestContentV1, ContextManifestDeclaredV1, ContextManifestEntryKindV1,
-    ContextManifestEntryV1, ContextTaintV1, ContextTrustLevelV1, DispatchBudgetV1,
-    DispatchEnvelopeBodyV2, DispatchEnvelopeV3, DispatchEnvelopeV4, DispatchEnvelopeV5,
-    ExecutionRoleV1, PriorCandidateRefV1, SandboxProfileContentV1, SandboxProfileDeclaredV1,
-    SandboxRuntimeV1, TrustTierV1, WorkerHarnessV1, WorkerManifestContentV1,
-    WorkerManifestDeclaredV1, WorkerProviderV1, WorkflowGraphDeclaredV2, WorkflowGraphNodeV2,
+    ActionEvidenceVersionV1, ActionKindV1, ActionRequestedV2, AttemptContextContentV1,
+    AttemptContextDeclaredV1, AttemptFeedbackV1, CommitModeV1, ContextManifestContentV1,
+    ContextManifestDeclaredV1, ContextManifestEntryKindV1, ContextManifestEntryV1, ContextTaintV1,
+    ContextTrustLevelV1, DispatchBudgetV1, DispatchEnvelopeBodyV2, DispatchEnvelopeV3,
+    DispatchEnvelopeV4, DispatchEnvelopeV5, ExecutionRoleV1, PriorCandidateRefV1,
+    SandboxProfileContentV1, SandboxProfileDeclaredV1, SandboxRuntimeV1, TrustTierV1,
+    WorkerHarnessV1, WorkerManifestContentV1, WorkerManifestDeclaredV1, WorkerProviderV1,
+    WorkflowGraphDeclaredV2, WorkflowGraphNodeV2,
 };
 use bp_ledger::signing::{public_key_hash, ActorKeyRef, TrustedPublicKeys};
 use bp_ledger::storage::sqlite::{
@@ -86,6 +88,23 @@ fn event(run_id: RunId, kind: EventKind, payload: Payload) -> Event {
         id: EventId::new(),
         run_id,
         parent_event_id: None,
+        schema_version: Event::CURRENT_SCHEMA_VERSION,
+        kind,
+        occurred_at: Utc::now(),
+        payload,
+    }
+}
+
+fn child_event(
+    run_id: RunId,
+    parent_event_id: EventId,
+    kind: EventKind,
+    payload: Payload,
+) -> Event {
+    Event {
+        id: EventId::new(),
+        run_id,
+        parent_event_id: Some(parent_event_id),
         schema_version: Event::CURRENT_SCHEMA_VERSION,
         kind,
         occurred_at: Utc::now(),
@@ -375,6 +394,36 @@ fn observation_count(store: &SqliteStore) -> i64 {
         .expect("count V5 observations")
 }
 
+fn action_request_for_v5_fixture(fixture: &V5Fixture, authority_actor: &str) -> ActionRequestedV2 {
+    let dispatch_v3 = &fixture.dispatch.dispatch_v4.dispatch_v3;
+    let body = &dispatch_v3.body;
+    ActionRequestedV2 {
+        run_id: fixture.run_id.to_string(),
+        workflow_id: body.workflow_id.clone(),
+        unit_id: body.unit_id.clone(),
+        attempt: body.attempt,
+        provenance_ref: body.provenance_ref.clone(),
+        action_id: "v5-must-not-claim".into(),
+        idempotency_key: "v5-must-not-claim".into(),
+        action_kind: ActionKindV1::Process,
+        canonical_input_digest: digest('f'),
+        canonical_input_ref: "cas:input:v5-observation".into(),
+        dispatch_envelope_digest: fixture.dispatch.envelope_digest.clone(),
+        repository_binding_digest: dispatch_v3.repository_binding_digest.clone(),
+        ledger_authority_realm_digest: dispatch_v3.ledger_authority_realm_digest.clone(),
+        governed_packet_digest: dispatch_v3.governed_packet_digest.clone(),
+        capability_bundle_digest: body.capability_bundle_digest.clone(),
+        policy_digest: governed_dispatch_policy_digest_v1(&body.acceptance_contract_digest)
+            .expect("derive canonical governed policy digest"),
+        context_manifest_digest: body.context_manifest_digest.clone(),
+        worker_manifest_digest: body.worker_manifest_digest.clone(),
+        sandbox_profile_digest: body.sandbox_profile_digest.clone(),
+        authority_actor: authority_actor.into(),
+        execution_role: body.execution_role,
+        requested_at: timestamp(Utc::now()),
+    }
+}
+
 #[test]
 fn first_attempt_v5_observation_records_exact_signed_graph_and_manifest_witnesses_without_authority(
 ) {
@@ -475,13 +524,25 @@ fn first_attempt_v5_observation_records_exact_signed_graph_and_manifest_witnesse
         .expect("count activity claims");
     assert_eq!(claim_rows, 0);
 
+    let action_request = action_request_for_v5_fixture(&fixture, &signer.actor_id);
+    action_requested_v2_digest(&action_request).expect("action request fixture is canonical");
+    let action_request_event = child_event(
+        fixture.run_id,
+        fixture.dispatch_event.id,
+        EventKind::ActionRequestedV2,
+        Payload::ActionRequestedV2(action_request),
+    );
+    store
+        .append_signed(&action_request_event, &signing_key, &signer)
+        .expect("append signed V5-bound action request");
+
     let claim = store.claim_activity_v1(
         &ActivityClaimRequestV1 {
             run_id: fixture.run_id,
             activity_id: "v5-must-not-claim".into(),
             idempotency_key: "v5-must-not-claim".into(),
             dispatch_event_id: fixture.dispatch_event.id,
-            action_request_event_id: EventId::new(),
+            action_request_event_id: action_request_event.id,
             lease_duration_ms: 1_000,
         },
         &activity_claim_authority(&signing_key, &signer),
@@ -490,7 +551,8 @@ fn first_attempt_v5_observation_records_exact_signed_graph_and_manifest_witnesse
     );
     assert!(matches!(
         claim,
-        Err(LedgerError::ActivityClaimAuthorityRejected { .. })
+        Err(LedgerError::ActivityClaimAuthorityRejected { reason })
+            if reason == "claim requires a signed dispatch_envelope_v3 or graph-bound dispatch_envelope_v4 event"
     ));
     let claim_rows_after: i64 = store
         .conn_for_tests()
@@ -499,6 +561,62 @@ fn first_attempt_v5_observation_records_exact_signed_graph_and_manifest_witnesse
     assert_eq!(
         claim_rows_after, 0,
         "V5 observation must not grant an activity claim"
+    );
+}
+
+#[test]
+fn v5_observation_rejects_a_second_signed_dispatch_with_the_same_idempotency_identity() {
+    let store = SqliteStore::open_in_memory().expect("open store");
+    let signing_key = SigningKey::from_bytes(&[19u8; 32]);
+    let signer = actor("broker:dispatch", "dispatch-1", &signing_key);
+    let fixture = v5_fixture(1);
+    append_fixture(
+        &store,
+        &fixture,
+        &signing_key,
+        &signer,
+        &signing_key,
+        &signer,
+    );
+    let authority = admission_authority(&signing_key, &signer);
+    store
+        .observe_governed_dispatch_v5_admission_v1(
+            &GovernedDispatchV5ObservationRequestV1 {
+                run_id: fixture.run_id,
+                dispatch_event_id: fixture.dispatch_event.id,
+            },
+            &authority,
+        )
+        .expect("observe initial signed V5 dispatch");
+
+    // This is a distinct, valid signed tape event with exactly the same V5
+    // dispatch body. Its V5 envelope therefore collides on both the dispatch
+    // idempotency key and workflow-attempt semantic identity, and must not be
+    // accepted as an idempotent replay of the original event.
+    let duplicate_dispatch_event = event(
+        fixture.run_id,
+        EventKind::DispatchEnvelopeV5,
+        Payload::DispatchEnvelopeV5(fixture.dispatch.clone()),
+    );
+    store
+        .append_signed(&duplicate_dispatch_event, &signing_key, &signer)
+        .expect("append distinct but otherwise valid duplicate V5 dispatch");
+
+    let result = store.observe_governed_dispatch_v5_admission_v1(
+        &GovernedDispatchV5ObservationRequestV1 {
+            run_id: fixture.run_id,
+            dispatch_event_id: duplicate_dispatch_event.id,
+        },
+        &authority,
+    );
+    assert!(matches!(
+        result,
+        Err(LedgerError::GovernedDispatchAdmissionAuthorityRejected { .. })
+    ));
+    assert_eq!(
+        observation_count(&store),
+        1,
+        "a semantic collision must not create a second V5 observation"
     );
 }
 
