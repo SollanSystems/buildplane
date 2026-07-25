@@ -166,6 +166,14 @@ function rootlessPrerequisiteResult(
 			stderr: "",
 		};
 	}
+	if (
+		args[0] === "run" &&
+		args.includes("--pull=never") &&
+		args.at(-2) === IMAGE &&
+		args.at(-1) === "/bin/true"
+	) {
+		return { status: 0, stdout: "", stderr: "" };
+	}
 	return undefined;
 }
 
@@ -422,13 +430,7 @@ describe("governed command worker + Podman contract", () => {
 		]);
 		expect(podmanRuns).toHaveLength(1);
 		expect(receiptOutcomes).toEqual(["unknown"]);
-		expect(podmanBinaries).toEqual([
-			"podman",
-			"podman",
-			"podman",
-			"podman",
-			"podman",
-		]);
+		expect(podmanBinaries).toEqual(Array<string>(6).fill("podman"));
 	});
 
 	it("fails closed when Podman is unavailable and never substitutes a host runner", () => {

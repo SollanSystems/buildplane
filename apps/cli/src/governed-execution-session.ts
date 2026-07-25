@@ -34,6 +34,7 @@ import {
 
 const DIGEST = /^sha256:[a-f0-9]{64}$/;
 const PINNED_IMAGE = /^[^\s@]+@sha256:[a-f0-9]{64}$/;
+const MAX_ECMASCRIPT_EPOCH_MS = 8_640_000_000_000_000;
 
 export type GovernedExecutionUnavailableCode =
 	| "INVALID_INPUT"
@@ -268,15 +269,40 @@ function validateDispatch(
 		typeof dispatch.expiresAt === "string"
 			? Date.parse(dispatch.expiresAt)
 			: Number.NaN;
+	const budget = isRecord(dispatch.budget) ? dispatch.budget : undefined;
+	const rawMaxComputeTimeMs = budget?.maxComputeTimeMs;
+	const maxComputeTimeMs =
+		typeof rawMaxComputeTimeMs === "number" ? rawMaxComputeTimeMs : undefined;
+	const now = Date.now();
 	if (
-		!Number.isFinite(issuedAt) ||
-		!Number.isFinite(expiresAt) ||
+		!Number.isSafeInteger(issuedAt) ||
+		!Number.isSafeInteger(expiresAt) ||
 		issuedAt >= expiresAt ||
-		expiresAt <= Date.now()
+		issuedAt > now ||
+		budget === undefined ||
+		(rawMaxComputeTimeMs !== undefined &&
+			(maxComputeTimeMs === undefined ||
+				!Number.isSafeInteger(maxComputeTimeMs) ||
+				maxComputeTimeMs < 1 ||
+				maxComputeTimeMs > 0xffff_ffff ||
+				maxComputeTimeMs > MAX_ECMASCRIPT_EPOCH_MS - issuedAt))
 	) {
 		return unavailable(
 			"DISPATCH_EXPIRED",
-			"the sealed governed dispatch authority window is expired or invalid.",
+			"the sealed governed dispatch authority window is inactive, expired, or invalid.",
+		);
+	}
+	const computeDeadline =
+		maxComputeTimeMs === undefined ? expiresAt : issuedAt + maxComputeTimeMs;
+	if (
+		!Number.isSafeInteger(computeDeadline) ||
+		computeDeadline <= issuedAt ||
+		computeDeadline > MAX_ECMASCRIPT_EPOCH_MS ||
+		Math.min(expiresAt, computeDeadline) <= now
+	) {
+		return unavailable(
+			"DISPATCH_EXPIRED",
+			"the sealed governed dispatch authority window is inactive, expired, or invalid.",
 		);
 	}
 	return undefined;

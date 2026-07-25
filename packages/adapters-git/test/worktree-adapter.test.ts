@@ -1121,6 +1121,18 @@ describe("git worktree adapter", () => {
 		},
 	);
 
+	it.runIf(process.platform === "linux")(
+		"does not mistake pinned command-line Git hardening for repository configuration",
+		() => {
+			const repo = createCommittedRepo();
+			const adapter = createGovernedGitWorktreeAdapter();
+
+			expect(adapter.assertRunnableRepository(repo)).toEqual({
+				headSha: readGitHead(repo),
+			});
+		},
+	);
+
 	it("does not expose raw target or candidate mutation primitives from the governed adapter", () => {
 		const repo = createCommittedRepo();
 		const rootHeadBefore = readGitHead(repo);

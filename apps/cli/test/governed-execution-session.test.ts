@@ -97,6 +97,14 @@ const podmanRunner: PodmanCommandRunner = (_binary, args) => {
 			stderr: "",
 		};
 	}
+	if (
+		args[0] === "run" &&
+		args.includes("--pull=never") &&
+		args.at(-2) === IMAGE &&
+		args.at(-1) === "/bin/true"
+	) {
+		return { status: 0, stdout: "", stderr: "" };
+	}
 	throw new Error(`unexpected Podman invocation: ${args.join(" ")}`);
 };
 
@@ -151,6 +159,7 @@ function dispatch(
 	sandboxProfile = profile(),
 	overrides: Partial<GovernedDispatchLineageV3> = {},
 ): GovernedDispatchLineageV3 {
+	const now = Date.now();
 	const acceptanceContractDigest = DIGEST("c");
 	return {
 		schemaVersion: 3,
@@ -181,8 +190,8 @@ function dispatch(
 		idempotencyKey: "dispatch:governed-execution-session",
 		authorityActor: "kernel",
 		actionEvidenceVersion: "sealed_v3",
-		issuedAt: "2026-07-18T12:00:00Z",
-		expiresAt: "2099-07-18T12:00:00Z",
+		issuedAt: new Date(now - 1_000).toISOString(),
+		expiresAt: new Date(now + 15 * 60_000).toISOString(),
 		...overrides,
 	};
 }
@@ -551,7 +560,7 @@ describe("governed execution session", () => {
 		}
 	});
 
-	it("blocks reversed or malformed dispatch authority windows before composition", async () => {
+	it("blocks malformed, inactive, or elapsed dispatch authority windows before composition", async () => {
 		const source = packet();
 		const sandboxProfile = profile();
 		let factoryCalls = 0;
@@ -568,6 +577,15 @@ describe("governed execution session", () => {
 			{
 				issuedAt: "not-a-timestamp",
 				expiresAt: "2099-07-18T12:00:00Z",
+			},
+			{
+				issuedAt: "2099-07-18T12:00:00Z",
+				expiresAt: "2099-07-19T12:00:00Z",
+			},
+			{
+				issuedAt: "2020-07-18T12:00:00Z",
+				expiresAt: "2099-07-18T12:00:00Z",
+				budget: { maxTokens: 100, maxComputeTimeMs: 30_000 },
 			},
 		]) {
 			const dispatched = dispatch(source, sandboxProfile, authorityWindow);

@@ -122,9 +122,11 @@ function createPreauthorizedEnvelope(
 		readonly baseCommitSha?: string;
 		readonly issuedAt?: string;
 		readonly expiresAt?: string;
+		readonly maxComputeTimeMs?: number;
 		readonly governedPacketDigest?: string;
 	} = {},
 ): Record<string, unknown> {
+	const now = Date.now();
 	const unitId =
 		overrides.unitId ??
 		String(packet.unit && (packet.unit as { id: string }).id);
@@ -145,11 +147,14 @@ function createPreauthorizedEnvelope(
 		contextManifestDigest: digest("b"),
 		workerManifestDigest: digest("c"),
 		sandboxProfileDigest: digest("d"),
-		budget: { maxTokens: 10_000, maxComputeTimeMs: 60_000 },
+		budget: {
+			maxTokens: 10_000,
+			maxComputeTimeMs: overrides.maxComputeTimeMs ?? 60_000,
+		},
 		trustTier: "governed",
 		idempotencyKey: `dispatch:${unitId}:1`,
-		issuedAt: overrides.issuedAt ?? "2026-07-20T12:00:00Z",
-		expiresAt: overrides.expiresAt ?? "2099-07-20T12:15:00Z",
+		issuedAt: overrides.issuedAt ?? new Date(now - 1_000).toISOString(),
+		expiresAt: overrides.expiresAt ?? new Date(now + 15 * 60_000).toISOString(),
 	} as const;
 	const governedPacketDigest =
 		overrides.governedPacketDigest ??
@@ -726,6 +731,57 @@ describe("governed run front door", () => {
 			blockers: expect.arrayContaining([
 				expect.stringContaining("implementer dispatch envelope"),
 			]),
+		});
+		expect(hostResolver.resolve).not.toHaveBeenCalled();
+		expect(openCandidateSession).not.toHaveBeenCalled();
+		expectRootUnchanged(root, before);
+	});
+
+	it.each([
+		[
+			"not yet active",
+			{
+				issuedAt: "2099-07-20T12:00:00Z",
+				expiresAt: "2099-07-20T12:15:00Z",
+			},
+			"not yet active",
+		],
+		[
+			"past its compute deadline",
+			{
+				issuedAt: "2020-07-20T12:00:00Z",
+				expiresAt: "2099-07-20T12:15:00Z",
+				maxComputeTimeMs: 60_000,
+			},
+			"compute deadline",
+		],
+	] as const)("renders a preview without resolving a host when preauthorized authority is %s", async (_label, overrides, blocker) => {
+		const root = createGitProject();
+		const packet = createGovernedPacket("host-preauthorization-window");
+		const packetPath = writePacket(root, packet);
+		const envelopePath = writeEnvelope(
+			root,
+			createPreauthorizedEnvelope(root, packet, overrides),
+		);
+		const openCandidateSession = vi.fn();
+		hostResolver.resolve.mockResolvedValue({
+			kind: "host-owned-governed-broker-v1",
+			openCandidateSession,
+		} as unknown as HostOwnedGovernedBrokerV1);
+		const before = snapshotRoot(root);
+
+		const result = await runCliCapture(
+			root,
+			["run", "--packet", packetPath, "--envelope", envelopePath, "--json"],
+			legacyBundleMustNotBeConstructed(),
+		);
+
+		expect(result.exitCode).toBe(2);
+		expect(JSON.parse(result.stdout.join("\n"))).toMatchObject({
+			governance: "preview",
+			status: "blocked",
+			executionStarted: false,
+			blockers: expect.arrayContaining([expect.stringContaining(blocker)]),
 		});
 		expect(hostResolver.resolve).not.toHaveBeenCalled();
 		expect(openCandidateSession).not.toHaveBeenCalled();

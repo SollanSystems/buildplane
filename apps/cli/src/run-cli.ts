@@ -883,7 +883,7 @@ function formatRunHelp(): string[] {
 		"  Options:",
 		"    --approve        Request host-brokered governed admission; blocks until a privileged authority broker is available",
 		"    --resume <ref>   Ask the privileged host to reconcile an existing workflow; requires --approve and cannot take a packet or envelope",
-		"    --envelope <path> Supply a sealed DispatchEnvelopeV3 for host-verified preauthorized admission; the CLI checks only closed shape/digest and the host must verify its signed tape",
+		"    --envelope <path> Supply a sealed DispatchEnvelopeV3 for host-verified preauthorized admission; the CLI checks closed shape, digest, and authority window while the host verifies its signed tape",
 		"    --raw            Explicitly unsafe legacy execution; emits no trusted receipt",
 		"    --tui            Interactive terminal UI (unsafe --raw lane only)",
 		"    --json           Machine-readable output",
@@ -944,6 +944,10 @@ interface DispatchEnvelopePreview {
 	readonly provenanceRef: string;
 	readonly trustTier: string;
 	readonly baseCommitSha: string;
+	readonly budget: {
+		readonly maxComputeTimeMs?: number;
+	};
+	readonly issuedAt: string;
 	readonly expiresAt: string;
 	readonly envelopeDigest: string;
 	/** V3 binds this protocol selector into the envelope digest. */
@@ -2995,16 +2999,38 @@ async function preauthorizedEnvelopeBlocker(
 	if (envelope.executionRole !== "implementer") {
 		return "Preauthorized governed admission requires an implementer dispatch envelope; reviewer, adversary, and judge roles are read-only.";
 	}
+	const now = Date.now();
+	const issuedAt = Date.parse(envelope.issuedAt);
+	const expiresAt = Date.parse(envelope.expiresAt);
+	if (
+		!Number.isFinite(issuedAt) ||
+		!Number.isFinite(expiresAt) ||
+		issuedAt >= expiresAt
+	) {
+		return "Preauthorized dispatch envelope has an invalid authority window.";
+	}
+	if (issuedAt > now) {
+		return "Preauthorized dispatch envelope authority is not yet active.";
+	}
+	const computeDeadline =
+		envelope.budget.maxComputeTimeMs === undefined
+			? expiresAt
+			: issuedAt + envelope.budget.maxComputeTimeMs;
+	if (!Number.isFinite(computeDeadline)) {
+		return "Preauthorized dispatch envelope has an invalid compute deadline.";
+	}
+	const authorityDeadline = Math.min(expiresAt, computeDeadline);
+	if (authorityDeadline <= now) {
+		return computeDeadline < expiresAt
+			? "Preauthorized dispatch envelope compute deadline has elapsed."
+			: "Preauthorized dispatch envelope is expired or has an invalid expiry.";
+	}
 	let expectedGovernedPacketDigest: string;
 	try {
 		expectedGovernedPacketDigest =
 			strictGovernedSourcePacketDigest(sourcePacket);
 	} catch {
 		return "Preauthorized dispatch envelope packet binding could not be verified.";
-	}
-	const expiresAt = Date.parse(envelope.expiresAt);
-	if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
-		return "Preauthorized dispatch envelope is expired or has an invalid expiry.";
 	}
 	const source = asPreviewRecord(sourcePacket);
 	const unit = asPreviewRecord(source?.unit);

@@ -271,6 +271,14 @@ function governedGitUnavailable(message: string): SpawnSyncReturns<string> {
  * so a caller's PATH/GIT_* configuration cannot redirect a signed Git effect.
  */
 function createPinnedGovernedGitRunner(): GitCommandRunner {
+	return createPinnedGovernedGitRunnerWithFixedOptions(
+		GOVERNED_GIT_FIXED_OPTIONS,
+	);
+}
+
+function createPinnedGovernedGitRunnerWithFixedOptions(
+	fixedOptions: readonly string[],
+): GitCommandRunner {
 	return (args, spawnOptions) => {
 		if (process.platform !== "linux") {
 			return governedGitUnavailable(
@@ -292,11 +300,26 @@ function createPinnedGovernedGitRunner(): GitCommandRunner {
 			);
 		}
 
-		return spawnSync(executable, [...GOVERNED_GIT_FIXED_OPTIONS, ...args], {
+		return spawnSync(executable, [...fixedOptions, ...args], {
 			...spawnOptions,
 			env: governedGitEnvironment(),
 		});
 	};
+}
+
+/**
+ * Inspect repository-controlled configuration through the same pinned binary
+ * and scrubbed environment as governed effects, but without command-line
+ * hardening overrides. `git config --list` includes `-c` values in its output;
+ * scanning with the effect runner would therefore reject our own safe
+ * `core.hooksPath=/dev/null` override as if it were repository authority.
+ *
+ * This runner is deliberately read-only and private to configuration
+ * inspection. All topology and materialization effects continue to use the
+ * hardened runner above.
+ */
+function createPinnedGovernedGitConfigInspector(): GitCommandRunner {
+	return createPinnedGovernedGitRunnerWithFixedOptions([]);
 }
 
 /**
@@ -335,9 +358,9 @@ function isUnsafeGovernedGitConfigKey(key: string): boolean {
 }
 
 function assertGovernedGitConfiguration(
-	runGit: GitCommandRunner,
 	...directories: readonly string[]
 ): void {
+	const inspectGit = createPinnedGovernedGitConfigInspector();
 	const inspected = new Set<string>();
 	for (const directory of directories) {
 		if (inspected.has(directory)) continue;
@@ -346,7 +369,7 @@ function assertGovernedGitConfiguration(
 		// `config.worktree` scope. The pinned environment has already disabled
 		// system/global config; this sees every remaining repository-controlled
 		// scope without executing any configured helper.
-		const configuration = executeGitCommand(runGit, directory, [
+		const configuration = executeGitCommand(inspectGit, directory, [
 			"config",
 			"--includes",
 			"--null",
@@ -792,7 +815,6 @@ export function createGitWorktreeAdapter(
 			// Even a direct library call (outside the orchestrator) cannot turn the
 			// candidate helper into a host-config execution path.
 			assertGovernedGitConfiguration(
-				governedRunGit,
 				verifiedTopology.projectRoot,
 				verifiedTopology.candidatePath,
 			);
@@ -1220,7 +1242,7 @@ export function createGovernedGitWorktreeAdapter(): GovernedGitWorktreeAdapter {
 		...readOnlyGovernedAdapter
 	} = adapter;
 	const assertSafeRepository = (projectRoot: string): void => {
-		assertGovernedGitConfiguration(runGit, projectRoot);
+		assertGovernedGitConfiguration(projectRoot);
 	};
 
 	return Object.freeze({
@@ -1660,11 +1682,7 @@ function assertGovernedCandidateTopologyRemainsPinned(input: {
 			"candidate worktree topology changed after a governed boundary",
 		);
 	}
-	assertGovernedGitConfiguration(
-		input.runGit,
-		observed.projectRoot,
-		observed.candidatePath,
-	);
+	assertGovernedGitConfiguration(observed.projectRoot, observed.candidatePath);
 	return observed;
 }
 
