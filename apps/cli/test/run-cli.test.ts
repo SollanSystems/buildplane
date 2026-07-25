@@ -4722,7 +4722,9 @@ describe("cli command surface", () => {
 		const report = JSON.parse(result.stdout.join("\n"));
 		expect(report).toMatchObject({
 			runId: run.id,
-			verdict: "FAILED",
+			// A rejected scope policy is a blocked promotion, not a deterministic
+			// worker failure that a caller may retry or override without new authority.
+			verdict: "BLOCKED",
 		});
 		expect(report.issues).toEqual(
 			expect.arrayContaining([
