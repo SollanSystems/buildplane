@@ -2950,9 +2950,11 @@ async function runGovernedRunCommand(
 	const packetPath = resolve(options.cwd, runArguments.packetPath);
 	const packetSource = readFileSync(packetPath, "utf8");
 	const sourcePacket = JSON.parse(packetSource);
-	const packet = options.dependencies?.parsePacket
-		? options.dependencies.parsePacket(packetPath)
-		: await loadPacket(packetPath);
+	// Governed preview, strict admission, and the eventual host handoff must
+	// describe one immutable source snapshot. In particular, do not call the
+	// legacy path parser here: it would reopen an attacker-mutable path after
+	// the authority-bearing bytes above have already been read.
+	const packet = await parsePacketSource(packetSource);
 	const loadedEnvelope = runArguments.envelopePath
 		? await loadDispatchEnvelopePreview(
 				resolve(options.cwd, runArguments.envelopePath),
@@ -4580,12 +4582,16 @@ async function promoteMemoryFromReceipt(
 	};
 }
 
-async function loadPacket(packetPath: string): Promise<unknown> {
+async function parsePacketSource(packetSource: string): Promise<unknown> {
 	const kernel = (await cliImport("@buildplane/kernel")) as unknown as {
 		parseUnitPacket: (input: string) => unknown;
 	};
 
-	return kernel.parseUnitPacket(readFileSync(packetPath, "utf8"));
+	return kernel.parseUnitPacket(packetSource);
+}
+
+async function loadPacket(packetPath: string): Promise<unknown> {
+	return parsePacketSource(readFileSync(packetPath, "utf8"));
 }
 
 const NATIVE_COMMAND_DISPATCH_ERROR_CODE = "NATIVE_COMMAND_DISPATCH_FAILED";

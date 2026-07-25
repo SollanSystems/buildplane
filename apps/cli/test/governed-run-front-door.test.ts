@@ -306,6 +306,45 @@ describe("governed run front door", () => {
 		expectRootUnchanged(root, before);
 	});
 
+	it.each([
+		["without an operator approval", []],
+		["with an operator approval", ["--approve"]],
+	] as const)("builds the governed preview from the source snapshot %s without invoking an injected path parser", async (_label, approvalArguments) => {
+		const root = createGitProject();
+		const packetPath = writePacket(
+			root,
+			createGovernedPacket("source-snapshot"),
+		);
+		const before = snapshotRoot(root);
+		const parsePacket = vi.fn(() => {
+			throw new Error(
+				"governed preview must not re-parse the packet path after snapshotting its source",
+			);
+		});
+		hostResolver.resolve.mockResolvedValue(undefined);
+
+		const result = await runCliCapture(
+			root,
+			["run", ...approvalArguments, "--packet", packetPath, "--json"],
+			{
+				...legacyBundleMustNotBeConstructed(),
+				parsePacket,
+			},
+		);
+
+		expect(result.exitCode).toBe(2);
+		expect(parsePacket).not.toHaveBeenCalled();
+		expect(JSON.parse(result.stdout.join("\n"))).toMatchObject({
+			governance: "preview",
+			packet: {
+				unitId: "source-snapshot",
+				executionRole: "implementer",
+				executionRoleExplicit: true,
+			},
+		});
+		expectRootUnchanged(root, before);
+	});
+
 	it("fails closed before passing the target checkout to a legacy host candidate session", async () => {
 		const root = createGitProject();
 		const packetPath = writePacket(root, createGovernedPacket("host-success"));
