@@ -122,7 +122,7 @@ function isStringLiteralNode(node) {
 	);
 }
 
-function collectSourceModuleReferences(source, _filePath) {
+function collectSourceModuleReferences(source) {
 	const ast = parseAst(source);
 	const references = [];
 	const queueSpecifier = (src) => {
@@ -506,7 +506,7 @@ export function assertRuntimeImportClosure(entryFilePaths, options = {}) {
 		visited.add(filePath);
 		const source = readFileSync(filePath, "utf8");
 
-		for (const reference of collectSourceModuleReferences(source, filePath)) {
+		for (const reference of collectSourceModuleReferences(source)) {
 			if (reference.type === "unsupported-dynamic-import") {
 				onError(
 					`Runtime file uses computed dynamic import ${JSON.stringify(reference.expression)} in ${filePath}`,

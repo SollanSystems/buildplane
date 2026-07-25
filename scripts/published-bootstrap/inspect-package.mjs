@@ -527,8 +527,8 @@ function statementBindsVersionGuardImport(statement) {
 	}
 
 	return statement.specifiers.some((element) => {
-		const importedName = element.imported.name;
-		const localName = element.local.name;
+		const importedName = element.imported?.name ?? element.imported?.value;
+		const localName = element.local?.name;
 		return (
 			importedName === "assertSupportedNodeVersion" &&
 			localName === "assertSupportedNodeVersion"
