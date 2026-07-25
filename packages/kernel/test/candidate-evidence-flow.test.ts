@@ -1721,4 +1721,427 @@ describe("candidate-bound acceptance", () => {
 			rmSync(root, { recursive: true, force: true });
 		}
 	});
+
+	it("keeps the target root immutable when deterministic acceptance rejects a frozen V3 candidate", async () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-candidate-rejection-"));
+		const events: string[] = [];
+		const targetMutationAttempts: string[] = [];
+		let frozen: WorkspaceCandidateArtifact | undefined;
+		let recordedCandidateAcceptance:
+			| Parameters<CandidateEvidencePort["recordCandidateAcceptance"]>[0]
+			| undefined;
+		try {
+			git(root, ["init", "-q"]);
+			git(root, ["config", "user.email", "candidate@test.invalid"]);
+			git(root, ["config", "user.name", "Candidate Test"]);
+			writeFileSync(join(root, "base.txt"), "base\n");
+			git(root, ["add", "base.txt"]);
+			git(root, ["commit", "-qm", "base"]);
+			const baseSha = git(root, ["rev-parse", "HEAD"]);
+			const workspacePath = join(root, ".buildplane", "workspaces", RUN_ID);
+			mkdirSync(join(root, ".buildplane", "workspaces"), { recursive: true });
+			git(root, ["worktree", "add", "--detach", workspacePath, baseSha]);
+
+			const rootSnapshot = () => ({
+				head: git(root, ["rev-parse", "HEAD"]),
+				tree: git(root, ["rev-parse", "HEAD^{tree}"]),
+				commitCount: git(root, ["rev-list", "--count", "HEAD"]),
+				status: git(root, ["status", "--porcelain"]),
+			});
+			const rootBefore = rootSnapshot();
+			const commitRunFailureOutcome = vi.fn(
+				(_runId: string, _input: unknown) => ({
+					id: RUN_ID,
+					unitId: "candidate-unit",
+					status: "failed" as const,
+				}),
+			);
+			const commitRunCandidateOutcome = vi.fn(
+				(_runId: string, _input: unknown) => {
+					throw new Error(
+						"rejected candidates must not be persisted as accepted",
+					);
+				},
+			);
+			const deleteWorkspace = vi.fn(() => ({ deleted: true }));
+			const commitAndMergeWorkspace = vi.fn((_input: unknown) => {
+				targetMutationAttempts.push("commit-and-merge");
+				throw new Error(
+					"rejected candidate must not merge into the target root",
+				);
+			});
+			const promoteWorkspaceCandidate = vi.fn((_input: unknown) => {
+				targetMutationAttempts.push("compatibility-promotion");
+				throw new Error(
+					"rejected candidate must not use compatibility promotion",
+				);
+			});
+			const promoteGovernedWorkspaceCandidate = vi.fn((_input: unknown) => {
+				targetMutationAttempts.push("governed-promotion");
+				throw new Error(
+					"rejected candidate must not promote to the target root",
+				);
+			});
+			const storage = {
+				initializeProject: () => ({
+					created: true,
+					projectRoot: root,
+					stateDbPath: join(root, ".buildplane", "state.db"),
+				}),
+				createRun: (
+					_packet: UnitPacket,
+					options?: { readonly runId?: string },
+				) => ({
+					id: options?.runId ?? "storage-generated-run-id",
+					unitId: "candidate-unit",
+					status: "pending" as const,
+				}),
+				getChildRuns: () => [],
+				markRunRunning: () => {},
+				recordExecutionEvidence: () => {},
+				recordDecision: () => {},
+				completeRun: () => ({
+					id: RUN_ID,
+					unitId: "candidate-unit",
+					status: "passed" as const,
+				}),
+				recordWorkspacePrepared: () => {},
+				commitRunFailureOutcome,
+				commitRunSuccessOutcome: () => ({
+					id: RUN_ID,
+					unitId: "candidate-unit",
+					status: "passed" as const,
+				}),
+				recordAcceptanceShadow: () => {},
+				commitRunCandidateOutcome,
+				recordWorkspaceDeleted: () => {},
+				recordWorkspaceCleanupFailed: () => {},
+				suspendRun: () => ({
+					id: RUN_ID,
+					unitId: "candidate-unit",
+					status: "suspended" as const,
+				}),
+				approveRun: () => ({
+					id: RUN_ID,
+					unitId: "candidate-unit",
+					status: "pending" as const,
+				}),
+				rejectSuspendedRun: () => ({
+					id: RUN_ID,
+					unitId: "candidate-unit",
+					status: "failed" as const,
+				}),
+				getStatusSnapshot: () => ({
+					initialized: true,
+					latestRunUsedWorkspace: false,
+					actionableWorkspaces: [],
+					runCounts: {
+						pending: 0,
+						running: 0,
+						passed: 0,
+						failed: 0,
+						cancelled: 0,
+					},
+				}),
+				inspectTarget: () => {
+					throw new Error("unused");
+				},
+			} as unknown as BuildplaneStoragePort;
+
+			const runtime: BuildplaneRuntimePort = {
+				executePacket: () => {
+					events.push("execute");
+					writeFileSync(join(workspacePath, "candidate.txt"), "candidate\n");
+					return {
+						command: "ignored",
+						args: [],
+						cwd: workspacePath,
+						startedAt: "2026-07-17T12:00:00.000Z",
+						completedAt: "2026-07-17T12:00:01.000Z",
+						exitCode: 0,
+						stdout: "",
+						stderr: "",
+						outputChecks: [],
+					};
+				},
+			};
+
+			const policy: BuildplanePolicyPort = {
+				evaluateRun: () => {
+					events.push("policy");
+					return { kind: "advance-run", outcome: "approved", reasons: [] };
+				},
+				evaluateAcceptanceContract: (_contract, evidence) => {
+					events.push("acceptance-rejected");
+					expect(evidence.checkResults).toEqual([
+						{ command: "candidate-check", exitCode: 1 },
+					]);
+					return {
+						kind: "acceptance.contract",
+						outcome: "rejected",
+						reasons: ["candidate-check exited with status 1"],
+					};
+				},
+				evaluateAcceptanceDiffScope: () => ({
+					status: "passed",
+					outOfScopeFiles: [],
+				}),
+			};
+
+			const workspace: BuildplaneWorkspacePort = {
+				governedWorkspaceBoundary: "pinned-governed-git-v1",
+				assertRunnableRepository: () => ({
+					headSha: git(root, ["rev-parse", "HEAD"]),
+				}),
+				checkWorktreeClean: (path) =>
+					git(path, ["status", "--porcelain"]).length === 0,
+				prepareWorkspace: () => ({ path: workspacePath, headSha: baseSha }),
+				commitAndMergeWorkspace,
+				promoteWorkspaceCandidate,
+				promoteGovernedWorkspaceCandidate,
+				async createGovernedWorkspaceCandidate(input) {
+					events.push("materialize-git");
+					expect(input.governedDispatch.workflowId).toBe("workflow-v3");
+					git(workspacePath, ["add", "--all"]);
+					git(workspacePath, ["commit", "-qm", "candidate"]);
+					const frozenCandidate = candidate(
+						baseSha,
+						git(workspacePath, ["rev-parse", "HEAD"]),
+					);
+					frozen = frozenCandidate;
+					git(root, [
+						"update-ref",
+						frozenCandidate.candidateRef,
+						frozenCandidate.candidateCommitSha,
+					]);
+					return {
+						candidate: frozenCandidate,
+						actionReceipt: {
+							actionId: "git-candidate-create:candidate-flow/run/1",
+							actionReceiptRef: "event://action/candidate-git",
+							actionReceiptDigest: `sha256:${"8".repeat(64)}`,
+						},
+						candidateCreateActionEvidence: {
+							actionId: "git-candidate-create:candidate-flow/run/1",
+							actionRequestRef: "event://action-request/candidate-git",
+							actionRequestDigest: `sha256:${"1".repeat(64)}`,
+							activityClaimEventRef: "event://activity-claim/candidate-git",
+							activityClaimEventDigest: `sha256:${"2".repeat(64)}`,
+							activityResultEventRef: "event://activity-result/candidate-git",
+							activityResultEventDigest: `sha256:${"3".repeat(64)}`,
+							actionReceiptRef: "event://action/candidate-git",
+							actionReceiptDigest: `sha256:${"8".repeat(64)}`,
+						},
+					};
+				},
+				deleteWorkspace,
+			};
+
+			const acceptanceEvidencePort: BuildplaneAcceptanceEvidencePort = {
+				collectCheckResults: () => {
+					events.push("check");
+					expect(git(workspacePath, ["rev-parse", "HEAD"])).toBe(
+						frozen?.candidateCommitSha,
+					);
+					return [{ command: "candidate-check", exitCode: 1 }];
+				},
+			};
+
+			const candidateEvidencePort: CandidateEvidencePort = {
+				async recordCandidateAcceptance(input) {
+					events.push("candidate-acceptance");
+					recordedCandidateAcceptance = input;
+					return {
+						candidateDigest: `sha256:${CANDIDATE_DIGEST}`,
+						candidateCommitSha: input.candidate.candidateCommitSha,
+						acceptanceContractDigest: input.acceptanceContractDigest,
+						acceptanceRef: "event://candidate-acceptance/rejected",
+						outcome: input.outcome,
+					};
+				},
+				async recordCandidateReview() {
+					throw new Error("unused");
+				},
+			};
+
+			const capabilityBundleDigest = GOVERNED_CAPABILITY_BUNDLE_DIGEST;
+			const governedDispatch = v3Dispatch(baseSha, capabilityBundleDigest);
+			const activityClaimPort = {} as GovernedActivityClaimPort;
+			const actionEvidencePort: GovernedActionEvidencePort = {
+				async recordActionRequested(input) {
+					return {
+						actionRequest: input,
+						actionRequestRef: "event://action-request/unused",
+						actionRequestDigest: `sha256:${"1".repeat(64)}`,
+					};
+				},
+				async recordActionReceipt(input) {
+					return {
+						receipt: {
+							...input,
+							actionReceiptRef: "event://action-receipt/unused",
+						},
+						actionReceiptDigest: `sha256:${"2".repeat(64)}`,
+					};
+				},
+				async sealActionReceiptSet(input) {
+					events.push("seal-action-set");
+					expect(input.receipts.map((receipt) => receipt.actionId)).toEqual([
+						"git-candidate-create:candidate-flow/run/1",
+						"worker-action",
+					]);
+					const withoutDigest = {
+						schemaVersion: 1 as const,
+						...input,
+						actionReceiptSetRef: "event://action-set/rejected",
+					};
+					return {
+						...withoutDigest,
+						actionReceiptSetDigest:
+							canonicalActionReceiptSetRecordedV1Digest(withoutDigest),
+					};
+				},
+				async recordCandidateCreatedV2(input) {
+					events.push("candidate-created-v2");
+					expect(input.actionReceiptSetRef).toBe("event://action-set/rejected");
+					return "event://candidate-created/rejected";
+				},
+				async recordCandidateCompletion(input) {
+					events.push("candidate-completion");
+					expect(input.candidateCreatedEventRef).toBe(
+						"event://candidate-created/rejected",
+					);
+					return {
+						candidateCompletionRef: "event://candidate-completion/rejected",
+						completionDigest: input.completionDigest,
+					};
+				},
+			};
+			const governedWorkerExecutionPort: GovernedWorkerExecutionPort = {
+				async executeCandidatePacketAsync(input) {
+					expect(input.runId).toBe(RUN_ID);
+					expect(input.governedDispatch).toEqual(governedDispatch);
+					return {
+						executionReceipt: runtime.executePacket(
+							input.packet,
+							input.projectRoot,
+						),
+						actionReceipts: [
+							{
+								actionId: "worker-action",
+								actionReceiptRef: "event://action/worker",
+								actionReceiptDigest: `sha256:${"7".repeat(64)}`,
+							},
+						],
+					};
+				},
+			};
+			const orchestrator = createBuildplaneOrchestrator({
+				projectRoot: root,
+				storage,
+				runtime,
+				policy,
+				workspace,
+				admissionStore: {
+					writeReceiptArtifact: () => ({
+						ref: "artifact://admission",
+						path: join(root, "admission.json"),
+					}),
+					appendAdmissionEvent: () => ({
+						ref: "event://admission",
+						path: join(root, "events.jsonl"),
+					}),
+				},
+				admittedPlanReader: {
+					async read() {
+						return {
+							authorizedNextStep: "dispatch_admitted_plan",
+							signedByKernel: true,
+						};
+					},
+				},
+				profileRegistry: {
+					resolve: () => ({
+						name: "governed",
+						trustGates: {
+							acceptanceContract: GOVERNED_ACCEPTANCE_CONTRACT,
+						},
+					}),
+				},
+				acceptanceEvidencePort,
+				candidateEvidencePort,
+				governedWorkerExecutionPort,
+				governedActionEvidencePort: actionEvidencePort,
+				governedActivityClaimPort: activityClaimPort,
+				governedRepositoryBindingPort: {
+					assertDispatchRepositoryBinding: () => {},
+				},
+				governedLedgerAuthorityRealmPort: {
+					assertDispatchLedgerAuthorityRealm: () => {},
+				},
+			});
+
+			const runCandidatePacketAsync = orchestrator.runCandidatePacketAsync;
+			expect(runCandidatePacketAsync).toBeDefined();
+			const result = await runCandidatePacketAsync!(
+				packet({ capability_bundle_digest: capabilityBundleDigest }),
+				{ candidateId: "candidate-flow", attempt: 1 },
+				undefined,
+				governedDispatch,
+			);
+
+			expect(result.run).toMatchObject({ id: RUN_ID, status: "failed" });
+			expect(result.decision).toMatchObject({
+				kind: "acceptance.contract",
+				outcome: "rejected",
+			});
+			expect(result.workspace).toMatchObject({
+				path: workspacePath,
+				status: "retained",
+			});
+			expect(recordedCandidateAcceptance).toMatchObject({
+				runId: RUN_ID,
+				candidate: {
+					candidateCommitSha: frozen?.candidateCommitSha,
+				},
+				outcome: "rejected",
+				acceptanceContractDigest: GOVERNED_ACCEPTANCE_CONTRACT_DIGEST,
+				checkResults: [{ command: "candidate-check", exitCode: 1 }],
+			});
+			expect(commitRunFailureOutcome).toHaveBeenCalledWith(
+				RUN_ID,
+				expect.objectContaining({
+					decision: expect.objectContaining({ outcome: "rejected" }),
+					workspaceStatus: "retained",
+				}),
+			);
+			expect(commitRunCandidateOutcome).not.toHaveBeenCalled();
+			expect(deleteWorkspace).not.toHaveBeenCalled();
+			expect(commitAndMergeWorkspace).not.toHaveBeenCalled();
+			expect(promoteWorkspaceCandidate).not.toHaveBeenCalled();
+			expect(promoteGovernedWorkspaceCandidate).not.toHaveBeenCalled();
+			expect(targetMutationAttempts).toEqual([]);
+			expect(events).toEqual([
+				"execute",
+				"policy",
+				"materialize-git",
+				"seal-action-set",
+				"candidate-created-v2",
+				"candidate-completion",
+				"check",
+				"acceptance-rejected",
+				"candidate-acceptance",
+			]);
+			expect(frozen).toBeDefined();
+			expect(git(root, ["rev-parse", frozen!.candidateRef])).toBe(
+				frozen!.candidateCommitSha,
+			);
+			expect(git(workspacePath, ["rev-parse", "HEAD"])).toBe(
+				frozen!.candidateCommitSha,
+			);
+			expect(rootSnapshot()).toEqual(rootBefore);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
 });
