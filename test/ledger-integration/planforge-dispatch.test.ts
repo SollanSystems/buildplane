@@ -3,6 +3,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
+// The old PlanForge activity, receipt, recovery, and crash tapes exercised an
+// ambient local worker lane. That lane is intentionally retired: the CLI cannot
+// mint its own signed authority or execute a PlanForge task outside a host-owned
+// candidate session. Governed equivalents live in the broker-view, candidate
+// promotion, and native workflow-reducer suites; this integration test protects
+// the local fail-closed boundary itself.
+
 async function loadRunCli() {
 	const mod = (await import("../../apps/cli/src/run-cli.js")) as {
 		runCli: (
