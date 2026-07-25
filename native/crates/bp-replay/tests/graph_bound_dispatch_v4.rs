@@ -187,6 +187,11 @@ fn v4_projects_only_when_bound_to_the_exact_prior_v2_graph_and_node() {
         workflow.dispatch.workflow_graph_declaration_event_ref,
         Some(graph_event.id)
     );
+    assert_eq!(
+        workflow.workflow_graph.as_ref(),
+        state.workflow_graphs_v2.values().next(),
+        "a V4 instance retains the exact validated graph declaration"
+    );
 }
 
 #[test]

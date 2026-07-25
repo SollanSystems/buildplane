@@ -1843,6 +1843,7 @@ mod tests {
                 signature_ref: None,
                 action_evidence_version: Some(ActionEvidenceVersionV1::SealedV3),
             },
+            workflow_graph: None,
             action_evidence: None,
             retry_context: None,
             timers: Default::default(),

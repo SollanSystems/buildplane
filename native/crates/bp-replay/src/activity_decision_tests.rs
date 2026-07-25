@@ -150,6 +150,7 @@ fn fixture(result: Option<ActivityResultOutcomeV1>) -> Fixture {
                 signature_ref: None,
                 action_evidence_version: Some(ActionEvidenceVersionV1::SealedV3),
             },
+            workflow_graph: None,
             action_evidence: Some(ActionEvidenceReplayState {
                 action_evidence_version: ActionEvidenceVersionV1::SealedV3,
                 actions,

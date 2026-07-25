@@ -18,7 +18,7 @@ use bp_replay::engine::{ReplayEngine, TrustSpineSignerRole, TrustedReplayAuthori
 use bp_replay::trusted_recovery::WORKFLOW_INSTANCE_SNAPSHOT_CACHE_REDUCER_SCHEMA_VERSION_V1;
 use bp_replay::{
     ReplayIssue, TrustedGovernedRecoveryError, TrustedGovernedRecoverySnapshot,
-    VerifiedOtelProjectionErrorV1,
+    VerifiedOtelProjectionErrorV1, WorkflowInstanceV1,
 };
 use chrono::{SecondsFormat, Utc};
 use ed25519_dalek::SigningKey;
@@ -661,6 +661,157 @@ fn trusted_recovery_returns_a_fully_checkpointed_graph_bound_v4_workflow() {
         workflow.dispatch.workflow_graph_declaration_event_ref,
         Some(graph_event.id)
     );
+    let workflow_graph = workflow
+        .workflow_graph
+        .as_ref()
+        .expect("trusted recovery retains the exact validated V2 graph");
+    assert_eq!(workflow_graph.event_id, graph_event.id);
+    assert_eq!(workflow_graph.run_id, graph.run_id);
+    assert_eq!(workflow_graph.workflow_id, graph.workflow_id);
+    assert_eq!(workflow_graph.workflow_revision, graph.workflow_revision);
+    assert_eq!(workflow_graph.nodes, graph.nodes);
+    assert_eq!(workflow_graph.max_concurrent, graph.max_concurrent);
+    assert_eq!(workflow_graph.graph_digest, graph.graph_digest);
+    assert_eq!(workflow_graph.idempotency_key, graph.idempotency_key);
+    assert_eq!(workflow_graph.declared_at, graph.declared_at);
+
+    let cache_entries = snapshot
+        .workflow_instance_snapshot_cache_entries_v1()
+        .expect("trusted V4 recovery projects a non-authoritative cache entry");
+    assert_eq!(cache_entries.len(), 1);
+    let cached_workflow: WorkflowInstanceV1 = serde_json::from_str(&cache_entries[0].workflow_json)
+        .expect("cache entry serializes the recovered workflow");
+    assert_eq!(
+        cached_workflow.workflow_graph.as_ref(),
+        workflow.workflow_graph.as_ref(),
+        "the verified cache preserves the graph context without becoming authoritative"
+    );
+}
+
+#[test]
+fn trusted_recovery_migrates_only_the_exact_pre_graph_v4_cache_projection() {
+    let temp = TempDir::new().expect("temporary ledger directory");
+    let db_path = temp.path().join("events.db");
+    let store = SqliteStore::open(&db_path).expect("ledger store");
+    let run_id = RunId::new();
+    let signing_key = SigningKey::from_bytes(&[46; 32]);
+    let (authorities, pinned_kernel) = trusted_authorities(&signing_key);
+    let graph = declared_graph_v2(run_id);
+    let graph_event = graph_declaration_event(run_id, graph.clone());
+    store
+        .append_signed_with_checkpoint(
+            &graph_event,
+            &signing_key,
+            &kernel_signer(),
+            &CheckpointPolicy::every(1),
+        )
+        .expect("append checkpointed V2 graph declaration");
+    let dispatch =
+        graph_bound_v4_dispatch_event(run_id, graph_event.id, graph.graph_digest.clone());
+    store
+        .append_signed_with_checkpoint(
+            &dispatch,
+            &signing_key,
+            &kernel_signer(),
+            &CheckpointPolicy::every(1),
+        )
+        .expect("append checkpointed graph-bound V4 dispatch");
+
+    let snapshot = TrustedGovernedRecoverySnapshot::open(
+        &run_id.to_string(),
+        &db_path,
+        &authorities,
+        &pinned_kernel,
+    )
+    .expect("trusted V4 recovery");
+    let current = snapshot
+        .workflow_instance_snapshot_cache_entries_v1()
+        .expect("current V4 cache projection")
+        .into_iter()
+        .next()
+        .expect("one V4 workflow cache entry");
+    snapshot
+        .persist_workflow_instance_snapshot_cache_v1(&db_path)
+        .expect("persist current V4 cache projection");
+
+    let mut legacy_value: serde_json::Value =
+        serde_json::from_str(&current.workflow_json).expect("current cache JSON");
+    let removed = legacy_value
+        .as_object_mut()
+        .expect("cache workflow is an object")
+        .remove("workflow_graph");
+    assert!(removed.is_some(), "current V4 cache contains graph context");
+    let legacy_workflow_json =
+        serde_json::to_string(&legacy_value).expect("canonical pre-graph cache JSON");
+    let legacy_workflow_json_digest =
+        workflow_instance_snapshot_cache_workflow_json_digest_v1(&legacy_workflow_json)
+            .expect("pre-graph cache JSON digest");
+    Connection::open(&db_path)
+        .expect("open cache fixture connection")
+        .execute(
+            "UPDATE workflow_instance_snapshot_cache_v1
+             SET workflow_json = ?1, workflow_json_digest = ?2
+             WHERE run_id = ?3 AND dispatch_event_id = ?4 AND reducer_schema_version = ?5",
+            params![
+                legacy_workflow_json,
+                legacy_workflow_json_digest,
+                current.run_id.to_string(),
+                current.dispatch_event_id.to_string(),
+                i64::from(current.reducer_schema_version),
+            ],
+        )
+        .expect("seed an exact pre-graph V4 cache projection");
+
+    snapshot
+        .persist_workflow_instance_snapshot_cache_v1(&db_path)
+        .expect("a verified snapshot upgrades only its exact legacy V4 cache projection");
+    let upgraded_workflow_json: String = Connection::open(&db_path)
+        .expect("open upgraded cache")
+        .query_row(
+            "SELECT workflow_json FROM workflow_instance_snapshot_cache_v1
+             WHERE run_id = ?1 AND dispatch_event_id = ?2 AND reducer_schema_version = ?3",
+            params![
+                current.run_id.to_string(),
+                current.dispatch_event_id.to_string(),
+                i64::from(current.reducer_schema_version),
+            ],
+            |row| row.get(0),
+        )
+        .expect("read upgraded V4 cache projection");
+    assert_eq!(upgraded_workflow_json, current.workflow_json);
+    assert_eq!(cache_row_count(&db_path), 1);
+
+    let mut conflicting_value: serde_json::Value =
+        serde_json::from_str(&current.workflow_json).expect("current cache JSON");
+    conflicting_value["unit_id"] = serde_json::Value::String("tampered-unit".to_string());
+    let conflicting_workflow_json =
+        serde_json::to_string(&conflicting_value).expect("canonical conflicting cache JSON");
+    let conflicting_workflow_json_digest =
+        workflow_instance_snapshot_cache_workflow_json_digest_v1(&conflicting_workflow_json)
+            .expect("conflicting cache JSON digest");
+    Connection::open(&db_path)
+        .expect("open cache conflict fixture connection")
+        .execute(
+            "UPDATE workflow_instance_snapshot_cache_v1
+             SET workflow_json = ?1, workflow_json_digest = ?2
+             WHERE run_id = ?3 AND dispatch_event_id = ?4 AND reducer_schema_version = ?5",
+            params![
+                conflicting_workflow_json,
+                conflicting_workflow_json_digest,
+                current.run_id.to_string(),
+                current.dispatch_event_id.to_string(),
+                i64::from(current.reducer_schema_version),
+            ],
+        )
+        .expect("seed a non-migratable cache conflict");
+
+    let error = snapshot
+        .persist_workflow_instance_snapshot_cache_v1(&db_path)
+        .expect_err("only the exact omitted graph context is migratable");
+    assert!(matches!(
+        error,
+        bp_replay::WorkflowInstanceSnapshotCachePersistenceErrorV1::Conflict { .. }
+    ));
 }
 
 #[test]

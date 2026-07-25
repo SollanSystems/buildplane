@@ -322,6 +322,9 @@ pub const TRUSTED_GOVERNED_RECOVERY_MAX_EVENTS_V1: usize = 100_000;
 /// A cache reader must treat a different reducer schema as stale data, never
 /// as recovery authority. A future reducer must introduce a new bounded cache
 /// table or an explicit migration rather than incrementing this value in place.
+/// The additive V4 graph-context field uses the narrowly scoped explicit
+/// migration below: it accepts only the canonical prior JSON shape with that
+/// one field omitted after a fresh trusted replay has matched all other facts.
 pub const WORKFLOW_INSTANCE_SNAPSHOT_CACHE_REDUCER_SCHEMA_VERSION_V1: u32 = 1;
 
 /// Typed anchors copied only from the immutable verified event slice used to
@@ -448,6 +451,142 @@ fn workflow_instance_snapshot_cache_entry_matches_v1(
         sql_params,
         |row| row.get(0),
     ))
+}
+
+/// Find the stored JSON only when every non-JSON cache fact exactly matches a
+/// freshly verified entry. This supports the one explicit V1 cache migration
+/// below without relaxing conflict handling for any other cache mismatch.
+fn workflow_instance_snapshot_cache_entry_with_matching_metadata_v1(
+    tx: &Transaction<'_>,
+    entry: &WorkflowInstanceSnapshotCacheEntryV1,
+) -> Result<Option<(String, String)>, rusqlite::Error> {
+    let source_event_count = i64::try_from(entry.source_event_count)
+        .expect("bounded trusted recovery source count fits SQLite INTEGER");
+    let signed_non_checkpoint_event_count = i64::try_from(entry.signed_non_checkpoint_event_count)
+        .expect("bounded trusted recovery signed count fits SQLite INTEGER");
+    tx.query_row(
+        "SELECT workflow_json, workflow_json_digest
+         FROM workflow_instance_snapshot_cache_v1
+         WHERE run_id = ?1
+           AND dispatch_event_id = ?2
+           AND reducer_schema_version = ?3
+           AND authority = ?4
+           AND cache_schema_version = ?5
+           AND workflow_id = ?6
+           AND workflow_revision = ?7
+           AND unit_id = ?8
+           AND attempt = ?9
+           AND source_event_count = ?10
+           AND source_last_event_id = ?11
+           AND checkpoint_event_ref = ?12
+           AND checkpoint_event_digest = ?13
+           AND through_event_ref = ?14
+           AND signed_non_checkpoint_event_count = ?15
+           AND tape_root_hash = ?16
+           AND tape_root_algorithm = ?17
+           AND pinned_kernel_signer_actor_id = ?18
+           AND pinned_kernel_signer_key_id = ?19
+           AND pinned_kernel_signer_public_key_hash IS ?20",
+        params![
+            entry.run_id.to_string(),
+            entry.dispatch_event_id.to_string(),
+            i64::from(entry.reducer_schema_version),
+            entry.authority.as_wire(),
+            i64::from(entry.cache_schema_version),
+            entry.workflow_id,
+            entry.workflow_revision,
+            entry.unit_id,
+            i64::from(entry.attempt),
+            source_event_count,
+            entry.source_last_event_id.to_string(),
+            entry.checkpoint_event_ref.to_string(),
+            entry.checkpoint_event_digest,
+            entry.through_event_ref.to_string(),
+            signed_non_checkpoint_event_count,
+            entry.tape_root_hash,
+            workflow_instance_snapshot_cache_tape_root_algorithm_v1(entry),
+            entry.pinned_kernel_signer_actor_id,
+            entry.pinned_kernel_signer_key_id,
+            entry.pinned_kernel_signer_public_key_hash.as_deref(),
+        ],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .optional()
+}
+
+/// V4 graph context is an additive reducer projection. Old V1 cache rows
+/// encoded the otherwise identical V4 workflow without `workflow_graph`.
+/// Upgrade only that exact, canonical historical shape after a fresh trusted
+/// replay verifies every other cache fact. All other differences remain a
+/// conflict rather than becoming a cache overwrite primitive.
+fn migrate_exact_legacy_v4_graph_context_cache_entry_v1(
+    tx: &Transaction<'_>,
+    entry: &WorkflowInstanceSnapshotCacheEntryV1,
+) -> Result<(), rusqlite::Error> {
+    let Some((existing_workflow_json, existing_workflow_json_digest)) =
+        workflow_instance_snapshot_cache_entry_with_matching_metadata_v1(tx, entry)?
+    else {
+        return Ok(());
+    };
+    if !is_exact_legacy_v4_graph_context_cache_projection_v1(
+        &existing_workflow_json,
+        &existing_workflow_json_digest,
+        entry,
+    ) {
+        return Ok(());
+    }
+
+    let deleted = tx.execute(
+        "DELETE FROM workflow_instance_snapshot_cache_v1
+         WHERE run_id = ?1 AND dispatch_event_id = ?2 AND reducer_schema_version = ?3",
+        params![
+            entry.run_id.to_string(),
+            entry.dispatch_event_id.to_string(),
+            i64::from(entry.reducer_schema_version),
+        ],
+    )?;
+    debug_assert_eq!(
+        deleted, 1,
+        "matching cache metadata must identify exactly one V1 row"
+    );
+    Ok(())
+}
+
+fn is_exact_legacy_v4_graph_context_cache_projection_v1(
+    existing_workflow_json: &str,
+    existing_workflow_json_digest: &str,
+    entry: &WorkflowInstanceSnapshotCacheEntryV1,
+) -> bool {
+    if workflow_instance_snapshot_cache_workflow_json_digest_v1(existing_workflow_json)
+        .ok()
+        .as_deref()
+        != Some(existing_workflow_json_digest)
+    {
+        return false;
+    }
+    let Ok(existing) = serde_json::from_str::<serde_json::Value>(existing_workflow_json) else {
+        return false;
+    };
+    let Ok(mut expected) = serde_json::from_str::<serde_json::Value>(&entry.workflow_json) else {
+        return false;
+    };
+    let Some(expected_object) = expected.as_object_mut() else {
+        return false;
+    };
+    let Some(workflow_graph) = expected_object.remove("workflow_graph") else {
+        return false;
+    };
+    if workflow_graph.is_null()
+        || expected
+            .get("dispatch")
+            .and_then(serde_json::Value::as_object)
+            .and_then(|dispatch| dispatch.get("dispatch_version"))
+            .and_then(serde_json::Value::as_u64)
+            != Some(4)
+    {
+        return false;
+    }
+    existing == expected
 }
 
 fn insert_workflow_instance_snapshot_cache_entry_v1(
@@ -754,6 +893,15 @@ impl TrustedGovernedRecoverySnapshot {
         // retained inside the same write transaction as subsequent publication.
         ensure_workflow_instance_snapshot_cache_schema_v1(&tx)
             .map_err(WorkflowInstanceSnapshotCachePersistenceErrorV1::Initialize)?;
+
+        // The cache never supplies recovery authority, but a verified V4
+        // workflow now retains its graph context in the serialized projection.
+        // Replace only an exact pre-graph V4 cache shape inside this same
+        // source-anchor transaction; arbitrary cache differences still fail
+        // closed as conflicts below.
+        for entry in &entries {
+            migrate_exact_legacy_v4_graph_context_cache_entry_v1(&tx, entry)?;
+        }
 
         let current_cache_rows: i64 = tx.query_row(
             "SELECT COUNT(*) FROM workflow_instance_snapshot_cache_v1",
@@ -1924,6 +2072,7 @@ mod tests {
                 signature_ref: None,
                 action_evidence_version: Some(ActionEvidenceVersionV1::SealedV3),
             },
+            workflow_graph: None,
             action_evidence: None,
             retry_context: None,
             timers: BTreeMap::new(),

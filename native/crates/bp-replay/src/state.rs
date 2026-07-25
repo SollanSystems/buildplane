@@ -189,6 +189,12 @@ pub struct WorkflowInstanceV1 {
     pub attempt: u32,
     pub phase: WorkflowPhaseV1,
     pub dispatch: WorkflowDispatchReplayState,
+    /// Present only for graph-bound V4 dispatches. The reducer copies this
+    /// exact, previously validated V2 declaration from the signed tape so
+    /// recovery can retain dependency and concurrency context without using a
+    /// second authority store. Historical snapshots deserialize as `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_graph: Option<WorkflowGraphV2ReplayState>,
     /// Present only for V3 dispatches. The reducer derives this state solely
     /// from write-ahead requests, immutable receipts, and one sealed set so
     /// recovery code can expose pending/unknown effects without rerunning an

@@ -10023,6 +10023,7 @@ fn workflow_snapshot_defaults_added_lifecycle_fields() {
         serde_json::from_value(snapshot).expect("deserialize legacy workflow snapshot");
     assert!(restored.timers.is_empty());
     assert!(restored.cancellation.is_none());
+    assert!(restored.workflow_graph.is_none());
     assert_eq!(
         restored.terminal.expect("legacy terminal").terminal_version,
         1

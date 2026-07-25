@@ -997,6 +997,7 @@ fn apply_dispatch_envelope(state: &mut ReplayState, event: &Event, p: &DispatchE
                 signature_ref: Some(p.signature_ref.clone()),
                 action_evidence_version: None,
             },
+            workflow_graph: None,
             action_evidence: None,
             retry_context: None,
             timers: Default::default(),
@@ -1087,6 +1088,7 @@ fn apply_dispatch_envelope_v2(state: &mut ReplayState, event: &Event, p: &Dispat
                 signature_ref: None,
                 action_evidence_version: None,
             },
+            workflow_graph: None,
             action_evidence: None,
             retry_context: None,
             timers: Default::default(),
@@ -1422,7 +1424,7 @@ fn validate_v4_graph_binding(
     state: &ReplayState,
     event: &Event,
     dispatch: &DispatchEnvelopeV4,
-) -> Result<(), String> {
+) -> Result<WorkflowGraphV2ReplayState, String> {
     let body = &dispatch.dispatch_v3.body;
     let run_id = event.run_id.to_string();
     let key = workflow_graph_key(&run_id, &body.workflow_id, &body.workflow_revision);
@@ -1479,7 +1481,7 @@ fn validate_v4_graph_binding(
                 .into(),
         );
     }
-    Ok(())
+    Ok(graph.clone())
 }
 
 /// Graph-bound dispatches are scheduled only from their immutable V2
@@ -1644,6 +1646,7 @@ fn apply_dispatch_envelope_v3(state: &mut ReplayState, event: &Event, p: &Dispat
                 signature_ref: None,
                 action_evidence_version: Some(p.action_evidence_version),
             },
+            workflow_graph: None,
             action_evidence: Some(ActionEvidenceReplayState {
                 action_evidence_version: p.action_evidence_version,
                 actions: Default::default(),
@@ -1679,10 +1682,13 @@ fn apply_dispatch_envelope_v4(state: &mut ReplayState, event: &Event, p: &Dispat
         reject_workflow_transition(state, event, reason);
         return;
     }
-    if let Err(reason) = validate_v4_graph_binding(state, event, p) {
-        reject_workflow_transition(state, event, reason);
-        return;
-    }
+    let workflow_graph = match validate_v4_graph_binding(state, event, p) {
+        Ok(graph) => graph,
+        Err(reason) => {
+            reject_workflow_transition(state, event, reason);
+            return;
+        }
+    };
 
     ensure_workflow_instances(state);
     let nested = &p.dispatch_v3;
@@ -1780,6 +1786,7 @@ fn apply_dispatch_envelope_v4(state: &mut ReplayState, event: &Event, p: &Dispat
                 signature_ref: None,
                 action_evidence_version: Some(nested.action_evidence_version),
             },
+            workflow_graph: Some(workflow_graph),
             action_evidence: Some(ActionEvidenceReplayState {
                 action_evidence_version: nested.action_evidence_version,
                 actions: Default::default(),
