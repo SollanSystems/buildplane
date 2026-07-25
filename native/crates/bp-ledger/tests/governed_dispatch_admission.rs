@@ -21,6 +21,8 @@ use bp_ledger::LedgerError;
 use bp_ledger::Payload;
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use ed25519_dalek::SigningKey;
+use rusqlite::{params, Connection};
+use std::path::Path;
 use tempfile::TempDir;
 
 const DIGEST_A: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -137,6 +139,349 @@ fn raw_same_identity_dispatch_v3_event(request: &GovernedDispatchAdmissionReques
         occurred_at: Utc::now(),
         payload: Payload::DispatchEnvelopeV3(request.dispatch.clone()),
     }
+}
+
+struct LegacyB87AdmissionFixture {
+    run_id: RunId,
+    dispatch_event_ids: Vec<bp_ledger::EventId>,
+    dispatches: Vec<DispatchEnvelopeV3>,
+}
+
+fn bootstrap_legacy_b87_governed_dispatch_admissions(
+    ledger_path: &Path,
+    revisions: &[&str],
+) -> LegacyB87AdmissionFixture {
+    let conn = Connection::open(ledger_path).expect("open legacy b87 ledger file");
+    conn.execute_batch(
+        r#"
+        PRAGMA foreign_keys=ON;
+
+        CREATE TABLE events (
+            id               TEXT PRIMARY KEY,
+            run_id           TEXT NOT NULL,
+            parent_event_id  TEXT,
+            schema_version   INTEGER NOT NULL,
+            kind             TEXT NOT NULL,
+            occurred_at      TEXT NOT NULL,
+            payload          TEXT NOT NULL
+        );
+
+        CREATE TABLE governed_dispatch_admissions (
+            run_id                              TEXT NOT NULL,
+            idempotency_key                     TEXT NOT NULL,
+            workflow_id                         TEXT NOT NULL,
+            workflow_revision                   TEXT NOT NULL,
+            unit_id                             TEXT NOT NULL,
+            attempt                             INTEGER NOT NULL CHECK(attempt > 0),
+            envelope_digest                     TEXT NOT NULL,
+            governed_packet_digest              TEXT NOT NULL,
+            semantic_identity_digest            TEXT NOT NULL,
+            dispatch_event_id                   TEXT NOT NULL UNIQUE,
+            dispatch_event_digest               TEXT NOT NULL,
+            state                               TEXT NOT NULL CHECK(state IN ('awaiting_checkpoint', 'sealed')),
+            sealed_checkpoint_event_id          TEXT,
+            sealed_checkpoint_event_digest      TEXT,
+            created_at                          TEXT NOT NULL,
+            sealed_at                           TEXT,
+            PRIMARY KEY (run_id, idempotency_key),
+            UNIQUE (run_id, workflow_id, workflow_revision, unit_id, attempt),
+            UNIQUE (run_id, semantic_identity_digest),
+            FOREIGN KEY(dispatch_event_id) REFERENCES events(id),
+            FOREIGN KEY(sealed_checkpoint_event_id) REFERENCES events(id),
+            CHECK(
+                (state = 'awaiting_checkpoint'
+                    AND sealed_checkpoint_event_id IS NULL
+                    AND sealed_checkpoint_event_digest IS NULL
+                    AND sealed_at IS NULL)
+                OR
+                (state = 'sealed'
+                    AND sealed_checkpoint_event_id IS NOT NULL
+                    AND sealed_checkpoint_event_digest IS NOT NULL
+                    AND sealed_at IS NOT NULL)
+            )
+        );
+        "#,
+    )
+    .expect("create b87-style admission schema");
+
+    let run_id = RunId::new();
+    let mut dispatch_event_ids = Vec::with_capacity(revisions.len());
+    let mut dispatches = Vec::with_capacity(revisions.len());
+    for (index, revision) in revisions.iter().enumerate() {
+        let mut dispatch = governed_implementer_dispatch(Utc::now(), DIGEST_B);
+        dispatch.body.workflow_revision = (*revision).into();
+        dispatch.body.idempotency_key = format!(
+            "legacy:workflow-1:implement-unit-1:{revision}:{}",
+            index + 1
+        );
+        rehash_dispatch(&mut dispatch);
+        let event = Event {
+            id: bp_ledger::EventId::new(),
+            run_id,
+            parent_event_id: None,
+            schema_version: Event::CURRENT_SCHEMA_VERSION,
+            kind: EventKind::DispatchEnvelopeV3,
+            occurred_at: Utc::now(),
+            payload: Payload::DispatchEnvelopeV3(dispatch.clone()),
+        };
+        let payload = serde_json::to_string(&event.payload).expect("serialize legacy event");
+        conn.execute(
+            r#"INSERT INTO events (id, run_id, parent_event_id, schema_version, kind, occurred_at, payload)
+               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"#,
+            params![
+                event.id.to_string(),
+                event.run_id.to_string(),
+                event.parent_event_id.map(|id| id.to_string()),
+                event.schema_version,
+                event.kind.as_wire(),
+                event.occurred_at.to_rfc3339(),
+                payload,
+            ],
+        )
+        .expect("insert replayable legacy event");
+        conn.execute(
+            r#"INSERT INTO governed_dispatch_admissions (
+                    run_id, idempotency_key, workflow_id, workflow_revision, unit_id, attempt,
+                    envelope_digest, governed_packet_digest, semantic_identity_digest,
+                    dispatch_event_id, dispatch_event_digest, state, created_at
+                ) VALUES (
+                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
+                    'awaiting_checkpoint', ?12
+                )"#,
+            params![
+                run_id.to_string(),
+                &dispatch.body.idempotency_key,
+                &dispatch.body.workflow_id,
+                &dispatch.body.workflow_revision,
+                &dispatch.body.unit_id,
+                dispatch.body.attempt,
+                &dispatch.envelope_digest,
+                dispatch
+                    .governed_packet_digest
+                    .as_deref()
+                    .expect("fixture dispatch includes governed packet digest"),
+                format!("sha256:{:064x}", index + 1),
+                event.id.to_string(),
+                format!("sha256:{:064x}", 100 + index),
+                event.occurred_at.to_rfc3339(),
+            ],
+        )
+        .expect("insert legacy b87 admission projection");
+        dispatch_event_ids.push(event.id);
+        dispatches.push(dispatch);
+    }
+
+    LegacyB87AdmissionFixture {
+        run_id,
+        dispatch_event_ids,
+        dispatches,
+    }
+}
+
+#[test]
+fn legacy_b87_admission_without_cross_revision_conflict_opens_and_replays_events() {
+    let temp = TempDir::new().expect("create file-backed legacy ledger directory");
+    let ledger_path = temp.path().join("legacy-b87-no-conflict.db");
+    let fixture = bootstrap_legacy_b87_governed_dispatch_admissions(&ledger_path, &["r1"]);
+
+    let store = SqliteStore::open(&ledger_path).expect("open compatible legacy b87 ledger");
+    assert_eq!(store.event_count().expect("count legacy events"), 1);
+    let events = store
+        .events_for_run(&fixture.run_id.to_string())
+        .expect("read legacy tape events");
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        events[0].to_event().expect("parse legacy tape event").kind,
+        EventKind::DispatchEnvelopeV3
+    );
+    let identity_index_count: i64 = store
+        .conn_for_tests()
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?1",
+            ["idx_governed_dispatch_admissions_workflow_attempt"],
+            |row| row.get(0),
+        )
+        .expect("query V2 identity index");
+    assert_eq!(identity_index_count, 1);
+}
+
+#[test]
+fn legacy_b87_cross_revision_conflict_opens_without_rewriting_historical_rows() {
+    let temp = TempDir::new().expect("create file-backed legacy ledger directory");
+    let ledger_path = temp.path().join("legacy-b87-cross-revision-conflict.db");
+    let fixture = bootstrap_legacy_b87_governed_dispatch_admissions(&ledger_path, &["r1", "r2"]);
+
+    let store = SqliteStore::open(&ledger_path)
+        .expect("V2 guard must open a legacy conflicting admission ledger");
+    assert_eq!(store.event_count().expect("count historical events"), 2);
+    let events = store
+        .events_for_run(&fixture.run_id.to_string())
+        .expect("read historical tape events");
+    assert_eq!(events.len(), 2);
+    assert!(events.iter().all(
+        |event| event.to_event().expect("parse historical event").kind
+            == EventKind::DispatchEnvelopeV3
+    ));
+    let admissions: i64 = store
+        .conn_for_tests()
+        .query_row(
+            "SELECT COUNT(*) FROM governed_dispatch_admissions WHERE run_id = ?1",
+            [fixture.run_id.to_string()],
+            |row| row.get(0),
+        )
+        .expect("count historical admission projections");
+    assert_eq!(admissions, 2);
+    let identity_index_count: i64 = store
+        .conn_for_tests()
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?1",
+            ["idx_governed_dispatch_admissions_workflow_attempt"],
+            |row| row.get(0),
+        )
+        .expect("query absent V2 identity index");
+    assert_eq!(identity_index_count, 0);
+    let conflict_markers: i64 = store
+        .conn_for_tests()
+        .query_row(
+            "SELECT COUNT(*) FROM governed_dispatch_admission_identity_conflicts_v2
+             WHERE run_id = ?1 AND workflow_id = ?2 AND unit_id = ?3 AND attempt = ?4",
+            params![
+                fixture.run_id.to_string(),
+                "workflow-1",
+                "implement-unit-1",
+                1,
+            ],
+            |row| row.get(0),
+        )
+        .expect("read immutable V2 conflict marker");
+    assert_eq!(conflict_markers, 1);
+    let future_duplicate = store
+        .conn_for_tests()
+        .execute(
+            r#"INSERT INTO governed_dispatch_admissions (
+                    run_id, idempotency_key, workflow_id, workflow_revision, unit_id, attempt,
+                    envelope_digest, governed_packet_digest, semantic_identity_digest,
+                    dispatch_event_id, dispatch_event_digest, state, created_at
+                ) VALUES (
+                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
+                    'awaiting_checkpoint', ?12
+                )"#,
+            params![
+                fixture.run_id.to_string(),
+                "future:duplicate",
+                "workflow-1",
+                "r3",
+                "implement-unit-1",
+                1,
+                DIGEST_A,
+                DIGEST_C,
+                "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+                bp_ledger::EventId::new().to_string(),
+                DIGEST_D,
+                Utc::now().to_rfc3339(),
+            ],
+        )
+        .expect_err("V2 trigger must reject a future duplicate projection");
+    assert!(future_duplicate
+        .to_string()
+        .contains("governed dispatch admission identity already exists"));
+    assert_eq!(
+        store
+            .event_count()
+            .expect("count events after rejected duplicate"),
+        2
+    );
+    drop(store);
+
+    let reopened = SqliteStore::open(&ledger_path)
+        .expect("V2 guard must be idempotent across conflicting legacy reopens");
+    let reopened_markers: i64 = reopened
+        .conn_for_tests()
+        .query_row(
+            "SELECT COUNT(*) FROM governed_dispatch_admission_identity_conflicts_v2
+             WHERE run_id = ?1 AND workflow_id = ?2 AND unit_id = ?3 AND attempt = ?4",
+            params![
+                fixture.run_id.to_string(),
+                "workflow-1",
+                "implement-unit-1",
+                1,
+            ],
+            |row| row.get(0),
+        )
+        .expect("read stable V2 conflict marker after reopen");
+    assert_eq!(reopened_markers, 1);
+    assert_eq!(
+        reopened
+            .events_for_run(&fixture.run_id.to_string())
+            .expect("replay historical events after reopen")
+            .len(),
+        2
+    );
+}
+
+#[test]
+fn legacy_b87_cross_revision_conflict_fails_closed_for_record_and_seal_without_mutation() {
+    let temp = TempDir::new().expect("create file-backed legacy ledger directory");
+    let ledger_path = temp.path().join("legacy-b87-runtime-conflict.db");
+    let fixture = bootstrap_legacy_b87_governed_dispatch_admissions(&ledger_path, &["r1", "r2"]);
+    let store = SqliteStore::open(&ledger_path)
+        .expect("V2 guard must open a legacy conflicting admission ledger");
+    let dispatch_key = SigningKey::from_bytes(&[71_u8; 32]);
+    let checkpoint_key = SigningKey::from_bytes(&[73_u8; 32]);
+    let (authority, dispatch_signer, checkpoint_signer) =
+        admission_authority(&dispatch_key, &checkpoint_key, DIGEST_B);
+    let request = GovernedDispatchAdmissionRequestV1 {
+        run_id: fixture.run_id,
+        dispatch: fixture.dispatches[0].clone(),
+    };
+    let before_events = store.event_count().expect("count historical events");
+
+    let record = store
+        .record_governed_dispatch_admission_v1(
+            &request,
+            &authority,
+            &dispatch_key,
+            &dispatch_signer,
+        )
+        .expect_err("conflicted legacy identity must not return historical authority");
+    assert!(matches!(
+        record,
+        LedgerError::GovernedDispatchAdmissionReconciliationRequired { .. }
+    ));
+    assert_eq!(
+        store.event_count().expect("count events after record"),
+        before_events
+    );
+
+    let seal = store
+        .seal_governed_dispatch_admission_v1(
+            &GovernedDispatchAdmissionSealRequestV1 {
+                run_id: fixture.run_id,
+                dispatch_event_id: fixture.dispatch_event_ids[0],
+            },
+            &authority,
+            &checkpoint_key,
+            &checkpoint_signer,
+        )
+        .expect_err("conflicted legacy identity must not seal a selected historical row");
+    assert!(matches!(
+        seal,
+        LedgerError::GovernedDispatchAdmissionReconciliationRequired { .. }
+    ));
+    assert_eq!(
+        store.event_count().expect("count events after seal"),
+        before_events
+    );
+    let awaiting_count: i64 = store
+        .conn_for_tests()
+        .query_row(
+            "SELECT COUNT(*) FROM governed_dispatch_admissions
+             WHERE run_id = ?1 AND state = 'awaiting_checkpoint'",
+            [fixture.run_id.to_string()],
+            |row| row.get(0),
+        )
+        .expect("count unmodified historical admissions");
+    assert_eq!(awaiting_count, 2);
 }
 
 #[test]

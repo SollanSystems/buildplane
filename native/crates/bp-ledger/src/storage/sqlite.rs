@@ -937,6 +937,94 @@ pub fn ensure_workflow_instance_snapshot_cache_schema_v1(conn: &Connection) -> R
     Ok(())
 }
 
+/// Upgrade the governed-dispatch projection identity without rewriting legacy
+/// tape-backed rows.
+///
+/// Early V3 stores keyed the projection identity by workflow revision. A later
+/// revision-free unique index is correct for new writes, but SQLite cannot add
+/// it to a legacy database that already has cross-revision siblings. Keep that
+/// evidence readable, record the ambiguous identities immutably, and block all
+/// future duplicate projection inserts instead of choosing a historical row.
+fn ensure_governed_dispatch_admission_identity_guard_v2(conn: &Connection) -> Result<()> {
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    tx.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS governed_dispatch_admission_identity_conflicts_v2 (
+            run_id                      TEXT NOT NULL,
+            workflow_id                 TEXT NOT NULL,
+            unit_id                     TEXT NOT NULL,
+            attempt                     INTEGER NOT NULL CHECK(attempt > 0),
+            observed_projection_count   INTEGER NOT NULL CHECK(observed_projection_count > 1),
+            detected_at                 TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (run_id, workflow_id, unit_id, attempt)
+        );
+
+        CREATE TRIGGER IF NOT EXISTS governed_dispatch_admission_identity_conflicts_v2_no_update
+            BEFORE UPDATE ON governed_dispatch_admission_identity_conflicts_v2
+            BEGIN
+                SELECT RAISE(ABORT, 'governed dispatch admission identity conflicts are immutable: UPDATE forbidden');
+            END;
+
+        CREATE TRIGGER IF NOT EXISTS governed_dispatch_admission_identity_conflicts_v2_no_delete
+            BEFORE DELETE ON governed_dispatch_admission_identity_conflicts_v2
+            BEGIN
+                SELECT RAISE(ABORT, 'governed dispatch admission identity conflicts are immutable: DELETE forbidden');
+            END;
+
+        -- The V2 trigger is intentionally installed even when a historical
+        -- conflict prevents the corresponding unique index from being
+        -- created. It stops an older writer from growing an ambiguous identity
+        -- into a third projection.
+        CREATE TRIGGER IF NOT EXISTS governed_dispatch_admissions_reject_duplicate_identity_v2
+            BEFORE INSERT ON governed_dispatch_admissions
+            WHEN EXISTS (
+                SELECT 1
+                FROM governed_dispatch_admissions AS existing
+                WHERE existing.run_id = NEW.run_id
+                  AND existing.workflow_id = NEW.workflow_id
+                  AND existing.unit_id = NEW.unit_id
+                  AND existing.attempt = NEW.attempt
+            )
+            BEGIN
+                SELECT RAISE(ABORT, 'governed dispatch admission identity already exists');
+            END;
+        "#,
+    )?;
+
+    let conflicting_identity_count: i64 = tx.query_row(
+        r#"SELECT COUNT(*)
+           FROM (
+               SELECT 1
+               FROM governed_dispatch_admissions
+               GROUP BY run_id, workflow_id, unit_id, attempt
+               HAVING COUNT(*) > 1
+           )"#,
+        [],
+        |row| row.get(0),
+    )?;
+    if conflicting_identity_count == 0 {
+        tx.execute_batch(
+            r#"
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_governed_dispatch_admissions_workflow_attempt
+                ON governed_dispatch_admissions(run_id, workflow_id, unit_id, attempt);
+            "#,
+        )?;
+    } else {
+        tx.execute(
+            r#"INSERT OR IGNORE INTO governed_dispatch_admission_identity_conflicts_v2 (
+                    run_id, workflow_id, unit_id, attempt, observed_projection_count
+                )
+                SELECT run_id, workflow_id, unit_id, attempt, COUNT(*)
+                FROM governed_dispatch_admissions
+                GROUP BY run_id, workflow_id, unit_id, attempt
+                HAVING COUNT(*) > 1"#,
+            [],
+        )?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
 /// SQLite connection wrapping the events + runs schema.
 pub struct SqliteStore {
     conn: Connection,
@@ -1331,12 +1419,6 @@ impl SqliteStore {
                 )
             );
 
-            -- A named index enforces the durable V3 dispatch identity and
-            -- upgrades post-introduction stores without rewriting their
-            -- tape-backed projections. Existing conflicting rows fail closed.
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_governed_dispatch_admissions_workflow_attempt
-                ON governed_dispatch_admissions(run_id, workflow_id, unit_id, attempt);
-
             CREATE INDEX IF NOT EXISTS idx_governed_dispatch_admissions_state
                 ON governed_dispatch_admissions(run_id, state);
 
@@ -1536,6 +1618,7 @@ impl SqliteStore {
 
             "#,
         )?;
+        ensure_governed_dispatch_admission_identity_guard_v2(conn)?;
         ensure_workflow_instance_snapshot_cache_schema_v1(conn)
     }
 
@@ -2761,6 +2844,7 @@ impl SqliteStore {
             governed_dispatch_admission_semantic_identity_digest_v1(request)?;
 
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        require_governed_dispatch_admission_request_identity_not_conflicted(&tx, request)?;
         if let Some(existing) = governed_dispatch_admission_by_idempotency(
             &tx,
             request.run_id,
@@ -7539,6 +7623,71 @@ fn governed_dispatch_admission_by_workflow_attempt(
     .map_err(LedgerError::from)
 }
 
+fn governed_dispatch_admission_identity_is_conflicted(
+    conn: &Connection,
+    run_id: RunId,
+    workflow_id: &str,
+    unit_id: &str,
+    attempt: u32,
+) -> Result<bool> {
+    let marker_count: i64 = conn.query_row(
+        r#"SELECT COUNT(*)
+           FROM governed_dispatch_admission_identity_conflicts_v2
+           WHERE run_id = ?1 AND workflow_id = ?2 AND unit_id = ?3 AND attempt = ?4"#,
+        params![run_id.to_string(), workflow_id, unit_id, attempt],
+        |row| row.get(0),
+    )?;
+    if marker_count > 0 {
+        return Ok(true);
+    }
+    let projection_count: i64 = conn.query_row(
+        r#"SELECT COUNT(*)
+           FROM governed_dispatch_admissions
+           WHERE run_id = ?1 AND workflow_id = ?2 AND unit_id = ?3 AND attempt = ?4"#,
+        params![run_id.to_string(), workflow_id, unit_id, attempt],
+        |row| row.get(0),
+    )?;
+    Ok(projection_count > 1)
+}
+
+fn require_governed_dispatch_admission_request_identity_not_conflicted(
+    conn: &Connection,
+    request: &GovernedDispatchAdmissionRequestV1,
+) -> Result<()> {
+    if governed_dispatch_admission_identity_is_conflicted(
+        conn,
+        request.run_id,
+        &request.dispatch.body.workflow_id,
+        &request.dispatch.body.unit_id,
+        request.dispatch.body.attempt,
+    )? {
+        return Err(governed_dispatch_admission_reconciliation_required(
+            request,
+            "legacy revision-free admission identity has multiple historical projections",
+        ));
+    }
+    Ok(())
+}
+
+fn require_stored_governed_dispatch_admission_identity_not_conflicted(
+    conn: &Connection,
+    stored: &StoredGovernedDispatchAdmission,
+) -> Result<()> {
+    if governed_dispatch_admission_identity_is_conflicted(
+        conn,
+        stored.run_id,
+        &stored.workflow_id,
+        &stored.unit_id,
+        stored.attempt,
+    )? {
+        return Err(stored_governed_dispatch_admission_reconciliation_required(
+            stored,
+            "legacy revision-free admission identity has multiple historical projections",
+        ));
+    }
+    Ok(())
+}
+
 fn governed_dispatch_admission_by_event(
     conn: &Connection,
     run_id: RunId,
@@ -7725,6 +7874,7 @@ fn verified_governed_dispatch_admission_dispatch(
     stored: &StoredGovernedDispatchAdmission,
     authority: &GovernedDispatchAdmissionAuthorityV1,
 ) -> Result<DispatchEnvelopeV3> {
+    require_stored_governed_dispatch_admission_identity_not_conflicted(conn, stored)?;
     let event =
         load_verified_governed_dispatch_admission_event(conn, stored.dispatch_event_id, authority)?;
     let event_digest = canonical_event_hash(&event).map_err(|error| {
