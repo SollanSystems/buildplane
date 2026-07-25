@@ -1017,6 +1017,77 @@ describe("ActionGateway", () => {
 		expect(sandboxRunCommand).not.toHaveBeenCalled();
 	});
 
+	it.each([
+		["absent", undefined],
+		[
+			"failing",
+			vi.fn(() => {
+				throw new Error("telemetry offline");
+			}),
+		],
+	] as const)("does not let %s governed receipt telemetry mint or retain a permit or invoke host tools", (_telemetryState, onReceipt) => {
+		const hostRunCommand = vi.fn(tools().runCommand);
+		const sandboxRunCommand = vi.fn(governedExecutor().runCommand);
+		const bundle = governedBundle();
+		const ociExecutor = governedExecutor({ runCommand: sandboxRunCommand });
+		const action = Object.freeze({
+			actionId: "action-governed-telemetry-permit",
+			kind: "process.run" as const,
+			command: "git",
+			args: Object.freeze(["status"]),
+		});
+		const capabilityBundleDigest = governedBundleDigest(bundle);
+		const permitBinding = governedActionPermit({
+			runId: "run-governed-telemetry-permit",
+			worktreeRoot: "/worktree",
+			role: "implementer",
+			action,
+			capabilityBundleDigest,
+			sandboxProfileDigest: ociExecutor.sandbox.profileDigest,
+			governedDeadlineAtMs: 4_102_444_800_000,
+		});
+		const commonOptions = {
+			runId: "run-governed-telemetry-permit",
+			worktreeRoot: "/worktree",
+			role: "implementer" as const,
+			trustTier: "governed" as const,
+			capabilityBundle: bundle,
+			capabilityBundleDigest,
+			governedExecutor: ociExecutor,
+			governedDeadlineAtMs: 4_102_444_800_000,
+			tools: tools({ runCommand: hostRunCommand }),
+			...(onReceipt === undefined ? {} : { onReceipt }),
+		};
+		expect(createActionGateway(commonOptions).execute(action)).toMatchObject({
+			outcome: "denied",
+			reason: expect.stringMatching(/claim-bound permit/i),
+		});
+		expect(sandboxRunCommand).not.toHaveBeenCalled();
+		expect(hostRunCommand).not.toHaveBeenCalled();
+
+		const options = {
+			...commonOptions,
+			governedActionPermit: permitBinding.permit,
+			governedActionEvidence: permitBinding.evidence,
+		};
+
+		expect(createActionGateway(options).execute(action)).toMatchObject({
+			outcome: "succeeded",
+		});
+		expect(sandboxRunCommand).toHaveBeenCalledOnce();
+		expect(hostRunCommand).not.toHaveBeenCalled();
+
+		expect(createActionGateway(options).execute(action)).toMatchObject({
+			outcome: "denied",
+			reason: expect.stringMatching(/already consumed/i),
+		});
+		expect(sandboxRunCommand).toHaveBeenCalledOnce();
+		expect(hostRunCommand).not.toHaveBeenCalled();
+		if (onReceipt !== undefined) {
+			expect(onReceipt).toHaveBeenCalledTimes(3);
+		}
+	});
+
 	it("returns an immutable receipt even when an observer attempts to rewrite it", () => {
 		let observed: ActionGatewayReceipt | undefined;
 		const gateway = createActionGateway({
