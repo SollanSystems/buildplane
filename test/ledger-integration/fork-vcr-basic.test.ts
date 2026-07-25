@@ -312,10 +312,22 @@ describe("fork --vcr basic [Phase F]", () => {
 				fixture.forkExitCode,
 				`${fixture.forkStdout}\n${fixture.forkStderr}`,
 			).toBe(1);
-			expect(fixture.forkRunId).toBe("");
+			expect(fixture.forkRunId).not.toBe("");
 			expect(fixture.forkStderr).toContain(
 				"required output is outside the worktree root",
 			);
+			const db = new DatabaseSync(fixture.eventsDbPath, { readOnly: true });
+			const childEventKinds = (
+				db
+					.prepare("SELECT kind FROM events WHERE run_id = ? ORDER BY id ASC")
+					.all(fixture.forkRunId) as { kind: string }[]
+			).map((row) => row.kind);
+			db.close();
+			expect(childEventKinds).toContain("run_started");
+			expect(childEventKinds).toContain("run_failed");
+			expect(childEventKinds).not.toContain("tool_request");
+			expect(childEventKinds).not.toContain("tool_result");
+			expect(childEventKinds).not.toContain("workspace_write");
 			expect(existsSync(externalPath)).toBe(false);
 		} finally {
 			await fixture.cleanup();
