@@ -1,8 +1,8 @@
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it } from "vitest";
-import { makeBuildplaneRunFixture, makeForkFixture } from "./fixtures.js";
+import { makeForkFixture } from "./fixtures.js";
 
 const recordedCommand = {
 	command: "node",
@@ -269,12 +269,30 @@ describe("fork --vcr basic [Phase F]", () => {
 		}
 	}, 60_000);
 
-	it("does not capture traversal outputs outside the VCR output store", async () => {
-		const requiredOutput = "../escaped-vcr-capture.txt";
-		const fixture = await makeBuildplaneRunFixture({
-			packet: {
+	it("rejects traversal required outputs during VCR materialization", async () => {
+		const requiredOutput = `../escaped-vcr-materialization-${process.pid}-${Date.now()}.txt`;
+		const vcrCommand = {
+			command: "node",
+			args: ["-e", "console.log('contained-vcr-output');"],
+		};
+		const fixture = await makeForkFixture({
+			forkArgs: ["--vcr"],
+			parentPacket: {
 				unit: {
-					id: "u-parent-vcr-capture-traversal",
+					id: "u-parent-vcr-materialization-traversal",
+					kind: "command",
+					scope: "task",
+					inputRefs: [],
+					expectedOutputs: [],
+					verificationContract: "exit-0-and-required-outputs",
+					policyProfile: "default",
+				},
+				execution: vcrCommand,
+				verification: { requiredOutputs: [] },
+			},
+			forkPacket: {
+				unit: {
+					id: "u-fork-vcr-materialization-traversal",
 					kind: "command",
 					scope: "task",
 					inputRefs: [],
@@ -282,36 +300,53 @@ describe("fork --vcr basic [Phase F]", () => {
 					verificationContract: "exit-0-and-required-outputs",
 					policyProfile: "default",
 				},
-				execution: {
-					command: "node",
-					args: [
-						"-e",
-						"require('fs').writeFileSync('../escaped-vcr-capture.txt', 'outside');",
-					],
-				},
+				execution: vcrCommand,
 				verification: { requiredOutputs: [requiredOutput] },
 			},
 		});
 
 		try {
-			expect(fixture.exitCode).toBe(1);
+			const externalPath = join(fixture.dir, requiredOutput);
+			expect(existsSync(externalPath)).toBe(false);
+			expect(
+				fixture.forkExitCode,
+				`${fixture.forkStdout}\n${fixture.forkStderr}`,
+			).toBe(1);
 			const db = new DatabaseSync(fixture.eventsDbPath, { readOnly: true });
 			const row = db
-				.prepare("SELECT DISTINCT run_id FROM events LIMIT 1")
-				.get() as { run_id: string };
+				.prepare(
+					"SELECT payload FROM events WHERE run_id = ? AND kind = 'tool_result' ORDER BY id DESC LIMIT 1",
+				)
+				.get(fixture.forkRunId) as { payload: string };
+			const workspaceWriteCount = (
+				db
+					.prepare(
+						"SELECT COUNT(*) AS count FROM events WHERE run_id = ? AND kind = 'workspace_write'",
+					)
+					.get(fixture.forkRunId) as { count: number }
+			).count;
 			db.close();
 
-			expect(
-				existsSync(
-					resolve(
-						fixture.dir,
-						".buildplane",
-						"vcr",
-						row.run_id,
-						"escaped-vcr-capture.txt",
-					),
-				),
-			).toBe(false);
+			const payload = JSON.parse(row.payload) as {
+				ToolResultV1: {
+					output?: {
+						vcr?: string;
+						materialized_outputs?: {
+							path: string;
+							status: string;
+							reason?: string;
+						}[];
+					};
+				};
+			};
+			expect(payload.ToolResultV1.output?.vcr).toBe("hit");
+			expect(payload.ToolResultV1.output?.materialized_outputs).toContainEqual({
+				path: requiredOutput,
+				status: "invalid-output-path",
+				reason: "output path escapes root",
+			});
+			expect(workspaceWriteCount).toBe(0);
+			expect(existsSync(externalPath)).toBe(false);
 		} finally {
 			await fixture.cleanup();
 		}

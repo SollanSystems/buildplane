@@ -80,6 +80,14 @@ describe("fork basic", () => {
 				);
 			expect(checkpointBoundaries).toContain("pre-unit");
 			expect(checkpointBoundaries).toContain("post-unit");
+			const signatureCount = (
+				db
+					.prepare(
+						"SELECT COUNT(*) AS count FROM event_signatures AS signatures INNER JOIN events AS event ON event.id = signatures.event_id WHERE event.run_id = ?",
+					)
+					.get(fixture.forkRunId) as { count: number }
+			).count;
+			expect(signatureCount).toBe(0);
 
 			db.close();
 
