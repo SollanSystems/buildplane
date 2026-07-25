@@ -31,6 +31,7 @@ use super::{
 use bp_ledger::canonicalize::canonical_event_hash;
 use bp_ledger::event::Event;
 use bp_ledger::kind::EventKind;
+use bp_ledger::payload::activity::{ActivityStartedV1, ActivityType};
 use bp_ledger::payload::activity_claim::{
     ActivityClaimPurposeV1, ActivityClaimedV1, ActivityHeartbeatRecordedV1,
     ActivityResultOutcomeV1, ActivityResultRecordedV1,
@@ -40,19 +41,20 @@ use bp_ledger::payload::trust_spine::{
     candidate_completion_recorded_v1_digest, candidate_view_v1_digest,
     dispatch_envelope_v3_body_digest, dispatch_envelope_v4_digest,
     governed_dispatch_policy_digest_v1, model_action_authorized_v2_digest,
-    model_action_intent_v1_digest, review_verdict_output_v1_digest, ActionEvidenceVersionV1,
-    ActionFailureV1, ActionKindV1, ActionReceiptOutcomeV2, ActionReceiptRecordedV2,
-    ActionReceiptSetEntryV1, ActionReceiptSetRecordedV1, ActionRequestedV2, ActionResourceUsageV1,
-    CandidateAcceptanceOutcomeV1, CandidateAcceptanceRecordedV1, CandidateCompletionRecordedV1,
-    CandidateCreatedV2, CandidateViewV1, CommitModeV1, DispatchBudgetV1, DispatchEnvelopeBodyV2,
-    DispatchEnvelopeV3, DispatchEnvelopeV4, ExecutionRoleV1, ModelActionAuthorizedV2,
-    ModelActionCandidateBindingV1, ModelActionIntentV1, ModelRequestEvidenceV1,
-    PromotionApprovalRequestedV1, PromotionDecisionKindV1, PromotionExecutionClaimedV1,
-    PromotionGitBindingV1, PromotionResultOutcomeV1, PromotionWorktreeSyncStateV1,
-    ReviewDecisionV1, ReviewVerdictOutputV1, ReviewVerdictRecordedV2, TrustScopeEvidenceV1,
-    TrustTierV1, WorkflowCancellationCauseV1, WorkflowCancellationRequestedV1,
-    WorkflowTerminalOutcomeV1, WorkflowTerminalV2, MODEL_REQUEST_EVIDENCE_V1_SCHEMA_VERSION,
-    TRUST_SCOPE_EVIDENCE_V1_SCHEMA_VERSION,
+    model_action_intent_v1_digest, review_verdict_output_v1_digest, workflow_graph_v2_digest,
+    ActionEvidenceVersionV1, ActionFailureV1, ActionKindV1, ActionReceiptOutcomeV2,
+    ActionReceiptRecordedV2, ActionReceiptSetEntryV1, ActionReceiptSetRecordedV1,
+    ActionRequestedV2, ActionResourceUsageV1, CandidateAcceptanceOutcomeV1,
+    CandidateAcceptanceRecordedV1, CandidateCompletionRecordedV1, CandidateCreatedV2,
+    CandidateViewV1, CommitModeV1, DispatchBudgetV1, DispatchEnvelopeBodyV2, DispatchEnvelopeV3,
+    DispatchEnvelopeV4, ExecutionRoleV1, ModelActionAuthorizedV2, ModelActionCandidateBindingV1,
+    ModelActionIntentV1, ModelRequestEvidenceV1, PromotionApprovalRequestedV1,
+    PromotionDecisionKindV1, PromotionExecutionClaimedV1, PromotionGitBindingV1,
+    PromotionResultOutcomeV1, PromotionWorktreeSyncStateV1, ReviewDecisionV1,
+    ReviewVerdictOutputV1, ReviewVerdictRecordedV2, TrustScopeEvidenceV1, TrustTierV1,
+    WorkflowCancellationCauseV1, WorkflowCancellationRequestedV1, WorkflowGraphDeclaredV2,
+    WorkflowGraphNodeV2, WorkflowTerminalOutcomeV1, WorkflowTerminalV2,
+    MODEL_REQUEST_EVIDENCE_V1_SCHEMA_VERSION, TRUST_SCOPE_EVIDENCE_V1_SCHEMA_VERSION,
 };
 use bp_ledger::payload::Payload;
 use bp_ledger::signing::{public_key_hash, ActorKeyRef, TrustedPublicKeys};
@@ -2023,6 +2025,167 @@ fn candidate_completion_fixture_for_attempt_at(
     }
 }
 
+/// A deliberately narrow graph-bound fixture: one first-attempt implementer
+/// node with no dependencies and a one-slot graph. The native candidate lane
+/// can reconstruct this topology without pretending to be the full replay
+/// scheduler; dependency, multi-node, concurrent, and retry graphs remain
+/// fail-closed until their shared reducer is available.
+fn singleton_graph_bound_v4_candidate_completion_fixture(seed: u8) -> CandidateCompletionFixture {
+    graph_bound_v4_candidate_completion_fixture(seed, 1, false, false, false)
+}
+
+fn graph_bound_v4_candidate_completion_fixture(
+    seed: u8,
+    max_concurrent: u32,
+    include_second_node: bool,
+    include_prior_governed_dispatch: bool,
+    include_pre_dispatch_checkpoint: bool,
+) -> CandidateCompletionFixture {
+    let now = DateTime::parse_from_rfc3339(&timestamp(Utc::now() - Duration::seconds(60)))
+        .expect("round singleton V4 fixture timestamp to canonical milliseconds")
+        .with_timezone(&Utc);
+    let temp = TempDir::new().expect("temporary singleton V4 candidate fixture directory");
+    let store = SqliteStore::open(temp.path().join("events.db"))
+        .expect("open singleton V4 candidate SQLite ledger");
+    let run_id = RunId::new();
+    let kernel_key = SigningKey::from_bytes(&[seed; 32]);
+    let reviewer_key = SigningKey::from_bytes(&[seed.wrapping_add(1); 32]);
+    let operator_key = SigningKey::from_bytes(&[seed.wrapping_add(2); 32]);
+    let kernel = promotion_actor("singleton-v4-kernel", "kernel-main", &kernel_key);
+    let reviewer = promotion_actor("singleton-v4-reviewer", "reviewer-main", &reviewer_key);
+    let operator = promotion_actor("singleton-v4-operator", "operator-main", &operator_key);
+    let authority = GovernedPromotionAuthorityV1::new_governed_realm(
+        promotion_trusted_keys(&[&kernel_key, &reviewer_key, &operator_key]),
+        kernel.clone(),
+        vec![reviewer],
+        operator.clone(),
+        DIGEST_E.into(),
+    )
+    .expect("construct singleton V4 candidate completion authority");
+
+    let nested_dispatch = promotion_dispatch(now, DIGEST_E);
+    let graph_declared_at = now - Duration::milliseconds(500);
+    let mut nodes = vec![WorkflowGraphNodeV2 {
+        unit_id: nested_dispatch.body.unit_id.clone(),
+        depends_on: vec![],
+        execution_role: nested_dispatch.body.execution_role,
+        governed_packet_digest: nested_dispatch
+            .governed_packet_digest
+            .clone()
+            .expect("sealed V3 fixture carries a governed packet digest"),
+    }];
+    if include_second_node {
+        nodes.push(WorkflowGraphNodeV2 {
+            unit_id: "secondary-implementation-unit".into(),
+            depends_on: vec![],
+            execution_role: ExecutionRoleV1::Implementer,
+            governed_packet_digest: DIGEST_C.into(),
+        });
+    }
+    let mut graph = WorkflowGraphDeclaredV2 {
+        run_id: run_id.to_string(),
+        workflow_id: nested_dispatch.body.workflow_id.clone(),
+        workflow_revision: nested_dispatch.body.workflow_revision.clone(),
+        nodes,
+        max_concurrent,
+        graph_digest: String::new(),
+        idempotency_key: "graph:promotion-workflow-1:r1".into(),
+        declared_at: timestamp(graph_declared_at),
+    };
+    graph.graph_digest = workflow_graph_v2_digest(&graph).expect("hash singleton V4 graph");
+    let graph_event = promotion_event(
+        run_id,
+        None,
+        EventKind::WorkflowGraphDeclaredV2,
+        graph_declared_at,
+        Payload::WorkflowGraphDeclaredV2(graph.clone()),
+    );
+    if include_pre_dispatch_checkpoint {
+        store
+            .append_signed_with_checkpoint(
+                &graph_event,
+                &kernel_key,
+                &kernel,
+                &CheckpointPolicy::Enabled { cadence: 1 },
+            )
+            .expect("append graph declaration and authenticated singleton V4 prefix checkpoint");
+    } else {
+        store
+            .append_signed(&graph_event, &kernel_key, &kernel)
+            .expect("append signed singleton V4 graph declaration");
+    }
+
+    if include_prior_governed_dispatch {
+        let prior_dispatch_event = promotion_event(
+            run_id,
+            Some(graph_event.id),
+            EventKind::DispatchEnvelopeV3,
+            now - Duration::milliseconds(250),
+            Payload::DispatchEnvelopeV3(nested_dispatch.clone()),
+        );
+        store
+            .append_signed(&prior_dispatch_event, &kernel_key, &kernel)
+            .expect("append a valid signed pre-V4 governed dispatch");
+    }
+
+    let mut graph_dispatch = DispatchEnvelopeV4 {
+        dispatch_v3: nested_dispatch.clone(),
+        workflow_graph_digest: graph.graph_digest.clone(),
+        workflow_graph_declaration_event_ref: graph_event.id,
+        envelope_digest: String::new(),
+    };
+    graph_dispatch.envelope_digest = dispatch_envelope_v4_digest(
+        &graph_dispatch.dispatch_v3,
+        &graph_dispatch.workflow_graph_digest,
+        &graph_dispatch.workflow_graph_declaration_event_ref,
+    )
+    .expect("hash singleton V4 dispatch");
+    let graph_dispatch_event = promotion_event(
+        run_id,
+        Some(graph_event.id),
+        EventKind::DispatchEnvelopeV4,
+        now,
+        Payload::DispatchEnvelopeV4(graph_dispatch.clone()),
+    );
+    store
+        .append_signed(&graph_dispatch_event, &kernel_key, &kernel)
+        .expect("append signed singleton V4 dispatch");
+
+    // V4 keeps nested V3 authority fields but every effect must carry the
+    // outer V4 lineage digest. The fixture-only clone is never appended as a
+    // V3 dispatch; it provides that outer digest to the existing action and
+    // candidate evidence builder.
+    let mut outer_lineage_dispatch = nested_dispatch;
+    outer_lineage_dispatch.envelope_digest = graph_dispatch.envelope_digest;
+    let candidate_action = append_promotion_action_evidence(
+        &store,
+        run_id,
+        &outer_lineage_dispatch,
+        &graph_dispatch_event,
+        &kernel_key,
+        &kernel,
+        "git-candidate-create:candidate-promotion-1/run-1/1",
+        ActionKindV1::Git,
+        now + Duration::milliseconds(100),
+        None,
+        None,
+    );
+    CandidateCompletionFixture {
+        _temp: temp,
+        store,
+        run_id,
+        authority,
+        kernel_key,
+        kernel,
+        operator_key,
+        operator,
+        dispatch: outer_lineage_dispatch,
+        dispatch_event: graph_dispatch_event,
+        candidate_action,
+        now,
+    }
+}
+
 fn candidate_completion_request(
     fixture: &CandidateCompletionFixture,
     candidate_event: &Event,
@@ -3190,7 +3353,7 @@ fn native_candidate_completion_blocks_an_off_parent_payload_referenced_tape_proo
 }
 
 #[test]
-fn native_candidate_completion_rejects_graph_bound_v4_until_native_admission_is_available() {
+fn native_candidate_completion_rejects_graph_bound_v4_without_a_signed_graph_admission() {
     let fixture = candidate_completion_fixture(95);
     let (_, candidate_event) = append_candidate_artifact(
         &fixture.store,
@@ -3247,7 +3410,7 @@ fn native_candidate_completion_rejects_graph_bound_v4_until_native_admission_is_
             &outcome,
             Err(LedgerError::CandidateCompletionAuthorityRejected { .. })
         ),
-        "V4 dispatches must fail closed until native graph admission is reconstructed: {outcome:?}",
+        "graph-bound V4 dispatches without a signed graph admission must fail closed: {outcome:?}",
     );
     assert_eq!(
         promotion_event_count(
@@ -3257,6 +3420,376 @@ fn native_candidate_completion_rejects_graph_bound_v4_until_native_admission_is_
         ),
         0,
         "an unsupported V4 dispatch must not receive a native completion proof",
+    );
+}
+
+#[test]
+fn native_candidate_completion_records_a_singleton_first_attempt_graph_bound_v4_candidate() {
+    let fixture = singleton_graph_bound_v4_candidate_completion_fixture(96);
+    let (_, candidate_event) = append_candidate_artifact(
+        &fixture.store,
+        fixture.run_id,
+        &fixture.dispatch,
+        &fixture.kernel_key,
+        &fixture.kernel,
+        fixture.candidate_action.sealed_receipt_set_event(),
+        fixture.candidate_action.sealed_receipt_set(),
+        fixture.now + Duration::seconds(1),
+    );
+    let request = candidate_completion_request(&fixture, &candidate_event);
+
+    let (completion_event_id, completion_event_digest, completion_digest) = match fixture
+        .store
+        .record_governed_candidate_completion_v1(
+            &request,
+            &fixture.authority,
+            &fixture.kernel_key,
+            &fixture.kernel,
+        )
+        .expect("singleton first-attempt V4 evidence should be certifiable")
+    {
+        GovernedCandidateCompletionDispositionV1::Recorded {
+            candidate_completion_event_id,
+            candidate_completion_event_digest,
+            completion_digest,
+        } => (
+            candidate_completion_event_id,
+            candidate_completion_event_digest,
+            completion_digest,
+        ),
+        other => panic!("expected a first V4 completion record, received {other:?}"),
+    };
+
+    assert_eq!(
+        fixture
+            .store
+            .record_governed_candidate_completion_v1(
+                &request,
+                &fixture.authority,
+                &fixture.kernel_key,
+                &fixture.kernel,
+            )
+            .expect("the exact V4 retry should resolve the immutable completion"),
+        GovernedCandidateCompletionDispositionV1::Existing {
+            candidate_completion_event_id: completion_event_id,
+            candidate_completion_event_digest: completion_event_digest,
+            completion_digest,
+        },
+    );
+    assert_eq!(
+        promotion_event_count(
+            &fixture.store,
+            fixture.run_id,
+            "candidate_completion_recorded_v1",
+        ),
+        1,
+        "exact V4 retries must not append a second completion proof",
+    );
+}
+
+#[test]
+fn native_candidate_completion_records_a_checkpointed_singleton_graph_bound_v4_candidate() {
+    let fixture = graph_bound_v4_candidate_completion_fixture(102, 1, false, false, true);
+    let (_, candidate_event) = append_candidate_artifact(
+        &fixture.store,
+        fixture.run_id,
+        &fixture.dispatch,
+        &fixture.kernel_key,
+        &fixture.kernel,
+        fixture.candidate_action.sealed_receipt_set_event(),
+        fixture.candidate_action.sealed_receipt_set(),
+        fixture.now + Duration::seconds(1),
+    );
+    let request = candidate_completion_request(&fixture, &candidate_event);
+
+    let recorded = fixture
+        .store
+        .record_governed_candidate_completion_v1(
+            &request,
+            &fixture.authority,
+            &fixture.kernel_key,
+            &fixture.kernel,
+        )
+        .expect("a signed checkpoint is tape metadata, not competing graph state");
+    assert!(matches!(
+        recorded,
+        GovernedCandidateCompletionDispositionV1::Recorded { .. }
+    ));
+    assert_eq!(
+        promotion_event_count(
+            &fixture.store,
+            fixture.run_id,
+            "candidate_completion_recorded_v1",
+        ),
+        1,
+        "a checkpointed singleton V4 candidate must receive exactly one completion proof",
+    );
+}
+
+#[test]
+fn native_candidate_completion_keeps_wider_or_concurrent_graph_bound_v4_admission_closed() {
+    for (label, max_concurrent, include_second_node, seed) in [
+        ("multiple nodes", 1, true, 97),
+        ("max concurrent above one", 2, false, 98),
+    ] {
+        let fixture = graph_bound_v4_candidate_completion_fixture(
+            seed,
+            max_concurrent,
+            include_second_node,
+            false,
+            false,
+        );
+        let (_, candidate_event) = append_candidate_artifact(
+            &fixture.store,
+            fixture.run_id,
+            &fixture.dispatch,
+            &fixture.kernel_key,
+            &fixture.kernel,
+            fixture.candidate_action.sealed_receipt_set_event(),
+            fixture.candidate_action.sealed_receipt_set(),
+            fixture.now + Duration::seconds(1),
+        );
+        let outcome = fixture.store.record_governed_candidate_completion_v1(
+            &candidate_completion_request(&fixture, &candidate_event),
+            &fixture.authority,
+            &fixture.kernel_key,
+            &fixture.kernel,
+        );
+        assert!(
+            matches!(
+                outcome,
+                Err(LedgerError::CandidateCompletionAuthorityRejected { .. })
+            ),
+            "{label} graph admission must remain fail-closed until the full reducer is shared",
+        );
+        assert_eq!(
+            promotion_event_count(
+                &fixture.store,
+                fixture.run_id,
+                "candidate_completion_recorded_v1",
+            ),
+            0,
+            "{label} graph must not receive a completion proof",
+        );
+    }
+}
+
+#[test]
+fn native_candidate_completion_rejects_a_prior_signed_dispatch_before_singleton_v4_admission() {
+    let fixture = graph_bound_v4_candidate_completion_fixture(99, 1, false, true, false);
+    let (_, candidate_event) = append_candidate_artifact(
+        &fixture.store,
+        fixture.run_id,
+        &fixture.dispatch,
+        &fixture.kernel_key,
+        &fixture.kernel,
+        fixture.candidate_action.sealed_receipt_set_event(),
+        fixture.candidate_action.sealed_receipt_set(),
+        fixture.now + Duration::seconds(1),
+    );
+
+    let outcome = fixture.store.record_governed_candidate_completion_v1(
+        &candidate_completion_request(&fixture, &candidate_event),
+        &fixture.authority,
+        &fixture.kernel_key,
+        &fixture.kernel,
+    );
+    assert!(
+        matches!(
+            &outcome,
+            Err(LedgerError::CandidateCompletionAuthorityRejected { reason })
+                if reason.contains(
+                    "candidate completion singleton graph-bound V4 admission rejects prior run activity or competing dispatch state"
+                )
+        ),
+        "a valid signed pre-V4 dispatch must reach the strict singleton-prefix rejection: {outcome:?}",
+    );
+    assert_eq!(
+        promotion_event_count(
+            &fixture.store,
+            fixture.run_id,
+            "candidate_completion_recorded_v1",
+        ),
+        0,
+        "a singleton V4 prefix conflict must not append a completion proof",
+    );
+}
+
+#[test]
+fn native_candidate_completion_rejects_an_unsigned_activity_after_v4_dispatch() {
+    let fixture = singleton_graph_bound_v4_candidate_completion_fixture(100);
+    let (_, candidate_event) = append_candidate_artifact(
+        &fixture.store,
+        fixture.run_id,
+        &fixture.dispatch,
+        &fixture.kernel_key,
+        &fixture.kernel,
+        fixture.candidate_action.sealed_receipt_set_event(),
+        fixture.candidate_action.sealed_receipt_set(),
+        fixture.now + Duration::seconds(1),
+    );
+    let unsigned_activity = promotion_event(
+        fixture.run_id,
+        Some(candidate_event.id),
+        EventKind::ActivityStarted,
+        fixture.now + Duration::seconds(2),
+        Payload::ActivityStartedV1(ActivityStartedV1 {
+            run_id: fixture.run_id,
+            activity_id: "raw-post-v4".into(),
+            activity_type: ActivityType::Tool,
+            input_digest: DIGEST_A.into(),
+        }),
+    );
+    fixture
+        .store
+        .append(&unsigned_activity)
+        .expect("append an unsigned legacy activity bracket");
+
+    let outcome = fixture.store.record_governed_candidate_completion_v1(
+        &candidate_completion_request(&fixture, &candidate_event),
+        &fixture.authority,
+        &fixture.kernel_key,
+        &fixture.kernel,
+    );
+    assert!(
+        matches!(
+            &outcome,
+            Err(LedgerError::CandidateCompletionAuthorityRejected { .. })
+        ),
+        "an unsigned activity in a governed V4 run must block candidate completion: {outcome:?}",
+    );
+    assert_eq!(
+        promotion_event_count(
+            &fixture.store,
+            fixture.run_id,
+            "candidate_completion_recorded_v1",
+        ),
+        0,
+        "an unverified governed activity must not be sealed beside a candidate completion",
+    );
+}
+
+#[test]
+fn native_candidate_completion_rejects_a_signed_v3_dispatch_after_v4_candidate() {
+    let fixture = singleton_graph_bound_v4_candidate_completion_fixture(101);
+    let (_, candidate_event) = append_candidate_artifact(
+        &fixture.store,
+        fixture.run_id,
+        &fixture.dispatch,
+        &fixture.kernel_key,
+        &fixture.kernel,
+        fixture.candidate_action.sealed_receipt_set_event(),
+        fixture.candidate_action.sealed_receipt_set(),
+        fixture.now + Duration::seconds(1),
+    );
+    let Payload::DispatchEnvelopeV4(graph_dispatch) = &fixture.dispatch_event.payload else {
+        unreachable!("singleton fixture must carry the graph-bound V4 dispatch")
+    };
+    let later_dispatch = promotion_event(
+        fixture.run_id,
+        Some(candidate_event.id),
+        EventKind::DispatchEnvelopeV3,
+        fixture.now + Duration::seconds(2),
+        Payload::DispatchEnvelopeV3(graph_dispatch.dispatch_v3.clone()),
+    );
+    fixture
+        .store
+        .append_signed(&later_dispatch, &fixture.kernel_key, &fixture.kernel)
+        .expect("append a canonical signed nested V3 dispatch after the V4 candidate");
+
+    let outcome = fixture.store.record_governed_candidate_completion_v1(
+        &candidate_completion_request(&fixture, &candidate_event),
+        &fixture.authority,
+        &fixture.kernel_key,
+        &fixture.kernel,
+    );
+    assert!(
+        matches!(
+            &outcome,
+            Err(LedgerError::CandidateCompletionAuthorityRejected { reason })
+                if reason.contains(
+                    "candidate completion singleton graph-bound V4 tape contains an unmodeled ordinary event"
+                )
+        ),
+        "a signed V4-to-V3 workflow collision must reach the singleton closure: {outcome:?}",
+    );
+    assert_eq!(
+        promotion_event_count(
+            &fixture.store,
+            fixture.run_id,
+            "candidate_completion_recorded_v1",
+        ),
+        0,
+        "a replay-invalid signed V3 tail must not receive a V4 completion proof",
+    );
+}
+
+#[test]
+fn native_candidate_completion_uses_outer_v4_lineage_when_a_graph_workflow_is_cancelled() {
+    let fixture = singleton_graph_bound_v4_candidate_completion_fixture(99);
+    let (_, candidate_event) = append_candidate_artifact(
+        &fixture.store,
+        fixture.run_id,
+        &fixture.dispatch,
+        &fixture.kernel_key,
+        &fixture.kernel,
+        fixture.candidate_action.sealed_receipt_set_event(),
+        fixture.candidate_action.sealed_receipt_set(),
+        fixture.now + Duration::seconds(1),
+    );
+    let cancellation_at = fixture.now + Duration::seconds(2);
+    let cancellation = WorkflowCancellationRequestedV1 {
+        run_id: fixture.run_id.to_string(),
+        workflow_id: fixture.dispatch.body.workflow_id.clone(),
+        workflow_revision: fixture.dispatch.body.workflow_revision.clone(),
+        unit_id: fixture.dispatch.body.unit_id.clone(),
+        attempt: fixture.dispatch.body.attempt,
+        dispatch_event_ref: fixture.dispatch_event.id,
+        dispatch_envelope_digest: fixture.dispatch.envelope_digest.clone(),
+        cancellation_id: "cancel:singleton-v4".into(),
+        cause: WorkflowCancellationCauseV1::OperatorRequested,
+        timer_fired_event_ref: None,
+        timer_fired_event_digest: None,
+        requested_by: fixture.operator.actor_id.clone(),
+        idempotency_key: "cancel:singleton-v4:1".into(),
+        requested_at: timestamp(cancellation_at),
+    };
+    let cancellation_event = promotion_event(
+        fixture.run_id,
+        Some(fixture.dispatch_event.id),
+        EventKind::WorkflowCancellationRequestedV1,
+        cancellation_at,
+        Payload::WorkflowCancellationRequestedV1(cancellation),
+    );
+    fixture
+        .store
+        .append_signed(
+            &cancellation_event,
+            &fixture.operator_key,
+            &fixture.operator,
+        )
+        .expect("append outer-lineage V4 cancellation");
+
+    assert!(
+        matches!(
+            fixture.store.record_governed_candidate_completion_v1(
+                &candidate_completion_request(&fixture, &candidate_event),
+                &fixture.authority,
+                &fixture.kernel_key,
+                &fixture.kernel,
+            ),
+            Err(LedgerError::CandidateCompletionAuthorityRejected { .. })
+        ),
+        "an outer-lineage V4 cancellation must close candidate completion",
+    );
+    assert_eq!(
+        promotion_event_count(
+            &fixture.store,
+            fixture.run_id,
+            "candidate_completion_recorded_v1",
+        ),
+        0,
+        "a cancelled V4 workflow must not receive a completion proof",
     );
 }
 

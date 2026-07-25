@@ -26,17 +26,18 @@ use crate::payload::model_evidence::{
 use crate::payload::trust_spine::{
     action_receipt_recorded_v2_digest, action_receipt_set_v1_digest, action_requested_v2_digest,
     candidate_completion_recorded_v1_digest, dispatch_envelope_v3_body_digest,
-    governed_dispatch_policy_digest_v1, model_action_authorized_v2_digest,
-    model_action_intent_v1_digest, promotion_execution_claimed_v1_digest, ActionEvidenceVersionV1,
+    dispatch_envelope_v4_digest, governed_dispatch_policy_digest_v1,
+    model_action_authorized_v2_digest, model_action_intent_v1_digest,
+    promotion_execution_claimed_v1_digest, workflow_graph_v2_digest, ActionEvidenceVersionV1,
     ActionKindV1, ActionReceiptOutcomeV2, ActionReceiptRecordedV2, ActionReceiptSetEntryV1,
     ActionReceiptSetRecordedV1, ActionRequestedV2, CandidateAcceptanceOutcomeV1,
     CandidateAcceptanceRecordedV1, CandidateCompletionRecordedV1, CandidateCreatedV2, CommitModeV1,
-    DispatchEnvelopeV3, ExecutionRoleV1, ModelActionAuthorizedV1, ModelActionAuthorizedV2,
-    ModelActionIntentV1, ModelRequestEvidenceV1, PromotionApprovalRequestedV1,
-    PromotionDecisionKindV1, PromotionDecisionRecordedV1, PromotionExecutionClaimedV1,
-    PromotionExecutionLeaseBindingV1, PromotionGitBindingV1, PromotionResultOutcomeV1,
-    PromotionResultRecordedV1, PromotionWorktreeSyncStateV1, ReviewDecisionV1,
-    ReviewVerdictRecordedV2, TrustScopeEvidenceV1, TrustTierV1,
+    DispatchEnvelopeV3, DispatchEnvelopeV4, ExecutionRoleV1, ModelActionAuthorizedV1,
+    ModelActionAuthorizedV2, ModelActionIntentV1, ModelRequestEvidenceV1,
+    PromotionApprovalRequestedV1, PromotionDecisionKindV1, PromotionDecisionRecordedV1,
+    PromotionExecutionClaimedV1, PromotionExecutionLeaseBindingV1, PromotionGitBindingV1,
+    PromotionResultOutcomeV1, PromotionResultRecordedV1, PromotionWorktreeSyncStateV1,
+    ReviewDecisionV1, ReviewVerdictRecordedV2, TrustScopeEvidenceV1, TrustTierV1,
 };
 use crate::payload::Payload;
 use crate::signing::{
@@ -2010,6 +2011,7 @@ impl SqliteStore {
         &self,
         request: &GovernedCandidateCompletionRequestV1,
         expected_completion_event_id: EventId,
+        authority: &GovernedPromotionAuthorityV1,
         signing_key: &SigningKey,
         signer: &ActorKeyRef,
     ) -> Result<GovernedCheckpointSealOutcome> {
@@ -2017,6 +2019,18 @@ impl SqliteStore {
         require_candidate_completion_event_projection(
             &tx,
             request,
+            Some(expected_completion_event_id),
+        )?;
+        // Candidate proof creation and its response-gating checkpoint use
+        // separate commits. Reconstruct the V4 singleton closure again while
+        // this transaction owns the run writer lock so a raw or semantically
+        // competing tail cannot enter between those two boundaries.
+        verify_governed_candidate_completion_evidence(
+            &tx,
+            request,
+            authority,
+            signing_key,
+            signer,
             Some(expected_completion_event_id),
         )?;
         let outcome = self.seal_governed_signed_prefix_in_transaction(
@@ -3239,14 +3253,27 @@ impl SqliteStore {
             request.run_id,
             request.candidate_created_event_id,
         )? {
-            let disposition =
-                resolve_existing_governed_candidate_completion(&tx, &existing, request, authority)?;
+            let disposition = resolve_existing_governed_candidate_completion(
+                &tx,
+                &existing,
+                request,
+                authority,
+                kernel_signing_key,
+                kernel_signer,
+            )?;
             tx.commit()?;
             disposition
         } else {
             require_candidate_completion_event_projection(&tx, request, None)?;
 
-            let evidence = verify_governed_candidate_completion_evidence(&tx, request, authority)?;
+            let evidence = verify_governed_candidate_completion_evidence(
+                &tx,
+                request,
+                authority,
+                kernel_signing_key,
+                kernel_signer,
+                None,
+            )?;
             let completed_at = parse_claim_timestamp(&evidence.completion.completed_at).map_err(
                 |_| LedgerError::CandidateCompletionAuthorityRejected {
                     reason:
@@ -3308,6 +3335,7 @@ impl SqliteStore {
             .seal_governed_candidate_completion_prefix(
                 request,
                 expected_completion_event_id,
+                authority,
                 kernel_signing_key,
                 kernel_signer,
             )
@@ -11501,6 +11529,169 @@ fn validate_static_governed_candidate_completion_dispatch(
     Ok(())
 }
 
+/// Reconstruct the only graph-bound V4 admission shape the candidate-completion
+/// lane can prove without depending on the replay crate (which already depends
+/// on this ledger crate). A singleton, first-attempt graph has no dependency or
+/// concurrency state to approximate: its signed V2 declaration is the sole
+/// ordinary tape record before the V4 dispatch. Wider graphs and retries stay
+/// fail-closed until the shared reducer can be used at this authority boundary.
+fn verify_singleton_graph_bound_v4_candidate_completion_admission(
+    conn: &Connection,
+    request: &GovernedCandidateCompletionRequestV1,
+    authority: &GovernedPromotionAuthorityV1,
+    dispatch_event: &Event,
+    dispatch: &DispatchEnvelopeV4,
+) -> Result<EventId> {
+    canonicalize(dispatch_event.clone()).map_err(|error| {
+        LedgerError::CandidateCompletionAuthorityRejected {
+            reason: format!(
+                "candidate completion graph-bound V4 dispatch is not canonical: {error}"
+            ),
+        }
+    })?;
+    if dispatch_event.run_id != request.run_id || dispatch.dispatch_v3.body.attempt != 1 {
+        return candidate_completion_authority_rejected(
+            "candidate completion singleton graph-bound V4 admission requires the exact first dispatch attempt in its run",
+        );
+    }
+    let expected_outer_digest = dispatch_envelope_v4_digest(
+        &dispatch.dispatch_v3,
+        &dispatch.workflow_graph_digest,
+        &dispatch.workflow_graph_declaration_event_ref,
+    )
+    .map_err(|error| LedgerError::CandidateCompletionAuthorityRejected {
+        reason: format!(
+            "candidate completion could not canonicalize graph-bound V4 dispatch digest: {error}"
+        ),
+    })?;
+    if dispatch.envelope_digest != expected_outer_digest {
+        return candidate_completion_authority_rejected(
+            "candidate completion graph-bound V4 dispatch outer envelope digest is not canonical",
+        );
+    }
+
+    let graph_event = load_verified_promotion_event(
+        conn,
+        dispatch.workflow_graph_declaration_event_ref,
+        &authority.trusted_keys,
+        &authority.kernel_signer,
+        "candidate completion graph declaration",
+    )
+    .map_err(|error| LedgerError::CandidateCompletionAuthorityRejected {
+        reason: format!(
+            "candidate completion could not verify its graph-bound V2 declaration: {error}"
+        ),
+    })?;
+    canonicalize(graph_event.clone()).map_err(|error| {
+        LedgerError::CandidateCompletionAuthorityRejected {
+            reason: format!("candidate completion graph declaration is not canonical: {error}"),
+        }
+    })?;
+    if graph_event.run_id != request.run_id || !tape_event_precedes(&graph_event, dispatch_event) {
+        return candidate_completion_authority_rejected(
+            "candidate completion graph declaration must be a signed earlier event in the exact dispatch run",
+        );
+    }
+    let Payload::WorkflowGraphDeclaredV2(graph) = &graph_event.payload else {
+        return candidate_completion_authority_rejected(
+            "candidate completion graph-bound V4 dispatch must reference a workflow_graph_declared_v2 event",
+        );
+    };
+    let expected_graph_digest = workflow_graph_v2_digest(graph).map_err(|error| {
+        LedgerError::CandidateCompletionAuthorityRejected {
+            reason: format!(
+                "candidate completion could not canonicalize graph-bound V2 declaration: {error}"
+            ),
+        }
+    })?;
+    let body = &dispatch.dispatch_v3.body;
+    if graph.run_id != request.run_id.to_string()
+        || graph.workflow_id != body.workflow_id
+        || graph.workflow_revision != body.workflow_revision
+        || graph.graph_digest != expected_graph_digest
+        || graph.graph_digest != dispatch.workflow_graph_digest
+    {
+        return candidate_completion_authority_rejected(
+            "candidate completion graph-bound V4 dispatch does not exactly bind its signed V2 graph identity and digest",
+        );
+    }
+    let [node] = graph.nodes.as_slice() else {
+        return candidate_completion_authority_rejected(
+            "candidate completion currently supports only singleton graph-bound V4 declarations",
+        );
+    };
+    if graph.max_concurrent != 1 || !node.depends_on.is_empty() {
+        return candidate_completion_authority_rejected(
+            "candidate completion currently supports only dependency-free graph-bound V4 declarations with max_concurrent 1",
+        );
+    }
+    if node.unit_id != body.unit_id
+        || node.execution_role != body.execution_role
+        || dispatch.dispatch_v3.governed_packet_digest.as_deref()
+            != Some(node.governed_packet_digest.as_str())
+    {
+        return candidate_completion_authority_rejected(
+            "candidate completion graph-bound V4 dispatch does not exactly match its singleton V2 graph node",
+        );
+    }
+
+    // This strict prefix check deliberately mirrors the singleton boundary:
+    // before the V4 dispatch replay may have observed only its exact graph
+    // declaration. It rejects prior raw activity brackets, another dispatch,
+    // a second graph, and any other ordinary state that would require the full
+    // replay reducer to interpret. A verified checkpoint is tape-integrity
+    // metadata rather than a workflow transition, so it is allowed here and
+    // its complete chain is re-verified by the evidence closure below. The
+    // target's later action/candidate records are verified separately below.
+    let mut statement =
+        conn.prepare("SELECT id FROM events WHERE run_id = ?1 AND id < ?2 ORDER BY id ASC")?;
+    let prefix_ids = statement
+        .query_map(
+            params![request.run_id.to_string(), dispatch_event.id.to_string()],
+            |row| row.get::<_, String>(0),
+        )?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let mut saw_exact_graph = false;
+    for id in prefix_ids {
+        let event_id = parse_event_id(&id, "candidate completion singleton graph prefix")?;
+        let event = load_verified_promotion_event(
+            conn,
+            event_id,
+            &authority.trusted_keys,
+            &authority.kernel_signer,
+            "candidate completion singleton graph prefix",
+        )
+        .map_err(|error| LedgerError::CandidateCompletionAuthorityRejected {
+            reason: format!(
+                "candidate completion could not verify its singleton graph prefix: {error}"
+            ),
+        })?;
+        canonicalize(event.clone()).map_err(|error| {
+            LedgerError::CandidateCompletionAuthorityRejected {
+                reason: format!(
+                    "candidate completion singleton graph prefix contains a non-canonical event: {error}"
+                ),
+            }
+        })?;
+        if event.kind == EventKind::TapeCheckpoint {
+            continue;
+        }
+        if event.id == graph_event.id {
+            saw_exact_graph = true;
+            continue;
+        }
+        return candidate_completion_authority_rejected(
+            "candidate completion singleton graph-bound V4 admission rejects prior run activity or competing dispatch state",
+        );
+    }
+    if !saw_exact_graph {
+        return candidate_completion_authority_rejected(
+            "candidate completion graph-bound V4 dispatch graph declaration is absent from its tape prefix",
+        );
+    }
+    Ok(graph_event.id)
+}
+
 fn candidate_create_action_id_for(candidate: &CandidateCreatedV2) -> Result<String> {
     if candidate.candidate_id.trim().is_empty()
         || !is_canonical_buildplane_candidate_ref(&candidate.candidate_ref)
@@ -11528,6 +11719,14 @@ fn tape_event_precedes(before: &Event, after: &Event) -> bool {
     before.id.as_uuid() < after.id.as_uuid()
 }
 
+/// The effective terminal lease plus the exact heartbeat records that formed
+/// it. Singleton V4 closure validation must retain those identities so a
+/// second, unrelated heartbeat cannot hide outside the candidate evidence.
+struct EffectiveGovernedCandidateActivityLeaseV1 {
+    expires_at: DateTime<Utc>,
+    heartbeat_event_ids: HashSet<EventId>,
+}
+
 /// Reconstruct the effective lease for a terminal action from its signed
 /// claim and every signed heartbeat that extends that exact claim. The
 /// candidate-completion lane cannot use the mutable heartbeat projection: a
@@ -11546,7 +11745,7 @@ fn effective_governed_candidate_activity_lease_expiry(
     claim_event: &Event,
     claim: &ActivityClaimedV1,
     result_event: &Event,
-) -> Result<DateTime<Utc>> {
+) -> Result<EffectiveGovernedCandidateActivityLeaseV1> {
     let claimed_at = parse_claim_timestamp(&claim.claimed_at).map_err(|_| {
         LedgerError::CandidateCompletionAuthorityRejected {
             reason: "candidate completion activity claim timestamp is not canonical RFC3339 UTC"
@@ -11569,6 +11768,7 @@ fn effective_governed_candidate_activity_lease_expiry(
         }
     })?;
     let mut prior_heartbeat_at = None;
+    let mut heartbeat_event_ids = HashSet::new();
     for heartbeat_event in verified_kernel_events_for_run_kind(
         conn,
         request.run_id,
@@ -11637,8 +11837,12 @@ fn effective_governed_candidate_activity_lease_expiry(
         }
         current_lease_expires_at = next_lease_expires_at;
         prior_heartbeat_at = Some(heartbeat_at);
+        heartbeat_event_ids.insert(heartbeat_event.id);
     }
-    Ok(current_lease_expires_at)
+    Ok(EffectiveGovernedCandidateActivityLeaseV1 {
+        expires_at: current_lease_expires_at,
+        heartbeat_event_ids,
+    })
 }
 
 /// A candidate-completion proof is only valid while its workflow remains in
@@ -11651,6 +11855,7 @@ fn ensure_governed_candidate_completion_lifecycle_is_open(
     request: &GovernedCandidateCompletionRequestV1,
     dispatch_event: &Event,
     dispatch: &DispatchEnvelopeV3,
+    dispatch_envelope_digest: &str,
     candidate_event: &Event,
     candidate: &CandidateCreatedV2,
     receipt_set_event: &Event,
@@ -11689,7 +11894,7 @@ fn ensure_governed_candidate_completion_lifecycle_is_open(
                     && cancellation.unit_id == dispatch.body.unit_id
                     && cancellation.attempt == dispatch.body.attempt
                     && cancellation.dispatch_event_ref == dispatch_event.id
-                    && cancellation.dispatch_envelope_digest == dispatch.envelope_digest =>
+                    && cancellation.dispatch_envelope_digest == dispatch_envelope_digest =>
             {
                 Some("a workflow cancellation was already requested")
             }
@@ -11732,7 +11937,7 @@ fn ensure_governed_candidate_completion_lifecycle_is_open(
                     && prior_set.unit_id == dispatch.body.unit_id
                     && prior_set.attempt == dispatch.body.attempt
                     && prior_set.provenance_ref == dispatch.body.provenance_ref
-                    && prior_set.dispatch_envelope_digest == dispatch.envelope_digest =>
+                    && prior_set.dispatch_envelope_digest == dispatch_envelope_digest =>
             {
                 Some("a different receipt set was already sealed for this workflow attempt")
             }
@@ -11859,7 +12064,7 @@ fn verify_governed_candidate_receipt_set_completeness(
     receipt_set_event: &Event,
     receipt_set: &ActionReceiptSetRecordedV1,
     candidate_create_action_id: &str,
-) -> Result<()> {
+) -> Result<HashSet<EventId>> {
     let expected_policy_digest = governed_dispatch_policy_digest_v1(
         &dispatch.body.acceptance_contract_digest,
     )
@@ -12047,6 +12252,7 @@ fn verify_governed_candidate_receipt_set_completeness(
             .push(event.clone());
     }
 
+    let mut allowed_event_ids = HashSet::new();
     for (action_id, (action_event, action, action_digest)) in &actions {
         if action.action_kind == ActionKindV1::Model {
             return candidate_completion_authority_rejected(
@@ -12118,6 +12324,8 @@ fn verify_governed_candidate_receipt_set_completeness(
                 "candidate completion receipt set action claim does not bind the signed governed request",
             );
         }
+        allowed_event_ids.insert(action_event.id);
+        allowed_event_ids.insert(claim_event.id);
 
         let result_events = results_by_claim
             .get(&claim_event.id)
@@ -12138,7 +12346,7 @@ fn verify_governed_candidate_receipt_set_completeness(
                         .into(),
             }
         })?;
-        let effective_lease_expires_at = effective_governed_candidate_activity_lease_expiry(
+        let effective_lease = effective_governed_candidate_activity_lease_expiry(
             conn,
             request,
             authority,
@@ -12151,6 +12359,7 @@ fn verify_governed_candidate_receipt_set_completeness(
             claim,
             result_event,
         )?;
+        allowed_event_ids.extend(effective_lease.heartbeat_event_ids.iter().cloned());
         if result.run_id != request.run_id
             || result.activity_id != *action_id
             || result.idempotency_key != action.idempotency_key
@@ -12160,13 +12369,14 @@ fn verify_governed_candidate_receipt_set_completeness(
             || result.outcome != ActivityResultOutcomeV1::Succeeded
             || result_recorded_at != result_event.occurred_at
             || result_recorded_at < claimed_at
-            || result_recorded_at >= effective_lease_expires_at
+            || result_recorded_at >= effective_lease.expires_at
             || !tape_event_precedes(claim_event, result_event)
         {
             return candidate_completion_authority_rejected(
                 "candidate completion receipt set action result is not one successful terminal claim result",
             );
         }
+        allowed_event_ids.insert(result_event.id);
 
         let receipt_events = receipts_by_ref
             .get(&entry.action_receipt_ref)
@@ -12227,6 +12437,7 @@ fn verify_governed_candidate_receipt_set_completeness(
                 "candidate completion receipt set receipt does not bind one succeeded terminal action",
             );
         }
+        allowed_event_ids.insert(receipt_event.id);
     }
 
     // Do not let a second receipt for an already-derived action hide outside
@@ -12265,6 +12476,58 @@ fn verify_governed_candidate_receipt_set_completeness(
             );
         }
     }
+    Ok(allowed_event_ids)
+}
+
+/// The singleton V4 lane is intentionally narrower than the general replay
+/// reducer. Once it has admitted exactly one graph declaration and one V4
+/// dispatch, every ordinary tape event must be part of the re-derived action
+/// chain through the immutable candidate. Rejecting rather than approximating
+/// a tail prevents this authority writer from sealing a tape that trusted
+/// replay would later reject for an unsigned legacy activity, a second
+/// dispatch, a graph change, or any other unmodeled transition.
+fn verify_singleton_graph_bound_v4_candidate_completion_closure(
+    conn: &Connection,
+    request: &GovernedCandidateCompletionRequestV1,
+    kernel_signing_key: &SigningKey,
+    kernel_signer: &ActorKeyRef,
+    allowed_event_ids: &HashSet<EventId>,
+) -> Result<()> {
+    let covered = signed_ordinary_events_for_connection(conn, &request.run_id)?;
+    let prefix_roots = tape_prefix_roots(&covered);
+    SqliteStore::verify_governed_checkpoint_chain_for_seal(
+        conn,
+        &request.run_id,
+        &covered,
+        &prefix_roots,
+        kernel_signing_key,
+        kernel_signer,
+    )
+    .map_err(|error| LedgerError::CandidateCompletionAuthorityRejected {
+        reason: format!(
+            "candidate completion singleton graph-bound V4 checkpoint chain is not recoverable: {error}"
+        ),
+    })?;
+
+    for row in events_for_run_for_connection(conn, &request.run_id.to_string())? {
+        let event = row.to_event().map_err(|error| {
+            LedgerError::CandidateCompletionAuthorityRejected {
+                reason: format!(
+                    "candidate completion singleton graph-bound V4 tape contains an unreadable event: {error}"
+                ),
+            }
+        })?;
+        if event.kind == EventKind::TapeCheckpoint {
+            continue;
+        }
+        if !allowed_event_ids.contains(&event.id) {
+            return candidate_completion_authority_rejected(format!(
+                "candidate completion singleton graph-bound V4 tape contains an unmodeled ordinary event {} ({})",
+                event.id,
+                event.kind.as_wire(),
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -12272,6 +12535,9 @@ fn verify_governed_candidate_completion_evidence(
     conn: &Connection,
     request: &GovernedCandidateCompletionRequestV1,
     authority: &GovernedPromotionAuthorityV1,
+    kernel_signing_key: &SigningKey,
+    kernel_signer: &ActorKeyRef,
+    existing_completion_event_id: Option<EventId>,
 ) -> Result<VerifiedGovernedCandidateCompletionEvidence> {
     let dispatch_event = load_verified_promotion_event(
         conn,
@@ -12290,17 +12556,20 @@ fn verify_governed_candidate_completion_evidence(
             reason: "candidate completion requires a signed sealed-V3 or graph-bound V4 dispatch envelope".into(),
         }
     })?;
-    if dispatch_material.is_graph_bound_v4 {
-        // V4 validity depends on tape-global graph declaration, node
-        // scheduling, and retry-context admission. Candidate completion has
-        // not yet reconstructed that reducer state from the signed tape, so
-        // accepting only the nested V3 authority here could seal a candidate
-        // that trusted replay rejects. Until the native verifier ports those
-        // V4 admission checks, graph-bound dispatches must fail closed.
-        return candidate_completion_authority_rejected(
-            "candidate completion does not yet reconstruct graph-bound V4 admission; V4 dispatches are unsupported",
-        );
-    }
+    let singleton_graph_event_id =
+        if let Payload::DispatchEnvelopeV4(graph_bound_dispatch) = &dispatch_event.payload {
+            Some(
+                verify_singleton_graph_bound_v4_candidate_completion_admission(
+                    conn,
+                    request,
+                    authority,
+                    &dispatch_event,
+                    graph_bound_dispatch,
+                )?,
+            )
+        } else {
+            None
+        };
     let dispatch = dispatch_material.dispatch;
     let dispatch_envelope_digest = dispatch_material.lineage_envelope_digest;
     validate_static_governed_candidate_completion_dispatch(&dispatch, authority)?;
@@ -12396,6 +12665,7 @@ fn verify_governed_candidate_completion_evidence(
         request,
         &dispatch_event,
         &dispatch,
+        &dispatch_envelope_digest,
         &candidate_event,
         &candidate,
         &receipt_set_event,
@@ -12406,7 +12676,7 @@ fn verify_governed_candidate_completion_evidence(
     // candidate-create proof below; otherwise a set could omit a pending or
     // failed sibling action and become certifiable here even though trusted
     // replay rejects it.
-    verify_governed_candidate_receipt_set_completeness(
+    let action_evidence_event_ids = verify_governed_candidate_receipt_set_completeness(
         conn,
         request,
         authority,
@@ -12618,7 +12888,7 @@ fn verify_governed_candidate_completion_evidence(
                 .into(),
         }
     })?;
-    let effective_lease_expires_at = effective_governed_candidate_activity_lease_expiry(
+    let effective_lease = effective_governed_candidate_activity_lease_expiry(
         conn,
         request,
         authority,
@@ -12642,7 +12912,7 @@ fn verify_governed_candidate_completion_evidence(
         || result.outcome != ActivityResultOutcomeV1::Succeeded
         || result_recorded_at != result_event.occurred_at
         || result_recorded_at < claimed_at
-        || result_recorded_at >= effective_lease_expires_at
+        || result_recorded_at >= effective_lease.expires_at
         || receipt.result_digest != result.result_digest
         || receipt.result_ref != result.result_ref
         || receipt.evidence_digest != result.evidence_digest
@@ -12703,6 +12973,23 @@ fn verify_governed_candidate_completion_evidence(
                 reason: format!("could not canonicalize candidate completion proof: {error}"),
             }
         })?;
+    if let Some(graph_event_id) = singleton_graph_event_id {
+        let mut allowed_event_ids = action_evidence_event_ids;
+        allowed_event_ids.insert(graph_event_id);
+        allowed_event_ids.insert(dispatch_event.id);
+        allowed_event_ids.insert(receipt_set_event.id);
+        allowed_event_ids.insert(candidate_event.id);
+        if let Some(completion_event_id) = existing_completion_event_id {
+            allowed_event_ids.insert(completion_event_id);
+        }
+        verify_singleton_graph_bound_v4_candidate_completion_closure(
+            conn,
+            request,
+            kernel_signing_key,
+            kernel_signer,
+            &allowed_event_ids,
+        )?;
+    }
     Ok(VerifiedGovernedCandidateCompletionEvidence { completion })
 }
 
@@ -12835,18 +13122,27 @@ fn resolve_existing_governed_candidate_completion(
     stored: &StoredGovernedCandidateCompletion,
     request: &GovernedCandidateCompletionRequestV1,
     authority: &GovernedPromotionAuthorityV1,
+    kernel_signing_key: &SigningKey,
+    kernel_signer: &ActorKeyRef,
 ) -> Result<GovernedCandidateCompletionDispositionV1> {
-    let evidence = verify_governed_candidate_completion_evidence(conn, request, authority)?;
+    let completion_event_id = parse_event_id(
+        &stored.candidate_completion_event_id,
+        "governed_candidate_completions",
+    )?;
+    let evidence = verify_governed_candidate_completion_evidence(
+        conn,
+        request,
+        authority,
+        kernel_signing_key,
+        kernel_signer,
+        Some(completion_event_id),
+    )?;
     if !stored_governed_candidate_completion_matches(stored, request, &evidence.completion) {
         return Err(candidate_completion_reconciliation_required(
             request,
             "candidate-completion projection does not exactly match the re-derived immutable lineage",
         ));
     }
-    let completion_event_id = parse_event_id(
-        &stored.candidate_completion_event_id,
-        "governed_candidate_completions",
-    )?;
     let completion_event = load_verified_promotion_event(
         conn,
         completion_event_id,
