@@ -13,7 +13,10 @@ use bp_ledger::payload::trust_spine::{
     TrustScopeEvidenceV1, TrustTierV1,
 };
 use bp_ledger::EventId;
-use bp_replay::{state::WorkflowInstanceV1, TrustedGovernedRecoverySnapshot};
+use bp_replay::{
+    state::{WorkflowInstanceV1, WorkflowPhaseV1},
+    TrustedGovernedRecoverySnapshot,
+};
 use thiserror::Error;
 
 /// Immutable evidence a protected host may use to construct a reviewer-only
@@ -45,6 +48,8 @@ pub(crate) enum ReviewerSessionResolutionErrorV1 {
     ReviewerDispatchNotGovernedSealedV3,
     #[error("reviewer dispatch has an unsupported execution role")]
     UnsupportedReviewerRole,
+    #[error("reviewer workflow is not active for a new reviewer action")]
+    ReviewerWorkflowNotActive,
     #[error("reviewer dispatch has no sealed action evidence")]
     ReviewerActionEvidenceMissing,
     #[error("reviewer action request reference is not present in its dispatch")]
@@ -99,6 +104,9 @@ pub(crate) fn resolve_reviewer_model_evidence_from_snapshot_v1(
         return Err(ReviewerSessionResolutionErrorV1::RunMismatch);
     }
     validate_reviewer_dispatch(reviewer)?;
+    if reviewer.phase != WorkflowPhaseV1::Dispatched {
+        return Err(ReviewerSessionResolutionErrorV1::ReviewerWorkflowNotActive);
+    }
 
     let action_evidence = reviewer
         .action_evidence

@@ -51,7 +51,8 @@ use bp_ledger::payload::trust_spine::{
     PromotionGitBindingV1, PromotionResultOutcomeV1, PromotionWorktreeSyncStateV1,
     ReviewDecisionV1, ReviewVerdictOutputV1, ReviewVerdictRecordedV2, TrustScopeEvidenceV1,
     TrustTierV1, WorkflowCancellationCauseV1, WorkflowCancellationRequestedV1,
-    MODEL_REQUEST_EVIDENCE_V1_SCHEMA_VERSION, TRUST_SCOPE_EVIDENCE_V1_SCHEMA_VERSION,
+    WorkflowTerminalOutcomeV1, WorkflowTerminalV2, MODEL_REQUEST_EVIDENCE_V1_SCHEMA_VERSION,
+    TRUST_SCOPE_EVIDENCE_V1_SCHEMA_VERSION,
 };
 use bp_ledger::payload::Payload;
 use bp_ledger::signing::{public_key_hash, ActorKeyRef, TrustedPublicKeys};
@@ -2476,11 +2477,12 @@ fn reviewer_session_snapshot_fixture() -> (
     TrustedGovernedRecoverySnapshot,
     ParsedAuthorityBrokerOpenReviewerSessionRequestV1,
 ) {
-    reviewer_session_snapshot_fixture_with_authorization(false)
+    reviewer_session_snapshot_fixture_with_authorization(false, false)
 }
 
 fn reviewer_session_snapshot_fixture_with_authorization(
     authorize_reviewer_action: bool,
+    cancel_reviewer_workflow: bool,
 ) -> (
     TrustedGovernedRecoverySnapshot,
     ParsedAuthorityBrokerOpenReviewerSessionRequestV1,
@@ -2656,6 +2658,78 @@ fn reviewer_session_snapshot_fixture_with_authorization(
                 &CheckpointPolicy::every(1),
             )
             .expect("append checkpointed reviewer-session authorization");
+    } else if cancel_reviewer_workflow {
+        fixture
+            .store
+            .append_signed(&intent_event, &fixture.kernel_key, &fixture.kernel)
+            .expect("append reviewer-session intent before cancellation");
+        let cancellation_at = now + Duration::milliseconds(3);
+        let cancellation = WorkflowCancellationRequestedV1 {
+            run_id: run_id.to_string(),
+            workflow_id: reviewer_dispatch.body.workflow_id.clone(),
+            workflow_revision: reviewer_dispatch.body.workflow_revision.clone(),
+            unit_id: reviewer_dispatch.body.unit_id.clone(),
+            attempt: reviewer_dispatch.body.attempt,
+            dispatch_event_ref: reviewer_dispatch_event.id,
+            dispatch_envelope_digest: reviewer_dispatch.envelope_digest.clone(),
+            cancellation_id: "cancel:reviewer-session-workflow-1".into(),
+            cause: WorkflowCancellationCauseV1::OperatorRequested,
+            timer_fired_event_ref: None,
+            timer_fired_event_digest: None,
+            requested_by: fixture.operator.actor_id.clone(),
+            idempotency_key: "cancel:reviewer-session-workflow-1:1".into(),
+            requested_at: timestamp(cancellation_at),
+        };
+        let cancellation_event = promotion_event(
+            run_id,
+            Some(reviewer_dispatch_event.id),
+            EventKind::WorkflowCancellationRequestedV1,
+            cancellation_at,
+            Payload::WorkflowCancellationRequestedV1(cancellation),
+        );
+        fixture
+            .store
+            .append_signed(
+                &cancellation_event,
+                &fixture.operator_key,
+                &fixture.operator,
+            )
+            .expect("append reviewer-session cancellation");
+        let terminal_at = now + Duration::milliseconds(4);
+        let terminal = WorkflowTerminalV2 {
+            workflow_id: reviewer_dispatch.body.workflow_id.clone(),
+            workflow_revision: reviewer_dispatch.body.workflow_revision.clone(),
+            unit_id: reviewer_dispatch.body.unit_id.clone(),
+            attempt: reviewer_dispatch.body.attempt,
+            outcome: WorkflowTerminalOutcomeV1::Cancelled,
+            candidate_digest: None,
+            promotion_result_ref: None,
+            reconciliation_resolution_ref: None,
+            cancellation_request_event_ref: Some(cancellation_event.id),
+            cancellation_request_event_digest: Some(
+                canonical_event_hash(&cancellation_event)
+                    .expect("hash reviewer-session cancellation"),
+            ),
+            reason: Some("operator cancelled reviewer session".into()),
+            idempotency_key: "workflow-terminal:reviewer-session-workflow-1:1".into(),
+            completed_at: timestamp(terminal_at),
+        };
+        let terminal_event = promotion_event(
+            run_id,
+            Some(cancellation_event.id),
+            EventKind::WorkflowTerminalV2,
+            terminal_at,
+            Payload::WorkflowTerminalV2(terminal),
+        );
+        fixture
+            .store
+            .append_signed_with_checkpoint(
+                &terminal_event,
+                &fixture.kernel_key,
+                &fixture.kernel,
+                &CheckpointPolicy::every(1),
+            )
+            .expect("append checkpointed reviewer-session cancellation terminal");
     } else {
         fixture
             .store
@@ -2741,11 +2815,22 @@ fn reviewer_session_resolver_fails_closed_for_substituted_or_already_advanced_ac
     );
 
     let (advanced_snapshot, advanced_request) =
-        reviewer_session_snapshot_fixture_with_authorization(true);
+        reviewer_session_snapshot_fixture_with_authorization(true, false);
     assert_eq!(
         resolve_reviewer_model_evidence_from_snapshot_v1(&advanced_snapshot, &advanced_request)
             .expect_err("an authorized model action must be reconciled, never reopened"),
         ReviewerSessionResolutionErrorV1::ReviewerActionAlreadyAdvanced,
+    );
+}
+
+#[test]
+fn reviewer_session_resolver_rejects_an_unclaimed_action_after_workflow_cancellation() {
+    let (snapshot, request) = reviewer_session_snapshot_fixture_with_authorization(false, true);
+
+    assert_eq!(
+        resolve_reviewer_model_evidence_from_snapshot_v1(&snapshot, &request)
+            .expect_err("a cancelled workflow must not reopen an unclaimed reviewer action"),
+        ReviewerSessionResolutionErrorV1::ReviewerWorkflowNotActive,
     );
 }
 
