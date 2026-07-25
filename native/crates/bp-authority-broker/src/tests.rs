@@ -1,3 +1,4 @@
+use super::admission_protocol::ParsedAuthorityBrokerOpenReviewerSessionRequestV1;
 use super::confinement::{BrokerHostConfinementErrorV1, BrokerHostConfinementPolicyV1};
 use super::dispatch_admission::{
     BrokerDispatchAdmissionAuthority, BrokerDispatchAdmissionDisposition, DispatchAdmissionBackend,
@@ -15,6 +16,9 @@ use super::promotion_execution::{
 use super::promotion_git::{
     PromotionCapabilityError, PromotionGitError, PromotionGitGateway, PromotionGitOutcome,
     TestFixedGitRunner, TestGitOperation, TestGitOutput, VerifiedPromotionCapability,
+};
+use super::reviewer_session::{
+    resolve_reviewer_model_evidence_from_snapshot_v1, ReviewerSessionResolutionErrorV1,
 };
 use super::{
     AuthorityBackend, AuthorityBackendError, AuthorityGrant, BrokerModelActionRequest,
@@ -61,7 +65,7 @@ use bp_ledger::{EventId, LedgerError, RunId};
 use bp_replay::{
     engine::EngineError, reader::ReaderError,
     trusted_recovery::TRUSTED_GOVERNED_RECOVERY_MAX_EVENTS_V1, TrustSpineSignerRole,
-    TrustedGovernedRecoveryError, TrustedReplayAuthorities,
+    TrustedGovernedRecoveryError, TrustedGovernedRecoverySnapshot, TrustedReplayAuthorities,
 };
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use ed25519_dalek::SigningKey;
@@ -2466,6 +2470,283 @@ fn promotion_replay_authorities(fixture: &PromotionFixture) -> TrustedReplayAuth
     authorities.allow_signer(TrustSpineSignerRole::Reviewer, fixture.reviewer.clone());
     authorities.allow_signer(TrustSpineSignerRole::Operator, fixture.operator.clone());
     authorities
+}
+
+fn reviewer_session_snapshot_fixture() -> (
+    TrustedGovernedRecoverySnapshot,
+    ParsedAuthorityBrokerOpenReviewerSessionRequestV1,
+) {
+    reviewer_session_snapshot_fixture_with_authorization(false)
+}
+
+fn reviewer_session_snapshot_fixture_with_authorization(
+    authorize_reviewer_action: bool,
+) -> (
+    TrustedGovernedRecoverySnapshot,
+    ParsedAuthorityBrokerOpenReviewerSessionRequestV1,
+) {
+    let fixture = promotion_fixture();
+    let run_id = fixture.request.run_id;
+    let candidate_event = fixture
+        .store
+        .events_for_run(&run_id.to_string())
+        .expect("read immutable candidate event")
+        .into_iter()
+        .find(|event| event.id == fixture.request.candidate_created_event_id.to_string())
+        .expect("promotion fixture records one immutable candidate")
+        .to_event()
+        .expect("decode immutable candidate event");
+    let candidate_event_id = candidate_event.id;
+    let Payload::CandidateCreatedV2(candidate) = candidate_event.payload else {
+        panic!("promotion fixture candidate id must name a CandidateCreatedV2 event");
+    };
+
+    let now = DateTime::parse_from_rfc3339(&timestamp(Utc::now()))
+        .expect("round reviewer-session fixture timestamp to canonical milliseconds")
+        .with_timezone(&Utc);
+    let mut reviewer_dispatch = promotion_reviewer_dispatch(now, DIGEST_E);
+    reviewer_dispatch.body.workflow_id = "reviewer-session-workflow-1".into();
+    reviewer_dispatch.body.unit_id = "reviewer-session-unit-1".into();
+    reviewer_dispatch.body.idempotency_key =
+        "dispatch:reviewer-session-workflow-1:reviewer-session-unit-1:1".into();
+    reviewer_dispatch.envelope_digest = dispatch_envelope_v3_body_digest(
+        &reviewer_dispatch.body,
+        reviewer_dispatch.action_evidence_version,
+        &reviewer_dispatch.repository_binding_digest,
+        &reviewer_dispatch.ledger_authority_realm_digest,
+        reviewer_dispatch.governed_packet_digest.as_deref(),
+    )
+    .expect("hash governed reviewer-session dispatch");
+    let reviewer_dispatch_event = promotion_event(
+        run_id,
+        Some(fixture.request.acceptance_event_id),
+        EventKind::DispatchEnvelopeV3,
+        now,
+        Payload::DispatchEnvelopeV3(reviewer_dispatch.clone()),
+    );
+    fixture
+        .store
+        .append_signed(
+            &reviewer_dispatch_event,
+            &fixture.kernel_key,
+            &fixture.kernel,
+        )
+        .expect("append governed reviewer-session dispatch");
+
+    let action_id = "reviewer-session-model-action";
+    let action_request = ActionRequestedV2 {
+        run_id: run_id.to_string(),
+        workflow_id: reviewer_dispatch.body.workflow_id.clone(),
+        unit_id: reviewer_dispatch.body.unit_id.clone(),
+        attempt: reviewer_dispatch.body.attempt,
+        provenance_ref: reviewer_dispatch.body.provenance_ref.clone(),
+        action_id: action_id.into(),
+        idempotency_key: format!("action:{action_id}"),
+        action_kind: ActionKindV1::Model,
+        canonical_input_digest: DIGEST_A.into(),
+        canonical_input_ref: format!("cas:input:{action_id}"),
+        dispatch_envelope_digest: reviewer_dispatch.envelope_digest.clone(),
+        repository_binding_digest: reviewer_dispatch.repository_binding_digest.clone(),
+        ledger_authority_realm_digest: reviewer_dispatch.ledger_authority_realm_digest.clone(),
+        governed_packet_digest: reviewer_dispatch.governed_packet_digest.clone(),
+        capability_bundle_digest: reviewer_dispatch.body.capability_bundle_digest.clone(),
+        policy_digest: governed_dispatch_policy_digest_v1(
+            &reviewer_dispatch.body.acceptance_contract_digest,
+        )
+        .expect("derive reviewer-session action policy"),
+        context_manifest_digest: reviewer_dispatch.body.context_manifest_digest.clone(),
+        worker_manifest_digest: reviewer_dispatch.body.worker_manifest_digest.clone(),
+        sandbox_profile_digest: reviewer_dispatch.body.sandbox_profile_digest.clone(),
+        authority_actor: fixture.kernel.actor_id.clone(),
+        execution_role: ExecutionRoleV1::Reviewer,
+        requested_at: timestamp(now + Duration::milliseconds(1)),
+    };
+    let action_request_event = promotion_event(
+        run_id,
+        Some(reviewer_dispatch_event.id),
+        EventKind::ActionRequestedV2,
+        now + Duration::milliseconds(1),
+        Payload::ActionRequestedV2(action_request.clone()),
+    );
+    fixture
+        .store
+        .append_signed(&action_request_event, &fixture.kernel_key, &fixture.kernel)
+        .expect("append unclaimed reviewer-session model request");
+
+    let (candidate_view, candidate_view_digest, _) =
+        promotion_review_output(&candidate, &reviewer_dispatch);
+    let candidate_binding = ModelActionCandidateBindingV1 {
+        candidate_created_event_ref: candidate_event_id,
+        candidate_digest: candidate.candidate_digest.clone(),
+        candidate_commit_sha: candidate.candidate_commit_sha.clone(),
+        candidate_view_ref: format!("cas:{candidate_view_digest}"),
+        candidate_view_digest,
+        candidate_view,
+    };
+    let intent_at = now + Duration::milliseconds(2);
+    let mut intent = ModelActionIntentV1 {
+        run_id: run_id.to_string(),
+        workflow_id: reviewer_dispatch.body.workflow_id.clone(),
+        unit_id: reviewer_dispatch.body.unit_id.clone(),
+        attempt: reviewer_dispatch.body.attempt,
+        provenance_ref: reviewer_dispatch.body.provenance_ref.clone(),
+        action_id: action_id.into(),
+        idempotency_key: action_request.idempotency_key.clone(),
+        dispatch_event_ref: reviewer_dispatch_event.id,
+        dispatch_envelope_digest: reviewer_dispatch.envelope_digest.clone(),
+        action_request_event_ref: action_request_event.id,
+        action_request_digest: action_requested_v2_digest(&action_request)
+            .expect("hash reviewer-session action request"),
+        canonical_input_ref: action_request.canonical_input_ref.clone(),
+        canonical_input_digest: action_request.canonical_input_digest.clone(),
+        model_request_evidence: ModelRequestEvidenceV1 {
+            schema_version: MODEL_REQUEST_EVIDENCE_V1_SCHEMA_VERSION,
+            cas_ref: format!("cas:{DIGEST_B}"),
+            digest: DIGEST_B.into(),
+        },
+        trust_scope_evidence: TrustScopeEvidenceV1 {
+            schema_version: TRUST_SCOPE_EVIDENCE_V1_SCHEMA_VERSION,
+            cas_ref: format!("cas:{DIGEST_C}"),
+            digest: DIGEST_C.into(),
+        },
+        candidate_binding: Some(candidate_binding),
+        intent_actor: fixture.kernel.actor_id.clone(),
+        intended_at: timestamp(intent_at),
+        intent_digest: String::new(),
+    };
+    intent.intent_digest = model_action_intent_v1_digest(&intent).expect("hash reviewer intent");
+    let intent_event = promotion_event(
+        run_id,
+        Some(action_request_event.id),
+        EventKind::ModelActionIntentV1,
+        intent_at,
+        Payload::ModelActionIntentV1(intent.clone()),
+    );
+    if authorize_reviewer_action {
+        fixture
+            .store
+            .append_signed(&intent_event, &fixture.kernel_key, &fixture.kernel)
+            .expect("append reviewer-session intent before authorization");
+        let mut authorization = ModelActionAuthorizedV2 {
+            intent_event_ref: intent_event.id,
+            intent_digest: intent.intent_digest.clone(),
+            model_request_evidence: intent.model_request_evidence.clone(),
+            trust_scope_evidence: intent.trust_scope_evidence.clone(),
+            candidate_binding: intent.candidate_binding.clone(),
+            authorization_actor: fixture.kernel.actor_id.clone(),
+            expires_at: timestamp(now + Duration::seconds(30)),
+            authorization_ref: "authorization:reviewer-session-model-action".into(),
+            authorization_digest: String::new(),
+        };
+        authorization.authorization_digest = model_action_authorized_v2_digest(&authorization)
+            .expect("hash reviewer-session authorization");
+        let authorization_event = promotion_event(
+            run_id,
+            Some(intent_event.id),
+            EventKind::ModelActionAuthorizedV2,
+            now + Duration::milliseconds(3),
+            Payload::ModelActionAuthorizedV2(authorization),
+        );
+        fixture
+            .store
+            .append_signed_with_checkpoint(
+                &authorization_event,
+                &fixture.kernel_key,
+                &fixture.kernel,
+                &CheckpointPolicy::every(1),
+            )
+            .expect("append checkpointed reviewer-session authorization");
+    } else {
+        fixture
+            .store
+            .append_signed_with_checkpoint(
+                &intent_event,
+                &fixture.kernel_key,
+                &fixture.kernel,
+                &CheckpointPolicy::every(1),
+            )
+            .expect("append checkpointed unclaimed reviewer-session intent");
+    }
+
+    let replay_authorities = promotion_replay_authorities(&fixture);
+    let snapshot = TrustedGovernedRecoverySnapshot::open_bounded_v1(
+        &run_id.to_string(),
+        fixture._temp.path().join("events.db"),
+        &replay_authorities,
+        &fixture.kernel,
+    )
+    .expect("open a complete trusted reviewer-session snapshot");
+    let request = ParsedAuthorityBrokerOpenReviewerSessionRequestV1 {
+        run_id: run_id.to_string(),
+        reviewer_dispatch_event_ref: reviewer_dispatch_event.id.to_string(),
+        reviewer_action_request_event_ref: action_request_event.id.to_string(),
+    };
+    (snapshot, request)
+}
+
+#[test]
+fn reviewer_session_resolver_returns_only_exact_unclaimed_reviewer_evidence() {
+    let (snapshot, request) = reviewer_session_snapshot_fixture();
+
+    let evidence = resolve_reviewer_model_evidence_from_snapshot_v1(&snapshot, &request)
+        .expect("an unclaimed governed reviewer action has exact immutable evidence");
+
+    assert_eq!(evidence.run_id, request.run_id);
+    assert_eq!(
+        evidence.reviewer_dispatch_event_ref.to_string(),
+        request.reviewer_dispatch_event_ref
+    );
+    assert_eq!(
+        evidence.reviewer_action_request_event_ref.to_string(),
+        request.reviewer_action_request_event_ref
+    );
+    assert_eq!(evidence.execution_role, ExecutionRoleV1::Reviewer);
+    assert_eq!(evidence.candidate.candidate_digest, DIGEST_A);
+    assert!(evidence.candidate.candidate_view.read_only);
+    assert!(evidence.candidate.candidate_view.network_disabled);
+}
+
+#[test]
+fn reviewer_session_resolver_fails_closed_for_substituted_or_already_advanced_actions() {
+    let (snapshot, request) = reviewer_session_snapshot_fixture();
+
+    let substituted_run = ParsedAuthorityBrokerOpenReviewerSessionRequestV1 {
+        run_id: RunId::new().to_string(),
+        ..request.clone()
+    };
+    assert_eq!(
+        resolve_reviewer_model_evidence_from_snapshot_v1(&snapshot, &substituted_run)
+            .expect_err("a request from another run must not resolve"),
+        ReviewerSessionResolutionErrorV1::RunMismatch,
+    );
+
+    let substituted_dispatch = ParsedAuthorityBrokerOpenReviewerSessionRequestV1 {
+        reviewer_dispatch_event_ref: EventId::new().to_string(),
+        ..request.clone()
+    };
+    assert_eq!(
+        resolve_reviewer_model_evidence_from_snapshot_v1(&snapshot, &substituted_dispatch)
+            .expect_err("a substituted reviewer dispatch must not resolve"),
+        ReviewerSessionResolutionErrorV1::ReviewerDispatchNotFound,
+    );
+
+    let substituted_action = ParsedAuthorityBrokerOpenReviewerSessionRequestV1 {
+        reviewer_action_request_event_ref: EventId::new().to_string(),
+        ..request
+    };
+    assert_eq!(
+        resolve_reviewer_model_evidence_from_snapshot_v1(&snapshot, &substituted_action)
+            .expect_err("a substituted reviewer action must not resolve"),
+        ReviewerSessionResolutionErrorV1::ReviewerActionNotFound,
+    );
+
+    let (advanced_snapshot, advanced_request) =
+        reviewer_session_snapshot_fixture_with_authorization(true);
+    assert_eq!(
+        resolve_reviewer_model_evidence_from_snapshot_v1(&advanced_snapshot, &advanced_request)
+            .expect_err("an authorized model action must be reconciled, never reopened"),
+        ReviewerSessionResolutionErrorV1::ReviewerActionAlreadyAdvanced,
+    );
 }
 
 fn promotion_event_count(store: &SqliteStore, run_id: RunId, kind: &str) -> usize {

@@ -41,6 +41,8 @@ mod promotion_git;
 #[cfg(target_os = "linux")]
 #[allow(dead_code)]
 mod protocol;
+#[allow(dead_code)]
+mod reviewer_session;
 
 /// The complete request surface accepted from a run-bound broker controller.
 ///
