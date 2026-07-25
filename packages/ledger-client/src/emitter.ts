@@ -30,6 +30,7 @@ const CALLER_SUPPLIED_TRUST_SPINE_KINDS = new Set<string>([
 	"dispatch_envelope_v3",
 	"dispatch_envelope_v4",
 	"dispatch_envelope_v5",
+	"governed_dispatch_v5_admission_recorded_v1",
 	"context_manifest_declared_v1",
 	"worker_manifest_declared_v1",
 	"sandbox_profile_declared_v1",

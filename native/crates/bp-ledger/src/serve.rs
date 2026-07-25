@@ -243,6 +243,7 @@ fn reject_caller_supplied_authority_event(event: &Event, signed_append: bool) ->
             | EventKind::DispatchEnvelopeV3
             | EventKind::DispatchEnvelopeV4
             | EventKind::DispatchEnvelopeV5
+            | EventKind::GovernedDispatchV5AdmissionRecordedV1
             | EventKind::ContextManifestDeclaredV1
             | EventKind::WorkerManifestDeclaredV1
             | EventKind::SandboxProfileDeclaredV1
@@ -1501,6 +1502,17 @@ mod control_message_tests {
 
         let error = reject_caller_supplied_authority_event(&event, false)
             .expect_err("legacy generic ingest must not sign authority events");
+        assert!(matches!(
+            error,
+            LedgerError::CallerSuppliedTrustSpineEvent { .. }
+        ));
+
+        let v5_admission_receipt_kind_event = crate::event::Event {
+            kind: EventKind::GovernedDispatchV5AdmissionRecordedV1,
+            ..event.clone()
+        };
+        let error = reject_caller_supplied_authority_event(&v5_admission_receipt_kind_event, false)
+            .expect_err("generic ingest must not mint a V5 admission receipt");
         assert!(matches!(
             error,
             LedgerError::CallerSuppliedTrustSpineEvent { .. }

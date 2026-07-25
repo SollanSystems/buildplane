@@ -12,9 +12,10 @@ use bp_ledger::payload::trust_spine::{
     ContextManifestContentV1, ContextManifestDeclaredV1, ContextManifestEntryKindV1,
     ContextManifestEntryV1, ContextTaintV1, ContextTrustLevelV1, DispatchBudgetV1,
     DispatchEnvelopeBodyV2, DispatchEnvelopeV3, DispatchEnvelopeV4, DispatchEnvelopeV5,
-    ExecutionRoleV1, SandboxProfileContentV1, SandboxProfileDeclaredV1, SandboxRuntimeV1,
-    TrustTierV1, WorkerHarnessV1, WorkerManifestContentV1, WorkerManifestDeclaredV1,
-    WorkerProviderV1, WorkflowGraphDeclaredV2, WorkflowGraphNodeV2,
+    ExecutionRoleV1, GovernedDispatchV5AdmissionRecordedV1, SandboxProfileContentV1,
+    SandboxProfileDeclaredV1, SandboxRuntimeV1, TrustTierV1, WorkerHarnessV1,
+    WorkerManifestContentV1, WorkerManifestDeclaredV1, WorkerProviderV1, WorkflowGraphDeclaredV2,
+    WorkflowGraphNodeV2,
 };
 use bp_ledger::payload::Payload;
 use bp_ledger::signing::{public_key_hash, ActorKeyRef, TrustedPublicKeys};
@@ -602,6 +603,53 @@ fn v3_and_v4_dispatches_remain_compatible_without_v5_manifest_declarations() {
         .expect("V4 dispatch still projects without a V5 declaration");
     assert_eq!(v4_workflow.dispatch.dispatch_version, 4);
     assert!(v4_workflow.manifest_declarations.is_none());
+}
+
+#[test]
+fn v5_protected_host_admission_receipt_is_replay_evidence_not_execution_authority() {
+    let fixture = v5_fixture(1, None);
+    let Payload::DispatchEnvelopeV5(dispatch) = &fixture.dispatch.payload else {
+        unreachable!("V5 fixture dispatch event has the expected payload")
+    };
+    let mut state = ReplayState::default();
+    apply_legacy_projection_unchecked(&mut state, &fixture.graph);
+    apply_manifest_declarations(&mut state, &fixture);
+    apply_legacy_projection_unchecked(&mut state, &fixture.dispatch);
+    let before = state.clone();
+
+    let receipt_event = Event {
+        id: EventId::new(),
+        run_id: fixture.dispatch.run_id,
+        parent_event_id: Some(fixture.dispatch.id),
+        schema_version: Event::CURRENT_SCHEMA_VERSION,
+        kind: EventKind::GovernedDispatchV5AdmissionRecordedV1,
+        occurred_at: Utc::now(),
+        payload: Payload::GovernedDispatchV5AdmissionRecordedV1(
+            GovernedDispatchV5AdmissionRecordedV1 {
+                run_id: fixture.dispatch.run_id.to_string(),
+                source_dispatch_event_ref: fixture.dispatch.id,
+                source_dispatch_event_digest: digest('a'),
+                dispatch_envelope_digest: dispatch.envelope_digest.clone(),
+                witness_evidence_digest: digest('b'),
+                semantic_identity_digest: digest('c'),
+                idempotency_key: dispatch
+                    .dispatch_v4
+                    .dispatch_v3
+                    .body
+                    .idempotency_key
+                    .clone(),
+                ledger_authority_realm_digest: digest('d'),
+                admitted_at: "2026-07-25T00:02:00Z".into(),
+            },
+        ),
+    };
+
+    apply_legacy_projection_unchecked(&mut state, &receipt_event);
+
+    assert_eq!(
+        state, before,
+        "a V5 protected-host receipt must not create executable workflow state or alter prior projection"
+    );
 }
 
 #[test]

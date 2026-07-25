@@ -706,6 +706,19 @@
 		}
 	},
 	{
+		"GovernedDispatchV5AdmissionRecordedV1": {
+			"admitted_at": "2026-07-25T00:00:00Z",
+			"dispatch_envelope_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			"idempotency_key": "v5-admission:workflow-fixture:unit-fixture:1",
+			"ledger_authority_realm_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+			"run_id": "01919000-0000-7000-8000-0000000000ff",
+			"semantic_identity_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+			"source_dispatch_event_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			"source_dispatch_event_ref": "01919000-0000-7000-8000-000000000074",
+			"witness_evidence_digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+		}
+	},
+	{
 		"ActivityClaimedV1": {
 			"action_kind": "process",
 			"action_request_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",

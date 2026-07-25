@@ -111,10 +111,14 @@ pub(crate) fn apply_with_verified_signer(
         Payload::UnitFailedV1(p) => apply_unit_failed(state, event, p),
         Payload::UnitCancelledV1(p) => apply_unit_cancelled(state, event, p),
         Payload::GitCheckpointV1(p) => apply_git_checkpoint(state, event, p),
-		// Admission and release campaign evidence are authoritative tape metadata,
-		// not workflow-state transitions. They remain available to verified
-		// recovery/query paths without changing the reducer projection.
-        Payload::RunAdmissionRecordedV1(_) | Payload::ReleaseEvaluationEvidenceV1(_) => {}
+        // Admission and release campaign evidence are authoritative tape metadata,
+        // not workflow-state transitions. They remain available to verified
+        // recovery/query paths without changing the reducer projection. The V5
+        // protected-host receipt is likewise recovery evidence only: no V5
+        // effect, candidate, or promotion path may be opened by replaying it.
+        Payload::RunAdmissionRecordedV1(_)
+        | Payload::ReleaseEvaluationEvidenceV1(_)
+        | Payload::GovernedDispatchV5AdmissionRecordedV1(_) => {}
         Payload::PlanAdmittedV1(p) => apply_plan_admitted(state, event, p),
         Payload::PlanReceiptRecordedV1(p) => apply_plan_receipt(state, event, p),
         Payload::ActivityStartedV1(p) => apply_activity_started(state, event, p),

@@ -33,13 +33,13 @@ use crate::payload::trust_spine::{
     ActionReceiptSetRecordedV1, ActionRequestedV2, CandidateAcceptanceOutcomeV1,
     CandidateAcceptanceRecordedV1, CandidateCompletionRecordedV1, CandidateCreatedV2, CommitModeV1,
     ContextManifestDeclaredV1, DispatchEnvelopeV3, DispatchEnvelopeV4, DispatchEnvelopeV5,
-    ExecutionRoleV1, ModelActionAuthorizedV1, ModelActionAuthorizedV2, ModelActionIntentV1,
-    ModelRequestEvidenceV1, PromotionApprovalRequestedV1, PromotionDecisionKindV1,
-    PromotionDecisionRecordedV1, PromotionExecutionClaimedV1, PromotionExecutionLeaseBindingV1,
-    PromotionGitBindingV1, PromotionResultOutcomeV1, PromotionResultRecordedV1,
-    PromotionWorktreeSyncStateV1, ReviewDecisionV1, ReviewVerdictRecordedV2,
-    SandboxProfileDeclaredV1, TrustScopeEvidenceV1, TrustTierV1, WorkerManifestDeclaredV1,
-    WorkflowGraphDeclaredV2,
+    ExecutionRoleV1, GovernedDispatchV5AdmissionRecordedV1, ModelActionAuthorizedV1,
+    ModelActionAuthorizedV2, ModelActionIntentV1, ModelRequestEvidenceV1,
+    PromotionApprovalRequestedV1, PromotionDecisionKindV1, PromotionDecisionRecordedV1,
+    PromotionExecutionClaimedV1, PromotionExecutionLeaseBindingV1, PromotionGitBindingV1,
+    PromotionResultOutcomeV1, PromotionResultRecordedV1, PromotionWorktreeSyncStateV1,
+    ReviewDecisionV1, ReviewVerdictRecordedV2, SandboxProfileDeclaredV1, TrustScopeEvidenceV1,
+    TrustTierV1, WorkerManifestDeclaredV1, WorkflowGraphDeclaredV2,
 };
 use crate::payload::Payload;
 use crate::signing::{
@@ -306,6 +306,87 @@ impl GovernedDispatchAdmissionAuthorityV1 {
     }
 }
 
+/// Three independently configured protected identities for a V5 admission
+/// receipt. The source-dispatch signer can prove only the pre-existing V5
+/// envelope; a distinct host admission signer can record one receipt, and a
+/// third identity must seal the resulting complete tape prefix.
+///
+/// This authority is deliberately narrower than any effect authority. A
+/// sealed V5 admission record is recovery evidence only until a future,
+/// separately designed V5 action plane explicitly consumes it.
+#[derive(Clone, Debug)]
+pub struct GovernedDispatchV5AdmissionAuthorityV1 {
+    trusted_keys: TrustedPublicKeys,
+    source_dispatch_signer: ActorKeyRef,
+    admission_record_signer: ActorKeyRef,
+    checkpoint_signer: ActorKeyRef,
+    ledger_authority_realm_digest: String,
+}
+
+impl GovernedDispatchV5AdmissionAuthorityV1 {
+    /// Construct the narrowly scoped authority for one protected V5
+    /// admission realm. No identity or public key may serve more than one
+    /// role, preventing a source dispatch issuer from self-admitting or
+    /// self-sealing its own V5 envelope.
+    pub fn new_governed_realm(
+        trusted_keys: TrustedPublicKeys,
+        source_dispatch_signer: ActorKeyRef,
+        admission_record_signer: ActorKeyRef,
+        checkpoint_signer: ActorKeyRef,
+        ledger_authority_realm_digest: String,
+    ) -> Result<Self> {
+        if !is_canonical_sha256_digest(&ledger_authority_realm_digest) {
+            return governed_dispatch_admission_authority_rejected(
+                "governed V5 admission authority realm digest must be canonical sha256",
+            );
+        }
+
+        let mut actor_ids = HashSet::new();
+        let mut signer_identities = HashSet::new();
+        let mut public_key_hashes = HashSet::new();
+        for (label, signer) in [
+            ("source_dispatch_signer", &source_dispatch_signer),
+            ("admission_record_signer", &admission_record_signer),
+            ("checkpoint_signer", &checkpoint_signer),
+        ] {
+            validate_governed_dispatch_admission_trusted_actor(label, signer)?;
+            if trusted_keys.public_key_for(signer).is_none() {
+                return governed_dispatch_admission_authority_rejected(format!(
+                    "{label} does not have a configured trusted public key"
+                ));
+            }
+            if !actor_ids.insert(signer.actor_id.clone()) {
+                return governed_dispatch_admission_authority_rejected(
+                    "governed V5 source-dispatch, admission-record, and checkpoint authorities must use distinct actor identities",
+                );
+            }
+            if !signer_identities.insert(signer_identity_key(signer)) {
+                return governed_dispatch_admission_authority_rejected(
+                    "governed V5 source-dispatch, admission-record, and checkpoint authorities must use distinct signer identities",
+                );
+            }
+            let public_key_hash = signer
+                .public_key_hash
+                .as_ref()
+                .expect("V5 admission trusted actor was validated")
+                .clone();
+            if !public_key_hashes.insert(public_key_hash) {
+                return governed_dispatch_admission_authority_rejected(
+                    "governed V5 source-dispatch, admission-record, and checkpoint authorities must use distinct public keys",
+                );
+            }
+        }
+
+        Ok(Self {
+            trusted_keys,
+            source_dispatch_signer,
+            admission_record_signer,
+            checkpoint_signer,
+            ledger_authority_realm_digest,
+        })
+    }
+}
+
 /// Closed native request for a write-ahead activity reservation. All authority
 /// evidence is referenced by event id and re-derived from the signed tape;
 /// callers never provide an authority assertion or digest to be trusted.
@@ -447,6 +528,24 @@ pub struct GovernedDispatchAdmissionRequestV1 {
 pub struct GovernedDispatchAdmissionSealRequestV1 {
     pub run_id: RunId,
     pub dispatch_event_id: EventId,
+}
+
+/// Closed protected-host request to record a V5 admission receipt. Callers
+/// name only an already signed V5 dispatch event; every nested graph and
+/// manifest witness is re-derived inside the immediate ledger transaction.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GovernedDispatchV5AdmissionRequestV1 {
+    pub run_id: RunId,
+    pub dispatch_event_id: EventId,
+}
+
+/// Closed protected-host request to seal an already-recorded V5 admission.
+/// The admission receipt, source dispatch, complete signed prefix, and
+/// checkpoint coverage are all re-derived by the ledger.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GovernedDispatchV5AdmissionSealRequestV1 {
+    pub run_id: RunId,
+    pub admission_event_id: EventId,
 }
 
 /// Closed, observation-only read of one already-persisted manifest-bound V5
@@ -617,6 +716,36 @@ pub enum GovernedDispatchAdmissionDispositionV1 {
     Sealed {
         dispatch_event_id: EventId,
         dispatch_event_digest: String,
+        semantic_identity_digest: String,
+        idempotency_key: String,
+        checkpoint_event_id: EventId,
+        checkpoint_event_digest: String,
+    },
+}
+
+/// Durable state of a protected V5 admission record. Both variants are
+/// non-effect evidence: V5 remains intentionally absent from
+/// `dispatch_authority_material()` and cannot claim activities, create
+/// candidates, promote, or otherwise mutate a target branch in this slice.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GovernedDispatchV5AdmissionDispositionV1 {
+    AwaitingCheckpoint {
+        source_dispatch_event_id: EventId,
+        source_dispatch_event_digest: String,
+        admission_event_id: EventId,
+        admission_event_digest: String,
+        v5_envelope_digest: String,
+        witness_evidence_digest: String,
+        semantic_identity_digest: String,
+        idempotency_key: String,
+    },
+    Sealed {
+        source_dispatch_event_id: EventId,
+        source_dispatch_event_digest: String,
+        admission_event_id: EventId,
+        admission_event_digest: String,
+        v5_envelope_digest: String,
+        witness_evidence_digest: String,
         semantic_identity_digest: String,
         idempotency_key: String,
         checkpoint_event_id: EventId,
@@ -1591,6 +1720,130 @@ impl SqliteStore {
                     SELECT RAISE(ABORT, 'governed V5 dispatch observations are immutable: DELETE forbidden');
                 END;
 
+            -- Broker-private projection for one protected-host V5 admission
+            -- receipt. This is intentionally distinct from the observation
+            -- shadow: it is signed by a separately configured admission
+            -- identity and may advance once when a third checkpoint identity
+            -- seals the complete signed prefix. It is still not V5 effect
+            -- authority; no claim/candidate/promotion path consumes it here.
+            CREATE TABLE IF NOT EXISTS governed_dispatch_v5_admissions (
+                run_id                              TEXT NOT NULL,
+                idempotency_key                     TEXT NOT NULL,
+                workflow_id                         TEXT NOT NULL,
+                workflow_revision                   TEXT NOT NULL,
+                unit_id                             TEXT NOT NULL,
+                attempt                             INTEGER NOT NULL CHECK(attempt > 0),
+                semantic_identity_digest            TEXT NOT NULL,
+                source_dispatch_event_id            TEXT NOT NULL UNIQUE,
+                source_dispatch_event_digest        TEXT NOT NULL,
+                v5_envelope_digest                  TEXT NOT NULL,
+                v4_envelope_digest                  TEXT NOT NULL,
+                v4_graph_declaration_event_id       TEXT NOT NULL,
+                v4_graph_declaration_event_digest   TEXT NOT NULL,
+                v4_graph_digest                     TEXT NOT NULL,
+                context_manifest_event_id           TEXT NOT NULL,
+                context_manifest_event_digest       TEXT NOT NULL,
+                context_manifest_digest             TEXT NOT NULL,
+                worker_manifest_event_id            TEXT NOT NULL,
+                worker_manifest_event_digest        TEXT NOT NULL,
+                worker_manifest_digest              TEXT NOT NULL,
+                sandbox_profile_event_id            TEXT NOT NULL,
+                sandbox_profile_event_digest        TEXT NOT NULL,
+                sandbox_profile_digest              TEXT NOT NULL,
+                retry_context_event_id              TEXT,
+                retry_context_event_digest          TEXT,
+                retry_context_digest                TEXT,
+                witness_evidence_digest             TEXT NOT NULL,
+                ledger_authority_realm_digest       TEXT NOT NULL,
+                admission_event_id                  TEXT NOT NULL UNIQUE,
+                admission_event_digest              TEXT NOT NULL,
+                state                               TEXT NOT NULL CHECK(state IN ('awaiting_checkpoint', 'sealed')),
+                sealed_checkpoint_event_id          TEXT,
+                sealed_checkpoint_event_digest      TEXT,
+                created_at                          TEXT NOT NULL,
+                sealed_at                           TEXT,
+                PRIMARY KEY (run_id, source_dispatch_event_id),
+                UNIQUE (run_id, idempotency_key),
+                UNIQUE (run_id, workflow_id, unit_id, attempt),
+                UNIQUE (run_id, semantic_identity_digest),
+                FOREIGN KEY(source_dispatch_event_id) REFERENCES events(id),
+                FOREIGN KEY(admission_event_id) REFERENCES events(id),
+                FOREIGN KEY(v4_graph_declaration_event_id) REFERENCES events(id),
+                FOREIGN KEY(context_manifest_event_id) REFERENCES events(id),
+                FOREIGN KEY(worker_manifest_event_id) REFERENCES events(id),
+                FOREIGN KEY(sandbox_profile_event_id) REFERENCES events(id),
+                FOREIGN KEY(retry_context_event_id) REFERENCES events(id),
+                FOREIGN KEY(sealed_checkpoint_event_id) REFERENCES events(id),
+                CHECK(
+                    (state = 'awaiting_checkpoint'
+                        AND sealed_checkpoint_event_id IS NULL
+                        AND sealed_checkpoint_event_digest IS NULL
+                        AND sealed_at IS NULL)
+                    OR
+                    (state = 'sealed'
+                        AND sealed_checkpoint_event_id IS NOT NULL
+                        AND sealed_checkpoint_event_digest IS NOT NULL
+                        AND sealed_at IS NOT NULL)
+                ),
+                CHECK(
+                    (retry_context_event_id IS NULL
+                        AND retry_context_event_digest IS NULL
+                        AND retry_context_digest IS NULL)
+                    OR
+                    (retry_context_event_id IS NOT NULL
+                        AND retry_context_event_digest IS NOT NULL
+                        AND retry_context_digest IS NOT NULL)
+                )
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_governed_dispatch_v5_admissions_state
+                ON governed_dispatch_v5_admissions(run_id, state);
+
+            CREATE TRIGGER IF NOT EXISTS governed_dispatch_v5_admissions_no_delete
+                BEFORE DELETE ON governed_dispatch_v5_admissions
+                BEGIN
+                    SELECT RAISE(ABORT, 'governed V5 dispatch admissions are tape-backed: DELETE forbidden');
+                END;
+
+            CREATE TRIGGER IF NOT EXISTS governed_dispatch_v5_admissions_seal_only
+                BEFORE UPDATE ON governed_dispatch_v5_admissions
+                WHEN OLD.state != 'awaiting_checkpoint'
+                  OR NEW.state != 'sealed'
+                  OR OLD.run_id != NEW.run_id
+                  OR OLD.idempotency_key != NEW.idempotency_key
+                  OR OLD.workflow_id != NEW.workflow_id
+                  OR OLD.workflow_revision != NEW.workflow_revision
+                  OR OLD.unit_id != NEW.unit_id
+                  OR OLD.attempt != NEW.attempt
+                  OR OLD.semantic_identity_digest != NEW.semantic_identity_digest
+                  OR OLD.source_dispatch_event_id != NEW.source_dispatch_event_id
+                  OR OLD.source_dispatch_event_digest != NEW.source_dispatch_event_digest
+                  OR OLD.v5_envelope_digest != NEW.v5_envelope_digest
+                  OR OLD.v4_envelope_digest != NEW.v4_envelope_digest
+                  OR OLD.v4_graph_declaration_event_id != NEW.v4_graph_declaration_event_id
+                  OR OLD.v4_graph_declaration_event_digest != NEW.v4_graph_declaration_event_digest
+                  OR OLD.v4_graph_digest != NEW.v4_graph_digest
+                  OR OLD.context_manifest_event_id != NEW.context_manifest_event_id
+                  OR OLD.context_manifest_event_digest != NEW.context_manifest_event_digest
+                  OR OLD.context_manifest_digest != NEW.context_manifest_digest
+                  OR OLD.worker_manifest_event_id != NEW.worker_manifest_event_id
+                  OR OLD.worker_manifest_event_digest != NEW.worker_manifest_event_digest
+                  OR OLD.worker_manifest_digest != NEW.worker_manifest_digest
+                  OR OLD.sandbox_profile_event_id != NEW.sandbox_profile_event_id
+                  OR OLD.sandbox_profile_event_digest != NEW.sandbox_profile_event_digest
+                  OR OLD.sandbox_profile_digest != NEW.sandbox_profile_digest
+                  OR OLD.retry_context_event_id IS NOT NEW.retry_context_event_id
+                  OR OLD.retry_context_event_digest IS NOT NEW.retry_context_event_digest
+                  OR OLD.retry_context_digest IS NOT NEW.retry_context_digest
+                  OR OLD.witness_evidence_digest != NEW.witness_evidence_digest
+                  OR OLD.ledger_authority_realm_digest != NEW.ledger_authority_realm_digest
+                  OR OLD.admission_event_id != NEW.admission_event_id
+                  OR OLD.admission_event_digest != NEW.admission_event_digest
+                  OR OLD.created_at != NEW.created_at
+                BEGIN
+                    SELECT RAISE(ABORT, 'governed V5 dispatch admissions permit only one checkpoint-seal transition');
+                END;
+
             -- Broker-private projection for one operator promotion decision.
             -- It is intentionally separate from any Git effect receipt: the
             -- first state is merely write-ahead evidence and cannot authorize a
@@ -1786,7 +2039,11 @@ impl SqliteStore {
     ///     inserts directly through the private `insert_event`/
     ///     `insert_event_signature` and so bypasses this helper. Enforced in
     ///     EVERY mode (signed and unsigned).
-    /// (b) Per-run strictly-monotonic ordinary-event id: reject an ordinary
+    /// (b) Reject caller-supplied protected-host V5 admission receipts. They
+    ///     are minted only by [`Self::record_governed_dispatch_v5_admission_v1`]
+    ///     after it re-derives raw signed V5 witness evidence; allowing the
+    ///     generic path to append one could poison receipt reconciliation.
+    /// (c) Per-run strictly-monotonic ordinary-event id: reject an ordinary
     ///     event whose id is `<=` the latest NON-checkpoint event id for the
     ///     same run. Checkpoint ids never constrain the ordinary sequence (an
     ///     internally-minted checkpoint id can exceed a later, pre-generated
@@ -1810,6 +2067,11 @@ impl SqliteStore {
     fn validate_external_append(&self, event: &Event) -> Result<()> {
         if event.kind == EventKind::TapeCheckpoint {
             return Err(LedgerError::CallerSuppliedCheckpoint);
+        }
+        if event.kind == EventKind::GovernedDispatchV5AdmissionRecordedV1 {
+            return Err(LedgerError::CallerSuppliedTrustSpineEvent {
+                kind: event.kind.as_wire().to_string(),
+            });
         }
         if let Some(latest) = self.latest_ordinary_id(&event.run_id)? {
             if event.id.as_uuid() <= latest.as_uuid() {
@@ -3060,6 +3322,341 @@ impl SqliteStore {
             dispatch_event_digest: evidence.dispatch_event_digest,
             v5_envelope_digest: evidence.v5_envelope_digest,
         })
+    }
+
+    /// Record (or resolve) one separately signed protected-host V5 admission
+    /// receipt. The request names only a pre-existing source dispatch; this
+    /// immediate transaction re-derives raw V5 graph and manifest witnesses
+    /// directly from the signed tape and never reads the observation shadow.
+    ///
+    /// The returned record is intentionally recovery evidence, not effect
+    /// authority. V5 remains denied by `dispatch_authority_material()` until a
+    /// later, explicitly reviewed action-plane transition is introduced.
+    pub fn record_governed_dispatch_v5_admission_v1(
+        &self,
+        request: &GovernedDispatchV5AdmissionRequestV1,
+        authority: &GovernedDispatchV5AdmissionAuthorityV1,
+        admission_signing_key: &SigningKey,
+        admission_signer: &ActorKeyRef,
+    ) -> Result<GovernedDispatchV5AdmissionDispositionV1> {
+        validate_governed_dispatch_v5_admission_record_signer(
+            authority,
+            admission_signing_key,
+            admission_signer,
+        )?;
+
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let evidence = v5_observation_proof::verify_admission_evidence_in_tx(
+            &tx,
+            request.run_id,
+            request.dispatch_event_id,
+            authority,
+        )?;
+        require_no_governed_dispatch_v5_source_sibling(&tx, request, &evidence, authority)?;
+
+        if let Some(stored) = governed_dispatch_v5_admission_by_source(
+            &tx,
+            request.run_id,
+            request.dispatch_event_id,
+        )? {
+            let disposition = resolve_existing_governed_dispatch_v5_admission(
+                &tx, &stored, request, &evidence, authority,
+            )?;
+            tx.commit()?;
+            return Ok(disposition);
+        }
+
+        for collision in [
+            governed_dispatch_v5_admission_by_idempotency(
+                &tx,
+                request.run_id,
+                &evidence.idempotency_key,
+            )?,
+            governed_dispatch_v5_admission_by_workflow_attempt(
+                &tx,
+                request.run_id,
+                &evidence.workflow_id,
+                &evidence.unit_id,
+                evidence.attempt,
+            )?,
+            governed_dispatch_v5_admission_by_semantic_identity(
+                &tx,
+                request.run_id,
+                &evidence.semantic_identity_digest,
+            )?,
+        ] {
+            if collision.is_some() {
+                return Err(LedgerError::GovernedDispatchAdmissionConflict {
+                    run_id: request.run_id.to_string(),
+                    idempotency_key: evidence.idempotency_key.clone(),
+                });
+            }
+        }
+        require_governed_dispatch_v5_admission_receipt_projection(&tx, request, &evidence, None)?;
+
+        let occurred_at = canonical_ledger_timestamp(Utc::now())?;
+        let witness_evidence_digest =
+            governed_dispatch_v5_admission_witness_evidence_digest_v1(&evidence, authority)?;
+        let receipt = GovernedDispatchV5AdmissionRecordedV1 {
+            run_id: request.run_id.to_string(),
+            source_dispatch_event_ref: evidence.dispatch_event_id,
+            source_dispatch_event_digest: evidence.dispatch_event_digest.clone(),
+            dispatch_envelope_digest: evidence.v5_envelope_digest.clone(),
+            witness_evidence_digest: witness_evidence_digest.clone(),
+            semantic_identity_digest: evidence.semantic_identity_digest.clone(),
+            idempotency_key: evidence.idempotency_key.clone(),
+            ledger_authority_realm_digest: authority.ledger_authority_realm_digest.clone(),
+            admitted_at: timestamp(occurred_at.clone()),
+        };
+        let event = canonicalize(Event {
+            id: EventId::new(),
+            run_id: request.run_id,
+            parent_event_id: Some(evidence.dispatch_event_id),
+            schema_version: Event::CURRENT_SCHEMA_VERSION,
+            kind: EventKind::GovernedDispatchV5AdmissionRecordedV1,
+            occurred_at,
+            payload: Payload::GovernedDispatchV5AdmissionRecordedV1(receipt),
+        })?;
+        validate_new_ordinary_event_id(&tx, &event)?;
+        let signature = sign_event(&event, admission_signing_key, admission_signer, occurred_at)?;
+        let admission_event_digest = signature.canonical_event_hash.clone();
+        insert_event(&tx, &event)?;
+        insert_event_signature(&tx, &signature)?;
+        insert_governed_dispatch_v5_admission(
+            &tx,
+            &evidence,
+            authority,
+            &event,
+            &admission_event_digest,
+        )?;
+        tx.commit()?;
+        self.record_ordinary_append(&event);
+
+        Ok(
+            GovernedDispatchV5AdmissionDispositionV1::AwaitingCheckpoint {
+                source_dispatch_event_id: evidence.dispatch_event_id,
+                source_dispatch_event_digest: evidence.dispatch_event_digest,
+                admission_event_id: event.id,
+                admission_event_digest,
+                v5_envelope_digest: evidence.v5_envelope_digest,
+                witness_evidence_digest,
+                semantic_identity_digest: evidence.semantic_identity_digest,
+                idempotency_key: evidence.idempotency_key,
+            },
+        )
+    }
+
+    /// Seal one protected-host V5 admission receipt with the exact current
+    /// signed tape prefix. The receipt remains non-effect evidence after
+    /// sealing; this only makes recovery and duplicate delivery verifiable.
+    pub fn seal_governed_dispatch_v5_admission_v1(
+        &self,
+        request: &GovernedDispatchV5AdmissionSealRequestV1,
+        authority: &GovernedDispatchV5AdmissionAuthorityV1,
+        checkpoint_signing_key: &SigningKey,
+        checkpoint_signer: &ActorKeyRef,
+    ) -> Result<GovernedDispatchV5AdmissionDispositionV1> {
+        validate_governed_dispatch_v5_admission_checkpoint_signer(
+            authority,
+            checkpoint_signing_key,
+            checkpoint_signer,
+        )?;
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let stored = governed_dispatch_v5_admission_by_admission_event(
+            &tx,
+            request.run_id,
+            request.admission_event_id,
+        )?
+        .ok_or_else(
+            || LedgerError::GovernedDispatchAdmissionReconciliationRequired {
+                run_id: request.run_id.to_string(),
+                idempotency_key: "unknown".into(),
+                reason: "governed V5 admission has no native projection".into(),
+            },
+        )?;
+        verify_stored_governed_dispatch_v5_admission(&tx, &stored, authority)?;
+        if stored.state == StoredGovernedDispatchV5AdmissionState::Sealed {
+            let disposition =
+                sealed_governed_dispatch_v5_admission_disposition(&tx, &stored, authority)?;
+            tx.commit()?;
+            return Ok(disposition);
+        }
+        tx.commit()?;
+
+        let seal = self.seal_governed_dispatch_v5_admission_prefix(
+            &stored,
+            authority,
+            checkpoint_signing_key,
+            checkpoint_signer,
+        )?;
+        let checkpoint_event_id = match seal {
+            GovernedCheckpointSealOutcome::AlreadySealed {
+                checkpoint_event_id,
+            }
+            | GovernedCheckpointSealOutcome::Emitted {
+                checkpoint_event_id,
+            } => checkpoint_event_id,
+            GovernedCheckpointSealOutcome::EmptyPrefix => {
+                return Err(governed_dispatch_v5_admission_reconciliation_required(
+                    stored.run_id,
+                    &stored.idempotency_key,
+                    "V5 admission checkpoint sealing found no signed ordinary-event prefix",
+                ));
+            }
+        };
+        let checkpoint = fully_covering_governed_dispatch_v5_admission_checkpoint(
+            &self.conn,
+            request.run_id,
+            request.admission_event_id,
+            authority,
+        )?
+        .ok_or_else(|| {
+            governed_dispatch_v5_admission_reconciliation_required(
+                stored.run_id,
+                &stored.idempotency_key,
+                "V5 admission checkpoint sealing did not cover the current complete signed prefix",
+            )
+        })?;
+        if checkpoint.event_id != checkpoint_event_id {
+            return Err(governed_dispatch_v5_admission_reconciliation_required(
+                stored.run_id,
+                &stored.idempotency_key,
+                "a concurrent checkpoint changed the sealed V5 admission prefix; reopen trusted recovery before proceeding",
+            ));
+        }
+        self.mark_governed_dispatch_v5_admission_sealed(&stored, authority, &checkpoint)
+    }
+
+    fn seal_governed_dispatch_v5_admission_prefix(
+        &self,
+        expected: &StoredGovernedDispatchV5Admission,
+        authority: &GovernedDispatchV5AdmissionAuthorityV1,
+        checkpoint_signing_key: &SigningKey,
+        checkpoint_signer: &ActorKeyRef,
+    ) -> Result<GovernedCheckpointSealOutcome> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let current = governed_dispatch_v5_admission_by_admission_event(
+            &tx,
+            expected.run_id,
+            expected.admission_event_id,
+        )?
+        .ok_or_else(|| {
+            governed_dispatch_v5_admission_reconciliation_required(
+                expected.run_id,
+                &expected.idempotency_key,
+                "V5 admission projection disappeared before checkpoint sealing",
+            )
+        })?;
+        verify_stored_governed_dispatch_v5_admission(&tx, &current, authority)?;
+        let outcome = self.seal_governed_signed_prefix_in_transaction(
+            &tx,
+            &current.run_id,
+            checkpoint_signing_key,
+            checkpoint_signer,
+        )?;
+        tx.commit()?;
+        Ok(outcome)
+    }
+
+    fn mark_governed_dispatch_v5_admission_sealed(
+        &self,
+        expected: &StoredGovernedDispatchV5Admission,
+        authority: &GovernedDispatchV5AdmissionAuthorityV1,
+        checkpoint: &GovernedDispatchV5AdmissionCheckpointEvidence,
+    ) -> Result<GovernedDispatchV5AdmissionDispositionV1> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let current = governed_dispatch_v5_admission_by_admission_event(
+            &tx,
+            expected.run_id,
+            expected.admission_event_id,
+        )?
+        .ok_or_else(|| {
+            governed_dispatch_v5_admission_reconciliation_required(
+                expected.run_id,
+                &expected.idempotency_key,
+                "V5 admission projection disappeared before checkpoint association",
+            )
+        })?;
+        verify_stored_governed_dispatch_v5_admission(&tx, &current, authority)?;
+        match current.state {
+            StoredGovernedDispatchV5AdmissionState::Sealed => {
+                let current_checkpoint =
+                    sealed_governed_dispatch_v5_admission_checkpoint(&tx, &current, authority)?;
+                if current_checkpoint != *checkpoint {
+                    return Err(governed_dispatch_v5_admission_reconciliation_required(
+                        current.run_id,
+                        &current.idempotency_key,
+                        "V5 admission was sealed by a different checkpoint; reopen trusted recovery before proceeding",
+                    ));
+                }
+            }
+            StoredGovernedDispatchV5AdmissionState::AwaitingCheckpoint => {
+                let current_complete_checkpoint =
+                    fully_covering_governed_dispatch_v5_admission_checkpoint(
+                        &tx,
+                        current.run_id,
+                        current.admission_event_id,
+                        authority,
+                    )?
+                    .ok_or_else(|| {
+                        governed_dispatch_v5_admission_reconciliation_required(
+                            current.run_id,
+                            &current.idempotency_key,
+                            "checkpoint no longer covers the current complete V5 admission prefix",
+                        )
+                    })?;
+                if current_complete_checkpoint != *checkpoint {
+                    return Err(governed_dispatch_v5_admission_reconciliation_required(
+                        current.run_id,
+                        &current.idempotency_key,
+                        "checkpoint changed before the V5 admission seal transition",
+                    ));
+                }
+                verify_governed_dispatch_v5_admission_checkpoint_covers(
+                    &tx, &current, checkpoint, authority,
+                )?;
+                let updated = tx.execute(
+                    r#"UPDATE governed_dispatch_v5_admissions
+                       SET state = 'sealed',
+                           sealed_checkpoint_event_id = ?1,
+                           sealed_checkpoint_event_digest = ?2,
+                           sealed_at = ?3
+                       WHERE run_id = ?4
+                         AND admission_event_id = ?5
+                         AND state = 'awaiting_checkpoint'"#,
+                    params![
+                        checkpoint.event_id.to_string(),
+                        &checkpoint.event_digest,
+                        timestamp(Utc::now()),
+                        current.run_id.to_string(),
+                        current.admission_event_id.to_string(),
+                    ],
+                )?;
+                if updated != 1 {
+                    return Err(governed_dispatch_v5_admission_reconciliation_required(
+                        current.run_id,
+                        &current.idempotency_key,
+                        "checkpoint seal did not advance exactly one V5 admission projection",
+                    ));
+                }
+            }
+        }
+        let sealed = governed_dispatch_v5_admission_by_admission_event(
+            &tx,
+            expected.run_id,
+            expected.admission_event_id,
+        )?
+        .ok_or_else(|| {
+            governed_dispatch_v5_admission_reconciliation_required(
+                expected.run_id,
+                &expected.idempotency_key,
+                "V5 admission projection disappeared after checkpoint association",
+            )
+        })?;
+        let disposition =
+            sealed_governed_dispatch_v5_admission_disposition(&tx, &sealed, authority)?;
+        tx.commit()?;
+        Ok(disposition)
     }
 
     /// Record (or resolve) the one signed governed V3 admission for an exact
@@ -5743,6 +6340,42 @@ fn validate_governed_dispatch_admission_checkpoint_signer(
     {
         return governed_dispatch_admission_authority_rejected(
             "checkpoint signer does not match the explicitly configured governed admission checkpoint authority",
+        );
+    }
+    Ok(())
+}
+
+fn validate_governed_dispatch_v5_admission_record_signer(
+    authority: &GovernedDispatchV5AdmissionAuthorityV1,
+    signing_key: &SigningKey,
+    signer: &ActorKeyRef,
+) -> Result<()> {
+    let actual_public_key_hash = public_key_hash(&signing_key.verifying_key());
+    let expected = &authority.admission_record_signer;
+    if signer.actor_id != expected.actor_id
+        || signer.key_id != expected.key_id
+        || expected.public_key_hash.as_deref() != Some(actual_public_key_hash.as_str())
+    {
+        return governed_dispatch_admission_authority_rejected(
+            "append signer does not match the explicitly configured governed V5 admission-record authority",
+        );
+    }
+    Ok(())
+}
+
+fn validate_governed_dispatch_v5_admission_checkpoint_signer(
+    authority: &GovernedDispatchV5AdmissionAuthorityV1,
+    signing_key: &SigningKey,
+    signer: &ActorKeyRef,
+) -> Result<()> {
+    let actual_public_key_hash = public_key_hash(&signing_key.verifying_key());
+    let expected = &authority.checkpoint_signer;
+    if signer.actor_id != expected.actor_id
+        || signer.key_id != expected.key_id
+        || expected.public_key_hash.as_deref() != Some(actual_public_key_hash.as_str())
+    {
+        return governed_dispatch_admission_authority_rejected(
+            "checkpoint signer does not match the explicitly configured governed V5 admission checkpoint authority",
         );
     }
     Ok(())
@@ -8905,12 +9538,1146 @@ fn insert_governed_dispatch_v5_observation(
     Ok(())
 }
 
+const GOVERNED_DISPATCH_V5_ADMISSION_COLUMNS: &str =
+    "run_id, idempotency_key, workflow_id, workflow_revision, unit_id, attempt, \
+     semantic_identity_digest, source_dispatch_event_id, source_dispatch_event_digest, \
+     v5_envelope_digest, v4_envelope_digest, v4_graph_declaration_event_id, \
+     v4_graph_declaration_event_digest, v4_graph_digest, context_manifest_event_id, \
+     context_manifest_event_digest, context_manifest_digest, worker_manifest_event_id, \
+     worker_manifest_event_digest, worker_manifest_digest, sandbox_profile_event_id, \
+     sandbox_profile_event_digest, sandbox_profile_digest, retry_context_event_id, \
+     retry_context_event_digest, retry_context_digest, witness_evidence_digest, \
+     ledger_authority_realm_digest, admission_event_id, admission_event_digest, state, \
+     sealed_checkpoint_event_id, sealed_checkpoint_event_digest";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StoredGovernedDispatchV5AdmissionState {
+    AwaitingCheckpoint,
+    Sealed,
+}
+
+#[derive(Clone, Debug)]
+struct StoredGovernedDispatchV5Admission {
+    run_id: RunId,
+    idempotency_key: String,
+    workflow_id: String,
+    workflow_revision: String,
+    unit_id: String,
+    attempt: u32,
+    semantic_identity_digest: String,
+    source_dispatch_event_id: EventId,
+    source_dispatch_event_digest: String,
+    v5_envelope_digest: String,
+    v4_envelope_digest: String,
+    v4_graph_declaration_event_id: EventId,
+    v4_graph_declaration_event_digest: String,
+    v4_graph_digest: String,
+    context_manifest_event_id: EventId,
+    context_manifest_event_digest: String,
+    context_manifest_digest: String,
+    worker_manifest_event_id: EventId,
+    worker_manifest_event_digest: String,
+    worker_manifest_digest: String,
+    sandbox_profile_event_id: EventId,
+    sandbox_profile_event_digest: String,
+    sandbox_profile_digest: String,
+    retry_context_event_id: Option<EventId>,
+    retry_context_event_digest: Option<String>,
+    retry_context_digest: Option<String>,
+    witness_evidence_digest: String,
+    ledger_authority_realm_digest: String,
+    admission_event_id: EventId,
+    admission_event_digest: String,
+    state: StoredGovernedDispatchV5AdmissionState,
+    sealed_checkpoint_event_id: Option<EventId>,
+    sealed_checkpoint_event_digest: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct GovernedDispatchV5AdmissionCheckpointEvidence {
+    event_id: EventId,
+    event_digest: String,
+}
+
+impl StoredGovernedDispatchV5Admission {
+    fn matches_evidence(
+        &self,
+        evidence: &VerifiedGovernedDispatchV5ObservationEvidence,
+        authority: &GovernedDispatchV5AdmissionAuthorityV1,
+        witness_evidence_digest: &str,
+    ) -> bool {
+        self.run_id == evidence.run_id
+            && self.idempotency_key == evidence.idempotency_key
+            && self.workflow_id == evidence.workflow_id
+            && self.workflow_revision == evidence.workflow_revision
+            && self.unit_id == evidence.unit_id
+            && self.attempt == evidence.attempt
+            && self.semantic_identity_digest == evidence.semantic_identity_digest
+            && self.source_dispatch_event_id == evidence.dispatch_event_id
+            && self.source_dispatch_event_digest == evidence.dispatch_event_digest
+            && self.v5_envelope_digest == evidence.v5_envelope_digest
+            && self.v4_envelope_digest == evidence.v4_envelope_digest
+            && self.v4_graph_declaration_event_id == evidence.v4_graph_declaration_event_id
+            && self.v4_graph_declaration_event_digest == evidence.v4_graph_declaration_event_digest
+            && self.v4_graph_digest == evidence.v4_graph_digest
+            && self.context_manifest_event_id == evidence.context_manifest_event_id
+            && self.context_manifest_event_digest == evidence.context_manifest_event_digest
+            && self.context_manifest_digest == evidence.context_manifest_digest
+            && self.worker_manifest_event_id == evidence.worker_manifest_event_id
+            && self.worker_manifest_event_digest == evidence.worker_manifest_event_digest
+            && self.worker_manifest_digest == evidence.worker_manifest_digest
+            && self.sandbox_profile_event_id == evidence.sandbox_profile_event_id
+            && self.sandbox_profile_event_digest == evidence.sandbox_profile_event_digest
+            && self.sandbox_profile_digest == evidence.sandbox_profile_digest
+            && self.retry_context_event_id == evidence.retry_context_event_id
+            && self.retry_context_event_digest == evidence.retry_context_event_digest
+            && self.retry_context_digest == evidence.retry_context_digest
+            && self.witness_evidence_digest == witness_evidence_digest
+            && self.ledger_authority_realm_digest == authority.ledger_authority_realm_digest
+    }
+}
+
+fn governed_dispatch_v5_admission_reconciliation_required(
+    run_id: RunId,
+    idempotency_key: &str,
+    reason: impl Into<String>,
+) -> LedgerError {
+    LedgerError::GovernedDispatchAdmissionReconciliationRequired {
+        run_id: run_id.to_string(),
+        idempotency_key: idempotency_key.to_owned(),
+        reason: reason.into(),
+    }
+}
+
+/// Domain separator for the storage-private full raw-witness proof carried by
+/// a compact V5 admission receipt. The public receipt intentionally exposes
+/// only the resulting digest; the immutable projection and this proof bind
+/// every graph, manifest, and retry witness underneath it.
+const GOVERNED_DISPATCH_V5_ADMISSION_WITNESS_EVIDENCE_DIGEST_DOMAIN_V1: &[u8] =
+    b"buildplane.governed-dispatch-v5-admission.witness-evidence.v1\0";
+
+#[derive(serde::Serialize)]
+struct GovernedDispatchV5AdmissionWitnessEvidenceDigestMaterial<'a> {
+    run_id: String,
+    idempotency_key: &'a str,
+    workflow_id: &'a str,
+    workflow_revision: &'a str,
+    unit_id: &'a str,
+    attempt: u32,
+    semantic_identity_digest: &'a str,
+    source_dispatch_event_id: String,
+    source_dispatch_event_digest: &'a str,
+    v5_envelope_digest: &'a str,
+    v4_envelope_digest: &'a str,
+    v4_graph_declaration_event_id: String,
+    v4_graph_declaration_event_digest: &'a str,
+    v4_graph_digest: &'a str,
+    context_manifest_event_id: String,
+    context_manifest_event_digest: &'a str,
+    context_manifest_digest: &'a str,
+    worker_manifest_event_id: String,
+    worker_manifest_event_digest: &'a str,
+    worker_manifest_digest: &'a str,
+    sandbox_profile_event_id: String,
+    sandbox_profile_event_digest: &'a str,
+    sandbox_profile_digest: &'a str,
+    retry_context_event_id: Option<String>,
+    retry_context_event_digest: Option<&'a str>,
+    retry_context_digest: Option<&'a str>,
+    ledger_authority_realm_digest: &'a str,
+}
+
+/// Derive a compact receipt digest only after the private raw-tape proof has
+/// rechecked every V4 graph and V5 manifest witness. Unlike an ordinary
+/// receipt-field hash, this digest includes each raw witness event reference
+/// and canonical digest, so a durable row or receipt cannot be rebound to a
+/// different declaration without changing the signed evidence.
+fn governed_dispatch_v5_admission_witness_evidence_digest_v1(
+    evidence: &VerifiedGovernedDispatchV5ObservationEvidence,
+    authority: &GovernedDispatchV5AdmissionAuthorityV1,
+) -> Result<String> {
+    for (label, digest) in [
+        (
+            "source dispatch event",
+            evidence.dispatch_event_digest.as_str(),
+        ),
+        ("V5 envelope", evidence.v5_envelope_digest.as_str()),
+        ("V4 envelope", evidence.v4_envelope_digest.as_str()),
+        (
+            "V5 semantic identity",
+            evidence.semantic_identity_digest.as_str(),
+        ),
+        ("V5 graph", evidence.v4_graph_digest.as_str()),
+        (
+            "context manifest",
+            evidence.context_manifest_digest.as_str(),
+        ),
+        ("worker manifest", evidence.worker_manifest_digest.as_str()),
+        ("sandbox profile", evidence.sandbox_profile_digest.as_str()),
+        (
+            "ledger authority realm",
+            authority.ledger_authority_realm_digest.as_str(),
+        ),
+    ] {
+        if !is_canonical_sha256_digest(digest) {
+            return governed_dispatch_admission_authority_rejected(format!(
+                "re-derived V5 admission {label} digest is not canonical sha256"
+            ));
+        }
+    }
+    if let Some(retry_digest) = evidence.retry_context_digest.as_deref() {
+        if !is_canonical_sha256_digest(retry_digest) {
+            return governed_dispatch_admission_authority_rejected(
+                "re-derived V5 admission retry context digest is not canonical sha256",
+            );
+        }
+    }
+    for (label, digest) in [
+        (
+            "V4 graph declaration event",
+            evidence.v4_graph_declaration_event_digest.as_str(),
+        ),
+        (
+            "context manifest declaration event",
+            evidence.context_manifest_event_digest.as_str(),
+        ),
+        (
+            "worker manifest declaration event",
+            evidence.worker_manifest_event_digest.as_str(),
+        ),
+        (
+            "sandbox profile declaration event",
+            evidence.sandbox_profile_event_digest.as_str(),
+        ),
+    ] {
+        if !is_canonical_sha256_digest(digest) {
+            return governed_dispatch_admission_authority_rejected(format!(
+                "re-derived V5 admission {label} digest is not canonical sha256"
+            ));
+        }
+    }
+    match (
+        evidence.retry_context_event_id,
+        evidence.retry_context_event_digest.as_deref(),
+        evidence.retry_context_digest.as_deref(),
+    ) {
+        (None, None, None) | (Some(_), Some(_), Some(_)) => {}
+        _ => {
+            return governed_dispatch_admission_authority_rejected(
+                "re-derived V5 admission retry witness fields are incomplete",
+            );
+        }
+    }
+    if let Some(retry_event_digest) = evidence.retry_context_event_digest.as_deref() {
+        if !is_canonical_sha256_digest(retry_event_digest) {
+            return governed_dispatch_admission_authority_rejected(
+                "re-derived V5 admission retry context event digest is not canonical sha256",
+            );
+        }
+    }
+
+    let material = GovernedDispatchV5AdmissionWitnessEvidenceDigestMaterial {
+        run_id: evidence.run_id.to_string(),
+        idempotency_key: &evidence.idempotency_key,
+        workflow_id: &evidence.workflow_id,
+        workflow_revision: &evidence.workflow_revision,
+        unit_id: &evidence.unit_id,
+        attempt: evidence.attempt,
+        semantic_identity_digest: &evidence.semantic_identity_digest,
+        source_dispatch_event_id: evidence.dispatch_event_id.to_string(),
+        source_dispatch_event_digest: &evidence.dispatch_event_digest,
+        v5_envelope_digest: &evidence.v5_envelope_digest,
+        v4_envelope_digest: &evidence.v4_envelope_digest,
+        v4_graph_declaration_event_id: evidence.v4_graph_declaration_event_id.to_string(),
+        v4_graph_declaration_event_digest: &evidence.v4_graph_declaration_event_digest,
+        v4_graph_digest: &evidence.v4_graph_digest,
+        context_manifest_event_id: evidence.context_manifest_event_id.to_string(),
+        context_manifest_event_digest: &evidence.context_manifest_event_digest,
+        context_manifest_digest: &evidence.context_manifest_digest,
+        worker_manifest_event_id: evidence.worker_manifest_event_id.to_string(),
+        worker_manifest_event_digest: &evidence.worker_manifest_event_digest,
+        worker_manifest_digest: &evidence.worker_manifest_digest,
+        sandbox_profile_event_id: evidence.sandbox_profile_event_id.to_string(),
+        sandbox_profile_event_digest: &evidence.sandbox_profile_event_digest,
+        sandbox_profile_digest: &evidence.sandbox_profile_digest,
+        retry_context_event_id: evidence
+            .retry_context_event_id
+            .map(|event_id| event_id.to_string()),
+        retry_context_event_digest: evidence.retry_context_event_digest.as_deref(),
+        retry_context_digest: evidence.retry_context_digest.as_deref(),
+        ledger_authority_realm_digest: &authority.ledger_authority_realm_digest,
+    };
+    let bytes = serde_json::to_vec(&material)?;
+    let mut hasher = Sha256::new();
+    hasher.update(GOVERNED_DISPATCH_V5_ADMISSION_WITNESS_EVIDENCE_DIGEST_DOMAIN_V1);
+    hasher.update(bytes);
+    Ok(format!("sha256:{:x}", hasher.finalize()))
+}
+
+fn governed_dispatch_v5_admission_by_source(
+    conn: &Connection,
+    run_id: RunId,
+    source_dispatch_event_id: EventId,
+) -> Result<Option<StoredGovernedDispatchV5Admission>> {
+    let query = format!(
+        "SELECT {GOVERNED_DISPATCH_V5_ADMISSION_COLUMNS} \
+         FROM governed_dispatch_v5_admissions \
+         WHERE run_id = ?1 AND source_dispatch_event_id = ?2"
+    );
+    conn.query_row(
+        &query,
+        params![run_id.to_string(), source_dispatch_event_id.to_string()],
+        stored_governed_dispatch_v5_admission_from_row,
+    )
+    .optional()
+    .map_err(LedgerError::from)
+}
+
+fn governed_dispatch_v5_admission_by_admission_event(
+    conn: &Connection,
+    run_id: RunId,
+    admission_event_id: EventId,
+) -> Result<Option<StoredGovernedDispatchV5Admission>> {
+    let query = format!(
+        "SELECT {GOVERNED_DISPATCH_V5_ADMISSION_COLUMNS} \
+         FROM governed_dispatch_v5_admissions \
+         WHERE run_id = ?1 AND admission_event_id = ?2"
+    );
+    conn.query_row(
+        &query,
+        params![run_id.to_string(), admission_event_id.to_string()],
+        stored_governed_dispatch_v5_admission_from_row,
+    )
+    .optional()
+    .map_err(LedgerError::from)
+}
+
+fn governed_dispatch_v5_admission_by_idempotency(
+    conn: &Connection,
+    run_id: RunId,
+    idempotency_key: &str,
+) -> Result<Option<StoredGovernedDispatchV5Admission>> {
+    let query = format!(
+        "SELECT {GOVERNED_DISPATCH_V5_ADMISSION_COLUMNS} \
+         FROM governed_dispatch_v5_admissions \
+         WHERE run_id = ?1 AND idempotency_key = ?2"
+    );
+    conn.query_row(
+        &query,
+        params![run_id.to_string(), idempotency_key],
+        stored_governed_dispatch_v5_admission_from_row,
+    )
+    .optional()
+    .map_err(LedgerError::from)
+}
+
+fn governed_dispatch_v5_admission_by_workflow_attempt(
+    conn: &Connection,
+    run_id: RunId,
+    workflow_id: &str,
+    unit_id: &str,
+    attempt: u32,
+) -> Result<Option<StoredGovernedDispatchV5Admission>> {
+    let query = format!(
+        "SELECT {GOVERNED_DISPATCH_V5_ADMISSION_COLUMNS} \
+         FROM governed_dispatch_v5_admissions \
+         WHERE run_id = ?1 AND workflow_id = ?2 AND unit_id = ?3 AND attempt = ?4"
+    );
+    conn.query_row(
+        &query,
+        params![run_id.to_string(), workflow_id, unit_id, attempt],
+        stored_governed_dispatch_v5_admission_from_row,
+    )
+    .optional()
+    .map_err(LedgerError::from)
+}
+
+fn governed_dispatch_v5_admission_by_semantic_identity(
+    conn: &Connection,
+    run_id: RunId,
+    semantic_identity_digest: &str,
+) -> Result<Option<StoredGovernedDispatchV5Admission>> {
+    let query = format!(
+        "SELECT {GOVERNED_DISPATCH_V5_ADMISSION_COLUMNS} \
+         FROM governed_dispatch_v5_admissions \
+         WHERE run_id = ?1 AND semantic_identity_digest = ?2"
+    );
+    conn.query_row(
+        &query,
+        params![run_id.to_string(), semantic_identity_digest],
+        stored_governed_dispatch_v5_admission_from_row,
+    )
+    .optional()
+    .map_err(LedgerError::from)
+}
+
+fn stored_governed_dispatch_v5_admission_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<StoredGovernedDispatchV5Admission> {
+    let to_sql_error = |message: String| {
+        rusqlite::Error::FromSqlConversionFailure(
+            0,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                message,
+            )),
+        )
+    };
+    let parse_event = |value: String, field: &str| {
+        Uuid::parse_str(&value)
+            .map(EventId::from_uuid)
+            .map_err(|error| {
+                to_sql_error(format!(
+                    "invalid governed V5 admission {field} event id: {error}"
+                ))
+            })
+    };
+    let run_id: String = row.get(0)?;
+    let run_id = Uuid::parse_str(&run_id)
+        .map(RunId::from_uuid)
+        .map_err(|error| to_sql_error(format!("invalid governed V5 admission run id: {error}")))?;
+    let attempt: i64 = row.get(5)?;
+    let attempt = u32::try_from(attempt)
+        .map_err(|_| to_sql_error("invalid governed V5 admission attempt".into()))?;
+    let state: String = row.get(30)?;
+    let state = match state.as_str() {
+        "awaiting_checkpoint" => StoredGovernedDispatchV5AdmissionState::AwaitingCheckpoint,
+        "sealed" => StoredGovernedDispatchV5AdmissionState::Sealed,
+        _ => return Err(to_sql_error("invalid governed V5 admission state".into())),
+    };
+    let retry_context_event_id: Option<String> = row.get(23)?;
+    let retry_context_event_id = retry_context_event_id
+        .map(|value| parse_event(value, "retry context"))
+        .transpose()?;
+    let sealed_checkpoint_event_id: Option<String> = row.get(31)?;
+    let sealed_checkpoint_event_id = sealed_checkpoint_event_id
+        .map(|value| parse_event(value, "sealed checkpoint"))
+        .transpose()?;
+    Ok(StoredGovernedDispatchV5Admission {
+        run_id,
+        idempotency_key: row.get(1)?,
+        workflow_id: row.get(2)?,
+        workflow_revision: row.get(3)?,
+        unit_id: row.get(4)?,
+        attempt,
+        semantic_identity_digest: row.get(6)?,
+        source_dispatch_event_id: parse_event(row.get(7)?, "source dispatch")?,
+        source_dispatch_event_digest: row.get(8)?,
+        v5_envelope_digest: row.get(9)?,
+        v4_envelope_digest: row.get(10)?,
+        v4_graph_declaration_event_id: parse_event(row.get(11)?, "V4 graph declaration")?,
+        v4_graph_declaration_event_digest: row.get(12)?,
+        v4_graph_digest: row.get(13)?,
+        context_manifest_event_id: parse_event(row.get(14)?, "context manifest")?,
+        context_manifest_event_digest: row.get(15)?,
+        context_manifest_digest: row.get(16)?,
+        worker_manifest_event_id: parse_event(row.get(17)?, "worker manifest")?,
+        worker_manifest_event_digest: row.get(18)?,
+        worker_manifest_digest: row.get(19)?,
+        sandbox_profile_event_id: parse_event(row.get(20)?, "sandbox profile")?,
+        sandbox_profile_event_digest: row.get(21)?,
+        sandbox_profile_digest: row.get(22)?,
+        retry_context_event_id,
+        retry_context_event_digest: row.get(24)?,
+        retry_context_digest: row.get(25)?,
+        witness_evidence_digest: row.get(26)?,
+        ledger_authority_realm_digest: row.get(27)?,
+        admission_event_id: parse_event(row.get(28)?, "admission")?,
+        admission_event_digest: row.get(29)?,
+        state,
+        sealed_checkpoint_event_id,
+        sealed_checkpoint_event_digest: row.get(32)?,
+    })
+}
+
+/// Reject a second independently signed V5 source event with the exact same
+/// semantic identity. A projection only records admitted sources, so the raw
+/// tape must be scanned as well: otherwise a crash or generic append between
+/// record and seal could leave two equally plausible source envelopes.
+fn require_no_governed_dispatch_v5_source_sibling(
+    tx: &Transaction<'_>,
+    request: &GovernedDispatchV5AdmissionRequestV1,
+    evidence: &VerifiedGovernedDispatchV5ObservationEvidence,
+    authority: &GovernedDispatchV5AdmissionAuthorityV1,
+) -> Result<()> {
+    let mut statement = tx.prepare(
+        "SELECT id FROM events
+         WHERE run_id = ?1 AND kind = 'dispatch_envelope_v5'
+         ORDER BY id ASC",
+    )?;
+    let event_ids = statement
+        .query_map(params![request.run_id.to_string()], |row| {
+            row.get::<_, String>(0)
+        })?
+        .map(|row| -> Result<EventId> { parse_event_id(&row?, "V5 source dispatch") })
+        .collect::<Result<Vec<_>>>()?;
+
+    for candidate_event_id in event_ids {
+        if candidate_event_id == evidence.dispatch_event_id {
+            continue;
+        }
+        let Some((candidate, signature)) = event_and_signature_by_id(&*tx, candidate_event_id)?
+        else {
+            continue;
+        };
+        let Some(signature) = signature else {
+            continue;
+        };
+        if !actor_matches(&authority.source_dispatch_signer, &signature.signer) {
+            continue;
+        }
+        let candidate = canonicalize(candidate).map_err(|error| {
+            governed_dispatch_v5_admission_reconciliation_required(
+                request.run_id,
+                &evidence.idempotency_key,
+                format!("signed V5 source sibling could not be canonicalized: {error}"),
+            )
+        })?;
+        if verify_event_signature(&candidate, &signature, &authority.trusted_keys)
+            != VerificationStatus::Verified
+        {
+            return Err(governed_dispatch_v5_admission_reconciliation_required(
+                request.run_id,
+                &evidence.idempotency_key,
+                "signed V5 source sibling signature is not verified for the configured source authority",
+            ));
+        }
+        let candidate_hash = canonical_event_hash(&candidate).map_err(|error| {
+            governed_dispatch_v5_admission_reconciliation_required(
+                request.run_id,
+                &evidence.idempotency_key,
+                format!("signed V5 source sibling could not produce a canonical hash: {error}"),
+            )
+        })?;
+        if signature.canonical_event_hash != candidate_hash {
+            return Err(governed_dispatch_v5_admission_reconciliation_required(
+                request.run_id,
+                &evidence.idempotency_key,
+                "signed V5 source sibling detached signature hash does not match its canonical event",
+            ));
+        }
+        let Payload::DispatchEnvelopeV5(candidate_dispatch) = &candidate.payload else {
+            return Err(governed_dispatch_v5_admission_reconciliation_required(
+                request.run_id,
+                &evidence.idempotency_key,
+                "signed V5 source sibling does not carry a V5 dispatch payload",
+            ));
+        };
+        let candidate_identity = governed_dispatch_v5_observation_semantic_identity_digest_v1(
+            request.run_id,
+            candidate_dispatch,
+        )?;
+        if candidate_identity != evidence.semantic_identity_digest {
+            continue;
+        }
+        let candidate_evidence = v5_observation_proof::verify_admission_evidence_in_tx(
+            tx,
+            request.run_id,
+            candidate_event_id,
+            authority,
+        )
+        .map_err(|error| {
+            governed_dispatch_v5_admission_reconciliation_required(
+                request.run_id,
+                &evidence.idempotency_key,
+                format!(
+                    "a semantically identical signed V5 source sibling could not be fully re-verified: {error}"
+                ),
+            )
+        })?;
+        if candidate_evidence.semantic_identity_digest == evidence.semantic_identity_digest {
+            return Err(governed_dispatch_v5_admission_reconciliation_required(
+                request.run_id,
+                &evidence.idempotency_key,
+                "multiple fully verified V5 source dispatches share one immutable semantic identity",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn require_governed_dispatch_v5_admission_receipt_projection(
+    conn: &Connection,
+    request: &GovernedDispatchV5AdmissionRequestV1,
+    evidence: &VerifiedGovernedDispatchV5ObservationEvidence,
+    expected_admission_event_id: Option<EventId>,
+) -> Result<()> {
+    let mut statement = conn.prepare(
+        "SELECT id FROM events
+         WHERE run_id = ?1
+           AND kind = 'governed_dispatch_v5_admission_recorded_v1'
+           AND parent_event_id = ?2
+         ORDER BY id ASC",
+    )?;
+    let event_ids = statement
+        .query_map(
+            params![
+                request.run_id.to_string(),
+                evidence.dispatch_event_id.to_string()
+            ],
+            |row| row.get::<_, String>(0),
+        )?
+        .map(|row| -> Result<EventId> { parse_event_id(&row?, "V5 admission receipt") })
+        .collect::<Result<Vec<_>>>()?;
+    match (expected_admission_event_id, event_ids.as_slice()) {
+        (None, []) => Ok(()),
+        (Some(expected), [actual]) if *actual == expected => Ok(()),
+        (None, _) => Err(governed_dispatch_v5_admission_reconciliation_required(
+            request.run_id,
+            &evidence.idempotency_key,
+            "a V5 admission receipt exists without a native admission projection",
+        )),
+        (Some(_), _) => Err(governed_dispatch_v5_admission_reconciliation_required(
+            request.run_id,
+            &evidence.idempotency_key,
+            "V5 admission projection does not name the only receipt parented to its source dispatch",
+        )),
+    }
+}
+
+fn insert_governed_dispatch_v5_admission(
+    conn: &Connection,
+    evidence: &VerifiedGovernedDispatchV5ObservationEvidence,
+    authority: &GovernedDispatchV5AdmissionAuthorityV1,
+    event: &Event,
+    event_digest: &str,
+) -> Result<()> {
+    let witness_evidence_digest =
+        governed_dispatch_v5_admission_witness_evidence_digest_v1(evidence, authority)?;
+    conn.execute(
+        r#"INSERT INTO governed_dispatch_v5_admissions (
+                run_id, idempotency_key, workflow_id, workflow_revision, unit_id, attempt,
+                semantic_identity_digest, source_dispatch_event_id, source_dispatch_event_digest,
+                v5_envelope_digest, v4_envelope_digest,
+                v4_graph_declaration_event_id, v4_graph_declaration_event_digest, v4_graph_digest,
+                context_manifest_event_id, context_manifest_event_digest, context_manifest_digest,
+                worker_manifest_event_id, worker_manifest_event_digest, worker_manifest_digest,
+                sandbox_profile_event_id, sandbox_profile_event_digest, sandbox_profile_digest,
+                retry_context_event_id, retry_context_event_digest, retry_context_digest,
+                witness_evidence_digest, ledger_authority_realm_digest,
+                admission_event_id, admission_event_digest, state, created_at
+            ) VALUES (
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
+                ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26,
+                ?27, ?28, ?29, ?30, 'awaiting_checkpoint', ?31
+            )"#,
+        params![
+            evidence.run_id.to_string(),
+            &evidence.idempotency_key,
+            &evidence.workflow_id,
+            &evidence.workflow_revision,
+            &evidence.unit_id,
+            evidence.attempt,
+            &evidence.semantic_identity_digest,
+            evidence.dispatch_event_id.to_string(),
+            &evidence.dispatch_event_digest,
+            &evidence.v5_envelope_digest,
+            &evidence.v4_envelope_digest,
+            evidence.v4_graph_declaration_event_id.to_string(),
+            &evidence.v4_graph_declaration_event_digest,
+            &evidence.v4_graph_digest,
+            evidence.context_manifest_event_id.to_string(),
+            &evidence.context_manifest_event_digest,
+            &evidence.context_manifest_digest,
+            evidence.worker_manifest_event_id.to_string(),
+            &evidence.worker_manifest_event_digest,
+            &evidence.worker_manifest_digest,
+            evidence.sandbox_profile_event_id.to_string(),
+            &evidence.sandbox_profile_event_digest,
+            &evidence.sandbox_profile_digest,
+            evidence
+                .retry_context_event_id
+                .map(|event_id| event_id.to_string()),
+            &evidence.retry_context_event_digest,
+            &evidence.retry_context_digest,
+            witness_evidence_digest,
+            &authority.ledger_authority_realm_digest,
+            event.id.to_string(),
+            event_digest,
+            event.occurred_at.to_rfc3339(),
+        ],
+    )?;
+    Ok(())
+}
+
+fn load_verified_governed_dispatch_v5_admission_event(
+    conn: &Connection,
+    admission_event_id: EventId,
+    authority: &GovernedDispatchV5AdmissionAuthorityV1,
+) -> Result<Event> {
+    let Some((event, signature)) = event_and_signature_by_id(conn, admission_event_id)? else {
+        return governed_dispatch_admission_authority_rejected(
+            "governed V5 admission receipt is missing from the tape",
+        );
+    };
+    let Some(signature) = signature else {
+        return governed_dispatch_admission_authority_rejected(
+            "governed V5 admission receipt is unsigned",
+        );
+    };
+    let event = canonicalize(event).map_err(|error| {
+        LedgerError::GovernedDispatchAdmissionAuthorityRejected {
+            reason: format!("governed V5 admission receipt is not canonical: {error}"),
+        }
+    })?;
+    if !actor_matches(&authority.admission_record_signer, &signature.signer)
+        || verify_event_signature(&event, &signature, &authority.trusted_keys)
+            != VerificationStatus::Verified
+    {
+        return governed_dispatch_admission_authority_rejected(
+            "governed V5 admission receipt signature is not verified for the configured admission-record authority",
+        );
+    }
+    let event_digest = canonical_event_hash(&event).map_err(|error| {
+        LedgerError::GovernedDispatchAdmissionAuthorityRejected {
+            reason: format!("could not canonicalize governed V5 admission receipt: {error}"),
+        }
+    })?;
+    if signature.canonical_event_hash != event_digest {
+        return governed_dispatch_admission_authority_rejected(
+            "governed V5 admission receipt signature hash does not match its canonical event",
+        );
+    }
+    Ok(event)
+}
+
+fn verify_stored_governed_dispatch_v5_admission(
+    tx: &Transaction<'_>,
+    stored: &StoredGovernedDispatchV5Admission,
+    authority: &GovernedDispatchV5AdmissionAuthorityV1,
+) -> Result<VerifiedGovernedDispatchV5ObservationEvidence> {
+    let evidence = v5_observation_proof::verify_admission_evidence_in_tx(
+        tx,
+        stored.run_id,
+        stored.source_dispatch_event_id,
+        authority,
+    )?;
+    let request = GovernedDispatchV5AdmissionRequestV1 {
+        run_id: stored.run_id,
+        dispatch_event_id: stored.source_dispatch_event_id,
+    };
+    require_no_governed_dispatch_v5_source_sibling(tx, &request, &evidence, authority)?;
+    let witness_evidence_digest =
+        governed_dispatch_v5_admission_witness_evidence_digest_v1(&evidence, authority)?;
+    if !stored.matches_evidence(&evidence, authority, &witness_evidence_digest) {
+        return Err(governed_dispatch_v5_admission_reconciliation_required(
+            stored.run_id,
+            &stored.idempotency_key,
+            "V5 admission projection does not exactly match its re-derived raw-tape witnesses",
+        ));
+    }
+    if stored.source_dispatch_event_id.as_uuid() >= stored.admission_event_id.as_uuid() {
+        return Err(governed_dispatch_v5_admission_reconciliation_required(
+            stored.run_id,
+            &stored.idempotency_key,
+            "V5 admission receipt does not follow its source dispatch in tape order",
+        ));
+    }
+    let event = load_verified_governed_dispatch_v5_admission_event(
+        &*tx,
+        stored.admission_event_id,
+        authority,
+    )?;
+    let event_digest = canonical_event_hash(&event).map_err(|error| {
+        governed_dispatch_v5_admission_reconciliation_required(
+            stored.run_id,
+            &stored.idempotency_key,
+            format!("could not canonicalize stored V5 admission receipt: {error}"),
+        )
+    })?;
+    let Payload::GovernedDispatchV5AdmissionRecordedV1(receipt) = event.payload else {
+        return Err(governed_dispatch_v5_admission_reconciliation_required(
+            stored.run_id,
+            &stored.idempotency_key,
+            "V5 admission projection points to a non-admission-receipt tape event",
+        ));
+    };
+    if event.run_id != stored.run_id
+        || event.parent_event_id != Some(stored.source_dispatch_event_id)
+        || event.kind != EventKind::GovernedDispatchV5AdmissionRecordedV1
+        || event_digest != stored.admission_event_digest
+        || receipt.run_id != stored.run_id.to_string()
+        || receipt.source_dispatch_event_ref != stored.source_dispatch_event_id
+        || receipt.source_dispatch_event_digest != stored.source_dispatch_event_digest
+        || receipt.dispatch_envelope_digest != stored.v5_envelope_digest
+        || receipt.witness_evidence_digest != stored.witness_evidence_digest
+        || receipt.witness_evidence_digest != witness_evidence_digest
+        || receipt.semantic_identity_digest != stored.semantic_identity_digest
+        || receipt.idempotency_key != stored.idempotency_key
+        || receipt.ledger_authority_realm_digest != authority.ledger_authority_realm_digest
+        || receipt.ledger_authority_realm_digest != stored.ledger_authority_realm_digest
+        || receipt.admitted_at != timestamp(event.occurred_at.clone())
+    {
+        return Err(governed_dispatch_v5_admission_reconciliation_required(
+            stored.run_id,
+            &stored.idempotency_key,
+            "V5 admission projection or signed admission receipt is substituted or corrupt",
+        ));
+    }
+    require_governed_dispatch_v5_admission_receipt_projection(
+        &*tx,
+        &request,
+        &evidence,
+        Some(stored.admission_event_id),
+    )?;
+    Ok(evidence)
+}
+
+fn awaiting_governed_dispatch_v5_admission_disposition(
+    stored: &StoredGovernedDispatchV5Admission,
+) -> GovernedDispatchV5AdmissionDispositionV1 {
+    GovernedDispatchV5AdmissionDispositionV1::AwaitingCheckpoint {
+        source_dispatch_event_id: stored.source_dispatch_event_id,
+        source_dispatch_event_digest: stored.source_dispatch_event_digest.clone(),
+        admission_event_id: stored.admission_event_id,
+        admission_event_digest: stored.admission_event_digest.clone(),
+        v5_envelope_digest: stored.v5_envelope_digest.clone(),
+        witness_evidence_digest: stored.witness_evidence_digest.clone(),
+        semantic_identity_digest: stored.semantic_identity_digest.clone(),
+        idempotency_key: stored.idempotency_key.clone(),
+    }
+}
+
+fn resolve_existing_governed_dispatch_v5_admission(
+    tx: &Transaction<'_>,
+    stored: &StoredGovernedDispatchV5Admission,
+    request: &GovernedDispatchV5AdmissionRequestV1,
+    evidence: &VerifiedGovernedDispatchV5ObservationEvidence,
+    authority: &GovernedDispatchV5AdmissionAuthorityV1,
+) -> Result<GovernedDispatchV5AdmissionDispositionV1> {
+    if stored.run_id != request.run_id
+        || stored.source_dispatch_event_id != request.dispatch_event_id
+    {
+        return Err(governed_dispatch_v5_admission_reconciliation_required(
+            request.run_id,
+            &evidence.idempotency_key,
+            "V5 admission source dispatch does not match its native projection",
+        ));
+    }
+    let rederived = verify_stored_governed_dispatch_v5_admission(tx, stored, authority)?;
+    if rederived.dispatch_event_id != evidence.dispatch_event_id
+        || rederived.dispatch_event_digest != evidence.dispatch_event_digest
+        || rederived.semantic_identity_digest != evidence.semantic_identity_digest
+    {
+        return Err(governed_dispatch_v5_admission_reconciliation_required(
+            request.run_id,
+            &evidence.idempotency_key,
+            "V5 admission replay re-derived different source witness evidence",
+        ));
+    }
+    match stored.state {
+        StoredGovernedDispatchV5AdmissionState::AwaitingCheckpoint => {
+            Ok(awaiting_governed_dispatch_v5_admission_disposition(stored))
+        }
+        StoredGovernedDispatchV5AdmissionState::Sealed => {
+            sealed_governed_dispatch_v5_admission_disposition(tx, stored, authority)
+        }
+    }
+}
+
+fn load_verified_governed_dispatch_v5_admission_checkpoint_event(
+    conn: &Connection,
+    checkpoint_event_id: EventId,
+    authority: &GovernedDispatchV5AdmissionAuthorityV1,
+) -> Result<Event> {
+    let Some((event, signature)) = event_and_signature_by_id(conn, checkpoint_event_id)? else {
+        return governed_dispatch_admission_authority_rejected(
+            "governed V5 admission checkpoint is missing from the tape",
+        );
+    };
+    let Some(signature) = signature else {
+        return governed_dispatch_admission_authority_rejected(
+            "governed V5 admission checkpoint is unsigned",
+        );
+    };
+    let event = canonicalize(event).map_err(|error| {
+        LedgerError::GovernedDispatchAdmissionAuthorityRejected {
+            reason: format!("governed V5 admission checkpoint is not canonical: {error}"),
+        }
+    })?;
+    if !actor_matches(&authority.checkpoint_signer, &signature.signer)
+        || verify_event_signature(&event, &signature, &authority.trusted_keys)
+            != VerificationStatus::Verified
+    {
+        return governed_dispatch_admission_authority_rejected(
+            "governed V5 admission checkpoint signature is not verified for the configured checkpoint authority",
+        );
+    }
+    let event_digest = canonical_event_hash(&event).map_err(|error| {
+        LedgerError::GovernedDispatchAdmissionAuthorityRejected {
+            reason: format!("could not canonicalize governed V5 admission checkpoint: {error}"),
+        }
+    })?;
+    if signature.canonical_event_hash != event_digest {
+        return governed_dispatch_admission_authority_rejected(
+            "governed V5 admission checkpoint signature hash does not match its canonical event",
+        );
+    }
+    Ok(event)
+}
+
+fn verified_governed_dispatch_v5_admission_checkpoint_by_id(
+    conn: &Connection,
+    run_id: RunId,
+    checkpoint_event_id: EventId,
+    authority: &GovernedDispatchV5AdmissionAuthorityV1,
+) -> Result<GovernedDispatchV5AdmissionCheckpointEvidence> {
+    let event = load_verified_governed_dispatch_v5_admission_checkpoint_event(
+        conn,
+        checkpoint_event_id,
+        authority,
+    )?;
+    let Payload::TapeCheckpointV1(checkpoint) = &event.payload else {
+        return governed_dispatch_admission_authority_rejected(
+            "governed V5 admission seal does not reference a TapeCheckpointV1 event",
+        );
+    };
+    if event.run_id != run_id
+        || checkpoint.run_id != run_id
+        || event.parent_event_id != Some(checkpoint.through_event_id)
+    {
+        return governed_dispatch_admission_authority_rejected(
+            "governed V5 admission checkpoint does not anchor its signed run and covered event",
+        );
+    }
+    Ok(GovernedDispatchV5AdmissionCheckpointEvidence {
+        event_id: checkpoint_event_id,
+        event_digest: canonical_event_hash(&event)?,
+    })
+}
+
+fn verify_governed_dispatch_v5_admission_checkpoint_covers(
+    conn: &Connection,
+    stored: &StoredGovernedDispatchV5Admission,
+    checkpoint: &GovernedDispatchV5AdmissionCheckpointEvidence,
+    authority: &GovernedDispatchV5AdmissionAuthorityV1,
+) -> Result<()> {
+    let verified = verified_governed_dispatch_v5_admission_checkpoint_by_id(
+        conn,
+        stored.run_id,
+        checkpoint.event_id,
+        authority,
+    )?;
+    if verified != *checkpoint {
+        return Err(governed_dispatch_v5_admission_reconciliation_required(
+            stored.run_id,
+            &stored.idempotency_key,
+            "V5 admission checkpoint digest does not match the immutable sealing evidence",
+        ));
+    }
+    let checkpoint_event = load_verified_governed_dispatch_v5_admission_checkpoint_event(
+        conn,
+        checkpoint.event_id,
+        authority,
+    )?;
+    let Payload::TapeCheckpointV1(checkpoint_payload) = checkpoint_event.payload else {
+        return Err(governed_dispatch_v5_admission_reconciliation_required(
+            stored.run_id,
+            &stored.idempotency_key,
+            "V5 admission checkpoint evidence no longer carries TapeCheckpointV1 payload",
+        ));
+    };
+    let signed = signed_ordinary_events_for_connection(conn, &stored.run_id)?;
+    let Some(admission_index) = signed
+        .iter()
+        .position(|event| event.event_id == stored.admission_event_id)
+    else {
+        return Err(governed_dispatch_v5_admission_reconciliation_required(
+            stored.run_id,
+            &stored.idempotency_key,
+            "V5 admission receipt is absent from the signed ordinary-event prefix",
+        ));
+    };
+    let through_count = usize::try_from(checkpoint_payload.through_event_count).map_err(|_| {
+        governed_dispatch_v5_admission_reconciliation_required(
+            stored.run_id,
+            &stored.idempotency_key,
+            "V5 admission checkpoint through-event count is not representable on this host",
+        )
+    })?;
+    if through_count == 0
+        || through_count > signed.len()
+        || through_count <= admission_index
+        || checkpoint_payload.algorithm != TapeRootAlgorithm::Sha256Linear
+    {
+        return Err(governed_dispatch_v5_admission_reconciliation_required(
+            stored.run_id,
+            &stored.idempotency_key,
+            "checkpoint does not cover the exact governed V5 admission receipt",
+        ));
+    }
+    let covered = &signed[..through_count];
+    let Some(last) = covered.last() else {
+        return Err(governed_dispatch_v5_admission_reconciliation_required(
+            stored.run_id,
+            &stored.idempotency_key,
+            "checkpoint coverage became empty while verifying V5 admission seal",
+        ));
+    };
+    let expected_root = tape_root_hash(
+        &covered
+            .iter()
+            .map(|event| event.canonical_event_hash.clone())
+            .collect::<Vec<_>>(),
+    );
+    if checkpoint_payload.through_event_id != last.event_id
+        || checkpoint_payload.tape_root_hash != expected_root
+    {
+        return Err(governed_dispatch_v5_admission_reconciliation_required(
+            stored.run_id,
+            &stored.idempotency_key,
+            "checkpoint root does not verify the V5 admission receipt signed event prefix",
+        ));
+    }
+    Ok(())
+}
+
+fn fully_covering_governed_dispatch_v5_admission_checkpoint(
+    conn: &Connection,
+    run_id: RunId,
+    admission_event_id: EventId,
+    authority: &GovernedDispatchV5AdmissionAuthorityV1,
+) -> Result<Option<GovernedDispatchV5AdmissionCheckpointEvidence>> {
+    let signed = signed_ordinary_events_for_connection(conn, &run_id)?;
+    let Some(admission_index) = signed
+        .iter()
+        .position(|event| event.event_id == admission_event_id)
+    else {
+        return governed_dispatch_admission_authority_rejected(
+            "V5 admission receipt is absent from the signed ordinary-event prefix",
+        );
+    };
+    let Some(latest) = latest_checkpoint_for_connection(conn, &run_id)? else {
+        return Ok(None);
+    };
+    let Some(last) = signed.last() else {
+        return Ok(None);
+    };
+    if latest.through_event_count != signed.len() as u64
+        || latest.through_event_id != last.event_id
+        || latest.through_event_count <= admission_index as u64
+    {
+        return Ok(None);
+    }
+    let checkpoint = verified_governed_dispatch_v5_admission_checkpoint_by_id(
+        conn,
+        run_id,
+        latest.event_id,
+        authority,
+    )?;
+    let checkpoint_event = load_verified_governed_dispatch_v5_admission_checkpoint_event(
+        conn,
+        checkpoint.event_id,
+        authority,
+    )?;
+    let Payload::TapeCheckpointV1(checkpoint_payload) = checkpoint_event.payload else {
+        return governed_dispatch_admission_authority_rejected(
+            "latest V5 admission checkpoint does not carry TapeCheckpointV1 payload",
+        );
+    };
+    let expected_root = tape_root_hash(
+        &signed
+            .iter()
+            .map(|event| event.canonical_event_hash.clone())
+            .collect::<Vec<_>>(),
+    );
+    if checkpoint_payload.run_id != run_id
+        || checkpoint_payload.algorithm != TapeRootAlgorithm::Sha256Linear
+        || checkpoint_payload.through_event_id != last.event_id
+        || checkpoint_payload.through_event_count != signed.len() as u64
+        || checkpoint_payload.tape_root_hash != expected_root
+    {
+        return governed_dispatch_admission_authority_rejected(
+            "latest V5 admission checkpoint does not verify the complete signed prefix",
+        );
+    }
+    Ok(Some(checkpoint))
+}
+
+fn sealed_governed_dispatch_v5_admission_checkpoint(
+    conn: &Connection,
+    stored: &StoredGovernedDispatchV5Admission,
+    authority: &GovernedDispatchV5AdmissionAuthorityV1,
+) -> Result<GovernedDispatchV5AdmissionCheckpointEvidence> {
+    if stored.state != StoredGovernedDispatchV5AdmissionState::Sealed {
+        return Err(governed_dispatch_v5_admission_reconciliation_required(
+            stored.run_id,
+            &stored.idempotency_key,
+            "unsealed V5 admission lacks checkpoint evidence",
+        ));
+    }
+    let checkpoint_event_id = stored.sealed_checkpoint_event_id.ok_or_else(|| {
+        governed_dispatch_v5_admission_reconciliation_required(
+            stored.run_id,
+            &stored.idempotency_key,
+            "sealed V5 admission lacks its checkpoint event reference",
+        )
+    })?;
+    let expected_digest = stored
+        .sealed_checkpoint_event_digest
+        .as_deref()
+        .ok_or_else(|| {
+            governed_dispatch_v5_admission_reconciliation_required(
+                stored.run_id,
+                &stored.idempotency_key,
+                "sealed V5 admission lacks its checkpoint digest",
+            )
+        })?;
+    let checkpoint = verified_governed_dispatch_v5_admission_checkpoint_by_id(
+        conn,
+        stored.run_id,
+        checkpoint_event_id,
+        authority,
+    )?;
+    if checkpoint.event_digest != expected_digest {
+        return Err(governed_dispatch_v5_admission_reconciliation_required(
+            stored.run_id,
+            &stored.idempotency_key,
+            "sealed V5 admission checkpoint digest does not match its immutable projection",
+        ));
+    }
+    verify_governed_dispatch_v5_admission_checkpoint_covers(conn, stored, &checkpoint, authority)?;
+    Ok(checkpoint)
+}
+
+fn sealed_governed_dispatch_v5_admission_disposition(
+    tx: &Transaction<'_>,
+    stored: &StoredGovernedDispatchV5Admission,
+    authority: &GovernedDispatchV5AdmissionAuthorityV1,
+) -> Result<GovernedDispatchV5AdmissionDispositionV1> {
+    verify_stored_governed_dispatch_v5_admission(tx, stored, authority)?;
+    let checkpoint = sealed_governed_dispatch_v5_admission_checkpoint(&*tx, stored, authority)?;
+    Ok(GovernedDispatchV5AdmissionDispositionV1::Sealed {
+        source_dispatch_event_id: stored.source_dispatch_event_id,
+        source_dispatch_event_digest: stored.source_dispatch_event_digest.clone(),
+        admission_event_id: stored.admission_event_id,
+        admission_event_digest: stored.admission_event_digest.clone(),
+        v5_envelope_digest: stored.v5_envelope_digest.clone(),
+        witness_evidence_digest: stored.witness_evidence_digest.clone(),
+        semantic_identity_digest: stored.semantic_identity_digest.clone(),
+        idempotency_key: stored.idempotency_key.clone(),
+        checkpoint_event_id: checkpoint.event_id,
+        checkpoint_event_digest: checkpoint.event_digest,
+    })
+}
+
 /// Private proof boundary for V5 observation witnesses. Keeping the proof in
 /// its own module prevents unrelated storage code from fabricating it by
 /// struct literal; the parent can receive only the non-authoritative audit
 /// evidence yielded by `verify_observation_evidence_in_tx`.
 mod v5_observation_proof {
     use super::*;
+
+    /// The exact source-event verification material consumed by the private
+    /// raw V5 witness proof. Both the observation shadow and the later
+    /// protected-host admission receipt use this same tape proof, while their
+    /// distinct outer authorities remain unable to mint one another's events.
+    struct V5WitnessVerificationAuthority<'a> {
+        trusted_keys: &'a TrustedPublicKeys,
+        source_dispatch_signer: &'a ActorKeyRef,
+        ledger_authority_realm_digest: &'a str,
+    }
 
     /// Storage-private, transaction-scoped witness proof for one first-attempt
     /// V5 dispatch. It is deliberately neither serializable nor cloneable, and
@@ -9039,7 +10806,7 @@ mod v5_observation_proof {
     fn load_verified_v5_tape_event(
         conn: &Connection,
         event_id: EventId,
-        authority: &GovernedDispatchAdmissionAuthorityV1,
+        authority: &V5WitnessVerificationAuthority<'_>,
         label: &str,
     ) -> Result<VerifiedV5TapeEvent<Payload>> {
         let Some((event, signature)) = event_and_signature_by_id(conn, event_id)? else {
@@ -9055,8 +10822,8 @@ mod v5_observation_proof {
                 reason: format!("{label} is not canonical: {error}"),
             }
         })?;
-        if !actor_matches(&authority.dispatch_signer, &signature.signer)
-            || verify_event_signature(&event, &signature, &authority.trusted_keys)
+        if !actor_matches(authority.source_dispatch_signer, &signature.signer)
+            || verify_event_signature(&event, &signature, authority.trusted_keys)
                 != VerificationStatus::Verified
         {
             return governed_dispatch_admission_authority_rejected(format!(
@@ -9128,7 +10895,7 @@ mod v5_observation_proof {
         tx: &'tx Transaction<'conn>,
         run_id: RunId,
         dispatch_event_id: EventId,
-        authority: &GovernedDispatchAdmissionAuthorityV1,
+        authority: &V5WitnessVerificationAuthority<'_>,
     ) -> Result<VerifiedV5DispatchWitnesses<'tx, 'conn>> {
         let dispatch = expect_verified_v5_tape_payload(
             load_verified_v5_tape_event(&*tx, dispatch_event_id, authority, "V5 dispatch")?,
@@ -9347,7 +11114,30 @@ mod v5_observation_proof {
         dispatch_event_id: EventId,
         authority: &GovernedDispatchAdmissionAuthorityV1,
     ) -> Result<VerifiedGovernedDispatchV5ObservationEvidence> {
-        verify_v5_dispatch_witnesses_in_tx(tx, run_id, dispatch_event_id, authority)?
+        let source_authority = V5WitnessVerificationAuthority {
+            trusted_keys: &authority.trusted_keys,
+            source_dispatch_signer: &authority.dispatch_signer,
+            ledger_authority_realm_digest: &authority.ledger_authority_realm_digest,
+        };
+        verify_v5_dispatch_witnesses_in_tx(tx, run_id, dispatch_event_id, &source_authority)?
+            .into_observation_evidence()
+    }
+
+    /// Re-derive the same raw V5 witnesses for a protected admission record.
+    /// This intentionally bypasses the observation table: the table is an
+    /// audit cache, never a source of admission authority.
+    pub(super) fn verify_admission_evidence_in_tx(
+        tx: &Transaction<'_>,
+        run_id: RunId,
+        dispatch_event_id: EventId,
+        authority: &GovernedDispatchV5AdmissionAuthorityV1,
+    ) -> Result<VerifiedGovernedDispatchV5ObservationEvidence> {
+        let source_authority = V5WitnessVerificationAuthority {
+            trusted_keys: &authority.trusted_keys,
+            source_dispatch_signer: &authority.source_dispatch_signer,
+            ledger_authority_realm_digest: &authority.ledger_authority_realm_digest,
+        };
+        verify_v5_dispatch_witnesses_in_tx(tx, run_id, dispatch_event_id, &source_authority)?
             .into_observation_evidence()
     }
 }

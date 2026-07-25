@@ -30,6 +30,7 @@ import type {
 	DispatchEnvelopeV4,
 	DispatchEnvelopeV5,
 	GitCheckpointV1,
+	GovernedDispatchV5AdmissionRecordedV1,
 	ModelActionAuthorizedV1,
 	ModelActionAuthorizedV2,
 	ModelActionIntentV1,
@@ -102,6 +103,9 @@ export type Payload =
 	| { DispatchEnvelopeV3: DispatchEnvelopeV3 }
 	| { DispatchEnvelopeV4: DispatchEnvelopeV4 }
 	| { DispatchEnvelopeV5: DispatchEnvelopeV5 }
+	| {
+			GovernedDispatchV5AdmissionRecordedV1: GovernedDispatchV5AdmissionRecordedV1;
+	  }
 	| { ContextManifestDeclaredV1: ContextManifestDeclaredV1 }
 	| { WorkerManifestDeclaredV1: WorkerManifestDeclaredV1 }
 	| { SandboxProfileDeclaredV1: SandboxProfileDeclaredV1 }

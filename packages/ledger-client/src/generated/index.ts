@@ -940,6 +940,7 @@ export enum EventKind {
 	DispatchEnvelopeV3 = "dispatch_envelope_v3",
 	DispatchEnvelopeV4 = "dispatch_envelope_v4",
 	DispatchEnvelopeV5 = "dispatch_envelope_v5",
+	GovernedDispatchV5AdmissionRecordedV1 = "governed_dispatch_v5_admission_recorded_v1",
 	ContextManifestDeclaredV1 = "context_manifest_declared_v1",
 	WorkerManifestDeclaredV1 = "worker_manifest_declared_v1",
 	SandboxProfileDeclaredV1 = "sandbox_profile_declared_v1",
@@ -1036,6 +1037,42 @@ export interface GitCheckpointV1 {
 	unit_id: string;
 	/** If the git operation failed, this carries the reason; commit_sha may be empty. */
 	git_status: GitStatus;
+}
+
+/**
+ * `governed_dispatch_v5_admission_recorded_v1` payload — a protected-host
+ * receipt that binds one already-recorded V5 dispatch to the exact witness
+ * evidence re-derived by the host. It is an immutable admission record, not
+ * effect authority: callers must still verify its signer, tape position, and
+ * checkpoint before deriving any later workflow capability.
+ */
+export interface GovernedDispatchV5AdmissionRecordedV1 {
+	/** Must equal the enclosing event's run identifier. */
+	run_id: string;
+	/**
+	 * Exact preexisting `dispatch_envelope_v5` event the protected host
+	 * independently loaded and verified.
+	 */
+	source_dispatch_event_ref: EventId;
+	/** Canonical detached event digest for [`Self::source_dispatch_event_ref`]. */
+	source_dispatch_event_digest: string;
+	/** Detached V5 envelope digest carried by the source dispatch event. */
+	dispatch_envelope_digest: string;
+	/**
+	 * Canonical digest over the complete raw V5 witness proof re-derived by
+	 * the protected host. Its inputs include the graph and manifest witness
+	 * event identities and detached hashes, which remain tape-local rather
+	 * than being copied into this compact receipt.
+	 */
+	witness_evidence_digest: string;
+	/** Canonical digest identifying the immutable admission semantic identity. */
+	semantic_identity_digest: string;
+	/** Idempotency identity owned by the protected admission host. */
+	idempotency_key: string;
+	/** Exact host-owned ledger authority realm bound by the V5 envelope. */
+	ledger_authority_realm_digest: string;
+	/** RFC3339 UTC timestamp at which the protected host recorded admission. */
+	admitted_at: string;
 }
 
 export interface Message {

@@ -42,20 +42,21 @@ use bp_ledger::payload::trust_spine::{
     ContextManifestDeclaredV1, ContextManifestEntryKindV1, ContextManifestEntryV1, ContextTaintV1,
     ContextTrustLevelV1, DispatchBudgetV1, DispatchEnvelopeBodyV2, DispatchEnvelopeV1,
     DispatchEnvelopeV2, DispatchEnvelopeV3, DispatchEnvelopeV4, DispatchEnvelopeV5,
-    ExecutionRoleV1, ModelActionAuthorizedV1, ModelActionAuthorizedV2, ModelActionIntentV1,
-    ModelRequestEvidenceV1, PriorCandidateRefV1, PromotionApprovalRequestedV1,
-    PromotionDecisionKindV1, PromotionDecisionRecordedV1, PromotionExecutionClaimedV1,
-    PromotionGitBindingV1, PromotionReconciliationResolvedV1, PromotionResultOutcomeV1,
-    PromotionResultRecordedV1, PromotionWorktreeSyncStateV1, ReconciliationResolutionOutcomeV1,
-    ReviewDecisionV1, ReviewFindingSeverityV1, ReviewFindingV1, ReviewVerdictOutputV1,
-    ReviewVerdictRecordedV1, ReviewVerdictRecordedV2, SandboxProfileContentV1,
-    SandboxProfileDeclaredV1, SandboxRuntimeV1, SignatureRefV1, TrustScopeEvidenceV1, TrustTierV1,
-    WorkerHarnessV1, WorkerManifestContentV1, WorkerManifestDeclaredV1, WorkerProviderV1,
-    WorkflowCancellationCauseV1, WorkflowCancellationRequestedV1, WorkflowGraphDeclaredV1,
-    WorkflowGraphDeclaredV2, WorkflowGraphNodeV1, WorkflowGraphNodeV2, WorkflowTerminalOutcomeV1,
-    WorkflowTerminalV1, WorkflowTerminalV2, WorkflowTimerFiredV1, WorkflowTimerKindV1,
-    WorkflowTimerScheduledV1, MODEL_REQUEST_EVIDENCE_V1_SCHEMA_VERSION,
-    TRUST_SCOPE_EVIDENCE_V1_SCHEMA_VERSION, TYPESCRIPT_SAFE_INTEGER_MAX,
+    ExecutionRoleV1, GovernedDispatchV5AdmissionRecordedV1, ModelActionAuthorizedV1,
+    ModelActionAuthorizedV2, ModelActionIntentV1, ModelRequestEvidenceV1, PriorCandidateRefV1,
+    PromotionApprovalRequestedV1, PromotionDecisionKindV1, PromotionDecisionRecordedV1,
+    PromotionExecutionClaimedV1, PromotionGitBindingV1, PromotionReconciliationResolvedV1,
+    PromotionResultOutcomeV1, PromotionResultRecordedV1, PromotionWorktreeSyncStateV1,
+    ReconciliationResolutionOutcomeV1, ReviewDecisionV1, ReviewFindingSeverityV1, ReviewFindingV1,
+    ReviewVerdictOutputV1, ReviewVerdictRecordedV1, ReviewVerdictRecordedV2,
+    SandboxProfileContentV1, SandboxProfileDeclaredV1, SandboxRuntimeV1, SignatureRefV1,
+    TrustScopeEvidenceV1, TrustTierV1, WorkerHarnessV1, WorkerManifestContentV1,
+    WorkerManifestDeclaredV1, WorkerProviderV1, WorkflowCancellationCauseV1,
+    WorkflowCancellationRequestedV1, WorkflowGraphDeclaredV1, WorkflowGraphDeclaredV2,
+    WorkflowGraphNodeV1, WorkflowGraphNodeV2, WorkflowTerminalOutcomeV1, WorkflowTerminalV1,
+    WorkflowTerminalV2, WorkflowTimerFiredV1, WorkflowTimerKindV1, WorkflowTimerScheduledV1,
+    MODEL_REQUEST_EVIDENCE_V1_SCHEMA_VERSION, TRUST_SCOPE_EVIDENCE_V1_SCHEMA_VERSION,
+    TYPESCRIPT_SAFE_INTEGER_MAX,
 };
 use bp_ledger::payload::unit_lifecycle::{
     ArtifactRef, CancelCause, UnitCancelledV1, UnitCompletedV1, UnitFailedV1, UnitOutcome,
@@ -644,6 +645,36 @@ fn manifest_bound_dispatch_v5_fixtures() -> Vec<Value> {
         ))
         .unwrap(),
     ]
+}
+
+/// A protected-host V5 admission receipt remains a distinct tape payload from
+/// its source dispatch. Keep its fixture independent of the declaration
+/// fixtures above: the payload-drift suite validates its closed wire shape,
+/// while storage tests validate the live source-witness relationship.
+fn governed_dispatch_v5_admission_fixtures() -> Vec<Value> {
+    const DIGEST_A: &str =
+        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const DIGEST_B: &str =
+        "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const DIGEST_C: &str =
+        "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+    const DIGEST_D: &str =
+        "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+    const DIGEST_E: &str =
+        "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+
+    let receipt = GovernedDispatchV5AdmissionRecordedV1 {
+        run_id: fixed_run_id().to_string(),
+        source_dispatch_event_ref: fixed_event_id(74),
+        source_dispatch_event_digest: DIGEST_A.into(),
+        dispatch_envelope_digest: DIGEST_B.into(),
+        witness_evidence_digest: DIGEST_E.into(),
+        semantic_identity_digest: DIGEST_C.into(),
+        idempotency_key: "v5-admission:workflow-fixture:unit-fixture:1".into(),
+        ledger_authority_realm_digest: DIGEST_D.into(),
+        admitted_at: "2026-07-25T00:00:00Z".into(),
+    };
+    vec![serde_json::to_value(Payload::GovernedDispatchV5AdmissionRecordedV1(receipt)).unwrap()]
 }
 
 /// A claim and its terminal result exercise the durable activity-claim wire
@@ -1389,6 +1420,7 @@ fn main() {
     out.extend(workflow_graph_fixtures());
     out.extend(graph_bound_dispatch_v4_fixtures());
     out.extend(manifest_bound_dispatch_v5_fixtures());
+    out.extend(governed_dispatch_v5_admission_fixtures());
     out.extend(activity_claim_fixtures());
     out.extend(action_evidence_v3_fixtures());
     out.extend(workflow_lifecycle_fixtures());

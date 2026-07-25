@@ -23,6 +23,7 @@ import {
 	type DispatchEnvelopeV4,
 	type DispatchEnvelopeV5,
 	EventKind,
+	type GovernedDispatchV5AdmissionRecordedV1,
 	type ModelActionAuthorizedV1,
 	type ModelActionAuthorizedV2,
 	type ModelActionCandidateBindingV1,
@@ -96,6 +97,7 @@ const KNOWN_VARIANT_KEYS = {
 	DispatchEnvelopeV3: true,
 	DispatchEnvelopeV4: true,
 	DispatchEnvelopeV5: true,
+	GovernedDispatchV5AdmissionRecordedV1: true,
 	ContextManifestDeclaredV1: true,
 	WorkerManifestDeclaredV1: true,
 	SandboxProfileDeclaredV1: true,
@@ -289,7 +291,7 @@ function nativeDispatchBody(body: DispatchEnvelopeV2["body"]) {
 describe("payload drift alarm", () => {
 	it("every fixture parses as a known variant", () => {
 		const fixtures = loadFixtures();
-		expect(KNOWN_KEYS.size).toBe(61);
+		expect(KNOWN_KEYS.size).toBe(62);
 		expect(fixtures.length).toBe(KNOWN_KEYS.size);
 		const names: string[] = [];
 		for (const fx of fixtures) {
@@ -321,6 +323,10 @@ describe("payload drift alarm", () => {
 		expect(EventKind.DispatchEnvelopeV4).toBe("dispatch_envelope_v4");
 		expect(names).toContain("DispatchEnvelopeV5");
 		expect(EventKind.DispatchEnvelopeV5).toBe("dispatch_envelope_v5");
+		expect(names).toContain("GovernedDispatchV5AdmissionRecordedV1");
+		expect(EventKind.GovernedDispatchV5AdmissionRecordedV1).toBe(
+			"governed_dispatch_v5_admission_recorded_v1",
+		);
 		expect(names).toContain("ContextManifestDeclaredV1");
 		expect(EventKind.ContextManifestDeclaredV1).toBe(
 			"context_manifest_declared_v1",
@@ -818,6 +824,31 @@ describe("payload drift alarm", () => {
 				sandbox_profile_digest: dispatch.sandbox_profile_digest,
 			}),
 		);
+	});
+
+	it("V5 admission receipt fixture remains a self-contained protected-host record", () => {
+		const receipt = fixturePayload<GovernedDispatchV5AdmissionRecordedV1>(
+			loadFixtures(),
+			"GovernedDispatchV5AdmissionRecordedV1",
+		);
+
+		expect(receipt.run_id).toMatch(
+			/^01919000-0000-7000-8000-000000[0-9a-f]{6}$/,
+		);
+		expect(receipt.source_dispatch_event_ref).toMatch(
+			/^01919000-0000-7000-8000-000000[0-9a-f]{6}$/,
+		);
+		for (const digest of [
+			receipt.source_dispatch_event_digest,
+			receipt.dispatch_envelope_digest,
+			receipt.witness_evidence_digest,
+			receipt.semantic_identity_digest,
+			receipt.ledger_authority_realm_digest,
+		]) {
+			expect(digest).toMatch(/^sha256:[0-9a-f]{64}$/);
+		}
+		expect(receipt.idempotency_key).not.toBe("");
+		expect(receipt.admitted_at).toMatch(/^\d{4}-\d{2}-\d{2}T/);
 	});
 
 	it("dispatch V2 fixture retains the native declaration-ordered body digest", () => {

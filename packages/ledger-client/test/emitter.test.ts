@@ -317,6 +317,7 @@ describe("createTapeEmitter", () => {
 		for (const kind of [
 			"activity_heartbeat_recorded_v1",
 			"dispatch_envelope_v5",
+			"governed_dispatch_v5_admission_recorded_v1",
 			"context_manifest_declared_v1",
 			"worker_manifest_declared_v1",
 			"sandbox_profile_declared_v1",
