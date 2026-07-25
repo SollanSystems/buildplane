@@ -765,6 +765,7 @@ export async function makeForkFixture(
 	}
 
 	// Read fork run_id — whichever run_id in events.db has parent_run_id == parentRunId.
+	const { DatabaseSync } = await import("node:sqlite");
 	const db2 = new DatabaseSync(eventsDbPath);
 	const forkRow = db2
 		.prepare(
