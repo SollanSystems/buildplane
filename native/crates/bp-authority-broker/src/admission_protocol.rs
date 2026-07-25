@@ -1,11 +1,12 @@
 //! Strict, non-executing parsing for authority-broker request wire V1.
 //!
-//! This module accepts only the closed request JSON emitted by the TypeScript
-//! authority-broker client. It deliberately contains no transport, listener,
-//! startup configuration, dispatch issuance, credential, filesystem, or
-//! process capability. A future OS-authenticated broker may consume the
-//! crate-private parsed data only after it has established its own protected
-//! authority boundary.
+//! This module accepts only closed authority-broker V1 request JSON. Existing
+//! TypeScript clients emit its admission requests; a future protected host may
+//! emit its reviewer-session request only over an OS-authenticated channel.
+//! It deliberately contains no transport, listener, startup configuration,
+//! dispatch issuance, credential, filesystem, or process capability. A future
+//! OS-authenticated broker may consume the crate-private parsed data only after
+//! it has established its own protected authority boundary.
 
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -13,13 +14,15 @@ use thiserror::Error;
 
 const MAX_JS_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
-/// The two closed operations accepted by authority-broker request wire V1.
+/// The three closed operations accepted by authority-broker request wire V1.
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 pub(crate) enum AuthorityBrokerOperationV1 {
     #[serde(rename = "admit")]
     Admit,
     #[serde(rename = "lookup_preauthorized")]
     LookupPreauthorized,
+    #[serde(rename = "open_reviewer_session")]
+    OpenReviewerSession,
 }
 
 impl AuthorityBrokerOperationV1 {
@@ -27,6 +30,7 @@ impl AuthorityBrokerOperationV1 {
         match self {
             Self::Admit => "admit",
             Self::LookupPreauthorized => "lookup_preauthorized",
+            Self::OpenReviewerSession => "open_reviewer_session",
         }
     }
 }
@@ -46,6 +50,7 @@ pub(crate) struct ParsedAuthorityBrokerRequestV1 {
 pub(crate) enum ParsedAuthorityBrokerRequestBodyV1 {
     Admit(ParsedAuthorityBrokerAdmitRequestV1),
     LookupPreauthorized(ParsedAuthorityBrokerPreauthorizedLookupRequestV1),
+    OpenReviewerSession(ParsedAuthorityBrokerOpenReviewerSessionRequestV1),
 }
 
 /// Parsed fields allowed only for an admit request.
@@ -77,6 +82,18 @@ pub(crate) struct ParsedAuthorityBrokerPreauthorizedLookupRequestV1 {
     pub(crate) preauthorization_ref: String,
     pub(crate) governed_packet_ref: String,
     pub(crate) governed_packet_digest: String,
+}
+
+/// Parsed fields allowed only for a reviewer-session open request. These are
+/// caller-supplied, digest-bound UUID claims; a future protected host must
+/// resolve them through trusted replay before treating them as signed-tape
+/// identities. They are not caller-selected candidate, mount, worker, model,
+/// tool, sandbox, secret, verdict, or promotion inputs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ParsedAuthorityBrokerOpenReviewerSessionRequestV1 {
+    pub(crate) run_id: String,
+    pub(crate) reviewer_dispatch_event_ref: String,
+    pub(crate) reviewer_action_request_event_ref: String,
 }
 
 /// Rejections are parsing and integrity failures only; this module has no
@@ -118,6 +135,7 @@ struct WireAuthorityBrokerRequestV1 {
 enum WireAuthorityBrokerRequestBodyV1 {
     Admit(WireAuthorityBrokerAdmitRequestV1),
     LookupPreauthorized(WireAuthorityBrokerPreauthorizedLookupRequestV1),
+    OpenReviewerSession(WireAuthorityBrokerOpenReviewerSessionRequestV1),
 }
 
 #[derive(Deserialize)]
@@ -151,6 +169,14 @@ struct WireAuthorityBrokerPreauthorizedLookupRequestV1 {
     governed_packet_digest: String,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireAuthorityBrokerOpenReviewerSessionRequestV1 {
+    run_id: String,
+    reviewer_dispatch_event_ref: String,
+    reviewer_action_request_event_ref: String,
+}
+
 /// Parse and validate a single closed V1 request without invoking anything.
 ///
 /// The bytes-only signature intentionally prevents callers from supplying
@@ -176,6 +202,12 @@ pub(crate) fn parse_authority_broker_request_v1(
         ) => {
             ParsedAuthorityBrokerRequestBodyV1::LookupPreauthorized(parse_lookup_request(request)?)
         }
+        (
+            AuthorityBrokerOperationV1::OpenReviewerSession,
+            WireAuthorityBrokerRequestBodyV1::OpenReviewerSession(request),
+        ) => ParsedAuthorityBrokerRequestBodyV1::OpenReviewerSession(
+            parse_open_reviewer_session_request(request)?,
+        ),
         _ => return Err(AdmissionProtocolError::OperationRequestMismatch),
     };
 
@@ -250,6 +282,22 @@ fn parse_lookup_request(
         governed_packet_digest: require_digest(
             request.governed_packet_digest,
             "governed_packet_digest",
+        )?,
+    })
+}
+
+fn parse_open_reviewer_session_request(
+    request: WireAuthorityBrokerOpenReviewerSessionRequestV1,
+) -> Result<ParsedAuthorityBrokerOpenReviewerSessionRequestV1, AdmissionProtocolError> {
+    Ok(ParsedAuthorityBrokerOpenReviewerSessionRequestV1 {
+        run_id: require_uuid(request.run_id, "run_id")?,
+        reviewer_dispatch_event_ref: require_uuid(
+            request.reviewer_dispatch_event_ref,
+            "reviewer_dispatch_event_ref",
+        )?,
+        reviewer_action_request_event_ref: require_uuid(
+            request.reviewer_action_request_event_ref,
+            "reviewer_action_request_event_ref",
         )?,
     })
 }
@@ -376,6 +424,9 @@ fn canonical_request_json(request: &ParsedAuthorityBrokerRequestV1) -> String {
         ParsedAuthorityBrokerRequestBodyV1::LookupPreauthorized(request) => {
             canonical_lookup_request_json(request)
         }
+        ParsedAuthorityBrokerRequestBodyV1::OpenReviewerSession(request) => {
+            canonical_open_reviewer_session_request_json(request)
+        }
     };
     format!(
         r#"{{"operation":{},"request":{},"request_id":{},"schema_version":1}}"#,
@@ -417,6 +468,17 @@ fn canonical_lookup_request_json(
         json_string(&request.unit_id),
         json_string(&request.workflow_id),
         json_string(&request.workflow_revision),
+    )
+}
+
+fn canonical_open_reviewer_session_request_json(
+    request: &ParsedAuthorityBrokerOpenReviewerSessionRequestV1,
+) -> String {
+    format!(
+        r#"{{"reviewer_action_request_event_ref":{},"reviewer_dispatch_event_ref":{},"run_id":{}}}"#,
+        json_string(&request.reviewer_action_request_event_ref),
+        json_string(&request.reviewer_dispatch_event_ref),
+        json_string(&request.run_id),
     )
 }
 

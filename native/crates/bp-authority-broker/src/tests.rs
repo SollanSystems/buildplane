@@ -83,6 +83,8 @@ const AUTHORITY_BROKER_TS_ADMISSION_DIGEST: &str =
     "sha256:a8eba84025a9f3b6c6d44a9b4fe8446de7c9d7b75cfa335a6e83af202df38ed5";
 const AUTHORITY_BROKER_TS_LOOKUP_DIGEST: &str =
     "sha256:157768414de8d5e557af7345a3fe28eb8e52b434da8bb732aef0af8372069978";
+const AUTHORITY_BROKER_OPEN_REVIEWER_SESSION_DIGEST: &str =
+    "sha256:63d67b9f5b70aebbab13f0ccac147ae308c2ad35ed3892b70a245e5e26c9a1ff";
 
 fn authority_broker_digest(character: char) -> String {
     format!("sha256:{}", character.to_string().repeat(64))
@@ -106,6 +108,17 @@ fn authority_broker_lookup_wire() -> String {
         binding_digest = authority_broker_digest('f'),
         packet_digest = authority_broker_digest('2'),
         request_digest = AUTHORITY_BROKER_TS_LOOKUP_DIGEST,
+    )
+}
+
+/// A future protected host may send only opaque, digest-bound reviewer
+/// activity claims, then must resolve them through trusted replay. This parser
+/// fixture carries no candidate path, mount, prompt, tool, provider, secret,
+/// verdict, or promotion input.
+fn authority_broker_open_reviewer_session_wire() -> String {
+    format!(
+        r#"{{"schema_version":1,"operation":"open_reviewer_session","request_id":"123e4567-e89b-12d3-a456-426614174000","request":{{"run_id":"123e4567-e89b-12d3-a456-426614174003","reviewer_dispatch_event_ref":"123e4567-e89b-12d3-a456-426614174004","reviewer_action_request_event_ref":"123e4567-e89b-12d3-a456-426614174005"}},"request_digest":"{request_digest}"}}"#,
+        request_digest = AUTHORITY_BROKER_OPEN_REVIEWER_SESSION_DIGEST,
     )
 }
 
@@ -143,6 +156,74 @@ fn authority_broker_parser_accepts_the_typescript_lookup_contract() {
             request_digest,
             ..
         } if request_digest == AUTHORITY_BROKER_TS_LOOKUP_DIGEST
+    ));
+}
+
+#[test]
+fn authority_broker_parser_accepts_only_opaque_reviewer_session_identity() {
+    let parsed = super::admission_protocol::parse_authority_broker_request_v1(
+        authority_broker_open_reviewer_session_wire().as_bytes(),
+    )
+    .expect("the closed reviewer-session request fixture must parse");
+
+    assert!(matches!(
+        parsed,
+        super::admission_protocol::ParsedAuthorityBrokerRequestV1 {
+            operation: super::admission_protocol::AuthorityBrokerOperationV1::OpenReviewerSession,
+            request:
+                super::admission_protocol::ParsedAuthorityBrokerRequestBodyV1::OpenReviewerSession(_),
+            request_digest,
+            ..
+        } if request_digest == AUTHORITY_BROKER_OPEN_REVIEWER_SESSION_DIGEST
+    ));
+}
+
+#[test]
+fn authority_broker_parser_rejects_substituted_or_expanded_reviewer_session_requests() {
+    let wrong_digest = authority_broker_open_reviewer_session_wire().replacen(
+        AUTHORITY_BROKER_OPEN_REVIEWER_SESSION_DIGEST,
+        authority_broker_digest('0').as_str(),
+        1,
+    );
+    assert!(matches!(
+        super::admission_protocol::parse_authority_broker_request_v1(wrong_digest.as_bytes()),
+        Err(super::admission_protocol::AdmissionProtocolError::RequestDigestMismatch)
+    ));
+
+    let operation_substitution = authority_broker_admission_wire().replacen(
+        r#""operation":"admit""#,
+        r#""operation":"open_reviewer_session""#,
+        1,
+    );
+    assert!(matches!(
+        super::admission_protocol::parse_authority_broker_request_v1(
+            operation_substitution.as_bytes()
+        ),
+        Err(super::admission_protocol::AdmissionProtocolError::OperationRequestMismatch)
+    ));
+
+    let extra_field = authority_broker_open_reviewer_session_wire().replacen(
+        r#""reviewer_action_request_event_ref":"123e4567-e89b-12d3-a456-426614174005""#,
+        r#""reviewer_action_request_event_ref":"123e4567-e89b-12d3-a456-426614174005","candidate_path":"/workspace/candidate""#,
+        1,
+    );
+    assert!(matches!(
+        super::admission_protocol::parse_authority_broker_request_v1(extra_field.as_bytes()),
+        Err(super::admission_protocol::AdmissionProtocolError::Json(_))
+    ));
+
+    let invalid_event_ref = authority_broker_open_reviewer_session_wire().replacen(
+        "123e4567-e89b-12d3-a456-426614174004",
+        "not-a-canonical-event-id",
+        1,
+    );
+    assert!(matches!(
+        super::admission_protocol::parse_authority_broker_request_v1(invalid_event_ref.as_bytes()),
+        Err(
+            super::admission_protocol::AdmissionProtocolError::InvalidUuid {
+                field: "reviewer_dispatch_event_ref"
+            }
+        )
     ));
 }
 
