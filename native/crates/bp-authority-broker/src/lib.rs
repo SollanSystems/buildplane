@@ -13,6 +13,9 @@
 
 use bp_ledger::error::LedgerError;
 use bp_ledger::payload::activity_claim::ActivityResultOutcomeV1;
+use bp_ledger::payload::trust_spine::{
+    CandidateAcceptanceOutcomeV1, PromotionDecisionKindV1, ReviewDecisionV1,
+};
 use bp_ledger::signing::ActorKeyRef;
 use bp_ledger::storage::sqlite::{
     ActivityClaimAuthorityV1, ActivityResultDispositionV1,
@@ -26,6 +29,7 @@ use bp_ledger::storage::Cas;
 use bp_ledger::{EventId, RunId};
 use bp_replay::{
     TrustedGovernedRecoveryError, TrustedGovernedRecoverySnapshot, TrustedReplayAuthorities,
+    WorkflowPhaseV1,
 };
 use ed25519_dalek::SigningKey;
 use std::path::{Path, PathBuf};
@@ -36,6 +40,8 @@ mod admission_protocol;
 mod confinement;
 #[allow(dead_code)]
 mod dispatch_admission;
+#[allow(dead_code)]
+mod promotion_decision_handler;
 mod promotion_execution;
 #[allow(dead_code)]
 mod promotion_execution_handler;
@@ -115,6 +121,15 @@ pub(crate) enum BrokerPromotionDecisionStartupError {
 pub(crate) enum BrokerPromotionDecisionDisposition {
     Sealed,
     ReconciliationRequired,
+}
+
+/// The only parsed controller input accepted by the private operator-decision
+/// path. The wire may name a durable approval work item and choose one closed
+/// outcome; all decision lineage remains broker-derived.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct BrokerPromotionDecisionIngressRequest {
+    pub(crate) promotion_approval_request_event_id: EventId,
+    pub(crate) decision: PromotionDecisionKindV1,
 }
 
 /// Private broker composition for one startup-bound promotion-decision run.
@@ -216,6 +231,174 @@ impl<'a> BrokerPromotionDecisionAuthority<'a> {
                 BrokerPromotionDecisionDisposition::ReconciliationRequired
             }
         }
+    }
+}
+
+/// Opaque production composition for one startup-bound operator promotion
+/// decision path.
+///
+/// A caller never receives the enclosed trusted replay, protected ledger, or
+/// signer dependencies. For each opaque approval identity this authority
+/// reopens the full bounded recovery view and reconstructs the sole accepted
+/// storage request from tape-derived workflow state.
+pub(crate) struct ProtectedPromotionDecisionAuthority<'a> {
+    run_id: RunId,
+    database_path: PathBuf,
+    replay_authorities: &'a TrustedReplayAuthorities,
+    pinned_kernel_signer: &'a ActorKeyRef,
+    inner: BrokerPromotionDecisionAuthority<'a>,
+}
+
+impl<'a> ProtectedPromotionDecisionAuthority<'a> {
+    /// Construct only from protected startup dependencies. No caller may
+    /// select a run, database, trusted signer set, authority realm, or signing
+    /// key after this boundary has been created.
+    #[allow(dead_code)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn from_prevalidated_startup(
+        run_id: RunId,
+        database_path: impl AsRef<Path>,
+        replay_authorities: &'a TrustedReplayAuthorities,
+        pinned_kernel_signer: &'a ActorKeyRef,
+        store: &'a SqliteStore,
+        authority: &'a GovernedPromotionAuthorityV1,
+        operator_signing_key: &'a SigningKey,
+        operator_signer: &'a ActorKeyRef,
+        kernel_signing_key: &'a SigningKey,
+        kernel_signer: &'a ActorKeyRef,
+    ) -> Result<Self, BrokerPromotionDecisionStartupError> {
+        let inner = BrokerPromotionDecisionAuthority::from_prevalidated_startup(
+            run_id,
+            store,
+            authority,
+            operator_signing_key,
+            operator_signer,
+            kernel_signing_key,
+            kernel_signer,
+        )?;
+        Ok(Self {
+            run_id,
+            database_path: database_path.as_ref().to_path_buf(),
+            replay_authorities,
+            pinned_kernel_signer,
+            inner,
+        })
+    }
+
+    /// Bind the trusted recovery reader to the same canonical durable ledger
+    /// identity held by the protected writer. A valid copied tape must never
+    /// authorize a decision write into a different store.
+    fn canonical_recovery_database_path(&self) -> Option<PathBuf> {
+        let store_path = self.inner.store.canonical_database_path().ok()?;
+        let recovery_path = std::fs::canonicalize(&self.database_path).ok()?;
+        (store_path == recovery_path).then_some(recovery_path)
+    }
+
+    /// Reopen trusted replay and record only one tape-derived promotion
+    /// decision for an exact pending approval work item.
+    ///
+    /// Every malformed, stale, cross-run, unsupported, or incomplete state is
+    /// intentionally indistinguishable to the caller: reconciliation is
+    /// required and no storage write is attempted. This does not activate a
+    /// promotion effect; the sealed decision remains subject to the separate
+    /// execution-claim path.
+    pub(crate) fn record_from_approval_decision(
+        &self,
+        request: BrokerPromotionDecisionIngressRequest,
+    ) -> BrokerPromotionDecisionDisposition {
+        let startup_run_id = self.run_id.to_string();
+        let recovery_database_path = match self.canonical_recovery_database_path() {
+            Some(path) => path,
+            None => return BrokerPromotionDecisionDisposition::ReconciliationRequired,
+        };
+        let snapshot = match TrustedGovernedRecoverySnapshot::open_bounded_v1(
+            &startup_run_id,
+            &recovery_database_path,
+            self.replay_authorities,
+            self.pinned_kernel_signer,
+        ) {
+            Ok(snapshot) => snapshot,
+            Err(_) => return BrokerPromotionDecisionDisposition::ReconciliationRequired,
+        };
+        if snapshot.run_id() != startup_run_id {
+            return BrokerPromotionDecisionDisposition::ReconciliationRequired;
+        }
+
+        let approval_event_ref = request.promotion_approval_request_event_id.to_string();
+        let workflow =
+            match snapshot.workflow_for_promotion_approval_request_event_ref(&approval_event_ref) {
+                Some(workflow) => workflow,
+                None => return BrokerPromotionDecisionDisposition::ReconciliationRequired,
+            };
+        if workflow.run_id != startup_run_id
+            || workflow.phase != WorkflowPhaseV1::PromotionApprovalPending
+            || workflow.promotion.is_some()
+        {
+            return BrokerPromotionDecisionDisposition::ReconciliationRequired;
+        }
+
+        let approval = match workflow.promotion_approval.as_ref() {
+            Some(approval) if approval.event_id == request.promotion_approval_request_event_id => {
+                approval
+            }
+            _ => return BrokerPromotionDecisionDisposition::ReconciliationRequired,
+        };
+        let candidate = match workflow.candidate.as_ref() {
+            Some(candidate) => candidate,
+            None => return BrokerPromotionDecisionDisposition::ReconciliationRequired,
+        };
+        let candidate_completion = match workflow.candidate_completion.as_ref() {
+            Some(completion) => completion,
+            None => return BrokerPromotionDecisionDisposition::ReconciliationRequired,
+        };
+        let acceptance = match workflow.acceptance.as_ref() {
+            Some(acceptance) => acceptance,
+            None => return BrokerPromotionDecisionDisposition::ReconciliationRequired,
+        };
+        if candidate_completion.completion.run_id != startup_run_id
+            || candidate_completion.completion.candidate_created_event_ref != candidate.event_id
+            || candidate_completion.completion.candidate_digest != candidate.candidate_digest
+            || acceptance.candidate_digest != candidate.candidate_digest
+            || acceptance.candidate_commit_sha != candidate.candidate_commit_sha
+            || acceptance.outcome != CandidateAcceptanceOutcomeV1::Passed
+            || approval.candidate_digest != candidate.candidate_digest
+            || approval.base_commit_sha != candidate.base_commit_sha
+            || approval.envelope_digest != candidate.envelope_digest
+            || approval.acceptance_ref != acceptance.acceptance_ref
+            || approval.target_ref.trim().is_empty()
+            || approval.review_refs.is_empty()
+        {
+            return BrokerPromotionDecisionDisposition::ReconciliationRequired;
+        }
+
+        let mut review_event_ids = Vec::with_capacity(approval.review_refs.len());
+        for review_ref in &approval.review_refs {
+            let review = match workflow.reviews.get(review_ref) {
+                Some(review) => review,
+                None => return BrokerPromotionDecisionDisposition::ReconciliationRequired,
+            };
+            if review.review_ref != *review_ref
+                || review.decision != ReviewDecisionV1::Approve
+                || review.candidate_digest != candidate.candidate_digest
+                || review.candidate_commit_sha != candidate.candidate_commit_sha
+                || review.acceptance_ref.as_deref() != Some(acceptance.acceptance_ref.as_str())
+            {
+                return BrokerPromotionDecisionDisposition::ReconciliationRequired;
+            }
+            review_event_ids.push(review.event_id);
+        }
+
+        self.inner
+            .record_then_seal(GovernedPromotionDecisionRequestV1 {
+                run_id: self.run_id,
+                dispatch_event_id: workflow.dispatch.event_id,
+                candidate_created_event_id: candidate.event_id,
+                candidate_completion_event_id: candidate_completion.event_id,
+                acceptance_event_id: acceptance.event_id,
+                review_event_ids,
+                promotion_approval_request_event_id: approval.event_id,
+                decision: request.decision,
+            })
     }
 }
 

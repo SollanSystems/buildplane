@@ -7,6 +7,9 @@ use super::dispatch_admission::{
     DispatchAdmissionSnapshotVerifier, LedgerDispatchAdmissionBackend, ResolvedDispatchAdmission,
     SealedDispatchAdmissionEvidence, TrustedDispatchAdmissionSnapshotVerifier,
 };
+use super::promotion_decision_handler::{
+    handle_promotion_decision_wire, parse_promotion_decision_request, PromotionDecisionHandlerError,
+};
 use super::promotion_execution::{
     BrokerPromotionExecutionAuthority, BrokerPromotionExecutionRequest,
     BrokerPromotionExecutionStatus, PromotionEffectGateway, PromotionExecutionBackend,
@@ -34,8 +37,8 @@ use super::{
     BrokerModelActionStatus, BrokerModelAuthority, BrokerPromotionDecisionAuthority,
     BrokerPromotionDecisionDisposition, BrokerPromotionDecisionStartupError, CredentialGateway,
     GatewayCompletion, LeasePolicy, PairedGatewayResult, PrivateModelCapability,
-    ReplaySnapshotVerifier, ResultDisposition, TrustedReplayBinding,
-    TrustedReplayVerificationError, TrustedReplayVerifier,
+    ProtectedPromotionDecisionAuthority, ReplaySnapshotVerifier, ResultDisposition,
+    TrustedReplayBinding, TrustedReplayVerificationError, TrustedReplayVerifier,
 };
 use bp_ledger::canonicalize::canonical_event_hash;
 use bp_ledger::event::Event;
@@ -45,6 +48,7 @@ use bp_ledger::payload::activity_claim::{
     ActivityClaimPurposeV1, ActivityClaimedV1, ActivityHeartbeatRecordedV1,
     ActivityResultOutcomeV1, ActivityResultRecordedV1,
 };
+use bp_ledger::payload::run_lifecycle::RunStartedV1;
 use bp_ledger::payload::trust_spine::{
     action_receipt_recorded_v2_digest, action_receipt_set_v1_digest, action_requested_v2_digest,
     candidate_completion_recorded_v1_digest, candidate_view_v1_digest,
@@ -5071,6 +5075,583 @@ fn promotion_execution_rejects_a_claim_substituted_from_another_dispatch_before_
     assert_eq!(gateway_state.borrow().calls, 0);
 }
 
+fn promotion_decision_wire(
+    request_id: &str,
+    promotion_approval_request_event_id: &str,
+    decision: &str,
+) -> String {
+    format!(
+        r#"{{"request_id":"{request_id}","promotion_approval_request_event_id":"{promotion_approval_request_event_id}","decision":"{decision}"}}"#
+    )
+}
+
+fn promotion_decision_wire_with_injected_field(
+    request_id: &str,
+    promotion_approval_request_event_id: &str,
+    decision: &str,
+    injected_field: &str,
+) -> String {
+    let mut wire =
+        promotion_decision_wire(request_id, promotion_approval_request_event_id, decision);
+    wire.pop()
+        .expect("the canonical promotion decision wire ends in an object delimiter");
+    format!(r#"{wire},"{injected_field}":"caller-controlled"}}"#)
+}
+
+#[test]
+fn protected_promotion_decision_wire_accepts_only_closed_canonical_approval_identity_and_decision()
+{
+    let approval_event_id = EventId::new();
+    let wire = promotion_decision_wire(
+        "123e4567-e89b-12d3-a456-426614174000",
+        &approval_event_id.to_string(),
+        "promote",
+    );
+
+    let parsed = parse_promotion_decision_request(wire.as_bytes())
+        .expect("the closed canonical promotion approval identity must parse");
+    assert_eq!(
+        parsed.promotion_approval_request_event_id,
+        approval_event_id,
+    );
+    assert_eq!(parsed.decision, PromotionDecisionKindV1::Promote);
+
+    for (label, malformed_wire) in [
+        (
+            "unknown authority field",
+            promotion_decision_wire_with_injected_field(
+                "123e4567-e89b-12d3-a456-426614174000",
+                &approval_event_id.to_string(),
+                "promote",
+                "run_id",
+            ),
+        ),
+        (
+            "unknown lineage field",
+            promotion_decision_wire_with_injected_field(
+                "123e4567-e89b-12d3-a456-426614174000",
+                &approval_event_id.to_string(),
+                "promote",
+                "candidate_created_event_id",
+            ),
+        ),
+        (
+            "missing decision",
+            format!(
+                r#"{{"request_id":"123e4567-e89b-12d3-a456-426614174000","promotion_approval_request_event_id":"{approval_event_id}"}}"#
+            ),
+        ),
+        (
+            "noncanonical request ID",
+            promotion_decision_wire(
+                "123E4567-e89b-12d3-a456-426614174000",
+                &approval_event_id.to_string(),
+                "promote",
+            ),
+        ),
+        (
+            "noncanonical approval ID",
+            promotion_decision_wire(
+                "123e4567-e89b-12d3-a456-426614174000",
+                "123E4567-e89b-12d3-a456-426614174000",
+                "promote",
+            ),
+        ),
+        (
+            "unsupported decision",
+            promotion_decision_wire(
+                "123e4567-e89b-12d3-a456-426614174000",
+                &approval_event_id.to_string(),
+                "PROMOTE",
+            ),
+        ),
+    ] {
+        assert!(
+            matches!(
+                parse_promotion_decision_request(malformed_wire.as_bytes()),
+                Err(PromotionDecisionHandlerError::RequestRejected)
+            ),
+            "{label} must fail closed before the decision authority is entered"
+        );
+    }
+}
+
+fn checkpoint_pending_promotion_approval_for_trusted_replay(fixture: &PromotionFixture) {
+    let checkpointed_at =
+        DateTime::parse_from_rfc3339(&timestamp(Utc::now() + Duration::seconds(1)))
+            .expect("round trusted replay checkpoint timestamp to canonical milliseconds")
+            .with_timezone(&Utc);
+    let checkpoint_trigger = promotion_event(
+        fixture.request.run_id,
+        None,
+        EventKind::RunStarted,
+        checkpointed_at,
+        Payload::RunStartedV1(RunStartedV1 {
+            packet_hash: DIGEST_A.into(),
+            git_head: "0123456789abcdef0123456789abcdef01234567".into(),
+            workspace_path: "/trusted/replay/fixture".into(),
+            config: Default::default(),
+            parent_run_id: None,
+            parent_event_id: None,
+        }),
+    );
+    fixture
+        .store
+        .append_signed_with_checkpoint(
+            &checkpoint_trigger,
+            &fixture.kernel_key,
+            &fixture.kernel,
+            &CheckpointPolicy::every(1),
+        )
+        .expect("seal the pending approval prefix for trusted replay");
+}
+
+fn protected_promotion_decision_authority<'a>(
+    fixture: &'a PromotionFixture,
+    replay_authorities: &'a TrustedReplayAuthorities,
+) -> ProtectedPromotionDecisionAuthority<'a> {
+    ProtectedPromotionDecisionAuthority::from_prevalidated_startup(
+        fixture.request.run_id,
+        fixture._temp.path().join("events.db"),
+        replay_authorities,
+        &fixture.kernel,
+        &fixture.store,
+        &fixture.authority,
+        &fixture.operator_key,
+        &fixture.operator,
+        &fixture.kernel_key,
+        &fixture.kernel,
+    )
+    .expect("inject the protected replay, ledger, and signer startup dependencies")
+}
+
+#[test]
+fn protected_promotion_decision_handler_derives_verified_pending_lineage_then_seals() {
+    let fixture = promotion_fixture();
+    checkpoint_pending_promotion_approval_for_trusted_replay(&fixture);
+    let replay_authorities = promotion_replay_authorities(&fixture);
+    let mut authority = protected_promotion_decision_authority(&fixture, &replay_authorities);
+    let wire = promotion_decision_wire(
+        "123e4567-e89b-12d3-a456-426614174000",
+        &fixture
+            .request
+            .promotion_approval_request_event_id
+            .to_string(),
+        "promote",
+    );
+
+    assert_eq!(
+        handle_promotion_decision_wire(&mut authority, wire.as_bytes())
+            .expect("a canonical opaque decision must reach the protected authority"),
+        BrokerPromotionDecisionDisposition::Sealed
+    );
+    assert_eq!(
+        promotion_event_count(
+            &fixture.store,
+            fixture.request.run_id,
+            "promotion_decision_recorded",
+        ),
+        1
+    );
+
+    let recorded = fixture
+        .store
+        .events_for_run(&fixture.request.run_id.to_string())
+        .expect("read the sealed promotion tape")
+        .into_iter()
+        .find_map(|row| {
+            let event = row.to_event().expect("stored event remains canonical");
+            match event.payload {
+                Payload::PromotionDecisionRecordedV1(recorded) => Some(recorded),
+                _ => None,
+            }
+        })
+        .expect("the derived decision must be durably recorded");
+    let approval = fixture
+        .store
+        .events_for_run(&fixture.request.run_id.to_string())
+        .expect("read the source approval event")
+        .into_iter()
+        .find_map(|row| {
+            let event = row.to_event().expect("stored event remains canonical");
+            match event.payload {
+                Payload::PromotionApprovalRequestedV1(approval) => Some(approval),
+                _ => None,
+            }
+        })
+        .expect("the fixture contains one signed approval request");
+    assert_eq!(recorded.candidate_digest, approval.candidate_digest);
+    assert_eq!(recorded.base_commit_sha, approval.base_commit_sha);
+    assert_eq!(
+        recorded.target_ref.as_deref(),
+        Some(approval.target_ref.as_str())
+    );
+    assert_eq!(recorded.envelope_digest, approval.envelope_digest);
+    assert_eq!(recorded.acceptance_ref, approval.acceptance_ref);
+    assert_eq!(recorded.review_refs, approval.review_refs);
+    assert_eq!(
+        recorded.promotion_approval_request_ref.as_deref(),
+        Some(
+            fixture
+                .request
+                .promotion_approval_request_event_id
+                .to_string()
+                .as_str()
+        )
+    );
+    assert_eq!(recorded.decision, PromotionDecisionKindV1::Promote);
+}
+
+#[test]
+fn protected_promotion_decision_handler_requires_exact_pending_same_run_approval_without_new_decision(
+) {
+    let fixture = promotion_fixture();
+    checkpoint_pending_promotion_approval_for_trusted_replay(&fixture);
+    let replay_authorities = promotion_replay_authorities(&fixture);
+    let mut authority = protected_promotion_decision_authority(&fixture, &replay_authorities);
+    let other_run_fixture = promotion_fixture();
+    let cross_run_wire = promotion_decision_wire(
+        "123e4567-e89b-12d3-a456-426614174000",
+        &other_run_fixture
+            .request
+            .promotion_approval_request_event_id
+            .to_string(),
+        "reject",
+    );
+
+    assert_eq!(
+        handle_promotion_decision_wire(&mut authority, cross_run_wire.as_bytes())
+            .expect("a canonical but cross-run identity reaches the protected authority"),
+        BrokerPromotionDecisionDisposition::ReconciliationRequired
+    );
+    assert_eq!(
+        promotion_event_count(
+            &fixture.store,
+            fixture.request.run_id,
+            "promotion_decision_recorded",
+        ),
+        0,
+        "a cross-run approval request must not create any decision"
+    );
+
+    let pending_wire = promotion_decision_wire(
+        "123e4567-e89b-12d3-a456-426614174000",
+        &fixture
+            .request
+            .promotion_approval_request_event_id
+            .to_string(),
+        "reject",
+    );
+    assert_eq!(
+        handle_promotion_decision_wire(&mut authority, pending_wire.as_bytes())
+            .expect("the exact pending approval must be resolved once"),
+        BrokerPromotionDecisionDisposition::Sealed
+    );
+    assert_eq!(
+        handle_promotion_decision_wire(&mut authority, pending_wire.as_bytes())
+            .expect("a now-nonpending approval remains an opaque request"),
+        BrokerPromotionDecisionDisposition::ReconciliationRequired
+    );
+    assert_eq!(
+        promotion_event_count(
+            &fixture.store,
+            fixture.request.run_id,
+            "promotion_decision_recorded",
+        ),
+        1,
+        "a nonpending approval request must not create a second decision"
+    );
+}
+
+#[test]
+fn protected_promotion_decision_handler_reconciles_when_recovery_path_is_a_distinct_copy_of_store()
+{
+    let fixture = promotion_fixture();
+    checkpoint_pending_promotion_approval_for_trusted_replay(&fixture);
+    let copied_recovery_database_path = fixture._temp.path().join("copied-events.db");
+    let source_database_path = fixture._temp.path().join("events.db");
+    let checkpoint =
+        rusqlite::Connection::open(&source_database_path).expect("open source ledger for copy");
+    checkpoint
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+        .expect("flush the verified source ledger before copying it");
+    fs::copy(&source_database_path, &copied_recovery_database_path)
+        .expect("copy the otherwise-valid trusted recovery ledger");
+
+    let replay_authorities = promotion_replay_authorities(&fixture);
+    let mut authority = ProtectedPromotionDecisionAuthority::from_prevalidated_startup(
+        fixture.request.run_id,
+        &copied_recovery_database_path,
+        &replay_authorities,
+        &fixture.kernel,
+        &fixture.store,
+        &fixture.authority,
+        &fixture.operator_key,
+        &fixture.operator,
+        &fixture.kernel_key,
+        &fixture.kernel,
+    )
+    .expect("startup dependencies remain otherwise valid");
+    let wire = promotion_decision_wire(
+        "123e4567-e89b-12d3-a456-426614174000",
+        &fixture
+            .request
+            .promotion_approval_request_event_id
+            .to_string(),
+        "promote",
+    );
+
+    assert_eq!(
+        handle_promotion_decision_wire(&mut authority, wire.as_bytes())
+            .expect("the opaque request reaches the protected authority"),
+        BrokerPromotionDecisionDisposition::ReconciliationRequired
+    );
+    assert_eq!(
+        promotion_event_count(
+            &fixture.store,
+            fixture.request.run_id,
+            "promotion_decision_recorded",
+        ),
+        0,
+        "a copied recovery ledger must never authorize a write to the protected store"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn protected_promotion_decision_authenticated_frame_reader_rejects_same_uid_before_consuming_frame()
+{
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
+    use std::time::Duration;
+
+    let broker_uid = unsafe { libc::geteuid() };
+    let configured_worker_uid = broker_uid.checked_add(1).unwrap_or(broker_uid - 1);
+    let policy = BrokerHostConfinementPolicyV1::new(broker_uid, [configured_worker_uid])
+        .expect("a distinct configured worker identity is valid");
+    let attestation = policy
+        .attest_current_broker_process()
+        .expect("the test process is the configured broker identity");
+    let (mut broker_stream, mut same_uid_worker_stream) =
+        UnixStream::pair().expect("create a local Unix socket pair");
+    let payload = promotion_decision_wire(
+        "123e4567-e89b-12d3-a456-426614174000",
+        &EventId::new().to_string(),
+        "reject",
+    )
+    .into_bytes();
+    let mut frame = u32::try_from(payload.len())
+        .expect("the canonical promotion-decision fixture fits the bounded frame")
+        .to_be_bytes()
+        .to_vec();
+    frame.extend_from_slice(&payload);
+    same_uid_worker_stream
+        .write_all(&frame)
+        .expect("queue a valid-looking promotion-decision frame");
+
+    assert!(matches!(
+        super::promotion_decision_handler::read_authenticated_promotion_decision_frame(
+            &policy,
+            &attestation,
+            &mut broker_stream,
+        ),
+        Err(PromotionDecisionHandlerError::PeerRejected)
+    ));
+
+    broker_stream
+        .set_read_timeout(Some(Duration::from_millis(250)))
+        .expect("bound an assertion failure if the gate consumed the frame");
+    let mut observed = vec![0; frame.len()];
+    broker_stream
+        .read_exact(&mut observed)
+        .expect("peer authentication must fail before any frame byte is read");
+    assert_eq!(observed, frame);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn protected_promotion_decision_frame_reader_rejects_zero_oversized_and_truncated_frames() {
+    use std::io::Write;
+    use std::os::unix::net::UnixStream;
+
+    let cases = [
+        ("zero length", 0_u32.to_be_bytes().to_vec()),
+        (
+            "oversized",
+            u32::try_from(16 * 1024 + 1)
+                .expect("the bounded-frame test length fits u32")
+                .to_be_bytes()
+                .to_vec(),
+        ),
+        ("truncated payload", {
+            let mut frame = 4_u32.to_be_bytes().to_vec();
+            frame.extend_from_slice(&[1_u8, 2_u8]);
+            frame
+        }),
+    ];
+
+    for (label, frame) in cases {
+        let (mut broker_stream, mut worker_stream) =
+            UnixStream::pair().expect("create a local Unix socket pair");
+        worker_stream
+            .write_all(&frame)
+            .expect("queue the malformed promotion-decision frame");
+        drop(worker_stream);
+
+        assert!(
+            matches!(
+                super::promotion_decision_handler::read_bounded_promotion_decision_frame(
+                    &mut broker_stream
+                ),
+                Err(PromotionDecisionHandlerError::FrameRejected)
+            ),
+            "{label} frame must fail closed without allocating or parsing a request"
+        );
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn protected_promotion_decision_timeout_reader_rejects_held_open_partial_header_within_deadline() {
+    use std::io::Write;
+    use std::os::unix::net::UnixStream;
+    use std::time::{Duration, Instant};
+
+    let (mut broker_stream, mut worker_stream) =
+        UnixStream::pair().expect("create a local Unix socket pair");
+    worker_stream
+        .write_all(&[0_u8, 0_u8])
+        .expect("send only part of the frame header while retaining the peer");
+
+    let started = Instant::now();
+    assert!(matches!(
+        super::promotion_decision_handler::read_bounded_promotion_decision_frame_with_timeout_for_tests(
+            &mut broker_stream,
+            Duration::from_millis(25),
+        ),
+        Err(PromotionDecisionHandlerError::FrameRejected)
+    ));
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "a held-open partial frame must be rejected by the bounded timeout rather than pinning the broker"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn protected_promotion_decision_timeout_reader_rejects_held_open_partial_body_within_deadline() {
+    use std::io::Write;
+    use std::os::unix::net::UnixStream;
+    use std::time::{Duration, Instant};
+
+    let (mut broker_stream, mut worker_stream) =
+        UnixStream::pair().expect("create a local Unix socket pair");
+    worker_stream
+        .write_all(&[0_u8, 0_u8, 0_u8, 4_u8, 1_u8])
+        .expect("send a complete header and partial body while retaining the peer");
+
+    let started = Instant::now();
+    assert!(matches!(
+        super::promotion_decision_handler::read_bounded_promotion_decision_frame_with_timeout_for_tests(
+            &mut broker_stream,
+            Duration::from_millis(25),
+        ),
+        Err(PromotionDecisionHandlerError::FrameRejected)
+    ));
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "a held-open partial frame must be rejected by the bounded timeout rather than pinning the broker"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn protected_promotion_decision_timeout_reader_rejects_a_slow_drip_header_past_its_absolute_deadline(
+) {
+    use std::io::Write;
+    use std::os::unix::net::UnixStream;
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    const READ_TIMEOUT: Duration = Duration::from_millis(100);
+    const DRIP_INTERVAL: Duration = Duration::from_millis(40);
+
+    let (mut broker_stream, mut worker_stream) =
+        UnixStream::pair().expect("create a local Unix socket pair");
+    worker_stream
+        .write_all(&[0_u8])
+        .expect("send the first header byte before beginning a slow drip");
+    let drip = thread::spawn(move || {
+        for chunk in [&[0_u8][..], &[0_u8][..], &[1_u8, b'x'][..]] {
+            thread::sleep(DRIP_INTERVAL);
+            worker_stream
+                .write_all(chunk)
+                .expect("keep each slow-drip gap below the per-read timeout");
+        }
+    });
+
+    let started = Instant::now();
+    let result =
+        super::promotion_decision_handler::read_bounded_promotion_decision_frame_with_timeout_for_tests(
+            &mut broker_stream,
+            READ_TIMEOUT,
+        );
+    let elapsed = started.elapsed();
+    drip.join().expect("complete the slow-drip writer");
+    assert!(matches!(
+        result,
+        Err(PromotionDecisionHandlerError::FrameRejected)
+    ));
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "slow-dripped header bytes must not extend the absolute frame deadline"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn protected_promotion_decision_timeout_reader_rejects_a_slow_drip_body_past_its_absolute_deadline()
+{
+    use std::io::Write;
+    use std::os::unix::net::UnixStream;
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    const READ_TIMEOUT: Duration = Duration::from_millis(100);
+    const DRIP_INTERVAL: Duration = Duration::from_millis(40);
+
+    let (mut broker_stream, mut worker_stream) =
+        UnixStream::pair().expect("create a local Unix socket pair");
+    worker_stream
+        .write_all(&[0_u8, 0_u8, 0_u8, 4_u8, b'a'])
+        .expect("send a complete header and the first body byte");
+    let drip = thread::spawn(move || {
+        for byte in [b'b', b'c', b'd'] {
+            thread::sleep(DRIP_INTERVAL);
+            worker_stream
+                .write_all(&[byte])
+                .expect("keep each slow-drip gap below the per-read timeout");
+        }
+    });
+
+    let started = Instant::now();
+    let result =
+        super::promotion_decision_handler::read_bounded_promotion_decision_frame_with_timeout_for_tests(
+            &mut broker_stream,
+            READ_TIMEOUT,
+        );
+    let elapsed = started.elapsed();
+    drip.join().expect("complete the slow-drip writer");
+    assert!(matches!(
+        result,
+        Err(PromotionDecisionHandlerError::FrameRejected)
+    ));
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "slow-dripped body bytes must not extend the absolute frame deadline"
+    );
+}
+
 fn promotion_execution_wire(request_id: &str, promotion_decision_event_id: &str) -> String {
     format!(
         r#"{{"request_id":"{request_id}","promotion_decision_event_id":"{promotion_decision_event_id}"}}"#
@@ -5422,6 +6003,148 @@ fn protected_promotion_execution_frame_reader_rejects_zero_oversized_and_truncat
             "{label} frame must fail closed without allocating or parsing a request"
         );
     }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn protected_promotion_execution_timeout_reader_rejects_held_open_partial_header_within_deadline() {
+    use std::io::Write;
+    use std::os::unix::net::UnixStream;
+    use std::time::{Duration, Instant};
+
+    let (mut broker_stream, mut worker_stream) =
+        UnixStream::pair().expect("create a local Unix socket pair");
+    worker_stream
+        .write_all(&[0_u8, 0_u8])
+        .expect("send only part of the frame header while retaining the peer");
+
+    let started = Instant::now();
+    assert!(matches!(
+        super::promotion_execution_handler::read_bounded_promotion_execution_frame_with_timeout_for_tests(
+            &mut broker_stream,
+            Duration::from_millis(25),
+        ),
+        Err(PromotionExecutionHandlerError::FrameRejected)
+    ));
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "a held-open partial frame must be rejected by the bounded timeout rather than pinning the broker"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn protected_promotion_execution_timeout_reader_rejects_held_open_partial_body_within_deadline() {
+    use std::io::Write;
+    use std::os::unix::net::UnixStream;
+    use std::time::{Duration, Instant};
+
+    let (mut broker_stream, mut worker_stream) =
+        UnixStream::pair().expect("create a local Unix socket pair");
+    worker_stream
+        .write_all(&[0_u8, 0_u8, 0_u8, 4_u8, 1_u8])
+        .expect("send a complete header and partial body while retaining the peer");
+
+    let started = Instant::now();
+    assert!(matches!(
+        super::promotion_execution_handler::read_bounded_promotion_execution_frame_with_timeout_for_tests(
+            &mut broker_stream,
+            Duration::from_millis(25),
+        ),
+        Err(PromotionExecutionHandlerError::FrameRejected)
+    ));
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "a held-open partial frame must be rejected by the bounded timeout rather than pinning the broker"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn protected_promotion_execution_timeout_reader_rejects_a_slow_drip_header_past_its_absolute_deadline(
+) {
+    use std::io::Write;
+    use std::os::unix::net::UnixStream;
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    const READ_TIMEOUT: Duration = Duration::from_millis(100);
+    const DRIP_INTERVAL: Duration = Duration::from_millis(40);
+
+    let (mut broker_stream, mut worker_stream) =
+        UnixStream::pair().expect("create a local Unix socket pair");
+    worker_stream
+        .write_all(&[0_u8])
+        .expect("send the first header byte before beginning a slow drip");
+    let drip = thread::spawn(move || {
+        for chunk in [&[0_u8][..], &[0_u8][..], &[1_u8, b'x'][..]] {
+            thread::sleep(DRIP_INTERVAL);
+            worker_stream
+                .write_all(chunk)
+                .expect("keep each slow-drip gap below the per-read timeout");
+        }
+    });
+
+    let started = Instant::now();
+    let result =
+        super::promotion_execution_handler::read_bounded_promotion_execution_frame_with_timeout_for_tests(
+            &mut broker_stream,
+            READ_TIMEOUT,
+        );
+    let elapsed = started.elapsed();
+    drip.join().expect("complete the slow-drip writer");
+    assert!(matches!(
+        result,
+        Err(PromotionExecutionHandlerError::FrameRejected)
+    ));
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "slow-dripped header bytes must not extend the absolute frame deadline"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn protected_promotion_execution_timeout_reader_rejects_a_slow_drip_body_past_its_absolute_deadline(
+) {
+    use std::io::Write;
+    use std::os::unix::net::UnixStream;
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    const READ_TIMEOUT: Duration = Duration::from_millis(100);
+    const DRIP_INTERVAL: Duration = Duration::from_millis(40);
+
+    let (mut broker_stream, mut worker_stream) =
+        UnixStream::pair().expect("create a local Unix socket pair");
+    worker_stream
+        .write_all(&[0_u8, 0_u8, 0_u8, 4_u8, b'a'])
+        .expect("send a complete header and the first body byte");
+    let drip = thread::spawn(move || {
+        for byte in [b'b', b'c', b'd'] {
+            thread::sleep(DRIP_INTERVAL);
+            worker_stream
+                .write_all(&[byte])
+                .expect("keep each slow-drip gap below the per-read timeout");
+        }
+    });
+
+    let started = Instant::now();
+    let result =
+        super::promotion_execution_handler::read_bounded_promotion_execution_frame_with_timeout_for_tests(
+            &mut broker_stream,
+            READ_TIMEOUT,
+        );
+    let elapsed = started.elapsed();
+    drip.join().expect("complete the slow-drip writer");
+    assert!(matches!(
+        result,
+        Err(PromotionExecutionHandlerError::FrameRejected)
+    ));
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "slow-dripped body bytes must not extend the absolute frame deadline"
+    );
 }
 
 fn promotion_receipt_message() -> String {

@@ -83,6 +83,14 @@ pub enum TrustedGovernedRecoveryError {
         conflicting_dispatch_event_ref: String,
     },
     #[error(
+        "promotion approval request {promotion_approval_request_event_ref} is bound to more than one verified governed workflow ({first_dispatch_event_ref}, {conflicting_dispatch_event_ref})"
+    )]
+    PromotionApprovalIdentityConflict {
+        promotion_approval_request_event_ref: String,
+        first_dispatch_event_ref: String,
+        conflicting_dispatch_event_ref: String,
+    },
+    #[error(
         "promotion evidence for candidate {candidate_digest} is not bound to its immutable candidate"
     )]
     PromotionCandidateConflict { candidate_digest: String },
@@ -313,6 +321,10 @@ pub struct TrustedGovernedRecoverySnapshot {
     /// Lookup-only index for one exact signed promotion decision. A caller
     /// still needs the ledger's sealed write-ahead claim before any effect.
     promotion_decision_dispatch_index: BTreeMap<String, String>,
+    /// Lookup-only index for one exact signed promotion-approval work item.
+    /// A caller still needs broker-owned replay derivation and a sealed ledger
+    /// decision path; this index is not promotion authority.
+    promotion_approval_dispatch_index: BTreeMap<String, String>,
 }
 
 /// Fixed host-owned cap for a complete trusted recovery scan. It is not a CLI
@@ -1068,6 +1080,22 @@ impl TrustedGovernedRecoverySnapshot {
             })
     }
 
+    /// Find the one workflow containing an exact signed promotion-approval
+    /// work item.
+    ///
+    /// This is a read-only recovery query. A pending approval returned here is
+    /// not itself a decision or target-effect capability.
+    pub fn workflow_for_promotion_approval_request_event_ref(
+        &self,
+        promotion_approval_request_event_ref: &str,
+    ) -> Option<&WorkflowInstanceV1> {
+        self.promotion_approval_dispatch_index
+            .get(promotion_approval_request_event_ref)
+            .and_then(|dispatch_event_ref| {
+                self.workflows_by_dispatch_event_ref.get(dispatch_event_ref)
+            })
+    }
+
     /// Classify an already-recorded governed action from this fully verified
     /// tape snapshot.
     ///
@@ -1269,6 +1297,7 @@ impl TrustedGovernedRecoverySnapshot {
         let mut candidate_dispatch_index = BTreeMap::new();
         let mut promotion_dispatch_index = BTreeMap::new();
         let mut promotion_decision_dispatch_index = BTreeMap::new();
+        let mut promotion_approval_dispatch_index = BTreeMap::new();
 
         for workflow in workflows.filter(|workflow| {
             is_trusted_governed_recovery_workflow(workflow, snapshot_cache_source_anchor.as_ref())
@@ -1325,6 +1354,22 @@ impl TrustedGovernedRecoverySnapshot {
                 }
             }
 
+            if let Some(approval) = workflow.promotion_approval.as_ref() {
+                let promotion_approval_request_event_ref = approval.event_id.to_string();
+                if let Some(first_dispatch_event_ref) = promotion_approval_dispatch_index.insert(
+                    promotion_approval_request_event_ref.clone(),
+                    dispatch_event_ref.clone(),
+                ) {
+                    return Err(
+                        TrustedGovernedRecoveryError::PromotionApprovalIdentityConflict {
+                            promotion_approval_request_event_ref,
+                            first_dispatch_event_ref,
+                            conflicting_dispatch_event_ref: dispatch_event_ref,
+                        },
+                    );
+                }
+            }
+
             workflows_by_dispatch_event_ref.insert(dispatch_event_ref, workflow.clone());
         }
 
@@ -1341,6 +1386,7 @@ impl TrustedGovernedRecoverySnapshot {
             candidate_dispatch_index,
             promotion_dispatch_index,
             promotion_decision_dispatch_index,
+            promotion_approval_dispatch_index,
         })
     }
 }

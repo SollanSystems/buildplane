@@ -23,8 +23,13 @@ use serde::Deserialize;
 use std::io::Read;
 #[cfg(target_os = "linux")]
 use std::os::unix::net::UnixStream;
+#[cfg(target_os = "linux")]
+use std::time::{Duration, Instant};
 use thiserror::Error;
 use uuid::Uuid;
+
+#[cfg(target_os = "linux")]
+const PROMOTION_EXECUTION_FRAME_READ_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Closed local failures for the private authenticated promotion-execution
 /// ingress. Authority, tape, replay, Git, and reconciliation internals never
@@ -137,7 +142,8 @@ fn status_or_reconciliation<E>(
 /// This function starts no listener and writes no response. Peer verification
 /// is intentionally its first operation, so a rejected same-UID or
 /// unconfigured worker cannot cause even a frame-header read or a Git/tape
-/// operation.
+/// operation. Every individual socket read is also preceded by a fresh peer
+/// check and a fixed host-owned deadline.
 #[cfg(target_os = "linux")]
 pub(crate) fn handle_authenticated_promotion_execution_request(
     policy: &BrokerHostConfinementPolicyV1,
@@ -158,11 +164,15 @@ pub(crate) fn read_authenticated_promotion_execution_frame(
     attestation: &BrokerHostConfinementAttestationV1,
     stream: &mut UnixStream,
 ) -> Result<Vec<u8>, PromotionExecutionHandlerError> {
-    policy
-        .verify_linux_connected_worker(attestation, stream)
-        .map_err(|_| PromotionExecutionHandlerError::PeerRejected)?;
-
-    read_bounded_promotion_execution_frame(stream)
+    read_bounded_promotion_execution_frame_with_timeout(
+        stream,
+        PROMOTION_EXECUTION_FRAME_READ_TIMEOUT,
+        |stream| {
+            policy
+                .verify_linux_connected_worker(attestation, stream)
+                .map_err(|_| PromotionExecutionHandlerError::PeerRejected)
+        },
+    )
 }
 
 /// Read one big-endian length-prefixed payload without permitting an untrusted
@@ -171,12 +181,48 @@ pub(crate) fn read_authenticated_promotion_execution_frame(
 pub(crate) fn read_bounded_promotion_execution_frame(
     stream: &mut UnixStream,
 ) -> Result<Vec<u8>, PromotionExecutionHandlerError> {
+    read_bounded_promotion_execution_frame_with_timeout(
+        stream,
+        PROMOTION_EXECUTION_FRAME_READ_TIMEOUT,
+        |_| Ok(()),
+    )
+}
+
+/// Test-only entrypoint for exercising a held-open frame without making the
+/// production deadline caller-configurable.
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) fn read_bounded_promotion_execution_frame_with_timeout_for_tests(
+    stream: &mut UnixStream,
+    read_timeout: Duration,
+) -> Result<Vec<u8>, PromotionExecutionHandlerError> {
+    read_bounded_promotion_execution_frame_with_timeout(stream, read_timeout, |_| Ok(()))
+}
+
+/// Read one bounded frame with a host-owned absolute deadline and a mandatory
+/// gate just before each syscall that can block. The authenticated production
+/// path uses the gate to re-check the peer before every header/body read; the
+/// bare bounded reader uses a no-op gate only for isolated frame-reader tests.
+#[cfg(target_os = "linux")]
+fn read_bounded_promotion_execution_frame_with_timeout<F>(
+    stream: &mut UnixStream,
+    frame_timeout: Duration,
+    mut before_read: F,
+) -> Result<Vec<u8>, PromotionExecutionHandlerError>
+where
+    F: FnMut(&mut UnixStream) -> Result<(), PromotionExecutionHandlerError>,
+{
     const MAX_PROMOTION_EXECUTION_FRAME_BYTES: usize = 16 * 1024;
+    let deadline = Instant::now()
+        .checked_add(frame_timeout)
+        .ok_or(PromotionExecutionHandlerError::FrameRejected)?;
 
     let mut encoded_length = [0_u8; std::mem::size_of::<u32>()];
-    stream
-        .read_exact(&mut encoded_length)
-        .map_err(|_| PromotionExecutionHandlerError::FrameRejected)?;
+    read_execution_frame_chunk_with_deadline(
+        stream,
+        deadline,
+        &mut before_read,
+        &mut encoded_length,
+    )?;
 
     let payload_length = u32::from_be_bytes(encoded_length) as usize;
     if payload_length == 0 || payload_length > MAX_PROMOTION_EXECUTION_FRAME_BYTES {
@@ -184,8 +230,45 @@ pub(crate) fn read_bounded_promotion_execution_frame(
     }
 
     let mut payload = vec![0_u8; payload_length];
-    stream
-        .read_exact(&mut payload)
-        .map_err(|_| PromotionExecutionHandlerError::FrameRejected)?;
+    read_execution_frame_chunk_with_deadline(stream, deadline, &mut before_read, &mut payload)?;
     Ok(payload)
+}
+
+#[cfg(target_os = "linux")]
+fn read_execution_frame_chunk_with_deadline<F>(
+    stream: &mut UnixStream,
+    deadline: Instant,
+    before_read: &mut F,
+    buffer: &mut [u8],
+) -> Result<(), PromotionExecutionHandlerError>
+where
+    F: FnMut(&mut UnixStream) -> Result<(), PromotionExecutionHandlerError>,
+{
+    let mut filled = 0;
+    while filled < buffer.len() {
+        if Instant::now() >= deadline {
+            return Err(PromotionExecutionHandlerError::FrameRejected);
+        }
+
+        before_read(stream)?;
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .filter(|remaining| !remaining.is_zero())
+            .ok_or(PromotionExecutionHandlerError::FrameRejected)?;
+        stream
+            .set_read_timeout(Some(remaining))
+            .map_err(|_| PromotionExecutionHandlerError::FrameRejected)?;
+
+        let bytes_read = stream
+            .read(&mut buffer[filled..])
+            .map_err(|_| PromotionExecutionHandlerError::FrameRejected)?;
+        if bytes_read == 0 {
+            return Err(PromotionExecutionHandlerError::FrameRejected);
+        }
+        filled += bytes_read;
+        if Instant::now() >= deadline {
+            return Err(PromotionExecutionHandlerError::FrameRejected);
+        }
+    }
+    Ok(())
 }
