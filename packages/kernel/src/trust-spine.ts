@@ -691,13 +691,11 @@ export interface WorkerManifestV1 {
 }
 
 /**
- * Closed, content-addressed identity of the concrete runtime selected for one
- * worker. This is intentionally separate from `WorkerManifestV1`: the legacy
- * record remains a backwards-compatible reference while this record exposes
- * the immutable provider, harness, image, tool, skill, capability, and
- * sandbox bindings a protected host needs to verify.
+ * Closed observations about the concrete runtime selected for one worker.
+ * A separately owned detector supplies these facts; this record is evidence
+ * only and never grants execution, credential, or release authority.
  */
-export interface WorkerRuntimeManifestV1 {
+export interface WorkerRuntimeManifestFactsV1 {
 	readonly schemaVersion: 1;
 	readonly workerId: string;
 	readonly executionRole: ExecutionRoleV1;
@@ -711,6 +709,16 @@ export interface WorkerRuntimeManifestV1 {
 	readonly skillSetDigest: string;
 	readonly capabilityBundleDigest: string;
 	readonly sandboxProfileDigest: string;
+}
+
+/**
+ * Closed, content-addressed identity of the concrete runtime selected for one
+ * worker. This is intentionally separate from `WorkerManifestV1`: the legacy
+ * record remains a backwards-compatible reference while this record exposes
+ * the immutable provider, harness, image, tool, skill, capability, and
+ * sandbox bindings a protected host needs to verify.
+ */
+export interface WorkerRuntimeManifestV1 extends WorkerRuntimeManifestFactsV1 {
 	readonly runtimeManifestDigest: string;
 }
 
@@ -1217,6 +1225,21 @@ const WORKER_RUNTIME_MANIFEST_V1_FIELDS = [
 	"capabilityBundleDigest",
 	"sandboxProfileDigest",
 	"runtimeManifestDigest",
+] as const;
+const WORKER_RUNTIME_MANIFEST_V1_FACTS_FIELDS = [
+	"schemaVersion",
+	"workerId",
+	"executionRole",
+	"provider",
+	"model",
+	"providerVersion",
+	"harness",
+	"harnessVersion",
+	"imageDigest",
+	"toolCatalogDigest",
+	"skillSetDigest",
+	"capabilityBundleDigest",
+	"sandboxProfileDigest",
 ] as const;
 const CONTEXT_MANIFEST_FIELDS = [
 	"schemaVersion",
@@ -3227,6 +3250,49 @@ export function parseWorkerManifestV1(input: unknown): WorkerManifestV1 {
 }
 
 /**
+ * Create a closed, frozen runtime identity from separately detected runtime
+ * facts. The supplied facts are evidence only; this factory performs no host
+ * detection, broker resolution, credential access, or execution.
+ */
+export function createWorkerRuntimeManifestV1(
+	input: unknown,
+): WorkerRuntimeManifestV1 {
+	assertWorkerRuntimeManifestFactsPrototype(input);
+	const record = readClosedRecord(
+		input,
+		"workerRuntimeManifestFacts",
+		WORKER_RUNTIME_MANIFEST_V1_FACTS_FIELDS,
+	);
+	const facts = readWorkerRuntimeManifestV1Fields(
+		record,
+		"workerRuntimeManifestFacts",
+	);
+	const manifest = {
+		...facts,
+		runtimeManifestDigest: canonicalWorkerRuntimeManifestV1Digest(facts),
+	};
+	return Object.freeze(parseWorkerRuntimeManifestV1(manifest));
+}
+
+function assertWorkerRuntimeManifestFactsPrototype(input: unknown): void {
+	if (input === null || typeof input !== "object") return;
+
+	let prototype: object | null;
+	try {
+		prototype = Object.getPrototypeOf(input);
+	} catch {
+		throw new TypeError(
+			"workerRuntimeManifestFacts must have Object.prototype or null prototype",
+		);
+	}
+	if (prototype !== Object.prototype && prototype !== null) {
+		throw new TypeError(
+			"workerRuntimeManifestFacts must have Object.prototype or null prototype",
+		);
+	}
+}
+
+/**
  * Parse a closed, self-addressing runtime identity. The digest validates the
  * immutable runtime fields at the untrusted boundary but remains evidence,
  * never execution authority.
@@ -3240,7 +3306,7 @@ export function parseWorkerRuntimeManifestV1(
 		WORKER_RUNTIME_MANIFEST_V1_FIELDS,
 	);
 	const parsed: WorkerRuntimeManifestV1 = {
-		...readWorkerRuntimeManifestV1Fields(record),
+		...readWorkerRuntimeManifestV1Fields(record, "workerRuntimeManifest"),
 		runtimeManifestDigest: readSha256Digest(
 			record,
 			"runtimeManifestDigest",
@@ -3258,53 +3324,29 @@ export function parseWorkerRuntimeManifestV1(
 
 function readWorkerRuntimeManifestV1Fields(
 	record: Record<string, unknown>,
-): Omit<WorkerRuntimeManifestV1, "runtimeManifestDigest"> {
+	label: string,
+): WorkerRuntimeManifestFactsV1 {
 	return {
-		schemaVersion: readSchemaVersion(record, "workerRuntimeManifest"),
-		workerId: readNonBlankString(record, "workerId", "workerRuntimeManifest"),
-		executionRole: readEnum(
-			record,
-			"executionRole",
-			"workerRuntimeManifest",
-			EXECUTION_ROLES,
-		),
-		provider: readNonBlankString(record, "provider", "workerRuntimeManifest"),
-		model: readNonBlankString(record, "model", "workerRuntimeManifest"),
-		providerVersion: readNonBlankString(
-			record,
-			"providerVersion",
-			"workerRuntimeManifest",
-		),
-		harness: readNonBlankString(record, "harness", "workerRuntimeManifest"),
-		harnessVersion: readNonBlankString(
-			record,
-			"harnessVersion",
-			"workerRuntimeManifest",
-		),
-		imageDigest: readSha256Digest(
-			record,
-			"imageDigest",
-			"workerRuntimeManifest",
-		),
-		toolCatalogDigest: readSha256Digest(
-			record,
-			"toolCatalogDigest",
-			"workerRuntimeManifest",
-		),
-		skillSetDigest: readSha256Digest(
-			record,
-			"skillSetDigest",
-			"workerRuntimeManifest",
-		),
+		schemaVersion: readSchemaVersion(record, label),
+		workerId: readNonBlankString(record, "workerId", label),
+		executionRole: readEnum(record, "executionRole", label, EXECUTION_ROLES),
+		provider: readNonBlankString(record, "provider", label),
+		model: readNonBlankString(record, "model", label),
+		providerVersion: readNonBlankString(record, "providerVersion", label),
+		harness: readNonBlankString(record, "harness", label),
+		harnessVersion: readNonBlankString(record, "harnessVersion", label),
+		imageDigest: readSha256Digest(record, "imageDigest", label),
+		toolCatalogDigest: readSha256Digest(record, "toolCatalogDigest", label),
+		skillSetDigest: readSha256Digest(record, "skillSetDigest", label),
 		capabilityBundleDigest: readSha256Digest(
 			record,
 			"capabilityBundleDigest",
-			"workerRuntimeManifest",
+			label,
 		),
 		sandboxProfileDigest: readSha256Digest(
 			record,
 			"sandboxProfileDigest",
-			"workerRuntimeManifest",
+			label,
 		),
 	};
 }
@@ -3589,7 +3631,10 @@ export function canonicalWorkerRuntimeManifestV1Digest(
 		"workerRuntimeManifest",
 		WORKER_RUNTIME_MANIFEST_V1_FIELDS,
 	);
-	const runtime = readWorkerRuntimeManifestV1Fields(record);
+	const runtime = readWorkerRuntimeManifestV1Fields(
+		record,
+		"workerRuntimeManifest",
+	);
 	return canonicalDigest(WORKER_RUNTIME_MANIFEST_V1_DIGEST_DOMAIN, {
 		schema_version: runtime.schemaVersion,
 		worker_id: runtime.workerId,

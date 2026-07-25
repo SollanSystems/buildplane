@@ -1614,6 +1614,90 @@ describe("trust-spine V1 contracts", () => {
 });
 
 describe("trust-spine worker runtime manifests", () => {
+	function createRuntimeManifestFromPublicApi(
+		input: unknown,
+	): WorkerRuntimeManifestV1 {
+		const factory = (
+			kernelPublicApi as typeof kernelPublicApi & {
+				readonly createWorkerRuntimeManifestV1?: (
+					facts: unknown,
+				) => WorkerRuntimeManifestV1;
+			}
+		).createWorkerRuntimeManifestV1;
+		expect(factory).toBeTypeOf("function");
+		if (typeof factory !== "function") {
+			throw new TypeError("Worker runtime manifest factory is unavailable.");
+		}
+		return factory(input);
+	}
+
+	function workerRuntimeManifestFacts(
+		overrides: Record<string, unknown> = {},
+	): Record<string, unknown> {
+		const { runtimeManifestDigest: _ignored, ...facts } =
+			workerRuntimeManifest(overrides);
+		return facts;
+	}
+
+	it("creates a deterministic frozen runtime manifest from closed runtime facts", () => {
+		const facts = workerRuntimeManifestFacts();
+		const first = createRuntimeManifestFromPublicApi(facts);
+		const second = createRuntimeManifestFromPublicApi({ ...facts });
+
+		expect(first).toEqual(second);
+		expect(first).not.toBe(second);
+		expect(Object.isFrozen(first)).toBe(true);
+		expect(first.providerVersion).toBe("2026-07-17");
+		expect(first.harnessVersion).toBe("0.1.0");
+		expect(first.runtimeManifestDigest).toBe(
+			canonicalWorkerRuntimeManifestV1Digest(first),
+		);
+		expect(parseWorkerRuntimeManifestV1(first)).toEqual(first);
+	});
+
+	it("rejects complete own runtime facts on a custom prototype before canonicalizing", () => {
+		const facts = Object.assign(
+			Object.create({ runtimeManifestDigest: digest("f") }) as Record<
+				string,
+				unknown
+			>,
+			workerRuntimeManifestFacts(),
+		);
+
+		expect(Object.hasOwn(facts, "runtimeManifestDigest")).toBe(false);
+		expect(() => createRuntimeManifestFromPublicApi(facts)).toThrow(
+			"workerRuntimeManifestFacts must have Object.prototype or null prototype",
+		);
+	});
+
+	it.each([
+		[
+			"a caller-provided digest override",
+			() => ({
+				...workerRuntimeManifestFacts(),
+				runtimeManifestDigest: digest("f"),
+			}),
+			'workerRuntimeManifestFacts has unknown field "runtimeManifestDigest"',
+		],
+		[
+			"an unknown fact",
+			() => ({ ...workerRuntimeManifestFacts(), unexpected: true }),
+			'workerRuntimeManifestFacts has unknown field "unexpected"',
+		],
+		[
+			"a malformed provider version",
+			() => ({ ...workerRuntimeManifestFacts(), providerVersion: " " }),
+			"workerRuntimeManifestFacts.providerVersion must be a non-blank string",
+		],
+		[
+			"prototype-backed runtime facts",
+			() => Object.create(workerRuntimeManifestFacts()),
+			"workerRuntimeManifestFacts must have Object.prototype or null prototype",
+		],
+	])("fails closed for %s", (_label, build, message) => {
+		expect(() => createRuntimeManifestFromPublicApi(build())).toThrow(message);
+	});
+
 	it("parses a canonical runtime identity and binds it to governed sealed V3", () => {
 		const runtime = parseWorkerRuntimeManifestV1(workerRuntimeManifest());
 		const dispatch = parseDispatchEnvelopeV3(
