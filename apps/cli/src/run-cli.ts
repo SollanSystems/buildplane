@@ -6126,11 +6126,27 @@ async function runFork(
 		return 1;
 	}
 
+	let realWorkspaceRoot: string;
+	try {
+		realWorkspaceRoot = realpathSync(workspace);
+	} catch (error) {
+		opts.stderr(
+			`failed to resolve fork workspace before sidecar cleanup: ${String(error)}\n`,
+		);
+		return 1;
+	}
 	for (const sidecar of preflightLedgerSidecars) {
 		if (sidecar.existedBeforePreflight || !existsSync(sidecar.path)) {
 			continue;
 		}
 		try {
+			const realSidecarDirectory = realpathSync(dirname(sidecar.path));
+			if (!isPathAtOrBelowRoot(realWorkspaceRoot, realSidecarDirectory)) {
+				opts.stderr(
+					`fork plan ledger sidecar escapes the workspace; refusing removal at ${sidecar.path}\n`,
+				);
+				return 1;
+			}
 			if (!lstatSync(sidecar.path).isFile()) {
 				opts.stderr(
 					`fork plan created a non-file ledger sidecar at ${sidecar.path}; refusing checkout\n`,

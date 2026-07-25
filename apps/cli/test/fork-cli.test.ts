@@ -1,5 +1,11 @@
 import { EventEmitter } from "node:events";
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	symlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -324,6 +330,48 @@ describe("fork CLI orchestration", () => {
 		expect(exitCode).toBe(0);
 		expect(existsSync(join(ledgerDir, "events.db-wal"))).toBe(true);
 	});
+
+	it.runIf(process.platform === "linux")(
+		"fails closed when a planner sidecar resolves outside the workspace",
+		async () => {
+			forkState.createPlanLedgerSidecars = true;
+			const { root, packetPath } = createTempForkInputs();
+			const escapedLedgerDir = mkdtempSync(
+				join(tmpdir(), "buildplane-fork-sidecar-escape-"),
+			);
+			const workspaceBuildplaneDir = join(root, ".buildplane");
+			mkdirSync(workspaceBuildplaneDir, { recursive: true });
+			symlinkSync(
+				escapedLedgerDir,
+				join(workspaceBuildplaneDir, "ledger"),
+				"dir",
+			);
+			const stderr: string[] = [];
+
+			const exitCode = await runCli(
+				[
+					"fork",
+					"--raw",
+					"parent-run-1",
+					"--at",
+					"parent-event-1",
+					"--packet",
+					packetPath,
+					"--workspace",
+					root,
+				],
+				{
+					cwd: root,
+					stdout: () => {},
+					stderr: (line) => stderr.push(line),
+				},
+			);
+
+			expect(exitCode).toBe(1);
+			expect(stderr.join("\n")).toContain("escapes the workspace");
+			expect(existsSync(join(escapedLedgerDir, "events.db-shm"))).toBe(true);
+		},
+	);
 
 	it("routes fork execution through runPacketAsync for planned model packets", async () => {
 		const rawForkPacket = {
