@@ -298,7 +298,7 @@ describe("createTapeEmitter", () => {
 		});
 	});
 
-	it("refuses caller-crafted trust-spine activity events on the generic emitter", async () => {
+	it("refuses caller-crafted trust-spine authority events on the generic emitter", async () => {
 		const { stdin, stderr, childExit } = createMock();
 		const emitterP = createTapeEmitter({
 			childStdin: asWritable(stdin),
@@ -314,15 +314,20 @@ describe("createTapeEmitter", () => {
 		);
 		const emitter = await emitterP;
 
-		expect(() =>
-			emitter.emit("activity_heartbeat_recorded_v1", {
-				forged: true,
-			}),
-		).toThrow("authority-owned control");
-		expect(
-			stdin.writes.some((line) =>
-				line.includes("activity_heartbeat_recorded_v1"),
-			),
-		).toBe(false);
+		for (const kind of [
+			"activity_heartbeat_recorded_v1",
+			"dispatch_envelope_v5",
+			"context_manifest_declared_v1",
+			"worker_manifest_declared_v1",
+			"sandbox_profile_declared_v1",
+			"attempt_context_declared_v1",
+		]) {
+			expect(() =>
+				emitter.emit(kind, {
+					forged: true,
+				}),
+			).toThrow("authority-owned control");
+			expect(stdin.writes.some((line) => line.includes(kind))).toBe(false);
+		}
 	});
 });
