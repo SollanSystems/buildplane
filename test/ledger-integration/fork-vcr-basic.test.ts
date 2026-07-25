@@ -314,7 +314,7 @@ describe("fork --vcr basic [Phase F]", () => {
 			).toBe(1);
 			expect(fixture.forkRunId).not.toBe("");
 			expect(fixture.forkStderr).toContain(
-				"required output is outside the worktree root",
+				"unit expected output is outside the worktree root",
 			);
 			const db = new DatabaseSync(fixture.eventsDbPath, { readOnly: true });
 			const childEventKinds = (
