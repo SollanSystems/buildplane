@@ -37,6 +37,8 @@ mod confinement;
 #[allow(dead_code)]
 mod dispatch_admission;
 mod promotion_execution;
+#[allow(dead_code)]
+mod promotion_execution_handler;
 mod promotion_git;
 #[cfg(target_os = "linux")]
 #[allow(dead_code)]

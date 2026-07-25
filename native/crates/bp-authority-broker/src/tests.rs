@@ -13,6 +13,10 @@ use super::promotion_execution::{
     PromotionExecutionError, PromotionExecutionGrant, PromotionReplaySnapshotVerifier,
     PromotionResultDisposition, TrustedPromotionBinding, TrustedPromotionVerifier,
 };
+use super::promotion_execution_handler::{
+    handle_promotion_execution_wire_for_tests, parse_promotion_execution_request,
+    PromotionExecutionHandlerError,
+};
 use super::promotion_git::{
     PromotionCapabilityError, PromotionGitError, PromotionGitGateway, PromotionGitOutcome,
     TestFixedGitRunner, TestGitOperation, TestGitOutput, VerifiedPromotionCapability,
@@ -5065,6 +5069,359 @@ fn promotion_execution_rejects_a_claim_substituted_from_another_dispatch_before_
     assert_eq!(backend_state.borrow().claim_calls, 1);
     assert_eq!(backend_state.borrow().result_calls, 0);
     assert_eq!(gateway_state.borrow().calls, 0);
+}
+
+fn promotion_execution_wire(request_id: &str, promotion_decision_event_id: &str) -> String {
+    format!(
+        r#"{{"request_id":"{request_id}","promotion_decision_event_id":"{promotion_decision_event_id}"}}"#
+    )
+}
+
+fn promotion_execution_wire_with_injected_field(
+    request_id: &str,
+    promotion_decision_event_id: &str,
+    injected_field: &str,
+) -> String {
+    let mut wire = promotion_execution_wire(request_id, promotion_decision_event_id);
+    wire.pop()
+        .expect("the canonical promotion execution wire ends in an object delimiter");
+    format!(r#"{wire},"{injected_field}":"caller-controlled"}}"#)
+}
+
+#[test]
+fn protected_promotion_execution_wire_accepts_only_closed_canonical_decision_identity() {
+    let decision_event_id = EventId::new();
+    let wire = promotion_execution_wire(
+        "123e4567-e89b-12d3-a456-426614174000",
+        &decision_event_id.to_string(),
+    );
+
+    assert_eq!(
+        parse_promotion_execution_request(wire.as_bytes())
+            .expect("the closed canonical promotion identity must parse"),
+        BrokerPromotionExecutionRequest {
+            promotion_decision_event_id: decision_event_id,
+        }
+    );
+
+    for (label, malformed_wire) in [
+        (
+            "missing request ID",
+            format!(r#"{{"promotion_decision_event_id":"{decision_event_id}"}}"#),
+        ),
+        (
+            "missing decision ID",
+            r#"{"request_id":"123e4567-e89b-12d3-a456-426614174000"}"#.into(),
+        ),
+        (
+            "noncanonical request ID",
+            promotion_execution_wire(
+                "123E4567-e89b-12d3-a456-426614174000",
+                &decision_event_id.to_string(),
+            ),
+        ),
+        (
+            "noncanonical decision ID",
+            promotion_execution_wire(
+                "123e4567-e89b-12d3-a456-426614174000",
+                "123E4567-e89b-12d3-a456-426614174000",
+            ),
+        ),
+    ] {
+        assert!(
+            matches!(
+                parse_promotion_execution_request(malformed_wire.as_bytes()),
+                Err(PromotionExecutionHandlerError::RequestRejected)
+            ),
+            "{label} must fail closed before broker entry"
+        );
+    }
+}
+
+#[test]
+fn protected_promotion_execution_wire_rejects_caller_supplied_authority_and_effect_fields() {
+    let run_id = RunId::new();
+    let request = promotion_execution_request();
+    let backend_state = Rc::new(RefCell::new(FakePromotionBackendState::default()));
+    let gateway_state = Rc::new(RefCell::new(FakePromotionGatewayState::default()));
+    let mut authority = BrokerPromotionExecutionAuthority::new(
+        run_id,
+        FakePromotionVerifier { binding: None },
+        FakePromotionBackend {
+            state: Rc::clone(&backend_state),
+            grants: VecDeque::new(),
+            results: VecDeque::new(),
+        },
+        FakePromotionGateway {
+            state: Rc::clone(&gateway_state),
+            outcome: None,
+        },
+        LeasePolicy::from_startup_config(30_000).expect("valid promotion lease policy"),
+    );
+
+    for injected_field in [
+        "run_id",
+        "authority",
+        "candidate_digest",
+        "candidate_ref",
+        "repository_root",
+        "git",
+        "command",
+        "target_ref",
+        "lease_duration_ms",
+        "signing_key",
+        "idempotency_key",
+    ] {
+        let wire = promotion_execution_wire_with_injected_field(
+            "123e4567-e89b-12d3-a456-426614174000",
+            &request.promotion_decision_event_id.to_string(),
+            injected_field,
+        );
+        assert!(
+            matches!(
+                handle_promotion_execution_wire_for_tests(&mut authority, wire.as_bytes()),
+                Err(PromotionExecutionHandlerError::RequestRejected)
+            ),
+            "{injected_field} must be rejected before broker entry"
+        );
+        assert_eq!(backend_state.borrow().claim_calls, 0);
+        assert_eq!(backend_state.borrow().result_calls, 0);
+        assert_eq!(gateway_state.borrow().calls, 0);
+    }
+}
+
+#[test]
+fn protected_promotion_execution_wire_converts_replay_failure_to_reconciliation_without_git() {
+    let run_id = RunId::new();
+    let request = promotion_execution_request();
+    let backend_state = Rc::new(RefCell::new(FakePromotionBackendState::default()));
+    let gateway_state = Rc::new(RefCell::new(FakePromotionGatewayState::default()));
+    let mut authority = BrokerPromotionExecutionAuthority::new(
+        run_id,
+        FailingPromotionVerifier {
+            error: Some(PromotionExecutionError::Replay(bounded_recovery_error())),
+        },
+        FakePromotionBackend {
+            state: Rc::clone(&backend_state),
+            grants: VecDeque::new(),
+            results: VecDeque::new(),
+        },
+        FakePromotionGateway {
+            state: Rc::clone(&gateway_state),
+            outcome: None,
+        },
+        LeasePolicy::from_startup_config(30_000).expect("valid promotion lease policy"),
+    );
+    let wire = promotion_execution_wire(
+        "123e4567-e89b-12d3-a456-426614174000",
+        &request.promotion_decision_event_id.to_string(),
+    );
+
+    assert_eq!(
+        handle_promotion_execution_wire_for_tests(&mut authority, wire.as_bytes())
+            .expect("a valid opaque wire must reach the broker"),
+        BrokerPromotionExecutionStatus::ReconciliationRequired
+    );
+    assert_eq!(backend_state.borrow().claim_calls, 0);
+    assert_eq!(backend_state.borrow().result_calls, 0);
+    assert_eq!(gateway_state.borrow().calls, 0);
+}
+
+#[test]
+fn protected_promotion_execution_wire_for_reject_decision_never_claims_or_enters_git() {
+    let run_id = RunId::new();
+    let request = promotion_execution_request();
+    let dispatch_event_id = EventId::new();
+    let reject_binding = TrustedPromotionBinding::for_tests(
+        run_id,
+        request.promotion_decision_event_id,
+        DIGEST_A.into(),
+        dispatch_event_id,
+        DIGEST_B.into(),
+        PromotionDecisionKindV1::Reject,
+        ExecutionRoleV1::Implementer,
+        CommitModeV1::Atomic,
+        PROMOTION_CANDIDATE_DIGEST.into(),
+        PROMOTION_CANDIDATE_REF.into(),
+        PROMOTION_CANDIDATE_COMMIT.into(),
+        PROMOTION_TREE_DIGEST.into(),
+        PROMOTION_BASE_COMMIT.into(),
+        PROMOTION_TARGET_REF.into(),
+        "promotion:workflow-1:attempt-1".into(),
+        false,
+    );
+    let backend_state = Rc::new(RefCell::new(FakePromotionBackendState::default()));
+    let gateway_state = Rc::new(RefCell::new(FakePromotionGatewayState::default()));
+    let mut authority = BrokerPromotionExecutionAuthority::new(
+        run_id,
+        FakePromotionVerifier {
+            binding: Some(reject_binding),
+        },
+        FakePromotionBackend {
+            state: Rc::clone(&backend_state),
+            grants: VecDeque::new(),
+            results: VecDeque::new(),
+        },
+        FakePromotionGateway {
+            state: Rc::clone(&gateway_state),
+            outcome: None,
+        },
+        LeasePolicy::from_startup_config(30_000).expect("valid promotion lease policy"),
+    );
+    let wire = promotion_execution_wire(
+        "123e4567-e89b-12d3-a456-426614174000",
+        &request.promotion_decision_event_id.to_string(),
+    );
+
+    assert_eq!(
+        handle_promotion_execution_wire_for_tests(&mut authority, wire.as_bytes())
+            .expect("a valid opaque reject decision wire must reach the broker"),
+        BrokerPromotionExecutionStatus::Rejected
+    );
+    assert_eq!(backend_state.borrow().claim_calls, 0);
+    assert_eq!(backend_state.borrow().result_calls, 0);
+    assert_eq!(gateway_state.borrow().calls, 0);
+}
+
+#[test]
+fn protected_promotion_execution_wire_can_record_exactly_one_existing_authority_effect() {
+    let run_id = RunId::new();
+    let request = promotion_execution_request();
+    let dispatch_event_id = EventId::new();
+    let binding = promotion_execution_binding(run_id, &request, dispatch_event_id, false);
+    let backend_state = Rc::new(RefCell::new(FakePromotionBackendState::default()));
+    let gateway_state = Rc::new(RefCell::new(FakePromotionGatewayState::default()));
+    let claim = promotion_execution_claim(run_id, &request, dispatch_event_id);
+    let mut authority = BrokerPromotionExecutionAuthority::new(
+        run_id,
+        FakePromotionVerifier {
+            binding: Some(binding),
+        },
+        FakePromotionBackend {
+            state: Rc::clone(&backend_state),
+            grants: [Ok(PromotionExecutionGrant::Granted {
+                run_id,
+                claim_event_id: EventId::new(),
+                claim_event_digest: DIGEST_D.into(),
+                claim,
+            })]
+            .into_iter()
+            .collect(),
+            results: [Ok(PromotionResultDisposition::Recorded { run_id })]
+                .into_iter()
+                .collect(),
+        },
+        FakePromotionGateway {
+            state: Rc::clone(&gateway_state),
+            outcome: Some(Ok(promotion_execution_outcome())),
+        },
+        LeasePolicy::from_startup_config(30_000).expect("valid promotion lease policy"),
+    );
+    let wire = promotion_execution_wire(
+        "123e4567-e89b-12d3-a456-426614174000",
+        &request.promotion_decision_event_id.to_string(),
+    );
+
+    assert_eq!(
+        handle_promotion_execution_wire_for_tests(&mut authority, wire.as_bytes())
+            .expect("the exact closed decision identity must reach the authority"),
+        BrokerPromotionExecutionStatus::Recorded
+    );
+    assert_eq!(backend_state.borrow().claim_calls, 1);
+    assert_eq!(backend_state.borrow().result_calls, 1);
+    assert_eq!(gateway_state.borrow().calls, 1);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn protected_promotion_execution_authenticated_frame_reader_rejects_same_uid_before_consuming_frame(
+) {
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
+    use std::time::Duration;
+
+    let broker_uid = unsafe { libc::geteuid() };
+    let configured_worker_uid = broker_uid.checked_add(1).unwrap_or(broker_uid - 1);
+    let policy = BrokerHostConfinementPolicyV1::new(broker_uid, [configured_worker_uid])
+        .expect("a distinct configured worker identity is valid");
+    let attestation = policy
+        .attest_current_broker_process()
+        .expect("the test process is the configured broker identity");
+    let (mut broker_stream, mut same_uid_worker_stream) =
+        UnixStream::pair().expect("create a local Unix socket pair");
+    let payload = promotion_execution_wire(
+        "123e4567-e89b-12d3-a456-426614174000",
+        &EventId::new().to_string(),
+    )
+    .into_bytes();
+    let mut frame = u32::try_from(payload.len())
+        .expect("the canonical promotion fixture fits the bounded frame")
+        .to_be_bytes()
+        .to_vec();
+    frame.extend_from_slice(&payload);
+    same_uid_worker_stream
+        .write_all(&frame)
+        .expect("queue a valid-looking promotion frame");
+
+    assert!(matches!(
+        super::promotion_execution_handler::read_authenticated_promotion_execution_frame(
+            &policy,
+            &attestation,
+            &mut broker_stream,
+        ),
+        Err(PromotionExecutionHandlerError::PeerRejected)
+    ));
+
+    broker_stream
+        .set_read_timeout(Some(Duration::from_millis(250)))
+        .expect("bound an assertion failure if the gate consumed the frame");
+    let mut observed = vec![0; frame.len()];
+    broker_stream
+        .read_exact(&mut observed)
+        .expect("peer authentication must fail before any frame byte is read");
+    assert_eq!(observed, frame);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn protected_promotion_execution_frame_reader_rejects_zero_oversized_and_truncated_frames() {
+    use std::io::Write;
+    use std::os::unix::net::UnixStream;
+
+    let cases = [
+        ("zero length", 0_u32.to_be_bytes().to_vec()),
+        (
+            "oversized",
+            u32::try_from(16 * 1024 + 1)
+                .expect("the bounded-frame test length fits u32")
+                .to_be_bytes()
+                .to_vec(),
+        ),
+        ("truncated payload", {
+            let mut frame = 4_u32.to_be_bytes().to_vec();
+            frame.extend_from_slice(&[1_u8, 2_u8]);
+            frame
+        }),
+    ];
+
+    for (label, frame) in cases {
+        let (mut broker_stream, mut worker_stream) =
+            UnixStream::pair().expect("create a local Unix socket pair");
+        worker_stream
+            .write_all(&frame)
+            .expect("queue the malformed promotion frame");
+        drop(worker_stream);
+
+        assert!(
+            matches!(
+                super::promotion_execution_handler::read_bounded_promotion_execution_frame(
+                    &mut broker_stream
+                ),
+                Err(PromotionExecutionHandlerError::FrameRejected)
+            ),
+            "{label} frame must fail closed without allocating or parsing a request"
+        );
+    }
 }
 
 fn promotion_receipt_message() -> String {

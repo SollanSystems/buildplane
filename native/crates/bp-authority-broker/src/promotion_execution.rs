@@ -324,13 +324,21 @@ where
     }
 }
 
-impl<'a>
-    BrokerPromotionExecutionAuthority<
+/// Opaque production promotion authority constructed only from protected
+/// startup dependencies.
+///
+/// The enclosed replay verifier, ledger backend, and fixed Git gateway cannot
+/// be swapped by a wire caller or a sibling ingress. Test-only generic
+/// authorities remain separate from this production type.
+pub(crate) struct ProtectedPromotionExecutionAuthority<'a> {
+    inner: BrokerPromotionExecutionAuthority<
         PromotionReplaySnapshotVerifier<'a>,
         LedgerPromotionExecutionBackend<'a>,
         PromotionGitGateway,
-    >
-{
+    >,
+}
+
+impl<'a> ProtectedPromotionExecutionAuthority<'a> {
     /// Build the fixed production composition only from protected startup
     /// dependencies. There is deliberately no controller-supplied repository
     /// path, signer, tape path, lease duration, or Git executable.
@@ -349,22 +357,32 @@ impl<'a>
         lease_policy: LeasePolicy,
     ) -> Result<Self, PromotionGitStartupError> {
         let gateway = PromotionGitGateway::from_startup_repository_root(repository_root)?;
-        Ok(Self::new(
-            run_id,
-            PromotionReplaySnapshotVerifier::from_prevalidated_startup(
-                database_path,
-                replay_authorities,
-                pinned_kernel_signer,
+        Ok(Self {
+            inner: BrokerPromotionExecutionAuthority::new(
+                run_id,
+                PromotionReplaySnapshotVerifier::from_prevalidated_startup(
+                    database_path,
+                    replay_authorities,
+                    pinned_kernel_signer,
+                ),
+                LedgerPromotionExecutionBackend::from_prevalidated_startup(
+                    store,
+                    promotion_authority,
+                    kernel_signing_key,
+                    kernel_signer,
+                ),
+                gateway,
+                lease_policy,
             ),
-            LedgerPromotionExecutionBackend::from_prevalidated_startup(
-                store,
-                promotion_authority,
-                kernel_signing_key,
-                kernel_signer,
-            ),
-            gateway,
-            lease_policy,
-        ))
+        })
+    }
+
+    /// Execute only through the fixed startup composition.
+    pub(crate) fn claim_execute_and_record(
+        &mut self,
+        request: BrokerPromotionExecutionRequest,
+    ) -> Result<BrokerPromotionExecutionStatus, PromotionExecutionError> {
+        self.inner.claim_execute_and_record(request)
     }
 }
 
