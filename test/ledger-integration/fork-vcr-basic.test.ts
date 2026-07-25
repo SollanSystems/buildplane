@@ -269,7 +269,7 @@ describe("fork --vcr basic [Phase F]", () => {
 		}
 	}, 60_000);
 
-	it("rejects traversal required outputs during VCR materialization", async () => {
+	it("rejects traversal required outputs before VCR replay execution", async () => {
 		const requiredOutput = `../escaped-vcr-materialization-${process.pid}-${Date.now()}.txt`;
 		const vcrCommand = {
 			command: "node",
@@ -312,40 +312,10 @@ describe("fork --vcr basic [Phase F]", () => {
 				fixture.forkExitCode,
 				`${fixture.forkStdout}\n${fixture.forkStderr}`,
 			).toBe(1);
-			const db = new DatabaseSync(fixture.eventsDbPath, { readOnly: true });
-			const row = db
-				.prepare(
-					"SELECT payload FROM events WHERE run_id = ? AND kind = 'tool_result' ORDER BY id DESC LIMIT 1",
-				)
-				.get(fixture.forkRunId) as { payload: string };
-			const workspaceWriteCount = (
-				db
-					.prepare(
-						"SELECT COUNT(*) AS count FROM events WHERE run_id = ? AND kind = 'workspace_write'",
-					)
-					.get(fixture.forkRunId) as { count: number }
-			).count;
-			db.close();
-
-			const payload = JSON.parse(row.payload) as {
-				ToolResultV1: {
-					output?: {
-						vcr?: string;
-						materialized_outputs?: {
-							path: string;
-							status: string;
-							reason?: string;
-						}[];
-					};
-				};
-			};
-			expect(payload.ToolResultV1.output?.vcr).toBe("hit");
-			expect(payload.ToolResultV1.output?.materialized_outputs).toContainEqual({
-				path: requiredOutput,
-				status: "invalid-output-path",
-				reason: "output path escapes root",
-			});
-			expect(workspaceWriteCount).toBe(0);
+			expect(fixture.forkRunId).toBe("");
+			expect(fixture.forkStderr).toContain(
+			"required output is outside the worktree root",
+		);
 			expect(existsSync(externalPath)).toBe(false);
 		} finally {
 			await fixture.cleanup();
