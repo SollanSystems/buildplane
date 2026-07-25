@@ -32,12 +32,14 @@ use crate::payload::trust_spine::{
     ActionKindV1, ActionReceiptOutcomeV2, ActionReceiptRecordedV2, ActionReceiptSetEntryV1,
     ActionReceiptSetRecordedV1, ActionRequestedV2, CandidateAcceptanceOutcomeV1,
     CandidateAcceptanceRecordedV1, CandidateCompletionRecordedV1, CandidateCreatedV2, CommitModeV1,
-    DispatchEnvelopeV3, DispatchEnvelopeV4, DispatchEnvelopeV5, ExecutionRoleV1,
-    ModelActionAuthorizedV1, ModelActionAuthorizedV2, ModelActionIntentV1, ModelRequestEvidenceV1,
-    PromotionApprovalRequestedV1, PromotionDecisionKindV1, PromotionDecisionRecordedV1,
-    PromotionExecutionClaimedV1, PromotionExecutionLeaseBindingV1, PromotionGitBindingV1,
-    PromotionResultOutcomeV1, PromotionResultRecordedV1, PromotionWorktreeSyncStateV1,
-    ReviewDecisionV1, ReviewVerdictRecordedV2, TrustScopeEvidenceV1, TrustTierV1,
+    ContextManifestDeclaredV1, DispatchEnvelopeV3, DispatchEnvelopeV4, DispatchEnvelopeV5,
+    ExecutionRoleV1, ModelActionAuthorizedV1, ModelActionAuthorizedV2, ModelActionIntentV1,
+    ModelRequestEvidenceV1, PromotionApprovalRequestedV1, PromotionDecisionKindV1,
+    PromotionDecisionRecordedV1, PromotionExecutionClaimedV1, PromotionExecutionLeaseBindingV1,
+    PromotionGitBindingV1, PromotionResultOutcomeV1, PromotionResultRecordedV1,
+    PromotionWorktreeSyncStateV1, ReviewDecisionV1, ReviewVerdictRecordedV2,
+    SandboxProfileDeclaredV1, TrustScopeEvidenceV1, TrustTierV1, WorkerManifestDeclaredV1,
+    WorkflowGraphDeclaredV2,
 };
 use crate::payload::Payload;
 use crate::signing::{
@@ -58,6 +60,7 @@ use sha2::{Digest, Sha256};
 use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
@@ -2994,7 +2997,12 @@ impl SqliteStore {
         authority: &GovernedDispatchAdmissionAuthorityV1,
     ) -> Result<GovernedDispatchV5ObservationDispositionV1> {
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let evidence = verify_governed_dispatch_v5_observation_evidence(&tx, request, authority)?;
+        let evidence = v5_observation_proof::verify_observation_evidence_in_tx(
+            &tx,
+            request.run_id,
+            request.dispatch_event_id,
+            authority,
+        )?;
 
         if let Some(stored) = governed_dispatch_v5_observation_by_event(
             &tx,
@@ -8897,276 +8905,451 @@ fn insert_governed_dispatch_v5_observation(
     Ok(())
 }
 
-/// Read an exact V5 observation witness from the tape. The returned event has
-/// been canonicalized again after SQLite deserialization, is signed by the
-/// configured dispatch identity, and has a detached signature over that exact
-/// canonical event hash.
-fn load_verified_governed_dispatch_v5_observation_event(
-    conn: &Connection,
-    event_id: EventId,
-    authority: &GovernedDispatchAdmissionAuthorityV1,
-    label: &str,
-) -> Result<(Event, String)> {
-    let Some((event, signature)) = event_and_signature_by_id(conn, event_id)? else {
-        return governed_dispatch_admission_authority_rejected(format!(
-            "{label} is missing from the tape"
-        ));
-    };
-    let Some(signature) = signature else {
-        return governed_dispatch_admission_authority_rejected(format!("{label} is unsigned"));
-    };
-    let event = canonicalize(event).map_err(|error| {
-        LedgerError::GovernedDispatchAdmissionAuthorityRejected {
-            reason: format!("{label} is not canonical: {error}"),
+/// Private proof boundary for V5 observation witnesses. Keeping the proof in
+/// its own module prevents unrelated storage code from fabricating it by
+/// struct literal; the parent can receive only the non-authoritative audit
+/// evidence yielded by `verify_observation_evidence_in_tx`.
+mod v5_observation_proof {
+    use super::*;
+
+    /// Storage-private, transaction-scoped witness proof for one first-attempt
+    /// V5 dispatch. It is deliberately neither serializable nor cloneable, and
+    /// it has no conversion to a V3/V4 dispatch capability.
+    #[must_use = "verified V5 witness material must be consumed by a storage-local proof writer"]
+    struct VerifiedV5DispatchWitnesses<'tx, 'conn> {
+        run_id: RunId,
+        dispatch: VerifiedV5TapeEvent<DispatchEnvelopeV5>,
+        graph: VerifiedV5TapeEvent<WorkflowGraphDeclaredV2>,
+        context: VerifiedV5TapeEvent<ContextManifestDeclaredV1>,
+        worker: VerifiedV5TapeEvent<WorkerManifestDeclaredV1>,
+        sandbox: VerifiedV5TapeEvent<SandboxProfileDeclaredV1>,
+        attempt: VerifiedV5FirstAttempt,
+        _transaction: PhantomData<&'tx Transaction<'conn>>,
+    }
+
+    /// Marker proving that the private witness constructor rejected every
+    /// retry. Retrying requires an outer-V5 recorded-context proof and must
+    /// not be inferred from the nested V4 envelope.
+    struct VerifiedV5FirstAttempt;
+
+    /// One raw-tape event re-canonicalized and signature-verified inside the
+    /// current SQLite transaction. `tape_position` intentionally uses the
+    /// ledger's established UUIDv7 append order, not a payload timestamp.
+    struct VerifiedV5TapeEvent<T> {
+        run_id: RunId,
+        event_id: EventId,
+        canonical_event_hash: String,
+        tape_position: EventId,
+        signer: ActorKeyRef,
+        kind: EventKind,
+        payload: T,
+    }
+
+    impl VerifiedV5DispatchWitnesses<'_, '_> {
+        /// Convert already-verified private tape material into the immutable
+        /// audit projection. This method deliberately exposes only observation
+        /// fields; it does not yield a nested dispatch or an executable
+        /// capability.
+        fn into_observation_evidence(
+            self,
+        ) -> Result<VerifiedGovernedDispatchV5ObservationEvidence> {
+            let dispatch = &self.dispatch.payload;
+            let body = &dispatch.dispatch_v4.dispatch_v3.body;
+
+            // Keep the proof self-consistent even if a future change attempts
+            // to extend the constructor. Signature validity itself is proven
+            // only by `verify_v5_dispatch_witnesses_in_tx` below.
+            if self.dispatch.run_id != self.run_id
+                || self.graph.run_id != self.run_id
+                || self.context.run_id != self.run_id
+                || self.worker.run_id != self.run_id
+                || self.sandbox.run_id != self.run_id
+                || self.dispatch.kind != EventKind::DispatchEnvelopeV5
+                || self.graph.kind != EventKind::WorkflowGraphDeclaredV2
+                || self.context.kind != EventKind::ContextManifestDeclaredV1
+                || self.worker.kind != EventKind::WorkerManifestDeclaredV1
+                || self.sandbox.kind != EventKind::SandboxProfileDeclaredV1
+                || !verified_v5_tape_event_precedes(&self.graph, &self.dispatch)
+                || !verified_v5_tape_event_precedes(&self.context, &self.dispatch)
+                || !verified_v5_tape_event_precedes(&self.worker, &self.dispatch)
+                || !verified_v5_tape_event_precedes(&self.sandbox, &self.dispatch)
+                || !actor_matches(&self.dispatch.signer, &self.graph.signer)
+                || !actor_matches(&self.dispatch.signer, &self.context.signer)
+                || !actor_matches(&self.dispatch.signer, &self.worker.signer)
+                || !actor_matches(&self.dispatch.signer, &self.sandbox.signer)
+                || body.attempt != 1
+                || dispatch.attempt_context_declaration_event_ref.is_some()
+                || dispatch.attempt_context_digest.is_some()
+            {
+                return governed_dispatch_admission_authority_rejected(
+                    "V5 observation witness proof is internally inconsistent",
+                );
+            }
+            match self.attempt {
+                VerifiedV5FirstAttempt => {}
+            }
+
+            Ok(VerifiedGovernedDispatchV5ObservationEvidence {
+                run_id: self.run_id,
+                idempotency_key: body.idempotency_key.clone(),
+                workflow_id: body.workflow_id.clone(),
+                workflow_revision: body.workflow_revision.clone(),
+                unit_id: body.unit_id.clone(),
+                attempt: body.attempt,
+                semantic_identity_digest:
+                    governed_dispatch_v5_observation_semantic_identity_digest_v1(
+                        self.run_id,
+                        dispatch,
+                    )?,
+                dispatch_event_id: self.dispatch.event_id,
+                dispatch_event_digest: self.dispatch.canonical_event_hash.clone(),
+                v5_envelope_digest: dispatch.envelope_digest.clone(),
+                v4_envelope_digest: dispatch.dispatch_v4.envelope_digest.clone(),
+                v4_graph_declaration_event_id: self.graph.event_id,
+                v4_graph_declaration_event_digest: self.graph.canonical_event_hash.clone(),
+                v4_graph_digest: self.graph.payload.graph_digest.clone(),
+                context_manifest_event_id: self.context.event_id,
+                context_manifest_event_digest: self.context.canonical_event_hash.clone(),
+                context_manifest_digest: self.context.payload.context_manifest_digest.clone(),
+                worker_manifest_event_id: self.worker.event_id,
+                worker_manifest_event_digest: self.worker.canonical_event_hash.clone(),
+                worker_manifest_digest: self.worker.payload.worker_manifest_digest.clone(),
+                sandbox_profile_event_id: self.sandbox.event_id,
+                sandbox_profile_event_digest: self.sandbox.canonical_event_hash.clone(),
+                sandbox_profile_digest: self.sandbox.payload.sandbox_profile_digest.clone(),
+                retry_context_event_id: None,
+                retry_context_event_digest: None,
+                retry_context_digest: None,
+            })
         }
-    })?;
-    if !actor_matches(&authority.dispatch_signer, &signature.signer)
-        || verify_event_signature(&event, &signature, &authority.trusted_keys)
-            != VerificationStatus::Verified
-    {
-        return governed_dispatch_admission_authority_rejected(format!(
+    }
+
+    fn verified_v5_tape_event_precedes<T, U>(
+        before: &VerifiedV5TapeEvent<T>,
+        after: &VerifiedV5TapeEvent<U>,
+    ) -> bool {
+        before.tape_position.as_uuid() < after.tape_position.as_uuid()
+    }
+
+    /// Read one raw V5 witness from the tape. The returned record has been
+    /// canonicalized again after SQLite deserialization, is signed by the exact
+    /// configured dispatch identity, and is tied to the ledger's canonical append
+    /// position. It remains private until the transaction-scoped proof constructor
+    /// has checked its type, identity, ordering, and cross-witness bindings.
+    fn load_verified_v5_tape_event(
+        conn: &Connection,
+        event_id: EventId,
+        authority: &GovernedDispatchAdmissionAuthorityV1,
+        label: &str,
+    ) -> Result<VerifiedV5TapeEvent<Payload>> {
+        let Some((event, signature)) = event_and_signature_by_id(conn, event_id)? else {
+            return governed_dispatch_admission_authority_rejected(format!(
+                "{label} is missing from the tape"
+            ));
+        };
+        let Some(signature) = signature else {
+            return governed_dispatch_admission_authority_rejected(format!("{label} is unsigned"));
+        };
+        let event = canonicalize(event).map_err(|error| {
+            LedgerError::GovernedDispatchAdmissionAuthorityRejected {
+                reason: format!("{label} is not canonical: {error}"),
+            }
+        })?;
+        if !actor_matches(&authority.dispatch_signer, &signature.signer)
+            || verify_event_signature(&event, &signature, &authority.trusted_keys)
+                != VerificationStatus::Verified
+        {
+            return governed_dispatch_admission_authority_rejected(format!(
             "{label} does not carry a verified detached signature from the configured dispatch authority"
         ));
-    }
-    let event_digest = canonical_event_hash(&event).map_err(|error| {
-        LedgerError::GovernedDispatchAdmissionAuthorityRejected {
-            reason: format!("{label} could not produce a canonical event hash: {error}"),
         }
-    })?;
-    if signature.canonical_event_hash != event_digest {
-        return governed_dispatch_admission_authority_rejected(format!(
-            "{label} detached signature hash does not match its canonical event"
-        ));
+        let event_digest = canonical_event_hash(&event).map_err(|error| {
+            LedgerError::GovernedDispatchAdmissionAuthorityRejected {
+                reason: format!("{label} could not produce a canonical event hash: {error}"),
+            }
+        })?;
+        if signature.canonical_event_hash != event_digest {
+            return governed_dispatch_admission_authority_rejected(format!(
+                "{label} detached signature hash does not match its canonical event"
+            ));
+        }
+        Ok(VerifiedV5TapeEvent {
+            run_id: event.run_id,
+            event_id: event.id,
+            canonical_event_hash: event_digest,
+            tape_position: event.id,
+            signer: signature.signer,
+            kind: event.kind,
+            payload: event.payload,
+        })
     }
-    Ok((event, event_digest))
-}
 
-fn verify_governed_dispatch_v5_observation_evidence(
-    conn: &Connection,
-    request: &GovernedDispatchV5ObservationRequestV1,
-    authority: &GovernedDispatchAdmissionAuthorityV1,
-) -> Result<VerifiedGovernedDispatchV5ObservationEvidence> {
-    let (dispatch_event, dispatch_event_digest) =
-        load_verified_governed_dispatch_v5_observation_event(
-            conn,
-            request.dispatch_event_id,
-            authority,
+    fn expect_verified_v5_tape_payload<T>(
+        event: VerifiedV5TapeEvent<Payload>,
+        expected_kind: EventKind,
+        label: &str,
+        extract: impl FnOnce(Payload) -> Option<T>,
+    ) -> Result<VerifiedV5TapeEvent<T>> {
+        let VerifiedV5TapeEvent {
+            run_id,
+            event_id,
+            canonical_event_hash,
+            tape_position,
+            signer,
+            kind,
+            payload,
+        } = event;
+        if kind != expected_kind {
+            return governed_dispatch_admission_authority_rejected(format!(
+                "{label} has an unexpected signed tape event kind"
+            ));
+        }
+        let Some(payload) = extract(payload) else {
+            return governed_dispatch_admission_authority_rejected(format!(
+                "{label} has an unexpected signed tape payload"
+            ));
+        };
+        Ok(VerifiedV5TapeEvent {
+            run_id,
+            event_id,
+            canonical_event_hash,
+            tape_position,
+            signer,
+            kind,
+            payload,
+        })
+    }
+
+    /// Build the sole current V5 witness proof from raw tape inside one immediate
+    /// transaction. A successful result is observation material only: no public
+    /// dispatch authority, replay projection, or nested V3/V4 capability escapes
+    /// this function.
+    fn verify_v5_dispatch_witnesses_in_tx<'tx, 'conn>(
+        tx: &'tx Transaction<'conn>,
+        run_id: RunId,
+        dispatch_event_id: EventId,
+        authority: &GovernedDispatchAdmissionAuthorityV1,
+    ) -> Result<VerifiedV5DispatchWitnesses<'tx, 'conn>> {
+        let dispatch = expect_verified_v5_tape_payload(
+            load_verified_v5_tape_event(&*tx, dispatch_event_id, authority, "V5 dispatch")?,
+            EventKind::DispatchEnvelopeV5,
             "V5 dispatch",
+            |payload| match payload {
+                Payload::DispatchEnvelopeV5(dispatch) => Some(dispatch),
+                _ => None,
+            },
         )?;
-    if dispatch_event.run_id != request.run_id
-        || dispatch_event.kind != EventKind::DispatchEnvelopeV5
-    {
-        return governed_dispatch_admission_authority_rejected(
-            "V5 observation request does not name a V5 dispatch in its requested run",
-        );
-    }
-    let Payload::DispatchEnvelopeV5(dispatch) = &dispatch_event.payload else {
-        return governed_dispatch_admission_authority_rejected(
-            "V5 observation request does not name a manifest-bound V5 dispatch payload",
-        );
-    };
-    let body = &dispatch.dispatch_v4.dispatch_v3.body;
-    if dispatch
-        .dispatch_v4
-        .dispatch_v3
-        .ledger_authority_realm_digest
-        != authority.ledger_authority_realm_digest
-    {
-        return governed_dispatch_admission_authority_rejected(
-            "V5 observation dispatch does not belong to the configured protected ledger realm",
-        );
-    }
+        if dispatch.run_id != run_id {
+            return governed_dispatch_admission_authority_rejected(
+                "V5 observation request does not name a V5 dispatch in its requested run",
+            );
+        }
+        let body = &dispatch.payload.dispatch_v4.dispatch_v3.body;
+        if dispatch
+            .payload
+            .dispatch_v4
+            .dispatch_v3
+            .ledger_authority_realm_digest
+            != authority.ledger_authority_realm_digest
+        {
+            return governed_dispatch_admission_authority_rejected(
+                "V5 observation dispatch does not belong to the configured protected ledger realm",
+            );
+        }
 
-    // No observation of a retry may be mistaken for proof that the complete
-    // outer-V5 retry lineage (including feedback inclusion) was verified.
-    // Keep all retries fail-closed until that reducer exists at this storage
-    // boundary. We deliberately do not issue a retry witness shadow here.
-    if body.attempt != 1 {
-        return governed_dispatch_admission_authority_rejected(
-            "V5 retry observations require complete outer-V5 retry proof and are unsupported",
-        );
-    }
-    if dispatch.attempt_context_declaration_event_ref.is_some()
-        || dispatch.attempt_context_digest.is_some()
-    {
-        return governed_dispatch_admission_authority_rejected(
-            "first-attempt V5 observation cannot carry retry declaration material",
-        );
-    }
+        // No observation of a retry may be mistaken for proof that the complete
+        // outer-V5 retry lineage (including feedback inclusion) was verified.
+        // Keep all retries fail-closed until that reducer exists at this storage
+        // boundary. We deliberately do not issue a retry witness shadow here.
+        if body.attempt != 1 {
+            return governed_dispatch_admission_authority_rejected(
+                "V5 retry observations require complete outer-V5 retry proof and are unsupported",
+            );
+        }
+        if dispatch
+            .payload
+            .attempt_context_declaration_event_ref
+            .is_some()
+            || dispatch.payload.attempt_context_digest.is_some()
+        {
+            return governed_dispatch_admission_authority_rejected(
+                "first-attempt V5 observation cannot carry retry declaration material",
+            );
+        }
 
-    let (graph_event, graph_event_digest) = load_verified_governed_dispatch_v5_observation_event(
-        conn,
-        dispatch.dispatch_v4.workflow_graph_declaration_event_ref,
-        authority,
-        "V5 workflow graph declaration",
-    )?;
-    if graph_event.run_id != request.run_id || !tape_event_precedes(&graph_event, &dispatch_event) {
-        return governed_dispatch_admission_authority_rejected(
+        let graph = expect_verified_v5_tape_payload(
+            load_verified_v5_tape_event(
+                &*tx,
+                dispatch
+                    .payload
+                    .dispatch_v4
+                    .workflow_graph_declaration_event_ref,
+                authority,
+                "V5 workflow graph declaration",
+            )?,
+            EventKind::WorkflowGraphDeclaredV2,
+            "V5 workflow graph declaration",
+            |payload| match payload {
+                Payload::WorkflowGraphDeclaredV2(graph) => Some(graph),
+                _ => None,
+            },
+        )?;
+        if graph.run_id != run_id || !verified_v5_tape_event_precedes(&graph, &dispatch) {
+            return governed_dispatch_admission_authority_rejected(
             "V5 workflow graph declaration must be a signed preceding event in the dispatch run",
         );
-    }
-    let Payload::WorkflowGraphDeclaredV2(graph) = &graph_event.payload else {
-        return governed_dispatch_admission_authority_rejected(
-            "V5 workflow graph declaration witness does not carry WorkflowGraphDeclaredV2",
-        );
-    };
-    let expected_graph_digest = workflow_graph_v2_digest(graph).map_err(|error| {
-        LedgerError::GovernedDispatchAdmissionAuthorityRejected {
-            reason: format!("V5 workflow graph declaration digest is not canonical: {error}"),
         }
-    })?;
-    if graph_event.kind != EventKind::WorkflowGraphDeclaredV2
-        || graph.run_id != request.run_id.to_string()
-        || graph.workflow_id != body.workflow_id
-        || graph.workflow_revision != body.workflow_revision
-        || graph.graph_digest != expected_graph_digest
-        || graph.graph_digest != dispatch.dispatch_v4.workflow_graph_digest
-    {
-        return governed_dispatch_admission_authority_rejected(
-            "V5 graph witness does not exactly bind the nested V4 workflow authority",
-        );
-    }
-    let mut graph_nodes = graph
-        .nodes
-        .iter()
-        .filter(|node| node.unit_id == body.unit_id);
-    let Some(graph_node) = graph_nodes.next() else {
-        return governed_dispatch_admission_authority_rejected(
-            "V5 graph witness has no node for the nested dispatch unit",
-        );
-    };
-    if graph_nodes.next().is_some()
-        || graph_node.execution_role != body.execution_role
-        || Some(graph_node.governed_packet_digest.as_str())
-            != dispatch
-                .dispatch_v4
-                .dispatch_v3
-                .governed_packet_digest
-                .as_deref()
-    {
-        return governed_dispatch_admission_authority_rejected(
+        let expected_graph_digest = workflow_graph_v2_digest(&graph.payload).map_err(|error| {
+            LedgerError::GovernedDispatchAdmissionAuthorityRejected {
+                reason: format!("V5 workflow graph declaration digest is not canonical: {error}"),
+            }
+        })?;
+        if graph.payload.run_id != run_id.to_string()
+            || graph.payload.workflow_id != body.workflow_id
+            || graph.payload.workflow_revision != body.workflow_revision
+            || graph.payload.graph_digest != expected_graph_digest
+            || graph.payload.graph_digest != dispatch.payload.dispatch_v4.workflow_graph_digest
+        {
+            return governed_dispatch_admission_authority_rejected(
+                "V5 graph witness does not exactly bind the nested V4 workflow authority",
+            );
+        }
+        let mut graph_nodes = graph
+            .payload
+            .nodes
+            .iter()
+            .filter(|node| node.unit_id == body.unit_id);
+        let Some(graph_node) = graph_nodes.next() else {
+            return governed_dispatch_admission_authority_rejected(
+                "V5 graph witness has no node for the nested dispatch unit",
+            );
+        };
+        if graph_nodes.next().is_some()
+            || graph_node.execution_role != body.execution_role
+            || Some(graph_node.governed_packet_digest.as_str())
+                != dispatch
+                    .payload
+                    .dispatch_v4
+                    .dispatch_v3
+                    .governed_packet_digest
+                    .as_deref()
+        {
+            return governed_dispatch_admission_authority_rejected(
             "V5 graph witness node does not exactly bind the nested V4 dispatch role and governed packet",
         );
-    }
+        }
 
-    let (context_event, context_event_digest) =
-        load_verified_governed_dispatch_v5_observation_event(
-            conn,
-            dispatch.context_manifest_declaration_event_ref,
-            authority,
+        let context = expect_verified_v5_tape_payload(
+            load_verified_v5_tape_event(
+                &*tx,
+                dispatch.payload.context_manifest_declaration_event_ref,
+                authority,
+                "V5 context manifest declaration",
+            )?,
+            EventKind::ContextManifestDeclaredV1,
             "V5 context manifest declaration",
+            |payload| match payload {
+                Payload::ContextManifestDeclaredV1(context) => Some(context),
+                _ => None,
+            },
         )?;
-    if context_event.run_id != request.run_id
-        || !tape_event_precedes(&context_event, &dispatch_event)
-        || context_event.kind != EventKind::ContextManifestDeclaredV1
-    {
-        return governed_dispatch_admission_authority_rejected(
+        if context.run_id != run_id || !verified_v5_tape_event_precedes(&context, &dispatch) {
+            return governed_dispatch_admission_authority_rejected(
             "V5 context manifest declaration must be a signed preceding event in the dispatch run",
         );
-    }
-    let Payload::ContextManifestDeclaredV1(context_manifest) = &context_event.payload else {
-        return governed_dispatch_admission_authority_rejected(
-            "V5 context manifest witness has the wrong payload kind",
-        );
-    };
+        }
 
-    let (worker_event, worker_event_digest) = load_verified_governed_dispatch_v5_observation_event(
-        conn,
-        dispatch.worker_manifest_declaration_event_ref,
-        authority,
-        "V5 worker manifest declaration",
-    )?;
-    if worker_event.run_id != request.run_id
-        || !tape_event_precedes(&worker_event, &dispatch_event)
-        || worker_event.kind != EventKind::WorkerManifestDeclaredV1
-    {
-        return governed_dispatch_admission_authority_rejected(
+        let worker = expect_verified_v5_tape_payload(
+            load_verified_v5_tape_event(
+                &*tx,
+                dispatch.payload.worker_manifest_declaration_event_ref,
+                authority,
+                "V5 worker manifest declaration",
+            )?,
+            EventKind::WorkerManifestDeclaredV1,
+            "V5 worker manifest declaration",
+            |payload| match payload {
+                Payload::WorkerManifestDeclaredV1(worker) => Some(worker),
+                _ => None,
+            },
+        )?;
+        if worker.run_id != run_id || !verified_v5_tape_event_precedes(&worker, &dispatch) {
+            return governed_dispatch_admission_authority_rejected(
             "V5 worker manifest declaration must be a signed preceding event in the dispatch run",
         );
-    }
-    let Payload::WorkerManifestDeclaredV1(worker_manifest) = &worker_event.payload else {
-        return governed_dispatch_admission_authority_rejected(
-            "V5 worker manifest witness has the wrong payload kind",
-        );
-    };
+        }
 
-    let (sandbox_event, sandbox_event_digest) =
-        load_verified_governed_dispatch_v5_observation_event(
-            conn,
-            dispatch.sandbox_profile_declaration_event_ref,
-            authority,
+        let sandbox = expect_verified_v5_tape_payload(
+            load_verified_v5_tape_event(
+                &*tx,
+                dispatch.payload.sandbox_profile_declaration_event_ref,
+                authority,
+                "V5 sandbox profile declaration",
+            )?,
+            EventKind::SandboxProfileDeclaredV1,
             "V5 sandbox profile declaration",
+            |payload| match payload {
+                Payload::SandboxProfileDeclaredV1(sandbox) => Some(sandbox),
+                _ => None,
+            },
         )?;
-    if sandbox_event.run_id != request.run_id
-        || !tape_event_precedes(&sandbox_event, &dispatch_event)
-        || sandbox_event.kind != EventKind::SandboxProfileDeclaredV1
-    {
-        return governed_dispatch_admission_authority_rejected(
+        if sandbox.run_id != run_id || !verified_v5_tape_event_precedes(&sandbox, &dispatch) {
+            return governed_dispatch_admission_authority_rejected(
             "V5 sandbox profile declaration must be a signed preceding event in the dispatch run",
         );
-    }
-    let Payload::SandboxProfileDeclaredV1(sandbox_profile) = &sandbox_event.payload else {
-        return governed_dispatch_admission_authority_rejected(
-            "V5 sandbox profile witness has the wrong payload kind",
-        );
-    };
+        }
 
-    validate_v5_manifest_declaration_witnesses(
-        dispatch,
-        &request.run_id.to_string(),
-        V5ManifestDeclarationWitnesses {
-            context_manifest: Some(V5ContextManifestDeclarationWitness::from_declaration(
-                &context_event.id,
-                context_manifest,
-            )),
-            worker_manifest: Some(V5WorkerManifestDeclarationWitness::from_declaration(
-                &worker_event.id,
-                worker_manifest,
-            )),
-            sandbox_profile: Some(V5SandboxProfileDeclarationWitness::from_declaration(
-                &sandbox_event.id,
-                sandbox_profile,
-            )),
-            attempt_context: None,
-        },
-    )
-    .map_err(
-        |error| LedgerError::GovernedDispatchAdmissionAuthorityRejected {
-            reason: format!("V5 manifest declaration witnesses do not bind the dispatch: {error}"),
-        },
-    )?;
+        validate_v5_manifest_declaration_witnesses(
+            &dispatch.payload,
+            &run_id.to_string(),
+            V5ManifestDeclarationWitnesses {
+                context_manifest: Some(V5ContextManifestDeclarationWitness::from_declaration(
+                    &context.event_id,
+                    &context.payload,
+                )),
+                worker_manifest: Some(V5WorkerManifestDeclarationWitness::from_declaration(
+                    &worker.event_id,
+                    &worker.payload,
+                )),
+                sandbox_profile: Some(V5SandboxProfileDeclarationWitness::from_declaration(
+                    &sandbox.event_id,
+                    &sandbox.payload,
+                )),
+                attempt_context: None,
+            },
+        )
+        .map_err(
+            |error| LedgerError::GovernedDispatchAdmissionAuthorityRejected {
+                reason: format!(
+                    "V5 manifest declaration witnesses do not bind the dispatch: {error}"
+                ),
+            },
+        )?;
 
-    Ok(VerifiedGovernedDispatchV5ObservationEvidence {
-        run_id: request.run_id,
-        idempotency_key: body.idempotency_key.clone(),
-        workflow_id: body.workflow_id.clone(),
-        workflow_revision: body.workflow_revision.clone(),
-        unit_id: body.unit_id.clone(),
-        attempt: body.attempt,
-        semantic_identity_digest: governed_dispatch_v5_observation_semantic_identity_digest_v1(
-            request.run_id,
+        Ok(VerifiedV5DispatchWitnesses {
+            run_id,
             dispatch,
-        )?,
-        dispatch_event_id: dispatch_event.id,
-        dispatch_event_digest,
-        v5_envelope_digest: dispatch.envelope_digest.clone(),
-        v4_envelope_digest: dispatch.dispatch_v4.envelope_digest.clone(),
-        v4_graph_declaration_event_id: graph_event.id,
-        v4_graph_declaration_event_digest: graph_event_digest,
-        v4_graph_digest: graph.graph_digest.clone(),
-        context_manifest_event_id: context_event.id,
-        context_manifest_event_digest: context_event_digest,
-        context_manifest_digest: context_manifest.context_manifest_digest.clone(),
-        worker_manifest_event_id: worker_event.id,
-        worker_manifest_event_digest: worker_event_digest,
-        worker_manifest_digest: worker_manifest.worker_manifest_digest.clone(),
-        sandbox_profile_event_id: sandbox_event.id,
-        sandbox_profile_event_digest: sandbox_event_digest,
-        sandbox_profile_digest: sandbox_profile.sandbox_profile_digest.clone(),
-        retry_context_event_id: None,
-        retry_context_event_digest: None,
-        retry_context_digest: None,
-    })
+            graph,
+            context,
+            worker,
+            sandbox,
+            attempt: VerifiedV5FirstAttempt,
+            _transaction: PhantomData,
+        })
+    }
+
+    /// The sole parent-visible V5 proof operation. It returns only immutable
+    /// observation fields, never the private witness proof or nested V3/V4
+    /// authority material.
+    pub(super) fn verify_observation_evidence_in_tx(
+        tx: &Transaction<'_>,
+        run_id: RunId,
+        dispatch_event_id: EventId,
+        authority: &GovernedDispatchAdmissionAuthorityV1,
+    ) -> Result<VerifiedGovernedDispatchV5ObservationEvidence> {
+        verify_v5_dispatch_witnesses_in_tx(tx, run_id, dispatch_event_id, authority)?
+            .into_observation_evidence()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
