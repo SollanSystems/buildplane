@@ -21,8 +21,9 @@ use super::reviewer_session::{
     resolve_reviewer_model_evidence_from_snapshot_v1, ReviewerSessionResolutionErrorV1,
 };
 use super::v5_dispatch_admission::{
+    handle_v5_dispatch_admission_wire, parse_v5_dispatch_admission_request,
     BrokerV5DispatchAdmissionDisposition, LedgerV5DispatchAdmissionBackend,
-    V5DispatchAdmissionRequest, V5DispatchAdmissionStartupError,
+    V5DispatchAdmissionHandlerError, V5DispatchAdmissionRequest, V5DispatchAdmissionStartupError,
 };
 use super::{
     AuthorityBackend, AuthorityBackendError, AuthorityGrant, BrokerModelActionRequest,
@@ -6427,6 +6428,284 @@ fn v5_broker_admission_request(fixture: &V5BrokerAdmissionFixture) -> V5Dispatch
         run_id: fixture.run_id,
         source_dispatch_event_id: fixture.source_dispatch_event_id,
     }
+}
+
+fn v5_broker_admission_wire(
+    request_id: &str,
+    run_id: &str,
+    source_dispatch_event_id: &str,
+) -> String {
+    format!(
+        r#"{{"request_id":"{request_id}","run_id":"{run_id}","source_dispatch_event_id":"{source_dispatch_event_id}"}}"#
+    )
+}
+
+fn v5_broker_admission_wire_with_injected_field(
+    fixture: &V5BrokerAdmissionFixture,
+    injected_field: &str,
+) -> String {
+    let mut wire = v5_broker_admission_wire(
+        "123e4567-e89b-12d3-a456-426614174000",
+        &fixture.run_id.to_string(),
+        &fixture.source_dispatch_event_id.to_string(),
+    );
+    wire.pop()
+        .expect("the canonical V5 wire ends in an object delimiter");
+    format!(r#"{wire},"{injected_field}":"caller-controlled"}}"#)
+}
+
+fn v5_broker_admission_backend(
+    fixture: &V5BrokerAdmissionFixture,
+) -> LedgerV5DispatchAdmissionBackend<'_> {
+    LedgerV5DispatchAdmissionBackend::from_prevalidated_startup(
+        &fixture.store,
+        &fixture.authority,
+        &fixture.admission_key,
+        &fixture.admission_signer,
+        &fixture.checkpoint_key,
+        &fixture.checkpoint_signer,
+    )
+    .expect("inject distinct V5 admission and checkpoint dependencies")
+}
+
+#[test]
+fn protected_v5_admission_wire_accepts_only_closed_canonical_identity_and_seals() {
+    let fixture = v5_broker_admission_fixture();
+    let broker = v5_broker_admission_backend(&fixture);
+    let wire = v5_broker_admission_wire(
+        "123e4567-e89b-12d3-a456-426614174000",
+        &fixture.run_id.to_string(),
+        &fixture.source_dispatch_event_id.to_string(),
+    );
+
+    let parsed = parse_v5_dispatch_admission_request(wire.as_bytes())
+        .expect("the exact closed V5 identity wire must parse");
+    assert_eq!(parsed, v5_broker_admission_request(&fixture));
+
+    let outcome = handle_v5_dispatch_admission_wire(&broker, wire.as_bytes())
+        .expect("the parsed V5 request must reach the startup-bound backend");
+    assert!(matches!(
+        outcome,
+        BrokerV5DispatchAdmissionDisposition::Sealed(_)
+    ));
+    assert_eq!(v5_broker_admission_receipt_count(&fixture), 1);
+    assert_eq!(v5_broker_checkpoint_count(&fixture), 1);
+    assert_eq!(
+        fixture.store.event_count().expect("count sealed V5 tape"),
+        7
+    );
+}
+
+#[test]
+fn protected_v5_admission_wire_rejects_injected_authority_fields_before_tape_mutation() {
+    let fixture = v5_broker_admission_fixture();
+    let broker = v5_broker_admission_backend(&fixture);
+
+    for injected_field in [
+        "authority",
+        "admission_signing_key",
+        "checkpoint_signing_key",
+        "signer",
+        "trusted_keys",
+        "authority_realm",
+        "v5_envelope_digest",
+        "workspace",
+    ] {
+        let wire = v5_broker_admission_wire_with_injected_field(&fixture, injected_field);
+        assert!(
+            matches!(
+                handle_v5_dispatch_admission_wire(&broker, wire.as_bytes()),
+                Err(V5DispatchAdmissionHandlerError::RequestRejected)
+            ),
+            "{injected_field} must be rejected by the closed V5 wire before backend entry"
+        );
+        assert_eq!(v5_broker_admission_receipt_count(&fixture), 0);
+        assert_eq!(v5_broker_checkpoint_count(&fixture), 0);
+        assert_eq!(
+            fixture
+                .store
+                .event_count()
+                .expect("count unchanged V5 tape"),
+            5
+        );
+    }
+}
+
+#[test]
+fn protected_v5_admission_wire_rejects_missing_and_noncanonical_ids_before_tape_mutation() {
+    let fixture = v5_broker_admission_fixture();
+    let broker = v5_broker_admission_backend(&fixture);
+    let canonical_request_id = "123e4567-e89b-12d3-a456-426614174000";
+    let canonical_run_id = fixture.run_id.to_string();
+    let canonical_source_dispatch_event_id = fixture.source_dispatch_event_id.to_string();
+
+    let malformed_wires = [
+        (
+            "missing request_id",
+            format!(
+                r#"{{"run_id":"{canonical_run_id}","source_dispatch_event_id":"{canonical_source_dispatch_event_id}"}}"#
+            ),
+        ),
+        (
+            "missing run_id",
+            format!(
+                r#"{{"request_id":"{canonical_request_id}","source_dispatch_event_id":"{canonical_source_dispatch_event_id}"}}"#
+            ),
+        ),
+        (
+            "missing source_dispatch_event_id",
+            format!(r#"{{"request_id":"{canonical_request_id}","run_id":"{canonical_run_id}"}}"#),
+        ),
+        (
+            "noncanonical request_id",
+            v5_broker_admission_wire(
+                "123E4567-e89b-12d3-a456-426614174000",
+                &canonical_run_id,
+                &canonical_source_dispatch_event_id,
+            ),
+        ),
+        (
+            "noncanonical run_id",
+            v5_broker_admission_wire(
+                canonical_request_id,
+                "123E4567-e89b-12d3-a456-426614174000",
+                &canonical_source_dispatch_event_id,
+            ),
+        ),
+        (
+            "noncanonical source_dispatch_event_id",
+            v5_broker_admission_wire(
+                canonical_request_id,
+                &canonical_run_id,
+                "123E4567-e89b-12d3-a456-426614174000",
+            ),
+        ),
+    ];
+
+    for (label, wire) in malformed_wires {
+        assert!(
+            matches!(
+                handle_v5_dispatch_admission_wire(&broker, wire.as_bytes()),
+                Err(V5DispatchAdmissionHandlerError::RequestRejected)
+            ),
+            "{label} must be rejected before backend entry"
+        );
+        assert_eq!(v5_broker_admission_receipt_count(&fixture), 0);
+        assert_eq!(v5_broker_checkpoint_count(&fixture), 0);
+        assert_eq!(
+            fixture
+                .store
+                .event_count()
+                .expect("count unchanged V5 tape"),
+            5
+        );
+    }
+}
+
+#[test]
+fn protected_v5_admission_wire_returns_reconciliation_for_wrong_run_and_non_v5_source() {
+    let fixture = v5_broker_admission_fixture();
+    let broker = v5_broker_admission_backend(&fixture);
+    let request_id = "123e4567-e89b-12d3-a456-426614174000";
+    let wrong_run = RunId::new().to_string();
+
+    for (label, wire) in [
+        (
+            "wrong run",
+            v5_broker_admission_wire(
+                request_id,
+                &wrong_run,
+                &fixture.source_dispatch_event_id.to_string(),
+            ),
+        ),
+        (
+            "non-V5 source",
+            v5_broker_admission_wire(
+                request_id,
+                &fixture.run_id.to_string(),
+                &fixture.non_dispatch_event_id.to_string(),
+            ),
+        ),
+    ] {
+        assert!(
+            matches!(
+                handle_v5_dispatch_admission_wire(&broker, wire.as_bytes()),
+                Ok(BrokerV5DispatchAdmissionDisposition::ReconciliationRequired)
+            ),
+            "{label} must reconcile without granting or writing"
+        );
+        assert_eq!(v5_broker_admission_receipt_count(&fixture), 0);
+        assert_eq!(v5_broker_checkpoint_count(&fixture), 0);
+        assert_eq!(
+            fixture
+                .store
+                .event_count()
+                .expect("count unchanged V5 tape"),
+            5
+        );
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn protected_v5_authenticated_handler_rejects_same_uid_before_consuming_its_frame() {
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
+    use std::time::Duration;
+
+    let fixture = v5_broker_admission_fixture();
+    let broker = v5_broker_admission_backend(&fixture);
+    let broker_uid = unsafe { libc::geteuid() };
+    let configured_worker_uid = broker_uid.checked_add(1).unwrap_or(broker_uid - 1);
+    let policy = BrokerHostConfinementPolicyV1::new(broker_uid, [configured_worker_uid])
+        .expect("a distinct configured worker identity is valid");
+    let attestation = policy
+        .attest_current_broker_process()
+        .expect("the test process is the configured broker identity");
+    let (mut broker_stream, mut same_uid_worker_stream) =
+        UnixStream::pair().expect("create a local Unix socket pair");
+    let payload = v5_broker_admission_wire(
+        "123e4567-e89b-12d3-a456-426614174000",
+        &fixture.run_id.to_string(),
+        &fixture.source_dispatch_event_id.to_string(),
+    )
+    .into_bytes();
+    let mut frame = u32::try_from(payload.len())
+        .expect("the canonical V5 fixture fits the bounded frame")
+        .to_be_bytes()
+        .to_vec();
+    frame.extend_from_slice(&payload);
+    same_uid_worker_stream
+        .write_all(&frame)
+        .expect("queue a valid-looking V5 framed request");
+
+    assert!(matches!(
+        super::v5_dispatch_admission::handle_authenticated_v5_dispatch_admission_request(
+            &policy,
+            &attestation,
+            &mut broker_stream,
+            &broker,
+        ),
+        Err(V5DispatchAdmissionHandlerError::PeerRejected)
+    ));
+    assert_eq!(
+        fixture
+            .store
+            .event_count()
+            .expect("count unchanged V5 tape"),
+        5
+    );
+    assert_eq!(v5_broker_admission_receipt_count(&fixture), 0);
+    assert_eq!(v5_broker_checkpoint_count(&fixture), 0);
+
+    broker_stream
+        .set_read_timeout(Some(Duration::from_millis(250)))
+        .expect("bound an assertion failure if the gate consumed the frame");
+    let mut observed = vec![0; frame.len()];
+    broker_stream
+        .read_exact(&mut observed)
+        .expect("peer authentication must fail before any frame byte is read");
+    assert_eq!(observed, frame);
 }
 
 #[test]
