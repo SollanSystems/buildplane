@@ -5,6 +5,7 @@ import {
 	evaluateToolInvocation,
 	validateCapabilityBundle,
 } from "@buildplane/capability-broker";
+import { consumeGovernedActionPermit } from "./governed-action-permit.js";
 import { isTrustedGovernedActionExecutor } from "./governed-executor-provenance.js";
 import {
 	type RunCommandInput,
@@ -231,6 +232,19 @@ export interface CreateActionGatewayOptions {
 	 * the injectable seam exists solely for deterministic host-side tests.
 	 */
 	readonly governedNowMs?: () => number;
+	/**
+	 * Opaque internal-only capability minted after a durable V3 action request
+	 * and native activity claim. This stays `unknown` in the public options so
+	 * a structural object can never become authority; only the internal permit
+	 * registry recognizes a valid token.
+	 */
+	readonly governedActionPermit?: unknown;
+	/**
+	 * Internal, closed evidence copy for the exact durable request and native
+	 * claim that minted `governedActionPermit`. It cannot grant authority on its
+	 * own and is compared against the opaque permit immediately before OCI.
+	 */
+	readonly governedActionEvidence?: unknown;
 }
 
 /**
@@ -286,6 +300,8 @@ export function createActionGateway(
 		governedExecutor,
 		governedDeadlineAtMs,
 		governedNowMs,
+		governedActionPermit: options.governedActionPermit,
+		governedActionEvidence: options.governedActionEvidence,
 	});
 	// Host tools are intentionally constructed only for the raw lane. Keeping
 	// this branch outside the governed path prevents a future refactor from
@@ -334,6 +350,20 @@ export function createActionGateway(
 					inputDigest,
 					resultDigest: digest({ outcome: "denied", reason: denial }),
 					reason: denial,
+				});
+			}
+			const permitDenial = governedPermitDenial(context, normalizedAction);
+			if (permitDenial) {
+				return emitReceipt(options.onReceipt, {
+					actionId: normalizedAction.actionId,
+					kind: normalizedAction.kind,
+					runId: context.runId,
+					role: context.role,
+					trustTier: context.trustTier,
+					outcome: "denied",
+					inputDigest,
+					resultDigest: digest({ outcome: "denied", reason: permitDenial }),
+					reason: permitDenial,
 				});
 			}
 
@@ -552,6 +582,57 @@ function authorizationDenial(
 		}
 	}
 	return undefined;
+}
+
+/**
+ * This is intentionally after action parsing and capability/role checks but
+ * immediately before either OCI executor method. The internal registry marks
+ * a matching permit consumed before dispatch, so an uncertain executor result
+ * never becomes a local retry authorization.
+ */
+function governedPermitDenial(
+	context: {
+		readonly runId: string;
+		readonly worktreeRoot: string;
+		readonly role: ActionGatewayRole;
+		readonly trustTier: ActionGatewayTrustTier;
+		readonly capabilityBundleDigest?: string;
+		readonly governedExecutor?: GovernedActionExecutor;
+		readonly governedDeadlineAtMs?: number;
+		readonly governedNowMs?: () => number;
+		readonly governedActionPermit?: unknown;
+		readonly governedActionEvidence?: unknown;
+	},
+	action: ExecutableGatewayAction,
+): string | undefined {
+	if (context.trustTier !== "governed") return undefined;
+	if (
+		context.capabilityBundleDigest === undefined ||
+		context.governedExecutor === undefined ||
+		context.governedDeadlineAtMs === undefined ||
+		context.governedNowMs === undefined
+	) {
+		// `authorizationDenial` rejects these conditions first. Keep this
+		// defensive guard so a future refactor cannot turn an invariant breach
+		// into an OCI call.
+		return "governed action permit authority is incomplete";
+	}
+	const nowMs = readGovernedNowMs(context.governedNowMs);
+	if (nowMs === undefined) {
+		return "governed action clock returned an invalid epoch-millisecond timestamp";
+	}
+	return consumeGovernedActionPermit({
+		permit: context.governedActionPermit,
+		runId: context.runId,
+		worktreeRoot: context.worktreeRoot,
+		role: context.role,
+		action,
+		capabilityBundleDigest: context.capabilityBundleDigest,
+		sandboxProfileDigest: context.governedExecutor.sandbox.profileDigest,
+		governedDeadlineAtMs: context.governedDeadlineAtMs,
+		nowMs,
+		evidence: context.governedActionEvidence,
+	});
 }
 
 function governedExecutionContext(context: {

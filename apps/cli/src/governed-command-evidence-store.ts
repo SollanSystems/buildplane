@@ -3,7 +3,12 @@ import { existsSync, lstatSync, realpathSync, type Stats } from "node:fs";
 import { link, lstat, mkdir, open, readFile, unlink } from "node:fs/promises";
 import { dirname, isAbsolute, parse, relative, resolve } from "node:path";
 import type { GovernedCommandEvidenceStore } from "@buildplane/adapters-tools";
-import type { ActionRedactionV2 } from "@buildplane/kernel";
+import {
+	type ActionRedactionV2,
+	deriveGovernedCommandInputCommitmentV1,
+	GOVERNED_COMMAND_INPUT_CAS_REFERENCE_PREFIX,
+	type NormalizedGovernedCommandInputV1,
+} from "@buildplane/kernel";
 
 type GovernedCommandCanonicalInput = Parameters<
 	GovernedCommandEvidenceStore["persistCanonicalInput"]
@@ -16,13 +21,10 @@ const SHA256_DIGEST = /^sha256:[0-9a-f]{64}$/;
 const MAX_IDENTIFIER_LENGTH = 512;
 const MAX_REFERENCE_LENGTH = 4096;
 const MAX_COMMAND_LENGTH = 64 * 1024;
-const MAX_ARGUMENT_COUNT = 4096;
-const MAX_ARGUMENT_LENGTH = 64 * 1024;
-const MAX_TOTAL_ARGUMENT_BYTES = 1024 * 1024;
 const MAX_OUTPUT_CHECKS = 4096;
 const MAX_TOTAL_OUTPUT_PATH_BYTES = 1024 * 1024;
 const MAX_RECORD_BYTES = 1024 * 1024;
-const CAS_REFERENCE_PREFIX = "cas://governed-command-evidence/sha256/";
+const CAS_REFERENCE_PREFIX = GOVERNED_COMMAND_INPUT_CAS_REFERENCE_PREFIX;
 const HOST_EVIDENCE_DIRECTORY = ".buildplane-host-evidence";
 const EVIDENCE_STORE_OPTION_FIELDS = ["projectRoot", "root"] as const;
 
@@ -99,10 +101,15 @@ export function createGovernedCommandEvidenceStore(
 	return Object.freeze({
 		persistCanonicalInput(input: GovernedCommandCanonicalInput) {
 			return serialized(async () => {
-				const normalized = normalizeCanonicalInput(input);
+				const commitment = deriveGovernedCommandInputCommitmentV1(input);
+				const normalized = commitment.normalizedInput;
 				const identity = inputIdentity(normalized.runId, normalized.actionId);
-				const record = canonicalInputRecord(normalized, identity);
-				const artifact = await writeContentAddressedRecord(root, record);
+				const artifact = await writeContentAddressedBytes(
+					root,
+					commitment.bytes,
+					commitment.digest,
+					commitment.ref,
+				);
 				await bindIdentity(root, inputIdentityBinding(identity, artifact));
 				return {
 					canonicalInputDigest: artifact.digest,
@@ -280,58 +287,6 @@ function hasTraversalSegment(value: string): boolean {
 	return value.split(/[\\/]+/).some((segment) => segment === "..");
 }
 
-function normalizeCanonicalInput(
-	input: Parameters<GovernedCommandEvidenceStore["persistCanonicalInput"]>[0],
-): {
-	readonly runId: string;
-	readonly actionId: string;
-	readonly command: string;
-	readonly args: readonly string[];
-	readonly cwd?: string;
-} {
-	if (!input || typeof input !== "object") {
-		throw new TypeError("canonical governed command input must be an object.");
-	}
-	const runId = requireOpaqueIdentifier(input.runId, "runId");
-	const actionId = requireOpaqueIdentifier(input.actionId, "actionId");
-	const command = requireBoundedString(
-		input.command,
-		"command",
-		MAX_COMMAND_LENGTH,
-		true,
-	);
-	if (!Array.isArray(input.args) || input.args.length > MAX_ARGUMENT_COUNT) {
-		throw new TypeError("args must be a bounded array of command arguments.");
-	}
-	let argumentBytes = 0;
-	const args = input.args.map((value, index) => {
-		const argument = requireBoundedString(
-			value,
-			`args[${index}]`,
-			MAX_ARGUMENT_LENGTH,
-			false,
-		);
-		argumentBytes += Buffer.byteLength(argument, "utf8");
-		if (argumentBytes > MAX_TOTAL_ARGUMENT_BYTES) {
-			throw new TypeError(
-				"args exceed the bounded aggregate command input size.",
-			);
-		}
-		return argument;
-	});
-	const cwd =
-		input.cwd === undefined
-			? undefined
-			: requireBoundedString(input.cwd, "cwd", MAX_COMMAND_LENGTH, false);
-	return {
-		runId,
-		actionId,
-		command,
-		args,
-		...(cwd === undefined ? {} : { cwd }),
-	};
-}
-
 function normalizeActionResult(
 	input: Parameters<GovernedCommandEvidenceStore["persistActionResult"]>[0],
 ): {
@@ -505,21 +460,6 @@ function resultIdentity(input: {
 	};
 }
 
-function canonicalInputRecord(
-	input: ReturnType<typeof normalizeCanonicalInput>,
-	identity: InputIdentity,
-): Record<string, unknown> {
-	return {
-		schemaVersion: 1,
-		recordKind: "governed_command_input_v1",
-		runIdDigest: identity.runIdDigest,
-		actionIdDigest: identity.actionIdDigest,
-		commandDigest: sha256Text(input.command),
-		argsDigest: sha256CanonicalValue(input.args),
-		...(input.cwd === undefined ? {} : { cwdDigest: sha256Text(input.cwd) }),
-	};
-}
-
 function resultCommonRecord(
 	input: ReturnType<typeof normalizeActionResult>,
 	identity: InputIdentity,
@@ -548,7 +488,7 @@ function resultCommonRecord(
 }
 
 function inputRedactions(
-	input: ReturnType<typeof normalizeCanonicalInput>,
+	input: NormalizedGovernedCommandInputV1,
 ): readonly ActionRedactionV2[] {
 	return [
 		{
@@ -805,9 +745,43 @@ async function writeContentAddressedRecord(
 ): Promise<Artifact> {
 	const bytes = canonicalRecordBytes(record);
 	const digest = sha256Bytes(bytes);
+	return writeContentAddressedBytes(
+		root,
+		bytes,
+		digest,
+		`${CAS_REFERENCE_PREFIX}${digestHex(digest)}`,
+	);
+}
+
+/**
+ * Accept pre-canonicalized bytes only when their digest and CAS reference are
+ * self-consistent. Governed command input uses this after the shared kernel
+ * commitment derives the exact bytes that the worker later recomputes.
+ */
+async function writeContentAddressedBytes(
+	root: string,
+	rawBytes: Uint8Array,
+	expectedDigest: string,
+	expectedRef: string,
+): Promise<Artifact> {
+	const digest = requireSha256Digest(
+		expectedDigest,
+		"content-addressed digest",
+	);
+	const ref = requireCasReference(
+		expectedRef,
+		digest,
+		"content-addressed reference",
+	);
+	const bytes = Buffer.from(rawBytes);
+	if (sha256Bytes(bytes) !== digest) {
+		throw new GovernedCommandEvidenceConflictError(
+			"canonical evidence bytes do not match their derived digest.",
+		);
+	}
 	const path = contentAddressedPath(root, digest);
 	await writeImmutableFile(path, bytes);
-	return { digest, ref: `${CAS_REFERENCE_PREFIX}${digestHex(digest)}` };
+	return { digest, ref };
 }
 
 function contentAddressedPath(root: string, digest: string): string {

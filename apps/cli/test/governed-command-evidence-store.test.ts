@@ -9,6 +9,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative, sep } from "node:path";
+import { deriveGovernedCommandInputCommitmentV1 } from "@buildplane/kernel";
 import { afterEach, describe, expect, it } from "vitest";
 import {
 	createGovernedCommandEvidenceStore,
@@ -99,6 +100,21 @@ function everyStoredRecord(root: string): string {
 }
 
 describe("governed command evidence store", () => {
+	it("uses the shared command commitment for the persisted input digest and ref", async () => {
+		const root = temporaryRoot();
+		const store = storeAt(root);
+		const input = canonicalInput();
+		const expected = deriveGovernedCommandInputCommitmentV1(input);
+
+		const persisted = await store.persistCanonicalInput(input);
+
+		expect(persisted).toMatchObject({
+			canonicalInputDigest: expected.digest,
+			canonicalInputRef: expected.ref,
+		});
+		expect(contentAddressedRecords(root)).toHaveLength(1);
+	});
+
 	it("writes deterministic content-addressed input, result, and evidence records exactly once", async () => {
 		const root = temporaryRoot();
 		const projectRoot = temporaryRoot();

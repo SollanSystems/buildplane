@@ -1,11 +1,19 @@
 import { bundleDigest } from "@buildplane/capability-broker";
+import {
+	canonicalActionRequestedV2Digest,
+	deriveGovernedCommandInputCommitmentV1,
+} from "@buildplane/kernel";
 import { describe, expect, it, vi } from "vitest";
 import {
 	type ActionGatewayReceipt,
+	type ActionGatewayRole,
 	createActionGateway,
+	type GatewayAction,
 	type GatewayTools,
 	type GovernedActionExecutor,
 } from "../src/action-gateway.js";
+import { mintGovernedActionPermit } from "../src/governed-action-permit.js";
+import * as publicAdapterTools from "../src/index.js";
 import { createTrustedTestGovernedActionExecutor } from "./helpers/trusted-governed-executor.js";
 
 function governedBundle() {
@@ -42,6 +50,131 @@ function governedExecutor(
 	overrides: Partial<GovernedActionExecutor> = {},
 ): GovernedActionExecutor {
 	return createTrustedTestGovernedActionExecutor(overrides);
+}
+
+type ExecutableGatewayAction = Extract<
+	GatewayAction,
+	{ readonly kind: "process.run" }
+>;
+
+function governedActionPermit(input: {
+	readonly runId: string;
+	readonly worktreeRoot: string;
+	readonly role: ActionGatewayRole;
+	readonly action: ExecutableGatewayAction;
+	readonly capabilityBundleDigest: string;
+	readonly sandboxProfileDigest: string;
+	readonly governedDeadlineAtMs?: number;
+	readonly nowMs?: number;
+	readonly leaseExpiresAt?: string;
+}) {
+	const governedDeadlineAtMs = input.governedDeadlineAtMs ?? 4_102_444_800_000;
+	const nowMs = input.nowMs ?? Date.now();
+	const digestA = `sha256:${"a".repeat(64)}`;
+	const digestB = `sha256:${"b".repeat(64)}`;
+	const digestC = `sha256:${"c".repeat(64)}`;
+	const digestD = `sha256:${"d".repeat(64)}`;
+	const commandInputCommitment = deriveGovernedCommandInputCommitmentV1({
+		runId: input.runId,
+		actionId: input.action.actionId,
+		command: input.action.command,
+		args: input.action.args,
+		...(input.action.cwd === undefined ? {} : { cwd: input.action.cwd }),
+	});
+	const dispatch = {
+		schemaVersion: 3 as const,
+		runId: input.runId,
+		workflowId: "workflow-governed-permit",
+		workflowRevision: "revision-governed-permit",
+		unitId: "unit-governed-permit",
+		attempt: 1,
+		provenanceRef: "event://admission/governed-permit",
+		dispatchEnvelopeRef: "event://dispatch/governed-permit",
+		envelopeDigest: digestA,
+		baseCommitSha: "1".repeat(40),
+		repositoryBindingDigest: digestB,
+		ledgerAuthorityRealmDigest: digestC,
+		governedPacketDigest: digestD,
+		executionRole: input.role,
+		commitMode: "atomic" as const,
+		trustTier: "governed" as const,
+		capabilityBundleDigest: input.capabilityBundleDigest,
+		acceptanceContractDigest: digestB,
+		policyDigest: digestC,
+		contextManifestDigest: digestD,
+		workerManifestDigest: digestA,
+		sandboxProfileDigest: input.sandboxProfileDigest,
+		budget: {},
+		idempotencyKey: `dispatch:${input.runId}:1`,
+		authorityActor: "kernel:test",
+		actionEvidenceVersion: "sealed_v3" as const,
+		issuedAt: "2026-01-01T00:00:00.000Z",
+		expiresAt: "2101-01-01T00:00:00.000Z",
+	};
+	const actionRequest = {
+		schemaVersion: 2 as const,
+		runId: input.runId,
+		workflowId: dispatch.workflowId,
+		unitId: dispatch.unitId,
+		attempt: dispatch.attempt,
+		provenanceRef: dispatch.provenanceRef,
+		actionId: input.action.actionId,
+		idempotencyKey: `${dispatch.idempotencyKey}:action`,
+		actionKind:
+			input.action.kind === "process.run"
+				? ("process" as const)
+				: ("filesystem" as const),
+		canonicalInputDigest: commandInputCommitment.digest,
+		canonicalInputRef: commandInputCommitment.ref,
+		dispatchEnvelopeDigest: dispatch.envelopeDigest,
+		repositoryBindingDigest: dispatch.repositoryBindingDigest,
+		ledgerAuthorityRealmDigest: dispatch.ledgerAuthorityRealmDigest,
+		governedPacketDigest: dispatch.governedPacketDigest,
+		capabilityBundleDigest: input.capabilityBundleDigest,
+		policyDigest: dispatch.policyDigest,
+		contextManifestDigest: dispatch.contextManifestDigest,
+		workerManifestDigest: dispatch.workerManifestDigest,
+		sandboxProfileDigest: input.sandboxProfileDigest,
+		authorityActor: dispatch.authorityActor,
+		executionRole: input.role,
+		requestedAt: "2026-01-01T00:00:00.000Z",
+	};
+	const durableRequest = {
+		actionRequest,
+		actionRequestRef: "event://action-request/governed-permit",
+		actionRequestDigest: canonicalActionRequestedV2Digest(actionRequest),
+	};
+	const permit = mintGovernedActionPermit({
+		runId: input.runId,
+		worktreeRoot: input.worktreeRoot,
+		role: input.role,
+		action: input.action,
+		dispatch,
+		durableRequest,
+		claim: {
+			state: "granted",
+			activityId: input.action.actionId,
+			idempotencyKey: actionRequest.idempotencyKey,
+			claimEventId: "event://activity-claim/governed-permit",
+			claimEventDigest: digestA,
+			leaseId: "lease://activity-claim/governed-permit",
+			leaseExpiresAt: input.leaseExpiresAt ?? "2101-01-01T00:00:00.000Z",
+		},
+		capabilityBundleDigest: input.capabilityBundleDigest,
+		sandboxProfileDigest: input.sandboxProfileDigest,
+		governedDeadlineAtMs,
+		nowMs,
+	});
+	return Object.freeze({
+		permit,
+		evidence: Object.freeze({
+			dispatchEnvelopeDigest: dispatch.envelopeDigest,
+			durableActionRequestDigest: durableRequest.actionRequestDigest,
+			canonicalInputDigest: actionRequest.canonicalInputDigest,
+			idempotencyKey: actionRequest.idempotencyKey,
+			leaseId: "lease://activity-claim/governed-permit",
+		}),
+	});
 }
 
 const RESERVED_ACTION_FAMILIES = [
@@ -120,16 +253,282 @@ describe("ActionGateway", () => {
 		expect(runCommand).not.toHaveBeenCalled();
 	});
 
+	it("requires a durable claim-bound permit before governed OCI can observe an action", () => {
+		const sandboxRunCommand = vi.fn(governedExecutor().runCommand);
+		const bundle = governedBundle();
+		const gateway = createActionGateway({
+			runId: "run-governed-missing-permit",
+			worktreeRoot: "/worktree",
+			role: "implementer",
+			trustTier: "governed",
+			capabilityBundle: bundle,
+			capabilityBundleDigest: governedBundleDigest(bundle),
+			governedExecutor: governedExecutor({ runCommand: sandboxRunCommand }),
+			governedDeadlineAtMs: 4_102_444_800_000,
+		});
+
+		const receipt = gateway.execute({
+			actionId: "action-governed-missing-permit",
+			kind: "process.run",
+			command: "git",
+			args: ["status"],
+		});
+
+		expect(receipt).toMatchObject({
+			outcome: "denied",
+			reason: expect.stringMatching(/claim-bound permit/i),
+		});
+		expect(sandboxRunCommand).not.toHaveBeenCalled();
+	});
+
+	it.each([
+		"plain",
+		"serialized",
+	] as const)("denies a %s forged permit before OCI observes a governed action", (kind) => {
+		const sandboxRunCommand = vi.fn(governedExecutor().runCommand);
+		const bundle = governedBundle();
+		const ociExecutor = governedExecutor({ runCommand: sandboxRunCommand });
+		const action = Object.freeze({
+			actionId: "action-forged-governed-permit",
+			kind: "process.run" as const,
+			command: "git",
+			args: Object.freeze(["status"]),
+		});
+		const capabilityBundleDigest = governedBundleDigest(bundle);
+		const permitBinding = governedActionPermit({
+			runId: "run-forged-governed-permit",
+			worktreeRoot: "/worktree",
+			role: "implementer",
+			action,
+			capabilityBundleDigest,
+			sandboxProfileDigest: ociExecutor.sandbox.profileDigest,
+			governedDeadlineAtMs: 4_102_444_800_000,
+		});
+		const forgedPermit =
+			kind === "plain"
+				? Object.freeze({})
+				: JSON.parse(JSON.stringify(permitBinding.permit));
+		const gateway = createActionGateway({
+			runId: "run-forged-governed-permit",
+			worktreeRoot: "/worktree",
+			role: "implementer",
+			trustTier: "governed",
+			capabilityBundle: bundle,
+			capabilityBundleDigest,
+			governedExecutor: ociExecutor,
+			governedDeadlineAtMs: 4_102_444_800_000,
+			governedActionPermit: forgedPermit,
+			governedActionEvidence: permitBinding.evidence,
+		});
+
+		expect(gateway.execute(action)).toMatchObject({
+			outcome: "denied",
+			reason: expect.stringMatching(/claim-bound permit/i),
+		});
+		expect(sandboxRunCommand).not.toHaveBeenCalled();
+	});
+
+	it("consumes a governed permit once, including across separate gateways", () => {
+		const sandboxRunCommand = vi.fn(governedExecutor().runCommand);
+		const bundle = governedBundle();
+		const ociExecutor = governedExecutor({ runCommand: sandboxRunCommand });
+		const action = Object.freeze({
+			actionId: "action-one-use-governed-permit",
+			kind: "process.run" as const,
+			command: "git",
+			args: Object.freeze(["status"]),
+		});
+		const capabilityBundleDigest = governedBundleDigest(bundle);
+		const permitBinding = governedActionPermit({
+			runId: "run-one-use-governed-permit",
+			worktreeRoot: "/worktree",
+			role: "implementer",
+			action,
+			capabilityBundleDigest,
+			sandboxProfileDigest: ociExecutor.sandbox.profileDigest,
+			governedDeadlineAtMs: 4_102_444_800_000,
+		});
+		const options = {
+			runId: "run-one-use-governed-permit",
+			worktreeRoot: "/worktree",
+			role: "implementer" as const,
+			trustTier: "governed" as const,
+			capabilityBundle: bundle,
+			capabilityBundleDigest,
+			governedExecutor: ociExecutor,
+			governedDeadlineAtMs: 4_102_444_800_000,
+			governedActionPermit: permitBinding.permit,
+			governedActionEvidence: permitBinding.evidence,
+		};
+
+		expect(createActionGateway(options).execute(action)).toMatchObject({
+			outcome: "succeeded",
+		});
+		expect(createActionGateway(options).execute(action)).toMatchObject({
+			outcome: "denied",
+			reason: expect.stringMatching(/already consumed/i),
+		});
+		expect(sandboxRunCommand).toHaveBeenCalledOnce();
+	});
+
+	it("denies a permit after its activity lease expires before OCI dispatch", () => {
+		const sandboxRunCommand = vi.fn(governedExecutor().runCommand);
+		const bundle = governedBundle();
+		const ociExecutor = governedExecutor({ runCommand: sandboxRunCommand });
+		const action = Object.freeze({
+			actionId: "action-expired-lease-permit",
+			kind: "process.run" as const,
+			command: "git",
+			args: Object.freeze(["status"]),
+		});
+		const mintedAtMs = 1_800_000_000_000;
+		const leaseExpiresAt = new Date(mintedAtMs + 100).toISOString();
+		const capabilityBundleDigest = governedBundleDigest(bundle);
+		const permitBinding = governedActionPermit({
+			runId: "run-expired-lease-permit",
+			worktreeRoot: "/worktree",
+			role: "implementer",
+			action,
+			capabilityBundleDigest,
+			sandboxProfileDigest: ociExecutor.sandbox.profileDigest,
+			governedDeadlineAtMs: 4_102_444_800_000,
+			nowMs: mintedAtMs,
+			leaseExpiresAt,
+		});
+		const gateway = createActionGateway({
+			runId: "run-expired-lease-permit",
+			worktreeRoot: "/worktree",
+			role: "implementer",
+			trustTier: "governed",
+			capabilityBundle: bundle,
+			capabilityBundleDigest,
+			governedExecutor: ociExecutor,
+			governedDeadlineAtMs: 4_102_444_800_000,
+			governedNowMs: () => mintedAtMs + 101,
+			governedActionPermit: permitBinding.permit,
+			governedActionEvidence: permitBinding.evidence,
+		});
+
+		expect(gateway.execute(action)).toMatchObject({
+			outcome: "denied",
+			reason: expect.stringMatching(/lease is expired/i),
+		});
+		expect(sandboxRunCommand).not.toHaveBeenCalled();
+	});
+
+	it("denies a governed filesystem action even when a process permit is present", () => {
+		const sandboxWriteFile = vi.fn(governedExecutor().writeFile);
+		const bundle = governedBundle();
+		const ociExecutor = governedExecutor({ writeFile: sandboxWriteFile });
+		const processAction = Object.freeze({
+			actionId: "action-process-permit-for-filesystem-denial",
+			kind: "process.run" as const,
+			command: "git",
+			args: Object.freeze(["status"]),
+		});
+		const capabilityBundleDigest = governedBundleDigest(bundle);
+		const permitBinding = governedActionPermit({
+			runId: "run-filesystem-permit-denial",
+			worktreeRoot: "/worktree",
+			role: "implementer",
+			action: processAction,
+			capabilityBundleDigest,
+			sandboxProfileDigest: ociExecutor.sandbox.profileDigest,
+			governedDeadlineAtMs: 4_102_444_800_000,
+		});
+		const gateway = createActionGateway({
+			runId: "run-filesystem-permit-denial",
+			worktreeRoot: "/worktree",
+			role: "implementer",
+			trustTier: "governed",
+			capabilityBundle: bundle,
+			capabilityBundleDigest,
+			governedExecutor: ociExecutor,
+			governedDeadlineAtMs: 4_102_444_800_000,
+			governedActionPermit: permitBinding.permit,
+			governedActionEvidence: permitBinding.evidence,
+		});
+
+		expect(
+			gateway.execute({
+				actionId: "action-filesystem-permit-denial",
+				kind: "filesystem.write",
+				path: "output.txt",
+				content: "must not run",
+			}),
+		).toMatchObject({
+			outcome: "denied",
+			reason: expect.stringMatching(/no durable command input commitment/i),
+		});
+		expect(sandboxWriteFile).not.toHaveBeenCalled();
+	});
+
+	it("fails closed before minting a filesystem permit", () => {
+		expect(() =>
+			mintGovernedActionPermit({
+				runId: "run-filesystem-mint-denial",
+				worktreeRoot: "/worktree",
+				role: "implementer",
+				action: {
+					actionId: "action-filesystem-mint-denial",
+					kind: "filesystem.write",
+					path: "output.txt",
+					content: "must not mint",
+				},
+				dispatch: undefined as never,
+				durableRequest: undefined as never,
+				claim: undefined as never,
+				capabilityBundleDigest: `sha256:${"a".repeat(64)}`,
+				sandboxProfileDigest: `sha256:${"b".repeat(64)}`,
+				governedDeadlineAtMs: 4_102_444_800_000,
+				nowMs: 1_800_000_000_000,
+			}),
+		).toThrow(/durable command input commitment/i);
+	});
+
+	it("ignores malformed governed permit sidecars in the explicitly unsafe raw lane", () => {
+		const rawRunCommand = vi.fn(tools().runCommand);
+		const gateway = createActionGateway({
+			runId: "run-raw-malformed-governed-sidecars",
+			worktreeRoot: "/worktree",
+			role: "implementer",
+			trustTier: "raw",
+			tools: tools({ runCommand: rawRunCommand }),
+			governedActionPermit: Object.freeze({ forged: true }),
+			governedActionEvidence: ["not", "governed", "evidence"],
+		});
+
+		expect(
+			gateway.execute({
+				actionId: "action-raw-malformed-governed-sidecars",
+				kind: "process.run",
+				command: "git",
+				args: ["status"],
+			}),
+		).toMatchObject({ outcome: "succeeded" });
+		expect(rawRunCommand).toHaveBeenCalledOnce();
+	});
+
+	it("does not expose permit minting or consumption through the public package surface", () => {
+		expect(Object.hasOwn(publicAdapterTools, "mintGovernedActionPermit")).toBe(
+			false,
+		);
+		expect(
+			Object.hasOwn(publicAdapterTools, "consumeGovernedActionPermit"),
+		).toBe(false);
+	});
+
 	it("requires an exact governed capability bundle digest before OCI can observe an action", () => {
 		const sandboxRunCommand = vi.fn(governedExecutor().runCommand);
 		const bundle = governedBundle();
+		const ociExecutor = governedExecutor({ runCommand: sandboxRunCommand });
 		const common = {
 			runId: "run-governed-digest",
 			worktreeRoot: "/worktree",
 			role: "implementer" as const,
 			trustTier: "governed" as const,
 			capabilityBundle: bundle,
-			governedExecutor: governedExecutor({ runCommand: sandboxRunCommand }),
+			governedExecutor: ociExecutor,
 			governedDeadlineAtMs: 4_102_444_800_000,
 		};
 
@@ -144,16 +543,29 @@ describe("ActionGateway", () => {
 		).toThrow(/does not match the governed capability bundle/i);
 		expect(sandboxRunCommand).not.toHaveBeenCalled();
 
+		const action = Object.freeze({
+			actionId: "action-governed-digest",
+			kind: "process.run" as const,
+			command: "git",
+			args: Object.freeze(["status"]),
+		});
+		const capabilityBundleDigest = governedBundleDigest(bundle);
+		const permitBinding = governedActionPermit({
+			runId: common.runId,
+			worktreeRoot: common.worktreeRoot,
+			role: common.role,
+			action,
+			capabilityBundleDigest,
+			sandboxProfileDigest: ociExecutor.sandbox.profileDigest,
+			governedDeadlineAtMs: common.governedDeadlineAtMs,
+		});
 		const gateway = createActionGateway({
 			...common,
-			capabilityBundleDigest: governedBundleDigest(bundle),
+			capabilityBundleDigest,
+			governedActionPermit: permitBinding.permit,
+			governedActionEvidence: permitBinding.evidence,
 		});
-		const receipt = gateway.execute({
-			actionId: "action-governed-digest",
-			kind: "process.run",
-			command: "git",
-			args: ["status"],
-		});
+		const receipt = gateway.execute(action);
 
 		expect(receipt.outcome).toBe("succeeded");
 		expect(sandboxRunCommand).toHaveBeenCalledOnce();
@@ -224,26 +636,39 @@ describe("ActionGateway", () => {
 	it("routes governed actions only through an explicitly attested sandbox executor", () => {
 		const hostRunCommand = vi.fn(tools().runCommand);
 		const sandboxRunCommand = vi.fn(governedExecutor().runCommand);
+		const bundle = governedBundle();
+		const ociExecutor = governedExecutor({ runCommand: sandboxRunCommand });
+		const action = Object.freeze({
+			actionId: "action-sandboxed",
+			kind: "process.run" as const,
+			command: "git",
+			args: Object.freeze(["status"]),
+		});
+		const capabilityBundleDigest = governedBundleDigest(bundle);
+		const permitBinding = governedActionPermit({
+			runId: "run-sandboxed",
+			worktreeRoot: "/worktree",
+			role: "implementer",
+			action,
+			capabilityBundleDigest,
+			sandboxProfileDigest: ociExecutor.sandbox.profileDigest,
+			governedDeadlineAtMs: 4_102_444_800_000,
+		});
 		const gateway = createActionGateway({
 			runId: "run-sandboxed",
 			worktreeRoot: "/worktree",
 			role: "implementer",
 			trustTier: "governed",
-			capabilityBundle: governedBundle(),
-			capabilityBundleDigest: governedBundleDigest(),
+			capabilityBundle: bundle,
+			capabilityBundleDigest,
 			tools: tools({ runCommand: hostRunCommand }),
-			governedExecutor: governedExecutor({
-				runCommand: sandboxRunCommand,
-			}),
+			governedExecutor: ociExecutor,
 			governedDeadlineAtMs: 4_102_444_800_000,
+			governedActionPermit: permitBinding.permit,
+			governedActionEvidence: permitBinding.evidence,
 		});
 
-		const receipt = gateway.execute({
-			actionId: "action-sandboxed",
-			kind: "process.run",
-			command: "git",
-			args: ["status"],
-		});
+		const receipt = gateway.execute(action);
 
 		expect(receipt.outcome).toBe("succeeded");
 		expect(sandboxRunCommand).toHaveBeenCalledOnce();
@@ -254,7 +679,7 @@ describe("ActionGateway", () => {
 				worktreeRoot: "/worktree",
 				role: "implementer",
 				capabilityBundle: expect.objectContaining({ bundleId: "gateway-test" }),
-				capabilityBundleDigest: governedBundleDigest(),
+				capabilityBundleDigest,
 			}),
 		);
 		expect(hostRunCommand).not.toHaveBeenCalled();
@@ -423,23 +848,38 @@ describe("ActionGateway", () => {
 		"judge",
 	] as const)("allows %s to dispatch governed process.run through the attested executor", (role) => {
 		const sandboxRunCommand = vi.fn(governedExecutor().runCommand);
+		const bundle = governedBundle();
+		const ociExecutor = governedExecutor({ runCommand: sandboxRunCommand });
+		const action = Object.freeze({
+			actionId: `action-${role}-read-only-command`,
+			kind: "process.run" as const,
+			command: "git",
+			args: Object.freeze(["status"]),
+		});
+		const capabilityBundleDigest = governedBundleDigest(bundle);
+		const permitBinding = governedActionPermit({
+			runId: `run-${role}-read-only-command`,
+			worktreeRoot: "/worktree",
+			role,
+			action,
+			capabilityBundleDigest,
+			sandboxProfileDigest: ociExecutor.sandbox.profileDigest,
+			governedDeadlineAtMs: 4_102_444_800_000,
+		});
 		const gateway = createActionGateway({
 			runId: `run-${role}-read-only-command`,
 			worktreeRoot: "/worktree",
 			role,
 			trustTier: "governed",
-			capabilityBundle: governedBundle(),
-			capabilityBundleDigest: governedBundleDigest(),
-			governedExecutor: governedExecutor({ runCommand: sandboxRunCommand }),
+			capabilityBundle: bundle,
+			capabilityBundleDigest,
+			governedExecutor: ociExecutor,
 			governedDeadlineAtMs: 4_102_444_800_000,
+			governedActionPermit: permitBinding.permit,
+			governedActionEvidence: permitBinding.evidence,
 		});
 
-		const receipt = gateway.execute({
-			actionId: `action-${role}-read-only-command`,
-			kind: "process.run",
-			command: "git",
-			args: ["status"],
-		});
+		const receipt = gateway.execute(action);
 
 		expect(receipt.outcome).toBe("succeeded");
 		expect(sandboxRunCommand).toHaveBeenCalledOnce();

@@ -6,6 +6,7 @@ import {
 	canonicalActionReceiptRecordedV2Digest,
 	canonicalActionRequestedV2Digest,
 	canonicalGovernedUnitPacketV1Digest,
+	deriveGovernedCommandInputCommitmentV1,
 	type GovernedActionEvidencePort,
 	type GovernedActivityClaimPort,
 	type GovernedDispatchLineageV3,
@@ -319,12 +320,12 @@ describe("governed command worker + Podman contract", () => {
 			},
 		};
 		const evidenceStore: GovernedCommandEvidenceStore = {
-			async persistCanonicalInput() {
+			async persistCanonicalInput(input) {
 				order.push("canonical-input");
+				const commitment = deriveGovernedCommandInputCommitmentV1(input);
 				return {
-					canonicalInputDigest: DIGEST_E,
-					canonicalInputRef:
-						"cas://command-input/governed-worker-podman-contract",
+					canonicalInputDigest: commitment.digest,
+					canonicalInputRef: commitment.ref,
 					redactions: [],
 				};
 			},

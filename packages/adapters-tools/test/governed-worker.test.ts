@@ -12,6 +12,7 @@ import {
 	canonicalActionReceiptRecordedV2Digest,
 	canonicalActionRequestedV2Digest,
 	canonicalGovernedUnitPacketV1Digest,
+	deriveGovernedCommandInputCommitmentV1,
 } from "@buildplane/kernel";
 import { describe, expect, it, vi } from "vitest";
 import type { GovernedActionExecutor } from "../src/action-gateway.js";
@@ -184,11 +185,12 @@ function evidenceStore(
 	overrides: Partial<GovernedCommandEvidenceStore> = {},
 ): GovernedCommandEvidenceStore {
 	return {
-		persistCanonicalInput: async () => {
+		persistCanonicalInput: async (input) => {
 			order.push("input");
+			const commitment = deriveGovernedCommandInputCommitmentV1(input);
 			return {
-				canonicalInputDigest: DIGEST_E,
-				canonicalInputRef: "cas://command-input/governed-worker",
+				canonicalInputDigest: commitment.digest,
+				canonicalInputRef: commitment.ref,
 				redactions: [],
 			};
 		},
@@ -265,6 +267,10 @@ function v3Request(
 		actionEvidencePort: evidence,
 	};
 }
+
+type CanonicalCommandInput = Parameters<
+	GovernedCommandEvidenceStore["persistCanonicalInput"]
+>[0];
 
 describe("governed command worker execution port", () => {
 	it("rejects a structural executor before a governed worker can retain it", () => {
@@ -352,6 +358,105 @@ describe("governed command worker execution port", () => {
 					},
 				],
 			});
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it.each([
+		{
+			label: "command",
+			mutate: (input: CanonicalCommandInput) =>
+				deriveGovernedCommandInputCommitmentV1({
+					...input,
+					command: "git diff",
+				}),
+		},
+		{
+			label: "args",
+			mutate: (input: CanonicalCommandInput) =>
+				deriveGovernedCommandInputCommitmentV1({ ...input, args: ["diff"] }),
+		},
+		{
+			label: "cwd",
+			mutate: (input: CanonicalCommandInput) =>
+				deriveGovernedCommandInputCommitmentV1({ ...input, cwd: "other" }),
+		},
+		{
+			label: "run id",
+			mutate: (input: CanonicalCommandInput) =>
+				deriveGovernedCommandInputCommitmentV1({
+					...input,
+					runId: "other-run",
+				}),
+		},
+		{
+			label: "action id",
+			mutate: (input: CanonicalCommandInput) =>
+				deriveGovernedCommandInputCommitmentV1({
+					...input,
+					actionId: "other-action",
+				}),
+		},
+		{
+			label: "forged digest",
+			mutate: (input: CanonicalCommandInput) => {
+				const commitment = deriveGovernedCommandInputCommitmentV1(input);
+				return { ...commitment, digest: DIGEST_E };
+			},
+		},
+		{
+			label: "forged ref",
+			mutate: (input: CanonicalCommandInput) => {
+				const commitment = deriveGovernedCommandInputCommitmentV1(input);
+				return {
+					...commitment,
+					ref: "cas://governed-command-evidence/sha256/forged",
+				};
+			},
+		},
+	] as const)("blocks a persisted canonical-input commitment with a changed $label before request, claim, or OCI", async ({
+		mutate,
+	}) => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-governed-worker-"));
+		try {
+			const order: string[] = [];
+			const runCommand = vi.fn(() => ({
+				success: true,
+				exitCode: 0,
+				stdout: "",
+				stderr: "",
+			}));
+			const evidence = actionEvidencePort(order);
+			const claims = activityClaimPort(order);
+			const port = createGovernedCommandWorkerExecutionPort({
+				actionExecutor: executor({ runCommand }),
+				evidenceStore: evidenceStore(order, {
+					persistCanonicalInput: async (input) => {
+						order.push("input");
+						const forged = mutate(input);
+						return {
+							canonicalInputDigest: forged.digest,
+							canonicalInputRef: forged.ref,
+							redactions: [],
+						};
+					},
+				}),
+				activityClaimPort: claims,
+				now: () => "2026-07-18T00:00:00.000Z",
+			});
+			const inputPacket = packet();
+
+			await expect(
+				port.executeCandidatePacketAsync(
+					v3Request(root, inputPacket, evidence),
+				),
+			).rejects.toThrow(/exact shared CAS commitment/i);
+
+			expect(order).toEqual(["input"]);
+			expect(evidence.recordActionRequested).not.toHaveBeenCalled();
+			expect(claims.claim).not.toHaveBeenCalled();
+			expect(runCommand).not.toHaveBeenCalled();
 		} finally {
 			rmSync(root, { recursive: true, force: true });
 		}
@@ -745,12 +850,11 @@ describe("governed command worker execution port", () => {
 				capabilityBundleDigest: dispatch.capabilityBundleDigest,
 				idempotencyKey: dispatch.idempotencyKey,
 			};
-			const delayedInput = {
-				canonicalInputDigest: DIGEST_E,
-				canonicalInputRef: "cas://command-input/governed-worker",
-				redactions: [] as const,
-			};
-			const inputPersistence = deferred<typeof delayedInput>();
+			const inputPersistence = deferred<{
+				readonly canonicalInputDigest: string;
+				readonly canonicalInputRef: string;
+				readonly redactions: readonly [];
+			}>();
 			const store = evidenceStore(order, {
 				persistCanonicalInput: vi.fn(async () => {
 					order.push("input");
@@ -779,6 +883,12 @@ describe("governed command worker execution port", () => {
 			};
 			const resultPromise = port.executeCandidatePacketAsync(invocation);
 			expect(store.persistCanonicalInput).toHaveBeenCalledOnce();
+			const persistedCommandInput = vi.mocked(store.persistCanonicalInput).mock
+				.calls[0]?.[0];
+			expect(persistedCommandInput).toBeDefined();
+			const commitment = deriveGovernedCommandInputCommitmentV1(
+				persistedCommandInput!,
+			);
 
 			const replacementBundle = {
 				schemaVersion: "buildplane.capability_bundle.v0" as const,
@@ -807,7 +917,11 @@ describe("governed command worker execution port", () => {
 				recordActionRequested: forgedRecordActionRequested,
 				recordActionReceipt: forgedRecordActionReceipt,
 			});
-			inputPersistence.resolve(delayedInput);
+			inputPersistence.resolve({
+				canonicalInputDigest: commitment.digest,
+				canonicalInputRef: commitment.ref,
+				redactions: [],
+			});
 
 			const result = await resultPromise;
 			expect(recordActionRequested).toHaveBeenCalledWith(

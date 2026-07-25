@@ -70,6 +70,16 @@ export {
 	validateGovernedCandidateReviewExecutionInput,
 } from "./governed-candidate-review.ts";
 export type {
+	GovernedCommandInputCommitmentInputV1,
+	GovernedCommandInputCommitmentV1,
+	NormalizedGovernedCommandInputV1,
+} from "./governed-command-input-commitment.ts";
+export {
+	deriveGovernedCommandInputCommitmentV1,
+	GOVERNED_COMMAND_INPUT_CAS_REFERENCE_PREFIX,
+	normalizeGovernedCommandInputCommitmentV1,
+} from "./governed-command-input-commitment.ts";
+export type {
 	GovernedDispatchAuthorityWindowFailureV1,
 	GovernedDispatchAuthorityWindowInputV1,
 	GovernedDispatchAuthorityWindowInspectionV1,

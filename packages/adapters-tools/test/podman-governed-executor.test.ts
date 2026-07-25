@@ -17,12 +17,19 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { bundleDigest } from "@buildplane/capability-broker";
+import {
+	canonicalActionRequestedV2Digest,
+	deriveGovernedCommandInputCommitmentV1,
+} from "@buildplane/kernel";
 import { describe, expect, it, vi } from "vitest";
 import {
+	type ActionGatewayReceipt,
 	createActionGateway,
+	type GatewayAction,
 	type GovernedActionExecutionContext,
 	type GovernedActionExecutor,
 } from "../src/action-gateway.js";
+import { mintGovernedActionPermit } from "../src/governed-action-permit.js";
 import {
 	createPodmanGovernedActionExecutorForTest as createPodmanGovernedActionExecutor,
 	createPodmanGovernedActionExecutor as createProductionPodmanGovernedActionExecutor,
@@ -31,6 +38,7 @@ import {
 	type PodmanGovernedSandboxProfileV1,
 	podmanGovernedSandboxProfileDigest,
 } from "../src/podman-governed-executor.js";
+import { createTrustedTestGovernedActionExecutor } from "./helpers/trusted-governed-executor.js";
 
 const IMAGE = `registry.example.test/buildplane/worker@sha256:${"a".repeat(64)}`;
 const LINUX_TEST_HOST = { platform: "linux" } as const;
@@ -162,22 +170,282 @@ function directContext(worktreeRoot: string): GovernedActionExecutionContext {
 	};
 }
 
+type ProcessGatewayAction = Extract<
+	GatewayAction,
+	{ readonly kind: "process.run" }
+>;
+type FilesystemGatewayAction = Extract<
+	GatewayAction,
+	{ readonly kind: "filesystem.write" }
+>;
+
+const TEST_PERMIT_DIGEST_A = `sha256:${"a".repeat(64)}`;
+const TEST_PERMIT_DIGEST_B = `sha256:${"b".repeat(64)}`;
+const TEST_PERMIT_DIGEST_C = `sha256:${"c".repeat(64)}`;
+const TEST_PERMIT_DIGEST_D = `sha256:${"d".repeat(64)}`;
+const TEST_PERMIT_DIGEST_E = `sha256:${"e".repeat(64)}`;
+
+/**
+ * Produces the same durable request/claim lineage that a governed worker has
+ * before it reaches the gateway. This stays test-only: production workers
+ * mint permits only after their real evidence and native activity ports run.
+ */
+function permitForProcessAction(input: {
+	readonly runId: string;
+	readonly worktreeRoot: string;
+	readonly role: GovernedActionExecutionContext["role"];
+	readonly action: ProcessGatewayAction;
+	readonly capabilityBundleDigest: string;
+	readonly sandboxProfileDigest: string;
+	readonly deadlineAtMs: number;
+	readonly nowMs: number;
+}) {
+	const commandInput = deriveGovernedCommandInputCommitmentV1({
+		runId: input.runId,
+		actionId: input.action.actionId,
+		command: input.action.command,
+		args: input.action.args,
+		...(input.action.cwd === undefined ? {} : { cwd: input.action.cwd }),
+	});
+	const dispatch = {
+		schemaVersion: 3 as const,
+		runId: input.runId,
+		workflowId: "workflow-podman-governed-test",
+		workflowRevision: "1",
+		unitId: "unit-podman-governed-test",
+		attempt: 1,
+		provenanceRef: "event://admission/podman-governed-test",
+		dispatchEnvelopeRef: "event://dispatch/podman-governed-test",
+		envelopeDigest: TEST_PERMIT_DIGEST_A,
+		baseCommitSha: "1".repeat(40),
+		repositoryBindingDigest: TEST_PERMIT_DIGEST_B,
+		ledgerAuthorityRealmDigest: TEST_PERMIT_DIGEST_C,
+		governedPacketDigest: TEST_PERMIT_DIGEST_D,
+		executionRole: input.role,
+		commitMode: "atomic" as const,
+		trustTier: "governed" as const,
+		capabilityBundleDigest: input.capabilityBundleDigest,
+		acceptanceContractDigest: TEST_PERMIT_DIGEST_B,
+		policyDigest: TEST_PERMIT_DIGEST_C,
+		contextManifestDigest: TEST_PERMIT_DIGEST_D,
+		workerManifestDigest: TEST_PERMIT_DIGEST_E,
+		sandboxProfileDigest: input.sandboxProfileDigest,
+		budget: {},
+		idempotencyKey: `dispatch:${input.runId}:1`,
+		authorityActor: "kernel:test",
+		actionEvidenceVersion: "sealed_v3" as const,
+		issuedAt: "1970-01-01T00:00:00.000Z",
+		expiresAt: "2100-01-01T00:00:00.000Z",
+	};
+	const actionRequest = {
+		schemaVersion: 2 as const,
+		runId: input.runId,
+		workflowId: dispatch.workflowId,
+		unitId: dispatch.unitId,
+		attempt: dispatch.attempt,
+		provenanceRef: dispatch.provenanceRef,
+		actionId: input.action.actionId,
+		idempotencyKey: `${dispatch.idempotencyKey}:${input.action.actionId}`,
+		actionKind: "process" as const,
+		canonicalInputDigest: commandInput.digest,
+		canonicalInputRef: commandInput.ref,
+		dispatchEnvelopeDigest: dispatch.envelopeDigest,
+		repositoryBindingDigest: dispatch.repositoryBindingDigest,
+		ledgerAuthorityRealmDigest: dispatch.ledgerAuthorityRealmDigest,
+		governedPacketDigest: dispatch.governedPacketDigest,
+		capabilityBundleDigest: input.capabilityBundleDigest,
+		policyDigest: dispatch.policyDigest,
+		contextManifestDigest: dispatch.contextManifestDigest,
+		workerManifestDigest: dispatch.workerManifestDigest,
+		sandboxProfileDigest: input.sandboxProfileDigest,
+		authorityActor: dispatch.authorityActor,
+		executionRole: input.role,
+		requestedAt: "1970-01-01T00:00:00.000Z",
+	};
+	const durableRequest = {
+		actionRequest,
+		actionRequestRef: `event://action-request/${input.action.actionId}`,
+		actionRequestDigest: canonicalActionRequestedV2Digest(actionRequest),
+	};
+	const leaseId = `lease://activity/${input.action.actionId}`;
+	const permit = mintGovernedActionPermit({
+		runId: input.runId,
+		worktreeRoot: input.worktreeRoot,
+		role: input.role,
+		action: input.action,
+		dispatch,
+		durableRequest,
+		claim: {
+			state: "granted",
+			activityId: input.action.actionId,
+			idempotencyKey: actionRequest.idempotencyKey,
+			claimEventId: `event://activity-claim/${input.action.actionId}`,
+			claimEventDigest: TEST_PERMIT_DIGEST_E,
+			leaseId,
+			leaseExpiresAt: "2100-01-01T00:00:00.000Z",
+		},
+		capabilityBundleDigest: input.capabilityBundleDigest,
+		sandboxProfileDigest: input.sandboxProfileDigest,
+		governedDeadlineAtMs: input.deadlineAtMs,
+		nowMs: input.nowMs,
+	});
+	return Object.freeze({
+		permit,
+		evidence: Object.freeze({
+			dispatchEnvelopeDigest: dispatch.envelopeDigest,
+			durableActionRequestDigest: durableRequest.actionRequestDigest,
+			canonicalInputDigest: commandInput.digest,
+			idempotencyKey: actionRequest.idempotencyKey,
+			leaseId,
+		}),
+	});
+}
+
+function gatewayStyleFilesystemReceipt(
+	action: FilesystemGatewayAction,
+	context: GovernedActionExecutionContext,
+	result: ReturnType<GovernedActionExecutor["writeFile"]>,
+): ActionGatewayReceipt {
+	const brokerDenied = result.error?.startsWith("capability broker:") ?? false;
+	const outcome = brokerDenied
+		? "denied"
+		: result.success
+			? "succeeded"
+			: "failed";
+	const digest = `sha256:${createHash("sha256")
+		.update(JSON.stringify({ action, result }), "utf8")
+		.digest("hex")}`;
+	return Object.freeze({
+		actionId: action.actionId,
+		kind: action.kind,
+		runId: context.runId,
+		role: context.role,
+		trustTier: "governed",
+		outcome,
+		inputDigest: digest,
+		resultDigest: digest,
+		...(result.error === undefined ? {} : { reason: result.error }),
+	});
+}
+
 function gatewayFor(
 	worktreeRoot: string,
 	governedExecutor: GovernedActionExecutor,
 	bundle = governedBundle(),
 	overrides: Partial<Parameters<typeof createActionGateway>[0]> = {},
 ) {
-	return createActionGateway({
-		runId: "run-podman-1",
+	const {
+		governedActionPermit: _ignoredPermit,
+		governedActionEvidence: _ignoredEvidence,
+		governedDeadlineAtMs: suppliedDeadlineAtMs,
+		governedNowMs: suppliedNowMs,
+		...safeOverrides
+	} = overrides;
+	const deadlineAtMs = suppliedDeadlineAtMs ?? 4_102_444_800_000;
+	const nowMs = suppliedNowMs ?? (() => Date.now());
+	const runId = overrides.runId ?? "run-podman-1";
+	const role = overrides.role ?? "implementer";
+	const capabilityBundleDigest = bundleDigest(bundle);
+	const baseOptions = {
+		...safeOverrides,
+		runId,
 		worktreeRoot,
-		role: "implementer",
-		trustTier: "governed",
+		role,
+		trustTier: "governed" as const,
 		capabilityBundle: bundle,
-		capabilityBundleDigest: bundleDigest(bundle),
+		capabilityBundleDigest,
 		governedExecutor,
-		governedDeadlineAtMs: 4_102_444_800_000,
-		...overrides,
+		governedDeadlineAtMs: deadlineAtMs,
+		governedNowMs: nowMs,
+	};
+	// Preserve construction-time provenance/sandbox validation for tests that
+	// assert malformed executors are rejected before any action is considered.
+	const unpermittedGateway = createActionGateway(baseOptions);
+
+	return Object.freeze({
+		execute(action: GatewayAction): ActionGatewayReceipt {
+			if (action.kind !== "process.run" && action.kind !== "filesystem.write") {
+				return unpermittedGateway.execute(action);
+			}
+			const currentNowMs = nowMs();
+			if (currentNowMs >= deadlineAtMs) {
+				return unpermittedGateway.execute(action);
+			}
+			if (action.kind === "process.run") {
+				const permitBinding = permitForProcessAction({
+					runId,
+					worktreeRoot,
+					role,
+					action,
+					capabilityBundleDigest,
+					sandboxProfileDigest: governedExecutor.sandbox.profileDigest,
+					deadlineAtMs,
+					nowMs: currentNowMs,
+				});
+				return createActionGateway({
+					...baseOptions,
+					governedActionPermit: permitBinding.permit,
+					governedActionEvidence: permitBinding.evidence,
+				}).execute(action);
+			}
+			if (role !== "implementer" && role !== "candidate") {
+				return unpermittedGateway.execute(action);
+			}
+
+			/**
+			 * The command-only GA permit intentionally does not authorize a
+			 * filesystem action. These are executor-isolation tests, so mint a
+			 * legitimate gateway context through a separate, bounded process permit,
+			 * then exercise the attested executor's filesystem implementation
+			 * directly. This is test-only and is not an authorization path.
+			 */
+			let capturedContext: GovernedActionExecutionContext | undefined;
+			const contextAction: ProcessGatewayAction = Object.freeze({
+				actionId: `test-context:${action.actionId}`,
+				kind: "process.run",
+				command: "git",
+				args: Object.freeze(["status"]),
+			});
+			const contextExecutor = createTrustedTestGovernedActionExecutor({
+				sandbox: { profileDigest: governedExecutor.sandbox.profileDigest },
+				runCommand: (_input, context) => {
+					capturedContext = context;
+					return { success: true, exitCode: 0, stdout: "", stderr: "" };
+				},
+			});
+			const contextPermit = permitForProcessAction({
+				runId,
+				worktreeRoot,
+				role,
+				action: contextAction,
+				capabilityBundleDigest,
+				sandboxProfileDigest: contextExecutor.sandbox.profileDigest,
+				deadlineAtMs,
+				nowMs: currentNowMs,
+			});
+			const contextReceipt = createActionGateway({
+				...baseOptions,
+				governedExecutor: contextExecutor,
+				governedActionPermit: contextPermit.permit,
+				governedActionEvidence: contextPermit.evidence,
+			}).execute(contextAction);
+			if (
+				contextReceipt.outcome !== "succeeded" ||
+				capturedContext === undefined
+			) {
+				throw new Error(
+					"test helper could not obtain a gateway-minted context",
+				);
+			}
+			return gatewayStyleFilesystemReceipt(
+				action,
+				capturedContext,
+				governedExecutor.writeFile(
+					{ path: action.path, content: action.content },
+					capturedContext,
+				),
+			);
+		},
 	});
 }
 

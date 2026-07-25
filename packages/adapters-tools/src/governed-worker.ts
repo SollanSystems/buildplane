@@ -12,6 +12,7 @@ import {
 	canonicalGovernedUnitPacketV1Digest,
 	canonicalSha256Digest,
 	type DurableActionRequestV2,
+	deriveGovernedCommandInputCommitmentV1,
 	type ExecutionReceipt,
 	type GovernedActionEvidencePort,
 	type GovernedActivityClaimDispositionV1,
@@ -31,6 +32,7 @@ import {
 	createActionGateway,
 	type GovernedActionExecutor,
 } from "./action-gateway.js";
+import { mintGovernedActionPermit } from "./governed-action-permit.js";
 import { isTrustedGovernedActionExecutor } from "./governed-executor-provenance.js";
 
 const MAX_ECMASCRIPT_EPOCH_MS = 8_640_000_000_000_000;
@@ -375,15 +377,34 @@ async function executeV3Command(context: {
 	assertActiveGovernedDispatchAuthorityWindowV1(dispatch, context.now());
 	assertDispatchComputeDeadlineUnexpiredAt(deadlineAtMs, context.nowMs());
 	const actionId = governedActionId(workerInput.runId, dispatch.envelopeDigest);
-	const args = [...(execution.args ?? [])];
-	const persistedInput = await evidenceStore.persistCanonicalInput({
-		runId: workerInput.runId,
+	// One immutable object crosses every local boundary below: canonical input,
+	// durable request, native claim, permit minting, and the OCI gateway. This
+	// prevents a worker-side field mutation from making the persisted intent and
+	// the executable action describe different effects.
+	const gatewayAction = Object.freeze({
 		actionId,
+		kind: "process.run" as const,
 		command: execution.command,
-		args,
+		...(execution.args === undefined
+			? {}
+			: { args: Object.freeze([...execution.args]) }),
 		...(execution.cwd === undefined ? {} : { cwd: execution.cwd }),
 	});
-	assertPersistedInput(persistedInput);
+	const commandInputCommitment = deriveGovernedCommandInputCommitmentV1({
+		runId: workerInput.runId,
+		actionId: gatewayAction.actionId,
+		command: gatewayAction.command,
+		args: gatewayAction.args,
+		...(gatewayAction.cwd === undefined ? {} : { cwd: gatewayAction.cwd }),
+	});
+	const persistedInput = await evidenceStore.persistCanonicalInput({
+		runId: workerInput.runId,
+		actionId: gatewayAction.actionId,
+		command: gatewayAction.command,
+		args: gatewayAction.args ?? [],
+		...(gatewayAction.cwd === undefined ? {} : { cwd: gatewayAction.cwd }),
+	});
+	assertPersistedInput(persistedInput, commandInputCommitment);
 	const requestedAt = context.now();
 	const actionRequest: ActionRequestedV2 = {
 		schemaVersion: 2,
@@ -392,7 +413,7 @@ async function executeV3Command(context: {
 		unitId: dispatch.unitId,
 		attempt: dispatch.attempt,
 		provenanceRef: dispatch.provenanceRef,
-		actionId,
+		actionId: gatewayAction.actionId,
 		idempotencyKey: `${dispatch.idempotencyKey}:command`,
 		actionKind: "process",
 		canonicalInputDigest: canonicalSha256Digest(
@@ -475,7 +496,7 @@ async function executeV3Command(context: {
 		await context.activityClaimPort.claim({
 			dispatch,
 			durableRequest,
-			activityId: actionId,
+			activityId: gatewayAction.actionId,
 			idempotencyKey: actionRequest.idempotencyKey,
 			leaseDurationMs: context.activityLeaseDurationMs,
 		}),
@@ -506,29 +527,45 @@ async function executeV3Command(context: {
 	const startedAt = preOciAt;
 	const startedAtMs = context.nowMs();
 	try {
+		const governedActionEvidence = Object.freeze({
+			dispatchEnvelopeDigest: dispatch.envelopeDigest,
+			durableActionRequestDigest: durableRequest.actionRequestDigest,
+			canonicalInputDigest: durableRequest.actionRequest.canonicalInputDigest,
+			idempotencyKey: durableRequest.actionRequest.idempotencyKey,
+			leaseId: activityClaim.leaseId,
+		});
+		const governedActionPermit = mintGovernedActionPermit({
+			runId: workerInput.runId,
+			worktreeRoot: workerInput.projectRoot,
+			role: dispatch.executionRole,
+			action: gatewayAction,
+			dispatch,
+			durableRequest,
+			claim: activityClaim,
+			capabilityBundleDigest: dispatch.capabilityBundleDigest,
+			sandboxProfileDigest: context.actionExecutor.sandbox.profileDigest,
+			governedDeadlineAtMs: deadlineAtMs,
+			nowMs: startedAtMs,
+		});
 		const gateway = createActionGateway({
 			runId: workerInput.runId,
 			worktreeRoot: workerInput.projectRoot,
-			role: "implementer",
+			role: dispatch.executionRole,
 			trustTier: "governed",
 			capabilityBundle: workerInput.packet.capability_bundle,
 			capabilityBundleDigest: workerInput.packet.capability_bundle_digest,
 			governedExecutor: context.actionExecutor,
 			governedDeadlineAtMs: deadlineAtMs,
 			governedNowMs: context.nowMs,
+			governedActionPermit,
+			governedActionEvidence,
 			onReceipt: context.onActionReceipt,
 		});
 		// No await occurs between this final authority observation and the typed
 		// gateway effect. If it fails after a lease was granted, reconciliation
 		// remains conservative and the OCI action is never attempted.
 		assertActiveGovernedDispatchAuthorityWindowV1(dispatch, context.now());
-		gatewayReceipt = gateway.execute({
-			actionId,
-			kind: "process.run",
-			command: execution.command,
-			...(execution.args === undefined ? {} : { args: execution.args }),
-			...(execution.cwd === undefined ? {} : { cwd: execution.cwd }),
-		});
+		gatewayReceipt = gateway.execute(gatewayAction);
 	} catch (error) {
 		await recordUnknownActivityAndReceipt({
 			dispatch,
@@ -1531,9 +1568,16 @@ function assertPersistedInput(
 	input: Awaited<
 		ReturnType<GovernedCommandEvidenceStore["persistCanonicalInput"]>
 	>,
+	expected: ReturnType<typeof deriveGovernedCommandInputCommitmentV1>,
 ): void {
-	canonicalSha256Digest(input.canonicalInputDigest);
-	requireEvidenceReference(input.canonicalInputRef, "canonical input");
+	if (
+		input.canonicalInputDigest !== expected.digest ||
+		input.canonicalInputRef !== expected.ref
+	) {
+		throw new TypeError(
+			"persisted canonical command input does not match the exact shared CAS commitment.",
+		);
+	}
 }
 
 function assertPersistedResult(
