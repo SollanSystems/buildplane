@@ -30,6 +30,10 @@ pub struct ReplayStep {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum TrustSpineSignerRole {
     Kernel,
+    /// Separately configured protected-host identity allowed to record V5
+    /// admission evidence. This role carries no dispatch, effect, or promotion
+    /// authority.
+    Admission,
     Reviewer,
     Operator,
 }
@@ -489,6 +493,11 @@ fn required_signer_role(
         Payload::ReviewVerdictRecordedV1(_) | Payload::ReviewVerdictRecordedV2(_) => {
             Some(TrustSpineSignerRole::Reviewer)
         }
+        // A V5 protected-host admission receipt is recovery evidence only, but
+        // it still needs a distinct signer purpose. A kernel, worker, reviewer,
+        // or operator key must not be able to substitute for the protected
+        // admission host simply because it can sign another trust-spine event.
+        Payload::GovernedDispatchV5AdmissionRecordedV1(_) => Some(TrustSpineSignerRole::Admission),
         Payload::PromotionDecisionRecordedV1(_) | Payload::PromotionReconciliationResolvedV1(_) => {
             Some(TrustSpineSignerRole::Operator)
         }
@@ -499,6 +508,7 @@ fn required_signer_role(
 fn signer_role_wire(role: TrustSpineSignerRole) -> &'static str {
     match role {
         TrustSpineSignerRole::Kernel => "kernel",
+        TrustSpineSignerRole::Admission => "admission",
         TrustSpineSignerRole::Reviewer => "reviewer",
         TrustSpineSignerRole::Operator => "operator",
     }

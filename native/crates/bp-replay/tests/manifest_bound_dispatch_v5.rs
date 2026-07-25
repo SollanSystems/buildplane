@@ -1,8 +1,10 @@
 //! Manifest-bound V5 dispatch reducer tests.
 
+use bp_ledger::canonicalize::canonical_event_hash;
 use bp_ledger::event::Event;
 use bp_ledger::id::{EventId, RunId};
 use bp_ledger::kind::EventKind;
+use bp_ledger::payload::run_lifecycle::RunStartedV1;
 use bp_ledger::payload::trust_spine::{
     attempt_context_content_v1_digest, attempt_context_recorded_v1_digest,
     context_manifest_content_v1_digest, dispatch_envelope_v3_body_digest,
@@ -18,13 +20,20 @@ use bp_ledger::payload::trust_spine::{
     WorkflowGraphNodeV2,
 };
 use bp_ledger::payload::Payload;
-use bp_ledger::signing::{public_key_hash, ActorKeyRef, TrustedPublicKeys};
-use bp_ledger::storage::sqlite::SqliteStore;
+use bp_ledger::signing::{public_key_hash, sign_event, ActorKeyRef, TrustedPublicKeys};
+use bp_ledger::storage::sqlite::{
+    GovernedDispatchV5AdmissionAuthorityV1, GovernedDispatchV5AdmissionDispositionV1,
+    GovernedDispatchV5AdmissionRequestV1, GovernedDispatchV5AdmissionSealRequestV1, SqliteStore,
+};
 use bp_replay::engine::{ReplayEngine, TrustSpineSignerRole, TrustedReplayAuthorities};
 use bp_replay::state::{AttemptContextReplayState, ReplayIssue, ReplayState};
 use bp_replay::transitions::apply_legacy_projection_unchecked;
-use chrono::Utc;
+use bp_replay::{TrustedGovernedRecoveryError, TrustedGovernedRecoverySnapshot};
+use chrono::{SecondsFormat, Utc};
 use ed25519_dalek::SigningKey;
+use rusqlite::params;
+use std::collections::BTreeMap;
+use std::path::Path;
 use tempfile::TempDir;
 
 fn digest(hex: char) -> String {
@@ -47,6 +56,29 @@ fn reviewer_signer() -> ActorKeyRef {
     }
 }
 
+fn admission_signer() -> ActorKeyRef {
+    ActorKeyRef {
+        actor_id: "admission".into(),
+        key_id: "admission-main".into(),
+        public_key_hash: None,
+    }
+}
+
+fn checkpoint_signer() -> ActorKeyRef {
+    ActorKeyRef {
+        actor_id: "checkpoint".into(),
+        key_id: "checkpoint-main".into(),
+        public_key_hash: None,
+    }
+}
+
+fn signer_with_key(signer: ActorKeyRef, signing_key: &SigningKey) -> ActorKeyRef {
+    ActorKeyRef {
+        public_key_hash: Some(public_key_hash(&signing_key.verifying_key())),
+        ..signer
+    }
+}
+
 fn trusted_authorities(signing_key: &SigningKey) -> TrustedReplayAuthorities {
     let key_hash = public_key_hash(&signing_key.verifying_key());
     let mut keys = TrustedPublicKeys::default();
@@ -63,6 +95,66 @@ fn trusted_authorities(signing_key: &SigningKey) -> TrustedReplayAuthorities {
         },
     );
     authorities
+}
+
+fn protected_v5_admission_replay_authorities(
+    source_signing_key: &SigningKey,
+    admission_signing_key: &SigningKey,
+    checkpoint_signing_key: &SigningKey,
+    allow_admission_signer: bool,
+) -> (
+    GovernedDispatchV5AdmissionAuthorityV1,
+    TrustedReplayAuthorities,
+    ActorKeyRef,
+    ActorKeyRef,
+    ActorKeyRef,
+) {
+    let source_signer = signer_with_key(kernel_signer(), source_signing_key);
+    let admission_signer = signer_with_key(admission_signer(), admission_signing_key);
+    let checkpoint_signer = signer_with_key(checkpoint_signer(), checkpoint_signing_key);
+    let mut keys = TrustedPublicKeys::default();
+    keys.insert_public_key(
+        source_signer
+            .public_key_hash
+            .clone()
+            .expect("source signer key hash"),
+        source_signing_key.verifying_key().to_bytes().to_vec(),
+    );
+    keys.insert_public_key(
+        admission_signer
+            .public_key_hash
+            .clone()
+            .expect("admission signer key hash"),
+        admission_signing_key.verifying_key().to_bytes().to_vec(),
+    );
+    keys.insert_public_key(
+        checkpoint_signer
+            .public_key_hash
+            .clone()
+            .expect("checkpoint signer key hash"),
+        checkpoint_signing_key.verifying_key().to_bytes().to_vec(),
+    );
+    let admission_authority = GovernedDispatchV5AdmissionAuthorityV1::new_governed_realm(
+        keys.clone(),
+        source_signer.clone(),
+        admission_signer.clone(),
+        checkpoint_signer.clone(),
+        digest('8'),
+    )
+    .expect("construct protected V5 admission authority");
+    let mut authorities = TrustedReplayAuthorities::new(keys);
+    authorities.allow_signer(TrustSpineSignerRole::Kernel, source_signer.clone());
+    if allow_admission_signer {
+        authorities.allow_signer(TrustSpineSignerRole::Admission, admission_signer.clone());
+    }
+    authorities.allow_signer(TrustSpineSignerRole::Kernel, checkpoint_signer.clone());
+    (
+        admission_authority,
+        authorities,
+        source_signer,
+        admission_signer,
+        checkpoint_signer,
+    )
 }
 
 struct V5Fixture {
@@ -347,6 +439,185 @@ fn apply_manifest_declarations(state: &mut ReplayState, fixture: &V5Fixture) {
     }
 }
 
+fn append_signed_v5_source(
+    store: &SqliteStore,
+    fixture: &V5Fixture,
+    signing_key: &SigningKey,
+    signer: &ActorKeyRef,
+) {
+    for event in [
+        &fixture.graph,
+        &fixture.context_manifest,
+        &fixture.worker_manifest,
+        &fixture.sandbox_profile,
+        &fixture.dispatch,
+    ] {
+        store
+            .append_signed(event, signing_key, signer)
+            .expect("append protected V5 source evidence");
+    }
+}
+
+fn record_and_seal_v5_admission(
+    store: &SqliteStore,
+    fixture: &V5Fixture,
+    authority: &GovernedDispatchV5AdmissionAuthorityV1,
+    admission_signing_key: &SigningKey,
+    admission_signer: &ActorKeyRef,
+    checkpoint_signing_key: &SigningKey,
+    checkpoint_signer: &ActorKeyRef,
+) -> EventId {
+    let admission_event_id = match store
+        .record_governed_dispatch_v5_admission_v1(
+            &GovernedDispatchV5AdmissionRequestV1 {
+                run_id: fixture.dispatch.run_id,
+                dispatch_event_id: fixture.dispatch.id,
+            },
+            authority,
+            admission_signing_key,
+            admission_signer,
+        )
+        .expect("record separately signed V5 admission receipt")
+    {
+        GovernedDispatchV5AdmissionDispositionV1::AwaitingCheckpoint {
+            admission_event_id, ..
+        } => admission_event_id,
+        other => panic!("new V5 admission must await a checkpoint, got {other:?}"),
+    };
+    store
+        .seal_governed_dispatch_v5_admission_v1(
+            &GovernedDispatchV5AdmissionSealRequestV1 {
+                run_id: fixture.dispatch.run_id,
+                admission_event_id,
+            },
+            authority,
+            checkpoint_signing_key,
+            checkpoint_signer,
+        )
+        .expect("seal a checkpoint prefix containing the V5 admission receipt");
+    admission_event_id
+}
+
+/// Production ingress intentionally rejects caller-supplied V5 receipts. This
+/// test-only writer lets replay be exercised against a byte-valid, signed tape
+/// that bypassed that ingress, so the reducer's independent role and binding
+/// checks cannot regress into trusting storage admission projections.
+fn append_signed_v5_admission_receipt_directly_for_replay_test(
+    db_path: &Path,
+    event: &Event,
+    signing_key: &SigningKey,
+    signer: &ActorKeyRef,
+) {
+    let signature = sign_event(event, signing_key, signer, Utc::now())
+        .expect("sign a canonical direct V5 admission receipt");
+    let connection = rusqlite::Connection::open(db_path).expect("open test ledger connection");
+    connection
+        .execute(
+            r#"INSERT INTO events (id, run_id, parent_event_id, schema_version, kind, occurred_at, payload)
+               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"#,
+            params![
+                event.id.to_string(),
+                event.run_id.to_string(),
+                event.parent_event_id.map(|event_id| event_id.to_string()),
+                event.schema_version,
+                event.kind_str(),
+                event.occurred_at.to_rfc3339(),
+                serde_json::to_string(&event.payload).expect("serialize direct receipt payload"),
+            ],
+        )
+        .expect("insert direct V5 admission receipt event");
+    connection
+        .execute(
+            r#"INSERT INTO event_signatures (
+                    event_id, canonical_event_hash, actor_id, key_id, public_key_hash,
+                    algorithm, signature, signed_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"#,
+            params![
+                signature.event_id.to_string(),
+                signature.canonical_event_hash,
+                signature.signer.actor_id,
+                signature.signer.key_id,
+                signature.signer.public_key_hash,
+                "ed25519",
+                signature.signature,
+                signature.signed_at.to_rfc3339(),
+            ],
+        )
+        .expect("insert direct V5 admission receipt signature");
+}
+
+fn append_checkpointed_anchor_after_direct_v5_admission(
+    store: &SqliteStore,
+    run_id: RunId,
+    signing_key: &SigningKey,
+    signer: &ActorKeyRef,
+) {
+    let anchor = Event {
+        id: EventId::new(),
+        run_id,
+        parent_event_id: None,
+        schema_version: Event::CURRENT_SCHEMA_VERSION,
+        kind: EventKind::RunStarted,
+        occurred_at: Utc::now(),
+        payload: Payload::RunStartedV1(RunStartedV1 {
+            packet_hash: "sha256:recovery-anchor".into(),
+            git_head: "recovery-anchor".into(),
+            workspace_path: "/protected-host/recovery-anchor".into(),
+            config: BTreeMap::new(),
+            parent_run_id: None,
+            parent_event_id: None,
+        }),
+    };
+    store
+        .append_signed_with_checkpoint(
+            &anchor,
+            signing_key,
+            signer,
+            &bp_ledger::storage::sqlite::CheckpointPolicy::every(1),
+        )
+        .expect("append a checkpointed anchor over the direct V5 admission receipt");
+}
+
+fn v5_admission_receipt_event(fixture: &V5Fixture) -> Event {
+    let Payload::DispatchEnvelopeV5(dispatch) = &fixture.dispatch.payload else {
+        unreachable!("V5 fixture dispatch event has the expected payload")
+    };
+    let occurred_at = chrono::DateTime::parse_from_rfc3339("2026-07-25T00:02:00.000Z")
+        .expect("canonical fixture timestamp")
+        .with_timezone(&Utc);
+    Event {
+        id: EventId::new(),
+        run_id: fixture.dispatch.run_id,
+        parent_event_id: Some(fixture.dispatch.id),
+        schema_version: Event::CURRENT_SCHEMA_VERSION,
+        kind: EventKind::GovernedDispatchV5AdmissionRecordedV1,
+        occurred_at,
+        payload: Payload::GovernedDispatchV5AdmissionRecordedV1(
+            GovernedDispatchV5AdmissionRecordedV1 {
+                run_id: fixture.dispatch.run_id.to_string(),
+                source_dispatch_event_ref: fixture.dispatch.id,
+                source_dispatch_event_digest: canonical_event_hash(&fixture.dispatch)
+                    .expect("canonical V5 source dispatch hash"),
+                dispatch_envelope_digest: dispatch.envelope_digest.clone(),
+                witness_evidence_digest: digest('b'),
+                semantic_identity_digest: digest('c'),
+                idempotency_key: dispatch
+                    .dispatch_v4
+                    .dispatch_v3
+                    .body
+                    .idempotency_key
+                    .clone(),
+                ledger_authority_realm_digest: dispatch
+                    .dispatch_v4
+                    .dispatch_v3
+                    .ledger_authority_realm_digest
+                    .clone(),
+                admitted_at: occurred_at.to_rfc3339_opts(SecondsFormat::Millis, true),
+            },
+        ),
+    }
+}
+
 /// Build the replay projection produced by a previously validated
 /// `attempt_context_recorded_v1` event. These tests target the V5 dispatch
 /// consumer, so its exact envelope binding is the only variable under test.
@@ -608,41 +879,12 @@ fn v3_and_v4_dispatches_remain_compatible_without_v5_manifest_declarations() {
 #[test]
 fn v5_protected_host_admission_receipt_is_replay_evidence_not_execution_authority() {
     let fixture = v5_fixture(1, None);
-    let Payload::DispatchEnvelopeV5(dispatch) = &fixture.dispatch.payload else {
-        unreachable!("V5 fixture dispatch event has the expected payload")
-    };
     let mut state = ReplayState::default();
     apply_legacy_projection_unchecked(&mut state, &fixture.graph);
     apply_manifest_declarations(&mut state, &fixture);
     apply_legacy_projection_unchecked(&mut state, &fixture.dispatch);
     let before = state.clone();
-
-    let receipt_event = Event {
-        id: EventId::new(),
-        run_id: fixture.dispatch.run_id,
-        parent_event_id: Some(fixture.dispatch.id),
-        schema_version: Event::CURRENT_SCHEMA_VERSION,
-        kind: EventKind::GovernedDispatchV5AdmissionRecordedV1,
-        occurred_at: Utc::now(),
-        payload: Payload::GovernedDispatchV5AdmissionRecordedV1(
-            GovernedDispatchV5AdmissionRecordedV1 {
-                run_id: fixture.dispatch.run_id.to_string(),
-                source_dispatch_event_ref: fixture.dispatch.id,
-                source_dispatch_event_digest: digest('a'),
-                dispatch_envelope_digest: dispatch.envelope_digest.clone(),
-                witness_evidence_digest: digest('b'),
-                semantic_identity_digest: digest('c'),
-                idempotency_key: dispatch
-                    .dispatch_v4
-                    .dispatch_v3
-                    .body
-                    .idempotency_key
-                    .clone(),
-                ledger_authority_realm_digest: digest('d'),
-                admitted_at: "2026-07-25T00:02:00Z".into(),
-            },
-        ),
-    };
+    let receipt_event = v5_admission_receipt_event(&fixture);
 
     apply_legacy_projection_unchecked(&mut state, &receipt_event);
 
@@ -650,6 +892,281 @@ fn v5_protected_host_admission_receipt_is_replay_evidence_not_execution_authorit
         state, before,
         "a V5 protected-host receipt must not create executable workflow state or alter prior projection"
     );
+}
+
+#[test]
+fn trusted_recovery_excludes_v5_dispatch_without_protected_host_admission_receipt() {
+    let fixture = v5_fixture(1, None);
+    let temp = TempDir::new().expect("temporary ledger directory");
+    let db_path = temp.path().join("events.db");
+    let store = SqliteStore::open(&db_path).expect("ledger store");
+    let signing_key = SigningKey::from_bytes(&[36; 32]);
+    let authorities = trusted_authorities(&signing_key);
+    let pinned_kernel = ActorKeyRef {
+        public_key_hash: Some(public_key_hash(&signing_key.verifying_key())),
+        ..kernel_signer()
+    };
+
+    for event in [
+        &fixture.graph,
+        &fixture.context_manifest,
+        &fixture.worker_manifest,
+        &fixture.sandbox_profile,
+        &fixture.dispatch,
+    ] {
+        store
+            .append_signed_with_checkpoint(
+                event,
+                &signing_key,
+                &kernel_signer(),
+                &bp_ledger::storage::sqlite::CheckpointPolicy::every(1),
+            )
+            .expect("append checkpointed kernel-signed V5 source evidence");
+    }
+
+    let recovery = TrustedGovernedRecoverySnapshot::open(
+        &fixture.dispatch.run_id.to_string(),
+        &db_path,
+        &authorities,
+        &pinned_kernel,
+    );
+
+    assert!(
+        matches!(
+            &recovery,
+            Err(TrustedGovernedRecoveryError::NoSealedV3GovernedWorkflow)
+        ),
+        "expected V5 recovery to fail closed without admission evidence, got {recovery:?}"
+    );
+}
+
+#[test]
+fn trusted_recovery_exposes_v5_only_after_a_coherent_admission_receipt() {
+    let fixture = v5_fixture(1, None);
+    let temp = TempDir::new().expect("temporary ledger directory");
+    let db_path = temp.path().join("events.db");
+    let store = SqliteStore::open(&db_path).expect("ledger store");
+    let source_signing_key = SigningKey::from_bytes(&[37; 32]);
+    let admission_signing_key = SigningKey::from_bytes(&[38; 32]);
+    let checkpoint_signing_key = SigningKey::from_bytes(&[39; 32]);
+    let (admission_authority, authorities, source_signer, admission_signer, pinned_kernel) =
+        protected_v5_admission_replay_authorities(
+            &source_signing_key,
+            &admission_signing_key,
+            &checkpoint_signing_key,
+            true,
+        );
+    append_signed_v5_source(&store, &fixture, &source_signing_key, &source_signer);
+    let admission_event_id = record_and_seal_v5_admission(
+        &store,
+        &fixture,
+        &admission_authority,
+        &admission_signing_key,
+        &admission_signer,
+        &checkpoint_signing_key,
+        &pinned_kernel,
+    );
+
+    let snapshot = TrustedGovernedRecoverySnapshot::open(
+        &fixture.dispatch.run_id.to_string(),
+        &db_path,
+        &authorities,
+        &pinned_kernel,
+    )
+    .expect("coherent admission receipt should make the V5 workflow recoverable");
+    let workflow = snapshot
+        .workflow_for_dispatch_event_ref(&fixture.dispatch.id.to_string())
+        .expect("admission-gated V5 workflow is visible in trusted recovery");
+
+    assert_eq!(workflow.phase, bp_replay::WorkflowPhaseV1::Dispatched);
+    assert!(workflow.candidate.is_none());
+    assert!(workflow.promotion.is_none());
+    let receipt_state = workflow
+        .v5_admission_receipt
+        .as_ref()
+        .expect("only immutable V5 admission evidence is projected");
+    assert_eq!(receipt_state.event_id, admission_event_id);
+    assert_eq!(
+        receipt_state.source_dispatch_event_ref, fixture.dispatch.id,
+        "the receipt remains bound to the exact V5 source dispatch"
+    );
+}
+
+#[test]
+fn trusted_recovery_rejects_v5_receipt_without_a_permitted_admission_signer() {
+    let fixture = v5_fixture(1, None);
+    let temp = TempDir::new().expect("temporary ledger directory");
+    let db_path = temp.path().join("events.db");
+    let store = SqliteStore::open(&db_path).expect("ledger store");
+    let source_signing_key = SigningKey::from_bytes(&[40; 32]);
+    let admission_signing_key = SigningKey::from_bytes(&[41; 32]);
+    let checkpoint_signing_key = SigningKey::from_bytes(&[42; 32]);
+    let (_admission_authority, authorities, source_signer, _admission_signer, pinned_kernel) =
+        protected_v5_admission_replay_authorities(
+            &source_signing_key,
+            &admission_signing_key,
+            &checkpoint_signing_key,
+            false,
+        );
+    append_signed_v5_source(&store, &fixture, &source_signing_key, &source_signer);
+    let receipt_event = v5_admission_receipt_event(&fixture);
+    append_signed_v5_admission_receipt_directly_for_replay_test(
+        &db_path,
+        &receipt_event,
+        &source_signing_key,
+        &source_signer,
+    );
+    append_checkpointed_anchor_after_direct_v5_admission(
+        &store,
+        fixture.dispatch.run_id,
+        &checkpoint_signing_key,
+        &pinned_kernel,
+    );
+
+    let recovery = TrustedGovernedRecoverySnapshot::open(
+        &fixture.dispatch.run_id.to_string(),
+        &db_path,
+        &authorities,
+        &pinned_kernel,
+    );
+
+    match recovery {
+        Err(TrustedGovernedRecoveryError::ReplayIssue {
+            issue:
+                ReplayIssue::UnauthorizedTrustSpineSigner {
+                    event_id,
+                    required_role,
+                    event_kind,
+                    signer_actor_id,
+                    ..
+                },
+        }) => {
+            assert_eq!(event_id, receipt_event.id);
+            assert_eq!(required_role, "admission");
+            assert_eq!(event_kind, "governed_dispatch_v5_admission_recorded_v1");
+            assert_eq!(signer_actor_id.as_deref(), Some("kernel"));
+        }
+        other => {
+            panic!("expected an unauthorized admission receipt to block recovery, got {other:?}")
+        }
+    }
+}
+
+#[test]
+fn trusted_recovery_rejects_a_v5_receipt_with_a_tampered_source_dispatch_digest() {
+    let fixture = v5_fixture(1, None);
+    let temp = TempDir::new().expect("temporary ledger directory");
+    let db_path = temp.path().join("events.db");
+    let store = SqliteStore::open(&db_path).expect("ledger store");
+    let source_signing_key = SigningKey::from_bytes(&[43; 32]);
+    let admission_signing_key = SigningKey::from_bytes(&[44; 32]);
+    let checkpoint_signing_key = SigningKey::from_bytes(&[45; 32]);
+    let (_admission_authority, authorities, source_signer, admission_signer, pinned_kernel) =
+        protected_v5_admission_replay_authorities(
+            &source_signing_key,
+            &admission_signing_key,
+            &checkpoint_signing_key,
+            true,
+        );
+    append_signed_v5_source(&store, &fixture, &source_signing_key, &source_signer);
+    let mut receipt_event = v5_admission_receipt_event(&fixture);
+    let Payload::GovernedDispatchV5AdmissionRecordedV1(receipt) = &mut receipt_event.payload else {
+        unreachable!("V5 admission fixture event has the expected payload")
+    };
+    receipt.source_dispatch_event_digest = digest('f');
+    append_signed_v5_admission_receipt_directly_for_replay_test(
+        &db_path,
+        &receipt_event,
+        &admission_signing_key,
+        &admission_signer,
+    );
+    append_checkpointed_anchor_after_direct_v5_admission(
+        &store,
+        fixture.dispatch.run_id,
+        &checkpoint_signing_key,
+        &pinned_kernel,
+    );
+
+    let recovery = TrustedGovernedRecoverySnapshot::open(
+        &fixture.dispatch.run_id.to_string(),
+        &db_path,
+        &authorities,
+        &pinned_kernel,
+    );
+
+    assert!(matches!(
+        recovery,
+        Err(TrustedGovernedRecoveryError::ReplayIssue {
+            issue: ReplayIssue::WorkflowTransitionRejected {
+                event_id,
+                event_kind,
+                reason,
+                ..
+            },
+        }) if event_id == receipt_event.id
+            && event_kind == "governed_dispatch_v5_admission_recorded_v1"
+            && reason.contains("exact source dispatch authority")
+    ));
+}
+
+#[test]
+fn trusted_recovery_rejects_a_second_conflicting_v5_admission_receipt() {
+    let fixture = v5_fixture(1, None);
+    let temp = TempDir::new().expect("temporary ledger directory");
+    let db_path = temp.path().join("events.db");
+    let store = SqliteStore::open(&db_path).expect("ledger store");
+    let source_signing_key = SigningKey::from_bytes(&[46; 32]);
+    let admission_signing_key = SigningKey::from_bytes(&[47; 32]);
+    let checkpoint_signing_key = SigningKey::from_bytes(&[48; 32]);
+    let (_admission_authority, authorities, source_signer, admission_signer, pinned_kernel) =
+        protected_v5_admission_replay_authorities(
+            &source_signing_key,
+            &admission_signing_key,
+            &checkpoint_signing_key,
+            true,
+        );
+    append_signed_v5_source(&store, &fixture, &source_signing_key, &source_signer);
+    let first_receipt_event = v5_admission_receipt_event(&fixture);
+    let second_receipt_event = v5_admission_receipt_event(&fixture);
+    append_signed_v5_admission_receipt_directly_for_replay_test(
+        &db_path,
+        &first_receipt_event,
+        &admission_signing_key,
+        &admission_signer,
+    );
+    append_signed_v5_admission_receipt_directly_for_replay_test(
+        &db_path,
+        &second_receipt_event,
+        &admission_signing_key,
+        &admission_signer,
+    );
+    append_checkpointed_anchor_after_direct_v5_admission(
+        &store,
+        fixture.dispatch.run_id,
+        &checkpoint_signing_key,
+        &pinned_kernel,
+    );
+
+    let recovery = TrustedGovernedRecoverySnapshot::open(
+        &fixture.dispatch.run_id.to_string(),
+        &db_path,
+        &authorities,
+        &pinned_kernel,
+    );
+
+    assert!(matches!(
+        recovery,
+        Err(TrustedGovernedRecoveryError::ReplayIssue {
+            issue: ReplayIssue::WorkflowTransitionRejected {
+                event_id,
+                event_kind,
+                reason,
+                ..
+            },
+        }) if event_id == second_receipt_event.id
+            && event_kind == "governed_dispatch_v5_admission_recorded_v1"
+            && reason.contains("conflicts with the existing immutable receipt evidence")
+    ));
 }
 
 #[test]

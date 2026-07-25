@@ -11,7 +11,7 @@ use crate::state::{
     PlanReceiptReplayState, PromotionApprovalRequestReplayState, PromotionDecisionReplayState,
     PromotionExecutionClaimReplayState, PromotionReconciliationReplayState, PromotionReplayState,
     PromotionResultReplayState, RecordedActivityState, ReplayIssue, ReplayState,
-    ReviewVerdictReplayState, SandboxProfileDeclarationReplayState,
+    ReviewVerdictReplayState, SandboxProfileDeclarationReplayState, V5AdmissionReceiptReplayState,
     WorkerManifestDeclarationReplayState, WorkflowCancellationReplayState,
     WorkflowDispatchReplayState, WorkflowGraphReplayState, WorkflowGraphV2ReplayState,
     WorkflowInstanceV1, WorkflowPhaseV1, WorkflowTerminalReplayState,
@@ -48,16 +48,17 @@ use bp_ledger::payload::{
         CandidateAcceptanceRecordedV1, CandidateCompletionRecordedV1, CandidateCreatedV1,
         CandidateCreatedV2, CommitModeV1, ContextManifestDeclaredV1, DispatchBudgetV1,
         DispatchEnvelopeBodyV2, DispatchEnvelopeV1, DispatchEnvelopeV2, DispatchEnvelopeV3,
-        DispatchEnvelopeV4, DispatchEnvelopeV5, ExecutionRoleV1, ModelActionAuthorizedV1,
-        ModelActionAuthorizedV2, ModelActionCandidateBindingV1, ModelActionIntentV1,
-        PromotionApprovalRequestedV1, PromotionDecisionKindV1, PromotionDecisionRecordedV1,
-        PromotionExecutionClaimedV1, PromotionGitBindingV1, PromotionReconciliationResolvedV1,
-        PromotionResultOutcomeV1, PromotionResultRecordedV1, PromotionWorktreeSyncStateV1,
-        ReconciliationResolutionOutcomeV1, ReviewDecisionV1, ReviewVerdictOutputV1,
-        ReviewVerdictRecordedV1, ReviewVerdictRecordedV2, SandboxProfileDeclaredV1, TrustTierV1,
-        WorkerManifestDeclaredV1, WorkflowCancellationCauseV1, WorkflowCancellationRequestedV1,
-        WorkflowGraphDeclaredV1, WorkflowGraphDeclaredV2, WorkflowTerminalOutcomeV1,
-        WorkflowTerminalV1, WorkflowTerminalV2, WorkflowTimerFiredV1, WorkflowTimerScheduledV1,
+        DispatchEnvelopeV4, DispatchEnvelopeV5, ExecutionRoleV1,
+        GovernedDispatchV5AdmissionRecordedV1, ModelActionAuthorizedV1, ModelActionAuthorizedV2,
+        ModelActionCandidateBindingV1, ModelActionIntentV1, PromotionApprovalRequestedV1,
+        PromotionDecisionKindV1, PromotionDecisionRecordedV1, PromotionExecutionClaimedV1,
+        PromotionGitBindingV1, PromotionReconciliationResolvedV1, PromotionResultOutcomeV1,
+        PromotionResultRecordedV1, PromotionWorktreeSyncStateV1, ReconciliationResolutionOutcomeV1,
+        ReviewDecisionV1, ReviewVerdictOutputV1, ReviewVerdictRecordedV1, ReviewVerdictRecordedV2,
+        SandboxProfileDeclaredV1, TrustTierV1, WorkerManifestDeclaredV1,
+        WorkflowCancellationCauseV1, WorkflowCancellationRequestedV1, WorkflowGraphDeclaredV1,
+        WorkflowGraphDeclaredV2, WorkflowTerminalOutcomeV1, WorkflowTerminalV1, WorkflowTerminalV2,
+        WorkflowTimerFiredV1, WorkflowTimerScheduledV1,
     },
     unit_lifecycle::{UnitCancelledV1, UnitCompletedV1, UnitFailedV1, UnitStartedV1},
     workspace::{PostWriteState, WorkspaceWriteV1},
@@ -113,12 +114,8 @@ pub(crate) fn apply_with_verified_signer(
         Payload::GitCheckpointV1(p) => apply_git_checkpoint(state, event, p),
         // Admission and release campaign evidence are authoritative tape metadata,
         // not workflow-state transitions. They remain available to verified
-        // recovery/query paths without changing the reducer projection. The V5
-        // protected-host receipt is likewise recovery evidence only: no V5
-        // effect, candidate, or promotion path may be opened by replaying it.
-        Payload::RunAdmissionRecordedV1(_)
-        | Payload::ReleaseEvaluationEvidenceV1(_)
-        | Payload::GovernedDispatchV5AdmissionRecordedV1(_) => {}
+        // recovery/query paths without changing the reducer projection.
+        Payload::RunAdmissionRecordedV1(_) | Payload::ReleaseEvaluationEvidenceV1(_) => {}
         Payload::PlanAdmittedV1(p) => apply_plan_admitted(state, event, p),
         Payload::PlanReceiptRecordedV1(p) => apply_plan_receipt(state, event, p),
         Payload::ActivityStartedV1(p) => apply_activity_started(state, event, p),
@@ -139,6 +136,9 @@ pub(crate) fn apply_with_verified_signer(
         Payload::DispatchEnvelopeV3(p) => apply_dispatch_envelope_v3(state, event, p),
         Payload::DispatchEnvelopeV4(p) => apply_dispatch_envelope_v4(state, event, p),
         Payload::DispatchEnvelopeV5(p) => apply_dispatch_envelope_v5(state, event, p, signer),
+        Payload::GovernedDispatchV5AdmissionRecordedV1(p) => {
+            apply_governed_dispatch_v5_admission_recorded_v1(state, event, p, signer)
+        }
         Payload::ContextManifestDeclaredV1(p) => {
             apply_context_manifest_declared_v1(state, event, p, signer)
         }
@@ -1283,6 +1283,7 @@ fn apply_dispatch_envelope(state: &mut ReplayState, event: &Event, p: &DispatchE
             dispatch: WorkflowDispatchReplayState {
                 dispatch_version: 1,
                 event_id: event.id,
+                dispatch_event_digest: None,
                 envelope_digest: p.envelope_digest.clone(),
                 provenance_ref: p.provenance_ref.clone(),
                 base_commit_sha: p.base_commit_sha.clone(),
@@ -1308,6 +1309,7 @@ fn apply_dispatch_envelope(state: &mut ReplayState, event: &Event, p: &DispatchE
             },
             workflow_graph: None,
             manifest_declarations: None,
+            v5_admission_receipt: None,
             action_evidence: None,
             retry_context: None,
             timers: Default::default(),
@@ -1375,6 +1377,7 @@ fn apply_dispatch_envelope_v2(state: &mut ReplayState, event: &Event, p: &Dispat
             dispatch: WorkflowDispatchReplayState {
                 dispatch_version: 2,
                 event_id: event.id,
+                dispatch_event_digest: None,
                 envelope_digest: p.envelope_digest.clone(),
                 provenance_ref: body.provenance_ref.clone(),
                 base_commit_sha: body.base_commit_sha.clone(),
@@ -1400,6 +1403,7 @@ fn apply_dispatch_envelope_v2(state: &mut ReplayState, event: &Event, p: &Dispat
             },
             workflow_graph: None,
             manifest_declarations: None,
+            v5_admission_receipt: None,
             action_evidence: None,
             retry_context: None,
             timers: Default::default(),
@@ -2012,6 +2016,7 @@ fn apply_dispatch_envelope_v3(state: &mut ReplayState, event: &Event, p: &Dispat
             dispatch: WorkflowDispatchReplayState {
                 dispatch_version: 3,
                 event_id: event.id,
+                dispatch_event_digest: None,
                 envelope_digest: p.envelope_digest.clone(),
                 provenance_ref: body.provenance_ref.clone(),
                 base_commit_sha: body.base_commit_sha.clone(),
@@ -2037,6 +2042,7 @@ fn apply_dispatch_envelope_v3(state: &mut ReplayState, event: &Event, p: &Dispat
             },
             workflow_graph: None,
             manifest_declarations: None,
+            v5_admission_receipt: None,
             action_evidence: Some(ActionEvidenceReplayState {
                 action_evidence_version: p.action_evidence_version,
                 actions: Default::default(),
@@ -2153,6 +2159,7 @@ fn apply_dispatch_envelope_v4(state: &mut ReplayState, event: &Event, p: &Dispat
             dispatch: WorkflowDispatchReplayState {
                 dispatch_version: 4,
                 event_id: event.id,
+                dispatch_event_digest: None,
                 envelope_digest: p.envelope_digest.clone(),
                 provenance_ref: body.provenance_ref.clone(),
                 base_commit_sha: body.base_commit_sha.clone(),
@@ -2178,6 +2185,7 @@ fn apply_dispatch_envelope_v4(state: &mut ReplayState, event: &Event, p: &Dispat
             },
             workflow_graph: Some(workflow_graph),
             manifest_declarations: None,
+            v5_admission_receipt: None,
             action_evidence: Some(ActionEvidenceReplayState {
                 action_evidence_version: nested.action_evidence_version,
                 actions: Default::default(),
@@ -2352,6 +2360,17 @@ fn apply_dispatch_envelope_v5(
         reject_workflow_transition(state, event, reason);
         return;
     }
+    let dispatch_event_digest = match canonical_event_hash(event) {
+        Ok(digest) => digest,
+        Err(error) => {
+            reject_workflow_transition(
+                state,
+                event,
+                format!("manifest-bound V5 dispatch event hash is not canonical: {error}"),
+            );
+            return;
+        }
+    };
     let workflow_graph = match validate_v4_graph_binding(state, event, &p.dispatch_v4) {
         Ok(graph) => graph,
         Err(reason) => {
@@ -2445,6 +2464,7 @@ fn apply_dispatch_envelope_v5(
             dispatch: WorkflowDispatchReplayState {
                 dispatch_version: 5,
                 event_id: event.id,
+                dispatch_event_digest: Some(dispatch_event_digest),
                 envelope_digest: p.envelope_digest.clone(),
                 provenance_ref: body.provenance_ref.clone(),
                 base_commit_sha: body.base_commit_sha.clone(),
@@ -2472,6 +2492,7 @@ fn apply_dispatch_envelope_v5(
             },
             workflow_graph: Some(workflow_graph),
             manifest_declarations: Some(manifest_declarations),
+            v5_admission_receipt: None,
             action_evidence: Some(ActionEvidenceReplayState {
                 action_evidence_version: nested.action_evidence_version,
                 actions: Default::default(),
@@ -2493,6 +2514,215 @@ fn apply_dispatch_envelope_v5(
         },
     );
     sync_workflow_compatibility_view(state, &key);
+}
+
+/// Project immutable V5 protected-host admission evidence only after an
+/// authoritative replay engine has verified a dedicated admission signer. The
+/// receipt is deliberately excluded from unchecked legacy projection so a
+/// migration/read-only caller cannot manufacture governed recovery evidence.
+/// It also never advances the workflow phase or opens an action, candidate, or
+/// promotion path.
+fn apply_governed_dispatch_v5_admission_recorded_v1(
+    state: &mut ReplayState,
+    event: &Event,
+    receipt: &GovernedDispatchV5AdmissionRecordedV1,
+    signer: Option<&ActorKeyRef>,
+) {
+    let Some(signer) = signer else {
+        return;
+    };
+    if signer.actor_id.trim().is_empty() || signer.key_id.trim().is_empty() {
+        reject_workflow_transition(
+            state,
+            event,
+            "V5 admission receipt requires a non-empty verified admission signer identity".into(),
+        );
+        return;
+    }
+    if let Err(reason) = validate_v5_event_payload(event) {
+        reject_workflow_transition(state, event, reason);
+        return;
+    }
+    let event_run_id = event.run_id.to_string();
+    if receipt.run_id != event_run_id {
+        reject_workflow_transition(
+            state,
+            event,
+            "V5 admission receipt run_id does not match its enclosing event".into(),
+        );
+        return;
+    }
+    if event.parent_event_id != Some(receipt.source_dispatch_event_ref) {
+        reject_workflow_transition(
+            state,
+            event,
+            "V5 admission receipt parent_event_id does not bind its source dispatch".into(),
+        );
+        return;
+    }
+    if event.id.as_uuid() <= receipt.source_dispatch_event_ref.as_uuid() {
+        reject_workflow_transition(
+            state,
+            event,
+            "V5 admission receipt must occur after its source dispatch event".into(),
+        );
+        return;
+    }
+    let expected_admitted_at = event
+        .occurred_at
+        .to_rfc3339_opts(SecondsFormat::Millis, true);
+    if receipt.admitted_at != expected_admitted_at {
+        reject_workflow_transition(
+            state,
+            event,
+            "V5 admission receipt admitted_at must equal the canonical enclosing event timestamp"
+                .into(),
+        );
+        return;
+    }
+    if ![
+        receipt.source_dispatch_event_digest.as_str(),
+        receipt.dispatch_envelope_digest.as_str(),
+        receipt.witness_evidence_digest.as_str(),
+        receipt.semantic_identity_digest.as_str(),
+        receipt.ledger_authority_realm_digest.as_str(),
+    ]
+    .into_iter()
+    .all(is_canonical_sha256_digest)
+        || receipt.idempotency_key.trim().is_empty()
+    {
+        reject_workflow_transition(
+            state,
+            event,
+            "V5 admission receipt has malformed digest or idempotency evidence".into(),
+        );
+        return;
+    }
+    let receipt_event_digest = match canonical_event_hash(event) {
+        Ok(digest) => digest,
+        Err(error) => {
+            reject_workflow_transition(
+                state,
+                event,
+                format!("could not canonicalize V5 admission receipt event: {error}"),
+            );
+            return;
+        }
+    };
+
+    let matching_workflows = state
+        .workflow_instances
+        .iter()
+        .filter_map(|(key, workflow)| {
+            (workflow.dispatch.event_id == receipt.source_dispatch_event_ref).then(|| key.clone())
+        })
+        .collect::<Vec<_>>();
+    let [workflow_key] = matching_workflows.as_slice() else {
+        reject_workflow_transition(
+            state,
+            event,
+            if matching_workflows.is_empty() {
+                "V5 admission receipt has no prior source dispatch workflow".into()
+            } else {
+                "V5 admission receipt source dispatch is ambiguous across workflow projections"
+                    .into()
+            },
+        );
+        return;
+    };
+
+    let workflow = state
+        .workflow_instances
+        .get(workflow_key)
+        .expect("matched workflow key must resolve");
+    if workflow.dispatch.dispatch_version != 5 {
+        reject_workflow_transition(
+            state,
+            event,
+            "V5 admission receipt source is not a manifest-bound V5 dispatch".into(),
+        );
+        return;
+    }
+    if !event_matches_workflow_run(workflow, event) || receipt.run_id != workflow.run_id {
+        reject_workflow_transition(
+            state,
+            event,
+            "V5 admission receipt belongs to a different workflow run".into(),
+        );
+        return;
+    }
+    let Some(source_dispatch_event_digest) = workflow.dispatch.dispatch_event_digest.as_deref()
+    else {
+        reject_workflow_transition(
+            state,
+            event,
+            "manifest-bound V5 dispatch is missing its canonical source event digest".into(),
+        );
+        return;
+    };
+    let Some(ledger_authority_realm_digest) =
+        workflow.dispatch.ledger_authority_realm_digest.as_deref()
+    else {
+        reject_workflow_transition(
+            state,
+            event,
+            "manifest-bound V5 dispatch is missing its ledger authority realm digest".into(),
+        );
+        return;
+    };
+    if !is_canonical_sha256_digest(source_dispatch_event_digest)
+        || !is_canonical_sha256_digest(ledger_authority_realm_digest)
+        || receipt.source_dispatch_event_digest != source_dispatch_event_digest
+        || receipt.dispatch_envelope_digest != workflow.dispatch.envelope_digest
+        || receipt.idempotency_key != workflow.dispatch.idempotency_key
+        || receipt.ledger_authority_realm_digest != ledger_authority_realm_digest
+    {
+        reject_workflow_transition(
+            state,
+            event,
+            "V5 admission receipt does not bind the exact source dispatch authority".into(),
+        );
+        return;
+    }
+
+    let projected = V5AdmissionReceiptReplayState {
+        event_id: event.id,
+        event_digest: receipt_event_digest,
+        run_id: receipt.run_id.clone(),
+        parent_event_id: event.parent_event_id,
+        source_dispatch_event_ref: receipt.source_dispatch_event_ref,
+        source_dispatch_event_digest: receipt.source_dispatch_event_digest.clone(),
+        dispatch_envelope_digest: receipt.dispatch_envelope_digest.clone(),
+        witness_evidence_digest: receipt.witness_evidence_digest.clone(),
+        semantic_identity_digest: receipt.semantic_identity_digest.clone(),
+        idempotency_key: receipt.idempotency_key.clone(),
+        ledger_authority_realm_digest: receipt.ledger_authority_realm_digest.clone(),
+        occurred_at: expected_admitted_at,
+        admitted_at: receipt.admitted_at.clone(),
+        verified_signer: Some(signer.clone()),
+    };
+    if let Some(existing) = state
+        .workflow_instances
+        .get(workflow_key)
+        .and_then(|workflow| workflow.v5_admission_receipt.as_ref())
+    {
+        if existing == &projected {
+            sync_workflow_compatibility_view(state, workflow_key);
+            return;
+        }
+        reject_workflow_transition(
+            state,
+            event,
+            "V5 admission receipt conflicts with the existing immutable receipt evidence".into(),
+        );
+        return;
+    }
+    state
+        .workflow_instances
+        .get_mut(workflow_key)
+        .expect("matched workflow key must remain present")
+        .v5_admission_receipt = Some(projected);
+    sync_workflow_compatibility_view(state, workflow_key);
 }
 
 /// Apply the write-ahead record for a V3 gateway effect. The request is bound

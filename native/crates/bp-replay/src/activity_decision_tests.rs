@@ -124,6 +124,7 @@ fn fixture(result: Option<ActivityResultOutcomeV1>) -> Fixture {
             dispatch: WorkflowDispatchReplayState {
                 dispatch_version: 3,
                 event_id: dispatch_event_id,
+                dispatch_event_digest: None,
                 envelope_digest: DIGEST_B.into(),
                 provenance_ref: "provenance:1".into(),
                 base_commit_sha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
@@ -152,6 +153,7 @@ fn fixture(result: Option<ActivityResultOutcomeV1>) -> Fixture {
             },
             workflow_graph: None,
             manifest_declarations: None,
+            v5_admission_receipt: None,
             action_evidence: Some(ActionEvidenceReplayState {
                 action_evidence_version: ActionEvidenceVersionV1::SealedV3,
                 actions,

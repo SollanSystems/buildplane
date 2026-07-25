@@ -17,6 +17,7 @@ use bp_ledger::payload::trust_spine::{
     WorkflowTerminalOutcomeV1, WorkflowTimerKindV1,
 };
 use bp_ledger::signing::{ActorKeyRef, VerificationStatus};
+use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -222,6 +223,12 @@ pub struct WorkflowInstanceV1 {
     /// migration has dropped one of those authority facts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manifest_declarations: Option<ManifestDispatchWitnessesReplayState>,
+    /// Present only for manifest-bound V5 dispatches after a separately signed,
+    /// protected-host admission receipt has been verified during replay. This
+    /// is immutable recovery evidence only; it must not alter workflow phase,
+    /// effect eligibility, or promotion authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub v5_admission_receipt: Option<V5AdmissionReceiptReplayState>,
     /// Present only for V3 dispatches. The reducer derives this state solely
     /// from write-ahead requests, immutable receipts, and one sealed set so
     /// recovery code can expose pending/unknown effects without rerunning an
@@ -393,6 +400,93 @@ pub struct ManifestDispatchWitnessesReplayState {
     pub attempt_context: Option<AttemptContextDeclarationReplayState>,
 }
 
+/// Immutable projection of one protected-host V5 admission receipt. The
+/// reducer records it only after the replay engine has verified an explicitly
+/// authorized admission signer; this value is read-only recovery evidence, not
+/// a capability or action authorization.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct V5AdmissionReceiptReplayState {
+    pub event_id: EventId,
+    pub event_digest: String,
+    pub run_id: String,
+    pub parent_event_id: Option<EventId>,
+    pub source_dispatch_event_ref: EventId,
+    pub source_dispatch_event_digest: String,
+    pub dispatch_envelope_digest: String,
+    pub witness_evidence_digest: String,
+    pub semantic_identity_digest: String,
+    pub idempotency_key: String,
+    pub ledger_authority_realm_digest: String,
+    pub occurred_at: String,
+    pub admitted_at: String,
+    /// Present only when a trusted replay engine verified the receipt's
+    /// detached admission signature and role before projection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verified_signer: Option<ActorKeyRef>,
+}
+
+/// Return whether a V5 workflow retains one complete, signer-bound protected
+/// admission receipt inside the full tape prefix that formed a trusted recovery
+/// snapshot. This validates only replay evidence; it deliberately grants no
+/// effect, candidate, or promotion authority.
+pub(crate) fn has_complete_v5_admission_receipt(
+    workflow: &WorkflowInstanceV1,
+    through_event_ref: Option<EventId>,
+) -> bool {
+    if workflow.dispatch.dispatch_version != 5 {
+        return false;
+    }
+    let (Some(receipt), Some(through_event_ref)) =
+        (workflow.v5_admission_receipt.as_ref(), through_event_ref)
+    else {
+        return false;
+    };
+    let dispatch = &workflow.dispatch;
+    let Some(dispatch_event_digest) = dispatch.dispatch_event_digest.as_deref() else {
+        return false;
+    };
+    let Some(ledger_authority_realm_digest) = dispatch.ledger_authority_realm_digest.as_deref()
+    else {
+        return false;
+    };
+
+    let receipt_timestamp_is_canonical = DateTime::parse_from_rfc3339(&receipt.occurred_at)
+        .ok()
+        .map(|timestamp| {
+            timestamp
+                .with_timezone(&Utc)
+                .to_rfc3339_opts(SecondsFormat::Millis, true)
+        })
+        .is_some_and(|timestamp| timestamp == receipt.occurred_at);
+
+    has_bound_signer(receipt.verified_signer.as_ref())
+        && receipt.run_id == workflow.run_id
+        && receipt.parent_event_id == Some(receipt.source_dispatch_event_ref)
+        && receipt.source_dispatch_event_ref == dispatch.event_id
+        && receipt.source_dispatch_event_digest == dispatch_event_digest
+        && receipt.dispatch_envelope_digest == dispatch.envelope_digest
+        && receipt.idempotency_key == dispatch.idempotency_key
+        && receipt.ledger_authority_realm_digest == ledger_authority_realm_digest
+        && receipt.occurred_at == receipt.admitted_at
+        && receipt_timestamp_is_canonical
+        && receipt.event_id.as_uuid() > dispatch.event_id.as_uuid()
+        && receipt.event_id.as_uuid() <= through_event_ref.as_uuid()
+        && [
+            receipt.event_digest.as_str(),
+            dispatch_event_digest,
+            receipt.source_dispatch_event_digest.as_str(),
+            receipt.dispatch_envelope_digest.as_str(),
+            receipt.witness_evidence_digest.as_str(),
+            receipt.semantic_identity_digest.as_str(),
+            receipt.ledger_authority_realm_digest.as_str(),
+            ledger_authority_realm_digest,
+        ]
+        .into_iter()
+        .all(is_canonical_sha256_digest)
+        && !receipt.idempotency_key.trim().is_empty()
+}
+
 /// Return whether a V5 workflow retains the complete signed, immutable
 /// manifest witnesses consumed by its dispatch. This deliberately validates
 /// the copied evidence again instead of treating the presence of a snapshot
@@ -522,6 +616,14 @@ fn has_bound_signer(signer: Option<&ActorKeyRef>) -> bool {
     })
 }
 
+fn is_canonical_sha256_digest(value: &str) -> bool {
+    value.len() == 71
+        && value.starts_with("sha256:")
+        && value[7..]
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkflowDispatchReplayState {
@@ -529,6 +631,11 @@ pub struct WorkflowDispatchReplayState {
     #[serde(default = "default_dispatch_version")]
     pub dispatch_version: u8,
     pub event_id: EventId,
+    /// Present only for V5 dispatches. This is the detached-signature canonical
+    /// event digest, kept distinct from the nested dispatch envelope digest so
+    /// protected-host admission evidence cannot bind to another source event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatch_event_digest: Option<String>,
     pub envelope_digest: String,
     pub provenance_ref: String,
     pub base_commit_sha: String,

@@ -16,7 +16,10 @@ use crate::activity_decision::{
 use crate::engine::{EngineError, ReplayEngine, TrustSpineSignerRole, TrustedReplayAuthorities};
 use crate::otel_projection::{VerifiedOtelProjectionErrorV1, VerifiedOtelProjectionV1};
 use crate::reader::VerifiedEvent;
-use crate::state::{has_complete_v5_manifest_dispatch_witnesses, ReplayIssue, WorkflowInstanceV1};
+use crate::state::{
+    has_complete_v5_admission_receipt, has_complete_v5_manifest_dispatch_witnesses, ReplayIssue,
+    WorkflowInstanceV1,
+};
 use crate::tape_integrity::{
     verify_full_tape_integrity_v1, TapeIntegrityError, TapeIntegrityReportV1,
 };
@@ -1267,8 +1270,9 @@ impl TrustedGovernedRecoverySnapshot {
         let mut promotion_dispatch_index = BTreeMap::new();
         let mut promotion_decision_dispatch_index = BTreeMap::new();
 
-        for workflow in workflows.filter(|workflow| is_trusted_governed_recovery_workflow(workflow))
-        {
+        for workflow in workflows.filter(|workflow| {
+            is_trusted_governed_recovery_workflow(workflow, snapshot_cache_source_anchor.as_ref())
+        }) {
             let dispatch_event_ref = workflow.dispatch.event_id.to_string();
             if let Some(candidate) = workflow.candidate.as_ref() {
                 if let Some(first_dispatch_event_ref) = candidate_dispatch_index.insert(
@@ -1364,7 +1368,7 @@ fn classify_replayed_governed_promotion_recovery_v1(
             PromotionRecoveryBlockReasonV1::WorkflowIdentityMismatch,
         );
     }
-    if !is_trusted_governed_recovery_workflow(workflow) {
+    if !is_trusted_governed_recovery_workflow(workflow, None) {
         return promotion_blocked(query, PromotionRecoveryBlockReasonV1::UnsupportedDispatch);
     }
 
@@ -1818,7 +1822,10 @@ fn is_rfc3339_utc(value: &str) -> bool {
     value.ends_with('Z') && DateTime::parse_from_rfc3339(value).is_ok()
 }
 
-fn is_trusted_governed_recovery_workflow(workflow: &WorkflowInstanceV1) -> bool {
+fn is_trusted_governed_recovery_workflow(
+    workflow: &WorkflowInstanceV1,
+    source_anchor: Option<&TrustedReplaySourceAnchorV1>,
+) -> bool {
     let dispatch = &workflow.dispatch;
     let required_digests = [
         &dispatch.envelope_digest,
@@ -1880,7 +1887,7 @@ fn is_trusted_governed_recovery_workflow(workflow: &WorkflowInstanceV1) -> bool 
         // succeeds in trusted replay. Require both persisted witnesses here so
         // an incomplete/migrated projection cannot be mistaken for graph-bound
         // recovery authority.
-        4 | 5 => {
+        4 => {
             dispatch.workflow_graph_digest.is_some()
                 && dispatch
                     .workflow_graph_digest
@@ -1890,8 +1897,22 @@ fn is_trusted_governed_recovery_workflow(workflow: &WorkflowInstanceV1) -> bool 
                     .workflow_graph_declaration_event_ref
                     .as_ref()
                     .is_some_and(|event_ref| !event_ref.to_string().trim().is_empty())
-                && (dispatch.dispatch_version != 5
-                    || has_complete_v5_manifest_dispatch_witnesses(workflow))
+        }
+        5 => {
+            dispatch.workflow_graph_digest.is_some()
+                && dispatch
+                    .workflow_graph_digest
+                    .as_deref()
+                    .is_some_and(is_canonical_sha256_digest)
+                && dispatch
+                    .workflow_graph_declaration_event_ref
+                    .as_ref()
+                    .is_some_and(|event_ref| !event_ref.to_string().trim().is_empty())
+                && has_complete_v5_manifest_dispatch_witnesses(workflow)
+                && has_complete_v5_admission_receipt(
+                    workflow,
+                    source_anchor.map(|anchor| anchor.through_event_ref),
+                )
         }
         _ => false,
     }
@@ -2048,6 +2069,7 @@ mod tests {
             dispatch: WorkflowDispatchReplayState {
                 dispatch_version: 3,
                 event_id: dispatch_event_id,
+                dispatch_event_digest: None,
                 envelope_digest: DIGEST_A.into(),
                 provenance_ref: "admission:1".into(),
                 base_commit_sha: "1".repeat(40),
@@ -2076,6 +2098,7 @@ mod tests {
             },
             workflow_graph: None,
             manifest_declarations: None,
+            v5_admission_receipt: None,
             action_evidence: None,
             retry_context: None,
             timers: BTreeMap::new(),
@@ -2135,7 +2158,7 @@ mod tests {
         workflow.dispatch.workflow_graph_declaration_event_ref = Some(EventId::new());
         workflow.manifest_declarations = None;
 
-        assert!(!is_trusted_governed_recovery_workflow(&workflow));
+        assert!(!is_trusted_governed_recovery_workflow(&workflow, None));
     }
 
     #[test]
