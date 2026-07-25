@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
 	chmodSync,
 	existsSync,
@@ -140,6 +141,12 @@ function writeStubPackageManagerExecutable(
 		].join("\n"),
 	);
 	chmodSync(executablePath, 0o755);
+	if (process.platform === "win32") {
+		writeFileSync(
+			`${executablePath}.cmd`,
+			`@echo off\r\n"${process.execPath}" "%~dp0${commandName}" %*\r\n`,
+		);
+	}
 	return executablePath;
 }
 
@@ -299,6 +306,7 @@ function ensureWorkspaceBuildOutputs() {
 	execFileSync(resolvePackageManagerCommand("pnpm"), ["build", "--force"], {
 		cwd: process.cwd(),
 		encoding: "utf8",
+		shell: process.platform === "win32",
 	});
 
 	const stillMissing = REQUIRED_BUILD_OUTPUTS.filter(
@@ -382,9 +390,14 @@ function writeMinimalPublishedPackage(
 			"linux-x64",
 			"buildplane-native",
 		);
+		const nativeSource = "#!/bin/sh\nexit 0\n";
 		mkdirSync(dirname(nativePath), { recursive: true });
-		writeFileSync(nativePath, "#!/bin/sh\nexit 0\n");
+		writeFileSync(nativePath, nativeSource);
 		chmodSync(nativePath, 0o755);
+		writeFileSync(
+			join(dirname(nativePath), "buildplane-native.sha256"),
+			`sha256:${createHash("sha256").update(nativeSource).digest("hex")}\n`,
+		);
 	}
 }
 
@@ -506,6 +519,12 @@ describe("workspace build output preparation", () => {
 				].join("\n"),
 			);
 			chmodSync(executablePath, 0o755);
+			if (process.platform === "win32") {
+				writeFileSync(
+					`${executablePath}.cmd`,
+					`@echo off\r\n"${process.execPath}" "%~dp0pnpm" %*\r\n`,
+				);
+			}
 			process.chdir(tempRoot);
 			process.env.PATH = [binRoot, originalPath ?? ""]
 				.filter(Boolean)
@@ -1325,6 +1344,7 @@ describe("published bootstrap staging", () => {
 			{
 				cwd: staged.packageRoot,
 				encoding: "utf8",
+				shell: process.platform === "win32",
 			},
 		)
 			.trim()
@@ -1349,6 +1369,7 @@ describe("published bootstrap staging", () => {
 			{
 				cwd: staged.packageRoot,
 				encoding: "utf8",
+				shell: process.platform === "win32",
 			},
 		)
 			.trim()
@@ -1656,6 +1677,12 @@ describe("published bootstrap staging", () => {
 						path: "package/vendor/native/linux-x64/buildplane-native",
 						body: "#!/bin/sh\nexit 0\n",
 						mode: 0o755,
+					},
+					{
+						path: "package/vendor/native/linux-x64/buildplane-native.sha256",
+						body: `sha256:${createHash("sha256")
+							.update("#!/bin/sh\nexit 0\n")
+							.digest("hex")}\n`,
 					},
 				]),
 			);

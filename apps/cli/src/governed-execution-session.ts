@@ -16,6 +16,7 @@ import {
 	type GovernedLedgerAuthorityRealmPort,
 	type GovernedRepositoryBindingPort,
 	type GovernedWorkerExecutionPort,
+	inspectGovernedDispatchAuthorityWindowV1,
 	parseGovernedUnitPacket,
 	type Run,
 	type UnitPacket,
@@ -34,8 +35,6 @@ import {
 
 const DIGEST = /^sha256:[a-f0-9]{64}$/;
 const PINNED_IMAGE = /^[^\s@]+@sha256:[a-f0-9]{64}$/;
-const MAX_ECMASCRIPT_EPOCH_MS = 8_640_000_000_000_000;
-
 export type GovernedExecutionUnavailableCode =
 	| "INVALID_INPUT"
 	| "AUTHORITY_UNAVAILABLE"
@@ -261,45 +260,12 @@ function validateDispatch(
 			"governed execution requires an implementer atomic sealed V3 dispatch.",
 		);
 	}
-	const issuedAt =
-		typeof dispatch.issuedAt === "string"
-			? Date.parse(dispatch.issuedAt)
-			: Number.NaN;
-	const expiresAt =
-		typeof dispatch.expiresAt === "string"
-			? Date.parse(dispatch.expiresAt)
-			: Number.NaN;
-	const budget = isRecord(dispatch.budget) ? dispatch.budget : undefined;
-	const rawMaxComputeTimeMs = budget?.maxComputeTimeMs;
-	const maxComputeTimeMs =
-		typeof rawMaxComputeTimeMs === "number" ? rawMaxComputeTimeMs : undefined;
-	const now = Date.now();
-	if (
-		!Number.isSafeInteger(issuedAt) ||
-		!Number.isSafeInteger(expiresAt) ||
-		issuedAt >= expiresAt ||
-		issuedAt > now ||
-		budget === undefined ||
-		(rawMaxComputeTimeMs !== undefined &&
-			(maxComputeTimeMs === undefined ||
-				!Number.isSafeInteger(maxComputeTimeMs) ||
-				maxComputeTimeMs < 1 ||
-				maxComputeTimeMs > 0xffff_ffff ||
-				maxComputeTimeMs > MAX_ECMASCRIPT_EPOCH_MS - issuedAt))
-	) {
-		return unavailable(
-			"DISPATCH_EXPIRED",
-			"the sealed governed dispatch authority window is inactive, expired, or invalid.",
-		);
-	}
-	const computeDeadline =
-		maxComputeTimeMs === undefined ? expiresAt : issuedAt + maxComputeTimeMs;
-	if (
-		!Number.isSafeInteger(computeDeadline) ||
-		computeDeadline <= issuedAt ||
-		computeDeadline > MAX_ECMASCRIPT_EPOCH_MS ||
-		Math.min(expiresAt, computeDeadline) <= now
-	) {
+	const authorityWindow = inspectGovernedDispatchAuthorityWindowV1({
+		issuedAt: dispatch.issuedAt,
+		expiresAt: dispatch.expiresAt,
+		budget: dispatch.budget,
+	});
+	if (authorityWindow.state !== "active") {
 		return unavailable(
 			"DISPATCH_EXPIRED",
 			"the sealed governed dispatch authority window is inactive, expired, or invalid.",

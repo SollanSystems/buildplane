@@ -19,8 +19,9 @@ import { GOVERNED_AUTHORITY_BROKER_REQUIRED } from "../src/governed-ledger-autho
 
 const RUN_ID = "01919000-0000-7000-8000-000000000001";
 const EVENT_ID = "01919000-0000-7000-8000-000000000002";
-const ISSUED_AT = "2026-07-18T12:00:00.000Z";
-const EXPIRES_AT = "2026-07-18T12:05:00.000Z";
+const FIXTURE_NOW = Date.now();
+const ISSUED_AT = new Date(FIXTURE_NOW - 1_000).toISOString();
+const EXPIRES_AT = new Date(FIXTURE_NOW + 300_000).toISOString();
 const BASE_SHA = "a".repeat(40);
 const ACCEPTANCE_CONTRACT = {
 	schemaVersion: 1,
@@ -130,7 +131,7 @@ function request(
 		issuedAt: ISSUED_AT,
 		expiresAt: EXPIRES_AT,
 		readCurrentBaseSha: () => BASE_SHA,
-		now: () => new Date("2026-07-18T12:01:00.000Z"),
+		now: () => new Date(FIXTURE_NOW),
 		generateEventId: () => EVENT_ID,
 		...overrides,
 	} as GovernedDispatchAdmissionInputV3;
@@ -330,7 +331,7 @@ describe("governed dispatch admission", () => {
 			"expired timestamps",
 			(input: GovernedDispatchAdmissionInputV3) => ({
 				...input,
-				expiresAt: "2026-07-18T12:00:30.000Z",
+				expiresAt: new Date(FIXTURE_NOW - 500).toISOString(),
 			}),
 			/expired/i,
 		],

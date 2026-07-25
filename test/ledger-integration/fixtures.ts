@@ -663,6 +663,8 @@ export interface ForkFixtureResult {
 	eventsDbPath: string;
 	parentRunId: string;
 	forkRunId: string;
+	/** Isolated detached worktree used by the unsafe fork attempt. */
+	forkWorkspace: string;
 	forkExitCode: number;
 	forkStdout: string;
 	forkStderr: string;
@@ -776,14 +778,21 @@ export async function makeForkFixture(
 	db2.close();
 
 	const forkRunId = forkRow?.run_id ?? "";
+	const combinedForkStdout = forkStdout.join("\n");
+	const workspaceMatch =
+		/(?:^|\n)fork workspace: (.+?) \(base [0-9a-f]{8}\)(?:\n|$)/.exec(
+			combinedForkStdout,
+		);
+	const forkWorkspace = workspaceMatch?.[1] ?? "";
 
 	return {
 		dir,
 		eventsDbPath,
 		parentRunId,
 		forkRunId,
+		forkWorkspace,
 		forkExitCode,
-		forkStdout: forkStdout.join("\n"),
+		forkStdout: combinedForkStdout,
 		forkStderr: forkStderr.join("\n"),
 		cleanup: parent.cleanup,
 	};

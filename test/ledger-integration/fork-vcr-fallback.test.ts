@@ -92,7 +92,11 @@ describe("fork --vcr fallback [Phase F]", () => {
 
 		try {
 			expect(fixture.forkExitCode).toBe(0);
-			expect(existsSync(join(fixture.dir, "vcr-reexecuted.txt"))).toBe(true);
+			expect(fixture.forkWorkspace).not.toBe("");
+			expect(existsSync(join(fixture.dir, "vcr-reexecuted.txt"))).toBe(false);
+			expect(
+				existsSync(join(fixture.forkWorkspace, "vcr-reexecuted.txt")),
+			).toBe(true);
 
 			const db = new DatabaseSync(fixture.eventsDbPath, { readOnly: true });
 			const rows = db

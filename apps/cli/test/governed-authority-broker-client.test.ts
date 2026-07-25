@@ -21,8 +21,9 @@ const UUID = "123e4567-e89b-12d3-a456-426614174000";
 const RESPONSE_ID = "123e4567-e89b-12d3-a456-426614174001";
 const EVENT_ID = "123e4567-e89b-12d3-a456-426614174002";
 const RUN_ID = "123e4567-e89b-12d3-a456-426614174003";
-const ISSUED_AT = "2099-01-01T00:00:00.000Z";
-const EXPIRES_AT = "2099-01-01T01:00:00.000Z";
+const FIXTURE_NOW = Date.now();
+const ISSUED_AT = new Date(FIXTURE_NOW - 1_000).toISOString();
+const EXPIRES_AT = new Date(FIXTURE_NOW + 3_600_000).toISOString();
 
 function admissionInput(
 	overrides: Partial<
@@ -90,7 +91,7 @@ function envelope() {
 			contextManifestDigest: DIGEST("c"),
 			workerManifestDigest: DIGEST("d"),
 			sandboxProfileDigest: DIGEST("e"),
-			budget: { maxTokens: 1000, maxComputeTimeMs: 10_000 },
+			budget: { maxTokens: 1000, maxComputeTimeMs: 3_600_000 },
 			trustTier: "governed" as const,
 			idempotencyKey: "workflow-trust-spine:unit-admit:1",
 			issuedAt: ISSUED_AT,
@@ -423,6 +424,12 @@ describe("governed authority broker client", () => {
 				"expiry",
 				(response) => {
 					response.expires_at = "2020-01-01T01:00:00.000Z";
+				},
+			],
+			[
+				"expires_at",
+				(response) => {
+					response.expires_at = "2099-02-30T01:00:00.000Z";
 				},
 			],
 			[

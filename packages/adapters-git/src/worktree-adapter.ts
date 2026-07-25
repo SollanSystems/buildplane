@@ -18,9 +18,11 @@ import type {
 	RecordActionReceiptV2Input,
 } from "@buildplane/kernel";
 import {
+	assertActiveGovernedDispatchAuthorityWindowV1,
 	canonicalActionReceiptRecordedV2Digest,
 	canonicalActionRequestedV2Digest,
 	isCanonicalBuildplaneCandidateRef,
+	parseNativeRfc3339Utc,
 } from "@buildplane/kernel";
 
 /** A function that runs a git command and returns its result synchronously. */
@@ -132,6 +134,7 @@ export type GitWorkspaceCandidatePromotionInspectionResult = Omit<
 
 export type GitWorkspaceCandidateErrorCode =
 	| "CANDIDATE_INVALID_IDENTITY"
+	| "CANDIDATE_AUTHORITY_INACTIVE"
 	| "CANDIDATE_CREATION_FAILED"
 	| "CANDIDATE_WORKSPACE_HEAD_MISMATCH"
 	| "CANDIDATE_WORKSPACE_TOPOLOGY_INVALID"
@@ -807,6 +810,7 @@ export function createGitWorktreeAdapter(
 			input: CreateGovernedWorkspaceCandidateInput,
 		): Promise<GovernedWorkspaceCandidateCreationResult> {
 			const governed = validateGovernedCandidateCreationInput(input);
+			assertGovernedCandidateDispatchAuthority(governed.dispatch, now());
 			const verifiedTopology = assertGovernedCandidateWorktreeTopology(
 				governedRunGit,
 				governed.projectRoot,
@@ -822,6 +826,10 @@ export function createGitWorktreeAdapter(
 				governed,
 				verifiedTopology,
 			);
+			// The action request is itself durable evidence. Re-check the signed
+			// authority immediately before it so slow topology verification cannot
+			// turn an expired dispatch into a new pending effect.
+			assertGovernedCandidateDispatchAuthority(execution.dispatch, now());
 			const requestedAt = now();
 			const actionRequest = governedCandidateActionRequest(
 				execution,
@@ -837,6 +845,7 @@ export function createGitWorktreeAdapter(
 				runGit: governedRunGit,
 				expected: execution.topology,
 			});
+			assertGovernedCandidateDispatchAuthority(execution.dispatch, now());
 			const activityClaim = requireGrantedCandidateActivityClaim(
 				await execution.activityClaimPort.claim({
 					dispatch: execution.dispatch,
@@ -868,9 +877,11 @@ export function createGitWorktreeAdapter(
 			}
 			let candidate: GitWorkspaceCandidate;
 			try {
+				assertGovernedCandidateDispatchAuthority(execution.dispatch, now());
 				candidate = materializeVerifiedGovernedWorkspaceCandidate({
 					execution,
 					runGit: governedRunGit,
+					activityClaim,
 					now,
 				});
 			} catch (error) {
@@ -1421,6 +1432,20 @@ function validateGovernedCandidateCreationInput(
 	});
 }
 
+function assertGovernedCandidateDispatchAuthority(
+	dispatch: GovernedDispatchLineageV3,
+	now: string,
+): void {
+	try {
+		assertActiveGovernedDispatchAuthorityWindowV1(dispatch, now);
+	} catch (error) {
+		throw new GitWorkspaceCandidateError(
+			"CANDIDATE_AUTHORITY_INACTIVE",
+			`Governed candidate dispatch authority is inactive: ${errorMessage(error)}`,
+		);
+	}
+}
+
 /** Governed candidate effects never infer their repository authority. */
 function requireGovernedCandidateProjectRoot(
 	input: CreateGovernedWorkspaceCandidateInput,
@@ -1500,6 +1525,17 @@ function snapshotGovernedDispatchLineageV3(
 			"Governed candidate dispatch must contain a budget object.",
 		);
 	}
+	// Preserve omitted budget fields as omitted. In particular, the sealed V3
+	// authority window permits an omitted compute cap, while an explicitly
+	// present `undefined` cap is correctly invalid.
+	const budget = Object.freeze({
+		...(Object.hasOwn(input.budget, "maxTokens")
+			? { maxTokens: input.budget.maxTokens }
+			: {}),
+		...(Object.hasOwn(input.budget, "maxComputeTimeMs")
+			? { maxComputeTimeMs: input.budget.maxComputeTimeMs }
+			: {}),
+	});
 	return Object.freeze({
 		schemaVersion: input.schemaVersion,
 		runId: input.runId,
@@ -1523,10 +1559,7 @@ function snapshotGovernedDispatchLineageV3(
 		contextManifestDigest: input.contextManifestDigest,
 		workerManifestDigest: input.workerManifestDigest,
 		sandboxProfileDigest: input.sandboxProfileDigest,
-		budget: Object.freeze({
-			maxTokens: input.budget.maxTokens,
-			maxComputeTimeMs: input.budget.maxComputeTimeMs,
-		}),
+		budget,
 		idempotencyKey: input.idempotencyKey,
 		authorityActor: input.authorityActor,
 		actionEvidenceVersion: input.actionEvidenceVersion,
@@ -1695,6 +1728,7 @@ function assertGovernedCandidateTopologyRemainsPinned(input: {
 function materializeVerifiedGovernedWorkspaceCandidate(input: {
 	readonly execution: GovernedCandidateExecutionContext;
 	readonly runGit: GitCommandRunner;
+	readonly activityClaim: GrantedGovernedActivityClaimV1;
 	readonly now: () => string;
 }): GitWorkspaceCandidate {
 	const topology = assertGovernedCandidateTopologyRemainsPinned({
@@ -1714,9 +1748,49 @@ function materializeVerifiedGovernedWorkspaceCandidate(input: {
 	// whose Git runner is immutable, pinned, and scrubbed. The generic/raw path
 	// never receives the signed packet's mutable workspace string or identity.
 	return createGitWorktreeAdapter({
-		runGit: input.runGit,
+		runGit: createGovernedCandidateMaterializationGitRunner(input),
 		now: input.now,
 	}).createWorkspaceCandidate(materializationInput);
+}
+
+/**
+ * Gate every mutation in one governed candidate materialization at the last
+ * synchronous boundary before the pinned Git runner executes it. In
+ * particular, a claim/dispatch that expires during the read-only preparation
+ * phase cannot authorize a later `add`, `commit`, or candidate-ref write.
+ *
+ * This wrapper intentionally has no async work: after the final lease check,
+ * it invokes the captured raw runner directly, leaving no await gap for a
+ * caller-controlled change to race into the effect.
+ */
+function createGovernedCandidateMaterializationGitRunner(input: {
+	readonly execution: GovernedCandidateExecutionContext;
+	readonly runGit: GitCommandRunner;
+	readonly activityClaim: GrantedGovernedActivityClaimV1;
+	readonly now: () => string;
+}): GitCommandRunner {
+	const rawRunGit = input.runGit;
+	return (args, options) => {
+		if (isGovernedCandidateMaterializationMutation(args)) {
+			assertGovernedCandidateTopologyRemainsPinned({
+				runGit: rawRunGit,
+				expected: input.execution.topology,
+			});
+			const observedAt = input.now();
+			assertGovernedCandidateDispatchAuthority(
+				input.execution.dispatch,
+				observedAt,
+			);
+			assertCandidateActivityClaimUnexpiredAt(input.activityClaim, observedAt);
+		}
+		return rawRunGit(args, options);
+	};
+}
+
+function isGovernedCandidateMaterializationMutation(
+	args: readonly string[],
+): boolean {
+	return args[0] === "add" || args[0] === "commit" || args[0] === "update-ref";
 }
 
 function canonicalGovernedCandidateDirectory(
@@ -2062,7 +2136,7 @@ function requireGrantedCandidateActivityClaim(
 			"Native activity claim did not bind the candidate Git action identity.",
 		);
 	}
-	parseTimestamp(
+	parseNativeCandidateActivityTimestamp(
 		disposition.leaseExpiresAt,
 		"candidate Git activity lease expiry",
 	);
@@ -2073,15 +2147,17 @@ function assertCandidateActivityClaimUnexpiredAt(
 	claim: GrantedGovernedActivityClaimV1,
 	observedAt: string,
 ): void {
-	const observedAtMs = parseTimestamp(
+	const observedAtTimestamp = parseNativeCandidateActivityTimestamp(
 		observedAt,
 		"candidate Git activity observed time",
 	);
-	const leaseExpiresAtMs = parseTimestamp(
+	const leaseExpiresAtTimestamp = parseNativeCandidateActivityTimestamp(
 		claim.leaseExpiresAt,
 		"candidate Git activity lease expiry",
 	);
-	if (observedAtMs >= leaseExpiresAtMs) {
+	if (
+		observedAtTimestamp.orderingNanos >= leaseExpiresAtTimestamp.orderingNanos
+	) {
 		throw new GitWorkspaceCandidateError(
 			"CANDIDATE_CREATION_FAILED",
 			"Native activity lease expired before candidate Git materialization could begin.",
@@ -2192,15 +2268,9 @@ function requireNonEmptyString(value: unknown, label: string): string {
 	return value;
 }
 
-function parseTimestamp(value: unknown, label: string): number {
-	if (typeof value !== "string") {
-		throw new GitWorkspaceCandidateError(
-			"CANDIDATE_CREATION_FAILED",
-			`${label} must be an RFC 3339 timestamp.`,
-		);
-	}
-	const timestamp = Date.parse(value);
-	if (!Number.isFinite(timestamp)) {
+function parseNativeCandidateActivityTimestamp(value: unknown, label: string) {
+	const timestamp = parseNativeRfc3339Utc(value);
+	if (timestamp === undefined) {
 		throw new GitWorkspaceCandidateError(
 			"CANDIDATE_CREATION_FAILED",
 			`${label} must be an RFC 3339 timestamp.`,

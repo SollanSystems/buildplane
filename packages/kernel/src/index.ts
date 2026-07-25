@@ -77,6 +77,18 @@ export {
 	validateGovernedCandidateReviewExecutionInput,
 } from "./governed-candidate-review.js";
 export type {
+	GovernedDispatchAuthorityWindowFailureV1,
+	GovernedDispatchAuthorityWindowInputV1,
+	GovernedDispatchAuthorityWindowInspectionV1,
+	GovernedDispatchAuthorityWindowValidationV1,
+} from "./governed-dispatch-authority-window.js";
+export {
+	assertActiveGovernedDispatchAuthorityWindowV1,
+	inspectGovernedDispatchAuthorityWindowV1,
+	MAX_GOVERNED_COMPUTE_TIME_MS,
+	validateGovernedDispatchAuthorityWindowV1,
+} from "./governed-dispatch-authority-window.js";
+export type {
 	GovernedV3RetryContextResolverPort,
 	GovernedV3RetryPredecessorActionV1,
 	GovernedV3RetryRequestV1,
@@ -138,6 +150,12 @@ export type {
 	UpsertRepoFactInput,
 	WorkerLabel,
 } from "./memory-types.js";
+export type { NativeRfc3339UtcTimestamp } from "./native-rfc3339-utc.js";
+export {
+	addNativeRfc3339UtcMilliseconds,
+	isNativeRfc3339Utc,
+	parseNativeRfc3339Utc,
+} from "./native-rfc3339-utc.js";
 export type {
 	BuildplaneOrchestrator,
 	CandidatePromotionResult,

@@ -129,7 +129,7 @@ function v3Dispatch(
 		idempotencyKey: "dispatch-v3:1",
 		authorityActor: "kernel:test",
 		actionEvidenceVersion: "sealed_v3",
-		issuedAt: "2099-07-17T12:00:00Z",
+		issuedAt: "2020-07-17T12:00:00Z",
 		expiresAt: "2099-07-17T12:15:00Z",
 		...overrides,
 	};
@@ -758,7 +758,7 @@ describe("candidate-bound acceptance", () => {
 					{ issuedAt: "2099-02-31T12:00:00Z" },
 				),
 			}),
-		).rejects.toThrow(/RFC3339 UTC/i);
+		).rejects.toThrow(/invalid issued at/i);
 	});
 
 	it("requires packet-bound acceptance, trust, and capability authority before a V3 worker effect", async () => {

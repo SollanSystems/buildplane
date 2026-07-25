@@ -128,6 +128,192 @@ describe("git worktree adapter", () => {
 		},
 	);
 
+	it("rejects future-issued or elapsed-compute candidate authority before evidence, claims, or Git materialization", async () => {
+		const repo = createCommittedRepo();
+		const adapter = createGitWorktreeAdapter({
+			now: () => "2026-07-18T12:00:00.000Z",
+		});
+		const { headSha: baseSha } = adapter.assertRunnableRepository(repo);
+		const workspace = adapter.prepareWorkspace(
+			repo,
+			"candidate-inactive-authority",
+			baseSha,
+		);
+		const rootHeadBefore = readGitHead(repo);
+		const rootTreeBefore = readGitTree(repo);
+		const rootCommitCountBefore = commitCount(repo);
+
+		for (const dispatchPatch of [
+			{
+				issuedAt: "2026-07-18T12:00:00.000000001Z",
+				expiresAt: "2026-07-18T12:15:00.000000000Z",
+			},
+			{
+				issuedAt: "2026-07-18T11:00:00.000000000Z",
+				expiresAt: "2026-07-18T13:00:00.000000000Z",
+				budget: { maxComputeTimeMs: 1 },
+			},
+		] as const) {
+			const actionEvidencePort = blockedGovernedCandidateEvidencePort();
+			const activityClaimPort = governedCandidateActivityClaimPort();
+			const claim = vi.spyOn(activityClaimPort, "claim");
+			const input = governedCandidateInput({
+				path: workspace.path,
+				projectRoot: repo,
+				baseSha,
+				candidateId: "candidate-inactive-authority",
+				runId: "candidate-inactive-authority",
+				attempt: 1,
+				actionEvidencePort,
+				activityClaimPort,
+			});
+
+			await expect(
+				adapter.createGovernedWorkspaceCandidate({
+					...input,
+					governedDispatch: {
+						...input.governedDispatch,
+						...dispatchPatch,
+					},
+				}),
+			).rejects.toThrow(/candidate dispatch authority is inactive/i);
+			expect(actionEvidencePort.recordActionRequested).not.toHaveBeenCalled();
+			expect(actionEvidencePort.recordActionReceipt).not.toHaveBeenCalled();
+			expect(claim).not.toHaveBeenCalled();
+		}
+
+		expect(readGitHead(repo)).toBe(rootHeadBefore);
+		expect(readGitTree(repo)).toBe(rootTreeBefore);
+		expect(commitCount(repo)).toBe(rootCommitCountBefore);
+	});
+
+	it.runIf(process.platform === "linux")(
+		"rejects a dispatch authority that expires after claim but before the first candidate Git mutation",
+		async () => {
+			const validAt = "2026-07-18T12:00:00.000Z";
+			const expiredAt = "2026-07-18T12:05:00.000Z";
+			let claimReturned = false;
+			let nowReadsAfterClaim = 0;
+			const adapter = createGitWorktreeAdapter({
+				now: () => {
+					if (!claimReturned) return validAt;
+					nowReadsAfterClaim += 1;
+					// The first two post-claim reads protect the existing pre-effect
+					// boundaries. The authority then elapses while the materializer is
+					// preparing its first Git write.
+					return nowReadsAfterClaim <= 2 ? validAt : expiredAt;
+				},
+			});
+			const repo = createCommittedRepo();
+			const { headSha: baseSha } = adapter.assertRunnableRepository(repo);
+			const workspace = adapter.prepareWorkspace(
+				repo,
+				"candidate-authority-expired-before-write",
+				baseSha,
+			);
+			writeFileSync(join(workspace.path, "candidate.txt"), "candidate\n");
+			const rootHeadBefore = readGitHead(repo);
+			const rootTreeBefore = readGitTree(repo);
+			const rootCommitCountBefore = commitCount(repo);
+			const candidateRef =
+				"refs/buildplane/candidates/candidate-authority-expired-before-write/candidate-authority-expired-before-write/1";
+			let actionRequestDigest = "";
+			const actionEvidencePort: CreateGovernedWorkspaceCandidateInput["actionEvidencePort"] =
+				{
+					recordActionRequested: vi.fn(async (actionRequest) => {
+						actionRequestDigest =
+							canonicalActionRequestedV2Digest(actionRequest);
+						return {
+							actionRequest,
+							actionRequestRef:
+								"event://action-request/candidate-authority-expired-before-write",
+							actionRequestDigest,
+						};
+					}),
+					recordActionReceipt: vi.fn(async (receipt) => {
+						const durableReceipt = {
+							...receipt,
+							actionReceiptRef:
+								"event://action-receipt/candidate-authority-expired-before-write",
+						};
+						return {
+							receipt: durableReceipt,
+							actionReceiptDigest:
+								canonicalActionReceiptRecordedV2Digest(durableReceipt),
+						};
+					}),
+					sealActionReceiptSet: vi.fn(),
+					recordCandidateCreatedV2: vi.fn(),
+				};
+			const activityClaimPort = {
+				claim: vi.fn(async (claimInput) => {
+					claimReturned = true;
+					return {
+						state: "granted" as const,
+						activityId: claimInput.activityId,
+						idempotencyKey: claimInput.idempotencyKey,
+						claimEventId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+						claimEventDigest: digest("a"),
+						leaseId: "candidate-authority-expired-before-write-lease",
+						leaseExpiresAt: "2099-07-18T12:05:00.000Z",
+					};
+				}),
+				recordResult: vi.fn(async (result) => ({
+					state: "recorded" as const,
+					resultEventId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+					resultEventDigest: digest("b"),
+					resultOutcome: result.outcome,
+				})),
+			};
+			const input = governedCandidateInput({
+				path: workspace.path,
+				projectRoot: repo,
+				baseSha,
+				candidateId: "candidate-authority-expired-before-write",
+				runId: "candidate-authority-expired-before-write",
+				attempt: 1,
+				actionEvidencePort,
+				activityClaimPort,
+			});
+
+			await expect(
+				adapter.createGovernedWorkspaceCandidate({
+					...input,
+					governedDispatch: {
+						...input.governedDispatch,
+						issuedAt: "2026-07-18T11:59:00.000Z",
+						expiresAt: expiredAt,
+						budget: { maxComputeTimeMs: 600_000 },
+					},
+				}),
+			).rejects.toThrow(/candidate dispatch authority is inactive/i);
+
+			expect(activityClaimPort.claim).toHaveBeenCalledTimes(1);
+			expect(nowReadsAfterClaim).toBeGreaterThanOrEqual(3);
+			expect(activityClaimPort.recordResult).toHaveBeenCalledWith(
+				expect.objectContaining({ outcome: "unknown" }),
+			);
+			expect(actionEvidencePort.recordActionReceipt).toHaveBeenCalledWith(
+				expect.objectContaining({ outcome: "unknown" }),
+			);
+			expect(
+				runGit(repo, [
+					"rev-parse",
+					"--verify",
+					"--quiet",
+					`${candidateRef}^{commit}`,
+				]),
+			).toMatchObject({ status: 1 });
+			expect(readGitHead(workspace.path)).toBe(baseSha);
+			expect(gitStdoutOrThrow(workspace.path, ["status", "--porcelain"])).toBe(
+				"?? candidate.txt",
+			);
+			expect(readGitHead(repo)).toBe(rootHeadBefore);
+			expect(readGitTree(repo)).toBe(rootTreeBefore);
+			expect(commitCount(repo)).toBe(rootCommitCountBefore);
+		},
+	);
+
 	it("rejects governed candidate materialization without an explicit repository root before write-ahead", async () => {
 		const repo = createCommittedRepo();
 		const adapter = createGitWorktreeAdapter();
@@ -882,6 +1068,79 @@ describe("git worktree adapter", () => {
 			expect(readGitHead(repo)).toBe(rootHeadBefore);
 			expect(readGitTree(repo)).toBe(rootTreeBefore);
 			expect(readGitHead(workspace.path)).toBe(baseSha);
+		},
+	);
+
+	it.runIf(process.platform === "linux")(
+		"rejects a calendar-normalized native activity lease before candidate Git materialization",
+		async () => {
+			const repo = createCommittedRepo();
+			const adapter = createGitWorktreeAdapter({
+				now: () => "2026-02-28T12:00:00.000000000Z",
+			});
+			const { headSha: baseSha } = adapter.assertRunnableRepository(repo);
+			const workspace = adapter.prepareWorkspace(
+				repo,
+				"candidate-governed-invalid-native-lease",
+				baseSha,
+			);
+			writeFileSync(join(workspace.path, "candidate.txt"), "candidate\n");
+			const rootHeadBefore = readGitHead(repo);
+			const rootTreeBefore = readGitTree(repo);
+			const actionEvidencePort: CreateGovernedWorkspaceCandidateInput["actionEvidencePort"] =
+				{
+					recordActionRequested: vi.fn(async (actionRequest) => ({
+						actionRequest,
+						actionRequestRef:
+							"event://action-request/candidate-governed-invalid-native-lease",
+						actionRequestDigest:
+							canonicalActionRequestedV2Digest(actionRequest),
+					})),
+					recordActionReceipt: vi.fn(),
+					sealActionReceiptSet: vi.fn(),
+					recordCandidateCreatedV2: vi.fn(),
+				};
+			const activityClaimPort = {
+				claim: vi.fn(async (claimInput) => ({
+					state: "granted" as const,
+					activityId: claimInput.activityId,
+					idempotencyKey: claimInput.idempotencyKey,
+					claimEventId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+					claimEventDigest: digest("c"),
+					leaseId: "candidate-governed-invalid-native-lease",
+					// V8 normalizes this non-leap-day to March; the native reducer
+					// rejects it, and the Git boundary must use that same grammar.
+					leaseExpiresAt: "2026-02-29T12:00:00.000000000Z",
+				})),
+				recordResult: vi.fn(),
+			};
+
+			await expect(
+				adapter.createGovernedWorkspaceCandidate(
+					governedCandidateInput({
+						path: workspace.path,
+						projectRoot: repo,
+						baseSha,
+						candidateId: "candidate-governed-invalid-native-lease",
+						runId: "candidate-governed-invalid-native-lease",
+						attempt: 1,
+						actionEvidencePort,
+						activityClaimPort,
+					}),
+				),
+			).rejects.toThrow(
+				/candidate Git activity lease expiry must be an RFC 3339 timestamp/i,
+			);
+
+			expect(activityClaimPort.claim).toHaveBeenCalledTimes(1);
+			expect(activityClaimPort.recordResult).not.toHaveBeenCalled();
+			expect(actionEvidencePort.recordActionReceipt).not.toHaveBeenCalled();
+			expect(readGitHead(repo)).toBe(rootHeadBefore);
+			expect(readGitTree(repo)).toBe(rootTreeBefore);
+			expect(readGitHead(workspace.path)).toBe(baseSha);
+			expect(gitStdoutOrThrow(workspace.path, ["status", "--porcelain"])).toBe(
+				"?? candidate.txt",
+			);
 		},
 	);
 
@@ -2448,8 +2707,8 @@ function governedCandidateInput(
 			idempotencyKey: "governed-candidate-dispatch",
 			authorityActor: "kernel",
 			actionEvidenceVersion: "sealed_v3",
-			issuedAt: "2026-07-18T12:00:00.000Z",
-			expiresAt: "2026-07-18T13:00:00.000Z",
+			issuedAt: "2020-07-18T12:00:00.000Z",
+			expiresAt: "2099-07-18T13:00:00.000Z",
 		},
 	};
 }
@@ -2464,7 +2723,7 @@ function governedCandidateActivityClaimPort(): CreateGovernedWorkspaceCandidateI
 				claimEventId: "33333333-3333-4333-8333-333333333333",
 				claimEventDigest: digest("4"),
 				leaseId: "candidate-git-test-lease",
-				leaseExpiresAt: "2026-07-18T12:05:00.000Z",
+				leaseExpiresAt: "2099-07-18T12:05:00.000Z",
 			};
 		},
 		async recordResult(input) {

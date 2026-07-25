@@ -160,7 +160,13 @@ describe("fork --vcr basic [Phase F]", () => {
 				fixture.forkExitCode,
 				`${fixture.forkStdout}\n${fixture.forkStderr}`,
 			).toBe(0);
-			expect(existsSync(join(fixture.dir, "vcr-side-effect.txt"))).toBe(false);
+			// The parent command deliberately created this file before the fork.
+			// VCR must preserve that caller state while avoiding a second execution
+			// in the detached child worktree.
+			expect(existsSync(join(fixture.dir, "vcr-side-effect.txt"))).toBe(true);
+			expect(
+				existsSync(join(fixture.forkWorkspace, "vcr-side-effect.txt")),
+			).toBe(false);
 
 			const db = new DatabaseSync(fixture.eventsDbPath, { readOnly: true });
 			const row = db

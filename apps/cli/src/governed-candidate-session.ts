@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import {
+	assertActiveGovernedDispatchAuthorityWindowV1,
 	canonicalGovernedUnitPacketV1Digest,
 	type EventBus,
 	type GovernedDispatchLineageV3,
@@ -124,6 +125,15 @@ function validateInput(
 			"governed candidate session requires an implementer atomic sealed_v3 dispatch.",
 		);
 	}
+	try {
+		assertActiveGovernedDispatchAuthorityWindowV1(dispatch);
+	} catch (error) {
+		throw new TypeError(
+			`governed candidate session requires an active verified dispatch authority window: ${
+				error instanceof Error ? error.message : String(error)
+			}`,
+		);
+	}
 	if (
 		typeof input.projectRoot !== "string" ||
 		input.projectRoot.length === 0 ||
@@ -158,17 +168,6 @@ function validateInput(
 	input.ledgerAuthorityRealmPort.assertDispatchLedgerAuthorityRealm({
 		dispatch,
 	});
-	const now = Date.now();
-	if (
-		!Number.isFinite(Date.parse(dispatch.issuedAt)) ||
-		!Number.isFinite(Date.parse(dispatch.expiresAt)) ||
-		Date.parse(dispatch.issuedAt) >= Date.parse(dispatch.expiresAt) ||
-		Date.parse(dispatch.expiresAt) <= now
-	) {
-		throw new TypeError(
-			"governed candidate session requires an active verified dispatch authority window.",
-		);
-	}
 	let strictPacket: UnitPacket;
 	try {
 		strictPacket = parseGovernedUnitPacket(JSON.stringify(input.packet));
