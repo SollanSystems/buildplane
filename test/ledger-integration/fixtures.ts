@@ -695,8 +695,10 @@ export async function makeForkFixture(
 			throw new Error(`git ${args.join(" ")} failed: ${r.stderr}`);
 		}
 	};
-	runGitForFork(["add", "-A"]);
-	runGitForFork(["commit", "-q", "-m", "buildplane: post-run state"]);
+	if (runGitForFork(["status", "--porcelain"]).trim().length > 0) {
+		runGitForFork(["add", "-A"]);
+		runGitForFork(["commit", "-q", "-m", "buildplane: post-run state"]);
+	}
 
 	// Write fork packet.
 	const { writeFileSync } = await import("node:fs");
