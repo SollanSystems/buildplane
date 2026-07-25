@@ -34,6 +34,8 @@ use thiserror::Error;
 #[allow(dead_code)]
 mod admission_protocol;
 mod confinement;
+#[allow(dead_code)]
+mod dispatch_admission;
 mod promotion_execution;
 mod promotion_git;
 #[cfg(target_os = "linux")]

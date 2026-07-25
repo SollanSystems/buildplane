@@ -82,6 +82,7 @@ dependencies = [
  "chrono",
  "ed25519-dalek",
  "libc",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2",

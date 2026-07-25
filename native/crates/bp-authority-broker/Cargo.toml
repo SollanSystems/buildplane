@@ -16,4 +16,5 @@ thiserror.workspace = true
 
 [dev-dependencies]
 chrono.workspace = true
+rusqlite.workspace = true
 tempfile = "3"

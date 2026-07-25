@@ -14,6 +14,9 @@ pub enum LedgerError {
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 
+    #[error("sqlite database identity is unavailable: {reason}")]
+    DatabaseIdentityUnavailable { reason: String },
+
     #[error("schema version {received} not supported (supported: {supported})")]
     UnsupportedSchemaVersion { received: u32, supported: u32 },
 

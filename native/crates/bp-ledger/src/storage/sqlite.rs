@@ -52,7 +52,7 @@ use sha2::{Digest, Sha256};
 use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 /// Default tape-root checkpoint cadence: emit one checkpoint per 256 signed
@@ -1028,6 +1028,10 @@ fn ensure_governed_dispatch_admission_identity_guard_v2(conn: &Connection) -> Re
 /// SQLite connection wrapping the events + runs schema.
 pub struct SqliteStore {
     conn: Connection,
+    /// Canonical durable identity captured from the connection when it opens.
+    /// It is intentionally not re-resolved later: a changed symlink must not
+    /// make an already-open store appear to be a different database.
+    database_path: Option<PathBuf>,
     /// Per-run high-water mark of the latest NON-checkpoint event id, used by
     /// the monotonic-id guard so it never has to issue a per-append `SELECT`.
     ///
@@ -1051,14 +1055,32 @@ pub struct SqliteStore {
     fail_next_checkpoint_signature_insert: Cell<bool>,
 }
 
+fn canonical_database_path_for_connection(conn: &Connection) -> Option<PathBuf> {
+    let mut statement = conn.prepare("PRAGMA database_list").ok()?;
+    let mut rows = statement.query([]).ok()?;
+    while let Some(row) = rows.next().ok()? {
+        let schema: String = row.get(1).ok()?;
+        if schema != "main" {
+            continue;
+        }
+        let path: String = row.get(2).ok()?;
+        return (!path.is_empty())
+            .then(|| std::fs::canonicalize(path).ok())
+            .flatten();
+    }
+    None
+}
+
 impl SqliteStore {
     /// Open or create a ledger database at `path`. Creates tables and the
     /// append-only trigger on first open.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let conn = Connection::open(path)?;
+        let database_path = canonical_database_path_for_connection(&conn);
         Self::init(&conn)?;
         Ok(Self {
             conn,
+            database_path,
             ordinary_id_high_water: RefCell::new(HashMap::new()),
             #[cfg(any(test, feature = "test-support"))]
             fail_next_checkpoint_signature_insert: Cell::new(false),
@@ -1071,10 +1093,23 @@ impl SqliteStore {
         Self::init(&conn)?;
         Ok(Self {
             conn,
+            database_path: None,
             ordinary_id_high_water: RefCell::new(HashMap::new()),
             #[cfg(any(test, feature = "test-support"))]
             fail_next_checkpoint_signature_insert: Cell::new(false),
         })
+    }
+
+    /// Return the canonical durable file identity captured when this store
+    /// opened. In-memory, unnamed, and non-canonicalizable databases
+    /// deliberately have no usable identity for a cross-connection trusted
+    /// recovery proof.
+    pub fn canonical_database_path(&self) -> Result<PathBuf> {
+        self.database_path
+            .clone()
+            .ok_or_else(|| LedgerError::DatabaseIdentityUnavailable {
+                reason: "the opened SQLite connection has no canonical durable primary path".into(),
+            })
     }
 
     fn init(conn: &Connection) -> Result<()> {

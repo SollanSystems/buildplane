@@ -1,4 +1,11 @@
 use super::confinement::{BrokerHostConfinementErrorV1, BrokerHostConfinementPolicyV1};
+use super::dispatch_admission::{
+    BrokerDispatchAdmissionAuthority, BrokerDispatchAdmissionDisposition, DispatchAdmissionBackend,
+    DispatchAdmissionBackendError, DispatchAdmissionRequestResolver,
+    DispatchAdmissionResolverError, DispatchAdmissionSnapshotError,
+    DispatchAdmissionSnapshotVerifier, LedgerDispatchAdmissionBackend, ResolvedDispatchAdmission,
+    SealedDispatchAdmissionEvidence, TrustedDispatchAdmissionSnapshotVerifier,
+};
 use super::promotion_execution::{
     BrokerPromotionExecutionAuthority, BrokerPromotionExecutionRequest,
     BrokerPromotionExecutionStatus, PromotionEffectGateway, PromotionExecutionBackend,
@@ -46,7 +53,8 @@ use bp_ledger::payload::Payload;
 use bp_ledger::signing::{public_key_hash, ActorKeyRef, TrustedPublicKeys};
 use bp_ledger::storage::sqlite::{
     CheckpointPolicy, GovernedCandidateCompletionDispositionV1,
-    GovernedCandidateCompletionRequestV1, GovernedPromotionAuthorityV1,
+    GovernedCandidateCompletionRequestV1, GovernedDispatchAdmissionAuthorityV1,
+    GovernedDispatchAdmissionRequestV1, GovernedPromotionAuthorityV1,
     GovernedPromotionDecisionRequestV1, SqliteStore,
 };
 use bp_ledger::{EventId, LedgerError, RunId};
@@ -59,6 +67,8 @@ use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use ed25519_dalek::SigningKey;
 use std::cell::RefCell;
 use std::collections::VecDeque;
+use std::fs;
+use std::path::PathBuf;
 use std::rc::Rc;
 use tempfile::TempDir;
 
@@ -4384,4 +4394,766 @@ fn promotion_gateway_reports_target_advanced_when_a_descendant_still_contains_th
             descendant,
         } if ancestor == PROMOTION_MERGE_COMMIT && descendant == PROMOTION_TARGET_ADVANCED
     )));
+}
+
+struct DispatchAdmissionFixture {
+    _temp: TempDir,
+    db_path: PathBuf,
+    store: SqliteStore,
+    authority: GovernedDispatchAdmissionAuthorityV1,
+    dispatch_key: SigningKey,
+    dispatch_signer: ActorKeyRef,
+    checkpoint_key: SigningKey,
+    checkpoint_signer: ActorKeyRef,
+    replay_authorities: TrustedReplayAuthorities,
+    parsed: super::admission_protocol::ParsedAuthorityBrokerRequestV1,
+    request: GovernedDispatchAdmissionRequestV1,
+}
+
+fn dispatch_admission_fixture() -> DispatchAdmissionFixture {
+    let parsed = super::admission_protocol::parse_authority_broker_request_v1(
+        authority_broker_admission_wire().as_bytes(),
+    )
+    .expect("parse strict authority-broker admit fixture");
+    let admit = match &parsed.request {
+        super::admission_protocol::ParsedAuthorityBrokerRequestBodyV1::Admit(admit) => {
+            admit.clone()
+        }
+        other => panic!("expected parsed admit request, received {other:?}"),
+    };
+    let run_id: RunId = serde_json::from_value(serde_json::Value::String(admit.run_id.clone()))
+        .expect("strict parsed run id must deserialize as a ledger run id");
+    let now = Utc::now();
+    let body = DispatchEnvelopeBodyV2 {
+        workflow_id: admit.workflow_id.clone(),
+        workflow_revision: admit.workflow_revision.clone(),
+        unit_id: admit.unit_id.clone(),
+        attempt: u32::try_from(admit.attempt).expect("fixture attempt fits u32"),
+        execution_role: ExecutionRoleV1::Implementer,
+        commit_mode: CommitModeV1::Atomic,
+        provenance_ref: "protected:broker-dispatch-admission".into(),
+        base_commit_sha: "1".repeat(40),
+        capability_bundle_digest: DIGEST_A.into(),
+        acceptance_contract_digest: DIGEST_B.into(),
+        context_manifest_digest: DIGEST_C.into(),
+        worker_manifest_digest: DIGEST_D.into(),
+        sandbox_profile_digest: DIGEST_E.into(),
+        budget: DispatchBudgetV1 {
+            max_tokens: Some(1_024),
+            max_compute_time_ms: Some(60_000),
+        },
+        trust_tier: TrustTierV1::Governed,
+        idempotency_key: admit.idempotency_key.clone(),
+        issued_at: timestamp(now - Duration::seconds(1)),
+        expires_at: timestamp(now + Duration::minutes(10)),
+    };
+    let envelope_digest = dispatch_envelope_v3_body_digest(
+        &body,
+        ActionEvidenceVersionV1::SealedV3,
+        &admit.expected_repository_binding_digest,
+        DIGEST_E,
+        Some(&admit.governed_packet_digest),
+    )
+    .expect("hash protected broker dispatch fixture");
+    let request = GovernedDispatchAdmissionRequestV1 {
+        run_id,
+        dispatch: DispatchEnvelopeV3 {
+            body,
+            action_evidence_version: ActionEvidenceVersionV1::SealedV3,
+            repository_binding_digest: admit.expected_repository_binding_digest,
+            ledger_authority_realm_digest: DIGEST_E.into(),
+            governed_packet_digest: Some(admit.governed_packet_digest),
+            envelope_digest,
+        },
+    };
+
+    let temp = TempDir::new().expect("open temporary dispatch-admission directory");
+    let db_path = temp.path().join("events.db");
+    let store = SqliteStore::open(&db_path).expect("open dispatch-admission SQLite ledger");
+    let dispatch_key = SigningKey::from_bytes(&[111; 32]);
+    let checkpoint_key = SigningKey::from_bytes(&[112; 32]);
+    let dispatch_signer = promotion_actor("broker-dispatch", "dispatch-main", &dispatch_key);
+    let checkpoint_signer =
+        promotion_actor("broker-checkpoint", "checkpoint-main", &checkpoint_key);
+    let authority = GovernedDispatchAdmissionAuthorityV1::new_governed_realm(
+        promotion_trusted_keys(&[&dispatch_key, &checkpoint_key]),
+        dispatch_signer.clone(),
+        checkpoint_signer.clone(),
+        DIGEST_E.into(),
+    )
+    .expect("inject distinct dispatch and checkpoint authorities");
+    let mut replay_authorities =
+        TrustedReplayAuthorities::new(promotion_trusted_keys(&[&dispatch_key, &checkpoint_key]));
+    replay_authorities.allow_signer(TrustSpineSignerRole::Kernel, dispatch_signer.clone());
+    replay_authorities.allow_signer(TrustSpineSignerRole::Kernel, checkpoint_signer.clone());
+
+    DispatchAdmissionFixture {
+        _temp: temp,
+        db_path,
+        store,
+        authority,
+        dispatch_key,
+        dispatch_signer,
+        checkpoint_key,
+        checkpoint_signer,
+        replay_authorities,
+        parsed,
+        request,
+    }
+}
+
+fn dispatch_admission_event_count(fixture: &DispatchAdmissionFixture) -> usize {
+    fixture
+        .store
+        .events_for_run(&fixture.request.run_id.to_string())
+        .expect("read dispatch-admission tape")
+        .iter()
+        .filter(|event| event.kind == "dispatch_envelope_v3")
+        .count()
+}
+
+fn dispatch_admission_checkpoint_count(fixture: &DispatchAdmissionFixture) -> usize {
+    fixture
+        .store
+        .events_for_run(&fixture.request.run_id.to_string())
+        .expect("read dispatch-admission tape")
+        .iter()
+        .filter(|event| event.kind == "tape_checkpoint")
+        .count()
+}
+
+fn append_later_valid_checkpointed_dispatch(fixture: &DispatchAdmissionFixture) {
+    let now = Utc::now();
+    let mut dispatch = fixture.request.dispatch.clone();
+    dispatch.body.unit_id = "unit-after-admission".into();
+    dispatch.body.idempotency_key = "workflow-trust-spine:unit-after-admission:1".into();
+    dispatch.body.issued_at = timestamp(now - Duration::seconds(1));
+    dispatch.body.expires_at = timestamp(now + Duration::minutes(10));
+    dispatch.envelope_digest = dispatch_envelope_v3_body_digest(
+        &dispatch.body,
+        dispatch.action_evidence_version,
+        &dispatch.repository_binding_digest,
+        &dispatch.ledger_authority_realm_digest,
+        dispatch.governed_packet_digest.as_deref(),
+    )
+    .expect("hash later valid dispatch");
+    let event = Event {
+        id: EventId::new(),
+        run_id: fixture.request.run_id,
+        parent_event_id: None,
+        schema_version: Event::CURRENT_SCHEMA_VERSION,
+        kind: EventKind::DispatchEnvelopeV3,
+        occurred_at: now,
+        payload: Payload::DispatchEnvelopeV3(dispatch),
+    };
+    fixture
+        .store
+        .append_signed_with_checkpoint(
+            &event,
+            &fixture.checkpoint_key,
+            &fixture.checkpoint_signer,
+            &CheckpointPolicy::every(1),
+        )
+        .expect("append later valid signed dispatch and checkpoint");
+}
+
+fn exact_checkpoint_evidence(
+    fixture: &DispatchAdmissionFixture,
+    ordinal: usize,
+) -> (EventId, String) {
+    let checkpoint = fixture
+        .store
+        .events_for_run(&fixture.request.run_id.to_string())
+        .expect("read checkpointed dispatch-admission tape")
+        .into_iter()
+        .filter(|event| event.kind == "tape_checkpoint")
+        .nth(ordinal)
+        .expect("fixture must contain the requested checkpoint")
+        .to_event()
+        .expect("checkpoint row must decode");
+    (
+        checkpoint.id,
+        canonical_event_hash(&checkpoint).expect("hash immutable checkpoint evidence"),
+    )
+}
+
+struct FixtureDispatchAdmissionResolver {
+    request: GovernedDispatchAdmissionRequestV1,
+    calls: Rc<RefCell<usize>>,
+}
+
+impl DispatchAdmissionRequestResolver for FixtureDispatchAdmissionResolver {
+    fn resolve_exact_admit(
+        &mut self,
+        admit: &super::admission_protocol::ParsedAuthorityBrokerAdmitRequestV1,
+    ) -> Result<ResolvedDispatchAdmission, DispatchAdmissionResolverError> {
+        *self.calls.borrow_mut() += 1;
+        Ok(ResolvedDispatchAdmission::from_protected_registry(
+            self.request.clone(),
+            admit.repository_target_ref.clone(),
+            admit.governed_packet_ref.clone(),
+        ))
+    }
+}
+
+#[derive(Clone, Copy)]
+enum SubstitutedOpaqueReference {
+    RepositoryTarget,
+    GovernedPacket,
+}
+
+struct SubstitutingOpaqueReferenceResolver {
+    request: GovernedDispatchAdmissionRequestV1,
+    substitution: SubstitutedOpaqueReference,
+}
+
+impl DispatchAdmissionRequestResolver for SubstitutingOpaqueReferenceResolver {
+    fn resolve_exact_admit(
+        &mut self,
+        admit: &super::admission_protocol::ParsedAuthorityBrokerAdmitRequestV1,
+    ) -> Result<ResolvedDispatchAdmission, DispatchAdmissionResolverError> {
+        let repository_target_ref = match self.substitution {
+            SubstitutedOpaqueReference::RepositoryTarget => "broker://repositories/other".into(),
+            SubstitutedOpaqueReference::GovernedPacket => admit.repository_target_ref.clone(),
+        };
+        let governed_packet_ref = match self.substitution {
+            SubstitutedOpaqueReference::RepositoryTarget => admit.governed_packet_ref.clone(),
+            SubstitutedOpaqueReference::GovernedPacket => "cas://packets/other".into(),
+        };
+        Ok(ResolvedDispatchAdmission::from_protected_registry(
+            self.request.clone(),
+            repository_target_ref,
+            governed_packet_ref,
+        ))
+    }
+}
+
+struct NeverDispatchAdmissionSnapshotVerifier {
+    calls: Rc<RefCell<usize>>,
+}
+
+impl DispatchAdmissionSnapshotVerifier for NeverDispatchAdmissionSnapshotVerifier {
+    fn verify_fresh_sealed_admission(
+        &mut self,
+        _request: &GovernedDispatchAdmissionRequestV1,
+        _sealed: &SealedDispatchAdmissionEvidence,
+    ) -> Result<(), DispatchAdmissionSnapshotError> {
+        *self.calls.borrow_mut() += 1;
+        Err(DispatchAdmissionSnapshotError::Rejected {
+            reason: "test verifier must not be called".into(),
+        })
+    }
+}
+
+#[derive(Clone)]
+enum SubstitutedDispatchAdmissionEvidence {
+    DispatchEventDigest,
+    CheckpointEventDigest,
+    EarlierCheckpoint {
+        event_id: EventId,
+        event_digest: String,
+    },
+}
+
+struct SubstitutingDispatchAdmissionBackend<B> {
+    inner: B,
+    substitution: SubstitutedDispatchAdmissionEvidence,
+}
+
+impl<B> DispatchAdmissionBackend for SubstitutingDispatchAdmissionBackend<B>
+where
+    B: DispatchAdmissionBackend,
+{
+    fn record_then_exact_seal(
+        &mut self,
+        request: &GovernedDispatchAdmissionRequestV1,
+    ) -> Result<SealedDispatchAdmissionEvidence, DispatchAdmissionBackendError> {
+        let mut sealed = self.inner.record_then_exact_seal(request)?;
+        match &self.substitution {
+            SubstitutedDispatchAdmissionEvidence::DispatchEventDigest => {
+                sealed.dispatch_event_digest = DIGEST_A.into()
+            }
+            SubstitutedDispatchAdmissionEvidence::CheckpointEventDigest => {
+                sealed.checkpoint_event_digest = DIGEST_A.into()
+            }
+            SubstitutedDispatchAdmissionEvidence::EarlierCheckpoint {
+                event_id,
+                event_digest,
+            } => {
+                sealed.checkpoint_event_id = event_id.clone();
+                sealed.checkpoint_event_digest = event_digest.clone();
+            }
+        }
+        Ok(sealed)
+    }
+}
+
+struct CopyingDispatchAdmissionBackend<B> {
+    inner: B,
+    source_database_path: PathBuf,
+    copied_snapshot_database_path: PathBuf,
+}
+
+impl<B> DispatchAdmissionBackend for CopyingDispatchAdmissionBackend<B>
+where
+    B: DispatchAdmissionBackend,
+{
+    fn record_then_exact_seal(
+        &mut self,
+        request: &GovernedDispatchAdmissionRequestV1,
+    ) -> Result<SealedDispatchAdmissionEvidence, DispatchAdmissionBackendError> {
+        let sealed = self.inner.record_then_exact_seal(request)?;
+        let checkpoint =
+            rusqlite::Connection::open(&self.source_database_path).map_err(LedgerError::from)?;
+        checkpoint
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .map_err(LedgerError::from)?;
+        fs::copy(
+            &self.source_database_path,
+            &self.copied_snapshot_database_path,
+        )
+        .map_err(LedgerError::from)?;
+        Ok(sealed)
+    }
+}
+
+#[test]
+fn broker_dispatch_admission_records_seals_and_confirms_a_fresh_trusted_snapshot() {
+    let fixture = dispatch_admission_fixture();
+    let resolver_calls = Rc::new(RefCell::new(0));
+    let resolver = FixtureDispatchAdmissionResolver {
+        request: fixture.request.clone(),
+        calls: Rc::clone(&resolver_calls),
+    };
+    let backend = LedgerDispatchAdmissionBackend::from_prevalidated_startup(
+        &fixture.store,
+        &fixture.authority,
+        &fixture.dispatch_key,
+        &fixture.dispatch_signer,
+        &fixture.checkpoint_key,
+        &fixture.checkpoint_signer,
+    )
+    .expect("startup injects independently configured ledger signers");
+    let snapshot = TrustedDispatchAdmissionSnapshotVerifier::from_prevalidated_startup(
+        &fixture.store,
+        &fixture.db_path,
+        &fixture.replay_authorities,
+        &fixture.checkpoint_signer,
+    );
+    let mut broker = BrokerDispatchAdmissionAuthority::new(resolver, backend, snapshot);
+
+    let outcome = broker.admit(fixture.parsed.clone());
+
+    assert!(matches!(
+        outcome,
+        BrokerDispatchAdmissionDisposition::Sealed(_)
+    ));
+    assert_eq!(*resolver_calls.borrow(), 1);
+    assert_eq!(dispatch_admission_event_count(&fixture), 1);
+    assert_eq!(dispatch_admission_checkpoint_count(&fixture), 1);
+}
+
+#[test]
+fn broker_dispatch_admission_exact_retry_returns_the_existing_sealed_identity_without_a_dispatch() {
+    let fixture = dispatch_admission_fixture();
+    let resolver = FixtureDispatchAdmissionResolver {
+        request: fixture.request.clone(),
+        calls: Rc::new(RefCell::new(0)),
+    };
+    let backend = LedgerDispatchAdmissionBackend::from_prevalidated_startup(
+        &fixture.store,
+        &fixture.authority,
+        &fixture.dispatch_key,
+        &fixture.dispatch_signer,
+        &fixture.checkpoint_key,
+        &fixture.checkpoint_signer,
+    )
+    .expect("startup injects independently configured ledger signers");
+    let snapshot = TrustedDispatchAdmissionSnapshotVerifier::from_prevalidated_startup(
+        &fixture.store,
+        &fixture.db_path,
+        &fixture.replay_authorities,
+        &fixture.checkpoint_signer,
+    );
+    let mut broker = BrokerDispatchAdmissionAuthority::new(resolver, backend, snapshot);
+
+    let first = broker.admit(fixture.parsed.clone());
+    let retry = broker.admit(fixture.parsed.clone());
+
+    assert!(matches!(
+        first,
+        BrokerDispatchAdmissionDisposition::Sealed(_)
+    ));
+    assert_eq!(retry, first, "exact retry must reuse the sealed proof");
+    assert_eq!(dispatch_admission_event_count(&fixture), 1);
+    assert_eq!(dispatch_admission_checkpoint_count(&fixture), 1);
+}
+
+#[test]
+fn broker_dispatch_admission_exact_retry_stays_sealed_after_a_later_valid_checkpoint() {
+    let fixture = dispatch_admission_fixture();
+    let resolver = FixtureDispatchAdmissionResolver {
+        request: fixture.request.clone(),
+        calls: Rc::new(RefCell::new(0)),
+    };
+    let backend = LedgerDispatchAdmissionBackend::from_prevalidated_startup(
+        &fixture.store,
+        &fixture.authority,
+        &fixture.dispatch_key,
+        &fixture.dispatch_signer,
+        &fixture.checkpoint_key,
+        &fixture.checkpoint_signer,
+    )
+    .expect("startup injects independently configured ledger signers");
+    let snapshot = TrustedDispatchAdmissionSnapshotVerifier::from_prevalidated_startup(
+        &fixture.store,
+        &fixture.db_path,
+        &fixture.replay_authorities,
+        &fixture.checkpoint_signer,
+    );
+    let mut broker = BrokerDispatchAdmissionAuthority::new(resolver, backend, snapshot);
+
+    let first = broker.admit(fixture.parsed.clone());
+    assert!(matches!(
+        first,
+        BrokerDispatchAdmissionDisposition::Sealed(_)
+    ));
+    append_later_valid_checkpointed_dispatch(&fixture);
+    assert_eq!(dispatch_admission_event_count(&fixture), 2);
+    assert_eq!(dispatch_admission_checkpoint_count(&fixture), 2);
+
+    let retry = broker.admit(fixture.parsed.clone());
+
+    assert_eq!(
+        retry, first,
+        "later valid work must not revoke a sealed retry"
+    );
+    assert_eq!(dispatch_admission_event_count(&fixture), 2);
+    assert_eq!(dispatch_admission_checkpoint_count(&fixture), 2);
+}
+
+#[test]
+fn broker_dispatch_admission_reconciles_when_injected_real_checkpoint_precedes_its_dispatch() {
+    let fixture = dispatch_admission_fixture();
+    append_later_valid_checkpointed_dispatch(&fixture);
+    let (earlier_checkpoint_event_id, earlier_checkpoint_event_digest) =
+        exact_checkpoint_evidence(&fixture, 0);
+    let resolver = FixtureDispatchAdmissionResolver {
+        request: fixture.request.clone(),
+        calls: Rc::new(RefCell::new(0)),
+    };
+    let backend = SubstitutingDispatchAdmissionBackend {
+        inner: LedgerDispatchAdmissionBackend::from_prevalidated_startup(
+            &fixture.store,
+            &fixture.authority,
+            &fixture.dispatch_key,
+            &fixture.dispatch_signer,
+            &fixture.checkpoint_key,
+            &fixture.checkpoint_signer,
+        )
+        .expect("startup injects independently configured ledger signers"),
+        substitution: SubstitutedDispatchAdmissionEvidence::EarlierCheckpoint {
+            event_id: earlier_checkpoint_event_id,
+            event_digest: earlier_checkpoint_event_digest,
+        },
+    };
+    let snapshot = TrustedDispatchAdmissionSnapshotVerifier::from_prevalidated_startup(
+        &fixture.store,
+        &fixture.db_path,
+        &fixture.replay_authorities,
+        &fixture.checkpoint_signer,
+    );
+    let mut broker = BrokerDispatchAdmissionAuthority::new(resolver, backend, snapshot);
+
+    assert!(matches!(
+        broker.admit(fixture.parsed.clone()),
+        BrokerDispatchAdmissionDisposition::ReconciliationRequired
+    ));
+    assert_eq!(dispatch_admission_event_count(&fixture), 2);
+    assert_eq!(dispatch_admission_checkpoint_count(&fixture), 2);
+}
+
+#[test]
+fn broker_dispatch_admission_reconciles_when_snapshot_path_is_a_distinct_copy_of_store() {
+    let fixture = dispatch_admission_fixture();
+    let copied_snapshot_database_path = fixture._temp.path().join("copied-events.db");
+    let resolver = FixtureDispatchAdmissionResolver {
+        request: fixture.request.clone(),
+        calls: Rc::new(RefCell::new(0)),
+    };
+    let backend = CopyingDispatchAdmissionBackend {
+        inner: LedgerDispatchAdmissionBackend::from_prevalidated_startup(
+            &fixture.store,
+            &fixture.authority,
+            &fixture.dispatch_key,
+            &fixture.dispatch_signer,
+            &fixture.checkpoint_key,
+            &fixture.checkpoint_signer,
+        )
+        .expect("startup injects independently configured ledger signers"),
+        source_database_path: fixture.db_path.clone(),
+        copied_snapshot_database_path: copied_snapshot_database_path.clone(),
+    };
+    let snapshot = TrustedDispatchAdmissionSnapshotVerifier::from_prevalidated_startup(
+        &fixture.store,
+        &copied_snapshot_database_path,
+        &fixture.replay_authorities,
+        &fixture.checkpoint_signer,
+    );
+    let mut broker = BrokerDispatchAdmissionAuthority::new(resolver, backend, snapshot);
+
+    assert!(matches!(
+        broker.admit(fixture.parsed.clone()),
+        BrokerDispatchAdmissionDisposition::ReconciliationRequired
+    ));
+    assert!(
+        copied_snapshot_database_path.exists(),
+        "backend must create the otherwise-valid copied recovery database"
+    );
+    assert_eq!(dispatch_admission_event_count(&fixture), 1);
+    assert_eq!(dispatch_admission_checkpoint_count(&fixture), 1);
+}
+
+#[test]
+fn broker_dispatch_admission_rejects_every_resolved_tuple_or_digest_mismatch_before_ledger_write() {
+    for mismatch in [
+        "run",
+        "workflow",
+        "revision",
+        "unit",
+        "attempt",
+        "idempotency",
+        "repository_binding",
+        "governed_packet",
+    ] {
+        let fixture = dispatch_admission_fixture();
+        let mut mismatched = fixture.request.clone();
+        match mismatch {
+            "run" => mismatched.run_id = RunId::new(),
+            "workflow" => mismatched.dispatch.body.workflow_id = "other-workflow".into(),
+            "revision" => mismatched.dispatch.body.workflow_revision = "other-revision".into(),
+            "unit" => mismatched.dispatch.body.unit_id = "other-unit".into(),
+            "attempt" => mismatched.dispatch.body.attempt += 1,
+            "idempotency" => mismatched.dispatch.body.idempotency_key = "other-key".into(),
+            "repository_binding" => mismatched.dispatch.repository_binding_digest = DIGEST_A.into(),
+            "governed_packet" => mismatched.dispatch.governed_packet_digest = Some(DIGEST_B.into()),
+            other => panic!("unknown mismatch fixture {other}"),
+        }
+        let resolver = FixtureDispatchAdmissionResolver {
+            request: mismatched,
+            calls: Rc::new(RefCell::new(0)),
+        };
+        let backend = LedgerDispatchAdmissionBackend::from_prevalidated_startup(
+            &fixture.store,
+            &fixture.authority,
+            &fixture.dispatch_key,
+            &fixture.dispatch_signer,
+            &fixture.checkpoint_key,
+            &fixture.checkpoint_signer,
+        )
+        .expect("startup injects independently configured ledger signers");
+        let snapshot = TrustedDispatchAdmissionSnapshotVerifier::from_prevalidated_startup(
+            &fixture.store,
+            &fixture.db_path,
+            &fixture.replay_authorities,
+            &fixture.checkpoint_signer,
+        );
+        let mut broker = BrokerDispatchAdmissionAuthority::new(resolver, backend, snapshot);
+
+        assert!(matches!(
+            broker.admit(fixture.parsed.clone()),
+            BrokerDispatchAdmissionDisposition::ReconciliationRequired
+        ));
+        assert_eq!(
+            dispatch_admission_event_count(&fixture),
+            0,
+            "{mismatch} mismatch must be rejected before dispatch recording"
+        );
+        assert_eq!(
+            dispatch_admission_checkpoint_count(&fixture),
+            0,
+            "{mismatch} mismatch must be rejected before checkpoint sealing"
+        );
+    }
+}
+
+#[test]
+fn broker_dispatch_admission_rejects_opaque_reference_substitution_before_ledger_write() {
+    for substitution in [
+        SubstitutedOpaqueReference::RepositoryTarget,
+        SubstitutedOpaqueReference::GovernedPacket,
+    ] {
+        let fixture = dispatch_admission_fixture();
+        let resolver = SubstitutingOpaqueReferenceResolver {
+            request: fixture.request.clone(),
+            substitution,
+        };
+        let backend = LedgerDispatchAdmissionBackend::from_prevalidated_startup(
+            &fixture.store,
+            &fixture.authority,
+            &fixture.dispatch_key,
+            &fixture.dispatch_signer,
+            &fixture.checkpoint_key,
+            &fixture.checkpoint_signer,
+        )
+        .expect("startup injects independently configured ledger signers");
+        let snapshot = TrustedDispatchAdmissionSnapshotVerifier::from_prevalidated_startup(
+            &fixture.store,
+            &fixture.db_path,
+            &fixture.replay_authorities,
+            &fixture.checkpoint_signer,
+        );
+        let mut broker = BrokerDispatchAdmissionAuthority::new(resolver, backend, snapshot);
+
+        assert!(matches!(
+            broker.admit(fixture.parsed.clone()),
+            BrokerDispatchAdmissionDisposition::ReconciliationRequired
+        ));
+        assert_eq!(dispatch_admission_event_count(&fixture), 0);
+        assert_eq!(dispatch_admission_checkpoint_count(&fixture), 0);
+    }
+}
+
+#[test]
+fn broker_dispatch_admission_fails_closed_for_lookup_without_resolver_or_ledger_effects() {
+    let mut fixture = dispatch_admission_fixture();
+    fixture.parsed = super::admission_protocol::parse_authority_broker_request_v1(
+        authority_broker_lookup_wire().as_bytes(),
+    )
+    .expect("parse strict authority-broker lookup fixture");
+    let resolver_calls = Rc::new(RefCell::new(0));
+    let snapshot_calls = Rc::new(RefCell::new(0));
+    let resolver = FixtureDispatchAdmissionResolver {
+        request: fixture.request.clone(),
+        calls: Rc::clone(&resolver_calls),
+    };
+    let backend = LedgerDispatchAdmissionBackend::from_prevalidated_startup(
+        &fixture.store,
+        &fixture.authority,
+        &fixture.dispatch_key,
+        &fixture.dispatch_signer,
+        &fixture.checkpoint_key,
+        &fixture.checkpoint_signer,
+    )
+    .expect("startup injects independently configured ledger signers");
+    let mut broker = BrokerDispatchAdmissionAuthority::new(
+        resolver,
+        backend,
+        NeverDispatchAdmissionSnapshotVerifier {
+            calls: Rc::clone(&snapshot_calls),
+        },
+    );
+
+    assert!(matches!(
+        broker.admit(fixture.parsed.clone()),
+        BrokerDispatchAdmissionDisposition::ReconciliationRequired
+    ));
+    assert_eq!(*resolver_calls.borrow(), 0);
+    assert_eq!(*snapshot_calls.borrow(), 0);
+    assert_eq!(dispatch_admission_event_count(&fixture), 0);
+    assert_eq!(dispatch_admission_checkpoint_count(&fixture), 0);
+}
+
+#[test]
+fn broker_dispatch_admission_reconciles_after_a_real_seal_when_fresh_snapshot_evidence_mismatches()
+{
+    let fixture = dispatch_admission_fixture();
+    let resolver = FixtureDispatchAdmissionResolver {
+        request: fixture.request.clone(),
+        calls: Rc::new(RefCell::new(0)),
+    };
+    let backend = SubstitutingDispatchAdmissionBackend {
+        inner: LedgerDispatchAdmissionBackend::from_prevalidated_startup(
+            &fixture.store,
+            &fixture.authority,
+            &fixture.dispatch_key,
+            &fixture.dispatch_signer,
+            &fixture.checkpoint_key,
+            &fixture.checkpoint_signer,
+        )
+        .expect("startup injects independently configured ledger signers"),
+        substitution: SubstitutedDispatchAdmissionEvidence::CheckpointEventDigest,
+    };
+    let snapshot = TrustedDispatchAdmissionSnapshotVerifier::from_prevalidated_startup(
+        &fixture.store,
+        &fixture.db_path,
+        &fixture.replay_authorities,
+        &fixture.checkpoint_signer,
+    );
+    let mut broker = BrokerDispatchAdmissionAuthority::new(resolver, backend, snapshot);
+
+    assert!(matches!(
+        broker.admit(fixture.parsed.clone()),
+        BrokerDispatchAdmissionDisposition::ReconciliationRequired
+    ));
+    assert_eq!(dispatch_admission_event_count(&fixture), 1);
+    assert_eq!(dispatch_admission_checkpoint_count(&fixture), 1);
+}
+
+#[test]
+fn broker_dispatch_admission_reconciles_after_a_real_seal_when_dispatch_event_digest_mismatches() {
+    let fixture = dispatch_admission_fixture();
+    let resolver = FixtureDispatchAdmissionResolver {
+        request: fixture.request.clone(),
+        calls: Rc::new(RefCell::new(0)),
+    };
+    let backend = SubstitutingDispatchAdmissionBackend {
+        inner: LedgerDispatchAdmissionBackend::from_prevalidated_startup(
+            &fixture.store,
+            &fixture.authority,
+            &fixture.dispatch_key,
+            &fixture.dispatch_signer,
+            &fixture.checkpoint_key,
+            &fixture.checkpoint_signer,
+        )
+        .expect("startup injects independently configured ledger signers"),
+        substitution: SubstitutedDispatchAdmissionEvidence::DispatchEventDigest,
+    };
+    let snapshot = TrustedDispatchAdmissionSnapshotVerifier::from_prevalidated_startup(
+        &fixture.store,
+        &fixture.db_path,
+        &fixture.replay_authorities,
+        &fixture.checkpoint_signer,
+    );
+    let mut broker = BrokerDispatchAdmissionAuthority::new(resolver, backend, snapshot);
+
+    assert!(matches!(
+        broker.admit(fixture.parsed.clone()),
+        BrokerDispatchAdmissionDisposition::ReconciliationRequired
+    ));
+    assert_eq!(dispatch_admission_event_count(&fixture), 1);
+    assert_eq!(dispatch_admission_checkpoint_count(&fixture), 1);
+}
+
+#[test]
+fn broker_dispatch_admission_never_reports_success_when_checkpoint_sealing_fails() {
+    let fixture = dispatch_admission_fixture();
+    let resolver = FixtureDispatchAdmissionResolver {
+        request: fixture.request.clone(),
+        calls: Rc::new(RefCell::new(0)),
+    };
+    let wrong_checkpoint_key = SigningKey::from_bytes(&[113; 32]);
+    let backend = LedgerDispatchAdmissionBackend::from_prevalidated_startup(
+        &fixture.store,
+        &fixture.authority,
+        &fixture.dispatch_key,
+        &fixture.dispatch_signer,
+        &wrong_checkpoint_key,
+        &fixture.checkpoint_signer,
+    )
+    .expect("distinct but untrusted checkpoint material is a runtime reconciliation case");
+    let snapshot = TrustedDispatchAdmissionSnapshotVerifier::from_prevalidated_startup(
+        &fixture.store,
+        &fixture.db_path,
+        &fixture.replay_authorities,
+        &fixture.checkpoint_signer,
+    );
+    let mut broker = BrokerDispatchAdmissionAuthority::new(resolver, backend, snapshot);
+
+    assert!(matches!(
+        broker.admit(fixture.parsed.clone()),
+        BrokerDispatchAdmissionDisposition::ReconciliationRequired
+    ));
+    assert_eq!(dispatch_admission_event_count(&fixture), 1);
+    assert_eq!(dispatch_admission_checkpoint_count(&fixture), 0);
 }
