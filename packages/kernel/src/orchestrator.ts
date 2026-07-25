@@ -18,6 +18,7 @@ import {
 	createDefaultAdmittedPlanReader,
 } from "./admitted-plan-reader.js";
 import type { EventBus, EventContext } from "./events.js";
+import { assertActiveGovernedDispatchAuthorityWindowV1 } from "./governed-dispatch-authority-window.js";
 import {
 	createGovernedV3RetryRequestV1,
 	type GovernedV3RetryContextResolverPort,
@@ -209,8 +210,6 @@ const PRINTABLE_ASCII_ACTION_ID_PATTERN = /^[\x21-\x7e]+$/;
 // fields (Feb 31 → Mar 3), so an impossible calendar date could otherwise sign.
 const RFC3339_PATTERN =
 	/^(?<year>\d{4})-(?<month>\d{2})-(?<day>\d{2})[Tt](?<hour>\d{2}):(?<minute>\d{2}):(?<second>\d{2})(\.\d+)?([Zz]|[+-]\d{2}:\d{2})$/;
-const RFC3339_UTC_MILLIS_PATTERN =
-	/^(?<year>\d{4})-(?<month>\d{2})-(?<day>\d{2})T(?<hour>\d{2}):(?<minute>\d{2}):(?<second>\d{2})(?:\.\d{1,3})?Z$/;
 
 /**
  * Thrown by `recordOperatorDecision` validation (M5-S4 D5) BEFORE any tape emit,
@@ -235,57 +234,6 @@ export class CandidatePromotionValidationError extends Error {
 		super(message);
 		this.name = "CandidatePromotionValidationError";
 	}
-}
-
-/**
- * V3 dispatches are serialized into the signed native ledger, whose canonical
- * rules require an RFC3339 UTC timestamp. `Date.parse` alone accepts offset,
- * lower-case, and calendar-impossible forms, so validate the exact wire shape
- * and its calendar fields before comparing expiry.
- */
-function requireRfc3339UtcEpoch(value: unknown, field: string): number {
-	if (typeof value !== "string") {
-		throw new CandidatePromotionValidationError(
-			`${field} must be an RFC3339 UTC timestamp.`,
-		);
-	}
-	const match = RFC3339_UTC_MILLIS_PATTERN.exec(value);
-	const epochMs = Date.parse(value);
-	if (match === null || !Number.isFinite(epochMs)) {
-		throw new CandidatePromotionValidationError(
-			`${field} must be an RFC3339 UTC timestamp.`,
-		);
-	}
-	const fields = match.groups as {
-		year: string;
-		month: string;
-		day: string;
-		hour: string;
-		minute: string;
-		second: string;
-	};
-	const year = Number(fields.year);
-	const month = Number(fields.month);
-	const day = Number(fields.day);
-	const hour = Number(fields.hour);
-	const minute = Number(fields.minute);
-	const second = Number(fields.second);
-	const calendar = new Date(
-		Date.UTC(year, month - 1, day, hour, minute, second),
-	);
-	if (
-		calendar.getUTCFullYear() !== year ||
-		calendar.getUTCMonth() !== month - 1 ||
-		calendar.getUTCDate() !== day ||
-		calendar.getUTCHours() !== hour ||
-		calendar.getUTCMinutes() !== minute ||
-		calendar.getUTCSeconds() !== second
-	) {
-		throw new CandidatePromotionValidationError(
-			`${field} must be a real RFC3339 UTC calendar timestamp.`,
-		);
-	}
-	return epochMs;
 }
 
 /** Caller-supplied candidate evidence for an operator/preauthorized decision. */
@@ -1443,22 +1391,13 @@ export function createBuildplaneOrchestrator(
 		] as const) {
 			requirePromotionReference(value, field);
 		}
-		const issuedAtEpochMs = requireRfc3339UtcEpoch(
-			lineage.issuedAt,
-			"governedDispatch.issuedAt",
-		);
-		const expiresAtEpochMs = requireRfc3339UtcEpoch(
-			lineage.expiresAt,
-			"governedDispatch.expiresAt",
-		);
-		if (issuedAtEpochMs >= expiresAtEpochMs) {
+		try {
+			assertActiveGovernedDispatchAuthorityWindowV1(lineage);
+		} catch (error) {
 			throw new CandidatePromotionValidationError(
-				"V3 governed dispatch expiresAt must be later than issuedAt.",
-			);
-		}
-		if (expiresAtEpochMs <= Date.now()) {
-			throw new CandidatePromotionValidationError(
-				"V3 governed dispatch is expired and cannot authorize a worker effect.",
+				`V3 governed dispatch cannot authorize a worker effect: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
 			);
 		}
 	}

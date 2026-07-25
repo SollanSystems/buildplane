@@ -1,7 +1,10 @@
 import { createHash, KeyObject, verify } from "node:crypto";
 import {
+	addNativeRfc3339UtcMilliseconds,
+	assertActiveGovernedDispatchAuthorityWindowV1,
 	type DispatchEnvelopeV3,
 	parseDispatchEnvelopeV3,
+	parseNativeRfc3339Utc,
 } from "@buildplane/kernel";
 
 const SHA256_DIGEST = /^sha256:[0-9a-f]{64}$/;
@@ -506,9 +509,17 @@ function assertGovernedEnvelope(
 			"authority broker response expiry does not agree with the dispatch envelope expiry.",
 		);
 	}
-	if (Date.parse(envelope.body.expiresAt) <= Date.now()) {
+	try {
+		assertActiveGovernedDispatchAuthorityWindowV1({
+			issuedAt: envelope.body.issuedAt,
+			expiresAt: envelope.body.expiresAt,
+			budget: envelope.body.budget,
+		});
+	} catch (error) {
 		throw new TypeError(
-			"authority broker response envelope expiry is expired.",
+			`authority broker response envelope authority window is inactive: ${
+				error instanceof Error ? error.message : String(error)
+			}`,
 		);
 	}
 	if (
@@ -888,14 +899,20 @@ function requirePositiveSafeInteger(value: unknown, label: string): number {
 }
 
 function requireFutureTimestamp(value: unknown, label: string): string {
+	const parsed = parseNativeRfc3339Utc(value);
+	const nowCeiling = addNativeRfc3339UtcMilliseconds(
+		new Date().toISOString(),
+		1,
+	);
 	if (
 		typeof value !== "string" ||
 		!RFC3339_UTC.test(value) ||
-		!Number.isFinite(Date.parse(value))
+		parsed === undefined ||
+		nowCeiling === undefined
 	) {
 		throw new TypeError(`${label} must be a RFC3339 UTC timestamp.`);
 	}
-	if (Date.parse(value) <= Date.now()) {
+	if (parsed.orderingNanos <= nowCeiling) {
 		throw new TypeError(`${label} expiry is expired.`);
 	}
 	return value;

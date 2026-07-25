@@ -5,13 +5,12 @@ import {
 	appendFileSync,
 	copyFileSync,
 	existsSync,
-	lstatSync,
 	mkdirSync,
 	readdirSync,
 	readFileSync,
 	realpathSync,
-	rmSync,
 	statSync,
+	unlinkSync,
 	writeFileSync,
 } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -31,6 +30,7 @@ import {
 	type CandidateCreatedV2,
 	canonicalGovernedUnitPacketV1Digest,
 	type EnvelopeProposal,
+	inspectGovernedDispatchAuthorityWindowV1,
 	type LedgerActivityPort,
 	type OperatorDecisionPort,
 	type PolicyProfile,
@@ -2392,8 +2392,15 @@ function buildGovernedRunPreview(
 				"Dispatch envelope provenanceRef does not match the packet.",
 			);
 		}
-		if (Date.parse(envelope.expiresAt) <= Date.now()) {
-			blockers.push("Dispatch envelope is expired.");
+		const authority = inspectGovernedDispatchAuthorityWindowV1({
+			issuedAt: envelope.issuedAt,
+			expiresAt: envelope.expiresAt,
+			budget: envelope.budget,
+		});
+		if (authority.state !== "active") {
+			blockers.push(
+				`Dispatch envelope authority is inactive (${authority.failure}).`,
+			);
 		}
 	}
 	if (options.sandbox.state !== "feasible") {
@@ -3001,31 +3008,22 @@ async function preauthorizedEnvelopeBlocker(
 	if (envelope.executionRole !== "implementer") {
 		return "Preauthorized governed admission requires an implementer dispatch envelope; reviewer, adversary, and judge roles are read-only.";
 	}
-	const now = Date.now();
-	const issuedAt = Date.parse(envelope.issuedAt);
-	const expiresAt = Date.parse(envelope.expiresAt);
-	if (
-		!Number.isFinite(issuedAt) ||
-		!Number.isFinite(expiresAt) ||
-		issuedAt >= expiresAt
-	) {
-		return "Preauthorized dispatch envelope has an invalid authority window.";
-	}
-	if (issuedAt > now) {
-		return "Preauthorized dispatch envelope authority is not yet active.";
-	}
-	const computeDeadline =
-		envelope.budget.maxComputeTimeMs === undefined
-			? expiresAt
-			: issuedAt + envelope.budget.maxComputeTimeMs;
-	if (!Number.isFinite(computeDeadline)) {
-		return "Preauthorized dispatch envelope has an invalid compute deadline.";
-	}
-	const authorityDeadline = Math.min(expiresAt, computeDeadline);
-	if (authorityDeadline <= now) {
-		return computeDeadline < expiresAt
-			? "Preauthorized dispatch envelope compute deadline has elapsed."
-			: "Preauthorized dispatch envelope is expired or has an invalid expiry.";
+	const authority = inspectGovernedDispatchAuthorityWindowV1({
+		issuedAt: envelope.issuedAt,
+		expiresAt: envelope.expiresAt,
+		budget: envelope.budget,
+	});
+	if (authority.state !== "active") {
+		switch (authority.failure) {
+			case "not-yet-active":
+				return "Preauthorized dispatch envelope authority is not yet active.";
+			case "compute-deadline-elapsed":
+				return "Preauthorized dispatch envelope compute deadline has elapsed.";
+			case "expired":
+				return "Preauthorized dispatch envelope is expired or has an invalid expiry.";
+			default:
+				return "Preauthorized dispatch envelope has an invalid authority window.";
+		}
 	}
 	let expectedGovernedPacketDigest: string;
 	try {
@@ -5316,6 +5314,77 @@ function resolveContainedPath(root: string, path: string): ContainedPathResult {
 	return { ok: true, path: candidate };
 }
 
+/**
+ * Fork planning reads a legacy tape before creating an isolated worktree. Do
+ * not follow a caller-controlled `.buildplane/ledger` link outside the named
+ * repository: VCR and native replay would otherwise read an unrelated tape.
+ */
+function assertForkLedgerContained(workspace: string): string {
+	let realWorkspaceRoot: string;
+	let realLedgerDirectory: string;
+	let realEventsDb: string;
+	try {
+		realWorkspaceRoot = realpathSync(workspace);
+		const ledgerDirectory = resolve(workspace, ".buildplane", "ledger");
+		realLedgerDirectory = realpathSync(ledgerDirectory);
+		realEventsDb = realpathSync(resolve(ledgerDirectory, "events.db"));
+	} catch (error) {
+		throw new Error(
+			`fork requires a resolvable workspace ledger under .buildplane/ledger: ${String(error)}`,
+		);
+	}
+	if (
+		!isPathAtOrBelowRoot(realWorkspaceRoot, realLedgerDirectory) ||
+		!isPathAtOrBelowRoot(realWorkspaceRoot, realEventsDb) ||
+		!statSync(realEventsDb).isFile()
+	) {
+		throw new Error(
+			"fork ledger escapes the workspace or is not a regular events.db file.",
+		);
+	}
+	return realWorkspaceRoot;
+}
+
+/**
+ * A Git worktree receives a byte-for-byte snapshot of `.buildplane/state.db`,
+ * but that projection is keyed by the absolute parent project root. A legacy
+ * fork must not reuse or repair the parent's projection from its child
+ * worktree. Remove only the child snapshot and let the child orchestrator
+ * initialize a fresh local projection before execution.
+ */
+function resetForkWorkspaceProjectState(workspace: string): void {
+	const stateDirectory = resolve(workspace, ".buildplane");
+	for (const stateFile of [
+		"project.json",
+		"state.db",
+		"state.db-shm",
+		"state.db-wal",
+	]) {
+		const statePath = resolve(stateDirectory, stateFile);
+		try {
+			// unlinkSync removes a symlink itself rather than following it. The
+			// target is a fixed child-worktree path, never caller-provided input.
+			unlinkSync(statePath);
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+				continue;
+			}
+			throw new Error(
+				`failed to reset isolated fork project state at ${statePath}: ${String(error)}`,
+			);
+		}
+	}
+}
+
+function forkWorktreePath(workspace: string, runId: string): string {
+	const suffix = createHash("sha256")
+		.update("buildplane.legacy-fork-worktree.v1\0")
+		.update(runId, "utf8")
+		.digest("hex")
+		.slice(0, 24);
+	return resolve(workspace, ".buildplane", "workspaces", `fork-${suffix}`);
+}
+
 function loadForkVcrOutputStore(
 	workspace: string,
 	parentRunId: string,
@@ -5458,7 +5527,8 @@ async function loadForkVcrCassette(
 
 async function runForkExecution(
 	plan: ForkPlan,
-	workspace: string,
+	executionWorkspace: string,
+	ledgerWorkspace: string,
 	vcr: ForkVcrOptions,
 	opts: { stdout: (s: string) => void; stderr: (s: string) => void },
 ): Promise<number> {
@@ -5469,8 +5539,12 @@ async function runForkExecution(
 	// tightly coupled to the `case "run"` closure locals (enrichedPacket,
 	// cliEventBus, commandExecutor, etc.). A full extraction is tracked for
 	// Phase F consolidation.
-	const binary = resolveLedgerBinary(workspace);
-	const ledgerChild = spawnLedgerSubprocess(binary, plan.new_run_id, workspace);
+	const binary = resolveLedgerBinary(ledgerWorkspace);
+	const ledgerChild = spawnLedgerSubprocess(
+		binary,
+		plan.new_run_id,
+		ledgerWorkspace,
+	);
 
 	let emitter: TapeEmitter;
 	try {
@@ -5478,7 +5552,7 @@ async function runForkExecution(
 			childStdin: ledgerChild.stdin,
 			childStderr: ledgerChild.stderr,
 			childExit: ledgerChild.exit,
-			workspacePath: workspace,
+			workspacePath: ledgerWorkspace,
 			runId: plan.new_run_id,
 		});
 	} catch (err) {
@@ -5494,7 +5568,7 @@ async function runForkExecution(
 	let runStartEventId: string | undefined;
 	let forkCurrentUnit: LedgerUnitContext | null = null;
 	const getForkUnitCtx = () => forkCurrentUnit;
-	const ledgerWorkspacePath = resolve(workspace);
+	const executionWorkspacePath = resolve(executionWorkspace);
 	let vcrCassette = new Map<string, VcrToolResult[]>();
 	let unsubscribeFork: (() => void) | null = null;
 	try {
@@ -5504,12 +5578,16 @@ async function runForkExecution(
 				: undefined,
 		);
 		// Load a fresh orchestrator bundle scoped to the fork workspace.
-		const bundle = await loadCliOrchestrator(workspace);
+		const bundle = await loadCliOrchestrator(executionWorkspace);
 		const {
 			orchestrator: forkOrchestrator,
 			eventBus: forkEventBus,
 			runWithCommandGateway: runForkWithCommandGateway,
 		} = bundle;
+		// The detached worktree has a fresh, child-local storage projection. Its
+		// ledger remains anchored to `ledgerWorkspace`; this initialization must
+		// never mutate or attempt to repair the caller's state database.
+		forkOrchestrator.initializeProject();
 
 		// Wire bus subscription for unit-boundary events (mirrors run command handler).
 		unsubscribeFork = forkEventBus.subscribe((evt: unknown) => {
@@ -5525,14 +5603,14 @@ async function runForkExecution(
 					forkCurrentUnit = completeLedgerUnit(
 						emitter,
 						plan.new_run_id,
-						ledgerWorkspacePath,
+						executionWorkspacePath,
 						forkCurrentUnit,
 						"failed",
 					);
 					forkCurrentUnit = beginLedgerUnit(
 						emitter,
 						plan.new_run_id,
-						ledgerWorkspacePath,
+						executionWorkspacePath,
 						unitId,
 						e.executionType ?? "command",
 						runStartEventId,
@@ -5543,7 +5621,7 @@ async function runForkExecution(
 					forkCurrentUnit = completeLedgerUnit(
 						emitter,
 						plan.new_run_id,
-						ledgerWorkspacePath,
+						executionWorkspacePath,
 						forkCurrentUnit,
 						e.exitCode === 0 ? "passed" : "failed",
 					);
@@ -5560,7 +5638,7 @@ async function runForkExecution(
 					forkCurrentUnit = completeLedgerUnit(
 						emitter,
 						plan.new_run_id,
-						ledgerWorkspacePath,
+						executionWorkspacePath,
 						forkCurrentUnit,
 						"failed",
 					);
@@ -5605,10 +5683,15 @@ async function runForkExecution(
 		} => {
 			const realWorktreeRoot = safeRealpath(worktreeRoot);
 			const parentWorkspaceRoot = safeRealpath(
-				pathResolve(workspace, ".buildplane", "workspaces", vcr.parentRunId),
+				pathResolve(
+					ledgerWorkspace,
+					".buildplane",
+					"workspaces",
+					vcr.parentRunId,
+				),
 			);
 			const parentOutputStoreRoot = safeRealpath(
-				vcrOutputStoreRoot(workspace, vcr.parentRunId),
+				vcrOutputStoreRoot(ledgerWorkspace, vcr.parentRunId),
 			);
 			const sourceRoots = [
 				{ label: "parent_vcr_output_store", root: parentOutputStoreRoot },
@@ -5971,7 +6054,7 @@ async function runForkExecution(
 		runStartEventId = emitLedgerRunStarted(
 			emitter,
 			packetHash,
-			workspace,
+			executionWorkspace,
 			plan.parent_run_id,
 			plan.parent_event_id,
 			plan.checkout_sha,
@@ -5990,7 +6073,7 @@ async function runForkExecution(
 		forkCurrentUnit = completeLedgerUnit(
 			emitter,
 			plan.new_run_id,
-			ledgerWorkspacePath,
+			executionWorkspacePath,
 			forkCurrentUnit,
 			exitCode === 0 ? "passed" : "failed",
 		);
@@ -6018,7 +6101,7 @@ async function runForkExecution(
 		forkCurrentUnit = completeLedgerUnit(
 			emitter,
 			plan.new_run_id,
-			ledgerWorkspacePath,
+			executionWorkspacePath,
 			forkCurrentUnit,
 			exitCode === 0 ? "passed" : "failed",
 		);
@@ -6062,20 +6145,43 @@ async function runFork(
 	opts.stdout("trusted-receipt: false\n");
 
 	const workspace = resolve(args.value.workspace ?? opts.cwd);
-	// `fork plan` opens the parent tape for replay. SQLite can create these
-	// companion files even though planning is read-only. Capture their state
-	// before planning so we can remove only files created by this invocation
-	// before Git checks out the fork base; never delete a caller-owned sidecar.
-	const preflightLedgerSidecars = [
-		resolve(workspace, ".buildplane", "ledger", "events.db-shm"),
-		resolve(workspace, ".buildplane", "ledger", "events.db-wal"),
-	].map((path) => ({ path, existedBeforePreflight: existsSync(path) }));
 	// Resolve the packet path against the user's cwd BEFORE spawning the native
 	// binary — the plan subprocess runs in `planSpawnCwd` (project root), not
 	// `opts.cwd`, so a relative path like `./packet.json` would otherwise be
 	// resolved from the wrong directory.
 	const packet = resolve(opts.cwd, args.value.packet);
 	const binary = resolveLedgerBinary(opts.cwd);
+	let realWorkspaceRoot: string;
+	try {
+		realWorkspaceRoot = assertForkLedgerContained(workspace);
+	} catch (error) {
+		opts.stderr(`buildplane fork: ${String(error)}\n`);
+		return 1;
+	}
+
+	// Clean-worktree pre-flight must happen before VCR loading or native planning.
+	// Planning opens the ledger and SQLite may legitimately materialize WAL/SHM
+	// sidecars. Those planner-owned sidecars are not caller changes and must never
+	// make us delete state or reject an otherwise clean parent workspace.
+	const statusResult = spawnSync(
+		"git",
+		["-C", workspace, "status", "--porcelain"],
+		{ encoding: "utf8" },
+	);
+	if (statusResult.status !== 0) {
+		opts.stderr(`git status in ${workspace} failed: ${statusResult.stderr}\n`);
+		return 1;
+	}
+	const dirtyLines = statusResult.stdout
+		.split("\n")
+		.filter((line) => line.trim().length > 0);
+	if (dirtyLines.length > 0) {
+		opts.stderr(
+			`workspace has uncommitted changes; commit or stash before forking\n`,
+		);
+		return 1;
+	}
+
 	let vcrCassette: Map<string, VcrToolResult[]> | undefined;
 	let vcrOutputStore: Map<string, Buffer> | undefined;
 	if (args.value.vcr) {
@@ -6126,83 +6232,79 @@ async function runFork(
 		return 1;
 	}
 
-	let realWorkspaceRoot: string;
+	// Phase 2: create a detached fork worktree. Never checkout the caller's
+	// root: a concurrent replay can retain SQLite sidecars there, and a rejected
+	// or failed raw fork must not alter the parent repository's HEAD or tree.
+	const forkWorkspace = forkWorktreePath(workspace, plan.new_run_id);
+	const forkWorkspaceParent = dirname(forkWorkspace);
 	try {
-		realWorkspaceRoot = realpathSync(workspace);
-	} catch (error) {
-		opts.stderr(
-			`failed to resolve fork workspace before sidecar cleanup: ${String(error)}\n`,
+		const containedParent = ensureContainedDirectory(
+			realWorkspaceRoot,
+			forkWorkspaceParent,
+			realpathSync,
 		);
-		return 1;
-	}
-	for (const sidecar of preflightLedgerSidecars) {
-		if (sidecar.existedBeforePreflight || !existsSync(sidecar.path)) {
-			continue;
-		}
-		try {
-			const realSidecarDirectory = realpathSync(dirname(sidecar.path));
-			if (!isPathAtOrBelowRoot(realWorkspaceRoot, realSidecarDirectory)) {
-				opts.stderr(
-					`fork plan ledger sidecar escapes the workspace; refusing removal at ${sidecar.path}\n`,
-				);
-				return 1;
-			}
-			if (!lstatSync(sidecar.path).isFile()) {
-				opts.stderr(
-					`fork plan created a non-file ledger sidecar at ${sidecar.path}; refusing checkout\n`,
-				);
-				return 1;
-			}
-			rmSync(sidecar.path);
-		} catch (error) {
+		if (!containedParent.ok) {
 			opts.stderr(
-				`failed to remove fork-plan ledger sidecar at ${sidecar.path}: ${String(error)}\n`,
+				`fork workspace parent is outside the repository: ${containedParent.reason}\n`,
 			);
 			return 1;
 		}
-	}
-
-	// Phase 2: clean-worktree pre-flight.
-	// Filter out SQLite WAL companion files (*.db-shm, *.db-wal) — these are
-	// created transiently when fork plan opens events.db for replay and do not
-	// represent user changes. Everything else must be committed.
-	const statusResult = spawnSync(
-		"git",
-		["-C", workspace, "status", "--porcelain"],
-		{ encoding: "utf8" },
-	);
-	if (statusResult.status !== 0) {
-		opts.stderr(`git status in ${workspace} failed: ${statusResult.stderr}\n`);
+	} catch (error) {
+		opts.stderr(
+			`failed to prepare isolated fork workspace: ${String(error)}\n`,
+		);
 		return 1;
 	}
-	const dirtyLines = statusResult.stdout
-		.split("\n")
-		.filter((line) => line.trim().length > 0)
-		.filter((line) => !line.match(/\.db-shm$|\.db-wal$/u));
-	if (dirtyLines.length > 0) {
+	if (existsSync(forkWorkspace)) {
 		opts.stderr(
-			`workspace has uncommitted changes; commit or stash before forking\n`,
+			`fork workspace already exists at ${forkWorkspace}; inspect or remove it before retrying.\n`,
+		);
+		return 1;
+	}
+	const worktreeResult = spawnSync(
+		"git",
+		[
+			"-C",
+			workspace,
+			"worktree",
+			"add",
+			"--detach",
+			forkWorkspace,
+			plan.checkout_sha,
+		],
+		{ encoding: "utf8" },
+	);
+	if (worktreeResult.status !== 0) {
+		opts.stderr(
+			`git worktree add ${plan.checkout_sha} failed: ${worktreeResult.stderr}\n`,
+		);
+		return 1;
+	}
+	try {
+		const containedWorkspace = ensureContainedDirectory(
+			realWorkspaceRoot,
+			forkWorkspace,
+			realpathSync,
+		);
+		if (!containedWorkspace.ok) {
+			opts.stderr(
+				`isolated fork workspace is outside the repository: ${containedWorkspace.reason}\n`,
+			);
+			return 1;
+		}
+		resetForkWorkspaceProjectState(forkWorkspace);
+	} catch (error) {
+		opts.stderr(
+			`failed to initialize isolated fork workspace state: ${String(error)}\n`,
 		);
 		return 1;
 	}
 
-	// Phase 3: checkout the pre-unit SHA.
-	const checkoutResult = spawnSync(
-		"git",
-		["-C", workspace, "checkout", plan.checkout_sha],
-		{ encoding: "utf8" },
-	);
-	if (checkoutResult.status !== 0) {
-		opts.stderr(
-			`git checkout ${plan.checkout_sha} failed: ${checkoutResult.stderr}\n`,
-		);
-		return 1;
-	}
-
-	// Phase 4: stub execution for Task 5. Task 6 replaces this with a real
-	// ledger spawn + orchestrator invocation.
+	// Phase 3: execute against the detached child while the tape remains owned
+	// by the caller workspace.
 	const exitCode = await runForkExecution(
 		plan,
+		forkWorkspace,
 		workspace,
 		{
 			enabled: args.value.vcr,
@@ -6214,20 +6316,11 @@ async function runFork(
 		opts,
 	);
 
-	// Phase 5: exit hint.
-	const currentBranchResult = spawnSync(
-		"git",
-		["-C", workspace, "rev-parse", "--abbrev-ref", "HEAD"],
-		{ encoding: "utf8" },
-	);
-	const currentBranch = currentBranchResult.stdout.trim();
+	// Phase 4: explicit location. The isolated worktree remains available for
+	// debugging the unsafe legacy result; the parent root was never checked out.
 	opts.stdout(
-		`\nHEAD is at fork tree ${plan.checkout_sha.slice(0, 8)}; ` +
-			`run \`git checkout <branch>\` to restore.\n`,
+		`\nfork workspace: ${forkWorkspace} (base ${plan.checkout_sha.slice(0, 8)})\n`,
 	);
-	if (currentBranch === "HEAD") {
-		opts.stdout(`(detached HEAD)\n`);
-	}
 	return exitCode;
 }
 

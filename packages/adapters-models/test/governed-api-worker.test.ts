@@ -288,7 +288,7 @@ function governedDispatch(
 		idempotencyKey: "governed-api-worker:1",
 		authorityActor: "kernel:test",
 		actionEvidenceVersion: "sealed_v3",
-		issuedAt: "2099-07-18T00:00:00.000Z",
+		issuedAt: "2020-07-18T00:00:00.000Z",
 		expiresAt: "2099-07-18T00:15:00.000Z",
 		...overrides,
 	};
@@ -1422,6 +1422,8 @@ describe("governed API worker execution port", () => {
 			.fn<() => string>()
 			.mockReturnValueOnce("2099-07-18T00:14:00.000Z")
 			.mockReturnValueOnce("2099-07-18T00:14:00.000Z")
+			.mockReturnValueOnce("2099-07-18T00:14:00.000Z")
+			.mockReturnValueOnce("2099-07-18T00:14:00.000Z")
 			.mockReturnValue("2099-07-18T00:16:00.000Z");
 		const authorityPort = createTestGovernedModelActionAuthorityPort({
 			now: () => "2099-07-18T00:14:00.000Z",
@@ -1444,7 +1446,14 @@ describe("governed API worker execution port", () => {
 		});
 
 		await expect(
-			port.executeCandidatePacketAsync(request({ evidence })),
+			port.executeCandidatePacketAsync(
+				request({
+					evidence,
+					dispatch: governedDispatch({
+						expiresAt: "2099-07-18T00:17:00.000Z",
+					}),
+				}),
+			),
 		).rejects.toThrow(/authority is expired/i);
 		expect(events).toEqual([
 			"canonical-input",
@@ -1564,6 +1573,60 @@ describe("governed API worker execution port", () => {
 		expect(complete).not.toHaveBeenCalled();
 	});
 
+	it("rechecks the activity lease at the provider effect boundary", async () => {
+		const events: string[] = [];
+		const evidence = actionEvidence(events);
+		const complete = vi.fn(client(events).complete);
+		const now = vi
+			.fn<() => string>()
+			.mockReturnValueOnce("2099-07-18T00:14:00.000Z")
+			.mockReturnValueOnce("2099-07-18T00:14:00.000Z")
+			.mockReturnValueOnce("2099-07-18T00:14:00.000Z")
+			.mockReturnValueOnce("2099-07-18T00:14:00.000Z")
+			.mockReturnValueOnce("2099-07-18T00:14:00.000Z")
+			.mockReturnValue("2099-07-18T00:16:00.000Z");
+		const authorityPort = createTestGovernedModelActionAuthorityPort({
+			now: () => "2099-07-18T00:14:00.000Z",
+			resolver: {
+				async authorize(input) {
+					events.push("authority");
+					return nativeAuthorityGrant(input, {
+						authorization: {
+							expires_at: "2099-07-18T00:17:00.000Z",
+						},
+					});
+				},
+			},
+		});
+		const port = createGovernedApiWorkerExecutionPort({
+			actionGateway: actionGateway(events, client(events, { complete })),
+			modelActionAuthorityPort: authorityPort,
+			evidenceStore: evidenceStore(events),
+			activityClaimPort: activityClaimPort(events),
+			now,
+		});
+
+		await expect(
+			port.executeCandidatePacketAsync(
+				request({
+					evidence,
+					dispatch: governedDispatch({
+						expiresAt: "2099-07-18T00:17:00.000Z",
+					}),
+				}),
+			),
+		).rejects.toThrow(/activity lease expired/i);
+		expect(events).toEqual([
+			"canonical-input",
+			"action-requested",
+			"activity-claim",
+			"authority",
+			"activity-result:failed",
+			"action-receipt:denied",
+		]);
+		expect(complete).not.toHaveBeenCalled();
+	});
+
 	it("records an unknown effect instead of a success when the gateway returns after authority expiry", async () => {
 		const events: string[] = [];
 		const receipt = vi.fn(async (input: RecordActionReceiptV2Input) => {
@@ -1574,6 +1637,9 @@ describe("governed API worker execution port", () => {
 		const complete = vi.fn(client(events).complete);
 		const now = vi
 			.fn<() => string>()
+			.mockReturnValueOnce("2099-07-18T00:14:00.000Z")
+			.mockReturnValueOnce("2099-07-18T00:14:00.000Z")
+			.mockReturnValueOnce("2099-07-18T00:14:00.000Z")
 			.mockReturnValueOnce("2099-07-18T00:14:00.000Z")
 			.mockReturnValueOnce("2099-07-18T00:14:00.000Z")
 			.mockReturnValueOnce("2099-07-18T00:14:00.000Z")
@@ -1649,6 +1715,31 @@ describe("governed API worker execution port", () => {
 		expect(complete).not.toHaveBeenCalled();
 	});
 
+	it("rejects a future-issued V3 dispatch before model evidence or a client effect", async () => {
+		const events: string[] = [];
+		const evidence = actionEvidence(events);
+		const complete = vi.fn(client(events).complete);
+		const port = createGovernedApiWorkerExecutionPort({
+			actionGateway: actionGateway(events, client(events, { complete })),
+			evidenceStore: evidenceStore(events),
+			now: () => "2099-07-18T00:00:00.000000000Z",
+		});
+
+		await expect(
+			port.executeCandidatePacketAsync(
+				request({
+					evidence,
+					dispatch: governedDispatch({
+						issuedAt: "2099-07-18T00:00:00.000000001Z",
+						expiresAt: "2099-07-18T00:15:00.000000000Z",
+					}),
+				}),
+			),
+		).rejects.toThrow(/not yet active/i);
+		expect(events).toEqual([]);
+		expect(complete).not.toHaveBeenCalled();
+	});
+
 	it("rejects an impossible UTC calendar date before model evidence or a client effect", async () => {
 		const events: string[] = [];
 		const evidence = actionEvidence(events);
@@ -1678,6 +1769,8 @@ describe("governed API worker execution port", () => {
 		const complete = vi.fn(client(events).complete);
 		const now = vi
 			.fn<() => string>()
+			.mockReturnValueOnce("2099-07-18T00:14:00.000Z")
+			.mockReturnValueOnce("2099-07-18T00:14:00.000Z")
 			.mockReturnValueOnce("2099-07-18T00:14:00.000Z")
 			.mockReturnValue("2099-07-18T00:16:00.000Z");
 		const port = createGovernedApiWorkerExecutionPort({
@@ -1733,6 +1826,7 @@ describe("governed API worker execution port", () => {
 				request({
 					evidence,
 					dispatch: governedDispatch({
+						issuedAt: "2099-07-18T00:00:00.000Z",
 						budget: { maxComputeTimeMs: 1_000 },
 					}),
 				}),
@@ -1756,11 +1850,12 @@ describe("governed API worker execution port", () => {
 				request({
 					evidence,
 					dispatch: governedDispatch({
+						issuedAt: "2099-07-18T00:00:00.000Z",
 						budget: { maxComputeTimeMs: 1_000 },
 					}),
 				}),
 			),
-		).rejects.toThrow(/compute budget is exhausted/i);
+		).rejects.toThrow(/compute deadline elapsed/i);
 		expect(events).toEqual([]);
 		expect(complete).not.toHaveBeenCalled();
 	});

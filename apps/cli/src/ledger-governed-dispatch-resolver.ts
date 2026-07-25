@@ -15,6 +15,7 @@ import {
 	parseActionRequestedV2,
 	parseCandidateCompletionRecordedV1,
 	parseCandidateCreatedV2,
+	validateGovernedDispatchAuthorityWindowV1,
 } from "@buildplane/kernel";
 import {
 	GOVERNED_AUTHORITY_BROKER_REQUIRED,
@@ -633,18 +634,15 @@ function parseNativeDispatch(
 		dispatch.expires_at,
 		"dispatch.expires_at",
 	);
-	const now = parseNativeRfc3339Utc(new Date().toISOString());
-	if (now === undefined) {
-		throw new Error(
-			"current UTC time must satisfy the native RFC3339 grammar.",
-		);
-	}
-	if (
-		issuedAt.value >= expiresAt.value ||
-		expiresAt.value <= now.orderingNanos
-	) {
+	const budget = parseNativeBudget(dispatch.budget);
+	const authority = validateGovernedDispatchAuthorityWindowV1({
+		issuedAt: issuedAt.text,
+		expiresAt: expiresAt.text,
+		budget,
+	});
+	if (authority.state !== "valid") {
 		throw new TypeError(
-			"resolved governed dispatch is expired or has an invalid authority window.",
+			`resolved governed dispatch authority window is invalid (${authority.failure}).`,
 		);
 	}
 	const executionRole = requireRole(
@@ -713,7 +711,7 @@ function parseNativeDispatch(
 			dispatch.governed_packet_digest,
 			"dispatch.governed_packet_digest",
 		),
-		budget: parseNativeBudget(dispatch.budget),
+		budget,
 		idempotencyKey: requireNonEmpty(
 			dispatch.idempotency_key,
 			"dispatch.idempotency_key",

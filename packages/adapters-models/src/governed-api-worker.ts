@@ -22,14 +22,17 @@ import type {
 	UnitPacket,
 } from "@buildplane/kernel";
 import {
+	assertActiveGovernedDispatchAuthorityWindowV1,
 	canonicalActionReceiptRecordedV2Digest,
 	canonicalActionRequestedV2Digest,
 	canonicalCandidateViewV1Digest as canonicalKernelCandidateViewV1Digest,
 	canonicalGovernedUnitPacketV1Digest as canonicalKernelGovernedUnitPacketV1Digest,
 	canonicalReviewVerdictOutputV1Digest as canonicalKernelReviewVerdictOutputV1Digest,
+	isNativeRfc3339Utc,
 	parseActionReceiptRecordedV2,
 	parseActionRequestedV2,
 	parseGovernedUnitPacket,
+	parseNativeRfc3339Utc,
 	parseReviewVerdictV1,
 } from "@buildplane/kernel";
 import type {
@@ -459,8 +462,10 @@ function normalizeModelActionAuthorityGrant(
 		);
 	}
 	if (
-		Date.parse(grant.authorization.expires_at) >
-		Date.parse(expected.dispatch.expiresAt)
+		compareNativeRfc3339Utc(
+			grant.authorization.expires_at,
+			expected.dispatch.expiresAt,
+		) > 0
 	) {
 		throw new TypeError(
 			"governed model action authority grant must not outlive its dispatch.",
@@ -1072,7 +1077,27 @@ function isModelActionAuthorityUnexpired(
 	grant: VerifiedModelActionAuthorityV2,
 	observedAt: string,
 ): boolean {
-	return Date.parse(grant.authorization.expires_at) > Date.parse(observedAt);
+	return (
+		compareNativeRfc3339Utc(grant.authorization.expires_at, observedAt) > 0
+	);
+}
+
+/**
+ * All model-authority timestamps originate from native signed records. Never
+ * use JavaScript's normalizing Date parser at an effect boundary: it loses
+ * nanoseconds and accepts calendar rollovers that native replay rejects.
+ */
+function compareNativeRfc3339Utc(left: string, right: string): number {
+	const leftTimestamp = parseNativeRfc3339Utc(left);
+	const rightTimestamp = parseNativeRfc3339Utc(right);
+	if (leftTimestamp === undefined || rightTimestamp === undefined) {
+		return Number.NaN;
+	}
+	return leftTimestamp.orderingNanos < rightTimestamp.orderingNanos
+		? -1
+		: leftTimestamp.orderingNanos > rightTimestamp.orderingNanos
+			? 1
+			: 0;
 }
 
 /** Closed completion vocabulary for an implementer model response. */
@@ -1254,6 +1279,12 @@ export function createGovernedApiWorkerExecutionPort(
 
 			let canonicalInput: ModelInputEvidenceV1;
 			try {
+				// Canonical input persistence is a durable activity. Do not create
+				// any new governed record after the signed authority window closes.
+				assertActiveGovernedDispatchAuthorityWindowV1(
+					prepared.dispatch,
+					readTimestamp(now, "governed API worker input authorization time"),
+				);
 				canonicalInput = normalizeModelInputEvidence(
 					await persistCanonicalInput({
 						schemaVersion: 1,
@@ -1303,6 +1334,12 @@ export function createGovernedApiWorkerExecutionPort(
 
 			let recordedRequest: unknown;
 			try {
+				// The prior evidence write is asynchronous, so re-check immediately
+				// before the write-ahead action request and activity claim.
+				assertActiveGovernedDispatchAuthorityWindowV1(
+					prepared.dispatch,
+					readTimestamp(now, "governed API worker request authorization time"),
+				);
 				recordedRequest =
 					await activityEvidencePort.recordActionRequested(actionRequest);
 			} catch (error) {
@@ -1352,7 +1389,10 @@ export function createGovernedApiWorkerExecutionPort(
 				now,
 				"governed API worker pre-gateway authorization time",
 			);
-			if (!isModelBudgetUnexpired(prepared.modelBudget, preGatewayAt)) {
+			if (
+				!isModelBudgetUnexpired(prepared.modelBudget, preGatewayAt) ||
+				!isActiveDispatchAuthority(prepared.dispatch, preGatewayAt)
+			) {
 				await persistTerminalFailureOrThrowUnknown({
 					actionEvidencePort: activityEvidencePort,
 					dispatch: prepared.dispatch,
@@ -1427,6 +1467,7 @@ export function createGovernedApiWorkerExecutionPort(
 			);
 			if (
 				!isModelBudgetUnexpired(prepared.modelBudget, preProviderAt) ||
+				!isActiveDispatchAuthority(prepared.dispatch, preProviderAt) ||
 				!isModelActionAuthorityUnexpired(modelActionAuthority, preProviderAt)
 			) {
 				await persistTerminalFailureOrThrowUnknown({
@@ -1500,6 +1541,64 @@ export function createGovernedApiWorkerExecutionPort(
 			}
 
 			let gatewayResult: GovernedModelActionGatewayResultV1;
+			const providerEffectAt = readTimestamp(
+				now,
+				"governed API worker provider effect authorization time",
+			);
+			if (
+				!isModelBudgetUnexpired(prepared.modelBudget, providerEffectAt) ||
+				!isActiveDispatchAuthority(prepared.dispatch, providerEffectAt) ||
+				!isModelActionAuthorityUnexpired(modelActionAuthority, providerEffectAt)
+			) {
+				await persistTerminalFailureOrThrowUnknown({
+					actionEvidencePort: activityEvidencePort,
+					dispatch: prepared.dispatch,
+					actionId,
+					idempotencyKey,
+					actionRequestDigest: durableRequest.actionRequestDigest,
+					evidenceDigest: durableRequest.actionRequestDigest,
+					evidenceRef: durableRequest.actionRequestRef,
+					redactions: canonicalInput.redactions,
+					outcome: "denied",
+					failureCode: "dispatch-inactive-before-api-call",
+					failureMessage:
+						"governed API dispatch, model authority, or compute budget is inactive at the provider effect boundary.",
+					authorizationRef:
+						modelActionAuthority.authorization.authorization_ref,
+					completedAt: providerEffectAt,
+				});
+				throw new TypeError(
+					"governed API dispatch authority is inactive and cannot authorize a provider action.",
+				);
+			}
+			try {
+				// This is the final activity-lease check before the provider effect.
+				// Keep it directly adjacent to authorizeAndComplete: the lease can
+				// expire while the earlier authority resolution was in progress.
+				activityEvidencePort.assertActionLeaseUnexpired(
+					actionId,
+					providerEffectAt,
+				);
+			} catch (error) {
+				await persistTerminalFailureOrThrowUnknown({
+					actionEvidencePort: activityEvidencePort,
+					dispatch: prepared.dispatch,
+					actionId,
+					idempotencyKey,
+					actionRequestDigest: durableRequest.actionRequestDigest,
+					evidenceDigest: durableRequest.actionRequestDigest,
+					evidenceRef: durableRequest.actionRequestRef,
+					redactions: canonicalInput.redactions,
+					outcome: "denied",
+					failureCode: "activity-lease-expired-before-api-call",
+					failureMessage:
+						error instanceof Error ? error.message : String(error),
+					authorizationRef:
+						modelActionAuthority.authorization.authorization_ref,
+					completedAt: providerEffectAt,
+				});
+				throw error;
+			}
 			try {
 				gatewayResult = normalizeGatewayResult(
 					await authorizeAndComplete(gatewayRequest),
@@ -1573,10 +1672,20 @@ export function createGovernedApiWorkerExecutionPort(
 				now,
 				"governed API worker post-gateway authorization time",
 			);
-			if (
+			let activityLeaseExpiredAfterGateway = false;
+			try {
+				activityEvidencePort.assertActionLeaseUnexpired(
+					actionId,
+					postGatewayAt,
+				);
+			} catch {
+				activityLeaseExpiredAfterGateway = true;
+			}
+			const authorityInactiveAfterGateway =
 				!isModelBudgetUnexpired(prepared.modelBudget, postGatewayAt) ||
-				!isModelActionAuthorityUnexpired(modelActionAuthority, postGatewayAt)
-			) {
+				!isActiveDispatchAuthority(prepared.dispatch, postGatewayAt) ||
+				!isModelActionAuthorityUnexpired(modelActionAuthority, postGatewayAt);
+			if (authorityInactiveAfterGateway || activityLeaseExpiredAfterGateway) {
 				await persistUnknownOrThrowUnknown({
 					actionEvidencePort: activityEvidencePort,
 					dispatch: prepared.dispatch,
@@ -1588,7 +1697,9 @@ export function createGovernedApiWorkerExecutionPort(
 					resourceUsage: resourceUsage(response.resourceUsage),
 					authorizationRef: gatewayResult.authorization.authorizationRef,
 					completedAt: postGatewayAt,
-					failureCode: "model-action-authority-expired-after-api-call",
+					failureCode: authorityInactiveAfterGateway
+						? "model-action-authority-expired-after-api-call"
+						: "activity-lease-expired-after-api-call",
 				});
 				throw new GovernedApiUnknownEffectError(
 					"governed API model action completed after its authority lease or dispatch budget; do not retry.",
@@ -1712,10 +1823,17 @@ export function createGovernedApiWorkerExecutionPort(
 			}
 
 			const completedAt = readTimestamp(now, "governed API worker completedAt");
-			if (
+			let activityLeaseExpiredBeforeReceipt = false;
+			try {
+				activityEvidencePort.assertActionLeaseUnexpired(actionId, completedAt);
+			} catch {
+				activityLeaseExpiredBeforeReceipt = true;
+			}
+			const authorityInactiveBeforeReceipt =
 				!isModelBudgetUnexpired(prepared.modelBudget, completedAt) ||
-				!isModelActionAuthorityUnexpired(modelActionAuthority, completedAt)
-			) {
+				!isActiveDispatchAuthority(prepared.dispatch, completedAt) ||
+				!isModelActionAuthorityUnexpired(modelActionAuthority, completedAt);
+			if (authorityInactiveBeforeReceipt || activityLeaseExpiredBeforeReceipt) {
 				await persistUnknownOrThrowUnknown({
 					actionEvidencePort: activityEvidencePort,
 					dispatch: prepared.dispatch,
@@ -1727,7 +1845,9 @@ export function createGovernedApiWorkerExecutionPort(
 					resourceUsage: resourceUsage(response.resourceUsage),
 					authorizationRef: gatewayResult.authorization.authorizationRef,
 					completedAt,
-					failureCode: "model-action-authority-expired-before-success-receipt",
+					failureCode: authorityInactiveBeforeReceipt
+						? "model-action-authority-expired-before-success-receipt"
+						: "activity-lease-expired-before-success-receipt",
 				});
 				throw new GovernedApiUnknownEffectError(
 					"governed API model result reached receipt persistence after its authority lease or dispatch budget; do not retry.",
@@ -2021,14 +2141,16 @@ function createActivityBoundEvidencePort(input: {
 					"sealed V3 API action has no native activity claim before the provider boundary.",
 				);
 			}
-			const leaseExpiresAt = Date.parse(activity.claim.leaseExpiresAt);
-			const checkedAt = Date.parse(at);
-			if (!Number.isFinite(leaseExpiresAt) || !Number.isFinite(checkedAt)) {
+			const comparison = compareNativeRfc3339Utc(
+				activity.claim.leaseExpiresAt,
+				at,
+			);
+			if (!Number.isFinite(comparison)) {
 				throw new TypeError(
 					"native activity claim has an invalid lease timestamp.",
 				);
 			}
-			if (leaseExpiresAt <= checkedAt) {
+			if (comparison <= 0) {
 				throw new GovernedApiUnknownEffectError(
 					"native activity lease expired before the provider boundary; do not issue the model request.",
 				);
@@ -2130,6 +2252,7 @@ function prepareExecutionInput(
 		dispatch,
 		acceptanceContractDigest,
 	);
+	assertActiveGovernedDispatchAuthorityWindowV1(dispatch, observedAt);
 	const modelBudget = deriveModelBudget(dispatch);
 	assertModelBudgetUnexpired(modelBudget, observedAt);
 	assertActionEvidencePort(input.actionEvidencePort);
@@ -2287,18 +2410,6 @@ function assertV3DispatchMatchesPacket(
 	})) {
 		assertSha256Digest(value, `governed API dispatch ${label}`);
 	}
-	const issuedAt = Date.parse(dispatch.issuedAt);
-	const expiresAt = Date.parse(dispatch.expiresAt);
-	if (!Number.isFinite(issuedAt) || !Number.isFinite(expiresAt)) {
-		throw new TypeError(
-			"governed API worker requires parseable dispatch timestamps.",
-		);
-	}
-	if (issuedAt >= expiresAt) {
-		throw new TypeError(
-			"governed API worker requires dispatch expiresAt later than issuedAt.",
-		);
-	}
 }
 
 const MAX_ECMASCRIPT_EPOCH_MS = 8_640_000_000_000_000;
@@ -2377,7 +2488,7 @@ function isModelBudgetUnexpired(
 	budget: GovernedApiModelBudgetV1,
 	observedAt: string,
 ): boolean {
-	return Date.parse(budget.deadlineAt) > Date.parse(observedAt);
+	return compareNativeRfc3339Utc(budget.deadlineAt, observedAt) > 0;
 }
 
 function assertModelBudgetUnexpired(
@@ -2388,6 +2499,24 @@ function assertModelBudgetUnexpired(
 		throw new TypeError(
 			"governed API V3 dispatch is expired or its compute budget is exhausted and cannot authorize a model action.",
 		);
+	}
+}
+
+/**
+ * Preserve the worker's terminal-result branches while making the native
+ * authority-window comparison the actual security decision. Callers use this
+ * boolean only to choose a denied/unknown receipt; no effect is issued unless
+ * the same assertion passed immediately before its boundary.
+ */
+function isActiveDispatchAuthority(
+	dispatch: GovernedDispatchLineageV3,
+	observedAt: string,
+): boolean {
+	try {
+		assertActiveGovernedDispatchAuthorityWindowV1(dispatch, observedAt);
+		return true;
+	} catch {
+		return false;
 	}
 }
 
@@ -4517,18 +4646,9 @@ function assertRfc3339UtcTimestamp(input: unknown, label: string): string {
 	const timestamp = input;
 	if (
 		typeof timestamp !== "string" ||
-		!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/.test(timestamp) ||
-		Number.isNaN(Date.parse(timestamp))
+		!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/.test(timestamp) ||
+		!isNativeRfc3339Utc(timestamp)
 	) {
-		throw new TypeError(`${label} must be an RFC3339 UTC timestamp.`);
-	}
-	// Date.parse accepts rollover dates such as 2099-02-30 and silently
-	// normalizes them. Round-trip through ISO text so this boundary agrees with
-	// the native Chrono parser rather than authorizing a different instant.
-	const normalized = timestamp.includes(".")
-		? timestamp
-		: timestamp.replace("Z", ".000Z");
-	if (new Date(Date.parse(timestamp)).toISOString() !== normalized) {
 		throw new TypeError(`${label} must be an RFC3339 UTC timestamp.`);
 	}
 	return timestamp;

@@ -406,7 +406,7 @@ describe("governed command worker execution port", () => {
 		[
 			"a non-positive compute budget",
 			{ maxComputeTimeMs: 0 } as never,
-			/positive safe integer/i,
+			/invalid budget/i,
 		],
 		[
 			"an unknown budget field",
@@ -416,7 +416,7 @@ describe("governed command worker execution port", () => {
 		[
 			"an overflowing compute budget",
 			{ maxComputeTimeMs: Number.MAX_SAFE_INTEGER },
-			/overflows the absolute compute deadline/i,
+			/invalid budget/i,
 		],
 	])("fails closed before evidence or OCI for %s", async (_label, budget, error) => {
 		const root = mkdtempSync(join(tmpdir(), "buildplane-governed-worker-"));
@@ -480,6 +480,87 @@ describe("governed command worker execution port", () => {
 				}),
 			).rejects.toThrow(/compute deadline is exhausted/i);
 			expect(order).toEqual([]);
+			expect(runCommand).not.toHaveBeenCalled();
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("denies a future-issued dispatch before input evidence, activity claim, or OCI", async () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-governed-worker-"));
+		try {
+			const observedAt = "2026-07-18T00:00:00.000Z";
+			const order: string[] = [];
+			const runCommand = vi.fn(executor().runCommand);
+			const inputPacket = packet();
+			const port = createGovernedCommandWorkerExecutionPort({
+				actionExecutor: executor({ runCommand }),
+				evidenceStore: evidenceStore(order),
+				activityClaimPort: activityClaimPort(order),
+				now: () => observedAt,
+				nowMs: () => Date.parse(observedAt),
+			});
+
+			await expect(
+				port.executeCandidatePacketAsync({
+					...request(root, inputPacket),
+					governedDispatch: governedDispatch(
+						inputPacket.capability_bundle_digest!,
+						{
+							issuedAt: "2026-07-18T00:00:00.000000001Z",
+							expiresAt: "2026-07-18T00:15:00.000000000Z",
+						},
+						inputPacket,
+					),
+					actionEvidencePort: actionEvidencePort(order),
+				}),
+			).rejects.toThrow(/not yet active/i);
+			expect(order).toEqual([]);
+			expect(runCommand).not.toHaveBeenCalled();
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("rejects a calendar-normalized activity lease before OCI", async () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-governed-worker-"));
+		try {
+			const order: string[] = [];
+			const runCommand = vi.fn(() => {
+				order.push("oci");
+				return { success: true, exitCode: 0, stdout: "", stderr: "" };
+			});
+			const inputPacket = packet();
+			const claims = activityClaimPort(order, {
+				claim: vi.fn(async () => {
+					order.push("claim");
+					return {
+						state: "granted" as const,
+						claimEventId: "event://activity-claim/governed-worker",
+						claimEventDigest: DIGEST_A,
+						leaseId: "lease://activity-claim/governed-worker",
+						leaseExpiresAt: "2026-02-30T00:00:00.000Z",
+					};
+				}),
+			});
+			const evidence = actionEvidencePort(order);
+			const port = createGovernedCommandWorkerExecutionPort({
+				actionExecutor: executor({ runCommand }),
+				evidenceStore: evidenceStore(order),
+				activityClaimPort: claims,
+				now: () => "2026-07-18T00:00:00.000Z",
+			});
+
+			await expect(
+				port.executeCandidatePacketAsync({
+					...request(root, inputPacket),
+					governedDispatch: governedDispatch(
+						inputPacket.capability_bundle_digest!,
+					),
+					actionEvidencePort: evidence,
+				}),
+			).rejects.toThrow(/activity lease expiry.*RFC3339/i);
+			expect(order).toEqual(["input", "request", "claim"]);
 			expect(runCommand).not.toHaveBeenCalled();
 		} finally {
 			rmSync(root, { recursive: true, force: true });
@@ -854,6 +935,8 @@ describe("governed command worker execution port", () => {
 				.fn<() => string>()
 				.mockReturnValueOnce("2026-07-18T00:00:00.000Z")
 				.mockReturnValueOnce("2026-07-18T00:00:00.000Z")
+				.mockReturnValueOnce("2026-07-18T00:00:00.000Z")
+				.mockReturnValueOnce("2026-07-18T00:00:00.000Z")
 				.mockReturnValue("2026-07-18T00:16:00.000Z");
 			const port = createGovernedCommandWorkerExecutionPort({
 				actionExecutor: executor({ runCommand }),
@@ -876,7 +959,7 @@ describe("governed command worker execution port", () => {
 					),
 					actionEvidencePort: evidence,
 				}),
-			).rejects.toThrow(/dispatch is expired/i);
+			).rejects.toThrow(/expired/i);
 			expect(runCommand).not.toHaveBeenCalled();
 			expect(order).toEqual(["input", "request", "receipt"]);
 		} finally {

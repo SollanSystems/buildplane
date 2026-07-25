@@ -5,6 +5,7 @@ import {
 	canonicalSha256Digest,
 	type DispatchBudgetV1,
 	type GovernedDispatchLineageV3,
+	inspectGovernedDispatchAuthorityWindowV1,
 	type DispatchEnvelopeV3 as KernelDispatchEnvelopeV3,
 	parseDispatchEnvelopeV3,
 	parseGovernedUnitPacket,
@@ -576,15 +577,26 @@ function assertValidAtCurrentTime(
 	if (!(now instanceof Date) || !Number.isFinite(now.getTime())) {
 		throw new TypeError("now must return a valid Date.");
 	}
-	const issuedAt = Date.parse(envelope.body.issuedAt);
-	const expiresAt = Date.parse(envelope.body.expiresAt);
-	if (issuedAt > now.getTime()) {
-		throw new TypeError(
-			"governed dispatch issuedAt must not be in the future.",
-		);
-	}
-	if (expiresAt <= now.getTime()) {
-		throw new TypeError("governed dispatch is expired.");
+	const authority = inspectGovernedDispatchAuthorityWindowV1(
+		{
+			issuedAt: envelope.body.issuedAt,
+			expiresAt: envelope.body.expiresAt,
+			budget: envelope.body.budget,
+		},
+		now.toISOString(),
+	);
+	if (authority.state === "active") return;
+	switch (authority.failure) {
+		case "not-yet-active":
+			throw new TypeError(
+				"governed dispatch issuedAt must not be in the future.",
+			);
+		case "expired":
+			throw new TypeError("governed dispatch is expired.");
+		case "compute-deadline-elapsed":
+			throw new TypeError("governed dispatch compute deadline has elapsed.");
+		default:
+			throw new TypeError("governed dispatch authority window is invalid.");
 	}
 }
 

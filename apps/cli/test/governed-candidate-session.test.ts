@@ -84,8 +84,12 @@ function packet(overrides: Record<string, unknown> = {}): UnitPacket {
 	} as UnitPacket;
 }
 
-function dispatch(source = packet()): GovernedDispatchLineageV3 {
+function dispatch(
+	source = packet(),
+	overrides: Partial<GovernedDispatchLineageV3> = {},
+): GovernedDispatchLineageV3 {
 	const acceptanceContractDigest = DIGEST("b");
+	const now = Date.now();
 	return {
 		schemaVersion: 3,
 		runId: RUN_ID,
@@ -115,8 +119,9 @@ function dispatch(source = packet()): GovernedDispatchLineageV3 {
 		idempotencyKey: "dispatch:governed-session",
 		authorityActor: "kernel",
 		actionEvidenceVersion: "sealed_v3",
-		issuedAt: "2026-07-18T12:00:00Z",
-		expiresAt: "2099-07-18T12:00:00Z",
+		issuedAt: new Date(now - 1_000).toISOString(),
+		expiresAt: new Date(now + 15 * 60_000).toISOString(),
+		...overrides,
 	};
 }
 
@@ -190,6 +195,42 @@ describe("governed candidate session", () => {
 		});
 		expect(calls[0]?.options).not.toHaveProperty("promotion");
 		expect(calls[0]?.options.finalizationMode).not.toBe("auto-merge");
+	});
+
+	it("blocks future-issued and elapsed-compute dispatches before the kernel can create a candidate", async () => {
+		const source = packet();
+		const now = Date.now();
+		const inactiveDispatches = [
+			dispatch(source, {
+				issuedAt: new Date(now + 60_000).toISOString(),
+				expiresAt: new Date(now + 120_000).toISOString(),
+			}),
+			dispatch(source, {
+				issuedAt: new Date(now - 60_000).toISOString(),
+				expiresAt: new Date(now + 60_000).toISOString(),
+				budget: { maxTokens: 100, maxComputeTimeMs: 1 },
+			}),
+		];
+		let calls = 0;
+		const orchestrator = {
+			async runPacketAsync(): Promise<RunPacketResult> {
+				calls += 1;
+				throw new Error("inactive authority must not reach the orchestrator");
+			},
+		};
+
+		for (const dispatched of inactiveDispatches) {
+			await expect(
+				executeGovernedCandidateSession({
+					packet: source,
+					dispatch: dispatched,
+					resolution: resolution(dispatched),
+					...verifiedAuthorityPorts(),
+					orchestrator,
+				}),
+			).rejects.toThrow(/active verified dispatch authority window/i);
+		}
+		expect(calls).toBe(0);
 	});
 
 	it("blocks recovery state, model packets, and wrong roles before any orchestrator call", async () => {

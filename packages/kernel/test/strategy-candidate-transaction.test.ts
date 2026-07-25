@@ -48,7 +48,7 @@ const GOVERNED_DISPATCH: GovernedDispatchLineageV3 = {
 	idempotencyKey: "dispatch:strategy-candidate:1",
 	authorityActor: "kernel:test",
 	actionEvidenceVersion: "sealed_v3",
-	issuedAt: "2099-07-17T12:00:00Z",
+	issuedAt: "2020-07-17T12:00:00Z",
 	expiresAt: "2099-07-17T12:15:00Z",
 };
 

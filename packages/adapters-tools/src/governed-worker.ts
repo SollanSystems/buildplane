@@ -6,6 +6,7 @@ import {
 	type ActionReceiptRecordedV2,
 	type ActionRedactionV2,
 	type ActionRequestedV2,
+	assertActiveGovernedDispatchAuthorityWindowV1,
 	canonicalActionReceiptRecordedV2Digest,
 	canonicalActionRequestedV2Digest,
 	canonicalGovernedUnitPacketV1Digest,
@@ -21,6 +22,7 @@ import {
 	type GovernedWorkerExecutionPort,
 	type GovernedWorkerExecutionResultV3,
 	type GrantedGovernedActivityClaimV1,
+	parseNativeRfc3339Utc,
 	type RecordActionReceiptV2Input,
 	type UnitPacket,
 } from "@buildplane/kernel";
@@ -367,9 +369,10 @@ async function executeV3Command(context: {
 		actionEvidencePort,
 		deadlineAtMs,
 	} = context;
-	// Do not persist an action intent after the shared signed compute window has
-	// elapsed. The gateway and OCI executor repeat this immediately before their
-	// own effect boundaries to account for durable setup time.
+	// Do not persist an action intent after the signed authority window has
+	// elapsed. This check is deliberately before evidence persistence: evidence
+	// records are effects too, and telemetry must never extend authority.
+	assertActiveGovernedDispatchAuthorityWindowV1(dispatch, context.now());
 	assertDispatchComputeDeadlineUnexpiredAt(deadlineAtMs, context.nowMs());
 	const actionId = governedActionId(workerInput.runId, dispatch.envelopeDigest);
 	const args = [...(execution.args ?? [])];
@@ -412,12 +415,16 @@ async function executeV3Command(context: {
 		executionRole: dispatch.executionRole,
 		requestedAt,
 	};
+	// Input persistence is asynchronous. Re-check immediately before the write
+	// ahead action request so a dispatch cannot cross its authority boundary
+	// during canonicalization.
+	assertActiveGovernedDispatchAuthorityWindowV1(dispatch, context.now());
 	const durableRequest =
 		await actionEvidencePort.recordActionRequested(actionRequest);
 	assertDurableRequest(actionRequest, durableRequest);
 	const preGatewayAt = context.now();
 	try {
-		assertV3DispatchUnexpiredAt(dispatch, preGatewayAt);
+		assertActiveGovernedDispatchAuthorityWindowV1(dispatch, preGatewayAt);
 	} catch (error) {
 		await recordDeniedActionReceipt({
 			dispatch,
@@ -445,6 +452,22 @@ async function executeV3Command(context: {
 				error instanceof Error
 					? error.message
 					: "V3 governed dispatch compute deadline is exhausted.",
+		});
+		throw error;
+	}
+	try {
+		assertActiveGovernedDispatchAuthorityWindowV1(dispatch, context.now());
+	} catch (error) {
+		await recordDeniedActionReceipt({
+			dispatch,
+			durableRequest,
+			actionEvidencePort,
+			completedAt: context.now(),
+			failureCode: "DISPATCH_EXPIRED_BEFORE_OCI_ACTION",
+			message:
+				error instanceof Error
+					? error.message
+					: "V3 governed dispatch authority is inactive.",
 		});
 		throw error;
 	}
@@ -495,6 +518,10 @@ async function executeV3Command(context: {
 			governedNowMs: context.nowMs,
 			onReceipt: context.onActionReceipt,
 		});
+		// No await occurs between this final authority observation and the typed
+		// gateway effect. If it fails after a lease was granted, reconciliation
+		// remains conservative and the OCI action is never attempted.
+		assertActiveGovernedDispatchAuthorityWindowV1(dispatch, context.now());
 		gatewayReceipt = gateway.execute({
 			actionId,
 			kind: "process.run",
@@ -1185,37 +1212,8 @@ function assertGovernedCommandInput(
 	})) {
 		canonicalSha256Digest(value);
 	}
-	const issuedAt = Date.parse(dispatch.issuedAt);
-	const expiresAt = Date.parse(dispatch.expiresAt);
-	if (!Number.isFinite(issuedAt) || !Number.isFinite(expiresAt)) {
-		throw new TypeError(
-			"V3 governed command execution requires parseable dispatch and current timestamps.",
-		);
-	}
-	if (issuedAt >= expiresAt) {
-		throw new TypeError(
-			"V3 governed command execution requires expiresAt later than issuedAt.",
-		);
-	}
-	assertV3DispatchUnexpiredAt(dispatch, now());
+	assertActiveGovernedDispatchAuthorityWindowV1(dispatch, now());
 	return dispatch;
-}
-
-function assertV3DispatchUnexpiredAt(
-	dispatch: GovernedDispatchLineageV3,
-	observedAt: string,
-): void {
-	const currentTime = Date.parse(observedAt);
-	if (!Number.isFinite(currentTime)) {
-		throw new TypeError(
-			"V3 governed command execution requires a parseable current timestamp.",
-		);
-	}
-	if (Date.parse(dispatch.expiresAt) <= currentTime) {
-		throw new TypeError(
-			"V3 governed command dispatch is expired and cannot authorize an OCI action.",
-		);
-	}
 }
 
 /**
@@ -1422,11 +1420,16 @@ function assertActivityClaimUnexpiredAt(
 	claim: GrantedGovernedActivityClaimV1,
 	observedAt: string,
 ): void {
-	const now = Date.parse(
+	const now = parseNativeRfc3339Utc(
 		requireRfc3339Timestamp(observedAt, "current timestamp"),
 	);
-	const expiresAt = Date.parse(claim.leaseExpiresAt);
-	if (expiresAt <= now) {
+	const expiresAt = parseNativeRfc3339Utc(claim.leaseExpiresAt);
+	if (now === undefined || expiresAt === undefined) {
+		throw new TypeError(
+			"governed activity claim lease must use native RFC3339 UTC timestamps.",
+		);
+	}
+	if (expiresAt.orderingNanos <= now.orderingNanos) {
 		throw new Error(
 			"governed activity claim lease is expired and cannot authorize an OCI action.",
 		);
@@ -1467,7 +1470,7 @@ function assertRecordedActivityResult(
 }
 
 function requireRfc3339Timestamp(value: string, label: string): string {
-	if (typeof value !== "string" || !Number.isFinite(Date.parse(value))) {
+	if (typeof value !== "string" || parseNativeRfc3339Utc(value) === undefined) {
 		throw new TypeError(`${label} must be a parseable RFC3339 timestamp.`);
 	}
 	return value;
