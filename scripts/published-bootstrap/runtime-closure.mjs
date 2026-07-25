@@ -15,7 +15,7 @@ import {
 	relative,
 	resolve,
 } from "node:path";
-import ts from "typescript";
+import { parseAst } from "vite";
 
 const RUNTIME_FILE_EXTENSIONS = new Set([".js", ".mjs", ".cjs"]);
 const TYPESCRIPT_FILE_EXTENSIONS = new Set([".ts", ".tsx", ".mts", ".cts"]);
@@ -91,57 +91,83 @@ function assertRelativeRuntimeImportDoesNotTraverseSymlinkedDirectory(
 	return false;
 }
 
-function describeNode(sourceFile, node) {
-	return node.getText(sourceFile).replace(/\s+/g, " ").trim();
+function walkEstreeSiblings(node, visit) {
+	for (const key of Object.keys(node)) {
+		if (key === "type" || key === "start" || key === "end" || key === "raw") {
+			continue;
+		}
+		const child = node[key];
+		if (Array.isArray(child)) {
+			for (const item of child) {
+				if (item && typeof item === "object" && typeof item.type === "string") {
+					visit(item);
+				}
+			}
+		} else if (
+			child &&
+			typeof child === "object" &&
+			typeof child.type === "string"
+		) {
+			visit(child);
+		}
+	}
 }
 
-function collectSourceModuleReferences(source, filePath) {
-	const sourceFile = ts.createSourceFile(
-		filePath,
-		source,
-		ts.ScriptTarget.ESNext,
-		true,
-		ts.ScriptKind.JS,
+function isStringLiteralNode(node) {
+	return (
+		node !== null &&
+		node !== undefined &&
+		node.type === "Literal" &&
+		typeof node.value === "string"
 	);
+}
+
+function collectSourceModuleReferences(source, _filePath) {
+	const ast = parseAst(source);
 	const references = [];
-	const queueSpecifier = (moduleSpecifier) => {
-		if (!ts.isStringLiteralLike(moduleSpecifier)) {
+	const queueSpecifier = (src) => {
+		if (!isStringLiteralNode(src)) {
 			return;
 		}
 
 		references.push({
-			specifier: moduleSpecifier.text,
+			specifier: src.value,
 			type: "specifier",
 		});
 	};
 	const queueDynamicImportViolation = (expression) => {
 		references.push({
-			expression: describeNode(sourceFile, expression),
+			expression: source
+				.slice(expression.start, expression.end)
+				.replace(/\s+/g, " ")
+				.trim(),
 			type: "unsupported-dynamic-import",
 		});
 	};
 	const visit = (node) => {
-		if (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) {
-			if (node.moduleSpecifier) {
-				queueSpecifier(node.moduleSpecifier);
-			}
-		} else if (
-			ts.isCallExpression(node) &&
-			node.expression.kind === ts.SyntaxKind.ImportKeyword &&
-			node.arguments.length >= 1
+		if (
+			node.type === "ImportDeclaration" ||
+			node.type === "ExportNamedDeclaration" ||
+			node.type === "ExportAllDeclaration"
 		) {
-			const [moduleSpecifier] = node.arguments;
-			if (!ts.isStringLiteralLike(moduleSpecifier)) {
-				queueDynamicImportViolation(moduleSpecifier);
+			if (node.source) {
+				queueSpecifier(node.source);
+			}
+		} else if (node.type === "ImportExpression") {
+			const src = node.source;
+			if (!isStringLiteralNode(src)) {
+				queueDynamicImportViolation(src ?? node);
 			} else {
-				queueSpecifier(moduleSpecifier);
+				queueSpecifier(src);
 			}
 		}
 
-		ts.forEachChild(node, visit);
+		walkEstreeSiblings(node, visit);
 	};
 
-	visit(sourceFile);
+	for (const statement of ast.body) {
+		visit(statement);
+	}
 	return references;
 }
 

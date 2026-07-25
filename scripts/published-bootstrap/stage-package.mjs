@@ -13,7 +13,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import ts from "typescript";
+import { parseAst } from "vite";
 import { derivePublishManifest } from "./manifest.mjs";
 import { derivePublishedReadme } from "./readme.mjs";
 import {
@@ -345,48 +345,66 @@ function toRuntimeModuleSpecifier(fromFilePath, packageRoot, packageName) {
 }
 
 function collectInternalRuntimeImportEdits(source, filePath, packageRoot) {
-	const sourceFile = ts.createSourceFile(
-		filePath,
-		source,
-		ts.ScriptTarget.ESNext,
-		true,
-		ts.ScriptKind.JS,
-	);
+	const ast = parseAst(source);
 	const edits = [];
-	const queueRewrite = (moduleSpecifier) => {
-		if (!ts.isStringLiteralLike(moduleSpecifier)) {
+	const queueRewrite = (src) => {
+		if (src?.type !== "Literal" || typeof src.value !== "string") {
 			return;
 		}
 
-		const specifier = moduleSpecifier.text;
+		const specifier = src.value;
 		if (!(specifier in INTERNAL_PACKAGE_ENTRYPOINTS)) {
 			return;
 		}
 
 		edits.push({
-			end: moduleSpecifier.getEnd() - 1,
+			end: src.end - 1,
 			replacement: toRuntimeModuleSpecifier(filePath, packageRoot, specifier),
-			start: moduleSpecifier.getStart(sourceFile) + 1,
+			start: src.start + 1,
 		});
 	};
 
 	const visit = (node) => {
-		if (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) {
-			if (node.moduleSpecifier) {
-				queueRewrite(node.moduleSpecifier);
-			}
-		} else if (
-			ts.isCallExpression(node) &&
-			node.expression.kind === ts.SyntaxKind.ImportKeyword &&
-			node.arguments.length >= 1
+		if (
+			node.type === "ImportDeclaration" ||
+			node.type === "ExportNamedDeclaration" ||
+			node.type === "ExportAllDeclaration"
 		) {
-			queueRewrite(node.arguments[0]);
+			if (node.source) {
+				queueRewrite(node.source);
+			}
+		} else if (node.type === "ImportExpression") {
+			queueRewrite(node.source);
 		}
 
-		ts.forEachChild(node, visit);
+		for (const key of Object.keys(node)) {
+			if (key === "type" || key === "start" || key === "end" || key === "raw") {
+				continue;
+			}
+			const child = node[key];
+			if (Array.isArray(child)) {
+				for (const item of child) {
+					if (
+						item &&
+						typeof item === "object" &&
+						typeof item.type === "string"
+					) {
+						visit(item);
+					}
+				}
+			} else if (
+				child &&
+				typeof child === "object" &&
+				typeof child.type === "string"
+			) {
+				visit(child);
+			}
+		}
 	};
 
-	visit(sourceFile);
+	for (const statement of ast.body) {
+		visit(statement);
+	}
 	return edits.sort((left, right) => right.start - left.start);
 }
 
