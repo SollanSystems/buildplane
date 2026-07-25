@@ -1243,6 +1243,14 @@ fn recorded_approval_request_binds_the_subsequent_promotion_decision() {
             .event_id,
         request_event.id
     );
+    assert_eq!(
+        workflow
+            .promotion_approval
+            .as_ref()
+            .expect("approval request projection")
+            .event_digest,
+        canonical_event_hash(&request_event).expect("approval request has a canonical hash")
+    );
 
     let mut unbound_decision = promotion_decision_for_approval_request(&request);
     unbound_decision.promotion_approval_request_ref = None;
@@ -1361,6 +1369,18 @@ fn approval_request_requires_approved_review_and_has_one_physical_event_identity
     apply(&mut state, &request_event);
     apply(&mut state, &request_event);
     assert!(state.issues.is_empty());
+
+    // A matching event ID and payload is not enough to make a physically
+    // distinct event idempotent: parent linkage is part of the canonical
+    // event identity that the recovery handoff later re-emits.
+    let mut same_id_different_bytes = request_event.clone();
+    same_id_different_bytes.parent_event_id = Some(EventId::new());
+    apply(&mut state, &same_id_different_bytes);
+    assert!(state.issues.iter().any(|issue| matches!(
+        issue,
+        ReplayIssue::WorkflowTransitionRejected { reason, .. }
+            if reason.contains("different promotion approval request")
+    )));
 
     apply(
         &mut state,

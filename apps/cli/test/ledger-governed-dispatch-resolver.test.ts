@@ -16,28 +16,32 @@ const NATIVE_GOVERNED_DISPATCH_RESOLUTION_V1_FIXTURE = new URL(
 	"./fixtures/governed-dispatch-resolution-v1.json",
 	import.meta.url,
 );
-const NATIVE_GOVERNED_DISPATCH_RESOLUTION_V1_COMPLETED_CANDIDATE_FIXTURE =
-	new URL(
-		"./fixtures/governed-dispatch-resolution-v1-completed-candidate.json",
-		import.meta.url,
-	);
-const NATIVE_GOVERNED_DISPATCH_RESOLUTION_V1_CANCELLATION_FIXTURE = new URL(
-	"./fixtures/governed-dispatch-resolution-v1-cancellation.json",
+const NATIVE_GOVERNED_DISPATCH_RESOLUTION_V2_FIXTURE = new URL(
+	"./fixtures/governed-dispatch-resolution-v2.json",
 	import.meta.url,
 );
-const NATIVE_GOVERNED_DISPATCH_RESOLUTION_V1_PROMOTION_APPROVAL_FIXTURE =
+const NATIVE_GOVERNED_DISPATCH_RESOLUTION_V2_COMPLETED_CANDIDATE_FIXTURE =
 	new URL(
-		"./fixtures/governed-dispatch-resolution-v1-promotion-approval.json",
+		"./fixtures/governed-dispatch-resolution-v2-completed-candidate.json",
 		import.meta.url,
 	);
-const NATIVE_GOVERNED_DISPATCH_RESOLUTION_V1_PENDING_ACTIVITY_RECOVERY_FIXTURE =
+const NATIVE_GOVERNED_DISPATCH_RESOLUTION_V2_CANCELLATION_FIXTURE = new URL(
+	"./fixtures/governed-dispatch-resolution-v2-cancellation.json",
+	import.meta.url,
+);
+const NATIVE_GOVERNED_DISPATCH_RESOLUTION_V2_PROMOTION_APPROVAL_FIXTURE =
 	new URL(
-		"./fixtures/governed-dispatch-resolution-v1-pending-activity-recovery.json",
+		"./fixtures/governed-dispatch-resolution-v2-promotion-approval.json",
 		import.meta.url,
 	);
-const NATIVE_GOVERNED_DISPATCH_RESOLUTION_V1_PENDING_ACTIVITY_RECOVERY_HEARTBEAT_FIXTURE =
+const NATIVE_GOVERNED_DISPATCH_RESOLUTION_V2_PENDING_ACTIVITY_RECOVERY_FIXTURE =
 	new URL(
-		"./fixtures/governed-dispatch-resolution-v1-pending-activity-recovery-heartbeat.json",
+		"./fixtures/governed-dispatch-resolution-v2-pending-activity-recovery.json",
+		import.meta.url,
+	);
+const NATIVE_GOVERNED_DISPATCH_RESOLUTION_V2_PENDING_ACTIVITY_RECOVERY_HEARTBEAT_FIXTURE =
+	new URL(
+		"./fixtures/governed-dispatch-resolution-v2-pending-activity-recovery-heartbeat.json",
 		import.meta.url,
 	);
 const TEST_SNAPSHOT_CONTEXT = {
@@ -50,6 +54,12 @@ const TEST_SNAPSHOT_CONTEXT = {
 function nativeGovernedDispatchResolutionV1Fixture(): Record<string, unknown> {
 	return JSON.parse(
 		readFileSync(NATIVE_GOVERNED_DISPATCH_RESOLUTION_V1_FIXTURE, "utf8"),
+	) as Record<string, unknown>;
+}
+
+function nativeGovernedDispatchResolutionV2Fixture(): Record<string, unknown> {
+	return JSON.parse(
+		readFileSync(NATIVE_GOVERNED_DISPATCH_RESOLUTION_V2_FIXTURE, "utf8"),
 	) as Record<string, unknown>;
 }
 
@@ -86,11 +96,11 @@ describe("native governed dispatch resolver", () => {
 		);
 	});
 
-	it("accepts the native V1 golden contract and rejects incompatible shapes", () => {
-		expect(existsSync(NATIVE_GOVERNED_DISPATCH_RESOLUTION_V1_FIXTURE)).toBe(
+	it("accepts the native V2 golden contract and rejects incompatible shapes", () => {
+		expect(existsSync(NATIVE_GOVERNED_DISPATCH_RESOLUTION_V2_FIXTURE)).toBe(
 			true,
 		);
-		const fixture = nativeGovernedDispatchResolutionV1Fixture();
+		const fixture = nativeGovernedDispatchResolutionV2Fixture();
 
 		expect(parseNativeFixture(fixture)).toMatchObject({
 			dispatch: {
@@ -113,10 +123,53 @@ describe("native governed dispatch resolver", () => {
 		);
 
 		const wrongVersion = structuredClone(fixture);
-		wrongVersion.schema_version = 2;
+		wrongVersion.schema_version = 3;
 		expect(() => parseNativeFixture(wrongVersion)).toThrow(
-			/schema_version must be 1/i,
+			/schema_version must be 1 or 2/i,
 		);
+	});
+
+	it("negotiates legacy V1 and sealed V2 recovery contracts without downgrade", () => {
+		const legacyV1 = nativeGovernedDispatchResolutionV1Fixture();
+		expect(
+			parseNativeFixture(legacyV1).pendingPromotionApprovalRecoveryWork,
+		).toEqual([]);
+
+		const v1WithV2Work = structuredClone(legacyV1);
+		(
+			v1WithV2Work.recovery as Record<string, unknown>
+		).pending_promotion_approval_recovery_work = [];
+		expect(() => parseNativeFixture(v1WithV2Work)).toThrow(
+			/governed recovery contains unsupported field\(s\): pending_promotion_approval_recovery_work/i,
+		);
+
+		const sealedV2 = nativeFixture(
+			NATIVE_GOVERNED_DISPATCH_RESOLUTION_V2_PROMOTION_APPROVAL_FIXTURE,
+		);
+		const sealedV2Recovery = sealedV2.recovery as Record<string, unknown>;
+		const downgradedSealedV1 = structuredClone(sealedV2);
+		downgradedSealedV1.schema_version = 1;
+		delete (downgradedSealedV1.recovery as Record<string, unknown>)
+			.pending_promotion_approval_recovery_work;
+		expect(() => parseNativeFixture(downgradedSealedV1)).toThrow(
+			/promotion_approval contains unsupported field\(s\): event_digest/i,
+		);
+
+		const incompleteV2 = nativeGovernedDispatchResolutionV2Fixture();
+		delete (incompleteV2.recovery as Record<string, unknown>)
+			.pending_promotion_approval_recovery_work;
+		expect(() => parseNativeFixture(incompleteV2)).toThrow(
+			/governed recovery is missing required field.*pending_promotion_approval_recovery_work/i,
+		);
+
+		const unknownVersion = structuredClone(legacyV1);
+		unknownVersion.schema_version = 3;
+		expect(() => parseNativeFixture(unknownVersion)).toThrow(
+			/schema_version must be 1 or 2/i,
+		);
+		expect(
+			sealedV2Recovery.pending_promotion_approval_recovery_work,
+		).toBeDefined();
 	});
 
 	it("rejects runner-shaped input on the snapshot parser", () => {
@@ -210,12 +263,12 @@ describe("native governed dispatch resolver", () => {
 	it("exposes pending activity recovery only as frozen, exact read-only status", () => {
 		expect(
 			existsSync(
-				NATIVE_GOVERNED_DISPATCH_RESOLUTION_V1_PENDING_ACTIVITY_RECOVERY_FIXTURE,
+				NATIVE_GOVERNED_DISPATCH_RESOLUTION_V2_PENDING_ACTIVITY_RECOVERY_FIXTURE,
 			),
 		).toBe(true);
 		const resolved = parseNativeFixture(
 			nativeFixture(
-				NATIVE_GOVERNED_DISPATCH_RESOLUTION_V1_PENDING_ACTIVITY_RECOVERY_FIXTURE,
+				NATIVE_GOVERNED_DISPATCH_RESOLUTION_V2_PENDING_ACTIVITY_RECOVERY_FIXTURE,
 			),
 		);
 
@@ -260,12 +313,12 @@ describe("native governed dispatch resolver", () => {
 	it("consumes a native heartbeated pending activity as frozen status with its effective expiry", () => {
 		expect(
 			existsSync(
-				NATIVE_GOVERNED_DISPATCH_RESOLUTION_V1_PENDING_ACTIVITY_RECOVERY_HEARTBEAT_FIXTURE,
+				NATIVE_GOVERNED_DISPATCH_RESOLUTION_V2_PENDING_ACTIVITY_RECOVERY_HEARTBEAT_FIXTURE,
 			),
 		).toBe(true);
 		const resolved = parseNativeFixture(
 			nativeFixture(
-				NATIVE_GOVERNED_DISPATCH_RESOLUTION_V1_PENDING_ACTIVITY_RECOVERY_HEARTBEAT_FIXTURE,
+				NATIVE_GOVERNED_DISPATCH_RESOLUTION_V2_PENDING_ACTIVITY_RECOVERY_HEARTBEAT_FIXTURE,
 			),
 		);
 		const [status] = resolved.pendingActivityRecoveryWork;
@@ -283,7 +336,7 @@ describe("native governed dispatch resolver", () => {
 
 	it("accepts Chrono-compatible leap-second recovery timestamps", () => {
 		const fixture = nativeFixture(
-			NATIVE_GOVERNED_DISPATCH_RESOLUTION_V1_PENDING_ACTIVITY_RECOVERY_HEARTBEAT_FIXTURE,
+			NATIVE_GOVERNED_DISPATCH_RESOLUTION_V2_PENDING_ACTIVITY_RECOVERY_HEARTBEAT_FIXTURE,
 		);
 		const recovery = fixture.recovery as Record<string, unknown>;
 		const [claim] = recovery.activity_claims as Record<string, unknown>[];
@@ -326,7 +379,7 @@ describe("native governed dispatch resolver", () => {
 
 	it("uses Chrono duration arithmetic at a midnight compute deadline", () => {
 		const fixture = nativeFixture(
-			NATIVE_GOVERNED_DISPATCH_RESOLUTION_V1_PENDING_ACTIVITY_RECOVERY_HEARTBEAT_FIXTURE,
+			NATIVE_GOVERNED_DISPATCH_RESOLUTION_V2_PENDING_ACTIVITY_RECOVERY_HEARTBEAT_FIXTURE,
 		);
 		const dispatch = fixture.dispatch as Record<string, unknown>;
 		const budget = dispatch.budget as Record<string, unknown>;
@@ -376,7 +429,7 @@ describe("native governed dispatch resolver", () => {
 
 	it("rejects timestamp forms excluded by the native Chrono boundary", () => {
 		const fixture = nativeFixture(
-			NATIVE_GOVERNED_DISPATCH_RESOLUTION_V1_PENDING_ACTIVITY_RECOVERY_HEARTBEAT_FIXTURE,
+			NATIVE_GOVERNED_DISPATCH_RESOLUTION_V2_PENDING_ACTIVITY_RECOVERY_HEARTBEAT_FIXTURE,
 		);
 		const recovery = fixture.recovery as Record<string, unknown>;
 		const [claim] = recovery.activity_claims as Record<string, unknown>[];
@@ -400,7 +453,7 @@ describe("native governed dispatch resolver", () => {
 
 	it("preserves native nanosecond dispatch ordering", () => {
 		const fixture = nativeFixture(
-			NATIVE_GOVERNED_DISPATCH_RESOLUTION_V1_PENDING_ACTIVITY_RECOVERY_HEARTBEAT_FIXTURE,
+			NATIVE_GOVERNED_DISPATCH_RESOLUTION_V2_PENDING_ACTIVITY_RECOVERY_HEARTBEAT_FIXTURE,
 		);
 		const dispatch = fixture.dispatch as Record<string, unknown>;
 
@@ -418,7 +471,7 @@ describe("native governed dispatch resolver", () => {
 
 	it("fails closed on malformed or foreign native activity heartbeats", () => {
 		const fixture = nativeFixture(
-			NATIVE_GOVERNED_DISPATCH_RESOLUTION_V1_PENDING_ACTIVITY_RECOVERY_HEARTBEAT_FIXTURE,
+			NATIVE_GOVERNED_DISPATCH_RESOLUTION_V2_PENDING_ACTIVITY_RECOVERY_HEARTBEAT_FIXTURE,
 		);
 		const recovery = fixture.recovery as Record<string, unknown>;
 		const [claim] = recovery.activity_claims as Record<string, unknown>[];
@@ -475,7 +528,7 @@ describe("native governed dispatch resolver", () => {
 
 	it("rejects a heartbeat extension beyond the signed compute deadline", () => {
 		const fixture = nativeFixture(
-			NATIVE_GOVERNED_DISPATCH_RESOLUTION_V1_PENDING_ACTIVITY_RECOVERY_HEARTBEAT_FIXTURE,
+			NATIVE_GOVERNED_DISPATCH_RESOLUTION_V2_PENDING_ACTIVITY_RECOVERY_HEARTBEAT_FIXTURE,
 		);
 		const recovery = fixture.recovery as Record<string, unknown>;
 		const [claim] = recovery.activity_claims as Record<string, unknown>[];
@@ -508,7 +561,7 @@ describe("native governed dispatch resolver", () => {
 
 	it("rejects a pending active-lease expiry that differs from the verified heartbeat expiry", () => {
 		const fixture = nativeFixture(
-			NATIVE_GOVERNED_DISPATCH_RESOLUTION_V1_PENDING_ACTIVITY_RECOVERY_HEARTBEAT_FIXTURE,
+			NATIVE_GOVERNED_DISPATCH_RESOLUTION_V2_PENDING_ACTIVITY_RECOVERY_HEARTBEAT_FIXTURE,
 		);
 		const recovery = fixture.recovery as Record<string, unknown>;
 		const [status] = recovery.pending_activity_recovery_work as Record<
@@ -534,7 +587,7 @@ describe("native governed dispatch resolver", () => {
 
 	it("requires the closed pending activity recovery shape and exact replay lineage", () => {
 		const fixture = nativeFixture(
-			NATIVE_GOVERNED_DISPATCH_RESOLUTION_V1_PENDING_ACTIVITY_RECOVERY_FIXTURE,
+			NATIVE_GOVERNED_DISPATCH_RESOLUTION_V2_PENDING_ACTIVITY_RECOVERY_FIXTURE,
 		);
 		const recovery = fixture.recovery as Record<string, unknown>;
 		const [status] = recovery.pending_activity_recovery_work as Record<
@@ -632,7 +685,7 @@ describe("native governed dispatch resolver", () => {
 
 	it("consumes fixed-purpose non-model native recovery status without authority", () => {
 		const fixture = nativeFixture(
-			NATIVE_GOVERNED_DISPATCH_RESOLUTION_V1_PENDING_ACTIVITY_RECOVERY_FIXTURE,
+			NATIVE_GOVERNED_DISPATCH_RESOLUTION_V2_PENDING_ACTIVITY_RECOVERY_FIXTURE,
 		);
 		const recovery = fixture.recovery as Record<string, unknown>;
 		const [claim] = recovery.activity_claims as Record<string, unknown>[];
@@ -664,10 +717,10 @@ describe("native governed dispatch resolver", () => {
 	it("requires every native resolver fixture to carry an explicit pending activity status array", () => {
 		for (const url of [
 			NATIVE_GOVERNED_DISPATCH_RESOLUTION_V1_FIXTURE,
-			NATIVE_GOVERNED_DISPATCH_RESOLUTION_V1_COMPLETED_CANDIDATE_FIXTURE,
-			NATIVE_GOVERNED_DISPATCH_RESOLUTION_V1_CANCELLATION_FIXTURE,
-			NATIVE_GOVERNED_DISPATCH_RESOLUTION_V1_PROMOTION_APPROVAL_FIXTURE,
-			NATIVE_GOVERNED_DISPATCH_RESOLUTION_V1_PENDING_ACTIVITY_RECOVERY_FIXTURE,
+			NATIVE_GOVERNED_DISPATCH_RESOLUTION_V2_COMPLETED_CANDIDATE_FIXTURE,
+			NATIVE_GOVERNED_DISPATCH_RESOLUTION_V2_CANCELLATION_FIXTURE,
+			NATIVE_GOVERNED_DISPATCH_RESOLUTION_V2_PROMOTION_APPROVAL_FIXTURE,
+			NATIVE_GOVERNED_DISPATCH_RESOLUTION_V2_PENDING_ACTIVITY_RECOVERY_FIXTURE,
 		]) {
 			const fixture = nativeFixture(url);
 			const recovery = fixture.recovery as Record<string, unknown>;
@@ -731,12 +784,12 @@ describe("native governed dispatch resolver", () => {
 	it("consumes the native serialized action, receipt, activity, and candidate-completion recovery fixture", () => {
 		expect(
 			existsSync(
-				NATIVE_GOVERNED_DISPATCH_RESOLUTION_V1_COMPLETED_CANDIDATE_FIXTURE,
+				NATIVE_GOVERNED_DISPATCH_RESOLUTION_V2_COMPLETED_CANDIDATE_FIXTURE,
 			),
 		).toBe(true);
 		const resolved = parseNativeFixture(
 			nativeFixture(
-				NATIVE_GOVERNED_DISPATCH_RESOLUTION_V1_COMPLETED_CANDIDATE_FIXTURE,
+				NATIVE_GOVERNED_DISPATCH_RESOLUTION_V2_COMPLETED_CANDIDATE_FIXTURE,
 			),
 		);
 
@@ -770,11 +823,11 @@ describe("native governed dispatch resolver", () => {
 
 	it("consumes the native serialized timer firing and cancellation fixture as status only", () => {
 		expect(
-			existsSync(NATIVE_GOVERNED_DISPATCH_RESOLUTION_V1_CANCELLATION_FIXTURE),
+			existsSync(NATIVE_GOVERNED_DISPATCH_RESOLUTION_V2_CANCELLATION_FIXTURE),
 		).toBe(true);
 		const resolved = parseNativeFixture(
 			nativeFixture(
-				NATIVE_GOVERNED_DISPATCH_RESOLUTION_V1_CANCELLATION_FIXTURE,
+				NATIVE_GOVERNED_DISPATCH_RESOLUTION_V2_CANCELLATION_FIXTURE,
 			),
 		);
 
@@ -799,12 +852,12 @@ describe("native governed dispatch resolver", () => {
 	it("projects a native serialized pending promotion approval as a read-only operator handoff", () => {
 		expect(
 			existsSync(
-				NATIVE_GOVERNED_DISPATCH_RESOLUTION_V1_PROMOTION_APPROVAL_FIXTURE,
+				NATIVE_GOVERNED_DISPATCH_RESOLUTION_V2_PROMOTION_APPROVAL_FIXTURE,
 			),
 		).toBe(true);
 		const resolved = parseNativeFixture(
 			nativeFixture(
-				NATIVE_GOVERNED_DISPATCH_RESOLUTION_V1_PROMOTION_APPROVAL_FIXTURE,
+				NATIVE_GOVERNED_DISPATCH_RESOLUTION_V2_PROMOTION_APPROVAL_FIXTURE,
 			),
 		);
 
@@ -833,9 +886,102 @@ describe("native governed dispatch resolver", () => {
 		expect(resolved).not.toHaveProperty("promotionResolver");
 	});
 
+	it("projects sealed pending promotion recovery work as status without promotion authority", () => {
+		const fixture = nativeFixture(
+			NATIVE_GOVERNED_DISPATCH_RESOLUTION_V2_PROMOTION_APPROVAL_FIXTURE,
+		);
+		const dispatch = fixture.dispatch as Record<string, unknown>;
+		const recovery = fixture.recovery as Record<string, unknown>;
+		const approval = recovery.promotion_approval as Record<string, unknown>;
+		recovery.promotion_approval = {
+			...approval,
+			event_digest: DIGEST("a"),
+		};
+		recovery.pending_promotion_approval_recovery_work = [
+			{
+				schema_version: 1,
+				run_id: dispatch.run_id,
+				workflow_id: dispatch.workflow_id,
+				workflow_revision: dispatch.workflow_revision,
+				unit_id: dispatch.unit_id,
+				attempt: dispatch.attempt,
+				dispatch_event_ref: fixture.dispatch_event_ref,
+				dispatch_envelope_digest: dispatch.envelope_digest,
+				candidate_digest: approval.candidate_digest,
+				base_commit_sha: approval.base_commit_sha,
+				target_ref: approval.target_ref,
+				promotion_approval_request_event_ref: approval.event_id,
+				promotion_approval_request_event_digest: DIGEST("a"),
+				acceptance_ref: approval.acceptance_ref,
+				review_refs: approval.review_refs,
+				requested_by: approval.requested_by,
+				requested_at: approval.requested_at,
+				idempotency_key: approval.idempotency_key,
+			},
+		];
+
+		const resolved = parseNativeFixture(fixture);
+
+		expect(resolved.pendingPromotionApprovalRecoveryWork).toEqual([
+			expect.objectContaining({
+				state: "operator_decision_required",
+				authority: "none",
+				promotionApprovalRequestEventDigest: DIGEST("a"),
+			}),
+		]);
+		expect(Object.isFrozen(resolved.pendingPromotionApprovalRecoveryWork)).toBe(
+			true,
+		);
+		expect(
+			Object.isFrozen(resolved.pendingPromotionApprovalRecoveryWork[0]),
+		).toBe(true);
+		expect(resolved.pendingPromotionApprovalRecoveryWork[0]).not.toHaveProperty(
+			"promote",
+		);
+		expect(resolved).not.toHaveProperty("promotionResolver");
+	});
+
+	it("keeps legacy pending approval evidence readable without re-emitting operator work", () => {
+		const fixture = nativeFixture(
+			NATIVE_GOVERNED_DISPATCH_RESOLUTION_V2_PROMOTION_APPROVAL_FIXTURE,
+		);
+		const recovery = fixture.recovery as Record<string, unknown>;
+		const approval = recovery.promotion_approval as Record<string, unknown>;
+		const { event_digest: _legacyEventDigest, ...legacyApproval } = approval;
+		recovery.promotion_approval = legacyApproval;
+		recovery.pending_promotion_approval_recovery_work = [];
+
+		const resolved = parseNativeFixture(fixture);
+
+		expect(resolved.promotionApproval?.eventDigest).toBeUndefined();
+		expect(resolved.pendingPromotionApprovalRecoveryWork).toEqual([]);
+		expect(resolved).not.toHaveProperty("promotionResolver");
+	});
+
+	it.each([
+		"adversary",
+		"judge",
+	] as const)("accepts a sealed %s review role for pending approval status", (reviewerRole) => {
+		const fixture = nativeFixture(
+			NATIVE_GOVERNED_DISPATCH_RESOLUTION_V2_PROMOTION_APPROVAL_FIXTURE,
+		);
+		const recovery = fixture.recovery as Record<string, unknown>;
+		const reviews = recovery.reviews as Record<string, unknown>[];
+		reviews[0] = {
+			...reviews[0],
+			reviewer_execution_role: reviewerRole,
+		};
+
+		const resolved = parseNativeFixture(fixture);
+
+		expect(resolved.phase).toBe("promotion_approval_pending");
+		expect(resolved.pendingPromotionApprovalRecoveryWork).toHaveLength(1);
+		expect(resolved).not.toHaveProperty("promotionResolver");
+	});
+
 	it("requires a native full lineage for a pending promotion-approval handoff", () => {
 		const fixture = nativeFixture(
-			NATIVE_GOVERNED_DISPATCH_RESOLUTION_V1_PROMOTION_APPROVAL_FIXTURE,
+			NATIVE_GOVERNED_DISPATCH_RESOLUTION_V2_PROMOTION_APPROVAL_FIXTURE,
 		);
 		const recovery = fixture.recovery as Record<string, unknown>;
 		const candidates = recovery.candidates as readonly Record<
@@ -928,7 +1074,7 @@ describe("native governed dispatch resolver", () => {
 	] as const)("fails closed on %s", (_label, rebind, expected) => {
 		const fixture = structuredClone(
 			nativeFixture(
-				NATIVE_GOVERNED_DISPATCH_RESOLUTION_V1_PROMOTION_APPROVAL_FIXTURE,
+				NATIVE_GOVERNED_DISPATCH_RESOLUTION_V2_PROMOTION_APPROVAL_FIXTURE,
 			),
 		);
 		rebind(fixture);
@@ -954,7 +1100,7 @@ describe("native governed dispatch resolver", () => {
 	] as const)("fails closed when %s", (_label, mutate, expected) => {
 		const fixture = structuredClone(
 			nativeFixture(
-				NATIVE_GOVERNED_DISPATCH_RESOLUTION_V1_PROMOTION_APPROVAL_FIXTURE,
+				NATIVE_GOVERNED_DISPATCH_RESOLUTION_V2_PROMOTION_APPROVAL_FIXTURE,
 			),
 		);
 		mutate(fixture);
@@ -964,7 +1110,7 @@ describe("native governed dispatch resolver", () => {
 
 	it("fails closed when a pending promotion approval does not bind the dispatch base SHA", () => {
 		const fixture = nativeFixture(
-			NATIVE_GOVERNED_DISPATCH_RESOLUTION_V1_PROMOTION_APPROVAL_FIXTURE,
+			NATIVE_GOVERNED_DISPATCH_RESOLUTION_V2_PROMOTION_APPROVAL_FIXTURE,
 		);
 		const recovery = fixture.recovery as Record<string, unknown>;
 		const approval = recovery.promotion_approval as Record<string, unknown>;
@@ -985,7 +1131,7 @@ describe("native governed dispatch resolver", () => {
 
 	it("fails closed on an unknown field nested inside native promotion-approval evidence", () => {
 		const fixture = nativeFixture(
-			NATIVE_GOVERNED_DISPATCH_RESOLUTION_V1_PROMOTION_APPROVAL_FIXTURE,
+			NATIVE_GOVERNED_DISPATCH_RESOLUTION_V2_PROMOTION_APPROVAL_FIXTURE,
 		);
 		const recovery = fixture.recovery as Record<string, unknown>;
 		const approval = recovery.promotion_approval as Record<string, unknown>;
@@ -1006,7 +1152,7 @@ describe("native governed dispatch resolver", () => {
 
 	it("fails closed when native promotion-approval evidence omits a required binding", () => {
 		const fixture = nativeFixture(
-			NATIVE_GOVERNED_DISPATCH_RESOLUTION_V1_PROMOTION_APPROVAL_FIXTURE,
+			NATIVE_GOVERNED_DISPATCH_RESOLUTION_V2_PROMOTION_APPROVAL_FIXTURE,
 		);
 		const recovery = fixture.recovery as Record<string, unknown>;
 		const approval = structuredClone(
@@ -1024,7 +1170,7 @@ describe("native governed dispatch resolver", () => {
 
 	it("fails closed on unknown fields nested inside the native candidate-completion fixture", () => {
 		const fixture = nativeFixture(
-			NATIVE_GOVERNED_DISPATCH_RESOLUTION_V1_COMPLETED_CANDIDATE_FIXTURE,
+			NATIVE_GOVERNED_DISPATCH_RESOLUTION_V2_COMPLETED_CANDIDATE_FIXTURE,
 		);
 		const recovery = fixture.recovery as Record<string, unknown>;
 		const completion = recovery.candidate_completion as Record<string, unknown>;
@@ -1046,7 +1192,7 @@ describe("native governed dispatch resolver", () => {
 
 	it("rejects a digest-valid candidate-completion action rebinding from the native fixture", () => {
 		const fixture = nativeFixture(
-			NATIVE_GOVERNED_DISPATCH_RESOLUTION_V1_COMPLETED_CANDIDATE_FIXTURE,
+			NATIVE_GOVERNED_DISPATCH_RESOLUTION_V2_COMPLETED_CANDIDATE_FIXTURE,
 		);
 		const recovery = fixture.recovery as Record<string, unknown>;
 		const candidateCompletion = recovery.candidate_completion as Record<

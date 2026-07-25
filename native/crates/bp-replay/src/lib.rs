@@ -54,12 +54,15 @@ pub use tape_integrity::{
 /// use bp_replay::classify_replayed_governed_action_v1;
 /// ```
 pub use trusted_recovery::{
-    PromotionRecoveryBlockReasonV1, PromotionRecoveryDispositionV1,
-    RecordedPromotionReconciliationV1, RecordedPromotionRecoveryDecisionV1,
-    RecordedPromotionRecoveryIdentityV1, RecordedPromotionRecoveryQueryV1,
-    RecordedPromotionResultV1, TrustedGovernedRecoveryError, TrustedGovernedRecoverySnapshot,
-    WorkflowInstanceSnapshotCachePersistenceErrorV1,
-    WorkflowInstanceSnapshotCacheProjectionErrorV1, RECORDED_PROMOTION_RECOVERY_SCHEMA_VERSION_V1,
+    PendingPromotionApprovalRecoveryBlockReasonV1, PendingPromotionApprovalRecoveryErrorV1,
+    PendingPromotionApprovalRecoveryWorkV1, PromotionRecoveryBlockReasonV1,
+    PromotionRecoveryDispositionV1, RecordedPromotionReconciliationV1,
+    RecordedPromotionRecoveryDecisionV1, RecordedPromotionRecoveryIdentityV1,
+    RecordedPromotionRecoveryQueryV1, RecordedPromotionResultV1, TrustedGovernedRecoveryError,
+    TrustedGovernedRecoverySnapshot, WorkflowInstanceSnapshotCachePersistenceErrorV1,
+    WorkflowInstanceSnapshotCacheProjectionErrorV1,
+    PENDING_PROMOTION_APPROVAL_RECOVERY_WORK_SCHEMA_VERSION_V1,
+    RECORDED_PROMOTION_RECOVERY_SCHEMA_VERSION_V1,
 };
 
 #[cfg(test)]

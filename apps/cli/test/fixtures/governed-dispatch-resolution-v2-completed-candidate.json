@@ -1,5 +1,5 @@
 {
-	"schema_version": 1,
+	"schema_version": 2,
 	"dispatch_event_ref": "00000000-0000-7000-8000-000000000012",
 	"trusted_kernel_signer": {
 		"actor_id": "kernel",
@@ -47,7 +47,7 @@
 		"algorithm": "sha256_linear"
 	},
 	"recovery": {
-		"phase": "promotion_approval_pending",
+		"phase": "candidate_created",
 		"requests": [
 			{
 				"event_id": "00000000-0000-7000-8000-000000000013",
@@ -106,6 +106,7 @@
 			}
 		],
 		"pending_activity_recovery_work": [],
+		"pending_promotion_approval_recovery_work": [],
 		"receipts": [
 			{
 				"event_id": "00000000-0000-7000-8000-000000000019",
@@ -182,73 +183,8 @@
 				"completed_at": "2026-07-18T12:02:00Z"
 			}
 		},
-		"acceptance": {
-			"event_id": "00000000-0000-7000-8000-000000000021",
-			"candidate_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
-			"candidate_commit_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-			"acceptance_ref": "acceptance:fixture",
-			"acceptance_contract_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-			"acceptance_digest": "sha256:8888888888888888888888888888888888888888888888888888888888888888",
-			"outcome": "passed",
-			"evaluated_at": "2026-07-18T12:02:10Z"
-		},
-		"reviews": [
-			{
-				"review_version": 2,
-				"event_id": "00000000-0000-7000-8000-000000000022",
-				"candidate_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
-				"candidate_commit_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-				"review_ref": "review:fixture",
-				"decision": "approve",
-				"findings": [],
-				"confidence": 1.0,
-				"reviewer_manifest_digest": "sha256:9999999999999999999999999999999999999999999999999999999999999999",
-				"review_verdict_action_id": "review:fixture/action",
-				"review_action_request_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
-				"review_action_receipt_ref": "receipt:review:fixture",
-				"review_action_receipt_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
-				"review_output_ref": "cas://review/fixture-output",
-				"review_output_digest": "sha256:765556e161c09b23127d83d78a815ccaaee844203b78b670a84b66f944318c3f",
-				"acceptance_ref": "acceptance:fixture",
-				"acceptance_digest": "sha256:8888888888888888888888888888888888888888888888888888888888888888",
-				"acceptance_contract_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-				"candidate_envelope_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
-				"reviewer_workflow_id": "review-workflow:fixture",
-				"reviewer_dispatch_envelope_digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
-				"reviewer_unit_id": "review-unit:fixture",
-				"reviewer_attempt": 1,
-				"reviewer_execution_role": "reviewer",
-				"review_action_receipt_set_ref": "receipt-set:review:fixture",
-				"review_action_receipt_set_digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
-				"candidate_view": {
-					"candidate_ref": "refs/buildplane/candidates/candidate-1/run-1/1",
-					"candidate_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
-					"candidate_commit_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-					"tree_digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
-					"reviewer_context_manifest_digest": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
-					"reviewer_sandbox_profile_digest": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
-					"mount_path_digest": "sha256:8888888888888888888888888888888888888888888888888888888888888888",
-					"read_only": true,
-					"network_disabled": true
-				},
-				"candidate_view_ref": "candidate-view:fixture",
-				"candidate_view_digest": "sha256:a6d0301a8237abb1947866ace134b46acea535a7e3e880ec71ef52bec0da0941",
-				"reviewer_authority": "reviewer:fixture",
-				"reviewed_at": "2026-07-18T12:02:20Z"
-			}
-		],
-		"promotion_approval": {
-			"event_id": "00000000-0000-7000-8000-0000000000aa",
-			"candidate_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
-			"base_commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-			"target_ref": "refs/heads/main",
-			"envelope_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
-			"acceptance_ref": "acceptance:fixture",
-			"review_refs": ["review:fixture"],
-			"requested_by": "kernel",
-			"requested_at": "2026-07-18T12:02:30Z",
-			"idempotency_key": "promotion:fixture"
-		},
+		"acceptance": null,
+		"reviews": [],
 		"promotion": null,
 		"terminal": null,
 		"timers": [],

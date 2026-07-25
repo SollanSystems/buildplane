@@ -17,8 +17,8 @@ use crate::engine::{EngineError, ReplayEngine, TrustSpineSignerRole, TrustedRepl
 use crate::otel_projection::{VerifiedOtelProjectionErrorV1, VerifiedOtelProjectionV1};
 use crate::reader::VerifiedEvent;
 use crate::state::{
-    has_complete_v5_admission_receipt, has_complete_v5_manifest_dispatch_witnesses, ReplayIssue,
-    WorkflowInstanceV1,
+    has_complete_v5_admission_receipt, has_complete_v5_manifest_dispatch_witnesses,
+    PromotionApprovalRequestReplayState, ReplayIssue, WorkflowInstanceV1, WorkflowPhaseV1,
 };
 use crate::tape_integrity::{
     verify_full_tape_integrity_v1, TapeIntegrityError, TapeIntegrityReportV1,
@@ -28,8 +28,10 @@ use bp_ledger::canonicalize::{
 };
 use bp_ledger::id::{EventId, RunId};
 use bp_ledger::payload::trust_spine::{
-    ActionEvidenceVersionV1, CommitModeV1, PromotionDecisionKindV1, PromotionResultOutcomeV1,
-    ReconciliationResolutionOutcomeV1, TrustTierV1,
+    candidate_completion_recorded_v1_digest, candidate_view_v1_digest,
+    review_verdict_output_v1_digest, ActionEvidenceVersionV1, CandidateAcceptanceOutcomeV1,
+    CommitModeV1, ExecutionRoleV1, PromotionDecisionKindV1, PromotionResultOutcomeV1,
+    ReconciliationResolutionOutcomeV1, ReviewDecisionV1, ReviewVerdictOutputV1, TrustTierV1,
 };
 use bp_ledger::signing::ActorKeyRef;
 use bp_ledger::storage::sqlite::{
@@ -45,7 +47,7 @@ use rusqlite::{
     params, Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 /// Why a governed recovery snapshot could not be constructed.
@@ -301,6 +303,70 @@ pub struct RecordedPromotionRecoveryDecisionV1 {
     pub reason: Option<PromotionRecoveryBlockReasonV1>,
 }
 
+/// Closed wire-schema revision for a reducer-issued pending operator-approval
+/// work item. It is observation-only data from a fully verified snapshot and
+/// has no signer, decision, lease, promotion, or effect authority.
+pub const PENDING_PROMOTION_APPROVAL_RECOVERY_WORK_SCHEMA_VERSION_V1: u16 = 1;
+
+/// Immutable, candidate-bound operator work item re-emitted after recovery.
+///
+/// The exact request event and canonical event digest are mandatory for a new
+/// snapshot. Historical requests that lacked the digest remain readable in
+/// replay but are deliberately omitted from this recovery projection.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PendingPromotionApprovalRecoveryWorkV1 {
+    pub schema_version: u16,
+    pub run_id: String,
+    pub workflow_id: String,
+    pub workflow_revision: String,
+    pub unit_id: String,
+    pub attempt: u32,
+    pub dispatch_event_ref: String,
+    pub dispatch_envelope_digest: String,
+    pub candidate_digest: String,
+    pub base_commit_sha: String,
+    pub target_ref: String,
+    pub promotion_approval_request_event_ref: String,
+    pub promotion_approval_request_event_digest: String,
+    pub acceptance_ref: String,
+    pub review_refs: Vec<String>,
+    pub requested_by: String,
+    pub requested_at: String,
+    pub idempotency_key: String,
+}
+
+/// Closed failure vocabulary for the complete pending-approval recovery query.
+/// A future malformed pending approval must block the whole query rather than
+/// permit a caller to treat a partial list as an authority source.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PendingPromotionApprovalRecoveryErrorV1 {
+    #[error("pending promotion workflow {workflow_dispatch_event_ref} has no approval request")]
+    PendingWorkflowMissingApproval { workflow_dispatch_event_ref: String },
+    #[error("pending promotion approval {promotion_approval_request_event_ref} has incomplete evidence: {reason:?}")]
+    IncompleteApprovalBlocked {
+        promotion_approval_request_event_ref: String,
+        reason: PendingPromotionApprovalRecoveryBlockReasonV1,
+    },
+}
+
+/// Closed reasons why a pending approval cannot be safely re-emitted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PendingPromotionApprovalRecoveryBlockReasonV1 {
+    MalformedApprovalEvidence,
+    CandidateMissing,
+    CandidateIdentityMismatch,
+    CandidateCompletionMissing,
+    CandidateCompletionIdentityMismatch,
+    AcceptanceMissing,
+    AcceptanceNotPassed,
+    AcceptanceIdentityMismatch,
+    ReviewEvidenceMissing,
+    ReviewNotApproved,
+}
+
 /// A recovery authority snapshot built only from a fully verified tape.
 ///
 /// Its fields are private on purpose. Callers receive immutable references to
@@ -529,12 +595,20 @@ fn workflow_instance_snapshot_cache_entry_with_matching_metadata_v1(
     .optional()
 }
 
-/// V4 graph context is an additive reducer projection. Old V1 cache rows
-/// encoded the otherwise identical V4 workflow without `workflow_graph`.
-/// Upgrade only that exact, canonical historical shape after a fresh trusted
-/// replay verifies every other cache fact. All other differences remain a
-/// conflict rather than becoming a cache overwrite primitive.
-fn migrate_exact_legacy_v4_graph_context_cache_entry_v1(
+/// The cache is non-authoritative, but snapshots still use exact conflict
+/// detection so concurrent publishers cannot overwrite each other. These two
+/// reducer additions changed the serialized projection without changing any
+/// tape fact:
+///
+/// - V4 added `workflow_graph`; and
+/// - pending operator approval recovery added
+///   `promotion_approval.event_digest`.
+///
+/// A fresh trusted replay may replace only the exact historical JSON shapes
+/// where one or both of those additive fields are omitted. Every other
+/// difference remains a conflict rather than becoming a cache-overwrite
+/// primitive.
+fn migrate_exact_legacy_cache_projection_entry_v1(
     tx: &Transaction<'_>,
     entry: &WorkflowInstanceSnapshotCacheEntryV1,
 ) -> Result<(), rusqlite::Error> {
@@ -543,7 +617,7 @@ fn migrate_exact_legacy_v4_graph_context_cache_entry_v1(
     else {
         return Ok(());
     };
-    if !is_exact_legacy_v4_graph_context_cache_projection_v1(
+    if !is_exact_legacy_cache_projection_v1(
         &existing_workflow_json,
         &existing_workflow_json_digest,
         entry,
@@ -567,7 +641,7 @@ fn migrate_exact_legacy_v4_graph_context_cache_entry_v1(
     Ok(())
 }
 
-fn is_exact_legacy_v4_graph_context_cache_projection_v1(
+fn is_exact_legacy_cache_projection_v1(
     existing_workflow_json: &str,
     existing_workflow_json_digest: &str,
     entry: &WorkflowInstanceSnapshotCacheEntryV1,
@@ -582,14 +656,36 @@ fn is_exact_legacy_v4_graph_context_cache_projection_v1(
     let Ok(existing) = serde_json::from_str::<serde_json::Value>(existing_workflow_json) else {
         return false;
     };
-    let Ok(mut expected) = serde_json::from_str::<serde_json::Value>(&entry.workflow_json) else {
+    let Ok(expected) = serde_json::from_str::<serde_json::Value>(&entry.workflow_json) else {
         return false;
     };
+
+    let graph_context_omitted =
+        legacy_v4_graph_context_omitted_cache_projection_v1(expected.clone());
+    let approval_digest_omitted =
+        legacy_promotion_approval_event_digest_omitted_cache_projection_v1(expected.clone());
+    let graph_context_and_approval_digest_omitted = graph_context_omitted
+        .clone()
+        .and_then(legacy_promotion_approval_event_digest_omitted_cache_projection_v1);
+
+    [
+        graph_context_omitted,
+        approval_digest_omitted,
+        graph_context_and_approval_digest_omitted,
+    ]
+    .into_iter()
+    .flatten()
+    .any(|legacy_projection| existing == legacy_projection)
+}
+
+fn legacy_v4_graph_context_omitted_cache_projection_v1(
+    mut expected: serde_json::Value,
+) -> Option<serde_json::Value> {
     let Some(expected_object) = expected.as_object_mut() else {
-        return false;
+        return None;
     };
     let Some(workflow_graph) = expected_object.remove("workflow_graph") else {
-        return false;
+        return None;
     };
     if workflow_graph.is_null()
         || expected
@@ -599,9 +695,25 @@ fn is_exact_legacy_v4_graph_context_cache_projection_v1(
             .and_then(serde_json::Value::as_u64)
             != Some(4)
     {
-        return false;
+        return None;
     }
-    existing == expected
+    Some(expected)
+}
+
+fn legacy_promotion_approval_event_digest_omitted_cache_projection_v1(
+    mut expected: serde_json::Value,
+) -> Option<serde_json::Value> {
+    let approval = expected
+        .get_mut("promotion_approval")
+        .and_then(serde_json::Value::as_object_mut)?;
+    let event_digest = approval.remove("event_digest")?;
+    if !event_digest
+        .as_str()
+        .is_some_and(is_canonical_sha256_digest)
+    {
+        return None;
+    }
+    Some(expected)
 }
 
 fn insert_workflow_instance_snapshot_cache_entry_v1(
@@ -909,13 +1021,12 @@ impl TrustedGovernedRecoverySnapshot {
         ensure_workflow_instance_snapshot_cache_schema_v1(&tx)
             .map_err(WorkflowInstanceSnapshotCachePersistenceErrorV1::Initialize)?;
 
-        // The cache never supplies recovery authority, but a verified V4
-        // workflow now retains its graph context in the serialized projection.
-        // Replace only an exact pre-graph V4 cache shape inside this same
+        // The cache never supplies recovery authority. Replace only exact,
+        // known historical additive projection shapes inside this same
         // source-anchor transaction; arbitrary cache differences still fail
         // closed as conflicts below.
         for entry in &entries {
-            migrate_exact_legacy_v4_graph_context_cache_entry_v1(&tx, entry)?;
+            migrate_exact_legacy_cache_projection_entry_v1(&tx, entry)?;
         }
 
         let current_cache_rows: i64 = tx.query_row(
@@ -1094,6 +1205,84 @@ impl TrustedGovernedRecoverySnapshot {
             .and_then(|dispatch_event_ref| {
                 self.workflows_by_dispatch_event_ref.get(dispatch_event_ref)
             })
+    }
+
+    /// Re-emit only exact, still-pending operator approval observations from a
+    /// fully verified snapshot.
+    ///
+    /// This method cannot sign a decision, issue a promotion lease, mutate a
+    /// target ref, or invoke a host. Legacy approval projections without an
+    /// event digest remain replay-readable but are intentionally not re-emitted.
+    pub fn pending_promotion_approval_recovery_work_v1(
+        &self,
+    ) -> Result<Vec<PendingPromotionApprovalRecoveryWorkV1>, PendingPromotionApprovalRecoveryErrorV1>
+    {
+        let mut work = Vec::new();
+        for workflow in self.workflows_by_dispatch_event_ref.values() {
+            if workflow.phase != WorkflowPhaseV1::PromotionApprovalPending {
+                continue;
+            }
+            let Some(approval) = workflow.promotion_approval.as_ref() else {
+                return Err(
+                    PendingPromotionApprovalRecoveryErrorV1::PendingWorkflowMissingApproval {
+                        workflow_dispatch_event_ref: workflow.dispatch.event_id.to_string(),
+                    },
+                );
+            };
+            if approval.event_digest.is_empty() {
+                continue;
+            }
+            let approval_event_ref = approval.event_id.to_string();
+            if workflow.promotion.is_some()
+                || workflow.cancellation.is_some()
+                || workflow.terminal.is_some()
+            {
+                return Err(
+                    PendingPromotionApprovalRecoveryErrorV1::IncompleteApprovalBlocked {
+                        promotion_approval_request_event_ref: approval_event_ref,
+                        reason:
+                            PendingPromotionApprovalRecoveryBlockReasonV1::MalformedApprovalEvidence,
+                    },
+                );
+            }
+            validate_pending_promotion_approval_recovery_workflow(workflow, approval).map_err(
+                |reason| PendingPromotionApprovalRecoveryErrorV1::IncompleteApprovalBlocked {
+                    promotion_approval_request_event_ref: approval.event_id.to_string(),
+                    reason,
+                },
+            )?;
+            work.push(PendingPromotionApprovalRecoveryWorkV1 {
+                schema_version: PENDING_PROMOTION_APPROVAL_RECOVERY_WORK_SCHEMA_VERSION_V1,
+                run_id: workflow.run_id.clone(),
+                workflow_id: workflow.workflow_id.clone(),
+                workflow_revision: workflow.workflow_revision.clone(),
+                unit_id: workflow.unit_id.clone(),
+                attempt: workflow.attempt,
+                dispatch_event_ref: workflow.dispatch.event_id.to_string(),
+                dispatch_envelope_digest: workflow.dispatch.envelope_digest.clone(),
+                candidate_digest: approval.candidate_digest.clone(),
+                base_commit_sha: approval.base_commit_sha.clone(),
+                target_ref: approval.target_ref.clone(),
+                promotion_approval_request_event_ref: approval.event_id.to_string(),
+                promotion_approval_request_event_digest: approval.event_digest.clone(),
+                acceptance_ref: approval.acceptance_ref.clone(),
+                review_refs: approval.review_refs.clone(),
+                requested_by: approval.requested_by.clone(),
+                requested_at: approval.requested_at.clone(),
+                idempotency_key: approval.idempotency_key.clone(),
+            });
+        }
+        work.sort_by(|left, right| {
+            (
+                &left.dispatch_event_ref,
+                &left.promotion_approval_request_event_ref,
+            )
+                .cmp(&(
+                    &right.dispatch_event_ref,
+                    &right.promotion_approval_request_event_ref,
+                ))
+        });
+        Ok(work)
     }
 
     /// Classify an already-recorded governed action from this fully verified
@@ -1389,6 +1578,205 @@ impl TrustedGovernedRecoverySnapshot {
             promotion_approval_dispatch_index,
         })
     }
+}
+
+fn validate_pending_promotion_approval_recovery_workflow(
+    workflow: &WorkflowInstanceV1,
+    approval: &PromotionApprovalRequestReplayState,
+) -> Result<(), PendingPromotionApprovalRecoveryBlockReasonV1> {
+    if !is_canonical_sha256_digest(&approval.event_digest)
+        || !is_canonical_sha256_digest(&approval.candidate_digest)
+        || !is_canonical_git_object_id(&approval.base_commit_sha)
+        || !is_canonical_target_ref(&approval.target_ref)
+        || !is_canonical_sha256_digest(&approval.envelope_digest)
+        || !strings_are_non_empty([
+            &approval.acceptance_ref,
+            &approval.requested_by,
+            &approval.idempotency_key,
+        ])
+        || !is_rfc3339_utc(&approval.requested_at)
+    {
+        return Err(PendingPromotionApprovalRecoveryBlockReasonV1::MalformedApprovalEvidence);
+    }
+
+    let candidate = workflow
+        .candidate
+        .as_ref()
+        .ok_or(PendingPromotionApprovalRecoveryBlockReasonV1::CandidateMissing)?;
+    if approval.candidate_digest != candidate.candidate_digest
+        || approval.base_commit_sha != candidate.base_commit_sha
+        || approval.envelope_digest != candidate.envelope_digest
+        || !is_canonical_buildplane_candidate_ref(&candidate.candidate_ref)
+        || !is_canonical_sha256_digest(&candidate.candidate_digest)
+        || !is_canonical_git_object_id(&candidate.base_commit_sha)
+        || !is_canonical_git_object_id(&candidate.candidate_commit_sha)
+        || ![
+            &candidate.commit_digest,
+            &candidate.tree_digest,
+            &candidate.patch_digest,
+            &candidate.changed_files_digest,
+            &candidate.envelope_digest,
+        ]
+        .into_iter()
+        .all(|digest| is_canonical_sha256_digest(digest))
+    {
+        return Err(PendingPromotionApprovalRecoveryBlockReasonV1::CandidateIdentityMismatch);
+    }
+
+    let completion = workflow
+        .candidate_completion
+        .as_ref()
+        .ok_or(PendingPromotionApprovalRecoveryBlockReasonV1::CandidateCompletionMissing)?;
+    let completion = &completion.completion;
+    if completion.run_id != workflow.run_id
+        || completion.workflow_id != workflow.workflow_id
+        || completion.unit_id != workflow.unit_id
+        || completion.attempt != workflow.attempt
+        || completion.provenance_ref != workflow.dispatch.provenance_ref
+        || completion.candidate_created_event_ref != candidate.event_id
+        || completion.candidate_digest != candidate.candidate_digest
+        || !strings_are_non_empty([
+            &completion.candidate_create_action_id,
+            &completion.action_receipt_ref,
+        ])
+        || ![
+            &completion.action_request_digest,
+            &completion.activity_claim_event_digest,
+            &completion.activity_result_event_digest,
+            &completion.action_receipt_digest,
+            &completion.completion_digest,
+        ]
+        .into_iter()
+        .all(|digest| is_canonical_sha256_digest(digest))
+        || !is_rfc3339_utc(&completion.completed_at)
+    {
+        return Err(
+            PendingPromotionApprovalRecoveryBlockReasonV1::CandidateCompletionIdentityMismatch,
+        );
+    }
+    let expected_completion_digest =
+        candidate_completion_recorded_v1_digest(completion).map_err(|_| {
+            PendingPromotionApprovalRecoveryBlockReasonV1::CandidateCompletionIdentityMismatch
+        })?;
+    if completion.completion_digest != expected_completion_digest {
+        return Err(
+            PendingPromotionApprovalRecoveryBlockReasonV1::CandidateCompletionIdentityMismatch,
+        );
+    }
+
+    let acceptance = workflow
+        .acceptance
+        .as_ref()
+        .ok_or(PendingPromotionApprovalRecoveryBlockReasonV1::AcceptanceMissing)?;
+    if acceptance.outcome != CandidateAcceptanceOutcomeV1::Passed {
+        return Err(PendingPromotionApprovalRecoveryBlockReasonV1::AcceptanceNotPassed);
+    }
+    if acceptance.candidate_digest != candidate.candidate_digest
+        || acceptance.candidate_commit_sha != candidate.candidate_commit_sha
+        || acceptance.acceptance_ref != approval.acceptance_ref
+        || acceptance.acceptance_contract_digest != workflow.dispatch.acceptance_contract_digest
+        || !is_canonical_sha256_digest(&acceptance.acceptance_digest)
+        || !is_rfc3339_utc(&acceptance.evaluated_at)
+    {
+        return Err(PendingPromotionApprovalRecoveryBlockReasonV1::AcceptanceIdentityMismatch);
+    }
+
+    if approval.review_refs.is_empty() {
+        return Err(PendingPromotionApprovalRecoveryBlockReasonV1::ReviewEvidenceMissing);
+    }
+    let mut review_refs = BTreeSet::new();
+    for review_ref in &approval.review_refs {
+        if review_ref.trim().is_empty() || !review_refs.insert(review_ref) {
+            return Err(PendingPromotionApprovalRecoveryBlockReasonV1::ReviewEvidenceMissing);
+        }
+        let review = workflow
+            .reviews
+            .get(review_ref)
+            .ok_or(PendingPromotionApprovalRecoveryBlockReasonV1::ReviewEvidenceMissing)?;
+        if review.review_version != 2 || review.decision != ReviewDecisionV1::Approve {
+            return Err(PendingPromotionApprovalRecoveryBlockReasonV1::ReviewNotApproved);
+        }
+        let candidate_view = review
+            .candidate_view
+            .as_ref()
+            .ok_or(PendingPromotionApprovalRecoveryBlockReasonV1::ReviewEvidenceMissing)?;
+        let expected_candidate_view_digest = candidate_view_v1_digest(candidate_view)
+            .map_err(|_| PendingPromotionApprovalRecoveryBlockReasonV1::ReviewEvidenceMissing)?;
+        let expected_review_output_digest =
+            review_verdict_output_v1_digest(&ReviewVerdictOutputV1 {
+                candidate_digest: review.candidate_digest.clone(),
+                candidate_commit_sha: review.candidate_commit_sha.clone(),
+                decision: review.decision,
+                findings: review.findings.clone(),
+                confidence: review.confidence,
+                candidate_view_digest: expected_candidate_view_digest.clone(),
+            })
+            .map_err(|_| PendingPromotionApprovalRecoveryBlockReasonV1::ReviewEvidenceMissing)?;
+        if review.review_ref != *review_ref
+            || review.candidate_digest != candidate.candidate_digest
+            || review.candidate_commit_sha != candidate.candidate_commit_sha
+            || review.acceptance_ref.as_deref() != Some(acceptance.acceptance_ref.as_str())
+            || review.acceptance_digest.as_deref() != Some(acceptance.acceptance_digest.as_str())
+            || review.acceptance_contract_digest.as_deref()
+                != Some(acceptance.acceptance_contract_digest.as_str())
+            || review.candidate_envelope_digest.as_deref()
+                != Some(candidate.envelope_digest.as_str())
+            || !matches!(
+                review.reviewer_execution_role,
+                Some(
+                    ExecutionRoleV1::Reviewer | ExecutionRoleV1::Adversary | ExecutionRoleV1::Judge
+                )
+            )
+            || !review.confidence.is_finite()
+            || !(0.0..=1.0).contains(&review.confidence)
+            || !is_canonical_sha256_digest(&review.reviewer_manifest_digest)
+            || ![
+                review.review_action_request_digest.as_deref(),
+                review.review_action_receipt_digest.as_deref(),
+                review.review_output_digest.as_deref(),
+                review.reviewer_dispatch_envelope_digest.as_deref(),
+                review.review_action_receipt_set_digest.as_deref(),
+                review.candidate_view_digest.as_deref(),
+            ]
+            .into_iter()
+            .all(|digest| digest.is_some_and(is_canonical_sha256_digest))
+            || ![
+                review.review_verdict_action_id.as_deref(),
+                review.review_action_receipt_ref.as_deref(),
+                review.review_output_ref.as_deref(),
+                review.reviewer_workflow_id.as_deref(),
+                review.reviewer_unit_id.as_deref(),
+                review.review_action_receipt_set_ref.as_deref(),
+                review.candidate_view_ref.as_deref(),
+                review.reviewer_authority.as_deref(),
+            ]
+            .into_iter()
+            .all(|value| value.is_some_and(|value| !value.trim().is_empty()))
+            || review.reviewer_attempt.is_none_or(|attempt| attempt == 0)
+            || candidate_view.candidate_ref != candidate.candidate_ref
+            || candidate_view.candidate_digest != candidate.candidate_digest
+            || candidate_view.candidate_commit_sha != candidate.candidate_commit_sha
+            || candidate_view.tree_digest != candidate.tree_digest
+            || review.candidate_view_digest.as_deref()
+                != Some(expected_candidate_view_digest.as_str())
+            || review.review_output_digest.as_deref()
+                != Some(expected_review_output_digest.as_str())
+            || !candidate_view.read_only
+            || !candidate_view.network_disabled
+            || ![
+                &candidate_view.reviewer_context_manifest_digest,
+                &candidate_view.reviewer_sandbox_profile_digest,
+                &candidate_view.mount_path_digest,
+            ]
+            .into_iter()
+            .all(|digest| is_canonical_sha256_digest(digest))
+            || !is_rfc3339_utc(&review.reviewed_at)
+        {
+            return Err(PendingPromotionApprovalRecoveryBlockReasonV1::ReviewEvidenceMissing);
+        }
+    }
+
+    Ok(())
 }
 
 /// Pure, read-only classifier for promotion evidence projected by a fully
@@ -1994,9 +2382,11 @@ mod tests {
     use crate::state::{
         ActionEvidenceReplayState, ActionReplayState, ActionRequestReplayState,
         ActivityClaimReplayState, ActivityHeartbeatReplayState, ActivityResultReplayState,
-        CandidateArtifactReplayState, PromotionDecisionReplayState,
-        PromotionReconciliationReplayState, PromotionReplayState, PromotionResultReplayState,
-        WorkflowDispatchReplayState, WorkflowPhaseV1,
+        CandidateAcceptanceReplayState, CandidateArtifactReplayState,
+        CandidateCompletionReplayState, PromotionApprovalRequestReplayState,
+        PromotionDecisionReplayState, PromotionReconciliationReplayState, PromotionReplayState,
+        PromotionResultReplayState, ReviewVerdictReplayState, WorkflowDispatchReplayState,
+        WorkflowPhaseV1,
     };
     use bp_ledger::event::Event;
     use bp_ledger::id::{EventId, RunId};
@@ -2005,15 +2395,19 @@ mod tests {
     use bp_ledger::payload::checkpoint::TapeRootAlgorithm;
     use bp_ledger::payload::run_lifecycle::RunStartedV1;
     use bp_ledger::payload::trust_spine::{
-        ActionEvidenceVersionV1, ActionKindV1, DispatchBudgetV1, ExecutionRoleV1,
-        PromotionDecisionKindV1, PromotionGitBindingV1, PromotionResultOutcomeV1,
-        PromotionWorktreeSyncStateV1, ReconciliationResolutionOutcomeV1,
+        candidate_completion_recorded_v1_digest, candidate_view_v1_digest,
+        review_verdict_output_v1_digest, ActionEvidenceVersionV1, ActionKindV1,
+        CandidateAcceptanceOutcomeV1, CandidateCompletionRecordedV1, CandidateViewV1,
+        DispatchBudgetV1, ExecutionRoleV1, PromotionDecisionKindV1, PromotionGitBindingV1,
+        PromotionResultOutcomeV1, PromotionWorktreeSyncStateV1, ReconciliationResolutionOutcomeV1,
+        ReviewDecisionV1, ReviewVerdictOutputV1,
     };
     use bp_ledger::payload::Payload;
     use bp_ledger::signing::{public_key_hash, TrustedPublicKeys};
     use bp_ledger::storage::sqlite::SqliteStore;
     use chrono::Utc;
     use ed25519_dalek::SigningKey;
+    use rusqlite::{params, Connection};
     use std::collections::BTreeMap;
     use tempfile::TempDir;
 
@@ -2196,6 +2590,291 @@ mod tests {
         }
     }
 
+    fn pending_promotion_approval_workflow() -> WorkflowInstanceV1 {
+        let mut workflow = workflow(DIGEST_A, None);
+        let candidate = workflow
+            .candidate
+            .as_ref()
+            .expect("fixture has an immutable candidate")
+            .clone();
+        let mut completion = CandidateCompletionRecordedV1 {
+            run_id: workflow.run_id.clone(),
+            workflow_id: workflow.workflow_id.clone(),
+            unit_id: workflow.unit_id.clone(),
+            attempt: workflow.attempt,
+            provenance_ref: workflow.dispatch.provenance_ref.clone(),
+            candidate_created_event_ref: candidate.event_id,
+            candidate_digest: candidate.candidate_digest.clone(),
+            candidate_create_action_id: "candidate:create".into(),
+            action_request_ref: EventId::new(),
+            action_request_digest: DIGEST_A.into(),
+            activity_claim_event_ref: EventId::new(),
+            activity_claim_event_digest: DIGEST_B.into(),
+            activity_result_event_ref: EventId::new(),
+            activity_result_event_digest: DIGEST_A.into(),
+            action_receipt_ref: "receipt:candidate".into(),
+            action_receipt_digest: DIGEST_B.into(),
+            completion_digest: String::new(),
+            completed_at: "2026-07-17T00:01:00Z".into(),
+        };
+        completion.completion_digest = candidate_completion_recorded_v1_digest(&completion)
+            .expect("fixture candidate completion has a canonical digest");
+        workflow.candidate_completion = Some(CandidateCompletionReplayState {
+            event_id: EventId::new(),
+            completion,
+        });
+        workflow.acceptance = Some(CandidateAcceptanceReplayState {
+            event_id: EventId::new(),
+            candidate_digest: candidate.candidate_digest.clone(),
+            candidate_commit_sha: candidate.candidate_commit_sha.clone(),
+            acceptance_ref: "acceptance:1".into(),
+            acceptance_contract_digest: workflow.dispatch.acceptance_contract_digest.clone(),
+            acceptance_digest: DIGEST_B.into(),
+            outcome: CandidateAcceptanceOutcomeV1::Passed,
+            evaluated_at: "2026-07-17T00:02:00Z".into(),
+        });
+        let candidate_view = CandidateViewV1 {
+            candidate_ref: candidate.candidate_ref.clone(),
+            candidate_digest: candidate.candidate_digest.clone(),
+            candidate_commit_sha: candidate.candidate_commit_sha.clone(),
+            tree_digest: candidate.tree_digest.clone(),
+            reviewer_context_manifest_digest: DIGEST_A.into(),
+            reviewer_sandbox_profile_digest: DIGEST_B.into(),
+            mount_path_digest: DIGEST_A.into(),
+            read_only: true,
+            network_disabled: true,
+        };
+        let candidate_view_digest = candidate_view_v1_digest(&candidate_view)
+            .expect("fixture candidate view has a canonical digest");
+        let review_output_digest = review_verdict_output_v1_digest(&ReviewVerdictOutputV1 {
+            candidate_digest: candidate.candidate_digest.clone(),
+            candidate_commit_sha: candidate.candidate_commit_sha.clone(),
+            decision: ReviewDecisionV1::Approve,
+            findings: vec![],
+            confidence: 1.0,
+            candidate_view_digest: candidate_view_digest.clone(),
+        })
+        .expect("fixture review output has a canonical digest");
+        workflow.reviews.insert(
+            "review:1".into(),
+            ReviewVerdictReplayState {
+                review_version: 2,
+                event_id: EventId::new(),
+                candidate_digest: candidate.candidate_digest.clone(),
+                candidate_commit_sha: candidate.candidate_commit_sha.clone(),
+                review_ref: "review:1".into(),
+                decision: ReviewDecisionV1::Approve,
+                findings: vec![],
+                confidence: 1.0,
+                reviewer_manifest_digest: DIGEST_A.into(),
+                review_verdict_action_id: Some("review:verdict".into()),
+                review_action_request_digest: Some(DIGEST_A.into()),
+                review_action_receipt_ref: Some("receipt:review".into()),
+                review_action_receipt_digest: Some(DIGEST_B.into()),
+                review_output_ref: Some("cas:review-output".into()),
+                review_output_digest: Some(review_output_digest),
+                acceptance_ref: Some("acceptance:1".into()),
+                acceptance_digest: Some(DIGEST_B.into()),
+                acceptance_contract_digest: Some(
+                    workflow.dispatch.acceptance_contract_digest.clone(),
+                ),
+                candidate_envelope_digest: Some(candidate.envelope_digest.clone()),
+                reviewer_workflow_id: Some("reviewer-workflow".into()),
+                reviewer_dispatch_envelope_digest: Some(DIGEST_A.into()),
+                reviewer_unit_id: Some("reviewer-unit".into()),
+                reviewer_attempt: Some(1),
+                reviewer_execution_role: Some(ExecutionRoleV1::Reviewer),
+                review_action_receipt_set_ref: Some("receipt-set:review".into()),
+                review_action_receipt_set_digest: Some(DIGEST_B.into()),
+                candidate_view: Some(candidate_view),
+                candidate_view_ref: Some("view:review".into()),
+                candidate_view_digest: Some(candidate_view_digest),
+                reviewer_authority: Some("reviewer".into()),
+                reviewed_at: "2026-07-17T00:02:30Z".into(),
+            },
+        );
+        workflow.phase = WorkflowPhaseV1::PromotionApprovalPending;
+        workflow.promotion_approval = Some(PromotionApprovalRequestReplayState {
+            event_id: EventId::new(),
+            event_digest: DIGEST_A.into(),
+            candidate_digest: candidate.candidate_digest,
+            base_commit_sha: candidate.base_commit_sha,
+            target_ref: "refs/heads/main".into(),
+            envelope_digest: candidate.envelope_digest,
+            acceptance_ref: "acceptance:1".into(),
+            review_refs: vec!["review:1".into()],
+            requested_by: "kernel".into(),
+            requested_at: "2026-07-17T00:03:00Z".into(),
+            idempotency_key: "promotion:approval:1".into(),
+        });
+        workflow
+    }
+
+    #[test]
+    fn pending_promotion_approval_recovery_excludes_legacy_approval_without_event_digest() {
+        let mut workflow = workflow(DIGEST_A, None);
+        let candidate = workflow
+            .candidate
+            .as_ref()
+            .expect("fixture has an immutable candidate");
+        workflow.phase = WorkflowPhaseV1::PromotionApprovalPending;
+        workflow.promotion_approval = Some(PromotionApprovalRequestReplayState {
+            event_id: EventId::new(),
+            event_digest: String::new(),
+            candidate_digest: candidate.candidate_digest.clone(),
+            base_commit_sha: candidate.base_commit_sha.clone(),
+            target_ref: "refs/heads/main".into(),
+            envelope_digest: candidate.envelope_digest.clone(),
+            acceptance_ref: "acceptance:1".into(),
+            review_refs: vec!["review:1".into()],
+            requested_by: "kernel".into(),
+            requested_at: "2026-07-17T00:03:00Z".into(),
+            idempotency_key: "promotion:approval:1".into(),
+        });
+        let snapshot = TrustedGovernedRecoverySnapshot::from_verified_replay(
+            "run",
+            kernel(),
+            integrity(),
+            [&workflow].into_iter(),
+        )
+        .expect("fixture forms a trusted recovery snapshot");
+
+        let work = snapshot
+            .pending_promotion_approval_recovery_work_v1()
+            .expect("legacy approval is readable but not re-emittable");
+
+        assert!(work.is_empty());
+    }
+
+    #[test]
+    fn pending_promotion_approval_recovery_fails_closed_for_missing_candidate_completion() {
+        let mut workflow = pending_promotion_approval_workflow();
+        workflow.candidate_completion = None;
+        let approval_event_ref = workflow
+            .promotion_approval
+            .as_ref()
+            .expect("fixture has pending approval")
+            .event_id
+            .to_string();
+        let snapshot = TrustedGovernedRecoverySnapshot::from_verified_replay(
+            "run",
+            kernel(),
+            integrity(),
+            [&workflow].into_iter(),
+        )
+        .expect("fixture forms a trusted recovery snapshot");
+
+        let error = snapshot
+            .pending_promotion_approval_recovery_work_v1()
+            .expect_err("missing sealed candidate completion blocks the whole query");
+
+        assert_eq!(
+            error,
+            PendingPromotionApprovalRecoveryErrorV1::IncompleteApprovalBlocked {
+                promotion_approval_request_event_ref: approval_event_ref,
+                reason: PendingPromotionApprovalRecoveryBlockReasonV1::CandidateCompletionMissing,
+            }
+        );
+    }
+
+    #[test]
+    fn pending_promotion_approval_recovery_fails_closed_for_forged_candidate_view_digest() {
+        let mut workflow = pending_promotion_approval_workflow();
+        workflow
+            .reviews
+            .get_mut("review:1")
+            .expect("fixture has approved review")
+            .candidate_view_digest = Some(DIGEST_A.into());
+        let approval_event_ref = workflow
+            .promotion_approval
+            .as_ref()
+            .expect("fixture has pending approval")
+            .event_id
+            .to_string();
+        let snapshot = TrustedGovernedRecoverySnapshot::from_verified_replay(
+            "run",
+            kernel(),
+            integrity(),
+            [&workflow].into_iter(),
+        )
+        .expect("fixture forms a trusted recovery snapshot");
+
+        let error = snapshot
+            .pending_promotion_approval_recovery_work_v1()
+            .expect_err("forged candidate-view digest blocks recovery");
+
+        assert_eq!(
+            error,
+            PendingPromotionApprovalRecoveryErrorV1::IncompleteApprovalBlocked {
+                promotion_approval_request_event_ref: approval_event_ref,
+                reason: PendingPromotionApprovalRecoveryBlockReasonV1::ReviewEvidenceMissing,
+            }
+        );
+    }
+
+    #[test]
+    fn pending_promotion_approval_recovery_reemits_only_closed_immutable_work() {
+        let workflow = pending_promotion_approval_workflow();
+        let approval = workflow
+            .promotion_approval
+            .as_ref()
+            .expect("fixture has pending approval");
+        let snapshot = TrustedGovernedRecoverySnapshot::from_verified_replay(
+            "run",
+            kernel(),
+            integrity(),
+            [&workflow].into_iter(),
+        )
+        .expect("fixture forms a trusted recovery snapshot");
+
+        let work = snapshot
+            .pending_promotion_approval_recovery_work_v1()
+            .expect("sealed approval is safe to re-emit");
+
+        assert_eq!(work.len(), 1);
+        let recovered = &work[0];
+        assert_eq!(
+            recovered.schema_version,
+            PENDING_PROMOTION_APPROVAL_RECOVERY_WORK_SCHEMA_VERSION_V1
+        );
+        assert_eq!(recovered.run_id, workflow.run_id);
+        assert_eq!(recovered.workflow_id, workflow.workflow_id);
+        assert_eq!(recovered.workflow_revision, workflow.workflow_revision);
+        assert_eq!(recovered.unit_id, workflow.unit_id);
+        assert_eq!(recovered.attempt, workflow.attempt);
+        assert_eq!(
+            recovered.dispatch_event_ref,
+            workflow.dispatch.event_id.to_string()
+        );
+        assert_eq!(
+            recovered.dispatch_envelope_digest,
+            workflow.dispatch.envelope_digest
+        );
+        assert_eq!(recovered.candidate_digest, approval.candidate_digest);
+        assert_eq!(recovered.base_commit_sha, approval.base_commit_sha);
+        assert_eq!(recovered.target_ref, approval.target_ref);
+        assert_eq!(
+            recovered.promotion_approval_request_event_ref,
+            approval.event_id.to_string()
+        );
+        assert_eq!(
+            recovered.promotion_approval_request_event_digest,
+            approval.event_digest
+        );
+        assert_eq!(recovered.acceptance_ref, approval.acceptance_ref);
+        assert_eq!(recovered.review_refs, approval.review_refs);
+        assert_eq!(recovered.requested_by, approval.requested_by);
+        assert_eq!(recovered.requested_at, approval.requested_at);
+        assert_eq!(recovered.idempotency_key, approval.idempotency_key);
+
+        let mut encoded = serde_json::to_value(recovered).expect("work serializes");
+        encoded["forged_authority"] = serde_json::Value::Bool(true);
+        assert!(
+            serde_json::from_value::<PendingPromotionApprovalRecoveryWorkV1>(encoded).is_err(),
+            "the recovery work contract remains closed to authority-bearing fields"
+        );
+    }
+
     #[test]
     fn v5_recovery_fails_closed_without_the_complete_manifest_witnesses() {
         let mut workflow = workflow(DIGEST_A, None);
@@ -2255,6 +2934,97 @@ mod tests {
             !db_path.exists(),
             "fixture rejection occurs before the persistence path initializes a database"
         );
+    }
+
+    #[test]
+    fn cache_persistence_migrates_exact_legacy_pending_approval_without_event_digest() {
+        let temp = TempDir::new().expect("temporary ledger directory");
+        let db_path = temp.path().join("events.db");
+        let store = SqliteStore::open(&db_path).expect("ledger store");
+        let run_id = RunId::new();
+        let source_event = run_started_event(run_id);
+        store
+            .append(&source_event)
+            .expect("append immutable source event for cache anchoring");
+        let source_anchor = TrustedReplaySourceAnchorV1 {
+            run_id,
+            source_event_count: 1,
+            source_last_event_id: source_event.id,
+            checkpoint_event_ref: source_event.id,
+            through_event_ref: source_event.id,
+        };
+        let mut workflow = pending_promotion_approval_workflow();
+        workflow.run_id = run_id.to_string();
+        workflow.dispatch.event_id = source_event.id;
+        let snapshot = TrustedGovernedRecoverySnapshot::from_verified_replay_with_source_anchor(
+            &run_id.to_string(),
+            kernel(),
+            integrity(),
+            Some(source_anchor),
+            [&workflow].into_iter(),
+        )
+        .expect("fixture forms an anchored trusted cache projection");
+
+        let current = snapshot
+            .workflow_instance_snapshot_cache_entries_v1()
+            .expect("trusted snapshot projects one cache entry")
+            .into_iter()
+            .next()
+            .expect("one pending-approval cache entry");
+        snapshot
+            .persist_workflow_instance_snapshot_cache_v1(&db_path)
+            .expect("persist current cache projection");
+
+        let mut legacy_value: serde_json::Value =
+            serde_json::from_str(&current.workflow_json).expect("current cache JSON");
+        let removed = legacy_value
+            .get_mut("promotion_approval")
+            .and_then(serde_json::Value::as_object_mut)
+            .and_then(|approval| approval.remove("event_digest"));
+        assert!(
+            removed.is_some(),
+            "current pending approval cache projection records its event digest"
+        );
+        let legacy_workflow_json =
+            serde_json::to_string(&legacy_value).expect("legacy cache projection JSON");
+        let legacy_workflow_json_digest =
+            workflow_instance_snapshot_cache_workflow_json_digest_v1(&legacy_workflow_json)
+                .expect("legacy cache projection digest");
+        Connection::open(&db_path)
+            .expect("open cache fixture connection")
+            .execute(
+                "UPDATE workflow_instance_snapshot_cache_v1
+                 SET workflow_json = ?1, workflow_json_digest = ?2
+                 WHERE run_id = ?3 AND dispatch_event_id = ?4 AND reducer_schema_version = ?5",
+                params![
+                    legacy_workflow_json,
+                    legacy_workflow_json_digest,
+                    current.run_id.to_string(),
+                    current.dispatch_event_id.to_string(),
+                    i64::from(current.reducer_schema_version),
+                ],
+            )
+            .expect("seed exact pre-event-digest cache projection");
+
+        snapshot
+            .persist_workflow_instance_snapshot_cache_v1(&db_path)
+            .expect(
+                "a verified snapshot upgrades only the exact legacy pending-approval projection",
+            );
+        let upgraded_workflow_json: String = Connection::open(&db_path)
+            .expect("open upgraded cache")
+            .query_row(
+                "SELECT workflow_json FROM workflow_instance_snapshot_cache_v1
+                 WHERE run_id = ?1 AND dispatch_event_id = ?2 AND reducer_schema_version = ?3",
+                params![
+                    current.run_id.to_string(),
+                    current.dispatch_event_id.to_string(),
+                    i64::from(current.reducer_schema_version),
+                ],
+                |row| row.get(0),
+            )
+            .expect("read upgraded cache projection");
+        assert_eq!(upgraded_workflow_json, current.workflow_json);
     }
 
     fn pending_activity_workflow(action_id: &str, idempotency_key: &str) -> WorkflowInstanceV1 {

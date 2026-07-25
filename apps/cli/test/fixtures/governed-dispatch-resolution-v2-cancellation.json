@@ -1,5 +1,5 @@
 {
-	"schema_version": 1,
+	"schema_version": 2,
 	"dispatch_event_ref": "00000000-0000-7000-8000-000000000012",
 	"trusted_kernel_signer": {
 		"actor_id": "kernel",
@@ -51,6 +51,7 @@
 		"requests": [],
 		"activity_claims": [],
 		"pending_activity_recovery_work": [],
+		"pending_promotion_approval_recovery_work": [],
 		"receipts": [],
 		"receipt_set": null,
 		"candidates": [],

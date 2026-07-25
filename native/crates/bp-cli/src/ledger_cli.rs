@@ -28,9 +28,10 @@ use bp_replay::{
     ActionReceiptReplayState, ActionReceiptSetReplayState, ActionRequestReplayState,
     ActivityClaimReplayState, CandidateAcceptanceReplayState, CandidateArtifactReplayState,
     CandidateCompletionReplayState, PendingActivityRecoveryWorkV1,
-    PromotionApprovalRequestReplayState, PromotionReplayState, ReviewVerdictReplayState,
-    TapeIntegrityReportV1, TrustedGovernedRecoverySnapshot, WorkflowDispatchReplayState,
-    WorkflowInstanceV1, WorkflowPhaseV1, WorkflowTerminalReplayState,
+    PendingPromotionApprovalRecoveryWorkV1, PromotionApprovalRequestReplayState,
+    PromotionReplayState, ReviewVerdictReplayState, TapeIntegrityReportV1,
+    TrustedGovernedRecoverySnapshot, WorkflowDispatchReplayState, WorkflowInstanceV1,
+    WorkflowPhaseV1, WorkflowTerminalReplayState,
 };
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::Serialize;
@@ -200,13 +201,13 @@ pub struct GovernedModelIntentIssueArgs {
 /// SQLite metadata view and it grants no new authority on its own.
 #[derive(Debug, Clone, Serialize)]
 #[serde(deny_unknown_fields)]
-struct GovernedDispatchResolutionV1 {
+struct GovernedDispatchResolutionV2 {
     schema_version: u8,
     dispatch_event_ref: String,
     trusted_kernel_signer: ActorKeyRef,
     dispatch: ResolvedGovernedDispatchV3,
     tape_integrity: TapeIntegrityReportV1,
-    recovery: GovernedDispatchRecoveryV1,
+    recovery: GovernedDispatchRecoveryV2,
 }
 
 /// Exact V3 dispatch fields reconstructed from an authority-verified replay.
@@ -229,7 +230,7 @@ struct ResolvedGovernedDispatchV3 {
 /// caller may infer or mint a replacement effect.
 #[derive(Debug, Clone, Serialize)]
 #[serde(deny_unknown_fields)]
-struct GovernedDispatchRecoveryV1 {
+struct GovernedDispatchRecoveryV2 {
     phase: WorkflowPhaseV1,
     requests: Vec<ActionRequestReplayState>,
     activity_claims: Vec<ActivityClaimReplayState>,
@@ -237,6 +238,10 @@ struct GovernedDispatchRecoveryV1 {
     /// non-terminal activity. This never grants a retry, lease, or host
     /// execution path.
     pending_activity_recovery_work: Vec<PendingActivityRecoveryWorkV1>,
+    /// Fully verified, non-authorizing operator work re-emitted only from a
+    /// sealed pending-promotion lineage. It carries no decision, lease, or
+    /// promotion capability.
+    pending_promotion_approval_recovery_work: Vec<PendingPromotionApprovalRecoveryWorkV1>,
     receipts: Vec<ActionReceiptReplayState>,
     receipt_set: Option<ActionReceiptSetReplayState>,
     candidates: Vec<CandidateArtifactReplayState>,
@@ -1796,6 +1801,7 @@ mod tests {
                 event_id: bp_ledger::id::EventId::from_uuid(
                     uuid::Uuid::parse_str("01919000-0000-7000-8000-000000000001").unwrap(),
                 ),
+                dispatch_event_digest: None,
                 envelope_digest:
                     "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                         .to_string(),
@@ -1844,6 +1850,8 @@ mod tests {
                 action_evidence_version: Some(ActionEvidenceVersionV1::SealedV3),
             },
             workflow_graph: None,
+            manifest_declarations: None,
+            v5_admission_receipt: None,
             action_evidence: None,
             retry_context: None,
             timers: Default::default(),
@@ -1862,13 +1870,13 @@ mod tests {
     /// fixture. Keep it a projection of the native closed structs, rather
     /// than duplicating those structs in TypeScript: the assertion below
     /// fails whenever serde output changes.
-    fn governed_dispatch_resolution_v1_fixture_projection() -> GovernedDispatchResolutionV1 {
-        governed_dispatch_resolution_v1_fixture_from_workflow(
-            governed_dispatch_resolution_v1_fixture_workflow(),
+    fn governed_dispatch_resolution_v2_fixture_projection() -> GovernedDispatchResolutionV2 {
+        governed_dispatch_resolution_v2_fixture_from_workflow(
+            governed_dispatch_resolution_v2_fixture_workflow(),
         )
     }
 
-    fn governed_dispatch_resolution_v1_fixture_workflow() -> WorkflowInstanceV1 {
+    fn governed_dispatch_resolution_v2_fixture_workflow() -> WorkflowInstanceV1 {
         use bp_ledger::payload::trust_spine::DispatchBudgetV1;
 
         let mut workflow = resolved_governed_v3_workflow("2099-07-18T12:00:00Z");
@@ -1912,19 +1920,31 @@ mod tests {
         workflow
     }
 
-    fn governed_dispatch_resolution_v1_fixture_from_workflow(
+    fn governed_dispatch_resolution_v2_fixture_from_workflow(
         workflow: WorkflowInstanceV1,
-    ) -> GovernedDispatchResolutionV1 {
-        governed_dispatch_resolution_v1_fixture_from_workflow_with_pending_activity_recovery_work(
+    ) -> GovernedDispatchResolutionV2 {
+        governed_dispatch_resolution_v2_fixture_from_workflow_with_pending_activity_recovery_work(
             workflow,
             Vec::new(),
         )
     }
 
-    fn governed_dispatch_resolution_v1_fixture_from_workflow_with_pending_activity_recovery_work(
+    fn governed_dispatch_resolution_v2_fixture_from_workflow_with_pending_activity_recovery_work(
         workflow: WorkflowInstanceV1,
         pending_activity_recovery_work: Vec<PendingActivityRecoveryWorkV1>,
-    ) -> GovernedDispatchResolutionV1 {
+    ) -> GovernedDispatchResolutionV2 {
+        governed_dispatch_resolution_v2_fixture_from_workflow_with_recovery_work(
+            workflow,
+            pending_activity_recovery_work,
+            Vec::new(),
+        )
+    }
+
+    fn governed_dispatch_resolution_v2_fixture_from_workflow_with_recovery_work(
+        workflow: WorkflowInstanceV1,
+        pending_activity_recovery_work: Vec<PendingActivityRecoveryWorkV1>,
+        pending_promotion_approval_recovery_work: Vec<PendingPromotionApprovalRecoveryWorkV1>,
+    ) -> GovernedDispatchResolutionV2 {
         use bp_ledger::payload::checkpoint::TapeRootAlgorithm;
 
         project_governed_dispatch_resolution(
@@ -1952,16 +1972,17 @@ mod tests {
                 algorithm: TapeRootAlgorithm::Sha256Linear,
             },
             pending_activity_recovery_work,
+            pending_promotion_approval_recovery_work,
         )
     }
 
     #[test]
-    fn governed_dispatch_resolution_v1_fixture_matches_native_serialization() {
+    fn governed_dispatch_resolution_v2_fixture_matches_native_serialization() {
         let expected: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../../apps/cli/test/fixtures/governed-dispatch-resolution-v1.json"
+            "../../../../apps/cli/test/fixtures/governed-dispatch-resolution-v2.json"
         ))
         .expect("cross-language governed-dispatch fixture must be valid JSON");
-        let actual = serde_json::to_value(governed_dispatch_resolution_v1_fixture_projection())
+        let actual = serde_json::to_value(governed_dispatch_resolution_v2_fixture_projection())
             .expect("native governed-dispatch projection must serialize");
 
         assert_eq!(
@@ -1970,29 +1991,29 @@ mod tests {
         );
     }
 
-    fn governed_dispatch_resolution_v1_pending_activity_recovery_fixture_projection(
-    ) -> GovernedDispatchResolutionV1 {
-        governed_dispatch_resolution_v1_pending_activity_recovery_fixture_projection_with_heartbeat(
+    fn governed_dispatch_resolution_v2_pending_activity_recovery_fixture_projection(
+    ) -> GovernedDispatchResolutionV2 {
+        governed_dispatch_resolution_v2_pending_activity_recovery_fixture_projection_with_heartbeat(
             false,
         )
     }
 
-    fn governed_dispatch_resolution_v1_pending_activity_recovery_heartbeat_fixture_projection(
-    ) -> GovernedDispatchResolutionV1 {
-        governed_dispatch_resolution_v1_pending_activity_recovery_fixture_projection_with_heartbeat(
+    fn governed_dispatch_resolution_v2_pending_activity_recovery_heartbeat_fixture_projection(
+    ) -> GovernedDispatchResolutionV2 {
+        governed_dispatch_resolution_v2_pending_activity_recovery_fixture_projection_with_heartbeat(
             true,
         )
     }
 
-    fn governed_dispatch_resolution_v1_pending_activity_recovery_fixture_projection_with_heartbeat(
+    fn governed_dispatch_resolution_v2_pending_activity_recovery_fixture_projection_with_heartbeat(
         with_heartbeat: bool,
-    ) -> GovernedDispatchResolutionV1 {
+    ) -> GovernedDispatchResolutionV2 {
         use bp_replay::{
             state::ActivityHeartbeatReplayState, PendingActivityRecoveryStateV1,
             RecordedActionIdentityV1, PENDING_ACTIVITY_RECOVERY_WORK_SCHEMA_VERSION_V1,
         };
 
-        let mut workflow = governed_dispatch_resolution_v1_completed_candidate_fixture_workflow();
+        let mut workflow = governed_dispatch_resolution_v2_completed_candidate_fixture_workflow();
         workflow.phase = WorkflowPhaseV1::Dispatched;
         workflow.candidate = None;
         workflow.candidate_completion = None;
@@ -2061,21 +2082,21 @@ mod tests {
             effective_lease_expires_at: Some(claim.lease_expires_at),
             reason: None,
         };
-        governed_dispatch_resolution_v1_fixture_from_workflow_with_pending_activity_recovery_work(
+        governed_dispatch_resolution_v2_fixture_from_workflow_with_pending_activity_recovery_work(
             workflow,
             vec![pending],
         )
     }
 
     #[test]
-    fn governed_dispatch_resolution_v1_pending_activity_recovery_fixture_matches_native_serialization(
+    fn governed_dispatch_resolution_v2_pending_activity_recovery_fixture_matches_native_serialization(
     ) {
         let expected: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../../apps/cli/test/fixtures/governed-dispatch-resolution-v1-pending-activity-recovery.json"
+            "../../../../apps/cli/test/fixtures/governed-dispatch-resolution-v2-pending-activity-recovery.json"
         ))
         .expect("pending activity recovery cross-language fixture must be valid JSON");
         let actual = serde_json::to_value(
-            governed_dispatch_resolution_v1_pending_activity_recovery_fixture_projection(),
+            governed_dispatch_resolution_v2_pending_activity_recovery_fixture_projection(),
         )
         .expect("native pending activity recovery projection must serialize");
 
@@ -2086,14 +2107,14 @@ mod tests {
     }
 
     #[test]
-    fn governed_dispatch_resolution_v1_pending_activity_recovery_heartbeat_fixture_matches_native_serialization(
+    fn governed_dispatch_resolution_v2_pending_activity_recovery_heartbeat_fixture_matches_native_serialization(
     ) {
         let expected: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../../apps/cli/test/fixtures/governed-dispatch-resolution-v1-pending-activity-recovery-heartbeat.json"
+            "../../../../apps/cli/test/fixtures/governed-dispatch-resolution-v2-pending-activity-recovery-heartbeat.json"
         ))
         .expect("pending activity heartbeat recovery cross-language fixture must be valid JSON");
         let actual = serde_json::to_value(
-            governed_dispatch_resolution_v1_pending_activity_recovery_heartbeat_fixture_projection(
+            governed_dispatch_resolution_v2_pending_activity_recovery_heartbeat_fixture_projection(
             ),
         )
         .expect("native pending activity heartbeat recovery projection must serialize");
@@ -2107,9 +2128,9 @@ mod tests {
     #[test]
     fn pending_activity_recovery_work_filters_foreign_dispatches_and_rejects_same_dispatch_rebinding(
     ) {
-        let workflow = governed_dispatch_resolution_v1_fixture_workflow();
+        let workflow = governed_dispatch_resolution_v2_fixture_workflow();
         let projection =
-            governed_dispatch_resolution_v1_pending_activity_recovery_fixture_projection();
+            governed_dispatch_resolution_v2_pending_activity_recovery_fixture_projection();
         let pending = projection
             .recovery
             .pending_activity_recovery_work
@@ -2137,6 +2158,66 @@ mod tests {
         assert!(error.contains("exact requested governed dispatch identity"));
     }
 
+    #[test]
+    fn pending_promotion_approval_recovery_work_filters_foreign_dispatches_and_rejects_rebinding() {
+        let mut workflow = governed_dispatch_resolution_v2_fixture_workflow();
+        workflow.phase = WorkflowPhaseV1::PromotionApprovalPending;
+        let approval = PromotionApprovalRequestReplayState {
+            event_id: governed_fixture_event_id("00000000-0000-7000-8000-0000000000aa"),
+            event_digest: governed_fixture_digest('a'),
+            candidate_digest: governed_fixture_digest('3'),
+            base_commit_sha: "a".repeat(40),
+            target_ref: "refs/heads/main".to_string(),
+            envelope_digest: workflow.dispatch.envelope_digest.clone(),
+            acceptance_ref: "acceptance:fixture".to_string(),
+            review_refs: vec!["review:fixture".to_string()],
+            requested_by: "kernel".to_string(),
+            requested_at: "2026-07-18T12:02:30Z".to_string(),
+            idempotency_key: "promotion:fixture".to_string(),
+        };
+        let pending = PendingPromotionApprovalRecoveryWorkV1 {
+            schema_version: 1,
+            run_id: workflow.run_id.clone(),
+            workflow_id: workflow.workflow_id.clone(),
+            workflow_revision: workflow.workflow_revision.clone(),
+            unit_id: workflow.unit_id.clone(),
+            attempt: workflow.attempt,
+            dispatch_event_ref: workflow.dispatch.event_id.to_string(),
+            dispatch_envelope_digest: workflow.dispatch.envelope_digest.clone(),
+            candidate_digest: approval.candidate_digest.clone(),
+            base_commit_sha: approval.base_commit_sha.clone(),
+            target_ref: approval.target_ref.clone(),
+            promotion_approval_request_event_ref: approval.event_id.to_string(),
+            promotion_approval_request_event_digest: approval.event_digest.clone(),
+            acceptance_ref: approval.acceptance_ref.clone(),
+            review_refs: approval.review_refs.clone(),
+            requested_by: approval.requested_by.clone(),
+            requested_at: approval.requested_at.clone(),
+            idempotency_key: approval.idempotency_key.clone(),
+        };
+        workflow.promotion_approval = Some(approval);
+
+        let mut foreign = pending.clone();
+        foreign.dispatch_event_ref = "00000000-0000-7000-8000-000000000099".to_string();
+        let bound = pending_promotion_approval_recovery_work_for_dispatch(
+            vec![foreign, pending.clone()],
+            &workflow,
+            &workflow.dispatch.event_id.to_string(),
+        )
+        .expect("foreign operator work must be omitted rather than rebound");
+        assert_eq!(bound, vec![pending.clone()]);
+
+        let mut rebound = pending;
+        rebound.candidate_digest = governed_fixture_digest('f');
+        let error = pending_promotion_approval_recovery_work_for_dispatch(
+            vec![rebound],
+            &workflow,
+            &workflow.dispatch.event_id.to_string(),
+        )
+        .expect_err("same-dispatch operator work with a foreign lineage must fail closed");
+        assert!(error.contains("exact reducer approval request"));
+    }
+
     fn governed_fixture_event_id(value: &str) -> bp_ledger::id::EventId {
         bp_ledger::id::EventId::from_uuid(uuid::Uuid::parse_str(value).unwrap())
     }
@@ -2145,7 +2226,7 @@ mod tests {
         format!("sha256:{}", character.to_string().repeat(64))
     }
 
-    fn governed_dispatch_resolution_v1_completed_candidate_fixture_workflow() -> WorkflowInstanceV1
+    fn governed_dispatch_resolution_v2_completed_candidate_fixture_workflow() -> WorkflowInstanceV1
     {
         use bp_ledger::payload::activity_claim::{ActivityClaimPurposeV1, ActivityResultOutcomeV1};
         use bp_ledger::payload::trust_spine::{
@@ -2159,7 +2240,7 @@ mod tests {
         use bp_replay::{ActionEvidenceReplayState, ActionReplayState, ActivityResultReplayState};
         use std::collections::BTreeMap;
 
-        let mut workflow = governed_dispatch_resolution_v1_fixture_workflow();
+        let mut workflow = governed_dispatch_resolution_v2_fixture_workflow();
         workflow.phase = WorkflowPhaseV1::CandidateCreated;
         let action_id = "git-candidate-create:candidate-1/run-1/1".to_string();
         let action_request_payload = ActionRequestedV2 {
@@ -2412,18 +2493,18 @@ mod tests {
         workflow
     }
 
-    fn governed_dispatch_resolution_v1_completed_candidate_fixture_projection(
-    ) -> GovernedDispatchResolutionV1 {
-        governed_dispatch_resolution_v1_fixture_from_workflow(
-            governed_dispatch_resolution_v1_completed_candidate_fixture_workflow(),
+    fn governed_dispatch_resolution_v2_completed_candidate_fixture_projection(
+    ) -> GovernedDispatchResolutionV2 {
+        governed_dispatch_resolution_v2_fixture_from_workflow(
+            governed_dispatch_resolution_v2_completed_candidate_fixture_workflow(),
         )
     }
 
-    fn governed_dispatch_resolution_v1_cancellation_fixture_projection(
-    ) -> GovernedDispatchResolutionV1 {
+    fn governed_dispatch_resolution_v2_cancellation_fixture_projection(
+    ) -> GovernedDispatchResolutionV2 {
         use bp_ledger::payload::trust_spine::{WorkflowCancellationCauseV1, WorkflowTimerKindV1};
 
-        let mut workflow = governed_dispatch_resolution_v1_fixture_workflow();
+        let mut workflow = governed_dispatch_resolution_v2_fixture_workflow();
         workflow.phase = WorkflowPhaseV1::CancellationRequested;
         let timer_event = governed_fixture_event_id("00000000-0000-7000-8000-000000000021");
         let timer_digest = governed_fixture_digest('1');
@@ -2468,17 +2549,17 @@ mod tests {
             requested_at: "2026-07-18T12:10:00Z".to_string(),
         });
 
-        governed_dispatch_resolution_v1_fixture_from_workflow(workflow)
+        governed_dispatch_resolution_v2_fixture_from_workflow(workflow)
     }
 
-    fn governed_dispatch_resolution_v1_promotion_approval_fixture_projection(
-    ) -> GovernedDispatchResolutionV1 {
+    fn governed_dispatch_resolution_v2_promotion_approval_fixture_projection(
+    ) -> GovernedDispatchResolutionV2 {
         use bp_ledger::payload::trust_spine::{
             candidate_view_v1_digest, review_verdict_output_v1_digest,
             CandidateAcceptanceOutcomeV1, CandidateViewV1, ReviewDecisionV1, ReviewVerdictOutputV1,
         };
 
-        let mut workflow = governed_dispatch_resolution_v1_completed_candidate_fixture_workflow();
+        let mut workflow = governed_dispatch_resolution_v2_completed_candidate_fixture_workflow();
         let candidate = workflow
             .candidate
             .as_ref()
@@ -2556,31 +2637,57 @@ mod tests {
             },
         );
         workflow.phase = WorkflowPhaseV1::ReviewApproved;
-        workflow.promotion_approval = Some(PromotionApprovalRequestReplayState {
+        let approval = PromotionApprovalRequestReplayState {
             event_id: governed_fixture_event_id("00000000-0000-7000-8000-0000000000aa"),
-            candidate_digest: candidate.candidate_digest,
-            base_commit_sha: candidate.base_commit_sha,
+            event_digest: governed_fixture_digest('a'),
+            candidate_digest: candidate.candidate_digest.clone(),
+            base_commit_sha: candidate.base_commit_sha.clone(),
             target_ref: "refs/heads/main".to_string(),
-            envelope_digest: candidate.envelope_digest,
-            acceptance_ref: acceptance.acceptance_ref,
-            review_refs: vec![review_ref],
+            envelope_digest: candidate.envelope_digest.clone(),
+            acceptance_ref: acceptance.acceptance_ref.clone(),
+            review_refs: vec![review_ref.clone()],
             requested_by: "kernel".to_string(),
             requested_at: "2026-07-18T12:02:30Z".to_string(),
             idempotency_key: "promotion:fixture".to_string(),
-        });
+        };
+        let pending_promotion_approval_recovery_work = PendingPromotionApprovalRecoveryWorkV1 {
+            schema_version: 1,
+            run_id: workflow.run_id.clone(),
+            workflow_id: workflow.workflow_id.clone(),
+            workflow_revision: workflow.workflow_revision.clone(),
+            unit_id: workflow.unit_id.clone(),
+            attempt: workflow.attempt,
+            dispatch_event_ref: workflow.dispatch.event_id.to_string(),
+            dispatch_envelope_digest: workflow.dispatch.envelope_digest.clone(),
+            candidate_digest: approval.candidate_digest.clone(),
+            base_commit_sha: approval.base_commit_sha.clone(),
+            target_ref: approval.target_ref.clone(),
+            promotion_approval_request_event_ref: approval.event_id.to_string(),
+            promotion_approval_request_event_digest: approval.event_digest.clone(),
+            acceptance_ref: approval.acceptance_ref.clone(),
+            review_refs: approval.review_refs.clone(),
+            requested_by: approval.requested_by.clone(),
+            requested_at: approval.requested_at.clone(),
+            idempotency_key: approval.idempotency_key.clone(),
+        };
+        workflow.promotion_approval = Some(approval);
         workflow.phase = WorkflowPhaseV1::PromotionApprovalPending;
 
-        governed_dispatch_resolution_v1_fixture_from_workflow(workflow)
+        governed_dispatch_resolution_v2_fixture_from_workflow_with_recovery_work(
+            workflow,
+            Vec::new(),
+            vec![pending_promotion_approval_recovery_work],
+        )
     }
 
     #[test]
-    fn governed_dispatch_resolution_v1_completed_candidate_fixture_matches_native_serialization() {
+    fn governed_dispatch_resolution_v2_completed_candidate_fixture_matches_native_serialization() {
         let expected: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../../apps/cli/test/fixtures/governed-dispatch-resolution-v1-completed-candidate.json"
+            "../../../../apps/cli/test/fixtures/governed-dispatch-resolution-v2-completed-candidate.json"
         ))
         .expect("completed candidate cross-language fixture must be valid JSON");
         let actual = serde_json::to_value(
-            governed_dispatch_resolution_v1_completed_candidate_fixture_projection(),
+            governed_dispatch_resolution_v2_completed_candidate_fixture_projection(),
         )
         .expect("native completed candidate projection must serialize");
 
@@ -2591,13 +2698,13 @@ mod tests {
     }
 
     #[test]
-    fn governed_dispatch_resolution_v1_cancellation_fixture_matches_native_serialization() {
+    fn governed_dispatch_resolution_v2_cancellation_fixture_matches_native_serialization() {
         let expected: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../../apps/cli/test/fixtures/governed-dispatch-resolution-v1-cancellation.json"
+            "../../../../apps/cli/test/fixtures/governed-dispatch-resolution-v2-cancellation.json"
         ))
         .expect("cancellation cross-language fixture must be valid JSON");
         let actual =
-            serde_json::to_value(governed_dispatch_resolution_v1_cancellation_fixture_projection())
+            serde_json::to_value(governed_dispatch_resolution_v2_cancellation_fixture_projection())
                 .expect("native cancellation projection must serialize");
 
         assert_eq!(
@@ -2607,13 +2714,13 @@ mod tests {
     }
 
     #[test]
-    fn governed_dispatch_resolution_v1_promotion_approval_fixture_matches_native_serialization() {
+    fn governed_dispatch_resolution_v2_promotion_approval_fixture_matches_native_serialization() {
         let expected: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../../apps/cli/test/fixtures/governed-dispatch-resolution-v1-promotion-approval.json"
+            "../../../../apps/cli/test/fixtures/governed-dispatch-resolution-v2-promotion-approval.json"
         ))
         .expect("promotion approval cross-language fixture must be valid JSON");
         let actual = serde_json::to_value(
-            governed_dispatch_resolution_v1_promotion_approval_fixture_projection(),
+            governed_dispatch_resolution_v2_promotion_approval_fixture_projection(),
         )
         .expect("native promotion approval projection must serialize");
 
@@ -2631,6 +2738,7 @@ mod tests {
             event_id: bp_ledger::id::EventId::from_uuid(
                 uuid::Uuid::parse_str("01919000-0000-7000-8000-0000000000aa").unwrap(),
             ),
+            event_digest: String::new(),
             candidate_digest:
                 "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                     .to_string(),
@@ -2646,7 +2754,7 @@ mod tests {
             idempotency_key: "promotion:1".to_string(),
         });
 
-        let recovery = project_governed_dispatch_recovery(&workflow, Vec::new());
+        let recovery = project_governed_dispatch_recovery(&workflow, Vec::new(), Vec::new());
 
         assert_eq!(recovery.phase, WorkflowPhaseV1::PromotionApprovalPending);
         assert_eq!(
@@ -2660,6 +2768,16 @@ mod tests {
                 .as_ref()
                 .expect("pending approval state")
                 .event_id
+        );
+        let serialized = serde_json::to_value(&recovery)
+            .expect("legacy approval recovery projection must serialize");
+        assert!(
+            serialized["promotion_approval"]
+                .as_object()
+                .expect("legacy approval projection")
+                .get("event_digest")
+                .is_none(),
+            "historical empty digest remains omitted so status replay stays readable"
         );
         assert!(recovery.promotion.is_none());
     }
@@ -2726,7 +2844,7 @@ mod tests {
             requested_at: "2026-01-01T00:10:00Z".to_string(),
         });
 
-        let recovery = project_governed_dispatch_recovery(&workflow, Vec::new());
+        let recovery = project_governed_dispatch_recovery(&workflow, Vec::new(), Vec::new());
 
         assert_eq!(recovery.phase, WorkflowPhaseV1::CancellationRequested);
         assert_eq!(recovery.timers.len(), 1);
@@ -2799,7 +2917,7 @@ mod tests {
             },
         });
 
-        let recovery = project_governed_dispatch_recovery(&workflow, Vec::new());
+        let recovery = project_governed_dispatch_recovery(&workflow, Vec::new(), Vec::new());
 
         let completion = recovery
             .candidate_completion
@@ -4662,7 +4780,7 @@ fn resolve_governed_dispatch_v3_at(
     authorities: &TrustedReplayAuthorities,
     trusted_kernel_signer: ActorKeyRef,
     now: DateTime<Utc>,
-) -> Result<GovernedDispatchResolutionV1, String> {
+) -> Result<GovernedDispatchResolutionV2, String> {
     let dispatch_event_id = bp_ledger::id::EventId::from_uuid(
         uuid::Uuid::parse_str(&args.dispatch_event_ref)
             .map_err(|error| format!("--dispatch-event-ref must be a UUID: {error}"))?,
@@ -4690,6 +4808,16 @@ fn resolve_governed_dispatch_v3_at(
         .map_err(|error| {
             format!("trusted governed pending activity recovery projection is blocked: {error:?}")
         })?;
+    // Query pending operator work from the same fully verified snapshot before
+    // narrowing to one dispatch. This prevents a malformed future approval
+    // lineage from being hidden behind a partial per-dispatch status result.
+    let pending_promotion_approval_recovery_work = snapshot
+        .pending_promotion_approval_recovery_work_v1()
+        .map_err(|error| {
+            format!(
+                "trusted governed pending promotion approval recovery projection is blocked: {error:?}"
+            )
+        })?;
     let workflow = snapshot
         .workflow_for_dispatch_event_ref(&dispatch_event_ref)
         .cloned()
@@ -4715,12 +4843,19 @@ fn resolve_governed_dispatch_v3_at(
         &workflow,
         &dispatch_event_ref,
     )?;
+    let pending_promotion_approval_recovery_work =
+        pending_promotion_approval_recovery_work_for_dispatch(
+            pending_promotion_approval_recovery_work,
+            &workflow,
+            &dispatch_event_ref,
+        )?;
     Ok(project_governed_dispatch_resolution(
         dispatch_event_ref,
         trusted_kernel_signer,
         workflow,
         snapshot.tape_integrity().clone(),
         pending_activity_recovery_work,
+        pending_promotion_approval_recovery_work,
     ))
 }
 
@@ -4753,6 +4888,65 @@ fn pending_activity_recovery_work_for_dispatch(
         {
             return Err(
                 "trusted pending activity recovery work did not bind the exact requested governed dispatch identity"
+                    .to_string(),
+            );
+        }
+        bound.push(item);
+    }
+    Ok(bound)
+}
+
+/// Keep sealed operator-work status scoped to the requested immutable
+/// workflow. This is deliberately a verification-only projection: the
+/// returned item cannot create a decision, claim a promotion, or invoke Git.
+fn pending_promotion_approval_recovery_work_for_dispatch(
+    work: Vec<PendingPromotionApprovalRecoveryWorkV1>,
+    workflow: &WorkflowInstanceV1,
+    dispatch_event_ref: &str,
+) -> Result<Vec<PendingPromotionApprovalRecoveryWorkV1>, String> {
+    if workflow.dispatch.event_id.to_string() != dispatch_event_ref {
+        return Err(
+            "verified governed workflow did not retain the requested dispatch event reference"
+                .to_string(),
+        );
+    }
+
+    let mut bound = Vec::new();
+    for item in work {
+        if item.dispatch_event_ref != dispatch_event_ref {
+            continue;
+        }
+        if item.run_id != workflow.run_id
+            || item.workflow_id != workflow.workflow_id
+            || item.workflow_revision != workflow.workflow_revision
+            || item.unit_id != workflow.unit_id
+            || item.attempt != workflow.attempt
+            || item.dispatch_envelope_digest != workflow.dispatch.envelope_digest
+        {
+            return Err(
+                "trusted pending promotion approval recovery work did not bind the exact requested governed dispatch identity"
+                    .to_string(),
+            );
+        }
+        let Some(approval) = workflow.promotion_approval.as_ref() else {
+            return Err(
+                "trusted pending promotion approval recovery work has no matching reducer approval state"
+                    .to_string(),
+            );
+        };
+        if item.promotion_approval_request_event_ref != approval.event_id.to_string()
+            || item.promotion_approval_request_event_digest != approval.event_digest
+            || item.candidate_digest != approval.candidate_digest
+            || item.base_commit_sha != approval.base_commit_sha
+            || item.target_ref != approval.target_ref
+            || item.acceptance_ref != approval.acceptance_ref
+            || item.review_refs != approval.review_refs
+            || item.requested_by != approval.requested_by
+            || item.requested_at != approval.requested_at
+            || item.idempotency_key != approval.idempotency_key
+        {
+            return Err(
+                "trusted pending promotion approval recovery work did not bind the exact reducer approval request"
                     .to_string(),
             );
         }
@@ -5012,11 +5206,16 @@ fn project_governed_dispatch_resolution(
     workflow: WorkflowInstanceV1,
     tape_integrity: TapeIntegrityReportV1,
     pending_activity_recovery_work: Vec<PendingActivityRecoveryWorkV1>,
-) -> GovernedDispatchResolutionV1 {
-    let recovery = project_governed_dispatch_recovery(&workflow, pending_activity_recovery_work);
+    pending_promotion_approval_recovery_work: Vec<PendingPromotionApprovalRecoveryWorkV1>,
+) -> GovernedDispatchResolutionV2 {
+    let recovery = project_governed_dispatch_recovery(
+        &workflow,
+        pending_activity_recovery_work,
+        pending_promotion_approval_recovery_work,
+    );
 
-    GovernedDispatchResolutionV1 {
-        schema_version: 1,
+    GovernedDispatchResolutionV2 {
+        schema_version: 2,
         dispatch_event_ref,
         trusted_kernel_signer,
         dispatch: ResolvedGovernedDispatchV3 {
@@ -5035,7 +5234,8 @@ fn project_governed_dispatch_resolution(
 fn project_governed_dispatch_recovery(
     workflow: &WorkflowInstanceV1,
     pending_activity_recovery_work: Vec<PendingActivityRecoveryWorkV1>,
-) -> GovernedDispatchRecoveryV1 {
+    pending_promotion_approval_recovery_work: Vec<PendingPromotionApprovalRecoveryWorkV1>,
+) -> GovernedDispatchRecoveryV2 {
     let action_evidence = workflow.action_evidence.as_ref();
     let mut requests = Vec::new();
     let mut activity_claims = Vec::new();
@@ -5052,11 +5252,12 @@ fn project_governed_dispatch_recovery(
         }
     }
 
-    GovernedDispatchRecoveryV1 {
+    GovernedDispatchRecoveryV2 {
         phase: workflow.phase,
         requests,
         activity_claims,
         pending_activity_recovery_work,
+        pending_promotion_approval_recovery_work,
         receipts,
         receipt_set: action_evidence.and_then(|evidence| evidence.sealed_receipt_set.clone()),
         candidates: workflow.candidate.clone().into_iter().collect(),

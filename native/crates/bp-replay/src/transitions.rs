@@ -6103,6 +6103,17 @@ fn apply_promotion_approval_requested(
     p: &PromotionApprovalRequestedV1,
 ) {
     ensure_workflow_instances(state);
+    let approval_event_digest = match canonical_event_hash(event) {
+        Ok(digest) => digest,
+        Err(error) => {
+            reject_workflow_transition(
+                state,
+                event,
+                format!("promotion approval request canonical hash failed: {error}"),
+            );
+            return;
+        }
+    };
     let key = match find_workflow_key_for_candidate(state, event, &p.candidate_digest, None) {
         Ok(key) => key,
         Err(reason) => {
@@ -6184,7 +6195,12 @@ fn apply_promotion_approval_requested(
         return;
     }
     if let Some(existing) = workflow.promotion_approval.as_ref() {
-        if promotion_approval_request_matches_existing(existing, event.id, p) {
+        if promotion_approval_request_matches_existing(
+            existing,
+            event.id,
+            p,
+            &approval_event_digest,
+        ) {
             return;
         }
         reject_workflow_transition(
@@ -6231,6 +6247,7 @@ fn apply_promotion_approval_requested(
         .expect("workflow was checked above");
     workflow.promotion_approval = Some(PromotionApprovalRequestReplayState {
         event_id: event.id,
+        event_digest: approval_event_digest,
         candidate_digest: p.candidate_digest.clone(),
         base_commit_sha: p.base_commit_sha.clone(),
         target_ref: p.target_ref.clone(),
@@ -9302,8 +9319,10 @@ fn promotion_approval_request_matches_existing(
     existing: &PromotionApprovalRequestReplayState,
     event_id: EventId,
     p: &PromotionApprovalRequestedV1,
+    event_digest: &str,
 ) -> bool {
     existing.event_id == event_id
+        && existing.event_digest == event_digest
         && existing.candidate_digest == p.candidate_digest
         && existing.base_commit_sha == p.base_commit_sha
         && existing.target_ref == p.target_ref

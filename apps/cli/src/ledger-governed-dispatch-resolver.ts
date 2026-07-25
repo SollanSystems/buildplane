@@ -42,7 +42,9 @@ const SHA256_DIGEST = /^sha256:[0-9a-f]{64}$/;
 const COMMIT_SHA = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 const CANONICAL_U64_DECIMAL = /^(?:0|[1-9][0-9]*)$/;
 const MAX_U64_DECIMAL = "18446744073709551615";
-const NATIVE_RECOVERY_FIELDS = [
+type NativeGovernedDispatchResolutionSchemaVersion = 1 | 2;
+
+const NATIVE_RECOVERY_V1_FIELDS = [
 	"phase",
 	"requests",
 	"activity_claims",
@@ -62,7 +64,15 @@ const NATIVE_RECOVERY_FIELDS = [
 	"unknown_action_ids",
 	"failed_action_ids",
 ] as const;
-const NATIVE_RECOVERY_REQUIRED_FIELDS = NATIVE_RECOVERY_FIELDS.filter(
+const NATIVE_RECOVERY_V2_FIELDS = [
+	...NATIVE_RECOVERY_V1_FIELDS.slice(0, 4),
+	"pending_promotion_approval_recovery_work",
+	...NATIVE_RECOVERY_V1_FIELDS.slice(4),
+] as const;
+const NATIVE_RECOVERY_V1_REQUIRED_FIELDS = NATIVE_RECOVERY_V1_FIELDS.filter(
+	(field) => field !== "promotion_approval" && field !== "candidate_completion",
+);
+const NATIVE_RECOVERY_V2_REQUIRED_FIELDS = NATIVE_RECOVERY_V2_FIELDS.filter(
 	(field) => field !== "promotion_approval" && field !== "candidate_completion",
 );
 
@@ -133,6 +143,11 @@ export interface ResolvedGovernedDispatchSnapshot {
 	 * execution, or promotion authority.
 	 */
 	readonly pendingActivityRecoveryWork: readonly GovernedPendingActivityRecoveryWorkStatusV1[];
+	/**
+	 * Fully verified, sealed operator work re-emitted by native replay. These
+	 * entries are status only: they cannot decide, claim, retry, or promote.
+	 */
+	readonly pendingPromotionApprovalRecoveryWork: readonly GovernedPendingPromotionApprovalRecoveryWorkStatusV1[];
 	/**
 	 * Persisted operator work item, present only while the signed reducer is
 	 * awaiting a durable decision. This is status data only.
@@ -252,10 +267,41 @@ export interface GovernedPromotionApprovalHandoffStatusV1 {
 	readonly state: "operator_decision_required";
 	readonly authority: "none";
 	readonly eventRef: string;
+	/** Present only for post-upgrade approval events. Historical approval
+	 * evidence remains replay-readable but is never re-emitted as new work. */
+	readonly eventDigest?: string;
 	readonly candidateDigest: string;
 	readonly baseCommitSha: string;
 	readonly targetRef: string;
 	readonly envelopeDigest: string;
+	readonly acceptanceRef: string;
+	readonly reviewRefs: readonly string[];
+	readonly requestedBy: string;
+	readonly requestedAt: string;
+	readonly idempotencyKey: string;
+}
+
+/**
+ * Native reducer-issued pending operator work. It is a closed observation of
+ * a fully sealed candidate/acceptance/review lineage; no local parser can
+ * turn it into a promotion decision or effect capability.
+ */
+export interface GovernedPendingPromotionApprovalRecoveryWorkStatusV1 {
+	readonly schemaVersion: 1;
+	readonly state: "operator_decision_required";
+	readonly authority: "none";
+	readonly runId: string;
+	readonly workflowId: string;
+	readonly workflowRevision: string;
+	readonly unitId: string;
+	readonly attempt: number;
+	readonly dispatchEventRef: string;
+	readonly dispatchEnvelopeDigest: string;
+	readonly candidateDigest: string;
+	readonly baseCommitSha: string;
+	readonly targetRef: string;
+	readonly promotionApprovalRequestEventRef: string;
+	readonly promotionApprovalRequestEventDigest: string;
 	readonly acceptanceRef: string;
 	readonly reviewRefs: readonly string[];
 	readonly requestedBy: string;
@@ -425,9 +471,10 @@ function parseNativeResolution(
 		"tape_integrity",
 		"recovery",
 	]);
-	if (root.schema_version !== 1) {
+	const schemaVersion = root.schema_version;
+	if (schemaVersion !== 1 && schemaVersion !== 2) {
 		throw new TypeError(
-			"governed dispatch resolution schema_version must be 1.",
+			"governed dispatch resolution schema_version must be 1 or 2.",
 		);
 	}
 	if (
@@ -446,12 +493,14 @@ function parseNativeResolution(
 		config.kernelActorId,
 	);
 	parseNativeTapeIntegrity(root.tape_integrity);
-	const recovery = parseNativeRecovery(root.recovery, dispatch);
+	const recovery = parseNativeRecovery(root.recovery, dispatch, schemaVersion);
 	return {
 		dispatch,
 		recovery: recovery.snapshot,
 		phase: recovery.phase,
 		pendingActivityRecoveryWork: recovery.pendingActivityRecoveryWork,
+		pendingPromotionApprovalRecoveryWork:
+			recovery.pendingPromotionApprovalRecoveryWork,
 		...(recovery.promotionApproval === undefined
 			? {}
 			: { promotionApproval: recovery.promotionApproval }),
@@ -745,11 +794,13 @@ function parseNativeBudget(value: unknown): DispatchBudgetV1 {
 function parseNativeRecovery(
 	value: unknown,
 	dispatch: GovernedDispatchLineageV3,
+	schemaVersion: NativeGovernedDispatchResolutionSchemaVersion,
 ): {
 	readonly snapshot: GovernedActionEvidenceRecoverySnapshot;
 	readonly phase: string;
 	readonly promotionApproval?: GovernedPromotionApprovalHandoffStatusV1;
 	readonly pendingActivityRecoveryWork: readonly GovernedPendingActivityRecoveryWorkStatusV1[];
+	readonly pendingPromotionApprovalRecoveryWork: readonly GovernedPendingPromotionApprovalRecoveryWorkStatusV1[];
 	readonly lifecycle: GovernedWorkflowLifecycleStatusV1;
 	readonly pendingActionIds: readonly string[];
 	readonly unknownActionIds: readonly string[];
@@ -758,8 +809,10 @@ function parseNativeRecovery(
 	const recovery = closedRecord(
 		value,
 		"governed recovery",
-		NATIVE_RECOVERY_FIELDS,
-		NATIVE_RECOVERY_REQUIRED_FIELDS,
+		schemaVersion === 1 ? NATIVE_RECOVERY_V1_FIELDS : NATIVE_RECOVERY_V2_FIELDS,
+		schemaVersion === 1
+			? NATIVE_RECOVERY_V1_REQUIRED_FIELDS
+			: NATIVE_RECOVERY_V2_REQUIRED_FIELDS,
 	);
 	const phase = requireWorkflowPhase(recovery.phase);
 	const lifecycle = parseNativeLifecycle(
@@ -772,6 +825,7 @@ function parseNativeRecovery(
 		recovery.promotion_approval,
 		phase,
 		dispatch,
+		schemaVersion,
 	);
 	const requests = parseNativeRequests(recovery.requests, dispatch);
 	const receipts = parseNativeReceipts(recovery.receipts, dispatch, requests);
@@ -828,6 +882,15 @@ function parseNativeRecovery(
 			recovery.terminal,
 		);
 	}
+	const pendingPromotionApprovalRecoveryWork =
+		schemaVersion === 1
+			? Object.freeze([])
+			: parseNativePendingPromotionApprovalRecoveryWork(
+					recovery.pending_promotion_approval_recovery_work,
+					dispatch,
+					phase,
+					promotionApproval,
+				);
 	const pendingActionIds = parseActionIds(
 		recovery.pending_action_ids,
 		"pending_action_ids",
@@ -867,6 +930,7 @@ function parseNativeRecovery(
 		phase,
 		...(promotionApproval === undefined ? {} : { promotionApproval }),
 		pendingActivityRecoveryWork,
+		pendingPromotionApprovalRecoveryWork,
 		lifecycle,
 		pendingActionIds,
 		unknownActionIds,
@@ -1545,6 +1609,7 @@ function parseNativePromotionApprovalHandoff(
 	promotionApproval: unknown,
 	phase: string,
 	dispatch: GovernedDispatchLineageV3,
+	schemaVersion: NativeGovernedDispatchResolutionSchemaVersion,
 ): GovernedPromotionApprovalHandoffStatusV1 | undefined {
 	if (promotionApproval === undefined || promotionApproval === null) {
 		if (phase === "promotion_approval_pending") {
@@ -1554,7 +1619,11 @@ function parseNativePromotionApprovalHandoff(
 		}
 		return undefined;
 	}
-	const approval = parseNativePromotionApproval(promotionApproval, dispatch);
+	const approval = parseNativePromotionApproval(
+		promotionApproval,
+		dispatch,
+		schemaVersion,
+	);
 	if (phase === "promotion_approval_pending") {
 		return approval;
 	}
@@ -1566,19 +1635,54 @@ function parseNativePromotionApprovalHandoff(
 function parseNativePromotionApproval(
 	value: unknown,
 	dispatch: GovernedDispatchLineageV3,
+	schemaVersion: NativeGovernedDispatchResolutionSchemaVersion,
 ): GovernedPromotionApprovalHandoffStatusV1 {
-	const approval = closedRecord(value, "promotion_approval", [
-		"event_id",
-		"candidate_digest",
-		"base_commit_sha",
-		"target_ref",
-		"envelope_digest",
-		"acceptance_ref",
-		"review_refs",
-		"requested_by",
-		"requested_at",
-		"idempotency_key",
-	]);
+	const approval = closedRecord(
+		value,
+		"promotion_approval",
+		schemaVersion === 1
+			? [
+					"event_id",
+					"candidate_digest",
+					"base_commit_sha",
+					"target_ref",
+					"envelope_digest",
+					"acceptance_ref",
+					"review_refs",
+					"requested_by",
+					"requested_at",
+					"idempotency_key",
+				]
+			: [
+					"event_id",
+					"event_digest",
+					"candidate_digest",
+					"base_commit_sha",
+					"target_ref",
+					"envelope_digest",
+					"acceptance_ref",
+					"review_refs",
+					"requested_by",
+					"requested_at",
+					"idempotency_key",
+				],
+		[
+			"event_id",
+			"candidate_digest",
+			"base_commit_sha",
+			"target_ref",
+			"envelope_digest",
+			"acceptance_ref",
+			"review_refs",
+			"requested_by",
+			"requested_at",
+			"idempotency_key",
+		],
+	);
+	const eventDigest = optionalDigest(
+		approval.event_digest,
+		"promotion_approval.event_digest",
+	);
 	const envelopeDigest = requireDigest(
 		approval.envelope_digest,
 		"promotion_approval.envelope_digest",
@@ -1617,6 +1721,7 @@ function parseNativePromotionApproval(
 		state: "operator_decision_required",
 		authority: "none",
 		eventRef: requireEventId(approval.event_id, "promotion_approval.event_id"),
+		...(eventDigest === undefined ? {} : { eventDigest }),
 		candidateDigest: requireDigest(
 			approval.candidate_digest,
 			"promotion_approval.candidate_digest",
@@ -1645,6 +1750,192 @@ function parseNativePromotionApproval(
 			"promotion_approval.idempotency_key",
 		),
 	});
+}
+
+/**
+ * Parse the native reducer's sealed operator-work projection. The TypeScript
+ * layer treats this as display-only status and insists that it remains bound
+ * to both the signed dispatch and the raw reducer approval evidence. Missing
+ * event digests identify historical approvals: they stay inspectable but may
+ * not be re-emitted as a new operator work item.
+ */
+function parseNativePendingPromotionApprovalRecoveryWork(
+	value: unknown,
+	dispatch: GovernedDispatchLineageV3,
+	phase: string,
+	promotionApproval: GovernedPromotionApprovalHandoffStatusV1 | undefined,
+): readonly GovernedPendingPromotionApprovalRecoveryWorkStatusV1[] {
+	const seenApprovalEvents = new Set<string>();
+	const work = requireArray(
+		value,
+		"recovery.pending_promotion_approval_recovery_work",
+	).map((entry, index) => {
+		const label = `recovery.pending_promotion_approval_recovery_work[${index}]`;
+		const item = closedRecord(entry, label, [
+			"schema_version",
+			"run_id",
+			"workflow_id",
+			"workflow_revision",
+			"unit_id",
+			"attempt",
+			"dispatch_event_ref",
+			"dispatch_envelope_digest",
+			"candidate_digest",
+			"base_commit_sha",
+			"target_ref",
+			"promotion_approval_request_event_ref",
+			"promotion_approval_request_event_digest",
+			"acceptance_ref",
+			"review_refs",
+			"requested_by",
+			"requested_at",
+			"idempotency_key",
+		]);
+		if (item.schema_version !== 1) {
+			throw new TypeError(`${label}.schema_version is not supported.`);
+		}
+		const reviewRefs = requireArray(
+			item.review_refs,
+			`${label}.review_refs`,
+		).map((reviewRef, reviewIndex) =>
+			requireNonEmpty(reviewRef, `${label}.review_refs[${reviewIndex}]`),
+		);
+		if (
+			reviewRefs.length === 0 ||
+			new Set(reviewRefs).size !== reviewRefs.length
+		) {
+			throw new TypeError(
+				`${label}.review_refs must contain distinct approval references.`,
+			);
+		}
+		const parsed: GovernedPendingPromotionApprovalRecoveryWorkStatusV1 = {
+			schemaVersion: 1,
+			state: "operator_decision_required",
+			authority: "none",
+			runId: requireEventId(item.run_id, `${label}.run_id`),
+			workflowId: requireNonEmpty(item.workflow_id, `${label}.workflow_id`),
+			workflowRevision: requireNonEmpty(
+				item.workflow_revision,
+				`${label}.workflow_revision`,
+			),
+			unitId: requireNonEmpty(item.unit_id, `${label}.unit_id`),
+			attempt: requirePositiveInteger(item.attempt, `${label}.attempt`),
+			dispatchEventRef: requireEventId(
+				item.dispatch_event_ref,
+				`${label}.dispatch_event_ref`,
+			),
+			dispatchEnvelopeDigest: requireDigest(
+				item.dispatch_envelope_digest,
+				`${label}.dispatch_envelope_digest`,
+			),
+			candidateDigest: requireDigest(
+				item.candidate_digest,
+				`${label}.candidate_digest`,
+			),
+			baseCommitSha: requireCommitSha(
+				item.base_commit_sha,
+				`${label}.base_commit_sha`,
+			),
+			targetRef: requireCanonicalPromotionTargetRef(
+				item.target_ref,
+				`${label}.target_ref`,
+			),
+			promotionApprovalRequestEventRef: requireEventId(
+				item.promotion_approval_request_event_ref,
+				`${label}.promotion_approval_request_event_ref`,
+			),
+			promotionApprovalRequestEventDigest: requireDigest(
+				item.promotion_approval_request_event_digest,
+				`${label}.promotion_approval_request_event_digest`,
+			),
+			acceptanceRef: requireNonEmpty(
+				item.acceptance_ref,
+				`${label}.acceptance_ref`,
+			),
+			reviewRefs: Object.freeze([...reviewRefs]),
+			requestedBy: requireNonEmpty(item.requested_by, `${label}.requested_by`),
+			requestedAt: requireTimestamp(item.requested_at, `${label}.requested_at`),
+			idempotencyKey: requireNonEmpty(
+				item.idempotency_key,
+				`${label}.idempotency_key`,
+			),
+		};
+		if (
+			parsed.runId !== dispatch.runId ||
+			parsed.workflowId !== dispatch.workflowId ||
+			parsed.workflowRevision !== dispatch.workflowRevision ||
+			parsed.unitId !== dispatch.unitId ||
+			parsed.attempt !== dispatch.attempt ||
+			parsed.dispatchEventRef !== dispatch.dispatchEnvelopeRef ||
+			parsed.dispatchEnvelopeDigest !== dispatch.envelopeDigest
+		) {
+			throw new TypeError(
+				`${label} does not bind the exact verified governed dispatch identity.`,
+			);
+		}
+		if (seenApprovalEvents.has(parsed.promotionApprovalRequestEventRef)) {
+			throw new TypeError(
+				"recovery.pending_promotion_approval_recovery_work contains duplicate approval-event identity.",
+			);
+		}
+		seenApprovalEvents.add(parsed.promotionApprovalRequestEventRef);
+		return Object.freeze(parsed);
+	});
+
+	if (phase !== "promotion_approval_pending") {
+		if (work.length !== 0) {
+			throw new Error(
+				"pending promotion approval recovery work is present outside promotion_approval_pending.",
+			);
+		}
+		return Object.freeze([]);
+	}
+	if (promotionApproval === undefined) {
+		throw new Error(
+			"pending promotion approval recovery work is present without reducer approval evidence.",
+		);
+	}
+	if (promotionApproval.eventDigest === undefined) {
+		if (work.length !== 0) {
+			throw new Error(
+				"historical promotion approval evidence without an event digest must not be re-emitted as operator work.",
+			);
+		}
+		return Object.freeze([]);
+	}
+	if (work.length !== 1) {
+		throw new Error(
+			"promotion_approval_pending with a sealed approval event requires exactly one native recovery work item.",
+		);
+	}
+	const item = work[0];
+	if (item === undefined) {
+		throw new Error(
+			"pending promotion approval recovery work became unavailable during closed parsing.",
+		);
+	}
+	if (
+		item.promotionApprovalRequestEventRef !== promotionApproval.eventRef ||
+		item.promotionApprovalRequestEventDigest !==
+			promotionApproval.eventDigest ||
+		item.candidateDigest !== promotionApproval.candidateDigest ||
+		item.baseCommitSha !== promotionApproval.baseCommitSha ||
+		item.targetRef !== promotionApproval.targetRef ||
+		item.dispatchEnvelopeDigest !== promotionApproval.envelopeDigest ||
+		item.acceptanceRef !== promotionApproval.acceptanceRef ||
+		item.requestedBy !== promotionApproval.requestedBy ||
+		item.requestedAt !== promotionApproval.requestedAt ||
+		item.idempotencyKey !== promotionApproval.idempotencyKey ||
+		item.reviewRefs.length !== promotionApproval.reviewRefs.length ||
+		item.reviewRefs.some(
+			(reviewRef, index) => reviewRef !== promotionApproval.reviewRefs[index],
+		)
+	) {
+		throw new TypeError(
+			"native pending promotion approval recovery work does not bind the exact reducer approval evidence.",
+		);
+	}
+	return Object.freeze([...work]);
 }
 
 function requireCanonicalPromotionTargetRef(
@@ -3182,13 +3473,18 @@ function validatePendingPromotionApprovalReviewV2Evidence(
 	);
 	requireNonEmpty(review.reviewer_unit_id, `${label}.reviewer_unit_id`);
 	requirePositiveInteger(review.reviewer_attempt, `${label}.reviewer_attempt`);
+	const reviewerRole = requireRole(
+		review.reviewer_execution_role,
+		`${label}.reviewer_execution_role`,
+	);
 	if (
-		requireRole(
-			review.reviewer_execution_role,
-			`${label}.reviewer_execution_role`,
-		) !== "reviewer"
+		reviewerRole !== "reviewer" &&
+		reviewerRole !== "adversary" &&
+		reviewerRole !== "judge"
 	) {
-		throw new TypeError(`${label}.reviewer_execution_role must be reviewer.`);
+		throw new TypeError(
+			`${label}.reviewer_execution_role must be reviewer, adversary, or judge.`,
+		);
 	}
 	requireNonEmpty(
 		review.review_action_receipt_set_ref,

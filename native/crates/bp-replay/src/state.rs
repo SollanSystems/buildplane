@@ -932,7 +932,7 @@ pub struct ActivityResultReplayState {
     /// Canonical hash of the exact signed result event. This is additive so
     /// pre-completion snapshots remain readable; a new completion proof fails
     /// closed until a full replay supplies the value.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub event_digest: String,
     pub run_id: String,
     pub activity_id: String,
@@ -1181,6 +1181,11 @@ pub struct PromotionExecutionClaimReplayState {
 #[serde(deny_unknown_fields)]
 pub struct PromotionApprovalRequestReplayState {
     pub event_id: EventId,
+    /// Canonical hash of the exact kernel-signed approval-request event.
+    /// Historical snapshots did not retain it, so an absent value stays
+    /// readable but cannot be re-emitted as a new operator work item.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub event_digest: String,
     pub candidate_digest: String,
     pub base_commit_sha: String,
     pub target_ref: String,

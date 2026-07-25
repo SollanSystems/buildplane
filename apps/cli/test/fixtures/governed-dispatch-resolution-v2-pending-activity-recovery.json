@@ -1,5 +1,5 @@
 {
-	"schema_version": 1,
+	"schema_version": 2,
 	"dispatch_event_ref": "00000000-0000-7000-8000-000000000012",
 	"trusted_kernel_signer": {
 		"actor_id": "kernel",
@@ -80,32 +80,13 @@
 				"dispatch_envelope_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
 				"authority_actor": "kernel",
 				"lease_id": "candidate-create-lease",
-				"lease_expires_at": "2026-07-18T12:01:55Z",
+				"lease_expires_at": "2026-07-18T12:01:45Z",
 				"claimed_at": "2026-07-18T12:01:30Z",
 				"signer": {
 					"actor_id": "kernel",
 					"key_id": "kernel-main",
 					"public_key_hash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-				},
-				"heartbeats": [
-					{
-						"event_id": "00000000-0000-7000-8000-000000000018",
-						"event_digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
-						"run_id": "00000000-0000-7000-8000-000000000011",
-						"activity_id": "git-candidate-create:candidate-1/run-1/1",
-						"idempotency_key": "git-candidate-create:candidate-1/run-1/1",
-						"heartbeat_id": "heartbeat:candidate-create:1",
-						"heartbeat_request_digest": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
-						"claim_event_id": "00000000-0000-7000-8000-000000000017",
-						"claim_event_digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
-						"lease_id": "candidate-create-lease",
-						"dispatch_event_id": "00000000-0000-7000-8000-000000000012",
-						"dispatch_envelope_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
-						"prior_lease_expires_at": "2026-07-18T12:01:45Z",
-						"lease_expires_at": "2026-07-18T12:01:55Z",
-						"heartbeat_at": "2026-07-18T12:01:40Z"
-					}
-				]
+				}
 			}
 		],
 		"pending_activity_recovery_work": [
@@ -130,9 +111,10 @@
 				"action_kind": "git",
 				"claim_purpose": "generic",
 				"state": "wait_for_active_lease",
-				"effective_lease_expires_at": "2026-07-18T12:01:55Z"
+				"effective_lease_expires_at": "2026-07-18T12:01:45Z"
 			}
 		],
+		"pending_promotion_approval_recovery_work": [],
 		"receipts": [],
 		"receipt_set": null,
 		"candidates": [],
