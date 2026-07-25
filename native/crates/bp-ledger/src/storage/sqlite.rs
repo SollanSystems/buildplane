@@ -2845,33 +2845,78 @@ impl SqliteStore {
         checkpoint_signing_key: &SigningKey,
         checkpoint_signer: &ActorKeyRef,
     ) -> Result<GovernedDispatchAdmissionDispositionV1> {
+        self.seal_governed_dispatch_admission_v1_inner(
+            request,
+            authority,
+            checkpoint_signing_key,
+            checkpoint_signer,
+            || {},
+        )
+    }
+
+    /// Test-only scheduling seam after a sealed-admission disposition is
+    /// materialized and committed.
+    ///
+    /// The callback receives no authority, store, or result and cannot alter
+    /// the ledger directly. It lets an integration test schedule a real second
+    /// store append at the boundary; it is absent from release builds.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn seal_governed_dispatch_admission_v1_with_after_transition_hook_for_tests<F>(
+        &self,
+        request: &GovernedDispatchAdmissionSealRequestV1,
+        authority: &GovernedDispatchAdmissionAuthorityV1,
+        checkpoint_signing_key: &SigningKey,
+        checkpoint_signer: &ActorKeyRef,
+        after_transition: F,
+    ) -> Result<GovernedDispatchAdmissionDispositionV1>
+    where
+        F: FnOnce(),
+    {
+        self.seal_governed_dispatch_admission_v1_inner(
+            request,
+            authority,
+            checkpoint_signing_key,
+            checkpoint_signer,
+            after_transition,
+        )
+    }
+
+    fn seal_governed_dispatch_admission_v1_inner<F>(
+        &self,
+        request: &GovernedDispatchAdmissionSealRequestV1,
+        authority: &GovernedDispatchAdmissionAuthorityV1,
+        checkpoint_signing_key: &SigningKey,
+        checkpoint_signer: &ActorKeyRef,
+        after_transition: F,
+    ) -> Result<GovernedDispatchAdmissionDispositionV1>
+    where
+        F: FnOnce(),
+    {
         validate_governed_dispatch_admission_checkpoint_signer(
             authority,
             checkpoint_signing_key,
             checkpoint_signer,
         )?;
-        let stored = {
-            let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-            let stored = governed_dispatch_admission_by_event(
-                &tx,
-                request.run_id,
-                request.dispatch_event_id,
-            )?
-            .ok_or_else(|| {
-                LedgerError::GovernedDispatchAdmissionReconciliationRequired {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let stored =
+            governed_dispatch_admission_by_event(&tx, request.run_id, request.dispatch_event_id)?
+                .ok_or_else(
+                || LedgerError::GovernedDispatchAdmissionReconciliationRequired {
                     run_id: request.run_id.to_string(),
                     idempotency_key: "unknown".into(),
                     reason: "governed dispatch admission has no native projection".into(),
-                }
-            })?;
-            verify_stored_governed_dispatch_admission(&tx, &stored, authority)?;
-            tx.commit()?;
-            stored
-        };
+                },
+            )?;
+        verify_stored_governed_dispatch_admission(&tx, &stored, authority)?;
 
         if stored.state == StoredGovernedDispatchAdmissionState::Sealed {
-            return sealed_governed_dispatch_admission_disposition(&self.conn, &stored, authority);
+            let disposition =
+                sealed_governed_dispatch_admission_disposition(&tx, &stored, authority)?;
+            tx.commit()?;
+            after_transition();
+            return Ok(disposition);
         }
+        tx.commit()?;
 
         let seal = self.seal_governed_dispatch_admission_prefix(
             &stored,
@@ -2911,19 +2956,10 @@ impl SqliteStore {
                 "a concurrent checkpoint changed the sealed admission prefix; reopen trusted recovery before proceeding",
             ));
         }
-        self.mark_governed_dispatch_admission_sealed(&stored, authority, &checkpoint)?;
-        let sealed = governed_dispatch_admission_by_event(
-            &self.conn,
-            request.run_id,
-            request.dispatch_event_id,
-        )?
-        .ok_or_else(|| {
-            stored_governed_dispatch_admission_reconciliation_required(
-                &stored,
-                "admission projection disappeared after checkpoint association",
-            )
-        })?;
-        sealed_governed_dispatch_admission_disposition(&self.conn, &sealed, authority)
+        let disposition =
+            self.mark_governed_dispatch_admission_sealed(&stored, authority, &checkpoint)?;
+        after_transition();
+        Ok(disposition)
     }
 
     fn seal_governed_dispatch_admission_prefix(
@@ -2968,7 +3004,7 @@ impl SqliteStore {
         expected: &StoredGovernedDispatchAdmission,
         authority: &GovernedDispatchAdmissionAuthorityV1,
         checkpoint: &GovernedDispatchAdmissionCheckpointEvidence,
-    ) -> Result<()> {
+    ) -> Result<GovernedDispatchAdmissionDispositionV1> {
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         let current =
             governed_dispatch_admission_by_event(&tx, expected.run_id, expected.dispatch_event_id)?
@@ -3038,8 +3074,17 @@ impl SqliteStore {
                 }
             }
         }
+        let sealed =
+            governed_dispatch_admission_by_event(&tx, expected.run_id, expected.dispatch_event_id)?
+                .ok_or_else(|| {
+                    stored_governed_dispatch_admission_reconciliation_required(
+                        expected,
+                        "admission projection disappeared after checkpoint association",
+                    )
+                })?;
+        let disposition = sealed_governed_dispatch_admission_disposition(&tx, &sealed, authority)?;
         tx.commit()?;
-        Ok(())
+        Ok(disposition)
     }
 
     /// Record (or resolve) the one closed materialization proof for an

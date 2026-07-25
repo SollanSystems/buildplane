@@ -21,6 +21,7 @@ use bp_ledger::LedgerError;
 use bp_ledger::Payload;
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use ed25519_dalek::SigningKey;
+use tempfile::TempDir;
 
 const DIGEST_A: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const DIGEST_B: &str = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -124,6 +125,18 @@ fn admission_authority(
     )
     .expect("construct governed admission authority");
     (authority, dispatch_signer, checkpoint_signer)
+}
+
+fn raw_same_identity_dispatch_v3_event(request: &GovernedDispatchAdmissionRequestV1) -> Event {
+    Event {
+        id: bp_ledger::EventId::new(),
+        run_id: request.run_id,
+        parent_event_id: None,
+        schema_version: Event::CURRENT_SCHEMA_VERSION,
+        kind: EventKind::DispatchEnvelopeV3,
+        occurred_at: Utc::now(),
+        payload: Payload::DispatchEnvelopeV3(request.dispatch.clone()),
+    }
 }
 
 #[test]
@@ -516,6 +529,17 @@ fn governed_dispatch_admission_withholds_success_until_its_exact_checkpoint_seal
             .expect("sealed retry resolves the original sealed admission"),
         sealed
     );
+    assert_eq!(
+        store
+            .seal_governed_dispatch_admission_v1(
+                &seal_request,
+                &authority,
+                &checkpoint_key,
+                &checkpoint_signer,
+            )
+            .expect("normal seal retry resolves the original sealed admission"),
+        sealed
+    );
 }
 
 #[test]
@@ -560,15 +584,7 @@ fn governed_dispatch_admission_sealed_retries_require_reconciliation_for_raw_sam
         GovernedDispatchAdmissionDispositionV1::Sealed { .. }
     ));
 
-    let raw_sibling = Event {
-        id: bp_ledger::EventId::new(),
-        run_id: request.run_id,
-        parent_event_id: None,
-        schema_version: Event::CURRENT_SCHEMA_VERSION,
-        kind: EventKind::DispatchEnvelopeV3,
-        occurred_at: Utc::now(),
-        payload: Payload::DispatchEnvelopeV3(request.dispatch.clone()),
-    };
+    let raw_sibling = raw_same_identity_dispatch_v3_event(&request);
     assert_ne!(raw_sibling.id, dispatch_event_id);
     store
         .append_signed(&raw_sibling, &dispatch_key, &dispatch_signer)
@@ -597,6 +613,171 @@ fn governed_dispatch_admission_sealed_retries_require_reconciliation_for_raw_sam
         .expect_err("sealed retry must reconcile the raw V3 sibling");
     assert!(matches!(
         seal_retry,
+        LedgerError::GovernedDispatchAdmissionReconciliationRequired { .. }
+    ));
+}
+
+#[test]
+fn governed_dispatch_admission_fresh_seal_materializes_before_a_later_raw_v3_sibling() {
+    let temp = TempDir::new().expect("create file-backed ledger directory");
+    let ledger_path = temp.path().join("events.db");
+    let store = SqliteStore::open(&ledger_path).expect("open primary ledger");
+    let dispatch_key = SigningKey::from_bytes(&[53_u8; 32]);
+    let checkpoint_key = SigningKey::from_bytes(&[59_u8; 32]);
+    let (authority, dispatch_signer, checkpoint_signer) =
+        admission_authority(&dispatch_key, &checkpoint_key, DIGEST_B);
+    let request = GovernedDispatchAdmissionRequestV1 {
+        run_id: RunId::new(),
+        dispatch: governed_implementer_dispatch(Utc::now(), DIGEST_B),
+    };
+    let awaiting = store
+        .record_governed_dispatch_admission_v1(
+            &request,
+            &authority,
+            &dispatch_key,
+            &dispatch_signer,
+        )
+        .expect("record admission before sealing");
+    let dispatch_event_id = match awaiting {
+        GovernedDispatchAdmissionDispositionV1::AwaitingCheckpoint {
+            dispatch_event_id, ..
+        } => dispatch_event_id,
+        other => panic!("unsealed admission must not report success, got {other:?}"),
+    };
+    let seal_request = GovernedDispatchAdmissionSealRequestV1 {
+        run_id: request.run_id,
+        dispatch_event_id,
+    };
+    let secondary = SqliteStore::open(&ledger_path).expect("open independent secondary ledger");
+    let raw_sibling = raw_same_identity_dispatch_v3_event(&request);
+    let secondary_dispatch_key = dispatch_key.clone();
+    let secondary_dispatch_signer = dispatch_signer.clone();
+
+    let sealed = store
+        .seal_governed_dispatch_admission_v1_with_after_transition_hook_for_tests(
+            &seal_request,
+            &authority,
+            &checkpoint_key,
+            &checkpoint_signer,
+            move || {
+                secondary
+                    .append_signed(
+                        &raw_sibling,
+                        &secondary_dispatch_key,
+                        &secondary_dispatch_signer,
+                    )
+                    .expect("real secondary store appends the raw V3 sibling");
+            },
+        )
+        .expect("a sibling appended after sealing must not rewrite the sealed result");
+    assert!(matches!(
+        sealed,
+        GovernedDispatchAdmissionDispositionV1::Sealed {
+            dispatch_event_id: sealed_dispatch_event_id,
+            ..
+        } if sealed_dispatch_event_id == dispatch_event_id
+    ));
+    assert_eq!(
+        store.event_count().expect("count persisted events"),
+        3,
+        "the later raw sibling is durable but outside the sealed decision"
+    );
+
+    let later_retry = store
+        .seal_governed_dispatch_admission_v1(
+            &seal_request,
+            &authority,
+            &checkpoint_key,
+            &checkpoint_signer,
+        )
+        .expect_err("a later retry must reopen reconciliation for the raw sibling");
+    assert!(matches!(
+        later_retry,
+        LedgerError::GovernedDispatchAdmissionReconciliationRequired { .. }
+    ));
+}
+
+#[test]
+fn governed_dispatch_admission_sealed_retry_materializes_before_a_later_raw_v3_sibling() {
+    let temp = TempDir::new().expect("create file-backed ledger directory");
+    let ledger_path = temp.path().join("events.db");
+    let store = SqliteStore::open(&ledger_path).expect("open primary ledger");
+    let dispatch_key = SigningKey::from_bytes(&[61_u8; 32]);
+    let checkpoint_key = SigningKey::from_bytes(&[67_u8; 32]);
+    let (authority, dispatch_signer, checkpoint_signer) =
+        admission_authority(&dispatch_key, &checkpoint_key, DIGEST_B);
+    let request = GovernedDispatchAdmissionRequestV1 {
+        run_id: RunId::new(),
+        dispatch: governed_implementer_dispatch(Utc::now(), DIGEST_B),
+    };
+    let awaiting = store
+        .record_governed_dispatch_admission_v1(
+            &request,
+            &authority,
+            &dispatch_key,
+            &dispatch_signer,
+        )
+        .expect("record admission before sealing");
+    let dispatch_event_id = match awaiting {
+        GovernedDispatchAdmissionDispositionV1::AwaitingCheckpoint {
+            dispatch_event_id, ..
+        } => dispatch_event_id,
+        other => panic!("unsealed admission must not report success, got {other:?}"),
+    };
+    let seal_request = GovernedDispatchAdmissionSealRequestV1 {
+        run_id: request.run_id,
+        dispatch_event_id,
+    };
+    let first_seal = store
+        .seal_governed_dispatch_admission_v1(
+            &seal_request,
+            &authority,
+            &checkpoint_key,
+            &checkpoint_signer,
+        )
+        .expect("initial seal succeeds");
+    let secondary = SqliteStore::open(&ledger_path).expect("open independent secondary ledger");
+    let raw_sibling = raw_same_identity_dispatch_v3_event(&request);
+    let secondary_dispatch_key = dispatch_key.clone();
+    let secondary_dispatch_signer = dispatch_signer.clone();
+
+    let retry = store
+        .seal_governed_dispatch_admission_v1_with_after_transition_hook_for_tests(
+            &seal_request,
+            &authority,
+            &checkpoint_key,
+            &checkpoint_signer,
+            move || {
+                secondary
+                    .append_signed(
+                        &raw_sibling,
+                        &secondary_dispatch_key,
+                        &secondary_dispatch_signer,
+                    )
+                    .expect("real secondary store appends the raw V3 sibling");
+            },
+        )
+        .expect("a later raw sibling must not rewrite the retried sealed result");
+    assert_eq!(
+        retry, first_seal,
+        "normal sealed retry keeps its original result"
+    );
+    assert_eq!(
+        store.event_count().expect("count persisted events"),
+        3,
+        "the later raw sibling is durable but outside the retried sealed decision"
+    );
+
+    let later_retry = store
+        .seal_governed_dispatch_admission_v1(
+            &seal_request,
+            &authority,
+            &checkpoint_key,
+            &checkpoint_signer,
+        )
+        .expect_err("a later retry must reopen reconciliation for the raw sibling");
+    assert!(matches!(
+        later_retry,
         LedgerError::GovernedDispatchAdmissionReconciliationRequired { .. }
     ));
 }
