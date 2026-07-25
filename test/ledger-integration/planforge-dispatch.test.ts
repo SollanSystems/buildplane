@@ -49,21 +49,49 @@ describe("PlanForge legacy dispatch trust boundary", () => {
 		}
 	});
 
-	it("blocks --input dispatch before it creates governed-looking state", async () => {
+	it("blocks every retired local execution form before it creates governed-looking state", async () => {
 		const root = mkdtempSync(join(tmpdir(), "buildplane-planforge-dispatch-"));
 		temporaryRoots.push(root);
 		const input = join(root, "untrusted-plan.md");
 		writeFileSync(input, "# Untrusted PlanForge source\n", "utf8");
 
-		const result = await runCliCapture(
-			["planforge", "dispatch", "--input", input, "--json"],
-			root,
-		);
+		const invocations = [
+			{
+				label: "dispatch",
+				argv: ["planforge", "dispatch", "--input", input, "--json"],
+				expectedError: "PlanForge legacy execution is blocked",
+			},
+			{
+				label: "resume",
+				argv: ["planforge", "resume", "--input", input, "--json"],
+				expectedError: "PlanForge legacy execution is blocked",
+			},
+			{
+				label: "recover",
+				argv: ["planforge", "recover", "--json"],
+				expectedError: "PlanForge legacy execution is blocked",
+			},
+			{
+				label: "loop",
+				argv: ["planforge", "loop", "--once", "--json"],
+				expectedError: "PlanForge legacy execution is blocked",
+			},
+			{
+				label: "authorize-envelope",
+				argv: ["planforge", "authorize-envelope", "--json"],
+				expectedError: "GOVERNED_AUTHORITY_BROKER_REQUIRED",
+			},
+		] as const;
 
-		expect(result.code).toBe(1);
-		expect(`${result.out}\n${result.err}`).toContain(
-			"PlanForge legacy execution is blocked",
-		);
-		expect(existsSync(join(root, ".buildplane"))).toBe(false);
+		for (const invocation of invocations) {
+			const result = await runCliCapture([...invocation.argv], root);
+			expect(result.code, invocation.label).toBe(1);
+			expect(`${result.out}\n${result.err}`, invocation.label).toContain(
+				invocation.expectedError,
+			);
+			expect(existsSync(join(root, ".buildplane")), invocation.label).toBe(
+				false,
+			);
+		}
 	});
 });
