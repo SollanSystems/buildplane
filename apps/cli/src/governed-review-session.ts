@@ -388,6 +388,10 @@ function readClosedDataRecord(
 		if (value === null || typeof value !== "object" || Array.isArray(value)) {
 			return undefined;
 		}
+		const prototype = Object.getPrototypeOf(value);
+		if (prototype !== Object.prototype && prototype !== null) {
+			return undefined;
+		}
 		const source = value as Record<string, unknown>;
 		if (Object.getOwnPropertySymbols(source).length > 0) return undefined;
 		const names = Object.getOwnPropertyNames(source);

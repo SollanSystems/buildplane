@@ -395,6 +395,33 @@ describe("host-owned governed review session", () => {
 		}
 	});
 
+	it("rejects a prototype-backed host reviewer session before it can run", async () => {
+		const run = vi.fn(async () => hostReviewResult());
+		const session = Object.assign(Object.create({}), {
+			kind: "host-owned-governed-reviewer-session-v1",
+			recoveryRef: RECOVERY_REFERENCE,
+			run,
+		});
+		const resolve = vi
+			.spyOn(hostBroker, "resolveHostOwnedGovernedBroker")
+			.mockResolvedValue({
+				async openReviewerSession() {
+					return session;
+				},
+			} as never);
+		try {
+			const result = await runHostOwnedGovernedReviewSession(hostInput());
+
+			expect(result).toMatchObject({
+				state: "unavailable",
+				code: "HOST_REVIEW_SESSION_UNAVAILABLE",
+			});
+			expect(run).not.toHaveBeenCalled();
+		} finally {
+			resolve.mockRestore();
+		}
+	});
+
 	it("blocks mismatched host session identity before it can run a reviewer", async () => {
 		const run = vi.fn(async () => hostReviewResult());
 		const resolve = vi
