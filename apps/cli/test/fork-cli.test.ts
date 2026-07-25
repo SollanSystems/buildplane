@@ -286,6 +286,7 @@ describe("fork CLI orchestration", () => {
 		const exitCode = await runCli(
 			[
 				"fork",
+				"--raw",
 				"parent-run-1",
 				"--at",
 				"parent-event-1",
@@ -372,6 +373,7 @@ describe("fork CLI orchestration", () => {
 		const exitCode = await runCli(
 			[
 				"fork",
+				"--raw",
 				"parent-run-1",
 				"--at",
 				"parent-event-1",
@@ -419,6 +421,7 @@ describe("fork CLI orchestration", () => {
 		const exitCode = await runCli(
 			[
 				"fork",
+				"--raw",
 				"parent-run-1",
 				"--at",
 				"parent-event-1",
@@ -453,6 +456,7 @@ describe("fork CLI orchestration", () => {
 		const exitCode = await runCli(
 			[
 				"fork",
+				"--raw",
 				"parent-run-1",
 				"--at",
 				"parent-event-1",

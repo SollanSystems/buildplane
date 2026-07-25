@@ -84,7 +84,11 @@ describe("replay command", () => {
 			run.stdout.find((l) => l.startsWith("run-id: "))?.slice(8) ?? "";
 		expect(originalRunId).not.toBe("");
 
-		const replay = await runCliCapture(root, ["replay", originalRunId]);
+		const replay = await runCliCapture(root, [
+			"replay",
+			"--raw",
+			originalRunId,
+		]);
 		expect(replay.exitCode).toBe(0);
 
 		const replayOutput = replay.stdout.join("\n");
@@ -121,6 +125,7 @@ describe("replay command", () => {
 
 		const replay = await runCliCapture(root, [
 			"replay",
+			"--raw",
 			originalRunId,
 			"--json",
 		]);
@@ -148,6 +153,7 @@ describe("replay command", () => {
 
 		const replay = await runCliCapture(root, [
 			"replay",
+			"--raw",
 			originalRunId,
 			"--policy=strict",
 			"--json",
@@ -162,7 +168,11 @@ describe("replay command", () => {
 		const root = mkdtempSync(join(tmpdir(), "bp-replay-"));
 		await runCliCapture(root, ["init"]);
 
-		const replay = await runCliCapture(root, ["replay", "nonexistent-run-id"]);
+		const replay = await runCliCapture(root, [
+			"replay",
+			"--raw",
+			"nonexistent-run-id",
+		]);
 		expect(replay.exitCode).toBe(1);
 	});
 
@@ -170,7 +180,7 @@ describe("replay command", () => {
 		const root = mkdtempSync(join(tmpdir(), "bp-replay-"));
 		await runCliCapture(root, ["init"]);
 
-		const replay = await runCliCapture(root, ["replay"]);
+		const replay = await runCliCapture(root, ["replay", "--raw"]);
 		expect(replay.exitCode).toBe(1);
 		expect(replay.stderr.join("\n")).toContain("Missing required run id");
 	});
