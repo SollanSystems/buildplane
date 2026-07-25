@@ -7,7 +7,11 @@ import { dirname, join, resolve } from "node:path";
 import type { Readable, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
 
-import { createTapeEmitter, type TapeEmitter } from "@buildplane/ledger-client";
+import {
+	createTapeEmitter,
+	newEventId,
+	type TapeEmitter,
+} from "@buildplane/ledger-client";
 
 const LEDGER_FIXTURES_DIR = dirname(fileURLToPath(import.meta.url));
 export const LEDGER_TEST_REPO_ROOT = resolve(LEDGER_FIXTURES_DIR, "../..");
@@ -143,6 +147,88 @@ export async function makeLedgerFixture(options?: {
 	};
 
 	return { dir, binary, child, emitter, cleanup };
+}
+
+export interface LegacyReplayTapeFixture {
+	dir: string;
+	eventsDbPath: string;
+	runId: string;
+	unitStartedEventId: string;
+	cleanup: () => Promise<void>;
+}
+
+/**
+ * Create a minimal unsigned legacy tape for read-only replay tests.
+ *
+ * This deliberately uses the generic native `ledger serve` endpoint rather
+ * than `run --raw`: unsafe runs must not manufacture a signed tape authority
+ * or a trusted receipt. The fixture exists only to preserve backwards replay
+ * coverage for already-recorded legacy events.
+ */
+export async function makeLegacyReplayTapeFixture(): Promise<LegacyReplayTapeFixture> {
+	const fixture = await makeLedgerFixture();
+	const runStartedEventId = newEventId();
+	const unitStartedEventId = newEventId();
+	const unitCompletedEventId = newEventId();
+	const runCompletedEventId = newEventId();
+
+	fixture.emitter.emit(
+		"run_started",
+		{
+			RunStartedV1: {
+				packet_hash: "sha256:legacy-replay-fixture",
+				git_head: "deadbeef",
+				workspace_path: fixture.dir,
+				config: {},
+				parent_run_id: null,
+			},
+		},
+		{ id: runStartedEventId },
+	);
+	fixture.emitter.emit(
+		"unit_started",
+		{
+			UnitStartedV1: {
+				unit_id: "legacy-replay-unit",
+				parent_unit_id: null,
+				unit_kind: "command",
+				policy: {},
+			},
+		},
+		{ id: unitStartedEventId, parent: runStartedEventId },
+	);
+	fixture.emitter.emit(
+		"unit_completed",
+		{
+			UnitCompletedV1: {
+				unit_id: "legacy-replay-unit",
+				outcome: "passed",
+				artifacts: [],
+			},
+		},
+		{ id: unitCompletedEventId, parent: unitStartedEventId },
+	);
+	fixture.emitter.emit(
+		"run_completed",
+		{
+			RunCompletedV1: {
+				outcome: "passed",
+				duration_ms: "1",
+				event_count: "4",
+				unit_count: "1",
+			},
+		},
+		{ id: runCompletedEventId, parent: runStartedEventId },
+	);
+	await fixture.emitter.close();
+
+	return {
+		dir: fixture.dir,
+		eventsDbPath: join(fixture.dir, ".buildplane", "ledger", "events.db"),
+		runId: "01919000-0000-7000-8000-000000000000",
+		unitStartedEventId,
+		cleanup: fixture.cleanup,
+	};
 }
 
 export interface BuildplaneRunFixture {

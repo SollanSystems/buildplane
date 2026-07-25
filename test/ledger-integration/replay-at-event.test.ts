@@ -1,8 +1,7 @@
 import { spawnSync } from "node:child_process";
-import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it } from "vitest";
 import {
-	makeBuildplaneRunFixture,
+	makeLegacyReplayTapeFixture,
 	resolveNativeBinaryForLedgerTests,
 } from "./fixtures.js";
 
@@ -10,40 +9,10 @@ const NATIVE_BIN = resolveNativeBinaryForLedgerTests();
 
 describe("replay --at event", () => {
 	it("fast-forwards to target event and emits state there", async () => {
-		const fixture = await makeBuildplaneRunFixture({
-			packet: {
-				unit: {
-					id: "unit-ff",
-					kind: "command",
-					scope: "task",
-					inputRefs: [],
-					expectedOutputs: ["a.txt"],
-					verificationContract: "exit-0-and-required-outputs",
-					policyProfile: "default",
-				},
-				execution: { command: "sh", args: ["-c", "echo a > a.txt"] },
-				verification: { requiredOutputs: ["a.txt"] },
-			},
-		});
+		const fixture = await makeLegacyReplayTapeFixture();
 
 		try {
-			const db = new DatabaseSync(fixture.eventsDbPath);
-			const runId = (
-				db.prepare("SELECT DISTINCT run_id FROM events LIMIT 1").get() as {
-					run_id: string;
-				}
-			).run_id;
-			const targetRow = db
-				.prepare(
-					"SELECT id FROM events WHERE kind = 'unit_started' ORDER BY id ASC LIMIT 1",
-				)
-				.get() as { id: string } | undefined;
-			db.close();
-
-			if (!targetRow) {
-				return;
-			}
-			const targetId = targetRow.id;
+			const targetId = fixture.unitStartedEventId;
 
 			const result = spawnSync(
 				NATIVE_BIN,
@@ -51,7 +20,7 @@ describe("replay --at event", () => {
 					"ledger",
 					"replay",
 					"--run-id",
-					runId,
+					fixture.runId,
 					"--workspace",
 					fixture.dir,
 					"--format",
@@ -76,38 +45,16 @@ describe("replay --at event", () => {
 	}, 30_000);
 
 	it("non-existent target id exits non-zero", async () => {
-		const fixture = await makeBuildplaneRunFixture({
-			packet: {
-				unit: {
-					id: "unit-miss",
-					kind: "command",
-					scope: "task",
-					inputRefs: [],
-					expectedOutputs: ["out.txt"],
-					verificationContract: "exit-0-and-required-outputs",
-					policyProfile: "default",
-				},
-				execution: { command: "sh", args: ["-c", "echo ok > out.txt"] },
-				verification: { requiredOutputs: ["out.txt"] },
-			},
-		});
+		const fixture = await makeLegacyReplayTapeFixture();
 
 		try {
-			const db = new DatabaseSync(fixture.eventsDbPath);
-			const runId = (
-				db.prepare("SELECT DISTINCT run_id FROM events LIMIT 1").get() as {
-					run_id: string;
-				}
-			).run_id;
-			db.close();
-
 			const result = spawnSync(
 				NATIVE_BIN,
 				[
 					"ledger",
 					"replay",
 					"--run-id",
-					runId,
+					fixture.runId,
 					"--workspace",
 					fixture.dir,
 					"--format",
