@@ -314,8 +314,8 @@ describe("fork --vcr basic [Phase F]", () => {
 			).toBe(1);
 			expect(fixture.forkRunId).toBe("");
 			expect(fixture.forkStderr).toContain(
-			"required output is outside the worktree root",
-		);
+				"required output is outside the worktree root",
+			);
 			expect(existsSync(externalPath)).toBe(false);
 		} finally {
 			await fixture.cleanup();
