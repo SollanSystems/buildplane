@@ -64,6 +64,12 @@ use bp_ledger::payload::{
     Payload,
 };
 use bp_ledger::signing::ActorKeyRef;
+use bp_ledger::v5_manifest_witness::{
+    validate_v5_manifest_declaration_witnesses, V5AttemptContextDeclarationWitness,
+    V5ContextManifestDeclarationWitness, V5ManifestDeclarationIdentity,
+    V5ManifestDeclarationWitnessError, V5ManifestDeclarationWitnesses,
+    V5SandboxProfileDeclarationWitness, V5WorkerManifestDeclarationWitness,
+};
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
 
 /// Apply an event without detached-signature or signer-purpose verification.
@@ -2191,9 +2197,31 @@ fn apply_dispatch_envelope_v4(state: &mut ReplayState, event: &Event, p: &Dispat
     sync_workflow_compatibility_view(state, &key);
 }
 
+/// Preserve replay's tape-order wording while the shared verifier remains
+/// deliberately pure: it validates bindings only and cannot claim a witness
+/// precedes the dispatch.
+fn replay_v5_manifest_binding_error(error: V5ManifestDeclarationWitnessError) -> String {
+    match error {
+        V5ManifestDeclarationWitnessError::MissingContextManifest => {
+            "manifest-bound V5 dispatch requires a preceding context manifest declaration for the same run/workflow/revision/unit/attempt".into()
+        }
+        V5ManifestDeclarationWitnessError::MissingWorkerManifest => {
+            "manifest-bound V5 dispatch requires a preceding worker manifest declaration for the same run/workflow/revision/unit/attempt".into()
+        }
+        V5ManifestDeclarationWitnessError::MissingSandboxProfile => {
+            "manifest-bound V5 dispatch requires a preceding sandbox profile declaration for the same run/workflow/revision/unit/attempt".into()
+        }
+        V5ManifestDeclarationWitnessError::MissingAttemptContext => {
+            "manifest-bound V5 retry dispatch requires a preceding attempt context declaration for the same run/workflow/revision/unit/attempt".into()
+        }
+        error => error.to_string(),
+    }
+}
+
 /// Resolve the immutable V5 declaration witnesses before admitting a
-/// manifest-bound dispatch. The tape order is represented by the projection:
-/// only declarations already present in these maps can be consumed.
+/// manifest-bound dispatch. The replay projection preserves tape order and
+/// signer evidence; the shared ledger verifier checks only the pure payload
+/// bindings after these projections have been resolved.
 fn validate_v5_manifest_binding(
     state: &ReplayState,
     event: &Event,
@@ -2209,154 +2237,96 @@ fn validate_v5_manifest_binding(
         &body.unit_id,
         body.attempt,
     );
-    let identity_matches = |declaration_run_id: &str,
-                            declaration_workflow_id: &str,
-                            declaration_workflow_revision: &str,
-                            declaration_unit_id: &str,
-                            declaration_attempt: u32,
-                            declaration_provenance_ref: &str| {
-        declaration_run_id == run_id
-            && declaration_workflow_id == body.workflow_id
-            && declaration_workflow_revision == body.workflow_revision
-            && declaration_unit_id == body.unit_id
-            && declaration_attempt == body.attempt
-            && declaration_provenance_ref == body.provenance_ref
-    };
+    let context_manifest = state.context_manifest_declarations.get(&key);
+    let worker_manifest = state.worker_manifest_declarations.get(&key);
+    let sandbox_profile = state.sandbox_profile_declarations.get(&key);
+    let attempt_context = state.attempt_context_declarations.get(&key);
 
-    let context_manifest = state
-        .context_manifest_declarations
-        .get(&key)
-        .ok_or_else(|| {
-            "manifest-bound V5 dispatch requires a preceding context manifest declaration for the same run/workflow/revision/unit/attempt"
-                .to_string()
-        })?;
-    if context_manifest.event_id != dispatch.context_manifest_declaration_event_ref
-        || context_manifest.context_manifest_digest != dispatch.context_manifest_digest
-        || dispatch.context_manifest_digest != body.context_manifest_digest
-        || !identity_matches(
-            &context_manifest.run_id,
-            &context_manifest.workflow_id,
-            &context_manifest.workflow_revision,
-            &context_manifest.unit_id,
-            context_manifest.attempt,
-            &context_manifest.provenance_ref,
-        )
-    {
-        return Err(
-            "manifest-bound V5 dispatch context manifest declaration does not bind the exact preceding run/workflow/revision/unit/attempt/provenance digest"
-                .into(),
-        );
-    }
+    validate_v5_manifest_declaration_witnesses(
+        dispatch,
+        &run_id,
+        V5ManifestDeclarationWitnesses {
+            context_manifest: context_manifest.map(|declaration| {
+                V5ContextManifestDeclarationWitness {
+                    event_id: &declaration.event_id,
+                    identity: V5ManifestDeclarationIdentity {
+                        run_id: &declaration.run_id,
+                        workflow_id: &declaration.workflow_id,
+                        workflow_revision: &declaration.workflow_revision,
+                        unit_id: &declaration.unit_id,
+                        attempt: declaration.attempt,
+                        provenance_ref: &declaration.provenance_ref,
+                    },
+                    digest: &declaration.context_manifest_digest,
+                }
+            }),
+            worker_manifest: worker_manifest.map(|declaration| {
+                V5WorkerManifestDeclarationWitness {
+                    event_id: &declaration.event_id,
+                    identity: V5ManifestDeclarationIdentity {
+                        run_id: &declaration.run_id,
+                        workflow_id: &declaration.workflow_id,
+                        workflow_revision: &declaration.workflow_revision,
+                        unit_id: &declaration.unit_id,
+                        attempt: declaration.attempt,
+                        provenance_ref: &declaration.provenance_ref,
+                    },
+                    digest: &declaration.worker_manifest_digest,
+                    execution_role: declaration.worker_manifest.execution_role,
+                    capability_bundle_digest: &declaration.worker_manifest.capability_bundle_digest,
+                    image_digest: &declaration.worker_manifest.image_digest,
+                }
+            }),
+            sandbox_profile: sandbox_profile.map(|declaration| {
+                V5SandboxProfileDeclarationWitness {
+                    event_id: &declaration.event_id,
+                    identity: V5ManifestDeclarationIdentity {
+                        run_id: &declaration.run_id,
+                        workflow_id: &declaration.workflow_id,
+                        workflow_revision: &declaration.workflow_revision,
+                        unit_id: &declaration.unit_id,
+                        attempt: declaration.attempt,
+                        provenance_ref: &declaration.provenance_ref,
+                    },
+                    digest: &declaration.sandbox_profile_digest,
+                    image_digest: &declaration.sandbox_profile.image_digest,
+                }
+            }),
+            attempt_context: attempt_context.map(|declaration| {
+                V5AttemptContextDeclarationWitness {
+                    event_id: &declaration.event_id,
+                    identity: V5ManifestDeclarationIdentity {
+                        run_id: &declaration.run_id,
+                        workflow_id: &declaration.workflow_id,
+                        workflow_revision: &declaration.workflow_revision,
+                        unit_id: &declaration.unit_id,
+                        attempt: declaration.attempt,
+                        provenance_ref: &declaration.provenance_ref,
+                    },
+                    digest: &declaration.attempt_context_digest,
+                    attempt_context_attempt: declaration.attempt_context.attempt,
+                }
+            }),
+        },
+    )
+    .map_err(replay_v5_manifest_binding_error)?;
 
-    let worker_manifest = state.worker_manifest_declarations.get(&key).ok_or_else(|| {
-        "manifest-bound V5 dispatch requires a preceding worker manifest declaration for the same run/workflow/revision/unit/attempt"
-            .to_string()
+    let context_manifest = context_manifest.ok_or_else(|| {
+        replay_v5_manifest_binding_error(V5ManifestDeclarationWitnessError::MissingContextManifest)
     })?;
-    if worker_manifest.event_id != dispatch.worker_manifest_declaration_event_ref
-        || worker_manifest.worker_manifest_digest != dispatch.worker_manifest_digest
-        || dispatch.worker_manifest_digest != body.worker_manifest_digest
-        || !identity_matches(
-            &worker_manifest.run_id,
-            &worker_manifest.workflow_id,
-            &worker_manifest.workflow_revision,
-            &worker_manifest.unit_id,
-            worker_manifest.attempt,
-            &worker_manifest.provenance_ref,
-        )
-    {
-        return Err(
-            "manifest-bound V5 dispatch worker manifest declaration does not bind the exact preceding run/workflow/revision/unit/attempt/provenance digest"
-                .into(),
-        );
-    }
-    if worker_manifest.worker_manifest.execution_role != body.execution_role
-        || worker_manifest.worker_manifest.capability_bundle_digest != body.capability_bundle_digest
-    {
-        return Err(
-            "manifest-bound V5 dispatch worker manifest execution role or capability bundle does not match its V4 authority"
-                .into(),
-        );
-    }
-
-    let sandbox_profile = state.sandbox_profile_declarations.get(&key).ok_or_else(|| {
-        "manifest-bound V5 dispatch requires a preceding sandbox profile declaration for the same run/workflow/revision/unit/attempt"
-            .to_string()
+    let worker_manifest = worker_manifest.ok_or_else(|| {
+        replay_v5_manifest_binding_error(V5ManifestDeclarationWitnessError::MissingWorkerManifest)
     })?;
-    if sandbox_profile.event_id != dispatch.sandbox_profile_declaration_event_ref
-        || sandbox_profile.sandbox_profile_digest != dispatch.sandbox_profile_digest
-        || dispatch.sandbox_profile_digest != body.sandbox_profile_digest
-        || !identity_matches(
-            &sandbox_profile.run_id,
-            &sandbox_profile.workflow_id,
-            &sandbox_profile.workflow_revision,
-            &sandbox_profile.unit_id,
-            sandbox_profile.attempt,
-            &sandbox_profile.provenance_ref,
-        )
-    {
-        return Err(
-            "manifest-bound V5 dispatch sandbox profile declaration does not bind the exact preceding run/workflow/revision/unit/attempt/provenance digest"
-                .into(),
-        );
-    }
-    if sandbox_profile.sandbox_profile.image_digest != worker_manifest.worker_manifest.image_digest
-    {
-        return Err(
-            "manifest-bound V5 dispatch sandbox profile image does not match its worker manifest image"
-                .into(),
-        );
-    }
-
-    let attempt_context = match (
-        body.attempt,
-        dispatch.attempt_context_declaration_event_ref.as_ref(),
-        dispatch.attempt_context_digest.as_deref(),
-    ) {
-        (1, None, None) => None,
-        (1, _, _) => {
-            return Err(
-                "manifest-bound V5 first attempt must not bind an attempt context declaration"
-                    .into(),
-            )
-        }
-        (_, Some(event_ref), Some(digest)) => {
-            let declaration = state.attempt_context_declarations.get(&key).ok_or_else(|| {
-                "manifest-bound V5 retry dispatch requires a preceding attempt context declaration for the same run/workflow/revision/unit/attempt"
-                    .to_string()
-            })?;
-            if declaration.event_id != *event_ref
-                || declaration.attempt_context_digest != digest
-                || declaration.attempt_context.attempt != body.attempt
-                || !identity_matches(
-                    &declaration.run_id,
-                    &declaration.workflow_id,
-                    &declaration.workflow_revision,
-                    &declaration.unit_id,
-                    declaration.attempt,
-                    &declaration.provenance_ref,
-                )
-            {
-                return Err(
-                    "manifest-bound V5 retry declaration does not bind the exact preceding run/workflow/revision/unit/attempt/provenance digest"
-                        .into(),
-                );
-            }
-            Some(declaration.clone())
-        }
-        _ => {
-            return Err(
-                "manifest-bound V5 retry dispatch requires paired attempt context declaration reference and digest"
-                    .into(),
-            )
-        }
-    };
+    let sandbox_profile = sandbox_profile.ok_or_else(|| {
+        replay_v5_manifest_binding_error(V5ManifestDeclarationWitnessError::MissingSandboxProfile)
+    })?;
 
     Ok(ManifestDispatchWitnessesReplayState {
         dispatch_verified_signer: signer.cloned(),
         context_manifest: context_manifest.clone(),
         worker_manifest: worker_manifest.clone(),
         sandbox_profile: sandbox_profile.clone(),
-        attempt_context,
+        attempt_context: attempt_context.cloned(),
     })
 }
 
