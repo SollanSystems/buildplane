@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -20,6 +20,7 @@ const hoisted = vi.hoisted(() => {
 		parsePacketImpl: (input: string) => unknown;
 		runPacketImpl: (packet: unknown) => unknown;
 		runPacketAsyncImpl: (packet: unknown) => Promise<unknown>;
+		createPlanLedgerSidecars: boolean;
 	} = {
 		plan: {
 			new_run_id: "fork-run-123",
@@ -32,6 +33,7 @@ const hoisted = vi.hoisted(() => {
 		parsePacketImpl: (input: string) => JSON.parse(input),
 		runPacketImpl: () => ({ run: { status: "passed" } }),
 		runPacketAsyncImpl: async () => ({ run: { status: "passed" } }),
+		createPlanLedgerSidecars: false,
 	};
 
 	const parseUnitPacketMock = vi.fn((input: string) =>
@@ -61,6 +63,16 @@ const hoisted = vi.hoisted(() => {
 				return { status: 0, stdout: "", stderr: "" };
 			}
 			if (args[0] === "fork" && args[1] === "plan") {
+				if (forkState.createPlanLedgerSidecars) {
+					const workspaceIndex = args.indexOf("--workspace");
+					const workspace = args[workspaceIndex + 1];
+					if (workspace) {
+						const ledgerDir = join(workspace, ".buildplane", "ledger");
+						mkdirSync(ledgerDir, { recursive: true });
+						writeFileSync(join(ledgerDir, "events.db-shm"), "generated");
+						writeFileSync(join(ledgerDir, "events.db-wal"), "generated");
+					}
+				}
 				return {
 					status: 0,
 					stdout: `${JSON.stringify(forkState.plan)}\n`,
@@ -243,6 +255,7 @@ beforeEach(() => {
 	forkState.parsePacketImpl = (input: string) => JSON.parse(input);
 	forkState.runPacketImpl = () => ({ run: { status: "passed" } });
 	forkState.runPacketAsyncImpl = async () => ({ run: { status: "passed" } });
+	forkState.createPlanLedgerSidecars = false;
 	process.env.BUILDPLANE_NATIVE_BIN = "/tmp/buildplane-native";
 });
 
@@ -251,6 +264,67 @@ afterEach(() => {
 });
 
 describe("fork CLI orchestration", () => {
+	it("removes only fresh planner-created ledger sidecars before checkout", async () => {
+		forkState.createPlanLedgerSidecars = true;
+		const { root, packetPath } = createTempForkInputs();
+
+		const exitCode = await runCli(
+			[
+				"fork",
+				"--raw",
+				"parent-run-1",
+				"--at",
+				"parent-event-1",
+				"--packet",
+				packetPath,
+				"--workspace",
+				root,
+			],
+			{
+				cwd: root,
+				stdout: () => {},
+				stderr: () => {},
+			},
+		);
+
+		expect(exitCode).toBe(0);
+		expect(
+			existsSync(join(root, ".buildplane", "ledger", "events.db-shm")),
+		).toBe(false);
+		expect(
+			existsSync(join(root, ".buildplane", "ledger", "events.db-wal")),
+		).toBe(false);
+	});
+
+	it("does not remove caller-owned ledger sidecars", async () => {
+		const { root, packetPath } = createTempForkInputs();
+		const ledgerDir = join(root, ".buildplane", "ledger");
+		mkdirSync(ledgerDir, { recursive: true });
+		writeFileSync(join(ledgerDir, "events.db-wal"), "caller-owned");
+
+		const exitCode = await runCli(
+			[
+				"fork",
+				"--raw",
+				"parent-run-1",
+				"--at",
+				"parent-event-1",
+				"--packet",
+				packetPath,
+				"--workspace",
+				root,
+			],
+			{
+				cwd: root,
+				stdout: () => {},
+				stderr: () => {},
+			},
+		);
+
+		expect(exitCode).toBe(0);
+		expect(existsSync(join(ledgerDir, "events.db-wal"))).toBe(true);
+	});
+
 	it("routes fork execution through runPacketAsync for planned model packets", async () => {
 		const rawForkPacket = {
 			unit: {

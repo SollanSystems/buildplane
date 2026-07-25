@@ -5,10 +5,12 @@ import {
 	appendFileSync,
 	copyFileSync,
 	existsSync,
+	lstatSync,
 	mkdirSync,
 	readdirSync,
 	readFileSync,
 	realpathSync,
+	rmSync,
 	statSync,
 	writeFileSync,
 } from "node:fs";
@@ -6060,6 +6062,14 @@ async function runFork(
 	opts.stdout("trusted-receipt: false\n");
 
 	const workspace = resolve(args.value.workspace ?? opts.cwd);
+	// `fork plan` opens the parent tape for replay. SQLite can create these
+	// companion files even though planning is read-only. Capture their state
+	// before planning so we can remove only files created by this invocation
+	// before Git checks out the fork base; never delete a caller-owned sidecar.
+	const preflightLedgerSidecars = [
+		resolve(workspace, ".buildplane", "ledger", "events.db-shm"),
+		resolve(workspace, ".buildplane", "ledger", "events.db-wal"),
+	].map((path) => ({ path, existedBeforePreflight: existsSync(path) }));
 	// Resolve the packet path against the user's cwd BEFORE spawning the native
 	// binary — the plan subprocess runs in `planSpawnCwd` (project root), not
 	// `opts.cwd`, so a relative path like `./packet.json` would otherwise be
@@ -6114,6 +6124,26 @@ async function runFork(
 	} catch (e) {
 		opts.stderr(`fork plan returned invalid JSON: ${String(e)}\n`);
 		return 1;
+	}
+
+	for (const sidecar of preflightLedgerSidecars) {
+		if (sidecar.existedBeforePreflight || !existsSync(sidecar.path)) {
+			continue;
+		}
+		try {
+			if (!lstatSync(sidecar.path).isFile()) {
+				opts.stderr(
+					`fork plan created a non-file ledger sidecar at ${sidecar.path}; refusing checkout\n`,
+				);
+				return 1;
+			}
+			rmSync(sidecar.path);
+		} catch (error) {
+			opts.stderr(
+				`failed to remove fork-plan ledger sidecar at ${sidecar.path}: ${String(error)}\n`,
+			);
+			return 1;
+		}
 	}
 
 	// Phase 2: clean-worktree pre-flight.
