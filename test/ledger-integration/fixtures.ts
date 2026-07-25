@@ -231,8 +231,88 @@ export async function makeLegacyReplayTapeFixture(): Promise<LegacyReplayTapeFix
 	};
 }
 
+export interface LegacyForkPreflightTapeFixture {
+	dir: string;
+	eventsDbPath: string;
+	runId: string;
+	runStartedEventId: string;
+	unitStartedEventId: string;
+	preUnitGitCheckpointEventId: string;
+	cleanup: () => Promise<void>;
+}
+
+/**
+ * Create the minimum unsigned legacy tape needed to reject invalid fork
+ * targets before fork execution. It uses generic native `ledger serve`, never
+ * `run --raw`, and intentionally creates no git repository, kernel key, or
+ * trusted authority artifact.
+ */
+export async function makeLegacyForkPreflightTapeFixture(): Promise<LegacyForkPreflightTapeFixture> {
+	const fixture = await makeLedgerFixture();
+	const runId = "01919000-0000-7000-8000-000000000000";
+	const runStartedEventId = newEventId();
+	const unitStartedEventId = newEventId();
+	const preUnitGitCheckpointEventId = newEventId();
+
+	try {
+		fixture.emitter.emit(
+			"run_started",
+			{
+				RunStartedV1: {
+					packet_hash: `sha256:${"a".repeat(64)}`,
+					git_head: "deadbeef",
+					workspace_path: fixture.dir,
+					config: {},
+					parent_run_id: null,
+				},
+			},
+			{ id: runStartedEventId },
+		);
+		fixture.emitter.emit(
+			"unit_started",
+			{
+				UnitStartedV1: {
+					unit_id: "legacy-fork-preflight-unit",
+					parent_unit_id: null,
+					unit_kind: "command",
+					policy: {},
+				},
+			},
+			{ id: unitStartedEventId, parent: runStartedEventId },
+		);
+		fixture.emitter.emit(
+			"git_checkpoint",
+			{
+				GitCheckpointV1: {
+					boundary: "pre-unit",
+					reference: `refs/buildplane/run/${runId}`,
+					commit_sha: "a".repeat(40),
+					unit_id: "legacy-fork-preflight-unit",
+					git_status: { kind: "ok" },
+				},
+			},
+			{ id: preUnitGitCheckpointEventId, parent: unitStartedEventId },
+		);
+		await fixture.emitter.close();
+	} catch (error) {
+		await fixture.cleanup();
+		throw error;
+	}
+
+	return {
+		dir: fixture.dir,
+		eventsDbPath: join(fixture.dir, ".buildplane", "ledger", "events.db"),
+		runId,
+		runStartedEventId,
+		unitStartedEventId,
+		preUnitGitCheckpointEventId,
+		cleanup: fixture.cleanup,
+	};
+}
+
 export interface BuildplaneRunFixture {
 	dir: string;
+	/** Conventional ledger location; unsafe raw execution does not create it. */
 	eventsDbPath: string;
 	exitCode: number;
 	cleanup: () => Promise<void>;
@@ -241,7 +321,8 @@ export interface BuildplaneRunFixture {
 /** Spin up an isolated workspace, initialize a Buildplane project, write a
  * packet.json, and run `runCli()` in-process with process.cwd() temporarily
  * chdir'd to the tempdir. Restores cwd + BUILDPLANE_NATIVE_BIN in finally.
- * Returns the run result + path to events.db.
+ * Returns the unsafe-run result plus the conventional events.db path; the path
+ * is not populated by raw execution.
  *
  * CRITICAL: tests using this fixture MUST NOT run concurrently with each
  * other (process.chdir is process-global). Vitest's default is worker-per-file
@@ -255,11 +336,10 @@ export interface BuildplaneRunFixture {
 	//  3. Fall back to "buildplane-native" on PATH.
 	// The resolved binary is injected as BUILDPLANE_NATIVE_BIN so the run-cli
  *
- * NOTE on --raw flag: the ledger subprocess integration lives in the "raw"
- * single-shot execution path of run-cli.  The default strategy path bypasses
- * it entirely.  This fixture always passes --raw so that the ledger subprocess
- * is spawned and events.db is populated.  Tests that need the strategy path
- * should call runCli directly instead of using this fixture.
+ * NOTE on --raw: this helper exists for deferred unsafe execution and fork/VCR
+ * migration. Raw execution does not spawn a ledger, create a signed tape, or
+ * issue a trusted receipt. Tests needing a tape must use makeLedgerFixture()
+ * or a purpose-built legacy tape fixture instead.
  */
 export async function makeBuildplaneRunFixture(opts: {
 	packet: unknown;
@@ -301,10 +381,9 @@ export async function makeBuildplaneRunFixture(opts: {
 		// Inject resolved binary path so run-cli can find it from the tempdir.
 		process.env.BUILDPLANE_NATIVE_BIN = nativeBinary;
 
-		// The run-path ledger subprocess now signs with the kernel key (M2-S5). Point
-		// HOME at an isolated temp dir and provision a kernel ed25519 seed so the signed
-		// `ledger serve --sign` subprocess + assertKernelSigningKey resolve it (value is
-		// irrelevant — only that the key exists).
+		// Keep the legacy helper's process environment isolated. This seed is
+		// retained for deferred fixture compatibility only: raw execution does not
+		// start `ledger serve --sign` or use it to create tape authority.
 		const home = join(dir, "home");
 		process.env.HOME = home;
 		const keyDir = join(home, ".buildplane", "keys", "kernel");
@@ -328,9 +407,8 @@ export async function makeBuildplaneRunFixture(opts: {
 		runGit(["add", "packet.json"]);
 		runGit(["commit", "-q", "-m", "buildplane: add packet"]);
 
-		// 4. Run the packet using --raw to engage the ledger-subprocess path.
-		//    The default strategy path does not spawn a ledger subprocess, so
-		//    events.db would be empty/missing without this flag.
+		// 4. Run the packet in the explicit unsafe lane. It does not spawn a
+		//    ledger subprocess or populate events.db.
 		exitCode = await runCli(["run", "--packet", packetPath, "--raw"], {
 			cwd: dir,
 			stdout: (_s: string) => {},
@@ -351,6 +429,8 @@ export async function makeBuildplaneRunFixture(opts: {
 		}
 	}
 
+	// Retained for deferred fork/VCR fixture migration; raw execution may leave
+	// this conventional path absent.
 	const eventsDbPath = join(dir, ".buildplane", "ledger", "events.db");
 
 	const cleanup = async () => {
