@@ -489,6 +489,7 @@ async function executeV3Command(context: {
 			role: "implementer",
 			trustTier: "governed",
 			capabilityBundle: workerInput.packet.capability_bundle,
+			capabilityBundleDigest: workerInput.packet.capability_bundle_digest,
 			governedExecutor: context.actionExecutor,
 			governedDeadlineAtMs: deadlineAtMs,
 			governedNowMs: context.nowMs,

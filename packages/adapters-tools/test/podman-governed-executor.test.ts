@@ -16,6 +16,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { bundleDigest } from "@buildplane/capability-broker";
 import { describe, expect, it, vi } from "vitest";
 import {
 	createActionGateway,
@@ -149,11 +150,13 @@ function governedBundle(
 
 /** Deliberately forged: only the gateway may mint an accepted context. */
 function directContext(worktreeRoot: string): GovernedActionExecutionContext {
+	const capabilityBundle = governedBundle();
 	return {
 		runId: "run-podman-direct",
 		worktreeRoot,
 		role: "implementer",
-		capabilityBundle: governedBundle(),
+		capabilityBundle,
+		capabilityBundleDigest: bundleDigest(capabilityBundle),
 		deadlineAtMs: 4_102_444_800_000,
 		nowMs: () => Date.now(),
 	};
@@ -171,6 +174,7 @@ function gatewayFor(
 		role: "implementer",
 		trustTier: "governed",
 		capabilityBundle: bundle,
+		capabilityBundleDigest: bundleDigest(bundle),
 		governedExecutor,
 		governedDeadlineAtMs: 4_102_444_800_000,
 		...overrides,

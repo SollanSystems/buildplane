@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import {
+	bundleDigest,
 	type CapabilityBundleV0,
 	evaluateToolInvocation,
 	validateCapabilityBundle,
@@ -119,6 +120,12 @@ export interface GovernedActionExecutionContext {
 	readonly role: ActionGatewayRole;
 	readonly capabilityBundle: CapabilityBundleV0;
 	/**
+	 * Canonical digest captured from the same immutable capability bundle the
+	 * gateway evaluated. An OCI executor can carry this identity into its own
+	 * effect evidence without trusting a worker-provided approximation.
+	 */
+	readonly capabilityBundleDigest: string;
+	/**
 	 * Immutable absolute deadline derived by the verified dispatch authority.
 	 * This is intentionally not a per-action allowance: retries and multiple
 	 * effects consume one shared signed compute-time window.
@@ -192,6 +199,13 @@ export interface CreateActionGatewayOptions {
 	readonly trustTier: ActionGatewayTrustTier;
 	/** Required for every governed action; never inferred from a worker prompt. */
 	readonly capabilityBundle?: CapabilityBundleV0;
+	/**
+	 * Required whenever a governed gateway receives a capability bundle. The
+	 * gateway recomputes it from its cloned bundle before it retains an OCI
+	 * executor, so a caller cannot swap in different capability authority after
+	 * admission. Raw mode deliberately ignores this compatibility field.
+	 */
+	readonly capabilityBundleDigest?: string;
 	/** Observational only. A telemetry failure can never change an authorization result. */
 	readonly onReceipt?: (receipt: ActionGatewayReceipt) => void;
 	/**
@@ -245,6 +259,11 @@ export function createActionGateway(
 		options.capabilityBundle === undefined
 			? undefined
 			: cloneImmutableCapabilityBundle(options.capabilityBundle);
+	const capabilityBundleDigest = captureGovernedCapabilityBundleDigest(
+		trustTier,
+		capabilityBundle,
+		options.capabilityBundleDigest,
+	);
 	const governedExecutor =
 		trustTier === "governed" && options.governedExecutor !== undefined
 			? normalizeGovernedExecutor(options.governedExecutor)
@@ -263,6 +282,7 @@ export function createActionGateway(
 		role,
 		trustTier,
 		capabilityBundle,
+		capabilityBundleDigest,
 		governedExecutor,
 		governedDeadlineAtMs,
 		governedNowMs,
@@ -540,6 +560,7 @@ function governedExecutionContext(context: {
 	readonly role: ActionGatewayRole;
 	readonly trustTier: ActionGatewayTrustTier;
 	readonly capabilityBundle?: CapabilityBundleV0;
+	readonly capabilityBundleDigest?: string;
 	readonly governedExecutor?: GovernedActionExecutor;
 	readonly governedDeadlineAtMs?: number;
 	readonly governedNowMs?: () => number;
@@ -547,6 +568,7 @@ function governedExecutionContext(context: {
 	if (
 		context.trustTier !== "governed" ||
 		context.capabilityBundle === undefined ||
+		context.capabilityBundleDigest === undefined ||
 		context.governedExecutor === undefined ||
 		context.governedDeadlineAtMs === undefined ||
 		context.governedNowMs === undefined
@@ -560,6 +582,7 @@ function governedExecutionContext(context: {
 		worktreeRoot: context.worktreeRoot,
 		role: context.role,
 		capabilityBundle: context.capabilityBundle,
+		capabilityBundleDigest: context.capabilityBundleDigest,
 		deadlineAtMs: context.governedDeadlineAtMs,
 		nowMs: context.governedNowMs,
 	});
@@ -1024,6 +1047,28 @@ function cloneImmutableCapabilityBundle(
 			}`,
 		);
 	}
+}
+
+function captureGovernedCapabilityBundleDigest(
+	trustTier: ActionGatewayTrustTier,
+	bundle: CapabilityBundleV0 | undefined,
+	value: unknown,
+): string | undefined {
+	// Raw packets are explicitly unsafe compatibility input. Do not turn this
+	// governed binding into an accidental authorization precondition there.
+	if (trustTier !== "governed" || bundle === undefined) return undefined;
+	if (!isSha256Digest(value)) {
+		throw new TypeError(
+			"ActionGateway governed capabilityBundleDigest must be a canonical sha256 digest.",
+		);
+	}
+	const expected = bundleDigest(bundle);
+	if (value !== expected) {
+		throw new TypeError(
+			"ActionGateway capabilityBundleDigest does not match the governed capability bundle.",
+		);
+	}
+	return expected;
 }
 
 function deepFreeze<T>(value: T): T {

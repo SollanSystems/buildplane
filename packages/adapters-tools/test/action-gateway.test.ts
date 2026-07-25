@@ -1,3 +1,4 @@
+import { bundleDigest } from "@buildplane/capability-broker";
 import { describe, expect, it, vi } from "vitest";
 import {
 	type ActionGatewayReceipt,
@@ -18,6 +19,10 @@ function governedBundle() {
 			run_command: { allowlist: ["git"] },
 		},
 	};
+}
+
+function governedBundleDigest(bundle = governedBundle()): string {
+	return bundleDigest(bundle);
 }
 
 function tools(overrides: Partial<GatewayTools> = {}): GatewayTools {
@@ -71,6 +76,7 @@ function reservedActionGateway(
 			? createActionGateway({
 					...common,
 					capabilityBundle: governedBundle(),
+					capabilityBundleDigest: governedBundleDigest(),
 					governedExecutor: governedExecutor({
 						runCommand: ociRunCommand,
 						writeFile: ociWriteFile,
@@ -114,6 +120,67 @@ describe("ActionGateway", () => {
 		expect(runCommand).not.toHaveBeenCalled();
 	});
 
+	it("requires an exact governed capability bundle digest before OCI can observe an action", () => {
+		const sandboxRunCommand = vi.fn(governedExecutor().runCommand);
+		const bundle = governedBundle();
+		const common = {
+			runId: "run-governed-digest",
+			worktreeRoot: "/worktree",
+			role: "implementer" as const,
+			trustTier: "governed" as const,
+			capabilityBundle: bundle,
+			governedExecutor: governedExecutor({ runCommand: sandboxRunCommand }),
+			governedDeadlineAtMs: 4_102_444_800_000,
+		};
+
+		expect(() => createActionGateway(common)).toThrow(
+			/governed capabilityBundleDigest/i,
+		);
+		expect(() =>
+			createActionGateway({
+				...common,
+				capabilityBundleDigest: `sha256:${"f".repeat(64)}`,
+			}),
+		).toThrow(/does not match the governed capability bundle/i);
+		expect(sandboxRunCommand).not.toHaveBeenCalled();
+
+		const gateway = createActionGateway({
+			...common,
+			capabilityBundleDigest: governedBundleDigest(bundle),
+		});
+		const receipt = gateway.execute({
+			actionId: "action-governed-digest",
+			kind: "process.run",
+			command: "git",
+			args: ["status"],
+		});
+
+		expect(receipt.outcome).toBe("succeeded");
+		expect(sandboxRunCommand).toHaveBeenCalledOnce();
+	});
+
+	it("keeps raw execution compatible when no capability bundle digest is supplied", () => {
+		const runCommand = vi.fn(tools().runCommand);
+		const gateway = createActionGateway({
+			runId: "run-raw-unsigned-bundle",
+			worktreeRoot: "/worktree",
+			role: "implementer",
+			trustTier: "raw",
+			capabilityBundle: governedBundle(),
+			tools: tools({ runCommand }),
+		});
+
+		expect(
+			gateway.execute({
+				actionId: "action-raw-unsigned-bundle",
+				kind: "process.run",
+				command: "git",
+				args: ["status"],
+			}),
+		).toMatchObject({ outcome: "succeeded" });
+		expect(runCommand).toHaveBeenCalledOnce();
+	});
+
 	it("never falls through to injected host tools when a governed sandbox executor is absent", () => {
 		const hostRunCommand = vi.fn(tools().runCommand);
 		const hostWriteFile = vi.fn(tools().writeFile);
@@ -123,6 +190,7 @@ describe("ActionGateway", () => {
 			role: "implementer",
 			trustTier: "governed",
 			capabilityBundle: governedBundle(),
+			capabilityBundleDigest: governedBundleDigest(),
 			// `tools` intentionally models the legacy host implementation. It must
 			// not be selected merely because the governed caller supplied it.
 			tools: tools({
@@ -162,6 +230,7 @@ describe("ActionGateway", () => {
 			role: "implementer",
 			trustTier: "governed",
 			capabilityBundle: governedBundle(),
+			capabilityBundleDigest: governedBundleDigest(),
 			tools: tools({ runCommand: hostRunCommand }),
 			governedExecutor: governedExecutor({
 				runCommand: sandboxRunCommand,
@@ -185,6 +254,7 @@ describe("ActionGateway", () => {
 				worktreeRoot: "/worktree",
 				role: "implementer",
 				capabilityBundle: expect.objectContaining({ bundleId: "gateway-test" }),
+				capabilityBundleDigest: governedBundleDigest(),
 			}),
 		);
 		expect(hostRunCommand).not.toHaveBeenCalled();
@@ -199,6 +269,7 @@ describe("ActionGateway", () => {
 			role: "implementer",
 			trustTier: "governed",
 			capabilityBundle: governedBundle(),
+			capabilityBundleDigest: governedBundleDigest(),
 			governedExecutor: governedExecutor({ runCommand: sandboxRunCommand }),
 			governedDeadlineAtMs: exhaustedAtMs,
 			governedNowMs: () => exhaustedAtMs,
@@ -228,6 +299,7 @@ describe("ActionGateway", () => {
 				role: "implementer",
 				trustTier: "governed",
 				capabilityBundle: governedBundle(),
+				capabilityBundleDigest: governedBundleDigest(),
 				governedExecutor: governedExecutor({ runCommand: sandboxRunCommand }),
 				governedDeadlineAtMs: Number.MAX_SAFE_INTEGER,
 			}),
@@ -260,6 +332,7 @@ describe("ActionGateway", () => {
 				role: "implementer",
 				trustTier: "governed",
 				capabilityBundle: governedBundle(),
+				capabilityBundleDigest: governedBundleDigest(),
 				governedExecutor: forgedExecutor,
 			}),
 		).toThrow(/trusted rootless OCI executor factory/i);
@@ -275,6 +348,7 @@ describe("ActionGateway", () => {
 			role: "implementer",
 			trustTier: "governed",
 			capabilityBundle: governedBundle(),
+			capabilityBundleDigest: governedBundleDigest(),
 			governedExecutor: governedExecutor({ runCommand: sandboxRunCommand }),
 		});
 
@@ -294,17 +368,19 @@ describe("ActionGateway", () => {
 
 	it("evaluates governed filesystem capabilities at the gateway before the sandbox executor", () => {
 		const sandboxWriteFile = vi.fn(governedExecutor().writeFile);
+		const narrowBundle = {
+			schemaVersion: "buildplane.capability_bundle.v0" as const,
+			bundleId: "narrow-gateway-test",
+			fsWrite: ["src/**"],
+			tools: { write_file: { enabled: true } },
+		};
 		const gateway = createActionGateway({
 			runId: "run-governed-write-broker",
 			worktreeRoot: "/worktree",
 			role: "implementer",
 			trustTier: "governed",
-			capabilityBundle: {
-				schemaVersion: "buildplane.capability_bundle.v0",
-				bundleId: "narrow-gateway-test",
-				fsWrite: ["src/**"],
-				tools: { write_file: { enabled: true } },
-			},
+			capabilityBundle: narrowBundle,
+			capabilityBundleDigest: bundleDigest(narrowBundle),
 			governedExecutor: governedExecutor({ writeFile: sandboxWriteFile }),
 		});
 
@@ -330,6 +406,7 @@ describe("ActionGateway", () => {
 				role: "implementer",
 				trustTier: "governed",
 				capabilityBundle: governedBundle(),
+				capabilityBundleDigest: governedBundleDigest(),
 				governedExecutor: governedExecutor({
 					sandbox: {
 						...governedExecutor().sandbox,
@@ -352,6 +429,7 @@ describe("ActionGateway", () => {
 			role,
 			trustTier: "governed",
 			capabilityBundle: governedBundle(),
+			capabilityBundleDigest: governedBundleDigest(),
 			governedExecutor: governedExecutor({ runCommand: sandboxRunCommand }),
 			governedDeadlineAtMs: 4_102_444_800_000,
 		});
@@ -383,6 +461,7 @@ describe("ActionGateway", () => {
 			role,
 			trustTier: "governed",
 			capabilityBundle: governedBundle(),
+			capabilityBundleDigest: governedBundleDigest(),
 			governedExecutor: governedExecutor({ writeFile: sandboxWriteFile }),
 			governedDeadlineAtMs: 4_102_444_800_000,
 		});
@@ -478,6 +557,7 @@ describe("ActionGateway", () => {
 			role: "implementer",
 			trustTier: "governed",
 			capabilityBundle: governedBundle(),
+			capabilityBundleDigest: governedBundleDigest(),
 			governedExecutor: governedExecutor({ runCommand: sandboxRunCommand }),
 			onReceipt,
 		});
