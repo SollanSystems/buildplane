@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -66,7 +66,7 @@ describe("cwd-isolation canary", () => {
 		}
 	}, 30_000);
 
-	it("resolves the native binary independently of the caller cwd", async () => {
+	it("keeps unsafe execution from creating a tape when the caller cwd is unrelated", async () => {
 		const originalCwd = process.cwd();
 		const unrelatedCwd = mkdtempSync(join(tmpdir(), "buildplane-native-cwd-"));
 		process.chdir(unrelatedCwd);
@@ -92,12 +92,13 @@ describe("cwd-isolation canary", () => {
 			});
 
 			expect(fixture.exitCode).toBe(0);
-			expect(existsSync(fixture.eventsDbPath)).toBe(true);
+			expect(existsSync(fixture.eventsDbPath)).toBe(false);
 		} finally {
 			if (fixture) {
 				await fixture.cleanup();
 			}
 			process.chdir(originalCwd);
+			rmSync(unrelatedCwd, { recursive: true, force: true });
 		}
 	}, 30_000);
 
