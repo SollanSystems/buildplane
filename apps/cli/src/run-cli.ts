@@ -885,7 +885,7 @@ function formatRunHelp(): string[] {
 		"  Options:",
 		"    --approve        Request host-brokered governed admission; blocks until a privileged authority broker is available",
 		"    --resume <ref>   Ask the privileged host to reconcile an existing workflow; requires --approve and cannot take a packet or envelope",
-		"    --envelope <path> Supply a sealed DispatchEnvelopeV3 for host-verified preauthorized admission; the CLI checks closed shape, digest, and authority window while the host verifies its signed tape",
+		"    --envelope <path> Supply a sealed DispatchEnvelopeV3 for host-verified preauthorized admission, or a manifest-bound DispatchEnvelopeV5 for structural-only host-owned preview",
 		"    --raw            Explicitly unsafe legacy execution; emits no trusted receipt",
 		"    --tui            Interactive terminal UI (unsafe --raw lane only)",
 		"    --json           Machine-readable output",
@@ -935,8 +935,20 @@ type RunCommandArguments =
 	| GraphRunCommandArguments
 	| RecoveryRunCommandArguments;
 
+interface DispatchEnvelopeManifestDeclarationPreview {
+	readonly eventRef: string;
+	readonly digest: string;
+}
+
+interface DispatchEnvelopeV5ManifestDeclarationsPreview {
+	readonly context: DispatchEnvelopeManifestDeclarationPreview;
+	readonly worker: DispatchEnvelopeManifestDeclarationPreview;
+	readonly sandboxProfile: DispatchEnvelopeManifestDeclarationPreview;
+	readonly attemptContext?: DispatchEnvelopeManifestDeclarationPreview;
+}
+
 interface DispatchEnvelopePreview {
-	readonly schemaVersion: 1 | 2 | 3;
+	readonly schemaVersion: 1 | 2 | 3 | 5;
 	/** Parsing is structural only; the native tape/reducer has not verified authority. */
 	readonly verification: "structural_only";
 	readonly workflowId: string;
@@ -956,12 +968,41 @@ interface DispatchEnvelopePreview {
 	readonly actionEvidenceVersion?: "sealed-v2" | "sealed_v3";
 	/** Required for newly issued sealed_v3 authority; compared with the original packet bytes before broker resolution. */
 	readonly governedPacketDigest?: string;
+	/** V5 exposes only immutable declaration identity, not locally usable authority. */
+	readonly manifestDeclarations?: DispatchEnvelopeV5ManifestDeclarationsPreview;
 }
 
 interface LoadedDispatchEnvelopePreview {
 	/** Exact bytes passed to the host after local structural validation. */
 	readonly source: string;
 	readonly preview: DispatchEnvelopePreview;
+}
+
+interface ParsedDispatchEnvelopeV5Preview {
+	readonly dispatchV4: {
+		readonly dispatchV3: {
+			readonly body: Omit<
+				DispatchEnvelopePreview,
+				| "schemaVersion"
+				| "verification"
+				| "envelopeDigest"
+				| "actionEvidenceVersion"
+				| "governedPacketDigest"
+				| "manifestDeclarations"
+			>;
+			readonly actionEvidenceVersion: "sealed-v2" | "sealed_v3";
+			readonly governedPacketDigest?: string;
+		};
+	};
+	readonly contextManifestDeclarationEventRef: string;
+	readonly contextManifestDigest: string;
+	readonly workerManifestDeclarationEventRef: string;
+	readonly workerManifestDigest: string;
+	readonly sandboxProfileDeclarationEventRef: string;
+	readonly sandboxProfileDigest: string;
+	readonly attemptContextDeclarationEventRef?: string;
+	readonly attemptContextDigest?: string;
+	readonly envelopeDigest: string;
 }
 
 interface GovernedSandboxPreview {
@@ -2031,6 +2072,37 @@ const NATIVE_DISPATCH_ENVELOPE_V3_FIELDS = [
 	"envelope_digest",
 ] as const;
 
+const NATIVE_DISPATCH_ENVELOPE_V4_FIELDS = [
+	"dispatch_v3",
+	"workflow_graph_digest",
+	"workflow_graph_declaration_event_ref",
+	"envelope_digest",
+] as const;
+
+const NATIVE_DISPATCH_ENVELOPE_V5_FIELDS = [
+	"dispatch_v4",
+	"context_manifest_declaration_event_ref",
+	"context_manifest_digest",
+	"worker_manifest_declaration_event_ref",
+	"worker_manifest_digest",
+	"sandbox_profile_declaration_event_ref",
+	"sandbox_profile_digest",
+	"attempt_context_declaration_event_ref",
+	"attempt_context_digest",
+	"envelope_digest",
+] as const;
+
+const NATIVE_DISPATCH_ENVELOPE_V5_REQUIRED_FIELDS = [
+	"dispatch_v4",
+	"context_manifest_declaration_event_ref",
+	"context_manifest_digest",
+	"worker_manifest_declaration_event_ref",
+	"worker_manifest_digest",
+	"sandbox_profile_declaration_event_ref",
+	"sandbox_profile_digest",
+	"envelope_digest",
+] as const;
+
 function readClosedPreviewRecord(
 	value: unknown,
 	label: string,
@@ -2204,6 +2276,141 @@ function translateNativeDispatchEnvelopeV3Preview(
 	};
 }
 
+/**
+ * V5 is a native-ledger, manifest-bound authority record. Its nested V4/V3
+ * values must retain the exact native wire shape during translation so the
+ * kernel's closed V5 parser can verify every nested digest and cross-binding.
+ * This only creates a structural preview; it never turns the record into a
+ * locally usable admission, tape, capability, or OCI authority.
+ */
+function translateNativeDispatchEnvelopeV5Preview(
+	raw: unknown,
+): unknown | undefined {
+	const outer = asPreviewRecord(raw);
+	if (!outer) return undefined;
+
+	let envelopeValue: unknown;
+	if (Object.hasOwn(outer, "DispatchEnvelopeV5")) {
+		envelopeValue = readClosedPreviewRecord(
+			outer,
+			"DispatchEnvelopeV5 payload",
+			["DispatchEnvelopeV5"],
+		).DispatchEnvelopeV5;
+	} else if (Object.hasOwn(outer, "dispatch_v4")) {
+		// Native ledger exports can omit the external event tag, but not any
+		// nested schema fields.
+		envelopeValue = outer;
+	} else {
+		return undefined;
+	}
+
+	const envelope = readClosedPreviewRecord(
+		envelopeValue,
+		"DispatchEnvelopeV5",
+		NATIVE_DISPATCH_ENVELOPE_V5_FIELDS,
+		NATIVE_DISPATCH_ENVELOPE_V5_REQUIRED_FIELDS,
+	);
+	const dispatchV4 = readClosedPreviewRecord(
+		envelope.dispatch_v4,
+		"DispatchEnvelopeV5.dispatch_v4",
+		NATIVE_DISPATCH_ENVELOPE_V4_FIELDS,
+	);
+	const dispatchV3 = readClosedPreviewRecord(
+		dispatchV4.dispatch_v3,
+		"DispatchEnvelopeV5.dispatch_v4.dispatch_v3",
+		NATIVE_DISPATCH_ENVELOPE_V3_FIELDS,
+		[
+			"body",
+			"action_evidence_version",
+			"repository_binding_digest",
+			"ledger_authority_realm_digest",
+			"envelope_digest",
+		],
+	);
+
+	return {
+		dispatchV4: {
+			schemaVersion: 4,
+			dispatchV3: {
+				schemaVersion: 3,
+				body: translateNativeDispatchEnvelopeV2Body(
+					dispatchV3.body,
+					"DispatchEnvelopeV5.dispatch_v4.dispatch_v3.body",
+				),
+				actionEvidenceVersion: dispatchV3.action_evidence_version,
+				repositoryBindingDigest: dispatchV3.repository_binding_digest,
+				ledgerAuthorityRealmDigest: dispatchV3.ledger_authority_realm_digest,
+				...(Object.hasOwn(dispatchV3, "governed_packet_digest")
+					? { governedPacketDigest: dispatchV3.governed_packet_digest }
+					: {}),
+				envelopeDigest: dispatchV3.envelope_digest,
+			},
+			workflowGraphDigest: dispatchV4.workflow_graph_digest,
+			workflowGraphDeclarationEventRef:
+				dispatchV4.workflow_graph_declaration_event_ref,
+			envelopeDigest: dispatchV4.envelope_digest,
+		},
+		contextManifestDeclarationEventRef:
+			envelope.context_manifest_declaration_event_ref,
+		contextManifestDigest: envelope.context_manifest_digest,
+		workerManifestDeclarationEventRef:
+			envelope.worker_manifest_declaration_event_ref,
+		workerManifestDigest: envelope.worker_manifest_digest,
+		sandboxProfileDeclarationEventRef:
+			envelope.sandbox_profile_declaration_event_ref,
+		sandboxProfileDigest: envelope.sandbox_profile_digest,
+		...(Object.hasOwn(envelope, "attempt_context_declaration_event_ref")
+			? {
+					attemptContextDeclarationEventRef:
+						envelope.attempt_context_declaration_event_ref,
+				}
+			: {}),
+		...(Object.hasOwn(envelope, "attempt_context_digest")
+			? { attemptContextDigest: envelope.attempt_context_digest }
+			: {}),
+		envelopeDigest: envelope.envelope_digest,
+	};
+}
+
+function previewDispatchEnvelopeV5(
+	parsed: ParsedDispatchEnvelopeV5Preview,
+): DispatchEnvelopePreview {
+	const dispatchV3 = parsed.dispatchV4.dispatchV3;
+	const attemptContext =
+		parsed.attemptContextDeclarationEventRef === undefined ||
+		parsed.attemptContextDigest === undefined
+			? undefined
+			: {
+					eventRef: parsed.attemptContextDeclarationEventRef,
+					digest: parsed.attemptContextDigest,
+				};
+	return {
+		schemaVersion: 5,
+		verification: "structural_only",
+		...dispatchV3.body,
+		actionEvidenceVersion: dispatchV3.actionEvidenceVersion,
+		...(dispatchV3.governedPacketDigest === undefined
+			? {}
+			: { governedPacketDigest: dispatchV3.governedPacketDigest }),
+		manifestDeclarations: {
+			context: {
+				eventRef: parsed.contextManifestDeclarationEventRef,
+				digest: parsed.contextManifestDigest,
+			},
+			worker: {
+				eventRef: parsed.workerManifestDeclarationEventRef,
+				digest: parsed.workerManifestDigest,
+			},
+			sandboxProfile: {
+				eventRef: parsed.sandboxProfileDeclarationEventRef,
+				digest: parsed.sandboxProfileDigest,
+			},
+			...(attemptContext === undefined ? {} : { attemptContext }),
+		},
+		envelopeDigest: parsed.envelopeDigest,
+	};
+}
+
 async function loadDispatchEnvelopePreview(
 	path: string,
 ): Promise<LoadedDispatchEnvelopePreview> {
@@ -2232,13 +2439,22 @@ async function loadDispatchEnvelopePreview(
 			readonly governedPacketDigest?: string;
 			readonly envelopeDigest: string;
 		};
+		parseDispatchEnvelopeV5: (
+			input: unknown,
+		) => ParsedDispatchEnvelopeV5Preview;
 	};
 	const source = readFileSync(path, "utf8");
 	const raw: unknown = JSON.parse(source);
+	const rawRecord = asPreviewRecord(raw);
 	const loaded = (
 		preview: DispatchEnvelopePreview,
 	): LoadedDispatchEnvelopePreview => Object.freeze({ source, preview });
-	if (asPreviewRecord(raw)?.schemaVersion === 3) {
+	if (rawRecord && Object.hasOwn(rawRecord, "dispatchV4")) {
+		return loaded(
+			previewDispatchEnvelopeV5(kernel.parseDispatchEnvelopeV5(raw)),
+		);
+	}
+	if (rawRecord?.schemaVersion === 3) {
 		const parsed = kernel.parseDispatchEnvelopeV3(raw);
 		return loaded({
 			schemaVersion: 3,
@@ -2251,7 +2467,7 @@ async function loadDispatchEnvelopePreview(
 			envelopeDigest: parsed.envelopeDigest,
 		});
 	}
-	if (asPreviewRecord(raw)?.schemaVersion === 2) {
+	if (rawRecord?.schemaVersion === 2) {
 		const parsed = kernel.parseDispatchEnvelopeV2(raw);
 		return loaded({
 			schemaVersion: 2,
@@ -2259,6 +2475,14 @@ async function loadDispatchEnvelopePreview(
 			...parsed.body,
 			envelopeDigest: parsed.envelopeDigest,
 		});
+	}
+	const nativeV5Preview = translateNativeDispatchEnvelopeV5Preview(raw);
+	if (nativeV5Preview !== undefined) {
+		return loaded(
+			previewDispatchEnvelopeV5(
+				kernel.parseDispatchEnvelopeV5(nativeV5Preview),
+			),
+		);
 	}
 	const nativeV3Preview = translateNativeDispatchEnvelopeV3Preview(raw);
 	if (nativeV3Preview !== undefined) {
@@ -2359,11 +2583,15 @@ function buildGovernedRunPreview(
 	if (!envelope) {
 		blockers.push(
 			options.approvalRequested
-				? "Governed admission was requested, but no DispatchEnvelopeV1, V2, or V3 was supplied."
-				: "No signed DispatchEnvelopeV1, V2, or V3 or explicit operator approval was supplied.",
+				? "Governed admission was requested, but no DispatchEnvelopeV1, V2, V3, or V5 was supplied."
+				: "No signed DispatchEnvelopeV1, V2, V3, or V5 or explicit operator approval was supplied.",
 		);
 	} else {
-		if (envelope.schemaVersion !== 3) {
+		if (envelope.schemaVersion === 5) {
+			blockers.push(
+				"DispatchEnvelopeV5 admission, signed-tape verification, capability authorization, and OCI sandbox initialization are host-owned; this CLI exposes only a structural preview.",
+			);
+		} else if (envelope.schemaVersion !== 3) {
 			blockers.push(
 				"Governed execution requires a sealed DispatchEnvelopeV3; V1 and V2 envelopes are preview-only compatibility artifacts.",
 			);
@@ -2436,9 +2664,15 @@ function buildGovernedRunPreview(
 	blockers.push(
 		"Governed execution is unavailable until signed-tape verification, ActionGateway authorization, and OCI sandbox initialization are configured.",
 	);
-	blockers.push(
-		"Governed authority broker is unavailable; no approval was recorded and no execution authority was created.",
-	);
+	if (envelope?.schemaVersion === 5) {
+		blockers.push(
+			"DispatchEnvelopeV5 preview never resolves a host broker, opens a candidate session, constructs a legacy bundle, creates a tape/run, invokes a worker, or mutates the root.",
+		);
+	} else {
+		blockers.push(
+			"Governed authority broker is unavailable; no approval was recorded and no execution authority was created.",
+		);
+	}
 
 	return {
 		governance: "preview",
@@ -2482,6 +2716,24 @@ function formatGovernedRunPreview(preview: GovernedRunPreview): string[] {
 								`envelope-action-evidence: ${preview.envelope.actionEvidenceVersion}`,
 							]),
 				];
+	const declarations = preview.envelope?.manifestDeclarations;
+	const declarationLines =
+		declarations === undefined
+			? []
+			: [
+					`context-manifest-declaration-event-ref: ${declarations.context.eventRef}`,
+					`context-manifest-digest: ${declarations.context.digest}`,
+					`worker-manifest-declaration-event-ref: ${declarations.worker.eventRef}`,
+					`worker-manifest-digest: ${declarations.worker.digest}`,
+					`sandbox-profile-declaration-event-ref: ${declarations.sandboxProfile.eventRef}`,
+					`sandbox-profile-digest: ${declarations.sandboxProfile.digest}`,
+					...(declarations.attemptContext === undefined
+						? []
+						: [
+								`attempt-context-declaration-event-ref: ${declarations.attemptContext.eventRef}`,
+								`attempt-context-digest: ${declarations.attemptContext.digest}`,
+							]),
+				];
 
 	return [
 		"Governed run preview: execution blocked",
@@ -2496,6 +2748,7 @@ function formatGovernedRunPreview(preview: GovernedRunPreview): string[] {
 		`approval: ${preview.approval.requested ? "requested" : "not requested"} (${preview.approval.state})`,
 		`authority-broker: ${preview.authorityBroker.state} (${preview.authorityBroker.code})`,
 		...envelopeLines,
+		...declarationLines,
 		`governed-sandbox: ${preview.sandbox.state} (${preview.sandbox.host.environment})`,
 		"blockers:",
 		...preview.blockers.map((blocker) => `  - ${blocker}`),
@@ -3222,6 +3475,14 @@ async function runGovernedRunCommand(
 			runArguments.json,
 			options.stdout,
 		);
+	}
+
+	// V5 binds host-owned manifest declarations. Its closed parser has already
+	// checked nested V4/V3 canonical digests and retry context, but this CLI has
+	// no local V5 admission, tape, capability, or OCI authority. Do not let it
+	// enter the V3 preauthorization path or resolve a host broker.
+	if (envelope?.schemaVersion === 5) {
+		return emitGovernedRunPreview(preview, runArguments.json, options.stdout);
 	}
 
 	if (loadedEnvelope !== undefined) {

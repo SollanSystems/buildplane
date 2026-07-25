@@ -12,8 +12,14 @@ import {
 	bundleDigest,
 	CAPABILITY_BUNDLE_SCHEMA_VERSION,
 } from "@buildplane/capability-broker";
+import type {
+	DispatchEnvelopeV4,
+	DispatchEnvelopeV5,
+} from "@buildplane/kernel";
 import {
 	canonicalDispatchEnvelopeV3Digest,
+	canonicalDispatchEnvelopeV4Digest,
+	canonicalDispatchEnvelopeV5Digest,
 	canonicalGovernedUnitPacketV1Digest,
 } from "@buildplane/kernel";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -173,6 +179,99 @@ function createPreauthorizedEnvelope(
 	};
 }
 
+function createNativeV5Envelope(
+	root: string,
+	packet: Record<string, unknown>,
+): Record<string, unknown> {
+	const dispatchV3 = createPreauthorizedEnvelope(
+		root,
+		packet,
+	) as unknown as DispatchEnvelopeV4["dispatchV3"];
+	const dispatchV4Draft: Omit<DispatchEnvelopeV4, "envelopeDigest"> = {
+		schemaVersion: 4,
+		dispatchV3,
+		workflowGraphDigest: digest("0"),
+		workflowGraphDeclarationEventRef: "01919000-0000-7000-8000-000000000070",
+	};
+	const dispatchV4: DispatchEnvelopeV4 = {
+		...dispatchV4Draft,
+		envelopeDigest: canonicalDispatchEnvelopeV4Digest(dispatchV4Draft),
+	};
+	const dispatchV5Draft: Omit<DispatchEnvelopeV5, "envelopeDigest"> = {
+		dispatchV4,
+		contextManifestDeclarationEventRef: "01919000-0000-7000-8000-000000000071",
+		contextManifestDigest: dispatchV3.body.contextManifestDigest,
+		workerManifestDeclarationEventRef: "01919000-0000-7000-8000-000000000072",
+		workerManifestDigest: dispatchV3.body.workerManifestDigest,
+		sandboxProfileDeclarationEventRef: "01919000-0000-7000-8000-000000000073",
+		sandboxProfileDigest: dispatchV3.body.sandboxProfileDigest,
+	};
+	const dispatchV5: DispatchEnvelopeV5 = {
+		...dispatchV5Draft,
+		envelopeDigest: canonicalDispatchEnvelopeV5Digest(dispatchV5Draft),
+	};
+	const body = dispatchV5.dispatchV4.dispatchV3.body;
+	const dispatchV3Native = {
+		body: {
+			workflow_id: body.workflowId,
+			workflow_revision: body.workflowRevision,
+			unit_id: body.unitId,
+			attempt: body.attempt,
+			execution_role: body.executionRole,
+			commit_mode: body.commitMode,
+			provenance_ref: body.provenanceRef,
+			base_commit_sha: body.baseCommitSha,
+			capability_bundle_digest: body.capabilityBundleDigest,
+			acceptance_contract_digest: body.acceptanceContractDigest,
+			context_manifest_digest: body.contextManifestDigest,
+			worker_manifest_digest: body.workerManifestDigest,
+			sandbox_profile_digest: body.sandboxProfileDigest,
+			budget: {
+				max_tokens: body.budget.maxTokens,
+				max_compute_time_ms: body.budget.maxComputeTimeMs,
+			},
+			trust_tier: body.trustTier,
+			idempotency_key: body.idempotencyKey,
+			issued_at: body.issuedAt,
+			expires_at: body.expiresAt,
+		},
+		action_evidence_version:
+			dispatchV5.dispatchV4.dispatchV3.actionEvidenceVersion,
+		repository_binding_digest:
+			dispatchV5.dispatchV4.dispatchV3.repositoryBindingDigest,
+		ledger_authority_realm_digest:
+			dispatchV5.dispatchV4.dispatchV3.ledgerAuthorityRealmDigest,
+		...(dispatchV5.dispatchV4.dispatchV3.governedPacketDigest === undefined
+			? {}
+			: {
+					governed_packet_digest:
+						dispatchV5.dispatchV4.dispatchV3.governedPacketDigest,
+				}),
+		envelope_digest: dispatchV5.dispatchV4.dispatchV3.envelopeDigest,
+	};
+	return {
+		DispatchEnvelopeV5: {
+			dispatch_v4: {
+				dispatch_v3: dispatchV3Native,
+				workflow_graph_digest: dispatchV5.dispatchV4.workflowGraphDigest,
+				workflow_graph_declaration_event_ref:
+					dispatchV5.dispatchV4.workflowGraphDeclarationEventRef,
+				envelope_digest: dispatchV5.dispatchV4.envelopeDigest,
+			},
+			context_manifest_declaration_event_ref:
+				dispatchV5.contextManifestDeclarationEventRef,
+			context_manifest_digest: dispatchV5.contextManifestDigest,
+			worker_manifest_declaration_event_ref:
+				dispatchV5.workerManifestDeclarationEventRef,
+			worker_manifest_digest: dispatchV5.workerManifestDigest,
+			sandbox_profile_declaration_event_ref:
+				dispatchV5.sandboxProfileDeclarationEventRef,
+			sandbox_profile_digest: dispatchV5.sandboxProfileDigest,
+			envelope_digest: dispatchV5.envelopeDigest,
+		},
+	};
+}
+
 function writeEnvelope(
 	root: string,
 	envelope: Record<string, unknown>,
@@ -227,6 +326,14 @@ function expectRootUnchanged(
 	before: ReturnType<typeof snapshotRoot>,
 ): void {
 	expect(snapshotRoot(root)).toEqual(before);
+}
+
+function expectGovernedLedgerAbsent(root: string): void {
+	const ledgerDirectory = join(root, ".buildplane", "ledger");
+	expect(existsSync(ledgerDirectory)).toBe(false);
+	expect(existsSync(join(ledgerDirectory, "events.db"))).toBe(false);
+	expect(existsSync(join(ledgerDirectory, "events.db-wal"))).toBe(false);
+	expect(existsSync(join(ledgerDirectory, "events.db-shm"))).toBe(false);
 }
 
 function digest(character: string): string {
@@ -308,6 +415,195 @@ describe("governed run front door", () => {
 			status: "blocked",
 			executionStarted: false,
 		});
+		expectRootUnchanged(root, before);
+	});
+
+	it("renders a valid native V5 envelope only as a host-owned structural preview", async () => {
+		const root = createGitProject();
+		const packet = createGovernedPacket("native-v5-preview");
+		const packetPath = writePacket(root, packet);
+		const envelopePath = writeEnvelope(
+			root,
+			createNativeV5Envelope(root, packet),
+		);
+		const before = snapshotRoot(root);
+		const stateBefore = readFileSync(
+			join(root, ".buildplane", "state.db"),
+			"utf8",
+		);
+		const openCandidateSession = vi.fn();
+		hostResolver.resolve.mockResolvedValue({
+			kind: "host-owned-governed-broker-v1",
+			openCandidateSession,
+		} as unknown as HostOwnedGovernedBrokerV1);
+
+		const result = await runCliCapture(
+			root,
+			["run", "--packet", packetPath, "--envelope", envelopePath, "--json"],
+			legacyBundleMustNotBeConstructed(),
+		);
+
+		expect(result.exitCode).toBe(2);
+		expect(result.stderr).toEqual([]);
+		expect(hostResolver.resolve).not.toHaveBeenCalled();
+		expect(openCandidateSession).not.toHaveBeenCalled();
+		expect(JSON.parse(result.stdout.join("\n"))).toMatchObject({
+			governance: "preview",
+			status: "blocked",
+			executionStarted: false,
+			envelope: {
+				schemaVersion: 5,
+				verification: "structural_only",
+				workflowId: "workflow-native-v5-preview",
+				unitId: "native-v5-preview",
+				manifestDeclarations: {
+					context: {
+						eventRef: "01919000-0000-7000-8000-000000000071",
+						digest: digest("b"),
+					},
+					worker: {
+						eventRef: "01919000-0000-7000-8000-000000000072",
+						digest: digest("c"),
+					},
+					sandboxProfile: {
+						eventRef: "01919000-0000-7000-8000-000000000073",
+						digest: digest("d"),
+					},
+				},
+			},
+			blockers: expect.arrayContaining([
+				expect.stringMatching(
+					/V5 admission.*tape.*capability.*OCI.*host-owned/i,
+				),
+			]),
+		});
+		expectRootUnchanged(root, before);
+		expect(readFileSync(join(root, ".buildplane", "state.db"), "utf8")).toBe(
+			stateBefore,
+		);
+		expectGovernedLedgerAbsent(root);
+	});
+
+	it("rejects malformed native V5 envelopes before host resolution", async () => {
+		const cases: readonly {
+			readonly id: string;
+			readonly name: string;
+			readonly mutate: (
+				payload: Record<string, unknown>,
+			) => Record<string, unknown>;
+		}[] = [
+			{
+				id: "unknown",
+				name: "an unknown V5 field",
+				mutate: (payload) => ({ ...payload, injected: true }),
+			},
+			{
+				id: "digest-mismatch",
+				name: "a canonical V5 digest mismatch",
+				mutate: (payload) => ({ ...payload, envelope_digest: digest("0") }),
+			},
+			{
+				id: "manifest-mismatch",
+				name: "a nested manifest binding mismatch",
+				mutate: (payload) => ({
+					...payload,
+					context_manifest_digest: digest("e"),
+				}),
+			},
+			{
+				id: "retry-context",
+				name: "incomplete retry context",
+				mutate: (payload) => ({
+					...payload,
+					attempt_context_declaration_event_ref:
+						"01919000-0000-7000-8000-000000000074",
+				}),
+			},
+		];
+
+		for (const testCase of cases) {
+			const root = createGitProject();
+			const packet = createGovernedPacket(`native-v5-${testCase.id}`);
+			const packetPath = writePacket(root, packet);
+			const nativeEnvelope = createNativeV5Envelope(root, packet);
+			const payload = nativeEnvelope.DispatchEnvelopeV5 as Record<
+				string,
+				unknown
+			>;
+			const envelopePath = writeEnvelope(root, {
+				DispatchEnvelopeV5: testCase.mutate(payload),
+			});
+			const before = snapshotRoot(root);
+			const stateBefore = readFileSync(
+				join(root, ".buildplane", "state.db"),
+				"utf8",
+			);
+			const openCandidateSession = vi.fn();
+			hostResolver.resolve.mockResolvedValue({
+				kind: "host-owned-governed-broker-v1",
+				openCandidateSession,
+			} as unknown as HostOwnedGovernedBrokerV1);
+
+			const result = await runCliCapture(
+				root,
+				["run", "--packet", packetPath, "--envelope", envelopePath, "--json"],
+				legacyBundleMustNotBeConstructed(),
+			);
+
+			expect(result.exitCode, testCase.name).toBe(1);
+			expect(JSON.parse(result.stdout.join("\n"))).toMatchObject({
+				error: { code: "CLI_ERROR" },
+			});
+			expect(hostResolver.resolve, testCase.name).not.toHaveBeenCalled();
+			expect(openCandidateSession, testCase.name).not.toHaveBeenCalled();
+			expectRootUnchanged(root, before);
+			expect(readFileSync(join(root, ".buildplane", "state.db"), "utf8")).toBe(
+				stateBefore,
+			);
+			expectGovernedLedgerAbsent(root);
+		}
+	});
+
+	it("rejects an unsafe raw request combined with a V5 envelope before any host boundary", async () => {
+		const root = createGitProject();
+		const packet = createGovernedPacket("native-v5-raw-rejected");
+		const packetPath = writePacket(root, packet);
+		const envelopePath = writeEnvelope(
+			root,
+			createNativeV5Envelope(root, packet),
+		);
+		const before = snapshotRoot(root);
+		hostResolver.resolve.mockResolvedValue({
+			kind: "host-owned-governed-broker-v1",
+		} as unknown as HostOwnedGovernedBrokerV1);
+
+		const result = await runCliCapture(
+			root,
+			[
+				"run",
+				"--raw",
+				"--packet",
+				packetPath,
+				"--envelope",
+				envelopePath,
+				"--json",
+			],
+			{
+				...legacyBundleMustNotBeConstructed(),
+				parsePacket: () => {
+					throw new Error("raw/envelope rejection must not parse a packet");
+				},
+			},
+		);
+
+		expect(result.exitCode).toBe(1);
+		expect(JSON.parse(result.stdout.join("\n"))).toMatchObject({
+			error: {
+				code: "CLI_ERROR",
+				message: expect.stringMatching(/--raw cannot be combined.*--envelope/i),
+			},
+		});
+		expect(hostResolver.resolve).not.toHaveBeenCalled();
 		expectRootUnchanged(root, before);
 	});
 
