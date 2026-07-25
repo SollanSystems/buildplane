@@ -637,6 +637,74 @@ pub fn dispatch_envelope_v5_digest(
     domain_separated_digest(DISPATCH_ENVELOPE_V5_DIGEST_DOMAIN, &material)
 }
 
+/// `governed_dispatch_v5_admission_recorded_v1` payload — a protected-host
+/// receipt that binds one already-recorded V5 dispatch to the exact witness
+/// evidence re-derived by the host. It is an immutable admission record, not
+/// effect authority: callers must still verify its signer, tape position, and
+/// checkpoint before deriving any later workflow capability.
+#[typeshare]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GovernedDispatchV5AdmissionRecordedV1 {
+    /// Must equal the enclosing event's run identifier.
+    pub run_id: String,
+    /// Exact preexisting `dispatch_envelope_v5` event the protected host
+    /// independently loaded and verified.
+    pub source_dispatch_event_ref: EventId,
+    /// Canonical detached event digest for [`Self::source_dispatch_event_ref`].
+    pub source_dispatch_event_digest: String,
+    /// Detached V5 envelope digest carried by the source dispatch event.
+    pub dispatch_envelope_digest: String,
+    /// Canonical host-rederived witness digest over every immutable binding in
+    /// this receipt other than this digest and [`Self::admitted_at`].
+    pub witness_evidence_digest: String,
+    /// Canonical digest identifying the immutable admission semantic identity.
+    pub semantic_identity_digest: String,
+    /// Idempotency identity owned by the protected admission host.
+    pub idempotency_key: String,
+    /// Exact host-owned ledger authority realm bound by the V5 envelope.
+    pub ledger_authority_realm_digest: String,
+    /// RFC3339 UTC timestamp at which the protected host recorded admission.
+    pub admitted_at: String,
+}
+
+/// Domain separator for
+/// [`governed_dispatch_v5_admission_recorded_v1_evidence_digest`].
+pub const GOVERNED_DISPATCH_V5_ADMISSION_RECORDED_V1_EVIDENCE_DIGEST_DOMAIN: &[u8] =
+    b"buildplane.governed-dispatch-v5-admission-recorded.v1\0";
+
+#[derive(Serialize)]
+struct GovernedDispatchV5AdmissionRecordedV1EvidenceDigestMaterial<'a> {
+    run_id: &'a str,
+    source_dispatch_event_ref: &'a EventId,
+    source_dispatch_event_digest: &'a str,
+    dispatch_envelope_digest: &'a str,
+    semantic_identity_digest: &'a str,
+    idempotency_key: &'a str,
+    ledger_authority_realm_digest: &'a str,
+}
+
+/// Return the canonical protected-host witness digest for a V5 admission
+/// receipt. The admission timestamp is deliberately excluded: receipt
+/// durability must not make the semantic admission identity time-dependent.
+pub fn governed_dispatch_v5_admission_recorded_v1_evidence_digest(
+    receipt: &GovernedDispatchV5AdmissionRecordedV1,
+) -> Result<String, serde_json::Error> {
+    let material = GovernedDispatchV5AdmissionRecordedV1EvidenceDigestMaterial {
+        run_id: &receipt.run_id,
+        source_dispatch_event_ref: &receipt.source_dispatch_event_ref,
+        source_dispatch_event_digest: &receipt.source_dispatch_event_digest,
+        dispatch_envelope_digest: &receipt.dispatch_envelope_digest,
+        semantic_identity_digest: &receipt.semantic_identity_digest,
+        idempotency_key: &receipt.idempotency_key,
+        ledger_authority_realm_digest: &receipt.ledger_authority_realm_digest,
+    };
+    domain_separated_digest(
+        GOVERNED_DISPATCH_V5_ADMISSION_RECORDED_V1_EVIDENCE_DIGEST_DOMAIN,
+        &material,
+    )
+}
+
 /// One node in a declared workflow graph. Both this list and each node's
 /// `depends_on` list are ordered authority bytes: canonicalization rejects any
 /// duplicate or non-lexical order rather than normalizing caller input.

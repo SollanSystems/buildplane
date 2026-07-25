@@ -57,6 +57,7 @@ pub enum Payload {
     DispatchEnvelopeV3(trust_spine::DispatchEnvelopeV3),
     DispatchEnvelopeV4(trust_spine::DispatchEnvelopeV4),
     DispatchEnvelopeV5(trust_spine::DispatchEnvelopeV5),
+    GovernedDispatchV5AdmissionRecordedV1(trust_spine::GovernedDispatchV5AdmissionRecordedV1),
     ContextManifestDeclaredV1(trust_spine::ContextManifestDeclaredV1),
     WorkerManifestDeclaredV1(trust_spine::WorkerManifestDeclaredV1),
     SandboxProfileDeclaredV1(trust_spine::SandboxProfileDeclaredV1),

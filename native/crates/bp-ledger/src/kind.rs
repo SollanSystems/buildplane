@@ -52,6 +52,7 @@ pub enum EventKind {
     DispatchEnvelopeV3,
     DispatchEnvelopeV4,
     DispatchEnvelopeV5,
+    GovernedDispatchV5AdmissionRecordedV1,
     ContextManifestDeclaredV1,
     WorkerManifestDeclaredV1,
     SandboxProfileDeclaredV1,
@@ -121,6 +122,9 @@ impl EventKind {
             Self::DispatchEnvelopeV3 => "dispatch_envelope_v3",
             Self::DispatchEnvelopeV4 => "dispatch_envelope_v4",
             Self::DispatchEnvelopeV5 => "dispatch_envelope_v5",
+            Self::GovernedDispatchV5AdmissionRecordedV1 => {
+                "governed_dispatch_v5_admission_recorded_v1"
+            }
             Self::ContextManifestDeclaredV1 => "context_manifest_declared_v1",
             Self::WorkerManifestDeclaredV1 => "worker_manifest_declared_v1",
             Self::SandboxProfileDeclaredV1 => "sandbox_profile_declared_v1",
@@ -200,6 +204,7 @@ mod tests {
             EventKind::DispatchEnvelopeV3,
             EventKind::DispatchEnvelopeV4,
             EventKind::DispatchEnvelopeV5,
+            EventKind::GovernedDispatchV5AdmissionRecordedV1,
             EventKind::ContextManifestDeclaredV1,
             EventKind::WorkerManifestDeclaredV1,
             EventKind::SandboxProfileDeclaredV1,

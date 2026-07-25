@@ -17,28 +17,28 @@ use crate::payload::trust_spine::{
     candidate_completion_recorded_v1_digest, candidate_view_v1_digest,
     context_manifest_content_v1_digest, dispatch_envelope_v2_body_digest,
     dispatch_envelope_v3_body_digest, dispatch_envelope_v4_digest, dispatch_envelope_v5_digest,
-    model_action_authorized_v1_digest, model_action_authorized_v2_digest,
-    model_action_intent_v1_digest, promotion_execution_claimed_v1_digest,
-    review_verdict_output_v1_digest, sandbox_profile_content_v1_digest,
-    worker_manifest_content_v1_digest, workflow_graph_v1_digest, workflow_graph_v2_digest,
-    ActionEvidenceVersionV1, ActionReceiptOutcomeV2, ActionReceiptRecordedV2,
-    ActionReceiptSetRecordedV1, ActionRequestedV2, AttemptContextContentV1,
-    AttemptContextDeclaredV1, AttemptContextRecordedV1, CandidateCompletionRecordedV1,
-    CandidateCreatedV1, CandidateCreatedV2, CandidateViewV1, CommitModeV1,
-    ContextManifestContentV1, ContextManifestDeclaredV1, DispatchEnvelopeBodyV2,
+    governed_dispatch_v5_admission_recorded_v1_evidence_digest, model_action_authorized_v1_digest,
+    model_action_authorized_v2_digest, model_action_intent_v1_digest,
+    promotion_execution_claimed_v1_digest, review_verdict_output_v1_digest,
+    sandbox_profile_content_v1_digest, worker_manifest_content_v1_digest, workflow_graph_v1_digest,
+    workflow_graph_v2_digest, ActionEvidenceVersionV1, ActionReceiptOutcomeV2,
+    ActionReceiptRecordedV2, ActionReceiptSetRecordedV1, ActionRequestedV2,
+    AttemptContextContentV1, AttemptContextDeclaredV1, AttemptContextRecordedV1,
+    CandidateCompletionRecordedV1, CandidateCreatedV1, CandidateCreatedV2, CandidateViewV1,
+    CommitModeV1, ContextManifestContentV1, ContextManifestDeclaredV1, DispatchEnvelopeBodyV2,
     DispatchEnvelopeV3, DispatchEnvelopeV4, DispatchEnvelopeV5, ExecutionRoleV1,
-    ModelActionAuthorizedV1, ModelActionAuthorizedV2, ModelActionCandidateBindingV1,
-    ModelActionIntentV1, ModelRequestEvidenceV1, PromotionApprovalRequestedV1,
-    PromotionDecisionRecordedV1, PromotionExecutionClaimedV1, PromotionExecutionLeaseBindingV1,
-    PromotionGitBindingV1, PromotionReconciliationResolvedV1, PromotionResultOutcomeV1,
-    PromotionResultRecordedV1, PromotionWorktreeSyncStateV1, ReviewVerdictOutputV1,
-    ReviewVerdictRecordedV2, SandboxProfileContentV1, SandboxProfileDeclaredV1, SandboxRuntimeV1,
-    TrustScopeEvidenceV1, TrustTierV1, WorkerHarnessV1, WorkerManifestContentV1,
-    WorkerManifestDeclaredV1, WorkerProviderV1, WorkflowCancellationCauseV1,
-    WorkflowCancellationRequestedV1, WorkflowGraphDeclaredV1, WorkflowGraphDeclaredV2,
-    WorkflowGraphNodeV1, WorkflowGraphNodeV2, WorkflowTerminalOutcomeV1, WorkflowTerminalV2,
-    WorkflowTimerFiredV1, WorkflowTimerScheduledV1, MODEL_REQUEST_EVIDENCE_V1_SCHEMA_VERSION,
-    TRUST_SCOPE_EVIDENCE_V1_SCHEMA_VERSION,
+    GovernedDispatchV5AdmissionRecordedV1, ModelActionAuthorizedV1, ModelActionAuthorizedV2,
+    ModelActionCandidateBindingV1, ModelActionIntentV1, ModelRequestEvidenceV1,
+    PromotionApprovalRequestedV1, PromotionDecisionRecordedV1, PromotionExecutionClaimedV1,
+    PromotionExecutionLeaseBindingV1, PromotionGitBindingV1, PromotionReconciliationResolvedV1,
+    PromotionResultOutcomeV1, PromotionResultRecordedV1, PromotionWorktreeSyncStateV1,
+    ReviewVerdictOutputV1, ReviewVerdictRecordedV2, SandboxProfileContentV1,
+    SandboxProfileDeclaredV1, SandboxRuntimeV1, TrustScopeEvidenceV1, TrustTierV1, WorkerHarnessV1,
+    WorkerManifestContentV1, WorkerManifestDeclaredV1, WorkerProviderV1,
+    WorkflowCancellationCauseV1, WorkflowCancellationRequestedV1, WorkflowGraphDeclaredV1,
+    WorkflowGraphDeclaredV2, WorkflowGraphNodeV1, WorkflowGraphNodeV2, WorkflowTerminalOutcomeV1,
+    WorkflowTerminalV2, WorkflowTimerFiredV1, WorkflowTimerScheduledV1,
+    MODEL_REQUEST_EVIDENCE_V1_SCHEMA_VERSION, TRUST_SCOPE_EVIDENCE_V1_SCHEMA_VERSION,
 };
 use crate::payload::Payload;
 use crate::storage::cas::CanonicalCasRef;
@@ -248,6 +248,20 @@ fn validate_event_semantics(event: &Event) -> Result<()> {
                 );
             }
         }
+        Payload::GovernedDispatchV5AdmissionRecordedV1(receipt) => {
+            if receipt.run_id != event.run_id.to_string() {
+                return invalid(
+                    event.kind_str(),
+                    "V5 admission receipt run_id must match the enclosing event run_id",
+                );
+            }
+            if event.parent_event_id != Some(receipt.source_dispatch_event_ref) {
+                return invalid(
+                    event.kind_str(),
+                    "V5 admission receipt parent_event_id must equal its source_dispatch_event_ref",
+                );
+            }
+        }
         _ => {}
     }
     match &event.payload {
@@ -310,6 +324,20 @@ fn validate_payload_semantics(kind: &str, payload: &Payload) -> Result<()> {
         }
         Payload::DispatchEnvelopeV5(envelope) => {
             validate_dispatch_envelope_v5_shape(kind, envelope)?;
+        }
+        Payload::GovernedDispatchV5AdmissionRecordedV1(receipt) => {
+            validate_governed_dispatch_v5_admission_recorded_v1_shape(kind, receipt)?;
+            let expected = governed_dispatch_v5_admission_recorded_v1_evidence_digest(receipt)
+                .map_err(|error| LedgerError::InvalidPayload {
+                    kind: kind.to_string(),
+                    reason: format!("could not canonicalize V5 admission evidence: {error}"),
+                })?;
+            if receipt.witness_evidence_digest != expected {
+                return invalid(
+                    kind,
+                    "witness_evidence_digest does not match the canonical V5 admission evidence",
+                );
+            }
         }
         Payload::ContextManifestDeclaredV1(declaration) => {
             validate_context_manifest_declared_v1_shape(kind, declaration)?;
@@ -1486,6 +1514,49 @@ fn validate_dispatch_envelope_v5_shape(kind: &str, envelope: &DispatchEnvelopeV5
         );
     }
     Ok(())
+}
+
+/// Validate the self-contained shape of a protected V5 admission receipt.
+/// Exact source-event kind, signer purpose, tape order, and witness
+/// re-derivation remain storage/reducer responsibilities because they require
+/// the signed tape; canonicalization rejects only malformed receipt bytes.
+fn validate_governed_dispatch_v5_admission_recorded_v1_shape(
+    kind: &str,
+    receipt: &GovernedDispatchV5AdmissionRecordedV1,
+) -> Result<()> {
+    validate_non_empty_fields(
+        kind,
+        [
+            ("run_id", receipt.run_id.as_str()),
+            ("idempotency_key", receipt.idempotency_key.as_str()),
+        ],
+    )?;
+    validate_sha256_fields(
+        kind,
+        [
+            (
+                "source_dispatch_event_digest",
+                receipt.source_dispatch_event_digest.as_str(),
+            ),
+            (
+                "dispatch_envelope_digest",
+                receipt.dispatch_envelope_digest.as_str(),
+            ),
+            (
+                "witness_evidence_digest",
+                receipt.witness_evidence_digest.as_str(),
+            ),
+            (
+                "semantic_identity_digest",
+                receipt.semantic_identity_digest.as_str(),
+            ),
+            (
+                "ledger_authority_realm_digest",
+                receipt.ledger_authority_realm_digest.as_str(),
+            ),
+        ],
+    )?;
+    validate_rfc3339_utc(kind, "admitted_at", &receipt.admitted_at)
 }
 
 fn validate_manifest_declaration_header(
@@ -3289,6 +3360,9 @@ fn payload_variant_name(payload: &Payload) -> &'static str {
         Payload::DispatchEnvelopeV3(_) => "DispatchEnvelopeV3",
         Payload::DispatchEnvelopeV4(_) => "DispatchEnvelopeV4",
         Payload::DispatchEnvelopeV5(_) => "DispatchEnvelopeV5",
+        Payload::GovernedDispatchV5AdmissionRecordedV1(_) => {
+            "GovernedDispatchV5AdmissionRecordedV1"
+        }
         Payload::ContextManifestDeclaredV1(_) => "ContextManifestDeclaredV1",
         Payload::WorkerManifestDeclaredV1(_) => "WorkerManifestDeclaredV1",
         Payload::SandboxProfileDeclaredV1(_) => "SandboxProfileDeclaredV1",
@@ -3356,6 +3430,7 @@ fn kind_to_variant(kind: &str) -> Result<&'static str> {
         "dispatch_envelope_v3" => "DispatchEnvelopeV3",
         "dispatch_envelope_v4" => "DispatchEnvelopeV4",
         "dispatch_envelope_v5" => "DispatchEnvelopeV5",
+        "governed_dispatch_v5_admission_recorded_v1" => "GovernedDispatchV5AdmissionRecordedV1",
         "context_manifest_declared_v1" => "ContextManifestDeclaredV1",
         "worker_manifest_declared_v1" => "WorkerManifestDeclaredV1",
         "sandbox_profile_declared_v1" => "SandboxProfileDeclaredV1",
@@ -3396,4 +3471,98 @@ fn kind_to_variant(kind: &str) -> Result<&'static str> {
             })
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::event::Event;
+    use crate::id::{EventId, RunId};
+    use crate::kind::EventKind;
+    use crate::payload::trust_spine::{
+        governed_dispatch_v5_admission_recorded_v1_evidence_digest,
+        GovernedDispatchV5AdmissionRecordedV1,
+    };
+    use chrono::Utc;
+
+    fn digest(byte: char) -> String {
+        format!("sha256:{}", byte.to_string().repeat(64))
+    }
+
+    fn v5_admission_receipt(run_id: &RunId) -> GovernedDispatchV5AdmissionRecordedV1 {
+        let mut receipt = GovernedDispatchV5AdmissionRecordedV1 {
+            run_id: run_id.to_string(),
+            source_dispatch_event_ref: EventId::new(),
+            source_dispatch_event_digest: digest('a'),
+            dispatch_envelope_digest: digest('b'),
+            witness_evidence_digest: String::new(),
+            semantic_identity_digest: digest('c'),
+            idempotency_key: "v5-admission:unit-1:attempt-1".into(),
+            ledger_authority_realm_digest: digest('d'),
+            admitted_at: "2026-07-25T00:00:00Z".into(),
+        };
+        receipt.witness_evidence_digest =
+            governed_dispatch_v5_admission_recorded_v1_evidence_digest(&receipt).unwrap();
+        receipt
+    }
+
+    #[test]
+    fn v5_admission_receipt_is_timestamp_independent_and_run_bound() {
+        let run_id = RunId::new();
+        let receipt = v5_admission_receipt(&run_id);
+        let mut later = receipt.clone();
+        later.admitted_at = "2026-07-25T00:00:01Z".into();
+
+        assert_eq!(
+            governed_dispatch_v5_admission_recorded_v1_evidence_digest(&receipt).unwrap(),
+            governed_dispatch_v5_admission_recorded_v1_evidence_digest(&later).unwrap(),
+        );
+
+        let event = Event {
+            id: EventId::new(),
+            run_id,
+            parent_event_id: Some(receipt.source_dispatch_event_ref),
+            schema_version: Event::CURRENT_SCHEMA_VERSION,
+            kind: EventKind::GovernedDispatchV5AdmissionRecordedV1,
+            occurred_at: Utc::now(),
+            payload: Payload::GovernedDispatchV5AdmissionRecordedV1(receipt.clone()),
+        };
+        assert_eq!(canonicalize(event.clone()).unwrap().payload, event.payload);
+
+        let wrong_parent_event = Event {
+            parent_event_id: Some(EventId::new()),
+            ..event.clone()
+        };
+        let error = canonicalize(wrong_parent_event).unwrap_err();
+        assert!(error.to_string().contains(
+            "V5 admission receipt parent_event_id must equal its source_dispatch_event_ref"
+        ));
+
+        let wrong_run_event = Event {
+            run_id: RunId::new(),
+            payload: Payload::GovernedDispatchV5AdmissionRecordedV1(receipt),
+            ..event
+        };
+        let error = canonicalize(wrong_run_event).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("V5 admission receipt run_id must match the enclosing event run_id"));
+    }
+
+    #[test]
+    fn v5_admission_receipt_rejects_unrederived_evidence_digest() {
+        let run_id = RunId::new();
+        let mut receipt = v5_admission_receipt(&run_id);
+        receipt.witness_evidence_digest = digest('e');
+        let payload = Payload::GovernedDispatchV5AdmissionRecordedV1(receipt);
+        let error = canonicalize_payload(
+            "governed_dispatch_v5_admission_recorded_v1",
+            Event::CURRENT_SCHEMA_VERSION,
+            serde_json::to_value(payload).unwrap(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains(
+            "witness_evidence_digest does not match the canonical V5 admission evidence"
+        ));
+    }
 }
