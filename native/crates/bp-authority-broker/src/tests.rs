@@ -20,6 +20,10 @@ use super::promotion_git::{
 use super::reviewer_session::{
     resolve_reviewer_model_evidence_from_snapshot_v1, ReviewerSessionResolutionErrorV1,
 };
+use super::v5_dispatch_admission::{
+    BrokerV5DispatchAdmissionDisposition, LedgerV5DispatchAdmissionBackend,
+    V5DispatchAdmissionRequest, V5DispatchAdmissionStartupError,
+};
 use super::{
     AuthorityBackend, AuthorityBackendError, AuthorityGrant, BrokerModelActionRequest,
     BrokerModelActionStatus, BrokerModelAuthority, BrokerPromotionDecisionAuthority,
@@ -39,19 +43,24 @@ use bp_ledger::payload::activity_claim::{
 use bp_ledger::payload::trust_spine::{
     action_receipt_recorded_v2_digest, action_receipt_set_v1_digest, action_requested_v2_digest,
     candidate_completion_recorded_v1_digest, candidate_view_v1_digest,
-    dispatch_envelope_v3_body_digest, dispatch_envelope_v4_digest,
-    governed_dispatch_policy_digest_v1, model_action_authorized_v2_digest,
-    model_action_intent_v1_digest, review_verdict_output_v1_digest, workflow_graph_v2_digest,
-    ActionEvidenceVersionV1, ActionFailureV1, ActionKindV1, ActionReceiptOutcomeV2,
-    ActionReceiptRecordedV2, ActionReceiptSetEntryV1, ActionReceiptSetRecordedV1,
-    ActionRequestedV2, ActionResourceUsageV1, CandidateAcceptanceOutcomeV1,
-    CandidateAcceptanceRecordedV1, CandidateCompletionRecordedV1, CandidateCreatedV2,
-    CandidateViewV1, CommitModeV1, DispatchBudgetV1, DispatchEnvelopeBodyV2, DispatchEnvelopeV3,
-    DispatchEnvelopeV4, ExecutionRoleV1, ModelActionAuthorizedV2, ModelActionCandidateBindingV1,
-    ModelActionIntentV1, ModelRequestEvidenceV1, PromotionApprovalRequestedV1,
-    PromotionDecisionKindV1, PromotionExecutionClaimedV1, PromotionGitBindingV1,
-    PromotionResultOutcomeV1, PromotionWorktreeSyncStateV1, ReviewDecisionV1,
-    ReviewVerdictOutputV1, ReviewVerdictRecordedV2, TrustScopeEvidenceV1, TrustTierV1,
+    context_manifest_content_v1_digest, dispatch_envelope_v3_body_digest,
+    dispatch_envelope_v4_digest, dispatch_envelope_v5_digest, governed_dispatch_policy_digest_v1,
+    model_action_authorized_v2_digest, model_action_intent_v1_digest,
+    review_verdict_output_v1_digest, sandbox_profile_content_v1_digest,
+    worker_manifest_content_v1_digest, workflow_graph_v2_digest, ActionEvidenceVersionV1,
+    ActionFailureV1, ActionKindV1, ActionReceiptOutcomeV2, ActionReceiptRecordedV2,
+    ActionReceiptSetEntryV1, ActionReceiptSetRecordedV1, ActionRequestedV2, ActionResourceUsageV1,
+    CandidateAcceptanceOutcomeV1, CandidateAcceptanceRecordedV1, CandidateCompletionRecordedV1,
+    CandidateCreatedV2, CandidateViewV1, CommitModeV1, ContextManifestContentV1,
+    ContextManifestDeclaredV1, ContextManifestEntryKindV1, ContextManifestEntryV1, ContextTaintV1,
+    ContextTrustLevelV1, DispatchBudgetV1, DispatchEnvelopeBodyV2, DispatchEnvelopeV3,
+    DispatchEnvelopeV4, DispatchEnvelopeV5, ExecutionRoleV1, ModelActionAuthorizedV2,
+    ModelActionCandidateBindingV1, ModelActionIntentV1, ModelRequestEvidenceV1,
+    PromotionApprovalRequestedV1, PromotionDecisionKindV1, PromotionExecutionClaimedV1,
+    PromotionGitBindingV1, PromotionResultOutcomeV1, PromotionWorktreeSyncStateV1,
+    ReviewDecisionV1, ReviewVerdictOutputV1, ReviewVerdictRecordedV2, SandboxProfileContentV1,
+    SandboxProfileDeclaredV1, SandboxRuntimeV1, TrustScopeEvidenceV1, TrustTierV1, WorkerHarnessV1,
+    WorkerManifestContentV1, WorkerManifestDeclaredV1, WorkerProviderV1,
     WorkflowCancellationCauseV1, WorkflowCancellationRequestedV1, WorkflowGraphDeclaredV2,
     WorkflowGraphNodeV2, WorkflowTerminalOutcomeV1, WorkflowTerminalV2,
     MODEL_REQUEST_EVIDENCE_V1_SCHEMA_VERSION, TRUST_SCOPE_EVIDENCE_V1_SCHEMA_VERSION,
@@ -61,8 +70,8 @@ use bp_ledger::signing::{public_key_hash, ActorKeyRef, TrustedPublicKeys};
 use bp_ledger::storage::sqlite::{
     CheckpointPolicy, GovernedCandidateCompletionDispositionV1,
     GovernedCandidateCompletionRequestV1, GovernedDispatchAdmissionAuthorityV1,
-    GovernedDispatchAdmissionRequestV1, GovernedPromotionAuthorityV1,
-    GovernedPromotionDecisionRequestV1, SqliteStore,
+    GovernedDispatchAdmissionRequestV1, GovernedDispatchV5AdmissionAuthorityV1,
+    GovernedPromotionAuthorityV1, GovernedPromotionDecisionRequestV1, SqliteStore,
 };
 use bp_ledger::{EventId, LedgerError, RunId};
 use bp_replay::{
@@ -6136,4 +6145,484 @@ fn broker_dispatch_admission_never_reports_success_when_checkpoint_sealing_fails
     ));
     assert_eq!(dispatch_admission_event_count(&fixture), 1);
     assert_eq!(dispatch_admission_checkpoint_count(&fixture), 0);
+}
+
+/// A minimal, real signed V5 source tape. The broker adapter is deliberately
+/// exercised against the ledger's V5 admission transaction rather than a fake
+/// backend so a source envelope cannot be confused with the later host-signed
+/// admission receipt.
+struct V5BrokerAdmissionFixture {
+    store: SqliteStore,
+    run_id: RunId,
+    non_dispatch_event_id: EventId,
+    source_dispatch_event_id: EventId,
+    v5_envelope_digest: String,
+    admission_key: SigningKey,
+    admission_signer: ActorKeyRef,
+    checkpoint_key: SigningKey,
+    checkpoint_signer: ActorKeyRef,
+    authority: GovernedDispatchV5AdmissionAuthorityV1,
+}
+
+fn v5_broker_event(run_id: RunId, kind: EventKind, payload: Payload) -> Event {
+    Event {
+        id: EventId::new(),
+        run_id,
+        parent_event_id: None,
+        schema_version: Event::CURRENT_SCHEMA_VERSION,
+        kind,
+        occurred_at: Utc::now(),
+        payload,
+    }
+}
+
+fn v5_broker_admission_fixture() -> V5BrokerAdmissionFixture {
+    let store = SqliteStore::open_in_memory().expect("open V5 broker admission ledger");
+    let source_key = SigningKey::from_bytes(&[241; 32]);
+    let admission_key = SigningKey::from_bytes(&[242; 32]);
+    let checkpoint_key = SigningKey::from_bytes(&[243; 32]);
+    let source_signer = promotion_actor("broker:v5-source", "source-1", &source_key);
+    let admission_signer = promotion_actor("kernel:v5-admission", "admission-1", &admission_key);
+    let checkpoint_signer =
+        promotion_actor("kernel:v5-checkpoint", "checkpoint-1", &checkpoint_key);
+    let authority = GovernedDispatchV5AdmissionAuthorityV1::new_governed_realm(
+        promotion_trusted_keys(&[&source_key, &admission_key, &checkpoint_key]),
+        source_signer.clone(),
+        admission_signer.clone(),
+        checkpoint_signer.clone(),
+        authority_broker_digest('9'),
+    )
+    .expect("construct three-way V5 admission authority");
+
+    let run_id = RunId::new();
+    let now = Utc::now();
+    let context_manifest = ContextManifestContentV1 {
+        entries: vec![ContextManifestEntryV1 {
+            kind: ContextManifestEntryKindV1::RepositoryFile,
+            reference: "repo:AGENTS.md".into(),
+            digest: authority_broker_digest('a'),
+            provenance_ref: "provenance:repository".into(),
+            trust: ContextTrustLevelV1::Verified,
+            taint: ContextTaintV1::Clean,
+        }],
+    };
+    let worker_manifest = WorkerManifestContentV1 {
+        provider: WorkerProviderV1::OpenAi,
+        model: "gpt-5".into(),
+        harness: WorkerHarnessV1::OpenAiApiSdk,
+        image_digest: authority_broker_digest('b'),
+        tool_manifest_digest: authority_broker_digest('c'),
+        skill_manifest_digest: authority_broker_digest('d'),
+        capability_bundle_digest: authority_broker_digest('e'),
+        execution_role: ExecutionRoleV1::Implementer,
+    };
+    let sandbox_profile = SandboxProfileContentV1 {
+        runtime: SandboxRuntimeV1::RootlessOci,
+        rootless: true,
+        image_digest: worker_manifest.image_digest.clone(),
+        read_only_rootfs: true,
+        writable_overlay_digest: authority_broker_digest('f'),
+        mount_manifest_digest: authority_broker_digest('a'),
+        environment_manifest_digest: authority_broker_digest('b'),
+        network_policy_digest: authority_broker_digest('c'),
+        resource_policy_digest: authority_broker_digest('d'),
+        secret_handle_manifest_digest: authority_broker_digest('e'),
+    };
+    let context_declaration = ContextManifestDeclaredV1 {
+        run_id: run_id.to_string(),
+        workflow_id: "workflow-v5".into(),
+        workflow_revision: "r1".into(),
+        unit_id: "unit-v5".into(),
+        attempt: 1,
+        provenance_ref: "admission:v5".into(),
+        context_manifest_digest: context_manifest_content_v1_digest(&context_manifest)
+            .expect("hash V5 context manifest"),
+        context_manifest,
+        idempotency_key: "context-manifest:workflow-v5:unit-v5:1".into(),
+        declared_at: timestamp(now),
+    };
+    let worker_declaration = WorkerManifestDeclaredV1 {
+        run_id: run_id.to_string(),
+        workflow_id: "workflow-v5".into(),
+        workflow_revision: "r1".into(),
+        unit_id: "unit-v5".into(),
+        attempt: 1,
+        provenance_ref: "admission:v5".into(),
+        worker_manifest_digest: worker_manifest_content_v1_digest(&worker_manifest)
+            .expect("hash V5 worker manifest"),
+        worker_manifest,
+        idempotency_key: "worker-manifest:workflow-v5:unit-v5:1".into(),
+        declared_at: timestamp(now),
+    };
+    let sandbox_declaration = SandboxProfileDeclaredV1 {
+        run_id: run_id.to_string(),
+        workflow_id: "workflow-v5".into(),
+        workflow_revision: "r1".into(),
+        unit_id: "unit-v5".into(),
+        attempt: 1,
+        provenance_ref: "admission:v5".into(),
+        sandbox_profile_digest: sandbox_profile_content_v1_digest(&sandbox_profile)
+            .expect("hash V5 sandbox profile"),
+        sandbox_profile,
+        idempotency_key: "sandbox-profile:workflow-v5:unit-v5:1".into(),
+        declared_at: timestamp(now),
+    };
+
+    let graph_packet_digest = authority_broker_digest('f');
+    let mut graph = WorkflowGraphDeclaredV2 {
+        run_id: run_id.to_string(),
+        workflow_id: "workflow-v5".into(),
+        workflow_revision: "r1".into(),
+        nodes: vec![WorkflowGraphNodeV2 {
+            unit_id: "unit-v5".into(),
+            depends_on: vec![],
+            execution_role: ExecutionRoleV1::Implementer,
+            governed_packet_digest: graph_packet_digest.clone(),
+        }],
+        max_concurrent: 1,
+        graph_digest: String::new(),
+        idempotency_key: "graph-v2:workflow-v5:r1".into(),
+        declared_at: timestamp(now),
+    };
+    graph.graph_digest = workflow_graph_v2_digest(&graph).expect("hash V5 graph");
+    let graph_event = v5_broker_event(
+        run_id,
+        EventKind::WorkflowGraphDeclaredV2,
+        Payload::WorkflowGraphDeclaredV2(graph.clone()),
+    );
+    let context_event = v5_broker_event(
+        run_id,
+        EventKind::ContextManifestDeclaredV1,
+        Payload::ContextManifestDeclaredV1(context_declaration.clone()),
+    );
+    let worker_event = v5_broker_event(
+        run_id,
+        EventKind::WorkerManifestDeclaredV1,
+        Payload::WorkerManifestDeclaredV1(worker_declaration.clone()),
+    );
+    let sandbox_event = v5_broker_event(
+        run_id,
+        EventKind::SandboxProfileDeclaredV1,
+        Payload::SandboxProfileDeclaredV1(sandbox_declaration.clone()),
+    );
+    let body = DispatchEnvelopeBodyV2 {
+        workflow_id: "workflow-v5".into(),
+        workflow_revision: "r1".into(),
+        unit_id: "unit-v5".into(),
+        attempt: 1,
+        execution_role: ExecutionRoleV1::Implementer,
+        commit_mode: CommitModeV1::Atomic,
+        provenance_ref: "admission:v5".into(),
+        base_commit_sha: "1".repeat(40),
+        capability_bundle_digest: worker_declaration
+            .worker_manifest
+            .capability_bundle_digest
+            .clone(),
+        acceptance_contract_digest: authority_broker_digest('c'),
+        context_manifest_digest: context_declaration.context_manifest_digest.clone(),
+        worker_manifest_digest: worker_declaration.worker_manifest_digest.clone(),
+        sandbox_profile_digest: sandbox_declaration.sandbox_profile_digest.clone(),
+        budget: DispatchBudgetV1 {
+            max_tokens: Some(1_024),
+            max_compute_time_ms: Some(60_000),
+        },
+        trust_tier: TrustTierV1::Governed,
+        idempotency_key: "dispatch:workflow-v5:unit-v5:1".into(),
+        issued_at: timestamp(now - Duration::seconds(1)),
+        expires_at: timestamp(now + Duration::minutes(10)),
+    };
+    let dispatch_v3 = DispatchEnvelopeV3 {
+        envelope_digest: dispatch_envelope_v3_body_digest(
+            &body,
+            ActionEvidenceVersionV1::SealedV3,
+            &authority_broker_digest('a'),
+            &authority_broker_digest('9'),
+            Some(&graph_packet_digest),
+        )
+        .expect("hash V5 dispatch V3 layer"),
+        body,
+        action_evidence_version: ActionEvidenceVersionV1::SealedV3,
+        repository_binding_digest: authority_broker_digest('a'),
+        ledger_authority_realm_digest: authority_broker_digest('9'),
+        governed_packet_digest: Some(graph_packet_digest),
+    };
+    let dispatch_v4 = DispatchEnvelopeV4 {
+        envelope_digest: dispatch_envelope_v4_digest(
+            &dispatch_v3,
+            &graph.graph_digest,
+            &graph_event.id,
+        )
+        .expect("hash V5 dispatch V4 layer"),
+        dispatch_v3,
+        workflow_graph_digest: graph.graph_digest,
+        workflow_graph_declaration_event_ref: graph_event.id,
+    };
+    let mut dispatch = DispatchEnvelopeV5 {
+        dispatch_v4,
+        context_manifest_declaration_event_ref: context_event.id,
+        context_manifest_digest: context_declaration.context_manifest_digest,
+        worker_manifest_declaration_event_ref: worker_event.id,
+        worker_manifest_digest: worker_declaration.worker_manifest_digest,
+        sandbox_profile_declaration_event_ref: sandbox_event.id,
+        sandbox_profile_digest: sandbox_declaration.sandbox_profile_digest,
+        attempt_context_declaration_event_ref: None,
+        attempt_context_digest: None,
+        envelope_digest: String::new(),
+    };
+    dispatch.envelope_digest = dispatch_envelope_v5_digest(&dispatch).expect("hash V5 envelope");
+    let dispatch_event = v5_broker_event(
+        run_id,
+        EventKind::DispatchEnvelopeV5,
+        Payload::DispatchEnvelopeV5(dispatch.clone()),
+    );
+
+    for event in [
+        &graph_event,
+        &context_event,
+        &worker_event,
+        &sandbox_event,
+        &dispatch_event,
+    ] {
+        store
+            .append_signed(event, &source_key, &source_signer)
+            .expect("append signed V5 source evidence");
+    }
+
+    V5BrokerAdmissionFixture {
+        store,
+        run_id,
+        non_dispatch_event_id: graph_event.id,
+        source_dispatch_event_id: dispatch_event.id,
+        v5_envelope_digest: dispatch.envelope_digest,
+        admission_key,
+        admission_signer,
+        checkpoint_key,
+        checkpoint_signer,
+        authority,
+    }
+}
+
+fn v5_broker_admission_receipt_count(fixture: &V5BrokerAdmissionFixture) -> usize {
+    fixture
+        .store
+        .events_for_run(&fixture.run_id.to_string())
+        .expect("read V5 broker admission tape")
+        .iter()
+        .filter(|event| event.kind == "governed_dispatch_v5_admission_recorded_v1")
+        .count()
+}
+
+fn v5_broker_checkpoint_count(fixture: &V5BrokerAdmissionFixture) -> usize {
+    fixture
+        .store
+        .events_for_run(&fixture.run_id.to_string())
+        .expect("read V5 broker admission tape")
+        .iter()
+        .filter(|event| event.kind == "tape_checkpoint")
+        .count()
+}
+
+fn v5_broker_admission_request(fixture: &V5BrokerAdmissionFixture) -> V5DispatchAdmissionRequest {
+    V5DispatchAdmissionRequest {
+        run_id: fixture.run_id,
+        source_dispatch_event_id: fixture.source_dispatch_event_id,
+    }
+}
+
+#[test]
+fn broker_v5_dispatch_admission_records_and_seals_real_v5_source_evidence() {
+    let fixture = v5_broker_admission_fixture();
+    let broker = LedgerV5DispatchAdmissionBackend::from_prevalidated_startup(
+        &fixture.store,
+        &fixture.authority,
+        &fixture.admission_key,
+        &fixture.admission_signer,
+        &fixture.checkpoint_key,
+        &fixture.checkpoint_signer,
+    )
+    .expect("inject distinct V5 admission and checkpoint dependencies");
+
+    let outcome = broker.record_then_exact_seal(v5_broker_admission_request(&fixture));
+
+    let sealed = match outcome {
+        BrokerV5DispatchAdmissionDisposition::Sealed(sealed) => sealed,
+        BrokerV5DispatchAdmissionDisposition::ReconciliationRequired => {
+            panic!("valid V5 source evidence must seal")
+        }
+    };
+    assert_eq!(sealed.run_id, fixture.run_id);
+    assert_eq!(
+        sealed.source_dispatch_event_id,
+        fixture.source_dispatch_event_id
+    );
+    assert_eq!(sealed.v5_envelope_digest, fixture.v5_envelope_digest);
+    assert_ne!(
+        sealed.admission_event_id, fixture.source_dispatch_event_id,
+        "the host receipt must be distinct from the source dispatch"
+    );
+    assert_eq!(v5_broker_admission_receipt_count(&fixture), 1);
+    assert_eq!(v5_broker_checkpoint_count(&fixture), 1);
+    assert_eq!(
+        fixture.store.event_count().expect("count sealed V5 tape"),
+        7
+    );
+}
+
+#[test]
+fn broker_v5_dispatch_admission_exact_retry_returns_the_same_sealed_evidence() {
+    let fixture = v5_broker_admission_fixture();
+    let broker = LedgerV5DispatchAdmissionBackend::from_prevalidated_startup(
+        &fixture.store,
+        &fixture.authority,
+        &fixture.admission_key,
+        &fixture.admission_signer,
+        &fixture.checkpoint_key,
+        &fixture.checkpoint_signer,
+    )
+    .expect("inject distinct V5 admission and checkpoint dependencies");
+
+    let first = broker.record_then_exact_seal(v5_broker_admission_request(&fixture));
+    let retry = broker.record_then_exact_seal(v5_broker_admission_request(&fixture));
+
+    assert!(matches!(
+        first,
+        BrokerV5DispatchAdmissionDisposition::Sealed(_)
+    ));
+    assert_eq!(retry, first, "retry must reuse the exact sealed evidence");
+    assert_eq!(v5_broker_admission_receipt_count(&fixture), 1);
+    assert_eq!(v5_broker_checkpoint_count(&fixture), 1);
+    assert_eq!(
+        fixture.store.event_count().expect("count stable V5 tape"),
+        7
+    );
+}
+
+#[test]
+fn broker_v5_dispatch_admission_reconciles_then_retries_without_duplicate_receipt() {
+    let fixture = v5_broker_admission_fixture();
+    let wrong_checkpoint_key = SigningKey::from_bytes(&[244; 32]);
+    let wrong_checkpoint_broker = LedgerV5DispatchAdmissionBackend::from_prevalidated_startup(
+        &fixture.store,
+        &fixture.authority,
+        &fixture.admission_key,
+        &fixture.admission_signer,
+        &wrong_checkpoint_key,
+        &fixture.checkpoint_signer,
+    )
+    .expect("untrusted but distinct checkpoint key is a runtime reconciliation case");
+
+    assert!(matches!(
+        wrong_checkpoint_broker.record_then_exact_seal(v5_broker_admission_request(&fixture)),
+        BrokerV5DispatchAdmissionDisposition::ReconciliationRequired
+    ));
+    assert_eq!(v5_broker_admission_receipt_count(&fixture), 1);
+    assert_eq!(v5_broker_checkpoint_count(&fixture), 0);
+
+    let correct_broker = LedgerV5DispatchAdmissionBackend::from_prevalidated_startup(
+        &fixture.store,
+        &fixture.authority,
+        &fixture.admission_key,
+        &fixture.admission_signer,
+        &fixture.checkpoint_key,
+        &fixture.checkpoint_signer,
+    )
+    .expect("re-create broker with correct checkpoint key");
+    assert!(matches!(
+        correct_broker.record_then_exact_seal(v5_broker_admission_request(&fixture)),
+        BrokerV5DispatchAdmissionDisposition::Sealed(_)
+    ));
+    assert_eq!(v5_broker_admission_receipt_count(&fixture), 1);
+    assert_eq!(v5_broker_checkpoint_count(&fixture), 1);
+}
+
+#[test]
+fn broker_v5_dispatch_admission_reconciles_wrong_run_without_tape_mutation() {
+    let fixture = v5_broker_admission_fixture();
+    let broker = LedgerV5DispatchAdmissionBackend::from_prevalidated_startup(
+        &fixture.store,
+        &fixture.authority,
+        &fixture.admission_key,
+        &fixture.admission_signer,
+        &fixture.checkpoint_key,
+        &fixture.checkpoint_signer,
+    )
+    .expect("inject valid V5 dependencies");
+    let request = V5DispatchAdmissionRequest {
+        run_id: RunId::new(),
+        source_dispatch_event_id: fixture.source_dispatch_event_id,
+    };
+
+    assert!(matches!(
+        broker.record_then_exact_seal(request),
+        BrokerV5DispatchAdmissionDisposition::ReconciliationRequired
+    ));
+    assert_eq!(v5_broker_admission_receipt_count(&fixture), 0);
+    assert_eq!(v5_broker_checkpoint_count(&fixture), 0);
+    assert_eq!(
+        fixture
+            .store
+            .event_count()
+            .expect("count unchanged V5 tape"),
+        5
+    );
+}
+
+#[test]
+fn broker_v5_dispatch_admission_reconciles_non_v5_source_without_tape_mutation() {
+    let fixture = v5_broker_admission_fixture();
+    let broker = LedgerV5DispatchAdmissionBackend::from_prevalidated_startup(
+        &fixture.store,
+        &fixture.authority,
+        &fixture.admission_key,
+        &fixture.admission_signer,
+        &fixture.checkpoint_key,
+        &fixture.checkpoint_signer,
+    )
+    .expect("inject valid V5 dependencies");
+    let request = V5DispatchAdmissionRequest {
+        run_id: fixture.run_id,
+        source_dispatch_event_id: fixture.non_dispatch_event_id,
+    };
+
+    assert!(matches!(
+        broker.record_then_exact_seal(request),
+        BrokerV5DispatchAdmissionDisposition::ReconciliationRequired
+    ));
+    assert_eq!(v5_broker_admission_receipt_count(&fixture), 0);
+    assert_eq!(v5_broker_checkpoint_count(&fixture), 0);
+    assert_eq!(
+        fixture
+            .store
+            .event_count()
+            .expect("count unchanged V5 tape"),
+        5
+    );
+}
+
+#[test]
+fn broker_v5_dispatch_admission_constructor_rejects_shared_key_material_and_signer_identity() {
+    let fixture = v5_broker_admission_fixture();
+
+    assert!(matches!(
+        LedgerV5DispatchAdmissionBackend::from_prevalidated_startup(
+            &fixture.store,
+            &fixture.authority,
+            &fixture.admission_key,
+            &fixture.admission_signer,
+            &fixture.admission_key,
+            &fixture.checkpoint_signer,
+        ),
+        Err(V5DispatchAdmissionStartupError::SharedSigningKeyMaterial)
+    ));
+    assert!(matches!(
+        LedgerV5DispatchAdmissionBackend::from_prevalidated_startup(
+            &fixture.store,
+            &fixture.authority,
+            &fixture.admission_key,
+            &fixture.admission_signer,
+            &fixture.checkpoint_key,
+            &fixture.admission_signer,
+        ),
+        Err(V5DispatchAdmissionStartupError::SharedSignerIdentity)
+    ));
 }

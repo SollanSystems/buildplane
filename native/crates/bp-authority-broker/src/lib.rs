@@ -43,6 +43,8 @@ mod promotion_git;
 mod protocol;
 #[allow(dead_code)]
 mod reviewer_session;
+#[allow(dead_code)]
+mod v5_dispatch_admission;
 
 /// The complete request surface accepted from a run-bound broker controller.
 ///
