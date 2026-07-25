@@ -1158,6 +1158,12 @@ function parseRunCommandArguments(
 		);
 	}
 
+	if (approve && envelopePath !== undefined) {
+		throw new Error(
+			"--approve and --envelope are mutually exclusive: choose operator-requested admission or a signed preauthorized envelope.",
+		);
+	}
+
 	if (raw && (approve || envelopePath !== undefined)) {
 		throw new Error(
 			"--raw cannot be combined with --approve or --envelope because raw execution is outside the governed trust boundary.",

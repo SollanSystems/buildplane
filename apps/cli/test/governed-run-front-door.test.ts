@@ -410,6 +410,53 @@ describe("governed run front door", () => {
 		expectRootUnchanged(root, before);
 	});
 
+	it.each([
+		[
+			"operator approval before a preauthorized envelope",
+			[
+				"--approve",
+				"--packet",
+				"packet-that-must-not-be-read.json",
+				"--envelope",
+				"envelope-that-must-not-be-read.json",
+			],
+		],
+		[
+			"a preauthorized envelope before operator approval",
+			[
+				"--packet",
+				"packet-that-must-not-be-read.json",
+				"--envelope",
+				"envelope-that-must-not-be-read.json",
+				"--approve",
+			],
+		],
+	] as const)("rejects %s before a broker, packet, or legacy worker boundary", async (_label, argumentsAfterRun) => {
+		const root = createGitProject();
+		const before = snapshotRoot(root);
+		hostResolver.resolve.mockResolvedValue({
+			kind: "host-owned-governed-broker-v1",
+		} as unknown as HostOwnedGovernedBrokerV1);
+
+		const result = await runCliCapture(
+			root,
+			["run", ...argumentsAfterRun, "--json"],
+			legacyBundleMustNotBeConstructed(),
+		);
+
+		expect(result.exitCode).toBe(1);
+		expect(JSON.parse(result.stdout.join("\n"))).toMatchObject({
+			error: {
+				code: "CLI_ERROR",
+				message: expect.stringMatching(
+					/--approve.*--envelope.*mutually exclusive/i,
+				),
+			},
+		});
+		expect(hostResolver.resolve).not.toHaveBeenCalled();
+		expectRootUnchanged(root, before);
+	});
+
 	it("returns help for a graph/raw request before the legacy bundle can be constructed", async () => {
 		const root = createGitProject();
 		const before = snapshotRoot(root);
