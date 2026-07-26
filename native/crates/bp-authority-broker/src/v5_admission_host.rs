@@ -42,7 +42,12 @@ use std::os::unix::net::{UnixListener, UnixStream};
 #[cfg(target_os = "linux")]
 use std::path::Path;
 #[cfg(target_os = "linux")]
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    mpsc, Arc, Mutex,
+};
+#[cfg(target_os = "linux")]
+use std::thread::JoinHandle;
 #[cfg(target_os = "linux")]
 use std::time::{Duration, Instant};
 use thiserror::Error;
@@ -73,6 +78,10 @@ enum V5AdmissionHostErrorV1 {
     Connection,
     #[error("protected V5 admission host accept failed")]
     Accept,
+    #[error("protected V5 admission mutation owner stopped")]
+    MutationOwner,
+    #[error("protected V5 admission ingress worker stopped")]
+    IngressWorker,
 }
 
 #[cfg(target_os = "linux")]
@@ -281,6 +290,12 @@ struct MutationRequest {
 }
 
 #[cfg(target_os = "linux")]
+struct HostThreadHandles {
+    mutation_owner: Option<JoinHandle<()>>,
+    ingress_workers: Vec<JoinHandle<()>>,
+}
+
+#[cfg(target_os = "linux")]
 fn connected_peer_uid(stream: &UnixStream) -> Result<u32, V5AdmissionHostErrorV1> {
     let mut credentials = std::mem::MaybeUninit::<libc::ucred>::zeroed();
     let mut length = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
@@ -310,6 +325,7 @@ fn run_ingress_worker(
     mutation: mpsc::SyncSender<MutationRequest>,
     policy: BrokerHostConfinementPolicyV1,
     attestation: BrokerHostConfinementAttestationV1,
+    fatal: Arc<AtomicBool>,
 ) {
     loop {
         let connection = match ingress
@@ -330,17 +346,24 @@ fn run_ingress_worker(
             continue;
         };
         let (response_tx, response_rx) = mpsc::sync_channel(1);
-        if mutation
-            .try_send(MutationRequest {
-                payload,
-                response: response_tx,
-            })
-            .is_err()
-        {
-            continue;
+        match mutation.try_send(MutationRequest {
+            payload,
+            response: response_tx,
+        }) {
+            Ok(()) => {}
+            Err(mpsc::TrySendError::Full(_)) => continue,
+            Err(mpsc::TrySendError::Disconnected(_)) => {
+                fatal.store(true, Ordering::Release);
+                return;
+            }
         }
-        let Ok(Ok(frame)) = response_rx.recv_timeout(MUTATION_RESPONSE_TIMEOUT) else {
-            continue;
+        let frame = match response_rx.recv_timeout(MUTATION_RESPONSE_TIMEOUT) {
+            Ok(Ok(frame)) => frame,
+            Ok(Err(_)) | Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                fatal.store(true, Ordering::Release);
+                return;
+            }
         };
         let _ = write_authenticated_response(&policy, &attestation, &mut stream, &frame);
     }
@@ -381,7 +404,7 @@ fn run_linux() -> Result<(), V5AdmissionHostErrorV1> {
     let policy = host.policy.clone();
     let attestation = host.attestation.clone();
     let (mutation_tx, mutation_rx) = mpsc::sync_channel::<MutationRequest>(MAX_TOTAL_IN_FLIGHT);
-    std::thread::Builder::new()
+    let mutation_owner = std::thread::Builder::new()
         .name("bp-v5-admission-mutation".into())
         .spawn(move || {
             while let Ok(request) = mutation_rx.recv() {
@@ -392,23 +415,89 @@ fn run_linux() -> Result<(), V5AdmissionHostErrorV1> {
         .map_err(|_| V5AdmissionHostErrorV1::Startup)?;
     let (ingress_tx, ingress_rx) = mpsc::sync_channel::<IngressConnection>(MAX_TOTAL_IN_FLIGHT);
     let ingress_rx = Arc::new(Mutex::new(ingress_rx));
+    let fatal = Arc::new(AtomicBool::new(false));
+    let mut ingress_workers = Vec::with_capacity(INGRESS_WORKER_COUNT);
     for index in 0..INGRESS_WORKER_COUNT {
         let receiver = Arc::clone(&ingress_rx);
         let mutation = mutation_tx.clone();
         let worker_policy = policy.clone();
         let worker_attestation = attestation.clone();
-        std::thread::Builder::new()
+        let worker_fatal = Arc::clone(&fatal);
+        let worker = std::thread::Builder::new()
             .name(format!("bp-v5-admission-ingress-{index}"))
             .spawn(move || {
-                run_ingress_worker(receiver, mutation, worker_policy, worker_attestation)
+                run_ingress_worker(
+                    receiver,
+                    mutation,
+                    worker_policy,
+                    worker_attestation,
+                    worker_fatal,
+                )
             })
             .map_err(|_| V5AdmissionHostErrorV1::Startup)?;
+        ingress_workers.push(worker);
     }
     let in_flight = Arc::new(Mutex::new(InFlightState::default()));
+    let mut handles = HostThreadHandles {
+        mutation_owner: Some(mutation_owner),
+        ingress_workers,
+    };
+    run_supervised_accept_loop(
+        &listener,
+        &policy,
+        &attestation,
+        &ingress_tx,
+        &in_flight,
+        &fatal,
+        &mut handles,
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn run_supervised_accept_loop(
+    listener: &UnixListener,
+    policy: &BrokerHostConfinementPolicyV1,
+    attestation: &BrokerHostConfinementAttestationV1,
+    ingress_tx: &mpsc::SyncSender<IngressConnection>,
+    in_flight: &Arc<Mutex<InFlightState>>,
+    fatal: &Arc<AtomicBool>,
+    handles: &mut HostThreadHandles,
+) -> Result<(), V5AdmissionHostErrorV1> {
+    listener
+        .set_nonblocking(true)
+        .map_err(|_| V5AdmissionHostErrorV1::Startup)?;
     loop {
-        let (stream, _) = listener
-            .accept()
-            .map_err(|_| V5AdmissionHostErrorV1::Accept)?;
+        if fatal.load(Ordering::Acquire) {
+            return Err(V5AdmissionHostErrorV1::MutationOwner);
+        }
+        if handles
+            .mutation_owner
+            .as_ref()
+            .is_some_and(JoinHandle::is_finished)
+        {
+            if let Some(handle) = handles.mutation_owner.take() {
+                let _ = handle.join();
+            }
+            return Err(V5AdmissionHostErrorV1::MutationOwner);
+        }
+        if let Some(index) = handles
+            .ingress_workers
+            .iter()
+            .position(JoinHandle::is_finished)
+        {
+            let handle = handles.ingress_workers.swap_remove(index);
+            let _ = handle.join();
+            return Err(V5AdmissionHostErrorV1::IngressWorker);
+        }
+        let stream = match listener.accept() {
+            Ok((stream, _)) => stream,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(10));
+                continue;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => return Err(V5AdmissionHostErrorV1::Accept),
+        };
         if policy
             .verify_linux_connected_worker_for_role(
                 BrokerAuthorityRoleV1::DispatchAdmission,
@@ -422,13 +511,18 @@ fn run_linux() -> Result<(), V5AdmissionHostErrorV1> {
         let Ok(uid) = connected_peer_uid(&stream) else {
             continue;
         };
-        let Some(permit) = try_acquire_in_flight(&in_flight, uid) else {
+        let Some(permit) = try_acquire_in_flight(in_flight, uid) else {
             continue;
         };
-        let _ = ingress_tx.try_send(IngressConnection {
+        match ingress_tx.try_send(IngressConnection {
             stream,
             _permit: permit,
-        });
+        }) {
+            Ok(()) | Err(mpsc::TrySendError::Full(_)) => {}
+            Err(mpsc::TrySendError::Disconnected(_)) => {
+                return Err(V5AdmissionHostErrorV1::IngressWorker);
+            }
+        }
     }
 }
 
@@ -557,6 +651,25 @@ fn validate_socket_path(expected_group: u32) -> Result<(), V5AdmissionHostErrorV
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::v5_admission_response::verify_v5_admission_response_v1;
+
+    #[cfg(target_os = "linux")]
+    fn same_process_worker_policy() -> (
+        BrokerHostConfinementPolicyV1,
+        BrokerHostConfinementAttestationV1,
+    ) {
+        let worker_uid = unsafe { libc::geteuid() };
+        assert_ne!(worker_uid, 0, "tests require an unprivileged Linux UID");
+        let broker_uid = worker_uid.checked_add(1).expect("distinct test broker UID");
+        let policy = BrokerHostConfinementPolicyV1::new_for_role(
+            broker_uid,
+            BrokerAuthorityRoleV1::DispatchAdmission,
+            [worker_uid],
+        )
+        .expect("same-process socket test policy");
+        let attestation = policy.attestation_for_same_process_socket_tests();
+        (policy, attestation)
+    }
 
     #[test]
     fn protected_v5_host_state_can_move_to_one_dedicated_mutation_thread() {
@@ -584,43 +697,300 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn bounded_fixed_worker_pool_allows_a_second_connection_past_a_stalled_first() {
-        use std::io::Read;
+    fn authenticated_worker_pool_serves_a_signed_valid_second_response_past_a_stalled_first() {
+        use crate::v5_dispatch_admission::BrokerV5DispatchAdmissionDisposition;
+        use ed25519_dalek::SigningKey;
+        use std::io::{Read, Write};
         use std::net::Shutdown;
 
-        let (task_tx, task_rx) = mpsc::sync_channel::<UnixStream>(2);
-        let task_rx = Arc::new(Mutex::new(task_rx));
-        let (completed_tx, completed_rx) = mpsc::sync_channel(2);
+        let (policy, attestation) = same_process_worker_policy();
+        let (ingress_tx, ingress_rx) = mpsc::sync_channel::<IngressConnection>(2);
+        let ingress_rx = Arc::new(Mutex::new(ingress_rx));
+        let (mutation_tx, mutation_rx) = mpsc::sync_channel::<MutationRequest>(2);
+        let fatal = Arc::new(AtomicBool::new(false));
         let mut workers = Vec::new();
         for _ in 0..2 {
-            let tasks = Arc::clone(&task_rx);
-            let completed = completed_tx.clone();
+            let ingress = Arc::clone(&ingress_rx);
+            let mutation = mutation_tx.clone();
+            let worker_policy = policy.clone();
+            let worker_attestation = attestation.clone();
+            let worker_fatal = Arc::clone(&fatal);
             workers.push(std::thread::spawn(move || {
-                let mut stream = tasks.lock().expect("task receiver").recv().expect("task");
-                let mut byte = [0_u8; 1];
-                if stream.read_exact(&mut byte).is_ok() {
-                    let _ = completed.send(byte[0]);
-                }
+                run_ingress_worker(
+                    ingress,
+                    mutation,
+                    worker_policy,
+                    worker_attestation,
+                    worker_fatal,
+                )
             }));
         }
+        let response_key = SigningKey::from_bytes(&[117; 32]);
+        let response_verifying_key = response_key.verifying_key();
+        let mutation_owner = std::thread::spawn(move || {
+            let request = mutation_rx
+                .recv()
+                .expect("valid request reaches mutation owner");
+            let parsed =
+                parse_v5_dispatch_admission_request(&request.payload).expect("parse valid request");
+            let binding = V5AdmissionResponseRequestBindingV1::new(
+                parsed.request_id,
+                parsed.run_id,
+                parsed.v5_envelope_digest,
+            )
+            .expect("bind signed response");
+            let payload = sign_v5_admission_response_v1(
+                &response_key,
+                &binding,
+                &BrokerV5DispatchAdmissionDisposition::ReconciliationRequired,
+            )
+            .expect("sign response");
+            let mut frame = u32::try_from(payload.len())
+                .expect("response length")
+                .to_be_bytes()
+                .to_vec();
+            frame.extend_from_slice(&payload);
+            request
+                .response
+                .send(Ok(frame))
+                .expect("return signed frame");
+        });
+        let in_flight = Arc::new(Mutex::new(InFlightState::default()));
         let (stalled_server, stalled_client) = UnixStream::pair().expect("stalled pair");
         let (valid_server, mut valid_client) = UnixStream::pair().expect("valid pair");
-        task_tx.send(stalled_server).expect("queue stalled");
-        task_tx.send(valid_server).expect("queue valid");
-        valid_client.write_all(b"x").expect("valid request byte");
+        let worker_uid = unsafe { libc::geteuid() };
+        ingress_tx
+            .send(IngressConnection {
+                stream: stalled_server,
+                _permit: try_acquire_in_flight(&in_flight, worker_uid).expect("stalled permit"),
+            })
+            .expect("queue stalled connection");
+        ingress_tx
+            .send(IngressConnection {
+                stream: valid_server,
+                _permit: try_acquire_in_flight(&in_flight, worker_uid).expect("valid permit"),
+            })
+            .expect("queue valid connection");
+        let request_id = uuid::Uuid::now_v7();
+        let run_id = bp_ledger::RunId::new();
+        let digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let payload = format!(
+            r#"{{"request_id":"{request_id}","run_id":"{run_id}","v5_envelope_digest":"{digest}"}}"#
+        )
+        .into_bytes();
+        valid_client
+            .write_all(
+                &u32::try_from(payload.len())
+                    .expect("request length")
+                    .to_be_bytes(),
+            )
+            .expect("write request length");
+        valid_client
+            .write_all(&payload)
+            .expect("write valid request payload");
         valid_client.shutdown(Shutdown::Write).expect("valid EOF");
-
-        assert_eq!(
-            completed_rx
-                .recv_timeout(Duration::from_millis(250))
-                .expect("second connection must reach a worker"),
-            b'x'
-        );
+        valid_client
+            .set_read_timeout(Some(Duration::from_millis(500)))
+            .expect("bound response read");
+        let mut encoded_length = [0_u8; 4];
+        valid_client
+            .read_exact(&mut encoded_length)
+            .expect("valid second response length");
+        let mut response = vec![0_u8; u32::from_be_bytes(encoded_length) as usize];
+        valid_client
+            .read_exact(&mut response)
+            .expect("valid second signed response");
+        let binding =
+            V5AdmissionResponseRequestBindingV1::new(request_id, run_id, digest.to_owned())
+                .expect("expected response binding");
+        assert!(matches!(
+            verify_v5_admission_response_v1(&response, &response_verifying_key, &binding,),
+            Ok(crate::v5_admission_response::VerifiedV5AdmissionResponseV1::ReconciliationRequired)
+        ));
+        let mut trailing = [0_u8; 1];
+        assert_eq!(valid_client.read(&mut trailing).expect("response EOF"), 0);
+        assert!(!fatal.load(Ordering::Acquire));
         drop(stalled_client);
-        drop(task_tx);
+        drop(ingress_tx);
+        drop(mutation_tx);
         for worker in workers {
             worker.join().expect("bounded worker");
         }
+        mutation_owner.join().expect("mutation owner");
+        assert_eq!(in_flight.lock().expect("released permits").total, 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn production_accept_loop_exits_closed_when_mutation_owner_panics() {
+        let temp = tempfile::TempDir::new().expect("temporary listener directory");
+        let listener =
+            UnixListener::bind(temp.path().join("v5.sock")).expect("bind supervised listener");
+        let (policy, attestation) = same_process_worker_policy();
+        let (ingress_tx, _ingress_rx) = mpsc::sync_channel::<IngressConnection>(1);
+        let in_flight = Arc::new(Mutex::new(InFlightState::default()));
+        let fatal = Arc::new(AtomicBool::new(false));
+        let mutation_owner = std::thread::spawn(|| panic!("deliberate mutation-owner failure"));
+        let mut handles = HostThreadHandles {
+            mutation_owner: Some(mutation_owner),
+            ingress_workers: Vec::new(),
+        };
+        let started = Instant::now();
+
+        assert_eq!(
+            run_supervised_accept_loop(
+                &listener,
+                &policy,
+                &attestation,
+                &ingress_tx,
+                &in_flight,
+                &fatal,
+                &mut handles,
+            ),
+            Err(V5AdmissionHostErrorV1::MutationOwner)
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "nonblocking accept supervision hid mutation-owner death"
+        );
+        assert!(
+            handles.mutation_owner.is_none(),
+            "finished owner was joined"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn authenticated_concurrent_exact_retries_share_one_serial_receipt_and_checkpoint() {
+        use crate::tests::{
+            v5_broker_admission_backend, v5_broker_admission_fixture,
+            v5_broker_admission_receipt_count, v5_broker_checkpoint_count,
+        };
+        use crate::v5_admission_response::VerifiedV5AdmissionResponseV1;
+        use std::io::{Read, Write};
+        use std::net::Shutdown;
+
+        let fixture = v5_broker_admission_fixture();
+        let run_id = fixture.run_id;
+        let digest = fixture.v5_envelope_digest.clone();
+        let (policy, attestation) = same_process_worker_policy();
+        let (ingress_tx, ingress_rx) = mpsc::sync_channel::<IngressConnection>(2);
+        let ingress_rx = Arc::new(Mutex::new(ingress_rx));
+        let (mutation_tx, mutation_rx) = mpsc::sync_channel::<MutationRequest>(2);
+        let fatal = Arc::new(AtomicBool::new(false));
+        let mut workers = Vec::new();
+        for _ in 0..2 {
+            let ingress = Arc::clone(&ingress_rx);
+            let mutation = mutation_tx.clone();
+            let worker_policy = policy.clone();
+            let worker_attestation = attestation.clone();
+            let worker_fatal = Arc::clone(&fatal);
+            workers.push(std::thread::spawn(move || {
+                run_ingress_worker(
+                    ingress,
+                    mutation,
+                    worker_policy,
+                    worker_attestation,
+                    worker_fatal,
+                )
+            }));
+        }
+        let response_key = ed25519_dalek::SigningKey::from_bytes(&[118; 32]);
+        let response_verifying_key = response_key.verifying_key();
+        let (counts_tx, counts_rx) = mpsc::sync_channel(1);
+        let mutation_owner = std::thread::spawn(move || {
+            let broker = v5_broker_admission_backend(&fixture);
+            for _ in 0..2 {
+                let request = mutation_rx.recv().expect("concurrent retry request");
+                let parsed = parse_v5_dispatch_admission_request(&request.payload)
+                    .expect("parse concurrent retry");
+                let binding = V5AdmissionResponseRequestBindingV1::new(
+                    parsed.request_id,
+                    parsed.run_id,
+                    parsed.v5_envelope_digest.clone(),
+                )
+                .expect("bind concurrent response");
+                let disposition = broker.record_then_exact_seal(parsed);
+                let payload = sign_v5_admission_response_v1(&response_key, &binding, &disposition)
+                    .expect("sign concurrent response");
+                let mut frame = u32::try_from(payload.len())
+                    .expect("response length")
+                    .to_be_bytes()
+                    .to_vec();
+                frame.extend_from_slice(&payload);
+                request.response.send(Ok(frame)).expect("return response");
+            }
+            counts_tx
+                .send((
+                    v5_broker_admission_receipt_count(&fixture),
+                    v5_broker_checkpoint_count(&fixture),
+                ))
+                .expect("return ledger counts");
+        });
+
+        let in_flight = Arc::new(Mutex::new(InFlightState::default()));
+        let worker_uid = unsafe { libc::geteuid() };
+        let mut clients = Vec::new();
+        let mut bindings = Vec::new();
+        for _ in 0..2 {
+            let (server, mut client) = UnixStream::pair().expect("retry socket pair");
+            ingress_tx
+                .send(IngressConnection {
+                    stream: server,
+                    _permit: try_acquire_in_flight(&in_flight, worker_uid).expect("retry permit"),
+                })
+                .expect("queue retry");
+            let request_id = uuid::Uuid::now_v7();
+            let payload = format!(
+                r#"{{"request_id":"{request_id}","run_id":"{run_id}","v5_envelope_digest":"{digest}"}}"#
+            )
+            .into_bytes();
+            client
+                .write_all(
+                    &u32::try_from(payload.len())
+                        .expect("request length")
+                        .to_be_bytes(),
+                )
+                .expect("write retry length");
+            client.write_all(&payload).expect("write retry payload");
+            client.shutdown(Shutdown::Write).expect("retry EOF");
+            client
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("bound retry response");
+            clients.push(client);
+            bindings.push(
+                V5AdmissionResponseRequestBindingV1::new(request_id, run_id, digest.clone())
+                    .expect("expected retry binding"),
+            );
+        }
+        for (client, binding) in clients.iter_mut().zip(&bindings) {
+            let mut encoded_length = [0_u8; 4];
+            client
+                .read_exact(&mut encoded_length)
+                .expect("retry response length");
+            let mut response = vec![0_u8; u32::from_be_bytes(encoded_length) as usize];
+            client
+                .read_exact(&mut response)
+                .expect("retry signed response");
+            assert!(matches!(
+                verify_v5_admission_response_v1(&response, &response_verifying_key, binding,),
+                Ok(VerifiedV5AdmissionResponseV1::Sealed(_))
+            ));
+        }
+        assert_eq!(
+            counts_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("serialized ledger counts"),
+            (1, 1)
+        );
+        drop(ingress_tx);
+        drop(mutation_tx);
+        for worker in workers {
+            worker.join().expect("retry worker");
+        }
+        mutation_owner.join().expect("retry mutation owner");
+        assert!(!fatal.load(Ordering::Acquire));
+        assert_eq!(in_flight.lock().expect("released retry permits").total, 0);
     }
 
     #[cfg(target_os = "linux")]
@@ -653,6 +1023,117 @@ mod tests {
         );
         drop(queue_rx);
         assert_eq!(state.lock().expect("released queue permit").total, 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn authenticated_worker_rejects_full_mutation_queue_but_fails_on_disconnect() {
+        use std::io::Write;
+        use std::net::Shutdown;
+
+        fn write_request(client: &mut UnixStream) {
+            let payload = format!(
+                r#"{{"request_id":"{}","run_id":"{}","v5_envelope_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}"#,
+                uuid::Uuid::now_v7(),
+                bp_ledger::RunId::new(),
+            )
+            .into_bytes();
+            client
+                .write_all(
+                    &u32::try_from(payload.len())
+                        .expect("request length")
+                        .to_be_bytes(),
+                )
+                .expect("write request length");
+            client.write_all(&payload).expect("write request");
+            client.shutdown(Shutdown::Write).expect("request EOF");
+        }
+
+        let (policy, attestation) = same_process_worker_policy();
+        let worker_uid = unsafe { libc::geteuid() };
+
+        let full_state = Arc::new(Mutex::new(InFlightState::default()));
+        let (full_ingress_tx, full_ingress_rx) = mpsc::sync_channel(1);
+        let (full_mutation_tx, full_mutation_rx) = mpsc::sync_channel(1);
+        let (held_response_tx, _held_response_rx) = mpsc::sync_channel(1);
+        full_mutation_tx
+            .try_send(MutationRequest {
+                payload: b"held".to_vec(),
+                response: held_response_tx,
+            })
+            .expect("fill mutation queue");
+        let full_fatal = Arc::new(AtomicBool::new(false));
+        let full_worker = {
+            let fatal = Arc::clone(&full_fatal);
+            let policy = policy.clone();
+            let attestation = attestation.clone();
+            std::thread::spawn(move || {
+                run_ingress_worker(
+                    Arc::new(Mutex::new(full_ingress_rx)),
+                    full_mutation_tx,
+                    policy,
+                    attestation,
+                    fatal,
+                )
+            })
+        };
+        let (full_server, mut full_client) = UnixStream::pair().expect("full queue pair");
+        full_ingress_tx
+            .send(IngressConnection {
+                stream: full_server,
+                _permit: try_acquire_in_flight(&full_state, worker_uid).expect("full queue permit"),
+            })
+            .expect("queue full mutation request");
+        write_request(&mut full_client);
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while full_state.lock().expect("full state").total != 0 && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert_eq!(full_state.lock().expect("released full permit").total, 0);
+        assert!(!full_fatal.load(Ordering::Acquire));
+        drop(full_ingress_tx);
+        full_worker.join().expect("full queue worker");
+        drop(full_mutation_rx);
+
+        let disconnected_state = Arc::new(Mutex::new(InFlightState::default()));
+        let (disconnected_ingress_tx, disconnected_ingress_rx) = mpsc::sync_channel(1);
+        let (disconnected_mutation_tx, disconnected_mutation_rx) = mpsc::sync_channel(1);
+        drop(disconnected_mutation_rx);
+        let disconnected_fatal = Arc::new(AtomicBool::new(false));
+        let disconnected_worker = {
+            let fatal = Arc::clone(&disconnected_fatal);
+            std::thread::spawn(move || {
+                run_ingress_worker(
+                    Arc::new(Mutex::new(disconnected_ingress_rx)),
+                    disconnected_mutation_tx,
+                    policy,
+                    attestation,
+                    fatal,
+                )
+            })
+        };
+        let (disconnected_server, mut disconnected_client) =
+            UnixStream::pair().expect("disconnected pair");
+        disconnected_ingress_tx
+            .send(IngressConnection {
+                stream: disconnected_server,
+                _permit: try_acquire_in_flight(&disconnected_state, worker_uid)
+                    .expect("disconnected permit"),
+            })
+            .expect("queue disconnected mutation request");
+        write_request(&mut disconnected_client);
+        disconnected_worker
+            .join()
+            .expect("disconnected worker exits");
+        assert!(disconnected_fatal.load(Ordering::Acquire));
+        assert_eq!(
+            disconnected_state
+                .lock()
+                .expect("released disconnected permit")
+                .total,
+            0
+        );
+        drop(disconnected_ingress_tx);
     }
 
     #[cfg(target_os = "linux")]

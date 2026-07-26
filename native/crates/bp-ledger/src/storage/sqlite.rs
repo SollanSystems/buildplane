@@ -66,6 +66,48 @@ use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
+const V5_SOURCE_SCAN_BATCH_LIMIT: usize = 64;
+const V5_SOURCE_AUTHORITY_FINGERPRINT_DOMAIN_V1: &[u8] =
+    b"buildplane.governed-dispatch-v5-source-authority.v1\0";
+const V5_SOURCE_EVENT_BOOTSTRAP_QUERY_V1: &str = r#"
+    SELECT e.rowid, e.id
+    FROM events e INDEXED BY idx_events_v5_envelope_digest
+    WHERE e.run_id = ?1
+      AND e.kind = 'dispatch_envelope_v5'
+      AND json_extract(
+            e.payload,
+            '$.DispatchEnvelopeV5.envelope_digest'
+          ) = ?2
+      AND e.rowid > ?3
+      AND e.rowid <= ?4
+    ORDER BY e.rowid ASC
+    LIMIT ?5
+"#;
+const V5_SOURCE_SCAN_QUERY_V1: &str = r#"
+    SELECT
+        i.signature_rowid,
+        e.id, e.run_id, e.parent_event_id, e.schema_version,
+        e.kind, e.occurred_at, e.payload,
+        s.event_id, s.canonical_event_hash, s.actor_id, s.key_id,
+        s.public_key_hash, s.algorithm, s.signature, s.signed_at
+    FROM governed_dispatch_v5_signature_scan_index i
+         INDEXED BY idx_governed_dispatch_v5_signature_scan_exact
+    JOIN event_signatures s
+      ON s.rowid = i.signature_rowid
+     AND s.event_id = i.event_id
+    JOIN events e ON e.rowid = i.event_rowid AND e.id = i.event_id
+    WHERE i.run_id = ?1
+      AND i.v5_envelope_digest = ?2
+      AND i.actor_id = ?3
+      AND i.key_id = ?4
+      AND i.public_key_hash = ?5
+      AND i.algorithm = 'ed25519'
+      AND i.signature_rowid > ?6
+      AND i.signature_rowid <= ?7
+    ORDER BY i.signature_rowid ASC
+    LIMIT ?8
+"#;
+
 /// Default tape-root checkpoint cadence: emit one checkpoint per 256 signed
 /// events per run.
 pub const DEFAULT_CHECKPOINT_CADENCE: u64 = 256;
@@ -1420,6 +1462,11 @@ impl SqliteStore {
                 FOREIGN KEY(event_id) REFERENCES events(id)
             );
 
+            -- The implicit rowid appended to this equality-prefix index is the
+            -- trusted monotonic cursor for bounded V5 source scans.
+            CREATE INDEX IF NOT EXISTS idx_event_signatures_v5_source_scan
+                ON event_signatures(actor_id, key_id, public_key_hash, algorithm);
+
             CREATE TRIGGER IF NOT EXISTS event_signatures_no_update
                 BEFORE UPDATE ON event_signatures
                 BEGIN
@@ -1431,6 +1478,124 @@ impl SqliteStore {
                 BEGIN
                     SELECT RAISE(ABORT, 'event_signatures is append-only: DELETE forbidden');
                 END;
+
+            -- Append-derived lookup metadata only. These rows narrow bounded
+            -- scans but are never authority: the referenced event and
+            -- signature are reloaded from the append-only tape and verified.
+            CREATE TABLE IF NOT EXISTS governed_dispatch_v5_signature_scan_index (
+                signature_rowid       INTEGER PRIMARY KEY CHECK(signature_rowid > 0),
+                event_rowid           INTEGER NOT NULL CHECK(event_rowid > 0),
+                event_id              TEXT NOT NULL UNIQUE,
+                run_id                TEXT NOT NULL,
+                v5_envelope_digest    TEXT NOT NULL,
+                actor_id              TEXT NOT NULL,
+                key_id                TEXT NOT NULL,
+                public_key_hash       TEXT,
+                algorithm             TEXT NOT NULL,
+                FOREIGN KEY(event_id) REFERENCES events(id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_governed_dispatch_v5_signature_scan_exact
+                ON governed_dispatch_v5_signature_scan_index(
+                    run_id,
+                    v5_envelope_digest,
+                    actor_id,
+                    key_id,
+                    public_key_hash,
+                    algorithm,
+                    signature_rowid
+                );
+
+            CREATE TRIGGER IF NOT EXISTS governed_dispatch_v5_signature_scan_after_insert
+                AFTER INSERT ON event_signatures
+                BEGIN
+                    INSERT INTO governed_dispatch_v5_signature_scan_index (
+                        signature_rowid, event_rowid, event_id, run_id,
+                        v5_envelope_digest, actor_id, key_id,
+                        public_key_hash, algorithm
+                    )
+                    SELECT
+                        NEW.rowid, e.rowid, e.id, e.run_id,
+                        json_extract(
+                            e.payload,
+                            '$.DispatchEnvelopeV5.envelope_digest'
+                        ),
+                        NEW.actor_id, NEW.key_id, NEW.public_key_hash,
+                        NEW.algorithm
+                    FROM events e
+                    WHERE e.id = NEW.event_id
+                      AND e.kind = 'dispatch_envelope_v5';
+                END;
+
+            CREATE TRIGGER IF NOT EXISTS governed_dispatch_v5_signature_scan_no_update
+                BEFORE UPDATE ON governed_dispatch_v5_signature_scan_index
+                BEGIN
+                    SELECT RAISE(ABORT, 'V5 signature scan index is append-derived: UPDATE forbidden');
+                END;
+
+            CREATE TRIGGER IF NOT EXISTS governed_dispatch_v5_signature_scan_no_delete
+                BEFORE DELETE ON governed_dispatch_v5_signature_scan_index
+                BEGIN
+                    SELECT RAISE(ABORT, 'V5 signature scan index is append-derived: DELETE forbidden');
+                END;
+
+            -- Mutable, broker-private scan state. It is not tape evidence and
+            -- grants no authority by itself: every projected candidate is
+            -- reloaded and cryptographically reverified before use.
+            CREATE TABLE IF NOT EXISTS governed_dispatch_v5_source_scans (
+                run_id                              TEXT NOT NULL,
+                v5_envelope_digest                  TEXT NOT NULL,
+                source_authority_fingerprint        TEXT NOT NULL,
+                scan_schema_version                 INTEGER NOT NULL CHECK(scan_schema_version = 1),
+                event_cursor_rowid                  INTEGER NOT NULL CHECK(event_cursor_rowid >= 0),
+                observed_event_high_water_rowid     INTEGER NOT NULL CHECK(observed_event_high_water_rowid >= 0),
+                event_complete_through_rowid        INTEGER,
+                cursor_signature_rowid              INTEGER NOT NULL CHECK(cursor_signature_rowid >= 0),
+                observed_high_water_rowid           INTEGER NOT NULL CHECK(observed_high_water_rowid >= 0),
+                complete_through_signature_rowid    INTEGER,
+                candidate_signature_rowid           INTEGER,
+                candidate_event_id                  TEXT,
+                candidate_event_digest              TEXT,
+                ambiguous                           INTEGER NOT NULL CHECK(ambiguous IN (0, 1)),
+                PRIMARY KEY (
+                    run_id,
+                    v5_envelope_digest,
+                    source_authority_fingerprint
+                ),
+                FOREIGN KEY(candidate_event_id) REFERENCES events(id),
+                CHECK(event_cursor_rowid <= observed_event_high_water_rowid),
+                CHECK(
+                    event_complete_through_rowid IS NULL
+                    OR (
+                        event_complete_through_rowid = event_cursor_rowid
+                        AND event_complete_through_rowid =
+                            observed_event_high_water_rowid
+                    )
+                ),
+                CHECK(cursor_signature_rowid <= observed_high_water_rowid),
+                CHECK(
+                    complete_through_signature_rowid IS NULL
+                    OR (
+                        complete_through_signature_rowid = cursor_signature_rowid
+                        AND complete_through_signature_rowid = observed_high_water_rowid
+                    )
+                ),
+                CHECK(
+                    (
+                        candidate_signature_rowid IS NULL
+                        AND candidate_event_id IS NULL
+                        AND candidate_event_digest IS NULL
+                    )
+                    OR
+                    (
+                        candidate_signature_rowid IS NOT NULL
+                        AND candidate_signature_rowid > 0
+                        AND candidate_signature_rowid <= cursor_signature_rowid
+                        AND candidate_event_id IS NOT NULL
+                        AND candidate_event_digest IS NOT NULL
+                    )
+                )
+            );
 
             CREATE TABLE IF NOT EXISTS runs (
                 id               TEXT PRIMARY KEY,
@@ -3553,138 +3718,209 @@ impl SqliteStore {
                 "V5 source envelope digest is not canonical sha256",
             ));
         }
-
-        const MAX_SIGNER_FILTERED_CANDIDATES: usize = 64;
-        let source_hash = authority
-            .source_dispatch_signer
-            .public_key_hash
-            .as_deref()
-            .ok_or_else(|| {
-                governed_dispatch_v5_admission_reconciliation_required(
-                    run_id,
-                    "unresolved",
-                    "configured V5 source signer has no public key hash",
-                )
-            })?;
-        let mut statement = self.conn.prepare(
-            r#"SELECT
-                    e.id, e.run_id, e.parent_event_id, e.schema_version,
-                    e.kind, e.occurred_at, e.payload,
-                    s.event_id, s.canonical_event_hash, s.actor_id, s.key_id,
-                    s.public_key_hash, s.algorithm, s.signature, s.signed_at
-                FROM events e
-                JOIN event_signatures s ON s.event_id = e.id
-                WHERE e.run_id = ?1
-                  AND e.kind = 'dispatch_envelope_v5'
-                  AND json_extract(
-                        e.payload,
-                        '$.DispatchEnvelopeV5.envelope_digest'
-                      ) = ?2
-                  AND s.algorithm = 'ed25519'
-                  AND s.actor_id = ?3
-                  AND s.key_id = ?4
-                  AND s.public_key_hash = ?5
-                ORDER BY e.id ASC
-                LIMIT ?6"#,
-        )?;
-        let mut rows = statement.query(params![
-            run_id.to_string(),
+        let authority_fingerprint =
+            governed_dispatch_v5_source_authority_fingerprint_v1(authority)?;
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        require_governed_dispatch_v5_source_scan_schema(&tx, run_id)?;
+        let event_high_water =
+            governed_dispatch_v5_source_event_high_water(&tx, run_id, v5_envelope_digest)?;
+        let mut projection = governed_dispatch_v5_source_scan_projection(
+            &tx,
+            run_id,
             v5_envelope_digest,
-            authority.source_dispatch_signer.actor_id,
-            authority.source_dispatch_signer.key_id,
-            source_hash,
-            i64::try_from(MAX_SIGNER_FILTERED_CANDIDATES + 1).unwrap_or(i64::MAX),
-        ])?;
-        let mut resolved = None;
-        let mut loaded = 0_usize;
-        while let Some(row) = rows.next()? {
-            loaded = loaded.saturating_add(1);
-            #[cfg(any(test, feature = "test-support"))]
-            self.v5_source_candidate_loaded_count
-                .set(u64::try_from(loaded).unwrap_or(u64::MAX));
-            if loaded > MAX_SIGNER_FILTERED_CANDIDATES {
-                return Err(governed_dispatch_v5_admission_reconciliation_required(
-                    run_id,
-                    "unresolved",
-                    "V5 source signer-filtered candidate budget was exhausted",
-                ));
-            }
-            let event_row = StoredEventRow {
-                id: row.get(0)?,
-                run_id: row.get(1)?,
-                parent_event_id: row.get(2)?,
-                schema_version: row.get(3)?,
-                kind: row.get(4)?,
-                occurred_at: row.get(5)?,
-                payload: row.get(6)?,
-            };
-            let signature_row = StoredEventSignatureRow {
-                event_id: row.get(7)?,
-                canonical_event_hash: row.get(8)?,
-                actor_id: row.get(9)?,
-                key_id: row.get(10)?,
-                public_key_hash: row.get(11)?,
-                algorithm: row.get(12)?,
-                signature: row.get(13)?,
-                signed_at: row.get(14)?,
-            };
-            let Ok(signature) = signature_row.to_event_signature() else {
-                continue;
-            };
-            #[cfg(any(test, feature = "test-support"))]
-            self.v5_source_candidate_verification_count.set(
-                self.v5_source_candidate_verification_count
-                    .get()
-                    .saturating_add(1),
-            );
-            let Ok(event) = event_row.to_event() else {
-                continue;
-            };
-            if verify_event_signature(&event, &signature, &authority.trusted_keys)
-                != VerificationStatus::Verified
+            &authority_fingerprint,
+        )?
+        .unwrap_or_else(|| {
+            StoredGovernedDispatchV5SourceScan::new(
+                run_id,
+                v5_envelope_digest,
+                &authority_fingerprint,
+            )
+        });
+        validate_governed_dispatch_v5_source_scan_projection(
+            &tx,
+            &projection,
+            run_id,
+            v5_envelope_digest,
+            &authority_fingerprint,
+            authority,
+        )?;
+        if event_high_water < projection.event_cursor_rowid
+            || event_high_water < projection.observed_event_high_water_rowid
+        {
+            return Err(governed_dispatch_v5_admission_reconciliation_required(
+                run_id,
+                "unresolved",
+                "V5 source event high-water regressed below durable scan state",
+            ));
+        }
+        if event_high_water > projection.observed_event_high_water_rowid {
+            projection.observed_event_high_water_rowid = event_high_water;
+            projection.event_complete_through_rowid = None;
+        }
+
+        let mut loaded = bootstrap_governed_dispatch_v5_signature_scan_index(
+            &tx,
+            &mut projection,
+            run_id,
+            v5_envelope_digest,
+            V5_SOURCE_SCAN_BATCH_LIMIT,
+        )?;
+        #[cfg(any(test, feature = "test-support"))]
+        self.v5_source_candidate_loaded_count
+            .set(u64::try_from(loaded).unwrap_or(u64::MAX));
+        if projection.event_cursor_rowid == event_high_water {
+            projection.event_complete_through_rowid = Some(event_high_water);
+        }
+
+        let mut signature_high_water = projection.observed_high_water_rowid;
+        if projection.event_complete_through_rowid == Some(event_high_water) {
+            signature_high_water = governed_dispatch_v5_source_signature_high_water(
+                &tx,
+                run_id,
+                v5_envelope_digest,
+                authority,
+            )?;
+            if signature_high_water < projection.cursor_signature_rowid
+                || signature_high_water < projection.observed_high_water_rowid
             {
-                continue;
-            }
-            let Payload::DispatchEnvelopeV5(dispatch) = &event.payload else {
                 return Err(governed_dispatch_v5_admission_reconciliation_required(
                     run_id,
                     "unresolved",
-                    "V5 source event kind and payload do not agree",
-                ));
-            };
-            if dispatch.envelope_digest != v5_envelope_digest {
-                continue;
-            }
-            let recomputed = dispatch_envelope_v5_digest(dispatch).map_err(|error| {
-                governed_dispatch_v5_admission_reconciliation_required(
-                    run_id,
-                    "unresolved",
-                    format!("matching V5 source digest could not be recomputed: {error}"),
-                )
-            })?;
-            if recomputed != v5_envelope_digest {
-                return Err(governed_dispatch_v5_admission_reconciliation_required(
-                    run_id,
-                    "unresolved",
-                    "matching V5 source carries a noncanonical detached digest",
+                    "V5 source signature high-water regressed below durable scan state",
                 ));
             }
-            if resolved.replace(event.id).is_some() {
-                return Err(governed_dispatch_v5_admission_reconciliation_required(
-                    run_id,
-                    "unresolved",
-                    "V5 source envelope digest resolves to more than one signed event",
-                ));
+            if signature_high_water > projection.observed_high_water_rowid {
+                projection.observed_high_water_rowid = signature_high_water;
+                projection.complete_through_signature_rowid = None;
             }
         }
 
-        resolved.ok_or_else(|| {
-            governed_dispatch_v5_admission_reconciliation_required(
-                run_id,
-                "unresolved",
-                "V5 source envelope digest did not resolve to exactly one signed event",
-            )
-        })
+        let remaining_budget = V5_SOURCE_SCAN_BATCH_LIMIT.saturating_sub(loaded);
+        if projection.event_complete_through_rowid == Some(event_high_water)
+            && projection.cursor_signature_rowid < signature_high_water
+            && remaining_budget > 0
+        {
+            let source_hash = authority
+                .source_dispatch_signer
+                .public_key_hash
+                .as_deref()
+                .ok_or_else(|| {
+                    governed_dispatch_v5_admission_reconciliation_required(
+                        run_id,
+                        "unresolved",
+                        "configured V5 source signer has no public key hash",
+                    )
+                })?;
+            let mut statement = tx.prepare(V5_SOURCE_SCAN_QUERY_V1)?;
+            let mut rows = statement.query(params![
+                run_id.to_string(),
+                v5_envelope_digest,
+                authority.source_dispatch_signer.actor_id,
+                authority.source_dispatch_signer.key_id,
+                source_hash,
+                projection.cursor_signature_rowid,
+                signature_high_water,
+                i64::try_from(remaining_budget).unwrap_or(i64::MAX),
+            ])?;
+            let loaded_before_signature_scan = loaded;
+            while let Some(row) = rows.next()? {
+                loaded = loaded.saturating_add(1);
+                if loaded > V5_SOURCE_SCAN_BATCH_LIMIT {
+                    return Err(governed_dispatch_v5_admission_reconciliation_required(
+                        run_id,
+                        "unresolved",
+                        "V5 source scan exceeded its fixed row budget",
+                    ));
+                }
+                let signature_rowid: i64 = row.get(0)?;
+                if signature_rowid <= projection.cursor_signature_rowid
+                    || signature_rowid > signature_high_water
+                {
+                    return Err(governed_dispatch_v5_admission_reconciliation_required(
+                        run_id,
+                        "unresolved",
+                        "V5 source scan returned a non-monotonic signature row",
+                    ));
+                }
+                projection.cursor_signature_rowid = signature_rowid;
+                #[cfg(any(test, feature = "test-support"))]
+                self.v5_source_candidate_loaded_count
+                    .set(u64::try_from(loaded).unwrap_or(u64::MAX));
+
+                let event_row = StoredEventRow {
+                    id: row.get(1)?,
+                    run_id: row.get(2)?,
+                    parent_event_id: row.get(3)?,
+                    schema_version: row.get(4)?,
+                    kind: row.get(5)?,
+                    occurred_at: row.get(6)?,
+                    payload: row.get(7)?,
+                };
+                let signature_row = StoredEventSignatureRow {
+                    event_id: row.get(8)?,
+                    canonical_event_hash: row.get(9)?,
+                    actor_id: row.get(10)?,
+                    key_id: row.get(11)?,
+                    public_key_hash: row.get(12)?,
+                    algorithm: row.get(13)?,
+                    signature: row.get(14)?,
+                    signed_at: row.get(15)?,
+                };
+                if let Some((event_id, event_digest)) =
+                    verified_governed_dispatch_v5_source_scan_candidate(
+                        &event_row,
+                        &signature_row,
+                        run_id,
+                        v5_envelope_digest,
+                        authority,
+                        || {
+                            #[cfg(any(test, feature = "test-support"))]
+                            self.v5_source_candidate_verification_count.set(
+                                self.v5_source_candidate_verification_count
+                                    .get()
+                                    .saturating_add(1),
+                            );
+                        },
+                    )?
+                {
+                    match projection.candidate_event_id {
+                        None => {
+                            projection.candidate_signature_rowid = Some(signature_rowid);
+                            projection.candidate_event_id = Some(event_id);
+                            projection.candidate_event_digest = Some(event_digest);
+                        }
+                        Some(existing) if existing == event_id => {}
+                        Some(_) => projection.ambiguous = true,
+                    }
+                }
+            }
+            if loaded == loaded_before_signature_scan {
+                return Err(governed_dispatch_v5_admission_reconciliation_required(
+                    run_id,
+                    "unresolved",
+                    "V5 source scan could not advance to its captured signature high-water",
+                ));
+            }
+        }
+        if projection.event_complete_through_rowid == Some(event_high_water)
+            && projection.cursor_signature_rowid == signature_high_water
+        {
+            projection.complete_through_signature_rowid = Some(signature_high_water);
+        }
+        persist_governed_dispatch_v5_source_scan_projection(&tx, &projection)?;
+        let resolved = resolved_governed_dispatch_v5_source_from_projection(
+            &tx,
+            &projection,
+            run_id,
+            v5_envelope_digest,
+            &authority_fingerprint,
+            authority,
+            event_high_water,
+            signature_high_water,
+        );
+        tx.commit()?;
+        resolved
     }
 
     /// Reset the resolver instrumentation used by large-run regression tests.
@@ -3704,6 +3940,71 @@ impl SqliteStore {
     #[cfg(any(test, feature = "test-support"))]
     pub fn v5_source_candidate_loaded_count_for_tests(&self) -> u64 {
         self.v5_source_candidate_loaded_count.get()
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn v5_source_scan_batch_limit_for_tests(&self) -> usize {
+        V5_SOURCE_SCAN_BATCH_LIMIT
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn v5_source_projection_state_for_tests(
+        &self,
+        run_id: RunId,
+        v5_envelope_digest: &str,
+        authority: &GovernedDispatchV5AdmissionAuthorityV1,
+    ) -> Result<Option<(i64, i64, Option<i64>, bool, Option<EventId>)>> {
+        let fingerprint = governed_dispatch_v5_source_authority_fingerprint_v1(authority)?;
+        Ok(governed_dispatch_v5_source_scan_projection(
+            &self.conn,
+            run_id,
+            v5_envelope_digest,
+            &fingerprint,
+        )?
+        .map(|projection| {
+            (
+                projection.cursor_signature_rowid,
+                projection.observed_high_water_rowid,
+                projection.complete_through_signature_rowid,
+                projection.ambiguous,
+                projection.candidate_event_id,
+            )
+        }))
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn v5_source_scan_query_plan_for_tests(
+        &self,
+        run_id: RunId,
+        v5_envelope_digest: &str,
+        authority: &GovernedDispatchV5AdmissionAuthorityV1,
+    ) -> Result<Vec<String>> {
+        let source_hash = authority
+            .source_dispatch_signer
+            .public_key_hash
+            .as_deref()
+            .ok_or_else(|| LedgerError::GovernedDispatchAdmissionAuthorityRejected {
+                reason: "configured V5 source signer has no public key hash".into(),
+            })?;
+        let mut statement = self
+            .conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {V5_SOURCE_SCAN_QUERY_V1}"))?;
+        let details = statement
+            .query_map(
+                params![
+                    run_id.to_string(),
+                    v5_envelope_digest,
+                    authority.source_dispatch_signer.actor_id,
+                    authority.source_dispatch_signer.key_id,
+                    source_hash,
+                    0_i64,
+                    i64::MAX,
+                    i64::try_from(V5_SOURCE_SCAN_BATCH_LIMIT).unwrap_or(i64::MAX),
+                ],
+                |row| row.get::<_, String>(3),
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(details)
     }
 
     /// Record (or resolve) one separately signed protected-host V5 admission
@@ -3734,7 +4035,9 @@ impl SqliteStore {
             request.dispatch_event_id,
             authority,
         )?;
-        require_no_governed_dispatch_v5_source_sibling(&tx, request, &evidence, authority)?;
+        require_complete_governed_dispatch_v5_source_projection(
+            &tx, request, &evidence, authority,
+        )?;
 
         if let Some(stored) = governed_dispatch_v5_admission_by_source(
             &tx,
@@ -10672,99 +10975,745 @@ fn stored_governed_dispatch_v5_admission_from_row(
     })
 }
 
-/// Reject a second independently signed V5 source event with the exact same
-/// semantic identity. A projection only records admitted sources, so the raw
-/// tape must be scanned as well: otherwise a crash or generic append between
-/// record and seal could leave two equally plausible source envelopes.
-fn require_no_governed_dispatch_v5_source_sibling(
+#[derive(Clone, Debug)]
+struct StoredGovernedDispatchV5SourceScan {
+    run_id: String,
+    v5_envelope_digest: String,
+    source_authority_fingerprint: String,
+    scan_schema_version: i64,
+    event_cursor_rowid: i64,
+    observed_event_high_water_rowid: i64,
+    event_complete_through_rowid: Option<i64>,
+    cursor_signature_rowid: i64,
+    observed_high_water_rowid: i64,
+    complete_through_signature_rowid: Option<i64>,
+    candidate_signature_rowid: Option<i64>,
+    candidate_event_id: Option<EventId>,
+    candidate_event_digest: Option<String>,
+    ambiguous: bool,
+}
+
+impl StoredGovernedDispatchV5SourceScan {
+    fn new(run_id: RunId, v5_envelope_digest: &str, source_authority_fingerprint: &str) -> Self {
+        Self {
+            run_id: run_id.to_string(),
+            v5_envelope_digest: v5_envelope_digest.to_owned(),
+            source_authority_fingerprint: source_authority_fingerprint.to_owned(),
+            scan_schema_version: 1,
+            event_cursor_rowid: 0,
+            observed_event_high_water_rowid: 0,
+            event_complete_through_rowid: None,
+            cursor_signature_rowid: 0,
+            observed_high_water_rowid: 0,
+            complete_through_signature_rowid: None,
+            candidate_signature_rowid: None,
+            candidate_event_id: None,
+            candidate_event_digest: None,
+            ambiguous: false,
+        }
+    }
+}
+
+fn governed_dispatch_v5_source_authority_fingerprint_v1(
+    authority: &GovernedDispatchV5AdmissionAuthorityV1,
+) -> Result<String> {
+    #[derive(serde::Serialize)]
+    struct FingerprintMaterial<'a> {
+        schema_version: u8,
+        algorithm: &'static str,
+        actor_id: &'a str,
+        key_id: &'a str,
+        public_key_hash: &'a str,
+        ledger_authority_realm_digest: &'a str,
+    }
+
+    let public_key_hash = authority
+        .source_dispatch_signer
+        .public_key_hash
+        .as_deref()
+        .ok_or_else(|| LedgerError::GovernedDispatchAdmissionAuthorityRejected {
+            reason: "configured V5 source signer has no public key hash".into(),
+        })?;
+    let encoded = serde_json::to_vec(&FingerprintMaterial {
+        schema_version: 1,
+        algorithm: "ed25519",
+        actor_id: &authority.source_dispatch_signer.actor_id,
+        key_id: &authority.source_dispatch_signer.key_id,
+        public_key_hash,
+        ledger_authority_realm_digest: &authority.ledger_authority_realm_digest,
+    })?;
+    let mut hasher = Sha256::new();
+    hasher.update(V5_SOURCE_AUTHORITY_FINGERPRINT_DOMAIN_V1);
+    hasher.update(encoded);
+    Ok(format!("sha256:{:x}", hasher.finalize()))
+}
+
+fn governed_dispatch_v5_source_event_high_water(
+    conn: &Connection,
+    run_id: RunId,
+    v5_envelope_digest: &str,
+) -> Result<i64> {
+    conn.query_row(
+        "SELECT COALESCE(MAX(rowid), 0)
+         FROM events INDEXED BY idx_events_v5_envelope_digest
+         WHERE run_id = ?1
+           AND kind = 'dispatch_envelope_v5'
+           AND json_extract(
+                 payload,
+                 '$.DispatchEnvelopeV5.envelope_digest'
+               ) = ?2",
+        params![run_id.to_string(), v5_envelope_digest],
+        |row| row.get(0),
+    )
+    .map_err(Into::into)
+}
+
+fn governed_dispatch_v5_source_signature_high_water(
+    conn: &Connection,
+    run_id: RunId,
+    v5_envelope_digest: &str,
+    authority: &GovernedDispatchV5AdmissionAuthorityV1,
+) -> Result<i64> {
+    let public_key_hash = authority
+        .source_dispatch_signer
+        .public_key_hash
+        .as_deref()
+        .ok_or_else(|| LedgerError::GovernedDispatchAdmissionAuthorityRejected {
+            reason: "configured V5 source signer has no public key hash".into(),
+        })?;
+    conn.query_row(
+        "SELECT COALESCE(MAX(signature_rowid), 0)
+         FROM governed_dispatch_v5_signature_scan_index
+              INDEXED BY idx_governed_dispatch_v5_signature_scan_exact
+         WHERE run_id = ?1
+           AND v5_envelope_digest = ?2
+           AND actor_id = ?3
+           AND key_id = ?4
+           AND public_key_hash = ?5
+           AND algorithm = 'ed25519'",
+        params![
+            run_id.to_string(),
+            v5_envelope_digest,
+            authority.source_dispatch_signer.actor_id,
+            authority.source_dispatch_signer.key_id,
+            public_key_hash,
+        ],
+        |row| row.get(0),
+    )
+    .map_err(Into::into)
+}
+
+fn require_governed_dispatch_v5_source_scan_schema(conn: &Connection, run_id: RunId) -> Result<()> {
+    let required = [
+        (
+            "table",
+            "governed_dispatch_v5_signature_scan_index",
+            "signature_rowid",
+        ),
+        (
+            "index",
+            "idx_governed_dispatch_v5_signature_scan_exact",
+            "v5_envelope_digest",
+        ),
+        (
+            "trigger",
+            "governed_dispatch_v5_signature_scan_after_insert",
+            "NEW.rowid",
+        ),
+        (
+            "trigger",
+            "governed_dispatch_v5_signature_scan_no_update",
+            "UPDATE forbidden",
+        ),
+        (
+            "trigger",
+            "governed_dispatch_v5_signature_scan_no_delete",
+            "DELETE forbidden",
+        ),
+    ];
+    for (object_type, name, required_fragment) in required {
+        let sql = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type = ?1 AND name = ?2",
+                params![object_type, name],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten();
+        if !sql
+            .as_deref()
+            .is_some_and(|sql| sql.contains(required_fragment))
+        {
+            return Err(governed_dispatch_v5_admission_reconciliation_required(
+                run_id,
+                "unresolved",
+                format!("required V5 source scan schema object {name} is missing or corrupt"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn require_governed_dispatch_v5_signature_scan_index_row(
+    conn: &Connection,
+    run_id: RunId,
+    event_rowid: i64,
+    event_id: &str,
+) -> Result<()> {
+    let source = conn
+        .query_row(
+            "SELECT
+                 s.rowid, e.rowid, e.id, e.run_id,
+                 json_extract(
+                     e.payload,
+                     '$.DispatchEnvelopeV5.envelope_digest'
+                 ),
+                 s.actor_id, s.key_id, s.public_key_hash, s.algorithm
+             FROM events e
+             JOIN event_signatures s ON s.event_id = e.id
+             WHERE e.rowid = ?1 AND e.id = ?2",
+            params![event_rowid, event_id],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, Option<String>>(7)?,
+                    row.get::<_, String>(8)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some(source) = source else {
+        return Ok(());
+    };
+    let indexed = conn
+        .query_row(
+            "SELECT
+                 signature_rowid, event_rowid, event_id, run_id,
+                 v5_envelope_digest, actor_id, key_id,
+                 public_key_hash, algorithm
+             FROM governed_dispatch_v5_signature_scan_index
+             WHERE signature_rowid = ?1",
+            params![source.0],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, Option<String>>(7)?,
+                    row.get::<_, String>(8)?,
+                ))
+            },
+        )
+        .optional()?;
+    if indexed.as_ref() != Some(&source) {
+        return Err(governed_dispatch_v5_admission_reconciliation_required(
+            run_id,
+            "unresolved",
+            "append-derived V5 signature scan index row is missing or corrupt",
+        ));
+    }
+    Ok(())
+}
+
+fn bootstrap_governed_dispatch_v5_signature_scan_index(
+    tx: &Transaction<'_>,
+    projection: &mut StoredGovernedDispatchV5SourceScan,
+    run_id: RunId,
+    v5_envelope_digest: &str,
+    budget: usize,
+) -> Result<usize> {
+    if budget == 0 || projection.event_cursor_rowid >= projection.observed_event_high_water_rowid {
+        return Ok(0);
+    }
+    let mut statement = tx.prepare(V5_SOURCE_EVENT_BOOTSTRAP_QUERY_V1)?;
+    let rows = statement
+        .query_map(
+            params![
+                run_id.to_string(),
+                v5_envelope_digest,
+                projection.event_cursor_rowid,
+                projection.observed_event_high_water_rowid,
+                i64::try_from(budget).unwrap_or(i64::MAX),
+            ],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+        )?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    if rows.len() > budget {
+        return Err(governed_dispatch_v5_admission_reconciliation_required(
+            run_id,
+            "unresolved",
+            "V5 source event bootstrap exceeded its fixed row budget",
+        ));
+    }
+    for (event_rowid, event_id) in &rows {
+        if *event_rowid <= projection.event_cursor_rowid
+            || *event_rowid > projection.observed_event_high_water_rowid
+        {
+            return Err(governed_dispatch_v5_admission_reconciliation_required(
+                run_id,
+                "unresolved",
+                "V5 source event bootstrap returned a non-monotonic row",
+            ));
+        }
+        tx.execute(
+            r#"INSERT OR IGNORE INTO governed_dispatch_v5_signature_scan_index (
+                   signature_rowid, event_rowid, event_id, run_id,
+                   v5_envelope_digest, actor_id, key_id,
+                   public_key_hash, algorithm
+               )
+               SELECT
+                   s.rowid, e.rowid, e.id, e.run_id,
+                   json_extract(
+                       e.payload,
+                       '$.DispatchEnvelopeV5.envelope_digest'
+                   ),
+                   s.actor_id, s.key_id, s.public_key_hash, s.algorithm
+               FROM events e
+               JOIN event_signatures s ON s.event_id = e.id
+               WHERE e.rowid = ?1 AND e.id = ?2"#,
+            params![event_rowid, event_id],
+        )?;
+        require_governed_dispatch_v5_signature_scan_index_row(tx, run_id, *event_rowid, event_id)?;
+        projection.event_cursor_rowid = *event_rowid;
+    }
+    if projection.event_cursor_rowid == projection.observed_event_high_water_rowid {
+        projection.event_complete_through_rowid = Some(projection.observed_event_high_water_rowid);
+    }
+    Ok(rows.len())
+}
+
+fn governed_dispatch_v5_source_scan_projection(
+    conn: &Connection,
+    run_id: RunId,
+    v5_envelope_digest: &str,
+    source_authority_fingerprint: &str,
+) -> Result<Option<StoredGovernedDispatchV5SourceScan>> {
+    conn.query_row(
+        "SELECT
+             run_id, v5_envelope_digest, source_authority_fingerprint,
+             scan_schema_version, event_cursor_rowid,
+             observed_event_high_water_rowid, event_complete_through_rowid,
+             cursor_signature_rowid, observed_high_water_rowid,
+             complete_through_signature_rowid, candidate_signature_rowid,
+             candidate_event_id, candidate_event_digest, ambiguous
+         FROM governed_dispatch_v5_source_scans
+         WHERE run_id = ?1
+           AND v5_envelope_digest = ?2
+           AND source_authority_fingerprint = ?3",
+        params![
+            run_id.to_string(),
+            v5_envelope_digest,
+            source_authority_fingerprint
+        ],
+        |row| {
+            let candidate_event_id = row
+                .get::<_, Option<String>>(11)?
+                .map(|value| parse_event_id(&value, "V5 source scan candidate"))
+                .transpose()
+                .map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        11,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })?;
+            Ok(StoredGovernedDispatchV5SourceScan {
+                run_id: row.get(0)?,
+                v5_envelope_digest: row.get(1)?,
+                source_authority_fingerprint: row.get(2)?,
+                scan_schema_version: row.get(3)?,
+                event_cursor_rowid: row.get(4)?,
+                observed_event_high_water_rowid: row.get(5)?,
+                event_complete_through_rowid: row.get(6)?,
+                cursor_signature_rowid: row.get(7)?,
+                observed_high_water_rowid: row.get(8)?,
+                complete_through_signature_rowid: row.get(9)?,
+                candidate_signature_rowid: row.get(10)?,
+                candidate_event_id,
+                candidate_event_digest: row.get(12)?,
+                ambiguous: row.get::<_, i64>(13)? == 1,
+            })
+        },
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+fn persist_governed_dispatch_v5_source_scan_projection(
+    tx: &Transaction<'_>,
+    projection: &StoredGovernedDispatchV5SourceScan,
+) -> Result<()> {
+    tx.execute(
+        r#"INSERT INTO governed_dispatch_v5_source_scans (
+               run_id, v5_envelope_digest, source_authority_fingerprint,
+               scan_schema_version, event_cursor_rowid,
+               observed_event_high_water_rowid, event_complete_through_rowid,
+               cursor_signature_rowid, observed_high_water_rowid,
+               complete_through_signature_rowid, candidate_signature_rowid,
+               candidate_event_id, candidate_event_digest, ambiguous
+           ) VALUES (
+               ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14
+           )
+           ON CONFLICT(run_id, v5_envelope_digest, source_authority_fingerprint)
+           DO UPDATE SET
+               scan_schema_version = excluded.scan_schema_version,
+               event_cursor_rowid = excluded.event_cursor_rowid,
+               observed_event_high_water_rowid =
+                   excluded.observed_event_high_water_rowid,
+               event_complete_through_rowid =
+                   excluded.event_complete_through_rowid,
+               cursor_signature_rowid = excluded.cursor_signature_rowid,
+               observed_high_water_rowid = excluded.observed_high_water_rowid,
+               complete_through_signature_rowid =
+                   excluded.complete_through_signature_rowid,
+               candidate_signature_rowid = excluded.candidate_signature_rowid,
+               candidate_event_id = excluded.candidate_event_id,
+               candidate_event_digest = excluded.candidate_event_digest,
+               ambiguous = excluded.ambiguous"#,
+        params![
+            projection.run_id,
+            projection.v5_envelope_digest,
+            projection.source_authority_fingerprint,
+            projection.scan_schema_version,
+            projection.event_cursor_rowid,
+            projection.observed_event_high_water_rowid,
+            projection.event_complete_through_rowid,
+            projection.cursor_signature_rowid,
+            projection.observed_high_water_rowid,
+            projection.complete_through_signature_rowid,
+            projection.candidate_signature_rowid,
+            projection
+                .candidate_event_id
+                .map(|event_id| event_id.to_string()),
+            projection.candidate_event_digest,
+            i64::from(projection.ambiguous),
+        ],
+    )?;
+    Ok(())
+}
+
+fn verified_governed_dispatch_v5_source_scan_candidate(
+    event_row: &StoredEventRow,
+    signature_row: &StoredEventSignatureRow,
+    run_id: RunId,
+    v5_envelope_digest: &str,
+    authority: &GovernedDispatchV5AdmissionAuthorityV1,
+    mut on_cryptographic_verification: impl FnMut(),
+) -> Result<Option<(EventId, String)>> {
+    if event_row.run_id != run_id.to_string()
+        || event_row.kind != "dispatch_envelope_v5"
+        || signature_row.algorithm != "ed25519"
+    {
+        return Ok(None);
+    }
+    let Ok(event) = event_row.to_event().and_then(canonicalize) else {
+        return Ok(None);
+    };
+    let Payload::DispatchEnvelopeV5(dispatch) = &event.payload else {
+        return Ok(None);
+    };
+    if dispatch.envelope_digest != v5_envelope_digest {
+        return Ok(None);
+    }
+    let Ok(signature) = signature_row.to_event_signature() else {
+        return Ok(None);
+    };
+    if !actor_matches(&authority.source_dispatch_signer, &signature.signer) {
+        return Ok(None);
+    }
+    on_cryptographic_verification();
+    if verify_event_signature(&event, &signature, &authority.trusted_keys)
+        != VerificationStatus::Verified
+    {
+        return Ok(None);
+    }
+    let event_digest = canonical_event_hash(&event).map_err(|error| {
+        governed_dispatch_v5_admission_reconciliation_required(
+            run_id,
+            "unresolved",
+            format!("verified V5 source event hash could not be recomputed: {error}"),
+        )
+    })?;
+    if signature.canonical_event_hash != event_digest {
+        return Err(governed_dispatch_v5_admission_reconciliation_required(
+            run_id,
+            "unresolved",
+            "verified V5 source signature carries a mismatched canonical event hash",
+        ));
+    }
+    let recomputed = dispatch_envelope_v5_digest(dispatch).map_err(|error| {
+        governed_dispatch_v5_admission_reconciliation_required(
+            run_id,
+            "unresolved",
+            format!("verified V5 source envelope digest could not be recomputed: {error}"),
+        )
+    })?;
+    if recomputed != v5_envelope_digest {
+        return Err(governed_dispatch_v5_admission_reconciliation_required(
+            run_id,
+            "unresolved",
+            "verified V5 source carries a noncanonical detached envelope digest",
+        ));
+    }
+    Ok(Some((event.id, event_digest)))
+}
+
+fn reverify_governed_dispatch_v5_projected_candidate(
+    conn: &Connection,
+    projection: &StoredGovernedDispatchV5SourceScan,
+    run_id: RunId,
+    v5_envelope_digest: &str,
+    authority: &GovernedDispatchV5AdmissionAuthorityV1,
+) -> Result<Option<EventId>> {
+    let (Some(signature_rowid), Some(event_id), Some(expected_event_digest)) = (
+        projection.candidate_signature_rowid,
+        projection.candidate_event_id,
+        projection.candidate_event_digest.as_deref(),
+    ) else {
+        return Ok(None);
+    };
+    let mut statement = conn.prepare(
+        "SELECT
+             e.id, e.run_id, e.parent_event_id, e.schema_version,
+             e.kind, e.occurred_at, e.payload,
+             s.event_id, s.canonical_event_hash, s.actor_id, s.key_id,
+             s.public_key_hash, s.algorithm, s.signature, s.signed_at
+         FROM event_signatures s
+         JOIN events e ON e.id = s.event_id
+         WHERE s.rowid = ?1 AND s.event_id = ?2",
+    )?;
+    let row = statement
+        .query_row(params![signature_rowid, event_id.to_string()], |row| {
+            Ok((
+                StoredEventRow {
+                    id: row.get(0)?,
+                    run_id: row.get(1)?,
+                    parent_event_id: row.get(2)?,
+                    schema_version: row.get(3)?,
+                    kind: row.get(4)?,
+                    occurred_at: row.get(5)?,
+                    payload: row.get(6)?,
+                },
+                StoredEventSignatureRow {
+                    event_id: row.get(7)?,
+                    canonical_event_hash: row.get(8)?,
+                    actor_id: row.get(9)?,
+                    key_id: row.get(10)?,
+                    public_key_hash: row.get(11)?,
+                    algorithm: row.get(12)?,
+                    signature: row.get(13)?,
+                    signed_at: row.get(14)?,
+                },
+            ))
+        })
+        .optional()?
+        .ok_or_else(|| {
+            governed_dispatch_v5_admission_reconciliation_required(
+                run_id,
+                "unresolved",
+                "projected V5 source candidate row is missing",
+            )
+        })?;
+    let verified = verified_governed_dispatch_v5_source_scan_candidate(
+        &row.0,
+        &row.1,
+        run_id,
+        v5_envelope_digest,
+        authority,
+        || {},
+    )?
+    .ok_or_else(|| {
+        governed_dispatch_v5_admission_reconciliation_required(
+            run_id,
+            "unresolved",
+            "projected V5 source candidate no longer verifies",
+        )
+    })?;
+    if verified.0 != event_id || verified.1 != expected_event_digest {
+        return Err(governed_dispatch_v5_admission_reconciliation_required(
+            run_id,
+            "unresolved",
+            "projected V5 source candidate identity is corrupt",
+        ));
+    }
+    Ok(Some(event_id))
+}
+
+fn validate_governed_dispatch_v5_source_scan_projection(
+    conn: &Connection,
+    projection: &StoredGovernedDispatchV5SourceScan,
+    run_id: RunId,
+    v5_envelope_digest: &str,
+    source_authority_fingerprint: &str,
+    authority: &GovernedDispatchV5AdmissionAuthorityV1,
+) -> Result<()> {
+    let candidate_fields_present = [
+        projection.candidate_signature_rowid.is_some(),
+        projection.candidate_event_id.is_some(),
+        projection.candidate_event_digest.is_some(),
+    ];
+    if projection.scan_schema_version != 1
+        || projection.run_id != run_id.to_string()
+        || projection.v5_envelope_digest != v5_envelope_digest
+        || projection.source_authority_fingerprint != source_authority_fingerprint
+        || projection.event_cursor_rowid < 0
+        || projection.observed_event_high_water_rowid < projection.event_cursor_rowid
+        || projection
+            .event_complete_through_rowid
+            .is_some_and(|complete| {
+                complete != projection.event_cursor_rowid
+                    || complete != projection.observed_event_high_water_rowid
+            })
+        || projection.cursor_signature_rowid < 0
+        || projection.observed_high_water_rowid < projection.cursor_signature_rowid
+        || !matches!(
+            candidate_fields_present,
+            [false, false, false] | [true, true, true]
+        )
+        || projection
+            .candidate_signature_rowid
+            .is_some_and(|rowid| rowid <= 0 || rowid > projection.cursor_signature_rowid)
+        || projection
+            .candidate_event_digest
+            .as_deref()
+            .is_some_and(|digest| !is_canonical_sha256_digest(digest))
+        || projection
+            .complete_through_signature_rowid
+            .is_some_and(|complete| {
+                complete != projection.cursor_signature_rowid
+                    || complete != projection.observed_high_water_rowid
+            })
+    {
+        return Err(governed_dispatch_v5_admission_reconciliation_required(
+            run_id,
+            "unresolved",
+            "durable V5 source scan projection is corrupt or authority-mismatched",
+        ));
+    }
+    if projection.candidate_event_id.is_some() {
+        reverify_governed_dispatch_v5_projected_candidate(
+            conn,
+            projection,
+            run_id,
+            v5_envelope_digest,
+            authority,
+        )?;
+    }
+    Ok(())
+}
+
+fn resolved_governed_dispatch_v5_source_from_projection(
+    conn: &Connection,
+    projection: &StoredGovernedDispatchV5SourceScan,
+    run_id: RunId,
+    v5_envelope_digest: &str,
+    source_authority_fingerprint: &str,
+    authority: &GovernedDispatchV5AdmissionAuthorityV1,
+    current_event_high_water: i64,
+    current_signature_high_water: i64,
+) -> Result<EventId> {
+    validate_governed_dispatch_v5_source_scan_projection(
+        conn,
+        projection,
+        run_id,
+        v5_envelope_digest,
+        source_authority_fingerprint,
+        authority,
+    )?;
+    if projection.event_cursor_rowid != current_event_high_water
+        || projection.observed_event_high_water_rowid != current_event_high_water
+        || projection.event_complete_through_rowid != Some(current_event_high_water)
+        || projection.cursor_signature_rowid != current_signature_high_water
+        || projection.observed_high_water_rowid != current_signature_high_water
+        || projection.complete_through_signature_rowid != Some(current_signature_high_water)
+    {
+        return Err(governed_dispatch_v5_admission_reconciliation_required(
+            run_id,
+            "unresolved",
+            "durable V5 source scan has not reached its stable signature high-water",
+        ));
+    }
+    if projection.ambiguous {
+        return Err(governed_dispatch_v5_admission_reconciliation_required(
+            run_id,
+            "unresolved",
+            "more than one verified V5 source event has the requested envelope digest",
+        ));
+    }
+    reverify_governed_dispatch_v5_projected_candidate(
+        conn,
+        projection,
+        run_id,
+        v5_envelope_digest,
+        authority,
+    )?
+    .ok_or_else(|| {
+        governed_dispatch_v5_admission_reconciliation_required(
+            run_id,
+            "unresolved",
+            "completed V5 source scan did not find one verified source event",
+        )
+    })
+}
+
+fn require_complete_governed_dispatch_v5_source_projection(
     tx: &Transaction<'_>,
     request: &GovernedDispatchV5AdmissionRequestV1,
     evidence: &VerifiedGovernedDispatchV5ObservationEvidence,
     authority: &GovernedDispatchV5AdmissionAuthorityV1,
 ) -> Result<()> {
-    let mut statement = tx.prepare(
-        "SELECT id FROM events
-         WHERE run_id = ?1 AND kind = 'dispatch_envelope_v5'
-         ORDER BY id ASC",
+    require_governed_dispatch_v5_source_scan_schema(tx, request.run_id)?;
+    let authority_fingerprint = governed_dispatch_v5_source_authority_fingerprint_v1(authority)?;
+    let event_high_water = governed_dispatch_v5_source_event_high_water(
+        tx,
+        request.run_id,
+        &evidence.v5_envelope_digest,
     )?;
-    let event_ids = statement
-        .query_map(params![request.run_id.to_string()], |row| {
-            row.get::<_, String>(0)
-        })?
-        .map(|row| -> Result<EventId> { parse_event_id(&row?, "V5 source dispatch") })
-        .collect::<Result<Vec<_>>>()?;
-
-    for candidate_event_id in event_ids {
-        if candidate_event_id == evidence.dispatch_event_id {
-            continue;
-        }
-        let Some((candidate_row, signature_row)) =
-            stored_event_and_signature_by_id(&*tx, candidate_event_id)?
-        else {
-            continue;
-        };
-        let Some(signature_row) = signature_row else {
-            continue;
-        };
-        if signature_row.algorithm != "ed25519" {
-            continue;
-        }
-        let Ok(signature) = signature_row.to_event_signature() else {
-            continue;
-        };
-        if !actor_matches(&authority.source_dispatch_signer, &signature.signer) {
-            continue;
-        }
-        let Ok(candidate) = candidate_row.to_event().and_then(canonicalize) else {
-            continue;
-        };
-        if verify_event_signature(&candidate, &signature, &authority.trusted_keys)
-            != VerificationStatus::Verified
-        {
-            continue;
-        }
-        let Ok(candidate_hash) = canonical_event_hash(&candidate) else {
-            continue;
-        };
-        if signature.canonical_event_hash != candidate_hash {
-            continue;
-        }
-        let Payload::DispatchEnvelopeV5(candidate_dispatch) = &candidate.payload else {
-            return Err(governed_dispatch_v5_admission_reconciliation_required(
-                request.run_id,
-                &evidence.idempotency_key,
-                "signed V5 source sibling does not carry a V5 dispatch payload",
-            ));
-        };
-        let candidate_identity = governed_dispatch_v5_observation_semantic_identity_digest_v1(
+    let signature_high_water = governed_dispatch_v5_source_signature_high_water(
+        tx,
+        request.run_id,
+        &evidence.v5_envelope_digest,
+        authority,
+    )?;
+    let projection = governed_dispatch_v5_source_scan_projection(
+        tx,
+        request.run_id,
+        &evidence.v5_envelope_digest,
+        &authority_fingerprint,
+    )?
+    .ok_or_else(|| {
+        governed_dispatch_v5_admission_reconciliation_required(
             request.run_id,
-            candidate_dispatch,
-        )?;
-        if candidate_identity != evidence.semantic_identity_digest {
-            continue;
-        }
-        let candidate_evidence = v5_observation_proof::verify_admission_evidence_in_tx(
-            tx,
-            request.run_id,
-            candidate_event_id,
-            authority,
+            &evidence.idempotency_key,
+            "V5 admission has no completed authoritative source scan",
         )
-        .map_err(|error| {
-            governed_dispatch_v5_admission_reconciliation_required(
-                request.run_id,
-                &evidence.idempotency_key,
-                format!(
-                    "a semantically identical signed V5 source sibling could not be fully re-verified: {error}"
-                ),
-            )
-        })?;
-        if candidate_evidence.semantic_identity_digest == evidence.semantic_identity_digest {
-            return Err(governed_dispatch_v5_admission_reconciliation_required(
-                request.run_id,
-                &evidence.idempotency_key,
-                "multiple fully verified V5 source dispatches share one immutable semantic identity",
-            ));
-        }
+    })?;
+    let projected_event_id = resolved_governed_dispatch_v5_source_from_projection(
+        tx,
+        &projection,
+        request.run_id,
+        &evidence.v5_envelope_digest,
+        &authority_fingerprint,
+        authority,
+        event_high_water,
+        signature_high_water,
+    )?;
+    if projected_event_id != evidence.dispatch_event_id {
+        return Err(governed_dispatch_v5_admission_reconciliation_required(
+            request.run_id,
+            &evidence.idempotency_key,
+            "V5 admission request does not name the completed authoritative source projection",
+        ));
     }
     Ok(())
 }
@@ -10929,7 +11878,7 @@ fn verify_stored_governed_dispatch_v5_admission(
         run_id: stored.run_id,
         dispatch_event_id: stored.source_dispatch_event_id,
     };
-    require_no_governed_dispatch_v5_source_sibling(tx, &request, &evidence, authority)?;
+    require_complete_governed_dispatch_v5_source_projection(tx, &request, &evidence, authority)?;
     let witness_evidence_digest =
         governed_dispatch_v5_admission_witness_evidence_digest_v1(&evidence, authority)?;
     if !stored.matches_evidence(&evidence, authority, &witness_evidence_digest) {

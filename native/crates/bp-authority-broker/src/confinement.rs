@@ -164,6 +164,15 @@ impl BrokerHostConfinementPolicyV1 {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn attestation_for_same_process_socket_tests(
+        &self,
+    ) -> BrokerHostConfinementAttestationV1 {
+        BrokerHostConfinementAttestationV1 {
+            broker_uid: self.broker_uid,
+        }
+    }
+
     /// Compatibility helper for existing internal tests. It is deliberately
     /// absent from production builds so the generic authority boundary cannot
     /// be used by a protected host.

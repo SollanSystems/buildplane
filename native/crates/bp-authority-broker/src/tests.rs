@@ -8265,11 +8265,11 @@ fn broker_dispatch_admission_never_reports_success_when_checkpoint_sealing_fails
 /// exercised against the ledger's V5 admission transaction rather than a fake
 /// backend so a source envelope cannot be confused with the later host-signed
 /// admission receipt.
-struct V5BrokerAdmissionFixture {
+pub(crate) struct V5BrokerAdmissionFixture {
     store: SqliteStore,
-    run_id: RunId,
+    pub(crate) run_id: RunId,
     source_dispatch_event_id: EventId,
-    v5_envelope_digest: String,
+    pub(crate) v5_envelope_digest: String,
     source_key: SigningKey,
     source_signer: ActorKeyRef,
     admission_key: SigningKey,
@@ -8291,7 +8291,13 @@ fn v5_broker_event(run_id: RunId, kind: EventKind, payload: Payload) -> Event {
     }
 }
 
-fn v5_broker_admission_fixture() -> V5BrokerAdmissionFixture {
+pub(crate) fn v5_broker_admission_fixture() -> V5BrokerAdmissionFixture {
+    v5_broker_admission_fixture_with_exact_signer_flood_before_source(0)
+}
+
+fn v5_broker_admission_fixture_with_exact_signer_flood_before_source(
+    forged_count: usize,
+) -> V5BrokerAdmissionFixture {
     let store = SqliteStore::open_in_memory().expect("open V5 broker admission ledger");
     let source_key = SigningKey::from_bytes(&[241; 32]);
     let admission_key = SigningKey::from_bytes(&[242; 32]);
@@ -8491,17 +8497,37 @@ fn v5_broker_admission_fixture() -> V5BrokerAdmissionFixture {
         Payload::DispatchEnvelopeV5(dispatch.clone()),
     );
 
-    for event in [
-        &graph_event,
-        &context_event,
-        &worker_event,
-        &sandbox_event,
-        &dispatch_event,
-    ] {
+    for event in [&graph_event, &context_event, &worker_event, &sandbox_event] {
         store
             .append_signed(event, &source_key, &source_signer)
             .expect("append signed V5 source evidence");
     }
+    store
+        .append(&dispatch_event)
+        .expect("append V5 source event before detached signature");
+    if forged_count > 0 {
+        let tx = store
+            .conn_for_tests()
+            .unchecked_transaction()
+            .expect("begin pre-source exact-signer flood");
+        for _ in 0..forged_count {
+            let forged = Event {
+                id: EventId::new(),
+                occurred_at: Utc::now(),
+                ..dispatch_event.clone()
+            };
+            let mut invalid = sign_event(&forged, &admission_key, &source_signer, Utc::now())
+                .expect("construct invalid pre-source exact-signer signature");
+            invalid.signer = source_signer.clone();
+            insert_v5_flood_event(&tx, &forged, Some((&invalid, "ed25519")));
+        }
+        tx.commit().expect("commit pre-source exact-signer flood");
+    }
+    let source_signature = sign_event(&dispatch_event, &source_key, &source_signer, Utc::now())
+        .expect("sign V5 source event");
+    store
+        .append_event_signature(&source_signature)
+        .expect("append V5 source detached signature");
 
     V5BrokerAdmissionFixture {
         store,
@@ -8593,7 +8619,7 @@ fn insert_v5_flood_event(
     }
 }
 
-fn v5_broker_admission_receipt_count(fixture: &V5BrokerAdmissionFixture) -> usize {
+pub(crate) fn v5_broker_admission_receipt_count(fixture: &V5BrokerAdmissionFixture) -> usize {
     fixture
         .store
         .events_for_run(&fixture.run_id.to_string())
@@ -8603,7 +8629,7 @@ fn v5_broker_admission_receipt_count(fixture: &V5BrokerAdmissionFixture) -> usiz
         .count()
 }
 
-fn v5_broker_checkpoint_count(fixture: &V5BrokerAdmissionFixture) -> usize {
+pub(crate) fn v5_broker_checkpoint_count(fixture: &V5BrokerAdmissionFixture) -> usize {
     fixture
         .store
         .events_for_run(&fixture.run_id.to_string())
@@ -8642,7 +8668,7 @@ fn v5_broker_admission_wire_with_injected_field(
     format!(r#"{wire},"{injected_field}":"caller-controlled"}}"#)
 }
 
-fn v5_broker_admission_backend(
+pub(crate) fn v5_broker_admission_backend(
     fixture: &V5BrokerAdmissionFixture,
 ) -> LedgerV5DispatchAdmissionBackend<'_> {
     LedgerV5DispatchAdmissionBackend::from_prevalidated_startup(
@@ -9196,53 +9222,107 @@ fn broker_v5_digest_resolution_verifies_only_indexed_candidates_on_a_large_run()
             )
             .expect("append unrelated signed event");
     }
+    let template = matching_v5_source_event(&fixture);
+    let unrelated_run = RunId::new();
+    let unrelated_digest = authority_broker_digest('8');
+    let tx = fixture
+        .store
+        .conn_for_tests()
+        .unchecked_transaction()
+        .expect("begin unrelated V5 flood");
+    for _ in 0..1_000 {
+        let wrong_run = Event {
+            id: EventId::new(),
+            run_id: unrelated_run,
+            occurred_at: Utc::now(),
+            ..template.clone()
+        };
+        let wrong_run_signature = sign_event(
+            &wrong_run,
+            &fixture.source_key,
+            &fixture.source_signer,
+            Utc::now(),
+        )
+        .expect("sign wrong-run V5 row");
+        insert_v5_flood_event(&tx, &wrong_run, Some((&wrong_run_signature, "ed25519")));
+
+        let mut wrong_digest = Event {
+            id: EventId::new(),
+            occurred_at: Utc::now(),
+            ..template.clone()
+        };
+        let Payload::DispatchEnvelopeV5(dispatch) = &mut wrong_digest.payload else {
+            panic!("V5 template payload");
+        };
+        dispatch.envelope_digest = unrelated_digest.clone();
+        let mut wrong_digest_signature = sign_event(
+            &template,
+            &fixture.source_key,
+            &fixture.source_signer,
+            Utc::now(),
+        )
+        .expect("sign source template for wrong-digest metadata row");
+        wrong_digest_signature.event_id = wrong_digest.id;
+        insert_v5_flood_event(
+            &tx,
+            &wrong_digest,
+            Some((&wrong_digest_signature, "ed25519")),
+        );
+    }
+    tx.commit().expect("commit unrelated V5 flood");
     fixture
         .store
         .reset_v5_source_candidate_verification_count_for_tests();
-    let query_plan = {
-        let mut statement = fixture
-            .store
-            .conn_for_tests()
-            .prepare(
-                "EXPLAIN QUERY PLAN
-                 SELECT e.id, s.event_id
-                 FROM events e
-                 LEFT JOIN event_signatures s ON s.event_id = e.id
-                 WHERE e.run_id = ?1
-                   AND e.kind = 'dispatch_envelope_v5'
-                   AND json_extract(
-                         e.payload,
-                         '$.DispatchEnvelopeV5.envelope_digest'
-                       ) = ?2",
-            )
-            .expect("prepare V5 source query plan");
-        statement
-            .query_map(
-                rusqlite::params![fixture.run_id.to_string(), fixture.v5_envelope_digest],
-                |row| row.get::<_, String>(3),
-            )
-            .expect("query V5 source plan")
-            .collect::<Result<Vec<_>, _>>()
-            .expect("collect V5 source plan")
-    };
+    let query_plan = fixture
+        .store
+        .v5_source_scan_query_plan_for_tests(
+            fixture.run_id,
+            &fixture.v5_envelope_digest,
+            &fixture.authority,
+        )
+        .expect("explain exact production V5 source scan");
     assert!(
         query_plan
             .iter()
-            .any(|detail| detail.contains("idx_events_v5_envelope_digest")),
-        "V5 resolver query must use its digest index: {query_plan:?}"
+            .any(|detail| detail.contains("idx_governed_dispatch_v5_signature_scan_exact")),
+        "V5 resolver query must use signer predicates and the rowid cursor index: {query_plan:?}"
+    );
+    assert!(
+        query_plan
+            .iter()
+            .any(|detail| detail.contains("sqlite_autoindex_event_signatures_1"))
+            && query_plan
+                .iter()
+                .any(|detail| detail.contains("sqlite_autoindex_events_1")),
+        "the bounded signer batch must join append-only signature and event rows by their unique identities: {query_plan:?}"
     );
     let broker = v5_broker_admission_backend(&fixture);
 
-    assert!(matches!(
-        broker.record_then_exact_seal(v5_broker_admission_request(&fixture)),
-        BrokerV5DispatchAdmissionDisposition::Sealed(_)
-    ));
+    let mut sealed = false;
+    for _ in 0..=16 {
+        if matches!(
+            broker.record_then_exact_seal(v5_broker_admission_request(&fixture)),
+            BrokerV5DispatchAdmissionDisposition::Sealed(_)
+        ) {
+            sealed = true;
+            break;
+        }
+    }
+    assert!(
+        sealed,
+        "bounded signer scan must eventually pass unrelated rows"
+    );
     assert_eq!(
         fixture
             .store
             .v5_source_candidate_verification_count_for_tests(),
         1,
         "unrelated events must not trigger signature loading or cryptographic verification"
+    );
+    assert_eq!(
+        fixture.store.v5_source_candidate_loaded_count_for_tests(),
+        2,
+        "only the exact run+digest event bootstrap and candidate row may consume keyed budget"
     );
 }
 
@@ -9299,13 +9379,24 @@ fn broker_v5_digest_resolution_sql_filters_large_unsigned_and_wrong_role_floods(
         .reset_v5_source_candidate_verification_count_for_tests();
     let broker = v5_broker_admission_backend(&fixture);
 
-    assert!(matches!(
-        broker.record_then_exact_seal(v5_broker_admission_request(&fixture)),
-        BrokerV5DispatchAdmissionDisposition::Sealed(_)
-    ));
-    assert_eq!(
-        fixture.store.v5_source_candidate_loaded_count_for_tests(),
-        1
+    let mut sealed = false;
+    for _ in 0..=64 {
+        if matches!(
+            broker.record_then_exact_seal(v5_broker_admission_request(&fixture)),
+            BrokerV5DispatchAdmissionDisposition::Sealed(_)
+        ) {
+            sealed = true;
+            break;
+        }
+    }
+    assert!(
+        sealed,
+        "finite same-digest metadata must not poison resolution"
+    );
+    assert!(
+        fixture.store.v5_source_candidate_loaded_count_for_tests()
+            <= u64::try_from(fixture.store.v5_source_scan_batch_limit_for_tests())
+                .expect("batch fits u64")
     );
     assert_eq!(
         fixture
@@ -9316,14 +9407,14 @@ fn broker_v5_digest_resolution_sql_filters_large_unsigned_and_wrong_role_floods(
 }
 
 #[test]
-fn broker_v5_digest_resolution_reconciles_on_exact_signer_candidate_cap_without_mutation() {
-    let fixture = v5_broker_admission_fixture();
+fn broker_v5_digest_resolution_makes_bounded_monotonic_progress_through_exact_signer_floods() {
+    let fixture = v5_broker_admission_fixture_with_exact_signer_flood_before_source(1_000);
     let template = matching_v5_source_event(&fixture);
     let tx = fixture
         .store
         .conn_for_tests()
         .unchecked_transaction()
-        .expect("begin exact-signer flood transaction");
+        .expect("begin post-source exact-signer flood transaction");
     for _ in 0..1_000 {
         let duplicate = Event {
             id: EventId::new(),
@@ -9340,12 +9431,95 @@ fn broker_v5_digest_resolution_reconciles_on_exact_signer_candidate_cap_without_
         invalid.signer = fixture.source_signer.clone();
         insert_v5_flood_event(&tx, &duplicate, Some((&invalid, "ed25519")));
     }
-    tx.commit().expect("commit exact-signer flood transaction");
+    tx.commit()
+        .expect("commit post-source exact-signer flood transaction");
+    let broker = v5_broker_admission_backend(&fixture);
+    let tape_before_admission = fixture.store.event_count().expect("count flooded tape");
+    let batch_limit = fixture.store.v5_source_scan_batch_limit_for_tests();
+    let mut previous_cursor = 0_i64;
+    let mut sealed = false;
+
+    for _ in 0..=80 {
+        fixture
+            .store
+            .reset_v5_source_candidate_verification_count_for_tests();
+        let outcome = broker.record_then_exact_seal(v5_broker_admission_request(&fixture));
+        assert!(
+            fixture.store.v5_source_candidate_loaded_count_for_tests()
+                <= u64::try_from(batch_limit).expect("batch limit fits u64")
+        );
+        assert!(
+            fixture
+                .store
+                .v5_source_candidate_verification_count_for_tests()
+                <= u64::try_from(batch_limit).expect("batch limit fits u64")
+        );
+        let (cursor, observed_high_water, complete_through, ambiguous, candidate) = fixture
+            .store
+            .v5_source_projection_state_for_tests(
+                fixture.run_id,
+                &fixture.v5_envelope_digest,
+                &fixture.authority,
+            )
+            .expect("read durable V5 source scan projection")
+            .expect("projection exists after first retry");
+        assert!(
+            cursor >= previous_cursor,
+            "projection cursor must not regress"
+        );
+        assert!(cursor <= observed_high_water);
+        assert!(!ambiguous);
+        previous_cursor = cursor;
+
+        if matches!(outcome, BrokerV5DispatchAdmissionDisposition::Sealed(_)) {
+            assert_eq!(complete_through, Some(observed_high_water));
+            assert_eq!(candidate, Some(fixture.source_dispatch_event_id));
+            sealed = true;
+            break;
+        }
+        assert!(matches!(
+            outcome,
+            BrokerV5DispatchAdmissionDisposition::ReconciliationRequired
+        ));
+        assert_eq!(
+            fixture.store.event_count().expect("unchanged tape"),
+            tape_before_admission,
+            "projection retries must not append tape evidence before the authoritative scan completes"
+        );
+        assert_eq!(v5_broker_admission_receipt_count(&fixture), 0);
+        assert_eq!(v5_broker_checkpoint_count(&fixture), 0);
+    }
+
+    assert!(
+        sealed,
+        "finite forged rows must not permanently poison resolution"
+    );
+    assert_eq!(v5_broker_admission_receipt_count(&fixture), 1);
+    assert_eq!(v5_broker_checkpoint_count(&fixture), 1);
+}
+
+#[test]
+fn broker_v5_source_projection_corruption_fails_closed_without_tape_mutation() {
+    let fixture = v5_broker_admission_fixture();
+    let before = fixture.store.event_count().expect("count source tape");
     fixture
         .store
-        .reset_v5_source_candidate_verification_count_for_tests();
+        .resolve_unique_governed_dispatch_v5_source_by_digest_v1(
+            fixture.run_id,
+            &fixture.v5_envelope_digest,
+            &fixture.authority,
+        )
+        .expect("complete one-row authoritative projection");
+    fixture
+        .store
+        .conn_for_tests()
+        .execute(
+            "UPDATE governed_dispatch_v5_source_scans
+             SET candidate_event_digest = ?1",
+            rusqlite::params![authority_broker_digest('0')],
+        )
+        .expect("corrupt mutable scan cache");
     let broker = v5_broker_admission_backend(&fixture);
-    let before = fixture.store.event_count().expect("count tape");
 
     assert!(matches!(
         broker.record_then_exact_seal(v5_broker_admission_request(&fixture)),
@@ -9354,16 +9528,116 @@ fn broker_v5_digest_resolution_reconciles_on_exact_signer_candidate_cap_without_
     assert_eq!(fixture.store.event_count().expect("unchanged tape"), before);
     assert_eq!(v5_broker_admission_receipt_count(&fixture), 0);
     assert_eq!(v5_broker_checkpoint_count(&fixture), 0);
-    assert_eq!(
-        fixture.store.v5_source_candidate_loaded_count_for_tests(),
-        65
-    );
-    assert_eq!(
+}
+
+#[test]
+fn broker_v5_post_schema_signatures_are_indexed_and_scan_index_is_immutable() {
+    let fixture = v5_broker_admission_fixture();
+    let duplicate = matching_v5_source_event(&fixture);
+    fixture
+        .store
+        .append(&duplicate)
+        .expect("append post-schema unsigned V5 source");
+    let signature = sign_event(
+        &duplicate,
+        &fixture.source_key,
+        &fixture.source_signer,
+        Utc::now(),
+    )
+    .expect("sign post-schema V5 source");
+    fixture
+        .store
+        .append_event_signature(&signature)
+        .expect("append post-schema detached signature");
+    let indexed: i64 = fixture
+        .store
+        .conn_for_tests()
+        .query_row(
+            "SELECT COUNT(*)
+             FROM governed_dispatch_v5_signature_scan_index
+             WHERE event_id = ?1 AND signature_rowid > 0",
+            rusqlite::params![duplicate.id.to_string()],
+            |row| row.get(0),
+        )
+        .expect("query append-derived V5 scan index");
+    assert_eq!(indexed, 1);
+    assert!(
         fixture
             .store
-            .v5_source_candidate_verification_count_for_tests(),
-        64
+            .conn_for_tests()
+            .execute(
+                "UPDATE governed_dispatch_v5_signature_scan_index
+                 SET actor_id = 'attacker'",
+                [],
+            )
+            .is_err(),
+        "append-derived scan rows must reject update"
     );
+    assert!(
+        fixture
+            .store
+            .conn_for_tests()
+            .execute("DELETE FROM governed_dispatch_v5_signature_scan_index", [])
+            .is_err(),
+        "append-derived scan rows must reject delete"
+    );
+}
+
+#[test]
+fn broker_v5_missing_scan_trigger_or_index_fails_closed_without_tape_mutation() {
+    for schema_object in [
+        "DROP TRIGGER governed_dispatch_v5_signature_scan_after_insert",
+        "DROP INDEX idx_governed_dispatch_v5_signature_scan_exact",
+    ] {
+        let fixture = v5_broker_admission_fixture();
+        let before = fixture.store.event_count().expect("count source tape");
+        fixture
+            .store
+            .conn_for_tests()
+            .execute_batch(schema_object)
+            .expect("corrupt required scan schema");
+        let broker = v5_broker_admission_backend(&fixture);
+
+        assert!(matches!(
+            broker.record_then_exact_seal(v5_broker_admission_request(&fixture)),
+            BrokerV5DispatchAdmissionDisposition::ReconciliationRequired
+        ));
+        assert_eq!(fixture.store.event_count().expect("unchanged tape"), before);
+        assert_eq!(v5_broker_admission_receipt_count(&fixture), 0);
+        assert_eq!(v5_broker_checkpoint_count(&fixture), 0);
+    }
+}
+
+#[test]
+fn broker_v5_later_verified_duplicate_sets_ambiguous_projection_and_reconciles() {
+    let fixture = v5_broker_admission_fixture();
+    let broker = v5_broker_admission_backend(&fixture);
+    assert!(matches!(
+        broker.record_then_exact_seal(v5_broker_admission_request(&fixture)),
+        BrokerV5DispatchAdmissionDisposition::Sealed(_)
+    ));
+    append_matching_v5_source(
+        &fixture,
+        Some(&fixture.source_key),
+        Some(&fixture.source_signer),
+    );
+
+    assert!(matches!(
+        broker.record_then_exact_seal(v5_broker_admission_request(&fixture)),
+        BrokerV5DispatchAdmissionDisposition::ReconciliationRequired
+    ));
+    let (_, _, _, ambiguous, _) = fixture
+        .store
+        .v5_source_projection_state_for_tests(
+            fixture.run_id,
+            &fixture.v5_envelope_digest,
+            &fixture.authority,
+        )
+        .expect("read ambiguous projection")
+        .expect("projection exists");
+    assert!(ambiguous);
+    assert_eq!(v5_broker_admission_receipt_count(&fixture), 1);
+    assert_eq!(v5_broker_checkpoint_count(&fixture), 1);
 }
 
 #[test]

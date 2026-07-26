@@ -467,6 +467,20 @@ fn record_and_seal_v5_admission(
     checkpoint_signing_key: &SigningKey,
     checkpoint_signer: &ActorKeyRef,
 ) -> EventId {
+    let Payload::DispatchEnvelopeV5(dispatch) = &fixture.dispatch.payload else {
+        panic!("fixture dispatch must contain a V5 envelope");
+    };
+    let resolved_source_event_id = store
+        .resolve_unique_governed_dispatch_v5_source_by_digest_v1(
+            fixture.dispatch.run_id,
+            dispatch.envelope_digest.as_str(),
+            authority,
+        )
+        .expect("resolve the authoritative V5 source before admission");
+    assert_eq!(
+        resolved_source_event_id, fixture.dispatch.id,
+        "the bounded source projection must resolve the fixture dispatch"
+    );
     let admission_event_id = match store
         .record_governed_dispatch_v5_admission_v1(
             &GovernedDispatchV5AdmissionRequestV1 {

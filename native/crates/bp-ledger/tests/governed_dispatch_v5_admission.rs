@@ -34,6 +34,7 @@ use bp_ledger::{LedgerError, Payload};
 use chrono::{Duration, SecondsFormat, Utc};
 use ed25519_dalek::SigningKey;
 use rusqlite::params;
+use tempfile::TempDir;
 
 fn digest(hex: char) -> String {
     format!("sha256:{}", hex.to_string().repeat(64))
@@ -548,6 +549,28 @@ fn awaiting_admission_event_id(disposition: GovernedDispatchV5AdmissionDispositi
     }
 }
 
+fn complete_v5_source_scan(
+    store: &SqliteStore,
+    fixture: &V5Fixture,
+    authority: &GovernedDispatchV5AdmissionAuthorityV1,
+) {
+    for _ in 0..8 {
+        match store.resolve_unique_governed_dispatch_v5_source_by_digest_v1(
+            fixture.run_id,
+            &fixture.dispatch.envelope_digest,
+            authority,
+        ) {
+            Ok(event_id) => {
+                assert_eq!(event_id, fixture.dispatch_event.id);
+                return;
+            }
+            Err(LedgerError::GovernedDispatchAdmissionReconciliationRequired { .. }) => {}
+            Err(error) => panic!("complete V5 source scan: {error}"),
+        }
+    }
+    panic!("V5 source scan did not complete within the bounded test retries");
+}
+
 #[test]
 fn first_attempt_v5_source_records_one_host_admission_then_exactly_one_checkpoint() {
     let store = SqliteStore::open_in_memory().expect("open store");
@@ -568,6 +591,7 @@ fn first_attempt_v5_source_records_one_host_admission_then_exactly_one_checkpoin
     assert_eq!(store.event_count().expect("count raw source tape"), 5);
     assert_eq!(v5_admission_count(&store), 0);
     assert_eq!(v5_observation_count(&store), 0);
+    complete_v5_source_scan(&store, &fixture, &authority);
 
     let request = GovernedDispatchV5AdmissionRequestV1 {
         run_id: fixture.run_id,
@@ -694,6 +718,7 @@ fn sealed_v5_admission_reopens_reconciliation_for_a_distinct_source_sibling() {
         &source_key,
         &source_signer,
     );
+    complete_v5_source_scan(&store, &fixture, &authority);
     let request = GovernedDispatchV5AdmissionRequestV1 {
         run_id: fixture.run_id,
         dispatch_event_id: fixture.dispatch_event.id,
@@ -740,6 +765,14 @@ fn sealed_v5_admission_reopens_reconciliation_for_a_distinct_source_sibling() {
         .append_signed(&source_sibling, &source_key, &source_signer)
         .expect("append distinct signed V5 source sibling");
     assert_eq!(store.event_count().expect("count source sibling tape"), 8);
+    assert!(matches!(
+        store.resolve_unique_governed_dispatch_v5_source_by_digest_v1(
+            fixture.run_id,
+            &fixture.dispatch.envelope_digest,
+            &authority,
+        ),
+        Err(LedgerError::GovernedDispatchAdmissionReconciliationRequired { .. })
+    ));
 
     let record_retry = store.record_governed_dispatch_v5_admission_v1(
         &request,
@@ -787,6 +820,7 @@ fn v5_admission_reopens_reconciliation_for_a_second_signed_receipt_sibling() {
         &source_key,
         &source_signer,
     );
+    complete_v5_source_scan(&store, &fixture, &authority);
     let request = GovernedDispatchV5AdmissionRequestV1 {
         run_id: fixture.run_id,
         dispatch_event_id: fixture.dispatch_event.id,
@@ -897,6 +931,7 @@ fn v5_admission_rejects_wrong_source_or_admission_signer_without_a_write() {
         &expected_source_key,
         &source_signer,
     );
+    complete_v5_source_scan(&wrong_admission_store, &wrong_admission_fixture, &authority);
     let wrong_admission_key = SigningKey::from_bytes(&[45u8; 32]);
     let wrong_admission_signer = actor(
         "untrusted:v5-admission",
@@ -942,6 +977,7 @@ fn generic_append_paths_cannot_poison_v5_admission_receipt_reconciliation() {
         &source_key,
         &source_signer,
     );
+    complete_v5_source_scan(&store, &fixture, &authority);
     let admission_event_id = awaiting_admission_event_id(
         store
             .record_governed_dispatch_v5_admission_v1(
@@ -1062,6 +1098,7 @@ fn v5_admission_rejects_missing_wrong_run_and_retry_source_evidence_without_a_wr
         &source_key,
         &source_signer,
     );
+    complete_v5_source_scan(&retry_store, &retry_fixture, &authority);
     let retry_result = retry_store.record_governed_dispatch_v5_admission_v1(
         &GovernedDispatchV5AdmissionRequestV1 {
             run_id: retry_fixture.run_id,
@@ -1099,6 +1136,7 @@ fn v5_admission_rejects_wrong_checkpoint_signer_without_emitting_a_checkpoint() 
         &source_key,
         &source_signer,
     );
+    complete_v5_source_scan(&store, &fixture, &authority);
     let admission_event_id = awaiting_admission_event_id(
         store
             .record_governed_dispatch_v5_admission_v1(
@@ -1157,6 +1195,7 @@ fn sealed_v5_admission_still_cannot_claim_a_v5_bound_action() {
         &source_key,
         &source_signer,
     );
+    complete_v5_source_scan(&store, &fixture, &authority);
     let admission_event_id = awaiting_admission_event_id(
         store
             .record_governed_dispatch_v5_admission_v1(
@@ -1217,4 +1256,145 @@ fn sealed_v5_admission_still_cannot_claim_a_v5_bound_action() {
         .query_row("SELECT COUNT(*) FROM activity_claims", [], |row| row.get(0))
         .expect("count rejected V5 activity claims");
     assert_eq!(claim_rows, 0, "sealed V5 admission remains evidence only");
+}
+
+#[test]
+fn legacy_v5_tape_reopens_with_empty_additive_source_scan_projection() {
+    let temp = TempDir::new().expect("create legacy V5 ledger directory");
+    let path = temp.path().join("legacy-v5-without-source-scan.db");
+    let source_key = SigningKey::from_bytes(&[41; 32]);
+    let context_key = SigningKey::from_bytes(&[42; 32]);
+    let admission_key = SigningKey::from_bytes(&[43; 32]);
+    let checkpoint_key = SigningKey::from_bytes(&[44; 32]);
+    let (authority, source_signer, _, _) =
+        v5_admission_authority(&source_key, &admission_key, &checkpoint_key);
+    let context_signer = actor("kernel:v5-context", "context-1", &context_key);
+    let fixture = v5_fixture(1);
+    {
+        let store = SqliteStore::open(&path).expect("create current ledger");
+        append_fixture(
+            &store,
+            &fixture,
+            &source_key,
+            &source_signer,
+            &context_key,
+            &context_signer,
+        );
+        let tx = store
+            .conn_for_tests()
+            .unchecked_transaction()
+            .expect("begin pre-schema source flood");
+        for _ in 0..130 {
+            let duplicate = Event {
+                id: EventId::new(),
+                occurred_at: Utc::now(),
+                ..fixture.dispatch_event.clone()
+            };
+            let invalid = sign_event(
+                &duplicate,
+                &admission_key,
+                &source_signer,
+                duplicate.occurred_at,
+            )
+            .expect("construct invalid exact-signer historical signature");
+            tx.execute(
+                r#"INSERT INTO events
+                   (id, run_id, parent_event_id, schema_version, kind, occurred_at, payload)
+                   VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"#,
+                params![
+                    duplicate.id.to_string(),
+                    duplicate.run_id.to_string(),
+                    duplicate.parent_event_id.map(|id| id.to_string()),
+                    duplicate.schema_version,
+                    duplicate.kind.as_wire(),
+                    duplicate.occurred_at.to_rfc3339(),
+                    serde_json::to_string(&duplicate.payload).expect("serialize duplicate"),
+                ],
+            )
+            .expect("insert historical duplicate event");
+            tx.execute(
+                r#"INSERT INTO event_signatures (
+                       event_id, canonical_event_hash, actor_id, key_id,
+                       public_key_hash, algorithm, signature, signed_at
+                   ) VALUES (?1, ?2, ?3, ?4, ?5, 'ed25519', ?6, ?7)"#,
+                params![
+                    invalid.event_id.to_string(),
+                    invalid.canonical_event_hash,
+                    invalid.signer.actor_id,
+                    invalid.signer.key_id,
+                    invalid.signer.public_key_hash,
+                    invalid.signature,
+                    invalid.signed_at.to_rfc3339(),
+                ],
+            )
+            .expect("insert historical invalid signature");
+        }
+        tx.commit().expect("commit pre-schema source flood");
+    }
+    {
+        let connection = rusqlite::Connection::open(&path).expect("open legacy fixture directly");
+        connection
+            .execute_batch(
+                "DROP TRIGGER governed_dispatch_v5_signature_scan_after_insert;
+                 DROP TABLE governed_dispatch_v5_signature_scan_index;
+                 DROP TABLE governed_dispatch_v5_source_scans;",
+            )
+            .expect("remove additive projection to model a pre-projection ledger");
+    }
+
+    let reopened = SqliteStore::open(&path).expect("reopen legacy V5 tape");
+    let events = reopened
+        .signed_events_for_run(&fixture.run_id.to_string())
+        .expect("read unchanged legacy signed tape");
+    assert_eq!(events.len(), 135);
+    let projection_rows: i64 = reopened
+        .conn_for_tests()
+        .query_row(
+            "SELECT COUNT(*) FROM governed_dispatch_v5_source_scans",
+            [],
+            |row| row.get(0),
+        )
+        .expect("new projection exists empty");
+    assert_eq!(
+        projection_rows, 0,
+        "opening must not backfill historical tape"
+    );
+    let tape_count = reopened.event_count().expect("count legacy tape");
+    let mut previous_event_cursor = 0_i64;
+    let mut resolved = None;
+    for _ in 0..=8 {
+        reopened.reset_v5_source_candidate_verification_count_for_tests();
+        resolved = reopened
+            .resolve_unique_governed_dispatch_v5_source_by_digest_v1(
+                fixture.run_id,
+                &fixture.dispatch.envelope_digest,
+                &authority,
+            )
+            .ok();
+        assert!(
+            reopened.v5_source_candidate_loaded_count_for_tests()
+                <= u64::try_from(reopened.v5_source_scan_batch_limit_for_tests())
+                    .expect("batch fits u64")
+        );
+        let event_cursor: i64 = reopened
+            .conn_for_tests()
+            .query_row(
+                "SELECT event_cursor_rowid
+                 FROM governed_dispatch_v5_source_scans",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read lazy bootstrap cursor");
+        assert!(event_cursor >= previous_event_cursor);
+        previous_event_cursor = event_cursor;
+        if resolved.is_some() {
+            break;
+        }
+    }
+    assert_eq!(resolved, Some(fixture.dispatch_event.id));
+    assert_eq!(
+        reopened.event_count().expect("unchanged legacy tape"),
+        tape_count,
+        "lazy scan bootstrap must not backfill or mutate tape events"
+    );
 }
