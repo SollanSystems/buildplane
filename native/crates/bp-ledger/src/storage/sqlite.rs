@@ -16,13 +16,14 @@ use crate::payload::checkpoint::{tape_root_hash, TapeCheckpointV1, TapeRootAlgor
 use crate::payload::model_evidence::{
     derive_model_action_scope_constraints_v1, model_request_evidence_document_v1_bytes,
     model_request_evidence_v1_descriptor, parse_verified_canonical_model_action_input_v1,
+    parse_verified_model_provider_result_document_v1,
     parse_verified_model_request_evidence_document_v1,
     parse_verified_model_result_evidence_document_v1,
     parse_verified_trust_scope_evidence_document_v1, trust_scope_evidence_document_v1_bytes,
     trust_scope_evidence_v1_descriptor, validate_model_action_binding_against_replayed_dispatch_v3,
     verify_model_request_evidence_matches_canonical_input,
     verify_trust_scope_evidence_matches_model_request, ModelActionEvidenceBindingV1,
-    ModelRequestEvidenceDocumentV1, TrustScopeEvidenceDocumentV1,
+    ModelProviderV1, ModelRequestEvidenceDocumentV1, TrustScopeEvidenceDocumentV1,
 };
 use crate::payload::trust_spine::{
     action_receipt_recorded_v2_digest, action_receipt_set_v1_digest, action_requested_v2_digest,
@@ -3592,6 +3593,42 @@ impl SqliteStore {
                 &model_request_bytes,
                 &verified.intent.model_request_evidence,
             )?;
+            let result_bytes = cas.get_verified_canonical_bytes(result_ref, result_digest)?;
+            let result = parse_verified_model_provider_result_document_v1(
+                &result_bytes,
+                result_ref,
+                result_digest,
+            )?;
+            let expected_provider_request_id = format!(
+                "{}:{}",
+                match model_request
+                    .document()
+                    .normalized_provider_request
+                    .provider
+                {
+                    ModelProviderV1::Anthropic => "anthropic",
+                    ModelProviderV1::Openai => "openai",
+                },
+                verified.intent.action_id
+            );
+            let expected_candidate_digest = verified
+                .intent
+                .candidate_binding
+                .as_ref()
+                .map(|candidate| candidate.candidate_digest.as_str());
+            let result = result.document();
+            if result.action_id != verified.intent.action_id
+                || result.provider_request_id != expected_provider_request_id
+                || result.model_request_digest != model_request.document().model_request_digest
+                || result.execution_role != model_request.document().binding.execution_role
+                || result.candidate_digest.as_deref() != expected_candidate_digest
+                || result.worker_manifest_digest
+                    != model_request.document().binding.worker_manifest_digest
+            {
+                return Err(LedgerError::ActivityClaimAuthorityRejected {
+                    reason: "successful governed model result does not bind the exact signed role, candidate, worker, request, and provider route".into(),
+                });
+            }
             let evidence = evidence.document();
             if evidence.action_id != verified.intent.action_id
                 || evidence.action_request_ref

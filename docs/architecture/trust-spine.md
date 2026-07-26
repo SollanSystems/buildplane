@@ -639,8 +639,14 @@ reopens those exact bytes and the already-authorized model-request evidence,
 rehashes both objects, and compares every binding to signed lineage. Missing
 objects, storage corruption, unknown fields, alternate encodings, and
 well-formed cross-request substitution all fail before a success event can be
-signed. The provider result object still needs its own native closed CAS schema
-before the production gateway can persist this evidence end to end.
+signed. The result object is independently stored as a closed
+`ModelProviderResultDocumentV1`: it binds the derived provider request identity,
+model-request digest, signed role, candidate (for review-like roles), worker
+manifest, and normalized implementer or review completion. Nested unknown
+fields, noncanonical findings, role/completion mismatch, malformed confidence,
+and candidate/worker substitution fail before the enclosing evidence record is
+accepted. The production provider gateway still must construct and persist
+these two documents as one protected result path.
 
 Provider effects receive the same immutable budget boundary as OCI actions.
 The adapter derives `min(expiresAt, issuedAt + maxComputeTimeMs)` once from the

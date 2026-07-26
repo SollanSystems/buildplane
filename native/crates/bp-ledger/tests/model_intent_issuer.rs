@@ -9,12 +9,13 @@ use bp_ledger::kind::EventKind;
 use bp_ledger::payload::activity_claim::ActivityResultOutcomeV1;
 use bp_ledger::payload::model_evidence::{
     canonical_model_action_input_v1_bytes, derive_model_action_scope_constraints_v1,
-    model_request_evidence_document_v1_bytes, model_request_evidence_v1_descriptor,
-    model_request_semantic_v1_digest, model_result_evidence_document_v1_bytes,
-    parse_verified_canonical_model_action_input_v1,
+    model_provider_result_document_v1_bytes, model_request_evidence_document_v1_bytes,
+    model_request_evidence_v1_descriptor, model_request_semantic_v1_digest,
+    model_result_evidence_document_v1_bytes, parse_verified_canonical_model_action_input_v1,
     parse_verified_model_request_evidence_document_v1, trust_scope_evidence_document_v1_bytes,
     trust_scope_evidence_v1_descriptor, CanonicalModelActionInputV1,
-    CredentialFreeNormalizedModelRequestV1, ModelActionEvidenceBindingV1, ModelProviderV1,
+    CredentialFreeNormalizedModelRequestV1, ModelActionEvidenceBindingV1,
+    ModelProviderCompletionV1, ModelProviderResultDocumentV1, ModelProviderV1,
     ModelRequestEvidenceDocumentV1, ModelResultEvidenceDocumentV1, TrustScopeEvidenceDocumentV1,
 };
 use bp_ledger::payload::trust_spine::{
@@ -1036,8 +1037,23 @@ fn native_model_authority_commits_the_v2_authorization_and_one_lease_together() 
             _ => None,
         })
         .expect("signed model authorization");
+    let provider_result = ModelProviderResultDocumentV1::new(
+        request.action_id.clone(),
+        format!("openai:{}", request.action_id),
+        canonical_input.model_request_digest.clone(),
+        ExecutionRoleV1::Implementer,
+        None,
+        dispatch.body.worker_manifest_digest.clone(),
+        ModelProviderCompletionV1::Implementer {
+            summary: "Candidate result produced.".into(),
+            output_refs: vec![],
+        },
+    )
+    .expect("construct closed provider result");
+    let provider_result_bytes =
+        model_provider_result_document_v1_bytes(&provider_result).expect("encode provider result");
     let result_ref = cas
-        .put_canonical_bytes(br#"{"schema_version":1,"outcome":"completed"}"#)
+        .put_canonical_bytes(&provider_result_bytes)
         .expect("store provider result");
     let result_evidence = ModelResultEvidenceDocumentV1::new(
         request.action_id.clone(),
@@ -1045,7 +1061,7 @@ fn native_model_authority_commits_the_v2_authorization_and_one_lease_together() 
         action_requested_v2_digest(&request).expect("action request digest"),
         canonical_input.model_request_digest.clone(),
         authorization_ref.clone(),
-        authorization.authorization_digest,
+        authorization.authorization_digest.clone(),
         result_ref.to_cas_ref(),
         result_ref.digest().into(),
         vec![],
@@ -1107,6 +1123,99 @@ fn native_model_authority_commits_the_v2_authorization_and_one_lease_together() 
         LedgerError::ActivityClaimAuthorityRejected { .. }
     ));
     assert_eq!(store.event_count().unwrap(), 5);
+
+    let mut substituted_result = provider_result.clone();
+    substituted_result.worker_manifest_digest = DIGEST_A.into();
+    let substituted_result_bytes = model_provider_result_document_v1_bytes(&substituted_result)
+        .expect("encode well-formed substituted result");
+    let substituted_result_ref = cas
+        .put_canonical_bytes(&substituted_result_bytes)
+        .expect("store substituted result");
+    let substituted_result_evidence = ModelResultEvidenceDocumentV1::new(
+        request.action_id.clone(),
+        request_event.id.to_string(),
+        action_requested_v2_digest(&request).expect("action request digest"),
+        canonical_input.model_request_digest.clone(),
+        authorization_ref.clone(),
+        authorization.authorization_digest.clone(),
+        substituted_result_ref.to_cas_ref(),
+        substituted_result_ref.digest().into(),
+        vec![],
+    )
+    .expect("construct substituted-result evidence");
+    let substituted_result_evidence_bytes =
+        model_result_evidence_document_v1_bytes(&substituted_result_evidence)
+            .expect("encode substituted-result evidence");
+    let substituted_result_evidence_ref = cas
+        .put_canonical_bytes(&substituted_result_evidence_bytes)
+        .expect("store substituted-result evidence");
+    let substituted_result_error = store
+        .record_governed_model_action_result_v1_at_for_tests(
+            &GovernedModelActionResultRequestV1 {
+                run_id,
+                lease_id: lease_id.clone(),
+                outcome: ActivityResultOutcomeV1::Succeeded,
+                result_digest: Some(substituted_result_ref.digest().into()),
+                result_ref: Some(substituted_result_ref.to_cas_ref()),
+                evidence_digest: substituted_result_evidence_ref.digest().into(),
+                evidence_ref: substituted_result_evidence_ref.to_cas_ref(),
+            },
+            &cas,
+            &authority,
+            &key,
+            &signer,
+            now + Duration::milliseconds(2),
+        )
+        .expect_err("well-formed result for another worker manifest must fail");
+    assert!(matches!(
+        substituted_result_error,
+        LedgerError::ActivityClaimAuthorityRejected { .. }
+    ));
+    assert_eq!(store.event_count().unwrap(), 5);
+
+    let malformed_result_ref = cas
+        .put_canonical_bytes(br#"{"schema_version":1,"outcome":"completed"}"#)
+        .expect("store malformed provider result");
+    let malformed_evidence = ModelResultEvidenceDocumentV1::new(
+        request.action_id.clone(),
+        request_event.id.to_string(),
+        action_requested_v2_digest(&request).expect("action request digest"),
+        canonical_input.model_request_digest.clone(),
+        authorization_ref.clone(),
+        authorization.authorization_digest.clone(),
+        malformed_result_ref.to_cas_ref(),
+        malformed_result_ref.digest().into(),
+        vec![],
+    )
+    .expect("construct malformed-result evidence");
+    let malformed_evidence_bytes = model_result_evidence_document_v1_bytes(&malformed_evidence)
+        .expect("encode malformed-result evidence");
+    let malformed_evidence_ref = cas
+        .put_canonical_bytes(&malformed_evidence_bytes)
+        .expect("store malformed-result evidence");
+    let malformed_result = store
+        .record_governed_model_action_result_v1_at_for_tests(
+            &GovernedModelActionResultRequestV1 {
+                run_id,
+                lease_id: lease_id.clone(),
+                outcome: ActivityResultOutcomeV1::Succeeded,
+                result_digest: Some(malformed_result_ref.digest().into()),
+                result_ref: Some(malformed_result_ref.to_cas_ref()),
+                evidence_digest: malformed_evidence_ref.digest().into(),
+                evidence_ref: malformed_evidence_ref.to_cas_ref(),
+            },
+            &cas,
+            &authority,
+            &key,
+            &signer,
+            now + Duration::milliseconds(2),
+        )
+        .expect_err("success requires a closed native provider-result document");
+    assert_eq!(store.event_count().unwrap(), 5);
+    assert!(
+        matches!(malformed_result, LedgerError::InvalidJson(_)),
+        "unexpected malformed-result error: {malformed_result}"
+    );
 
     let terminal = store
         .record_governed_model_action_result_v1_at_for_tests(

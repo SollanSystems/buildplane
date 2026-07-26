@@ -18,8 +18,8 @@ use crate::id::EventId;
 use crate::payload::trust_spine::{
     action_requested_v2_digest, dispatch_envelope_v3_body_digest,
     governed_dispatch_policy_digest_v1, ActionEvidenceVersionV1, ActionKindV1, ActionRequestedV2,
-    CommitModeV1, DispatchEnvelopeV3, ExecutionRoleV1, ModelRequestEvidenceV1,
-    TrustScopeEvidenceV1, TrustTierV1, MODEL_REQUEST_EVIDENCE_V1_SCHEMA_VERSION,
+    CommitModeV1, DispatchEnvelopeV3, ExecutionRoleV1, ModelRequestEvidenceV1, ReviewDecisionV1,
+    ReviewFindingV1, TrustScopeEvidenceV1, TrustTierV1, MODEL_REQUEST_EVIDENCE_V1_SCHEMA_VERSION,
     TRUST_SCOPE_EVIDENCE_V1_SCHEMA_VERSION,
 };
 use crate::storage::cas::CanonicalCasRef;
@@ -66,6 +66,7 @@ pub const TRUST_SCOPE_EVIDENCE_DOCUMENT_V1_SCHEMA_VERSION: u32 =
 pub const PROVIDER_TOKEN_PREFLIGHT_INPUT_V1_SCHEMA_VERSION: u32 = 1;
 pub const PROVIDER_TOKEN_PREFLIGHT_RESULT_V1_SCHEMA_VERSION: u32 = 1;
 pub const MODEL_RESULT_EVIDENCE_DOCUMENT_V1_SCHEMA_VERSION: u32 = 1;
+pub const MODEL_PROVIDER_RESULT_DOCUMENT_V1_SCHEMA_VERSION: u32 = 1;
 
 /// Only the API/SDK providers admitted by the governed worker lane.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -288,6 +289,40 @@ pub struct ModelResultEvidenceDocumentV1 {
     pub redactions: Vec<ModelRedactionCommitmentV1>,
 }
 
+/// Normalized semantic completion stored inside a provider-result CAS object.
+/// The provider-specific wire response never enters this document.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ModelProviderCompletionV1 {
+    Implementer {
+        summary: String,
+        output_refs: Vec<String>,
+    },
+    Review {
+        decision: ReviewDecisionV1,
+        findings: Vec<ReviewFindingV1>,
+        confidence: f64,
+    },
+}
+
+/// Closed, canonical result object produced from a strictly parsed provider
+/// completion. Candidate and worker bindings are repeated deliberately so the
+/// ledger can compare the raw result bytes to signed authority without trusting
+/// the evidence envelope that points at them.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelProviderResultDocumentV1 {
+    pub schema_version: u32,
+    pub action_id: String,
+    pub provider_request_id: String,
+    pub model_request_digest: String,
+    pub execution_role: ExecutionRoleV1,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_digest: Option<String>,
+    pub worker_manifest_digest: String,
+    pub completion: ModelProviderCompletionV1,
+}
+
 /// A verified canonical input preserves the strict raw CAS identity alongside
 /// the parsed document. Passing this wrapper to constructors prevents an
 /// issuer from accidentally comparing model evidence to the right semantics
@@ -327,6 +362,12 @@ pub struct VerifiedProviderTokenPreflightResultV1 {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VerifiedModelResultEvidenceDocumentV1 {
     document: ModelResultEvidenceDocumentV1,
+    reference: CanonicalCasRef,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct VerifiedModelProviderResultDocumentV1 {
+    document: ModelProviderResultDocumentV1,
     reference: CanonicalCasRef,
 }
 
@@ -491,6 +532,134 @@ impl ModelResultEvidenceDocumentV1 {
             &self.result_digest,
         )?;
         validate_redaction_commitments(&self.redactions)?;
+        Ok(())
+    }
+}
+
+impl ModelProviderResultDocumentV1 {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        action_id: String,
+        provider_request_id: String,
+        model_request_digest: String,
+        execution_role: ExecutionRoleV1,
+        candidate_digest: Option<String>,
+        worker_manifest_digest: String,
+        completion: ModelProviderCompletionV1,
+    ) -> Result<Self> {
+        let document = Self {
+            schema_version: MODEL_PROVIDER_RESULT_DOCUMENT_V1_SCHEMA_VERSION,
+            action_id,
+            provider_request_id,
+            model_request_digest,
+            execution_role,
+            candidate_digest,
+            worker_manifest_digest,
+            completion,
+        };
+        document.validate()?;
+        Ok(document)
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if self.schema_version != MODEL_PROVIDER_RESULT_DOCUMENT_V1_SCHEMA_VERSION {
+            return Err(unsupported_schema(
+                "model_provider_result_document_v1",
+                self.schema_version,
+                MODEL_PROVIDER_RESULT_DOCUMENT_V1_SCHEMA_VERSION,
+            ));
+        }
+        validate_binding_text("action_id", &self.action_id)?;
+        validate_binding_text("provider_request_id", &self.provider_request_id)?;
+        validate_sha256_digest("model_request_digest", &self.model_request_digest)?;
+        validate_sha256_digest("worker_manifest_digest", &self.worker_manifest_digest)?;
+        if let Some(candidate_digest) = &self.candidate_digest {
+            validate_sha256_digest("candidate_digest", candidate_digest)?;
+        }
+        match (
+            &self.execution_role,
+            &self.candidate_digest,
+            &self.completion,
+        ) {
+            (
+                ExecutionRoleV1::Implementer,
+                None,
+                ModelProviderCompletionV1::Implementer {
+                    summary,
+                    output_refs,
+                },
+            ) => {
+                validate_canonical_content(
+                    "completion.summary",
+                    summary,
+                    MAX_NORMALIZED_SYSTEM_PROMPT_BYTES,
+                )?;
+                validate_reference_list("completion.output_refs", output_refs)?;
+            }
+            (
+                ExecutionRoleV1::Reviewer | ExecutionRoleV1::Adversary | ExecutionRoleV1::Judge,
+                Some(_),
+                ModelProviderCompletionV1::Review {
+                    findings,
+                    confidence,
+                    ..
+                },
+            ) => {
+                if !confidence.is_finite() || !(0.0..=1.0).contains(confidence) {
+                    return Err(invalid(
+                        "model_provider_result_document_v1",
+                        "review confidence must be finite and between zero and one",
+                    ));
+                }
+                if findings.len() > MAX_MODEL_TOOL_CAPABILITIES {
+                    return Err(invalid(
+                        "model_provider_result_document_v1",
+                        format!(
+                            "review findings exceed maximum of {MAX_MODEL_TOOL_CAPABILITIES} entries"
+                        ),
+                    ));
+                }
+                for finding in findings {
+                    validate_identifier(
+                        "completion.findings.check_id",
+                        &finding.check_id,
+                        MAX_COMMITMENT_IDENTIFIER_BYTES,
+                    )?;
+                    validate_identifier(
+                        "completion.findings.file",
+                        &finding.file,
+                        MAX_BINDING_TEXT_BYTES,
+                    )?;
+                    validate_canonical_content(
+                        "completion.findings.explanation",
+                        &finding.explanation,
+                        MAX_REDACTION_REASON_BYTES,
+                    )?;
+                    if finding.line == 0 {
+                        return Err(invalid(
+                            "model_provider_result_document_v1",
+                            "review finding line must be positive",
+                        ));
+                    }
+                    if finding.evidence_refs.is_empty() {
+                        return Err(invalid(
+                            "model_provider_result_document_v1",
+                            "review findings require at least one evidence reference",
+                        ));
+                    }
+                    validate_reference_list(
+                        "completion.findings.evidence_refs",
+                        &finding.evidence_refs,
+                    )?;
+                }
+            }
+            _ => {
+                return Err(invalid(
+                    "model_provider_result_document_v1",
+                    "completion kind and candidate binding do not match the execution role",
+                ));
+            }
+        }
         Ok(())
     }
 }
@@ -916,6 +1085,16 @@ impl VerifiedModelResultEvidenceDocumentV1 {
     }
 }
 
+impl VerifiedModelProviderResultDocumentV1 {
+    pub fn document(&self) -> &ModelProviderResultDocumentV1 {
+        &self.document
+    }
+
+    pub fn reference(&self) -> &CanonicalCasRef {
+        &self.reference
+    }
+}
+
 /// Derive the only constraints a V1 governed API model worker may receive.
 /// `Candidate` is intentionally denied because it is not a provider-worker
 /// role; an unknown future role cannot silently inherit implementer access.
@@ -1027,6 +1206,13 @@ pub fn model_result_evidence_document_v1_bytes(
 ) -> Result<Vec<u8>> {
     document.validate()?;
     canonical_document_bytes(document, "model_result_evidence_document_v1")
+}
+
+pub fn model_provider_result_document_v1_bytes(
+    document: &ModelProviderResultDocumentV1,
+) -> Result<Vec<u8>> {
+    document.validate()?;
+    canonical_document_bytes(document, "model_provider_result_document_v1")
 }
 
 /// Create the descriptor `ModelActionIntentV1` carries after protected CAS
@@ -1156,6 +1342,22 @@ pub fn parse_verified_model_result_evidence_document_v1(
     let canonical = model_result_evidence_document_v1_bytes(&document)?;
     ensure_exact_canonical_bytes("model_result_evidence_document_v1", bytes, &canonical)?;
     Ok(VerifiedModelResultEvidenceDocumentV1 {
+        document,
+        reference,
+    })
+}
+
+pub fn parse_verified_model_provider_result_document_v1(
+    bytes: &[u8],
+    cas_ref: &str,
+    digest: &str,
+) -> Result<VerifiedModelProviderResultDocumentV1> {
+    let reference =
+        verify_raw_cas_bytes("model_provider_result_document_v1", bytes, cas_ref, digest)?;
+    let document: ModelProviderResultDocumentV1 = serde_json::from_slice(bytes)?;
+    let canonical = model_provider_result_document_v1_bytes(&document)?;
+    ensure_exact_canonical_bytes("model_provider_result_document_v1", bytes, &canonical)?;
+    Ok(VerifiedModelProviderResultDocumentV1 {
         document,
         reference,
     })
@@ -1651,6 +1853,30 @@ fn validate_content(field: &str, value: &str, max_bytes: usize, allow_empty: boo
             "model_evidence_v1",
             format!("{field} must be non-empty, bounded, and contain no NUL bytes"),
         ));
+    }
+    Ok(())
+}
+
+fn validate_canonical_content(field: &str, value: &str, max_bytes: usize) -> Result<()> {
+    validate_content(field, value, max_bytes, false)?;
+    if value.trim() != value {
+        return Err(invalid(
+            "model_evidence_v1",
+            format!("{field} must not have leading or trailing whitespace"),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_reference_list(field: &str, values: &[String]) -> Result<()> {
+    if values.len() > MAX_MODEL_TOOL_CAPABILITIES {
+        return Err(invalid(
+            "model_provider_result_document_v1",
+            format!("{field} exceeds maximum of {MAX_MODEL_TOOL_CAPABILITIES} entries"),
+        ));
+    }
+    for value in values {
+        validate_identifier(field, value, MAX_BINDING_TEXT_BYTES)?;
     }
     Ok(())
 }

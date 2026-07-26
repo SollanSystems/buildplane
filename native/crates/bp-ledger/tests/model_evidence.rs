@@ -7,8 +7,10 @@
 use bp_ledger::id::EventId;
 use bp_ledger::payload::model_evidence::{
     canonical_model_action_input_v1_bytes, derive_model_action_scope_constraints_v1,
-    model_request_evidence_document_v1_bytes, model_request_evidence_v1_descriptor,
-    model_result_evidence_document_v1_bytes, parse_verified_canonical_model_action_input_v1,
+    model_provider_result_document_v1_bytes, model_request_evidence_document_v1_bytes,
+    model_request_evidence_v1_descriptor, model_result_evidence_document_v1_bytes,
+    parse_verified_canonical_model_action_input_v1,
+    parse_verified_model_provider_result_document_v1,
     parse_verified_model_request_evidence_document_v1,
     parse_verified_model_result_evidence_document_v1,
     parse_verified_provider_token_preflight_input_v1,
@@ -17,12 +19,15 @@ use bp_ledger::payload::model_evidence::{
     provider_token_preflight_result_v1_bytes, trust_scope_evidence_document_v1_bytes,
     trust_scope_evidence_v1_descriptor, verify_model_request_evidence_matches_canonical_input,
     verify_trust_scope_evidence_matches_model_request, CanonicalModelActionInputV1,
-    CredentialFreeNormalizedModelRequestV1, ModelActionEvidenceBindingV1, ModelProviderV1,
+    CredentialFreeNormalizedModelRequestV1, ModelActionEvidenceBindingV1,
+    ModelProviderCompletionV1, ModelProviderResultDocumentV1, ModelProviderV1,
     ModelRedactionCommitmentV1, ModelRequestEvidenceDocumentV1, ModelResultEvidenceDocumentV1,
     ModelToolCapabilityCommitmentV1, ModelToolCapabilityKindV1, ProviderTokenPreflightInputV1,
     ProviderTokenPreflightResultV1, TrustScopeEvidenceDocumentV1,
 };
-use bp_ledger::payload::trust_spine::{ActionKindV1, ExecutionRoleV1};
+use bp_ledger::payload::trust_spine::{
+    ActionKindV1, ExecutionRoleV1, ReviewDecisionV1, ReviewFindingSeverityV1, ReviewFindingV1,
+};
 use bp_ledger::storage::cas::{CanonicalCasRef, Cas};
 use serde_json::json;
 
@@ -355,4 +360,63 @@ fn model_result_evidence_is_closed_canonical_and_bound_to_exact_result() {
         model_result_evidence_document_v1_bytes(&substituted).is_err(),
         "result ref and digest substitution must fail before persistence"
     );
+}
+
+#[test]
+fn model_provider_result_is_closed_and_role_candidate_manifest_bound() {
+    let temp = tempfile::tempdir().expect("temporary CAS root");
+    let cas = Cas::open(temp.path()).expect("open CAS");
+    let result = ModelProviderResultDocumentV1::new(
+        "workflow-1:unit-1:attempt-1:model".into(),
+        "openai:workflow-1:unit-1:attempt-1:model".into(),
+        DIGEST_A.into(),
+        ExecutionRoleV1::Reviewer,
+        Some(DIGEST_B.into()),
+        DIGEST_C.into(),
+        ModelProviderCompletionV1::Review {
+            decision: ReviewDecisionV1::Abstain,
+            findings: vec![ReviewFindingV1 {
+                severity: ReviewFindingSeverityV1::High,
+                check_id: "review.security".into(),
+                file: "src/lib.rs".into(),
+                line: 12,
+                explanation: "Evidence is insufficient.".into(),
+                evidence_refs: vec![format!("cas:{}", DIGEST_A)],
+            }],
+            confidence: 0.25,
+        },
+    )
+    .expect("closed provider result");
+    let bytes =
+        model_provider_result_document_v1_bytes(&result).expect("canonical provider result bytes");
+    let reference = cas
+        .put_canonical_bytes(&bytes)
+        .expect("store provider result");
+    assert_eq!(
+        parse_verified_model_provider_result_document_v1(
+            &bytes,
+            &reference.to_cas_ref(),
+            reference.digest(),
+        )
+        .expect("verified provider result")
+        .document(),
+        &result
+    );
+
+    let mut wrong_role = result.clone();
+    wrong_role.execution_role = ExecutionRoleV1::Implementer;
+    assert!(model_provider_result_document_v1_bytes(&wrong_role).is_err());
+
+    let mut unknown = serde_json::to_value(&result).expect("result JSON");
+    unknown["completion"]["operator_override"] = json!(true);
+    let unknown_bytes = serde_json::to_vec(&unknown).expect("unknown bytes");
+    let unknown_ref = cas
+        .put_canonical_bytes(&unknown_bytes)
+        .expect("store unknown bytes");
+    assert!(parse_verified_model_provider_result_document_v1(
+        &unknown_bytes,
+        &unknown_ref.to_cas_ref(),
+        unknown_ref.digest(),
+    )
+    .is_err());
 }
