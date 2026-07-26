@@ -687,8 +687,12 @@ claim, and its signed successful result projection. It derives the action
 identity and role from the verified model intent, checks the preflight ceiling
 against the signed dispatch budget, and rejects missing or unrecorded results.
 The remaining authority slice must issue and execute that activity through the
-host gateway and require its verified recording before model-provider
-authorization can be granted.
+host gateway. The protected broker's ledger backend now locates the preflight
+from the verified model-action identity and requires its verified recording
+before it asks the ledger for model-provider authority; callers cannot select
+an alternate token-count action. The production issuer/executor for the
+preflight network activity is still required before governed session startup
+can enter this lane.
 
 Those counts are persisted in the signed action receipt and replayed as one
 checked aggregate for the sealed V3 dispatch attempt. A metered failed call

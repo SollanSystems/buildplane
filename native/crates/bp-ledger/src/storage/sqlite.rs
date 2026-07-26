@@ -595,6 +595,16 @@ pub struct ProviderTokenPreflightRecordingRequestV1 {
     pub preflight_action_request_event_id: EventId,
 }
 
+/// Read-only request that locates the one provider token-count activity
+/// derived from a verified model action. The caller cannot select an
+/// alternate preflight action or result.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProviderTokenPreflightForModelActionRequestV1 {
+    pub run_id: RunId,
+    pub dispatch_event_id: EventId,
+    pub model_action_request_event_id: EventId,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VerifiedProviderTokenPreflightRecordingV1 {
     input: VerifiedProviderTokenPreflightInputV1,
@@ -3172,6 +3182,55 @@ impl SqliteStore {
             self.record_ordinary_append(event);
         }
         Ok(issued.into_public_disposition())
+    }
+
+    /// Locate and verify the token-count activity whose identity is derived
+    /// from the signed model intent. The durable claim projection is used only
+    /// to find its action event; the complete signed tape/CAS lineage is then
+    /// reopened by the exact-record verifier.
+    pub fn verify_recorded_provider_token_preflight_for_model_action_v1(
+        &self,
+        request: &ProviderTokenPreflightForModelActionRequestV1,
+        cas: &Cas,
+        authority: &ActivityClaimAuthorityV1,
+    ) -> Result<VerifiedProviderTokenPreflightRecordingV1> {
+        require_protected_model_intent_realm(authority)?;
+        let issue = ModelActionIntentIssueRequestV1 {
+            run_id: request.run_id,
+            dispatch_event_id: request.dispatch_event_id,
+            action_request_event_id: request.model_action_request_event_id,
+        };
+        let stored_intent = model_action_intent_by_action_request(
+            &self.conn,
+            request.run_id,
+            request.model_action_request_event_id,
+        )?
+        .ok_or_else(|| LedgerError::ActivityClaimAuthorityRejected {
+            reason: "provider token preflight has no verified model intent".into(),
+        })?;
+        let intent = verify_signed_model_action_intent_projection(
+            &self.conn,
+            &stored_intent,
+            cas,
+            authority,
+            &issue,
+            ModelActionIntentAuthorityLane::Existing,
+        )?;
+        let expected_action_id = format!("{}:provider-token-preflight", intent.action_id);
+        let claim = activity_claim_by_activity_id(&self.conn, request.run_id, &expected_action_id)?
+            .ok_or_else(|| LedgerError::ActivityClaimAuthorityRejected {
+                reason: "provider token preflight has no derived activity claim".into(),
+            })?;
+        self.verify_recorded_provider_token_preflight_v1(
+            &ProviderTokenPreflightRecordingRequestV1 {
+                run_id: request.run_id,
+                dispatch_event_id: request.dispatch_event_id,
+                model_action_request_event_id: request.model_action_request_event_id,
+                preflight_action_request_event_id: claim.action_request_event_id,
+            },
+            cas,
+            authority,
+        )
     }
 
     /// Reconstruct a completed provider token-count activity without issuing

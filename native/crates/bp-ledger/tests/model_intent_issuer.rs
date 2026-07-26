@@ -41,7 +41,8 @@ use bp_ledger::storage::sqlite::{
     GovernedModelActionAuthorizeAndClaimDispositionV1,
     GovernedModelActionAuthorizeAndClaimRequestV1, GovernedModelActionResultRequestV1,
     ModelActionIntentIssueDispositionV1, ModelActionIntentIssueRequestV1,
-    ProviderTokenPreflightRecordingRequestV1, SqliteStore,
+    ProviderTokenPreflightForModelActionRequestV1, ProviderTokenPreflightRecordingRequestV1,
+    SqliteStore,
 };
 use bp_ledger::storage::Cas;
 use bp_ledger::LedgerError;
@@ -985,6 +986,22 @@ fn native_model_authority_commits_the_v2_authorization_and_one_lease_together() 
         &intent.model_request_evidence,
     )
     .expect("verified model request evidence");
+    let preflight_for_model_action = ProviderTokenPreflightForModelActionRequestV1 {
+        run_id,
+        dispatch_event_id: dispatch_event.id,
+        model_action_request_event_id: request_event.id,
+    };
+    let missing_preflight = store
+        .verify_recorded_provider_token_preflight_for_model_action_v1(
+            &preflight_for_model_action,
+            &cas,
+            &authority,
+        )
+        .expect_err("model provider authority must not infer an unrecorded token count");
+    assert!(matches!(
+        missing_preflight,
+        LedgerError::ActivityClaimAuthorityRejected { .. }
+    ));
     let preflight_input =
         ProviderTokenPreflightInputV1::from_verified_model_request(&verified_model_request, 1024)
             .expect("derive token preflight input");
@@ -1082,6 +1099,14 @@ fn native_model_authority_commits_the_v2_authorization_and_one_lease_together() 
         .verify_recorded_provider_token_preflight_v1(&preflight_recording_request, &cas, &authority)
         .expect("verify recorded token preflight from signed tape and CAS");
     assert_eq!(verified_preflight.result().document().input_tokens, 321);
+    let located_preflight = store
+        .verify_recorded_provider_token_preflight_for_model_action_v1(
+            &preflight_for_model_action,
+            &cas,
+            &authority,
+        )
+        .expect("locate token preflight from the verified model-action identity");
+    assert_eq!(located_preflight.result().document().input_tokens, 321);
 
     let authority_request = GovernedModelActionAuthorizeAndClaimRequestV1 {
         run_id,

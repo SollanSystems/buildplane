@@ -27,7 +27,8 @@ use bp_ledger::storage::sqlite::{
     GovernedPromotionAuthorityV1, GovernedPromotionDecisionDispositionV1,
     GovernedPromotionDecisionRequestV1, GovernedPromotionDecisionSealRequestV1,
     GovernedPromotionReconciliationDispositionV1, GovernedPromotionReconciliationRequestV1,
-    SqliteStore, MAX_ACTIVITY_LEASE_MS, MIN_ACTIVITY_LEASE_MS,
+    ProviderTokenPreflightForModelActionRequestV1, SqliteStore, MAX_ACTIVITY_LEASE_MS,
+    MIN_ACTIVITY_LEASE_MS,
 };
 use bp_ledger::storage::Cas;
 use bp_ledger::{EventId, RunId};
@@ -1299,6 +1300,17 @@ impl AuthorityBackend for LedgerAuthorityBackend<'_> {
         execution_role: bp_ledger::payload::trust_spine::ExecutionRoleV1,
         lease_duration_ms: u64,
     ) -> Result<AuthorityGrant, AuthorityBackendError> {
+        self.store
+            .verify_recorded_provider_token_preflight_for_model_action_v1(
+                &ProviderTokenPreflightForModelActionRequestV1 {
+                    run_id,
+                    dispatch_event_id: request.dispatch_event_id,
+                    model_action_request_event_id: request.action_request_event_id,
+                },
+                self.cas,
+                self.authority,
+            )
+            .map_err(AuthorityBackendError::from_ledger)?;
         let request = GovernedModelActionAuthorizeAndClaimRequestV1 {
             run_id,
             dispatch_event_id: request.dispatch_event_id,
