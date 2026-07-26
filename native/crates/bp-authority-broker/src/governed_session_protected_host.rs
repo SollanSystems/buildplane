@@ -66,13 +66,13 @@ use bp_ledger::payload::activity_claim::ActivityResultOutcomeV1;
 use bp_ledger::payload::model_evidence::ModelProviderV1;
 use bp_ledger::payload::trust_spine::ExecutionRoleV1;
 use bp_ledger::storage::sqlite::{
-    ActivityClaimDispositionV1, ActivityResultDispositionV1,
+    ActivityClaimDispositionV1, ActivityResultDispositionV1, GovernedV5CandidateCreateRequestV1,
     GovernedV5CandidateFinalizeActionIssueDispositionV1,
     GovernedV5CandidateFinalizeActionIssueRequestV1,
     GovernedV5CandidateFinalizeAuthorizeAndClaimRequestV1,
-    GovernedV5CandidateFinalizeResultRequestV1, GovernedV5CandidateReceiptSetRequestV1,
-    GovernedV5CommandActionIssueRequestV1, GovernedV5CommandActionReceiptRequestV1,
-    ResolveGovernedV5CandidateAuthorityRequestV1,
+    GovernedV5CandidateFinalizeResultRequestV1, GovernedV5CandidateReceiptSetDispositionV1,
+    GovernedV5CandidateReceiptSetRequestV1, GovernedV5CommandActionIssueRequestV1,
+    GovernedV5CommandActionReceiptRequestV1, ResolveGovernedV5CandidateAuthorityRequestV1,
 };
 use bp_provider_anthropic::{AnthropicHttpTransportV1, AnthropicProvider};
 use bp_provider_sdk::{
@@ -429,7 +429,8 @@ impl ProtectedGovernedSessionHostStateV1 {
             {
                 return Err(ProtectedGovernedSessionProviderErrorV1::DurableAuthority);
             }
-            self.ledger
+            let receipt_set_disposition = self
+                .ledger
                 .store()
                 .seal_succeeded_governed_v5_candidate_receipt_set_v1(
                     &GovernedV5CandidateReceiptSetRequestV1 {
@@ -442,6 +443,31 @@ impl ProtectedGovernedSessionHostStateV1 {
                     &config.activity_authority,
                     self.signing_keys.action_receipt(),
                     &config.action_receipt_signer,
+                )
+                .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)?;
+            let action_receipt_set_event_id = match receipt_set_disposition {
+                GovernedV5CandidateReceiptSetDispositionV1::Recorded {
+                    action_receipt_set_event_id,
+                    ..
+                }
+                | GovernedV5CandidateReceiptSetDispositionV1::Existing {
+                    action_receipt_set_event_id,
+                    ..
+                } => action_receipt_set_event_id,
+            };
+            self.ledger
+                .store()
+                .record_governed_v5_candidate_created_v1(
+                    &GovernedV5CandidateCreateRequestV1 {
+                        run_id: config.run_id,
+                        action_receipt_set_event_id,
+                    },
+                    self.cas.cas(),
+                    &config.v5_admission_authority,
+                    &config.activity_authority,
+                    &config.action_receipt_signer,
+                    self.signing_keys.candidate_artifact(),
+                    &config.candidate_artifact_signer,
                 )
                 .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)?;
         }
@@ -886,6 +912,7 @@ mod tests {
         action_seed: [u8; 32],
         claim_seed: [u8; 32],
         receipt_seed: [u8; 32],
+        candidate_seed: [u8; 32],
         broker_identity_seed: [u8; 32],
     }
 
@@ -902,6 +929,7 @@ mod tests {
                 action_seed: [32; 32],
                 claim_seed: [33; 32],
                 receipt_seed: [37; 32],
+                candidate_seed: [38; 32],
                 broker_identity_seed: [34; 32],
             };
             fixture.install();
@@ -919,6 +947,11 @@ mod tests {
                 &["kernel", "action-receipt"],
                 "receipt-main",
                 &self.receipt_seed,
+            );
+            self.write_key(
+                &["kernel", "candidate-artifact"],
+                "candidate-main",
+                &self.candidate_seed,
             );
             self.write_key(
                 &["broker", "governed-session"],
@@ -1010,6 +1043,11 @@ mod tests {
                     "kernel:action-receipt",
                     "receipt-main",
                     self.receipt_seed
+                ),
+                "candidate_artifact": signer(
+                    "kernel:candidate-artifact",
+                    "candidate-main",
+                    self.candidate_seed
                 ),
                 "broker_identity": signer(
                     "broker:governed-session",

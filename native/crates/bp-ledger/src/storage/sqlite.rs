@@ -695,6 +695,32 @@ pub enum GovernedV5CandidateReceiptSetDispositionV1 {
     },
 }
 
+/// Closed request to turn one verified process-plus-Git receipt set into the
+/// immutable candidate lifecycle event. The receipt set is the only
+/// caller-selected identity; all candidate and dispatch fields are rebuilt
+/// from signed tape and strict CAS evidence.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GovernedV5CandidateCreateRequestV1 {
+    pub run_id: RunId,
+    pub action_receipt_set_event_id: EventId,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GovernedV5CandidateCreateDispositionV1 {
+    Recorded {
+        candidate_created_event_id: EventId,
+        candidate_created_event_digest: String,
+        candidate_ref: String,
+        candidate_digest: String,
+    },
+    Existing {
+        candidate_created_event_id: EventId,
+        candidate_created_event_digest: String,
+        candidate_ref: String,
+        candidate_digest: String,
+    },
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct GovernedV5CandidateArtifactEvidenceV1 {
@@ -708,6 +734,16 @@ struct GovernedV5CandidateArtifactEvidenceV1 {
     patch_digest: String,
     changed_files_digest: String,
     candidate_digest: String,
+}
+
+#[derive(Clone, Debug)]
+struct VerifiedGovernedV5CandidateReceiptMemberV1 {
+    action_event: Event,
+    action: ActionRequestedV2,
+    result_event: Event,
+    result: ActivityResultRecordedV1,
+    receipt_event: Event,
+    receipt: ActionReceiptRecordedV2,
 }
 
 /// Closed native request to create the signed intent that precedes a governed
@@ -8985,6 +9021,558 @@ impl SqliteStore {
         })
     }
 
+    /// Append one immutable candidate lifecycle record from an exact signed
+    /// process-plus-Git receipt set. The candidate signer is deliberately
+    /// distinct from dispatch, action, claim, and receipt authorities.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_governed_v5_candidate_created_v1(
+        &self,
+        request: &GovernedV5CandidateCreateRequestV1,
+        cas: &Cas,
+        v5_authority: &GovernedDispatchV5AdmissionAuthorityV1,
+        activity_authority: &ActivityClaimAuthorityV1,
+        receipt_signer: &ActorKeyRef,
+        candidate_signing_key: &SigningKey,
+        candidate_signer: &ActorKeyRef,
+    ) -> Result<GovernedV5CandidateCreateDispositionV1> {
+        self.record_governed_v5_candidate_created_v1_at(
+            request,
+            cas,
+            v5_authority,
+            activity_authority,
+            receipt_signer,
+            candidate_signing_key,
+            candidate_signer,
+            Utc::now(),
+        )
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_governed_v5_candidate_created_v1_at_for_tests(
+        &self,
+        request: &GovernedV5CandidateCreateRequestV1,
+        cas: &Cas,
+        v5_authority: &GovernedDispatchV5AdmissionAuthorityV1,
+        activity_authority: &ActivityClaimAuthorityV1,
+        receipt_signer: &ActorKeyRef,
+        candidate_signing_key: &SigningKey,
+        candidate_signer: &ActorKeyRef,
+        now: DateTime<Utc>,
+    ) -> Result<GovernedV5CandidateCreateDispositionV1> {
+        self.record_governed_v5_candidate_created_v1_at(
+            request,
+            cas,
+            v5_authority,
+            activity_authority,
+            receipt_signer,
+            candidate_signing_key,
+            candidate_signer,
+            now,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_governed_v5_candidate_created_v1_at(
+        &self,
+        request: &GovernedV5CandidateCreateRequestV1,
+        cas: &Cas,
+        v5_authority: &GovernedDispatchV5AdmissionAuthorityV1,
+        activity_authority: &ActivityClaimAuthorityV1,
+        receipt_signer: &ActorKeyRef,
+        candidate_signing_key: &SigningKey,
+        candidate_signer: &ActorKeyRef,
+        now: DateTime<Utc>,
+    ) -> Result<GovernedV5CandidateCreateDispositionV1> {
+        require_protected_governed_realm(activity_authority)?;
+        validate_governed_candidate_artifact_signer(
+            activity_authority,
+            candidate_signing_key,
+            candidate_signer,
+            receipt_signer,
+        )?;
+        let now = canonical_ledger_timestamp(now)?;
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let receipt_set_event = load_verified_authority_event(
+            &tx,
+            request.action_receipt_set_event_id,
+            &activity_authority.trusted_keys,
+            receipt_signer,
+            "V5 candidate receipt set",
+        )
+        .map_err(|error| candidate_artifact_authority_rejected(error.to_string()))?;
+        if receipt_set_event.run_id != request.run_id {
+            return Err(candidate_artifact_authority_rejected(
+                "candidate receipt set belongs to another run",
+            ));
+        }
+        let Payload::ActionReceiptSetRecordedV1(receipt_set) = &receipt_set_event.payload else {
+            return Err(candidate_artifact_authority_rejected(
+                "candidate artifact requires ActionReceiptSetRecordedV1",
+            ));
+        };
+        let receipt_set = receipt_set.clone();
+        if receipt_set.run_id != request.run_id.to_string()
+            || receipt_set.receipts.len() != 2
+            || receipt_set.action_receipt_set_digest
+                != action_receipt_set_v1_digest(&receipt_set).map_err(|error| {
+                    candidate_artifact_authority_rejected(format!(
+                        "candidate receipt set cannot be canonicalized: {error}"
+                    ))
+                })?
+            || receipt_set
+                .receipts
+                .windows(2)
+                .any(|pair| pair[0].action_id >= pair[1].action_id)
+        {
+            return Err(candidate_artifact_authority_rejected(
+                "candidate artifact requires one canonical two-action receipt set",
+            ));
+        }
+
+        let signed_receipts = signed_events_for_run_kind_by_signer(
+            &tx,
+            request.run_id,
+            EventKind::ActionReceiptRecordedV2,
+            activity_authority,
+            receipt_signer,
+            "V5 candidate receipt member",
+        )
+        .map_err(|error| candidate_artifact_authority_rejected(error.to_string()))?;
+        let mut process_member = None;
+        let mut git_member = None;
+        let mut dispatch_event_id = None;
+        for entry in &receipt_set.receipts {
+            let mut matching = signed_receipts.iter().filter(|event| {
+                matches!(
+                    &event.payload,
+                    Payload::ActionReceiptRecordedV2(receipt)
+                        if receipt.action_receipt_ref == entry.action_receipt_ref
+                )
+            });
+            let receipt_event = matching.next().cloned().ok_or_else(|| {
+                candidate_artifact_authority_rejected(
+                    "candidate receipt-set member is missing from signed tape",
+                )
+            })?;
+            if matching.next().is_some() {
+                return Err(candidate_artifact_reconciliation_required(
+                    request.run_id,
+                    request.action_receipt_set_event_id,
+                    "candidate receipt ref resolves to multiple signed events",
+                ));
+            }
+            let Payload::ActionReceiptRecordedV2(receipt) = &receipt_event.payload else {
+                unreachable!("receipt scan returns ActionReceiptRecordedV2")
+            };
+            let receipt = receipt.clone();
+            if receipt.action_id != entry.action_id
+                || receipt.outcome != ActionReceiptOutcomeV2::Succeeded
+                || receipt.action_receipt_ref != entry.action_receipt_ref
+                || action_receipt_recorded_v2_digest(&receipt).map_err(|error| {
+                    candidate_artifact_authority_rejected(format!(
+                        "candidate receipt cannot be canonicalized: {error}"
+                    ))
+                })? != entry.action_receipt_digest
+                || !tape_event_precedes(&receipt_event, &receipt_set_event)
+            {
+                return Err(candidate_artifact_authority_rejected(
+                    "candidate receipt-set entry does not bind one succeeded signed receipt",
+                ));
+            }
+            let result_event_id = receipt_event.parent_event_id.ok_or_else(|| {
+                candidate_artifact_authority_rejected(
+                    "candidate receipt has no terminal-result parent",
+                )
+            })?;
+            let result_event = load_verified_authority_event(
+                &tx,
+                result_event_id,
+                &activity_authority.trusted_keys,
+                &activity_authority.claim_signer,
+                "V5 candidate receipt result",
+            )
+            .map_err(|error| candidate_artifact_authority_rejected(error.to_string()))?;
+            let Payload::ActivityResultRecordedV1(result) = &result_event.payload else {
+                return Err(candidate_artifact_authority_rejected(
+                    "candidate receipt parent is not ActivityResultRecordedV1",
+                ));
+            };
+            let result = result.clone();
+            let claim_event_id = result_event.parent_event_id.ok_or_else(|| {
+                candidate_artifact_authority_rejected(
+                    "candidate terminal result has no claim parent",
+                )
+            })?;
+            let claim_event = load_verified_authority_event(
+                &tx,
+                claim_event_id,
+                &activity_authority.trusted_keys,
+                &activity_authority.claim_signer,
+                "V5 candidate receipt claim",
+            )
+            .map_err(|error| candidate_artifact_authority_rejected(error.to_string()))?;
+            let Payload::ActivityClaimedV1(claim) = &claim_event.payload else {
+                return Err(candidate_artifact_authority_rejected(
+                    "candidate terminal result parent is not ActivityClaimedV1",
+                ));
+            };
+            let claim = claim.clone();
+            let action_event_id = claim_event.parent_event_id.ok_or_else(|| {
+                candidate_artifact_authority_rejected(
+                    "candidate activity claim has no action parent",
+                )
+            })?;
+            let action_event = load_verified_authority_event(
+                &tx,
+                action_event_id,
+                &activity_authority.trusted_keys,
+                &activity_authority.action_request_signer,
+                "V5 candidate receipt action",
+            )
+            .map_err(|error| candidate_artifact_authority_rejected(error.to_string()))?;
+            let Payload::ActionRequestedV2(action) = &action_event.payload else {
+                return Err(candidate_artifact_authority_rejected(
+                    "candidate activity claim parent is not ActionRequestedV2",
+                ));
+            };
+            let action = action.clone();
+            let member_dispatch = action_event.parent_event_id.ok_or_else(|| {
+                candidate_artifact_authority_rejected(
+                    "candidate action has no governed dispatch parent",
+                )
+            })?;
+            let action_digest = action_requested_v2_digest(&action).map_err(|error| {
+                candidate_artifact_authority_rejected(format!(
+                    "candidate action cannot be canonicalized: {error}"
+                ))
+            })?;
+            let claim_digest = canonical_event_hash(&claim_event).map_err(|error| {
+                candidate_artifact_authority_rejected(format!(
+                    "candidate claim cannot be canonicalized: {error}"
+                ))
+            })?;
+            let recorded_at = parse_claim_timestamp(&result.recorded_at).map_err(|_| {
+                candidate_artifact_authority_rejected(
+                    "candidate result timestamp is not canonical RFC3339 UTC",
+                )
+            })?;
+            let claimed_at = parse_claim_timestamp(&claim.claimed_at).map_err(|_| {
+                candidate_artifact_authority_rejected(
+                    "candidate claim timestamp is not canonical RFC3339 UTC",
+                )
+            })?;
+            let lease_expires_at =
+                parse_claim_timestamp(&claim.lease_expires_at).map_err(|_| {
+                    candidate_artifact_authority_rejected(
+                        "candidate claim lease expiry is not canonical RFC3339 UTC",
+                    )
+                })?;
+            if action.run_id != request.run_id.to_string()
+                || action.workflow_id != receipt_set.workflow_id
+                || action.unit_id != receipt_set.unit_id
+                || action.attempt != receipt_set.attempt
+                || action.provenance_ref != receipt_set.provenance_ref
+                || action.dispatch_envelope_digest != receipt_set.dispatch_envelope_digest
+                || action.execution_role != ExecutionRoleV1::Implementer
+                || action.action_id != receipt.action_id
+                || action.idempotency_key != receipt.idempotency_key
+                || action_digest != receipt.action_request_digest
+                || receipt.run_id != action.run_id
+                || receipt.workflow_id != action.workflow_id
+                || receipt.unit_id != action.unit_id
+                || receipt.attempt != action.attempt
+                || receipt.provenance_ref != action.provenance_ref
+                || receipt.dispatch_envelope_digest != action.dispatch_envelope_digest
+                || receipt.capability_bundle_digest != action.capability_bundle_digest
+                || receipt.policy_digest != action.policy_digest
+                || receipt.context_manifest_digest != action.context_manifest_digest
+                || receipt.worker_manifest_digest != action.worker_manifest_digest
+                || receipt.sandbox_profile_digest != action.sandbox_profile_digest
+                || receipt.authority_actor != action.authority_actor
+                || receipt.execution_role != action.execution_role
+                || receipt.failure.is_some()
+                || receipt.authorization_ref.is_some()
+                || claim.activity_id != action.action_id
+                || claim.idempotency_key != action.idempotency_key
+                || claim.action_kind != action.action_kind
+                || claim.action_request_event_id != action_event.id
+                || claim.action_request_digest != action_digest
+                || claim.dispatch_event_id != member_dispatch
+                || claim.dispatch_envelope_digest != action.dispatch_envelope_digest
+                || claim.authority_actor != activity_authority.claim_signer.actor_id
+                || result.activity_id != action.action_id
+                || result.idempotency_key != action.idempotency_key
+                || result.claim_event_id != claim_event.id
+                || result.claim_event_digest != claim_digest
+                || result.lease_id != claim.lease_id
+                || result.outcome != ActivityResultOutcomeV1::Succeeded
+                || receipt.result_digest != result.result_digest
+                || receipt.result_ref != result.result_ref
+                || receipt.evidence_digest != result.evidence_digest
+                || receipt.evidence_ref != result.evidence_ref
+                || receipt.completed_at != result.recorded_at
+                || claimed_at != claim_event.occurred_at
+                || recorded_at != result_event.occurred_at
+                || recorded_at < claimed_at
+                || recorded_at >= lease_expires_at
+                || receipt_event.occurred_at != recorded_at
+                || !tape_event_precedes(&action_event, &claim_event)
+                || !tape_event_precedes(&claim_event, &result_event)
+                || !tape_event_precedes(&result_event, &receipt_event)
+            {
+                return Err(candidate_artifact_authority_rejected(
+                    "candidate receipt member does not form one exact action/claim/result lineage",
+                ));
+            }
+            let member = VerifiedGovernedV5CandidateReceiptMemberV1 {
+                action_event,
+                action,
+                result_event,
+                result,
+                receipt_event,
+                receipt,
+            };
+            if dispatch_event_id
+                .replace(member_dispatch)
+                .is_some_and(|prior| prior != member_dispatch)
+            {
+                return Err(candidate_artifact_authority_rejected(
+                    "candidate receipt members belong to different dispatches",
+                ));
+            }
+            match member.action.action_kind {
+                ActionKindV1::Process
+                    if claim.purpose == ActivityClaimPurposeV1::GovernedCommandActionV1 =>
+                {
+                    if process_member.replace(member).is_some() {
+                        return Err(candidate_artifact_authority_rejected(
+                            "candidate receipt set contains multiple process actions",
+                        ));
+                    }
+                }
+                ActionKindV1::Git
+                    if claim.purpose == ActivityClaimPurposeV1::GovernedCandidateFinalizeV1 =>
+                {
+                    if git_member.replace(member).is_some() {
+                        return Err(candidate_artifact_authority_rejected(
+                            "candidate receipt set contains multiple Git actions",
+                        ));
+                    }
+                }
+                _ => {
+                    return Err(candidate_artifact_authority_rejected(
+                        "candidate receipt set contains an unsupported action purpose",
+                    ));
+                }
+            }
+        }
+        let (Some(_process_member), Some(git_member), Some(dispatch_event_id)) =
+            (process_member, git_member, dispatch_event_id)
+        else {
+            return Err(candidate_artifact_authority_rejected(
+                "candidate receipt set must contain one process and one Git action",
+            ));
+        };
+        if receipt_set_event.parent_event_id != Some(git_member.receipt_event.id) {
+            return Err(candidate_artifact_authority_rejected(
+                "candidate receipt set is not parented to its Git receipt",
+            ));
+        }
+        let sealed_at = parse_claim_timestamp(&receipt_set.sealed_at).map_err(|_| {
+            candidate_artifact_authority_rejected(
+                "candidate receipt-set timestamp is not canonical RFC3339 UTC",
+            )
+        })?;
+        if sealed_at != receipt_set_event.occurred_at
+            || sealed_at != git_member.result_event.occurred_at
+            || now < sealed_at
+        {
+            return Err(candidate_artifact_authority_rejected(
+                "candidate receipt-set and lifecycle timestamps are inconsistent",
+            ));
+        }
+        let admission =
+            governed_dispatch_v5_admission_by_source(&tx, request.run_id, dispatch_event_id)?
+                .ok_or_else(|| {
+                    candidate_artifact_authority_rejected(
+                        "candidate artifact requires a recorded V5 admission",
+                    )
+                })?;
+        let material = verified_sealed_v5_dispatch_action_material(
+            &tx,
+            request.run_id,
+            dispatch_event_id,
+            admission.admission_event_id,
+            v5_authority,
+            activity_authority,
+        )
+        .map_err(|error| candidate_artifact_authority_rejected(error.to_string()))?;
+        if material.lineage_envelope_digest != receipt_set.dispatch_envelope_digest {
+            return Err(candidate_artifact_authority_rejected(
+                "candidate receipt set does not bind the sealed V5 dispatch",
+            ));
+        }
+        let evidence_bytes = cas
+            .get_verified_canonical_bytes(
+                &git_member.result.evidence_ref,
+                &git_member.result.evidence_digest,
+            )
+            .map_err(|error| {
+                candidate_artifact_authority_rejected(format!(
+                    "candidate artifact evidence is unavailable or corrupt: {error}"
+                ))
+            })?;
+        let artifact: GovernedV5CandidateArtifactEvidenceV1 =
+            serde_json::from_slice(&evidence_bytes).map_err(|error| {
+                candidate_artifact_authority_rejected(format!(
+                    "candidate artifact evidence is invalid: {error}"
+                ))
+            })?;
+        let canonical_artifact = serde_json::to_vec(&artifact).map_err(|error| {
+            candidate_artifact_authority_rejected(format!(
+                "candidate artifact evidence cannot be canonicalized: {error}"
+            ))
+        })?;
+        verify_governed_v5_candidate_artifact_evidence(
+            &artifact,
+            &canonical_artifact,
+            &evidence_bytes,
+            request.run_id,
+            receipt_set.attempt,
+            &receipt_set.dispatch_envelope_digest,
+            &material.dispatch.body.base_commit_sha,
+        )
+        .map_err(|error| candidate_artifact_authority_rejected(error.to_string()))?;
+        let expected_result_ref = format!("git-ref:{}", artifact.candidate_ref);
+        if git_member.result.result_digest.as_deref() != Some(artifact.candidate_digest.as_str())
+            || git_member.result.result_ref.as_deref() != Some(expected_result_ref.as_str())
+            || git_member.receipt.result_digest.as_deref()
+                != Some(artifact.candidate_digest.as_str())
+            || git_member.receipt.result_ref.as_deref() != Some(expected_result_ref.as_str())
+        {
+            return Err(candidate_artifact_authority_rejected(
+                "candidate Git evidence does not bind the immutable artifact",
+            ));
+        }
+        let candidate = CandidateCreatedV2 {
+            run_id: request.run_id.to_string(),
+            candidate_id: artifact.candidate_id.clone(),
+            candidate_ref: artifact.candidate_ref.clone(),
+            workflow_id: receipt_set.workflow_id.clone(),
+            unit_id: receipt_set.unit_id.clone(),
+            attempt: receipt_set.attempt,
+            provenance_ref: receipt_set.provenance_ref.clone(),
+            candidate_digest: artifact.candidate_digest.clone(),
+            base_commit_sha: artifact.base_commit_sha,
+            candidate_commit_sha: artifact.candidate_commit_sha,
+            commit_digest: artifact.commit_digest,
+            tree_digest: artifact.tree_digest,
+            patch_digest: artifact.patch_digest,
+            changed_files_digest: artifact.changed_files_digest,
+            envelope_digest: receipt_set.dispatch_envelope_digest.clone(),
+            action_receipt_set_ref: receipt_set.action_receipt_set_ref.clone(),
+            action_receipt_set_digest: receipt_set.action_receipt_set_digest.clone(),
+        };
+        canonicalize_payload(
+            EventKind::CandidateCreatedV2.as_wire(),
+            Event::CURRENT_SCHEMA_VERSION,
+            serde_json::to_value(Payload::CandidateCreatedV2(candidate.clone())).map_err(
+                |error| {
+                    candidate_artifact_authority_rejected(format!(
+                        "candidate lifecycle payload cannot be serialized: {error}"
+                    ))
+                },
+            )?,
+        )
+        .map_err(|error| {
+            candidate_artifact_authority_rejected(format!(
+                "candidate lifecycle payload is invalid: {error}"
+            ))
+        })?;
+
+        let existing_candidates = signed_events_for_run_kind_by_signer(
+            &tx,
+            request.run_id,
+            EventKind::CandidateCreatedV2,
+            activity_authority,
+            candidate_signer,
+            "V5 candidate lifecycle event",
+        )
+        .map_err(|error| candidate_artifact_authority_rejected(error.to_string()))?
+        .into_iter()
+        .filter(|event| {
+            matches!(
+                &event.payload,
+                Payload::CandidateCreatedV2(existing)
+                    if existing.workflow_id == candidate.workflow_id
+                        && existing.unit_id == candidate.unit_id
+                        && existing.attempt == candidate.attempt
+                        && existing.provenance_ref == candidate.provenance_ref
+            )
+        })
+        .collect::<Vec<_>>();
+        match existing_candidates.as_slice() {
+            [] => {}
+            [event] => {
+                let Payload::CandidateCreatedV2(existing) = &event.payload else {
+                    unreachable!("candidate scan returns CandidateCreatedV2")
+                };
+                if existing != &candidate
+                    || event.parent_event_id != Some(receipt_set_event.id)
+                    || !tape_event_precedes(&receipt_set_event, event)
+                {
+                    return Err(candidate_artifact_reconciliation_required(
+                        request.run_id,
+                        request.action_receipt_set_event_id,
+                        "existing candidate lifecycle event conflicts with verified evidence",
+                    ));
+                }
+                let event_digest = canonical_event_hash(event).map_err(|error| {
+                    candidate_artifact_authority_rejected(format!(
+                        "candidate lifecycle event cannot be canonicalized: {error}"
+                    ))
+                })?;
+                tx.commit()?;
+                return Ok(GovernedV5CandidateCreateDispositionV1::Existing {
+                    candidate_created_event_id: event.id,
+                    candidate_created_event_digest: event_digest,
+                    candidate_ref: candidate.candidate_ref,
+                    candidate_digest: candidate.candidate_digest,
+                });
+            }
+            _ => {
+                return Err(candidate_artifact_reconciliation_required(
+                    request.run_id,
+                    request.action_receipt_set_event_id,
+                    "multiple signed candidate lifecycle events name one workflow attempt",
+                ));
+            }
+        }
+        let event = canonicalize(Event {
+            id: EventId::new(),
+            run_id: request.run_id,
+            parent_event_id: Some(receipt_set_event.id),
+            schema_version: Event::CURRENT_SCHEMA_VERSION,
+            kind: EventKind::CandidateCreatedV2,
+            occurred_at: now,
+            payload: Payload::CandidateCreatedV2(candidate.clone()),
+        })?;
+        validate_new_ordinary_event_id(&tx, &event)?;
+        let signature = sign_event(&event, candidate_signing_key, candidate_signer, now)?;
+        let event_digest = signature.canonical_event_hash.clone();
+        insert_event(&tx, &event)?;
+        insert_event_signature(&tx, &signature)?;
+        tx.commit()?;
+        self.record_ordinary_append(&event);
+        Ok(GovernedV5CandidateCreateDispositionV1::Recorded {
+            candidate_created_event_id: event.id,
+            candidate_created_event_digest: event_digest,
+            candidate_ref: candidate.candidate_ref,
+            candidate_digest: candidate.candidate_digest,
+        })
+    }
+
     /// Convert one succeeded, checkpoint-admitted V5 command into its exact
     /// immutable receipt evidence.
     ///
@@ -10688,6 +11276,35 @@ fn validate_governed_action_receipt_signer(
     Ok(())
 }
 
+fn validate_governed_candidate_artifact_signer(
+    authority: &ActivityClaimAuthorityV1,
+    signing_key: &SigningKey,
+    candidate_signer: &ActorKeyRef,
+    receipt_signer: &ActorKeyRef,
+) -> Result<()> {
+    validate_trusted_actor("candidate artifact signer", candidate_signer)
+        .map_err(|error| candidate_artifact_authority_rejected(error.to_string()))?;
+    let actual_public_key_hash = public_key_hash(&signing_key.verifying_key());
+    let trusted_bytes = authority
+        .trusted_keys
+        .public_key_for(candidate_signer)
+        .ok_or_else(|| {
+            candidate_artifact_authority_rejected("candidate artifact signer is not trusted")
+        })?;
+    if candidate_signer.public_key_hash.as_deref() != Some(actual_public_key_hash.as_str())
+        || trusted_bytes != signing_key.verifying_key().as_bytes()
+        || actor_matches(candidate_signer, &authority.dispatch_signer)
+        || actor_matches(candidate_signer, &authority.action_request_signer)
+        || actor_matches(candidate_signer, &authority.claim_signer)
+        || actor_matches(candidate_signer, receipt_signer)
+    {
+        return Err(candidate_artifact_authority_rejected(
+            "candidate artifact signer must be one distinct trusted protected-host identity",
+        ));
+    }
+    Ok(())
+}
+
 fn action_receipt_authority_rejected(reason: impl Into<String>) -> LedgerError {
     LedgerError::ActionReceiptAuthorityRejected {
         reason: reason.into(),
@@ -10702,6 +11319,24 @@ fn action_receipt_reconciliation_required(
     LedgerError::ActionReceiptReconciliationRequired {
         run_id: run_id.to_string(),
         action_id: action_id.into(),
+        reason: reason.into(),
+    }
+}
+
+fn candidate_artifact_authority_rejected(reason: impl Into<String>) -> LedgerError {
+    LedgerError::CandidateArtifactAuthorityRejected {
+        reason: reason.into(),
+    }
+}
+
+fn candidate_artifact_reconciliation_required(
+    run_id: RunId,
+    action_receipt_set_event_id: EventId,
+    reason: impl Into<String>,
+) -> LedgerError {
+    LedgerError::CandidateArtifactReconciliationRequired {
+        run_id: run_id.to_string(),
+        action_receipt_set_event_id: action_receipt_set_event_id.to_string(),
         reason: reason.into(),
     }
 }

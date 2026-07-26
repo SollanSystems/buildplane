@@ -6,7 +6,7 @@
 //! deliberately prove that the admission record itself does not make V5
 //! actions claimable.
 
-use bp_ledger::canonicalize::canonicalize;
+use bp_ledger::canonicalize::{canonical_event_hash, canonicalize};
 use bp_ledger::event::Event;
 use bp_ledger::id::{EventId, RunId};
 use bp_ledger::kind::EventKind;
@@ -34,7 +34,8 @@ use bp_ledger::storage::sqlite::{
     GovernedCommandActionAuthorizeAndClaimDispositionV1, GovernedCommandActionIssueDispositionV1,
     GovernedCommandActionResultRequestV1, GovernedDispatchV5AdmissionAuthorityV1,
     GovernedDispatchV5AdmissionDispositionV1, GovernedDispatchV5AdmissionRequestV1,
-    GovernedDispatchV5AdmissionSealRequestV1, GovernedV5CandidateFinalizeActionIssueDispositionV1,
+    GovernedDispatchV5AdmissionSealRequestV1, GovernedV5CandidateCreateDispositionV1,
+    GovernedV5CandidateCreateRequestV1, GovernedV5CandidateFinalizeActionIssueDispositionV1,
     GovernedV5CandidateFinalizeActionIssueRequestV1,
     GovernedV5CandidateFinalizeAuthorizeAndClaimRequestV1,
     GovernedV5CandidateFinalizeResultRequestV1, GovernedV5CandidateReceiptSetDispositionV1,
@@ -277,18 +278,25 @@ fn governed_v5_action_authority_with_receipt(
     source_signer: &ActorKeyRef,
     action_key: &SigningKey,
     receipt_key: &SigningKey,
-) -> (ActivityClaimAuthorityV1, ActorKeyRef, ActorKeyRef) {
+    candidate_key: &SigningKey,
+) -> (
+    ActivityClaimAuthorityV1,
+    ActorKeyRef,
+    ActorKeyRef,
+    ActorKeyRef,
+) {
     let action_signer = actor("kernel:v5-action", "action-1", action_key);
     let receipt_signer = actor("kernel:v5-receipt", "receipt-1", receipt_key);
+    let candidate_signer = actor("kernel:v5-candidate", "candidate-1", candidate_key);
     let authority = ActivityClaimAuthorityV1::new_governed_realm(
-        trusted_keys(&[source_key, action_key, receipt_key]),
+        trusted_keys(&[source_key, action_key, receipt_key, candidate_key]),
         source_signer.clone(),
         action_signer.clone(),
         action_signer.clone(),
         digest('9'),
     )
     .expect("construct protected V5 action and receipt authority");
-    (authority, action_signer, receipt_signer)
+    (authority, action_signer, receipt_signer, candidate_signer)
 }
 
 fn event(run_id: RunId, kind: EventKind, payload: Payload) -> Event {
@@ -904,14 +912,16 @@ fn v5_command_issuance_requires_a_checkpoint_sealed_admission() {
     let checkpoint_key = SigningKey::from_bytes(&[73u8; 32]);
     let action_key = SigningKey::from_bytes(&[74u8; 32]);
     let receipt_key = SigningKey::from_bytes(&[79u8; 32]);
+    let candidate_key = SigningKey::from_bytes(&[81u8; 32]);
     let (v5_authority, source_signer, admission_signer, checkpoint_signer) =
         v5_admission_authority(&source_key, &admission_key, &checkpoint_key);
-    let (activity_authority, action_signer, receipt_signer) =
+    let (activity_authority, action_signer, receipt_signer, candidate_signer) =
         governed_v5_action_authority_with_receipt(
             &source_key,
             &source_signer,
             &action_key,
             &receipt_key,
+            &candidate_key,
         );
     let fixture = v5_fixture(1);
     append_fixture(
@@ -1719,6 +1729,122 @@ fn v5_command_issuance_requires_a_checkpoint_sealed_admission() {
         "receipt-set retry must not append duplicate closure evidence"
     );
 
+    let candidate_create_request = GovernedV5CandidateCreateRequestV1 {
+        run_id: fixture.run_id,
+        action_receipt_set_event_id: receipt_set_event_id,
+    };
+    let wrong_candidate_key = SigningKey::from_bytes(&[82u8; 32]);
+    let wrong_candidate_signer = actor("kernel:v5-candidate", "candidate-1", &wrong_candidate_key);
+    assert!(matches!(
+        store.record_governed_v5_candidate_created_v1(
+            &candidate_create_request,
+            &cas,
+            &v5_authority,
+            &activity_authority,
+            &receipt_signer,
+            &wrong_candidate_key,
+            &wrong_candidate_signer,
+        ),
+        Err(LedgerError::CandidateArtifactAuthorityRejected { .. })
+    ));
+    assert_eq!(
+        store
+            .event_count()
+            .expect("count rejected candidate signer tape"),
+        16,
+        "a substituted candidate signer must not append lifecycle evidence"
+    );
+    let candidate_created = store
+        .record_governed_v5_candidate_created_v1(
+            &candidate_create_request,
+            &cas,
+            &v5_authority,
+            &activity_authority,
+            &receipt_signer,
+            &candidate_key,
+            &candidate_signer,
+        )
+        .expect("record immutable V5 candidate lifecycle event");
+    let (
+        candidate_created_event_id,
+        candidate_created_event_digest,
+        recorded_candidate_ref,
+        recorded_candidate_digest,
+    ) = match candidate_created {
+        GovernedV5CandidateCreateDispositionV1::Recorded {
+            candidate_created_event_id,
+            candidate_created_event_digest,
+            candidate_ref,
+            candidate_digest,
+        } => (
+            candidate_created_event_id,
+            candidate_created_event_digest,
+            candidate_ref,
+            candidate_digest,
+        ),
+        other => panic!("first candidate lifecycle write must record, got {other:?}"),
+    };
+    assert_eq!(recorded_candidate_ref, candidate_ref);
+    let (_, expected_candidate_digest) = candidate_artifact_evidence_v1(&fixture, &candidate_ref);
+    assert_eq!(recorded_candidate_digest, expected_candidate_digest);
+    assert_eq!(
+        store.event_count().expect("count candidate lifecycle tape"),
+        17,
+        "candidate creation must append exactly one separately signed lifecycle event"
+    );
+    let candidate_event = store
+        .events_for_run(&fixture.run_id.to_string())
+        .expect("load candidate lifecycle tape")
+        .into_iter()
+        .map(|row| row.to_event().expect("decode candidate lifecycle event"))
+        .find(|event| event.id == candidate_created_event_id)
+        .expect("find candidate lifecycle event");
+    assert_eq!(
+        candidate_event.parent_event_id,
+        Some(receipt_set_event_id),
+        "candidate lifecycle evidence must be parented to the complete receipt set"
+    );
+    assert_eq!(
+        canonical_event_hash(&candidate_event).expect("digest candidate lifecycle event"),
+        candidate_created_event_digest
+    );
+    let Payload::CandidateCreatedV2(candidate) = &candidate_event.payload else {
+        panic!("candidate lifecycle must append CandidateCreatedV2");
+    };
+    assert_eq!(candidate.candidate_ref, candidate_ref);
+    assert_eq!(candidate.candidate_digest, recorded_candidate_digest);
+    assert_eq!(candidate.action_receipt_set_ref, receipt_set_ref);
+    assert_eq!(candidate.action_receipt_set_digest, receipt_set_digest);
+    assert_eq!(candidate.envelope_digest, fixture.dispatch.envelope_digest);
+    let candidate_retry = store
+        .record_governed_v5_candidate_created_v1_at_for_tests(
+            &candidate_create_request,
+            &cas,
+            &v5_authority,
+            &activity_authority,
+            &receipt_signer,
+            &candidate_key,
+            &candidate_signer,
+            "2100-01-01T00:00:00Z"
+                .parse()
+                .expect("parse candidate retry time"),
+        )
+        .expect("recover exact candidate lifecycle event");
+    assert!(matches!(
+        candidate_retry,
+        GovernedV5CandidateCreateDispositionV1::Existing {
+            candidate_created_event_id: existing,
+            ..
+        } if existing == candidate_created_event_id
+    ));
+    assert_eq!(
+        store
+            .event_count()
+            .expect("count idempotent candidate retry tape"),
+        17,
+        "candidate lifecycle retry must not append duplicate evidence"
+    );
+
     let retry = store
         .issue_governed_v5_command_action_v1_at_for_tests(
             &action_request,
@@ -1739,7 +1865,7 @@ fn v5_command_issuance_requires_a_checkpoint_sealed_admission() {
     ));
     assert_eq!(
         store.event_count().expect("count recovered V5 tape"),
-        16,
+        17,
         "V5 action replay must not append a duplicate effect intent"
     );
 }

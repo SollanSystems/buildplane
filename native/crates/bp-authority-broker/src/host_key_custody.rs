@@ -111,6 +111,7 @@ pub(crate) struct ProtectedGovernedSessionSigningKeysV1 {
     action_request: SigningKey,
     claim: SigningKey,
     action_receipt: SigningKey,
+    candidate_artifact: SigningKey,
     broker_identity: SigningKey,
 }
 
@@ -125,6 +126,10 @@ impl ProtectedGovernedSessionSigningKeysV1 {
 
     pub(crate) fn action_receipt(&self) -> &SigningKey {
         &self.action_receipt
+    }
+
+    pub(crate) fn candidate_artifact(&self) -> &SigningKey {
+        &self.candidate_artifact
     }
 
     pub(crate) fn broker_identity(&self) -> &SigningKey {
@@ -153,6 +158,11 @@ pub(crate) fn load_governed_session_signing_keys_v1(
             &config.action_receipt_signer,
             config.broker_uid,
         )?;
+        let candidate_artifact = load_signing_key_from_authority_descriptor(
+            startup.authority_root().directory(),
+            &config.candidate_artifact_signer,
+            config.broker_uid,
+        )?;
         let broker_identity = load_signing_key_from_authority_descriptor(
             startup.authority_root().directory(),
             &config.broker_identity_signer,
@@ -162,8 +172,12 @@ pub(crate) fn load_governed_session_signing_keys_v1(
             || action_request.verifying_key() == action_receipt.verifying_key()
             || action_request.verifying_key() == broker_identity.verifying_key()
             || claim.verifying_key() == action_receipt.verifying_key()
+            || claim.verifying_key() == candidate_artifact.verifying_key()
             || claim.verifying_key() == broker_identity.verifying_key()
+            || action_receipt.verifying_key() == candidate_artifact.verifying_key()
             || action_receipt.verifying_key() == broker_identity.verifying_key()
+            || candidate_artifact.verifying_key() == broker_identity.verifying_key()
+            || action_request.verifying_key() == candidate_artifact.verifying_key()
         {
             return Err(ProtectedHostKeyLoadError::AliasedKeyMaterial);
         }
@@ -171,6 +185,7 @@ pub(crate) fn load_governed_session_signing_keys_v1(
             action_request,
             claim,
             action_receipt,
+            candidate_artifact,
             broker_identity,
         })
     }
@@ -615,9 +630,15 @@ mod tests {
         let claim_seed = [23; 32];
         let broker_identity_seed = [24; 32];
         let receipt_seed = [25; 32];
+        let candidate_seed = [26; 32];
         fixture.write_key(&["kernel", "model-action"], "action-main", &action_seed);
         fixture.write_key(&["kernel", "model-claim"], "claim-main", &claim_seed);
         fixture.write_key(&["kernel", "action-receipt"], "receipt-main", &receipt_seed);
+        fixture.write_key(
+            &["kernel", "candidate-artifact"],
+            "candidate-main",
+            &candidate_seed,
+        );
         fixture.write_key(
             &["broker", "governed-session"],
             "broker-main",
@@ -673,6 +694,11 @@ mod tests {
                 "receipt-main",
                 receipt_seed
             ),
+            "candidate_artifact": signer(
+                "kernel:candidate-artifact",
+                "candidate-main",
+                candidate_seed
+            ),
             "broker_identity": signer(
                 "broker:governed-session",
                 "broker-main",
@@ -692,6 +718,7 @@ mod tests {
         assert_eq!(keys.action_request().to_bytes(), action_seed);
         assert_eq!(keys.claim().to_bytes(), claim_seed);
         assert_eq!(keys.action_receipt().to_bytes(), receipt_seed);
+        assert_eq!(keys.candidate_artifact().to_bytes(), candidate_seed);
         assert_eq!(keys.broker_identity().to_bytes(), broker_identity_seed);
         assert!(
             !fixture

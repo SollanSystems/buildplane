@@ -780,8 +780,9 @@ loaded only from fixed
 `/etc/buildplane/authority-host/governed-session-v1.json`. It binds one run,
 realm, non-root broker UID, distinct client UIDs, listener group, bounded
 activity lease, exact provider/model and worker-manifest allowlists, a
-digest-pinned OCI image/profile with resource ceilings, and four distinct
-public signer identities for dispatch, action-request, claim, and
+digest-pinned OCI image/profile with resource ceilings, and distinct public
+signer identities for dispatch, V5 admission recording/checkpointing,
+action-request, claim, action-receipt, candidate-artifact, and
 broker-response/session roles. The
 parser constructs the activity and replay authorities plus the model-action
 confinement and OCI policies. Unknown fields, secret or endpoint fields,
@@ -789,9 +790,12 @@ caller-selected socket/ledger/CAS/credential paths, duplicate identities or
 keys, unknown providers, unsafe model IDs, unpinned images, and invalid limits
 fail closed. The loader retains the descriptor-validated private authority
 root; signing-key, ledger, CAS, and credential custody all derive from that
-same startup object. Only the action-request and claim private keys are loaded
-alongside the domain-separated broker identity by this host; the dispatch
-identity remains verification-only.
+same startup object. Only the action-request, claim, action-receipt, and
+candidate-artifact private keys are loaded alongside the domain-separated
+broker identity by this host; dispatch and V5-admission identities remain
+verification-only. Candidate creation is signed by its own key only after the
+host reconstructs the complete process-plus-Git receipt set and revalidates
+the immutable candidate artifact from CAS.
 
 Protected governed-session startup is now an all-or-nothing internal
 composition. The current process must match the configured non-root broker

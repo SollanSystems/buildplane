@@ -116,6 +116,18 @@ pub enum LedgerError {
         reason: String,
     },
 
+    #[error("governed candidate artifact authority rejected: {reason}")]
+    CandidateArtifactAuthorityRejected { reason: String },
+
+    #[error(
+        "governed candidate artifact requires reconciliation for run {run_id} and receipt set {action_receipt_set_event_id}: {reason}"
+    )]
+    CandidateArtifactReconciliationRequired {
+        run_id: String,
+        action_receipt_set_event_id: String,
+        reason: String,
+    },
+
     #[error("governed candidate completion authority rejected: {reason}")]
     CandidateCompletionAuthorityRejected { reason: String },
 
