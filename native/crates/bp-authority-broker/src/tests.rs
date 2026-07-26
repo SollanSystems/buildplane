@@ -8951,6 +8951,43 @@ fn broker_v5_dispatch_admission_ignores_unsigned_matching_source_poisoning() {
 }
 
 #[test]
+fn broker_v5_dispatch_admission_ignores_unsigned_noncanonical_digest_poisoning() {
+    let fixture = v5_broker_admission_fixture();
+    let mut forged = matching_v5_source_event(&fixture);
+    let Payload::DispatchEnvelopeV5(dispatch) = &mut forged.payload else {
+        panic!("matching V5 source fixture must carry a V5 envelope");
+    };
+    dispatch.dispatch_v4.dispatch_v3.body.base_commit_sha = "2".repeat(40);
+    fixture
+        .store
+        .conn_for_tests()
+        .execute(
+            "INSERT INTO events (
+                id, run_id, parent_event_id, schema_version, kind, occurred_at, payload
+             ) VALUES (?1, ?2, NULL, ?3, 'dispatch_envelope_v5', ?4, ?5)",
+            rusqlite::params![
+                forged.id.to_string(),
+                forged.run_id.to_string(),
+                forged.schema_version,
+                forged
+                    .occurred_at
+                    .to_rfc3339_opts(SecondsFormat::Millis, true),
+                serde_json::to_string(&forged.payload).expect("serialize forged V5 source"),
+            ],
+        )
+        .expect("inject unsigned V5 source with forged embedded digest");
+    let broker = v5_broker_admission_backend(&fixture);
+
+    let outcome = broker.record_then_exact_seal(v5_broker_admission_request(&fixture));
+    assert!(
+        matches!(outcome, BrokerV5DispatchAdmissionDisposition::Sealed(_)),
+        "unsigned noncanonical copy must not poison verified V5 admission: {outcome:?}"
+    );
+    assert_eq!(v5_broker_admission_receipt_count(&fixture), 1);
+    assert_eq!(v5_broker_checkpoint_count(&fixture), 1);
+}
+
+#[test]
 fn broker_v5_dispatch_admission_ignores_wrong_role_matching_source_poisoning() {
     let fixture = v5_broker_admission_fixture();
     append_matching_v5_source(

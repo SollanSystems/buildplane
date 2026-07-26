@@ -3551,19 +3551,32 @@ impl SqliteStore {
         for (event_row, signature_row) in
             v5_source_candidates_by_digest_for_connection(&self.conn, run_id, v5_envelope_digest)?
         {
+            let Some(signature_row) = signature_row else {
+                continue;
+            };
+            if signature_row.algorithm != "ed25519" {
+                continue;
+            }
+            let Ok(signature) = signature_row.to_event_signature() else {
+                continue;
+            };
+            if !actor_matches(&authority.source_dispatch_signer, &signature.signer) {
+                continue;
+            }
             #[cfg(any(test, feature = "test-support"))]
             self.v5_source_candidate_verification_count.set(
                 self.v5_source_candidate_verification_count
                     .get()
                     .saturating_add(1),
             );
-            let event = event_row.to_event().map_err(|error| {
-                governed_dispatch_v5_admission_reconciliation_required(
-                    run_id,
-                    "unresolved",
-                    format!("V5 source event could not be reconstructed: {error}"),
-                )
-            })?;
+            let Ok(event) = event_row.to_event() else {
+                continue;
+            };
+            if verify_event_signature(&event, &signature, &authority.trusted_keys)
+                != VerificationStatus::Verified
+            {
+                continue;
+            }
             let Payload::DispatchEnvelopeV5(dispatch) = &event.payload else {
                 return Err(governed_dispatch_v5_admission_reconciliation_required(
                     run_id,
@@ -3587,21 +3600,6 @@ impl SqliteStore {
                     "unresolved",
                     "matching V5 source carries a noncanonical detached digest",
                 ));
-            }
-            let Some(signature_row) = signature_row else {
-                continue;
-            };
-            if signature_row.algorithm != "ed25519" {
-                continue;
-            }
-            let Ok(signature) = signature_row.to_event_signature() else {
-                continue;
-            };
-            if verify_event_signature(&event, &signature, &authority.trusted_keys)
-                != VerificationStatus::Verified
-                || !actor_matches(&authority.source_dispatch_signer, &signature.signer)
-            {
-                continue;
             }
             if resolved.replace(event.id).is_some() {
                 return Err(governed_dispatch_v5_admission_reconciliation_required(
