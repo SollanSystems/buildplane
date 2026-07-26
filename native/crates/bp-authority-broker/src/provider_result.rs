@@ -3,8 +3,10 @@ use crate::{GatewayCompletion, PrivateModelCapability};
 use bp_ledger::error::LedgerError;
 use bp_ledger::payload::activity_claim::ActivityResultOutcomeV1;
 use bp_ledger::payload::model_evidence::{
-    model_provider_result_document_v1_bytes, model_result_evidence_document_v1_bytes,
-    ModelProviderCompletionV1, ModelProviderResultDocumentV1, ModelProviderV1,
+    model_provider_result_document_v1_bytes, model_provider_unknown_evidence_document_v1_bytes,
+    model_result_evidence_document_v1_bytes,
+    parse_verified_model_provider_unknown_evidence_document_v1, ModelProviderCompletionV1,
+    ModelProviderResultDocumentV1, ModelProviderUnknownEvidenceDocumentV1, ModelProviderV1,
     ModelResultEvidenceDocumentV1, VerifiedModelRequestEvidenceDocumentV1,
 };
 use bp_ledger::payload::trust_spine::{
@@ -138,6 +140,51 @@ impl<'a> ProviderResultWriterV1<'a> {
             evidence_digest: evidence_ref.digest().to_string(),
             evidence_ref: evidence_ref.to_cas_ref(),
         })
+    }
+
+    pub(crate) fn persist_unknown(
+        &self,
+        capability: &PrivateModelCapability,
+        authorization_digest: &str,
+        model_request: &VerifiedModelRequestEvidenceDocumentV1,
+    ) -> Result<GatewayCompletion, LedgerError> {
+        let binding = &model_request.document().binding;
+        let expected_provider = match model_request
+            .document()
+            .normalized_provider_request
+            .provider
+        {
+            ModelProviderV1::Anthropic => "anthropic",
+            ModelProviderV1::Openai => "openai",
+        };
+        let provider_request_id = format!("{expected_provider}:{}", binding.action_id);
+        if capability.run_id.to_string() != binding.run_id
+            || capability.dispatch_event_id != binding.dispatch_event_ref
+            || capability.action_request_event_id != binding.action_request_event_ref
+            || capability.execution_role != binding.execution_role
+        {
+            return Err(invalid(
+                "unknown provider result authority does not reproduce the verified capability",
+            ));
+        }
+        let evidence = ModelProviderUnknownEvidenceDocumentV1::new(
+            binding.action_id.clone(),
+            provider_request_id,
+            model_request.document().model_request_digest.clone(),
+            capability.authorization_ref.clone(),
+            authorization_digest.into(),
+        )?;
+        let bytes = model_provider_unknown_evidence_document_v1_bytes(&evidence)?;
+        let reference = self.cas.put_canonical_bytes(&bytes)?;
+        parse_verified_model_provider_unknown_evidence_document_v1(
+            &bytes,
+            &reference.to_cas_ref(),
+            reference.digest(),
+        )?;
+        Ok(GatewayCompletion::unknown(
+            reference.digest().into(),
+            reference.to_cas_ref(),
+        ))
     }
 }
 

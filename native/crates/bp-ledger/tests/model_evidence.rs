@@ -7,10 +7,11 @@
 use bp_ledger::id::EventId;
 use bp_ledger::payload::model_evidence::{
     canonical_model_action_input_v1_bytes, derive_model_action_scope_constraints_v1,
-    model_provider_result_document_v1_bytes, model_request_evidence_document_v1_bytes,
-    model_request_evidence_v1_descriptor, model_result_evidence_document_v1_bytes,
-    parse_verified_canonical_model_action_input_v1,
+    model_provider_result_document_v1_bytes, model_provider_unknown_evidence_document_v1_bytes,
+    model_request_evidence_document_v1_bytes, model_request_evidence_v1_descriptor,
+    model_result_evidence_document_v1_bytes, parse_verified_canonical_model_action_input_v1,
     parse_verified_model_provider_result_document_v1,
+    parse_verified_model_provider_unknown_evidence_document_v1,
     parse_verified_model_request_evidence_document_v1,
     parse_verified_model_result_evidence_document_v1,
     parse_verified_provider_token_preflight_input_v1,
@@ -22,11 +23,11 @@ use bp_ledger::payload::model_evidence::{
     verify_model_request_evidence_matches_canonical_input,
     verify_trust_scope_evidence_matches_model_request, CanonicalModelActionInputV1,
     CredentialFreeNormalizedModelRequestV1, ModelActionEvidenceBindingV1,
-    ModelProviderCompletionV1, ModelProviderResultDocumentV1, ModelProviderV1,
-    ModelRedactionCommitmentV1, ModelRequestEvidenceDocumentV1, ModelResultEvidenceDocumentV1,
-    ModelToolCapabilityCommitmentV1, ModelToolCapabilityKindV1, ProviderTokenPreflightInputV1,
-    ProviderTokenPreflightResultV1, ProviderTokenPreflightUnknownEvidenceV1,
-    TrustScopeEvidenceDocumentV1,
+    ModelProviderCompletionV1, ModelProviderResultDocumentV1,
+    ModelProviderUnknownEvidenceDocumentV1, ModelProviderV1, ModelRedactionCommitmentV1,
+    ModelRequestEvidenceDocumentV1, ModelResultEvidenceDocumentV1, ModelToolCapabilityCommitmentV1,
+    ModelToolCapabilityKindV1, ProviderTokenPreflightInputV1, ProviderTokenPreflightResultV1,
+    ProviderTokenPreflightUnknownEvidenceV1, TrustScopeEvidenceDocumentV1,
 };
 use bp_ledger::payload::trust_spine::{
     ActionKindV1, ExecutionRoleV1, ReviewDecisionV1, ReviewFindingSeverityV1, ReviewFindingV1,
@@ -455,4 +456,47 @@ fn model_provider_result_is_closed_and_role_candidate_manifest_bound() {
         unknown_ref.digest(),
     )
     .is_err());
+}
+
+#[test]
+fn model_provider_unknown_evidence_is_closed_canonical_and_authority_bound() {
+    let temp = tempfile::tempdir().expect("temporary CAS root");
+    let cas = Cas::open(temp.path()).expect("open CAS");
+    let evidence = ModelProviderUnknownEvidenceDocumentV1::new(
+        "workflow-1:unit-1:attempt-1:model".into(),
+        "anthropic:workflow-1:unit-1:attempt-1:model".into(),
+        DIGEST_A.into(),
+        "model-auth:v2:workflow-1:unit-1".into(),
+        DIGEST_B.into(),
+    )
+    .expect("closed unknown evidence");
+    let bytes = model_provider_unknown_evidence_document_v1_bytes(&evidence)
+        .expect("canonical unknown evidence bytes");
+    let reference = cas
+        .put_canonical_bytes(&bytes)
+        .expect("store unknown evidence");
+    let verified = parse_verified_model_provider_unknown_evidence_document_v1(
+        &bytes,
+        &reference.to_cas_ref(),
+        reference.digest(),
+    )
+    .expect("verified unknown evidence");
+    assert_eq!(verified.document(), &evidence);
+    assert_eq!(verified.reference(), &reference);
+
+    let mut expanded = serde_json::to_value(&evidence).expect("unknown evidence JSON");
+    expanded["provider_error"] = json!("secret-bearing transport error");
+    let expanded_bytes = serde_json::to_vec(&expanded).expect("expanded bytes");
+    let expanded_ref = cas
+        .put_canonical_bytes(&expanded_bytes)
+        .expect("store expanded bytes");
+    assert!(
+        parse_verified_model_provider_unknown_evidence_document_v1(
+            &expanded_bytes,
+            &expanded_ref.to_cas_ref(),
+            expanded_ref.digest(),
+        )
+        .is_err(),
+        "provider error details and unknown fields must fail closed"
+    );
 }

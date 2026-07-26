@@ -1,10 +1,11 @@
 use crate::provider_request::BoundProviderRequestV1;
 use crate::provider_result::ProviderResultWriterV1;
-use crate::PrivateModelCapability;
+use crate::{PrivateModelCapability, ProviderExecutionAuthorityV1};
 use bp_ledger::payload::model_evidence::{
     canonical_model_action_input_v1_bytes, model_request_evidence_document_v1_bytes,
     model_request_evidence_v1_descriptor, parse_verified_canonical_model_action_input_v1,
     parse_verified_model_provider_result_document_v1,
+    parse_verified_model_provider_unknown_evidence_document_v1,
     parse_verified_model_request_evidence_document_v1,
     parse_verified_model_result_evidence_document_v1, CanonicalModelActionInputV1,
     CredentialFreeNormalizedModelRequestV1, ModelActionEvidenceBindingV1, ModelProviderV1,
@@ -127,6 +128,7 @@ fn provider_result_writer_persists_exact_result_and_evidence_objects() {
         execution_role: ExecutionRoleV1::Implementer,
         lease_id: "lease-1".into(),
         authorization_ref: "model-auth:v2:run-1:action-1".into(),
+        provider_authority: ProviderExecutionAuthorityV1::synthetic_for_test(),
     };
     let completion = ProviderCompletionV1::Implementer(ProviderImplementerCompletionV1 {
         schema_version: 1,
@@ -154,6 +156,23 @@ fn provider_result_writer_persists_exact_result_and_evidence_objects() {
     assert_eq!(
         result.document().worker_manifest_digest,
         binding.worker_manifest_digest
+    );
+
+    let unknown = ProviderResultWriterV1::new(&cas)
+        .persist_unknown(&capability, DIGEST_C, &verified_model)
+        .expect("persist paired unknown evidence");
+    let unknown_bytes = cas
+        .get_verified_canonical_bytes(&unknown.evidence_ref, &unknown.evidence_digest)
+        .expect("load unknown evidence");
+    let unknown_evidence = parse_verified_model_provider_unknown_evidence_document_v1(
+        &unknown_bytes,
+        &unknown.evidence_ref,
+        &unknown.evidence_digest,
+    )
+    .expect("verify unknown evidence");
+    assert_eq!(
+        unknown_evidence.document().authorization_ref,
+        capability.authorization_ref
     );
 
     let evidence_bytes = cas

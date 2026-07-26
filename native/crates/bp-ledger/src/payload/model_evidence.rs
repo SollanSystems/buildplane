@@ -68,6 +68,7 @@ pub const PROVIDER_TOKEN_PREFLIGHT_RESULT_V1_SCHEMA_VERSION: u32 = 1;
 pub const PROVIDER_TOKEN_PREFLIGHT_UNKNOWN_EVIDENCE_V1_SCHEMA_VERSION: u32 = 1;
 pub const MODEL_RESULT_EVIDENCE_DOCUMENT_V1_SCHEMA_VERSION: u32 = 1;
 pub const MODEL_PROVIDER_RESULT_DOCUMENT_V1_SCHEMA_VERSION: u32 = 1;
+pub const MODEL_PROVIDER_UNKNOWN_EVIDENCE_DOCUMENT_V1_SCHEMA_VERSION: u32 = 1;
 
 /// Only the API/SDK providers admitted by the governed worker lane.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -304,6 +305,23 @@ pub struct ModelResultEvidenceDocumentV1 {
     pub redactions: Vec<ModelRedactionCommitmentV1>,
 }
 
+/// Canonical evidence for a model provider effect whose terminal result cannot
+/// be proven. It contains only signed-authority bindings and a closed failure
+/// class; provider error text, response bytes, credentials, and headers are
+/// deliberately excluded.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelProviderUnknownEvidenceDocumentV1 {
+    pub schema_version: u32,
+    pub outcome: String,
+    pub action_id: String,
+    pub provider_request_id: String,
+    pub model_request_digest: String,
+    pub authorization_ref: String,
+    pub authorization_digest: String,
+    pub failure_class: String,
+}
+
 /// Normalized semantic completion stored inside a provider-result CAS object.
 /// The provider-specific wire response never enters this document.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -383,6 +401,12 @@ pub struct VerifiedProviderTokenPreflightUnknownEvidenceV1 {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VerifiedModelResultEvidenceDocumentV1 {
     document: ModelResultEvidenceDocumentV1,
+    reference: CanonicalCasRef,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VerifiedModelProviderUnknownEvidenceDocumentV1 {
+    document: ModelProviderUnknownEvidenceDocumentV1,
     reference: CanonicalCasRef,
 }
 
@@ -604,6 +628,55 @@ impl ModelResultEvidenceDocumentV1 {
             &self.result_digest,
         )?;
         validate_redaction_commitments(&self.redactions)?;
+        Ok(())
+    }
+}
+
+impl ModelProviderUnknownEvidenceDocumentV1 {
+    pub fn new(
+        action_id: String,
+        provider_request_id: String,
+        model_request_digest: String,
+        authorization_ref: String,
+        authorization_digest: String,
+    ) -> Result<Self> {
+        let document = Self {
+            schema_version: MODEL_PROVIDER_UNKNOWN_EVIDENCE_DOCUMENT_V1_SCHEMA_VERSION,
+            outcome: "unknown".into(),
+            action_id,
+            provider_request_id,
+            model_request_digest,
+            authorization_ref,
+            authorization_digest,
+            failure_class: "provider_effect_unknown".into(),
+        };
+        document.validate()?;
+        Ok(document)
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self.schema_version != MODEL_PROVIDER_UNKNOWN_EVIDENCE_DOCUMENT_V1_SCHEMA_VERSION
+            || self.outcome != "unknown"
+            || self.failure_class != "provider_effect_unknown"
+        {
+            return Err(invalid(
+                "model_provider_unknown_evidence_document_v1",
+                "unknown evidence has an unsupported schema or closed status",
+            ));
+        }
+        validate_identifier("action_id", &self.action_id, MAX_BINDING_TEXT_BYTES)?;
+        validate_identifier(
+            "provider_request_id",
+            &self.provider_request_id,
+            MAX_BINDING_TEXT_BYTES,
+        )?;
+        validate_identifier(
+            "authorization_ref",
+            &self.authorization_ref,
+            MAX_BINDING_TEXT_BYTES,
+        )?;
+        validate_sha256_digest("model_request_digest", &self.model_request_digest)?;
+        validate_sha256_digest("authorization_digest", &self.authorization_digest)?;
         Ok(())
     }
 }
@@ -1157,6 +1230,16 @@ impl VerifiedProviderTokenPreflightUnknownEvidenceV1 {
     }
 }
 
+impl VerifiedModelProviderUnknownEvidenceDocumentV1 {
+    pub fn document(&self) -> &ModelProviderUnknownEvidenceDocumentV1 {
+        &self.document
+    }
+
+    pub fn reference(&self) -> &CanonicalCasRef {
+        &self.reference
+    }
+}
+
 impl VerifiedModelResultEvidenceDocumentV1 {
     pub fn document(&self) -> &ModelResultEvidenceDocumentV1 {
         &self.document
@@ -1310,6 +1393,13 @@ pub fn model_result_evidence_document_v1_bytes(
 ) -> Result<Vec<u8>> {
     document.validate()?;
     canonical_document_bytes(document, "model_result_evidence_document_v1")
+}
+
+pub fn model_provider_unknown_evidence_document_v1_bytes(
+    document: &ModelProviderUnknownEvidenceDocumentV1,
+) -> Result<Vec<u8>> {
+    document.validate()?;
+    canonical_document_bytes(document, "model_provider_unknown_evidence_document_v1")
 }
 
 pub fn model_provider_result_document_v1_bytes(
@@ -1473,6 +1563,31 @@ pub fn parse_verified_model_result_evidence_document_v1(
     let canonical = model_result_evidence_document_v1_bytes(&document)?;
     ensure_exact_canonical_bytes("model_result_evidence_document_v1", bytes, &canonical)?;
     Ok(VerifiedModelResultEvidenceDocumentV1 {
+        document,
+        reference,
+    })
+}
+
+pub fn parse_verified_model_provider_unknown_evidence_document_v1(
+    bytes: &[u8],
+    cas_ref: &str,
+    digest: &str,
+) -> Result<VerifiedModelProviderUnknownEvidenceDocumentV1> {
+    let reference = verify_raw_cas_bytes(
+        "model_provider_unknown_evidence_document_v1",
+        bytes,
+        cas_ref,
+        digest,
+    )?;
+    let document: ModelProviderUnknownEvidenceDocumentV1 = serde_json::from_slice(bytes)?;
+    document.validate()?;
+    let canonical = model_provider_unknown_evidence_document_v1_bytes(&document)?;
+    ensure_exact_canonical_bytes(
+        "model_provider_unknown_evidence_document_v1",
+        bytes,
+        &canonical,
+    )?;
+    Ok(VerifiedModelProviderUnknownEvidenceDocumentV1 {
         document,
         reference,
     })

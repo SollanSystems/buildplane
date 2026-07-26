@@ -17,6 +17,7 @@ use crate::payload::model_evidence::{
     derive_model_action_scope_constraints_v1, model_request_evidence_document_v1_bytes,
     model_request_evidence_v1_descriptor, parse_verified_canonical_model_action_input_v1,
     parse_verified_model_provider_result_document_v1,
+    parse_verified_model_provider_unknown_evidence_document_v1,
     parse_verified_model_request_evidence_document_v1,
     parse_verified_model_result_evidence_document_v1,
     parse_verified_provider_token_preflight_input_v1,
@@ -643,15 +644,54 @@ pub enum ProviderTokenPreflightActionIssueDispositionV1 {
 pub struct VerifiedProviderTokenPreflightRecordingV1 {
     input: VerifiedProviderTokenPreflightInputV1,
     result: VerifiedProviderTokenPreflightResultV1,
+    dispatch: DispatchEnvelopeV3,
+    model_request: VerifiedModelRequestEvidenceDocumentV1,
+    trust_scope: VerifiedTrustScopeEvidenceDocumentV1,
+    candidate_binding: Option<ModelActionCandidateBindingV1>,
 }
 
 impl VerifiedProviderTokenPreflightRecordingV1 {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn from_verified_parts_for_tests(
+        input: VerifiedProviderTokenPreflightInputV1,
+        result: VerifiedProviderTokenPreflightResultV1,
+        dispatch: DispatchEnvelopeV3,
+        model_request: VerifiedModelRequestEvidenceDocumentV1,
+        trust_scope: VerifiedTrustScopeEvidenceDocumentV1,
+        candidate_binding: Option<ModelActionCandidateBindingV1>,
+    ) -> Self {
+        Self {
+            input,
+            result,
+            dispatch,
+            model_request,
+            trust_scope,
+            candidate_binding,
+        }
+    }
+
     pub fn input(&self) -> &VerifiedProviderTokenPreflightInputV1 {
         &self.input
     }
 
     pub fn result(&self) -> &VerifiedProviderTokenPreflightResultV1 {
         &self.result
+    }
+
+    pub fn dispatch(&self) -> &DispatchEnvelopeV3 {
+        &self.dispatch
+    }
+
+    pub fn model_request(&self) -> &VerifiedModelRequestEvidenceDocumentV1 {
+        &self.model_request
+    }
+
+    pub fn trust_scope(&self) -> &VerifiedTrustScopeEvidenceDocumentV1 {
+        &self.trust_scope
+    }
+
+    pub fn candidate_binding(&self) -> Option<&ModelActionCandidateBindingV1> {
+        self.candidate_binding.as_ref()
     }
 }
 
@@ -3549,6 +3589,15 @@ impl SqliteStore {
             &model_request_bytes,
             &intent.model_request_evidence,
         )?;
+        let trust_scope_bytes = cas.get_verified_canonical_bytes(
+            &intent.trust_scope_evidence.cas_ref,
+            &intent.trust_scope_evidence.digest,
+        )?;
+        let trust_scope = parse_verified_trust_scope_evidence_document_v1(
+            &trust_scope_bytes,
+            &intent.trust_scope_evidence,
+        )?;
+        verify_trust_scope_evidence_matches_model_request(trust_scope.document(), &model_request)?;
 
         let dispatch_event = load_verified_authority_event(
             &self.conn,
@@ -3665,7 +3714,14 @@ impl SqliteStore {
             &result_digest,
             &input,
         )?;
-        Ok(VerifiedProviderTokenPreflightRecordingV1 { input, result })
+        Ok(VerifiedProviderTokenPreflightRecordingV1 {
+            input,
+            result,
+            dispatch,
+            model_request,
+            trust_scope,
+            candidate_binding: intent.candidate_binding,
+        })
     }
 
     /// Atomically create (or resolve) the only provider-effect authority for
@@ -4166,6 +4222,47 @@ impl SqliteStore {
             {
                 return Err(LedgerError::ActivityClaimAuthorityRejected {
                     reason: "successful governed model evidence does not bind the exact signed action, authorization, model request, and result".into(),
+                });
+            }
+        } else if request.outcome == ActivityResultOutcomeV1::Unknown {
+            let evidence_bytes =
+                cas.get_verified_canonical_bytes(&request.evidence_ref, &request.evidence_digest)?;
+            let evidence = parse_verified_model_provider_unknown_evidence_document_v1(
+                &evidence_bytes,
+                &request.evidence_ref,
+                &request.evidence_digest,
+            )?;
+            let model_request_bytes = cas.get_verified_canonical_bytes(
+                &verified.intent.model_request_evidence.cas_ref,
+                &verified.intent.model_request_evidence.digest,
+            )?;
+            let model_request = parse_verified_model_request_evidence_document_v1(
+                &model_request_bytes,
+                &verified.intent.model_request_evidence,
+            )?;
+            let expected_provider_request_id = format!(
+                "{}:{}",
+                match model_request
+                    .document()
+                    .normalized_provider_request
+                    .provider
+                {
+                    ModelProviderV1::Anthropic => "anthropic",
+                    ModelProviderV1::Openai => "openai",
+                },
+                verified.intent.action_id
+            );
+            let evidence = evidence.document();
+            if request.result_digest.is_some()
+                || request.result_ref.is_some()
+                || evidence.action_id != verified.intent.action_id
+                || evidence.provider_request_id != expected_provider_request_id
+                || evidence.model_request_digest != model_request.document().model_request_digest
+                || evidence.authorization_ref != verified.authorization.authorization_ref
+                || evidence.authorization_digest != verified.authorization.authorization_digest
+            {
+                return Err(LedgerError::ActivityClaimAuthorityRejected {
+                    reason: "unknown governed model evidence does not bind the exact signed action, authorization, model request, and provider route".into(),
                 });
             }
         }

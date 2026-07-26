@@ -42,6 +42,7 @@ use thiserror::Error;
 
 #[allow(dead_code)]
 mod admission_protocol;
+mod anthropic_model_gateway;
 mod confinement;
 #[allow(dead_code)]
 mod dispatch_admission;
@@ -914,6 +915,33 @@ pub(crate) struct PrivateModelCapability {
     execution_role: bp_ledger::payload::trust_spine::ExecutionRoleV1,
     lease_id: String,
     authorization_ref: String,
+    provider_authority: ProviderExecutionAuthorityV1,
+}
+
+pub(crate) enum ProviderExecutionAuthorityV1 {
+    Verified {
+        authorization_digest: String,
+        preflight: bp_ledger::storage::sqlite::VerifiedProviderTokenPreflightRecordingV1,
+    },
+    #[cfg(test)]
+    Synthetic,
+}
+
+impl ProviderExecutionAuthorityV1 {
+    fn verified(
+        authorization_digest: String,
+        preflight: bp_ledger::storage::sqlite::VerifiedProviderTokenPreflightRecordingV1,
+    ) -> Self {
+        Self::Verified {
+            authorization_digest,
+            preflight,
+        }
+    }
+
+    #[cfg(test)]
+    fn synthetic_for_test() -> Self {
+        Self::Synthetic
+    }
 }
 
 impl PrivateModelCapability {
@@ -993,6 +1021,7 @@ pub(crate) enum AuthorityGrant {
         run_id: RunId,
         lease_id: String,
         authorization_ref: String,
+        provider_authority: ProviderExecutionAuthorityV1,
     },
     Pending {
         run_id: RunId,
@@ -1142,6 +1171,7 @@ where
                 run_id,
                 lease_id,
                 authorization_ref,
+                provider_authority,
             } if run_id == self.run_id && !replay_already_claimed => PrivateModelCapability {
                 run_id,
                 dispatch_event_id: request.dispatch_event_id,
@@ -1149,6 +1179,7 @@ where
                 execution_role: self.expected_role,
                 lease_id,
                 authorization_ref,
+                provider_authority,
             },
             AuthorityGrant::Pending { run_id } if run_id == self.run_id => {
                 return Ok(BrokerModelActionStatus::Pending)
@@ -1310,7 +1341,8 @@ impl AuthorityBackend for LedgerAuthorityBackend<'_> {
         execution_role: bp_ledger::payload::trust_spine::ExecutionRoleV1,
         lease_duration_ms: u64,
     ) -> Result<AuthorityGrant, AuthorityBackendError> {
-        self.store
+        let preflight = self
+            .store
             .verify_recorded_provider_token_preflight_for_model_action_v1(
                 &ProviderTokenPreflightForModelActionRequestV1 {
                     run_id,
@@ -1358,11 +1390,16 @@ impl AuthorityBackend for LedgerAuthorityBackend<'_> {
             GovernedModelActionAuthorizeAndClaimDispositionV1::Granted {
                 lease_id,
                 authorization_ref,
+                authorization_digest,
                 ..
             } => AuthorityGrant::Granted {
                 run_id,
                 lease_id,
                 authorization_ref,
+                provider_authority: ProviderExecutionAuthorityV1::verified(
+                    authorization_digest,
+                    preflight,
+                ),
             },
             GovernedModelActionAuthorizeAndClaimDispositionV1::Pending { .. } => {
                 AuthorityGrant::Pending { run_id }

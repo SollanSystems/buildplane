@@ -5,9 +5,11 @@
 //! signed ledger, existing CAS, and Anthropic credential deployment all pass.
 //! No listener or worker authority is granted by this module.
 
+use crate::anthropic_model_gateway::AnthropicModelGatewayV1;
 use crate::confinement::BrokerHostConfinementAttestationV1;
 use crate::governed_reviewer_authority::{
-    open_governed_reviewer_session_from_replay_v1, OpenedGovernedReviewerSessionV1,
+    execute_governed_reviewer_run_v1, open_governed_reviewer_session_from_replay_v1,
+    OpenedGovernedReviewerSessionV1,
 };
 use crate::governed_session_startup::{
     GovernedSessionHostStartupErrorV1, GovernedSessionHostStartupV1, GovernedSessionProviderLaneV1,
@@ -36,12 +38,18 @@ use crate::provider_preflight::{
 use crate::rootless_oci::{
     attest_rootless_oci_v1, RootlessOciAttestationV1, RootlessOciStartupErrorV1,
 };
-use crate::{BrokerModelActionRequest, ReplaySnapshotVerifier, TrustedReplayVerifier};
+use crate::{
+    BrokerModelActionRequest, BrokerModelActionStatus, BrokerModelAuthority, LeasePolicy,
+    LedgerAuthorityBackend, ReplaySnapshotVerifier, TrustedReplayVerifier,
+};
 use async_trait::async_trait;
 use bp_ledger::payload::model_evidence::ModelProviderV1;
 use bp_ledger::payload::trust_spine::ExecutionRoleV1;
 use bp_provider_anthropic::{AnthropicHttpTransportV1, AnthropicProvider};
-use bp_provider_sdk::{ProviderError, ProviderTokenCountRequestV1, ProviderTokenCounterV1};
+use bp_provider_sdk::{
+    ProviderAdapter, ProviderError, ProviderRequest, ProviderResponse, ProviderTokenCountRequestV1,
+    ProviderTokenCounterV1,
+};
 use std::collections::BTreeSet;
 use thiserror::Error;
 
@@ -51,24 +59,25 @@ pub(crate) struct ProtectedGovernedSessionHostStateV1 {
     signing_keys: ProtectedGovernedSessionSigningKeysV1,
     ledger: ProtectedPromotionDecisionLedgerV1,
     cas: ProtectedV5CasV1,
-    anthropic_counter: ProtectedAnthropicCounterV1,
+    anthropic_provider: ProtectedAnthropicProviderV1,
+    provider_runtime: tokio::runtime::Runtime,
 }
 
 #[derive(Clone)]
-struct ProtectedAnthropicCounterV1 {
+struct ProtectedAnthropicProviderV1 {
     provider: AnthropicProvider,
     allowed_models: BTreeSet<String>,
     allowed_worker_manifest_digests: BTreeSet<String>,
 }
 
 #[async_trait]
-impl ProviderTokenCounterV1 for ProtectedAnthropicCounterV1 {
+impl ProviderTokenCounterV1 for ProtectedAnthropicProviderV1 {
     fn id(&self) -> &'static str {
         "anthropic"
     }
 
     async fn available(&self) -> Result<bool, ProviderError> {
-        self.provider.available().await
+        ProviderTokenCounterV1::available(&self.provider).await
     }
 
     async fn count_input_tokens(
@@ -85,6 +94,30 @@ impl ProviderTokenCounterV1 for ProtectedAnthropicCounterV1 {
             ));
         }
         self.provider.count_input_tokens(request).await
+    }
+}
+
+#[async_trait]
+impl ProviderAdapter for ProtectedAnthropicProviderV1 {
+    fn id(&self) -> &'static str {
+        "anthropic"
+    }
+
+    async fn available(&self) -> Result<bool, ProviderError> {
+        ProviderAdapter::available(&self.provider).await
+    }
+
+    async fn complete(&self, request: &ProviderRequest) -> Result<ProviderResponse, ProviderError> {
+        if !self.allowed_models.contains(&request.model)
+            || !self
+                .allowed_worker_manifest_digests
+                .contains(&request.worker_manifest_digest)
+        {
+            return Err(ProviderError::InvalidContract(
+                "provider request is outside protected host allowlists".into(),
+            ));
+        }
+        self.provider.complete(request).await
     }
 }
 
@@ -110,7 +143,7 @@ impl ProtectedGovernedSessionHostStateV1 {
     }
 
     pub(crate) fn anthropic_counter(&self) -> &impl ProviderTokenCounterV1 {
-        &self.anthropic_counter
+        &self.anthropic_provider
     }
 
     /// Prepare the separately recorded token-count activity for one exact
@@ -118,7 +151,7 @@ impl ProtectedGovernedSessionHostStateV1 {
     /// events. Role, provider, model, prompts, manifests, candidate binding,
     /// activity identity, budgets, and evidence are reconstructed from trusted
     /// replay and strict CAS documents inside the protected host.
-    pub(crate) async fn prepare_anthropic_provider(
+    pub(crate) fn prepare_anthropic_provider(
         &self,
         request: BrokerModelActionRequest,
     ) -> Result<ProviderTokenPreflightStatusV1, ProtectedGovernedSessionProviderErrorV1> {
@@ -157,7 +190,7 @@ impl ProtectedGovernedSessionHostStateV1 {
         .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)?;
         let evidence_writer = CasProviderTokenPreflightEvidenceWriterV1::new(self.cas.cas());
         let gateway = CredentialProviderTokenPreflightGatewayV1::new(
-            self.anthropic_counter.clone(),
+            self.anthropic_provider.clone(),
             evidence_writer,
         );
         let authority =
@@ -166,8 +199,8 @@ impl ProtectedGovernedSessionHostStateV1 {
             &self.session_startup,
             authority,
         );
-        lane.prepare_provider()
-            .await
+        self.provider_runtime
+            .block_on(lane.prepare_provider())
             .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)
     }
 
@@ -191,6 +224,90 @@ impl ProtectedGovernedSessionHostStateV1 {
             request_id,
         )
         .map_err(|_| ProtectedGovernedSessionProviderErrorV1::TrustedReplay)
+    }
+
+    pub(crate) fn run_reviewer_session(
+        &self,
+        recovery_ref: &str,
+        session_ref: &str,
+    ) -> Result<BrokerModelActionStatus, ProtectedGovernedSessionProviderErrorV1> {
+        let config = self.validated_startup.config();
+        let snapshot = bp_replay::TrustedGovernedRecoverySnapshot::open_bounded_v1(
+            &config.run_id.to_string(),
+            self.ledger.recovery_database_path(),
+            &config.replay_authorities,
+            &config.claim_signer,
+        )
+        .map_err(|_| ProtectedGovernedSessionProviderErrorV1::TrustedReplay)?;
+        let evidence = crate::governed_reviewer_authority::resolve_governed_reviewer_run_v1(
+            &snapshot,
+            &self.signing_keys.broker_identity().verifying_key(),
+            recovery_ref,
+            session_ref,
+        )
+        .map_err(|_| ProtectedGovernedSessionProviderErrorV1::TrustedReplay)?;
+        let request = BrokerModelActionRequest {
+            dispatch_event_id: evidence.reviewer_dispatch_event_ref,
+            action_request_event_id: evidence.reviewer_action_request_event_ref,
+        };
+        match self.prepare_anthropic_provider(request.clone())? {
+            ProviderTokenPreflightStatusV1::Recorded => {}
+            ProviderTokenPreflightStatusV1::Pending => return Ok(BrokerModelActionStatus::Pending),
+            ProviderTokenPreflightStatusV1::Failed => return Ok(BrokerModelActionStatus::Failed),
+            ProviderTokenPreflightStatusV1::LeaseExpired => {
+                return Ok(BrokerModelActionStatus::LeaseExpired)
+            }
+            ProviderTokenPreflightStatusV1::ReconciliationRequired => {
+                return Ok(BrokerModelActionStatus::ReconciliationRequired)
+            }
+        }
+
+        let verifier = ReplaySnapshotVerifier::from_prevalidated_startup(
+            self.ledger.recovery_database_path(),
+            &config.replay_authorities,
+            &config.claim_signer,
+        );
+        let backend = LedgerAuthorityBackend::from_prevalidated_startup(
+            self.ledger.store(),
+            self.cas.cas(),
+            &config.activity_authority,
+            self.signing_keys.claim(),
+            &config.claim_signer,
+        );
+        let gateway = AnthropicModelGatewayV1::new(
+            self.anthropic_provider.clone(),
+            self.cas.cas(),
+            &self.provider_runtime,
+        );
+        let mut authority = BrokerModelAuthority::new_for_role(
+            config.run_id,
+            evidence.execution_role,
+            verifier,
+            backend,
+            gateway,
+            LeasePolicy::from_startup_config(config.model_action_lease_ms)
+                .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)?,
+        )
+        .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)?;
+        // Provider preflight appends to the tape. Reopen the bounded recovery
+        // view before crossing the model-effect boundary so a cancellation or
+        // authority transition recorded during preflight cannot be hidden by
+        // the older snapshot used to resolve the session identity.
+        let execution_snapshot = bp_replay::TrustedGovernedRecoverySnapshot::open_bounded_v1(
+            &config.run_id.to_string(),
+            self.ledger.recovery_database_path(),
+            &config.replay_authorities,
+            &config.claim_signer,
+        )
+        .map_err(|_| ProtectedGovernedSessionProviderErrorV1::TrustedReplay)?;
+        execute_governed_reviewer_run_v1(
+            &execution_snapshot,
+            &self.signing_keys.broker_identity().verifying_key(),
+            recovery_ref,
+            session_ref,
+            &mut authority,
+        )
+        .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)
     }
 }
 
@@ -218,6 +335,8 @@ pub(crate) enum ProtectedGovernedSessionHostStartupErrorV1 {
     Cas,
     #[error("protected governed-session provider credential is unavailable or unsafe")]
     Credential,
+    #[error("protected governed-session provider runtime is unavailable")]
+    ProviderRuntime,
     #[error("protected governed-session startup proof is invalid")]
     StartupProof,
 }
@@ -277,11 +396,15 @@ fn compose_prevalidated_governed_session_host_v1(
         .iter()
         .cloned()
         .collect();
-    let anthropic_counter = ProtectedAnthropicCounterV1 {
+    let anthropic_provider = ProtectedAnthropicProviderV1 {
         provider: AnthropicProvider::new(anthropic_transport),
         allowed_models,
         allowed_worker_manifest_digests,
     };
+    let provider_runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|_| ProtectedGovernedSessionHostStartupErrorV1::ProviderRuntime)?;
 
     Ok(ProtectedGovernedSessionHostStateV1 {
         validated_startup,
@@ -289,7 +412,8 @@ fn compose_prevalidated_governed_session_host_v1(
         signing_keys,
         ledger,
         cas,
-        anthropic_counter,
+        anthropic_provider,
+        provider_runtime,
     })
 }
 
@@ -627,14 +751,40 @@ mod tests {
             oci_attestation(),
         )
         .expect("protected host");
-        let result = block_on(state.prepare_anthropic_provider(BrokerModelActionRequest {
+        let result = state.prepare_anthropic_provider(BrokerModelActionRequest {
             dispatch_event_id: bp_ledger::EventId::new(),
             action_request_event_id: bp_ledger::EventId::new(),
-        }));
+        });
         assert_eq!(
             result,
             Err(ProtectedGovernedSessionProviderErrorV1::TrustedReplay)
         );
         assert_eq!(state.ledger().store().event_count().expect("ledger"), 0);
+    }
+
+    #[test]
+    fn reviewer_run_rejects_unknown_session_before_provider_or_ledger_effect() {
+        let fixture = HostFixture::new();
+        let validated = fixture.validated_startup();
+        let confinement = validated
+            .config()
+            .confinement_policy
+            .attestation_for_same_process_socket_tests();
+        let state = compose_prevalidated_governed_session_host_v1(
+            validated,
+            confinement,
+            oci_attestation(),
+        )
+        .expect("protected host");
+
+        assert_eq!(
+            state.run_reviewer_session("recovery://unknown", "session://unknown"),
+            Err(ProtectedGovernedSessionProviderErrorV1::TrustedReplay)
+        );
+        assert_eq!(
+            state.ledger().store().event_count().expect("ledger"),
+            0,
+            "an untrusted session identity must not reach token count, model, or ledger effects"
+        );
     }
 }

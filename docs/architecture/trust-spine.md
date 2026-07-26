@@ -650,9 +650,17 @@ conversion from the SDK's already-parsed semantic completion into those two CAS
 documents. It rechecks the private capability, verified model request, derived
 provider route/request identity, role, candidate, worker manifest, and native
 authorization before writing first the result and then its evidence envelope.
-The production credential gateway still must compose this writer with provider
-transport and convert every post-capability failure into a paired `unknown`
-terminal result.
+The protected Anthropic completion gateway now composes that writer with the
+host-owned provider transport. The opaque capability retains the exact
+ledger-verified dispatch, model request, trust scope, preflight input/result,
+optional candidate binding, and authorization digest. The gateway reconstructs
+the request solely from that material, strictly parses the closed provider
+completion, and persists success only when every binding still matches. Any
+request-construction, provider, response-parse, or result-persistence failure
+is collapsed to paired canonical `unknown` evidence; raw provider errors and
+response bytes never cross the gateway or enter durable evidence. If even that
+evidence cannot be persisted, the deliberately empty fallback is rejected by
+the ledger and the activity becomes reconciliation-only rather than retryable.
 
 Provider effects receive the same immutable budget boundary as OCI actions.
 The adapter derives `min(expiresAt, issuedAt + maxComputeTimeMs)` once from the
@@ -686,8 +694,8 @@ ledger can now reconstruct those documents from a distinct signed
 claim, and its signed successful result projection. It derives the action
 identity and role from the verified model intent, checks the preflight ceiling
 against the signed dispatch budget, and rejects missing or unrecorded results.
-The remaining authority slice must issue and execute that activity through the
-host gateway. The protected broker's ledger backend now locates the preflight
+The protected host now issues and executes that activity through the
+credential-owning gateway. The protected broker's ledger backend locates the preflight
 from the verified model-action identity and requires its verified recording
 before it asks the ledger for model-provider authority; callers cannot select
 an alternate token-count action. The native ledger now also owns idempotent
@@ -695,8 +703,9 @@ preflight action issuance. It derives and stores the closed CAS input from the
 verified model intent and signed token ceiling, signs one distinct network
 action through the configured action-request authority, rejects
 duplicate/conflicting action records, and reuses the original action after a
-crash or retry. The claim/executor/result composition is still required before
-governed session startup can enter this lane.
+crash or retry. Its claim, counter, evidence, and terminal-result composition
+is active inside governed-session host state; the public listener remains
+disabled until its closed request/response handler is complete.
 The provider SDK now exposes a separate closed token-count request and counter
 interface. The broker reconstructs that request from the same verified
 dispatch, model request, trust scope, preflight input, role-derived response
@@ -758,7 +767,8 @@ unsafe parent-directory modes, invalid header bytes, and values over 8 KiB.
 The bounded read and provider credential allocation are zeroized, errors omit
 secret and path data, and no environment, CLI argument, worker mount, or OCI
 value can select or receive the key. The default Linux host runner still needs
-full authority composition before this lane can be enabled externally.
+the closed session request/response listener before this lane can be enabled
+externally.
 An indeterminate token-count call now produces a closed canonical
 `ProviderTokenPreflightUnknownEvidenceV1` CAS document. The broker immediately
 reopens it through the ledger parser and verifies its exact request, input, and
@@ -791,9 +801,12 @@ profile digest before private custody is opened. The action, claim, and broker
 identity keys, pre-existing signed ledger, pre-existing descriptor-bound CAS, and validated
 Anthropic credential must then all load from the retained authority root.
 Missing or unsafe state yields one closed startup category and no host state.
-This composition still grants no listener or worker authority; the remaining
-host slice must derive each request from trusted replay and construct the
-per-action provider lane without accepting authority fields from the client.
+This composition still grants no listener or worker authority. Its private
+reviewer run path now derives each request from trusted replay, records or
+reuses token preflight, reopens recovery state after that write, constructs the
+role-bound model authority, and invokes the protected Anthropic gateway. The
+remaining host slice is the closed listener/response boundary; it must expose
+only opaque recovery/session references and closed status values.
 Reviewer session opening now follows that rule internally: the opaque recovery
 token exposes only untrusted run and candidate-dispatch routing fields. The
 host locates the candidate in a fully verified recovery snapshot, derives its

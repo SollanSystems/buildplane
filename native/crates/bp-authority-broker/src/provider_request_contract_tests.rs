@@ -1,14 +1,18 @@
+use crate::anthropic_model_gateway::AnthropicModelGatewayV1;
 use crate::provider_preflight::{
     CasProviderTokenPreflightEvidenceWriterV1, PrivateProviderTokenPreflightCapabilityV1,
     ProviderTokenPreflightEvidenceWriterV1,
 };
 use crate::provider_request::{build_provider_request_v1, build_provider_token_count_request_v1};
-use crate::PrivateModelCapability;
+use crate::{CredentialGateway, PrivateModelCapability, ProviderExecutionAuthorityV1};
+use async_trait::async_trait;
 use bp_ledger::id::{EventId, RunId};
 use bp_ledger::payload::model_evidence::{
     canonical_model_action_input_v1_bytes, derive_model_action_scope_constraints_v1,
     model_request_evidence_document_v1_bytes, model_request_evidence_v1_descriptor,
     parse_verified_canonical_model_action_input_v1,
+    parse_verified_model_provider_result_document_v1,
+    parse_verified_model_provider_unknown_evidence_document_v1,
     parse_verified_model_request_evidence_document_v1,
     parse_verified_provider_token_preflight_input_v1,
     parse_verified_provider_token_preflight_result_v1,
@@ -24,11 +28,54 @@ use bp_ledger::payload::trust_spine::{
     DispatchEnvelopeV3, ExecutionRoleV1, TrustTierV1,
 };
 use bp_ledger::storage::cas::Cas;
-use bp_provider_sdk::{provider_response_contract_v1, ProviderExecutionRoleV1};
+use bp_ledger::storage::sqlite::VerifiedProviderTokenPreflightRecordingV1;
+use bp_provider_anthropic::{AnthropicMessageRequestV1, AnthropicProvider, AnthropicTransportV1};
+use bp_provider_sdk::{provider_response_contract_v1, ProviderError, ProviderExecutionRoleV1};
+use serde_json::{json, Value};
 
 const DIGEST_A: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const DIGEST_B: &str = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const DIGEST_C: &str = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+
+#[derive(Clone)]
+struct CompletionTransport {
+    fail: bool,
+}
+
+#[async_trait]
+impl AnthropicTransportV1 for CompletionTransport {
+    async fn available(&self) -> Result<bool, ProviderError> {
+        Ok(true)
+    }
+
+    async fn send_message(
+        &self,
+        request: AnthropicMessageRequestV1,
+        _deadline_unix_ms: i64,
+    ) -> Result<Value, ProviderError> {
+        if self.fail {
+            return Err(ProviderError::Transport(
+                "sensitive provider failure must not cross the gateway".into(),
+            ));
+        }
+        Ok(json!({
+            "id": "msg_test_1",
+            "type": "message",
+            "role": "assistant",
+            "content": [{
+                "type": "text",
+                "text": "{\"schemaVersion\":1,\"outcome\":\"completed\",\"summary\":\"Candidate created.\",\"outputRefs\":[]}"
+            }],
+            "model": request.model,
+            "stop_reason": "end_turn",
+            "stop_sequence": null,
+            "usage": {
+                "input_tokens": 321,
+                "output_tokens": 10
+            }
+        }))
+    }
+}
 
 #[test]
 fn provider_request_is_reconstructed_only_from_exact_verified_evidence() {
@@ -175,6 +222,7 @@ fn provider_request_is_reconstructed_only_from_exact_verified_evidence() {
         execution_role: ExecutionRoleV1::Implementer,
         lease_id: "lease-1".into(),
         authorization_ref: "authorization://1".into(),
+        provider_authority: ProviderExecutionAuthorityV1::synthetic_for_test(),
     };
 
     let token_count_request = build_provider_token_count_request_v1(
@@ -257,6 +305,102 @@ fn provider_request_is_reconstructed_only_from_exact_verified_evidence() {
         response.contract_digest
     );
     assert!(request.request.candidate_digest.is_none());
+
+    let recording = VerifiedProviderTokenPreflightRecordingV1::from_verified_parts_for_tests(
+        verified_preflight.clone(),
+        verified_result.clone(),
+        dispatch.clone(),
+        verified_model.clone(),
+        verified_scope.clone(),
+        None,
+    );
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("provider runtime");
+    let completed_capability = PrivateModelCapability {
+        run_id,
+        dispatch_event_id,
+        action_request_event_id,
+        execution_role: ExecutionRoleV1::Implementer,
+        lease_id: "completion-lease".into(),
+        authorization_ref: "authorization://completion".into(),
+        provider_authority: ProviderExecutionAuthorityV1::verified(
+            DIGEST_C.into(),
+            recording.clone(),
+        ),
+    };
+    let mut completed_gateway = AnthropicModelGatewayV1::new(
+        AnthropicProvider::new(CompletionTransport { fail: false }),
+        &cas,
+        &runtime,
+    );
+    let completed = completed_gateway.invoke(completed_capability);
+    assert_eq!(
+        completed.completion.outcome,
+        bp_ledger::payload::activity_claim::ActivityResultOutcomeV1::Succeeded
+    );
+    let completion_ref = completed
+        .completion
+        .result_ref
+        .as_deref()
+        .expect("provider result ref");
+    let completion_digest = completed
+        .completion
+        .result_digest
+        .as_deref()
+        .expect("provider result digest");
+    let completion_bytes = cas
+        .get_verified_canonical_bytes(completion_ref, completion_digest)
+        .expect("load provider result");
+    parse_verified_model_provider_result_document_v1(
+        &completion_bytes,
+        completion_ref,
+        completion_digest,
+    )
+    .expect("strict provider result");
+
+    let unknown_capability = PrivateModelCapability {
+        run_id,
+        dispatch_event_id,
+        action_request_event_id,
+        execution_role: ExecutionRoleV1::Implementer,
+        lease_id: "unknown-lease".into(),
+        authorization_ref: "authorization://unknown".into(),
+        provider_authority: ProviderExecutionAuthorityV1::verified(DIGEST_C.into(), recording),
+    };
+    let mut failing_gateway = AnthropicModelGatewayV1::new(
+        AnthropicProvider::new(CompletionTransport { fail: true }),
+        &cas,
+        &runtime,
+    );
+    let unknown = failing_gateway.invoke(unknown_capability);
+    assert_eq!(
+        unknown.completion.outcome,
+        bp_ledger::payload::activity_claim::ActivityResultOutcomeV1::Unknown
+    );
+    assert!(unknown.completion.result_ref.is_none());
+    assert!(unknown.completion.result_digest.is_none());
+    let unknown_bytes = cas
+        .get_verified_canonical_bytes(
+            &unknown.completion.evidence_ref,
+            &unknown.completion.evidence_digest,
+        )
+        .expect("load canonical unknown evidence");
+    let unknown_document = parse_verified_model_provider_unknown_evidence_document_v1(
+        &unknown_bytes,
+        &unknown.completion.evidence_ref,
+        &unknown.completion.evidence_digest,
+    )
+    .expect("strict unknown evidence");
+    assert_eq!(
+        unknown_document.document().failure_class,
+        "provider_effect_unknown"
+    );
+    assert!(
+        !String::from_utf8_lossy(&unknown_bytes).contains("sensitive provider failure"),
+        "raw provider failure text must never enter durable evidence"
+    );
 
     let mut substituted_dispatch = dispatch;
     substituted_dispatch.body.budget.max_tokens = Some(15_000);

@@ -46,8 +46,9 @@ use super::{
     BrokerPromotionReconciliationDisposition, BrokerPromotionReconciliationIngressRequest,
     BrokerPromotionReconciliationStartupError, CredentialGateway, GatewayCompletion, LeasePolicy,
     PairedGatewayResult, PrivateModelCapability, ProtectedPromotionDecisionAuthority,
-    ProtectedPromotionReconciliationAuthority, ReplaySnapshotVerifier, ResultDisposition,
-    TrustedReplayBinding, TrustedReplayVerificationError, TrustedReplayVerifier,
+    ProtectedPromotionReconciliationAuthority, ProviderExecutionAuthorityV1,
+    ReplaySnapshotVerifier, ResultDisposition, TrustedReplayBinding,
+    TrustedReplayVerificationError, TrustedReplayVerifier,
 };
 use bp_ledger::canonicalize::canonical_event_hash;
 use bp_ledger::event::Event;
@@ -824,6 +825,7 @@ fn verified_grant_moves_one_private_capability_and_pairs_the_gateway_result() {
             run_id,
             lease_id: "private-lease".into(),
             authorization_ref: "authorization://opaque".into(),
+            provider_authority: ProviderExecutionAuthorityV1::synthetic_for_test(),
         })],
         [Ok(ResultDisposition::Recorded {
             run_id,
@@ -931,6 +933,7 @@ fn checkpointed_sqlite_replay_gate_binds_the_exact_run_dispatch_and_model_action
                 run_id,
                 lease_id: "integration-lease".into(),
                 authorization_ref: "authorization://integration".into(),
+                provider_authority: ProviderExecutionAuthorityV1::synthetic_for_test(),
             })]
             .into_iter()
             .collect(),
@@ -1116,6 +1119,7 @@ fn reviewer_model_authority_accepts_only_startup_selected_reviewer_evidence() {
                 run_id,
                 lease_id: "reviewer-lease".into(),
                 authorization_ref: "authorization://reviewer".into(),
+                provider_authority: ProviderExecutionAuthorityV1::synthetic_for_test(),
             })]
             .into_iter()
             .collect(),
@@ -1227,6 +1231,7 @@ fn cross_run_backend_grant_becomes_reconciliation_without_gateway_entry() {
             run_id: RunId::new(),
             lease_id: "wrong-run-lease".into(),
             authorization_ref: "authorization://wrong-run".into(),
+            provider_authority: ProviderExecutionAuthorityV1::synthetic_for_test(),
         })],
         [],
         succeeded_completion(),
@@ -1269,6 +1274,7 @@ fn preexisting_replayed_claim_can_only_resolve_to_a_status_not_a_fresh_gateway_c
                 run_id,
                 lease_id: "must-not-be-reissued".into(),
                 authorization_ref: "authorization://must-not-be-reissued".into(),
+                provider_authority: ProviderExecutionAuthorityV1::synthetic_for_test(),
             })]
             .into_iter()
             .collect(),
@@ -1347,6 +1353,7 @@ fn provider_failure_after_grant_is_paired_and_durably_recorded_unknown() {
             run_id,
             lease_id: "ambiguous-lease".into(),
             authorization_ref: "authorization://ambiguous".into(),
+            provider_authority: ProviderExecutionAuthorityV1::synthetic_for_test(),
         })],
         [Ok(ResultDisposition::Recorded {
             run_id,
@@ -1380,6 +1387,7 @@ fn result_side_lease_expiry_requires_reconciliation_and_repeat_never_reenters_ga
                 run_id,
                 lease_id: "result-expired-lease".into(),
                 authorization_ref: "authorization://result-expired".into(),
+                provider_authority: ProviderExecutionAuthorityV1::synthetic_for_test(),
             }),
             Ok(AuthorityGrant::LeaseExpired { run_id }),
         ],
@@ -1415,6 +1423,7 @@ fn result_persistence_failure_after_grant_is_reconciliation_not_a_retryable_erro
             run_id,
             lease_id: "uncertain-result-lease".into(),
             authorization_ref: "authorization://uncertain-result".into(),
+            provider_authority: ProviderExecutionAuthorityV1::synthetic_for_test(),
         })],
         [Err(AuthorityBackendError::Ledger(
             LedgerError::InvalidPayload {
@@ -3916,6 +3925,7 @@ fn governed_reviewer_open_binds_signed_recovery_to_repository_and_replay() {
                 run_id,
                 lease_id: "reviewer-session-lease".into(),
                 authorization_ref: "authorization://reviewer-session".into(),
+                provider_authority: ProviderExecutionAuthorityV1::synthetic_for_test(),
             })]
             .into_iter()
             .collect(),
