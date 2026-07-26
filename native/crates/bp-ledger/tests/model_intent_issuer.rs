@@ -13,12 +13,11 @@ use bp_ledger::payload::model_evidence::{
     model_request_evidence_v1_descriptor, model_request_semantic_v1_digest,
     model_result_evidence_document_v1_bytes, parse_verified_canonical_model_action_input_v1,
     parse_verified_model_request_evidence_document_v1,
-    parse_verified_provider_token_preflight_input_v1, provider_token_preflight_input_v1_bytes,
-    provider_token_preflight_result_v1_bytes, trust_scope_evidence_document_v1_bytes,
-    trust_scope_evidence_v1_descriptor, CanonicalModelActionInputV1,
-    CredentialFreeNormalizedModelRequestV1, ModelActionEvidenceBindingV1,
-    ModelProviderCompletionV1, ModelProviderResultDocumentV1, ModelProviderV1,
-    ModelRequestEvidenceDocumentV1, ModelResultEvidenceDocumentV1, ProviderTokenPreflightInputV1,
+    parse_verified_provider_token_preflight_input_v1, provider_token_preflight_result_v1_bytes,
+    trust_scope_evidence_document_v1_bytes, trust_scope_evidence_v1_descriptor,
+    CanonicalModelActionInputV1, CredentialFreeNormalizedModelRequestV1,
+    ModelActionEvidenceBindingV1, ModelProviderCompletionV1, ModelProviderResultDocumentV1,
+    ModelProviderV1, ModelRequestEvidenceDocumentV1, ModelResultEvidenceDocumentV1,
     ProviderTokenPreflightResultV1, TrustScopeEvidenceDocumentV1,
 };
 use bp_ledger::payload::trust_spine::{
@@ -41,6 +40,7 @@ use bp_ledger::storage::sqlite::{
     GovernedModelActionAuthorizeAndClaimDispositionV1,
     GovernedModelActionAuthorizeAndClaimRequestV1, GovernedModelActionResultRequestV1,
     ModelActionIntentIssueDispositionV1, ModelActionIntentIssueRequestV1,
+    ProviderTokenPreflightActionIssueDispositionV1, ProviderTokenPreflightActionIssueRequestV1,
     ProviderTokenPreflightForModelActionRequestV1, ProviderTokenPreflightRecordingRequestV1,
     SqliteStore,
 };
@@ -1002,48 +1002,87 @@ fn native_model_authority_commits_the_v2_authorization_and_one_lease_together() 
         missing_preflight,
         LedgerError::ActivityClaimAuthorityRejected { .. }
     ));
-    let preflight_input =
-        ProviderTokenPreflightInputV1::from_verified_model_request(&verified_model_request, 1024)
-            .expect("derive token preflight input");
-    let preflight_input_bytes =
-        provider_token_preflight_input_v1_bytes(&preflight_input).expect("encode preflight input");
-    let preflight_input_ref = cas
-        .put_canonical_bytes(&preflight_input_bytes)
-        .expect("store preflight input");
+    let preflight_issue_request = ProviderTokenPreflightActionIssueRequestV1 {
+        run_id,
+        dispatch_event_id: dispatch_event.id,
+        model_action_request_event_id: request_event.id,
+    };
+    let wrong_key = SigningKey::from_bytes(&[58; 32]);
+    let wrong_signer = signer.clone();
+    let wrong_issuer = store
+        .issue_provider_token_preflight_action_v1_at_for_tests(
+            &preflight_issue_request,
+            &cas,
+            &authority,
+            &wrong_key,
+            &wrong_signer,
+            now + Duration::milliseconds(1),
+        )
+        .expect_err("an untrusted action-request signer cannot issue provider preflight");
+    assert!(matches!(
+        wrong_issuer,
+        LedgerError::ActivityClaimAuthorityRejected { .. }
+    ));
+    assert_eq!(store.event_count().unwrap(), 3);
+    let issued_preflight = store
+        .issue_provider_token_preflight_action_v1_at_for_tests(
+            &preflight_issue_request,
+            &cas,
+            &authority,
+            &key,
+            &signer,
+            now + Duration::milliseconds(1),
+        )
+        .expect("issue signed provider token preflight action");
+    let (preflight_action_event_id, preflight_input_ref, preflight_input_digest) =
+        match issued_preflight {
+            ProviderTokenPreflightActionIssueDispositionV1::Issued {
+                action_request_event_id,
+                canonical_input_ref,
+                canonical_input_digest,
+            } => (
+                action_request_event_id,
+                canonical_input_ref,
+                canonical_input_digest,
+            ),
+            other => panic!("first preflight issuance must append, got {other:?}"),
+        };
+    let replayed_preflight = store
+        .issue_provider_token_preflight_action_v1_at_for_tests(
+            &preflight_issue_request,
+            &cas,
+            &authority,
+            &key,
+            &signer,
+            now + Duration::milliseconds(2),
+        )
+        .expect("replay signed provider token preflight action");
+    assert!(matches!(
+        replayed_preflight,
+        ProviderTokenPreflightActionIssueDispositionV1::Existing {
+            action_request_event_id,
+            ..
+        } if action_request_event_id == preflight_action_event_id
+    ));
+    let preflight_input_bytes = cas
+        .get_verified_canonical_bytes(&preflight_input_ref, &preflight_input_digest)
+        .expect("load issued preflight input");
     let verified_preflight_input = parse_verified_provider_token_preflight_input_v1(
         &preflight_input_bytes,
-        &preflight_input_ref.to_cas_ref(),
-        preflight_input_ref.digest(),
+        &preflight_input_ref,
+        &preflight_input_digest,
         &verified_model_request,
     )
     .expect("verified preflight input");
-    let mut preflight_action = request.clone();
-    preflight_action.action_id = format!("{}:provider-token-preflight", request.action_id);
-    preflight_action.idempotency_key = preflight_action.action_id.clone();
-    preflight_action.action_kind = ActionKindV1::Network;
-    preflight_action.canonical_input_ref = preflight_input_ref.to_cas_ref();
-    preflight_action.canonical_input_digest = preflight_input_ref.digest().into();
-    preflight_action.requested_at = timestamp(now + Duration::milliseconds(1));
-    let preflight_action_event = Event {
-        id: EventId::new(),
-        run_id,
-        parent_event_id: Some(dispatch_event.id),
-        schema_version: Event::CURRENT_SCHEMA_VERSION,
-        kind: EventKind::ActionRequestedV2,
-        occurred_at: now + Duration::milliseconds(1),
-        payload: Payload::ActionRequestedV2(preflight_action.clone()),
-    };
-    store
-        .append_signed(&preflight_action_event, &key, &signer)
-        .expect("append signed preflight action");
+    let preflight_action_id = format!("{}:provider-token-preflight", request.action_id);
     let preflight_claim = store
         .claim_activity_v1_at_for_tests(
             &ActivityClaimRequestV1 {
                 run_id,
-                activity_id: preflight_action.action_id.clone(),
-                idempotency_key: preflight_action.idempotency_key.clone(),
+                activity_id: preflight_action_id.clone(),
+                idempotency_key: preflight_action_id.clone(),
                 dispatch_event_id: dispatch_event.id,
-                action_request_event_id: preflight_action_event.id,
+                action_request_event_id: preflight_action_event_id,
                 lease_duration_ms: 1_000,
             },
             &authority,
@@ -1060,7 +1099,7 @@ fn native_model_authority_commits_the_v2_authorization_and_one_lease_together() 
         run_id,
         dispatch_event_id: dispatch_event.id,
         model_action_request_event_id: request_event.id,
-        preflight_action_request_event_id: preflight_action_event.id,
+        preflight_action_request_event_id: preflight_action_event_id,
     };
     let incomplete_preflight = store
         .verify_recorded_provider_token_preflight_v1(&preflight_recording_request, &cas, &authority)
@@ -1080,8 +1119,8 @@ fn native_model_authority_commits_the_v2_authorization_and_one_lease_together() 
         .record_activity_result_v1_at_for_tests(
             &ActivityResultRequestV1 {
                 run_id,
-                activity_id: preflight_action.action_id.clone(),
-                idempotency_key: preflight_action.idempotency_key.clone(),
+                activity_id: preflight_action_id.clone(),
+                idempotency_key: preflight_action_id,
                 lease_id: preflight_lease_id,
                 outcome: ActivityResultOutcomeV1::Succeeded,
                 result_digest: Some(preflight_result_ref.digest().into()),

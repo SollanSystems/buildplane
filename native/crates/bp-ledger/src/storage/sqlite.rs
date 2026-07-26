@@ -21,12 +21,14 @@ use crate::payload::model_evidence::{
     parse_verified_model_result_evidence_document_v1,
     parse_verified_provider_token_preflight_input_v1,
     parse_verified_provider_token_preflight_result_v1,
-    parse_verified_trust_scope_evidence_document_v1, trust_scope_evidence_document_v1_bytes,
-    trust_scope_evidence_v1_descriptor, validate_model_action_binding_against_replayed_dispatch_v3,
+    parse_verified_trust_scope_evidence_document_v1, provider_token_preflight_input_v1_bytes,
+    trust_scope_evidence_document_v1_bytes, trust_scope_evidence_v1_descriptor,
+    validate_model_action_binding_against_replayed_dispatch_v3,
     verify_model_request_evidence_matches_canonical_input,
     verify_trust_scope_evidence_matches_model_request, ModelActionEvidenceBindingV1,
-    ModelProviderV1, ModelRequestEvidenceDocumentV1, TrustScopeEvidenceDocumentV1,
-    VerifiedProviderTokenPreflightInputV1, VerifiedProviderTokenPreflightResultV1,
+    ModelProviderV1, ModelRequestEvidenceDocumentV1, ProviderTokenPreflightInputV1,
+    TrustScopeEvidenceDocumentV1, VerifiedProviderTokenPreflightInputV1,
+    VerifiedProviderTokenPreflightResultV1,
 };
 use crate::payload::trust_spine::{
     action_receipt_recorded_v2_digest, action_receipt_set_v1_digest, action_requested_v2_digest,
@@ -603,6 +605,27 @@ pub struct ProviderTokenPreflightForModelActionRequestV1 {
     pub run_id: RunId,
     pub dispatch_event_id: EventId,
     pub model_action_request_event_id: EventId,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProviderTokenPreflightActionIssueRequestV1 {
+    pub run_id: RunId,
+    pub dispatch_event_id: EventId,
+    pub model_action_request_event_id: EventId,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ProviderTokenPreflightActionIssueDispositionV1 {
+    Issued {
+        action_request_event_id: EventId,
+        canonical_input_ref: String,
+        canonical_input_digest: String,
+    },
+    Existing {
+        action_request_event_id: EventId,
+        canonical_input_ref: String,
+        canonical_input_digest: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -3182,6 +3205,218 @@ impl SqliteStore {
             self.record_ordinary_append(event);
         }
         Ok(issued.into_public_disposition())
+    }
+
+    pub fn issue_provider_token_preflight_action_v1(
+        &self,
+        request: &ProviderTokenPreflightActionIssueRequestV1,
+        cas: &Cas,
+        authority: &ActivityClaimAuthorityV1,
+        signing_key: &SigningKey,
+        signer: &ActorKeyRef,
+    ) -> Result<ProviderTokenPreflightActionIssueDispositionV1> {
+        self.issue_provider_token_preflight_action_v1_at(
+            request,
+            cas,
+            authority,
+            signing_key,
+            signer,
+            Utc::now(),
+        )
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn issue_provider_token_preflight_action_v1_at_for_tests(
+        &self,
+        request: &ProviderTokenPreflightActionIssueRequestV1,
+        cas: &Cas,
+        authority: &ActivityClaimAuthorityV1,
+        signing_key: &SigningKey,
+        signer: &ActorKeyRef,
+        now: DateTime<Utc>,
+    ) -> Result<ProviderTokenPreflightActionIssueDispositionV1> {
+        self.issue_provider_token_preflight_action_v1_at(
+            request,
+            cas,
+            authority,
+            signing_key,
+            signer,
+            now,
+        )
+    }
+
+    fn issue_provider_token_preflight_action_v1_at(
+        &self,
+        request: &ProviderTokenPreflightActionIssueRequestV1,
+        cas: &Cas,
+        authority: &ActivityClaimAuthorityV1,
+        signing_key: &SigningKey,
+        signer: &ActorKeyRef,
+        now: DateTime<Utc>,
+    ) -> Result<ProviderTokenPreflightActionIssueDispositionV1> {
+        require_protected_model_intent_realm(authority)?;
+        validate_action_request_signer(authority, signing_key, signer)?;
+        let now = canonical_ledger_timestamp(now)?;
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let issue = ModelActionIntentIssueRequestV1 {
+            run_id: request.run_id,
+            dispatch_event_id: request.dispatch_event_id,
+            action_request_event_id: request.model_action_request_event_id,
+        };
+        let stored_intent = model_action_intent_by_action_request(
+            &tx,
+            request.run_id,
+            request.model_action_request_event_id,
+        )?
+        .ok_or_else(|| LedgerError::ActivityClaimAuthorityRejected {
+            reason: "provider token preflight action requires an existing verified model intent"
+                .into(),
+        })?;
+        let intent = verify_signed_model_action_intent_projection(
+            &tx,
+            &stored_intent,
+            cas,
+            authority,
+            &issue,
+            ModelActionIntentAuthorityLane::Existing,
+        )?;
+        let model_request_bytes = cas.get_verified_canonical_bytes(
+            &intent.model_request_evidence.cas_ref,
+            &intent.model_request_evidence.digest,
+        )?;
+        let model_request = parse_verified_model_request_evidence_document_v1(
+            &model_request_bytes,
+            &intent.model_request_evidence,
+        )?;
+        let dispatch_event = load_verified_authority_event(
+            &tx,
+            request.dispatch_event_id,
+            &authority.trusted_keys,
+            &authority.dispatch_signer,
+            "provider token preflight dispatch",
+        )?;
+        if dispatch_event.run_id != request.run_id {
+            return Err(LedgerError::ActivityClaimAuthorityRejected {
+                reason: "provider token preflight dispatch belongs to another run".into(),
+            });
+        }
+        let dispatch = dispatch_authority_material(&dispatch_event.payload)
+            .ok_or_else(|| LedgerError::ActivityClaimAuthorityRejected {
+                reason: "provider token preflight requires a governed dispatch envelope".into(),
+            })?
+            .dispatch;
+        validate_governed_dispatch(&dispatch, now)?;
+        let max_total_tokens = dispatch
+            .body
+            .budget
+            .max_tokens
+            .and_then(|tokens| u32::try_from(tokens).ok())
+            .ok_or_else(|| LedgerError::ActivityClaimAuthorityRejected {
+                reason: "provider token preflight requires a signed u32 total-token budget".into(),
+            })?;
+        let preflight_input = ProviderTokenPreflightInputV1::from_verified_model_request(
+            &model_request,
+            max_total_tokens,
+        )?;
+        let input_bytes = provider_token_preflight_input_v1_bytes(&preflight_input)?;
+        let input_ref = cas.put_canonical_bytes(&input_bytes)?;
+
+        let model_action_event = load_verified_authority_event(
+            &tx,
+            request.model_action_request_event_id,
+            &authority.trusted_keys,
+            &authority.action_request_signer,
+            "provider token preflight model action",
+        )?;
+        let Payload::ActionRequestedV2(mut preflight_action) = model_action_event.payload else {
+            return Err(LedgerError::ActivityClaimAuthorityRejected {
+                reason: "provider token preflight requires a model action_requested_v2 event"
+                    .into(),
+            });
+        };
+        preflight_action.action_id = format!("{}:provider-token-preflight", intent.action_id);
+        preflight_action.idempotency_key = preflight_action.action_id.clone();
+        preflight_action.action_kind = ActionKindV1::Network;
+        preflight_action.canonical_input_ref = input_ref.to_cas_ref();
+        preflight_action.canonical_input_digest = input_ref.digest().into();
+        preflight_action.requested_at = timestamp(now);
+
+        let mut statement =
+            tx.prepare("SELECT id FROM events WHERE run_id = ?1 AND kind = ?2 ORDER BY id ASC")?;
+        let ids = statement
+            .query_map(
+                params![
+                    request.run_id.to_string(),
+                    EventKind::ActionRequestedV2.as_wire()
+                ],
+                |row| row.get::<_, String>(0),
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        drop(statement);
+        let mut existing = None;
+        for id in ids {
+            let event_id = parse_event_id(&id, "provider token preflight action")?;
+            let event = load_verified_authority_event(
+                &tx,
+                event_id,
+                &authority.trusted_keys,
+                &authority.action_request_signer,
+                "provider token preflight action",
+            )?;
+            let Payload::ActionRequestedV2(action) = &event.payload else {
+                unreachable!("action-request query returns only action_requested_v2 events")
+            };
+            let action = action.clone();
+            if action.action_id != preflight_action.action_id {
+                continue;
+            }
+            if existing.replace((event, action)).is_some() {
+                return Err(LedgerError::ActivityClaimAuthorityRejected {
+                    reason: "provider token preflight has duplicate signed action requests".into(),
+                });
+            }
+        }
+        if let Some((event, action)) = existing {
+            let mut expected = preflight_action;
+            expected.requested_at = action.requested_at.clone();
+            if event.parent_event_id != Some(request.dispatch_event_id)
+                || event.occurred_at != parse_claim_timestamp(&action.requested_at)?
+                || action != expected
+            {
+                return Err(LedgerError::ActivityClaimAuthorityRejected {
+                    reason:
+                        "existing provider token preflight action conflicts with verified evidence"
+                            .into(),
+                });
+            }
+            tx.commit()?;
+            return Ok(ProviderTokenPreflightActionIssueDispositionV1::Existing {
+                action_request_event_id: event.id,
+                canonical_input_ref: action.canonical_input_ref,
+                canonical_input_digest: action.canonical_input_digest,
+            });
+        }
+
+        let event = canonicalize(Event {
+            id: EventId::new(),
+            run_id: request.run_id,
+            parent_event_id: Some(request.dispatch_event_id),
+            schema_version: Event::CURRENT_SCHEMA_VERSION,
+            kind: EventKind::ActionRequestedV2,
+            occurred_at: now,
+            payload: Payload::ActionRequestedV2(preflight_action.clone()),
+        })?;
+        validate_new_ordinary_event_id(&tx, &event)?;
+        let signature = sign_event(&event, signing_key, signer, now)?;
+        insert_event(&tx, &event)?;
+        insert_event_signature(&tx, &signature)?;
+        tx.commit()?;
+        self.record_ordinary_append(&event);
+        Ok(ProviderTokenPreflightActionIssueDispositionV1::Issued {
+            action_request_event_id: event.id,
+            canonical_input_ref: preflight_action.canonical_input_ref,
+            canonical_input_digest: preflight_action.canonical_input_digest,
+        })
     }
 
     /// Locate and verify the token-count activity whose identity is derived
@@ -7473,6 +7708,26 @@ fn validate_claim_signer(
     {
         return Err(LedgerError::ActivityClaimAuthorityRejected {
             reason: "append signer does not match the explicitly configured claim authority".into(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_action_request_signer(
+    authority: &ActivityClaimAuthorityV1,
+    signing_key: &SigningKey,
+    signer: &ActorKeyRef,
+) -> Result<()> {
+    let expected = &authority.action_request_signer;
+    let actual_public_key_hash = public_key_hash(&signing_key.verifying_key());
+    if signer.actor_id != expected.actor_id
+        || signer.key_id != expected.key_id
+        || expected.public_key_hash.as_deref() != Some(actual_public_key_hash.as_str())
+    {
+        return Err(LedgerError::ActivityClaimAuthorityRejected {
+            reason:
+                "append signer does not match the explicitly configured action-request authority"
+                    .into(),
         });
     }
     Ok(())

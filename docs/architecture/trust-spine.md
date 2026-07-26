@@ -690,9 +690,13 @@ The remaining authority slice must issue and execute that activity through the
 host gateway. The protected broker's ledger backend now locates the preflight
 from the verified model-action identity and requires its verified recording
 before it asks the ledger for model-provider authority; callers cannot select
-an alternate token-count action. The production issuer/executor for the
-preflight network activity is still required before governed session startup
-can enter this lane.
+an alternate token-count action. The native ledger now also owns idempotent
+preflight action issuance. It derives and stores the closed CAS input from the
+verified model intent and signed token ceiling, signs one distinct network
+action through the configured action-request authority, rejects
+duplicate/conflicting action records, and reuses the original action after a
+crash or retry. The claim/executor/result composition is still required before
+governed session startup can enter this lane.
 The provider SDK now exposes a separate closed token-count request and counter
 interface. The broker reconstructs that request from the same verified
 dispatch, model request, trust scope, preflight input, role-derived response
@@ -701,8 +705,8 @@ Anthropic adapter maps it to the provider's
 [`POST /v1/messages/count_tokens`](https://platform.claude.com/docs/en/api/messages/count_tokens)
 endpoint through the host credential broker, with bounded responses and
 strict output parsing. This transport does not itself grant or record the
-network activity; the broker-owned activity issuer/result writer remains the
-next composition step.
+network activity; the broker-owned claim, counter invocation, result writer,
+and unknown-effect reconciliation remain the next composition step.
 
 Those counts are persisted in the signed action receipt and replayed as one
 checked aggregate for the sealed V3 dispatch attempt. A metered failed call
