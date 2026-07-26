@@ -6086,8 +6086,7 @@ fn canonical_candidate_ref_run_substitution_reconciles_decision_and_never_enters
 }
 
 #[test]
-fn protected_promotion_decision_handler_requires_exact_pending_same_run_approval_without_new_decision(
-) {
+fn protected_promotion_decision_response_loss_retry_records_at_most_one_decision() {
     let fixture = promotion_fixture();
     checkpoint_pending_promotion_approval_for_trusted_replay(&fixture);
     let replay_authorities = promotion_replay_authorities(&fixture);
@@ -6130,6 +6129,9 @@ fn protected_promotion_decision_handler_requires_exact_pending_same_run_approval
             .expect("the exact pending approval must be resolved once"),
         BrokerPromotionDecisionDisposition::Sealed
     );
+    // Model a response that was lost after the sealed effect. The client
+    // retries the identical request; replay must not authorize another
+    // decision record.
     assert_eq!(
         handle_promotion_decision_wire(&mut authority, pending_wire.as_bytes())
             .expect("a now-nonpending approval remains an opaque request"),

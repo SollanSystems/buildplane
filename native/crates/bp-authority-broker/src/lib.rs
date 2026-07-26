@@ -1,11 +1,11 @@
 //! Broker-private composition for durable governed model authority.
 //!
-//! This crate intentionally exposes no public authority endpoint. It is a
-//! composition boundary for a future broker process whose startup must inject
-//! an already-open protected ledger/CAS realm, trusted signer configuration,
-//! and credential-owning gateway. Production OS peer authentication and
-//! credential isolation remain integration gates; this crate must not be wired
-//! to `buildplane-native`, the generic ledger server, or a same-UID signer.
+//! This crate exposes one opaque, no-argument promotion-decision host runner.
+//! All authority constructors, custody types, ledger/CAS state, signers, paths,
+//! and protocol internals remain private. The runner consumes only its fixed
+//! protected deployment config and pre-opened Linux listener. Other authority
+//! roles remain composition boundaries and must not be wired to
+//! `buildplane-native`, the generic ledger server, or a same-UID signer.
 //! A production gateway must convert every catchable provider failure after
 //! capability receipt into paired `Unknown` evidence. Process death or panic
 //! before that pairing still requires an OS-supervised reconciliation path and
@@ -49,6 +49,7 @@ mod host_key_custody;
 mod host_ledger_custody;
 #[allow(dead_code)]
 mod promotion_decision_handler;
+mod promotion_decision_host;
 mod promotion_execution;
 #[allow(dead_code)]
 mod promotion_execution_handler;
@@ -60,6 +61,8 @@ mod protocol;
 mod reviewer_session;
 #[allow(dead_code)]
 mod v5_dispatch_admission;
+
+pub use promotion_decision_host::run_default_promotion_decision_host_v1;
 
 use crate::promotion_git::{
     PromotionGitGateway, PromotionGitStartupError, VerifiedPromotionCapability,

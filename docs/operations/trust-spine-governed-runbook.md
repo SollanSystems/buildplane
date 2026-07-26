@@ -85,6 +85,87 @@ native decision-bound Git executor will own that final compare-and-swap and
 its durable result. The shipped CLI remains containment/pre-GA mode and does
 not invoke that executor.
 
+### Protected promotion-decision host
+
+`buildplane-authority-host` activates only the operator
+promotion-decision endpoint. It records and kernel-seals one replay-derived
+decision; it has no Git, CAS, provider, model, network, or action-execution
+capability. Promotion execution remains a separate endpoint and OS role.
+
+The binary accepts no arguments or environment overrides. A supervisor must
+pass exactly one already-listening Unix stream socket as file descriptor 3.
+The kernel-reported pathname must be exactly
+`/run/buildplane/authority-host/promotion-decision-v1.sock`. The three parent
+directories must be root-owned exact `0755`; the socket must be root-owned,
+group-owned by the GID named in the fixed host config, exact `0660`, and have
+one link. The broker service UID and every configured client UID must be
+non-root and distinct. Failure to meet any part of this contract stops startup;
+the host never binds, unlinks, replaces, or falls back to another socket.
+
+The following systemd units illustrate the deployment contract. The
+`buildplane-promotion` group must resolve to the same GID as
+`socket_group_gid`, while `buildplane-authority` and every authorized client
+must resolve to the distinct UIDs pinned in the fixed config. The sample
+assumes the configured authority root is
+`/var/lib/buildplane/authority`.
+
+```ini
+# buildplane-authority-host.socket
+[Unit]
+Description=Buildplane protected promotion-decision socket
+
+[Socket]
+ListenStream=/run/buildplane/authority-host/promotion-decision-v1.sock
+Accept=no
+Service=buildplane-authority-host.service
+SocketUser=root
+SocketGroup=buildplane-promotion
+SocketMode=0660
+DirectoryMode=0755
+RemoveOnStop=true
+
+[Install]
+WantedBy=sockets.target
+```
+
+```ini
+# buildplane-authority-host.service
+[Unit]
+Description=Buildplane protected promotion-decision authority
+Requires=buildplane-authority-host.socket
+After=buildplane-authority-host.socket
+
+[Service]
+Type=simple
+ExecStart=/usr/libexec/buildplane/buildplane-authority-host
+User=buildplane-authority
+Group=buildplane-authority
+Restart=on-failure
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadOnlyPaths=/etc/buildplane/authority-host
+ReadOnlyPaths=/var/lib/buildplane/authority/keys
+ReadWritePaths=/var/lib/buildplane/authority/ledger
+RestrictAddressFamilies=AF_UNIX
+CapabilityBoundingSet=
+AmbientCapabilities=
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native
+UMask=0077
+StandardOutput=null
+StandardError=null
+```
+
+The socket unit must be the service's only activated listener so systemd
+passes it as descriptor 3. Create and verify the fixed config, authority root,
+keys, ledger, OS users, and group through the protected-host provisioning
+process; the binary intentionally provides no provisioning mode.
+
 ## Recovery protocol
 
 1. Preserve the opaque host recovery reference and do not submit a replacement
