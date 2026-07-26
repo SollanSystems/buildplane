@@ -35,6 +35,7 @@ pub struct ProviderRequest {
     pub response_schema_digest: String,
     pub response_schema: Value,
     pub candidate_digest: Option<String>,
+    pub max_total_tokens: u32,
     pub max_input_tokens: u32,
     pub max_output_tokens: u32,
     pub deadline_unix_ms: i64,
@@ -70,7 +71,13 @@ impl ProviderRequest {
                 "provider response contract must match the exact role-derived schema".into(),
             ));
         }
-        if self.max_input_tokens == 0 || self.max_output_tokens == 0 || self.deadline_unix_ms <= 0 {
+        if self.max_total_tokens == 0
+            || self.max_input_tokens == 0
+            || self.max_output_tokens == 0
+            || self.max_input_tokens > self.max_total_tokens
+            || self.max_output_tokens > self.max_total_tokens
+            || self.deadline_unix_ms <= 0
+        {
             return Err(ProviderError::InvalidContract(
                 "provider token ceilings and deadline must be positive".into(),
             ));
@@ -136,6 +143,7 @@ impl ProviderResponse {
         &self,
         max_input_tokens: u32,
         max_output_tokens: u32,
+        max_total_tokens: u32,
     ) -> Result<(), ProviderError> {
         if self.schema_version != 1
             || self.request_id.trim().is_empty()
@@ -145,7 +153,16 @@ impl ProviderResponse {
                 "provider response identity is invalid".into(),
             ));
         }
-        if self.input_tokens > max_input_tokens || self.output_tokens > max_output_tokens {
+        let total_tokens = self
+            .input_tokens
+            .checked_add(self.output_tokens)
+            .ok_or_else(|| {
+                ProviderError::InvalidContract("provider response token usage overflowed".into())
+            })?;
+        if self.input_tokens > max_input_tokens
+            || self.output_tokens > max_output_tokens
+            || total_tokens > max_total_tokens
+        {
             return Err(ProviderError::InvalidContract(
                 "provider response exceeds the signed token ceiling".into(),
             ));
@@ -331,6 +348,7 @@ mod tests {
             "response_schema_digest": contract.schema_digest,
             "response_schema": contract.schema,
             "candidate_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "max_total_tokens": 14000,
             "max_input_tokens": 12000,
             "max_output_tokens": 2000,
             "deadline_unix_ms": 1784246400000_i64,
@@ -432,8 +450,19 @@ mod tests {
         .expect("closed provider response");
         assert_eq!(response.stop_reason, ProviderStopReasonV1::Completed);
         response
-            .validate_against(12000, 2000)
+            .validate_against(12000, 2000, 14000)
             .expect("within budget");
+
+        let over_total: ProviderResponse = serde_json::from_value(json!({
+            "schema_version": 1,
+            "request_id": "provider:reviewer:1",
+            "output": {"decision": "approve"},
+            "input_tokens": 12000,
+            "output_tokens": 2000,
+            "stop_reason": "completed"
+        }))
+        .expect("closed provider response");
+        assert!(over_total.validate_against(12000, 2000, 13000).is_err());
 
         let mut unknown = serde_json::to_value(&response).expect("encode response");
         unknown["raw_headers"] = json!({"authorization": "secret"});

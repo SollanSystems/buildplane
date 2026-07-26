@@ -652,6 +652,13 @@ effect rather than a successful result. Post-response accounting alone is not
 authorization. When a token budget is present, a provider response must report
 both input and output token counts. Missing, malformed, or over-budget usage
 is terminal failure and cannot form a candidate.
+The native provider request now carries the signed total-token ceiling in
+addition to its input and output sub-ceilings. Response validation uses checked
+arithmetic and rejects a call whose combined usage exceeds the total even when
+each component is independently below its own cap. Provider-specific input
+preflight is still a separately recorded activity requirement; it must not be
+hidden inside the HTTP adapter because an unrecorded token-count request would
+itself violate exactly-once remote-effect recovery.
 
 Those counts are persisted in the signed action receipt and replayed as one
 checked aggregate for the sealed V3 dispatch attempt. A metered failed call

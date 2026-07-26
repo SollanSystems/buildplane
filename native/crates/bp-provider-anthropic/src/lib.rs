@@ -413,7 +413,11 @@ fn parse_response(
         output_tokens: response.usage.output_tokens,
         stop_reason,
     };
-    provider_response.validate_against(request.max_input_tokens, request.max_output_tokens)?;
+    provider_response.validate_against(
+        request.max_input_tokens,
+        request.max_output_tokens,
+        request.max_total_tokens,
+    )?;
     Ok(provider_response)
 }
 
@@ -484,6 +488,7 @@ mod tests {
             response_schema_digest: response_contract.schema_digest,
             response_schema: response_contract.schema,
             candidate_digest: Some(format!("sha256:{}", "b".repeat(64))),
+            max_total_tokens: 14_000,
             max_input_tokens: 12_000,
             max_output_tokens: 2_000,
             deadline_unix_ms: i64::MAX,
