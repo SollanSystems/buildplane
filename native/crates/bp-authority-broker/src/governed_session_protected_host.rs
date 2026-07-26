@@ -6,7 +6,11 @@
 //! No listener or worker authority is granted by this module.
 
 use crate::anthropic_model_gateway::AnthropicModelGatewayV1;
-use crate::candidate_workspace::open_candidate_workspace_v1;
+use crate::candidate_workspace::{open_candidate_workspace_v1, reopen_candidate_workspace_v1};
+use crate::command_action::{
+    BrokerCommandActionRequest, BrokerCommandActionStatus, BrokerCommandAuthority,
+    LedgerV5CommandAuthorityBackend,
+};
 use crate::confinement::BrokerHostConfinementAttestationV1;
 use crate::governed_reviewer_authority::{
     execute_governed_reviewer_run_v1, open_governed_reviewer_session_from_replay_v1,
@@ -22,8 +26,8 @@ use crate::governed_session_startup::{
     GovernedSessionHostStartupErrorV1, GovernedSessionHostStartupV1, GovernedSessionProviderLaneV1,
 };
 use crate::governed_session_token::{
-    issue_recovery_token_v1, issue_session_token_v1, verify_recovery_token_v1,
-    GovernedSessionKindV1,
+    issue_recovery_token_v1, issue_session_token_v1, parse_untrusted_recovery_token_binding_v1,
+    verify_recovery_token_v1, verify_session_token_v1, GovernedSessionKindV1,
 };
 use crate::host_anthropic_credential_custody::ProtectedAnthropicCredentialBrokerV1;
 use crate::host_cas_custody::{
@@ -47,7 +51,8 @@ use crate::provider_preflight::{
     ProviderTokenPreflightStatusV1,
 };
 use crate::rootless_oci::{
-    attest_rootless_oci_v1, RootlessOciAttestationV1, RootlessOciStartupErrorV1,
+    attest_rootless_oci_v1, FixedPodmanCommandRunner, RootlessOciAttestationV1,
+    RootlessOciCommandGateway, RootlessOciStartupErrorV1,
 };
 use crate::{
     BrokerModelActionRequest, BrokerModelActionStatus, BrokerModelAuthority, LeasePolicy,
@@ -56,7 +61,10 @@ use crate::{
 use async_trait::async_trait;
 use bp_ledger::payload::model_evidence::ModelProviderV1;
 use bp_ledger::payload::trust_spine::ExecutionRoleV1;
-use bp_ledger::storage::sqlite::ResolveGovernedV5CandidateAuthorityRequestV1;
+use bp_ledger::storage::sqlite::{
+    GovernedV5CommandActionIssueRequestV1, GovernedV5CommandActionReceiptSetRequestV1,
+    ResolveGovernedV5CandidateAuthorityRequestV1,
+};
 use bp_provider_anthropic::{AnthropicHttpTransportV1, AnthropicProvider};
 use bp_provider_sdk::{
     ProviderAdapter, ProviderError, ProviderRequest, ProviderResponse, ProviderTokenCountRequestV1,
@@ -66,6 +74,7 @@ use std::collections::BTreeSet;
 use std::os::unix::net::UnixStream;
 use std::time::Duration;
 use thiserror::Error;
+use uuid::Uuid;
 
 pub(crate) struct ProtectedGovernedSessionHostStateV1 {
     validated_startup: ValidatedGovernedSessionHostStartupV1,
@@ -185,7 +194,125 @@ impl ProtectedGovernedSessionHostStateV1 {
             &resolved,
         )
         .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)?;
+        self.ledger
+            .store()
+            .issue_governed_v5_command_action_v1(
+                &GovernedV5CommandActionIssueRequestV1 {
+                    run_id: resolved.run_id,
+                    dispatch_event_id: resolved.dispatch_event_id,
+                    admission_event_id: resolved.admission_event_id,
+                    packet_source: packet_source.into(),
+                },
+                self.cas.cas(),
+                &config.v5_admission_authority,
+                &config.activity_authority,
+                self.signing_keys.action_request(),
+                &config.action_request_signer,
+            )
+            .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)?;
         Ok((recovery_ref, session_ref))
+    }
+
+    #[allow(dead_code)] // Wired to RunCandidateSession after immutable finalization is composed.
+    fn run_candidate_command(
+        &self,
+        recovery_ref: &str,
+        session_ref: &str,
+    ) -> Result<BrokerCommandActionStatus, ProtectedGovernedSessionProviderErrorV1> {
+        let untrusted = parse_untrusted_recovery_token_binding_v1(recovery_ref)
+            .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)?;
+        let config = self.validated_startup.config();
+        if untrusted.run_id != config.run_id.to_string() {
+            return Err(ProtectedGovernedSessionProviderErrorV1::DurableAuthority);
+        }
+        let dispatch_event_id = Uuid::parse_str(&untrusted.candidate_dispatch_event_ref)
+            .map(bp_ledger::EventId::from_uuid)
+            .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)?;
+        let execution = self
+            .ledger
+            .store()
+            .resolve_governed_v5_candidate_execution_authority_v1(
+                config.run_id,
+                dispatch_event_id,
+                &config.v5_admission_authority,
+                &config.activity_authority,
+            )
+            .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)?;
+        let verified_recovery = verify_recovery_token_v1(
+            &self.signing_keys.broker_identity().verifying_key(),
+            recovery_ref,
+            &execution.candidate.repository_binding_digest,
+        )
+        .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)?;
+        let verified_session = verify_session_token_v1(
+            &self.signing_keys.broker_identity().verifying_key(),
+            session_ref,
+            GovernedSessionKindV1::Candidate,
+            recovery_ref,
+        )
+        .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)?;
+        if verified_recovery.run_id() != config.run_id.to_string()
+            || verified_recovery.candidate_dispatch_event_ref()
+                != execution.candidate.dispatch_event_id.to_string()
+            || verified_session.run_id() != verified_recovery.run_id()
+            || verified_session.candidate_dispatch_event_ref()
+                != verified_recovery.candidate_dispatch_event_ref()
+            || execution.candidate.sandbox_profile_digest
+                != self.session_startup.sandbox_profile_digest()
+        {
+            return Err(ProtectedGovernedSessionProviderErrorV1::DurableAuthority);
+        }
+        let workspace = reopen_candidate_workspace_v1(
+            self.validated_startup.authority_root().directory(),
+            &execution.candidate,
+        )
+        .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)?;
+        let backend = LedgerV5CommandAuthorityBackend::new(
+            self.ledger.store(),
+            self.cas.cas(),
+            &config.v5_admission_authority,
+            &config.activity_authority,
+            execution.candidate.admission_event_id,
+            self.signing_keys.claim(),
+            &config.claim_signer,
+        );
+        let gateway = RootlessOciCommandGateway::new(
+            config.oci_profile.clone(),
+            self.session_startup.oci_attestation(),
+            &workspace.path,
+            self.cas.cas(),
+            FixedPodmanCommandRunner,
+        )
+        .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)?;
+        let mut authority = BrokerCommandAuthority::new(
+            config.run_id,
+            backend,
+            gateway,
+            config.model_action_lease_ms,
+        );
+        let status = authority
+            .authorize_and_execute(BrokerCommandActionRequest {
+                dispatch_event_id: execution.candidate.dispatch_event_id,
+                action_request_event_id: execution.action_request_event_id,
+            })
+            .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)?;
+        if status == BrokerCommandActionStatus::Succeeded {
+            self.ledger
+                .store()
+                .seal_succeeded_governed_v5_command_action_receipt_set_v1(
+                    &GovernedV5CommandActionReceiptSetRequestV1 {
+                        run_id: config.run_id,
+                        action_request_event_id: execution.action_request_event_id,
+                    },
+                    self.cas.cas(),
+                    &config.v5_admission_authority,
+                    &config.activity_authority,
+                    self.signing_keys.action_receipt(),
+                    &config.action_receipt_signer,
+                )
+                .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)?;
+        }
+        Ok(status)
     }
 
     pub(crate) fn validated_startup(&self) -> &ValidatedGovernedSessionHostStartupV1 {
@@ -625,6 +752,7 @@ mod tests {
         owner: u32,
         action_seed: [u8; 32],
         claim_seed: [u8; 32],
+        receipt_seed: [u8; 32],
         broker_identity_seed: [u8; 32],
     }
 
@@ -640,6 +768,7 @@ mod tests {
                 owner: unsafe { libc::geteuid() },
                 action_seed: [32; 32],
                 claim_seed: [33; 32],
+                receipt_seed: [37; 32],
                 broker_identity_seed: [34; 32],
             };
             fixture.install();
@@ -653,6 +782,11 @@ mod tests {
                 &self.action_seed,
             );
             self.write_key(&["kernel", "model-claim"], "claim-main", &self.claim_seed);
+            self.write_key(
+                &["kernel", "action-receipt"],
+                "receipt-main",
+                &self.receipt_seed,
+            );
             self.write_key(
                 &["broker", "governed-session"],
                 "broker-main",
@@ -739,6 +873,11 @@ mod tests {
                     self.action_seed
                 ),
                 "claim": signer("kernel:model-claim", "claim-main", self.claim_seed),
+                "action_receipt": signer(
+                    "kernel:action-receipt",
+                    "receipt-main",
+                    self.receipt_seed
+                ),
                 "broker_identity": signer(
                     "broker:governed-session",
                     "broker-main",

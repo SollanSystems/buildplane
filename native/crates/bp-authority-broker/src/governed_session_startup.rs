@@ -69,6 +69,10 @@ impl GovernedSessionHostStartupV1 {
         &self.oci_attestation.profile_digest
     }
 
+    pub(crate) fn oci_attestation(&self) -> &RootlessOciAttestationV1 {
+        &self.oci_attestation
+    }
+
     #[cfg(target_os = "linux")]
     pub(crate) fn verified_connected_worker_uid(
         &self,

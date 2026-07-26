@@ -10,28 +10,32 @@ use bp_ledger::canonicalize::canonicalize;
 use bp_ledger::event::Event;
 use bp_ledger::id::{EventId, RunId};
 use bp_ledger::kind::EventKind;
+use bp_ledger::payload::activity_claim::ActivityResultOutcomeV1;
 use bp_ledger::payload::governed_packet::GovernedCommandPacketV1;
 use bp_ledger::payload::trust_spine::{
-    action_requested_v2_digest, attempt_context_content_v1_digest,
-    context_manifest_content_v1_digest, dispatch_envelope_v3_body_digest,
-    dispatch_envelope_v4_digest, dispatch_envelope_v5_digest, governed_dispatch_policy_digest_v1,
-    sandbox_profile_content_v1_digest, worker_manifest_content_v1_digest, workflow_graph_v2_digest,
-    ActionEvidenceVersionV1, ActionKindV1, ActionRequestedV2, AttemptContextContentV1,
-    AttemptContextDeclaredV1, AttemptFeedbackV1, CommitModeV1, ContextManifestContentV1,
-    ContextManifestDeclaredV1, ContextManifestEntryKindV1, ContextManifestEntryV1, ContextTaintV1,
-    ContextTrustLevelV1, DispatchBudgetV1, DispatchEnvelopeBodyV2, DispatchEnvelopeV3,
-    DispatchEnvelopeV4, DispatchEnvelopeV5, ExecutionRoleV1, PriorCandidateRefV1,
-    SandboxProfileContentV1, SandboxProfileDeclaredV1, SandboxRuntimeV1, TrustTierV1,
-    WorkerHarnessV1, WorkerManifestContentV1, WorkerManifestDeclaredV1, WorkerProviderV1,
-    WorkflowGraphDeclaredV2, WorkflowGraphNodeV2,
+    action_receipt_recorded_v2_digest, action_receipt_set_v1_digest, action_requested_v2_digest,
+    attempt_context_content_v1_digest, context_manifest_content_v1_digest,
+    dispatch_envelope_v3_body_digest, dispatch_envelope_v4_digest, dispatch_envelope_v5_digest,
+    governed_dispatch_policy_digest_v1, sandbox_profile_content_v1_digest,
+    worker_manifest_content_v1_digest, workflow_graph_v2_digest, ActionEvidenceVersionV1,
+    ActionKindV1, ActionRequestedV2, AttemptContextContentV1, AttemptContextDeclaredV1,
+    AttemptFeedbackV1, CommitModeV1, ContextManifestContentV1, ContextManifestDeclaredV1,
+    ContextManifestEntryKindV1, ContextManifestEntryV1, ContextTaintV1, ContextTrustLevelV1,
+    DispatchBudgetV1, DispatchEnvelopeBodyV2, DispatchEnvelopeV3, DispatchEnvelopeV4,
+    DispatchEnvelopeV5, ExecutionRoleV1, PriorCandidateRefV1, SandboxProfileContentV1,
+    SandboxProfileDeclaredV1, SandboxRuntimeV1, TrustTierV1, WorkerHarnessV1,
+    WorkerManifestContentV1, WorkerManifestDeclaredV1, WorkerProviderV1, WorkflowGraphDeclaredV2,
+    WorkflowGraphNodeV2,
 };
 use bp_ledger::signing::{public_key_hash, sign_event, ActorKeyRef, TrustedPublicKeys};
 use bp_ledger::storage::sqlite::{
-    ActivityClaimAuthorityV1, ActivityClaimRequestV1, CheckpointPolicy,
-    GovernedCommandActionAuthorizeAndClaimDispositionV1, GovernedCommandActionIssueDispositionV1,
+    ActivityClaimAuthorityV1, ActivityClaimRequestV1, ActivityResultDispositionV1,
+    CheckpointPolicy, GovernedCommandActionAuthorizeAndClaimDispositionV1,
+    GovernedCommandActionIssueDispositionV1, GovernedCommandActionResultRequestV1,
     GovernedDispatchV5AdmissionAuthorityV1, GovernedDispatchV5AdmissionDispositionV1,
     GovernedDispatchV5AdmissionRequestV1, GovernedDispatchV5AdmissionSealRequestV1,
     GovernedV5CommandActionAuthorizeAndClaimRequestV1, GovernedV5CommandActionIssueRequestV1,
+    GovernedV5CommandActionReceiptSetDispositionV1, GovernedV5CommandActionReceiptSetRequestV1,
     ResolveGovernedV5CandidateAuthorityRequestV1, SqliteStore,
 };
 use bp_ledger::storage::Cas;
@@ -182,6 +186,25 @@ fn governed_v5_action_authority(
     )
     .expect("construct protected V5 action authority");
     (authority, action_signer)
+}
+
+fn governed_v5_action_authority_with_receipt(
+    source_key: &SigningKey,
+    source_signer: &ActorKeyRef,
+    action_key: &SigningKey,
+    receipt_key: &SigningKey,
+) -> (ActivityClaimAuthorityV1, ActorKeyRef, ActorKeyRef) {
+    let action_signer = actor("kernel:v5-action", "action-1", action_key);
+    let receipt_signer = actor("kernel:v5-receipt", "receipt-1", receipt_key);
+    let authority = ActivityClaimAuthorityV1::new_governed_realm(
+        trusted_keys(&[source_key, action_key, receipt_key]),
+        source_signer.clone(),
+        action_signer.clone(),
+        action_signer.clone(),
+        digest('9'),
+    )
+    .expect("construct protected V5 action and receipt authority");
+    (authority, action_signer, receipt_signer)
 }
 
 fn event(run_id: RunId, kind: EventKind, payload: Payload) -> Event {
@@ -796,10 +819,16 @@ fn v5_command_issuance_requires_a_checkpoint_sealed_admission() {
     let admission_key = SigningKey::from_bytes(&[72u8; 32]);
     let checkpoint_key = SigningKey::from_bytes(&[73u8; 32]);
     let action_key = SigningKey::from_bytes(&[74u8; 32]);
+    let receipt_key = SigningKey::from_bytes(&[79u8; 32]);
     let (v5_authority, source_signer, admission_signer, checkpoint_signer) =
         v5_admission_authority(&source_key, &admission_key, &checkpoint_key);
-    let (activity_authority, action_signer) =
-        governed_v5_action_authority(&source_key, &source_signer, &action_key);
+    let (activity_authority, action_signer, receipt_signer) =
+        governed_v5_action_authority_with_receipt(
+            &source_key,
+            &source_signer,
+            &action_key,
+            &receipt_key,
+        );
     let fixture = v5_fixture(1);
     append_fixture(
         &store,
@@ -1002,6 +1031,24 @@ fn v5_command_issuance_requires_a_checkpoint_sealed_admission() {
         )
     );
     assert_eq!(store.event_count().expect("count issued V5 tape"), 8);
+    let execution = store
+        .resolve_governed_v5_candidate_execution_authority_v1(
+            fixture.run_id,
+            fixture.dispatch_event.id,
+            &v5_authority,
+            &activity_authority,
+        )
+        .expect("recover execution authority without client-selected action identity");
+    assert_eq!(execution.action_request_event_id, action_request_event_id);
+    assert_eq!(
+        execution.candidate.dispatch_event_id,
+        fixture.dispatch_event.id
+    );
+    assert_eq!(execution.candidate.admission_event_id, admission_event_id);
+    assert_eq!(
+        execution.candidate.dispatch_envelope_digest,
+        fixture.dispatch.envelope_digest
+    );
 
     let granted = store
         .authorize_and_claim_governed_v5_command_action_v1(
@@ -1019,17 +1066,169 @@ fn v5_command_issuance_requires_a_checkpoint_sealed_admission() {
             &action_signer,
         )
         .expect("claim action through sealed V5 admission");
-    match granted {
-        GovernedCommandActionAuthorizeAndClaimDispositionV1::Granted { command_intent, .. } => {
+    let lease_id = match granted {
+        GovernedCommandActionAuthorizeAndClaimDispositionV1::Granted {
+            command_intent,
+            lease_id,
+            ..
+        } => {
             assert_eq!(command_intent.document().command, "/usr/bin/git");
             assert_eq!(command_intent.document().args, ["status", "--short"]);
+            lease_id
         }
         other => panic!("first sealed V5 claim must grant one lease, got {other:?}"),
-    }
+    };
     assert_eq!(
         store.event_count().expect("count claimed V5 tape"),
         9,
         "sealed V5 action must produce exactly one durable claim"
+    );
+    let command_evidence = cas
+        .put_canonical_bytes(br#"{"outcome":"succeeded","source":"oci"}"#)
+        .expect("store terminal command evidence");
+    let result = store
+        .record_governed_v5_command_action_result_v1(
+            &GovernedCommandActionResultRequestV1 {
+                run_id: fixture.run_id,
+                lease_id,
+                outcome: ActivityResultOutcomeV1::Succeeded,
+                result_digest: Some(command_evidence.digest().into()),
+                result_ref: Some(command_evidence.to_cas_ref()),
+                evidence_digest: command_evidence.digest().into(),
+                evidence_ref: command_evidence.to_cas_ref(),
+            },
+            &cas,
+            &v5_authority,
+            &activity_authority,
+            &action_key,
+            &action_signer,
+        )
+        .expect("record succeeded command result");
+    assert!(matches!(
+        result,
+        ActivityResultDispositionV1::Recorded { .. }
+    ));
+    assert_eq!(store.event_count().expect("count resulted V5 tape"), 10);
+    let receipt_request = GovernedV5CommandActionReceiptSetRequestV1 {
+        run_id: fixture.run_id,
+        action_request_event_id,
+    };
+    let wrong_receipt_key = SigningKey::from_bytes(&[80u8; 32]);
+    let wrong_receipt_signer = actor("kernel:v5-receipt", "receipt-1", &wrong_receipt_key);
+    assert!(matches!(
+        store.seal_succeeded_governed_v5_command_action_receipt_set_v1(
+            &receipt_request,
+            &cas,
+            &v5_authority,
+            &activity_authority,
+            &wrong_receipt_key,
+            &wrong_receipt_signer,
+        ),
+        Err(LedgerError::ActionReceiptAuthorityRejected { .. })
+    ));
+    assert_eq!(
+        store
+            .event_count()
+            .expect("count wrong receipt signer tape"),
+        10,
+        "a substituted receipt signer must not append evidence"
+    );
+    let sealed_receipts = store
+        .seal_succeeded_governed_v5_command_action_receipt_set_v1(
+            &receipt_request,
+            &cas,
+            &v5_authority,
+            &activity_authority,
+            &receipt_key,
+            &receipt_signer,
+        )
+        .expect("seal succeeded command receipt set");
+    let (
+        action_receipt_event_id,
+        action_receipt_ref,
+        action_receipt_digest,
+        action_receipt_set_event_id,
+        action_receipt_set_ref,
+        action_receipt_set_digest,
+    ) = match sealed_receipts {
+        GovernedV5CommandActionReceiptSetDispositionV1::Recorded {
+            action_receipt_event_id,
+            action_receipt_ref,
+            action_receipt_digest,
+            action_receipt_set_event_id,
+            action_receipt_set_ref,
+            action_receipt_set_digest,
+        } => (
+            action_receipt_event_id,
+            action_receipt_ref,
+            action_receipt_digest,
+            action_receipt_set_event_id,
+            action_receipt_set_ref,
+            action_receipt_set_digest,
+        ),
+        other => panic!("first receipt closure must record evidence, got {other:?}"),
+    };
+    assert_eq!(
+        store.event_count().expect("count sealed receipt tape"),
+        12,
+        "receipt and receipt set must commit atomically"
+    );
+    let receipt_events = store
+        .events_for_run(&fixture.run_id.to_string())
+        .expect("load receipt tape")
+        .into_iter()
+        .map(|row| row.to_event().expect("decode receipt tape event"))
+        .collect::<Vec<_>>();
+    let receipt_event = receipt_events
+        .iter()
+        .find(|event| event.id == action_receipt_event_id)
+        .expect("find action receipt");
+    let Payload::ActionReceiptRecordedV2(receipt) = &receipt_event.payload else {
+        panic!("receipt closure must append action_receipt_recorded_v2");
+    };
+    assert_eq!(receipt.action_receipt_ref, action_receipt_ref);
+    assert_eq!(
+        action_receipt_recorded_v2_digest(receipt).expect("digest action receipt"),
+        action_receipt_digest
+    );
+    let receipt_set_event = receipt_events
+        .iter()
+        .find(|event| event.id == action_receipt_set_event_id)
+        .expect("find action receipt set");
+    let Payload::ActionReceiptSetRecordedV1(receipt_set) = &receipt_set_event.payload else {
+        panic!("receipt closure must append action_receipt_set_recorded_v1");
+    };
+    assert_eq!(receipt_set_event.parent_event_id, Some(receipt_event.id));
+    assert_eq!(receipt_set.action_receipt_set_ref, action_receipt_set_ref);
+    assert_eq!(
+        action_receipt_set_v1_digest(receipt_set).expect("digest action receipt set"),
+        action_receipt_set_digest
+    );
+    let receipt_retry = store
+        .seal_succeeded_governed_v5_command_action_receipt_set_v1(
+            &receipt_request,
+            &cas,
+            &v5_authority,
+            &activity_authority,
+            &receipt_key,
+            &receipt_signer,
+        )
+        .expect("recover exact sealed command receipts");
+    assert!(matches!(
+        receipt_retry,
+        GovernedV5CommandActionReceiptSetDispositionV1::Existing {
+            action_receipt_event_id: existing_receipt,
+            action_receipt_set_event_id: existing_set,
+            ..
+        } if existing_receipt == action_receipt_event_id
+            && existing_set == action_receipt_set_event_id
+    ));
+    assert_eq!(
+        store
+            .event_count()
+            .expect("count idempotent receipt retry tape"),
+        12,
+        "receipt closure retry must not append duplicate evidence"
     );
 
     let retry = store
@@ -1052,7 +1251,7 @@ fn v5_command_issuance_requires_a_checkpoint_sealed_admission() {
     ));
     assert_eq!(
         store.event_count().expect("count recovered V5 tape"),
-        9,
+        12,
         "V5 action replay must not append a duplicate effect intent"
     );
 }

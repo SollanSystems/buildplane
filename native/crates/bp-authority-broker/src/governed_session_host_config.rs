@@ -50,6 +50,7 @@ pub(crate) struct GovernedSessionHostConfigV1 {
     pub(crate) v5_admission_checkpoint_signer: ActorKeyRef,
     pub(crate) action_request_signer: ActorKeyRef,
     pub(crate) claim_signer: ActorKeyRef,
+    pub(crate) action_receipt_signer: ActorKeyRef,
     pub(crate) broker_identity_signer: ActorKeyRef,
     pub(crate) activity_authority: ActivityClaimAuthorityV1,
     pub(crate) v5_admission_authority: GovernedDispatchV5AdmissionAuthorityV1,
@@ -83,6 +84,7 @@ struct RawGovernedSessionHostConfigV1 {
     v5_admission_checkpoint: RawSignerV1,
     action_request: RawSignerV1,
     claim: RawSignerV1,
+    action_receipt: RawSignerV1,
     broker_identity: RawSignerV1,
 }
 
@@ -172,6 +174,7 @@ pub(crate) fn parse_governed_session_host_config_v1(
     let v5_admission_checkpoint = parse_signer(raw.v5_admission_checkpoint)?;
     let action_request = parse_signer(raw.action_request)?;
     let claim = parse_signer(raw.claim)?;
+    let action_receipt = parse_signer(raw.action_receipt)?;
     let broker_identity = parse_signer(raw.broker_identity)?;
     let signers = [
         &dispatch,
@@ -179,6 +182,7 @@ pub(crate) fn parse_governed_session_host_config_v1(
         &v5_admission_checkpoint,
         &action_request,
         &claim,
+        &action_receipt,
         &broker_identity,
     ];
     let mut actor_ids = BTreeSet::new();
@@ -208,6 +212,7 @@ pub(crate) fn parse_governed_session_host_config_v1(
     let v5_admission_checkpoint_signer = v5_admission_checkpoint.identity;
     let action_request_signer = action_request.identity;
     let claim_signer = claim.identity;
+    let action_receipt_signer = action_receipt.identity;
     let broker_identity_signer = broker_identity.identity;
     let activity_authority = ActivityClaimAuthorityV1::new_governed_realm(
         trusted_keys.clone(),
@@ -233,6 +238,7 @@ pub(crate) fn parse_governed_session_host_config_v1(
         v5_admission_checkpoint_signer.clone(),
         action_request_signer.clone(),
         claim_signer.clone(),
+        action_receipt_signer.clone(),
     ] {
         replay_authorities.allow_signer(TrustSpineSignerRole::Kernel, signer);
     }
@@ -268,6 +274,7 @@ pub(crate) fn parse_governed_session_host_config_v1(
         v5_admission_checkpoint_signer,
         action_request_signer,
         claim_signer,
+        action_receipt_signer,
         broker_identity_signer,
         activity_authority,
         v5_admission_authority,
@@ -427,6 +434,7 @@ mod tests {
             ),
             "action_request": signer("kernel:model-action", "action-main", 2),
             "claim": signer("kernel:model-claim", "claim-main", 3),
+            "action_receipt": signer("kernel:action-receipt", "receipt-main", 7),
             "broker_identity": signer("broker:governed-session", "broker-main", 4),
         })
     }
@@ -449,6 +457,8 @@ mod tests {
             config.v5_admission_checkpoint_signer
         );
         assert_ne!(config.action_request_signer, config.claim_signer);
+        assert_ne!(config.claim_signer, config.action_receipt_signer);
+        assert_ne!(config.action_receipt_signer, config.broker_identity_signer);
         assert_ne!(config.claim_signer, config.broker_identity_signer);
     }
 
@@ -499,6 +509,9 @@ mod tests {
             ("v5_admission_checkpoint", "claim"),
             ("v5_admission_checkpoint", "broker_identity"),
             ("action_request", "claim"),
+            ("action_request", "action_receipt"),
+            ("claim", "action_receipt"),
+            ("action_receipt", "broker_identity"),
             ("dispatch", "broker_identity"),
             ("action_request", "broker_identity"),
             ("claim", "broker_identity"),

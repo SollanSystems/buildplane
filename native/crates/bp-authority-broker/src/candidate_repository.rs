@@ -26,6 +26,12 @@ pub(crate) struct GovernedRepositoryBindingV1 {
     origin_url_digest: Option<String>,
 }
 
+impl GovernedRepositoryBindingV1 {
+    pub(crate) fn repository_root(&self) -> &str {
+        &self.repository_root
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 enum GovernedGitObjectFormatV1 {

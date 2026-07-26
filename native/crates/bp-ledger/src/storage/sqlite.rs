@@ -47,7 +47,7 @@ use crate::payload::trust_spine::{
     governed_dispatch_policy_digest_v1, model_action_authorized_v2_digest,
     model_action_intent_v1_digest, promotion_execution_claimed_v1_digest, workflow_graph_v2_digest,
     ActionEvidenceVersionV1, ActionKindV1, ActionReceiptOutcomeV2, ActionReceiptRecordedV2,
-    ActionReceiptSetEntryV1, ActionReceiptSetRecordedV1, ActionRequestedV2,
+    ActionReceiptSetEntryV1, ActionReceiptSetRecordedV1, ActionRequestedV2, ActionResourceUsageV1,
     AttemptContextRecordedV1, CandidateAcceptanceOutcomeV1, CandidateAcceptanceRecordedV1,
     CandidateCompletionRecordedV1, CandidateCreatedV2, CandidateViewV1, CommitModeV1,
     ContextManifestDeclaredV1, DispatchEnvelopeV3, DispatchEnvelopeV4, DispatchEnvelopeV5,
@@ -573,6 +573,36 @@ pub struct GovernedCommandActionResultRequestV1 {
     pub evidence_ref: String,
 }
 
+/// Closed protected-host request to seal the succeeded command activity into
+/// the immutable action evidence consumed by candidate creation. The caller
+/// may name only the signed action request; dispatch, admission, claim, result,
+/// receipt contents, timestamps, references, and digests are reconstructed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GovernedV5CommandActionReceiptSetRequestV1 {
+    pub run_id: RunId,
+    pub action_request_event_id: EventId,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GovernedV5CommandActionReceiptSetDispositionV1 {
+    Recorded {
+        action_receipt_event_id: EventId,
+        action_receipt_ref: String,
+        action_receipt_digest: String,
+        action_receipt_set_event_id: EventId,
+        action_receipt_set_ref: String,
+        action_receipt_set_digest: String,
+    },
+    Existing {
+        action_receipt_event_id: EventId,
+        action_receipt_ref: String,
+        action_receipt_digest: String,
+        action_receipt_set_event_id: EventId,
+        action_receipt_set_ref: String,
+        action_receipt_set_digest: String,
+    },
+}
+
 /// Closed native request to create the signed intent that precedes a governed
 /// model authorization. Every identity, role, canonical input, and evidence
 /// descriptor is re-derived from signed tape plus the protected realm CAS.
@@ -673,6 +703,15 @@ pub struct ResolvedGovernedV5CandidateAuthorityV1 {
     pub dispatch_envelope_digest: String,
     pub governed_packet_digest: String,
     pub sandbox_profile_digest: String,
+}
+
+/// Restart-safe execution authority recovered from the dispatch identity in a
+/// signed candidate-session token. The action identity is selected from the
+/// signed tape, never supplied by the reconnecting client.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedGovernedV5CandidateExecutionAuthorityV1 {
+    pub candidate: ResolvedGovernedV5CandidateAuthorityV1,
+    pub action_request_event_id: EventId,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -7115,6 +7154,106 @@ impl SqliteStore {
         })
     }
 
+    pub fn resolve_governed_v5_candidate_execution_authority_v1(
+        &self,
+        run_id: RunId,
+        dispatch_event_id: EventId,
+        v5_authority: &GovernedDispatchV5AdmissionAuthorityV1,
+        activity_authority: &ActivityClaimAuthorityV1,
+    ) -> Result<ResolvedGovernedV5CandidateExecutionAuthorityV1> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Deferred)?;
+        let admission = governed_dispatch_v5_admission_by_source(&tx, run_id, dispatch_event_id)?
+            .ok_or_else(|| LedgerError::ActivityClaimAuthorityRejected {
+            reason: "candidate execution requires a recorded V5 admission for its dispatch".into(),
+        })?;
+        let material = verified_sealed_v5_dispatch_action_material(
+            &tx,
+            run_id,
+            dispatch_event_id,
+            admission.admission_event_id,
+            v5_authority,
+            activity_authority,
+        )?;
+        let dispatch = material.dispatch;
+        let governed_packet_digest = dispatch.governed_packet_digest.clone().ok_or_else(|| {
+            LedgerError::ActivityClaimAuthorityRejected {
+                reason: "candidate execution dispatch has no governed packet digest".into(),
+            }
+        })?;
+        let expected_action_id = format!(
+            "governed:{}:{}",
+            run_id,
+            material
+                .lineage_envelope_digest
+                .strip_prefix("sha256:")
+                .ok_or_else(|| LedgerError::ActivityClaimAuthorityRejected {
+                    reason: "candidate execution dispatch digest is not canonical sha256".into(),
+                })?
+        );
+        let mut statement = tx.prepare(
+            "SELECT id FROM events \
+             WHERE run_id = ?1 AND kind = ?2 AND parent_event_id = ?3 \
+             ORDER BY id ASC",
+        )?;
+        let ids = statement
+            .query_map(
+                params![
+                    run_id.to_string(),
+                    EventKind::ActionRequestedV2.as_wire(),
+                    dispatch_event_id.to_string()
+                ],
+                |row| row.get::<_, String>(0),
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        drop(statement);
+        let mut action_request_event_id = None;
+        for raw_id in ids {
+            let event_id = parse_event_id(&raw_id, "candidate execution action")?;
+            let event = load_verified_authority_event(
+                &tx,
+                event_id,
+                &activity_authority.trusted_keys,
+                &activity_authority.action_request_signer,
+                "candidate execution action",
+            )?;
+            let Payload::ActionRequestedV2(action) = event.payload else {
+                unreachable!("action-request query returns only action_requested_v2 events");
+            };
+            if action.action_id != expected_action_id {
+                continue;
+            }
+            if action_request_event_id.replace(event_id).is_some() {
+                return Err(governed_dispatch_v5_admission_reconciliation_required(
+                    run_id,
+                    &admission.idempotency_key,
+                    "candidate execution has duplicate signed action requests",
+                ));
+            }
+        }
+        let action_request_event_id =
+            action_request_event_id.ok_or_else(|| LedgerError::ActivityClaimAuthorityRejected {
+                reason: "candidate execution has no signed V5 action request".into(),
+            })?;
+        tx.commit()?;
+        Ok(ResolvedGovernedV5CandidateExecutionAuthorityV1 {
+            candidate: ResolvedGovernedV5CandidateAuthorityV1 {
+                run_id,
+                dispatch_event_id,
+                admission_event_id: admission.admission_event_id,
+                workflow_id: dispatch.body.workflow_id,
+                unit_id: dispatch.body.unit_id,
+                attempt: dispatch.body.attempt,
+                provenance_ref: dispatch.body.provenance_ref,
+                base_commit_sha: dispatch.body.base_commit_sha,
+                repository_binding_digest: dispatch.repository_binding_digest,
+                dispatch_envelope_digest: material.lineage_envelope_digest,
+                governed_packet_digest,
+                sandbox_profile_digest: dispatch.body.sandbox_profile_digest,
+            },
+            action_request_event_id,
+        })
+    }
+
     /// Claim the one fixed read-only verifier activity named by signed V3
     /// evidence. This is deliberately narrower than the generic claim API:
     /// callers can name only event references and a bounded lease, while the
@@ -7704,6 +7843,710 @@ impl SqliteStore {
             evidence_ref: request.evidence_ref.clone(),
         };
         self.record_activity_result_v1_at(&derived, authority, signing_key, signer, now)
+    }
+
+    /// Record the terminal result for a command lease whose authority comes
+    /// from a checkpoint-sealed V5 admission. The admission identity is
+    /// recovered from the claim's signed source dispatch, not supplied by the
+    /// worker reconnecting with the opaque lease.
+    pub fn record_governed_v5_command_action_result_v1(
+        &self,
+        request: &GovernedCommandActionResultRequestV1,
+        cas: &Cas,
+        v5_authority: &GovernedDispatchV5AdmissionAuthorityV1,
+        activity_authority: &ActivityClaimAuthorityV1,
+        signing_key: &SigningKey,
+        signer: &ActorKeyRef,
+    ) -> Result<ActivityResultDispositionV1> {
+        self.record_governed_v5_command_action_result_v1_at(
+            request,
+            cas,
+            v5_authority,
+            activity_authority,
+            signing_key,
+            signer,
+            Utc::now(),
+        )
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_governed_v5_command_action_result_v1_at_for_tests(
+        &self,
+        request: &GovernedCommandActionResultRequestV1,
+        cas: &Cas,
+        v5_authority: &GovernedDispatchV5AdmissionAuthorityV1,
+        activity_authority: &ActivityClaimAuthorityV1,
+        signing_key: &SigningKey,
+        signer: &ActorKeyRef,
+        now: DateTime<Utc>,
+    ) -> Result<ActivityResultDispositionV1> {
+        self.record_governed_v5_command_action_result_v1_at(
+            request,
+            cas,
+            v5_authority,
+            activity_authority,
+            signing_key,
+            signer,
+            now,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_governed_v5_command_action_result_v1_at(
+        &self,
+        request: &GovernedCommandActionResultRequestV1,
+        cas: &Cas,
+        v5_authority: &GovernedDispatchV5AdmissionAuthorityV1,
+        activity_authority: &ActivityClaimAuthorityV1,
+        signing_key: &SigningKey,
+        signer: &ActorKeyRef,
+        now: DateTime<Utc>,
+    ) -> Result<ActivityResultDispositionV1> {
+        require_protected_governed_realm(activity_authority)?;
+        validate_claim_signer(activity_authority, signing_key, signer)?;
+        if request.lease_id.trim().is_empty() {
+            return Err(LedgerError::InvalidPayload {
+                kind: "record_governed_v5_command_action_result_v1".into(),
+                reason: "lease_id must be non-empty".into(),
+            });
+        }
+        let stored = activity_claim_by_lease(&self.conn, request.run_id, &request.lease_id)?
+            .ok_or_else(|| {
+                command_action_authority_rejected(
+                    "V5 command result lease does not name a signed activity claim",
+                )
+            })?;
+        let signed_claim = verify_signed_claim_projection(&self.conn, &stored, activity_authority)?;
+        if stored.action_kind != ActionKindV1::Process
+            || signed_claim.purpose != ActivityClaimPurposeV1::GovernedCommandActionV1
+        {
+            return Err(command_action_authority_rejected(
+                "V5 command result requires a protected process-command lease",
+            ));
+        }
+        let admission = governed_dispatch_v5_admission_by_source(
+            &self.conn,
+            request.run_id,
+            stored.dispatch_event_id,
+        )?
+        .ok_or_else(|| {
+            command_action_authority_rejected(
+                "V5 command result requires a recorded admission for its source dispatch",
+            )
+        })?;
+        let claimed_at = parse_claim_timestamp(&signed_claim.claimed_at)?;
+        let reconstruction_request = GovernedCommandActionAuthorizeAndClaimRequestV1 {
+            run_id: stored.run_id,
+            dispatch_event_id: stored.dispatch_event_id,
+            action_request_event_id: stored.action_request_event_id,
+            lease_duration_ms: stored.lease_duration_ms,
+        };
+        let (derived_claim, _) = reconstruct_governed_v5_command_action(
+            &self.conn,
+            &reconstruction_request,
+            admission.admission_event_id,
+            cas,
+            v5_authority,
+            activity_authority,
+            claimed_at,
+        )?;
+        if derived_claim.activity_id != stored.activity_id
+            || derived_claim.idempotency_key != stored.idempotency_key
+            || derived_claim.dispatch_event_id != stored.dispatch_event_id
+            || derived_claim.action_request_event_id != stored.action_request_event_id
+        {
+            return Err(command_action_authority_rejected(
+                "V5 command result lease does not match reconstructed admission authority",
+            ));
+        }
+        if !activity_heartbeats_for_claim(&self.conn, stored.run_id, stored.claim_event_id)?
+            .is_empty()
+        {
+            return Err(command_action_authority_rejected(
+                "V5 command result does not admit heartbeat-extended leases",
+            ));
+        }
+        let derived = ActivityResultRequestV1 {
+            run_id: request.run_id,
+            activity_id: stored.activity_id.clone(),
+            idempotency_key: stored.idempotency_key.clone(),
+            lease_id: request.lease_id.clone(),
+            outcome: request.outcome,
+            result_digest: request.result_digest.clone(),
+            result_ref: request.result_ref.clone(),
+            evidence_digest: request.evidence_digest.clone(),
+            evidence_ref: request.evidence_ref.clone(),
+        };
+        validate_activity_result_request(&derived)?;
+
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let current = activity_claim_by_idempotency(&tx, request.run_id, &stored.idempotency_key)?
+            .ok_or_else(|| LedgerError::ActivityClaimNotFound {
+                run_id: request.run_id.to_string(),
+                idempotency_key: stored.idempotency_key.clone(),
+            })?;
+        verify_signed_claim_projection(&tx, &current, activity_authority)?;
+        if current.claim_event_id != stored.claim_event_id
+            || current.claim_event_digest != stored.claim_event_digest
+            || current.activity_id != stored.activity_id
+            || current.action_request_event_id != stored.action_request_event_id
+            || current.dispatch_event_id != stored.dispatch_event_id
+            || current.lease_id != stored.lease_id
+            || current.lease_expires_at != stored.lease_expires_at
+        {
+            return Err(command_action_authority_rejected(
+                "V5 command result claim projection changed during authority reconstruction",
+            ));
+        }
+        if current.state == StoredActivityClaimState::Recorded {
+            verify_signed_activity_result_projection(&tx, &current, activity_authority)?;
+            let disposition = existing_result_disposition(&current, &derived)?;
+            tx.commit()?;
+            return Ok(disposition);
+        }
+        if current.lease_id != request.lease_id {
+            return Err(LedgerError::ActivityClaimLeaseMismatch {
+                run_id: request.run_id.to_string(),
+                idempotency_key: current.idempotency_key,
+            });
+        }
+        let lease_expires_at = parse_claim_timestamp(&current.lease_expires_at)?;
+        if now >= lease_expires_at && request.outcome != ActivityResultOutcomeV1::Unknown {
+            tx.commit()?;
+            return Ok(ActivityResultDispositionV1::LeaseExpired {
+                claim_event_id: current.claim_event_id,
+                lease_expires_at: timestamp(lease_expires_at),
+            });
+        }
+
+        let now = canonical_ledger_timestamp(now)?;
+        let recorded_at = timestamp(now);
+        let event = canonicalize(Event {
+            id: EventId::new(),
+            run_id: request.run_id,
+            parent_event_id: Some(current.claim_event_id),
+            schema_version: Event::CURRENT_SCHEMA_VERSION,
+            kind: EventKind::ActivityResultRecordedV1,
+            occurred_at: now,
+            payload: Payload::ActivityResultRecordedV1(ActivityResultRecordedV1 {
+                run_id: request.run_id,
+                activity_id: current.activity_id.clone(),
+                idempotency_key: current.idempotency_key.clone(),
+                claim_event_id: current.claim_event_id,
+                claim_event_digest: current.claim_event_digest.clone(),
+                lease_id: request.lease_id.clone(),
+                outcome: request.outcome,
+                result_digest: request.result_digest.clone(),
+                result_ref: request.result_ref.clone(),
+                evidence_digest: request.evidence_digest.clone(),
+                evidence_ref: request.evidence_ref.clone(),
+                recorded_at: recorded_at.clone(),
+            }),
+        })?;
+        validate_new_ordinary_event_id(&tx, &event)?;
+        let signature = sign_event(&event, signing_key, signer, now)?;
+        let result_event_digest = signature.canonical_event_hash.clone();
+        insert_event(&tx, &event)?;
+        insert_event_signature(&tx, &signature)?;
+        let updated = tx.execute(
+            r#"UPDATE activity_claims
+               SET state = 'recorded',
+                   result_event_id = ?1,
+                   result_event_digest = ?2,
+                   result_outcome = ?3,
+                   result_digest = ?4,
+                   result_ref = ?5,
+                   evidence_digest = ?6,
+                   evidence_ref = ?7,
+                   recorded_at = ?8
+               WHERE run_id = ?9 AND idempotency_key = ?10 AND state = 'granted'"#,
+            params![
+                event.id.to_string(),
+                &result_event_digest,
+                activity_result_outcome_wire(request.outcome),
+                &request.result_digest,
+                &request.result_ref,
+                &request.evidence_digest,
+                &request.evidence_ref,
+                &recorded_at,
+                request.run_id.to_string(),
+                &current.idempotency_key,
+            ],
+        )?;
+        if updated != 1 {
+            return Err(command_action_authority_rejected(
+                "V5 command result did not close exactly one granted lease",
+            ));
+        }
+        tx.commit()?;
+        self.record_ordinary_append(&event);
+        Ok(ActivityResultDispositionV1::Recorded {
+            result_event_id: event.id,
+            result_event_digest,
+            outcome: request.outcome,
+        })
+    }
+
+    /// Convert one succeeded, checkpoint-admitted V5 command into the exact
+    /// immutable receipt evidence required before candidate creation.
+    ///
+    /// Both records are appended atomically. An exact retry returns the
+    /// existing pair; a partial, duplicated, or substituted pair requires
+    /// reconciliation and never appends replacement evidence.
+    #[allow(clippy::too_many_arguments)]
+    pub fn seal_succeeded_governed_v5_command_action_receipt_set_v1(
+        &self,
+        request: &GovernedV5CommandActionReceiptSetRequestV1,
+        cas: &Cas,
+        v5_authority: &GovernedDispatchV5AdmissionAuthorityV1,
+        activity_authority: &ActivityClaimAuthorityV1,
+        signing_key: &SigningKey,
+        receipt_signer: &ActorKeyRef,
+    ) -> Result<GovernedV5CommandActionReceiptSetDispositionV1> {
+        self.seal_succeeded_governed_v5_command_action_receipt_set_v1_at(
+            request,
+            cas,
+            v5_authority,
+            activity_authority,
+            signing_key,
+            receipt_signer,
+            Utc::now(),
+        )
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    #[allow(clippy::too_many_arguments)]
+    pub fn seal_succeeded_governed_v5_command_action_receipt_set_v1_at_for_tests(
+        &self,
+        request: &GovernedV5CommandActionReceiptSetRequestV1,
+        cas: &Cas,
+        v5_authority: &GovernedDispatchV5AdmissionAuthorityV1,
+        activity_authority: &ActivityClaimAuthorityV1,
+        signing_key: &SigningKey,
+        receipt_signer: &ActorKeyRef,
+        now: DateTime<Utc>,
+    ) -> Result<GovernedV5CommandActionReceiptSetDispositionV1> {
+        self.seal_succeeded_governed_v5_command_action_receipt_set_v1_at(
+            request,
+            cas,
+            v5_authority,
+            activity_authority,
+            signing_key,
+            receipt_signer,
+            now,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn seal_succeeded_governed_v5_command_action_receipt_set_v1_at(
+        &self,
+        request: &GovernedV5CommandActionReceiptSetRequestV1,
+        cas: &Cas,
+        v5_authority: &GovernedDispatchV5AdmissionAuthorityV1,
+        activity_authority: &ActivityClaimAuthorityV1,
+        signing_key: &SigningKey,
+        receipt_signer: &ActorKeyRef,
+        now: DateTime<Utc>,
+    ) -> Result<GovernedV5CommandActionReceiptSetDispositionV1> {
+        require_protected_governed_realm(activity_authority)?;
+        validate_governed_action_receipt_signer(activity_authority, signing_key, receipt_signer)?;
+        let signed_at = canonical_ledger_timestamp(now)?;
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let action_event = load_verified_authority_event(
+            &tx,
+            request.action_request_event_id,
+            &activity_authority.trusted_keys,
+            &activity_authority.action_request_signer,
+            "V5 command receipt action request",
+        )?;
+        if action_event.run_id != request.run_id {
+            return Err(action_receipt_authority_rejected(
+                "command receipt action request belongs to another run",
+            ));
+        }
+        let dispatch_event_id = action_event.parent_event_id.ok_or_else(|| {
+            action_receipt_authority_rejected(
+                "command receipt action request has no parent dispatch",
+            )
+        })?;
+        let Payload::ActionRequestedV2(action) = &action_event.payload else {
+            return Err(action_receipt_authority_rejected(
+                "command receipt requires a signed action_requested_v2 event",
+            ));
+        };
+        let action = action.clone();
+        if action.action_kind != ActionKindV1::Process
+            || action.execution_role != ExecutionRoleV1::Implementer
+            || action.authority_actor != activity_authority.action_request_signer.actor_id
+        {
+            return Err(action_receipt_authority_rejected(
+                "command receipt action is not a protected implementer process action",
+            ));
+        }
+        let admission =
+            governed_dispatch_v5_admission_by_source(&tx, request.run_id, dispatch_event_id)?
+                .ok_or_else(|| {
+                    action_receipt_authority_rejected(
+                        "command receipt requires a recorded V5 admission for its dispatch",
+                    )
+                })?;
+        let dispatch_material = verified_sealed_v5_dispatch_action_material(
+            &tx,
+            request.run_id,
+            dispatch_event_id,
+            admission.admission_event_id,
+            v5_authority,
+            activity_authority,
+        )?;
+        let requested_at = parse_claim_timestamp(&action.requested_at).map_err(|_| {
+            action_receipt_authority_rejected(
+                "command receipt action timestamp is not canonical RFC3339 UTC",
+            )
+        })?;
+        let reconstruction_request = GovernedCommandActionAuthorizeAndClaimRequestV1 {
+            run_id: request.run_id,
+            dispatch_event_id,
+            action_request_event_id: request.action_request_event_id,
+            lease_duration_ms: MIN_ACTIVITY_LEASE_MS,
+        };
+        let (derived_claim, _) = reconstruct_governed_v5_command_action_in_tx(
+            &tx,
+            &reconstruction_request,
+            admission.admission_event_id,
+            cas,
+            v5_authority,
+            activity_authority,
+            requested_at,
+        )
+        .map_err(|error| {
+            action_receipt_authority_rejected(format!(
+                "command receipt could not reconstruct signed V5 command authority: {error}"
+            ))
+        })?;
+        if derived_claim.activity_id != action.action_id
+            || derived_claim.idempotency_key != action.idempotency_key
+            || dispatch_material.lineage_envelope_digest != action.dispatch_envelope_digest
+        {
+            return Err(action_receipt_authority_rejected(
+                "command receipt reconstruction changed immutable action identity",
+            ));
+        }
+        let action_request_digest = action_requested_v2_digest(&action).map_err(|error| {
+            action_receipt_authority_rejected(format!(
+                "command receipt could not canonicalize its action request: {error}"
+            ))
+        })?;
+
+        let claim_event = unique_signed_child_event(
+            &tx,
+            request.run_id,
+            request.action_request_event_id,
+            EventKind::ActivityClaimedV1,
+            activity_authority,
+            &activity_authority.claim_signer,
+            &action.action_id,
+            "V5 command receipt activity claim",
+        )?;
+        let Payload::ActivityClaimedV1(claim) = &claim_event.payload else {
+            unreachable!("activity-claim query returns only ActivityClaimedV1")
+        };
+        let claim = claim.clone();
+        let claim_event_digest = canonical_event_hash(&claim_event).map_err(|error| {
+            action_receipt_authority_rejected(format!(
+                "command receipt could not canonicalize its activity claim: {error}"
+            ))
+        })?;
+        if claim.run_id != request.run_id
+            || claim.activity_id != action.action_id
+            || claim.idempotency_key != action.idempotency_key
+            || claim.action_kind != ActionKindV1::Process
+            || claim.action_request_event_id != request.action_request_event_id
+            || claim.action_request_digest != action_request_digest
+            || claim.dispatch_event_id != dispatch_event_id
+            || claim.dispatch_envelope_digest != action.dispatch_envelope_digest
+            || claim.authority_actor != activity_authority.claim_signer.actor_id
+            || claim.purpose != ActivityClaimPurposeV1::GovernedCommandActionV1
+            || !tape_event_precedes(&action_event, &claim_event)
+        {
+            return Err(action_receipt_authority_rejected(
+                "command receipt claim does not exactly bind its signed action",
+            ));
+        }
+        let claimed_at = parse_claim_timestamp(&claim.claimed_at).map_err(|_| {
+            action_receipt_authority_rejected(
+                "command receipt claim timestamp is not canonical RFC3339 UTC",
+            )
+        })?;
+        let lease_expires_at = parse_claim_timestamp(&claim.lease_expires_at).map_err(|_| {
+            action_receipt_authority_rejected(
+                "command receipt lease expiry is not canonical RFC3339 UTC",
+            )
+        })?;
+
+        let result_event = unique_signed_child_event(
+            &tx,
+            request.run_id,
+            claim_event.id,
+            EventKind::ActivityResultRecordedV1,
+            activity_authority,
+            &activity_authority.claim_signer,
+            &action.action_id,
+            "V5 command receipt activity result",
+        )?;
+        let Payload::ActivityResultRecordedV1(result) = &result_event.payload else {
+            unreachable!("activity-result query returns only ActivityResultRecordedV1")
+        };
+        let result = result.clone();
+        let recorded_at = parse_claim_timestamp(&result.recorded_at).map_err(|_| {
+            action_receipt_authority_rejected(
+                "command receipt result timestamp is not canonical RFC3339 UTC",
+            )
+        })?;
+        if result.run_id != request.run_id
+            || result.activity_id != action.action_id
+            || result.idempotency_key != action.idempotency_key
+            || result.claim_event_id != claim_event.id
+            || result.claim_event_digest != claim_event_digest
+            || result.lease_id != claim.lease_id
+            || result.outcome != ActivityResultOutcomeV1::Succeeded
+            || result.result_digest.is_none()
+            || result.result_ref.is_none()
+            || recorded_at != result_event.occurred_at
+            || recorded_at < claimed_at
+            || recorded_at >= lease_expires_at
+            || !tape_event_precedes(&claim_event, &result_event)
+        {
+            return Err(action_receipt_authority_rejected(
+                "command receipt requires one succeeded result inside its exact signed lease",
+            ));
+        }
+        let canonical_input = cas
+            .get_verified_canonical_bytes(
+                &action.canonical_input_ref,
+                &action.canonical_input_digest,
+            )
+            .map_err(|error| {
+                action_receipt_authority_rejected(format!(
+                    "command receipt canonical input is unavailable or corrupt: {error}"
+                ))
+            })?;
+        let evidence = cas
+            .get_verified_canonical_bytes(&result.evidence_ref, &result.evidence_digest)
+            .map_err(|error| {
+                action_receipt_authority_rejected(format!(
+                    "command receipt terminal evidence is unavailable or corrupt: {error}"
+                ))
+            })?;
+        if let (Some(result_ref), Some(result_digest)) = (
+            result.result_ref.as_deref(),
+            result.result_digest.as_deref(),
+        ) {
+            cas.get_verified_canonical_bytes(result_ref, result_digest)
+                .map_err(|error| {
+                    action_receipt_authority_rejected(format!(
+                        "command receipt result evidence is unavailable or corrupt: {error}"
+                    ))
+                })?;
+        }
+
+        let result_event_digest = canonical_event_hash(&result_event).map_err(|error| {
+            action_receipt_authority_rejected(format!(
+                "command receipt could not canonicalize its activity result: {error}"
+            ))
+        })?;
+        let action_receipt_ref = governed_action_receipt_ref_v1(
+            request.run_id,
+            &action.action_id,
+            &action_request_digest,
+            &result_event_digest,
+        );
+        let wall_time_ms = recorded_at
+            .signed_duration_since(claimed_at)
+            .num_milliseconds()
+            .try_into()
+            .map_err(|_| {
+                action_receipt_authority_rejected(
+                    "command receipt signed activity duration is outside the supported range",
+                )
+            })?;
+        let input_bytes = u64::try_from(canonical_input.len()).map_err(|_| {
+            action_receipt_authority_rejected(
+                "command receipt canonical input length is outside the supported range",
+            )
+        })?;
+        let output_bytes = u64::try_from(evidence.len()).map_err(|_| {
+            action_receipt_authority_rejected(
+                "command receipt evidence length is outside the supported range",
+            )
+        })?;
+        let receipt = ActionReceiptRecordedV2 {
+            run_id: action.run_id.clone(),
+            workflow_id: action.workflow_id.clone(),
+            unit_id: action.unit_id.clone(),
+            attempt: action.attempt,
+            provenance_ref: action.provenance_ref.clone(),
+            action_id: action.action_id.clone(),
+            idempotency_key: action.idempotency_key.clone(),
+            action_request_digest,
+            dispatch_envelope_digest: action.dispatch_envelope_digest.clone(),
+            capability_bundle_digest: action.capability_bundle_digest.clone(),
+            policy_digest: action.policy_digest.clone(),
+            context_manifest_digest: action.context_manifest_digest.clone(),
+            worker_manifest_digest: action.worker_manifest_digest.clone(),
+            sandbox_profile_digest: action.sandbox_profile_digest.clone(),
+            authority_actor: action.authority_actor.clone(),
+            execution_role: action.execution_role,
+            outcome: ActionReceiptOutcomeV2::Succeeded,
+            result_digest: result.result_digest.clone(),
+            result_ref: result.result_ref.clone(),
+            evidence_digest: result.evidence_digest.clone(),
+            evidence_ref: result.evidence_ref.clone(),
+            resource_usage: ActionResourceUsageV1 {
+                wall_time_ms,
+                cpu_time_ms: None,
+                peak_memory_bytes: None,
+                input_bytes: Some(input_bytes),
+                output_bytes: Some(output_bytes),
+                input_tokens: None,
+                output_tokens: None,
+            },
+            redactions: Vec::new(),
+            failure: None,
+            authorization_ref: None,
+            action_receipt_ref,
+            completed_at: result.recorded_at.clone(),
+        };
+        let action_receipt_digest =
+            action_receipt_recorded_v2_digest(&receipt).map_err(|error| {
+                action_receipt_authority_rejected(format!(
+                    "command receipt could not derive its canonical digest: {error}"
+                ))
+            })?;
+        let action_receipt_set_ref = governed_action_receipt_set_ref_v1(
+            request.run_id,
+            &action.dispatch_envelope_digest,
+            &action_receipt_digest,
+        );
+        let mut receipt_set = ActionReceiptSetRecordedV1 {
+            run_id: action.run_id.clone(),
+            workflow_id: action.workflow_id.clone(),
+            unit_id: action.unit_id.clone(),
+            attempt: action.attempt,
+            provenance_ref: action.provenance_ref.clone(),
+            dispatch_envelope_digest: action.dispatch_envelope_digest.clone(),
+            action_receipt_set_ref,
+            action_receipt_set_digest: String::new(),
+            receipts: vec![ActionReceiptSetEntryV1 {
+                action_id: action.action_id.clone(),
+                action_receipt_ref: receipt.action_receipt_ref.clone(),
+                action_receipt_digest: action_receipt_digest.clone(),
+            }],
+            sealed_at: result.recorded_at.clone(),
+        };
+        receipt_set.action_receipt_set_digest = action_receipt_set_v1_digest(&receipt_set)
+            .map_err(|error| {
+                action_receipt_authority_rejected(format!(
+                    "command receipt set could not derive its canonical digest: {error}"
+                ))
+            })?;
+
+        let existing_receipt = matching_signed_action_receipt(
+            &tx,
+            request.run_id,
+            receipt_signer,
+            activity_authority,
+            &action.action_id,
+        )?;
+        let existing_set = matching_signed_action_receipt_set(
+            &tx,
+            request.run_id,
+            receipt_signer,
+            activity_authority,
+            &action,
+        )?;
+        match (existing_receipt, existing_set) {
+            (Some(receipt_event), Some(receipt_set_event)) => {
+                let Payload::ActionReceiptRecordedV2(existing_receipt) = &receipt_event.payload
+                else {
+                    unreachable!("receipt matcher returns only ActionReceiptRecordedV2")
+                };
+                let Payload::ActionReceiptSetRecordedV1(existing_set) = &receipt_set_event.payload
+                else {
+                    unreachable!("receipt-set matcher returns only ActionReceiptSetRecordedV1")
+                };
+                if existing_receipt != &receipt
+                    || existing_set != &receipt_set
+                    || receipt_event.parent_event_id != Some(result_event.id)
+                    || receipt_set_event.parent_event_id != Some(receipt_event.id)
+                    || !tape_event_precedes(&result_event, &receipt_event)
+                    || !tape_event_precedes(&receipt_event, &receipt_set_event)
+                {
+                    return Err(action_receipt_reconciliation_required(
+                        request.run_id,
+                        &action.action_id,
+                        "existing receipt evidence conflicts with the reconstructed command result",
+                    ));
+                }
+                tx.commit()?;
+                return Ok(GovernedV5CommandActionReceiptSetDispositionV1::Existing {
+                    action_receipt_event_id: receipt_event.id,
+                    action_receipt_ref: receipt.action_receipt_ref,
+                    action_receipt_digest,
+                    action_receipt_set_event_id: receipt_set_event.id,
+                    action_receipt_set_ref: receipt_set.action_receipt_set_ref,
+                    action_receipt_set_digest: receipt_set.action_receipt_set_digest,
+                });
+            }
+            (None, None) => {}
+            _ => {
+                return Err(action_receipt_reconciliation_required(
+                    request.run_id,
+                    &action.action_id,
+                    "receipt and receipt-set evidence are only partially recorded",
+                ))
+            }
+        }
+
+        let receipt_event = canonicalize(Event {
+            id: EventId::new(),
+            run_id: request.run_id,
+            parent_event_id: Some(result_event.id),
+            schema_version: Event::CURRENT_SCHEMA_VERSION,
+            kind: EventKind::ActionReceiptRecordedV2,
+            occurred_at: recorded_at,
+            payload: Payload::ActionReceiptRecordedV2(receipt.clone()),
+        })?;
+        validate_new_ordinary_event_id(&tx, &receipt_event)?;
+        let receipt_signature = sign_event(&receipt_event, signing_key, receipt_signer, signed_at)?;
+        insert_event(&tx, &receipt_event)?;
+        insert_event_signature(&tx, &receipt_signature)?;
+
+        let receipt_set_event = canonicalize(Event {
+            id: EventId::new(),
+            run_id: request.run_id,
+            parent_event_id: Some(receipt_event.id),
+            schema_version: Event::CURRENT_SCHEMA_VERSION,
+            kind: EventKind::ActionReceiptSetRecordedV1,
+            occurred_at: recorded_at,
+            payload: Payload::ActionReceiptSetRecordedV1(receipt_set.clone()),
+        })?;
+        validate_new_ordinary_event_id(&tx, &receipt_set_event)?;
+        let receipt_set_signature =
+            sign_event(&receipt_set_event, signing_key, receipt_signer, signed_at)?;
+        insert_event(&tx, &receipt_set_event)?;
+        insert_event_signature(&tx, &receipt_set_signature)?;
+        tx.commit()?;
+        self.record_ordinary_append(&receipt_event);
+        self.record_ordinary_append(&receipt_set_event);
+        Ok(GovernedV5CommandActionReceiptSetDispositionV1::Recorded {
+            action_receipt_event_id: receipt_event.id,
+            action_receipt_ref: receipt.action_receipt_ref,
+            action_receipt_digest,
+            action_receipt_set_event_id: receipt_set_event.id,
+            action_receipt_set_ref: receipt_set.action_receipt_set_ref,
+            action_receipt_set_digest: receipt_set.action_receipt_set_digest,
+        })
     }
 
     /// Append one already-derived checkpoint inside the caller's transaction.
@@ -8649,6 +9492,238 @@ fn validate_action_request_signer(
     Ok(())
 }
 
+fn validate_governed_action_receipt_signer(
+    authority: &ActivityClaimAuthorityV1,
+    signing_key: &SigningKey,
+    signer: &ActorKeyRef,
+) -> Result<()> {
+    validate_trusted_actor("action receipt signer", signer)
+        .map_err(|error| action_receipt_authority_rejected(error.to_string()))?;
+    let actual_public_key_hash = public_key_hash(&signing_key.verifying_key());
+    let trusted_bytes = authority
+        .trusted_keys
+        .public_key_for(signer)
+        .ok_or_else(|| action_receipt_authority_rejected("action receipt signer is not trusted"))?;
+    if signer.public_key_hash.as_deref() != Some(actual_public_key_hash.as_str())
+        || trusted_bytes != signing_key.verifying_key().as_bytes()
+        || actor_matches(signer, &authority.dispatch_signer)
+        || actor_matches(signer, &authority.action_request_signer)
+        || actor_matches(signer, &authority.claim_signer)
+    {
+        return Err(action_receipt_authority_rejected(
+            "action receipt signer must be one distinct trusted protected-host identity",
+        ));
+    }
+    Ok(())
+}
+
+fn action_receipt_authority_rejected(reason: impl Into<String>) -> LedgerError {
+    LedgerError::ActionReceiptAuthorityRejected {
+        reason: reason.into(),
+    }
+}
+
+fn action_receipt_reconciliation_required(
+    run_id: RunId,
+    action_id: &str,
+    reason: impl Into<String>,
+) -> LedgerError {
+    LedgerError::ActionReceiptReconciliationRequired {
+        run_id: run_id.to_string(),
+        action_id: action_id.into(),
+        reason: reason.into(),
+    }
+}
+
+fn governed_action_receipt_ref_v1(
+    run_id: RunId,
+    action_id: &str,
+    action_request_digest: &str,
+    result_event_digest: &str,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"buildplane.governed-action-receipt-ref.v1\0");
+    let run_id = run_id.to_string();
+    for value in [
+        run_id.as_str(),
+        action_id,
+        action_request_digest,
+        result_event_digest,
+    ] {
+        hasher.update((value.len() as u64).to_be_bytes());
+        hasher.update(value.as_bytes());
+    }
+    format!(
+        "buildplane:action-receipt:v2:sha256:{:x}",
+        hasher.finalize()
+    )
+}
+
+fn governed_action_receipt_set_ref_v1(
+    run_id: RunId,
+    dispatch_envelope_digest: &str,
+    action_receipt_digest: &str,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"buildplane.governed-action-receipt-set-ref.v1\0");
+    let run_id = run_id.to_string();
+    for value in [
+        run_id.as_str(),
+        dispatch_envelope_digest,
+        action_receipt_digest,
+    ] {
+        hasher.update((value.len() as u64).to_be_bytes());
+        hasher.update(value.as_bytes());
+    }
+    format!(
+        "buildplane:action-receipt-set:v1:sha256:{:x}",
+        hasher.finalize()
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn unique_signed_child_event(
+    conn: &Connection,
+    run_id: RunId,
+    parent_event_id: EventId,
+    kind: EventKind,
+    authority: &ActivityClaimAuthorityV1,
+    signer: &ActorKeyRef,
+    action_id: &str,
+    label: &str,
+) -> Result<Event> {
+    let mut statement = conn.prepare(
+        "SELECT id FROM events \
+         WHERE run_id = ?1 AND kind = ?2 AND parent_event_id = ?3 \
+         ORDER BY id ASC",
+    )?;
+    let ids = statement
+        .query_map(
+            params![
+                run_id.to_string(),
+                kind.as_wire(),
+                parent_event_id.to_string()
+            ],
+            |row| row.get::<_, String>(0),
+        )?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    drop(statement);
+    let [raw_id] = ids.as_slice() else {
+        return if ids.is_empty() {
+            Err(action_receipt_authority_rejected(format!(
+                "{label} is missing"
+            )))
+        } else {
+            Err(action_receipt_reconciliation_required(
+                run_id,
+                action_id,
+                format!("{label} has duplicate signed children"),
+            ))
+        };
+    };
+    let event_id = parse_event_id(raw_id, label)?;
+    load_verified_authority_event(conn, event_id, &authority.trusted_keys, signer, label).map_err(
+        |error| action_receipt_authority_rejected(format!("{label} is not trusted: {error}")),
+    )
+}
+
+fn signed_events_for_run_kind_by_signer(
+    conn: &Connection,
+    run_id: RunId,
+    kind: EventKind,
+    authority: &ActivityClaimAuthorityV1,
+    signer: &ActorKeyRef,
+    label: &str,
+) -> Result<Vec<Event>> {
+    let mut statement =
+        conn.prepare("SELECT id FROM events WHERE run_id = ?1 AND kind = ?2 ORDER BY id ASC")?;
+    let ids = statement
+        .query_map(params![run_id.to_string(), kind.as_wire()], |row| {
+            row.get::<_, String>(0)
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    drop(statement);
+    ids.into_iter()
+        .map(|raw_id| {
+            let event_id = parse_event_id(&raw_id, label)?;
+            load_verified_authority_event(conn, event_id, &authority.trusted_keys, signer, label)
+                .map_err(|error| {
+                    action_receipt_authority_rejected(format!("{label} is not trusted: {error}"))
+                })
+        })
+        .collect()
+}
+
+fn matching_signed_action_receipt(
+    conn: &Connection,
+    run_id: RunId,
+    receipt_signer: &ActorKeyRef,
+    authority: &ActivityClaimAuthorityV1,
+    action_id: &str,
+) -> Result<Option<Event>> {
+    let mut matching = signed_events_for_run_kind_by_signer(
+        conn,
+        run_id,
+        EventKind::ActionReceiptRecordedV2,
+        authority,
+        receipt_signer,
+        "V5 command action receipt",
+    )?
+    .into_iter()
+    .filter(|event| {
+        matches!(
+            &event.payload,
+            Payload::ActionReceiptRecordedV2(receipt) if receipt.action_id == action_id
+        )
+    });
+    let first = matching.next();
+    if matching.next().is_some() {
+        return Err(action_receipt_reconciliation_required(
+            run_id,
+            action_id,
+            "multiple signed receipts name the same action",
+        ));
+    }
+    Ok(first)
+}
+
+fn matching_signed_action_receipt_set(
+    conn: &Connection,
+    run_id: RunId,
+    receipt_signer: &ActorKeyRef,
+    authority: &ActivityClaimAuthorityV1,
+    action: &ActionRequestedV2,
+) -> Result<Option<Event>> {
+    let mut matching = signed_events_for_run_kind_by_signer(
+        conn,
+        run_id,
+        EventKind::ActionReceiptSetRecordedV1,
+        authority,
+        receipt_signer,
+        "V5 command action receipt set",
+    )?
+    .into_iter()
+    .filter(|event| {
+        matches!(
+            &event.payload,
+            Payload::ActionReceiptSetRecordedV1(set)
+                if set.workflow_id == action.workflow_id
+                    && set.unit_id == action.unit_id
+                    && set.attempt == action.attempt
+                    && set.dispatch_envelope_digest == action.dispatch_envelope_digest
+        )
+    });
+    let first = matching.next();
+    if matching.next().is_some() {
+        return Err(action_receipt_reconciliation_required(
+            run_id,
+            &action.action_id,
+            "multiple signed receipt sets name the same workflow attempt",
+        ));
+    }
+    Ok(first)
+}
+
 fn require_protected_governed_realm(authority: &ActivityClaimAuthorityV1) -> Result<()> {
     if authority.ledger_authority_realm_digest.is_none() {
         return Err(LedgerError::ActivityClaimAuthorityRejected {
@@ -9522,14 +10597,40 @@ fn reconstruct_governed_v5_command_action(
     VerifiedCommandIntentEvidenceDocumentV1,
 )> {
     let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
-    let reconstructed = reconstruct_governed_command_action_with_verifier(
+    let reconstructed = reconstruct_governed_v5_command_action_in_tx(
         &tx,
+        request,
+        admission_event_id,
+        cas,
+        v5_authority,
+        activity_authority,
+        now,
+    )?;
+    tx.commit()?;
+    Ok(reconstructed)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn reconstruct_governed_v5_command_action_in_tx(
+    tx: &Transaction<'_>,
+    request: &GovernedCommandActionAuthorizeAndClaimRequestV1,
+    admission_event_id: EventId,
+    cas: &Cas,
+    v5_authority: &GovernedDispatchV5AdmissionAuthorityV1,
+    activity_authority: &ActivityClaimAuthorityV1,
+    now: DateTime<Utc>,
+) -> Result<(
+    ActivityClaimRequestV1,
+    VerifiedCommandIntentEvidenceDocumentV1,
+)> {
+    let reconstructed = reconstruct_governed_command_action_with_verifier(
+        tx,
         request,
         cas,
         activity_authority,
         |claim| {
             let dispatch_material = verified_sealed_v5_dispatch_action_material(
-                &tx,
+                tx,
                 claim.run_id,
                 claim.dispatch_event_id,
                 admission_event_id,
@@ -9537,14 +10638,14 @@ fn reconstruct_governed_v5_command_action(
                 activity_authority,
             )?;
             let dispatch_event = load_verified_authority_event(
-                &tx,
+                tx,
                 claim.dispatch_event_id,
                 &activity_authority.trusted_keys,
                 &activity_authority.dispatch_signer,
                 "sealed V5 command reconstruction dispatch",
             )?;
             verify_claim_evidence_from_dispatch_material(
-                &tx,
+                tx,
                 claim,
                 activity_authority,
                 now,
@@ -9559,7 +10660,6 @@ fn reconstruct_governed_v5_command_action(
             Ok(())
         },
     )?;
-    tx.commit()?;
     Ok(reconstructed)
 }
 

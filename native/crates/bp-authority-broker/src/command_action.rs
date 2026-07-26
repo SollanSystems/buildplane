@@ -386,15 +386,23 @@ impl CommandAuthorityBackend for LedgerV5CommandAuthorityBackend<'_> {
         lease_id: String,
         completion: CommandGatewayCompletion,
     ) -> Result<CommandResultDisposition, CommandAuthorityError> {
-        record_command_result(
-            self.store,
+        let disposition = self.store.record_governed_v5_command_action_result_v1(
+            &GovernedCommandActionResultRequestV1 {
+                run_id,
+                lease_id,
+                outcome: completion.outcome,
+                result_digest: completion.result_digest,
+                result_ref: completion.result_ref,
+                evidence_digest: completion.evidence_digest,
+                evidence_ref: completion.evidence_ref,
+            },
+            self.cas,
+            self.v5_authority,
             self.activity_authority,
             self.signing_key,
             self.signer,
-            run_id,
-            lease_id,
-            completion,
-        )
+        )?;
+        Ok(command_result_disposition(run_id, disposition))
     }
 }
 
@@ -450,14 +458,21 @@ fn record_command_result(
         signing_key,
         signer,
     )?;
-    Ok(match disposition {
+    Ok(command_result_disposition(run_id, disposition))
+}
+
+fn command_result_disposition(
+    run_id: RunId,
+    disposition: ActivityResultDispositionV1,
+) -> CommandResultDisposition {
+    match disposition {
         ActivityResultDispositionV1::Recorded { outcome, .. } => {
             CommandResultDisposition::Recorded { run_id, outcome }
         }
         ActivityResultDispositionV1::LeaseExpired { .. } => {
             CommandResultDisposition::LeaseExpired { run_id }
         }
-    })
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
