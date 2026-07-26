@@ -20,6 +20,12 @@ use crate::host_ledger_custody::{
 #[cfg(target_os = "linux")]
 use crate::promotion_decision_handler::handle_authenticated_promotion_decision_request;
 #[cfg(target_os = "linux")]
+use crate::promotion_decision_handler::HandledPromotionDecisionV1;
+use crate::promotion_decision_response::{
+    sign_promotion_decision_response, PromotionDecisionResponseBindingV1,
+    PromotionDecisionResponseStatusV1,
+};
+#[cfg(target_os = "linux")]
 use crate::ProtectedPromotionDecisionAuthority;
 
 #[cfg(target_os = "linux")]
@@ -36,15 +42,12 @@ use std::path::Path;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
-const SEALED_RESPONSE_JSON: &[u8] = br#"{"schema_version":1,"status":"sealed"}"#;
-const RECONCILIATION_REQUIRED_RESPONSE_JSON: &[u8] =
-    br#"{"schema_version":1,"status":"reconciliation_required"}"#;
 const PROMOTION_DECISION_LISTENER_FD: libc::c_int = 3;
 const PROMOTION_DECISION_SOCKET_PATH: &str =
     "/run/buildplane/authority-host/promotion-decision-v1.sock";
 const LISTENER_PARENT_COMPONENTS: [&[u8]; 3] = [b"run", b"buildplane", b"authority-host"];
 const LISTENER_SOCKET_FILE_NAME: &[u8] = b"promotion-decision-v1.sock";
-const MAX_PROMOTION_DECISION_RESPONSE_FRAME_BYTES: usize = 64;
+const MAX_PROMOTION_DECISION_RESPONSE_FRAME_BYTES: usize = 4 * 1024;
 const PROMOTION_DECISION_RESPONSE_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
@@ -191,12 +194,13 @@ impl ProtectedPromotionDecisionHostV1 {
                 )
                 .map_err(|_| ProtectedPromotionDecisionHostErrorV1::ConnectionFailed)
             },
-            |stream, disposition| {
+            |stream, handled| {
                 write_authenticated_promotion_decision_response(
                     &self.policy,
                     &self.attestation,
                     stream,
-                    disposition,
+                    self.signing_keys.kernel(),
+                    &handled,
                 )
             },
         )
@@ -517,18 +521,25 @@ fn duplicate_and_validate_owned_preopened_listener_for_test(
 }
 
 fn encode_promotion_decision_response_frame(
+    broker_identity_signing_key: &ed25519_dalek::SigningKey,
+    binding: PromotionDecisionResponseBindingV1<'_>,
     disposition: BrokerPromotionDecisionDisposition,
-) -> Vec<u8> {
-    let payload = match disposition {
-        Sealed => SEALED_RESPONSE_JSON,
-        ReconciliationRequired => RECONCILIATION_REQUIRED_RESPONSE_JSON,
+) -> Result<Vec<u8>, ProtectedPromotionDecisionHostErrorV1> {
+    let status = match disposition {
+        Sealed => PromotionDecisionResponseStatusV1::Sealed,
+        ReconciliationRequired => PromotionDecisionResponseStatusV1::ReconciliationRequired,
     };
+    // The kernel key is reused only through this domain-separated, closed
+    // response constructor. There is no generic or caller-supplied signing
+    // surface at the host boundary.
+    let payload = sign_promotion_decision_response(broker_identity_signing_key, binding, status)
+        .map_err(|_| ProtectedPromotionDecisionHostErrorV1::ConnectionFailed)?;
     let mut frame = u32::try_from(payload.len())
-        .expect("the fixed promotion-decision response fits u32")
+        .map_err(|_| ProtectedPromotionDecisionHostErrorV1::ConnectionFailed)?
         .to_be_bytes()
         .to_vec();
-    frame.extend_from_slice(payload);
-    frame
+    frame.extend_from_slice(&payload);
+    Ok(frame)
 }
 
 fn write_response_frame_with_deadline<W, F>(
@@ -575,9 +586,20 @@ fn write_authenticated_promotion_decision_response(
     policy: &BrokerHostConfinementPolicyV1,
     attestation: &BrokerHostConfinementAttestationV1,
     stream: &mut UnixStream,
-    disposition: BrokerPromotionDecisionDisposition,
+    broker_identity_signing_key: &ed25519_dalek::SigningKey,
+    handled: &HandledPromotionDecisionV1,
 ) -> Result<(), ProtectedPromotionDecisionHostErrorV1> {
-    let frame = encode_promotion_decision_response_frame(disposition);
+    let binding = PromotionDecisionResponseBindingV1::new(
+        &handled.request_id,
+        &handled.promotion_approval_request_event_id,
+        &handled.decision,
+    )
+    .map_err(|_| ProtectedPromotionDecisionHostErrorV1::ConnectionFailed)?;
+    let frame = encode_promotion_decision_response_frame(
+        broker_identity_signing_key,
+        binding,
+        handled.disposition,
+    )?;
     write_response_frame_with_deadline(
         stream,
         &frame,
@@ -601,40 +623,28 @@ fn write_authenticated_promotion_decision_response(
     )
 }
 
-fn complete_request_with_response<S, H, R>(
+fn complete_request_with_response<S, H, R, T>(
     subject: &mut S,
     handle_request: H,
     write_response: R,
 ) -> Result<(), ProtectedPromotionDecisionHostErrorV1>
 where
-    H: FnOnce(
-        &mut S,
-    )
-        -> Result<BrokerPromotionDecisionDisposition, ProtectedPromotionDecisionHostErrorV1>,
-    R: FnOnce(
-        &mut S,
-        BrokerPromotionDecisionDisposition,
-    ) -> Result<(), ProtectedPromotionDecisionHostErrorV1>,
+    H: FnOnce(&mut S) -> Result<T, ProtectedPromotionDecisionHostErrorV1>,
+    R: FnOnce(&mut S, T) -> Result<(), ProtectedPromotionDecisionHostErrorV1>,
 {
     let disposition = handle_request(subject)?;
     write_response(subject, disposition)
 }
 
 #[cfg(test)]
-fn complete_request_with_response_for_test<S, H, R>(
+fn complete_request_with_response_for_test<S, H, R, T>(
     subject: &mut S,
     handle_request: H,
     write_response: R,
 ) -> Result<(), ProtectedPromotionDecisionHostErrorV1>
 where
-    H: FnOnce(
-        &mut S,
-    )
-        -> Result<BrokerPromotionDecisionDisposition, ProtectedPromotionDecisionHostErrorV1>,
-    R: FnOnce(
-        &mut S,
-        BrokerPromotionDecisionDisposition,
-    ) -> Result<(), ProtectedPromotionDecisionHostErrorV1>,
+    H: FnOnce(&mut S) -> Result<T, ProtectedPromotionDecisionHostErrorV1>,
+    R: FnOnce(&mut S, T) -> Result<(), ProtectedPromotionDecisionHostErrorV1>,
 {
     complete_request_with_response(subject, handle_request, write_response)
 }
@@ -728,17 +738,63 @@ where
 mod tests {
     use super::*;
 
+    fn test_response_signing_key() -> ed25519_dalek::SigningKey {
+        ed25519_dalek::SigningKey::from_bytes(&[94; 32])
+    }
+
+    fn test_response_binding() -> PromotionDecisionResponseBindingV1<'static> {
+        PromotionDecisionResponseBindingV1::new(
+            "018f2e40-0000-7000-8000-000000000111",
+            "123e4567-e89b-12d3-a456-426614174001",
+            "promote",
+        )
+        .unwrap()
+    }
+
+    fn test_response_frame(disposition: BrokerPromotionDecisionDisposition) -> Vec<u8> {
+        encode_promotion_decision_response_frame(
+            &test_response_signing_key(),
+            test_response_binding(),
+            disposition,
+        )
+        .unwrap()
+    }
+
+    fn test_handled_decision() -> HandledPromotionDecisionV1 {
+        HandledPromotionDecisionV1 {
+            disposition: BrokerPromotionDecisionDisposition::Sealed,
+            request_id: "018f2e40-0000-7000-8000-000000000111".to_string(),
+            promotion_approval_request_event_id: "123e4567-e89b-12d3-a456-426614174001".to_string(),
+            decision: "promote".to_string(),
+        }
+    }
+
     #[test]
-    fn response_frames_are_bounded_closed_and_canonical() {
+    fn response_frames_are_bounded_closed_canonical_and_broker_signed() {
+        use crate::promotion_decision_response::{
+            verify_promotion_decision_response_for_test, PromotionDecisionResponseStatusV1,
+        };
+        use ed25519_dalek::SigningKey;
+
+        let signing_key = SigningKey::from_bytes(&[94; 32]);
+        let binding = test_response_binding();
+        let frame = encode_promotion_decision_response_frame(
+            &signing_key,
+            binding,
+            BrokerPromotionDecisionDisposition::Sealed,
+        )
+        .unwrap();
+        let payload_length = u32::from_be_bytes(frame[..4].try_into().unwrap()) as usize;
+        assert_eq!(payload_length, frame.len() - 4);
+        assert!(frame.len() <= MAX_PROMOTION_DECISION_RESPONSE_FRAME_BYTES);
         assert_eq!(
-            encode_promotion_decision_response_frame(BrokerPromotionDecisionDisposition::Sealed),
-            b"\0\0\0&{\"schema_version\":1,\"status\":\"sealed\"}".to_vec()
-        );
-        assert_eq!(
-            encode_promotion_decision_response_frame(
-                BrokerPromotionDecisionDisposition::ReconciliationRequired
-            ),
-            b"\0\0\07{\"schema_version\":1,\"status\":\"reconciliation_required\"}".to_vec()
+            verify_promotion_decision_response_for_test(
+                &frame[4..],
+                &signing_key.verifying_key(),
+                binding,
+            )
+            .unwrap(),
+            PromotionDecisionResponseStatusV1::Sealed
         );
     }
 
@@ -1118,8 +1174,7 @@ mod tests {
             }
         }
 
-        let frame =
-            encode_promotion_decision_response_frame(BrokerPromotionDecisionDisposition::Sealed);
+        let frame = test_response_frame(BrokerPromotionDecisionDisposition::Sealed);
         let mut writer = PartialWriter::default();
         let mut gate_calls = 0;
         write_response_frame_with_deadline_for_test(
@@ -1156,8 +1211,7 @@ mod tests {
             }
         }
 
-        let frame =
-            encode_promotion_decision_response_frame(BrokerPromotionDecisionDisposition::Sealed);
+        let frame = test_response_frame(BrokerPromotionDecisionDisposition::Sealed);
         assert_eq!(
             write_response_frame_with_deadline_for_test(
                 &mut SlowWriter,
@@ -1222,13 +1276,16 @@ mod tests {
             .expect("current process attestation");
         let (mut broker_stream, mut same_uid_client) =
             UnixStream::pair().expect("connected Unix stream");
+        let signing_key = test_response_signing_key();
+        let handled = test_handled_decision();
 
         assert!(
             write_authenticated_promotion_decision_response(
                 &policy,
                 &attestation,
                 &mut broker_stream,
-                BrokerPromotionDecisionDisposition::Sealed,
+                &signing_key,
+                &handled,
             )
             .is_err(),
             "same-UID peer must be rechecked and rejected before write"
@@ -1311,7 +1368,11 @@ mod tests {
         let mut subject = ();
         let result = complete_request_with_response_for_test(
             &mut subject,
-            |_| Err(ProtectedPromotionDecisionHostErrorV1::ConnectionFailed),
+            |_| {
+                Err::<BrokerPromotionDecisionDisposition, _>(
+                    ProtectedPromotionDecisionHostErrorV1::ConnectionFailed,
+                )
+            },
             |_, _| {
                 response_called = true;
                 Ok(())

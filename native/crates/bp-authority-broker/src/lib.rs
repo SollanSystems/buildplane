@@ -55,6 +55,9 @@ mod promotion_decision_client_contract_tests;
 #[allow(dead_code)]
 mod promotion_decision_handler;
 mod promotion_decision_host;
+mod promotion_decision_response;
+#[cfg(test)]
+mod promotion_decision_response_contract_tests;
 mod promotion_execution;
 #[allow(dead_code)]
 mod promotion_execution_handler;

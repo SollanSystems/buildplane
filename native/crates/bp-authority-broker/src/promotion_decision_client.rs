@@ -4,6 +4,11 @@
 //! closed operator choice. It owns no signer, ledger, reducer, Git, worker, or
 //! promotion-execution capability.
 
+use crate::promotion_decision_response::{
+    verify_promotion_decision_response, PromotionDecisionResponseBindingV1,
+    PromotionDecisionResponseStatusV1,
+};
+use ed25519_dalek::VerifyingKey;
 use serde::Deserialize;
 #[cfg(target_os = "linux")]
 use std::fs::File;
@@ -26,7 +31,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 const MAX_PROMOTION_DECISION_REQUEST_FRAME_BYTES: usize = 16 * 1024;
-const MAX_PROMOTION_DECISION_RESPONSE_FRAME_BYTES: usize = 64;
+const MAX_PROMOTION_DECISION_RESPONSE_FRAME_BYTES: usize = 4 * 1024;
 #[cfg(target_os = "linux")]
 const MAX_PROTECTED_CLIENT_CONFIG_BYTES: usize = 4 * 1024;
 #[cfg(target_os = "linux")]
@@ -117,23 +122,29 @@ fn is_canonical_uuid(value: &str) -> bool {
 #[serde(deny_unknown_fields)]
 struct ProtectedClientConfigWireV1 {
     schema_version: u8,
-    broker_uid: u32,
+    listener_creator_uid: u32,
     socket_group_gid: u32,
+    broker_identity_public_key: Vec<u8>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ProtectedPromotionDecisionClientConfigV1 {
-    broker_uid: u32,
+    listener_creator_uid: u32,
     socket_group_gid: u32,
+    broker_identity_public_key: VerifyingKey,
 }
 
 impl ProtectedPromotionDecisionClientConfigV1 {
-    pub(crate) fn broker_uid(self) -> u32 {
-        self.broker_uid
+    pub(crate) fn listener_creator_uid(&self) -> u32 {
+        self.listener_creator_uid
     }
 
-    pub(crate) fn socket_group_gid(self) -> u32 {
+    pub(crate) fn socket_group_gid(&self) -> u32 {
         self.socket_group_gid
+    }
+
+    pub(crate) fn broker_identity_public_key(&self) -> &VerifyingKey {
+        &self.broker_identity_public_key
     }
 }
 
@@ -142,12 +153,19 @@ pub(crate) fn parse_protected_client_config_json(
 ) -> Result<ProtectedPromotionDecisionClientConfigV1, PromotionDecisionClientErrorV1> {
     let wire: ProtectedClientConfigWireV1 =
         serde_json::from_slice(bytes).map_err(|_| PromotionDecisionClientErrorV1::InvalidConfig)?;
-    if wire.schema_version != 1 || wire.broker_uid == 0 {
+    if wire.schema_version != 1 || wire.listener_creator_uid != 0 {
         return Err(PromotionDecisionClientErrorV1::InvalidConfig);
     }
+    let public_key: [u8; 32] = wire
+        .broker_identity_public_key
+        .try_into()
+        .map_err(|_| PromotionDecisionClientErrorV1::InvalidConfig)?;
+    let broker_identity_public_key = VerifyingKey::from_bytes(&public_key)
+        .map_err(|_| PromotionDecisionClientErrorV1::InvalidConfig)?;
     Ok(ProtectedPromotionDecisionClientConfigV1 {
-        broker_uid: wire.broker_uid,
+        listener_creator_uid: wire.listener_creator_uid,
         socket_group_gid: wire.socket_group_gid,
+        broker_identity_public_key,
     })
 }
 
@@ -293,9 +311,9 @@ pub(crate) fn validate_socket_facts(
 }
 
 #[cfg(target_os = "linux")]
-fn validate_connected_broker_peer(
+fn validate_connected_listener_creator(
     stream: &std::os::unix::net::UnixStream,
-    expected_broker_uid: u32,
+    expected_listener_creator_uid: u32,
 ) -> Result<(), PromotionDecisionClientErrorV1> {
     use std::os::fd::AsRawFd;
     let mut credentials = std::mem::MaybeUninit::<libc::ucred>::zeroed();
@@ -314,23 +332,34 @@ fn validate_connected_broker_peer(
         return Err(PromotionDecisionClientErrorV1::InvalidConfig);
     }
     let credentials = unsafe { credentials.assume_init() };
-    if credentials.pid <= 0 || credentials.uid != expected_broker_uid {
+    if credentials.pid <= 0 || credentials.uid != expected_listener_creator_uid {
         return Err(PromotionDecisionClientErrorV1::InvalidConfig);
     }
     Ok(())
 }
 
 #[cfg(all(test, target_os = "linux"))]
-pub(crate) fn validate_connected_broker_peer_for_test(
+pub(crate) fn validate_connected_listener_creator_for_test(
     stream: &std::os::unix::net::UnixStream,
-    expected_broker_uid: u32,
+    expected_listener_creator_uid: u32,
 ) -> Result<(), PromotionDecisionClientErrorV1> {
-    validate_connected_broker_peer(stream, expected_broker_uid)
+    validate_connected_listener_creator(stream, expected_listener_creator_uid)
 }
 
 pub(crate) fn encode_promotion_decision_request_frame(
     request: &PromotionDecisionClientRequestV1,
 ) -> Result<Vec<u8>, PromotionDecisionClientErrorV1> {
+    encode_promotion_decision_request_frame_with_id(request).map(|encoded| encoded.frame)
+}
+
+struct EncodedPromotionDecisionRequestV1 {
+    request_id: String,
+    frame: Vec<u8>,
+}
+
+fn encode_promotion_decision_request_frame_with_id(
+    request: &PromotionDecisionClientRequestV1,
+) -> Result<EncodedPromotionDecisionRequestV1, PromotionDecisionClientErrorV1> {
     let request_id = Uuid::now_v7().hyphenated().to_string();
     let payload = format!(
         r#"{{"request_id":"{request_id}","promotion_approval_request_event_id":"{}","decision":"{}"}}"#,
@@ -342,7 +371,7 @@ pub(crate) fn encode_promotion_decision_request_frame(
     let mut frame = Vec::with_capacity(4 + payload.len());
     frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
     frame.extend_from_slice(payload.as_bytes());
-    Ok(frame)
+    Ok(EncodedPromotionDecisionRequestV1 { request_id, frame })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -351,34 +380,23 @@ pub(crate) enum PromotionDecisionClientStatusV1 {
     ReconciliationRequired,
 }
 
-pub(crate) fn parse_promotion_decision_response_payload(
-    payload: &[u8],
-) -> Result<PromotionDecisionClientStatusV1, PromotionDecisionClientErrorV1> {
-    match payload {
-        SEALED_RESPONSE_JSON => Ok(PromotionDecisionClientStatusV1::Sealed),
-        RECONCILIATION_REQUIRED_RESPONSE_JSON => {
-            Ok(PromotionDecisionClientStatusV1::ReconciliationRequired)
-        }
-        _ => Err(PromotionDecisionClientErrorV1::InvalidResponse),
-    }
-}
-
 #[cfg(target_os = "linux")]
 fn exchange_promotion_decision_with_stream(
     stream: &mut UnixStream,
-    expected_broker_uid: u32,
+    expected_listener_creator_uid: u32,
+    broker_identity_public_key: &VerifyingKey,
     request: &PromotionDecisionClientRequestV1,
 ) -> Result<PromotionDecisionClientStatusV1, PromotionDecisionClientErrorV1> {
-    validate_connected_broker_peer(stream, expected_broker_uid)?;
+    validate_connected_listener_creator(stream, expected_listener_creator_uid)?;
     stream
         .set_write_timeout(Some(PROMOTION_DECISION_IO_TIMEOUT))
         .map_err(|_| PromotionDecisionClientErrorV1::ConnectionRejected)?;
-    let frame = encode_promotion_decision_request_frame(request)?;
+    let encoded = encode_promotion_decision_request_frame_with_id(request)?;
     stream
-        .write_all(&frame)
+        .write_all(&encoded.frame)
         .map_err(|_| PromotionDecisionClientErrorV1::ConnectionRejected)?;
 
-    validate_connected_broker_peer(stream, expected_broker_uid)?;
+    validate_connected_listener_creator(stream, expected_listener_creator_uid)?;
     stream
         .set_read_timeout(Some(PROMOTION_DECISION_IO_TIMEOUT))
         .map_err(|_| PromotionDecisionClientErrorV1::ConnectionRejected)?;
@@ -390,13 +408,20 @@ fn exchange_promotion_decision_with_stream(
     if payload_length == 0 || payload_length > MAX_PROMOTION_DECISION_RESPONSE_FRAME_BYTES {
         return Err(PromotionDecisionClientErrorV1::InvalidResponse);
     }
-    validate_connected_broker_peer(stream, expected_broker_uid)?;
+    validate_connected_listener_creator(stream, expected_listener_creator_uid)?;
     let mut payload = vec![0_u8; payload_length];
     stream
         .read_exact(&mut payload)
         .map_err(|_| PromotionDecisionClientErrorV1::InvalidResponse)?;
-    let status = parse_promotion_decision_response_payload(&payload)?;
-    validate_connected_broker_peer(stream, expected_broker_uid)?;
+    let binding = PromotionDecisionResponseBindingV1::new(
+        &encoded.request_id,
+        &request.promotion_approval_request_event_id,
+        &request.decision,
+    )
+    .map_err(|_| PromotionDecisionClientErrorV1::InvalidResponse)?;
+    let status = verify_promotion_decision_response(&payload, broker_identity_public_key, binding)
+        .map_err(|_| PromotionDecisionClientErrorV1::InvalidResponse)?;
+    validate_connected_listener_creator(stream, expected_listener_creator_uid)?;
     let mut trailing = [0_u8; 1];
     if stream
         .read(&mut trailing)
@@ -405,7 +430,12 @@ fn exchange_promotion_decision_with_stream(
     {
         return Err(PromotionDecisionClientErrorV1::InvalidResponse);
     }
-    Ok(status)
+    match status {
+        PromotionDecisionResponseStatusV1::Sealed => Ok(PromotionDecisionClientStatusV1::Sealed),
+        PromotionDecisionResponseStatusV1::ReconciliationRequired => {
+            Ok(PromotionDecisionClientStatusV1::ReconciliationRequired)
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -774,12 +804,17 @@ fn run_linux_client() -> Result<PromotionDecisionClientStatusV1, PromotionDecisi
     {
         return Err(PromotionDecisionClientErrorV1::ConnectionRejected);
     }
-    validate_connected_broker_peer(&stream, config.broker_uid())?;
+    validate_connected_listener_creator(&stream, config.listener_creator_uid())?;
     let after = validate_default_socket_path(config.socket_group_gid())?;
     if before != after {
         return Err(PromotionDecisionClientErrorV1::ConnectionRejected);
     }
-    exchange_promotion_decision_with_stream(&mut stream, config.broker_uid(), &request)
+    exchange_promotion_decision_with_stream(
+        &mut stream,
+        config.listener_creator_uid(),
+        config.broker_identity_public_key(),
+        &request,
+    )
 }
 
 /// Run the fixed-path, no-authority promotion-decision client.
@@ -821,8 +856,14 @@ pub fn run_default_promotion_decision_client_v1() -> ExitCode {
 #[cfg(all(test, target_os = "linux"))]
 pub(crate) fn exchange_promotion_decision_with_stream_for_test(
     stream: &mut UnixStream,
-    expected_broker_uid: u32,
+    expected_listener_creator_uid: u32,
+    broker_identity_public_key: &VerifyingKey,
     request: &PromotionDecisionClientRequestV1,
 ) -> Result<PromotionDecisionClientStatusV1, PromotionDecisionClientErrorV1> {
-    exchange_promotion_decision_with_stream(stream, expected_broker_uid, request)
+    exchange_promotion_decision_with_stream(
+        stream,
+        expected_listener_creator_uid,
+        broker_identity_public_key,
+        request,
+    )
 }

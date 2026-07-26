@@ -15,8 +15,6 @@ declare const hostOwnedCandidateRunResultBrand: unique symbol;
 declare const hostOwnedReviewerSessionBrand: unique symbol;
 declare const hostOwnedReviewerRunResultBrand: unique symbol;
 declare const hostOwnedPlanForgeAdmissionBrand: unique symbol;
-declare const hostOwnedPromotionDecisionSessionBrand: unique symbol;
-declare const hostOwnedPromotionDecisionRunResultBrand: unique symbol;
 
 export type HostOwnedCandidateApprovalV1 =
 	| "operator-requested"
@@ -120,25 +118,6 @@ export interface HostOwnedRecoverySessionOpenInputV1 {
 	readonly projectRoot: string;
 	readonly recoveryReference: string;
 	readonly approval: "operator-requested";
-}
-
-/**
- * Submit one closed operator decision for the pending promotion approval
- * already bound into a recovered governed workflow. The host reconstructs the
- * approval, candidate, review, signer, tape, and future execution lineage
- * exclusively from `recoveryReference`; the CLI cannot name or replace any
- * of it.
- *
- * Recording this decision is not a promotion execution request. The host must
- * not return a Git, candidate, signer, command, worker, generic callback, or
- * target-mutation capability from this one-shot handoff.
- */
-export interface HostOwnedPromotionDecisionSessionOpenInputV1 {
-	readonly kind: "governed-promotion-decision-session-open-v1";
-	readonly schemaVersion: 1;
-	readonly projectRoot: string;
-	readonly recoveryReference: string;
-	readonly decision: "promote" | "reject";
 }
 
 /**
@@ -302,40 +281,6 @@ export interface HostOwnedReviewerRunResultV1 {
 }
 
 /**
- * Opaque completion of exactly one decision-recording operation. Its evidence
- * is deliberately limited to opaque references and canonical digests; a
- * sealed decision is not a Git effect, promotion-completion signal, or
- * continuation capability.
- */
-export interface HostOwnedPromotionDecisionRunResultV1 {
-	readonly kind: "host-owned-governed-promotion-decision-run-result-v1";
-	readonly schemaVersion: 1;
-	readonly recoveryRef: string;
-	/** The exact sealed operator decision, not the CLI's requested value. */
-	readonly decision: "promote" | "reject";
-	readonly promotionDecisionRef: string;
-	readonly promotionDecisionDigest: string;
-	readonly tapeRootDigest: string;
-	readonly nativeReceiptRef: string;
-	readonly nativeReceiptDigest: string;
-	readonly [hostOwnedPromotionDecisionRunResultBrand]: true;
-}
-
-/**
- * Opaque host-owned decision session. `run` is the sole callable member and
- * may record only the closed decision bound by the recovered host workflow.
- * It has no second action, Git, worker, signer, candidate, or promotion
- * execution surface.
- */
-export interface HostOwnedPromotionDecisionSessionV1 {
-	readonly kind: "host-owned-governed-promotion-decision-session-v1";
-	readonly schemaVersion: 1;
-	readonly recoveryRef: string;
-	readonly run: () => Promise<HostOwnedPromotionDecisionRunResultV1>;
-	readonly [hostOwnedPromotionDecisionSessionBrand]: true;
-}
-
-/**
  * PlanForge has its own closed candidate-session/result contract so an opaque
  * admission/task pair cannot be confused with another governed candidate.
  */
@@ -410,16 +355,6 @@ export interface HostOwnedGovernedBrokerV1 {
 	readonly openReviewerSession: (
 		input: HostOwnedReviewerSessionOpenInputV1,
 	) => Promise<HostOwnedReviewerSessionV1>;
-	/**
-	 * Open exactly one recovery-bound operator-decision recorder. The host must
-	 * resolve a sealed pending promotion approval from protected tape/reducer
-	 * state and record only `decision`. It must reject stale, non-pending,
-	 * substituted, replayed, or mismatched recovery state, and it must not
-	 * execute a promotion or expose any of its authority to the CLI.
-	 */
-	readonly openPromotionDecisionSession: (
-		input: HostOwnedPromotionDecisionSessionOpenInputV1,
-	) => Promise<HostOwnedPromotionDecisionSessionV1>;
 	/**
 	 * Recover one host-recorded workflow. Kept separate from fresh admission so
 	 * a recovery call cannot carry a replacement packet, envelope, or preauth.

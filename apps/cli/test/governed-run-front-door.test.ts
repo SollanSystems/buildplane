@@ -1923,38 +1923,15 @@ describe("governed run front door", () => {
 		expectRootUnchanged(root, before);
 	});
 
-	it("does not invoke legacy recovery or forged promotion-decision callbacks before the native host contract exists", async () => {
+	it("does not invoke legacy recovery callbacks for native promotion decisions", async () => {
 		const root = createGitProject();
 		const before = snapshotRoot(root);
-		const run = vi.fn(async () => ({
-			kind: "host-owned-governed-promotion-decision-run-result-v1",
-			schemaVersion: 1,
-			recoveryRef: "host-recovery/promotion-decision",
-			decision: "reject",
-			promotionDecisionRef: "host-evidence/promotion-decision",
-			promotionDecisionDigest: digest("a"),
-			tapeRootDigest: digest("b"),
-			nativeReceiptRef: "native-receipt/promotion-decision",
-			nativeReceiptDigest: digest("c"),
-			targetRef: "refs/heads/main",
-			promote() {
-				throw new Error("forged promotion callable must never execute");
-			},
-		}));
-		const openPromotionDecisionSession = vi.fn(async () => ({
-			kind: "host-owned-governed-promotion-decision-session-v1",
-			schemaVersion: 1,
-			recoveryRef: "host-recovery/promotion-decision",
-			run,
-			targetRef: "refs/heads/main",
-		}));
 		const openRecoverySession = vi.fn(async () => {
 			throw new Error("legacy recovery callback must never execute");
 		});
 		hostResolver.resolve.mockResolvedValue({
 			kind: "host-owned-governed-broker-v1",
 			openRecoverySession,
-			openPromotionDecisionSession,
 		} as unknown as HostOwnedGovernedBrokerV1);
 
 		const response = await runCliCapture(
@@ -1978,8 +1955,6 @@ describe("governed run front door", () => {
 			promotion: { state: "not-executed" },
 		});
 		expect(openRecoverySession).not.toHaveBeenCalled();
-		expect(openPromotionDecisionSession).not.toHaveBeenCalled();
-		expect(run).not.toHaveBeenCalled();
 		expect(hostResolver.resolve).not.toHaveBeenCalled();
 		expectRootUnchanged(root, before);
 	});

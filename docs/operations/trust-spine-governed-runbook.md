@@ -199,17 +199,28 @@ regular, single-link, and exact `0644`. Its closed contents are:
 ```json
 {
   "schema_version": 1,
-  "broker_uid": 991,
-  "socket_group_gid": 992
+  "listener_creator_uid": 0,
+  "socket_group_gid": 992,
+  "broker_identity_public_key": [
+    83, 71, 9, 98, 85, 138, 110, 8,
+    57, 2, 42, 230, 92, 107, 39, 35,
+    179, 39, 114, 229, 192, 197, 244, 119,
+    108, 184, 230, 163, 225, 11, 162, 243
+  ]
 }
 ```
 
-Set `broker_uid` to the non-root UID of `buildplane-authority` and
-`socket_group_gid` to the GID of `buildplane-promotion`. Unknown fields,
-symlinks, unsafe ownership or modes, a changed socket inode, or a connected
-server whose Linux `SO_PEERCRED` UID does not match `broker_uid` blocks the
-request. The native client also verifies that it is executing the exact
-installed root-owned file before reading stdin.
+`listener_creator_uid` must be exactly `0`, because systemd creates the
+listening socket as root before the non-root broker accepts it.
+`socket_group_gid` is the GID of `buildplane-promotion`.
+`broker_identity_public_key` is the exact 32-byte Ed25519 public key for the
+host config's kernel signer; the illustrative bytes above must be replaced
+with the deployment key. Provisioning must reject a client pin that does not
+match that protected host identity. Unknown fields, symlinks, unsafe ownership
+or modes, a changed socket inode, or a connected listener whose Linux
+`SO_PEERCRED` UID does not match `listener_creator_uid` blocks the request.
+The native client also verifies that it is executing the exact installed
+root-owned file before reading stdin.
 
 Use only a canonical lower-case hyphenated promotion-approval request event
 UUID:
@@ -223,13 +234,22 @@ buildplane run \
 ```
 
 The client generates a fresh correlation UUID and sends one bounded request to
-the fixed authority socket. An exact `sealed` response means only that the
-decision was recorded and kernel-sealed; the CLI still exits in
-recovery-required state and does not execute promotion. An exact
-`reconciliation_required` response, missing response, timeout, malformed
-response, missing installation/config/socket, or unsupported platform remains
-blocked. Do not automatically resubmit after a lost or unknown response; use
-the same durable approval event only after operator-led reconciliation.
+the fixed authority socket. The host returns a closed, canonical response
+signed under the domain
+`buildplane.protected-promotion-decision.response.v1`. The signature binds the
+protocol and domain versions, fresh request UUID, approval event UUID, operator
+decision, and exact response status. The client does not interpret `sealed` or
+`reconciliation_required` until the pinned key verifies that signature and all
+request bindings match. A replayed, substituted, unsigned, noncanonical, or
+wrong-key response is blocked.
+
+A verified `sealed` response means only that the decision was recorded and
+kernel-sealed; the CLI still exits in recovery-required state and does not
+execute promotion. A verified `reconciliation_required` response, missing
+response, timeout, malformed response, missing installation/config/socket, or
+unsupported platform remains blocked. Do not automatically resubmit after a
+lost or unknown response; use the same durable approval event only after
+operator-led reconciliation.
 
 ## Recovery protocol
 

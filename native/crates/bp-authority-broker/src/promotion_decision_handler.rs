@@ -56,6 +56,13 @@ struct PromotionDecisionWire {
     decision: String,
 }
 
+pub(crate) struct HandledPromotionDecisionV1 {
+    pub(crate) disposition: BrokerPromotionDecisionDisposition,
+    pub(crate) request_id: String,
+    pub(crate) promotion_approval_request_event_id: String,
+    pub(crate) decision: String,
+}
+
 /// Parse one closed operator promotion-decision request.
 ///
 /// The request ID is canonicalized only as correlation metadata and then
@@ -120,9 +127,31 @@ pub(crate) fn handle_authenticated_promotion_decision_request(
     attestation: &BrokerHostConfinementAttestationV1,
     stream: &mut UnixStream,
     authority: &mut ProtectedPromotionDecisionAuthority<'_>,
-) -> Result<BrokerPromotionDecisionDisposition, PromotionDecisionHandlerError> {
+) -> Result<HandledPromotionDecisionV1, PromotionDecisionHandlerError> {
     let payload = read_authenticated_promotion_decision_frame(policy, attestation, stream)?;
-    handle_promotion_decision_wire(authority, &payload)
+    let wire: PromotionDecisionWire = serde_json::from_slice(&payload)
+        .map_err(|_| PromotionDecisionHandlerError::RequestRejected)?;
+    let request_id = parse_canonical_uuid(wire.request_id.clone())?;
+    let promotion_approval_request_event_id =
+        parse_canonical_uuid(wire.promotion_approval_request_event_id.clone())?;
+    let decision = match wire.decision.as_str() {
+        "promote" => PromotionDecisionKindV1::Promote,
+        "reject" => PromotionDecisionKindV1::Reject,
+        _ => return Err(PromotionDecisionHandlerError::RequestRejected),
+    };
+    let disposition =
+        authority.record_from_approval_decision(BrokerPromotionDecisionIngressRequest {
+            promotion_approval_request_event_id: EventId::from_uuid(
+                promotion_approval_request_event_id,
+            ),
+            decision,
+        });
+    Ok(HandledPromotionDecisionV1 {
+        disposition,
+        request_id: request_id.hyphenated().to_string(),
+        promotion_approval_request_event_id: wire.promotion_approval_request_event_id,
+        decision: wire.decision,
+    })
 }
 
 /// Authenticate a connected Linux worker, then return its one bounded opaque
