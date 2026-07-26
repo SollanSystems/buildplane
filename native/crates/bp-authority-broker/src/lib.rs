@@ -14,7 +14,8 @@
 use bp_ledger::error::LedgerError;
 use bp_ledger::payload::activity_claim::ActivityResultOutcomeV1;
 use bp_ledger::payload::trust_spine::{
-    CandidateAcceptanceOutcomeV1, PromotionDecisionKindV1, ReviewDecisionV1,
+    CandidateAcceptanceOutcomeV1, PromotionDecisionKindV1, PromotionResultOutcomeV1,
+    ReconciliationResolutionOutcomeV1, ReviewDecisionV1,
 };
 use bp_ledger::signing::ActorKeyRef;
 use bp_ledger::storage::sqlite::{
@@ -22,8 +23,9 @@ use bp_ledger::storage::sqlite::{
     GovernedModelActionAuthorizeAndClaimDispositionV1,
     GovernedModelActionAuthorizeAndClaimRequestV1, GovernedModelActionResultRequestV1,
     GovernedPromotionAuthorityV1, GovernedPromotionDecisionDispositionV1,
-    GovernedPromotionDecisionRequestV1, GovernedPromotionDecisionSealRequestV1, SqliteStore,
-    MAX_ACTIVITY_LEASE_MS, MIN_ACTIVITY_LEASE_MS,
+    GovernedPromotionDecisionRequestV1, GovernedPromotionDecisionSealRequestV1,
+    GovernedPromotionReconciliationDispositionV1, GovernedPromotionReconciliationRequestV1,
+    SqliteStore, MAX_ACTIVITY_LEASE_MS, MIN_ACTIVITY_LEASE_MS,
 };
 use bp_ledger::storage::Cas;
 use bp_ledger::{EventId, RunId};
@@ -53,6 +55,10 @@ mod protocol;
 mod reviewer_session;
 #[allow(dead_code)]
 mod v5_dispatch_admission;
+
+use crate::promotion_git::{
+    PromotionGitGateway, PromotionGitStartupError, VerifiedPromotionCapability,
+};
 
 /// The complete request surface accepted from a run-bound broker controller.
 ///
@@ -399,6 +405,385 @@ impl<'a> ProtectedPromotionDecisionAuthority<'a> {
                 promotion_approval_request_event_id: approval.event_id,
                 decision: request.decision,
             })
+    }
+}
+
+/// The only controller-supplied recovery identity for an already-recorded
+/// promotion result. In particular, a controller cannot nominate a result,
+/// reconciliation outcome, signer, repository root, or Git capability.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(dead_code)] // Wired only by the future OS-authenticated broker host.
+pub(crate) struct BrokerPromotionReconciliationIngressRequest {
+    pub(crate) promotion_decision_event_id: EventId,
+}
+
+/// Redacted result of the broker-owned reconciliation path. `Recorded` and
+/// `Existing` are durable abandonment evidence only; neither grants a target
+/// mutation, a root checkout update, a terminal workflow transition, or a
+/// reusable Git capability.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code)] // Wired only by the future OS-authenticated broker host.
+pub(crate) enum BrokerPromotionReconciliationDisposition {
+    Recorded,
+    Existing,
+    ReconciliationRequired,
+}
+
+/// Startup validation for the recovery-only promotion-reconciliation
+/// composition. The fixed Git gateway is constructed once at broker startup;
+/// no controller gets to select a path, binary, runner, or signer.
+#[derive(Debug, Error, PartialEq, Eq)]
+pub(crate) enum BrokerPromotionReconciliationStartupError {
+    #[error("governed promotion operator and kernel signing keys must use distinct material")]
+    SharedSigningKeyMaterial,
+    #[error("governed promotion operator and kernel signer identities must be distinct")]
+    SharedSignerIdentity,
+    #[error("the trusted replay kernel signer must equal the governed promotion kernel signer")]
+    PinnedKernelSignerMismatch,
+    #[error("the local operator signer must equal the governed promotion authority operator")]
+    ConfiguredOperatorSignerMismatch,
+    #[error("the local kernel signer must equal the governed promotion authority kernel")]
+    ConfiguredKernelSignerMismatch,
+    #[error(transparent)]
+    Git(#[from] PromotionGitStartupError),
+}
+
+/// Protected, recovery-only composition for a previously recorded governed
+/// promotion result.
+///
+/// This is intentionally separate from effect execution. It reopens a fully
+/// checkpointed trusted replay on every request, derives the exact result and
+/// candidate lineage from that snapshot, observes an existing receipt through
+/// the fixed Git gateway, and then asks the narrow ledger primitive to append
+/// only `Abandon`. It never calls `promote`, never creates a merge, never
+/// updates a target ref, and never synchronizes the root checkout.
+///
+/// The raw ledger writer remains public only because `bp-ledger` and this
+/// broker are separate crates. It is a narrow broker FFI primitive, not an
+/// external ledger-server or controller API; construction of this façade keeps
+/// its signing material and authority realm outside the controller boundary.
+#[allow(dead_code)] // The native host integration owns the first production call site.
+pub(crate) struct ProtectedPromotionReconciliationAuthority<'a> {
+    run_id: RunId,
+    database_path: PathBuf,
+    replay_authorities: &'a TrustedReplayAuthorities,
+    pinned_kernel_signer: &'a ActorKeyRef,
+    store: &'a SqliteStore,
+    authority: &'a GovernedPromotionAuthorityV1,
+    operator_signing_key: &'a SigningKey,
+    operator_signer: &'a ActorKeyRef,
+    kernel_signing_key: &'a SigningKey,
+    kernel_signer: &'a ActorKeyRef,
+    gateway: PromotionGitGateway,
+}
+
+impl<'a> ProtectedPromotionReconciliationAuthority<'a> {
+    /// Construct the production recovery boundary only from startup-owned
+    /// dependencies. Unsupported platforms or unavailable fixed Git block
+    /// governed recovery rather than falling back to a host shell.
+    #[allow(dead_code)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn from_prevalidated_startup(
+        run_id: RunId,
+        database_path: impl AsRef<Path>,
+        replay_authorities: &'a TrustedReplayAuthorities,
+        pinned_kernel_signer: &'a ActorKeyRef,
+        store: &'a SqliteStore,
+        authority: &'a GovernedPromotionAuthorityV1,
+        operator_signing_key: &'a SigningKey,
+        operator_signer: &'a ActorKeyRef,
+        kernel_signing_key: &'a SigningKey,
+        kernel_signer: &'a ActorKeyRef,
+        repository_root: &Path,
+    ) -> Result<Self, BrokerPromotionReconciliationStartupError> {
+        let gateway = PromotionGitGateway::from_startup_repository_root(repository_root)?;
+        Self::from_prevalidated_startup_with_gateway(
+            run_id,
+            database_path,
+            replay_authorities,
+            pinned_kernel_signer,
+            store,
+            authority,
+            operator_signing_key,
+            operator_signer,
+            kernel_signing_key,
+            kernel_signer,
+            gateway,
+        )
+    }
+
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn from_prevalidated_startup_with_gateway_for_tests(
+        run_id: RunId,
+        database_path: impl AsRef<Path>,
+        replay_authorities: &'a TrustedReplayAuthorities,
+        pinned_kernel_signer: &'a ActorKeyRef,
+        store: &'a SqliteStore,
+        authority: &'a GovernedPromotionAuthorityV1,
+        operator_signing_key: &'a SigningKey,
+        operator_signer: &'a ActorKeyRef,
+        kernel_signing_key: &'a SigningKey,
+        kernel_signer: &'a ActorKeyRef,
+        gateway: PromotionGitGateway,
+    ) -> Result<Self, BrokerPromotionReconciliationStartupError> {
+        Self::from_prevalidated_startup_with_gateway(
+            run_id,
+            database_path,
+            replay_authorities,
+            pinned_kernel_signer,
+            store,
+            authority,
+            operator_signing_key,
+            operator_signer,
+            kernel_signing_key,
+            kernel_signer,
+            gateway,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn from_prevalidated_startup_with_gateway(
+        run_id: RunId,
+        database_path: impl AsRef<Path>,
+        replay_authorities: &'a TrustedReplayAuthorities,
+        pinned_kernel_signer: &'a ActorKeyRef,
+        store: &'a SqliteStore,
+        authority: &'a GovernedPromotionAuthorityV1,
+        operator_signing_key: &'a SigningKey,
+        operator_signer: &'a ActorKeyRef,
+        kernel_signing_key: &'a SigningKey,
+        kernel_signer: &'a ActorKeyRef,
+        gateway: PromotionGitGateway,
+    ) -> Result<Self, BrokerPromotionReconciliationStartupError> {
+        if operator_signing_key.to_bytes() == kernel_signing_key.to_bytes() {
+            return Err(BrokerPromotionReconciliationStartupError::SharedSigningKeyMaterial);
+        }
+        if operator_signer == kernel_signer {
+            return Err(BrokerPromotionReconciliationStartupError::SharedSignerIdentity);
+        }
+        if pinned_kernel_signer != kernel_signer {
+            return Err(BrokerPromotionReconciliationStartupError::PinnedKernelSignerMismatch);
+        }
+        if authority.configured_operator_signer() != operator_signer {
+            return Err(
+                BrokerPromotionReconciliationStartupError::ConfiguredOperatorSignerMismatch,
+            );
+        }
+        if authority.configured_kernel_signer() != kernel_signer {
+            return Err(BrokerPromotionReconciliationStartupError::ConfiguredKernelSignerMismatch);
+        }
+        Ok(Self {
+            run_id,
+            database_path: database_path.as_ref().to_path_buf(),
+            replay_authorities,
+            pinned_kernel_signer,
+            store,
+            authority,
+            operator_signing_key,
+            operator_signer,
+            kernel_signing_key,
+            kernel_signer,
+            gateway,
+        })
+    }
+
+    /// Keep the trusted reader on the exact SQLite identity that the protected
+    /// writer will later use. A copied tape can never authorize a write into a
+    /// different store.
+    #[allow(dead_code)] // Called once the native host exposes the recovery endpoint.
+    fn canonical_recovery_database_path(&self) -> Option<PathBuf> {
+        let store_path = self.store.canonical_database_path().ok()?;
+        let recovery_path = std::fs::canonicalize(&self.database_path).ok()?;
+        (store_path == recovery_path).then_some(recovery_path)
+    }
+
+    /// Observe and abandon one exact recorded target-bound promotion.
+    ///
+    /// Any mismatch leaves the ledger unchanged and reports reconciliation.
+    /// In particular, an absent or malformed receipt is not a reason to retry
+    /// promotion: `observe_existing_receipt` is the only Git entry point here.
+    #[allow(dead_code)] // Called once the native host exposes the recovery endpoint.
+    pub(crate) fn record_abandon_from_replayed_promotion(
+        &mut self,
+        request: BrokerPromotionReconciliationIngressRequest,
+    ) -> BrokerPromotionReconciliationDisposition {
+        let run_id_text = self.run_id.to_string();
+        let recovery_database_path = match self.canonical_recovery_database_path() {
+            Some(path) => path,
+            None => return BrokerPromotionReconciliationDisposition::ReconciliationRequired,
+        };
+        let snapshot = match TrustedGovernedRecoverySnapshot::open_bounded_v1(
+            &run_id_text,
+            &recovery_database_path,
+            self.replay_authorities,
+            self.pinned_kernel_signer,
+        ) {
+            Ok(snapshot) => snapshot,
+            Err(_) => return BrokerPromotionReconciliationDisposition::ReconciliationRequired,
+        };
+        if snapshot.run_id() != run_id_text {
+            return BrokerPromotionReconciliationDisposition::ReconciliationRequired;
+        }
+
+        let workflow = match snapshot.workflow_for_promotion_decision_event_ref(
+            &request.promotion_decision_event_id.to_string(),
+        ) {
+            Some(workflow) => workflow,
+            None => return BrokerPromotionReconciliationDisposition::ReconciliationRequired,
+        };
+        let candidate = match workflow.candidate.as_ref() {
+            Some(candidate) => candidate,
+            None => return BrokerPromotionReconciliationDisposition::ReconciliationRequired,
+        };
+        let promotion = match workflow.promotion.as_ref() {
+            Some(promotion) => promotion,
+            None => return BrokerPromotionReconciliationDisposition::ReconciliationRequired,
+        };
+        let target_ref = match promotion.decision.target_ref.as_deref() {
+            Some(target_ref) if !target_ref.trim().is_empty() => target_ref,
+            _ => return BrokerPromotionReconciliationDisposition::ReconciliationRequired,
+        };
+        if workflow.run_id != run_id_text
+            || !matches!(
+                workflow.phase,
+                WorkflowPhaseV1::PromotionReconciliationRequired
+                    | WorkflowPhaseV1::PromotionReconciliationResolved
+            )
+            || promotion.decision.event_id != request.promotion_decision_event_id
+            || promotion.decision.event_digest.trim().is_empty()
+            || promotion.decision.decision != PromotionDecisionKindV1::Promote
+            || promotion.decision.authority != self.operator_signer.actor_id
+            || promotion.decision.decided_by != self.operator_signer.actor_id
+            || promotion.decision.candidate_digest != candidate.candidate_digest
+            || promotion.decision.base_commit_sha != candidate.base_commit_sha
+            || promotion.decision.envelope_digest != candidate.envelope_digest
+        {
+            return BrokerPromotionReconciliationDisposition::ReconciliationRequired;
+        }
+
+        let result = match promotion.result.as_ref() {
+            Some(result) => result,
+            None => return BrokerPromotionReconciliationDisposition::ReconciliationRequired,
+        };
+        let claim = match promotion.execution_claim.as_ref() {
+            Some(claim) => claim,
+            None => return BrokerPromotionReconciliationDisposition::ReconciliationRequired,
+        };
+        let lease_binding = match result.promotion_execution_lease_binding.as_ref() {
+            Some(binding) => binding,
+            None => return BrokerPromotionReconciliationDisposition::ReconciliationRequired,
+        };
+        let expected_git_binding = match result.promotion_git_binding.clone() {
+            Some(binding) => binding,
+            None => return BrokerPromotionReconciliationDisposition::ReconciliationRequired,
+        };
+        let expected_receipt_ref = match expected_git_binding.promotion_receipt_ref.as_deref() {
+            Some(receipt_ref) if !receipt_ref.trim().is_empty() => receipt_ref,
+            _ => return BrokerPromotionReconciliationDisposition::ReconciliationRequired,
+        };
+        if result.event_digest.trim().is_empty()
+            || result.promotion_decision_ref != request.promotion_decision_event_id.to_string()
+            || result.candidate_digest != candidate.candidate_digest
+            || result.idempotency_key != promotion.decision.idempotency_key
+            || result.outcome != PromotionResultOutcomeV1::ReconciliationRequired
+            || expected_git_binding.target_ref != target_ref
+            || expected_git_binding.candidate_commit_sha != candidate.candidate_commit_sha
+            || expected_git_binding.merged_tree_digest != candidate.tree_digest
+            || expected_git_binding.merged_head_sha != result.merged_head_sha
+            || claim.claim.promotion_decision_event_ref != request.promotion_decision_event_id
+            || claim.claim.promotion_decision_event_digest != promotion.decision.event_digest
+            || claim.claim.dispatch_event_ref != workflow.dispatch.event_id
+            || claim.claim.dispatch_envelope_digest != workflow.dispatch.envelope_digest
+            || claim.claim.run_id != run_id_text
+            || claim.claim.candidate_digest != candidate.candidate_digest
+            || claim.claim.candidate_ref != candidate.candidate_ref
+            || claim.claim.candidate_commit_sha != candidate.candidate_commit_sha
+            || claim.claim.candidate_tree_digest != candidate.tree_digest
+            || claim.claim.base_commit_sha != candidate.base_commit_sha
+            || claim.claim.target_ref != target_ref
+            || claim.claim.idempotency_key != promotion.decision.idempotency_key
+            || lease_binding.promotion_execution_claim_event_ref != claim.event_id
+            || lease_binding.promotion_execution_claim_event_digest != claim.event_digest
+            || lease_binding.lease_id != claim.claim.lease_id
+        {
+            return BrokerPromotionReconciliationDisposition::ReconciliationRequired;
+        }
+        if let Some(reconciliation) = promotion.reconciliation.as_ref() {
+            if workflow.phase != WorkflowPhaseV1::PromotionReconciliationResolved
+                || reconciliation.event_digest.trim().is_empty()
+                || reconciliation.candidate_digest != candidate.candidate_digest
+                || reconciliation.promotion_decision_ref
+                    != request.promotion_decision_event_id.to_string()
+                || reconciliation.promotion_result_ref != result.event_id.to_string()
+                || reconciliation.promotion_receipt_ref != expected_receipt_ref
+                || reconciliation.outcome != ReconciliationResolutionOutcomeV1::Abandon
+                || reconciliation.authority != promotion.decision.authority
+                || reconciliation.resolved_by != promotion.decision.authority
+                || reconciliation.authority != self.operator_signer.actor_id
+                || reconciliation.resolved_by != self.operator_signer.actor_id
+                || reconciliation.idempotency_key
+                    != format!(
+                        "promotion-reconciliation-abandon:{}",
+                        promotion.decision.idempotency_key
+                    )
+            {
+                return BrokerPromotionReconciliationDisposition::ReconciliationRequired;
+            }
+            // The reconciliation event is already in a fully trusted,
+            // checkpointed snapshot. Do not re-observe mutable Git state or
+            // re-enter the writer merely to answer an exact duplicate.
+            return BrokerPromotionReconciliationDisposition::Existing;
+        } else if workflow.phase != WorkflowPhaseV1::PromotionReconciliationRequired {
+            return BrokerPromotionReconciliationDisposition::ReconciliationRequired;
+        }
+
+        let capability = match VerifiedPromotionCapability::from_verified_facts(
+            candidate.candidate_digest.clone(),
+            candidate.candidate_ref.clone(),
+            candidate.candidate_commit_sha.clone(),
+            candidate.tree_digest.clone(),
+            candidate.base_commit_sha.clone(),
+            target_ref.to_string(),
+            promotion.decision.idempotency_key.clone(),
+        ) {
+            Ok(capability) => capability,
+            Err(_) => return BrokerPromotionReconciliationDisposition::ReconciliationRequired,
+        };
+        let observation = match self.gateway.observe_existing_receipt(capability) {
+            Ok(observation) => observation,
+            Err(_) => return BrokerPromotionReconciliationDisposition::ReconciliationRequired,
+        };
+        if observation.ledger_outcome() != PromotionResultOutcomeV1::ReconciliationRequired
+            || observation.binding() != &expected_git_binding
+        {
+            return BrokerPromotionReconciliationDisposition::ReconciliationRequired;
+        }
+
+        match self
+            .store
+            .record_governed_promotion_reconciliation_abandon_v1(
+                &GovernedPromotionReconciliationRequestV1 {
+                    run_id: self.run_id,
+                    promotion_decision_event_id: request.promotion_decision_event_id,
+                    promotion_result_event_id: result.event_id,
+                },
+                self.authority,
+                self.operator_signing_key,
+                self.operator_signer,
+                self.kernel_signing_key,
+                self.kernel_signer,
+            ) {
+            Ok(GovernedPromotionReconciliationDispositionV1::Recorded {
+                outcome: ReconciliationResolutionOutcomeV1::Abandon,
+                ..
+            }) => BrokerPromotionReconciliationDisposition::Recorded,
+            Ok(GovernedPromotionReconciliationDispositionV1::Existing {
+                outcome: ReconciliationResolutionOutcomeV1::Abandon,
+                ..
+            }) => BrokerPromotionReconciliationDisposition::Existing,
+            Ok(_) | Err(_) => BrokerPromotionReconciliationDisposition::ReconciliationRequired,
+        }
     }
 }
 

@@ -311,11 +311,15 @@ function legacyBundleMustNotBeConstructed(): RunCliDependencies {
 
 function snapshotRoot(root: string): {
 	readonly head: string;
+	readonly tree: string;
+	readonly commitCount: string;
 	readonly status: string;
 	readonly refs: string;
 } {
 	return {
 		head: git(root, ["rev-parse", "HEAD"]).trim(),
+		tree: git(root, ["rev-parse", "HEAD^{tree}"]).trim(),
+		commitCount: git(root, ["rev-list", "--count", "HEAD"]).trim(),
 		status: git(root, ["status", "--porcelain"]),
 		refs: git(root, ["show-ref", "--head"]),
 	};
@@ -1696,5 +1700,214 @@ describe("governed run front door", () => {
 			expect(result.exitCode).toBe(1);
 		}
 		expect(host).not.toHaveBeenCalled();
+	});
+
+	it.each([
+		"promote",
+		"reject",
+	] as const)("keeps the recovered %s decision blocked when no privileged host is installed without changing the target root", async (decision) => {
+		const root = createGitProject();
+		const before = snapshotRoot(root);
+		hostResolver.resolve.mockResolvedValue(undefined);
+
+		const response = await runCliCapture(
+			root,
+			[
+				"run",
+				"--resume",
+				"host-recovery/promotion-decision",
+				"--approve",
+				"--decision",
+				decision,
+				"--json",
+			],
+			legacyBundleMustNotBeConstructed(),
+		);
+
+		expect(response.exitCode).toBe(2);
+		expect(JSON.parse(response.stdout.join("\n"))).toEqual({
+			governance: "governed",
+			status: "recovery-required",
+			executionStarted: "unknown",
+			decision: { requested: decision, state: "blocked" },
+			promotion: { state: "not-executed" },
+			recovery: { action: "contact-host", retry: "blocked" },
+		});
+		expectRootUnchanged(root, before);
+	});
+
+	it("rejects decision forms that could select a fresh packet, graph, raw lane, alternate input, or malformed decision before host resolution", async () => {
+		const root = createGitProject();
+		const packetPath = writePacket(
+			root,
+			createGovernedPacket("promotion-decision-arguments"),
+		);
+		const before = snapshotRoot(root);
+		const host = vi.fn();
+		hostResolver.resolve.mockImplementation(host);
+
+		for (const args of [
+			["run", "--approve", "--packet", packetPath, "--decision", "promote"],
+			[
+				"run",
+				"--approve",
+				"--graph",
+				"untrusted-graph.json",
+				"--decision",
+				"reject",
+			],
+			["run", "--raw", "--packet", packetPath, "--decision", "promote"],
+			[
+				"run",
+				"--resume",
+				"host-recovery/promotion-decision",
+				"--decision",
+				"promote",
+			],
+			[
+				"run",
+				"--resume",
+				"host-recovery/promotion-decision",
+				"--approve",
+				"--decision",
+				"unexpected",
+			],
+			[
+				"run",
+				"--resume",
+				"host-recovery/promotion-decision",
+				"--approve",
+				"--decision",
+				"promote",
+				"--decision",
+				"reject",
+			],
+			[
+				"run",
+				"--resume",
+				"host-recovery/promotion-decision",
+				"--approve",
+				"--decision",
+				"promote",
+				"--packet",
+				packetPath,
+			],
+			[
+				"run",
+				"--resume",
+				"host-recovery/promotion-decision",
+				"--approve",
+				"--decision",
+				"promote",
+				"--graph",
+				"untrusted-graph.json",
+			],
+			[
+				"run",
+				"--resume",
+				"host-recovery/promotion-decision",
+				"--approve",
+				"--decision",
+				"promote",
+				"--envelope",
+				"replacement-envelope.json",
+			],
+			[
+				"run",
+				"--resume",
+				"host-recovery/promotion-decision",
+				"--approve",
+				"--decision",
+				"promote",
+				"--raw",
+			],
+			[
+				"run",
+				"--resume",
+				"host-recovery/promotion-decision",
+				"--approve",
+				"--decision",
+				"promote",
+				"--tui",
+			],
+			[
+				"run",
+				"--resume",
+				"host-recovery/promotion-decision",
+				"--approve",
+				"--decision",
+			],
+		] as const) {
+			const response = await runCliCapture(
+				root,
+				args,
+				legacyBundleMustNotBeConstructed(),
+			);
+			expect(response.exitCode).toBe(1);
+		}
+
+		expect(host).not.toHaveBeenCalled();
+		expectRootUnchanged(root, before);
+	});
+
+	it("does not invoke legacy recovery or forged promotion-decision callbacks before the native host contract exists", async () => {
+		const root = createGitProject();
+		const before = snapshotRoot(root);
+		const run = vi.fn(async () => ({
+			kind: "host-owned-governed-promotion-decision-run-result-v1",
+			schemaVersion: 1,
+			recoveryRef: "host-recovery/promotion-decision",
+			decision: "reject",
+			promotionDecisionRef: "host-evidence/promotion-decision",
+			promotionDecisionDigest: digest("a"),
+			tapeRootDigest: digest("b"),
+			nativeReceiptRef: "native-receipt/promotion-decision",
+			nativeReceiptDigest: digest("c"),
+			targetRef: "refs/heads/main",
+			promote() {
+				throw new Error("forged promotion callable must never execute");
+			},
+		}));
+		const openPromotionDecisionSession = vi.fn(async () => ({
+			kind: "host-owned-governed-promotion-decision-session-v1",
+			schemaVersion: 1,
+			recoveryRef: "host-recovery/promotion-decision",
+			run,
+			targetRef: "refs/heads/main",
+		}));
+		const openRecoverySession = vi.fn(async () => {
+			throw new Error("legacy recovery callback must never execute");
+		});
+		hostResolver.resolve.mockResolvedValue({
+			kind: "host-owned-governed-broker-v1",
+			openRecoverySession,
+			openPromotionDecisionSession,
+		} as unknown as HostOwnedGovernedBrokerV1);
+
+		const response = await runCliCapture(
+			root,
+			[
+				"run",
+				"--resume",
+				"host-recovery/promotion-decision",
+				"--approve",
+				"--decision",
+				"reject",
+				"--json",
+			],
+			legacyBundleMustNotBeConstructed(),
+		);
+
+		expect(response.exitCode).toBe(2);
+		expect(JSON.parse(response.stdout.join("\n"))).toMatchObject({
+			status: "recovery-required",
+			decision: { requested: "reject", state: "blocked" },
+			promotion: { state: "not-executed" },
+		});
+		expect(openRecoverySession).not.toHaveBeenCalled();
+		expect(openPromotionDecisionSession).not.toHaveBeenCalled();
+		expect(run).not.toHaveBeenCalled();
+		expect(hostResolver.resolve).not.toHaveBeenCalled();
+		expectRootUnchanged(root, before);
 	});
 });

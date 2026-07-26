@@ -296,6 +296,24 @@ impl PromotionGitGateway {
         self.observe_receipt(&capability, existing)
     }
 
+    /// Re-observe an immutable receipt without crossing the Git mutation
+    /// boundary. This recovery-only path verifies the candidate and receipt
+    /// facts afresh, then reports the target state exactly as it exists now.
+    ///
+    /// It deliberately never falls through to `promote`: a missing, malformed,
+    /// or ambiguous receipt remains reconciliation-required rather than
+    /// permission to create a merge or issue a compare-and-swap.
+    pub(super) fn observe_existing_receipt(
+        &mut self,
+        capability: VerifiedPromotionCapability,
+    ) -> Result<PromotionGitOutcome, PromotionGitError> {
+        let candidate = self.verify_candidate(&capability)?;
+        let Some(receipt) = self.inspect_receipt(&capability, &candidate)? else {
+            return Err(PromotionGitError::ReconciliationRequired);
+        };
+        self.observe_receipt(&capability, receipt)
+    }
+
     fn verify_candidate(
         &mut self,
         capability: &VerifiedPromotionCapability,

@@ -87,6 +87,7 @@ import {
 	type HostOwnedCandidateApprovalV1,
 	type HostOwnedCandidateSessionV1,
 	type HostOwnedPlanForgeCandidateSessionV1,
+	type HostOwnedPromotionDecisionSessionV1,
 	resolveHostOwnedGovernedBroker,
 } from "./governed-authority-broker-host.js";
 import { GOVERNED_AUTHORITY_BROKER_REQUIRED_CODE } from "./governed-ledger-authority.js";
@@ -877,6 +878,7 @@ function formatRunHelp(): string[] {
 	return [
 		"buildplane run --packet <path> [options]",
 		"buildplane run --resume <opaque-recovery-reference> --approve [--json]",
+		"buildplane run --resume <opaque-recovery-reference> --approve --decision promote|reject [--json]",
 		"",
 		"  By default, Buildplane enters the governed front door.",
 		"  It blocks in preview until a privileged host verifies the signed envelope,",
@@ -885,6 +887,7 @@ function formatRunHelp(): string[] {
 		"  Options:",
 		"    --approve        Request host-brokered governed admission; blocks until a privileged authority broker is available",
 		"    --resume <ref>   Ask the privileged host to reconcile an existing workflow; requires --approve and cannot take a packet or envelope",
+		"    --decision <kind> Record one recovery-only promotion decision (promote or reject); requires --resume and --approve, and never executes a promotion",
 		"    --envelope <path> Supply a sealed DispatchEnvelopeV3 for host-verified preauthorized admission, or a manifest-bound DispatchEnvelopeV5 for structural-only host-owned preview",
 		"    --raw            Explicitly unsafe legacy execution; emits no trusted receipt",
 		"    --tui            Interactive terminal UI (unsafe --raw lane only)",
@@ -930,10 +933,27 @@ interface RecoveryRunCommandArguments {
 	readonly recoveryReference: string;
 }
 
+/**
+ * A promotion decision is intentionally a distinct recovery-only form. It
+ * carries no packet, envelope, candidate, worker, reviewer, target, or
+ * execution selector; the privileged host must derive all of those from the
+ * already sealed recovery identity.
+ */
+interface PromotionDecisionRecoveryRunCommandArguments {
+	readonly kind: "promotion-decision-recovery";
+	readonly raw: false;
+	readonly tui: false;
+	readonly json: boolean;
+	readonly approve: true;
+	readonly recoveryReference: string;
+	readonly decision: "promote" | "reject";
+}
+
 type RunCommandArguments =
 	| PacketRunCommandArguments
 	| GraphRunCommandArguments
-	| RecoveryRunCommandArguments;
+	| RecoveryRunCommandArguments
+	| PromotionDecisionRecoveryRunCommandArguments;
 
 interface DispatchEnvelopeManifestDeclarationPreview {
 	readonly eventRef: string;
@@ -1092,12 +1112,19 @@ function parseRunCommandArguments(
 	args: readonly string[],
 ): RunCommandArguments {
 	const booleans = new Set(["--raw", "--tui", "--json", "--approve"]);
-	const values = new Set(["--packet", "--graph", "--envelope", "--resume"]);
+	const values = new Set([
+		"--packet",
+		"--graph",
+		"--envelope",
+		"--resume",
+		"--decision",
+	]);
 	const seen = new Set<string>();
 	let packetPath: string | undefined;
 	let graphPath: string | undefined;
 	let envelopePath: string | undefined;
 	let recoveryReference: string | undefined;
+	let promotionDecision: "promote" | "reject" | undefined;
 
 	for (let index = 0; index < args.length; index += 1) {
 		const arg = args[index];
@@ -1125,8 +1152,12 @@ function parseRunCommandArguments(
 				graphPath = value;
 			} else if (arg === "--envelope") {
 				envelopePath = value;
-			} else {
+			} else if (arg === "--resume") {
 				recoveryReference = value;
+			} else if (value === "promote" || value === "reject") {
+				promotionDecision = value;
+			} else {
+				throw new Error("--decision must be exactly promote or reject.");
 			}
 			continue;
 		}
@@ -1164,6 +1195,17 @@ function parseRunCommandArguments(
 				"--resume cannot be combined with --packet, --graph, --envelope, --raw, or --tui because recovered authority comes only from the privileged host.",
 			);
 		}
+		if (promotionDecision !== undefined) {
+			return {
+				kind: "promotion-decision-recovery",
+				raw: false,
+				tui: false,
+				json: seen.has("--json"),
+				approve: true,
+				recoveryReference,
+				decision: promotionDecision,
+			};
+		}
 		return {
 			kind: "recovery-resume",
 			raw: false,
@@ -1172,6 +1214,12 @@ function parseRunCommandArguments(
 			approve: true,
 			recoveryReference,
 		};
+	}
+
+	if (promotionDecision !== undefined) {
+		throw new Error(
+			"--decision is available only with --resume <opaque-recovery-reference> --approve.",
+		);
 	}
 
 	if (packetPath !== undefined && graphPath !== undefined) {
@@ -1416,6 +1464,25 @@ const HOST_CANDIDATE_RESULT_FIELDS = [
 
 const HOST_CANDIDATE_SESSION_FIELDS = ["kind", "recoveryRef", "run"] as const;
 
+const HOST_PROMOTION_DECISION_SESSION_FIELDS = [
+	"kind",
+	"schemaVersion",
+	"recoveryRef",
+	"run",
+] as const;
+
+const HOST_PROMOTION_DECISION_RESULT_FIELDS = [
+	"kind",
+	"schemaVersion",
+	"recoveryRef",
+	"decision",
+	"promotionDecisionRef",
+	"promotionDecisionDigest",
+	"tapeRootDigest",
+	"nativeReceiptRef",
+	"nativeReceiptDigest",
+] as const;
+
 const HOST_PLANFORGE_ADMISSION_FIELDS = [
 	"kind",
 	"admissionRef",
@@ -1462,6 +1529,21 @@ interface GovernedRootSnapshot {
 interface ParsedHostCandidateSession {
 	readonly recoveryRef: string;
 	readonly run: () => Promise<unknown>;
+}
+
+interface ParsedHostPromotionDecisionSession {
+	readonly recoveryRef: string;
+	readonly run: () => Promise<unknown>;
+}
+
+interface ParsedHostPromotionDecisionResult {
+	readonly recoveryRef: string;
+	readonly decision: "promote" | "reject";
+	readonly promotionDecisionRef: string;
+	readonly promotionDecisionDigest: string;
+	readonly tapeRootDigest: string;
+	readonly nativeReceiptRef: string;
+	readonly nativeReceiptDigest: string;
 }
 
 interface ParsedHostCandidateReceipt {
@@ -1578,6 +1660,16 @@ function readHostOpaqueReference(value: unknown, label: string): string {
 	return value;
 }
 
+function readHostPromotionDecision(
+	value: unknown,
+	label: string,
+): "promote" | "reject" {
+	if (value !== "promote" && value !== "reject") {
+		throw new TypeError(`${label} must be promote or reject.`);
+	}
+	return value;
+}
+
 function parseHostPlanForgeAdmission(
 	value: unknown,
 ): ParsedHostPlanForgeAdmission {
@@ -1683,6 +1775,91 @@ function parseHostCandidateSession(value: unknown): ParsedHostCandidateSession {
 			"host candidate session recoveryRef",
 		),
 		run: record.run as () => Promise<unknown>,
+	});
+}
+
+/**
+ * A promotion-decision session is a one-shot host boundary. Validate its
+ * exact data shape before accessing the sole `run` callback, so inherited,
+ * accessor-backed, extensible, or authority-bearing wrappers never become a
+ * usable continuation surface in the CLI process.
+ */
+function parseHostPromotionDecisionSession(
+	value: unknown,
+): ParsedHostPromotionDecisionSession {
+	const record = readClosedHostDataRecord(
+		value,
+		"host promotion-decision session",
+		HOST_PROMOTION_DECISION_SESSION_FIELDS,
+	);
+	if (
+		record.kind !== "host-owned-governed-promotion-decision-session-v1" ||
+		record.schemaVersion !== 1 ||
+		typeof record.run !== "function"
+	) {
+		throw new TypeError(
+			"host-owned governed broker returned an invalid promotion-decision session.",
+		);
+	}
+	return Object.freeze({
+		recoveryRef: readHostOpaqueReference(
+			record.recoveryRef,
+			"host promotion-decision session recoveryRef",
+		),
+		run: record.run as () => Promise<unknown>,
+	});
+}
+
+/**
+ * The result deliberately returns evidence identity only. Closed parsing
+ * rejects target/candidate/signer/command/worker/callable additions before
+ * the CLI can report the decision as recorded.
+ */
+function parseHostPromotionDecisionResult(
+	value: unknown,
+): ParsedHostPromotionDecisionResult {
+	const record = readClosedHostDataRecord(
+		value,
+		"host promotion-decision result",
+		HOST_PROMOTION_DECISION_RESULT_FIELDS,
+	);
+	if (
+		record.kind !== "host-owned-governed-promotion-decision-run-result-v1" ||
+		record.schemaVersion !== 1
+	) {
+		throw new TypeError(
+			"host-owned governed broker returned an invalid promotion-decision result.",
+		);
+	}
+	return Object.freeze({
+		recoveryRef: readHostOpaqueReference(
+			record.recoveryRef,
+			"host promotion-decision result.recoveryRef",
+		),
+		decision: readHostPromotionDecision(
+			record.decision,
+			"host promotion-decision result.decision",
+		),
+		promotionDecisionRef: readHostOpaqueReference(
+			record.promotionDecisionRef,
+			"host promotion-decision result.promotionDecisionRef",
+		),
+		promotionDecisionDigest: readHostDigest(
+			record.promotionDecisionDigest,
+			"host promotion-decision result.promotionDecisionDigest",
+		),
+		tapeRootDigest: readHostDigest(
+			record.tapeRootDigest,
+			"host promotion-decision result.tapeRootDigest",
+		),
+		nativeReceiptRef: readHostOpaqueReference(
+			record.nativeReceiptRef,
+			"host promotion-decision result.nativeReceiptRef",
+		),
+		nativeReceiptDigest: readHostDigest(
+			record.nativeReceiptDigest,
+			"host promotion-decision result.nativeReceiptDigest",
+		),
 	});
 }
 
@@ -2962,6 +3139,74 @@ function emitGovernedHostRecovery(
 	return 2;
 }
 
+/**
+ * A recorded operator decision is not a promotion completion. The host may
+ * have sealed a decision record, but all subsequent reconciliation and any
+ * distinct execution action remain host-owned. Keep the CLI response narrow
+ * so it cannot be confused with a target mutation receipt.
+ */
+interface GovernedPromotionDecisionRecoveryOutput {
+	readonly governance: "governed";
+	readonly status: "recovery-required";
+	readonly executionStarted: "unknown";
+	readonly decision: {
+		readonly requested: "promote" | "reject";
+		readonly state: "blocked" | "recorded";
+	};
+	readonly promotion: {
+		readonly state: "not-executed";
+	};
+	readonly recovery: {
+		readonly action: "contact-host";
+		readonly retry: "blocked" | "required";
+	};
+}
+
+function buildGovernedPromotionDecisionRecoveryOutput(
+	decision: "promote" | "reject",
+	state: "blocked" | "recorded",
+): GovernedPromotionDecisionRecoveryOutput {
+	return Object.freeze({
+		governance: "governed" as const,
+		status: "recovery-required" as const,
+		executionStarted: "unknown" as const,
+		decision: Object.freeze({ requested: decision, state }),
+		promotion: Object.freeze({ state: "not-executed" as const }),
+		recovery: Object.freeze({
+			action: "contact-host" as const,
+			retry:
+				state === "recorded" ? ("required" as const) : ("blocked" as const),
+		}),
+	});
+}
+
+function emitGovernedPromotionDecisionRecovery(
+	json: boolean,
+	stdout: (line: string) => void,
+	decision: "promote" | "reject",
+	state: "blocked" | "recorded",
+): number {
+	const output = buildGovernedPromotionDecisionRecoveryOutput(decision, state);
+	if (json) {
+		stdout(formatJson(output));
+	} else if (state === "recorded") {
+		stdout("Governed promotion decision recorded: recovery required");
+		stdout(`decision: ${decision} (recorded)`);
+		stdout("promotion: not executed");
+		stdout(
+			"recovery: required; contact the privileged host before any separate promotion execution",
+		);
+	} else {
+		stdout("Governed promotion decision blocked: recovery required");
+		stdout(`decision: ${decision} (blocked)`);
+		stdout("promotion: not executed");
+		stdout(
+			"recovery: blocked; contact the privileged host to reconcile this session",
+		);
+	}
+	return 2;
+}
+
 function assertGovernedProjectInitialized(projectRoot: string): void {
 	const stateDirectory = join(projectRoot, ".buildplane");
 	if (
@@ -3103,6 +3348,60 @@ async function executeHostCandidateSession(
 			sourcePacket,
 			expectedEnvelopeDigest,
 		);
+	} catch (error) {
+		sessionFailure = error;
+	}
+	if (!rootSnapshotMatches(before, projectRoot)) {
+		throw new GovernedRootIntegrityViolation();
+	}
+	if (sessionFailure !== undefined) {
+		throw sessionFailure;
+	}
+}
+
+/**
+ * Keep the recovery-only operator-decision handoff behind the same native
+ * host-contract guard as candidate/recovery callbacks. The host receives a
+ * project root, so a structural JavaScript callback must never become a
+ * production decision or promotion authority path. Once a native host exists,
+ * this path validates the one-shot session/result wrappers and observes that
+ * the checked-out target remained unchanged; it never opens an execution or
+ * promotion action from TypeScript.
+ */
+async function executeHostPromotionDecisionSession(
+	projectRoot: string,
+	recoveryReference: string,
+	requestedDecision: "promote" | "reject",
+	openSession: () => Promise<HostOwnedPromotionDecisionSessionV1>,
+): Promise<void> {
+	// This must precede both `openSession()` and `session.run()`. In the
+	// shipped distribution it blocks every structural JavaScript callback.
+	requireNativeGovernedHostContract();
+	const before = captureGovernedRootSnapshot(projectRoot);
+	if (!before) {
+		throw new Error(
+			"governed root integrity snapshot is unavailable; the host promotion-decision session was not opened.",
+		);
+	}
+	let sessionFailure: unknown;
+	try {
+		const session = parseHostPromotionDecisionSession(await openSession());
+		if (session.recoveryRef !== recoveryReference) {
+			throw new TypeError(
+				"host promotion-decision session must bind the requested recovery identity.",
+			);
+		}
+		const result = parseHostPromotionDecisionResult(await session.run());
+		if (result.recoveryRef !== session.recoveryRef) {
+			throw new TypeError(
+				"host promotion-decision session and result must bind the same recovery identity.",
+			);
+		}
+		if (result.decision !== requestedDecision) {
+			throw new TypeError(
+				"host promotion-decision result must bind the requested operator decision.",
+			);
+		}
 	} catch (error) {
 		sessionFailure = error;
 	}
@@ -3383,6 +3682,69 @@ async function runGovernedRunCommand(
 
 	assertGovernedProjectInitialized(options.cwd);
 	const projectRoot = resolve(options.cwd);
+	if (runArguments.kind === "promotion-decision-recovery") {
+		// Resolving a structural JavaScript broker is itself an authority
+		// boundary: a replaced resolver could perform an effect before returning
+		// a session. Fail before resolving it until the native host contract
+		// exists, rather than merely guarding the later session callbacks.
+		try {
+			requireNativeGovernedHostContract();
+		} catch {
+			return emitGovernedPromotionDecisionRecovery(
+				runArguments.json,
+				options.stdout,
+				runArguments.decision,
+				"blocked",
+			);
+		}
+		let broker: Awaited<ReturnType<typeof resolveHostOwnedGovernedBroker>>;
+		try {
+			broker = await resolveHostOwnedGovernedBroker();
+		} catch {
+			return emitGovernedPromotionDecisionRecovery(
+				runArguments.json,
+				options.stdout,
+				runArguments.decision,
+				"blocked",
+			);
+		}
+		if (!broker) {
+			return emitGovernedPromotionDecisionRecovery(
+				runArguments.json,
+				options.stdout,
+				runArguments.decision,
+				"blocked",
+			);
+		}
+		try {
+			await executeHostPromotionDecisionSession(
+				projectRoot,
+				runArguments.recoveryReference,
+				runArguments.decision,
+				() =>
+					broker.openPromotionDecisionSession({
+						kind: "governed-promotion-decision-session-open-v1",
+						schemaVersion: 1,
+						projectRoot,
+						recoveryReference: runArguments.recoveryReference,
+						decision: runArguments.decision,
+					}),
+			);
+		} catch {
+			return emitGovernedPromotionDecisionRecovery(
+				runArguments.json,
+				options.stdout,
+				runArguments.decision,
+				"blocked",
+			);
+		}
+		return emitGovernedPromotionDecisionRecovery(
+			runArguments.json,
+			options.stdout,
+			runArguments.decision,
+			"recorded",
+		);
+	}
 	if (runArguments.kind === "recovery-resume") {
 		const broker = await resolveHostOwnedGovernedBroker();
 		if (!broker) {

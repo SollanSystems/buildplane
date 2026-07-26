@@ -16,6 +16,7 @@ thiserror.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+bp-ledger = { workspace = true, features = ["test-support"] }
 chrono.workspace = true
 rusqlite.workspace = true
 tempfile = "3"

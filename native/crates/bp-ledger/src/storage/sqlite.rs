@@ -37,9 +37,10 @@ use crate::payload::trust_spine::{
     ModelActionAuthorizedV2, ModelActionIntentV1, ModelRequestEvidenceV1,
     PromotionApprovalRequestedV1, PromotionDecisionKindV1, PromotionDecisionRecordedV1,
     PromotionExecutionClaimedV1, PromotionExecutionLeaseBindingV1, PromotionGitBindingV1,
-    PromotionResultOutcomeV1, PromotionResultRecordedV1, PromotionWorktreeSyncStateV1,
-    ReviewDecisionV1, ReviewVerdictRecordedV2, SandboxProfileDeclaredV1, TrustScopeEvidenceV1,
-    TrustTierV1, WorkerManifestDeclaredV1, WorkflowGraphDeclaredV2,
+    PromotionReconciliationResolvedV1, PromotionResultOutcomeV1, PromotionResultRecordedV1,
+    PromotionWorktreeSyncStateV1, ReconciliationResolutionOutcomeV1, ReviewDecisionV1,
+    ReviewVerdictRecordedV2, SandboxProfileDeclaredV1, TrustScopeEvidenceV1, TrustTierV1,
+    WorkerManifestDeclaredV1, WorkflowGraphDeclaredV2,
 };
 use crate::payload::Payload;
 use crate::signing::{
@@ -246,6 +247,21 @@ impl GovernedPromotionAuthorityV1 {
             operator_signer,
             ledger_authority_realm_digest,
         })
+    }
+
+    /// Read-only startup identity accessors for the sibling protected broker
+    /// composition. They expose no key material and let a broker reject a
+    /// locally injected signer that differs from the authority realm before an
+    /// `Existing` recovery path can bypass the writer's signer validation.
+    #[doc(hidden)]
+    pub fn configured_kernel_signer(&self) -> &ActorKeyRef {
+        &self.kernel_signer
+    }
+
+    /// See [`Self::configured_kernel_signer`].
+    #[doc(hidden)]
+    pub fn configured_operator_signer(&self) -> &ActorKeyRef {
+        &self.operator_signer
     }
 }
 
@@ -620,6 +636,39 @@ pub struct GovernedPromotionResultRequestV1 {
     /// it records a target-effect outcome; callers cannot attach a neighbour's
     /// lease to this decision.
     pub promotion_execution_lease_binding: Option<PromotionExecutionLeaseBindingV1>,
+}
+
+/// Closed broker-only request to abandon one already-recorded governed
+/// promotion reconciliation. Every payload field is re-derived from the
+/// sealed decision and immutable result; the caller cannot choose an outcome,
+/// receipt, candidate, signer, or timestamp.
+///
+/// This stays out of the generic ledger-server protocol. It is public only so
+/// the sibling broker crate can hold the protected startup composition.
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GovernedPromotionReconciliationRequestV1 {
+    pub run_id: RunId,
+    pub promotion_decision_event_id: EventId,
+    pub promotion_result_event_id: EventId,
+}
+
+/// Exact durable resolution returned by the broker-only reconciliation writer.
+/// A retry resolves the existing signed event and never emits a second
+/// operator abandonment.
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GovernedPromotionReconciliationDispositionV1 {
+    Recorded {
+        promotion_reconciliation_event_id: EventId,
+        promotion_reconciliation_event_digest: String,
+        outcome: ReconciliationResolutionOutcomeV1,
+    },
+    Existing {
+        promotion_reconciliation_event_id: EventId,
+        promotion_reconciliation_event_digest: String,
+        outcome: ReconciliationResolutionOutcomeV1,
+    },
 }
 
 /// Result of an idempotent model-intent issue operation. Both variants name
@@ -2068,7 +2117,11 @@ impl SqliteStore {
         if event.kind == EventKind::TapeCheckpoint {
             return Err(LedgerError::CallerSuppliedCheckpoint);
         }
-        if event.kind == EventKind::GovernedDispatchV5AdmissionRecordedV1 {
+        if matches!(
+            event.kind,
+            EventKind::GovernedDispatchV5AdmissionRecordedV1
+                | EventKind::PromotionReconciliationResolved
+        ) {
             return Err(LedgerError::CallerSuppliedTrustSpineEvent {
                 kind: event.kind.as_wire().to_string(),
             });
@@ -4868,6 +4921,151 @@ impl SqliteStore {
                 ))
             }
         }
+    }
+
+    /// Append or resolve one operator-owned `Abandon` event for an already
+    /// recorded, target-bound promotion reconciliation.
+    ///
+    /// The immutable promotion result remains historical evidence. This
+    /// method never performs Git work, never reissues a promotion lease, and
+    /// never exposes a caller-selected reconciliation outcome. It is a narrow
+    /// protected-host primitive used only after a broker has reopened trusted
+    /// replay and completed a read-only receipt observation.
+    ///
+    /// The ordinary reconciliation event and the kernel checkpoint are one
+    /// SQLite transaction. A checkpoint failure therefore rolls the event back
+    /// instead of leaving an unsealed governed tail that trusted replay cannot
+    /// resume through this broker boundary. A retry either observes the exact
+    /// sealed event or records one new atomically sealed abandonment.
+    ///
+    /// The generic append paths reject this event kind, so no generic
+    /// ledger-server request can race in a second reconciliation record.
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_governed_promotion_reconciliation_abandon_v1(
+        &self,
+        request: &GovernedPromotionReconciliationRequestV1,
+        authority: &GovernedPromotionAuthorityV1,
+        operator_signing_key: &SigningKey,
+        operator_signer: &ActorKeyRef,
+        kernel_signing_key: &SigningKey,
+        kernel_signer: &ActorKeyRef,
+    ) -> Result<GovernedPromotionReconciliationDispositionV1> {
+        validate_governed_promotion_signer(
+            authority,
+            operator_signing_key,
+            operator_signer,
+            PromotionSignerRoleV1::Operator,
+        )?;
+        validate_governed_promotion_signer(
+            authority,
+            kernel_signing_key,
+            kernel_signer,
+            PromotionSignerRoleV1::Kernel,
+        )?;
+        let now = canonical_ledger_timestamp(Utc::now())?;
+
+        let (disposition, appended_event) = {
+            let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+            let decision = governed_promotion_decision_by_event(
+                &tx,
+                request.run_id,
+                request.promotion_decision_event_id,
+            )?
+            .ok_or_else(|| {
+                promotion_reconciliation_authority_rejected(
+                    "promotion reconciliation has no native decision projection",
+                )
+            })?;
+            if decision.state != StoredGovernedPromotionDecisionState::Sealed {
+                return Err(promotion_reconciliation_authority_rejected(
+                    "promotion reconciliation requires a kernel-sealed decision",
+                ));
+            }
+            let verified =
+                verified_governed_promotion_decision_from_stored(&tx, &decision, authority)?;
+            verify_stored_governed_promotion_decision_seal(&tx, &decision, authority)?;
+            let result = governed_promotion_result_by_decision(
+                &tx,
+                request.run_id,
+                request.promotion_decision_event_id,
+            )?
+            .ok_or_else(|| {
+                promotion_reconciliation_authority_rejected(
+                    "promotion reconciliation has no native result projection",
+                )
+            })?;
+            if result.promotion_result_event_id != request.promotion_result_event_id {
+                return Err(promotion_reconciliation_authority_rejected(
+                    "promotion reconciliation result reference does not match the sealed decision",
+                ));
+            }
+            let resolution = governed_promotion_reconciliation_abandon_payload(
+                &tx, request, &decision, &verified, &result, authority, now,
+            )?;
+
+            let (disposition, appended_event) = if let Some((event_id, event_digest)) =
+                existing_governed_promotion_reconciliation_abandon(
+                    &tx,
+                    request.run_id,
+                    result.promotion_result_event_id,
+                    &resolution,
+                    authority,
+                )? {
+                (
+                    GovernedPromotionReconciliationDispositionV1::Existing {
+                        promotion_reconciliation_event_id: event_id,
+                        promotion_reconciliation_event_digest: event_digest,
+                        outcome: ReconciliationResolutionOutcomeV1::Abandon,
+                    },
+                    None,
+                )
+            } else {
+                let event = canonicalize(Event {
+                    id: EventId::new(),
+                    run_id: request.run_id,
+                    parent_event_id: Some(result.promotion_result_event_id),
+                    schema_version: Event::CURRENT_SCHEMA_VERSION,
+                    kind: EventKind::PromotionReconciliationResolved,
+                    occurred_at: now,
+                    payload: Payload::PromotionReconciliationResolvedV1(resolution),
+                })?;
+                validate_new_ordinary_event_id(&tx, &event)?;
+                let signature = sign_event(&event, operator_signing_key, operator_signer, now)?;
+                let event_digest = signature.canonical_event_hash.clone();
+                insert_event(&tx, &event)?;
+                insert_event_signature(&tx, &signature)?;
+                (
+                    GovernedPromotionReconciliationDispositionV1::Recorded {
+                        promotion_reconciliation_event_id: event.id,
+                        promotion_reconciliation_event_digest: event_digest,
+                        outcome: ReconciliationResolutionOutcomeV1::Abandon,
+                    },
+                    Some(event),
+                )
+            };
+
+            match self.seal_governed_signed_prefix_in_transaction(
+                &tx,
+                &request.run_id,
+                kernel_signing_key,
+                kernel_signer,
+            )? {
+                GovernedCheckpointSealOutcome::AlreadySealed { .. }
+                | GovernedCheckpointSealOutcome::Emitted { .. } => {}
+                GovernedCheckpointSealOutcome::EmptyPrefix => {
+                    return Err(promotion_reconciliation_authority_rejected(
+                        "promotion reconciliation sealing found no signed governed prefix",
+                    ));
+                }
+            }
+            tx.commit()?;
+            (disposition, appended_event)
+        };
+        if let Some(event) = appended_event.as_ref() {
+            self.record_ordinary_append(event);
+        }
+        Ok(disposition)
     }
 
     /// Claim the one fixed read-only verifier activity named by signed V3
@@ -11920,6 +12118,178 @@ fn verify_stored_governed_promotion_execution_claim(
         });
     }
     Ok(payload.clone())
+}
+
+fn promotion_reconciliation_authority_rejected(reason: impl Into<String>) -> LedgerError {
+    LedgerError::PromotionAuthorityRejected {
+        reason: reason.into(),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn governed_promotion_reconciliation_abandon_payload(
+    conn: &Connection,
+    request: &GovernedPromotionReconciliationRequestV1,
+    decision: &StoredGovernedPromotionDecision,
+    verified: &VerifiedStoredGovernedPromotionDecision,
+    result: &StoredGovernedPromotionResult,
+    authority: &GovernedPromotionAuthorityV1,
+    now: DateTime<Utc>,
+) -> Result<PromotionReconciliationResolvedV1> {
+    if result.run_id != request.run_id
+        || result.promotion_decision_event_id != request.promotion_decision_event_id
+        || result.promotion_result_event_id != request.promotion_result_event_id
+        || result.candidate_digest != decision.candidate_digest
+        || result.idempotency_key != decision.idempotency_key
+        || result.promotion_decision_event_digest != decision.promotion_decision_event_digest
+    {
+        return Err(promotion_reconciliation_authority_rejected(
+            "promotion reconciliation result projection identity does not match the sealed decision",
+        ));
+    }
+    let event = load_verified_promotion_event(
+        conn,
+        result.promotion_result_event_id,
+        &authority.trusted_keys,
+        &authority.kernel_signer,
+        "promotion result",
+    )?;
+    if event.run_id != request.run_id
+        || event.parent_event_id != Some(decision.promotion_decision_event_id)
+        || canonical_event_hash(&event)? != result.promotion_result_event_digest
+    {
+        return Err(promotion_reconciliation_authority_rejected(
+            "promotion reconciliation result event does not bind its native projection",
+        ));
+    }
+    let Payload::PromotionResultRecordedV1(payload) = &event.payload else {
+        return Err(promotion_reconciliation_authority_rejected(
+            "promotion reconciliation projection does not reference a promotion result event",
+        ));
+    };
+    if payload.candidate_digest != result.candidate_digest
+        || payload.idempotency_key != result.idempotency_key
+        || payload.promotion_decision_ref != decision.promotion_decision_event_id.to_string()
+        || payload.outcome != result.outcome
+        || payload.merged_head_sha != result.merged_head_sha
+        || payload.promotion_git_binding != result.promotion_git_binding
+        || payload.completed_at != result.completed_at
+    {
+        return Err(promotion_reconciliation_authority_rejected(
+            "promotion reconciliation result projection does not match its signed tape event",
+        ));
+    }
+    let result_request = GovernedPromotionResultRequestV1 {
+        run_id: request.run_id,
+        promotion_decision_event_id: request.promotion_decision_event_id,
+        outcome: payload.outcome,
+        merged_head_sha: payload.merged_head_sha.clone(),
+        promotion_git_binding: payload.promotion_git_binding.clone(),
+        promotion_execution_lease_binding: payload.promotion_execution_lease_binding.clone(),
+    };
+    validate_governed_promotion_result_against_decision(&result_request, decision, verified)?;
+    validate_governed_promotion_result_execution_lease(
+        conn,
+        &result_request,
+        decision,
+        verified,
+        authority,
+        None,
+    )?;
+    if payload.outcome != PromotionResultOutcomeV1::ReconciliationRequired {
+        return Err(promotion_reconciliation_authority_rejected(
+            "promotion reconciliation requires a recorded reconciliation-required result",
+        ));
+    }
+    let receipt_ref = payload
+        .promotion_git_binding
+        .as_ref()
+        .and_then(|binding| binding.promotion_receipt_ref.as_ref())
+        .filter(|receipt_ref| !receipt_ref.trim().is_empty())
+        .ok_or_else(|| {
+            promotion_reconciliation_authority_rejected(
+                "promotion reconciliation requires the recorded immutable promotion receipt",
+            )
+        })?;
+    let authority_actor = authority.operator_signer.actor_id.clone();
+    Ok(PromotionReconciliationResolvedV1 {
+        candidate_digest: result.candidate_digest.clone(),
+        promotion_decision_ref: decision.promotion_decision_event_id.to_string(),
+        promotion_result_ref: result.promotion_result_event_id.to_string(),
+        promotion_receipt_ref: receipt_ref.clone(),
+        outcome: ReconciliationResolutionOutcomeV1::Abandon,
+        authority: authority_actor.clone(),
+        resolved_by: authority_actor,
+        idempotency_key: format!(
+            "promotion-reconciliation-abandon:{}",
+            result.idempotency_key
+        ),
+        resolved_at: timestamp(now),
+    })
+}
+
+fn existing_governed_promotion_reconciliation_abandon(
+    conn: &Connection,
+    run_id: RunId,
+    promotion_result_event_id: EventId,
+    expected: &PromotionReconciliationResolvedV1,
+    authority: &GovernedPromotionAuthorityV1,
+) -> Result<Option<(EventId, String)>> {
+    let mut statement =
+        conn.prepare("SELECT id FROM events WHERE run_id = ?1 AND kind = ?2 ORDER BY id ASC")?;
+    let ids = statement
+        .query_map(
+            params![
+                run_id.to_string(),
+                EventKind::PromotionReconciliationResolved.as_wire()
+            ],
+            |row| row.get::<_, String>(0),
+        )?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let mut existing = None;
+    for id in ids {
+        let event_id = parse_event_id(&id, "promotion reconciliation")?;
+        let event = load_verified_promotion_event(
+            conn,
+            event_id,
+            &authority.trusted_keys,
+            &authority.operator_signer,
+            "promotion reconciliation",
+        )?;
+        let Payload::PromotionReconciliationResolvedV1(payload) = &event.payload else {
+            return Err(promotion_reconciliation_authority_rejected(
+                "promotion reconciliation event has an unexpected payload",
+            ));
+        };
+        let binds_same_promotion = payload.promotion_result_ref == expected.promotion_result_ref
+            || payload.promotion_decision_ref == expected.promotion_decision_ref
+            || payload.candidate_digest == expected.candidate_digest;
+        if !binds_same_promotion {
+            continue;
+        }
+        if event.parent_event_id != Some(promotion_result_event_id)
+            || payload.candidate_digest != expected.candidate_digest
+            || payload.promotion_decision_ref != expected.promotion_decision_ref
+            || payload.promotion_result_ref != expected.promotion_result_ref
+            || payload.promotion_receipt_ref != expected.promotion_receipt_ref
+            || payload.outcome != ReconciliationResolutionOutcomeV1::Abandon
+            || payload.authority != expected.authority
+            || payload.resolved_by != expected.resolved_by
+            || payload.idempotency_key != expected.idempotency_key
+            || payload.resolved_at != timestamp(event.occurred_at)
+        {
+            return Err(promotion_reconciliation_authority_rejected(
+                "a different promotion reconciliation event already binds this immutable promotion",
+            ));
+        }
+        let event_digest = canonical_event_hash(&event)?;
+        if existing.replace((event.id, event_digest)).is_some() {
+            return Err(promotion_reconciliation_authority_rejected(
+                "more than one matching promotion reconciliation event exists",
+            ));
+        }
+    }
+    Ok(existing)
 }
 
 fn resolve_existing_governed_promotion_result(

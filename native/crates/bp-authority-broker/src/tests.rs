@@ -35,9 +35,11 @@ use super::v5_dispatch_admission::{
 use super::{
     AuthorityBackend, AuthorityBackendError, AuthorityGrant, BrokerModelActionRequest,
     BrokerModelActionStatus, BrokerModelAuthority, BrokerPromotionDecisionAuthority,
-    BrokerPromotionDecisionDisposition, BrokerPromotionDecisionStartupError, CredentialGateway,
-    GatewayCompletion, LeasePolicy, PairedGatewayResult, PrivateModelCapability,
-    ProtectedPromotionDecisionAuthority, ReplaySnapshotVerifier, ResultDisposition,
+    BrokerPromotionDecisionDisposition, BrokerPromotionDecisionStartupError,
+    BrokerPromotionReconciliationDisposition, BrokerPromotionReconciliationIngressRequest,
+    BrokerPromotionReconciliationStartupError, CredentialGateway, GatewayCompletion, LeasePolicy,
+    PairedGatewayResult, PrivateModelCapability, ProtectedPromotionDecisionAuthority,
+    ProtectedPromotionReconciliationAuthority, ReplaySnapshotVerifier, ResultDisposition,
     TrustedReplayBinding, TrustedReplayVerificationError, TrustedReplayVerifier,
 };
 use bp_ledger::canonicalize::canonical_event_hash;
@@ -66,8 +68,9 @@ use bp_ledger::payload::trust_spine::{
     DispatchEnvelopeV4, DispatchEnvelopeV5, ExecutionRoleV1, ModelActionAuthorizedV2,
     ModelActionCandidateBindingV1, ModelActionIntentV1, ModelRequestEvidenceV1,
     PromotionApprovalRequestedV1, PromotionDecisionKindV1, PromotionExecutionClaimedV1,
-    PromotionGitBindingV1, PromotionResultOutcomeV1, PromotionWorktreeSyncStateV1,
-    ReviewDecisionV1, ReviewVerdictOutputV1, ReviewVerdictRecordedV2, SandboxProfileContentV1,
+    PromotionExecutionLeaseBindingV1, PromotionGitBindingV1, PromotionResultOutcomeV1,
+    PromotionWorktreeSyncStateV1, ReconciliationResolutionOutcomeV1, ReviewDecisionV1,
+    ReviewVerdictOutputV1, ReviewVerdictRecordedV2, SandboxProfileContentV1,
     SandboxProfileDeclaredV1, SandboxRuntimeV1, TrustScopeEvidenceV1, TrustTierV1, WorkerHarnessV1,
     WorkerManifestContentV1, WorkerManifestDeclaredV1, WorkerProviderV1,
     WorkflowCancellationCauseV1, WorkflowCancellationRequestedV1, WorkflowGraphDeclaredV2,
@@ -80,13 +83,17 @@ use bp_ledger::storage::sqlite::{
     CheckpointPolicy, GovernedCandidateCompletionDispositionV1,
     GovernedCandidateCompletionRequestV1, GovernedDispatchAdmissionAuthorityV1,
     GovernedDispatchAdmissionRequestV1, GovernedDispatchV5AdmissionAuthorityV1,
-    GovernedPromotionAuthorityV1, GovernedPromotionDecisionRequestV1, SqliteStore,
+    GovernedPromotionAuthorityV1, GovernedPromotionDecisionRequestV1,
+    GovernedPromotionExecutionClaimDispositionV1, GovernedPromotionExecutionClaimRequestV1,
+    GovernedPromotionReconciliationDispositionV1, GovernedPromotionReconciliationRequestV1,
+    GovernedPromotionResultDispositionV1, GovernedPromotionResultRequestV1, SqliteStore,
 };
 use bp_ledger::{EventId, LedgerError, RunId};
 use bp_replay::{
     engine::EngineError, reader::ReaderError,
     trusted_recovery::TRUSTED_GOVERNED_RECOVERY_MAX_EVENTS_V1, TrustSpineSignerRole,
     TrustedGovernedRecoveryError, TrustedGovernedRecoverySnapshot, TrustedReplayAuthorities,
+    WorkflowPhaseV1,
 };
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use ed25519_dalek::SigningKey;
@@ -1848,7 +1855,11 @@ fn promotion_candidate(
         base_commit_sha: dispatch.body.base_commit_sha.clone(),
         candidate_commit_sha: "2".repeat(40),
         commit_digest: DIGEST_B.into(),
-        tree_digest: DIGEST_C.into(),
+        // The reconciliation façade's read-only Git observer independently
+        // hashes this empty fixture tree. Keep the signed candidate fact equal
+        // to that deterministic observation rather than using a placeholder
+        // digest that no real Git tree could satisfy.
+        tree_digest: PROMOTION_TREE_DIGEST.into(),
         patch_digest: DIGEST_D.into(),
         changed_files_digest: DIGEST_E.into(),
         envelope_digest: dispatch.envelope_digest.clone(),
@@ -2652,6 +2663,670 @@ fn promotion_replay_authorities(fixture: &PromotionFixture) -> TrustedReplayAuth
     authorities.allow_signer(TrustSpineSignerRole::Reviewer, fixture.reviewer.clone());
     authorities.allow_signer(TrustSpineSignerRole::Operator, fixture.operator.clone());
     authorities
+}
+
+fn record_reconciliation_required_promotion_result(
+    fixture: &PromotionFixture,
+) -> (EventId, EventId, String) {
+    let decision_event_id = match fixture
+        .store
+        .record_governed_promotion_decision_v1(
+            &fixture.request,
+            &fixture.authority,
+            &fixture.operator_key,
+            &fixture.operator,
+        )
+        .expect("record one operator promotion decision")
+    {
+        bp_ledger::storage::sqlite::GovernedPromotionDecisionDispositionV1::AwaitingKernelSeal {
+            promotion_decision_event_id,
+            ..
+        }
+        | bp_ledger::storage::sqlite::GovernedPromotionDecisionDispositionV1::Sealed {
+            promotion_decision_event_id,
+            ..
+        } => promotion_decision_event_id,
+    };
+    fixture
+        .store
+        .seal_governed_promotion_decision_v1(
+            &bp_ledger::storage::sqlite::GovernedPromotionDecisionSealRequestV1 {
+                run_id: fixture.request.run_id,
+                promotion_decision_event_id: decision_event_id,
+            },
+            &fixture.authority,
+            &fixture.kernel_key,
+            &fixture.kernel,
+        )
+        .expect("seal the promotion decision before its one effect claim");
+
+    let (claim_event_id, claim_event_digest, lease_id) = match fixture
+        .store
+        .claim_governed_promotion_execution_v1(
+            &GovernedPromotionExecutionClaimRequestV1 {
+                run_id: fixture.request.run_id,
+                promotion_decision_event_id: decision_event_id,
+                lease_duration_ms: 30_000,
+            },
+            &fixture.authority,
+            &fixture.kernel_key,
+            &fixture.kernel,
+        )
+        .expect("reserve the one promotion execution lease")
+    {
+        GovernedPromotionExecutionClaimDispositionV1::Granted {
+            promotion_execution_claim_event_id,
+            promotion_execution_claim_event_digest,
+            claim,
+        } => (
+            promotion_execution_claim_event_id,
+            promotion_execution_claim_event_digest,
+            claim.lease_id,
+        ),
+        other => panic!("fixture must grant one promotion lease, got {other:?}"),
+    };
+
+    let candidate_event = fixture
+        .store
+        .events_for_run(&fixture.request.run_id.to_string())
+        .expect("read fixture candidate")
+        .into_iter()
+        .find(|event| event.id == fixture.request.candidate_created_event_id.to_string())
+        .expect("fixture must contain the immutable candidate")
+        .to_event()
+        .expect("decode fixture candidate");
+    let Payload::CandidateCreatedV2(candidate) = candidate_event.payload else {
+        panic!("fixture candidate event must carry CandidateCreatedV2");
+    };
+    let merged_head_sha = "3".repeat(40);
+    let receipt_suffix = candidate
+        .candidate_ref
+        .strip_prefix("refs/buildplane/candidates/")
+        .expect("fixture candidate ref is canonical");
+    let result = fixture
+        .store
+        .record_governed_promotion_result_v1(
+            &GovernedPromotionResultRequestV1 {
+                run_id: fixture.request.run_id,
+                promotion_decision_event_id: decision_event_id,
+                outcome: PromotionResultOutcomeV1::ReconciliationRequired,
+                merged_head_sha: Some(merged_head_sha.clone()),
+                promotion_git_binding: Some(PromotionGitBindingV1 {
+                    target_ref: "refs/heads/main".into(),
+                    target_head_before_sha: candidate.base_commit_sha.clone(),
+                    target_head_after_sha: Some(merged_head_sha.clone()),
+                    merged_head_sha: Some(merged_head_sha),
+                    candidate_commit_sha: candidate.candidate_commit_sha.clone(),
+                    merge_parent_shas: Some(vec![
+                        candidate.base_commit_sha.clone(),
+                        candidate.candidate_commit_sha.clone(),
+                    ]),
+                    merged_tree_sha: Some("4".repeat(40)),
+                    merged_tree_digest: candidate.tree_digest.clone(),
+                    promotion_receipt_ref: Some(format!(
+                        "refs/buildplane/promotions/{receipt_suffix}"
+                    )),
+                    worktree_sync_state: Some(PromotionWorktreeSyncStateV1::RootCheckoutStale),
+                }),
+                promotion_execution_lease_binding: Some(PromotionExecutionLeaseBindingV1 {
+                    promotion_execution_claim_event_ref: claim_event_id,
+                    promotion_execution_claim_event_digest: claim_event_digest,
+                    lease_id,
+                }),
+            },
+            &fixture.authority,
+            &fixture.kernel_key,
+            &fixture.kernel,
+        )
+        .expect("record the known post-CAS reconciliation-required result");
+    let result_event_id = match result {
+        GovernedPromotionResultDispositionV1::Recorded {
+            promotion_result_event_id,
+            ..
+        }
+        | GovernedPromotionResultDispositionV1::Existing {
+            promotion_result_event_id,
+            ..
+        } => promotion_result_event_id,
+    };
+
+    (
+        decision_event_id,
+        result_event_id,
+        candidate.candidate_digest,
+    )
+}
+
+#[test]
+fn promotion_reconciliation_writer_appends_or_resolves_one_exact_operator_abandonment() {
+    let fixture = promotion_fixture();
+    let (promotion_decision_event_id, promotion_result_event_id, candidate_digest) =
+        record_reconciliation_required_promotion_result(&fixture);
+    let request = GovernedPromotionReconciliationRequestV1 {
+        run_id: fixture.request.run_id,
+        promotion_decision_event_id,
+        promotion_result_event_id,
+    };
+    let event_count_before = fixture.store.event_count().expect("count signed tape");
+
+    let first = fixture
+        .store
+        .record_governed_promotion_reconciliation_abandon_v1(
+            &request,
+            &fixture.authority,
+            &fixture.operator_key,
+            &fixture.operator,
+            &fixture.kernel_key,
+            &fixture.kernel,
+        )
+        .expect("append one operator-owned reconciliation abandonment");
+    let (reconciliation_event_id, reconciliation_event_digest) = match first {
+        GovernedPromotionReconciliationDispositionV1::Recorded {
+            promotion_reconciliation_event_id,
+            promotion_reconciliation_event_digest,
+            outcome,
+        } => {
+            assert_eq!(outcome, ReconciliationResolutionOutcomeV1::Abandon);
+            (
+                promotion_reconciliation_event_id,
+                promotion_reconciliation_event_digest,
+            )
+        }
+        other => panic!("first reconciliation must append, got {other:?}"),
+    };
+    assert_eq!(
+        fixture
+            .store
+            .event_count()
+            .expect("count appended resolution"),
+        event_count_before + 2,
+        "the operator resolution and its kernel checkpoint must be durable"
+    );
+
+    let reconciliation_event = fixture
+        .store
+        .events_for_run(&fixture.request.run_id.to_string())
+        .expect("read reconciliation tape")
+        .into_iter()
+        .find(|event| event.id == reconciliation_event_id.to_string())
+        .expect("the reported reconciliation event is durable")
+        .to_event()
+        .expect("decode reconciliation event");
+    assert_eq!(
+        reconciliation_event.kind,
+        EventKind::PromotionReconciliationResolved
+    );
+    let Payload::PromotionReconciliationResolvedV1(resolution) = reconciliation_event.payload
+    else {
+        panic!("reconciliation writer must emit the dedicated payload");
+    };
+    assert_eq!(resolution.candidate_digest, candidate_digest);
+    assert_eq!(
+        resolution.promotion_decision_ref,
+        promotion_decision_event_id.to_string()
+    );
+    assert_eq!(
+        resolution.promotion_result_ref,
+        promotion_result_event_id.to_string()
+    );
+    assert_eq!(
+        resolution.outcome,
+        ReconciliationResolutionOutcomeV1::Abandon
+    );
+    assert_eq!(resolution.authority, fixture.operator.actor_id);
+    assert_eq!(resolution.resolved_by, fixture.operator.actor_id);
+
+    let generic_append = Event {
+        id: EventId::new(),
+        run_id: fixture.request.run_id,
+        parent_event_id: Some(promotion_result_event_id),
+        schema_version: Event::CURRENT_SCHEMA_VERSION,
+        kind: EventKind::PromotionReconciliationResolved,
+        occurred_at: Utc::now(),
+        payload: Payload::PromotionReconciliationResolvedV1(resolution.clone()),
+    };
+    assert!(matches!(
+        fixture
+            .store
+            .append_signed(&generic_append, &fixture.operator_key, &fixture.operator),
+        Err(LedgerError::CallerSuppliedTrustSpineEvent { kind })
+            if kind == "promotion_reconciliation_resolved"
+    ));
+
+    let replay_authorities = promotion_replay_authorities(&fixture);
+    let snapshot = TrustedGovernedRecoverySnapshot::open_bounded_v1(
+        &fixture.request.run_id.to_string(),
+        fixture._temp.path().join("events.db"),
+        &replay_authorities,
+        &fixture.kernel,
+    )
+    .expect("the sealed abandonment must be visible to a fresh trusted replay");
+    let workflow = snapshot
+        .workflow_for_promotion_decision_event_ref(&promotion_decision_event_id.to_string())
+        .expect("the exact promotion workflow remains replayable");
+    assert_eq!(
+        workflow.phase,
+        WorkflowPhaseV1::PromotionReconciliationResolved
+    );
+    assert!(workflow
+        .promotion
+        .as_ref()
+        .and_then(|promotion| promotion.reconciliation.as_ref())
+        .is_some_and(|reconciliation| reconciliation.event_id == reconciliation_event_id));
+
+    let second = fixture
+        .store
+        .record_governed_promotion_reconciliation_abandon_v1(
+            &request,
+            &fixture.authority,
+            &fixture.operator_key,
+            &fixture.operator,
+            &fixture.kernel_key,
+            &fixture.kernel,
+        )
+        .expect("retry resolves the exact existing reconciliation event");
+    assert!(matches!(
+        second,
+        GovernedPromotionReconciliationDispositionV1::Existing {
+            promotion_reconciliation_event_id: existing_event_id,
+            promotion_reconciliation_event_digest: existing_event_digest,
+            outcome: ReconciliationResolutionOutcomeV1::Abandon,
+        } if existing_event_id == reconciliation_event_id
+            && existing_event_digest == reconciliation_event_digest
+    ));
+    assert_eq!(
+        fixture
+            .store
+            .event_count()
+            .expect("count duplicate resolution"),
+        event_count_before + 2,
+        "a duplicate reconciliation must not append another operator event or checkpoint"
+    );
+}
+
+#[test]
+fn protected_reconciliation_facade_derives_abandonment_only_from_replayed_decision_and_reuses_it() {
+    let fixture = promotion_fixture();
+    let (promotion_decision_event_id, promotion_result_event_id, _) =
+        record_reconciliation_required_promotion_result(&fixture);
+    let replay_authorities = promotion_replay_authorities(&fixture);
+    let (gateway, git_state) =
+        reconciliation_fixture_gateway(&fixture, promotion_result_event_id, true);
+    let mut authority = ProtectedPromotionReconciliationAuthority::
+        from_prevalidated_startup_with_gateway_for_tests(
+            fixture.request.run_id,
+            fixture._temp.path().join("events.db"),
+            &replay_authorities,
+            &fixture.kernel,
+            &fixture.store,
+            &fixture.authority,
+            &fixture.operator_key,
+            &fixture.operator,
+            &fixture.kernel_key,
+            &fixture.kernel,
+            gateway,
+        )
+        .expect("startup owns the protected reconciliation dependencies");
+    let request = BrokerPromotionReconciliationIngressRequest {
+        // The controller names only the already-recorded decision. It cannot
+        // select a result, outcome, signer, repository path, or Git capability.
+        promotion_decision_event_id,
+    };
+    let count_before = fixture
+        .store
+        .event_count()
+        .expect("count durable fixture events");
+
+    let first = authority.record_abandon_from_replayed_promotion(request.clone());
+    assert_eq!(first, BrokerPromotionReconciliationDisposition::Recorded);
+    assert_eq!(
+        fixture
+            .store
+            .event_count()
+            .expect("count recorded abandonment"),
+        count_before + 2,
+        "the façade may append only its operator abandonment and kernel checkpoint"
+    );
+    let git_operations_after_first = git_state.borrow().operations.len();
+
+    let second = authority.record_abandon_from_replayed_promotion(request);
+    assert_eq!(second, BrokerPromotionReconciliationDisposition::Existing);
+    assert_eq!(
+        fixture
+            .store
+            .event_count()
+            .expect("count duplicate abandonment"),
+        count_before + 2,
+        "an exact retry must return the same durable reconciliation rather than append"
+    );
+
+    let state = git_state.borrow();
+    assert_eq!(
+        state.operations.len(),
+        git_operations_after_first,
+        "a sealed exact retry must not re-observe mutable Git state"
+    );
+    assert_eq!(state.create_merge_calls, 0);
+    assert_eq!(state.atomic_update_calls, 0);
+    assert!(state
+        .operations
+        .iter()
+        .any(|operation| matches!(operation, TestGitOperation::InspectReceipt { .. })));
+}
+
+#[test]
+fn protected_reconciliation_facade_checkpoint_failure_rolls_back_then_retries_once() {
+    let fixture = promotion_fixture();
+    let (promotion_decision_event_id, promotion_result_event_id, _) =
+        record_reconciliation_required_promotion_result(&fixture);
+    let replay_authorities = promotion_replay_authorities(&fixture);
+    let (gateway, git_state) =
+        reconciliation_fixture_gateway(&fixture, promotion_result_event_id, true);
+    let mut authority = ProtectedPromotionReconciliationAuthority::
+        from_prevalidated_startup_with_gateway_for_tests(
+            fixture.request.run_id,
+            fixture._temp.path().join("events.db"),
+            &replay_authorities,
+            &fixture.kernel,
+            &fixture.store,
+            &fixture.authority,
+            &fixture.operator_key,
+            &fixture.operator,
+            &fixture.kernel_key,
+            &fixture.kernel,
+            gateway,
+        )
+        .expect("startup owns the protected reconciliation dependencies");
+    let request = BrokerPromotionReconciliationIngressRequest {
+        promotion_decision_event_id,
+    };
+    let count_before = fixture
+        .store
+        .event_count()
+        .expect("count durable fixture events");
+
+    fixture
+        .store
+        .fail_next_checkpoint_signature_insert_for_tests();
+    assert_eq!(
+        authority.record_abandon_from_replayed_promotion(request.clone()),
+        BrokerPromotionReconciliationDisposition::ReconciliationRequired,
+        "a checkpoint failure must not leave an unsealed abandonment event behind"
+    );
+    assert_eq!(
+        fixture
+            .store
+            .event_count()
+            .expect("count rolled-back attempt"),
+        count_before,
+        "the abandonment append and checkpoint seal must share one transaction"
+    );
+
+    assert_eq!(
+        authority.record_abandon_from_replayed_promotion(request),
+        BrokerPromotionReconciliationDisposition::Recorded,
+        "retry after an atomic rollback records one sealed abandonment"
+    );
+    assert_eq!(
+        fixture.store.event_count().expect("count sealed retry"),
+        count_before + 2,
+        "the retry appends exactly one operator abandonment and one checkpoint"
+    );
+    let state = git_state.borrow();
+    assert_eq!(state.create_merge_calls, 0);
+    assert_eq!(state.atomic_update_calls, 0);
+    assert!(
+        state.operations.iter().all(|operation| !matches!(
+            operation,
+            TestGitOperation::CreateMergeCommit { .. } | TestGitOperation::AtomicAdvance { .. }
+        )),
+        "the recovery façade may only read the existing receipt"
+    );
+}
+
+#[test]
+fn protected_reconciliation_facade_blocks_missing_receipt_before_writer_or_git_mutation() {
+    let fixture = promotion_fixture();
+    let (promotion_decision_event_id, promotion_result_event_id, _) =
+        record_reconciliation_required_promotion_result(&fixture);
+    let replay_authorities = promotion_replay_authorities(&fixture);
+    let (gateway, git_state) =
+        reconciliation_fixture_gateway(&fixture, promotion_result_event_id, false);
+    let mut authority = ProtectedPromotionReconciliationAuthority::
+        from_prevalidated_startup_with_gateway_for_tests(
+            fixture.request.run_id,
+            fixture._temp.path().join("events.db"),
+            &replay_authorities,
+            &fixture.kernel,
+            &fixture.store,
+            &fixture.authority,
+            &fixture.operator_key,
+            &fixture.operator,
+            &fixture.kernel_key,
+            &fixture.kernel,
+            gateway,
+        )
+        .expect("startup owns the protected reconciliation dependencies");
+    let count_before = fixture
+        .store
+        .event_count()
+        .expect("count durable fixture events");
+
+    let result = authority.record_abandon_from_replayed_promotion(
+        BrokerPromotionReconciliationIngressRequest {
+            promotion_decision_event_id,
+        },
+    );
+
+    assert_eq!(
+        result,
+        BrokerPromotionReconciliationDisposition::ReconciliationRequired
+    );
+    assert_eq!(
+        fixture
+            .store
+            .event_count()
+            .expect("count blocked abandonment"),
+        count_before,
+        "a missing receipt must not reach the raw ledger writer"
+    );
+    let state = git_state.borrow();
+    assert_eq!(state.create_merge_calls, 0);
+    assert_eq!(state.atomic_update_calls, 0);
+    assert!(state.operations.iter().all(|operation| !matches!(
+        operation,
+        TestGitOperation::CreateMergeCommit { .. } | TestGitOperation::AtomicAdvance { .. }
+    )));
+}
+
+#[test]
+fn protected_reconciliation_facade_rejects_existing_evidence_from_a_different_allowed_operator() {
+    let fixture = promotion_fixture();
+    let (promotion_decision_event_id, promotion_result_event_id, _) =
+        record_reconciliation_required_promotion_result(&fixture);
+    let durable_request = GovernedPromotionReconciliationRequestV1 {
+        run_id: fixture.request.run_id,
+        promotion_decision_event_id,
+        promotion_result_event_id,
+    };
+    fixture
+        .store
+        .record_governed_promotion_reconciliation_abandon_v1(
+            &durable_request,
+            &fixture.authority,
+            &fixture.operator_key,
+            &fixture.operator,
+            &fixture.kernel_key,
+            &fixture.kernel,
+        )
+        .expect("record the fixture operator's sealed abandonment");
+
+    // Replay may intentionally trust multiple operators, but this startup-bound
+    // writer is authorized for exactly one. A sealed event from the fixture
+    // operator must not be returned as `Existing` to a differently configured
+    // broker instance.
+    let other_operator_key = SigningKey::from_bytes(&[64; 32]);
+    let other_operator = promotion_actor(
+        "promotion-operator-other",
+        "operator-other",
+        &other_operator_key,
+    );
+    let mut replay_authorities = TrustedReplayAuthorities::new(promotion_trusted_keys(&[
+        &fixture.kernel_key,
+        &fixture.reviewer_key,
+        &fixture.operator_key,
+        &other_operator_key,
+    ]));
+    replay_authorities.allow_signer(TrustSpineSignerRole::Kernel, fixture.kernel.clone());
+    replay_authorities.allow_signer(TrustSpineSignerRole::Reviewer, fixture.reviewer.clone());
+    replay_authorities.allow_signer(TrustSpineSignerRole::Operator, fixture.operator.clone());
+    replay_authorities.allow_signer(TrustSpineSignerRole::Operator, other_operator.clone());
+    let facade_authority = GovernedPromotionAuthorityV1::new_governed_realm(
+        promotion_trusted_keys(&[
+            &fixture.kernel_key,
+            &fixture.reviewer_key,
+            &fixture.operator_key,
+            &other_operator_key,
+        ]),
+        fixture.kernel.clone(),
+        vec![fixture.reviewer.clone()],
+        other_operator.clone(),
+        DIGEST_E.into(),
+    )
+    .expect("construct a distinct but valid startup authority realm");
+    let (gateway, git_state) =
+        reconciliation_fixture_gateway(&fixture, promotion_result_event_id, true);
+    let mut authority = ProtectedPromotionReconciliationAuthority::
+        from_prevalidated_startup_with_gateway_for_tests(
+            fixture.request.run_id,
+            fixture._temp.path().join("events.db"),
+            &replay_authorities,
+            &fixture.kernel,
+            &fixture.store,
+            &facade_authority,
+            &other_operator_key,
+            &other_operator,
+            &fixture.kernel_key,
+            &fixture.kernel,
+            gateway,
+        )
+        .expect("the local operator matches this facade authority");
+    let count_before = fixture
+        .store
+        .event_count()
+        .expect("count the sealed fixture abandonment");
+
+    assert_eq!(
+        authority.record_abandon_from_replayed_promotion(
+            BrokerPromotionReconciliationIngressRequest {
+                promotion_decision_event_id,
+            },
+        ),
+        BrokerPromotionReconciliationDisposition::ReconciliationRequired,
+        "a trusted-but-different operator must not reuse this broker's recovery result"
+    );
+    assert_eq!(
+        fixture.store.event_count().expect("count rejected retry"),
+        count_before,
+        "a signer mismatch must not reach the raw ledger writer"
+    );
+    assert!(
+        git_state.borrow().operations.is_empty(),
+        "an existing signer mismatch must reject before observing mutable Git state"
+    );
+}
+
+#[test]
+fn protected_reconciliation_facade_startup_rejects_a_different_pinned_kernel() {
+    let fixture = promotion_fixture();
+    let (_, promotion_result_event_id, _) =
+        record_reconciliation_required_promotion_result(&fixture);
+    let replay_authorities = promotion_replay_authorities(&fixture);
+    let mismatched_kernel_key = SigningKey::from_bytes(&[65; 32]);
+    let mismatched_kernel = promotion_actor(
+        "promotion-kernel-other",
+        "kernel-other",
+        &mismatched_kernel_key,
+    );
+    let (gateway, _) = reconciliation_fixture_gateway(&fixture, promotion_result_event_id, true);
+
+    let startup =
+        ProtectedPromotionReconciliationAuthority::from_prevalidated_startup_with_gateway_for_tests(
+            fixture.request.run_id,
+            fixture._temp.path().join("events.db"),
+            &replay_authorities,
+            &mismatched_kernel,
+            &fixture.store,
+            &fixture.authority,
+            &fixture.operator_key,
+            &fixture.operator,
+            &fixture.kernel_key,
+            &fixture.kernel,
+            gateway,
+        );
+
+    assert!(matches!(
+        startup,
+        Err(BrokerPromotionReconciliationStartupError::PinnedKernelSignerMismatch)
+    ));
+}
+
+#[test]
+fn protected_reconciliation_facade_startup_rejects_signers_that_differ_from_its_authority_realm() {
+    let fixture = promotion_fixture();
+    let (_, promotion_result_event_id, _) =
+        record_reconciliation_required_promotion_result(&fixture);
+    let replay_authorities = promotion_replay_authorities(&fixture);
+
+    let other_operator_key = SigningKey::from_bytes(&[64; 32]);
+    let other_operator = promotion_actor(
+        "promotion-operator-other",
+        "operator-other",
+        &other_operator_key,
+    );
+    let (operator_gateway, _) =
+        reconciliation_fixture_gateway(&fixture, promotion_result_event_id, true);
+    let operator_startup =
+        ProtectedPromotionReconciliationAuthority::from_prevalidated_startup_with_gateway_for_tests(
+            fixture.request.run_id,
+            fixture._temp.path().join("events.db"),
+            &replay_authorities,
+            &fixture.kernel,
+            &fixture.store,
+            &fixture.authority,
+            &other_operator_key,
+            &other_operator,
+            &fixture.kernel_key,
+            &fixture.kernel,
+            operator_gateway,
+        );
+    assert!(matches!(
+        operator_startup,
+        Err(BrokerPromotionReconciliationStartupError::ConfiguredOperatorSignerMismatch)
+    ));
+
+    let other_kernel_key = SigningKey::from_bytes(&[65; 32]);
+    let other_kernel = promotion_actor("promotion-kernel-other", "kernel-other", &other_kernel_key);
+    let (kernel_gateway, _) =
+        reconciliation_fixture_gateway(&fixture, promotion_result_event_id, true);
+    let kernel_startup =
+        ProtectedPromotionReconciliationAuthority::from_prevalidated_startup_with_gateway_for_tests(
+            fixture.request.run_id,
+            fixture._temp.path().join("events.db"),
+            &replay_authorities,
+            &other_kernel,
+            &fixture.store,
+            &fixture.authority,
+            &fixture.operator_key,
+            &fixture.operator,
+            &other_kernel_key,
+            &other_kernel,
+            kernel_gateway,
+        );
+    assert!(matches!(
+        kernel_startup,
+        Err(BrokerPromotionReconciliationStartupError::ConfiguredKernelSignerMismatch)
+    ));
 }
 
 fn reviewer_session_snapshot_fixture() -> (
@@ -6278,6 +6953,188 @@ fn test_promotion_gateway(runner: PromotionGitRunner) -> PromotionGitGateway {
         .expect("test root is canonical by construction")
 }
 
+#[derive(Clone)]
+struct ReconciliationFixtureGitFacts {
+    candidate_digest: String,
+    candidate_ref: String,
+    candidate_commit: String,
+    candidate_tree_digest: String,
+    candidate_tree: String,
+    base_commit: String,
+    target_ref: String,
+    target_head: String,
+    merge_commit: String,
+    receipt_ref: String,
+    idempotency_key: String,
+}
+
+#[derive(Default)]
+struct ReconciliationFixtureGitRunnerState {
+    operations: Vec<TestGitOperation>,
+    create_merge_calls: usize,
+    atomic_update_calls: usize,
+}
+
+struct ReconciliationFixtureGitRunner {
+    facts: ReconciliationFixtureGitFacts,
+    receipt_present: bool,
+    state: Rc<RefCell<ReconciliationFixtureGitRunnerState>>,
+}
+
+fn reconciliation_fixture_candidate(fixture: &PromotionFixture) -> CandidateCreatedV2 {
+    let event = fixture
+        .store
+        .events_for_run(&fixture.request.run_id.to_string())
+        .expect("read fixture candidate")
+        .into_iter()
+        .find(|event| event.id == fixture.request.candidate_created_event_id.to_string())
+        .expect("fixture contains the immutable candidate")
+        .to_event()
+        .expect("decode fixture candidate event");
+    let Payload::CandidateCreatedV2(candidate) = event.payload else {
+        panic!("fixture candidate event must carry CandidateCreatedV2");
+    };
+    candidate
+}
+
+fn reconciliation_fixture_gateway(
+    fixture: &PromotionFixture,
+    promotion_result_event_id: EventId,
+    receipt_present: bool,
+) -> (
+    PromotionGitGateway,
+    Rc<RefCell<ReconciliationFixtureGitRunnerState>>,
+) {
+    let candidate = reconciliation_fixture_candidate(fixture);
+    let event = fixture
+        .store
+        .events_for_run(&fixture.request.run_id.to_string())
+        .expect("read fixture result")
+        .into_iter()
+        .find(|event| event.id == promotion_result_event_id.to_string())
+        .expect("fixture contains the recorded reconciliation result")
+        .to_event()
+        .expect("decode fixture promotion result");
+    let Payload::PromotionResultRecordedV1(result) = event.payload else {
+        panic!("fixture result event must carry PromotionResultRecordedV1");
+    };
+    let binding = result
+        .promotion_git_binding
+        .expect("fixture result carries exact Git reconciliation evidence");
+    let facts = ReconciliationFixtureGitFacts {
+        candidate_digest: candidate.candidate_digest,
+        candidate_ref: candidate.candidate_ref,
+        candidate_commit: candidate.candidate_commit_sha,
+        candidate_tree_digest: candidate.tree_digest,
+        candidate_tree: binding
+            .merged_tree_sha
+            .expect("fixture result binds an observed merge tree"),
+        base_commit: candidate.base_commit_sha,
+        target_ref: binding.target_ref,
+        target_head: binding
+            .target_head_after_sha
+            .expect("fixture result records the post-CAS target head"),
+        merge_commit: result
+            .merged_head_sha
+            .expect("fixture result records the immutable merge"),
+        receipt_ref: binding
+            .promotion_receipt_ref
+            .expect("fixture result records the immutable receipt ref"),
+        idempotency_key: result.idempotency_key,
+    };
+    let state = Rc::new(RefCell::new(ReconciliationFixtureGitRunnerState::default()));
+    let gateway = PromotionGitGateway::with_test_runner(
+        "/broker-test-root",
+        Box::new(ReconciliationFixtureGitRunner {
+            facts,
+            receipt_present,
+            state: state.clone(),
+        }),
+    )
+    .expect("test root is canonical by construction");
+    (gateway, state)
+}
+
+fn reconciliation_fixture_receipt_message(facts: &ReconciliationFixtureGitFacts) -> String {
+    format!(
+        "buildplane governed promotion receipt v1\ncandidate_digest: {}\ncandidate_ref: {}\ncandidate_commit: {}\ncandidate_tree: {}\ncandidate_tree_digest: {}\nbase_commit: {}\ntarget_ref: {}\nidempotency_key: {}",
+        facts.candidate_digest,
+        facts.candidate_ref,
+        facts.candidate_commit,
+        facts.candidate_tree,
+        facts.candidate_tree_digest,
+        facts.base_commit,
+        facts.target_ref,
+        facts.idempotency_key,
+    )
+}
+
+fn reconciliation_fixture_candidate_commit(facts: &ReconciliationFixtureGitFacts) -> String {
+    format!(
+        "tree {}\nparent {}\nauthor test <test@example.invalid> 0 +0000\ncommitter test <test@example.invalid> 0 +0000\n\ncandidate\n",
+        facts.candidate_tree, facts.base_commit
+    )
+}
+
+fn reconciliation_fixture_merge_commit(facts: &ReconciliationFixtureGitFacts) -> String {
+    format!(
+        "tree {}\nparent {}\nparent {}\nauthor test <test@example.invalid> 0 +0000\ncommitter test <test@example.invalid> 0 +0000\n\n{}\n",
+        facts.candidate_tree,
+        facts.base_commit,
+        facts.candidate_commit,
+        reconciliation_fixture_receipt_message(facts),
+    )
+}
+
+impl TestFixedGitRunner for ReconciliationFixtureGitRunner {
+    fn invoke(&mut self, operation: TestGitOperation) -> TestGitOutput {
+        self.state.borrow_mut().operations.push(operation.clone());
+        match operation {
+            TestGitOperation::ResolveCandidateRef { candidate_ref }
+                if candidate_ref == self.facts.candidate_ref =>
+            {
+                TestGitOutput::success(format!("{}\n", self.facts.candidate_commit).into())
+            }
+            TestGitOperation::ReadCommit { commit } if commit == self.facts.candidate_commit => {
+                TestGitOutput::success(reconciliation_fixture_candidate_commit(&self.facts).into())
+            }
+            TestGitOperation::ReadCommit { commit } if commit == self.facts.merge_commit => {
+                TestGitOutput::success(reconciliation_fixture_merge_commit(&self.facts).into())
+            }
+            TestGitOperation::ReadTreeListing { commit }
+                if commit == self.facts.candidate_commit || commit == self.facts.merge_commit =>
+            {
+                TestGitOutput::success(Vec::new())
+            }
+            TestGitOperation::InspectReceipt { receipt_ref }
+                if receipt_ref == self.facts.receipt_ref && self.receipt_present =>
+            {
+                TestGitOutput::success(format!("{}\n", self.facts.merge_commit).into())
+            }
+            TestGitOperation::InspectReceipt { receipt_ref }
+                if receipt_ref == self.facts.receipt_ref =>
+            {
+                TestGitOutput::failure(1)
+            }
+            TestGitOperation::ResolveTarget { target_ref }
+                if target_ref == self.facts.target_ref =>
+            {
+                TestGitOutput::success(format!("{}\n", self.facts.target_head).into())
+            }
+            TestGitOperation::CreateMergeCommit { .. } => {
+                self.state.borrow_mut().create_merge_calls += 1;
+                TestGitOutput::failure(2)
+            }
+            TestGitOperation::AtomicAdvance { .. } => {
+                self.state.borrow_mut().atomic_update_calls += 1;
+                TestGitOutput::failure(2)
+            }
+            TestGitOperation::IsAncestor { .. } => TestGitOutput::failure(1),
+            _ => TestGitOutput::failure(2),
+        }
+    }
+}
+
 #[test]
 fn promotion_capability_rejects_malformed_digest_and_crosses_no_git_boundary() {
     let malformed = VerifiedPromotionCapability::from_verified_facts(
@@ -6370,6 +7227,72 @@ fn promotion_gateway_reuses_an_existing_candidate_receipt_without_a_second_merge
         .operations
         .iter()
         .any(|operation| matches!(operation, TestGitOperation::InspectReceipt { .. })));
+}
+
+#[test]
+fn promotion_gateway_read_only_receipt_observation_never_creates_or_advances() {
+    let (runner, state) = PromotionGitRunner::new(true);
+    let mut gateway = test_promotion_gateway(runner);
+
+    let outcome = gateway
+        .observe_existing_receipt(promotion_capability())
+        .expect("an exact immutable receipt is observable during recovery");
+
+    assert!(matches!(
+        outcome,
+        PromotionGitOutcome::RootPendingReconciliation { .. }
+    ));
+    let state = state.borrow();
+    assert_eq!(state.create_merge_calls, 0);
+    assert_eq!(state.atomic_update_calls, 0);
+    assert!(state.operations.iter().all(|operation| !matches!(
+        operation,
+        TestGitOperation::CreateMergeCommit { .. } | TestGitOperation::AtomicAdvance { .. }
+    )));
+}
+
+#[test]
+fn promotion_gateway_read_only_receipt_observation_blocks_when_receipt_is_missing() {
+    let (runner, state) = PromotionGitRunner::new(false);
+    let mut gateway = test_promotion_gateway(runner);
+
+    assert!(gateway
+        .observe_existing_receipt(promotion_capability())
+        .is_err());
+    let state = state.borrow();
+    assert_eq!(state.create_merge_calls, 0);
+    assert_eq!(state.atomic_update_calls, 0);
+    assert!(state.operations.iter().all(|operation| !matches!(
+        operation,
+        TestGitOperation::CreateMergeCommit { .. } | TestGitOperation::AtomicAdvance { .. }
+    )));
+}
+
+#[test]
+fn promotion_gateway_read_only_receipt_observation_reports_divergent_target_without_mutation() {
+    let (runner, state) = PromotionGitRunner::new(true);
+    state.borrow_mut().target_head = PROMOTION_TARGET_ADVANCED.into();
+    let mut gateway = test_promotion_gateway(runner);
+
+    let outcome = gateway
+        .observe_existing_receipt(promotion_capability())
+        .expect("an exact receipt may truthfully observe a target that advanced later");
+
+    assert!(matches!(
+        outcome,
+        PromotionGitOutcome::TargetAdvanced { .. }
+    ));
+    assert_eq!(
+        outcome.binding().worktree_sync_state,
+        Some(PromotionWorktreeSyncStateV1::TargetAdvanced)
+    );
+    let state = state.borrow();
+    assert_eq!(state.create_merge_calls, 0);
+    assert_eq!(state.atomic_update_calls, 0);
+    assert!(state.operations.iter().all(|operation| !matches!(
+        operation,
+        TestGitOperation::CreateMergeCommit { .. } | TestGitOperation::AtomicAdvance { .. }
+    )));
 }
 
 #[test]
