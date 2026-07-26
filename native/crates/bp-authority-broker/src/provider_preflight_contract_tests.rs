@@ -89,6 +89,8 @@ impl ProviderTokenPreflightEvidenceWriterV1 for EvidenceWriter {
     ) -> Option<ProviderTokenPreflightGatewayCompletionV1> {
         Some(ProviderTokenPreflightGatewayCompletionV1::succeeded(
             input_tokens,
+            "sha256:result".into(),
+            "cas:result".into(),
             "sha256:success".into(),
             "cas:success".into(),
         ))
@@ -118,6 +120,8 @@ impl ProviderTokenPreflightGatewayV1 for Gateway {
             ActivityResultOutcomeV1::Succeeded => {
                 ProviderTokenPreflightGatewayCompletionV1::succeeded(
                     321,
+                    "sha256:result".into(),
+                    "cas:result".into(),
                     "sha256:evidence".into(),
                     "cas:evidence".into(),
                 )
@@ -129,6 +133,8 @@ impl ProviderTokenPreflightGatewayV1 for Gateway {
             ActivityResultOutcomeV1::Failed => ProviderTokenPreflightGatewayCompletionV1 {
                 outcome: ActivityResultOutcomeV1::Failed,
                 input_tokens: None,
+                result_digest: None,
+                result_ref: None,
                 evidence_digest: "sha256:evidence".into(),
                 evidence_ref: "cas:evidence".into(),
             },

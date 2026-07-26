@@ -717,7 +717,13 @@ now paired with a broker-owned evidence writer: provider mismatch or evidence
 writer failure cannot produce a recordable completion, and provider errors are
 normalized to an unknown-effect record rather than surfaced as retryable
 transport failures. The CAS evidence writer and ledger backend are the
-remaining production bindings.
+remaining production bindings. The broker now provides the CAS writer: a
+successful count becomes the strict `ProviderTokenPreflightResultV1` bytes
+bound to the verified input, while provider uncertainty becomes a separate
+closed evidence object bound to the provider request, preflight digest, and
+model-request digest. CAS failure returns no recordable completion. The
+ledger backend that supplies the verified input and records the terminal
+activity remains the final preflight binding.
 
 Those counts are persisted in the signed action receipt and replayed as one
 checked aggregate for the sealed V3 dispatch attempt. A metered failed call

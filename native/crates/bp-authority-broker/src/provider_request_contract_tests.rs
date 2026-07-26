@@ -1,3 +1,7 @@
+use crate::provider_preflight::{
+    CasProviderTokenPreflightEvidenceWriterV1, PrivateProviderTokenPreflightCapabilityV1,
+    ProviderTokenPreflightEvidenceWriterV1,
+};
 use crate::provider_request::{build_provider_request_v1, build_provider_token_count_request_v1};
 use crate::PrivateModelCapability;
 use bp_ledger::id::{EventId, RunId};
@@ -191,6 +195,44 @@ fn provider_request_is_reconstructed_only_from_exact_verified_evidence() {
         token_count_request.request.response_contract_digest,
         response.contract_digest
     );
+    let preflight_capability = PrivateProviderTokenPreflightCapabilityV1::new(
+        run_id.to_string(),
+        "preflight-lease".into(),
+        token_count_request.provider,
+        token_count_request.request.clone(),
+    );
+    let mut preflight_writer =
+        CasProviderTokenPreflightEvidenceWriterV1::new(&cas, &verified_preflight);
+    let persisted_preflight = preflight_writer
+        .succeeded(&preflight_capability, 321)
+        .expect("persist provider preflight result");
+    let persisted_result_ref = persisted_preflight
+        .result_ref
+        .as_deref()
+        .expect("result ref");
+    let persisted_result_digest = persisted_preflight
+        .result_digest
+        .as_deref()
+        .expect("result digest");
+    let persisted_result_bytes = cas
+        .get_verified_canonical_bytes(persisted_result_ref, persisted_result_digest)
+        .expect("load provider preflight result");
+    parse_verified_provider_token_preflight_result_v1(
+        &persisted_result_bytes,
+        persisted_result_ref,
+        persisted_result_digest,
+        &verified_preflight,
+    )
+    .expect("strict persisted provider preflight result");
+    let unknown_preflight = preflight_writer
+        .unknown(&preflight_capability)
+        .expect("persist unknown preflight evidence");
+    assert!(cas
+        .get_verified_canonical_bytes(
+            &unknown_preflight.evidence_ref,
+            &unknown_preflight.evidence_digest,
+        )
+        .is_ok());
 
     let request = build_provider_request_v1(
         &capability,
