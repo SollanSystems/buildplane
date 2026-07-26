@@ -8,8 +8,8 @@ use super::dispatch_admission::{
     SealedDispatchAdmissionEvidence, TrustedDispatchAdmissionSnapshotVerifier,
 };
 use super::governed_reviewer_authority::{
-    open_governed_reviewer_session_v1, resolve_governed_reviewer_run_v1,
-    GovernedReviewerAuthorityErrorV1,
+    execute_governed_reviewer_run_v1, open_governed_reviewer_session_v1,
+    resolve_governed_reviewer_run_v1, GovernedReviewerAuthorityErrorV1,
 };
 use super::governed_session_token::issue_recovery_token_v1;
 use super::promotion_decision_handler::{
@@ -3854,6 +3854,65 @@ fn governed_reviewer_open_binds_signed_recovery_to_repository_and_replay() {
         resumed.reviewer_action_request_event_ref,
         session.evidence().reviewer_action_request_event_ref
     );
+
+    let run_id = RunId::from_uuid(uuid::Uuid::parse_str(&request.run_id).expect("fixture run id"));
+    let backend_state = Rc::new(RefCell::new(BackendState::default()));
+    let gateway_state = Rc::new(RefCell::new(GatewayState::default()));
+    let mut authority = BrokerModelAuthority::new_for_role(
+        run_id,
+        ExecutionRoleV1::Reviewer,
+        FakeVerifier {
+            calls: Rc::new(RefCell::new(Vec::new())),
+            results: [Ok(TrustedReplayBinding {
+                run_id,
+                dispatch_event_id: resumed.reviewer_dispatch_event_ref,
+                action_request_event_id: resumed.reviewer_action_request_event_ref,
+                dispatch_role: ExecutionRoleV1::Reviewer,
+                action_role: ExecutionRoleV1::Reviewer,
+                has_existing_claim: false,
+            })]
+            .into_iter()
+            .collect(),
+        },
+        FakeBackend {
+            state: Rc::clone(&backend_state),
+            grants: [Ok(AuthorityGrant::Granted {
+                run_id,
+                lease_id: "reviewer-session-lease".into(),
+                authorization_ref: "authorization://reviewer-session".into(),
+            })]
+            .into_iter()
+            .collect(),
+            results: [Ok(ResultDisposition::Recorded {
+                run_id,
+                outcome: ActivityResultOutcomeV1::Succeeded,
+            })]
+            .into_iter()
+            .collect(),
+        },
+        FakeGateway {
+            state: Rc::clone(&gateway_state),
+            completion: Some(succeeded_completion()),
+        },
+        LeasePolicy::from_startup_config(30_000).unwrap(),
+    )
+    .expect("reviewer authority");
+    assert_eq!(
+        execute_governed_reviewer_run_v1(
+            &snapshot,
+            &token_key.verifying_key(),
+            session.recovery_ref(),
+            session.session_ref(),
+            &mut authority,
+        )
+        .expect("session identity enters the broker-owned authority transaction"),
+        BrokerModelActionStatus::Recorded
+    );
+    assert_eq!(
+        backend_state.borrow().authorize_calls[0].execution_role,
+        ExecutionRoleV1::Reviewer
+    );
+    assert_eq!(gateway_state.borrow().calls, 1);
 }
 
 #[test]

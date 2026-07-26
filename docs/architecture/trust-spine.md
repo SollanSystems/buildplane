@@ -701,6 +701,13 @@ independently verifies the signed candidate, completion proof, passed
 acceptance, exact read-only/network-disabled candidate view and protected CAS
 bytes, evidence documents, and role. The broker passes its startup-selected
 role into that storage boundary; request fields cannot select the lane.
+The authenticated reviewer run now composes directly with the
+startup-role-bound broker transaction: recovery and session tokens are
+reverified, the exact dispatch/action references are re-derived from trusted
+replay, and those private references enter authorize-and-execute without
+crossing a callback or caller-selected request surface. The endpoint remains
+inactive until the credential gateway is backed by the required read-only OCI
+worker rather than an ambient provider process.
 
 The remaining OS-isolated broker must expose the native, same-ledger-process
 `resolve-or-authorize` transaction to the credential-holding provider boundary,

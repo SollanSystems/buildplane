@@ -12,6 +12,10 @@ use crate::governed_session_token::{
 use crate::reviewer_session::{
     resolve_reviewer_model_evidence_for_candidate_recovery_v1, ResolvedReviewerModelEvidenceV1,
 };
+use crate::{
+    AuthorityBackend, AuthorityBackendError, BrokerModelActionRequest, BrokerModelActionStatus,
+    BrokerModelAuthority, CredentialGateway, TrustedReplayVerificationError, TrustedReplayVerifier,
+};
 use bp_replay::TrustedGovernedRecoverySnapshot;
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use thiserror::Error;
@@ -117,4 +121,41 @@ pub(crate) fn resolve_governed_reviewer_run_v1(
         return Err(GovernedReviewerAuthorityErrorV1::RunMismatch);
     }
     Ok(evidence)
+}
+
+/// Consume an authenticated reviewer session directly inside the broker-owned
+/// model authority transaction.
+///
+/// The caller supplies no dispatch, action, role, candidate, model, or
+/// capability data. Those identities are re-derived from trusted replay and
+/// immediately handed to the startup-role-bound authority. The provider
+/// capability remains private to that authority and its credential gateway.
+pub(crate) fn execute_governed_reviewer_run_v1<V, B, G>(
+    snapshot: &TrustedGovernedRecoverySnapshot,
+    session_verifying_key: &VerifyingKey,
+    recovery_ref: &str,
+    session_ref: &str,
+    authority: &mut BrokerModelAuthority<V, B, G>,
+) -> Result<BrokerModelActionStatus, AuthorityBackendError>
+where
+    V: TrustedReplayVerifier,
+    B: AuthorityBackend,
+    G: CredentialGateway,
+{
+    let evidence = resolve_governed_reviewer_run_v1(
+        snapshot,
+        session_verifying_key,
+        recovery_ref,
+        session_ref,
+    )
+    .map_err(|_| {
+        AuthorityBackendError::TrustedReplay(TrustedReplayVerificationError::Rejected {
+            reason: "authenticated reviewer session no longer resolves to eligible replay evidence"
+                .into(),
+        })
+    })?;
+    authority.authorize_and_execute(BrokerModelActionRequest {
+        dispatch_event_id: evidence.reviewer_dispatch_event_ref,
+        action_request_event_id: evidence.reviewer_action_request_event_ref,
+    })
 }
