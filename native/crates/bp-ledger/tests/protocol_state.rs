@@ -12,6 +12,9 @@ use bp_ledger::storage::{
 use std::io::Cursor;
 use tempfile::TempDir;
 
+#[path = "support/retry_candidate.rs"]
+mod retry_candidate_support;
+
 fn make_fixture() -> (SqliteStore, Cas, TempDir) {
     let tmp = TempDir::new().unwrap();
     let store = SqliteStore::open(tmp.path().join("events.db")).unwrap();
@@ -984,6 +987,92 @@ fn governed_retry_candidate_identity_control_rejects_unverified_dispatch_without
     assert_eq!(rejection["request_id"], "identity-missing-dispatch-1");
     assert_eq!(rejection["outcome"], "rejected");
     assert_eq!(rejection["code"], "trusted_activity_authority_rejected");
+}
+
+#[test]
+fn governed_retry_candidate_identity_control_resolves_with_exact_id_echo_and_prefix_seal() {
+    use chrono::{Timelike, Utc};
+
+    let (store, cas, _tmp) = make_fixture();
+    let run_id = bp_ledger::RunId::from_uuid(
+        uuid::Uuid::parse_str("01919000-0000-7000-8000-000000000000").unwrap(),
+    );
+    let (signing, config) = governed_test_protocol(run_id);
+    let SigningConfig::Signed {
+        signing_key,
+        signer,
+        ..
+    } = &signing
+    else {
+        unreachable!("governed test protocol is signed")
+    };
+    let observed_now = Utc::now();
+    let fixture_now = observed_now
+        .with_nanosecond(observed_now.nanosecond() / 1_000_000 * 1_000_000)
+        .expect("truncate fixture time to canonical milliseconds");
+    let dispatch_event_id = retry_candidate_support::append_valid_retry_identity_evidence(
+        &store,
+        signing_key,
+        signer,
+        run_id,
+        fixture_now,
+    );
+    let candidate_ref = format!("refs/buildplane/candidates/candidate-identity/{run_id}/2");
+    let resolve = serde_json::json!({
+        "control": "resolve_retry_candidate_action_identity_v1",
+        "request_id": "identity-valid-1",
+        "run_id": run_id,
+        "dispatch_event_id": dispatch_event_id,
+        "candidate_ref": candidate_ref,
+    });
+    let input = format!("{}\n{}\n{}\n", handshake_line(1), resolve, close_line(0));
+    let event_count_before = store.event_count().expect("count retry evidence");
+    let mut stderr = Vec::new();
+
+    let outcome = serve_governed_with_protocol(
+        Cursor::new(input.as_bytes()),
+        &mut stderr,
+        &store,
+        &cas,
+        1,
+        &signing,
+        &config,
+    )
+    .expect("governed serve resolves a verified retry identity");
+
+    assert_eq!(outcome.events_written, 0);
+    assert_eq!(
+        store.event_count().expect("count sealed retry evidence"),
+        event_count_before + 1,
+        "the read-only resolution appends only the required governed prefix checkpoint"
+    );
+    let messages: Vec<serde_json::Value> = String::from_utf8(stderr)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let resolved = messages
+        .iter()
+        .find(|message| message["control"] == "resolve_retry_candidate_action_identity_v1_result")
+        .expect("governed resolver must emit one typed response");
+    assert_eq!(resolved["request_id"], "identity-valid-1");
+    assert_eq!(
+        resolved["outcome"], "resolved",
+        "unexpected governed resolver response: {resolved:?}"
+    );
+    let candidate_key = candidate_ref
+        .strip_prefix("refs/buildplane/candidates/")
+        .expect("candidate ref has canonical prefix");
+    let expected_action_id = format!(
+        "{}:git-candidate-create:{candidate_key}",
+        retry_candidate_support::RETRY_ACTION_NAMESPACE
+    );
+    assert_eq!(resolved["action_id"], expected_action_id);
+    assert_eq!(resolved["activity_id"], expected_action_id);
+    assert_eq!(
+        resolved["idempotency_key"],
+        format!("{expected_action_id}:idempotency")
+    );
 }
 
 #[test]

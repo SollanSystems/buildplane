@@ -2787,6 +2787,75 @@ fn governed_retry_candidate_claim_rejects_an_unbound_authority_before_lease() {
 }
 
 #[test]
+fn governed_retry_candidate_claim_rejects_a_mismatched_protected_realm_before_lease() {
+    let store = SqliteStore::open_in_memory().expect("open mismatched-realm retry claim store");
+    let kernel_key = SigningKey::from_bytes(&[71; 32]);
+    let kernel = actor("kernel", "kernel-main", &kernel_key);
+    let now = retry_candidate_fixture_time();
+    let run_id = RunId::new();
+    let completion_request = append_retry_candidate_completion_evidence(
+        &store,
+        &kernel_key,
+        &kernel,
+        run_id,
+        now,
+        RetryCandidateEvidenceVariant::Valid,
+    );
+    let protected_authority = retry_candidate_activity_claim_authority(&kernel_key, &kernel);
+    let resolved = store
+        .resolve_governed_v3_retry_candidate_action_identity_v1(
+            &retry_candidate_identity_request(&completion_request),
+            &protected_authority,
+        )
+        .expect("resolve valid retry identity before substituting the claim realm");
+    let claim_request = append_retry_candidate_claim_request(
+        &store,
+        &kernel_key,
+        &kernel,
+        run_id,
+        completion_request.dispatch_event_id,
+        now,
+        ExecutionRoleV1::Implementer,
+        resolved.action_id,
+        resolved.idempotency_key,
+    );
+    let mismatched_authority = ActivityClaimAuthorityV1::new_governed_realm(
+        trusted_keys(&[&kernel_key]),
+        kernel.clone(),
+        kernel.clone(),
+        kernel.clone(),
+        DIGEST_D.into(),
+    )
+    .expect("construct a different protected realm");
+    let event_count_before_claim = store.event_count().expect("count mismatched-realm tape");
+
+    let error = store
+        .claim_activity_v1_at_for_tests(
+            &claim_request,
+            &mismatched_authority,
+            &kernel_key,
+            &kernel,
+            now + Duration::seconds(13),
+        )
+        .expect_err("a different protected realm must not mint a retry candidate lease");
+    assert!(
+        matches!(
+            error,
+            LedgerError::ActivityClaimAuthorityRejected { ref reason }
+                if reason.contains("protected governed ledger authority realm")
+        ),
+        "expected a configured-realm mismatch rejection, got {error:?}"
+    );
+    assert_eq!(
+        store
+            .event_count()
+            .expect("count rejected mismatched-realm claim"),
+        event_count_before_claim,
+        "a realm-mismatched retry claim must fail before appending a lease"
+    );
+}
+
+#[test]
 fn governed_retry_candidate_claim_rejects_a_reviewer_retry_dispatch_before_lease() {
     let store = SqliteStore::open_in_memory().expect("open reviewer retry candidate claim store");
     let kernel_key = SigningKey::from_bytes(&[71; 32]);
