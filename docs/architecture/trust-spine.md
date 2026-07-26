@@ -743,6 +743,13 @@ replay, and those private references enter authorize-and-execute without
 crossing a callback or caller-selected request surface. The endpoint remains
 inactive until the credential gateway is backed by the required read-only OCI
 worker rather than an ambient provider process.
+The one-use private capability handed to that gateway now carries the exact
+run, dispatch event, action-request event, startup-selected execution role,
+lease, and native authorization reference. Those fields are reconstructed
+inside the broker after replay and transactional claim; none can be supplied
+or changed by the worker. This gives the future production credential gateway
+enough sealed identity to load the corresponding request and evidence from the
+same protected ledger/CAS rather than accepting model input alongside a lease.
 
 The remaining OS-isolated broker must expose the native, same-ledger-process
 `resolve-or-authorize` transaction to the credential-holding provider boundary,

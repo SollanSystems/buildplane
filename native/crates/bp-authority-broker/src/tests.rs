@@ -595,6 +595,7 @@ impl AuthorityBackend for FakeBackend {
 #[derive(Default)]
 struct GatewayState {
     calls: usize,
+    capabilities: Vec<(RunId, EventId, EventId, ExecutionRoleV1, String)>,
 }
 
 struct FakeGateway {
@@ -604,7 +605,16 @@ struct FakeGateway {
 
 impl CredentialGateway for FakeGateway {
     fn invoke(&mut self, capability: PrivateModelCapability) -> PairedGatewayResult {
-        self.state.borrow_mut().calls += 1;
+        let mut state = self.state.borrow_mut();
+        state.calls += 1;
+        state.capabilities.push((
+            capability.run_id,
+            capability.dispatch_event_id,
+            capability.action_request_event_id,
+            capability.execution_role,
+            capability.authorization_ref.clone(),
+        ));
+        drop(state);
         capability.complete(
             self.completion
                 .take()
@@ -827,9 +837,22 @@ fn verified_grant_moves_one_private_capability_and_pairs_the_gateway_result() {
     );
     assert_eq!(
         verifier_calls.borrow().as_slice(),
-        &[VerifyCall { run_id, request }]
+        &[VerifyCall {
+            run_id,
+            request: request.clone()
+        }]
     );
     assert_eq!(gateway_state.borrow().calls, 1);
+    assert_eq!(
+        gateway_state.borrow().capabilities,
+        vec![(
+            run_id,
+            request.dispatch_event_id,
+            request.action_request_event_id,
+            ExecutionRoleV1::Implementer,
+            "authorization://opaque".into(),
+        )]
+    );
     assert_eq!(
         backend_state.borrow().authorize_calls[0].lease_duration_ms,
         30_000

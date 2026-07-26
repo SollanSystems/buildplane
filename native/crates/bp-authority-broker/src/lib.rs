@@ -892,8 +892,10 @@ impl GatewayCompletion {
 /// non-serializable, and non-cloneable. Completion consumes it.
 pub(crate) struct PrivateModelCapability {
     run_id: RunId,
+    dispatch_event_id: EventId,
+    action_request_event_id: EventId,
+    execution_role: bp_ledger::payload::trust_spine::ExecutionRoleV1,
     lease_id: String,
-    #[allow(dead_code)]
     authorization_ref: String,
 }
 
@@ -1125,6 +1127,9 @@ where
                 authorization_ref,
             } if run_id == self.run_id && !replay_already_claimed => PrivateModelCapability {
                 run_id,
+                dispatch_event_id: request.dispatch_event_id,
+                action_request_event_id: request.action_request_event_id,
+                execution_role: self.expected_role,
                 lease_id,
                 authorization_ref,
             },
