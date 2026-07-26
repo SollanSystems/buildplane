@@ -11103,35 +11103,142 @@ fn governed_dispatch_v5_source_signature_high_water(
     .map_err(Into::into)
 }
 
+const GOVERNED_DISPATCH_V5_SIGNATURE_SCAN_INDEX_TABLE_SQL: &str = r#"
+    CREATE TABLE governed_dispatch_v5_signature_scan_index (
+        signature_rowid       INTEGER PRIMARY KEY CHECK(signature_rowid > 0),
+        event_rowid           INTEGER NOT NULL CHECK(event_rowid > 0),
+        event_id              TEXT NOT NULL UNIQUE,
+        run_id                TEXT NOT NULL,
+        v5_envelope_digest    TEXT NOT NULL,
+        actor_id              TEXT NOT NULL,
+        key_id                TEXT NOT NULL,
+        public_key_hash       TEXT,
+        algorithm             TEXT NOT NULL,
+        FOREIGN KEY(event_id) REFERENCES events(id)
+    )
+"#;
+
+const GOVERNED_DISPATCH_V5_SIGNATURE_SCAN_EXACT_INDEX_SQL: &str = r#"
+    CREATE INDEX idx_governed_dispatch_v5_signature_scan_exact
+    ON governed_dispatch_v5_signature_scan_index(
+        run_id,
+        v5_envelope_digest,
+        actor_id,
+        key_id,
+        public_key_hash,
+        algorithm,
+        signature_rowid
+    )
+"#;
+
+const GOVERNED_DISPATCH_V5_SIGNATURE_SCAN_AFTER_INSERT_SQL: &str = r#"
+    CREATE TRIGGER governed_dispatch_v5_signature_scan_after_insert
+    AFTER INSERT ON event_signatures
+    BEGIN
+        INSERT INTO governed_dispatch_v5_signature_scan_index (
+            signature_rowid, event_rowid, event_id, run_id,
+            v5_envelope_digest, actor_id, key_id,
+            public_key_hash, algorithm
+        )
+        SELECT
+            NEW.rowid, e.rowid, e.id, e.run_id,
+            json_extract(
+                e.payload,
+                '$.DispatchEnvelopeV5.envelope_digest'
+            ),
+            NEW.actor_id, NEW.key_id, NEW.public_key_hash,
+            NEW.algorithm
+        FROM events e
+        WHERE e.id = NEW.event_id
+          AND e.kind = 'dispatch_envelope_v5';
+    END
+"#;
+
+const GOVERNED_DISPATCH_V5_SIGNATURE_SCAN_NO_UPDATE_SQL: &str = r#"
+    CREATE TRIGGER governed_dispatch_v5_signature_scan_no_update
+    BEFORE UPDATE ON governed_dispatch_v5_signature_scan_index
+    BEGIN
+        SELECT RAISE(ABORT, 'V5 signature scan index is append-derived: UPDATE forbidden');
+    END
+"#;
+
+const GOVERNED_DISPATCH_V5_SIGNATURE_SCAN_NO_DELETE_SQL: &str = r#"
+    CREATE TRIGGER governed_dispatch_v5_signature_scan_no_delete
+    BEFORE DELETE ON governed_dispatch_v5_signature_scan_index
+    BEGIN
+        SELECT RAISE(ABORT, 'V5 signature scan index is append-derived: DELETE forbidden');
+    END
+"#;
+
+/// Canonicalize SQLite-owned schema text without weakening quoted literals.
+///
+/// SQLite removes `IF NOT EXISTS` and may preserve arbitrary insignificant
+/// formatting in `sqlite_master.sql`. Outside quoted tokens SQL is
+/// case-insensitive and whitespace-insensitive, so normalize exactly those
+/// dimensions. Quoted strings and identifiers remain byte-for-byte bound.
+fn canonical_sqlite_schema_sql(sql: &str) -> String {
+    let mut canonical = String::with_capacity(sql.len());
+    let mut chars = sql.chars().peekable();
+    let mut quote: Option<char> = None;
+
+    while let Some(ch) = chars.next() {
+        if let Some(end_quote) = quote {
+            canonical.push(ch);
+            if ch == end_quote {
+                if end_quote != ']' && chars.peek() == Some(&end_quote) {
+                    canonical.push(chars.next().expect("peeked escaped quote"));
+                } else {
+                    quote = None;
+                }
+            }
+            continue;
+        }
+
+        match ch {
+            '\'' | '"' | '`' => {
+                quote = Some(ch);
+                canonical.push(ch);
+            }
+            '[' => {
+                quote = Some(']');
+                canonical.push(ch);
+            }
+            _ if ch.is_whitespace() => {}
+            _ => canonical.extend(ch.to_lowercase()),
+        }
+    }
+    canonical
+}
+
 fn require_governed_dispatch_v5_source_scan_schema(conn: &Connection, run_id: RunId) -> Result<()> {
     let required = [
         (
             "table",
             "governed_dispatch_v5_signature_scan_index",
-            "signature_rowid",
+            GOVERNED_DISPATCH_V5_SIGNATURE_SCAN_INDEX_TABLE_SQL,
         ),
         (
             "index",
             "idx_governed_dispatch_v5_signature_scan_exact",
-            "v5_envelope_digest",
+            GOVERNED_DISPATCH_V5_SIGNATURE_SCAN_EXACT_INDEX_SQL,
         ),
         (
             "trigger",
             "governed_dispatch_v5_signature_scan_after_insert",
-            "NEW.rowid",
+            GOVERNED_DISPATCH_V5_SIGNATURE_SCAN_AFTER_INSERT_SQL,
         ),
         (
             "trigger",
             "governed_dispatch_v5_signature_scan_no_update",
-            "UPDATE forbidden",
+            GOVERNED_DISPATCH_V5_SIGNATURE_SCAN_NO_UPDATE_SQL,
         ),
         (
             "trigger",
             "governed_dispatch_v5_signature_scan_no_delete",
-            "DELETE forbidden",
+            GOVERNED_DISPATCH_V5_SIGNATURE_SCAN_NO_DELETE_SQL,
         ),
     ];
-    for (object_type, name, required_fragment) in required {
+    for (object_type, name, expected_sql) in required {
         let sql = conn
             .query_row(
                 "SELECT sql FROM sqlite_master WHERE type = ?1 AND name = ?2",
@@ -11140,9 +11247,10 @@ fn require_governed_dispatch_v5_source_scan_schema(conn: &Connection, run_id: Ru
             )
             .optional()?
             .flatten();
+        let expected_sql = canonical_sqlite_schema_sql(expected_sql);
         if !sql
             .as_deref()
-            .is_some_and(|sql| sql.contains(required_fragment))
+            .is_some_and(|sql| canonical_sqlite_schema_sql(sql) == expected_sql)
         {
             return Err(governed_dispatch_v5_admission_reconciliation_required(
                 run_id,

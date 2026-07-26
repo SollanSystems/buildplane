@@ -9609,6 +9609,116 @@ fn broker_v5_missing_scan_trigger_or_index_fails_closed_without_tape_mutation() 
 }
 
 #[test]
+fn broker_v5_semantically_substituted_scan_schema_fails_closed_without_tape_mutation() {
+    let substitutions = [
+        (
+            "after-insert no-op",
+            "DROP TRIGGER governed_dispatch_v5_signature_scan_after_insert;
+             CREATE TRIGGER governed_dispatch_v5_signature_scan_after_insert
+             AFTER INSERT ON event_signatures
+             BEGIN SELECT NEW.rowid; END;",
+        ),
+        (
+            "update marker without abort",
+            "DROP TRIGGER governed_dispatch_v5_signature_scan_no_update;
+             CREATE TRIGGER governed_dispatch_v5_signature_scan_no_update
+             BEFORE UPDATE ON governed_dispatch_v5_signature_scan_index
+             BEGIN SELECT 'UPDATE forbidden'; END;",
+        ),
+        (
+            "delete marker without abort",
+            "DROP TRIGGER governed_dispatch_v5_signature_scan_no_delete;
+             CREATE TRIGGER governed_dispatch_v5_signature_scan_no_delete
+             BEFORE DELETE ON governed_dispatch_v5_signature_scan_index
+             BEGIN SELECT 'DELETE forbidden'; END;",
+        ),
+        (
+            "weakened exact index",
+            "DROP INDEX idx_governed_dispatch_v5_signature_scan_exact;
+             CREATE INDEX idx_governed_dispatch_v5_signature_scan_exact
+             ON governed_dispatch_v5_signature_scan_index(
+                 v5_envelope_digest,
+                 signature_rowid
+             );",
+        ),
+        (
+            "unconstrained scan table",
+            "DROP TRIGGER governed_dispatch_v5_signature_scan_after_insert;
+             DROP TRIGGER governed_dispatch_v5_signature_scan_no_update;
+             DROP TRIGGER governed_dispatch_v5_signature_scan_no_delete;
+             DROP INDEX idx_governed_dispatch_v5_signature_scan_exact;
+             DROP TABLE governed_dispatch_v5_signature_scan_index;
+             CREATE TABLE governed_dispatch_v5_signature_scan_index (
+                 signature_rowid INTEGER,
+                 event_rowid INTEGER,
+                 event_id TEXT,
+                 run_id TEXT,
+                 v5_envelope_digest TEXT,
+                 actor_id TEXT,
+                 key_id TEXT,
+                 public_key_hash TEXT,
+                 algorithm TEXT
+             );
+             CREATE INDEX idx_governed_dispatch_v5_signature_scan_exact
+             ON governed_dispatch_v5_signature_scan_index(
+                 run_id, v5_envelope_digest, actor_id, key_id,
+                 public_key_hash, algorithm, signature_rowid
+             );
+             CREATE TRIGGER governed_dispatch_v5_signature_scan_after_insert
+             AFTER INSERT ON event_signatures
+             BEGIN
+                 INSERT INTO governed_dispatch_v5_signature_scan_index (
+                     signature_rowid, event_rowid, event_id, run_id,
+                     v5_envelope_digest, actor_id, key_id,
+                     public_key_hash, algorithm
+                 )
+                 SELECT NEW.rowid, e.rowid, e.id, e.run_id,
+                        json_extract(e.payload, '$.DispatchEnvelopeV5.envelope_digest'),
+                        NEW.actor_id, NEW.key_id, NEW.public_key_hash, NEW.algorithm
+                 FROM events e
+                 WHERE e.id = NEW.event_id AND e.kind = 'dispatch_envelope_v5';
+             END;
+             CREATE TRIGGER governed_dispatch_v5_signature_scan_no_update
+             BEFORE UPDATE ON governed_dispatch_v5_signature_scan_index
+             BEGIN
+                 SELECT RAISE(ABORT, 'V5 signature scan index is append-derived: UPDATE forbidden');
+             END;
+             CREATE TRIGGER governed_dispatch_v5_signature_scan_no_delete
+             BEFORE DELETE ON governed_dispatch_v5_signature_scan_index
+             BEGIN
+                 SELECT RAISE(ABORT, 'V5 signature scan index is append-derived: DELETE forbidden');
+             END;",
+        ),
+    ];
+
+    for (name, substitution) in substitutions {
+        let fixture = v5_broker_admission_fixture();
+        let before = fixture.store.event_count().expect("count source tape");
+        fixture
+            .store
+            .conn_for_tests()
+            .execute_batch(substitution)
+            .unwrap_or_else(|error| panic!("install {name} substitution: {error}"));
+        let broker = v5_broker_admission_backend(&fixture);
+
+        assert!(
+            matches!(
+                broker.record_then_exact_seal(v5_broker_admission_request(&fixture)),
+                BrokerV5DispatchAdmissionDisposition::ReconciliationRequired
+            ),
+            "{name} substitution must fail closed"
+        );
+        assert_eq!(
+            fixture.store.event_count().expect("unchanged tape"),
+            before,
+            "{name} substitution must not append tape evidence"
+        );
+        assert_eq!(v5_broker_admission_receipt_count(&fixture), 0);
+        assert_eq!(v5_broker_checkpoint_count(&fixture), 0);
+    }
+}
+
+#[test]
 fn broker_v5_later_verified_duplicate_sets_ambiguous_projection_and_reconciles() {
     let fixture = v5_broker_admission_fixture();
     let broker = v5_broker_admission_backend(&fixture);
