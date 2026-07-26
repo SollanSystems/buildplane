@@ -804,9 +804,20 @@ Missing or unsafe state yields one closed startup category and no host state.
 This composition still grants no listener or worker authority. Its private
 reviewer run path now derives each request from trusted replay, records or
 reuses token preflight, reopens recovery state after that write, constructs the
-role-bound model authority, and invokes the protected Anthropic gateway. The
-remaining host slice is the closed listener/response boundary; it must expose
-only opaque recovery/session references and closed status values.
+role-bound model authority, and invokes the protected Anthropic gateway.
+The authenticated connection handler now satisfies that response boundary
+inside the protected composition. It revalidates the connected Unix peer,
+accepts the existing bounded closed request frame, and dispatches only
+`probe`, `open_reviewer_session`, and `run_reviewer_session`; candidate
+operations remain authority-rejected. Reviewer open returns only the exact
+input recovery token plus a broker-signed opaque session token. Reviewer run
+returns only a signed closed
+`governed_reviewer_run_result_v1` status (`pending`, `recorded`, `failed`,
+`lease_expired`, or `reconciliation_required`). Unknown result fields,
+retry-like states, and authority-bearing response material are rejected before
+signing. The remaining external activation slice is the default supervised
+listener: it must claim the fixed socket and select the allowed client UID from
+startup configuration.
 Reviewer session opening now follows that rule internally: the opaque recovery
 token exposes only untrusted run and candidate-dispatch routing fields. The
 host locates the candidate in a fully verified recovery snapshot, derives its

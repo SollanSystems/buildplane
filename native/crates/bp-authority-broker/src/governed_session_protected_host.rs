@@ -11,6 +11,12 @@ use crate::governed_reviewer_authority::{
     execute_governed_reviewer_run_v1, open_governed_reviewer_session_from_replay_v1,
     OpenedGovernedReviewerSessionV1,
 };
+use crate::governed_session_client::ParsedGovernedSessionClientRequestV1;
+use crate::governed_session_host::{
+    handle_governed_session_connection, GovernedSessionHostDispositionV1,
+    GovernedSessionHostErrorV1,
+};
+use crate::governed_session_response::governed_reviewer_run_result_v1;
 use crate::governed_session_startup::{
     GovernedSessionHostStartupErrorV1, GovernedSessionHostStartupV1, GovernedSessionProviderLaneV1,
 };
@@ -51,6 +57,8 @@ use bp_provider_sdk::{
     ProviderTokenCounterV1,
 };
 use std::collections::BTreeSet;
+use std::os::unix::net::UnixStream;
+use std::time::Duration;
 use thiserror::Error;
 
 pub(crate) struct ProtectedGovernedSessionHostStateV1 {
@@ -309,6 +317,69 @@ impl ProtectedGovernedSessionHostStateV1 {
         )
         .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)
     }
+
+    fn authorize_client_request(
+        &self,
+        request: &ParsedGovernedSessionClientRequestV1,
+    ) -> Result<GovernedSessionHostDispositionV1, GovernedSessionHostErrorV1> {
+        match request {
+            ParsedGovernedSessionClientRequestV1::Probe { .. } => {
+                Ok(GovernedSessionHostDispositionV1::Ready)
+            }
+            ParsedGovernedSessionClientRequestV1::OpenReviewerSession {
+                request_id,
+                recovery_ref,
+                ..
+            } => {
+                let opened = self
+                    .open_reviewer_session(recovery_ref, request_id)
+                    .map_err(|_| GovernedSessionHostErrorV1::AuthorityRejected)?;
+                if opened.recovery_ref() != recovery_ref {
+                    return Err(GovernedSessionHostErrorV1::AuthorityRejected);
+                }
+                Ok(GovernedSessionHostDispositionV1::Opened {
+                    recovery_ref: opened.recovery_ref().into(),
+                    session_ref: opened.session_ref().into(),
+                })
+            }
+            ParsedGovernedSessionClientRequestV1::RunReviewerSession {
+                recovery_ref,
+                session_ref,
+                ..
+            } => {
+                let status = self
+                    .run_reviewer_session(recovery_ref, session_ref)
+                    .map_err(|_| GovernedSessionHostErrorV1::AuthorityRejected)?;
+                Ok(GovernedSessionHostDispositionV1::Completed {
+                    recovery_ref: recovery_ref.clone(),
+                    session_ref: session_ref.clone(),
+                    result: governed_reviewer_run_result_v1(status),
+                })
+            }
+            // Candidate opening and execution remain unavailable until the
+            // same protected state owns the OCI candidate action plane.
+            ParsedGovernedSessionClientRequestV1::OpenCandidateSession { .. }
+            | ParsedGovernedSessionClientRequestV1::OpenRecoverySession { .. }
+            | ParsedGovernedSessionClientRequestV1::RunCandidateSession { .. } => {
+                Err(GovernedSessionHostErrorV1::AuthorityRejected)
+            }
+        }
+    }
+
+    pub(crate) fn handle_authenticated_connection(
+        &self,
+        stream: &mut UnixStream,
+        expected_client_uid: u32,
+        timeout: Duration,
+    ) -> Result<(), GovernedSessionHostErrorV1> {
+        handle_governed_session_connection(
+            stream,
+            expected_client_uid,
+            self.signing_keys.broker_identity(),
+            timeout,
+            |request| self.authorize_client_request(request),
+        )
+    }
 }
 
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
@@ -465,6 +536,7 @@ mod tests {
     use futures::executor::block_on;
     use serde_json::{json, Value};
     use std::fs;
+    use std::io::{Read, Write};
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
 
@@ -786,5 +858,93 @@ mod tests {
             0,
             "an untrusted session identity must not reach token count, model, or ledger effects"
         );
+    }
+
+    #[test]
+    fn protected_dispatcher_exposes_probe_but_keeps_candidate_lane_closed() {
+        let fixture = HostFixture::new();
+        let validated = fixture.validated_startup();
+        let confinement = validated
+            .config()
+            .confinement_policy
+            .attestation_for_same_process_socket_tests();
+        let state = compose_prevalidated_governed_session_host_v1(
+            validated,
+            confinement,
+            oci_attestation(),
+        )
+        .expect("protected host");
+        let probe = crate::governed_session_client::parse_governed_session_client_request(
+            br#"{"schema_version":1,"protocol":"buildplane-governed-session","request_id":"01919000-0000-7000-8000-000000000098","operation":"probe"}"#,
+        )
+        .expect("probe");
+        assert_eq!(
+            state.authorize_client_request(&probe),
+            Ok(crate::governed_session_host::GovernedSessionHostDispositionV1::Ready)
+        );
+
+        let candidate = crate::governed_session_client::parse_governed_session_client_request(
+            br#"{"schema_version":1,"protocol":"buildplane-governed-session","request_id":"01919000-0000-7000-8000-000000000099","operation":"run_candidate_session","recovery_ref":"recovery:opaque","session_ref":"session:opaque"}"#,
+        )
+        .expect("candidate request");
+        assert_eq!(
+            state.authorize_client_request(&candidate),
+            Err(crate::governed_session_host::GovernedSessionHostErrorV1::AuthorityRejected)
+        );
+        assert_eq!(state.ledger().store().event_count().expect("ledger"), 0);
+    }
+
+    #[test]
+    fn protected_connection_authenticates_and_signs_the_closed_probe() {
+        let fixture = HostFixture::new();
+        let validated = fixture.validated_startup();
+        let confinement = validated
+            .config()
+            .confinement_policy
+            .attestation_for_same_process_socket_tests();
+        let state = compose_prevalidated_governed_session_host_v1(
+            validated,
+            confinement,
+            oci_attestation(),
+        )
+        .expect("protected host");
+        let verifying_key = state.signing_keys().broker_identity().verifying_key();
+        let request = br#"{"schema_version":1,"protocol":"buildplane-governed-session","request_id":"01919000-0000-7000-8000-000000000097","operation":"probe"}"#.to_vec();
+        let parsed =
+            crate::governed_session_client::parse_governed_session_client_request(&request)
+                .expect("probe");
+        let (mut client, mut server) = UnixStream::pair().expect("socket pair");
+        let client_thread = std::thread::spawn(move || {
+            client
+                .write_all(&(request.len() as u32).to_be_bytes())
+                .expect("frame length");
+            client.write_all(&request).expect("request");
+            client
+                .shutdown(std::net::Shutdown::Write)
+                .expect("request EOF");
+            let mut length = [0_u8; 4];
+            client.read_exact(&mut length).expect("response length");
+            let mut response = vec![0_u8; u32::from_be_bytes(length) as usize];
+            client.read_exact(&mut response).expect("response");
+            response
+        });
+
+        state
+            .handle_authenticated_connection(
+                &mut server,
+                unsafe { libc::geteuid() },
+                Duration::from_secs(2),
+            )
+            .expect("protected connection");
+        let response = client_thread.join().expect("client");
+        let verified = crate::governed_session_response::verify_governed_session_response_v1(
+            &response,
+            &verifying_key,
+            &parsed,
+        )
+        .expect("signed probe");
+        assert!(std::str::from_utf8(verified.projection_json())
+            .expect("projection")
+            .contains(r#""status":"ready""#));
     }
 }

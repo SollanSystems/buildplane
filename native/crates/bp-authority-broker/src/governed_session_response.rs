@@ -3,6 +3,7 @@
 use crate::governed_session_client::{
     GovernedSessionClientOperationV1, ParsedGovernedSessionClientRequestV1,
 };
+use crate::BrokerModelActionStatus;
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -72,6 +73,30 @@ struct ProjectionWireV1<'a> {
     recovery_ref: Option<&'a str>,
     session_ref: Option<&'a str>,
     result: Option<&'a Value>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct GovernedReviewerRunResultWireV1 {
+    schema_version: u8,
+    kind: String,
+    status: String,
+}
+
+pub(crate) fn governed_reviewer_run_result_v1(status: BrokerModelActionStatus) -> Value {
+    let status = match status {
+        BrokerModelActionStatus::Pending => "pending",
+        BrokerModelActionStatus::Recorded => "recorded",
+        BrokerModelActionStatus::Failed => "failed",
+        BrokerModelActionStatus::LeaseExpired => "lease_expired",
+        BrokerModelActionStatus::ReconciliationRequired => "reconciliation_required",
+    };
+    serde_json::to_value(GovernedReviewerRunResultWireV1 {
+        schema_version: 1,
+        kind: "governed_reviewer_run_result_v1".into(),
+        status: status.into(),
+    })
+    .expect("fixed governed reviewer result is serializable")
 }
 
 pub(crate) fn sign_governed_session_response_v1(
@@ -198,12 +223,17 @@ fn validate_response_binding<'a>(
             }
             ("opened", None)
         }
-        GovernedSessionClientOperationV1::RunCandidateSession
-        | GovernedSessionClientOperationV1::RunReviewerSession => {
+        GovernedSessionClientOperationV1::RunCandidateSession => {
             validate_session_refs(request, recovery_ref, session_ref)?;
             let result = result
                 .filter(|value| value.is_object())
                 .ok_or(GovernedSessionResponseErrorV1::InvalidBinding)?;
+            ("completed", Some(result))
+        }
+        GovernedSessionClientOperationV1::RunReviewerSession => {
+            validate_session_refs(request, recovery_ref, session_ref)?;
+            let result = result.ok_or(GovernedSessionResponseErrorV1::InvalidBinding)?;
+            validate_governed_reviewer_run_result(result)?;
             ("completed", Some(result))
         }
     };
@@ -213,6 +243,23 @@ fn validate_response_binding<'a>(
         session_ref,
         result,
     })
+}
+
+fn validate_governed_reviewer_run_result(
+    result: &Value,
+) -> Result<(), GovernedSessionResponseErrorV1> {
+    let result: GovernedReviewerRunResultWireV1 = serde_json::from_value(result.clone())
+        .map_err(|_| GovernedSessionResponseErrorV1::InvalidBinding)?;
+    if result.schema_version != 1
+        || result.kind != "governed_reviewer_run_result_v1"
+        || !matches!(
+            result.status.as_str(),
+            "pending" | "recorded" | "failed" | "lease_expired" | "reconciliation_required"
+        )
+    {
+        return Err(GovernedSessionResponseErrorV1::InvalidBinding);
+    }
+    Ok(())
 }
 
 fn encode_unsigned(

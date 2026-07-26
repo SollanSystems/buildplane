@@ -179,7 +179,7 @@ fn encode_disposition(
     Ok(response)
 }
 
-fn handle_governed_session_connection<F>(
+pub(crate) fn handle_governed_session_connection<F>(
     stream: &mut UnixStream,
     expected_uid: u32,
     signing_key: &SigningKey,
@@ -220,7 +220,6 @@ where
         .map_err(|_| GovernedSessionHostErrorV1::ConnectionRejected)
 }
 
-#[cfg(test)]
 pub(crate) fn handle_governed_session_connection_for_test<F>(
     stream: &mut UnixStream,
     expected_uid: u32,

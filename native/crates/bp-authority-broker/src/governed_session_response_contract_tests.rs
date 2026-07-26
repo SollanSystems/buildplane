@@ -1,8 +1,9 @@
 use crate::governed_session_client::parse_governed_session_client_request;
 use crate::governed_session_response::{
-    sign_governed_session_probe_response_v1, sign_governed_session_response_v1,
-    verify_governed_session_response_v1,
+    governed_reviewer_run_result_v1, sign_governed_session_probe_response_v1,
+    sign_governed_session_response_v1, verify_governed_session_response_v1,
 };
+use crate::BrokerModelActionStatus;
 use ed25519_dalek::SigningKey;
 
 fn reviewer_request(recovery_ref: &str) -> Vec<u8> {
@@ -14,6 +15,10 @@ fn reviewer_request(recovery_ref: &str) -> Vec<u8> {
 
 fn candidate_run_request() -> Vec<u8> {
     br#"{"schema_version":1,"protocol":"buildplane-governed-session","request_id":"01919000-0000-7000-8000-000000000082","operation":"run_candidate_session","recovery_ref":"host-recovery/session-0001","session_ref":"host-session/session-0001"}"#.to_vec()
+}
+
+fn reviewer_run_request() -> Vec<u8> {
+    br#"{"schema_version":1,"protocol":"buildplane-governed-session","request_id":"01919000-0000-7000-8000-000000000083","operation":"run_reviewer_session","recovery_ref":"host-recovery/session-0001","session_ref":"host-session/session-0001"}"#.to_vec()
 }
 
 #[test]
@@ -93,6 +98,57 @@ fn signed_completed_response_requires_a_closed_object_result_and_exact_session_b
             invalid,
         )
         .is_err());
+    }
+}
+
+#[test]
+fn reviewer_completion_exposes_only_the_closed_broker_status_contract() {
+    let key = SigningKey::from_bytes(&[45; 32]);
+    let request = parse_governed_session_client_request(&reviewer_run_request()).unwrap();
+    for status in [
+        BrokerModelActionStatus::Pending,
+        BrokerModelActionStatus::Recorded,
+        BrokerModelActionStatus::Failed,
+        BrokerModelActionStatus::LeaseExpired,
+        BrokerModelActionStatus::ReconciliationRequired,
+    ] {
+        let signed = sign_governed_session_response_v1(
+            &key,
+            &request,
+            "host-recovery/session-0001",
+            "host-session/session-0001",
+            Some(governed_reviewer_run_result_v1(status)),
+        )
+        .expect("sign reviewer status");
+        verify_governed_session_response_v1(&signed, &key.verifying_key(), &request)
+            .expect("verify reviewer status");
+    }
+
+    for invalid in [
+        serde_json::json!({"status": "recorded"}),
+        serde_json::json!({
+            "schemaVersion": 1,
+            "kind": "governed_reviewer_run_result_v1",
+            "status": "retry"
+        }),
+        serde_json::json!({
+            "schemaVersion": 1,
+            "kind": "governed_reviewer_run_result_v1",
+            "status": "recorded",
+            "authorizationRef": "forged"
+        }),
+    ] {
+        assert!(
+            sign_governed_session_response_v1(
+                &key,
+                &request,
+                "host-recovery/session-0001",
+                "host-session/session-0001",
+                Some(invalid),
+            )
+            .is_err(),
+            "reviewer status must reject open or authority-bearing result shapes"
+        );
     }
 }
 
