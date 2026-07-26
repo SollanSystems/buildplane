@@ -25,7 +25,8 @@ use bp_ledger::storage::sqlite::{
     ActivityClaimAuthorityV1, ActivityClaimDispositionV1, ActivityClaimRequestV1,
     ActivityHeartbeatDispositionV1, ActivityHeartbeatRequestV1, ActivityResultDispositionV1,
     ActivityResultRequestV1, CheckpointPolicy, GovernedCommandActionAuthorizeAndClaimDispositionV1,
-    GovernedCommandActionAuthorizeAndClaimRequestV1, GovernedCommandActionResultRequestV1,
+    GovernedCommandActionAuthorizeAndClaimRequestV1, GovernedCommandActionIssueDispositionV1,
+    GovernedCommandActionIssueRequestV1, GovernedCommandActionResultRequestV1,
     GovernedVerifierClaimRequestV1, GovernedVerifierResultRequestV1, SqliteStore,
 };
 use bp_ledger::storage::Cas;
@@ -37,6 +38,67 @@ use tempfile::tempdir;
 
 const DIGEST_A: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const DIGEST_B: &str = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+const COMMAND_PACKET_DIGEST: &str =
+    "sha256:6d36115fece78efd5f4d17c9cffe6cabe78725a46b374c4b3bad0f9ce45d556c";
+const COMMAND_CAPABILITY_DIGEST: &str =
+    "sha256:f9735004122fe5a668ec78fc26b3335ed0654d2dd1c16967bcd1d258b88dfeaa";
+const COMMAND_ACCEPTANCE_DIGEST: &str =
+    "sha256:b05a1e96b6f3a5e6f415d435de0c46872a8b69ca89de30b5fc9cb7f485e301b4";
+
+fn governed_command_packet_source() -> String {
+    serde_json::json!({
+        "unit": {
+            "id": "unit-1",
+            "kind": "implementation",
+            "scope": "task",
+            "verificationContract": "tests pass",
+            "policyProfile": "default"
+        },
+        "execution_role": "implementer",
+        "execution": {
+            "command": "/usr/bin/git",
+            "args": ["status", "--short"],
+            "cwd": "repo"
+        },
+        "intent": {
+            "objective": "Inspect the candidate",
+            "taskType": "implement",
+            "features": {
+                "ambiguity": "low",
+                "reversibility": "easy",
+                "verifierStrength": "strong",
+                "changeSurface": 3
+            }
+        },
+        "provenance_ref": "01900000-0000-7000-8000-000000000001",
+        "capability_bundle": {
+            "schemaVersion": "buildplane.capability_bundle.v0",
+            "bundleId": "bundle-1",
+            "fsRead": ["**/*"],
+            "fsWrite": ["**/*"],
+            "netEgress": [],
+            "tools": {
+                "run_command": {
+                    "allowlist": ["/usr/bin/git"]
+                }
+            }
+        },
+        "capability_bundle_digest": COMMAND_CAPABILITY_DIGEST,
+        "acceptance_contract": {
+            "schemaVersion": 1,
+            "contract_version": "v0",
+            "diff_scope": { "allowed_globs": ["**/*"] },
+            "checks": [{ "command": "git status --short" }]
+        },
+        "trust_scope": {
+            "schemaVersion": 1,
+            "lane": "governed",
+            "principal": "operator",
+            "scope": "repository"
+        }
+    })
+    .to_string()
+}
 
 fn signer() -> (SigningKey, ActorKeyRef, TrustedPublicKeys) {
     let signing_key = SigningKey::from_bytes(&[37u8; 32]);
@@ -94,6 +156,63 @@ fn governed_handshake(run_id: RunId) -> String {
         r#"{{"control":"handshake","protocol":1,"run_id":"{}","started_at":"2026-07-18T00:00:00Z","schema_version":1}}"#,
         run_id
     )
+}
+
+fn append_governed_command_dispatch(
+    store: &SqliteStore,
+    signing_key: &SigningKey,
+    signer: &ActorKeyRef,
+) -> (RunId, EventId, DispatchEnvelopeV3) {
+    let run_id = RunId::new();
+    let body = DispatchEnvelopeBodyV2 {
+        workflow_id: "workflow-command".into(),
+        workflow_revision: "r1".into(),
+        unit_id: "unit-1".into(),
+        attempt: 1,
+        execution_role: ExecutionRoleV1::Implementer,
+        commit_mode: CommitModeV1::Atomic,
+        provenance_ref: "01900000-0000-7000-8000-000000000001".into(),
+        base_commit_sha: "1".repeat(40),
+        capability_bundle_digest: COMMAND_CAPABILITY_DIGEST.into(),
+        acceptance_contract_digest: COMMAND_ACCEPTANCE_DIGEST.into(),
+        context_manifest_digest: DIGEST_A.into(),
+        worker_manifest_digest: DIGEST_B.into(),
+        sandbox_profile_digest: DIGEST_A.into(),
+        budget: DispatchBudgetV1 {
+            max_tokens: Some(1_000),
+            max_compute_time_ms: None,
+        },
+        trust_tier: TrustTierV1::Governed,
+        idempotency_key: "dispatch:workflow-command:unit-1:1".into(),
+        issued_at: "2026-07-18T00:00:00Z".into(),
+        expires_at: "2099-07-18T00:00:00Z".into(),
+    };
+    let dispatch = DispatchEnvelopeV3 {
+        envelope_digest: dispatch_envelope_v3_body_digest(
+            &body,
+            ActionEvidenceVersionV1::SealedV3,
+            DIGEST_A,
+            DIGEST_B,
+            Some(COMMAND_PACKET_DIGEST),
+        )
+        .unwrap(),
+        body,
+        action_evidence_version: ActionEvidenceVersionV1::SealedV3,
+        repository_binding_digest: DIGEST_A.into(),
+        ledger_authority_realm_digest: DIGEST_B.into(),
+        governed_packet_digest: Some(COMMAND_PACKET_DIGEST.into()),
+    };
+    let event = Event {
+        id: EventId::new(),
+        run_id,
+        parent_event_id: None,
+        schema_version: Event::CURRENT_SCHEMA_VERSION,
+        kind: EventKind::DispatchEnvelopeV3,
+        occurred_at: "2026-07-18T00:00:00Z".parse().unwrap(),
+        payload: Payload::DispatchEnvelopeV3(dispatch.clone()),
+    };
+    store.append_signed(&event, signing_key, signer).unwrap();
+    (run_id, event.id, dispatch)
 }
 
 fn assert_current_signed_prefix_is_checkpointed(
@@ -3228,6 +3347,184 @@ fn heartbeat_after_lease_expiry_blocks_without_appending_a_second_authority_even
         store.event_count().unwrap(),
         3,
         "a heartbeat after expiry must not create an ambiguous authority event"
+    );
+}
+
+#[test]
+fn protected_command_issuer_derives_one_recoverable_action_from_packet_and_dispatch() {
+    let store = SqliteStore::open_in_memory().unwrap();
+    let directory = tempdir().unwrap();
+    let cas = Cas::open(directory.path().join("cas")).unwrap();
+    let (signing_key, signer, trusted) = signer();
+    let trusted_actor = trusted_actor(&signing_key);
+    let authority = ActivityClaimAuthorityV1::new_governed_realm(
+        trusted,
+        trusted_actor.clone(),
+        trusted_actor.clone(),
+        trusted_actor,
+        DIGEST_B.into(),
+    )
+    .unwrap();
+    let (run_id, dispatch_event_id, dispatch) =
+        append_governed_command_dispatch(&store, &signing_key, &signer);
+    let request = GovernedCommandActionIssueRequestV1 {
+        run_id,
+        dispatch_event_id,
+        packet_source: governed_command_packet_source(),
+    };
+    let issued_at: chrono::DateTime<Utc> = "2026-07-18T00:00:02Z".parse().unwrap();
+    let issued = store
+        .issue_governed_command_action_v1_at_for_tests(
+            &request,
+            &cas,
+            &authority,
+            &signing_key,
+            &signer,
+            issued_at,
+        )
+        .unwrap();
+    let action_request_event_id = match issued {
+        GovernedCommandActionIssueDispositionV1::Issued {
+            action_request_event_id,
+            verified_input,
+            ..
+        } => {
+            assert_eq!(verified_input.document().command, "/usr/bin/git");
+            assert_eq!(verified_input.document().args, ["status", "--short"]);
+            assert_eq!(verified_input.document().cwd.as_deref(), Some("repo"));
+            action_request_event_id
+        }
+        other => panic!("expected a newly issued command action, got {other:?}"),
+    };
+    let action_event = store
+        .events_for_run(&run_id.to_string())
+        .unwrap()
+        .into_iter()
+        .find(|row| row.id == action_request_event_id.to_string())
+        .unwrap()
+        .to_event()
+        .unwrap();
+    let Payload::ActionRequestedV2(action) = action_event.payload else {
+        panic!("protected command issuer must append action_requested_v2");
+    };
+    assert_eq!(action_event.parent_event_id, Some(dispatch_event_id));
+    assert_eq!(action_event.occurred_at, issued_at);
+    assert_eq!(
+        action.action_id,
+        format!(
+            "governed:{run_id}:{}",
+            dispatch.envelope_digest.strip_prefix("sha256:").unwrap()
+        )
+    );
+    assert_eq!(
+        action.idempotency_key,
+        "dispatch:workflow-command:unit-1:1:command"
+    );
+    assert_eq!(action.capability_bundle_digest, COMMAND_CAPABILITY_DIGEST);
+    assert_eq!(
+        action.policy_digest,
+        governed_dispatch_policy_digest_v1(COMMAND_ACCEPTANCE_DIGEST).unwrap()
+    );
+
+    let recovered_at: chrono::DateTime<Utc> = "2100-07-18T00:00:00Z".parse().unwrap();
+    assert!(matches!(
+        store
+            .issue_governed_command_action_v1_at_for_tests(
+                &request,
+                &cas,
+                &authority,
+                &signing_key,
+                &signer,
+                recovered_at,
+            )
+            .unwrap(),
+        GovernedCommandActionIssueDispositionV1::Existing {
+            action_request_event_id: existing,
+            ..
+        } if existing == action_request_event_id
+    ));
+    assert_eq!(
+        store.event_count().unwrap(),
+        2,
+        "retry after dispatch expiry must recover the signed write-ahead action without reissuing it"
+    );
+
+    let claim = GovernedCommandActionAuthorizeAndClaimRequestV1 {
+        run_id,
+        dispatch_event_id,
+        action_request_event_id,
+        lease_duration_ms: 60_000,
+    };
+    assert!(matches!(
+        store
+            .authorize_and_claim_governed_command_action_v1_at_for_tests(
+                &claim,
+                &cas,
+                &authority,
+                &signing_key,
+                &signer,
+                issued_at + Duration::seconds(1),
+            )
+            .unwrap(),
+        GovernedCommandActionAuthorizeAndClaimDispositionV1::Granted { .. }
+    ));
+}
+
+#[test]
+fn protected_command_issuer_rejects_packet_or_capability_substitution_without_action() {
+    let store = SqliteStore::open_in_memory().unwrap();
+    let directory = tempdir().unwrap();
+    let cas = Cas::open(directory.path().join("cas")).unwrap();
+    let (signing_key, signer, trusted) = signer();
+    let trusted_actor = trusted_actor(&signing_key);
+    let authority = ActivityClaimAuthorityV1::new_governed_realm(
+        trusted,
+        trusted_actor.clone(),
+        trusted_actor.clone(),
+        trusted_actor,
+        DIGEST_B.into(),
+    )
+    .unwrap();
+    let (run_id, dispatch_event_id, _) =
+        append_governed_command_dispatch(&store, &signing_key, &signer);
+    let now: chrono::DateTime<Utc> = "2026-07-18T00:00:02Z".parse().unwrap();
+    let substituted_command = governed_command_packet_source().replace("/usr/bin/git", "/bin/sh");
+    assert!(store
+        .issue_governed_command_action_v1_at_for_tests(
+            &GovernedCommandActionIssueRequestV1 {
+                run_id,
+                dispatch_event_id,
+                packet_source: substituted_command,
+            },
+            &cas,
+            &authority,
+            &signing_key,
+            &signer,
+            now,
+        )
+        .is_err());
+    let substituted_capability = governed_command_packet_source().replace(
+        COMMAND_CAPABILITY_DIGEST,
+        "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    );
+    assert!(store
+        .issue_governed_command_action_v1_at_for_tests(
+            &GovernedCommandActionIssueRequestV1 {
+                run_id,
+                dispatch_event_id,
+                packet_source: substituted_capability,
+            },
+            &cas,
+            &authority,
+            &signing_key,
+            &signer,
+            now,
+        )
+        .is_err());
+    assert_eq!(
+        store.event_count().unwrap(),
+        1,
+        "invalid packet authority must never append action_requested_v2"
     );
 }
 

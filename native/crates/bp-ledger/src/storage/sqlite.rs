@@ -14,10 +14,13 @@ use crate::payload::activity_claim::{
 };
 use crate::payload::checkpoint::{tape_root_hash, TapeCheckpointV1, TapeRootAlgorithm};
 use crate::payload::command_evidence::{
-    command_intent_evidence_document_v1_bytes, parse_verified_canonical_command_action_input_v1,
-    parse_verified_command_intent_evidence_document_v1, CommandActionEvidenceBindingV1,
-    CommandIntentEvidenceDocumentV1, VerifiedCommandIntentEvidenceDocumentV1,
+    canonical_command_action_input_v1_bytes, command_intent_evidence_document_v1_bytes,
+    parse_verified_canonical_command_action_input_v1,
+    parse_verified_command_intent_evidence_document_v1, CanonicalCommandActionInputV1,
+    CommandActionEvidenceBindingV1, CommandIntentEvidenceDocumentV1,
+    VerifiedCanonicalCommandActionInputV1, VerifiedCommandIntentEvidenceDocumentV1,
 };
+use crate::payload::governed_packet::GovernedCommandPacketV1;
 use crate::payload::model_evidence::{
     derive_model_action_scope_constraints_v1, model_request_evidence_document_v1_bytes,
     model_request_evidence_v1_descriptor, parse_verified_canonical_model_action_input_v1,
@@ -603,6 +606,36 @@ pub struct GovernedCommandActionAuthorizeAndClaimRequestV1 {
     pub dispatch_event_id: EventId,
     pub action_request_event_id: EventId,
     pub lease_duration_ms: u64,
+}
+
+/// Closed protected request that turns one signed dispatch plus untrusted
+/// packet source into the sole process `ActionRequestedV2` for that dispatch.
+///
+/// The caller cannot select action identity, executable digests, policy,
+/// manifests, role, or timestamp. Native code normalizes the packet, verifies
+/// its capability/acceptance bindings against signed dispatch authority, and
+/// persists the exact executable bytes to protected CAS before appending.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GovernedCommandActionIssueRequestV1 {
+    pub run_id: RunId,
+    pub dispatch_event_id: EventId,
+    pub packet_source: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GovernedCommandActionIssueDispositionV1 {
+    Issued {
+        action_request_event_id: EventId,
+        canonical_input_ref: String,
+        canonical_input_digest: String,
+        verified_input: VerifiedCanonicalCommandActionInputV1,
+    },
+    Existing {
+        action_request_event_id: EventId,
+        canonical_input_ref: String,
+        canonical_input_digest: String,
+        verified_input: VerifiedCanonicalCommandActionInputV1,
+    },
 }
 
 /// Closed host-private terminal result for a governed model lease. The caller
@@ -6626,6 +6659,278 @@ impl SqliteStore {
             self.record_ordinary_append(event);
         }
         Ok(disposition)
+    }
+
+    /// Create or recover the single native process write-ahead action for one
+    /// governed command dispatch.
+    pub fn issue_governed_command_action_v1(
+        &self,
+        request: &GovernedCommandActionIssueRequestV1,
+        cas: &Cas,
+        authority: &ActivityClaimAuthorityV1,
+        signing_key: &SigningKey,
+        signer: &ActorKeyRef,
+    ) -> Result<GovernedCommandActionIssueDispositionV1> {
+        self.issue_governed_command_action_v1_at(
+            request,
+            cas,
+            authority,
+            signing_key,
+            signer,
+            Utc::now(),
+        )
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn issue_governed_command_action_v1_at_for_tests(
+        &self,
+        request: &GovernedCommandActionIssueRequestV1,
+        cas: &Cas,
+        authority: &ActivityClaimAuthorityV1,
+        signing_key: &SigningKey,
+        signer: &ActorKeyRef,
+        now: DateTime<Utc>,
+    ) -> Result<GovernedCommandActionIssueDispositionV1> {
+        self.issue_governed_command_action_v1_at(request, cas, authority, signing_key, signer, now)
+    }
+
+    fn issue_governed_command_action_v1_at(
+        &self,
+        request: &GovernedCommandActionIssueRequestV1,
+        cas: &Cas,
+        authority: &ActivityClaimAuthorityV1,
+        signing_key: &SigningKey,
+        signer: &ActorKeyRef,
+        now: DateTime<Utc>,
+    ) -> Result<GovernedCommandActionIssueDispositionV1> {
+        require_protected_governed_realm(authority)?;
+        validate_action_request_signer(authority, signing_key, signer)?;
+        let now = canonical_ledger_timestamp(now)?;
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let dispatch_event = load_verified_authority_event(
+            &tx,
+            request.dispatch_event_id,
+            &authority.trusted_keys,
+            &authority.dispatch_signer,
+            "governed command dispatch",
+        )?;
+        if dispatch_event.run_id != request.run_id {
+            return Err(LedgerError::ActivityClaimAuthorityRejected {
+                reason: "governed command dispatch belongs to another run".into(),
+            });
+        }
+        let dispatch_material =
+            dispatch_authority_material(&dispatch_event.payload).ok_or_else(|| {
+                LedgerError::ActivityClaimAuthorityRejected {
+                    reason:
+                        "governed command issuance requires a signed V3 or graph-bound V4 dispatch"
+                            .into(),
+                }
+            })?;
+        let dispatch = dispatch_material.dispatch;
+        let dispatch_envelope_digest = dispatch_material.lineage_envelope_digest;
+        let governed_packet_digest =
+            dispatch.governed_packet_digest.as_deref().ok_or_else(|| {
+                LedgerError::ActivityClaimAuthorityRejected {
+                    reason: "governed command dispatch does not bind a normalized packet".into(),
+                }
+            })?;
+        let packet = GovernedCommandPacketV1::parse_and_verify(
+            &request.packet_source,
+            governed_packet_digest,
+        )
+        .map_err(|error| LedgerError::ActivityClaimAuthorityRejected {
+            reason: format!("governed command packet authority is invalid: {error}"),
+        })?;
+        if packet.unit.id != dispatch.body.unit_id
+            || packet.execution_role != dispatch.body.execution_role
+            || packet.provenance_ref != dispatch.body.provenance_ref
+            || packet.capability_bundle_digest != dispatch.body.capability_bundle_digest
+            || packet.acceptance_contract_digest()? != dispatch.body.acceptance_contract_digest
+        {
+            return Err(LedgerError::ActivityClaimAuthorityRejected {
+                reason:
+                    "governed command packet does not exactly bind the signed dispatch authority"
+                        .into(),
+            });
+        }
+        let action_id = format!(
+            "governed:{}:{}",
+            request.run_id,
+            dispatch_envelope_digest
+                .strip_prefix("sha256:")
+                .ok_or_else(|| LedgerError::ActivityClaimAuthorityRejected {
+                    reason: "governed command dispatch digest is not canonical sha256".into(),
+                })?
+        );
+        let idempotency_key = format!("{}:command", dispatch.body.idempotency_key);
+        let input = CanonicalCommandActionInputV1::new(
+            request.run_id.to_string(),
+            action_id.clone(),
+            packet.execution.command.clone(),
+            packet.command_args().to_vec(),
+            packet.execution.cwd.clone(),
+        )
+        .map_err(|error| LedgerError::ActivityClaimAuthorityRejected {
+            reason: format!("governed command executable material is invalid: {error}"),
+        })?;
+        let input_bytes = canonical_command_action_input_v1_bytes(&input).map_err(|error| {
+            LedgerError::ActivityClaimAuthorityRejected {
+                reason: format!("governed command executable could not be canonicalized: {error}"),
+            }
+        })?;
+        let input_ref = cas.put_canonical_bytes(&input_bytes)?;
+        let verified_input = parse_verified_canonical_command_action_input_v1(
+            &input_bytes,
+            &input_ref.to_cas_ref(),
+            input_ref.digest(),
+        )?;
+        let policy_digest = governed_dispatch_policy_digest_v1(
+            &dispatch.body.acceptance_contract_digest,
+        )
+        .map_err(|error| LedgerError::ActivityClaimAuthorityRejected {
+            reason: format!("governed command policy binding could not be derived: {error}"),
+        })?;
+        let expected_action = ActionRequestedV2 {
+            run_id: request.run_id.to_string(),
+            workflow_id: dispatch.body.workflow_id.clone(),
+            unit_id: dispatch.body.unit_id.clone(),
+            attempt: dispatch.body.attempt,
+            provenance_ref: dispatch.body.provenance_ref.clone(),
+            action_id: action_id.clone(),
+            idempotency_key: idempotency_key.clone(),
+            action_kind: ActionKindV1::Process,
+            canonical_input_digest: input_ref.digest().into(),
+            canonical_input_ref: input_ref.to_cas_ref(),
+            dispatch_envelope_digest: dispatch_envelope_digest.clone(),
+            repository_binding_digest: dispatch.repository_binding_digest.clone(),
+            ledger_authority_realm_digest: dispatch.ledger_authority_realm_digest.clone(),
+            governed_packet_digest: Some(governed_packet_digest.into()),
+            capability_bundle_digest: dispatch.body.capability_bundle_digest.clone(),
+            policy_digest,
+            context_manifest_digest: dispatch.body.context_manifest_digest.clone(),
+            worker_manifest_digest: dispatch.body.worker_manifest_digest.clone(),
+            sandbox_profile_digest: dispatch.body.sandbox_profile_digest.clone(),
+            authority_actor: authority.action_request_signer.actor_id.clone(),
+            execution_role: dispatch.body.execution_role,
+            requested_at: timestamp(now),
+        };
+
+        let mut statement =
+            tx.prepare("SELECT id FROM events WHERE run_id = ?1 AND kind = ?2 ORDER BY id ASC")?;
+        let ids = statement
+            .query_map(
+                params![
+                    request.run_id.to_string(),
+                    EventKind::ActionRequestedV2.as_wire()
+                ],
+                |row| row.get::<_, String>(0),
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        drop(statement);
+        let mut existing = None;
+        for id in ids {
+            let event_id = parse_event_id(&id, "governed command action")?;
+            let event = load_verified_authority_event(
+                &tx,
+                event_id,
+                &authority.trusted_keys,
+                &authority.action_request_signer,
+                "governed command action",
+            )?;
+            let action = match &event.payload {
+                Payload::ActionRequestedV2(action) => action.clone(),
+                _ => unreachable!("action-request query returns only action_requested_v2 events"),
+            };
+            if action.action_id != action_id {
+                continue;
+            }
+            if existing.replace((event, action)).is_some() {
+                return Err(LedgerError::ActivityClaimAuthorityRejected {
+                    reason: "governed command dispatch has duplicate signed action requests".into(),
+                });
+            }
+        }
+        if let Some((event, action)) = existing {
+            let mut expected = expected_action;
+            expected.requested_at = action.requested_at.clone();
+            let requested_at = parse_claim_timestamp(&action.requested_at)?;
+            let dispatch_window = validate_governed_dispatch(&dispatch, requested_at)?;
+            let claim = ActivityClaimRequestV1 {
+                run_id: request.run_id,
+                activity_id: action_id,
+                idempotency_key,
+                dispatch_event_id: request.dispatch_event_id,
+                action_request_event_id: event.id,
+                lease_duration_ms: MIN_ACTIVITY_LEASE_MS,
+            };
+            validate_action_request_matches_dispatch(
+                &claim,
+                &action,
+                &dispatch,
+                &dispatch_envelope_digest,
+                authority,
+                dispatch_window.issued_at,
+                requested_at,
+            )?;
+            if event.parent_event_id != Some(request.dispatch_event_id)
+                || event.occurred_at != requested_at
+                || action != expected
+            {
+                return Err(LedgerError::ActivityClaimAuthorityRejected {
+                    reason:
+                        "existing governed command action conflicts with verified packet authority"
+                            .into(),
+                });
+            }
+            tx.commit()?;
+            return Ok(GovernedCommandActionIssueDispositionV1::Existing {
+                action_request_event_id: event.id,
+                canonical_input_ref: action.canonical_input_ref,
+                canonical_input_digest: action.canonical_input_digest,
+                verified_input,
+            });
+        }
+
+        let dispatch_window = validate_governed_dispatch(&dispatch, now)?;
+        let claim = ActivityClaimRequestV1 {
+            run_id: request.run_id,
+            activity_id: action_id,
+            idempotency_key,
+            dispatch_event_id: request.dispatch_event_id,
+            action_request_event_id: EventId::new(),
+            lease_duration_ms: MIN_ACTIVITY_LEASE_MS,
+        };
+        validate_action_request_matches_dispatch(
+            &claim,
+            &expected_action,
+            &dispatch,
+            &dispatch_envelope_digest,
+            authority,
+            dispatch_window.issued_at,
+            now,
+        )?;
+        let event = canonicalize(Event {
+            id: claim.action_request_event_id,
+            run_id: request.run_id,
+            parent_event_id: Some(request.dispatch_event_id),
+            schema_version: Event::CURRENT_SCHEMA_VERSION,
+            kind: EventKind::ActionRequestedV2,
+            occurred_at: now,
+            payload: Payload::ActionRequestedV2(expected_action.clone()),
+        })?;
+        validate_new_ordinary_event_id(&tx, &event)?;
+        let signature = sign_event(&event, signing_key, signer, now)?;
+        insert_event(&tx, &event)?;
+        insert_event_signature(&tx, &signature)?;
+        tx.commit()?;
+        self.record_ordinary_append(&event);
+        Ok(GovernedCommandActionIssueDispositionV1::Issued {
+            action_request_event_id: event.id,
+            canonical_input_ref: expected_action.canonical_input_ref,
+            canonical_input_digest: expected_action.canonical_input_digest,
+            verified_input,
+        })
     }
 
     /// Claim the one fixed read-only verifier activity named by signed V3

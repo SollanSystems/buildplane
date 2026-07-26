@@ -15,6 +15,7 @@ use std::collections::HashSet;
 
 pub const GOVERNED_UNIT_PACKET_V1_DIGEST_DOMAIN: &[u8] = b"buildplane.governed-unit-packet.v1\0";
 pub const CAPABILITY_BUNDLE_V0_SCHEMA_VERSION: &str = "buildplane.capability_bundle.v0";
+pub const MAX_GOVERNED_COMMAND_PACKET_SOURCE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -299,6 +300,11 @@ pub struct GovernedTrustScopeV1 {
 
 impl GovernedCommandPacketV1 {
     pub fn parse_and_verify(source: &str, expected_packet_digest: &str) -> Result<Self> {
+        if source.len() > MAX_GOVERNED_COMMAND_PACKET_SOURCE_BYTES {
+            return Err(invalid(format!(
+                "governed command packet exceeds {MAX_GOVERNED_COMMAND_PACKET_SOURCE_BYTES} bytes"
+            )));
+        }
         let mut packet: Self = serde_json::from_str(source).map_err(|error| {
             invalid(format!(
                 "governed command packet is not a closed V1 document: {error}"
@@ -780,5 +786,15 @@ mod tests {
         let escape = source.replace("\"cwd\":\"repo\"", "\"cwd\":\"../target\"");
         let packet: GovernedCommandPacketV1 = serde_json::from_str(&escape).unwrap();
         assert!(packet.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_oversized_source_before_json_parsing() {
+        let source = " ".repeat(MAX_GOVERNED_COMMAND_PACKET_SOURCE_BYTES + 1);
+        assert!(GovernedCommandPacketV1::parse_and_verify(
+            &source,
+            &format!("sha256:{}", "0".repeat(64))
+        )
+        .is_err());
     }
 }
