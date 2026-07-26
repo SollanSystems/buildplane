@@ -1017,10 +1017,17 @@ impl AuthorityBackendError {
 /// in one broker-owned call frame.
 pub(crate) struct BrokerModelAuthority<V, B, G> {
     run_id: RunId,
+    expected_role: bp_ledger::payload::trust_spine::ExecutionRoleV1,
     verifier: V,
     backend: B,
     gateway: G,
     lease_policy: LeasePolicy,
+}
+
+#[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
+pub(crate) enum BrokerModelAuthorityStartupErrorV1 {
+    #[error("execution role cannot own a model effect authority")]
+    UnsupportedExecutionRole,
 }
 
 impl<V, B, G> BrokerModelAuthority<V, B, G>
@@ -1038,11 +1045,39 @@ where
     ) -> Self {
         Self {
             run_id,
+            expected_role: bp_ledger::payload::trust_spine::ExecutionRoleV1::Implementer,
             verifier,
             backend,
             gateway,
             lease_policy,
         }
+    }
+
+    pub(crate) fn new_for_role(
+        run_id: RunId,
+        expected_role: bp_ledger::payload::trust_spine::ExecutionRoleV1,
+        verifier: V,
+        backend: B,
+        gateway: G,
+        lease_policy: LeasePolicy,
+    ) -> Result<Self, BrokerModelAuthorityStartupErrorV1> {
+        if !matches!(
+            expected_role,
+            bp_ledger::payload::trust_spine::ExecutionRoleV1::Implementer
+                | bp_ledger::payload::trust_spine::ExecutionRoleV1::Reviewer
+                | bp_ledger::payload::trust_spine::ExecutionRoleV1::Adversary
+                | bp_ledger::payload::trust_spine::ExecutionRoleV1::Judge
+        ) {
+            return Err(BrokerModelAuthorityStartupErrorV1::UnsupportedExecutionRole);
+        }
+        Ok(Self {
+            run_id,
+            expected_role,
+            verifier,
+            backend,
+            gateway,
+            lease_policy,
+        })
     }
 
     pub(crate) fn authorize_and_execute(
@@ -1053,10 +1088,8 @@ where
         if replay_binding.run_id != self.run_id
             || replay_binding.dispatch_event_id != request.dispatch_event_id
             || replay_binding.action_request_event_id != request.action_request_event_id
-            || replay_binding.dispatch_role
-                != bp_ledger::payload::trust_spine::ExecutionRoleV1::Implementer
-            || replay_binding.action_role
-                != bp_ledger::payload::trust_spine::ExecutionRoleV1::Implementer
+            || replay_binding.dispatch_role != self.expected_role
+            || replay_binding.action_role != self.expected_role
         {
             return Err(AuthorityBackendError::TrustedReplayBindingMismatch);
         }

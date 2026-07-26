@@ -1061,6 +1061,86 @@ fn non_implementer_replay_binding_is_rejected_before_storage() {
 }
 
 #[test]
+fn reviewer_model_authority_accepts_only_startup_selected_reviewer_evidence() {
+    let run_id = RunId::new();
+    let request = request();
+    let backend_state = Rc::new(RefCell::new(BackendState::default()));
+    let gateway_state = Rc::new(RefCell::new(GatewayState::default()));
+    let verifier = FakeVerifier {
+        calls: Rc::new(RefCell::new(Vec::new())),
+        results: [Ok(TrustedReplayBinding {
+            run_id,
+            dispatch_event_id: request.dispatch_event_id,
+            action_request_event_id: request.action_request_event_id,
+            dispatch_role: ExecutionRoleV1::Reviewer,
+            action_role: ExecutionRoleV1::Reviewer,
+            has_existing_claim: false,
+        })]
+        .into_iter()
+        .collect(),
+    };
+    let mut authority = BrokerModelAuthority::new_for_role(
+        run_id,
+        ExecutionRoleV1::Reviewer,
+        verifier,
+        FakeBackend {
+            state: Rc::clone(&backend_state),
+            grants: [Ok(AuthorityGrant::Granted {
+                run_id,
+                lease_id: "reviewer-lease".into(),
+                authorization_ref: "authorization://reviewer".into(),
+            })]
+            .into_iter()
+            .collect(),
+            results: [Ok(ResultDisposition::Recorded {
+                run_id,
+                outcome: ActivityResultOutcomeV1::Succeeded,
+            })]
+            .into_iter()
+            .collect(),
+        },
+        FakeGateway {
+            state: Rc::clone(&gateway_state),
+            completion: Some(succeeded_completion()),
+        },
+        LeasePolicy::from_startup_config(30_000).unwrap(),
+    )
+    .expect("reviewer is a supported startup role");
+
+    assert_eq!(
+        authority.authorize_and_execute(request).unwrap(),
+        BrokerModelActionStatus::Recorded
+    );
+    assert_eq!(backend_state.borrow().authorize_calls.len(), 1);
+    assert_eq!(gateway_state.borrow().calls, 1);
+}
+
+#[test]
+fn candidate_role_cannot_construct_a_model_effect_authority() {
+    let run_id = RunId::new();
+    let request = request();
+    let result = BrokerModelAuthority::new_for_role(
+        run_id,
+        ExecutionRoleV1::Candidate,
+        FakeVerifier {
+            calls: Rc::new(RefCell::new(Vec::new())),
+            results: [Ok(exact_binding(run_id, &request))].into_iter().collect(),
+        },
+        FakeBackend {
+            state: Rc::new(RefCell::new(BackendState::default())),
+            grants: VecDeque::new(),
+            results: VecDeque::new(),
+        },
+        FakeGateway {
+            state: Rc::new(RefCell::new(GatewayState::default())),
+            completion: None,
+        },
+        LeasePolicy::from_startup_config(30_000).unwrap(),
+    );
+    assert!(result.is_err());
+}
+
+#[test]
 fn durable_retry_states_are_status_only_and_never_reenter_the_gateway() {
     let run_id = RunId::new();
     let cases = [
