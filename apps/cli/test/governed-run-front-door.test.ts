@@ -38,6 +38,9 @@ const hostResolver = vi.hoisted(() => ({
 const promotionDecisionClient = vi.hoisted(() => ({
 	submit: vi.fn(),
 }));
+const v5AdmissionClient = vi.hoisted(() => ({
+	request: vi.fn(),
+}));
 
 vi.mock("../src/governed-authority-broker-host.js", async () => {
 	const actual = await vi.importActual<
@@ -50,6 +53,9 @@ vi.mock("../src/governed-authority-broker-host.js", async () => {
 });
 vi.mock("../src/governed-promotion-decision-client.js", () => ({
 	submitProtectedPromotionDecision: promotionDecisionClient.submit,
+}));
+vi.mock("../src/governed-v5-admission-client.js", () => ({
+	requestGovernedV5Admission: v5AdmissionClient.request,
 }));
 
 const { runCli } = await import("../src/run-cli.js");
@@ -278,6 +284,81 @@ function createNativeV5Envelope(
 	};
 }
 
+function createNativeV5SignedEventCarrier(
+	root: string,
+	packet: Record<string, unknown>,
+	overrides: {
+		readonly eventId?: string;
+		readonly runId?: string;
+		readonly canonicalEventHash?: string;
+	} = {},
+): Record<string, unknown> {
+	const payload = createNativeV5Envelope(root, packet);
+	const eventId = overrides.eventId ?? "01919000-0000-7000-8000-000000000076";
+	const runId = overrides.runId ?? "01919000-0000-7000-8000-000000000077";
+	return {
+		event: {
+			id: eventId,
+			run_id: runId,
+			parent_event_id: null,
+			schema_version: 1,
+			kind: "dispatch_envelope_v5",
+			occurred_at: "2026-07-26T12:00:00Z",
+			payload,
+		},
+		signature: {
+			event_id: eventId,
+			canonical_event_hash: overrides.canonicalEventHash ?? digest("9"),
+			signer: {
+				actor_id: "kernel",
+				key_id: "kernel-main",
+				public_key_hash: digest("8"),
+			},
+			algorithm: "ed25519",
+			signature: "A".repeat(86),
+			signed_at: "2026-07-26T12:00:01Z",
+		},
+	};
+}
+
+function nativeV5AdmissionResponse(
+	request: {
+		readonly requestId: string;
+		readonly runId: string;
+		readonly v5EnvelopeDigest: string;
+	},
+	sourceEventId: string,
+	sourceEventHash: string,
+	status: "sealed" | "reconciliation_required" = "sealed",
+) {
+	return {
+		schema_version: 1 as const,
+		protocol: "buildplane-v5-dispatch-admission" as const,
+		domain: "protected-authority-response" as const,
+		request_id: request.requestId,
+		run_id: request.runId,
+		v5_envelope_digest: request.v5EnvelopeDigest,
+		status,
+		evidence:
+			status === "sealed"
+				? {
+						run_id: request.runId,
+						source_dispatch_event_id: sourceEventId,
+						source_dispatch_event_digest: sourceEventHash,
+						admission_event_id: "01919000-0000-7000-8000-000000000078",
+						admission_event_digest: digest("1"),
+						v5_envelope_digest: request.v5EnvelopeDigest,
+						witness_evidence_digest: digest("2"),
+						semantic_identity_digest: digest("3"),
+						idempotency_key: "admit-v5:front-door",
+						checkpoint_event_id: "01919000-0000-7000-8000-000000000079",
+						checkpoint_event_digest: digest("4"),
+					}
+				: null,
+		signature: "ab".repeat(64),
+	};
+}
+
 function writeEnvelope(
 	root: string,
 	envelope: Record<string, unknown>,
@@ -403,6 +484,7 @@ function createHostCandidateRunResult(
 afterEach(() => {
 	hostResolver.resolve.mockReset();
 	promotionDecisionClient.submit.mockReset();
+	v5AdmissionClient.request.mockReset();
 	vi.restoreAllMocks();
 });
 
@@ -450,12 +532,21 @@ describe("governed run front door", () => {
 
 		const result = await runCliCapture(
 			root,
-			["run", "--packet", packetPath, "--envelope", envelopePath, "--json"],
+			[
+				"run",
+				"--approve",
+				"--packet",
+				packetPath,
+				"--envelope",
+				envelopePath,
+				"--json",
+			],
 			legacyBundleMustNotBeConstructed(),
 		);
 
 		expect(result.exitCode).toBe(2);
 		expect(result.stderr).toEqual([]);
+		expect(v5AdmissionClient.request).not.toHaveBeenCalled();
 		expect(hostResolver.resolve).not.toHaveBeenCalled();
 		expect(openCandidateSession).not.toHaveBeenCalled();
 		expect(JSON.parse(result.stdout.join("\n"))).toMatchObject({
@@ -492,6 +583,287 @@ describe("governed run front door", () => {
 		expect(readFileSync(join(root, ".buildplane", "state.db"), "utf8")).toBe(
 			stateBefore,
 		);
+		expectGovernedLedgerAbsent(root);
+	});
+
+	it("does not invoke V5 admission for a signed carrier without explicit approval", async () => {
+		const root = createGitProject();
+		const packet = createGovernedPacket("native-v5-carrier-preview");
+		const packetPath = writePacket(root, packet);
+		const envelopePath = writeEnvelope(
+			root,
+			createNativeV5SignedEventCarrier(root, packet),
+		);
+		const before = snapshotRoot(root);
+		const stateBefore = readFileSync(
+			join(root, ".buildplane", "state.db"),
+			"utf8",
+		);
+
+		const result = await runCliCapture(
+			root,
+			["run", "--packet", packetPath, "--envelope", envelopePath, "--json"],
+			legacyBundleMustNotBeConstructed(),
+		);
+
+		expect(result.exitCode).toBe(2);
+		expect(v5AdmissionClient.request).not.toHaveBeenCalled();
+		expect(hostResolver.resolve).not.toHaveBeenCalled();
+		expect(JSON.parse(result.stdout.join("\n"))).toMatchObject({
+			governance: "preview",
+			status: "blocked",
+			executionStarted: false,
+			envelope: { schemaVersion: 5, verification: "structural_only" },
+		});
+		expectRootUnchanged(root, before);
+		expect(readFileSync(join(root, ".buildplane", "state.db"), "utf8")).toBe(
+			stateBefore,
+		);
+		expectGovernedLedgerAbsent(root);
+	});
+
+	it.each([
+		"sealed",
+		"reconciliation_required",
+	] as const)("emits a non-executing broker-owned V5 %s admission view", async (status) => {
+		const root = createGitProject();
+		const packet = createGovernedPacket(`native-v5-${status}`);
+		const packetPath = writePacket(root, packet);
+		const carrier = createNativeV5SignedEventCarrier(root, packet);
+		const envelopePath = writeEnvelope(root, carrier);
+		const event = carrier.event as Record<string, unknown>;
+		const signature = carrier.signature as Record<string, unknown>;
+		const before = snapshotRoot(root);
+		const stateBefore = readFileSync(
+			join(root, ".buildplane", "state.db"),
+			"utf8",
+		);
+		const openCandidateSession = vi.fn();
+		hostResolver.resolve.mockResolvedValue({
+			kind: "host-owned-governed-broker-v1",
+			openCandidateSession,
+		} as unknown as HostOwnedGovernedBrokerV1);
+		v5AdmissionClient.request.mockImplementation(
+			async (request: {
+				requestId: string;
+				runId: string;
+				v5EnvelopeDigest: string;
+			}) =>
+				nativeV5AdmissionResponse(
+					request,
+					String(event.id),
+					String(signature.canonical_event_hash),
+					status,
+				),
+		);
+
+		const result = await runCliCapture(
+			root,
+			[
+				"run",
+				"--approve",
+				"--packet",
+				packetPath,
+				"--envelope",
+				envelopePath,
+				"--json",
+			],
+			legacyBundleMustNotBeConstructed(),
+		);
+
+		expect(result.exitCode).toBe(2);
+		expect(result.stderr).toEqual([]);
+		expect(v5AdmissionClient.request).toHaveBeenCalledOnce();
+		expect(v5AdmissionClient.request).toHaveBeenCalledWith({
+			requestId: expect.stringMatching(
+				/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+			),
+			runId: event.run_id,
+			v5EnvelopeDigest: expect.stringMatching(/^sha256:[0-9a-f]{64}$/),
+		});
+		expect(hostResolver.resolve).not.toHaveBeenCalled();
+		expect(openCandidateSession).not.toHaveBeenCalled();
+		expect(JSON.parse(result.stdout.join("\n"))).toMatchObject({
+			governance: "governed",
+			status,
+			executionStarted: false,
+			admission: {
+				sourceEventId: event.id,
+				sourceEventHash: signature.canonical_event_hash,
+			},
+			blockers: expect.arrayContaining([
+				expect.stringMatching(
+					/candidate.*worker.*action.*promotion authority.*not opened/i,
+				),
+			]),
+		});
+		expectRootUnchanged(root, before);
+		expect(readFileSync(join(root, ".buildplane", "state.db"), "utf8")).toBe(
+			stateBefore,
+		);
+		expectGovernedLedgerAbsent(root);
+	});
+
+	it("blocks a V5 admission response whose source event identity differs from the signed carrier", async () => {
+		const root = createGitProject();
+		const packet = createGovernedPacket("native-v5-substituted-source");
+		const packetPath = writePacket(root, packet);
+		const carrier = createNativeV5SignedEventCarrier(root, packet);
+		const envelopePath = writeEnvelope(root, carrier);
+		const event = carrier.event as Record<string, unknown>;
+		const before = snapshotRoot(root);
+		v5AdmissionClient.request.mockImplementation(
+			async (request: {
+				requestId: string;
+				runId: string;
+				v5EnvelopeDigest: string;
+			}) =>
+				nativeV5AdmissionResponse(
+					request,
+					"01919000-0000-7000-8000-000000000099",
+					digest("0"),
+				),
+		);
+
+		const result = await runCliCapture(
+			root,
+			[
+				"run",
+				"--approve",
+				"--packet",
+				packetPath,
+				"--envelope",
+				envelopePath,
+				"--json",
+			],
+			legacyBundleMustNotBeConstructed(),
+		);
+
+		expect(result.exitCode).toBe(2);
+		expect(JSON.parse(result.stdout.join("\n"))).toMatchObject({
+			governance: "governed",
+			status: "blocked",
+			executionStarted: false,
+			blockers: expect.arrayContaining([
+				expect.stringMatching(/source event.*signed carrier/i),
+			]),
+		});
+		expect(v5AdmissionClient.request).toHaveBeenCalledWith(
+			expect.objectContaining({ runId: event.run_id }),
+		);
+		expect(hostResolver.resolve).not.toHaveBeenCalled();
+		expectRootUnchanged(root, before);
+		expectGovernedLedgerAbsent(root);
+	});
+
+	it("blocks a malformed signed V5 carrier before native admission", async () => {
+		const root = createGitProject();
+		const packet = createGovernedPacket("native-v5-malformed-carrier");
+		const packetPath = writePacket(root, packet);
+		const carrier = createNativeV5SignedEventCarrier(root, packet);
+		const envelopePath = writeEnvelope(root, {
+			...carrier,
+			signature: {
+				...(carrier.signature as Record<string, unknown>),
+				endpoint: "/tmp/attacker.sock",
+			},
+		});
+		const before = snapshotRoot(root);
+
+		const result = await runCliCapture(
+			root,
+			[
+				"run",
+				"--approve",
+				"--packet",
+				packetPath,
+				"--envelope",
+				envelopePath,
+				"--json",
+			],
+			legacyBundleMustNotBeConstructed(),
+		);
+
+		expect(result.exitCode).toBe(1);
+		expect(v5AdmissionClient.request).not.toHaveBeenCalled();
+		expect(hostResolver.resolve).not.toHaveBeenCalled();
+		expectRootUnchanged(root, before);
+		expectGovernedLedgerAbsent(root);
+	});
+
+	it("emits a blocked admission view when the protected client fails closed", async () => {
+		const root = createGitProject();
+		const packet = createGovernedPacket("native-v5-client-blocked");
+		const packetPath = writePacket(root, packet);
+		const envelopePath = writeEnvelope(
+			root,
+			createNativeV5SignedEventCarrier(root, packet),
+		);
+		const before = snapshotRoot(root);
+		v5AdmissionClient.request.mockResolvedValue(undefined);
+
+		const result = await runCliCapture(
+			root,
+			[
+				"run",
+				"--approve",
+				"--packet",
+				packetPath,
+				"--envelope",
+				envelopePath,
+				"--json",
+			],
+			legacyBundleMustNotBeConstructed(),
+		);
+
+		expect(result.exitCode).toBe(2);
+		expect(JSON.parse(result.stdout.join("\n"))).toMatchObject({
+			governance: "governed",
+			status: "blocked",
+			executionStarted: false,
+			blockers: expect.arrayContaining([
+				expect.stringMatching(/protected V5 dispatch admission.*invalid/i),
+				expect.stringMatching(
+					/candidate.*worker.*action.*promotion authority.*not opened/i,
+				),
+			]),
+		});
+		expect(hostResolver.resolve).not.toHaveBeenCalled();
+		expectRootUnchanged(root, before);
+		expectGovernedLedgerAbsent(root);
+	});
+
+	it("rejects an ungoverned packet source before invoking protected V5 admission", async () => {
+		const root = createGitProject();
+		const validPacket = createGovernedPacket("native-v5-source-blocked");
+		const packetPath = writePacket(root, {
+			...validPacket,
+			unknown_authority: true,
+		});
+		const envelopePath = writeEnvelope(
+			root,
+			createNativeV5SignedEventCarrier(root, validPacket),
+		);
+		const before = snapshotRoot(root);
+
+		const result = await runCliCapture(
+			root,
+			[
+				"run",
+				"--approve",
+				"--packet",
+				packetPath,
+				"--envelope",
+				envelopePath,
+				"--json",
+			],
+			legacyBundleMustNotBeConstructed(),
+		);
+
+		expect(result.exitCode).toBe(2);
+		expect(v5AdmissionClient.request).not.toHaveBeenCalled();
+		expect(hostResolver.resolve).not.toHaveBeenCalled();
+		expectRootUnchanged(root, before);
 		expectGovernedLedgerAbsent(root);
 	});
 
@@ -718,32 +1090,24 @@ describe("governed run front door", () => {
 	});
 
 	it.each([
-		[
-			"operator approval before a preauthorized envelope",
-			[
-				"--approve",
-				"--packet",
-				"packet-that-must-not-be-read.json",
-				"--envelope",
-				"envelope-that-must-not-be-read.json",
-			],
-		],
-		[
-			"a preauthorized envelope before operator approval",
-			[
-				"--packet",
-				"packet-that-must-not-be-read.json",
-				"--envelope",
-				"envelope-that-must-not-be-read.json",
-				"--approve",
-			],
-		],
-	] as const)("rejects %s before a broker, packet, or legacy worker boundary", async (_label, argumentsAfterRun) => {
+		"approval-first",
+		"envelope-first",
+	] as const)("rejects a V3 approve plus envelope request after immutable envelope classification (%s)", async (order) => {
 		const root = createGitProject();
+		const packet = createGovernedPacket(`v3-mutual-${order}`);
+		const packetPath = writePacket(root, packet);
+		const envelopePath = writeEnvelope(
+			root,
+			createPreauthorizedEnvelope(root, packet),
+		);
 		const before = snapshotRoot(root);
 		hostResolver.resolve.mockResolvedValue({
 			kind: "host-owned-governed-broker-v1",
 		} as unknown as HostOwnedGovernedBrokerV1);
+		const argumentsAfterRun =
+			order === "approval-first"
+				? ["--approve", "--packet", packetPath, "--envelope", envelopePath]
+				: ["--packet", packetPath, "--envelope", envelopePath, "--approve"];
 
 		const result = await runCliCapture(
 			root,
@@ -761,6 +1125,7 @@ describe("governed run front door", () => {
 			},
 		});
 		expect(hostResolver.resolve).not.toHaveBeenCalled();
+		expect(v5AdmissionClient.request).not.toHaveBeenCalled();
 		expectRootUnchanged(root, before);
 	});
 

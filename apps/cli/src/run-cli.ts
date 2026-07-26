@@ -52,6 +52,7 @@ import type {
 	MissionControlStore,
 } from "@buildplane/mission-control-server";
 import { evaluateEnvelopeAdmission } from "@buildplane/policy";
+import { parse as parseUuid, stringify as stringifyUuid } from "uuid";
 import {
 	type BootstrapDoctorReport,
 	inspectBootstrapDoctor,
@@ -91,6 +92,10 @@ import {
 } from "./governed-authority-broker-host.js";
 import { GOVERNED_AUTHORITY_BROKER_REQUIRED_CODE } from "./governed-ledger-authority.js";
 import { submitProtectedPromotionDecision } from "./governed-promotion-decision-client.js";
+import {
+	type GovernedV5AdmissionResponseV1,
+	requestGovernedV5Admission,
+} from "./governed-v5-admission-client.js";
 import {
 	createAcceptancePort,
 	evaluateAcceptanceDiffScope,
@@ -877,6 +882,7 @@ function formatTopLevelHelp(): string[] {
 function formatRunHelp(): string[] {
 	return [
 		"buildplane run --packet <path> [options]",
+		"buildplane run --packet <path> --approve --envelope <signed-v5-event.json> [--json]",
 		"buildplane run --resume <opaque-recovery-reference> --approve [--json]",
 		"buildplane run --resume <opaque-recovery-reference> --approve --decision promote|reject [--json]",
 		"",
@@ -885,10 +891,10 @@ function formatRunHelp(): string[] {
 		"  tape, ActionGateway, and sandbox path; it never falls back to raw execution.",
 		"",
 		"  Options:",
-		"    --approve        Request host-brokered governed admission; blocks until a privileged authority broker is available",
+		"    --approve        Explicitly approve protected V5 admission when paired with a signed V5 event carrier; otherwise requests host-brokered admission",
 		"    --resume <ref>   Ask the privileged host to reconcile an existing workflow; requires --approve and cannot take a packet or envelope",
 		"    --decision <kind> Record one recovery-only promotion decision (promote or reject); requires --resume and --approve, and never executes a promotion",
-		"    --envelope <path> Supply a sealed DispatchEnvelopeV3 for host-verified preauthorized admission, or a manifest-bound DispatchEnvelopeV5 for structural-only host-owned preview",
+		"    --envelope <path> Supply a sealed V3 proposal, a bare V5 structural preview, or a closed native signed-event V5 carrier; only the carrier plus --approve can request a non-executing admission view",
 		"    --raw            Explicitly unsafe legacy execution; emits no trusted receipt",
 		"    --tui            Interactive terminal UI (unsafe --raw lane only)",
 		"    --json           Machine-readable output",
@@ -978,6 +984,11 @@ interface DispatchEnvelopePreview {
 	readonly provenanceRef: string;
 	readonly trustTier: string;
 	readonly baseCommitSha: string;
+	readonly capabilityBundleDigest: string;
+	readonly acceptanceContractDigest: string;
+	readonly contextManifestDigest: string;
+	readonly workerManifestDigest: string;
+	readonly sandboxProfileDigest: string;
 	readonly budget: {
 		readonly maxComputeTimeMs?: number;
 	};
@@ -996,6 +1007,13 @@ interface LoadedDispatchEnvelopePreview {
 	/** Exact bytes passed to the host after local structural validation. */
 	readonly source: string;
 	readonly preview: DispatchEnvelopePreview;
+	readonly signedV5Carrier?: NativeSignedDispatchEnvelopeV5Carrier;
+}
+
+interface NativeSignedDispatchEnvelopeV5Carrier {
+	readonly eventId: string;
+	readonly runId: string;
+	readonly canonicalEventHash: string;
 }
 
 interface ParsedDispatchEnvelopeV5Preview {
@@ -1244,12 +1262,6 @@ function parseRunCommandArguments(
 	if (!packetPath) {
 		throw new Error(
 			"Missing required --packet <path> or --graph <path> argument.",
-		);
-	}
-
-	if (approve && envelopePath !== undefined) {
-		throw new Error(
-			"--approve and --envelope are mutually exclusive: choose operator-requested admission or a signed preauthorized envelope.",
 		);
 	}
 
@@ -2151,6 +2163,30 @@ const NATIVE_DISPATCH_ENVELOPE_V5_REQUIRED_FIELDS = [
 	"envelope_digest",
 ] as const;
 
+const NATIVE_SIGNED_EVENT_FIELDS = ["event", "signature"] as const;
+const NATIVE_EVENT_FIELDS = [
+	"id",
+	"run_id",
+	"parent_event_id",
+	"schema_version",
+	"kind",
+	"occurred_at",
+	"payload",
+] as const;
+const NATIVE_EVENT_SIGNATURE_FIELDS = [
+	"event_id",
+	"canonical_event_hash",
+	"signer",
+	"algorithm",
+	"signature",
+	"signed_at",
+] as const;
+const NATIVE_EVENT_SIGNER_FIELDS = [
+	"actor_id",
+	"key_id",
+	"public_key_hash",
+] as const;
+
 function readClosedPreviewRecord(
 	value: unknown,
 	label: string,
@@ -2175,6 +2211,102 @@ function readClosedPreviewRecord(
 		);
 	}
 	return record;
+}
+
+function isCanonicalUuid(value: unknown): value is string {
+	if (typeof value !== "string") return false;
+	try {
+		return stringifyUuid(parseUuid(value)) === value;
+	} catch {
+		return false;
+	}
+}
+
+function isCanonicalSha256Digest(value: unknown): value is string {
+	return typeof value === "string" && /^sha256:[0-9a-f]{64}$/.test(value);
+}
+
+function isCanonicalEd25519Signature(value: unknown): value is string {
+	if (typeof value !== "string" || !/^[A-Za-z0-9_-]{86}$/.test(value)) {
+		return false;
+	}
+	try {
+		const decoded = Buffer.from(value, "base64url");
+		return decoded.length === 64 && decoded.toString("base64url") === value;
+	} catch {
+		return false;
+	}
+}
+
+function isValidNativeTimestamp(value: unknown): value is string {
+	return (
+		typeof value === "string" &&
+		value.length > 0 &&
+		Number.isFinite(Date.parse(value))
+	);
+}
+
+function parseNativeSignedDispatchEnvelopeV5Carrier(
+	raw: unknown,
+):
+	| (NativeSignedDispatchEnvelopeV5Carrier & { readonly payload: unknown })
+	| undefined {
+	const outer = asPreviewRecord(raw);
+	if (
+		outer === null ||
+		(!Object.hasOwn(outer, "event") && !Object.hasOwn(outer, "signature"))
+	) {
+		return undefined;
+	}
+	const carrier = readClosedPreviewRecord(
+		outer,
+		"signed DispatchEnvelopeV5 carrier",
+		NATIVE_SIGNED_EVENT_FIELDS,
+	);
+	const event = readClosedPreviewRecord(
+		carrier.event,
+		"signed DispatchEnvelopeV5 carrier.event",
+		NATIVE_EVENT_FIELDS,
+	);
+	const signature = readClosedPreviewRecord(
+		carrier.signature,
+		"signed DispatchEnvelopeV5 carrier.signature",
+		NATIVE_EVENT_SIGNATURE_FIELDS,
+	);
+	const signer = readClosedPreviewRecord(
+		signature.signer,
+		"signed DispatchEnvelopeV5 carrier.signature.signer",
+		NATIVE_EVENT_SIGNER_FIELDS,
+	);
+	if (
+		!isCanonicalUuid(event.id) ||
+		!isCanonicalUuid(event.run_id) ||
+		(event.parent_event_id !== null &&
+			!isCanonicalUuid(event.parent_event_id)) ||
+		event.schema_version !== 1 ||
+		event.kind !== "dispatch_envelope_v5" ||
+		!isValidNativeTimestamp(event.occurred_at) ||
+		signature.event_id !== event.id ||
+		!isCanonicalSha256Digest(signature.canonical_event_hash) ||
+		signature.algorithm !== "ed25519" ||
+		!isCanonicalEd25519Signature(signature.signature) ||
+		!isValidNativeTimestamp(signature.signed_at) ||
+		typeof signer.actor_id !== "string" ||
+		signer.actor_id.length === 0 ||
+		typeof signer.key_id !== "string" ||
+		signer.key_id.length === 0 ||
+		!isCanonicalSha256Digest(signer.public_key_hash)
+	) {
+		throw new TypeError(
+			"signed DispatchEnvelopeV5 carrier contains invalid native event or detached signature metadata",
+		);
+	}
+	return Object.freeze({
+		eventId: event.id,
+		runId: event.run_id,
+		canonicalEventHash: signature.canonical_event_hash,
+		payload: event.payload,
+	});
 }
 
 /**
@@ -2493,17 +2625,30 @@ async function loadDispatchEnvelopePreview(
 	};
 	const source = readFileSync(path, "utf8");
 	const raw: unknown = JSON.parse(source);
-	const rawRecord = asPreviewRecord(raw);
+	const signedV5Carrier = parseNativeSignedDispatchEnvelopeV5Carrier(raw);
+	const envelopeRaw = signedV5Carrier?.payload ?? raw;
+	const rawRecord = asPreviewRecord(envelopeRaw);
 	const loaded = (
 		preview: DispatchEnvelopePreview,
-	): LoadedDispatchEnvelopePreview => Object.freeze({ source, preview });
+	): LoadedDispatchEnvelopePreview => {
+		if (signedV5Carrier !== undefined && preview.schemaVersion !== 5) {
+			throw new TypeError(
+				"signed DispatchEnvelopeV5 carrier must contain exactly one DispatchEnvelopeV5 payload",
+			);
+		}
+		return Object.freeze({
+			source,
+			preview,
+			...(signedV5Carrier === undefined ? {} : { signedV5Carrier }),
+		});
+	};
 	if (rawRecord && Object.hasOwn(rawRecord, "dispatchV4")) {
 		return loaded(
-			previewDispatchEnvelopeV5(kernel.parseDispatchEnvelopeV5(raw)),
+			previewDispatchEnvelopeV5(kernel.parseDispatchEnvelopeV5(envelopeRaw)),
 		);
 	}
 	if (rawRecord?.schemaVersion === 3) {
-		const parsed = kernel.parseDispatchEnvelopeV3(raw);
+		const parsed = kernel.parseDispatchEnvelopeV3(envelopeRaw);
 		return loaded({
 			schemaVersion: 3,
 			verification: "structural_only",
@@ -2516,7 +2661,7 @@ async function loadDispatchEnvelopePreview(
 		});
 	}
 	if (rawRecord?.schemaVersion === 2) {
-		const parsed = kernel.parseDispatchEnvelopeV2(raw);
+		const parsed = kernel.parseDispatchEnvelopeV2(envelopeRaw);
 		return loaded({
 			schemaVersion: 2,
 			verification: "structural_only",
@@ -2524,7 +2669,7 @@ async function loadDispatchEnvelopePreview(
 			envelopeDigest: parsed.envelopeDigest,
 		});
 	}
-	const nativeV5Preview = translateNativeDispatchEnvelopeV5Preview(raw);
+	const nativeV5Preview = translateNativeDispatchEnvelopeV5Preview(envelopeRaw);
 	if (nativeV5Preview !== undefined) {
 		return loaded(
 			previewDispatchEnvelopeV5(
@@ -2532,7 +2677,7 @@ async function loadDispatchEnvelopePreview(
 			),
 		);
 	}
-	const nativeV3Preview = translateNativeDispatchEnvelopeV3Preview(raw);
+	const nativeV3Preview = translateNativeDispatchEnvelopeV3Preview(envelopeRaw);
 	if (nativeV3Preview !== undefined) {
 		const parsed = kernel.parseDispatchEnvelopeV3(nativeV3Preview);
 		return loaded({
@@ -2546,7 +2691,7 @@ async function loadDispatchEnvelopePreview(
 			envelopeDigest: parsed.envelopeDigest,
 		});
 	}
-	const nativeV2Preview = translateNativeDispatchEnvelopeV2Preview(raw);
+	const nativeV2Preview = translateNativeDispatchEnvelopeV2Preview(envelopeRaw);
 	if (nativeV2Preview !== undefined) {
 		const parsed = kernel.parseDispatchEnvelopeV2(nativeV2Preview);
 		return loaded({
@@ -2559,7 +2704,7 @@ async function loadDispatchEnvelopePreview(
 	return loaded({
 		schemaVersion: 1,
 		verification: "structural_only",
-		...kernel.parseDispatchEnvelopeV1(raw),
+		...kernel.parseDispatchEnvelopeV1(envelopeRaw),
 	});
 }
 
@@ -2922,6 +3067,88 @@ function emitGovernedRunPreview(
 		for (const line of formatGovernedRunPreview(preview)) {
 			stdout(line);
 		}
+	}
+	return 2;
+}
+
+interface GovernedV5AdmissionView {
+	readonly kind: "broker-owned-governed-v5-admission-view-v1";
+	readonly governance: "governed";
+	readonly status: "sealed" | "reconciliation_required" | "blocked";
+	readonly executionStarted: false;
+	readonly admission: {
+		readonly requestId: string;
+		readonly runId: string;
+		readonly envelopeDigest: string;
+		readonly sourceEventId: string;
+		readonly sourceEventHash: string;
+		readonly evidence: GovernedV5AdmissionResponseV1["evidence"] | null;
+		readonly responseSignature: string | null;
+	};
+	readonly blockers: readonly string[];
+}
+
+function buildGovernedV5AdmissionView(
+	requestId: string,
+	envelope: DispatchEnvelopePreview,
+	carrier: NativeSignedDispatchEnvelopeV5Carrier,
+	response: GovernedV5AdmissionResponseV1 | undefined,
+): GovernedV5AdmissionView {
+	const blockers: string[] = [];
+	let status: GovernedV5AdmissionView["status"] = "blocked";
+	if (response === undefined) {
+		blockers.push(
+			"Protected V5 dispatch admission was unavailable or returned an invalid signed response.",
+		);
+	} else if (
+		response.status === "sealed" &&
+		(response.evidence === null ||
+			response.evidence.source_dispatch_event_id !== carrier.eventId ||
+			response.evidence.source_dispatch_event_digest !==
+				carrier.canonicalEventHash)
+	) {
+		blockers.push(
+			"Protected V5 admission source event does not match the signed carrier event id and canonical hash.",
+		);
+	} else {
+		status = response.status;
+	}
+	blockers.push(
+		"Admission view only: candidate, worker, action, and promotion authority was not opened.",
+	);
+	return Object.freeze({
+		kind: "broker-owned-governed-v5-admission-view-v1",
+		governance: "governed",
+		status,
+		executionStarted: false,
+		admission: Object.freeze({
+			requestId,
+			runId: carrier.runId,
+			envelopeDigest: envelope.envelopeDigest,
+			sourceEventId: carrier.eventId,
+			sourceEventHash: carrier.canonicalEventHash,
+			evidence: response?.status === "sealed" ? response.evidence : null,
+			responseSignature: response?.signature ?? null,
+		}),
+		blockers: Object.freeze(blockers),
+	});
+}
+
+function emitGovernedV5AdmissionView(
+	view: GovernedV5AdmissionView,
+	json: boolean,
+	stdout: (line: string) => void,
+): number {
+	if (json) {
+		stdout(formatJson(view));
+	} else {
+		stdout(`Governed V5 admission view: ${view.status}`);
+		stdout(`run: ${view.admission.runId}`);
+		stdout(`source-event: ${view.admission.sourceEventId}`);
+		stdout(`envelope-digest: ${view.admission.envelopeDigest}`);
+		stdout("execution-started: false");
+		stdout("blockers:");
+		for (const blocker of view.blockers) stdout(`  - ${blocker}`);
 	}
 	return 2;
 }
@@ -3458,6 +3685,78 @@ async function preauthorizedEnvelopeBlocker(
 	return undefined;
 }
 
+async function governedV5AdmissionBlocker(
+	projectRoot: string,
+	sourcePacket: unknown,
+	envelope: DispatchEnvelopePreview,
+): Promise<string | undefined> {
+	if (
+		envelope.schemaVersion !== 5 ||
+		envelope.actionEvidenceVersion !== "sealed_v3"
+	) {
+		return "Protected V5 admission requires a manifest-bound DispatchEnvelopeV5 with sealed_v3 action evidence.";
+	}
+	if (envelope.trustTier !== "governed" || envelope.commitMode !== "atomic") {
+		return "Protected V5 admission requires a governed, atomic dispatch envelope.";
+	}
+	if (envelope.executionRole !== "implementer") {
+		return "Protected V5 admission requires an implementer dispatch envelope; review roles remain read-only.";
+	}
+	const authority = inspectGovernedDispatchAuthorityWindowV1({
+		issuedAt: envelope.issuedAt,
+		expiresAt: envelope.expiresAt,
+		budget: envelope.budget,
+	});
+	if (authority.state !== "active") {
+		return "Protected V5 dispatch envelope does not have an active authority window.";
+	}
+	let expectedGovernedPacketDigest: string;
+	try {
+		expectedGovernedPacketDigest =
+			strictGovernedSourcePacketDigest(sourcePacket);
+	} catch {
+		return "Protected V5 admission could not verify the governed packet digest.";
+	}
+	const source = asPreviewRecord(sourcePacket);
+	const unit = asPreviewRecord(source?.unit);
+	const unitId = previewString(unit, "id");
+	const executionRole = previewString(source, "execution_role");
+	const provenanceRef = previewString(source, "provenance_ref");
+	const capabilityDigest = previewString(source, "capability_bundle_digest");
+	if (
+		unitId === null ||
+		executionRole === null ||
+		provenanceRef === null ||
+		capabilityDigest === null ||
+		source?.capability_bundle === undefined ||
+		source.acceptance_contract === undefined ||
+		source.trust_scope === undefined
+	) {
+		return "Protected V5 admission requires the original governed packet identity and contracts.";
+	}
+	if (
+		envelope.unitId !== unitId ||
+		envelope.executionRole !== executionRole ||
+		envelope.provenanceRef !== provenanceRef
+	) {
+		return "Protected V5 dispatch envelope does not match the original packet identity.";
+	}
+	if (envelope.capabilityBundleDigest !== capabilityDigest) {
+		return "Protected V5 dispatch envelope does not match the packet capability digest.";
+	}
+	const root = captureGovernedRootSnapshot(projectRoot);
+	if (!root || envelope.baseCommitSha !== root.head) {
+		return "Protected V5 dispatch envelope is stale or not bound to the checked-out target base.";
+	}
+	if (
+		envelope.governedPacketDigest === undefined ||
+		envelope.governedPacketDigest !== expectedGovernedPacketDigest
+	) {
+		return "Protected V5 dispatch envelope does not bind the original governed packet digest.";
+	}
+	return undefined;
+}
+
 function withGovernedPreviewBlocker(
 	preview: GovernedRunPreview,
 	blocker: string,
@@ -3610,12 +3909,50 @@ async function runGovernedRunCommand(
 		);
 	}
 
-	// V5 binds host-owned manifest declarations. Its closed parser has already
-	// checked nested V4/V3 canonical digests and retry context, but this CLI has
-	// no local V5 admission, tape, capability, or OCI authority. Do not let it
-	// enter the V3 preauthorization path or resolve a host broker.
+	// Approval plus an envelope is meaningful only for the protected V5 signed
+	// event carrier. Classification happens from the immutable envelope snapshot
+	// above; V3 retains the historical mutual exclusion and no file is reopened.
+	if (
+		runArguments.approve &&
+		loadedEnvelope !== undefined &&
+		envelope?.schemaVersion !== 5
+	) {
+		throw new Error(
+			"--approve and --envelope are mutually exclusive except for a signed DispatchEnvelopeV5 event carrier.",
+		);
+	}
+
+	// A bare V5 payload remains structural-only even when --approve is present.
+	// A signed carrier without explicit approval also cannot cross the native
+	// admission boundary.
 	if (envelope?.schemaVersion === 5) {
-		return emitGovernedRunPreview(preview, runArguments.json, options.stdout);
+		const carrier = loadedEnvelope?.signedV5Carrier;
+		if (carrier === undefined || !runArguments.approve) {
+			return emitGovernedRunPreview(preview, runArguments.json, options.stdout);
+		}
+		const blocker = await governedV5AdmissionBlocker(
+			projectRoot,
+			sourcePacket,
+			envelope,
+		);
+		if (blocker !== undefined) {
+			return emitGovernedRunPreview(
+				withGovernedPreviewBlocker(preview, blocker),
+				runArguments.json,
+				options.stdout,
+			);
+		}
+		const requestId = newEventId();
+		const response = await requestGovernedV5Admission({
+			requestId,
+			runId: carrier.runId,
+			v5EnvelopeDigest: envelope.envelopeDigest,
+		});
+		return emitGovernedV5AdmissionView(
+			buildGovernedV5AdmissionView(requestId, envelope, carrier, response),
+			runArguments.json,
+			options.stdout,
+		);
 	}
 
 	if (loadedEnvelope !== undefined) {
