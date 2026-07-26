@@ -10,12 +10,16 @@ use bp_ledger::payload::model_evidence::{
     model_request_evidence_document_v1_bytes, model_request_evidence_v1_descriptor,
     parse_verified_canonical_model_action_input_v1,
     parse_verified_model_request_evidence_document_v1,
-    parse_verified_trust_scope_evidence_document_v1, trust_scope_evidence_document_v1_bytes,
+    parse_verified_provider_token_preflight_input_v1,
+    parse_verified_provider_token_preflight_result_v1,
+    parse_verified_trust_scope_evidence_document_v1, provider_token_preflight_input_v1_bytes,
+    provider_token_preflight_result_v1_bytes, trust_scope_evidence_document_v1_bytes,
     trust_scope_evidence_v1_descriptor, verify_model_request_evidence_matches_canonical_input,
     verify_trust_scope_evidence_matches_model_request, CanonicalModelActionInputV1,
     CredentialFreeNormalizedModelRequestV1, ModelActionEvidenceBindingV1, ModelProviderV1,
     ModelRedactionCommitmentV1, ModelRequestEvidenceDocumentV1, ModelToolCapabilityCommitmentV1,
-    ModelToolCapabilityKindV1, TrustScopeEvidenceDocumentV1,
+    ModelToolCapabilityKindV1, ProviderTokenPreflightInputV1, ProviderTokenPreflightResultV1,
+    TrustScopeEvidenceDocumentV1,
 };
 use bp_ledger::payload::trust_spine::{ActionKindV1, ExecutionRoleV1};
 use bp_ledger::storage::cas::{CanonicalCasRef, Cas};
@@ -208,5 +212,92 @@ fn evidence_documents_reject_unknown_fields_semantic_substitution_and_descriptor
         )
         .is_err(),
         "a descriptor that names a different raw CAS digest must be rejected"
+    );
+}
+
+#[test]
+fn provider_token_preflight_documents_bind_the_verified_request_and_total_budget() {
+    let temp = tempfile::tempdir().expect("temporary CAS root");
+    let cas = Cas::open(temp.path()).expect("open CAS");
+    let input = input();
+    let input_bytes = canonical_model_action_input_v1_bytes(&input).expect("canonical input bytes");
+    let input_ref = cas.put_canonical_bytes(&input_bytes).expect("store input");
+    let verified_input = parse_verified_canonical_model_action_input_v1(
+        &input_bytes,
+        &input_ref.to_cas_ref(),
+        input_ref.digest(),
+    )
+    .expect("verified input");
+    let model_document = ModelRequestEvidenceDocumentV1::from_verified_canonical_input(
+        binding(&input_ref),
+        &verified_input,
+    )
+    .expect("model request evidence");
+    let model_bytes =
+        model_request_evidence_document_v1_bytes(&model_document).expect("model evidence bytes");
+    let model_ref = cas
+        .put_canonical_bytes(&model_bytes)
+        .expect("store model evidence");
+    let verified_model = parse_verified_model_request_evidence_document_v1(
+        &model_bytes,
+        &model_request_evidence_v1_descriptor(&model_ref),
+    )
+    .expect("verified model evidence");
+
+    let preflight =
+        ProviderTokenPreflightInputV1::from_verified_model_request(&verified_model, 14_000)
+            .expect("preflight input");
+    let preflight_bytes =
+        provider_token_preflight_input_v1_bytes(&preflight).expect("preflight bytes");
+    let preflight_ref = cas
+        .put_canonical_bytes(&preflight_bytes)
+        .expect("store preflight");
+    let verified_preflight = parse_verified_provider_token_preflight_input_v1(
+        &preflight_bytes,
+        &preflight_ref.to_cas_ref(),
+        preflight_ref.digest(),
+        &verified_model,
+    )
+    .expect("verified preflight");
+    assert_eq!(verified_preflight.document(), &preflight);
+
+    let result =
+        ProviderTokenPreflightResultV1::new(&verified_preflight, 321).expect("preflight result");
+    let result_bytes =
+        provider_token_preflight_result_v1_bytes(&result).expect("preflight result bytes");
+    let result_ref = cas
+        .put_canonical_bytes(&result_bytes)
+        .expect("store preflight result");
+    assert_eq!(
+        parse_verified_provider_token_preflight_result_v1(
+            &result_bytes,
+            &result_ref.to_cas_ref(),
+            result_ref.digest(),
+            &verified_preflight,
+        )
+        .expect("verified preflight result")
+        .document(),
+        &result
+    );
+
+    assert!(ProviderTokenPreflightResultV1::new(&verified_preflight, 0).is_err());
+    assert!(ProviderTokenPreflightResultV1::new(&verified_preflight, 14_000).is_err());
+
+    let mut substituted = preflight;
+    substituted.model_request_digest = DIGEST_A.into();
+    let substituted_bytes =
+        provider_token_preflight_input_v1_bytes(&substituted).expect("well-formed substitution");
+    let substituted_ref = cas
+        .put_canonical_bytes(&substituted_bytes)
+        .expect("store substitution");
+    assert!(
+        parse_verified_provider_token_preflight_input_v1(
+            &substituted_bytes,
+            &substituted_ref.to_cas_ref(),
+            substituted_ref.digest(),
+            &verified_model,
+        )
+        .is_err(),
+        "a well-formed preflight for different model evidence must fail"
     );
 }

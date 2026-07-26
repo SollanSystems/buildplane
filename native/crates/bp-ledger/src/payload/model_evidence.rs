@@ -63,6 +63,8 @@ pub const MODEL_REQUEST_EVIDENCE_DOCUMENT_V1_SCHEMA_VERSION: u32 =
 /// `ModelActionIntentV1`.
 pub const TRUST_SCOPE_EVIDENCE_DOCUMENT_V1_SCHEMA_VERSION: u32 =
     TRUST_SCOPE_EVIDENCE_V1_SCHEMA_VERSION;
+pub const PROVIDER_TOKEN_PREFLIGHT_INPUT_V1_SCHEMA_VERSION: u32 = 1;
+pub const PROVIDER_TOKEN_PREFLIGHT_RESULT_V1_SCHEMA_VERSION: u32 = 1;
 
 /// Only the API/SDK providers admitted by the governed worker lane.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -237,6 +239,33 @@ pub struct TrustScopeEvidenceDocumentV1 {
     pub constraints: ModelActionScopeConstraintsV1,
 }
 
+/// Canonical input for a separately recorded provider token-count activity.
+///
+/// The document is derived from verified model-request evidence and the signed
+/// total-token ceiling. It contains no credential, lease, worker path, or
+/// provider-specific opaque settings.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderTokenPreflightInputV1 {
+    pub schema_version: u32,
+    pub model_request_evidence: ModelRequestEvidenceV1,
+    pub model_request_digest: String,
+    pub provider: ModelProviderV1,
+    pub model: String,
+    pub response_contract_digest: String,
+    pub max_total_tokens: u32,
+}
+
+/// Canonical result of one recorded provider token-count activity.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderTokenPreflightResultV1 {
+    pub schema_version: u32,
+    pub preflight_input_digest: String,
+    pub model_request_digest: String,
+    pub input_tokens: u32,
+}
+
 /// A verified canonical input preserves the strict raw CAS identity alongside
 /// the parsed document. Passing this wrapper to constructors prevents an
 /// issuer from accidentally comparing model evidence to the right semantics
@@ -259,6 +288,121 @@ pub struct VerifiedModelRequestEvidenceDocumentV1 {
 pub struct VerifiedTrustScopeEvidenceDocumentV1 {
     document: TrustScopeEvidenceDocumentV1,
     reference: CanonicalCasRef,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VerifiedProviderTokenPreflightInputV1 {
+    document: ProviderTokenPreflightInputV1,
+    reference: CanonicalCasRef,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VerifiedProviderTokenPreflightResultV1 {
+    document: ProviderTokenPreflightResultV1,
+    reference: CanonicalCasRef,
+}
+
+impl ProviderTokenPreflightInputV1 {
+    pub fn from_verified_model_request(
+        model_request: &VerifiedModelRequestEvidenceDocumentV1,
+        max_total_tokens: u32,
+    ) -> Result<Self> {
+        let normalized = &model_request.document().normalized_provider_request;
+        let document = Self {
+            schema_version: PROVIDER_TOKEN_PREFLIGHT_INPUT_V1_SCHEMA_VERSION,
+            model_request_evidence: model_request.descriptor(),
+            model_request_digest: model_request.document().model_request_digest.clone(),
+            provider: normalized.provider,
+            model: normalized.model.clone(),
+            response_contract_digest: normalized.response_schema_digest.clone(),
+            max_total_tokens,
+        };
+        document.validate_against_model_request(model_request)?;
+        Ok(document)
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self.schema_version != PROVIDER_TOKEN_PREFLIGHT_INPUT_V1_SCHEMA_VERSION {
+            return Err(unsupported_schema(
+                "provider_token_preflight_input_v1",
+                self.schema_version,
+                PROVIDER_TOKEN_PREFLIGHT_INPUT_V1_SCHEMA_VERSION,
+            ));
+        }
+        validate_model_request_evidence_descriptor(&self.model_request_evidence)?;
+        validate_sha256_digest("model_request_digest", &self.model_request_digest)?;
+        validate_identifier("model", &self.model, MAX_MODEL_IDENTIFIER_BYTES)?;
+        validate_sha256_digest("response_contract_digest", &self.response_contract_digest)?;
+        if self.max_total_tokens < 2 {
+            return Err(invalid(
+                "provider_token_preflight_input_v1",
+                "max_total_tokens must reserve at least one input and one output token",
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_against_model_request(
+        &self,
+        model_request: &VerifiedModelRequestEvidenceDocumentV1,
+    ) -> Result<()> {
+        self.validate()?;
+        let normalized = &model_request.document().normalized_provider_request;
+        if self.model_request_evidence != model_request.descriptor()
+            || self.model_request_digest != model_request.document().model_request_digest
+            || self.provider != normalized.provider
+            || self.model != normalized.model
+            || self.response_contract_digest != normalized.response_schema_digest
+        {
+            return Err(invalid(
+                "provider_token_preflight_input_v1",
+                "preflight input does not reproduce the verified model request",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl ProviderTokenPreflightResultV1 {
+    pub fn new(
+        preflight: &VerifiedProviderTokenPreflightInputV1,
+        input_tokens: u32,
+    ) -> Result<Self> {
+        let document = Self {
+            schema_version: PROVIDER_TOKEN_PREFLIGHT_RESULT_V1_SCHEMA_VERSION,
+            preflight_input_digest: preflight.reference.digest().to_string(),
+            model_request_digest: preflight.document.model_request_digest.clone(),
+            input_tokens,
+        };
+        document.validate_against_preflight(preflight)?;
+        Ok(document)
+    }
+
+    fn validate_against_preflight(
+        &self,
+        preflight: &VerifiedProviderTokenPreflightInputV1,
+    ) -> Result<()> {
+        if self.schema_version != PROVIDER_TOKEN_PREFLIGHT_RESULT_V1_SCHEMA_VERSION {
+            return Err(unsupported_schema(
+                "provider_token_preflight_result_v1",
+                self.schema_version,
+                PROVIDER_TOKEN_PREFLIGHT_RESULT_V1_SCHEMA_VERSION,
+            ));
+        }
+        validate_sha256_digest("preflight_input_digest", &self.preflight_input_digest)?;
+        validate_sha256_digest("model_request_digest", &self.model_request_digest)?;
+        if self.preflight_input_digest != preflight.reference.digest()
+            || self.model_request_digest != preflight.document.model_request_digest
+            || self.input_tokens == 0
+            || self.input_tokens >= preflight.document.max_total_tokens
+        {
+            return Err(invalid(
+                "provider_token_preflight_result_v1",
+                "preflight result does not bind the input or leave an output-token reservation",
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl CanonicalModelActionInputV1 {
@@ -652,6 +796,26 @@ impl VerifiedTrustScopeEvidenceDocumentV1 {
     }
 }
 
+impl VerifiedProviderTokenPreflightInputV1 {
+    pub fn document(&self) -> &ProviderTokenPreflightInputV1 {
+        &self.document
+    }
+
+    pub fn reference(&self) -> &CanonicalCasRef {
+        &self.reference
+    }
+}
+
+impl VerifiedProviderTokenPreflightResultV1 {
+    pub fn document(&self) -> &ProviderTokenPreflightResultV1 {
+        &self.document
+    }
+
+    pub fn reference(&self) -> &CanonicalCasRef {
+        &self.reference
+    }
+}
+
 /// Derive the only constraints a V1 governed API model worker may receive.
 /// `Candidate` is intentionally denied because it is not a provider-worker
 /// role; an unknown future role cannot silently inherit implementer access.
@@ -730,6 +894,34 @@ pub fn trust_scope_evidence_document_v1_bytes(
     canonical_document_bytes(document, "trust_scope_evidence_document_v1")
 }
 
+pub fn provider_token_preflight_input_v1_bytes(
+    document: &ProviderTokenPreflightInputV1,
+) -> Result<Vec<u8>> {
+    document.validate()?;
+    canonical_document_bytes(document, "provider_token_preflight_input_v1")
+}
+
+pub fn provider_token_preflight_result_v1_bytes(
+    document: &ProviderTokenPreflightResultV1,
+) -> Result<Vec<u8>> {
+    if document.schema_version != PROVIDER_TOKEN_PREFLIGHT_RESULT_V1_SCHEMA_VERSION {
+        return Err(unsupported_schema(
+            "provider_token_preflight_result_v1",
+            document.schema_version,
+            PROVIDER_TOKEN_PREFLIGHT_RESULT_V1_SCHEMA_VERSION,
+        ));
+    }
+    validate_sha256_digest("preflight_input_digest", &document.preflight_input_digest)?;
+    validate_sha256_digest("model_request_digest", &document.model_request_digest)?;
+    if document.input_tokens == 0 {
+        return Err(invalid(
+            "provider_token_preflight_result_v1",
+            "input_tokens must be positive",
+        ));
+    }
+    canonical_document_bytes(document, "provider_token_preflight_result_v1")
+}
+
 /// Create the descriptor `ModelActionIntentV1` carries after protected CAS
 /// storage has returned a strict raw reference.
 pub fn model_request_evidence_v1_descriptor(reference: &CanonicalCasRef) -> ModelRequestEvidenceV1 {
@@ -805,6 +997,42 @@ pub fn parse_verified_trust_scope_evidence_document_v1(
     let canonical = trust_scope_evidence_document_v1_bytes(&document)?;
     ensure_exact_canonical_bytes("trust_scope_evidence_document_v1", bytes, &canonical)?;
     Ok(VerifiedTrustScopeEvidenceDocumentV1 {
+        document,
+        reference,
+    })
+}
+
+pub fn parse_verified_provider_token_preflight_input_v1(
+    bytes: &[u8],
+    cas_ref: &str,
+    digest: &str,
+    model_request: &VerifiedModelRequestEvidenceDocumentV1,
+) -> Result<VerifiedProviderTokenPreflightInputV1> {
+    let reference =
+        verify_raw_cas_bytes("provider_token_preflight_input_v1", bytes, cas_ref, digest)?;
+    let document: ProviderTokenPreflightInputV1 = serde_json::from_slice(bytes)?;
+    document.validate_against_model_request(model_request)?;
+    let canonical = provider_token_preflight_input_v1_bytes(&document)?;
+    ensure_exact_canonical_bytes("provider_token_preflight_input_v1", bytes, &canonical)?;
+    Ok(VerifiedProviderTokenPreflightInputV1 {
+        document,
+        reference,
+    })
+}
+
+pub fn parse_verified_provider_token_preflight_result_v1(
+    bytes: &[u8],
+    cas_ref: &str,
+    digest: &str,
+    preflight: &VerifiedProviderTokenPreflightInputV1,
+) -> Result<VerifiedProviderTokenPreflightResultV1> {
+    let reference =
+        verify_raw_cas_bytes("provider_token_preflight_result_v1", bytes, cas_ref, digest)?;
+    let document: ProviderTokenPreflightResultV1 = serde_json::from_slice(bytes)?;
+    document.validate_against_preflight(preflight)?;
+    let canonical = provider_token_preflight_result_v1_bytes(&document)?;
+    ensure_exact_canonical_bytes("provider_token_preflight_result_v1", bytes, &canonical)?;
+    Ok(VerifiedProviderTokenPreflightResultV1 {
         document,
         reference,
     })

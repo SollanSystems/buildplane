@@ -659,6 +659,16 @@ each component is independently below its own cap. Provider-specific input
 preflight is still a separately recorded activity requirement; it must not be
 hidden inside the HTTP adapter because an unrecorded token-count request would
 itself violate exactly-once remote-effect recovery.
+The native ledger now defines the two closed CAS documents needed by that
+activity. `ProviderTokenPreflightInputV1` is constructed only from verified
+model-request evidence plus the signed total-token ceiling.
+`ProviderTokenPreflightResultV1` binds the exact preflight-input digest and
+model-request digest, requires positive observed input usage, and rejects a
+count that leaves no output reservation. Exact canonical bytes, raw CAS
+digests, unknown-field rejection, and cross-document substitution checks are
+enforced before either document can become verified evidence. The next
+authority slice must attach those documents to a separately claimed network
+action and replay its terminal result before constructing the model request.
 
 Those counts are persisted in the signed action receipt and replayed as one
 checked aggregate for the sealed V3 dispatch attempt. A metered failed call
