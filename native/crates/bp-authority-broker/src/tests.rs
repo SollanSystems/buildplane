@@ -25,6 +25,7 @@ use super::promotion_git::{
     TestFixedGitRunner, TestGitOperation, TestGitOutput, VerifiedPromotionCapability,
 };
 use super::reviewer_session::{
+    resolve_reviewer_model_evidence_for_candidate_recovery_v1,
     resolve_reviewer_model_evidence_from_snapshot_v1, ReviewerSessionResolutionErrorV1,
 };
 use super::v5_dispatch_admission::{
@@ -3648,6 +3649,69 @@ fn reviewer_session_resolver_returns_only_exact_unclaimed_reviewer_evidence() {
     assert_eq!(evidence.candidate.candidate_digest, DIGEST_A);
     assert!(evidence.candidate.candidate_view.read_only);
     assert!(evidence.candidate.candidate_view.network_disabled);
+}
+
+#[test]
+fn reviewer_recovery_derives_the_single_action_from_candidate_identity() {
+    let (snapshot, request) = reviewer_session_snapshot_fixture();
+    let candidate_dispatch_event_ref = snapshot
+        .workflow_for_candidate_digest(DIGEST_A)
+        .expect("fixture candidate")
+        .dispatch
+        .event_id
+        .to_string();
+
+    let evidence = resolve_reviewer_model_evidence_for_candidate_recovery_v1(
+        &snapshot,
+        &candidate_dispatch_event_ref,
+    )
+    .expect("candidate recovery derives one pending reviewer");
+
+    assert_eq!(evidence.run_id, request.run_id);
+    assert_eq!(
+        evidence.reviewer_dispatch_event_ref.to_string(),
+        request.reviewer_dispatch_event_ref
+    );
+    assert_eq!(
+        evidence.reviewer_action_request_event_ref.to_string(),
+        request.reviewer_action_request_event_ref
+    );
+}
+
+#[test]
+fn reviewer_recovery_rejects_a_substituted_candidate_identity() {
+    let (snapshot, _) = reviewer_session_snapshot_fixture();
+    assert_eq!(
+        resolve_reviewer_model_evidence_for_candidate_recovery_v1(
+            &snapshot,
+            &EventId::new().to_string(),
+        )
+        .expect_err("an unknown candidate recovery identity must not select a reviewer"),
+        ReviewerSessionResolutionErrorV1::CandidateRecoveryNotFound,
+    );
+}
+
+#[test]
+fn reviewer_recovery_never_reopens_advanced_or_cancelled_actions() {
+    for (snapshot, _) in [
+        reviewer_session_snapshot_fixture_with_authorization(true, false),
+        reviewer_session_snapshot_fixture_with_authorization(false, true),
+    ] {
+        let candidate_dispatch_event_ref = snapshot
+            .workflow_for_candidate_digest(DIGEST_A)
+            .expect("fixture candidate")
+            .dispatch
+            .event_id
+            .to_string();
+        assert_eq!(
+            resolve_reviewer_model_evidence_for_candidate_recovery_v1(
+                &snapshot,
+                &candidate_dispatch_event_ref,
+            )
+            .expect_err("recovery must not reopen an advanced reviewer action"),
+            ReviewerSessionResolutionErrorV1::ReviewerRecoveryNotFound,
+        );
+    }
 }
 
 #[test]

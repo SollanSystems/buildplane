@@ -1158,6 +1158,43 @@ impl TrustedGovernedRecoverySnapshot {
             })
     }
 
+    /// Find replay-derived reviewer action identities that bind one immutable
+    /// candidate digest.
+    ///
+    /// This is a narrowing query, not authority. It returns only signed-tape
+    /// identities and deliberately omits prompts, paths, credentials, leases,
+    /// tools, and gateway handles. A protected broker must still validate the
+    /// complete reviewer and candidate workflow before opening an activity,
+    /// and must reject zero or multiple eligible identities.
+    pub fn reviewer_action_candidates_for_candidate_digest(
+        &self,
+        candidate_digest: &str,
+    ) -> Vec<(&WorkflowInstanceV1, EventId)> {
+        let mut candidates = Vec::new();
+        for workflow in self.workflows_by_dispatch_event_ref.values() {
+            if !matches!(
+                workflow.dispatch.execution_role,
+                ExecutionRoleV1::Reviewer | ExecutionRoleV1::Adversary | ExecutionRoleV1::Judge
+            ) {
+                continue;
+            }
+            let Some(action_evidence) = workflow.action_evidence.as_ref() else {
+                continue;
+            };
+            for action in action_evidence.actions.values() {
+                if action
+                    .model_intent
+                    .as_ref()
+                    .and_then(|intent| intent.candidate_binding.as_ref())
+                    .is_some_and(|binding| binding.candidate_digest == candidate_digest)
+                {
+                    candidates.push((workflow, action.request.event_id));
+                }
+            }
+        }
+        candidates
+    }
+
     /// Find an exact promotion only when both its candidate digest and
     /// idempotency key match tape-derived decision evidence.
     pub fn workflow_for_promotion_identity(

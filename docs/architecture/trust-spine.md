@@ -673,6 +673,11 @@ authenticates and rechecks the client peer, bounds one framed exchange by an
 absolute deadline, and signs only request-bound handler results. It deliberately
 has no public runner or default listener until trusted replay and the OCI action
 plane supply the authority handler.
+Reviewer recovery is also host-derived now: trusted replay starts from the
+candidate dispatch identity recovered from the host token, finds model intents
+bound to that exact candidate, fully revalidates each reviewer workflow, and
+opens only when exactly one unclaimed reviewer/adversary/judge action remains.
+The client cannot nominate reviewer dispatch or action event identifiers.
 
 The remaining OS-isolated broker must expose the native, same-ledger-process
 `resolve-or-authorize` transaction to the credential-holding provider boundary,

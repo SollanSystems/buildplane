@@ -40,6 +40,12 @@ pub(crate) struct ResolvedReviewerModelEvidenceV1 {
 /// returning paths, model input, credentials, or mutable runtime details.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub(crate) enum ReviewerSessionResolutionErrorV1 {
+    #[error("candidate recovery identity is not present in the trusted snapshot")]
+    CandidateRecoveryNotFound,
+    #[error("candidate recovery has no eligible reviewer activity")]
+    ReviewerRecoveryNotFound,
+    #[error("candidate recovery resolves to more than one eligible reviewer activity")]
+    ReviewerRecoveryAmbiguous,
     #[error("reviewer request run does not match the trusted recovery snapshot")]
     RunMismatch,
     #[error("reviewer dispatch reference is not present in the trusted snapshot")]
@@ -78,6 +84,48 @@ pub(crate) enum ReviewerSessionResolutionErrorV1 {
     CandidateAcceptanceNotPassed,
     #[error("candidate view is not an exact read-only, network-disabled reviewer view")]
     CandidateViewMismatch,
+}
+
+/// Derive the one pending reviewer activity from a host-issued candidate
+/// recovery identity.
+///
+/// The untrusted client supplies no reviewer dispatch, action, model, role, or
+/// candidate digest. The candidate dispatch reference is recovered from the
+/// host's authenticated opaque token, then trusted replay supplies all reviewer
+/// candidates. Zero, multiple, stale, cancelled, or already-advanced matches
+/// fail closed.
+pub(crate) fn resolve_reviewer_model_evidence_for_candidate_recovery_v1(
+    snapshot: &TrustedGovernedRecoverySnapshot,
+    candidate_dispatch_event_ref: &str,
+) -> Result<ResolvedReviewerModelEvidenceV1, ReviewerSessionResolutionErrorV1> {
+    let candidate_workflow = snapshot
+        .workflow_for_dispatch_event_ref(candidate_dispatch_event_ref)
+        .ok_or(ReviewerSessionResolutionErrorV1::CandidateRecoveryNotFound)?;
+    validate_candidate_workflow(candidate_workflow)?;
+    let candidate = candidate_workflow
+        .candidate
+        .as_ref()
+        .ok_or(ReviewerSessionResolutionErrorV1::CandidateRecoveryNotFound)?;
+
+    let mut resolved = Vec::new();
+    for (reviewer_workflow, action_event_ref) in
+        snapshot.reviewer_action_candidates_for_candidate_digest(&candidate.candidate_digest)
+    {
+        let request = ParsedAuthorityBrokerOpenReviewerSessionRequestV1 {
+            run_id: snapshot.run_id().to_string(),
+            reviewer_dispatch_event_ref: reviewer_workflow.dispatch.event_id.to_string(),
+            reviewer_action_request_event_ref: action_event_ref.to_string(),
+        };
+        if let Ok(evidence) = resolve_reviewer_model_evidence_from_snapshot_v1(snapshot, &request) {
+            resolved.push(evidence);
+        }
+    }
+
+    match resolved.len() {
+        1 => Ok(resolved.remove(0)),
+        0 => Err(ReviewerSessionResolutionErrorV1::ReviewerRecoveryNotFound),
+        _ => Err(ReviewerSessionResolutionErrorV1::ReviewerRecoveryAmbiguous),
+    }
 }
 
 /// Resolve only an exact, unclaimed reviewer/adversary/judge model action from
