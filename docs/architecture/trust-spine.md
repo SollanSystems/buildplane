@@ -680,9 +680,15 @@ model-request evidence plus the signed total-token ceiling.
 model-request digest, requires positive observed input usage, and rejects a
 count that leaves no output reservation. Exact canonical bytes, raw CAS
 digests, unknown-field rejection, and cross-document substitution checks are
-enforced before either document can become verified evidence. The next
-authority slice must attach those documents to a separately claimed network
-action and replay its terminal result before constructing the model request.
+enforced before either document can become verified evidence. The native
+ledger can now reconstruct those documents from a distinct signed
+`ActionRequestedV2` network action, its historically valid generic activity
+claim, and its signed successful result projection. It derives the action
+identity and role from the verified model intent, checks the preflight ceiling
+against the signed dispatch budget, and rejects missing or unrecorded results.
+The remaining authority slice must issue and execute that activity through the
+host gateway and require its verified recording before model-provider
+authorization can be granted.
 
 Those counts are persisted in the signed action receipt and replayed as one
 checked aggregate for the sealed V3 dispatch attempt. A metered failed call

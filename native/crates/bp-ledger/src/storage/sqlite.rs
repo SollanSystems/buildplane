@@ -19,11 +19,14 @@ use crate::payload::model_evidence::{
     parse_verified_model_provider_result_document_v1,
     parse_verified_model_request_evidence_document_v1,
     parse_verified_model_result_evidence_document_v1,
+    parse_verified_provider_token_preflight_input_v1,
+    parse_verified_provider_token_preflight_result_v1,
     parse_verified_trust_scope_evidence_document_v1, trust_scope_evidence_document_v1_bytes,
     trust_scope_evidence_v1_descriptor, validate_model_action_binding_against_replayed_dispatch_v3,
     verify_model_request_evidence_matches_canonical_input,
     verify_trust_scope_evidence_matches_model_request, ModelActionEvidenceBindingV1,
     ModelProviderV1, ModelRequestEvidenceDocumentV1, TrustScopeEvidenceDocumentV1,
+    VerifiedProviderTokenPreflightInputV1, VerifiedProviderTokenPreflightResultV1,
 };
 use crate::payload::trust_spine::{
     action_receipt_recorded_v2_digest, action_receipt_set_v1_digest, action_requested_v2_digest,
@@ -579,6 +582,33 @@ pub struct GovernedModelActionResultRequestV1 {
     pub result_ref: Option<String>,
     pub evidence_digest: String,
     pub evidence_ref: String,
+}
+
+/// Read-only request to reconstruct one completed provider token-count
+/// activity from signed tape and protected CAS. Every dynamic field is derived
+/// from the already-issued model intent and the preflight action it names.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProviderTokenPreflightRecordingRequestV1 {
+    pub run_id: RunId,
+    pub dispatch_event_id: EventId,
+    pub model_action_request_event_id: EventId,
+    pub preflight_action_request_event_id: EventId,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VerifiedProviderTokenPreflightRecordingV1 {
+    input: VerifiedProviderTokenPreflightInputV1,
+    result: VerifiedProviderTokenPreflightResultV1,
+}
+
+impl VerifiedProviderTokenPreflightRecordingV1 {
+    pub fn input(&self) -> &VerifiedProviderTokenPreflightInputV1 {
+        &self.input
+    }
+
+    pub fn result(&self) -> &VerifiedProviderTokenPreflightResultV1 {
+        &self.result
+    }
 }
 
 /// Broker-private request to record the one closed candidate-completion proof
@@ -3142,6 +3172,170 @@ impl SqliteStore {
             self.record_ordinary_append(event);
         }
         Ok(issued.into_public_disposition())
+    }
+
+    /// Reconstruct a completed provider token-count activity without issuing
+    /// new authority. A caller can name tape records, but cannot supply token
+    /// counts, provider/model settings, CAS descriptors, or action identity.
+    pub fn verify_recorded_provider_token_preflight_v1(
+        &self,
+        request: &ProviderTokenPreflightRecordingRequestV1,
+        cas: &Cas,
+        authority: &ActivityClaimAuthorityV1,
+    ) -> Result<VerifiedProviderTokenPreflightRecordingV1> {
+        require_protected_model_intent_realm(authority)?;
+        if request.model_action_request_event_id == request.preflight_action_request_event_id {
+            return Err(LedgerError::ActivityClaimAuthorityRejected {
+                reason: "provider token preflight must be a distinct recorded network action"
+                    .into(),
+            });
+        }
+        let issue = ModelActionIntentIssueRequestV1 {
+            run_id: request.run_id,
+            dispatch_event_id: request.dispatch_event_id,
+            action_request_event_id: request.model_action_request_event_id,
+        };
+        let stored_intent = model_action_intent_by_action_request(
+            &self.conn,
+            request.run_id,
+            request.model_action_request_event_id,
+        )?
+        .ok_or_else(|| LedgerError::ActivityClaimAuthorityRejected {
+            reason: "provider token preflight has no verified model intent".into(),
+        })?;
+        let intent = verify_signed_model_action_intent_projection(
+            &self.conn,
+            &stored_intent,
+            cas,
+            authority,
+            &issue,
+            ModelActionIntentAuthorityLane::Existing,
+        )?;
+        let model_request_bytes = cas.get_verified_canonical_bytes(
+            &intent.model_request_evidence.cas_ref,
+            &intent.model_request_evidence.digest,
+        )?;
+        let model_request = parse_verified_model_request_evidence_document_v1(
+            &model_request_bytes,
+            &intent.model_request_evidence,
+        )?;
+
+        let dispatch_event = load_verified_authority_event(
+            &self.conn,
+            request.dispatch_event_id,
+            &authority.trusted_keys,
+            &authority.dispatch_signer,
+            "provider token preflight dispatch",
+        )?;
+        if dispatch_event.run_id != request.run_id {
+            return Err(LedgerError::ActivityClaimAuthorityRejected {
+                reason: "provider token preflight dispatch belongs to another run".into(),
+            });
+        }
+        let dispatch = dispatch_authority_material(&dispatch_event.payload)
+            .ok_or_else(|| LedgerError::ActivityClaimAuthorityRejected {
+                reason: "provider token preflight requires a governed dispatch envelope".into(),
+            })?
+            .dispatch;
+        let max_total_tokens = dispatch
+            .body
+            .budget
+            .max_tokens
+            .and_then(|tokens| u32::try_from(tokens).ok())
+            .ok_or_else(|| LedgerError::ActivityClaimAuthorityRejected {
+                reason: "provider token preflight requires a signed u32 total-token budget".into(),
+            })?;
+
+        let action_event = load_verified_authority_event(
+            &self.conn,
+            request.preflight_action_request_event_id,
+            &authority.trusted_keys,
+            &authority.action_request_signer,
+            "provider token preflight action request",
+        )?;
+        if action_event.run_id != request.run_id
+            || action_event.parent_event_id != Some(request.dispatch_event_id)
+        {
+            return Err(LedgerError::ActivityClaimAuthorityRejected {
+                reason: "provider token preflight action does not bind the signed dispatch".into(),
+            });
+        }
+        let Payload::ActionRequestedV2(preflight_action) = action_event.payload else {
+            return Err(LedgerError::ActivityClaimAuthorityRejected {
+                reason: "provider token preflight requires an action_requested_v2 event".into(),
+            });
+        };
+        let expected_action_id = format!("{}:provider-token-preflight", intent.action_id);
+        if preflight_action.action_id != expected_action_id
+            || preflight_action.idempotency_key != expected_action_id
+            || preflight_action.action_kind != ActionKindV1::Network
+            || preflight_action.execution_role != model_request.document().binding.execution_role
+        {
+            return Err(LedgerError::ActivityClaimAuthorityRejected {
+                reason: "provider token preflight action identity, kind, or role is not derived from the model intent".into(),
+            });
+        }
+        let input_bytes = cas.get_verified_canonical_bytes(
+            &preflight_action.canonical_input_ref,
+            &preflight_action.canonical_input_digest,
+        )?;
+        let input = parse_verified_provider_token_preflight_input_v1(
+            &input_bytes,
+            &preflight_action.canonical_input_ref,
+            &preflight_action.canonical_input_digest,
+            &model_request,
+        )?;
+        if input.document().max_total_tokens != max_total_tokens {
+            return Err(LedgerError::ActivityClaimAuthorityRejected {
+                reason:
+                    "provider token preflight input does not equal the signed total-token budget"
+                        .into(),
+            });
+        }
+
+        let claim = activity_claim_by_activity_id(&self.conn, request.run_id, &expected_action_id)?
+            .ok_or_else(|| LedgerError::ActivityClaimAuthorityRejected {
+                reason: "provider token preflight has no signed activity claim".into(),
+            })?;
+        let signed_claim = verify_signed_claim_projection(&self.conn, &claim, authority)?;
+        let claimed_at = parse_claim_timestamp(&signed_claim.claimed_at)?;
+        let claim_request = ActivityClaimRequestV1 {
+            run_id: claim.run_id,
+            activity_id: claim.activity_id.clone(),
+            idempotency_key: claim.idempotency_key.clone(),
+            dispatch_event_id: claim.dispatch_event_id,
+            action_request_event_id: claim.action_request_event_id,
+            lease_duration_ms: claim.lease_duration_ms,
+        };
+        let claim_evidence =
+            verify_claim_evidence(&self.conn, &claim_request, authority, claimed_at)?;
+        if signed_claim.purpose != ActivityClaimPurposeV1::Generic
+            || claim.action_kind != ActionKindV1::Network
+            || claim_evidence.action_kind != claim.action_kind
+            || claim_evidence.action_request_digest != claim.action_request_digest
+            || claim_evidence.dispatch_envelope_digest != claim.dispatch_envelope_digest
+            || claim.action_request_event_id != request.preflight_action_request_event_id
+            || claim.dispatch_event_id != request.dispatch_event_id
+            || claim.activity_id != expected_action_id
+            || claim.idempotency_key != expected_action_id
+            || claim.state != StoredActivityClaimState::Recorded
+            || claim.result_outcome != Some(ActivityResultOutcomeV1::Succeeded)
+        {
+            return Err(LedgerError::ActivityClaimAuthorityRejected {
+                reason: "provider token preflight claim/result projection is not the exact successful network activity".into(),
+            });
+        }
+        verify_signed_activity_result_projection(&self.conn, &claim, authority)?;
+        let result_ref = required_claim_string(claim.result_ref.as_deref(), "result_ref")?;
+        let result_digest = required_claim_string(claim.result_digest.as_deref(), "result_digest")?;
+        let result_bytes = cas.get_verified_canonical_bytes(&result_ref, &result_digest)?;
+        let result = parse_verified_provider_token_preflight_result_v1(
+            &result_bytes,
+            &result_ref,
+            &result_digest,
+            &input,
+        )?;
+        Ok(VerifiedProviderTokenPreflightRecordingV1 { input, result })
     }
 
     /// Atomically create (or resolve) the only provider-effect authority for

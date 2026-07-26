@@ -12,11 +12,14 @@ use bp_ledger::payload::model_evidence::{
     model_provider_result_document_v1_bytes, model_request_evidence_document_v1_bytes,
     model_request_evidence_v1_descriptor, model_request_semantic_v1_digest,
     model_result_evidence_document_v1_bytes, parse_verified_canonical_model_action_input_v1,
-    parse_verified_model_request_evidence_document_v1, trust_scope_evidence_document_v1_bytes,
+    parse_verified_model_request_evidence_document_v1,
+    parse_verified_provider_token_preflight_input_v1, provider_token_preflight_input_v1_bytes,
+    provider_token_preflight_result_v1_bytes, trust_scope_evidence_document_v1_bytes,
     trust_scope_evidence_v1_descriptor, CanonicalModelActionInputV1,
     CredentialFreeNormalizedModelRequestV1, ModelActionEvidenceBindingV1,
     ModelProviderCompletionV1, ModelProviderResultDocumentV1, ModelProviderV1,
-    ModelRequestEvidenceDocumentV1, ModelResultEvidenceDocumentV1, TrustScopeEvidenceDocumentV1,
+    ModelRequestEvidenceDocumentV1, ModelResultEvidenceDocumentV1, ProviderTokenPreflightInputV1,
+    ProviderTokenPreflightResultV1, TrustScopeEvidenceDocumentV1,
 };
 use bp_ledger::payload::trust_spine::{
     action_receipt_set_v1_digest, action_requested_v2_digest,
@@ -33,10 +36,12 @@ use bp_ledger::payload::trust_spine::{
 use bp_ledger::payload::Payload;
 use bp_ledger::signing::{public_key_hash, ActorKeyRef, TrustedPublicKeys};
 use bp_ledger::storage::sqlite::{
-    ActivityClaimAuthorityV1, ActivityClaimRequestV1, ActivityResultDispositionV1,
+    ActivityClaimAuthorityV1, ActivityClaimDispositionV1, ActivityClaimRequestV1,
+    ActivityResultDispositionV1, ActivityResultRequestV1,
     GovernedModelActionAuthorizeAndClaimDispositionV1,
     GovernedModelActionAuthorizeAndClaimRequestV1, GovernedModelActionResultRequestV1,
-    ModelActionIntentIssueDispositionV1, ModelActionIntentIssueRequestV1, SqliteStore,
+    ModelActionIntentIssueDispositionV1, ModelActionIntentIssueRequestV1,
+    ProviderTokenPreflightRecordingRequestV1, SqliteStore,
 };
 use bp_ledger::storage::Cas;
 use bp_ledger::LedgerError;
@@ -950,6 +955,134 @@ fn native_model_authority_commits_the_v2_authorization_and_one_lease_together() 
         .append_signed(&request_event, &key, &signer)
         .expect("append signed model action request");
 
+    store
+        .issue_model_action_intent_v1_at_for_tests(
+            &issue_request(run_id, dispatch_event.id, request_event.id),
+            &cas,
+            &authority,
+            &key,
+            &signer,
+            now,
+        )
+        .expect("issue model intent before provider token preflight");
+    let intent = store
+        .events_for_run(&run_id.to_string())
+        .expect("load model intent")
+        .into_iter()
+        .find_map(|row| match row.to_event().expect("decode event").payload {
+            Payload::ModelActionIntentV1(intent) => Some(intent),
+            _ => None,
+        })
+        .expect("signed model intent");
+    let model_request_bytes = cas
+        .get_verified_canonical_bytes(
+            &intent.model_request_evidence.cas_ref,
+            &intent.model_request_evidence.digest,
+        )
+        .expect("load model request evidence");
+    let verified_model_request = parse_verified_model_request_evidence_document_v1(
+        &model_request_bytes,
+        &intent.model_request_evidence,
+    )
+    .expect("verified model request evidence");
+    let preflight_input =
+        ProviderTokenPreflightInputV1::from_verified_model_request(&verified_model_request, 1024)
+            .expect("derive token preflight input");
+    let preflight_input_bytes =
+        provider_token_preflight_input_v1_bytes(&preflight_input).expect("encode preflight input");
+    let preflight_input_ref = cas
+        .put_canonical_bytes(&preflight_input_bytes)
+        .expect("store preflight input");
+    let verified_preflight_input = parse_verified_provider_token_preflight_input_v1(
+        &preflight_input_bytes,
+        &preflight_input_ref.to_cas_ref(),
+        preflight_input_ref.digest(),
+        &verified_model_request,
+    )
+    .expect("verified preflight input");
+    let mut preflight_action = request.clone();
+    preflight_action.action_id = format!("{}:provider-token-preflight", request.action_id);
+    preflight_action.idempotency_key = preflight_action.action_id.clone();
+    preflight_action.action_kind = ActionKindV1::Network;
+    preflight_action.canonical_input_ref = preflight_input_ref.to_cas_ref();
+    preflight_action.canonical_input_digest = preflight_input_ref.digest().into();
+    preflight_action.requested_at = timestamp(now + Duration::milliseconds(1));
+    let preflight_action_event = Event {
+        id: EventId::new(),
+        run_id,
+        parent_event_id: Some(dispatch_event.id),
+        schema_version: Event::CURRENT_SCHEMA_VERSION,
+        kind: EventKind::ActionRequestedV2,
+        occurred_at: now + Duration::milliseconds(1),
+        payload: Payload::ActionRequestedV2(preflight_action.clone()),
+    };
+    store
+        .append_signed(&preflight_action_event, &key, &signer)
+        .expect("append signed preflight action");
+    let preflight_claim = store
+        .claim_activity_v1_at_for_tests(
+            &ActivityClaimRequestV1 {
+                run_id,
+                activity_id: preflight_action.action_id.clone(),
+                idempotency_key: preflight_action.idempotency_key.clone(),
+                dispatch_event_id: dispatch_event.id,
+                action_request_event_id: preflight_action_event.id,
+                lease_duration_ms: 1_000,
+            },
+            &authority,
+            &key,
+            &signer,
+            now + Duration::milliseconds(1),
+        )
+        .expect("claim provider token preflight");
+    let preflight_lease_id = match preflight_claim {
+        ActivityClaimDispositionV1::Granted { lease_id, .. } => lease_id,
+        other => panic!("preflight must grant one lease, got {other:?}"),
+    };
+    let preflight_recording_request = ProviderTokenPreflightRecordingRequestV1 {
+        run_id,
+        dispatch_event_id: dispatch_event.id,
+        model_action_request_event_id: request_event.id,
+        preflight_action_request_event_id: preflight_action_event.id,
+    };
+    let incomplete_preflight = store
+        .verify_recorded_provider_token_preflight_v1(&preflight_recording_request, &cas, &authority)
+        .expect_err("an unrecorded provider token preflight cannot authorize transport");
+    assert!(matches!(
+        incomplete_preflight,
+        LedgerError::ActivityClaimAuthorityRejected { .. }
+    ));
+    let preflight_result = ProviderTokenPreflightResultV1::new(&verified_preflight_input, 321)
+        .expect("provider token preflight result");
+    let preflight_result_bytes = provider_token_preflight_result_v1_bytes(&preflight_result)
+        .expect("encode preflight result");
+    let preflight_result_ref = cas
+        .put_canonical_bytes(&preflight_result_bytes)
+        .expect("store preflight result");
+    store
+        .record_activity_result_v1_at_for_tests(
+            &ActivityResultRequestV1 {
+                run_id,
+                activity_id: preflight_action.action_id.clone(),
+                idempotency_key: preflight_action.idempotency_key.clone(),
+                lease_id: preflight_lease_id,
+                outcome: ActivityResultOutcomeV1::Succeeded,
+                result_digest: Some(preflight_result_ref.digest().into()),
+                result_ref: Some(preflight_result_ref.to_cas_ref()),
+                evidence_digest: preflight_result_ref.digest().into(),
+                evidence_ref: preflight_result_ref.to_cas_ref(),
+            },
+            &authority,
+            &key,
+            &signer,
+            now + Duration::milliseconds(2),
+        )
+        .expect("record provider token preflight");
+    let verified_preflight = store
+        .verify_recorded_provider_token_preflight_v1(&preflight_recording_request, &cas, &authority)
+        .expect("verify recorded token preflight from signed tape and CAS");
+    assert_eq!(verified_preflight.result().document().input_tokens, 321);
+
     let authority_request = GovernedModelActionAuthorizeAndClaimRequestV1 {
         run_id,
         dispatch_event_id: dispatch_event.id,
@@ -963,7 +1096,7 @@ fn native_model_authority_commits_the_v2_authorization_and_one_lease_together() 
             &authority,
             &key,
             &signer,
-            now,
+            now + Duration::milliseconds(3),
         )
         .expect("issue the native V2 model authority and lease");
     let (authorization_ref, claim_event_id, lease_id) = match granted {
@@ -977,7 +1110,7 @@ fn native_model_authority_commits_the_v2_authorization_and_one_lease_together() 
     };
     assert_eq!(
         store.event_count().unwrap(),
-        5,
+        8,
         "intent, V2 authorization, and lease must commit with no separately usable authority state"
     );
 
@@ -988,7 +1121,7 @@ fn native_model_authority_commits_the_v2_authorization_and_one_lease_together() 
             &authority,
             &key,
             &signer,
-            now + Duration::milliseconds(1),
+            now + Duration::milliseconds(4),
         )
         .expect("retry resolves the original authority without a second lease");
     assert!(matches!(
@@ -1001,7 +1134,7 @@ fn native_model_authority_commits_the_v2_authorization_and_one_lease_together() 
     ));
     assert_eq!(
         store.event_count().unwrap(),
-        5,
+        8,
         "retry cannot append a second authority"
     );
 
@@ -1015,7 +1148,7 @@ fn native_model_authority_commits_the_v2_authorization_and_one_lease_together() 
             &authority,
             &key,
             &signer,
-            now + Duration::milliseconds(1),
+            now + Duration::milliseconds(4),
         )
         .expect_err("a retry cannot stretch the immutable provider lease");
     assert!(matches!(
@@ -1024,7 +1157,7 @@ fn native_model_authority_commits_the_v2_authorization_and_one_lease_together() 
     ));
     assert_eq!(
         store.event_count().unwrap(),
-        5,
+        8,
         "conflict cannot append authority"
     );
 
@@ -1087,11 +1220,11 @@ fn native_model_authority_commits_the_v2_authorization_and_one_lease_together() 
             &authority,
             &key,
             &signer,
-            now + Duration::milliseconds(2),
+            now + Duration::milliseconds(5),
         )
         .expect_err("success requires the exact persisted native evidence bytes");
     assert!(matches!(unpersisted, LedgerError::Cas(_)));
-    assert_eq!(store.event_count().unwrap(), 5);
+    assert_eq!(store.event_count().unwrap(), 8);
 
     let mut substituted_evidence = result_evidence.clone();
     substituted_evidence.model_request_digest = DIGEST_A.into();
@@ -1115,14 +1248,14 @@ fn native_model_authority_commits_the_v2_authorization_and_one_lease_together() 
             &authority,
             &key,
             &signer,
-            now + Duration::milliseconds(2),
+            now + Duration::milliseconds(5),
         )
         .expect_err("well-formed evidence for another model request must fail");
     assert!(matches!(
         substituted,
         LedgerError::ActivityClaimAuthorityRejected { .. }
     ));
-    assert_eq!(store.event_count().unwrap(), 5);
+    assert_eq!(store.event_count().unwrap(), 8);
 
     let mut substituted_result = provider_result.clone();
     substituted_result.worker_manifest_digest = DIGEST_A.into();
@@ -1164,14 +1297,14 @@ fn native_model_authority_commits_the_v2_authorization_and_one_lease_together() 
             &authority,
             &key,
             &signer,
-            now + Duration::milliseconds(2),
+            now + Duration::milliseconds(5),
         )
         .expect_err("well-formed result for another worker manifest must fail");
     assert!(matches!(
         substituted_result_error,
         LedgerError::ActivityClaimAuthorityRejected { .. }
     ));
-    assert_eq!(store.event_count().unwrap(), 5);
+    assert_eq!(store.event_count().unwrap(), 8);
 
     let malformed_result_ref = cas
         .put_canonical_bytes(br#"{"schema_version":1,"outcome":"completed"}"#)
@@ -1208,10 +1341,10 @@ fn native_model_authority_commits_the_v2_authorization_and_one_lease_together() 
             &authority,
             &key,
             &signer,
-            now + Duration::milliseconds(2),
+            now + Duration::milliseconds(5),
         )
         .expect_err("success requires a closed native provider-result document");
-    assert_eq!(store.event_count().unwrap(), 5);
+    assert_eq!(store.event_count().unwrap(), 8);
     assert!(
         matches!(malformed_result, LedgerError::InvalidJson(_)),
         "unexpected malformed-result error: {malformed_result}"
@@ -1232,7 +1365,7 @@ fn native_model_authority_commits_the_v2_authorization_and_one_lease_together() 
             &authority,
             &key,
             &signer,
-            now + Duration::milliseconds(2),
+            now + Duration::milliseconds(5),
         )
         .expect("record the model result through its native lease lane");
     assert!(matches!(
@@ -1241,7 +1374,7 @@ fn native_model_authority_commits_the_v2_authorization_and_one_lease_together() 
     ));
     assert_eq!(
         store.event_count().unwrap(),
-        6,
+        9,
         "terminal result is exactly once"
     );
 
@@ -1252,7 +1385,7 @@ fn native_model_authority_commits_the_v2_authorization_and_one_lease_together() 
             &authority,
             &key,
             &signer,
-            now + Duration::milliseconds(3),
+            now + Duration::milliseconds(6),
         )
         .expect("post-result retry reuses recorded authority state");
     assert!(matches!(
@@ -1266,7 +1399,7 @@ fn native_model_authority_commits_the_v2_authorization_and_one_lease_together() 
     ));
     assert_eq!(
         store.event_count().unwrap(),
-        6,
+        9,
         "recorded retry cannot append another event"
     );
 
