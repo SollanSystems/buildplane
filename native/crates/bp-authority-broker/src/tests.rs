@@ -7,6 +7,11 @@ use super::dispatch_admission::{
     DispatchAdmissionSnapshotVerifier, LedgerDispatchAdmissionBackend, ResolvedDispatchAdmission,
     SealedDispatchAdmissionEvidence, TrustedDispatchAdmissionSnapshotVerifier,
 };
+use super::governed_reviewer_authority::{
+    open_governed_reviewer_session_v1, resolve_governed_reviewer_run_v1,
+    GovernedReviewerAuthorityErrorV1,
+};
+use super::governed_session_token::issue_recovery_token_v1;
 use super::promotion_decision_handler::{
     handle_promotion_decision_wire, parse_promotion_decision_request, PromotionDecisionHandlerError,
 };
@@ -3712,6 +3717,160 @@ fn reviewer_recovery_never_reopens_advanced_or_cancelled_actions() {
             ReviewerSessionResolutionErrorV1::ReviewerRecoveryNotFound,
         );
     }
+}
+
+#[test]
+fn governed_reviewer_open_binds_signed_recovery_to_repository_and_replay() {
+    let (snapshot, request) = reviewer_session_snapshot_fixture();
+    let candidate_dispatch_event_ref = snapshot
+        .workflow_for_candidate_digest(DIGEST_A)
+        .expect("fixture candidate")
+        .dispatch
+        .event_id
+        .to_string();
+    let token_key = SigningKey::from_bytes(&[75; 32]);
+    let recovery_ref = issue_recovery_token_v1(
+        &token_key,
+        snapshot.run_id(),
+        &candidate_dispatch_event_ref,
+        DIGEST_B,
+    )
+    .expect("signed recovery");
+    let session = open_governed_reviewer_session_v1(
+        &snapshot,
+        &token_key,
+        DIGEST_B,
+        &recovery_ref,
+        "01919000-0000-7000-8000-000000000110",
+    )
+    .expect("open reviewer from trusted recovery");
+
+    assert_eq!(session.recovery_ref(), recovery_ref);
+    assert_eq!(session.evidence().run_id, request.run_id);
+    assert_eq!(
+        session
+            .evidence()
+            .reviewer_action_request_event_ref
+            .to_string(),
+        request.reviewer_action_request_event_ref
+    );
+    assert!(session.session_ref().starts_with("gs1.r."));
+
+    let resumed = resolve_governed_reviewer_run_v1(
+        &snapshot,
+        &token_key.verifying_key(),
+        session.recovery_ref(),
+        session.session_ref(),
+    )
+    .expect("session token reopens only the same pending reviewer evidence");
+    assert_eq!(
+        resumed.reviewer_action_request_event_ref,
+        session.evidence().reviewer_action_request_event_ref
+    );
+}
+
+#[test]
+fn governed_reviewer_open_rejects_repository_and_run_substitution() {
+    let (snapshot, _) = reviewer_session_snapshot_fixture();
+    let candidate_dispatch_event_ref = snapshot
+        .workflow_for_candidate_digest(DIGEST_A)
+        .expect("fixture candidate")
+        .dispatch
+        .event_id
+        .to_string();
+    let token_key = SigningKey::from_bytes(&[76; 32]);
+    let recovery_ref = issue_recovery_token_v1(
+        &token_key,
+        snapshot.run_id(),
+        &candidate_dispatch_event_ref,
+        DIGEST_B,
+    )
+    .expect("signed recovery");
+    assert_eq!(
+        open_governed_reviewer_session_v1(
+            &snapshot,
+            &token_key,
+            DIGEST_C,
+            &recovery_ref,
+            "01919000-0000-7000-8000-000000000111",
+        )
+        .expect_err("another repository identity must not open the reviewer"),
+        GovernedReviewerAuthorityErrorV1::RecoveryRejected,
+    );
+
+    let other_run_recovery = issue_recovery_token_v1(
+        &token_key,
+        "01919000-0000-7000-8000-000000000112",
+        &candidate_dispatch_event_ref,
+        DIGEST_B,
+    )
+    .expect("other run recovery");
+    assert_eq!(
+        open_governed_reviewer_session_v1(
+            &snapshot,
+            &token_key,
+            DIGEST_B,
+            &other_run_recovery,
+            "01919000-0000-7000-8000-000000000113",
+        )
+        .expect_err("another run must not open the reviewer"),
+        GovernedReviewerAuthorityErrorV1::RunMismatch,
+    );
+}
+
+#[test]
+fn governed_reviewer_run_rejects_recovery_or_session_substitution() {
+    let (snapshot, _) = reviewer_session_snapshot_fixture();
+    let candidate_dispatch_event_ref = snapshot
+        .workflow_for_candidate_digest(DIGEST_A)
+        .expect("fixture candidate")
+        .dispatch
+        .event_id
+        .to_string();
+    let token_key = SigningKey::from_bytes(&[77; 32]);
+    let recovery_ref = issue_recovery_token_v1(
+        &token_key,
+        snapshot.run_id(),
+        &candidate_dispatch_event_ref,
+        DIGEST_B,
+    )
+    .expect("signed recovery");
+    let session = open_governed_reviewer_session_v1(
+        &snapshot,
+        &token_key,
+        DIGEST_B,
+        &recovery_ref,
+        "01919000-0000-7000-8000-000000000114",
+    )
+    .expect("reviewer session");
+    let other_recovery = issue_recovery_token_v1(
+        &token_key,
+        snapshot.run_id(),
+        &candidate_dispatch_event_ref,
+        DIGEST_C,
+    )
+    .expect("other signed recovery");
+
+    assert_eq!(
+        resolve_governed_reviewer_run_v1(
+            &snapshot,
+            &token_key.verifying_key(),
+            &other_recovery,
+            session.session_ref(),
+        )
+        .expect_err("session token must bind the exact recovery token"),
+        GovernedReviewerAuthorityErrorV1::SessionRejected,
+    );
+    assert_eq!(
+        resolve_governed_reviewer_run_v1(
+            &snapshot,
+            &token_key.verifying_key(),
+            session.recovery_ref(),
+            "gs1.r.01919000-0000-7000-8000-000000000115.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        .expect_err("forged session token must not reach replay evidence"),
+        GovernedReviewerAuthorityErrorV1::SessionRejected,
+    );
 }
 
 #[test]

@@ -44,6 +44,8 @@ mod admission_protocol;
 mod confinement;
 #[allow(dead_code)]
 mod dispatch_admission;
+#[allow(dead_code)] // Open evidence is consumed by the protected OCI reviewer handler next.
+mod governed_reviewer_authority;
 mod governed_session_client;
 #[cfg(test)]
 mod governed_session_client_contract_tests;

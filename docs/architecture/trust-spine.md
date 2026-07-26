@@ -684,6 +684,12 @@ candidate dispatch, and canonical repository identity; a session token binds
 the verified recovery token, candidate/reviewer lane, and fresh V7 nonce. Both
 fit the closed opaque-reference limit, survive host restart, and still require
 fresh trusted replay before any effect.
+Reviewer open and run resolution now compose those tokens with the trusted
+snapshot: open verifies repository and run binding before issuing a reviewer
+lane token; run verifies that exact recovery/session pair and re-derives the
+still-unclaimed reviewer evidence. This remains pre-effect and private—the
+native authorize-and-claim transaction plus read-only OCI worker must consume
+the evidence before the endpoint can be activated.
 
 The remaining OS-isolated broker must expose the native, same-ledger-process
 `resolve-or-authorize` transaction to the credential-holding provider boundary,
