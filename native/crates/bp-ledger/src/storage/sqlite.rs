@@ -1300,6 +1300,9 @@ pub struct SqliteStore {
     /// do not regress the protected resolver to a per-event scan.
     #[cfg(any(test, feature = "test-support"))]
     v5_source_candidate_verification_count: Cell<u64>,
+    /// Test-only count of signer-filtered V5 candidates loaded from SQLite.
+    #[cfg(any(test, feature = "test-support"))]
+    v5_source_candidate_loaded_count: Cell<u64>,
 }
 
 fn canonical_database_path_for_connection(conn: &Connection) -> Option<PathBuf> {
@@ -1333,6 +1336,8 @@ impl SqliteStore {
             fail_next_checkpoint_signature_insert: Cell::new(false),
             #[cfg(any(test, feature = "test-support"))]
             v5_source_candidate_verification_count: Cell::new(0),
+            #[cfg(any(test, feature = "test-support"))]
+            v5_source_candidate_loaded_count: Cell::new(0),
         })
     }
 
@@ -1348,6 +1353,8 @@ impl SqliteStore {
             fail_next_checkpoint_signature_insert: Cell::new(false),
             #[cfg(any(test, feature = "test-support"))]
             v5_source_candidate_verification_count: Cell::new(0),
+            #[cfg(any(test, feature = "test-support"))]
+            v5_source_candidate_loaded_count: Cell::new(0),
         })
     }
 
@@ -3547,22 +3554,83 @@ impl SqliteStore {
             ));
         }
 
+        const MAX_SIGNER_FILTERED_CANDIDATES: usize = 64;
+        let source_hash = authority
+            .source_dispatch_signer
+            .public_key_hash
+            .as_deref()
+            .ok_or_else(|| {
+                governed_dispatch_v5_admission_reconciliation_required(
+                    run_id,
+                    "unresolved",
+                    "configured V5 source signer has no public key hash",
+                )
+            })?;
+        let mut statement = self.conn.prepare(
+            r#"SELECT
+                    e.id, e.run_id, e.parent_event_id, e.schema_version,
+                    e.kind, e.occurred_at, e.payload,
+                    s.event_id, s.canonical_event_hash, s.actor_id, s.key_id,
+                    s.public_key_hash, s.algorithm, s.signature, s.signed_at
+                FROM events e
+                JOIN event_signatures s ON s.event_id = e.id
+                WHERE e.run_id = ?1
+                  AND e.kind = 'dispatch_envelope_v5'
+                  AND json_extract(
+                        e.payload,
+                        '$.DispatchEnvelopeV5.envelope_digest'
+                      ) = ?2
+                  AND s.algorithm = 'ed25519'
+                  AND s.actor_id = ?3
+                  AND s.key_id = ?4
+                  AND s.public_key_hash = ?5
+                ORDER BY e.id ASC
+                LIMIT ?6"#,
+        )?;
+        let mut rows = statement.query(params![
+            run_id.to_string(),
+            v5_envelope_digest,
+            authority.source_dispatch_signer.actor_id,
+            authority.source_dispatch_signer.key_id,
+            source_hash,
+            i64::try_from(MAX_SIGNER_FILTERED_CANDIDATES + 1).unwrap_or(i64::MAX),
+        ])?;
         let mut resolved = None;
-        for (event_row, signature_row) in
-            v5_source_candidates_by_digest_for_connection(&self.conn, run_id, v5_envelope_digest)?
-        {
-            let Some(signature_row) = signature_row else {
-                continue;
-            };
-            if signature_row.algorithm != "ed25519" {
-                continue;
+        let mut loaded = 0_usize;
+        while let Some(row) = rows.next()? {
+            loaded = loaded.saturating_add(1);
+            #[cfg(any(test, feature = "test-support"))]
+            self.v5_source_candidate_loaded_count
+                .set(u64::try_from(loaded).unwrap_or(u64::MAX));
+            if loaded > MAX_SIGNER_FILTERED_CANDIDATES {
+                return Err(governed_dispatch_v5_admission_reconciliation_required(
+                    run_id,
+                    "unresolved",
+                    "V5 source signer-filtered candidate budget was exhausted",
+                ));
             }
+            let event_row = StoredEventRow {
+                id: row.get(0)?,
+                run_id: row.get(1)?,
+                parent_event_id: row.get(2)?,
+                schema_version: row.get(3)?,
+                kind: row.get(4)?,
+                occurred_at: row.get(5)?,
+                payload: row.get(6)?,
+            };
+            let signature_row = StoredEventSignatureRow {
+                event_id: row.get(7)?,
+                canonical_event_hash: row.get(8)?,
+                actor_id: row.get(9)?,
+                key_id: row.get(10)?,
+                public_key_hash: row.get(11)?,
+                algorithm: row.get(12)?,
+                signature: row.get(13)?,
+                signed_at: row.get(14)?,
+            };
             let Ok(signature) = signature_row.to_event_signature() else {
                 continue;
             };
-            if !actor_matches(&authority.source_dispatch_signer, &signature.signer) {
-                continue;
-            }
             #[cfg(any(test, feature = "test-support"))]
             self.v5_source_candidate_verification_count.set(
                 self.v5_source_candidate_verification_count
@@ -3623,12 +3691,19 @@ impl SqliteStore {
     #[cfg(any(test, feature = "test-support"))]
     pub fn reset_v5_source_candidate_verification_count_for_tests(&self) {
         self.v5_source_candidate_verification_count.set(0);
+        self.v5_source_candidate_loaded_count.set(0);
     }
 
     /// Return how many digest-index candidates reached V5 source verification.
     #[cfg(any(test, feature = "test-support"))]
     pub fn v5_source_candidate_verification_count_for_tests(&self) -> u64 {
         self.v5_source_candidate_verification_count.get()
+    }
+
+    /// Return how many signer-filtered rows the bounded resolver loaded.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn v5_source_candidate_loaded_count_for_tests(&self) -> u64 {
+        self.v5_source_candidate_loaded_count.get()
     }
 
     /// Record (or resolve) one separately signed protected-host V5 admission
@@ -13597,72 +13672,6 @@ fn signature_for_event_for_connection(
     )
     .optional()
     .map_err(LedgerError::from)
-}
-
-/// Narrow V5 source candidates with one indexed query and load each detached
-/// signature in the same join. The JSON expression is only an indexable hint:
-/// callers must reconstruct, canonicalize, and cryptographically verify every
-/// returned row before treating it as an authoritative source.
-fn v5_source_candidates_by_digest_for_connection(
-    conn: &Connection,
-    run_id: RunId,
-    v5_envelope_digest: &str,
-) -> Result<Vec<(StoredEventRow, Option<StoredEventSignatureRow>)>> {
-    let mut statement = conn.prepare(
-        r#"SELECT
-                e.id,
-                e.run_id,
-                e.parent_event_id,
-                e.schema_version,
-                e.kind,
-                e.occurred_at,
-                e.payload,
-                s.event_id,
-                s.canonical_event_hash,
-                s.actor_id,
-                s.key_id,
-                s.public_key_hash,
-                s.algorithm,
-                s.signature,
-                s.signed_at
-            FROM events e
-            LEFT JOIN event_signatures s ON s.event_id = e.id
-            WHERE e.run_id = ?1
-              AND e.kind = 'dispatch_envelope_v5'
-              AND json_extract(
-                    e.payload,
-                    '$.DispatchEnvelopeV5.envelope_digest'
-                  ) = ?2
-            ORDER BY e.id ASC"#,
-    )?;
-    let rows = statement.query_map(params![run_id.to_string(), v5_envelope_digest], |row| {
-        let event = StoredEventRow {
-            id: row.get(0)?,
-            run_id: row.get(1)?,
-            parent_event_id: row.get(2)?,
-            schema_version: row.get(3)?,
-            kind: row.get(4)?,
-            occurred_at: row.get(5)?,
-            payload: row.get(6)?,
-        };
-        let signature_event_id: Option<String> = row.get(7)?;
-        let signature = match signature_event_id {
-            Some(event_id) => Some(StoredEventSignatureRow {
-                event_id,
-                canonical_event_hash: row.get(8)?,
-                actor_id: row.get(9)?,
-                key_id: row.get(10)?,
-                public_key_hash: row.get(11)?,
-                algorithm: row.get(12)?,
-                signature: row.get(13)?,
-                signed_at: row.get(14)?,
-            }),
-            None => None,
-        };
-        Ok((event, signature))
-    })?;
-    rows.collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(LedgerError::from)
 }
 
 fn signed_events_for_run_for_connection(

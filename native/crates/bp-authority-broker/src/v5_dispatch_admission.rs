@@ -346,7 +346,7 @@ fn read_bounded_v5_dispatch_admission_frame(
 }
 
 #[cfg(target_os = "linux")]
-fn read_authenticated_v5_dispatch_admission_frame(
+pub(crate) fn read_authenticated_v5_dispatch_admission_frame(
     policy: &BrokerHostConfinementPolicyV1,
     attestation: &BrokerHostConfinementAttestationV1,
     stream: &mut UnixStream,

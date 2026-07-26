@@ -55,7 +55,7 @@ pub(crate) enum BrokerAuthorityRoleV1 {
 /// A non-forgeable-in-normal-code proof that the current process started as
 /// the configured broker UID. It is retained by the protected server and is
 /// required when it validates a connected worker.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct BrokerHostConfinementAttestationV1 {
     broker_uid: u32,
 }

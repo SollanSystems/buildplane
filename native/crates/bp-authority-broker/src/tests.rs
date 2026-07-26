@@ -8552,6 +8552,47 @@ fn matching_v5_source_event(fixture: &V5BrokerAdmissionFixture) -> Event {
     }
 }
 
+fn insert_v5_flood_event(
+    tx: &rusqlite::Transaction<'_>,
+    event: &Event,
+    signature: Option<(&bp_ledger::signing::EventSignatureV1, &str)>,
+) {
+    tx.execute(
+        r#"INSERT INTO events
+           (id, run_id, parent_event_id, schema_version, kind, occurred_at, payload)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"#,
+        rusqlite::params![
+            event.id.to_string(),
+            event.run_id.to_string(),
+            event.parent_event_id.map(|id| id.to_string()),
+            event.schema_version,
+            event.kind_str(),
+            event.occurred_at.to_rfc3339(),
+            serde_json::to_string(&event.payload).expect("serialize flood payload"),
+        ],
+    )
+    .expect("insert realistic flood event");
+    if let Some((signature, algorithm)) = signature {
+        tx.execute(
+            r#"INSERT INTO event_signatures
+               (event_id, canonical_event_hash, actor_id, key_id, public_key_hash,
+                algorithm, signature, signed_at)
+               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"#,
+            rusqlite::params![
+                signature.event_id.to_string(),
+                signature.canonical_event_hash,
+                signature.signer.actor_id,
+                signature.signer.key_id,
+                signature.signer.public_key_hash,
+                algorithm,
+                signature.signature,
+                signature.signed_at.to_rfc3339(),
+            ],
+        )
+        .expect("insert realistic flood signature");
+    }
+}
+
 fn v5_broker_admission_receipt_count(fixture: &V5BrokerAdmissionFixture) -> usize {
     fixture
         .store
@@ -9206,6 +9247,126 @@ fn broker_v5_digest_resolution_verifies_only_indexed_candidates_on_a_large_run()
 }
 
 #[test]
+fn broker_v5_digest_resolution_sql_filters_large_unsigned_and_wrong_role_floods() {
+    let fixture = v5_broker_admission_fixture();
+    let template = matching_v5_source_event(&fixture);
+    let tx = fixture
+        .store
+        .conn_for_tests()
+        .unchecked_transaction()
+        .expect("begin flood fixture transaction");
+    for _ in 0..1_000 {
+        let unsigned = Event {
+            id: EventId::new(),
+            occurred_at: Utc::now(),
+            ..template.clone()
+        };
+        insert_v5_flood_event(&tx, &unsigned, None);
+        let wrong_role = Event {
+            id: EventId::new(),
+            occurred_at: Utc::now(),
+            ..template.clone()
+        };
+        let signature = sign_event(
+            &wrong_role,
+            &fixture.admission_key,
+            &fixture.admission_signer,
+            Utc::now(),
+        )
+        .expect("sign wrong-role flood event");
+        insert_v5_flood_event(&tx, &wrong_role, Some((&signature, "ed25519")));
+        let unsupported = Event {
+            id: EventId::new(),
+            occurred_at: Utc::now(),
+            ..template.clone()
+        };
+        let unsupported_signature = sign_event(
+            &unsupported,
+            &fixture.source_key,
+            &fixture.source_signer,
+            Utc::now(),
+        )
+        .expect("sign unsupported-algorithm flood event");
+        insert_v5_flood_event(
+            &tx,
+            &unsupported,
+            Some((&unsupported_signature, "future-signature-v9")),
+        );
+    }
+    tx.commit().expect("commit flood fixture transaction");
+    fixture
+        .store
+        .reset_v5_source_candidate_verification_count_for_tests();
+    let broker = v5_broker_admission_backend(&fixture);
+
+    assert!(matches!(
+        broker.record_then_exact_seal(v5_broker_admission_request(&fixture)),
+        BrokerV5DispatchAdmissionDisposition::Sealed(_)
+    ));
+    assert_eq!(
+        fixture.store.v5_source_candidate_loaded_count_for_tests(),
+        1
+    );
+    assert_eq!(
+        fixture
+            .store
+            .v5_source_candidate_verification_count_for_tests(),
+        1
+    );
+}
+
+#[test]
+fn broker_v5_digest_resolution_reconciles_on_exact_signer_candidate_cap_without_mutation() {
+    let fixture = v5_broker_admission_fixture();
+    let template = matching_v5_source_event(&fixture);
+    let tx = fixture
+        .store
+        .conn_for_tests()
+        .unchecked_transaction()
+        .expect("begin exact-signer flood transaction");
+    for _ in 0..1_000 {
+        let duplicate = Event {
+            id: EventId::new(),
+            occurred_at: Utc::now(),
+            ..template.clone()
+        };
+        let mut invalid = sign_event(
+            &duplicate,
+            &fixture.admission_key,
+            &fixture.source_signer,
+            Utc::now(),
+        )
+        .expect("construct invalid exact-signer signature");
+        invalid.signer = fixture.source_signer.clone();
+        insert_v5_flood_event(&tx, &duplicate, Some((&invalid, "ed25519")));
+    }
+    tx.commit().expect("commit exact-signer flood transaction");
+    fixture
+        .store
+        .reset_v5_source_candidate_verification_count_for_tests();
+    let broker = v5_broker_admission_backend(&fixture);
+    let before = fixture.store.event_count().expect("count tape");
+
+    assert!(matches!(
+        broker.record_then_exact_seal(v5_broker_admission_request(&fixture)),
+        BrokerV5DispatchAdmissionDisposition::ReconciliationRequired
+    ));
+    assert_eq!(fixture.store.event_count().expect("unchanged tape"), before);
+    assert_eq!(v5_broker_admission_receipt_count(&fixture), 0);
+    assert_eq!(v5_broker_checkpoint_count(&fixture), 0);
+    assert_eq!(
+        fixture.store.v5_source_candidate_loaded_count_for_tests(),
+        65
+    );
+    assert_eq!(
+        fixture
+            .store
+            .v5_source_candidate_verification_count_for_tests(),
+        64
+    );
+}
+
+#[test]
 fn broker_v5_dispatch_admission_reconciles_then_retries_without_duplicate_receipt() {
     let fixture = v5_broker_admission_fixture();
     let wrong_checkpoint_key = SigningKey::from_bytes(&[244; 32]);
@@ -9241,6 +9402,41 @@ fn broker_v5_dispatch_admission_reconciles_then_retries_without_duplicate_receip
     ));
     assert_eq!(v5_broker_admission_receipt_count(&fixture), 1);
     assert_eq!(v5_broker_checkpoint_count(&fixture), 1);
+}
+
+#[test]
+fn dedicated_serial_mutation_owner_makes_concurrent_exact_retries_one_receipt_and_checkpoint() {
+    let fixture = v5_broker_admission_fixture();
+    let request = v5_broker_admission_request(&fixture);
+    let (request_tx, request_rx) = std::sync::mpsc::sync_channel(2);
+    let first_tx = request_tx.clone();
+    let first_request = request.clone();
+    let first = std::thread::spawn(move || first_tx.send(first_request).expect("first retry"));
+    let second = std::thread::spawn(move || request_tx.send(request).expect("second retry"));
+    first.join().expect("first sender");
+    second.join().expect("second sender");
+
+    let result = std::thread::spawn(move || {
+        let broker = v5_broker_admission_backend(&fixture);
+        let mut sealed = 0;
+        for _ in 0..2 {
+            if matches!(
+                broker.record_then_exact_seal(request_rx.recv().expect("queued exact retry")),
+                BrokerV5DispatchAdmissionDisposition::Sealed(_)
+            ) {
+                sealed += 1;
+            }
+        }
+        (
+            sealed,
+            v5_broker_admission_receipt_count(&fixture),
+            v5_broker_checkpoint_count(&fixture),
+        )
+    })
+    .join()
+    .expect("dedicated mutation owner");
+
+    assert_eq!(result, (2, 1, 1));
 }
 
 #[test]

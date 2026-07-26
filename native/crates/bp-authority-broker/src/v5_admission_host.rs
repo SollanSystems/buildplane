@@ -26,9 +26,11 @@ use crate::v5_admission_response::{
 };
 #[cfg(target_os = "linux")]
 use crate::v5_dispatch_admission::{
-    handle_authenticated_v5_dispatch_admission_request_with_binding,
-    LedgerV5DispatchAdmissionBackend,
+    parse_v5_dispatch_admission_request, read_authenticated_v5_dispatch_admission_frame,
+    record_v5_admission_for_expected_run, LedgerV5DispatchAdmissionBackend,
 };
+#[cfg(target_os = "linux")]
+use std::collections::{HashMap, VecDeque};
 #[cfg(target_os = "linux")]
 use std::fs::File;
 #[cfg(target_os = "linux")]
@@ -40,10 +42,24 @@ use std::os::unix::net::{UnixListener, UnixStream};
 #[cfg(target_os = "linux")]
 use std::path::Path;
 #[cfg(target_os = "linux")]
+use std::sync::{mpsc, Arc, Mutex};
+#[cfg(target_os = "linux")]
 use std::time::{Duration, Instant};
 use thiserror::Error;
 
 const MAX_RESPONSE_FRAME_BYTES: usize = 16 * 1024;
+#[cfg(target_os = "linux")]
+const INGRESS_WORKER_COUNT: usize = 4;
+#[cfg(target_os = "linux")]
+const MAX_TOTAL_IN_FLIGHT: usize = 8;
+#[cfg(target_os = "linux")]
+const MAX_PER_UID_IN_FLIGHT: usize = 2;
+#[cfg(target_os = "linux")]
+const MAX_PER_UID_PER_WINDOW: usize = 16;
+#[cfg(target_os = "linux")]
+const PER_UID_RATE_WINDOW: Duration = Duration::from_secs(1);
+#[cfg(target_os = "linux")]
+const MUTATION_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 #[cfg(target_os = "linux")]
 const SOCKET_PARENT_COMPONENTS: [&[u8]; 3] = [b"run", b"buildplane", b"authority-host"];
 #[cfg(target_os = "linux")]
@@ -115,7 +131,10 @@ impl V5AdmissionHostV1 {
         })
     }
 
-    fn handle(&self, stream: &mut UnixStream) -> Result<(), V5AdmissionHostErrorV1> {
+    fn mutate_and_encode_response(
+        &self,
+        payload: &[u8],
+    ) -> Result<Vec<u8>, V5AdmissionHostErrorV1> {
         let config = self.startup.config();
         let backend = LedgerV5DispatchAdmissionBackend::from_prevalidated_startup(
             self.ledger.store(),
@@ -126,23 +145,18 @@ impl V5AdmissionHostV1 {
             &config.checkpoint_signer,
         )
         .map_err(|_| V5AdmissionHostErrorV1::Startup)?;
-        let handled = handle_authenticated_v5_dispatch_admission_request_with_binding(
-            &self.policy,
-            &self.attestation,
-            stream,
-            &backend,
-            config.run_id,
-        )
-        .map_err(|_| V5AdmissionHostErrorV1::Connection)?;
+        let request = parse_v5_dispatch_admission_request(payload)
+            .map_err(|_| V5AdmissionHostErrorV1::Connection)?;
+        let disposition =
+            record_v5_admission_for_expected_run(&backend, request.clone(), config.run_id);
         let binding = V5AdmissionResponseRequestBindingV1::new(
-            handled.request.request_id,
-            handled.request.run_id,
-            handled.request.v5_envelope_digest.clone(),
+            request.request_id,
+            request.run_id,
+            request.v5_envelope_digest.clone(),
         )
         .map_err(|_| V5AdmissionHostErrorV1::Connection)?;
-        let payload =
-            sign_v5_admission_response_v1(self.keys.checkpoint(), &binding, &handled.disposition)
-                .map_err(|_| V5AdmissionHostErrorV1::Connection)?;
+        let payload = sign_v5_admission_response_v1(self.keys.checkpoint(), &binding, &disposition)
+            .map_err(|_| V5AdmissionHostErrorV1::Connection)?;
         if payload.is_empty() || payload.len() > MAX_RESPONSE_FRAME_BYTES {
             return Err(V5AdmissionHostErrorV1::Connection);
         }
@@ -151,40 +165,184 @@ impl V5AdmissionHostV1 {
             .to_be_bytes()
             .to_vec();
         frame.extend_from_slice(&payload);
-        let deadline = Instant::now()
-            .checked_add(Duration::from_secs(5))
+        Ok(frame)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn write_authenticated_response(
+    policy: &BrokerHostConfinementPolicyV1,
+    attestation: &BrokerHostConfinementAttestationV1,
+    stream: &mut UnixStream,
+    frame: &[u8],
+) -> Result<(), V5AdmissionHostErrorV1> {
+    let deadline = Instant::now()
+        .checked_add(Duration::from_secs(5))
+        .ok_or(V5AdmissionHostErrorV1::Connection)?;
+    let mut written = 0;
+    while written < frame.len() {
+        policy
+            .verify_linux_connected_worker_for_role(
+                BrokerAuthorityRoleV1::DispatchAdmission,
+                attestation,
+                stream,
+            )
+            .map_err(|_| V5AdmissionHostErrorV1::Connection)?;
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .filter(|remaining| !remaining.is_zero())
             .ok_or(V5AdmissionHostErrorV1::Connection)?;
-        let mut written = 0;
-        while written < frame.len() {
-            self.policy
-                .verify_linux_connected_worker_for_role(
-                    BrokerAuthorityRoleV1::DispatchAdmission,
-                    &self.attestation,
-                    stream,
-                )
-                .map_err(|_| V5AdmissionHostErrorV1::Connection)?;
-            let remaining = deadline
-                .checked_duration_since(Instant::now())
-                .filter(|remaining| !remaining.is_zero())
-                .ok_or(V5AdmissionHostErrorV1::Connection)?;
-            stream
-                .set_write_timeout(Some(remaining))
-                .map_err(|_| V5AdmissionHostErrorV1::Connection)?;
-            let count = stream
-                .write(&frame[written..])
-                .map_err(|_| V5AdmissionHostErrorV1::Connection)?;
-            if count == 0 {
-                return Err(V5AdmissionHostErrorV1::Connection);
-            }
-            written += count;
-            if Instant::now() >= deadline {
-                return Err(V5AdmissionHostErrorV1::Connection);
+        stream
+            .set_write_timeout(Some(remaining))
+            .map_err(|_| V5AdmissionHostErrorV1::Connection)?;
+        let count = stream
+            .write(&frame[written..])
+            .map_err(|_| V5AdmissionHostErrorV1::Connection)?;
+        if count == 0 {
+            return Err(V5AdmissionHostErrorV1::Connection);
+        }
+        written += count;
+        if Instant::now() >= deadline {
+            return Err(V5AdmissionHostErrorV1::Connection);
+        }
+    }
+    stream
+        .shutdown(std::net::Shutdown::Write)
+        .map_err(|_| V5AdmissionHostErrorV1::Connection)?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Default)]
+struct InFlightState {
+    total: usize,
+    by_uid: HashMap<u32, usize>,
+    recent_by_uid: HashMap<u32, VecDeque<Instant>>,
+}
+
+#[cfg(target_os = "linux")]
+struct InFlightPermit {
+    uid: u32,
+    state: Arc<Mutex<InFlightState>>,
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for InFlightPermit {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.state.lock() {
+            state.total = state.total.saturating_sub(1);
+            if let Some(count) = state.by_uid.get_mut(&self.uid) {
+                *count = count.saturating_sub(1);
+                if *count == 0 {
+                    state.by_uid.remove(&self.uid);
+                }
             }
         }
-        stream
-            .shutdown(std::net::Shutdown::Write)
-            .map_err(|_| V5AdmissionHostErrorV1::Connection)?;
-        Ok(())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn try_acquire_in_flight(state: &Arc<Mutex<InFlightState>>, uid: u32) -> Option<InFlightPermit> {
+    let mut counts = state.lock().ok()?;
+    let per_uid = counts.by_uid.get(&uid).copied().unwrap_or(0);
+    if counts.total >= MAX_TOTAL_IN_FLIGHT || per_uid >= MAX_PER_UID_IN_FLIGHT {
+        return None;
+    }
+    let now = Instant::now();
+    let recent = counts.recent_by_uid.entry(uid).or_default();
+    while recent
+        .front()
+        .is_some_and(|accepted| now.duration_since(*accepted) >= PER_UID_RATE_WINDOW)
+    {
+        recent.pop_front();
+    }
+    if recent.len() >= MAX_PER_UID_PER_WINDOW {
+        return None;
+    }
+    recent.push_back(now);
+    counts.total += 1;
+    counts.by_uid.insert(uid, per_uid + 1);
+    Some(InFlightPermit {
+        uid,
+        state: Arc::clone(state),
+    })
+}
+
+#[cfg(target_os = "linux")]
+struct IngressConnection {
+    stream: UnixStream,
+    _permit: InFlightPermit,
+}
+
+#[cfg(target_os = "linux")]
+struct MutationRequest {
+    payload: Vec<u8>,
+    response: mpsc::SyncSender<Result<Vec<u8>, V5AdmissionHostErrorV1>>,
+}
+
+#[cfg(target_os = "linux")]
+fn connected_peer_uid(stream: &UnixStream) -> Result<u32, V5AdmissionHostErrorV1> {
+    let mut credentials = std::mem::MaybeUninit::<libc::ucred>::zeroed();
+    let mut length = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    if unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            credentials.as_mut_ptr().cast(),
+            std::ptr::addr_of_mut!(length),
+        )
+    } != 0
+        || length as usize != std::mem::size_of::<libc::ucred>()
+    {
+        return Err(V5AdmissionHostErrorV1::Connection);
+    }
+    let credentials = unsafe { credentials.assume_init() };
+    if credentials.pid <= 0 {
+        return Err(V5AdmissionHostErrorV1::Connection);
+    }
+    Ok(credentials.uid)
+}
+
+#[cfg(target_os = "linux")]
+fn run_ingress_worker(
+    ingress: Arc<Mutex<mpsc::Receiver<IngressConnection>>>,
+    mutation: mpsc::SyncSender<MutationRequest>,
+    policy: BrokerHostConfinementPolicyV1,
+    attestation: BrokerHostConfinementAttestationV1,
+) {
+    loop {
+        let connection = match ingress
+            .lock()
+            .ok()
+            .and_then(|receiver| receiver.recv().ok())
+        {
+            Some(connection) => connection,
+            None => return,
+        };
+        let IngressConnection {
+            mut stream,
+            _permit,
+        } = connection;
+        let Ok(payload) =
+            read_authenticated_v5_dispatch_admission_frame(&policy, &attestation, &mut stream)
+        else {
+            continue;
+        };
+        let (response_tx, response_rx) = mpsc::sync_channel(1);
+        if mutation
+            .try_send(MutationRequest {
+                payload,
+                response: response_tx,
+            })
+            .is_err()
+        {
+            continue;
+        }
+        let Ok(Ok(frame)) = response_rx.recv_timeout(MUTATION_RESPONSE_TIMEOUT) else {
+            continue;
+        };
+        let _ = write_authenticated_response(&policy, &attestation, &mut stream, &frame);
     }
 }
 
@@ -220,14 +378,57 @@ fn run_linux() -> Result<(), V5AdmissionHostErrorV1> {
         load_default_v5_admission_host_config_v1().map_err(|_| V5AdmissionHostErrorV1::Startup)?;
     validate_socket_path(startup.config().socket_group_gid)?;
     let host = V5AdmissionHostV1::from_startup(startup)?;
+    let policy = host.policy.clone();
+    let attestation = host.attestation.clone();
+    let (mutation_tx, mutation_rx) = mpsc::sync_channel::<MutationRequest>(MAX_TOTAL_IN_FLIGHT);
+    std::thread::Builder::new()
+        .name("bp-v5-admission-mutation".into())
+        .spawn(move || {
+            while let Ok(request) = mutation_rx.recv() {
+                let result = host.mutate_and_encode_response(&request.payload);
+                let _ = request.response.send(result);
+            }
+        })
+        .map_err(|_| V5AdmissionHostErrorV1::Startup)?;
+    let (ingress_tx, ingress_rx) = mpsc::sync_channel::<IngressConnection>(MAX_TOTAL_IN_FLIGHT);
+    let ingress_rx = Arc::new(Mutex::new(ingress_rx));
+    for index in 0..INGRESS_WORKER_COUNT {
+        let receiver = Arc::clone(&ingress_rx);
+        let mutation = mutation_tx.clone();
+        let worker_policy = policy.clone();
+        let worker_attestation = attestation.clone();
+        std::thread::Builder::new()
+            .name(format!("bp-v5-admission-ingress-{index}"))
+            .spawn(move || {
+                run_ingress_worker(receiver, mutation, worker_policy, worker_attestation)
+            })
+            .map_err(|_| V5AdmissionHostErrorV1::Startup)?;
+    }
+    let in_flight = Arc::new(Mutex::new(InFlightState::default()));
     loop {
-        let (mut stream, _) = listener
+        let (stream, _) = listener
             .accept()
             .map_err(|_| V5AdmissionHostErrorV1::Accept)?;
-        match host.handle(&mut stream) {
-            Ok(()) | Err(V5AdmissionHostErrorV1::Connection) => {}
-            Err(error) => return Err(error),
+        if policy
+            .verify_linux_connected_worker_for_role(
+                BrokerAuthorityRoleV1::DispatchAdmission,
+                &attestation,
+                &stream,
+            )
+            .is_err()
+        {
+            continue;
         }
+        let Ok(uid) = connected_peer_uid(&stream) else {
+            continue;
+        };
+        let Some(permit) = try_acquire_in_flight(&in_flight, uid) else {
+            continue;
+        };
+        let _ = ingress_tx.try_send(IngressConnection {
+            stream,
+            _permit: permit,
+        });
     }
 }
 
@@ -356,6 +557,114 @@ fn validate_socket_path(expected_group: u32) -> Result<(), V5AdmissionHostErrorV
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn protected_v5_host_state_can_move_to_one_dedicated_mutation_thread() {
+        fn assert_send<T: Send>() {}
+        assert_send::<V5AdmissionHostV1>();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn ingress_limits_enforce_per_uid_and_total_caps_and_release_on_drop() {
+        let state = Arc::new(Mutex::new(InFlightState::default()));
+        let first = try_acquire_in_flight(&state, 1001).expect("first UID permit");
+        let second = try_acquire_in_flight(&state, 1001).expect("second UID permit");
+        assert!(try_acquire_in_flight(&state, 1001).is_none());
+        let mut other = Vec::new();
+        for uid in 1002..1008 {
+            other.push(try_acquire_in_flight(&state, uid).expect("total permit"));
+        }
+        assert!(try_acquire_in_flight(&state, 2000).is_none());
+        drop(first);
+        assert!(try_acquire_in_flight(&state, 1001).is_some());
+        drop(second);
+        drop(other);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn bounded_fixed_worker_pool_allows_a_second_connection_past_a_stalled_first() {
+        use std::io::Read;
+        use std::net::Shutdown;
+
+        let (task_tx, task_rx) = mpsc::sync_channel::<UnixStream>(2);
+        let task_rx = Arc::new(Mutex::new(task_rx));
+        let (completed_tx, completed_rx) = mpsc::sync_channel(2);
+        let mut workers = Vec::new();
+        for _ in 0..2 {
+            let tasks = Arc::clone(&task_rx);
+            let completed = completed_tx.clone();
+            workers.push(std::thread::spawn(move || {
+                let mut stream = tasks.lock().expect("task receiver").recv().expect("task");
+                let mut byte = [0_u8; 1];
+                if stream.read_exact(&mut byte).is_ok() {
+                    let _ = completed.send(byte[0]);
+                }
+            }));
+        }
+        let (stalled_server, stalled_client) = UnixStream::pair().expect("stalled pair");
+        let (valid_server, mut valid_client) = UnixStream::pair().expect("valid pair");
+        task_tx.send(stalled_server).expect("queue stalled");
+        task_tx.send(valid_server).expect("queue valid");
+        valid_client.write_all(b"x").expect("valid request byte");
+        valid_client.shutdown(Shutdown::Write).expect("valid EOF");
+
+        assert_eq!(
+            completed_rx
+                .recv_timeout(Duration::from_millis(250))
+                .expect("second connection must reach a worker"),
+            b'x'
+        );
+        drop(stalled_client);
+        drop(task_tx);
+        for worker in workers {
+            worker.join().expect("bounded worker");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn full_ingress_queue_rejects_without_leaking_total_or_per_uid_permits() {
+        let state = Arc::new(Mutex::new(InFlightState::default()));
+        let (queue_tx, queue_rx) = mpsc::sync_channel::<IngressConnection>(1);
+        let (first, _first_peer) = UnixStream::pair().expect("first pair");
+        let first_permit = try_acquire_in_flight(&state, 1001).expect("first permit");
+        queue_tx
+            .try_send(IngressConnection {
+                stream: first,
+                _permit: first_permit,
+            })
+            .expect("fill ingress queue");
+
+        let (second, _second_peer) = UnixStream::pair().expect("second pair");
+        let second_permit = try_acquire_in_flight(&state, 1001).expect("second permit");
+        assert!(matches!(
+            queue_tx.try_send(IngressConnection {
+                stream: second,
+                _permit: second_permit,
+            }),
+            Err(mpsc::TrySendError::Full(_))
+        ));
+        assert_eq!(state.lock().expect("counts").total, 1);
+        assert_eq!(
+            state.lock().expect("counts").by_uid.get(&1001).copied(),
+            Some(1)
+        );
+        drop(queue_rx);
+        assert_eq!(state.lock().expect("released queue permit").total, 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn ingress_rate_limit_rejects_a_uid_after_its_fixed_window_budget() {
+        let state = Arc::new(Mutex::new(InFlightState::default()));
+        for _ in 0..MAX_PER_UID_PER_WINDOW {
+            drop(try_acquire_in_flight(&state, 1001).expect("rate-window permit"));
+        }
+        assert!(try_acquire_in_flight(&state, 1001).is_none());
+        assert!(try_acquire_in_flight(&state, 1002).is_some());
+    }
 
     #[test]
     fn production_endpoint_paths_are_fixed_and_role_specific() {
