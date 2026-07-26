@@ -141,7 +141,7 @@ pub(crate) fn canonical_governed_repository_binding_digest_v1(
     Ok(domain_sha256(REPOSITORY_BINDING_DOMAIN, &bytes))
 }
 
-fn governed_git_executable() -> Result<PathBuf, CandidateRepositoryErrorV1> {
+pub(crate) fn governed_git_executable() -> Result<PathBuf, CandidateRepositoryErrorV1> {
     let path =
         fs::canonicalize(GOVERNED_GIT).map_err(|_| CandidateRepositoryErrorV1::GitUnavailable)?;
     if !path.is_file() {
@@ -150,7 +150,7 @@ fn governed_git_executable() -> Result<PathBuf, CandidateRepositoryErrorV1> {
     Ok(path)
 }
 
-fn required_git_value(
+pub(crate) fn required_git_value(
     git: &Path,
     repository: &Path,
     args: &[&str],
@@ -177,7 +177,7 @@ fn optional_git_value(
     Err(CandidateRepositoryErrorV1::GitQuery)
 }
 
-fn governed_git_output(
+pub(crate) fn governed_git_output(
     git: &Path,
     repository: &Path,
     args: &[&str],

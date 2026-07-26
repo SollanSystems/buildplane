@@ -6,12 +6,13 @@
 //! No listener or worker authority is granted by this module.
 
 use crate::anthropic_model_gateway::AnthropicModelGatewayV1;
+use crate::candidate_workspace::open_candidate_workspace_v1;
 use crate::confinement::BrokerHostConfinementAttestationV1;
 use crate::governed_reviewer_authority::{
     execute_governed_reviewer_run_v1, open_governed_reviewer_session_from_replay_v1,
     OpenedGovernedReviewerSessionV1,
 };
-use crate::governed_session_client::ParsedGovernedSessionClientRequestV1;
+use crate::governed_session_client::{CandidateApprovalV1, ParsedGovernedSessionClientRequestV1};
 use crate::governed_session_host::{
     handle_governed_session_connection, GovernedSessionHostDispositionV1,
     GovernedSessionHostErrorV1,
@@ -19,6 +20,10 @@ use crate::governed_session_host::{
 use crate::governed_session_response::governed_reviewer_run_result_v1;
 use crate::governed_session_startup::{
     GovernedSessionHostStartupErrorV1, GovernedSessionHostStartupV1, GovernedSessionProviderLaneV1,
+};
+use crate::governed_session_token::{
+    issue_recovery_token_v1, issue_session_token_v1, verify_recovery_token_v1,
+    GovernedSessionKindV1,
 };
 use crate::host_anthropic_credential_custody::ProtectedAnthropicCredentialBrokerV1;
 use crate::host_cas_custody::{
@@ -51,6 +56,7 @@ use crate::{
 use async_trait::async_trait;
 use bp_ledger::payload::model_evidence::ModelProviderV1;
 use bp_ledger::payload::trust_spine::ExecutionRoleV1;
+use bp_ledger::storage::sqlite::ResolveGovernedV5CandidateAuthorityRequestV1;
 use bp_provider_anthropic::{AnthropicHttpTransportV1, AnthropicProvider};
 use bp_provider_sdk::{
     ProviderAdapter, ProviderError, ProviderRequest, ProviderResponse, ProviderTokenCountRequestV1,
@@ -130,6 +136,58 @@ impl ProviderAdapter for ProtectedAnthropicProviderV1 {
 }
 
 impl ProtectedGovernedSessionHostStateV1 {
+    fn open_candidate_session(
+        &self,
+        packet_source: &str,
+        project_root: &str,
+        request_id: &str,
+        approval: &CandidateApprovalV1,
+    ) -> Result<(String, String), ProtectedGovernedSessionProviderErrorV1> {
+        if !matches!(approval, CandidateApprovalV1::OperatorRequested) {
+            return Err(ProtectedGovernedSessionProviderErrorV1::DurableAuthority);
+        }
+        let config = self.validated_startup.config();
+        let resolved = self
+            .ledger
+            .store()
+            .resolve_governed_v5_candidate_authority_v1(
+                &ResolveGovernedV5CandidateAuthorityRequestV1 {
+                    run_id: config.run_id,
+                    packet_source: packet_source.into(),
+                },
+                &config.v5_admission_authority,
+                &config.activity_authority,
+            )
+            .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)?;
+        let recovery_ref = issue_recovery_token_v1(
+            self.signing_keys.broker_identity(),
+            &resolved.run_id.to_string(),
+            &resolved.dispatch_event_id.to_string(),
+            &resolved.repository_binding_digest,
+        )
+        .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)?;
+        let verified_recovery = verify_recovery_token_v1(
+            &self.signing_keys.broker_identity().verifying_key(),
+            &recovery_ref,
+            &resolved.repository_binding_digest,
+        )
+        .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)?;
+        let session_ref = issue_session_token_v1(
+            self.signing_keys.broker_identity(),
+            GovernedSessionKindV1::Candidate,
+            &verified_recovery,
+            request_id,
+        )
+        .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)?;
+        open_candidate_workspace_v1(
+            self.validated_startup.authority_root().directory(),
+            project_root,
+            &resolved,
+        )
+        .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)?;
+        Ok((recovery_ref, session_ref))
+    }
+
     pub(crate) fn validated_startup(&self) -> &ValidatedGovernedSessionHostStartupV1 {
         &self.validated_startup
     }
@@ -356,10 +414,23 @@ impl ProtectedGovernedSessionHostStateV1 {
                     result: governed_reviewer_run_result_v1(status),
                 })
             }
-            // Candidate opening and execution remain unavailable until the
-            // same protected state owns the OCI candidate action plane.
-            ParsedGovernedSessionClientRequestV1::OpenCandidateSession { .. }
-            | ParsedGovernedSessionClientRequestV1::OpenRecoverySession { .. }
+            ParsedGovernedSessionClientRequestV1::OpenCandidateSession {
+                request_id,
+                packet_source,
+                project_root,
+                approval,
+            } => {
+                let (recovery_ref, session_ref) = self
+                    .open_candidate_session(packet_source, project_root, request_id, approval)
+                    .map_err(|_| GovernedSessionHostErrorV1::AuthorityRejected)?;
+                Ok(GovernedSessionHostDispositionV1::Opened {
+                    recovery_ref,
+                    session_ref,
+                })
+            }
+            // Recovery and execution remain unavailable until the same
+            // protected state owns OCI execution and candidate finalization.
+            ParsedGovernedSessionClientRequestV1::OpenRecoverySession { .. }
             | ParsedGovernedSessionClientRequestV1::RunCandidateSession { .. } => {
                 Err(GovernedSessionHostErrorV1::AuthorityRejected)
             }
