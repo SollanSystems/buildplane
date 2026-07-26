@@ -2,12 +2,23 @@ use async_trait::async_trait;
 use bp_provider_sdk::{
     ProviderAdapter, ProviderError, ProviderRequest, ProviderResponse, ProviderStopReasonV1,
 };
+use reqwest::{
+    header::{HeaderValue, USER_AGENT},
+    redirect::Policy,
+    Client,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
+    fmt,
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
+use zeroize::Zeroize;
+
+const ANTHROPIC_MESSAGES_ENDPOINT: &str = "https://api.anthropic.com/v1/messages";
+const ANTHROPIC_VERSION: &str = "2023-06-01";
+const MAX_ANTHROPIC_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -56,7 +67,154 @@ pub trait AnthropicTransportV1: Send + Sync {
     async fn send_message(
         &self,
         request: AnthropicMessageRequestV1,
+        deadline_unix_ms: i64,
     ) -> Result<Value, ProviderError>;
+}
+
+pub struct AnthropicApiCredentialV1(Vec<u8>);
+
+impl AnthropicApiCredentialV1 {
+    pub fn new(mut secret: Vec<u8>) -> Result<Self, ProviderError> {
+        if secret.is_empty()
+            || secret
+                .iter()
+                .any(|byte| byte.is_ascii_whitespace() || byte.is_ascii_control())
+        {
+            secret.zeroize();
+            return Err(ProviderError::InvalidContract(
+                "Anthropic host credential is empty or unsafe for an HTTP header".into(),
+            ));
+        }
+        if HeaderValue::from_bytes(&secret).is_err() {
+            secret.zeroize();
+            return Err(ProviderError::InvalidContract(
+                "Anthropic host credential is invalid for an HTTP header".into(),
+            ));
+        }
+        Ok(Self(secret))
+    }
+
+    fn header_value(&self) -> Result<HeaderValue, ProviderError> {
+        HeaderValue::from_bytes(&self.0)
+            .map_err(|_| ProviderError::Transport("Anthropic credential became invalid".into()))
+    }
+}
+
+impl fmt::Debug for AnthropicApiCredentialV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("AnthropicApiCredentialV1([REDACTED])")
+    }
+}
+
+impl Drop for AnthropicApiCredentialV1 {
+    fn drop(&mut self) {
+        self.0.zeroize();
+    }
+}
+
+#[async_trait]
+pub trait AnthropicCredentialBrokerV1: Send + Sync {
+    async fn available(&self) -> Result<bool, ProviderError>;
+
+    async fn issue_for_messages(&self) -> Result<AnthropicApiCredentialV1, ProviderError>;
+}
+
+pub struct AnthropicHttpTransportV1 {
+    client: Client,
+    credential_broker: Arc<dyn AnthropicCredentialBrokerV1>,
+}
+
+impl AnthropicHttpTransportV1 {
+    pub fn new<T>(credential_broker: T) -> Result<Self, ProviderError>
+    where
+        T: AnthropicCredentialBrokerV1 + 'static,
+    {
+        let client = Client::builder()
+            .https_only(true)
+            .redirect(Policy::none())
+            .no_proxy()
+            .build()
+            .map_err(|error| {
+                ProviderError::Transport(format!(
+                    "failed to initialize protected Anthropic HTTP client: {error}"
+                ))
+            })?;
+        Ok(Self {
+            client,
+            credential_broker: Arc::new(credential_broker),
+        })
+    }
+}
+
+#[async_trait]
+impl AnthropicTransportV1 for AnthropicHttpTransportV1 {
+    async fn available(&self) -> Result<bool, ProviderError> {
+        self.credential_broker.available().await
+    }
+
+    async fn send_message(
+        &self,
+        request: AnthropicMessageRequestV1,
+        deadline_unix_ms: i64,
+    ) -> Result<Value, ProviderError> {
+        let remaining_ms = deadline_unix_ms
+            .checked_sub(now_unix_ms()?)
+            .filter(|remaining| *remaining > 0)
+            .ok_or_else(|| {
+                ProviderError::Transport(
+                    "Anthropic request deadline elapsed before HTTP transport".into(),
+                )
+            })?;
+        let timeout = Duration::from_millis(u64::try_from(remaining_ms).map_err(|_| {
+            ProviderError::Transport("Anthropic request deadline exceeds supported range".into())
+        })?);
+        let credential = self.credential_broker.issue_for_messages().await?;
+        let response = self
+            .client
+            .post(ANTHROPIC_MESSAGES_ENDPOINT)
+            .header("x-api-key", credential.header_value()?)
+            .header("anthropic-version", ANTHROPIC_VERSION)
+            .header(USER_AGENT, "buildplane-native/0.1")
+            .timeout(timeout)
+            .json(&request)
+            .send()
+            .await
+            .map_err(|error| {
+                ProviderError::Transport(format!("Anthropic HTTP request failed: {error}"))
+            })?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(ProviderError::Transport(format!(
+                "Anthropic HTTP request returned status {status}"
+            )));
+        }
+        if response
+            .content_length()
+            .is_some_and(|length| length > MAX_ANTHROPIC_RESPONSE_BYTES as u64)
+        {
+            return Err(ProviderError::Transport(
+                "Anthropic HTTP response exceeded the protected size limit".into(),
+            ));
+        }
+
+        let mut response = response;
+        let mut body = Vec::new();
+        while let Some(chunk) = response.chunk().await.map_err(|error| {
+            ProviderError::Transport(format!("failed to read Anthropic HTTP response: {error}"))
+        })? {
+            if body.len().saturating_add(chunk.len()) > MAX_ANTHROPIC_RESPONSE_BYTES {
+                return Err(ProviderError::Transport(
+                    "Anthropic HTTP response exceeded the protected size limit".into(),
+                ));
+            }
+            body.extend_from_slice(&chunk);
+        }
+        serde_json::from_slice(&body).map_err(|error| {
+            ProviderError::InvalidContract(format!(
+                "Anthropic HTTP response was not valid JSON: {error}"
+            ))
+        })
+    }
 }
 
 pub struct AnthropicProvider {
@@ -116,7 +274,10 @@ impl ProviderAdapter for AnthropicProvider {
                 })
                 .collect(),
         };
-        let raw_response = self.transport.send_message(wire_request).await?;
+        let raw_response = self
+            .transport
+            .send_message(wire_request, request.deadline_unix_ms)
+            .await?;
         if now_unix_ms()? >= request.deadline_unix_ms {
             return Err(ProviderError::Transport(
                 "Anthropic request deadline elapsed with an unknown transport result".into(),
@@ -266,7 +427,10 @@ fn now_unix_ms() -> Result<i64, ProviderError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{AnthropicMessageRequestV1, AnthropicProvider, AnthropicTransportV1};
+    use super::{
+        AnthropicApiCredentialV1, AnthropicMessageRequestV1, AnthropicProvider,
+        AnthropicTransportV1,
+    };
     use async_trait::async_trait;
     use bp_provider_sdk::{
         provider_json_schema_digest_v1, ProviderAdapter, ProviderError, ProviderExecutionRoleV1,
@@ -278,7 +442,7 @@ mod tests {
 
     #[derive(Clone)]
     struct FakeTransport {
-        request: Arc<Mutex<Option<AnthropicMessageRequestV1>>>,
+        request: Arc<Mutex<Option<(AnthropicMessageRequestV1, i64)>>>,
         response: Value,
     }
 
@@ -291,8 +455,9 @@ mod tests {
         async fn send_message(
             &self,
             request: AnthropicMessageRequestV1,
+            deadline_unix_ms: i64,
         ) -> Result<Value, ProviderError> {
-            *self.request.lock().expect("request lock") = Some(request);
+            *self.request.lock().expect("request lock") = Some((request, deadline_unix_ms));
             Ok(self.response.clone())
         }
     }
@@ -362,11 +527,12 @@ mod tests {
         assert_eq!(response.input_tokens, 321);
         assert_eq!(response.output_tokens, 45);
 
-        let wire = captured
+        let (wire, deadline_unix_ms) = captured
             .lock()
             .expect("request lock")
             .clone()
             .expect("captured request");
+        assert_eq!(deadline_unix_ms, i64::MAX);
         assert_eq!(wire.model, "claude-sonnet-4-6");
         assert_eq!(wire.max_tokens, 2_000);
         assert_eq!(
@@ -439,5 +605,17 @@ mod tests {
             };
             assert!(block_on(AnthropicProvider::new(transport).complete(&request())).is_err());
         }
+    }
+
+    #[test]
+    fn host_credential_is_validated_and_redacted() {
+        let credential =
+            AnthropicApiCredentialV1::new(b"short-lived-host-secret".to_vec()).expect("credential");
+        assert_eq!(
+            format!("{credential:?}"),
+            "AnthropicApiCredentialV1([REDACTED])"
+        );
+        assert!(AnthropicApiCredentialV1::new(Vec::new()).is_err());
+        assert!(AnthropicApiCredentialV1::new(b"secret\nheader".to_vec()).is_err());
     }
 }

@@ -612,8 +612,13 @@ API's current `output_config.format` and strict tool definitions, delegates
 only a credential-free wire request to an injected host-owned transport, and
 parses structured output, tool calls, stop reason, and complete cached-plus-
 uncached input usage back into the closed provider response. The OpenAI crate
-and the production Anthropic host-credential transport remain fail-closed
-until their protected-host integrations implement the same boundary.
+remains fail-closed. Anthropic's production transport is host-side and fixed to
+the HTTPS Messages endpoint with redirects and ambient proxy discovery
+disabled, an absolute request timeout, and a bounded response body. It obtains
+a fresh redacted, zeroizing credential from a host broker for each request;
+credentials never enter the provider request or worker sandbox. That transport
+is not available to governed execution until protected-host startup injects
+both the broker and the OCI/action-gateway boundary.
 
 The provider worker seals only a content-addressed `ModelResultEvidenceV1`.
 Its implementer result digest is recomputed from the closed completion, and
