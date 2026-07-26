@@ -645,8 +645,14 @@ model-request digest, signed role, candidate (for review-like roles), worker
 manifest, and normalized implementer or review completion. Nested unknown
 fields, noncanonical findings, role/completion mismatch, malformed confidence,
 and candidate/worker substitution fail before the enclosing evidence record is
-accepted. The production provider gateway still must construct and persist
-these two documents as one protected result path.
+accepted. The broker-owned `ProviderResultWriterV1` is the only native
+conversion from the SDK's already-parsed semantic completion into those two CAS
+documents. It rechecks the private capability, verified model request, derived
+provider route/request identity, role, candidate, worker manifest, and native
+authorization before writing first the result and then its evidence envelope.
+The production credential gateway still must compose this writer with provider
+transport and convert every post-capability failure into a paired `unknown`
+terminal result.
 
 Provider effects receive the same immutable budget boundary as OCI actions.
 The adapter derives `min(expiresAt, issuedAt + maxComputeTimeMs)` once from the

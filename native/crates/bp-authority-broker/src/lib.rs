@@ -88,6 +88,9 @@ mod protocol;
 mod provider_request;
 #[cfg(test)]
 mod provider_request_contract_tests;
+mod provider_result;
+#[cfg(test)]
+mod provider_result_contract_tests;
 #[allow(dead_code)]
 mod reviewer_session;
 mod rootless_oci;
