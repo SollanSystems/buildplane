@@ -10,6 +10,7 @@ use bp_ledger::canonicalize::canonicalize;
 use bp_ledger::event::Event;
 use bp_ledger::id::{EventId, RunId};
 use bp_ledger::kind::EventKind;
+use bp_ledger::payload::governed_packet::GovernedCommandPacketV1;
 use bp_ledger::payload::trust_spine::{
     action_requested_v2_digest, attempt_context_content_v1_digest,
     context_manifest_content_v1_digest, dispatch_envelope_v3_body_digest,
@@ -27,9 +28,13 @@ use bp_ledger::payload::trust_spine::{
 use bp_ledger::signing::{public_key_hash, sign_event, ActorKeyRef, TrustedPublicKeys};
 use bp_ledger::storage::sqlite::{
     ActivityClaimAuthorityV1, ActivityClaimRequestV1, CheckpointPolicy,
+    GovernedCommandActionAuthorizeAndClaimDispositionV1, GovernedCommandActionIssueDispositionV1,
     GovernedDispatchV5AdmissionAuthorityV1, GovernedDispatchV5AdmissionDispositionV1,
-    GovernedDispatchV5AdmissionRequestV1, GovernedDispatchV5AdmissionSealRequestV1, SqliteStore,
+    GovernedDispatchV5AdmissionRequestV1, GovernedDispatchV5AdmissionSealRequestV1,
+    GovernedV5CommandActionAuthorizeAndClaimRequestV1, GovernedV5CommandActionIssueRequestV1,
+    SqliteStore,
 };
+use bp_ledger::storage::Cas;
 use bp_ledger::{LedgerError, Payload};
 use chrono::{Duration, SecondsFormat, Utc};
 use ed25519_dalek::SigningKey;
@@ -38,6 +43,66 @@ use tempfile::TempDir;
 
 fn digest(hex: char) -> String {
     format!("sha256:{}", hex.to_string().repeat(64))
+}
+
+const COMMAND_CAPABILITY_DIGEST: &str =
+    "sha256:f9735004122fe5a668ec78fc26b3335ed0654d2dd1c16967bcd1d258b88dfeaa";
+const COMMAND_ACCEPTANCE_DIGEST: &str =
+    "sha256:b05a1e96b6f3a5e6f415d435de0c46872a8b69ca89de30b5fc9cb7f485e301b4";
+
+fn governed_command_packet_source() -> String {
+    serde_json::json!({
+        "unit": {
+            "id": "unit-v5",
+            "kind": "implementation",
+            "scope": "task",
+            "verificationContract": "tests pass",
+            "policyProfile": "default"
+        },
+        "execution_role": "implementer",
+        "execution": {
+            "command": "/usr/bin/git",
+            "args": ["status", "--short"],
+            "cwd": "repo"
+        },
+        "intent": {
+            "objective": "Inspect the V5 candidate",
+            "taskType": "implement",
+            "features": {
+                "ambiguity": "low",
+                "reversibility": "easy",
+                "verifierStrength": "strong",
+                "changeSurface": 3
+            }
+        },
+        "provenance_ref": "admission:v5",
+        "capability_bundle": {
+            "schemaVersion": "buildplane.capability_bundle.v0",
+            "bundleId": "bundle-1",
+            "fsRead": ["**/*"],
+            "fsWrite": ["**/*"],
+            "netEgress": [],
+            "tools": {
+                "run_command": {
+                    "allowlist": ["/usr/bin/git"]
+                }
+            }
+        },
+        "capability_bundle_digest": COMMAND_CAPABILITY_DIGEST,
+        "acceptance_contract": {
+            "schemaVersion": 1,
+            "contract_version": "v0",
+            "diff_scope": { "allowed_globs": ["**/*"] },
+            "checks": [{ "command": "git status --short" }]
+        },
+        "trust_scope": {
+            "schemaVersion": 1,
+            "lane": "governed",
+            "principal": "operator",
+            "scope": "repository"
+        }
+    })
+    .to_string()
 }
 
 fn timestamp(value: chrono::DateTime<Utc>) -> String {
@@ -102,6 +167,23 @@ fn activity_claim_authority(key: &SigningKey, signer: &ActorKeyRef) -> ActivityC
     .expect("construct activity claim authority")
 }
 
+fn governed_v5_action_authority(
+    source_key: &SigningKey,
+    source_signer: &ActorKeyRef,
+    action_key: &SigningKey,
+) -> (ActivityClaimAuthorityV1, ActorKeyRef) {
+    let action_signer = actor("kernel:v5-action", "action-1", action_key);
+    let authority = ActivityClaimAuthorityV1::new_governed_realm(
+        trusted_keys(&[source_key, action_key]),
+        source_signer.clone(),
+        action_signer.clone(),
+        action_signer.clone(),
+        digest('9'),
+    )
+    .expect("construct protected V5 action authority");
+    (authority, action_signer)
+}
+
 fn event(run_id: RunId, kind: EventKind, payload: Payload) -> Event {
     Event {
         id: EventId::new(),
@@ -162,7 +244,7 @@ fn v5_fixture(attempt: u32) -> V5Fixture {
         image_digest: digest('b'),
         tool_manifest_digest: digest('c'),
         skill_manifest_digest: digest('d'),
-        capability_bundle_digest: digest('e'),
+        capability_bundle_digest: COMMAND_CAPABILITY_DIGEST.into(),
         execution_role: ExecutionRoleV1::Implementer,
     };
     let sandbox_profile = SandboxProfileContentV1 {
@@ -217,7 +299,11 @@ fn v5_fixture(attempt: u32) -> V5Fixture {
         declared_at: timestamp(now),
     };
 
-    let graph_packet_digest = digest('f');
+    let graph_packet_digest =
+        serde_json::from_str::<GovernedCommandPacketV1>(&governed_command_packet_source())
+            .expect("decode normalized V5 command packet")
+            .canonical_digest()
+            .expect("hash normalized V5 command packet");
     let mut graph = WorkflowGraphDeclaredV2 {
         run_id: run_id.to_string(),
         workflow_id: "workflow-v5".into(),
@@ -301,7 +387,7 @@ fn v5_fixture(attempt: u32) -> V5Fixture {
             .worker_manifest
             .capability_bundle_digest
             .clone(),
-        acceptance_contract_digest: digest('c'),
+        acceptance_contract_digest: COMMAND_ACCEPTANCE_DIGEST.into(),
         context_manifest_digest: context_declaration.context_manifest_digest.clone(),
         worker_manifest_digest: worker_declaration.worker_manifest_digest.clone(),
         sandbox_profile_digest: sandbox_declaration.sandbox_profile_digest.clone(),
@@ -699,6 +785,274 @@ fn first_attempt_v5_source_records_one_host_admission_then_exactly_one_checkpoin
     assert_eq!(v5_admission_count(&store), 1);
     assert_eq!(checkpoint_count(&store, fixture.run_id), 1);
     assert_eq!(store.event_count().expect("count stable sealed V5 tape"), 7);
+}
+
+#[test]
+fn v5_command_issuance_requires_a_checkpoint_sealed_admission() {
+    let store = SqliteStore::open_in_memory().expect("open store");
+    let directory = TempDir::new().expect("create CAS directory");
+    let cas = Cas::open(directory.path().join("cas")).expect("open CAS");
+    let source_key = SigningKey::from_bytes(&[71u8; 32]);
+    let admission_key = SigningKey::from_bytes(&[72u8; 32]);
+    let checkpoint_key = SigningKey::from_bytes(&[73u8; 32]);
+    let action_key = SigningKey::from_bytes(&[74u8; 32]);
+    let (v5_authority, source_signer, admission_signer, checkpoint_signer) =
+        v5_admission_authority(&source_key, &admission_key, &checkpoint_key);
+    let (activity_authority, action_signer) =
+        governed_v5_action_authority(&source_key, &source_signer, &action_key);
+    let fixture = v5_fixture(1);
+    append_fixture(
+        &store,
+        &fixture,
+        &source_key,
+        &source_signer,
+        &source_key,
+        &source_signer,
+    );
+    complete_v5_source_scan(&store, &fixture, &v5_authority);
+    let admission_event_id = awaiting_admission_event_id(
+        store
+            .record_governed_dispatch_v5_admission_v1(
+                &GovernedDispatchV5AdmissionRequestV1 {
+                    run_id: fixture.run_id,
+                    dispatch_event_id: fixture.dispatch_event.id,
+                },
+                &v5_authority,
+                &admission_key,
+                &admission_signer,
+            )
+            .expect("record V5 admission"),
+    );
+    let action_request = GovernedV5CommandActionIssueRequestV1 {
+        run_id: fixture.run_id,
+        dispatch_event_id: fixture.dispatch_event.id,
+        admission_event_id,
+        packet_source: governed_command_packet_source(),
+    };
+
+    let unsealed = store.issue_governed_v5_command_action_v1(
+        &action_request,
+        &cas,
+        &v5_authority,
+        &activity_authority,
+        &action_key,
+        &action_signer,
+    );
+    assert!(matches!(
+        unsealed,
+        Err(LedgerError::ActivityClaimAuthorityRejected { .. })
+    ));
+    assert_eq!(
+        store.event_count().expect("count unsealed admission tape"),
+        6,
+        "an admission receipt without checkpoint coverage must not issue an action"
+    );
+
+    store
+        .seal_governed_dispatch_v5_admission_v1(
+            &GovernedDispatchV5AdmissionSealRequestV1 {
+                run_id: fixture.run_id,
+                admission_event_id,
+            },
+            &v5_authority,
+            &checkpoint_key,
+            &checkpoint_signer,
+        )
+        .expect("seal V5 admission");
+    let substituted_packet = GovernedV5CommandActionIssueRequestV1 {
+        packet_source: governed_command_packet_source().replace("/usr/bin/git", "/bin/sh"),
+        ..action_request.clone()
+    };
+    assert!(matches!(
+        store.issue_governed_v5_command_action_v1(
+            &substituted_packet,
+            &cas,
+            &v5_authority,
+            &activity_authority,
+            &action_key,
+            &action_signer,
+        ),
+        Err(LedgerError::ActivityClaimAuthorityRejected { .. })
+    ));
+    assert_eq!(
+        store.event_count().expect("count substituted V5 tape"),
+        7,
+        "a sealed admission must not authorize substituted packet bytes"
+    );
+    let issued = store
+        .issue_governed_v5_command_action_v1(
+            &action_request,
+            &cas,
+            &v5_authority,
+            &activity_authority,
+            &action_key,
+            &action_signer,
+        )
+        .expect("issue action from sealed V5 admission");
+    let action_request_event_id = match issued {
+        GovernedCommandActionIssueDispositionV1::Issued {
+            action_request_event_id,
+            verified_input,
+            ..
+        } => {
+            assert_eq!(verified_input.document().command, "/usr/bin/git");
+            assert_eq!(verified_input.document().args, ["status", "--short"]);
+            action_request_event_id
+        }
+        other => panic!("sealed V5 admission must issue one action, got {other:?}"),
+    };
+    let action_event = store
+        .events_for_run(&fixture.run_id.to_string())
+        .expect("load V5 action tape")
+        .into_iter()
+        .find(|row| row.id == action_request_event_id.to_string())
+        .expect("find issued V5 action")
+        .to_event()
+        .expect("decode issued V5 action");
+    let Payload::ActionRequestedV2(action) = action_event.payload else {
+        panic!("V5 command issuer must append action_requested_v2");
+    };
+    assert_eq!(
+        action_event.parent_event_id,
+        Some(fixture.dispatch_event.id)
+    );
+    assert_eq!(
+        action.dispatch_envelope_digest, fixture.dispatch.envelope_digest,
+        "the action lineage must retain the outer V5 digest"
+    );
+    assert_eq!(
+        action.action_id,
+        format!(
+            "governed:{}:{}",
+            fixture.run_id,
+            fixture
+                .dispatch
+                .envelope_digest
+                .strip_prefix("sha256:")
+                .expect("canonical V5 digest")
+        )
+    );
+    assert_eq!(store.event_count().expect("count issued V5 tape"), 8);
+
+    let granted = store
+        .authorize_and_claim_governed_v5_command_action_v1(
+            &GovernedV5CommandActionAuthorizeAndClaimRequestV1 {
+                run_id: fixture.run_id,
+                dispatch_event_id: fixture.dispatch_event.id,
+                admission_event_id,
+                action_request_event_id,
+                lease_duration_ms: 60_000,
+            },
+            &cas,
+            &v5_authority,
+            &activity_authority,
+            &action_key,
+            &action_signer,
+        )
+        .expect("claim action through sealed V5 admission");
+    match granted {
+        GovernedCommandActionAuthorizeAndClaimDispositionV1::Granted { command_intent, .. } => {
+            assert_eq!(command_intent.document().command, "/usr/bin/git");
+            assert_eq!(command_intent.document().args, ["status", "--short"]);
+        }
+        other => panic!("first sealed V5 claim must grant one lease, got {other:?}"),
+    }
+    assert_eq!(
+        store.event_count().expect("count claimed V5 tape"),
+        9,
+        "sealed V5 action must produce exactly one durable claim"
+    );
+
+    let retry = store
+        .issue_governed_v5_command_action_v1_at_for_tests(
+            &action_request,
+            &cas,
+            &v5_authority,
+            &activity_authority,
+            &action_key,
+            &action_signer,
+            "2100-01-01T00:00:00Z".parse().expect("parse retry time"),
+        )
+        .expect("recover existing V5 action after dispatch expiry");
+    assert!(matches!(
+        retry,
+        GovernedCommandActionIssueDispositionV1::Existing {
+            action_request_event_id: existing,
+            ..
+        } if existing == action_request_event_id
+    ));
+    assert_eq!(
+        store.event_count().expect("count recovered V5 tape"),
+        9,
+        "V5 action replay must not append a duplicate effect intent"
+    );
+}
+
+#[test]
+fn raw_or_mismatched_v5_authority_never_reaches_the_action_plane() {
+    let store = SqliteStore::open_in_memory().expect("open store");
+    let directory = TempDir::new().expect("create CAS directory");
+    let cas = Cas::open(directory.path().join("cas")).expect("open CAS");
+    let source_key = SigningKey::from_bytes(&[75u8; 32]);
+    let admission_key = SigningKey::from_bytes(&[76u8; 32]);
+    let checkpoint_key = SigningKey::from_bytes(&[77u8; 32]);
+    let action_key = SigningKey::from_bytes(&[78u8; 32]);
+    let (v5_authority, source_signer, _, _) =
+        v5_admission_authority(&source_key, &admission_key, &checkpoint_key);
+    let (activity_authority, action_signer) =
+        governed_v5_action_authority(&source_key, &source_signer, &action_key);
+    let fixture = v5_fixture(1);
+    append_fixture(
+        &store,
+        &fixture,
+        &source_key,
+        &source_signer,
+        &source_key,
+        &source_signer,
+    );
+    let request = GovernedV5CommandActionIssueRequestV1 {
+        run_id: fixture.run_id,
+        dispatch_event_id: fixture.dispatch_event.id,
+        admission_event_id: EventId::new(),
+        packet_source: governed_command_packet_source(),
+    };
+
+    assert!(matches!(
+        store.issue_governed_v5_command_action_v1(
+            &request,
+            &cas,
+            &v5_authority,
+            &activity_authority,
+            &action_key,
+            &action_signer,
+        ),
+        Err(LedgerError::ActivityClaimAuthorityRejected { .. })
+    ));
+
+    let mismatched_activity_authority = ActivityClaimAuthorityV1::new_governed_realm(
+        trusted_keys(&[&source_key, &action_key]),
+        source_signer,
+        action_signer.clone(),
+        action_signer.clone(),
+        digest('8'),
+    )
+    .expect("construct mismatched protected realm");
+    assert!(matches!(
+        store.issue_governed_v5_command_action_v1(
+            &request,
+            &cas,
+            &v5_authority,
+            &mismatched_activity_authority,
+            &action_key,
+            &action_signer,
+        ),
+        Err(LedgerError::ActivityClaimAuthorityRejected { .. })
+    ));
+    assert_eq!(
+        store.event_count().expect("count raw V5 tape"),
+        5,
+        "raw V5 source evidence or a mismatched realm must never mint action authority"
+    );
 }
 
 #[test]
