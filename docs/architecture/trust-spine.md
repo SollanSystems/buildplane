@@ -765,8 +765,9 @@ loaded only from fixed
 `/etc/buildplane/authority-host/governed-session-v1.json`. It binds one run,
 realm, non-root broker UID, distinct client UIDs, listener group, bounded
 activity lease, exact provider/model and worker-manifest allowlists, a
-digest-pinned OCI image/profile with resource ceilings, and three distinct
-public signer identities for dispatch, action-request, and claim roles. The
+digest-pinned OCI image/profile with resource ceilings, and four distinct
+public signer identities for dispatch, action-request, claim, and
+broker-response/session roles. The
 parser constructs the activity and replay authorities plus the model-action
 confinement and OCI policies. Unknown fields, secret or endpoint fields,
 caller-selected socket/ledger/CAS/credential paths, duplicate identities or
@@ -774,13 +775,15 @@ keys, unknown providers, unsafe model IDs, unpinned images, and invalid limits
 fail closed. The loader retains the descriptor-validated private authority
 root; signing-key, ledger, CAS, and credential custody all derive from that
 same startup object. Only the action-request and claim private keys are loaded
-by this host; the dispatch identity remains verification-only.
+alongside the domain-separated broker identity by this host; the dispatch
+identity remains verification-only.
 
 Protected governed-session startup is now an all-or-nothing internal
 composition. The current process must match the configured non-root broker
 identity and the exact OCI canary must attest a rootless runtime, read-only
 base, narrow writable overlay, no network, no host fallback, pinned image, and
-profile digest before private custody is opened. The action and claim keys,
+profile digest before private custody is opened. The action, claim, and broker
+identity keys,
 pre-existing signed ledger, pre-existing descriptor-bound CAS, and validated
 Anthropic credential must then all load from the retained authority root.
 Missing or unsafe state yields one closed startup category and no host state.

@@ -325,6 +325,7 @@ mod tests {
         owner: u32,
         action_seed: [u8; 32],
         claim_seed: [u8; 32],
+        broker_identity_seed: [u8; 32],
     }
 
     impl HostFixture {
@@ -339,6 +340,7 @@ mod tests {
                 owner: unsafe { libc::geteuid() },
                 action_seed: [32; 32],
                 claim_seed: [33; 32],
+                broker_identity_seed: [34; 32],
             };
             fixture.install();
             fixture
@@ -351,6 +353,11 @@ mod tests {
                 &self.action_seed,
             );
             self.write_key(&["kernel", "model-claim"], "claim-main", &self.claim_seed);
+            self.write_key(
+                &["broker", "governed-session"],
+                "broker-main",
+                &self.broker_identity_seed,
+            );
             let ledger_directory = self.authority_root.join("ledger");
             create_private_directory(&ledger_directory);
             let database = ledger_directory.join("events.db");
@@ -422,6 +429,11 @@ mod tests {
                     self.action_seed
                 ),
                 "claim": signer("kernel:model-claim", "claim-main", self.claim_seed),
+                "broker_identity": signer(
+                    "broker:governed-session",
+                    "broker-main",
+                    self.broker_identity_seed
+                ),
             });
             validate_governed_session_host_startup_from_trusted_anchor_for_test(
                 parse_governed_session_host_config_v1(&config.to_string())
@@ -479,6 +491,7 @@ mod tests {
         );
         assert_eq!(state.signing_keys().action_request().to_bytes(), [32; 32]);
         assert_eq!(state.signing_keys().claim().to_bytes(), [33; 32]);
+        assert_eq!(state.signing_keys().broker_identity().to_bytes(), [34; 32]);
         assert_eq!(state.ledger().store().event_count().expect("ledger"), 0);
         assert!(state
             .cas()

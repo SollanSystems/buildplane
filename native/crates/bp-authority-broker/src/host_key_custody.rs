@@ -110,6 +110,7 @@ pub(crate) struct ProtectedV5AdmissionSigningKeysV1 {
 pub(crate) struct ProtectedGovernedSessionSigningKeysV1 {
     action_request: SigningKey,
     claim: SigningKey,
+    broker_identity: SigningKey,
 }
 
 impl ProtectedGovernedSessionSigningKeysV1 {
@@ -119,6 +120,10 @@ impl ProtectedGovernedSessionSigningKeysV1 {
 
     pub(crate) fn claim(&self) -> &SigningKey {
         &self.claim
+    }
+
+    pub(crate) fn broker_identity(&self) -> &SigningKey {
+        &self.broker_identity
     }
 }
 
@@ -138,12 +143,21 @@ pub(crate) fn load_governed_session_signing_keys_v1(
             &config.claim_signer,
             config.broker_uid,
         )?;
-        if action_request.verifying_key() == claim.verifying_key() {
+        let broker_identity = load_signing_key_from_authority_descriptor(
+            startup.authority_root().directory(),
+            &config.broker_identity_signer,
+            config.broker_uid,
+        )?;
+        if action_request.verifying_key() == claim.verifying_key()
+            || action_request.verifying_key() == broker_identity.verifying_key()
+            || claim.verifying_key() == broker_identity.verifying_key()
+        {
             return Err(ProtectedHostKeyLoadError::AliasedKeyMaterial);
         }
         Ok(ProtectedGovernedSessionSigningKeysV1 {
             action_request,
             claim,
+            broker_identity,
         })
     }
     #[cfg(not(target_os = "linux"))]
@@ -580,13 +594,19 @@ mod tests {
     }
 
     #[test]
-    fn governed_session_custody_loads_only_action_and_claim_keys() {
+    fn governed_session_custody_loads_action_claim_and_broker_identity_keys() {
         let fixture = KeyFixture::new();
         let dispatch_seed = [21; 32];
         let action_seed = [22; 32];
         let claim_seed = [23; 32];
+        let broker_identity_seed = [24; 32];
         fixture.write_key(&["kernel", "model-action"], "action-main", &action_seed);
         fixture.write_key(&["kernel", "model-claim"], "claim-main", &claim_seed);
+        fixture.write_key(
+            &["broker", "governed-session"],
+            "broker-main",
+            &broker_identity_seed,
+        );
         let signer = |actor_id: &str, key_id: &str, seed: [u8; 32]| {
             let signing_key = SigningKey::from_bytes(&seed);
             json!({
@@ -622,6 +642,11 @@ mod tests {
             "dispatch": signer("dispatch:governed", "dispatch-main", dispatch_seed),
             "action_request": signer("kernel:model-action", "action-main", action_seed),
             "claim": signer("kernel:model-claim", "claim-main", claim_seed),
+            "broker_identity": signer(
+                "broker:governed-session",
+                "broker-main",
+                broker_identity_seed
+            ),
         });
         let startup = validate_governed_session_host_startup_from_trusted_anchor_for_test(
             parse_governed_session_host_config_v1(&config.to_string())
@@ -635,6 +660,7 @@ mod tests {
             load_governed_session_signing_keys_v1(&startup).expect("load governed-session keys");
         assert_eq!(keys.action_request().to_bytes(), action_seed);
         assert_eq!(keys.claim().to_bytes(), claim_seed);
+        assert_eq!(keys.broker_identity().to_bytes(), broker_identity_seed);
         assert!(
             !fixture
                 .authority_root

@@ -47,6 +47,7 @@ pub(crate) struct GovernedSessionHostConfigV1 {
     pub(crate) dispatch_signer: ActorKeyRef,
     pub(crate) action_request_signer: ActorKeyRef,
     pub(crate) claim_signer: ActorKeyRef,
+    pub(crate) broker_identity_signer: ActorKeyRef,
     pub(crate) activity_authority: ActivityClaimAuthorityV1,
     pub(crate) replay_authorities: TrustedReplayAuthorities,
     pub(crate) confinement_policy: BrokerHostConfinementPolicyV1,
@@ -76,6 +77,7 @@ struct RawGovernedSessionHostConfigV1 {
     dispatch: RawSignerV1,
     action_request: RawSignerV1,
     claim: RawSignerV1,
+    broker_identity: RawSignerV1,
 }
 
 #[derive(Deserialize)]
@@ -162,7 +164,8 @@ pub(crate) fn parse_governed_session_host_config_v1(
     let dispatch = parse_signer(raw.dispatch)?;
     let action_request = parse_signer(raw.action_request)?;
     let claim = parse_signer(raw.claim)?;
-    let signers = [&dispatch, &action_request, &claim];
+    let broker_identity = parse_signer(raw.broker_identity)?;
+    let signers = [&dispatch, &action_request, &claim, &broker_identity];
     let mut actor_ids = BTreeSet::new();
     let mut signer_identities = BTreeSet::new();
     let mut public_key_hashes = BTreeSet::new();
@@ -188,6 +191,7 @@ pub(crate) fn parse_governed_session_host_config_v1(
     let dispatch_signer = dispatch.identity;
     let action_request_signer = action_request.identity;
     let claim_signer = claim.identity;
+    let broker_identity_signer = broker_identity.identity;
     let activity_authority = ActivityClaimAuthorityV1::new_governed_realm(
         trusted_keys.clone(),
         dispatch_signer.clone(),
@@ -235,6 +239,7 @@ pub(crate) fn parse_governed_session_host_config_v1(
         dispatch_signer,
         action_request_signer,
         claim_signer,
+        broker_identity_signer,
         activity_authority,
         replay_authorities,
         confinement_policy,
@@ -382,6 +387,7 @@ mod tests {
             "dispatch": signer("dispatch:governed", "dispatch-main", 1),
             "action_request": signer("kernel:model-action", "action-main", 2),
             "claim": signer("kernel:model-claim", "claim-main", 3),
+            "broker_identity": signer("broker:governed-session", "broker-main", 4),
         })
     }
 
@@ -398,6 +404,7 @@ mod tests {
         assert_eq!(config.model_action_lease_ms, MIN_ACTIVITY_LEASE_MS);
         assert_ne!(config.dispatch_signer, config.action_request_signer);
         assert_ne!(config.action_request_signer, config.claim_signer);
+        assert_ne!(config.claim_signer, config.broker_identity_signer);
     }
 
     #[test]
@@ -438,6 +445,9 @@ mod tests {
             ("dispatch", "action_request"),
             ("dispatch", "claim"),
             ("action_request", "claim"),
+            ("dispatch", "broker_identity"),
+            ("action_request", "broker_identity"),
+            ("claim", "broker_identity"),
         ] {
             let mut actor_alias = valid_config();
             actor_alias[right]["actor_id"] = actor_alias[left]["actor_id"].clone();
