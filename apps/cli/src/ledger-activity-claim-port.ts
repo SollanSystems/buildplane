@@ -9,10 +9,12 @@ import {
 	canonicalSha256Digest,
 	type DurableActionRequestV2,
 	type GovernedDispatchLineageV3,
+	isCanonicalBuildplaneCandidateRef,
 } from "@buildplane/kernel";
 import type {
 	ActivityClaimResultLine,
 	ActivityResultResultLine,
+	RetryCandidateActionIdentityResultLine,
 	TapeEmitter,
 } from "@buildplane/ledger-client";
 
@@ -101,24 +103,52 @@ export function createGovernedActivityClaimPort(input: {
 				}),
 			);
 		},
+
+		async resolveRetryCandidateActionIdentity(retryInput: {
+			readonly dispatch: GovernedDispatchLineageV3;
+			readonly candidateRef: string;
+		}) {
+			assertRetryCandidateIdentityInput(retryInput);
+			const dispatchEventId = requireEventId(
+				await references.resolveDispatchEventId({
+					dispatch: retryInput.dispatch,
+				}),
+				"resolved signed dispatch event",
+			);
+			return toRetryCandidateActionIdentityDisposition(
+				await emitter.resolveRetryCandidateActionIdentity({
+					runId: retryInput.dispatch.runId,
+					dispatchEventId,
+					candidateRef: retryInput.candidateRef,
+				}),
+			);
+		},
 	});
 }
 
-function captureEmitter(
-	input: TapeEmitter,
-): Pick<TapeEmitter, "claimActivity" | "recordActivityResult"> {
+function captureEmitter(input: TapeEmitter): Pick<
+	TapeEmitter,
+	"claimActivity" | "recordActivityResult"
+> & {
+	readonly resolveRetryCandidateActionIdentity: NonNullable<
+		TapeEmitter["resolveRetryCandidateActionIdentity"]
+	>;
+} {
 	if (
 		!input ||
 		typeof input.claimActivity !== "function" ||
-		typeof input.recordActivityResult !== "function"
+		typeof input.recordActivityResult !== "function" ||
+		typeof input.resolveRetryCandidateActionIdentity !== "function"
 	) {
 		throw new TypeError(
-			"createGovernedActivityClaimPort requires a native tape emitter with activity-claim controls.",
+			"createGovernedActivityClaimPort requires a native tape emitter with activity-claim and retry candidate action identity controls.",
 		);
 	}
 	return Object.freeze({
 		claimActivity: input.claimActivity.bind(input),
 		recordActivityResult: input.recordActivityResult.bind(input),
+		resolveRetryCandidateActionIdentity:
+			input.resolveRetryCandidateActionIdentity.bind(input),
 	});
 }
 
@@ -160,6 +190,18 @@ function assertClaimInput(
 	) {
 		throw new RangeError(
 			"native activity claim leaseDurationMs must be an integer from 1000 through 900000.",
+		);
+	}
+}
+
+function assertRetryCandidateIdentityInput(input: {
+	readonly dispatch: GovernedDispatchLineageV3;
+	readonly candidateRef: string;
+}): void {
+	assertSealedV3Dispatch(input.dispatch);
+	if (!isCanonicalBuildplaneCandidateRef(input.candidateRef)) {
+		throw new TypeError(
+			"native retry candidate action identity requires a canonical Buildplane candidate ref.",
 		);
 	}
 }
@@ -352,6 +394,95 @@ function toResultDisposition(
 				),
 			};
 	}
+}
+
+function toRetryCandidateActionIdentityDisposition(
+	line: RetryCandidateActionIdentityResultLine,
+):
+	| {
+			readonly state: "resolved";
+			readonly actionId: string;
+			readonly activityId: string;
+			readonly idempotencyKey: string;
+	  }
+	| {
+			readonly state: "rejected";
+			readonly code: string;
+			readonly message: string;
+	  } {
+	if (!line || typeof line !== "object" || Array.isArray(line)) {
+		throw new TypeError(
+			"native retry candidate action identity response is malformed.",
+		);
+	}
+	const record = line as unknown as Record<string, unknown>;
+	if (record.control !== "resolve_retry_candidate_action_identity_v1_result") {
+		throw new TypeError(
+			"native retry candidate action identity response has an unexpected control.",
+		);
+	}
+	switch (record.outcome) {
+		case "resolved":
+			if (
+				!hasExactNonEmptyStringFields(record, [
+					"control",
+					"request_id",
+					"outcome",
+					"action_id",
+					"activity_id",
+					"idempotency_key",
+				])
+			) {
+				throw new TypeError(
+					"native retry candidate action identity response is malformed.",
+				);
+			}
+			return {
+				state: "resolved",
+				actionId: record.action_id,
+				activityId: record.activity_id,
+				idempotencyKey: record.idempotency_key,
+			};
+		case "rejected":
+			if (
+				!hasExactNonEmptyStringFields(record, [
+					"control",
+					"request_id",
+					"outcome",
+					"code",
+					"message",
+				])
+			) {
+				throw new TypeError(
+					"native retry candidate action identity response is malformed.",
+				);
+			}
+			return {
+				state: "rejected",
+				code: record.code,
+				message: record.message,
+			};
+		default:
+			throw new TypeError(
+				"native retry candidate action identity response is malformed.",
+			);
+	}
+}
+
+function hasExactNonEmptyStringFields(
+	value: Record<string, unknown>,
+	fields: readonly string[],
+): value is Record<string, string> {
+	const keys = Object.keys(value);
+	return (
+		keys.length === fields.length &&
+		fields.every(
+			(field) =>
+				field in value &&
+				typeof value[field] === "string" &&
+				value[field].trim().length > 0,
+		)
+	);
 }
 
 function requireActivityOutcome(

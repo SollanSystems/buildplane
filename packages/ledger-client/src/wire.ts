@@ -209,6 +209,37 @@ export function buildHeartbeatActivityV1(
 	})}\n`;
 }
 
+/**
+ * Authority-owned retry identity resolution. The caller can name only the
+ * signed retry dispatch and immutable candidate ref; native code derives the
+ * action/activity/idempotency identity from the signed attempt context.
+ */
+export interface ResolveRetryCandidateActionIdentityV1Args {
+	requestId: string;
+	runId: string;
+	dispatchEventId: string;
+	candidateRef: string;
+}
+
+/** Build the closed retry candidate action identity resolution request. */
+export function buildResolveRetryCandidateActionIdentityV1(
+	args: ResolveRetryCandidateActionIdentityV1Args,
+): string {
+	assertNonEmptyActivityFields(args, [
+		"requestId",
+		"runId",
+		"dispatchEventId",
+		"candidateRef",
+	]);
+	return `${JSON.stringify({
+		control: "resolve_retry_candidate_action_identity_v1",
+		request_id: args.requestId,
+		run_id: args.runId,
+		dispatch_event_id: args.dispatchEventId,
+		candidate_ref: args.candidateRef,
+	})}\n`;
+}
+
 function assertNonEmptyActivityFields(
 	value: object,
 	fields: readonly string[],
@@ -391,6 +422,27 @@ export type ActivityHeartbeatResultLine =
 	| ActivityHeartbeatLeaseExpiredLine
 	| ActivityHeartbeatRejectedLine;
 
+export interface RetryCandidateActionIdentityResolvedLine {
+	control: "resolve_retry_candidate_action_identity_v1_result";
+	request_id: string;
+	outcome: "resolved";
+	action_id: string;
+	activity_id: string;
+	idempotency_key: string;
+}
+
+export interface RetryCandidateActionIdentityRejectedLine {
+	control: "resolve_retry_candidate_action_identity_v1_result";
+	request_id: string;
+	outcome: "rejected";
+	code: string;
+	message: string;
+}
+
+export type RetryCandidateActionIdentityResultLine =
+	| RetryCandidateActionIdentityResolvedLine
+	| RetryCandidateActionIdentityRejectedLine;
+
 export type AckLine =
 	| HandshakeAck
 	| FlushAck
@@ -398,7 +450,8 @@ export type AckLine =
 	| ErrorLine
 	| ActivityClaimResultLine
 	| ActivityResultResultLine
-	| ActivityHeartbeatResultLine;
+	| ActivityHeartbeatResultLine
+	| RetryCandidateActionIdentityResultLine;
 
 /** Parse a JSON ack line from the ledger's stderr. Returns null if unrecognized. */
 export function parseAckLine(line: string): AckLine | null {
@@ -429,6 +482,8 @@ export function parseAckLine(line: string): AckLine | null {
 			return parseActivityResultResultLine(value);
 		case "heartbeat_activity_v1_result":
 			return parseActivityHeartbeatResultLine(value);
+		case "resolve_retry_candidate_action_identity_v1_result":
+			return parseRetryCandidateActionIdentityResultLine(value);
 		default:
 			return null;
 	}
@@ -442,7 +497,8 @@ export function isActivityControlResponseLine(line: string): boolean {
 			isRecord(value) &&
 			(value.control === "claim_activity_v1_result" ||
 				value.control === "record_activity_result_v1_result" ||
-				value.control === "heartbeat_activity_v1_result")
+				value.control === "heartbeat_activity_v1_result" ||
+				value.control === "resolve_retry_candidate_action_identity_v1_result")
 		);
 	} catch {
 		return false;
@@ -588,6 +644,36 @@ function parseActivityHeartbeatResultLine(
 				"message",
 			])
 				? (value as unknown as ActivityHeartbeatRejectedLine)
+				: null;
+		default:
+			return null;
+	}
+}
+
+function parseRetryCandidateActionIdentityResultLine(
+	value: Record<string, unknown>,
+): RetryCandidateActionIdentityResultLine | null {
+	switch (value.outcome) {
+		case "resolved":
+			return hasExactStringFields(value, [
+				"control",
+				"request_id",
+				"outcome",
+				"action_id",
+				"activity_id",
+				"idempotency_key",
+			])
+				? (value as unknown as RetryCandidateActionIdentityResolvedLine)
+				: null;
+		case "rejected":
+			return hasExactStringFields(value, [
+				"control",
+				"request_id",
+				"outcome",
+				"code",
+				"message",
+			])
+				? (value as unknown as RetryCandidateActionIdentityRejectedLine)
 				: null;
 		default:
 			return null;

@@ -5047,7 +5047,20 @@ fn apply_candidate_created_v2(state: &mut ReplayState, event: &Event, p: &Candid
         );
         return;
     }
-    if !candidate_v2_matches_dispatch(workflow, p) {
+    if !candidate_ref_binds_candidate_id_run_and_attempt(
+        &p.candidate_ref,
+        &p.candidate_id,
+        &event.run_id.to_string(),
+        workflow.attempt,
+    ) {
+        reject_workflow_transition(
+            state,
+            event,
+            "candidate v2 candidate ref must bind the signed candidate id, event run, and dispatch attempt".into(),
+        );
+        return;
+    }
+    if !candidate_v2_matches_dispatch(workflow, event, p) {
         reject_workflow_transition(
             state,
             event,
@@ -5256,6 +5269,20 @@ fn apply_candidate_completion_recorded_v1(
         );
         return;
     };
+    if !candidate_ref_binds_candidate_id_run_and_attempt(
+        &candidate.candidate_ref,
+        &candidate.candidate_id,
+        &event.run_id.to_string(),
+        workflow.attempt,
+    ) {
+        reject_workflow_transition(
+            state,
+            event,
+            "candidate completion candidate ref must bind the signed candidate id, event run, and dispatch attempt"
+                .into(),
+        );
+        return;
+    }
     if p.candidate_created_event_ref != candidate.event_id
         || p.candidate_digest != candidate.candidate_digest
         || event.parent_event_id != Some(candidate.event_id)
@@ -5328,15 +5355,19 @@ fn apply_candidate_completion_recorded_v1(
         return;
     };
     if action.request.action_kind != ActionKindV1::Git
-        || !candidate_create_action_id_matches_candidate(
+        || !candidate_create_action_identity_matches_candidate(
+            workflow,
             &p.candidate_create_action_id,
+            &action.request.idempotency_key,
             &candidate.candidate_ref,
+            &candidate.candidate_id,
+            &event.run_id.to_string(),
         )
     {
         reject_workflow_transition(
             state,
             event,
-            "candidate completion requires the exact Git candidate-create action for its immutable candidate ref"
+            "candidate completion requires the exact Git candidate-create action and idempotency key for its immutable candidate ref"
                 .into(),
         );
         return;
@@ -8069,15 +8100,60 @@ fn requires_candidate_completion(workflow: &WorkflowInstanceV1) -> bool {
 
 const CANDIDATE_CREATE_ACTION_ID_PREFIX: &str = "git-candidate-create:";
 
+const RETRY_CANDIDATE_CREATE_ACTION_ID_SEGMENT: &str = ":git-candidate-create:";
+const RETRY_CANDIDATE_CREATE_IDEMPOTENCY_SUFFIX: &str = ":idempotency";
+
 /// The governed Git adapter assigns the candidate action identifier from the
 /// exact Buildplane candidate-ref suffix. Requiring both this deterministic
 /// identity and `ActionKindV1::Git` prevents a generic completed action from
 /// being retrospectively labeled as the materialization that made a candidate.
-fn candidate_create_action_id_matches_candidate(action_id: &str, candidate_ref: &str) -> bool {
+///
+/// Retry V3 sealed-governed workflows additionally bind the candidate effect
+/// to the namespace retained from their consumed retry context. V4 and V5
+/// retain their existing candidate-action contract: this V3-only extension
+/// must not turn a namespaced V3 identity into a permissive cross-version
+/// matcher.
+fn candidate_create_action_identity_matches_candidate(
+    workflow: &WorkflowInstanceV1,
+    action_id: &str,
+    idempotency_key: &str,
+    candidate_ref: &str,
+    candidate_id: &str,
+    event_run_id: &str,
+) -> bool {
+    if !candidate_ref_binds_candidate_id_run_and_attempt(
+        candidate_ref,
+        candidate_id,
+        event_run_id,
+        workflow.attempt,
+    ) {
+        return false;
+    }
     let Some(candidate_key) = candidate_ref.strip_prefix(BUILDPANE_CANDIDATE_REF_PREFIX) else {
         return false;
     };
-    action_id == format!("{CANDIDATE_CREATE_ACTION_ID_PREFIX}{candidate_key}")
+
+    if !uses_context_bound_retry_candidate_action_identity(workflow) {
+        return action_id == format!("{CANDIDATE_CREATE_ACTION_ID_PREFIX}{candidate_key}");
+    }
+
+    let Some(retry_context) = workflow.retry_context.as_ref() else {
+        return false;
+    };
+    let expected_action_id = format!(
+        "{}{RETRY_CANDIDATE_CREATE_ACTION_ID_SEGMENT}{candidate_key}",
+        retry_context.context.retry_action_namespace
+    );
+    action_id == expected_action_id
+        && idempotency_key
+            == format!("{expected_action_id}{RETRY_CANDIDATE_CREATE_IDEMPOTENCY_SUFFIX}")
+}
+
+fn uses_context_bound_retry_candidate_action_identity(workflow: &WorkflowInstanceV1) -> bool {
+    workflow.attempt > 1
+        && workflow.dispatch.dispatch_version == 3
+        && workflow.dispatch.trust_tier == TrustTierV1::Governed
+        && workflow.dispatch.action_evidence_version == Some(ActionEvidenceVersionV1::SealedV3)
 }
 
 /// Retry action identities use a literal colon delimiter after the signed
@@ -9146,13 +9222,52 @@ fn candidate_matches_existing(
         && existing.action_receipt_set_digest.is_none()
 }
 
-fn candidate_v2_matches_dispatch(workflow: &WorkflowInstanceV1, p: &CandidateCreatedV2) -> bool {
+fn candidate_v2_matches_dispatch(
+    workflow: &WorkflowInstanceV1,
+    event: &Event,
+    p: &CandidateCreatedV2,
+) -> bool {
     workflow.workflow_id == p.workflow_id
         && workflow.unit_id == p.unit_id
         && workflow.attempt == p.attempt
+        && candidate_ref_binds_candidate_id_run_and_attempt(
+            &p.candidate_ref,
+            &p.candidate_id,
+            &event.run_id.to_string(),
+            workflow.attempt,
+        )
         && workflow.dispatch.provenance_ref == p.provenance_ref
         && workflow.dispatch.base_commit_sha == p.base_commit_sha
         && workflow.dispatch.envelope_digest == p.envelope_digest
+}
+
+/// Governed candidates are namespaced by candidate id, run id, and dispatch
+/// attempt. Canonical syntax alone is insufficient: all three segments must
+/// bind the signed candidate and workflow currently admitting it.
+fn candidate_ref_binds_candidate_id_run_and_attempt(
+    candidate_ref: &str,
+    candidate_id: &str,
+    event_run_id: &str,
+    attempt: u32,
+) -> bool {
+    if !is_canonical_buildplane_candidate_ref(candidate_ref) {
+        return false;
+    }
+    let Some(suffix) = candidate_ref.strip_prefix(BUILDPANE_CANDIDATE_REF_PREFIX) else {
+        return false;
+    };
+    let mut segments = suffix.split('/');
+    let (Some(candidate_ref_id), Some(candidate_run_id), Some(candidate_attempt), None) = (
+        segments.next(),
+        segments.next(),
+        segments.next(),
+        segments.next(),
+    ) else {
+        return false;
+    };
+    candidate_ref_id == candidate_id
+        && candidate_run_id == event_run_id
+        && candidate_attempt == attempt.to_string()
 }
 
 fn candidate_v2_matches_existing(

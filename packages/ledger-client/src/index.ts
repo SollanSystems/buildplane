@@ -38,7 +38,10 @@ export {
 	buildClaimActivityV1,
 	buildHeartbeatActivityV1,
 	buildRecordActivityResultV1,
+	buildResolveRetryCandidateActionIdentityV1,
 	type ClaimActivityV1Args,
 	type HeartbeatActivityV1Args,
 	type RecordActivityResultV1Args,
+	type ResolveRetryCandidateActionIdentityV1Args,
+	type RetryCandidateActionIdentityResultLine,
 } from "./wire.js";

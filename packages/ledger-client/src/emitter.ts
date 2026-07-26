@@ -12,11 +12,14 @@ import {
 	buildFlush,
 	buildHeartbeatActivityV1,
 	buildRecordActivityResultV1,
+	buildResolveRetryCandidateActionIdentityV1,
 	type ClaimActivityV1Args,
 	type HeartbeatActivityV1Args,
 	isActivityControlResponseLine,
 	parseAckLine,
 	type RecordActivityResultV1Args,
+	type ResolveRetryCandidateActionIdentityV1Args,
+	type RetryCandidateActionIdentityResultLine,
 } from "./wire.js";
 
 /**
@@ -127,6 +130,15 @@ export interface TapeEmitter {
 	heartbeatActivity(
 		args: Omit<HeartbeatActivityV1Args, "requestId"> & { requestId?: string },
 	): Promise<ActivityHeartbeatResultLine>;
+	/**
+	 * Resolve the native-verified identity for the retry candidate Git effect.
+	 * Callers supply neither an action namespace nor an idempotency identity.
+	 */
+	resolveRetryCandidateActionIdentity?(
+		args: Omit<ResolveRetryCandidateActionIdentityV1Args, "requestId"> & {
+			requestId?: string;
+		},
+	): Promise<RetryCandidateActionIdentityResultLine>;
 	flush(): Promise<void>;
 	close(): Promise<void>;
 	onFailure(cb: (reason: LedgerFailure) => void): void;
@@ -174,12 +186,14 @@ export async function createTapeEmitter(
 	type ActivityResponse =
 		| ActivityClaimResultLine
 		| ActivityResultResultLine
-		| ActivityHeartbeatResultLine;
+		| ActivityHeartbeatResultLine
+		| RetryCandidateActionIdentityResultLine;
 	type PendingActivityControl = {
 		expectedControl:
 			| "claim_activity_v1_result"
 			| "record_activity_result_v1_result"
-			| "heartbeat_activity_v1_result";
+			| "heartbeat_activity_v1_result"
+			| "resolve_retry_candidate_action_identity_v1_result";
 		resolve: (response: ActivityResponse) => void;
 		reject: (error: Error) => void;
 		timeout: ReturnType<typeof setTimeout>;
@@ -231,7 +245,8 @@ export async function createTapeEmitter(
 			} else if (
 				ack.control === "claim_activity_v1_result" ||
 				ack.control === "record_activity_result_v1_result" ||
-				ack.control === "heartbeat_activity_v1_result"
+				ack.control === "heartbeat_activity_v1_result" ||
+				ack.control === "resolve_retry_candidate_action_identity_v1_result"
 			) {
 				const pending = pendingActivityControls.get(ack.request_id);
 				if (!pending) {
@@ -410,6 +425,18 @@ export async function createTapeEmitter(
 				requestId,
 				line,
 				"heartbeat_activity_v1_result",
+			);
+		},
+		resolveRetryCandidateActionIdentity(args) {
+			const requestId = args.requestId ?? newLedgerEventId();
+			const line = buildResolveRetryCandidateActionIdentityV1({
+				...args,
+				requestId,
+			});
+			return requestActivityControl<RetryCandidateActionIdentityResultLine>(
+				requestId,
+				line,
+				"resolve_retry_candidate_action_identity_v1_result",
 			);
 		},
 		async flush() {

@@ -298,6 +298,132 @@ describe("createTapeEmitter", () => {
 		});
 	});
 
+	it("resolves a retry candidate action identity through the closed native control", async () => {
+		const { stdin, stderr, childExit } = createMock();
+		const emitterP = createTapeEmitter({
+			childStdin: asWritable(stdin),
+			childStderr: asReadable(stderr),
+			childExit,
+			workspacePath: "/tmp/ws",
+			runId,
+		});
+		setImmediate(() =>
+			stderr.push(
+				`{"control":"handshake_ack","ready":true,"ledger_version":"0.1.0","schema_version":1}\n`,
+			),
+		);
+		const emitter = await emitterP;
+		const identityP = emitter.resolveRetryCandidateActionIdentity({
+			requestId: "retry-identity-request-1",
+			runId,
+			dispatchEventId: "01919000-0000-7000-8000-000000000001",
+			candidateRef: "refs/buildplane/candidates/candidate-1/run-1/2",
+		});
+		await new Promise((resolve) => setImmediate(resolve));
+		expect(JSON.parse(stdin.writes.at(-1)!)).toEqual({
+			control: "resolve_retry_candidate_action_identity_v1",
+			request_id: "retry-identity-request-1",
+			run_id: runId,
+			dispatch_event_id: "01919000-0000-7000-8000-000000000001",
+			candidate_ref: "refs/buildplane/candidates/candidate-1/run-1/2",
+		});
+		stderr.push(
+			'{"control":"resolve_retry_candidate_action_identity_v1_result","request_id":"retry-identity-request-1","outcome":"resolved","action_id":"git-candidate-create:candidate-1/run-1/2","activity_id":"git-candidate-create:candidate-1/run-1/2","idempotency_key":"dispatch:run-1:retry-candidate"}\n',
+		);
+		await expect(identityP).resolves.toMatchObject({
+			outcome: "resolved",
+			action_id: "git-candidate-create:candidate-1/run-1/2",
+		});
+	});
+
+	it("fails closed on a malformed retry candidate action identity response", async () => {
+		const { stdin, stderr, childExit } = createMock();
+		const emitterP = createTapeEmitter({
+			childStdin: asWritable(stdin),
+			childStderr: asReadable(stderr),
+			childExit,
+			workspacePath: "/tmp/ws",
+			runId,
+			activityControlTimeoutMs: 100,
+		});
+		setImmediate(() =>
+			stderr.push(
+				`{"control":"handshake_ack","ready":true,"ledger_version":"0.1.0","schema_version":1}\n`,
+			),
+		);
+		const emitter = await emitterP;
+		const failure = vi.fn();
+		emitter.onFailure(failure);
+		const identityP = emitter.resolveRetryCandidateActionIdentity({
+			requestId: "retry-identity-request-1",
+			runId,
+			dispatchEventId: "01919000-0000-7000-8000-000000000001",
+			candidateRef: "refs/buildplane/candidates/candidate-1/run-1/2",
+		});
+		await new Promise((resolve) => setImmediate(resolve));
+		stderr.push(
+			'{"control":"resolve_retry_candidate_action_identity_v1_result","request_id":"retry-identity-request-1","outcome":"resolved","action_id":"action","activity_id":"activity","idempotency_key":"key","unexpected":true}\n',
+		);
+		await expect(identityP).rejects.toThrow(
+			"malformed activity authority response",
+		);
+		expect(failure).toHaveBeenCalledOnce();
+	});
+
+	it("fails closed when a retry identity request receives another control response", async () => {
+		const { stdin, stderr, childExit } = createMock();
+		const emitterP = createTapeEmitter({
+			childStdin: asWritable(stdin),
+			childStderr: asReadable(stderr),
+			childExit,
+			workspacePath: "/tmp/ws",
+			runId,
+			activityControlTimeoutMs: 100,
+		});
+		setImmediate(() =>
+			stderr.push(
+				`{"control":"handshake_ack","ready":true,"ledger_version":"0.1.0","schema_version":1}\n`,
+			),
+		);
+		const emitter = await emitterP;
+		const identityP = emitter.resolveRetryCandidateActionIdentity({
+			requestId: "retry-identity-request-1",
+			runId,
+			dispatchEventId: "01919000-0000-7000-8000-000000000001",
+			candidateRef: "refs/buildplane/candidates/candidate-1/run-1/2",
+		});
+		await new Promise((resolve) => setImmediate(resolve));
+		stderr.push(
+			'{"control":"claim_activity_v1_result","request_id":"retry-identity-request-1","outcome":"rejected","code":"wrong_control","message":"wrong control"}\n',
+		);
+		await expect(identityP).rejects.toThrow("incompatible pending control");
+	});
+
+	it("fails closed on an unsolicited retry candidate action identity response", async () => {
+		const { stdin, stderr, childExit } = createMock();
+		const emitterP = createTapeEmitter({
+			childStdin: asWritable(stdin),
+			childStderr: asReadable(stderr),
+			childExit,
+			workspacePath: "/tmp/ws",
+			runId,
+		});
+		setImmediate(() =>
+			stderr.push(
+				`{"control":"handshake_ack","ready":true,"ledger_version":"0.1.0","schema_version":1}\n`,
+			),
+		);
+		const emitter = await emitterP;
+		const failure = vi.fn();
+		emitter.onFailure(failure);
+		stderr.push(
+			'{"control":"resolve_retry_candidate_action_identity_v1_result","request_id":"unsolicited-request","outcome":"rejected","code":"untrusted","message":"unsolicited"}\n',
+		);
+		await new Promise((resolve) => setImmediate(resolve));
+		expect(failure).toHaveBeenCalledOnce();
+		expect(failure.mock.calls[0][0].message).toContain("unsolicited");
+	});
+
 	it("refuses caller-crafted trust-spine authority events on the generic emitter", async () => {
 		const { stdin, stderr, childExit } = createMock();
 		const emitterP = createTapeEmitter({

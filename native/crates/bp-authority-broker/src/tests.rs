@@ -1838,6 +1838,16 @@ fn append_promotion_action_evidence_with_options(
     }
 }
 
+const PROMOTION_CANDIDATE_ID: &str = "candidate-promotion-1";
+
+fn promotion_candidate_ref(run_id: &RunId, attempt: u32) -> String {
+    format!("refs/buildplane/candidates/{PROMOTION_CANDIDATE_ID}/{run_id}/{attempt}")
+}
+
+fn promotion_candidate_create_action_id(run_id: &RunId, attempt: u32) -> String {
+    format!("git-candidate-create:{PROMOTION_CANDIDATE_ID}/{run_id}/{attempt}")
+}
+
 fn promotion_candidate(
     run_id: RunId,
     dispatch: &DispatchEnvelopeV3,
@@ -1845,8 +1855,8 @@ fn promotion_candidate(
 ) -> CandidateCreatedV2 {
     CandidateCreatedV2 {
         run_id: run_id.to_string(),
-        candidate_id: "candidate-promotion-1".into(),
-        candidate_ref: "refs/buildplane/candidates/candidate-promotion-1/run-1/1".into(),
+        candidate_id: PROMOTION_CANDIDATE_ID.into(),
+        candidate_ref: promotion_candidate_ref(&run_id, dispatch.body.attempt),
         workflow_id: dispatch.body.workflow_id.clone(),
         unit_id: dispatch.body.unit_id.clone(),
         attempt: dispatch.body.attempt,
@@ -2024,6 +2034,7 @@ fn candidate_completion_fixture_for_attempt_at(
     store
         .append_signed(&dispatch_event, &kernel_key, &kernel)
         .expect("append governed implementation dispatch");
+    let candidate_action_id = promotion_candidate_create_action_id(&run_id, dispatch.body.attempt);
     let candidate_action = append_promotion_action_evidence_with_options(
         &store,
         run_id,
@@ -2031,7 +2042,7 @@ fn candidate_completion_fixture_for_attempt_at(
         &dispatch_event,
         &kernel_key,
         &kernel,
-        "git-candidate-create:candidate-promotion-1/run-1/1",
+        &candidate_action_id,
         ActionKindV1::Git,
         now + Duration::milliseconds(100),
         None,
@@ -2186,6 +2197,8 @@ fn graph_bound_v4_candidate_completion_fixture(
     // candidate evidence builder.
     let mut outer_lineage_dispatch = nested_dispatch;
     outer_lineage_dispatch.envelope_digest = graph_dispatch.envelope_digest;
+    let candidate_action_id =
+        promotion_candidate_create_action_id(&run_id, outer_lineage_dispatch.body.attempt);
     let candidate_action = append_promotion_action_evidence(
         &store,
         run_id,
@@ -2193,7 +2206,7 @@ fn graph_bound_v4_candidate_completion_fixture(
         &graph_dispatch_event,
         &kernel_key,
         &kernel,
-        "git-candidate-create:candidate-promotion-1/run-1/1",
+        &candidate_action_id,
         ActionKindV1::Git,
         now + Duration::milliseconds(100),
         None,
@@ -2490,6 +2503,7 @@ fn append_promotion_evidence(
         .append_signed(&dispatch_event, kernel_key, kernel)
         .expect("append governed implementation dispatch");
 
+    let candidate_action_id = promotion_candidate_create_action_id(&run_id, dispatch.body.attempt);
     let candidate_action = append_promotion_action_evidence(
         store,
         run_id,
@@ -2497,7 +2511,7 @@ fn append_promotion_evidence(
         &dispatch_event,
         kernel_key,
         kernel,
-        "git-candidate-create:candidate-promotion-1/run-1/1",
+        &candidate_action_id,
         ActionKindV1::Git,
         now + Duration::milliseconds(100),
         None,
@@ -3732,6 +3746,7 @@ fn native_candidate_completion_records_one_tape_proof_and_resolves_an_exact_retr
     store
         .append_signed(&dispatch_event, &kernel_key, &kernel)
         .expect("append governed implementation dispatch");
+    let candidate_action_id = promotion_candidate_create_action_id(&run_id, dispatch.body.attempt);
     let candidate_action = append_promotion_action_evidence(
         &store,
         run_id,
@@ -3739,7 +3754,7 @@ fn native_candidate_completion_records_one_tape_proof_and_resolves_an_exact_retr
         &dispatch_event,
         &kernel_key,
         &kernel,
-        "git-candidate-create:candidate-promotion-1/run-1/1",
+        &candidate_action_id,
         ActionKindV1::Git,
         now + Duration::milliseconds(100),
         None,
@@ -3917,6 +3932,7 @@ fn native_candidate_completion_blocks_an_orphaned_tape_proof() {
     store
         .append_signed(&dispatch_event, &kernel_key, &kernel)
         .expect("append governed implementation dispatch");
+    let candidate_action_id = promotion_candidate_create_action_id(&run_id, dispatch.body.attempt);
     let candidate_action = append_promotion_action_evidence(
         &store,
         run_id,
@@ -3924,7 +3940,7 @@ fn native_candidate_completion_blocks_an_orphaned_tape_proof() {
         &dispatch_event,
         &kernel_key,
         &kernel,
-        "git-candidate-create:candidate-promotion-1/run-1/1",
+        &candidate_action_id,
         ActionKindV1::Git,
         now + Duration::milliseconds(100),
         None,
@@ -4519,6 +4535,7 @@ fn native_candidate_completion_rejects_a_candidate_without_the_receipt_set_paren
     store
         .append_signed(&dispatch_event, &kernel_key, &kernel)
         .expect("append governed implementation dispatch");
+    let candidate_action_id = promotion_candidate_create_action_id(&run_id, dispatch.body.attempt);
     let candidate_action = append_promotion_action_evidence(
         &store,
         run_id,
@@ -4526,7 +4543,7 @@ fn native_candidate_completion_rejects_a_candidate_without_the_receipt_set_paren
         &dispatch_event,
         &kernel_key,
         &kernel,
-        "git-candidate-create:candidate-promotion-1/run-1/1",
+        &candidate_action_id,
         ActionKindV1::Git,
         now + Duration::milliseconds(100),
         None,
@@ -5975,6 +5992,97 @@ fn protected_promotion_decision_handler_derives_verified_pending_lineage_then_se
         )
     );
     assert_eq!(recorded.decision, PromotionDecisionKindV1::Promote);
+}
+
+#[test]
+fn canonical_candidate_ref_run_substitution_reconciles_decision_and_never_enters_promotion_gateway()
+{
+    let fixture = promotion_fixture();
+    let mut substituted_candidate = reconciliation_fixture_candidate(&fixture);
+    let substituted_run_id = RunId::new();
+    assert_ne!(substituted_run_id, fixture.request.run_id);
+    substituted_candidate.candidate_ref = format!(
+        "refs/buildplane/candidates/{}/{}/{}",
+        substituted_candidate.candidate_id, substituted_run_id, substituted_candidate.attempt,
+    );
+    let malformed_at = DateTime::parse_from_rfc3339(&timestamp(Utc::now() + Duration::seconds(1)))
+        .expect("round malformed candidate timestamp to canonical milliseconds")
+        .with_timezone(&Utc);
+    let malformed_candidate_event = promotion_event(
+        fixture.request.run_id,
+        Some(fixture.request.promotion_approval_request_event_id),
+        EventKind::CandidateCreatedV2,
+        malformed_at,
+        Payload::CandidateCreatedV2(substituted_candidate),
+    );
+    fixture
+        .store
+        .append_signed_with_checkpoint(
+            &malformed_candidate_event,
+            &fixture.kernel_key,
+            &fixture.kernel,
+            &CheckpointPolicy::every(1),
+        )
+        .expect("append the canonical-but-cross-run candidate ref to the signed tape");
+
+    let replay_authorities = promotion_replay_authorities(&fixture);
+    let mut decision_authority =
+        protected_promotion_decision_authority(&fixture, &replay_authorities);
+    let decision_wire = promotion_decision_wire(
+        "123e4567-e89b-12d3-a456-426614174000",
+        &fixture
+            .request
+            .promotion_approval_request_event_id
+            .to_string(),
+        "promote",
+    );
+
+    assert_eq!(
+        handle_promotion_decision_wire(&mut decision_authority, decision_wire.as_bytes())
+            .expect("the canonical opaque decision request reaches trusted replay"),
+        BrokerPromotionDecisionDisposition::ReconciliationRequired,
+        "a candidate ref whose UUID run segment differs from the signed event run must not make a decision"
+    );
+    assert_eq!(
+        promotion_event_count(
+            &fixture.store,
+            fixture.request.run_id,
+            "promotion_decision_recorded",
+        ),
+        0,
+        "rejected candidate lineage must not record a promotion decision"
+    );
+
+    let backend_state = Rc::new(RefCell::new(FakePromotionBackendState::default()));
+    let gateway_state = Rc::new(RefCell::new(FakePromotionGatewayState::default()));
+    let mut execution_authority = BrokerPromotionExecutionAuthority::new(
+        fixture.request.run_id,
+        PromotionReplaySnapshotVerifier::from_prevalidated_startup(
+            fixture._temp.path().join("events.db"),
+            &replay_authorities,
+            &fixture.kernel,
+        ),
+        FakePromotionBackend {
+            state: Rc::clone(&backend_state),
+            grants: VecDeque::new(),
+            results: VecDeque::new(),
+        },
+        FakePromotionGateway {
+            state: Rc::clone(&gateway_state),
+            outcome: None,
+        },
+        LeasePolicy::from_startup_config(30_000).expect("valid promotion lease policy"),
+    );
+
+    assert!(matches!(
+        execution_authority.claim_execute_and_record(BrokerPromotionExecutionRequest {
+            promotion_decision_event_id: EventId::new(),
+        }),
+        Err(PromotionExecutionError::Replay(_))
+    ));
+    assert_eq!(backend_state.borrow().claim_calls, 0);
+    assert_eq!(backend_state.borrow().result_calls, 0);
+    assert_eq!(gateway_state.borrow().calls, 0);
 }
 
 #[test]

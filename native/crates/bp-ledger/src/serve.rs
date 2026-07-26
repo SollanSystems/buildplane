@@ -16,7 +16,9 @@ use crate::signing::ActorKeyRef;
 use crate::storage::sqlite::{
     ActivityClaimAuthorityV1, ActivityClaimDispositionV1, ActivityClaimRequestV1,
     ActivityHeartbeatDispositionV1, ActivityHeartbeatRequestV1, ActivityResultDispositionV1,
-    ActivityResultRequestV1, CheckpointPolicy, SqliteStore,
+    ActivityResultRequestV1, CheckpointPolicy,
+    ResolveGovernedV3RetryCandidateActionIdentityRequestV1,
+    ResolvedGovernedV3RetryCandidateActionIdentityV1, SqliteStore,
 };
 use crate::storage::Cas;
 use ed25519_dalek::SigningKey;
@@ -164,6 +166,17 @@ pub enum ControlMessage {
         /// Opaque caller correlation id. No action inputs are accepted until
         /// the trusted replay authority contract exists.
         request_id: String,
+    },
+    /// Resolve the one closed action identity for a sealed-V3 retry candidate
+    /// before a caller can append its write-ahead action request. The caller
+    /// names only a signed dispatch event and a traversal-safe candidate ref;
+    /// the protected ledger replays the retry context and derives every effect
+    /// identity itself.
+    ResolveRetryCandidateActionIdentityV1 {
+        request_id: String,
+        run_id: crate::id::RunId,
+        dispatch_event_id: EventId,
+        candidate_ref: String,
     },
     /// Atomically reserve a lease for an already signed governed V3 action
     /// request. The request shape is validated as closed before deserialization;
@@ -343,6 +356,29 @@ fn validate_closed_authority_controls(value: &serde_json::Value) -> Result<()> {
                 });
             }
         }
+        "resolve_retry_candidate_action_identity_v1" => {
+            validate_closed_control_fields(
+                value,
+                control,
+                &[
+                    "control",
+                    "request_id",
+                    "run_id",
+                    "dispatch_event_id",
+                    "candidate_ref",
+                ],
+            )?;
+            if value
+                .get("candidate_ref")
+                .and_then(serde_json::Value::as_str)
+                .is_none_or(|candidate_ref| candidate_ref.trim().is_empty())
+            {
+                return Err(LedgerError::InvalidPayload {
+                    kind: control.into(),
+                    reason: "candidate_ref must be a non-empty string".into(),
+                });
+            }
+        }
         "claim_activity_v1" => validate_closed_control_fields(
             value,
             control,
@@ -463,7 +499,8 @@ pub fn serve_with_protocol<R: Read, W: Write>(
 /// Run the full protocol state machine with an independently configured,
 /// signed activity-claim authority. `SigningConfig::Signed` is necessary but
 /// not sufficient: the supplied config also names trusted dispatch and action
-/// request signers and the only key allowed to sign claim/result events.
+/// request signers and the only key allowed to sign claim/result events. Retry
+/// candidate identity resolution is available only through governed serve.
 pub fn serve_with_protocol_with_activity_claims<R: Read, W: Write>(
     stdin: R,
     stderr: W,
@@ -743,6 +780,87 @@ fn serve_with_protocol_inner<R: Read, W: Write>(
                 // every replayed trust-spine record.
                 write_model_action_authority_unavailable(&mut stderr, &request_id)?;
             }
+            Line::Control(ControlMessage::ResolveRetryCandidateActionIdentityV1 {
+                request_id,
+                run_id,
+                dispatch_event_id,
+                candidate_ref,
+            }) => {
+                if governed_expected_run_id.is_none() {
+                    write_activity_claim_rejected(
+                        &mut stderr,
+                        "resolve_retry_candidate_action_identity_v1_result",
+                        &request_id,
+                        "governed_serve_required",
+                        "retry candidate identity resolution is available only through governed serve",
+                    )?;
+                    continue;
+                }
+                let request = ResolveGovernedV3RetryCandidateActionIdentityRequestV1 {
+                    run_id,
+                    dispatch_event_id,
+                    candidate_ref,
+                };
+                match activity_claims {
+                    ActivityClaimProtocolConfig::Disabled => {
+                        write_activity_claim_rejected(
+                            &mut stderr,
+                            "resolve_retry_candidate_action_identity_v1_result",
+                            &request_id,
+                            "trusted_activity_authority_unconfigured",
+                            "retry candidate identity resolution requires independent trusted activity authority configuration",
+                        )?;
+                    }
+                    ActivityClaimProtocolConfig::Signed(authority) => match signing {
+                        SigningConfig::Unsigned => {
+                            write_activity_claim_rejected(
+                                &mut stderr,
+                                "resolve_retry_candidate_action_identity_v1_result",
+                                &request_id,
+                                "signed_append_required",
+                                "retry candidate identity resolution requires a signed ledger append configuration",
+                            )?;
+                        }
+                        SigningConfig::Signed {
+                            signing_key,
+                            signer,
+                            ..
+                        } => {
+                            // The resolver is read-only, but its answer is still
+                            // authorization material. Seal the governed prefix
+                            // before reading it so checkpoint corruption cannot
+                            // yield an identity that a later claim would treat as
+                            // effect authority.
+                            seal_governed_control_prefix(
+                                store,
+                                governed_expected_run_id,
+                                signing_key,
+                                signer,
+                            )?;
+                            match store.resolve_governed_v3_retry_candidate_action_identity_v1(
+                                &request, authority,
+                            ) {
+                                Ok(identity) => {
+                                    write_retry_candidate_action_identity_resolved(
+                                        &mut stderr,
+                                        &request_id,
+                                        identity,
+                                    )?;
+                                }
+                                Err(error) => {
+                                    write_activity_claim_rejected(
+                                        &mut stderr,
+                                        "resolve_retry_candidate_action_identity_v1_result",
+                                        &request_id,
+                                        retry_candidate_action_identity_error_code(&error),
+                                        &error.to_string(),
+                                    )?;
+                                }
+                            }
+                        }
+                    },
+                }
+            }
             Line::Control(ControlMessage::ClaimActivityV1 {
                 request_id,
                 run_id,
@@ -1018,7 +1136,8 @@ fn serve_with_protocol_inner<R: Read, W: Write>(
 
 fn control_run_id(line: &Line) -> Option<RunId> {
     match line {
-        Line::Control(ControlMessage::ClaimActivityV1 { run_id, .. })
+        Line::Control(ControlMessage::ResolveRetryCandidateActionIdentityV1 { run_id, .. })
+        | Line::Control(ControlMessage::ClaimActivityV1 { run_id, .. })
         | Line::Control(ControlMessage::HeartbeatActivityV1 { run_id, .. })
         | Line::Control(ControlMessage::RecordActivityResultV1 { run_id, .. }) => Some(*run_id),
         _ => None,
@@ -1175,6 +1294,24 @@ fn write_activity_claim_disposition<W: Write>(
     write_json_line(stderr, &value)
 }
 
+fn write_retry_candidate_action_identity_resolved<W: Write>(
+    stderr: &mut W,
+    request_id: &str,
+    identity: ResolvedGovernedV3RetryCandidateActionIdentityV1,
+) -> std::io::Result<()> {
+    write_json_line(
+        stderr,
+        &serde_json::json!({
+            "control": "resolve_retry_candidate_action_identity_v1_result",
+            "request_id": request_id,
+            "outcome": "resolved",
+            "action_id": identity.action_id,
+            "activity_id": identity.activity_id,
+            "idempotency_key": identity.idempotency_key,
+        }),
+    )
+}
+
 fn write_activity_heartbeat_disposition<W: Write>(
     stderr: &mut W,
     request_id: &str,
@@ -1292,6 +1429,17 @@ fn activity_claim_error_code(error: &LedgerError) -> &'static str {
         LedgerError::InvalidPayload { .. } => "invalid_activity_request",
         LedgerError::NonMonotonicEventId { .. } => "non_monotonic_event_id",
         _ => "activity_claim_storage_failure",
+    }
+}
+
+fn retry_candidate_action_identity_error_code(error: &LedgerError) -> &'static str {
+    match error {
+        LedgerError::ActivityClaimAuthorityRejected { .. }
+        | LedgerError::CandidateCompletionAuthorityRejected { .. }
+        | LedgerError::PromotionAuthorityRejected { .. } => "trusted_activity_authority_rejected",
+        LedgerError::InvalidPayload { .. } => "invalid_retry_candidate_identity_request",
+        LedgerError::NonMonotonicEventId { .. } => "non_monotonic_event_id",
+        _ => "retry_candidate_identity_storage_failure",
     }
 }
 

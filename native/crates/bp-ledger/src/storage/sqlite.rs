@@ -25,22 +25,23 @@ use crate::payload::model_evidence::{
 };
 use crate::payload::trust_spine::{
     action_receipt_recorded_v2_digest, action_receipt_set_v1_digest, action_requested_v2_digest,
-    candidate_completion_recorded_v1_digest, dispatch_envelope_v3_body_digest,
-    dispatch_envelope_v4_digest, governed_dispatch_policy_digest_v1,
-    model_action_authorized_v2_digest, model_action_intent_v1_digest,
-    promotion_execution_claimed_v1_digest, workflow_graph_v2_digest, ActionEvidenceVersionV1,
-    ActionKindV1, ActionReceiptOutcomeV2, ActionReceiptRecordedV2, ActionReceiptSetEntryV1,
-    ActionReceiptSetRecordedV1, ActionRequestedV2, CandidateAcceptanceOutcomeV1,
-    CandidateAcceptanceRecordedV1, CandidateCompletionRecordedV1, CandidateCreatedV2, CommitModeV1,
-    ContextManifestDeclaredV1, DispatchEnvelopeV3, DispatchEnvelopeV4, DispatchEnvelopeV5,
-    ExecutionRoleV1, GovernedDispatchV5AdmissionRecordedV1, ModelActionAuthorizedV1,
-    ModelActionAuthorizedV2, ModelActionIntentV1, ModelRequestEvidenceV1,
-    PromotionApprovalRequestedV1, PromotionDecisionKindV1, PromotionDecisionRecordedV1,
-    PromotionExecutionClaimedV1, PromotionExecutionLeaseBindingV1, PromotionGitBindingV1,
-    PromotionReconciliationResolvedV1, PromotionResultOutcomeV1, PromotionResultRecordedV1,
-    PromotionWorktreeSyncStateV1, ReconciliationResolutionOutcomeV1, ReviewDecisionV1,
-    ReviewVerdictRecordedV2, SandboxProfileDeclaredV1, TrustScopeEvidenceV1, TrustTierV1,
-    WorkerManifestDeclaredV1, WorkflowGraphDeclaredV2,
+    attempt_context_recorded_v1_digest, candidate_completion_recorded_v1_digest,
+    dispatch_envelope_v3_body_digest, dispatch_envelope_v4_digest,
+    governed_dispatch_policy_digest_v1, model_action_authorized_v2_digest,
+    model_action_intent_v1_digest, promotion_execution_claimed_v1_digest, workflow_graph_v2_digest,
+    ActionEvidenceVersionV1, ActionKindV1, ActionReceiptOutcomeV2, ActionReceiptRecordedV2,
+    ActionReceiptSetEntryV1, ActionReceiptSetRecordedV1, ActionRequestedV2,
+    AttemptContextRecordedV1, CandidateAcceptanceOutcomeV1, CandidateAcceptanceRecordedV1,
+    CandidateCompletionRecordedV1, CandidateCreatedV2, CommitModeV1, ContextManifestDeclaredV1,
+    DispatchEnvelopeV3, DispatchEnvelopeV4, DispatchEnvelopeV5, ExecutionRoleV1,
+    GovernedDispatchV5AdmissionRecordedV1, ModelActionAuthorizedV1, ModelActionAuthorizedV2,
+    ModelActionIntentV1, ModelRequestEvidenceV1, PromotionApprovalRequestedV1,
+    PromotionDecisionKindV1, PromotionDecisionRecordedV1, PromotionExecutionClaimedV1,
+    PromotionExecutionLeaseBindingV1, PromotionGitBindingV1, PromotionReconciliationResolvedV1,
+    PromotionResultOutcomeV1, PromotionResultRecordedV1, PromotionWorktreeSyncStateV1,
+    ReconciliationResolutionOutcomeV1, ReviewDecisionV1, ReviewVerdictRecordedV2,
+    SandboxProfileDeclaredV1, TrustScopeEvidenceV1, TrustTierV1, WorkerManifestDeclaredV1,
+    WorkflowGraphDeclaredV2, WorkflowTerminalOutcomeV1,
 };
 use crate::payload::Payload;
 use crate::signing::{
@@ -401,6 +402,28 @@ impl GovernedDispatchV5AdmissionAuthorityV1 {
             ledger_authority_realm_digest,
         })
     }
+}
+
+/// Closed, read-only request to derive the one candidate-create action
+/// identity for a sealed-V3 governed retry. The caller can name only a signed
+/// dispatch event and a canonical Buildplane candidate ref; retry namespace,
+/// action id, activity id, and idempotency key are re-derived from verified
+/// tape and are never accepted as caller input.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolveGovernedV3RetryCandidateActionIdentityRequestV1 {
+    pub run_id: RunId,
+    pub dispatch_event_id: EventId,
+    pub candidate_ref: String,
+}
+
+/// Exact retry candidate-create identity derived from a sealed-V3 dispatch
+/// and its signed retry context. This is an observation-only result: it does
+/// not append an action request, claim a lease, or authorize a Git effect.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedGovernedV3RetryCandidateActionIdentityV1 {
+    pub action_id: String,
+    pub activity_id: String,
+    pub idempotency_key: String,
 }
 
 /// Closed native request for a write-ahead activity reservation. All authority
@@ -2570,6 +2593,119 @@ impl SqliteStore {
                 .ok_or_else(|| rejected("checkpoint index overflow"))?;
         }
         Ok(())
+    }
+
+    /// Resolve the one candidate-create identity that a sealed-V3 governed
+    /// retry may use. This is deliberately read-only: a later action-request
+    /// issuer and activity-claim operation must each re-verify their own
+    /// boundaries before a Git effect can begin.
+    ///
+    /// The candidate ref is validated before any tape lookup, then its run and
+    /// retry-attempt segments are bound to the signed dispatch. Candidate ID
+    /// remains a canonical safe target until the dispatch schema carries an
+    /// immutable candidate binding. No mutable workspace state,
+    /// caller-supplied namespace, action id, or idempotency key participates
+    /// in the result.
+    pub fn resolve_governed_v3_retry_candidate_action_identity_v1(
+        &self,
+        request: &ResolveGovernedV3RetryCandidateActionIdentityRequestV1,
+        authority: &ActivityClaimAuthorityV1,
+    ) -> Result<ResolvedGovernedV3RetryCandidateActionIdentityV1> {
+        let candidate_suffix = canonical_buildplane_candidate_ref_suffix(&request.candidate_ref)
+            .ok_or_else(|| LedgerError::ActivityClaimAuthorityRejected {
+                reason: "governed retry candidate identity requires a canonical Buildplane candidate ref"
+                    .into(),
+            })?;
+
+        let dispatch_event = load_verified_authority_event(
+            &self.conn,
+            request.dispatch_event_id,
+            &authority.trusted_keys,
+            &authority.dispatch_signer,
+            "governed retry candidate identity dispatch",
+        )?;
+        if dispatch_event.run_id != request.run_id {
+            return governed_retry_candidate_identity_rejected(
+                "governed retry candidate identity dispatch run_id does not match the request",
+            );
+        }
+        let dispatch = match (&dispatch_event.kind, &dispatch_event.payload) {
+            (EventKind::DispatchEnvelopeV3, Payload::DispatchEnvelopeV3(dispatch)) => dispatch,
+            (EventKind::DispatchEnvelopeV4, Payload::DispatchEnvelopeV4(_)) => {
+                return governed_retry_candidate_identity_rejected(
+                    "governed retry candidate identity supports only outer sealed-V3 dispatch envelopes; graph-bound V4 retries remain rejected",
+                );
+            }
+            (EventKind::DispatchEnvelopeV5, Payload::DispatchEnvelopeV5(_)) => {
+                return governed_retry_candidate_identity_rejected(
+                    "governed retry candidate identity supports only outer sealed-V3 dispatch envelopes; manifest-bound V5 retries remain rejected",
+                );
+            }
+            _ => {
+                return governed_retry_candidate_identity_rejected(
+                    "governed retry candidate identity dispatch is not a sealed-V3 dispatch envelope",
+                );
+            }
+        };
+        if dispatch.body.attempt <= 1 {
+            return governed_retry_candidate_identity_rejected(
+                "governed retry candidate identity requires a dispatch attempt greater than one",
+            );
+        }
+        let configured_realm = authority
+            .ledger_authority_realm_digest
+            .as_deref()
+            .ok_or_else(|| LedgerError::ActivityClaimAuthorityRejected {
+                reason: "governed retry candidate identity requires a configured protected activity authority realm"
+                    .into(),
+            })?;
+        let retry_authority = GovernedPromotionAuthorityV1 {
+            trusted_keys: authority.trusted_keys.clone(),
+            kernel_signer: authority.dispatch_signer.clone(),
+            reviewer_signers: Vec::new(),
+            operator_signer: authority.claim_signer.clone(),
+            ledger_authority_realm_digest: configured_realm.into(),
+        };
+        validate_static_governed_candidate_completion_dispatch(dispatch, &retry_authority).map_err(
+            |error| LedgerError::ActivityClaimAuthorityRejected {
+                reason: format!(
+                    "governed retry candidate identity dispatch is outside the configured sealed-V3 realm: {error}"
+                ),
+            },
+        )?;
+        if !candidate_ref_suffix_binds_run_and_attempt(
+            candidate_suffix,
+            request.run_id,
+            dispatch.body.attempt,
+        ) {
+            return governed_retry_candidate_identity_rejected(
+                "governed retry candidate identity candidate_ref must bind the signed run and attempt",
+            );
+        }
+        let retry_context = verify_governed_sealed_v3_retry_context(
+            &self.conn,
+            request.run_id,
+            &retry_authority,
+            &dispatch_event,
+            dispatch,
+        )
+        .map_err(|error| LedgerError::ActivityClaimAuthorityRejected {
+            reason: format!(
+                "governed retry candidate identity cannot resolve its signed retry context: {error}"
+            ),
+        })?;
+        let (action_id, Some(idempotency_key)) = candidate_create_action_identity_for_suffix(
+            candidate_suffix,
+            Some(&retry_context.retry_action_namespace),
+        ) else {
+            unreachable!("a verified retry context always derives an idempotency key")
+        };
+
+        Ok(ResolvedGovernedV3RetryCandidateActionIdentityV1 {
+            activity_id: action_id.clone(),
+            action_id,
+            idempotency_key,
+        })
     }
 
     /// Atomically reserve a single execution lease for a signed governed V3
@@ -6966,6 +7102,14 @@ fn verify_claim_evidence(
         dispatch_window.issued_at,
         now,
     )?;
+    verify_governed_v3_retry_candidate_claim_identity(
+        conn,
+        request,
+        authority,
+        &dispatch_event,
+        &dispatch,
+        &action_request,
+    )?;
     // A `ModelActionIntentV1` is write-ahead evidence, not provider-effect
     // authority. The generic claim control cannot validate or consume the
     // intent/authorization/provider idempotency chain atomically, so allowing
@@ -6989,6 +7133,128 @@ fn verify_claim_evidence(
         dispatch_envelope_digest,
         effective_deadline: dispatch_window.effective_deadline,
     })
+}
+
+/// A retry candidate-create Git effect has a durable context-bound identity.
+/// The generic claim lane normally accepts arbitrary Git work, but it must not
+/// turn a caller-selected retry namespace into a lease for the action that
+/// materializes an immutable candidate. Reuse the same complete, signed V3
+/// predecessor proof as candidate completion before minting that effect.
+fn verify_governed_v3_retry_candidate_claim_identity(
+    conn: &Connection,
+    request: &ActivityClaimRequestV1,
+    authority: &ActivityClaimAuthorityV1,
+    dispatch_event: &Event,
+    dispatch: &DispatchEnvelopeV3,
+    action_request: &ActionRequestedV2,
+) -> Result<()> {
+    let looks_like_candidate_create = action_request.action_kind == ActionKindV1::Git
+        && (action_request
+            .action_id
+            .starts_with("git-candidate-create:")
+            || action_request.action_id.contains(":git-candidate-create:"));
+    if !looks_like_candidate_create || dispatch.body.attempt <= 1 {
+        return Ok(());
+    }
+
+    match &dispatch_event.payload {
+        Payload::DispatchEnvelopeV3(_) => {}
+        Payload::DispatchEnvelopeV4(_) => {
+            return Err(LedgerError::ActivityClaimAuthorityRejected {
+                reason: "governed retry candidate-create claims support only outer sealed-V3 dispatch envelopes; graph-bound V4 retries remain rejected".into(),
+            });
+        }
+        Payload::DispatchEnvelopeV5(_) => {
+            return Err(LedgerError::ActivityClaimAuthorityRejected {
+                reason: "governed retry candidate-create claims support only outer sealed-V3 dispatch envelopes; manifest-bound V5 retries remain rejected".into(),
+            });
+        }
+        _ => {
+            return Err(LedgerError::ActivityClaimAuthorityRejected {
+                reason:
+                    "governed retry candidate-create claim does not reference a dispatch envelope"
+                        .into(),
+            });
+        }
+    }
+
+    // The retry proof itself is a kernel/dispatch authority record. The
+    // generic claim authority can have a distinct action-request or claim
+    // signer, so construct only the verifier view required by the shared
+    // sealed-V3 predecessor validator; no promotion authority is granted.
+    // This special effect is nevertheless available only to a configured host
+    // realm: a signed dispatch cannot select its own verifier realm.
+    let configured_realm = authority
+        .ledger_authority_realm_digest
+        .as_deref()
+        .ok_or_else(|| LedgerError::ActivityClaimAuthorityRejected {
+            reason: "governed retry candidate-create claim requires a configured protected activity authority realm"
+                .into(),
+        })?;
+    let retry_authority = GovernedPromotionAuthorityV1 {
+        trusted_keys: authority.trusted_keys.clone(),
+        kernel_signer: authority.dispatch_signer.clone(),
+        reviewer_signers: Vec::new(),
+        operator_signer: authority.claim_signer.clone(),
+        ledger_authority_realm_digest: configured_realm.into(),
+    };
+    validate_static_governed_candidate_completion_dispatch(dispatch, &retry_authority).map_err(
+        |error| LedgerError::ActivityClaimAuthorityRejected {
+            reason: format!(
+                "governed retry candidate-create claim dispatch is outside the configured sealed-V3 realm: {error}"
+            ),
+        },
+    )?;
+    let retry_context = verify_governed_sealed_v3_retry_context(
+        conn,
+        request.run_id,
+        &retry_authority,
+        dispatch_event,
+        dispatch,
+    )
+    .map_err(|error| LedgerError::ActivityClaimAuthorityRejected {
+        reason: format!(
+            "governed retry candidate-create claim cannot resolve its signed retry context: {error}"
+        ),
+    })?;
+    let expected_prefix = format!(
+        "{}:{RETRY_CANDIDATE_ACTION_KIND}:",
+        retry_context.retry_action_namespace
+    );
+    let Some(candidate_key) = action_request.action_id.strip_prefix(&expected_prefix) else {
+        return Err(LedgerError::ActivityClaimAuthorityRejected {
+            reason: "governed retry candidate-create action_id must derive from the exact signed retry action namespace".into(),
+        });
+    };
+    if candidate_key.is_empty() {
+        return Err(LedgerError::ActivityClaimAuthorityRejected {
+            reason: "governed retry candidate-create action_id requires a non-empty candidate key"
+                .into(),
+        });
+    }
+    if action_request.idempotency_key != format!("{}:idempotency", action_request.action_id) {
+        return Err(LedgerError::ActivityClaimAuthorityRejected {
+            reason: "governed retry candidate-create idempotency_key must exactly derive from its action_id".into(),
+        });
+    }
+    let candidate_ref = format!("{BUILDPANE_CANDIDATE_REF_PREFIX}{candidate_key}");
+    let Some(candidate_suffix) = canonical_buildplane_candidate_ref_suffix(&candidate_ref) else {
+        return Err(LedgerError::ActivityClaimAuthorityRejected {
+            reason: "governed retry candidate-create candidate key must form a canonical Buildplane candidate ref".into(),
+        });
+    };
+    if !candidate_ref_suffix_binds_run_and_attempt(
+        candidate_suffix,
+        request.run_id,
+        dispatch.body.attempt,
+    ) {
+        return Err(LedgerError::ActivityClaimAuthorityRejected {
+            reason:
+                "governed retry candidate-create candidate key must bind the signed run and attempt"
+                    .into(),
+        });
+    }
+    Ok(())
 }
 
 /// Reconstruct the exact model action from signed tape before the native
@@ -8233,6 +8499,23 @@ fn verify_governed_promotion_decision_evidence(
     {
         return promotion_authority_rejected(
             "candidate artifact does not exactly bind the governed dispatch lineage",
+        );
+    }
+    let Some(candidate_ref_suffix) =
+        canonical_buildplane_candidate_ref_suffix(&candidate.candidate_ref)
+    else {
+        return promotion_authority_rejected(
+            "promotion decision requires a canonical Buildplane candidate ref",
+        );
+    };
+    if !candidate_ref_suffix_binds_candidate_id_run_and_attempt(
+        candidate_ref_suffix,
+        &candidate.candidate_id,
+        request.run_id,
+        dispatch.body.attempt,
+    ) {
+        return promotion_authority_rejected(
+            "promotion candidate ref must bind the signed candidate id, run, and attempt",
         );
     }
 
@@ -14629,6 +14912,19 @@ struct VerifiedGovernedCandidateCompletionEvidence {
     completion: CandidateCompletionRecordedV1,
 }
 
+/// Signed retry authority reconstructed entirely from the tape while the
+/// candidate-completion writer owns its immediate transaction. The caller never
+/// supplies this material: retry action identities derive only from this proof.
+#[derive(Clone, Debug)]
+struct VerifiedGovernedCandidateRetryContextV1 {
+    retry_action_namespace: String,
+    prior_action_ids: HashSet<String>,
+    prior_action_idempotency_keys: HashSet<String>,
+}
+
+const RETRY_ACTION_NAMESPACE_DELIMITER: &str = ":";
+const RETRY_CANDIDATE_ACTION_KIND: &str = "git-candidate-create";
+
 fn validate_governed_candidate_completion_request(
     _request: &GovernedCandidateCompletionRequestV1,
 ) -> Result<()> {
@@ -14640,6 +14936,12 @@ fn validate_governed_candidate_completion_request(
 
 fn candidate_completion_authority_rejected<T>(reason: impl Into<String>) -> Result<T> {
     Err(LedgerError::CandidateCompletionAuthorityRejected {
+        reason: reason.into(),
+    })
+}
+
+fn governed_retry_candidate_identity_rejected<T>(reason: impl Into<String>) -> Result<T> {
+    Err(LedgerError::ActivityClaimAuthorityRejected {
         reason: reason.into(),
     })
 }
@@ -14676,18 +14978,608 @@ fn validate_static_governed_candidate_completion_dispatch(
             "candidate completion requires a sealed-V3 governed atomic implementer or candidate dispatch in this protected realm",
         );
     }
-    // Retry dispatches carry an additional closed AttemptContext plus a
-    // namespace rule for every action identity. The native candidate lane has
-    // not yet received those replay inputs, so treating a signed retry packet
-    // as first-attempt evidence would let it certify a tape that trusted
-    // replay rejects. Preserve safety and make the capability boundary
-    // explicit until the complete retry reducer is shared here.
-    if dispatch.body.attempt != 1 {
+    Ok(())
+}
+
+fn retry_action_identity_uses_namespace(identity: &str, namespace: &str) -> bool {
+    if namespace.trim().is_empty() {
+        return false;
+    }
+    let prefix = format!("{namespace}{RETRY_ACTION_NAMESPACE_DELIMITER}");
+    identity
+        .strip_prefix(&prefix)
+        .is_some_and(|suffix| !suffix.is_empty())
+}
+
+fn canonical_governed_candidate_retry_event(event: Event, label: &str) -> Result<Event> {
+    canonicalize(event.clone()).map_err(|error| {
+        LedgerError::CandidateCompletionAuthorityRejected {
+            reason: format!("candidate completion retry {label} event is not canonical: {error}"),
+        }
+    })?;
+    Ok(event)
+}
+
+fn load_verified_governed_candidate_retry_event(
+    conn: &Connection,
+    event_id: EventId,
+    authority: &GovernedPromotionAuthorityV1,
+    label: &str,
+) -> Result<Event> {
+    load_verified_promotion_event(
+        conn,
+        event_id,
+        &authority.trusted_keys,
+        &authority.kernel_signer,
+        label,
+    )
+    .map_err(|error| LedgerError::CandidateCompletionAuthorityRejected {
+        reason: format!("candidate completion retry {label} proof is not verified: {error}"),
+    })
+}
+
+/// Reconstruct the sealed-V3 predecessor chain for a retry dispatch. This is
+/// deliberately local to the ledger writer: importing replay would invert the
+/// crate dependency, while accepting a caller-provided context would make the
+/// completion authority weaker than replay.
+#[allow(clippy::too_many_lines)]
+fn verify_governed_sealed_v3_retry_context(
+    conn: &Connection,
+    run_id: RunId,
+    authority: &GovernedPromotionAuthorityV1,
+    dispatch_event: &Event,
+    dispatch: &DispatchEnvelopeV3,
+) -> Result<VerifiedGovernedCandidateRetryContextV1> {
+    if dispatch.body.attempt <= 1
+        || !matches!(dispatch_event.payload, Payload::DispatchEnvelopeV3(_))
+    {
         return candidate_completion_authority_rejected(
-            "candidate completion currently supports only attempt 1; governed retries require native AttemptContext and action-namespace verification",
+            "candidate completion retries require an outer sealed-V3 dispatch envelope",
         );
     }
-    Ok(())
+    canonical_governed_candidate_retry_event(dispatch_event.clone(), "dispatch")?;
+
+    let contexts = verified_kernel_events_for_run_kind(
+        conn,
+        run_id,
+        EventKind::AttemptContextRecordedV1,
+        authority,
+        "retry attempt context",
+    )?
+    .into_iter()
+    .map(|context_event| {
+        let context_event = canonical_governed_candidate_retry_event(context_event, "context")?;
+        let Payload::AttemptContextRecordedV1(context) = &context_event.payload else {
+            unreachable!("attempt-context kind only returns AttemptContextRecordedV1 payloads")
+        };
+        let context = context.clone();
+        Ok((context_event, context))
+    })
+    .collect::<Result<Vec<_>>>()?;
+    let mut context_idempotency_keys = HashMap::<String, EventId>::new();
+    let mut next_dispatch_idempotency_keys = HashMap::<String, EventId>::new();
+    let mut retry_action_namespaces = HashMap::<String, EventId>::new();
+    let mut prior_attempt_owners = HashMap::<(String, String, u32), EventId>::new();
+    for (context_event, context) in &contexts {
+        if context_event.run_id != run_id || context.run_id != run_id.to_string() {
+            return candidate_completion_authority_rejected(
+                "candidate completion retry context belongs to a different run",
+            );
+        }
+        if context_idempotency_keys
+            .insert(context.idempotency_key.clone(), context_event.id)
+            .is_some()
+            || next_dispatch_idempotency_keys
+                .insert(
+                    context.next_dispatch_idempotency_key.clone(),
+                    context_event.id,
+                )
+                .is_some()
+            || retry_action_namespaces
+                .insert(context.retry_action_namespace.clone(), context_event.id)
+                .is_some()
+            || prior_attempt_owners
+                .insert(
+                    (
+                        context.workflow_id.clone(),
+                        context.unit_id.clone(),
+                        context.prior_attempt,
+                    ),
+                    context_event.id,
+                )
+                .is_some()
+        {
+            return candidate_completion_authority_rejected(
+                "candidate completion retry contexts reuse a run-global retry idempotency, action namespace, or prior-attempt ownership",
+            );
+        }
+    }
+
+    let mut exact_context: Option<(Event, AttemptContextRecordedV1)> = None;
+    let mut saw_same_retry_identity = false;
+    for (context_event, context) in contexts {
+        let same_retry_identity = context.run_id == run_id.to_string()
+            && context.workflow_id == dispatch.body.workflow_id
+            && context.workflow_revision == dispatch.body.workflow_revision
+            && context.unit_id == dispatch.body.unit_id
+            && context.next_attempt == dispatch.body.attempt;
+        if !same_retry_identity {
+            continue;
+        }
+        saw_same_retry_identity = true;
+        if context.next_dispatch_envelope_digest != dispatch.envelope_digest
+            || context.next_dispatch_idempotency_key != dispatch.body.idempotency_key
+        {
+            return candidate_completion_authority_rejected(
+                "candidate completion retry context does not bind the exact next sealed-V3 dispatch envelope digest and idempotency key",
+            );
+        }
+        if exact_context.replace((context_event, context)).is_some() {
+            return candidate_completion_authority_rejected(
+                "candidate completion retry dispatch has duplicate signed attempt contexts",
+            );
+        }
+    }
+    let Some((context_event, context)) = exact_context else {
+        let reason = if saw_same_retry_identity {
+            "candidate completion retry context did not bind the exact next dispatch"
+        } else {
+            "candidate completion sealed-V3 retry requires one signed recorded prior-attempt context"
+        };
+        return candidate_completion_authority_rejected(reason);
+    };
+    if context.attempt_context_digest
+        != attempt_context_recorded_v1_digest(&context).map_err(|error| {
+            LedgerError::CandidateCompletionAuthorityRejected {
+                reason: format!(
+                    "candidate completion could not canonicalize retry context digest: {error}"
+                ),
+            }
+        })?
+        || context.prior_attempt.checked_add(1) != Some(context.next_attempt)
+        || context_event.run_id != run_id
+        || !tape_event_precedes(&context_event, dispatch_event)
+    {
+        return candidate_completion_authority_rejected(
+            "candidate completion retry context is not an exact, earlier signed retry decision",
+        );
+    }
+    let context_recorded_at = parse_claim_timestamp(&context.recorded_at).map_err(|_| {
+        LedgerError::CandidateCompletionAuthorityRejected {
+            reason: "candidate completion retry context recorded_at is not canonical RFC3339 UTC"
+                .into(),
+        }
+    })?;
+    if context_recorded_at != context_event.occurred_at {
+        return candidate_completion_authority_rejected(
+            "candidate completion retry context recorded_at does not match its signed tape event time",
+        );
+    }
+
+    let prior_dispatch_event = unique_verified_kernel_event_matching(
+        conn,
+        run_id,
+        EventKind::DispatchEnvelopeV3,
+        authority,
+        "retry prior dispatch",
+        |event| {
+            matches!(
+                &event.payload,
+                Payload::DispatchEnvelopeV3(prior)
+                    if prior.envelope_digest == context.prior_dispatch_envelope_digest
+                        && prior.body.workflow_id == context.workflow_id
+                        && prior.body.workflow_revision == context.workflow_revision
+                        && prior.body.unit_id == context.unit_id
+                        && prior.body.attempt == context.prior_attempt
+            )
+        },
+    )?;
+    let prior_dispatch_event =
+        canonical_governed_candidate_retry_event(prior_dispatch_event, "prior dispatch")?;
+    let Payload::DispatchEnvelopeV3(prior_dispatch) = &prior_dispatch_event.payload else {
+        unreachable!("retry prior dispatch matcher returns only DispatchEnvelopeV3")
+    };
+    validate_static_governed_candidate_completion_dispatch(prior_dispatch, authority)?;
+    let prior_dispatch_issued_at =
+        parse_claim_timestamp(&prior_dispatch.body.issued_at).map_err(|_| {
+            LedgerError::CandidateCompletionAuthorityRejected {
+            reason:
+                "candidate completion retry prior dispatch issued_at is not canonical RFC3339 UTC"
+                    .into(),
+        }
+        })?;
+    let prior_effective_deadline = validate_governed_dispatch(prior_dispatch, prior_dispatch_issued_at)
+        .map_err(|error| LedgerError::CandidateCompletionAuthorityRejected {
+            reason: format!(
+                "candidate completion could not derive the retry prior dispatch authority deadline: {error}"
+            ),
+        })?
+        .effective_deadline;
+    if prior_dispatch_event.run_id != run_id
+        || !tape_event_precedes(&prior_dispatch_event, &context_event)
+    {
+        return candidate_completion_authority_rejected(
+            "candidate completion retry context prior dispatch is not an earlier signed event in the exact run",
+        );
+    }
+
+    let prior_terminal_event_id = parse_event_id(
+        &context.prior_terminal_event_ref,
+        "candidate completion retry prior terminal",
+    )
+    .map_err(|error| LedgerError::CandidateCompletionAuthorityRejected {
+        reason: format!(
+            "candidate completion retry context has an invalid prior terminal ref: {error}"
+        ),
+    })?;
+    let prior_terminal_event = canonical_governed_candidate_retry_event(
+        load_verified_governed_candidate_retry_event(
+            conn,
+            prior_terminal_event_id,
+            authority,
+            "prior terminal",
+        )?,
+        "prior terminal",
+    )?;
+    let prior_terminal_digest = canonical_event_hash(&prior_terminal_event).map_err(|error| {
+        LedgerError::CandidateCompletionAuthorityRejected {
+            reason: format!(
+                "candidate completion could not canonicalize retry prior terminal: {error}"
+            ),
+        }
+    })?;
+    let (
+        terminal_workflow_id,
+        terminal_workflow_revision,
+        terminal_unit_id,
+        terminal_attempt,
+        terminal_outcome,
+        terminal_completed_at,
+    ) = match &prior_terminal_event.payload {
+        Payload::WorkflowTerminalV1(terminal) => (
+            terminal.workflow_id.as_str(),
+            terminal.workflow_revision.as_str(),
+            terminal.unit_id.as_str(),
+            terminal.attempt,
+            terminal.outcome,
+            terminal.completed_at.as_str(),
+        ),
+        Payload::WorkflowTerminalV2(terminal) => (
+            terminal.workflow_id.as_str(),
+            terminal.workflow_revision.as_str(),
+            terminal.unit_id.as_str(),
+            terminal.attempt,
+            terminal.outcome,
+            terminal.completed_at.as_str(),
+        ),
+        _ => {
+            return candidate_completion_authority_rejected(
+                    "candidate completion retry context prior terminal is not a workflow terminal record",
+                );
+        }
+    };
+    let terminal_completed_at = parse_claim_timestamp(terminal_completed_at).map_err(|_| {
+        LedgerError::CandidateCompletionAuthorityRejected {
+            reason: "candidate completion retry prior terminal completed_at is not canonical RFC3339 UTC".into(),
+        }
+    })?;
+    if prior_terminal_event.run_id != run_id
+        || prior_terminal_digest != context.prior_terminal_event_digest
+        || terminal_workflow_id != prior_dispatch.body.workflow_id
+        || terminal_workflow_revision != prior_dispatch.body.workflow_revision
+        || terminal_unit_id != prior_dispatch.body.unit_id
+        || terminal_attempt != prior_dispatch.body.attempt
+        || terminal_outcome != WorkflowTerminalOutcomeV1::Failed
+        || terminal_completed_at != prior_terminal_event.occurred_at
+        || !tape_event_precedes(&prior_dispatch_event, &prior_terminal_event)
+        || !tape_event_precedes(&prior_terminal_event, &context_event)
+        || context_recorded_at < terminal_completed_at
+    {
+        return candidate_completion_authority_rejected(
+            "candidate completion retry context does not bind the exact failed prior terminal evidence",
+        );
+    }
+
+    let prior_receipt_event = unique_verified_kernel_event_matching(
+        conn,
+        run_id,
+        EventKind::ActionReceiptRecordedV2,
+        authority,
+        "retry prior failed action receipt",
+        |event| {
+            matches!(
+                &event.payload,
+                Payload::ActionReceiptRecordedV2(receipt)
+                    if receipt.action_receipt_ref == context.prior_action_receipt_ref
+                        && action_receipt_recorded_v2_digest(receipt)
+                            .is_ok_and(|digest| digest == context.prior_action_receipt_digest)
+            )
+        },
+    )?;
+    let prior_receipt_event =
+        canonical_governed_candidate_retry_event(prior_receipt_event, "prior failed receipt")?;
+    let Payload::ActionReceiptRecordedV2(prior_receipt) = &prior_receipt_event.payload else {
+        unreachable!("retry prior receipt matcher returns only ActionReceiptRecordedV2")
+    };
+    let prior_receipt_digest =
+        action_receipt_recorded_v2_digest(prior_receipt).map_err(|error| {
+            LedgerError::CandidateCompletionAuthorityRejected {
+                reason: format!(
+                    "candidate completion could not canonicalize retry prior receipt: {error}"
+                ),
+            }
+        })?;
+    if prior_receipt_digest != context.prior_action_receipt_digest
+        || prior_receipt.run_id != run_id.to_string()
+        || prior_receipt.workflow_id != prior_dispatch.body.workflow_id
+        || prior_receipt.unit_id != prior_dispatch.body.unit_id
+        || prior_receipt.attempt != prior_dispatch.body.attempt
+        || prior_receipt.provenance_ref != prior_dispatch.body.provenance_ref
+        || prior_receipt.dispatch_envelope_digest != prior_dispatch.envelope_digest
+        || prior_receipt.authority_actor != authority.kernel_signer.actor_id
+        || prior_receipt.execution_role != prior_dispatch.body.execution_role
+        || prior_receipt.outcome != ActionReceiptOutcomeV2::Failed
+        || !tape_event_precedes(&prior_dispatch_event, &prior_receipt_event)
+        || !tape_event_precedes(&prior_receipt_event, &prior_terminal_event)
+    {
+        return candidate_completion_authority_rejected(
+            "candidate completion retry context prior receipt does not bind the failed prior dispatch",
+        );
+    }
+
+    let prior_request_event = unique_verified_kernel_event_matching(
+        conn,
+        run_id,
+        EventKind::ActionRequestedV2,
+        authority,
+        "retry prior action request",
+        |event| {
+            matches!(
+                &event.payload,
+                Payload::ActionRequestedV2(action)
+                    if action.action_id == prior_receipt.action_id
+                        && action.idempotency_key == prior_receipt.idempotency_key
+                        && action_requested_v2_digest(action)
+                            .is_ok_and(|digest| digest == prior_receipt.action_request_digest)
+            )
+        },
+    )?;
+    let prior_request_event =
+        canonical_governed_candidate_retry_event(prior_request_event, "prior action request")?;
+    let Payload::ActionRequestedV2(prior_request) = &prior_request_event.payload else {
+        unreachable!("retry prior action request matcher returns only ActionRequestedV2")
+    };
+    let prior_request_digest = action_requested_v2_digest(prior_request).map_err(|error| {
+        LedgerError::CandidateCompletionAuthorityRejected {
+            reason: format!(
+                "candidate completion could not canonicalize retry prior request: {error}"
+            ),
+        }
+    })?;
+    let prior_requested_at = parse_claim_timestamp(&prior_request.requested_at).map_err(|_| {
+        LedgerError::CandidateCompletionAuthorityRejected {
+            reason:
+                "candidate completion retry prior request requested_at is not canonical RFC3339 UTC"
+                    .into(),
+        }
+    })?;
+    let expected_prior_policy_digest =
+        governed_dispatch_policy_digest_v1(&prior_dispatch.body.acceptance_contract_digest).map_err(
+            |error| LedgerError::CandidateCompletionAuthorityRejected {
+                reason: format!(
+                    "candidate completion could not derive the retry prior dispatch policy binding: {error}"
+                ),
+            },
+        )?;
+    if prior_request_digest != prior_receipt.action_request_digest
+        || prior_request.run_id != run_id.to_string()
+        || prior_request.workflow_id != prior_dispatch.body.workflow_id
+        || prior_request.unit_id != prior_dispatch.body.unit_id
+        || prior_request.attempt != prior_dispatch.body.attempt
+        || prior_request.provenance_ref != prior_dispatch.body.provenance_ref
+        || prior_request.dispatch_envelope_digest != prior_dispatch.envelope_digest
+        || prior_request.repository_binding_digest != prior_dispatch.repository_binding_digest
+        || prior_request.ledger_authority_realm_digest
+            != prior_dispatch.ledger_authority_realm_digest
+        || prior_request.governed_packet_digest != prior_dispatch.governed_packet_digest
+        || prior_request.capability_bundle_digest != prior_dispatch.body.capability_bundle_digest
+        || prior_request.policy_digest != expected_prior_policy_digest
+        || prior_request.context_manifest_digest != prior_dispatch.body.context_manifest_digest
+        || prior_request.worker_manifest_digest != prior_dispatch.body.worker_manifest_digest
+        || prior_request.sandbox_profile_digest != prior_dispatch.body.sandbox_profile_digest
+        || prior_request.authority_actor != authority.kernel_signer.actor_id
+        || prior_request.execution_role != prior_dispatch.body.execution_role
+        || prior_requested_at != prior_request_event.occurred_at
+        || prior_requested_at < prior_dispatch_issued_at
+        || prior_request_event.parent_event_id != Some(prior_dispatch_event.id)
+        || !tape_event_precedes(&prior_dispatch_event, &prior_request_event)
+        || !tape_event_precedes(&prior_request_event, &prior_receipt_event)
+    {
+        return candidate_completion_authority_rejected(
+            "candidate completion retry context prior action request does not bind the failed prior dispatch",
+        );
+    }
+
+    let prior_claim_event = unique_verified_kernel_event_matching(
+        conn,
+        run_id,
+        EventKind::ActivityClaimedV1,
+        authority,
+        "retry prior action claim",
+        |event| event.parent_event_id == Some(prior_request_event.id),
+    )?;
+    let prior_claim_event =
+        canonical_governed_candidate_retry_event(prior_claim_event, "prior action claim")?;
+    let Payload::ActivityClaimedV1(prior_claim) = &prior_claim_event.payload else {
+        unreachable!("retry prior claim matcher returns only ActivityClaimedV1")
+    };
+    let prior_claim_digest = canonical_event_hash(&prior_claim_event).map_err(|error| {
+        LedgerError::CandidateCompletionAuthorityRejected {
+            reason: format!(
+                "candidate completion could not canonicalize retry prior claim: {error}"
+            ),
+        }
+    })?;
+    let prior_claimed_at = parse_claim_timestamp(&prior_claim.claimed_at).map_err(|_| {
+        LedgerError::CandidateCompletionAuthorityRejected {
+            reason:
+                "candidate completion retry prior claim claimed_at is not canonical RFC3339 UTC"
+                    .into(),
+        }
+    })?;
+    let prior_lease_expires_at =
+        parse_claim_timestamp(&prior_claim.lease_expires_at).map_err(|_| {
+            LedgerError::CandidateCompletionAuthorityRejected {
+            reason:
+                "candidate completion retry prior claim lease expiry is not canonical RFC3339 UTC"
+                    .into(),
+        }
+        })?;
+    if prior_claim.run_id != run_id
+        || prior_claim.activity_id != prior_request.action_id
+        || prior_claim.idempotency_key != prior_request.idempotency_key
+        || prior_claim.action_kind != prior_request.action_kind
+        || prior_claim.action_request_event_id != prior_request_event.id
+        || prior_claim.action_request_digest != prior_request_digest
+        || prior_claim.dispatch_event_id != prior_dispatch_event.id
+        || prior_claim.dispatch_envelope_digest != prior_dispatch.envelope_digest
+        || prior_claim.authority_actor != authority.kernel_signer.actor_id
+        || prior_claim.purpose != ActivityClaimPurposeV1::Generic
+        || prior_claimed_at != prior_claim_event.occurred_at
+        || prior_claimed_at < prior_requested_at
+        || prior_lease_expires_at <= prior_claimed_at
+        || prior_lease_expires_at > prior_effective_deadline
+        || prior_claim_event.parent_event_id != Some(prior_request_event.id)
+        || !tape_event_precedes(&prior_request_event, &prior_claim_event)
+    {
+        return candidate_completion_authority_rejected(
+            "candidate completion retry context prior claim does not bind the failed action request",
+        );
+    }
+
+    let prior_result_event = unique_verified_kernel_event_matching(
+        conn,
+        run_id,
+        EventKind::ActivityResultRecordedV1,
+        authority,
+        "retry prior failed action result",
+        |event| event.parent_event_id == Some(prior_claim_event.id),
+    )?;
+    let prior_result_event =
+        canonical_governed_candidate_retry_event(prior_result_event, "prior failed action result")?;
+    let Payload::ActivityResultRecordedV1(prior_result) = &prior_result_event.payload else {
+        unreachable!("retry prior result matcher returns only ActivityResultRecordedV1")
+    };
+    let prior_result_recorded_at =
+        parse_claim_timestamp(&prior_result.recorded_at).map_err(|_| {
+            LedgerError::CandidateCompletionAuthorityRejected {
+            reason:
+                "candidate completion retry prior result recorded_at is not canonical RFC3339 UTC"
+                    .into(),
+        }
+        })?;
+    let prior_receipt_completed_at =
+        parse_claim_timestamp(&prior_receipt.completed_at).map_err(|_| {
+            LedgerError::CandidateCompletionAuthorityRejected {
+            reason:
+                "candidate completion retry prior receipt completed_at is not canonical RFC3339 UTC"
+                    .into(),
+        }
+        })?;
+    if prior_result.run_id != run_id
+        || prior_result.activity_id != prior_request.action_id
+        || prior_result.idempotency_key != prior_request.idempotency_key
+        || prior_result.claim_event_id != prior_claim_event.id
+        || prior_result.claim_event_digest != prior_claim_digest
+        || prior_result.lease_id != prior_claim.lease_id
+        || prior_result.outcome != ActivityResultOutcomeV1::Failed
+        || prior_result_recorded_at != prior_result_event.occurred_at
+        || prior_result_recorded_at < prior_claimed_at
+        || prior_result_recorded_at >= prior_lease_expires_at
+        || prior_receipt_event.parent_event_id != Some(prior_result_event.id)
+        || prior_receipt.result_digest != prior_result.result_digest
+        || prior_receipt.result_ref != prior_result.result_ref
+        || prior_receipt.evidence_digest != prior_result.evidence_digest
+        || prior_receipt.evidence_ref != prior_result.evidence_ref
+        || prior_receipt_completed_at < prior_claimed_at
+        || prior_receipt_completed_at > prior_result_recorded_at
+        || !tape_event_precedes(&prior_claim_event, &prior_result_event)
+        || !tape_event_precedes(&prior_result_event, &prior_receipt_event)
+    {
+        return candidate_completion_authority_rejected(
+            "candidate completion retry context prior receipt does not bind a failed terminal action result",
+        );
+    }
+
+    let mut prior_action_ids = HashSet::new();
+    let mut prior_action_idempotency_keys = HashSet::new();
+    for action_event in verified_kernel_events_for_run_kind(
+        conn,
+        run_id,
+        EventKind::ActionRequestedV2,
+        authority,
+        "retry prior action identity",
+    )? {
+        let action_event =
+            canonical_governed_candidate_retry_event(action_event, "prior action identity")?;
+        let Payload::ActionRequestedV2(action) = &action_event.payload else {
+            unreachable!("action-request kind only returns ActionRequestedV2 payloads")
+        };
+        let same_prior_attempt = action.run_id == run_id.to_string()
+            && action.workflow_id == prior_dispatch.body.workflow_id
+            && action.unit_id == prior_dispatch.body.unit_id
+            && action.attempt == prior_dispatch.body.attempt;
+        if !same_prior_attempt {
+            continue;
+        }
+        if action.provenance_ref != prior_dispatch.body.provenance_ref
+            || action.dispatch_envelope_digest != prior_dispatch.envelope_digest
+            || action.repository_binding_digest != prior_dispatch.repository_binding_digest
+            || action.ledger_authority_realm_digest != prior_dispatch.ledger_authority_realm_digest
+            || action.governed_packet_digest != prior_dispatch.governed_packet_digest
+            || action.capability_bundle_digest != prior_dispatch.body.capability_bundle_digest
+            || action.policy_digest != expected_prior_policy_digest
+            || action.context_manifest_digest != prior_dispatch.body.context_manifest_digest
+            || action.worker_manifest_digest != prior_dispatch.body.worker_manifest_digest
+            || action.sandbox_profile_digest != prior_dispatch.body.sandbox_profile_digest
+            || action.authority_actor != authority.kernel_signer.actor_id
+            || action.execution_role != prior_dispatch.body.execution_role
+            || action_event.parent_event_id != Some(prior_dispatch_event.id)
+        {
+            return candidate_completion_authority_rejected(
+                "candidate completion retry predecessor contains a substituted prior action identity",
+            );
+        }
+        if !prior_action_ids.insert(action.action_id.clone())
+            || !prior_action_idempotency_keys.insert(action.idempotency_key.clone())
+        {
+            return candidate_completion_authority_rejected(
+                "candidate completion retry predecessor contains duplicate prior action identity or idempotency evidence",
+            );
+        }
+    }
+    if !prior_action_ids.contains(&prior_request.action_id)
+        || !prior_action_idempotency_keys.contains(&prior_request.idempotency_key)
+    {
+        return candidate_completion_authority_rejected(
+            "candidate completion retry context prior action identity is absent from the signed predecessor dispatch",
+        );
+    }
+    if context.next_dispatch_idempotency_key == prior_dispatch.body.idempotency_key
+        || context.retry_action_namespace == prior_dispatch.body.idempotency_key
+        || prior_action_idempotency_keys.contains(&context.next_dispatch_idempotency_key)
+        || prior_action_idempotency_keys.contains(&context.retry_action_namespace)
+    {
+        return candidate_completion_authority_rejected(
+            "candidate completion retry context reuses a prior dispatch or action idempotency namespace",
+        );
+    }
+
+    Ok(VerifiedGovernedCandidateRetryContextV1 {
+        retry_action_namespace: context.retry_action_namespace,
+        prior_action_ids,
+        prior_action_idempotency_keys,
+    })
 }
 
 /// Reconstruct the only graph-bound V4 admission shape the candidate-completion
@@ -14853,23 +15745,103 @@ fn verify_singleton_graph_bound_v4_candidate_completion_admission(
     Ok(graph_event.id)
 }
 
-fn candidate_create_action_id_for(candidate: &CandidateCreatedV2) -> Result<String> {
-    if candidate.candidate_id.trim().is_empty()
-        || !is_canonical_buildplane_candidate_ref(&candidate.candidate_ref)
-    {
+fn canonical_buildplane_candidate_ref_suffix(candidate_ref: &str) -> Option<&str> {
+    is_canonical_buildplane_candidate_ref(candidate_ref)
+        .then(|| candidate_ref.strip_prefix(BUILDPANE_CANDIDATE_REF_PREFIX))
+        .flatten()
+}
+
+fn candidate_ref_suffix_segments(suffix: &str) -> Option<(&str, &str, &str)> {
+    let mut segments = suffix.split('/');
+    let (Some(candidate_id), Some(candidate_run_id), Some(candidate_attempt), None) = (
+        segments.next(),
+        segments.next(),
+        segments.next(),
+        segments.next(),
+    ) else {
+        return None;
+    };
+    (!candidate_id.is_empty()).then_some((candidate_id, candidate_run_id, candidate_attempt))
+}
+
+/// A retry dispatch has no immutable candidate ID/ref, so pre-effect resolver
+/// and claim validation can bind only the canonical run and attempt segments.
+fn candidate_ref_suffix_binds_run_and_attempt(suffix: &str, run_id: RunId, attempt: u32) -> bool {
+    let Some((_, candidate_run_id, candidate_attempt)) = candidate_ref_suffix_segments(suffix)
+    else {
+        return false;
+    };
+    candidate_run_id == run_id.to_string() && candidate_attempt == attempt.to_string()
+}
+
+/// Once `CandidateCreatedV2` is signed, its candidate ID is immutable evidence
+/// and must bind the first candidate-ref segment in addition to run/attempt.
+fn candidate_ref_suffix_binds_candidate_id_run_and_attempt(
+    suffix: &str,
+    candidate_id: &str,
+    run_id: RunId,
+    attempt: u32,
+) -> bool {
+    let Some((candidate_ref_id, candidate_run_id, candidate_attempt)) =
+        candidate_ref_suffix_segments(suffix)
+    else {
+        return false;
+    };
+    candidate_ref_id == candidate_id
+        && candidate_run_id == run_id.to_string()
+        && candidate_attempt == attempt.to_string()
+}
+
+/// Format candidate-create identities from a previously validated canonical
+/// ref suffix. Candidate completion and the pre-effect retry resolver share
+/// this exact formatter so no caller can create a second retry namespace
+/// convention at the storage boundary.
+fn candidate_create_action_identity_for_suffix(
+    suffix: &str,
+    retry_action_namespace: Option<&str>,
+) -> (String, Option<String>) {
+    let legacy_action_id = format!("{RETRY_CANDIDATE_ACTION_KIND}:{suffix}");
+    let Some(retry_action_namespace) = retry_action_namespace else {
+        return (legacy_action_id, None);
+    };
+    let action_id = format!("{retry_action_namespace}:{RETRY_CANDIDATE_ACTION_KIND}:{suffix}");
+    let idempotency_key = format!("{action_id}:idempotency");
+    (action_id, Some(idempotency_key))
+}
+
+fn candidate_create_action_identity_for(
+    candidate: &CandidateCreatedV2,
+    retry_context: Option<&VerifiedGovernedCandidateRetryContextV1>,
+    expected_run_id: RunId,
+    expected_attempt: u32,
+) -> Result<(String, Option<String>)> {
+    if candidate.candidate_id.trim().is_empty() {
         return candidate_completion_authority_rejected(
             "candidate completion requires a non-empty candidate id and canonical Buildplane candidate ref",
         );
     }
-    let suffix = candidate
-        .candidate_ref
-        .strip_prefix(BUILDPANE_CANDIDATE_REF_PREFIX)
-        .ok_or_else(|| LedgerError::CandidateCompletionAuthorityRejected {
+    let suffix =
+        canonical_buildplane_candidate_ref_suffix(&candidate.candidate_ref).ok_or_else(|| {
+            LedgerError::CandidateCompletionAuthorityRejected {
             reason:
                 "candidate completion candidate ref is outside the Buildplane candidate namespace"
                     .into(),
+        }
         })?;
-    Ok(format!("git-candidate-create:{suffix}"))
+    if !candidate_ref_suffix_binds_candidate_id_run_and_attempt(
+        suffix,
+        &candidate.candidate_id,
+        expected_run_id,
+        expected_attempt,
+    ) {
+        return candidate_completion_authority_rejected(
+            "candidate completion candidate ref must bind the signed candidate id, run, and attempt",
+        );
+    }
+    Ok(candidate_create_action_identity_for_suffix(
+        suffix,
+        retry_context.map(|context| context.retry_action_namespace.as_str()),
+    ))
 }
 
 /// Tape order is the canonical UUIDv7 event-id order used by the ledger's
@@ -15225,6 +16197,8 @@ fn verify_governed_candidate_receipt_set_completeness(
     receipt_set_event: &Event,
     receipt_set: &ActionReceiptSetRecordedV1,
     candidate_create_action_id: &str,
+    candidate_create_action_idempotency_key: Option<&str>,
+    retry_context: Option<&VerifiedGovernedCandidateRetryContextV1>,
 ) -> Result<HashSet<EventId>> {
     let expected_policy_digest = governed_dispatch_policy_digest_v1(
         &dispatch.body.acceptance_contract_digest,
@@ -15322,6 +16296,36 @@ fn verify_governed_candidate_receipt_set_completeness(
         {
             return candidate_completion_authority_rejected(
                 "candidate completion receipt set contains an action request outside its exact sealed dispatch lineage",
+            );
+        }
+        if let Some(retry_context) = retry_context {
+            if !retry_action_identity_uses_namespace(
+                &action.action_id,
+                &retry_context.retry_action_namespace,
+            ) || !retry_action_identity_uses_namespace(
+                &action.idempotency_key,
+                &retry_context.retry_action_namespace,
+            ) {
+                return candidate_completion_authority_rejected(
+                    "candidate completion sealed-V3 retry action_id and idempotency_key must each use the signed retry action namespace",
+                );
+            }
+            if retry_context.prior_action_ids.contains(&action.action_id)
+                || retry_context
+                    .prior_action_idempotency_keys
+                    .contains(&action.idempotency_key)
+            {
+                return candidate_completion_authority_rejected(
+                    "candidate completion sealed-V3 retry cannot reuse a prior-attempt action_id or idempotency_key",
+                );
+            }
+        }
+        if action.action_id == candidate_create_action_id
+            && candidate_create_action_idempotency_key
+                .is_some_and(|expected| action.idempotency_key != expected)
+        {
+            return candidate_completion_authority_rejected(
+                "candidate completion sealed-V3 retry candidate action idempotency_key does not match its signed retry namespace and candidate ref",
             );
         }
         if !idempotency_keys.insert(action.idempotency_key.clone())
@@ -15734,6 +16738,30 @@ fn verify_governed_candidate_completion_evidence(
     let dispatch = dispatch_material.dispatch;
     let dispatch_envelope_digest = dispatch_material.lineage_envelope_digest;
     validate_static_governed_candidate_completion_dispatch(&dispatch, authority)?;
+    let retry_context = if dispatch.body.attempt > 1 {
+        match &dispatch_event.payload {
+            Payload::DispatchEnvelopeV3(_) => Some(verify_governed_sealed_v3_retry_context(
+                conn,
+                request.run_id,
+                authority,
+                &dispatch_event,
+                &dispatch,
+            )?),
+            Payload::DispatchEnvelopeV4(_) => {
+                return candidate_completion_authority_rejected(
+                    "candidate completion retry support is limited to outer sealed-V3 dispatch envelopes; graph-bound V4 retries remain rejected",
+                );
+            }
+            Payload::DispatchEnvelopeV5(_) => {
+                return candidate_completion_authority_rejected(
+                    "candidate completion retry support is limited to outer sealed-V3 dispatch envelopes; manifest-bound V5 retries remain rejected",
+                );
+            }
+            _ => unreachable!("dispatch authority material returns only V3 or V4 dispatches"),
+        }
+    } else {
+        None
+    };
     let expected_policy_digest = governed_dispatch_policy_digest_v1(
         &dispatch.body.acceptance_contract_digest,
     )
@@ -15771,7 +16799,13 @@ fn verify_governed_candidate_completion_evidence(
             "candidate completion candidate artifact does not exactly bind the governed dispatch lineage",
         );
     }
-    let candidate_create_action_id = candidate_create_action_id_for(&candidate)?;
+    let (candidate_create_action_id, candidate_create_action_idempotency_key) =
+        candidate_create_action_identity_for(
+            &candidate,
+            retry_context.as_ref(),
+            request.run_id,
+            dispatch.body.attempt,
+        )?;
 
     let receipt_set_event = unique_verified_kernel_event_matching(
         conn,
@@ -15847,6 +16881,8 @@ fn verify_governed_candidate_completion_evidence(
         &receipt_set_event,
         receipt_set,
         &candidate_create_action_id,
+        candidate_create_action_idempotency_key.as_deref(),
+        retry_context.as_ref(),
     )?;
     let matching_receipt_entries = receipt_set
         .receipts

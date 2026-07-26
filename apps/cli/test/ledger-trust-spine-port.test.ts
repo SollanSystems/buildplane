@@ -408,6 +408,26 @@ describe("candidate promotion ledger port", () => {
 		expect(fake.emits).toHaveLength(1);
 	});
 
+	it("fails closed before verification or emission for a sealed V3 promotion", async () => {
+		const fake = createFakeEmitter();
+		let verifierCalls = 0;
+		const port = createCandidatePromotionDecisionPort(fake.emitter, {
+			references: verifiedReferences({
+				onVerifyIntent() {
+					verifierCalls += 1;
+				},
+			}),
+		});
+
+		await expect(
+			port.recordPromotionDecision({ intent: sealedV3PromotionIntent() }),
+		).rejects.toThrow(
+			/sealed_v3 promotion decisions are unsupported by the legacy TypeScript port/i,
+		);
+		expect(verifierCalls).toBe(0);
+		expect(fake.emits).toHaveLength(0);
+	});
+
 	it("rejects V2 candidate evidence that carries a legacy V1 action receipt digest", async () => {
 		const fake = createFakeEmitter();
 		let verifierCalls = 0;
@@ -472,13 +492,22 @@ describe("candidate promotion ledger port", () => {
 			}),
 		});
 		const intent = sealedV3PromotionIntent();
+		const rejectionIntent = {
+			...intent,
+			decision: { ...intent.decision, decision: "reject" as const },
+			acceptance: { ...intent.acceptance, outcome: "rejected" as const },
+			review: {
+				...intent.review,
+				verdict: { ...intent.review.verdict, decision: "reject" as const },
+			},
+		};
 
 		await expect(
 			port.recordPromotionDecision({
 				intent: {
-					...intent,
+					...rejectionIntent,
 					candidate: {
-						...intent.candidate,
+						...rejectionIntent.candidate,
 						actionReceiptSetDigest: DIGEST("9"),
 					},
 				},
@@ -1812,7 +1841,7 @@ describe("governed action evidence ledger port", () => {
 		).not.toHaveProperty("schema_version");
 	});
 
-	it("re-reads signed activity lineage before it records one candidate-completion proof", async () => {
+	it("re-reads a native-derived retry identity before it records one candidate-completion proof", async () => {
 		const fake = createFakeEmitter();
 		let snapshot: GovernedActionEvidenceRecoverySnapshot = {
 			dispatchPolicyDigest: DIGEST("4"),
@@ -1829,9 +1858,12 @@ describe("governed action evidence ledger port", () => {
 				},
 			},
 		});
+		const retryActionId =
+			"retry-action:workflow-v3:unit-v3:2:git-candidate-create:candidate-v3/run-v3/2";
 		const request = governedActionRequest({
-			actionId: "git-candidate-create:candidate-v3/run-v3/1",
-			idempotencyKey: "git-candidate-create:candidate-v3/run-v3/1",
+			attempt: 2,
+			actionId: retryActionId,
+			idempotencyKey: `${retryActionId}:idempotency`,
 			actionKind: "git",
 		});
 		const durableRequest = await port.recordActionRequested(request);
@@ -1841,7 +1873,10 @@ describe("governed action evidence ledger port", () => {
 		const receiptSet = await port.sealActionReceiptSet(
 			receiptSetInput(request, [durableReceipt]),
 		);
-		const candidate = governedCandidateCreated(request, receiptSet);
+		const candidate = {
+			...governedCandidateCreated(request, receiptSet),
+			candidateRef: "refs/buildplane/candidates/candidate-v3/run-v3/2",
+		};
 		const candidateCreatedRef = await port.recordCandidateCreatedV2(candidate);
 		const completion = candidateCompletion(
 			candidate,
@@ -1915,6 +1950,82 @@ describe("governed action evidence ledger port", () => {
 			recordCandidateCompletion!.call(port, completion),
 		).resolves.toEqual(recorded);
 		expect(fake.emits).toHaveLength(5);
+	});
+
+	it("rejects recovery when a canonical candidate ref belongs to another run", async () => {
+		const fake = createFakeEmitter();
+		let snapshot: GovernedActionEvidenceRecoverySnapshot = {
+			dispatchPolicyDigest: DIGEST("4"),
+			requests: [],
+			receipts: [],
+			candidates: [],
+		};
+		const port = createGovernedActionEvidencePort(fake.emitter, {
+			recoveryResolver: {
+				async resolveDispatch() {
+					return snapshot;
+				},
+			},
+		});
+		const actionId = "git-candidate-create:candidate-v3/other-run/1";
+		const request = governedActionRequest({
+			actionId,
+			idempotencyKey: actionId,
+			actionKind: "git",
+		});
+		const durableRequest = await port.recordActionRequested(request);
+		const durableReceipt = await port.recordActionReceipt(
+			governedActionReceipt(request),
+		);
+		const receiptSet = await port.sealActionReceiptSet(
+			receiptSetInput(request, [durableReceipt]),
+		);
+		const candidate = {
+			...governedCandidateCreated(request, receiptSet),
+			candidateRef: "refs/buildplane/candidates/candidate-v3/other-run/1",
+		};
+		const candidateCreatedRef = await port.recordCandidateCreatedV2(candidate);
+		const completion = candidateCompletion(
+			candidate,
+			candidateCreatedRef,
+			durableRequest,
+			durableReceipt,
+		);
+		snapshot = {
+			dispatchPolicyDigest: request.policyDigest,
+			requests: [durableRequest],
+			receipts: [durableReceipt],
+			receiptSet,
+			candidates: [{ candidate, candidateCreatedRef }],
+			activityClaims: [
+				{
+					activityId: request.actionId,
+					idempotencyKey: request.idempotencyKey,
+					claimEventRef: completion.activityClaimEventRef,
+					claimEventDigest: completion.activityClaimEventDigest,
+					actionRequestRef: durableRequest.actionRequestRef,
+					actionRequestDigest: durableRequest.actionRequestDigest,
+					leaseId: "candidate-create-lease",
+					leaseExpiresAt: "2026-07-18T12:10:00.000Z",
+					result: {
+						resultEventRef: completion.activityResultEventRef,
+						resultEventDigest: completion.activityResultEventDigest,
+						claimEventRef: completion.activityClaimEventRef,
+						claimEventDigest: completion.activityClaimEventDigest,
+						outcome: "succeeded",
+					},
+				},
+			],
+		};
+
+		await expect(port.recordCandidateCompletion?.(completion)).rejects.toThrow(
+			/candidate ref must bind the immutable candidate id, run, and attempt/i,
+		);
+		expect(
+			fake.emits.filter(
+				({ kind }) => kind === "candidate_completion_recorded_v1",
+			),
+		).toEqual([]);
 	});
 
 	it("reconciles an exact recovered candidate-completion proof without a second append", async () => {

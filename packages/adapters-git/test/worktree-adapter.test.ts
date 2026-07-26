@@ -128,6 +128,295 @@ describe("git worktree adapter", () => {
 		},
 	);
 
+	it.runIf(process.platform === "linux")(
+		"resolves retry candidate identity before recording and propagates it exactly",
+		async () => {
+			const repo = createCommittedRepo();
+			const adapter = createGitWorktreeAdapter({
+				now: () => "2026-07-18T12:00:00.000Z",
+			});
+			const { headSha: baseSha } = adapter.assertRunnableRepository(repo);
+			const workspace = adapter.prepareWorkspace(
+				repo,
+				"candidate-governed-retry",
+				baseSha,
+			);
+			writeFileSync(join(workspace.path, "candidate.txt"), "candidate retry\n");
+			const candidateKey =
+				"candidate-governed-retry/candidate-governed-retry/2";
+			const candidateRef = `refs/buildplane/candidates/${candidateKey}`;
+			const expectedActionId = `retry-action:workflow-governed-candidate:implement:2:git-candidate-create:${candidateKey}`;
+			const expectedIdempotencyKey = `${expectedActionId}:idempotency`;
+			const resolvedIdentity = {
+				state: "resolved" as const,
+				actionId: expectedActionId,
+				activityId: expectedActionId,
+				idempotencyKey: expectedIdempotencyKey,
+			};
+			const order: string[] = [];
+			let actionRequestDigest = "";
+			const actionEvidencePort: CreateGovernedWorkspaceCandidateInput["actionEvidencePort"] =
+				{
+					recordActionRequested: vi.fn(async (actionRequest) => {
+						order.push("request");
+						actionRequestDigest =
+							canonicalActionRequestedV2Digest(actionRequest);
+						return {
+							actionRequest,
+							actionRequestRef:
+								"event://action-request/candidate-governed-retry",
+							actionRequestDigest,
+						};
+					}),
+					recordActionReceipt: vi.fn(async (receipt) => {
+						order.push("receipt");
+						const durableReceipt = {
+							...receipt,
+							actionReceiptRef:
+								"event://action-receipt/candidate-governed-retry",
+						};
+						return {
+							receipt: durableReceipt,
+							actionReceiptDigest:
+								canonicalActionReceiptRecordedV2Digest(durableReceipt),
+						};
+					}),
+					sealActionReceiptSet: vi.fn(),
+					recordCandidateCreatedV2: vi.fn(),
+				};
+			const defaultActivityClaimPort = governedCandidateActivityClaimPort();
+			const activityClaimPort = {
+				...defaultActivityClaimPort,
+				resolveRetryCandidateActionIdentity: vi.fn(async () => {
+					order.push("resolve");
+					return resolvedIdentity;
+				}),
+				claim: vi.fn(async (claimInput) => {
+					order.push("claim");
+					return defaultActivityClaimPort.claim(claimInput);
+				}),
+				recordResult: vi.fn(async (resultInput) => {
+					order.push("result");
+					return defaultActivityClaimPort.recordResult(resultInput);
+				}),
+			} satisfies CreateGovernedWorkspaceCandidateInput["activityClaimPort"];
+			const input = governedCandidateInput({
+				path: workspace.path,
+				projectRoot: repo,
+				baseSha,
+				candidateId: "candidate-governed-retry",
+				runId: "candidate-governed-retry",
+				attempt: 2,
+				actionEvidencePort,
+				activityClaimPort,
+			});
+
+			const created = await adapter.createGovernedWorkspaceCandidate(input);
+
+			expect(order).toEqual([
+				"resolve",
+				"request",
+				"claim",
+				"result",
+				"receipt",
+			]);
+			expect(
+				activityClaimPort.resolveRetryCandidateActionIdentity,
+			).toHaveBeenCalledWith(
+				expect.objectContaining({
+					candidateRef,
+					dispatch: expect.objectContaining({
+						runId: "candidate-governed-retry",
+						attempt: 2,
+					}),
+				}),
+			);
+			expect(actionEvidencePort.recordActionRequested).toHaveBeenCalledWith(
+				expect.objectContaining({
+					actionId: expectedActionId,
+					idempotencyKey: expectedIdempotencyKey,
+				}),
+			);
+			expect(activityClaimPort.claim).toHaveBeenCalledWith(
+				expect.objectContaining({
+					activityId: expectedActionId,
+					idempotencyKey: expectedIdempotencyKey,
+					durableRequest: expect.objectContaining({
+						actionRequest: expect.objectContaining({
+							actionId: expectedActionId,
+							idempotencyKey: expectedIdempotencyKey,
+						}),
+					}),
+				}),
+			);
+			expect(activityClaimPort.recordResult).toHaveBeenCalledWith(
+				expect.objectContaining({
+					durableRequest: expect.objectContaining({
+						actionRequest: expect.objectContaining({
+							actionId: expectedActionId,
+							idempotencyKey: expectedIdempotencyKey,
+						}),
+					}),
+				}),
+			);
+			expect(actionEvidencePort.recordActionReceipt).toHaveBeenCalledWith(
+				expect.objectContaining({
+					actionId: expectedActionId,
+					idempotencyKey: expectedIdempotencyKey,
+				}),
+			);
+			expect(created.actionReceipt.actionId).toBe(expectedActionId);
+			expect(created.candidateCreateActionEvidence.actionId).toBe(
+				expectedActionId,
+			);
+			expect(actionRequestDigest).not.toBe("");
+			const actionRequest =
+				actionEvidencePort.recordActionRequested.mock.calls[0]?.[0];
+			expect(actionRequest?.canonicalInputRef).not.toContain(
+				"retryActionNamespace",
+			);
+		},
+	);
+
+	it("fails closed before any effect when retry identity resolution rejects, is malformed, or is mismatched", async () => {
+		const variants = [
+			{
+				label: "rejected",
+				resolution: {
+					state: "rejected" as const,
+					code: "RETRY_IDENTITY_REJECTED",
+					message: "native retry lineage did not authorize this candidate",
+				},
+			},
+			{
+				label: "malformed",
+				resolution: {
+					state: "resolved" as const,
+					actionId: "",
+					activityId: "",
+					idempotencyKey: "",
+				},
+			},
+			{
+				label: "mismatched",
+				resolution: {
+					state: "resolved" as const,
+					actionId:
+						"retry-action:workflow-governed-candidate:implement:2:git-candidate-create:other-candidate/other-candidate/2",
+					activityId:
+						"retry-action:workflow-governed-candidate:implement:2:git-candidate-create:other-candidate/other-candidate/2",
+					idempotencyKey:
+						"retry-action:workflow-governed-candidate:implement:2:git-candidate-create:other-candidate/other-candidate/2:idempotency",
+				},
+			},
+		] as const;
+
+		for (const { label, resolution } of variants) {
+			const repo = createCommittedRepo();
+			const adapter = createGitWorktreeAdapter({
+				now: () => "2026-07-18T12:00:00.000Z",
+			});
+			const { headSha: baseSha } = adapter.assertRunnableRepository(repo);
+			const candidateId = `candidate-retry-${label}`;
+			const workspace = adapter.prepareWorkspace(repo, candidateId, baseSha);
+			writeFileSync(join(workspace.path, "candidate.txt"), "candidate retry\n");
+			const rootHeadBefore = readGitHead(repo);
+			const rootTreeBefore = readGitTree(repo);
+			const rootCommitCountBefore = commitCount(repo);
+			const actionEvidencePort = blockedGovernedCandidateEvidencePort();
+			const defaultActivityClaimPort = governedCandidateActivityClaimPort();
+			const activityClaimPort = {
+				...defaultActivityClaimPort,
+				resolveRetryCandidateActionIdentity: vi.fn(async () => resolution),
+			} satisfies CreateGovernedWorkspaceCandidateInput["activityClaimPort"];
+			const claim = vi.spyOn(activityClaimPort, "claim");
+			const recordResult = vi.spyOn(activityClaimPort, "recordResult");
+			const input = governedCandidateInput({
+				path: workspace.path,
+				projectRoot: repo,
+				baseSha,
+				candidateId,
+				runId: candidateId,
+				attempt: 2,
+				actionEvidencePort,
+				activityClaimPort,
+			});
+
+			await expect(
+				adapter.createGovernedWorkspaceCandidate(input),
+			).rejects.toThrow(/retry candidate action identity/i);
+			expect(
+				activityClaimPort.resolveRetryCandidateActionIdentity,
+			).toHaveBeenCalledTimes(1);
+			expect(actionEvidencePort.recordActionRequested).not.toHaveBeenCalled();
+			expect(actionEvidencePort.recordActionReceipt).not.toHaveBeenCalled();
+			expect(claim).not.toHaveBeenCalled();
+			expect(recordResult).not.toHaveBeenCalled();
+			expect(readGitHead(repo)).toBe(rootHeadBefore);
+			expect(readGitTree(repo)).toBe(rootTreeBefore);
+			expect(commitCount(repo)).toBe(rootCommitCountBefore);
+			expect(
+				runGit(repo, [
+					"show-ref",
+					"--verify",
+					"--quiet",
+					`refs/buildplane/candidates/${candidateId}/${candidateId}/2`,
+				]).status,
+			).not.toBe(0);
+		}
+	});
+
+	it("fails closed before any effect when a retry identity resolver is unavailable", async () => {
+		const adapter = createGitWorktreeAdapter({
+			now: () => "2026-07-18T12:00:00.000Z",
+		});
+		const actionEvidencePort = blockedGovernedCandidateEvidencePort();
+		const activityClaimPort = governedCandidateActivityClaimPort();
+		const claim = vi.spyOn(activityClaimPort, "claim");
+		const recordResult = vi.spyOn(activityClaimPort, "recordResult");
+		const input = governedCandidateInput({
+			path: "candidate-retry-resolver-unavailable",
+			projectRoot: "project-root",
+			baseSha: "a".repeat(40),
+			candidateId: "candidate-retry-resolver-unavailable",
+			runId: "candidate-retry-resolver-unavailable",
+			attempt: 2,
+			actionEvidencePort,
+			activityClaimPort,
+		});
+
+		await expect(
+			adapter.createGovernedWorkspaceCandidate(input),
+		).rejects.toThrow(
+			/retry candidate action identity resolver is unavailable/i,
+		);
+		expect(actionEvidencePort.recordActionRequested).not.toHaveBeenCalled();
+		expect(actionEvidencePort.recordActionReceipt).not.toHaveBeenCalled();
+		expect(claim).not.toHaveBeenCalled();
+		expect(recordResult).not.toHaveBeenCalled();
+	});
+
+	it("does not expose a caller-supplied retry action namespace", () => {
+		const input = governedCandidateInput({
+			path: "candidate-retry-raw-namespace",
+			projectRoot: "project-root",
+			baseSha: "a".repeat(40),
+			candidateId: "candidate-retry-raw-namespace",
+			runId: "candidate-retry-raw-namespace",
+			attempt: 2,
+			actionEvidencePort: blockedGovernedCandidateEvidencePort(),
+		});
+		const rawNamespaceInput = {
+			...input,
+			// @ts-expect-error Retry identity is closed and native-resolved.
+			retryActionNamespace: "retry-action:caller-controlled",
+		} satisfies CreateGovernedWorkspaceCandidateInput;
+
+		expect(rawNamespaceInput.retryActionNamespace).toBe(
+			"retry-action:caller-controlled",
+		);
+	});
+
 	it("rejects future-issued or elapsed-compute candidate authority before evidence, claims, or Git materialization", async () => {
 		const repo = createCommittedRepo();
 		const adapter = createGitWorktreeAdapter({

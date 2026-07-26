@@ -1906,6 +1906,15 @@ export function createCandidatePromotionDecisionPort(
 		async recordPromotionDecision({ intent }): Promise<string> {
 			return serialized(async () => {
 				const validated = validatePromotionIntent(intent);
+				if (
+					validated.candidateEvidence.schemaVersion === 2 &&
+					validated.candidateEvidence.actionEvidenceVersion === "sealed_v3" &&
+					validated.decision.decision === "promote"
+				) {
+					throw new TypeError(
+						"sealed_v3 promotion decisions are unsupported by the legacy TypeScript port.",
+					);
+				}
 				const strictBinding = strictPromotionDecisionBindingFromDecision(
 					validated.decision,
 					"promotion decision",
@@ -3549,12 +3558,10 @@ export function assertCandidateCompletionBindsRecovery(
 			"candidate completion does not bind the exact recovered immutable candidate identity.",
 		);
 	}
-	const expectedActionId = candidateCreateActionId(candidate);
-	if (completion.candidateCreateActionId !== expectedActionId) {
-		throw new TypeError(
-			"candidate completion action id is not the canonical candidate-create Git action.",
-		);
-	}
+	const expectedActionId = candidateCreateActionIdFromPersistedRecoveryEvidence(
+		candidate,
+		completion.candidateCreateActionId,
+	);
 
 	if (!Array.isArray(snapshot.requests)) {
 		throw new TypeError(
@@ -3589,6 +3596,14 @@ export function assertCandidateCompletionBindsRecovery(
 	) {
 		throw new TypeError(
 			"candidate completion request does not bind the exact candidate-create Git action.",
+		);
+	}
+	if (
+		candidate.attempt > 1 &&
+		request.idempotencyKey !== `${expectedActionId}:idempotency`
+	) {
+		throw new TypeError(
+			"candidate completion retry request idempotency key must exactly derive from its persisted native action identity.",
 		);
 	}
 
@@ -3725,7 +3740,14 @@ export function assertCandidateCompletionBindsRecovery(
 	};
 }
 
-function candidateCreateActionId(candidate: KernelCandidateCreatedV2): string {
+/**
+ * Return the candidate ref suffix only after binding it to the immutable
+ * candidate identity. A canonical ref alone is insufficient: it must belong
+ * to this candidate's id, run, and attempt before recovery may use it.
+ */
+function candidateKeyFromRecoveryCandidate(
+	candidate: KernelCandidateCreatedV2,
+): string {
 	if (!isCanonicalBuildplaneCandidateRef(candidate.candidateRef)) {
 		throw new TypeError(
 			"candidate completion requires a canonical Buildplane candidate ref.",
@@ -3737,7 +3759,53 @@ function candidateCreateActionId(candidate: KernelCandidateCreatedV2): string {
 			"candidate completion candidate ref is outside the candidate-create namespace.",
 		);
 	}
-	return `git-candidate-create:${candidate.candidateRef.slice(prefix.length)}`;
+	const candidateKey = candidate.candidateRef.slice(prefix.length);
+	const [candidateId, runId, attempt, ...extraSegments] =
+		candidateKey.split("/");
+	if (
+		extraSegments.length !== 0 ||
+		candidateId !== candidate.candidateId ||
+		runId !== candidate.runId ||
+		attempt !== String(candidate.attempt)
+	) {
+		throw new TypeError(
+			"candidate completion candidate ref must bind the immutable candidate id, run, and attempt.",
+		);
+	}
+	return candidateKey;
+}
+
+/**
+ * Attempt one retains its historical fixed action id. For retries, the native
+ * authority—not TypeScript—derives the signed namespace. Recovery accepts it
+ * only as persisted evidence that exactly matches the request/claim/result and
+ * receipt chain below; it never reconstructs a retry namespace locally.
+ */
+function candidateCreateActionIdFromPersistedRecoveryEvidence(
+	candidate: KernelCandidateCreatedV2,
+	persistedActionId: string,
+): string {
+	const candidateKey = candidateKeyFromRecoveryCandidate(candidate);
+	if (candidate.attempt === 1) {
+		const legacyActionId = `git-candidate-create:${candidateKey}`;
+		if (persistedActionId !== legacyActionId) {
+			throw new TypeError(
+				"candidate completion action id is not the canonical candidate-create Git action.",
+			);
+		}
+		return legacyActionId;
+	}
+
+	const retryActionSuffix = `:git-candidate-create:${candidateKey}`;
+	if (
+		persistedActionId.length <= retryActionSuffix.length ||
+		!persistedActionId.endsWith(retryActionSuffix)
+	) {
+		throw new TypeError(
+			"candidate completion retry action id is not bound to the canonical candidate-create ref.",
+		);
+	}
+	return persistedActionId;
 }
 
 function isRfc3339Utc(value: unknown): value is string {

@@ -838,6 +838,155 @@ fn activity_claim_control_is_closed_and_default_serve_fails_closed() {
 }
 
 #[test]
+fn retry_candidate_identity_control_is_closed_and_default_serve_fails_closed() {
+    let malformed = r#"{"control":"resolve_retry_candidate_action_identity_v1","request_id":"identity-1","run_id":"01919000-0000-7000-8000-000000000000","dispatch_event_id":"01919000-0000-7000-8000-000000000001","candidate_ref":"refs/buildplane/candidates/candidate-1/01919000-0000-7000-8000-000000000000/2","forged_namespace":"retry-action:forged"}"#;
+    assert!(
+        parse_control_or_event(malformed).is_err(),
+        "retry identity controls must reject caller-supplied authority fields"
+    );
+
+    let (store, cas, _tmp) = make_fixture();
+    let resolve = r#"{"control":"resolve_retry_candidate_action_identity_v1","request_id":"identity-1","run_id":"01919000-0000-7000-8000-000000000000","dispatch_event_id":"01919000-0000-7000-8000-000000000001","candidate_ref":"refs/buildplane/candidates/candidate-1/01919000-0000-7000-8000-000000000000/2"}"#;
+    let stdin = format!("{}\n{}\n{}\n", handshake_line(1), resolve, close_line(0));
+    let mut stderr = Vec::new();
+    let outcome = serve_with_protocol(
+        Cursor::new(stdin.as_bytes()),
+        &mut stderr,
+        &store,
+        &cas,
+        1,
+        &SigningConfig::Unsigned,
+    )
+    .expect("disabled identity controls return a typed rejection, not a protocol abort");
+    assert_eq!(outcome.events_written, 0);
+    assert_eq!(store.event_count().unwrap(), 0);
+    let messages: Vec<serde_json::Value> = String::from_utf8(stderr)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let rejection = messages
+        .iter()
+        .find(|message| message["control"] == "resolve_retry_candidate_action_identity_v1_result")
+        .expect("identity operation must emit one typed response");
+    assert_eq!(rejection["outcome"], "rejected");
+    assert_eq!(rejection["code"], "governed_serve_required");
+}
+
+#[test]
+fn legacy_activity_claim_serve_rejects_retry_candidate_identity_without_governed_run() {
+    let (store, cas, _tmp) = make_fixture();
+    let run_id = bp_ledger::RunId::from_uuid(
+        uuid::Uuid::parse_str("01919000-0000-7000-8000-000000000000").unwrap(),
+    );
+    let (signing, config) = governed_test_protocol(run_id);
+    let resolve = serde_json::json!({
+        "control": "resolve_retry_candidate_action_identity_v1",
+        "request_id": "legacy-identity-1",
+        "run_id": run_id,
+        "dispatch_event_id": "01919000-0000-7000-8000-000000000001",
+        "candidate_ref": format!(
+            "refs/buildplane/candidates/candidate-identity/{run_id}/2"
+        ),
+    });
+    let stdin = format!("{}\n{}\n{}\n", handshake_line(1), resolve, close_line(0),);
+    let mut stderr = Vec::new();
+    let outcome = serve_with_protocol_with_activity_claims(
+        Cursor::new(stdin.as_bytes()),
+        &mut stderr,
+        &store,
+        &cas,
+        1,
+        &signing,
+        &ActivityClaimProtocolConfig::Signed(config.activity_claim_authority),
+    )
+    .expect("legacy identity controls must close with a typed rejection");
+
+    assert_eq!(outcome.events_written, 0);
+    assert_eq!(
+        store.event_count().unwrap(),
+        0,
+        "must not append an action or lease"
+    );
+    let messages: Vec<serde_json::Value> = String::from_utf8(stderr)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let rejection = messages
+        .iter()
+        .find(|message| message["control"] == "resolve_retry_candidate_action_identity_v1_result")
+        .expect("legacy identity operation must emit one typed response");
+    assert_eq!(rejection["request_id"], "legacy-identity-1");
+    assert_eq!(rejection["outcome"], "rejected");
+    assert_eq!(rejection["code"], "governed_serve_required");
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message["outcome"] == "resolved"),
+        "legacy serve must not expose a resolved action identity"
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message["control"] == "claim_activity_v1_result"),
+        "legacy identity resolution must not mint a lease"
+    );
+}
+
+#[test]
+fn governed_retry_candidate_identity_control_rejects_unverified_dispatch_without_appending() {
+    let (store, cas, _tmp) = make_fixture();
+    let run_id = bp_ledger::RunId::from_uuid(
+        uuid::Uuid::parse_str("01919000-0000-7000-8000-000000000000").unwrap(),
+    );
+    let (signing, config) = governed_test_protocol(run_id);
+    let resolve = serde_json::json!({
+        "control": "resolve_retry_candidate_action_identity_v1",
+        "request_id": "identity-missing-dispatch-1",
+        "run_id": run_id,
+        "dispatch_event_id": "01919000-0000-7000-8000-000000000001",
+        "candidate_ref": format!(
+            "refs/buildplane/candidates/candidate-identity/{run_id}/2"
+        ),
+    });
+    let input = format!(
+        concat!(
+            r#"{{"control":"handshake","protocol":1,"run_id":"{}","started_at":"2026-04-17T12:00:00Z","schema_version":1}}"#,
+            "\n{}\n",
+            r#"{{"control":"close","seq":0}}"#,
+            "\n"
+        ),
+        run_id, resolve,
+    );
+    let mut stderr = Vec::new();
+    let outcome = serve_governed_with_protocol(
+        Cursor::new(input.as_bytes()),
+        &mut stderr,
+        &store,
+        &cas,
+        1,
+        &signing,
+        &config,
+    )
+    .expect("a rejected native identity lookup must keep the governed serve session live");
+    assert_eq!(outcome.events_written, 0);
+    assert_eq!(store.event_count().unwrap(), 0);
+    let messages: Vec<serde_json::Value> = String::from_utf8(stderr)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let rejection = messages
+        .iter()
+        .find(|message| message["control"] == "resolve_retry_candidate_action_identity_v1_result")
+        .expect("identity lookup must emit one typed response");
+    assert_eq!(rejection["request_id"], "identity-missing-dispatch-1");
+    assert_eq!(rejection["outcome"], "rejected");
+    assert_eq!(rejection["code"], "trusted_activity_authority_rejected");
+}
+
+#[test]
 fn activity_claims_require_signed_append_even_with_trusted_authority_configured() {
     use bp_ledger::signing::{public_key_hash, ActorKeyRef, TrustedPublicKeys};
     use ed25519_dalek::SigningKey;

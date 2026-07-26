@@ -811,6 +811,7 @@ export function createGitWorktreeAdapter(
 		): Promise<GovernedWorkspaceCandidateCreationResult> {
 			const governed = validateGovernedCandidateCreationInput(input);
 			assertGovernedCandidateDispatchAuthority(governed.dispatch, now());
+			const preflight = await prepareGovernedCandidateExecution(governed);
 			const verifiedTopology = assertGovernedCandidateWorktreeTopology(
 				governedRunGit,
 				governed.projectRoot,
@@ -825,6 +826,7 @@ export function createGitWorktreeAdapter(
 			const execution = createGovernedCandidateExecutionContext(
 				governed,
 				verifiedTopology,
+				preflight,
 			);
 			// The action request is itself durable evidence. Re-check the signed
 			// authority immediately before it so slow topology verification cannot
@@ -850,8 +852,8 @@ export function createGitWorktreeAdapter(
 				await execution.activityClaimPort.claim({
 					dispatch: execution.dispatch,
 					durableRequest,
-					activityId: actionRequest.actionId,
-					idempotencyKey: actionRequest.idempotencyKey,
+					activityId: execution.actionIdentity.activityId,
+					idempotencyKey: execution.actionIdentity.idempotencyKey,
 					leaseDurationMs: GOVERNED_CANDIDATE_ACTIVITY_LEASE_DURATION_MS,
 				}),
 				actionRequest,
@@ -1478,6 +1480,23 @@ interface CapturedGovernedCandidateActionEvidencePort {
 	readonly recordActionReceipt: GovernedActionEvidencePort["recordActionReceipt"];
 }
 
+/** The candidate flow captures the native resolver before its first await. */
+interface CapturedGovernedCandidateActivityClaimPort {
+	readonly claim: GovernedActivityClaimPort["claim"];
+	readonly recordResult: GovernedActivityClaimPort["recordResult"];
+	readonly resolveRetryCandidateActionIdentity?: NonNullable<
+		GovernedActivityClaimPort["resolveRetryCandidateActionIdentity"]
+	>;
+}
+
+/** Native identity and evidence writers captured before retry preflight. */
+interface PreparedGovernedCandidateExecution {
+	readonly dispatch: GovernedDispatchLineageV3;
+	readonly actionIdentity: GovernedCandidateActionIdentity;
+	readonly actionEvidencePort: CapturedGovernedCandidateActionEvidencePort;
+	readonly activityClaimPort: CapturedGovernedCandidateActivityClaimPort;
+}
+
 /**
  * Immutable authority and effect data for one governed candidate operation.
  * This is intentionally constructed before the first awaited evidence write:
@@ -1487,13 +1506,38 @@ interface GovernedCandidateExecutionContext {
 	readonly materialization: GovernedCandidateMaterializationInput;
 	readonly topology: VerifiedGovernedCandidateWorktreeTopology;
 	readonly dispatch: GovernedDispatchLineageV3;
+	readonly actionIdentity: GovernedCandidateActionIdentity;
 	readonly actionEvidencePort: CapturedGovernedCandidateActionEvidencePort;
-	readonly activityClaimPort: GovernedActivityClaimPort;
+	readonly activityClaimPort: CapturedGovernedCandidateActivityClaimPort;
+}
+
+async function prepareGovernedCandidateExecution(
+	input: ValidatedGovernedCandidateCreationInput,
+): Promise<PreparedGovernedCandidateExecution> {
+	const dispatch = snapshotGovernedDispatchLineageV3(input.dispatch);
+	const actionEvidencePort = captureCandidateActionEvidencePort(
+		input.actionEvidencePort,
+	);
+	const activityClaimPort = captureCandidateActivityClaimPort(
+		input.activityClaimPort,
+	);
+	const actionIdentity = await resolveGovernedRetryCandidateActionIdentity({
+		identity: input.identity,
+		dispatch,
+		activityClaimPort,
+	});
+	return Object.freeze({
+		dispatch,
+		actionIdentity,
+		actionEvidencePort,
+		activityClaimPort,
+	});
 }
 
 function createGovernedCandidateExecutionContext(
 	input: ValidatedGovernedCandidateCreationInput,
 	topology: VerifiedGovernedCandidateWorktreeTopology,
+	preflight: PreparedGovernedCandidateExecution,
 ): GovernedCandidateExecutionContext {
 	const materialization = Object.freeze({
 		candidateId: input.identity.candidateId,
@@ -1506,13 +1550,10 @@ function createGovernedCandidateExecutionContext(
 	return Object.freeze({
 		materialization,
 		topology,
-		dispatch: snapshotGovernedDispatchLineageV3(input.dispatch),
-		actionEvidencePort: captureCandidateActionEvidencePort(
-			input.actionEvidencePort,
-		),
-		activityClaimPort: captureCandidateActivityClaimPort(
-			input.activityClaimPort,
-		),
+		dispatch: preflight.dispatch,
+		actionIdentity: preflight.actionIdentity,
+		actionEvidencePort: preflight.actionEvidencePort,
+		activityClaimPort: preflight.activityClaimPort,
 	});
 }
 
@@ -1959,6 +2000,7 @@ function governedCandidateActionRequest(
 	const { dispatch, materialization } = execution;
 	const identity = materialization;
 	const candidateKey = candidateKeyFor(identity);
+	const actionIdentity = execution.actionIdentity;
 	const canonicalInputJson = JSON.stringify({
 		schemaVersion: 1,
 		action: "create-immutable-candidate",
@@ -1977,8 +2019,8 @@ function governedCandidateActionRequest(
 		unitId: dispatch.unitId,
 		attempt: identity.attempt,
 		provenanceRef: dispatch.provenanceRef,
-		actionId: `git-candidate-create:${candidateKey}`,
-		idempotencyKey: `${dispatch.idempotencyKey}:git-candidate-create`,
+		actionId: actionIdentity.actionId,
+		idempotencyKey: actionIdentity.idempotencyKey,
 		actionKind: "git",
 		canonicalInputDigest,
 		// The input is non-secret and deliberately self-contained. It lets a
@@ -2010,6 +2052,7 @@ function governedCandidateSuccessReceipt(
 	const { dispatch, materialization } = execution;
 	const candidateEvidence = canonicalCandidateEvidence(candidate);
 	const candidateDigest = sha256Digest(candidateEvidence);
+	const actionIdentity = execution.actionIdentity;
 	return {
 		schemaVersion: 2,
 		runId: materialization.runId,
@@ -2017,8 +2060,8 @@ function governedCandidateSuccessReceipt(
 		unitId: dispatch.unitId,
 		attempt: materialization.attempt,
 		provenanceRef: dispatch.provenanceRef,
-		actionId: `git-candidate-create:${candidate.candidateKey}`,
-		idempotencyKey: `${dispatch.idempotencyKey}:git-candidate-create`,
+		actionId: actionIdentity.actionId,
+		idempotencyKey: actionIdentity.idempotencyKey,
 		actionRequestDigest,
 		dispatchEnvelopeDigest: dispatch.envelopeDigest,
 		capabilityBundleDigest: dispatch.capabilityBundleDigest,
@@ -2053,6 +2096,7 @@ function governedCandidateFailureReceipt(
 		error instanceof GitWorkspaceCandidateError
 			? error.code
 			: "GIT_CANDIDATE_CREATION_UNKNOWN";
+	const actionIdentity = execution.actionIdentity;
 	return {
 		schemaVersion: 2,
 		runId: materialization.runId,
@@ -2060,8 +2104,8 @@ function governedCandidateFailureReceipt(
 		unitId: dispatch.unitId,
 		attempt: materialization.attempt,
 		provenanceRef: dispatch.provenanceRef,
-		actionId: `git-candidate-create:${candidateKeyFor(materialization)}`,
-		idempotencyKey: `${dispatch.idempotencyKey}:git-candidate-create`,
+		actionId: actionIdentity.actionId,
+		idempotencyKey: actionIdentity.idempotencyKey,
 		actionRequestDigest,
 		dispatchEnvelopeDigest: dispatch.envelopeDigest,
 		capabilityBundleDigest: dispatch.capabilityBundleDigest,
@@ -2081,6 +2125,142 @@ function governedCandidateFailureReceipt(
 	};
 }
 
+interface GovernedCandidateActionIdentity {
+	readonly actionId: string;
+	readonly activityId: string;
+	readonly idempotencyKey: string;
+}
+
+/**
+ * Resolve and snapshot the one action identity before action evidence exists.
+ * Retry identity remains entirely native-owned; this adapter only validates
+ * that the response is bound to its canonical candidate ref.
+ */
+async function resolveGovernedRetryCandidateActionIdentity(input: {
+	readonly identity: GitWorkspaceCandidateIdentity;
+	readonly dispatch: GovernedDispatchLineageV3;
+	readonly activityClaimPort: CapturedGovernedCandidateActivityClaimPort;
+}): Promise<GovernedCandidateActionIdentity> {
+	const candidateKey = candidateKeyFor(input.identity);
+	const candidateRef = candidateRefFor(input.identity);
+	if (input.identity.attempt === 1) {
+		const actionId = `git-candidate-create:${candidateKey}`;
+		return Object.freeze({
+			actionId,
+			activityId: actionId,
+			idempotencyKey: `${input.dispatch.idempotencyKey}:git-candidate-create`,
+		});
+	}
+	const resolver = input.activityClaimPort.resolveRetryCandidateActionIdentity;
+	if (resolver === undefined) {
+		throw retryCandidateActionIdentityError(
+			"resolver is unavailable for this retry",
+		);
+	}
+	let disposition: unknown;
+	try {
+		disposition = await resolver({
+			dispatch: input.dispatch,
+			candidateRef,
+		});
+	} catch (error) {
+		throw retryCandidateActionIdentityError(
+			`resolver failed: ${errorMessage(error)}`,
+		);
+	}
+	return requireResolvedRetryCandidateActionIdentity({
+		disposition,
+		candidateKey,
+	});
+}
+
+function requireResolvedRetryCandidateActionIdentity(input: {
+	readonly disposition: unknown;
+	readonly candidateKey: string;
+}): GovernedCandidateActionIdentity {
+	if (
+		input.disposition === null ||
+		typeof input.disposition !== "object" ||
+		Array.isArray(input.disposition)
+	) {
+		throw retryCandidateActionIdentityError(
+			"resolver returned a malformed result",
+		);
+	}
+	const disposition = input.disposition as Record<string, unknown>;
+	if (disposition.state === "rejected") {
+		const code = retryCandidateActionIdentityString(
+			disposition.code,
+			"rejection code",
+		);
+		const message = retryCandidateActionIdentityString(
+			disposition.message,
+			"rejection message",
+		);
+		throw retryCandidateActionIdentityError(
+			`resolver rejected the candidate (${code}): ${message}`,
+		);
+	}
+	if (disposition.state !== "resolved") {
+		throw retryCandidateActionIdentityError(
+			"resolver returned a malformed result",
+		);
+	}
+	const actionId = retryCandidateActionIdentityString(
+		disposition.actionId,
+		"action id",
+	);
+	const activityId = retryCandidateActionIdentityString(
+		disposition.activityId,
+		"activity id",
+	);
+	const idempotencyKey = retryCandidateActionIdentityString(
+		disposition.idempotencyKey,
+		"idempotency key",
+	);
+	const expectedActionSuffix = `:git-candidate-create:${input.candidateKey}`;
+	if (
+		actionId.length <= expectedActionSuffix.length ||
+		!actionId.endsWith(expectedActionSuffix)
+	) {
+		throw retryCandidateActionIdentityError(
+			"resolver action id is not bound to the canonical candidate ref",
+		);
+	}
+	if (activityId !== actionId) {
+		throw retryCandidateActionIdentityError(
+			"resolver activity id does not equal its action id",
+		);
+	}
+	if (idempotencyKey !== `${actionId}:idempotency`) {
+		throw retryCandidateActionIdentityError(
+			"resolver idempotency key does not bind its action id",
+		);
+	}
+	return Object.freeze({ actionId, activityId, idempotencyKey });
+}
+
+function retryCandidateActionIdentityString(
+	value: unknown,
+	label: string,
+): string {
+	if (typeof value !== "string" || value.trim().length === 0) {
+		throw retryCandidateActionIdentityError(
+			`resolver returned an invalid ${label}`,
+		);
+	}
+	return value;
+}
+
+function retryCandidateActionIdentityError(
+	reason: string,
+): GitWorkspaceCandidateError {
+	return new GitWorkspaceCandidateError(
+		"CANDIDATE_CREATION_FAILED",
+		`Native retry candidate action identity ${reason}.`,
+	);
+}
+
 /**
  * Bind the native control surface once per candidate materialization. This
  * prevents caller-side property swaps from changing the authority writer
@@ -2088,7 +2268,7 @@ function governedCandidateFailureReceipt(
  */
 function captureCandidateActivityClaimPort(
 	input: GovernedActivityClaimPort,
-): GovernedActivityClaimPort {
+): CapturedGovernedCandidateActivityClaimPort {
 	if (
 		!input ||
 		typeof input.claim !== "function" ||
@@ -2099,9 +2279,13 @@ function captureCandidateActivityClaimPort(
 			"Governed candidate creation requires a native activity-claim port before any Git effect.",
 		);
 	}
+	const resolver = input.resolveRetryCandidateActionIdentity;
 	return Object.freeze({
 		claim: input.claim.bind(input),
 		recordResult: input.recordResult.bind(input),
+		...(typeof resolver === "function"
+			? { resolveRetryCandidateActionIdentity: resolver.bind(input) }
+			: {}),
 	});
 }
 

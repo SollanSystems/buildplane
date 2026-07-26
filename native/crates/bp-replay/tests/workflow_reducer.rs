@@ -41,14 +41,18 @@ use bp_ledger::payload::trust_spine::{
     TRUST_SCOPE_EVIDENCE_V1_SCHEMA_VERSION,
 };
 use bp_ledger::payload::Payload;
-use bp_ledger::signing::{public_key_hash, ActorKeyRef, TrustedPublicKeys, VerificationStatus};
+use bp_ledger::signing::{
+    public_key_hash, sign_event, ActorKeyRef, TrustedPublicKeys, VerificationStatus,
+};
 use bp_ledger::storage::sqlite::SqliteStore;
 use bp_replay::engine::{ReplayEngine, TrustSpineSignerRole, TrustedReplayAuthorities};
 use bp_replay::state::{ReplayIssue, ReplayState, WorkflowInstanceV1, WorkflowPhaseV1};
 use bp_replay::transitions::apply;
 use chrono::Utc;
 use ed25519_dalek::SigningKey;
+use rusqlite::params;
 use std::collections::BTreeMap;
+use std::path::Path;
 use tempfile::TempDir;
 
 const DIGEST_A: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -73,6 +77,54 @@ fn event_of(run_id: RunId, kind: EventKind, payload: Payload) -> Event {
         occurred_at,
         payload,
     }
+}
+
+/// Production ingress intentionally rejects caller-supplied reconciliation
+/// resolutions. This test-only writer lets replay exercise a byte-valid,
+/// signed tape that bypassed that ingress, so replay's independent signer-role
+/// check cannot regress into trusting storage admission projections.
+fn append_signed_event_directly_for_replay_test(
+    db_path: &Path,
+    event: &Event,
+    signing_key: &SigningKey,
+    signer: &ActorKeyRef,
+) {
+    let signature = sign_event(event, signing_key, signer, Utc::now())
+        .expect("sign a canonical direct replay test event");
+    let connection = rusqlite::Connection::open(db_path).expect("open test ledger connection");
+    connection
+        .execute(
+            r#"INSERT INTO events (id, run_id, parent_event_id, schema_version, kind, occurred_at, payload)
+               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"#,
+            params![
+                event.id.to_string(),
+                event.run_id.to_string(),
+                event.parent_event_id.map(|event_id| event_id.to_string()),
+                event.schema_version,
+                event.kind_str(),
+                event.occurred_at.to_rfc3339(),
+                serde_json::to_string(&event.payload).expect("serialize direct replay payload"),
+            ],
+        )
+        .expect("insert direct replay test event");
+    connection
+        .execute(
+            r#"INSERT INTO event_signatures (
+                    event_id, canonical_event_hash, actor_id, key_id, public_key_hash,
+                    algorithm, signature, signed_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"#,
+            params![
+                signature.event_id.to_string(),
+                signature.canonical_event_hash,
+                signature.signer.actor_id,
+                signature.signer.key_id,
+                signature.signer.public_key_hash,
+                "ed25519",
+                signature.signature,
+                signature.signed_at.to_rfc3339(),
+            ],
+        )
+        .expect("insert direct replay test signature");
 }
 
 fn has_activity_transition_rejection(state: &ReplayState, expected_reason: &str) -> bool {
@@ -904,7 +956,7 @@ fn candidate_v2(
     CandidateCreatedV2 {
         run_id: run_id.to_string(),
         candidate_id: "candidate-v2-1".into(),
-        candidate_ref: "refs/buildplane/candidates/candidate-v2-1/run-1/1".into(),
+        candidate_ref: candidate_v2_ref(run_id, dispatch.body.attempt),
         workflow_id: dispatch.body.workflow_id.clone(),
         unit_id: dispatch.body.unit_id.clone(),
         attempt: dispatch.body.attempt,
@@ -920,6 +972,18 @@ fn candidate_v2(
         action_receipt_set_ref: set.action_receipt_set_ref.clone(),
         action_receipt_set_digest: set.action_receipt_set_digest.clone(),
     }
+}
+
+fn candidate_v2_ref(run_id: RunId, attempt: u32) -> String {
+    format!("refs/buildplane/candidates/candidate-v2-1/{run_id}/{attempt}")
+}
+
+fn candidate_v2_action_id(run_id: RunId, attempt: u32) -> String {
+    let candidate_ref = candidate_v2_ref(run_id, attempt);
+    let candidate_key = candidate_ref
+        .strip_prefix("refs/buildplane/candidates/")
+        .expect("candidate V2 ref has the Buildplane prefix");
+    format!("git-candidate-create:{candidate_key}")
 }
 
 fn candidate_completion(
@@ -1003,7 +1067,7 @@ fn v2_review_fixture() -> V2ReviewFixture {
     let mut reviewer_request = action_request(run_id, &reviewer_dispatch, "review-action-1");
     reviewer_request.action_kind = ActionKindV1::Model;
     let mut reviewer_receipt = action_receipt(&reviewer_request, ActionReceiptOutcomeV2::Succeeded);
-    let candidate_view = review_v2_candidate_view(&reviewer_dispatch);
+    let candidate_view = review_v2_candidate_view(run_id, &candidate_dispatch, &reviewer_dispatch);
     let review_output_digest = review_verdict_output_v1_digest(&review_v2_output(&candidate_view))
         .expect("hash closed review output");
     reviewer_receipt.result_ref = Some(format!("cas:{review_output_digest}"));
@@ -1199,7 +1263,7 @@ fn v2_review_binds_passed_candidate_and_sealed_reviewer_action_evidence() {
             .candidate_view
             .as_ref()
             .map(|view| view.candidate_ref.as_str()),
-        Some("refs/buildplane/candidates/candidate-v2-1/run-1/1")
+        Some(fixture.candidate.candidate_ref.as_str())
     );
 }
 
@@ -1438,7 +1502,10 @@ fn sealed_v3_reviewer_authorized_for_candidate_a_cannot_issue_verdict_for_candid
     let candidate_b_set = action_receipt_set(&candidate_b_request, &candidate_b_receipt);
     let mut candidate_b = candidate_v2(run_id, &candidate_b_dispatch, &candidate_b_set);
     candidate_b.candidate_id = "candidate-v2-2".into();
-    candidate_b.candidate_ref = "refs/buildplane/candidates/candidate-v2-2/run-1/1".into();
+    candidate_b.candidate_ref = format!(
+        "refs/buildplane/candidates/candidate-v2-2/{run_id}/{}",
+        candidate_b.attempt
+    );
     candidate_b.candidate_digest = DIGEST_B.into();
     candidate_b.candidate_commit_sha = "3".repeat(40);
     candidate_b.tree_digest = DIGEST_A.into();
@@ -1451,7 +1518,8 @@ fn sealed_v3_reviewer_authorized_for_candidate_a_cannot_issue_verdict_for_candid
         reviewer_dispatch_v3_with_action_evidence(ActionEvidenceVersionV1::SealedV3);
     let mut reviewer_request = action_request(run_id, &reviewer_dispatch, "review-action-a");
     reviewer_request.action_kind = ActionKindV1::Model;
-    let candidate_view_a = review_v2_candidate_view(&reviewer_dispatch);
+    let candidate_view_a =
+        review_v2_candidate_view(run_id, &candidate_a_dispatch, &reviewer_dispatch);
     let candidate_view_a_digest =
         candidate_view_v1_digest(&candidate_view_a).expect("hash candidate A view");
     let mut candidate_view_b = candidate_view_a.clone();
@@ -4243,7 +4311,7 @@ fn review_v2(
     reviewer_receipt: &ActionReceiptRecordedV2,
     reviewer_set: &ActionReceiptSetRecordedV1,
 ) -> ReviewVerdictRecordedV2 {
-    let candidate_view = review_v2_candidate_view(reviewer_dispatch);
+    let candidate_view = review_v2_candidate_view(run_id, candidate_dispatch, reviewer_dispatch);
     let review_output = review_v2_output(&candidate_view);
     let review_output_digest =
         review_verdict_output_v1_digest(&review_output).expect("hash closed review output");
@@ -4287,9 +4355,13 @@ fn review_v2(
     }
 }
 
-fn review_v2_candidate_view(reviewer_dispatch: &DispatchEnvelopeV3) -> CandidateViewV1 {
+fn review_v2_candidate_view(
+    run_id: RunId,
+    candidate_dispatch: &DispatchEnvelopeV3,
+    reviewer_dispatch: &DispatchEnvelopeV3,
+) -> CandidateViewV1 {
     CandidateViewV1 {
-        candidate_ref: "refs/buildplane/candidates/candidate-v2-1/run-1/1".into(),
+        candidate_ref: candidate_v2_ref(run_id, candidate_dispatch.body.attempt),
         candidate_digest: DIGEST_A.into(),
         candidate_commit_sha: "2".repeat(40),
         tree_digest: DIGEST_C.into(),
@@ -7285,7 +7357,7 @@ fn replay_engine_refuses_a_v2_dispatch_from_an_untrusted_kernel_signer() {
 fn replay_engine_requires_an_operator_signer_for_reconciliation_resolution() {
     let temp = TempDir::new().expect("temporary ledger directory");
     let db_path = temp.path().join("events.db");
-    let store = SqliteStore::open(&db_path).expect("ledger store");
+    let _store = SqliteStore::open(&db_path).expect("ledger store");
     let run_id = RunId::new();
     let signing_key = SigningKey::from_bytes(&[9; 32]);
     let trusted_authorities = trusted_authorities(&signing_key);
@@ -7300,9 +7372,12 @@ fn replay_engine_requires_an_operator_signer_for_reconciliation_resolution() {
         )),
     );
     let resolution_event_id = resolution_event.id;
-    store
-        .append_signed(&resolution_event, &signing_key, &kernel_signer())
-        .expect("append signed resolution with the wrong role");
+    append_signed_event_directly_for_replay_test(
+        &db_path,
+        &resolution_event,
+        &signing_key,
+        &kernel_signer(),
+    );
 
     let mut replay = ReplayEngine::open_with_trusted_authorities(
         &run_id.to_string(),
@@ -8463,11 +8538,8 @@ fn legacy_tape_events_and_legacy_serialized_state_remain_replay_compatible() {
 fn sealed_v3_candidate_requires_closed_completion_lineage_before_acceptance() {
     let run_id = RunId::new();
     let dispatch = dispatch_v3_with_action_evidence(ActionEvidenceVersionV1::SealedV3);
-    let mut request = action_request(
-        run_id,
-        &dispatch,
-        "git-candidate-create:candidate-v2-1/run-1/1",
-    );
+    let candidate_action_id = candidate_v2_action_id(run_id, dispatch.body.attempt);
+    let mut request = action_request(run_id, &dispatch, &candidate_action_id);
     request.action_kind = ActionKindV1::Git;
     let dispatch_event = event_of(
         run_id,
@@ -8648,6 +8720,232 @@ fn sealed_v3_candidate_requires_closed_completion_lineage_before_acceptance() {
             .phase,
         WorkflowPhaseV1::AcceptancePassed
     );
+}
+
+fn replay_sealed_v3_retry_candidate_completion(
+    configure_request: impl FnOnce(&mut ActionRequestedV2),
+) -> (ReplayState, u32) {
+    replay_sealed_v3_retry_candidate_completion_with_candidate_ref(
+        configure_request,
+        candidate_v2_ref,
+        true,
+    )
+}
+
+fn replay_sealed_v3_retry_candidate_completion_with_candidate_ref(
+    configure_request: impl FnOnce(&mut ActionRequestedV2),
+    candidate_ref_for: impl FnOnce(RunId, u32) -> String,
+    expect_candidate_setup_accepted: bool,
+) -> (ReplayState, u32) {
+    let run_id = RunId::new();
+    let mut state = ReplayState::default();
+    let fixture = apply_failed_retry_attempt(&mut state, run_id);
+    let retry = retry_dispatch(&fixture.prior_dispatch);
+    let context = retry_attempt_context(run_id, &fixture, &retry);
+    let retry_namespace = context.retry_action_namespace.clone();
+
+    apply(
+        &mut state,
+        &event_of(
+            run_id,
+            EventKind::AttemptContextRecordedV1,
+            Payload::AttemptContextRecordedV1(context),
+        ),
+    );
+    let retry_dispatch_event = event_of(
+        run_id,
+        EventKind::DispatchEnvelopeV3,
+        Payload::DispatchEnvelopeV3(retry.clone()),
+    );
+    apply(&mut state, &retry_dispatch_event);
+
+    let candidate_ref = candidate_ref_for(run_id, retry.body.attempt);
+    let candidate_key = candidate_ref
+        .strip_prefix("refs/buildplane/candidates/")
+        .expect("retry candidate ref has the Buildplane prefix");
+    let action_id = format!("{retry_namespace}:git-candidate-create:{candidate_key}");
+    let mut request = action_request(run_id, &retry, &action_id);
+    request.action_kind = ActionKindV1::Git;
+    request.idempotency_key = format!("{action_id}:idempotency");
+    configure_request(&mut request);
+    let request_event = event_of(
+        run_id,
+        EventKind::ActionRequestedV2,
+        Payload::ActionRequestedV2(request.clone()),
+    );
+    let claim = activity_claim(run_id, &retry_dispatch_event, &request_event, &request);
+    let claim_event = activity_claim_event(run_id, &claim);
+    let result = activity_result(&claim_event, &claim, ActivityResultOutcomeV1::Succeeded);
+    let result_event = activity_result_event(run_id, &claim_event, &result);
+    let receipt = action_receipt(&request, ActionReceiptOutcomeV2::Succeeded);
+    let receipt_set = action_receipt_set(&request, &receipt);
+    let mut candidate = candidate_v2(run_id, &retry, &receipt_set);
+    candidate.candidate_ref = candidate_ref;
+    let candidate_event = event_of(
+        run_id,
+        EventKind::CandidateCreatedV2,
+        Payload::CandidateCreatedV2(candidate.clone()),
+    );
+
+    for event in [
+        request_event.clone(),
+        claim_event.clone(),
+        result_event.clone(),
+        event_of(
+            run_id,
+            EventKind::ActionReceiptRecordedV2,
+            Payload::ActionReceiptRecordedV2(receipt.clone()),
+        ),
+        event_of(
+            run_id,
+            EventKind::ActionReceiptSetRecordedV1,
+            Payload::ActionReceiptSetRecordedV1(receipt_set),
+        ),
+        candidate_event.clone(),
+    ] {
+        apply(&mut state, &event);
+    }
+    if expect_candidate_setup_accepted {
+        assert!(
+            state.issues.is_empty(),
+            "retry candidate setup: {:#?}",
+            state.issues
+        );
+    }
+
+    let completion = candidate_completion(
+        &candidate,
+        &candidate_event,
+        &request,
+        &request_event,
+        &claim_event,
+        &result_event,
+        &receipt,
+    );
+    apply(
+        &mut state,
+        &candidate_completion_event(run_id, &candidate_event, &completion),
+    );
+
+    (state, retry.body.attempt)
+}
+
+#[test]
+fn sealed_v3_retry_candidate_completion_accepts_the_context_bound_action_identity() {
+    let (state, retry_attempt) = replay_sealed_v3_retry_candidate_completion(|_| {});
+
+    let retry_workflow = state
+        .workflow_instances
+        .values()
+        .find(|workflow| workflow.attempt == retry_attempt)
+        .expect("retry workflow");
+    assert!(retry_workflow.candidate_completion.is_some());
+    assert!(
+        state.issues.is_empty(),
+        "context-bound retry candidate completion: {:#?}",
+        state.issues
+    );
+}
+
+#[test]
+fn sealed_v3_retry_candidate_rejects_a_canonical_ref_for_another_run_before_completion() {
+    let (state, retry_attempt) = replay_sealed_v3_retry_candidate_completion_with_candidate_ref(
+        |_| {},
+        |_, attempt| candidate_v2_ref(RunId::new(), attempt),
+        false,
+    );
+
+    let retry_workflow = state
+        .workflow_instances
+        .values()
+        .find(|workflow| workflow.attempt == retry_attempt)
+        .expect("retry workflow");
+    assert!(retry_workflow.candidate.is_none());
+    assert!(retry_workflow.candidate_completion.is_none());
+    assert!(has_activity_transition_rejection(
+        &state,
+        "candidate ref must bind the signed candidate id, event run, and dispatch attempt"
+    ));
+}
+
+#[test]
+fn sealed_v3_retry_candidate_rejects_a_canonical_ref_for_the_wrong_attempt_before_completion() {
+    let (state, retry_attempt) = replay_sealed_v3_retry_candidate_completion_with_candidate_ref(
+        |_| {},
+        |run_id, attempt| candidate_v2_ref(run_id, attempt + 1),
+        false,
+    );
+
+    let retry_workflow = state
+        .workflow_instances
+        .values()
+        .find(|workflow| workflow.attempt == retry_attempt)
+        .expect("retry workflow");
+    assert!(retry_workflow.candidate.is_none());
+    assert!(retry_workflow.candidate_completion.is_none());
+    assert!(has_activity_transition_rejection(
+        &state,
+        "candidate ref must bind the signed candidate id, event run, and dispatch attempt"
+    ));
+}
+
+#[test]
+fn sealed_v3_retry_candidate_rejects_a_canonical_ref_with_a_different_candidate_id_before_completion(
+) {
+    let (state, retry_attempt) = replay_sealed_v3_retry_candidate_completion_with_candidate_ref(
+        |_| {},
+        |run_id, attempt| {
+            format!("refs/buildplane/candidates/different-candidate-id/{run_id}/{attempt}")
+        },
+        false,
+    );
+
+    let retry_workflow = state
+        .workflow_instances
+        .values()
+        .find(|workflow| workflow.attempt == retry_attempt)
+        .expect("retry workflow");
+    assert!(retry_workflow.candidate.is_none());
+    assert!(retry_workflow.candidate_completion.is_none());
+    assert!(has_activity_transition_rejection(
+        &state,
+        "candidate ref must bind the signed candidate id, event run, and dispatch attempt"
+    ));
+}
+
+#[test]
+fn sealed_v3_retry_candidate_completion_rejects_a_namespaced_but_noncanonical_idempotency_key() {
+    let (state, retry_attempt) = replay_sealed_v3_retry_candidate_completion(|request| {
+        request
+            .idempotency_key
+            .push_str(":unexpected-idempotency-suffix");
+    });
+
+    let retry_workflow = state
+        .workflow_instances
+        .values()
+        .find(|workflow| workflow.attempt == retry_attempt)
+        .expect("retry workflow");
+    assert!(retry_workflow.candidate_completion.is_none());
+    assert!(has_activity_transition_rejection(&state, "idempotency key"));
+}
+
+#[test]
+fn sealed_v3_retry_candidate_completion_rejects_a_namespaced_but_noncanonical_action_id() {
+    let (state, retry_attempt) = replay_sealed_v3_retry_candidate_completion(|request| {
+        request.action_id.push_str(":unexpected-action-id-suffix");
+    });
+
+    let retry_workflow = state
+        .workflow_instances
+        .values()
+        .find(|workflow| workflow.attempt == retry_attempt)
+        .expect("retry workflow");
+    assert!(retry_workflow.candidate_completion.is_none());
+    assert!(has_activity_transition_rejection(
+        &state,
+        "exact Git candidate-create action"
+    ));
 }
 
 #[test]
@@ -9145,11 +9443,8 @@ fn apply_sealed_v3_reviewed_candidate(
     dispatch: &DispatchEnvelopeV3,
     dispatch_event: &Event,
 ) -> SealedV3ReviewedCandidateFixture {
-    let mut candidate_request = action_request(
-        run_id,
-        dispatch,
-        "git-candidate-create:candidate-v2-1/run-1/1",
-    );
+    let candidate_action_id = candidate_v2_action_id(run_id, dispatch.body.attempt);
+    let mut candidate_request = action_request(run_id, dispatch, &candidate_action_id);
     candidate_request.action_kind = ActionKindV1::Git;
     let candidate_request_event = event_of(
         run_id,
@@ -9235,7 +9530,7 @@ fn apply_sealed_v3_reviewed_candidate(
         Payload::ActionRequestedV2(reviewer_request.clone()),
     );
     apply(state, &reviewer_request_event);
-    let candidate_view = review_v2_candidate_view(&reviewer_dispatch);
+    let candidate_view = review_v2_candidate_view(run_id, dispatch, &reviewer_dispatch);
     let review_output = review_v2_output(&candidate_view);
     let review_output_digest =
         review_verdict_output_v1_digest(&review_output).expect("hash closed review output");
@@ -9382,11 +9677,8 @@ fn cancellation_rejects_a_valid_promotion_rejection_and_allows_the_cancelled_ter
     let (mut state, run_id, dispatch, dispatch_event, schedule, schedule_event) =
         lifecycle_timer_fixture();
 
-    let mut candidate_request = action_request(
-        run_id,
-        &dispatch,
-        "git-candidate-create:candidate-v2-1/run-1/1",
-    );
+    let candidate_action_id = candidate_v2_action_id(run_id, dispatch.body.attempt);
+    let mut candidate_request = action_request(run_id, &dispatch, &candidate_action_id);
     candidate_request.action_kind = ActionKindV1::Git;
     let candidate_request_event = event_of(
         run_id,
@@ -9472,7 +9764,7 @@ fn cancellation_rejects_a_valid_promotion_rejection_and_allows_the_cancelled_ter
         Payload::ActionRequestedV2(reviewer_request.clone()),
     );
     apply(&mut state, &reviewer_request_event);
-    let candidate_view = review_v2_candidate_view(&reviewer_dispatch);
+    let candidate_view = review_v2_candidate_view(run_id, &dispatch, &reviewer_dispatch);
     let review_output = review_v2_output(&candidate_view);
     let review_output_digest =
         review_verdict_output_v1_digest(&review_output).expect("hash closed review output");

@@ -15,6 +15,25 @@ const ACTION_REQUEST_EVENT_ID = "00000000-0000-7000-8000-000000000002";
 const CLAIM_EVENT_ID = "00000000-0000-7000-8000-000000000003";
 const RESULT_EVENT_ID = "00000000-0000-7000-8000-000000000004";
 
+type RetryCandidateActionIdentityPort = {
+	resolveRetryCandidateActionIdentity(input: {
+		readonly dispatch: GovernedDispatchLineageV3;
+		readonly candidateRef: string;
+	}): Promise<
+		| {
+				readonly state: "resolved";
+				readonly actionId: string;
+				readonly activityId: string;
+				readonly idempotencyKey: string;
+		  }
+		| {
+				readonly state: "rejected";
+				readonly code: string;
+				readonly message: string;
+		  }
+	>;
+};
+
 function dispatch(
 	overrides: Partial<GovernedDispatchLineageV3> = {},
 ): GovernedDispatchLineageV3 {
@@ -102,10 +121,25 @@ function createFakeEmitter() {
 		result_event_digest: DIGEST_B,
 		result_outcome: "succeeded" as const,
 	}));
+	const resolveRetryCandidateActionIdentity = vi.fn(async () => ({
+		control: "resolve_retry_candidate_action_identity_v1_result" as const,
+		request_id: "request-retry-identity",
+		outcome: "resolved" as const,
+		action_id:
+			"git-candidate-create:candidate-activity-port/run-activity-port/2",
+		activity_id:
+			"git-candidate-create:candidate-activity-port/run-activity-port/2",
+		idempotency_key: "dispatch:activity-port:retry-candidate",
+	}));
 	return {
-		emitter: { claimActivity, recordActivityResult } as unknown as TapeEmitter,
+		emitter: {
+			claimActivity,
+			recordActivityResult,
+			resolveRetryCandidateActionIdentity,
+		} as unknown as TapeEmitter,
 		claimActivity,
 		recordActivityResult,
+		resolveRetryCandidateActionIdentity,
 	};
 }
 
@@ -220,5 +254,90 @@ describe("governed activity claim tape port", () => {
 			}),
 		).rejects.toThrow(/native event UUID/i);
 		expect(fake.claimActivity).not.toHaveBeenCalled();
+	});
+
+	it("resolves only the signed dispatch event before obtaining retry candidate identity", async () => {
+		const fake = createFakeEmitter();
+		const resolveDispatchEventId = vi.fn(async () => DISPATCH_EVENT_ID);
+		const resolveActionRequestEventId = vi.fn(
+			async () => ACTION_REQUEST_EVENT_ID,
+		);
+		const port = createGovernedActivityClaimPort({
+			emitter: fake.emitter,
+			references: { resolveDispatchEventId, resolveActionRequestEventId },
+		}) as unknown as GovernedActivityClaimPort &
+			RetryCandidateActionIdentityPort;
+		const governedDispatch = dispatch({ attempt: 2 });
+		const candidateRef =
+			"refs/buildplane/candidates/candidate-activity-port/run-activity-port/2";
+
+		await expect(
+			port.resolveRetryCandidateActionIdentity({
+				dispatch: governedDispatch,
+				candidateRef,
+			}),
+		).resolves.toEqual({
+			state: "resolved",
+			actionId:
+				"git-candidate-create:candidate-activity-port/run-activity-port/2",
+			activityId:
+				"git-candidate-create:candidate-activity-port/run-activity-port/2",
+			idempotencyKey: "dispatch:activity-port:retry-candidate",
+		});
+		expect(resolveDispatchEventId).toHaveBeenCalledWith({
+			dispatch: governedDispatch,
+		});
+		expect(resolveActionRequestEventId).not.toHaveBeenCalled();
+		expect(fake.resolveRetryCandidateActionIdentity).toHaveBeenCalledWith({
+			runId: governedDispatch.runId,
+			dispatchEventId: DISPATCH_EVENT_ID,
+			candidateRef,
+		});
+	});
+
+	it("fails closed when the native retry candidate identity response is malformed", async () => {
+		const fake = createFakeEmitter();
+		fake.resolveRetryCandidateActionIdentity.mockResolvedValueOnce({
+			control: "resolve_retry_candidate_action_identity_v1_result",
+			request_id: "request-retry-identity",
+			outcome: "resolved",
+			action_id:
+				"git-candidate-create:candidate-activity-port/run-activity-port/2",
+			activity_id: "",
+			idempotency_key: "dispatch:activity-port:retry-candidate",
+		});
+		const port = createGovernedActivityClaimPort({
+			emitter: fake.emitter,
+			references: {
+				resolveDispatchEventId: async () => DISPATCH_EVENT_ID,
+				resolveActionRequestEventId: async () => ACTION_REQUEST_EVENT_ID,
+			},
+		}) as unknown as RetryCandidateActionIdentityPort;
+		const governedDispatch = dispatch({ attempt: 2 });
+
+		await expect(
+			port.resolveRetryCandidateActionIdentity({
+				dispatch: governedDispatch,
+				candidateRef:
+					"refs/buildplane/candidates/candidate-activity-port/run-activity-port/2",
+			}),
+		).rejects.toThrow(/retry candidate action identity/i);
+	});
+
+	it("requires the native retry candidate identity capability", () => {
+		const fake = createFakeEmitter();
+		const {
+			resolveRetryCandidateActionIdentity: _unused,
+			...incompleteEmitter
+		} = fake.emitter as unknown as Record<string, unknown>;
+		expect(() =>
+			createGovernedActivityClaimPort({
+				emitter: incompleteEmitter as unknown as TapeEmitter,
+				references: {
+					resolveDispatchEventId: async () => DISPATCH_EVENT_ID,
+					resolveActionRequestEventId: async () => ACTION_REQUEST_EVENT_ID,
+				},
+			}),
+		).toThrow(/retry candidate action identity/i);
 	});
 });

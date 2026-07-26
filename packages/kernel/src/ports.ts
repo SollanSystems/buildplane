@@ -1104,11 +1104,41 @@ export type GovernedActivityResultDispositionV1 =
 	  };
 
 /**
+ * Closed native resolution for the one retry candidate Git action. The native
+ * authority derives these fields from the sealed retry context; TypeScript may
+ * only consume the returned identity and must not supply an action namespace.
+ */
+export interface ResolvedRetryCandidateActionIdentityV1 {
+	readonly state: "resolved";
+	readonly actionId: string;
+	readonly activityId: string;
+	readonly idempotencyKey: string;
+}
+
+/** A native retry-identity denial is terminal before action evidence exists. */
+export type GovernedRetryCandidateActionIdentityDispositionV1 =
+	| ResolvedRetryCandidateActionIdentityV1
+	| {
+			readonly state: "rejected";
+			readonly code: string;
+			readonly message: string;
+	  };
+
+/**
  * Native tape-backed activity boundary for every sealed_v3 irreversible
  * action. A caller must write action intent, obtain a grant, record exactly
  * one terminal result, and only then write the matching action receipt.
  */
 export interface GovernedActivityClaimPort {
+	/**
+	 * Native-only resolver for the retry candidate Git identity. It remains
+	 * optional while ports migrate, but a V3 attempt after the first must reject
+	 * before action evidence, a claim, or a Git effect when it is unavailable.
+	 */
+	resolveRetryCandidateActionIdentity?(input: {
+		readonly dispatch: GovernedDispatchLineageV3;
+		readonly candidateRef: string;
+	}): Promise<GovernedRetryCandidateActionIdentityDispositionV1>;
 	claim(input: {
 		readonly dispatch: GovernedDispatchLineageV3;
 		readonly durableRequest: DurableActionRequestV2;
