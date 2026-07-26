@@ -517,7 +517,7 @@ fn open_trusted_anchor_for_test(
 /// Tests may replace the immutable root-owned prefix with their private temp
 /// anchor, but retain the same descriptor-walk and final-root checks.
 #[cfg(all(test, target_os = "linux"))]
-fn validate_promotion_decision_host_startup_from_trusted_anchor_for_test(
+pub(crate) fn validate_promotion_decision_host_startup_from_trusted_anchor_for_test(
     config: PromotionDecisionHostConfigV1,
     trusted_anchor: &Path,
     expected_ancestor_owner: u32,

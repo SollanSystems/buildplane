@@ -44,6 +44,7 @@ mod confinement;
 mod dispatch_admission;
 mod host_config;
 mod host_config_loader;
+mod host_key_custody;
 #[allow(dead_code)]
 mod promotion_decision_handler;
 mod promotion_execution;
