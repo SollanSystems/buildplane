@@ -653,6 +653,19 @@ pub struct GovernedV5CandidateFinalizeAuthorizeAndClaimRequestV1 {
     pub lease_duration_ms: u64,
 }
 
+/// Closed terminal-result input for the purpose-bound candidate Git lease.
+/// The opaque lease is the only activity selector exposed to the host.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GovernedV5CandidateFinalizeResultRequestV1 {
+    pub run_id: RunId,
+    pub lease_id: String,
+    pub outcome: ActivityResultOutcomeV1,
+    pub result_digest: Option<String>,
+    pub result_ref: Option<String>,
+    pub evidence_digest: String,
+    pub evidence_ref: String,
+}
+
 /// Closed native request to create the signed intent that precedes a governed
 /// model authorization. Every identity, role, canonical input, and evidence
 /// descriptor is re-derived from signed tape plus the protected realm CAS.
@@ -8314,6 +8327,152 @@ impl SqliteStore {
         })
     }
 
+    /// Record the terminal outcome of the one purpose-bound candidate Git
+    /// lease. The signed claim and sealed V5 admission are reconstructed
+    /// before the result transaction; a terminal retry reuses the exact event.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_governed_v5_candidate_finalize_result_v1(
+        &self,
+        request: &GovernedV5CandidateFinalizeResultRequestV1,
+        cas: &Cas,
+        v5_authority: &GovernedDispatchV5AdmissionAuthorityV1,
+        activity_authority: &ActivityClaimAuthorityV1,
+        signing_key: &SigningKey,
+        signer: &ActorKeyRef,
+    ) -> Result<ActivityResultDispositionV1> {
+        self.record_governed_v5_candidate_finalize_result_v1_at(
+            request,
+            cas,
+            v5_authority,
+            activity_authority,
+            signing_key,
+            signer,
+            Utc::now(),
+        )
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_governed_v5_candidate_finalize_result_v1_at_for_tests(
+        &self,
+        request: &GovernedV5CandidateFinalizeResultRequestV1,
+        cas: &Cas,
+        v5_authority: &GovernedDispatchV5AdmissionAuthorityV1,
+        activity_authority: &ActivityClaimAuthorityV1,
+        signing_key: &SigningKey,
+        signer: &ActorKeyRef,
+        now: DateTime<Utc>,
+    ) -> Result<ActivityResultDispositionV1> {
+        self.record_governed_v5_candidate_finalize_result_v1_at(
+            request,
+            cas,
+            v5_authority,
+            activity_authority,
+            signing_key,
+            signer,
+            now,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_governed_v5_candidate_finalize_result_v1_at(
+        &self,
+        request: &GovernedV5CandidateFinalizeResultRequestV1,
+        cas: &Cas,
+        v5_authority: &GovernedDispatchV5AdmissionAuthorityV1,
+        activity_authority: &ActivityClaimAuthorityV1,
+        signing_key: &SigningKey,
+        signer: &ActorKeyRef,
+        now: DateTime<Utc>,
+    ) -> Result<ActivityResultDispositionV1> {
+        require_protected_governed_realm(activity_authority)?;
+        validate_claim_signer(activity_authority, signing_key, signer)?;
+        if request.lease_id.trim().is_empty() {
+            return Err(LedgerError::InvalidPayload {
+                kind: "record_governed_v5_candidate_finalize_result_v1".into(),
+                reason: "lease_id must be non-empty".into(),
+            });
+        }
+        let stored = activity_claim_by_lease(&self.conn, request.run_id, &request.lease_id)?
+            .ok_or_else(|| {
+                command_action_authority_rejected(
+                    "candidate finalization result lease does not name a signed claim",
+                )
+            })?;
+        let signed_claim = verify_signed_claim_projection(&self.conn, &stored, activity_authority)?;
+        if stored.action_kind != ActionKindV1::Git
+            || signed_claim.purpose != ActivityClaimPurposeV1::GovernedCandidateFinalizeV1
+        {
+            return Err(command_action_authority_rejected(
+                "candidate finalization result requires its purpose-bound Git lease",
+            ));
+        }
+        let admission = governed_dispatch_v5_admission_by_source(
+            &self.conn,
+            request.run_id,
+            stored.dispatch_event_id,
+        )?
+        .ok_or_else(|| {
+            command_action_authority_rejected(
+                "candidate finalization result requires a recorded V5 admission",
+            )
+        })?;
+        let claimed_at = parse_claim_timestamp(&signed_claim.claimed_at)?;
+        let reconstruction = GovernedV5CandidateFinalizeAuthorizeAndClaimRequestV1 {
+            run_id: stored.run_id,
+            dispatch_event_id: stored.dispatch_event_id,
+            admission_event_id: admission.admission_event_id,
+            action_request_event_id: stored.action_request_event_id,
+            lease_duration_ms: stored.lease_duration_ms,
+        };
+        let derived_claim = reconstruct_governed_v5_candidate_finalize_claim_v1(
+            &self.conn,
+            &reconstruction,
+            cas,
+            v5_authority,
+            activity_authority,
+            claimed_at,
+        )?;
+        if derived_claim.activity_id != stored.activity_id
+            || derived_claim.idempotency_key != stored.idempotency_key
+            || derived_claim.dispatch_event_id != stored.dispatch_event_id
+            || derived_claim.action_request_event_id != stored.action_request_event_id
+        {
+            return Err(command_action_authority_rejected(
+                "candidate finalization result lease does not match reconstructed authority",
+            ));
+        }
+        if !activity_heartbeats_for_claim(&self.conn, stored.run_id, stored.claim_event_id)?
+            .is_empty()
+        {
+            return Err(command_action_authority_rejected(
+                "candidate finalization result does not admit heartbeat-extended leases",
+            ));
+        }
+        let derived = ActivityResultRequestV1 {
+            run_id: request.run_id,
+            activity_id: stored.activity_id.clone(),
+            idempotency_key: stored.idempotency_key.clone(),
+            lease_id: request.lease_id.clone(),
+            outcome: request.outcome,
+            result_digest: request.result_digest.clone(),
+            result_ref: request.result_ref.clone(),
+            evidence_digest: request.evidence_digest.clone(),
+            evidence_ref: request.evidence_ref.clone(),
+        };
+        validate_activity_result_request(&derived)?;
+        record_reconstructed_v5_activity_result_in_tx(
+            self,
+            &stored,
+            &derived,
+            activity_authority,
+            signing_key,
+            signer,
+            now,
+            "candidate finalization",
+        )
+    }
+
     /// Convert one succeeded, checkpoint-admitted V5 command into its exact
     /// immutable receipt evidence.
     ///
@@ -11084,6 +11243,228 @@ fn reconstruct_governed_command_action(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn reconstruct_governed_v5_candidate_finalize_claim_v1(
+    conn: &Connection,
+    request: &GovernedV5CandidateFinalizeAuthorizeAndClaimRequestV1,
+    cas: &Cas,
+    v5_authority: &GovernedDispatchV5AdmissionAuthorityV1,
+    activity_authority: &ActivityClaimAuthorityV1,
+    now: DateTime<Utc>,
+) -> Result<ActivityClaimRequestV1> {
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Deferred)?;
+    let action_event = load_verified_authority_event(
+        &tx,
+        request.action_request_event_id,
+        &activity_authority.trusted_keys,
+        &activity_authority.action_request_signer,
+        "V5 candidate finalization action",
+    )?;
+    if action_event.run_id != request.run_id
+        || action_event.parent_event_id != Some(request.dispatch_event_id)
+    {
+        return Err(command_action_authority_rejected(
+            "candidate finalization action does not bind the requested run and dispatch",
+        ));
+    }
+    let Payload::ActionRequestedV2(action) = &action_event.payload else {
+        return Err(command_action_authority_rejected(
+            "candidate finalization requires ActionRequestedV2",
+        ));
+    };
+    let action = action.clone();
+    let material = verified_sealed_v5_dispatch_action_material(
+        &tx,
+        request.run_id,
+        request.dispatch_event_id,
+        request.admission_event_id,
+        v5_authority,
+        activity_authority,
+    )?;
+    let bytes = cas.get_verified_canonical_bytes(
+        &action.canonical_input_ref,
+        &action.canonical_input_digest,
+    )?;
+    let input: GovernedV5CandidateFinalizeInputV1 =
+        serde_json::from_slice(&bytes).map_err(|error| {
+            command_action_authority_rejected(format!(
+                "candidate finalization CAS input is invalid: {error}",
+            ))
+        })?;
+    let canonical = serde_json::to_vec(&input).map_err(|error| {
+        command_action_authority_rejected(format!(
+            "candidate finalization CAS input cannot be canonicalized: {error}",
+        ))
+    })?;
+    let dispatch_envelope_digest = material.lineage_envelope_digest.clone();
+    let dispatch = material.dispatch;
+    validate_governed_dispatch(&dispatch, now).map_err(|error| {
+        command_action_authority_rejected(format!(
+            "candidate finalization requires live sealed authority: {error}",
+        ))
+    })?;
+    let candidate_suffix = input
+        .candidate_ref
+        .strip_prefix(BUILDPANE_CANDIDATE_REF_PREFIX)
+        .ok_or_else(|| {
+            command_action_authority_rejected("candidate finalization input has an invalid ref")
+        })?;
+    if canonical != bytes
+        || input.schema_version != 1
+        || input.action != "create-immutable-candidate"
+        || input.run_id != request.run_id.to_string()
+        || input.attempt != dispatch.body.attempt
+        || input.candidate_key != candidate_suffix
+        || input.candidate_ref != format!("{BUILDPANE_CANDIDATE_REF_PREFIX}{}", input.candidate_key)
+        || input.candidate_key
+            != format!(
+                "{}/{}/{}",
+                input.candidate_id, request.run_id, dispatch.body.attempt
+            )
+        || input.base_sha != dispatch.body.base_commit_sha
+        || action.action_kind != ActionKindV1::Git
+        || action.execution_role != ExecutionRoleV1::Implementer
+        || action.action_id != format!("{RETRY_CANDIDATE_ACTION_KIND}:{candidate_suffix}")
+        || action.idempotency_key
+            != format!(
+                "{}:{RETRY_CANDIDATE_ACTION_KIND}",
+                dispatch.body.idempotency_key
+            )
+        || action.dispatch_envelope_digest != dispatch_envelope_digest
+    {
+        return Err(command_action_authority_rejected(
+            "candidate finalization action or CAS input was substituted",
+        ));
+    }
+    let claim = ActivityClaimRequestV1 {
+        run_id: request.run_id,
+        activity_id: action.action_id,
+        idempotency_key: action.idempotency_key,
+        dispatch_event_id: request.dispatch_event_id,
+        action_request_event_id: request.action_request_event_id,
+        lease_duration_ms: request.lease_duration_ms,
+    };
+    tx.commit()?;
+    Ok(claim)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_reconstructed_v5_activity_result_in_tx(
+    store: &SqliteStore,
+    stored: &StoredActivityClaim,
+    request: &ActivityResultRequestV1,
+    authority: &ActivityClaimAuthorityV1,
+    signing_key: &SigningKey,
+    signer: &ActorKeyRef,
+    now: DateTime<Utc>,
+    lane: &str,
+) -> Result<ActivityResultDispositionV1> {
+    let tx = Transaction::new_unchecked(&store.conn, TransactionBehavior::Immediate)?;
+    let current = activity_claim_by_idempotency(&tx, request.run_id, &stored.idempotency_key)?
+        .ok_or_else(|| LedgerError::ActivityClaimNotFound {
+            run_id: request.run_id.to_string(),
+            idempotency_key: stored.idempotency_key.clone(),
+        })?;
+    verify_signed_claim_projection(&tx, &current, authority)?;
+    if current.claim_event_id != stored.claim_event_id
+        || current.claim_event_digest != stored.claim_event_digest
+        || current.activity_id != stored.activity_id
+        || current.action_request_event_id != stored.action_request_event_id
+        || current.dispatch_event_id != stored.dispatch_event_id
+        || current.lease_id != stored.lease_id
+        || current.lease_expires_at != stored.lease_expires_at
+    {
+        return Err(command_action_authority_rejected(format!(
+            "{lane} result claim changed during authority reconstruction",
+        )));
+    }
+    if current.state == StoredActivityClaimState::Recorded {
+        verify_signed_activity_result_projection(&tx, &current, authority)?;
+        let disposition = existing_result_disposition(&current, request)?;
+        tx.commit()?;
+        return Ok(disposition);
+    }
+    if current.lease_id != request.lease_id {
+        return Err(LedgerError::ActivityClaimLeaseMismatch {
+            run_id: request.run_id.to_string(),
+            idempotency_key: current.idempotency_key,
+        });
+    }
+    let lease_expires_at = parse_claim_timestamp(&current.lease_expires_at)?;
+    if now >= lease_expires_at && request.outcome != ActivityResultOutcomeV1::Unknown {
+        tx.commit()?;
+        return Ok(ActivityResultDispositionV1::LeaseExpired {
+            claim_event_id: current.claim_event_id,
+            lease_expires_at: timestamp(lease_expires_at),
+        });
+    }
+    let now = canonical_ledger_timestamp(now)?;
+    let recorded_at = timestamp(now);
+    let event = canonicalize(Event {
+        id: EventId::new(),
+        run_id: request.run_id,
+        parent_event_id: Some(current.claim_event_id),
+        schema_version: Event::CURRENT_SCHEMA_VERSION,
+        kind: EventKind::ActivityResultRecordedV1,
+        occurred_at: now,
+        payload: Payload::ActivityResultRecordedV1(ActivityResultRecordedV1 {
+            run_id: request.run_id,
+            activity_id: current.activity_id.clone(),
+            idempotency_key: current.idempotency_key.clone(),
+            claim_event_id: current.claim_event_id,
+            claim_event_digest: current.claim_event_digest.clone(),
+            lease_id: request.lease_id.clone(),
+            outcome: request.outcome,
+            result_digest: request.result_digest.clone(),
+            result_ref: request.result_ref.clone(),
+            evidence_digest: request.evidence_digest.clone(),
+            evidence_ref: request.evidence_ref.clone(),
+            recorded_at: recorded_at.clone(),
+        }),
+    })?;
+    validate_new_ordinary_event_id(&tx, &event)?;
+    let signature = sign_event(&event, signing_key, signer, now)?;
+    let result_event_digest = signature.canonical_event_hash.clone();
+    insert_event(&tx, &event)?;
+    insert_event_signature(&tx, &signature)?;
+    let updated = tx.execute(
+        r#"UPDATE activity_claims
+           SET state = 'recorded',
+               result_event_id = ?1,
+               result_event_digest = ?2,
+               result_outcome = ?3,
+               result_digest = ?4,
+               result_ref = ?5,
+               evidence_digest = ?6,
+               evidence_ref = ?7,
+               recorded_at = ?8
+           WHERE run_id = ?9 AND idempotency_key = ?10 AND state = 'granted'"#,
+        params![
+            event.id.to_string(),
+            &result_event_digest,
+            activity_result_outcome_wire(request.outcome),
+            &request.result_digest,
+            &request.result_ref,
+            &request.evidence_digest,
+            &request.evidence_ref,
+            &recorded_at,
+            request.run_id.to_string(),
+            &current.idempotency_key,
+        ],
+    )?;
+    if updated != 1 {
+        return Err(command_action_authority_rejected(format!(
+            "{lane} result did not close exactly one granted lease",
+        )));
+    }
+    tx.commit()?;
+    store.record_ordinary_append(&event);
+    Ok(ActivityResultDispositionV1::Recorded {
+        result_event_id: event.id,
+        result_event_digest,
+        outcome: request.outcome,
+    })
+}
+
 fn reconstruct_governed_v5_command_action(
     conn: &Connection,
     request: &GovernedCommandActionAuthorizeAndClaimRequestV1,

@@ -37,9 +37,10 @@ use bp_ledger::storage::sqlite::{
     GovernedDispatchV5AdmissionSealRequestV1, GovernedV5CandidateFinalizeActionIssueDispositionV1,
     GovernedV5CandidateFinalizeActionIssueRequestV1,
     GovernedV5CandidateFinalizeAuthorizeAndClaimRequestV1,
-    GovernedV5CommandActionAuthorizeAndClaimRequestV1, GovernedV5CommandActionIssueRequestV1,
-    GovernedV5CommandActionReceiptDispositionV1, GovernedV5CommandActionReceiptRequestV1,
-    ResolveGovernedV5CandidateAuthorityRequestV1, SqliteStore,
+    GovernedV5CandidateFinalizeResultRequestV1, GovernedV5CommandActionAuthorizeAndClaimRequestV1,
+    GovernedV5CommandActionIssueRequestV1, GovernedV5CommandActionReceiptDispositionV1,
+    GovernedV5CommandActionReceiptRequestV1, ResolveGovernedV5CandidateAuthorityRequestV1,
+    SqliteStore,
 };
 use bp_ledger::storage::Cas;
 use bp_ledger::{LedgerError, Payload};
@@ -1381,14 +1382,14 @@ fn v5_command_issuance_requires_a_checkpoint_sealed_admission() {
             &action_signer,
         )
         .expect("claim purpose-bound Git finalization");
-    let finalize_claim_event_id = match finalize_claim {
+    let (finalize_claim_event_id, finalize_lease_id) = match finalize_claim {
         ActivityClaimDispositionV1::Granted {
             claim_event_id,
             lease_id,
             ..
         } => {
             assert!(!lease_id.is_empty());
-            claim_event_id
+            (claim_event_id, lease_id)
         }
         other => panic!("first finalization claim must grant one lease, got {other:?}"),
     };
@@ -1432,6 +1433,67 @@ fn v5_command_issuance_requires_a_checkpoint_sealed_admission() {
             .expect("count duplicate finalization claim"),
         13
     );
+    let candidate_evidence = cas
+        .put_canonical_bytes(
+            br#"{"candidateDigest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","outcome":"succeeded"}"#,
+        )
+        .expect("store candidate finalization evidence");
+    let finalize_result_request = GovernedV5CandidateFinalizeResultRequestV1 {
+        run_id: fixture.run_id,
+        lease_id: finalize_lease_id,
+        outcome: ActivityResultOutcomeV1::Succeeded,
+        result_digest: Some(candidate_evidence.digest().into()),
+        result_ref: Some(candidate_evidence.to_cas_ref()),
+        evidence_digest: candidate_evidence.digest().into(),
+        evidence_ref: candidate_evidence.to_cas_ref(),
+    };
+    let finalize_result = store
+        .record_governed_v5_candidate_finalize_result_v1(
+            &finalize_result_request,
+            &cas,
+            &v5_authority,
+            &activity_authority,
+            &action_key,
+            &action_signer,
+        )
+        .expect("record candidate finalization result");
+    let finalize_result_event_id = match finalize_result {
+        ActivityResultDispositionV1::Recorded {
+            result_event_id,
+            outcome: ActivityResultOutcomeV1::Succeeded,
+            ..
+        } => result_event_id,
+        other => panic!("first finalization result must record success, got {other:?}"),
+    };
+    assert_eq!(
+        store.event_count().expect("count Git result"),
+        14,
+        "one signed terminal result must close the Git lease"
+    );
+    let result_retry = store
+        .record_governed_v5_candidate_finalize_result_v1(
+            &finalize_result_request,
+            &cas,
+            &v5_authority,
+            &activity_authority,
+            &action_key,
+            &action_signer,
+        )
+        .expect("recover exact finalization result");
+    assert!(matches!(
+        result_retry,
+        ActivityResultDispositionV1::Recorded {
+            result_event_id,
+            outcome: ActivityResultOutcomeV1::Succeeded,
+            ..
+        } if result_event_id == finalize_result_event_id
+    ));
+    assert_eq!(
+        store
+            .event_count()
+            .expect("count duplicate finalization result"),
+        14
+    );
 
     let retry = store
         .issue_governed_v5_command_action_v1_at_for_tests(
@@ -1453,7 +1515,7 @@ fn v5_command_issuance_requires_a_checkpoint_sealed_admission() {
     ));
     assert_eq!(
         store.event_count().expect("count recovered V5 tape"),
-        13,
+        14,
         "V5 action replay must not append a duplicate effect intent"
     );
 }

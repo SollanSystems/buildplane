@@ -6,7 +6,10 @@
 //! No listener or worker authority is granted by this module.
 
 use crate::anthropic_model_gateway::AnthropicModelGatewayV1;
-use crate::candidate_workspace::{open_candidate_workspace_v1, reopen_candidate_workspace_v1};
+use crate::candidate_workspace::{
+    finalize_candidate_workspace_v1, immutable_candidate_artifact_v1_bytes,
+    open_candidate_workspace_v1, reopen_candidate_workspace_v1,
+};
 use crate::command_action::{
     BrokerCommandActionRequest, BrokerCommandActionStatus, BrokerCommandAuthority,
     LedgerV5CommandAuthorityBackend,
@@ -59,10 +62,14 @@ use crate::{
     LedgerAuthorityBackend, ReplaySnapshotVerifier, TrustedReplayVerifier,
 };
 use async_trait::async_trait;
+use bp_ledger::payload::activity_claim::ActivityResultOutcomeV1;
 use bp_ledger::payload::model_evidence::ModelProviderV1;
 use bp_ledger::payload::trust_spine::ExecutionRoleV1;
 use bp_ledger::storage::sqlite::{
-    GovernedV5CandidateFinalizeActionIssueRequestV1, GovernedV5CommandActionIssueRequestV1,
+    ActivityClaimDispositionV1, GovernedV5CandidateFinalizeActionIssueDispositionV1,
+    GovernedV5CandidateFinalizeActionIssueRequestV1,
+    GovernedV5CandidateFinalizeAuthorizeAndClaimRequestV1,
+    GovernedV5CandidateFinalizeResultRequestV1, GovernedV5CommandActionIssueRequestV1,
     GovernedV5CommandActionReceiptRequestV1, ResolveGovernedV5CandidateAuthorityRequestV1,
 };
 use bp_provider_anthropic::{AnthropicHttpTransportV1, AnthropicProvider};
@@ -311,7 +318,8 @@ impl ProtectedGovernedSessionHostStateV1 {
                     &config.action_receipt_signer,
                 )
                 .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)?;
-            self.ledger
+            let finalize_action = self
+                .ledger
                 .store()
                 .issue_governed_v5_candidate_finalize_action_v1(
                     &GovernedV5CandidateFinalizeActionIssueRequestV1 {
@@ -324,6 +332,88 @@ impl ProtectedGovernedSessionHostStateV1 {
                     &config.action_receipt_signer,
                     self.signing_keys.action_request(),
                     &config.action_request_signer,
+                )
+                .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)?;
+            let finalize_action_event_id = match finalize_action {
+                GovernedV5CandidateFinalizeActionIssueDispositionV1::Recorded {
+                    action_request_event_id,
+                    ..
+                }
+                | GovernedV5CandidateFinalizeActionIssueDispositionV1::Existing {
+                    action_request_event_id,
+                    ..
+                } => action_request_event_id,
+            };
+            let finalize_claim = self
+                .ledger
+                .store()
+                .authorize_and_claim_governed_v5_candidate_finalize_v1(
+                    &GovernedV5CandidateFinalizeAuthorizeAndClaimRequestV1 {
+                        run_id: config.run_id,
+                        dispatch_event_id: execution.candidate.dispatch_event_id,
+                        admission_event_id: execution.candidate.admission_event_id,
+                        action_request_event_id: finalize_action_event_id,
+                        lease_duration_ms: config.model_action_lease_ms,
+                    },
+                    self.cas.cas(),
+                    &config.v5_admission_authority,
+                    &config.activity_authority,
+                    self.signing_keys.claim(),
+                    &config.claim_signer,
+                )
+                .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)?;
+            let ActivityClaimDispositionV1::Granted { lease_id, .. } = finalize_claim else {
+                return Err(ProtectedGovernedSessionProviderErrorV1::DurableAuthority);
+            };
+            let result_request = match finalize_candidate_workspace_v1(
+                self.validated_startup.authority_root().directory(),
+                &execution.candidate,
+            ) {
+                Ok(artifact) => {
+                    let evidence = immutable_candidate_artifact_v1_bytes(&artifact)
+                        .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)?;
+                    let evidence_ref =
+                        self.cas.cas().put_canonical_bytes(&evidence).map_err(|_| {
+                            ProtectedGovernedSessionProviderErrorV1::DurableAuthority
+                        })?;
+                    GovernedV5CandidateFinalizeResultRequestV1 {
+                        run_id: config.run_id,
+                        lease_id,
+                        outcome: ActivityResultOutcomeV1::Succeeded,
+                        result_digest: Some(artifact.candidate_digest),
+                        result_ref: Some(format!("git-ref:{}", artifact.candidate_ref)),
+                        evidence_digest: evidence_ref.digest().into(),
+                        evidence_ref: evidence_ref.to_cas_ref(),
+                    }
+                }
+                Err(_) => {
+                    let evidence_ref = self
+                        .cas
+                        .cas()
+                        .put_canonical_bytes(
+                            br#"{"outcome":"unknown","reason":"candidate-finalization-failed"}"#,
+                        )
+                        .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)?;
+                    GovernedV5CandidateFinalizeResultRequestV1 {
+                        run_id: config.run_id,
+                        lease_id,
+                        outcome: ActivityResultOutcomeV1::Unknown,
+                        result_digest: None,
+                        result_ref: None,
+                        evidence_digest: evidence_ref.digest().into(),
+                        evidence_ref: evidence_ref.to_cas_ref(),
+                    }
+                }
+            };
+            self.ledger
+                .store()
+                .record_governed_v5_candidate_finalize_result_v1(
+                    &result_request,
+                    self.cas.cas(),
+                    &config.v5_admission_authority,
+                    &config.activity_authority,
+                    self.signing_keys.claim(),
+                    &config.claim_signer,
                 )
                 .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)?;
         }

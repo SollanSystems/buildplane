@@ -61,6 +61,38 @@ pub(crate) struct ImmutableCandidateArtifactV1 {
     pub(crate) candidate_digest: String,
 }
 
+pub(crate) fn immutable_candidate_artifact_v1_bytes(
+    artifact: &ImmutableCandidateArtifactV1,
+) -> Result<Vec<u8>, CandidateWorkspaceErrorV1> {
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Evidence<'a> {
+        schema_version: u8,
+        candidate_id: &'a str,
+        candidate_ref: &'a str,
+        base_commit_sha: &'a str,
+        candidate_commit_sha: &'a str,
+        commit_digest: &'a str,
+        tree_digest: &'a str,
+        patch_digest: &'a str,
+        changed_files_digest: &'a str,
+        candidate_digest: &'a str,
+    }
+    serde_json::to_vec(&Evidence {
+        schema_version: 1,
+        candidate_id: &artifact.candidate_id,
+        candidate_ref: &artifact.candidate_ref,
+        base_commit_sha: &artifact.base_commit_sha,
+        candidate_commit_sha: &artifact.candidate_commit_sha,
+        commit_digest: &artifact.commit_digest,
+        tree_digest: &artifact.tree_digest,
+        patch_digest: &artifact.patch_digest,
+        changed_files_digest: &artifact.changed_files_digest,
+        candidate_digest: &artifact.candidate_digest,
+    })
+    .map_err(|_| CandidateWorkspaceErrorV1::ReconciliationRequired)
+}
+
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
 pub(crate) enum CandidateWorkspaceErrorV1 {
     #[error("candidate repository authority is invalid")]
