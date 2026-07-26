@@ -151,6 +151,7 @@ pub(crate) fn build_provider_request_v1(
         response_schema_digest: response_contract.schema_digest,
         response_schema: response_contract.schema,
         candidate_digest,
+        worker_manifest_digest: binding.worker_manifest_digest.clone(),
         max_total_tokens,
         max_input_tokens: input_tokens,
         max_output_tokens,

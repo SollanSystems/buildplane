@@ -686,7 +686,11 @@ schema digest: implementers use `ImplementerCompletionV1`; reviewers,
 adversaries, and judges use `ReviewVerdictV1`. Structured output is mandatory
 at the host gateway, and the adapter parses the returned value again as an
 independent receipt gate. It does not treat process health or an exit code as a
-semantic approval. Model-visible tools are intentionally empty in the governed
+semantic approval. The independent parser rejects unknown fields, noncanonical
+text, request/candidate/worker-manifest substitution, invalid confidence, and
+empty or padded evidence references. `abstain` remains an explicit non-approval
+decision for the workflow layer to escalate; it is never normalized to
+approval. Model-visible tools are intentionally empty in the governed
 lane today. Factory-injected capability declarations are rejected until a
 future action definition is derived exclusively from the signed capability
 bundle and each proposed call can become its own typed, claimed activity.

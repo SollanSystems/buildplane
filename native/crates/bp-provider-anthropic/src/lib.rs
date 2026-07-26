@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use bp_provider_sdk::{
-    ProviderAdapter, ProviderError, ProviderRequest, ProviderResponse, ProviderStopReasonV1,
+    parse_provider_completion_v1, ProviderAdapter, ProviderError, ProviderRequest,
+    ProviderResponse, ProviderStopReasonV1,
 };
 use reqwest::{
     header::{HeaderValue, USER_AGENT},
@@ -418,6 +419,9 @@ fn parse_response(
         request.max_output_tokens,
         request.max_total_tokens,
     )?;
+    if provider_response.stop_reason == ProviderStopReasonV1::Completed {
+        parse_provider_completion_v1(request, &provider_response)?;
+    }
     Ok(provider_response)
 }
 
@@ -488,6 +492,7 @@ mod tests {
             response_schema_digest: response_contract.schema_digest,
             response_schema: response_contract.schema,
             candidate_digest: Some(format!("sha256:{}", "b".repeat(64))),
+            worker_manifest_digest: format!("sha256:{}", "c".repeat(64)),
             max_total_tokens: 14_000,
             max_input_tokens: 12_000,
             max_output_tokens: 2_000,
@@ -510,7 +515,7 @@ mod tests {
                 "id": "msg_01",
                 "type": "message",
                 "role": "assistant",
-                "content": [{"type": "text", "text": "{\"decision\":\"approve\"}"}],
+                "content": [{"type": "text", "text": "{\"schemaVersion\":1,\"candidateDigest\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"decision\":\"approve\",\"findings\":[],\"confidence\":0.9,\"reviewerManifestDigest\":\"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"}"}],
                 "model": "claude-sonnet-4-6",
                 "stop_reason": "end_turn",
                 "usage": {
@@ -524,7 +529,7 @@ mod tests {
         let provider = AnthropicProvider::new(transport);
         assert!(block_on(provider.available()).expect("availability"));
         let response = block_on(provider.complete(&request())).expect("provider response");
-        assert_eq!(response.output, json!({"decision": "approve"}));
+        assert_eq!(response.output["decision"], json!("approve"));
         assert_eq!(response.stop_reason, ProviderStopReasonV1::Completed);
         assert_eq!(response.input_tokens, 321);
         assert_eq!(response.output_tokens, 45);

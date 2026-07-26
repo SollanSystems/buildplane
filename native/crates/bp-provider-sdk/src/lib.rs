@@ -35,6 +35,7 @@ pub struct ProviderRequest {
     pub response_schema_digest: String,
     pub response_schema: Value,
     pub candidate_digest: Option<String>,
+    pub worker_manifest_digest: String,
     pub max_total_tokens: u32,
     pub max_input_tokens: u32,
     pub max_output_tokens: u32,
@@ -80,6 +81,11 @@ impl ProviderRequest {
         {
             return Err(ProviderError::InvalidContract(
                 "provider token ceilings and deadline must be positive".into(),
+            ));
+        }
+        if !is_sha256_digest(&self.worker_manifest_digest) {
+            return Err(ProviderError::InvalidContract(
+                "provider requests require a canonical worker manifest digest".into(),
             ));
         }
         match self.execution_role {
@@ -171,6 +177,147 @@ impl ProviderResponse {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderReviewDecisionV1 {
+    Approve,
+    RequestChanges,
+    Reject,
+    Abstain,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderReviewFindingSeverityV1 {
+    Info,
+    Low,
+    Medium,
+    High,
+    Critical,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProviderReviewFindingV1 {
+    pub severity: ProviderReviewFindingSeverityV1,
+    pub check_id: String,
+    pub file: String,
+    pub line: u32,
+    pub explanation: String,
+    pub evidence_refs: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProviderReviewVerdictV1 {
+    pub schema_version: u8,
+    pub candidate_digest: String,
+    pub decision: ProviderReviewDecisionV1,
+    pub findings: Vec<ProviderReviewFindingV1>,
+    pub confidence: f64,
+    pub reviewer_manifest_digest: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProviderImplementerCompletionV1 {
+    pub schema_version: u8,
+    pub outcome: String,
+    pub summary: String,
+    pub output_refs: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ProviderCompletionV1 {
+    Implementer(ProviderImplementerCompletionV1),
+    Review(ProviderReviewVerdictV1),
+}
+
+pub fn parse_provider_completion_v1(
+    request: &ProviderRequest,
+    response: &ProviderResponse,
+) -> Result<ProviderCompletionV1, ProviderError> {
+    request.validate()?;
+    response.validate_against(
+        request.max_input_tokens,
+        request.max_output_tokens,
+        request.max_total_tokens,
+    )?;
+    if response.request_id != request.request_id {
+        return Err(ProviderError::InvalidContract(
+            "provider completion request identity does not match its authority".into(),
+        ));
+    }
+    if response.stop_reason != ProviderStopReasonV1::Completed {
+        return Err(ProviderError::InvalidContract(
+            "provider completion requires a completed stop reason".into(),
+        ));
+    }
+
+    match request.execution_role {
+        ProviderExecutionRoleV1::Implementer => {
+            let completion: ProviderImplementerCompletionV1 =
+                serde_json::from_value(response.output.clone()).map_err(|error| {
+                    ProviderError::InvalidContract(format!(
+                        "implementer completion is not a closed schema: {error}"
+                    ))
+                })?;
+            if completion.schema_version != 1
+                || completion.outcome != "completed"
+                || !is_canonical_nonempty_text(&completion.summary)
+                || completion
+                    .output_refs
+                    .iter()
+                    .any(|value| !is_canonical_nonempty_text(value))
+            {
+                return Err(ProviderError::InvalidContract(
+                    "implementer completion is not canonical".into(),
+                ));
+            }
+            Ok(ProviderCompletionV1::Implementer(completion))
+        }
+        ProviderExecutionRoleV1::Reviewer
+        | ProviderExecutionRoleV1::Adversary
+        | ProviderExecutionRoleV1::Judge => {
+            let verdict: ProviderReviewVerdictV1 = serde_json::from_value(response.output.clone())
+                .map_err(|error| {
+                    ProviderError::InvalidContract(format!(
+                        "review completion is not a closed schema: {error}"
+                    ))
+                })?;
+            let expected_candidate = request.candidate_digest.as_deref().ok_or_else(|| {
+                ProviderError::InvalidContract(
+                    "review completion authority is missing a candidate digest".into(),
+                )
+            })?;
+            if verdict.schema_version != 1
+                || !is_sha256_digest(&verdict.candidate_digest)
+                || verdict.candidate_digest != expected_candidate
+                || !is_sha256_digest(&verdict.reviewer_manifest_digest)
+                || verdict.reviewer_manifest_digest != request.worker_manifest_digest
+                || !verdict.confidence.is_finite()
+                || !(0.0..=1.0).contains(&verdict.confidence)
+                || verdict.findings.iter().any(|finding| {
+                    finding.line == 0
+                        || !is_canonical_nonempty_text(&finding.check_id)
+                        || !is_canonical_nonempty_text(&finding.file)
+                        || !is_canonical_nonempty_text(&finding.explanation)
+                        || finding.evidence_refs.is_empty()
+                        || finding
+                            .evidence_refs
+                            .iter()
+                            .any(|value| !is_canonical_nonempty_text(value))
+                })
+            {
+                return Err(ProviderError::InvalidContract(
+                    "review completion is not bound to its signed authority".into(),
+                ));
+            }
+            Ok(ProviderCompletionV1::Review(verdict))
+        }
+    }
+}
+
 #[async_trait]
 pub trait ProviderAdapter: Send + Sync {
     fn id(&self) -> &'static str;
@@ -198,6 +345,10 @@ fn is_sha256_digest(value: &str) -> bool {
         && hex
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn is_canonical_nonempty_text(value: &str) -> bool {
+    !value.trim().is_empty() && value == value.trim()
 }
 
 pub fn provider_json_schema_digest_v1(schema: &Value) -> Result<String, ProviderError> {
@@ -328,8 +479,9 @@ pub fn provider_response_contract_v1(
 #[cfg(test)]
 mod tests {
     use super::{
-        provider_json_schema_digest_v1, provider_response_contract_v1, ProviderExecutionRoleV1,
-        ProviderRequest, ProviderResponse, ProviderStopReasonV1,
+        parse_provider_completion_v1, provider_json_schema_digest_v1,
+        provider_response_contract_v1, ProviderCompletionV1, ProviderExecutionRoleV1,
+        ProviderRequest, ProviderResponse, ProviderReviewDecisionV1, ProviderStopReasonV1,
     };
     use serde_json::json;
 
@@ -348,6 +500,7 @@ mod tests {
             "response_schema_digest": contract.schema_digest,
             "response_schema": contract.schema,
             "candidate_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "worker_manifest_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
             "max_total_tokens": 14000,
             "max_input_tokens": 12000,
             "max_output_tokens": 2000,
@@ -467,5 +620,89 @@ mod tests {
         let mut unknown = serde_json::to_value(&response).expect("encode response");
         unknown["raw_headers"] = json!({"authorization": "secret"});
         assert!(serde_json::from_value::<ProviderResponse>(unknown).is_err());
+    }
+
+    #[test]
+    fn provider_completion_is_closed_and_bound_to_review_authority() {
+        let request: ProviderRequest =
+            serde_json::from_value(request_json()).expect("provider request");
+        let response: ProviderResponse = serde_json::from_value(json!({
+            "schema_version": 1,
+            "request_id": request.request_id,
+            "output": {
+                "schemaVersion": 1,
+                "candidateDigest": request.candidate_digest,
+                "decision": "abstain",
+                "findings": [{
+                    "severity": "high",
+                    "checkId": "review.security",
+                    "file": "src/lib.rs",
+                    "line": 12,
+                    "explanation": "Evidence is insufficient.",
+                    "evidenceRefs": ["cas:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]
+                }],
+                "confidence": 0.25,
+                "reviewerManifestDigest": request.worker_manifest_digest
+            },
+            "input_tokens": 321,
+            "output_tokens": 45,
+            "stop_reason": "completed"
+        }))
+        .expect("provider response");
+        assert!(matches!(
+            parse_provider_completion_v1(&request, &response).expect("closed completion"),
+            ProviderCompletionV1::Review(ref verdict)
+                if verdict.decision == ProviderReviewDecisionV1::Abstain
+        ));
+
+        let mut substituted = response;
+        substituted.output["candidateDigest"] =
+            json!("sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd");
+        assert!(parse_provider_completion_v1(&request, &substituted).is_err());
+        substituted.output["candidateDigest"] =
+            json!("sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+        substituted.output["reviewerManifestDigest"] =
+            json!("sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd");
+        assert!(parse_provider_completion_v1(&request, &substituted).is_err());
+        substituted.output["reviewerManifestDigest"] =
+            json!("sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc");
+        substituted.output["operator_override"] = json!(true);
+        assert!(parse_provider_completion_v1(&request, &substituted).is_err());
+    }
+
+    #[test]
+    fn implementer_completion_is_closed_and_canonical() {
+        let contract = provider_response_contract_v1(ProviderExecutionRoleV1::Implementer)
+            .expect("implementer response contract");
+        let mut raw = request_json();
+        raw["execution_role"] = json!("implementer");
+        raw["response_schema_name"] = json!(contract.name);
+        raw["response_contract_digest"] = json!(contract.contract_digest);
+        raw["response_schema_digest"] = json!(contract.schema_digest);
+        raw["response_schema"] = contract.schema;
+        raw["candidate_digest"] = serde_json::Value::Null;
+        let request: ProviderRequest = serde_json::from_value(raw).expect("provider request");
+        let response: ProviderResponse = serde_json::from_value(json!({
+            "schema_version": 1,
+            "request_id": request.request_id,
+            "output": {
+                "schemaVersion": 1,
+                "outcome": "completed",
+                "summary": "Candidate created.",
+                "outputRefs": ["cas:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]
+            },
+            "input_tokens": 321,
+            "output_tokens": 45,
+            "stop_reason": "completed"
+        }))
+        .expect("provider response");
+        assert!(matches!(
+            parse_provider_completion_v1(&request, &response).expect("closed completion"),
+            ProviderCompletionV1::Implementer(_)
+        ));
+
+        let mut padded = response;
+        padded.output["summary"] = json!(" Candidate created.");
+        assert!(parse_provider_completion_v1(&request, &padded).is_err());
     }
 }
