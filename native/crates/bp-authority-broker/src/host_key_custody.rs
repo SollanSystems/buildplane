@@ -24,6 +24,8 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 #[cfg(target_os = "linux")]
 use std::path::{Component, Path};
+#[cfg(target_os = "linux")]
+use zeroize::Zeroizing;
 
 /// Closed failures for protected private-key loading.
 ///
@@ -177,19 +179,7 @@ fn load_signing_key_from_authority_descriptor(
         broker_uid,
     )?;
 
-    let mut bytes = Vec::with_capacity(33);
-    file.take(33)
-        .read_to_end(&mut bytes)
-        .map_err(|_| ProtectedHostKeyLoadError::ReadFailed)?;
-    if bytes.len() != 32 {
-        bytes.fill(0);
-        return Err(ProtectedHostKeyLoadError::InvalidSeedLength);
-    }
-    let mut seed = [0_u8; 32];
-    seed.copy_from_slice(&bytes);
-    bytes.fill(0);
-    let signing_key = SigningKey::from_bytes(&seed);
-    seed.fill(0);
+    let signing_key = read_signing_key_seed(file)?;
 
     let expected_hash = signer
         .public_key_hash
@@ -199,6 +189,24 @@ fn load_signing_key_from_authority_descriptor(
         return Err(ProtectedHostKeyLoadError::PublicKeyMismatch);
     }
     Ok(signing_key)
+}
+
+/// Read a raw Ed25519 seed through RAII-backed buffers. Both the growable
+/// partial-read buffer and the fixed-size seed copy are guaranteed to be
+/// zeroized on every return path, including an I/O error after a partial read.
+#[cfg(target_os = "linux")]
+fn read_signing_key_seed(reader: impl Read) -> Result<SigningKey, ProtectedHostKeyLoadError> {
+    let mut bytes = Zeroizing::new(Vec::with_capacity(33));
+    reader
+        .take(33)
+        .read_to_end(&mut bytes)
+        .map_err(|_| ProtectedHostKeyLoadError::ReadFailed)?;
+    if bytes.len() != 32 {
+        return Err(ProtectedHostKeyLoadError::InvalidSeedLength);
+    }
+    let mut seed = Zeroizing::new([0_u8; 32]);
+    seed.copy_from_slice(&bytes);
+    Ok(SigningKey::from_bytes(&seed))
 }
 
 #[cfg(target_os = "linux")]
@@ -294,6 +302,7 @@ mod tests {
     use crate::host_config_loader::validate_promotion_decision_host_startup_from_trusted_anchor_for_test;
     use serde_json::json;
     use std::fs;
+    use std::io::{self, Read};
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::{symlink, PermissionsExt};
     use std::path::{Path, PathBuf};
@@ -633,5 +642,34 @@ mod tests {
                 );
             }
         }
+    }
+
+    struct PartialSecretThenError {
+        emitted: bool,
+    }
+
+    impl Read for PartialSecretThenError {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            if self.emitted {
+                return Err(io::Error::other("raw-os-error-containing-transient-secret"));
+            }
+            self.emitted = true;
+            let partial_secret = [0xabu8; 16];
+            buffer[..partial_secret.len()].copy_from_slice(&partial_secret);
+            Ok(partial_secret.len())
+        }
+    }
+
+    #[test]
+    fn partial_seed_read_errors_through_the_closed_raii_buffer_path() {
+        let error = match read_signing_key_seed(PartialSecretThenError { emitted: false }) {
+            Ok(_) => panic!("a partial read followed by an error must fail closed"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error, ProtectedHostKeyLoadError::ReadFailed);
+        let rendered = error.to_string();
+        assert!(!rendered.contains("transient-secret"));
+        assert!(!rendered.contains("171"));
     }
 }
