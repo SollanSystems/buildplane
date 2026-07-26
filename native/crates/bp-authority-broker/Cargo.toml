@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+async-trait.workspace = true
 bp-ledger.workspace = true
 bp-provider-sdk.workspace = true
 bp-replay.workspace = true
@@ -20,5 +21,6 @@ zeroize.workspace = true
 
 [dev-dependencies]
 bp-ledger = { workspace = true, features = ["test-support"] }
+futures.workspace = true
 rusqlite.workspace = true
 tempfile = "3"

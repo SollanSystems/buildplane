@@ -86,6 +86,10 @@ mod promotion_git;
 #[cfg(target_os = "linux")]
 #[allow(dead_code)]
 mod protocol;
+#[allow(dead_code)] // Production ledger/counter composition follows the closed lifecycle tests.
+mod provider_preflight;
+#[cfg(test)]
+mod provider_preflight_contract_tests;
 mod provider_request;
 #[cfg(test)]
 mod provider_request_contract_tests;

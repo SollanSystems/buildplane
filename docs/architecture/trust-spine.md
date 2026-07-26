@@ -706,7 +706,13 @@ Anthropic adapter maps it to the provider's
 endpoint through the host credential broker, with bounded responses and
 strict output parsing. This transport does not itself grant or record the
 network activity; the broker-owned claim, counter invocation, result writer,
-and unknown-effect reconciliation remain the next composition step.
+and unknown-effect reconciliation remain the next composition step. The broker
+now has a closed preflight lifecycle orchestrator for that composition: a
+remote count is invoked only after a durable grant, a recorded result is
+reused without another call, and either an unknown provider effect or a
+post-call durable-write failure yields reconciliation rather than retry
+authority. Its production ledger/CAS backend and Anthropic counter binding are
+still intentionally unexported work.
 
 Those counts are persisted in the signed action receipt and replayed as one
 checked aggregate for the sealed V3 dispatch attempt. A metered failed call
