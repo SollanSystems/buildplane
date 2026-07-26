@@ -13,7 +13,7 @@ use bp_ledger::kind::EventKind;
 use bp_ledger::payload::activity_claim::{ActivityClaimPurposeV1, ActivityResultOutcomeV1};
 use bp_ledger::payload::governed_packet::GovernedCommandPacketV1;
 use bp_ledger::payload::trust_spine::{
-    action_receipt_recorded_v2_digest, action_requested_v2_digest,
+    action_receipt_recorded_v2_digest, action_receipt_set_v1_digest, action_requested_v2_digest,
     attempt_context_content_v1_digest, context_manifest_content_v1_digest,
     dispatch_envelope_v3_body_digest, dispatch_envelope_v4_digest, dispatch_envelope_v5_digest,
     governed_dispatch_policy_digest_v1, sandbox_profile_content_v1_digest,
@@ -37,7 +37,8 @@ use bp_ledger::storage::sqlite::{
     GovernedDispatchV5AdmissionSealRequestV1, GovernedV5CandidateFinalizeActionIssueDispositionV1,
     GovernedV5CandidateFinalizeActionIssueRequestV1,
     GovernedV5CandidateFinalizeAuthorizeAndClaimRequestV1,
-    GovernedV5CandidateFinalizeResultRequestV1, GovernedV5CommandActionAuthorizeAndClaimRequestV1,
+    GovernedV5CandidateFinalizeResultRequestV1, GovernedV5CandidateReceiptSetDispositionV1,
+    GovernedV5CandidateReceiptSetRequestV1, GovernedV5CommandActionAuthorizeAndClaimRequestV1,
     GovernedV5CommandActionIssueRequestV1, GovernedV5CommandActionReceiptDispositionV1,
     GovernedV5CommandActionReceiptRequestV1, ResolveGovernedV5CandidateAuthorityRequestV1,
     SqliteStore,
@@ -47,6 +48,7 @@ use bp_ledger::{LedgerError, Payload};
 use chrono::{Duration, SecondsFormat, Utc};
 use ed25519_dalek::SigningKey;
 use rusqlite::params;
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
 fn digest(hex: char) -> String {
@@ -111,6 +113,84 @@ fn governed_command_packet_source() -> String {
         }
     })
     .to_string()
+}
+
+fn candidate_artifact_evidence_v1(fixture: &V5Fixture, candidate_ref: &str) -> (Vec<u8>, String) {
+    #[derive(serde::Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct CandidateDigestMaterial<'a> {
+        schema_version: u8,
+        candidate_id: &'a str,
+        run_id: String,
+        attempt: u32,
+        candidate_ref: &'a str,
+        base_sha: &'a str,
+        candidate_commit_sha: &'a str,
+        commit_digest: &'a str,
+        tree_digest: &'a str,
+        patch_digest: &'a str,
+        changed_files_digest: &'a str,
+    }
+    #[derive(serde::Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Evidence<'a> {
+        schema_version: u8,
+        candidate_id: &'a str,
+        candidate_ref: &'a str,
+        base_commit_sha: &'a str,
+        candidate_commit_sha: &'a str,
+        commit_digest: String,
+        tree_digest: String,
+        patch_digest: String,
+        changed_files_digest: String,
+        candidate_digest: &'a str,
+    }
+
+    let candidate_id = candidate_ref
+        .strip_prefix("refs/buildplane/candidates/")
+        .and_then(|suffix| suffix.split('/').next())
+        .expect("candidate ref has an identity");
+    let base_sha = fixture
+        .dispatch
+        .dispatch_v4
+        .dispatch_v3
+        .body
+        .base_commit_sha
+        .as_str();
+    let candidate_commit_sha = "2".repeat(base_sha.len());
+    let commit_digest = "3".repeat(64);
+    let tree_digest = "4".repeat(64);
+    let patch_digest = "5".repeat(64);
+    let changed_files_digest = "6".repeat(64);
+    let material = CandidateDigestMaterial {
+        schema_version: 1,
+        candidate_id,
+        run_id: fixture.run_id.to_string(),
+        attempt: fixture.dispatch.dispatch_v4.dispatch_v3.body.attempt,
+        candidate_ref,
+        base_sha,
+        candidate_commit_sha: &candidate_commit_sha,
+        commit_digest: &commit_digest,
+        tree_digest: &tree_digest,
+        patch_digest: &patch_digest,
+        changed_files_digest: &changed_files_digest,
+    };
+    let material_bytes = serde_json::to_vec(&material).expect("canonical candidate material");
+    let candidate_digest = format!("sha256:{:x}", Sha256::digest(&material_bytes));
+    let evidence = serde_json::to_vec(&Evidence {
+        schema_version: 1,
+        candidate_id,
+        candidate_ref,
+        base_commit_sha: base_sha,
+        candidate_commit_sha: &candidate_commit_sha,
+        commit_digest: format!("sha256:{commit_digest}"),
+        tree_digest: format!("sha256:{tree_digest}"),
+        patch_digest: format!("sha256:{patch_digest}"),
+        changed_files_digest: format!("sha256:{changed_files_digest}"),
+        candidate_digest: &candidate_digest,
+    })
+    .expect("canonical candidate artifact evidence");
+    (evidence, candidate_digest)
 }
 
 fn timestamp(value: chrono::DateTime<Utc>) -> String {
@@ -1433,17 +1513,17 @@ fn v5_command_issuance_requires_a_checkpoint_sealed_admission() {
             .expect("count duplicate finalization claim"),
         13
     );
+    let (candidate_evidence_bytes, candidate_digest) =
+        candidate_artifact_evidence_v1(&fixture, &candidate_ref);
     let candidate_evidence = cas
-        .put_canonical_bytes(
-            br#"{"candidateDigest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","outcome":"succeeded"}"#,
-        )
+        .put_canonical_bytes(&candidate_evidence_bytes)
         .expect("store candidate finalization evidence");
     let finalize_result_request = GovernedV5CandidateFinalizeResultRequestV1 {
         run_id: fixture.run_id,
         lease_id: finalize_lease_id,
         outcome: ActivityResultOutcomeV1::Succeeded,
-        result_digest: Some(candidate_evidence.digest().into()),
-        result_ref: Some(candidate_evidence.to_cas_ref()),
+        result_digest: Some(candidate_digest),
+        result_ref: Some(format!("git-ref:{candidate_ref}")),
         evidence_digest: candidate_evidence.digest().into(),
         evidence_ref: candidate_evidence.to_cas_ref(),
     };
@@ -1495,6 +1575,150 @@ fn v5_command_issuance_requires_a_checkpoint_sealed_admission() {
         14
     );
 
+    let receipt_set_request = GovernedV5CandidateReceiptSetRequestV1 {
+        run_id: fixture.run_id,
+        process_action_request_event_id: action_request_event_id,
+        finalize_action_request_event_id: finalize_action_event_id,
+    };
+    assert!(matches!(
+        store.seal_succeeded_governed_v5_candidate_receipt_set_v1(
+            &receipt_set_request,
+            &cas,
+            &v5_authority,
+            &activity_authority,
+            &wrong_receipt_key,
+            &wrong_receipt_signer,
+        ),
+        Err(LedgerError::ActionReceiptAuthorityRejected { .. })
+    ));
+    assert_eq!(
+        store
+            .event_count()
+            .expect("count rejected receipt-set signer tape"),
+        14,
+        "a substituted receipt signer must not append a Git receipt or set"
+    );
+    let recorded_set = store
+        .seal_succeeded_governed_v5_candidate_receipt_set_v1(
+            &receipt_set_request,
+            &cas,
+            &v5_authority,
+            &activity_authority,
+            &receipt_key,
+            &receipt_signer,
+        )
+        .expect("seal candidate process-plus-Git receipt set");
+    let (
+        finalize_receipt_event_id,
+        finalize_receipt_ref,
+        finalize_receipt_digest,
+        receipt_set_event_id,
+        receipt_set_ref,
+        receipt_set_digest,
+    ) = match recorded_set {
+        GovernedV5CandidateReceiptSetDispositionV1::Recorded {
+            finalize_action_receipt_event_id,
+            finalize_action_receipt_ref,
+            finalize_action_receipt_digest,
+            action_receipt_set_event_id,
+            action_receipt_set_ref,
+            action_receipt_set_digest,
+        } => (
+            finalize_action_receipt_event_id,
+            finalize_action_receipt_ref,
+            finalize_action_receipt_digest,
+            action_receipt_set_event_id,
+            action_receipt_set_ref,
+            action_receipt_set_digest,
+        ),
+        other => panic!("first candidate receipt set must record, got {other:?}"),
+    };
+    assert_eq!(
+        store.event_count().expect("count sealed receipt-set tape"),
+        16,
+        "Git success must append one Git receipt and one complete set atomically"
+    );
+    let closure_events = store
+        .events_for_run(&fixture.run_id.to_string())
+        .expect("load candidate receipt-set tape")
+        .into_iter()
+        .map(|row| row.to_event().expect("decode candidate closure event"))
+        .collect::<Vec<_>>();
+    let finalize_receipt_event = closure_events
+        .iter()
+        .find(|event| event.id == finalize_receipt_event_id)
+        .expect("find finalization receipt");
+    assert_eq!(
+        finalize_receipt_event.parent_event_id,
+        Some(finalize_result_event_id)
+    );
+    let Payload::ActionReceiptRecordedV2(finalize_receipt) = &finalize_receipt_event.payload else {
+        panic!("finalization closure must append ActionReceiptRecordedV2");
+    };
+    assert_eq!(finalize_receipt.action_receipt_ref, finalize_receipt_ref);
+    assert_eq!(
+        action_receipt_recorded_v2_digest(finalize_receipt).expect("digest finalization receipt"),
+        finalize_receipt_digest
+    );
+    let receipt_set_event = closure_events
+        .iter()
+        .find(|event| event.id == receipt_set_event_id)
+        .expect("find complete receipt set");
+    assert_eq!(
+        receipt_set_event.parent_event_id,
+        Some(finalize_receipt_event_id)
+    );
+    let Payload::ActionReceiptSetRecordedV1(receipt_set) = &receipt_set_event.payload else {
+        panic!("candidate closure must append ActionReceiptSetRecordedV1");
+    };
+    assert_eq!(receipt_set.action_receipt_set_ref, receipt_set_ref);
+    assert_eq!(receipt_set.action_receipt_set_digest, receipt_set_digest);
+    assert_eq!(
+        action_receipt_set_v1_digest(receipt_set).expect("digest complete receipt set"),
+        receipt_set_digest
+    );
+    assert_eq!(receipt_set.receipts.len(), 2);
+    assert!(
+        receipt_set
+            .receipts
+            .windows(2)
+            .all(|pair| pair[0].action_id < pair[1].action_id),
+        "receipt-set membership must be strict lexical action-id order"
+    );
+    assert!(receipt_set
+        .receipts
+        .iter()
+        .any(|entry| entry.action_id == action.action_id));
+    assert!(receipt_set
+        .receipts
+        .iter()
+        .any(|entry| entry.action_id == finalize_action_id));
+    let set_retry = store
+        .seal_succeeded_governed_v5_candidate_receipt_set_v1(
+            &receipt_set_request,
+            &cas,
+            &v5_authority,
+            &activity_authority,
+            &receipt_key,
+            &receipt_signer,
+        )
+        .expect("recover exact candidate receipt set");
+    assert!(matches!(
+        set_retry,
+        GovernedV5CandidateReceiptSetDispositionV1::Existing {
+            finalize_action_receipt_event_id: existing_receipt,
+            action_receipt_set_event_id: existing_set,
+            ..
+        } if existing_receipt == finalize_receipt_event_id && existing_set == receipt_set_event_id
+    ));
+    assert_eq!(
+        store
+            .event_count()
+            .expect("count idempotent receipt-set retry tape"),
+        16,
+        "receipt-set retry must not append duplicate closure evidence"
+    );
+
     let retry = store
         .issue_governed_v5_command_action_v1_at_for_tests(
             &action_request,
@@ -1515,7 +1739,7 @@ fn v5_command_issuance_requires_a_checkpoint_sealed_admission() {
     ));
     assert_eq!(
         store.event_count().expect("count recovered V5 tape"),
-        14,
+        16,
         "V5 action replay must not append a duplicate effect intent"
     );
 }

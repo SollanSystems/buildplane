@@ -66,11 +66,13 @@ use bp_ledger::payload::activity_claim::ActivityResultOutcomeV1;
 use bp_ledger::payload::model_evidence::ModelProviderV1;
 use bp_ledger::payload::trust_spine::ExecutionRoleV1;
 use bp_ledger::storage::sqlite::{
-    ActivityClaimDispositionV1, GovernedV5CandidateFinalizeActionIssueDispositionV1,
+    ActivityClaimDispositionV1, ActivityResultDispositionV1,
+    GovernedV5CandidateFinalizeActionIssueDispositionV1,
     GovernedV5CandidateFinalizeActionIssueRequestV1,
     GovernedV5CandidateFinalizeAuthorizeAndClaimRequestV1,
-    GovernedV5CandidateFinalizeResultRequestV1, GovernedV5CommandActionIssueRequestV1,
-    GovernedV5CommandActionReceiptRequestV1, ResolveGovernedV5CandidateAuthorityRequestV1,
+    GovernedV5CandidateFinalizeResultRequestV1, GovernedV5CandidateReceiptSetRequestV1,
+    GovernedV5CommandActionIssueRequestV1, GovernedV5CommandActionReceiptRequestV1,
+    ResolveGovernedV5CandidateAuthorityRequestV1,
 };
 use bp_provider_anthropic::{AnthropicHttpTransportV1, AnthropicProvider};
 use bp_provider_sdk::{
@@ -405,7 +407,8 @@ impl ProtectedGovernedSessionHostStateV1 {
                     }
                 }
             };
-            self.ledger
+            let result_disposition = self
+                .ledger
                 .store()
                 .record_governed_v5_candidate_finalize_result_v1(
                     &result_request,
@@ -414,6 +417,31 @@ impl ProtectedGovernedSessionHostStateV1 {
                     &config.activity_authority,
                     self.signing_keys.claim(),
                     &config.claim_signer,
+                )
+                .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)?;
+            if !matches!(
+                result_disposition,
+                ActivityResultDispositionV1::Recorded {
+                    outcome: ActivityResultOutcomeV1::Succeeded,
+                    ..
+                }
+            ) || result_request.outcome != ActivityResultOutcomeV1::Succeeded
+            {
+                return Err(ProtectedGovernedSessionProviderErrorV1::DurableAuthority);
+            }
+            self.ledger
+                .store()
+                .seal_succeeded_governed_v5_candidate_receipt_set_v1(
+                    &GovernedV5CandidateReceiptSetRequestV1 {
+                        run_id: config.run_id,
+                        process_action_request_event_id: execution.action_request_event_id,
+                        finalize_action_request_event_id: finalize_action_event_id,
+                    },
+                    self.cas.cas(),
+                    &config.v5_admission_authority,
+                    &config.activity_authority,
+                    self.signing_keys.action_receipt(),
+                    &config.action_receipt_signer,
                 )
                 .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)?;
         }
