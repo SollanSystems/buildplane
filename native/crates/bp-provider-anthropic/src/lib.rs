@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use bp_provider_sdk::{
     parse_provider_completion_v1, ProviderAdapter, ProviderError, ProviderRequest,
-    ProviderResponse, ProviderStopReasonV1,
+    ProviderResponse, ProviderStopReasonV1, ProviderTokenCountRequestV1, ProviderTokenCounterV1,
 };
 use reqwest::{
     header::{HeaderValue, USER_AGENT},
@@ -18,6 +18,7 @@ use std::{
 use zeroize::Zeroize;
 
 const ANTHROPIC_MESSAGES_ENDPOINT: &str = "https://api.anthropic.com/v1/messages";
+const ANTHROPIC_TOKEN_COUNT_ENDPOINT: &str = "https://api.anthropic.com/v1/messages/count_tokens";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 const MAX_ANTHROPIC_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 
@@ -26,6 +27,16 @@ const MAX_ANTHROPIC_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 pub struct AnthropicMessageRequestV1 {
     pub model: String,
     pub max_tokens: u32,
+    pub system: Option<String>,
+    pub messages: Vec<AnthropicMessageV1>,
+    pub output_config: AnthropicOutputConfigV1,
+    pub tools: Vec<AnthropicToolV1>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct AnthropicTokenCountRequestV1 {
+    pub model: String,
     pub system: Option<String>,
     pub messages: Vec<AnthropicMessageV1>,
     pub output_config: AnthropicOutputConfigV1,
@@ -70,6 +81,16 @@ pub trait AnthropicTransportV1: Send + Sync {
         request: AnthropicMessageRequestV1,
         deadline_unix_ms: i64,
     ) -> Result<Value, ProviderError>;
+
+    async fn count_tokens(
+        &self,
+        _request: AnthropicTokenCountRequestV1,
+        _deadline_unix_ms: i64,
+    ) -> Result<Value, ProviderError> {
+        Err(ProviderError::Unsupported(
+            "Anthropic token-count transport",
+        ))
+    }
 }
 
 pub struct AnthropicApiCredentialV1(Vec<u8>);
@@ -145,17 +166,11 @@ impl AnthropicHttpTransportV1 {
             credential_broker: Arc::new(credential_broker),
         })
     }
-}
 
-#[async_trait]
-impl AnthropicTransportV1 for AnthropicHttpTransportV1 {
-    async fn available(&self) -> Result<bool, ProviderError> {
-        self.credential_broker.available().await
-    }
-
-    async fn send_message(
+    async fn post_json<T: Serialize + Sync>(
         &self,
-        request: AnthropicMessageRequestV1,
+        endpoint: &'static str,
+        request: &T,
         deadline_unix_ms: i64,
     ) -> Result<Value, ProviderError> {
         let remaining_ms = deadline_unix_ms
@@ -172,12 +187,12 @@ impl AnthropicTransportV1 for AnthropicHttpTransportV1 {
         let credential = self.credential_broker.issue_for_messages().await?;
         let response = self
             .client
-            .post(ANTHROPIC_MESSAGES_ENDPOINT)
+            .post(endpoint)
             .header("x-api-key", credential.header_value()?)
             .header("anthropic-version", ANTHROPIC_VERSION)
             .header(USER_AGENT, "buildplane-native/0.1")
             .timeout(timeout)
-            .json(&request)
+            .json(request)
             .send()
             .await
             .map_err(|error| {
@@ -197,7 +212,6 @@ impl AnthropicTransportV1 for AnthropicHttpTransportV1 {
                 "Anthropic HTTP response exceeded the protected size limit".into(),
             ));
         }
-
         let mut response = response;
         let mut body = Vec::new();
         while let Some(chunk) = response.chunk().await.map_err(|error| {
@@ -215,6 +229,31 @@ impl AnthropicTransportV1 for AnthropicHttpTransportV1 {
                 "Anthropic HTTP response was not valid JSON: {error}"
             ))
         })
+    }
+}
+
+#[async_trait]
+impl AnthropicTransportV1 for AnthropicHttpTransportV1 {
+    async fn available(&self) -> Result<bool, ProviderError> {
+        self.credential_broker.available().await
+    }
+
+    async fn send_message(
+        &self,
+        request: AnthropicMessageRequestV1,
+        deadline_unix_ms: i64,
+    ) -> Result<Value, ProviderError> {
+        self.post_json(ANTHROPIC_MESSAGES_ENDPOINT, &request, deadline_unix_ms)
+            .await
+    }
+
+    async fn count_tokens(
+        &self,
+        request: AnthropicTokenCountRequestV1,
+        deadline_unix_ms: i64,
+    ) -> Result<Value, ProviderError> {
+        self.post_json(ANTHROPIC_TOKEN_COUNT_ENDPOINT, &request, deadline_unix_ms)
+            .await
     }
 }
 
@@ -286,6 +325,79 @@ impl ProviderAdapter for AnthropicProvider {
         }
         parse_response(request, raw_response)
     }
+}
+
+#[async_trait]
+impl ProviderTokenCounterV1 for AnthropicProvider {
+    fn id(&self) -> &'static str {
+        "anthropic"
+    }
+
+    async fn available(&self) -> Result<bool, ProviderError> {
+        self.transport.available().await
+    }
+
+    async fn count_input_tokens(
+        &self,
+        request: &ProviderTokenCountRequestV1,
+    ) -> Result<u32, ProviderError> {
+        request.validate()?;
+        if now_unix_ms()? >= request.deadline_unix_ms {
+            return Err(ProviderError::Transport(
+                "Anthropic token-count deadline elapsed before transport".into(),
+            ));
+        }
+        let raw_response = self
+            .transport
+            .count_tokens(
+                AnthropicTokenCountRequestV1 {
+                    model: request.model.clone(),
+                    system: request.system_prompt.clone(),
+                    messages: vec![AnthropicMessageV1 {
+                        role: "user".into(),
+                        content: request.prompt.clone(),
+                    }],
+                    output_config: AnthropicOutputConfigV1 {
+                        format: AnthropicOutputFormatV1 {
+                            format_type: "json_schema".into(),
+                            schema: request.response_schema.clone(),
+                        },
+                    },
+                    tools: request
+                        .tools
+                        .iter()
+                        .map(|tool| AnthropicToolV1 {
+                            name: tool.name.clone(),
+                            input_schema: tool.input_schema.clone(),
+                            strict: true,
+                        })
+                        .collect(),
+                },
+                request.deadline_unix_ms,
+            )
+            .await?;
+        if now_unix_ms()? >= request.deadline_unix_ms {
+            return Err(ProviderError::Transport(
+                "Anthropic token-count deadline elapsed with an unknown transport result".into(),
+            ));
+        }
+        let response: AnthropicTokenCountResponseV1 = serde_json::from_value(raw_response)
+            .map_err(|error| {
+                ProviderError::InvalidContract(format!("Anthropic token-count response: {error}"))
+            })?;
+        if response.input_tokens == 0 || response.input_tokens >= request.max_total_tokens {
+            return Err(ProviderError::InvalidContract(
+                "Anthropic token count must leave a positive output-token reservation".into(),
+            ));
+        }
+        Ok(response.input_tokens)
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AnthropicTokenCountResponseV1 {
+    input_tokens: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -437,13 +549,13 @@ fn now_unix_ms() -> Result<i64, ProviderError> {
 mod tests {
     use super::{
         AnthropicApiCredentialV1, AnthropicMessageRequestV1, AnthropicProvider,
-        AnthropicTransportV1,
+        AnthropicTokenCountRequestV1, AnthropicTransportV1,
     };
     use async_trait::async_trait;
     use bp_provider_sdk::{
         provider_json_schema_digest_v1, provider_response_contract_v1, ProviderAdapter,
         ProviderError, ProviderExecutionRoleV1, ProviderRequest, ProviderStopReasonV1,
-        ProviderToolDefinitionV1,
+        ProviderTokenCountRequestV1, ProviderTokenCounterV1, ProviderToolDefinitionV1,
     };
     use futures::executor::block_on;
     use serde_json::{json, Value};
@@ -464,6 +576,36 @@ mod tests {
         async fn send_message(
             &self,
             request: AnthropicMessageRequestV1,
+            deadline_unix_ms: i64,
+        ) -> Result<Value, ProviderError> {
+            *self.request.lock().expect("request lock") = Some((request, deadline_unix_ms));
+            Ok(self.response.clone())
+        }
+    }
+
+    #[derive(Clone)]
+    struct CountingTransport {
+        request: Arc<Mutex<Option<(AnthropicTokenCountRequestV1, i64)>>>,
+        response: Value,
+    }
+
+    #[async_trait]
+    impl AnthropicTransportV1 for CountingTransport {
+        async fn available(&self) -> Result<bool, ProviderError> {
+            Ok(true)
+        }
+
+        async fn send_message(
+            &self,
+            _request: AnthropicMessageRequestV1,
+            _deadline_unix_ms: i64,
+        ) -> Result<Value, ProviderError> {
+            Err(ProviderError::Unsupported("test message transport"))
+        }
+
+        async fn count_tokens(
+            &self,
+            request: AnthropicTokenCountRequestV1,
             deadline_unix_ms: i64,
         ) -> Result<Value, ProviderError> {
             *self.request.lock().expect("request lock") = Some((request, deadline_unix_ms));
@@ -506,6 +648,64 @@ mod tests {
         }
     }
 
+    fn token_count_request() -> ProviderTokenCountRequestV1 {
+        let request = request();
+        ProviderTokenCountRequestV1 {
+            schema_version: request.schema_version,
+            request_id: format!("{}:provider-token-preflight", request.request_id),
+            model: request.model,
+            execution_role: request.execution_role,
+            system_prompt: request.system_prompt,
+            prompt: request.prompt,
+            response_schema_name: request.response_schema_name,
+            response_contract_digest: request.response_contract_digest,
+            response_schema_digest: request.response_schema_digest,
+            response_schema: request.response_schema,
+            candidate_digest: request.candidate_digest,
+            worker_manifest_digest: request.worker_manifest_digest,
+            max_total_tokens: request.max_total_tokens,
+            deadline_unix_ms: request.deadline_unix_ms,
+            tools: request.tools,
+        }
+    }
+
+    #[test]
+    fn counts_the_exact_structured_message_without_creating_a_completion() {
+        let captured = Arc::new(Mutex::new(None));
+        let provider = AnthropicProvider::new(CountingTransport {
+            request: Arc::clone(&captured),
+            response: json!({"input_tokens": 321}),
+        });
+        let count = block_on(provider.count_input_tokens(&token_count_request()))
+            .expect("provider token count");
+        assert_eq!(count, 321);
+        let (wire, deadline) = captured
+            .lock()
+            .expect("request lock")
+            .clone()
+            .expect("captured token-count request");
+        assert_eq!(deadline, i64::MAX);
+        assert_eq!(wire.model, "claude-sonnet-4-6");
+        assert_eq!(wire.messages[0].content, token_count_request().prompt);
+        assert_eq!(
+            wire.output_config.format.schema,
+            token_count_request().response_schema
+        );
+        assert!(wire.tools[0].strict);
+
+        for invalid in [
+            json!({"input_tokens": 0}),
+            json!({"input_tokens": 14_000}),
+            json!({"input_tokens": 321, "unexpected": true}),
+        ] {
+            let provider = AnthropicProvider::new(CountingTransport {
+                request: Arc::new(Mutex::new(None)),
+                response: invalid,
+            });
+            assert!(block_on(provider.count_input_tokens(&token_count_request())).is_err());
+        }
+    }
+
     #[test]
     fn maps_closed_request_and_completed_structured_response() {
         let captured = Arc::new(Mutex::new(None));
@@ -527,7 +727,7 @@ mod tests {
             }),
         };
         let provider = AnthropicProvider::new(transport);
-        assert!(block_on(provider.available()).expect("availability"));
+        assert!(block_on(ProviderAdapter::available(&provider)).expect("availability"));
         let response = block_on(provider.complete(&request())).expect("provider response");
         assert_eq!(response.output["decision"], json!("approve"));
         assert_eq!(response.stop_reason, ProviderStopReasonV1::Completed);

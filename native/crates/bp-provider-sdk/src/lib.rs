@@ -43,6 +43,60 @@ pub struct ProviderRequest {
     pub tools: Vec<ProviderToolDefinitionV1>,
 }
 
+/// Closed provider-neutral input for the separately recorded remote
+/// token-count activity. It contains the exact model-visible request contract
+/// but no caller-supplied observed count or output-token authorization.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderTokenCountRequestV1 {
+    pub schema_version: u8,
+    pub request_id: String,
+    pub model: String,
+    pub execution_role: ProviderExecutionRoleV1,
+    pub system_prompt: Option<String>,
+    pub prompt: String,
+    pub response_schema_name: String,
+    pub response_contract_digest: String,
+    pub response_schema_digest: String,
+    pub response_schema: Value,
+    pub candidate_digest: Option<String>,
+    pub worker_manifest_digest: String,
+    pub max_total_tokens: u32,
+    pub deadline_unix_ms: i64,
+    pub tools: Vec<ProviderToolDefinitionV1>,
+}
+
+impl ProviderTokenCountRequestV1 {
+    pub fn validate(&self) -> Result<(), ProviderError> {
+        if self.max_total_tokens == 0 {
+            return Err(ProviderError::InvalidContract(
+                "provider token-count request requires a positive signed total-token ceiling"
+                    .into(),
+            ));
+        }
+        ProviderRequest {
+            schema_version: self.schema_version,
+            request_id: self.request_id.clone(),
+            model: self.model.clone(),
+            execution_role: self.execution_role,
+            system_prompt: self.system_prompt.clone(),
+            prompt: self.prompt.clone(),
+            response_schema_name: self.response_schema_name.clone(),
+            response_contract_digest: self.response_contract_digest.clone(),
+            response_schema_digest: self.response_schema_digest.clone(),
+            response_schema: self.response_schema.clone(),
+            candidate_digest: self.candidate_digest.clone(),
+            worker_manifest_digest: self.worker_manifest_digest.clone(),
+            max_total_tokens: self.max_total_tokens,
+            max_input_tokens: 1,
+            max_output_tokens: 1,
+            deadline_unix_ms: self.deadline_unix_ms,
+            tools: self.tools.clone(),
+        }
+        .validate()
+    }
+}
+
 impl ProviderRequest {
     pub fn validate(&self) -> Result<(), ProviderError> {
         if self.schema_version != 1 {
@@ -325,6 +379,18 @@ pub trait ProviderAdapter: Send + Sync {
     async fn available(&self) -> Result<bool, ProviderError>;
 
     async fn complete(&self, request: &ProviderRequest) -> Result<ProviderResponse, ProviderError>;
+}
+
+#[async_trait]
+pub trait ProviderTokenCounterV1: Send + Sync {
+    fn id(&self) -> &'static str;
+
+    async fn available(&self) -> Result<bool, ProviderError>;
+
+    async fn count_input_tokens(
+        &self,
+        request: &ProviderTokenCountRequestV1,
+    ) -> Result<u32, ProviderError>;
 }
 
 #[derive(Debug, Error)]

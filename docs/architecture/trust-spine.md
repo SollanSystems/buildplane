@@ -693,6 +693,16 @@ before it asks the ledger for model-provider authority; callers cannot select
 an alternate token-count action. The production issuer/executor for the
 preflight network activity is still required before governed session startup
 can enter this lane.
+The provider SDK now exposes a separate closed token-count request and counter
+interface. The broker reconstructs that request from the same verified
+dispatch, model request, trust scope, preflight input, role-derived response
+contract, candidate binding, budget, and deadline used by completion. The
+Anthropic adapter maps it to the provider's
+[`POST /v1/messages/count_tokens`](https://platform.claude.com/docs/en/api/messages/count_tokens)
+endpoint through the host credential broker, with bounded responses and
+strict output parsing. This transport does not itself grant or record the
+network activity; the broker-owned activity issuer/result writer remains the
+next composition step.
 
 Those counts are persisted in the signed action receipt and replayed as one
 checked aggregate for the sealed V3 dispatch attempt. A metered failed call

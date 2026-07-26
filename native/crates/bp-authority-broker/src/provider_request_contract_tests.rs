@@ -1,4 +1,4 @@
-use crate::provider_request::build_provider_request_v1;
+use crate::provider_request::{build_provider_request_v1, build_provider_token_count_request_v1};
 use crate::PrivateModelCapability;
 use bp_ledger::id::{EventId, RunId};
 use bp_ledger::payload::model_evidence::{
@@ -173,6 +173,25 @@ fn provider_request_is_reconstructed_only_from_exact_verified_evidence() {
         authorization_ref: "authorization://1".into(),
     };
 
+    let token_count_request = build_provider_token_count_request_v1(
+        &dispatch,
+        &verified_model,
+        &verified_scope,
+        &verified_preflight,
+        None,
+    )
+    .expect("provider token-count request");
+    assert_eq!(token_count_request.provider, ModelProviderV1::Anthropic);
+    assert_eq!(token_count_request.request.max_total_tokens, 14_000);
+    assert_eq!(
+        token_count_request.request.request_id,
+        "anthropic:workflow-1:unit-1:attempt-1:model:provider-token-preflight"
+    );
+    assert_eq!(
+        token_count_request.request.response_contract_digest,
+        response.contract_digest
+    );
+
     let request = build_provider_request_v1(
         &capability,
         &dispatch,
@@ -199,6 +218,14 @@ fn provider_request_is_reconstructed_only_from_exact_verified_evidence() {
 
     let mut substituted_dispatch = dispatch;
     substituted_dispatch.body.budget.max_tokens = Some(15_000);
+    assert!(build_provider_token_count_request_v1(
+        &substituted_dispatch,
+        &verified_model,
+        &verified_scope,
+        &verified_preflight,
+        None,
+    )
+    .is_err());
     assert!(build_provider_request_v1(
         &capability,
         &substituted_dispatch,

@@ -15,7 +15,10 @@ use bp_ledger::payload::trust_spine::{
     ActionEvidenceVersionV1, ActionKindV1, CommitModeV1, DispatchEnvelopeV3, ExecutionRoleV1,
     ModelActionCandidateBindingV1, TrustTierV1,
 };
-use bp_provider_sdk::{provider_response_contract_v1, ProviderExecutionRoleV1, ProviderRequest};
+use bp_provider_sdk::{
+    provider_response_contract_v1, ProviderExecutionRoleV1, ProviderRequest,
+    ProviderTokenCountRequestV1,
+};
 use chrono::{DateTime, Duration};
 use thiserror::Error;
 
@@ -43,6 +46,113 @@ pub(crate) enum ProviderRequestBuildErrorV1 {
 pub(crate) struct BoundProviderRequestV1 {
     pub(crate) provider: ModelProviderV1,
     pub(crate) request: ProviderRequest,
+}
+
+#[derive(Debug)]
+pub(crate) struct BoundProviderTokenCountRequestV1 {
+    pub(crate) provider: ModelProviderV1,
+    pub(crate) request: ProviderTokenCountRequestV1,
+}
+
+pub(crate) fn build_provider_token_count_request_v1(
+    dispatch: &DispatchEnvelopeV3,
+    model_request: &VerifiedModelRequestEvidenceDocumentV1,
+    trust_scope: &VerifiedTrustScopeEvidenceDocumentV1,
+    preflight: &VerifiedProviderTokenPreflightInputV1,
+    candidate: Option<&ModelActionCandidateBindingV1>,
+) -> Result<BoundProviderTokenCountRequestV1, ProviderRequestBuildErrorV1> {
+    let evidence = model_request.document();
+    let binding = &evidence.binding;
+    if dispatch.envelope_digest != binding.dispatch_envelope_digest
+        || dispatch.body.workflow_id != binding.workflow_id
+        || dispatch.body.unit_id != binding.unit_id
+        || dispatch.body.attempt != binding.attempt
+        || dispatch.body.provenance_ref != binding.provenance_ref
+        || dispatch.body.execution_role != binding.execution_role
+        || dispatch.body.commit_mode != CommitModeV1::Atomic
+        || dispatch.body.trust_tier != TrustTierV1::Governed
+        || dispatch.action_evidence_version != ActionEvidenceVersionV1::SealedV3
+        || dispatch.repository_binding_digest != binding.repository_binding_digest
+        || dispatch.ledger_authority_realm_digest != binding.ledger_authority_realm_digest
+        || dispatch.governed_packet_digest.as_deref()
+            != Some(binding.governed_packet_digest.as_str())
+        || dispatch.body.capability_bundle_digest != binding.capability_bundle_digest
+        || dispatch.body.context_manifest_digest != binding.context_manifest_digest
+        || dispatch.body.worker_manifest_digest != binding.worker_manifest_digest
+        || dispatch.body.sandbox_profile_digest != binding.sandbox_profile_digest
+    {
+        return Err(ProviderRequestBuildErrorV1::DispatchBindingMismatch);
+    }
+    verify_trust_scope_evidence_matches_model_request(trust_scope.document(), model_request)
+        .map_err(|_| ProviderRequestBuildErrorV1::TrustScopeMismatch)?;
+    if preflight.document().model_request_evidence != model_request.descriptor()
+        || preflight.document().model_request_digest != evidence.model_request_digest
+    {
+        return Err(ProviderRequestBuildErrorV1::PreflightMismatch);
+    }
+    let role = map_role(binding.execution_role)?;
+    let candidate_digest = match (binding.execution_role, candidate) {
+        (ExecutionRoleV1::Implementer, None) => None,
+        (
+            ExecutionRoleV1::Reviewer | ExecutionRoleV1::Adversary | ExecutionRoleV1::Judge,
+            Some(candidate),
+        ) => Some(candidate.candidate_digest.clone()),
+        _ => return Err(ProviderRequestBuildErrorV1::RoleBindingMismatch),
+    };
+    if !evidence.tool_capabilities.is_empty()
+        || !trust_scope
+            .document()
+            .constraints
+            .tool_capabilities
+            .is_empty()
+    {
+        return Err(ProviderRequestBuildErrorV1::UnsupportedAuthority);
+    }
+    let response_contract = provider_response_contract_v1(role)
+        .map_err(|_| ProviderRequestBuildErrorV1::InvalidProviderContract)?;
+    let normalized = &evidence.normalized_provider_request;
+    if normalized.response_schema_digest != response_contract.contract_digest
+        || normalized.provider != preflight.document().provider
+        || normalized.model != preflight.document().model
+        || normalized.response_schema_digest != preflight.document().response_contract_digest
+    {
+        return Err(ProviderRequestBuildErrorV1::PreflightMismatch);
+    }
+    let max_total_tokens = dispatch
+        .body
+        .budget
+        .max_tokens
+        .filter(|value| *value == preflight.document().max_total_tokens)
+        .ok_or(ProviderRequestBuildErrorV1::InvalidBudget)?;
+    let provider = normalized.provider;
+    let provider_name = match provider {
+        ModelProviderV1::Anthropic => "anthropic",
+        ModelProviderV1::Openai => "openai",
+    };
+    let request = ProviderTokenCountRequestV1 {
+        schema_version: 1,
+        request_id: format!(
+            "{provider_name}:{}:provider-token-preflight",
+            binding.action_id
+        ),
+        model: normalized.model.clone(),
+        execution_role: role,
+        system_prompt: normalized.system_prompt.clone(),
+        prompt: normalized.prompt.clone(),
+        response_schema_name: response_contract.name.into(),
+        response_contract_digest: response_contract.contract_digest,
+        response_schema_digest: response_contract.schema_digest,
+        response_schema: response_contract.schema,
+        candidate_digest,
+        worker_manifest_digest: binding.worker_manifest_digest.clone(),
+        max_total_tokens,
+        deadline_unix_ms: provider_deadline_unix_ms(dispatch)?,
+        tools: vec![],
+    };
+    request
+        .validate()
+        .map_err(|_| ProviderRequestBuildErrorV1::InvalidProviderContract)?;
+    Ok(BoundProviderTokenCountRequestV1 { provider, request })
 }
 
 pub(crate) fn build_provider_request_v1(
