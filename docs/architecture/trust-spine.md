@@ -770,6 +770,17 @@ inside the broker after replay and transactional claim; none can be supplied
 or changed by the worker. This gives the future production credential gateway
 enough sealed identity to load the corresponding request and evidence from the
 same protected ledger/CAS rather than accepting model input alongside a lease.
+The broker now has the corresponding pure reconstruction gate. It accepts only
+that capability, the exact signed dispatch, verified model-request and
+trust-scope documents, and verified token-preflight input/result documents.
+It rechecks their run, workflow, unit, attempt, dispatch/action event, role,
+repository, realm, packet, manifests, sandbox, response contract, provider,
+model, and total-budget bindings; rejects model-visible tools until the typed
+action loop exists; derives the provider route rather than accepting adapter
+selection; and reserves only `signed total - recorded input` tokens for output.
+Its absolute deadline is the earlier of dispatch expiry and issued time plus
+the signed compute allowance. No worker request, prompt wrapper, provider
+setting, or credential participates in reconstruction.
 
 The remaining OS-isolated broker must expose the native, same-ledger-process
 `resolve-or-authorize` transaction to the credential-holding provider boundary,

@@ -85,6 +85,9 @@ mod promotion_git;
 #[cfg(target_os = "linux")]
 #[allow(dead_code)]
 mod protocol;
+mod provider_request;
+#[cfg(test)]
+mod provider_request_contract_tests;
 #[allow(dead_code)]
 mod reviewer_session;
 mod rootless_oci;

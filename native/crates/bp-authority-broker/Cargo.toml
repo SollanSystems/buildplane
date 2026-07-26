@@ -6,7 +6,9 @@ license.workspace = true
 
 [dependencies]
 bp-ledger.workspace = true
+bp-provider-sdk.workspace = true
 bp-replay.workspace = true
+chrono.workspace = true
 ed25519-dalek.workspace = true
 libc.workspace = true
 serde.workspace = true
@@ -18,6 +20,5 @@ zeroize.workspace = true
 
 [dev-dependencies]
 bp-ledger = { workspace = true, features = ["test-support"] }
-chrono.workspace = true
 rusqlite.workspace = true
 tempfile = "3"
