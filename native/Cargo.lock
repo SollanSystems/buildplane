@@ -85,6 +85,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "bp-ledger",
+ "bp-provider-anthropic",
  "bp-provider-sdk",
  "bp-replay",
  "chrono",

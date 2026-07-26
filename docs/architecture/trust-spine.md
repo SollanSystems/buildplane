@@ -705,20 +705,18 @@ Anthropic adapter maps it to the provider's
 [`POST /v1/messages/count_tokens`](https://platform.claude.com/docs/en/api/messages/count_tokens)
 endpoint through the host credential broker, with bounded responses and
 strict output parsing. This transport does not itself grant or record the
-network activity; the broker-owned claim, counter invocation, result writer,
-and unknown-effect reconciliation remain the next composition step. The broker
-now has a closed preflight lifecycle orchestrator for that composition: a
+network activity. The broker now has a closed preflight lifecycle orchestrator
+for the broker-owned claim, counter invocation, result writer, and
+unknown-effect reconciliation: a
 remote count is invoked only after a durable grant, a recorded result is
 reused without another call, and either an unknown provider effect or a
 post-call durable-write failure yields reconciliation rather than retry
-authority. Its production ledger/CAS backend and Anthropic counter binding are
-still intentionally unexported work. A credential-owning counter adapter is
-now paired with a broker-owned evidence writer: provider mismatch or evidence
-writer failure cannot produce a recordable completion, and provider errors are
-normalized to an unknown-effect record rather than surfaced as retryable
-transport failures. The CAS evidence writer and ledger backend are the
-remaining production bindings. The broker now provides the CAS writer: a
-successful count becomes the strict `ProviderTokenPreflightResultV1` bytes
+authority. A credential-owning counter adapter is paired with a broker-owned
+evidence writer: provider mismatch or evidence-writer failure cannot produce a
+recordable completion, and provider errors are normalized to an unknown-effect
+record rather than surfaced as retryable transport failures. The broker's CAS
+writer turns a successful count into strict `ProviderTokenPreflightResultV1`
+bytes
 bound to the verified input, while provider uncertainty becomes a separate
 closed evidence object bound to the provider request, preflight digest, and
 model-request digest. CAS failure returns no recordable completion. The
@@ -734,8 +732,16 @@ composition as an opaque provider lane only after both the model-action
 confinement policy and the rootless OCI attestation pass. The lane exposes
 only its sandbox-profile digest and the closed preflight status; it cannot
 return credentials, leases, signers, CAS handles, or provider requests. The
-default Linux host runner still needs protected configuration and credential
-custody before this lane can be enabled externally.
+Anthropic credential broker now opens one fixed
+`credentials/anthropic-api-key-v1` file relative to the retained validated
+authority-root descriptor for each host-performed request. It rejects symlink
+or hardlink substitution, wrong owner, any mode other than `0400` or `0600`,
+unsafe parent-directory modes, invalid header bytes, and values over 8 KiB.
+The bounded read and provider credential allocation are zeroized, errors omit
+secret and path data, and no environment, CLI argument, worker mount, or OCI
+value can select or receive the key. The default Linux host runner still needs
+the closed governed-session public configuration and full authority
+composition before this lane can be enabled externally.
 
 Those counts are persisted in the signed action receipt and replayed as one
 checked aggregate for the sealed V3 dispatch attempt. A metered failed call

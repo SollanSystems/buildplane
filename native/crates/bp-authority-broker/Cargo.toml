@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 async-trait.workspace = true
 bp-ledger.workspace = true
+bp-provider-anthropic.workspace = true
 bp-provider-sdk.workspace = true
 bp-replay.workspace = true
 chrono.workspace = true

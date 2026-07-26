@@ -64,6 +64,8 @@ mod governed_session_startup_contract_tests;
 mod governed_session_token;
 #[cfg(test)]
 mod governed_session_token_contract_tests;
+#[allow(dead_code)] // Wired into the default governed-session host in the next composition slice.
+mod host_anthropic_credential_custody;
 mod host_cas_custody;
 mod host_config;
 mod host_config_loader;
