@@ -10,7 +10,7 @@ use bp_ledger::canonicalize::canonicalize;
 use bp_ledger::event::Event;
 use bp_ledger::id::{EventId, RunId};
 use bp_ledger::kind::EventKind;
-use bp_ledger::payload::activity_claim::ActivityResultOutcomeV1;
+use bp_ledger::payload::activity_claim::{ActivityClaimPurposeV1, ActivityResultOutcomeV1};
 use bp_ledger::payload::governed_packet::GovernedCommandPacketV1;
 use bp_ledger::payload::trust_spine::{
     action_receipt_recorded_v2_digest, action_requested_v2_digest,
@@ -29,13 +29,14 @@ use bp_ledger::payload::trust_spine::{
 };
 use bp_ledger::signing::{public_key_hash, sign_event, ActorKeyRef, TrustedPublicKeys};
 use bp_ledger::storage::sqlite::{
-    ActivityClaimAuthorityV1, ActivityClaimRequestV1, ActivityResultDispositionV1,
-    CheckpointPolicy, GovernedCommandActionAuthorizeAndClaimDispositionV1,
-    GovernedCommandActionIssueDispositionV1, GovernedCommandActionResultRequestV1,
-    GovernedDispatchV5AdmissionAuthorityV1, GovernedDispatchV5AdmissionDispositionV1,
-    GovernedDispatchV5AdmissionRequestV1, GovernedDispatchV5AdmissionSealRequestV1,
-    GovernedV5CandidateFinalizeActionIssueDispositionV1,
+    ActivityClaimAuthorityV1, ActivityClaimDispositionV1, ActivityClaimRequestV1,
+    ActivityResultDispositionV1, CheckpointPolicy,
+    GovernedCommandActionAuthorizeAndClaimDispositionV1, GovernedCommandActionIssueDispositionV1,
+    GovernedCommandActionResultRequestV1, GovernedDispatchV5AdmissionAuthorityV1,
+    GovernedDispatchV5AdmissionDispositionV1, GovernedDispatchV5AdmissionRequestV1,
+    GovernedDispatchV5AdmissionSealRequestV1, GovernedV5CandidateFinalizeActionIssueDispositionV1,
     GovernedV5CandidateFinalizeActionIssueRequestV1,
+    GovernedV5CandidateFinalizeAuthorizeAndClaimRequestV1,
     GovernedV5CommandActionAuthorizeAndClaimRequestV1, GovernedV5CommandActionIssueRequestV1,
     GovernedV5CommandActionReceiptDispositionV1, GovernedV5CommandActionReceiptRequestV1,
     ResolveGovernedV5CandidateAuthorityRequestV1, SqliteStore,
@@ -1363,6 +1364,74 @@ fn v5_command_issuance_requires_a_checkpoint_sealed_admission() {
             .expect("count idempotent finalization issuance"),
         12
     );
+    let finalize_claim_request = GovernedV5CandidateFinalizeAuthorizeAndClaimRequestV1 {
+        run_id: fixture.run_id,
+        dispatch_event_id: fixture.dispatch_event.id,
+        admission_event_id,
+        action_request_event_id: finalize_action_event_id,
+        lease_duration_ms: 60_000,
+    };
+    let finalize_claim = store
+        .authorize_and_claim_governed_v5_candidate_finalize_v1(
+            &finalize_claim_request,
+            &cas,
+            &v5_authority,
+            &activity_authority,
+            &action_key,
+            &action_signer,
+        )
+        .expect("claim purpose-bound Git finalization");
+    let finalize_claim_event_id = match finalize_claim {
+        ActivityClaimDispositionV1::Granted {
+            claim_event_id,
+            lease_id,
+            ..
+        } => {
+            assert!(!lease_id.is_empty());
+            claim_event_id
+        }
+        other => panic!("first finalization claim must grant one lease, got {other:?}"),
+    };
+    assert_eq!(store.event_count().expect("count Git claim"), 13);
+    let claim_event = store
+        .events_for_run(&fixture.run_id.to_string())
+        .expect("load claimed finalization tape")
+        .into_iter()
+        .map(|row| row.to_event().expect("decode claimed finalization event"))
+        .find(|event| event.id == finalize_claim_event_id)
+        .expect("find finalization claim");
+    let Payload::ActivityClaimedV1(claim) = claim_event.payload else {
+        panic!("finalization claim must append ActivityClaimedV1");
+    };
+    assert_eq!(claim.action_kind, ActionKindV1::Git);
+    assert_eq!(
+        claim.purpose,
+        ActivityClaimPurposeV1::GovernedCandidateFinalizeV1
+    );
+    assert_eq!(claim.action_request_event_id, finalize_action_event_id);
+    let duplicate_claim = store
+        .authorize_and_claim_governed_v5_candidate_finalize_v1(
+            &finalize_claim_request,
+            &cas,
+            &v5_authority,
+            &activity_authority,
+            &action_key,
+            &action_signer,
+        )
+        .expect("recover finalization claim without capability replay");
+    assert!(matches!(
+        duplicate_claim,
+        ActivityClaimDispositionV1::Pending {
+            claim_event_id,
+            ..
+        } if claim_event_id == finalize_claim_event_id
+    ));
+    assert_eq!(
+        store
+            .event_count()
+            .expect("count duplicate finalization claim"),
+        13
+    );
 
     let retry = store
         .issue_governed_v5_command_action_v1_at_for_tests(
@@ -1384,7 +1453,7 @@ fn v5_command_issuance_requires_a_checkpoint_sealed_admission() {
     ));
     assert_eq!(
         store.event_count().expect("count recovered V5 tape"),
-        12,
+        13,
         "V5 action replay must not append a duplicate effect intent"
     );
 }

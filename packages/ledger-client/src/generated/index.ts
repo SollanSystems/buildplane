@@ -253,6 +253,12 @@ export enum ActivityClaimPurposeV1 {
 	 * parented `ModelActionIntentV1` and `ModelActionAuthorizedV2`.
 	 */
 	GovernedModelActionV1 = "governed_model_action_v1",
+	/**
+	 * A Git lease issued only after the protected host has verified the
+	 * succeeded implementer process receipt and reconstructed the exact
+	 * candidate-finalization input from the sealed V5 dispatch and CAS.
+	 */
+	GovernedCandidateFinalizeV1 = "governed_candidate_finalize_v1",
 }
 
 /** Signed write-ahead execution reservation for one action request. */

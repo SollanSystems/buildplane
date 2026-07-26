@@ -628,6 +628,31 @@ pub enum GovernedV5CandidateFinalizeActionIssueDispositionV1 {
     },
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct GovernedV5CandidateFinalizeInputV1 {
+    schema_version: u8,
+    action: String,
+    candidate_id: String,
+    run_id: String,
+    attempt: u32,
+    candidate_key: String,
+    candidate_ref: String,
+    base_sha: String,
+}
+
+/// Closed request for the only lease that may execute a V5 candidate Git
+/// finalization. Every action and candidate field is reconstructed from signed
+/// tape and strict CAS evidence before a purpose-bound claim can be appended.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GovernedV5CandidateFinalizeAuthorizeAndClaimRequestV1 {
+    pub run_id: RunId,
+    pub dispatch_event_id: EventId,
+    pub admission_event_id: EventId,
+    pub action_request_event_id: EventId,
+    pub lease_duration_ms: u64,
+}
+
 /// Closed native request to create the signed intent that precedes a governed
 /// model authorization. Every identity, role, canonical input, and evidence
 /// descriptor is re-derived from signed tape plus the protected realm CAS.
@@ -3597,6 +3622,182 @@ impl SqliteStore {
             disposition,
             command_intent,
         ))
+    }
+
+    /// Reconstruct and lease the Git activity that finalizes one immutable V5
+    /// candidate. Generic claim entry points cannot mint this purpose, and an
+    /// exact retry never receives the original opaque lease again.
+    #[allow(clippy::too_many_arguments)]
+    pub fn authorize_and_claim_governed_v5_candidate_finalize_v1(
+        &self,
+        request: &GovernedV5CandidateFinalizeAuthorizeAndClaimRequestV1,
+        cas: &Cas,
+        v5_authority: &GovernedDispatchV5AdmissionAuthorityV1,
+        activity_authority: &ActivityClaimAuthorityV1,
+        signing_key: &SigningKey,
+        signer: &ActorKeyRef,
+    ) -> Result<ActivityClaimDispositionV1> {
+        self.authorize_and_claim_governed_v5_candidate_finalize_v1_at(
+            request,
+            cas,
+            v5_authority,
+            activity_authority,
+            signing_key,
+            signer,
+            Utc::now(),
+        )
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    #[allow(clippy::too_many_arguments)]
+    pub fn authorize_and_claim_governed_v5_candidate_finalize_v1_at_for_tests(
+        &self,
+        request: &GovernedV5CandidateFinalizeAuthorizeAndClaimRequestV1,
+        cas: &Cas,
+        v5_authority: &GovernedDispatchV5AdmissionAuthorityV1,
+        activity_authority: &ActivityClaimAuthorityV1,
+        signing_key: &SigningKey,
+        signer: &ActorKeyRef,
+        now: DateTime<Utc>,
+    ) -> Result<ActivityClaimDispositionV1> {
+        self.authorize_and_claim_governed_v5_candidate_finalize_v1_at(
+            request,
+            cas,
+            v5_authority,
+            activity_authority,
+            signing_key,
+            signer,
+            now,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn authorize_and_claim_governed_v5_candidate_finalize_v1_at(
+        &self,
+        request: &GovernedV5CandidateFinalizeAuthorizeAndClaimRequestV1,
+        cas: &Cas,
+        v5_authority: &GovernedDispatchV5AdmissionAuthorityV1,
+        activity_authority: &ActivityClaimAuthorityV1,
+        signing_key: &SigningKey,
+        signer: &ActorKeyRef,
+        now: DateTime<Utc>,
+    ) -> Result<ActivityClaimDispositionV1> {
+        require_protected_governed_realm(activity_authority)?;
+        validate_claim_signer(activity_authority, signing_key, signer)?;
+        if !(MIN_ACTIVITY_LEASE_MS..=MAX_ACTIVITY_LEASE_MS).contains(&request.lease_duration_ms) {
+            return Err(command_action_authority_rejected(format!(
+                "lease_duration_ms must be in {MIN_ACTIVITY_LEASE_MS}..={MAX_ACTIVITY_LEASE_MS}",
+            )));
+        }
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Deferred)?;
+        let action_event = load_verified_authority_event(
+            &tx,
+            request.action_request_event_id,
+            &activity_authority.trusted_keys,
+            &activity_authority.action_request_signer,
+            "V5 candidate finalization action",
+        )?;
+        if action_event.run_id != request.run_id
+            || action_event.parent_event_id != Some(request.dispatch_event_id)
+        {
+            return Err(command_action_authority_rejected(
+                "candidate finalization action does not bind the requested run and dispatch",
+            ));
+        }
+        let Payload::ActionRequestedV2(action) = &action_event.payload else {
+            return Err(command_action_authority_rejected(
+                "candidate finalization lease requires ActionRequestedV2",
+            ));
+        };
+        let action = action.clone();
+        if action.action_kind != ActionKindV1::Git
+            || action.execution_role != ExecutionRoleV1::Implementer
+        {
+            return Err(command_action_authority_rejected(
+                "candidate finalization lease requires an implementer Git action",
+            ));
+        }
+        let material = verified_sealed_v5_dispatch_action_material(
+            &tx,
+            request.run_id,
+            request.dispatch_event_id,
+            request.admission_event_id,
+            v5_authority,
+            activity_authority,
+        )?;
+        let bytes = cas.get_verified_canonical_bytes(
+            &action.canonical_input_ref,
+            &action.canonical_input_digest,
+        )?;
+        let input: GovernedV5CandidateFinalizeInputV1 =
+            serde_json::from_slice(&bytes).map_err(|error| {
+                command_action_authority_rejected(format!(
+                    "candidate finalization CAS input is invalid: {error}",
+                ))
+            })?;
+        let canonical = serde_json::to_vec(&input).map_err(|error| {
+            command_action_authority_rejected(format!(
+                "candidate finalization CAS input cannot be canonicalized: {error}",
+            ))
+        })?;
+        let dispatch_envelope_digest = material.lineage_envelope_digest.clone();
+        let dispatch = material.dispatch;
+        let candidate_suffix = input
+            .candidate_ref
+            .strip_prefix(BUILDPANE_CANDIDATE_REF_PREFIX)
+            .ok_or_else(|| {
+                command_action_authority_rejected(
+                    "candidate finalization input has a non-Buildplane ref",
+                )
+            })?;
+        let expected_action_id = format!("{RETRY_CANDIDATE_ACTION_KIND}:{candidate_suffix}");
+        if canonical != bytes
+            || input.schema_version != 1
+            || input.action != "create-immutable-candidate"
+            || input.run_id != request.run_id.to_string()
+            || input.attempt != dispatch.body.attempt
+            || input.candidate_key != candidate_suffix
+            || input.candidate_ref
+                != format!("{BUILDPANE_CANDIDATE_REF_PREFIX}{}", input.candidate_key)
+            || input.candidate_key
+                != format!(
+                    "{}/{}/{}",
+                    input.candidate_id, request.run_id, dispatch.body.attempt
+                )
+            || input.base_sha != dispatch.body.base_commit_sha
+            || action.action_id != expected_action_id
+            || action.idempotency_key
+                != format!(
+                    "{}:{RETRY_CANDIDATE_ACTION_KIND}",
+                    dispatch.body.idempotency_key
+                )
+            || action.dispatch_envelope_digest != dispatch_envelope_digest
+        {
+            return Err(command_action_authority_rejected(
+                "candidate finalization action or CAS input was substituted",
+            ));
+        }
+        let claim = ActivityClaimRequestV1 {
+            run_id: request.run_id,
+            activity_id: action.action_id.clone(),
+            idempotency_key: action.idempotency_key.clone(),
+            dispatch_event_id: request.dispatch_event_id,
+            action_request_event_id: request.action_request_event_id,
+            lease_duration_ms: request.lease_duration_ms,
+        };
+        tx.commit()?;
+        self.claim_activity_v1_at_with_evidence_authority(
+            &claim,
+            activity_authority,
+            signing_key,
+            signer,
+            now,
+            ActivityClaimPurposeV1::GovernedCandidateFinalizeV1,
+            ActivityClaimEvidenceAuthorityV1::SealedV5 {
+                admission_event_id: request.admission_event_id,
+                authority: v5_authority,
+            },
+        )
     }
 
     /// Issue the one signed `ModelActionIntentV1` record for a governed model
@@ -8694,27 +8895,15 @@ impl SqliteStore {
             "{}:{RETRY_CANDIDATE_ACTION_KIND}",
             dispatch.body.idempotency_key
         );
-        #[derive(serde::Serialize)]
-        #[serde(rename_all = "camelCase")]
-        struct CandidateFinalizeInputV1<'a> {
-            schema_version: u8,
-            action: &'static str,
-            candidate_id: &'a str,
-            run_id: String,
-            attempt: u32,
-            candidate_key: &'a str,
-            candidate_ref: &'a str,
-            base_sha: &'a str,
-        }
-        let input_bytes = serde_json::to_vec(&CandidateFinalizeInputV1 {
+        let input_bytes = serde_json::to_vec(&GovernedV5CandidateFinalizeInputV1 {
             schema_version: 1,
-            action: "create-immutable-candidate",
-            candidate_id: &candidate_id,
+            action: "create-immutable-candidate".into(),
+            candidate_id: candidate_id.clone(),
             run_id: request.run_id.to_string(),
             attempt: dispatch.body.attempt,
-            candidate_key: &candidate_key,
-            candidate_ref: &candidate_ref,
-            base_sha: &dispatch.body.base_commit_sha,
+            candidate_key: candidate_key.clone(),
+            candidate_ref: candidate_ref.clone(),
+            base_sha: dispatch.body.base_commit_sha.clone(),
         })
         .map_err(|error| {
             command_action_authority_rejected(format!(

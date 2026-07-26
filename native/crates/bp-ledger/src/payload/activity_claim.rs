@@ -50,6 +50,10 @@ pub enum ActivityClaimPurposeV1 {
     /// this purpose because a sealed V3 model effect additionally requires a
     /// parented `ModelActionIntentV1` and `ModelActionAuthorizedV2`.
     GovernedModelActionV1,
+    /// A Git lease issued only after the protected host has verified the
+    /// succeeded implementer process receipt and reconstructed the exact
+    /// candidate-finalization input from the sealed V5 dispatch and CAS.
+    GovernedCandidateFinalizeV1,
 }
 
 fn is_generic_claim_purpose(value: &ActivityClaimPurposeV1) -> bool {
