@@ -951,6 +951,7 @@ pub(crate) trait AuthorityBackend {
         &mut self,
         run_id: RunId,
         request: &BrokerModelActionRequest,
+        execution_role: bp_ledger::payload::trust_spine::ExecutionRoleV1,
         lease_duration_ms: u64,
     ) -> Result<AuthorityGrant, AuthorityBackendError>;
 
@@ -1098,6 +1099,7 @@ where
         let grant = match self.backend.authorize_and_claim(
             self.run_id,
             &request,
+            self.expected_role,
             self.lease_policy.duration_ms(),
         ) {
             Ok(grant) => grant,
@@ -1277,6 +1279,7 @@ impl AuthorityBackend for LedgerAuthorityBackend<'_> {
         &mut self,
         run_id: RunId,
         request: &BrokerModelActionRequest,
+        execution_role: bp_ledger::payload::trust_spine::ExecutionRoleV1,
         lease_duration_ms: u64,
     ) -> Result<AuthorityGrant, AuthorityBackendError> {
         let request = GovernedModelActionAuthorizeAndClaimRequestV1 {
@@ -1285,16 +1288,32 @@ impl AuthorityBackend for LedgerAuthorityBackend<'_> {
             action_request_event_id: request.action_request_event_id,
             lease_duration_ms,
         };
-        let disposition = self
-            .store
-            .authorize_and_claim_governed_model_action_v1(
-                &request,
-                self.cas,
-                self.authority,
-                self.signing_key,
-                self.signer,
-            )
-            .map_err(AuthorityBackendError::from_ledger)?;
+        let disposition = match execution_role {
+            bp_ledger::payload::trust_spine::ExecutionRoleV1::Implementer => {
+                self.store.authorize_and_claim_governed_model_action_v1(
+                    &request,
+                    self.cas,
+                    self.authority,
+                    self.signing_key,
+                    self.signer,
+                )
+            }
+            bp_ledger::payload::trust_spine::ExecutionRoleV1::Reviewer
+            | bp_ledger::payload::trust_spine::ExecutionRoleV1::Adversary
+            | bp_ledger::payload::trust_spine::ExecutionRoleV1::Judge => self
+                .store
+                .authorize_and_claim_governed_reviewer_model_action_v1(
+                    &request,
+                    self.cas,
+                    self.authority,
+                    self.signing_key,
+                    self.signer,
+                ),
+            bp_ledger::payload::trust_spine::ExecutionRoleV1::Candidate => {
+                return Err(AuthorityBackendError::TrustedReplayBindingMismatch)
+            }
+        }
+        .map_err(AuthorityBackendError::from_ledger)?;
 
         Ok(match disposition {
             GovernedModelActionAuthorizeAndClaimDispositionV1::Granted {

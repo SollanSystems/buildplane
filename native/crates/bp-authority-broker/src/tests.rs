@@ -525,6 +525,7 @@ impl TrustedReplayVerifier for FakeVerifier {
 struct AuthorizeCall {
     run_id: RunId,
     request: BrokerModelActionRequest,
+    execution_role: ExecutionRoleV1,
     lease_duration_ms: u64,
 }
 
@@ -556,11 +557,13 @@ impl AuthorityBackend for FakeBackend {
         &mut self,
         run_id: RunId,
         request: &BrokerModelActionRequest,
+        execution_role: ExecutionRoleV1,
         lease_duration_ms: u64,
     ) -> Result<AuthorityGrant, AuthorityBackendError> {
         self.state.borrow_mut().authorize_calls.push(AuthorizeCall {
             run_id,
             request: request.clone(),
+            execution_role,
             lease_duration_ms,
         });
         self.grants
@@ -1112,6 +1115,10 @@ fn reviewer_model_authority_accepts_only_startup_selected_reviewer_evidence() {
         BrokerModelActionStatus::Recorded
     );
     assert_eq!(backend_state.borrow().authorize_calls.len(), 1);
+    assert_eq!(
+        backend_state.borrow().authorize_calls[0].execution_role,
+        ExecutionRoleV1::Reviewer
+    );
     assert_eq!(gateway_state.borrow().calls, 1);
 }
 

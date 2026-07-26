@@ -688,15 +688,19 @@ Reviewer open and run resolution now compose those tokens with the trusted
 snapshot: open verifies repository and run binding before issuing a reviewer
 lane token; run verifies that exact recovery/session pair and re-derives the
 still-unclaimed reviewer evidence. This remains pre-effect and private—the
-native authorize-and-claim transaction plus read-only OCI worker must consume
-the evidence before the endpoint can be activated.
+read-only OCI worker must consume the resulting private capability before the
+endpoint can be activated.
 The broker model-effect transaction is now startup-role-bound rather than
 hard-coded to implementer: implementer, reviewer, adversary, and judge
 compositions compare both replayed dispatch and action roles with the one
 selected role, while `candidate` cannot construct effect authority. The
-production ledger intent issuer still admits implementer-only evidence, so a
-reviewer composition remains blocked until the separate candidate-view-aware
-authorize-and-claim storage path is implemented.
+production ledger now keeps two distinct lanes. Implementers may transactionally
+issue their write-ahead intent. Review-like roles may only adopt a pre-existing
+kernel-signed, candidate-bound intent, after the same immediate transaction
+independently verifies the signed candidate, completion proof, passed
+acceptance, exact read-only/network-disabled candidate view and protected CAS
+bytes, evidence documents, and role. The broker passes its startup-selected
+role into that storage boundary; request fields cannot select the lane.
 
 The remaining OS-isolated broker must expose the native, same-ledger-process
 `resolve-or-authorize` transaction to the credential-holding provider boundary,

@@ -8,16 +8,25 @@ use bp_ledger::id::{EventId, RunId};
 use bp_ledger::kind::EventKind;
 use bp_ledger::payload::activity_claim::ActivityResultOutcomeV1;
 use bp_ledger::payload::model_evidence::{
-    canonical_model_action_input_v1_bytes, model_request_semantic_v1_digest,
-    CanonicalModelActionInputV1, CredentialFreeNormalizedModelRequestV1, ModelProviderV1,
+    canonical_model_action_input_v1_bytes, derive_model_action_scope_constraints_v1,
+    model_request_evidence_document_v1_bytes, model_request_evidence_v1_descriptor,
+    model_request_semantic_v1_digest, parse_verified_canonical_model_action_input_v1,
+    parse_verified_model_request_evidence_document_v1, trust_scope_evidence_document_v1_bytes,
+    trust_scope_evidence_v1_descriptor, CanonicalModelActionInputV1,
+    CredentialFreeNormalizedModelRequestV1, ModelActionEvidenceBindingV1, ModelProviderV1,
+    ModelRequestEvidenceDocumentV1, TrustScopeEvidenceDocumentV1,
 };
 use bp_ledger::payload::trust_spine::{
-    action_receipt_set_v1_digest, action_requested_v2_digest, dispatch_envelope_v3_body_digest,
-    dispatch_envelope_v4_digest, governed_dispatch_policy_digest_v1, ActionEvidenceVersionV1,
+    action_receipt_set_v1_digest, action_requested_v2_digest,
+    candidate_completion_recorded_v1_digest, candidate_view_v1_digest,
+    dispatch_envelope_v3_body_digest, dispatch_envelope_v4_digest,
+    governed_dispatch_policy_digest_v1, model_action_intent_v1_digest, ActionEvidenceVersionV1,
     ActionFailureV1, ActionKindV1, ActionReceiptOutcomeV2, ActionReceiptRecordedV2,
     ActionReceiptSetEntryV1, ActionReceiptSetRecordedV1, ActionRequestedV2, ActionResourceUsageV1,
-    CommitModeV1, DispatchBudgetV1, DispatchEnvelopeBodyV2, DispatchEnvelopeV3, DispatchEnvelopeV4,
-    ExecutionRoleV1, TrustTierV1,
+    CandidateAcceptanceOutcomeV1, CandidateAcceptanceRecordedV1, CandidateCompletionRecordedV1,
+    CandidateCreatedV2, CandidateViewV1, CommitModeV1, DispatchBudgetV1, DispatchEnvelopeBodyV2,
+    DispatchEnvelopeV3, DispatchEnvelopeV4, ExecutionRoleV1, ModelActionCandidateBindingV1,
+    ModelActionIntentV1, TrustTierV1,
 };
 use bp_ledger::payload::Payload;
 use bp_ledger::signing::{public_key_hash, ActorKeyRef, TrustedPublicKeys};
@@ -278,6 +287,215 @@ fn issue_request(
         dispatch_event_id,
         action_request_event_id,
     }
+}
+
+fn append_signed_candidate_bound_reviewer_intent(
+    store: &SqliteStore,
+    cas: &Cas,
+    key: &SigningKey,
+    signer: &ActorKeyRef,
+    run_id: RunId,
+    dispatch: &DispatchEnvelopeV3,
+    dispatch_event_id: EventId,
+    action_request: &ActionRequestedV2,
+    action_request_event_id: EventId,
+    candidate_event_ref_override: Option<EventId>,
+    at: DateTime<Utc>,
+) {
+    let canonical_input_bytes =
+        canonical_model_action_input_v1_bytes(&canonical_model_input()).expect("encode input");
+    let verified_input = parse_verified_canonical_model_action_input_v1(
+        &canonical_input_bytes,
+        &action_request.canonical_input_ref,
+        &action_request.canonical_input_digest,
+    )
+    .expect("verify canonical input");
+    let evidence_binding = ModelActionEvidenceBindingV1::from_action_requested_v2(
+        action_request,
+        dispatch_event_id,
+        action_request_event_id,
+    )
+    .expect("derive reviewer evidence binding");
+    let model_document = ModelRequestEvidenceDocumentV1::from_verified_canonical_input(
+        evidence_binding,
+        &verified_input,
+    )
+    .expect("derive reviewer model evidence");
+    let model_bytes =
+        model_request_evidence_document_v1_bytes(&model_document).expect("encode model evidence");
+    let model_ref = cas
+        .put_canonical_bytes(&model_bytes)
+        .expect("store reviewer model evidence");
+    let model_evidence = model_request_evidence_v1_descriptor(&model_ref);
+    let verified_model =
+        parse_verified_model_request_evidence_document_v1(&model_bytes, &model_evidence)
+            .expect("verify reviewer model evidence");
+    let constraints = derive_model_action_scope_constraints_v1(
+        ExecutionRoleV1::Reviewer,
+        &verified_input.document().tool_capabilities,
+    )
+    .expect("derive reviewer trust scope");
+    let trust_document = TrustScopeEvidenceDocumentV1::from_verified_model_request_evidence(
+        &verified_model,
+        dispatch.body.acceptance_contract_digest.clone(),
+        constraints,
+    )
+    .expect("derive reviewer trust evidence");
+    let trust_bytes =
+        trust_scope_evidence_document_v1_bytes(&trust_document).expect("encode trust evidence");
+    let trust_ref = cas
+        .put_canonical_bytes(&trust_bytes)
+        .expect("store reviewer trust evidence");
+    let trust_evidence = trust_scope_evidence_v1_descriptor(&trust_ref);
+
+    let candidate_commit_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string();
+    let candidate_ref = format!("refs/buildplane/candidates/candidate-review/{run_id}/1");
+    let candidate = CandidateCreatedV2 {
+        run_id: run_id.to_string(),
+        candidate_id: "candidate-review".into(),
+        candidate_ref: candidate_ref.clone(),
+        workflow_id: "candidate-workflow".into(),
+        unit_id: "candidate-unit".into(),
+        attempt: 1,
+        provenance_ref: "prov:candidate".into(),
+        candidate_digest: DIGEST_C.into(),
+        base_commit_sha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+        candidate_commit_sha: candidate_commit_sha.clone(),
+        commit_digest: DIGEST_D.into(),
+        tree_digest: DIGEST_E.into(),
+        patch_digest: DIGEST_A.into(),
+        changed_files_digest: DIGEST_B.into(),
+        envelope_digest: DIGEST_D.into(),
+        action_receipt_set_ref: "set:candidate-review".into(),
+        action_receipt_set_digest: DIGEST_E.into(),
+    };
+    let candidate_event = Event {
+        id: EventId::new(),
+        run_id,
+        parent_event_id: None,
+        schema_version: Event::CURRENT_SCHEMA_VERSION,
+        kind: EventKind::CandidateCreatedV2,
+        occurred_at: at - Duration::milliseconds(2),
+        payload: Payload::CandidateCreatedV2(candidate),
+    };
+    store
+        .append_signed(&candidate_event, key, signer)
+        .expect("append signed candidate");
+    let mut completion = CandidateCompletionRecordedV1 {
+        run_id: run_id.to_string(),
+        workflow_id: "candidate-workflow".into(),
+        unit_id: "candidate-unit".into(),
+        attempt: 1,
+        provenance_ref: "prov:candidate".into(),
+        candidate_created_event_ref: candidate_event.id,
+        candidate_digest: DIGEST_C.into(),
+        candidate_create_action_id: "candidate-create".into(),
+        action_request_ref: EventId::new(),
+        action_request_digest: DIGEST_A.into(),
+        activity_claim_event_ref: EventId::new(),
+        activity_claim_event_digest: DIGEST_B.into(),
+        activity_result_event_ref: EventId::new(),
+        activity_result_event_digest: DIGEST_C.into(),
+        action_receipt_ref: "receipt:candidate-review".into(),
+        action_receipt_digest: DIGEST_D.into(),
+        completion_digest: String::new(),
+        completed_at: timestamp(at - Duration::milliseconds(1)),
+    };
+    completion.completion_digest =
+        candidate_completion_recorded_v1_digest(&completion).expect("hash candidate completion");
+    let completion_event = Event {
+        id: EventId::new(),
+        run_id,
+        parent_event_id: Some(candidate_event.id),
+        schema_version: Event::CURRENT_SCHEMA_VERSION,
+        kind: EventKind::CandidateCompletionRecordedV1,
+        occurred_at: at - Duration::milliseconds(1),
+        payload: Payload::CandidateCompletionRecordedV1(completion),
+    };
+    store
+        .append_signed(&completion_event, key, signer)
+        .expect("append signed candidate completion");
+    let acceptance = CandidateAcceptanceRecordedV1 {
+        candidate_digest: DIGEST_C.into(),
+        candidate_commit_sha: candidate_commit_sha.clone(),
+        acceptance_ref: "acceptance:candidate-review".into(),
+        acceptance_contract_digest: dispatch.body.acceptance_contract_digest.clone(),
+        acceptance_digest: DIGEST_E.into(),
+        outcome: CandidateAcceptanceOutcomeV1::Passed,
+        evaluated_at: timestamp(at),
+    };
+    let acceptance_event = Event {
+        id: EventId::new(),
+        run_id,
+        parent_event_id: Some(completion_event.id),
+        schema_version: Event::CURRENT_SCHEMA_VERSION,
+        kind: EventKind::CandidateAcceptanceRecorded,
+        occurred_at: at,
+        payload: Payload::CandidateAcceptanceRecordedV1(acceptance),
+    };
+    store
+        .append_signed(&acceptance_event, key, signer)
+        .expect("append signed candidate acceptance");
+
+    let candidate_view = CandidateViewV1 {
+        candidate_ref,
+        candidate_digest: DIGEST_C.into(),
+        candidate_commit_sha,
+        tree_digest: DIGEST_E.into(),
+        reviewer_context_manifest_digest: dispatch.body.context_manifest_digest.clone(),
+        reviewer_sandbox_profile_digest: dispatch.body.sandbox_profile_digest.clone(),
+        mount_path_digest: DIGEST_B.into(),
+        read_only: true,
+        network_disabled: true,
+    };
+    let candidate_view_bytes = serde_json::to_vec(&candidate_view).expect("encode candidate view");
+    let candidate_view_ref = cas
+        .put_canonical_bytes(&candidate_view_bytes)
+        .expect("store candidate view");
+    let candidate_view_digest =
+        candidate_view_v1_digest(&candidate_view).expect("hash candidate view");
+    let mut intent = ModelActionIntentV1 {
+        run_id: run_id.to_string(),
+        workflow_id: action_request.workflow_id.clone(),
+        unit_id: action_request.unit_id.clone(),
+        attempt: action_request.attempt,
+        provenance_ref: action_request.provenance_ref.clone(),
+        action_id: action_request.action_id.clone(),
+        idempotency_key: action_request.idempotency_key.clone(),
+        dispatch_event_ref: dispatch_event_id,
+        dispatch_envelope_digest: dispatch.envelope_digest.clone(),
+        action_request_event_ref: action_request_event_id,
+        action_request_digest: action_requested_v2_digest(action_request)
+            .expect("hash reviewer action"),
+        canonical_input_ref: action_request.canonical_input_ref.clone(),
+        canonical_input_digest: action_request.canonical_input_digest.clone(),
+        model_request_evidence: model_evidence,
+        trust_scope_evidence: trust_evidence,
+        candidate_binding: Some(ModelActionCandidateBindingV1 {
+            candidate_created_event_ref: candidate_event_ref_override.unwrap_or(candidate_event.id),
+            candidate_digest: DIGEST_C.into(),
+            candidate_commit_sha: candidate_view.candidate_commit_sha.clone(),
+            candidate_view_ref: candidate_view_ref.to_cas_ref(),
+            candidate_view_digest,
+            candidate_view,
+        }),
+        intent_actor: signer.actor_id.clone(),
+        intended_at: timestamp(at),
+        intent_digest: String::new(),
+    };
+    intent.intent_digest = model_action_intent_v1_digest(&intent).expect("hash reviewer intent");
+    let intent_event = Event {
+        id: EventId::new(),
+        run_id,
+        parent_event_id: Some(action_request_event_id),
+        schema_version: Event::CURRENT_SCHEMA_VERSION,
+        kind: EventKind::ModelActionIntentV1,
+        occurred_at: at,
+        payload: Payload::ModelActionIntentV1(intent),
+    };
+    store
+        .append_signed(&intent_event, key, signer)
+        .expect("append signed reviewer intent");
 }
 
 fn graph_bound_dispatch_v4(dispatch_v3: DispatchEnvelopeV3) -> DispatchEnvelopeV4 {
@@ -1222,6 +1440,253 @@ fn model_intent_issuer_refuses_review_roles_until_a_native_candidate_view_exists
         store.event_count().unwrap(),
         2,
         "rejected reviewer actions cannot append a model intent"
+    );
+
+    let error = store
+        .authorize_and_claim_governed_reviewer_model_action_v1_at_for_tests(
+            &GovernedModelActionAuthorizeAndClaimRequestV1 {
+                run_id,
+                dispatch_event_id: dispatch_event.id,
+                action_request_event_id: request_event.id,
+                lease_duration_ms: 10_000,
+            },
+            &cas,
+            &authority,
+            &key,
+            &signer,
+            now,
+        )
+        .expect_err("reviewer authority requires a pre-existing signed candidate-bound intent");
+    assert!(
+        matches!(
+            error,
+            LedgerError::ModelActionIntentAuthorityRejected { .. }
+        ),
+        "unexpected error: {error}"
+    );
+    assert_eq!(
+        store.event_count().unwrap(),
+        2,
+        "the reviewer authority lane cannot synthesize candidate authority"
+    );
+}
+
+#[test]
+fn reviewer_authority_adopts_only_a_signed_candidate_bound_intent() {
+    let store = SqliteStore::open_in_memory().expect("open store");
+    let temp = TempDir::new().expect("create CAS root");
+    let cas = Cas::open(temp.path()).expect("open protected test CAS");
+    let key = SigningKey::from_bytes(&[12; 32]);
+    let signer = signer(&key);
+    let realm_digest = DIGEST_B;
+    let authority = authority(&key, realm_digest);
+    let now = DateTime::parse_from_rfc3339("2026-07-17T00:10:00.000Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let run_id = RunId::new();
+    let mut review_dispatch = dispatch(now, realm_digest);
+    review_dispatch.body.execution_role = ExecutionRoleV1::Reviewer;
+    review_dispatch.envelope_digest = dispatch_envelope_v3_body_digest(
+        &review_dispatch.body,
+        review_dispatch.action_evidence_version,
+        &review_dispatch.repository_binding_digest,
+        &review_dispatch.ledger_authority_realm_digest,
+        review_dispatch.governed_packet_digest.as_deref(),
+    )
+    .expect("rehash reviewer dispatch");
+    let dispatch_event = Event {
+        id: EventId::new(),
+        run_id,
+        parent_event_id: None,
+        schema_version: Event::CURRENT_SCHEMA_VERSION,
+        kind: EventKind::DispatchEnvelopeV3,
+        occurred_at: now - Duration::seconds(1),
+        payload: Payload::DispatchEnvelopeV3(review_dispatch.clone()),
+    };
+    store
+        .append_signed(&dispatch_event, &key, &signer)
+        .expect("append signed reviewer dispatch");
+
+    let canonical_input_bytes =
+        canonical_model_action_input_v1_bytes(&canonical_model_input()).expect("encode input");
+    let canonical_input_ref = cas
+        .put_canonical_bytes(&canonical_input_bytes)
+        .expect("store canonical model input");
+    let request = action_request(
+        run_id,
+        &review_dispatch,
+        now,
+        &canonical_input_ref.to_cas_ref(),
+        canonical_input_ref.digest(),
+    );
+    let request_event = Event {
+        id: EventId::new(),
+        run_id,
+        parent_event_id: Some(dispatch_event.id),
+        schema_version: Event::CURRENT_SCHEMA_VERSION,
+        kind: EventKind::ActionRequestedV2,
+        occurred_at: now,
+        payload: Payload::ActionRequestedV2(request.clone()),
+    };
+    store
+        .append_signed(&request_event, &key, &signer)
+        .expect("append signed reviewer action");
+    append_signed_candidate_bound_reviewer_intent(
+        &store,
+        &cas,
+        &key,
+        &signer,
+        run_id,
+        &review_dispatch,
+        dispatch_event.id,
+        &request,
+        request_event.id,
+        None,
+        now + Duration::milliseconds(1),
+    );
+
+    let authority_request = GovernedModelActionAuthorizeAndClaimRequestV1 {
+        run_id,
+        dispatch_event_id: dispatch_event.id,
+        action_request_event_id: request_event.id,
+        lease_duration_ms: 10_000,
+    };
+    let disposition = store
+        .authorize_and_claim_governed_reviewer_model_action_v1_at_for_tests(
+            &authority_request,
+            &cas,
+            &authority,
+            &key,
+            &signer,
+            now + Duration::milliseconds(2),
+        )
+        .expect("authorize signed candidate-bound reviewer action");
+    assert!(matches!(
+        disposition,
+        GovernedModelActionAuthorizeAndClaimDispositionV1::Granted { .. }
+    ));
+    assert_eq!(
+        store.event_count().unwrap(),
+        8,
+        "adoption adds only authorization and claim; it does not rewrite the intent"
+    );
+    store
+        .authorize_and_claim_governed_model_action_v1_at_for_tests(
+            &authority_request,
+            &cas,
+            &authority,
+            &key,
+            &signer,
+            now + Duration::milliseconds(3),
+        )
+        .expect_err("the implementer lane cannot recover reviewer authority");
+    assert_eq!(
+        store.event_count().unwrap(),
+        8,
+        "cross-lane retry cannot append or expose reviewer authority"
+    );
+}
+
+#[test]
+fn reviewer_authority_rejects_a_signed_intent_with_a_missing_candidate_event() {
+    let store = SqliteStore::open_in_memory().expect("open store");
+    let temp = TempDir::new().expect("create CAS root");
+    let cas = Cas::open(temp.path()).expect("open protected test CAS");
+    let key = SigningKey::from_bytes(&[13; 32]);
+    let signer = signer(&key);
+    let realm_digest = DIGEST_B;
+    let authority = authority(&key, realm_digest);
+    let now = DateTime::parse_from_rfc3339("2026-07-17T00:10:00.000Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let run_id = RunId::new();
+    let mut review_dispatch = dispatch(now, realm_digest);
+    review_dispatch.body.execution_role = ExecutionRoleV1::Reviewer;
+    review_dispatch.envelope_digest = dispatch_envelope_v3_body_digest(
+        &review_dispatch.body,
+        review_dispatch.action_evidence_version,
+        &review_dispatch.repository_binding_digest,
+        &review_dispatch.ledger_authority_realm_digest,
+        review_dispatch.governed_packet_digest.as_deref(),
+    )
+    .expect("rehash reviewer dispatch");
+    let dispatch_event = Event {
+        id: EventId::new(),
+        run_id,
+        parent_event_id: None,
+        schema_version: Event::CURRENT_SCHEMA_VERSION,
+        kind: EventKind::DispatchEnvelopeV3,
+        occurred_at: now - Duration::seconds(1),
+        payload: Payload::DispatchEnvelopeV3(review_dispatch.clone()),
+    };
+    store
+        .append_signed(&dispatch_event, &key, &signer)
+        .expect("append signed reviewer dispatch");
+    let canonical_input_bytes =
+        canonical_model_action_input_v1_bytes(&canonical_model_input()).expect("encode input");
+    let canonical_input_ref = cas
+        .put_canonical_bytes(&canonical_input_bytes)
+        .expect("store canonical model input");
+    let request = action_request(
+        run_id,
+        &review_dispatch,
+        now,
+        &canonical_input_ref.to_cas_ref(),
+        canonical_input_ref.digest(),
+    );
+    let request_event = Event {
+        id: EventId::new(),
+        run_id,
+        parent_event_id: Some(dispatch_event.id),
+        schema_version: Event::CURRENT_SCHEMA_VERSION,
+        kind: EventKind::ActionRequestedV2,
+        occurred_at: now,
+        payload: Payload::ActionRequestedV2(request.clone()),
+    };
+    store
+        .append_signed(&request_event, &key, &signer)
+        .expect("append signed reviewer action");
+    append_signed_candidate_bound_reviewer_intent(
+        &store,
+        &cas,
+        &key,
+        &signer,
+        run_id,
+        &review_dispatch,
+        dispatch_event.id,
+        &request,
+        request_event.id,
+        Some(EventId::new()),
+        now + Duration::milliseconds(1),
+    );
+
+    let error = store
+        .authorize_and_claim_governed_reviewer_model_action_v1_at_for_tests(
+            &GovernedModelActionAuthorizeAndClaimRequestV1 {
+                run_id,
+                dispatch_event_id: dispatch_event.id,
+                action_request_event_id: request_event.id,
+                lease_duration_ms: 10_000,
+            },
+            &cas,
+            &authority,
+            &key,
+            &signer,
+            now + Duration::milliseconds(2),
+        )
+        .expect_err("missing signed candidate lineage must fail closed");
+    assert!(
+        matches!(
+            error,
+            LedgerError::ModelActionIntentAuthorityRejected { .. }
+                | LedgerError::ActivityClaimAuthorityRejected { .. }
+        ),
+        "unexpected error: {error}"
+    );
+    assert_eq!(
+        store.event_count().unwrap(),
+        6,
+        "candidate lineage failure cannot append authorization or claim"
     );
 }
 

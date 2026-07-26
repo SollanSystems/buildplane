@@ -32,16 +32,16 @@ use crate::payload::trust_spine::{
     ActionEvidenceVersionV1, ActionKindV1, ActionReceiptOutcomeV2, ActionReceiptRecordedV2,
     ActionReceiptSetEntryV1, ActionReceiptSetRecordedV1, ActionRequestedV2,
     AttemptContextRecordedV1, CandidateAcceptanceOutcomeV1, CandidateAcceptanceRecordedV1,
-    CandidateCompletionRecordedV1, CandidateCreatedV2, CommitModeV1, ContextManifestDeclaredV1,
-    DispatchEnvelopeV3, DispatchEnvelopeV4, DispatchEnvelopeV5, ExecutionRoleV1,
-    GovernedDispatchV5AdmissionRecordedV1, ModelActionAuthorizedV1, ModelActionAuthorizedV2,
-    ModelActionIntentV1, ModelRequestEvidenceV1, PromotionApprovalRequestedV1,
-    PromotionDecisionKindV1, PromotionDecisionRecordedV1, PromotionExecutionClaimedV1,
-    PromotionExecutionLeaseBindingV1, PromotionGitBindingV1, PromotionReconciliationResolvedV1,
-    PromotionResultOutcomeV1, PromotionResultRecordedV1, PromotionWorktreeSyncStateV1,
-    ReconciliationResolutionOutcomeV1, ReviewDecisionV1, ReviewVerdictRecordedV2,
-    SandboxProfileDeclaredV1, TrustScopeEvidenceV1, TrustTierV1, WorkerManifestDeclaredV1,
-    WorkflowGraphDeclaredV2, WorkflowTerminalOutcomeV1,
+    CandidateCompletionRecordedV1, CandidateCreatedV2, CandidateViewV1, CommitModeV1,
+    ContextManifestDeclaredV1, DispatchEnvelopeV3, DispatchEnvelopeV4, DispatchEnvelopeV5,
+    ExecutionRoleV1, GovernedDispatchV5AdmissionRecordedV1, ModelActionAuthorizedV1,
+    ModelActionAuthorizedV2, ModelActionIntentV1, ModelRequestEvidenceV1,
+    PromotionApprovalRequestedV1, PromotionDecisionKindV1, PromotionDecisionRecordedV1,
+    PromotionExecutionClaimedV1, PromotionExecutionLeaseBindingV1, PromotionGitBindingV1,
+    PromotionReconciliationResolvedV1, PromotionResultOutcomeV1, PromotionResultRecordedV1,
+    PromotionWorktreeSyncStateV1, ReconciliationResolutionOutcomeV1, ReviewDecisionV1,
+    ReviewVerdictRecordedV2, SandboxProfileDeclaredV1, TrustScopeEvidenceV1, TrustTierV1,
+    WorkerManifestDeclaredV1, WorkflowGraphDeclaredV2, WorkflowTerminalOutcomeV1,
 };
 use crate::payload::Payload;
 use crate::signing::{
@@ -3132,6 +3132,7 @@ impl SqliteStore {
             authority,
             signing_key,
             signer,
+            ModelActionIntentAuthorityLane::Implementer,
             clock,
         )?;
         tx.commit()?;
@@ -3162,6 +3163,30 @@ impl SqliteStore {
             authority,
             signing_key,
             signer,
+            ModelActionIntentAuthorityLane::Implementer,
+            &mut clock,
+        )
+    }
+
+    /// Authorize a review-like provider action only from a pre-existing,
+    /// kernel-signed candidate-bound intent. Unlike the implementer lane this
+    /// operation never creates an intent from caller-supplied request fields.
+    pub fn authorize_and_claim_governed_reviewer_model_action_v1(
+        &self,
+        request: &GovernedModelActionAuthorizeAndClaimRequestV1,
+        cas: &Cas,
+        authority: &ActivityClaimAuthorityV1,
+        signing_key: &SigningKey,
+        signer: &ActorKeyRef,
+    ) -> Result<GovernedModelActionAuthorizeAndClaimDispositionV1> {
+        let mut clock = Utc::now;
+        self.authorize_and_claim_governed_model_action_v1_with_clock(
+            request,
+            cas,
+            authority,
+            signing_key,
+            signer,
+            ModelActionIntentAuthorityLane::Reviewer,
             &mut clock,
         )
     }
@@ -3183,6 +3208,29 @@ impl SqliteStore {
             authority,
             signing_key,
             signer,
+            ModelActionIntentAuthorityLane::Implementer,
+            &mut clock,
+        )
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn authorize_and_claim_governed_reviewer_model_action_v1_at_for_tests(
+        &self,
+        request: &GovernedModelActionAuthorizeAndClaimRequestV1,
+        cas: &Cas,
+        authority: &ActivityClaimAuthorityV1,
+        signing_key: &SigningKey,
+        signer: &ActorKeyRef,
+        now: DateTime<Utc>,
+    ) -> Result<GovernedModelActionAuthorizeAndClaimDispositionV1> {
+        let mut clock = || now;
+        self.authorize_and_claim_governed_model_action_v1_with_clock(
+            request,
+            cas,
+            authority,
+            signing_key,
+            signer,
+            ModelActionIntentAuthorityLane::Reviewer,
             &mut clock,
         )
     }
@@ -3194,6 +3242,7 @@ impl SqliteStore {
         authority: &ActivityClaimAuthorityV1,
         signing_key: &SigningKey,
         signer: &ActorKeyRef,
+        lane: ModelActionIntentAuthorityLane,
         clock: &mut F,
     ) -> Result<GovernedModelActionAuthorizeAndClaimDispositionV1>
     where
@@ -3215,7 +3264,7 @@ impl SqliteStore {
             request.action_request_event_id,
         )? {
             let disposition = resolve_existing_governed_model_authorization(
-                &tx, &existing, request, cas, authority, clock,
+                &tx, &existing, request, cas, authority, lane, clock,
             )?;
             tx.commit()?;
             return Ok(disposition);
@@ -3243,6 +3292,7 @@ impl SqliteStore {
             authority,
             signing_key,
             signer,
+            lane,
             clock,
         )?;
 
@@ -3253,11 +3303,12 @@ impl SqliteStore {
         // recoverable after expiry.
         let now = canonical_ledger_timestamp(clock())?;
         let evidence =
-            verify_model_action_intent_issue_evidence(&tx, &issue_request, authority, now)?;
+            verify_model_action_intent_issue_evidence(&tx, &issue_request, authority, lane, now)?;
         if !model_action_intent_matches_issue_evidence(
             &issued_intent.intent,
             &issue_request,
             &evidence,
+            lane,
         ) {
             return Err(model_action_authorization_reconciliation_required(
                 request,
@@ -6870,6 +6921,45 @@ struct ModelActionIntentInTx {
     appended_event: Option<Event>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ModelActionIntentAuthorityLane {
+    Implementer,
+    Reviewer,
+    Existing,
+}
+
+impl ModelActionIntentAuthorityLane {
+    fn permits_role(self, role: ExecutionRoleV1) -> bool {
+        match self {
+            Self::Implementer => role == ExecutionRoleV1::Implementer,
+            Self::Reviewer => matches!(
+                role,
+                ExecutionRoleV1::Reviewer | ExecutionRoleV1::Adversary | ExecutionRoleV1::Judge
+            ),
+            Self::Existing => role != ExecutionRoleV1::Candidate,
+        }
+    }
+
+    fn permits(self, role: ExecutionRoleV1, has_candidate_binding: bool) -> bool {
+        match self {
+            Self::Implementer => role == ExecutionRoleV1::Implementer && !has_candidate_binding,
+            Self::Reviewer => {
+                matches!(
+                    role,
+                    ExecutionRoleV1::Reviewer | ExecutionRoleV1::Adversary | ExecutionRoleV1::Judge
+                ) && has_candidate_binding
+            }
+            Self::Existing => match role {
+                ExecutionRoleV1::Implementer => !has_candidate_binding,
+                ExecutionRoleV1::Reviewer | ExecutionRoleV1::Adversary | ExecutionRoleV1::Judge => {
+                    has_candidate_binding
+                }
+                ExecutionRoleV1::Candidate => false,
+            },
+        }
+    }
+}
+
 impl ModelActionIntentInTx {
     fn into_public_disposition(self) -> ModelActionIntentIssueDispositionV1 {
         let disposition = if self.appended_event.is_some() {
@@ -6903,6 +6993,7 @@ fn issue_model_action_intent_v1_in_tx<F>(
     authority: &ActivityClaimAuthorityV1,
     signing_key: &SigningKey,
     signer: &ActorKeyRef,
+    lane: ModelActionIntentAuthorityLane,
     clock: &mut F,
 ) -> Result<ModelActionIntentInTx>
 where
@@ -6919,13 +7010,20 @@ where
         request.run_id,
         request.action_request_event_id,
     )? {
-        let existing_intent =
-            verify_signed_model_action_intent_projection(conn, &existing, cas, authority, request)?;
+        let existing_intent = verify_signed_model_action_intent_projection(
+            conn, &existing, cas, authority, request, lane,
+        )?;
         return Ok(ModelActionIntentInTx {
             intent_event_id: existing.intent_event_id,
             intent: existing_intent,
             appended_event: None,
         });
+    }
+
+    if lane == ModelActionIntentAuthorityLane::Reviewer {
+        return adopt_signed_reviewer_model_action_intent_v1_in_tx(
+            conn, request, cas, authority, lane,
+        );
     }
 
     if model_action_intent_event_exists_for_action_request(
@@ -6940,7 +7038,7 @@ where
     }
 
     let evidence =
-        verify_model_action_intent_issue_evidence(conn, request, authority, initial_now)?;
+        verify_model_action_intent_issue_evidence(conn, request, authority, lane, initial_now)?;
     ensure_model_action_intent_lifecycle_is_open(conn, request, &evidence)?;
     ensure_single_model_action_intent_for_sealed_dispatch_attempt(conn, request, &evidence)?;
     let (model_request_evidence, trust_scope_evidence) =
@@ -6952,7 +7050,7 @@ where
     // event; the timestamp on the intent/event/signature is this fresh value
     // rather than the earlier pre-I/O observation.
     let now = canonical_ledger_timestamp(clock())?;
-    let evidence = verify_model_action_intent_issue_evidence(conn, request, authority, now)?;
+    let evidence = verify_model_action_intent_issue_evidence(conn, request, authority, lane, now)?;
     let intended_at = timestamp(now);
     let mut intent = ModelActionIntentV1 {
         run_id: request.run_id.to_string(),
@@ -6970,9 +7068,6 @@ where
         canonical_input_digest: evidence.action_request.canonical_input_digest.clone(),
         model_request_evidence,
         trust_scope_evidence,
-        // The first native issuer supports implementer-only model actions.
-        // Review-like roles require a separately native-derived immutable
-        // candidate view before they can receive model authority.
         candidate_binding: None,
         intent_actor: authority.claim_signer.actor_id.clone(),
         intended_at: intended_at.clone(),
@@ -7761,6 +7856,7 @@ fn verify_model_action_intent_issue_evidence(
     conn: &Connection,
     issue: &ModelActionIntentIssueRequestV1,
     authority: &ActivityClaimAuthorityV1,
+    lane: ModelActionIntentAuthorityLane,
     now: DateTime<Utc>,
 ) -> Result<VerifiedModelActionIntentIssueEvidence> {
     let dispatch_event = load_verified_authority_event(
@@ -7840,9 +7936,9 @@ fn verify_model_action_intent_issue_evidence(
             reason: "model action intent may bind only a signed model action request".into(),
         });
     }
-    if action_request.execution_role != ExecutionRoleV1::Implementer {
+    if !lane.permits_role(action_request.execution_role) {
         return Err(LedgerError::ModelActionIntentAuthorityRejected {
-            reason: "model action intent issuer currently supports only implementer model actions; review roles require a native candidate-view issuer"
+            reason: "model action execution role is not permitted by the selected protected authority lane"
                 .into(),
         });
     }
@@ -7876,6 +7972,303 @@ fn verify_model_action_intent_issue_evidence(
         action_request,
         action_request_digest,
     })
+}
+
+fn adopt_signed_reviewer_model_action_intent_v1_in_tx(
+    conn: &Connection,
+    request: &ModelActionIntentIssueRequestV1,
+    cas: &Cas,
+    authority: &ActivityClaimAuthorityV1,
+    lane: ModelActionIntentAuthorityLane,
+) -> Result<ModelActionIntentInTx> {
+    let mut statement = conn.prepare(
+        "SELECT id FROM events \
+         WHERE run_id = ?1 AND parent_event_id = ?2 AND kind = 'model_action_intent_v1' \
+         ORDER BY id ASC",
+    )?;
+    let raw_ids = statement
+        .query_map(
+            params![
+                request.run_id.to_string(),
+                request.action_request_event_id.to_string()
+            ],
+            |row| row.get::<_, String>(0),
+        )?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let [raw_id] = raw_ids.as_slice() else {
+        return Err(LedgerError::ModelActionIntentAuthorityRejected {
+            reason: if raw_ids.is_empty() {
+                "reviewer model authority requires a pre-existing signed candidate-bound intent"
+                    .into()
+            } else {
+                "reviewer model authority found multiple candidate-bound intents for one action"
+                    .into()
+            },
+        });
+    };
+    let intent_event_id = parse_event_id(raw_id, "reviewer model action intent")?;
+    let event = load_verified_authority_event(
+        conn,
+        intent_event_id,
+        &authority.trusted_keys,
+        &authority.claim_signer,
+        "reviewer model action intent",
+    )?;
+    if event.run_id != request.run_id
+        || event.parent_event_id != Some(request.action_request_event_id)
+    {
+        return Err(LedgerError::ModelActionIntentAuthorityRejected {
+            reason: "reviewer model intent does not bind the requested run and action".into(),
+        });
+    }
+    let Payload::ModelActionIntentV1(intent) = event.payload else {
+        return Err(LedgerError::ModelActionIntentAuthorityRejected {
+            reason: "reviewer model intent event has the wrong payload kind".into(),
+        });
+    };
+    let recomputed = model_action_intent_v1_digest(&intent).map_err(|error| {
+        LedgerError::ModelActionIntentAuthorityRejected {
+            reason: format!("could not canonicalize reviewer model intent: {error}"),
+        }
+    })?;
+    let intended_at = parse_claim_timestamp(&intent.intended_at).map_err(|error| {
+        LedgerError::ModelActionIntentAuthorityRejected {
+            reason: format!("reviewer model intent timestamp is invalid: {error}"),
+        }
+    })?;
+    if intent.intent_digest != recomputed
+        || intent.intent_actor != authority.claim_signer.actor_id
+        || intended_at != event.occurred_at
+    {
+        return Err(LedgerError::ModelActionIntentAuthorityRejected {
+            reason: "reviewer model intent does not exactly match its signed tape event".into(),
+        });
+    }
+    let evidence =
+        verify_model_action_intent_issue_evidence(conn, request, authority, lane, intended_at)?;
+    if !model_action_intent_matches_issue_evidence(&intent, request, &evidence, lane) {
+        return Err(LedgerError::ModelActionIntentAuthorityRejected {
+            reason: "reviewer model intent does not bind the verified dispatch/action evidence"
+                .into(),
+        });
+    }
+    verify_reviewer_candidate_binding(conn, cas, authority, &evidence, &intent)?;
+    verify_model_action_intent_evidence_documents(
+        cas,
+        request,
+        &evidence,
+        &intent.model_request_evidence,
+        &intent.trust_scope_evidence,
+    )?;
+    insert_model_action_intent_projection(
+        conn,
+        request,
+        &evidence.action_request_digest,
+        &Event {
+            id: intent_event_id,
+            run_id: request.run_id,
+            parent_event_id: Some(request.action_request_event_id),
+            schema_version: Event::CURRENT_SCHEMA_VERSION,
+            kind: EventKind::ModelActionIntentV1,
+            occurred_at: intended_at,
+            payload: Payload::ModelActionIntentV1(intent.clone()),
+        },
+        &intent,
+        &intent.intended_at,
+    )?;
+    Ok(ModelActionIntentInTx {
+        intent_event_id,
+        intent,
+        appended_event: None,
+    })
+}
+
+fn verify_reviewer_candidate_binding(
+    conn: &Connection,
+    cas: &Cas,
+    authority: &ActivityClaimAuthorityV1,
+    evidence: &VerifiedModelActionIntentIssueEvidence,
+    intent: &ModelActionIntentV1,
+) -> Result<()> {
+    let binding = intent.candidate_binding.as_ref().ok_or_else(|| {
+        LedgerError::ModelActionIntentAuthorityRejected {
+            reason: "reviewer model intent is missing its immutable candidate binding".into(),
+        }
+    })?;
+    let candidate_event = load_verified_authority_event(
+        conn,
+        binding.candidate_created_event_ref,
+        &authority.trusted_keys,
+        &authority.claim_signer,
+        "reviewer candidate artifact",
+    )?;
+    if candidate_event.run_id.to_string() != intent.run_id {
+        return Err(LedgerError::ModelActionIntentAuthorityRejected {
+            reason: "reviewer candidate artifact belongs to a different run".into(),
+        });
+    }
+    let Payload::CandidateCreatedV2(candidate) = candidate_event.payload else {
+        return Err(LedgerError::ModelActionIntentAuthorityRejected {
+            reason: "reviewer candidate binding does not reference candidate_created_v2".into(),
+        });
+    };
+    if candidate.workflow_id == intent.workflow_id
+        || candidate.candidate_digest != binding.candidate_digest
+        || candidate.candidate_commit_sha != binding.candidate_commit_sha
+        || candidate.candidate_ref != binding.candidate_view.candidate_ref
+        || candidate.tree_digest != binding.candidate_view.tree_digest
+    {
+        return Err(LedgerError::ModelActionIntentAuthorityRejected {
+            reason: "reviewer candidate binding does not match the signed immutable candidate"
+                .into(),
+        });
+    }
+    let completions = verified_claim_events_for_run_kind(
+        conn,
+        candidate_event.run_id,
+        EventKind::CandidateCompletionRecordedV1,
+        authority,
+        "reviewer candidate completion",
+    )?;
+    let matching_completions = completions
+        .into_iter()
+        .filter(|event| {
+            matches!(
+                &event.payload,
+                Payload::CandidateCompletionRecordedV1(completion)
+                    if completion.candidate_created_event_ref
+                        == binding.candidate_created_event_ref
+                        && completion.candidate_digest == binding.candidate_digest
+            )
+        })
+        .collect::<Vec<_>>();
+    let [completion_event] = matching_completions.as_slice() else {
+        return Err(LedgerError::ModelActionIntentAuthorityRejected {
+            reason: "reviewer candidate requires exactly one signed immutable completion proof"
+                .into(),
+        });
+    };
+    let Payload::CandidateCompletionRecordedV1(completion) = &completion_event.payload else {
+        unreachable!("candidate completion query filtered payload kind");
+    };
+    let recomputed_completion =
+        candidate_completion_recorded_v1_digest(completion).map_err(|error| {
+            LedgerError::ModelActionIntentAuthorityRejected {
+                reason: format!("could not canonicalize reviewer candidate completion: {error}"),
+            }
+        })?;
+    if completion_event.parent_event_id != Some(binding.candidate_created_event_ref)
+        || completion.completion_digest != recomputed_completion
+        || completion.workflow_id != candidate.workflow_id
+        || completion.unit_id != candidate.unit_id
+        || completion.attempt != candidate.attempt
+        || completion.provenance_ref != candidate.provenance_ref
+    {
+        return Err(LedgerError::ModelActionIntentAuthorityRejected {
+            reason: "reviewer candidate completion does not close the exact signed candidate"
+                .into(),
+        });
+    }
+    let acceptances = verified_claim_events_for_run_kind(
+        conn,
+        candidate_event.run_id,
+        EventKind::CandidateAcceptanceRecorded,
+        authority,
+        "reviewer candidate acceptance",
+    )?;
+    let matching_acceptances = acceptances
+        .into_iter()
+        .filter(|event| {
+            matches!(
+                &event.payload,
+                Payload::CandidateAcceptanceRecordedV1(acceptance)
+                    if acceptance.candidate_digest == binding.candidate_digest
+            )
+        })
+        .collect::<Vec<_>>();
+    let [acceptance_event] = matching_acceptances.as_slice() else {
+        return Err(LedgerError::ModelActionIntentAuthorityRejected {
+            reason:
+                "reviewer candidate requires exactly one signed deterministic acceptance record"
+                    .into(),
+        });
+    };
+    let Payload::CandidateAcceptanceRecordedV1(acceptance) = &acceptance_event.payload else {
+        unreachable!("candidate acceptance query filtered payload kind");
+    };
+    if acceptance.outcome != CandidateAcceptanceOutcomeV1::Passed
+        || acceptance.candidate_commit_sha != binding.candidate_commit_sha
+        || acceptance.acceptance_contract_digest
+            != evidence.dispatch.body.acceptance_contract_digest
+        || acceptance_event.parent_event_id != Some(completion_event.id)
+    {
+        return Err(LedgerError::ModelActionIntentAuthorityRejected {
+            reason: "reviewer candidate acceptance is not a passed check over the exact candidate and contract"
+                .into(),
+        });
+    }
+    if binding.candidate_view.reviewer_context_manifest_digest
+        != evidence.dispatch.body.context_manifest_digest
+        || binding.candidate_view.reviewer_sandbox_profile_digest
+            != evidence.dispatch.body.sandbox_profile_digest
+        || !binding.candidate_view.read_only
+        || !binding.candidate_view.network_disabled
+    {
+        return Err(LedgerError::ModelActionIntentAuthorityRejected {
+            reason:
+                "reviewer candidate view does not match the signed read-only reviewer authority"
+                    .into(),
+        });
+    }
+    let candidate_view_ref = CanonicalCasRef::parse(&binding.candidate_view_ref).map_err(|_| {
+        LedgerError::ModelActionIntentAuthorityRejected {
+            reason: "reviewer candidate view reference is not a strict protected-CAS reference"
+                .into(),
+        }
+    })?;
+    let candidate_view_bytes = cas
+        .get_verified_canonical_bytes(&binding.candidate_view_ref, candidate_view_ref.digest())
+        .map_err(model_action_intent_evidence_rejected)?;
+    let stored_view: CandidateViewV1 =
+        serde_json::from_slice(&candidate_view_bytes).map_err(|error| {
+            LedgerError::ModelActionIntentAuthorityRejected {
+                reason: format!("reviewer candidate view object is invalid: {error}"),
+            }
+        })?;
+    if stored_view != binding.candidate_view {
+        return Err(LedgerError::ModelActionIntentAuthorityRejected {
+            reason: "reviewer candidate view object does not equal the signed closed view".into(),
+        });
+    }
+    Ok(())
+}
+
+fn verified_claim_events_for_run_kind(
+    conn: &Connection,
+    run_id: RunId,
+    kind: EventKind,
+    authority: &ActivityClaimAuthorityV1,
+    label: &str,
+) -> Result<Vec<Event>> {
+    let mut statement =
+        conn.prepare("SELECT id FROM events WHERE run_id = ?1 AND kind = ?2 ORDER BY id ASC")?;
+    let ids = statement
+        .query_map(params![run_id.to_string(), kind.as_wire()], |row| {
+            row.get::<_, String>(0)
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    ids.into_iter()
+        .map(|id| {
+            let event_id = parse_event_id(&id, label)?;
+            load_verified_authority_event(
+                conn,
+                event_id,
+                &authority.trusted_keys,
+                &authority.claim_signer,
+                label,
+            )
+        })
+        .collect()
 }
 
 /// Refuse to introduce a native model intent after the action has reached a
@@ -15054,6 +15447,7 @@ fn verify_signed_model_action_intent_projection(
     cas: &Cas,
     authority: &ActivityClaimAuthorityV1,
     issue: &ModelActionIntentIssueRequestV1,
+    lane: ModelActionIntentAuthorityLane,
 ) -> Result<ModelActionIntentV1> {
     if stored.run_id != issue.run_id
         || stored.action_request_event_id != issue.action_request_event_id
@@ -15096,7 +15490,6 @@ fn verify_signed_model_action_intent_projection(
         || intent.trust_scope_evidence.digest != stored.trust_scope_evidence_digest
         || intent.intended_at != stored.created_at
         || intent.intent_actor != authority.claim_signer.actor_id
-        || intent.candidate_binding.is_some()
     {
         return Err(LedgerError::ModelActionIntentAuthorityRejected {
             reason: "model action intent projection does not exactly match its signed tape event"
@@ -15108,8 +15501,9 @@ fn verify_signed_model_action_intent_projection(
             reason: format!("projected model action intent timestamp is invalid: {error}"),
         }
     })?;
-    let evidence = verify_model_action_intent_issue_evidence(conn, issue, authority, intended_at)?;
-    if !model_action_intent_matches_issue_evidence(&intent, issue, &evidence) {
+    let evidence =
+        verify_model_action_intent_issue_evidence(conn, issue, authority, lane, intended_at)?;
+    if !model_action_intent_matches_issue_evidence(&intent, issue, &evidence, lane) {
         return Err(LedgerError::ModelActionIntentAuthorityRejected {
             reason:
                 "model action intent projection does not bind the verified dispatch/action evidence"
@@ -15136,6 +15530,7 @@ fn verify_signed_governed_model_authorization_projection(
     issue: &ModelActionIntentIssueRequestV1,
     cas: &Cas,
     authority: &ActivityClaimAuthorityV1,
+    lane: ModelActionIntentAuthorityLane,
 ) -> Result<VerifiedGovernedModelAuthorization> {
     if stored.run_id != issue.run_id
         || stored.action_request_event_id != issue.action_request_event_id
@@ -15162,6 +15557,7 @@ fn verify_signed_governed_model_authorization_projection(
         cas,
         authority,
         issue,
+        lane,
     )?;
     if intent_projection.intent_event_id != stored.intent_event_id
         || intent_projection.intent_digest != stored.intent_digest
@@ -15252,7 +15648,8 @@ fn verify_signed_governed_model_authorization_projection(
     }
     let intended_at = parse_claim_timestamp(&intent.intended_at)?;
     let expires_at = parse_claim_timestamp(&authorization.expires_at)?;
-    let evidence = verify_model_action_intent_issue_evidence(conn, issue, authority, intended_at)?;
+    let evidence =
+        verify_model_action_intent_issue_evidence(conn, issue, authority, lane, intended_at)?;
     let dispatch_window = validate_governed_dispatch(&evidence.dispatch, intended_at).map_err(|error| {
         LedgerError::ModelActionAuthorizationReconciliationRequired {
             run_id: issue.run_id.to_string(),
@@ -15327,6 +15724,7 @@ fn verify_governed_model_claim_lineage(
         &issue,
         cas,
         authority,
+        ModelActionIntentAuthorityLane::Existing,
     )?;
     let claimed_at = parse_claim_timestamp(&signed_claim.claimed_at)?;
     let lease_expires_at = parse_claim_timestamp(&signed_claim.lease_expires_at)?;
@@ -15354,6 +15752,7 @@ fn resolve_existing_governed_model_authorization<F>(
     request: &GovernedModelActionAuthorizeAndClaimRequestV1,
     cas: &Cas,
     authority: &ActivityClaimAuthorityV1,
+    lane: ModelActionIntentAuthorityLane,
     clock: &mut F,
 ) -> Result<GovernedModelActionAuthorizeAndClaimDispositionV1>
 where
@@ -15374,7 +15773,7 @@ where
         action_request_event_id: request.action_request_event_id,
     };
     let verified = verify_signed_governed_model_authorization_projection(
-        conn, stored, &issue, cas, authority,
+        conn, stored, &issue, cas, authority, lane,
     )?;
     let claim =
         activity_claim_by_idempotency(conn, request.run_id, &verified.intent.idempotency_key)?
@@ -15442,6 +15841,7 @@ fn model_action_intent_matches_issue_evidence(
     intent: &ModelActionIntentV1,
     issue: &ModelActionIntentIssueRequestV1,
     evidence: &VerifiedModelActionIntentIssueEvidence,
+    lane: ModelActionIntentAuthorityLane,
 ) -> bool {
     intent.run_id == issue.run_id.to_string()
         && intent.workflow_id == evidence.action_request.workflow_id
@@ -15456,7 +15856,10 @@ fn model_action_intent_matches_issue_evidence(
         && intent.action_request_digest == evidence.action_request_digest
         && intent.canonical_input_ref == evidence.action_request.canonical_input_ref
         && intent.canonical_input_digest == evidence.action_request.canonical_input_digest
-        && intent.candidate_binding.is_none()
+        && lane.permits(
+            evidence.action_request.execution_role,
+            intent.candidate_binding.is_some(),
+        )
 }
 
 fn insert_model_action_intent_projection(
