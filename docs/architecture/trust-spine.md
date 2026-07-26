@@ -759,6 +759,11 @@ The bounded read and provider credential allocation are zeroized, errors omit
 secret and path data, and no environment, CLI argument, worker mount, or OCI
 value can select or receive the key. The default Linux host runner still needs
 full authority composition before this lane can be enabled externally.
+An indeterminate token-count call now produces a closed canonical
+`ProviderTokenPreflightUnknownEvidenceV1` CAS document. The broker immediately
+reopens it through the ledger parser and verifies its exact request, input, and
+model digests before recording an `unknown` result, so recovery cannot treat
+locally serialized or substituted failure evidence as authoritative.
 
 The protected governed-session host now has a closed public V1 configuration
 loaded only from fixed

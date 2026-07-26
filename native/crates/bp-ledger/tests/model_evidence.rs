@@ -15,15 +15,18 @@ use bp_ledger::payload::model_evidence::{
     parse_verified_model_result_evidence_document_v1,
     parse_verified_provider_token_preflight_input_v1,
     parse_verified_provider_token_preflight_result_v1,
+    parse_verified_provider_token_preflight_unknown_evidence_v1,
     parse_verified_trust_scope_evidence_document_v1, provider_token_preflight_input_v1_bytes,
-    provider_token_preflight_result_v1_bytes, trust_scope_evidence_document_v1_bytes,
-    trust_scope_evidence_v1_descriptor, verify_model_request_evidence_matches_canonical_input,
+    provider_token_preflight_result_v1_bytes, provider_token_preflight_unknown_evidence_v1_bytes,
+    trust_scope_evidence_document_v1_bytes, trust_scope_evidence_v1_descriptor,
+    verify_model_request_evidence_matches_canonical_input,
     verify_trust_scope_evidence_matches_model_request, CanonicalModelActionInputV1,
     CredentialFreeNormalizedModelRequestV1, ModelActionEvidenceBindingV1,
     ModelProviderCompletionV1, ModelProviderResultDocumentV1, ModelProviderV1,
     ModelRedactionCommitmentV1, ModelRequestEvidenceDocumentV1, ModelResultEvidenceDocumentV1,
     ModelToolCapabilityCommitmentV1, ModelToolCapabilityKindV1, ProviderTokenPreflightInputV1,
-    ProviderTokenPreflightResultV1, TrustScopeEvidenceDocumentV1,
+    ProviderTokenPreflightResultV1, ProviderTokenPreflightUnknownEvidenceV1,
+    TrustScopeEvidenceDocumentV1,
 };
 use bp_ledger::payload::trust_spine::{
     ActionKindV1, ExecutionRoleV1, ReviewDecisionV1, ReviewFindingSeverityV1, ReviewFindingV1,
@@ -288,6 +291,39 @@ fn provider_token_preflight_documents_bind_the_verified_request_and_total_budget
 
     assert!(ProviderTokenPreflightResultV1::new(&verified_preflight, 0).is_err());
     assert!(ProviderTokenPreflightResultV1::new(&verified_preflight, 14_000).is_err());
+
+    let provider_request_id = "openai:workflow:unit:attempt-1:model:provider-token-preflight";
+    let unknown = ProviderTokenPreflightUnknownEvidenceV1::new(
+        &verified_preflight,
+        provider_request_id.into(),
+    )
+    .expect("unknown evidence");
+    let unknown_bytes = provider_token_preflight_unknown_evidence_v1_bytes(&unknown)
+        .expect("unknown evidence bytes");
+    let unknown_ref = cas
+        .put_canonical_bytes(&unknown_bytes)
+        .expect("store unknown evidence");
+    let verified_unknown = parse_verified_provider_token_preflight_unknown_evidence_v1(
+        &unknown_bytes,
+        &unknown_ref.to_cas_ref(),
+        unknown_ref.digest(),
+        &verified_preflight,
+        provider_request_id,
+    )
+    .expect("verified unknown evidence");
+    assert_eq!(verified_unknown.document(), &unknown);
+    assert_eq!(verified_unknown.reference(), &unknown_ref);
+    assert!(
+        parse_verified_provider_token_preflight_unknown_evidence_v1(
+            &unknown_bytes,
+            &unknown_ref.to_cas_ref(),
+            unknown_ref.digest(),
+            &verified_preflight,
+            "openai:attacker-selected",
+        )
+        .is_err(),
+        "unknown evidence must remain bound to the exact provider request"
+    );
 
     let mut substituted = preflight;
     substituted.model_request_digest = DIGEST_A.into();

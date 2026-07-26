@@ -65,6 +65,7 @@ pub const TRUST_SCOPE_EVIDENCE_DOCUMENT_V1_SCHEMA_VERSION: u32 =
     TRUST_SCOPE_EVIDENCE_V1_SCHEMA_VERSION;
 pub const PROVIDER_TOKEN_PREFLIGHT_INPUT_V1_SCHEMA_VERSION: u32 = 1;
 pub const PROVIDER_TOKEN_PREFLIGHT_RESULT_V1_SCHEMA_VERSION: u32 = 1;
+pub const PROVIDER_TOKEN_PREFLIGHT_UNKNOWN_EVIDENCE_V1_SCHEMA_VERSION: u32 = 1;
 pub const MODEL_RESULT_EVIDENCE_DOCUMENT_V1_SCHEMA_VERSION: u32 = 1;
 pub const MODEL_PROVIDER_RESULT_DOCUMENT_V1_SCHEMA_VERSION: u32 = 1;
 
@@ -268,6 +269,20 @@ pub struct ProviderTokenPreflightResultV1 {
     pub input_tokens: u32,
 }
 
+/// Canonical evidence that a provider token-count effect may have occurred but
+/// no trustworthy result was recovered. This terminal evidence never carries
+/// provider error text, credentials, headers, or response bytes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderTokenPreflightUnknownEvidenceV1 {
+    pub schema_version: u32,
+    pub outcome: String,
+    pub provider_request_id: String,
+    pub preflight_input_digest: String,
+    pub model_request_digest: String,
+    pub failure_class: String,
+}
+
 /// Strict raw-CAS evidence binding for one terminal provider result.
 ///
 /// This document does not prove that the result itself is semantically valid;
@@ -356,6 +371,12 @@ pub struct VerifiedProviderTokenPreflightInputV1 {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VerifiedProviderTokenPreflightResultV1 {
     document: ProviderTokenPreflightResultV1,
+    reference: CanonicalCasRef,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VerifiedProviderTokenPreflightUnknownEvidenceV1 {
+    document: ProviderTokenPreflightUnknownEvidenceV1,
     reference: CanonicalCasRef,
 }
 
@@ -468,6 +489,57 @@ impl ProviderTokenPreflightResultV1 {
             return Err(invalid(
                 "provider_token_preflight_result_v1",
                 "preflight result does not bind the input or leave an output-token reservation",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl ProviderTokenPreflightUnknownEvidenceV1 {
+    pub fn new(
+        preflight: &VerifiedProviderTokenPreflightInputV1,
+        provider_request_id: String,
+    ) -> Result<Self> {
+        let document = Self {
+            schema_version: PROVIDER_TOKEN_PREFLIGHT_UNKNOWN_EVIDENCE_V1_SCHEMA_VERSION,
+            outcome: "unknown".into(),
+            provider_request_id,
+            preflight_input_digest: preflight.reference.digest().to_string(),
+            model_request_digest: preflight.document.model_request_digest.clone(),
+            failure_class: "provider_effect_unknown".into(),
+        };
+        document.validate_against_preflight(preflight, &document.provider_request_id)?;
+        Ok(document)
+    }
+
+    fn validate_against_preflight(
+        &self,
+        preflight: &VerifiedProviderTokenPreflightInputV1,
+        expected_provider_request_id: &str,
+    ) -> Result<()> {
+        if self.schema_version != PROVIDER_TOKEN_PREFLIGHT_UNKNOWN_EVIDENCE_V1_SCHEMA_VERSION
+            || self.outcome != "unknown"
+            || self.failure_class != "provider_effect_unknown"
+        {
+            return Err(invalid(
+                "provider_token_preflight_unknown_evidence_v1",
+                "unknown evidence has an unsupported schema or closed status",
+            ));
+        }
+        validate_identifier(
+            "provider_request_id",
+            &self.provider_request_id,
+            MAX_BINDING_TEXT_BYTES,
+        )?;
+        validate_sha256_digest("preflight_input_digest", &self.preflight_input_digest)?;
+        validate_sha256_digest("model_request_digest", &self.model_request_digest)?;
+        if self.provider_request_id != expected_provider_request_id
+            || self.preflight_input_digest != preflight.reference.digest()
+            || self.model_request_digest != preflight.document.model_request_digest
+        {
+            return Err(invalid(
+                "provider_token_preflight_unknown_evidence_v1",
+                "unknown evidence does not bind the verified provider request",
             ));
         }
         Ok(())
@@ -1075,6 +1147,16 @@ impl VerifiedProviderTokenPreflightResultV1 {
     }
 }
 
+impl VerifiedProviderTokenPreflightUnknownEvidenceV1 {
+    pub fn document(&self) -> &ProviderTokenPreflightUnknownEvidenceV1 {
+        &self.document
+    }
+
+    pub fn reference(&self) -> &CanonicalCasRef {
+        &self.reference
+    }
+}
+
 impl VerifiedModelResultEvidenceDocumentV1 {
     pub fn document(&self) -> &ModelResultEvidenceDocumentV1 {
         &self.document
@@ -1199,6 +1281,28 @@ pub fn provider_token_preflight_result_v1_bytes(
         ));
     }
     canonical_document_bytes(document, "provider_token_preflight_result_v1")
+}
+
+pub fn provider_token_preflight_unknown_evidence_v1_bytes(
+    document: &ProviderTokenPreflightUnknownEvidenceV1,
+) -> Result<Vec<u8>> {
+    if document.schema_version != PROVIDER_TOKEN_PREFLIGHT_UNKNOWN_EVIDENCE_V1_SCHEMA_VERSION
+        || document.outcome != "unknown"
+        || document.failure_class != "provider_effect_unknown"
+    {
+        return Err(invalid(
+            "provider_token_preflight_unknown_evidence_v1",
+            "unknown evidence has an unsupported schema or closed status",
+        ));
+    }
+    validate_identifier(
+        "provider_request_id",
+        &document.provider_request_id,
+        MAX_BINDING_TEXT_BYTES,
+    )?;
+    validate_sha256_digest("preflight_input_digest", &document.preflight_input_digest)?;
+    validate_sha256_digest("model_request_digest", &document.model_request_digest)?;
+    canonical_document_bytes(document, "provider_token_preflight_unknown_evidence_v1")
 }
 
 pub fn model_result_evidence_document_v1_bytes(
@@ -1326,6 +1430,33 @@ pub fn parse_verified_provider_token_preflight_result_v1(
     let canonical = provider_token_preflight_result_v1_bytes(&document)?;
     ensure_exact_canonical_bytes("provider_token_preflight_result_v1", bytes, &canonical)?;
     Ok(VerifiedProviderTokenPreflightResultV1 {
+        document,
+        reference,
+    })
+}
+
+pub fn parse_verified_provider_token_preflight_unknown_evidence_v1(
+    bytes: &[u8],
+    cas_ref: &str,
+    digest: &str,
+    preflight: &VerifiedProviderTokenPreflightInputV1,
+    expected_provider_request_id: &str,
+) -> Result<VerifiedProviderTokenPreflightUnknownEvidenceV1> {
+    let reference = verify_raw_cas_bytes(
+        "provider_token_preflight_unknown_evidence_v1",
+        bytes,
+        cas_ref,
+        digest,
+    )?;
+    let document: ProviderTokenPreflightUnknownEvidenceV1 = serde_json::from_slice(bytes)?;
+    document.validate_against_preflight(preflight, expected_provider_request_id)?;
+    let canonical = provider_token_preflight_unknown_evidence_v1_bytes(&document)?;
+    ensure_exact_canonical_bytes(
+        "provider_token_preflight_unknown_evidence_v1",
+        bytes,
+        &canonical,
+    )?;
+    Ok(VerifiedProviderTokenPreflightUnknownEvidenceV1 {
         document,
         reference,
     })

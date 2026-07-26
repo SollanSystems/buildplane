@@ -1,7 +1,9 @@
 use async_trait::async_trait;
 use bp_ledger::payload::activity_claim::ActivityResultOutcomeV1;
 use bp_ledger::payload::model_evidence::{
-    provider_token_preflight_result_v1_bytes, ModelProviderV1, ProviderTokenPreflightResultV1,
+    parse_verified_provider_token_preflight_unknown_evidence_v1,
+    provider_token_preflight_result_v1_bytes, provider_token_preflight_unknown_evidence_v1_bytes,
+    ModelProviderV1, ProviderTokenPreflightResultV1, ProviderTokenPreflightUnknownEvidenceV1,
     VerifiedProviderTokenPreflightInputV1,
 };
 use bp_ledger::payload::trust_spine::ExecutionRoleV1;
@@ -19,7 +21,6 @@ use bp_provider_sdk::{
     ProviderExecutionRoleV1, ProviderTokenCountRequestV1, ProviderTokenCounterV1,
 };
 use ed25519_dalek::SigningKey;
-use serde::Serialize;
 use thiserror::Error;
 
 use crate::provider_request::build_provider_token_count_request_v1;
@@ -163,17 +164,6 @@ impl ProviderTokenPreflightGatewayCompletionV1 {
     }
 }
 
-#[derive(Serialize)]
-#[serde(deny_unknown_fields)]
-struct ProviderTokenPreflightUnknownEvidenceV1 {
-    schema_version: u8,
-    outcome: &'static str,
-    provider_request_id: String,
-    preflight_input_digest: String,
-    model_request_digest: String,
-    failure_class: &'static str,
-}
-
 pub(crate) struct CasProviderTokenPreflightEvidenceWriterV1<'a> {
     cas: &'a Cas,
 }
@@ -223,20 +213,21 @@ impl ProviderTokenPreflightEvidenceWriterV1 for CasProviderTokenPreflightEvidenc
         if !self.matches(capability) {
             return None;
         }
-        let evidence = ProviderTokenPreflightUnknownEvidenceV1 {
-            schema_version: 1,
-            outcome: "unknown",
-            provider_request_id: capability.request.request_id.clone(),
-            preflight_input_digest: capability.preflight_input.reference().digest().into(),
-            model_request_digest: capability
-                .preflight_input
-                .document()
-                .model_request_digest
-                .clone(),
-            failure_class: "provider_effect_unknown",
-        };
-        let bytes = serde_json::to_vec(&evidence).ok()?;
+        let evidence = ProviderTokenPreflightUnknownEvidenceV1::new(
+            &capability.preflight_input,
+            capability.request.request_id.clone(),
+        )
+        .ok()?;
+        let bytes = provider_token_preflight_unknown_evidence_v1_bytes(&evidence).ok()?;
         let reference = self.cas.put_canonical_bytes(&bytes).ok()?;
+        parse_verified_provider_token_preflight_unknown_evidence_v1(
+            &bytes,
+            &reference.to_cas_ref(),
+            reference.digest(),
+            &capability.preflight_input,
+            &capability.request.request_id,
+        )
+        .ok()?;
         Some(ProviderTokenPreflightGatewayCompletionV1::unknown(
             reference.digest().into(),
             reference.to_cas_ref(),
