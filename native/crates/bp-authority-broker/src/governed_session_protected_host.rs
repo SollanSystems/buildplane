@@ -6,6 +6,9 @@
 //! No listener or worker authority is granted by this module.
 
 use crate::confinement::BrokerHostConfinementAttestationV1;
+use crate::governed_reviewer_authority::{
+    open_governed_reviewer_session_from_replay_v1, OpenedGovernedReviewerSessionV1,
+};
 use crate::governed_session_startup::{
     GovernedSessionHostStartupErrorV1, GovernedSessionHostStartupV1, GovernedSessionProviderLaneV1,
 };
@@ -166,6 +169,28 @@ impl ProtectedGovernedSessionHostStateV1 {
         lane.prepare_provider()
             .await
             .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)
+    }
+
+    pub(crate) fn open_reviewer_session(
+        &self,
+        recovery_ref: &str,
+        request_id: &str,
+    ) -> Result<OpenedGovernedReviewerSessionV1, ProtectedGovernedSessionProviderErrorV1> {
+        let config = self.validated_startup.config();
+        let snapshot = bp_replay::TrustedGovernedRecoverySnapshot::open_bounded_v1(
+            &config.run_id.to_string(),
+            self.ledger.recovery_database_path(),
+            &config.replay_authorities,
+            &config.claim_signer,
+        )
+        .map_err(|_| ProtectedGovernedSessionProviderErrorV1::TrustedReplay)?;
+        open_governed_reviewer_session_from_replay_v1(
+            &snapshot,
+            self.signing_keys.broker_identity(),
+            recovery_ref,
+            request_id,
+        )
+        .map_err(|_| ProtectedGovernedSessionProviderErrorV1::TrustedReplay)
     }
 }
 

@@ -8,8 +8,9 @@ use super::dispatch_admission::{
     SealedDispatchAdmissionEvidence, TrustedDispatchAdmissionSnapshotVerifier,
 };
 use super::governed_reviewer_authority::{
-    execute_governed_reviewer_run_v1, open_governed_reviewer_session_v1,
-    resolve_governed_reviewer_run_v1, GovernedReviewerAuthorityErrorV1,
+    execute_governed_reviewer_run_v1, open_governed_reviewer_session_from_replay_v1,
+    open_governed_reviewer_session_v1, resolve_governed_reviewer_run_v1,
+    GovernedReviewerAuthorityErrorV1,
 };
 use super::governed_session_token::issue_recovery_token_v1;
 use super::promotion_decision_handler::{
@@ -3775,7 +3776,6 @@ fn reviewer_recovery_derives_the_single_action_from_candidate_identity() {
         .dispatch
         .event_id
         .to_string();
-
     let evidence = resolve_reviewer_model_evidence_for_candidate_recovery_v1(
         &snapshot,
         &candidate_dispatch_event_ref,
@@ -3838,22 +3838,35 @@ fn governed_reviewer_open_binds_signed_recovery_to_repository_and_replay() {
         .dispatch
         .event_id
         .to_string();
+    let repository_binding_digest = snapshot
+        .workflow_for_dispatch_event_ref(&candidate_dispatch_event_ref)
+        .and_then(|workflow| workflow.dispatch.repository_binding_digest.as_deref())
+        .expect("fixture repository binding")
+        .to_string();
     let token_key = SigningKey::from_bytes(&[75; 32]);
     let recovery_ref = issue_recovery_token_v1(
         &token_key,
         snapshot.run_id(),
         &candidate_dispatch_event_ref,
-        DIGEST_B,
+        &repository_binding_digest,
     )
     .expect("signed recovery");
     let session = open_governed_reviewer_session_v1(
         &snapshot,
         &token_key,
-        DIGEST_B,
+        &repository_binding_digest,
         &recovery_ref,
         "01919000-0000-7000-8000-000000000110",
     )
     .expect("open reviewer from trusted recovery");
+    let replay_derived_session = open_governed_reviewer_session_from_replay_v1(
+        &snapshot,
+        &token_key,
+        &recovery_ref,
+        "01919000-0000-7000-8000-000000000114",
+    )
+    .expect("repository binding is derived from trusted replay");
+    assert_eq!(replay_derived_session.evidence(), session.evidence());
 
     assert_eq!(session.recovery_ref(), recovery_ref);
     assert_eq!(session.evidence().run_id, request.run_id);
@@ -3947,12 +3960,17 @@ fn governed_reviewer_open_rejects_repository_and_run_substitution() {
         .dispatch
         .event_id
         .to_string();
+    let repository_binding_digest = snapshot
+        .workflow_for_dispatch_event_ref(&candidate_dispatch_event_ref)
+        .and_then(|workflow| workflow.dispatch.repository_binding_digest.as_deref())
+        .expect("fixture repository binding")
+        .to_string();
     let token_key = SigningKey::from_bytes(&[76; 32]);
     let recovery_ref = issue_recovery_token_v1(
         &token_key,
         snapshot.run_id(),
         &candidate_dispatch_event_ref,
-        DIGEST_B,
+        &repository_binding_digest,
     )
     .expect("signed recovery");
     assert_eq!(
@@ -3966,23 +3984,45 @@ fn governed_reviewer_open_rejects_repository_and_run_substitution() {
         .expect_err("another repository identity must not open the reviewer"),
         GovernedReviewerAuthorityErrorV1::RecoveryRejected,
     );
+    assert_eq!(
+        open_governed_reviewer_session_from_replay_v1(
+            &snapshot,
+            &token_key,
+            &recovery_ref,
+            "01919000-0000-7000-8000-000000000115",
+        )
+        .expect("trusted replay recovers the correct repository binding")
+        .evidence()
+        .run_id,
+        snapshot.run_id(),
+    );
 
     let other_run_recovery = issue_recovery_token_v1(
         &token_key,
         "01919000-0000-7000-8000-000000000112",
         &candidate_dispatch_event_ref,
-        DIGEST_B,
+        &repository_binding_digest,
     )
     .expect("other run recovery");
     assert_eq!(
         open_governed_reviewer_session_v1(
             &snapshot,
             &token_key,
-            DIGEST_B,
+            &repository_binding_digest,
             &other_run_recovery,
             "01919000-0000-7000-8000-000000000113",
         )
         .expect_err("another run must not open the reviewer"),
+        GovernedReviewerAuthorityErrorV1::RunMismatch,
+    );
+    assert_eq!(
+        open_governed_reviewer_session_from_replay_v1(
+            &snapshot,
+            &token_key,
+            &other_run_recovery,
+            "01919000-0000-7000-8000-000000000116",
+        )
+        .expect_err("untrusted routing fields cannot cross the replay run"),
         GovernedReviewerAuthorityErrorV1::RunMismatch,
     );
 }

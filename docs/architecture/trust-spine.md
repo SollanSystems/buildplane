@@ -788,13 +788,20 @@ composition. The current process must match the configured non-root broker
 identity and the exact OCI canary must attest a rootless runtime, read-only
 base, narrow writable overlay, no network, no host fallback, pinned image, and
 profile digest before private custody is opened. The action, claim, and broker
-identity keys,
-pre-existing signed ledger, pre-existing descriptor-bound CAS, and validated
+identity keys, pre-existing signed ledger, pre-existing descriptor-bound CAS, and validated
 Anthropic credential must then all load from the retained authority root.
 Missing or unsafe state yields one closed startup category and no host state.
 This composition still grants no listener or worker authority; the remaining
 host slice must derive each request from trusted replay and construct the
 per-action provider lane without accepting authority fields from the client.
+Reviewer session opening now follows that rule internally: the opaque recovery
+token exposes only untrusted run and candidate-dispatch routing fields. The
+host locates the candidate in a fully verified recovery snapshot, derives its
+repository-binding digest from the signed dispatch, verifies the token with
+the protected broker identity, resolves the single eligible reviewer action,
+and issues a role-bound session token using the client request UUID as the
+deterministic nonce. No event ID, repository digest, model, role, or candidate
+digest is accepted from the client as authority.
 
 Those counts are persisted in the signed action receipt and replayed as one
 checked aggregate for the sealed V3 dispatch attempt. A metered failed call

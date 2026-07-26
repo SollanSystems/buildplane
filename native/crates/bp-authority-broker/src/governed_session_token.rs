@@ -54,6 +54,16 @@ pub(crate) struct VerifiedSessionTokenV1 {
     candidate_dispatch_event_ref: String,
 }
 
+/// Non-authoritative routing fields exposed by the signed recovery-token
+/// envelope. Callers may use these only to locate trusted replay state; no
+/// authority exists until [`verify_recovery_token_v1`] succeeds with the
+/// repository digest recovered from that state.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct UntrustedRecoveryTokenBindingV1 {
+    pub(crate) run_id: String,
+    pub(crate) candidate_dispatch_event_ref: String,
+}
+
 impl VerifiedSessionTokenV1 {
     pub(crate) fn session_nonce(&self) -> &str {
         &self.session_nonce
@@ -115,6 +125,16 @@ pub(crate) fn verify_recovery_token_v1(
         .map_err(|_| GovernedSessionTokenErrorV1::InvalidSignature)?;
     Ok(VerifiedRecoveryTokenV1 {
         token: token.into(),
+        run_id: run_id.into(),
+        candidate_dispatch_event_ref: candidate_dispatch_event_ref.into(),
+    })
+}
+
+pub(crate) fn parse_untrusted_recovery_token_binding_v1(
+    token: &str,
+) -> Result<UntrustedRecoveryTokenBindingV1, GovernedSessionTokenErrorV1> {
+    let (run_id, candidate_dispatch_event_ref, _) = parse_recovery_token(token)?;
+    Ok(UntrustedRecoveryTokenBindingV1 {
         run_id: run_id.into(),
         candidate_dispatch_event_ref: candidate_dispatch_event_ref.into(),
     })

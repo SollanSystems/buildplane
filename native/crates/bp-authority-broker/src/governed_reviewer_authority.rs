@@ -6,8 +6,8 @@
 //! trusted replay identifies exactly one still-unclaimed reviewer activity.
 
 use crate::governed_session_token::{
-    issue_session_token_v1, verify_recovery_token_v1, verify_session_token_v1,
-    GovernedSessionKindV1,
+    issue_session_token_v1, parse_untrusted_recovery_token_binding_v1, verify_recovery_token_v1,
+    verify_session_token_v1, GovernedSessionKindV1,
 };
 use crate::reviewer_session::{
     resolve_reviewer_model_evidence_for_candidate_recovery_v1, ResolvedReviewerModelEvidenceV1,
@@ -89,6 +89,39 @@ pub(crate) fn open_governed_reviewer_session_v1(
         session_ref,
         evidence,
     })
+}
+
+/// Open a reviewer session using only an opaque recovery token and trusted
+/// replay. The token's visible run/dispatch fields are routing hints, never
+/// authority: the candidate workflow supplies the repository digest and the
+/// broker identity key must verify the complete token before reviewer evidence
+/// or a session token is returned.
+pub(crate) fn open_governed_reviewer_session_from_replay_v1(
+    snapshot: &TrustedGovernedRecoverySnapshot,
+    session_signing_key: &SigningKey,
+    recovery_ref: &str,
+    session_nonce: &str,
+) -> Result<OpenedGovernedReviewerSessionV1, GovernedReviewerAuthorityErrorV1> {
+    let untrusted = parse_untrusted_recovery_token_binding_v1(recovery_ref)
+        .map_err(|_| GovernedReviewerAuthorityErrorV1::RecoveryRejected)?;
+    if untrusted.run_id != snapshot.run_id() {
+        return Err(GovernedReviewerAuthorityErrorV1::RunMismatch);
+    }
+    let candidate = snapshot
+        .workflow_for_dispatch_event_ref(&untrusted.candidate_dispatch_event_ref)
+        .ok_or(GovernedReviewerAuthorityErrorV1::EvidenceRejected)?;
+    let repository_binding_digest = candidate
+        .dispatch
+        .repository_binding_digest
+        .as_deref()
+        .ok_or(GovernedReviewerAuthorityErrorV1::EvidenceRejected)?;
+    open_governed_reviewer_session_v1(
+        snapshot,
+        session_signing_key,
+        repository_binding_digest,
+        recovery_ref,
+        session_nonce,
+    )
 }
 
 /// Reopen only the exact reviewer identity authenticated by a session token.
