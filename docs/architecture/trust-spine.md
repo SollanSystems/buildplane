@@ -678,6 +678,12 @@ candidate dispatch identity recovered from the host token, finds model intents
 bound to that exact candidate, fully revalidates each reviewer workflow, and
 opens only when exactly one unclaimed reviewer/adversary/judge action remains.
 The client cannot nominate reviewer dispatch or action event identifiers.
+Recovery and session handles are defined as domain-separated Ed25519 tokens
+rather than mutable in-memory authority. A recovery token binds the exact run,
+candidate dispatch, and canonical repository identity; a session token binds
+the verified recovery token, candidate/reviewer lane, and fresh V7 nonce. Both
+fit the closed opaque-reference limit, survive host restart, and still require
+fresh trusted replay before any effect.
 
 The remaining OS-isolated broker must expose the native, same-ledger-process
 `resolve-or-authorize` transaction to the credential-holding provider boundary,

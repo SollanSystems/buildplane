@@ -55,6 +55,9 @@ mod governed_session_host_contract_tests;
 mod governed_session_response;
 #[cfg(test)]
 mod governed_session_response_contract_tests;
+mod governed_session_token;
+#[cfg(test)]
+mod governed_session_token_contract_tests;
 mod host_cas_custody;
 mod host_config;
 mod host_config_loader;
