@@ -668,6 +668,11 @@ an opaque candidate or reviewer session. Reviewer lookup carries only the
 host-issued recovery reference. This client does not itself create authority,
 and no protected governed-session listener or session registry ships yet, so
 the probe fails and governed API-worker execution remains blocked.
+The native crate contains a private server-side transport contract that
+authenticates and rechecks the client peer, bounds one framed exchange by an
+absolute deadline, and signs only request-bound handler results. It deliberately
+has no public runner or default listener until trusted replay and the OCI action
+plane supply the authority handler.
 
 The remaining OS-isolated broker must expose the native, same-ledger-process
 `resolve-or-authorize` transaction to the credential-holding provider boundary,
