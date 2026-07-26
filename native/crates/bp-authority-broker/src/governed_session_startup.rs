@@ -1,0 +1,73 @@
+//! Fail-closed startup composition for the protected governed-session host.
+//!
+//! This proof retains both the broker's kernel-observed model-action identity
+//! and the fresh rootless OCI attestation. It grants no listener, action,
+//! provider, credential, mount, or promotion authority by itself.
+
+use crate::confinement::{
+    BrokerAuthorityRoleV1, BrokerHostConfinementAttestationV1, BrokerHostConfinementErrorV1,
+    BrokerHostConfinementPolicyV1,
+};
+use crate::rootless_oci::RootlessOciAttestationV1;
+use thiserror::Error;
+
+#[derive(Debug)]
+pub(crate) struct GovernedSessionHostStartupV1 {
+    _confinement_policy: BrokerHostConfinementPolicyV1,
+    _confinement_attestation: BrokerHostConfinementAttestationV1,
+    oci_attestation: RootlessOciAttestationV1,
+}
+
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
+pub(crate) enum GovernedSessionHostStartupErrorV1 {
+    #[error("governed session host requires the model-action authority role")]
+    WrongAuthorityRole,
+    #[error("governed session broker confinement attestation is invalid")]
+    InvalidConfinement,
+    #[error("governed session rootless OCI attestation is invalid")]
+    InvalidOciAttestation,
+}
+
+impl GovernedSessionHostStartupV1 {
+    pub(crate) fn new(
+        confinement_policy: BrokerHostConfinementPolicyV1,
+        confinement_attestation: BrokerHostConfinementAttestationV1,
+        oci_attestation: RootlessOciAttestationV1,
+    ) -> Result<Self, GovernedSessionHostStartupErrorV1> {
+        confinement_policy
+            .verify_startup_attestation_for_role(
+                BrokerAuthorityRoleV1::ModelAction,
+                &confinement_attestation,
+            )
+            .map_err(map_confinement_error)?;
+        if oci_attestation.runtime != "rootless-oci"
+            || !oci_attestation.rootless
+            || !oci_attestation.read_only_base
+            || !oci_attestation.writable_overlay
+            || oci_attestation.network != "none"
+            || oci_attestation.host_fallback
+            || oci_attestation.profile_digest.is_empty()
+            || oci_attestation.image.is_empty()
+        {
+            return Err(GovernedSessionHostStartupErrorV1::InvalidOciAttestation);
+        }
+        Ok(Self {
+            _confinement_policy: confinement_policy,
+            _confinement_attestation: confinement_attestation,
+            oci_attestation,
+        })
+    }
+
+    pub(crate) fn sandbox_profile_digest(&self) -> &str {
+        &self.oci_attestation.profile_digest
+    }
+}
+
+fn map_confinement_error(error: BrokerHostConfinementErrorV1) -> GovernedSessionHostStartupErrorV1 {
+    match error {
+        BrokerHostConfinementErrorV1::RolePolicyMismatch { .. } => {
+            GovernedSessionHostStartupErrorV1::WrongAuthorityRole
+        }
+        _ => GovernedSessionHostStartupErrorV1::InvalidConfinement,
+    }
+}

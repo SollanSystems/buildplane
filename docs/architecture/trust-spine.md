@@ -558,6 +558,13 @@ directory, bounds captured output, enforces one absolute probe deadline, and
 runs version, rootless-mode, user-namespace, isolation-flag, and no-mount
 canary checks before returning an unforgeable in-process attestation. Probe
 failure has no host runner fallback.
+The private governed-session startup composition now requires that OCI
+attestation and a kernel-observed broker confinement attestation from the exact
+`ModelAction` authority policy in the same retained proof. A promotion or
+admission policy, a different broker UID, or any weakened rootless/read-only/
+no-network property is rejected before a session host can be constructed.
+This proof deliberately exposes no listener, action, provider, credential,
+mount, or promotion authority.
 
 A governed dispatch's `maxComputeTimeMs` is enforced as one immutable absolute
 deadline: `min(expiresAt, issuedAt + maxComputeTimeMs)`. The worker rejects an

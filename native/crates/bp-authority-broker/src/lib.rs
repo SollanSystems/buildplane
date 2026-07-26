@@ -57,6 +57,9 @@ mod governed_session_host_contract_tests;
 mod governed_session_response;
 #[cfg(test)]
 mod governed_session_response_contract_tests;
+mod governed_session_startup;
+#[cfg(test)]
+mod governed_session_startup_contract_tests;
 mod governed_session_token;
 #[cfg(test)]
 mod governed_session_token_contract_tests;

@@ -238,14 +238,29 @@ impl BrokerHostConfinementPolicyV1 {
         attestation: &BrokerHostConfinementAttestationV1,
         stream: &UnixStream,
     ) -> Result<(), BrokerHostConfinementErrorV1> {
+        self.verify_startup_attestation_for_role(role, attestation)?;
+        let peer = linux_peer_identity(stream)?;
+        self.verify_peer_for_role(role, peer)
+    }
+
+    pub(crate) fn verify_startup_attestation_for_role(
+        &self,
+        role: BrokerAuthorityRoleV1,
+        attestation: &BrokerHostConfinementAttestationV1,
+    ) -> Result<(), BrokerHostConfinementErrorV1> {
+        if role != self.role {
+            return Err(BrokerHostConfinementErrorV1::RolePolicyMismatch {
+                configured_role: self.role,
+                requested_role: role,
+            });
+        }
         if attestation.broker_uid != self.broker_uid {
             return Err(BrokerHostConfinementErrorV1::AttestationPolicyMismatch {
                 attested_broker_uid: attestation.broker_uid,
                 configured_broker_uid: self.broker_uid,
             });
         }
-        let peer = linux_peer_identity(stream)?;
-        self.verify_peer_for_role(role, peer)
+        Ok(())
     }
 }
 
