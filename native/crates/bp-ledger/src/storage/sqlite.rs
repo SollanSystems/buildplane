@@ -11170,44 +11170,68 @@ const GOVERNED_DISPATCH_V5_SIGNATURE_SCAN_NO_DELETE_SQL: &str = r#"
     END
 "#;
 
-/// Canonicalize SQLite-owned schema text without weakening quoted literals.
+/// Tokenize SQLite-owned schema text without weakening lexical boundaries.
 ///
 /// SQLite removes `IF NOT EXISTS` and may preserve arbitrary insignificant
-/// formatting in `sqlite_master.sql`. Outside quoted tokens SQL is
-/// case-insensitive and whitespace-insensitive, so normalize exactly those
-/// dimensions. Quoted strings and identifiers remain byte-for-byte bound.
-fn canonical_sqlite_schema_sql(sql: &str) -> String {
-    let mut canonical = String::with_capacity(sql.len());
+/// formatting in `sqlite_master.sql`. Unquoted tokens are ASCII
+/// case-insensitive, while quoted strings and identifiers remain byte-for-byte
+/// bound. Whitespace separates tokens but is otherwise insignificant.
+///
+/// Returning a token sequence (rather than deleting whitespace) is essential:
+/// SQLite accepts type names such as `INTEGERPRIMARYKEY`, which must never
+/// compare equal to the three authoritative tokens `INTEGER PRIMARY KEY`.
+fn tokenize_sqlite_schema_sql(sql: &str) -> Option<Vec<String>> {
+    let mut tokens = Vec::new();
     let mut chars = sql.chars().peekable();
-    let mut quote: Option<char> = None;
 
     while let Some(ch) = chars.next() {
-        if let Some(end_quote) = quote {
-            canonical.push(ch);
-            if ch == end_quote {
-                if end_quote != ']' && chars.peek() == Some(&end_quote) {
-                    canonical.push(chars.next().expect("peeked escaped quote"));
-                } else {
-                    quote = None;
-                }
-            }
+        if ch.is_whitespace() {
             continue;
         }
 
-        match ch {
-            '\'' | '"' | '`' => {
-                quote = Some(ch);
-                canonical.push(ch);
+        if matches!(ch, '\'' | '"' | '`' | '[') {
+            let end_quote = if ch == '[' { ']' } else { ch };
+            let mut token = String::from(ch);
+            let mut closed = false;
+            while let Some(quoted) = chars.next() {
+                token.push(quoted);
+                if quoted == end_quote {
+                    if end_quote != ']' && chars.peek() == Some(&end_quote) {
+                        token.push(chars.next().expect("peeked escaped quote"));
+                    } else {
+                        closed = true;
+                        break;
+                    }
+                }
             }
-            '[' => {
-                quote = Some(']');
-                canonical.push(ch);
+            if !closed {
+                return None;
             }
-            _ if ch.is_whitespace() => {}
-            _ => canonical.extend(ch.to_lowercase()),
+            tokens.push(token);
+            continue;
+        }
+
+        if ch.is_alphanumeric() || matches!(ch, '_' | '$') {
+            let mut token = String::new();
+            token.push(ch.to_ascii_lowercase());
+            while let Some(next) = chars.peek().copied() {
+                if next.is_alphanumeric() || matches!(next, '_' | '$') {
+                    token.push(
+                        chars
+                            .next()
+                            .expect("peeked unquoted token")
+                            .to_ascii_lowercase(),
+                    );
+                } else {
+                    break;
+                }
+            }
+            tokens.push(token);
+        } else {
+            tokens.push(ch.to_string());
         }
     }
-    canonical
+    Some(tokens)
 }
 
 fn require_governed_dispatch_v5_source_scan_schema(conn: &Connection, run_id: RunId) -> Result<()> {
@@ -11247,10 +11271,12 @@ fn require_governed_dispatch_v5_source_scan_schema(conn: &Connection, run_id: Ru
             )
             .optional()?
             .flatten();
-        let expected_sql = canonical_sqlite_schema_sql(expected_sql);
+        let expected_tokens = tokenize_sqlite_schema_sql(expected_sql)
+            .expect("static V5 source scan schema SQL must be lexically closed");
         if !sql
             .as_deref()
-            .is_some_and(|sql| canonical_sqlite_schema_sql(sql) == expected_sql)
+            .and_then(tokenize_sqlite_schema_sql)
+            .is_some_and(|tokens| tokens == expected_tokens)
         {
             return Err(governed_dispatch_v5_admission_reconciliation_required(
                 run_id,

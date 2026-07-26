@@ -9642,22 +9642,23 @@ fn broker_v5_semantically_substituted_scan_schema_fails_closed_without_tape_muta
              );",
         ),
         (
-            "unconstrained scan table",
+            "lexical token-boundary collision",
             "DROP TRIGGER governed_dispatch_v5_signature_scan_after_insert;
              DROP TRIGGER governed_dispatch_v5_signature_scan_no_update;
              DROP TRIGGER governed_dispatch_v5_signature_scan_no_delete;
              DROP INDEX idx_governed_dispatch_v5_signature_scan_exact;
              DROP TABLE governed_dispatch_v5_signature_scan_index;
              CREATE TABLE governed_dispatch_v5_signature_scan_index (
-                 signature_rowid INTEGER,
-                 event_rowid INTEGER,
-                 event_id TEXT,
-                 run_id TEXT,
-                 v5_envelope_digest TEXT,
-                 actor_id TEXT,
-                 key_id TEXT,
+                 signature_rowid INTEGERPRIMARYKEY CHECK(signature_rowid > 0),
+                 event_rowid INTEGERNOTNULL CHECK(event_rowid > 0),
+                 event_id TEXTNOTNULLUNIQUE,
+                 run_id TEXTNOTNULL,
+                 v5_envelope_digest TEXTNOTNULL,
+                 actor_id TEXTNOTNULL,
+                 key_id TEXTNOTNULL,
                  public_key_hash TEXT,
-                 algorithm TEXT
+                 algorithm TEXTNOTNULL,
+                 FOREIGN KEY(event_id) REFERENCES events(id)
              );
              CREATE INDEX idx_governed_dispatch_v5_signature_scan_exact
              ON governed_dispatch_v5_signature_scan_index(
@@ -9716,6 +9717,33 @@ fn broker_v5_semantically_substituted_scan_schema_fails_closed_without_tape_muta
         assert_eq!(v5_broker_admission_receipt_count(&fixture), 0);
         assert_eq!(v5_broker_checkpoint_count(&fixture), 0);
     }
+}
+
+#[test]
+fn broker_v5_scan_schema_guard_accepts_harmless_keyword_case_and_formatting() {
+    let fixture = v5_broker_admission_fixture();
+    fixture
+        .store
+        .conn_for_tests()
+        .execute_batch(
+            "DROP TRIGGER governed_dispatch_v5_signature_scan_no_update;
+             create trigger governed_dispatch_v5_signature_scan_no_update
+               before    update
+               on governed_dispatch_v5_signature_scan_index
+             begin
+               select raise(abort,
+                 'V5 signature scan index is append-derived: UPDATE forbidden');
+             end;",
+        )
+        .expect("replace trigger with semantically identical formatting");
+    let broker = v5_broker_admission_backend(&fixture);
+
+    assert!(matches!(
+        broker.record_then_exact_seal(v5_broker_admission_request(&fixture)),
+        BrokerV5DispatchAdmissionDisposition::Sealed(_)
+    ));
+    assert_eq!(v5_broker_admission_receipt_count(&fixture), 1);
+    assert_eq!(v5_broker_checkpoint_count(&fixture), 1);
 }
 
 #[test]
