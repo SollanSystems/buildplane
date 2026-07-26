@@ -433,8 +433,9 @@ mod tests {
     };
     use async_trait::async_trait;
     use bp_provider_sdk::{
-        provider_json_schema_digest_v1, ProviderAdapter, ProviderError, ProviderExecutionRoleV1,
-        ProviderRequest, ProviderStopReasonV1, ProviderToolDefinitionV1,
+        provider_json_schema_digest_v1, provider_response_contract_v1, ProviderAdapter,
+        ProviderError, ProviderExecutionRoleV1, ProviderRequest, ProviderStopReasonV1,
+        ProviderToolDefinitionV1,
     };
     use futures::executor::block_on;
     use serde_json::{json, Value};
@@ -463,12 +464,8 @@ mod tests {
     }
 
     fn request() -> ProviderRequest {
-        let response_schema = json!({
-            "type": "object",
-            "properties": {"decision": {"type": "string"}},
-            "required": ["decision"],
-            "additionalProperties": false
-        });
+        let response_contract = provider_response_contract_v1(ProviderExecutionRoleV1::Reviewer)
+            .expect("response contract");
         let tool_schema = json!({
             "type": "object",
             "properties": {"path": {"type": "string"}},
@@ -482,10 +479,10 @@ mod tests {
             execution_role: ProviderExecutionRoleV1::Reviewer,
             system_prompt: Some("Review only the immutable candidate.".into()),
             prompt: "Return the verdict or request a read-only tool.".into(),
-            response_schema_name: "review_verdict_v1".into(),
-            response_schema_digest: provider_json_schema_digest_v1(&response_schema)
-                .expect("response schema"),
-            response_schema,
+            response_schema_name: response_contract.name.into(),
+            response_contract_digest: response_contract.contract_digest,
+            response_schema_digest: response_contract.schema_digest,
+            response_schema: response_contract.schema,
             candidate_digest: Some(format!("sha256:{}", "b".repeat(64))),
             max_input_tokens: 12_000,
             max_output_tokens: 2_000,

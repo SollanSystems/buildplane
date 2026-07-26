@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -31,6 +31,7 @@ pub struct ProviderRequest {
     pub system_prompt: Option<String>,
     pub prompt: String,
     pub response_schema_name: String,
+    pub response_contract_digest: String,
     pub response_schema_digest: String,
     pub response_schema: Value,
     pub candidate_digest: Option<String>,
@@ -59,11 +60,14 @@ impl ProviderRequest {
                 )));
             }
         }
-        if !is_sha256_digest(&self.response_schema_digest)
-            || provider_json_schema_digest_v1(&self.response_schema)? != self.response_schema_digest
+        let response_contract = provider_response_contract_v1(self.execution_role)?;
+        if self.response_schema_name != response_contract.name
+            || self.response_contract_digest != response_contract.contract_digest
+            || self.response_schema_digest != response_contract.schema_digest
+            || self.response_schema != response_contract.schema
         {
             return Err(ProviderError::InvalidContract(
-                "response_schema_digest must match the canonical response schema".into(),
+                "provider response contract must match the exact role-derived schema".into(),
             ));
         }
         if self.max_input_tokens == 0 || self.max_output_tokens == 0 || self.deadline_unix_ms <= 0 {
@@ -194,26 +198,127 @@ pub fn provider_json_schema_digest_v1(schema: &Value) -> Result<String, Provider
     Ok(format!("sha256:{:x}", digest.finalize()))
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProviderResponseContractV1 {
+    pub name: &'static str,
+    pub contract_digest: String,
+    pub schema_digest: String,
+    pub schema: Value,
+}
+
+pub fn provider_response_contract_v1(
+    role: ProviderExecutionRoleV1,
+) -> Result<ProviderResponseContractV1, ProviderError> {
+    let (name, descriptor, schema) = match role {
+        ProviderExecutionRoleV1::Implementer => (
+            "implementer_completion_v1",
+            br#"{"schemaVersion":1,"kind":"implementer_completion_v1","required":["schemaVersion","outcome","summary","outputRefs"],"outcome":"completed"}"#
+                .as_slice(),
+            json!({
+                "type": "object",
+                "properties": {
+                    "schemaVersion": {"type": "integer", "const": 1},
+                    "outcome": {"type": "string", "const": "completed"},
+                    "summary": {"type": "string", "minLength": 1},
+                    "outputRefs": {
+                        "type": "array",
+                        "items": {"type": "string", "minLength": 1}
+                    }
+                },
+                "required": ["schemaVersion", "outcome", "summary", "outputRefs"],
+                "additionalProperties": false
+            }),
+        ),
+        ProviderExecutionRoleV1::Reviewer
+        | ProviderExecutionRoleV1::Adversary
+        | ProviderExecutionRoleV1::Judge => (
+            "review_verdict_v1",
+            br#"{"schemaVersion":1,"kind":"review_verdict_v1","required":["schemaVersion","candidateDigest","decision","findings","confidence","reviewerManifestDigest"],"decisions":["approve","request_changes","reject","abstain"]}"#
+                .as_slice(),
+            json!({
+                "type": "object",
+                "properties": {
+                    "schemaVersion": {"type": "integer", "const": 1},
+                    "candidateDigest": {
+                        "type": "string",
+                        "pattern": "^sha256:[a-f0-9]{64}$"
+                    },
+                    "decision": {
+                        "type": "string",
+                        "enum": ["approve", "request_changes", "reject", "abstain"]
+                    },
+                    "findings": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "severity": {
+                                    "type": "string",
+                                    "enum": ["info", "low", "medium", "high", "critical"]
+                                },
+                                "checkId": {"type": "string", "minLength": 1},
+                                "file": {"type": "string", "minLength": 1},
+                                "line": {"type": "integer", "minimum": 1},
+                                "explanation": {"type": "string", "minLength": 1},
+                                "evidenceRefs": {
+                                    "type": "array",
+                                    "minItems": 1,
+                                    "items": {"type": "string", "minLength": 1}
+                                }
+                            },
+                            "required": [
+                                "severity",
+                                "checkId",
+                                "file",
+                                "line",
+                                "explanation",
+                                "evidenceRefs"
+                            ],
+                            "additionalProperties": false
+                        }
+                    },
+                    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                    "reviewerManifestDigest": {
+                        "type": "string",
+                        "pattern": "^sha256:[a-f0-9]{64}$"
+                    }
+                },
+                "required": [
+                    "schemaVersion",
+                    "candidateDigest",
+                    "decision",
+                    "findings",
+                    "confidence",
+                    "reviewerManifestDigest"
+                ],
+                "additionalProperties": false
+            }),
+        ),
+    };
+    let mut contract_hasher = Sha256::new();
+    contract_hasher.update(b"buildplane.governed-api-response-schema.v1\0");
+    contract_hasher.update(descriptor);
+    let contract_digest = format!("sha256:{:x}", contract_hasher.finalize());
+    let schema_digest = provider_json_schema_digest_v1(&schema)?;
+    Ok(ProviderResponseContractV1 {
+        name,
+        contract_digest,
+        schema_digest,
+        schema,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        provider_json_schema_digest_v1, ProviderExecutionRoleV1, ProviderRequest, ProviderResponse,
-        ProviderStopReasonV1,
+        provider_json_schema_digest_v1, provider_response_contract_v1, ProviderExecutionRoleV1,
+        ProviderRequest, ProviderResponse, ProviderStopReasonV1,
     };
     use serde_json::json;
 
     fn request_json() -> serde_json::Value {
-        let response_schema = json!({
-            "type": "object",
-            "properties": {
-                "decision": {
-                    "type": "string",
-                    "enum": ["approve", "request_changes", "reject", "abstain"]
-                }
-            },
-            "required": ["decision"],
-            "additionalProperties": false
-        });
+        let contract = provider_response_contract_v1(ProviderExecutionRoleV1::Reviewer)
+            .expect("review response contract");
         json!({
             "schema_version": 1,
             "request_id": "provider:reviewer:1",
@@ -221,10 +326,10 @@ mod tests {
             "execution_role": "reviewer",
             "system_prompt": "Review only the immutable candidate.",
             "prompt": "Return the closed review verdict.",
-            "response_schema_name": "review_verdict_v1",
-            "response_schema_digest": provider_json_schema_digest_v1(&response_schema)
-                .expect("canonical response schema"),
-            "response_schema": response_schema,
+            "response_schema_name": contract.name,
+            "response_contract_digest": contract.contract_digest,
+            "response_schema_digest": contract.schema_digest,
+            "response_schema": contract.schema,
             "candidate_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
             "max_input_tokens": 12000,
             "max_output_tokens": 2000,
@@ -255,6 +360,39 @@ mod tests {
         let mut substituted_schema = request.clone();
         substituted_schema.response_schema["required"] = json!([]);
         assert!(substituted_schema.validate().is_err());
+
+        let mut substituted_contract = request;
+        substituted_contract.response_contract_digest =
+            substituted_contract.response_schema_digest.clone();
+        assert!(substituted_contract.validate().is_err());
+    }
+
+    #[test]
+    fn response_contract_digests_match_the_typescript_fixtures() {
+        let implementer = provider_response_contract_v1(ProviderExecutionRoleV1::Implementer)
+            .expect("implementer contract");
+        assert_eq!(
+            implementer.contract_digest,
+            "sha256:657d50b8bb2aa0ef5dfc2596dc622b033d5133321c9fb942d8c188c7b104a136"
+        );
+        let reviewer = provider_response_contract_v1(ProviderExecutionRoleV1::Reviewer)
+            .expect("reviewer contract");
+        assert_eq!(
+            reviewer.contract_digest,
+            "sha256:f46b59bc038137c1472a32defb16fc49d475cea7cf137f66287b16408f0742f0"
+        );
+        assert_eq!(
+            reviewer.contract_digest,
+            provider_response_contract_v1(ProviderExecutionRoleV1::Adversary)
+                .expect("adversary contract")
+                .contract_digest
+        );
+        assert_eq!(
+            reviewer.contract_digest,
+            provider_response_contract_v1(ProviderExecutionRoleV1::Judge)
+                .expect("judge contract")
+                .contract_digest
+        );
     }
 
     #[test]

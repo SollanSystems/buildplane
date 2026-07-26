@@ -609,12 +609,15 @@ request blocks before either the write-ahead action record or provider gateway.
 The native provider SDK now exposes the corresponding closed V1 transport
 contract instead of the former prompt/text pair. Requests carry the actual
 closed response and tool-input JSON schemas as well as domain-separated
-digests recomputed from their canonical bytes. They also bind the execution
-role, candidate digest for review-like roles, absolute deadline, and separate
-input/output token ceilings; responses require a structured output, metered
-token counts, request identity, and a closed stop reason. Unknown fields,
-role/candidate mismatches, and substituted schemas fail before an adapter can
-perform transport. The Anthropic adapter maps that contract to the Messages
+digests recomputed from their canonical bytes. The response JSON-schema digest
+is distinct from the kernel's role-derived semantic response-contract digest;
+native fixtures reproduce the exact TypeScript domain-separated values for
+both implementer and review-like roles. Requests must match both bindings, the
+execution role, candidate digest for review-like roles, absolute deadline, and
+separate input/output token ceilings; responses require a structured output,
+metered token counts, request identity, and a closed stop reason. Unknown
+fields, role/candidate mismatches, substituted contracts, and substituted
+schemas fail before an adapter can perform transport. The Anthropic adapter maps that contract to the Messages
 API's current `output_config.format` and strict tool definitions, delegates
 only a credential-free wire request to an injected host-owned transport, and
 parses structured output, tool calls, stop reason, and complete cached-plus-
