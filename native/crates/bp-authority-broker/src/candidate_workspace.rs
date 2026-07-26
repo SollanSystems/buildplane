@@ -11,6 +11,7 @@ use crate::candidate_repository::{
 };
 use bp_ledger::storage::sqlite::ResolvedGovernedV5CandidateAuthorityV1;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::ffi::CString;
 use std::fs::File;
 use std::io::{Read, Write};
@@ -45,6 +46,19 @@ pub(crate) struct OpenedCandidateWorkspaceV1 {
     pub(crate) candidate_ref: String,
     pub(crate) path: PathBuf,
     pub(crate) base_commit_sha: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ImmutableCandidateArtifactV1 {
+    pub(crate) candidate_id: String,
+    pub(crate) candidate_ref: String,
+    pub(crate) base_commit_sha: String,
+    pub(crate) candidate_commit_sha: String,
+    pub(crate) commit_digest: String,
+    pub(crate) tree_digest: String,
+    pub(crate) patch_digest: String,
+    pub(crate) changed_files_digest: String,
+    pub(crate) candidate_digest: String,
 }
 
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
@@ -267,6 +281,352 @@ pub(crate) fn reopen_candidate_workspace_v1(
         path: canonical_workspace,
         base_commit_sha: authority.base_commit_sha.clone(),
     })
+}
+
+/// Materialize one deterministic commit and create-only candidate ref while
+/// preserving the checked-out target branch exactly. Git object writes occur
+/// before the ref CAS, so a crash can be retried to the same commit identity;
+/// the detached workspace HEAD and target HEAD never move.
+pub(crate) fn finalize_candidate_workspace_v1(
+    authority_root: &File,
+    authority: &ResolvedGovernedV5CandidateAuthorityV1,
+) -> Result<ImmutableCandidateArtifactV1, CandidateWorkspaceErrorV1> {
+    let (candidate_id, candidate_ref, workspace_name) = candidate_identity(authority)?;
+    let workspace_root = open_or_create_private_directory_at(authority_root, WORKSPACE_DIRECTORY)?;
+    let manifest_bytes =
+        read_workspace_manifest_bytes(&workspace_root, &manifest_name(&workspace_name)?)?;
+    let manifest: CandidateWorkspaceManifestV1 = serde_json::from_slice(&manifest_bytes)
+        .map_err(|_| CandidateWorkspaceErrorV1::ReconciliationRequired)?;
+    if manifest.schema_version != 1
+        || manifest.run_id != authority.run_id.to_string()
+        || manifest.dispatch_event_id != authority.dispatch_event_id.to_string()
+        || manifest.admission_event_id != authority.admission_event_id.to_string()
+        || manifest.repository_binding_digest != authority.repository_binding_digest
+        || manifest.candidate_id != candidate_id
+        || manifest.candidate_ref != candidate_ref
+        || manifest.workspace_name != workspace_name
+        || manifest.base_commit_sha != authority.base_commit_sha
+        || manifest.dispatch_envelope_digest != authority.dispatch_envelope_digest
+        || manifest.governed_packet_digest != authority.governed_packet_digest
+        || manifest.sandbox_profile_digest != authority.sandbox_profile_digest
+    {
+        return Err(CandidateWorkspaceErrorV1::ReconciliationRequired);
+    }
+    verify_governed_repository_binding_v1(
+        &manifest.repository_root,
+        &authority.repository_binding_digest,
+    )?;
+    let git = governed_git_executable()?;
+    let repository = Path::new(&manifest.repository_root);
+    let root_head = required_git_value(
+        &git,
+        repository,
+        &["rev-parse", "--verify", "HEAD^{commit}"],
+    )?;
+    let root_tree = required_git_value(&git, repository, &["rev-parse", "HEAD^{tree}"])?;
+    let root_count = required_git_value(&git, repository, &["rev-list", "--count", "HEAD"])?;
+    if root_head != authority.base_commit_sha
+        || !required_git_value_allow_empty(&git, repository, &["status", "--porcelain=v1", "-z"])?
+            .is_empty()
+    {
+        return Err(CandidateWorkspaceErrorV1::BaseMismatch);
+    }
+
+    let workspace_path = PathBuf::from(format!(
+        "/proc/{}/fd/{}/{}",
+        std::process::id(),
+        workspace_root.as_raw_fd(),
+        workspace_name
+    ));
+    if workspace_path
+        .symlink_metadata()
+        .is_ok_and(|metadata| metadata.file_type().is_symlink())
+    {
+        return Err(CandidateWorkspaceErrorV1::WorkspaceCustody);
+    }
+    let canonical_workspace = workspace_path
+        .canonicalize()
+        .map_err(|_| CandidateWorkspaceErrorV1::WorkspaceCustody)?;
+    let canonical_workspace_root = PathBuf::from(format!(
+        "/proc/{}/fd/{}",
+        std::process::id(),
+        workspace_root.as_raw_fd()
+    ))
+    .canonicalize()
+    .map_err(|_| CandidateWorkspaceErrorV1::WorkspaceCustody)?;
+    if canonical_workspace.parent() != Some(canonical_workspace_root.as_path())
+        || required_git_value(
+            &git,
+            &canonical_workspace,
+            &["rev-parse", "--verify", "HEAD^{commit}"],
+        )? != authority.base_commit_sha
+    {
+        return Err(CandidateWorkspaceErrorV1::ReconciliationRequired);
+    }
+    verify_candidate_worktree_topology(&git, repository, &canonical_workspace)?;
+
+    let existing_ref =
+        governed_git_output(&git, repository, &["rev-parse", "--verify", &candidate_ref])?;
+    let candidate_commit_sha = if existing_ref.status.success() {
+        let existing = decoded_git_value(existing_ref)?;
+        derive_candidate_artifact(
+            &git,
+            repository,
+            authority,
+            &candidate_id,
+            &candidate_ref,
+            &existing,
+        )?
+        .candidate_commit_sha
+    } else if existing_ref.status.code() == Some(128) {
+        let staged = governed_git_output(
+            &git,
+            &canonical_workspace,
+            &["add", "--all", "--", ".", ":!.buildplane"],
+        )?;
+        if !staged.status.success() {
+            return Err(CandidateWorkspaceErrorV1::Git);
+        }
+        let tree = required_git_value(&git, &canonical_workspace, &["write-tree"])?;
+        let candidate_key = format!("{candidate_id}/{}/{}", authority.run_id, authority.attempt);
+        let message = format!("feat: buildplane candidate {candidate_key}");
+        let commit = required_git_value(
+            &git,
+            &canonical_workspace,
+            &[
+                "commit-tree",
+                &tree,
+                "-p",
+                &authority.base_commit_sha,
+                "-m",
+                &message,
+            ],
+        )?;
+        let empty = "0".repeat(authority.base_commit_sha.len());
+        let create_ref = governed_git_output(
+            &git,
+            repository,
+            &["update-ref", &candidate_ref, &commit, &empty],
+        )?;
+        if create_ref.status.success() {
+            commit
+        } else {
+            let concurrent =
+                required_git_value(&git, repository, &["rev-parse", "--verify", &candidate_ref])?;
+            if concurrent != commit {
+                return Err(CandidateWorkspaceErrorV1::ReconciliationRequired);
+            }
+            concurrent
+        }
+    } else {
+        return Err(CandidateWorkspaceErrorV1::Git);
+    };
+    let artifact = derive_candidate_artifact(
+        &git,
+        repository,
+        authority,
+        &candidate_id,
+        &candidate_ref,
+        &candidate_commit_sha,
+    )?;
+    if required_git_value(
+        &git,
+        repository,
+        &["rev-parse", "--verify", "HEAD^{commit}"],
+    )? != root_head
+        || required_git_value(&git, repository, &["rev-parse", "HEAD^{tree}"])? != root_tree
+        || required_git_value(&git, repository, &["rev-list", "--count", "HEAD"])? != root_count
+        || !required_git_value_allow_empty(&git, repository, &["status", "--porcelain=v1", "-z"])?
+            .is_empty()
+        || required_git_value(
+            &git,
+            &canonical_workspace,
+            &["rev-parse", "--verify", "HEAD^{commit}"],
+        )? != authority.base_commit_sha
+    {
+        return Err(CandidateWorkspaceErrorV1::ReconciliationRequired);
+    }
+    Ok(artifact)
+}
+
+fn verify_candidate_worktree_topology(
+    git: &Path,
+    repository: &Path,
+    workspace: &Path,
+) -> Result<(), CandidateWorkspaceErrorV1> {
+    let root_common = required_git_value(git, repository, &["rev-parse", "--git-common-dir"])?;
+    let root_common = canonical_git_path(repository, &root_common)?;
+    let workspace_common = required_git_value(git, workspace, &["rev-parse", "--git-common-dir"])?;
+    let workspace_common = canonical_git_path(workspace, &workspace_common)?;
+    let workspace_git_dir = required_git_value(git, workspace, &["rev-parse", "--git-dir"])?;
+    let workspace_git_dir = canonical_git_path(workspace, &workspace_git_dir)?;
+    let detached = governed_git_output(git, workspace, &["symbolic-ref", "-q", "HEAD"])?;
+    if root_common != workspace_common
+        || !workspace_git_dir.starts_with(root_common.join("worktrees"))
+        || detached.status.code() != Some(1)
+    {
+        return Err(CandidateWorkspaceErrorV1::ReconciliationRequired);
+    }
+    Ok(())
+}
+
+fn canonical_git_path(
+    repository: &Path,
+    value: &str,
+) -> Result<PathBuf, CandidateWorkspaceErrorV1> {
+    let path = PathBuf::from(value);
+    let path = if path.is_absolute() {
+        path
+    } else {
+        repository.join(path)
+    };
+    path.canonicalize()
+        .map_err(|_| CandidateWorkspaceErrorV1::ReconciliationRequired)
+}
+
+fn decoded_git_value(output: std::process::Output) -> Result<String, CandidateWorkspaceErrorV1> {
+    let value = String::from_utf8(output.stdout).map_err(|_| CandidateWorkspaceErrorV1::Git)?;
+    let value = value.trim().to_owned();
+    if value.is_empty() {
+        return Err(CandidateWorkspaceErrorV1::Git);
+    }
+    Ok(value)
+}
+
+fn required_git_bytes(
+    git: &Path,
+    repository: &Path,
+    args: &[&str],
+) -> Result<Vec<u8>, CandidateWorkspaceErrorV1> {
+    let output = governed_git_output(git, repository, args)?;
+    if !output.status.success() {
+        return Err(CandidateWorkspaceErrorV1::Git);
+    }
+    Ok(output.stdout)
+}
+
+fn derive_candidate_artifact(
+    git: &Path,
+    repository: &Path,
+    authority: &ResolvedGovernedV5CandidateAuthorityV1,
+    candidate_id: &str,
+    candidate_ref: &str,
+    candidate_commit_sha: &str,
+) -> Result<ImmutableCandidateArtifactV1, CandidateWorkspaceErrorV1> {
+    let ref_commit =
+        required_git_value(git, repository, &["rev-parse", "--verify", candidate_ref])?;
+    let parent = required_git_value(
+        git,
+        repository,
+        &["rev-parse", "--verify", &format!("{candidate_commit_sha}^")],
+    )?;
+    if ref_commit != candidate_commit_sha || parent != authority.base_commit_sha {
+        return Err(CandidateWorkspaceErrorV1::ReconciliationRequired);
+    }
+    let commit_digest = sha256_hex(&required_git_bytes(
+        git,
+        repository,
+        &["cat-file", "commit", candidate_commit_sha],
+    )?);
+    let tree_digest = sha256_hex(&required_git_bytes(
+        git,
+        repository,
+        &["ls-tree", "-r", "--full-tree", "-z", candidate_commit_sha],
+    )?);
+    let patch_digest = sha256_hex(&required_git_bytes(
+        git,
+        repository,
+        &[
+            "-c",
+            "core.quotePath=false",
+            "-c",
+            "diff.algorithm=myers",
+            "-c",
+            "diff.mnemonicPrefix=false",
+            "-c",
+            "diff.noprefix=false",
+            "diff",
+            "--binary",
+            "--full-index",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-renames",
+            "--no-color",
+            "--no-indent-heuristic",
+            "--unified=3",
+            &authority.base_commit_sha,
+            candidate_commit_sha,
+        ],
+    )?);
+    let changed_files_digest = sha256_hex(&required_git_bytes(
+        git,
+        repository,
+        &[
+            "-c",
+            "core.quotePath=false",
+            "-c",
+            "diff.algorithm=myers",
+            "-c",
+            "diff.mnemonicPrefix=false",
+            "-c",
+            "diff.noprefix=false",
+            "diff",
+            "--name-only",
+            "-z",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-renames",
+            "--no-color",
+            &authority.base_commit_sha,
+            candidate_commit_sha,
+        ],
+    )?);
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct CandidateDigestMaterial<'a> {
+        schema_version: u8,
+        candidate_id: &'a str,
+        run_id: String,
+        attempt: u32,
+        candidate_ref: &'a str,
+        base_sha: &'a str,
+        candidate_commit_sha: &'a str,
+        commit_digest: &'a str,
+        tree_digest: &'a str,
+        patch_digest: &'a str,
+        changed_files_digest: &'a str,
+    }
+    let material = CandidateDigestMaterial {
+        schema_version: 1,
+        candidate_id,
+        run_id: authority.run_id.to_string(),
+        attempt: authority.attempt,
+        candidate_ref,
+        base_sha: &authority.base_commit_sha,
+        candidate_commit_sha,
+        commit_digest: &commit_digest,
+        tree_digest: &tree_digest,
+        patch_digest: &patch_digest,
+        changed_files_digest: &changed_files_digest,
+    };
+    let candidate_digest = serde_json::to_vec(&material)
+        .map(|bytes| sha256_hex(&bytes))
+        .map_err(|_| CandidateWorkspaceErrorV1::ReconciliationRequired)?;
+    Ok(ImmutableCandidateArtifactV1 {
+        candidate_id: candidate_id.into(),
+        candidate_ref: candidate_ref.into(),
+        base_commit_sha: authority.base_commit_sha.clone(),
+        candidate_commit_sha: candidate_commit_sha.into(),
+        commit_digest: format!("sha256:{commit_digest}"),
+        tree_digest: format!("sha256:{tree_digest}"),
+        patch_digest: format!("sha256:{patch_digest}"),
+        changed_files_digest: format!("sha256:{changed_files_digest}"),
+        candidate_digest: format!("sha256:{candidate_digest}"),
+    })
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
 }
 
 fn candidate_identity(
@@ -637,5 +997,131 @@ mod tests {
             Err(CandidateWorkspaceErrorV1::ReconciliationRequired)
         );
         assert!(git_ok(repository.path(), &["status", "--porcelain"]).is_empty());
+    }
+
+    #[test]
+    fn finalization_is_idempotent_and_never_mutates_the_target_branch() {
+        let (repository, _custody, root, authority) = fixture();
+        let opened = open_candidate_workspace_v1(
+            &root,
+            repository.path().to_str().expect("utf8 repository"),
+            &authority,
+        )
+        .expect("open candidate");
+        fs::write(opened.path.join("candidate.txt"), "candidate\n").expect("candidate change");
+        fs::create_dir(opened.path.join(".buildplane")).expect("worker state directory");
+        fs::write(
+            opened.path.join(".buildplane").join("worker-state.json"),
+            "{}",
+        )
+        .expect("worker state");
+
+        let root_head = git_ok(repository.path(), &["rev-parse", "HEAD"]);
+        let root_tree = git_ok(repository.path(), &["rev-parse", "HEAD^{tree}"]);
+        let root_count = git_ok(repository.path(), &["rev-list", "--count", "HEAD"]);
+        let artifact =
+            finalize_candidate_workspace_v1(&root, &authority).expect("finalize candidate");
+
+        assert_eq!(artifact.candidate_id, opened.candidate_id);
+        assert_eq!(artifact.candidate_ref, opened.candidate_ref);
+        assert_eq!(artifact.base_commit_sha, root_head);
+        assert_eq!(
+            git_ok(
+                repository.path(),
+                &["rev-parse", "--verify", &opened.candidate_ref]
+            ),
+            artifact.candidate_commit_sha
+        );
+        assert_eq!(
+            git_ok(
+                repository.path(),
+                &["rev-parse", &format!("{}^", artifact.candidate_commit_sha)]
+            ),
+            root_head
+        );
+        assert_eq!(
+            git_ok(
+                repository.path(),
+                &[
+                    "show",
+                    "--format=",
+                    "--name-only",
+                    &artifact.candidate_commit_sha
+                ]
+            ),
+            "candidate.txt",
+            "private worker state must not enter the candidate"
+        );
+        assert_eq!(git_ok(repository.path(), &["rev-parse", "HEAD"]), root_head);
+        assert_eq!(
+            git_ok(repository.path(), &["rev-parse", "HEAD^{tree}"]),
+            root_tree
+        );
+        assert_eq!(
+            git_ok(repository.path(), &["rev-list", "--count", "HEAD"]),
+            root_count
+        );
+        assert!(git_ok(repository.path(), &["status", "--porcelain"]).is_empty());
+        assert_eq!(
+            git_ok(&opened.path, &["rev-parse", "HEAD"]),
+            root_head,
+            "candidate workspace must remain detached at the base"
+        );
+        for digest in [
+            &artifact.commit_digest,
+            &artifact.tree_digest,
+            &artifact.patch_digest,
+            &artifact.changed_files_digest,
+            &artifact.candidate_digest,
+        ] {
+            assert!(
+                digest
+                    .strip_prefix("sha256:")
+                    .is_some_and(|hex| hex.len() == 64
+                        && hex
+                            .bytes()
+                            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))),
+                "digest is not canonical: {digest}"
+            );
+        }
+
+        let replay =
+            finalize_candidate_workspace_v1(&root, &authority).expect("replay finalization");
+        assert_eq!(replay, artifact);
+        assert_eq!(git_ok(repository.path(), &["rev-parse", "HEAD"]), root_head);
+        assert_eq!(
+            git_ok(repository.path(), &["rev-list", "--count", "HEAD"]),
+            root_count
+        );
+        assert!(git_ok(repository.path(), &["status", "--porcelain"]).is_empty());
+    }
+
+    #[test]
+    fn stale_or_dirty_target_prevents_finalization_and_candidate_ref_creation() {
+        let (repository, _custody, root, authority) = fixture();
+        let opened = open_candidate_workspace_v1(
+            &root,
+            repository.path().to_str().expect("utf8 repository"),
+            &authority,
+        )
+        .expect("open candidate");
+        fs::write(opened.path.join("candidate.txt"), "candidate\n").expect("candidate change");
+        fs::write(repository.path().join("dirty.txt"), "dirty\n").expect("dirty target");
+
+        assert_eq!(
+            finalize_candidate_workspace_v1(&root, &authority),
+            Err(CandidateWorkspaceErrorV1::BaseMismatch)
+        );
+        assert!(
+            !governed_git_output(
+                &governed_git_executable().expect("git"),
+                repository.path(),
+                &["show-ref", "--verify", "--quiet", &opened.candidate_ref],
+            )
+            .expect("query ref")
+            .status
+            .success(),
+            "failed finalization must not publish a candidate ref"
+        );
     }
 }

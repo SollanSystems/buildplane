@@ -198,6 +198,12 @@ pub(crate) fn governed_git_output(
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_COUNT", "0")
         .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_AUTHOR_NAME", "Buildplane Protected Host")
+        .env("GIT_AUTHOR_EMAIL", "protected-host@buildplane.invalid")
+        .env("GIT_COMMITTER_NAME", "Buildplane Protected Host")
+        .env("GIT_COMMITTER_EMAIL", "protected-host@buildplane.invalid")
+        .env("GIT_AUTHOR_DATE", "2000-01-01T00:00:00Z")
+        .env("GIT_COMMITTER_DATE", "2000-01-01T00:00:00Z")
         .args([
             "--no-optional-locks",
             "-c",
