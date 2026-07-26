@@ -607,8 +607,13 @@ role, candidate digest for review-like roles, absolute deadline, and separate
 input/output token ceilings; responses require a structured output, metered
 token counts, request identity, and a closed stop reason. Unknown fields,
 role/candidate mismatches, and substituted schemas fail before an adapter can
-perform transport. The OpenAI and Anthropic crates remain fail-closed stubs
-until their host-credential transports implement this contract.
+perform transport. The Anthropic adapter maps that contract to the Messages
+API's current `output_config.format` and strict tool definitions, delegates
+only a credential-free wire request to an injected host-owned transport, and
+parses structured output, tool calls, stop reason, and complete cached-plus-
+uncached input usage back into the closed provider response. The OpenAI crate
+and the production Anthropic host-credential transport remain fail-closed
+until their protected-host integrations implement the same boundary.
 
 The provider worker seals only a content-addressed `ModelResultEvidenceV1`.
 Its implementer result digest is recomputed from the closed completion, and

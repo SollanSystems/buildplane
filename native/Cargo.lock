@@ -256,6 +256,9 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "bp-provider-sdk",
+ "futures",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
