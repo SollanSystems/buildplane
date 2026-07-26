@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use bp_ledger::payload::activity_claim::ActivityResultOutcomeV1;
 use bp_ledger::payload::model_evidence::ModelProviderV1;
-use bp_provider_sdk::ProviderTokenCountRequestV1;
+use bp_provider_sdk::{ProviderTokenCountRequestV1, ProviderTokenCounterV1};
 use thiserror::Error;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -114,6 +114,65 @@ pub(crate) trait ProviderTokenPreflightGatewayV1: Send {
         &mut self,
         capability: PrivateProviderTokenPreflightCapabilityV1,
     ) -> PairedProviderTokenPreflightResultV1;
+}
+
+pub(crate) trait ProviderTokenPreflightEvidenceWriterV1: Send {
+    fn succeeded(
+        &mut self,
+        capability: &PrivateProviderTokenPreflightCapabilityV1,
+        input_tokens: u32,
+    ) -> Option<ProviderTokenPreflightGatewayCompletionV1>;
+
+    fn unknown(
+        &mut self,
+        capability: &PrivateProviderTokenPreflightCapabilityV1,
+    ) -> Option<ProviderTokenPreflightGatewayCompletionV1>;
+}
+
+pub(crate) struct CredentialProviderTokenPreflightGatewayV1<C, W> {
+    counter: C,
+    evidence_writer: W,
+}
+
+impl<C, W> CredentialProviderTokenPreflightGatewayV1<C, W> {
+    pub(crate) fn new(counter: C, evidence_writer: W) -> Self {
+        Self {
+            counter,
+            evidence_writer,
+        }
+    }
+}
+
+#[async_trait]
+impl<C, W> ProviderTokenPreflightGatewayV1 for CredentialProviderTokenPreflightGatewayV1<C, W>
+where
+    C: ProviderTokenCounterV1 + Send + Sync,
+    W: ProviderTokenPreflightEvidenceWriterV1,
+{
+    async fn count(
+        &mut self,
+        capability: PrivateProviderTokenPreflightCapabilityV1,
+    ) -> PairedProviderTokenPreflightResultV1 {
+        let expected_provider = match capability.provider {
+            ModelProviderV1::Anthropic => "anthropic",
+            ModelProviderV1::Openai => "openai",
+        };
+        let completion = if self.counter.id() != expected_provider {
+            None
+        } else {
+            match self.counter.count_input_tokens(&capability.request).await {
+                Ok(input_tokens) => self.evidence_writer.succeeded(&capability, input_tokens),
+                Err(_) => self.evidence_writer.unknown(&capability),
+            }
+        }
+        .unwrap_or_else(|| ProviderTokenPreflightGatewayCompletionV1 {
+            outcome: ActivityResultOutcomeV1::Unknown,
+            input_tokens: None,
+            evidence_digest: String::new(),
+            evidence_ref: String::new(),
+        });
+        capability.complete(completion)
+    }
 }
 
 pub(crate) trait ProviderTokenPreflightBackendV1 {

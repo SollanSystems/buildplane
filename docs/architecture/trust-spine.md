@@ -712,7 +712,12 @@ remote count is invoked only after a durable grant, a recorded result is
 reused without another call, and either an unknown provider effect or a
 post-call durable-write failure yields reconciliation rather than retry
 authority. Its production ledger/CAS backend and Anthropic counter binding are
-still intentionally unexported work.
+still intentionally unexported work. A credential-owning counter adapter is
+now paired with a broker-owned evidence writer: provider mismatch or evidence
+writer failure cannot produce a recordable completion, and provider errors are
+normalized to an unknown-effect record rather than surfaced as retryable
+transport failures. The CAS evidence writer and ledger backend are the
+remaining production bindings.
 
 Those counts are persisted in the signed action receipt and replayed as one
 checked aggregate for the sealed V3 dispatch attempt. A metered failed call
