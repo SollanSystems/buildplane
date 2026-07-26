@@ -652,6 +652,16 @@ mod tests {
                     "tmpfs_bytes": 67108864
                 },
                 "dispatch": signer("dispatch:governed", "dispatch-main", [31; 32]),
+                "v5_admission_record": signer(
+                    "kernel:v5-admission",
+                    "v5-admission-main",
+                    [35; 32]
+                ),
+                "v5_admission_checkpoint": signer(
+                    "kernel:v5-admission-checkpoint",
+                    "v5-checkpoint-main",
+                    [36; 32]
+                ),
                 "action_request": signer(
                     "kernel:model-action",
                     "action-main",

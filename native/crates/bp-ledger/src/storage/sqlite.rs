@@ -388,8 +388,9 @@ impl GovernedDispatchAdmissionAuthorityV1 {
 /// third identity must seal the resulting complete tape prefix.
 ///
 /// This authority is deliberately narrower than any effect authority. A
-/// sealed V5 admission record is recovery evidence only until a future,
-/// separately designed V5 action plane explicitly consumes it.
+/// sealed V5 admission remains inert unless the separately configured action
+/// authority reopens it, verifies its checkpoint, and binds a typed action to
+/// the exact nested dispatch.
 #[derive(Clone, Debug)]
 pub struct GovernedDispatchV5AdmissionAuthorityV1 {
     trusted_keys: TrustedPublicKeys,
@@ -643,6 +644,35 @@ pub struct GovernedV5CommandActionIssueRequestV1 {
     pub dispatch_event_id: EventId,
     pub admission_event_id: EventId,
     pub packet_source: String,
+}
+
+/// Closed read-only request used by the protected candidate host to identify
+/// one sealed V5 dispatch from normalized packet bytes. Event identities are
+/// deliberately not caller inputs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolveGovernedV5CandidateAuthorityRequestV1 {
+    pub run_id: RunId,
+    pub packet_source: String,
+}
+
+/// Exact candidate-opening authority recovered from one checkpoint-sealed V5
+/// admission. This contains no signer or lease capability; it lets the host
+/// verify the local repository and derive fixed candidate/session identities
+/// before issuing the separately signed command action.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedGovernedV5CandidateAuthorityV1 {
+    pub run_id: RunId,
+    pub dispatch_event_id: EventId,
+    pub admission_event_id: EventId,
+    pub workflow_id: String,
+    pub unit_id: String,
+    pub attempt: u32,
+    pub provenance_ref: String,
+    pub base_commit_sha: String,
+    pub repository_binding_digest: String,
+    pub dispatch_envelope_digest: String,
+    pub governed_packet_digest: String,
+    pub sandbox_profile_digest: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2215,8 +2245,9 @@ impl SqliteStore {
             -- receipt. This is intentionally distinct from the observation
             -- shadow: it is signed by a separately configured admission
             -- identity and may advance once when a third checkpoint identity
-            -- seals the complete signed prefix. It is still not V5 effect
-            -- authority; no claim/candidate/promotion path consumes it here.
+            -- seals the complete signed prefix. It is not effect authority on
+            -- its own: the candidate/action plane reopens this evidence only
+            -- together with a separately configured activity authority.
             CREATE TABLE IF NOT EXISTS governed_dispatch_v5_admissions (
                 run_id                              TEXT NOT NULL,
                 idempotency_key                     TEXT NOT NULL,
@@ -6981,6 +7012,109 @@ impl SqliteStore {
         Ok(issued.disposition)
     }
 
+    /// Resolve the single live, checkpoint-sealed V5 admission whose signed
+    /// dispatch exactly binds the supplied normalized packet. The caller
+    /// cannot choose either tape event identity.
+    pub fn resolve_governed_v5_candidate_authority_v1(
+        &self,
+        request: &ResolveGovernedV5CandidateAuthorityRequestV1,
+        v5_authority: &GovernedDispatchV5AdmissionAuthorityV1,
+        activity_authority: &ActivityClaimAuthorityV1,
+    ) -> Result<ResolvedGovernedV5CandidateAuthorityV1> {
+        self.resolve_governed_v5_candidate_authority_v1_at(
+            request,
+            v5_authority,
+            activity_authority,
+            Utc::now(),
+        )
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn resolve_governed_v5_candidate_authority_v1_at_for_tests(
+        &self,
+        request: &ResolveGovernedV5CandidateAuthorityRequestV1,
+        v5_authority: &GovernedDispatchV5AdmissionAuthorityV1,
+        activity_authority: &ActivityClaimAuthorityV1,
+        now: DateTime<Utc>,
+    ) -> Result<ResolvedGovernedV5CandidateAuthorityV1> {
+        self.resolve_governed_v5_candidate_authority_v1_at(
+            request,
+            v5_authority,
+            activity_authority,
+            now,
+        )
+    }
+
+    fn resolve_governed_v5_candidate_authority_v1_at(
+        &self,
+        request: &ResolveGovernedV5CandidateAuthorityRequestV1,
+        v5_authority: &GovernedDispatchV5AdmissionAuthorityV1,
+        activity_authority: &ActivityClaimAuthorityV1,
+        now: DateTime<Utc>,
+    ) -> Result<ResolvedGovernedV5CandidateAuthorityV1> {
+        let now = canonical_ledger_timestamp(now)?;
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Deferred)?;
+        let admissions = sealed_governed_dispatch_v5_admissions_for_run(&tx, request.run_id)?;
+        let mut resolved = None;
+
+        for admission in admissions {
+            let material = verified_sealed_v5_dispatch_action_material(
+                &tx,
+                request.run_id,
+                admission.source_dispatch_event_id,
+                admission.admission_event_id,
+                v5_authority,
+                activity_authority,
+            )?;
+            let packet = match verified_governed_command_packet_for_dispatch(
+                &request.packet_source,
+                &material.dispatch,
+            ) {
+                Ok(packet) => packet,
+                Err(LedgerError::ActivityClaimAuthorityRejected { .. }) => continue,
+                Err(error) => return Err(error),
+            };
+            validate_governed_dispatch(&material.dispatch, now).map_err(|error| {
+                LedgerError::ActivityClaimAuthorityRejected {
+                    reason: format!(
+                        "candidate opening requires a live signed V5 dispatch authority window: {error}"
+                    ),
+                }
+            })?;
+
+            if resolved.is_some() {
+                return Err(governed_dispatch_v5_admission_reconciliation_required(
+                    request.run_id,
+                    "candidate-authority",
+                    "multiple sealed V5 admissions bind the same candidate packet",
+                ));
+            }
+
+            let dispatch = material.dispatch;
+            resolved = Some(ResolvedGovernedV5CandidateAuthorityV1 {
+                run_id: request.run_id,
+                dispatch_event_id: admission.source_dispatch_event_id,
+                admission_event_id: admission.admission_event_id,
+                workflow_id: dispatch.body.workflow_id,
+                unit_id: dispatch.body.unit_id,
+                attempt: dispatch.body.attempt,
+                provenance_ref: dispatch.body.provenance_ref,
+                base_commit_sha: dispatch.body.base_commit_sha,
+                repository_binding_digest: dispatch.repository_binding_digest,
+                dispatch_envelope_digest: material.lineage_envelope_digest,
+                governed_packet_digest: packet.canonical_digest()?,
+                sandbox_profile_digest: dispatch.body.sandbox_profile_digest,
+            });
+        }
+
+        tx.commit()?;
+        resolved.ok_or_else(|| LedgerError::ActivityClaimAuthorityRejected {
+            reason:
+                "candidate opening requires exactly one live sealed V5 admission for this packet"
+                    .into(),
+        })
+    }
+
     /// Claim the one fixed read-only verifier activity named by signed V3
     /// evidence. This is deliberately narrower than the generic claim API:
     /// callers can name only event references and a bounded lease, while the
@@ -9132,21 +9266,10 @@ struct GovernedCommandActionIssueInTx {
     appended_event: Option<Event>,
 }
 
-#[allow(clippy::too_many_arguments)]
-fn issue_governed_command_action_from_dispatch_in_tx(
-    tx: &Transaction<'_>,
-    run_id: RunId,
-    dispatch_event_id: EventId,
+fn verified_governed_command_packet_for_dispatch(
     packet_source: &str,
-    dispatch_material: DispatchAuthorityMaterialV1,
-    cas: &Cas,
-    authority: &ActivityClaimAuthorityV1,
-    signing_key: &SigningKey,
-    signer: &ActorKeyRef,
-    now: DateTime<Utc>,
-) -> Result<GovernedCommandActionIssueInTx> {
-    let dispatch = dispatch_material.dispatch;
-    let dispatch_envelope_digest = dispatch_material.lineage_envelope_digest;
+    dispatch: &DispatchEnvelopeV3,
+) -> Result<GovernedCommandPacketV1> {
     let governed_packet_digest = dispatch.governed_packet_digest.as_deref().ok_or_else(|| {
         LedgerError::ActivityClaimAuthorityRejected {
             reason: "governed command dispatch does not bind a normalized packet".into(),
@@ -9167,6 +9290,26 @@ fn issue_governed_command_action_from_dispatch_in_tx(
                 .into(),
         });
     }
+    Ok(packet)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn issue_governed_command_action_from_dispatch_in_tx(
+    tx: &Transaction<'_>,
+    run_id: RunId,
+    dispatch_event_id: EventId,
+    packet_source: &str,
+    dispatch_material: DispatchAuthorityMaterialV1,
+    cas: &Cas,
+    authority: &ActivityClaimAuthorityV1,
+    signing_key: &SigningKey,
+    signer: &ActorKeyRef,
+    now: DateTime<Utc>,
+) -> Result<GovernedCommandActionIssueInTx> {
+    let dispatch = dispatch_material.dispatch;
+    let dispatch_envelope_digest = dispatch_material.lineage_envelope_digest;
+    let packet = verified_governed_command_packet_for_dispatch(packet_source, &dispatch)?;
+    let governed_packet_digest = packet.canonical_digest()?;
     let action_id = format!(
         "governed:{}:{}",
         run_id,
@@ -9218,7 +9361,7 @@ fn issue_governed_command_action_from_dispatch_in_tx(
         dispatch_envelope_digest: dispatch_envelope_digest.clone(),
         repository_binding_digest: dispatch.repository_binding_digest.clone(),
         ledger_authority_realm_digest: dispatch.ledger_authority_realm_digest.clone(),
-        governed_packet_digest: Some(governed_packet_digest.into()),
+        governed_packet_digest: Some(governed_packet_digest),
         capability_bundle_digest: dispatch.body.capability_bundle_digest.clone(),
         policy_digest,
         context_manifest_digest: dispatch.body.context_manifest_digest.clone(),
@@ -13197,6 +13340,27 @@ fn governed_dispatch_v5_admission_by_source(
     )
     .optional()
     .map_err(LedgerError::from)
+}
+
+fn sealed_governed_dispatch_v5_admissions_for_run(
+    conn: &Connection,
+    run_id: RunId,
+) -> Result<Vec<StoredGovernedDispatchV5Admission>> {
+    let query = format!(
+        "SELECT {GOVERNED_DISPATCH_V5_ADMISSION_COLUMNS} \
+         FROM governed_dispatch_v5_admissions \
+         WHERE run_id = ?1 AND state = 'sealed' \
+         ORDER BY admission_event_id ASC"
+    );
+    let mut statement = conn.prepare(&query)?;
+    let admissions = statement
+        .query_map(
+            params![run_id.to_string()],
+            stored_governed_dispatch_v5_admission_from_row,
+        )?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(LedgerError::from)?;
+    Ok(admissions)
 }
 
 fn governed_dispatch_v5_admission_by_admission_event(

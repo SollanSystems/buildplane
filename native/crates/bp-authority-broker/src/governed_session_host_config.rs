@@ -8,7 +8,8 @@ use bp_ledger::keyring::KeyringRef;
 use bp_ledger::payload::model_evidence::ModelProviderV1;
 use bp_ledger::signing::{public_key_hash, ActorKeyRef, TrustedPublicKeys};
 use bp_ledger::storage::sqlite::{
-    ActivityClaimAuthorityV1, MAX_ACTIVITY_LEASE_MS, MIN_ACTIVITY_LEASE_MS,
+    ActivityClaimAuthorityV1, GovernedDispatchV5AdmissionAuthorityV1, MAX_ACTIVITY_LEASE_MS,
+    MIN_ACTIVITY_LEASE_MS,
 };
 use bp_ledger::RunId;
 use bp_replay::{TrustSpineSignerRole, TrustedReplayAuthorities};
@@ -45,10 +46,13 @@ pub(crate) struct GovernedSessionHostConfigV1 {
     pub(crate) allowed_provider_models: Vec<AllowedProviderModelV1>,
     pub(crate) allowed_worker_manifest_digests: Vec<String>,
     pub(crate) dispatch_signer: ActorKeyRef,
+    pub(crate) v5_admission_record_signer: ActorKeyRef,
+    pub(crate) v5_admission_checkpoint_signer: ActorKeyRef,
     pub(crate) action_request_signer: ActorKeyRef,
     pub(crate) claim_signer: ActorKeyRef,
     pub(crate) broker_identity_signer: ActorKeyRef,
     pub(crate) activity_authority: ActivityClaimAuthorityV1,
+    pub(crate) v5_admission_authority: GovernedDispatchV5AdmissionAuthorityV1,
     pub(crate) replay_authorities: TrustedReplayAuthorities,
     pub(crate) confinement_policy: BrokerHostConfinementPolicyV1,
     pub(crate) oci_profile: RootlessOciProfileV1,
@@ -75,6 +79,8 @@ struct RawGovernedSessionHostConfigV1 {
     allowed_worker_manifest_digests: Vec<String>,
     oci: RawOciProfileV1,
     dispatch: RawSignerV1,
+    v5_admission_record: RawSignerV1,
+    v5_admission_checkpoint: RawSignerV1,
     action_request: RawSignerV1,
     claim: RawSignerV1,
     broker_identity: RawSignerV1,
@@ -162,10 +168,19 @@ pub(crate) fn parse_governed_session_host_config_v1(
         parse_worker_manifest_digests(raw.allowed_worker_manifest_digests)?;
 
     let dispatch = parse_signer(raw.dispatch)?;
+    let v5_admission_record = parse_signer(raw.v5_admission_record)?;
+    let v5_admission_checkpoint = parse_signer(raw.v5_admission_checkpoint)?;
     let action_request = parse_signer(raw.action_request)?;
     let claim = parse_signer(raw.claim)?;
     let broker_identity = parse_signer(raw.broker_identity)?;
-    let signers = [&dispatch, &action_request, &claim, &broker_identity];
+    let signers = [
+        &dispatch,
+        &v5_admission_record,
+        &v5_admission_checkpoint,
+        &action_request,
+        &claim,
+        &broker_identity,
+    ];
     let mut actor_ids = BTreeSet::new();
     let mut signer_identities = BTreeSet::new();
     let mut public_key_hashes = BTreeSet::new();
@@ -189,6 +204,8 @@ pub(crate) fn parse_governed_session_host_config_v1(
     }
 
     let dispatch_signer = dispatch.identity;
+    let v5_admission_record_signer = v5_admission_record.identity;
+    let v5_admission_checkpoint_signer = v5_admission_checkpoint.identity;
     let action_request_signer = action_request.identity;
     let claim_signer = claim.identity;
     let broker_identity_signer = broker_identity.identity;
@@ -200,10 +217,20 @@ pub(crate) fn parse_governed_session_host_config_v1(
         raw.authority_realm_digest.clone(),
     )
     .map_err(|_| GovernedSessionHostConfigErrorV1::Invalid)?;
+    let v5_admission_authority = GovernedDispatchV5AdmissionAuthorityV1::new_governed_realm(
+        trusted_keys.clone(),
+        dispatch_signer.clone(),
+        v5_admission_record_signer.clone(),
+        v5_admission_checkpoint_signer.clone(),
+        raw.authority_realm_digest.clone(),
+    )
+    .map_err(|_| GovernedSessionHostConfigErrorV1::Invalid)?;
 
     let mut replay_authorities = TrustedReplayAuthorities::new(trusted_keys);
     for signer in [
         dispatch_signer.clone(),
+        v5_admission_record_signer.clone(),
+        v5_admission_checkpoint_signer.clone(),
         action_request_signer.clone(),
         claim_signer.clone(),
     ] {
@@ -237,10 +264,13 @@ pub(crate) fn parse_governed_session_host_config_v1(
         allowed_provider_models,
         allowed_worker_manifest_digests,
         dispatch_signer,
+        v5_admission_record_signer,
+        v5_admission_checkpoint_signer,
         action_request_signer,
         claim_signer,
         broker_identity_signer,
         activity_authority,
+        v5_admission_authority,
         replay_authorities,
         confinement_policy,
         oci_profile,
@@ -385,6 +415,16 @@ mod tests {
                 "tmpfs_bytes": 67108864
             },
             "dispatch": signer("dispatch:governed", "dispatch-main", 1),
+            "v5_admission_record": signer(
+                "kernel:v5-admission",
+                "v5-admission-main",
+                5
+            ),
+            "v5_admission_checkpoint": signer(
+                "kernel:v5-admission-checkpoint",
+                "v5-checkpoint-main",
+                6
+            ),
             "action_request": signer("kernel:model-action", "action-main", 2),
             "claim": signer("kernel:model-claim", "claim-main", 3),
             "broker_identity": signer("broker:governed-session", "broker-main", 4),
@@ -403,6 +443,11 @@ mod tests {
         assert_eq!(config.allowed_provider_models.len(), 2);
         assert_eq!(config.model_action_lease_ms, MIN_ACTIVITY_LEASE_MS);
         assert_ne!(config.dispatch_signer, config.action_request_signer);
+        assert_ne!(config.dispatch_signer, config.v5_admission_record_signer);
+        assert_ne!(
+            config.v5_admission_record_signer,
+            config.v5_admission_checkpoint_signer
+        );
         assert_ne!(config.action_request_signer, config.claim_signer);
         assert_ne!(config.claim_signer, config.broker_identity_signer);
     }
@@ -442,8 +487,17 @@ mod tests {
         assert!(parse_governed_session_host_config_v1(&lease.to_string()).is_err());
 
         for (left, right) in [
+            ("dispatch", "v5_admission_record"),
+            ("dispatch", "v5_admission_checkpoint"),
             ("dispatch", "action_request"),
             ("dispatch", "claim"),
+            ("v5_admission_record", "v5_admission_checkpoint"),
+            ("v5_admission_record", "action_request"),
+            ("v5_admission_record", "claim"),
+            ("v5_admission_record", "broker_identity"),
+            ("v5_admission_checkpoint", "action_request"),
+            ("v5_admission_checkpoint", "claim"),
+            ("v5_admission_checkpoint", "broker_identity"),
             ("action_request", "claim"),
             ("dispatch", "broker_identity"),
             ("action_request", "broker_identity"),

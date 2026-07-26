@@ -32,7 +32,7 @@ use bp_ledger::storage::sqlite::{
     GovernedDispatchV5AdmissionAuthorityV1, GovernedDispatchV5AdmissionDispositionV1,
     GovernedDispatchV5AdmissionRequestV1, GovernedDispatchV5AdmissionSealRequestV1,
     GovernedV5CommandActionAuthorizeAndClaimRequestV1, GovernedV5CommandActionIssueRequestV1,
-    SqliteStore,
+    ResolveGovernedV5CandidateAuthorityRequestV1, SqliteStore,
 };
 use bp_ledger::storage::Cas;
 use bp_ledger::{LedgerError, Payload};
@@ -829,6 +829,10 @@ fn v5_command_issuance_requires_a_checkpoint_sealed_admission() {
         admission_event_id,
         packet_source: governed_command_packet_source(),
     };
+    let candidate_request = ResolveGovernedV5CandidateAuthorityRequestV1 {
+        run_id: fixture.run_id,
+        packet_source: governed_command_packet_source(),
+    };
 
     let unsealed = store.issue_governed_v5_command_action_v1(
         &action_request,
@@ -847,6 +851,14 @@ fn v5_command_issuance_requires_a_checkpoint_sealed_admission() {
         6,
         "an admission receipt without checkpoint coverage must not issue an action"
     );
+    assert!(matches!(
+        store.resolve_governed_v5_candidate_authority_v1(
+            &candidate_request,
+            &v5_authority,
+            &activity_authority,
+        ),
+        Err(LedgerError::ActivityClaimAuthorityRejected { .. })
+    ));
 
     store
         .seal_governed_dispatch_v5_admission_v1(
@@ -859,6 +871,63 @@ fn v5_command_issuance_requires_a_checkpoint_sealed_admission() {
             &checkpoint_signer,
         )
         .expect("seal V5 admission");
+    let resolved = store
+        .resolve_governed_v5_candidate_authority_v1(
+            &candidate_request,
+            &v5_authority,
+            &activity_authority,
+        )
+        .expect("resolve candidate authority from packet alone");
+    let dispatch_v3 = &fixture.dispatch.dispatch_v4.dispatch_v3;
+    assert_eq!(resolved.run_id, fixture.run_id);
+    assert_eq!(resolved.dispatch_event_id, fixture.dispatch_event.id);
+    assert_eq!(resolved.admission_event_id, admission_event_id);
+    assert_eq!(resolved.workflow_id, dispatch_v3.body.workflow_id);
+    assert_eq!(resolved.unit_id, dispatch_v3.body.unit_id);
+    assert_eq!(resolved.attempt, dispatch_v3.body.attempt);
+    assert_eq!(resolved.provenance_ref, dispatch_v3.body.provenance_ref);
+    assert_eq!(resolved.base_commit_sha, dispatch_v3.body.base_commit_sha);
+    assert_eq!(
+        resolved.repository_binding_digest,
+        dispatch_v3.repository_binding_digest
+    );
+    assert_eq!(
+        resolved.dispatch_envelope_digest,
+        fixture.dispatch.envelope_digest
+    );
+    assert_eq!(
+        resolved.governed_packet_digest,
+        dispatch_v3
+            .governed_packet_digest
+            .clone()
+            .expect("packet digest")
+    );
+    assert_eq!(
+        resolved.sandbox_profile_digest,
+        dispatch_v3.body.sandbox_profile_digest
+    );
+    assert!(matches!(
+        store.resolve_governed_v5_candidate_authority_v1(
+            &ResolveGovernedV5CandidateAuthorityRequestV1 {
+                packet_source: governed_command_packet_source().replace("/usr/bin/git", "/bin/sh"),
+                ..candidate_request.clone()
+            },
+            &v5_authority,
+            &activity_authority,
+        ),
+        Err(LedgerError::ActivityClaimAuthorityRejected { .. })
+    ));
+    assert!(matches!(
+        store.resolve_governed_v5_candidate_authority_v1_at_for_tests(
+            &candidate_request,
+            &v5_authority,
+            &activity_authority,
+            "2100-01-01T00:00:00Z"
+                .parse()
+                .expect("parse expired candidate open time"),
+        ),
+        Err(LedgerError::ActivityClaimAuthorityRejected { .. })
+    ));
     let substituted_packet = GovernedV5CommandActionIssueRequestV1 {
         packet_source: governed_command_packet_source().replace("/usr/bin/git", "/bin/sh"),
         ..action_request.clone()

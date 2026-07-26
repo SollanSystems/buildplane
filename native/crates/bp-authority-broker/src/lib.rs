@@ -43,6 +43,8 @@ use thiserror::Error;
 #[allow(dead_code)]
 mod admission_protocol;
 mod anthropic_model_gateway;
+#[allow(dead_code)] // Candidate host composition consumes this after sealed V5 resolution.
+mod candidate_repository;
 #[allow(dead_code)] // Activated by the protected candidate/OCI host composition next.
 mod command_action;
 mod confinement;

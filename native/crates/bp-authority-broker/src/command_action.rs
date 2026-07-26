@@ -15,6 +15,7 @@ use bp_ledger::storage::sqlite::{
     ActivityClaimAuthorityV1, ActivityResultDispositionV1,
     GovernedCommandActionAuthorizeAndClaimDispositionV1,
     GovernedCommandActionAuthorizeAndClaimRequestV1, GovernedCommandActionResultRequestV1,
+    GovernedDispatchV5AdmissionAuthorityV1, GovernedV5CommandActionAuthorizeAndClaimRequestV1,
     SqliteStore,
 };
 use bp_ledger::storage::Cas;
@@ -314,6 +315,149 @@ impl CommandAuthorityBackend for LedgerCommandAuthorityBackend<'_> {
             }
         })
     }
+}
+
+/// Protected V5 command backend. The admission receipt identity is bound when
+/// the candidate session is opened and cannot be replaced by an individual
+/// command request. Both authorization and durable claim creation therefore
+/// traverse the ledger's sealed-V5-only entry point.
+pub(crate) struct LedgerV5CommandAuthorityBackend<'a> {
+    store: &'a SqliteStore,
+    cas: &'a Cas,
+    v5_authority: &'a GovernedDispatchV5AdmissionAuthorityV1,
+    activity_authority: &'a ActivityClaimAuthorityV1,
+    admission_event_id: EventId,
+    signing_key: &'a SigningKey,
+    signer: &'a ActorKeyRef,
+}
+
+impl<'a> LedgerV5CommandAuthorityBackend<'a> {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        store: &'a SqliteStore,
+        cas: &'a Cas,
+        v5_authority: &'a GovernedDispatchV5AdmissionAuthorityV1,
+        activity_authority: &'a ActivityClaimAuthorityV1,
+        admission_event_id: EventId,
+        signing_key: &'a SigningKey,
+        signer: &'a ActorKeyRef,
+    ) -> Self {
+        Self {
+            store,
+            cas,
+            v5_authority,
+            activity_authority,
+            admission_event_id,
+            signing_key,
+            signer,
+        }
+    }
+}
+
+impl CommandAuthorityBackend for LedgerV5CommandAuthorityBackend<'_> {
+    fn authorize_and_claim(
+        &mut self,
+        run_id: RunId,
+        request: &BrokerCommandActionRequest,
+        lease_duration_ms: u64,
+    ) -> Result<CommandAuthorityGrant, CommandAuthorityError> {
+        let disposition = self
+            .store
+            .authorize_and_claim_governed_v5_command_action_v1(
+                &GovernedV5CommandActionAuthorizeAndClaimRequestV1 {
+                    run_id,
+                    dispatch_event_id: request.dispatch_event_id,
+                    admission_event_id: self.admission_event_id,
+                    action_request_event_id: request.action_request_event_id,
+                    lease_duration_ms,
+                },
+                self.cas,
+                self.v5_authority,
+                self.activity_authority,
+                self.signing_key,
+                self.signer,
+            )?;
+        Ok(command_grant_from_disposition(run_id, disposition))
+    }
+
+    fn record_result(
+        &mut self,
+        run_id: RunId,
+        lease_id: String,
+        completion: CommandGatewayCompletion,
+    ) -> Result<CommandResultDisposition, CommandAuthorityError> {
+        record_command_result(
+            self.store,
+            self.activity_authority,
+            self.signing_key,
+            self.signer,
+            run_id,
+            lease_id,
+            completion,
+        )
+    }
+}
+
+fn command_grant_from_disposition(
+    run_id: RunId,
+    disposition: GovernedCommandActionAuthorizeAndClaimDispositionV1,
+) -> CommandAuthorityGrant {
+    match disposition {
+        GovernedCommandActionAuthorizeAndClaimDispositionV1::Granted {
+            lease_id,
+            lease_expires_at,
+            command_intent,
+            ..
+        } => CommandAuthorityGrant::Granted {
+            run_id,
+            lease_id,
+            lease_expires_at,
+            command_intent,
+        },
+        GovernedCommandActionAuthorizeAndClaimDispositionV1::Pending { .. } => {
+            CommandAuthorityGrant::Pending { run_id }
+        }
+        GovernedCommandActionAuthorizeAndClaimDispositionV1::Recorded { outcome, .. } => {
+            CommandAuthorityGrant::Recorded { run_id, outcome }
+        }
+        GovernedCommandActionAuthorizeAndClaimDispositionV1::LeaseExpired { .. } => {
+            CommandAuthorityGrant::LeaseExpired { run_id }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_command_result(
+    store: &SqliteStore,
+    authority: &ActivityClaimAuthorityV1,
+    signing_key: &SigningKey,
+    signer: &ActorKeyRef,
+    run_id: RunId,
+    lease_id: String,
+    completion: CommandGatewayCompletion,
+) -> Result<CommandResultDisposition, CommandAuthorityError> {
+    let disposition = store.record_governed_command_action_result_v1(
+        &GovernedCommandActionResultRequestV1 {
+            run_id,
+            lease_id,
+            outcome: completion.outcome,
+            result_digest: completion.result_digest,
+            result_ref: completion.result_ref,
+            evidence_digest: completion.evidence_digest,
+            evidence_ref: completion.evidence_ref,
+        },
+        authority,
+        signing_key,
+        signer,
+    )?;
+    Ok(match disposition {
+        ActivityResultDispositionV1::Recorded { outcome, .. } => {
+            CommandResultDisposition::Recorded { run_id, outcome }
+        }
+        ActivityResultDispositionV1::LeaseExpired { .. } => {
+            CommandResultDisposition::LeaseExpired { run_id }
+        }
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
