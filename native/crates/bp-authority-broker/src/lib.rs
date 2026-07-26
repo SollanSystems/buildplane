@@ -53,6 +53,8 @@ mod governed_session_client_contract_tests;
 #[cfg(target_os = "linux")]
 #[allow(dead_code)] // Transport-only until trusted replay and OCI handlers are composed.
 mod governed_session_host;
+#[allow(dead_code)] // Consumed by the protected governed-session host loader next.
+mod governed_session_host_config;
 #[cfg(all(test, target_os = "linux"))]
 mod governed_session_host_contract_tests;
 mod governed_session_response;

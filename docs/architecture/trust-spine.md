@@ -740,8 +740,23 @@ unsafe parent-directory modes, invalid header bytes, and values over 8 KiB.
 The bounded read and provider credential allocation are zeroized, errors omit
 secret and path data, and no environment, CLI argument, worker mount, or OCI
 value can select or receive the key. The default Linux host runner still needs
-the closed governed-session public configuration and full authority
-composition before this lane can be enabled externally.
+full authority composition before this lane can be enabled externally.
+
+The protected governed-session host now has a closed public V1 configuration
+loaded only from fixed
+`/etc/buildplane/authority-host/governed-session-v1.json`. It binds one run,
+realm, non-root broker UID, distinct client UIDs, listener group, bounded
+activity lease, exact provider/model and worker-manifest allowlists, a
+digest-pinned OCI image/profile with resource ceilings, and three distinct
+public signer identities for dispatch, action-request, and claim roles. The
+parser constructs the activity and replay authorities plus the model-action
+confinement and OCI policies. Unknown fields, secret or endpoint fields,
+caller-selected socket/ledger/CAS/credential paths, duplicate identities or
+keys, unknown providers, unsafe model IDs, unpinned images, and invalid limits
+fail closed. The loader retains the descriptor-validated private authority
+root; signing-key, ledger, CAS, and credential custody all derive from that
+same startup object. Only the action-request and claim private keys are loaded
+by this host; the dispatch identity remains verification-only.
 
 Those counts are persisted in the signed action receipt and replayed as one
 checked aggregate for the sealed V3 dispatch attempt. A metered failed call

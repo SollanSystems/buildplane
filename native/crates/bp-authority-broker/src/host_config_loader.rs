@@ -5,6 +5,9 @@
 //! read, parses the resulting JSON, and retains a separately descriptor-walked
 //! authority-root directory for later protected startup steps.
 
+use crate::governed_session_host_config::{
+    parse_governed_session_host_config_v1, GovernedSessionHostConfigV1,
+};
 use crate::host_config::{parse_promotion_decision_host_config, PromotionDecisionHostConfigV1};
 use crate::v5_admission_host_config::{parse_v5_admission_host_config_v1, V5AdmissionHostConfigV1};
 use thiserror::Error;
@@ -27,6 +30,7 @@ const DEFAULT_PROMOTION_DECISION_HOST_CONFIG_PARENT_COMPONENTS: [&[u8]; 3] =
     [b"etc", b"buildplane", b"authority-host"];
 const DEFAULT_PROMOTION_DECISION_HOST_CONFIG_FILE_NAME: &[u8] = b"promotion-decision-v1.json";
 const DEFAULT_V5_ADMISSION_HOST_CONFIG_FILE_NAME: &[u8] = b"v5-dispatch-admission-v1.json";
+const DEFAULT_GOVERNED_SESSION_HOST_CONFIG_FILE_NAME: &[u8] = b"governed-session-v1.json";
 const MAX_PROTECTED_HOST_CONFIG_BYTES: usize = 256 * 1024;
 
 /// Closed failures for the protected deployment config reader.
@@ -121,6 +125,22 @@ pub(crate) struct ValidatedPromotionDecisionHostStartupV1 {
     authority_root: ValidatedAuthorityRootV1,
 }
 
+#[derive(Debug)]
+pub(crate) struct ValidatedGovernedSessionHostStartupV1 {
+    config: GovernedSessionHostConfigV1,
+    authority_root: ValidatedAuthorityRootV1,
+}
+
+impl ValidatedGovernedSessionHostStartupV1 {
+    pub(crate) fn config(&self) -> &GovernedSessionHostConfigV1 {
+        &self.config
+    }
+
+    pub(crate) fn authority_root(&self) -> &ValidatedAuthorityRootV1 {
+        &self.authority_root
+    }
+}
+
 impl ValidatedPromotionDecisionHostStartupV1 {
     pub(crate) fn config(&self) -> &PromotionDecisionHostConfigV1 {
         &self.config
@@ -170,6 +190,33 @@ pub(crate) fn load_default_v5_admission_host_config_v1(
         let authority_root =
             open_validated_authority_root_path(&config.authority_root, config.broker_uid)?;
         Ok(ValidatedV5AdmissionHostStartupV1 {
+            config,
+            authority_root,
+        })
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Err(ProtectedHostConfigReadError::UnsupportedPlatform)
+    }
+}
+
+/// Read the sole deployment config accepted by the governed-session host.
+/// Production callers cannot supply a path, environment value, CLI override,
+/// provider endpoint, secret location, ledger path, or CAS path.
+pub(crate) fn load_default_governed_session_host_config_v1(
+) -> Result<ValidatedGovernedSessionHostStartupV1, ProtectedHostConfigReadError> {
+    #[cfg(target_os = "linux")]
+    {
+        let bytes = read_default_protected_host_config_json_bytes(
+            DEFAULT_GOVERNED_SESSION_HOST_CONFIG_FILE_NAME,
+        )?;
+        let json =
+            std::str::from_utf8(&bytes).map_err(|_| ProtectedHostConfigReadError::InvalidConfig)?;
+        let config = parse_governed_session_host_config_v1(json)
+            .map_err(|_| ProtectedHostConfigReadError::InvalidConfig)?;
+        let authority_root =
+            open_validated_authority_root_path(&config.authority_root, config.broker_uid)?;
+        Ok(ValidatedGovernedSessionHostStartupV1 {
             config,
             authority_root,
         })
@@ -597,6 +644,24 @@ pub(crate) fn validate_v5_admission_host_startup_from_trusted_anchor_for_test(
 }
 
 #[cfg(all(test, target_os = "linux"))]
+pub(crate) fn validate_governed_session_host_startup_from_trusted_anchor_for_test(
+    config: GovernedSessionHostConfigV1,
+    trusted_anchor: &Path,
+    expected_ancestor_owner: u32,
+) -> Result<ValidatedGovernedSessionHostStartupV1, ProtectedHostConfigReadError> {
+    let authority_root = validate_authority_root_from_trusted_anchor_for_test(
+        &config.authority_root,
+        config.broker_uid,
+        trusted_anchor,
+        expected_ancestor_owner,
+    )?;
+    Ok(ValidatedGovernedSessionHostStartupV1 {
+        config,
+        authority_root,
+    })
+}
+
+#[cfg(all(test, target_os = "linux"))]
 fn validate_authority_root_from_trusted_anchor_for_test(
     authority_root_path: &Path,
     broker_uid: u32,
@@ -677,6 +742,11 @@ mod tests {
             ProtectedHostConfigReadError,
         > = load_default_promotion_decision_host_config_v1;
         let _ = loader;
+        let governed_loader: fn() -> Result<
+            ValidatedGovernedSessionHostStartupV1,
+            ProtectedHostConfigReadError,
+        > = load_default_governed_session_host_config_v1;
+        let _ = governed_loader;
     }
 
     fn parsed_config_for_authority_root(

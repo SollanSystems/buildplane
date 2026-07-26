@@ -4,6 +4,7 @@
 //! retained by protected host startup. No path, environment, or CLI override is
 //! accepted at this boundary.
 
+use crate::host_config_loader::ValidatedGovernedSessionHostStartupV1;
 use crate::host_config_loader::ValidatedPromotionDecisionHostStartupV1;
 use crate::host_config_loader::ValidatedV5AdmissionHostStartupV1;
 use ed25519_dalek::SigningKey;
@@ -104,6 +105,52 @@ pub(crate) struct ProtectedPromotionDecisionSigningKeysV1 {
 pub(crate) struct ProtectedV5AdmissionSigningKeysV1 {
     admission: SigningKey,
     checkpoint: SigningKey,
+}
+
+pub(crate) struct ProtectedGovernedSessionSigningKeysV1 {
+    action_request: SigningKey,
+    claim: SigningKey,
+}
+
+impl ProtectedGovernedSessionSigningKeysV1 {
+    pub(crate) fn action_request(&self) -> &SigningKey {
+        &self.action_request
+    }
+
+    pub(crate) fn claim(&self) -> &SigningKey {
+        &self.claim
+    }
+}
+
+pub(crate) fn load_governed_session_signing_keys_v1(
+    startup: &ValidatedGovernedSessionHostStartupV1,
+) -> Result<ProtectedGovernedSessionSigningKeysV1, ProtectedHostKeyLoadError> {
+    #[cfg(target_os = "linux")]
+    {
+        let config = startup.config();
+        let action_request = load_signing_key_from_authority_descriptor(
+            startup.authority_root().directory(),
+            &config.action_request_signer,
+            config.broker_uid,
+        )?;
+        let claim = load_signing_key_from_authority_descriptor(
+            startup.authority_root().directory(),
+            &config.claim_signer,
+            config.broker_uid,
+        )?;
+        if action_request.verifying_key() == claim.verifying_key() {
+            return Err(ProtectedHostKeyLoadError::AliasedKeyMaterial);
+        }
+        Ok(ProtectedGovernedSessionSigningKeysV1 {
+            action_request,
+            claim,
+        })
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = startup;
+        Err(ProtectedHostKeyLoadError::UnsupportedPlatform)
+    }
 }
 
 impl ProtectedV5AdmissionSigningKeysV1 {
@@ -345,7 +392,9 @@ fn key_descriptor_facts(metadata: &Metadata) -> KeyDescriptorFacts {
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
+    use crate::governed_session_host_config::parse_governed_session_host_config_v1;
     use crate::host_config::parse_promotion_decision_host_config;
+    use crate::host_config_loader::validate_governed_session_host_startup_from_trusted_anchor_for_test;
     use crate::host_config_loader::validate_promotion_decision_host_startup_from_trusted_anchor_for_test;
     use crate::host_config_loader::validate_v5_admission_host_startup_from_trusted_anchor_for_test;
     use crate::v5_admission_host_config::parse_v5_admission_host_config_v1;
@@ -527,6 +576,71 @@ mod tests {
                 .join("keys/source/source-main.ed25519")
                 .exists(),
             "the source dispatch identity is verification-only"
+        );
+    }
+
+    #[test]
+    fn governed_session_custody_loads_only_action_and_claim_keys() {
+        let fixture = KeyFixture::new();
+        let dispatch_seed = [21; 32];
+        let action_seed = [22; 32];
+        let claim_seed = [23; 32];
+        fixture.write_key(&["kernel", "model-action"], "action-main", &action_seed);
+        fixture.write_key(&["kernel", "model-claim"], "claim-main", &claim_seed);
+        let signer = |actor_id: &str, key_id: &str, seed: [u8; 32]| {
+            let signing_key = SigningKey::from_bytes(&seed);
+            json!({
+                "actor_id": actor_id,
+                "key_id": key_id,
+                "public_key": signing_key.verifying_key().to_bytes().to_vec(),
+            })
+        };
+        let client_uid = if fixture.owner == 1 { 2 } else { 1 };
+        let config = json!({
+            "schema_version": 1,
+            "run_id": "018f2e40-0000-7000-8000-000000000001",
+            "broker_uid": fixture.owner,
+            "governed_session_client_uids": [client_uid],
+            "socket_group_gid": 1002,
+            "authority_root": fixture.authority_root.to_string_lossy(),
+            "authority_realm_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "model_action_lease_ms": bp_ledger::storage::sqlite::MIN_ACTIVITY_LEASE_MS,
+            "allowed_provider_models": [
+                {"provider": "anthropic", "models": ["claude-sonnet-4-5-20250929"]}
+            ],
+            "allowed_worker_manifest_digests": [
+                "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            ],
+            "oci": {
+                "image": "registry.example/buildplane-worker@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "profile_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                "cpu_cores": 2,
+                "memory_bytes": 1073741824,
+                "pids_limit": 128,
+                "tmpfs_bytes": 67108864
+            },
+            "dispatch": signer("dispatch:governed", "dispatch-main", dispatch_seed),
+            "action_request": signer("kernel:model-action", "action-main", action_seed),
+            "claim": signer("kernel:model-claim", "claim-main", claim_seed),
+        });
+        let startup = validate_governed_session_host_startup_from_trusted_anchor_for_test(
+            parse_governed_session_host_config_v1(&config.to_string())
+                .expect("valid governed-session config"),
+            fixture._anchor.path(),
+            fixture.owner,
+        )
+        .expect("descriptor-bound governed-session startup");
+
+        let keys =
+            load_governed_session_signing_keys_v1(&startup).expect("load governed-session keys");
+        assert_eq!(keys.action_request().to_bytes(), action_seed);
+        assert_eq!(keys.claim().to_bytes(), claim_seed);
+        assert!(
+            !fixture
+                .authority_root
+                .join("keys/dispatch/governed/dispatch-main.ed25519")
+                .exists(),
+            "the dispatch identity is verification-only"
         );
     }
 

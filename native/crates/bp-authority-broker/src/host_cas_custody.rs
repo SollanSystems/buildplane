@@ -1,5 +1,6 @@
 //! Protected descriptor-bound CAS custody for the V5 admission host.
 
+use crate::host_config_loader::ValidatedGovernedSessionHostStartupV1;
 use bp_ledger::storage::cas::Cas;
 use thiserror::Error;
 
@@ -132,6 +133,23 @@ pub(crate) fn load_protected_v5_cas_v1(
     #[cfg(not(target_os = "linux"))]
     {
         let _ = (authority_root, expected_owner);
+        Err(ProtectedV5CasLoadError::UnsupportedPlatform)
+    }
+}
+
+pub(crate) fn load_governed_session_cas_v1(
+    startup: &ValidatedGovernedSessionHostStartupV1,
+) -> Result<ProtectedV5CasV1, ProtectedV5CasLoadError> {
+    #[cfg(target_os = "linux")]
+    {
+        load_protected_v5_cas_v1(
+            startup.authority_root().directory(),
+            startup.config().broker_uid,
+        )
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = startup;
         Err(ProtectedV5CasLoadError::UnsupportedPlatform)
     }
 }

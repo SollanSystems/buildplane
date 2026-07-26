@@ -13,6 +13,8 @@ use thiserror::Error;
 #[cfg(target_os = "linux")]
 use crate::host_config_loader::ValidatedAuthorityRootV1;
 #[cfg(target_os = "linux")]
+use crate::host_config_loader::ValidatedGovernedSessionHostStartupV1;
+#[cfg(target_os = "linux")]
 use std::fs::{File, Metadata};
 #[cfg(target_os = "linux")]
 use std::io::Read;
@@ -79,7 +81,14 @@ pub(crate) struct ProtectedAnthropicCredentialBrokerV1;
 
 impl ProtectedAnthropicCredentialBrokerV1 {
     #[cfg(target_os = "linux")]
-    pub(crate) fn from_validated_authority_root(
+    pub(crate) fn from_validated_governed_session_startup(
+        startup: &ValidatedGovernedSessionHostStartupV1,
+    ) -> Result<Self, ProviderError> {
+        Self::from_validated_authority_root(startup.authority_root(), startup.config().broker_uid)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn from_validated_authority_root(
         authority_root: &ValidatedAuthorityRootV1,
         broker_uid: u32,
     ) -> Result<Self, ProviderError> {
