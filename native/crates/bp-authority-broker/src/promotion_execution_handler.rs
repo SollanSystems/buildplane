@@ -7,7 +7,9 @@
 //! ledger, replay, signer, and fixed-Git dependencies.
 
 #[cfg(target_os = "linux")]
-use crate::confinement::{BrokerHostConfinementAttestationV1, BrokerHostConfinementPolicyV1};
+use crate::confinement::{
+    BrokerAuthorityRoleV1, BrokerHostConfinementAttestationV1, BrokerHostConfinementPolicyV1,
+};
 #[cfg(test)]
 use crate::promotion_execution::{
     BrokerPromotionExecutionAuthority, PromotionEffectGateway, PromotionExecutionBackend,
@@ -169,7 +171,11 @@ pub(crate) fn read_authenticated_promotion_execution_frame(
         PROMOTION_EXECUTION_FRAME_READ_TIMEOUT,
         |stream| {
             policy
-                .verify_linux_connected_worker(attestation, stream)
+                .verify_linux_connected_worker_for_role(
+                    BrokerAuthorityRoleV1::PromotionExecution,
+                    attestation,
+                    stream,
+                )
                 .map_err(|_| PromotionExecutionHandlerError::PeerRejected)
         },
     )

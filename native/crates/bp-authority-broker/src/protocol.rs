@@ -8,7 +8,9 @@
 use crate::admission_protocol::{
     parse_authority_broker_request_v1, ParsedAuthorityBrokerRequestV1,
 };
-use crate::confinement::{BrokerHostConfinementAttestationV1, BrokerHostConfinementPolicyV1};
+use crate::confinement::{
+    BrokerAuthorityRoleV1, BrokerHostConfinementAttestationV1, BrokerHostConfinementPolicyV1,
+};
 use std::io::Read;
 use std::os::unix::net::UnixStream;
 use thiserror::Error;
@@ -41,7 +43,11 @@ pub(crate) fn read_authenticated_authority_broker_request_v1(
     stream: &mut UnixStream,
 ) -> Result<ParsedAuthorityBrokerRequestV1, BrokerProtocolErrorV1> {
     policy
-        .verify_linux_connected_worker(attestation, stream)
+        .verify_linux_connected_worker_for_role(
+            BrokerAuthorityRoleV1::DispatchAdmission,
+            attestation,
+            stream,
+        )
         .map_err(|_| BrokerProtocolErrorV1::PeerRejected)?;
 
     read_bounded_authority_broker_request_v1(stream)

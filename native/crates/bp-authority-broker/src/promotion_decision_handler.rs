@@ -7,7 +7,9 @@
 //! ledger, and signer dependencies.
 
 #[cfg(target_os = "linux")]
-use crate::confinement::{BrokerHostConfinementAttestationV1, BrokerHostConfinementPolicyV1};
+use crate::confinement::{
+    BrokerAuthorityRoleV1, BrokerHostConfinementAttestationV1, BrokerHostConfinementPolicyV1,
+};
 use crate::{
     BrokerPromotionDecisionDisposition, BrokerPromotionDecisionIngressRequest,
     ProtectedPromotionDecisionAuthority,
@@ -137,7 +139,11 @@ pub(crate) fn read_authenticated_promotion_decision_frame(
         PROMOTION_DECISION_FRAME_READ_TIMEOUT,
         |stream| {
             policy
-                .verify_linux_connected_worker(attestation, stream)
+                .verify_linux_connected_worker_for_role(
+                    BrokerAuthorityRoleV1::PromotionDecision,
+                    attestation,
+                    stream,
+                )
                 .map_err(|_| PromotionDecisionHandlerError::PeerRejected)
         },
     )

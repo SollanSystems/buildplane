@@ -7,7 +7,9 @@
 //! worker, lease, capability, candidate, or promotion surface.
 
 #[cfg(target_os = "linux")]
-use crate::confinement::{BrokerHostConfinementAttestationV1, BrokerHostConfinementPolicyV1};
+use crate::confinement::{
+    BrokerAuthorityRoleV1, BrokerHostConfinementAttestationV1, BrokerHostConfinementPolicyV1,
+};
 use bp_ledger::signing::ActorKeyRef;
 use bp_ledger::storage::sqlite::{
     GovernedDispatchV5AdmissionAuthorityV1, GovernedDispatchV5AdmissionDispositionV1,
@@ -269,7 +271,11 @@ pub(crate) fn handle_authenticated_v5_dispatch_admission_request(
     backend: &LedgerV5DispatchAdmissionBackend<'_>,
 ) -> Result<BrokerV5DispatchAdmissionDisposition, V5DispatchAdmissionHandlerError> {
     policy
-        .verify_linux_connected_worker(attestation, stream)
+        .verify_linux_connected_worker_for_role(
+            BrokerAuthorityRoleV1::DispatchAdmission,
+            attestation,
+            stream,
+        )
         .map_err(|_| V5DispatchAdmissionHandlerError::PeerRejected)?;
 
     let payload = read_bounded_v5_dispatch_admission_frame(stream)?;

@@ -42,6 +42,7 @@ mod admission_protocol;
 mod confinement;
 #[allow(dead_code)]
 mod dispatch_admission;
+mod host_config;
 #[allow(dead_code)]
 mod promotion_decision_handler;
 mod promotion_execution;

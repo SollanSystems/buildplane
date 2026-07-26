@@ -26,16 +26,30 @@ struct BrokerPeerIdentityV1 {
     gid: u32,
 }
 
-/// Startup policy for the broker process and the worker UIDs it may accept.
+/// Startup policy for one broker authority endpoint and the client UIDs it may
+/// accept.
 ///
-/// The broker identity must be distinct from every permitted worker identity.
+/// The broker identity must be distinct from every permitted client identity.
 /// A same-UID connection can read the broker's key material or invoke its
 /// native authority surface under the same OS principal, so it is never a
-/// valid worker boundary.
+/// valid client boundary.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct BrokerHostConfinementPolicyV1 {
     broker_uid: u32,
-    worker_uids: BTreeSet<u32>,
+    role: BrokerAuthorityRoleV1,
+    client_uids: BTreeSet<u32>,
+}
+
+/// Closed authority operation roles with independently configured worker UIDs.
+///
+/// Adding a broker endpoint requires extending this enum and explicitly
+/// configuring its worker identity boundary at host startup.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BrokerAuthorityRoleV1 {
+    DispatchAdmission,
+    PromotionDecision,
+    PromotionExecution,
+    ModelAction,
 }
 
 /// A non-forgeable-in-normal-code proof that the current process started as
@@ -51,8 +65,17 @@ pub(crate) struct BrokerHostConfinementAttestationV1 {
 pub(crate) enum BrokerHostConfinementErrorV1 {
     #[error("broker host confinement requires at least one separately configured worker UID")]
     NoWorkerUids,
+    #[error("UID 0 is not allowed for a broker or authority client")]
+    UidZeroNotAllowed { uid: u32 },
     #[error("configured worker UID {uid} aliases the broker UID")]
     WorkerUidAliasesBroker { uid: u32 },
+    #[error(
+        "broker confinement policy role {configured_role:?} does not match requested role {requested_role:?}"
+    )]
+    RolePolicyMismatch {
+        configured_role: BrokerAuthorityRoleV1,
+        requested_role: BrokerAuthorityRoleV1,
+    },
     #[cfg(not(target_os = "linux"))]
     #[error("broker host confinement is supported only on Linux")]
     UnsupportedPlatform,
@@ -76,24 +99,44 @@ pub(crate) enum BrokerHostConfinementErrorV1 {
 }
 
 impl BrokerHostConfinementPolicyV1 {
-    /// Construct a closed startup policy. Callers must derive these UIDs from
-    /// protected host configuration, never from a packet, environment value,
-    /// model request, or worker-controlled socket metadata.
-    pub(crate) fn new(
+    /// Construct a closed startup policy for exactly one authority endpoint.
+    /// Callers must derive these UIDs from protected host configuration, never
+    /// from a packet, environment value, model request, or worker-controlled
+    /// socket metadata.
+    pub(crate) fn new_for_role(
         broker_uid: u32,
-        worker_uids: impl IntoIterator<Item = u32>,
+        role: BrokerAuthorityRoleV1,
+        client_uids: impl IntoIterator<Item = u32>,
     ) -> Result<Self, BrokerHostConfinementErrorV1> {
-        let worker_uids: BTreeSet<u32> = worker_uids.into_iter().collect();
-        if worker_uids.is_empty() {
+        if broker_uid == 0 {
+            return Err(BrokerHostConfinementErrorV1::UidZeroNotAllowed { uid: broker_uid });
+        }
+        let client_uids: BTreeSet<u32> = client_uids.into_iter().collect();
+        if client_uids.is_empty() {
             return Err(BrokerHostConfinementErrorV1::NoWorkerUids);
         }
-        if worker_uids.contains(&broker_uid) {
+        if client_uids.contains(&0) {
+            return Err(BrokerHostConfinementErrorV1::UidZeroNotAllowed { uid: 0 });
+        }
+        if client_uids.contains(&broker_uid) {
             return Err(BrokerHostConfinementErrorV1::WorkerUidAliasesBroker { uid: broker_uid });
         }
         Ok(Self {
             broker_uid,
-            worker_uids,
+            role,
+            client_uids,
         })
+    }
+
+    /// Compatibility helper for existing internal tests. It is deliberately
+    /// absent from production builds so a protected host cannot start without
+    /// binding its authority boundary to an explicit role.
+    #[cfg(test)]
+    pub(crate) fn new(
+        broker_uid: u32,
+        worker_uids: impl IntoIterator<Item = u32>,
+    ) -> Result<Self, BrokerHostConfinementErrorV1> {
+        Self::new_for_role(broker_uid, BrokerAuthorityRoleV1::ModelAction, worker_uids)
     }
 
     /// Establish that this process is the separately configured broker before
@@ -121,29 +164,68 @@ impl BrokerHostConfinementPolicyV1 {
         }
     }
 
-    /// Validate one kernel-observed peer identity. This pure helper keeps the
-    /// policy testable; production callers must use
-    /// [`Self::verify_linux_connected_worker`] so identity is read from the
-    /// connected socket rather than supplied by a worker request.
+    /// Compatibility helper for existing internal tests. It is deliberately
+    /// absent from production builds so the generic authority boundary cannot
+    /// be used by a protected host.
+    #[cfg(test)]
     fn verify_peer(&self, peer: BrokerPeerIdentityV1) -> Result<(), BrokerHostConfinementErrorV1> {
+        self.verify_peer_for_role(self.role, peer)
+    }
+
+    /// Validate one kernel-observed peer identity for a specific authority
+    /// role. Production callers must use
+    /// [`Self::verify_linux_connected_worker_for_role`] so identity is read
+    /// from a connected socket rather than supplied by a worker request.
+    fn verify_peer_for_role(
+        &self,
+        role: BrokerAuthorityRoleV1,
+        peer: BrokerPeerIdentityV1,
+    ) -> Result<(), BrokerHostConfinementErrorV1> {
+        if role != self.role {
+            return Err(BrokerHostConfinementErrorV1::RolePolicyMismatch {
+                configured_role: self.role,
+                requested_role: role,
+            });
+        }
+        self.verify_peer_against_uids(peer, &self.client_uids)
+    }
+
+    fn verify_peer_against_uids(
+        &self,
+        peer: BrokerPeerIdentityV1,
+        allowed_worker_uids: &BTreeSet<u32>,
+    ) -> Result<(), BrokerHostConfinementErrorV1> {
         if peer.pid <= 0 {
             return Err(BrokerHostConfinementErrorV1::InvalidPeerPid { pid: peer.pid });
         }
         if peer.uid == self.broker_uid {
             return Err(BrokerHostConfinementErrorV1::PeerUsesBrokerUid { uid: peer.uid });
         }
-        if !self.worker_uids.contains(&peer.uid) {
+        if !allowed_worker_uids.contains(&peer.uid) {
             return Err(BrokerHostConfinementErrorV1::PeerUidNotAllowed { uid: peer.uid });
         }
         Ok(())
     }
 
-    /// Read Linux `SO_PEERCRED` from one accepted Unix-domain socket and
-    /// validate the identity under a startup attestation. The caller cannot
-    /// pass a UID, PID, or GID; a missing kernel credential fails closed.
-    #[cfg(target_os = "linux")]
+    /// Compatibility helper for existing internal tests. It is deliberately
+    /// absent from production builds so a protected host must provide an
+    /// explicit authority role.
+    #[cfg(all(test, target_os = "linux"))]
     pub(crate) fn verify_linux_connected_worker(
         &self,
+        attestation: &BrokerHostConfinementAttestationV1,
+        stream: &UnixStream,
+    ) -> Result<(), BrokerHostConfinementErrorV1> {
+        self.verify_linux_connected_worker_for_role(self.role, attestation, stream)
+    }
+
+    /// Read Linux `SO_PEERCRED` from one accepted Unix-domain socket and
+    /// validate its identity only for the requested authority role under a
+    /// startup attestation.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn verify_linux_connected_worker_for_role(
+        &self,
+        role: BrokerAuthorityRoleV1,
         attestation: &BrokerHostConfinementAttestationV1,
         stream: &UnixStream,
     ) -> Result<(), BrokerHostConfinementErrorV1> {
@@ -154,7 +236,7 @@ impl BrokerHostConfinementPolicyV1 {
             });
         }
         let peer = linux_peer_identity(stream)?;
-        self.verify_peer(peer)
+        self.verify_peer_for_role(role, peer)
     }
 }
 
@@ -234,6 +316,124 @@ mod tests {
         assert!(matches!(
             BrokerHostConfinementPolicyV1::new(4_201, [4_201]),
             Err(BrokerHostConfinementErrorV1::WorkerUidAliasesBroker { .. })
+        ));
+    }
+
+    #[test]
+    fn promotion_decision_role_rejects_a_uid_not_configured_for_the_endpoint() {
+        let policy = BrokerHostConfinementPolicyV1::new_for_role(
+            4_201,
+            BrokerAuthorityRoleV1::PromotionDecision,
+            [4_202],
+        )
+        .expect("a separately configured promotion-decision client is valid");
+
+        policy
+            .verify_peer_for_role(
+                BrokerAuthorityRoleV1::PromotionDecision,
+                BrokerPeerIdentityV1 {
+                    pid: 104,
+                    uid: 4_202,
+                    gid: 4_202,
+                },
+            )
+            .expect("the promotion-decision UID is admitted only for that role");
+        assert!(matches!(
+            policy.verify_peer_for_role(
+                BrokerAuthorityRoleV1::PromotionDecision,
+                BrokerPeerIdentityV1 {
+                    pid: 105,
+                    uid: 4_203,
+                    gid: 4_203,
+                },
+            ),
+            Err(BrokerHostConfinementErrorV1::PeerUidNotAllowed { uid: 4_203 })
+        ));
+        assert!(matches!(
+            policy.verify_peer_for_role(
+                BrokerAuthorityRoleV1::PromotionDecision,
+                BrokerPeerIdentityV1 {
+                    pid: 106,
+                    uid: 4_201,
+                    gid: 4_201,
+                },
+            ),
+            Err(BrokerHostConfinementErrorV1::PeerUsesBrokerUid { uid: 4_201 })
+        ));
+    }
+
+    #[test]
+    fn role_bound_policy_rejects_empty_or_broker_aliased_client_sets() {
+        assert!(matches!(
+            BrokerHostConfinementPolicyV1::new_for_role(
+                4_201,
+                BrokerAuthorityRoleV1::PromotionDecision,
+                [],
+            ),
+            Err(BrokerHostConfinementErrorV1::NoWorkerUids)
+        ));
+        assert!(matches!(
+            BrokerHostConfinementPolicyV1::new_for_role(
+                4_201,
+                BrokerAuthorityRoleV1::PromotionExecution,
+                [4_201],
+            ),
+            Err(BrokerHostConfinementErrorV1::WorkerUidAliasesBroker { uid: 4_201 })
+        ));
+    }
+
+    #[test]
+    fn role_bound_policy_accepts_only_its_explicit_endpoint_role() {
+        let policy = BrokerHostConfinementPolicyV1::new_for_role(
+            4_201,
+            BrokerAuthorityRoleV1::DispatchAdmission,
+            [4_202],
+        )
+        .expect("a separately configured endpoint client is valid");
+
+        policy
+            .verify_peer_for_role(
+                BrokerAuthorityRoleV1::DispatchAdmission,
+                BrokerPeerIdentityV1 {
+                    pid: 107,
+                    uid: 4_202,
+                    gid: 4_202,
+                },
+            )
+            .expect("the configured client is admitted for its configured endpoint");
+        assert!(matches!(
+            policy.verify_peer_for_role(
+                BrokerAuthorityRoleV1::ModelAction,
+                BrokerPeerIdentityV1 {
+                    pid: 108,
+                    uid: 4_202,
+                    gid: 4_202,
+                },
+            ),
+            Err(BrokerHostConfinementErrorV1::RolePolicyMismatch {
+                configured_role: BrokerAuthorityRoleV1::DispatchAdmission,
+                requested_role: BrokerAuthorityRoleV1::ModelAction,
+            })
+        ));
+    }
+
+    #[test]
+    fn role_bound_policy_rejects_root_broker_and_client_uids() {
+        assert!(matches!(
+            BrokerHostConfinementPolicyV1::new_for_role(
+                0,
+                BrokerAuthorityRoleV1::PromotionDecision,
+                [4_202],
+            ),
+            Err(BrokerHostConfinementErrorV1::UidZeroNotAllowed { uid: 0 })
+        ));
+        assert!(matches!(
+            BrokerHostConfinementPolicyV1::new_for_role(
+                4_201,
+                BrokerAuthorityRoleV1::PromotionDecision,
+                [0],
+            ),
+            Err(BrokerHostConfinementErrorV1::UidZeroNotAllowed { uid: 0 })
         ));
     }
 
