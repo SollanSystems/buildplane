@@ -84,6 +84,9 @@ mod promotion_git;
 mod protocol;
 #[allow(dead_code)]
 mod reviewer_session;
+mod rootless_oci;
+#[cfg(test)]
+mod rootless_oci_contract_tests;
 mod v5_admission_client;
 mod v5_admission_host;
 #[allow(dead_code)]

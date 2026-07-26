@@ -550,6 +550,14 @@ environment baseline as an action before it emits its OCI attestation. A
 runtime that merely advertises those flags but cannot launch the isolated image
 is therefore blocked before worker execution. A missing probe or executor does
 not permit host-shell fallback.
+The native protected broker now owns the same startup attestation instead of
+trusting a TypeScript process to assert it. Its closed profile accepts only a
+digest-pinned image and bounded CPU, memory, PID, and tmpfs limits. The fixed
+`/usr/bin/podman` runner clears the environment, uses `/` as its working
+directory, bounds captured output, enforces one absolute probe deadline, and
+runs version, rootless-mode, user-namespace, isolation-flag, and no-mount
+canary checks before returning an unforgeable in-process attestation. Probe
+failure has no host runner fallback.
 
 A governed dispatch's `maxComputeTimeMs` is enforced as one immutable absolute
 deadline: `min(expiresAt, issuedAt + maxComputeTimeMs)`. The worker rejects an
