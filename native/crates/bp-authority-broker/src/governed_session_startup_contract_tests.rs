@@ -1,10 +1,19 @@
 use crate::confinement::{BrokerAuthorityRoleV1, BrokerHostConfinementPolicyV1};
 use crate::governed_session_startup::{
-    GovernedSessionHostStartupErrorV1, GovernedSessionHostStartupV1,
+    GovernedSessionHostStartupErrorV1, GovernedSessionHostStartupV1, GovernedSessionProviderLaneV1,
+};
+use crate::provider_preflight::{
+    PrivateProviderTokenPreflightCapabilityV1, ProviderTokenPreflightAuthorityErrorV1,
+    ProviderTokenPreflightAuthorityV1, ProviderTokenPreflightBackendV1,
+    ProviderTokenPreflightGatewayCompletionV1, ProviderTokenPreflightGatewayV1,
+    ProviderTokenPreflightGrantV1, ProviderTokenPreflightStatusV1,
 };
 use crate::rootless_oci::{
     attest_rootless_oci_with_runner_v1, OciProbeResultV1, OciProbeRunner, RootlessOciProfileV1,
 };
+use async_trait::async_trait;
+use bp_ledger::payload::activity_claim::ActivityResultOutcomeV1;
+use futures::executor::block_on;
 use std::collections::VecDeque;
 
 const IMAGE: &str =
@@ -12,6 +21,41 @@ const IMAGE: &str =
 const DIGEST: &str = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
 struct FakeRunner(VecDeque<OciProbeResultV1>);
+
+struct RecordedBackend;
+
+impl ProviderTokenPreflightBackendV1 for RecordedBackend {
+    fn issue_and_claim(
+        &mut self,
+        run_id: &str,
+    ) -> Result<ProviderTokenPreflightGrantV1, ProviderTokenPreflightAuthorityErrorV1> {
+        Ok(ProviderTokenPreflightGrantV1::Recorded {
+            run_id: run_id.into(),
+            outcome: ActivityResultOutcomeV1::Succeeded,
+        })
+    }
+
+    fn record(
+        &mut self,
+        _run_id: &str,
+        _lease_id: String,
+        _completion: ProviderTokenPreflightGatewayCompletionV1,
+    ) -> Result<ActivityResultOutcomeV1, ProviderTokenPreflightAuthorityErrorV1> {
+        panic!("recorded preflight cannot be recorded again")
+    }
+}
+
+struct NoGateway;
+
+#[async_trait]
+impl ProviderTokenPreflightGatewayV1 for NoGateway {
+    async fn count(
+        &mut self,
+        _capability: PrivateProviderTokenPreflightCapabilityV1,
+    ) -> crate::provider_preflight::PairedProviderTokenPreflightResultV1 {
+        panic!("recorded preflight cannot call the provider")
+    }
+}
 
 impl OciProbeRunner for FakeRunner {
     fn run(&mut self, _args: &[String], _timeout_ms: u64) -> OciProbeResultV1 {
@@ -56,6 +100,15 @@ fn governed_session_startup_requires_model_action_confinement_and_oci() {
     let startup = GovernedSessionHostStartupV1::new(policy, broker, oci_attestation())
         .expect("governed session startup");
     assert_eq!(startup.sandbox_profile_digest(), DIGEST);
+    let preflight =
+        ProviderTokenPreflightAuthorityV1::new("run-1".into(), RecordedBackend, NoGateway);
+    let mut provider_lane =
+        GovernedSessionProviderLaneV1::from_prevalidated_startup(&startup, preflight);
+    assert_eq!(provider_lane.sandbox_profile_digest(), DIGEST);
+    assert_eq!(
+        block_on(provider_lane.prepare_provider()).expect("provider preflight"),
+        ProviderTokenPreflightStatusV1::Recorded
+    );
 }
 
 #[test]

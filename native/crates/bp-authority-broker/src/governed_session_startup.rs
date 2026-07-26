@@ -8,6 +8,11 @@ use crate::confinement::{
     BrokerAuthorityRoleV1, BrokerHostConfinementAttestationV1, BrokerHostConfinementErrorV1,
     BrokerHostConfinementPolicyV1,
 };
+use crate::provider_preflight::{
+    ProviderTokenPreflightAuthorityErrorV1, ProviderTokenPreflightAuthorityV1,
+    ProviderTokenPreflightBackendV1, ProviderTokenPreflightGatewayV1,
+    ProviderTokenPreflightStatusV1,
+};
 use crate::rootless_oci::RootlessOciAttestationV1;
 use thiserror::Error;
 
@@ -60,6 +65,41 @@ impl GovernedSessionHostStartupV1 {
 
     pub(crate) fn sandbox_profile_digest(&self) -> &str {
         &self.oci_attestation.profile_digest
+    }
+}
+
+/// Runtime composition proving that the provider-preflight authority was
+/// created only after the protected host confinement and rootless OCI startup
+/// checks succeeded. It exposes no underlying signer, credential, CAS, lease,
+/// transport, or sandbox handle.
+pub(crate) struct GovernedSessionProviderLaneV1<B, G> {
+    sandbox_profile_digest: String,
+    preflight: ProviderTokenPreflightAuthorityV1<B, G>,
+}
+
+impl<B, G> GovernedSessionProviderLaneV1<B, G>
+where
+    B: ProviderTokenPreflightBackendV1,
+    G: ProviderTokenPreflightGatewayV1,
+{
+    pub(crate) fn from_prevalidated_startup(
+        startup: &GovernedSessionHostStartupV1,
+        preflight: ProviderTokenPreflightAuthorityV1<B, G>,
+    ) -> Self {
+        Self {
+            sandbox_profile_digest: startup.sandbox_profile_digest().into(),
+            preflight,
+        }
+    }
+
+    pub(crate) fn sandbox_profile_digest(&self) -> &str {
+        &self.sandbox_profile_digest
+    }
+
+    pub(crate) async fn prepare_provider(
+        &mut self,
+    ) -> Result<ProviderTokenPreflightStatusV1, ProviderTokenPreflightAuthorityErrorV1> {
+        self.preflight.authorize_and_execute().await
     }
 }
 

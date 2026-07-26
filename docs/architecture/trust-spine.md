@@ -729,7 +729,13 @@ configured action-request and claim signing keys. Startup validates the exact
 provider, role, action identity, request identity, and lease bounds before
 constructing it. Wiring this backend, the verified preflight input, and the
 provider counter into the protected governed-session host remains the final
-preflight composition step.
+preflight composition step. The governed-session startup now retains that
+composition as an opaque provider lane only after both the model-action
+confinement policy and the rootless OCI attestation pass. The lane exposes
+only its sandbox-profile digest and the closed preflight status; it cannot
+return credentials, leases, signers, CAS handles, or provider requests. The
+default Linux host runner still needs protected configuration and credential
+custody before this lane can be enabled externally.
 
 Those counts are persisted in the signed action receipt and replayed as one
 checked aggregate for the sealed V3 dispatch attempt. A metered failed call
