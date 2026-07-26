@@ -212,6 +212,9 @@ mod tests {
         let mut unknown = valid_config();
         unknown["socket_path"] = json!("/tmp/attacker.sock");
         assert!(parse_v5_admission_host_config_v1(&unknown.to_string()).is_err());
+        let mut caller_selected_cas = valid_config();
+        caller_selected_cas["cas_root"] = json!("/tmp/attacker-cas");
+        assert!(parse_v5_admission_host_config_v1(&caller_selected_cas.to_string()).is_err());
 
         for (left, right) in [
             ("source_dispatch", "admission_record"),

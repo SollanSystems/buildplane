@@ -385,6 +385,7 @@ where
 
     let mut payload = vec![0_u8; payload_length];
     read_frame_chunk(stream, deadline, &mut before_read, &mut payload)?;
+    require_frame_eof(stream, deadline, &mut before_read)?;
     Ok(payload)
 }
 
@@ -420,6 +421,47 @@ where
         }
     }
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn require_frame_eof<F>(
+    stream: &mut UnixStream,
+    deadline: Instant,
+    before_read: &mut F,
+) -> Result<(), V5DispatchAdmissionHandlerError>
+where
+    F: FnMut(&mut UnixStream) -> Result<(), V5DispatchAdmissionHandlerError>,
+{
+    before_read(stream)?;
+    let remaining = deadline
+        .checked_duration_since(Instant::now())
+        .filter(|remaining| !remaining.is_zero())
+        .ok_or(V5DispatchAdmissionHandlerError::FrameRejected)?;
+    stream
+        .set_read_timeout(Some(remaining))
+        .map_err(|_| V5DispatchAdmissionHandlerError::FrameRejected)?;
+    let mut trailing = [0_u8; 1];
+    match stream.read(&mut trailing) {
+        Ok(0) if Instant::now() < deadline => Ok(()),
+        Ok(_) | Err(_) => Err(V5DispatchAdmissionHandlerError::FrameRejected),
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) fn handle_v5_dispatch_admission_framed_with_binding_for_test(
+    stream: &mut UnixStream,
+    backend: &LedgerV5DispatchAdmissionBackend<'_>,
+    expected_run_id: RunId,
+    timeout: Duration,
+) -> Result<HandledV5DispatchAdmissionV1, V5DispatchAdmissionHandlerError> {
+    let payload = read_v5_frame_with_timeout(stream, timeout, |_| Ok(()))?;
+    let request = parse_v5_dispatch_admission_request(&payload)?;
+    let disposition =
+        record_v5_admission_for_expected_run(backend, request.clone(), expected_run_id);
+    Ok(HandledV5DispatchAdmissionV1 {
+        request,
+        disposition,
+    })
 }
 
 /// Facts that must remain invariant across the record and seal transitions.

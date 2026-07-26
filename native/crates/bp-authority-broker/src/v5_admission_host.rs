@@ -9,6 +9,8 @@ use crate::confinement::{
     BrokerAuthorityRoleV1, BrokerHostConfinementAttestationV1, BrokerHostConfinementPolicyV1,
 };
 #[cfg(target_os = "linux")]
+use crate::host_cas_custody::{load_protected_v5_cas_v1, ProtectedV5CasV1};
+#[cfg(target_os = "linux")]
 use crate::host_config_loader::{
     load_default_v5_admission_host_config_v1, ValidatedV5AdmissionHostStartupV1,
 };
@@ -60,6 +62,7 @@ enum V5AdmissionHostErrorV1 {
 #[cfg(target_os = "linux")]
 struct V5AdmissionHostV1 {
     startup: ValidatedV5AdmissionHostStartupV1,
+    _cas: ProtectedV5CasV1,
     keys: ProtectedV5AdmissionSigningKeysV1,
     ledger: ProtectedPromotionDecisionLedgerV1,
     policy: BrokerHostConfinementPolicyV1,
@@ -84,6 +87,11 @@ impl V5AdmissionHostV1 {
         let attestation = policy
             .attest_current_broker_process()
             .map_err(|_| V5AdmissionHostErrorV1::Startup)?;
+        let cas = load_protected_v5_cas_v1(
+            startup.authority_root().directory(),
+            startup.config().broker_uid,
+        )
+        .map_err(|_| V5AdmissionHostErrorV1::Startup)?;
         let keys = load_v5_admission_signing_keys_v1(&startup)
             .map_err(|_| V5AdmissionHostErrorV1::Startup)?;
         let ledger =
@@ -99,6 +107,7 @@ impl V5AdmissionHostV1 {
         .map_err(|_| V5AdmissionHostErrorV1::Startup)?;
         Ok(Self {
             startup,
+            _cas: cas,
             keys,
             ledger,
             policy,
@@ -168,7 +177,13 @@ impl V5AdmissionHostV1 {
                 return Err(V5AdmissionHostErrorV1::Connection);
             }
             written += count;
+            if Instant::now() >= deadline {
+                return Err(V5AdmissionHostErrorV1::Connection);
+            }
         }
+        stream
+            .shutdown(std::net::Shutdown::Write)
+            .map_err(|_| V5AdmissionHostErrorV1::Connection)?;
         Ok(())
     }
 }

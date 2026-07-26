@@ -8851,6 +8851,53 @@ fn protected_v5_authenticated_handler_rejects_same_uid_before_consuming_its_fram
     assert_eq!(observed, frame);
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn protected_v5_framed_handler_rejects_trailing_data_before_any_ledger_mutation() {
+    use std::io::Write;
+    use std::net::Shutdown;
+    use std::os::unix::net::UnixStream;
+    use std::time::Duration;
+
+    for trailing in [b"trailing".to_vec(), {
+        let mut second = 2_u32.to_be_bytes().to_vec();
+        second.extend_from_slice(b"{}");
+        second
+    }] {
+        let fixture = v5_broker_admission_fixture();
+        let broker = v5_broker_admission_backend(&fixture);
+        let (mut broker_stream, mut client_stream) =
+            UnixStream::pair().expect("create local Unix socket pair");
+        let payload = v5_broker_admission_wire(
+            "123e4567-e89b-12d3-a456-426614174000",
+            &fixture.run_id.to_string(),
+            &fixture.v5_envelope_digest,
+        );
+        let mut frame = (payload.len() as u32).to_be_bytes().to_vec();
+        frame.extend_from_slice(payload.as_bytes());
+        frame.extend_from_slice(&trailing);
+        client_stream
+            .write_all(&frame)
+            .expect("request plus trailing frame");
+        client_stream
+            .shutdown(Shutdown::Write)
+            .expect("single request EOF");
+
+        assert!(
+            super::v5_dispatch_admission::handle_v5_dispatch_admission_framed_with_binding_for_test(
+                &mut broker_stream,
+                &broker,
+                fixture.run_id,
+                Duration::from_millis(250),
+            )
+            .is_err()
+        );
+        assert_eq!(v5_broker_admission_receipt_count(&fixture), 0);
+        assert_eq!(v5_broker_checkpoint_count(&fixture), 0);
+        assert_eq!(fixture.store.event_count().expect("unchanged tape"), 5);
+    }
+}
+
 #[test]
 fn broker_v5_dispatch_admission_records_and_seals_real_v5_source_evidence() {
     let fixture = v5_broker_admission_fixture();

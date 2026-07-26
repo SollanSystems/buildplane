@@ -27,6 +27,8 @@ use std::os::unix::fs::MetadataExt;
 use std::os::unix::net::UnixStream;
 #[cfg(target_os = "linux")]
 use std::path::Path;
+#[cfg(target_os = "linux")]
+use std::time::{Duration, Instant};
 
 #[derive(Debug)]
 struct ClientConfigV1 {
@@ -140,10 +142,29 @@ fn exchange_with_stream(
     broker_identity_public_key: &VerifyingKey,
     input: &[u8],
 ) -> Result<Vec<u8>, V5AdmissionClientErrorV1> {
-    stream
-        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
-        .and_then(|_| stream.set_write_timeout(Some(std::time::Duration::from_secs(5))))
-        .map_err(|_| V5AdmissionClientErrorV1::Blocked)?;
+    exchange_with_stream_with_policy(
+        stream,
+        broker_identity_public_key,
+        input,
+        Duration::from_secs(5),
+        |stream| validate_listener_creator(stream, expected_listener_creator_uid),
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn exchange_with_stream_with_policy<F>(
+    stream: &mut UnixStream,
+    broker_identity_public_key: &VerifyingKey,
+    input: &[u8],
+    timeout: Duration,
+    mut authenticate: F,
+) -> Result<Vec<u8>, V5AdmissionClientErrorV1>
+where
+    F: FnMut(&mut UnixStream) -> Result<(), V5AdmissionClientErrorV1>,
+{
+    let deadline = Instant::now()
+        .checked_add(timeout)
+        .ok_or(V5AdmissionClientErrorV1::Blocked)?;
     let request = parse_v5_dispatch_admission_request(&input)
         .map_err(|_| V5AdmissionClientErrorV1::Blocked)?;
     let canonical_request = format!(
@@ -158,31 +179,119 @@ fn exchange_with_stream(
     )
     .map_err(|_| V5AdmissionClientErrorV1::Blocked)?;
 
-    validate_listener_creator(stream, expected_listener_creator_uid)?;
+    let mut frame = u32::try_from(canonical_request.len())
+        .map_err(|_| V5AdmissionClientErrorV1::Blocked)?
+        .to_be_bytes()
+        .to_vec();
+    frame.extend_from_slice(&canonical_request);
+    write_all_with_absolute_deadline(stream, &frame, deadline, &mut |stream, deadline| {
+        authenticate(stream)?;
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .filter(|remaining| !remaining.is_zero())
+            .ok_or(V5AdmissionClientErrorV1::Blocked)?;
+        stream
+            .set_write_timeout(Some(remaining))
+            .map_err(|_| V5AdmissionClientErrorV1::Blocked)
+    })?;
     stream
-        .write_all(
-            &u32::try_from(canonical_request.len())
-                .map_err(|_| V5AdmissionClientErrorV1::Blocked)?
-                .to_be_bytes(),
-        )
-        .and_then(|_| stream.write_all(&canonical_request))
+        .shutdown(std::net::Shutdown::Write)
         .map_err(|_| V5AdmissionClientErrorV1::Blocked)?;
     let mut encoded_length = [0_u8; 4];
-    stream
-        .read_exact(&mut encoded_length)
-        .map_err(|_| V5AdmissionClientErrorV1::Blocked)?;
+    read_exact_with_absolute_deadline(stream, &mut encoded_length, deadline, &mut authenticate)?;
     let length = u32::from_be_bytes(encoded_length) as usize;
     if length == 0 || length > MAX_RESPONSE_BYTES {
         return Err(V5AdmissionClientErrorV1::Blocked);
     }
     let mut payload = vec![0_u8; length];
-    stream
-        .read_exact(&mut payload)
-        .map_err(|_| V5AdmissionClientErrorV1::Blocked)?;
-    validate_listener_creator(stream, expected_listener_creator_uid)?;
+    read_exact_with_absolute_deadline(stream, &mut payload, deadline, &mut authenticate)?;
+    require_eof_with_absolute_deadline(stream, deadline, &mut authenticate)?;
     verify_v5_admission_response_v1(&payload, broker_identity_public_key, &binding)
         .map_err(|_| V5AdmissionClientErrorV1::Blocked)?;
     Ok(payload)
+}
+
+#[cfg(target_os = "linux")]
+fn write_all_with_absolute_deadline<W, F>(
+    writer: &mut W,
+    bytes: &[u8],
+    deadline: Instant,
+    authenticate: &mut F,
+) -> Result<(), V5AdmissionClientErrorV1>
+where
+    W: Write,
+    F: FnMut(&mut W, Instant) -> Result<(), V5AdmissionClientErrorV1>,
+{
+    let mut written = 0;
+    while written < bytes.len() {
+        authenticate(writer, deadline)?;
+        if Instant::now() >= deadline {
+            return Err(V5AdmissionClientErrorV1::Blocked);
+        }
+        let count = writer
+            .write(&bytes[written..])
+            .map_err(|_| V5AdmissionClientErrorV1::Blocked)?;
+        if count == 0 || Instant::now() >= deadline {
+            return Err(V5AdmissionClientErrorV1::Blocked);
+        }
+        written += count;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn read_exact_with_absolute_deadline<F>(
+    stream: &mut UnixStream,
+    bytes: &mut [u8],
+    deadline: Instant,
+    authenticate: &mut F,
+) -> Result<(), V5AdmissionClientErrorV1>
+where
+    F: FnMut(&mut UnixStream) -> Result<(), V5AdmissionClientErrorV1>,
+{
+    let mut read = 0;
+    while read < bytes.len() {
+        authenticate(stream)?;
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .filter(|remaining| !remaining.is_zero())
+            .ok_or(V5AdmissionClientErrorV1::Blocked)?;
+        stream
+            .set_read_timeout(Some(remaining))
+            .map_err(|_| V5AdmissionClientErrorV1::Blocked)?;
+        let count = stream
+            .read(&mut bytes[read..])
+            .map_err(|_| V5AdmissionClientErrorV1::Blocked)?;
+        if count == 0 || Instant::now() >= deadline {
+            return Err(V5AdmissionClientErrorV1::Blocked);
+        }
+        read += count;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn require_eof_with_absolute_deadline<F>(
+    stream: &mut UnixStream,
+    deadline: Instant,
+    authenticate: &mut F,
+) -> Result<(), V5AdmissionClientErrorV1>
+where
+    F: FnMut(&mut UnixStream) -> Result<(), V5AdmissionClientErrorV1>,
+{
+    authenticate(stream)?;
+    let remaining = deadline
+        .checked_duration_since(Instant::now())
+        .filter(|remaining| !remaining.is_zero())
+        .ok_or(V5AdmissionClientErrorV1::Blocked)?;
+    stream
+        .set_read_timeout(Some(remaining))
+        .map_err(|_| V5AdmissionClientErrorV1::Blocked)?;
+    let mut trailing = [0_u8; 1];
+    match stream.read(&mut trailing) {
+        Ok(0) if Instant::now() < deadline => Ok(()),
+        Ok(_) | Err(_) => Err(V5AdmissionClientErrorV1::Blocked),
+    }
 }
 
 #[cfg(all(test, target_os = "linux"))]
@@ -198,6 +307,45 @@ fn exchange_with_stream_for_test(
         broker_identity_public_key,
         input,
     )
+}
+
+#[cfg(all(test, target_os = "linux"))]
+fn exchange_with_stream_with_policy_for_test<F>(
+    stream: &mut UnixStream,
+    broker_identity_public_key: &VerifyingKey,
+    input: &[u8],
+    timeout: Duration,
+    authenticate: F,
+) -> Result<Vec<u8>, V5AdmissionClientErrorV1>
+where
+    F: FnMut(&mut UnixStream) -> Result<(), V5AdmissionClientErrorV1>,
+{
+    exchange_with_stream_with_policy(
+        stream,
+        broker_identity_public_key,
+        input,
+        timeout,
+        authenticate,
+    )
+}
+
+#[cfg(all(test, target_os = "linux"))]
+fn write_all_with_absolute_deadline_for_test<W, F>(
+    writer: &mut W,
+    bytes: &[u8],
+    timeout: Duration,
+    mut authenticate: F,
+) -> Result<(), V5AdmissionClientErrorV1>
+where
+    W: Write,
+    F: FnMut(&mut W, Instant) -> Result<(), V5AdmissionClientErrorV1>,
+{
+    let deadline = Instant::now()
+        .checked_add(timeout)
+        .ok_or(V5AdmissionClientErrorV1::Blocked)?;
+    write_all_with_absolute_deadline(writer, bytes, deadline, &mut |writer, _| {
+        authenticate(writer, deadline)
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -544,5 +692,201 @@ mod tests {
             .expect("JSON")
             .contains("\"status\":\"sealed\""));
         server.join().expect("mock server");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn client_exchange_blocks_a_signed_response_with_trailing_data() {
+        use std::net::Shutdown;
+        use std::os::unix::net::UnixStream;
+
+        let (mut client, mut server) = UnixStream::pair().expect("socket pair");
+        let key = SigningKey::from_bytes(&[78; 32]);
+        let request_id = uuid::Uuid::now_v7();
+        let run_id = bp_ledger::RunId::new();
+        let digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let request = format!(
+            r#"{{"request_id":"{request_id}","run_id":"{run_id}","v5_envelope_digest":"{digest}"}}"#
+        );
+        let response = signed_reconciliation_response(&key, request_id, run_id, digest);
+        let server_thread = std::thread::spawn(move || {
+            let mut header = [0_u8; 4];
+            server.read_exact(&mut header).expect("request header");
+            let mut body = vec![0_u8; u32::from_be_bytes(header) as usize];
+            server.read_exact(&mut body).expect("request body");
+            let mut eof = [0_u8; 1];
+            assert_eq!(server.read(&mut eof).expect("request EOF"), 0);
+            server
+                .write_all(&(response.len() as u32).to_be_bytes())
+                .and_then(|_| server.write_all(&response))
+                .and_then(|_| server.write_all(b"x"))
+                .expect("response plus trailing byte");
+            server.shutdown(Shutdown::Write).expect("response EOF");
+        });
+
+        assert_eq!(
+            exchange_with_stream_for_test(
+                &mut client,
+                unsafe { libc::geteuid() },
+                &key.verifying_key(),
+                request.as_bytes(),
+            ),
+            Err(V5AdmissionClientErrorV1::Blocked)
+        );
+        server_thread.join().expect("mock server");
+    }
+
+    #[test]
+    fn client_partial_writer_uses_one_deadline_and_rechecks_before_every_write() {
+        use std::io;
+        use std::time::{Duration, Instant};
+
+        struct SlowWriter;
+        impl Write for SlowWriter {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                std::thread::sleep(Duration::from_millis(20));
+                Ok(bytes.len().min(1))
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let mut checks = 0;
+        let started = Instant::now();
+        assert!(write_all_with_absolute_deadline_for_test(
+            &mut SlowWriter,
+            b"slow",
+            Duration::from_millis(50),
+            |_, _| {
+                checks += 1;
+                Ok(())
+            },
+        )
+        .is_err());
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(checks >= 2);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn client_slow_drip_header_is_bounded_and_reauthenticated_per_read() {
+        use std::net::Shutdown;
+        use std::os::unix::net::UnixStream;
+        use std::time::{Duration, Instant};
+
+        let (mut client, mut server) = UnixStream::pair().expect("socket pair");
+        let key = SigningKey::from_bytes(&[79; 32]);
+        let request_id = uuid::Uuid::now_v7();
+        let run_id = bp_ledger::RunId::new();
+        let digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let request = format!(
+            r#"{{"request_id":"{request_id}","run_id":"{run_id}","v5_envelope_digest":"{digest}"}}"#
+        );
+        let response = signed_reconciliation_response(&key, request_id, run_id, digest);
+        let server_thread = std::thread::spawn(move || {
+            let mut request_bytes = Vec::new();
+            server.read_to_end(&mut request_bytes).expect("request EOF");
+            for byte in (response.len() as u32).to_be_bytes() {
+                if server.write_all(&[byte]).is_err() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            let _ = server.shutdown(Shutdown::Write);
+        });
+        let mut checks = 0;
+        let started = Instant::now();
+        assert_eq!(
+            exchange_with_stream_with_policy_for_test(
+                &mut client,
+                &key.verifying_key(),
+                request.as_bytes(),
+                Duration::from_millis(50),
+                |_| {
+                    checks += 1;
+                    Ok(())
+                },
+            ),
+            Err(V5AdmissionClientErrorV1::Blocked)
+        );
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(checks >= 2);
+        drop(client);
+        server_thread.join().expect("mock server");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn client_slow_drip_body_is_bounded_and_reauthenticated_per_read() {
+        use std::net::Shutdown;
+        use std::os::unix::net::UnixStream;
+        use std::time::{Duration, Instant};
+
+        let (mut client, mut server) = UnixStream::pair().expect("socket pair");
+        let key = SigningKey::from_bytes(&[80; 32]);
+        let request_id = uuid::Uuid::now_v7();
+        let run_id = bp_ledger::RunId::new();
+        let digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let request = format!(
+            r#"{{"request_id":"{request_id}","run_id":"{run_id}","v5_envelope_digest":"{digest}"}}"#
+        );
+        let response = signed_reconciliation_response(&key, request_id, run_id, digest);
+        let server_thread = std::thread::spawn(move || {
+            let mut request_bytes = Vec::new();
+            server.read_to_end(&mut request_bytes).expect("request EOF");
+            server
+                .write_all(&(response.len() as u32).to_be_bytes())
+                .expect("response header");
+            for byte in response {
+                if server.write_all(&[byte]).is_err() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            let _ = server.shutdown(Shutdown::Write);
+        });
+        let mut checks = 0;
+        let started = Instant::now();
+        assert_eq!(
+            exchange_with_stream_with_policy_for_test(
+                &mut client,
+                &key.verifying_key(),
+                request.as_bytes(),
+                Duration::from_millis(50),
+                |_| {
+                    checks += 1;
+                    Ok(())
+                },
+            ),
+            Err(V5AdmissionClientErrorV1::Blocked)
+        );
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(checks >= 3);
+        drop(client);
+        server_thread.join().expect("mock server");
+    }
+
+    #[cfg(target_os = "linux")]
+    fn signed_reconciliation_response(
+        key: &SigningKey,
+        request_id: uuid::Uuid,
+        run_id: bp_ledger::RunId,
+        digest: &str,
+    ) -> Vec<u8> {
+        use crate::v5_admission_response::{
+            sign_v5_admission_response_v1, V5AdmissionResponseRequestBindingV1,
+        };
+        use crate::v5_dispatch_admission::BrokerV5DispatchAdmissionDisposition;
+
+        let binding =
+            V5AdmissionResponseRequestBindingV1::new(request_id, run_id, digest.to_string())
+                .expect("response binding");
+        sign_v5_admission_response_v1(
+            key,
+            &binding,
+            &BrokerV5DispatchAdmissionDisposition::ReconciliationRequired,
+        )
+        .expect("signed response")
     }
 }

@@ -44,6 +44,7 @@ mod admission_protocol;
 mod confinement;
 #[allow(dead_code)]
 mod dispatch_admission;
+mod host_cas_custody;
 mod host_config;
 mod host_config_loader;
 mod host_key_custody;
