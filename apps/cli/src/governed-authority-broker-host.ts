@@ -8,6 +8,13 @@
  * the input, admission, dispatch, and candidate execution contract.
  */
 import type { CandidateCreatedV2, ReviewVerdictV1 } from "@buildplane/kernel";
+import {
+	openProtectedCandidateSessionV1,
+	openProtectedRecoverySessionV1,
+	openProtectedReviewerSessionV1,
+	probeProtectedGovernedSessionHostV1,
+	runProtectedGovernedSessionV1,
+} from "./governed-session-client.js";
 
 declare const hostOwnedGovernedBrokerBrand: unique symbol;
 declare const hostOwnedCandidateSessionBrand: unique symbol;
@@ -368,12 +375,101 @@ export interface HostOwnedGovernedBrokerV1 {
 /**
  * Resolves a capability provided by an OS-authenticated host integration.
  *
- * This distribution has no privileged host integration yet. It intentionally
- * performs no environment, command-line, filesystem, network, global, or
- * fallback lookup; governed callers must treat `undefined` as blocked.
+ * Linux callers receive only an adapter over the fixed, root-installed native
+ * session client. The native executable owns its own inode/config/socket/peer
+ * and signed-response checks. No path, environment, argument, callback,
+ * endpoint, key, signer, executor, or promotion override crosses this module.
+ *
+ * Unsupported platforms remain blocked. A missing or rejected native client
+ * makes broker resolution fail and never falls back to local execution.
  */
 export async function resolveHostOwnedGovernedBroker(): Promise<
 	HostOwnedGovernedBrokerV1 | undefined
 > {
-	return undefined;
+	if (process.platform !== "linux") return undefined;
+	if (!(await probeProtectedGovernedSessionHostV1())) return undefined;
+
+	const unsupportedPlanForge = async (): Promise<never> => {
+		throw new Error(
+			"PlanForge authority is not supported by the protected governed session protocol.",
+		);
+	};
+
+	return Object.freeze({
+		kind: "host-owned-governed-broker-v1" as const,
+		admitPlanForge: unsupportedPlanForge,
+		openPlanForgeCandidateSession: unsupportedPlanForge,
+		async openCandidateSession(input: HostOwnedCandidateSessionOpenInputV1) {
+			const opened = await openProtectedCandidateSessionV1(input);
+			if (!opened) throw protectedSessionClientError("candidate");
+			return candidateSession(opened);
+		},
+		async openRecoverySession(input: HostOwnedRecoverySessionOpenInputV1) {
+			const opened = await openProtectedRecoverySessionV1(input);
+			if (!opened) throw protectedSessionClientError("recovery");
+			return candidateSession(opened);
+		},
+		async openReviewerSession(input: HostOwnedReviewerSessionOpenInputV1) {
+			const opened = await openProtectedReviewerSessionV1(input);
+			if (!opened) {
+				throw protectedSessionClientError("reviewer recovery identity");
+			}
+			const recoveryRef = opened.recoveryReference;
+			const sessionReference = opened.sessionReference;
+			return Object.freeze({
+				kind: "host-owned-governed-reviewer-session-v1" as const,
+				recoveryRef,
+				async run() {
+					const completed = await runProtectedGovernedSessionV1({
+						operation: "run_reviewer_session",
+						recoveryReference: recoveryRef,
+						sessionReference,
+					});
+					if (!completed) throw protectedSessionClientError("reviewer run");
+					const result = completed.result;
+					if (
+						result.kind !== "host-owned-governed-reviewer-run-result-v1" ||
+						result.recoveryRef !== recoveryRef
+					) {
+						throw protectedSessionClientError("reviewer result");
+					}
+					return result as unknown as HostOwnedReviewerRunResultV1;
+				},
+			}) as HostOwnedReviewerSessionV1;
+		},
+	}) as unknown as HostOwnedGovernedBrokerV1;
+}
+
+function candidateSession(opened: {
+	readonly recoveryReference: string;
+	readonly sessionReference: string;
+}): HostOwnedCandidateSessionV1 {
+	const recoveryRef = opened.recoveryReference;
+	const sessionReference = opened.sessionReference;
+	return Object.freeze({
+		kind: "host-owned-governed-candidate-session-v1" as const,
+		recoveryRef,
+		async run() {
+			const completed = await runProtectedGovernedSessionV1({
+				operation: "run_candidate_session",
+				recoveryReference: recoveryRef,
+				sessionReference,
+			});
+			if (!completed) throw protectedSessionClientError("candidate run");
+			const result = completed.result;
+			if (
+				result.kind !== "host-owned-governed-candidate-run-result-v1" ||
+				result.recoveryRef !== recoveryRef
+			) {
+				throw protectedSessionClientError("candidate result");
+			}
+			return result as unknown as HostOwnedCandidateRunResult;
+		},
+	}) as HostOwnedCandidateSessionV1;
+}
+
+function protectedSessionClientError(operation: string): Error {
+	return new Error(
+		`protected governed session client rejected the ${operation} operation.`,
+	);
 }

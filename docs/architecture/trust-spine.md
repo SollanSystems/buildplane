@@ -660,14 +660,23 @@ candidate, review, or promotion issuer. The TypeScript launcher remains
 intentionally unavailable because it cannot prove an external broker owns the
 session; a realm-pinned key must not make a caller-controlled stdin stream
 authoritative.
-Governed API-worker execution remains blocked until an OS-isolated broker
-exposes the native, same-ledger-process `resolve-or-authorize` transaction to
-the credential-holding provider boundary, replays against configured trusted
-kernel authorities, and hands the original signed capability directly to that
-gateway. The storage primitive already appends or returns the exact V2
-authority under the ledger lock and reconciles a post-lease crash as unknown;
-the remaining release gate is making that capability unforgeable to ambient
-same-user workers. Authority expiry bounds the governed completion: the gateway needs an effect deadline with
+The CLI now has a fail-closed client boundary for that future composition:
+`/usr/libexec/buildplane/buildplane-governed-session-client` validates its own
+installed inode, root-owned configuration, fixed Unix socket, listener peer,
+single absolute exchange deadline, and broker-signed response before exposing
+an opaque candidate or reviewer session. Reviewer lookup carries only the
+host-issued recovery reference. This client does not itself create authority,
+and no protected governed-session listener or session registry ships yet, so
+the probe fails and governed API-worker execution remains blocked.
+
+The remaining OS-isolated broker must expose the native, same-ledger-process
+`resolve-or-authorize` transaction to the credential-holding provider boundary,
+replay against configured trusted kernel authorities, and hand the original
+signed capability directly to that gateway. The storage primitive already
+appends or returns the exact V2 authority under the ledger lock and reconciles a
+post-lease crash as unknown; the remaining release gate is making that
+capability unforgeable to ambient same-user workers. Authority expiry bounds
+the governed completion: the gateway needs an effect deadline with
 receipt-persistence margin plus provider-specific input preflight and an
 output-token reservation before it sends a request. The adapter records an
 unknown effect rather than a success if a provider response arrives at or after

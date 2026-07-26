@@ -44,6 +44,12 @@ mod admission_protocol;
 mod confinement;
 #[allow(dead_code)]
 mod dispatch_admission;
+mod governed_session_client;
+#[cfg(test)]
+mod governed_session_client_contract_tests;
+mod governed_session_response;
+#[cfg(test)]
+mod governed_session_response_contract_tests;
 mod host_cas_custody;
 mod host_config;
 mod host_config_loader;
@@ -78,6 +84,7 @@ mod v5_admission_response_contract_tests;
 #[allow(dead_code)]
 mod v5_dispatch_admission;
 
+pub use governed_session_client::run_default_governed_session_client_v1;
 pub use promotion_decision_client::run_default_promotion_decision_client_v1;
 pub use promotion_decision_host::run_default_promotion_decision_host_v1;
 pub use v5_admission_client::run_default_v5_admission_client_v1;
