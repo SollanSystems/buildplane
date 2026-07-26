@@ -27,8 +27,9 @@ use crate::payload::model_evidence::{
     verify_model_request_evidence_matches_canonical_input,
     verify_trust_scope_evidence_matches_model_request, ModelActionEvidenceBindingV1,
     ModelProviderV1, ModelRequestEvidenceDocumentV1, ProviderTokenPreflightInputV1,
-    TrustScopeEvidenceDocumentV1, VerifiedProviderTokenPreflightInputV1,
-    VerifiedProviderTokenPreflightResultV1,
+    TrustScopeEvidenceDocumentV1, VerifiedModelRequestEvidenceDocumentV1,
+    VerifiedProviderTokenPreflightInputV1, VerifiedProviderTokenPreflightResultV1,
+    VerifiedTrustScopeEvidenceDocumentV1,
 };
 use crate::payload::trust_spine::{
     action_receipt_recorded_v2_digest, action_receipt_set_v1_digest, action_requested_v2_digest,
@@ -42,13 +43,13 @@ use crate::payload::trust_spine::{
     CandidateCompletionRecordedV1, CandidateCreatedV2, CandidateViewV1, CommitModeV1,
     ContextManifestDeclaredV1, DispatchEnvelopeV3, DispatchEnvelopeV4, DispatchEnvelopeV5,
     ExecutionRoleV1, GovernedDispatchV5AdmissionRecordedV1, ModelActionAuthorizedV1,
-    ModelActionAuthorizedV2, ModelActionIntentV1, ModelRequestEvidenceV1,
-    PromotionApprovalRequestedV1, PromotionDecisionKindV1, PromotionDecisionRecordedV1,
-    PromotionExecutionClaimedV1, PromotionExecutionLeaseBindingV1, PromotionGitBindingV1,
-    PromotionReconciliationResolvedV1, PromotionResultOutcomeV1, PromotionResultRecordedV1,
-    PromotionWorktreeSyncStateV1, ReconciliationResolutionOutcomeV1, ReviewDecisionV1,
-    ReviewVerdictRecordedV2, SandboxProfileDeclaredV1, TrustScopeEvidenceV1, TrustTierV1,
-    WorkerManifestDeclaredV1, WorkflowGraphDeclaredV2, WorkflowTerminalOutcomeV1,
+    ModelActionAuthorizedV2, ModelActionCandidateBindingV1, ModelActionIntentV1,
+    ModelRequestEvidenceV1, PromotionApprovalRequestedV1, PromotionDecisionKindV1,
+    PromotionDecisionRecordedV1, PromotionExecutionClaimedV1, PromotionExecutionLeaseBindingV1,
+    PromotionGitBindingV1, PromotionReconciliationResolvedV1, PromotionResultOutcomeV1,
+    PromotionResultRecordedV1, PromotionWorktreeSyncStateV1, ReconciliationResolutionOutcomeV1,
+    ReviewDecisionV1, ReviewVerdictRecordedV2, SandboxProfileDeclaredV1, TrustScopeEvidenceV1,
+    TrustTierV1, WorkerManifestDeclaredV1, WorkflowGraphDeclaredV2, WorkflowTerminalOutcomeV1,
 };
 use crate::payload::Payload;
 use crate::signing::{
@@ -621,12 +622,20 @@ pub enum ProviderTokenPreflightActionIssueDispositionV1 {
         canonical_input_ref: String,
         canonical_input_digest: String,
         verified_input: VerifiedProviderTokenPreflightInputV1,
+        dispatch: DispatchEnvelopeV3,
+        model_request: VerifiedModelRequestEvidenceDocumentV1,
+        trust_scope: VerifiedTrustScopeEvidenceDocumentV1,
+        candidate_binding: Option<ModelActionCandidateBindingV1>,
     },
     Existing {
         action_request_event_id: EventId,
         canonical_input_ref: String,
         canonical_input_digest: String,
         verified_input: VerifiedProviderTokenPreflightInputV1,
+        dispatch: DispatchEnvelopeV3,
+        model_request: VerifiedModelRequestEvidenceDocumentV1,
+        trust_scope: VerifiedTrustScopeEvidenceDocumentV1,
+        candidate_binding: Option<ModelActionCandidateBindingV1>,
     },
 }
 
@@ -3290,6 +3299,15 @@ impl SqliteStore {
             &model_request_bytes,
             &intent.model_request_evidence,
         )?;
+        let trust_scope_bytes = cas.get_verified_canonical_bytes(
+            &intent.trust_scope_evidence.cas_ref,
+            &intent.trust_scope_evidence.digest,
+        )?;
+        let trust_scope = parse_verified_trust_scope_evidence_document_v1(
+            &trust_scope_bytes,
+            &intent.trust_scope_evidence,
+        )?;
+        verify_trust_scope_evidence_matches_model_request(trust_scope.document(), &model_request)?;
         let dispatch_event = load_verified_authority_event(
             &tx,
             request.dispatch_event_id,
@@ -3403,6 +3421,10 @@ impl SqliteStore {
                 canonical_input_ref: action.canonical_input_ref,
                 canonical_input_digest: action.canonical_input_digest,
                 verified_input,
+                dispatch,
+                model_request,
+                trust_scope,
+                candidate_binding: intent.candidate_binding,
             });
         }
 
@@ -3426,6 +3448,10 @@ impl SqliteStore {
             canonical_input_ref: preflight_action.canonical_input_ref,
             canonical_input_digest: preflight_action.canonical_input_digest,
             verified_input,
+            dispatch,
+            model_request,
+            trust_scope,
+            candidate_binding: intent.candidate_binding,
         })
     }
 

@@ -1039,17 +1039,29 @@ fn native_model_authority_commits_the_v2_authorization_and_one_lease_together() 
         preflight_input_ref,
         preflight_input_digest,
         issued_verified_preflight_input,
+        issued_dispatch,
+        issued_model_request,
+        issued_trust_scope,
+        issued_candidate_binding,
     ) = match issued_preflight {
         ProviderTokenPreflightActionIssueDispositionV1::Issued {
             action_request_event_id,
             canonical_input_ref,
             canonical_input_digest,
             verified_input,
+            dispatch,
+            model_request,
+            trust_scope,
+            candidate_binding,
         } => (
             action_request_event_id,
             canonical_input_ref,
             canonical_input_digest,
             verified_input,
+            dispatch,
+            model_request,
+            trust_scope,
+            candidate_binding,
         ),
         other => panic!("first preflight issuance must append, got {other:?}"),
     };
@@ -1084,6 +1096,19 @@ fn native_model_authority_commits_the_v2_authorization_and_one_lease_together() 
         issued_verified_preflight_input, verified_preflight_input,
         "issuance must return the exact verified CAS input"
     );
+    assert_eq!(
+        issued_model_request, verified_model_request,
+        "issuance must return the exact verified model request"
+    );
+    assert_eq!(
+        issued_dispatch.envelope_digest, dispatch.envelope_digest,
+        "issuance must return the verified signed dispatch"
+    );
+    assert_eq!(
+        issued_trust_scope.document().model_request_evidence,
+        issued_model_request.descriptor()
+    );
+    assert!(issued_candidate_binding.is_none());
     let preflight_action_id = format!("{}:provider-token-preflight", request.action_id);
     let preflight_claim = store
         .claim_activity_v1_at_for_tests(

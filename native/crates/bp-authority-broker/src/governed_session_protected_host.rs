@@ -7,7 +7,7 @@
 
 use crate::confinement::BrokerHostConfinementAttestationV1;
 use crate::governed_session_startup::{
-    GovernedSessionHostStartupErrorV1, GovernedSessionHostStartupV1,
+    GovernedSessionHostStartupErrorV1, GovernedSessionHostStartupV1, GovernedSessionProviderLaneV1,
 };
 use crate::host_anthropic_credential_custody::ProtectedAnthropicCredentialBrokerV1;
 use crate::host_cas_custody::{
@@ -25,9 +25,21 @@ use crate::host_ledger_custody::{
     load_governed_session_ledger_v1, ProtectedHostLedgerLoadError,
     ProtectedPromotionDecisionLedgerV1,
 };
+use crate::provider_preflight::{
+    CasProviderTokenPreflightEvidenceWriterV1, CredentialProviderTokenPreflightGatewayV1,
+    LedgerProviderTokenPreflightBackendV1, ProviderTokenPreflightAuthorityV1,
+    ProviderTokenPreflightStatusV1,
+};
 use crate::rootless_oci::{
     attest_rootless_oci_v1, RootlessOciAttestationV1, RootlessOciStartupErrorV1,
 };
+use crate::{BrokerModelActionRequest, ReplaySnapshotVerifier, TrustedReplayVerifier};
+use async_trait::async_trait;
+use bp_ledger::payload::model_evidence::ModelProviderV1;
+use bp_ledger::payload::trust_spine::ExecutionRoleV1;
+use bp_provider_anthropic::{AnthropicHttpTransportV1, AnthropicProvider};
+use bp_provider_sdk::{ProviderError, ProviderTokenCountRequestV1, ProviderTokenCounterV1};
+use std::collections::BTreeSet;
 use thiserror::Error;
 
 pub(crate) struct ProtectedGovernedSessionHostStateV1 {
@@ -36,7 +48,41 @@ pub(crate) struct ProtectedGovernedSessionHostStateV1 {
     signing_keys: ProtectedGovernedSessionSigningKeysV1,
     ledger: ProtectedPromotionDecisionLedgerV1,
     cas: ProtectedV5CasV1,
-    anthropic_credentials: ProtectedAnthropicCredentialBrokerV1,
+    anthropic_counter: ProtectedAnthropicCounterV1,
+}
+
+#[derive(Clone)]
+struct ProtectedAnthropicCounterV1 {
+    provider: AnthropicProvider,
+    allowed_models: BTreeSet<String>,
+    allowed_worker_manifest_digests: BTreeSet<String>,
+}
+
+#[async_trait]
+impl ProviderTokenCounterV1 for ProtectedAnthropicCounterV1 {
+    fn id(&self) -> &'static str {
+        "anthropic"
+    }
+
+    async fn available(&self) -> Result<bool, ProviderError> {
+        self.provider.available().await
+    }
+
+    async fn count_input_tokens(
+        &self,
+        request: &ProviderTokenCountRequestV1,
+    ) -> Result<u32, ProviderError> {
+        if !self.allowed_models.contains(&request.model)
+            || !self
+                .allowed_worker_manifest_digests
+                .contains(&request.worker_manifest_digest)
+        {
+            return Err(ProviderError::InvalidContract(
+                "provider request is outside protected host allowlists".into(),
+            ));
+        }
+        self.provider.count_input_tokens(request).await
+    }
 }
 
 impl ProtectedGovernedSessionHostStateV1 {
@@ -60,9 +106,75 @@ impl ProtectedGovernedSessionHostStateV1 {
         &self.cas
     }
 
-    pub(crate) fn anthropic_credentials(&self) -> &ProtectedAnthropicCredentialBrokerV1 {
-        &self.anthropic_credentials
+    pub(crate) fn anthropic_counter(&self) -> &impl ProviderTokenCounterV1 {
+        &self.anthropic_counter
     }
+
+    /// Prepare the separately recorded token-count activity for one exact
+    /// signed model action. The caller may name only the dispatch and action
+    /// events. Role, provider, model, prompts, manifests, candidate binding,
+    /// activity identity, budgets, and evidence are reconstructed from trusted
+    /// replay and strict CAS documents inside the protected host.
+    pub(crate) async fn prepare_anthropic_provider(
+        &self,
+        request: BrokerModelActionRequest,
+    ) -> Result<ProviderTokenPreflightStatusV1, ProtectedGovernedSessionProviderErrorV1> {
+        let config = self.validated_startup.config();
+        let mut verifier = ReplaySnapshotVerifier::from_prevalidated_startup(
+            self.ledger.recovery_database_path(),
+            &config.replay_authorities,
+            &config.claim_signer,
+        );
+        let binding = verifier
+            .verify_exact_action(config.run_id, &request)
+            .map_err(|_| ProtectedGovernedSessionProviderErrorV1::TrustedReplay)?;
+        if binding.run_id != config.run_id
+            || binding.dispatch_event_id != request.dispatch_event_id
+            || binding.action_request_event_id != request.action_request_event_id
+            || binding.dispatch_role != binding.action_role
+            || binding.dispatch_role == ExecutionRoleV1::Candidate
+        {
+            return Err(ProtectedGovernedSessionProviderErrorV1::TrustedReplay);
+        }
+
+        let backend = LedgerProviderTokenPreflightBackendV1::from_prevalidated_startup(
+            config.run_id,
+            request.dispatch_event_id,
+            request.action_request_event_id,
+            binding.dispatch_role,
+            config.model_action_lease_ms,
+            self.ledger.store(),
+            self.cas.cas(),
+            &config.activity_authority,
+            self.signing_keys.action_request(),
+            &config.action_request_signer,
+            self.signing_keys.claim(),
+            &config.claim_signer,
+        )
+        .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)?;
+        let evidence_writer = CasProviderTokenPreflightEvidenceWriterV1::new(self.cas.cas());
+        let gateway = CredentialProviderTokenPreflightGatewayV1::new(
+            self.anthropic_counter.clone(),
+            evidence_writer,
+        );
+        let authority =
+            ProviderTokenPreflightAuthorityV1::new(config.run_id.to_string(), backend, gateway);
+        let mut lane = GovernedSessionProviderLaneV1::from_prevalidated_startup(
+            &self.session_startup,
+            authority,
+        );
+        lane.prepare_provider()
+            .await
+            .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
+pub(crate) enum ProtectedGovernedSessionProviderErrorV1 {
+    #[error("protected governed-session trusted replay rejected provider preparation")]
+    TrustedReplay,
+    #[error("protected governed-session durable provider authority failed")]
+    DurableAuthority,
 }
 
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
@@ -125,6 +237,26 @@ fn compose_prevalidated_governed_session_host_v1(
             &validated_startup,
         )
         .map_err(|_| ProtectedGovernedSessionHostStartupErrorV1::Credential)?;
+    let anthropic_transport = AnthropicHttpTransportV1::new(anthropic_credentials)
+        .map_err(|_| ProtectedGovernedSessionHostStartupErrorV1::Credential)?;
+    let allowed_models = validated_startup
+        .config()
+        .allowed_provider_models
+        .iter()
+        .filter(|entry| entry.provider == ModelProviderV1::Anthropic)
+        .map(|entry| entry.model.clone())
+        .collect();
+    let allowed_worker_manifest_digests = validated_startup
+        .config()
+        .allowed_worker_manifest_digests
+        .iter()
+        .cloned()
+        .collect();
+    let anthropic_counter = ProtectedAnthropicCounterV1 {
+        provider: AnthropicProvider::new(anthropic_transport),
+        allowed_models,
+        allowed_worker_manifest_digests,
+    };
 
     Ok(ProtectedGovernedSessionHostStateV1 {
         validated_startup,
@@ -132,7 +264,7 @@ fn compose_prevalidated_governed_session_host_v1(
         signing_keys,
         ledger,
         cas,
-        anthropic_credentials,
+        anthropic_counter,
     })
 }
 
@@ -179,6 +311,7 @@ mod tests {
     use crate::host_config_loader::validate_governed_session_host_startup_from_trusted_anchor_for_test;
     use bp_ledger::storage::sqlite::SqliteStore;
     use bp_provider_anthropic::AnthropicCredentialBrokerV1;
+    use bp_provider_sdk::{provider_response_contract_v1, ProviderExecutionRoleV1};
     use ed25519_dalek::SigningKey;
     use futures::executor::block_on;
     use serde_json::{json, Value};
@@ -352,7 +485,7 @@ mod tests {
             .cas()
             .get_bytes("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
             .is_err());
-        assert!(block_on(state.anthropic_credentials().available()).expect("credential"));
+        assert!(block_on(state.anthropic_counter().available()).expect("credential"));
     }
 
     #[test]
@@ -392,5 +525,78 @@ mod tests {
                 "{missing} must fail closed"
             );
         }
+    }
+
+    #[test]
+    fn protected_counter_rejects_model_and_worker_manifest_outside_startup_policy() {
+        let fixture = HostFixture::new();
+        let validated = fixture.validated_startup();
+        let confinement = validated
+            .config()
+            .confinement_policy
+            .attestation_for_same_process_socket_tests();
+        let state = compose_prevalidated_governed_session_host_v1(
+            validated,
+            confinement,
+            oci_attestation(),
+        )
+        .expect("protected host");
+        let contract = provider_response_contract_v1(ProviderExecutionRoleV1::Implementer)
+            .expect("response contract");
+        let mut request = ProviderTokenCountRequestV1 {
+            schema_version: 1,
+            request_id: "anthropic:workflow:unit:attempt-1:model:provider-token-preflight".into(),
+            model: "claude-not-allowed".into(),
+            execution_role: ProviderExecutionRoleV1::Implementer,
+            system_prompt: None,
+            prompt: "bounded prompt".into(),
+            response_schema_name: contract.name.into(),
+            response_contract_digest: contract.contract_digest,
+            response_schema_digest: contract.schema_digest,
+            response_schema: contract.schema,
+            candidate_digest: None,
+            worker_manifest_digest:
+                "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            max_total_tokens: 1_024,
+            deadline_unix_ms: i64::MAX,
+            tools: vec![],
+        };
+        assert!(matches!(
+            block_on(state.anthropic_counter().count_input_tokens(&request)),
+            Err(ProviderError::InvalidContract(_))
+        ));
+
+        request.model = "claude-sonnet-4-5-20250929".into();
+        request.worker_manifest_digest =
+            "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".into();
+        assert!(matches!(
+            block_on(state.anthropic_counter().count_input_tokens(&request)),
+            Err(ProviderError::InvalidContract(_))
+        ));
+    }
+
+    #[test]
+    fn provider_preparation_rejects_unknown_tape_identity_before_gateway_entry() {
+        let fixture = HostFixture::new();
+        let validated = fixture.validated_startup();
+        let confinement = validated
+            .config()
+            .confinement_policy
+            .attestation_for_same_process_socket_tests();
+        let state = compose_prevalidated_governed_session_host_v1(
+            validated,
+            confinement,
+            oci_attestation(),
+        )
+        .expect("protected host");
+        let result = block_on(state.prepare_anthropic_provider(BrokerModelActionRequest {
+            dispatch_event_id: bp_ledger::EventId::new(),
+            action_request_event_id: bp_ledger::EventId::new(),
+        }));
+        assert_eq!(
+            result,
+            Err(ProtectedGovernedSessionProviderErrorV1::TrustedReplay)
+        );
+        assert_eq!(state.ledger().store().event_count().expect("ledger"), 0);
     }
 }

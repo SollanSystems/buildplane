@@ -730,9 +730,22 @@ verified preflight-input object whose canonical bytes it stored in CAS; that
 object travels only inside the opaque one-use provider capability. The CAS
 evidence writer derives success or unknown evidence from that capability
 rather than from a separately injected input, preventing result evidence from
-being rebound to another CAS object. Wiring this backend and the
-provider counter into the protected governed-session host remains the final
-preflight composition step. The governed-session startup now retains that
+being rebound to another CAS object. Issuance also returns the exact verified
+dispatch, model-request, trust-scope, and optional candidate binding reopened
+inside the transaction. The broker builds the provider token-count request
+only from those values; callers no longer supply provider, model, prompt,
+manifest, candidate, activity identity, or request identity to the durable
+backend.
+
+The protected governed-session host now composes the Anthropic HTTP transport,
+startup model and worker-manifest allowlists, ledger-derived preflight backend,
+CAS evidence writer, opaque authority, and OCI-bound provider lane in one
+internal method. Its controller input contains only the already signed
+dispatch and model-action event identities. A fresh trusted replay snapshot
+must bind both events and their exact role before issuance. An unknown tape
+identity, disallowed model, or disallowed worker manifest fails before the
+provider transport; the preflight activity ID is derived from the verified
+model action. The governed-session startup retains this
 composition as an opaque provider lane only after both the model-action
 confinement policy and the rootless OCI attestation pass. The lane exposes
 only its sandbox-profile digest and the closed preflight status; it cannot

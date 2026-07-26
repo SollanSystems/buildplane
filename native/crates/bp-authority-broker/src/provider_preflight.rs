@@ -22,6 +22,8 @@ use ed25519_dalek::SigningKey;
 use serde::Serialize;
 use thiserror::Error;
 
+use crate::provider_request::build_provider_token_count_request_v1;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ProviderTokenPreflightStatusV1 {
     Pending,
@@ -334,11 +336,9 @@ pub(crate) struct LedgerProviderTokenPreflightBackendV1<'a> {
     run_id: RunId,
     dispatch_event_id: EventId,
     model_action_request_event_id: EventId,
-    preflight_action_id: String,
+    preflight_action_id: Option<String>,
     execution_role: ExecutionRoleV1,
     lease_duration_ms: u64,
-    provider: ModelProviderV1,
-    request: ProviderTokenCountRequestV1,
     store: &'a SqliteStore,
     cas: &'a Cas,
     authority: &'a ActivityClaimAuthorityV1,
@@ -354,11 +354,8 @@ impl<'a> LedgerProviderTokenPreflightBackendV1<'a> {
         run_id: RunId,
         dispatch_event_id: EventId,
         model_action_request_event_id: EventId,
-        preflight_action_id: String,
         execution_role: ExecutionRoleV1,
         lease_duration_ms: u64,
-        provider: ModelProviderV1,
-        request: ProviderTokenCountRequestV1,
         store: &'a SqliteStore,
         cas: &'a Cas,
         authority: &'a ActivityClaimAuthorityV1,
@@ -367,42 +364,16 @@ impl<'a> LedgerProviderTokenPreflightBackendV1<'a> {
         claim_signing_key: &'a SigningKey,
         claim_signer: &'a ActorKeyRef,
     ) -> Result<Self, ProviderTokenPreflightAuthorityErrorV1> {
-        request
-            .validate()
-            .map_err(|_| ProviderTokenPreflightAuthorityErrorV1::DurableAuthority)?;
-        let provider_name = match provider {
-            ModelProviderV1::Anthropic => "anthropic",
-            ModelProviderV1::Openai => "openai",
-        };
-        let role_matches = matches!(
-            (execution_role, request.execution_role),
-            (
-                ExecutionRoleV1::Implementer,
-                ProviderExecutionRoleV1::Implementer
-            ) | (ExecutionRoleV1::Reviewer, ProviderExecutionRoleV1::Reviewer)
-                | (
-                    ExecutionRoleV1::Adversary,
-                    ProviderExecutionRoleV1::Adversary
-                )
-                | (ExecutionRoleV1::Judge, ProviderExecutionRoleV1::Judge)
-        );
-        if preflight_action_id.trim().is_empty()
-            || !preflight_action_id.ends_with(":provider-token-preflight")
-            || request.request_id != format!("{provider_name}:{preflight_action_id}")
-            || !role_matches
-            || !(MIN_ACTIVITY_LEASE_MS..=MAX_ACTIVITY_LEASE_MS).contains(&lease_duration_ms)
-        {
+        if !(MIN_ACTIVITY_LEASE_MS..=MAX_ACTIVITY_LEASE_MS).contains(&lease_duration_ms) {
             return Err(ProviderTokenPreflightAuthorityErrorV1::DurableAuthority);
         }
         Ok(Self {
             run_id,
             dispatch_event_id,
             model_action_request_event_id,
-            preflight_action_id,
+            preflight_action_id: None,
             execution_role,
             lease_duration_ms,
-            provider,
-            request,
             store,
             cas,
             authority,
@@ -451,25 +422,87 @@ impl ProviderTokenPreflightBackendV1 for LedgerProviderTokenPreflightBackendV1<'
                 self.action_signer,
             )
             .map_err(|_| ProviderTokenPreflightAuthorityErrorV1::DurableAuthority)?;
-        let (action_request_event_id, preflight_input) = match issued {
+        let (
+            action_request_event_id,
+            preflight_input,
+            dispatch,
+            model_request,
+            trust_scope,
+            candidate_binding,
+        ) = match issued {
             ProviderTokenPreflightActionIssueDispositionV1::Issued {
                 action_request_event_id,
                 verified_input,
+                dispatch,
+                model_request,
+                trust_scope,
+                candidate_binding,
                 ..
             }
             | ProviderTokenPreflightActionIssueDispositionV1::Existing {
                 action_request_event_id,
                 verified_input,
+                dispatch,
+                model_request,
+                trust_scope,
+                candidate_binding,
                 ..
-            } => (action_request_event_id, verified_input),
+            } => (
+                action_request_event_id,
+                verified_input,
+                dispatch,
+                model_request,
+                trust_scope,
+                candidate_binding,
+            ),
         };
+        let bound_request = build_provider_token_count_request_v1(
+            &dispatch,
+            &model_request,
+            &trust_scope,
+            &preflight_input,
+            candidate_binding.as_ref(),
+        )
+        .map_err(|_| ProviderTokenPreflightAuthorityErrorV1::DurableAuthority)?;
+        let preflight_action_id = format!(
+            "{}:provider-token-preflight",
+            model_request.document().binding.action_id
+        );
+        match &self.preflight_action_id {
+            Some(existing) if existing != &preflight_action_id => {
+                return Err(ProviderTokenPreflightAuthorityErrorV1::DurableAuthority);
+            }
+            None => self.preflight_action_id = Some(preflight_action_id.clone()),
+            _ => {}
+        }
+        let provider_name = match bound_request.provider {
+            ModelProviderV1::Anthropic => "anthropic",
+            ModelProviderV1::Openai => "openai",
+        };
+        let role_matches = matches!(
+            (self.execution_role, bound_request.request.execution_role),
+            (
+                ExecutionRoleV1::Implementer,
+                ProviderExecutionRoleV1::Implementer
+            ) | (ExecutionRoleV1::Reviewer, ProviderExecutionRoleV1::Reviewer)
+                | (
+                    ExecutionRoleV1::Adversary,
+                    ProviderExecutionRoleV1::Adversary
+                )
+                | (ExecutionRoleV1::Judge, ProviderExecutionRoleV1::Judge)
+        );
+        if !role_matches
+            || bound_request.request.request_id != format!("{provider_name}:{preflight_action_id}")
+        {
+            return Err(ProviderTokenPreflightAuthorityErrorV1::DurableAuthority);
+        }
         let claim = self
             .store
             .claim_activity_v1(
                 &ActivityClaimRequestV1 {
                     run_id: self.run_id,
-                    activity_id: self.preflight_action_id.clone(),
-                    idempotency_key: self.preflight_action_id.clone(),
+                    activity_id: preflight_action_id.clone(),
+                    idempotency_key: preflight_action_id,
                     dispatch_event_id: self.dispatch_event_id,
                     action_request_event_id,
                     lease_duration_ms: self.lease_duration_ms,
@@ -484,8 +517,8 @@ impl ProviderTokenPreflightBackendV1 for LedgerProviderTokenPreflightBackendV1<'
                 ProviderTokenPreflightGrantV1::Granted {
                     run_id: run_id.into(),
                     lease_id,
-                    provider: self.provider,
-                    request: self.request.clone(),
+                    provider: bound_request.provider,
+                    request: bound_request.request,
                     preflight_input,
                 }
             }
@@ -528,13 +561,17 @@ impl ProviderTokenPreflightBackendV1 for LedgerProviderTokenPreflightBackendV1<'
         if run_id != self.run_id.to_string() || !completion.is_closed() {
             return Err(ProviderTokenPreflightAuthorityErrorV1::DurableAuthority);
         }
+        let preflight_action_id = self
+            .preflight_action_id
+            .clone()
+            .ok_or(ProviderTokenPreflightAuthorityErrorV1::DurableAuthority)?;
         match self
             .store
             .record_activity_result_v1(
                 &ActivityResultRequestV1 {
                     run_id: self.run_id,
-                    activity_id: self.preflight_action_id.clone(),
-                    idempotency_key: self.preflight_action_id.clone(),
+                    activity_id: preflight_action_id.clone(),
+                    idempotency_key: preflight_action_id,
                     lease_id,
                     outcome: completion.outcome,
                     result_digest: completion.result_digest,

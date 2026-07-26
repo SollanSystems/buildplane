@@ -257,6 +257,7 @@ impl AnthropicTransportV1 for AnthropicHttpTransportV1 {
     }
 }
 
+#[derive(Clone)]
 pub struct AnthropicProvider {
     transport: Arc<dyn AnthropicTransportV1>,
 }
