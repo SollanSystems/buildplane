@@ -10,11 +10,12 @@ use bp_ledger::payload::activity_claim::ActivityResultOutcomeV1;
 use bp_ledger::payload::model_evidence::{
     canonical_model_action_input_v1_bytes, derive_model_action_scope_constraints_v1,
     model_request_evidence_document_v1_bytes, model_request_evidence_v1_descriptor,
-    model_request_semantic_v1_digest, parse_verified_canonical_model_action_input_v1,
+    model_request_semantic_v1_digest, model_result_evidence_document_v1_bytes,
+    parse_verified_canonical_model_action_input_v1,
     parse_verified_model_request_evidence_document_v1, trust_scope_evidence_document_v1_bytes,
     trust_scope_evidence_v1_descriptor, CanonicalModelActionInputV1,
     CredentialFreeNormalizedModelRequestV1, ModelActionEvidenceBindingV1, ModelProviderV1,
-    ModelRequestEvidenceDocumentV1, TrustScopeEvidenceDocumentV1,
+    ModelRequestEvidenceDocumentV1, ModelResultEvidenceDocumentV1, TrustScopeEvidenceDocumentV1,
 };
 use bp_ledger::payload::trust_spine::{
     action_receipt_set_v1_digest, action_requested_v2_digest,
@@ -1026,16 +1027,97 @@ fn native_model_authority_commits_the_v2_authorization_and_one_lease_together() 
         "conflict cannot append authority"
     );
 
+    let authorization = store
+        .events_for_run(&run_id.to_string())
+        .expect("load model authority")
+        .into_iter()
+        .find_map(|row| match row.to_event().expect("decode event").payload {
+            Payload::ModelActionAuthorizedV2(authorization) => Some(authorization),
+            _ => None,
+        })
+        .expect("signed model authorization");
+    let result_ref = cas
+        .put_canonical_bytes(br#"{"schema_version":1,"outcome":"completed"}"#)
+        .expect("store provider result");
+    let result_evidence = ModelResultEvidenceDocumentV1::new(
+        request.action_id.clone(),
+        request_event.id.to_string(),
+        action_requested_v2_digest(&request).expect("action request digest"),
+        canonical_input.model_request_digest.clone(),
+        authorization_ref.clone(),
+        authorization.authorization_digest,
+        result_ref.to_cas_ref(),
+        result_ref.digest().into(),
+        vec![],
+    )
+    .expect("construct model result evidence");
+    let evidence_bytes = model_result_evidence_document_v1_bytes(&result_evidence)
+        .expect("encode model result evidence");
+    let evidence_ref = cas
+        .put_canonical_bytes(&evidence_bytes)
+        .expect("store model result evidence");
+    let unpersisted = store
+        .record_governed_model_action_result_v1_at_for_tests(
+            &GovernedModelActionResultRequestV1 {
+                run_id,
+                lease_id: lease_id.clone(),
+                outcome: ActivityResultOutcomeV1::Succeeded,
+                result_digest: Some(result_ref.digest().into()),
+                result_ref: Some(result_ref.to_cas_ref()),
+                evidence_digest: DIGEST_D.into(),
+                evidence_ref: format!("cas:{}", DIGEST_D),
+            },
+            &cas,
+            &authority,
+            &key,
+            &signer,
+            now + Duration::milliseconds(2),
+        )
+        .expect_err("success requires the exact persisted native evidence bytes");
+    assert!(matches!(unpersisted, LedgerError::Cas(_)));
+    assert_eq!(store.event_count().unwrap(), 5);
+
+    let mut substituted_evidence = result_evidence.clone();
+    substituted_evidence.model_request_digest = DIGEST_A.into();
+    let substituted_bytes = model_result_evidence_document_v1_bytes(&substituted_evidence)
+        .expect("encode well-formed substituted evidence");
+    let substituted_ref = cas
+        .put_canonical_bytes(&substituted_bytes)
+        .expect("store substituted evidence");
+    let substituted = store
+        .record_governed_model_action_result_v1_at_for_tests(
+            &GovernedModelActionResultRequestV1 {
+                run_id,
+                lease_id: lease_id.clone(),
+                outcome: ActivityResultOutcomeV1::Succeeded,
+                result_digest: Some(result_ref.digest().into()),
+                result_ref: Some(result_ref.to_cas_ref()),
+                evidence_digest: substituted_ref.digest().into(),
+                evidence_ref: substituted_ref.to_cas_ref(),
+            },
+            &cas,
+            &authority,
+            &key,
+            &signer,
+            now + Duration::milliseconds(2),
+        )
+        .expect_err("well-formed evidence for another model request must fail");
+    assert!(matches!(
+        substituted,
+        LedgerError::ActivityClaimAuthorityRejected { .. }
+    ));
+    assert_eq!(store.event_count().unwrap(), 5);
+
     let terminal = store
         .record_governed_model_action_result_v1_at_for_tests(
             &GovernedModelActionResultRequestV1 {
                 run_id,
                 lease_id: lease_id.clone(),
                 outcome: ActivityResultOutcomeV1::Succeeded,
-                result_digest: Some(DIGEST_C.into()),
-                result_ref: Some("cas:model-result:1".into()),
-                evidence_digest: DIGEST_D.into(),
-                evidence_ref: "cas:model-evidence:1".into(),
+                result_digest: Some(result_ref.digest().into()),
+                result_ref: Some(result_ref.to_cas_ref()),
+                evidence_digest: evidence_ref.digest().into(),
+                evidence_ref: evidence_ref.to_cas_ref(),
             },
             &cas,
             &authority,

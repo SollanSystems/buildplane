@@ -630,15 +630,17 @@ credentials never enter the provider request or worker sandbox. That transport
 is not available to governed execution until protected-host startup injects
 both the broker and the OCI/action-gateway boundary.
 
-The provider worker seals only a content-addressed `ModelResultEvidenceV1`.
-Its implementer result digest is recomputed from the closed completion, and
-its review result digest is recomputed from the closed candidate-bound verdict.
-The evidence record also binds the action request, canonical provider request,
-native authorization reference and digest; both result and evidence references
-are deterministic CAS addresses derived from those digests. A substituted,
-well-formed result or reference is therefore an unknown effect rather than a
-successful receipt. A future native-signed evidence record remains required to
-prove CAS persistence across process boundaries.
+The provider worker seals only content-addressed result evidence. The native
+ledger now defines a closed, declaration-ordered
+`ModelResultEvidenceDocumentV1` whose raw CAS identity binds the action request,
+canonical provider request, native authorization, result object, and ordered
+redaction commitments. Before recording a successful model result, the ledger
+reopens those exact bytes and the already-authorized model-request evidence,
+rehashes both objects, and compares every binding to signed lineage. Missing
+objects, storage corruption, unknown fields, alternate encodings, and
+well-formed cross-request substitution all fail before a success event can be
+signed. The provider result object still needs its own native closed CAS schema
+before the production gateway can persist this evidence end to end.
 
 Provider effects receive the same immutable budget boundary as OCI actions.
 The adapter derives `min(expiresAt, issuedAt + maxComputeTimeMs)` once from the

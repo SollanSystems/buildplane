@@ -8,8 +8,9 @@ use bp_ledger::id::EventId;
 use bp_ledger::payload::model_evidence::{
     canonical_model_action_input_v1_bytes, derive_model_action_scope_constraints_v1,
     model_request_evidence_document_v1_bytes, model_request_evidence_v1_descriptor,
-    parse_verified_canonical_model_action_input_v1,
+    model_result_evidence_document_v1_bytes, parse_verified_canonical_model_action_input_v1,
     parse_verified_model_request_evidence_document_v1,
+    parse_verified_model_result_evidence_document_v1,
     parse_verified_provider_token_preflight_input_v1,
     parse_verified_provider_token_preflight_result_v1,
     parse_verified_trust_scope_evidence_document_v1, provider_token_preflight_input_v1_bytes,
@@ -17,9 +18,9 @@ use bp_ledger::payload::model_evidence::{
     trust_scope_evidence_v1_descriptor, verify_model_request_evidence_matches_canonical_input,
     verify_trust_scope_evidence_matches_model_request, CanonicalModelActionInputV1,
     CredentialFreeNormalizedModelRequestV1, ModelActionEvidenceBindingV1, ModelProviderV1,
-    ModelRedactionCommitmentV1, ModelRequestEvidenceDocumentV1, ModelToolCapabilityCommitmentV1,
-    ModelToolCapabilityKindV1, ProviderTokenPreflightInputV1, ProviderTokenPreflightResultV1,
-    TrustScopeEvidenceDocumentV1,
+    ModelRedactionCommitmentV1, ModelRequestEvidenceDocumentV1, ModelResultEvidenceDocumentV1,
+    ModelToolCapabilityCommitmentV1, ModelToolCapabilityKindV1, ProviderTokenPreflightInputV1,
+    ProviderTokenPreflightResultV1, TrustScopeEvidenceDocumentV1,
 };
 use bp_ledger::payload::trust_spine::{ActionKindV1, ExecutionRoleV1};
 use bp_ledger::storage::cas::{CanonicalCasRef, Cas};
@@ -299,5 +300,59 @@ fn provider_token_preflight_documents_bind_the_verified_request_and_total_budget
         )
         .is_err(),
         "a well-formed preflight for different model evidence must fail"
+    );
+}
+
+#[test]
+fn model_result_evidence_is_closed_canonical_and_bound_to_exact_result() {
+    let temp = tempfile::tempdir().expect("temporary CAS root");
+    let cas = Cas::open(temp.path()).expect("open CAS");
+    let evidence = ModelResultEvidenceDocumentV1::new(
+        "workflow-1:unit-1:attempt-1:model".into(),
+        "event:action-request-1".into(),
+        DIGEST_A.into(),
+        DIGEST_B.into(),
+        "model-auth:v2:run-1:action-1".into(),
+        DIGEST_C.into(),
+        format!("cas:{}", DIGEST_A),
+        DIGEST_A.into(),
+        vec![ModelRedactionCommitmentV1 {
+            field: "provider_credential".into(),
+            reason: "host-only credential".into(),
+            redacted_digest: None,
+        }],
+    )
+    .expect("closed evidence");
+    let bytes =
+        model_result_evidence_document_v1_bytes(&evidence).expect("canonical evidence bytes");
+    let reference = cas
+        .put_canonical_bytes(&bytes)
+        .expect("store result evidence");
+    let verified = parse_verified_model_result_evidence_document_v1(
+        &bytes,
+        &reference.to_cas_ref(),
+        reference.digest(),
+    )
+    .expect("verified result evidence");
+    assert_eq!(verified.document(), &evidence);
+
+    let mut unknown = serde_json::to_value(&evidence).expect("evidence JSON");
+    unknown["operator_override"] = json!(true);
+    let unknown_bytes = serde_json::to_vec(&unknown).expect("unknown bytes");
+    let unknown_ref = cas
+        .put_canonical_bytes(&unknown_bytes)
+        .expect("store unknown bytes");
+    assert!(parse_verified_model_result_evidence_document_v1(
+        &unknown_bytes,
+        &unknown_ref.to_cas_ref(),
+        unknown_ref.digest(),
+    )
+    .is_err());
+
+    let mut substituted = evidence;
+    substituted.result_digest = DIGEST_B.into();
+    assert!(
+        model_result_evidence_document_v1_bytes(&substituted).is_err(),
+        "result ref and digest substitution must fail before persistence"
     );
 }

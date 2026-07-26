@@ -65,6 +65,7 @@ pub const TRUST_SCOPE_EVIDENCE_DOCUMENT_V1_SCHEMA_VERSION: u32 =
     TRUST_SCOPE_EVIDENCE_V1_SCHEMA_VERSION;
 pub const PROVIDER_TOKEN_PREFLIGHT_INPUT_V1_SCHEMA_VERSION: u32 = 1;
 pub const PROVIDER_TOKEN_PREFLIGHT_RESULT_V1_SCHEMA_VERSION: u32 = 1;
+pub const MODEL_RESULT_EVIDENCE_DOCUMENT_V1_SCHEMA_VERSION: u32 = 1;
 
 /// Only the API/SDK providers admitted by the governed worker lane.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -266,6 +267,27 @@ pub struct ProviderTokenPreflightResultV1 {
     pub input_tokens: u32,
 }
 
+/// Strict raw-CAS evidence binding for one terminal provider result.
+///
+/// This document does not prove that the result itself is semantically valid;
+/// it binds the exact result CAS object to the signed action request and native
+/// model authorization. The result object has its own closed schema and is
+/// verified independently before this evidence may authorize success.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelResultEvidenceDocumentV1 {
+    pub schema_version: u32,
+    pub action_id: String,
+    pub action_request_ref: String,
+    pub action_request_digest: String,
+    pub model_request_digest: String,
+    pub authorization_ref: String,
+    pub authorization_digest: String,
+    pub result_ref: String,
+    pub result_digest: String,
+    pub redactions: Vec<ModelRedactionCommitmentV1>,
+}
+
 /// A verified canonical input preserves the strict raw CAS identity alongside
 /// the parsed document. Passing this wrapper to constructors prevents an
 /// issuer from accidentally comparing model evidence to the right semantics
@@ -299,6 +321,12 @@ pub struct VerifiedProviderTokenPreflightInputV1 {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VerifiedProviderTokenPreflightResultV1 {
     document: ProviderTokenPreflightResultV1,
+    reference: CanonicalCasRef,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VerifiedModelResultEvidenceDocumentV1 {
+    document: ModelResultEvidenceDocumentV1,
     reference: CanonicalCasRef,
 }
 
@@ -401,6 +429,68 @@ impl ProviderTokenPreflightResultV1 {
                 "preflight result does not bind the input or leave an output-token reservation",
             ));
         }
+        Ok(())
+    }
+}
+
+impl ModelResultEvidenceDocumentV1 {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        action_id: String,
+        action_request_ref: String,
+        action_request_digest: String,
+        model_request_digest: String,
+        authorization_ref: String,
+        authorization_digest: String,
+        result_ref: String,
+        result_digest: String,
+        redactions: Vec<ModelRedactionCommitmentV1>,
+    ) -> Result<Self> {
+        let document = Self {
+            schema_version: MODEL_RESULT_EVIDENCE_DOCUMENT_V1_SCHEMA_VERSION,
+            action_id,
+            action_request_ref,
+            action_request_digest,
+            model_request_digest,
+            authorization_ref,
+            authorization_digest,
+            result_ref,
+            result_digest,
+            redactions,
+        };
+        document.validate()?;
+        Ok(document)
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if self.schema_version != MODEL_RESULT_EVIDENCE_DOCUMENT_V1_SCHEMA_VERSION {
+            return Err(unsupported_schema(
+                "model_result_evidence_document_v1",
+                self.schema_version,
+                MODEL_RESULT_EVIDENCE_DOCUMENT_V1_SCHEMA_VERSION,
+            ));
+        }
+        for (field, value) in [
+            ("action_id", self.action_id.as_str()),
+            ("action_request_ref", self.action_request_ref.as_str()),
+            ("authorization_ref", self.authorization_ref.as_str()),
+        ] {
+            validate_binding_text(field, value)?;
+        }
+        for (field, value) in [
+            ("action_request_digest", self.action_request_digest.as_str()),
+            ("model_request_digest", self.model_request_digest.as_str()),
+            ("authorization_digest", self.authorization_digest.as_str()),
+        ] {
+            validate_sha256_digest(field, value)?;
+        }
+        validate_raw_cas_descriptor(
+            "result_ref",
+            &self.result_ref,
+            "result_digest",
+            &self.result_digest,
+        )?;
+        validate_redaction_commitments(&self.redactions)?;
         Ok(())
     }
 }
@@ -816,6 +906,16 @@ impl VerifiedProviderTokenPreflightResultV1 {
     }
 }
 
+impl VerifiedModelResultEvidenceDocumentV1 {
+    pub fn document(&self) -> &ModelResultEvidenceDocumentV1 {
+        &self.document
+    }
+
+    pub fn reference(&self) -> &CanonicalCasRef {
+        &self.reference
+    }
+}
+
 /// Derive the only constraints a V1 governed API model worker may receive.
 /// `Candidate` is intentionally denied because it is not a provider-worker
 /// role; an unknown future role cannot silently inherit implementer access.
@@ -920,6 +1020,13 @@ pub fn provider_token_preflight_result_v1_bytes(
         ));
     }
     canonical_document_bytes(document, "provider_token_preflight_result_v1")
+}
+
+pub fn model_result_evidence_document_v1_bytes(
+    document: &ModelResultEvidenceDocumentV1,
+) -> Result<Vec<u8>> {
+    document.validate()?;
+    canonical_document_bytes(document, "model_result_evidence_document_v1")
 }
 
 /// Create the descriptor `ModelActionIntentV1` carries after protected CAS
@@ -1033,6 +1140,22 @@ pub fn parse_verified_provider_token_preflight_result_v1(
     let canonical = provider_token_preflight_result_v1_bytes(&document)?;
     ensure_exact_canonical_bytes("provider_token_preflight_result_v1", bytes, &canonical)?;
     Ok(VerifiedProviderTokenPreflightResultV1 {
+        document,
+        reference,
+    })
+}
+
+pub fn parse_verified_model_result_evidence_document_v1(
+    bytes: &[u8],
+    cas_ref: &str,
+    digest: &str,
+) -> Result<VerifiedModelResultEvidenceDocumentV1> {
+    let reference =
+        verify_raw_cas_bytes("model_result_evidence_document_v1", bytes, cas_ref, digest)?;
+    let document: ModelResultEvidenceDocumentV1 = serde_json::from_slice(bytes)?;
+    let canonical = model_result_evidence_document_v1_bytes(&document)?;
+    ensure_exact_canonical_bytes("model_result_evidence_document_v1", bytes, &canonical)?;
+    Ok(VerifiedModelResultEvidenceDocumentV1 {
         document,
         reference,
     })

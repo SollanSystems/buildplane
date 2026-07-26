@@ -17,6 +17,7 @@ use crate::payload::model_evidence::{
     derive_model_action_scope_constraints_v1, model_request_evidence_document_v1_bytes,
     model_request_evidence_v1_descriptor, parse_verified_canonical_model_action_input_v1,
     parse_verified_model_request_evidence_document_v1,
+    parse_verified_model_result_evidence_document_v1,
     parse_verified_trust_scope_evidence_document_v1, trust_scope_evidence_document_v1_bytes,
     trust_scope_evidence_v1_descriptor, validate_model_action_binding_against_replayed_dispatch_v3,
     verify_model_request_evidence_matches_canonical_input,
@@ -3563,6 +3564,49 @@ impl SqliteStore {
                 reason: "governed model lease does not bind the expected native model action"
                     .into(),
             });
+        }
+        if request.outcome == ActivityResultOutcomeV1::Succeeded {
+            let result_digest = request.result_digest.as_deref().ok_or_else(|| {
+                LedgerError::ActivityClaimAuthorityRejected {
+                    reason: "successful governed model result is missing its result digest".into(),
+                }
+            })?;
+            let result_ref = request.result_ref.as_deref().ok_or_else(|| {
+                LedgerError::ActivityClaimAuthorityRejected {
+                    reason: "successful governed model result is missing its result reference"
+                        .into(),
+                }
+            })?;
+            let evidence_bytes =
+                cas.get_verified_canonical_bytes(&request.evidence_ref, &request.evidence_digest)?;
+            let evidence = parse_verified_model_result_evidence_document_v1(
+                &evidence_bytes,
+                &request.evidence_ref,
+                &request.evidence_digest,
+            )?;
+            let model_request_bytes = cas.get_verified_canonical_bytes(
+                &verified.intent.model_request_evidence.cas_ref,
+                &verified.intent.model_request_evidence.digest,
+            )?;
+            let model_request = parse_verified_model_request_evidence_document_v1(
+                &model_request_bytes,
+                &verified.intent.model_request_evidence,
+            )?;
+            let evidence = evidence.document();
+            if evidence.action_id != verified.intent.action_id
+                || evidence.action_request_ref
+                    != verified.intent.action_request_event_ref.to_string()
+                || evidence.action_request_digest != verified.intent.action_request_digest
+                || evidence.model_request_digest != model_request.document().model_request_digest
+                || evidence.authorization_ref != verified.authorization.authorization_ref
+                || evidence.authorization_digest != verified.authorization.authorization_digest
+                || evidence.result_ref != result_ref
+                || evidence.result_digest != result_digest
+            {
+                return Err(LedgerError::ActivityClaimAuthorityRejected {
+                    reason: "successful governed model evidence does not bind the exact signed action, authorization, model request, and result".into(),
+                });
+            }
         }
         let derived = ActivityResultRequestV1 {
             run_id: request.run_id,
