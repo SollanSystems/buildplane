@@ -57,6 +57,8 @@ mod governed_session_host;
 mod governed_session_host_config;
 #[cfg(all(test, target_os = "linux"))]
 mod governed_session_host_contract_tests;
+#[allow(dead_code)] // Default listener activation follows the closed request-to-action handler.
+mod governed_session_protected_host;
 mod governed_session_response;
 #[cfg(test)]
 mod governed_session_response_contract_tests;

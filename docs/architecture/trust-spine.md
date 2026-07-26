@@ -758,6 +758,18 @@ root; signing-key, ledger, CAS, and credential custody all derive from that
 same startup object. Only the action-request and claim private keys are loaded
 by this host; the dispatch identity remains verification-only.
 
+Protected governed-session startup is now an all-or-nothing internal
+composition. The current process must match the configured non-root broker
+identity and the exact OCI canary must attest a rootless runtime, read-only
+base, narrow writable overlay, no network, no host fallback, pinned image, and
+profile digest before private custody is opened. The action and claim keys,
+pre-existing signed ledger, pre-existing descriptor-bound CAS, and validated
+Anthropic credential must then all load from the retained authority root.
+Missing or unsafe state yields one closed startup category and no host state.
+This composition still grants no listener or worker authority; the remaining
+host slice must derive each request from trusted replay and construct the
+per-action provider lane without accepting authority fields from the client.
+
 Those counts are persisted in the signed action receipt and replayed as one
 checked aggregate for the sealed V3 dispatch attempt. A metered failed call
 still consumes the allowance; a `model-token-usage-missing` failure blocks a

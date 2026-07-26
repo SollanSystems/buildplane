@@ -84,7 +84,15 @@ impl ProtectedAnthropicCredentialBrokerV1 {
     pub(crate) fn from_validated_governed_session_startup(
         startup: &ValidatedGovernedSessionHostStartupV1,
     ) -> Result<Self, ProviderError> {
-        Self::from_validated_authority_root(startup.authority_root(), startup.config().broker_uid)
+        let broker = Self::from_validated_authority_root(
+            startup.authority_root(),
+            startup.config().broker_uid,
+        )?;
+        broker
+            .load()
+            .map(drop)
+            .map_err(|_| credential_transport_error())?;
+        Ok(broker)
     }
 
     #[cfg(target_os = "linux")]
