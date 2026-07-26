@@ -43,6 +43,8 @@ use thiserror::Error;
 #[allow(dead_code)]
 mod admission_protocol;
 mod anthropic_model_gateway;
+#[allow(dead_code)] // Activated by the protected candidate/OCI host composition next.
+mod command_action;
 mod confinement;
 #[allow(dead_code)]
 mod dispatch_admission;

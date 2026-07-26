@@ -25,8 +25,8 @@ use bp_ledger::storage::sqlite::{
     ActivityClaimAuthorityV1, ActivityClaimDispositionV1, ActivityClaimRequestV1,
     ActivityHeartbeatDispositionV1, ActivityHeartbeatRequestV1, ActivityResultDispositionV1,
     ActivityResultRequestV1, CheckpointPolicy, GovernedCommandActionAuthorizeAndClaimDispositionV1,
-    GovernedCommandActionAuthorizeAndClaimRequestV1, GovernedVerifierClaimRequestV1,
-    GovernedVerifierResultRequestV1, SqliteStore,
+    GovernedCommandActionAuthorizeAndClaimRequestV1, GovernedCommandActionResultRequestV1,
+    GovernedVerifierClaimRequestV1, GovernedVerifierResultRequestV1, SqliteStore,
 };
 use bp_ledger::storage::Cas;
 use chrono::{Duration, Utc};
@@ -3359,6 +3359,44 @@ fn protected_command_authority_returns_executable_evidence_only_with_first_lease
             now + Duration::seconds(2),
         )
         .is_err());
+
+    let result = GovernedCommandActionResultRequestV1 {
+        run_id,
+        lease_id,
+        outcome: bp_ledger::payload::activity_claim::ActivityResultOutcomeV1::Succeeded,
+        result_digest: Some(DIGEST_A.into()),
+        result_ref: Some(format!("cas:{DIGEST_A}")),
+        evidence_digest: DIGEST_B.into(),
+        evidence_ref: format!("cas:{DIGEST_B}"),
+    };
+    assert!(matches!(
+        store
+            .record_governed_command_action_result_v1_at_for_tests(
+                &result,
+                &authority,
+                &signing_key,
+                &signer,
+                now + Duration::seconds(3),
+            )
+            .unwrap(),
+        ActivityResultDispositionV1::Recorded { .. }
+    ));
+    assert!(matches!(
+        store
+            .authorize_and_claim_governed_command_action_v1_at_for_tests(
+                &request,
+                &cas,
+                &authority,
+                &signing_key,
+                &signer,
+                now + Duration::seconds(4),
+            )
+            .unwrap(),
+        GovernedCommandActionAuthorizeAndClaimDispositionV1::Recorded {
+            outcome: bp_ledger::payload::activity_claim::ActivityResultOutcomeV1::Succeeded,
+            ..
+        }
+    ));
 }
 
 #[test]

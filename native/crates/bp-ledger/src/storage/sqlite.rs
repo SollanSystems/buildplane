@@ -555,6 +555,20 @@ pub struct GovernedVerifierResultRequestV1 {
     pub evidence_ref: String,
 }
 
+/// Closed terminal result for a protected governed command lease. The caller
+/// supplies only the opaque lease and fixed terminal evidence; action and
+/// idempotency identity are recovered from the signed claim lineage.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GovernedCommandActionResultRequestV1 {
+    pub run_id: RunId,
+    pub lease_id: String,
+    pub outcome: ActivityResultOutcomeV1,
+    pub result_digest: Option<String>,
+    pub result_ref: Option<String>,
+    pub evidence_digest: String,
+    pub evidence_ref: String,
+}
+
 /// Closed native request to create the signed intent that precedes a governed
 /// model authorization. Every identity, role, canonical input, and evidence
 /// descriptor is re-derived from signed tape plus the protected realm CAS.
@@ -7051,7 +7065,13 @@ impl SqliteStore {
             .ok_or_else(|| LedgerError::ActivityClaimAuthorityRejected {
                 reason: "governed verifier lease does not name a signed activity claim".into(),
             })?;
-        verify_governed_verifier_claim_lineage(&self.conn, &claim, authority)?;
+        verify_purpose_bound_process_claim_lineage(
+            &self.conn,
+            &claim,
+            authority,
+            ActivityClaimPurposeV1::GovernedVerifierV1,
+            "governed verifier",
+        )?;
         if claim.action_kind != ActionKindV1::Process {
             return Err(LedgerError::ActivityClaimAuthorityRejected {
                 reason: "governed verifier lease does not name a reviewer process action".into(),
@@ -7078,6 +7098,112 @@ impl SqliteStore {
                 reason: "governed verifier lease does not bind a signed reviewer process action"
                     .into(),
             });
+        }
+        let derived = ActivityResultRequestV1 {
+            run_id: request.run_id,
+            activity_id: claim.activity_id,
+            idempotency_key: claim.idempotency_key,
+            lease_id: request.lease_id.clone(),
+            outcome: request.outcome,
+            result_digest: request.result_digest.clone(),
+            result_ref: request.result_ref.clone(),
+            evidence_digest: request.evidence_digest.clone(),
+            evidence_ref: request.evidence_ref.clone(),
+        };
+        self.record_activity_result_v1_at(&derived, authority, signing_key, signer, now)
+    }
+
+    /// Record one command result through the opaque lease returned by the
+    /// protected command authority. The lease must resolve to the dedicated
+    /// command purpose and an implementer process action; a generic or
+    /// verifier lease cannot be relabeled as command execution.
+    pub fn record_governed_command_action_result_v1(
+        &self,
+        request: &GovernedCommandActionResultRequestV1,
+        authority: &ActivityClaimAuthorityV1,
+        signing_key: &SigningKey,
+        signer: &ActorKeyRef,
+    ) -> Result<ActivityResultDispositionV1> {
+        self.record_governed_command_action_result_v1_at(
+            request,
+            authority,
+            signing_key,
+            signer,
+            Utc::now(),
+        )
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn record_governed_command_action_result_v1_at_for_tests(
+        &self,
+        request: &GovernedCommandActionResultRequestV1,
+        authority: &ActivityClaimAuthorityV1,
+        signing_key: &SigningKey,
+        signer: &ActorKeyRef,
+        now: DateTime<Utc>,
+    ) -> Result<ActivityResultDispositionV1> {
+        self.record_governed_command_action_result_v1_at(
+            request,
+            authority,
+            signing_key,
+            signer,
+            now,
+        )
+    }
+
+    fn record_governed_command_action_result_v1_at(
+        &self,
+        request: &GovernedCommandActionResultRequestV1,
+        authority: &ActivityClaimAuthorityV1,
+        signing_key: &SigningKey,
+        signer: &ActorKeyRef,
+        now: DateTime<Utc>,
+    ) -> Result<ActivityResultDispositionV1> {
+        require_protected_governed_realm(authority)?;
+        if request.lease_id.trim().is_empty() {
+            return Err(LedgerError::InvalidPayload {
+                kind: "record_governed_command_action_result_v1".into(),
+                reason: "lease_id must be non-empty".into(),
+            });
+        }
+        let claim = activity_claim_by_lease(&self.conn, request.run_id, &request.lease_id)?
+            .ok_or_else(|| {
+                command_action_authority_rejected(
+                    "command result lease does not name a signed activity claim",
+                )
+            })?;
+        verify_purpose_bound_process_claim_lineage(
+            &self.conn,
+            &claim,
+            authority,
+            ActivityClaimPurposeV1::GovernedCommandActionV1,
+            "governed command",
+        )?;
+        if claim.action_kind != ActionKindV1::Process {
+            return Err(command_action_authority_rejected(
+                "command result lease does not name a process action",
+            ));
+        }
+        let action_request_event = load_verified_authority_event(
+            &self.conn,
+            claim.action_request_event_id,
+            &authority.trusted_keys,
+            &authority.action_request_signer,
+            "governed command action request",
+        )?;
+        let Payload::ActionRequestedV2(action_request) = action_request_event.payload else {
+            return Err(command_action_authority_rejected(
+                "command result lease action is not action_requested_v2",
+            ));
+        };
+        if action_request.action_kind != ActionKindV1::Process
+            || action_request.execution_role != ExecutionRoleV1::Implementer
+            || action_request.action_id != claim.activity_id
+            || action_request.idempotency_key != claim.idempotency_key
+        {
+            return Err(command_action_authority_rejected(
+                "command result lease does not bind a signed implementer process action",
+            ));
         }
         let derived = ActivityResultRequestV1 {
             run_id: request.run_id,
@@ -9984,17 +10110,22 @@ fn verify_signed_claim_projection(
 /// after the envelope expires. Instead, re-check dispatch liveness and action
 /// ordering at the signed claim timestamp, while still enforcing the current
 /// host realm identity.
-fn verify_governed_verifier_claim_lineage(
+fn verify_purpose_bound_process_claim_lineage(
     conn: &Connection,
     stored: &StoredActivityClaim,
     authority: &ActivityClaimAuthorityV1,
+    expected_purpose: ActivityClaimPurposeV1,
+    lane: &str,
 ) -> Result<()> {
     let signed_claim = verify_signed_claim_projection(conn, stored, authority)?;
-    if signed_claim.purpose != ActivityClaimPurposeV1::GovernedVerifierV1 {
+    if signed_claim.purpose != expected_purpose {
         return Err(LedgerError::ActivityClaimAuthorityRejected {
-            reason:
+            reason: if expected_purpose == ActivityClaimPurposeV1::GovernedVerifierV1 {
                 "governed verifier result requires a lease minted by the fixed verifier claim lane"
-                    .into(),
+                    .into()
+            } else {
+                format!("{lane} result requires a lease minted by its fixed-purpose claim lane")
+            },
         });
     }
     let claimed_at = parse_claim_timestamp(&signed_claim.claimed_at)?;
@@ -10012,8 +10143,9 @@ fn verify_governed_verifier_claim_lineage(
         || evidence.dispatch_envelope_digest != stored.dispatch_envelope_digest
     {
         return Err(LedgerError::ActivityClaimAuthorityRejected {
-            reason: "governed verifier lease does not match its historical signed dispatch/action evidence"
-                .into(),
+            reason: format!(
+                "{lane} lease does not match its historical signed dispatch/action evidence"
+            ),
         });
     }
     Ok(())
