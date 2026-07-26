@@ -1,10 +1,12 @@
 //! Broker-private composition for durable governed model authority.
 //!
-//! This crate exposes one opaque, no-argument promotion-decision host runner.
-//! All authority constructors, custody types, ledger/CAS state, signers, paths,
-//! and protocol internals remain private. The runner consumes only its fixed
-//! protected deployment config and pre-opened Linux listener. Other authority
-//! roles remain composition boundaries and must not be wired to
+//! This crate exposes one opaque, no-argument promotion-decision host runner
+//! and one no-authority, fixed-path client runner. All authority constructors,
+//! custody types, ledger/CAS state, signers, paths, and protocol internals
+//! remain private. The host consumes only its fixed protected deployment
+//! config and pre-opened Linux listener; the client consumes only its closed
+//! decision input and protected public identity pin. Other authority roles
+//! remain composition boundaries and must not be wired to
 //! `buildplane-native`, the generic ledger server, or a same-UID signer.
 //! A production gateway must convert every catchable provider failure after
 //! capability receipt into paired `Unknown` evidence. Process death or panic
@@ -47,6 +49,9 @@ mod host_config_loader;
 mod host_key_custody;
 #[allow(dead_code)] // Constructed by the native authority host listener in the next slice.
 mod host_ledger_custody;
+mod promotion_decision_client;
+#[cfg(test)]
+mod promotion_decision_client_contract_tests;
 #[allow(dead_code)]
 mod promotion_decision_handler;
 mod promotion_decision_host;
@@ -62,6 +67,7 @@ mod reviewer_session;
 #[allow(dead_code)]
 mod v5_dispatch_admission;
 
+pub use promotion_decision_client::run_default_promotion_decision_client_v1;
 pub use promotion_decision_host::run_default_promotion_decision_host_v1;
 
 use crate::promotion_git::{

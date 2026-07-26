@@ -22,6 +22,7 @@ not an invitation to rerun the same packet with an ambient model shell.
 | Governed preview | `buildplane run --packet <file>` | Compiles and shows the bounded request; creates no execution authority | None |
 | Governed host request | `buildplane run --packet <file> --approve` | Requests a host-owned candidate session. It remains blocked until the host verifies admission, tape, and OCI prerequisites. | Only after the host emits a verified governed receipt |
 | Governed recovery | `buildplane run --resume <opaque-host-reference> --approve` | Host-only recovery of an existing workflow identity; no caller packet or replacement envelope is accepted. | Only an exact signed result is reusable |
+| Promotion-decision recovery | `buildplane run --resume <promotion-approval-event-uuid> --approve --decision promote\|reject` | Submits one closed decision through the fixed native client; it records no Git effect and reports recorded only for the broker's exact sealed response. | Decision evidence only; promotion remains separate |
 | Raw compatibility | `buildplane run --raw ...` | Explicitly unsafe legacy execution; may use ambient adapters. | Never governed or trusted |
 
 Do not use `--raw` to work around a governed block. Raw output is labelled
@@ -178,6 +179,57 @@ A compromised allowlisted operator UID can cause bounded availability loss by
 occupying the sequential endpoint. Isolate and monitor each allowlisted UID.
 This availability risk cannot expand authority or create concurrent ledger writes;
 the single-writer serving model remains intentional.
+
+### Protected promotion-decision client
+
+Governed promotion-decision recovery is the only CLI path currently connected
+to the protected host. Install `buildplane-authority-client` as the exact
+root-owned regular file
+`/usr/libexec/buildplane/buildplane-authority-client`, mode `0755`, with one
+link. `/usr`, `/usr/libexec`, and `/usr/libexec/buildplane` must each be
+root-owned exact `0755`. The CLI does not consult `PATH`,
+`BUILDPLANE_NATIVE_BIN`, a workspace build, an environment variable, or a
+caller option for this binary.
+
+Provision the client-readable identity pin at the fixed path
+`/etc/buildplane/authority-host/promotion-decision-client-v1.json`. Its parent
+directories must be root-owned exact `0755`; the file must be root-owned,
+regular, single-link, and exact `0644`. Its closed contents are:
+
+```json
+{
+  "schema_version": 1,
+  "broker_uid": 991,
+  "socket_group_gid": 992
+}
+```
+
+Set `broker_uid` to the non-root UID of `buildplane-authority` and
+`socket_group_gid` to the GID of `buildplane-promotion`. Unknown fields,
+symlinks, unsafe ownership or modes, a changed socket inode, or a connected
+server whose Linux `SO_PEERCRED` UID does not match `broker_uid` blocks the
+request. The native client also verifies that it is executing the exact
+installed root-owned file before reading stdin.
+
+Use only a canonical lower-case hyphenated promotion-approval request event
+UUID:
+
+```sh
+buildplane run \
+  --resume 123e4567-e89b-12d3-a456-426614174001 \
+  --approve \
+  --decision promote \
+  --json
+```
+
+The client generates a fresh correlation UUID and sends one bounded request to
+the fixed authority socket. An exact `sealed` response means only that the
+decision was recorded and kernel-sealed; the CLI still exits in
+recovery-required state and does not execute promotion. An exact
+`reconciliation_required` response, missing response, timeout, malformed
+response, missing installation/config/socket, or unsupported platform remains
+blocked. Do not automatically resubmit after a lost or unknown response; use
+the same durable approval event only after operator-led reconciliation.
 
 ## Recovery protocol
 

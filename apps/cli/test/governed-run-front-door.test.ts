@@ -35,6 +35,9 @@ import type { RunCliDependencies } from "../src/run-cli.js";
 const hostResolver = vi.hoisted(() => ({
 	resolve: vi.fn(),
 }));
+const promotionDecisionClient = vi.hoisted(() => ({
+	submit: vi.fn(),
+}));
 
 vi.mock("../src/governed-authority-broker-host.js", async () => {
 	const actual = await vi.importActual<
@@ -45,6 +48,9 @@ vi.mock("../src/governed-authority-broker-host.js", async () => {
 		resolveHostOwnedGovernedBroker: hostResolver.resolve,
 	};
 });
+vi.mock("../src/governed-promotion-decision-client.js", () => ({
+	submitProtectedPromotionDecision: promotionDecisionClient.submit,
+}));
 
 const { runCli } = await import("../src/run-cli.js");
 
@@ -396,6 +402,7 @@ function createHostCandidateRunResult(
 
 afterEach(() => {
 	hostResolver.resolve.mockReset();
+	promotionDecisionClient.submit.mockReset();
 	vi.restoreAllMocks();
 });
 
@@ -1733,6 +1740,72 @@ describe("governed run front door", () => {
 			promotion: { state: "not-executed" },
 			recovery: { action: "contact-host", retry: "blocked" },
 		});
+		expectRootUnchanged(root, before);
+	});
+
+	it("records only an exact sealed native response for a canonical approval event UUID", async () => {
+		const root = createGitProject();
+		const before = snapshotRoot(root);
+		const approvalEventId = "123e4567-e89b-12d3-a456-426614174001";
+		promotionDecisionClient.submit.mockResolvedValue("sealed");
+
+		const response = await runCliCapture(
+			root,
+			[
+				"run",
+				"--resume",
+				approvalEventId,
+				"--approve",
+				"--decision",
+				"promote",
+				"--json",
+			],
+			legacyBundleMustNotBeConstructed(),
+		);
+
+		expect(promotionDecisionClient.submit).toHaveBeenCalledWith({
+			promotionApprovalRequestEventId: approvalEventId,
+			decision: "promote",
+		});
+		expect(hostResolver.resolve).not.toHaveBeenCalled();
+		expect(response.exitCode).toBe(2);
+		expect(JSON.parse(response.stdout.join("\n"))).toMatchObject({
+			decision: { requested: "promote", state: "recorded" },
+			promotion: { state: "not-executed" },
+			recovery: { retry: "required" },
+		});
+		expectRootUnchanged(root, before);
+	});
+
+	it.each([
+		"reconciliation_required",
+		undefined,
+	] as const)("keeps native promotion-decision status %s blocked", async (status) => {
+		const root = createGitProject();
+		const before = snapshotRoot(root);
+		promotionDecisionClient.submit.mockResolvedValue(status);
+
+		const response = await runCliCapture(
+			root,
+			[
+				"run",
+				"--resume",
+				"123e4567-e89b-12d3-a456-426614174001",
+				"--approve",
+				"--decision",
+				"reject",
+				"--json",
+			],
+			legacyBundleMustNotBeConstructed(),
+		);
+
+		expect(response.exitCode).toBe(2);
+		expect(JSON.parse(response.stdout.join("\n"))).toMatchObject({
+			decision: { requested: "reject", state: "blocked" },
+			promotion: { state: "not-executed" },
+			recovery: { retry: "blocked" },
+		});
+		expect(hostResolver.resolve).not.toHaveBeenCalled();
 		expectRootUnchanged(root, before);
 	});
 
