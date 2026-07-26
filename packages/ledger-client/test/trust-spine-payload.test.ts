@@ -703,6 +703,7 @@ describe("trust-spine ledger payloads", () => {
 		expect(Object.values(ActivityClaimPurposeV1)).toEqual([
 			"generic",
 			"governed_verifier_v1",
+			"governed_command_action_v1",
 			"governed_model_action_v1",
 		]);
 		expect(EventKind.ActivityClaimedV1).toBe("activity_claimed_v1");

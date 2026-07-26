@@ -39,6 +39,12 @@ pub enum ActivityClaimPurposeV1 {
     #[default]
     Generic,
     GovernedVerifierV1,
+    /// A process lease issued only after the protected native command
+    /// authority has reopened the signed dispatch/action chain and verified
+    /// the exact executable input from protected CAS. Generic claim controls
+    /// never return executable material and therefore cannot mint this
+    /// purpose.
+    GovernedCommandActionV1,
     /// A provider model lease issued only by the protected native
     /// model-authority transaction. Generic claim controls must never mint
     /// this purpose because a sealed V3 model effect additionally requires a

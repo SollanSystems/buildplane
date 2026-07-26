@@ -4,7 +4,11 @@ use bp_ledger::canonicalize::canonical_event_hash;
 use bp_ledger::event::Event;
 use bp_ledger::id::{EventId, RunId};
 use bp_ledger::kind::EventKind;
+use bp_ledger::payload::activity_claim::ActivityClaimPurposeV1;
 use bp_ledger::payload::checkpoint::tape_root_hash;
+use bp_ledger::payload::command_evidence::{
+    canonical_command_action_input_v1_bytes, CanonicalCommandActionInputV1,
+};
 use bp_ledger::payload::trust_spine::{
     dispatch_envelope_v3_body_digest, dispatch_envelope_v4_digest,
     governed_dispatch_policy_digest_v1, ActionEvidenceVersionV1, ActionKindV1, ActionRequestedV2,
@@ -20,7 +24,8 @@ use bp_ledger::signing::{public_key_hash, ActorKeyRef, TrustedPublicKeys};
 use bp_ledger::storage::sqlite::{
     ActivityClaimAuthorityV1, ActivityClaimDispositionV1, ActivityClaimRequestV1,
     ActivityHeartbeatDispositionV1, ActivityHeartbeatRequestV1, ActivityResultDispositionV1,
-    ActivityResultRequestV1, CheckpointPolicy, GovernedVerifierClaimRequestV1,
+    ActivityResultRequestV1, CheckpointPolicy, GovernedCommandActionAuthorizeAndClaimDispositionV1,
+    GovernedCommandActionAuthorizeAndClaimRequestV1, GovernedVerifierClaimRequestV1,
     GovernedVerifierResultRequestV1, SqliteStore,
 };
 use bp_ledger::storage::Cas;
@@ -28,6 +33,7 @@ use chrono::{Duration, Utc};
 use ed25519_dalek::SigningKey;
 use sha2::{Digest, Sha256};
 use std::io::Cursor;
+use tempfile::tempdir;
 
 const DIGEST_A: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const DIGEST_B: &str = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -221,6 +227,48 @@ fn append_sibling_governed_action_request(
     store
         .append_signed(&event, signing_key, signer)
         .expect("append sibling governed action request");
+    event.id
+}
+
+fn append_sealed_command_action_request(
+    store: &SqliteStore,
+    signing_key: &SigningKey,
+    signer: &ActorKeyRef,
+    run_id: RunId,
+    dispatch_event_id: EventId,
+    source_action_request_event_id: EventId,
+    action_id: &str,
+    canonical_input_ref: String,
+    canonical_input_digest: String,
+) -> EventId {
+    let source_event = store
+        .events_for_run(&run_id.to_string())
+        .expect("read source governed action request")
+        .into_iter()
+        .find(|row| row.id == source_action_request_event_id.to_string())
+        .expect("source governed action request exists")
+        .to_event()
+        .expect("source governed action request decodes");
+    let Payload::ActionRequestedV2(mut request) = source_event.payload else {
+        panic!("source event must carry action_requested_v2");
+    };
+    request.action_id = action_id.into();
+    request.idempotency_key = format!("command:{action_id}");
+    request.canonical_input_ref = canonical_input_ref;
+    request.canonical_input_digest = canonical_input_digest;
+
+    let event = Event {
+        id: EventId::new(),
+        run_id,
+        parent_event_id: Some(dispatch_event_id),
+        schema_version: Event::CURRENT_SCHEMA_VERSION,
+        kind: EventKind::ActionRequestedV2,
+        occurred_at: Utc::now(),
+        payload: Payload::ActionRequestedV2(request),
+    };
+    store
+        .append_signed(&event, signing_key, signer)
+        .expect("append sealed command action request");
     event.id
 }
 
@@ -3180,5 +3228,212 @@ fn heartbeat_after_lease_expiry_blocks_without_appending_a_second_authority_even
         store.event_count().unwrap(),
         3,
         "a heartbeat after expiry must not create an ambiguous authority event"
+    );
+}
+
+#[test]
+fn protected_command_authority_returns_executable_evidence_only_with_first_lease() {
+    let store = SqliteStore::open_in_memory().unwrap();
+    let directory = tempdir().unwrap();
+    let cas = Cas::open(directory.path().join("cas")).unwrap();
+    let (signing_key, signer, trusted) = signer();
+    let trusted_actor = trusted_actor(&signing_key);
+    let authority = ActivityClaimAuthorityV1::new_governed_realm(
+        trusted,
+        trusted_actor.clone(),
+        trusted_actor.clone(),
+        trusted_actor,
+        DIGEST_B.into(),
+    )
+    .unwrap();
+    let (run_id, dispatch_event_id, source_action_request_event_id) =
+        append_governed_dispatch_and_request(&store, &signing_key, &signer);
+    let action_id = "command-authority-action";
+    let input = CanonicalCommandActionInputV1::new(
+        run_id.to_string(),
+        action_id.into(),
+        "/usr/bin/git".into(),
+        vec!["status".into(), "--short".into()],
+        Some("workspace".into()),
+    )
+    .unwrap();
+    let input_bytes = canonical_command_action_input_v1_bytes(&input).unwrap();
+    let input_ref = cas.put_canonical_bytes(&input_bytes).unwrap();
+    let action_request_event_id = append_sealed_command_action_request(
+        &store,
+        &signing_key,
+        &signer,
+        run_id,
+        dispatch_event_id,
+        source_action_request_event_id,
+        action_id,
+        input_ref.to_cas_ref(),
+        input_ref.digest().into(),
+    );
+    let request = GovernedCommandActionAuthorizeAndClaimRequestV1 {
+        run_id,
+        dispatch_event_id,
+        action_request_event_id,
+        lease_duration_ms: 60_000,
+    };
+    let now: chrono::DateTime<Utc> = "2026-07-18T00:00:02Z".parse().unwrap();
+
+    let granted = store
+        .authorize_and_claim_governed_command_action_v1_at_for_tests(
+            &request,
+            &cas,
+            &authority,
+            &signing_key,
+            &signer,
+            now,
+        )
+        .unwrap();
+    let (claim_event_id, lease_id) = match granted {
+        GovernedCommandActionAuthorizeAndClaimDispositionV1::Granted {
+            claim_event_id,
+            lease_id,
+            command_intent,
+            ..
+        } => {
+            assert_eq!(command_intent.document().command, "/usr/bin/git");
+            assert_eq!(command_intent.document().args, ["status", "--short"]);
+            assert_eq!(command_intent.document().binding.run_id, run_id.to_string());
+            assert_eq!(
+                command_intent.document().binding.action_request_event_ref,
+                action_request_event_id
+            );
+            (claim_event_id, lease_id)
+        }
+        other => panic!("expected a fresh command grant, got {other:?}"),
+    };
+    assert!(!lease_id.is_empty());
+
+    let claim_event = store
+        .events_for_run(&run_id.to_string())
+        .unwrap()
+        .into_iter()
+        .find(|row| row.id == claim_event_id.to_string())
+        .unwrap()
+        .to_event()
+        .unwrap();
+    let Payload::ActivityClaimedV1(claim) = claim_event.payload else {
+        panic!("command grant must append activity_claimed_v1");
+    };
+    assert_eq!(
+        claim.purpose,
+        ActivityClaimPurposeV1::GovernedCommandActionV1
+    );
+
+    let replay = store
+        .authorize_and_claim_governed_command_action_v1_at_for_tests(
+            &request,
+            &cas,
+            &authority,
+            &signing_key,
+            &signer,
+            now + Duration::seconds(1),
+        )
+        .unwrap();
+    assert!(matches!(
+        replay,
+        GovernedCommandActionAuthorizeAndClaimDispositionV1::Pending {
+            claim_event_id: replayed,
+            ..
+        } if replayed == claim_event_id
+    ));
+
+    let generic_claim = ActivityClaimRequestV1 {
+        run_id,
+        activity_id: action_id.into(),
+        idempotency_key: format!("command:{action_id}"),
+        dispatch_event_id,
+        action_request_event_id,
+        lease_duration_ms: 60_000,
+    };
+    assert!(store
+        .claim_activity_v1_at_for_tests(
+            &generic_claim,
+            &authority,
+            &signing_key,
+            &signer,
+            now + Duration::seconds(2),
+        )
+        .is_err());
+}
+
+#[test]
+fn protected_command_authority_rejects_substituted_or_missing_cas_before_claim() {
+    let store = SqliteStore::open_in_memory().unwrap();
+    let directory = tempdir().unwrap();
+    let source_cas = Cas::open(directory.path().join("source-cas")).unwrap();
+    let empty_cas = Cas::open(directory.path().join("empty-cas")).unwrap();
+    let (signing_key, signer, trusted) = signer();
+    let trusted_actor = trusted_actor(&signing_key);
+    let authority = ActivityClaimAuthorityV1::new_governed_realm(
+        trusted,
+        trusted_actor.clone(),
+        trusted_actor.clone(),
+        trusted_actor,
+        DIGEST_B.into(),
+    )
+    .unwrap();
+    let (run_id, dispatch_event_id, source_action_request_event_id) =
+        append_governed_dispatch_and_request(&store, &signing_key, &signer);
+    let input = CanonicalCommandActionInputV1::new(
+        run_id.to_string(),
+        "different-action".into(),
+        "/usr/bin/git".into(),
+        vec!["status".into()],
+        None,
+    )
+    .unwrap();
+    let input_bytes = canonical_command_action_input_v1_bytes(&input).unwrap();
+    let input_ref = source_cas.put_canonical_bytes(&input_bytes).unwrap();
+    let action_request_event_id = append_sealed_command_action_request(
+        &store,
+        &signing_key,
+        &signer,
+        run_id,
+        dispatch_event_id,
+        source_action_request_event_id,
+        "expected-action",
+        input_ref.to_cas_ref(),
+        input_ref.digest().into(),
+    );
+    let request = GovernedCommandActionAuthorizeAndClaimRequestV1 {
+        run_id,
+        dispatch_event_id,
+        action_request_event_id,
+        lease_duration_ms: 60_000,
+    };
+    let now: chrono::DateTime<Utc> = "2026-07-18T00:00:02Z".parse().unwrap();
+    let event_count_before = store.event_count().unwrap();
+
+    assert!(store
+        .authorize_and_claim_governed_command_action_v1_at_for_tests(
+            &request,
+            &source_cas,
+            &authority,
+            &signing_key,
+            &signer,
+            now,
+        )
+        .is_err());
+    assert_eq!(store.event_count().unwrap(), event_count_before);
+
+    assert!(store
+        .authorize_and_claim_governed_command_action_v1_at_for_tests(
+            &request,
+            &empty_cas,
+            &authority,
+            &signing_key,
+            &signer,
+            now,
+        )
+        .is_err());
+    assert_eq!(
+        store.event_count().unwrap(),
+        event_count_before,
+        "missing or substituted executable CAS must never append a lease"
     );
 }

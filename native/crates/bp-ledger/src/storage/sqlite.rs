@@ -13,6 +13,11 @@ use crate::payload::activity_claim::{
     ActivityResultOutcomeV1, ActivityResultRecordedV1,
 };
 use crate::payload::checkpoint::{tape_root_hash, TapeCheckpointV1, TapeRootAlgorithm};
+use crate::payload::command_evidence::{
+    command_intent_evidence_document_v1_bytes, parse_verified_canonical_command_action_input_v1,
+    parse_verified_command_intent_evidence_document_v1, CommandActionEvidenceBindingV1,
+    CommandIntentEvidenceDocumentV1, VerifiedCommandIntentEvidenceDocumentV1,
+};
 use crate::payload::model_evidence::{
     derive_model_action_scope_constraints_v1, model_request_evidence_document_v1_bytes,
     model_request_evidence_v1_descriptor, parse_verified_canonical_model_action_input_v1,
@@ -574,6 +579,18 @@ pub struct GovernedModelActionAuthorizeAndClaimRequestV1 {
     pub lease_duration_ms: u64,
 }
 
+/// Closed host-private request for the only governed process-effect authority
+/// transition. All executable bytes and action identity are reconstructed
+/// from signed tape and protected CAS; the caller may select only the already
+/// recorded dispatch/action pair and the bounded startup lease duration.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GovernedCommandActionAuthorizeAndClaimRequestV1 {
+    pub run_id: RunId,
+    pub dispatch_event_id: EventId,
+    pub action_request_event_id: EventId,
+    pub lease_duration_ms: u64,
+}
+
 /// Closed host-private terminal result for a governed model lease. The caller
 /// may name only the opaque lease returned to the original provider gateway;
 /// action identity and idempotency are recovered from signed tape.
@@ -908,6 +925,34 @@ pub enum GovernedModelActionAuthorizeAndClaimDispositionV1 {
     LeaseExpired {
         authorization_event_id: EventId,
         authorization_ref: String,
+        claim_event_id: EventId,
+        lease_expires_at: String,
+    },
+}
+
+/// Result of the protected command authorization transition. Only a fresh
+/// grant contains verified executable evidence and an opaque lease. Duplicate,
+/// completed, and expired calls never receive either again.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GovernedCommandActionAuthorizeAndClaimDispositionV1 {
+    Granted {
+        claim_event_id: EventId,
+        claim_event_digest: String,
+        lease_id: String,
+        lease_expires_at: String,
+        command_intent: VerifiedCommandIntentEvidenceDocumentV1,
+    },
+    Pending {
+        claim_event_id: EventId,
+        lease_expires_at: String,
+    },
+    Recorded {
+        claim_event_id: EventId,
+        result_event_id: EventId,
+        result_event_digest: String,
+        outcome: ActivityResultOutcomeV1,
+    },
+    LeaseExpired {
         claim_event_id: EventId,
         lease_expires_at: String,
     },
@@ -3152,6 +3197,122 @@ impl SqliteStore {
             claim_event_digest,
             lease_id,
             lease_expires_at,
+        })
+    }
+
+    /// Reconstruct and lease one governed process action through the protected
+    /// command authority. Executable bytes are loaded from the exact strict
+    /// CAS object named by the signed action, converted into replay-bound
+    /// intent evidence, and retained in memory before the claim transaction.
+    /// The claim transaction then independently reopens the signed
+    /// dispatch/action chain and current authority window.
+    ///
+    /// Only the first durable grant receives the executable evidence and
+    /// opaque lease. Replays return status without either value, preventing a
+    /// second host process from acquiring the same effect capability.
+    pub fn authorize_and_claim_governed_command_action_v1(
+        &self,
+        request: &GovernedCommandActionAuthorizeAndClaimRequestV1,
+        cas: &Cas,
+        authority: &ActivityClaimAuthorityV1,
+        signing_key: &SigningKey,
+        signer: &ActorKeyRef,
+    ) -> Result<GovernedCommandActionAuthorizeAndClaimDispositionV1> {
+        self.authorize_and_claim_governed_command_action_v1_at(
+            request,
+            cas,
+            authority,
+            signing_key,
+            signer,
+            Utc::now(),
+        )
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn authorize_and_claim_governed_command_action_v1_at_for_tests(
+        &self,
+        request: &GovernedCommandActionAuthorizeAndClaimRequestV1,
+        cas: &Cas,
+        authority: &ActivityClaimAuthorityV1,
+        signing_key: &SigningKey,
+        signer: &ActorKeyRef,
+        now: DateTime<Utc>,
+    ) -> Result<GovernedCommandActionAuthorizeAndClaimDispositionV1> {
+        self.authorize_and_claim_governed_command_action_v1_at(
+            request,
+            cas,
+            authority,
+            signing_key,
+            signer,
+            now,
+        )
+    }
+
+    fn authorize_and_claim_governed_command_action_v1_at(
+        &self,
+        request: &GovernedCommandActionAuthorizeAndClaimRequestV1,
+        cas: &Cas,
+        authority: &ActivityClaimAuthorityV1,
+        signing_key: &SigningKey,
+        signer: &ActorKeyRef,
+        now: DateTime<Utc>,
+    ) -> Result<GovernedCommandActionAuthorizeAndClaimDispositionV1> {
+        require_protected_governed_realm(authority)?;
+        validate_claim_signer(authority, signing_key, signer)?;
+        if !(MIN_ACTIVITY_LEASE_MS..=MAX_ACTIVITY_LEASE_MS).contains(&request.lease_duration_ms) {
+            return Err(command_action_authority_rejected(format!(
+                "lease_duration_ms must be in {MIN_ACTIVITY_LEASE_MS}..={MAX_ACTIVITY_LEASE_MS}",
+            )));
+        }
+
+        let (claim, command_intent) =
+            reconstruct_governed_command_action(&self.conn, request, cas, authority, now)?;
+        let disposition = self.claim_activity_v1_at(
+            &claim,
+            authority,
+            signing_key,
+            signer,
+            now,
+            ActivityClaimPurposeV1::GovernedCommandActionV1,
+        )?;
+        Ok(match disposition {
+            ActivityClaimDispositionV1::Granted {
+                claim_event_id,
+                claim_event_digest,
+                lease_id,
+                lease_expires_at,
+            } => GovernedCommandActionAuthorizeAndClaimDispositionV1::Granted {
+                claim_event_id,
+                claim_event_digest,
+                lease_id,
+                lease_expires_at,
+                command_intent,
+            },
+            ActivityClaimDispositionV1::Pending {
+                claim_event_id,
+                lease_expires_at,
+            } => GovernedCommandActionAuthorizeAndClaimDispositionV1::Pending {
+                claim_event_id,
+                lease_expires_at,
+            },
+            ActivityClaimDispositionV1::Recorded {
+                claim_event_id,
+                result_event_id,
+                result_event_digest,
+                outcome,
+            } => GovernedCommandActionAuthorizeAndClaimDispositionV1::Recorded {
+                claim_event_id,
+                result_event_id,
+                result_event_digest,
+                outcome,
+            },
+            ActivityClaimDispositionV1::LeaseExpired {
+                claim_event_id,
+                lease_expires_at,
+            } => GovernedCommandActionAuthorizeAndClaimDispositionV1::LeaseExpired {
+                claim_event_id,
+                lease_expires_at,
+            },
         })
     }
 
@@ -8352,6 +8513,137 @@ fn validate_activity_heartbeat_request(request: &ActivityHeartbeatRequestV1) -> 
         });
     }
     Ok(())
+}
+
+fn reconstruct_governed_command_action(
+    conn: &Connection,
+    request: &GovernedCommandActionAuthorizeAndClaimRequestV1,
+    cas: &Cas,
+    authority: &ActivityClaimAuthorityV1,
+    now: DateTime<Utc>,
+) -> Result<(
+    ActivityClaimRequestV1,
+    VerifiedCommandIntentEvidenceDocumentV1,
+)> {
+    let action_event = load_verified_authority_event(
+        conn,
+        request.action_request_event_id,
+        &authority.trusted_keys,
+        &authority.action_request_signer,
+        "governed command action request",
+    )
+    .map_err(|error| {
+        command_action_authority_rejected(format!(
+            "could not verify the signed command action request: {error}",
+        ))
+    })?;
+    if action_event.run_id != request.run_id {
+        return Err(command_action_authority_rejected(
+            "command action request run_id does not match the authority request",
+        ));
+    }
+    if action_event.parent_event_id != Some(request.dispatch_event_id) {
+        return Err(command_action_authority_rejected(
+            "command action request does not name the selected dispatch as parent",
+        ));
+    }
+    let action = match action_event.payload {
+        Payload::ActionRequestedV2(action) => action,
+        _ => {
+            return Err(command_action_authority_rejected(
+                "command authority requires a signed action_requested_v2 event",
+            ));
+        }
+    };
+    if action.action_kind != ActionKindV1::Process {
+        return Err(command_action_authority_rejected(
+            "command authority accepts only process actions",
+        ));
+    }
+    if action.execution_role != ExecutionRoleV1::Implementer {
+        return Err(command_action_authority_rejected(
+            "command authority requires the signed implementer role",
+        ));
+    }
+
+    let claim = ActivityClaimRequestV1 {
+        run_id: request.run_id,
+        activity_id: action.action_id.clone(),
+        idempotency_key: action.idempotency_key.clone(),
+        dispatch_event_id: request.dispatch_event_id,
+        action_request_event_id: request.action_request_event_id,
+        lease_duration_ms: request.lease_duration_ms,
+    };
+    verify_claim_evidence(conn, &claim, authority, now).map_err(|error| {
+        command_action_authority_rejected(format!(
+            "command action does not bind active signed dispatch authority: {error}",
+        ))
+    })?;
+
+    let input_bytes = cas
+        .get_verified_canonical_bytes(&action.canonical_input_ref, &action.canonical_input_digest)
+        .map_err(|error| {
+            command_action_authority_rejected(format!(
+                "command canonical input is unavailable or corrupt: {error}",
+            ))
+        })?;
+    let verified_input = parse_verified_canonical_command_action_input_v1(
+        &input_bytes,
+        &action.canonical_input_ref,
+        &action.canonical_input_digest,
+    )
+    .map_err(|error| {
+        command_action_authority_rejected(format!(
+            "command canonical input is not closed executable evidence: {error}",
+        ))
+    })?;
+    let binding = CommandActionEvidenceBindingV1::from_action_requested_v2(
+        &action,
+        request.dispatch_event_id,
+        request.action_request_event_id,
+    )
+    .map_err(|error| {
+        command_action_authority_rejected(format!(
+            "command evidence binding could not be reconstructed: {error}",
+        ))
+    })?;
+    let intent =
+        CommandIntentEvidenceDocumentV1::from_verified_canonical_input(binding, &verified_input)
+            .map_err(|error| {
+                command_action_authority_rejected(format!(
+                    "command executable material does not match signed action identity: {error}",
+                ))
+            })?;
+    let intent_bytes = command_intent_evidence_document_v1_bytes(&intent).map_err(|error| {
+        command_action_authority_rejected(format!(
+            "command intent evidence could not be canonicalized: {error}",
+        ))
+    })?;
+    let intent_ref = cas.put_canonical_bytes(&intent_bytes).map_err(|error| {
+        command_action_authority_rejected(format!(
+            "command intent evidence could not be durably stored: {error}",
+        ))
+    })?;
+    let verified_intent = parse_verified_command_intent_evidence_document_v1(
+        &intent_bytes,
+        &intent_ref.to_cas_ref(),
+        intent_ref.digest(),
+    )
+    .map_err(|error| {
+        command_action_authority_rejected(format!(
+            "stored command intent evidence failed verification: {error}",
+        ))
+    })?;
+    Ok((claim, verified_intent))
+}
+
+fn command_action_authority_rejected(reason: impl Into<String>) -> LedgerError {
+    LedgerError::ActivityClaimAuthorityRejected {
+        reason: format!(
+            "governed command action authority rejected: {}",
+            reason.into()
+        ),
+    }
 }
 
 fn verify_claim_evidence(
