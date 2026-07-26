@@ -26,7 +26,7 @@ use crate::ProtectedPromotionDecisionAuthority;
 use std::fs::File;
 use std::io::Write;
 #[cfg(target_os = "linux")]
-use std::os::fd::{AsRawFd, FromRawFd, RawFd};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 #[cfg(target_os = "linux")]
 use std::os::unix::fs::MetadataExt;
 #[cfg(target_os = "linux")]
@@ -55,6 +55,43 @@ enum ProtectedPromotionDecisionHostErrorV1 {
     ConnectionFailed,
     #[error("protected promotion-decision host accept failed")]
     AcceptFailed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OperationalDiagnosticV1 {
+    StartupFailed,
+    AcceptFailed,
+    #[cfg(any(test, not(target_os = "linux")))]
+    UnsupportedPlatform,
+}
+
+impl OperationalDiagnosticV1 {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::StartupFailed => "startup_failed",
+            Self::AcceptFailed => "accept_failed",
+            #[cfg(any(test, not(target_os = "linux")))]
+            Self::UnsupportedPlatform => "unsupported_platform",
+        }
+    }
+}
+
+fn operational_diagnostic_for_error(
+    error: ProtectedPromotionDecisionHostErrorV1,
+) -> OperationalDiagnosticV1 {
+    match error {
+        ProtectedPromotionDecisionHostErrorV1::AcceptFailed => {
+            OperationalDiagnosticV1::AcceptFailed
+        }
+        ProtectedPromotionDecisionHostErrorV1::StartupFailed
+        | ProtectedPromotionDecisionHostErrorV1::ConnectionFailed => {
+            OperationalDiagnosticV1::StartupFailed
+        }
+    }
+}
+
+fn emit_operational_diagnostic(category: OperationalDiagnosticV1) {
+    eprintln!("{}", category.as_str());
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -353,11 +390,11 @@ fn validate_default_listener_path(
 }
 
 #[cfg(target_os = "linux")]
-fn duplicate_and_validate_preopened_listener(
-    listener_fd: RawFd,
+fn duplicate_and_validate_owned_preopened_listener(
+    listener_fd: OwnedFd,
     expected_path: &Path,
 ) -> Result<UnixListener, ProtectedPromotionDecisionHostErrorV1> {
-    let duplicated_fd = unsafe { libc::fcntl(listener_fd, libc::F_DUPFD_CLOEXEC, 4) };
+    let duplicated_fd = unsafe { libc::fcntl(listener_fd.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 4) };
     if duplicated_fd < 0 {
         return Err(ProtectedPromotionDecisionHostErrorV1::StartupFailed);
     }
@@ -388,6 +425,27 @@ fn duplicate_and_validate_preopened_listener(
 }
 
 #[cfg(target_os = "linux")]
+fn claim_and_validate_preopened_listener(
+    listener_fd: RawFd,
+    expected_path: &Path,
+) -> Result<UnixListener, ProtectedPromotionDecisionHostErrorV1> {
+    let descriptor_flags = unsafe { libc::fcntl(listener_fd, libc::F_GETFD) };
+    if descriptor_flags < 0
+        || unsafe {
+            libc::fcntl(
+                listener_fd,
+                libc::F_SETFD,
+                descriptor_flags | libc::FD_CLOEXEC,
+            )
+        } != 0
+    {
+        return Err(ProtectedPromotionDecisionHostErrorV1::StartupFailed);
+    }
+    let listener_fd = unsafe { OwnedFd::from_raw_fd(listener_fd) };
+    duplicate_and_validate_owned_preopened_listener(listener_fd, expected_path)
+}
+
+#[cfg(target_os = "linux")]
 fn validate_listener_then_load_startup<T, F>(
     listener_fd: RawFd,
     expected_path: &Path,
@@ -396,7 +454,7 @@ fn validate_listener_then_load_startup<T, F>(
 where
     F: FnOnce() -> Result<T, ProtectedPromotionDecisionHostErrorV1>,
 {
-    let listener = duplicate_and_validate_preopened_listener(listener_fd, expected_path)?;
+    let listener = claim_and_validate_preopened_listener(listener_fd, expected_path)?;
     let startup = load_startup()?;
     Ok((listener, startup))
 }
@@ -440,7 +498,22 @@ fn duplicate_and_validate_preopened_listener_for_test(
     listener_fd: RawFd,
     expected_path: &Path,
 ) -> Result<UnixListener, ProtectedPromotionDecisionHostErrorV1> {
-    duplicate_and_validate_preopened_listener(listener_fd, expected_path)
+    let owned_duplicate = unsafe { libc::fcntl(listener_fd, libc::F_DUPFD_CLOEXEC, 4) };
+    if owned_duplicate < 0 {
+        return Err(ProtectedPromotionDecisionHostErrorV1::StartupFailed);
+    }
+    duplicate_and_validate_owned_preopened_listener(
+        unsafe { OwnedFd::from_raw_fd(owned_duplicate) },
+        expected_path,
+    )
+}
+
+#[cfg(all(test, target_os = "linux"))]
+fn duplicate_and_validate_owned_preopened_listener_for_test(
+    listener_fd: OwnedFd,
+    expected_path: &Path,
+) -> Result<UnixListener, ProtectedPromotionDecisionHostErrorV1> {
+    duplicate_and_validate_owned_preopened_listener(listener_fd, expected_path)
 }
 
 fn encode_promotion_decision_response_frame(
@@ -596,12 +669,16 @@ pub fn run_default_promotion_decision_host_v1() -> ExitCode {
     {
         return match run_default_promotion_decision_host_linux_v1() {
             Ok(()) => ExitCode::SUCCESS,
-            Err(_) => ExitCode::FAILURE,
+            Err(error) => {
+                emit_operational_diagnostic(operational_diagnostic_for_error(error));
+                ExitCode::FAILURE
+            }
         };
     }
 
     #[cfg(not(target_os = "linux"))]
     {
+        emit_operational_diagnostic(OperationalDiagnosticV1::UnsupportedPlatform);
         ExitCode::FAILURE
     }
 }
@@ -739,9 +816,9 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn preopened_listener_validation_accepts_kernel_bound_path_without_inode_equivalence() {
-        use std::os::fd::{AsRawFd, FromRawFd};
+        use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
         use std::os::unix::fs::MetadataExt;
-        use std::os::unix::net::UnixListener;
+        use std::os::unix::net::{UnixListener, UnixStream};
 
         let anchor = tempfile::tempdir().expect("temporary socket directory");
         let socket_path = anchor.path().join("promotion-decision.sock");
@@ -759,9 +836,18 @@ mod tests {
             "Linux AF_UNIX listener and pathname identities are intentionally distinct"
         );
 
+        let owned_input_raw =
+            unsafe { libc::fcntl(original.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 4) };
+        assert!(owned_input_raw >= 0);
+        let owned_input = unsafe { OwnedFd::from_raw_fd(owned_input_raw) };
         let validated =
-            duplicate_and_validate_preopened_listener_for_test(original.as_raw_fd(), &socket_path)
+            duplicate_and_validate_owned_preopened_listener_for_test(owned_input, &socket_path)
                 .expect("valid listening stream with exact kernel pathname");
+        assert_eq!(
+            unsafe { libc::fcntl(owned_input_raw, libc::F_GETFD) },
+            -1,
+            "successful validation must consume and close the inherited listener descriptor"
+        );
         assert_eq!(
             validated
                 .local_addr()
@@ -773,11 +859,10 @@ mod tests {
         assert_ne!(descriptor_flags, -1);
         assert_ne!(descriptor_flags & libc::FD_CLOEXEC, 0);
 
-        // The validated handle owns only the CLOEXEC duplicate.
-        drop(validated);
-        let duplicate = unsafe { libc::fcntl(original.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 4) };
-        assert!(duplicate >= 0);
-        drop(unsafe { std::fs::File::from_raw_fd(duplicate) });
+        let _client = UnixStream::connect(&socket_path).expect("connect to validated listener");
+        validated
+            .accept()
+            .expect("returned listener remains functional after consuming the inherited fd");
     }
 
     #[cfg(target_os = "linux")]
@@ -1213,10 +1298,10 @@ mod tests {
     }
 
     #[test]
-    fn authority_host_binary_calls_only_the_opaque_runner() {
+    fn authority_host_binary_guards_arguments_before_the_opaque_runner() {
         assert_eq!(
             include_str!("bin/buildplane-authority-host.rs"),
-            "fn main() -> std::process::ExitCode {\n    bp_authority_broker::run_default_promotion_decision_host_v1()\n}\n"
+            "fn main() -> std::process::ExitCode {\n    if std::env::args_os().len() != 1 {\n        eprintln!(\"invalid_arguments\");\n        return std::process::ExitCode::FAILURE;\n    }\n    bp_authority_broker::run_default_promotion_decision_host_v1()\n}\n"
         );
     }
 
@@ -1266,5 +1351,51 @@ mod tests {
                 assert!(!message.to_lowercase().contains(sensitive));
             }
         }
+    }
+
+    #[test]
+    fn lifecycle_failures_map_only_to_fixed_operational_categories() {
+        assert_eq!(
+            [
+                operational_diagnostic_for_error(
+                    ProtectedPromotionDecisionHostErrorV1::StartupFailed,
+                ),
+                operational_diagnostic_for_error(
+                    ProtectedPromotionDecisionHostErrorV1::ConnectionFailed,
+                ),
+                operational_diagnostic_for_error(
+                    ProtectedPromotionDecisionHostErrorV1::AcceptFailed,
+                ),
+                OperationalDiagnosticV1::UnsupportedPlatform,
+            ],
+            [
+                OperationalDiagnosticV1::StartupFailed,
+                OperationalDiagnosticV1::StartupFailed,
+                OperationalDiagnosticV1::AcceptFailed,
+                OperationalDiagnosticV1::UnsupportedPlatform,
+            ]
+        );
+        assert_eq!(
+            [
+                OperationalDiagnosticV1::StartupFailed.as_str(),
+                OperationalDiagnosticV1::AcceptFailed.as_str(),
+                OperationalDiagnosticV1::UnsupportedPlatform.as_str(),
+            ],
+            ["startup_failed", "accept_failed", "unsupported_platform"]
+        );
+    }
+
+    #[test]
+    fn runbook_keeps_redacted_diagnostics_and_restart_limits_observable() {
+        let runbook = include_str!("../../../../docs/operations/trust-spine-governed-runbook.md");
+        assert!(runbook.contains(
+            "After=buildplane-authority-host.socket\nStartLimitIntervalSec=60s\nStartLimitBurst=5\n\n[Service]"
+        ));
+        assert!(runbook.contains("Restart=on-failure\nRestartSec=5s"));
+        assert!(runbook.contains("StandardOutput=null\nStandardError=journal"));
+        assert!(runbook.contains(
+            "A compromised allowlisted operator UID can cause bounded availability loss"
+        ));
+        assert!(runbook.contains("cannot expand authority or create concurrent ledger writes"));
     }
 }

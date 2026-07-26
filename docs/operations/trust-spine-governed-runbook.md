@@ -134,6 +134,8 @@ WantedBy=sockets.target
 Description=Buildplane protected promotion-decision authority
 Requires=buildplane-authority-host.socket
 After=buildplane-authority-host.socket
+StartLimitIntervalSec=60s
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -141,6 +143,7 @@ ExecStart=/usr/libexec/buildplane/buildplane-authority-host
 User=buildplane-authority
 Group=buildplane-authority
 Restart=on-failure
+RestartSec=5s
 NoNewPrivileges=true
 PrivateDevices=true
 PrivateTmp=true
@@ -158,13 +161,23 @@ RestrictSUIDSGID=true
 SystemCallArchitectures=native
 UMask=0077
 StandardOutput=null
-StandardError=null
+StandardError=journal
 ```
 
 The socket unit must be the service's only activated listener so systemd
 passes it as descriptor 3. Create and verify the fixed config, authority root,
 keys, ledger, OS users, and group through the protected-host provisioning
 process; the binary intentionally provides no provisioning mode.
+
+The journal receives only the fixed redacted categories `startup_failed`,
+`accept_failed`, `unsupported_platform`, or `invalid_arguments`; it never
+receives request, identity, path, descriptor, signer, ledger, or OS-error
+details from this host.
+
+A compromised allowlisted operator UID can cause bounded availability loss by
+occupying the sequential endpoint. Isolate and monitor each allowlisted UID.
+This availability risk cannot expand authority or create concurrent ledger writes;
+the single-writer serving model remains intentional.
 
 ## Recovery protocol
 
