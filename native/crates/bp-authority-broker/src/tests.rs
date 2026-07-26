@@ -8268,9 +8268,10 @@ fn broker_dispatch_admission_never_reports_success_when_checkpoint_sealing_fails
 struct V5BrokerAdmissionFixture {
     store: SqliteStore,
     run_id: RunId,
-    non_dispatch_event_id: EventId,
     source_dispatch_event_id: EventId,
     v5_envelope_digest: String,
+    source_key: SigningKey,
+    source_signer: ActorKeyRef,
     admission_key: SigningKey,
     admission_signer: ActorKeyRef,
     checkpoint_key: SigningKey,
@@ -8505,14 +8506,45 @@ fn v5_broker_admission_fixture() -> V5BrokerAdmissionFixture {
     V5BrokerAdmissionFixture {
         store,
         run_id,
-        non_dispatch_event_id: graph_event.id,
         source_dispatch_event_id: dispatch_event.id,
         v5_envelope_digest: dispatch.envelope_digest,
+        source_key,
+        source_signer,
         admission_key,
         admission_signer,
         checkpoint_key,
         checkpoint_signer,
         authority,
+    }
+}
+
+fn append_matching_v5_source(
+    fixture: &V5BrokerAdmissionFixture,
+    signing_key: Option<&SigningKey>,
+    signer: Option<&ActorKeyRef>,
+) {
+    let (source, _) = fixture
+        .store
+        .signed_events_for_run(&fixture.run_id.to_string())
+        .expect("read V5 source tape")
+        .into_iter()
+        .find(|(event, _)| event.id == fixture.source_dispatch_event_id)
+        .expect("find original V5 source");
+    let duplicate = Event {
+        id: EventId::new(),
+        occurred_at: Utc::now(),
+        ..source
+    };
+    match (signing_key, signer) {
+        (Some(signing_key), Some(signer)) => fixture
+            .store
+            .append_signed(&duplicate, signing_key, signer)
+            .expect("append matching signed V5 source"),
+        (None, None) => fixture
+            .store
+            .append(&duplicate)
+            .expect("append matching unsigned V5 source"),
+        _ => panic!("test source requires both signing key and signer"),
     }
 }
 
@@ -8539,17 +8571,13 @@ fn v5_broker_checkpoint_count(fixture: &V5BrokerAdmissionFixture) -> usize {
 fn v5_broker_admission_request(fixture: &V5BrokerAdmissionFixture) -> V5DispatchAdmissionRequest {
     V5DispatchAdmissionRequest {
         run_id: fixture.run_id,
-        source_dispatch_event_id: fixture.source_dispatch_event_id,
+        v5_envelope_digest: fixture.v5_envelope_digest.clone(),
     }
 }
 
-fn v5_broker_admission_wire(
-    request_id: &str,
-    run_id: &str,
-    source_dispatch_event_id: &str,
-) -> String {
+fn v5_broker_admission_wire(request_id: &str, run_id: &str, v5_envelope_digest: &str) -> String {
     format!(
-        r#"{{"request_id":"{request_id}","run_id":"{run_id}","source_dispatch_event_id":"{source_dispatch_event_id}"}}"#
+        r#"{{"request_id":"{request_id}","run_id":"{run_id}","v5_envelope_digest":"{v5_envelope_digest}"}}"#
     )
 }
 
@@ -8560,7 +8588,7 @@ fn v5_broker_admission_wire_with_injected_field(
     let mut wire = v5_broker_admission_wire(
         "123e4567-e89b-12d3-a456-426614174000",
         &fixture.run_id.to_string(),
-        &fixture.source_dispatch_event_id.to_string(),
+        &fixture.v5_envelope_digest,
     );
     wire.pop()
         .expect("the canonical V5 wire ends in an object delimiter");
@@ -8588,7 +8616,7 @@ fn protected_v5_admission_wire_accepts_only_closed_canonical_identity_and_seals(
     let wire = v5_broker_admission_wire(
         "123e4567-e89b-12d3-a456-426614174000",
         &fixture.run_id.to_string(),
-        &fixture.source_dispatch_event_id.to_string(),
+        &fixture.v5_envelope_digest,
     );
 
     let parsed = parse_v5_dispatch_admission_request(wire.as_bytes())
@@ -8621,7 +8649,7 @@ fn protected_v5_admission_wire_rejects_injected_authority_fields_before_tape_mut
         "signer",
         "trusted_keys",
         "authority_realm",
-        "v5_envelope_digest",
+        "source_dispatch_event_id",
         "workspace",
     ] {
         let wire = v5_broker_admission_wire_with_injected_field(&fixture, injected_field);
@@ -8650,23 +8678,23 @@ fn protected_v5_admission_wire_rejects_missing_and_noncanonical_ids_before_tape_
     let broker = v5_broker_admission_backend(&fixture);
     let canonical_request_id = "123e4567-e89b-12d3-a456-426614174000";
     let canonical_run_id = fixture.run_id.to_string();
-    let canonical_source_dispatch_event_id = fixture.source_dispatch_event_id.to_string();
+    let canonical_v5_envelope_digest = fixture.v5_envelope_digest.clone();
 
     let malformed_wires = [
         (
             "missing request_id",
             format!(
-                r#"{{"run_id":"{canonical_run_id}","source_dispatch_event_id":"{canonical_source_dispatch_event_id}"}}"#
+                r#"{{"run_id":"{canonical_run_id}","v5_envelope_digest":"{canonical_v5_envelope_digest}"}}"#
             ),
         ),
         (
             "missing run_id",
             format!(
-                r#"{{"request_id":"{canonical_request_id}","source_dispatch_event_id":"{canonical_source_dispatch_event_id}"}}"#
+                r#"{{"request_id":"{canonical_request_id}","v5_envelope_digest":"{canonical_v5_envelope_digest}"}}"#
             ),
         ),
         (
-            "missing source_dispatch_event_id",
+            "missing v5_envelope_digest",
             format!(r#"{{"request_id":"{canonical_request_id}","run_id":"{canonical_run_id}"}}"#),
         ),
         (
@@ -8674,7 +8702,7 @@ fn protected_v5_admission_wire_rejects_missing_and_noncanonical_ids_before_tape_
             v5_broker_admission_wire(
                 "123E4567-e89b-12d3-a456-426614174000",
                 &canonical_run_id,
-                &canonical_source_dispatch_event_id,
+                &canonical_v5_envelope_digest,
             ),
         ),
         (
@@ -8682,15 +8710,15 @@ fn protected_v5_admission_wire_rejects_missing_and_noncanonical_ids_before_tape_
             v5_broker_admission_wire(
                 canonical_request_id,
                 "123E4567-e89b-12d3-a456-426614174000",
-                &canonical_source_dispatch_event_id,
+                &canonical_v5_envelope_digest,
             ),
         ),
         (
-            "noncanonical source_dispatch_event_id",
+            "noncanonical v5_envelope_digest",
             v5_broker_admission_wire(
                 canonical_request_id,
                 &canonical_run_id,
-                "123E4567-e89b-12d3-a456-426614174000",
+                "sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
             ),
         ),
     ];
@@ -8716,7 +8744,7 @@ fn protected_v5_admission_wire_rejects_missing_and_noncanonical_ids_before_tape_
 }
 
 #[test]
-fn protected_v5_admission_wire_returns_reconciliation_for_wrong_run_and_non_v5_source() {
+fn protected_v5_admission_wire_returns_reconciliation_for_wrong_run_and_unknown_digest() {
     let fixture = v5_broker_admission_fixture();
     let broker = v5_broker_admission_backend(&fixture);
     let request_id = "123e4567-e89b-12d3-a456-426614174000";
@@ -8725,18 +8753,14 @@ fn protected_v5_admission_wire_returns_reconciliation_for_wrong_run_and_non_v5_s
     for (label, wire) in [
         (
             "wrong run",
-            v5_broker_admission_wire(
-                request_id,
-                &wrong_run,
-                &fixture.source_dispatch_event_id.to_string(),
-            ),
+            v5_broker_admission_wire(request_id, &wrong_run, &fixture.v5_envelope_digest),
         ),
         (
-            "non-V5 source",
+            "unknown digest",
             v5_broker_admission_wire(
                 request_id,
                 &fixture.run_id.to_string(),
-                &fixture.non_dispatch_event_id.to_string(),
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             ),
         ),
     ] {
@@ -8780,7 +8804,7 @@ fn protected_v5_authenticated_handler_rejects_same_uid_before_consuming_its_fram
     let payload = v5_broker_admission_wire(
         "123e4567-e89b-12d3-a456-426614174000",
         &fixture.run_id.to_string(),
-        &fixture.source_dispatch_event_id.to_string(),
+        &fixture.v5_envelope_digest,
     )
     .into_bytes();
     let mut frame = u32::try_from(payload.len())
@@ -8890,6 +8914,56 @@ fn broker_v5_dispatch_admission_exact_retry_returns_the_same_sealed_evidence() {
 }
 
 #[test]
+fn broker_v5_dispatch_admission_rejects_duplicate_verified_sources_by_digest() {
+    let fixture = v5_broker_admission_fixture();
+    append_matching_v5_source(
+        &fixture,
+        Some(&fixture.source_key),
+        Some(&fixture.source_signer),
+    );
+    let broker = v5_broker_admission_backend(&fixture);
+
+    assert!(matches!(
+        broker.record_then_exact_seal(v5_broker_admission_request(&fixture)),
+        BrokerV5DispatchAdmissionDisposition::ReconciliationRequired
+    ));
+    assert_eq!(v5_broker_admission_receipt_count(&fixture), 0);
+    assert_eq!(v5_broker_checkpoint_count(&fixture), 0);
+}
+
+#[test]
+fn broker_v5_dispatch_admission_rejects_unsigned_matching_source_by_digest() {
+    let fixture = v5_broker_admission_fixture();
+    append_matching_v5_source(&fixture, None, None);
+    let broker = v5_broker_admission_backend(&fixture);
+
+    assert!(matches!(
+        broker.record_then_exact_seal(v5_broker_admission_request(&fixture)),
+        BrokerV5DispatchAdmissionDisposition::ReconciliationRequired
+    ));
+    assert_eq!(v5_broker_admission_receipt_count(&fixture), 0);
+    assert_eq!(v5_broker_checkpoint_count(&fixture), 0);
+}
+
+#[test]
+fn broker_v5_dispatch_admission_rejects_matching_source_signed_by_wrong_role() {
+    let fixture = v5_broker_admission_fixture();
+    append_matching_v5_source(
+        &fixture,
+        Some(&fixture.admission_key),
+        Some(&fixture.admission_signer),
+    );
+    let broker = v5_broker_admission_backend(&fixture);
+
+    assert!(matches!(
+        broker.record_then_exact_seal(v5_broker_admission_request(&fixture)),
+        BrokerV5DispatchAdmissionDisposition::ReconciliationRequired
+    ));
+    assert_eq!(v5_broker_admission_receipt_count(&fixture), 0);
+    assert_eq!(v5_broker_checkpoint_count(&fixture), 0);
+}
+
+#[test]
 fn broker_v5_dispatch_admission_reconciles_then_retries_without_duplicate_receipt() {
     let fixture = v5_broker_admission_fixture();
     let wrong_checkpoint_key = SigningKey::from_bytes(&[244; 32]);
@@ -8941,7 +9015,7 @@ fn broker_v5_dispatch_admission_reconciles_wrong_run_without_tape_mutation() {
     .expect("inject valid V5 dependencies");
     let request = V5DispatchAdmissionRequest {
         run_id: RunId::new(),
-        source_dispatch_event_id: fixture.source_dispatch_event_id,
+        v5_envelope_digest: fixture.v5_envelope_digest.clone(),
     };
 
     assert!(matches!(
@@ -8960,7 +9034,7 @@ fn broker_v5_dispatch_admission_reconciles_wrong_run_without_tape_mutation() {
 }
 
 #[test]
-fn broker_v5_dispatch_admission_reconciles_non_v5_source_without_tape_mutation() {
+fn broker_v5_dispatch_admission_reconciles_unknown_digest_without_tape_mutation() {
     let fixture = v5_broker_admission_fixture();
     let broker = LedgerV5DispatchAdmissionBackend::from_prevalidated_startup(
         &fixture.store,
@@ -8973,7 +9047,8 @@ fn broker_v5_dispatch_admission_reconciles_non_v5_source_without_tape_mutation()
     .expect("inject valid V5 dependencies");
     let request = V5DispatchAdmissionRequest {
         run_id: fixture.run_id,
-        source_dispatch_event_id: fixture.non_dispatch_event_id,
+        v5_envelope_digest:
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
     };
 
     assert!(matches!(

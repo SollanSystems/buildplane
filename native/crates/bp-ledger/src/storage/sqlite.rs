@@ -26,7 +26,7 @@ use crate::payload::model_evidence::{
 use crate::payload::trust_spine::{
     action_receipt_recorded_v2_digest, action_receipt_set_v1_digest, action_requested_v2_digest,
     attempt_context_recorded_v1_digest, candidate_completion_recorded_v1_digest,
-    dispatch_envelope_v3_body_digest, dispatch_envelope_v4_digest,
+    dispatch_envelope_v3_body_digest, dispatch_envelope_v4_digest, dispatch_envelope_v5_digest,
     governed_dispatch_policy_digest_v1, model_action_authorized_v2_digest,
     model_action_intent_v1_digest, promotion_execution_claimed_v1_digest, workflow_graph_v2_digest,
     ActionEvidenceVersionV1, ActionKindV1, ActionReceiptOutcomeV2, ActionReceiptRecordedV2,
@@ -3510,6 +3510,97 @@ impl SqliteStore {
             dispatch_event_id: evidence.dispatch_event_id,
             dispatch_event_digest: evidence.dispatch_event_digest,
             v5_envelope_digest: evidence.v5_envelope_digest,
+        })
+    }
+
+    /// Resolve the sole already-signed V5 source dispatch named by its
+    /// canonical envelope digest.
+    ///
+    /// This is an observation-only helper for the protected admission host.
+    /// It never accepts an event ID from the caller and never appends. The
+    /// subsequent admission transaction still re-verifies the returned event
+    /// and all of its graph/manifest witnesses under the same authority.
+    pub fn resolve_unique_governed_dispatch_v5_source_by_digest_v1(
+        &self,
+        run_id: RunId,
+        v5_envelope_digest: &str,
+        authority: &GovernedDispatchV5AdmissionAuthorityV1,
+    ) -> Result<EventId> {
+        if !is_canonical_sha256_digest(v5_envelope_digest) {
+            return Err(governed_dispatch_v5_admission_reconciliation_required(
+                run_id,
+                "unresolved",
+                "V5 source envelope digest is not canonical sha256",
+            ));
+        }
+
+        let mut resolved = None;
+        for row in self.verified_events_for_run(&run_id.to_string(), &authority.trusted_keys)? {
+            if row.event.kind != "dispatch_envelope_v5" {
+                continue;
+            }
+            let event = row.event.to_event().map_err(|error| {
+                governed_dispatch_v5_admission_reconciliation_required(
+                    run_id,
+                    "unresolved",
+                    format!("V5 source event could not be reconstructed: {error}"),
+                )
+            })?;
+            let Payload::DispatchEnvelopeV5(dispatch) = &event.payload else {
+                return Err(governed_dispatch_v5_admission_reconciliation_required(
+                    run_id,
+                    "unresolved",
+                    "V5 source event kind and payload do not agree",
+                ));
+            };
+            if dispatch.envelope_digest != v5_envelope_digest {
+                continue;
+            }
+            let signature = row.signature.as_ref().ok_or_else(|| {
+                governed_dispatch_v5_admission_reconciliation_required(
+                    run_id,
+                    "unresolved",
+                    "matching V5 source event is unsigned",
+                )
+            })?;
+            if row.verification != VerificationStatus::Verified
+                || !actor_matches(&authority.source_dispatch_signer, &signature.signer)
+            {
+                return Err(governed_dispatch_v5_admission_reconciliation_required(
+                    run_id,
+                    "unresolved",
+                    "matching V5 source event is not verified for the configured source authority",
+                ));
+            }
+            let recomputed = dispatch_envelope_v5_digest(dispatch).map_err(|error| {
+                governed_dispatch_v5_admission_reconciliation_required(
+                    run_id,
+                    "unresolved",
+                    format!("matching V5 source digest could not be recomputed: {error}"),
+                )
+            })?;
+            if recomputed != v5_envelope_digest {
+                return Err(governed_dispatch_v5_admission_reconciliation_required(
+                    run_id,
+                    "unresolved",
+                    "matching V5 source carries a noncanonical detached digest",
+                ));
+            }
+            if resolved.replace(event.id).is_some() {
+                return Err(governed_dispatch_v5_admission_reconciliation_required(
+                    run_id,
+                    "unresolved",
+                    "V5 source envelope digest resolves to more than one signed event",
+                ));
+            }
+        }
+
+        resolved.ok_or_else(|| {
+            governed_dispatch_v5_admission_reconciliation_required(
+                run_id,
+                "unresolved",
+                "V5 source envelope digest did not resolve to exactly one signed event",
+            )
         })
     }
 

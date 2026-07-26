@@ -1,10 +1,11 @@
 //! Broker-private composition for a sealed V5 admission receipt.
 //!
-//! The caller names only a run and an already-signed V5 source dispatch. The
-//! protected ledger re-derives every graph and manifest witness, records the
-//! separate host admission receipt, and seals its exact tape prefix. This
-//! module returns recovery evidence only: it deliberately has no action,
-//! worker, lease, capability, candidate, or promotion surface.
+//! The caller names only a run and the canonical digest of an already-signed
+//! V5 source dispatch. The protected ledger resolves exactly one source event,
+//! re-derives every graph and manifest witness, records the separate host
+//! admission receipt, and seals its exact tape prefix. This module returns
+//! recovery evidence only: it deliberately has no action, worker, lease,
+//! capability, candidate, or promotion surface.
 
 #[cfg(target_os = "linux")]
 use crate::confinement::{
@@ -28,10 +29,10 @@ use uuid::Uuid;
 /// The entire caller-controlled request surface for the V5 admission
 /// composition. The source envelope, manifests, signer identities, and all
 /// authority facts remain in protected startup dependencies or signed tape.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct V5DispatchAdmissionRequest {
     pub(crate) run_id: RunId,
-    pub(crate) source_dispatch_event_id: EventId,
+    pub(crate) v5_envelope_digest: String,
 }
 
 /// Closed local failures for the private authenticated V5 admission ingress.
@@ -57,7 +58,7 @@ pub(crate) enum V5DispatchAdmissionHandlerError {
 struct V5DispatchAdmissionWire {
     request_id: String,
     run_id: String,
-    source_dispatch_event_id: String,
+    v5_envelope_digest: String,
 }
 
 /// Parse the only caller-controlled V5 admission identity request.
@@ -72,12 +73,21 @@ pub(crate) fn parse_v5_dispatch_admission_request(
         .map_err(|_| V5DispatchAdmissionHandlerError::RequestRejected)?;
     let _request_id = parse_canonical_uuid(wire.request_id)?;
     let run_id = RunId::from_uuid(parse_canonical_uuid(wire.run_id)?);
-    let source_dispatch_event_id =
-        EventId::from_uuid(parse_canonical_uuid(wire.source_dispatch_event_id)?);
+    if !is_canonical_sha256_digest(&wire.v5_envelope_digest) {
+        return Err(V5DispatchAdmissionHandlerError::RequestRejected);
+    }
     Ok(V5DispatchAdmissionRequest {
         run_id,
-        source_dispatch_event_id,
+        v5_envelope_digest: wire.v5_envelope_digest,
     })
+}
+
+fn is_canonical_sha256_digest(value: &str) -> bool {
+    value.len() == 71
+        && value.starts_with("sha256:")
+        && value.as_bytes()[7..]
+            .iter()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }
 
 /// Require the canonical lowercase hyphenated representation before converting
@@ -182,10 +192,20 @@ impl<'a> LedgerV5DispatchAdmissionBackend<'a> {
         &self,
         request: V5DispatchAdmissionRequest,
     ) -> BrokerV5DispatchAdmissionDisposition {
+        let source_dispatch_event_id = match self
+            .store
+            .resolve_unique_governed_dispatch_v5_source_by_digest_v1(
+                request.run_id,
+                &request.v5_envelope_digest,
+                self.authority,
+            ) {
+            Ok(event_id) => event_id,
+            Err(_) => return BrokerV5DispatchAdmissionDisposition::ReconciliationRequired,
+        };
         let recorded = match self.store.record_governed_dispatch_v5_admission_v1(
             &GovernedDispatchV5AdmissionRequestV1 {
                 run_id: request.run_id,
-                dispatch_event_id: request.source_dispatch_event_id,
+                dispatch_event_id: source_dispatch_event_id,
             },
             self.authority,
             self.admission_signing_key,
@@ -194,7 +214,11 @@ impl<'a> LedgerV5DispatchAdmissionBackend<'a> {
             Ok(recorded) => recorded,
             Err(_) => return BrokerV5DispatchAdmissionDisposition::ReconciliationRequired,
         };
-        let recorded = match RecordedV5AdmissionFacts::from_recorded(recorded, &request) {
+        let recorded = match RecordedV5AdmissionFacts::from_recorded(
+            recorded,
+            &request,
+            source_dispatch_event_id,
+        ) {
             Some(recorded) => recorded,
             None => return BrokerV5DispatchAdmissionDisposition::ReconciliationRequired,
         };
@@ -237,7 +261,7 @@ impl<'a> LedgerV5DispatchAdmissionBackend<'a> {
             }
         };
 
-        if !recorded.matches_sealed(&sealed, &request) {
+        if !recorded.matches_sealed(&sealed, &request, source_dispatch_event_id) {
             return BrokerV5DispatchAdmissionDisposition::ReconciliationRequired;
         }
         BrokerV5DispatchAdmissionDisposition::Sealed(sealed)
@@ -324,6 +348,7 @@ impl RecordedV5AdmissionFacts {
     fn from_recorded(
         disposition: GovernedDispatchV5AdmissionDispositionV1,
         request: &V5DispatchAdmissionRequest,
+        expected_source_dispatch_event_id: EventId,
     ) -> Option<Self> {
         let (
             source_dispatch_event_id,
@@ -366,7 +391,8 @@ impl RecordedV5AdmissionFacts {
                 idempotency_key,
             ),
         };
-        if source_dispatch_event_id != request.source_dispatch_event_id
+        if source_dispatch_event_id != expected_source_dispatch_event_id
+            || v5_envelope_digest != request.v5_envelope_digest
             || admission_event_id == source_dispatch_event_id
         {
             return None;
@@ -387,9 +413,11 @@ impl RecordedV5AdmissionFacts {
         &self,
         sealed: &SealedV5DispatchAdmissionEvidence,
         request: &V5DispatchAdmissionRequest,
+        source_dispatch_event_id: EventId,
     ) -> bool {
         sealed.run_id == request.run_id
-            && sealed.source_dispatch_event_id == request.source_dispatch_event_id
+            && sealed.v5_envelope_digest == request.v5_envelope_digest
+            && sealed.source_dispatch_event_id == source_dispatch_event_id
             && sealed.source_dispatch_event_id == self.source_dispatch_event_id
             && sealed.source_dispatch_event_digest == self.source_dispatch_event_digest
             && sealed.admission_event_id == self.admission_event_id
@@ -401,5 +429,43 @@ impl RecordedV5AdmissionFacts {
             && sealed.idempotency_key == self.idempotency_key
             && sealed.checkpoint_event_id != sealed.source_dispatch_event_id
             && sealed.checkpoint_event_id != sealed.admission_event_id
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recorded_facts_reject_a_source_event_id_substituted_after_digest_resolution() {
+        let run_id = RunId::new();
+        let expected_source_dispatch_event_id = EventId::new();
+        let substituted_source_dispatch_event_id = EventId::new();
+        let request = V5DispatchAdmissionRequest {
+            run_id,
+            v5_envelope_digest:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+        };
+        let disposition = GovernedDispatchV5AdmissionDispositionV1::AwaitingCheckpoint {
+            source_dispatch_event_id: substituted_source_dispatch_event_id,
+            source_dispatch_event_digest:
+                "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            admission_event_id: EventId::new(),
+            admission_event_digest:
+                "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".into(),
+            v5_envelope_digest: request.v5_envelope_digest.clone(),
+            witness_evidence_digest:
+                "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd".into(),
+            semantic_identity_digest:
+                "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".into(),
+            idempotency_key: "dispatch:v5:test".into(),
+        };
+
+        assert!(RecordedV5AdmissionFacts::from_recorded(
+            disposition,
+            &request,
+            expected_source_dispatch_event_id,
+        )
+        .is_none());
     }
 }
