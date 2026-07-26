@@ -200,9 +200,9 @@ fn provider_request_is_reconstructed_only_from_exact_verified_evidence() {
         "preflight-lease".into(),
         token_count_request.provider,
         token_count_request.request.clone(),
+        verified_preflight.clone(),
     );
-    let mut preflight_writer =
-        CasProviderTokenPreflightEvidenceWriterV1::new(&cas, &verified_preflight);
+    let mut preflight_writer = CasProviderTokenPreflightEvidenceWriterV1::new(&cas);
     let persisted_preflight = preflight_writer
         .succeeded(&preflight_capability, 321)
         .expect("persist provider preflight result");

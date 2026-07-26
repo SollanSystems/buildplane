@@ -36,6 +36,7 @@ pub(crate) struct PrivateProviderTokenPreflightCapabilityV1 {
     lease_id: String,
     provider: ModelProviderV1,
     request: ProviderTokenCountRequestV1,
+    preflight_input: VerifiedProviderTokenPreflightInputV1,
 }
 
 impl PrivateProviderTokenPreflightCapabilityV1 {
@@ -44,12 +45,14 @@ impl PrivateProviderTokenPreflightCapabilityV1 {
         lease_id: String,
         provider: ModelProviderV1,
         request: ProviderTokenCountRequestV1,
+        preflight_input: VerifiedProviderTokenPreflightInputV1,
     ) -> Self {
         Self {
             run_id,
             lease_id,
             provider,
             request,
+            preflight_input,
         }
     }
 
@@ -59,6 +62,10 @@ impl PrivateProviderTokenPreflightCapabilityV1 {
 
     pub(crate) fn request(&self) -> &ProviderTokenCountRequestV1 {
         &self.request
+    }
+
+    pub(crate) fn preflight_input(&self) -> &VerifiedProviderTokenPreflightInputV1 {
+        &self.preflight_input
     }
 
     pub(crate) fn complete(
@@ -78,6 +85,7 @@ pub(crate) enum ProviderTokenPreflightGrantV1 {
         lease_id: String,
         provider: ModelProviderV1,
         request: ProviderTokenCountRequestV1,
+        preflight_input: VerifiedProviderTokenPreflightInputV1,
     },
     Pending {
         run_id: String,
@@ -166,16 +174,15 @@ struct ProviderTokenPreflightUnknownEvidenceV1 {
 
 pub(crate) struct CasProviderTokenPreflightEvidenceWriterV1<'a> {
     cas: &'a Cas,
-    preflight: &'a VerifiedProviderTokenPreflightInputV1,
 }
 
 impl<'a> CasProviderTokenPreflightEvidenceWriterV1<'a> {
-    pub(crate) fn new(cas: &'a Cas, preflight: &'a VerifiedProviderTokenPreflightInputV1) -> Self {
-        Self { cas, preflight }
+    pub(crate) fn new(cas: &'a Cas) -> Self {
+        Self { cas }
     }
 
     fn matches(&self, capability: &PrivateProviderTokenPreflightCapabilityV1) -> bool {
-        let input = self.preflight.document();
+        let input = capability.preflight_input.document();
         capability.request.model == input.model
             && capability.request.max_total_tokens == input.max_total_tokens
             && match capability.provider {
@@ -194,7 +201,8 @@ impl ProviderTokenPreflightEvidenceWriterV1 for CasProviderTokenPreflightEvidenc
         if !self.matches(capability) {
             return None;
         }
-        let result = ProviderTokenPreflightResultV1::new(self.preflight, input_tokens).ok()?;
+        let result =
+            ProviderTokenPreflightResultV1::new(&capability.preflight_input, input_tokens).ok()?;
         let bytes = provider_token_preflight_result_v1_bytes(&result).ok()?;
         let reference = self.cas.put_canonical_bytes(&bytes).ok()?;
         Some(ProviderTokenPreflightGatewayCompletionV1::succeeded(
@@ -217,8 +225,12 @@ impl ProviderTokenPreflightEvidenceWriterV1 for CasProviderTokenPreflightEvidenc
             schema_version: 1,
             outcome: "unknown",
             provider_request_id: capability.request.request_id.clone(),
-            preflight_input_digest: self.preflight.reference().digest().into(),
-            model_request_digest: self.preflight.document().model_request_digest.clone(),
+            preflight_input_digest: capability.preflight_input.reference().digest().into(),
+            model_request_digest: capability
+                .preflight_input
+                .document()
+                .model_request_digest
+                .clone(),
             failure_class: "provider_effect_unknown",
         };
         let bytes = serde_json::to_vec(&evidence).ok()?;
@@ -439,15 +451,17 @@ impl ProviderTokenPreflightBackendV1 for LedgerProviderTokenPreflightBackendV1<'
                 self.action_signer,
             )
             .map_err(|_| ProviderTokenPreflightAuthorityErrorV1::DurableAuthority)?;
-        let action_request_event_id = match issued {
+        let (action_request_event_id, preflight_input) = match issued {
             ProviderTokenPreflightActionIssueDispositionV1::Issued {
                 action_request_event_id,
+                verified_input,
                 ..
             }
             | ProviderTokenPreflightActionIssueDispositionV1::Existing {
                 action_request_event_id,
+                verified_input,
                 ..
-            } => action_request_event_id,
+            } => (action_request_event_id, verified_input),
         };
         let claim = self
             .store
@@ -472,6 +486,7 @@ impl ProviderTokenPreflightBackendV1 for LedgerProviderTokenPreflightBackendV1<'
                     lease_id,
                     provider: self.provider,
                     request: self.request.clone(),
+                    preflight_input,
                 }
             }
             ActivityClaimDispositionV1::Pending { .. } => ProviderTokenPreflightGrantV1::Pending {
@@ -575,9 +590,14 @@ where
                 lease_id,
                 provider,
                 request,
-            } if run_id == self.run_id => {
-                PrivateProviderTokenPreflightCapabilityV1::new(run_id, lease_id, provider, request)
-            }
+                preflight_input,
+            } if run_id == self.run_id => PrivateProviderTokenPreflightCapabilityV1::new(
+                run_id,
+                lease_id,
+                provider,
+                request,
+                preflight_input,
+            ),
             ProviderTokenPreflightGrantV1::Pending { run_id } if run_id == self.run_id => {
                 return Ok(ProviderTokenPreflightStatusV1::Pending);
             }

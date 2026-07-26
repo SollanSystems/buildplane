@@ -620,11 +620,13 @@ pub enum ProviderTokenPreflightActionIssueDispositionV1 {
         action_request_event_id: EventId,
         canonical_input_ref: String,
         canonical_input_digest: String,
+        verified_input: VerifiedProviderTokenPreflightInputV1,
     },
     Existing {
         action_request_event_id: EventId,
         canonical_input_ref: String,
         canonical_input_digest: String,
+        verified_input: VerifiedProviderTokenPreflightInputV1,
     },
 }
 
@@ -3320,6 +3322,12 @@ impl SqliteStore {
         )?;
         let input_bytes = provider_token_preflight_input_v1_bytes(&preflight_input)?;
         let input_ref = cas.put_canonical_bytes(&input_bytes)?;
+        let verified_input = parse_verified_provider_token_preflight_input_v1(
+            &input_bytes,
+            &input_ref.to_cas_ref(),
+            input_ref.digest(),
+            &model_request,
+        )?;
 
         let model_action_event = load_verified_authority_event(
             &tx,
@@ -3394,6 +3402,7 @@ impl SqliteStore {
                 action_request_event_id: event.id,
                 canonical_input_ref: action.canonical_input_ref,
                 canonical_input_digest: action.canonical_input_digest,
+                verified_input,
             });
         }
 
@@ -3416,6 +3425,7 @@ impl SqliteStore {
             action_request_event_id: event.id,
             canonical_input_ref: preflight_action.canonical_input_ref,
             canonical_input_digest: preflight_action.canonical_input_digest,
+            verified_input,
         })
     }
 

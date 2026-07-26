@@ -1034,19 +1034,25 @@ fn native_model_authority_commits_the_v2_authorization_and_one_lease_together() 
             now + Duration::milliseconds(1),
         )
         .expect("issue signed provider token preflight action");
-    let (preflight_action_event_id, preflight_input_ref, preflight_input_digest) =
-        match issued_preflight {
-            ProviderTokenPreflightActionIssueDispositionV1::Issued {
-                action_request_event_id,
-                canonical_input_ref,
-                canonical_input_digest,
-            } => (
-                action_request_event_id,
-                canonical_input_ref,
-                canonical_input_digest,
-            ),
-            other => panic!("first preflight issuance must append, got {other:?}"),
-        };
+    let (
+        preflight_action_event_id,
+        preflight_input_ref,
+        preflight_input_digest,
+        issued_verified_preflight_input,
+    ) = match issued_preflight {
+        ProviderTokenPreflightActionIssueDispositionV1::Issued {
+            action_request_event_id,
+            canonical_input_ref,
+            canonical_input_digest,
+            verified_input,
+        } => (
+            action_request_event_id,
+            canonical_input_ref,
+            canonical_input_digest,
+            verified_input,
+        ),
+        other => panic!("first preflight issuance must append, got {other:?}"),
+    };
     let replayed_preflight = store
         .issue_provider_token_preflight_action_v1_at_for_tests(
             &preflight_issue_request,
@@ -1074,6 +1080,10 @@ fn native_model_authority_commits_the_v2_authorization_and_one_lease_together() 
         &verified_model_request,
     )
     .expect("verified preflight input");
+    assert_eq!(
+        issued_verified_preflight_input, verified_preflight_input,
+        "issuance must return the exact verified CAS input"
+    );
     let preflight_action_id = format!("{}:provider-token-preflight", request.action_id);
     let preflight_claim = store
         .claim_activity_v1_at_for_tests(

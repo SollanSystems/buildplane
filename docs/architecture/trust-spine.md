@@ -725,7 +725,12 @@ issuance, idempotent preflight action issuance, bounded generic claim,
 recorded-result verification, and terminal result recording using separate
 configured action-request and claim signing keys. Startup validates the exact
 provider, role, action identity, request identity, and lease bounds before
-constructing it. Wiring this backend, the verified preflight input, and the
+constructing it. The issuance transaction now returns the same strictly
+verified preflight-input object whose canonical bytes it stored in CAS; that
+object travels only inside the opaque one-use provider capability. The CAS
+evidence writer derives success or unknown evidence from that capability
+rather than from a separately injected input, preventing result evidence from
+being rebound to another CAS object. Wiring this backend and the
 provider counter into the protected governed-session host remains the final
 preflight composition step. The governed-session startup now retains that
 composition as an opaque provider lane only after both the model-action
