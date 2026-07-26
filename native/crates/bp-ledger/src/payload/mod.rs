@@ -7,6 +7,7 @@ pub mod capability_broker;
 pub mod checkpoint;
 pub mod command_evidence;
 pub mod git_checkpoint;
+pub mod governed_packet;
 pub mod model_evidence;
 pub mod model_io;
 pub mod operator_decision;
