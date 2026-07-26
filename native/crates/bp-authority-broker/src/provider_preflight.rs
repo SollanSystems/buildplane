@@ -4,8 +4,21 @@ use bp_ledger::payload::model_evidence::{
     provider_token_preflight_result_v1_bytes, ModelProviderV1, ProviderTokenPreflightResultV1,
     VerifiedProviderTokenPreflightInputV1,
 };
+use bp_ledger::payload::trust_spine::ExecutionRoleV1;
+use bp_ledger::signing::ActorKeyRef;
+use bp_ledger::storage::sqlite::{
+    ActivityClaimAuthorityV1, ActivityClaimDispositionV1, ActivityClaimRequestV1,
+    ActivityResultDispositionV1, ActivityResultRequestV1, ModelActionIntentIssueRequestV1,
+    ProviderTokenPreflightActionIssueDispositionV1, ProviderTokenPreflightActionIssueRequestV1,
+    ProviderTokenPreflightForModelActionRequestV1, SqliteStore, MAX_ACTIVITY_LEASE_MS,
+    MIN_ACTIVITY_LEASE_MS,
+};
 use bp_ledger::storage::Cas;
-use bp_provider_sdk::{ProviderTokenCountRequestV1, ProviderTokenCounterV1};
+use bp_ledger::{EventId, RunId};
+use bp_provider_sdk::{
+    ProviderExecutionRoleV1, ProviderTokenCountRequestV1, ProviderTokenCounterV1,
+};
+use ed25519_dalek::SigningKey;
 use serde::Serialize;
 use thiserror::Error;
 
@@ -303,6 +316,229 @@ pub(crate) trait ProviderTokenPreflightBackendV1 {
         lease_id: String,
         completion: ProviderTokenPreflightGatewayCompletionV1,
     ) -> Result<ActivityResultOutcomeV1, ProviderTokenPreflightAuthorityErrorV1>;
+}
+
+pub(crate) struct LedgerProviderTokenPreflightBackendV1<'a> {
+    run_id: RunId,
+    dispatch_event_id: EventId,
+    model_action_request_event_id: EventId,
+    preflight_action_id: String,
+    execution_role: ExecutionRoleV1,
+    lease_duration_ms: u64,
+    provider: ModelProviderV1,
+    request: ProviderTokenCountRequestV1,
+    store: &'a SqliteStore,
+    cas: &'a Cas,
+    authority: &'a ActivityClaimAuthorityV1,
+    action_signing_key: &'a SigningKey,
+    action_signer: &'a ActorKeyRef,
+    claim_signing_key: &'a SigningKey,
+    claim_signer: &'a ActorKeyRef,
+}
+
+impl<'a> LedgerProviderTokenPreflightBackendV1<'a> {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn from_prevalidated_startup(
+        run_id: RunId,
+        dispatch_event_id: EventId,
+        model_action_request_event_id: EventId,
+        preflight_action_id: String,
+        execution_role: ExecutionRoleV1,
+        lease_duration_ms: u64,
+        provider: ModelProviderV1,
+        request: ProviderTokenCountRequestV1,
+        store: &'a SqliteStore,
+        cas: &'a Cas,
+        authority: &'a ActivityClaimAuthorityV1,
+        action_signing_key: &'a SigningKey,
+        action_signer: &'a ActorKeyRef,
+        claim_signing_key: &'a SigningKey,
+        claim_signer: &'a ActorKeyRef,
+    ) -> Result<Self, ProviderTokenPreflightAuthorityErrorV1> {
+        request
+            .validate()
+            .map_err(|_| ProviderTokenPreflightAuthorityErrorV1::DurableAuthority)?;
+        let provider_name = match provider {
+            ModelProviderV1::Anthropic => "anthropic",
+            ModelProviderV1::Openai => "openai",
+        };
+        let role_matches = matches!(
+            (execution_role, request.execution_role),
+            (
+                ExecutionRoleV1::Implementer,
+                ProviderExecutionRoleV1::Implementer
+            ) | (ExecutionRoleV1::Reviewer, ProviderExecutionRoleV1::Reviewer)
+                | (
+                    ExecutionRoleV1::Adversary,
+                    ProviderExecutionRoleV1::Adversary
+                )
+                | (ExecutionRoleV1::Judge, ProviderExecutionRoleV1::Judge)
+        );
+        if preflight_action_id.trim().is_empty()
+            || !preflight_action_id.ends_with(":provider-token-preflight")
+            || request.request_id != format!("{provider_name}:{preflight_action_id}")
+            || !role_matches
+            || !(MIN_ACTIVITY_LEASE_MS..=MAX_ACTIVITY_LEASE_MS).contains(&lease_duration_ms)
+        {
+            return Err(ProviderTokenPreflightAuthorityErrorV1::DurableAuthority);
+        }
+        Ok(Self {
+            run_id,
+            dispatch_event_id,
+            model_action_request_event_id,
+            preflight_action_id,
+            execution_role,
+            lease_duration_ms,
+            provider,
+            request,
+            store,
+            cas,
+            authority,
+            action_signing_key,
+            action_signer,
+            claim_signing_key,
+            claim_signer,
+        })
+    }
+}
+
+impl ProviderTokenPreflightBackendV1 for LedgerProviderTokenPreflightBackendV1<'_> {
+    fn issue_and_claim(
+        &mut self,
+        run_id: &str,
+    ) -> Result<ProviderTokenPreflightGrantV1, ProviderTokenPreflightAuthorityErrorV1> {
+        if run_id != self.run_id.to_string() {
+            return Err(ProviderTokenPreflightAuthorityErrorV1::DurableAuthority);
+        }
+        if self.execution_role == ExecutionRoleV1::Implementer {
+            self.store
+                .issue_model_action_intent_v1(
+                    &ModelActionIntentIssueRequestV1 {
+                        run_id: self.run_id,
+                        dispatch_event_id: self.dispatch_event_id,
+                        action_request_event_id: self.model_action_request_event_id,
+                    },
+                    self.cas,
+                    self.authority,
+                    self.claim_signing_key,
+                    self.claim_signer,
+                )
+                .map_err(|_| ProviderTokenPreflightAuthorityErrorV1::DurableAuthority)?;
+        }
+        let issued = self
+            .store
+            .issue_provider_token_preflight_action_v1(
+                &ProviderTokenPreflightActionIssueRequestV1 {
+                    run_id: self.run_id,
+                    dispatch_event_id: self.dispatch_event_id,
+                    model_action_request_event_id: self.model_action_request_event_id,
+                },
+                self.cas,
+                self.authority,
+                self.action_signing_key,
+                self.action_signer,
+            )
+            .map_err(|_| ProviderTokenPreflightAuthorityErrorV1::DurableAuthority)?;
+        let action_request_event_id = match issued {
+            ProviderTokenPreflightActionIssueDispositionV1::Issued {
+                action_request_event_id,
+                ..
+            }
+            | ProviderTokenPreflightActionIssueDispositionV1::Existing {
+                action_request_event_id,
+                ..
+            } => action_request_event_id,
+        };
+        let claim = self
+            .store
+            .claim_activity_v1(
+                &ActivityClaimRequestV1 {
+                    run_id: self.run_id,
+                    activity_id: self.preflight_action_id.clone(),
+                    idempotency_key: self.preflight_action_id.clone(),
+                    dispatch_event_id: self.dispatch_event_id,
+                    action_request_event_id,
+                    lease_duration_ms: self.lease_duration_ms,
+                },
+                self.authority,
+                self.claim_signing_key,
+                self.claim_signer,
+            )
+            .map_err(|_| ProviderTokenPreflightAuthorityErrorV1::DurableAuthority)?;
+        Ok(match claim {
+            ActivityClaimDispositionV1::Granted { lease_id, .. } => {
+                ProviderTokenPreflightGrantV1::Granted {
+                    run_id: run_id.into(),
+                    lease_id,
+                    provider: self.provider,
+                    request: self.request.clone(),
+                }
+            }
+            ActivityClaimDispositionV1::Pending { .. } => ProviderTokenPreflightGrantV1::Pending {
+                run_id: run_id.into(),
+            },
+            ActivityClaimDispositionV1::Recorded { outcome, .. } => {
+                if outcome == ActivityResultOutcomeV1::Succeeded {
+                    self.store
+                        .verify_recorded_provider_token_preflight_for_model_action_v1(
+                            &ProviderTokenPreflightForModelActionRequestV1 {
+                                run_id: self.run_id,
+                                dispatch_event_id: self.dispatch_event_id,
+                                model_action_request_event_id: self.model_action_request_event_id,
+                            },
+                            self.cas,
+                            self.authority,
+                        )
+                        .map_err(|_| ProviderTokenPreflightAuthorityErrorV1::DurableAuthority)?;
+                }
+                ProviderTokenPreflightGrantV1::Recorded {
+                    run_id: run_id.into(),
+                    outcome,
+                }
+            }
+            ActivityClaimDispositionV1::LeaseExpired { .. } => {
+                ProviderTokenPreflightGrantV1::LeaseExpired {
+                    run_id: run_id.into(),
+                }
+            }
+        })
+    }
+
+    fn record(
+        &mut self,
+        run_id: &str,
+        lease_id: String,
+        completion: ProviderTokenPreflightGatewayCompletionV1,
+    ) -> Result<ActivityResultOutcomeV1, ProviderTokenPreflightAuthorityErrorV1> {
+        if run_id != self.run_id.to_string() || !completion.is_closed() {
+            return Err(ProviderTokenPreflightAuthorityErrorV1::DurableAuthority);
+        }
+        match self
+            .store
+            .record_activity_result_v1(
+                &ActivityResultRequestV1 {
+                    run_id: self.run_id,
+                    activity_id: self.preflight_action_id.clone(),
+                    idempotency_key: self.preflight_action_id.clone(),
+                    lease_id,
+                    outcome: completion.outcome,
+                    result_digest: completion.result_digest,
+                    result_ref: completion.result_ref,
+                    evidence_digest: completion.evidence_digest,
+                    evidence_ref: completion.evidence_ref,
+                },
+                self.authority,
+                self.claim_signing_key,
+                self.claim_signer,
+            )
+            .map_err(|_| ProviderTokenPreflightAuthorityErrorV1::DurableAuthority)?
+        {
+            ActivityResultDispositionV1::Recorded { outcome, .. } => Ok(outcome),
+            ActivityResultDispositionV1::LeaseExpired { .. } => {
+                Err(ProviderTokenPreflightAuthorityErrorV1::DurableAuthority)
+            }
+        }
+    }
 }
 
 #[derive(Debug, Error)]

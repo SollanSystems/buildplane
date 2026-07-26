@@ -722,8 +722,14 @@ successful count becomes the strict `ProviderTokenPreflightResultV1` bytes
 bound to the verified input, while provider uncertainty becomes a separate
 closed evidence object bound to the provider request, preflight digest, and
 model-request digest. CAS failure returns no recordable completion. The
-ledger backend that supplies the verified input and records the terminal
-activity remains the final preflight binding.
+ledger backend now owns the remaining durable transitions: implementer intent
+issuance, idempotent preflight action issuance, bounded generic claim,
+recorded-result verification, and terminal result recording using separate
+configured action-request and claim signing keys. Startup validates the exact
+provider, role, action identity, request identity, and lease bounds before
+constructing it. Wiring this backend, the verified preflight input, and the
+provider counter into the protected governed-session host remains the final
+preflight composition step.
 
 Those counts are persisted in the signed action receipt and replayed as one
 checked aggregate for the sealed V3 dispatch attempt. A metered failed call
