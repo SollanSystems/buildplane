@@ -600,14 +600,15 @@ exact gateway request, then derives the evidence digest and CAS reference from
 those values plus its redactions. A syntactically valid record for a different
 request blocks before either the write-ahead action record or provider gateway.
 The native provider SDK now exposes the corresponding closed V1 transport
-contract instead of the former prompt/text pair. Requests bind the execution
-role, response-schema digest, candidate digest for review-like roles, absolute
-deadline, separate input/output token ceilings, and typed tool schema digests;
-responses require a structured output, metered token counts, request identity,
-and a closed stop reason. Unknown fields and role/candidate mismatches fail
-before an adapter can perform transport. The OpenAI and Anthropic crates remain
-fail-closed stubs until their host-credential transports implement this
-contract.
+contract instead of the former prompt/text pair. Requests carry the actual
+closed response and tool-input JSON schemas as well as domain-separated
+digests recomputed from their canonical bytes. They also bind the execution
+role, candidate digest for review-like roles, absolute deadline, and separate
+input/output token ceilings; responses require a structured output, metered
+token counts, request identity, and a closed stop reason. Unknown fields,
+role/candidate mismatches, and substituted schemas fail before an adapter can
+perform transport. The OpenAI and Anthropic crates remain fail-closed stubs
+until their host-credential transports implement this contract.
 
 The provider worker seals only a content-addressed `ModelResultEvidenceV1`.
 Its implementer result digest is recomputed from the closed completion, and

@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -17,6 +18,7 @@ pub enum ProviderExecutionRoleV1 {
 pub struct ProviderToolDefinitionV1 {
     pub name: String,
     pub input_schema_digest: String,
+    pub input_schema: Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -30,6 +32,7 @@ pub struct ProviderRequest {
     pub prompt: String,
     pub response_schema_name: String,
     pub response_schema_digest: String,
+    pub response_schema: Value,
     pub candidate_digest: Option<String>,
     pub max_input_tokens: u32,
     pub max_output_tokens: u32,
@@ -56,9 +59,11 @@ impl ProviderRequest {
                 )));
             }
         }
-        if !is_sha256_digest(&self.response_schema_digest) {
+        if !is_sha256_digest(&self.response_schema_digest)
+            || provider_json_schema_digest_v1(&self.response_schema)? != self.response_schema_digest
+        {
             return Err(ProviderError::InvalidContract(
-                "response_schema_digest must be a canonical sha256 digest".into(),
+                "response_schema_digest must match the canonical response schema".into(),
             ));
         }
         if self.max_input_tokens == 0 || self.max_output_tokens == 0 || self.deadline_unix_ms <= 0 {
@@ -90,9 +95,11 @@ impl ProviderRequest {
             if tool.name.trim().is_empty()
                 || tool.name != tool.name.trim()
                 || !is_sha256_digest(&tool.input_schema_digest)
+                || provider_json_schema_digest_v1(&tool.input_schema)? != tool.input_schema_digest
             {
                 return Err(ProviderError::InvalidContract(
-                    "provider tool definitions must have canonical names and schema digests".into(),
+                    "provider tool definitions must have canonical names and matching schema digests"
+                        .into(),
                 ));
             }
         }
@@ -172,12 +179,41 @@ fn is_sha256_digest(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
+pub fn provider_json_schema_digest_v1(schema: &Value) -> Result<String, ProviderError> {
+    if !schema.is_object() {
+        return Err(ProviderError::InvalidContract(
+            "provider JSON schemas must be objects".into(),
+        ));
+    }
+    let canonical = serde_json::to_vec(schema).map_err(|error| {
+        ProviderError::InvalidContract(format!("provider JSON schema is not serializable: {error}"))
+    })?;
+    let mut digest = Sha256::new();
+    digest.update(b"buildplane.provider-json-schema.v1\0");
+    digest.update(canonical);
+    Ok(format!("sha256:{:x}", digest.finalize()))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ProviderExecutionRoleV1, ProviderRequest, ProviderResponse, ProviderStopReasonV1};
+    use super::{
+        provider_json_schema_digest_v1, ProviderExecutionRoleV1, ProviderRequest, ProviderResponse,
+        ProviderStopReasonV1,
+    };
     use serde_json::json;
 
     fn request_json() -> serde_json::Value {
+        let response_schema = json!({
+            "type": "object",
+            "properties": {
+                "decision": {
+                    "type": "string",
+                    "enum": ["approve", "request_changes", "reject", "abstain"]
+                }
+            },
+            "required": ["decision"],
+            "additionalProperties": false
+        });
         json!({
             "schema_version": 1,
             "request_id": "provider:reviewer:1",
@@ -186,7 +222,9 @@ mod tests {
             "system_prompt": "Review only the immutable candidate.",
             "prompt": "Return the closed review verdict.",
             "response_schema_name": "review_verdict_v1",
-            "response_schema_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "response_schema_digest": provider_json_schema_digest_v1(&response_schema)
+                .expect("canonical response schema"),
+            "response_schema": response_schema,
             "candidate_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
             "max_input_tokens": 12000,
             "max_output_tokens": 2000,
@@ -211,6 +249,36 @@ mod tests {
         let request: ProviderRequest =
             serde_json::from_value(missing_candidate).expect("closed shape");
         assert!(request.validate().is_err());
+
+        let request: ProviderRequest =
+            serde_json::from_value(request_json()).expect("closed provider request");
+        let mut substituted_schema = request.clone();
+        substituted_schema.response_schema["required"] = json!([]);
+        assert!(substituted_schema.validate().is_err());
+    }
+
+    #[test]
+    fn provider_tool_schema_is_bound_to_its_digest() {
+        let mut raw = request_json();
+        let input_schema = json!({
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "required": ["path"],
+            "additionalProperties": false
+        });
+        raw["tools"] = json!([{
+            "name": "read_candidate_file",
+            "input_schema_digest": provider_json_schema_digest_v1(&input_schema)
+                .expect("canonical input schema"),
+            "input_schema": input_schema
+        }]);
+        let request: ProviderRequest =
+            serde_json::from_value(raw).expect("closed provider request");
+        request.validate().expect("valid tool schema binding");
+
+        let mut substituted_schema = request;
+        substituted_schema.tools[0].input_schema["required"] = json!([]);
+        assert!(substituted_schema.validate().is_err());
     }
 
     #[test]
