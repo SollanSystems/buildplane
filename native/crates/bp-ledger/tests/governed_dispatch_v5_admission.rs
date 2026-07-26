@@ -13,7 +13,7 @@ use bp_ledger::kind::EventKind;
 use bp_ledger::payload::activity_claim::ActivityResultOutcomeV1;
 use bp_ledger::payload::governed_packet::GovernedCommandPacketV1;
 use bp_ledger::payload::trust_spine::{
-    action_receipt_recorded_v2_digest, action_receipt_set_v1_digest, action_requested_v2_digest,
+    action_receipt_recorded_v2_digest, action_requested_v2_digest,
     attempt_context_content_v1_digest, context_manifest_content_v1_digest,
     dispatch_envelope_v3_body_digest, dispatch_envelope_v4_digest, dispatch_envelope_v5_digest,
     governed_dispatch_policy_digest_v1, sandbox_profile_content_v1_digest,
@@ -34,8 +34,10 @@ use bp_ledger::storage::sqlite::{
     GovernedCommandActionIssueDispositionV1, GovernedCommandActionResultRequestV1,
     GovernedDispatchV5AdmissionAuthorityV1, GovernedDispatchV5AdmissionDispositionV1,
     GovernedDispatchV5AdmissionRequestV1, GovernedDispatchV5AdmissionSealRequestV1,
+    GovernedV5CandidateFinalizeActionIssueDispositionV1,
+    GovernedV5CandidateFinalizeActionIssueRequestV1,
     GovernedV5CommandActionAuthorizeAndClaimRequestV1, GovernedV5CommandActionIssueRequestV1,
-    GovernedV5CommandActionReceiptSetDispositionV1, GovernedV5CommandActionReceiptSetRequestV1,
+    GovernedV5CommandActionReceiptDispositionV1, GovernedV5CommandActionReceiptRequestV1,
     ResolveGovernedV5CandidateAuthorityRequestV1, SqliteStore,
 };
 use bp_ledger::storage::Cas;
@@ -1109,14 +1111,14 @@ fn v5_command_issuance_requires_a_checkpoint_sealed_admission() {
         ActivityResultDispositionV1::Recorded { .. }
     ));
     assert_eq!(store.event_count().expect("count resulted V5 tape"), 10);
-    let receipt_request = GovernedV5CommandActionReceiptSetRequestV1 {
+    let receipt_request = GovernedV5CommandActionReceiptRequestV1 {
         run_id: fixture.run_id,
         action_request_event_id,
     };
     let wrong_receipt_key = SigningKey::from_bytes(&[80u8; 32]);
     let wrong_receipt_signer = actor("kernel:v5-receipt", "receipt-1", &wrong_receipt_key);
     assert!(matches!(
-        store.seal_succeeded_governed_v5_command_action_receipt_set_v1(
+        store.record_succeeded_governed_v5_command_action_receipt_v1(
             &receipt_request,
             &cas,
             &v5_authority,
@@ -1133,8 +1135,8 @@ fn v5_command_issuance_requires_a_checkpoint_sealed_admission() {
         10,
         "a substituted receipt signer must not append evidence"
     );
-    let sealed_receipts = store
-        .seal_succeeded_governed_v5_command_action_receipt_set_v1(
+    let recorded_receipt = store
+        .record_succeeded_governed_v5_command_action_receipt_v1(
             &receipt_request,
             &cas,
             &v5_authority,
@@ -1142,36 +1144,24 @@ fn v5_command_issuance_requires_a_checkpoint_sealed_admission() {
             &receipt_key,
             &receipt_signer,
         )
-        .expect("seal succeeded command receipt set");
-    let (
-        action_receipt_event_id,
-        action_receipt_ref,
-        action_receipt_digest,
-        action_receipt_set_event_id,
-        action_receipt_set_ref,
-        action_receipt_set_digest,
-    ) = match sealed_receipts {
-        GovernedV5CommandActionReceiptSetDispositionV1::Recorded {
-            action_receipt_event_id,
-            action_receipt_ref,
-            action_receipt_digest,
-            action_receipt_set_event_id,
-            action_receipt_set_ref,
-            action_receipt_set_digest,
-        } => (
-            action_receipt_event_id,
-            action_receipt_ref,
-            action_receipt_digest,
-            action_receipt_set_event_id,
-            action_receipt_set_ref,
-            action_receipt_set_digest,
-        ),
-        other => panic!("first receipt closure must record evidence, got {other:?}"),
-    };
+        .expect("record succeeded command receipt");
+    let (action_receipt_event_id, action_receipt_ref, action_receipt_digest) =
+        match recorded_receipt {
+            GovernedV5CommandActionReceiptDispositionV1::Recorded {
+                action_receipt_event_id,
+                action_receipt_ref,
+                action_receipt_digest,
+            } => (
+                action_receipt_event_id,
+                action_receipt_ref,
+                action_receipt_digest,
+            ),
+            other => panic!("first receipt recording must append evidence, got {other:?}"),
+        };
     assert_eq!(
-        store.event_count().expect("count sealed receipt tape"),
-        12,
-        "receipt and receipt set must commit atomically"
+        store.event_count().expect("count recorded receipt tape"),
+        11,
+        "command completion must record one receipt without prematurely sealing a set"
     );
     let receipt_events = store
         .events_for_run(&fixture.run_id.to_string())
@@ -1184,28 +1174,21 @@ fn v5_command_issuance_requires_a_checkpoint_sealed_admission() {
         .find(|event| event.id == action_receipt_event_id)
         .expect("find action receipt");
     let Payload::ActionReceiptRecordedV2(receipt) = &receipt_event.payload else {
-        panic!("receipt closure must append action_receipt_recorded_v2");
+        panic!("receipt recording must append action_receipt_recorded_v2");
     };
     assert_eq!(receipt.action_receipt_ref, action_receipt_ref);
     assert_eq!(
         action_receipt_recorded_v2_digest(receipt).expect("digest action receipt"),
         action_receipt_digest
     );
-    let receipt_set_event = receipt_events
-        .iter()
-        .find(|event| event.id == action_receipt_set_event_id)
-        .expect("find action receipt set");
-    let Payload::ActionReceiptSetRecordedV1(receipt_set) = &receipt_set_event.payload else {
-        panic!("receipt closure must append action_receipt_set_recorded_v1");
-    };
-    assert_eq!(receipt_set_event.parent_event_id, Some(receipt_event.id));
-    assert_eq!(receipt_set.action_receipt_set_ref, action_receipt_set_ref);
-    assert_eq!(
-        action_receipt_set_v1_digest(receipt_set).expect("digest action receipt set"),
-        action_receipt_set_digest
+    assert!(
+        !receipt_events
+            .iter()
+            .any(|event| matches!(event.payload, Payload::ActionReceiptSetRecordedV1(_))),
+        "the set cannot close before the separately authorized Git finalization activity"
     );
     let receipt_retry = store
-        .seal_succeeded_governed_v5_command_action_receipt_set_v1(
+        .record_succeeded_governed_v5_command_action_receipt_v1(
             &receipt_request,
             &cas,
             &v5_authority,
@@ -1213,22 +1196,172 @@ fn v5_command_issuance_requires_a_checkpoint_sealed_admission() {
             &receipt_key,
             &receipt_signer,
         )
-        .expect("recover exact sealed command receipts");
+        .expect("recover exact command receipt");
     assert!(matches!(
         receipt_retry,
-        GovernedV5CommandActionReceiptSetDispositionV1::Existing {
+        GovernedV5CommandActionReceiptDispositionV1::Existing {
             action_receipt_event_id: existing_receipt,
-            action_receipt_set_event_id: existing_set,
             ..
         } if existing_receipt == action_receipt_event_id
-            && existing_set == action_receipt_set_event_id
     ));
     assert_eq!(
         store
             .event_count()
             .expect("count idempotent receipt retry tape"),
-        12,
-        "receipt closure retry must not append duplicate evidence"
+        11,
+        "receipt retry must not append duplicate evidence"
+    );
+
+    let finalize_request = GovernedV5CandidateFinalizeActionIssueRequestV1 {
+        run_id: fixture.run_id,
+        process_action_request_event_id: action_request_event_id,
+    };
+    assert!(matches!(
+        store.issue_governed_v5_candidate_finalize_action_v1(
+            &finalize_request,
+            &cas,
+            &v5_authority,
+            &activity_authority,
+            &wrong_receipt_signer,
+            &action_key,
+            &action_signer,
+        ),
+        Err(LedgerError::ActionReceiptAuthorityRejected { .. })
+    ));
+    assert_eq!(
+        store.event_count().expect("count rejected Git issuance"),
+        11,
+        "an untrusted receipt identity must not authorize Git"
+    );
+    let finalize = store
+        .issue_governed_v5_candidate_finalize_action_v1(
+            &finalize_request,
+            &cas,
+            &v5_authority,
+            &activity_authority,
+            &receipt_signer,
+            &action_key,
+            &action_signer,
+        )
+        .expect("issue candidate finalization action");
+    let (
+        finalize_action_event_id,
+        finalize_action_digest,
+        finalize_action_id,
+        finalize_idempotency_key,
+        candidate_ref,
+    ) = match finalize {
+        GovernedV5CandidateFinalizeActionIssueDispositionV1::Recorded {
+            action_request_event_id,
+            action_request_digest,
+            action_id,
+            idempotency_key,
+            candidate_ref,
+        } => (
+            action_request_event_id,
+            action_request_digest,
+            action_id,
+            idempotency_key,
+            candidate_ref,
+        ),
+        other => panic!("first Git finalization issuance must record, got {other:?}"),
+    };
+    assert_eq!(store.event_count().expect("count Git issuance"), 12);
+    let finalize_events = store
+        .events_for_run(&fixture.run_id.to_string())
+        .expect("load finalization tape")
+        .into_iter()
+        .map(|row| row.to_event().expect("decode finalization event"))
+        .collect::<Vec<_>>();
+    let finalize_event = finalize_events
+        .iter()
+        .find(|event| event.id == finalize_action_event_id)
+        .expect("find Git action");
+    assert_eq!(
+        finalize_event.parent_event_id,
+        Some(fixture.dispatch_event.id)
+    );
+    assert!(
+        action_receipt_event_id.as_uuid() < finalize_action_event_id.as_uuid(),
+        "Git intent must follow the process receipt"
+    );
+    let Payload::ActionRequestedV2(finalize_action) = &finalize_event.payload else {
+        panic!("candidate finalization must append ActionRequestedV2");
+    };
+    assert_eq!(finalize_action.action_kind, ActionKindV1::Git);
+    assert_eq!(finalize_action.action_id, finalize_action_id);
+    assert_eq!(finalize_action.idempotency_key, finalize_idempotency_key);
+    assert_eq!(
+        action_requested_v2_digest(finalize_action).expect("digest Git action"),
+        finalize_action_digest
+    );
+    assert_eq!(
+        finalize_action_id,
+        format!(
+            "git-candidate-create:{}",
+            candidate_ref
+                .strip_prefix("refs/buildplane/candidates/")
+                .expect("canonical candidate ref")
+        )
+    );
+    let finalize_input = cas
+        .get_verified_canonical_bytes(
+            &finalize_action.canonical_input_ref,
+            &finalize_action.canonical_input_digest,
+        )
+        .expect("load finalization input");
+    let finalize_input: serde_json::Value =
+        serde_json::from_slice(&finalize_input).expect("parse finalization input");
+    assert_eq!(
+        finalize_input
+            .get("action")
+            .and_then(|value| value.as_str()),
+        Some("create-immutable-candidate")
+    );
+    assert_eq!(
+        finalize_input
+            .get("candidateRef")
+            .and_then(|value| value.as_str()),
+        Some(candidate_ref.as_str())
+    );
+    assert_eq!(
+        finalize_input
+            .get("baseSha")
+            .and_then(|value| value.as_str()),
+        Some(
+            fixture
+                .dispatch
+                .dispatch_v4
+                .dispatch_v3
+                .body
+                .base_commit_sha
+                .as_str()
+        )
+    );
+    let finalize_retry = store
+        .issue_governed_v5_candidate_finalize_action_v1_at_for_tests(
+            &finalize_request,
+            &cas,
+            &v5_authority,
+            &activity_authority,
+            &receipt_signer,
+            &action_key,
+            &action_signer,
+            "2100-01-01T00:00:00Z".parse().expect("parse retry time"),
+        )
+        .expect("recover finalization action after dispatch expiry");
+    assert!(matches!(
+        finalize_retry,
+        GovernedV5CandidateFinalizeActionIssueDispositionV1::Existing {
+            action_request_event_id,
+            ..
+        } if action_request_event_id == finalize_action_event_id
+    ));
+    assert_eq!(
+        store
+            .event_count()
+            .expect("count idempotent finalization issuance"),
+        12
     );
 
     let retry = store

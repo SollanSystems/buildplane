@@ -62,8 +62,8 @@ use async_trait::async_trait;
 use bp_ledger::payload::model_evidence::ModelProviderV1;
 use bp_ledger::payload::trust_spine::ExecutionRoleV1;
 use bp_ledger::storage::sqlite::{
-    GovernedV5CommandActionIssueRequestV1, GovernedV5CommandActionReceiptSetRequestV1,
-    ResolveGovernedV5CandidateAuthorityRequestV1,
+    GovernedV5CandidateFinalizeActionIssueRequestV1, GovernedV5CommandActionIssueRequestV1,
+    GovernedV5CommandActionReceiptRequestV1, ResolveGovernedV5CandidateAuthorityRequestV1,
 };
 use bp_provider_anthropic::{AnthropicHttpTransportV1, AnthropicProvider};
 use bp_provider_sdk::{
@@ -299,8 +299,8 @@ impl ProtectedGovernedSessionHostStateV1 {
         if status == BrokerCommandActionStatus::Succeeded {
             self.ledger
                 .store()
-                .seal_succeeded_governed_v5_command_action_receipt_set_v1(
-                    &GovernedV5CommandActionReceiptSetRequestV1 {
+                .record_succeeded_governed_v5_command_action_receipt_v1(
+                    &GovernedV5CommandActionReceiptRequestV1 {
                         run_id: config.run_id,
                         action_request_event_id: execution.action_request_event_id,
                     },
@@ -309,6 +309,21 @@ impl ProtectedGovernedSessionHostStateV1 {
                     &config.activity_authority,
                     self.signing_keys.action_receipt(),
                     &config.action_receipt_signer,
+                )
+                .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)?;
+            self.ledger
+                .store()
+                .issue_governed_v5_candidate_finalize_action_v1(
+                    &GovernedV5CandidateFinalizeActionIssueRequestV1 {
+                        run_id: config.run_id,
+                        process_action_request_event_id: execution.action_request_event_id,
+                    },
+                    self.cas.cas(),
+                    &config.v5_admission_authority,
+                    &config.activity_authority,
+                    &config.action_receipt_signer,
+                    self.signing_keys.action_request(),
+                    &config.action_request_signer,
                 )
                 .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)?;
         }

@@ -573,33 +573,58 @@ pub struct GovernedCommandActionResultRequestV1 {
     pub evidence_ref: String,
 }
 
-/// Closed protected-host request to seal the succeeded command activity into
-/// the immutable action evidence consumed by candidate creation. The caller
-/// may name only the signed action request; dispatch, admission, claim, result,
-/// receipt contents, timestamps, references, and digests are reconstructed.
+/// Closed protected-host request to record the succeeded command activity's
+/// immutable receipt. This deliberately does not seal an action-receipt set:
+/// candidate Git finalization is a later separately authorized activity, and
+/// only the complete process-plus-Git set may be sealed for candidate creation.
+/// The caller may name only the signed action request; dispatch, admission,
+/// claim, result, receipt contents, timestamps, references, and digests are
+/// reconstructed.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct GovernedV5CommandActionReceiptSetRequestV1 {
+pub struct GovernedV5CommandActionReceiptRequestV1 {
     pub run_id: RunId,
     pub action_request_event_id: EventId,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum GovernedV5CommandActionReceiptSetDispositionV1 {
+pub enum GovernedV5CommandActionReceiptDispositionV1 {
     Recorded {
         action_receipt_event_id: EventId,
         action_receipt_ref: String,
         action_receipt_digest: String,
-        action_receipt_set_event_id: EventId,
-        action_receipt_set_ref: String,
-        action_receipt_set_digest: String,
     },
     Existing {
         action_receipt_event_id: EventId,
         action_receipt_ref: String,
         action_receipt_digest: String,
-        action_receipt_set_event_id: EventId,
-        action_receipt_set_ref: String,
-        action_receipt_set_digest: String,
+    },
+}
+
+/// Closed request to issue the Git write-ahead action that materializes one
+/// immutable candidate after the implementer process has a signed succeeded
+/// receipt. The caller cannot supply candidate identity, ref, Git inputs, or
+/// idempotency identity; all are derived from the sealed V5 dispatch.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GovernedV5CandidateFinalizeActionIssueRequestV1 {
+    pub run_id: RunId,
+    pub process_action_request_event_id: EventId,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GovernedV5CandidateFinalizeActionIssueDispositionV1 {
+    Recorded {
+        action_request_event_id: EventId,
+        action_request_digest: String,
+        action_id: String,
+        idempotency_key: String,
+        candidate_ref: String,
+    },
+    Existing {
+        action_request_event_id: EventId,
+        action_request_digest: String,
+        action_id: String,
+        idempotency_key: String,
+        candidate_ref: String,
     },
 }
 
@@ -8088,23 +8113,24 @@ impl SqliteStore {
         })
     }
 
-    /// Convert one succeeded, checkpoint-admitted V5 command into the exact
-    /// immutable receipt evidence required before candidate creation.
+    /// Convert one succeeded, checkpoint-admitted V5 command into its exact
+    /// immutable receipt evidence.
     ///
-    /// Both records are appended atomically. An exact retry returns the
-    /// existing pair; a partial, duplicated, or substituted pair requires
-    /// reconciliation and never appends replacement evidence.
+    /// This is intentionally not a receipt-set seal. Candidate finalization is
+    /// a separate Git activity and the complete set is sealed only after that
+    /// activity has a succeeded terminal receipt. An exact retry returns the
+    /// existing receipt; substituted evidence requires reconciliation.
     #[allow(clippy::too_many_arguments)]
-    pub fn seal_succeeded_governed_v5_command_action_receipt_set_v1(
+    pub fn record_succeeded_governed_v5_command_action_receipt_v1(
         &self,
-        request: &GovernedV5CommandActionReceiptSetRequestV1,
+        request: &GovernedV5CommandActionReceiptRequestV1,
         cas: &Cas,
         v5_authority: &GovernedDispatchV5AdmissionAuthorityV1,
         activity_authority: &ActivityClaimAuthorityV1,
         signing_key: &SigningKey,
         receipt_signer: &ActorKeyRef,
-    ) -> Result<GovernedV5CommandActionReceiptSetDispositionV1> {
-        self.seal_succeeded_governed_v5_command_action_receipt_set_v1_at(
+    ) -> Result<GovernedV5CommandActionReceiptDispositionV1> {
+        self.record_succeeded_governed_v5_command_action_receipt_v1_at(
             request,
             cas,
             v5_authority,
@@ -8117,17 +8143,17 @@ impl SqliteStore {
 
     #[cfg(any(test, feature = "test-support"))]
     #[allow(clippy::too_many_arguments)]
-    pub fn seal_succeeded_governed_v5_command_action_receipt_set_v1_at_for_tests(
+    pub fn record_succeeded_governed_v5_command_action_receipt_v1_at_for_tests(
         &self,
-        request: &GovernedV5CommandActionReceiptSetRequestV1,
+        request: &GovernedV5CommandActionReceiptRequestV1,
         cas: &Cas,
         v5_authority: &GovernedDispatchV5AdmissionAuthorityV1,
         activity_authority: &ActivityClaimAuthorityV1,
         signing_key: &SigningKey,
         receipt_signer: &ActorKeyRef,
         now: DateTime<Utc>,
-    ) -> Result<GovernedV5CommandActionReceiptSetDispositionV1> {
-        self.seal_succeeded_governed_v5_command_action_receipt_set_v1_at(
+    ) -> Result<GovernedV5CommandActionReceiptDispositionV1> {
+        self.record_succeeded_governed_v5_command_action_receipt_v1_at(
             request,
             cas,
             v5_authority,
@@ -8139,16 +8165,16 @@ impl SqliteStore {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn seal_succeeded_governed_v5_command_action_receipt_set_v1_at(
+    fn record_succeeded_governed_v5_command_action_receipt_v1_at(
         &self,
-        request: &GovernedV5CommandActionReceiptSetRequestV1,
+        request: &GovernedV5CommandActionReceiptRequestV1,
         cas: &Cas,
         v5_authority: &GovernedDispatchV5AdmissionAuthorityV1,
         activity_authority: &ActivityClaimAuthorityV1,
         signing_key: &SigningKey,
         receipt_signer: &ActorKeyRef,
         now: DateTime<Utc>,
-    ) -> Result<GovernedV5CommandActionReceiptSetDispositionV1> {
+    ) -> Result<GovernedV5CommandActionReceiptDispositionV1> {
         require_protected_governed_realm(activity_authority)?;
         validate_governed_action_receipt_signer(activity_authority, signing_key, receipt_signer)?;
         let signed_at = canonical_ledger_timestamp(now)?;
@@ -8423,34 +8449,6 @@ impl SqliteStore {
                     "command receipt could not derive its canonical digest: {error}"
                 ))
             })?;
-        let action_receipt_set_ref = governed_action_receipt_set_ref_v1(
-            request.run_id,
-            &action.dispatch_envelope_digest,
-            &action_receipt_digest,
-        );
-        let mut receipt_set = ActionReceiptSetRecordedV1 {
-            run_id: action.run_id.clone(),
-            workflow_id: action.workflow_id.clone(),
-            unit_id: action.unit_id.clone(),
-            attempt: action.attempt,
-            provenance_ref: action.provenance_ref.clone(),
-            dispatch_envelope_digest: action.dispatch_envelope_digest.clone(),
-            action_receipt_set_ref,
-            action_receipt_set_digest: String::new(),
-            receipts: vec![ActionReceiptSetEntryV1 {
-                action_id: action.action_id.clone(),
-                action_receipt_ref: receipt.action_receipt_ref.clone(),
-                action_receipt_digest: action_receipt_digest.clone(),
-            }],
-            sealed_at: result.recorded_at.clone(),
-        };
-        receipt_set.action_receipt_set_digest = action_receipt_set_v1_digest(&receipt_set)
-            .map_err(|error| {
-                action_receipt_authority_rejected(format!(
-                    "command receipt set could not derive its canonical digest: {error}"
-                ))
-            })?;
-
         let existing_receipt = matching_signed_action_receipt(
             &tx,
             request.run_id,
@@ -8458,54 +8456,26 @@ impl SqliteStore {
             activity_authority,
             &action.action_id,
         )?;
-        let existing_set = matching_signed_action_receipt_set(
-            &tx,
-            request.run_id,
-            receipt_signer,
-            activity_authority,
-            &action,
-        )?;
-        match (existing_receipt, existing_set) {
-            (Some(receipt_event), Some(receipt_set_event)) => {
-                let Payload::ActionReceiptRecordedV2(existing_receipt) = &receipt_event.payload
-                else {
-                    unreachable!("receipt matcher returns only ActionReceiptRecordedV2")
-                };
-                let Payload::ActionReceiptSetRecordedV1(existing_set) = &receipt_set_event.payload
-                else {
-                    unreachable!("receipt-set matcher returns only ActionReceiptSetRecordedV1")
-                };
-                if existing_receipt != &receipt
-                    || existing_set != &receipt_set
-                    || receipt_event.parent_event_id != Some(result_event.id)
-                    || receipt_set_event.parent_event_id != Some(receipt_event.id)
-                    || !tape_event_precedes(&result_event, &receipt_event)
-                    || !tape_event_precedes(&receipt_event, &receipt_set_event)
-                {
-                    return Err(action_receipt_reconciliation_required(
-                        request.run_id,
-                        &action.action_id,
-                        "existing receipt evidence conflicts with the reconstructed command result",
-                    ));
-                }
-                tx.commit()?;
-                return Ok(GovernedV5CommandActionReceiptSetDispositionV1::Existing {
-                    action_receipt_event_id: receipt_event.id,
-                    action_receipt_ref: receipt.action_receipt_ref,
-                    action_receipt_digest,
-                    action_receipt_set_event_id: receipt_set_event.id,
-                    action_receipt_set_ref: receipt_set.action_receipt_set_ref,
-                    action_receipt_set_digest: receipt_set.action_receipt_set_digest,
-                });
-            }
-            (None, None) => {}
-            _ => {
+        if let Some(receipt_event) = existing_receipt {
+            let Payload::ActionReceiptRecordedV2(existing_receipt) = &receipt_event.payload else {
+                unreachable!("receipt matcher returns only ActionReceiptRecordedV2")
+            };
+            if existing_receipt != &receipt
+                || receipt_event.parent_event_id != Some(result_event.id)
+                || !tape_event_precedes(&result_event, &receipt_event)
+            {
                 return Err(action_receipt_reconciliation_required(
                     request.run_id,
                     &action.action_id,
-                    "receipt and receipt-set evidence are only partially recorded",
-                ))
+                    "existing receipt conflicts with the reconstructed command result",
+                ));
             }
+            tx.commit()?;
+            return Ok(GovernedV5CommandActionReceiptDispositionV1::Existing {
+                action_receipt_event_id: receipt_event.id,
+                action_receipt_ref: receipt.action_receipt_ref,
+                action_receipt_digest,
+            });
         }
 
         let receipt_event = canonicalize(Event {
@@ -8521,32 +8491,373 @@ impl SqliteStore {
         let receipt_signature = sign_event(&receipt_event, signing_key, receipt_signer, signed_at)?;
         insert_event(&tx, &receipt_event)?;
         insert_event_signature(&tx, &receipt_signature)?;
-
-        let receipt_set_event = canonicalize(Event {
-            id: EventId::new(),
-            run_id: request.run_id,
-            parent_event_id: Some(receipt_event.id),
-            schema_version: Event::CURRENT_SCHEMA_VERSION,
-            kind: EventKind::ActionReceiptSetRecordedV1,
-            occurred_at: recorded_at,
-            payload: Payload::ActionReceiptSetRecordedV1(receipt_set.clone()),
-        })?;
-        validate_new_ordinary_event_id(&tx, &receipt_set_event)?;
-        let receipt_set_signature =
-            sign_event(&receipt_set_event, signing_key, receipt_signer, signed_at)?;
-        insert_event(&tx, &receipt_set_event)?;
-        insert_event_signature(&tx, &receipt_set_signature)?;
         tx.commit()?;
         self.record_ordinary_append(&receipt_event);
-        self.record_ordinary_append(&receipt_set_event);
-        Ok(GovernedV5CommandActionReceiptSetDispositionV1::Recorded {
+        Ok(GovernedV5CommandActionReceiptDispositionV1::Recorded {
             action_receipt_event_id: receipt_event.id,
             action_receipt_ref: receipt.action_receipt_ref,
             action_receipt_digest,
-            action_receipt_set_event_id: receipt_set_event.id,
-            action_receipt_set_ref: receipt_set.action_receipt_set_ref,
-            action_receipt_set_digest: receipt_set.action_receipt_set_digest,
         })
+    }
+
+    /// Issue or recover the one Git candidate-finalization intent for a sealed
+    /// V5 implementer dispatch. A succeeded process receipt must already exist,
+    /// while any prematurely sealed receipt set blocks the transition.
+    #[allow(clippy::too_many_arguments)]
+    pub fn issue_governed_v5_candidate_finalize_action_v1(
+        &self,
+        request: &GovernedV5CandidateFinalizeActionIssueRequestV1,
+        cas: &Cas,
+        v5_authority: &GovernedDispatchV5AdmissionAuthorityV1,
+        activity_authority: &ActivityClaimAuthorityV1,
+        receipt_signer: &ActorKeyRef,
+        signing_key: &SigningKey,
+        action_signer: &ActorKeyRef,
+    ) -> Result<GovernedV5CandidateFinalizeActionIssueDispositionV1> {
+        self.issue_governed_v5_candidate_finalize_action_v1_at(
+            request,
+            cas,
+            v5_authority,
+            activity_authority,
+            receipt_signer,
+            signing_key,
+            action_signer,
+            Utc::now(),
+        )
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    #[allow(clippy::too_many_arguments)]
+    pub fn issue_governed_v5_candidate_finalize_action_v1_at_for_tests(
+        &self,
+        request: &GovernedV5CandidateFinalizeActionIssueRequestV1,
+        cas: &Cas,
+        v5_authority: &GovernedDispatchV5AdmissionAuthorityV1,
+        activity_authority: &ActivityClaimAuthorityV1,
+        receipt_signer: &ActorKeyRef,
+        signing_key: &SigningKey,
+        action_signer: &ActorKeyRef,
+        now: DateTime<Utc>,
+    ) -> Result<GovernedV5CandidateFinalizeActionIssueDispositionV1> {
+        self.issue_governed_v5_candidate_finalize_action_v1_at(
+            request,
+            cas,
+            v5_authority,
+            activity_authority,
+            receipt_signer,
+            signing_key,
+            action_signer,
+            now,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn issue_governed_v5_candidate_finalize_action_v1_at(
+        &self,
+        request: &GovernedV5CandidateFinalizeActionIssueRequestV1,
+        cas: &Cas,
+        v5_authority: &GovernedDispatchV5AdmissionAuthorityV1,
+        activity_authority: &ActivityClaimAuthorityV1,
+        receipt_signer: &ActorKeyRef,
+        signing_key: &SigningKey,
+        action_signer: &ActorKeyRef,
+        now: DateTime<Utc>,
+    ) -> Result<GovernedV5CandidateFinalizeActionIssueDispositionV1> {
+        require_protected_governed_realm(activity_authority)?;
+        validate_action_request_signer(activity_authority, signing_key, action_signer)?;
+        let now = canonical_ledger_timestamp(now)?;
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let process_event = load_verified_authority_event(
+            &tx,
+            request.process_action_request_event_id,
+            &activity_authority.trusted_keys,
+            &activity_authority.action_request_signer,
+            "V5 candidate process action",
+        )?;
+        if process_event.run_id != request.run_id {
+            return Err(command_action_authority_rejected(
+                "candidate finalization process action belongs to another run",
+            ));
+        }
+        let dispatch_event_id = process_event.parent_event_id.ok_or_else(|| {
+            command_action_authority_rejected(
+                "candidate finalization process action has no parent dispatch",
+            )
+        })?;
+        let Payload::ActionRequestedV2(process_action) = &process_event.payload else {
+            return Err(command_action_authority_rejected(
+                "candidate finalization requires a signed process action request",
+            ));
+        };
+        if process_action.action_kind != ActionKindV1::Process
+            || process_action.execution_role != ExecutionRoleV1::Implementer
+        {
+            return Err(command_action_authority_rejected(
+                "candidate finalization requires the protected implementer process action",
+            ));
+        }
+        let admission =
+            governed_dispatch_v5_admission_by_source(&tx, request.run_id, dispatch_event_id)?
+                .ok_or_else(|| {
+                    command_action_authority_rejected(
+                        "candidate finalization requires a recorded V5 admission",
+                    )
+                })?;
+        let material = verified_sealed_v5_dispatch_action_material(
+            &tx,
+            request.run_id,
+            dispatch_event_id,
+            admission.admission_event_id,
+            v5_authority,
+            activity_authority,
+        )?;
+        let dispatch = material.dispatch;
+        if dispatch.body.execution_role != ExecutionRoleV1::Implementer
+            || process_action.dispatch_envelope_digest != material.lineage_envelope_digest
+        {
+            return Err(command_action_authority_rejected(
+                "candidate finalization process action does not bind its sealed V5 dispatch",
+            ));
+        }
+        let process_receipt = matching_signed_action_receipt(
+            &tx,
+            request.run_id,
+            receipt_signer,
+            activity_authority,
+            &process_action.action_id,
+        )?
+        .ok_or_else(|| {
+            action_receipt_authority_rejected(
+                "candidate finalization requires the succeeded process receipt",
+            )
+        })?;
+        let Payload::ActionReceiptRecordedV2(process_receipt_payload) = &process_receipt.payload
+        else {
+            unreachable!("receipt matcher returns only ActionReceiptRecordedV2")
+        };
+        let process_action_digest =
+            action_requested_v2_digest(process_action).map_err(|error| {
+                action_receipt_authority_rejected(format!(
+                    "candidate finalization could not canonicalize process action: {error}"
+                ))
+            })?;
+        if process_receipt_payload.outcome != ActionReceiptOutcomeV2::Succeeded
+            || process_receipt_payload.action_request_digest != process_action_digest
+            || process_receipt_payload.dispatch_envelope_digest != material.lineage_envelope_digest
+            || process_receipt_payload.execution_role != ExecutionRoleV1::Implementer
+            || process_receipt_payload.result_digest.is_none()
+            || process_receipt_payload.result_ref.is_none()
+            || !tape_event_precedes(&process_event, &process_receipt)
+        {
+            return Err(action_receipt_authority_rejected(
+                "candidate finalization process receipt does not close the signed command",
+            ));
+        }
+        if matching_signed_action_receipt_set(
+            &tx,
+            request.run_id,
+            receipt_signer,
+            activity_authority,
+            process_action,
+        )?
+        .is_some()
+        {
+            return Err(action_receipt_reconciliation_required(
+                request.run_id,
+                &process_action.action_id,
+                "candidate finalization found a receipt set sealed before the Git activity",
+            ));
+        }
+
+        let digest_hex = material
+            .lineage_envelope_digest
+            .strip_prefix("sha256:")
+            .filter(|value| {
+                value.len() == 64
+                    && value
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            })
+            .ok_or_else(|| {
+                command_action_authority_rejected(
+                    "candidate finalization dispatch digest is not canonical sha256",
+                )
+            })?;
+        let candidate_id = format!("c-{digest_hex}");
+        let candidate_key = format!(
+            "{candidate_id}/{}/{}",
+            request.run_id, dispatch.body.attempt
+        );
+        let candidate_ref = format!("{BUILDPANE_CANDIDATE_REF_PREFIX}{candidate_key}");
+        let action_id = format!("{RETRY_CANDIDATE_ACTION_KIND}:{candidate_key}");
+        let idempotency_key = format!(
+            "{}:{RETRY_CANDIDATE_ACTION_KIND}",
+            dispatch.body.idempotency_key
+        );
+        #[derive(serde::Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct CandidateFinalizeInputV1<'a> {
+            schema_version: u8,
+            action: &'static str,
+            candidate_id: &'a str,
+            run_id: String,
+            attempt: u32,
+            candidate_key: &'a str,
+            candidate_ref: &'a str,
+            base_sha: &'a str,
+        }
+        let input_bytes = serde_json::to_vec(&CandidateFinalizeInputV1 {
+            schema_version: 1,
+            action: "create-immutable-candidate",
+            candidate_id: &candidate_id,
+            run_id: request.run_id.to_string(),
+            attempt: dispatch.body.attempt,
+            candidate_key: &candidate_key,
+            candidate_ref: &candidate_ref,
+            base_sha: &dispatch.body.base_commit_sha,
+        })
+        .map_err(|error| {
+            command_action_authority_rejected(format!(
+                "candidate finalization input cannot be canonicalized: {error}"
+            ))
+        })?;
+        let input_ref = cas.put_canonical_bytes(&input_bytes)?;
+        let policy_digest =
+            governed_dispatch_policy_digest_v1(&dispatch.body.acceptance_contract_digest)
+                .map_err(command_action_authority_rejected)?;
+        let expected = ActionRequestedV2 {
+            run_id: request.run_id.to_string(),
+            workflow_id: dispatch.body.workflow_id.clone(),
+            unit_id: dispatch.body.unit_id.clone(),
+            attempt: dispatch.body.attempt,
+            provenance_ref: dispatch.body.provenance_ref.clone(),
+            action_id: action_id.clone(),
+            idempotency_key: idempotency_key.clone(),
+            action_kind: ActionKindV1::Git,
+            canonical_input_digest: input_ref.digest().into(),
+            canonical_input_ref: input_ref.to_cas_ref(),
+            dispatch_envelope_digest: material.lineage_envelope_digest.clone(),
+            repository_binding_digest: dispatch.repository_binding_digest.clone(),
+            ledger_authority_realm_digest: dispatch.ledger_authority_realm_digest.clone(),
+            governed_packet_digest: dispatch.governed_packet_digest.clone(),
+            capability_bundle_digest: dispatch.body.capability_bundle_digest.clone(),
+            policy_digest,
+            context_manifest_digest: dispatch.body.context_manifest_digest.clone(),
+            worker_manifest_digest: dispatch.body.worker_manifest_digest.clone(),
+            sandbox_profile_digest: dispatch.body.sandbox_profile_digest.clone(),
+            authority_actor: activity_authority.action_request_signer.actor_id.clone(),
+            execution_role: dispatch.body.execution_role,
+            requested_at: timestamp(now),
+        };
+
+        let mut statement =
+            tx.prepare("SELECT id FROM events WHERE run_id = ?1 AND kind = ?2 ORDER BY id ASC")?;
+        let ids = statement
+            .query_map(
+                params![
+                    request.run_id.to_string(),
+                    EventKind::ActionRequestedV2.as_wire()
+                ],
+                |row| row.get::<_, String>(0),
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        drop(statement);
+        let mut existing = None;
+        for raw_id in ids {
+            let event_id = parse_event_id(&raw_id, "V5 candidate finalization action")?;
+            let event = load_verified_authority_event(
+                &tx,
+                event_id,
+                &activity_authority.trusted_keys,
+                &activity_authority.action_request_signer,
+                "V5 candidate finalization action",
+            )?;
+            let Payload::ActionRequestedV2(action) = &event.payload else {
+                unreachable!("action request query returns only ActionRequestedV2")
+            };
+            let action = action.clone();
+            if action.action_id != action_id {
+                continue;
+            }
+            if existing.replace((event, action)).is_some() {
+                return Err(action_receipt_reconciliation_required(
+                    request.run_id,
+                    &action_id,
+                    "candidate finalization has duplicate signed Git actions",
+                ));
+            }
+        }
+        if let Some((event, action)) = existing {
+            let mut exact = expected;
+            exact.requested_at = action.requested_at.clone();
+            if action != exact
+                || event.parent_event_id != Some(dispatch_event_id)
+                || !tape_event_precedes(&process_receipt, &event)
+            {
+                return Err(action_receipt_reconciliation_required(
+                    request.run_id,
+                    &action_id,
+                    "existing candidate finalization action conflicts with sealed authority",
+                ));
+            }
+            let action_request_digest = action_requested_v2_digest(&action).map_err(|error| {
+                command_action_authority_rejected(format!(
+                    "candidate finalization action cannot be canonicalized: {error}"
+                ))
+            })?;
+            tx.commit()?;
+            return Ok(
+                GovernedV5CandidateFinalizeActionIssueDispositionV1::Existing {
+                    action_request_event_id: event.id,
+                    action_request_digest,
+                    action_id,
+                    idempotency_key,
+                    candidate_ref,
+                },
+            );
+        }
+
+        validate_governed_dispatch(&dispatch, now).map_err(|error| {
+            command_action_authority_rejected(format!(
+                "candidate finalization requires a live sealed dispatch: {error}"
+            ))
+        })?;
+        let event = canonicalize(Event {
+            id: EventId::new(),
+            run_id: request.run_id,
+            parent_event_id: Some(dispatch_event_id),
+            schema_version: Event::CURRENT_SCHEMA_VERSION,
+            kind: EventKind::ActionRequestedV2,
+            occurred_at: now,
+            payload: Payload::ActionRequestedV2(expected.clone()),
+        })?;
+        if !tape_event_precedes(&process_receipt, &event) {
+            return Err(action_receipt_reconciliation_required(
+                request.run_id,
+                &action_id,
+                "candidate finalization action does not follow its process receipt",
+            ));
+        }
+        validate_new_ordinary_event_id(&tx, &event)?;
+        let signature = sign_event(&event, signing_key, action_signer, now)?;
+        let action_request_digest = action_requested_v2_digest(&expected).map_err(|error| {
+            command_action_authority_rejected(format!(
+                "candidate finalization action cannot be canonicalized: {error}"
+            ))
+        })?;
+        insert_event(&tx, &event)?;
+        insert_event_signature(&tx, &signature)?;
+        tx.commit()?;
+        self.record_ordinary_append(&event);
+        Ok(
+            GovernedV5CandidateFinalizeActionIssueDispositionV1::Recorded {
+                action_request_event_id: event.id,
+                action_request_digest,
+                action_id,
+                idempotency_key,
+                candidate_ref,
+            },
+        )
     }
 
     /// Append one already-derived checkpoint inside the caller's transaction.
