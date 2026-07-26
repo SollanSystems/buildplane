@@ -238,9 +238,23 @@ impl BrokerHostConfinementPolicyV1 {
         attestation: &BrokerHostConfinementAttestationV1,
         stream: &UnixStream,
     ) -> Result<(), BrokerHostConfinementErrorV1> {
+        self.verified_linux_connected_worker_uid_for_role(role, attestation, stream)
+            .map(|_| ())
+    }
+
+    /// Return the kernel-observed UID only after the exact startup role,
+    /// attestation, PID, broker separation, and configured allowlist all pass.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn verified_linux_connected_worker_uid_for_role(
+        &self,
+        role: BrokerAuthorityRoleV1,
+        attestation: &BrokerHostConfinementAttestationV1,
+        stream: &UnixStream,
+    ) -> Result<u32, BrokerHostConfinementErrorV1> {
         self.verify_startup_attestation_for_role(role, attestation)?;
         let peer = linux_peer_identity(stream)?;
-        self.verify_peer_for_role(role, peer)
+        self.verify_peer_for_role(role, peer)?;
+        Ok(peer.uid)
     }
 
     pub(crate) fn verify_startup_attestation_for_role(

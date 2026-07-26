@@ -369,9 +369,12 @@ impl ProtectedGovernedSessionHostStateV1 {
     pub(crate) fn handle_authenticated_connection(
         &self,
         stream: &mut UnixStream,
-        expected_client_uid: u32,
         timeout: Duration,
     ) -> Result<(), GovernedSessionHostErrorV1> {
+        let expected_client_uid = self
+            .session_startup
+            .verified_connected_worker_uid(stream)
+            .map_err(|_| GovernedSessionHostErrorV1::ConnectionRejected)?;
         handle_governed_session_connection(
             stream,
             expected_client_uid,
@@ -416,6 +419,12 @@ pub(crate) fn load_default_protected_governed_session_host_v1(
 ) -> Result<ProtectedGovernedSessionHostStateV1, ProtectedGovernedSessionHostStartupErrorV1> {
     let validated_startup = load_default_governed_session_host_config_v1()
         .map_err(|_| ProtectedGovernedSessionHostStartupErrorV1::Config)?;
+    compose_validated_governed_session_host_v1(validated_startup)
+}
+
+pub(crate) fn compose_validated_governed_session_host_v1(
+    validated_startup: ValidatedGovernedSessionHostStartupV1,
+) -> Result<ProtectedGovernedSessionHostStateV1, ProtectedGovernedSessionHostStartupErrorV1> {
     let confinement_attestation = validated_startup
         .config()
         .confinement_policy
@@ -536,7 +545,6 @@ mod tests {
     use futures::executor::block_on;
     use serde_json::{json, Value};
     use std::fs;
-    use std::io::{Read, Write};
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
 
@@ -895,7 +903,7 @@ mod tests {
     }
 
     #[test]
-    fn protected_connection_authenticates_and_signs_the_closed_probe() {
+    fn protected_connection_rejects_same_uid_before_parsing_or_signing() {
         let fixture = HostFixture::new();
         let validated = fixture.validated_startup();
         let confinement = validated
@@ -908,43 +916,12 @@ mod tests {
             oci_attestation(),
         )
         .expect("protected host");
-        let verifying_key = state.signing_keys().broker_identity().verifying_key();
-        let request = br#"{"schema_version":1,"protocol":"buildplane-governed-session","request_id":"01919000-0000-7000-8000-000000000097","operation":"probe"}"#.to_vec();
-        let parsed =
-            crate::governed_session_client::parse_governed_session_client_request(&request)
-                .expect("probe");
-        let (mut client, mut server) = UnixStream::pair().expect("socket pair");
-        let client_thread = std::thread::spawn(move || {
-            client
-                .write_all(&(request.len() as u32).to_be_bytes())
-                .expect("frame length");
-            client.write_all(&request).expect("request");
-            client
-                .shutdown(std::net::Shutdown::Write)
-                .expect("request EOF");
-            let mut length = [0_u8; 4];
-            client.read_exact(&mut length).expect("response length");
-            let mut response = vec![0_u8; u32::from_be_bytes(length) as usize];
-            client.read_exact(&mut response).expect("response");
-            response
-        });
-
-        state
-            .handle_authenticated_connection(
-                &mut server,
-                unsafe { libc::geteuid() },
-                Duration::from_secs(2),
-            )
-            .expect("protected connection");
-        let response = client_thread.join().expect("client");
-        let verified = crate::governed_session_response::verify_governed_session_response_v1(
-            &response,
-            &verifying_key,
-            &parsed,
-        )
-        .expect("signed probe");
-        assert!(std::str::from_utf8(verified.projection_json())
-            .expect("projection")
-            .contains(r#""status":"ready""#));
+        let (_client, mut server) = UnixStream::pair().expect("socket pair");
+        assert_eq!(
+            state.handle_authenticated_connection(&mut server, Duration::from_secs(2)),
+            Err(GovernedSessionHostErrorV1::ConnectionRejected),
+            "the broker UID cannot authenticate itself as a governed-session client"
+        );
+        assert_eq!(state.ledger().store().event_count().expect("ledger"), 0);
     }
 }

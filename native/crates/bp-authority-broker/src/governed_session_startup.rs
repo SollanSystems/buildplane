@@ -14,12 +14,14 @@ use crate::provider_preflight::{
     ProviderTokenPreflightStatusV1,
 };
 use crate::rootless_oci::RootlessOciAttestationV1;
+#[cfg(target_os = "linux")]
+use std::os::unix::net::UnixStream;
 use thiserror::Error;
 
 #[derive(Debug)]
 pub(crate) struct GovernedSessionHostStartupV1 {
-    _confinement_policy: BrokerHostConfinementPolicyV1,
-    _confinement_attestation: BrokerHostConfinementAttestationV1,
+    confinement_policy: BrokerHostConfinementPolicyV1,
+    confinement_attestation: BrokerHostConfinementAttestationV1,
     oci_attestation: RootlessOciAttestationV1,
 }
 
@@ -57,14 +59,28 @@ impl GovernedSessionHostStartupV1 {
             return Err(GovernedSessionHostStartupErrorV1::InvalidOciAttestation);
         }
         Ok(Self {
-            _confinement_policy: confinement_policy,
-            _confinement_attestation: confinement_attestation,
+            confinement_policy,
+            confinement_attestation,
             oci_attestation,
         })
     }
 
     pub(crate) fn sandbox_profile_digest(&self) -> &str {
         &self.oci_attestation.profile_digest
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn verified_connected_worker_uid(
+        &self,
+        stream: &UnixStream,
+    ) -> Result<u32, GovernedSessionHostStartupErrorV1> {
+        self.confinement_policy
+            .verified_linux_connected_worker_uid_for_role(
+                BrokerAuthorityRoleV1::ModelAction,
+                &self.confinement_attestation,
+                stream,
+            )
+            .map_err(map_confinement_error)
     }
 }
 

@@ -180,6 +180,92 @@ occupying the sequential endpoint. Isolate and monitor each allowlisted UID.
 This availability risk cannot expand authority or create concurrent ledger writes;
 the single-writer serving model remains intentional.
 
+### Protected governed-session host
+
+`buildplane-governed-session-host` is the Linux-only API-provider and reviewer
+session endpoint. It accepts no arguments or environment overrides and never
+binds a socket. Systemd must pass exactly one already-listening Unix stream as
+descriptor 3 at
+`/run/buildplane/authority-host/governed-session-v1.sock`. The same parent,
+owner, group, mode, and single-link requirements described above apply, using
+the `socket_group_gid` in
+`/etc/buildplane/authority-host/governed-session-v1.json`.
+
+Startup is all-or-nothing. Before accepting a client, the host verifies the
+fixed socket, non-root broker identity, configured client UID set, signer
+separation, signed ledger, protected CAS, Anthropic credential file, and the
+configured rootless Podman canary. The credential must remain at the fixed
+protected authority-root location; `ANTHROPIC_API_KEY`, proxy variables, PATH,
+and caller-supplied paths do not select provider authority. Missing Podman,
+OCI flags, image, credentials, keys, ledger, or CAS blocks startup without a
+host-shell fallback.
+
+```ini
+# buildplane-governed-session-host.socket
+[Unit]
+Description=Buildplane protected governed-session socket
+
+[Socket]
+ListenStream=/run/buildplane/authority-host/governed-session-v1.sock
+Accept=no
+Service=buildplane-governed-session-host.service
+SocketUser=root
+SocketGroup=buildplane-governed-session
+SocketMode=0660
+DirectoryMode=0755
+RemoveOnStop=true
+
+[Install]
+WantedBy=sockets.target
+```
+
+```ini
+# buildplane-governed-session-host.service
+[Unit]
+Description=Buildplane protected governed-session authority
+Requires=buildplane-governed-session-host.socket
+After=buildplane-governed-session-host.socket
+StartLimitIntervalSec=60s
+StartLimitBurst=5
+
+[Service]
+Type=simple
+ExecStart=/usr/libexec/buildplane/buildplane-governed-session-host
+User=buildplane-session-authority
+Group=buildplane-session-authority
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadOnlyPaths=/etc/buildplane/authority-host
+ReadOnlyPaths=/var/lib/buildplane/authority/keys
+ReadOnlyPaths=/var/lib/buildplane/authority/credentials
+ReadWritePaths=/var/lib/buildplane/authority/cas
+ReadWritePaths=/var/lib/buildplane/authority/ledger
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+CapabilityBoundingSet=
+AmbientCapabilities=
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native
+UMask=0077
+StandardOutput=null
+StandardError=journal
+```
+
+The configured provider endpoint is fixed in the host binary and redirects
+and ambient proxy discovery are disabled. Egress policy outside the process
+must allow only the approved provider destination. Reviewer session ingress
+can expose only `probe`, `open_reviewer_session`, and
+`run_reviewer_session`; candidate and general tool execution remain blocked.
+The signed run response contains only opaque session references and the closed
+status set `pending`, `recorded`, `failed`, `lease_expired`, or
+`reconciliation_required`.
+
 ### Protected promotion-decision client
 
 Governed promotion-decision recovery is the only CLI path currently connected

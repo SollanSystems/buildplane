@@ -704,8 +704,8 @@ verified model intent and signed token ceiling, signs one distinct network
 action through the configured action-request authority, rejects
 duplicate/conflicting action records, and reuses the original action after a
 crash or retry. Its claim, counter, evidence, and terminal-result composition
-is active inside governed-session host state; the public listener remains
-disabled until its closed request/response handler is complete.
+is active inside governed-session host state and is reachable only through the
+closed authenticated reviewer-session handler.
 The provider SDK now exposes a separate closed token-count request and counter
 interface. The broker reconstructs that request from the same verified
 dispatch, model request, trust scope, preflight input, role-derived response
@@ -801,7 +801,7 @@ profile digest before private custody is opened. The action, claim, and broker
 identity keys, pre-existing signed ledger, pre-existing descriptor-bound CAS, and validated
 Anthropic credential must then all load from the retained authority root.
 Missing or unsafe state yields one closed startup category and no host state.
-This composition still grants no listener or worker authority. Its private
+The protected state itself cannot bind or discover a listener. Its private
 reviewer run path now derives each request from trusted replay, records or
 reuses token preflight, reopens recovery state after that write, constructs the
 role-bound model authority, and invokes the protected Anthropic gateway.
@@ -815,9 +815,14 @@ returns only a signed closed
 `governed_reviewer_run_result_v1` status (`pending`, `recorded`, `failed`,
 `lease_expired`, or `reconciliation_required`). Unknown result fields,
 retry-like states, and authority-bearing response material are rejected before
-signing. The remaining external activation slice is the default supervised
-listener: it must claim the fixed socket and select the allowed client UID from
-startup configuration.
+signing. The default Linux runner claims only supervisor-provided descriptor 3,
+proves it is the fixed
+`/run/buildplane/authority-host/governed-session-v1.sock`, validates the
+root-owned `0755` parent chain and root/group-owned `0660` single-link socket,
+then loads private host authority. It never binds, replaces, discovers, or
+falls back to another socket. The confinement policy derives the client UID
+from `SO_PEERCRED`, rejects the broker UID and non-allowlisted UIDs, and passes
+that exact UID into the framed connection handler for repeated peer checks.
 Reviewer session opening now follows that rule internally: the opaque recovery
 token exposes only untrusted run and candidate-dispatch routing fields. The
 host locates the candidate in a fully verified recovery snapshot, derives its
@@ -876,19 +881,21 @@ candidate, review, or promotion issuer. The TypeScript launcher remains
 intentionally unavailable because it cannot prove an external broker owns the
 session; a realm-pinned key must not make a caller-controlled stdin stream
 authoritative.
-The CLI now has a fail-closed client boundary for that future composition:
+The CLI now has a fail-closed client boundary for that composition:
 `/usr/libexec/buildplane/buildplane-governed-session-client` validates its own
 installed inode, root-owned configuration, fixed Unix socket, listener peer,
 single absolute exchange deadline, and broker-signed response before exposing
 an opaque candidate or reviewer session. Reviewer lookup carries only the
-host-issued recovery reference. This client does not itself create authority,
-and no protected governed-session listener or session registry ships yet, so
-the probe fails and governed API-worker execution remains blocked.
-The native crate contains a private server-side transport contract that
+host-issued recovery reference. This client does not itself create authority.
+The dedicated protected listener and restart-safe signed session tokens now
+ship, while candidate execution and general typed-tool execution remain
+blocked.
+The native crate contains the server-side transport contract that
 authenticates and rechecks the client peer, bounds one framed exchange by an
-absolute deadline, and signs only request-bound handler results. It deliberately
-has no public runner or default listener until trusted replay and the OCI action
-plane supply the authority handler.
+absolute deadline, and signs only request-bound handler results. Its public
+runner is Linux-only, argument-free, environment-independent, and
+socket-activated; missing OCI, custody, config, listener, or signed state stops
+startup instead of selecting an ambient process.
 Reviewer recovery is also host-derived now: trusted replay starts from the
 candidate dispatch identity recovered from the host token, finds model intents
 bound to that exact candidate, fully revalidates each reviewer workflow, and
@@ -900,12 +907,12 @@ candidate dispatch, and canonical repository identity; a session token binds
 the verified recovery token, candidate/reviewer lane, and fresh V7 nonce. Both
 fit the closed opaque-reference limit, survive host restart, and still require
 fresh trusted replay before any effect.
-Reviewer open and run resolution now compose those tokens with the trusted
+Reviewer open and run resolution compose those tokens with the trusted
 snapshot: open verifies repository and run binding before issuing a reviewer
 lane token; run verifies that exact recovery/session pair and re-derives the
-still-unclaimed reviewer evidence. This remains pre-effect and private—the
-read-only OCI worker must consume the resulting private capability before the
-endpoint can be activated.
+still-unclaimed reviewer evidence before entering the private model-effect
+transaction. The listener exposes neither resolved event identity nor the
+capability.
 The broker model-effect transaction is now startup-role-bound rather than
 hard-coded to implementer: implementer, reviewer, adversary, and judge
 compositions compare both replayed dispatch and action roles with the one
@@ -921,15 +928,16 @@ The authenticated reviewer run now composes directly with the
 startup-role-bound broker transaction: recovery and session tokens are
 reverified, the exact dispatch/action references are re-derived from trusted
 replay, and those private references enter authorize-and-execute without
-crossing a callback or caller-selected request surface. The endpoint remains
-inactive until the credential gateway is backed by the required read-only OCI
-worker rather than an ambient provider process.
+crossing a callback or caller-selected request surface. The protected
+credential gateway is an API transport owned by the host, not an ambient model
+CLI or worker process; model-visible tools remain empty until their effects can
+run through the OCI ActionGateway.
 The one-use private capability handed to that gateway now carries the exact
 run, dispatch event, action-request event, startup-selected execution role,
 lease, and native authorization reference. Those fields are reconstructed
 inside the broker after replay and transactional claim; none can be supplied
-or changed by the worker. This gives the future production credential gateway
-enough sealed identity to load the corresponding request and evidence from the
+or changed by the worker. This gives the production credential gateway enough
+sealed identity to load the corresponding request and evidence from the
 same protected ledger/CAS rather than accepting model input alongside a lease.
 The broker now has the corresponding pure reconstruction gate. It accepts only
 that capability, the exact signed dispatch, verified model-request and

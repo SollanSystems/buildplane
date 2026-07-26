@@ -1,11 +1,11 @@
 //! Broker-private composition for durable governed model authority.
 //!
-//! This crate exposes one opaque, no-argument promotion-decision host runner
-//! and one no-authority, fixed-path client runner. All authority constructors,
+//! This crate exposes opaque, no-argument, socket-activated authority host
+//! runners and no-authority, fixed-path client runners. All authority constructors,
 //! custody types, ledger/CAS state, signers, paths, and protocol internals
 //! remain private. The host consumes only its fixed protected deployment
 //! config and pre-opened Linux listener; the client consumes only its closed
-//! decision input and protected public identity pin. Other authority roles
+//! closed input and protected public identity pins. Other authority roles
 //! remain composition boundaries and must not be wired to
 //! `buildplane-native`, the generic ledger server, or a same-UID signer.
 //! A production gateway must convert every catchable provider failure after
@@ -52,13 +52,13 @@ mod governed_session_client;
 #[cfg(test)]
 mod governed_session_client_contract_tests;
 #[cfg(target_os = "linux")]
-#[allow(dead_code)] // Transport-only until trusted replay and OCI handlers are composed.
 mod governed_session_host;
 #[allow(dead_code)] // Consumed by the protected governed-session host loader next.
 mod governed_session_host_config;
 #[cfg(all(test, target_os = "linux"))]
 mod governed_session_host_contract_tests;
-#[allow(dead_code)] // Default listener activation follows the closed request-to-action handler.
+mod governed_session_listener;
+#[cfg(target_os = "linux")]
 mod governed_session_protected_host;
 mod governed_session_response;
 #[cfg(test)]
@@ -69,13 +69,11 @@ mod governed_session_startup_contract_tests;
 mod governed_session_token;
 #[cfg(test)]
 mod governed_session_token_contract_tests;
-#[allow(dead_code)] // Wired into the default governed-session host in the next composition slice.
 mod host_anthropic_credential_custody;
 mod host_cas_custody;
 mod host_config;
 mod host_config_loader;
 mod host_key_custody;
-#[allow(dead_code)] // Constructed by the native authority host listener in the next slice.
 mod host_ledger_custody;
 mod promotion_decision_client;
 #[cfg(test)]
@@ -119,6 +117,7 @@ mod v5_admission_response_contract_tests;
 mod v5_dispatch_admission;
 
 pub use governed_session_client::run_default_governed_session_client_v1;
+pub use governed_session_listener::run_default_governed_session_host_v1;
 pub use promotion_decision_client::run_default_promotion_decision_client_v1;
 pub use promotion_decision_host::run_default_promotion_decision_host_v1;
 pub use v5_admission_client::run_default_v5_admission_client_v1;
