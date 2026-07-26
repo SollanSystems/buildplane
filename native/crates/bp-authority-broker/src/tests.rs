@@ -78,7 +78,7 @@ use bp_ledger::payload::trust_spine::{
     MODEL_REQUEST_EVIDENCE_V1_SCHEMA_VERSION, TRUST_SCOPE_EVIDENCE_V1_SCHEMA_VERSION,
 };
 use bp_ledger::payload::Payload;
-use bp_ledger::signing::{public_key_hash, ActorKeyRef, TrustedPublicKeys};
+use bp_ledger::signing::{public_key_hash, sign_event, ActorKeyRef, TrustedPublicKeys};
 use bp_ledger::storage::sqlite::{
     CheckpointPolicy, GovernedCandidateCompletionDispositionV1,
     GovernedCandidateCompletionRequestV1, GovernedDispatchAdmissionAuthorityV1,
@@ -8523,18 +8523,7 @@ fn append_matching_v5_source(
     signing_key: Option<&SigningKey>,
     signer: Option<&ActorKeyRef>,
 ) {
-    let (source, _) = fixture
-        .store
-        .signed_events_for_run(&fixture.run_id.to_string())
-        .expect("read V5 source tape")
-        .into_iter()
-        .find(|(event, _)| event.id == fixture.source_dispatch_event_id)
-        .expect("find original V5 source");
-    let duplicate = Event {
-        id: EventId::new(),
-        occurred_at: Utc::now(),
-        ..source
-    };
+    let duplicate = matching_v5_source_event(fixture);
     match (signing_key, signer) {
         (Some(signing_key), Some(signer)) => fixture
             .store
@@ -8545,6 +8534,21 @@ fn append_matching_v5_source(
             .append(&duplicate)
             .expect("append matching unsigned V5 source"),
         _ => panic!("test source requires both signing key and signer"),
+    }
+}
+
+fn matching_v5_source_event(fixture: &V5BrokerAdmissionFixture) -> Event {
+    let (source, _) = fixture
+        .store
+        .signed_events_for_run(&fixture.run_id.to_string())
+        .expect("read V5 source tape")
+        .into_iter()
+        .find(|(event, _)| event.id == fixture.source_dispatch_event_id)
+        .expect("find original V5 source");
+    Event {
+        id: EventId::new(),
+        occurred_at: Utc::now(),
+        ..source
     }
 }
 
@@ -8932,21 +8936,22 @@ fn broker_v5_dispatch_admission_rejects_duplicate_verified_sources_by_digest() {
 }
 
 #[test]
-fn broker_v5_dispatch_admission_rejects_unsigned_matching_source_by_digest() {
+fn broker_v5_dispatch_admission_ignores_unsigned_matching_source_poisoning() {
     let fixture = v5_broker_admission_fixture();
     append_matching_v5_source(&fixture, None, None);
     let broker = v5_broker_admission_backend(&fixture);
 
-    assert!(matches!(
-        broker.record_then_exact_seal(v5_broker_admission_request(&fixture)),
-        BrokerV5DispatchAdmissionDisposition::ReconciliationRequired
-    ));
-    assert_eq!(v5_broker_admission_receipt_count(&fixture), 0);
-    assert_eq!(v5_broker_checkpoint_count(&fixture), 0);
+    let outcome = broker.record_then_exact_seal(v5_broker_admission_request(&fixture));
+    assert!(
+        matches!(outcome, BrokerV5DispatchAdmissionDisposition::Sealed(_)),
+        "unexpected V5 admission outcome: {outcome:?}"
+    );
+    assert_eq!(v5_broker_admission_receipt_count(&fixture), 1);
+    assert_eq!(v5_broker_checkpoint_count(&fixture), 1);
 }
 
 #[test]
-fn broker_v5_dispatch_admission_rejects_matching_source_signed_by_wrong_role() {
+fn broker_v5_dispatch_admission_ignores_wrong_role_matching_source_poisoning() {
     let fixture = v5_broker_admission_fixture();
     append_matching_v5_source(
         &fixture,
@@ -8955,12 +8960,163 @@ fn broker_v5_dispatch_admission_rejects_matching_source_signed_by_wrong_role() {
     );
     let broker = v5_broker_admission_backend(&fixture);
 
+    let outcome = broker.record_then_exact_seal(v5_broker_admission_request(&fixture));
+    assert!(
+        matches!(outcome, BrokerV5DispatchAdmissionDisposition::Sealed(_)),
+        "unexpected wrong-role V5 admission outcome: {outcome:?}"
+    );
+    assert_eq!(v5_broker_admission_receipt_count(&fixture), 1);
+    assert_eq!(v5_broker_checkpoint_count(&fixture), 1);
+}
+
+#[test]
+fn broker_v5_dispatch_admission_ignores_invalid_signature_matching_source_poisoning() {
+    let fixture = v5_broker_admission_fixture();
+    let duplicate = matching_v5_source_event(&fixture);
+    fixture
+        .store
+        .append(&duplicate)
+        .expect("append matching V5 source before detached signature");
+    let invalid = sign_event(
+        &duplicate,
+        &fixture.admission_key,
+        &fixture.source_signer,
+        Utc::now(),
+    )
+    .expect("construct a structurally valid but cryptographically invalid source signature");
+    fixture
+        .store
+        .append_event_signature(&invalid)
+        .expect("append invalid detached signature fixture");
+    let broker = v5_broker_admission_backend(&fixture);
+
     assert!(matches!(
         broker.record_then_exact_seal(v5_broker_admission_request(&fixture)),
-        BrokerV5DispatchAdmissionDisposition::ReconciliationRequired
+        BrokerV5DispatchAdmissionDisposition::Sealed(_)
     ));
-    assert_eq!(v5_broker_admission_receipt_count(&fixture), 0);
-    assert_eq!(v5_broker_checkpoint_count(&fixture), 0);
+    assert_eq!(v5_broker_admission_receipt_count(&fixture), 1);
+    assert_eq!(v5_broker_checkpoint_count(&fixture), 1);
+}
+
+#[test]
+fn broker_v5_dispatch_admission_ignores_unsupported_signature_matching_source_poisoning() {
+    let fixture = v5_broker_admission_fixture();
+    let duplicate = matching_v5_source_event(&fixture);
+    fixture
+        .store
+        .append(&duplicate)
+        .expect("append matching V5 source before unsupported signature");
+    let signature = sign_event(
+        &duplicate,
+        &fixture.source_key,
+        &fixture.source_signer,
+        Utc::now(),
+    )
+    .expect("construct source signature fixture");
+    fixture
+        .store
+        .conn_for_tests()
+        .execute(
+            "INSERT INTO event_signatures (
+                event_id, canonical_event_hash, actor_id, key_id,
+                public_key_hash, algorithm, signature, signed_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, 'unsupported-v1', ?6, ?7)",
+            rusqlite::params![
+                signature.event_id.to_string(),
+                signature.canonical_event_hash,
+                signature.signer.actor_id,
+                signature.signer.key_id,
+                signature.signer.public_key_hash,
+                signature.signature,
+                signature
+                    .signed_at
+                    .to_rfc3339_opts(SecondsFormat::Millis, true),
+            ],
+        )
+        .expect("append unsupported detached signature fixture");
+    let broker = v5_broker_admission_backend(&fixture);
+
+    let outcome = broker.record_then_exact_seal(v5_broker_admission_request(&fixture));
+    assert!(
+        matches!(outcome, BrokerV5DispatchAdmissionDisposition::Sealed(_)),
+        "unexpected unsupported-signature V5 admission outcome: {outcome:?}"
+    );
+    assert_eq!(v5_broker_admission_receipt_count(&fixture), 1);
+    assert_eq!(v5_broker_checkpoint_count(&fixture), 1);
+}
+
+#[test]
+fn broker_v5_digest_resolution_verifies_only_indexed_candidates_on_a_large_run() {
+    let fixture = v5_broker_admission_fixture();
+    let (unrelated, _) = fixture
+        .store
+        .signed_events_for_run(&fixture.run_id.to_string())
+        .expect("read V5 fixture tape")
+        .into_iter()
+        .find(|(event, _)| event.id != fixture.source_dispatch_event_id)
+        .expect("find unrelated signed event");
+    for _ in 0..512 {
+        fixture
+            .store
+            .append_signed(
+                &Event {
+                    id: EventId::new(),
+                    occurred_at: Utc::now(),
+                    ..unrelated.clone()
+                },
+                &fixture.source_key,
+                &fixture.source_signer,
+            )
+            .expect("append unrelated signed event");
+    }
+    fixture
+        .store
+        .reset_v5_source_candidate_verification_count_for_tests();
+    let query_plan = {
+        let mut statement = fixture
+            .store
+            .conn_for_tests()
+            .prepare(
+                "EXPLAIN QUERY PLAN
+                 SELECT e.id, s.event_id
+                 FROM events e
+                 LEFT JOIN event_signatures s ON s.event_id = e.id
+                 WHERE e.run_id = ?1
+                   AND e.kind = 'dispatch_envelope_v5'
+                   AND json_extract(
+                         e.payload,
+                         '$.DispatchEnvelopeV5.envelope_digest'
+                       ) = ?2",
+            )
+            .expect("prepare V5 source query plan");
+        statement
+            .query_map(
+                rusqlite::params![fixture.run_id.to_string(), fixture.v5_envelope_digest],
+                |row| row.get::<_, String>(3),
+            )
+            .expect("query V5 source plan")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect V5 source plan")
+    };
+    assert!(
+        query_plan
+            .iter()
+            .any(|detail| detail.contains("idx_events_v5_envelope_digest")),
+        "V5 resolver query must use its digest index: {query_plan:?}"
+    );
+    let broker = v5_broker_admission_backend(&fixture);
+
+    assert!(matches!(
+        broker.record_then_exact_seal(v5_broker_admission_request(&fixture)),
+        BrokerV5DispatchAdmissionDisposition::Sealed(_)
+    ));
+    assert_eq!(
+        fixture
+            .store
+            .v5_source_candidate_verification_count_for_tests(),
+        1,
+        "unrelated events must not trigger signature loading or cryptographic verification"
+    );
 }
 
 #[test]
