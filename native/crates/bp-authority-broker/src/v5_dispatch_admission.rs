@@ -23,6 +23,8 @@ use serde::Deserialize;
 use std::io::Read;
 #[cfg(target_os = "linux")]
 use std::os::unix::net::UnixStream;
+#[cfg(target_os = "linux")]
+use std::time::{Duration, Instant};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -31,6 +33,7 @@ use uuid::Uuid;
 /// authority facts remain in protected startup dependencies or signed tape.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct V5DispatchAdmissionRequest {
+    pub(crate) request_id: Uuid,
     pub(crate) run_id: RunId,
     pub(crate) v5_envelope_digest: String,
 }
@@ -71,12 +74,13 @@ pub(crate) fn parse_v5_dispatch_admission_request(
 ) -> Result<V5DispatchAdmissionRequest, V5DispatchAdmissionHandlerError> {
     let wire: V5DispatchAdmissionWire = serde_json::from_slice(wire)
         .map_err(|_| V5DispatchAdmissionHandlerError::RequestRejected)?;
-    let _request_id = parse_canonical_uuid(wire.request_id)?;
+    let request_id = parse_canonical_uuid(wire.request_id)?;
     let run_id = RunId::from_uuid(parse_canonical_uuid(wire.run_id)?);
     if !is_canonical_sha256_digest(&wire.v5_envelope_digest) {
         return Err(V5DispatchAdmissionHandlerError::RequestRejected);
     }
     Ok(V5DispatchAdmissionRequest {
+        request_id,
         run_id,
         v5_envelope_digest: wire.v5_envelope_digest,
     })
@@ -108,6 +112,11 @@ fn parse_canonical_uuid(value: String) -> Result<Uuid, V5DispatchAdmissionHandle
 pub(crate) enum BrokerV5DispatchAdmissionDisposition {
     Sealed(SealedV5DispatchAdmissionEvidence),
     ReconciliationRequired,
+}
+
+pub(crate) struct HandledV5DispatchAdmissionV1 {
+    pub(crate) request: V5DispatchAdmissionRequest,
+    pub(crate) disposition: BrokerV5DispatchAdmissionDisposition,
 }
 
 /// Closed evidence for one sealed V5 admission transaction.
@@ -281,6 +290,17 @@ pub(crate) fn handle_v5_dispatch_admission_wire(
     Ok(backend.record_then_exact_seal(request))
 }
 
+pub(crate) fn record_v5_admission_for_expected_run(
+    backend: &LedgerV5DispatchAdmissionBackend<'_>,
+    request: V5DispatchAdmissionRequest,
+    expected_run_id: RunId,
+) -> BrokerV5DispatchAdmissionDisposition {
+    if request.run_id != expected_run_id {
+        return BrokerV5DispatchAdmissionDisposition::ReconciliationRequired;
+    }
+    backend.record_then_exact_seal(request)
+}
+
 /// Authenticate a connected Linux worker before reading exactly one bounded
 /// V5 request frame, then run the post-auth V5 handler.
 ///
@@ -294,16 +314,26 @@ pub(crate) fn handle_authenticated_v5_dispatch_admission_request(
     stream: &mut UnixStream,
     backend: &LedgerV5DispatchAdmissionBackend<'_>,
 ) -> Result<BrokerV5DispatchAdmissionDisposition, V5DispatchAdmissionHandlerError> {
-    policy
-        .verify_linux_connected_worker_for_role(
-            BrokerAuthorityRoleV1::DispatchAdmission,
-            attestation,
-            stream,
-        )
-        .map_err(|_| V5DispatchAdmissionHandlerError::PeerRejected)?;
-
-    let payload = read_bounded_v5_dispatch_admission_frame(stream)?;
+    let payload = read_authenticated_v5_dispatch_admission_frame(policy, attestation, stream)?;
     handle_v5_dispatch_admission_wire(backend, &payload)
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn handle_authenticated_v5_dispatch_admission_request_with_binding(
+    policy: &BrokerHostConfinementPolicyV1,
+    attestation: &BrokerHostConfinementAttestationV1,
+    stream: &mut UnixStream,
+    backend: &LedgerV5DispatchAdmissionBackend<'_>,
+    expected_run_id: RunId,
+) -> Result<HandledV5DispatchAdmissionV1, V5DispatchAdmissionHandlerError> {
+    let payload = read_authenticated_v5_dispatch_admission_frame(policy, attestation, stream)?;
+    let request = parse_v5_dispatch_admission_request(&payload)?;
+    let disposition =
+        record_v5_admission_for_expected_run(backend, request.clone(), expected_run_id);
+    Ok(HandledV5DispatchAdmissionV1 {
+        request,
+        disposition,
+    })
 }
 
 /// Read one big-endian length-prefixed V5 payload without permitting an
@@ -312,12 +342,41 @@ pub(crate) fn handle_authenticated_v5_dispatch_admission_request(
 fn read_bounded_v5_dispatch_admission_frame(
     stream: &mut UnixStream,
 ) -> Result<Vec<u8>, V5DispatchAdmissionHandlerError> {
-    const MAX_V5_DISPATCH_ADMISSION_FRAME_BYTES: usize = 16 * 1024;
+    read_v5_frame_with_timeout(stream, Duration::from_secs(5), |_| Ok(()))
+}
 
+#[cfg(target_os = "linux")]
+fn read_authenticated_v5_dispatch_admission_frame(
+    policy: &BrokerHostConfinementPolicyV1,
+    attestation: &BrokerHostConfinementAttestationV1,
+    stream: &mut UnixStream,
+) -> Result<Vec<u8>, V5DispatchAdmissionHandlerError> {
+    read_v5_frame_with_timeout(stream, Duration::from_secs(5), |stream| {
+        policy
+            .verify_linux_connected_worker_for_role(
+                BrokerAuthorityRoleV1::DispatchAdmission,
+                attestation,
+                stream,
+            )
+            .map_err(|_| V5DispatchAdmissionHandlerError::PeerRejected)
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn read_v5_frame_with_timeout<F>(
+    stream: &mut UnixStream,
+    timeout: Duration,
+    mut before_read: F,
+) -> Result<Vec<u8>, V5DispatchAdmissionHandlerError>
+where
+    F: FnMut(&mut UnixStream) -> Result<(), V5DispatchAdmissionHandlerError>,
+{
+    const MAX_V5_DISPATCH_ADMISSION_FRAME_BYTES: usize = 16 * 1024;
+    let deadline = Instant::now()
+        .checked_add(timeout)
+        .ok_or(V5DispatchAdmissionHandlerError::FrameRejected)?;
     let mut encoded_length = [0_u8; std::mem::size_of::<u32>()];
-    stream
-        .read_exact(&mut encoded_length)
-        .map_err(|_| V5DispatchAdmissionHandlerError::FrameRejected)?;
+    read_frame_chunk(stream, deadline, &mut before_read, &mut encoded_length)?;
 
     let payload_length = u32::from_be_bytes(encoded_length) as usize;
     if payload_length == 0 || payload_length > MAX_V5_DISPATCH_ADMISSION_FRAME_BYTES {
@@ -325,10 +384,42 @@ fn read_bounded_v5_dispatch_admission_frame(
     }
 
     let mut payload = vec![0_u8; payload_length];
-    stream
-        .read_exact(&mut payload)
-        .map_err(|_| V5DispatchAdmissionHandlerError::FrameRejected)?;
+    read_frame_chunk(stream, deadline, &mut before_read, &mut payload)?;
     Ok(payload)
+}
+
+#[cfg(target_os = "linux")]
+fn read_frame_chunk<F>(
+    stream: &mut UnixStream,
+    deadline: Instant,
+    before_read: &mut F,
+    buffer: &mut [u8],
+) -> Result<(), V5DispatchAdmissionHandlerError>
+where
+    F: FnMut(&mut UnixStream) -> Result<(), V5DispatchAdmissionHandlerError>,
+{
+    let mut filled = 0;
+    while filled < buffer.len() {
+        before_read(stream)?;
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .filter(|remaining| !remaining.is_zero())
+            .ok_or(V5DispatchAdmissionHandlerError::FrameRejected)?;
+        stream
+            .set_read_timeout(Some(remaining))
+            .map_err(|_| V5DispatchAdmissionHandlerError::FrameRejected)?;
+        let count = stream
+            .read(&mut buffer[filled..])
+            .map_err(|_| V5DispatchAdmissionHandlerError::FrameRejected)?;
+        if count == 0 {
+            return Err(V5DispatchAdmissionHandlerError::FrameRejected);
+        }
+        filled += count;
+        if Instant::now() >= deadline {
+            return Err(V5DispatchAdmissionHandlerError::FrameRejected);
+        }
+    }
+    Ok(())
 }
 
 /// Facts that must remain invariant across the record and seal transitions.
@@ -442,6 +533,7 @@ mod tests {
         let expected_source_dispatch_event_id = EventId::new();
         let substituted_source_dispatch_event_id = EventId::new();
         let request = V5DispatchAdmissionRequest {
+            request_id: Uuid::now_v7(),
             run_id,
             v5_envelope_digest:
                 "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
@@ -467,5 +559,79 @@ mod tests {
             expected_source_dispatch_event_id,
         )
         .is_none());
+    }
+
+    #[test]
+    fn exact_wire_parser_retains_canonical_request_correlation_for_signed_response() {
+        let request_id = "018f2e40-0000-7000-8000-000000000009";
+        let run_id = "018f2e40-0000-7000-8000-000000000001";
+        let digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let parsed = parse_v5_dispatch_admission_request(
+            format!(
+                r#"{{"request_id":"{request_id}","run_id":"{run_id}","v5_envelope_digest":"{digest}"}}"#
+            )
+            .as_bytes(),
+        )
+        .expect("closed request");
+
+        assert_eq!(parsed.request_id.to_string(), request_id);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn bounded_reader_rejects_zero_oversized_and_truncated_frames() {
+        use std::io::Write;
+        use std::os::unix::net::UnixStream;
+
+        for frame in [
+            0_u32.to_be_bytes().to_vec(),
+            (16_u32 * 1024 + 1).to_be_bytes().to_vec(),
+            {
+                let mut frame = 8_u32.to_be_bytes().to_vec();
+                frame.extend_from_slice(b"short");
+                frame
+            },
+        ] {
+            let (mut reader, mut writer) = UnixStream::pair().expect("socket pair");
+            writer.write_all(&frame).expect("write malformed frame");
+            drop(writer);
+            assert_eq!(
+                read_bounded_v5_dispatch_admission_frame(&mut reader),
+                Err(V5DispatchAdmissionHandlerError::FrameRejected)
+            );
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn bounded_reader_uses_one_absolute_deadline_and_rechecks_peer_before_each_read() {
+        use std::io::Write;
+        use std::os::unix::net::UnixStream;
+
+        let (mut reader, mut writer) = UnixStream::pair().expect("socket pair");
+        writer
+            .write_all(&2_u32.to_be_bytes())
+            .expect("write frame length");
+        writer.write_all(b"x").expect("write partial payload");
+
+        let mut peer_checks = 0_u32;
+        let started = Instant::now();
+        assert_eq!(
+            read_v5_frame_with_timeout(&mut reader, Duration::from_millis(50), |_| {
+                peer_checks += 1;
+                Ok(())
+            },),
+            Err(V5DispatchAdmissionHandlerError::FrameRejected)
+        );
+
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "held-open peer exceeded the bounded absolute deadline"
+        );
+        assert!(
+            peer_checks >= 2,
+            "peer authority was not rechecked before the payload read"
+        );
+        drop(writer);
     }
 }

@@ -6,6 +6,7 @@
 //! authority-root directory for later protected startup steps.
 
 use crate::host_config::{parse_promotion_decision_host_config, PromotionDecisionHostConfigV1};
+use crate::v5_admission_host_config::{parse_v5_admission_host_config_v1, V5AdmissionHostConfigV1};
 use thiserror::Error;
 
 #[cfg(target_os = "linux")]
@@ -25,6 +26,7 @@ const ROOT_UID: u32 = 0;
 const DEFAULT_PROMOTION_DECISION_HOST_CONFIG_PARENT_COMPONENTS: [&[u8]; 3] =
     [b"etc", b"buildplane", b"authority-host"];
 const DEFAULT_PROMOTION_DECISION_HOST_CONFIG_FILE_NAME: &[u8] = b"promotion-decision-v1.json";
+const DEFAULT_V5_ADMISSION_HOST_CONFIG_FILE_NAME: &[u8] = b"v5-dispatch-admission-v1.json";
 const MAX_PROTECTED_HOST_CONFIG_BYTES: usize = 256 * 1024;
 
 /// Closed failures for the protected deployment config reader.
@@ -85,13 +87,29 @@ pub(crate) struct ValidatedAuthorityRootV1;
 
 #[cfg(target_os = "linux")]
 impl ValidatedAuthorityRootV1 {
-    fn new(directory: File) -> Self {
+    pub(crate) fn new(directory: File) -> Self {
         Self { directory }
     }
 
     /// The held directory descriptor for later protected-realm opens.
     pub(crate) fn directory(&self) -> &File {
         &self.directory
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct ValidatedV5AdmissionHostStartupV1 {
+    config: V5AdmissionHostConfigV1,
+    authority_root: ValidatedAuthorityRootV1,
+}
+
+impl ValidatedV5AdmissionHostStartupV1 {
+    pub(crate) fn config(&self) -> &V5AdmissionHostConfigV1 {
+        &self.config
+    }
+
+    pub(crate) fn authority_root(&self) -> &ValidatedAuthorityRootV1 {
+        &self.authority_root
     }
 }
 
@@ -120,15 +138,42 @@ pub(crate) fn load_default_promotion_decision_host_config_v1(
 ) -> Result<ValidatedPromotionDecisionHostStartupV1, ProtectedHostConfigReadError> {
     #[cfg(target_os = "linux")]
     {
-        let json = read_default_protected_host_config_json_bytes()?;
+        let json = read_default_protected_host_config_json_bytes(
+            DEFAULT_PROMOTION_DECISION_HOST_CONFIG_FILE_NAME,
+        )?;
         let config = parse_protected_host_config_json(&json)?;
-        let authority_root = open_validated_authority_root(&config)?;
+        let authority_root =
+            open_validated_authority_root_path(&config.authority_root, config.broker_uid)?;
         Ok(ValidatedPromotionDecisionHostStartupV1 {
             config,
             authority_root,
         })
     }
 
+    #[cfg(not(target_os = "linux"))]
+    {
+        Err(ProtectedHostConfigReadError::UnsupportedPlatform)
+    }
+}
+
+pub(crate) fn load_default_v5_admission_host_config_v1(
+) -> Result<ValidatedV5AdmissionHostStartupV1, ProtectedHostConfigReadError> {
+    #[cfg(target_os = "linux")]
+    {
+        let bytes = read_default_protected_host_config_json_bytes(
+            DEFAULT_V5_ADMISSION_HOST_CONFIG_FILE_NAME,
+        )?;
+        let json =
+            std::str::from_utf8(&bytes).map_err(|_| ProtectedHostConfigReadError::InvalidConfig)?;
+        let config = parse_v5_admission_host_config_v1(json)
+            .map_err(|_| ProtectedHostConfigReadError::InvalidConfig)?;
+        let authority_root =
+            open_validated_authority_root_path(&config.authority_root, config.broker_uid)?;
+        Ok(ValidatedV5AdmissionHostStartupV1 {
+            config,
+            authority_root,
+        })
+    }
     #[cfg(not(target_os = "linux"))]
     {
         Err(ProtectedHostConfigReadError::UnsupportedPlatform)
@@ -190,10 +235,11 @@ fn validate_authority_root_facts(
 /// closed deployment config; each component is reopened exactly once through
 /// the descriptor walk below, never by a later path lookup.
 #[cfg(target_os = "linux")]
-fn open_validated_authority_root(
-    config: &PromotionDecisionHostConfigV1,
+fn open_validated_authority_root_path(
+    authority_root_path: &Path,
+    broker_uid: u32,
 ) -> Result<ValidatedAuthorityRootV1, ProtectedHostConfigReadError> {
-    let components = authority_root_components(&config.authority_root)?;
+    let components = authority_root_components(authority_root_path)?;
     let (final_component, ancestors) = components
         .split_last()
         .ok_or(ProtectedHostConfigReadError::UnsafeAuthorityRoot)?;
@@ -216,7 +262,7 @@ fn open_validated_authority_root(
                 .metadata()
                 .map_err(|_| ProtectedHostConfigReadError::UnsafeAuthorityRoot)?,
         ),
-        config.broker_uid,
+        broker_uid,
     )?;
     Ok(ValidatedAuthorityRootV1::new(authority_root))
 }
@@ -255,8 +301,9 @@ fn authority_root_components(
 /// then open exactly `promotion-decision-v1.json`. There is no configurable
 /// production pathname or owner policy.
 #[cfg(target_os = "linux")]
-fn read_default_protected_host_config_json_bytes() -> Result<Vec<u8>, ProtectedHostConfigReadError>
-{
+fn read_default_protected_host_config_json_bytes(
+    file_name: &[u8],
+) -> Result<Vec<u8>, ProtectedHostConfigReadError> {
     let mut parent = open_validated_root_directory()?;
     for component in DEFAULT_PROMOTION_DECISION_HOST_CONFIG_PARENT_COMPONENTS {
         let child = open_root_owned_directory_at(parent.as_raw_fd(), component)?;
@@ -265,10 +312,7 @@ fn read_default_protected_host_config_json_bytes() -> Result<Vec<u8>, ProtectedH
 
     // The final name is opened relative to the held, validated parent. A
     // later pathname swap cannot redirect this descriptor to another parent.
-    let mut config = open_config_file_at(
-        parent.as_raw_fd(),
-        DEFAULT_PROMOTION_DECISION_HOST_CONFIG_FILE_NAME,
-    )?;
+    let mut config = open_config_file_at(parent.as_raw_fd(), file_name)?;
     validate_config_file_facts(
         descriptor_facts(
             &config
@@ -522,7 +566,44 @@ pub(crate) fn validate_promotion_decision_host_startup_from_trusted_anchor_for_t
     trusted_anchor: &Path,
     expected_ancestor_owner: u32,
 ) -> Result<ValidatedPromotionDecisionHostStartupV1, ProtectedHostConfigReadError> {
-    let authority_root_components = absolute_path_components_for_test(&config.authority_root)
+    let authority_root = validate_authority_root_from_trusted_anchor_for_test(
+        &config.authority_root,
+        config.broker_uid,
+        trusted_anchor,
+        expected_ancestor_owner,
+    )?;
+    Ok(ValidatedPromotionDecisionHostStartupV1 {
+        config,
+        authority_root,
+    })
+}
+
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) fn validate_v5_admission_host_startup_from_trusted_anchor_for_test(
+    config: V5AdmissionHostConfigV1,
+    trusted_anchor: &Path,
+    expected_ancestor_owner: u32,
+) -> Result<ValidatedV5AdmissionHostStartupV1, ProtectedHostConfigReadError> {
+    let authority_root = validate_authority_root_from_trusted_anchor_for_test(
+        &config.authority_root,
+        config.broker_uid,
+        trusted_anchor,
+        expected_ancestor_owner,
+    )?;
+    Ok(ValidatedV5AdmissionHostStartupV1 {
+        config,
+        authority_root,
+    })
+}
+
+#[cfg(all(test, target_os = "linux"))]
+fn validate_authority_root_from_trusted_anchor_for_test(
+    authority_root_path: &Path,
+    broker_uid: u32,
+    trusted_anchor: &Path,
+    expected_ancestor_owner: u32,
+) -> Result<ValidatedAuthorityRootV1, ProtectedHostConfigReadError> {
+    let authority_root_components = absolute_path_components_for_test(authority_root_path)
         .map_err(|_| ProtectedHostConfigReadError::UnsafeAuthorityRoot)?;
     let anchor_components = absolute_path_components_for_test(trusted_anchor)
         .map_err(|_| ProtectedHostConfigReadError::UnsafeAuthorityRoot)?;
@@ -564,12 +645,9 @@ pub(crate) fn validate_promotion_decision_host_startup_from_trusted_anchor_for_t
                 .metadata()
                 .map_err(|_| ProtectedHostConfigReadError::UnsafeAuthorityRoot)?,
         ),
-        config.broker_uid,
+        broker_uid,
     )?;
-    Ok(ValidatedPromotionDecisionHostStartupV1 {
-        config,
-        authority_root: ValidatedAuthorityRootV1::new(authority_root),
-    })
+    Ok(ValidatedAuthorityRootV1::new(authority_root))
 }
 
 #[cfg(all(test, target_os = "linux"))]

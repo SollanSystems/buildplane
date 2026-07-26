@@ -7,6 +7,7 @@
 //! select the durable authority realm.
 
 use crate::host_config_loader::ValidatedPromotionDecisionHostStartupV1;
+use crate::host_config_loader::ValidatedV5AdmissionHostStartupV1;
 use bp_ledger::storage::sqlite::SqliteStore;
 use thiserror::Error;
 
@@ -104,55 +105,10 @@ pub(crate) fn load_promotion_decision_ledger_v1(
 ) -> Result<ProtectedPromotionDecisionLedgerV1, ProtectedHostLedgerLoadError> {
     #[cfg(target_os = "linux")]
     {
-        let expected_owner = startup.config().broker_uid;
-        let ledger_directory = open_directory_at(
-            startup.authority_root().directory().as_raw_fd(),
-            LEDGER_DIRECTORY_NAME,
-        )?;
-        validate_ledger_directory_metadata(&ledger_directory, expected_owner)?;
-
-        let database = open_database_at(ledger_directory.as_raw_fd())?;
-        let database_metadata = database
-            .metadata()
-            .map_err(|_| ProtectedHostLedgerLoadError::UnsafeLedgerDatabase)?;
-        validate_ledger_database_metadata(&database_metadata, expected_owner)?;
-        let validated_identity = database_identity(&database_metadata);
-        validate_existing_sqlite_sidecars(ledger_directory.as_raw_fd(), expected_owner)?;
-
-        let recovery_database_path = PathBuf::from(format!(
-            "/proc/self/fd/{}/events.db",
-            ledger_directory.as_raw_fd()
-        ));
-        let sqlite_uri = PathBuf::from(format!(
-            "file:/proc/self/fd/{}/events.db?mode=rw",
-            ledger_directory.as_raw_fd()
-        ));
-        let store = SqliteStore::open(&sqlite_uri)
-            .map_err(|_| ProtectedHostLedgerLoadError::LedgerOpenFailed)?;
-
-        let store_path = store
-            .canonical_database_path()
-            .map_err(|_| ProtectedHostLedgerLoadError::LedgerIdentityMismatch)?;
-        let recovery_target = std::fs::canonicalize(&recovery_database_path)
-            .map_err(|_| ProtectedHostLedgerLoadError::LedgerIdentityMismatch)?;
-        if store_path != recovery_target {
-            return Err(ProtectedHostLedgerLoadError::LedgerIdentityMismatch);
-        }
-        let reopened_metadata = std::fs::metadata(&store_path)
-            .map_err(|_| ProtectedHostLedgerLoadError::LedgerIdentityMismatch)?;
-        if database_identity(&reopened_metadata) != validated_identity {
-            return Err(ProtectedHostLedgerLoadError::LedgerIdentityMismatch);
-        }
-        let sqlite_sidecars =
-            open_and_validate_sqlite_sidecars(ledger_directory.as_raw_fd(), expected_owner)?;
-
-        Ok(ProtectedPromotionDecisionLedgerV1 {
-            store,
-            database,
-            sqlite_sidecars,
-            ledger_directory,
-            recovery_database_path,
-        })
+        load_protected_ledger_v1(
+            startup.authority_root().directory(),
+            startup.config().broker_uid,
+        )
     }
 
     #[cfg(not(target_os = "linux"))]
@@ -160,6 +116,75 @@ pub(crate) fn load_promotion_decision_ledger_v1(
         let _ = startup;
         Err(ProtectedHostLedgerLoadError::UnsupportedPlatform)
     }
+}
+
+pub(crate) fn load_v5_admission_ledger_v1(
+    startup: &ValidatedV5AdmissionHostStartupV1,
+) -> Result<ProtectedPromotionDecisionLedgerV1, ProtectedHostLedgerLoadError> {
+    #[cfg(target_os = "linux")]
+    {
+        load_protected_ledger_v1(
+            startup.authority_root().directory(),
+            startup.config().broker_uid,
+        )
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = startup;
+        Err(ProtectedHostLedgerLoadError::UnsupportedPlatform)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn load_protected_ledger_v1(
+    authority_root: &File,
+    expected_owner: u32,
+) -> Result<ProtectedPromotionDecisionLedgerV1, ProtectedHostLedgerLoadError> {
+    let ledger_directory = open_directory_at(authority_root.as_raw_fd(), LEDGER_DIRECTORY_NAME)?;
+    validate_ledger_directory_metadata(&ledger_directory, expected_owner)?;
+
+    let database = open_database_at(ledger_directory.as_raw_fd())?;
+    let database_metadata = database
+        .metadata()
+        .map_err(|_| ProtectedHostLedgerLoadError::UnsafeLedgerDatabase)?;
+    validate_ledger_database_metadata(&database_metadata, expected_owner)?;
+    let validated_identity = database_identity(&database_metadata);
+    validate_existing_sqlite_sidecars(ledger_directory.as_raw_fd(), expected_owner)?;
+
+    let recovery_database_path = PathBuf::from(format!(
+        "/proc/self/fd/{}/events.db",
+        ledger_directory.as_raw_fd()
+    ));
+    let sqlite_uri = PathBuf::from(format!(
+        "file:/proc/self/fd/{}/events.db?mode=rw",
+        ledger_directory.as_raw_fd()
+    ));
+    let store = SqliteStore::open(&sqlite_uri)
+        .map_err(|_| ProtectedHostLedgerLoadError::LedgerOpenFailed)?;
+
+    let store_path = store
+        .canonical_database_path()
+        .map_err(|_| ProtectedHostLedgerLoadError::LedgerIdentityMismatch)?;
+    let recovery_target = std::fs::canonicalize(&recovery_database_path)
+        .map_err(|_| ProtectedHostLedgerLoadError::LedgerIdentityMismatch)?;
+    if store_path != recovery_target {
+        return Err(ProtectedHostLedgerLoadError::LedgerIdentityMismatch);
+    }
+    let reopened_metadata = std::fs::metadata(&store_path)
+        .map_err(|_| ProtectedHostLedgerLoadError::LedgerIdentityMismatch)?;
+    if database_identity(&reopened_metadata) != validated_identity {
+        return Err(ProtectedHostLedgerLoadError::LedgerIdentityMismatch);
+    }
+    let sqlite_sidecars =
+        open_and_validate_sqlite_sidecars(ledger_directory.as_raw_fd(), expected_owner)?;
+
+    Ok(ProtectedPromotionDecisionLedgerV1 {
+        store,
+        database,
+        sqlite_sidecars,
+        ledger_directory,
+        recovery_database_path,
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -375,8 +400,10 @@ mod tests {
     use crate::host_config::parse_promotion_decision_host_config;
     use crate::host_config_loader::{
         validate_promotion_decision_host_startup_from_trusted_anchor_for_test,
+        validate_v5_admission_host_startup_from_trusted_anchor_for_test,
         ValidatedPromotionDecisionHostStartupV1,
     };
+    use crate::v5_admission_host_config::parse_v5_admission_host_config_v1;
     use bp_ledger::storage::sqlite::SqliteStore;
     use ed25519_dalek::SigningKey;
     use serde_json::json;
@@ -445,6 +472,37 @@ mod tests {
             self.create_ledger_in(&ledger_directory)
         }
 
+        fn v5_startup(&self) -> ValidatedV5AdmissionHostStartupV1 {
+            let signer = |actor_id: &str, key_id: &str, seed: [u8; 32]| {
+                let signing_key = SigningKey::from_bytes(&seed);
+                json!({
+                    "actor_id": actor_id,
+                    "key_id": key_id,
+                    "public_key": signing_key.verifying_key().to_bytes().to_vec(),
+                })
+            };
+            let client_uid = if self.owner == 1 { 2 } else { 1 };
+            let config = json!({
+                "schema_version": 1,
+                "run_id": "018f2e40-0000-7000-8000-000000000001",
+                "broker_uid": self.owner,
+                "dispatch_admission_client_uids": [client_uid],
+                "socket_group_gid": 1002,
+                "authority_root": self.authority_root.to_string_lossy(),
+                "authority_realm_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "source_dispatch": signer("source", "source-main", [11; 32]),
+                "admission_record": signer("admission", "admission-main", [12; 32]),
+                "checkpoint": signer("checkpoint", "checkpoint-main", [13; 32]),
+            });
+            validate_v5_admission_host_startup_from_trusted_anchor_for_test(
+                parse_v5_admission_host_config_v1(&config.to_string())
+                    .expect("valid V5 ledger-custody config"),
+                self._anchor.path(),
+                self.owner,
+            )
+            .expect("validated V5 test startup")
+        }
+
         fn create_ledger_in(&self, ledger_directory: &Path) -> PathBuf {
             let database_path = ledger_directory.join("events.db");
             let store = SqliteStore::open(&database_path).expect("create a real Buildplane ledger");
@@ -511,6 +569,22 @@ mod tests {
             (store_metadata.dev(), store_metadata.ino()),
             (recovery_metadata.dev(), recovery_metadata.ino()),
             "the writer and recovery reader must bind the same device and inode"
+        );
+    }
+
+    #[test]
+    fn v5_host_reuses_the_same_descriptor_bound_existing_ledger_custody() {
+        let fixture = LedgerFixture::new();
+        let database_path = fixture.create_ledger();
+        let startup = fixture.v5_startup();
+        let protected =
+            load_v5_admission_ledger_v1(&startup).expect("load protected V5 ledger custody");
+        assert_eq!(
+            protected
+                .store()
+                .canonical_database_path()
+                .expect("canonical V5 ledger"),
+            fs::canonicalize(database_path).expect("canonical fixture ledger")
         );
     }
 

@@ -8574,6 +8574,8 @@ fn v5_broker_checkpoint_count(fixture: &V5BrokerAdmissionFixture) -> usize {
 
 fn v5_broker_admission_request(fixture: &V5BrokerAdmissionFixture) -> V5DispatchAdmissionRequest {
     V5DispatchAdmissionRequest {
+        request_id: uuid::Uuid::parse_str("123e4567-e89b-12d3-a456-426614174000")
+            .expect("canonical test request id"),
         run_id: fixture.run_id,
         v5_envelope_digest: fixture.v5_envelope_digest.clone(),
     }
@@ -9207,6 +9209,7 @@ fn broker_v5_dispatch_admission_reconciles_wrong_run_without_tape_mutation() {
     )
     .expect("inject valid V5 dependencies");
     let request = V5DispatchAdmissionRequest {
+        request_id: uuid::Uuid::now_v7(),
         run_id: RunId::new(),
         v5_envelope_digest: fixture.v5_envelope_digest.clone(),
     };
@@ -9227,6 +9230,32 @@ fn broker_v5_dispatch_admission_reconciles_wrong_run_without_tape_mutation() {
 }
 
 #[test]
+fn protected_v5_host_run_binding_blocks_a_valid_other_run_before_tape_mutation() {
+    let fixture = v5_broker_admission_fixture();
+    let broker = v5_broker_admission_backend(&fixture);
+    let before = fixture.store.event_count().expect("count V5 tape");
+    let disposition = super::v5_dispatch_admission::record_v5_admission_for_expected_run(
+        &broker,
+        v5_broker_admission_request(&fixture),
+        RunId::new(),
+    );
+
+    assert!(matches!(
+        disposition,
+        BrokerV5DispatchAdmissionDisposition::ReconciliationRequired
+    ));
+    assert_eq!(
+        fixture
+            .store
+            .event_count()
+            .expect("count unchanged V5 tape"),
+        before
+    );
+    assert_eq!(v5_broker_admission_receipt_count(&fixture), 0);
+    assert_eq!(v5_broker_checkpoint_count(&fixture), 0);
+}
+
+#[test]
 fn broker_v5_dispatch_admission_reconciles_unknown_digest_without_tape_mutation() {
     let fixture = v5_broker_admission_fixture();
     let broker = LedgerV5DispatchAdmissionBackend::from_prevalidated_startup(
@@ -9239,6 +9268,7 @@ fn broker_v5_dispatch_admission_reconciles_unknown_digest_without_tape_mutation(
     )
     .expect("inject valid V5 dependencies");
     let request = V5DispatchAdmissionRequest {
+        request_id: uuid::Uuid::now_v7(),
         run_id: fixture.run_id,
         v5_envelope_digest:
             "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),

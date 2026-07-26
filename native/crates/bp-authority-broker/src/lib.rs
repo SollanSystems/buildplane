@@ -67,11 +67,20 @@ mod promotion_git;
 mod protocol;
 #[allow(dead_code)]
 mod reviewer_session;
+mod v5_admission_client;
+mod v5_admission_host;
+#[allow(dead_code)]
+mod v5_admission_host_config;
+mod v5_admission_response;
+#[cfg(test)]
+mod v5_admission_response_contract_tests;
 #[allow(dead_code)]
 mod v5_dispatch_admission;
 
 pub use promotion_decision_client::run_default_promotion_decision_client_v1;
 pub use promotion_decision_host::run_default_promotion_decision_host_v1;
+pub use v5_admission_client::run_default_v5_admission_client_v1;
+pub use v5_admission_host::run_default_v5_admission_host_v1;
 
 use crate::promotion_git::{
     PromotionGitGateway, PromotionGitStartupError, VerifiedPromotionCapability,

@@ -5,6 +5,7 @@
 //! accepted at this boundary.
 
 use crate::host_config_loader::ValidatedPromotionDecisionHostStartupV1;
+use crate::host_config_loader::ValidatedV5AdmissionHostStartupV1;
 use ed25519_dalek::SigningKey;
 use thiserror::Error;
 
@@ -98,6 +99,52 @@ fn validate_key_file_facts(
 pub(crate) struct ProtectedPromotionDecisionSigningKeysV1 {
     kernel: SigningKey,
     operator: SigningKey,
+}
+
+pub(crate) struct ProtectedV5AdmissionSigningKeysV1 {
+    admission: SigningKey,
+    checkpoint: SigningKey,
+}
+
+impl ProtectedV5AdmissionSigningKeysV1 {
+    pub(crate) fn admission(&self) -> &SigningKey {
+        &self.admission
+    }
+
+    pub(crate) fn checkpoint(&self) -> &SigningKey {
+        &self.checkpoint
+    }
+}
+
+pub(crate) fn load_v5_admission_signing_keys_v1(
+    startup: &ValidatedV5AdmissionHostStartupV1,
+) -> Result<ProtectedV5AdmissionSigningKeysV1, ProtectedHostKeyLoadError> {
+    #[cfg(target_os = "linux")]
+    {
+        let config = startup.config();
+        let admission = load_signing_key_from_authority_descriptor(
+            startup.authority_root().directory(),
+            &config.admission_record_signer,
+            config.broker_uid,
+        )?;
+        let checkpoint = load_signing_key_from_authority_descriptor(
+            startup.authority_root().directory(),
+            &config.checkpoint_signer,
+            config.broker_uid,
+        )?;
+        if admission.verifying_key() == checkpoint.verifying_key() {
+            return Err(ProtectedHostKeyLoadError::AliasedKeyMaterial);
+        }
+        Ok(ProtectedV5AdmissionSigningKeysV1 {
+            admission,
+            checkpoint,
+        })
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = startup;
+        Err(ProtectedHostKeyLoadError::UnsupportedPlatform)
+    }
 }
 
 impl ProtectedPromotionDecisionSigningKeysV1 {
@@ -300,6 +347,8 @@ mod tests {
     use super::*;
     use crate::host_config::parse_promotion_decision_host_config;
     use crate::host_config_loader::validate_promotion_decision_host_startup_from_trusted_anchor_for_test;
+    use crate::host_config_loader::validate_v5_admission_host_startup_from_trusted_anchor_for_test;
+    use crate::v5_admission_host_config::parse_v5_admission_host_config_v1;
     use serde_json::json;
     use std::fs;
     use std::io::{self, Read};
@@ -431,6 +480,54 @@ mod tests {
             .expect("descriptor-bound keys load after pathname move");
         assert_eq!(keys.kernel().to_bytes(), kernel_seed);
         assert_eq!(keys.operator().to_bytes(), operator_seed);
+    }
+
+    #[test]
+    fn v5_custody_loads_only_admission_and_checkpoint_keys_from_retained_root() {
+        let fixture = KeyFixture::new();
+        let source_seed = [11; 32];
+        let admission_seed = [12; 32];
+        let checkpoint_seed = [13; 32];
+        fixture.write_key(&["admission"], "admission-main", &admission_seed);
+        fixture.write_key(&["checkpoint"], "checkpoint-main", &checkpoint_seed);
+        let signer = |actor_id: &str, key_id: &str, seed: [u8; 32]| {
+            let signing_key = SigningKey::from_bytes(&seed);
+            json!({
+                "actor_id": actor_id,
+                "key_id": key_id,
+                "public_key": signing_key.verifying_key().to_bytes().to_vec(),
+            })
+        };
+        let client_uid = if fixture.owner == 1 { 2 } else { 1 };
+        let config = json!({
+            "schema_version": 1,
+            "run_id": "018f2e40-0000-7000-8000-000000000001",
+            "broker_uid": fixture.owner,
+            "dispatch_admission_client_uids": [client_uid],
+            "socket_group_gid": 1002,
+            "authority_root": fixture.authority_root.to_string_lossy(),
+            "authority_realm_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "source_dispatch": signer("source", "source-main", source_seed),
+            "admission_record": signer("admission", "admission-main", admission_seed),
+            "checkpoint": signer("checkpoint", "checkpoint-main", checkpoint_seed),
+        });
+        let startup = validate_v5_admission_host_startup_from_trusted_anchor_for_test(
+            parse_v5_admission_host_config_v1(&config.to_string()).expect("valid V5 config"),
+            fixture._anchor.path(),
+            fixture.owner,
+        )
+        .expect("descriptor-bound V5 startup");
+
+        let keys = load_v5_admission_signing_keys_v1(&startup).expect("load V5 signing custody");
+        assert_eq!(keys.admission().to_bytes(), admission_seed);
+        assert_eq!(keys.checkpoint().to_bytes(), checkpoint_seed);
+        assert!(
+            !fixture
+                .authority_root
+                .join("keys/source/source-main.ed25519")
+                .exists(),
+            "the source dispatch identity is verification-only"
+        );
     }
 
     #[test]
