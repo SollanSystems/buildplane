@@ -3922,20 +3922,22 @@ async function runGovernedRunCommand(
 	assertGovernedProjectInitialized(options.cwd);
 	const projectRoot = resolve(options.cwd);
 	if (runArguments.kind === "promotion-decision-recovery") {
-		let status: "sealed" | "reconciliation_required" | undefined;
+		let result:
+			| Awaited<ReturnType<typeof submitProtectedPromotionDecision>>
+			| undefined;
 		try {
-			status = await submitProtectedPromotionDecision({
+			result = await submitProtectedPromotionDecision({
 				promotionApprovalRequestEventId: runArguments.recoveryReference,
 				decision: runArguments.decision,
 			});
 		} catch {
-			status = undefined;
+			result = undefined;
 		}
 		return emitGovernedPromotionDecisionRecovery(
 			runArguments.json,
 			options.stdout,
 			runArguments.decision,
-			status === "sealed" ? "recorded" : "blocked",
+			result?.status === "sealed" ? "recorded" : "blocked",
 		);
 	}
 	if (runArguments.kind === "recovery-resume") {

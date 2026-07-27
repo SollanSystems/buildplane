@@ -36,9 +36,8 @@ const MAX_PROMOTION_DECISION_RESPONSE_FRAME_BYTES: usize = 4 * 1024;
 const MAX_PROTECTED_CLIENT_CONFIG_BYTES: usize = 4 * 1024;
 #[cfg(target_os = "linux")]
 const PROMOTION_DECISION_IO_TIMEOUT: Duration = Duration::from_secs(5);
-const SEALED_RESPONSE_JSON: &[u8] = br#"{"schema_version":1,"status":"sealed"}"#;
 const RECONCILIATION_REQUIRED_RESPONSE_JSON: &[u8] =
-    br#"{"schema_version":1,"status":"reconciliation_required"}"#;
+    br#"{"schema_version":2,"status":"reconciliation_required","promotion_decision_event_id":null}"#;
 #[cfg(target_os = "linux")]
 const PROTECTED_CLIENT_CONFIG_PARENT_COMPONENTS: [&[u8]; 3] =
     [b"etc", b"buildplane", b"authority-host"];
@@ -374,9 +373,9 @@ fn encode_promotion_decision_request_frame_with_id(
     Ok(EncodedPromotionDecisionRequestV1 { request_id, frame })
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum PromotionDecisionClientStatusV1 {
-    Sealed,
+    Sealed { promotion_decision_event_id: String },
     ReconciliationRequired,
 }
 
@@ -431,10 +430,15 @@ fn exchange_promotion_decision_with_stream(
         return Err(PromotionDecisionClientErrorV1::InvalidResponse);
     }
     match status {
-        PromotionDecisionResponseStatusV1::Sealed => Ok(PromotionDecisionClientStatusV1::Sealed),
-        PromotionDecisionResponseStatusV1::ReconciliationRequired => {
+        (PromotionDecisionResponseStatusV1::Sealed, Some(promotion_decision_event_id)) => {
+            Ok(PromotionDecisionClientStatusV1::Sealed {
+                promotion_decision_event_id,
+            })
+        }
+        (PromotionDecisionResponseStatusV1::ReconciliationRequired, None) => {
             Ok(PromotionDecisionClientStatusV1::ReconciliationRequired)
         }
+        _ => Err(PromotionDecisionClientErrorV1::InvalidResponse),
     }
 }
 
@@ -832,13 +836,18 @@ pub fn run_default_promotion_decision_client_v1() -> ExitCode {
             }
         };
         let payload = match status {
-            PromotionDecisionClientStatusV1::Sealed => SEALED_RESPONSE_JSON,
+            PromotionDecisionClientStatusV1::Sealed {
+                promotion_decision_event_id,
+            } => format!(
+                r#"{{"schema_version":2,"status":"sealed","promotion_decision_event_id":"{promotion_decision_event_id}"}}"#
+            )
+            .into_bytes(),
             PromotionDecisionClientStatusV1::ReconciliationRequired => {
-                RECONCILIATION_REQUIRED_RESPONSE_JSON
+                RECONCILIATION_REQUIRED_RESPONSE_JSON.to_vec()
             }
         };
         if std::io::stdout()
-            .write_all(payload)
+            .write_all(&payload)
             .and_then(|_| std::io::stdout().write_all(b"\n"))
             .is_err()
         {

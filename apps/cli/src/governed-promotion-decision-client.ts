@@ -3,18 +3,19 @@ import { parse as parseUuid, stringify as stringifyUuid } from "uuid";
 
 const INSTALLED_AUTHORITY_CLIENT =
 	"/usr/libexec/buildplane/buildplane-authority-client";
-const SEALED_RESULT = '{"schema_version":1,"status":"sealed"}\n';
-const RECONCILIATION_REQUIRED_RESULT =
-	'{"schema_version":1,"status":"reconciliation_required"}\n';
-
 export interface ProtectedPromotionDecisionInputV1 {
 	readonly promotionApprovalRequestEventId: string;
 	readonly decision: "promote" | "reject";
 }
 
-export type ProtectedPromotionDecisionStatusV1 =
-	| "sealed"
-	| "reconciliation_required";
+export type ProtectedPromotionDecisionResultV2 =
+	| {
+			readonly status: "sealed";
+			readonly promotionDecisionEventId: string;
+	  }
+	| {
+			readonly status: "reconciliation_required";
+	  };
 
 function isCanonicalUuid(value: string): boolean {
 	try {
@@ -33,7 +34,7 @@ function isCanonicalUuid(value: string): boolean {
  */
 export async function submitProtectedPromotionDecision(
 	input: ProtectedPromotionDecisionInputV1,
-): Promise<ProtectedPromotionDecisionStatusV1 | undefined> {
+): Promise<ProtectedPromotionDecisionResultV2 | undefined> {
 	if (
 		process.platform !== "linux" ||
 		!isCanonicalUuid(input.promotionApprovalRequestEventId) ||
@@ -64,14 +65,52 @@ export async function submitProtectedPromotionDecision(
 		) {
 			return undefined;
 		}
-		if (result.stdout === SEALED_RESULT) {
-			return "sealed";
-		}
-		if (result.stdout === RECONCILIATION_REQUIRED_RESULT) {
-			return "reconciliation_required";
-		}
-		return undefined;
+		return parseProtectedPromotionDecisionResult(result.stdout);
 	} catch {
 		return undefined;
 	}
+}
+
+function parseProtectedPromotionDecisionResult(
+	source: string,
+): ProtectedPromotionDecisionResultV2 | undefined {
+	let value: unknown;
+	try {
+		value = JSON.parse(source);
+	} catch {
+		return undefined;
+	}
+	if (
+		typeof value !== "object" ||
+		value === null ||
+		Object.getPrototypeOf(value) !== Object.prototype ||
+		`${JSON.stringify(value)}\n` !== source
+	) {
+		return undefined;
+	}
+	const record = value as Record<string, unknown>;
+	if (
+		Object.keys(record).join(",") !==
+			"schema_version,status,promotion_decision_event_id" ||
+		record.schema_version !== 2
+	) {
+		return undefined;
+	}
+	if (
+		record.status === "sealed" &&
+		typeof record.promotion_decision_event_id === "string" &&
+		isCanonicalUuid(record.promotion_decision_event_id)
+	) {
+		return Object.freeze({
+			status: "sealed" as const,
+			promotionDecisionEventId: record.promotion_decision_event_id,
+		});
+	}
+	if (
+		record.status === "reconciliation_required" &&
+		record.promotion_decision_event_id === null
+	) {
+		return Object.freeze({ status: "reconciliation_required" as const });
+	}
+	return undefined;
 }

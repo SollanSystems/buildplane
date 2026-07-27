@@ -361,16 +361,18 @@ buildplane run \
 The client generates a fresh correlation UUID and sends one bounded request to
 the fixed authority socket. The host returns a closed, canonical response
 signed under the domain
-`buildplane.protected-promotion-decision.response.v1`. The signature binds the
+`buildplane.protected-promotion-decision.response.v2`. The signature binds the
 protocol and domain versions, fresh request UUID, approval event UUID, operator
-decision, and exact response status. The client does not interpret `sealed` or
-`reconciliation_required` until the pinned key verifies that signature and all
-request bindings match. A replayed, substituted, unsigned, noncanonical, or
-wrong-key response is blocked.
+decision, exact response status, and the resulting promotion-decision event
+UUID when sealed. The client does not interpret `sealed` or
+`reconciliation_required` or expose a decision event UUID until the pinned key
+verifies that signature and all request bindings match. A replayed, substituted,
+unsigned, noncanonical, or wrong-key response is blocked.
 
 A verified `sealed` response means only that the decision was recorded and
-kernel-sealed; the CLI still exits in recovery-required state and does not
-execute promotion. A verified `reconciliation_required` response, missing
+kernel-sealed and identifies the exact decision event eligible for the
+separately confined promotion-execution endpoint. A verified
+`reconciliation_required` response contains no decision identity. Missing
 response, timeout, malformed response, missing installation/config/socket, or
 unsupported platform remains blocked. Do not automatically resubmit after a
 lost or unknown response; use the same durable approval event only after

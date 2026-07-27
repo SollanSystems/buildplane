@@ -198,7 +198,9 @@ pub(crate) enum BrokerPromotionDecisionStartupError {
 /// transition is deliberately collapsed to reconciliation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum BrokerPromotionDecisionDisposition {
-    Sealed,
+    Sealed {
+        promotion_decision_event_id: EventId,
+    },
     ReconciliationRequired,
 }
 
@@ -303,9 +305,12 @@ impl<'a> BrokerPromotionDecisionAuthority<'a> {
             self.kernel_signing_key,
             self.kernel_signer,
         ) {
-            Ok(GovernedPromotionDecisionDispositionV1::Sealed { .. }) => {
-                BrokerPromotionDecisionDisposition::Sealed
-            }
+            Ok(GovernedPromotionDecisionDispositionV1::Sealed {
+                promotion_decision_event_id,
+                ..
+            }) => BrokerPromotionDecisionDisposition::Sealed {
+                promotion_decision_event_id,
+            },
             Ok(GovernedPromotionDecisionDispositionV1::AwaitingKernelSeal { .. }) | Err(_) => {
                 BrokerPromotionDecisionDisposition::ReconciliationRequired
             }

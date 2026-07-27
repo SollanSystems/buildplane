@@ -13,6 +13,7 @@ use crate::promotion_decision_response::{
 use ed25519_dalek::SigningKey;
 
 const APPROVAL_EVENT_ID: &str = "123e4567-e89b-12d3-a456-426614174001";
+const DECISION_EVENT_ID: &str = "123e4567-e89b-12d3-a456-426614174003";
 
 #[test]
 fn client_input_is_closed_and_requires_a_canonical_approval_event_uuid() {
@@ -224,6 +225,7 @@ fn systemd_style_listener_creator_is_the_client_peer_not_the_acceptor_process() 
                 )
                 .unwrap(),
                 PromotionDecisionResponseStatusV1::Sealed,
+                Some(DECISION_EVENT_ID),
             )
             .unwrap();
             stream.write_all(&(response.len() as u32).to_be_bytes())?;
@@ -265,7 +267,9 @@ fn systemd_style_listener_creator_is_the_client_peer_not_the_acceptor_process() 
             &request,
         )
         .unwrap(),
-        PromotionDecisionClientStatusV1::Sealed
+        PromotionDecisionClientStatusV1::Sealed {
+            promotion_decision_event_id: DECISION_EVENT_ID.to_string()
+        }
     );
 
     let mut status = 0;
@@ -392,6 +396,7 @@ fn connected_exchange_writes_one_request_and_accepts_only_a_complete_exact_respo
             PromotionDecisionResponseBindingV1::new(request_id, APPROVAL_EVENT_ID, "promote")
                 .unwrap(),
             PromotionDecisionResponseStatusV1::Sealed,
+            Some(DECISION_EVENT_ID),
         )
         .unwrap();
         server
@@ -407,7 +412,9 @@ fn connected_exchange_writes_one_request_and_accepts_only_a_complete_exact_respo
             &request,
         )
         .unwrap(),
-        PromotionDecisionClientStatusV1::Sealed
+        PromotionDecisionClientStatusV1::Sealed {
+            promotion_decision_event_id: DECISION_EVENT_ID.to_string()
+        }
     );
     server_thread.join().unwrap();
 
@@ -444,6 +451,7 @@ fn connected_exchange_writes_one_request_and_accepts_only_a_complete_exact_respo
             )
             .unwrap(),
             PromotionDecisionResponseStatusV1::Sealed,
+            Some(DECISION_EVENT_ID),
         )
         .unwrap();
         server

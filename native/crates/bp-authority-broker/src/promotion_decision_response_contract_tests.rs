@@ -8,6 +8,7 @@ const REQUEST_ID: &str = "018f2e40-0000-7000-8000-000000000111";
 const OTHER_REQUEST_ID: &str = "018f2e40-0000-7000-8000-000000000112";
 const APPROVAL_EVENT_ID: &str = "123e4567-e89b-12d3-a456-426614174001";
 const OTHER_APPROVAL_EVENT_ID: &str = "123e4567-e89b-12d3-a456-426614174002";
+const DECISION_EVENT_ID: &str = "123e4567-e89b-12d3-a456-426614174003";
 
 fn binding(
     request_id: &'static str,
@@ -25,13 +26,17 @@ fn signed_response_binds_nonce_event_decision_status_protocol_domain_and_key() {
         &signer,
         expected,
         PromotionDecisionResponseStatusV1::Sealed,
+        Some(DECISION_EVENT_ID),
     )
     .expect("protected host signs its closed response");
 
     assert_eq!(
         verify_promotion_decision_response_for_test(&payload, &signer.verifying_key(), expected,)
             .expect("the exact signed response verifies"),
-        PromotionDecisionResponseStatusV1::Sealed
+        (
+            PromotionDecisionResponseStatusV1::Sealed,
+            Some(DECISION_EVENT_ID.to_string())
+        )
     );
 
     for substituted in [
@@ -67,12 +72,14 @@ fn response_rejects_replay_wrong_status_signature_and_unsigned_or_extended_shape
         &signer,
         expected,
         PromotionDecisionResponseStatusV1::Sealed,
+        Some(DECISION_EVENT_ID),
     )
     .unwrap();
     let reconciliation = sign_promotion_decision_response_for_test(
         &signer,
         expected,
         PromotionDecisionResponseStatusV1::ReconciliationRequired,
+        None,
     )
     .unwrap();
 
@@ -83,7 +90,10 @@ fn response_rejects_replay_wrong_status_signature_and_unsigned_or_extended_shape
             expected,
         )
         .unwrap(),
-        PromotionDecisionResponseStatusV1::ReconciliationRequired
+        (
+            PromotionDecisionResponseStatusV1::ReconciliationRequired,
+            None
+        )
     );
 
     let mut wrong_signature = sealed.clone();
@@ -117,7 +127,7 @@ fn response_rejects_replay_wrong_status_signature_and_unsigned_or_extended_shape
             r#""domain":"protected-authority-response""#,
             r#""domain":"other-domain""#,
         ),
-        replace(r#""schema_version":1"#, r#""schema_version":2"#),
+        replace(r#""schema_version":2"#, r#""schema_version":1"#),
         br#"{"schema_version":1,"status":"sealed"}"#.to_vec(),
         [
             sealed.as_slice().strip_suffix(b"}").unwrap(),

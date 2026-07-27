@@ -9,10 +9,10 @@ use serde::Deserialize;
 use thiserror::Error;
 use uuid::Uuid;
 
-const RESPONSE_SCHEMA_VERSION: u8 = 1;
+const RESPONSE_SCHEMA_VERSION: u8 = 2;
 const RESPONSE_PROTOCOL: &str = "buildplane-promotion-decision";
 const RESPONSE_DOMAIN: &str = "protected-authority-response";
-const SIGNATURE_DOMAIN: &[u8] = b"buildplane.protected-promotion-decision.response.v1\0";
+const SIGNATURE_DOMAIN: &[u8] = b"buildplane.protected-promotion-decision.response.v2\0";
 
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
 pub(crate) enum PromotionDecisionResponseErrorV1 {
@@ -75,6 +75,7 @@ struct SignedPromotionDecisionResponseWireV1 {
     request_id: String,
     promotion_approval_request_event_id: String,
     decision: String,
+    promotion_decision_event_id: Option<String>,
     status: String,
     signature: String,
 }
@@ -83,13 +84,16 @@ pub(crate) fn sign_promotion_decision_response(
     signing_key: &SigningKey,
     binding: PromotionDecisionResponseBindingV1<'_>,
     status: PromotionDecisionResponseStatusV1,
+    promotion_decision_event_id: Option<&str>,
 ) -> Result<Vec<u8>, PromotionDecisionResponseErrorV1> {
-    let unsigned = canonical_unsigned_payload(binding, status);
+    validate_outcome_binding(status, promotion_decision_event_id)?;
+    let unsigned = canonical_unsigned_payload(binding, status, promotion_decision_event_id);
     let message = signature_message(&unsigned);
     let signature = signing_key.sign(&message);
     Ok(canonical_signed_payload(
         binding,
         status,
+        promotion_decision_event_id,
         &encode_hex(&signature.to_bytes()),
     ))
 }
@@ -98,7 +102,7 @@ pub(crate) fn verify_promotion_decision_response(
     payload: &[u8],
     verifying_key: &VerifyingKey,
     expected: PromotionDecisionResponseBindingV1<'_>,
-) -> Result<PromotionDecisionResponseStatusV1, PromotionDecisionResponseErrorV1> {
+) -> Result<(PromotionDecisionResponseStatusV1, Option<String>), PromotionDecisionResponseErrorV1> {
     let wire: SignedPromotionDecisionResponseWireV1 = serde_json::from_slice(payload)
         .map_err(|_| PromotionDecisionResponseErrorV1::InvalidPayload)?;
     if wire.schema_version != RESPONSE_SCHEMA_VERSION
@@ -115,30 +119,45 @@ pub(crate) fn verify_promotion_decision_response(
         "reconciliation_required" => PromotionDecisionResponseStatusV1::ReconciliationRequired,
         _ => return Err(PromotionDecisionResponseErrorV1::InvalidPayload),
     };
+    validate_outcome_binding(status, wire.promotion_decision_event_id.as_deref())?;
     let signature_bytes = decode_signature_hex(&wire.signature)?;
-    let canonical = canonical_signed_payload(expected, status, &wire.signature);
+    let canonical = canonical_signed_payload(
+        expected,
+        status,
+        wire.promotion_decision_event_id.as_deref(),
+        &wire.signature,
+    );
     if payload != canonical {
         return Err(PromotionDecisionResponseErrorV1::InvalidPayload);
     }
-    let unsigned = canonical_unsigned_payload(expected, status);
+    let unsigned = canonical_unsigned_payload(
+        expected,
+        status,
+        wire.promotion_decision_event_id.as_deref(),
+    );
     verifying_key
         .verify_strict(
             &signature_message(&unsigned),
             &Signature::from_bytes(&signature_bytes),
         )
         .map_err(|_| PromotionDecisionResponseErrorV1::InvalidSignature)?;
-    Ok(status)
+    Ok((status, wire.promotion_decision_event_id))
 }
 
 fn canonical_unsigned_payload(
     binding: PromotionDecisionResponseBindingV1<'_>,
     status: PromotionDecisionResponseStatusV1,
+    promotion_decision_event_id: Option<&str>,
 ) -> Vec<u8> {
+    let promotion_decision_event_id = promotion_decision_event_id
+        .map(|event_id| format!(r#""{event_id}""#))
+        .unwrap_or_else(|| "null".into());
     format!(
-        r#"{{"schema_version":{RESPONSE_SCHEMA_VERSION},"protocol":"{RESPONSE_PROTOCOL}","domain":"{RESPONSE_DOMAIN}","request_id":"{}","promotion_approval_request_event_id":"{}","decision":"{}","status":"{}"}}"#,
+        r#"{{"schema_version":{RESPONSE_SCHEMA_VERSION},"protocol":"{RESPONSE_PROTOCOL}","domain":"{RESPONSE_DOMAIN}","request_id":"{}","promotion_approval_request_event_id":"{}","decision":"{}","promotion_decision_event_id":{},"status":"{}"}}"#,
         binding.request_id,
         binding.promotion_approval_request_event_id,
         binding.decision,
+        promotion_decision_event_id,
         status.as_str()
     )
     .into_bytes()
@@ -147,14 +166,30 @@ fn canonical_unsigned_payload(
 fn canonical_signed_payload(
     binding: PromotionDecisionResponseBindingV1<'_>,
     status: PromotionDecisionResponseStatusV1,
+    promotion_decision_event_id: Option<&str>,
     signature: &str,
 ) -> Vec<u8> {
-    let mut unsigned = canonical_unsigned_payload(binding, status);
+    let mut unsigned = canonical_unsigned_payload(binding, status, promotion_decision_event_id);
     unsigned.pop();
     unsigned.extend_from_slice(br#","signature":""#);
     unsigned.extend_from_slice(signature.as_bytes());
     unsigned.extend_from_slice(br#""}"#);
     unsigned
+}
+
+fn validate_outcome_binding(
+    status: PromotionDecisionResponseStatusV1,
+    promotion_decision_event_id: Option<&str>,
+) -> Result<(), PromotionDecisionResponseErrorV1> {
+    match (status, promotion_decision_event_id) {
+        (PromotionDecisionResponseStatusV1::Sealed, Some(event_id))
+            if is_canonical_uuid(event_id) =>
+        {
+            Ok(())
+        }
+        (PromotionDecisionResponseStatusV1::ReconciliationRequired, None) => Ok(()),
+        _ => Err(PromotionDecisionResponseErrorV1::InvalidBinding),
+    }
 }
 
 fn signature_message(unsigned: &[u8]) -> Vec<u8> {
@@ -204,8 +239,9 @@ pub(crate) fn sign_promotion_decision_response_for_test(
     signing_key: &SigningKey,
     binding: PromotionDecisionResponseBindingV1<'_>,
     status: PromotionDecisionResponseStatusV1,
+    promotion_decision_event_id: Option<&str>,
 ) -> Result<Vec<u8>, PromotionDecisionResponseErrorV1> {
-    sign_promotion_decision_response(signing_key, binding, status)
+    sign_promotion_decision_response(signing_key, binding, status, promotion_decision_event_id)
 }
 
 #[cfg(test)]
@@ -213,6 +249,6 @@ pub(crate) fn verify_promotion_decision_response_for_test(
     payload: &[u8],
     verifying_key: &VerifyingKey,
     expected: PromotionDecisionResponseBindingV1<'_>,
-) -> Result<PromotionDecisionResponseStatusV1, PromotionDecisionResponseErrorV1> {
+) -> Result<(PromotionDecisionResponseStatusV1, Option<String>), PromotionDecisionResponseErrorV1> {
     verify_promotion_decision_response(payload, verifying_key, expected)
 }

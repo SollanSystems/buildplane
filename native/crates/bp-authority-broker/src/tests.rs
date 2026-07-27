@@ -5606,8 +5606,14 @@ fn broker_promotion_decision_records_seals_and_replays_only_a_sealed_disposition
     let first = broker.record_then_seal(fixture.request.clone());
     let replay = broker.record_then_seal(fixture.request.clone());
 
-    assert_eq!(first, BrokerPromotionDecisionDisposition::Sealed);
-    assert_eq!(replay, BrokerPromotionDecisionDisposition::Sealed);
+    assert!(matches!(
+        first,
+        BrokerPromotionDecisionDisposition::Sealed { .. }
+    ));
+    assert!(matches!(
+        replay,
+        BrokerPromotionDecisionDisposition::Sealed { .. }
+    ));
     assert_eq!(
         promotion_event_count(
             &fixture.store,
@@ -5627,10 +5633,10 @@ fn broker_promotion_decision_records_seals_and_replays_only_a_sealed_disposition
 fn promotion_replay_verifier_reopens_the_exact_sealed_decision_and_rejects_substitution() {
     let fixture = promotion_fixture();
     let broker = promotion_broker(&fixture);
-    assert_eq!(
+    assert!(matches!(
         broker.record_then_seal(fixture.request.clone()),
-        BrokerPromotionDecisionDisposition::Sealed
-    );
+        BrokerPromotionDecisionDisposition::Sealed { .. }
+    ));
     let decision_event_id = fixture
         .store
         .events_for_run(&fixture.request.run_id.to_string())
@@ -5795,10 +5801,10 @@ fn broker_promotion_decision_retries_an_existing_record_after_a_failed_seal_with
     );
 
     let recovered_broker = promotion_broker(&fixture);
-    assert_eq!(
+    assert!(matches!(
         recovered_broker.record_then_seal(fixture.request.clone()),
-        BrokerPromotionDecisionDisposition::Sealed
-    );
+        BrokerPromotionDecisionDisposition::Sealed { .. }
+    ));
     assert_eq!(
         promotion_event_count(
             &fixture.store,
@@ -6375,11 +6381,11 @@ fn protected_promotion_decision_handler_derives_verified_pending_lineage_then_se
         "promote",
     );
 
-    assert_eq!(
+    assert!(matches!(
         handle_promotion_decision_wire(&mut authority, wire.as_bytes())
             .expect("a canonical opaque decision must reach the protected authority"),
-        BrokerPromotionDecisionDisposition::Sealed
-    );
+        BrokerPromotionDecisionDisposition::Sealed { .. }
+    ));
     assert_eq!(
         promotion_event_count(
             &fixture.store,
@@ -6567,11 +6573,11 @@ fn protected_promotion_decision_response_loss_retry_records_at_most_one_decision
             .to_string(),
         "reject",
     );
-    assert_eq!(
+    assert!(matches!(
         handle_promotion_decision_wire(&mut authority, pending_wire.as_bytes())
             .expect("the exact pending approval must be resolved once"),
-        BrokerPromotionDecisionDisposition::Sealed
-    );
+        BrokerPromotionDecisionDisposition::Sealed { .. }
+    ));
     // Model a response that was lost after the sealed effect. The client
     // retries the identical request; replay must not authorize another
     // decision record.

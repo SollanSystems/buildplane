@@ -526,14 +526,25 @@ fn encode_promotion_decision_response_frame(
     disposition: BrokerPromotionDecisionDisposition,
 ) -> Result<Vec<u8>, ProtectedPromotionDecisionHostErrorV1> {
     let status = match disposition {
-        Sealed => PromotionDecisionResponseStatusV1::Sealed,
+        Sealed { .. } => PromotionDecisionResponseStatusV1::Sealed,
         ReconciliationRequired => PromotionDecisionResponseStatusV1::ReconciliationRequired,
+    };
+    let promotion_decision_event_id = match disposition {
+        Sealed {
+            promotion_decision_event_id,
+        } => Some(promotion_decision_event_id.to_string()),
+        ReconciliationRequired => None,
     };
     // The kernel key is reused only through this domain-separated, closed
     // response constructor. There is no generic or caller-supplied signing
     // surface at the host boundary.
-    let payload = sign_promotion_decision_response(broker_identity_signing_key, binding, status)
-        .map_err(|_| ProtectedPromotionDecisionHostErrorV1::ConnectionFailed)?;
+    let payload = sign_promotion_decision_response(
+        broker_identity_signing_key,
+        binding,
+        status,
+        promotion_decision_event_id.as_deref(),
+    )
+    .map_err(|_| ProtectedPromotionDecisionHostErrorV1::ConnectionFailed)?;
     let mut frame = u32::try_from(payload.len())
         .map_err(|_| ProtectedPromotionDecisionHostErrorV1::ConnectionFailed)?
         .to_be_bytes()
@@ -762,10 +773,18 @@ mod tests {
 
     fn test_handled_decision() -> HandledPromotionDecisionV1 {
         HandledPromotionDecisionV1 {
-            disposition: BrokerPromotionDecisionDisposition::Sealed,
+            disposition: test_sealed_disposition(),
             request_id: "018f2e40-0000-7000-8000-000000000111".to_string(),
             promotion_approval_request_event_id: "123e4567-e89b-12d3-a456-426614174001".to_string(),
             decision: "promote".to_string(),
+        }
+    }
+
+    fn test_sealed_disposition() -> BrokerPromotionDecisionDisposition {
+        BrokerPromotionDecisionDisposition::Sealed {
+            promotion_decision_event_id: bp_ledger::EventId::from_uuid(
+                uuid::Uuid::parse_str("123e4567-e89b-12d3-a456-426614174003").unwrap(),
+            ),
         }
     }
 
@@ -781,7 +800,7 @@ mod tests {
         let frame = encode_promotion_decision_response_frame(
             &signing_key,
             binding,
-            BrokerPromotionDecisionDisposition::Sealed,
+            test_sealed_disposition(),
         )
         .unwrap();
         let payload_length = u32::from_be_bytes(frame[..4].try_into().unwrap()) as usize;
@@ -794,7 +813,10 @@ mod tests {
                 binding,
             )
             .unwrap(),
-            PromotionDecisionResponseStatusV1::Sealed
+            (
+                PromotionDecisionResponseStatusV1::Sealed,
+                Some("123e4567-e89b-12d3-a456-426614174003".to_string())
+            )
         );
     }
 
@@ -1174,7 +1196,7 @@ mod tests {
             }
         }
 
-        let frame = test_response_frame(BrokerPromotionDecisionDisposition::Sealed);
+        let frame = test_response_frame(test_sealed_disposition());
         let mut writer = PartialWriter::default();
         let mut gate_calls = 0;
         write_response_frame_with_deadline_for_test(
@@ -1211,7 +1233,7 @@ mod tests {
             }
         }
 
-        let frame = test_response_frame(BrokerPromotionDecisionDisposition::Sealed);
+        let frame = test_response_frame(test_sealed_disposition());
         assert_eq!(
             write_response_frame_with_deadline_for_test(
                 &mut SlowWriter,

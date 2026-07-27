@@ -2231,7 +2231,10 @@ describe("governed run front door", () => {
 		const root = createGitProject();
 		const before = snapshotRoot(root);
 		const approvalEventId = "123e4567-e89b-12d3-a456-426614174001";
-		promotionDecisionClient.submit.mockResolvedValue("sealed");
+		promotionDecisionClient.submit.mockResolvedValue({
+			status: "sealed",
+			promotionDecisionEventId: "123e4567-e89b-12d3-a456-426614174002",
+		});
 
 		const response = await runCliCapture(
 			root,
@@ -2262,7 +2265,7 @@ describe("governed run front door", () => {
 	});
 
 	it.each([
-		"reconciliation_required",
+		{ status: "reconciliation_required" },
 		undefined,
 	] as const)("keeps native promotion-decision status %s blocked", async (status) => {
 		const root = createGitProject();

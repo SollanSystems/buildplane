@@ -14,6 +14,7 @@ const { submitProtectedPromotionDecision } = await import(
 
 const originalPlatform = Object.getOwnPropertyDescriptor(process, "platform");
 const approvalEventId = "123e4567-e89b-12d3-a456-426614174001";
+const decisionEventId = "123e4567-e89b-12d3-a456-426614174003";
 
 function setPlatform(platform: NodeJS.Platform): void {
 	Object.defineProperty(process, "platform", {
@@ -28,7 +29,7 @@ function nativeResult(overrides: Record<string, unknown> = {}) {
 		signal: null,
 		status: 0,
 		stderr: "",
-		stdout: '{"schema_version":1,"status":"sealed"}\n',
+		stdout: `{"schema_version":2,"status":"sealed","promotion_decision_event_id":"${decisionEventId}"}\n`,
 		...overrides,
 	};
 }
@@ -53,7 +54,10 @@ describe("protected promotion-decision native client", () => {
 				promotionApprovalRequestEventId: approvalEventId,
 				decision: "promote",
 			}),
-		).resolves.toBe("sealed");
+		).resolves.toEqual({
+			status: "sealed",
+			promotionDecisionEventId: decisionEventId,
+		});
 
 		expect(childProcess.spawnSync).toHaveBeenCalledWith(
 			"/usr/libexec/buildplane/buildplane-authority-client",
@@ -77,7 +81,8 @@ describe("protected promotion-decision native client", () => {
 	it("returns reconciliation only for the exact closed native response", async () => {
 		childProcess.spawnSync.mockReturnValue(
 			nativeResult({
-				stdout: '{"schema_version":1,"status":"reconciliation_required"}\n',
+				stdout:
+					'{"schema_version":2,"status":"reconciliation_required","promotion_decision_event_id":null}\n',
 			}),
 		);
 
@@ -86,7 +91,7 @@ describe("protected promotion-decision native client", () => {
 				promotionApprovalRequestEventId: approvalEventId,
 				decision: "reject",
 			}),
-		).resolves.toBe("reconciliation_required");
+		).resolves.toEqual({ status: "reconciliation_required" });
 	});
 
 	it.each([
