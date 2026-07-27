@@ -61,9 +61,13 @@ fn timestamp(value: DateTime<Utc>) -> String {
 }
 
 fn signer(key: &SigningKey) -> ActorKeyRef {
+    signer_for(key, "kernel", "kernel-main")
+}
+
+fn signer_for(key: &SigningKey, actor_id: &str, key_id: &str) -> ActorKeyRef {
     ActorKeyRef {
-        actor_id: "kernel".into(),
-        key_id: "kernel-main".into(),
+        actor_id: actor_id.into(),
+        key_id: key_id.into(),
         public_key_hash: Some(public_key_hash(&key.verifying_key())),
     }
 }
@@ -302,6 +306,11 @@ fn append_signed_candidate_bound_reviewer_intent(
     cas: &Cas,
     key: &SigningKey,
     signer: &ActorKeyRef,
+    candidate_key: &SigningKey,
+    candidate_signer: &ActorKeyRef,
+    acceptance_key: &SigningKey,
+    acceptance_signer: &ActorKeyRef,
+    checkpoint_authority: Option<(&SigningKey, &ActorKeyRef)>,
     run_id: RunId,
     dispatch: &DispatchEnvelopeV3,
     dispatch_event_id: EventId,
@@ -309,7 +318,7 @@ fn append_signed_candidate_bound_reviewer_intent(
     action_request_event_id: EventId,
     candidate_event_ref_override: Option<EventId>,
     at: DateTime<Utc>,
-) {
+) -> EventId {
     let canonical_input_bytes =
         canonical_model_action_input_v1_bytes(&canonical_model_input()).expect("encode input");
     let verified_input = parse_verified_canonical_model_action_input_v1(
@@ -387,7 +396,7 @@ fn append_signed_candidate_bound_reviewer_intent(
         payload: Payload::CandidateCreatedV2(candidate),
     };
     store
-        .append_signed(&candidate_event, key, signer)
+        .append_signed(&candidate_event, candidate_key, candidate_signer)
         .expect("append signed candidate");
     let mut completion = CandidateCompletionRecordedV1 {
         run_id: run_id.to_string(),
@@ -421,7 +430,7 @@ fn append_signed_candidate_bound_reviewer_intent(
         payload: Payload::CandidateCompletionRecordedV1(completion),
     };
     store
-        .append_signed(&completion_event, key, signer)
+        .append_signed(&completion_event, candidate_key, candidate_signer)
         .expect("append signed candidate completion");
     let acceptance = CandidateAcceptanceRecordedV1 {
         candidate_digest: DIGEST_C.into(),
@@ -442,8 +451,13 @@ fn append_signed_candidate_bound_reviewer_intent(
         payload: Payload::CandidateAcceptanceRecordedV1(acceptance),
     };
     store
-        .append_signed(&acceptance_event, key, signer)
+        .append_signed(&acceptance_event, acceptance_key, acceptance_signer)
         .expect("append signed candidate acceptance");
+    if let Some((checkpoint_key, checkpoint_signer)) = checkpoint_authority {
+        store
+            .seal_governed_signed_prefix_for_tests(&run_id, checkpoint_key, checkpoint_signer)
+            .expect("seal signed candidate acceptance prefix");
+    }
 
     let candidate_view = CandidateViewV1 {
         candidate_ref,
@@ -504,6 +518,7 @@ fn append_signed_candidate_bound_reviewer_intent(
     store
         .append_signed(&intent_event, key, signer)
         .expect("append signed reviewer intent");
+    acceptance_event.id
 }
 
 fn graph_bound_dispatch_v4(dispatch_v3: DispatchEnvelopeV3) -> DispatchEnvelopeV4 {
@@ -1911,8 +1926,52 @@ fn reviewer_authority_adopts_only_a_signed_candidate_bound_intent() {
     let cas = Cas::open(temp.path()).expect("open protected test CAS");
     let key = SigningKey::from_bytes(&[12; 32]);
     let signer = signer(&key);
+    let admission_key = SigningKey::from_bytes(&[42; 32]);
+    let admission_signer = signer_for(&admission_key, "admission", "admission-main");
+    let checkpoint_key = SigningKey::from_bytes(&[43; 32]);
+    let checkpoint_signer = signer_for(&checkpoint_key, "checkpoint", "checkpoint-main");
+    let candidate_key = SigningKey::from_bytes(&[44; 32]);
+    let candidate_signer = signer_for(&candidate_key, "candidate", "candidate-main");
+    let acceptance_key = SigningKey::from_bytes(&[45; 32]);
+    let acceptance_signer = signer_for(&acceptance_key, "acceptance", "acceptance-main");
+    let substituted_acceptance_key = SigningKey::from_bytes(&[46; 32]);
+    let substituted_acceptance_signer = signer_for(
+        &substituted_acceptance_key,
+        "substituted-acceptance",
+        "substituted-acceptance-main",
+    );
     let realm_digest = DIGEST_B;
-    let authority = authority(&key, realm_digest);
+    let mut trusted_keys = TrustedPublicKeys::default();
+    for (trusted_signer, trusted_key) in [
+        (&signer, &key),
+        (&admission_signer, &admission_key),
+        (&checkpoint_signer, &checkpoint_key),
+        (&candidate_signer, &candidate_key),
+        (&acceptance_signer, &acceptance_key),
+        (&substituted_acceptance_signer, &substituted_acceptance_key),
+    ] {
+        trusted_keys.insert_public_key(
+            trusted_signer
+                .public_key_hash
+                .clone()
+                .expect("test signer has a public key hash"),
+            trusted_key.verifying_key().to_bytes().to_vec(),
+        );
+    }
+    let authority = ActivityClaimAuthorityV1::new_governed_realm(
+        trusted_keys.clone(),
+        signer.clone(),
+        signer.clone(),
+        signer.clone(),
+        realm_digest.into(),
+    )
+    .expect("construct reviewer activity authority")
+    .with_governed_reviewer_lineage(
+        candidate_signer.clone(),
+        acceptance_signer.clone(),
+        checkpoint_signer.clone(),
+    )
+    .expect("bind immutable reviewer lineage authorities");
     let now = DateTime::parse_from_rfc3339("2026-07-17T00:10:00.000Z")
         .unwrap()
         .with_timezone(&Utc);
@@ -1964,11 +2023,16 @@ fn reviewer_authority_adopts_only_a_signed_candidate_bound_intent() {
     store
         .append_signed(&request_event, &key, &signer)
         .expect("append signed reviewer action");
-    append_signed_candidate_bound_reviewer_intent(
+    let acceptance_event_id = append_signed_candidate_bound_reviewer_intent(
         &store,
         &cas,
         &key,
         &signer,
+        &candidate_key,
+        &candidate_signer,
+        &acceptance_key,
+        &acceptance_signer,
+        Some((&checkpoint_key, &checkpoint_signer)),
         run_id,
         &review_dispatch,
         dispatch_event.id,
@@ -1984,8 +2048,44 @@ fn reviewer_authority_adopts_only_a_signed_candidate_bound_intent() {
         action_request_event_id: request_event.id,
         lease_duration_ms: 10_000,
     };
+    let substituted_signer = store
+        .authorize_and_claim_governed_v5_reviewer_model_action_v1_at_for_tests(
+            &authority_request,
+            &cas,
+            &ActivityClaimAuthorityV1::new_governed_realm(
+                trusted_keys,
+                signer.clone(),
+                signer.clone(),
+                signer.clone(),
+                realm_digest.into(),
+            )
+            .expect("construct substituted reviewer activity authority")
+            .with_governed_reviewer_lineage(
+                candidate_signer.clone(),
+                substituted_acceptance_signer,
+                checkpoint_signer.clone(),
+            )
+            .expect("bind substituted reviewer lineage authority"),
+            &key,
+            &signer,
+            now + Duration::milliseconds(2),
+        )
+        .expect_err("trusted but wrong acceptance signer must fail closed");
+    assert!(
+        matches!(
+            substituted_signer,
+            LedgerError::ModelActionIntentAuthorityRejected { .. }
+                | LedgerError::ActivityClaimAuthorityRejected { .. }
+        ),
+        "unexpected signer-substitution error: {substituted_signer}"
+    );
+    assert_eq!(
+        store.event_count().unwrap(),
+        7,
+        "signer substitution cannot append reviewer authorization"
+    );
     let disposition = store
-        .authorize_and_claim_governed_reviewer_model_action_v1_at_for_tests(
+        .authorize_and_claim_governed_v5_reviewer_model_action_v1_at_for_tests(
             &authority_request,
             &cas,
             &authority,
@@ -2000,7 +2100,7 @@ fn reviewer_authority_adopts_only_a_signed_candidate_bound_intent() {
     ));
     assert_eq!(
         store.event_count().unwrap(),
-        8,
+        9,
         "adoption adds only authorization and claim; it does not rewrite the intent"
     );
     store
@@ -2015,9 +2115,10 @@ fn reviewer_authority_adopts_only_a_signed_candidate_bound_intent() {
         .expect_err("the implementer lane cannot recover reviewer authority");
     assert_eq!(
         store.event_count().unwrap(),
-        8,
+        9,
         "cross-lane retry cannot append or expose reviewer authority"
     );
+    assert_ne!(acceptance_event_id, request_event.id);
 }
 
 #[test]
@@ -2084,6 +2185,11 @@ fn reviewer_authority_rejects_a_signed_intent_with_a_missing_candidate_event() {
         &cas,
         &key,
         &signer,
+        &key,
+        &signer,
+        &key,
+        &signer,
+        None,
         run_id,
         &review_dispatch,
         dispatch_event.id,

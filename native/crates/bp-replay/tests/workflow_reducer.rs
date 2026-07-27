@@ -4332,6 +4332,7 @@ fn review_v2(
             .expect("hash review action receipt"),
         review_output_ref: format!("cas:{review_output_digest}"),
         review_output_digest,
+        review_output_semantic_digest: None,
         decision: review_output.decision,
         findings: review_output.findings,
         confidence: review_output.confidence,

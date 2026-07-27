@@ -981,7 +981,7 @@ describe("trust-spine V1 contracts", () => {
 			networkDisabled: true,
 		};
 		const candidateViewDigest = canonicalCandidateViewV1Digest(candidateView);
-		const reviewOutputDigest = canonicalReviewVerdictOutputV1Digest({
+		const reviewOutputSemanticDigest = canonicalReviewVerdictOutputV1Digest({
 			candidateDigest: candidateView.candidateDigest,
 			candidateCommitSha: candidateView.candidateCommitSha,
 			decision: "approve",
@@ -989,6 +989,7 @@ describe("trust-spine V1 contracts", () => {
 			confidence: 0.9,
 			candidateViewDigest,
 		});
+		const reviewOutputDigest = digest("8");
 		const review: ReviewVerdictRecordedV2 = {
 			runId: "run-2",
 			workflowId: "workflow-2",
@@ -1004,6 +1005,7 @@ describe("trust-spine V1 contracts", () => {
 			reviewActionReceiptDigest: digest("0"),
 			reviewOutputRef: `cas:${reviewOutputDigest}`,
 			reviewOutputDigest,
+			reviewOutputSemanticDigest,
 			decision: "approve",
 			findings: [],
 			confidence: 0.9,
@@ -1027,12 +1029,33 @@ describe("trust-spine V1 contracts", () => {
 		};
 
 		expect(parseReviewVerdictRecordedV2(review)).toEqual(review);
+		const {
+			reviewOutputSemanticDigest: _reviewOutputSemanticDigest,
+			...legacyReview
+		} = review;
+		expect(
+			parseReviewVerdictRecordedV2({
+				...legacyReview,
+				reviewOutputRef: `cas:${reviewOutputSemanticDigest}`,
+				reviewOutputDigest: reviewOutputSemanticDigest,
+			}),
+		).toEqual({
+			...legacyReview,
+			reviewOutputRef: `cas:${reviewOutputSemanticDigest}`,
+			reviewOutputDigest: reviewOutputSemanticDigest,
+		});
 		expect(() =>
 			parseReviewVerdictRecordedV2({
 				...review,
 				candidateViewDigest: digest("7"),
 			}),
 		).toThrow(/candidateViewDigest/i);
+		expect(() =>
+			parseReviewVerdictRecordedV2({
+				...review,
+				reviewOutputSemanticDigest: digest("9"),
+			}),
+		).toThrow(/reviewOutputSemanticDigest/i);
 		expect(() =>
 			parseReviewVerdictRecordedV2({
 				...review,

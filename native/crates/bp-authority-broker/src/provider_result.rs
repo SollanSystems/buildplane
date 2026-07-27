@@ -10,7 +10,8 @@ use bp_ledger::payload::model_evidence::{
     ModelResultEvidenceDocumentV1, VerifiedModelRequestEvidenceDocumentV1,
 };
 use bp_ledger::payload::trust_spine::{
-    ExecutionRoleV1, ReviewDecisionV1, ReviewFindingSeverityV1, ReviewFindingV1,
+    review_verdict_output_v1_digest, ExecutionRoleV1, ModelActionCandidateBindingV1,
+    ReviewDecisionV1, ReviewFindingSeverityV1, ReviewFindingV1, ReviewVerdictOutputV1,
 };
 use bp_ledger::storage::Cas;
 use bp_provider_sdk::{
@@ -33,6 +34,7 @@ impl<'a> ProviderResultWriterV1<'a> {
         authorization_digest: &str,
         model_request: &VerifiedModelRequestEvidenceDocumentV1,
         bound: &BoundProviderRequestV1,
+        candidate: Option<&ModelActionCandidateBindingV1>,
         completion: ProviderCompletionV1,
     ) -> Result<GatewayCompletion, LedgerError> {
         bound
@@ -64,17 +66,27 @@ impl<'a> ProviderResultWriterV1<'a> {
             ));
         }
 
-        let normalized_completion = match completion {
+        let result_bytes = match completion {
             ProviderCompletionV1::Implementer(completion)
                 if binding.execution_role == ExecutionRoleV1::Implementer
                     && completion.schema_version == 1
                     && completion.outcome == "completed"
-                    && bound.request.candidate_digest.is_none() =>
+                    && bound.request.candidate_digest.is_none()
+                    && candidate.is_none() =>
             {
-                ModelProviderCompletionV1::Implementer {
-                    summary: completion.summary,
-                    output_refs: completion.output_refs,
-                }
+                let result = ModelProviderResultDocumentV1::new(
+                    binding.action_id.clone(),
+                    bound.request.request_id.clone(),
+                    model_request.document().model_request_digest.clone(),
+                    binding.execution_role,
+                    None,
+                    binding.worker_manifest_digest.clone(),
+                    ModelProviderCompletionV1::Implementer {
+                        summary: completion.summary,
+                        output_refs: completion.output_refs,
+                    },
+                )?;
+                model_provider_result_document_v1_bytes(&result)?
             }
             ProviderCompletionV1::Review(verdict)
                 if matches!(
@@ -85,7 +97,23 @@ impl<'a> ProviderResultWriterV1<'a> {
                         == Some(verdict.candidate_digest.as_str())
                     && verdict.reviewer_manifest_digest == binding.worker_manifest_digest =>
             {
-                ModelProviderCompletionV1::Review {
+                let candidate = candidate.ok_or_else(|| {
+                    invalid("review provider completion is missing its signed candidate binding")
+                })?;
+                if candidate.candidate_digest != verdict.candidate_digest
+                    || candidate.candidate_view.candidate_digest != candidate.candidate_digest
+                    || candidate.candidate_view.candidate_commit_sha
+                        != candidate.candidate_commit_sha
+                    || !candidate.candidate_view.read_only
+                    || !candidate.candidate_view.network_disabled
+                {
+                    return Err(invalid(
+                        "review provider completion does not bind the exact read-only candidate view",
+                    ));
+                }
+                let output = ReviewVerdictOutputV1 {
+                    candidate_digest: verdict.candidate_digest,
+                    candidate_commit_sha: candidate.candidate_commit_sha.clone(),
                     decision: map_review_decision(verdict.decision),
                     findings: verdict
                         .findings
@@ -100,7 +128,14 @@ impl<'a> ProviderResultWriterV1<'a> {
                         })
                         .collect(),
                     confidence: verdict.confidence,
+                    candidate_view_digest: candidate.candidate_view_digest.clone(),
+                };
+                if review_verdict_output_v1_digest(&output).is_err() {
+                    return Err(invalid(
+                        "review provider completion cannot be canonicalized",
+                    ));
                 }
+                serde_json::to_vec(&output).map_err(|error| invalid(error.to_string()))?
             }
             _ => {
                 return Err(invalid(
@@ -109,16 +144,6 @@ impl<'a> ProviderResultWriterV1<'a> {
             }
         };
 
-        let result = ModelProviderResultDocumentV1::new(
-            binding.action_id.clone(),
-            bound.request.request_id.clone(),
-            model_request.document().model_request_digest.clone(),
-            binding.execution_role,
-            bound.request.candidate_digest.clone(),
-            binding.worker_manifest_digest.clone(),
-            normalized_completion,
-        )?;
-        let result_bytes = model_provider_result_document_v1_bytes(&result)?;
         let result_ref = self.cas.put_canonical_bytes(&result_bytes)?;
         let evidence = ModelResultEvidenceDocumentV1::new(
             binding.action_id.clone(),

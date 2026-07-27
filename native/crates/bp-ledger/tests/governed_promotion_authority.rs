@@ -265,6 +265,7 @@ fn review(
         review_action_receipt_digest: DIGEST_B.into(),
         review_output_ref: format!("cas:{review_output_digest}"),
         review_output_digest,
+        review_output_semantic_digest: None,
         decision: ReviewDecisionV1::Approve,
         findings: Vec::new(),
         confidence: 1.0,

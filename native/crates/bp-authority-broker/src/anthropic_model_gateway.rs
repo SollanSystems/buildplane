@@ -67,6 +67,7 @@ where
                                         authorization_digest,
                                         preflight.model_request(),
                                         &bound,
+                                        preflight.candidate_binding(),
                                         parsed,
                                     )
                                     .ok()

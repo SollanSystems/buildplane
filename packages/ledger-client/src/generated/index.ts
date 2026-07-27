@@ -1861,7 +1861,14 @@ export interface ReviewVerdictRecordedV2 {
 	review_action_receipt_ref: string;
 	review_action_receipt_digest: string;
 	review_output_ref: string;
+	/**
+	 * Raw SHA-256 digest of the exact protected-CAS bytes returned by the
+	 * review action. Legacy V2 records used this field for the semantic
+	 * digest as well; new records carry both values explicitly.
+	 */
 	review_output_digest: string;
+	/** Domain-separated digest of the decoded closed ReviewVerdictOutputV1. */
+	review_output_semantic_digest?: string;
 	decision: ReviewDecisionV1;
 	findings: ReviewFindingV1[];
 	confidence: number;

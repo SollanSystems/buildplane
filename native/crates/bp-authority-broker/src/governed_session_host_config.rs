@@ -231,6 +231,13 @@ pub(crate) fn parse_governed_session_host_config_v1(
         claim_signer.clone(),
         raw.authority_realm_digest.clone(),
     )
+    .and_then(|authority| {
+        authority.with_governed_reviewer_lineage(
+            candidate_artifact_signer.clone(),
+            candidate_acceptance_signer.clone(),
+            v5_admission_checkpoint_signer.clone(),
+        )
+    })
     .map_err(|_| GovernedSessionHostConfigErrorV1::Invalid)?;
     let v5_admission_authority = GovernedDispatchV5AdmissionAuthorityV1::new_governed_realm(
         trusted_keys.clone(),

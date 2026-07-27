@@ -2618,6 +2618,7 @@ mod tests {
                 review_action_receipt_digest: Some(governed_fixture_digest('2')),
                 review_output_ref: Some("cas://review/fixture-output".to_string()),
                 review_output_digest: Some(review_output_digest),
+                review_output_semantic_digest: None,
                 acceptance_ref: Some(acceptance.acceptance_ref.clone()),
                 acceptance_digest: Some(acceptance.acceptance_digest.clone()),
                 acceptance_contract_digest: Some(acceptance.acceptance_contract_digest.clone()),

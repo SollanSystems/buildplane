@@ -45,19 +45,20 @@ use crate::payload::trust_spine::{
     attempt_context_recorded_v1_digest, candidate_completion_recorded_v1_digest,
     dispatch_envelope_v3_body_digest, dispatch_envelope_v4_digest, dispatch_envelope_v5_digest,
     governed_dispatch_policy_digest_v1, model_action_authorized_v2_digest,
-    model_action_intent_v1_digest, promotion_execution_claimed_v1_digest, workflow_graph_v2_digest,
-    ActionEvidenceVersionV1, ActionKindV1, ActionReceiptOutcomeV2, ActionReceiptRecordedV2,
-    ActionReceiptSetEntryV1, ActionReceiptSetRecordedV1, ActionRequestedV2, ActionResourceUsageV1,
-    AttemptContextRecordedV1, CandidateAcceptanceOutcomeV1, CandidateAcceptanceRecordedV1,
-    CandidateCompletionRecordedV1, CandidateCreatedV2, CandidateViewV1, CommitModeV1,
-    ContextManifestDeclaredV1, DispatchEnvelopeV3, DispatchEnvelopeV4, DispatchEnvelopeV5,
-    ExecutionRoleV1, GovernedDispatchV5AdmissionRecordedV1, ModelActionAuthorizedV1,
-    ModelActionAuthorizedV2, ModelActionCandidateBindingV1, ModelActionIntentV1,
-    ModelRequestEvidenceV1, PromotionApprovalRequestedV1, PromotionDecisionKindV1,
-    PromotionDecisionRecordedV1, PromotionExecutionClaimedV1, PromotionExecutionLeaseBindingV1,
-    PromotionGitBindingV1, PromotionReconciliationResolvedV1, PromotionResultOutcomeV1,
-    PromotionResultRecordedV1, PromotionWorktreeSyncStateV1, ReconciliationResolutionOutcomeV1,
-    ReviewDecisionV1, ReviewVerdictRecordedV2, SandboxProfileDeclaredV1, TrustScopeEvidenceV1,
+    model_action_intent_v1_digest, promotion_execution_claimed_v1_digest,
+    review_verdict_output_v1_digest, workflow_graph_v2_digest, ActionEvidenceVersionV1,
+    ActionKindV1, ActionReceiptOutcomeV2, ActionReceiptRecordedV2, ActionReceiptSetEntryV1,
+    ActionReceiptSetRecordedV1, ActionRequestedV2, ActionResourceUsageV1, AttemptContextRecordedV1,
+    CandidateAcceptanceOutcomeV1, CandidateAcceptanceRecordedV1, CandidateCompletionRecordedV1,
+    CandidateCreatedV2, CandidateViewV1, CommitModeV1, ContextManifestDeclaredV1,
+    DispatchEnvelopeV3, DispatchEnvelopeV4, DispatchEnvelopeV5, ExecutionRoleV1,
+    GovernedDispatchV5AdmissionRecordedV1, ModelActionAuthorizedV1, ModelActionAuthorizedV2,
+    ModelActionCandidateBindingV1, ModelActionIntentV1, ModelRequestEvidenceV1,
+    PromotionApprovalRequestedV1, PromotionDecisionKindV1, PromotionDecisionRecordedV1,
+    PromotionExecutionClaimedV1, PromotionExecutionLeaseBindingV1, PromotionGitBindingV1,
+    PromotionReconciliationResolvedV1, PromotionResultOutcomeV1, PromotionResultRecordedV1,
+    PromotionWorktreeSyncStateV1, ReconciliationResolutionOutcomeV1, ReviewDecisionV1,
+    ReviewVerdictOutputV1, ReviewVerdictRecordedV2, SandboxProfileDeclaredV1, TrustScopeEvidenceV1,
     TrustTierV1, WorkerManifestDeclaredV1, WorkflowGraphDeclaredV2, WorkflowTerminalOutcomeV1,
 };
 use crate::payload::Payload;
@@ -152,6 +153,7 @@ pub struct ActivityClaimAuthorityV1 {
     dispatch_signer: ActorKeyRef,
     action_request_signer: ActorKeyRef,
     claim_signer: ActorKeyRef,
+    governed_reviewer_lineage: Option<GovernedReviewerLineageAuthorityV1>,
     /// Present only for the governed host-realm server. A generic workspace
     /// tape cannot claim this realm merely by copying its signed payload.
     ledger_authority_realm_digest: Option<String>,
@@ -181,6 +183,7 @@ impl ActivityClaimAuthorityV1 {
             dispatch_signer,
             action_request_signer,
             claim_signer,
+            governed_reviewer_lineage: None,
             ledger_authority_realm_digest: None,
         })
     }
@@ -209,6 +212,95 @@ impl ActivityClaimAuthorityV1 {
         authority.ledger_authority_realm_digest = Some(ledger_authority_realm_digest);
         Ok(authority)
     }
+
+    /// Bind the immutable candidate, deterministic-acceptance, and checkpoint
+    /// verification identities used by the governed reviewer lane. These are
+    /// verification authorities only; private signing material remains outside
+    /// the ledger and cannot be recovered from this value.
+    pub fn with_governed_reviewer_lineage(
+        mut self,
+        candidate_artifact_signer: ActorKeyRef,
+        candidate_acceptance_signer: ActorKeyRef,
+        checkpoint_signer: ActorKeyRef,
+    ) -> Result<Self> {
+        let lineage = GovernedReviewerLineageAuthorityV1::new(
+            &self.trusted_keys,
+            [
+                &self.dispatch_signer,
+                &self.action_request_signer,
+                &self.claim_signer,
+            ],
+            candidate_artifact_signer,
+            candidate_acceptance_signer,
+            checkpoint_signer,
+        )?;
+        self.governed_reviewer_lineage = Some(lineage);
+        Ok(self)
+    }
+}
+
+#[derive(Clone, Debug)]
+struct GovernedReviewerLineageAuthorityV1 {
+    candidate_artifact_signer: ActorKeyRef,
+    candidate_acceptance_signer: ActorKeyRef,
+    checkpoint_signer: ActorKeyRef,
+}
+
+impl GovernedReviewerLineageAuthorityV1 {
+    fn new(
+        trusted_keys: &TrustedPublicKeys,
+        existing_authorities: [&ActorKeyRef; 3],
+        candidate_artifact_signer: ActorKeyRef,
+        candidate_acceptance_signer: ActorKeyRef,
+        checkpoint_signer: ActorKeyRef,
+    ) -> Result<Self> {
+        let lineage = [
+            ("candidate_artifact_signer", &candidate_artifact_signer),
+            ("candidate_acceptance_signer", &candidate_acceptance_signer),
+            ("checkpoint_signer", &checkpoint_signer),
+        ];
+        for (label, signer) in lineage {
+            validate_trusted_actor(label, signer)?;
+            if trusted_keys.public_key_for(signer).is_none() {
+                return Err(LedgerError::ActivityClaimAuthorityRejected {
+                    reason: format!("{label} does not have a configured trusted public key"),
+                });
+            }
+            if existing_authorities
+                .iter()
+                .any(|existing| authorities_overlap(existing, signer))
+            {
+                return Err(LedgerError::ActivityClaimAuthorityRejected {
+                    reason: format!(
+                        "{label} must be distinct from dispatch, action-request, and claim authorities"
+                    ),
+                });
+            }
+        }
+        for (left, right) in [
+            (&candidate_artifact_signer, &candidate_acceptance_signer),
+            (&candidate_artifact_signer, &checkpoint_signer),
+            (&candidate_acceptance_signer, &checkpoint_signer),
+        ] {
+            if authorities_overlap(left, right) {
+                return Err(LedgerError::ActivityClaimAuthorityRejected {
+                    reason: "candidate artifact, acceptance, and checkpoint authorities must be distinct"
+                        .into(),
+                });
+            }
+        }
+        Ok(Self {
+            candidate_artifact_signer,
+            candidate_acceptance_signer,
+            checkpoint_signer,
+        })
+    }
+}
+
+fn authorities_overlap(left: &ActorKeyRef, right: &ActorKeyRef) -> bool {
+    left.actor_id == right.actor_id
+        || signer_identity_key(left) == signer_identity_key(right)
+        || left.public_key_hash == right.public_key_hash
 }
 
 /// Distinct, protected identities required to record a governed promotion
@@ -3154,6 +3246,25 @@ impl SqliteStore {
         Ok(outcome)
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn seal_governed_signed_prefix_for_tests(
+        &self,
+        run_id: &RunId,
+        signing_key: &SigningKey,
+        signer: &ActorKeyRef,
+    ) -> Result<()> {
+        match self.seal_governed_signed_prefix(run_id, signing_key, signer)? {
+            GovernedCheckpointSealOutcome::AlreadySealed { .. }
+            | GovernedCheckpointSealOutcome::Emitted { .. } => Ok(()),
+            GovernedCheckpointSealOutcome::EmptyPrefix => {
+                Err(LedgerError::ActivityClaimAuthorityRejected {
+                    reason: "test checkpoint sealing requires a signed ordinary-event prefix"
+                        .into(),
+                })
+            }
+        }
+    }
+
     /// Governed checkpoint sealing after the caller has already acquired the
     /// run's immediate writer transaction. Keeping this separate lets a
     /// candidate-completion retry prove that no sibling completion was appended
@@ -4721,7 +4832,31 @@ impl SqliteStore {
         signing_key: &SigningKey,
         signer: &ActorKeyRef,
     ) -> Result<GovernedModelActionAuthorizeAndClaimDispositionV1> {
+        require_governed_reviewer_lineage(authority)?;
         let mut clock = Utc::now;
+        self.authorize_and_claim_governed_model_action_v1_with_clock(
+            request,
+            cas,
+            authority,
+            signing_key,
+            signer,
+            ModelActionIntentAuthorityLane::Reviewer,
+            &mut clock,
+        )
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn authorize_and_claim_governed_v5_reviewer_model_action_v1_at_for_tests(
+        &self,
+        request: &GovernedModelActionAuthorizeAndClaimRequestV1,
+        cas: &Cas,
+        authority: &ActivityClaimAuthorityV1,
+        signing_key: &SigningKey,
+        signer: &ActorKeyRef,
+        now: DateTime<Utc>,
+    ) -> Result<GovernedModelActionAuthorizeAndClaimDispositionV1> {
+        require_governed_reviewer_lineage(authority)?;
+        let mut clock = || now;
         self.authorize_and_claim_governed_model_action_v1_with_clock(
             request,
             cas,
@@ -5134,40 +5269,85 @@ impl SqliteStore {
                 &verified.intent.model_request_evidence,
             )?;
             let result_bytes = cas.get_verified_canonical_bytes(result_ref, result_digest)?;
-            let result = parse_verified_model_provider_result_document_v1(
-                &result_bytes,
-                result_ref,
-                result_digest,
-            )?;
-            let expected_provider_request_id = format!(
-                "{}:{}",
-                match model_request
-                    .document()
-                    .normalized_provider_request
-                    .provider
-                {
-                    ModelProviderV1::Anthropic => "anthropic",
-                    ModelProviderV1::Openai => "openai",
-                },
-                verified.intent.action_id
-            );
-            let expected_candidate_digest = verified
-                .intent
-                .candidate_binding
-                .as_ref()
-                .map(|candidate| candidate.candidate_digest.as_str());
-            let result = result.document();
-            if result.action_id != verified.intent.action_id
-                || result.provider_request_id != expected_provider_request_id
-                || result.model_request_digest != model_request.document().model_request_digest
-                || result.execution_role != model_request.document().binding.execution_role
-                || result.candidate_digest.as_deref() != expected_candidate_digest
-                || result.worker_manifest_digest
-                    != model_request.document().binding.worker_manifest_digest
-            {
-                return Err(LedgerError::ActivityClaimAuthorityRejected {
-                    reason: "successful governed model result does not bind the exact signed role, candidate, worker, request, and provider route".into(),
-                });
+            match model_request.document().binding.execution_role {
+                ExecutionRoleV1::Implementer => {
+                    let result = parse_verified_model_provider_result_document_v1(
+                        &result_bytes,
+                        result_ref,
+                        result_digest,
+                    )?;
+                    let expected_provider_request_id = format!(
+                        "{}:{}",
+                        match model_request
+                            .document()
+                            .normalized_provider_request
+                            .provider
+                        {
+                            ModelProviderV1::Anthropic => "anthropic",
+                            ModelProviderV1::Openai => "openai",
+                        },
+                        verified.intent.action_id
+                    );
+                    let result = result.document();
+                    if result.action_id != verified.intent.action_id
+                        || result.provider_request_id != expected_provider_request_id
+                        || result.model_request_digest
+                            != model_request.document().model_request_digest
+                        || result.execution_role != ExecutionRoleV1::Implementer
+                        || result.candidate_digest.is_some()
+                        || result.worker_manifest_digest
+                            != model_request.document().binding.worker_manifest_digest
+                    {
+                        return Err(LedgerError::ActivityClaimAuthorityRejected {
+                            reason: "successful governed implementer result does not bind the exact signed worker, request, and provider route".into(),
+                        });
+                    }
+                }
+                ExecutionRoleV1::Reviewer | ExecutionRoleV1::Adversary | ExecutionRoleV1::Judge => {
+                    let output: ReviewVerdictOutputV1 = serde_json::from_slice(&result_bytes)
+                        .map_err(|error| LedgerError::ActivityClaimAuthorityRejected {
+                            reason: format!(
+                                "successful governed review result is not a closed ReviewVerdictOutputV1: {error}"
+                            ),
+                        })?;
+                    let canonical = serde_json::to_vec(&output).map_err(|error| {
+                        LedgerError::ActivityClaimAuthorityRejected {
+                            reason: format!(
+                                "successful governed review result cannot be canonicalized: {error}"
+                            ),
+                        }
+                    })?;
+                    let candidate = verified.intent.candidate_binding.as_ref().ok_or_else(
+                        || LedgerError::ActivityClaimAuthorityRejected {
+                            reason:
+                                "successful governed review result has no signed candidate binding"
+                                    .into(),
+                        },
+                    )?;
+                    review_verdict_output_v1_digest(&output).map_err(|error| {
+                        LedgerError::ActivityClaimAuthorityRejected {
+                            reason: format!(
+                                "successful governed review result cannot be digested: {error}"
+                            ),
+                        }
+                    })?;
+                    if canonical != result_bytes
+                        || output.candidate_digest != candidate.candidate_digest
+                        || output.candidate_commit_sha != candidate.candidate_commit_sha
+                        || output.candidate_view_digest != candidate.candidate_view_digest
+                        || !output.confidence.is_finite()
+                        || !(0.0..=1.0).contains(&output.confidence)
+                    {
+                        return Err(LedgerError::ActivityClaimAuthorityRejected {
+                            reason: "successful governed review result does not bind the exact signed candidate, view, and closed output digest".into(),
+                        });
+                    }
+                }
+                ExecutionRoleV1::Candidate => {
+                    return Err(LedgerError::ActivityClaimAuthorityRejected {
+                        reason: "candidate role cannot record a governed model result".into(),
+                    });
+                }
             }
             let evidence = evidence.document();
             if evidence.action_id != verified.intent.action_id
@@ -12606,6 +12786,18 @@ fn require_protected_model_intent_realm(authority: &ActivityClaimAuthorityV1) ->
     Ok(())
 }
 
+fn require_governed_reviewer_lineage(
+    authority: &ActivityClaimAuthorityV1,
+) -> Result<&GovernedReviewerLineageAuthorityV1> {
+    require_protected_model_intent_realm(authority)?;
+    authority.governed_reviewer_lineage.as_ref().ok_or_else(|| {
+        LedgerError::ModelActionIntentAuthorityRejected {
+            reason: "governed reviewer authority requires pinned candidate, acceptance, and checkpoint identities"
+                .into(),
+        }
+    })
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PromotionSignerRoleV1 {
     Kernel,
@@ -14967,6 +15159,13 @@ fn verify_reviewer_candidate_binding(
     evidence: &VerifiedModelActionIntentIssueEvidence,
     intent: &ModelActionIntentV1,
 ) -> Result<()> {
+    let reviewer_lineage = authority.governed_reviewer_lineage.as_ref();
+    let candidate_signer = reviewer_lineage
+        .map(|lineage| &lineage.candidate_artifact_signer)
+        .unwrap_or(&authority.claim_signer);
+    let acceptance_signer = reviewer_lineage
+        .map(|lineage| &lineage.candidate_acceptance_signer)
+        .unwrap_or(&authority.claim_signer);
     let binding = intent.candidate_binding.as_ref().ok_or_else(|| {
         LedgerError::ModelActionIntentAuthorityRejected {
             reason: "reviewer model intent is missing its immutable candidate binding".into(),
@@ -14976,7 +15175,7 @@ fn verify_reviewer_candidate_binding(
         conn,
         binding.candidate_created_event_ref,
         &authority.trusted_keys,
-        &authority.claim_signer,
+        candidate_signer,
         "reviewer candidate artifact",
     )?;
     if candidate_event.run_id.to_string() != intent.run_id {
@@ -15000,11 +15199,12 @@ fn verify_reviewer_candidate_binding(
                 .into(),
         });
     }
-    let completions = verified_claim_events_for_run_kind(
+    let completions = verified_authority_events_for_run_kind(
         conn,
         candidate_event.run_id,
         EventKind::CandidateCompletionRecordedV1,
         authority,
+        candidate_signer,
         "reviewer candidate completion",
     )?;
     let matching_completions = completions
@@ -15046,11 +15246,12 @@ fn verify_reviewer_candidate_binding(
                 .into(),
         });
     }
-    let acceptances = verified_claim_events_for_run_kind(
+    let acceptances = verified_authority_events_for_run_kind(
         conn,
         candidate_event.run_id,
         EventKind::CandidateAcceptanceRecorded,
         authority,
+        acceptance_signer,
         "reviewer candidate acceptance",
     )?;
     let matching_acceptances = acceptances
@@ -15083,6 +15284,15 @@ fn verify_reviewer_candidate_binding(
             reason: "reviewer candidate acceptance is not a passed check over the exact candidate and contract"
                 .into(),
         });
+    }
+    if let Some(lineage) = reviewer_lineage {
+        verify_governed_reviewer_lineage_checkpoint(
+            conn,
+            candidate_event.run_id,
+            acceptance_event.id,
+            authority,
+            &lineage.checkpoint_signer,
+        )?;
     }
     if binding.candidate_view.reviewer_context_manifest_digest
         != evidence.dispatch.body.context_manifest_digest
@@ -15120,11 +15330,12 @@ fn verify_reviewer_candidate_binding(
     Ok(())
 }
 
-fn verified_claim_events_for_run_kind(
+fn verified_authority_events_for_run_kind(
     conn: &Connection,
     run_id: RunId,
     kind: EventKind,
     authority: &ActivityClaimAuthorityV1,
+    expected_signer: &ActorKeyRef,
     label: &str,
 ) -> Result<Vec<Event>> {
     let mut statement =
@@ -15141,11 +15352,164 @@ fn verified_claim_events_for_run_kind(
                 conn,
                 event_id,
                 &authority.trusted_keys,
-                &authority.claim_signer,
+                expected_signer,
                 label,
             )
         })
         .collect()
+}
+
+fn verify_governed_reviewer_lineage_checkpoint(
+    conn: &Connection,
+    run_id: RunId,
+    acceptance_event_id: EventId,
+    authority: &ActivityClaimAuthorityV1,
+    checkpoint_signer: &ActorKeyRef,
+) -> Result<()> {
+    let rejected = |reason: &str| LedgerError::ModelActionIntentAuthorityRejected {
+        reason: format!("reviewer candidate acceptance checkpoint rejected: {reason}"),
+    };
+    let signed = signed_ordinary_events_for_connection(conn, &run_id)?;
+    let Some(acceptance_position) = signed
+        .iter()
+        .position(|event| event.event_id == acceptance_event_id)
+    else {
+        return Err(rejected(
+            "acceptance is absent from the signed ordinary-event prefix",
+        ));
+    };
+    let prefix_len = acceptance_position + 1;
+    let expected_root = tape_root_hash(
+        &signed[..prefix_len]
+            .iter()
+            .map(|event| event.canonical_event_hash.clone())
+            .collect::<Vec<_>>(),
+    );
+    let mut matching = 0_u8;
+    for (event, signature) in checkpoint_events_for_run_for_connection(conn, &run_id)? {
+        let Payload::TapeCheckpointV1(checkpoint) = &event.payload else {
+            return Err(rejected("checkpoint row has the wrong payload"));
+        };
+        if checkpoint.through_event_id != acceptance_event_id {
+            continue;
+        }
+        let signature = signature.ok_or_else(|| rejected("checkpoint is unsigned"))?;
+        if event.run_id != run_id
+            || event.parent_event_id != Some(acceptance_event_id)
+            || checkpoint.run_id != run_id
+            || checkpoint.algorithm != TapeRootAlgorithm::Sha256Linear
+            || checkpoint.through_event_count != prefix_len as u64
+            || checkpoint.tape_root_hash != expected_root
+            || !actor_matches(checkpoint_signer, &signature.signer)
+            || verify_event_signature(&event, &signature, &authority.trusted_keys)
+                != VerificationStatus::Verified
+        {
+            return Err(rejected(
+                "checkpoint does not verify the exact signed acceptance prefix",
+            ));
+        }
+        matching = matching
+            .checked_add(1)
+            .ok_or_else(|| rejected("checkpoint count overflow"))?;
+    }
+    if matching != 1 {
+        return Err(rejected(
+            "acceptance requires exactly one pinned checkpoint",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod governed_reviewer_lineage_checkpoint_tests {
+    use super::*;
+
+    fn test_actor(key: &SigningKey, actor_id: &str) -> ActorKeyRef {
+        ActorKeyRef {
+            actor_id: actor_id.into(),
+            key_id: format!("{actor_id}-main"),
+            public_key_hash: Some(public_key_hash(&key.verifying_key())),
+        }
+    }
+
+    #[test]
+    fn reviewer_lineage_rejects_an_uncheckpointed_acceptance() {
+        let store = SqliteStore::open_in_memory().expect("open test ledger");
+        let claim_key = SigningKey::from_bytes(&[71; 32]);
+        let candidate_key = SigningKey::from_bytes(&[72; 32]);
+        let acceptance_key = SigningKey::from_bytes(&[73; 32]);
+        let checkpoint_key = SigningKey::from_bytes(&[74; 32]);
+        let claim_signer = test_actor(&claim_key, "claim");
+        let candidate_signer = test_actor(&candidate_key, "candidate");
+        let acceptance_signer = test_actor(&acceptance_key, "acceptance");
+        let checkpoint_signer = test_actor(&checkpoint_key, "checkpoint");
+        let mut trusted_keys = TrustedPublicKeys::default();
+        for (signer, key) in [
+            (&claim_signer, &claim_key),
+            (&candidate_signer, &candidate_key),
+            (&acceptance_signer, &acceptance_key),
+            (&checkpoint_signer, &checkpoint_key),
+        ] {
+            trusted_keys.insert_public_key(
+                signer
+                    .public_key_hash
+                    .clone()
+                    .expect("test signer has hash"),
+                key.verifying_key().to_bytes().to_vec(),
+            );
+        }
+        let authority = ActivityClaimAuthorityV1::new_governed_realm(
+            trusted_keys,
+            claim_signer.clone(),
+            claim_signer.clone(),
+            claim_signer,
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+        )
+        .expect("construct test authority")
+        .with_governed_reviewer_lineage(
+            candidate_signer,
+            acceptance_signer.clone(),
+            checkpoint_signer.clone(),
+        )
+        .expect("bind reviewer lineage");
+        let run_id = RunId::new();
+        let acceptance_event = Event {
+            id: EventId::new(),
+            run_id,
+            parent_event_id: None,
+            schema_version: Event::CURRENT_SCHEMA_VERSION,
+            kind: EventKind::CandidateAcceptanceRecorded,
+            occurred_at: Utc::now(),
+            payload: Payload::CandidateAcceptanceRecordedV1(CandidateAcceptanceRecordedV1 {
+                candidate_digest:
+                    "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+                candidate_commit_sha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+                acceptance_ref: "acceptance:test".into(),
+                acceptance_contract_digest:
+                    "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".into(),
+                acceptance_digest:
+                    "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd".into(),
+                outcome: CandidateAcceptanceOutcomeV1::Passed,
+                evaluated_at: "2026-07-26T00:00:00.000Z".into(),
+            }),
+        };
+        store
+            .append_signed(&acceptance_event, &acceptance_key, &acceptance_signer)
+            .expect("append signed acceptance");
+
+        let error = verify_governed_reviewer_lineage_checkpoint(
+            &store.conn,
+            run_id,
+            acceptance_event.id,
+            &authority,
+            &checkpoint_signer,
+        )
+        .expect_err("uncheckpointed acceptance must fail closed");
+        assert!(matches!(
+            error,
+            LedgerError::ModelActionIntentAuthorityRejected { .. }
+        ));
+    }
 }
 
 /// Refuse to introduce a native model intent after the action has reached a

@@ -2403,6 +2403,9 @@ fn validate_review_verdict_v2_shape(kind: &str, review: &ReviewVerdictRecordedV2
             ),
         ],
     )?;
+    if let Some(semantic_digest) = review.review_output_semantic_digest.as_deref() {
+        validate_sha256_fields(kind, [("review_output_semantic_digest", semantic_digest)])?;
+    }
     validate_candidate_view_v1_shape(kind, &review.candidate_view)?;
     let expected_candidate_view_digest =
         candidate_view_v1_digest(&review.candidate_view).map_err(|error| {
@@ -2429,17 +2432,35 @@ fn validate_review_verdict_v2_shape(kind: &str, review: &ReviewVerdictRecordedV2
         kind: kind.to_string(),
         reason: format!("could not canonicalize review v2 closed output: {error}"),
     })?;
-    if review.review_output_digest != expected_output_digest {
-        return invalid(
-            kind,
-            "review_output_digest does not match the canonical closed review output",
-        );
-    }
-    if review.review_output_ref != format!("cas:{}", review.review_output_digest) {
-        return invalid(
-            kind,
-            "review_output_ref must be the exact protected CAS reference for review_output_digest",
-        );
+    match review.review_output_semantic_digest.as_deref() {
+        Some(semantic_digest) => {
+            if semantic_digest != expected_output_digest {
+                return invalid(
+                    kind,
+                    "review_output_semantic_digest does not match the canonical closed review output",
+                );
+            }
+            if review.review_output_ref != format!("cas:{}", review.review_output_digest) {
+                return invalid(
+                    kind,
+                    "review_output_ref must be the exact protected CAS reference for raw review_output_digest",
+                );
+            }
+        }
+        None => {
+            if review.review_output_digest != expected_output_digest {
+                return invalid(
+                    kind,
+                    "legacy review_output_digest does not match the canonical closed review output",
+                );
+            }
+            if review.review_output_ref != format!("cas:{}", review.review_output_digest) {
+                return invalid(
+                    kind,
+                    "legacy review_output_ref must match review_output_digest",
+                );
+            }
+        }
     }
     validate_rfc3339_utc(kind, "reviewed_at", &review.reviewed_at)
 }

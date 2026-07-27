@@ -1796,8 +1796,16 @@ fn validate_pending_promotion_approval_recovery_workflow(
             || candidate_view.tree_digest != candidate.tree_digest
             || review.candidate_view_digest.as_deref()
                 != Some(expected_candidate_view_digest.as_str())
-            || review.review_output_digest.as_deref()
-                != Some(expected_review_output_digest.as_str())
+            || match review.review_output_semantic_digest.as_deref() {
+                Some(semantic_digest) => {
+                    semantic_digest != expected_review_output_digest
+                        || !is_canonical_sha256_digest(semantic_digest)
+                }
+                None => {
+                    review.review_output_digest.as_deref()
+                        != Some(expected_review_output_digest.as_str())
+                }
+            }
             || !candidate_view.read_only
             || !candidate_view.network_disabled
             || ![
@@ -2710,6 +2718,7 @@ mod tests {
                 review_action_receipt_digest: Some(DIGEST_B.into()),
                 review_output_ref: Some("cas:review-output".into()),
                 review_output_digest: Some(review_output_digest),
+                review_output_semantic_digest: None,
                 acceptance_ref: Some("acceptance:1".into()),
                 acceptance_digest: Some(DIGEST_B.into()),
                 acceptance_contract_digest: Some(

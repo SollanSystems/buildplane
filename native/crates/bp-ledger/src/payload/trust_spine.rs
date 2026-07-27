@@ -1944,7 +1944,13 @@ pub struct ReviewVerdictRecordedV2 {
     pub review_action_receipt_ref: String,
     pub review_action_receipt_digest: String,
     pub review_output_ref: String,
+    /// Raw SHA-256 digest of the exact protected-CAS bytes returned by the
+    /// review action. Legacy V2 records used this field for the semantic
+    /// digest as well; new records carry both values explicitly.
     pub review_output_digest: String,
+    /// Domain-separated digest of the decoded closed ReviewVerdictOutputV1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_output_semantic_digest: Option<String>,
     pub decision: ReviewDecisionV1,
     pub findings: Vec<ReviewFindingV1>,
     pub confidence: f64,

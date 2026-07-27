@@ -1108,6 +1108,8 @@ pub struct ReviewVerdictReplayState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_output_digest: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_output_semantic_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acceptance_ref: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acceptance_digest: Option<String>,

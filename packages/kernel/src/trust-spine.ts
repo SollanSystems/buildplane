@@ -564,6 +564,7 @@ export interface ReviewVerdictRecordedV2 {
 	readonly reviewActionReceiptDigest: string;
 	readonly reviewOutputRef: string;
 	readonly reviewOutputDigest: string;
+	readonly reviewOutputSemanticDigest?: string;
 	readonly decision: ReviewDecisionV1;
 	readonly findings: readonly ReviewFindingV1[];
 	readonly confidence: number;
@@ -1209,6 +1210,7 @@ const REVIEW_VERDICT_RECORDED_V2_FIELDS = [
 	"reviewActionReceiptDigest",
 	"reviewOutputRef",
 	"reviewOutputDigest",
+	"reviewOutputSemanticDigest",
 	"decision",
 	"findings",
 	"confidence",
@@ -2971,6 +2973,11 @@ export function parseReviewVerdictRecordedV2(
 		"reviewOutputDigest",
 		"reviewVerdictRecordedV2",
 	);
+	const reviewOutputSemanticDigest = readOptionalSha256Digest(
+		record,
+		"reviewOutputSemanticDigest",
+		"reviewVerdictRecordedV2",
+	);
 	const reviewOutputRef = readNonBlankString(
 		record,
 		"reviewOutputRef",
@@ -2981,8 +2988,7 @@ export function parseReviewVerdictRecordedV2(
 			"reviewVerdictRecordedV2.reviewOutputRef must be the exact CAS reference for reviewOutputDigest",
 		);
 	}
-	if (
-		reviewOutputDigest !==
+	const canonicalReviewOutputSemanticDigest =
 		canonicalReviewVerdictOutputV1Digest({
 			candidateDigest,
 			candidateCommitSha,
@@ -2990,10 +2996,15 @@ export function parseReviewVerdictRecordedV2(
 			findings: verdict.findings,
 			confidence: verdict.confidence,
 			candidateViewDigest,
-		})
+		});
+	if (
+		(reviewOutputSemanticDigest ?? reviewOutputDigest) !==
+		canonicalReviewOutputSemanticDigest
 	) {
 		throw new TypeError(
-			"reviewVerdictRecordedV2.reviewOutputDigest must equal the canonical closed review output digest",
+			reviewOutputSemanticDigest === undefined
+				? "reviewVerdictRecordedV2.reviewOutputDigest must equal the canonical closed review output digest"
+				: "reviewVerdictRecordedV2.reviewOutputSemanticDigest must equal the canonical closed review output digest",
 		);
 	}
 	const reviewedAt = readRfc3339UtcTimestamp(
@@ -3048,6 +3059,9 @@ export function parseReviewVerdictRecordedV2(
 		),
 		reviewOutputRef,
 		reviewOutputDigest,
+		...(reviewOutputSemanticDigest === undefined
+			? {}
+			: { reviewOutputSemanticDigest }),
 		decision: verdict.decision,
 		findings: verdict.findings,
 		confidence: verdict.confidence,

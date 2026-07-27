@@ -5694,6 +5694,7 @@ fn apply_review_verdict(state: &mut ReplayState, event: &Event, p: &ReviewVerdic
             review_action_receipt_digest: None,
             review_output_ref: None,
             review_output_digest: None,
+            review_output_semantic_digest: None,
             acceptance_ref: None,
             acceptance_digest: None,
             acceptance_contract_digest: None,
@@ -6056,13 +6057,17 @@ fn apply_review_verdict_v2(state: &mut ReplayState, event: &Event, p: &ReviewVer
             return;
         }
     };
-    if p.review_output_digest != expected_output_digest {
-        reject_workflow_transition(
-            state,
-            event,
-            "review v2 output digest does not match its closed verdict fields".into(),
-        );
-        return;
+    match p.review_output_semantic_digest.as_deref() {
+        Some(semantic_digest) if semantic_digest == expected_output_digest => {}
+        None if p.review_output_digest == expected_output_digest => {}
+        _ => {
+            reject_workflow_transition(
+                state,
+                event,
+                "review v2 semantic digest does not match its closed verdict fields".into(),
+            );
+            return;
+        }
     }
     if let Some(existing) = workflow.reviews.get(&p.review_ref) {
         if review_v2_matches_existing(existing, event.id, p) {
@@ -6098,6 +6103,7 @@ fn apply_review_verdict_v2(state: &mut ReplayState, event: &Event, p: &ReviewVer
             review_action_receipt_digest: Some(p.review_action_receipt_digest.clone()),
             review_output_ref: Some(p.review_output_ref.clone()),
             review_output_digest: Some(p.review_output_digest.clone()),
+            review_output_semantic_digest: p.review_output_semantic_digest.clone(),
             acceptance_ref: Some(p.acceptance_ref.clone()),
             acceptance_digest: Some(p.acceptance_digest.clone()),
             acceptance_contract_digest: Some(p.acceptance_contract_digest.clone()),
@@ -9335,6 +9341,7 @@ fn review_matches_existing(
         && existing.review_action_receipt_digest.is_none()
         && existing.review_output_ref.is_none()
         && existing.review_output_digest.is_none()
+        && existing.review_output_semantic_digest.is_none()
         && existing.acceptance_ref.is_none()
         && existing.acceptance_digest.is_none()
         && existing.acceptance_contract_digest.is_none()
@@ -9376,6 +9383,7 @@ fn review_v2_matches_existing(
             == Some(p.review_action_receipt_digest.as_str())
         && existing.review_output_ref.as_deref() == Some(p.review_output_ref.as_str())
         && existing.review_output_digest.as_deref() == Some(p.review_output_digest.as_str())
+        && existing.review_output_semantic_digest == p.review_output_semantic_digest
         && existing.acceptance_ref.as_deref() == Some(p.acceptance_ref.as_str())
         && existing.acceptance_digest.as_deref() == Some(p.acceptance_digest.as_str())
         && existing.acceptance_contract_digest.as_deref()
