@@ -2000,7 +2000,7 @@ describe("cli command surface", () => {
 		});
 		expect(JSON.parse(approvalRequested.stdout.join("\n")).blockers).toEqual(
 			expect.arrayContaining([
-				"Governed admission was requested, but no DispatchEnvelopeV1, V2, or V3 was supplied.",
+				"Governed admission was requested, but no DispatchEnvelopeV1, V2, V3, or V5 was supplied.",
 			]),
 		);
 		expect(git(root, ["rev-parse", "HEAD"]).trim()).toBe(headBefore);
