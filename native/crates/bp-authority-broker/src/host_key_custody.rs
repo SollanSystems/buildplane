@@ -108,6 +108,7 @@ pub(crate) struct ProtectedV5AdmissionSigningKeysV1 {
 }
 
 pub(crate) struct ProtectedGovernedSessionSigningKeysV1 {
+    checkpoint: SigningKey,
     action_request: SigningKey,
     claim: SigningKey,
     action_receipt: SigningKey,
@@ -116,6 +117,10 @@ pub(crate) struct ProtectedGovernedSessionSigningKeysV1 {
 }
 
 impl ProtectedGovernedSessionSigningKeysV1 {
+    pub(crate) fn checkpoint(&self) -> &SigningKey {
+        &self.checkpoint
+    }
+
     pub(crate) fn action_request(&self) -> &SigningKey {
         &self.action_request
     }
@@ -143,6 +148,11 @@ pub(crate) fn load_governed_session_signing_keys_v1(
     #[cfg(target_os = "linux")]
     {
         let config = startup.config();
+        let checkpoint = load_signing_key_from_authority_descriptor(
+            startup.authority_root().directory(),
+            &config.v5_admission_checkpoint_signer,
+            config.broker_uid,
+        )?;
         let action_request = load_signing_key_from_authority_descriptor(
             startup.authority_root().directory(),
             &config.action_request_signer,
@@ -168,7 +178,12 @@ pub(crate) fn load_governed_session_signing_keys_v1(
             &config.broker_identity_signer,
             config.broker_uid,
         )?;
-        if action_request.verifying_key() == claim.verifying_key()
+        if checkpoint.verifying_key() == action_request.verifying_key()
+            || checkpoint.verifying_key() == claim.verifying_key()
+            || checkpoint.verifying_key() == action_receipt.verifying_key()
+            || checkpoint.verifying_key() == candidate_artifact.verifying_key()
+            || checkpoint.verifying_key() == broker_identity.verifying_key()
+            || action_request.verifying_key() == claim.verifying_key()
             || action_request.verifying_key() == action_receipt.verifying_key()
             || action_request.verifying_key() == broker_identity.verifying_key()
             || claim.verifying_key() == action_receipt.verifying_key()
@@ -182,6 +197,7 @@ pub(crate) fn load_governed_session_signing_keys_v1(
             return Err(ProtectedHostKeyLoadError::AliasedKeyMaterial);
         }
         Ok(ProtectedGovernedSessionSigningKeysV1 {
+            checkpoint,
             action_request,
             claim,
             action_receipt,
@@ -631,6 +647,12 @@ mod tests {
         let broker_identity_seed = [24; 32];
         let receipt_seed = [25; 32];
         let candidate_seed = [26; 32];
+        let checkpoint_seed = [46; 32];
+        fixture.write_key(
+            &["kernel", "v5-admission-checkpoint"],
+            "v5-checkpoint-main",
+            &checkpoint_seed,
+        );
         fixture.write_key(&["kernel", "model-action"], "action-main", &action_seed);
         fixture.write_key(&["kernel", "model-claim"], "claim-main", &claim_seed);
         fixture.write_key(&["kernel", "action-receipt"], "receipt-main", &receipt_seed);
@@ -715,6 +737,7 @@ mod tests {
 
         let keys =
             load_governed_session_signing_keys_v1(&startup).expect("load governed-session keys");
+        assert_eq!(keys.checkpoint().to_bytes(), checkpoint_seed);
         assert_eq!(keys.action_request().to_bytes(), action_seed);
         assert_eq!(keys.claim().to_bytes(), claim_seed);
         assert_eq!(keys.action_receipt().to_bytes(), receipt_seed);

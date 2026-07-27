@@ -118,22 +118,25 @@ The Git adapter freezes worker output under an immutable candidate ref and
 records the base commit, candidate commit, tree, patch, changed-files, and
 candidate digests. It never merges that ref while it is being reviewed.
 
-For sealed V3 candidates, `CandidateCompletionRecordedV1` closes the material
-ization boundary only after a fresh signed reducer projection proves the exact
+For sealed V3 candidates, `CandidateCompletionRecordedV1` closes the
+materialization boundary only after a fresh signed reducer projection proves the exact
 candidate-create Git request, native activity claim, succeeded activity result,
 terminal receipt, and sealed receipt-set entry. Its digest is bound to the
-`CandidateCreatedV2` event and uses that receipt-set seal timestamp, so a
+`CandidateCreatedV2` event and uses that immutable lifecycle timestamp, so a
 crash/retry can reconcile one immutable proof rather than inventing a new
 completion time. A recovered proof with any different digest is a conflict;
 missing claim/result lineage blocks rather than being inferred from a worker
 message or a process-local map.
 
-The current protected authority deployment is single-writer per governed run.
-Ports in that process also serialize candidate completion by candidate-created
-event ID and treat a post-append flush failure as indeterminate until tape
-reconciliation. A multi-writer broker is not an enabled governed deployment
-until the native ledger exposes an atomic candidate-completion append-or-resolve
-operation.
+The V5 protected host now uses the same native completion projection. It
+reconstructs the exact Git-finalization action, claim, result, receipt, sealed
+receipt set, V5 admission, and candidate digest from signed tape; signs the
+completion with the distinct candidate-artifact identity; and seals the entire
+prefix with the pinned V5 checkpoint identity. The projection is unique by
+candidate-created event ID, so an exact retry returns the original proof and
+checkpoint while a sibling, substituted signer, or changed lineage requires
+reconciliation. Candidate completion is therefore available to trusted replay
+and reviewer resolution without granting merge authority.
 
 For a governed candidate, deterministic acceptance executes against the frozen
 commit under the exact acceptance-contract digest named by the signed dispatch.

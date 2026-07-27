@@ -227,11 +227,8 @@ pub(crate) fn resolve_reviewer_model_evidence_from_snapshot_v1(
 fn validate_reviewer_dispatch(
     workflow: &WorkflowInstanceV1,
 ) -> Result<(), ReviewerSessionResolutionErrorV1> {
-    if workflow.dispatch.dispatch_version != 3
-        || workflow.dispatch.trust_tier != TrustTierV1::Governed
+    if !has_complete_governed_sealed_dispatch_authority(workflow)
         || workflow.dispatch.commit_mode != CommitModeV1::Atomic
-        || workflow.dispatch.action_evidence_version != Some(ActionEvidenceVersionV1::SealedV3)
-        || workflow.dispatch.governed_packet_digest.is_none()
     {
         return Err(ReviewerSessionResolutionErrorV1::ReviewerDispatchNotGovernedSealedV3);
     }
@@ -244,16 +241,36 @@ fn validate_reviewer_dispatch(
 fn validate_candidate_workflow(
     workflow: &WorkflowInstanceV1,
 ) -> Result<(), ReviewerSessionResolutionErrorV1> {
-    if workflow.dispatch.dispatch_version != 3
-        || workflow.dispatch.trust_tier != TrustTierV1::Governed
+    if !has_complete_governed_sealed_dispatch_authority(workflow)
         || workflow.dispatch.commit_mode != CommitModeV1::Atomic
-        || workflow.dispatch.action_evidence_version != Some(ActionEvidenceVersionV1::SealedV3)
-        || workflow.dispatch.governed_packet_digest.is_none()
         || workflow.dispatch.execution_role != ExecutionRoleV1::Implementer
     {
         return Err(ReviewerSessionResolutionErrorV1::CandidateDispatchNotGovernedSealedV3);
     }
     Ok(())
+}
+
+fn has_complete_governed_sealed_dispatch_authority(workflow: &WorkflowInstanceV1) -> bool {
+    if workflow.dispatch.trust_tier != TrustTierV1::Governed
+        || workflow.dispatch.action_evidence_version != Some(ActionEvidenceVersionV1::SealedV3)
+        || workflow
+            .dispatch
+            .governed_packet_digest
+            .as_deref()
+            .is_none_or(str::is_empty)
+    {
+        return false;
+    }
+    match workflow.dispatch.dispatch_version {
+        3 => true,
+        4 => workflow.workflow_graph.is_some(),
+        5 => {
+            workflow.workflow_graph.is_some()
+                && workflow.manifest_declarations.is_some()
+                && workflow.v5_admission_receipt.is_some()
+        }
+        _ => false,
+    }
 }
 
 fn validate_candidate_binding(

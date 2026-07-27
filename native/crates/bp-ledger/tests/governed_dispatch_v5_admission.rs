@@ -14,28 +14,29 @@ use bp_ledger::payload::activity_claim::{ActivityClaimPurposeV1, ActivityResultO
 use bp_ledger::payload::governed_packet::GovernedCommandPacketV1;
 use bp_ledger::payload::trust_spine::{
     action_receipt_recorded_v2_digest, action_receipt_set_v1_digest, action_requested_v2_digest,
-    attempt_context_content_v1_digest, context_manifest_content_v1_digest,
-    dispatch_envelope_v3_body_digest, dispatch_envelope_v4_digest, dispatch_envelope_v5_digest,
-    governed_dispatch_policy_digest_v1, sandbox_profile_content_v1_digest,
-    worker_manifest_content_v1_digest, workflow_graph_v2_digest, ActionEvidenceVersionV1,
-    ActionKindV1, ActionRequestedV2, AttemptContextContentV1, AttemptContextDeclaredV1,
-    AttemptFeedbackV1, CommitModeV1, ContextManifestContentV1, ContextManifestDeclaredV1,
-    ContextManifestEntryKindV1, ContextManifestEntryV1, ContextTaintV1, ContextTrustLevelV1,
-    DispatchBudgetV1, DispatchEnvelopeBodyV2, DispatchEnvelopeV3, DispatchEnvelopeV4,
-    DispatchEnvelopeV5, ExecutionRoleV1, PriorCandidateRefV1, SandboxProfileContentV1,
-    SandboxProfileDeclaredV1, SandboxRuntimeV1, TrustTierV1, WorkerHarnessV1,
-    WorkerManifestContentV1, WorkerManifestDeclaredV1, WorkerProviderV1, WorkflowGraphDeclaredV2,
-    WorkflowGraphNodeV2,
+    attempt_context_content_v1_digest, candidate_completion_recorded_v1_digest,
+    context_manifest_content_v1_digest, dispatch_envelope_v3_body_digest,
+    dispatch_envelope_v4_digest, dispatch_envelope_v5_digest, governed_dispatch_policy_digest_v1,
+    sandbox_profile_content_v1_digest, worker_manifest_content_v1_digest, workflow_graph_v2_digest,
+    ActionEvidenceVersionV1, ActionKindV1, ActionRequestedV2, AttemptContextContentV1,
+    AttemptContextDeclaredV1, AttemptFeedbackV1, CommitModeV1, ContextManifestContentV1,
+    ContextManifestDeclaredV1, ContextManifestEntryKindV1, ContextManifestEntryV1, ContextTaintV1,
+    ContextTrustLevelV1, DispatchBudgetV1, DispatchEnvelopeBodyV2, DispatchEnvelopeV3,
+    DispatchEnvelopeV4, DispatchEnvelopeV5, ExecutionRoleV1, PriorCandidateRefV1,
+    SandboxProfileContentV1, SandboxProfileDeclaredV1, SandboxRuntimeV1, TrustTierV1,
+    WorkerHarnessV1, WorkerManifestContentV1, WorkerManifestDeclaredV1, WorkerProviderV1,
+    WorkflowGraphDeclaredV2, WorkflowGraphNodeV2,
 };
 use bp_ledger::signing::{public_key_hash, sign_event, ActorKeyRef, TrustedPublicKeys};
 use bp_ledger::storage::sqlite::{
     ActivityClaimAuthorityV1, ActivityClaimDispositionV1, ActivityClaimRequestV1,
-    ActivityResultDispositionV1, CheckpointPolicy,
+    ActivityResultDispositionV1, CheckpointPolicy, GovernedCandidateCompletionDispositionV1,
     GovernedCommandActionAuthorizeAndClaimDispositionV1, GovernedCommandActionIssueDispositionV1,
     GovernedCommandActionResultRequestV1, GovernedDispatchV5AdmissionAuthorityV1,
     GovernedDispatchV5AdmissionDispositionV1, GovernedDispatchV5AdmissionRequestV1,
-    GovernedDispatchV5AdmissionSealRequestV1, GovernedV5CandidateCreateDispositionV1,
-    GovernedV5CandidateCreateRequestV1, GovernedV5CandidateFinalizeActionIssueDispositionV1,
+    GovernedDispatchV5AdmissionSealRequestV1, GovernedV5CandidateCompletionRequestV1,
+    GovernedV5CandidateCreateDispositionV1, GovernedV5CandidateCreateRequestV1,
+    GovernedV5CandidateFinalizeActionIssueDispositionV1,
     GovernedV5CandidateFinalizeActionIssueRequestV1,
     GovernedV5CandidateFinalizeAuthorizeAndClaimRequestV1,
     GovernedV5CandidateFinalizeResultRequestV1, GovernedV5CandidateReceiptSetDispositionV1,
@@ -1845,6 +1846,150 @@ fn v5_command_issuance_requires_a_checkpoint_sealed_admission() {
         "candidate lifecycle retry must not append duplicate evidence"
     );
 
+    let completion_request = GovernedV5CandidateCompletionRequestV1 {
+        run_id: fixture.run_id,
+        candidate_created_event_id,
+    };
+    assert!(matches!(
+        store.record_governed_v5_candidate_completion_v1(
+            &completion_request,
+            &v5_authority,
+            &activity_authority,
+            &receipt_signer,
+            &wrong_candidate_key,
+            &wrong_candidate_signer,
+            &checkpoint_key,
+            &checkpoint_signer,
+        ),
+        Err(LedgerError::CandidateArtifactAuthorityRejected { .. })
+    ));
+    assert_eq!(
+        store
+            .event_count()
+            .expect("count rejected completion signer tape"),
+        17,
+        "a substituted completion signer must not append proof or checkpoint"
+    );
+    let wrong_checkpoint_key = SigningKey::from_bytes(&[83u8; 32]);
+    let wrong_checkpoint_signer = actor(
+        "kernel:v5-checkpoint",
+        "checkpoint-1",
+        &wrong_checkpoint_key,
+    );
+    assert!(matches!(
+        store.record_governed_v5_candidate_completion_v1(
+            &completion_request,
+            &v5_authority,
+            &activity_authority,
+            &receipt_signer,
+            &candidate_key,
+            &candidate_signer,
+            &wrong_checkpoint_key,
+            &wrong_checkpoint_signer,
+        ),
+        Err(LedgerError::GovernedDispatchAdmissionAuthorityRejected { .. })
+    ));
+    assert_eq!(
+        store
+            .event_count()
+            .expect("count rejected completion checkpoint tape"),
+        17,
+        "a substituted checkpoint signer must not append a completion proof"
+    );
+    let completion = store
+        .record_governed_v5_candidate_completion_v1(
+            &completion_request,
+            &v5_authority,
+            &activity_authority,
+            &receipt_signer,
+            &candidate_key,
+            &candidate_signer,
+            &checkpoint_key,
+            &checkpoint_signer,
+        )
+        .expect("record and seal V5 candidate completion");
+    let (completion_event_id, completion_event_digest, completion_digest) = match completion {
+        GovernedCandidateCompletionDispositionV1::Recorded {
+            candidate_completion_event_id,
+            candidate_completion_event_digest,
+            completion_digest,
+        } => (
+            candidate_completion_event_id,
+            candidate_completion_event_digest,
+            completion_digest,
+        ),
+        other => panic!("first V5 completion must record, got {other:?}"),
+    };
+    assert_eq!(
+        store.event_count().expect("count completed V5 tape"),
+        19,
+        "candidate completion must append one proof and one fully covering checkpoint"
+    );
+    let completion_event = store
+        .events_for_run(&fixture.run_id.to_string())
+        .expect("load completed V5 tape")
+        .into_iter()
+        .map(|row| row.to_event().expect("decode completed V5 event"))
+        .find(|event| event.id == completion_event_id)
+        .expect("find V5 candidate completion");
+    assert_eq!(
+        completion_event.parent_event_id,
+        Some(candidate_created_event_id)
+    );
+    assert_eq!(
+        canonical_event_hash(&completion_event).expect("digest V5 completion event"),
+        completion_event_digest
+    );
+    let Payload::CandidateCompletionRecordedV1(completion_payload) = &completion_event.payload
+    else {
+        panic!("V5 candidate completion must append CandidateCompletionRecordedV1");
+    };
+    assert_eq!(
+        completion_payload.candidate_created_event_ref,
+        candidate_created_event_id
+    );
+    assert_eq!(
+        completion_payload.candidate_digest,
+        recorded_candidate_digest
+    );
+    assert_eq!(
+        completion_payload.completion_digest,
+        candidate_completion_recorded_v1_digest(completion_payload)
+            .expect("canonical V5 completion digest")
+    );
+    assert_eq!(completion_payload.completion_digest, completion_digest);
+    assert_eq!(
+        completion_payload.action_request_ref,
+        finalize_action_event_id
+    );
+    assert_eq!(completion_payload.action_receipt_ref, finalize_receipt_ref);
+    let completion_retry = store
+        .record_governed_v5_candidate_completion_v1(
+            &completion_request,
+            &v5_authority,
+            &activity_authority,
+            &receipt_signer,
+            &candidate_key,
+            &candidate_signer,
+            &checkpoint_key,
+            &checkpoint_signer,
+        )
+        .expect("recover exact V5 candidate completion");
+    assert!(matches!(
+        completion_retry,
+        GovernedCandidateCompletionDispositionV1::Existing {
+            candidate_completion_event_id: existing,
+            ..
+        } if existing == completion_event_id
+    ));
+    assert_eq!(
+        store
+            .event_count()
+            .expect("count idempotent V5 completion retry tape"),
+        19,
+        "V5 candidate completion retry must not append another proof or checkpoint"
+    );
+
     let retry = store
         .issue_governed_v5_command_action_v1_at_for_tests(
             &action_request,
@@ -1865,7 +2010,7 @@ fn v5_command_issuance_requires_a_checkpoint_sealed_admission() {
     ));
     assert_eq!(
         store.event_count().expect("count recovered V5 tape"),
-        17,
+        19,
         "V5 action replay must not append a duplicate effect intent"
     );
 }

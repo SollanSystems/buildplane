@@ -66,7 +66,8 @@ use bp_ledger::payload::activity_claim::ActivityResultOutcomeV1;
 use bp_ledger::payload::model_evidence::ModelProviderV1;
 use bp_ledger::payload::trust_spine::ExecutionRoleV1;
 use bp_ledger::storage::sqlite::{
-    ActivityClaimDispositionV1, ActivityResultDispositionV1, GovernedV5CandidateCreateRequestV1,
+    ActivityClaimDispositionV1, ActivityResultDispositionV1,
+    GovernedV5CandidateCompletionRequestV1, GovernedV5CandidateCreateRequestV1,
     GovernedV5CandidateFinalizeActionIssueDispositionV1,
     GovernedV5CandidateFinalizeActionIssueRequestV1,
     GovernedV5CandidateFinalizeAuthorizeAndClaimRequestV1,
@@ -455,7 +456,8 @@ impl ProtectedGovernedSessionHostStateV1 {
                     ..
                 } => action_receipt_set_event_id,
             };
-            self.ledger
+            let candidate_disposition = self
+                .ledger
                 .store()
                 .record_governed_v5_candidate_created_v1(
                     &GovernedV5CandidateCreateRequestV1 {
@@ -468,6 +470,32 @@ impl ProtectedGovernedSessionHostStateV1 {
                     &config.action_receipt_signer,
                     self.signing_keys.candidate_artifact(),
                     &config.candidate_artifact_signer,
+                )
+                .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)?;
+            let candidate_created_event_id = match candidate_disposition {
+                bp_ledger::storage::sqlite::GovernedV5CandidateCreateDispositionV1::Recorded {
+                    candidate_created_event_id,
+                    ..
+                }
+                | bp_ledger::storage::sqlite::GovernedV5CandidateCreateDispositionV1::Existing {
+                    candidate_created_event_id,
+                    ..
+                } => candidate_created_event_id,
+            };
+            self.ledger
+                .store()
+                .record_governed_v5_candidate_completion_v1(
+                    &GovernedV5CandidateCompletionRequestV1 {
+                        run_id: config.run_id,
+                        candidate_created_event_id,
+                    },
+                    &config.v5_admission_authority,
+                    &config.activity_authority,
+                    &config.action_receipt_signer,
+                    self.signing_keys.candidate_artifact(),
+                    &config.candidate_artifact_signer,
+                    self.signing_keys.checkpoint(),
+                    &config.v5_admission_checkpoint_signer,
                 )
                 .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)?;
         }
@@ -909,6 +937,7 @@ mod tests {
         anchor: tempfile::TempDir,
         authority_root: PathBuf,
         owner: u32,
+        checkpoint_seed: [u8; 32],
         action_seed: [u8; 32],
         claim_seed: [u8; 32],
         receipt_seed: [u8; 32],
@@ -926,6 +955,7 @@ mod tests {
                 anchor,
                 authority_root,
                 owner: unsafe { libc::geteuid() },
+                checkpoint_seed: [36; 32],
                 action_seed: [32; 32],
                 claim_seed: [33; 32],
                 receipt_seed: [37; 32],
@@ -937,6 +967,11 @@ mod tests {
         }
 
         fn install(&self) {
+            self.write_key(
+                &["kernel", "v5-admission-checkpoint"],
+                "v5-checkpoint-main",
+                &self.checkpoint_seed,
+            );
             self.write_key(
                 &["kernel", "model-action"],
                 "action-main",
@@ -1031,7 +1066,7 @@ mod tests {
                 "v5_admission_checkpoint": signer(
                     "kernel:v5-admission-checkpoint",
                     "v5-checkpoint-main",
-                    [36; 32]
+                    self.checkpoint_seed
                 ),
                 "action_request": signer(
                     "kernel:model-action",
@@ -1109,6 +1144,7 @@ mod tests {
             state.session_startup().sandbox_profile_digest(),
             "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
         );
+        assert_eq!(state.signing_keys().checkpoint().to_bytes(), [36; 32]);
         assert_eq!(state.signing_keys().action_request().to_bytes(), [32; 32]);
         assert_eq!(state.signing_keys().claim().to_bytes(), [33; 32]);
         assert_eq!(state.signing_keys().broker_identity().to_bytes(), [34; 32]);
@@ -1123,9 +1159,21 @@ mod tests {
 
     #[test]
     fn missing_any_protected_dependency_prevents_host_state() {
-        for missing in ["action-key", "ledger", "cas", "credential"] {
+        for missing in [
+            "checkpoint-key",
+            "action-key",
+            "ledger",
+            "cas",
+            "credential",
+        ] {
             let fixture = HostFixture::new();
             match missing {
+                "checkpoint-key" => fs::remove_file(
+                    fixture
+                        .authority_root
+                        .join("keys/kernel/v5-admission-checkpoint/v5-checkpoint-main.ed25519"),
+                )
+                .expect("remove checkpoint key"),
                 "action-key" => fs::remove_file(
                     fixture
                         .authority_root
