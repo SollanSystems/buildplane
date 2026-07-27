@@ -1056,6 +1056,10 @@ struct V2ReviewFixture {
 }
 
 fn v2_review_fixture() -> V2ReviewFixture {
+    v2_review_fixture_with_decision(ReviewDecisionV1::Approve)
+}
+
+fn v2_review_fixture_with_decision(decision: ReviewDecisionV1) -> V2ReviewFixture {
     let run_id = RunId::new();
     let candidate_dispatch = dispatch_v3();
     let candidate_request = action_request(run_id, &candidate_dispatch, "implement-action-1");
@@ -1068,13 +1072,14 @@ fn v2_review_fixture() -> V2ReviewFixture {
     reviewer_request.action_kind = ActionKindV1::Model;
     let mut reviewer_receipt = action_receipt(&reviewer_request, ActionReceiptOutcomeV2::Succeeded);
     let candidate_view = review_v2_candidate_view(run_id, &candidate_dispatch, &reviewer_dispatch);
-    let review_output_digest = review_verdict_output_v1_digest(&review_v2_output(&candidate_view))
-        .expect("hash closed review output");
+    let review_output_digest =
+        review_verdict_output_v1_digest(&review_v2_output_with_decision(&candidate_view, decision))
+            .expect("hash closed review output");
     reviewer_receipt.result_ref = Some(format!("cas:{review_output_digest}"));
     reviewer_receipt.result_digest = Some(review_output_digest);
     reviewer_receipt.authorization_ref = Some("authorization:review-action-1".into());
     let reviewer_set = action_receipt_set(&reviewer_request, &reviewer_receipt);
-    let verdict = review_v2(
+    let verdict = review_v2_with_decision(
         run_id,
         &candidate_dispatch,
         &reviewer_dispatch,
@@ -1082,6 +1087,7 @@ fn v2_review_fixture() -> V2ReviewFixture {
         &reviewer_request,
         &reviewer_receipt,
         &reviewer_set,
+        decision,
     );
 
     V2ReviewFixture {
@@ -1265,6 +1271,70 @@ fn v2_review_binds_passed_candidate_and_sealed_reviewer_action_evidence() {
             .map(|view| view.candidate_ref.as_str()),
         Some(fixture.candidate.candidate_ref.as_str())
     );
+}
+
+#[test]
+fn non_approving_v2_review_decisions_never_create_promotion_eligibility() {
+    for decision in [
+        ReviewDecisionV1::RequestChanges,
+        ReviewDecisionV1::Reject,
+        ReviewDecisionV1::Abstain,
+    ] {
+        let fixture = v2_review_fixture_with_decision(decision);
+        let mut state = ReplayState::default();
+        apply_v2_review_prefix(&mut state, &fixture);
+        apply(
+            &mut state,
+            &event_of(
+                fixture.run_id,
+                EventKind::ReviewVerdictRecordedV2,
+                Payload::ReviewVerdictRecordedV2(fixture.verdict.clone()),
+            ),
+        );
+
+        let workflow_key = state
+            .workflow_instances
+            .iter()
+            .find_map(|(key, workflow)| {
+                (workflow.workflow_id == fixture.candidate_dispatch.body.workflow_id
+                    && workflow.unit_id == fixture.candidate_dispatch.body.unit_id
+                    && workflow.attempt == fixture.candidate_dispatch.body.attempt)
+                    .then_some(key.clone())
+            })
+            .expect("candidate workflow key");
+        let workflow = state
+            .workflow_instances
+            .get(&workflow_key)
+            .expect("candidate workflow");
+        assert_eq!(workflow.phase, WorkflowPhaseV1::Rejected);
+        assert!(workflow.promotion_approval.is_none());
+        assert!(workflow.promotion.is_none());
+
+        apply(
+            &mut state,
+            &event_of(
+                fixture.run_id,
+                EventKind::PromotionApprovalRequested,
+                Payload::PromotionApprovalRequestedV1(promotion_approval_request(&fixture)),
+            ),
+        );
+        let workflow = state
+            .workflow_instances
+            .get(&workflow_key)
+            .expect("candidate workflow after blocked promotion request");
+        assert_eq!(
+            workflow.phase,
+            WorkflowPhaseV1::Rejected,
+            "{decision:?} cannot leave a promotion-eligible phase"
+        );
+        assert!(workflow.promotion_approval.is_none());
+        assert!(workflow.promotion.is_none());
+        assert!(state.issues.iter().any(|issue| matches!(
+            issue,
+            ReplayIssue::WorkflowTransitionRejected { reason, .. }
+                if reason.contains("terminal workflow phase")
+        )));
+    }
 }
 
 #[test]
@@ -4311,8 +4381,31 @@ fn review_v2(
     reviewer_receipt: &ActionReceiptRecordedV2,
     reviewer_set: &ActionReceiptSetRecordedV1,
 ) -> ReviewVerdictRecordedV2 {
+    review_v2_with_decision(
+        run_id,
+        candidate_dispatch,
+        reviewer_dispatch,
+        acceptance,
+        reviewer_request,
+        reviewer_receipt,
+        reviewer_set,
+        ReviewDecisionV1::Approve,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn review_v2_with_decision(
+    run_id: RunId,
+    candidate_dispatch: &DispatchEnvelopeV3,
+    reviewer_dispatch: &DispatchEnvelopeV3,
+    acceptance: &CandidateAcceptanceRecordedV1,
+    reviewer_request: &ActionRequestedV2,
+    reviewer_receipt: &ActionReceiptRecordedV2,
+    reviewer_set: &ActionReceiptSetRecordedV1,
+    decision: ReviewDecisionV1,
+) -> ReviewVerdictRecordedV2 {
     let candidate_view = review_v2_candidate_view(run_id, candidate_dispatch, reviewer_dispatch);
-    let review_output = review_v2_output(&candidate_view);
+    let review_output = review_v2_output_with_decision(&candidate_view, decision);
     let review_output_digest =
         review_verdict_output_v1_digest(&review_output).expect("hash closed review output");
     ReviewVerdictRecordedV2 {
@@ -4375,10 +4468,17 @@ fn review_v2_candidate_view(
 }
 
 fn review_v2_output(candidate_view: &CandidateViewV1) -> ReviewVerdictOutputV1 {
+    review_v2_output_with_decision(candidate_view, ReviewDecisionV1::Approve)
+}
+
+fn review_v2_output_with_decision(
+    candidate_view: &CandidateViewV1,
+    decision: ReviewDecisionV1,
+) -> ReviewVerdictOutputV1 {
     ReviewVerdictOutputV1 {
         candidate_digest: DIGEST_A.into(),
         candidate_commit_sha: "2".repeat(40),
-        decision: ReviewDecisionV1::Approve,
+        decision,
         findings: vec![],
         confidence: 0.98,
         candidate_view_digest: candidate_view_v1_digest(candidate_view)
