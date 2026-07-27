@@ -2242,7 +2242,16 @@ mod tests {
 
         let mut workflow = governed_dispatch_resolution_v2_fixture_workflow();
         workflow.phase = WorkflowPhaseV1::CandidateCreated;
-        let action_id = "git-candidate-create:candidate-1/run-1/1".to_string();
+        let candidate_ref = format!(
+            "refs/buildplane/candidates/candidate-1/{}/{}",
+            workflow.run_id, workflow.attempt
+        );
+        let action_id = format!(
+            "git-candidate-create:{}",
+            candidate_ref
+                .strip_prefix("refs/buildplane/candidates/")
+                .expect("fixture candidate ref must use the candidate namespace")
+        );
         let action_request_payload = ActionRequestedV2 {
             run_id: workflow.run_id.clone(),
             workflow_id: workflow.workflow_id.clone(),
@@ -2444,7 +2453,7 @@ mod tests {
         workflow.candidate = Some(CandidateArtifactReplayState {
             event_id: governed_fixture_event_id("00000000-0000-7000-8000-000000000014"),
             candidate_id: "candidate-1".to_string(),
-            candidate_ref: "refs/buildplane/candidates/candidate-1/run-1/1".to_string(),
+            candidate_ref,
             candidate_digest: governed_fixture_digest('3'),
             base_commit_sha: workflow.dispatch.base_commit_sha.clone(),
             candidate_commit_sha: "b".repeat(40),

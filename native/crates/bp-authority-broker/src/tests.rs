@@ -5956,6 +5956,7 @@ impl TrustedPromotionVerifier for FailingPromotionVerifier {
 struct FakePromotionBackendState {
     claim_calls: usize,
     result_calls: usize,
+    recorded_outcome: Option<PromotionResultOutcomeV1>,
 }
 
 struct FakePromotionBackend {
@@ -5965,6 +5966,18 @@ struct FakePromotionBackend {
 }
 
 impl PromotionExecutionBackend for FakePromotionBackend {
+    fn record_rejection(
+        &mut self,
+        _run_id: RunId,
+        _request: &BrokerPromotionExecutionRequest,
+    ) -> Result<PromotionResultDisposition, PromotionExecutionError> {
+        let mut state = self.state.borrow_mut();
+        state.result_calls += 1;
+        state.recorded_outcome = Some(PromotionResultOutcomeV1::Rejected);
+        drop(state);
+        self.results.pop_front().expect("test configured a result")
+    }
+
     fn claim(
         &mut self,
         _run_id: RunId,
@@ -5979,11 +5992,14 @@ impl PromotionExecutionBackend for FakePromotionBackend {
         &mut self,
         _run_id: RunId,
         _request: &BrokerPromotionExecutionRequest,
-        _outcome: PromotionResultOutcomeV1,
+        outcome: PromotionResultOutcomeV1,
         _binding: PromotionGitBindingV1,
         _lease_binding: bp_ledger::payload::trust_spine::PromotionExecutionLeaseBindingV1,
     ) -> Result<PromotionResultDisposition, PromotionExecutionError> {
-        self.state.borrow_mut().result_calls += 1;
+        let mut state = self.state.borrow_mut();
+        state.result_calls += 1;
+        state.recorded_outcome = Some(outcome);
+        drop(state);
         self.results.pop_front().expect("test configured a result")
     }
 }
@@ -6054,6 +6070,26 @@ fn promotion_execution_outcome() -> PromotionGitOutcome {
     }
 }
 
+fn promoted_execution_outcome() -> PromotionGitOutcome {
+    PromotionGitOutcome::Promoted {
+        binding: PromotionGitBindingV1 {
+            target_ref: PROMOTION_TARGET_REF.into(),
+            target_head_before_sha: PROMOTION_BASE_COMMIT.into(),
+            target_head_after_sha: Some(PROMOTION_MERGE_COMMIT.into()),
+            merged_head_sha: Some(PROMOTION_MERGE_COMMIT.into()),
+            candidate_commit_sha: PROMOTION_CANDIDATE_COMMIT.into(),
+            merge_parent_shas: Some(vec![
+                PROMOTION_BASE_COMMIT.into(),
+                PROMOTION_CANDIDATE_COMMIT.into(),
+            ]),
+            merged_tree_sha: Some(PROMOTION_CANDIDATE_TREE.into()),
+            merged_tree_digest: PROMOTION_TREE_DIGEST.into(),
+            promotion_receipt_ref: Some(PROMOTION_RECEIPT_REF.into()),
+            worktree_sync_state: None,
+        },
+    }
+}
+
 #[test]
 fn promotion_execution_moves_one_sealed_claim_through_git_and_result_recording() {
     let run_id = RunId::new();
@@ -6078,23 +6114,30 @@ fn promotion_execution_moves_one_sealed_claim_through_git_and_result_recording()
             })]
             .into_iter()
             .collect(),
-            results: [Ok(PromotionResultDisposition::Recorded { run_id })]
-                .into_iter()
-                .collect(),
+            results: [Ok(PromotionResultDisposition::Recorded {
+                run_id,
+                outcome: PromotionResultOutcomeV1::Promoted,
+            })]
+            .into_iter()
+            .collect(),
         },
         FakePromotionGateway {
             state: Rc::clone(&gateway_state),
-            outcome: Some(Ok(promotion_execution_outcome())),
+            outcome: Some(Ok(promoted_execution_outcome())),
         },
         LeasePolicy::from_startup_config(30_000).expect("valid promotion lease policy"),
     );
 
     assert_eq!(
         authority.claim_execute_and_record(request).unwrap(),
-        BrokerPromotionExecutionStatus::Recorded
+        BrokerPromotionExecutionStatus::Completed
     );
     assert_eq!(backend_state.borrow().claim_calls, 1);
     assert_eq!(backend_state.borrow().result_calls, 1);
+    assert_eq!(
+        backend_state.borrow().recorded_outcome,
+        Some(PromotionResultOutcomeV1::Promoted)
+    );
     assert_eq!(gateway_state.borrow().calls, 1);
 }
 
@@ -7082,7 +7125,12 @@ fn protected_promotion_execution_wire_for_reject_decision_never_claims_or_enters
         FakePromotionBackend {
             state: Rc::clone(&backend_state),
             grants: VecDeque::new(),
-            results: VecDeque::new(),
+            results: [Ok(PromotionResultDisposition::Recorded {
+                run_id,
+                outcome: PromotionResultOutcomeV1::Rejected,
+            })]
+            .into_iter()
+            .collect(),
         },
         FakePromotionGateway {
             state: Rc::clone(&gateway_state),
@@ -7101,12 +7149,16 @@ fn protected_promotion_execution_wire_for_reject_decision_never_claims_or_enters
         BrokerPromotionExecutionStatus::Rejected
     );
     assert_eq!(backend_state.borrow().claim_calls, 0);
-    assert_eq!(backend_state.borrow().result_calls, 0);
+    assert_eq!(backend_state.borrow().result_calls, 1);
+    assert_eq!(
+        backend_state.borrow().recorded_outcome,
+        Some(PromotionResultOutcomeV1::Rejected)
+    );
     assert_eq!(gateway_state.borrow().calls, 0);
 }
 
 #[test]
-fn protected_promotion_execution_wire_can_record_exactly_one_existing_authority_effect() {
+fn protected_promotion_execution_wire_reports_recorded_reconciliation_as_nonterminal() {
     let run_id = RunId::new();
     let request = promotion_execution_request();
     let dispatch_event_id = EventId::new();
@@ -7129,9 +7181,12 @@ fn protected_promotion_execution_wire_can_record_exactly_one_existing_authority_
             })]
             .into_iter()
             .collect(),
-            results: [Ok(PromotionResultDisposition::Recorded { run_id })]
-                .into_iter()
-                .collect(),
+            results: [Ok(PromotionResultDisposition::Recorded {
+                run_id,
+                outcome: PromotionResultOutcomeV1::ReconciliationRequired,
+            })]
+            .into_iter()
+            .collect(),
         },
         FakePromotionGateway {
             state: Rc::clone(&gateway_state),
@@ -7147,7 +7202,7 @@ fn protected_promotion_execution_wire_can_record_exactly_one_existing_authority_
     assert_eq!(
         handle_promotion_execution_wire_for_tests(&mut authority, wire.as_bytes())
             .expect("the exact closed decision identity must reach the authority"),
-        BrokerPromotionExecutionStatus::Recorded
+        BrokerPromotionExecutionStatus::ReconciliationRequired
     );
     assert_eq!(backend_state.borrow().claim_calls, 1);
     assert_eq!(backend_state.borrow().result_calls, 1);
@@ -7431,6 +7486,7 @@ struct PromotionGitRunnerState {
     operations: Vec<TestGitOperation>,
     receipt_present: bool,
     target_head: String,
+    target_checked_out: bool,
     target_contains_merge: bool,
     candidate_tree: String,
     merge_tree: String,
@@ -7447,6 +7503,7 @@ impl PromotionGitRunner {
     fn new(receipt_present: bool) -> (Self, Rc<RefCell<PromotionGitRunnerState>>) {
         let state = Rc::new(RefCell::new(PromotionGitRunnerState {
             receipt_present,
+            target_checked_out: true,
             target_head: if receipt_present {
                 PROMOTION_MERGE_COMMIT.into()
             } else {
@@ -7494,6 +7551,19 @@ impl TestFixedGitRunner for PromotionGitRunner {
             }
             TestGitOperation::ResolveTarget { .. } => {
                 Self::success(format!("{}\n", state.target_head))
+            }
+            TestGitOperation::ListWorktrees => {
+                if state.target_checked_out {
+                    Self::success(
+                        format!(
+                            "worktree /protected/repository\0HEAD {}\0branch {}\0\0",
+                            state.target_head, PROMOTION_TARGET_REF
+                        )
+                        .into_bytes(),
+                    )
+                } else {
+                    Self::success(Vec::new())
+                }
             }
             TestGitOperation::CreateMergeCommit { .. } => {
                 state.create_merge_calls += 1;
@@ -7687,6 +7757,13 @@ impl TestFixedGitRunner for ReconciliationFixtureGitRunner {
             {
                 TestGitOutput::success(format!("{}\n", self.facts.target_head).into())
             }
+            TestGitOperation::ListWorktrees => TestGitOutput::success(
+                format!(
+                    "worktree /protected/repository\0HEAD {}\0branch {}\0\0",
+                    self.facts.target_head, self.facts.target_ref
+                )
+                .into_bytes(),
+            ),
             TestGitOperation::CreateMergeCommit { .. } => {
                 self.state.borrow_mut().create_merge_calls += 1;
                 TestGitOutput::failure(2)
@@ -7767,6 +7844,28 @@ fn promotion_gateway_creates_one_verified_merge_then_atomically_advances_target_
             && expected_base == PROMOTION_BASE_COMMIT
             && receipt_ref == PROMOTION_RECEIPT_REF
     )));
+}
+
+#[test]
+fn promotion_gateway_records_terminal_success_when_the_target_has_no_checkout() {
+    let (runner, state) = PromotionGitRunner::new(false);
+    state.borrow_mut().target_checked_out = false;
+    let mut gateway = test_promotion_gateway(runner);
+
+    let outcome = gateway
+        .promote(promotion_capability())
+        .expect("a headless protected repository has no checkout to reconcile");
+
+    assert!(matches!(outcome, PromotionGitOutcome::Promoted { .. }));
+    assert_eq!(outcome.ledger_outcome(), PromotionResultOutcomeV1::Promoted);
+    assert_eq!(outcome.binding().worktree_sync_state, None);
+    let state = state.borrow();
+    assert_eq!(state.create_merge_calls, 1);
+    assert_eq!(state.atomic_update_calls, 1);
+    assert!(state
+        .operations
+        .iter()
+        .any(|operation| matches!(operation, TestGitOperation::ListWorktrees)));
 }
 
 #[test]

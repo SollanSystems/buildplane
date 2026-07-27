@@ -9613,15 +9613,7 @@ fn promotion_result_is_semantically_valid(
 ) -> bool {
     match (promotion.decision.decision, p.outcome) {
         (PromotionDecisionKindV1::Promote, PromotionResultOutcomeV1::Promoted) => {
-            promotion_result_has_bound_merge_evidence(
-                workflow,
-                promotion,
-                p,
-                // A strict binding with any declared checkout state has not
-                // reconciled the root worktree. Promoted remains only for the
-                // legacy unbound compatibility path.
-                &[],
-            )
+            promotion_result_has_bound_merge_evidence(workflow, promotion, p, &[], true)
         }
         (PromotionDecisionKindV1::Promote, PromotionResultOutcomeV1::ReconciliationRequired) => {
             promotion_result_has_bound_merge_evidence(
@@ -9632,6 +9624,7 @@ fn promotion_result_is_semantically_valid(
                     PromotionWorktreeSyncStateV1::RootCheckoutStale,
                     PromotionWorktreeSyncStateV1::TargetAdvanced,
                 ],
+                false,
             )
         }
         (PromotionDecisionKindV1::Promote, PromotionResultOutcomeV1::Rejected)
@@ -9665,6 +9658,7 @@ fn promotion_result_has_bound_merge_evidence(
     promotion: &PromotionReplayState,
     p: &PromotionResultRecordedV1,
     allowed_sync_states: &[PromotionWorktreeSyncStateV1],
+    allow_headless_target: bool,
 ) -> bool {
     let Some(merged_head_sha) = p.merged_head_sha.as_deref() else {
         return false;
@@ -9690,6 +9684,7 @@ fn promotion_result_has_bound_merge_evidence(
                 &promotion.decision.base_commit_sha,
                 merged_head_sha,
                 allowed_sync_states,
+                allow_headless_target,
                 binding,
             )
         }),
@@ -9702,6 +9697,7 @@ fn promotion_git_binding_matches_candidate(
     decision_base_commit_sha: &str,
     merged_head_sha: &str,
     allowed_sync_states: &[PromotionWorktreeSyncStateV1],
+    allow_headless_target: bool,
     binding: &PromotionGitBindingV1,
 ) -> bool {
     workflow.candidate.as_ref().is_some_and(|candidate| {
@@ -9718,9 +9714,6 @@ fn promotion_git_binding_matches_candidate(
             return false;
         };
         let Some(promotion_receipt_ref) = binding.promotion_receipt_ref.as_deref() else {
-            return false;
-        };
-        let Some(worktree_sync_state) = binding.worktree_sync_state else {
             return false;
         };
         is_canonical_target_ref(&binding.target_ref)
@@ -9746,14 +9739,18 @@ fn promotion_git_binding_matches_candidate(
                 promotion_receipt_ref,
                 &candidate.candidate_ref,
             )
-            && allowed_sync_states.contains(&worktree_sync_state)
-            && match worktree_sync_state {
-                PromotionWorktreeSyncStateV1::PendingReconciliation
-                | PromotionWorktreeSyncStateV1::RootCheckoutStale => {
-                    target_head_after_sha == merged_head_sha
+            && match binding.worktree_sync_state {
+                None => allow_headless_target && target_head_after_sha == merged_head_sha,
+                Some(PromotionWorktreeSyncStateV1::PendingReconciliation)
+                | Some(PromotionWorktreeSyncStateV1::RootCheckoutStale) => {
+                    binding
+                        .worktree_sync_state
+                        .is_some_and(|state| allowed_sync_states.contains(&state))
+                        && target_head_after_sha == merged_head_sha
                 }
-                PromotionWorktreeSyncStateV1::TargetAdvanced => {
-                    target_head_after_sha != merged_head_sha
+                Some(PromotionWorktreeSyncStateV1::TargetAdvanced) => {
+                    allowed_sync_states.contains(&PromotionWorktreeSyncStateV1::TargetAdvanced)
+                        && target_head_after_sha != merged_head_sha
                 }
             }
     })
@@ -9840,11 +9837,10 @@ fn workflow_terminal_is_semantically_valid(
         WorkflowTerminalOutcomeV1::Completed => {
             workflow.phase == WorkflowPhaseV1::Promoted
                 && workflow.promotion.as_ref().is_some_and(|promotion| {
-                    promotion.decision.target_ref.is_none()
-                        && promotion.result.as_ref().is_some_and(|result| {
-                            result.outcome == PromotionResultOutcomeV1::Promoted
-                                && result.promotion_git_binding.is_none()
-                        })
+                    promotion
+                        .result
+                        .as_ref()
+                        .is_some_and(|result| result.outcome == PromotionResultOutcomeV1::Promoted)
                 })
                 && terminal.candidate_digest.is_some()
                 && terminal.promotion_result_ref.is_some()

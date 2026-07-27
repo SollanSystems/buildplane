@@ -2789,10 +2789,9 @@ fn validate_promotion_result_recorded_v1_shape(
 
     match result.outcome {
         PromotionResultOutcomeV1::Promoted => {
-            // A target-bound CAS deliberately leaves the root checkout
-            // untouched. Every declared sync state therefore requires an
-            // explicit reconciliation; only historical unbound results may
-            // remain promoted.
+            // A complete target-bound binding with no checkout state is a
+            // headless-repository success. Any declared checkout state still
+            // requires explicit reconciliation.
             validate_promotion_result_merge_evidence(kind, result, &[], false)?;
         }
         PromotionResultOutcomeV1::ReconciliationRequired => {
@@ -2929,7 +2928,7 @@ fn validate_promotion_git_binding_v1_shape(
             Some(merge_parent_shas),
             Some(merged_tree_sha),
             Some(promotion_receipt_ref),
-            Some(worktree_sync_state),
+            worktree_sync_state,
         ) => {
             if !is_canonical_git_object_id(target_head_after_sha)
                 || !is_canonical_git_object_id(binding_merged_head_sha)
@@ -2964,31 +2963,45 @@ fn validate_promotion_git_binding_v1_shape(
                     "promotion_git_binding promotion_receipt_ref must be a canonical Buildplane promotion ref",
                 );
             }
-            if !allowed_sync_states.contains(&worktree_sync_state) {
-                return invalid(
-                    kind,
-                    "promotion_git_binding worktree_sync_state is incompatible with the promotion result outcome",
-                );
-            }
             match worktree_sync_state {
-                PromotionWorktreeSyncStateV1::PendingReconciliation
-                | PromotionWorktreeSyncStateV1::RootCheckoutStale
-                    if target_head_after_sha != binding_merged_head_sha =>
+                None
+                    if !require_complete_target_bound_binding
+                        && allowed_sync_states.is_empty()
+                        && target_head_after_sha == binding_merged_head_sha =>
+                {
+                    Ok(())
+                }
+                Some(
+                    worktree_sync_state @ (PromotionWorktreeSyncStateV1::PendingReconciliation
+                    | PromotionWorktreeSyncStateV1::RootCheckoutStale),
+                )
+                    if allowed_sync_states.contains(&worktree_sync_state)
+                        && target_head_after_sha != binding_merged_head_sha =>
                 {
                     invalid(
                         kind,
                         "promotion_git_binding target_head_after_sha must equal merged_head_sha for an unchanged target",
                     )
                 }
-                PromotionWorktreeSyncStateV1::TargetAdvanced
-                    if target_head_after_sha == binding_merged_head_sha =>
+                Some(PromotionWorktreeSyncStateV1::TargetAdvanced)
+                    if allowed_sync_states
+                        .contains(&PromotionWorktreeSyncStateV1::TargetAdvanced)
+                        && target_head_after_sha == binding_merged_head_sha =>
                 {
                     invalid(
                         kind,
                         "promotion_git_binding target_advanced must observe a target head distinct from merged_head_sha",
                     )
                 }
-                _ => Ok(()),
+                Some(worktree_sync_state)
+                    if allowed_sync_states.contains(&worktree_sync_state) =>
+                {
+                    Ok(())
+                }
+                _ => invalid(
+                    kind,
+                    "promotion_git_binding worktree_sync_state is incompatible with the promotion result outcome",
+                ),
             }
         }
         _ => invalid(

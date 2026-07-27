@@ -202,10 +202,14 @@ signer, and idempotency facts are reconstructed from the signed tape.
 
 The executor loads only the kernel key, protected ledger, replay authorities,
 and the fixed `repository` directory opened without symlink traversal beneath
-the descriptor-bound authority root. Provision the exact target repository at
+the descriptor-bound authority root. Provision a bare or otherwise headless
+exact target repository at
 `/var/lib/buildplane/authority/repository`, owned by the configured broker UID
 with mode `0700`. It must be the same Git common repository that contains the
 immutable candidate refs; a copy or alternate checkout is not valid.
+If any worktree has the signed target ref checked out, promotion records
+`root_checkout_stale` and remains reconciliation-required instead of claiming
+terminal completion.
 
 The dedicated systemd socket passes descriptor 3 at the exact execution socket
 path. The service grants write access only to the protected ledger and fixed
@@ -221,14 +225,18 @@ the operator decision key. Its canonical reviewed units are
 family, operator-key mount, caller-selected repository, or executable
 override.
 
-Execution first reopens trusted replay. A reject decision returns `rejected`
-without claiming or entering Git. A promote decision obtains one durable
+Execution first reopens trusted replay. A reject decision records and seals one
+lease-free `rejected` result plus a failed `WorkflowTerminalV2`, then returns
+`rejected` without claiming or entering Git. A promote decision obtains one durable
 lease-bound claim, consumes one private fixed-Git capability, performs the
-candidate/base compare-and-swap, and records the result. Existing claims,
+candidate/base compare-and-swap, and records the result. When the target ref is
+not checked out anywhere, the host records and seals a completed
+`WorkflowTerminalV2` and returns the signed `completed` status. Existing claims,
 expired leases, uncertain Git observation, or result-write uncertainty return
 `pending`, `lease_expired`, or `reconciliation_required`; they never authorize
-a second Git attempt. A signed `recorded` response means the effect has a
-durable result record, not that the checked-out worktree has been synchronized.
+a second Git attempt. A signed `recorded` response remains nonterminal recovery
+evidence; only `completed` proves that the exact promoted result and terminal
+workflow record are both kernel-sealed.
 
 ### Protected governed-session host
 

@@ -154,6 +154,9 @@ impl ProtectedPromotionExecutionHostV1 {
                 PromotionExecutionResponseStatusV1::Rejected
             }
             BrokerPromotionExecutionStatus::Pending => PromotionExecutionResponseStatusV1::Pending,
+            BrokerPromotionExecutionStatus::Completed => {
+                PromotionExecutionResponseStatusV1::Completed
+            }
             BrokerPromotionExecutionStatus::Recorded => {
                 PromotionExecutionResponseStatusV1::Recorded
             }

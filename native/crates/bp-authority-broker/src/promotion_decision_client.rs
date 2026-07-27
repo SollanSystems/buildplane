@@ -459,6 +459,7 @@ pub(crate) enum PromotionDecisionClientStatusV1 {
 pub(crate) enum PromotionExecutionClientStatusV1 {
     Rejected,
     Pending,
+    Completed,
     Recorded,
     LeaseExpired,
     ReconciliationRequired,
@@ -579,6 +580,9 @@ fn exchange_promotion_execution_with_stream(
     Ok(match status {
         PromotionExecutionResponseStatusV1::Rejected => PromotionExecutionClientStatusV1::Rejected,
         PromotionExecutionResponseStatusV1::Pending => PromotionExecutionClientStatusV1::Pending,
+        PromotionExecutionResponseStatusV1::Completed => {
+            PromotionExecutionClientStatusV1::Completed
+        }
         PromotionExecutionResponseStatusV1::Recorded => PromotionExecutionClientStatusV1::Recorded,
         PromotionExecutionResponseStatusV1::LeaseExpired => {
             PromotionExecutionClientStatusV1::LeaseExpired
@@ -1039,6 +1043,7 @@ pub fn run_default_promotion_decision_client_v1() -> ExitCode {
                 match status {
                     PromotionExecutionClientStatusV1::Rejected => "rejected",
                     PromotionExecutionClientStatusV1::Pending => "pending",
+                    PromotionExecutionClientStatusV1::Completed => "completed",
                     PromotionExecutionClientStatusV1::Recorded => "recorded",
                     PromotionExecutionClientStatusV1::LeaseExpired => "lease_expired",
                     PromotionExecutionClientStatusV1::ReconciliationRequired =>

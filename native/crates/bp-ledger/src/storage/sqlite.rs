@@ -60,6 +60,7 @@ use crate::payload::trust_spine::{
     PromotionWorktreeSyncStateV1, ReconciliationResolutionOutcomeV1, ReviewDecisionV1,
     ReviewVerdictOutputV1, ReviewVerdictRecordedV2, SandboxProfileDeclaredV1, TrustScopeEvidenceV1,
     TrustTierV1, WorkerManifestDeclaredV1, WorkflowGraphDeclaredV2, WorkflowTerminalOutcomeV1,
+    WorkflowTerminalV2,
 };
 use crate::payload::Payload;
 use crate::signing::{
@@ -8393,11 +8394,326 @@ impl SqliteStore {
             kernel_signer,
         )? {
             GovernedCheckpointSealOutcome::AlreadySealed { .. }
-            | GovernedCheckpointSealOutcome::Emitted { .. } => Ok(disposition),
+            | GovernedCheckpointSealOutcome::Emitted { .. } => {}
+            GovernedCheckpointSealOutcome::EmptyPrefix => {
+                return Err(promotion_result_reconciliation_required(
+                    request,
+                    "promotion result sealing found no signed governed prefix",
+                ));
+            }
+        }
+
+        if matches!(
+            disposition,
+            GovernedPromotionResultDispositionV1::Recorded {
+                outcome: PromotionResultOutcomeV1::Promoted | PromotionResultOutcomeV1::Rejected,
+                ..
+            } | GovernedPromotionResultDispositionV1::Existing {
+                outcome: PromotionResultOutcomeV1::Promoted | PromotionResultOutcomeV1::Rejected,
+                ..
+            }
+        ) {
+            self.record_workflow_terminal_v2_for_final_promotion_result(
+                request,
+                authority,
+                kernel_signing_key,
+                kernel_signer,
+                now,
+            )?;
+        }
+
+        Ok(disposition)
+    }
+
+    /// Recover and seal the exact already-recorded final promotion outcome
+    /// before a protected execution host reports it as terminal. This method
+    /// performs no Git work and accepts no caller-supplied outcome evidence:
+    /// every result field is reconstructed from the verified signed event and
+    /// its immutable native projection.
+    #[doc(hidden)]
+    pub fn finalize_recorded_governed_promotion_result_v1(
+        &self,
+        run_id: RunId,
+        promotion_decision_event_id: EventId,
+        authority: &GovernedPromotionAuthorityV1,
+        kernel_signing_key: &SigningKey,
+        kernel_signer: &ActorKeyRef,
+    ) -> Result<PromotionResultOutcomeV1> {
+        validate_governed_promotion_signer(
+            authority,
+            kernel_signing_key,
+            kernel_signer,
+            PromotionSignerRoleV1::Kernel,
+        )?;
+        let request = {
+            let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+            let decision =
+                governed_promotion_decision_by_event(&tx, run_id, promotion_decision_event_id)?
+                    .ok_or_else(|| LedgerError::PromotionResultReconciliationRequired {
+                        run_id: run_id.to_string(),
+                        candidate_digest: "unknown".into(),
+                        reason: "recorded promotion finalization has no native decision projection"
+                            .into(),
+                    })?;
+            let verified =
+                verified_governed_promotion_decision_from_stored(&tx, &decision, authority)?;
+            verify_stored_governed_promotion_decision_seal(&tx, &decision, authority)?;
+            let result =
+                governed_promotion_result_by_decision(&tx, run_id, promotion_decision_event_id)?
+                    .ok_or_else(|| LedgerError::PromotionResultReconciliationRequired {
+                        run_id: run_id.to_string(),
+                        candidate_digest: decision.candidate_digest.clone(),
+                        reason: "recorded promotion finalization has no native result projection"
+                            .into(),
+                    })?;
+            let event = load_verified_promotion_event(
+                &tx,
+                result.promotion_result_event_id,
+                &authority.trusted_keys,
+                &authority.kernel_signer,
+                "promotion result",
+            )?;
+            let Payload::PromotionResultRecordedV1(payload) = &event.payload else {
+                return Err(LedgerError::PromotionResultReconciliationRequired {
+                    run_id: run_id.to_string(),
+                    candidate_digest: decision.candidate_digest.clone(),
+                    reason: "recorded promotion projection references the wrong payload".into(),
+                });
+            };
+            let request = GovernedPromotionResultRequestV1 {
+                run_id,
+                promotion_decision_event_id,
+                outcome: payload.outcome,
+                merged_head_sha: payload.merged_head_sha.clone(),
+                promotion_git_binding: payload.promotion_git_binding.clone(),
+                promotion_execution_lease_binding: payload
+                    .promotion_execution_lease_binding
+                    .clone(),
+            };
+            resolve_existing_governed_promotion_result(
+                &tx, &result, &request, &decision, &verified, authority,
+            )?;
+            tx.commit()?;
+            request
+        };
+
+        match self.seal_governed_signed_prefix(&run_id, kernel_signing_key, kernel_signer)? {
+            GovernedCheckpointSealOutcome::AlreadySealed { .. }
+            | GovernedCheckpointSealOutcome::Emitted { .. } => {}
+            GovernedCheckpointSealOutcome::EmptyPrefix => {
+                return Err(promotion_result_reconciliation_required(
+                    &request,
+                    "recorded promotion finalization found no signed governed prefix",
+                ))
+            }
+        }
+        if matches!(
+            request.outcome,
+            PromotionResultOutcomeV1::Promoted | PromotionResultOutcomeV1::Rejected
+        ) {
+            self.record_workflow_terminal_v2_for_final_promotion_result(
+                &request,
+                authority,
+                kernel_signing_key,
+                kernel_signer,
+                canonical_ledger_timestamp(Utc::now())?,
+            )?;
+        }
+        Ok(request.outcome)
+    }
+
+    /// Append or recover the one kernel-owned terminal workflow record for a
+    /// successfully promoted immutable candidate. This step deliberately runs
+    /// after the promotion result has its own checkpoint: if the host crashes
+    /// between the two records, a retry reuses the recorded Git result and
+    /// only completes this effect-free terminalization.
+    fn record_workflow_terminal_v2_for_final_promotion_result(
+        &self,
+        request: &GovernedPromotionResultRequestV1,
+        authority: &GovernedPromotionAuthorityV1,
+        kernel_signing_key: &SigningKey,
+        kernel_signer: &ActorKeyRef,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        let appended_event = {
+            let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+            let decision = governed_promotion_decision_by_event(
+                &tx,
+                request.run_id,
+                request.promotion_decision_event_id,
+            )?
+            .ok_or_else(|| {
+                promotion_result_reconciliation_required(
+                    request,
+                    "workflow terminalization has no native promotion decision projection",
+                )
+            })?;
+            let verified =
+                verified_governed_promotion_decision_from_stored(&tx, &decision, authority)?;
+            verify_stored_governed_promotion_decision_seal(&tx, &decision, authority)?;
+            let result = governed_promotion_result_by_decision(
+                &tx,
+                request.run_id,
+                request.promotion_decision_event_id,
+            )?
+            .ok_or_else(|| {
+                promotion_result_reconciliation_required(
+                    request,
+                    "workflow terminalization has no native promotion result projection",
+                )
+            })?;
+            verify_existing_governed_promotion_result_for_claim(
+                &tx, &result, &decision, authority,
+            )?;
+            let (terminal_outcome, terminal_reason) = match result.outcome {
+                PromotionResultOutcomeV1::Promoted => (WorkflowTerminalOutcomeV1::Completed, None),
+                PromotionResultOutcomeV1::Rejected => (
+                    WorkflowTerminalOutcomeV1::Failed,
+                    Some("promotion rejected".to_string()),
+                ),
+                PromotionResultOutcomeV1::ReconciliationRequired => {
+                    return Err(promotion_result_reconciliation_required(
+                        request,
+                        "workflow terminalization cannot hide unresolved promotion reconciliation",
+                    ))
+                }
+            };
+
+            let body = &verified.evidence.dispatch.body;
+            let terminal_idempotency_key = format!("workflow-terminal:{}", result.idempotency_key);
+            let same_workflow_attempt =
+                |workflow_id: &str, workflow_revision: &str, unit_id: &str, attempt: u32| {
+                    workflow_id == body.workflow_id
+                        && workflow_revision == body.workflow_revision
+                        && unit_id == body.unit_id
+                        && attempt == body.attempt
+                };
+
+            for event in verified_kernel_events_for_run_kind(
+                &tx,
+                request.run_id,
+                EventKind::WorkflowTerminal,
+                authority,
+                "workflow terminal v1",
+            )? {
+                let Payload::WorkflowTerminalV1(terminal) = &event.payload else {
+                    return Err(promotion_result_reconciliation_required(
+                        request,
+                        "workflow_terminal event has the wrong payload",
+                    ));
+                };
+                if same_workflow_attempt(
+                    &terminal.workflow_id,
+                    &terminal.workflow_revision,
+                    &terminal.unit_id,
+                    terminal.attempt,
+                ) {
+                    return Err(promotion_result_reconciliation_required(
+                        request,
+                        "a legacy workflow terminal already binds this promoted attempt",
+                    ));
+                }
+            }
+
+            let mut existing_terminal = None;
+            for event in verified_kernel_events_for_run_kind(
+                &tx,
+                request.run_id,
+                EventKind::WorkflowTerminalV2,
+                authority,
+                "workflow terminal v2",
+            )? {
+                let Payload::WorkflowTerminalV2(terminal) = &event.payload else {
+                    return Err(promotion_result_reconciliation_required(
+                        request,
+                        "workflow_terminal_v2 event has the wrong payload",
+                    ));
+                };
+                if !same_workflow_attempt(
+                    &terminal.workflow_id,
+                    &terminal.workflow_revision,
+                    &terminal.unit_id,
+                    terminal.attempt,
+                ) {
+                    continue;
+                }
+                let exact = event.parent_event_id == Some(result.promotion_result_event_id)
+                    && terminal.outcome == terminal_outcome
+                    && terminal.candidate_digest.as_deref()
+                        == Some(result.candidate_digest.as_str())
+                    && terminal.promotion_result_ref.as_deref()
+                        == Some(result.promotion_result_event_id.to_string().as_str())
+                    && terminal.reconciliation_resolution_ref.is_none()
+                    && terminal.cancellation_request_event_ref.is_none()
+                    && terminal.cancellation_request_event_digest.is_none()
+                    && terminal.reason == terminal_reason
+                    && terminal.idempotency_key == terminal_idempotency_key
+                    && terminal.completed_at == timestamp(event.occurred_at);
+                if !exact {
+                    return Err(promotion_result_reconciliation_required(
+                        request,
+                        "a conflicting workflow terminal already binds this promoted attempt",
+                    ));
+                }
+                if existing_terminal.replace(event.id).is_some() {
+                    return Err(promotion_result_reconciliation_required(
+                        request,
+                        "more than one workflow terminal binds this promoted attempt",
+                    ));
+                }
+            }
+
+            if existing_terminal.is_some() {
+                tx.commit()?;
+                None
+            } else {
+                let payload = WorkflowTerminalV2 {
+                    workflow_id: body.workflow_id.clone(),
+                    workflow_revision: body.workflow_revision.clone(),
+                    unit_id: body.unit_id.clone(),
+                    attempt: body.attempt,
+                    outcome: terminal_outcome,
+                    candidate_digest: Some(result.candidate_digest.clone()),
+                    promotion_result_ref: Some(result.promotion_result_event_id.to_string()),
+                    reconciliation_resolution_ref: None,
+                    cancellation_request_event_ref: None,
+                    cancellation_request_event_digest: None,
+                    reason: terminal_reason,
+                    idempotency_key: terminal_idempotency_key,
+                    completed_at: timestamp(now),
+                };
+                let event = canonicalize(Event {
+                    id: EventId::new(),
+                    run_id: request.run_id,
+                    parent_event_id: Some(result.promotion_result_event_id),
+                    schema_version: Event::CURRENT_SCHEMA_VERSION,
+                    kind: EventKind::WorkflowTerminalV2,
+                    occurred_at: now,
+                    payload: Payload::WorkflowTerminalV2(payload),
+                })?;
+                validate_new_ordinary_event_id(&tx, &event)?;
+                let signature = sign_event(&event, kernel_signing_key, kernel_signer, now)?;
+                insert_event(&tx, &event)?;
+                insert_event_signature(&tx, &signature)?;
+                tx.commit()?;
+                Some(event)
+            }
+        };
+
+        if let Some(event) = appended_event.as_ref() {
+            self.record_ordinary_append(event);
+        }
+        match self.seal_governed_signed_prefix(
+            &request.run_id,
+            kernel_signing_key,
+            kernel_signer,
+        )? {
+            GovernedCheckpointSealOutcome::AlreadySealed { .. }
+            | GovernedCheckpointSealOutcome::Emitted { .. } => Ok(()),
             GovernedCheckpointSealOutcome::EmptyPrefix => {
                 Err(promotion_result_reconciliation_required(
                     request,
-                    "promotion result sealing found no signed governed prefix",
+                    "workflow terminal sealing found no signed governed prefix",
                 ))
             }
         }
@@ -23457,16 +23773,9 @@ fn validate_governed_promotion_result_against_decision(
             return Ok(());
         }
         (PromotionDecisionKindV1::Promote, PromotionResultOutcomeV1::Promoted) => {
-            // New governed decisions are target-bound. A target ref update
-            // deliberately leaves the root checkout untouched, so it must
-            // remain reconciliation-required until a separate reconciler
-            // proves the checkout can move safely. `Promoted` stays only for
-            // historical unbound records, which this protected writer never
-            // emits.
-            return Err(promotion_result_reconciliation_required(
-                request,
-                "target-bound governed promotion must await root reconciliation",
-            ));
+            // A headless protected repository has no checkout to reconcile.
+            // The strict Git binding below must prove that fact by omitting a
+            // checkout state while the target points exactly at the merge.
         }
         (PromotionDecisionKindV1::Promote, PromotionResultOutcomeV1::ReconciliationRequired) => {}
     }
@@ -23529,12 +23838,6 @@ fn validate_governed_promotion_result_against_decision(
             "Git binding lacks the immutable promotion receipt ref",
         ));
     };
-    let Some(sync_state) = binding.worktree_sync_state else {
-        return Err(promotion_result_reconciliation_required(
-            request,
-            "Git binding lacks explicit checkout reconciliation state",
-        ));
-    };
     if !is_canonical_target_ref(target_ref)
         || !is_canonical_git_commit_sha(merged_head_sha)
         || !is_canonical_git_commit_sha(target_head_after_sha)
@@ -23561,23 +23864,25 @@ fn validate_governed_promotion_result_against_decision(
             "Git binding does not exactly bind the candidate, target, and merge evidence",
         ));
     }
-    match sync_state {
-        PromotionWorktreeSyncStateV1::RootCheckoutStale
-            if target_head_after_sha == merged_head_sha =>
-        {
+    match (request.outcome, binding.worktree_sync_state) {
+        (PromotionResultOutcomeV1::Promoted, None) if target_head_after_sha == merged_head_sha => {
             Ok(())
         }
-        PromotionWorktreeSyncStateV1::TargetAdvanced
-            if target_head_after_sha != merged_head_sha =>
-        {
-            Ok(())
-        }
-        PromotionWorktreeSyncStateV1::PendingReconciliation => {
-            Err(promotion_result_reconciliation_required(
-                request,
-                "native target-bound writer must classify an untouched root as root_checkout_stale",
-            ))
-        }
+        (
+            PromotionResultOutcomeV1::ReconciliationRequired,
+            Some(PromotionWorktreeSyncStateV1::RootCheckoutStale),
+        ) if target_head_after_sha == merged_head_sha => Ok(()),
+        (
+            PromotionResultOutcomeV1::ReconciliationRequired,
+            Some(PromotionWorktreeSyncStateV1::TargetAdvanced),
+        ) if target_head_after_sha != merged_head_sha => Ok(()),
+        (
+            PromotionResultOutcomeV1::ReconciliationRequired,
+            Some(PromotionWorktreeSyncStateV1::PendingReconciliation),
+        ) => Err(promotion_result_reconciliation_required(
+            request,
+            "native target-bound writer must classify an untouched root as root_checkout_stale",
+        )),
         _ => Err(promotion_result_reconciliation_required(
             request,
             "Git binding target observation conflicts with its reconciliation state",
@@ -23639,11 +23944,6 @@ fn validate_governed_promotion_result_execution_lease(
                 ));
             }
             return Ok(());
-        }
-        (PromotionDecisionKindV1::Promote, PromotionResultOutcomeV1::Promoted) => {
-            return Err(reject(
-                "target-bound governed promotion cannot record a promoted terminal result",
-            ));
         }
         _ => {}
     }

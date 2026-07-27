@@ -12,6 +12,7 @@ export type ProtectedPromotionExecutionResultV1 = {
 	readonly status:
 		| "rejected"
 		| "pending"
+		| "completed"
 		| "recorded"
 		| "lease_expired"
 		| "reconciliation_required";
@@ -86,6 +87,7 @@ function parseProtectedPromotionExecutionResult(
 		![
 			"rejected",
 			"pending",
+			"completed",
 			"recorded",
 			"lease_expired",
 			"reconciliation_required",

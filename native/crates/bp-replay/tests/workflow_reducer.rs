@@ -6475,6 +6475,81 @@ fn pending_reconciliation_result_cannot_project_as_promoted_or_completed() {
 }
 
 #[test]
+fn headless_target_bound_promotion_can_reach_terminal_completion() {
+    let run_id = RunId::new();
+    let mut state = ReplayState::default();
+    apply_dispatch_and_candidate(&mut state, run_id);
+    apply(
+        &mut state,
+        &event_of(
+            run_id,
+            EventKind::CandidateAcceptanceRecorded,
+            Payload::CandidateAcceptanceRecordedV1(acceptance(
+                CandidateAcceptanceOutcomeV1::Passed,
+            )),
+        ),
+    );
+    apply(
+        &mut state,
+        &event_of(
+            run_id,
+            EventKind::ReviewVerdictRecorded,
+            Payload::ReviewVerdictRecordedV1(review(ReviewDecisionV1::Approve)),
+        ),
+    );
+    let decision_event = event_of(
+        run_id,
+        EventKind::PromotionDecisionRecorded,
+        Payload::PromotionDecisionRecordedV1(promotion_decision(PromotionDecisionKindV1::Promote)),
+    );
+    let decision_ref = decision_event.id.to_string();
+    apply(&mut state, &decision_event);
+
+    let mut result = promotion_result(PromotionResultOutcomeV1::Promoted, decision_ref);
+    result
+        .promotion_git_binding
+        .as_mut()
+        .expect("target-bound promoted result carries Git evidence")
+        .worktree_sync_state = None;
+    let result_event = event_of(
+        run_id,
+        EventKind::PromotionResultRecorded,
+        Payload::PromotionResultRecordedV1(result),
+    );
+    let result_ref = result_event.id.to_string();
+    apply(&mut state, &result_event);
+
+    assert_eq!(
+        state
+            .workflow_instance
+            .as_ref()
+            .expect("workflow state")
+            .phase,
+        WorkflowPhaseV1::Promoted
+    );
+
+    apply(
+        &mut state,
+        &event_of(
+            run_id,
+            EventKind::WorkflowTerminal,
+            Payload::WorkflowTerminalV1(terminal(
+                WorkflowTerminalOutcomeV1::Completed,
+                Some(result_ref),
+            )),
+        ),
+    );
+
+    let workflow = state.workflow_instance.as_ref().expect("workflow state");
+    assert_eq!(workflow.phase, WorkflowPhaseV1::Completed);
+    assert_eq!(
+        workflow.terminal.as_ref().map(|terminal| terminal.outcome),
+        Some(WorkflowTerminalOutcomeV1::Completed)
+    );
+    assert!(state.issues.is_empty());
+}
+
+#[test]
 fn target_advanced_promotion_requires_bound_operator_resolution_before_terminal_failure() {
     let run_id = RunId::new();
     let mut state = ReplayState::default();

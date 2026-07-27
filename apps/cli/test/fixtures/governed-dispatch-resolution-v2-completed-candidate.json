@@ -51,8 +51,8 @@
 		"requests": [
 			{
 				"event_id": "00000000-0000-7000-8000-000000000013",
-				"action_id": "git-candidate-create:candidate-1/run-1/1",
-				"idempotency_key": "git-candidate-create:candidate-1/run-1/1",
+				"action_id": "git-candidate-create:candidate-1/00000000-0000-7000-8000-000000000011/1",
+				"idempotency_key": "git-candidate-create:candidate-1/00000000-0000-7000-8000-000000000011/1",
 				"action_kind": "git",
 				"canonical_input_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
 				"canonical_input_ref": "cas://candidate-create/input",
@@ -63,7 +63,7 @@
 				"authority_actor": "kernel",
 				"execution_role": "implementer",
 				"requested_at": "2026-07-18T12:01:00Z",
-				"action_request_digest": "sha256:a97909e9f00ef6b742579cdb915f6b3f9d7ec52825d55de6af5839e5a65344a6"
+				"action_request_digest": "sha256:0374601b4c41b12999aae97a8f6a3515847a7ada7e2ca49a34a65332aa8cc8d3"
 			}
 		],
 		"activity_claims": [
@@ -71,11 +71,11 @@
 				"event_id": "00000000-0000-7000-8000-000000000017",
 				"claim_event_digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
 				"run_id": "00000000-0000-7000-8000-000000000011",
-				"activity_id": "git-candidate-create:candidate-1/run-1/1",
-				"idempotency_key": "git-candidate-create:candidate-1/run-1/1",
+				"activity_id": "git-candidate-create:candidate-1/00000000-0000-7000-8000-000000000011/1",
+				"idempotency_key": "git-candidate-create:candidate-1/00000000-0000-7000-8000-000000000011/1",
 				"action_kind": "git",
 				"action_request_event_id": "00000000-0000-7000-8000-000000000013",
-				"action_request_digest": "sha256:a97909e9f00ef6b742579cdb915f6b3f9d7ec52825d55de6af5839e5a65344a6",
+				"action_request_digest": "sha256:0374601b4c41b12999aae97a8f6a3515847a7ada7e2ca49a34a65332aa8cc8d3",
 				"dispatch_event_id": "00000000-0000-7000-8000-000000000012",
 				"dispatch_envelope_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
 				"authority_actor": "kernel",
@@ -91,8 +91,8 @@
 					"event_id": "00000000-0000-7000-8000-000000000018",
 					"event_digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
 					"run_id": "00000000-0000-7000-8000-000000000011",
-					"activity_id": "git-candidate-create:candidate-1/run-1/1",
-					"idempotency_key": "git-candidate-create:candidate-1/run-1/1",
+					"activity_id": "git-candidate-create:candidate-1/00000000-0000-7000-8000-000000000011/1",
+					"idempotency_key": "git-candidate-create:candidate-1/00000000-0000-7000-8000-000000000011/1",
 					"claim_event_id": "00000000-0000-7000-8000-000000000017",
 					"claim_event_digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
 					"lease_id": "candidate-create-lease",
@@ -110,9 +110,9 @@
 		"receipts": [
 			{
 				"event_id": "00000000-0000-7000-8000-000000000019",
-				"action_id": "git-candidate-create:candidate-1/run-1/1",
-				"idempotency_key": "git-candidate-create:candidate-1/run-1/1",
-				"action_request_digest": "sha256:a97909e9f00ef6b742579cdb915f6b3f9d7ec52825d55de6af5839e5a65344a6",
+				"action_id": "git-candidate-create:candidate-1/00000000-0000-7000-8000-000000000011/1",
+				"idempotency_key": "git-candidate-create:candidate-1/00000000-0000-7000-8000-000000000011/1",
+				"action_request_digest": "sha256:0374601b4c41b12999aae97a8f6a3515847a7ada7e2ca49a34a65332aa8cc8d3",
 				"outcome": "succeeded",
 				"result_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
 				"result_ref": "cas://candidate-create/result",
@@ -126,19 +126,19 @@
 				"redactions": [],
 				"failure": null,
 				"action_receipt_ref": "receipt:candidate-create",
-				"action_receipt_digest": "sha256:c58c3f04db1f60994bc49d6f2823676fb1453369ca7755fa5f4a85c9fe9bf2e1",
+				"action_receipt_digest": "sha256:b5fa91c24e800abf15fd69618570f5e960a97efc9ec3d3da344918fb345958f0",
 				"completed_at": "2026-07-18T12:02:00Z"
 			}
 		],
 		"receipt_set": {
 			"event_id": "00000000-0000-7000-8000-000000000016",
 			"action_receipt_set_ref": "receipt-set:candidate-create",
-			"action_receipt_set_digest": "sha256:6a3e11b19932075d60d7af07d05d07900384a290f643237ee86af27e3c8acbef",
+			"action_receipt_set_digest": "sha256:4b1ed22d1a8975bbd3ed5e9c2509b2952b1a5db561a230cfad959811cc53bb0b",
 			"receipts": [
 				{
-					"action_id": "git-candidate-create:candidate-1/run-1/1",
+					"action_id": "git-candidate-create:candidate-1/00000000-0000-7000-8000-000000000011/1",
 					"action_receipt_ref": "receipt:candidate-create",
-					"action_receipt_digest": "sha256:c58c3f04db1f60994bc49d6f2823676fb1453369ca7755fa5f4a85c9fe9bf2e1"
+					"action_receipt_digest": "sha256:b5fa91c24e800abf15fd69618570f5e960a97efc9ec3d3da344918fb345958f0"
 				}
 			],
 			"sealed_at": "2026-07-18T12:02:00Z"
@@ -147,7 +147,7 @@
 			{
 				"event_id": "00000000-0000-7000-8000-000000000014",
 				"candidate_id": "candidate-1",
-				"candidate_ref": "refs/buildplane/candidates/candidate-1/run-1/1",
+				"candidate_ref": "refs/buildplane/candidates/candidate-1/00000000-0000-7000-8000-000000000011/1",
 				"candidate_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
 				"base_commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 				"candidate_commit_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -157,7 +157,7 @@
 				"changed_files_digest": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
 				"envelope_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
 				"action_receipt_set_ref": "receipt-set:candidate-create",
-				"action_receipt_set_digest": "sha256:6a3e11b19932075d60d7af07d05d07900384a290f643237ee86af27e3c8acbef"
+				"action_receipt_set_digest": "sha256:4b1ed22d1a8975bbd3ed5e9c2509b2952b1a5db561a230cfad959811cc53bb0b"
 			}
 		],
 		"candidate_completion": {
@@ -170,16 +170,16 @@
 				"provenance_ref": "plan-admitted:fixture",
 				"candidate_created_event_ref": "00000000-0000-7000-8000-000000000014",
 				"candidate_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
-				"candidate_create_action_id": "git-candidate-create:candidate-1/run-1/1",
+				"candidate_create_action_id": "git-candidate-create:candidate-1/00000000-0000-7000-8000-000000000011/1",
 				"action_request_ref": "00000000-0000-7000-8000-000000000013",
-				"action_request_digest": "sha256:a97909e9f00ef6b742579cdb915f6b3f9d7ec52825d55de6af5839e5a65344a6",
+				"action_request_digest": "sha256:0374601b4c41b12999aae97a8f6a3515847a7ada7e2ca49a34a65332aa8cc8d3",
 				"activity_claim_event_ref": "00000000-0000-7000-8000-000000000017",
 				"activity_claim_event_digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
 				"activity_result_event_ref": "00000000-0000-7000-8000-000000000018",
 				"activity_result_event_digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
 				"action_receipt_ref": "receipt:candidate-create",
-				"action_receipt_digest": "sha256:c58c3f04db1f60994bc49d6f2823676fb1453369ca7755fa5f4a85c9fe9bf2e1",
-				"completion_digest": "sha256:615f0eb3b5141bd077b49a249ba5e1c829fc639977f6331dcd5d01a30b9a641f",
+				"action_receipt_digest": "sha256:b5fa91c24e800abf15fd69618570f5e960a97efc9ec3d3da344918fb345958f0",
+				"completion_digest": "sha256:08a442ed4d22db9620d13501e6bf2bca9cbb440581cad4c5e4a03d1e4439a505",
 				"completed_at": "2026-07-18T12:02:00Z"
 			}
 		},

@@ -24,6 +24,7 @@ pub(crate) enum PromotionExecutionResponseErrorV1 {
 pub(crate) enum PromotionExecutionResponseStatusV1 {
     Rejected,
     Pending,
+    Completed,
     Recorded,
     LeaseExpired,
     ReconciliationRequired,
@@ -34,6 +35,7 @@ impl PromotionExecutionResponseStatusV1 {
         match self {
             Self::Rejected => "rejected",
             Self::Pending => "pending",
+            Self::Completed => "completed",
             Self::Recorded => "recorded",
             Self::LeaseExpired => "lease_expired",
             Self::ReconciliationRequired => "reconciliation_required",
@@ -102,6 +104,7 @@ pub(crate) fn verify_promotion_execution_response(
     let status = match wire.status.as_str() {
         "rejected" => PromotionExecutionResponseStatusV1::Rejected,
         "pending" => PromotionExecutionResponseStatusV1::Pending,
+        "completed" => PromotionExecutionResponseStatusV1::Completed,
         "recorded" => PromotionExecutionResponseStatusV1::Recorded,
         "lease_expired" => PromotionExecutionResponseStatusV1::LeaseExpired,
         "reconciliation_required" => PromotionExecutionResponseStatusV1::ReconciliationRequired,

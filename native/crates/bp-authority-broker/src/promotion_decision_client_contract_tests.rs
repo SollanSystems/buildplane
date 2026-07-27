@@ -74,7 +74,7 @@ fn execution_exchange_accepts_only_a_signed_response_bound_to_its_fresh_request(
                 DECISION_EVENT_ID,
             )
             .unwrap(),
-            PromotionExecutionResponseStatusV1::Recorded,
+            PromotionExecutionResponseStatusV1::Completed,
         )
         .unwrap();
         server
@@ -91,7 +91,7 @@ fn execution_exchange_accepts_only_a_signed_response_bound_to_its_fresh_request(
             &request,
         )
         .unwrap(),
-        PromotionExecutionClientStatusV1::Recorded
+        PromotionExecutionClientStatusV1::Completed
     );
     server_thread.join().unwrap();
 }

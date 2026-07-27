@@ -283,8 +283,10 @@ describe("native governed dispatch resolver", () => {
 					attempt: 1,
 					dispatchEventRef: DISPATCH_EVENT_ID,
 					dispatchEnvelopeDigest: DIGEST("d"),
-					actionId: "git-candidate-create:candidate-1/run-1/1",
-					idempotencyKey: "git-candidate-create:candidate-1/run-1/1",
+					actionId:
+						"git-candidate-create:candidate-1/00000000-0000-7000-8000-000000000011/1",
+					idempotencyKey:
+						"git-candidate-create:candidate-1/00000000-0000-7000-8000-000000000011/1",
 					actionRequestEventRef: "00000000-0000-7000-8000-000000000013",
 					actionRequestDigest: expect.stringMatching(SHA256_DIGEST),
 					activityClaimEventRef: "00000000-0000-7000-8000-000000000017",
@@ -808,14 +810,16 @@ describe("native governed dispatch resolver", () => {
 		]);
 		expect(resolved.recovery.activityClaims).toEqual([
 			expect.objectContaining({
-				activityId: "git-candidate-create:candidate-1/run-1/1",
+				activityId:
+					"git-candidate-create:candidate-1/00000000-0000-7000-8000-000000000011/1",
 				result: expect.objectContaining({ outcome: "succeeded" }),
 			}),
 		]);
 		expect(resolved.recovery.candidateCompletion).toEqual(
 			expect.objectContaining({
 				completion: expect.objectContaining({
-					candidateCreateActionId: "git-candidate-create:candidate-1/run-1/1",
+					candidateCreateActionId:
+						"git-candidate-create:candidate-1/00000000-0000-7000-8000-000000000011/1",
 				}),
 			}),
 		);

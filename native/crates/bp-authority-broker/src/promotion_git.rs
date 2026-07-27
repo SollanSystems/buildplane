@@ -166,11 +166,14 @@ idempotency_key: {}",
     }
 }
 
-/// The only caller-visible successful observations. Both forms map to a
-/// ledger `ReconciliationRequired` result: governed promotion never resets or
-/// checks out the root after moving the target ref.
+/// The only caller-visible successful observations. A headless protected
+/// repository can finish immediately; an exact merge with a checked-out target
+/// or a later target movement requires explicit reconciliation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum PromotionGitOutcome {
+    /// The target points exactly at the immutable merge and no worktree has
+    /// that target branch checked out.
+    Promoted { binding: PromotionGitBindingV1 },
     /// The target still points exactly at the immutable merge, while the root
     /// checkout remains deliberately untouched.
     RootPendingReconciliation { binding: PromotionGitBindingV1 },
@@ -180,17 +183,20 @@ pub(super) enum PromotionGitOutcome {
 }
 
 impl PromotionGitOutcome {
-    /// Existing protected ledger validation requires all newly target-bound
-    /// outcomes to be recorded as reconciliation-required.
     pub(super) fn ledger_outcome(&self) -> PromotionResultOutcomeV1 {
-        PromotionResultOutcomeV1::ReconciliationRequired
+        match self {
+            Self::Promoted { .. } => PromotionResultOutcomeV1::Promoted,
+            Self::RootPendingReconciliation { .. } | Self::TargetAdvanced { .. } => {
+                PromotionResultOutcomeV1::ReconciliationRequired
+            }
+        }
     }
 
     pub(super) fn binding(&self) -> &PromotionGitBindingV1 {
         match self {
-            Self::RootPendingReconciliation { binding } | Self::TargetAdvanced { binding } => {
-                binding
-            }
+            Self::Promoted { binding }
+            | Self::RootPendingReconciliation { binding }
+            | Self::TargetAdvanced { binding } => binding,
         }
     }
 }
@@ -404,10 +410,8 @@ impl PromotionGitGateway {
     ) -> Result<PromotionGitOutcome, PromotionGitError> {
         let target_head_after = self.resolve_target(&capability.target_ref)?;
         let sync_state = if target_head_after == receipt.merge_commit {
-            // No reset or checkout occurs in this component. The authority
-            // writer requires this exact root-stale state for new target-bound
-            // promotion results.
-            PromotionWorktreeSyncStateV1::RootCheckoutStale
+            self.target_is_checked_out(&capability.target_ref)?
+                .then_some(PromotionWorktreeSyncStateV1::RootCheckoutStale)
         } else {
             // A descendant still contains the merge, but it is no longer the
             // exact post-CAS target head. Observe reachability for the receipt
@@ -415,7 +419,7 @@ impl PromotionGitGateway {
             // target-advanced so the strict ledger binding remains truthful.
             let _target_contains_merge =
                 self.is_ancestor(&receipt.merge_commit, &target_head_after)?;
-            PromotionWorktreeSyncStateV1::TargetAdvanced
+            Some(PromotionWorktreeSyncStateV1::TargetAdvanced)
         };
         let binding = PromotionGitBindingV1 {
             target_ref: capability.target_ref.clone(),
@@ -430,19 +434,28 @@ impl PromotionGitGateway {
             merged_tree_sha: Some(receipt.merge_tree),
             merged_tree_digest: capability.candidate_tree_digest.clone(),
             promotion_receipt_ref: Some(capability.receipt_ref()),
-            worktree_sync_state: Some(sync_state),
+            worktree_sync_state: sync_state,
         };
         Ok(match sync_state {
-            PromotionWorktreeSyncStateV1::RootCheckoutStale => {
+            None => PromotionGitOutcome::Promoted { binding },
+            Some(PromotionWorktreeSyncStateV1::RootCheckoutStale) => {
                 PromotionGitOutcome::RootPendingReconciliation { binding }
             }
-            PromotionWorktreeSyncStateV1::TargetAdvanced => {
+            Some(PromotionWorktreeSyncStateV1::TargetAdvanced) => {
                 PromotionGitOutcome::TargetAdvanced { binding }
             }
-            PromotionWorktreeSyncStateV1::PendingReconciliation => {
+            Some(PromotionWorktreeSyncStateV1::PendingReconciliation) => {
                 return Err(PromotionGitError::ReconciliationRequired)
             }
         })
+    }
+
+    fn target_is_checked_out(&mut self, target_ref: &str) -> Result<bool, PromotionGitError> {
+        let output = self.require_success(FixedGitOperation::ListWorktrees)?;
+        let expected = format!("branch {target_ref}");
+        Ok(output
+            .split(|byte| *byte == 0)
+            .any(|field| field == expected.as_bytes()))
     }
 
     fn resolve_candidate_ref(&mut self, candidate_ref: &str) -> Result<String, PromotionGitError> {
@@ -601,6 +614,14 @@ impl PromotionGitGateway {
                     .arg(descendant);
                 self.command_output(command)
             }
+            FixedGitOperation::ListWorktrees => {
+                command
+                    .arg("worktree")
+                    .arg("list")
+                    .arg("--porcelain")
+                    .arg("-z");
+                self.command_output(command)
+            }
         }
     }
 
@@ -723,6 +744,7 @@ enum FixedGitOperation {
         ancestor: String,
         descendant: String,
     },
+    ListWorktrees,
 }
 
 fn parse_single_object_id(bytes: &[u8]) -> Option<String> {
@@ -977,6 +999,7 @@ pub(super) enum TestGitOperation {
         ancestor: String,
         descendant: String,
     },
+    ListWorktrees,
 }
 
 #[cfg(test)]
@@ -1027,6 +1050,7 @@ impl From<&FixedGitOperation> for TestGitOperation {
                 ancestor: ancestor.clone(),
                 descendant: descendant.clone(),
             },
+            FixedGitOperation::ListWorktrees => Self::ListWorktrees,
         }
     }
 }

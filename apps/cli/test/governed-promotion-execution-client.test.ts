@@ -28,7 +28,7 @@ function nativeResult(overrides: Record<string, unknown> = {}) {
 		signal: null,
 		status: 0,
 		stderr: "",
-		stdout: '{"schema_version":1,"status":"recorded"}\n',
+		stdout: '{"schema_version":1,"status":"completed"}\n',
 		...overrides,
 	};
 }
@@ -52,7 +52,7 @@ describe("protected promotion-execution native client", () => {
 			executeProtectedPromotion({
 				promotionDecisionEventId: decisionEventId,
 			}),
-		).resolves.toEqual({ status: "recorded" });
+		).resolves.toEqual({ status: "completed" });
 
 		expect(childProcess.spawnSync).toHaveBeenCalledWith(
 			"/usr/libexec/buildplane/buildplane-authority-client",
@@ -76,6 +76,7 @@ describe("protected promotion-execution native client", () => {
 	it.each([
 		"rejected",
 		"pending",
+		"completed",
 		"recorded",
 		"lease_expired",
 		"reconciliation_required",

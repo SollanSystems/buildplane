@@ -41,6 +41,7 @@ pub(crate) struct BrokerPromotionExecutionRequest {
 pub(crate) enum BrokerPromotionExecutionStatus {
     Rejected,
     Pending,
+    Completed,
     Recorded,
     LeaseExpired,
     ReconciliationRequired,
@@ -118,6 +119,12 @@ pub(crate) trait TrustedPromotionVerifier {
 }
 
 pub(crate) trait PromotionExecutionBackend {
+    fn record_rejection(
+        &mut self,
+        run_id: RunId,
+        request: &BrokerPromotionExecutionRequest,
+    ) -> Result<PromotionResultDisposition, PromotionExecutionError>;
+
     fn claim(
         &mut self,
         run_id: RunId,
@@ -163,6 +170,7 @@ pub(crate) enum PromotionExecutionGrant {
     },
     Recorded {
         run_id: RunId,
+        outcome: PromotionResultOutcomeV1,
     },
     LeaseExpired {
         run_id: RunId,
@@ -170,7 +178,10 @@ pub(crate) enum PromotionExecutionGrant {
 }
 
 pub(crate) enum PromotionResultDisposition {
-    Recorded { run_id: RunId },
+    Recorded {
+        run_id: RunId,
+        outcome: PromotionResultOutcomeV1,
+    },
 }
 
 #[derive(Debug, Error)]
@@ -254,7 +265,13 @@ where
             return Err(PromotionExecutionError::TrustedReplayBindingMismatch);
         }
         if binding.decision == PromotionDecisionKindV1::Reject {
-            return Ok(BrokerPromotionExecutionStatus::Rejected);
+            return Ok(match self.backend.record_rejection(self.run_id, &request) {
+                Ok(PromotionResultDisposition::Recorded {
+                    run_id,
+                    outcome: PromotionResultOutcomeV1::Rejected,
+                }) if run_id == self.run_id => BrokerPromotionExecutionStatus::Rejected,
+                _ => BrokerPromotionExecutionStatus::ReconciliationRequired,
+            });
         }
 
         let already_claimed = binding.has_existing_claim;
@@ -288,8 +305,14 @@ where
             PromotionExecutionGrant::Pending { run_id } if run_id == self.run_id => {
                 return Ok(BrokerPromotionExecutionStatus::Pending)
             }
-            PromotionExecutionGrant::Recorded { run_id } if run_id == self.run_id => {
-                return Ok(BrokerPromotionExecutionStatus::Recorded)
+            PromotionExecutionGrant::Recorded { run_id, outcome } if run_id == self.run_id => {
+                return Ok(match outcome {
+                    PromotionResultOutcomeV1::Promoted => BrokerPromotionExecutionStatus::Completed,
+                    PromotionResultOutcomeV1::Rejected => BrokerPromotionExecutionStatus::Rejected,
+                    PromotionResultOutcomeV1::ReconciliationRequired => {
+                        BrokerPromotionExecutionStatus::ReconciliationRequired
+                    }
+                })
             }
             PromotionExecutionGrant::LeaseExpired { run_id } if run_id == self.run_id => {
                 return Ok(BrokerPromotionExecutionStatus::LeaseExpired)
@@ -314,8 +337,16 @@ where
             capability.lease_binding,
         );
         match result {
-            Ok(PromotionResultDisposition::Recorded { run_id }) if run_id == self.run_id => {
-                Ok(BrokerPromotionExecutionStatus::Recorded)
+            Ok(PromotionResultDisposition::Recorded { run_id, outcome })
+                if run_id == self.run_id =>
+            {
+                Ok(match outcome {
+                    PromotionResultOutcomeV1::Promoted => BrokerPromotionExecutionStatus::Completed,
+                    PromotionResultOutcomeV1::Rejected => BrokerPromotionExecutionStatus::Rejected,
+                    PromotionResultOutcomeV1::ReconciliationRequired => {
+                        BrokerPromotionExecutionStatus::ReconciliationRequired
+                    }
+                })
             }
             // The CAS may have happened. An uncertain result record cannot be
             // retried by this frame or converted into a fresh lease.
@@ -540,6 +571,36 @@ impl<'a> LedgerPromotionExecutionBackend<'a> {
 }
 
 impl PromotionExecutionBackend for LedgerPromotionExecutionBackend<'_> {
+    fn record_rejection(
+        &mut self,
+        run_id: RunId,
+        request: &BrokerPromotionExecutionRequest,
+    ) -> Result<PromotionResultDisposition, PromotionExecutionError> {
+        let request = GovernedPromotionResultRequestV1 {
+            run_id,
+            promotion_decision_event_id: request.promotion_decision_event_id,
+            outcome: PromotionResultOutcomeV1::Rejected,
+            merged_head_sha: None,
+            promotion_git_binding: None,
+            promotion_execution_lease_binding: None,
+        };
+        match self
+            .store
+            .record_governed_promotion_result_v1(
+                &request,
+                self.authority,
+                self.kernel_signing_key,
+                self.kernel_signer,
+            )
+            .map_err(PromotionExecutionError::from_ledger)?
+        {
+            GovernedPromotionResultDispositionV1::Recorded { outcome, .. }
+            | GovernedPromotionResultDispositionV1::Existing { outcome, .. } => {
+                Ok(PromotionResultDisposition::Recorded { run_id, outcome })
+            }
+        }
+    }
+
     fn claim(
         &mut self,
         run_id: RunId,
@@ -574,8 +635,21 @@ impl PromotionExecutionBackend for LedgerPromotionExecutionBackend<'_> {
             GovernedPromotionExecutionClaimDispositionV1::Pending { .. } => {
                 PromotionExecutionGrant::Pending { run_id }
             }
-            GovernedPromotionExecutionClaimDispositionV1::Recorded { .. } => {
-                PromotionExecutionGrant::Recorded { run_id }
+            GovernedPromotionExecutionClaimDispositionV1::Recorded { outcome, .. } => {
+                let finalized_outcome = self
+                    .store
+                    .finalize_recorded_governed_promotion_result_v1(
+                        run_id,
+                        request.promotion_decision_event_id,
+                        self.authority,
+                        self.kernel_signing_key,
+                        self.kernel_signer,
+                    )
+                    .map_err(PromotionExecutionError::from_ledger)?;
+                if finalized_outcome != outcome {
+                    return Err(PromotionExecutionError::ReconciliationRequired);
+                }
+                PromotionExecutionGrant::Recorded { run_id, outcome }
             }
             GovernedPromotionExecutionClaimDispositionV1::LeaseExpired { .. } => {
                 PromotionExecutionGrant::LeaseExpired { run_id }
@@ -610,9 +684,9 @@ impl PromotionExecutionBackend for LedgerPromotionExecutionBackend<'_> {
             )
             .map_err(PromotionExecutionError::from_ledger)?
         {
-            GovernedPromotionResultDispositionV1::Recorded { .. }
-            | GovernedPromotionResultDispositionV1::Existing { .. } => {
-                Ok(PromotionResultDisposition::Recorded { run_id })
+            GovernedPromotionResultDispositionV1::Recorded { outcome, .. }
+            | GovernedPromotionResultDispositionV1::Existing { outcome, .. } => {
+                Ok(PromotionResultDisposition::Recorded { run_id, outcome })
             }
         }
     }

@@ -3393,6 +3393,30 @@ function emitGovernedPromotionRejected(
 	return 0;
 }
 
+function emitGovernedPromotionCompleted(
+	json: boolean,
+	stdout: (line: string) => void,
+): number {
+	const output = Object.freeze({
+		governance: "governed" as const,
+		status: "completed" as const,
+		executionStarted: true as const,
+		decision: Object.freeze({
+			requested: "promote" as const,
+			state: "recorded" as const,
+		}),
+		promotion: Object.freeze({ state: "completed" as const }),
+	});
+	if (json) {
+		stdout(formatJson(output));
+	} else {
+		stdout("Governed promotion completed");
+		stdout("decision: promote (recorded)");
+		stdout("promotion: completed");
+	}
+	return 0;
+}
+
 function assertGovernedProjectInitialized(projectRoot: string): void {
 	const stateDirectory = join(projectRoot, ".buildplane");
 	if (
@@ -3492,7 +3516,7 @@ function canonicalPlanForgeRepositoryIdentityDigest(
 /** PlanForge still has no protected native session protocol. */
 function requireNativeGovernedHostContract(): void {
 	throw new Error(
-		"Governed PlanForge execution is unavailable: the protected native host contract does not support PlanForge admission or candidate sessions.",
+		"Governed PlanForge execution is unavailable: the protected native trusted host contract does not support PlanForge admission or candidate sessions.",
 	);
 }
 
@@ -3983,9 +4007,6 @@ async function runGovernedRunCommand(
 				"blocked",
 			);
 		}
-		if (runArguments.decision === "reject") {
-			return emitGovernedPromotionRejected(runArguments.json, options.stdout);
-		}
 		let execution:
 			| Awaited<ReturnType<typeof executeProtectedPromotion>>
 			| undefined;
@@ -3995,6 +4016,15 @@ async function runGovernedRunCommand(
 			});
 		} catch {
 			execution = undefined;
+		}
+		if (
+			runArguments.decision === "reject" &&
+			execution?.status === "rejected"
+		) {
+			return emitGovernedPromotionRejected(runArguments.json, options.stdout);
+		}
+		if (execution?.status === "completed") {
+			return emitGovernedPromotionCompleted(runArguments.json, options.stdout);
 		}
 		return emitGovernedPromotionDecisionRecovery(
 			runArguments.json,

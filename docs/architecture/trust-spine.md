@@ -223,7 +223,11 @@ opaque, bounded promotion-execution lease. Only the first caller receives that
 lease; duplicates observe pending, recorded, or expired recovery state. The
 protected result writer requires that exact lease for every effect-bearing
 terminal observation, records at most one kernel-signed result, and seals the
-prefix again before returning. Both primitives are evidence-only: neither
+prefix again before returning. A sealed operator rejection takes a separate
+lease-free path and records both the rejected result and a failed
+`WorkflowTerminalV2` without entering Git. A promoted result is terminal only
+after its completed `WorkflowTerminalV2` is also kernel-signed and checkpointed.
+Both primitives are evidence-only: neither
 accepts Git subprocess, path, ref, or command input, so neither can itself
 mutate a target branch.
 
@@ -239,11 +243,12 @@ transaction. It verifies the candidate commit/tree/parents and semantic tree
 digest, reuses an existing candidate receipt rather than issuing a second CAS,
 and never checks out or resets the root worktree.
 
-This component remains intentionally **not** wired to the CLI, generic ledger
-server, or a production broker. OS-authenticated ownership of keys/CAS and
-crash-supervised reconciliation remain mandatory before it may be used for
-governed execution. The private claim and opaque lease are deliberately not
-exposed by the CLI, generic ledger server, or a same-user worker interface.
+The component is wired only through the fixed Linux promotion-decision and
+promotion-execution clients and their separately confined, socket-activated
+protected hosts. Deployment remains gated on OS-authenticated key/CAS custody
+and crash-supervised reconciliation. The private claim and opaque lease are
+never exposed by the CLI, generic ledger server, or a same-user worker
+interface.
 
 Accordingly, `sealed` still means only "the durable decision is
 recovery-verifiable." The final candidate and reviewer action-chain validation
@@ -284,14 +289,16 @@ otherwise mutate the root worktree. Thus, a successful target-ref CAS proves
 only that the target ref advanced to the immutable merge; it is neither a
 synced root checkout nor a passed promotion/run.
 
-Immediately after that CAS, the adapter reports its local
-`pending_reconciliation` observation. The kernel must terminalize the normal
-case as `reconciliation_required` with
+Immediately after that CAS, the fixed gateway lists registered worktrees using
+the exact target ref. A bare or otherwise headless protected repository has no
+target checkout to synchronize, so the result is `promoted` with no
+`worktreeSyncState`; the kernel then records the completed workflow terminal.
+If the target is checked out anywhere, the result is instead
+`reconciliation_required` with
 `worktreeSyncState: "root_checkout_stale"`, even while the target ref still
 equals the candidate merge. That state records that the target ref may now
-resolve to the merge while the files under the root checkout still represent
-the old base. The run is suspended rather than marked `promoted` or passed,
-and the root worktree remains untouched.
+resolve to the merge while checked-out files still represent the old base. The
+run remains suspended and the gateway never resets or mutates a worktree.
 
 `target_advanced` is the distinct recovery state for a target ref that has
 advanced away from the recorded candidate merge after the CAS. It too produces
@@ -302,9 +309,9 @@ governed inspector for a sealed V3 candidate, blocks recovery before it selects
 any mutation-capable promotion API; recovery never synthesizes a replacement
 receipt from history.
 
-Both states keep root-worktree mutation blocked. No root-checkout
+Both reconciliation states keep root-worktree mutation blocked. No root-checkout
 reconciliation action or operator command is implemented or exposed yet, so a
-normal post-CAS promotion remains suspended. A future explicit reconciliation
+promotion against a checked-out target remains suspended. A future explicit reconciliation
 path must first validate the root is clean, based on the expected commit, and
 still attached to the signed target branch. A rejected promotion decision, a
 historical unbound decision, or a reconciliation record without those checks

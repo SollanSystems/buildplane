@@ -65,6 +65,7 @@ fn response_accepts_only_the_closed_status_set_and_rejects_tampering_or_extensio
     for status in [
         PromotionExecutionResponseStatusV1::Rejected,
         PromotionExecutionResponseStatusV1::Pending,
+        PromotionExecutionResponseStatusV1::Completed,
         PromotionExecutionResponseStatusV1::Recorded,
         PromotionExecutionResponseStatusV1::LeaseExpired,
         PromotionExecutionResponseStatusV1::ReconciliationRequired,

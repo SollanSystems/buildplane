@@ -962,7 +962,7 @@ fn governed_promotion_decision_is_candidate_bound_idempotent_and_kernel_sealed()
     let promotion_result = GovernedPromotionResultRequestV1 {
         run_id,
         promotion_decision_event_id: decision_event_id,
-        outcome: PromotionResultOutcomeV1::ReconciliationRequired,
+        outcome: PromotionResultOutcomeV1::Promoted,
         merged_head_sha: Some(merged_head_sha.clone()),
         promotion_git_binding: Some(PromotionGitBindingV1 {
             target_ref: "refs/heads/main".into(),
@@ -979,7 +979,7 @@ fn governed_promotion_decision_is_candidate_bound_idempotent_and_kernel_sealed()
             promotion_receipt_ref: Some(format!(
                 "refs/buildplane/promotions/candidate-1/{run_id}/1"
             )),
-            worktree_sync_state: Some(PromotionWorktreeSyncStateV1::RootCheckoutStale),
+            worktree_sync_state: None,
         }),
         promotion_execution_lease_binding: None,
     };
@@ -1152,14 +1152,36 @@ fn governed_promotion_decision_is_candidate_bound_idempotent_and_kernel_sealed()
     assert!(matches!(
         recorded_result,
         GovernedPromotionResultDispositionV1::Recorded {
-            outcome: PromotionResultOutcomeV1::ReconciliationRequired,
+            outcome: PromotionResultOutcomeV1::Promoted,
             ..
         }
     ));
     assert_eq!(
         store.event_count().unwrap(),
-        13,
-        "the terminal result and its required kernel checkpoint must be durable"
+        15,
+        "the result, terminal workflow record, and both required kernel checkpoints must be durable"
+    );
+    let terminal_events = store
+        .signed_events_for_run(&run_id.to_string())
+        .expect("read terminalized promotion tape")
+        .into_iter()
+        .filter(|(event, _)| event.kind == EventKind::WorkflowTerminalV2)
+        .collect::<Vec<_>>();
+    assert_eq!(terminal_events.len(), 1);
+    let Payload::WorkflowTerminalV2(terminal) = &terminal_events[0].0.payload else {
+        panic!("terminal promotion event must use WorkflowTerminalV2");
+    };
+    assert_eq!(terminal.outcome, WorkflowTerminalOutcomeV1::Completed);
+    let recorded_result_event_id = match &recorded_result {
+        GovernedPromotionResultDispositionV1::Recorded {
+            promotion_result_event_id,
+            ..
+        } => promotion_result_event_id.to_string(),
+        _ => unreachable!("recorded disposition asserted above"),
+    };
+    assert_eq!(
+        terminal.promotion_result_ref.as_deref(),
+        Some(recorded_result_event_id.as_str())
     );
 
     let replayed_result = store
@@ -1174,14 +1196,14 @@ fn governed_promotion_decision_is_candidate_bound_idempotent_and_kernel_sealed()
     assert!(matches!(
         replayed_result,
         GovernedPromotionResultDispositionV1::Existing {
-            outcome: PromotionResultOutcomeV1::ReconciliationRequired,
+            outcome: PromotionResultOutcomeV1::Promoted,
             ..
         }
     ));
     assert_eq!(
         store.event_count().unwrap(),
-        13,
-        "a duplicate result must not append another result or checkpoint"
+        15,
+        "a duplicate result must not append another result, terminal, or checkpoint"
     );
 
     let mut substituted_result = promotion_result.clone();
@@ -1207,7 +1229,7 @@ fn governed_promotion_decision_is_candidate_bound_idempotent_and_kernel_sealed()
     ));
     assert_eq!(
         store.event_count().unwrap(),
-        13,
+        15,
         "a mismatched result retry must not append target-effect evidence"
     );
 
@@ -1230,9 +1252,171 @@ fn governed_promotion_decision_is_candidate_bound_idempotent_and_kernel_sealed()
     ));
     assert_eq!(
         store.event_count().unwrap(),
-        13,
+        15,
         "conflict must not append an event"
     );
+}
+
+#[test]
+fn sealed_reject_records_one_failed_terminal_without_a_git_lease() {
+    let store = SqliteStore::open_in_memory().expect("open store");
+    let kernel_key = SigningKey::from_bytes(&[71; 32]);
+    let reviewer_key = SigningKey::from_bytes(&[72; 32]);
+    let operator_key = SigningKey::from_bytes(&[73; 32]);
+    let kernel = actor("kernel", "kernel-main", &kernel_key);
+    let reviewer = actor("reviewer", "reviewer-main", &reviewer_key);
+    let operator = actor("operator", "operator-main", &operator_key);
+    let authority = GovernedPromotionAuthorityV1::new_governed_realm(
+        trusted_keys(&[&kernel_key, &reviewer_key, &operator_key]),
+        kernel.clone(),
+        vec![reviewer.clone()],
+        operator.clone(),
+        DIGEST_E.into(),
+    )
+    .expect("construct promotion authority");
+    let run_id = RunId::new();
+    let now = DateTime::parse_from_rfc3339("2026-07-20T12:30:00.000Z")
+        .expect("parse fixture time")
+        .with_timezone(&Utc);
+    let (mut decision_request, _) = append_v4_promotion_evidence(
+        &store,
+        &kernel_key,
+        &kernel,
+        &reviewer_key,
+        &reviewer,
+        run_id,
+        now,
+        V4PromotionDigestBinding::Outer,
+        PromotionCandidateRefBinding::Exact,
+    );
+    decision_request.decision = PromotionDecisionKindV1::Reject;
+    let decision_event_id = match store
+        .record_governed_promotion_decision_v1_at_for_tests(
+            &decision_request,
+            &authority,
+            &operator_key,
+            &operator,
+            now + Duration::seconds(7),
+        )
+        .expect("record operator rejection")
+    {
+        GovernedPromotionDecisionDispositionV1::AwaitingKernelSeal {
+            promotion_decision_event_id,
+            ..
+        } => promotion_decision_event_id,
+        other => panic!("rejection must await kernel seal, got {other:?}"),
+    };
+    store
+        .seal_governed_promotion_decision_v1(
+            &GovernedPromotionDecisionSealRequestV1 {
+                run_id,
+                promotion_decision_event_id: decision_event_id,
+            },
+            &authority,
+            &kernel_key,
+            &kernel,
+        )
+        .expect("seal operator rejection");
+
+    let result_request = GovernedPromotionResultRequestV1 {
+        run_id,
+        promotion_decision_event_id: decision_event_id,
+        outcome: PromotionResultOutcomeV1::Rejected,
+        merged_head_sha: None,
+        promotion_git_binding: None,
+        promotion_execution_lease_binding: None,
+    };
+    store.fail_next_checkpoint_signature_insert_for_tests();
+    let error = store
+        .record_governed_promotion_result_v1_at_for_tests(
+            &result_request,
+            &authority,
+            &kernel_key,
+            &kernel,
+            now + Duration::seconds(8),
+        )
+        .expect_err("checkpoint crash withholds a terminal response");
+    assert!(matches!(error, LedgerError::AppendOnlyViolation(_)));
+    assert_eq!(
+        store.event_count().unwrap(),
+        10,
+        "the signed result remains durable for effect-free recovery"
+    );
+    assert_eq!(
+        store
+            .finalize_recorded_governed_promotion_result_v1(
+                run_id,
+                decision_event_id,
+                &authority,
+                &kernel_key,
+                &kernel,
+            )
+            .expect("recovery seals the result and terminal workflow"),
+        PromotionResultOutcomeV1::Rejected
+    );
+    let result_event_id = store
+        .signed_events_for_run(&run_id.to_string())
+        .expect("read recovered result")
+        .into_iter()
+        .find_map(|(event, _)| {
+            (event.kind == EventKind::PromotionResultRecorded).then_some(event.id)
+        })
+        .expect("recovered result remains on tape");
+    assert_eq!(store.event_count().unwrap(), 13);
+
+    let terminal_events = store
+        .signed_events_for_run(&run_id.to_string())
+        .expect("read terminalized rejection tape")
+        .into_iter()
+        .filter(|(event, _)| event.kind == EventKind::WorkflowTerminalV2)
+        .collect::<Vec<_>>();
+    assert_eq!(terminal_events.len(), 1);
+    let Payload::WorkflowTerminalV2(terminal) = &terminal_events[0].0.payload else {
+        panic!("rejection terminal must use WorkflowTerminalV2");
+    };
+    assert_eq!(terminal.outcome, WorkflowTerminalOutcomeV1::Failed);
+    assert_eq!(terminal.reason.as_deref(), Some("promotion rejected"));
+    assert_eq!(
+        terminal.promotion_result_ref.as_deref(),
+        Some(result_event_id.to_string().as_str())
+    );
+
+    assert!(matches!(
+        store
+            .record_governed_promotion_result_v1_at_for_tests(
+                &result_request,
+                &authority,
+                &kernel_key,
+                &kernel,
+                now + Duration::seconds(9),
+            )
+            .expect("retry reuses terminal rejection"),
+        GovernedPromotionResultDispositionV1::Existing {
+            outcome: PromotionResultOutcomeV1::Rejected,
+            ..
+        }
+    ));
+    assert_eq!(store.event_count().unwrap(), 13);
+    assert!(matches!(
+        store
+            .claim_governed_promotion_execution_v1_at_for_tests(
+                &GovernedPromotionExecutionClaimRequestV1 {
+                    run_id,
+                    promotion_decision_event_id: decision_event_id,
+                    lease_duration_ms: 1_000,
+                },
+                &authority,
+                &kernel_key,
+                &kernel,
+                now + Duration::seconds(10),
+            )
+            .expect("terminal rejection is recovered without issuing a claim"),
+        GovernedPromotionExecutionClaimDispositionV1::Recorded {
+            outcome: PromotionResultOutcomeV1::Rejected,
+            ..
+        }
+    ));
+    assert_eq!(store.event_count().unwrap(), 13);
 }
 
 #[test]

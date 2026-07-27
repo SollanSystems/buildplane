@@ -2058,19 +2058,23 @@ fn promotion_result_evidence_is_well_formed(
             let Some(promotion_receipt_ref) = binding.promotion_receipt_ref.as_deref() else {
                 return false;
             };
-            let Some(worktree_sync_state) = binding.worktree_sync_state else {
-                return false;
-            };
-            let expected_sync_state = match result.outcome {
-                // A strict binding always reports a post-CAS checkout state;
-                // none of those states proves the root checkout reconciled.
-                PromotionResultOutcomeV1::Promoted => false,
-                PromotionResultOutcomeV1::ReconciliationRequired => matches!(
-                    worktree_sync_state,
-                    bp_ledger::payload::trust_spine::PromotionWorktreeSyncStateV1::RootCheckoutStale
-                        | bp_ledger::payload::trust_spine::PromotionWorktreeSyncStateV1::TargetAdvanced
-                ),
-                PromotionResultOutcomeV1::Rejected => false,
+            let valid_sync_state = match (result.outcome, binding.worktree_sync_state) {
+                (PromotionResultOutcomeV1::Promoted, None) => {
+                    target_head_after_sha == merged_head_sha
+                }
+                (
+                    PromotionResultOutcomeV1::ReconciliationRequired,
+                    Some(
+                        bp_ledger::payload::trust_spine::PromotionWorktreeSyncStateV1::RootCheckoutStale,
+                    ),
+                ) => target_head_after_sha == merged_head_sha,
+                (
+                    PromotionResultOutcomeV1::ReconciliationRequired,
+                    Some(
+                        bp_ledger::payload::trust_spine::PromotionWorktreeSyncStateV1::TargetAdvanced,
+                    ),
+                ) => target_head_after_sha != merged_head_sha,
+                _ => false,
             };
             is_canonical_target_ref(target_ref)
                 && binding.target_ref == target_ref
@@ -2091,17 +2095,11 @@ fn promotion_result_evidence_is_well_formed(
                 && is_canonical_git_object_id(merged_tree_sha)
                 && binding.merged_tree_digest == candidate.tree_digest
                 && is_canonical_sha256_digest(&binding.merged_tree_digest)
-                && promotion_receipt_ref_matches_candidate(promotion_receipt_ref, &candidate.candidate_ref)
-                && expected_sync_state
-                && match worktree_sync_state {
-                    bp_ledger::payload::trust_spine::PromotionWorktreeSyncStateV1::PendingReconciliation
-                    | bp_ledger::payload::trust_spine::PromotionWorktreeSyncStateV1::RootCheckoutStale => {
-                        target_head_after_sha == merged_head_sha
-                    }
-                    bp_ledger::payload::trust_spine::PromotionWorktreeSyncStateV1::TargetAdvanced => {
-                        target_head_after_sha != merged_head_sha
-                    }
-                }
+                && promotion_receipt_ref_matches_candidate(
+                    promotion_receipt_ref,
+                    &candidate.candidate_ref,
+                )
+                && valid_sync_state
         }
         PromotionResultOutcomeV1::Rejected => {
             result.merged_head_sha.is_none() && result.promotion_git_binding.is_none()
@@ -3734,6 +3732,38 @@ mod tests {
             decision.reason,
             Some(PromotionRecoveryBlockReasonV1::RecordedPromotionReconciliationRequired)
         );
+    }
+
+    #[test]
+    fn promotion_recovery_reuses_a_headless_target_bound_success() {
+        let mut workflow = workflow(DIGEST_A, Some(DIGEST_A));
+        record_promotion_result(&mut workflow, PromotionResultOutcomeV1::Promoted);
+        workflow
+            .promotion
+            .as_mut()
+            .and_then(|promotion| promotion.result.as_mut())
+            .and_then(|result| result.promotion_git_binding.as_mut())
+            .expect("fixture recorded target-bound Git evidence")
+            .worktree_sync_state = None;
+        workflow.phase = WorkflowPhaseV1::Promoted;
+        let query = promotion_query(&workflow);
+        let snapshot = TrustedGovernedRecoverySnapshot::from_verified_replay(
+            "run",
+            kernel(),
+            integrity(),
+            [&workflow].into_iter(),
+        )
+        .expect("fixture forms a trusted recovery snapshot");
+
+        let decision = snapshot.classify_recorded_governed_promotion_recovery_v1(&query);
+
+        assert_eq!(
+            decision.disposition,
+            PromotionRecoveryDispositionV1::ReuseRecordedPromotion
+        );
+        assert!(decision.result.is_some());
+        assert!(decision.reconciliation.is_none());
+        assert!(decision.reason.is_none());
     }
 
     #[test]

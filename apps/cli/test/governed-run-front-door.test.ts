@@ -2234,7 +2234,7 @@ describe("governed run front door", () => {
 		expectRootUnchanged(root, before);
 	});
 
-	it("records only an exact sealed native response for a canonical approval event UUID", async () => {
+	it("reports terminal completion only for an exact sealed native completion response", async () => {
 		const root = createGitProject();
 		const before = snapshotRoot(root);
 		const approvalEventId = "123e4567-e89b-12d3-a456-426614174001";
@@ -2243,7 +2243,7 @@ describe("governed run front door", () => {
 			status: "sealed",
 			promotionDecisionEventId: decisionEventId,
 		});
-		promotionExecutionClient.execute.mockResolvedValue({ status: "recorded" });
+		promotionExecutionClient.execute.mockResolvedValue({ status: "completed" });
 
 		const response = await runCliCapture(
 			root,
@@ -2267,22 +2267,25 @@ describe("governed run front door", () => {
 			promotionDecisionEventId: decisionEventId,
 		});
 		expect(hostResolver.resolve).not.toHaveBeenCalled();
-		expect(response.exitCode).toBe(2);
-		expect(JSON.parse(response.stdout.join("\n"))).toMatchObject({
+		expect(response.exitCode).toBe(0);
+		expect(JSON.parse(response.stdout.join("\n"))).toEqual({
+			governance: "governed",
+			status: "completed",
+			executionStarted: true,
 			decision: { requested: "promote", state: "recorded" },
-			promotion: { state: "recorded" },
-			recovery: { retry: "required" },
+			promotion: { state: "completed" },
 		});
 		expectRootUnchanged(root, before);
 	});
 
-	it("records a sealed rejection without ever entering promotion execution", async () => {
+	it("reports rejection only after the protected host records its terminal result", async () => {
 		const root = createGitProject();
 		const before = snapshotRoot(root);
 		promotionDecisionClient.submit.mockResolvedValue({
 			status: "sealed",
 			promotionDecisionEventId: "123e4567-e89b-12d3-a456-426614174002",
 		});
+		promotionExecutionClient.execute.mockResolvedValue({ status: "rejected" });
 
 		const response = await runCliCapture(
 			root,
@@ -2305,12 +2308,15 @@ describe("governed run front door", () => {
 			decision: { requested: "reject", state: "recorded" },
 			promotion: { state: "rejected" },
 		});
-		expect(promotionExecutionClient.execute).not.toHaveBeenCalled();
+		expect(promotionExecutionClient.execute).toHaveBeenCalledWith({
+			promotionDecisionEventId: "123e4567-e89b-12d3-a456-426614174002",
+		});
 		expectRootUnchanged(root, before);
 	});
 
 	it.each([
 		{ status: "pending" },
+		{ status: "recorded" },
 		{ status: "lease_expired" },
 		{ status: "reconciliation_required" },
 		{ status: "rejected" },
@@ -2344,7 +2350,9 @@ describe("governed run front door", () => {
 			promotion: {
 				state: status?.status ?? "blocked",
 			},
-			recovery: { retry: "blocked" },
+			recovery: {
+				retry: status?.status === "recorded" ? "required" : "blocked",
+			},
 		});
 		expectRootUnchanged(root, before);
 	});
