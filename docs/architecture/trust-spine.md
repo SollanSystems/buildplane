@@ -591,7 +591,8 @@ detail until an OS-authenticated broker can verify dispatch/reducer state and
 initialize it. This avoids treating a same-process factory call as broker
 authority.
 
-The OCI/ActionGateway implementation is not yet wired into `buildplane run`; it
+The OCI/ActionGateway implementation is wired into `buildplane run` only
+through the fixed Linux governed-session client and protected native host; it
 is an integration seam and fail-closed feasibility boundary, not an available
 governed worker lane.
 

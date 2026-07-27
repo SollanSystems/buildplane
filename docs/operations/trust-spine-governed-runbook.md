@@ -191,6 +191,25 @@ owner, group, mode, and single-link requirements described above apply, using
 the `socket_group_gid` in
 `/etc/buildplane/authority-host/governed-session-v1.json`.
 
+Build and stage the exact native host/client pair plus the reviewed systemd
+units as one content-addressed deployment bundle:
+
+```sh
+cargo build --release --manifest-path native/Cargo.toml \
+  -p bp-authority-broker --bins
+pnpm stage:trust-spine:protected-host -- \
+  --out /var/tmp/buildplane-protected-host-v1
+```
+
+The staging command never installs a service or grants authority. It rejects
+non-regular or symlinked inputs, snapshots Cargo hard-linked outputs into fresh
+single-link files, writes fixed installation destinations and modes, and hashes
+every binary and unit into `manifest.json`. Transfer the bundle through the
+protected release path, independently verify every manifest hash, then install
+the files at their declared destinations as root-owned, single-link regular
+files. The canonical unit sources live under
+`deploy/trust-spine/systemd`; do not copy the prose examples from this runbook.
+
 Startup is all-or-nothing. Before accepting a client, the host verifies the
 fixed socket, non-root broker identity, configured client UID set, signer
 separation, signed ledger, protected CAS, Anthropic credential file, and the
