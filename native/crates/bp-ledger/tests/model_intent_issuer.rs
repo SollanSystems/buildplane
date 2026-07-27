@@ -30,7 +30,7 @@ use bp_ledger::payload::trust_spine::{
     CandidateAcceptanceOutcomeV1, CandidateAcceptanceRecordedV1, CandidateCompletionRecordedV1,
     CandidateCreatedV2, CandidateViewV1, CommitModeV1, DispatchBudgetV1, DispatchEnvelopeBodyV2,
     DispatchEnvelopeV3, DispatchEnvelopeV4, ExecutionRoleV1, ModelActionCandidateBindingV1,
-    ModelActionIntentV1, TrustTierV1,
+    ModelActionIntentV1, ReviewDecisionV1, ReviewVerdictOutputV1, TrustTierV1,
 };
 use bp_ledger::payload::Payload;
 use bp_ledger::signing::{public_key_hash, ActorKeyRef, TrustedPublicKeys};
@@ -39,6 +39,7 @@ use bp_ledger::storage::sqlite::{
     ActivityResultDispositionV1, ActivityResultRequestV1,
     GovernedModelActionAuthorizeAndClaimDispositionV1,
     GovernedModelActionAuthorizeAndClaimRequestV1, GovernedModelActionResultRequestV1,
+    GovernedV5ReviewVerdictFinalizeDispositionV1, GovernedV5ReviewVerdictFinalizeRequestV1,
     ModelActionIntentIssueDispositionV1, ModelActionIntentIssueRequestV1,
     ProviderTokenPreflightActionIssueDispositionV1, ProviderTokenPreflightActionIssueRequestV1,
     ProviderTokenPreflightForModelActionRequestV1, ProviderTokenPreflightRecordingRequestV1,
@@ -1940,6 +1941,10 @@ fn reviewer_authority_adopts_only_a_signed_candidate_bound_intent() {
         "substituted-acceptance",
         "substituted-acceptance-main",
     );
+    let receipt_key = SigningKey::from_bytes(&[47; 32]);
+    let receipt_signer = signer_for(&receipt_key, "review-receipt", "review-receipt-main");
+    let review_key = SigningKey::from_bytes(&[48; 32]);
+    let review_signer = signer_for(&review_key, "review-verdict", "review-verdict-main");
     let realm_digest = DIGEST_B;
     let mut trusted_keys = TrustedPublicKeys::default();
     for (trusted_signer, trusted_key) in [
@@ -1949,6 +1954,8 @@ fn reviewer_authority_adopts_only_a_signed_candidate_bound_intent() {
         (&candidate_signer, &candidate_key),
         (&acceptance_signer, &acceptance_key),
         (&substituted_acceptance_signer, &substituted_acceptance_key),
+        (&receipt_signer, &receipt_key),
+        (&review_signer, &review_key),
     ] {
         trusted_keys.insert_public_key(
             trusted_signer
@@ -1969,6 +1976,7 @@ fn reviewer_authority_adopts_only_a_signed_candidate_bound_intent() {
     .with_governed_reviewer_lineage(
         candidate_signer.clone(),
         acceptance_signer.clone(),
+        review_signer.clone(),
         checkpoint_signer.clone(),
     )
     .expect("bind immutable reviewer lineage authorities");
@@ -1999,8 +2007,9 @@ fn reviewer_authority_adopts_only_a_signed_candidate_bound_intent() {
         .append_signed(&dispatch_event, &key, &signer)
         .expect("append signed reviewer dispatch");
 
+    let canonical_input = canonical_model_input();
     let canonical_input_bytes =
-        canonical_model_action_input_v1_bytes(&canonical_model_input()).expect("encode input");
+        canonical_model_action_input_v1_bytes(&canonical_input).expect("encode input");
     let canonical_input_ref = cas
         .put_canonical_bytes(&canonical_input_bytes)
         .expect("store canonical model input");
@@ -2041,7 +2050,6 @@ fn reviewer_authority_adopts_only_a_signed_candidate_bound_intent() {
         None,
         now + Duration::milliseconds(1),
     );
-
     let authority_request = GovernedModelActionAuthorizeAndClaimRequestV1 {
         run_id,
         dispatch_event_id: dispatch_event.id,
@@ -2063,12 +2071,13 @@ fn reviewer_authority_adopts_only_a_signed_candidate_bound_intent() {
             .with_governed_reviewer_lineage(
                 candidate_signer.clone(),
                 substituted_acceptance_signer,
+                review_signer.clone(),
                 checkpoint_signer.clone(),
             )
             .expect("bind substituted reviewer lineage authority"),
             &key,
             &signer,
-            now + Duration::milliseconds(2),
+            now + Duration::milliseconds(5),
         )
         .expect_err("trusted but wrong acceptance signer must fail closed");
     assert!(
@@ -2091,13 +2100,17 @@ fn reviewer_authority_adopts_only_a_signed_candidate_bound_intent() {
             &authority,
             &key,
             &signer,
-            now + Duration::milliseconds(2),
+            now + Duration::milliseconds(5),
         )
         .expect("authorize signed candidate-bound reviewer action");
-    assert!(matches!(
-        disposition,
-        GovernedModelActionAuthorizeAndClaimDispositionV1::Granted { .. }
-    ));
+    let (authorization_ref, lease_id) = match disposition {
+        GovernedModelActionAuthorizeAndClaimDispositionV1::Granted {
+            authorization_ref,
+            lease_id,
+            ..
+        } => (authorization_ref, lease_id),
+        other => panic!("reviewer authority must grant one lease, got {other:?}"),
+    };
     assert_eq!(
         store.event_count().unwrap(),
         9,
@@ -2110,7 +2123,7 @@ fn reviewer_authority_adopts_only_a_signed_candidate_bound_intent() {
             &authority,
             &key,
             &signer,
-            now + Duration::milliseconds(3),
+            now + Duration::milliseconds(6),
         )
         .expect_err("the implementer lane cannot recover reviewer authority");
     assert_eq!(
@@ -2119,6 +2132,248 @@ fn reviewer_authority_adopts_only_a_signed_candidate_bound_intent() {
         "cross-lane retry cannot append or expose reviewer authority"
     );
     assert_ne!(acceptance_event_id, request_event.id);
+
+    let preflight = store
+        .issue_provider_token_preflight_action_v1_at_for_tests(
+            &ProviderTokenPreflightActionIssueRequestV1 {
+                run_id,
+                dispatch_event_id: dispatch_event.id,
+                model_action_request_event_id: request_event.id,
+            },
+            &cas,
+            &authority,
+            &key,
+            &signer,
+            now + Duration::milliseconds(7),
+        )
+        .expect("issue reviewer provider-token preflight");
+    let (preflight_event_id, verified_preflight_input) = match preflight {
+        ProviderTokenPreflightActionIssueDispositionV1::Issued {
+            action_request_event_id,
+            verified_input,
+            ..
+        } => (action_request_event_id, verified_input),
+        other => panic!("reviewer preflight must be newly issued, got {other:?}"),
+    };
+    let preflight_action_id = format!("{}:provider-token-preflight", request.action_id);
+    let preflight_claim = store
+        .claim_activity_v1_at_for_tests(
+            &ActivityClaimRequestV1 {
+                run_id,
+                activity_id: preflight_action_id.clone(),
+                idempotency_key: preflight_action_id.clone(),
+                dispatch_event_id: dispatch_event.id,
+                action_request_event_id: preflight_event_id,
+                lease_duration_ms: 1_000,
+            },
+            &authority,
+            &key,
+            &signer,
+            now + Duration::milliseconds(8),
+        )
+        .expect("claim reviewer provider-token preflight");
+    let preflight_lease_id = match preflight_claim {
+        ActivityClaimDispositionV1::Granted { lease_id, .. } => lease_id,
+        other => panic!("reviewer preflight must grant one lease, got {other:?}"),
+    };
+    let preflight_result = ProviderTokenPreflightResultV1::new(&verified_preflight_input, 321)
+        .expect("construct reviewer provider-token preflight result");
+    let preflight_result_bytes = provider_token_preflight_result_v1_bytes(&preflight_result)
+        .expect("encode reviewer provider-token preflight result");
+    let preflight_result_ref = cas
+        .put_canonical_bytes(&preflight_result_bytes)
+        .expect("store reviewer provider-token preflight result");
+    store
+        .record_activity_result_v1_at_for_tests(
+            &ActivityResultRequestV1 {
+                run_id,
+                activity_id: preflight_action_id.clone(),
+                idempotency_key: preflight_action_id,
+                lease_id: preflight_lease_id,
+                outcome: ActivityResultOutcomeV1::Succeeded,
+                result_digest: Some(preflight_result_ref.digest().into()),
+                result_ref: Some(preflight_result_ref.to_cas_ref()),
+                evidence_digest: preflight_result_ref.digest().into(),
+                evidence_ref: preflight_result_ref.to_cas_ref(),
+            },
+            &authority,
+            &key,
+            &signer,
+            now + Duration::milliseconds(9),
+        )
+        .expect("record reviewer provider-token preflight");
+    assert_eq!(store.event_count().unwrap(), 12);
+
+    let events = store
+        .events_for_run(&run_id.to_string())
+        .expect("load reviewer authority events");
+    let authorization = events
+        .iter()
+        .find_map(
+            |row| match row.to_event().expect("decode reviewer event").payload {
+                Payload::ModelActionAuthorizedV2(authorization) => Some(authorization),
+                _ => None,
+            },
+        )
+        .expect("reviewer authorization exists");
+    let candidate_binding = events
+        .iter()
+        .find_map(
+            |row| match row.to_event().expect("decode reviewer event").payload {
+                Payload::ModelActionIntentV1(intent) => intent.candidate_binding,
+                _ => None,
+            },
+        )
+        .expect("reviewer intent binds a candidate");
+    let review_output = ReviewVerdictOutputV1 {
+        candidate_digest: candidate_binding.candidate_digest.clone(),
+        candidate_commit_sha: candidate_binding.candidate_commit_sha.clone(),
+        decision: ReviewDecisionV1::Approve,
+        findings: vec![],
+        confidence: 0.97,
+        candidate_view_digest: candidate_binding.candidate_view_digest.clone(),
+    };
+    let review_output_bytes =
+        serde_json::to_vec(&review_output).expect("encode closed review output");
+    let review_output_ref = cas
+        .put_canonical_bytes(&review_output_bytes)
+        .expect("persist closed review output");
+    let result_evidence = ModelResultEvidenceDocumentV1::new(
+        request.action_id.clone(),
+        request_event.id.to_string(),
+        action_requested_v2_digest(&request).expect("review action request digest"),
+        canonical_input.model_request_digest.clone(),
+        authorization_ref,
+        authorization.authorization_digest,
+        review_output_ref.to_cas_ref(),
+        review_output_ref.digest().into(),
+        vec![],
+    )
+    .expect("construct review result evidence");
+    let result_evidence_bytes = model_result_evidence_document_v1_bytes(&result_evidence)
+        .expect("encode review result evidence");
+    let result_evidence_ref = cas
+        .put_canonical_bytes(&result_evidence_bytes)
+        .expect("persist review result evidence");
+    store
+        .record_governed_model_action_result_v1_at_for_tests(
+            &GovernedModelActionResultRequestV1 {
+                run_id,
+                lease_id,
+                outcome: ActivityResultOutcomeV1::Succeeded,
+                result_digest: Some(review_output_ref.digest().into()),
+                result_ref: Some(review_output_ref.to_cas_ref()),
+                evidence_digest: result_evidence_ref.digest().into(),
+                evidence_ref: result_evidence_ref.to_cas_ref(),
+            },
+            &cas,
+            &authority,
+            &key,
+            &signer,
+            now + Duration::milliseconds(6),
+        )
+        .expect("record exact closed reviewer result");
+    let finalize_request = GovernedV5ReviewVerdictFinalizeRequestV1 {
+        run_id,
+        reviewer_action_request_event_id: request_event.id,
+    };
+    let finalized = store
+        .finalize_governed_v5_review_verdict_v1_at_for_tests(
+            &finalize_request,
+            &cas,
+            &authority,
+            &receipt_key,
+            &receipt_signer,
+            &review_key,
+            &review_signer,
+            &checkpoint_key,
+            &checkpoint_signer,
+            now + Duration::milliseconds(7),
+        )
+        .expect("materialize signed review receipt, set, and verdict");
+    assert!(matches!(
+        finalized,
+        GovernedV5ReviewVerdictFinalizeDispositionV1::Recorded {
+            decision: ReviewDecisionV1::Approve,
+            ..
+        }
+    ));
+    assert_eq!(store.event_count().unwrap(), 18);
+    let finalized_events = store
+        .events_for_run(&run_id.to_string())
+        .expect("load finalized reviewer evidence");
+    let receipt_set = finalized_events
+        .iter()
+        .find_map(
+            |row| match row.to_event().expect("decode finalized event").payload {
+                Payload::ActionReceiptSetRecordedV1(set) => Some(set),
+                _ => None,
+            },
+        )
+        .expect("review finalization seals one receipt set");
+    let expected_preflight_action_id = format!("{}:provider-token-preflight", request.action_id);
+    assert_eq!(
+        receipt_set
+            .receipts
+            .iter()
+            .map(|entry| entry.action_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            request.action_id.as_str(),
+            expected_preflight_action_id.as_str(),
+        ],
+        "the reviewer set must cover both provider preflight and model review"
+    );
+    let verdict = finalized_events
+        .iter()
+        .find_map(
+            |row| match row.to_event().expect("decode finalized event").payload {
+                Payload::ReviewVerdictRecordedV2(verdict) => Some(verdict),
+                _ => None,
+            },
+        )
+        .expect("review finalization records one V2 verdict");
+    assert_eq!(verdict.decision, ReviewDecisionV1::Approve);
+    assert_eq!(verdict.candidate_digest, candidate_binding.candidate_digest);
+    assert_eq!(
+        verdict.review_output_digest,
+        review_output_ref.digest(),
+        "raw protected-CAS digest remains the exact output object identity"
+    );
+    assert_ne!(
+        verdict
+            .review_output_semantic_digest
+            .as_deref()
+            .expect("new review verdicts bind a semantic digest"),
+        verdict.review_output_digest,
+        "domain-separated semantic digest must not be confused with raw CAS SHA"
+    );
+    let retry = store
+        .finalize_governed_v5_review_verdict_v1_at_for_tests(
+            &finalize_request,
+            &cas,
+            &authority,
+            &receipt_key,
+            &receipt_signer,
+            &review_key,
+            &review_signer,
+            &checkpoint_key,
+            &checkpoint_signer,
+            now + Duration::milliseconds(8),
+        )
+        .expect("exact finalization retry reuses the signed verdict");
+    assert!(matches!(
+        retry,
+        GovernedV5ReviewVerdictFinalizeDispositionV1::Existing {
+            decision: ReviewDecisionV1::Approve,
+            ..
+        }
+    ));
+    assert_eq!(
+        store.event_count().unwrap(),
+        18,
+        "review finalization retry cannot duplicate any evidence"
+    );
 }
 
 #[test]

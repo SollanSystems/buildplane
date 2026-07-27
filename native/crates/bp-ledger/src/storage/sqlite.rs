@@ -221,6 +221,7 @@ impl ActivityClaimAuthorityV1 {
         mut self,
         candidate_artifact_signer: ActorKeyRef,
         candidate_acceptance_signer: ActorKeyRef,
+        review_verdict_signer: ActorKeyRef,
         checkpoint_signer: ActorKeyRef,
     ) -> Result<Self> {
         let lineage = GovernedReviewerLineageAuthorityV1::new(
@@ -232,6 +233,7 @@ impl ActivityClaimAuthorityV1 {
             ],
             candidate_artifact_signer,
             candidate_acceptance_signer,
+            review_verdict_signer,
             checkpoint_signer,
         )?;
         self.governed_reviewer_lineage = Some(lineage);
@@ -243,6 +245,7 @@ impl ActivityClaimAuthorityV1 {
 struct GovernedReviewerLineageAuthorityV1 {
     candidate_artifact_signer: ActorKeyRef,
     candidate_acceptance_signer: ActorKeyRef,
+    review_verdict_signer: ActorKeyRef,
     checkpoint_signer: ActorKeyRef,
 }
 
@@ -252,11 +255,13 @@ impl GovernedReviewerLineageAuthorityV1 {
         existing_authorities: [&ActorKeyRef; 3],
         candidate_artifact_signer: ActorKeyRef,
         candidate_acceptance_signer: ActorKeyRef,
+        review_verdict_signer: ActorKeyRef,
         checkpoint_signer: ActorKeyRef,
     ) -> Result<Self> {
         let lineage = [
             ("candidate_artifact_signer", &candidate_artifact_signer),
             ("candidate_acceptance_signer", &candidate_acceptance_signer),
+            ("review_verdict_signer", &review_verdict_signer),
             ("checkpoint_signer", &checkpoint_signer),
         ];
         for (label, signer) in lineage {
@@ -279,12 +284,15 @@ impl GovernedReviewerLineageAuthorityV1 {
         }
         for (left, right) in [
             (&candidate_artifact_signer, &candidate_acceptance_signer),
+            (&candidate_artifact_signer, &review_verdict_signer),
             (&candidate_artifact_signer, &checkpoint_signer),
+            (&candidate_acceptance_signer, &review_verdict_signer),
             (&candidate_acceptance_signer, &checkpoint_signer),
+            (&review_verdict_signer, &checkpoint_signer),
         ] {
             if authorities_overlap(left, right) {
                 return Err(LedgerError::ActivityClaimAuthorityRejected {
-                    reason: "candidate artifact, acceptance, and checkpoint authorities must be distinct"
+                    reason: "candidate artifact, acceptance, review verdict, and checkpoint authorities must be distinct"
                         .into(),
                 });
             }
@@ -292,6 +300,7 @@ impl GovernedReviewerLineageAuthorityV1 {
         Ok(Self {
             candidate_artifact_signer,
             candidate_acceptance_signer,
+            review_verdict_signer,
             checkpoint_signer,
         })
     }
@@ -1061,6 +1070,36 @@ pub struct GovernedModelActionResultRequestV1 {
     pub result_ref: Option<String>,
     pub evidence_digest: String,
     pub evidence_ref: String,
+}
+
+/// Closed host-private request to materialize the review transaction that
+/// follows one succeeded governed reviewer model action. The caller selects
+/// only the already-signed action request; candidate, acceptance, result,
+/// receipt-set, and verdict fields are reconstructed from tape and CAS.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GovernedV5ReviewVerdictFinalizeRequestV1 {
+    pub run_id: RunId,
+    pub reviewer_action_request_event_id: EventId,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum GovernedV5ReviewVerdictFinalizeDispositionV1 {
+    Recorded {
+        review_action_receipt_event_id: EventId,
+        review_action_receipt_set_event_id: EventId,
+        review_verdict_event_id: EventId,
+        review_ref: String,
+        candidate_digest: String,
+        decision: ReviewDecisionV1,
+    },
+    Existing {
+        review_action_receipt_event_id: EventId,
+        review_action_receipt_set_event_id: EventId,
+        review_verdict_event_id: EventId,
+        review_ref: String,
+        candidate_digest: String,
+        decision: ReviewDecisionV1,
+    },
 }
 
 /// Read-only request to reconstruct one completed provider token-count
@@ -5317,13 +5356,14 @@ impl SqliteStore {
                             ),
                         }
                     })?;
-                    let candidate = verified.intent.candidate_binding.as_ref().ok_or_else(
-                        || LedgerError::ActivityClaimAuthorityRejected {
+                    let candidate =
+                        verified.intent.candidate_binding.as_ref().ok_or_else(|| {
+                            LedgerError::ActivityClaimAuthorityRejected {
                             reason:
                                 "successful governed review result has no signed candidate binding"
                                     .into(),
-                        },
-                    )?;
+                        }
+                        })?;
                     review_verdict_output_v1_digest(&output).map_err(|error| {
                         LedgerError::ActivityClaimAuthorityRejected {
                             reason: format!(
@@ -5509,6 +5549,694 @@ impl SqliteStore {
             result_event_digest,
             outcome: derived.outcome,
         })
+    }
+
+    /// Atomically derive and seal every terminal reviewer support receipt, the
+    /// complete receipt set, and the semantic verdict from one succeeded
+    /// governed model activity. No verdict fields are accepted from the caller.
+    #[allow(clippy::too_many_arguments)]
+    pub fn finalize_governed_v5_review_verdict_v1(
+        &self,
+        request: &GovernedV5ReviewVerdictFinalizeRequestV1,
+        cas: &Cas,
+        authority: &ActivityClaimAuthorityV1,
+        receipt_signing_key: &SigningKey,
+        receipt_signer: &ActorKeyRef,
+        review_signing_key: &SigningKey,
+        review_signer: &ActorKeyRef,
+        checkpoint_signing_key: &SigningKey,
+        checkpoint_signer: &ActorKeyRef,
+    ) -> Result<GovernedV5ReviewVerdictFinalizeDispositionV1> {
+        self.finalize_governed_v5_review_verdict_v1_at(
+            request,
+            cas,
+            authority,
+            receipt_signing_key,
+            receipt_signer,
+            review_signing_key,
+            review_signer,
+            checkpoint_signing_key,
+            checkpoint_signer,
+            Utc::now(),
+        )
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    #[allow(clippy::too_many_arguments)]
+    pub fn finalize_governed_v5_review_verdict_v1_at_for_tests(
+        &self,
+        request: &GovernedV5ReviewVerdictFinalizeRequestV1,
+        cas: &Cas,
+        authority: &ActivityClaimAuthorityV1,
+        receipt_signing_key: &SigningKey,
+        receipt_signer: &ActorKeyRef,
+        review_signing_key: &SigningKey,
+        review_signer: &ActorKeyRef,
+        checkpoint_signing_key: &SigningKey,
+        checkpoint_signer: &ActorKeyRef,
+        now: DateTime<Utc>,
+    ) -> Result<GovernedV5ReviewVerdictFinalizeDispositionV1> {
+        self.finalize_governed_v5_review_verdict_v1_at(
+            request,
+            cas,
+            authority,
+            receipt_signing_key,
+            receipt_signer,
+            review_signing_key,
+            review_signer,
+            checkpoint_signing_key,
+            checkpoint_signer,
+            now,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn finalize_governed_v5_review_verdict_v1_at(
+        &self,
+        request: &GovernedV5ReviewVerdictFinalizeRequestV1,
+        cas: &Cas,
+        authority: &ActivityClaimAuthorityV1,
+        receipt_signing_key: &SigningKey,
+        receipt_signer: &ActorKeyRef,
+        review_signing_key: &SigningKey,
+        review_signer: &ActorKeyRef,
+        checkpoint_signing_key: &SigningKey,
+        checkpoint_signer: &ActorKeyRef,
+        now: DateTime<Utc>,
+    ) -> Result<GovernedV5ReviewVerdictFinalizeDispositionV1> {
+        require_protected_model_intent_realm(authority)?;
+        let lineage = require_governed_reviewer_lineage(authority)?;
+        validate_governed_action_receipt_signer(authority, receipt_signing_key, receipt_signer)?;
+        validate_governed_review_verdict_signer(
+            authority,
+            lineage,
+            receipt_signer,
+            review_signing_key,
+            review_signer,
+        )?;
+        validate_governed_reviewer_checkpoint_signer(
+            authority,
+            lineage,
+            checkpoint_signing_key,
+            checkpoint_signer,
+        )?;
+        let signed_at = canonical_ledger_timestamp(now)?;
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let action_event = load_verified_authority_event(
+            &tx,
+            request.reviewer_action_request_event_id,
+            &authority.trusted_keys,
+            &authority.action_request_signer,
+            "review verdict model action",
+        )?;
+        if action_event.run_id != request.run_id {
+            return Err(review_verdict_authority_rejected(
+                "review action belongs to a different run",
+            ));
+        }
+        let dispatch_event_id = action_event.parent_event_id.ok_or_else(|| {
+            review_verdict_authority_rejected("review action has no signed parent dispatch")
+        })?;
+        let Payload::ActionRequestedV2(action) = &action_event.payload else {
+            return Err(review_verdict_authority_rejected(
+                "review finalization requires action_requested_v2",
+            ));
+        };
+        if action.action_kind != ActionKindV1::Model
+            || !matches!(
+                action.execution_role,
+                ExecutionRoleV1::Reviewer | ExecutionRoleV1::Adversary | ExecutionRoleV1::Judge
+            )
+            || action.authority_actor != authority.action_request_signer.actor_id
+        {
+            return Err(review_verdict_authority_rejected(
+                "review finalization requires one governed read-only model action",
+            ));
+        }
+        let claim = activity_claim_by_activity_id(&tx, request.run_id, &action.action_id)?
+            .ok_or_else(|| {
+                review_verdict_authority_rejected(
+                    "review action has no native governed model lease",
+                )
+            })?;
+        if claim.action_request_event_id != request.reviewer_action_request_event_id
+            || claim.dispatch_event_id != dispatch_event_id
+        {
+            return Err(review_verdict_authority_rejected(
+                "review lease does not bind the selected signed action",
+            ));
+        }
+        let verified = verify_governed_model_claim_lineage(&tx, &claim, authority, cas)?;
+        if verified.intent.action_id != action.action_id
+            || verified.intent.action_request_event_ref != request.reviewer_action_request_event_id
+            || verified.intent.dispatch_event_ref != dispatch_event_id
+        {
+            return Err(review_verdict_authority_rejected(
+                "review intent and authorization do not bind the selected action",
+            ));
+        }
+        let issue = ModelActionIntentIssueRequestV1 {
+            run_id: request.run_id,
+            dispatch_event_id,
+            action_request_event_id: request.reviewer_action_request_event_id,
+        };
+        let intended_at = parse_claim_timestamp(&verified.intent.intended_at)
+            .map_err(|_| review_verdict_authority_rejected("review intent time is invalid"))?;
+        let issue_evidence = verify_model_action_intent_issue_evidence(
+            &tx,
+            &issue,
+            authority,
+            ModelActionIntentAuthorityLane::Reviewer,
+            intended_at,
+        )?;
+        let candidate = verify_reviewer_candidate_binding(
+            &tx,
+            cas,
+            authority,
+            &issue_evidence,
+            &verified.intent,
+        )?;
+        let action_request_digest = action_requested_v2_digest(action).map_err(|error| {
+            review_verdict_authority_rejected(format!(
+                "review action request cannot be canonicalized: {error}"
+            ))
+        })?;
+        let claim_event = load_verified_authority_event(
+            &tx,
+            claim.claim_event_id,
+            &authority.trusted_keys,
+            &authority.claim_signer,
+            "review verdict activity claim",
+        )?;
+        let result_event = unique_signed_child_event(
+            &tx,
+            request.run_id,
+            claim.claim_event_id,
+            EventKind::ActivityResultRecordedV1,
+            authority,
+            &authority.claim_signer,
+            &action.action_id,
+            "review verdict activity result",
+        )?;
+        let Payload::ActivityResultRecordedV1(result) = &result_event.payload else {
+            unreachable!("review result lookup returns ActivityResultRecordedV1")
+        };
+        let claim_event_digest = canonical_event_hash(&claim_event)?;
+        let result_event_digest = canonical_event_hash(&result_event)?;
+        let claimed_at = parse_claim_timestamp(match &claim_event.payload {
+            Payload::ActivityClaimedV1(claim) => &claim.claimed_at,
+            _ => {
+                return Err(review_verdict_authority_rejected(
+                    "review claim event has the wrong payload",
+                ))
+            }
+        })
+        .map_err(|_| review_verdict_authority_rejected("review claim time is invalid"))?;
+        let recorded_at = parse_claim_timestamp(&result.recorded_at)
+            .map_err(|_| review_verdict_authority_rejected("review result time is invalid"))?;
+        if result.run_id != request.run_id
+            || result.activity_id != action.action_id
+            || result.idempotency_key != action.idempotency_key
+            || result.claim_event_id != claim.claim_event_id
+            || result.claim_event_digest != claim_event_digest
+            || result.outcome != ActivityResultOutcomeV1::Succeeded
+            || result.result_ref.is_none()
+            || result.result_digest.is_none()
+            || result_event.parent_event_id != Some(claim.claim_event_id)
+            || recorded_at != result_event.occurred_at
+            || !tape_event_precedes(&claim_event, &result_event)
+        {
+            return Err(review_verdict_authority_rejected(
+                "review finalization requires one exact succeeded model result",
+            ));
+        }
+        let result_ref = result
+            .result_ref
+            .as_deref()
+            .expect("successful review result checked above");
+        let result_digest = result
+            .result_digest
+            .as_deref()
+            .expect("successful review result checked above");
+        let result_bytes = cas
+            .get_verified_canonical_bytes(result_ref, result_digest)
+            .map_err(|error| {
+                review_verdict_authority_rejected(format!(
+                    "review output is unavailable or corrupt: {error}"
+                ))
+            })?;
+        let output: ReviewVerdictOutputV1 =
+            serde_json::from_slice(&result_bytes).map_err(|error| {
+                review_verdict_authority_rejected(format!(
+                    "review output is not a closed ReviewVerdictOutputV1: {error}"
+                ))
+            })?;
+        if serde_json::to_vec(&output).map_err(|error| {
+            review_verdict_authority_rejected(format!(
+                "review output cannot be canonicalized: {error}"
+            ))
+        })? != result_bytes
+            || output.candidate_digest != candidate.candidate.candidate_digest
+            || output.candidate_commit_sha != candidate.candidate.candidate_commit_sha
+            || output.candidate_view_digest
+                != verified
+                    .intent
+                    .candidate_binding
+                    .as_ref()
+                    .expect("review intent binding verified above")
+                    .candidate_view_digest
+        {
+            return Err(review_verdict_authority_rejected(
+                "review output does not bind the exact accepted candidate and read-only view",
+            ));
+        }
+        let review_output_semantic_digest =
+            review_verdict_output_v1_digest(&output).map_err(|error| {
+                review_verdict_authority_rejected(format!(
+                    "review output cannot be digested: {error}"
+                ))
+            })?;
+        let input_bytes = cas
+            .get_verified_canonical_bytes(
+                &action.canonical_input_ref,
+                &action.canonical_input_digest,
+            )
+            .map_err(|error| {
+                review_verdict_authority_rejected(format!(
+                    "review canonical input is unavailable or corrupt: {error}"
+                ))
+            })?;
+        cas.get_verified_canonical_bytes(&result.evidence_ref, &result.evidence_digest)
+            .map_err(|error| {
+                review_verdict_authority_rejected(format!(
+                    "review result evidence is unavailable or corrupt: {error}"
+                ))
+            })?;
+        let completed_at = result.recorded_at.clone();
+        let wall_time_ms = recorded_at
+            .signed_duration_since(claimed_at)
+            .num_milliseconds()
+            .try_into()
+            .map_err(|_| {
+                review_verdict_authority_rejected(
+                    "review action duration is outside the supported range",
+                )
+            })?;
+        let action_receipt_ref = governed_action_receipt_ref_v1(
+            request.run_id,
+            &action.action_id,
+            &action_request_digest,
+            &result_event_digest,
+        );
+        let receipt =
+            ActionReceiptRecordedV2 {
+                run_id: action.run_id.clone(),
+                workflow_id: action.workflow_id.clone(),
+                unit_id: action.unit_id.clone(),
+                attempt: action.attempt,
+                provenance_ref: action.provenance_ref.clone(),
+                action_id: action.action_id.clone(),
+                idempotency_key: action.idempotency_key.clone(),
+                action_request_digest: action_request_digest.clone(),
+                dispatch_envelope_digest: action.dispatch_envelope_digest.clone(),
+                capability_bundle_digest: action.capability_bundle_digest.clone(),
+                policy_digest: action.policy_digest.clone(),
+                context_manifest_digest: action.context_manifest_digest.clone(),
+                worker_manifest_digest: action.worker_manifest_digest.clone(),
+                sandbox_profile_digest: action.sandbox_profile_digest.clone(),
+                authority_actor: action.authority_actor.clone(),
+                execution_role: action.execution_role,
+                outcome: ActionReceiptOutcomeV2::Succeeded,
+                result_digest: Some(result_digest.into()),
+                result_ref: Some(result_ref.into()),
+                evidence_digest: result.evidence_digest.clone(),
+                evidence_ref: result.evidence_ref.clone(),
+                resource_usage: ActionResourceUsageV1 {
+                    wall_time_ms,
+                    cpu_time_ms: None,
+                    peak_memory_bytes: None,
+                    input_bytes: Some(input_bytes.len().try_into().map_err(|_| {
+                        review_verdict_authority_rejected("review input is too large")
+                    })?),
+                    output_bytes: Some(result_bytes.len().try_into().map_err(|_| {
+                        review_verdict_authority_rejected("review output is too large")
+                    })?),
+                    input_tokens: None,
+                    output_tokens: None,
+                },
+                redactions: Vec::new(),
+                failure: None,
+                authorization_ref: Some(verified.authorization.authorization_ref.clone()),
+                action_receipt_ref,
+                completed_at: completed_at.clone(),
+            };
+        let action_receipt_digest =
+            action_receipt_recorded_v2_digest(&receipt).map_err(|error| {
+                review_verdict_authority_rejected(format!(
+                    "review receipt cannot be canonicalized: {error}"
+                ))
+            })?;
+        let model_request_bytes = cas
+            .get_verified_canonical_bytes(
+                &verified.intent.model_request_evidence.cas_ref,
+                &verified.intent.model_request_evidence.digest,
+            )
+            .map_err(|error| {
+                review_verdict_authority_rejected(format!(
+                    "review model request evidence is unavailable or corrupt: {error}"
+                ))
+            })?;
+        let model_request = parse_verified_model_request_evidence_document_v1(
+            &model_request_bytes,
+            &verified.intent.model_request_evidence,
+        )
+        .map_err(|error| {
+            review_verdict_authority_rejected(format!(
+                "review model request evidence is invalid: {error}"
+            ))
+        })?;
+        let max_total_tokens = issue_evidence
+            .dispatch
+            .body
+            .budget
+            .max_tokens
+            .and_then(|value| u32::try_from(value).ok())
+            .ok_or_else(|| {
+                review_verdict_authority_rejected(
+                    "review dispatch has no supported signed total-token budget",
+                )
+            })?;
+        let mut receipt_materials = vec![DerivedReviewSupportReceiptV1 {
+            result_event: result_event.clone(),
+            receipt: receipt.clone(),
+            receipt_digest: action_receipt_digest.clone(),
+        }];
+        if let Some(preflight) = derive_provider_preflight_review_receipt(
+            &tx,
+            cas,
+            authority,
+            request.run_id,
+            dispatch_event_id,
+            action,
+            &model_request,
+            max_total_tokens,
+        )? {
+            receipt_materials.push(preflight);
+        }
+        receipt_materials
+            .sort_by(|left, right| left.receipt.action_id.cmp(&right.receipt.action_id));
+        let entries = receipt_materials
+            .iter()
+            .map(|material| ActionReceiptSetEntryV1 {
+                action_id: material.receipt.action_id.clone(),
+                action_receipt_ref: material.receipt.action_receipt_ref.clone(),
+                action_receipt_digest: material.receipt_digest.clone(),
+            })
+            .collect::<Vec<_>>();
+        let membership_bytes = serde_json::to_vec(&entries).map_err(|error| {
+            review_verdict_authority_rejected(format!(
+                "review receipt membership cannot be canonicalized: {error}"
+            ))
+        })?;
+        let membership_digest = format!("sha256:{:x}", Sha256::digest(&membership_bytes));
+        let mut receipt_set = ActionReceiptSetRecordedV1 {
+            run_id: action.run_id.clone(),
+            workflow_id: action.workflow_id.clone(),
+            unit_id: action.unit_id.clone(),
+            attempt: action.attempt,
+            provenance_ref: action.provenance_ref.clone(),
+            dispatch_envelope_digest: action.dispatch_envelope_digest.clone(),
+            action_receipt_set_ref: governed_action_receipt_set_ref_v1(
+                request.run_id,
+                &action.dispatch_envelope_digest,
+                &membership_digest,
+            ),
+            action_receipt_set_digest: String::new(),
+            receipts: entries,
+            sealed_at: completed_at.clone(),
+        };
+        receipt_set.action_receipt_set_digest = action_receipt_set_v1_digest(&receipt_set)
+            .map_err(|error| {
+                review_verdict_authority_rejected(format!(
+                    "review receipt set cannot be canonicalized: {error}"
+                ))
+            })?;
+        let binding = verified
+            .intent
+            .candidate_binding
+            .as_ref()
+            .expect("review intent binding verified above");
+        let review_ref = format!(
+            "review:v2:{}:{}:{}",
+            request.run_id,
+            action.action_id,
+            review_output_semantic_digest
+                .strip_prefix("sha256:")
+                .expect("semantic digest is canonical")
+        );
+        let verdict = ReviewVerdictRecordedV2 {
+            run_id: candidate.candidate.run_id.clone(),
+            workflow_id: candidate.candidate.workflow_id.clone(),
+            unit_id: candidate.candidate.unit_id.clone(),
+            attempt: candidate.candidate.attempt,
+            provenance_ref: candidate.candidate.provenance_ref.clone(),
+            candidate_digest: candidate.candidate.candidate_digest.clone(),
+            candidate_commit_sha: candidate.candidate.candidate_commit_sha.clone(),
+            review_ref: review_ref.clone(),
+            review_verdict_action_id: action.action_id.clone(),
+            review_action_request_digest: action_request_digest,
+            review_action_receipt_ref: receipt.action_receipt_ref.clone(),
+            review_action_receipt_digest: action_receipt_digest,
+            review_output_ref: result_ref.into(),
+            review_output_digest: result_digest.into(),
+            review_output_semantic_digest: Some(review_output_semantic_digest),
+            decision: output.decision,
+            findings: output.findings.clone(),
+            confidence: output.confidence,
+            acceptance_ref: candidate.acceptance.acceptance_ref.clone(),
+            acceptance_digest: candidate.acceptance.acceptance_digest.clone(),
+            acceptance_contract_digest: candidate.acceptance.acceptance_contract_digest.clone(),
+            candidate_envelope_digest: candidate.candidate.envelope_digest.clone(),
+            reviewer_workflow_id: action.workflow_id.clone(),
+            reviewer_dispatch_envelope_digest: action.dispatch_envelope_digest.clone(),
+            reviewer_unit_id: action.unit_id.clone(),
+            reviewer_attempt: action.attempt,
+            reviewer_execution_role: action.execution_role,
+            review_action_receipt_set_ref: receipt_set.action_receipt_set_ref.clone(),
+            review_action_receipt_set_digest: receipt_set.action_receipt_set_digest.clone(),
+            candidate_view: binding.candidate_view.clone(),
+            candidate_view_ref: binding.candidate_view_ref.clone(),
+            candidate_view_digest: binding.candidate_view_digest.clone(),
+            reviewer_manifest_digest: action.worker_manifest_digest.clone(),
+            reviewer_authority: review_signer.actor_id.clone(),
+            reviewed_at: completed_at.clone(),
+        };
+
+        let existing_receipts = receipt_materials
+            .iter()
+            .map(|material| {
+                matching_signed_action_receipt(
+                    &tx,
+                    request.run_id,
+                    receipt_signer,
+                    authority,
+                    &material.receipt.action_id,
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let existing_set = matching_signed_action_receipt_set(
+            &tx,
+            request.run_id,
+            receipt_signer,
+            authority,
+            action,
+        )?;
+        let existing_verdict = matching_signed_review_verdict(
+            &tx,
+            request.run_id,
+            authority,
+            review_signer,
+            &action.action_id,
+        )?;
+        let mut appended_events = Vec::new();
+        let all_receipts_exist = existing_receipts.iter().all(Option::is_some);
+        let no_receipts_exist = existing_receipts.iter().all(Option::is_none);
+        let disposition = match (
+            all_receipts_exist,
+            no_receipts_exist,
+            existing_set,
+            existing_verdict,
+        ) {
+            (true, false, Some(set_event), Some(verdict_event)) => {
+                let receipt_events = existing_receipts
+                    .into_iter()
+                    .map(|event| event.expect("all existing receipts checked"))
+                    .collect::<Vec<_>>();
+                for (receipt_event, material) in receipt_events.iter().zip(&receipt_materials) {
+                    let Payload::ActionReceiptRecordedV2(existing_receipt) = &receipt_event.payload
+                    else {
+                        unreachable!("receipt matcher returns ActionReceiptRecordedV2")
+                    };
+                    if existing_receipt != &material.receipt
+                        || receipt_event.parent_event_id != Some(material.result_event.id)
+                    {
+                        return Err(review_verdict_reconciliation_required(
+                            request,
+                            "existing reviewer action receipt conflicts with reconstructed tape and CAS",
+                        ));
+                    }
+                }
+                let Payload::ActionReceiptSetRecordedV1(existing_set) = &set_event.payload else {
+                    unreachable!("set matcher returns ActionReceiptSetRecordedV1")
+                };
+                let Payload::ReviewVerdictRecordedV2(existing_verdict) = &verdict_event.payload
+                else {
+                    unreachable!("verdict matcher returns ReviewVerdictRecordedV2")
+                };
+                if existing_set != &receipt_set
+                    || existing_verdict != &verdict
+                    || set_event.parent_event_id != receipt_events.last().map(|event| event.id)
+                    || verdict_event.parent_event_id != Some(set_event.id)
+                {
+                    return Err(review_verdict_reconciliation_required(
+                        request,
+                        "existing reviewer finalization evidence conflicts with reconstructed tape and CAS",
+                    ));
+                }
+                GovernedV5ReviewVerdictFinalizeDispositionV1::Existing {
+                    review_action_receipt_event_id: receipt_events
+                        .iter()
+                        .find(|event| {
+                            matches!(
+                                &event.payload,
+                                Payload::ActionReceiptRecordedV2(existing)
+                                    if existing.action_id == action.action_id
+                            )
+                        })
+                        .expect("model receipt is part of exact set")
+                        .id,
+                    review_action_receipt_set_event_id: set_event.id,
+                    review_verdict_event_id: verdict_event.id,
+                    review_ref: verdict.review_ref.clone(),
+                    candidate_digest: verdict.candidate_digest.clone(),
+                    decision: verdict.decision,
+                }
+            }
+            (false, true, None, None) => {
+                ensure_governed_review_finalization_lifecycle_is_open(
+                    &tx,
+                    request,
+                    dispatch_event_id,
+                    &issue_evidence,
+                    &candidate.candidate,
+                )?;
+                let mut receipt_events = Vec::with_capacity(receipt_materials.len());
+                for material in &receipt_materials {
+                    let receipt_occurred_at = parse_claim_timestamp(&material.receipt.completed_at)
+                        .map_err(|_| {
+                            review_verdict_authority_rejected(
+                                "review receipt completion time is invalid",
+                            )
+                        })?;
+                    let receipt_event = canonicalize(Event {
+                        id: EventId::new(),
+                        run_id: request.run_id,
+                        parent_event_id: Some(material.result_event.id),
+                        schema_version: Event::CURRENT_SCHEMA_VERSION,
+                        kind: EventKind::ActionReceiptRecordedV2,
+                        occurred_at: receipt_occurred_at,
+                        payload: Payload::ActionReceiptRecordedV2(material.receipt.clone()),
+                    })?;
+                    validate_new_ordinary_event_id(&tx, &receipt_event)?;
+                    let receipt_signature = sign_event(
+                        &receipt_event,
+                        receipt_signing_key,
+                        receipt_signer,
+                        signed_at,
+                    )?;
+                    insert_event(&tx, &receipt_event)?;
+                    insert_event_signature(&tx, &receipt_signature)?;
+                    appended_events.push(receipt_event.clone());
+                    receipt_events.push(receipt_event);
+                }
+
+                let set_event = canonicalize(Event {
+                    id: EventId::new(),
+                    run_id: request.run_id,
+                    parent_event_id: receipt_events.last().map(|event| event.id),
+                    schema_version: Event::CURRENT_SCHEMA_VERSION,
+                    kind: EventKind::ActionReceiptSetRecordedV1,
+                    occurred_at: recorded_at,
+                    payload: Payload::ActionReceiptSetRecordedV1(receipt_set.clone()),
+                })?;
+                validate_new_ordinary_event_id(&tx, &set_event)?;
+                let set_signature =
+                    sign_event(&set_event, receipt_signing_key, receipt_signer, signed_at)?;
+                insert_event(&tx, &set_event)?;
+                insert_event_signature(&tx, &set_signature)?;
+
+                let verdict_event = canonicalize(Event {
+                    id: EventId::new(),
+                    run_id: request.run_id,
+                    parent_event_id: Some(set_event.id),
+                    schema_version: Event::CURRENT_SCHEMA_VERSION,
+                    kind: EventKind::ReviewVerdictRecordedV2,
+                    occurred_at: recorded_at,
+                    payload: Payload::ReviewVerdictRecordedV2(verdict.clone()),
+                })?;
+                validate_new_ordinary_event_id(&tx, &verdict_event)?;
+                let verdict_signature =
+                    sign_event(&verdict_event, review_signing_key, review_signer, signed_at)?;
+                insert_event(&tx, &verdict_event)?;
+                insert_event_signature(&tx, &verdict_signature)?;
+                appended_events.extend([set_event.clone(), verdict_event.clone()]);
+
+                GovernedV5ReviewVerdictFinalizeDispositionV1::Recorded {
+                    review_action_receipt_event_id: receipt_events
+                        .iter()
+                        .find(|event| {
+                            matches!(
+                                &event.payload,
+                                Payload::ActionReceiptRecordedV2(recorded)
+                                    if recorded.action_id == action.action_id
+                            )
+                        })
+                        .expect("model receipt is part of derived set")
+                        .id,
+                    review_action_receipt_set_event_id: set_event.id,
+                    review_verdict_event_id: verdict_event.id,
+                    review_ref: verdict.review_ref.clone(),
+                    candidate_digest: verdict.candidate_digest.clone(),
+                    decision: verdict.decision,
+                }
+            }
+            _ => {
+                return Err(review_verdict_reconciliation_required(
+                    request,
+                    "review finalization found a partial receipt, set, or verdict transaction",
+                ))
+            }
+        };
+        match self.seal_governed_signed_prefix_in_transaction(
+            &tx,
+            &request.run_id,
+            checkpoint_signing_key,
+            checkpoint_signer,
+        )? {
+            GovernedCheckpointSealOutcome::AlreadySealed { .. }
+            | GovernedCheckpointSealOutcome::Emitted { .. } => {}
+            GovernedCheckpointSealOutcome::EmptyPrefix => {
+                return Err(review_verdict_reconciliation_required(
+                    request,
+                    "review finalization could not seal its signed prefix",
+                ))
+            }
+        }
+        tx.commit()?;
+        for event in &appended_events {
+            self.record_ordinary_append(event);
+        }
+        Ok(disposition)
     }
 
     /// Record one immutable, non-authoritative observation shadow for a
@@ -12165,6 +12893,12 @@ struct VerifiedGovernedModelAuthorization {
     authorized_at: DateTime<Utc>,
 }
 
+#[derive(Clone, Debug)]
+struct VerifiedGovernedReviewerCandidateV1 {
+    candidate: CandidateCreatedV2,
+    acceptance: CandidateAcceptanceRecordedV1,
+}
+
 /// The admission window evaluated for one claimed governed dispatch. The
 /// window is re-derived from the signed tape at claim time; no mutable
 /// projection can move the not-before or effective-deadline boundary.
@@ -12453,6 +13187,58 @@ fn validate_governed_action_receipt_signer(
     Ok(())
 }
 
+fn validate_governed_review_verdict_signer(
+    authority: &ActivityClaimAuthorityV1,
+    lineage: &GovernedReviewerLineageAuthorityV1,
+    receipt_signer: &ActorKeyRef,
+    signing_key: &SigningKey,
+    signer: &ActorKeyRef,
+) -> Result<()> {
+    validate_trusted_actor("review verdict signer", signer)
+        .map_err(|error| review_verdict_authority_rejected(error.to_string()))?;
+    let actual_public_key_hash = public_key_hash(&signing_key.verifying_key());
+    let trusted_bytes = authority
+        .trusted_keys
+        .public_key_for(signer)
+        .ok_or_else(|| review_verdict_authority_rejected("review verdict signer is not trusted"))?;
+    if !actor_matches(signer, &lineage.review_verdict_signer)
+        || signer.public_key_hash.as_deref() != Some(actual_public_key_hash.as_str())
+        || trusted_bytes != signing_key.verifying_key().as_bytes()
+        || actor_matches(signer, receipt_signer)
+    {
+        return Err(review_verdict_authority_rejected(
+            "review verdict signer must be the distinct pinned reviewer identity",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_governed_reviewer_checkpoint_signer(
+    authority: &ActivityClaimAuthorityV1,
+    lineage: &GovernedReviewerLineageAuthorityV1,
+    signing_key: &SigningKey,
+    signer: &ActorKeyRef,
+) -> Result<()> {
+    validate_trusted_actor("review checkpoint signer", signer)
+        .map_err(|error| review_verdict_authority_rejected(error.to_string()))?;
+    let actual_public_key_hash = public_key_hash(&signing_key.verifying_key());
+    let trusted_bytes = authority
+        .trusted_keys
+        .public_key_for(signer)
+        .ok_or_else(|| {
+            review_verdict_authority_rejected("review checkpoint signer is not trusted")
+        })?;
+    if !actor_matches(signer, &lineage.checkpoint_signer)
+        || signer.public_key_hash.as_deref() != Some(actual_public_key_hash.as_str())
+        || trusted_bytes != signing_key.verifying_key().as_bytes()
+    {
+        return Err(review_verdict_authority_rejected(
+            "review checkpoint signer must be the distinct pinned checkpoint identity",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_governed_candidate_artifact_signer(
     authority: &ActivityClaimAuthorityV1,
     signing_key: &SigningKey,
@@ -12538,6 +13324,23 @@ fn action_receipt_reconciliation_required(
         run_id: run_id.to_string(),
         action_id: action_id.into(),
         reason: reason.into(),
+    }
+}
+
+fn review_verdict_authority_rejected(reason: impl Into<String>) -> LedgerError {
+    LedgerError::ActivityClaimAuthorityRejected {
+        reason: format!("review verdict authority rejected: {}", reason.into()),
+    }
+}
+
+fn review_verdict_reconciliation_required(
+    request: &GovernedV5ReviewVerdictFinalizeRequestV1,
+    reason: impl Into<String>,
+) -> LedgerError {
+    LedgerError::ActionReceiptReconciliationRequired {
+        run_id: request.run_id.to_string(),
+        action_id: request.reviewer_action_request_event_id.to_string(),
+        reason: format!("review verdict reconciliation required: {}", reason.into()),
     }
 }
 
@@ -12768,6 +13571,283 @@ fn matching_signed_action_receipt_set(
     Ok(first)
 }
 
+fn matching_signed_review_verdict(
+    conn: &Connection,
+    run_id: RunId,
+    authority: &ActivityClaimAuthorityV1,
+    review_signer: &ActorKeyRef,
+    action_id: &str,
+) -> Result<Option<Event>> {
+    let mut matching = signed_events_for_run_kind_by_signer(
+        conn,
+        run_id,
+        EventKind::ReviewVerdictRecordedV2,
+        authority,
+        review_signer,
+        "governed V5 review verdict",
+    )?
+    .into_iter()
+    .filter(|event| {
+        matches!(
+            &event.payload,
+            Payload::ReviewVerdictRecordedV2(verdict)
+                if verdict.review_verdict_action_id == action_id
+        )
+    });
+    let first = matching.next();
+    if matching.next().is_some() {
+        return Err(LedgerError::ActionReceiptReconciliationRequired {
+            run_id: run_id.to_string(),
+            action_id: action_id.into(),
+            reason: "multiple signed review verdicts name the same model action".into(),
+        });
+    }
+    Ok(first)
+}
+
+#[derive(Clone, Debug)]
+struct DerivedReviewSupportReceiptV1 {
+    result_event: Event,
+    receipt: ActionReceiptRecordedV2,
+    receipt_digest: String,
+}
+
+fn derive_provider_preflight_review_receipt(
+    conn: &Connection,
+    cas: &Cas,
+    authority: &ActivityClaimAuthorityV1,
+    run_id: RunId,
+    dispatch_event_id: EventId,
+    model_action: &ActionRequestedV2,
+    model_request: &VerifiedModelRequestEvidenceDocumentV1,
+    max_total_tokens: u32,
+) -> Result<Option<DerivedReviewSupportReceiptV1>> {
+    let expected_action_id = format!("{}:provider-token-preflight", model_action.action_id);
+    let mut matching = verified_authority_events_for_run_kind(
+        conn,
+        run_id,
+        EventKind::ActionRequestedV2,
+        authority,
+        &authority.action_request_signer,
+        "review provider preflight action",
+    )?
+    .into_iter()
+    .filter(|event| {
+        matches!(
+            &event.payload,
+            Payload::ActionRequestedV2(action) if action.action_id == expected_action_id
+        )
+    });
+    let Some(action_event) = matching.next() else {
+        return Ok(None);
+    };
+    if matching.next().is_some() {
+        return Err(review_verdict_authority_rejected(
+            "review provider preflight has duplicate signed action requests",
+        ));
+    }
+    let Payload::ActionRequestedV2(action) = &action_event.payload else {
+        unreachable!("preflight action scan returns ActionRequestedV2")
+    };
+    if action_event.parent_event_id != Some(dispatch_event_id)
+        || action.idempotency_key != expected_action_id
+        || action.action_kind != ActionKindV1::Network
+        || action.workflow_id != model_action.workflow_id
+        || action.unit_id != model_action.unit_id
+        || action.attempt != model_action.attempt
+        || action.execution_role != model_action.execution_role
+        || action.dispatch_envelope_digest != model_action.dispatch_envelope_digest
+    {
+        return Err(review_verdict_authority_rejected(
+            "review provider preflight does not bind the exact reviewer dispatch and model action",
+        ));
+    }
+    let input_bytes = cas
+        .get_verified_canonical_bytes(&action.canonical_input_ref, &action.canonical_input_digest)
+        .map_err(|error| {
+            review_verdict_authority_rejected(format!(
+                "review provider preflight input is unavailable or corrupt: {error}"
+            ))
+        })?;
+    let input = parse_verified_provider_token_preflight_input_v1(
+        &input_bytes,
+        &action.canonical_input_ref,
+        &action.canonical_input_digest,
+        model_request,
+    )
+    .map_err(|error| {
+        review_verdict_authority_rejected(format!(
+            "review provider preflight input is invalid: {error}"
+        ))
+    })?;
+    if input.document().max_total_tokens != max_total_tokens {
+        return Err(review_verdict_authority_rejected(
+            "review provider preflight does not bind the signed token budget",
+        ));
+    }
+    let claim =
+        activity_claim_by_activity_id(conn, run_id, &expected_action_id)?.ok_or_else(|| {
+            review_verdict_authority_rejected(
+                "review provider preflight has no signed activity claim",
+            )
+        })?;
+    let signed_claim = verify_signed_claim_projection(conn, &claim, authority)?;
+    if signed_claim.purpose != ActivityClaimPurposeV1::Generic
+        || signed_claim.action_kind != ActionKindV1::Network
+        || claim.action_request_event_id != action_event.id
+        || claim.dispatch_event_id != dispatch_event_id
+        || claim.activity_id != expected_action_id
+        || claim.idempotency_key != expected_action_id
+    {
+        return Err(review_verdict_authority_rejected(
+            "review provider preflight claim does not bind its signed network action",
+        ));
+    }
+    let result_event = unique_signed_child_event(
+        conn,
+        run_id,
+        claim.claim_event_id,
+        EventKind::ActivityResultRecordedV1,
+        authority,
+        &authority.claim_signer,
+        &expected_action_id,
+        "review provider preflight result",
+    )?;
+    let Payload::ActivityResultRecordedV1(result) = &result_event.payload else {
+        unreachable!("preflight result scan returns ActivityResultRecordedV1")
+    };
+    let claim_event = load_verified_authority_event(
+        conn,
+        claim.claim_event_id,
+        &authority.trusted_keys,
+        &authority.claim_signer,
+        "review provider preflight claim",
+    )?;
+    let claim_event_digest = canonical_event_hash(&claim_event)?;
+    let claimed_at = parse_claim_timestamp(&signed_claim.claimed_at)
+        .map_err(|_| review_verdict_authority_rejected("preflight claim time is invalid"))?;
+    let recorded_at = parse_claim_timestamp(&result.recorded_at)
+        .map_err(|_| review_verdict_authority_rejected("preflight result time is invalid"))?;
+    if result.run_id != run_id
+        || result.activity_id != expected_action_id
+        || result.idempotency_key != expected_action_id
+        || result.claim_event_id != claim.claim_event_id
+        || result.claim_event_digest != claim_event_digest
+        || result.outcome != ActivityResultOutcomeV1::Succeeded
+        || result.result_ref.is_none()
+        || result.result_digest.is_none()
+        || recorded_at != result_event.occurred_at
+        || !tape_event_precedes(&claim_event, &result_event)
+    {
+        return Err(review_verdict_authority_rejected(
+            "review provider preflight requires one exact succeeded result",
+        ));
+    }
+    let result_ref = result
+        .result_ref
+        .as_deref()
+        .expect("succeeded preflight result checked above");
+    let result_digest = result
+        .result_digest
+        .as_deref()
+        .expect("succeeded preflight result checked above");
+    let result_bytes = cas
+        .get_verified_canonical_bytes(result_ref, result_digest)
+        .map_err(|error| {
+            review_verdict_authority_rejected(format!(
+                "review provider preflight result is unavailable or corrupt: {error}"
+            ))
+        })?;
+    parse_verified_provider_token_preflight_result_v1(
+        &result_bytes,
+        result_ref,
+        result_digest,
+        &input,
+    )
+    .map_err(|error| {
+        review_verdict_authority_rejected(format!(
+            "review provider preflight result is invalid: {error}"
+        ))
+    })?;
+    let _evidence_bytes = cas
+        .get_verified_canonical_bytes(&result.evidence_ref, &result.evidence_digest)
+        .map_err(|error| {
+            review_verdict_authority_rejected(format!(
+                "review provider preflight evidence is unavailable or corrupt: {error}"
+            ))
+        })?;
+    let action_request_digest = action_requested_v2_digest(action).map_err(|error| {
+        review_verdict_authority_rejected(format!(
+            "review provider preflight action cannot be canonicalized: {error}"
+        ))
+    })?;
+    let result_event_digest = canonical_event_hash(&result_event)?;
+    let receipt = ActionReceiptRecordedV2 {
+        run_id: action.run_id.clone(),
+        workflow_id: action.workflow_id.clone(),
+        unit_id: action.unit_id.clone(),
+        attempt: action.attempt,
+        provenance_ref: action.provenance_ref.clone(),
+        action_id: action.action_id.clone(),
+        idempotency_key: action.idempotency_key.clone(),
+        action_request_digest: action_request_digest.clone(),
+        dispatch_envelope_digest: action.dispatch_envelope_digest.clone(),
+        capability_bundle_digest: action.capability_bundle_digest.clone(),
+        policy_digest: action.policy_digest.clone(),
+        context_manifest_digest: action.context_manifest_digest.clone(),
+        worker_manifest_digest: action.worker_manifest_digest.clone(),
+        sandbox_profile_digest: action.sandbox_profile_digest.clone(),
+        authority_actor: action.authority_actor.clone(),
+        execution_role: action.execution_role,
+        outcome: ActionReceiptOutcomeV2::Succeeded,
+        result_digest: Some(result_digest.into()),
+        result_ref: Some(result_ref.into()),
+        evidence_digest: result.evidence_digest.clone(),
+        evidence_ref: result.evidence_ref.clone(),
+        resource_usage: ActionResourceUsageV1 {
+            wall_time_ms: recorded_at
+                .signed_duration_since(claimed_at)
+                .num_milliseconds()
+                .try_into()
+                .map_err(|_| {
+                    review_verdict_authority_rejected(
+                        "review provider preflight duration is outside the supported range",
+                    )
+                })?,
+            cpu_time_ms: None,
+            peak_memory_bytes: None,
+            input_bytes: Some(input_bytes.len().try_into().map_err(|_| {
+                review_verdict_authority_rejected("review provider preflight input is too large")
+            })?),
+            output_bytes: Some(result_bytes.len().try_into().map_err(|_| {
+                review_verdict_authority_rejected("review provider preflight result is too large")
+            })?),
+            input_tokens: None,
+            output_tokens: None,
+        },
+        redactions: Vec::new(),
+        failure: None,
+        authorization_ref: None,
+        action_receipt_ref: governed_action_receipt_ref_v1(
+            run_id,
+            &action.action_id,
+            &action_request_digest,
+            &result_event_digest,
+        ),
+        completed_at: result.recorded_at.clone(),
+    };
+    let receipt_digest = action_receipt_recorded_v2_digest(&receipt).map_err(|error| {
+        review_verdict_authority_rejected(format!(
+            "review provider preflight receipt cannot be canonicalized: {error}"
+        ))
+    })?;
+    Ok(Some(DerivedReviewSupportReceiptV1 {
+        result_event,
+        receipt,
+        receipt_digest,
+    }))
+}
+
 fn require_protected_governed_realm(authority: &ActivityClaimAuthorityV1) -> Result<()> {
     if authority.ledger_authority_realm_digest.is_none() {
         return Err(LedgerError::ActivityClaimAuthorityRejected {
@@ -12792,7 +13872,7 @@ fn require_governed_reviewer_lineage(
     require_protected_model_intent_realm(authority)?;
     authority.governed_reviewer_lineage.as_ref().ok_or_else(|| {
         LedgerError::ModelActionIntentAuthorityRejected {
-            reason: "governed reviewer authority requires pinned candidate, acceptance, and checkpoint identities"
+            reason: "governed reviewer authority requires pinned candidate, acceptance, review-verdict, and checkpoint identities"
                 .into(),
         }
     })
@@ -15121,7 +16201,7 @@ fn adopt_signed_reviewer_model_action_intent_v1_in_tx(
                 .into(),
         });
     }
-    verify_reviewer_candidate_binding(conn, cas, authority, &evidence, &intent)?;
+    let _ = verify_reviewer_candidate_binding(conn, cas, authority, &evidence, &intent)?;
     verify_model_action_intent_evidence_documents(
         cas,
         request,
@@ -15158,7 +16238,7 @@ fn verify_reviewer_candidate_binding(
     authority: &ActivityClaimAuthorityV1,
     evidence: &VerifiedModelActionIntentIssueEvidence,
     intent: &ModelActionIntentV1,
-) -> Result<()> {
+) -> Result<VerifiedGovernedReviewerCandidateV1> {
     let reviewer_lineage = authority.governed_reviewer_lineage.as_ref();
     let candidate_signer = reviewer_lineage
         .map(|lineage| &lineage.candidate_artifact_signer)
@@ -15183,7 +16263,7 @@ fn verify_reviewer_candidate_binding(
             reason: "reviewer candidate artifact belongs to a different run".into(),
         });
     }
-    let Payload::CandidateCreatedV2(candidate) = candidate_event.payload else {
+    let Payload::CandidateCreatedV2(candidate) = &candidate_event.payload else {
         return Err(LedgerError::ModelActionIntentAuthorityRejected {
             reason: "reviewer candidate binding does not reference candidate_created_v2".into(),
         });
@@ -15327,7 +16407,11 @@ fn verify_reviewer_candidate_binding(
             reason: "reviewer candidate view object does not equal the signed closed view".into(),
         });
     }
-    Ok(())
+    let candidate = candidate.clone();
+    Ok(VerifiedGovernedReviewerCandidateV1 {
+        candidate,
+        acceptance: acceptance.clone(),
+    })
 }
 
 fn verified_authority_events_for_run_kind(
@@ -15439,16 +16523,19 @@ mod governed_reviewer_lineage_checkpoint_tests {
         let candidate_key = SigningKey::from_bytes(&[72; 32]);
         let acceptance_key = SigningKey::from_bytes(&[73; 32]);
         let checkpoint_key = SigningKey::from_bytes(&[74; 32]);
+        let review_key = SigningKey::from_bytes(&[75; 32]);
         let claim_signer = test_actor(&claim_key, "claim");
         let candidate_signer = test_actor(&candidate_key, "candidate");
         let acceptance_signer = test_actor(&acceptance_key, "acceptance");
         let checkpoint_signer = test_actor(&checkpoint_key, "checkpoint");
+        let review_signer = test_actor(&review_key, "review");
         let mut trusted_keys = TrustedPublicKeys::default();
         for (signer, key) in [
             (&claim_signer, &claim_key),
             (&candidate_signer, &candidate_key),
             (&acceptance_signer, &acceptance_key),
             (&checkpoint_signer, &checkpoint_key),
+            (&review_signer, &review_key),
         ] {
             trusted_keys.insert_public_key(
                 signer
@@ -15469,6 +16556,7 @@ mod governed_reviewer_lineage_checkpoint_tests {
         .with_governed_reviewer_lineage(
             candidate_signer,
             acceptance_signer.clone(),
+            review_signer,
             checkpoint_signer.clone(),
         )
         .expect("bind reviewer lineage");
@@ -15587,6 +16675,84 @@ fn ensure_model_action_intent_lifecycle_is_open(
             return Err(model_action_intent_evidence_rejected_message(format!(
                 "cannot issue model action intent because {reason} (event {})",
                 event.id
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Refuse to turn a completed reviewer provider activity into promotion
+/// authority after the bound workflow attempt has been cancelled or
+/// terminalized. The exact-idempotent retry path is resolved before this
+/// check, so a previously sealed verdict remains recoverable without allowing
+/// a late first verdict to advance a closed workflow.
+fn ensure_governed_review_finalization_lifecycle_is_open(
+    conn: &Connection,
+    request: &GovernedV5ReviewVerdictFinalizeRequestV1,
+    dispatch_event_id: EventId,
+    evidence: &VerifiedModelActionIntentIssueEvidence,
+    candidate: &CandidateCreatedV2,
+) -> Result<()> {
+    let mut statement = conn.prepare(
+        "SELECT id, run_id, parent_event_id, schema_version, kind, occurred_at, payload \
+         FROM events \
+         WHERE run_id = ?1 \
+           AND kind IN ( \
+             'workflow_cancellation_requested_v1', \
+             'workflow_terminal', \
+             'workflow_terminal_v2' \
+           ) \
+         ORDER BY id ASC",
+    )?;
+    let rows = statement.query_map(params![request.run_id.to_string()], |row| {
+        Ok(StoredEventRow {
+            id: row.get(0)?,
+            run_id: row.get(1)?,
+            parent_event_id: row.get(2)?,
+            schema_version: row.get(3)?,
+            kind: row.get(4)?,
+            occurred_at: row.get(5)?,
+            payload: row.get(6)?,
+        })
+    })?;
+    for row in rows {
+        let event = row?.to_event()?;
+        let conflict = match &event.payload {
+            Payload::WorkflowCancellationRequestedV1(cancellation)
+                if cancellation.run_id == request.run_id.to_string()
+                    && cancellation.workflow_id == evidence.dispatch.body.workflow_id
+                    && cancellation.workflow_revision
+                        == evidence.dispatch.body.workflow_revision
+                    && cancellation.unit_id == evidence.dispatch.body.unit_id
+                    && cancellation.attempt == evidence.dispatch.body.attempt
+                    && cancellation.dispatch_event_ref == dispatch_event_id
+                    && cancellation.dispatch_envelope_digest
+                        == evidence.dispatch_envelope_digest =>
+            {
+                Some("a workflow cancellation was already requested")
+            }
+            Payload::WorkflowTerminalV1(terminal)
+                if terminal.workflow_id == evidence.dispatch.body.workflow_id
+                    && terminal.workflow_revision == evidence.dispatch.body.workflow_revision
+                    && terminal.unit_id == evidence.dispatch.body.unit_id
+                    && terminal.attempt == evidence.dispatch.body.attempt =>
+            {
+                Some("the workflow already has a terminal record")
+            }
+            Payload::WorkflowTerminalV2(terminal)
+                if terminal.workflow_id == evidence.dispatch.body.workflow_id
+                    && terminal.workflow_revision == evidence.dispatch.body.workflow_revision
+                    && terminal.unit_id == evidence.dispatch.body.unit_id
+                    && terminal.attempt == evidence.dispatch.body.attempt =>
+            {
+                Some("the workflow already has a terminal record")
+            }
+            _ => None,
+        };
+        if let Some(conflict) = conflict {
+            return Err(review_verdict_authority_rejected(format!(
+                "review finalization cannot advance closed workflow lifecycle evidence: {conflict} (event {}, candidate {})",
+                event.id, candidate.candidate_digest
             )));
         }
     }

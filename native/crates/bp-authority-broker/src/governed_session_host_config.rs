@@ -53,6 +53,7 @@ pub(crate) struct GovernedSessionHostConfigV1 {
     pub(crate) action_receipt_signer: ActorKeyRef,
     pub(crate) candidate_artifact_signer: ActorKeyRef,
     pub(crate) candidate_acceptance_signer: ActorKeyRef,
+    pub(crate) review_verdict_signer: ActorKeyRef,
     pub(crate) broker_identity_signer: ActorKeyRef,
     pub(crate) activity_authority: ActivityClaimAuthorityV1,
     pub(crate) v5_admission_authority: GovernedDispatchV5AdmissionAuthorityV1,
@@ -89,6 +90,7 @@ struct RawGovernedSessionHostConfigV1 {
     action_receipt: RawSignerV1,
     candidate_artifact: RawSignerV1,
     candidate_acceptance: RawSignerV1,
+    review_verdict: RawSignerV1,
     broker_identity: RawSignerV1,
 }
 
@@ -181,6 +183,7 @@ pub(crate) fn parse_governed_session_host_config_v1(
     let action_receipt = parse_signer(raw.action_receipt)?;
     let candidate_artifact = parse_signer(raw.candidate_artifact)?;
     let candidate_acceptance = parse_signer(raw.candidate_acceptance)?;
+    let review_verdict = parse_signer(raw.review_verdict)?;
     let broker_identity = parse_signer(raw.broker_identity)?;
     let signers = [
         &dispatch,
@@ -191,6 +194,7 @@ pub(crate) fn parse_governed_session_host_config_v1(
         &action_receipt,
         &candidate_artifact,
         &candidate_acceptance,
+        &review_verdict,
         &broker_identity,
     ];
     let mut actor_ids = BTreeSet::new();
@@ -223,6 +227,7 @@ pub(crate) fn parse_governed_session_host_config_v1(
     let action_receipt_signer = action_receipt.identity;
     let candidate_artifact_signer = candidate_artifact.identity;
     let candidate_acceptance_signer = candidate_acceptance.identity;
+    let review_verdict_signer = review_verdict.identity;
     let broker_identity_signer = broker_identity.identity;
     let activity_authority = ActivityClaimAuthorityV1::new_governed_realm(
         trusted_keys.clone(),
@@ -235,6 +240,7 @@ pub(crate) fn parse_governed_session_host_config_v1(
         authority.with_governed_reviewer_lineage(
             candidate_artifact_signer.clone(),
             candidate_acceptance_signer.clone(),
+            review_verdict_signer.clone(),
             v5_admission_checkpoint_signer.clone(),
         )
     })
@@ -261,6 +267,10 @@ pub(crate) fn parse_governed_session_host_config_v1(
     ] {
         replay_authorities.allow_signer(TrustSpineSignerRole::Kernel, signer);
     }
+    replay_authorities.allow_signer(
+        TrustSpineSignerRole::Reviewer,
+        review_verdict_signer.clone(),
+    );
 
     let confinement_policy = BrokerHostConfinementPolicyV1::new_for_role(
         raw.broker_uid,
@@ -296,6 +306,7 @@ pub(crate) fn parse_governed_session_host_config_v1(
         action_receipt_signer,
         candidate_artifact_signer,
         candidate_acceptance_signer,
+        review_verdict_signer,
         broker_identity_signer,
         activity_authority,
         v5_admission_authority,
@@ -462,6 +473,7 @@ mod tests {
                 "candidate-acceptance-main",
                 9
             ),
+            "review_verdict": signer("reviewer:verdict", "review-verdict-main", 10),
             "broker_identity": signer("broker:governed-session", "broker-main", 4),
         })
     }
@@ -499,6 +511,14 @@ mod tests {
         );
         assert_ne!(
             config.candidate_acceptance_signer,
+            config.v5_admission_checkpoint_signer
+        );
+        assert_ne!(
+            config.candidate_acceptance_signer,
+            config.review_verdict_signer
+        );
+        assert_ne!(
+            config.review_verdict_signer,
             config.v5_admission_checkpoint_signer
         );
         assert_ne!(config.action_receipt_signer, config.broker_identity_signer);
@@ -561,6 +581,10 @@ mod tests {
             ("candidate_acceptance", "claim"),
             ("candidate_acceptance", "action_receipt"),
             ("candidate_acceptance", "broker_identity"),
+            ("candidate_acceptance", "review_verdict"),
+            ("review_verdict", "v5_admission_checkpoint"),
+            ("review_verdict", "action_receipt"),
+            ("review_verdict", "broker_identity"),
             ("claim", "candidate_artifact"),
             ("action_request", "candidate_artifact"),
             ("dispatch", "candidate_artifact"),

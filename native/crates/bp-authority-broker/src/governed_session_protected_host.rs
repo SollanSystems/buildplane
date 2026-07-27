@@ -77,7 +77,8 @@ use bp_ledger::storage::sqlite::{
     GovernedV5CandidateFinalizeAuthorizeAndClaimRequestV1,
     GovernedV5CandidateFinalizeResultRequestV1, GovernedV5CandidateReceiptSetDispositionV1,
     GovernedV5CandidateReceiptSetRequestV1, GovernedV5CommandActionIssueRequestV1,
-    GovernedV5CommandActionReceiptRequestV1, ResolveGovernedV5CandidateAuthorityRequestV1,
+    GovernedV5CommandActionReceiptRequestV1, GovernedV5ReviewVerdictFinalizeRequestV1,
+    ResolveGovernedV5CandidateAuthorityRequestV1,
 };
 use bp_provider_anthropic::{AnthropicHttpTransportV1, AnthropicProvider};
 use bp_provider_sdk::{
@@ -837,14 +838,35 @@ impl ProtectedGovernedSessionHostStateV1 {
             &config.claim_signer,
         )
         .map_err(|_| ProtectedGovernedSessionProviderErrorV1::TrustedReplay)?;
-        execute_governed_reviewer_run_v1(
+        let status = execute_governed_reviewer_run_v1(
             &execution_snapshot,
             &self.signing_keys.broker_identity().verifying_key(),
             recovery_ref,
             session_ref,
             &mut authority,
         )
-        .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)
+        .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)?;
+        if status == BrokerModelActionStatus::Recorded {
+            self.ledger
+                .store()
+                .finalize_governed_v5_review_verdict_v1(
+                    &GovernedV5ReviewVerdictFinalizeRequestV1 {
+                        run_id: config.run_id,
+                        reviewer_action_request_event_id: evidence
+                            .reviewer_action_request_event_ref,
+                    },
+                    self.cas.cas(),
+                    &config.activity_authority,
+                    self.signing_keys.action_receipt(),
+                    &config.action_receipt_signer,
+                    self.signing_keys.review_verdict(),
+                    &config.review_verdict_signer,
+                    self.signing_keys.checkpoint(),
+                    &config.v5_admission_checkpoint_signer,
+                )
+                .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)?;
+        }
+        Ok(status)
     }
 
     fn authorize_client_request(
@@ -1116,6 +1138,7 @@ mod tests {
         receipt_seed: [u8; 32],
         candidate_seed: [u8; 32],
         acceptance_seed: [u8; 32],
+        review_seed: [u8; 32],
         broker_identity_seed: [u8; 32],
     }
 
@@ -1135,6 +1158,7 @@ mod tests {
                 receipt_seed: [37; 32],
                 candidate_seed: [38; 32],
                 acceptance_seed: [39; 32],
+                review_seed: [40; 32],
                 broker_identity_seed: [34; 32],
             };
             fixture.install();
@@ -1167,6 +1191,11 @@ mod tests {
                 &["kernel", "candidate-acceptance"],
                 "candidate-acceptance-main",
                 &self.acceptance_seed,
+            );
+            self.write_key(
+                &["reviewer", "verdict"],
+                "review-verdict-main",
+                &self.review_seed,
             );
             self.write_key(
                 &["broker", "governed-session"],
@@ -1268,6 +1297,11 @@ mod tests {
                     "kernel:candidate-acceptance",
                     "candidate-acceptance-main",
                     self.acceptance_seed
+                ),
+                "review_verdict": signer(
+                    "reviewer:verdict",
+                    "review-verdict-main",
+                    self.review_seed
                 ),
                 "broker_identity": signer(
                     "broker:governed-session",
