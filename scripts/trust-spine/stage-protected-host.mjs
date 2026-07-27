@@ -25,6 +25,20 @@ const UNIT_DIRECTORY = join(
 const FILES = Object.freeze([
 	Object.freeze({
 		sourceKind: "binary",
+		sourceName: "buildplane-authority-client",
+		path: "libexec/buildplane-authority-client",
+		installPath: "/usr/libexec/buildplane/buildplane-authority-client",
+		mode: 0o755,
+	}),
+	Object.freeze({
+		sourceKind: "binary",
+		sourceName: "buildplane-authority-host",
+		path: "libexec/buildplane-authority-host",
+		installPath: "/usr/libexec/buildplane/buildplane-authority-host",
+		mode: 0o755,
+	}),
+	Object.freeze({
+		sourceKind: "binary",
 		sourceName: "buildplane-governed-session-client",
 		path: "libexec/buildplane-governed-session-client",
 		installPath: "/usr/libexec/buildplane/buildplane-governed-session-client",
@@ -36,6 +50,43 @@ const FILES = Object.freeze([
 		path: "libexec/buildplane-governed-session-host",
 		installPath: "/usr/libexec/buildplane/buildplane-governed-session-host",
 		mode: 0o755,
+	}),
+	Object.freeze({
+		sourceKind: "binary",
+		sourceName: "buildplane-promotion-execution-host",
+		path: "libexec/buildplane-promotion-execution-host",
+		installPath: "/usr/libexec/buildplane/buildplane-promotion-execution-host",
+		mode: 0o755,
+	}),
+	Object.freeze({
+		sourceKind: "binary",
+		sourceName: "buildplane-v5-dispatch-admission-client",
+		path: "libexec/buildplane-v5-dispatch-admission-client",
+		installPath:
+			"/usr/libexec/buildplane/buildplane-v5-dispatch-admission-client",
+		mode: 0o755,
+	}),
+	Object.freeze({
+		sourceKind: "binary",
+		sourceName: "buildplane-v5-dispatch-admission-host",
+		path: "libexec/buildplane-v5-dispatch-admission-host",
+		installPath:
+			"/usr/libexec/buildplane/buildplane-v5-dispatch-admission-host",
+		mode: 0o755,
+	}),
+	Object.freeze({
+		sourceKind: "unit",
+		sourceName: "buildplane-authority-host.service",
+		path: "systemd/buildplane-authority-host.service",
+		installPath: "/usr/lib/systemd/system/buildplane-authority-host.service",
+		mode: 0o644,
+	}),
+	Object.freeze({
+		sourceKind: "unit",
+		sourceName: "buildplane-authority-host.socket",
+		path: "systemd/buildplane-authority-host.socket",
+		installPath: "/usr/lib/systemd/system/buildplane-authority-host.socket",
+		mode: 0o644,
 	}),
 	Object.freeze({
 		sourceKind: "unit",
@@ -51,6 +102,38 @@ const FILES = Object.freeze([
 		path: "systemd/buildplane-governed-session-host.socket",
 		installPath:
 			"/usr/lib/systemd/system/buildplane-governed-session-host.socket",
+		mode: 0o644,
+	}),
+	Object.freeze({
+		sourceKind: "unit",
+		sourceName: "buildplane-promotion-execution-host.service",
+		path: "systemd/buildplane-promotion-execution-host.service",
+		installPath:
+			"/usr/lib/systemd/system/buildplane-promotion-execution-host.service",
+		mode: 0o644,
+	}),
+	Object.freeze({
+		sourceKind: "unit",
+		sourceName: "buildplane-promotion-execution-host.socket",
+		path: "systemd/buildplane-promotion-execution-host.socket",
+		installPath:
+			"/usr/lib/systemd/system/buildplane-promotion-execution-host.socket",
+		mode: 0o644,
+	}),
+	Object.freeze({
+		sourceKind: "unit",
+		sourceName: "buildplane-v5-dispatch-admission-host.service",
+		path: "systemd/buildplane-v5-dispatch-admission-host.service",
+		installPath:
+			"/usr/lib/systemd/system/buildplane-v5-dispatch-admission-host.service",
+		mode: 0o644,
+	}),
+	Object.freeze({
+		sourceKind: "unit",
+		sourceName: "buildplane-v5-dispatch-admission-host.socket",
+		path: "systemd/buildplane-v5-dispatch-admission-host.socket",
+		installPath:
+			"/usr/lib/systemd/system/buildplane-v5-dispatch-admission-host.socket",
 		mode: 0o644,
 	}),
 ]);
@@ -122,7 +205,7 @@ export function stageProtectedHostBundleV1(input) {
 		`${JSON.stringify(
 			{
 				schemaVersion: 1,
-				artifact: "buildplane-protected-governed-session-host",
+				artifact: "buildplane-protected-trust-spine-host",
 				files: manifestFiles,
 			},
 			null,

@@ -8,6 +8,10 @@ use crate::promotion_decision_response::{
     verify_promotion_decision_response, PromotionDecisionResponseBindingV1,
     PromotionDecisionResponseStatusV1,
 };
+use crate::promotion_execution_response::{
+    verify_promotion_execution_response, PromotionExecutionResponseBindingV1,
+    PromotionExecutionResponseStatusV1,
+};
 use ed25519_dalek::VerifyingKey;
 use serde::Deserialize;
 #[cfg(target_os = "linux")]
@@ -44,11 +48,17 @@ const PROTECTED_CLIENT_CONFIG_PARENT_COMPONENTS: [&[u8]; 3] =
 #[cfg(target_os = "linux")]
 const PROTECTED_CLIENT_CONFIG_FILE_NAME: &[u8] = b"promotion-decision-client-v1.json";
 #[cfg(target_os = "linux")]
+const PROTECTED_EXECUTION_CLIENT_CONFIG_FILE_NAME: &[u8] = b"promotion-execution-client-v1.json";
+#[cfg(target_os = "linux")]
 const AUTHORITY_SOCKET_PARENT_COMPONENTS: [&[u8]; 3] = [b"run", b"buildplane", b"authority-host"];
 #[cfg(target_os = "linux")]
 const AUTHORITY_SOCKET_FILE_NAME: &[u8] = b"promotion-decision-v1.sock";
 #[cfg(target_os = "linux")]
+const EXECUTION_SOCKET_FILE_NAME: &[u8] = b"promotion-execution-v1.sock";
+#[cfg(target_os = "linux")]
 const AUTHORITY_SOCKET_PATH: &str = "/run/buildplane/authority-host/promotion-decision-v1.sock";
+#[cfg(target_os = "linux")]
+const EXECUTION_SOCKET_PATH: &str = "/run/buildplane/authority-host/promotion-execution-v1.sock";
 #[cfg(target_os = "linux")]
 const INSTALLED_CLIENT_PARENT_COMPONENTS: [&[u8]; 3] = [b"usr", b"libexec", b"buildplane"];
 #[cfg(target_os = "linux")]
@@ -76,10 +86,30 @@ struct ClientRequestWireV1 {
     decision: String,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PromotionExecutionClientRequestWireV1 {
+    schema_version: u8,
+    operation: String,
+    promotion_decision_event_id: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PromotionDecisionClientRequestV1 {
     promotion_approval_request_event_id: String,
     decision: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PromotionExecutionClientRequestV1 {
+    promotion_decision_event_id: String,
+}
+
+impl PromotionExecutionClientRequestV1 {
+    #[cfg(test)]
+    pub(crate) fn promotion_decision_event_id(&self) -> &str {
+        &self.promotion_decision_event_id
+    }
 }
 
 impl PromotionDecisionClientRequestV1 {
@@ -108,6 +138,22 @@ pub(crate) fn parse_client_request_stdin(
     Ok(PromotionDecisionClientRequestV1 {
         promotion_approval_request_event_id: wire.promotion_approval_request_event_id,
         decision: wire.decision,
+    })
+}
+
+pub(crate) fn parse_promotion_execution_client_request_stdin(
+    bytes: &[u8],
+) -> Result<PromotionExecutionClientRequestV1, PromotionDecisionClientErrorV1> {
+    let wire: PromotionExecutionClientRequestWireV1 =
+        serde_json::from_slice(bytes).map_err(|_| PromotionDecisionClientErrorV1::InvalidInput)?;
+    if wire.schema_version != 1
+        || wire.operation != "execute_promotion"
+        || !is_canonical_uuid(&wire.promotion_decision_event_id)
+    {
+        return Err(PromotionDecisionClientErrorV1::InvalidInput);
+    }
+    Ok(PromotionExecutionClientRequestV1 {
+        promotion_decision_event_id: wire.promotion_decision_event_id,
     })
 }
 
@@ -345,6 +391,7 @@ pub(crate) fn validate_connected_listener_creator_for_test(
     validate_connected_listener_creator(stream, expected_listener_creator_uid)
 }
 
+#[cfg(test)]
 pub(crate) fn encode_promotion_decision_request_frame(
     request: &PromotionDecisionClientRequestV1,
 ) -> Result<Vec<u8>, PromotionDecisionClientErrorV1> {
@@ -352,6 +399,11 @@ pub(crate) fn encode_promotion_decision_request_frame(
 }
 
 struct EncodedPromotionDecisionRequestV1 {
+    request_id: String,
+    frame: Vec<u8>,
+}
+
+struct EncodedPromotionExecutionRequestV1 {
     request_id: String,
     frame: Vec<u8>,
 }
@@ -373,9 +425,42 @@ fn encode_promotion_decision_request_frame_with_id(
     Ok(EncodedPromotionDecisionRequestV1 { request_id, frame })
 }
 
+#[cfg(test)]
+pub(crate) fn encode_promotion_execution_request_frame(
+    request: &PromotionExecutionClientRequestV1,
+) -> Result<Vec<u8>, PromotionDecisionClientErrorV1> {
+    encode_promotion_execution_request_frame_with_id(request).map(|encoded| encoded.frame)
+}
+
+fn encode_promotion_execution_request_frame_with_id(
+    request: &PromotionExecutionClientRequestV1,
+) -> Result<EncodedPromotionExecutionRequestV1, PromotionDecisionClientErrorV1> {
+    let request_id = Uuid::now_v7().hyphenated().to_string();
+    let payload = format!(
+        r#"{{"request_id":"{request_id}","promotion_decision_event_id":"{}"}}"#,
+        request.promotion_decision_event_id
+    );
+    if payload.is_empty() || payload.len() > MAX_PROMOTION_DECISION_REQUEST_FRAME_BYTES {
+        return Err(PromotionDecisionClientErrorV1::InvalidInput);
+    }
+    let mut frame = Vec::with_capacity(4 + payload.len());
+    frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    frame.extend_from_slice(payload.as_bytes());
+    Ok(EncodedPromotionExecutionRequestV1 { request_id, frame })
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum PromotionDecisionClientStatusV1 {
     Sealed { promotion_decision_event_id: String },
+    ReconciliationRequired,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PromotionExecutionClientStatusV1 {
+    Rejected,
+    Pending,
+    Recorded,
+    LeaseExpired,
     ReconciliationRequired,
 }
 
@@ -440,6 +525,68 @@ fn exchange_promotion_decision_with_stream(
         }
         _ => Err(PromotionDecisionClientErrorV1::InvalidResponse),
     }
+}
+
+#[cfg(target_os = "linux")]
+fn exchange_promotion_execution_with_stream(
+    stream: &mut UnixStream,
+    expected_listener_creator_uid: u32,
+    broker_identity_public_key: &VerifyingKey,
+    request: &PromotionExecutionClientRequestV1,
+) -> Result<PromotionExecutionClientStatusV1, PromotionDecisionClientErrorV1> {
+    validate_connected_listener_creator(stream, expected_listener_creator_uid)?;
+    stream
+        .set_write_timeout(Some(PROMOTION_DECISION_IO_TIMEOUT))
+        .map_err(|_| PromotionDecisionClientErrorV1::ConnectionRejected)?;
+    let encoded = encode_promotion_execution_request_frame_with_id(request)?;
+    stream
+        .write_all(&encoded.frame)
+        .map_err(|_| PromotionDecisionClientErrorV1::ConnectionRejected)?;
+
+    validate_connected_listener_creator(stream, expected_listener_creator_uid)?;
+    stream
+        .set_read_timeout(Some(PROMOTION_DECISION_IO_TIMEOUT))
+        .map_err(|_| PromotionDecisionClientErrorV1::ConnectionRejected)?;
+    let mut header = [0_u8; 4];
+    stream
+        .read_exact(&mut header)
+        .map_err(|_| PromotionDecisionClientErrorV1::InvalidResponse)?;
+    let payload_length = u32::from_be_bytes(header) as usize;
+    if payload_length == 0 || payload_length > MAX_PROMOTION_DECISION_RESPONSE_FRAME_BYTES {
+        return Err(PromotionDecisionClientErrorV1::InvalidResponse);
+    }
+    validate_connected_listener_creator(stream, expected_listener_creator_uid)?;
+    let mut payload = vec![0_u8; payload_length];
+    stream
+        .read_exact(&mut payload)
+        .map_err(|_| PromotionDecisionClientErrorV1::InvalidResponse)?;
+    let binding = PromotionExecutionResponseBindingV1::new(
+        &encoded.request_id,
+        &request.promotion_decision_event_id,
+    )
+    .map_err(|_| PromotionDecisionClientErrorV1::InvalidResponse)?;
+    let status = verify_promotion_execution_response(&payload, broker_identity_public_key, binding)
+        .map_err(|_| PromotionDecisionClientErrorV1::InvalidResponse)?;
+    validate_connected_listener_creator(stream, expected_listener_creator_uid)?;
+    let mut trailing = [0_u8; 1];
+    if stream
+        .read(&mut trailing)
+        .map_err(|_| PromotionDecisionClientErrorV1::InvalidResponse)?
+        != 0
+    {
+        return Err(PromotionDecisionClientErrorV1::InvalidResponse);
+    }
+    Ok(match status {
+        PromotionExecutionResponseStatusV1::Rejected => PromotionExecutionClientStatusV1::Rejected,
+        PromotionExecutionResponseStatusV1::Pending => PromotionExecutionClientStatusV1::Pending,
+        PromotionExecutionResponseStatusV1::Recorded => PromotionExecutionClientStatusV1::Recorded,
+        PromotionExecutionResponseStatusV1::LeaseExpired => {
+            PromotionExecutionClientStatusV1::LeaseExpired
+        }
+        PromotionExecutionResponseStatusV1::ReconciliationRequired => {
+            PromotionExecutionClientStatusV1::ReconciliationRequired
+        }
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -705,18 +852,26 @@ fn fixed_components(components: &[&[u8]]) -> Vec<Vec<u8>> {
 #[cfg(target_os = "linux")]
 fn load_default_client_config(
 ) -> Result<ProtectedPromotionDecisionClientConfigV1, PromotionDecisionClientErrorV1> {
+    load_default_client_config_for(PROTECTED_CLIENT_CONFIG_FILE_NAME)
+}
+
+#[cfg(target_os = "linux")]
+fn load_default_client_config_for(
+    file_name: &[u8],
+) -> Result<ProtectedPromotionDecisionClientConfigV1, PromotionDecisionClientErrorV1> {
     let root = open_root()?;
     let parent = open_validated_parent_from_anchor(
         &root,
         &fixed_components(&PROTECTED_CLIENT_CONFIG_PARENT_COMPONENTS),
         0,
     )?;
-    let mut file = open_config_at(parent.as_raw_fd(), PROTECTED_CLIENT_CONFIG_FILE_NAME, 0)?;
+    let mut file = open_config_at(parent.as_raw_fd(), file_name, 0)?;
     parse_protected_client_config_json(&read_bounded_client_config(&mut file)?)
 }
 
 #[cfg(target_os = "linux")]
-fn validate_default_socket_path(
+fn validate_default_socket_path_for(
+    file_name: &[u8],
     expected_group: u32,
 ) -> Result<SocketDescriptorFactsV1, PromotionDecisionClientErrorV1> {
     let root = open_root()?;
@@ -725,12 +880,7 @@ fn validate_default_socket_path(
         &fixed_components(&AUTHORITY_SOCKET_PARENT_COMPONENTS),
         0,
     )?;
-    socket_facts_at(
-        parent.as_raw_fd(),
-        AUTHORITY_SOCKET_FILE_NAME,
-        0,
-        expected_group,
-    )
+    socket_facts_at(parent.as_raw_fd(), file_name, 0, expected_group)
 }
 
 #[cfg(target_os = "linux")]
@@ -792,33 +942,70 @@ fn read_bounded_stdin() -> Result<Vec<u8>, PromotionDecisionClientErrorV1> {
 }
 
 #[cfg(target_os = "linux")]
-fn run_linux_client() -> Result<PromotionDecisionClientStatusV1, PromotionDecisionClientErrorV1> {
-    validate_installed_client_executable()?;
-    let config = load_default_client_config()?;
-    let request = parse_client_request_stdin(&read_bounded_stdin()?)?;
-    let before = validate_default_socket_path(config.socket_group_gid())?;
-    let mut stream = UnixStream::connect(AUTHORITY_SOCKET_PATH)
+enum ProtectedAuthorityClientStatusV1 {
+    Decision(PromotionDecisionClientStatusV1),
+    Execution(PromotionExecutionClientStatusV1),
+}
+
+#[cfg(target_os = "linux")]
+fn connect_validated_fixed_socket(
+    socket_path: &Path,
+    socket_file_name: &[u8],
+    config: &ProtectedPromotionDecisionClientConfigV1,
+) -> Result<UnixStream, PromotionDecisionClientErrorV1> {
+    let before = validate_default_socket_path_for(socket_file_name, config.socket_group_gid())?;
+    let stream = UnixStream::connect(socket_path)
         .map_err(|_| PromotionDecisionClientErrorV1::ConnectionRejected)?;
     if stream
         .peer_addr()
         .ok()
         .and_then(|address| address.as_pathname().map(Path::to_path_buf))
         .as_deref()
-        != Some(Path::new(AUTHORITY_SOCKET_PATH))
+        != Some(socket_path)
     {
         return Err(PromotionDecisionClientErrorV1::ConnectionRejected);
     }
     validate_connected_listener_creator(&stream, config.listener_creator_uid())?;
-    let after = validate_default_socket_path(config.socket_group_gid())?;
+    let after = validate_default_socket_path_for(socket_file_name, config.socket_group_gid())?;
     if before != after {
         return Err(PromotionDecisionClientErrorV1::ConnectionRejected);
     }
-    exchange_promotion_decision_with_stream(
+    Ok(stream)
+}
+
+#[cfg(target_os = "linux")]
+fn run_linux_client() -> Result<ProtectedAuthorityClientStatusV1, PromotionDecisionClientErrorV1> {
+    validate_installed_client_executable()?;
+    let input = read_bounded_stdin()?;
+    if let Ok(request) = parse_client_request_stdin(&input) {
+        let config = load_default_client_config()?;
+        let mut stream = connect_validated_fixed_socket(
+            Path::new(AUTHORITY_SOCKET_PATH),
+            AUTHORITY_SOCKET_FILE_NAME,
+            &config,
+        )?;
+        return exchange_promotion_decision_with_stream(
+            &mut stream,
+            config.listener_creator_uid(),
+            config.broker_identity_public_key(),
+            &request,
+        )
+        .map(ProtectedAuthorityClientStatusV1::Decision);
+    }
+    let request = parse_promotion_execution_client_request_stdin(&input)?;
+    let config = load_default_client_config_for(PROTECTED_EXECUTION_CLIENT_CONFIG_FILE_NAME)?;
+    let mut stream = connect_validated_fixed_socket(
+        Path::new(EXECUTION_SOCKET_PATH),
+        EXECUTION_SOCKET_FILE_NAME,
+        &config,
+    )?;
+    exchange_promotion_execution_with_stream(
         &mut stream,
         config.listener_creator_uid(),
         config.broker_identity_public_key(),
         &request,
     )
+    .map(ProtectedAuthorityClientStatusV1::Execution)
 }
 
 /// Run the fixed-path, no-authority promotion-decision client.
@@ -836,15 +1023,29 @@ pub fn run_default_promotion_decision_client_v1() -> ExitCode {
             }
         };
         let payload = match status {
-            PromotionDecisionClientStatusV1::Sealed {
-                promotion_decision_event_id,
-            } => format!(
+            ProtectedAuthorityClientStatusV1::Decision(
+                PromotionDecisionClientStatusV1::Sealed {
+                    promotion_decision_event_id,
+                },
+            ) => format!(
                 r#"{{"schema_version":2,"status":"sealed","promotion_decision_event_id":"{promotion_decision_event_id}"}}"#
             )
             .into_bytes(),
-            PromotionDecisionClientStatusV1::ReconciliationRequired => {
-                RECONCILIATION_REQUIRED_RESPONSE_JSON.to_vec()
-            }
+            ProtectedAuthorityClientStatusV1::Decision(
+                PromotionDecisionClientStatusV1::ReconciliationRequired,
+            ) => RECONCILIATION_REQUIRED_RESPONSE_JSON.to_vec(),
+            ProtectedAuthorityClientStatusV1::Execution(status) => format!(
+                r#"{{"schema_version":1,"status":"{}"}}"#,
+                match status {
+                    PromotionExecutionClientStatusV1::Rejected => "rejected",
+                    PromotionExecutionClientStatusV1::Pending => "pending",
+                    PromotionExecutionClientStatusV1::Recorded => "recorded",
+                    PromotionExecutionClientStatusV1::LeaseExpired => "lease_expired",
+                    PromotionExecutionClientStatusV1::ReconciliationRequired =>
+                        "reconciliation_required",
+                }
+            )
+            .into_bytes(),
         };
         if std::io::stdout()
             .write_all(&payload)
@@ -870,6 +1071,21 @@ pub(crate) fn exchange_promotion_decision_with_stream_for_test(
     request: &PromotionDecisionClientRequestV1,
 ) -> Result<PromotionDecisionClientStatusV1, PromotionDecisionClientErrorV1> {
     exchange_promotion_decision_with_stream(
+        stream,
+        expected_listener_creator_uid,
+        broker_identity_public_key,
+        request,
+    )
+}
+
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) fn exchange_promotion_execution_with_stream_for_test(
+    stream: &mut UnixStream,
+    expected_listener_creator_uid: u32,
+    broker_identity_public_key: &VerifyingKey,
+    request: &PromotionExecutionClientRequestV1,
+) -> Result<PromotionExecutionClientStatusV1, PromotionDecisionClientErrorV1> {
+    exchange_promotion_execution_with_stream(
         stream,
         expected_listener_creator_uid,
         broker_identity_public_key,

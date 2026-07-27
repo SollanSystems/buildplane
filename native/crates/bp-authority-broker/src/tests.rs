@@ -24,7 +24,7 @@ use super::promotion_execution::{
 };
 use super::promotion_execution_handler::{
     handle_promotion_execution_wire_for_tests, parse_promotion_execution_request,
-    PromotionExecutionHandlerError,
+    parse_promotion_execution_request_with_binding, PromotionExecutionHandlerError,
 };
 use super::promotion_git::{
     PromotionCapabilityError, PromotionGitError, PromotionGitGateway, PromotionGitOutcome,
@@ -6917,6 +6917,13 @@ fn protected_promotion_execution_wire_accepts_only_closed_canonical_decision_ide
         BrokerPromotionExecutionRequest {
             promotion_decision_event_id: decision_event_id,
         }
+    );
+    let parsed = parse_promotion_execution_request_with_binding(wire.as_bytes())
+        .expect("the host retains only response correlation plus the opaque decision identity");
+    assert_eq!(parsed.request_id(), "123e4567-e89b-12d3-a456-426614174000");
+    assert_eq!(
+        parsed.promotion_decision_event_id(),
+        decision_event_id.to_string()
     );
 
     for (label, malformed_wire) in [

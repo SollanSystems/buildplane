@@ -94,6 +94,7 @@ import {
 } from "./governed-authority-broker-host.js";
 import { GOVERNED_AUTHORITY_BROKER_REQUIRED_CODE } from "./governed-ledger-authority.js";
 import { submitProtectedPromotionDecision } from "./governed-promotion-decision-client.js";
+import { executeProtectedPromotion } from "./governed-promotion-execution-client.js";
 import { runHostOwnedGovernedReviewSession } from "./governed-review-session.js";
 import {
 	type GovernedV5AdmissionResponseV1,
@@ -3300,7 +3301,14 @@ interface GovernedPromotionDecisionRecoveryOutput {
 		readonly state: "blocked" | "recorded";
 	};
 	readonly promotion: {
-		readonly state: "not-executed";
+		readonly state:
+			| "not-executed"
+			| "blocked"
+			| "pending"
+			| "recorded"
+			| "lease_expired"
+			| "reconciliation_required"
+			| "rejected";
 	};
 	readonly recovery: {
 		readonly action: "contact-host";
@@ -3311,17 +3319,18 @@ interface GovernedPromotionDecisionRecoveryOutput {
 function buildGovernedPromotionDecisionRecoveryOutput(
 	decision: "promote" | "reject",
 	state: "blocked" | "recorded",
+	promotionState: GovernedPromotionDecisionRecoveryOutput["promotion"]["state"],
+	retry: "blocked" | "required",
 ): GovernedPromotionDecisionRecoveryOutput {
 	return Object.freeze({
 		governance: "governed" as const,
 		status: "recovery-required" as const,
 		executionStarted: "unknown" as const,
 		decision: Object.freeze({ requested: decision, state }),
-		promotion: Object.freeze({ state: "not-executed" as const }),
+		promotion: Object.freeze({ state: promotionState }),
 		recovery: Object.freeze({
 			action: "contact-host" as const,
-			retry:
-				state === "recorded" ? ("required" as const) : ("blocked" as const),
+			retry,
 		}),
 	});
 }
@@ -3331,26 +3340,57 @@ function emitGovernedPromotionDecisionRecovery(
 	stdout: (line: string) => void,
 	decision: "promote" | "reject",
 	state: "blocked" | "recorded",
+	promotionState: GovernedPromotionDecisionRecoveryOutput["promotion"]["state"],
+	retry: "blocked" | "required",
 ): number {
-	const output = buildGovernedPromotionDecisionRecoveryOutput(decision, state);
+	const output = buildGovernedPromotionDecisionRecoveryOutput(
+		decision,
+		state,
+		promotionState,
+		retry,
+	);
 	if (json) {
 		stdout(formatJson(output));
 	} else if (state === "recorded") {
 		stdout("Governed promotion decision recorded: recovery required");
 		stdout(`decision: ${decision} (recorded)`);
-		stdout("promotion: not executed");
+		stdout(`promotion: ${promotionState}`);
 		stdout(
 			"recovery: required; contact the privileged host before any separate promotion execution",
 		);
 	} else {
 		stdout("Governed promotion decision blocked: recovery required");
 		stdout(`decision: ${decision} (blocked)`);
-		stdout("promotion: not executed");
+		stdout(`promotion: ${promotionState}`);
 		stdout(
 			"recovery: blocked; contact the privileged host to reconcile this session",
 		);
 	}
 	return 2;
+}
+
+function emitGovernedPromotionRejected(
+	json: boolean,
+	stdout: (line: string) => void,
+): number {
+	const output = Object.freeze({
+		governance: "governed" as const,
+		status: "promotion-rejected" as const,
+		executionStarted: false as const,
+		decision: Object.freeze({
+			requested: "reject" as const,
+			state: "recorded" as const,
+		}),
+		promotion: Object.freeze({ state: "rejected" as const }),
+	});
+	if (json) {
+		stdout(formatJson(output));
+	} else {
+		stdout("Governed promotion rejected");
+		stdout("decision: reject (recorded)");
+		stdout("promotion: rejected");
+	}
+	return 0;
 }
 
 function assertGovernedProjectInitialized(projectRoot: string): void {
@@ -3933,11 +3973,36 @@ async function runGovernedRunCommand(
 		} catch {
 			result = undefined;
 		}
+		if (result?.status !== "sealed") {
+			return emitGovernedPromotionDecisionRecovery(
+				runArguments.json,
+				options.stdout,
+				runArguments.decision,
+				"blocked",
+				"not-executed",
+				"blocked",
+			);
+		}
+		if (runArguments.decision === "reject") {
+			return emitGovernedPromotionRejected(runArguments.json, options.stdout);
+		}
+		let execution:
+			| Awaited<ReturnType<typeof executeProtectedPromotion>>
+			| undefined;
+		try {
+			execution = await executeProtectedPromotion({
+				promotionDecisionEventId: result.promotionDecisionEventId,
+			});
+		} catch {
+			execution = undefined;
+		}
 		return emitGovernedPromotionDecisionRecovery(
 			runArguments.json,
 			options.stdout,
 			runArguments.decision,
-			result?.status === "sealed" ? "recorded" : "blocked",
+			"recorded",
+			execution?.status ?? "blocked",
+			execution?.status === "recorded" ? "required" : "blocked",
 		);
 	}
 	if (runArguments.kind === "recovery-resume") {

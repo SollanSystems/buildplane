@@ -22,7 +22,7 @@ not an invitation to rerun the same packet with an ambient model shell.
 | Governed preview | `buildplane run --packet <file>` | Compiles and shows the bounded request; creates no execution authority | None |
 | Governed host request | `buildplane run --packet <file> --approve` | Requests a host-owned candidate session. It remains blocked until the host verifies admission, tape, and OCI prerequisites. | Only after the host emits a verified governed receipt |
 | Governed recovery | `buildplane run --resume <opaque-host-reference> --approve` | Host-only recovery of an existing workflow identity; no caller packet or replacement envelope is accepted. | Only an exact signed result is reusable |
-| Promotion-decision recovery | `buildplane run --resume <promotion-approval-event-uuid> --approve --decision promote\|reject` | Submits one closed decision through the fixed native client; it records no Git effect and reports recorded only for the broker's exact sealed response. | Decision evidence only; promotion remains separate |
+| Promotion decision and execution | `buildplane run --resume <promotion-approval-event-uuid> --approve --decision promote\|reject` | Seals one closed decision. Rejection terminates without Git; promotion passes only the signed decision event identity to the separately confined exactly-once executor. | Signed decision plus protected promotion result or reconciliation evidence |
 | Raw compatibility | `buildplane run --raw ...` | Explicitly unsafe legacy execution; may use ambient adapters. | Never governed or trusted |
 
 Do not use `--raw` to work around a governed block. Raw output is labelled
@@ -89,10 +89,11 @@ immutable candidate digest
 ```
 
 An operator must not merge a candidate ref manually and then report a
-successful governed promotion. When the GA authority host is enabled, its
-native decision-bound Git executor will own that final compare-and-swap and
-its durable result. The shipped CLI remains containment/pre-GA mode and does
-not invoke that executor.
+successful governed promotion. The native decision-bound Git executor owns
+that final compare-and-swap and its durable result. The CLI invokes it only
+after verifying the sealed decision response and passes only the resulting
+promotion-decision event UUID. Any missing, malformed, pending, expired,
+rejected-for-promote, or reconciliation response remains blocked.
 
 ### Protected promotion-decision host
 
@@ -112,7 +113,7 @@ non-root and distinct. Failure to meet any part of this contract stops startup;
 the host never binds, unlinks, replaces, or falls back to another socket.
 
 The following systemd units illustrate the deployment contract. The
-`buildplane-promotion` group must resolve to the same GID as
+`buildplane-operator` group must resolve to the same GID as
 `socket_group_gid`, while `buildplane-authority` and every authorized client
 must resolve to the distinct UIDs pinned in the fixed config. The sample
 assumes the configured authority root is
@@ -128,7 +129,7 @@ ListenStream=/run/buildplane/authority-host/promotion-decision-v1.sock
 Accept=no
 Service=buildplane-authority-host.service
 SocketUser=root
-SocketGroup=buildplane-promotion
+SocketGroup=buildplane-operator
 SocketMode=0660
 DirectoryMode=0755
 RemoveOnStop=true
@@ -160,6 +161,7 @@ ProtectHome=true
 ProtectSystem=strict
 ReadOnlyPaths=/etc/buildplane/authority-host
 ReadOnlyPaths=/var/lib/buildplane/authority/keys
+ReadOnlyPaths=/var/lib/buildplane/authority/repository
 ReadWritePaths=/var/lib/buildplane/authority/ledger
 RestrictAddressFamilies=AF_UNIX
 CapabilityBoundingSet=
@@ -187,6 +189,46 @@ A compromised allowlisted operator UID can cause bounded availability loss by
 occupying the sequential endpoint. Isolate and monitor each allowlisted UID.
 This availability risk cannot expand authority or create concurrent ledger writes;
 the single-writer serving model remains intentional.
+
+### Protected promotion-execution host
+
+`buildplane-promotion-execution-host` is a separate Linux process and
+confinement role. It does not possess the operator signing key and cannot
+create or alter a promotion decision. It accepts only a canonical sealed
+promotion-decision event UUID over the fixed
+`/run/buildplane/authority-host/promotion-execution-v1.sock` endpoint.
+Candidate digest, base commit, target ref, repository path, Git command, lease,
+signer, and idempotency facts are reconstructed from the signed tape.
+
+The executor loads only the kernel key, protected ledger, replay authorities,
+and the fixed `repository` directory opened without symlink traversal beneath
+the descriptor-bound authority root. Provision the exact target repository at
+`/var/lib/buildplane/authority/repository`, owned by the configured broker UID
+with mode `0700`. It must be the same Git common repository that contains the
+immutable candidate refs; a copy or alternate checkout is not valid.
+
+The dedicated systemd socket passes descriptor 3 at the exact execution socket
+path. The service grants write access only to the protected ledger and fixed
+repository. Although ledger compatibility currently requires the decision and
+execution services to share the configured broker UID, the execution service's
+private mount namespace makes
+`/var/lib/buildplane/authority/keys/operator` inaccessible, restricts `/proc`
+to the service's own PID view, and creates a private network namespace. The
+executor can therefore load the kernel key it needs without gaining a path to
+the operator decision key. Its canonical reviewed units are
+`deploy/trust-spine/systemd/buildplane-promotion-execution-host.service` and
+`.socket`. Never add a host-shell fallback, writable key directory, network
+family, operator-key mount, caller-selected repository, or executable
+override.
+
+Execution first reopens trusted replay. A reject decision returns `rejected`
+without claiming or entering Git. A promote decision obtains one durable
+lease-bound claim, consumes one private fixed-Git capability, performs the
+candidate/base compare-and-swap, and records the result. Existing claims,
+expired leases, uncertain Git observation, or result-write uncertainty return
+`pending`, `lease_expired`, or `reconciliation_required`; they never authorize
+a second Git attempt. A signed `recorded` response means the effect has a
+durable result record, not that the checked-out worktree has been synchronized.
 
 ### Protected governed-session host
 
@@ -305,7 +347,7 @@ event reference. The reference is present if and only if the closed verdict is
 `approve`. A bare `succeeded` or `recorded` status is rejected as incomplete
 success evidence.
 
-### Protected promotion-decision client
+### Protected promotion-decision and execution client
 
 Promotion-decision recovery uses a separate fixed protected client. Install
 `buildplane-authority-client` as the exact
@@ -335,9 +377,17 @@ regular, single-link, and exact `0644`. Its closed contents are:
 }
 ```
 
+Provision an independently reviewed pin with the same closed schema at
+`/etc/buildplane/authority-host/promotion-execution-client-v1.json`. It must
+bind the root-created execution listener and the execution host's kernel
+response key. The no-authority client selects this second fixed config and
+socket only for the closed
+`{"operation":"execute_promotion","promotion_decision_event_id":"..."}` input.
+It cannot accept a path, Git ref, candidate, lease, command, signer, or policy.
+
 `listener_creator_uid` must be exactly `0`, because systemd creates the
 listening socket as root before the non-root broker accepts it.
-`socket_group_gid` is the GID of `buildplane-promotion`.
+`socket_group_gid` is the GID of `buildplane-operator`.
 `broker_identity_public_key` is the exact 32-byte Ed25519 public key for the
 host config's kernel signer; the illustrative bytes above must be replaced
 with the deployment key. Provisioning must reject a client pin that does not

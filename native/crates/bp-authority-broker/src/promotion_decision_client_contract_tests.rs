@@ -1,19 +1,100 @@
 use crate::promotion_decision_client::{
-    encode_promotion_decision_request_frame, parse_client_request_stdin,
+    encode_promotion_decision_request_frame, encode_promotion_execution_request_frame,
+    parse_client_request_stdin, parse_promotion_execution_client_request_stdin,
     parse_protected_client_config_json, validate_client_config_file_facts,
     validate_client_executable_facts, validate_client_parent_facts,
     validate_connected_listener_creator_for_test, validate_socket_facts,
     ClientConfigDescriptorFactsV1, ClientConfigDescriptorKindV1, ClientParentDescriptorFactsV1,
-    PromotionDecisionClientStatusV1, SocketDescriptorFactsV1, SocketDescriptorKindV1,
+    PromotionDecisionClientStatusV1, PromotionExecutionClientStatusV1, SocketDescriptorFactsV1,
+    SocketDescriptorKindV1,
 };
 use crate::promotion_decision_response::{
     sign_promotion_decision_response_for_test, PromotionDecisionResponseBindingV1,
     PromotionDecisionResponseStatusV1,
 };
+use crate::promotion_execution_response::{
+    sign_promotion_execution_response_for_test, PromotionExecutionResponseBindingV1,
+    PromotionExecutionResponseStatusV1,
+};
 use ed25519_dalek::SigningKey;
 
 const APPROVAL_EVENT_ID: &str = "123e4567-e89b-12d3-a456-426614174001";
 const DECISION_EVENT_ID: &str = "123e4567-e89b-12d3-a456-426614174003";
+
+#[test]
+fn execution_client_input_and_frame_expose_only_the_sealed_decision_identity() {
+    let parsed = parse_promotion_execution_client_request_stdin(
+        br#"{"schema_version":1,"operation":"execute_promotion","promotion_decision_event_id":"123e4567-e89b-12d3-a456-426614174003"}"#,
+    )
+    .expect("closed canonical execution input");
+    assert_eq!(parsed.promotion_decision_event_id(), DECISION_EVENT_ID);
+
+    let frame = encode_promotion_execution_request_frame(&parsed).expect("execution frame");
+    let payload_length = u32::from_be_bytes(frame[..4].try_into().unwrap()) as usize;
+    assert_eq!(payload_length, frame.len() - 4);
+    let payload = std::str::from_utf8(&frame[4..]).unwrap();
+    assert!(payload.starts_with(r#"{"request_id":""#));
+    assert!(payload
+        .ends_with(r#"","promotion_decision_event_id":"123e4567-e89b-12d3-a456-426614174003"}"#));
+
+    for rejected in [
+        br#"{"schema_version":1,"operation":"execute_promotion","promotion_decision_event_id":"123E4567-E89B-12D3-A456-426614174003"}"#.as_slice(),
+        br#"{"schema_version":1,"operation":"execute_promotion","promotion_decision_event_id":"123e4567-e89b-12d3-a456-426614174003","repository":"/tmp/repo"}"#.as_slice(),
+        br#"{"schema_version":1,"operation":"promote","promotion_decision_event_id":"123e4567-e89b-12d3-a456-426614174003"}"#.as_slice(),
+    ] {
+        assert!(parse_promotion_execution_client_request_stdin(rejected).is_err());
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn execution_exchange_accepts_only_a_signed_response_bound_to_its_fresh_request() {
+    use crate::promotion_decision_client::exchange_promotion_execution_with_stream_for_test;
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
+    use std::thread;
+
+    let request = parse_promotion_execution_client_request_stdin(
+        br#"{"schema_version":1,"operation":"execute_promotion","promotion_decision_event_id":"123e4567-e89b-12d3-a456-426614174003"}"#,
+    )
+    .unwrap();
+    let signing_key = SigningKey::from_bytes(&[104; 32]);
+    let verifying_key = signing_key.verifying_key();
+    let (mut client, mut server) = UnixStream::pair().unwrap();
+    let server_thread = thread::spawn(move || {
+        let mut header = [0_u8; 4];
+        server.read_exact(&mut header).unwrap();
+        let mut payload = vec![0_u8; u32::from_be_bytes(header) as usize];
+        server.read_exact(&mut payload).unwrap();
+        let request_wire: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+        let response = sign_promotion_execution_response_for_test(
+            &signing_key,
+            PromotionExecutionResponseBindingV1::new(
+                request_wire["request_id"].as_str().unwrap(),
+                DECISION_EVENT_ID,
+            )
+            .unwrap(),
+            PromotionExecutionResponseStatusV1::Recorded,
+        )
+        .unwrap();
+        server
+            .write_all(&(response.len() as u32).to_be_bytes())
+            .unwrap();
+        server.write_all(&response).unwrap();
+    });
+
+    assert_eq!(
+        exchange_promotion_execution_with_stream_for_test(
+            &mut client,
+            unsafe { libc::geteuid() },
+            &verifying_key,
+            &request,
+        )
+        .unwrap(),
+        PromotionExecutionClientStatusV1::Recorded
+    );
+    server_thread.join().unwrap();
+}
 
 #[test]
 fn client_input_is_closed_and_requires_a_canonical_approval_event_uuid() {

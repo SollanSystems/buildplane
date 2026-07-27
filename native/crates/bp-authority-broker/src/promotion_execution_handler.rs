@@ -59,6 +59,28 @@ struct PromotionExecutionWire {
     promotion_decision_event_id: String,
 }
 
+pub(crate) struct ParsedPromotionExecutionRequestV1 {
+    request_id: String,
+    promotion_decision_event_id: String,
+    request: BrokerPromotionExecutionRequest,
+}
+
+pub(crate) struct HandledPromotionExecutionV1 {
+    pub(crate) request_id: String,
+    pub(crate) promotion_decision_event_id: String,
+    pub(crate) status: BrokerPromotionExecutionStatus,
+}
+
+impl ParsedPromotionExecutionRequestV1 {
+    pub(crate) fn request_id(&self) -> &str {
+        &self.request_id
+    }
+
+    pub(crate) fn promotion_decision_event_id(&self) -> &str {
+        &self.promotion_decision_event_id
+    }
+}
+
 /// Parse one closed promotion-execution identity request.
 ///
 /// The request ID is canonicalized only as correlation metadata and then
@@ -67,13 +89,24 @@ struct PromotionExecutionWire {
 pub(crate) fn parse_promotion_execution_request(
     wire: &[u8],
 ) -> Result<BrokerPromotionExecutionRequest, PromotionExecutionHandlerError> {
+    Ok(parse_promotion_execution_request_with_binding(wire)?.request)
+}
+
+pub(crate) fn parse_promotion_execution_request_with_binding(
+    wire: &[u8],
+) -> Result<ParsedPromotionExecutionRequestV1, PromotionExecutionHandlerError> {
     let wire: PromotionExecutionWire = serde_json::from_slice(wire)
         .map_err(|_| PromotionExecutionHandlerError::RequestRejected)?;
-    let _request_id = parse_canonical_uuid(wire.request_id)?;
-    let promotion_decision_event_id =
-        EventId::from_uuid(parse_canonical_uuid(wire.promotion_decision_event_id)?);
-    Ok(BrokerPromotionExecutionRequest {
-        promotion_decision_event_id,
+    parse_canonical_uuid(wire.request_id.clone())?;
+    let promotion_decision_event_id = EventId::from_uuid(parse_canonical_uuid(
+        wire.promotion_decision_event_id.clone(),
+    )?);
+    Ok(ParsedPromotionExecutionRequestV1 {
+        request_id: wire.request_id,
+        promotion_decision_event_id: wire.promotion_decision_event_id,
+        request: BrokerPromotionExecutionRequest {
+            promotion_decision_event_id,
+        },
     })
 }
 
@@ -103,10 +136,20 @@ pub(crate) fn handle_promotion_execution_wire(
     authority: &mut ProtectedPromotionExecutionAuthority<'_>,
     wire: &[u8],
 ) -> Result<BrokerPromotionExecutionStatus, PromotionExecutionHandlerError> {
-    let request = parse_promotion_execution_request(wire)?;
-    Ok(status_or_reconciliation(
-        authority.claim_execute_and_record(request),
-    ))
+    Ok(handle_promotion_execution_wire_with_binding(authority, wire)?.status)
+}
+
+pub(crate) fn handle_promotion_execution_wire_with_binding(
+    authority: &mut ProtectedPromotionExecutionAuthority<'_>,
+    wire: &[u8],
+) -> Result<HandledPromotionExecutionV1, PromotionExecutionHandlerError> {
+    let parsed = parse_promotion_execution_request_with_binding(wire)?;
+    let status = status_or_reconciliation(authority.claim_execute_and_record(parsed.request));
+    Ok(HandledPromotionExecutionV1 {
+        request_id: parsed.request_id,
+        promotion_decision_event_id: parsed.promotion_decision_event_id,
+        status,
+    })
 }
 
 /// Generic test-only adapter for the existing authority fakes.
@@ -153,8 +196,26 @@ pub(crate) fn handle_authenticated_promotion_execution_request(
     stream: &mut UnixStream,
     authority: &mut ProtectedPromotionExecutionAuthority<'_>,
 ) -> Result<BrokerPromotionExecutionStatus, PromotionExecutionHandlerError> {
+    Ok(
+        handle_authenticated_promotion_execution_request_with_binding(
+            policy,
+            attestation,
+            stream,
+            authority,
+        )?
+        .status,
+    )
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn handle_authenticated_promotion_execution_request_with_binding(
+    policy: &BrokerHostConfinementPolicyV1,
+    attestation: &BrokerHostConfinementAttestationV1,
+    stream: &mut UnixStream,
+    authority: &mut ProtectedPromotionExecutionAuthority<'_>,
+) -> Result<HandledPromotionExecutionV1, PromotionExecutionHandlerError> {
     let payload = read_authenticated_promotion_execution_frame(policy, attestation, stream)?;
-    handle_promotion_execution_wire(authority, &payload)
+    handle_promotion_execution_wire_with_binding(authority, &payload)
 }
 
 /// Authenticate a connected Linux worker, then return its one bounded opaque

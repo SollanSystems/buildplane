@@ -328,6 +328,28 @@ pub(crate) fn load_promotion_decision_signing_keys_v1(
     }
 }
 
+/// Load only the kernel key needed to record promotion execution claims and
+/// results and to authenticate the execution response. The promotion executor
+/// deliberately never opens the operator key that authorizes the decision.
+pub(crate) fn load_promotion_execution_signing_key_v1(
+    startup: &ValidatedPromotionDecisionHostStartupV1,
+) -> Result<SigningKey, ProtectedHostKeyLoadError> {
+    #[cfg(target_os = "linux")]
+    {
+        load_signing_key_from_authority_descriptor(
+            startup.authority_root().directory(),
+            &startup.config().kernel_signer,
+            startup.config().broker_uid,
+        )
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = startup;
+        Err(ProtectedHostKeyLoadError::UnsupportedPlatform)
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn load_signing_key_from_authority_descriptor(
     authority_root: &File,
@@ -623,6 +645,26 @@ mod tests {
             .expect("descriptor-bound keys load after pathname move");
         assert_eq!(keys.kernel().to_bytes(), kernel_seed);
         assert_eq!(keys.operator().to_bytes(), operator_seed);
+    }
+
+    #[test]
+    fn promotion_execution_custody_loads_only_the_kernel_key() {
+        let fixture = KeyFixture::new();
+        let kernel_seed = [4; 32];
+        let operator_seed = [5; 32];
+        fixture.write_key(&["kernel"], "kernel-main", &kernel_seed);
+        let startup = fixture.startup(kernel_seed, operator_seed);
+
+        let key = load_promotion_execution_signing_key_v1(&startup)
+            .expect("execution custody needs only the kernel signer");
+        assert_eq!(key.to_bytes(), kernel_seed);
+        assert!(
+            !fixture
+                .authority_root
+                .join("keys/operator/primary/operator-main.ed25519")
+                .exists(),
+            "the promotion executor must not possess operator decision authority"
+        );
     }
 
     #[test]

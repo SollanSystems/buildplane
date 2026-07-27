@@ -93,7 +93,13 @@ mod promotion_decision_response_contract_tests;
 mod promotion_execution;
 #[allow(dead_code)]
 mod promotion_execution_handler;
+#[cfg(target_os = "linux")]
+mod promotion_execution_host;
+mod promotion_execution_response;
+#[cfg(test)]
+mod promotion_execution_response_contract_tests;
 mod promotion_git;
+mod promotion_repository_custody;
 #[cfg(target_os = "linux")]
 #[allow(dead_code)]
 mod protocol;
@@ -126,6 +132,13 @@ pub use governed_session_client::run_default_governed_session_client_v1;
 pub use governed_session_listener::run_default_governed_session_host_v1;
 pub use promotion_decision_client::run_default_promotion_decision_client_v1;
 pub use promotion_decision_host::run_default_promotion_decision_host_v1;
+#[cfg(target_os = "linux")]
+pub use promotion_execution_host::run_default_promotion_execution_host_v1;
+#[cfg(not(target_os = "linux"))]
+pub fn run_default_promotion_execution_host_v1() -> std::process::ExitCode {
+    eprintln!("unsupported_platform");
+    std::process::ExitCode::FAILURE
+}
 pub use v5_admission_client::run_default_v5_admission_client_v1;
 pub use v5_admission_host::run_default_v5_admission_host_v1;
 

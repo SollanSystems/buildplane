@@ -51,7 +51,7 @@ const MAX_PROMOTION_DECISION_RESPONSE_FRAME_BYTES: usize = 4 * 1024;
 const PROMOTION_DECISION_RESPONSE_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
-enum ProtectedPromotionDecisionHostErrorV1 {
+pub(crate) enum ProtectedPromotionDecisionHostErrorV1 {
     #[error("protected promotion-decision host startup failed")]
     StartupFailed,
     #[error("protected promotion-decision host connection failed")]
@@ -106,7 +106,7 @@ enum ListenerPathEntryKindV1 {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct ListenerPathFactsV1 {
+pub(crate) struct ListenerPathFactsV1 {
     kind: ListenerPathEntryKindV1,
     uid: u32,
     gid: u32,
@@ -239,7 +239,7 @@ fn validate_listener_socket_facts(
 }
 
 #[cfg(target_os = "linux")]
-fn validate_listener_path_from_anchor(
+pub(crate) fn validate_listener_path_from_anchor(
     anchor_descriptor: RawFd,
     parent_components: &[&[u8]],
     socket_file_name: &[u8],
@@ -429,7 +429,7 @@ fn duplicate_and_validate_owned_preopened_listener(
 }
 
 #[cfg(target_os = "linux")]
-fn claim_and_validate_preopened_listener(
+pub(crate) fn claim_and_validate_preopened_listener(
     listener_fd: RawFd,
     expected_path: &Path,
 ) -> Result<UnixListener, ProtectedPromotionDecisionHostErrorV1> {

@@ -16,6 +16,15 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 const temporaryRoots: string[] = [];
+const protectedHostBinaryNames = [
+	"buildplane-authority-client",
+	"buildplane-authority-host",
+	"buildplane-governed-session-client",
+	"buildplane-governed-session-host",
+	"buildplane-promotion-execution-host",
+	"buildplane-v5-dispatch-admission-client",
+	"buildplane-v5-dispatch-admission-host",
+] as const;
 
 afterEach(() => {
 	for (const root of temporaryRoots.splice(0)) {
@@ -41,17 +50,13 @@ describe("Trust Spine protected-host bundle staging", () => {
 		const outputDirectory = join(root, "bundle");
 		mkdirSync(binaryDirectory);
 
-		const binaries = {
-			"buildplane-governed-session-client": "client-binary-v1",
-			"buildplane-governed-session-host": "host-binary-v1",
-		} as const;
-		for (const [name, contents] of Object.entries(binaries)) {
+		for (const name of protectedHostBinaryNames) {
 			const path = join(binaryDirectory, name);
 			writeFileSync(
 				path,
 				Buffer.concat([
 					Buffer.from([0x7f, 0x45, 0x4c, 0x46]),
-					Buffer.from(contents),
+					Buffer.from(name),
 				]),
 			);
 			chmodSync(path, 0o755);
@@ -71,6 +76,7 @@ describe("Trust Spine protected-host bundle staging", () => {
 		});
 		const manifest = JSON.parse(readFileSync(result.manifestPath, "utf8")) as {
 			schemaVersion: number;
+			artifact: string;
 			files: Array<{
 				path: string;
 				installPath: string;
@@ -79,23 +85,61 @@ describe("Trust Spine protected-host bundle staging", () => {
 			}>;
 		};
 		expect(manifest.schemaVersion).toBe(1);
+		expect(manifest.artifact).toBe("buildplane-protected-trust-spine-host");
 		expect(manifest.files.map(({ path }) => path)).toEqual([
+			"libexec/buildplane-authority-client",
+			"libexec/buildplane-authority-host",
 			"libexec/buildplane-governed-session-client",
 			"libexec/buildplane-governed-session-host",
+			"libexec/buildplane-promotion-execution-host",
+			"libexec/buildplane-v5-dispatch-admission-client",
+			"libexec/buildplane-v5-dispatch-admission-host",
+			"systemd/buildplane-authority-host.service",
+			"systemd/buildplane-authority-host.socket",
 			"systemd/buildplane-governed-session-host.service",
 			"systemd/buildplane-governed-session-host.socket",
+			"systemd/buildplane-promotion-execution-host.service",
+			"systemd/buildplane-promotion-execution-host.socket",
+			"systemd/buildplane-v5-dispatch-admission-host.service",
+			"systemd/buildplane-v5-dispatch-admission-host.socket",
 		]);
 		expect(
 			manifest.files.map(({ installPath, mode }) => [installPath, mode]),
 		).toEqual([
+			["/usr/libexec/buildplane/buildplane-authority-client", "0755"],
+			["/usr/libexec/buildplane/buildplane-authority-host", "0755"],
 			["/usr/libexec/buildplane/buildplane-governed-session-client", "0755"],
 			["/usr/libexec/buildplane/buildplane-governed-session-host", "0755"],
+			["/usr/libexec/buildplane/buildplane-promotion-execution-host", "0755"],
+			[
+				"/usr/libexec/buildplane/buildplane-v5-dispatch-admission-client",
+				"0755",
+			],
+			["/usr/libexec/buildplane/buildplane-v5-dispatch-admission-host", "0755"],
+			["/usr/lib/systemd/system/buildplane-authority-host.service", "0644"],
+			["/usr/lib/systemd/system/buildplane-authority-host.socket", "0644"],
 			[
 				"/usr/lib/systemd/system/buildplane-governed-session-host.service",
 				"0644",
 			],
 			[
 				"/usr/lib/systemd/system/buildplane-governed-session-host.socket",
+				"0644",
+			],
+			[
+				"/usr/lib/systemd/system/buildplane-promotion-execution-host.service",
+				"0644",
+			],
+			[
+				"/usr/lib/systemd/system/buildplane-promotion-execution-host.socket",
+				"0644",
+			],
+			[
+				"/usr/lib/systemd/system/buildplane-v5-dispatch-admission-host.service",
+				"0644",
+			],
+			[
+				"/usr/lib/systemd/system/buildplane-v5-dispatch-admission-host.socket",
 				"0644",
 			],
 		]);
@@ -128,6 +172,35 @@ describe("Trust Spine protected-host bundle staging", () => {
 		).toContain(
 			"ListenStream=/run/buildplane/authority-host/governed-session-v1.sock",
 		);
+		const promotionExecutionService = readFileSync(
+			join(
+				outputDirectory,
+				"systemd",
+				"buildplane-promotion-execution-host.service",
+			),
+			"utf8",
+		);
+		expect(promotionExecutionService).toContain(
+			"ReadWritePaths=/var/lib/buildplane/authority/repository",
+		);
+		expect(promotionExecutionService).toContain(
+			"InaccessiblePaths=/var/lib/buildplane/authority/keys/operator",
+		);
+		expect(promotionExecutionService).toContain("PrivateNetwork=true");
+		expect(promotionExecutionService).toContain("ProtectProc=invisible");
+		expect(promotionExecutionService).toContain("ProcSubset=pid");
+		expect(
+			readFileSync(
+				join(
+					outputDirectory,
+					"systemd",
+					"buildplane-promotion-execution-host.socket",
+				),
+				"utf8",
+			),
+		).toContain(
+			"ListenStream=/run/buildplane/authority-host/promotion-execution-v1.sock",
+		);
 	});
 
 	it("rejects a non-ELF native binary before creating the bundle", async () => {
@@ -136,10 +209,7 @@ describe("Trust Spine protected-host bundle staging", () => {
 		const binaryDirectory = join(root, "bin");
 		const outputDirectory = join(root, "bundle");
 		mkdirSync(binaryDirectory);
-		for (const name of [
-			"buildplane-governed-session-client",
-			"buildplane-governed-session-host",
-		]) {
+		for (const name of protectedHostBinaryNames) {
 			const path = join(binaryDirectory, name);
 			writeFileSync(
 				path,
@@ -170,10 +240,7 @@ describe("Trust Spine protected-host bundle staging", () => {
 		const binaryDirectory = join(root, "bin");
 		const outputDirectory = join(root, "bundle");
 		mkdirSync(binaryDirectory);
-		for (const name of [
-			"buildplane-governed-session-client",
-			"buildplane-governed-session-host",
-		]) {
+		for (const name of protectedHostBinaryNames) {
 			const path = join(binaryDirectory, name);
 			writeFileSync(
 				path,
@@ -216,10 +283,7 @@ describe("Trust Spine protected-host bundle staging", () => {
 		const binaryDirectory = join(root, "bin");
 		const outputDirectory = join(root, "bundle");
 		mkdirSync(binaryDirectory);
-		for (const name of [
-			"buildplane-governed-session-client",
-			"buildplane-governed-session-host",
-		]) {
+		for (const name of protectedHostBinaryNames) {
 			const path = join(binaryDirectory, name);
 			writeFileSync(
 				path,

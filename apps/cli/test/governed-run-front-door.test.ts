@@ -40,6 +40,9 @@ const hostResolver = vi.hoisted(() => ({
 const promotionDecisionClient = vi.hoisted(() => ({
 	submit: vi.fn(),
 }));
+const promotionExecutionClient = vi.hoisted(() => ({
+	execute: vi.fn(),
+}));
 const v5AdmissionClient = vi.hoisted(() => ({
 	request: vi.fn(),
 }));
@@ -56,6 +59,9 @@ vi.mock("../src/governed-authority-broker-host.js", async () => {
 });
 vi.mock("../src/governed-promotion-decision-client.js", () => ({
 	submitProtectedPromotionDecision: promotionDecisionClient.submit,
+}));
+vi.mock("../src/governed-promotion-execution-client.js", () => ({
+	executeProtectedPromotion: promotionExecutionClient.execute,
 }));
 vi.mock("../src/governed-v5-admission-client.js", () => ({
 	requestGovernedV5Admission: v5AdmissionClient.request,
@@ -525,6 +531,7 @@ afterEach(() => {
 	hostResolver.resolve.mockReset();
 	hostResolver.isProtected.mockReset();
 	promotionDecisionClient.submit.mockReset();
+	promotionExecutionClient.execute.mockReset();
 	v5AdmissionClient.request.mockReset();
 	vi.restoreAllMocks();
 });
@@ -2231,10 +2238,12 @@ describe("governed run front door", () => {
 		const root = createGitProject();
 		const before = snapshotRoot(root);
 		const approvalEventId = "123e4567-e89b-12d3-a456-426614174001";
+		const decisionEventId = "123e4567-e89b-12d3-a456-426614174002";
 		promotionDecisionClient.submit.mockResolvedValue({
 			status: "sealed",
-			promotionDecisionEventId: "123e4567-e89b-12d3-a456-426614174002",
+			promotionDecisionEventId: decisionEventId,
 		});
+		promotionExecutionClient.execute.mockResolvedValue({ status: "recorded" });
 
 		const response = await runCliCapture(
 			root,
@@ -2254,12 +2263,88 @@ describe("governed run front door", () => {
 			promotionApprovalRequestEventId: approvalEventId,
 			decision: "promote",
 		});
+		expect(promotionExecutionClient.execute).toHaveBeenCalledWith({
+			promotionDecisionEventId: decisionEventId,
+		});
 		expect(hostResolver.resolve).not.toHaveBeenCalled();
 		expect(response.exitCode).toBe(2);
 		expect(JSON.parse(response.stdout.join("\n"))).toMatchObject({
 			decision: { requested: "promote", state: "recorded" },
-			promotion: { state: "not-executed" },
+			promotion: { state: "recorded" },
 			recovery: { retry: "required" },
+		});
+		expectRootUnchanged(root, before);
+	});
+
+	it("records a sealed rejection without ever entering promotion execution", async () => {
+		const root = createGitProject();
+		const before = snapshotRoot(root);
+		promotionDecisionClient.submit.mockResolvedValue({
+			status: "sealed",
+			promotionDecisionEventId: "123e4567-e89b-12d3-a456-426614174002",
+		});
+
+		const response = await runCliCapture(
+			root,
+			[
+				"run",
+				"--resume",
+				"123e4567-e89b-12d3-a456-426614174001",
+				"--approve",
+				"--decision",
+				"reject",
+				"--json",
+			],
+			legacyBundleMustNotBeConstructed(),
+		);
+
+		expect(response.exitCode).toBe(0);
+		expect(JSON.parse(response.stdout.join("\n"))).toMatchObject({
+			governance: "governed",
+			status: "promotion-rejected",
+			decision: { requested: "reject", state: "recorded" },
+			promotion: { state: "rejected" },
+		});
+		expect(promotionExecutionClient.execute).not.toHaveBeenCalled();
+		expectRootUnchanged(root, before);
+	});
+
+	it.each([
+		{ status: "pending" },
+		{ status: "lease_expired" },
+		{ status: "reconciliation_required" },
+		{ status: "rejected" },
+		undefined,
+	] as const)("keeps promotion execution status %s in recovery", async (status) => {
+		const root = createGitProject();
+		const before = snapshotRoot(root);
+		promotionDecisionClient.submit.mockResolvedValue({
+			status: "sealed",
+			promotionDecisionEventId: "123e4567-e89b-12d3-a456-426614174002",
+		});
+		promotionExecutionClient.execute.mockResolvedValue(status);
+
+		const response = await runCliCapture(
+			root,
+			[
+				"run",
+				"--resume",
+				"123e4567-e89b-12d3-a456-426614174001",
+				"--approve",
+				"--decision",
+				"promote",
+				"--json",
+			],
+			legacyBundleMustNotBeConstructed(),
+		);
+
+		expect(response.exitCode).toBe(2);
+		expect(JSON.parse(response.stdout.join("\n"))).toMatchObject({
+			decision: { requested: "promote", state: "recorded" },
+			promotion: {
+				state: status?.status ?? "blocked",
+			},
+			recovery: { retry: "blocked" },
 		});
 		expectRootUnchanged(root, before);
 	});
@@ -2293,6 +2378,7 @@ describe("governed run front door", () => {
 			recovery: { retry: "blocked" },
 		});
 		expect(hostResolver.resolve).not.toHaveBeenCalled();
+		expect(promotionExecutionClient.execute).not.toHaveBeenCalled();
 		expectRootUnchanged(root, before);
 	});
 
