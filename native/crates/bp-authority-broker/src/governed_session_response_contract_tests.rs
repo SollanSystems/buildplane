@@ -2,12 +2,15 @@ use crate::command_action::BrokerCommandActionStatus;
 use crate::governed_session_client::parse_governed_session_client_request;
 use crate::governed_session_response::{
     governed_candidate_run_status_v1, governed_reviewer_run_result_v1,
-    host_owned_governed_candidate_run_result_v1, sign_governed_session_probe_response_v1,
-    sign_governed_session_response_v1, verify_governed_session_response_v1,
-    GovernedCandidateReceiptProjectionV1,
+    host_owned_governed_candidate_run_result_v1, host_owned_governed_reviewer_run_result_v1,
+    sign_governed_session_probe_response_v1, sign_governed_session_response_v1,
+    verify_governed_session_response_v1, GovernedCandidateReceiptProjectionV1,
+    GovernedReviewReceiptProjectionV1,
 };
 use crate::BrokerModelActionStatus;
-use bp_ledger::payload::trust_spine::CandidateCreatedV2;
+use bp_ledger::payload::trust_spine::{
+    CandidateCreatedV2, ReviewDecisionV1, ReviewFindingSeverityV1, ReviewFindingV1,
+};
 use ed25519_dalek::SigningKey;
 
 fn reviewer_request(recovery_ref: &str) -> Vec<u8> {
@@ -68,6 +71,39 @@ fn candidate_receipt_projection() -> GovernedCandidateReceiptProjectionV1 {
             "sha256:5555555555555555555555555555555555555555555555555555555555555555".into(),
         governed_packet_digest:
             "sha256:6666666666666666666666666666666666666666666666666666666666666666".into(),
+    }
+}
+
+fn review_receipt_projection() -> GovernedReviewReceiptProjectionV1 {
+    GovernedReviewReceiptProjectionV1 {
+        candidate_created_event_ref: "01919000-0000-7000-8000-000000000091".into(),
+        candidate_completion_event_ref: "01919000-0000-7000-8000-000000000092".into(),
+        candidate_digest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            .into(),
+        acceptance_event_ref: "01919000-0000-7000-8000-000000000093".into(),
+        acceptance_digest:
+            "sha256:7777777777777777777777777777777777777777777777777777777777777777".into(),
+        reviewer_dispatch_event_ref: "01919000-0000-7000-8000-000000000094".into(),
+        reviewer_dispatch_envelope_digest:
+            "sha256:8888888888888888888888888888888888888888888888888888888888888888".into(),
+        review_verdict_event_ref: "01919000-0000-7000-8000-000000000095".into(),
+        decision: ReviewDecisionV1::Approve,
+        findings: vec![ReviewFindingV1 {
+            severity: ReviewFindingSeverityV1::Low,
+            check_id: "review-check".into(),
+            file: "src/lib.rs".into(),
+            line: 7,
+            explanation: "bounded finding".into(),
+            evidence_refs: vec!["cas:review-evidence".into()],
+        }],
+        confidence: 0.9,
+        reviewer_manifest_digest:
+            "sha256:9999999999999999999999999999999999999999999999999999999999999999".into(),
+        tape_root_digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            .into(),
+        native_receipt_ref: "signed-event:01919000-0000-7000-8000-000000000095".into(),
+        native_receipt_digest:
+            "sha256:abababababababababababababababababababababababababababababababab".into(),
     }
 }
 
@@ -164,12 +200,11 @@ fn signed_completed_response_requires_a_closed_object_result_and_exact_session_b
 }
 
 #[test]
-fn reviewer_completion_exposes_only_the_closed_broker_status_contract() {
+fn reviewer_completion_requires_a_verified_receipt_for_recorded_success() {
     let key = SigningKey::from_bytes(&[45; 32]);
     let request = parse_governed_session_client_request(&reviewer_run_request()).unwrap();
     for status in [
         BrokerModelActionStatus::Pending,
-        BrokerModelActionStatus::Recorded,
         BrokerModelActionStatus::Failed,
         BrokerModelActionStatus::LeaseExpired,
         BrokerModelActionStatus::ReconciliationRequired,
@@ -186,6 +221,24 @@ fn reviewer_completion_exposes_only_the_closed_broker_status_contract() {
             .expect("verify reviewer status");
     }
 
+    let completed = host_owned_governed_reviewer_run_result_v1(
+        "host-recovery/session-0001",
+        review_receipt_projection(),
+    );
+    let signed = sign_governed_session_response_v1(
+        &key,
+        &request,
+        "host-recovery/session-0001",
+        "host-session/session-0001",
+        Some(completed),
+    )
+    .expect("sign verified reviewer receipt");
+    let verified = verify_governed_session_response_v1(&signed, &key.verifying_key(), &request)
+        .expect("verify reviewer receipt");
+    let projection = std::str::from_utf8(verified.projection_json()).unwrap();
+    assert!(projection.contains(r#""kind":"host-owned-governed-reviewer-run-result-v1""#));
+    assert!(projection.contains(r#""decision":"approve""#));
+
     for invalid in [
         serde_json::json!({"status": "recorded"}),
         serde_json::json!({
@@ -196,8 +249,7 @@ fn reviewer_completion_exposes_only_the_closed_broker_status_contract() {
         serde_json::json!({
             "schemaVersion": 1,
             "kind": "governed_reviewer_run_result_v1",
-            "status": "recorded",
-            "authorizationRef": "forged"
+            "status": "recorded"
         }),
     ] {
         assert!(

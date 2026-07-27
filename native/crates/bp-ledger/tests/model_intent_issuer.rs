@@ -2295,12 +2295,34 @@ fn reviewer_authority_adopts_only_a_signed_candidate_bound_intent() {
         )
         .expect("materialize signed review receipt, set, and verdict");
     assert!(matches!(
-        finalized,
+        &finalized,
         GovernedV5ReviewVerdictFinalizeDispositionV1::Recorded {
             decision: ReviewDecisionV1::Approve,
             ..
         }
     ));
+    let resolved_receipt = match &finalized {
+        GovernedV5ReviewVerdictFinalizeDispositionV1::Recorded { receipt, .. } => receipt,
+        other => panic!("first review finalization must record, got {other:?}"),
+    };
+    assert_eq!(resolved_receipt.acceptance_event_id, acceptance_event_id);
+    assert_eq!(
+        resolved_receipt.reviewer_dispatch_event_id,
+        dispatch_event.id
+    );
+    assert_eq!(
+        resolved_receipt.reviewer_dispatch_envelope_digest,
+        review_dispatch.envelope_digest
+    );
+    assert_eq!(resolved_receipt.verdict.decision, ReviewDecisionV1::Approve);
+    assert_eq!(
+        resolved_receipt.verdict.candidate_digest,
+        resolved_receipt.candidate_digest
+    );
+    assert!(resolved_receipt.tape_root_digest.starts_with("sha256:"));
+    assert!(resolved_receipt
+        .review_verdict_event_digest
+        .starts_with("sha256:"));
     assert_eq!(store.event_count().unwrap(), 19);
     let finalized_events = store
         .events_for_run(&run_id.to_string())

@@ -286,9 +286,14 @@ initial session. The host stores it in verified CAS and binds its digest to the
 protected workspace manifest; candidate execution and recovery accept only
 opaque session or recovery references and reload those exact bytes from CAS.
 Caller-supplied packet replacement and general tool execution remain blocked.
-The signed run response contains only opaque session references and the closed
-status set `pending`, `recorded`, `failed`, `lease_expired`, or
-`reconciliation_required`.
+Nonterminal or failed signed run responses contain only opaque session
+references and the closed status set `pending`, `failed`, `lease_expired`, or
+`reconciliation_required`. Candidate success requires a V2 receipt rebuilt
+from the signed candidate, completion event, and exact checkpoint root.
+Reviewer success requires a V1 receipt binding the candidate, completion,
+passed acceptance, reviewer dispatch, structured verdict, signed verdict
+event, and exact finalization checkpoint root. A bare `succeeded` or `recorded`
+status is rejected as incomplete success evidence.
 
 ### Protected promotion-decision client
 

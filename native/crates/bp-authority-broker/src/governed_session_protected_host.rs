@@ -29,7 +29,8 @@ use crate::governed_session_host::{
 };
 use crate::governed_session_response::{
     governed_candidate_run_status_v1, governed_reviewer_run_result_v1,
-    host_owned_governed_candidate_run_result_v1, GovernedCandidateReceiptProjectionV1,
+    host_owned_governed_candidate_run_result_v1, host_owned_governed_reviewer_run_result_v1,
+    GovernedCandidateReceiptProjectionV1, GovernedReviewReceiptProjectionV1,
 };
 use crate::governed_session_startup::{
     GovernedSessionHostStartupErrorV1, GovernedSessionHostStartupV1, GovernedSessionProviderLaneV1,
@@ -82,8 +83,8 @@ use bp_ledger::storage::sqlite::{
     GovernedV5CandidateFinalizeAuthorizeAndClaimRequestV1,
     GovernedV5CandidateFinalizeResultRequestV1, GovernedV5CandidateReceiptSetDispositionV1,
     GovernedV5CandidateReceiptSetRequestV1, GovernedV5CommandActionIssueRequestV1,
-    GovernedV5CommandActionReceiptRequestV1, GovernedV5ReviewVerdictFinalizeRequestV1,
-    ResolveGovernedV5CandidateAuthorityRequestV1,
+    GovernedV5CommandActionReceiptRequestV1, GovernedV5ReviewVerdictFinalizeDispositionV1,
+    GovernedV5ReviewVerdictFinalizeRequestV1, ResolveGovernedV5CandidateAuthorityRequestV1,
 };
 use bp_provider_anthropic::{AnthropicHttpTransportV1, AnthropicProvider};
 use bp_provider_sdk::{
@@ -109,6 +110,12 @@ pub(crate) struct ProtectedGovernedSessionHostStateV1 {
 struct CandidateCommandRunResultV1 {
     status: BrokerCommandActionStatus,
     receipt: Option<GovernedCandidateReceiptProjectionV1>,
+}
+
+#[derive(Debug, PartialEq)]
+struct ReviewerRunResultV1 {
+    status: BrokerModelActionStatus,
+    receipt: Option<GovernedReviewReceiptProjectionV1>,
 }
 
 #[derive(Clone)]
@@ -917,7 +924,7 @@ impl ProtectedGovernedSessionHostStateV1 {
         &self,
         recovery_ref: &str,
         session_ref: &str,
-    ) -> Result<BrokerModelActionStatus, ProtectedGovernedSessionProviderErrorV1> {
+    ) -> Result<ReviewerRunResultV1, ProtectedGovernedSessionProviderErrorV1> {
         let config = self.validated_startup.config();
         let snapshot = bp_replay::TrustedGovernedRecoverySnapshot::open_bounded_v1(
             &config.run_id.to_string(),
@@ -954,13 +961,29 @@ impl ProtectedGovernedSessionHostStateV1 {
         };
         match self.prepare_anthropic_provider(request.clone())? {
             ProviderTokenPreflightStatusV1::Recorded => {}
-            ProviderTokenPreflightStatusV1::Pending => return Ok(BrokerModelActionStatus::Pending),
-            ProviderTokenPreflightStatusV1::Failed => return Ok(BrokerModelActionStatus::Failed),
+            ProviderTokenPreflightStatusV1::Pending => {
+                return Ok(ReviewerRunResultV1 {
+                    status: BrokerModelActionStatus::Pending,
+                    receipt: None,
+                })
+            }
+            ProviderTokenPreflightStatusV1::Failed => {
+                return Ok(ReviewerRunResultV1 {
+                    status: BrokerModelActionStatus::Failed,
+                    receipt: None,
+                })
+            }
             ProviderTokenPreflightStatusV1::LeaseExpired => {
-                return Ok(BrokerModelActionStatus::LeaseExpired)
+                return Ok(ReviewerRunResultV1 {
+                    status: BrokerModelActionStatus::LeaseExpired,
+                    receipt: None,
+                })
             }
             ProviderTokenPreflightStatusV1::ReconciliationRequired => {
-                return Ok(BrokerModelActionStatus::ReconciliationRequired)
+                return Ok(ReviewerRunResultV1 {
+                    status: BrokerModelActionStatus::ReconciliationRequired,
+                    receipt: None,
+                })
             }
         }
 
@@ -1011,7 +1034,8 @@ impl ProtectedGovernedSessionHostStateV1 {
         )
         .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)?;
         if status == BrokerModelActionStatus::Recorded {
-            self.ledger
+            let finalized = self
+                .ledger
                 .store()
                 .finalize_governed_v5_review_verdict_v1(
                     &GovernedV5ReviewVerdictFinalizeRequestV1 {
@@ -1032,8 +1056,38 @@ impl ProtectedGovernedSessionHostStateV1 {
                     &config.v5_admission_checkpoint_signer,
                 )
                 .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)?;
+            let receipt = match finalized {
+                GovernedV5ReviewVerdictFinalizeDispositionV1::Recorded { receipt, .. }
+                | GovernedV5ReviewVerdictFinalizeDispositionV1::Existing { receipt, .. } => receipt,
+            };
+            let verdict = receipt.verdict;
+            return Ok(ReviewerRunResultV1 {
+                status,
+                receipt: Some(GovernedReviewReceiptProjectionV1 {
+                    candidate_created_event_ref: receipt.candidate_created_event_id.to_string(),
+                    candidate_completion_event_ref: receipt
+                        .candidate_completion_event_id
+                        .to_string(),
+                    candidate_digest: receipt.candidate_digest,
+                    acceptance_event_ref: receipt.acceptance_event_id.to_string(),
+                    acceptance_digest: receipt.acceptance_digest,
+                    reviewer_dispatch_event_ref: receipt.reviewer_dispatch_event_id.to_string(),
+                    reviewer_dispatch_envelope_digest: receipt.reviewer_dispatch_envelope_digest,
+                    review_verdict_event_ref: receipt.review_verdict_event_id.to_string(),
+                    decision: verdict.decision,
+                    findings: verdict.findings,
+                    confidence: verdict.confidence,
+                    reviewer_manifest_digest: verdict.reviewer_manifest_digest,
+                    tape_root_digest: receipt.tape_root_digest,
+                    native_receipt_ref: format!("signed-event:{}", receipt.review_verdict_event_id),
+                    native_receipt_digest: receipt.review_verdict_event_digest,
+                }),
+            });
         }
-        Ok(status)
+        Ok(ReviewerRunResultV1 {
+            status,
+            receipt: None,
+        })
     }
 
     fn authorize_client_request(
@@ -1065,13 +1119,19 @@ impl ProtectedGovernedSessionHostStateV1 {
                 session_ref,
                 ..
             } => {
-                let status = self
+                let outcome = self
                     .run_reviewer_session(recovery_ref, session_ref)
                     .map_err(|_| GovernedSessionHostErrorV1::AuthorityRejected)?;
+                let result = match outcome.receipt {
+                    Some(receipt) => {
+                        host_owned_governed_reviewer_run_result_v1(recovery_ref, receipt)
+                    }
+                    None => governed_reviewer_run_result_v1(outcome.status),
+                };
                 Ok(GovernedSessionHostDispositionV1::Completed {
                     recovery_ref: recovery_ref.clone(),
                     session_ref: session_ref.clone(),
-                    result: governed_reviewer_run_result_v1(status),
+                    result,
                 })
             }
             ParsedGovernedSessionClientRequestV1::OpenCandidateSession {

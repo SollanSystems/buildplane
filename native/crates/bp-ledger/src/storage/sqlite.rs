@@ -1098,6 +1098,24 @@ pub struct GovernedV5ReviewVerdictFinalizeRequestV1 {
     pub target_ref: String,
 }
 
+/// Closed, checkpoint-verified review evidence returned to the protected host
+/// after finalization. It is display evidence only and carries no promotion
+/// decision or effect capability.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResolvedGovernedV5ReviewReceiptV1 {
+    pub candidate_created_event_id: EventId,
+    pub candidate_completion_event_id: EventId,
+    pub candidate_digest: String,
+    pub acceptance_event_id: EventId,
+    pub acceptance_digest: String,
+    pub reviewer_dispatch_event_id: EventId,
+    pub reviewer_dispatch_envelope_digest: String,
+    pub review_verdict_event_id: EventId,
+    pub review_verdict_event_digest: String,
+    pub verdict: ReviewVerdictRecordedV2,
+    pub tape_root_digest: String,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum GovernedV5ReviewVerdictFinalizeDispositionV1 {
     Recorded {
@@ -1108,6 +1126,7 @@ pub enum GovernedV5ReviewVerdictFinalizeDispositionV1 {
         review_ref: String,
         candidate_digest: String,
         decision: ReviewDecisionV1,
+        receipt: ResolvedGovernedV5ReviewReceiptV1,
     },
     Existing {
         review_action_receipt_event_id: EventId,
@@ -1117,6 +1136,7 @@ pub enum GovernedV5ReviewVerdictFinalizeDispositionV1 {
         review_ref: String,
         candidate_digest: String,
         decision: ReviewDecisionV1,
+        receipt: ResolvedGovernedV5ReviewReceiptV1,
     },
 }
 
@@ -6186,7 +6206,8 @@ impl SqliteStore {
                         "review verdict and promotion approval request are only partially recorded",
                     )),
                 };
-                GovernedV5ReviewVerdictFinalizeDispositionV1::Existing {
+                ReviewFinalizationDispositionMaterialV1 {
+                    recorded: false,
                     review_action_receipt_event_id: receipt_events
                         .iter()
                         .find(|event| {
@@ -6306,7 +6327,8 @@ impl SqliteStore {
                         None
                     };
 
-                GovernedV5ReviewVerdictFinalizeDispositionV1::Recorded {
+                ReviewFinalizationDispositionMaterialV1 {
+                    recorded: true,
                     review_action_receipt_event_id: receipt_events
                         .iter()
                         .find(|event| {
@@ -6333,21 +6355,110 @@ impl SqliteStore {
                 ))
             }
         };
-        match self.seal_governed_signed_prefix_in_transaction(
+        let checkpoint_event_id = match self.seal_governed_signed_prefix_in_transaction(
             &tx,
             &request.run_id,
             checkpoint_signing_key,
             checkpoint_signer,
         )? {
-            GovernedCheckpointSealOutcome::AlreadySealed { .. }
-            | GovernedCheckpointSealOutcome::Emitted { .. } => {}
+            GovernedCheckpointSealOutcome::AlreadySealed {
+                checkpoint_event_id,
+            }
+            | GovernedCheckpointSealOutcome::Emitted {
+                checkpoint_event_id,
+            } => checkpoint_event_id,
             GovernedCheckpointSealOutcome::EmptyPrefix => {
                 return Err(review_verdict_reconciliation_required(
                     request,
                     "review finalization could not seal its signed prefix",
                 ))
             }
+        };
+        let checkpoint_event = load_verified_authority_event(
+            &tx,
+            checkpoint_event_id,
+            &authority.trusted_keys,
+            checkpoint_signer,
+            "review finalization checkpoint",
+        )?;
+        let Payload::TapeCheckpointV1(checkpoint) = &checkpoint_event.payload else {
+            return Err(review_verdict_reconciliation_required(
+                request,
+                "review finalization seal is not a tape checkpoint",
+            ));
+        };
+        let expected_through_event_id = disposition
+            .promotion_approval_request_event_id
+            .unwrap_or(disposition.review_verdict_event_id);
+        if checkpoint_event.parent_event_id != Some(expected_through_event_id)
+            || checkpoint.run_id != request.run_id
+            || checkpoint.through_event_id != expected_through_event_id
+            || checkpoint.algorithm != TapeRootAlgorithm::Sha256Linear
+            || !is_canonical_sha256_digest(&checkpoint.tape_root_hash)
+        {
+            return Err(review_verdict_reconciliation_required(
+                request,
+                "review finalization checkpoint does not bind its exact terminal event",
+            ));
         }
+        let verdict_event = load_verified_authority_event(
+            &tx,
+            disposition.review_verdict_event_id,
+            &authority.trusted_keys,
+            review_signer,
+            "review finalization verdict receipt",
+        )?;
+        let Payload::ReviewVerdictRecordedV2(stored_verdict) = &verdict_event.payload else {
+            return Err(review_verdict_reconciliation_required(
+                request,
+                "review receipt event is not ReviewVerdictRecordedV2",
+            ));
+        };
+        if stored_verdict != &verdict {
+            return Err(review_verdict_reconciliation_required(
+                request,
+                "review receipt verdict no longer equals the reconstructed verdict",
+            ));
+        }
+        let review_verdict_event_digest = canonical_event_hash(&verdict_event)?;
+        let receipt = ResolvedGovernedV5ReviewReceiptV1 {
+            candidate_created_event_id: candidate.candidate_created_event_id,
+            candidate_completion_event_id: candidate.candidate_completion_event_id,
+            candidate_digest: candidate.candidate.candidate_digest.clone(),
+            acceptance_event_id: candidate.acceptance_event_id,
+            acceptance_digest: candidate.acceptance.acceptance_digest.clone(),
+            reviewer_dispatch_event_id: dispatch_event_id,
+            reviewer_dispatch_envelope_digest: action.dispatch_envelope_digest.clone(),
+            review_verdict_event_id: disposition.review_verdict_event_id,
+            review_verdict_event_digest,
+            verdict: verdict.clone(),
+            tape_root_digest: checkpoint.tape_root_hash.clone(),
+        };
+        let disposition = if disposition.recorded {
+            GovernedV5ReviewVerdictFinalizeDispositionV1::Recorded {
+                review_action_receipt_event_id: disposition.review_action_receipt_event_id,
+                review_action_receipt_set_event_id: disposition.review_action_receipt_set_event_id,
+                review_verdict_event_id: disposition.review_verdict_event_id,
+                promotion_approval_request_event_id: disposition
+                    .promotion_approval_request_event_id,
+                review_ref: disposition.review_ref,
+                candidate_digest: disposition.candidate_digest,
+                decision: disposition.decision,
+                receipt,
+            }
+        } else {
+            GovernedV5ReviewVerdictFinalizeDispositionV1::Existing {
+                review_action_receipt_event_id: disposition.review_action_receipt_event_id,
+                review_action_receipt_set_event_id: disposition.review_action_receipt_set_event_id,
+                review_verdict_event_id: disposition.review_verdict_event_id,
+                promotion_approval_request_event_id: disposition
+                    .promotion_approval_request_event_id,
+                review_ref: disposition.review_ref,
+                candidate_digest: disposition.candidate_digest,
+                decision: disposition.decision,
+                receipt,
+            }
+        };
         tx.commit()?;
         for event in &appended_events {
             self.record_ordinary_append(event);
@@ -13077,7 +13188,10 @@ struct VerifiedGovernedModelAuthorization {
 #[derive(Clone, Debug)]
 struct VerifiedGovernedReviewerCandidateV1 {
     candidate: CandidateCreatedV2,
+    candidate_created_event_id: EventId,
+    candidate_completion_event_id: EventId,
     acceptance: CandidateAcceptanceRecordedV1,
+    acceptance_event_id: EventId,
 }
 
 /// The admission window evaluated for one claimed governed dispatch. The
@@ -13825,6 +13939,17 @@ struct DerivedReviewSupportReceiptV1 {
     result_event: Event,
     receipt: ActionReceiptRecordedV2,
     receipt_digest: String,
+}
+
+struct ReviewFinalizationDispositionMaterialV1 {
+    recorded: bool,
+    review_action_receipt_event_id: EventId,
+    review_action_receipt_set_event_id: EventId,
+    review_verdict_event_id: EventId,
+    promotion_approval_request_event_id: Option<EventId>,
+    review_ref: String,
+    candidate_digest: String,
+    decision: ReviewDecisionV1,
 }
 
 fn derive_provider_preflight_review_receipt(
@@ -16628,7 +16753,10 @@ fn verify_reviewer_candidate_binding(
     let candidate = candidate.clone();
     Ok(VerifiedGovernedReviewerCandidateV1 {
         candidate,
+        candidate_created_event_id: candidate_event.id,
+        candidate_completion_event_id: completion_event.id,
         acceptance: acceptance.clone(),
+        acceptance_event_id: acceptance_event.id,
     })
 }
 

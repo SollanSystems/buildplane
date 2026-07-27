@@ -5,7 +5,9 @@ use crate::governed_session_client::{
     GovernedSessionClientOperationV1, ParsedGovernedSessionClientRequestV1,
 };
 use crate::BrokerModelActionStatus;
-use bp_ledger::payload::trust_spine::CandidateCreatedV2;
+use bp_ledger::payload::trust_spine::{
+    CandidateCreatedV2, ReviewDecisionV1, ReviewFindingSeverityV1, ReviewFindingV1,
+};
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -106,6 +108,25 @@ pub(crate) struct GovernedCandidateReceiptProjectionV1 {
     pub(crate) governed_packet_digest: String,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct GovernedReviewReceiptProjectionV1 {
+    pub(crate) candidate_created_event_ref: String,
+    pub(crate) candidate_completion_event_ref: String,
+    pub(crate) candidate_digest: String,
+    pub(crate) acceptance_event_ref: String,
+    pub(crate) acceptance_digest: String,
+    pub(crate) reviewer_dispatch_event_ref: String,
+    pub(crate) reviewer_dispatch_envelope_digest: String,
+    pub(crate) review_verdict_event_ref: String,
+    pub(crate) decision: ReviewDecisionV1,
+    pub(crate) findings: Vec<ReviewFindingV1>,
+    pub(crate) confidence: f64,
+    pub(crate) reviewer_manifest_digest: String,
+    pub(crate) tape_root_digest: String,
+    pub(crate) native_receipt_ref: String,
+    pub(crate) native_receipt_digest: String,
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct HostVerifiedCandidateReceiptWireV2 {
@@ -128,6 +149,55 @@ struct HostOwnedGovernedCandidateRunResultWireV1 {
     kind: String,
     recovery_ref: String,
     candidate_receipt: HostVerifiedCandidateReceiptWireV2,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct HostReviewFindingWireV1 {
+    severity: ReviewFindingSeverityV1,
+    check_id: String,
+    file: String,
+    line: u32,
+    explanation: String,
+    evidence_refs: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct HostReviewVerdictWireV1 {
+    schema_version: u8,
+    candidate_digest: String,
+    decision: ReviewDecisionV1,
+    findings: Vec<HostReviewFindingWireV1>,
+    confidence: f64,
+    reviewer_manifest_digest: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct HostVerifiedReviewReceiptWireV1 {
+    schema_version: u8,
+    recovery_ref: String,
+    candidate_created_event_ref: String,
+    candidate_completion_event_ref: String,
+    candidate_digest: String,
+    acceptance_event_ref: String,
+    acceptance_digest: String,
+    reviewer_dispatch_event_ref: String,
+    reviewer_dispatch_envelope_digest: String,
+    review_verdict_event_ref: String,
+    verdict: HostReviewVerdictWireV1,
+    tape_root_digest: String,
+    native_receipt_ref: String,
+    native_receipt_digest: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct HostOwnedGovernedReviewerRunResultWireV1 {
+    kind: String,
+    recovery_ref: String,
+    review_receipt: HostVerifiedReviewReceiptWireV1,
 }
 
 pub(crate) fn governed_candidate_run_status_v1(status: BrokerCommandActionStatus) -> Value {
@@ -169,6 +239,52 @@ pub(crate) fn host_owned_governed_candidate_run_result_v1(
         },
     })
     .expect("fixed host-owned governed candidate result is serializable")
+}
+
+pub(crate) fn host_owned_governed_reviewer_run_result_v1(
+    recovery_ref: &str,
+    receipt: GovernedReviewReceiptProjectionV1,
+) -> Value {
+    let findings = receipt
+        .findings
+        .into_iter()
+        .map(|finding| HostReviewFindingWireV1 {
+            severity: finding.severity,
+            check_id: finding.check_id,
+            file: finding.file,
+            line: finding.line,
+            explanation: finding.explanation,
+            evidence_refs: finding.evidence_refs,
+        })
+        .collect();
+    serde_json::to_value(HostOwnedGovernedReviewerRunResultWireV1 {
+        kind: "host-owned-governed-reviewer-run-result-v1".into(),
+        recovery_ref: recovery_ref.into(),
+        review_receipt: HostVerifiedReviewReceiptWireV1 {
+            schema_version: 1,
+            recovery_ref: recovery_ref.into(),
+            candidate_created_event_ref: receipt.candidate_created_event_ref,
+            candidate_completion_event_ref: receipt.candidate_completion_event_ref,
+            candidate_digest: receipt.candidate_digest.clone(),
+            acceptance_event_ref: receipt.acceptance_event_ref,
+            acceptance_digest: receipt.acceptance_digest,
+            reviewer_dispatch_event_ref: receipt.reviewer_dispatch_event_ref,
+            reviewer_dispatch_envelope_digest: receipt.reviewer_dispatch_envelope_digest,
+            review_verdict_event_ref: receipt.review_verdict_event_ref,
+            verdict: HostReviewVerdictWireV1 {
+                schema_version: 1,
+                candidate_digest: receipt.candidate_digest,
+                decision: receipt.decision,
+                findings,
+                confidence: receipt.confidence,
+                reviewer_manifest_digest: receipt.reviewer_manifest_digest,
+            },
+            tape_root_digest: receipt.tape_root_digest,
+            native_receipt_ref: receipt.native_receipt_ref,
+            native_receipt_digest: receipt.native_receipt_digest,
+        },
+    })
+    .expect("fixed host-owned governed reviewer result is serializable")
 }
 
 pub(crate) fn governed_reviewer_run_result_v1(status: BrokerModelActionStatus) -> Value {
@@ -323,7 +439,10 @@ fn validate_response_binding<'a>(
         GovernedSessionClientOperationV1::RunReviewerSession => {
             validate_session_refs(request, recovery_ref, session_ref)?;
             let result = result.ok_or(GovernedSessionResponseErrorV1::InvalidBinding)?;
-            validate_governed_reviewer_run_result(result)?;
+            validate_governed_reviewer_run_result(
+                result,
+                recovery_ref.ok_or(GovernedSessionResponseErrorV1::InvalidBinding)?,
+            )?;
             ("completed", Some(result))
         }
     };
@@ -402,14 +521,59 @@ fn is_canonical_target_ref(value: &str) -> bool {
 
 fn validate_governed_reviewer_run_result(
     result: &Value,
+    expected_recovery_ref: &str,
 ) -> Result<(), GovernedSessionResponseErrorV1> {
+    if result.get("kind").and_then(Value::as_str)
+        == Some("host-owned-governed-reviewer-run-result-v1")
+    {
+        let result: HostOwnedGovernedReviewerRunResultWireV1 =
+            serde_json::from_value(result.clone())
+                .map_err(|_| GovernedSessionResponseErrorV1::InvalidBinding)?;
+        let receipt = &result.review_receipt;
+        let verdict = &receipt.verdict;
+        if result.recovery_ref != expected_recovery_ref
+            || result.recovery_ref != receipt.recovery_ref
+            || receipt.schema_version != 1
+            || verdict.schema_version != 1
+            || verdict.candidate_digest != receipt.candidate_digest
+            || !is_event_id(&receipt.candidate_created_event_ref)
+            || !is_event_id(&receipt.candidate_completion_event_ref)
+            || !is_event_id(&receipt.acceptance_event_ref)
+            || !is_event_id(&receipt.reviewer_dispatch_event_ref)
+            || !is_event_id(&receipt.review_verdict_event_ref)
+            || !is_sha256_digest(&receipt.candidate_digest)
+            || !is_sha256_digest(&receipt.acceptance_digest)
+            || !is_sha256_digest(&receipt.reviewer_dispatch_envelope_digest)
+            || !is_sha256_digest(&receipt.tape_root_digest)
+            || !is_sha256_digest(&receipt.native_receipt_digest)
+            || !is_sha256_digest(&verdict.reviewer_manifest_digest)
+            || !verdict.confidence.is_finite()
+            || !(0.0..=1.0).contains(&verdict.confidence)
+            || receipt.native_receipt_ref
+                != format!("signed-event:{}", receipt.review_verdict_event_ref)
+            || verdict.findings.iter().any(|finding| {
+                finding.check_id.trim().is_empty()
+                    || finding.file.trim().is_empty()
+                    || finding.line == 0
+                    || finding.explanation.trim().is_empty()
+                    || finding.evidence_refs.is_empty()
+                    || finding
+                        .evidence_refs
+                        .iter()
+                        .any(|value| value.trim().is_empty())
+            })
+        {
+            return Err(GovernedSessionResponseErrorV1::InvalidBinding);
+        }
+        return Ok(());
+    }
     let result: GovernedReviewerRunResultWireV1 = serde_json::from_value(result.clone())
         .map_err(|_| GovernedSessionResponseErrorV1::InvalidBinding)?;
     if result.schema_version != 1
         || result.kind != "governed_reviewer_run_result_v1"
         || !matches!(
             result.status.as_str(),
-            "pending" | "recorded" | "failed" | "lease_expired" | "reconciliation_required"
+            "pending" | "failed" | "lease_expired" | "reconciliation_required"
         )
     {
         return Err(GovernedSessionResponseErrorV1::InvalidBinding);
