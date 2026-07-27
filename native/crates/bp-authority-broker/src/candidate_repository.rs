@@ -30,6 +30,10 @@ impl GovernedRepositoryBindingV1 {
     pub(crate) fn repository_root(&self) -> &str {
         &self.repository_root
     }
+
+    pub(crate) fn target_ref(&self) -> &str {
+        &self.target_ref
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]

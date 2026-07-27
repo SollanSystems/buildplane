@@ -2276,6 +2276,7 @@ fn reviewer_authority_adopts_only_a_signed_candidate_bound_intent() {
     let finalize_request = GovernedV5ReviewVerdictFinalizeRequestV1 {
         run_id,
         reviewer_action_request_event_id: request_event.id,
+        target_ref: "refs/heads/main".into(),
     };
     let finalized = store
         .finalize_governed_v5_review_verdict_v1_at_for_tests(
@@ -2286,6 +2287,8 @@ fn reviewer_authority_adopts_only_a_signed_candidate_bound_intent() {
             &receipt_signer,
             &review_key,
             &review_signer,
+            &key,
+            &signer,
             &checkpoint_key,
             &checkpoint_signer,
             now + Duration::milliseconds(7),
@@ -2298,7 +2301,7 @@ fn reviewer_authority_adopts_only_a_signed_candidate_bound_intent() {
             ..
         }
     ));
-    assert_eq!(store.event_count().unwrap(), 18);
+    assert_eq!(store.event_count().unwrap(), 19);
     let finalized_events = store
         .events_for_run(&run_id.to_string())
         .expect("load finalized reviewer evidence");
@@ -2348,6 +2351,20 @@ fn reviewer_authority_adopts_only_a_signed_candidate_bound_intent() {
         verdict.review_output_digest,
         "domain-separated semantic digest must not be confused with raw CAS SHA"
     );
+    let approval_request = finalized_events
+        .iter()
+        .find_map(
+            |row| match row.to_event().expect("decode finalized event").payload {
+                Payload::PromotionApprovalRequestedV1(request) => Some(request),
+                _ => None,
+            },
+        )
+        .expect("approving review creates one durable operator request");
+    assert_eq!(approval_request.target_ref, "refs/heads/main");
+    assert_eq!(
+        approval_request.review_refs,
+        vec![verdict.review_ref.clone()]
+    );
     let retry = store
         .finalize_governed_v5_review_verdict_v1_at_for_tests(
             &finalize_request,
@@ -2357,6 +2374,8 @@ fn reviewer_authority_adopts_only_a_signed_candidate_bound_intent() {
             &receipt_signer,
             &review_key,
             &review_signer,
+            &key,
+            &signer,
             &checkpoint_key,
             &checkpoint_signer,
             now + Duration::milliseconds(8),
@@ -2371,7 +2390,7 @@ fn reviewer_authority_adopts_only_a_signed_candidate_bound_intent() {
     ));
     assert_eq!(
         store.event_count().unwrap(),
-        18,
+        19,
         "review finalization retry cannot duplicate any evidence"
     );
 }

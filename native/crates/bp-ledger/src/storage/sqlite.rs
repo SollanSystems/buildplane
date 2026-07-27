@@ -1074,12 +1074,15 @@ pub struct GovernedModelActionResultRequestV1 {
 
 /// Closed host-private request to materialize the review transaction that
 /// follows one succeeded governed reviewer model action. The caller selects
-/// only the already-signed action request; candidate, acceptance, result,
-/// receipt-set, and verdict fields are reconstructed from tape and CAS.
+/// only the already-signed action request and a canonical target ref recovered
+/// by the protected host from the candidate's verified repository binding;
+/// candidate, acceptance, result, receipt-set, verdict, and approval fields
+/// are reconstructed from tape and CAS.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GovernedV5ReviewVerdictFinalizeRequestV1 {
     pub run_id: RunId,
     pub reviewer_action_request_event_id: EventId,
+    pub target_ref: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1088,6 +1091,7 @@ pub enum GovernedV5ReviewVerdictFinalizeDispositionV1 {
         review_action_receipt_event_id: EventId,
         review_action_receipt_set_event_id: EventId,
         review_verdict_event_id: EventId,
+        promotion_approval_request_event_id: Option<EventId>,
         review_ref: String,
         candidate_digest: String,
         decision: ReviewDecisionV1,
@@ -1096,6 +1100,7 @@ pub enum GovernedV5ReviewVerdictFinalizeDispositionV1 {
         review_action_receipt_event_id: EventId,
         review_action_receipt_set_event_id: EventId,
         review_verdict_event_id: EventId,
+        promotion_approval_request_event_id: Option<EventId>,
         review_ref: String,
         candidate_digest: String,
         decision: ReviewDecisionV1,
@@ -5564,6 +5569,8 @@ impl SqliteStore {
         receipt_signer: &ActorKeyRef,
         review_signing_key: &SigningKey,
         review_signer: &ActorKeyRef,
+        approval_signing_key: &SigningKey,
+        approval_signer: &ActorKeyRef,
         checkpoint_signing_key: &SigningKey,
         checkpoint_signer: &ActorKeyRef,
     ) -> Result<GovernedV5ReviewVerdictFinalizeDispositionV1> {
@@ -5575,6 +5582,8 @@ impl SqliteStore {
             receipt_signer,
             review_signing_key,
             review_signer,
+            approval_signing_key,
+            approval_signer,
             checkpoint_signing_key,
             checkpoint_signer,
             Utc::now(),
@@ -5592,6 +5601,8 @@ impl SqliteStore {
         receipt_signer: &ActorKeyRef,
         review_signing_key: &SigningKey,
         review_signer: &ActorKeyRef,
+        approval_signing_key: &SigningKey,
+        approval_signer: &ActorKeyRef,
         checkpoint_signing_key: &SigningKey,
         checkpoint_signer: &ActorKeyRef,
         now: DateTime<Utc>,
@@ -5604,6 +5615,8 @@ impl SqliteStore {
             receipt_signer,
             review_signing_key,
             review_signer,
+            approval_signing_key,
+            approval_signer,
             checkpoint_signing_key,
             checkpoint_signer,
             now,
@@ -5620,6 +5633,8 @@ impl SqliteStore {
         receipt_signer: &ActorKeyRef,
         review_signing_key: &SigningKey,
         review_signer: &ActorKeyRef,
+        approval_signing_key: &SigningKey,
+        approval_signer: &ActorKeyRef,
         checkpoint_signing_key: &SigningKey,
         checkpoint_signer: &ActorKeyRef,
         now: DateTime<Utc>,
@@ -5634,6 +5649,8 @@ impl SqliteStore {
             review_signing_key,
             review_signer,
         )?;
+        validate_action_request_signer(authority, approval_signing_key, approval_signer)
+            .map_err(|error| review_verdict_authority_rejected(error.to_string()))?;
         validate_governed_reviewer_checkpoint_signer(
             authority,
             lineage,
@@ -5652,6 +5669,11 @@ impl SqliteStore {
         if action_event.run_id != request.run_id {
             return Err(review_verdict_authority_rejected(
                 "review action belongs to a different run",
+            ));
+        }
+        if !is_canonical_target_ref(&request.target_ref) {
+            return Err(review_verdict_authority_rejected(
+                "review finalization target_ref is not a canonical branch ref",
             ));
         }
         let dispatch_event_id = action_event.parent_event_id.ok_or_else(|| {
@@ -6031,6 +6053,21 @@ impl SqliteStore {
             reviewer_authority: review_signer.actor_id.clone(),
             reviewed_at: completed_at.clone(),
         };
+        let promotion_approval =
+            (verdict.decision == ReviewDecisionV1::Approve).then(|| PromotionApprovalRequestedV1 {
+                candidate_digest: verdict.candidate_digest.clone(),
+                base_commit_sha: candidate.candidate.base_commit_sha.clone(),
+                target_ref: request.target_ref.clone(),
+                envelope_digest: verdict.candidate_envelope_digest.clone(),
+                acceptance_ref: verdict.acceptance_ref.clone(),
+                review_refs: vec![verdict.review_ref.clone()],
+                requested_by: approval_signer.actor_id.clone(),
+                requested_at: completed_at.clone(),
+                idempotency_key: format!(
+                    "promotion-approval:{}:{}",
+                    request.run_id, verdict.candidate_digest
+                ),
+            });
 
         let existing_receipts = receipt_materials
             .iter()
@@ -6057,6 +6094,13 @@ impl SqliteStore {
             authority,
             review_signer,
             &action.action_id,
+        )?;
+        let existing_approval = matching_signed_promotion_approval_request(
+            &tx,
+            request.run_id,
+            authority,
+            approval_signer,
+            &verdict.candidate_digest,
         )?;
         let mut appended_events = Vec::new();
         let all_receipts_exist = existing_receipts.iter().all(Option::is_some);
@@ -6103,6 +6147,32 @@ impl SqliteStore {
                         "existing reviewer finalization evidence conflicts with reconstructed tape and CAS",
                     ));
                 }
+                let promotion_approval_request_event_id = match (
+                    &promotion_approval,
+                    existing_approval.as_ref(),
+                ) {
+                    (Some(expected), Some(approval_event)) => {
+                        let Payload::PromotionApprovalRequestedV1(existing) =
+                            &approval_event.payload
+                        else {
+                            unreachable!("approval matcher returns PromotionApprovalRequestedV1")
+                        };
+                        if existing != expected
+                            || approval_event.parent_event_id != Some(verdict_event.id)
+                        {
+                            return Err(review_verdict_reconciliation_required(
+                                    request,
+                                    "existing promotion approval request conflicts with reconstructed review evidence",
+                                ));
+                        }
+                        Some(approval_event.id)
+                    }
+                    (None, None) => None,
+                    _ => return Err(review_verdict_reconciliation_required(
+                        request,
+                        "review verdict and promotion approval request are only partially recorded",
+                    )),
+                };
                 GovernedV5ReviewVerdictFinalizeDispositionV1::Existing {
                     review_action_receipt_event_id: receipt_events
                         .iter()
@@ -6117,12 +6187,19 @@ impl SqliteStore {
                         .id,
                     review_action_receipt_set_event_id: set_event.id,
                     review_verdict_event_id: verdict_event.id,
+                    promotion_approval_request_event_id,
                     review_ref: verdict.review_ref.clone(),
                     candidate_digest: verdict.candidate_digest.clone(),
                     decision: verdict.decision,
                 }
             }
             (false, true, None, None) => {
+                if existing_approval.is_some() {
+                    return Err(review_verdict_reconciliation_required(
+                        request,
+                        "promotion approval request exists before its reviewer finalization transaction",
+                    ));
+                }
                 ensure_governed_review_finalization_lifecycle_is_open(
                     &tx,
                     request,
@@ -6190,6 +6267,31 @@ impl SqliteStore {
                 insert_event(&tx, &verdict_event)?;
                 insert_event_signature(&tx, &verdict_signature)?;
                 appended_events.extend([set_event.clone(), verdict_event.clone()]);
+                let promotion_approval_request_event_id =
+                    if let Some(approval) = promotion_approval.as_ref() {
+                        let approval_event = canonicalize(Event {
+                            id: EventId::new(),
+                            run_id: request.run_id,
+                            parent_event_id: Some(verdict_event.id),
+                            schema_version: Event::CURRENT_SCHEMA_VERSION,
+                            kind: EventKind::PromotionApprovalRequested,
+                            occurred_at: recorded_at,
+                            payload: Payload::PromotionApprovalRequestedV1(approval.clone()),
+                        })?;
+                        validate_new_ordinary_event_id(&tx, &approval_event)?;
+                        let approval_signature = sign_event(
+                            &approval_event,
+                            approval_signing_key,
+                            approval_signer,
+                            signed_at,
+                        )?;
+                        insert_event(&tx, &approval_event)?;
+                        insert_event_signature(&tx, &approval_signature)?;
+                        appended_events.push(approval_event.clone());
+                        Some(approval_event.id)
+                    } else {
+                        None
+                    };
 
                 GovernedV5ReviewVerdictFinalizeDispositionV1::Recorded {
                     review_action_receipt_event_id: receipt_events
@@ -6205,6 +6307,7 @@ impl SqliteStore {
                         .id,
                     review_action_receipt_set_event_id: set_event.id,
                     review_verdict_event_id: verdict_event.id,
+                    promotion_approval_request_event_id,
                     review_ref: verdict.review_ref.clone(),
                     candidate_digest: verdict.candidate_digest.clone(),
                     decision: verdict.decision,
@@ -13600,6 +13703,40 @@ fn matching_signed_review_verdict(
             run_id: run_id.to_string(),
             action_id: action_id.into(),
             reason: "multiple signed review verdicts name the same model action".into(),
+        });
+    }
+    Ok(first)
+}
+
+fn matching_signed_promotion_approval_request(
+    conn: &Connection,
+    run_id: RunId,
+    authority: &ActivityClaimAuthorityV1,
+    approval_signer: &ActorKeyRef,
+    candidate_digest: &str,
+) -> Result<Option<Event>> {
+    let mut matching = signed_events_for_run_kind_by_signer(
+        conn,
+        run_id,
+        EventKind::PromotionApprovalRequested,
+        authority,
+        approval_signer,
+        "governed promotion approval request",
+    )?
+    .into_iter()
+    .filter(|event| {
+        matches!(
+            &event.payload,
+            Payload::PromotionApprovalRequestedV1(request)
+                if request.candidate_digest == candidate_digest
+        )
+    });
+    let first = matching.next();
+    if matching.next().is_some() {
+        return Err(LedgerError::ActionReceiptReconciliationRequired {
+            run_id: run_id.to_string(),
+            action_id: candidate_digest.into(),
+            reason: "multiple signed promotion approval requests name the same candidate".into(),
         });
     }
     Ok(first)

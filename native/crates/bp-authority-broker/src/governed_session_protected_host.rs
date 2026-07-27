@@ -9,7 +9,7 @@ use crate::anthropic_model_gateway::AnthropicModelGatewayV1;
 use crate::candidate_workspace::{
     finalize_candidate_workspace_v1, immutable_candidate_artifact_v1_bytes,
     open_candidate_verification_workspace_v1, open_candidate_workspace_v1,
-    reopen_candidate_workspace_v1,
+    reopen_candidate_workspace_v1, resolve_candidate_target_ref_v1,
 };
 use crate::command_action::{
     BrokerCommandActionRequest, BrokerCommandActionStatus, BrokerCommandAuthority,
@@ -784,6 +784,21 @@ impl ProtectedGovernedSessionHostStateV1 {
             session_ref,
         )
         .map_err(|_| ProtectedGovernedSessionProviderErrorV1::TrustedReplay)?;
+        let candidate_authority = self
+            .ledger
+            .store()
+            .resolve_governed_v5_candidate_execution_authority_v1(
+                config.run_id,
+                evidence.candidate_dispatch_event_ref,
+                &config.v5_admission_authority,
+                &config.activity_authority,
+            )
+            .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)?;
+        let target_ref = resolve_candidate_target_ref_v1(
+            self.validated_startup.authority_root().directory(),
+            &candidate_authority.candidate,
+        )
+        .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)?;
         let request = BrokerModelActionRequest {
             dispatch_event_id: evidence.reviewer_dispatch_event_ref,
             action_request_event_id: evidence.reviewer_action_request_event_ref,
@@ -854,6 +869,7 @@ impl ProtectedGovernedSessionHostStateV1 {
                         run_id: config.run_id,
                         reviewer_action_request_event_id: evidence
                             .reviewer_action_request_event_ref,
+                        target_ref,
                     },
                     self.cas.cas(),
                     &config.activity_authority,
@@ -861,6 +877,8 @@ impl ProtectedGovernedSessionHostStateV1 {
                     &config.action_receipt_signer,
                     self.signing_keys.review_verdict(),
                     &config.review_verdict_signer,
+                    self.signing_keys.action_request(),
+                    &config.action_request_signer,
                     self.signing_keys.checkpoint(),
                     &config.v5_admission_checkpoint_signer,
                 )

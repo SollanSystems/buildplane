@@ -323,6 +323,42 @@ pub(crate) fn reopen_candidate_workspace_v1(
     })
 }
 
+/// Recover the immutable target branch from the protected workspace manifest
+/// and recompute the complete repository binding before exposing it to the
+/// kernel-owned promotion-approval writer. No client-supplied branch name
+/// enters this path.
+pub(crate) fn resolve_candidate_target_ref_v1(
+    authority_root: &File,
+    authority: &ResolvedGovernedV5CandidateAuthorityV1,
+) -> Result<String, CandidateWorkspaceErrorV1> {
+    let (candidate_id, candidate_ref, workspace_name) = candidate_identity(authority)?;
+    let workspace_root = open_or_create_private_directory_at(authority_root, WORKSPACE_DIRECTORY)?;
+    let manifest_bytes =
+        read_workspace_manifest_bytes(&workspace_root, &manifest_name(&workspace_name)?)?;
+    let manifest: CandidateWorkspaceManifestV1 = serde_json::from_slice(&manifest_bytes)
+        .map_err(|_| CandidateWorkspaceErrorV1::ReconciliationRequired)?;
+    if manifest.schema_version != 1
+        || manifest.run_id != authority.run_id.to_string()
+        || manifest.dispatch_event_id != authority.dispatch_event_id.to_string()
+        || manifest.admission_event_id != authority.admission_event_id.to_string()
+        || manifest.repository_binding_digest != authority.repository_binding_digest
+        || manifest.candidate_id != candidate_id
+        || manifest.candidate_ref != candidate_ref
+        || manifest.workspace_name != workspace_name
+        || manifest.base_commit_sha != authority.base_commit_sha
+        || manifest.dispatch_envelope_digest != authority.dispatch_envelope_digest
+        || manifest.governed_packet_digest != authority.governed_packet_digest
+        || manifest.sandbox_profile_digest != authority.sandbox_profile_digest
+    {
+        return Err(CandidateWorkspaceErrorV1::ReconciliationRequired);
+    }
+    let binding = verify_governed_repository_binding_v1(
+        &manifest.repository_root,
+        &authority.repository_binding_digest,
+    )?;
+    Ok(binding.target_ref().into())
+}
+
 /// Materialize one deterministic commit and create-only candidate ref while
 /// preserving the checked-out target branch exactly. Git object writes occur
 /// before the ref CAS, so a crash can be retried to the same commit identity;
@@ -1269,6 +1305,11 @@ mod tests {
             open_candidate_verification_workspace_v1(&root, &authority, &artifact)
                 .expect("reopen verification workspace"),
             verification
+        );
+        assert_eq!(
+            resolve_candidate_target_ref_v1(&root, &authority)
+                .expect("recover target only from protected repository binding"),
+            "refs/heads/main"
         );
         assert_eq!(git_ok(repository.path(), &["rev-parse", "HEAD"]), root_head);
         assert_eq!(

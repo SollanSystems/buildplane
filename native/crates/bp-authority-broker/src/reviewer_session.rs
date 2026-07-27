@@ -26,6 +26,7 @@ use thiserror::Error;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ResolvedReviewerModelEvidenceV1 {
     pub(crate) run_id: String,
+    pub(crate) candidate_dispatch_event_ref: EventId,
     pub(crate) reviewer_dispatch_event_ref: EventId,
     pub(crate) reviewer_action_request_event_ref: EventId,
     pub(crate) reviewer_dispatch_envelope_digest: String,
@@ -214,6 +215,7 @@ pub(crate) fn resolve_reviewer_model_evidence_from_snapshot_v1(
 
     Ok(ResolvedReviewerModelEvidenceV1 {
         run_id: request.run_id.clone(),
+        candidate_dispatch_event_ref: candidate_workflow.dispatch.event_id,
         reviewer_dispatch_event_ref: reviewer.dispatch.event_id,
         reviewer_action_request_event_ref: action.request.event_id,
         reviewer_dispatch_envelope_digest: reviewer.dispatch.envelope_digest.clone(),
