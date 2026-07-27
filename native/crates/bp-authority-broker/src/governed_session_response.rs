@@ -1,5 +1,6 @@
 //! Canonical, domain-separated authentication for protected session replies.
 
+use crate::command_action::BrokerCommandActionStatus;
 use crate::governed_session_client::{
     GovernedSessionClientOperationV1, ParsedGovernedSessionClientRequestV1,
 };
@@ -81,6 +82,31 @@ struct GovernedReviewerRunResultWireV1 {
     schema_version: u8,
     kind: String,
     status: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct GovernedCandidateRunResultWireV1 {
+    schema_version: u8,
+    kind: String,
+    status: String,
+}
+
+pub(crate) fn governed_candidate_run_result_v1(status: BrokerCommandActionStatus) -> Value {
+    let status = match status {
+        BrokerCommandActionStatus::Succeeded => "succeeded",
+        BrokerCommandActionStatus::Failed => "failed",
+        BrokerCommandActionStatus::Unknown => "unknown",
+        BrokerCommandActionStatus::Pending => "pending",
+        BrokerCommandActionStatus::LeaseExpired => "lease_expired",
+        BrokerCommandActionStatus::ReconciliationRequired => "reconciliation_required",
+    };
+    serde_json::to_value(GovernedCandidateRunResultWireV1 {
+        schema_version: 1,
+        kind: "governed_candidate_run_result_v1".into(),
+        status: status.into(),
+    })
+    .expect("fixed governed candidate result is serializable")
 }
 
 pub(crate) fn governed_reviewer_run_result_v1(status: BrokerModelActionStatus) -> Value {
@@ -225,9 +251,8 @@ fn validate_response_binding<'a>(
         }
         GovernedSessionClientOperationV1::RunCandidateSession => {
             validate_session_refs(request, recovery_ref, session_ref)?;
-            let result = result
-                .filter(|value| value.is_object())
-                .ok_or(GovernedSessionResponseErrorV1::InvalidBinding)?;
+            let result = result.ok_or(GovernedSessionResponseErrorV1::InvalidBinding)?;
+            validate_governed_candidate_run_result(result)?;
             ("completed", Some(result))
         }
         GovernedSessionClientOperationV1::RunReviewerSession => {
@@ -243,6 +268,28 @@ fn validate_response_binding<'a>(
         session_ref,
         result,
     })
+}
+
+fn validate_governed_candidate_run_result(
+    result: &Value,
+) -> Result<(), GovernedSessionResponseErrorV1> {
+    let result: GovernedCandidateRunResultWireV1 = serde_json::from_value(result.clone())
+        .map_err(|_| GovernedSessionResponseErrorV1::InvalidBinding)?;
+    if result.schema_version != 1
+        || result.kind != "governed_candidate_run_result_v1"
+        || !matches!(
+            result.status.as_str(),
+            "succeeded"
+                | "failed"
+                | "unknown"
+                | "pending"
+                | "lease_expired"
+                | "reconciliation_required"
+        )
+    {
+        return Err(GovernedSessionResponseErrorV1::InvalidBinding);
+    }
+    Ok(())
 }
 
 fn validate_governed_reviewer_run_result(

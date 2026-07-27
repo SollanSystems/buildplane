@@ -15,7 +15,8 @@ use bp_ledger::storage::sqlite::{
     ActivityClaimAuthorityV1, ActivityResultDispositionV1,
     GovernedCommandActionAuthorizeAndClaimDispositionV1,
     GovernedCommandActionAuthorizeAndClaimRequestV1, GovernedCommandActionResultRequestV1,
-    GovernedDispatchV5AdmissionAuthorityV1, GovernedV5CommandActionAuthorizeAndClaimRequestV1,
+    GovernedDispatchV5AdmissionAuthorityV1, GovernedV5AcceptanceCheckAuthorizeAndClaimRequestV1,
+    GovernedV5AcceptanceCheckResultRequestV1, GovernedV5CommandActionAuthorizeAndClaimRequestV1,
     SqliteStore,
 };
 use bp_ledger::storage::Cas;
@@ -399,6 +400,126 @@ impl CommandAuthorityBackend for LedgerV5CommandAuthorityBackend<'_> {
             self.cas,
             self.v5_authority,
             self.activity_authority,
+            self.signing_key,
+            self.signer,
+        )?;
+        Ok(command_result_disposition(run_id, disposition))
+    }
+}
+
+/// Candidate-bound deterministic verification backend. Unlike implementer
+/// command authority, this lease is reconstructed from a completed candidate,
+/// declaration-ordered check index, and exact action event.
+pub(crate) struct LedgerV5AcceptanceAuthorityBackend<'a> {
+    store: &'a SqliteStore,
+    cas: &'a Cas,
+    v5_authority: &'a GovernedDispatchV5AdmissionAuthorityV1,
+    activity_authority: &'a ActivityClaimAuthorityV1,
+    candidate_completion_event_id: EventId,
+    dispatch_event_id: EventId,
+    action_request_event_id: EventId,
+    packet_source: String,
+    check_index: u32,
+    receipt_signer: &'a ActorKeyRef,
+    candidate_signer: &'a ActorKeyRef,
+    signing_key: &'a SigningKey,
+    signer: &'a ActorKeyRef,
+}
+
+impl<'a> LedgerV5AcceptanceAuthorityBackend<'a> {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        store: &'a SqliteStore,
+        cas: &'a Cas,
+        v5_authority: &'a GovernedDispatchV5AdmissionAuthorityV1,
+        activity_authority: &'a ActivityClaimAuthorityV1,
+        candidate_completion_event_id: EventId,
+        dispatch_event_id: EventId,
+        action_request_event_id: EventId,
+        packet_source: String,
+        check_index: u32,
+        receipt_signer: &'a ActorKeyRef,
+        candidate_signer: &'a ActorKeyRef,
+        signing_key: &'a SigningKey,
+        signer: &'a ActorKeyRef,
+    ) -> Self {
+        Self {
+            store,
+            cas,
+            v5_authority,
+            activity_authority,
+            candidate_completion_event_id,
+            dispatch_event_id,
+            action_request_event_id,
+            packet_source,
+            check_index,
+            receipt_signer,
+            candidate_signer,
+            signing_key,
+            signer,
+        }
+    }
+}
+
+impl CommandAuthorityBackend for LedgerV5AcceptanceAuthorityBackend<'_> {
+    fn authorize_and_claim(
+        &mut self,
+        run_id: RunId,
+        request: &BrokerCommandActionRequest,
+        lease_duration_ms: u64,
+    ) -> Result<CommandAuthorityGrant, CommandAuthorityError> {
+        if request.dispatch_event_id != self.dispatch_event_id
+            || request.action_request_event_id != self.action_request_event_id
+        {
+            return Err(CommandAuthorityError::BindingMismatch);
+        }
+        let disposition = self
+            .store
+            .authorize_and_claim_governed_v5_acceptance_check_v1(
+                &GovernedV5AcceptanceCheckAuthorizeAndClaimRequestV1 {
+                    run_id,
+                    candidate_completion_event_id: self.candidate_completion_event_id,
+                    action_request_event_id: self.action_request_event_id,
+                    packet_source: self.packet_source.clone(),
+                    check_index: self.check_index,
+                    lease_duration_ms,
+                },
+                self.cas,
+                self.v5_authority,
+                self.activity_authority,
+                self.receipt_signer,
+                self.candidate_signer,
+                self.signing_key,
+                self.signer,
+            )?;
+        Ok(command_grant_from_disposition(run_id, disposition))
+    }
+
+    fn record_result(
+        &mut self,
+        run_id: RunId,
+        lease_id: String,
+        completion: CommandGatewayCompletion,
+    ) -> Result<CommandResultDisposition, CommandAuthorityError> {
+        let disposition = self.store.record_governed_v5_acceptance_check_result_v1(
+            &GovernedV5AcceptanceCheckResultRequestV1 {
+                run_id,
+                candidate_completion_event_id: self.candidate_completion_event_id,
+                action_request_event_id: self.action_request_event_id,
+                packet_source: self.packet_source.clone(),
+                check_index: self.check_index,
+                lease_id,
+                outcome: completion.outcome,
+                result_digest: completion.result_digest,
+                result_ref: completion.result_ref,
+                evidence_digest: completion.evidence_digest,
+                evidence_ref: completion.evidence_ref,
+            },
+            self.cas,
+            self.v5_authority,
+            self.activity_authority,
+            self.receipt_signer,
+            self.candidate_signer,
             self.signing_key,
             self.signer,
         )?;

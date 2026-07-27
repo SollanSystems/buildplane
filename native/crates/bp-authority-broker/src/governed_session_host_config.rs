@@ -52,6 +52,7 @@ pub(crate) struct GovernedSessionHostConfigV1 {
     pub(crate) claim_signer: ActorKeyRef,
     pub(crate) action_receipt_signer: ActorKeyRef,
     pub(crate) candidate_artifact_signer: ActorKeyRef,
+    pub(crate) candidate_acceptance_signer: ActorKeyRef,
     pub(crate) broker_identity_signer: ActorKeyRef,
     pub(crate) activity_authority: ActivityClaimAuthorityV1,
     pub(crate) v5_admission_authority: GovernedDispatchV5AdmissionAuthorityV1,
@@ -87,6 +88,7 @@ struct RawGovernedSessionHostConfigV1 {
     claim: RawSignerV1,
     action_receipt: RawSignerV1,
     candidate_artifact: RawSignerV1,
+    candidate_acceptance: RawSignerV1,
     broker_identity: RawSignerV1,
 }
 
@@ -178,6 +180,7 @@ pub(crate) fn parse_governed_session_host_config_v1(
     let claim = parse_signer(raw.claim)?;
     let action_receipt = parse_signer(raw.action_receipt)?;
     let candidate_artifact = parse_signer(raw.candidate_artifact)?;
+    let candidate_acceptance = parse_signer(raw.candidate_acceptance)?;
     let broker_identity = parse_signer(raw.broker_identity)?;
     let signers = [
         &dispatch,
@@ -187,6 +190,7 @@ pub(crate) fn parse_governed_session_host_config_v1(
         &claim,
         &action_receipt,
         &candidate_artifact,
+        &candidate_acceptance,
         &broker_identity,
     ];
     let mut actor_ids = BTreeSet::new();
@@ -218,6 +222,7 @@ pub(crate) fn parse_governed_session_host_config_v1(
     let claim_signer = claim.identity;
     let action_receipt_signer = action_receipt.identity;
     let candidate_artifact_signer = candidate_artifact.identity;
+    let candidate_acceptance_signer = candidate_acceptance.identity;
     let broker_identity_signer = broker_identity.identity;
     let activity_authority = ActivityClaimAuthorityV1::new_governed_realm(
         trusted_keys.clone(),
@@ -245,6 +250,7 @@ pub(crate) fn parse_governed_session_host_config_v1(
         claim_signer.clone(),
         action_receipt_signer.clone(),
         candidate_artifact_signer.clone(),
+        candidate_acceptance_signer.clone(),
     ] {
         replay_authorities.allow_signer(TrustSpineSignerRole::Kernel, signer);
     }
@@ -282,6 +288,7 @@ pub(crate) fn parse_governed_session_host_config_v1(
         claim_signer,
         action_receipt_signer,
         candidate_artifact_signer,
+        candidate_acceptance_signer,
         broker_identity_signer,
         activity_authority,
         v5_admission_authority,
@@ -443,6 +450,11 @@ mod tests {
             "claim": signer("kernel:model-claim", "claim-main", 3),
             "action_receipt": signer("kernel:action-receipt", "receipt-main", 7),
             "candidate_artifact": signer("kernel:candidate-artifact", "candidate-main", 8),
+            "candidate_acceptance": signer(
+                "kernel:candidate-acceptance",
+                "candidate-acceptance-main",
+                9
+            ),
             "broker_identity": signer("broker:governed-session", "broker-main", 4),
         })
     }
@@ -473,6 +485,14 @@ mod tests {
         assert_ne!(
             config.candidate_artifact_signer,
             config.broker_identity_signer
+        );
+        assert_ne!(
+            config.candidate_artifact_signer,
+            config.candidate_acceptance_signer
+        );
+        assert_ne!(
+            config.candidate_acceptance_signer,
+            config.v5_admission_checkpoint_signer
         );
         assert_ne!(config.action_receipt_signer, config.broker_identity_signer);
         assert_ne!(config.claim_signer, config.broker_identity_signer);
@@ -528,6 +548,12 @@ mod tests {
             ("action_request", "action_receipt"),
             ("claim", "action_receipt"),
             ("action_receipt", "candidate_artifact"),
+            ("candidate_artifact", "candidate_acceptance"),
+            ("candidate_acceptance", "v5_admission_checkpoint"),
+            ("candidate_acceptance", "action_request"),
+            ("candidate_acceptance", "claim"),
+            ("candidate_acceptance", "action_receipt"),
+            ("candidate_acceptance", "broker_identity"),
             ("claim", "candidate_artifact"),
             ("action_request", "candidate_artifact"),
             ("dispatch", "candidate_artifact"),

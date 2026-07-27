@@ -8,11 +8,12 @@
 use crate::anthropic_model_gateway::AnthropicModelGatewayV1;
 use crate::candidate_workspace::{
     finalize_candidate_workspace_v1, immutable_candidate_artifact_v1_bytes,
-    open_candidate_workspace_v1, reopen_candidate_workspace_v1,
+    open_candidate_verification_workspace_v1, open_candidate_workspace_v1,
+    reopen_candidate_workspace_v1,
 };
 use crate::command_action::{
     BrokerCommandActionRequest, BrokerCommandActionStatus, BrokerCommandAuthority,
-    LedgerV5CommandAuthorityBackend,
+    LedgerV5AcceptanceAuthorityBackend, LedgerV5CommandAuthorityBackend,
 };
 use crate::confinement::BrokerHostConfinementAttestationV1;
 use crate::governed_reviewer_authority::{
@@ -63,12 +64,15 @@ use crate::{
 };
 use async_trait::async_trait;
 use bp_ledger::payload::activity_claim::ActivityResultOutcomeV1;
+use bp_ledger::payload::governed_packet::GovernedCommandPacketV1;
 use bp_ledger::payload::model_evidence::ModelProviderV1;
-use bp_ledger::payload::trust_spine::ExecutionRoleV1;
+use bp_ledger::payload::trust_spine::{CandidateAcceptanceOutcomeV1, ExecutionRoleV1};
 use bp_ledger::storage::sqlite::{
     ActivityClaimDispositionV1, ActivityResultDispositionV1,
-    GovernedV5CandidateCompletionRequestV1, GovernedV5CandidateCreateRequestV1,
-    GovernedV5CandidateFinalizeActionIssueDispositionV1,
+    GovernedCandidateCompletionDispositionV1, GovernedCommandActionIssueDispositionV1,
+    GovernedV5AcceptanceCheckIssueRequestV1, GovernedV5CandidateAcceptanceDispositionV1,
+    GovernedV5CandidateAcceptanceRequestV1, GovernedV5CandidateCompletionRequestV1,
+    GovernedV5CandidateCreateRequestV1, GovernedV5CandidateFinalizeActionIssueDispositionV1,
     GovernedV5CandidateFinalizeActionIssueRequestV1,
     GovernedV5CandidateFinalizeAuthorizeAndClaimRequestV1,
     GovernedV5CandidateFinalizeResultRequestV1, GovernedV5CandidateReceiptSetDispositionV1,
@@ -226,6 +230,7 @@ impl ProtectedGovernedSessionHostStateV1 {
     #[allow(dead_code)] // Wired to RunCandidateSession after immutable finalization is composed.
     fn run_candidate_command(
         &self,
+        packet_source: &str,
         recovery_ref: &str,
         session_ref: &str,
     ) -> Result<BrokerCommandActionStatus, ProtectedGovernedSessionProviderErrorV1> {
@@ -365,70 +370,84 @@ impl ProtectedGovernedSessionHostStateV1 {
                     &config.claim_signer,
                 )
                 .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)?;
-            let ActivityClaimDispositionV1::Granted { lease_id, .. } = finalize_claim else {
-                return Err(ProtectedGovernedSessionProviderErrorV1::DurableAuthority);
-            };
-            let result_request = match finalize_candidate_workspace_v1(
-                self.validated_startup.authority_root().directory(),
-                &execution.candidate,
-            ) {
-                Ok(artifact) => {
-                    let evidence = immutable_candidate_artifact_v1_bytes(&artifact)
-                        .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)?;
-                    let evidence_ref =
-                        self.cas.cas().put_canonical_bytes(&evidence).map_err(|_| {
-                            ProtectedGovernedSessionProviderErrorV1::DurableAuthority
-                        })?;
-                    GovernedV5CandidateFinalizeResultRequestV1 {
-                        run_id: config.run_id,
-                        lease_id,
-                        outcome: ActivityResultOutcomeV1::Succeeded,
-                        result_digest: Some(artifact.candidate_digest),
-                        result_ref: Some(format!("git-ref:{}", artifact.candidate_ref)),
-                        evidence_digest: evidence_ref.digest().into(),
-                        evidence_ref: evidence_ref.to_cas_ref(),
-                    }
-                }
-                Err(_) => {
-                    let evidence_ref = self
-                        .cas
-                        .cas()
-                        .put_canonical_bytes(
-                            br#"{"outcome":"unknown","reason":"candidate-finalization-failed"}"#,
+            match finalize_claim {
+                ActivityClaimDispositionV1::Granted { lease_id, .. } => {
+                    let result_request = match finalize_candidate_workspace_v1(
+                        self.validated_startup.authority_root().directory(),
+                        &execution.candidate,
+                    ) {
+                        Ok(artifact) => {
+                            let evidence = immutable_candidate_artifact_v1_bytes(&artifact)
+                                .map_err(|_| {
+                                    ProtectedGovernedSessionProviderErrorV1::DurableAuthority
+                                })?;
+                            let evidence_ref =
+                                self.cas.cas().put_canonical_bytes(&evidence).map_err(|_| {
+                                    ProtectedGovernedSessionProviderErrorV1::DurableAuthority
+                                })?;
+                            GovernedV5CandidateFinalizeResultRequestV1 {
+                                run_id: config.run_id,
+                                lease_id,
+                                outcome: ActivityResultOutcomeV1::Succeeded,
+                                result_digest: Some(artifact.candidate_digest),
+                                result_ref: Some(format!("git-ref:{}", artifact.candidate_ref)),
+                                evidence_digest: evidence_ref.digest().into(),
+                                evidence_ref: evidence_ref.to_cas_ref(),
+                            }
+                        }
+                        Err(_) => {
+                            let evidence_ref = self
+                                .cas
+                                .cas()
+                                .put_canonical_bytes(
+                                    br#"{"outcome":"unknown","reason":"candidate-finalization-failed"}"#,
+                                )
+                                .map_err(|_| {
+                                    ProtectedGovernedSessionProviderErrorV1::DurableAuthority
+                                })?;
+                            GovernedV5CandidateFinalizeResultRequestV1 {
+                                run_id: config.run_id,
+                                lease_id,
+                                outcome: ActivityResultOutcomeV1::Unknown,
+                                result_digest: None,
+                                result_ref: None,
+                                evidence_digest: evidence_ref.digest().into(),
+                                evidence_ref: evidence_ref.to_cas_ref(),
+                            }
+                        }
+                    };
+                    let result_disposition = self
+                        .ledger
+                        .store()
+                        .record_governed_v5_candidate_finalize_result_v1(
+                            &result_request,
+                            self.cas.cas(),
+                            &config.v5_admission_authority,
+                            &config.activity_authority,
+                            self.signing_keys.claim(),
+                            &config.claim_signer,
                         )
                         .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)?;
-                    GovernedV5CandidateFinalizeResultRequestV1 {
-                        run_id: config.run_id,
-                        lease_id,
-                        outcome: ActivityResultOutcomeV1::Unknown,
-                        result_digest: None,
-                        result_ref: None,
-                        evidence_digest: evidence_ref.digest().into(),
-                        evidence_ref: evidence_ref.to_cas_ref(),
+                    if !matches!(
+                        result_disposition,
+                        ActivityResultDispositionV1::Recorded {
+                            outcome: ActivityResultOutcomeV1::Succeeded,
+                            ..
+                        }
+                    ) || result_request.outcome != ActivityResultOutcomeV1::Succeeded
+                    {
+                        return Err(ProtectedGovernedSessionProviderErrorV1::DurableAuthority);
                     }
                 }
-            };
-            let result_disposition = self
-                .ledger
-                .store()
-                .record_governed_v5_candidate_finalize_result_v1(
-                    &result_request,
-                    self.cas.cas(),
-                    &config.v5_admission_authority,
-                    &config.activity_authority,
-                    self.signing_keys.claim(),
-                    &config.claim_signer,
-                )
-                .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)?;
-            if !matches!(
-                result_disposition,
-                ActivityResultDispositionV1::Recorded {
+                ActivityClaimDispositionV1::Recorded {
                     outcome: ActivityResultOutcomeV1::Succeeded,
                     ..
+                } => {}
+                ActivityClaimDispositionV1::Pending { .. }
+                | ActivityClaimDispositionV1::Recorded { .. }
+                | ActivityClaimDispositionV1::LeaseExpired { .. } => {
+                    return Err(ProtectedGovernedSessionProviderErrorV1::DurableAuthority);
                 }
-            ) || result_request.outcome != ActivityResultOutcomeV1::Succeeded
-            {
-                return Err(ProtectedGovernedSessionProviderErrorV1::DurableAuthority);
             }
             let receipt_set_disposition = self
                 .ledger
@@ -482,7 +501,8 @@ impl ProtectedGovernedSessionHostStateV1 {
                     ..
                 } => candidate_created_event_id,
             };
-            self.ledger
+            let completion_disposition = self
+                .ledger
                 .store()
                 .record_governed_v5_candidate_completion_v1(
                     &GovernedV5CandidateCompletionRequestV1 {
@@ -498,6 +518,143 @@ impl ProtectedGovernedSessionHostStateV1 {
                     &config.v5_admission_checkpoint_signer,
                 )
                 .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)?;
+            let candidate_completion_event_id = match completion_disposition {
+                GovernedCandidateCompletionDispositionV1::Recorded {
+                    candidate_completion_event_id,
+                    ..
+                }
+                | GovernedCandidateCompletionDispositionV1::Existing {
+                    candidate_completion_event_id,
+                    ..
+                } => candidate_completion_event_id,
+            };
+            let artifact = finalize_candidate_workspace_v1(
+                self.validated_startup.authority_root().directory(),
+                &execution.candidate,
+            )
+            .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)?;
+            let verification_workspace = open_candidate_verification_workspace_v1(
+                self.validated_startup.authority_root().directory(),
+                &execution.candidate,
+                &artifact,
+            )
+            .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)?;
+            let packet = GovernedCommandPacketV1::parse_and_verify(
+                packet_source,
+                &execution.candidate.governed_packet_digest,
+            )
+            .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)?;
+            let acceptance_checks = packet
+                .protected_acceptance_checks()
+                .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)?;
+            let mut check_action_request_event_ids = Vec::with_capacity(acceptance_checks.len());
+            for (check_index, _) in acceptance_checks.iter().enumerate() {
+                let check_index = u32::try_from(check_index)
+                    .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)?;
+                let issued = self
+                    .ledger
+                    .store()
+                    .issue_governed_v5_acceptance_check_action_v1(
+                        &GovernedV5AcceptanceCheckIssueRequestV1 {
+                            run_id: config.run_id,
+                            candidate_completion_event_id,
+                            packet_source: packet_source.into(),
+                            check_index,
+                        },
+                        self.cas.cas(),
+                        &config.v5_admission_authority,
+                        &config.activity_authority,
+                        &config.action_receipt_signer,
+                        &config.candidate_artifact_signer,
+                        self.signing_keys.action_request(),
+                        &config.action_request_signer,
+                    )
+                    .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)?;
+                let action_request_event_id = match issued {
+                    GovernedCommandActionIssueDispositionV1::Issued {
+                        action_request_event_id,
+                        ..
+                    }
+                    | GovernedCommandActionIssueDispositionV1::Existing {
+                        action_request_event_id,
+                        ..
+                    } => action_request_event_id,
+                };
+                let backend = LedgerV5AcceptanceAuthorityBackend::new(
+                    self.ledger.store(),
+                    self.cas.cas(),
+                    &config.v5_admission_authority,
+                    &config.activity_authority,
+                    candidate_completion_event_id,
+                    execution.candidate.dispatch_event_id,
+                    action_request_event_id,
+                    packet_source.into(),
+                    check_index,
+                    &config.action_receipt_signer,
+                    &config.candidate_artifact_signer,
+                    self.signing_keys.claim(),
+                    &config.claim_signer,
+                );
+                let gateway = RootlessOciCommandGateway::new_read_only_verifier(
+                    config.oci_profile.clone(),
+                    self.session_startup.oci_attestation(),
+                    &verification_workspace.path,
+                    self.cas.cas(),
+                    FixedPodmanCommandRunner,
+                )
+                .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)?;
+                let mut authority = BrokerCommandAuthority::new(
+                    config.run_id,
+                    backend,
+                    gateway,
+                    config.model_action_lease_ms,
+                );
+                match authority
+                    .authorize_and_execute(BrokerCommandActionRequest {
+                        dispatch_event_id: execution.candidate.dispatch_event_id,
+                        action_request_event_id,
+                    })
+                    .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)?
+                {
+                    BrokerCommandActionStatus::Succeeded | BrokerCommandActionStatus::Failed => {}
+                    BrokerCommandActionStatus::Unknown
+                    | BrokerCommandActionStatus::Pending
+                    | BrokerCommandActionStatus::LeaseExpired
+                    | BrokerCommandActionStatus::ReconciliationRequired => {
+                        return Err(ProtectedGovernedSessionProviderErrorV1::DurableAuthority);
+                    }
+                }
+                check_action_request_event_ids.push(action_request_event_id);
+            }
+            let acceptance = self
+                .ledger
+                .store()
+                .record_governed_v5_candidate_acceptance_v1(
+                    &GovernedV5CandidateAcceptanceRequestV1 {
+                        run_id: config.run_id,
+                        candidate_completion_event_id,
+                        packet_source: packet_source.into(),
+                        check_action_request_event_ids,
+                    },
+                    self.cas.cas(),
+                    &config.v5_admission_authority,
+                    &config.activity_authority,
+                    &config.action_receipt_signer,
+                    &config.candidate_artifact_signer,
+                    self.signing_keys.candidate_acceptance(),
+                    &config.candidate_acceptance_signer,
+                    self.signing_keys.checkpoint(),
+                    &config.v5_admission_checkpoint_signer,
+                )
+                .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)?;
+            let outcome = match acceptance {
+                GovernedV5CandidateAcceptanceDispositionV1::Recorded { outcome, .. }
+                | GovernedV5CandidateAcceptanceDispositionV1::Existing { outcome, .. } => outcome,
+            };
+            return Ok(match outcome {
+                CandidateAcceptanceOutcomeV1::Passed => BrokerCommandActionStatus::Succeeded,
+                CandidateAcceptanceOutcomeV1::Rejected => BrokerCommandActionStatus::Failed,
+            });
         }
         Ok(status)
     }
@@ -742,10 +899,26 @@ impl ProtectedGovernedSessionHostStateV1 {
                     session_ref,
                 })
             }
-            // Recovery and execution remain unavailable until the same
-            // protected state owns OCI execution and candidate finalization.
-            ParsedGovernedSessionClientRequestV1::OpenRecoverySession { .. }
-            | ParsedGovernedSessionClientRequestV1::RunCandidateSession { .. } => {
+            ParsedGovernedSessionClientRequestV1::RunCandidateSession {
+                packet_source,
+                recovery_ref,
+                session_ref,
+                ..
+            } => {
+                let status = self
+                    .run_candidate_command(packet_source, recovery_ref, session_ref)
+                    .map_err(|_| GovernedSessionHostErrorV1::AuthorityRejected)?;
+                Ok(GovernedSessionHostDispositionV1::Completed {
+                    recovery_ref: recovery_ref.clone(),
+                    session_ref: session_ref.clone(),
+                    result: crate::governed_session_response::governed_candidate_run_result_v1(
+                        status,
+                    ),
+                })
+            }
+            // Recovery opening remains unavailable until reducer-owned pending
+            // activity restoration is composed into the same protected state.
+            ParsedGovernedSessionClientRequestV1::OpenRecoverySession { .. } => {
                 Err(GovernedSessionHostErrorV1::AuthorityRejected)
             }
         }
@@ -942,6 +1115,7 @@ mod tests {
         claim_seed: [u8; 32],
         receipt_seed: [u8; 32],
         candidate_seed: [u8; 32],
+        acceptance_seed: [u8; 32],
         broker_identity_seed: [u8; 32],
     }
 
@@ -960,6 +1134,7 @@ mod tests {
                 claim_seed: [33; 32],
                 receipt_seed: [37; 32],
                 candidate_seed: [38; 32],
+                acceptance_seed: [39; 32],
                 broker_identity_seed: [34; 32],
             };
             fixture.install();
@@ -987,6 +1162,11 @@ mod tests {
                 &["kernel", "candidate-artifact"],
                 "candidate-main",
                 &self.candidate_seed,
+            );
+            self.write_key(
+                &["kernel", "candidate-acceptance"],
+                "candidate-acceptance-main",
+                &self.acceptance_seed,
             );
             self.write_key(
                 &["broker", "governed-session"],
@@ -1083,6 +1263,11 @@ mod tests {
                     "kernel:candidate-artifact",
                     "candidate-main",
                     self.candidate_seed
+                ),
+                "candidate_acceptance": signer(
+                    "kernel:candidate-acceptance",
+                    "candidate-acceptance-main",
+                    self.acceptance_seed
                 ),
                 "broker_identity": signer(
                     "broker:governed-session",
@@ -1331,7 +1516,7 @@ mod tests {
         );
 
         let candidate = crate::governed_session_client::parse_governed_session_client_request(
-            br#"{"schema_version":1,"protocol":"buildplane-governed-session","request_id":"01919000-0000-7000-8000-000000000099","operation":"run_candidate_session","recovery_ref":"recovery:opaque","session_ref":"session:opaque"}"#,
+            br#"{"schema_version":1,"protocol":"buildplane-governed-session","request_id":"01919000-0000-7000-8000-000000000099","operation":"run_candidate_session","packet_source":"{}","recovery_ref":"recovery:opaque","session_ref":"session:opaque"}"#,
         )
         .expect("candidate request");
         assert_eq!(

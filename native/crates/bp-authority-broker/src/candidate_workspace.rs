@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 const WORKSPACE_DIRECTORY: &[u8] = b"candidate-workspaces\0";
+const VERIFICATION_WORKSPACE_DIRECTORY: &[u8] = b"candidate-verification-workspaces\0";
 const CANDIDATE_REF_PREFIX: &str = "refs/buildplane/candidates/";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -58,6 +59,13 @@ pub(crate) struct ImmutableCandidateArtifactV1 {
     pub(crate) tree_digest: String,
     pub(crate) patch_digest: String,
     pub(crate) changed_files_digest: String,
+    pub(crate) candidate_digest: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct OpenedCandidateVerificationWorkspaceV1 {
+    pub(crate) path: PathBuf,
+    pub(crate) candidate_commit_sha: String,
     pub(crate) candidate_digest: String,
 }
 
@@ -479,6 +487,132 @@ pub(crate) fn finalize_candidate_workspace_v1(
         return Err(CandidateWorkspaceErrorV1::ReconciliationRequired);
     }
     Ok(artifact)
+}
+
+/// Open a separate clean detached worktree at the exact immutable candidate
+/// commit. The returned path is intended only for a read-only OCI bind mount;
+/// it never reuses the mutable implementer overlay and never moves the target
+/// checkout or candidate ref.
+pub(crate) fn open_candidate_verification_workspace_v1(
+    authority_root: &File,
+    authority: &ResolvedGovernedV5CandidateAuthorityV1,
+    artifact: &ImmutableCandidateArtifactV1,
+) -> Result<OpenedCandidateVerificationWorkspaceV1, CandidateWorkspaceErrorV1> {
+    let verified_artifact = finalize_candidate_workspace_v1(authority_root, authority)?;
+    if &verified_artifact != artifact {
+        return Err(CandidateWorkspaceErrorV1::ReconciliationRequired);
+    }
+    let (_, _, workspace_name) = candidate_identity(authority)?;
+    let candidate_workspace_root =
+        open_or_create_private_directory_at(authority_root, WORKSPACE_DIRECTORY)?;
+    let manifest_bytes =
+        read_workspace_manifest_bytes(&candidate_workspace_root, &manifest_name(&workspace_name)?)?;
+    let manifest: CandidateWorkspaceManifestV1 = serde_json::from_slice(&manifest_bytes)
+        .map_err(|_| CandidateWorkspaceErrorV1::ReconciliationRequired)?;
+    if manifest.repository_binding_digest != authority.repository_binding_digest
+        || manifest.candidate_ref != artifact.candidate_ref
+        || manifest.base_commit_sha != artifact.base_commit_sha
+    {
+        return Err(CandidateWorkspaceErrorV1::ReconciliationRequired);
+    }
+    verify_governed_repository_binding_v1(
+        &manifest.repository_root,
+        &authority.repository_binding_digest,
+    )?;
+    let git = governed_git_executable()?;
+    let repository = Path::new(&manifest.repository_root);
+    let root_head = required_git_value(
+        &git,
+        repository,
+        &["rev-parse", "--verify", "HEAD^{commit}"],
+    )?;
+    let root_tree = required_git_value(&git, repository, &["rev-parse", "HEAD^{tree}"])?;
+    let root_count = required_git_value(&git, repository, &["rev-list", "--count", "HEAD"])?;
+    if root_head != artifact.base_commit_sha
+        || !required_git_value_allow_empty(&git, repository, &["status", "--porcelain=v1", "-z"])?
+            .is_empty()
+        || required_git_value(
+            &git,
+            repository,
+            &["rev-parse", "--verify", &artifact.candidate_ref],
+        )? != artifact.candidate_commit_sha
+    {
+        return Err(CandidateWorkspaceErrorV1::BaseMismatch);
+    }
+
+    let verification_root =
+        open_or_create_private_directory_at(authority_root, VERIFICATION_WORKSPACE_DIRECTORY)?;
+    let canonical_root = PathBuf::from(format!(
+        "/proc/{}/fd/{}",
+        std::process::id(),
+        verification_root.as_raw_fd()
+    ))
+    .canonicalize()
+    .map_err(|_| CandidateWorkspaceErrorV1::WorkspaceCustody)?;
+    let verification_name = format!("verify-{workspace_name}");
+    let verification_path = PathBuf::from(format!(
+        "/proc/{}/fd/{}/{}",
+        std::process::id(),
+        verification_root.as_raw_fd(),
+        verification_name
+    ));
+    if verification_path
+        .symlink_metadata()
+        .is_ok_and(|metadata| metadata.file_type().is_symlink())
+    {
+        return Err(CandidateWorkspaceErrorV1::WorkspaceCustody);
+    }
+    if verification_path.exists() {
+        verify_existing_workspace(&git, &verification_path, &artifact.candidate_commit_sha)?;
+    } else {
+        let output = governed_git_output(
+            &git,
+            repository,
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                verification_path
+                    .to_str()
+                    .ok_or(CandidateWorkspaceErrorV1::WorkspaceCustody)?,
+                &artifact.candidate_commit_sha,
+            ],
+        )?;
+        if !output.status.success() {
+            if verification_path.exists() {
+                verify_existing_workspace(
+                    &git,
+                    &verification_path,
+                    &artifact.candidate_commit_sha,
+                )?;
+            } else {
+                return Err(CandidateWorkspaceErrorV1::Git);
+            }
+        }
+    }
+    verify_existing_workspace(&git, &verification_path, &artifact.candidate_commit_sha)?;
+    verify_candidate_worktree_topology(&git, repository, &verification_path)?;
+    let canonical_workspace = verification_path
+        .canonicalize()
+        .map_err(|_| CandidateWorkspaceErrorV1::WorkspaceCustody)?;
+    if canonical_workspace.parent() != Some(canonical_root.as_path())
+        || required_git_value(
+            &git,
+            repository,
+            &["rev-parse", "--verify", "HEAD^{commit}"],
+        )? != root_head
+        || required_git_value(&git, repository, &["rev-parse", "HEAD^{tree}"])? != root_tree
+        || required_git_value(&git, repository, &["rev-list", "--count", "HEAD"])? != root_count
+        || !required_git_value_allow_empty(&git, repository, &["status", "--porcelain=v1", "-z"])?
+            .is_empty()
+    {
+        return Err(CandidateWorkspaceErrorV1::ReconciliationRequired);
+    }
+    Ok(OpenedCandidateVerificationWorkspaceV1 {
+        path: canonical_workspace,
+        candidate_commit_sha: artifact.candidate_commit_sha.clone(),
+        candidate_digest: artifact.candidate_digest.clone(),
+    })
 }
 
 fn verify_candidate_worktree_topology(
@@ -1120,6 +1254,22 @@ mod tests {
         let replay =
             finalize_candidate_workspace_v1(&root, &authority).expect("replay finalization");
         assert_eq!(replay, artifact);
+        let verification = open_candidate_verification_workspace_v1(&root, &authority, &artifact)
+            .expect("open immutable candidate verification workspace");
+        assert_eq!(
+            git_ok(&verification.path, &["rev-parse", "HEAD"]),
+            artifact.candidate_commit_sha
+        );
+        assert!(
+            git_ok(&verification.path, &["status", "--porcelain"]).is_empty(),
+            "verification workspace must begin clean at the candidate commit"
+        );
+        assert_eq!(verification.candidate_digest, artifact.candidate_digest);
+        assert_eq!(
+            open_candidate_verification_workspace_v1(&root, &authority, &artifact)
+                .expect("reopen verification workspace"),
+            verification
+        );
         assert_eq!(git_ok(repository.path(), &["rev-parse", "HEAD"]), root_head);
         assert_eq!(
             git_ok(repository.path(), &["rev-list", "--count", "HEAD"]),

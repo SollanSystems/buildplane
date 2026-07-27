@@ -1,7 +1,9 @@
+use crate::command_action::BrokerCommandActionStatus;
 use crate::governed_session_client::parse_governed_session_client_request;
 use crate::governed_session_response::{
-    governed_reviewer_run_result_v1, sign_governed_session_probe_response_v1,
-    sign_governed_session_response_v1, verify_governed_session_response_v1,
+    governed_candidate_run_result_v1, governed_reviewer_run_result_v1,
+    sign_governed_session_probe_response_v1, sign_governed_session_response_v1,
+    verify_governed_session_response_v1,
 };
 use crate::BrokerModelActionStatus;
 use ed25519_dalek::SigningKey;
@@ -14,7 +16,7 @@ fn reviewer_request(recovery_ref: &str) -> Vec<u8> {
 }
 
 fn candidate_run_request() -> Vec<u8> {
-    br#"{"schema_version":1,"protocol":"buildplane-governed-session","request_id":"01919000-0000-7000-8000-000000000082","operation":"run_candidate_session","recovery_ref":"host-recovery/session-0001","session_ref":"host-session/session-0001"}"#.to_vec()
+    br#"{"schema_version":1,"protocol":"buildplane-governed-session","request_id":"01919000-0000-7000-8000-000000000082","operation":"run_candidate_session","packet_source":"{}","recovery_ref":"host-recovery/session-0001","session_ref":"host-session/session-0001"}"#.to_vec()
 }
 
 fn reviewer_run_request() -> Vec<u8> {
@@ -70,11 +72,7 @@ fn signed_open_response_is_canonical_and_bound_to_the_exact_recovery_lookup() {
 fn signed_completed_response_requires_a_closed_object_result_and_exact_session_binding() {
     let key = SigningKey::from_bytes(&[42; 32]);
     let request = parse_governed_session_client_request(&candidate_run_request()).unwrap();
-    let result = serde_json::json!({
-        "kind": "host-owned-governed-candidate-run-result-v1",
-        "recoveryRef": "host-recovery/session-0001",
-        "candidateReceipt": {"schemaVersion": 2}
-    });
+    let result = governed_candidate_run_result_v1(BrokerCommandActionStatus::Succeeded);
     let signed = sign_governed_session_response_v1(
         &key,
         &request,
