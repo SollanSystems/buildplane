@@ -298,10 +298,12 @@ Nonterminal or failed signed run responses contain only opaque session
 references and the closed status set `pending`, `failed`, `lease_expired`, or
 `reconciliation_required`. Candidate success requires a V2 receipt rebuilt
 from the signed candidate, completion event, and exact checkpoint root.
-Reviewer success requires a V1 receipt binding the candidate, completion,
+Reviewer success requires a V2 host receipt binding the candidate, completion,
 passed acceptance, reviewer dispatch, structured verdict, signed verdict
-event, and exact finalization checkpoint root. A bare `succeeded` or `recorded`
-status is rejected as incomplete success evidence.
+event, exact finalization checkpoint root, and a nullable promotion-request
+event reference. The reference is present if and only if the closed verdict is
+`approve`. A bare `succeeded` or `recorded` status is rejected as incomplete
+success evidence.
 
 ### Protected promotion-decision client
 
