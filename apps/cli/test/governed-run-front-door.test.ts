@@ -34,6 +34,7 @@ import type { RunCliDependencies } from "../src/run-cli.js";
 
 const hostResolver = vi.hoisted(() => ({
 	resolve: vi.fn(),
+	isProtected: vi.fn(),
 }));
 const promotionDecisionClient = vi.hoisted(() => ({
 	submit: vi.fn(),
@@ -49,6 +50,7 @@ vi.mock("../src/governed-authority-broker-host.js", async () => {
 	return {
 		...actual,
 		resolveHostOwnedGovernedBroker: hostResolver.resolve,
+		isProtectedHostOwnedGovernedBroker: hostResolver.isProtected,
 	};
 });
 vi.mock("../src/governed-promotion-decision-client.js", () => ({
@@ -483,6 +485,7 @@ function createHostCandidateRunResult(
 
 afterEach(() => {
 	hostResolver.resolve.mockReset();
+	hostResolver.isProtected.mockReset();
 	promotionDecisionClient.submit.mockReset();
 	v5AdmissionClient.request.mockReset();
 	vi.restoreAllMocks();
@@ -1187,7 +1190,7 @@ describe("governed run front door", () => {
 		expectRootUnchanged(root, before);
 	});
 
-	it("fails closed before passing the target checkout to a legacy host candidate session", async () => {
+	it("runs a candidate only through a provenance-verified protected host broker", async () => {
 		const root = createGitProject();
 		const packetPath = writePacket(root, createGovernedPacket("host-success"));
 		const packetSource = readFileSync(packetPath, "utf8");
@@ -1213,6 +1216,7 @@ describe("governed run front door", () => {
 			},
 		} as unknown as HostOwnedGovernedBrokerV1;
 		hostResolver.resolve.mockResolvedValue(broker);
+		hostResolver.isProtected.mockReturnValue(true);
 
 		const result = await runCliCapture(
 			root,
@@ -1220,20 +1224,23 @@ describe("governed run front door", () => {
 			legacyBundleMustNotBeConstructed(),
 		);
 
-		expect(result.exitCode).toBe(2);
+		expect(result.exitCode).toBe(0);
 		expect(result.stderr).toEqual([]);
 		expect(packetSource).toContain("host-success");
-		expect(received).toEqual([]);
-		expect(run).not.toHaveBeenCalled();
+		expect(received).toEqual([
+			{
+				kind: "new-candidate",
+				packetSource,
+				projectRoot: root,
+				approval: "operator-requested",
+			},
+		]);
+		expect(run).toHaveBeenCalledOnce();
 		expect(JSON.parse(result.stdout.join("\n"))).toEqual({
 			governance: "governed",
-			status: "recovery-required",
-			executionStarted: "unknown",
+			status: "candidate-awaiting-review",
+			executionStarted: true,
 			promotion: { state: "not-authorized" },
-			recovery: {
-				action: "contact-host",
-				retry: "blocked",
-			},
 		});
 		expectRootUnchanged(root, before);
 	});

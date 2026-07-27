@@ -141,6 +141,12 @@ describe("protected governed session client", () => {
 	it("opens and runs one candidate-only session through the fixed native client", async () => {
 		const broker = await hostBroker.resolveHostOwnedGovernedBroker();
 		expect(broker).toBeDefined();
+		expect(hostBroker.isProtectedHostOwnedGovernedBroker(broker)).toBe(true);
+		expect(
+			hostBroker.isProtectedHostOwnedGovernedBroker({
+				kind: "host-owned-governed-broker-v1",
+			}),
+		).toBe(false);
 
 		const session = await broker?.openCandidateSession({
 			kind: "new-candidate",

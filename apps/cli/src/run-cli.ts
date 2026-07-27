@@ -86,8 +86,10 @@ import { tryGitInWorkspace } from "./git-in-workspace.js";
 import { buildGoalPlan } from "./goal-command.js";
 import {
 	type HostOwnedCandidateApprovalV1,
-	type HostOwnedCandidateSessionV1,
+	type HostOwnedCandidateSessionOpenInputV1,
 	type HostOwnedPlanForgeCandidateSessionV1,
+	type HostOwnedRecoverySessionOpenInputV1,
+	isProtectedHostOwnedGovernedBroker,
 	resolveHostOwnedGovernedBroker,
 } from "./governed-authority-broker-host.js";
 import { GOVERNED_AUTHORITY_BROKER_REQUIRED_CODE } from "./governed-ledger-authority.js";
@@ -3401,30 +3403,27 @@ function canonicalPlanForgeRepositoryIdentityDigest(
 		.digest("hex")}`;
 }
 
-/**
- * `openSession` and `admit` are legacy structural JavaScript callbacks. Their
- * input carries the checked-out project root, so invoking either would hand an
- * untrusted host a target checkout capable of mutation before any sealed
- * PromotionDecision V3 exists. There is deliberately no JavaScript escape
- * hatch here: a future implementation must replace this with a native,
- * capability-bound host contract that never exposes a writable target
- * checkout.
- */
+/** PlanForge still has no protected native session protocol. */
 function requireNativeGovernedHostContract(): void {
 	throw new Error(
-		"Governed host execution is unavailable: no native trusted host contract can keep the target checkout immutable before a sealed PromotionDecision V3.",
+		"Governed PlanForge execution is unavailable: the protected native host contract does not support PlanForge admission or candidate sessions.",
 	);
 }
 
 async function executeHostCandidateSession(
 	projectRoot: string,
-	openSession: () => Promise<HostOwnedCandidateSessionV1>,
+	broker: unknown,
+	openInput:
+		| HostOwnedCandidateSessionOpenInputV1
+		| HostOwnedRecoverySessionOpenInputV1,
 	sourcePacket?: unknown,
 	expectedEnvelopeDigest?: string,
 ): Promise<void> {
-	// This must precede both `openSession()` and `session.run()`. The callback
-	// receives `projectRoot` only below, after a native contract exists.
-	requireNativeGovernedHostContract();
+	if (!isProtectedHostOwnedGovernedBroker(broker)) {
+		throw new Error(
+			"Governed host execution is unavailable: the broker was not minted by the fixed protected native client.",
+		);
+	}
 	const before = captureGovernedRootSnapshot(projectRoot);
 	if (!before) {
 		throw new Error(
@@ -3433,7 +3432,11 @@ async function executeHostCandidateSession(
 	}
 	let sessionFailure: unknown;
 	try {
-		const session = parseHostCandidateSession(await openSession());
+		const session = parseHostCandidateSession(
+			await ("kind" in openInput
+				? broker.openCandidateSession(openInput)
+				: broker.openRecoverySession(openInput)),
+		);
 		const result = parseHostCandidateResult(await session.run());
 		if (result.recoveryRef !== session.recoveryRef) {
 			throw new TypeError(
@@ -3821,13 +3824,11 @@ async function runGovernedRunCommand(
 			return emitGovernedHostRecovery(runArguments.json, options.stdout);
 		}
 		try {
-			await executeHostCandidateSession(projectRoot, () =>
-				broker.openRecoverySession({
-					projectRoot,
-					recoveryReference: runArguments.recoveryReference,
-					approval: "operator-requested",
-				}),
-			);
+			await executeHostCandidateSession(projectRoot, broker, {
+				projectRoot,
+				recoveryReference: runArguments.recoveryReference,
+				approval: "operator-requested",
+			});
 		} catch (error) {
 			return emitGovernedHostRecovery(
 				runArguments.json,
@@ -4002,13 +4003,13 @@ async function runGovernedRunCommand(
 		}
 		await executeHostCandidateSession(
 			projectRoot,
-			() =>
-				broker.openCandidateSession({
-					kind: "new-candidate",
-					packetSource,
-					projectRoot,
-					approval,
-				}),
+			broker,
+			{
+				kind: "new-candidate",
+				packetSource,
+				projectRoot,
+				approval,
+			},
 			sourcePacket,
 			runArguments.approve ? undefined : loadedEnvelope?.preview.envelopeDigest,
 		);

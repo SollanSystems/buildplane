@@ -149,6 +149,7 @@ describe("host-owned governed authority broker resolver", () => {
 		const hostModule = await import("../src/governed-authority-broker-host.js");
 
 		expect(Object.keys(hostModule).sort()).toEqual([
+			"isProtectedHostOwnedGovernedBroker",
 			"resolveHostOwnedGovernedBroker",
 		]);
 	});

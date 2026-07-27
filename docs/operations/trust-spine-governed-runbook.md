@@ -292,8 +292,8 @@ status set `pending`, `recorded`, `failed`, `lease_expired`, or
 
 ### Protected promotion-decision client
 
-Governed promotion-decision recovery is the only CLI path currently connected
-to the protected host. Install `buildplane-authority-client` as the exact
+Promotion-decision recovery uses a separate fixed protected client. Install
+`buildplane-authority-client` as the exact
 root-owned regular file
 `/usr/libexec/buildplane/buildplane-authority-client`, mode `0755`, with one
 link. `/usr`, `/usr/libexec`, and `/usr/libexec/buildplane` must each be
@@ -417,9 +417,10 @@ substitute.
 
 - The governed CLI does not invoke legacy JavaScript `openSession` or `admit`
   candidate/admission callbacks. Those structural callbacks would hand an
-  untrusted host a writable checkout. The only candidate-session protocol
-  eligible for governed integration is the fixed native client and protected
-  host contract described above.
+  untrusted host a writable checkout. Candidate and recovery sessions use only
+  a broker minted after the fixed native client proves the protected host
+  protocol; structurally similar JavaScript objects are rejected before the
+  target checkout is passed to them.
 - A governed host must own the capability, trusted-tape projection, opaque
   recovery identity, and rootless OCI action plane. Missing native authority,
   signed-tape/root proof, or OCI feasibility blocks before worker execution;

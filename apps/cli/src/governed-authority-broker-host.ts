@@ -23,6 +23,8 @@ declare const hostOwnedReviewerSessionBrand: unique symbol;
 declare const hostOwnedReviewerRunResultBrand: unique symbol;
 declare const hostOwnedPlanForgeAdmissionBrand: unique symbol;
 
+const protectedHostOwnedGovernedBrokers = new WeakSet<object>();
+
 export type HostOwnedCandidateApprovalV1 =
 	| "operator-requested"
 	| {
@@ -395,7 +397,7 @@ export async function resolveHostOwnedGovernedBroker(): Promise<
 		);
 	};
 
-	return Object.freeze({
+	const broker = Object.freeze({
 		kind: "host-owned-governed-broker-v1" as const,
 		admitPlanForge: unsupportedPlanForge,
 		openPlanForgeCandidateSession: unsupportedPlanForge,
@@ -438,6 +440,24 @@ export async function resolveHostOwnedGovernedBroker(): Promise<
 			}) as HostOwnedReviewerSessionV1;
 		},
 	}) as unknown as HostOwnedGovernedBrokerV1;
+	protectedHostOwnedGovernedBrokers.add(broker);
+	return broker;
+}
+
+/**
+ * Confirms that a broker was minted by this process after the fixed native
+ * client proved the protected host protocol. This is a provenance check, not
+ * a construction or registration surface: arbitrary structurally compatible
+ * JavaScript objects never enter the private weak set.
+ */
+export function isProtectedHostOwnedGovernedBroker(
+	value: unknown,
+): value is HostOwnedGovernedBrokerV1 {
+	return (
+		typeof value === "object" &&
+		value !== null &&
+		protectedHostOwnedGovernedBrokers.has(value)
+	);
 }
 
 function candidateSession(opened: {
