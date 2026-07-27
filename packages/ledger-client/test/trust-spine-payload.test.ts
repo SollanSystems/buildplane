@@ -705,6 +705,8 @@ describe("trust-spine ledger payloads", () => {
 			"governed_verifier_v1",
 			"governed_command_action_v1",
 			"governed_model_action_v1",
+			"governed_acceptance_check_v1",
+			"governed_candidate_finalize_v1",
 		]);
 		expect(EventKind.ActivityClaimedV1).toBe("activity_claimed_v1");
 		expect(EventKind.ActivityHeartbeatRecordedV1).toBe(

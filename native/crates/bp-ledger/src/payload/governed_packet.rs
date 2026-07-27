@@ -286,6 +286,8 @@ pub struct GovernedDiffScopeV1 {
 #[serde(deny_unknown_fields)]
 pub struct GovernedAcceptanceCheckV1 {
     pub command: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -338,6 +340,37 @@ impl GovernedCommandPacketV1 {
         self.execution.args.as_deref().unwrap_or(&[])
     }
 
+    /// Return the exact executable acceptance checks admitted to the protected
+    /// V5 action plane. Legacy V0 free-form command strings remain readable as
+    /// packet input, but they never become execution authority.
+    pub fn protected_acceptance_checks(&self) -> Result<&[GovernedAcceptanceCheckV1]> {
+        if self.acceptance_contract.schema_version != 1
+            || self.acceptance_contract.contract_version != "v1"
+            || self.acceptance_contract.checks.is_empty()
+        {
+            return Err(invalid(
+                "protected acceptance requires schemaVersion 1, contract_version v1, and at least one typed check",
+            ));
+        }
+        for check in &self.acceptance_contract.checks {
+            validate_trimmed("acceptance_contract.checks.command", &check.command)?;
+            if check.command.chars().any(char::is_whitespace) {
+                return Err(invalid(
+                    "protected acceptance check commands must name one executable without shell syntax",
+                ));
+            }
+            validate_string_list("acceptance_contract.checks.args", &check.args)?;
+            if is_ambient_shell_or_launcher(&check.command) {
+                return Err(invalid(
+                    "protected acceptance checks cannot invoke an ambient shell or command launcher",
+                ));
+            }
+            self.capability_bundle
+                .validate_for_process(&check.command, &check.args)?;
+        }
+        Ok(&self.acceptance_contract.checks)
+    }
+
     pub fn validate(&self) -> Result<()> {
         if self.execution_role != ExecutionRoleV1::Implementer {
             return Err(invalid(
@@ -366,10 +399,13 @@ impl GovernedCommandPacketV1 {
             validate_relative_path("execution.cwd", cwd)?;
         }
         if self.acceptance_contract.schema_version != 1
-            || self.acceptance_contract.contract_version != "v0"
+            || !matches!(
+                self.acceptance_contract.contract_version.as_str(),
+                "v0" | "v1"
+            )
         {
             return Err(invalid(
-                "acceptance_contract must use closed schemaVersion 1 and contract_version v0",
+                "acceptance_contract must use closed schemaVersion 1 and a supported contract_version",
             ));
         }
         validate_unique_trimmed(
@@ -386,6 +422,9 @@ impl GovernedCommandPacketV1 {
             .map(|check| check.command.clone())
             .collect::<Vec<_>>();
         validate_unique_trimmed("acceptance_contract.checks.command", &check_commands)?;
+        if self.acceptance_contract.contract_version == "v1" {
+            self.protected_acceptance_checks()?;
+        }
         if self.trust_scope.schema_version != 1 || self.trust_scope.lane != "governed" {
             return Err(invalid(
                 "trust_scope must use closed schemaVersion 1 and lane governed",
@@ -552,6 +591,28 @@ fn forbidden_permission_escape_token<'a>(command: &'a str, args: &'a [String]) -
             }) || normalized == "bypasspermissions"
                 || normalized.ends_with("=bypasspermissions")
         })
+}
+
+fn is_ambient_shell_or_launcher(command: &str) -> bool {
+    let executable = command
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(command)
+        .to_ascii_lowercase();
+    matches!(
+        executable.as_str(),
+        "sh" | "bash"
+            | "dash"
+            | "zsh"
+            | "fish"
+            | "env"
+            | "cmd"
+            | "cmd.exe"
+            | "powershell"
+            | "powershell.exe"
+            | "pwsh"
+            | "pwsh.exe"
+    )
 }
 
 fn validate_relative_glob(field: &str, value: &str) -> Result<()> {
@@ -786,6 +847,30 @@ mod tests {
         let escape = source.replace("\"cwd\":\"repo\"", "\"cwd\":\"../target\"");
         let packet: GovernedCommandPacketV1 = serde_json::from_str(&escape).unwrap();
         assert!(packet.validate().is_err());
+    }
+
+    #[test]
+    fn protected_acceptance_requires_typed_shell_free_checks() {
+        let (_, bundle_digest, _) = packet_with_computed_digests();
+        let typed = source(&bundle_digest)
+            .replace("\"contract_version\":\"v0\"", "\"contract_version\":\"v1\"")
+            .replace(
+                "{\"command\":\"git status --short\"}",
+                "{\"command\":\"/usr/bin/git\",\"args\":[\"status\",\"--short\"]}",
+            );
+        let packet: GovernedCommandPacketV1 = serde_json::from_str(&typed).unwrap();
+        let checks = packet.protected_acceptance_checks().unwrap();
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].command, "/usr/bin/git");
+        assert_eq!(checks[0].args, vec!["status", "--short"]);
+
+        let legacy: GovernedCommandPacketV1 =
+            serde_json::from_str(&source(&bundle_digest)).unwrap();
+        assert!(legacy.protected_acceptance_checks().is_err());
+
+        let shell = typed.replace("/usr/bin/git", "/bin/sh");
+        let shell: GovernedCommandPacketV1 = serde_json::from_str(&shell).unwrap();
+        assert!(shell.protected_acceptance_checks().is_err());
     }
 
     #[test]

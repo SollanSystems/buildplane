@@ -34,9 +34,11 @@ use bp_ledger::storage::sqlite::{
     GovernedCommandActionAuthorizeAndClaimDispositionV1, GovernedCommandActionIssueDispositionV1,
     GovernedCommandActionResultRequestV1, GovernedDispatchV5AdmissionAuthorityV1,
     GovernedDispatchV5AdmissionDispositionV1, GovernedDispatchV5AdmissionRequestV1,
-    GovernedDispatchV5AdmissionSealRequestV1, GovernedV5CandidateCompletionRequestV1,
-    GovernedV5CandidateCreateDispositionV1, GovernedV5CandidateCreateRequestV1,
-    GovernedV5CandidateFinalizeActionIssueDispositionV1,
+    GovernedDispatchV5AdmissionSealRequestV1, GovernedV5AcceptanceCheckAuthorizeAndClaimRequestV1,
+    GovernedV5AcceptanceCheckIssueRequestV1, GovernedV5AcceptanceCheckResultRequestV1,
+    GovernedV5CandidateAcceptanceDispositionV1, GovernedV5CandidateAcceptanceRequestV1,
+    GovernedV5CandidateCompletionRequestV1, GovernedV5CandidateCreateDispositionV1,
+    GovernedV5CandidateCreateRequestV1, GovernedV5CandidateFinalizeActionIssueDispositionV1,
     GovernedV5CandidateFinalizeActionIssueRequestV1,
     GovernedV5CandidateFinalizeAuthorizeAndClaimRequestV1,
     GovernedV5CandidateFinalizeResultRequestV1, GovernedV5CandidateReceiptSetDispositionV1,
@@ -60,7 +62,7 @@ fn digest(hex: char) -> String {
 const COMMAND_CAPABILITY_DIGEST: &str =
     "sha256:f9735004122fe5a668ec78fc26b3335ed0654d2dd1c16967bcd1d258b88dfeaa";
 const COMMAND_ACCEPTANCE_DIGEST: &str =
-    "sha256:b05a1e96b6f3a5e6f415d435de0c46872a8b69ca89de30b5fc9cb7f485e301b4";
+    "sha256:d4320343080064c0ad13b14a734abc7a646d69a28d64e56936d7905883047c41";
 
 fn governed_command_packet_source() -> String {
     serde_json::json!({
@@ -103,9 +105,12 @@ fn governed_command_packet_source() -> String {
         "capability_bundle_digest": COMMAND_CAPABILITY_DIGEST,
         "acceptance_contract": {
             "schemaVersion": 1,
-            "contract_version": "v0",
+            "contract_version": "v1",
             "diff_scope": { "allowed_globs": ["**/*"] },
-            "checks": [{ "command": "git status --short" }]
+            "checks": [{
+                "command": "/usr/bin/git",
+                "args": ["status", "--short"]
+            }]
         },
         "trust_scope": {
             "schemaVersion": 1,
@@ -280,8 +285,10 @@ fn governed_v5_action_authority_with_receipt(
     action_key: &SigningKey,
     receipt_key: &SigningKey,
     candidate_key: &SigningKey,
+    acceptance_key: &SigningKey,
 ) -> (
     ActivityClaimAuthorityV1,
+    ActorKeyRef,
     ActorKeyRef,
     ActorKeyRef,
     ActorKeyRef,
@@ -289,15 +296,28 @@ fn governed_v5_action_authority_with_receipt(
     let action_signer = actor("kernel:v5-action", "action-1", action_key);
     let receipt_signer = actor("kernel:v5-receipt", "receipt-1", receipt_key);
     let candidate_signer = actor("kernel:v5-candidate", "candidate-1", candidate_key);
+    let acceptance_signer = actor("kernel:v5-acceptance", "acceptance-1", acceptance_key);
     let authority = ActivityClaimAuthorityV1::new_governed_realm(
-        trusted_keys(&[source_key, action_key, receipt_key, candidate_key]),
+        trusted_keys(&[
+            source_key,
+            action_key,
+            receipt_key,
+            candidate_key,
+            acceptance_key,
+        ]),
         source_signer.clone(),
         action_signer.clone(),
         action_signer.clone(),
         digest('9'),
     )
     .expect("construct protected V5 action and receipt authority");
-    (authority, action_signer, receipt_signer, candidate_signer)
+    (
+        authority,
+        action_signer,
+        receipt_signer,
+        candidate_signer,
+        acceptance_signer,
+    )
 }
 
 fn event(run_id: RunId, kind: EventKind, payload: Payload) -> Event {
@@ -914,15 +934,17 @@ fn v5_command_issuance_requires_a_checkpoint_sealed_admission() {
     let action_key = SigningKey::from_bytes(&[74u8; 32]);
     let receipt_key = SigningKey::from_bytes(&[79u8; 32]);
     let candidate_key = SigningKey::from_bytes(&[81u8; 32]);
+    let acceptance_key = SigningKey::from_bytes(&[84u8; 32]);
     let (v5_authority, source_signer, admission_signer, checkpoint_signer) =
         v5_admission_authority(&source_key, &admission_key, &checkpoint_key);
-    let (activity_authority, action_signer, receipt_signer, candidate_signer) =
+    let (activity_authority, action_signer, receipt_signer, candidate_signer, acceptance_signer) =
         governed_v5_action_authority_with_receipt(
             &source_key,
             &source_signer,
             &action_key,
             &receipt_key,
             &candidate_key,
+            &acceptance_key,
         );
     let fixture = v5_fixture(1);
     append_fixture(
@@ -1990,6 +2012,299 @@ fn v5_command_issuance_requires_a_checkpoint_sealed_admission() {
         "V5 candidate completion retry must not append another proof or checkpoint"
     );
 
+    let acceptance_action_request = GovernedV5AcceptanceCheckIssueRequestV1 {
+        run_id: fixture.run_id,
+        candidate_completion_event_id: completion_event_id,
+        packet_source: governed_command_packet_source(),
+        check_index: 0,
+    };
+    let acceptance_action_time = Utc::now() + Duration::seconds(10);
+    let acceptance_action = store
+        .issue_governed_v5_acceptance_check_action_v1_at_for_tests(
+            &acceptance_action_request,
+            &cas,
+            &v5_authority,
+            &activity_authority,
+            &receipt_signer,
+            &candidate_signer,
+            &action_key,
+            &action_signer,
+            acceptance_action_time,
+        )
+        .expect("issue candidate-bound acceptance check");
+    let acceptance_action_event_id = match acceptance_action {
+        GovernedCommandActionIssueDispositionV1::Issued {
+            action_request_event_id,
+            verified_input,
+            ..
+        } => {
+            assert_eq!(verified_input.document().command, "/usr/bin/git");
+            assert_eq!(verified_input.document().args, ["status", "--short"]);
+            action_request_event_id
+        }
+        other => panic!("first acceptance check must issue, got {other:?}"),
+    };
+    assert_eq!(
+        store.event_count().expect("count acceptance action tape"),
+        20,
+        "candidate-bound acceptance must append exactly one write-ahead action"
+    );
+    let acceptance_claim = store
+        .authorize_and_claim_governed_v5_acceptance_check_v1_at_for_tests(
+            &GovernedV5AcceptanceCheckAuthorizeAndClaimRequestV1 {
+                run_id: fixture.run_id,
+                candidate_completion_event_id: completion_event_id,
+                action_request_event_id: acceptance_action_event_id,
+                packet_source: governed_command_packet_source(),
+                check_index: 0,
+                lease_duration_ms: 60_000,
+            },
+            &cas,
+            &v5_authority,
+            &activity_authority,
+            &receipt_signer,
+            &candidate_signer,
+            &action_key,
+            &action_signer,
+            acceptance_action_time + Duration::seconds(1),
+        )
+        .expect("claim candidate-bound acceptance check");
+    let acceptance_lease_id = match acceptance_claim {
+        GovernedCommandActionAuthorizeAndClaimDispositionV1::Granted {
+            command_intent,
+            lease_id,
+            ..
+        } => {
+            assert_eq!(command_intent.document().command, "/usr/bin/git");
+            assert_eq!(command_intent.document().args, ["status", "--short"]);
+            lease_id
+        }
+        other => panic!("first acceptance check claim must grant, got {other:?}"),
+    };
+    assert!(!acceptance_lease_id.is_empty());
+    assert_eq!(
+        store.event_count().expect("count acceptance claim tape"),
+        21,
+        "acceptance execution must have its own purpose-bound durable lease"
+    );
+    let acceptance_evidence = cas
+        .put_canonical_bytes(br#"{"outcome":"succeeded","source":"read-only-oci"}"#)
+        .expect("store acceptance evidence");
+    let acceptance_result_request = GovernedV5AcceptanceCheckResultRequestV1 {
+        run_id: fixture.run_id,
+        candidate_completion_event_id: completion_event_id,
+        action_request_event_id: acceptance_action_event_id,
+        packet_source: governed_command_packet_source(),
+        check_index: 0,
+        lease_id: acceptance_lease_id,
+        outcome: ActivityResultOutcomeV1::Succeeded,
+        result_digest: Some(acceptance_evidence.digest().into()),
+        result_ref: Some(acceptance_evidence.to_cas_ref()),
+        evidence_digest: acceptance_evidence.digest().into(),
+        evidence_ref: acceptance_evidence.to_cas_ref(),
+    };
+    let acceptance_result = store
+        .record_governed_v5_acceptance_check_result_v1_at_for_tests(
+            &acceptance_result_request,
+            &cas,
+            &v5_authority,
+            &activity_authority,
+            &receipt_signer,
+            &candidate_signer,
+            &action_key,
+            &action_signer,
+            acceptance_action_time + Duration::seconds(2),
+        )
+        .expect("record candidate-bound acceptance result");
+    assert!(matches!(
+        acceptance_result,
+        ActivityResultDispositionV1::Recorded {
+            outcome: ActivityResultOutcomeV1::Succeeded,
+            ..
+        }
+    ));
+    assert_eq!(
+        store.event_count().expect("count acceptance result tape"),
+        22,
+        "acceptance result must close exactly one purpose-bound lease"
+    );
+    let acceptance_result_retry = store
+        .record_governed_v5_acceptance_check_result_v1_at_for_tests(
+            &acceptance_result_request,
+            &cas,
+            &v5_authority,
+            &activity_authority,
+            &receipt_signer,
+            &candidate_signer,
+            &action_key,
+            &action_signer,
+            "2100-01-01T00:00:00Z"
+                .parse()
+                .expect("parse acceptance result retry time"),
+        )
+        .expect("recover candidate-bound acceptance result");
+    assert!(matches!(
+        acceptance_result_retry,
+        ActivityResultDispositionV1::Recorded {
+            outcome: ActivityResultOutcomeV1::Succeeded,
+            ..
+        }
+    ));
+    let candidate_acceptance_request = GovernedV5CandidateAcceptanceRequestV1 {
+        run_id: fixture.run_id,
+        candidate_completion_event_id: completion_event_id,
+        packet_source: governed_command_packet_source(),
+        check_action_request_event_ids: vec![acceptance_action_event_id],
+    };
+    assert!(store
+        .record_governed_v5_candidate_acceptance_v1(
+            &candidate_acceptance_request,
+            &cas,
+            &v5_authority,
+            &activity_authority,
+            &receipt_signer,
+            &candidate_signer,
+            &candidate_key,
+            &candidate_signer,
+            &checkpoint_key,
+            &checkpoint_signer,
+        )
+        .is_err());
+    assert_eq!(
+        store
+            .event_count()
+            .expect("count rejected acceptance signer tape"),
+        22,
+        "candidate and acceptance authorities must remain distinct"
+    );
+    let candidate_acceptance = store
+        .record_governed_v5_candidate_acceptance_v1(
+            &candidate_acceptance_request,
+            &cas,
+            &v5_authority,
+            &activity_authority,
+            &receipt_signer,
+            &candidate_signer,
+            &acceptance_key,
+            &acceptance_signer,
+            &checkpoint_key,
+            &checkpoint_signer,
+        )
+        .expect("record and seal candidate-bound deterministic acceptance");
+    let acceptance_event_id = match candidate_acceptance {
+        GovernedV5CandidateAcceptanceDispositionV1::Recorded {
+            candidate_acceptance_event_id,
+            outcome,
+            ..
+        } => {
+            assert_eq!(
+                outcome,
+                bp_ledger::payload::trust_spine::CandidateAcceptanceOutcomeV1::Passed
+            );
+            candidate_acceptance_event_id
+        }
+        other => panic!("first candidate acceptance must record, got {other:?}"),
+    };
+    assert_eq!(
+        store
+            .event_count()
+            .expect("count candidate acceptance tape"),
+        24,
+        "candidate acceptance must append one derived result and one complete checkpoint"
+    );
+    let acceptance_event = store
+        .events_for_run(&fixture.run_id.to_string())
+        .expect("load candidate acceptance tape")
+        .into_iter()
+        .map(|row| row.to_event().expect("decode acceptance event"))
+        .find(|event| event.id == acceptance_event_id)
+        .expect("find candidate acceptance event");
+    assert_eq!(acceptance_event.parent_event_id, Some(completion_event_id));
+    let Payload::CandidateAcceptanceRecordedV1(acceptance_payload) = &acceptance_event.payload
+    else {
+        panic!("candidate acceptance must append CandidateAcceptanceRecordedV1");
+    };
+    assert_eq!(
+        acceptance_payload.candidate_digest,
+        recorded_candidate_digest
+    );
+    assert_eq!(
+        acceptance_payload.acceptance_contract_digest,
+        COMMAND_ACCEPTANCE_DIGEST
+    );
+    let acceptance_retry_record = store
+        .record_governed_v5_candidate_acceptance_v1(
+            &candidate_acceptance_request,
+            &cas,
+            &v5_authority,
+            &activity_authority,
+            &receipt_signer,
+            &candidate_signer,
+            &acceptance_key,
+            &acceptance_signer,
+            &checkpoint_key,
+            &checkpoint_signer,
+        )
+        .expect("recover exact candidate acceptance");
+    assert!(matches!(
+        acceptance_retry_record,
+        GovernedV5CandidateAcceptanceDispositionV1::Existing {
+            candidate_acceptance_event_id,
+            ..
+        } if candidate_acceptance_event_id == acceptance_event_id
+    ));
+    assert_eq!(
+        store
+            .event_count()
+            .expect("count idempotent acceptance tape"),
+        24,
+        "acceptance retry must not append a second result or checkpoint"
+    );
+    let acceptance_retry = store
+        .issue_governed_v5_acceptance_check_action_v1_at_for_tests(
+            &acceptance_action_request,
+            &cas,
+            &v5_authority,
+            &activity_authority,
+            &receipt_signer,
+            &candidate_signer,
+            &action_key,
+            &action_signer,
+            "2100-01-01T00:00:00Z"
+                .parse()
+                .expect("parse acceptance retry time"),
+        )
+        .expect("recover candidate-bound acceptance check");
+    assert!(matches!(
+        acceptance_retry,
+        GovernedCommandActionIssueDispositionV1::Existing {
+            action_request_event_id,
+            ..
+        } if action_request_event_id == acceptance_action_event_id
+    ));
+    let mut substituted_check = acceptance_action_request.clone();
+    substituted_check.check_index = 1;
+    assert!(store
+        .issue_governed_v5_acceptance_check_action_v1_at_for_tests(
+            &substituted_check,
+            &cas,
+            &v5_authority,
+            &activity_authority,
+            &receipt_signer,
+            &candidate_signer,
+            &action_key,
+            &action_signer,
+            acceptance_action_time + Duration::seconds(1),
+        )
+        .is_err());
+    assert_eq!(
+        store
+            .event_count()
+            .expect("count rejected acceptance substitution tape"),
+        24,
+        "an out-of-contract acceptance check must not append authority"
+    );
+
     let retry = store
         .issue_governed_v5_command_action_v1_at_for_tests(
             &action_request,
@@ -2010,7 +2325,7 @@ fn v5_command_issuance_requires_a_checkpoint_sealed_admission() {
     ));
     assert_eq!(
         store.event_count().expect("count recovered V5 tape"),
-        19,
+        24,
         "V5 action replay must not append a duplicate effect intent"
     );
 }

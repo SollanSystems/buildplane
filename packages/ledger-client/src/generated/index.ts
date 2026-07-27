@@ -254,6 +254,13 @@ export enum ActivityClaimPurposeV1 {
 	 */
 	GovernedModelActionV1 = "governed_model_action_v1",
 	/**
+	 * A read-only process lease for one declaration-ordered deterministic
+	 * check over an immutable, checkpointed V5 candidate. This purpose is
+	 * distinct from implementer command authority even though both actions
+	 * are bound to the implementer's signed dispatch.
+	 */
+	GovernedAcceptanceCheckV1 = "governed_acceptance_check_v1",
+	/**
 	 * A Git lease issued only after the protected host has verified the
 	 * succeeded implementer process receipt and reconstructed the exact
 	 * candidate-finalization input from the sealed V5 dispatch and CAS.

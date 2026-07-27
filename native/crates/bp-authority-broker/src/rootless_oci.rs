@@ -184,6 +184,7 @@ struct GovernedOciCommandEvidenceV1 {
 pub(crate) struct RootlessOciCommandGateway<'a, R> {
     profile: RootlessOciProfileV1,
     candidate_workspace: PathBuf,
+    workspace_read_only: bool,
     evidence_cas: &'a Cas,
     runner: R,
 }
@@ -196,6 +197,41 @@ where
         profile: RootlessOciProfileV1,
         attestation: &RootlessOciAttestationV1,
         candidate_workspace: impl AsRef<Path>,
+        evidence_cas: &'a Cas,
+        runner: R,
+    ) -> Result<Self, RootlessOciCommandGatewayStartupErrorV1> {
+        Self::new_with_workspace_access(
+            profile,
+            attestation,
+            candidate_workspace,
+            false,
+            evidence_cas,
+            runner,
+        )
+    }
+
+    pub(crate) fn new_read_only_verifier(
+        profile: RootlessOciProfileV1,
+        attestation: &RootlessOciAttestationV1,
+        candidate_workspace: impl AsRef<Path>,
+        evidence_cas: &'a Cas,
+        runner: R,
+    ) -> Result<Self, RootlessOciCommandGatewayStartupErrorV1> {
+        Self::new_with_workspace_access(
+            profile,
+            attestation,
+            candidate_workspace,
+            true,
+            evidence_cas,
+            runner,
+        )
+    }
+
+    fn new_with_workspace_access(
+        profile: RootlessOciProfileV1,
+        attestation: &RootlessOciAttestationV1,
+        candidate_workspace: impl AsRef<Path>,
+        workspace_read_only: bool,
         evidence_cas: &'a Cas,
         runner: R,
     ) -> Result<Self, RootlessOciCommandGatewayStartupErrorV1> {
@@ -224,6 +260,7 @@ where
         Ok(Self {
             profile,
             candidate_workspace,
+            workspace_read_only,
             evidence_cas,
             runner,
         })
@@ -251,7 +288,13 @@ where
                 ..OciCommandExecutionResultV1::default()
             },
             (true, Some(timeout_ms), Some(workdir)) if timeout_ms > 0 => self.runner.run(
-                &governed_command_args(&self.profile, &self.candidate_workspace, intent, &workdir),
+                &governed_command_args(
+                    &self.profile,
+                    &self.candidate_workspace,
+                    self.workspace_read_only,
+                    intent,
+                    &workdir,
+                ),
                 timeout_ms,
             ),
             (true, _, None) => OciCommandExecutionResultV1 {
@@ -333,9 +376,11 @@ fn remaining_command_lease_ms(value: &str, now: DateTime<Utc>) -> Option<u64> {
 fn governed_command_args(
     profile: &RootlessOciProfileV1,
     candidate_workspace: &Path,
+    workspace_read_only: bool,
     intent: &bp_ledger::payload::command_evidence::CommandIntentEvidenceDocumentV1,
     workdir: &str,
 ) -> Vec<String> {
+    let workspace_access = if workspace_read_only { "ro" } else { "rw" };
     let mut args = vec![
         "run".into(),
         "--rm".into(),
@@ -362,8 +407,8 @@ fn governed_command_args(
         "--env=LANG=C.UTF-8".into(),
         "--env=LC_ALL=C.UTF-8".into(),
         format!(
-            "--volume={}:/workspace:rw,rprivate",
-            candidate_workspace.display()
+            "--volume={}:/workspace:{workspace_access},rprivate",
+            candidate_workspace.display(),
         ),
         format!("--workdir={workdir}"),
         profile.image.clone(),
@@ -843,6 +888,54 @@ mod command_gateway_tests {
         assert!(!args
             .iter()
             .any(|value| matches!(value.as_str(), "sh" | "bash" | "/bin/sh" | "/bin/bash")));
+    }
+
+    #[test]
+    fn verification_gateway_mounts_the_completed_candidate_read_only() {
+        let directory = tempdir().unwrap();
+        let candidate = directory.path().join("candidate");
+        fs::create_dir(&candidate).unwrap();
+        let cas = Cas::open(directory.path().join("cas")).unwrap();
+        let profile = profile();
+        let runner = CapturingRunner::default();
+        let calls = runner.calls.clone();
+        let mut gateway = RootlessOciCommandGateway::new_read_only_verifier(
+            profile.clone(),
+            &attestation(&profile),
+            &candidate,
+            &cas,
+            runner,
+        )
+        .unwrap();
+        let run_id = RunId::new();
+        let dispatch_event_id = EventId::new();
+        let action_request_event_id = EventId::new();
+        let capability = PrivateCommandCapability::from_verified_parts_for_tests(
+            run_id,
+            dispatch_event_id,
+            action_request_event_id,
+            "lease-1".into(),
+            "2099-07-26T12:00:00Z".into(),
+            verified_intent(
+                &cas,
+                run_id,
+                dispatch_event_id,
+                action_request_event_id,
+                None,
+            ),
+        );
+
+        let _paired = gateway.invoke(capability);
+        let calls = calls.borrow();
+        assert_eq!(calls.len(), 1);
+        let args = &calls[0].0;
+        assert!(args
+            .iter()
+            .any(|value| value.starts_with("--volume=")
+                && value.ends_with(":/workspace:ro,rprivate")));
+        assert!(!args
+            .iter()
+            .any(|value| value.ends_with(":/workspace:rw,rprivate")));
     }
 
     #[test]

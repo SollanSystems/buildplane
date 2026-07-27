@@ -20,7 +20,7 @@ use crate::payload::command_evidence::{
     CommandActionEvidenceBindingV1, CommandIntentEvidenceDocumentV1,
     VerifiedCanonicalCommandActionInputV1, VerifiedCommandIntentEvidenceDocumentV1,
 };
-use crate::payload::governed_packet::GovernedCommandPacketV1;
+use crate::payload::governed_packet::{GovernedAcceptanceCheckV1, GovernedCommandPacketV1};
 use crate::payload::model_evidence::{
     derive_model_action_scope_constraints_v1, model_request_evidence_document_v1_bytes,
     model_request_evidence_v1_descriptor, parse_verified_canonical_model_action_input_v1,
@@ -730,6 +730,36 @@ pub struct GovernedV5CandidateCompletionRequestV1 {
     pub candidate_created_event_id: EventId,
 }
 
+/// Closed request to aggregate the complete, purpose-bound deterministic
+/// acceptance result set for one checkpoint-sealed immutable V5 candidate.
+/// Check action ids are ordered exactly as the signed acceptance contract;
+/// every other field is reconstructed from signed tape and protected CAS.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GovernedV5CandidateAcceptanceRequestV1 {
+    pub run_id: RunId,
+    pub candidate_completion_event_id: EventId,
+    pub packet_source: String,
+    pub check_action_request_event_ids: Vec<EventId>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GovernedV5CandidateAcceptanceDispositionV1 {
+    Recorded {
+        candidate_acceptance_event_id: EventId,
+        candidate_acceptance_event_digest: String,
+        acceptance_ref: String,
+        acceptance_digest: String,
+        outcome: CandidateAcceptanceOutcomeV1,
+    },
+    Existing {
+        candidate_acceptance_event_id: EventId,
+        candidate_acceptance_event_digest: String,
+        acceptance_ref: String,
+        acceptance_digest: String,
+        outcome: CandidateAcceptanceOutcomeV1,
+    },
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct GovernedV5CandidateArtifactEvidenceV1 {
@@ -828,6 +858,49 @@ pub struct GovernedV5CommandActionIssueRequestV1 {
     pub dispatch_event_id: EventId,
     pub admission_event_id: EventId,
     pub packet_source: String,
+}
+
+/// Closed protected request for one deterministic acceptance check over an
+/// already completed immutable V5 candidate. The caller selects only the
+/// signed completion, normalized packet bytes, and declaration-order index;
+/// action identity and executable material are re-derived from signed tape.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GovernedV5AcceptanceCheckIssueRequestV1 {
+    pub run_id: RunId,
+    pub candidate_completion_event_id: EventId,
+    pub packet_source: String,
+    pub check_index: u32,
+}
+
+/// Closed claim request for an already issued candidate-bound acceptance
+/// action. Executable material and immutable action identity are reconstructed
+/// again before the purpose-bound lease is appended.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GovernedV5AcceptanceCheckAuthorizeAndClaimRequestV1 {
+    pub run_id: RunId,
+    pub candidate_completion_event_id: EventId,
+    pub action_request_event_id: EventId,
+    pub packet_source: String,
+    pub check_index: u32,
+    pub lease_duration_ms: u64,
+}
+
+/// Closed terminal result for one purpose-bound V5 acceptance check. The
+/// packet and completion references are evidence selectors only; the ledger
+/// re-derives the exact action and lease before recording an outcome.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GovernedV5AcceptanceCheckResultRequestV1 {
+    pub run_id: RunId,
+    pub candidate_completion_event_id: EventId,
+    pub action_request_event_id: EventId,
+    pub packet_source: String,
+    pub check_index: u32,
+    pub lease_id: String,
+    pub outcome: ActivityResultOutcomeV1,
+    pub result_digest: Option<String>,
+    pub result_ref: Option<String>,
+    pub evidence_digest: String,
+    pub evidence_ref: String,
 }
 
 /// Closed read-only request used by the protected candidate host to identify
@@ -2297,6 +2370,43 @@ impl SqliteStore {
                     SELECT RAISE(ABORT, 'governed candidate completions are tape-backed: DELETE forbidden');
                 END;
 
+            -- Broker-private immutable projection for the one deterministic
+            -- acceptance aggregate over a completed V5 candidate. The signed
+            -- tape event remains authoritative; the completion-keyed row is
+            -- the cross-process idempotency and sibling-detection boundary.
+            CREATE TABLE IF NOT EXISTS governed_candidate_acceptances (
+                run_id                              TEXT NOT NULL,
+                candidate_completion_event_id       TEXT NOT NULL,
+                candidate_digest                    TEXT NOT NULL,
+                candidate_commit_sha                TEXT NOT NULL,
+                acceptance_contract_digest          TEXT NOT NULL,
+                check_set_digest                    TEXT NOT NULL,
+                candidate_acceptance_event_id       TEXT NOT NULL UNIQUE,
+                candidate_acceptance_event_digest   TEXT NOT NULL,
+                acceptance_ref                      TEXT NOT NULL,
+                acceptance_digest                   TEXT NOT NULL,
+                outcome                             TEXT NOT NULL CHECK(outcome IN ('passed', 'rejected')),
+                evaluated_at                        TEXT NOT NULL,
+                PRIMARY KEY (run_id, candidate_completion_event_id),
+                FOREIGN KEY(candidate_completion_event_id) REFERENCES events(id),
+                FOREIGN KEY(candidate_acceptance_event_id) REFERENCES events(id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_governed_candidate_acceptances_digest
+                ON governed_candidate_acceptances(run_id, candidate_digest);
+
+            CREATE TRIGGER IF NOT EXISTS governed_candidate_acceptances_no_update
+                BEFORE UPDATE ON governed_candidate_acceptances
+                BEGIN
+                    SELECT RAISE(ABORT, 'governed candidate acceptances are tape-backed: UPDATE forbidden');
+                END;
+
+            CREATE TRIGGER IF NOT EXISTS governed_candidate_acceptances_no_delete
+                BEFORE DELETE ON governed_candidate_acceptances
+                BEGIN
+                    SELECT RAISE(ABORT, 'governed candidate acceptances are tape-backed: DELETE forbidden');
+                END;
+
             -- Broker-private projection for one signed governed V3 dispatch
             -- admission. The durable row is keyed by the dispatch
             -- idempotency key but also prevents two different envelopes from
@@ -3720,6 +3830,106 @@ impl SqliteStore {
             ActivityClaimPurposeV1::GovernedCommandActionV1,
             ActivityClaimEvidenceAuthorityV1::SealedV5 {
                 admission_event_id: request.admission_event_id,
+                authority: v5_authority,
+            },
+        )?;
+        Ok(governed_command_claim_disposition(
+            disposition,
+            command_intent,
+        ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn authorize_and_claim_governed_v5_acceptance_check_v1(
+        &self,
+        request: &GovernedV5AcceptanceCheckAuthorizeAndClaimRequestV1,
+        cas: &Cas,
+        v5_authority: &GovernedDispatchV5AdmissionAuthorityV1,
+        activity_authority: &ActivityClaimAuthorityV1,
+        receipt_signer: &ActorKeyRef,
+        candidate_signer: &ActorKeyRef,
+        signing_key: &SigningKey,
+        signer: &ActorKeyRef,
+    ) -> Result<GovernedCommandActionAuthorizeAndClaimDispositionV1> {
+        self.authorize_and_claim_governed_v5_acceptance_check_v1_at(
+            request,
+            cas,
+            v5_authority,
+            activity_authority,
+            receipt_signer,
+            candidate_signer,
+            signing_key,
+            signer,
+            Utc::now(),
+        )
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    #[allow(clippy::too_many_arguments)]
+    pub fn authorize_and_claim_governed_v5_acceptance_check_v1_at_for_tests(
+        &self,
+        request: &GovernedV5AcceptanceCheckAuthorizeAndClaimRequestV1,
+        cas: &Cas,
+        v5_authority: &GovernedDispatchV5AdmissionAuthorityV1,
+        activity_authority: &ActivityClaimAuthorityV1,
+        receipt_signer: &ActorKeyRef,
+        candidate_signer: &ActorKeyRef,
+        signing_key: &SigningKey,
+        signer: &ActorKeyRef,
+        now: DateTime<Utc>,
+    ) -> Result<GovernedCommandActionAuthorizeAndClaimDispositionV1> {
+        self.authorize_and_claim_governed_v5_acceptance_check_v1_at(
+            request,
+            cas,
+            v5_authority,
+            activity_authority,
+            receipt_signer,
+            candidate_signer,
+            signing_key,
+            signer,
+            now,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn authorize_and_claim_governed_v5_acceptance_check_v1_at(
+        &self,
+        request: &GovernedV5AcceptanceCheckAuthorizeAndClaimRequestV1,
+        cas: &Cas,
+        v5_authority: &GovernedDispatchV5AdmissionAuthorityV1,
+        activity_authority: &ActivityClaimAuthorityV1,
+        receipt_signer: &ActorKeyRef,
+        candidate_signer: &ActorKeyRef,
+        signing_key: &SigningKey,
+        signer: &ActorKeyRef,
+        now: DateTime<Utc>,
+    ) -> Result<GovernedCommandActionAuthorizeAndClaimDispositionV1> {
+        require_protected_governed_realm(activity_authority)?;
+        validate_claim_signer(activity_authority, signing_key, signer)?;
+        if !(MIN_ACTIVITY_LEASE_MS..=MAX_ACTIVITY_LEASE_MS).contains(&request.lease_duration_ms) {
+            return Err(command_action_authority_rejected(format!(
+                "lease_duration_ms must be in {MIN_ACTIVITY_LEASE_MS}..={MAX_ACTIVITY_LEASE_MS}",
+            )));
+        }
+        let (claim, command_intent, admission_event_id) = reconstruct_governed_v5_acceptance_check(
+            &self.conn,
+            request,
+            cas,
+            v5_authority,
+            activity_authority,
+            receipt_signer,
+            candidate_signer,
+            now,
+        )?;
+        let disposition = self.claim_activity_v1_at_with_evidence_authority(
+            &claim,
+            activity_authority,
+            signing_key,
+            signer,
+            now,
+            ActivityClaimPurposeV1::GovernedAcceptanceCheckV1,
+            ActivityClaimEvidenceAuthorityV1::SealedV5 {
+                admission_event_id,
                 authority: v5_authority,
             },
         )?;
@@ -7382,6 +7592,127 @@ impl SqliteStore {
         Ok(issued.disposition)
     }
 
+    /// Issue one candidate-bound deterministic acceptance action after the
+    /// immutable V5 completion proof has been checkpointed. Free-form legacy
+    /// checks never reach this path: executable and arguments come only from
+    /// the packet's strict V1 acceptance contract.
+    #[allow(clippy::too_many_arguments)]
+    pub fn issue_governed_v5_acceptance_check_action_v1(
+        &self,
+        request: &GovernedV5AcceptanceCheckIssueRequestV1,
+        cas: &Cas,
+        v5_authority: &GovernedDispatchV5AdmissionAuthorityV1,
+        activity_authority: &ActivityClaimAuthorityV1,
+        receipt_signer: &ActorKeyRef,
+        candidate_signer: &ActorKeyRef,
+        signing_key: &SigningKey,
+        signer: &ActorKeyRef,
+    ) -> Result<GovernedCommandActionIssueDispositionV1> {
+        self.issue_governed_v5_acceptance_check_action_v1_at(
+            request,
+            cas,
+            v5_authority,
+            activity_authority,
+            receipt_signer,
+            candidate_signer,
+            signing_key,
+            signer,
+            Utc::now(),
+        )
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    #[allow(clippy::too_many_arguments)]
+    pub fn issue_governed_v5_acceptance_check_action_v1_at_for_tests(
+        &self,
+        request: &GovernedV5AcceptanceCheckIssueRequestV1,
+        cas: &Cas,
+        v5_authority: &GovernedDispatchV5AdmissionAuthorityV1,
+        activity_authority: &ActivityClaimAuthorityV1,
+        receipt_signer: &ActorKeyRef,
+        candidate_signer: &ActorKeyRef,
+        signing_key: &SigningKey,
+        signer: &ActorKeyRef,
+        now: DateTime<Utc>,
+    ) -> Result<GovernedCommandActionIssueDispositionV1> {
+        self.issue_governed_v5_acceptance_check_action_v1_at(
+            request,
+            cas,
+            v5_authority,
+            activity_authority,
+            receipt_signer,
+            candidate_signer,
+            signing_key,
+            signer,
+            now,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn issue_governed_v5_acceptance_check_action_v1_at(
+        &self,
+        request: &GovernedV5AcceptanceCheckIssueRequestV1,
+        cas: &Cas,
+        v5_authority: &GovernedDispatchV5AdmissionAuthorityV1,
+        activity_authority: &ActivityClaimAuthorityV1,
+        receipt_signer: &ActorKeyRef,
+        candidate_signer: &ActorKeyRef,
+        signing_key: &SigningKey,
+        signer: &ActorKeyRef,
+        now: DateTime<Utc>,
+    ) -> Result<GovernedCommandActionIssueDispositionV1> {
+        require_protected_governed_realm(activity_authority)?;
+        validate_action_request_signer(activity_authority, signing_key, signer)?;
+        let now = canonical_ledger_timestamp(now)?;
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let completed = verified_governed_v5_completed_candidate_material(
+            &tx,
+            request.run_id,
+            request.candidate_completion_event_id,
+            v5_authority,
+            activity_authority,
+            receipt_signer,
+            candidate_signer,
+        )?;
+        let packet = verified_governed_command_packet_for_dispatch(
+            &request.packet_source,
+            &completed.dispatch_material.dispatch,
+        )?;
+        let checks = packet.protected_acceptance_checks().map_err(|error| {
+            LedgerError::ActivityClaimAuthorityRejected {
+                reason: format!("protected V5 acceptance contract is invalid: {error}"),
+            }
+        })?;
+        let check_index = usize::try_from(request.check_index).map_err(|_| {
+            LedgerError::ActivityClaimAuthorityRejected {
+                reason: "acceptance check index exceeds platform limits".into(),
+            }
+        })?;
+        let check =
+            checks
+                .get(check_index)
+                .ok_or_else(|| LedgerError::ActivityClaimAuthorityRejected {
+                    reason: "acceptance check index is outside the signed contract".into(),
+                })?;
+        let issued = issue_governed_v5_acceptance_check_from_completion_in_tx(
+            &tx,
+            request,
+            &completed,
+            &packet,
+            check,
+            cas,
+            activity_authority,
+            signing_key,
+            signer,
+            now,
+        )?;
+        tx.commit()?;
+        if let Some(event) = issued.appended_event.as_ref() {
+            self.record_ordinary_append(event);
+        }
+        Ok(issued.disposition)
+    }
+
     /// Resolve the single live, checkpoint-sealed V5 admission whose signed
     /// dispatch exactly binds the supplied normalized packet. The caller
     /// cannot choose either tape event identity.
@@ -8408,6 +8739,250 @@ impl SqliteStore {
         if updated != 1 {
             return Err(command_action_authority_rejected(
                 "V5 command result did not close exactly one granted lease",
+            ));
+        }
+        tx.commit()?;
+        self.record_ordinary_append(&event);
+        Ok(ActivityResultDispositionV1::Recorded {
+            result_event_id: event.id,
+            result_event_digest,
+            outcome: request.outcome,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_governed_v5_acceptance_check_result_v1(
+        &self,
+        request: &GovernedV5AcceptanceCheckResultRequestV1,
+        cas: &Cas,
+        v5_authority: &GovernedDispatchV5AdmissionAuthorityV1,
+        activity_authority: &ActivityClaimAuthorityV1,
+        receipt_signer: &ActorKeyRef,
+        candidate_signer: &ActorKeyRef,
+        signing_key: &SigningKey,
+        signer: &ActorKeyRef,
+    ) -> Result<ActivityResultDispositionV1> {
+        self.record_governed_v5_acceptance_check_result_v1_at(
+            request,
+            cas,
+            v5_authority,
+            activity_authority,
+            receipt_signer,
+            candidate_signer,
+            signing_key,
+            signer,
+            Utc::now(),
+        )
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_governed_v5_acceptance_check_result_v1_at_for_tests(
+        &self,
+        request: &GovernedV5AcceptanceCheckResultRequestV1,
+        cas: &Cas,
+        v5_authority: &GovernedDispatchV5AdmissionAuthorityV1,
+        activity_authority: &ActivityClaimAuthorityV1,
+        receipt_signer: &ActorKeyRef,
+        candidate_signer: &ActorKeyRef,
+        signing_key: &SigningKey,
+        signer: &ActorKeyRef,
+        now: DateTime<Utc>,
+    ) -> Result<ActivityResultDispositionV1> {
+        self.record_governed_v5_acceptance_check_result_v1_at(
+            request,
+            cas,
+            v5_authority,
+            activity_authority,
+            receipt_signer,
+            candidate_signer,
+            signing_key,
+            signer,
+            now,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_governed_v5_acceptance_check_result_v1_at(
+        &self,
+        request: &GovernedV5AcceptanceCheckResultRequestV1,
+        cas: &Cas,
+        v5_authority: &GovernedDispatchV5AdmissionAuthorityV1,
+        activity_authority: &ActivityClaimAuthorityV1,
+        receipt_signer: &ActorKeyRef,
+        candidate_signer: &ActorKeyRef,
+        signing_key: &SigningKey,
+        signer: &ActorKeyRef,
+        now: DateTime<Utc>,
+    ) -> Result<ActivityResultDispositionV1> {
+        require_protected_governed_realm(activity_authority)?;
+        validate_claim_signer(activity_authority, signing_key, signer)?;
+        if request.lease_id.trim().is_empty() {
+            return Err(LedgerError::InvalidPayload {
+                kind: "record_governed_v5_acceptance_check_result_v1".into(),
+                reason: "lease_id must be non-empty".into(),
+            });
+        }
+        let stored = activity_claim_by_lease(&self.conn, request.run_id, &request.lease_id)?
+            .ok_or_else(|| {
+                command_action_authority_rejected(
+                    "acceptance result lease does not name a signed activity claim",
+                )
+            })?;
+        let signed_claim = verify_signed_claim_projection(&self.conn, &stored, activity_authority)?;
+        if stored.action_kind != ActionKindV1::Process
+            || signed_claim.purpose != ActivityClaimPurposeV1::GovernedAcceptanceCheckV1
+            || stored.action_request_event_id != request.action_request_event_id
+        {
+            return Err(command_action_authority_rejected(
+                "acceptance result requires its exact purpose-bound process lease",
+            ));
+        }
+        let claimed_at = parse_claim_timestamp(&signed_claim.claimed_at)?;
+        let reconstruction = GovernedV5AcceptanceCheckAuthorizeAndClaimRequestV1 {
+            run_id: request.run_id,
+            candidate_completion_event_id: request.candidate_completion_event_id,
+            action_request_event_id: request.action_request_event_id,
+            packet_source: request.packet_source.clone(),
+            check_index: request.check_index,
+            lease_duration_ms: stored.lease_duration_ms,
+        };
+        let (derived_claim, _, _) = reconstruct_governed_v5_acceptance_check(
+            &self.conn,
+            &reconstruction,
+            cas,
+            v5_authority,
+            activity_authority,
+            receipt_signer,
+            candidate_signer,
+            claimed_at,
+        )?;
+        if derived_claim.activity_id != stored.activity_id
+            || derived_claim.idempotency_key != stored.idempotency_key
+            || derived_claim.dispatch_event_id != stored.dispatch_event_id
+            || derived_claim.action_request_event_id != stored.action_request_event_id
+        {
+            return Err(command_action_authority_rejected(
+                "acceptance result lease does not match reconstructed candidate authority",
+            ));
+        }
+        if !activity_heartbeats_for_claim(&self.conn, stored.run_id, stored.claim_event_id)?
+            .is_empty()
+        {
+            return Err(command_action_authority_rejected(
+                "acceptance result does not admit heartbeat-extended leases",
+            ));
+        }
+        let derived = ActivityResultRequestV1 {
+            run_id: request.run_id,
+            activity_id: stored.activity_id.clone(),
+            idempotency_key: stored.idempotency_key.clone(),
+            lease_id: request.lease_id.clone(),
+            outcome: request.outcome,
+            result_digest: request.result_digest.clone(),
+            result_ref: request.result_ref.clone(),
+            evidence_digest: request.evidence_digest.clone(),
+            evidence_ref: request.evidence_ref.clone(),
+        };
+        validate_activity_result_request(&derived)?;
+
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let current = activity_claim_by_idempotency(&tx, request.run_id, &stored.idempotency_key)?
+            .ok_or_else(|| LedgerError::ActivityClaimNotFound {
+                run_id: request.run_id.to_string(),
+                idempotency_key: stored.idempotency_key.clone(),
+            })?;
+        let current_claim = verify_signed_claim_projection(&tx, &current, activity_authority)?;
+        if current_claim.purpose != ActivityClaimPurposeV1::GovernedAcceptanceCheckV1
+            || current.claim_event_id != stored.claim_event_id
+            || current.claim_event_digest != stored.claim_event_digest
+            || current.activity_id != stored.activity_id
+            || current.action_request_event_id != stored.action_request_event_id
+            || current.dispatch_event_id != stored.dispatch_event_id
+            || current.lease_id != stored.lease_id
+            || current.lease_expires_at != stored.lease_expires_at
+        {
+            return Err(command_action_authority_rejected(
+                "acceptance result claim changed during authority reconstruction",
+            ));
+        }
+        if current.state == StoredActivityClaimState::Recorded {
+            verify_signed_activity_result_projection(&tx, &current, activity_authority)?;
+            let disposition = existing_result_disposition(&current, &derived)?;
+            tx.commit()?;
+            return Ok(disposition);
+        }
+        if current.lease_id != request.lease_id {
+            return Err(LedgerError::ActivityClaimLeaseMismatch {
+                run_id: request.run_id.to_string(),
+                idempotency_key: current.idempotency_key,
+            });
+        }
+        let lease_expires_at = parse_claim_timestamp(&current.lease_expires_at)?;
+        if now >= lease_expires_at && request.outcome != ActivityResultOutcomeV1::Unknown {
+            tx.commit()?;
+            return Ok(ActivityResultDispositionV1::LeaseExpired {
+                claim_event_id: current.claim_event_id,
+                lease_expires_at: timestamp(lease_expires_at),
+            });
+        }
+        let now = canonical_ledger_timestamp(now)?;
+        let recorded_at = timestamp(now);
+        let event = canonicalize(Event {
+            id: EventId::new(),
+            run_id: request.run_id,
+            parent_event_id: Some(current.claim_event_id),
+            schema_version: Event::CURRENT_SCHEMA_VERSION,
+            kind: EventKind::ActivityResultRecordedV1,
+            occurred_at: now,
+            payload: Payload::ActivityResultRecordedV1(ActivityResultRecordedV1 {
+                run_id: request.run_id,
+                activity_id: current.activity_id.clone(),
+                idempotency_key: current.idempotency_key.clone(),
+                claim_event_id: current.claim_event_id,
+                claim_event_digest: current.claim_event_digest.clone(),
+                lease_id: request.lease_id.clone(),
+                outcome: request.outcome,
+                result_digest: request.result_digest.clone(),
+                result_ref: request.result_ref.clone(),
+                evidence_digest: request.evidence_digest.clone(),
+                evidence_ref: request.evidence_ref.clone(),
+                recorded_at: recorded_at.clone(),
+            }),
+        })?;
+        validate_new_ordinary_event_id(&tx, &event)?;
+        let signature = sign_event(&event, signing_key, signer, now)?;
+        let result_event_digest = signature.canonical_event_hash.clone();
+        insert_event(&tx, &event)?;
+        insert_event_signature(&tx, &signature)?;
+        let updated = tx.execute(
+            r#"UPDATE activity_claims
+               SET state = 'recorded',
+                   result_event_id = ?1,
+                   result_event_digest = ?2,
+                   result_outcome = ?3,
+                   result_digest = ?4,
+                   result_ref = ?5,
+                   evidence_digest = ?6,
+                   evidence_ref = ?7,
+                   recorded_at = ?8
+               WHERE run_id = ?9 AND idempotency_key = ?10 AND state = 'granted'"#,
+            params![
+                event.id.to_string(),
+                &result_event_digest,
+                activity_result_outcome_wire(request.outcome),
+                &request.result_digest,
+                &request.result_ref,
+                &request.evidence_digest,
+                &request.evidence_ref,
+                &recorded_at,
+                request.run_id.to_string(),
+                &current.idempotency_key,
+            ],
+        )?;
+        if updated != 1 {
+            return Err(command_action_authority_rejected(
+                "acceptance result did not close exactly one granted lease",
             ));
         }
         tx.commit()?;
@@ -9777,6 +10352,222 @@ impl SqliteStore {
         )?;
         tx.commit()?;
         Ok(outcome)
+    }
+
+    /// Aggregate and checkpoint the exact purpose-bound deterministic check
+    /// results for one immutable V5 candidate. The aggregate signer is
+    /// deliberately distinct from candidate, effect, receipt, and checkpoint
+    /// authorities; losing any one of those authorities cannot manufacture a
+    /// passed acceptance record.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_governed_v5_candidate_acceptance_v1(
+        &self,
+        request: &GovernedV5CandidateAcceptanceRequestV1,
+        cas: &Cas,
+        v5_authority: &GovernedDispatchV5AdmissionAuthorityV1,
+        activity_authority: &ActivityClaimAuthorityV1,
+        receipt_signer: &ActorKeyRef,
+        candidate_signer: &ActorKeyRef,
+        acceptance_signing_key: &SigningKey,
+        acceptance_signer: &ActorKeyRef,
+        checkpoint_signing_key: &SigningKey,
+        checkpoint_signer: &ActorKeyRef,
+    ) -> Result<GovernedV5CandidateAcceptanceDispositionV1> {
+        require_protected_governed_realm(activity_authority)?;
+        validate_governed_candidate_acceptance_signer(
+            activity_authority,
+            v5_authority,
+            acceptance_signing_key,
+            acceptance_signer,
+            receipt_signer,
+            candidate_signer,
+            checkpoint_signer,
+        )?;
+        validate_governed_dispatch_v5_admission_checkpoint_signer(
+            v5_authority,
+            checkpoint_signing_key,
+            checkpoint_signer,
+        )?;
+
+        // Reconstruct each claim once outside the append transaction. The
+        // immediate transaction below re-verifies every signed projection and
+        // result before deriving the aggregate, so this preflight contributes
+        // no mutable authority.
+        for (check_index, action_request_event_id) in
+            request.check_action_request_event_ids.iter().enumerate()
+        {
+            let stored = activity_claim_by_action_request(
+                &self.conn,
+                request.run_id,
+                *action_request_event_id,
+            )?
+            .ok_or_else(|| {
+                candidate_acceptance_authority_rejected(
+                    "acceptance check has no purpose-bound activity claim",
+                )
+            })?;
+            let reconstruction = GovernedV5AcceptanceCheckAuthorizeAndClaimRequestV1 {
+                run_id: request.run_id,
+                candidate_completion_event_id: request.candidate_completion_event_id,
+                action_request_event_id: *action_request_event_id,
+                packet_source: request.packet_source.clone(),
+                check_index: u32::try_from(check_index).map_err(|_| {
+                    candidate_acceptance_authority_rejected(
+                        "acceptance check index exceeds the V1 contract range",
+                    )
+                })?,
+                lease_duration_ms: stored.lease_duration_ms,
+            };
+            reconstruct_governed_v5_acceptance_check(
+                &self.conn,
+                &reconstruction,
+                cas,
+                v5_authority,
+                activity_authority,
+                receipt_signer,
+                candidate_signer,
+                parse_claim_timestamp(
+                    &verify_signed_claim_projection(&self.conn, &stored, activity_authority)?
+                        .claimed_at,
+                )?,
+            )?;
+        }
+
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let evidence = verify_governed_v5_candidate_acceptance_evidence(
+            &tx,
+            request,
+            cas,
+            v5_authority,
+            activity_authority,
+            receipt_signer,
+            candidate_signer,
+        )?;
+        let disposition = if let Some(stored) = governed_candidate_acceptance_by_completion(
+            &tx,
+            request.run_id,
+            request.candidate_completion_event_id,
+        )? {
+            let disposition = resolve_existing_governed_v5_candidate_acceptance(
+                &tx,
+                &stored,
+                request,
+                &evidence,
+                activity_authority,
+                acceptance_signer,
+            )?;
+            tx.commit()?;
+            disposition
+        } else {
+            require_candidate_acceptance_event_projection(
+                &tx,
+                request,
+                &evidence.acceptance.candidate_digest,
+                None,
+            )?;
+            let evaluated_at =
+                parse_claim_timestamp(&evidence.acceptance.evaluated_at).map_err(|_| {
+                    candidate_acceptance_authority_rejected(
+                        "candidate acceptance timestamp is not canonical RFC3339 UTC",
+                    )
+                })?;
+            let event = canonicalize(Event {
+                id: EventId::new(),
+                run_id: request.run_id,
+                parent_event_id: Some(request.candidate_completion_event_id),
+                schema_version: Event::CURRENT_SCHEMA_VERSION,
+                kind: EventKind::CandidateAcceptanceRecorded,
+                occurred_at: evaluated_at,
+                payload: Payload::CandidateAcceptanceRecordedV1(evidence.acceptance.clone()),
+            })?;
+            validate_new_ordinary_event_id(&tx, &event)?;
+            let signature = sign_event(
+                &event,
+                acceptance_signing_key,
+                acceptance_signer,
+                Utc::now(),
+            )?;
+            let event_digest = signature.canonical_event_hash.clone();
+            insert_event(&tx, &event)?;
+            insert_event_signature(&tx, &signature)?;
+            insert_governed_candidate_acceptance(&tx, request, &evidence, &event, &event_digest)?;
+            tx.commit()?;
+            self.record_ordinary_append(&event);
+            GovernedV5CandidateAcceptanceDispositionV1::Recorded {
+                candidate_acceptance_event_id: event.id,
+                candidate_acceptance_event_digest: event_digest,
+                acceptance_ref: evidence.acceptance.acceptance_ref,
+                acceptance_digest: evidence.acceptance.acceptance_digest,
+                outcome: evidence.acceptance.outcome,
+            }
+        };
+
+        let acceptance_event_id = match &disposition {
+            GovernedV5CandidateAcceptanceDispositionV1::Recorded {
+                candidate_acceptance_event_id,
+                ..
+            }
+            | GovernedV5CandidateAcceptanceDispositionV1::Existing {
+                candidate_acceptance_event_id,
+                ..
+            } => *candidate_acceptance_event_id,
+        };
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let evidence = verify_governed_v5_candidate_acceptance_evidence(
+            &tx,
+            request,
+            cas,
+            v5_authority,
+            activity_authority,
+            receipt_signer,
+            candidate_signer,
+        )?;
+        let stored = governed_candidate_acceptance_by_completion(
+            &tx,
+            request.run_id,
+            request.candidate_completion_event_id,
+        )?
+        .ok_or_else(|| {
+            candidate_acceptance_reconciliation_required(
+                request,
+                "candidate acceptance projection disappeared before checkpoint sealing",
+            )
+        })?;
+        resolve_existing_governed_v5_candidate_acceptance(
+            &tx,
+            &stored,
+            request,
+            &evidence,
+            activity_authority,
+            acceptance_signer,
+        )?;
+        if parse_event_id(
+            &stored.candidate_acceptance_event_id,
+            "governed_candidate_acceptances",
+        )? != acceptance_event_id
+        {
+            return Err(candidate_acceptance_reconciliation_required(
+                request,
+                "candidate acceptance projection changed before checkpoint sealing",
+            ));
+        }
+        let seal = self.seal_governed_signed_prefix_in_transaction(
+            &tx,
+            &request.run_id,
+            checkpoint_signing_key,
+            checkpoint_signer,
+        )?;
+        tx.commit()?;
+        match seal {
+            GovernedCheckpointSealOutcome::AlreadySealed { .. }
+            | GovernedCheckpointSealOutcome::Emitted { .. } => Ok(disposition),
+            GovernedCheckpointSealOutcome::EmptyPrefix => {
+                Err(candidate_acceptance_reconciliation_required(
+                    request,
+                    "candidate acceptance sealing found no signed governed prefix",
+                ))
+            }
+        }
     }
 
     /// Convert one succeeded, checkpoint-admitted V5 command into its exact
@@ -11511,6 +12302,47 @@ fn validate_governed_candidate_artifact_signer(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
+fn validate_governed_candidate_acceptance_signer(
+    activity_authority: &ActivityClaimAuthorityV1,
+    v5_authority: &GovernedDispatchV5AdmissionAuthorityV1,
+    signing_key: &SigningKey,
+    acceptance_signer: &ActorKeyRef,
+    receipt_signer: &ActorKeyRef,
+    candidate_signer: &ActorKeyRef,
+    checkpoint_signer: &ActorKeyRef,
+) -> Result<()> {
+    validate_trusted_actor("candidate acceptance signer", acceptance_signer)
+        .map_err(|error| candidate_acceptance_authority_rejected(error.to_string()))?;
+    let actual_public_key_hash = public_key_hash(&signing_key.verifying_key());
+    let trusted_bytes = activity_authority
+        .trusted_keys
+        .public_key_for(acceptance_signer)
+        .ok_or_else(|| {
+            candidate_acceptance_authority_rejected("candidate acceptance signer is not trusted")
+        })?;
+    let collides = [
+        &activity_authority.dispatch_signer,
+        &activity_authority.action_request_signer,
+        &activity_authority.claim_signer,
+        receipt_signer,
+        candidate_signer,
+        checkpoint_signer,
+        &v5_authority.admission_record_signer,
+    ]
+    .into_iter()
+    .any(|other| actor_matches(acceptance_signer, other));
+    if acceptance_signer.public_key_hash.as_deref() != Some(actual_public_key_hash.as_str())
+        || trusted_bytes != signing_key.verifying_key().as_bytes()
+        || collides
+    {
+        return Err(candidate_acceptance_authority_rejected(
+            "candidate acceptance signer must be one distinct trusted protected-host identity",
+        ));
+    }
+    Ok(())
+}
+
 fn action_receipt_authority_rejected(reason: impl Into<String>) -> LedgerError {
     LedgerError::ActionReceiptAuthorityRejected {
         reason: reason.into(),
@@ -11544,6 +12376,26 @@ fn candidate_artifact_reconciliation_required(
         run_id: run_id.to_string(),
         action_receipt_set_event_id: action_receipt_set_event_id.to_string(),
         reason: reason.into(),
+    }
+}
+
+fn candidate_acceptance_authority_rejected(reason: impl Into<String>) -> LedgerError {
+    LedgerError::ActivityClaimAuthorityRejected {
+        reason: format!("candidate acceptance authority rejected: {}", reason.into()),
+    }
+}
+
+fn candidate_acceptance_reconciliation_required(
+    request: &GovernedV5CandidateAcceptanceRequestV1,
+    reason: impl Into<String>,
+) -> LedgerError {
+    LedgerError::CandidateCompletionReconciliationRequired {
+        run_id: request.run_id.to_string(),
+        candidate_created_event_id: request.candidate_completion_event_id.to_string(),
+        reason: format!(
+            "candidate acceptance reconciliation required: {}",
+            reason.into()
+        ),
     }
 }
 
@@ -12353,6 +13205,183 @@ struct GovernedCommandActionIssueInTx {
     appended_event: Option<Event>,
 }
 
+#[derive(Clone, Debug)]
+struct VerifiedGovernedV5CompletedCandidateMaterialV1 {
+    completion_event: Event,
+    completion: CandidateCompletionRecordedV1,
+    dispatch_event_id: EventId,
+    admission_event_id: EventId,
+    dispatch_material: DispatchAuthorityMaterialV1,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn verified_governed_v5_completed_candidate_material(
+    tx: &Transaction<'_>,
+    run_id: RunId,
+    completion_event_id: EventId,
+    v5_authority: &GovernedDispatchV5AdmissionAuthorityV1,
+    activity_authority: &ActivityClaimAuthorityV1,
+    receipt_signer: &ActorKeyRef,
+    candidate_signer: &ActorKeyRef,
+) -> Result<VerifiedGovernedV5CompletedCandidateMaterialV1> {
+    let rejected = |reason: String| LedgerError::CandidateCompletionAuthorityRejected { reason };
+    let completion_event = load_verified_authority_event(
+        tx,
+        completion_event_id,
+        &activity_authority.trusted_keys,
+        candidate_signer,
+        "V5 completed candidate",
+    )
+    .map_err(|error| rejected(error.to_string()))?;
+    if completion_event.run_id != run_id {
+        return Err(rejected(
+            "V5 candidate completion belongs to another run".into(),
+        ));
+    }
+    let Payload::CandidateCompletionRecordedV1(completion) = &completion_event.payload else {
+        return Err(rejected(
+            "V5 acceptance requires CandidateCompletionRecordedV1".into(),
+        ));
+    };
+    let completion = completion.clone();
+    if completion_event.parent_event_id != Some(completion.candidate_created_event_ref)
+        || completion.completion_digest
+            != candidate_completion_recorded_v1_digest(&completion)
+                .map_err(|error| rejected(error.to_string()))?
+    {
+        return Err(rejected(
+            "V5 acceptance completion payload is not canonical or candidate-parented".into(),
+        ));
+    }
+    let completion_request = GovernedV5CandidateCompletionRequestV1 {
+        run_id,
+        candidate_created_event_id: completion.candidate_created_event_ref,
+    };
+    let evidence = verify_governed_v5_candidate_completion_evidence(
+        tx,
+        &completion_request,
+        v5_authority,
+        activity_authority,
+        receipt_signer,
+        candidate_signer,
+    )?;
+    if evidence.completion != completion {
+        return Err(rejected(
+            "V5 acceptance completion does not equal reconstructed candidate lineage".into(),
+        ));
+    }
+    let projection_request = GovernedCandidateCompletionRequestV1 {
+        run_id,
+        dispatch_event_id: evidence.dispatch_event_id,
+        candidate_created_event_id: completion.candidate_created_event_ref,
+    };
+    require_candidate_completion_event_projection(
+        tx,
+        &projection_request,
+        Some(completion_event_id),
+    )?;
+    let stored = governed_candidate_completion_by_candidate(
+        tx,
+        run_id,
+        completion.candidate_created_event_ref,
+    )?
+    .ok_or_else(|| {
+        candidate_completion_reconciliation_required(
+            &projection_request,
+            "V5 acceptance candidate-completion projection is missing",
+        )
+    })?;
+    resolve_existing_governed_v5_candidate_completion(
+        tx,
+        &stored,
+        &completion_request,
+        &projection_request,
+        &evidence,
+        activity_authority,
+        candidate_signer,
+    )?;
+    verify_governed_v5_completion_checkpoint(tx, run_id, completion_event_id, v5_authority)?;
+    let admission =
+        governed_dispatch_v5_admission_by_source(tx, run_id, evidence.dispatch_event_id)?
+            .ok_or_else(|| rejected("V5 acceptance completion has no recorded admission".into()))?;
+    let dispatch_material = verified_sealed_v5_dispatch_action_material(
+        tx,
+        run_id,
+        evidence.dispatch_event_id,
+        admission.admission_event_id,
+        v5_authority,
+        activity_authority,
+    )
+    .map_err(|error| rejected(error.to_string()))?;
+    Ok(VerifiedGovernedV5CompletedCandidateMaterialV1 {
+        completion_event,
+        completion,
+        dispatch_event_id: evidence.dispatch_event_id,
+        admission_event_id: admission.admission_event_id,
+        dispatch_material,
+    })
+}
+
+fn verify_governed_v5_completion_checkpoint(
+    conn: &Connection,
+    run_id: RunId,
+    completion_event_id: EventId,
+    authority: &GovernedDispatchV5AdmissionAuthorityV1,
+) -> Result<()> {
+    let rejected = |reason: &str| LedgerError::CandidateCompletionAuthorityRejected {
+        reason: format!("V5 candidate completion checkpoint rejected: {reason}"),
+    };
+    let signed = signed_ordinary_events_for_connection(conn, &run_id)?;
+    let Some(completion_position) = signed
+        .iter()
+        .position(|event| event.event_id == completion_event_id)
+    else {
+        return Err(rejected(
+            "completion is absent from the signed ordinary-event prefix",
+        ));
+    };
+    let prefix_len = completion_position + 1;
+    let expected_root = tape_root_hash(
+        &signed[..prefix_len]
+            .iter()
+            .map(|event| event.canonical_event_hash.clone())
+            .collect::<Vec<_>>(),
+    );
+    let mut matching = 0_u8;
+    for (event, signature) in checkpoint_events_for_run_for_connection(conn, &run_id)? {
+        let Payload::TapeCheckpointV1(checkpoint) = &event.payload else {
+            return Err(rejected("checkpoint row has the wrong payload"));
+        };
+        if checkpoint.through_event_id != completion_event_id {
+            continue;
+        }
+        let signature = signature.ok_or_else(|| rejected("checkpoint is unsigned"))?;
+        if event.run_id != run_id
+            || event.parent_event_id != Some(completion_event_id)
+            || checkpoint.run_id != run_id
+            || checkpoint.algorithm != TapeRootAlgorithm::Sha256Linear
+            || checkpoint.through_event_count != prefix_len as u64
+            || checkpoint.tape_root_hash != expected_root
+            || !actor_matches(&authority.checkpoint_signer, &signature.signer)
+            || verify_event_signature(&event, &signature, &authority.trusted_keys)
+                != VerificationStatus::Verified
+        {
+            return Err(rejected(
+                "checkpoint does not verify the exact signed completion prefix",
+            ));
+        }
+        matching = matching
+            .checked_add(1)
+            .ok_or_else(|| rejected("checkpoint count overflow"))?;
+    }
+    if matching != 1 {
+        return Err(rejected(
+            "completion requires exactly one pinned checkpoint",
+        ));
+    }
+    Ok(())
+}
+
 fn verified_governed_command_packet_for_dispatch(
     packet_source: &str,
     dispatch: &DispatchEnvelopeV3,
@@ -12560,6 +13589,216 @@ fn issue_governed_command_action_from_dispatch_in_tx(
         occurred_at: now,
         payload: Payload::ActionRequestedV2(expected_action.clone()),
     })?;
+    validate_new_ordinary_event_id(tx, &event)?;
+    let signature = sign_event(&event, signing_key, signer, now)?;
+    insert_event(tx, &event)?;
+    insert_event_signature(tx, &signature)?;
+    Ok(GovernedCommandActionIssueInTx {
+        disposition: GovernedCommandActionIssueDispositionV1::Issued {
+            action_request_event_id: event.id,
+            canonical_input_ref: expected_action.canonical_input_ref,
+            canonical_input_digest: expected_action.canonical_input_digest,
+            verified_input,
+        },
+        appended_event: Some(event),
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn issue_governed_v5_acceptance_check_from_completion_in_tx(
+    tx: &Transaction<'_>,
+    request: &GovernedV5AcceptanceCheckIssueRequestV1,
+    completed: &VerifiedGovernedV5CompletedCandidateMaterialV1,
+    packet: &GovernedCommandPacketV1,
+    check: &GovernedAcceptanceCheckV1,
+    cas: &Cas,
+    authority: &ActivityClaimAuthorityV1,
+    signing_key: &SigningKey,
+    signer: &ActorKeyRef,
+    now: DateTime<Utc>,
+) -> Result<GovernedCommandActionIssueInTx> {
+    let dispatch = &completed.dispatch_material.dispatch;
+    let dispatch_envelope_digest = &completed.dispatch_material.lineage_envelope_digest;
+    let candidate_digest_hex = completed
+        .completion
+        .candidate_digest
+        .strip_prefix("sha256:")
+        .ok_or_else(|| LedgerError::ActivityClaimAuthorityRejected {
+            reason: "completed candidate digest is not canonical sha256".into(),
+        })?;
+    let action_id = format!("acceptance:{candidate_digest_hex}:{}", request.check_index);
+    let idempotency_key = format!(
+        "{}:acceptance:{candidate_digest_hex}:{}",
+        dispatch.body.idempotency_key, request.check_index
+    );
+    let input = CanonicalCommandActionInputV1::new(
+        request.run_id.to_string(),
+        action_id.clone(),
+        check.command.clone(),
+        check.args.clone(),
+        None,
+    )
+    .map_err(|error| LedgerError::ActivityClaimAuthorityRejected {
+        reason: format!("V5 acceptance executable material is invalid: {error}"),
+    })?;
+    let input_bytes = canonical_command_action_input_v1_bytes(&input).map_err(|error| {
+        LedgerError::ActivityClaimAuthorityRejected {
+            reason: format!("V5 acceptance executable could not be canonicalized: {error}"),
+        }
+    })?;
+    let input_ref = cas.put_canonical_bytes(&input_bytes)?;
+    let verified_input = parse_verified_canonical_command_action_input_v1(
+        &input_bytes,
+        &input_ref.to_cas_ref(),
+        input_ref.digest(),
+    )?;
+    let expected_action = ActionRequestedV2 {
+        run_id: request.run_id.to_string(),
+        workflow_id: dispatch.body.workflow_id.clone(),
+        unit_id: dispatch.body.unit_id.clone(),
+        attempt: dispatch.body.attempt,
+        provenance_ref: dispatch.body.provenance_ref.clone(),
+        action_id: action_id.clone(),
+        idempotency_key: idempotency_key.clone(),
+        action_kind: ActionKindV1::Process,
+        canonical_input_digest: input_ref.digest().into(),
+        canonical_input_ref: input_ref.to_cas_ref(),
+        dispatch_envelope_digest: dispatch_envelope_digest.clone(),
+        repository_binding_digest: dispatch.repository_binding_digest.clone(),
+        ledger_authority_realm_digest: dispatch.ledger_authority_realm_digest.clone(),
+        governed_packet_digest: Some(packet.canonical_digest()?),
+        capability_bundle_digest: dispatch.body.capability_bundle_digest.clone(),
+        policy_digest: governed_dispatch_policy_digest_v1(
+            &dispatch.body.acceptance_contract_digest,
+        )
+        .map_err(|error| LedgerError::ActivityClaimAuthorityRejected {
+            reason: format!("V5 acceptance policy binding could not be derived: {error}"),
+        })?,
+        context_manifest_digest: dispatch.body.context_manifest_digest.clone(),
+        worker_manifest_digest: dispatch.body.worker_manifest_digest.clone(),
+        sandbox_profile_digest: dispatch.body.sandbox_profile_digest.clone(),
+        authority_actor: authority.action_request_signer.actor_id.clone(),
+        execution_role: dispatch.body.execution_role,
+        requested_at: timestamp(now),
+    };
+
+    let mut statement =
+        tx.prepare("SELECT id FROM events WHERE run_id = ?1 AND kind = ?2 ORDER BY id ASC")?;
+    let ids = statement
+        .query_map(
+            params![
+                request.run_id.to_string(),
+                EventKind::ActionRequestedV2.as_wire()
+            ],
+            |row| row.get::<_, String>(0),
+        )?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    drop(statement);
+    let mut existing = None;
+    for id in ids {
+        let event_id = parse_event_id(&id, "V5 acceptance check action")?;
+        let event = load_verified_authority_event(
+            tx,
+            event_id,
+            &authority.trusted_keys,
+            &authority.action_request_signer,
+            "V5 acceptance check action",
+        )?;
+        let Payload::ActionRequestedV2(action) = &event.payload else {
+            unreachable!("action request query returns ActionRequestedV2")
+        };
+        let action = action.clone();
+        if action.action_id != action_id {
+            continue;
+        }
+        if existing.replace((event, action)).is_some() {
+            return Err(LedgerError::ActivityClaimAuthorityRejected {
+                reason: "V5 acceptance check has duplicate signed action requests".into(),
+            });
+        }
+    }
+    if let Some((event, action)) = existing {
+        let mut expected = expected_action;
+        expected.requested_at = action.requested_at.clone();
+        let requested_at = parse_claim_timestamp(&action.requested_at)?;
+        let dispatch_window = validate_governed_dispatch(dispatch, requested_at)?;
+        let claim = ActivityClaimRequestV1 {
+            run_id: request.run_id,
+            activity_id: action_id,
+            idempotency_key,
+            dispatch_event_id: event.parent_event_id.ok_or_else(|| {
+                LedgerError::ActivityClaimAuthorityRejected {
+                    reason: "V5 acceptance action has no dispatch parent".into(),
+                }
+            })?,
+            action_request_event_id: event.id,
+            lease_duration_ms: MIN_ACTIVITY_LEASE_MS,
+        };
+        validate_action_request_matches_dispatch(
+            &claim,
+            &action,
+            dispatch,
+            dispatch_envelope_digest,
+            authority,
+            dispatch_window.issued_at,
+            requested_at,
+        )?;
+        if claim.dispatch_event_id != completed.dispatch_event_id
+            || event.occurred_at != requested_at
+            || action != expected
+            || !tape_event_precedes(&completed.completion_event, &event)
+        {
+            return Err(LedgerError::ActivityClaimAuthorityRejected {
+                reason:
+                    "existing V5 acceptance action conflicts with completed-candidate authority"
+                        .into(),
+            });
+        }
+        return Ok(GovernedCommandActionIssueInTx {
+            disposition: GovernedCommandActionIssueDispositionV1::Existing {
+                action_request_event_id: event.id,
+                canonical_input_ref: action.canonical_input_ref,
+                canonical_input_digest: action.canonical_input_digest,
+                verified_input,
+            },
+            appended_event: None,
+        });
+    }
+
+    let dispatch_window = validate_governed_dispatch(dispatch, now)?;
+    let action_request_event_id = EventId::new();
+    let dispatch_event_id = completed.dispatch_event_id;
+    let claim = ActivityClaimRequestV1 {
+        run_id: request.run_id,
+        activity_id: action_id,
+        idempotency_key,
+        dispatch_event_id,
+        action_request_event_id,
+        lease_duration_ms: MIN_ACTIVITY_LEASE_MS,
+    };
+    validate_action_request_matches_dispatch(
+        &claim,
+        &expected_action,
+        dispatch,
+        dispatch_envelope_digest,
+        authority,
+        dispatch_window.issued_at,
+        now,
+    )?;
+    let event = canonicalize(Event {
+        id: action_request_event_id,
+        run_id: request.run_id,
+        parent_event_id: Some(dispatch_event_id),
+        schema_version: Event::CURRENT_SCHEMA_VERSION,
+        kind: EventKind::ActionRequestedV2,
+        occurred_at: now,
+        payload: Payload::ActionRequestedV2(expected_action.clone()),
+    })?;
+    if !tape_event_precedes(&completed.completion_event, &event) {
+        return Err(LedgerError::ActivityClaimAuthorityRejected {
+            reason: "V5 acceptance action must follow the completed candidate".into(),
+        });
+    }
     validate_new_ordinary_event_id(tx, &event)?;
     let signature = sign_event(&event, signing_key, signer, now)?;
     insert_event(tx, &event)?;
@@ -12842,6 +14081,184 @@ fn reconstruct_governed_v5_command_action(
     )?;
     tx.commit()?;
     Ok(reconstructed)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn reconstruct_governed_v5_acceptance_check(
+    conn: &Connection,
+    request: &GovernedV5AcceptanceCheckAuthorizeAndClaimRequestV1,
+    cas: &Cas,
+    v5_authority: &GovernedDispatchV5AdmissionAuthorityV1,
+    activity_authority: &ActivityClaimAuthorityV1,
+    receipt_signer: &ActorKeyRef,
+    candidate_signer: &ActorKeyRef,
+    now: DateTime<Utc>,
+) -> Result<(
+    ActivityClaimRequestV1,
+    VerifiedCommandIntentEvidenceDocumentV1,
+    EventId,
+)> {
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Deferred)?;
+    let completed = verified_governed_v5_completed_candidate_material(
+        &tx,
+        request.run_id,
+        request.candidate_completion_event_id,
+        v5_authority,
+        activity_authority,
+        receipt_signer,
+        candidate_signer,
+    )?;
+    let packet = verified_governed_command_packet_for_dispatch(
+        &request.packet_source,
+        &completed.dispatch_material.dispatch,
+    )?;
+    let checks = packet.protected_acceptance_checks().map_err(|error| {
+        command_action_authority_rejected(format!(
+            "protected V5 acceptance contract is invalid: {error}"
+        ))
+    })?;
+    let check = checks
+        .get(
+            usize::try_from(request.check_index)
+                .map_err(|_| command_action_authority_rejected("check index overflow"))?,
+        )
+        .ok_or_else(|| {
+            command_action_authority_rejected(
+                "acceptance check index is outside the signed contract",
+            )
+        })?;
+    let action_event = load_verified_authority_event(
+        &tx,
+        request.action_request_event_id,
+        &activity_authority.trusted_keys,
+        &activity_authority.action_request_signer,
+        "V5 acceptance check action",
+    )?;
+    if action_event.run_id != request.run_id
+        || action_event.parent_event_id != Some(completed.dispatch_event_id)
+        || !tape_event_precedes(&completed.completion_event, &action_event)
+    {
+        return Err(command_action_authority_rejected(
+            "acceptance action is not ordered after the exact completed candidate",
+        ));
+    }
+    let Payload::ActionRequestedV2(action) = &action_event.payload else {
+        return Err(command_action_authority_rejected(
+            "acceptance action is not ActionRequestedV2",
+        ));
+    };
+    let action = action.clone();
+    let candidate_digest_hex = completed
+        .completion
+        .candidate_digest
+        .strip_prefix("sha256:")
+        .ok_or_else(|| {
+            command_action_authority_rejected("completed candidate digest is not canonical sha256")
+        })?;
+    let action_id = format!("acceptance:{candidate_digest_hex}:{}", request.check_index);
+    let idempotency_key = format!(
+        "{}:acceptance:{candidate_digest_hex}:{}",
+        completed.dispatch_material.dispatch.body.idempotency_key, request.check_index
+    );
+    let expected_input = CanonicalCommandActionInputV1::new(
+        request.run_id.to_string(),
+        action_id.clone(),
+        check.command.clone(),
+        check.args.clone(),
+        None,
+    )?;
+    let input_bytes = cas.get_verified_canonical_bytes(
+        &action.canonical_input_ref,
+        &action.canonical_input_digest,
+    )?;
+    let verified_input = parse_verified_canonical_command_action_input_v1(
+        &input_bytes,
+        &action.canonical_input_ref,
+        &action.canonical_input_digest,
+    )?;
+    if verified_input.document() != &expected_input {
+        return Err(command_action_authority_rejected(
+            "acceptance executable material was substituted",
+        ));
+    }
+    let dispatch = &completed.dispatch_material.dispatch;
+    let requested_at = parse_claim_timestamp(&action.requested_at)?;
+    let dispatch_window = validate_governed_dispatch(dispatch, requested_at)?;
+    validate_governed_dispatch(dispatch, now).map_err(|error| {
+        command_action_authority_rejected(format!(
+            "acceptance check requires live sealed authority: {error}"
+        ))
+    })?;
+    let claim = ActivityClaimRequestV1 {
+        run_id: request.run_id,
+        activity_id: action_id,
+        idempotency_key,
+        dispatch_event_id: completed.dispatch_event_id,
+        action_request_event_id: request.action_request_event_id,
+        lease_duration_ms: request.lease_duration_ms,
+    };
+    validate_action_request_matches_dispatch(
+        &claim,
+        &action,
+        dispatch,
+        &completed.dispatch_material.lineage_envelope_digest,
+        activity_authority,
+        dispatch_window.issued_at,
+        requested_at,
+    )?;
+    let expected_action = ActionRequestedV2 {
+        run_id: request.run_id.to_string(),
+        workflow_id: dispatch.body.workflow_id.clone(),
+        unit_id: dispatch.body.unit_id.clone(),
+        attempt: dispatch.body.attempt,
+        provenance_ref: dispatch.body.provenance_ref.clone(),
+        action_id: claim.activity_id.clone(),
+        idempotency_key: claim.idempotency_key.clone(),
+        action_kind: ActionKindV1::Process,
+        canonical_input_digest: action.canonical_input_digest.clone(),
+        canonical_input_ref: action.canonical_input_ref.clone(),
+        dispatch_envelope_digest: completed.dispatch_material.lineage_envelope_digest.clone(),
+        repository_binding_digest: dispatch.repository_binding_digest.clone(),
+        ledger_authority_realm_digest: dispatch.ledger_authority_realm_digest.clone(),
+        governed_packet_digest: Some(packet.canonical_digest()?),
+        capability_bundle_digest: dispatch.body.capability_bundle_digest.clone(),
+        policy_digest: governed_dispatch_policy_digest_v1(
+            &dispatch.body.acceptance_contract_digest,
+        )
+        .map_err(|error| {
+            command_action_authority_rejected(format!(
+                "acceptance policy binding is invalid: {error}"
+            ))
+        })?,
+        context_manifest_digest: dispatch.body.context_manifest_digest.clone(),
+        worker_manifest_digest: dispatch.body.worker_manifest_digest.clone(),
+        sandbox_profile_digest: dispatch.body.sandbox_profile_digest.clone(),
+        authority_actor: activity_authority.action_request_signer.actor_id.clone(),
+        execution_role: ExecutionRoleV1::Implementer,
+        requested_at: action.requested_at.clone(),
+    };
+    if action != expected_action || action_event.occurred_at != requested_at {
+        return Err(command_action_authority_rejected(
+            "acceptance action does not equal reconstructed candidate authority",
+        ));
+    }
+    let binding = CommandActionEvidenceBindingV1::from_action_requested_v2(
+        &action,
+        completed.dispatch_event_id,
+        request.action_request_event_id,
+    )?;
+    let intent =
+        CommandIntentEvidenceDocumentV1::from_verified_canonical_input(binding, &verified_input)?;
+    let intent_bytes = command_intent_evidence_document_v1_bytes(&intent)?;
+    let intent_ref = cas.put_canonical_bytes(&intent_bytes)?;
+    let verified_intent = parse_verified_command_intent_evidence_document_v1(
+        &intent_bytes,
+        &intent_ref.to_cas_ref(),
+        intent_ref.digest(),
+    )?;
+    let admission_event_id = completed.admission_event_id;
+    tx.commit()?;
+    Ok((claim, verified_intent, admission_event_id))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -21402,6 +22819,18 @@ fn activity_claim_by_activity_id(
     )
 }
 
+fn activity_claim_by_action_request(
+    conn: &Connection,
+    run_id: RunId,
+    action_request_event_id: EventId,
+) -> Result<Option<StoredActivityClaim>> {
+    activity_claim_query(
+        conn,
+        "run_id = ?1 AND action_request_event_id = ?2",
+        params![run_id.to_string(), action_request_event_id.to_string()],
+    )
+}
+
 fn activity_claim_by_lease(
     conn: &Connection,
     run_id: RunId,
@@ -22188,6 +23617,385 @@ fn insert_event_signature(conn: &Connection, signature: &EventSignatureV1) -> Re
         ],
     )?;
     Ok(())
+}
+
+#[derive(Clone, Debug)]
+struct StoredGovernedCandidateAcceptance {
+    run_id: String,
+    candidate_completion_event_id: String,
+    candidate_digest: String,
+    candidate_commit_sha: String,
+    acceptance_contract_digest: String,
+    check_set_digest: String,
+    candidate_acceptance_event_id: String,
+    candidate_acceptance_event_digest: String,
+    acceptance_ref: String,
+    acceptance_digest: String,
+    outcome: CandidateAcceptanceOutcomeV1,
+    evaluated_at: String,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GovernedV5AcceptanceCheckAggregateV1 {
+    check_index: u32,
+    action_id: String,
+    action_request_event_id: String,
+    action_request_event_digest: String,
+    claim_event_id: String,
+    claim_event_digest: String,
+    result_event_id: String,
+    result_event_digest: String,
+    outcome: ActivityResultOutcomeV1,
+    result_digest: Option<String>,
+    evidence_digest: String,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GovernedV5CandidateAcceptanceDigestMaterialV1 {
+    schema_version: u8,
+    candidate_completion_event_id: String,
+    candidate_digest: String,
+    candidate_commit_sha: String,
+    acceptance_contract_digest: String,
+    checks: Vec<GovernedV5AcceptanceCheckAggregateV1>,
+    outcome: CandidateAcceptanceOutcomeV1,
+    evaluated_at: String,
+}
+
+#[derive(Clone, Debug)]
+struct VerifiedGovernedV5CandidateAcceptanceEvidenceV1 {
+    acceptance: CandidateAcceptanceRecordedV1,
+    check_set_digest: String,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn verify_governed_v5_candidate_acceptance_evidence(
+    tx: &Transaction<'_>,
+    request: &GovernedV5CandidateAcceptanceRequestV1,
+    cas: &Cas,
+    v5_authority: &GovernedDispatchV5AdmissionAuthorityV1,
+    activity_authority: &ActivityClaimAuthorityV1,
+    receipt_signer: &ActorKeyRef,
+    candidate_signer: &ActorKeyRef,
+) -> Result<VerifiedGovernedV5CandidateAcceptanceEvidenceV1> {
+    let completed = verified_governed_v5_completed_candidate_material(
+        tx,
+        request.run_id,
+        request.candidate_completion_event_id,
+        v5_authority,
+        activity_authority,
+        receipt_signer,
+        candidate_signer,
+    )
+    .map_err(|error| candidate_acceptance_authority_rejected(error.to_string()))?;
+    let packet = verified_governed_command_packet_for_dispatch(
+        &request.packet_source,
+        &completed.dispatch_material.dispatch,
+    )
+    .map_err(|error| candidate_acceptance_authority_rejected(error.to_string()))?;
+    let checks = packet.protected_acceptance_checks().map_err(|error| {
+        candidate_acceptance_authority_rejected(format!(
+            "protected V5 acceptance contract is invalid: {error}"
+        ))
+    })?;
+    if checks.len() != request.check_action_request_event_ids.len() {
+        return Err(candidate_acceptance_authority_rejected(
+            "acceptance result set does not exactly cover the signed contract",
+        ));
+    }
+    let unique_actions = request
+        .check_action_request_event_ids
+        .iter()
+        .copied()
+        .collect::<HashSet<_>>();
+    if unique_actions.len() != request.check_action_request_event_ids.len() {
+        return Err(candidate_acceptance_authority_rejected(
+            "acceptance action ids must be unique and declaration ordered",
+        ));
+    }
+
+    let candidate_event = load_verified_authority_event(
+        tx,
+        completed.completion.candidate_created_event_ref,
+        &activity_authority.trusted_keys,
+        candidate_signer,
+        "V5 acceptance candidate",
+    )
+    .map_err(|error| candidate_acceptance_authority_rejected(error.to_string()))?;
+    let Payload::CandidateCreatedV2(candidate) = &candidate_event.payload else {
+        return Err(candidate_acceptance_authority_rejected(
+            "acceptance completion parent is not CandidateCreatedV2",
+        ));
+    };
+    if candidate.candidate_digest != completed.completion.candidate_digest {
+        return Err(candidate_acceptance_authority_rejected(
+            "acceptance candidate digest does not match the completed candidate",
+        ));
+    }
+
+    let candidate_digest_hex = candidate
+        .candidate_digest
+        .strip_prefix("sha256:")
+        .ok_or_else(|| {
+            candidate_acceptance_authority_rejected(
+                "acceptance candidate digest is not canonical sha256",
+            )
+        })?;
+    let mut aggregate_checks = Vec::with_capacity(checks.len());
+    let mut evaluated_at: Option<DateTime<Utc>> = None;
+    for (check_index, (check, action_event_id)) in checks
+        .iter()
+        .zip(request.check_action_request_event_ids.iter())
+        .enumerate()
+    {
+        let check_index = u32::try_from(check_index).map_err(|_| {
+            candidate_acceptance_authority_rejected(
+                "acceptance check index exceeds the V1 contract range",
+            )
+        })?;
+        let action_event = load_verified_authority_event(
+            tx,
+            *action_event_id,
+            &activity_authority.trusted_keys,
+            &activity_authority.action_request_signer,
+            "V5 acceptance action",
+        )
+        .map_err(|error| candidate_acceptance_authority_rejected(error.to_string()))?;
+        let Payload::ActionRequestedV2(action) = &action_event.payload else {
+            return Err(candidate_acceptance_authority_rejected(
+                "acceptance action is not ActionRequestedV2",
+            ));
+        };
+        let expected_action_id = format!("acceptance:{candidate_digest_hex}:{check_index}");
+        let expected_idempotency_key = format!(
+            "{}:acceptance:{candidate_digest_hex}:{check_index}",
+            completed.dispatch_material.dispatch.body.idempotency_key
+        );
+        let expected_input = CanonicalCommandActionInputV1::new(
+            request.run_id.to_string(),
+            expected_action_id.clone(),
+            check.command.clone(),
+            check.args.clone(),
+            None,
+        )?;
+        let input_bytes = cas.get_verified_canonical_bytes(
+            &action.canonical_input_ref,
+            &action.canonical_input_digest,
+        )?;
+        let verified_input = parse_verified_canonical_command_action_input_v1(
+            &input_bytes,
+            &action.canonical_input_ref,
+            &action.canonical_input_digest,
+        )?;
+        if action_event.run_id != request.run_id
+            || action_event.parent_event_id != Some(completed.dispatch_event_id)
+            || !tape_event_precedes(&completed.completion_event, &action_event)
+            || action.action_id != expected_action_id
+            || action.idempotency_key != expected_idempotency_key
+            || verified_input.document() != &expected_input
+        {
+            return Err(candidate_acceptance_authority_rejected(
+                "acceptance action does not bind the declaration-ordered candidate check",
+            ));
+        }
+
+        let stored = activity_claim_by_action_request(tx, request.run_id, *action_event_id)?
+            .ok_or_else(|| {
+                candidate_acceptance_authority_rejected(
+                    "acceptance action has no durable purpose-bound claim",
+                )
+            })?;
+        let claim = verify_signed_claim_projection(tx, &stored, activity_authority)
+            .map_err(|error| candidate_acceptance_authority_rejected(error.to_string()))?;
+        if claim.purpose != ActivityClaimPurposeV1::GovernedAcceptanceCheckV1
+            || stored.activity_id != expected_action_id
+            || stored.idempotency_key != expected_idempotency_key
+            || stored.dispatch_event_id != completed.dispatch_event_id
+            || stored.action_request_event_id != *action_event_id
+            || stored.state != StoredActivityClaimState::Recorded
+            || !activity_heartbeats_for_claim(tx, request.run_id, stored.claim_event_id)?.is_empty()
+        {
+            return Err(candidate_acceptance_authority_rejected(
+                "acceptance check is not one terminal, unextended purpose-bound lease",
+            ));
+        }
+        verify_signed_activity_result_projection(tx, &stored, activity_authority)
+            .map_err(|error| candidate_acceptance_authority_rejected(error.to_string()))?;
+        let result_event_id = stored.result_event_id.ok_or_else(|| {
+            candidate_acceptance_authority_rejected(
+                "terminal acceptance projection has no result event",
+            )
+        })?;
+        let result_event_digest = stored.result_event_digest.clone().ok_or_else(|| {
+            candidate_acceptance_authority_rejected(
+                "terminal acceptance projection has no result event digest",
+            )
+        })?;
+        let result_outcome = stored.result_outcome.ok_or_else(|| {
+            candidate_acceptance_authority_rejected(
+                "terminal acceptance projection has no closed outcome",
+            )
+        })?;
+        match result_outcome {
+            ActivityResultOutcomeV1::Succeeded => {}
+            ActivityResultOutcomeV1::Failed => {}
+            ActivityResultOutcomeV1::Unknown => {
+                return Err(candidate_acceptance_authority_rejected(
+                    "unknown acceptance result requires reconciliation and cannot aggregate",
+                ));
+            }
+        }
+        let evidence_digest = stored.evidence_digest.clone().ok_or_else(|| {
+            candidate_acceptance_authority_rejected(
+                "terminal acceptance projection has no evidence digest",
+            )
+        })?;
+        let evidence_ref = stored.evidence_ref.as_deref().ok_or_else(|| {
+            candidate_acceptance_authority_rejected(
+                "terminal acceptance projection has no evidence reference",
+            )
+        })?;
+        cas.get_verified_canonical_bytes(evidence_ref, &evidence_digest)?;
+        match (&stored.result_ref, &stored.result_digest) {
+            (Some(result_ref), Some(result_digest)) => {
+                cas.get_verified_canonical_bytes(result_ref, result_digest)?;
+            }
+            (None, None) => {}
+            _ => {
+                return Err(candidate_acceptance_authority_rejected(
+                    "acceptance result reference and digest must be both present or both absent",
+                ));
+            }
+        }
+        let recorded_at =
+            parse_claim_timestamp(stored.recorded_at.as_deref().ok_or_else(|| {
+                candidate_acceptance_authority_rejected(
+                    "terminal acceptance projection has no recorded timestamp",
+                )
+            })?)?;
+        evaluated_at = Some(evaluated_at.map_or(recorded_at, |current| current.max(recorded_at)));
+        aggregate_checks.push(GovernedV5AcceptanceCheckAggregateV1 {
+            check_index,
+            action_id: expected_action_id,
+            action_request_event_id: action_event.id.to_string(),
+            action_request_event_digest: canonical_event_hash(&action_event)?,
+            claim_event_id: stored.claim_event_id.to_string(),
+            claim_event_digest: stored.claim_event_digest,
+            result_event_id: result_event_id.to_string(),
+            result_event_digest,
+            outcome: result_outcome,
+            result_digest: stored.result_digest,
+            evidence_digest,
+        });
+    }
+    let evaluated_at = evaluated_at.ok_or_else(|| {
+        candidate_acceptance_authority_rejected(
+            "protected acceptance requires at least one terminal check",
+        )
+    })?;
+    let outcome =
+        governed_candidate_acceptance_outcome(aggregate_checks.iter().map(|check| check.outcome))?;
+    let evaluated_at = timestamp(evaluated_at);
+    let material = GovernedV5CandidateAcceptanceDigestMaterialV1 {
+        schema_version: 1,
+        candidate_completion_event_id: request.candidate_completion_event_id.to_string(),
+        candidate_digest: candidate.candidate_digest.clone(),
+        candidate_commit_sha: candidate.candidate_commit_sha.clone(),
+        acceptance_contract_digest: completed
+            .dispatch_material
+            .dispatch
+            .body
+            .acceptance_contract_digest
+            .clone(),
+        checks: aggregate_checks,
+        outcome,
+        evaluated_at: evaluated_at.clone(),
+    };
+    let material_bytes = serde_json::to_vec(&material).map_err(|error| {
+        candidate_acceptance_authority_rejected(format!(
+            "candidate acceptance material cannot be canonicalized: {error}"
+        ))
+    })?;
+    let mut check_set_hasher = Sha256::new();
+    check_set_hasher.update(b"buildplane.candidate-acceptance-check-set.v1\0");
+    check_set_hasher.update(&material_bytes);
+    let check_set_digest = format!("sha256:{:x}", check_set_hasher.finalize());
+    let mut acceptance_hasher = Sha256::new();
+    acceptance_hasher.update(b"buildplane.candidate-acceptance.v1\0");
+    acceptance_hasher.update(&material_bytes);
+    let acceptance_digest = format!("sha256:{:x}", acceptance_hasher.finalize());
+    let acceptance_digest_hex = acceptance_digest.strip_prefix("sha256:").ok_or_else(|| {
+        candidate_acceptance_authority_rejected(
+            "derived candidate acceptance digest is not canonical sha256",
+        )
+    })?;
+    let acceptance_ref = format!("buildplane:candidate-acceptance:v1:{acceptance_digest_hex}");
+    Ok(VerifiedGovernedV5CandidateAcceptanceEvidenceV1 {
+        acceptance: CandidateAcceptanceRecordedV1 {
+            candidate_digest: candidate.candidate_digest.clone(),
+            candidate_commit_sha: candidate.candidate_commit_sha.clone(),
+            acceptance_ref,
+            acceptance_contract_digest: material.acceptance_contract_digest,
+            acceptance_digest,
+            outcome,
+            evaluated_at,
+        },
+        check_set_digest,
+    })
+}
+
+fn governed_candidate_acceptance_outcome(
+    outcomes: impl IntoIterator<Item = ActivityResultOutcomeV1>,
+) -> Result<CandidateAcceptanceOutcomeV1> {
+    let mut saw_result = false;
+    let mut acceptance = CandidateAcceptanceOutcomeV1::Passed;
+    for outcome in outcomes {
+        saw_result = true;
+        match outcome {
+            ActivityResultOutcomeV1::Succeeded => {}
+            ActivityResultOutcomeV1::Failed => {
+                acceptance = CandidateAcceptanceOutcomeV1::Rejected;
+            }
+            ActivityResultOutcomeV1::Unknown => {
+                return Err(candidate_acceptance_authority_rejected(
+                    "unknown acceptance result requires reconciliation and cannot aggregate",
+                ));
+            }
+        }
+    }
+    if !saw_result {
+        return Err(candidate_acceptance_authority_rejected(
+            "protected acceptance requires at least one terminal check",
+        ));
+    }
+    Ok(acceptance)
+}
+
+#[cfg(test)]
+mod governed_candidate_acceptance_outcome_tests {
+    use super::*;
+
+    #[test]
+    fn failed_check_rejects_and_unknown_or_empty_never_approves() {
+        assert_eq!(
+            governed_candidate_acceptance_outcome([
+                ActivityResultOutcomeV1::Succeeded,
+                ActivityResultOutcomeV1::Failed,
+            ])
+            .expect("closed failed result set"),
+            CandidateAcceptanceOutcomeV1::Rejected
+        );
+        assert!(
+            governed_candidate_acceptance_outcome([ActivityResultOutcomeV1::Unknown]).is_err(),
+            "unknown effects require reconciliation"
+        );
+        assert!(
+            governed_candidate_acceptance_outcome([]).is_err(),
+            "an empty contract result set cannot approve"
+        );
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -25154,6 +26962,231 @@ fn insert_governed_candidate_completion(
             event_digest,
             &completion.completion_digest,
             &completion.completed_at,
+        ],
+    )?;
+    Ok(())
+}
+
+fn governed_candidate_acceptance_by_completion(
+    conn: &Connection,
+    run_id: RunId,
+    candidate_completion_event_id: EventId,
+) -> Result<Option<StoredGovernedCandidateAcceptance>> {
+    conn.query_row(
+        "SELECT run_id, candidate_completion_event_id, candidate_digest, candidate_commit_sha, \
+                acceptance_contract_digest, check_set_digest, candidate_acceptance_event_id, \
+                candidate_acceptance_event_digest, acceptance_ref, acceptance_digest, outcome, evaluated_at \
+         FROM governed_candidate_acceptances \
+         WHERE run_id = ?1 AND candidate_completion_event_id = ?2",
+        params![
+            run_id.to_string(),
+            candidate_completion_event_id.to_string()
+        ],
+        |row| {
+            let outcome: String = row.get(10)?;
+            let outcome = match outcome.as_str() {
+                "passed" => CandidateAcceptanceOutcomeV1::Passed,
+                "rejected" => CandidateAcceptanceOutcomeV1::Rejected,
+                _ => {
+                    return Err(rusqlite::Error::FromSqlConversionFailure(
+                        10,
+                        rusqlite::types::Type::Text,
+                        Box::new(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "invalid governed candidate acceptance outcome",
+                        )),
+                    ));
+                }
+            };
+            Ok(StoredGovernedCandidateAcceptance {
+                run_id: row.get(0)?,
+                candidate_completion_event_id: row.get(1)?,
+                candidate_digest: row.get(2)?,
+                candidate_commit_sha: row.get(3)?,
+                acceptance_contract_digest: row.get(4)?,
+                check_set_digest: row.get(5)?,
+                candidate_acceptance_event_id: row.get(6)?,
+                candidate_acceptance_event_digest: row.get(7)?,
+                acceptance_ref: row.get(8)?,
+                acceptance_digest: row.get(9)?,
+                outcome,
+                evaluated_at: row.get(11)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(LedgerError::from)
+}
+
+fn stored_governed_candidate_acceptance_matches(
+    stored: &StoredGovernedCandidateAcceptance,
+    request: &GovernedV5CandidateAcceptanceRequestV1,
+    evidence: &VerifiedGovernedV5CandidateAcceptanceEvidenceV1,
+) -> bool {
+    let acceptance = &evidence.acceptance;
+    stored.run_id == request.run_id.to_string()
+        && stored.candidate_completion_event_id == request.candidate_completion_event_id.to_string()
+        && stored.candidate_digest == acceptance.candidate_digest
+        && stored.candidate_commit_sha == acceptance.candidate_commit_sha
+        && stored.acceptance_contract_digest == acceptance.acceptance_contract_digest
+        && stored.check_set_digest == evidence.check_set_digest
+        && stored.acceptance_ref == acceptance.acceptance_ref
+        && stored.acceptance_digest == acceptance.acceptance_digest
+        && stored.outcome == acceptance.outcome
+        && stored.evaluated_at == acceptance.evaluated_at
+}
+
+fn resolve_existing_governed_v5_candidate_acceptance(
+    conn: &Connection,
+    stored: &StoredGovernedCandidateAcceptance,
+    request: &GovernedV5CandidateAcceptanceRequestV1,
+    evidence: &VerifiedGovernedV5CandidateAcceptanceEvidenceV1,
+    activity_authority: &ActivityClaimAuthorityV1,
+    acceptance_signer: &ActorKeyRef,
+) -> Result<GovernedV5CandidateAcceptanceDispositionV1> {
+    if !stored_governed_candidate_acceptance_matches(stored, request, evidence) {
+        return Err(candidate_acceptance_reconciliation_required(
+            request,
+            "acceptance projection does not match the re-derived check result set",
+        ));
+    }
+    let event_id = parse_event_id(
+        &stored.candidate_acceptance_event_id,
+        "governed_candidate_acceptances",
+    )?;
+    let event = load_verified_authority_event(
+        conn,
+        event_id,
+        &activity_authority.trusted_keys,
+        acceptance_signer,
+        "V5 candidate acceptance",
+    )
+    .map_err(|error| candidate_acceptance_reconciliation_required(request, error.to_string()))?;
+    let Payload::CandidateAcceptanceRecordedV1(acceptance) = &event.payload else {
+        return Err(candidate_acceptance_reconciliation_required(
+            request,
+            "acceptance projection points to another event kind",
+        ));
+    };
+    let event_digest = canonical_event_hash(&event).map_err(|error| {
+        candidate_acceptance_reconciliation_required(
+            request,
+            format!("candidate acceptance event cannot be canonicalized: {error}"),
+        )
+    })?;
+    let evaluated_at = parse_claim_timestamp(&evidence.acceptance.evaluated_at).map_err(|_| {
+        candidate_acceptance_reconciliation_required(
+            request,
+            "re-derived candidate acceptance timestamp is invalid",
+        )
+    })?;
+    if event.run_id != request.run_id
+        || event.parent_event_id != Some(request.candidate_completion_event_id)
+        || event.occurred_at != evaluated_at
+        || acceptance != &evidence.acceptance
+        || event_digest != stored.candidate_acceptance_event_digest
+    {
+        return Err(candidate_acceptance_reconciliation_required(
+            request,
+            "candidate acceptance event or immutable projection is substituted or corrupt",
+        ));
+    }
+    require_candidate_acceptance_event_projection(
+        conn,
+        request,
+        &evidence.acceptance.candidate_digest,
+        Some(event_id),
+    )?;
+    Ok(GovernedV5CandidateAcceptanceDispositionV1::Existing {
+        candidate_acceptance_event_id: event_id,
+        candidate_acceptance_event_digest: event_digest,
+        acceptance_ref: evidence.acceptance.acceptance_ref.clone(),
+        acceptance_digest: evidence.acceptance.acceptance_digest.clone(),
+        outcome: evidence.acceptance.outcome,
+    })
+}
+
+fn require_candidate_acceptance_event_projection(
+    conn: &Connection,
+    request: &GovernedV5CandidateAcceptanceRequestV1,
+    candidate_digest: &str,
+    expected_event_id: Option<EventId>,
+) -> Result<()> {
+    let mut statement = conn.prepare(
+        "SELECT id FROM events \
+         WHERE run_id = ?1 AND kind = 'candidate_acceptance_recorded' \
+         ORDER BY id ASC",
+    )?;
+    let ids = statement
+        .query_map(params![request.run_id.to_string()], |row| {
+            row.get::<_, String>(0)
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let mut matching = Vec::new();
+    for id in ids {
+        let event_id = parse_event_id(&id, "candidate_acceptance_recorded")?;
+        let Some((event, _)) = event_and_signature_by_id(conn, event_id)? else {
+            return Err(candidate_acceptance_reconciliation_required(
+                request,
+                "candidate acceptance scan found a missing tape row",
+            ));
+        };
+        let directly_parented =
+            event.parent_event_id == Some(request.candidate_completion_event_id);
+        let names_candidate = matches!(
+            &event.payload,
+            Payload::CandidateAcceptanceRecordedV1(acceptance)
+                if acceptance.candidate_digest == candidate_digest
+        );
+        if directly_parented || names_candidate {
+            matching.push(event.id);
+        }
+    }
+    match expected_event_id {
+        None if matching.is_empty() => Ok(()),
+        Some(expected) if matching.as_slice() == [expected] => Ok(()),
+        None => Err(candidate_acceptance_reconciliation_required(
+            request,
+            "an acceptance event exists without its trusted native projection",
+        )),
+        Some(_) => Err(candidate_acceptance_reconciliation_required(
+            request,
+            "acceptance projection does not name the only tape event for its candidate",
+        )),
+    }
+}
+
+fn insert_governed_candidate_acceptance(
+    conn: &Connection,
+    request: &GovernedV5CandidateAcceptanceRequestV1,
+    evidence: &VerifiedGovernedV5CandidateAcceptanceEvidenceV1,
+    event: &Event,
+    event_digest: &str,
+) -> Result<()> {
+    let acceptance = &evidence.acceptance;
+    conn.execute(
+        r#"INSERT INTO governed_candidate_acceptances (
+                run_id, candidate_completion_event_id, candidate_digest,
+                candidate_commit_sha, acceptance_contract_digest, check_set_digest,
+                candidate_acceptance_event_id, candidate_acceptance_event_digest,
+                acceptance_ref, acceptance_digest, outcome, evaluated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)"#,
+        params![
+            request.run_id.to_string(),
+            request.candidate_completion_event_id.to_string(),
+            &acceptance.candidate_digest,
+            &acceptance.candidate_commit_sha,
+            &acceptance.acceptance_contract_digest,
+            &evidence.check_set_digest,
+            event.id.to_string(),
+            event_digest,
+            &acceptance.acceptance_ref,
+            &acceptance.acceptance_digest,
+            match acceptance.outcome {
+                CandidateAcceptanceOutcomeV1::Passed => "passed",
+                CandidateAcceptanceOutcomeV1::Rejected => "rejected",
+            },
+            &acceptance.evaluated_at,
         ],
     )?;
     Ok(())

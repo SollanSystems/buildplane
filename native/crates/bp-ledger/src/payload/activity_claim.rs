@@ -50,6 +50,11 @@ pub enum ActivityClaimPurposeV1 {
     /// this purpose because a sealed V3 model effect additionally requires a
     /// parented `ModelActionIntentV1` and `ModelActionAuthorizedV2`.
     GovernedModelActionV1,
+    /// A read-only process lease for one declaration-ordered deterministic
+    /// check over an immutable, checkpointed V5 candidate. This purpose is
+    /// distinct from implementer command authority even though both actions
+    /// are bound to the implementer's signed dispatch.
+    GovernedAcceptanceCheckV1,
     /// A Git lease issued only after the protected host has verified the
     /// succeeded implementer process receipt and reconstructed the exact
     /// candidate-finalization input from the sealed V5 dispatch and CAS.
