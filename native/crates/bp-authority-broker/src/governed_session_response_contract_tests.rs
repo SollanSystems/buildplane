@@ -1,11 +1,13 @@
 use crate::command_action::BrokerCommandActionStatus;
 use crate::governed_session_client::parse_governed_session_client_request;
 use crate::governed_session_response::{
-    governed_candidate_run_result_v1, governed_reviewer_run_result_v1,
-    sign_governed_session_probe_response_v1, sign_governed_session_response_v1,
-    verify_governed_session_response_v1,
+    governed_candidate_run_status_v1, governed_reviewer_run_result_v1,
+    host_owned_governed_candidate_run_result_v1, sign_governed_session_probe_response_v1,
+    sign_governed_session_response_v1, verify_governed_session_response_v1,
+    GovernedCandidateReceiptProjectionV1,
 };
 use crate::BrokerModelActionStatus;
+use bp_ledger::payload::trust_spine::CandidateCreatedV2;
 use ed25519_dalek::SigningKey;
 
 fn reviewer_request(recovery_ref: &str) -> Vec<u8> {
@@ -21,6 +23,52 @@ fn candidate_run_request() -> Vec<u8> {
 
 fn reviewer_run_request() -> Vec<u8> {
     br#"{"schema_version":1,"protocol":"buildplane-governed-session","request_id":"01919000-0000-7000-8000-000000000083","operation":"run_reviewer_session","recovery_ref":"host-recovery/session-0001","session_ref":"host-session/session-0001"}"#.to_vec()
+}
+
+fn candidate_receipt_projection() -> GovernedCandidateReceiptProjectionV1 {
+    GovernedCandidateReceiptProjectionV1 {
+        target_ref: "refs/heads/main".into(),
+        candidate: CandidateCreatedV2 {
+            run_id: "01919000-0000-7000-8000-000000000090".into(),
+            candidate_id: "candidate-1".into(),
+            candidate_ref:
+                "refs/buildplane/candidates/01919000-0000-7000-8000-000000000090/1/candidate-1"
+                    .into(),
+            workflow_id: "workflow-1".into(),
+            unit_id: "unit-1".into(),
+            attempt: 1,
+            provenance_ref:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            candidate_digest:
+                "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            base_commit_sha: "1".repeat(40),
+            candidate_commit_sha: "2".repeat(40),
+            commit_digest:
+                "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".into(),
+            tree_digest: "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+                .into(),
+            patch_digest: "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+                .into(),
+            changed_files_digest:
+                "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff".into(),
+            envelope_digest:
+                "sha256:1111111111111111111111111111111111111111111111111111111111111111".into(),
+            action_receipt_set_ref: "receipt-set:candidate-1".into(),
+            action_receipt_set_digest:
+                "sha256:2222222222222222222222222222222222222222222222222222222222222222".into(),
+        },
+        candidate_created_event_ref: "01919000-0000-7000-8000-000000000091".into(),
+        candidate_completion_event_ref: "01919000-0000-7000-8000-000000000092".into(),
+        candidate_completion_digest:
+            "sha256:3333333333333333333333333333333333333333333333333333333333333333".into(),
+        tape_root_digest: "sha256:4444444444444444444444444444444444444444444444444444444444444444"
+            .into(),
+        native_receipt_ref: "signed-event:01919000-0000-7000-8000-000000000092".into(),
+        native_receipt_digest:
+            "sha256:5555555555555555555555555555555555555555555555555555555555555555".into(),
+        governed_packet_digest:
+            "sha256:6666666666666666666666666666666666666666666666666666666666666666".into(),
+    }
 }
 
 #[test]
@@ -72,22 +120,38 @@ fn signed_open_response_is_canonical_and_bound_to_the_exact_recovery_lookup() {
 fn signed_completed_response_requires_a_closed_object_result_and_exact_session_binding() {
     let key = SigningKey::from_bytes(&[42; 32]);
     let request = parse_governed_session_client_request(&candidate_run_request()).unwrap();
-    let result = governed_candidate_run_result_v1(BrokerCommandActionStatus::Succeeded);
+    let result = host_owned_governed_candidate_run_result_v1(
+        "host-recovery/session-0001",
+        candidate_receipt_projection(),
+    );
     let signed = sign_governed_session_response_v1(
         &key,
         &request,
         "host-recovery/session-0001",
         "host-session/session-0001",
-        Some(result),
+        Some(result.clone()),
     )
     .unwrap();
     let verified = verify_governed_session_response_v1(&signed, &key.verifying_key(), &request)
         .expect("verify completed response");
-    assert!(std::str::from_utf8(verified.projection_json())
-        .unwrap()
-        .contains(r#""status":"completed""#));
+    let projection = std::str::from_utf8(verified.projection_json()).unwrap();
+    assert!(projection.contains(r#""status":"completed""#));
+    assert!(projection.contains(r#""kind":"host-owned-governed-candidate-run-result-v1""#));
+    assert!(projection.contains(r#""schemaVersion":2"#));
+    assert!(projection.contains(r#""governedPacketDigest":"sha256:6666"#));
 
-    for invalid in [None, Some(serde_json::json!(["not", "an", "object"]))] {
+    let mut substituted_recovery = result;
+    substituted_recovery["recoveryRef"] = serde_json::json!("host-recovery/substituted-session");
+    substituted_recovery["candidateReceipt"]["recoveryRef"] =
+        serde_json::json!("host-recovery/substituted-session");
+    for invalid in [
+        None,
+        Some(serde_json::json!(["not", "an", "object"])),
+        Some(governed_candidate_run_status_v1(
+            BrokerCommandActionStatus::Succeeded,
+        )),
+        Some(substituted_recovery),
+    ] {
         assert!(sign_governed_session_response_v1(
             &key,
             &request,

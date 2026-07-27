@@ -5,6 +5,7 @@ use crate::governed_session_client::{
     GovernedSessionClientOperationV1, ParsedGovernedSessionClientRequestV1,
 };
 use crate::BrokerModelActionStatus;
+use bp_ledger::payload::trust_spine::CandidateCreatedV2;
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -92,7 +93,44 @@ struct GovernedCandidateRunResultWireV1 {
     status: String,
 }
 
-pub(crate) fn governed_candidate_run_result_v1(status: BrokerCommandActionStatus) -> Value {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct GovernedCandidateReceiptProjectionV1 {
+    pub(crate) target_ref: String,
+    pub(crate) candidate: CandidateCreatedV2,
+    pub(crate) candidate_created_event_ref: String,
+    pub(crate) candidate_completion_event_ref: String,
+    pub(crate) candidate_completion_digest: String,
+    pub(crate) tape_root_digest: String,
+    pub(crate) native_receipt_ref: String,
+    pub(crate) native_receipt_digest: String,
+    pub(crate) governed_packet_digest: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct HostVerifiedCandidateReceiptWireV2 {
+    schema_version: u8,
+    recovery_ref: String,
+    target_ref: String,
+    candidate: CandidateCreatedV2,
+    candidate_created_event_ref: String,
+    candidate_completion_event_ref: String,
+    candidate_completion_digest: String,
+    tape_root_digest: String,
+    native_receipt_ref: String,
+    native_receipt_digest: String,
+    governed_packet_digest: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct HostOwnedGovernedCandidateRunResultWireV1 {
+    kind: String,
+    recovery_ref: String,
+    candidate_receipt: HostVerifiedCandidateReceiptWireV2,
+}
+
+pub(crate) fn governed_candidate_run_status_v1(status: BrokerCommandActionStatus) -> Value {
     let status = match status {
         BrokerCommandActionStatus::Succeeded => "succeeded",
         BrokerCommandActionStatus::Failed => "failed",
@@ -107,6 +145,30 @@ pub(crate) fn governed_candidate_run_result_v1(status: BrokerCommandActionStatus
         status: status.into(),
     })
     .expect("fixed governed candidate result is serializable")
+}
+
+pub(crate) fn host_owned_governed_candidate_run_result_v1(
+    recovery_ref: &str,
+    receipt: GovernedCandidateReceiptProjectionV1,
+) -> Value {
+    serde_json::to_value(HostOwnedGovernedCandidateRunResultWireV1 {
+        kind: "host-owned-governed-candidate-run-result-v1".into(),
+        recovery_ref: recovery_ref.into(),
+        candidate_receipt: HostVerifiedCandidateReceiptWireV2 {
+            schema_version: 2,
+            recovery_ref: recovery_ref.into(),
+            target_ref: receipt.target_ref,
+            candidate: receipt.candidate,
+            candidate_created_event_ref: receipt.candidate_created_event_ref,
+            candidate_completion_event_ref: receipt.candidate_completion_event_ref,
+            candidate_completion_digest: receipt.candidate_completion_digest,
+            tape_root_digest: receipt.tape_root_digest,
+            native_receipt_ref: receipt.native_receipt_ref,
+            native_receipt_digest: receipt.native_receipt_digest,
+            governed_packet_digest: receipt.governed_packet_digest,
+        },
+    })
+    .expect("fixed host-owned governed candidate result is serializable")
 }
 
 pub(crate) fn governed_reviewer_run_result_v1(status: BrokerModelActionStatus) -> Value {
@@ -252,7 +314,10 @@ fn validate_response_binding<'a>(
         GovernedSessionClientOperationV1::RunCandidateSession => {
             validate_session_refs(request, recovery_ref, session_ref)?;
             let result = result.ok_or(GovernedSessionResponseErrorV1::InvalidBinding)?;
-            validate_governed_candidate_run_result(result)?;
+            validate_governed_candidate_run_result(
+                result,
+                recovery_ref.ok_or(GovernedSessionResponseErrorV1::InvalidBinding)?,
+            )?;
             ("completed", Some(result))
         }
         GovernedSessionClientOperationV1::RunReviewerSession => {
@@ -272,24 +337,67 @@ fn validate_response_binding<'a>(
 
 fn validate_governed_candidate_run_result(
     result: &Value,
+    expected_recovery_ref: &str,
 ) -> Result<(), GovernedSessionResponseErrorV1> {
+    if result.get("kind").and_then(Value::as_str)
+        == Some("host-owned-governed-candidate-run-result-v1")
+    {
+        let result: HostOwnedGovernedCandidateRunResultWireV1 =
+            serde_json::from_value(result.clone())
+                .map_err(|_| GovernedSessionResponseErrorV1::InvalidBinding)?;
+        let receipt = &result.candidate_receipt;
+        if result.recovery_ref != expected_recovery_ref
+            || result.recovery_ref != receipt.recovery_ref
+            || receipt.schema_version != 2
+            || !is_canonical_target_ref(&receipt.target_ref)
+            || !is_event_id(&receipt.candidate_created_event_ref)
+            || !is_event_id(&receipt.candidate_completion_event_ref)
+            || receipt.candidate_created_event_ref == receipt.candidate_completion_event_ref
+            || !is_sha256_digest(&receipt.candidate_completion_digest)
+            || !is_sha256_digest(&receipt.tape_root_digest)
+            || !is_sha256_digest(&receipt.native_receipt_digest)
+            || !is_sha256_digest(&receipt.governed_packet_digest)
+            || receipt.native_receipt_ref
+                != format!("signed-event:{}", receipt.candidate_completion_event_ref)
+        {
+            return Err(GovernedSessionResponseErrorV1::InvalidBinding);
+        }
+        return Ok(());
+    }
     let result: GovernedCandidateRunResultWireV1 = serde_json::from_value(result.clone())
         .map_err(|_| GovernedSessionResponseErrorV1::InvalidBinding)?;
     if result.schema_version != 1
         || result.kind != "governed_candidate_run_result_v1"
         || !matches!(
             result.status.as_str(),
-            "succeeded"
-                | "failed"
-                | "unknown"
-                | "pending"
-                | "lease_expired"
-                | "reconciliation_required"
+            "failed" | "unknown" | "pending" | "lease_expired" | "reconciliation_required"
         )
     {
         return Err(GovernedSessionResponseErrorV1::InvalidBinding);
     }
     Ok(())
+}
+
+fn is_sha256_digest(value: &str) -> bool {
+    value.len() == 71
+        && value.starts_with("sha256:")
+        && value[7..]
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+}
+
+fn is_event_id(value: &str) -> bool {
+    uuid::Uuid::parse_str(value).is_ok()
+}
+
+fn is_canonical_target_ref(value: &str) -> bool {
+    value.starts_with("refs/heads/")
+        && value.len() > "refs/heads/".len()
+        && !value.contains("..")
+        && !value.contains("//")
+        && !value.contains("@{")
+        && !value.ends_with('.')
+        && !value.ends_with(".lock")
 }
 
 fn validate_governed_reviewer_run_result(

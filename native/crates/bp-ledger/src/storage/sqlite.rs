@@ -831,6 +831,19 @@ pub struct GovernedV5CandidateCompletionRequestV1 {
     pub candidate_created_event_id: EventId,
 }
 
+/// Verified display projection of one checkpoint-sealed V5 candidate
+/// completion. Every field is reconstructed from signed tape; callers provide
+/// only the run and completion event identities.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedGovernedV5CandidateReceiptV1 {
+    pub candidate: CandidateCreatedV2,
+    pub candidate_created_event_id: EventId,
+    pub candidate_completion_event_id: EventId,
+    pub candidate_completion_digest: String,
+    pub candidate_completion_event_digest: String,
+    pub tape_root_digest: String,
+}
+
 /// Closed request to aggregate the complete, purpose-bound deterministic
 /// acceptance result set for one checkpoint-sealed immutable V5 candidate.
 /// Check action ids are ordered exactly as the signed acceptance contract;
@@ -11304,6 +11317,71 @@ impl SqliteStore {
         }
     }
 
+    /// Resolve the exact signed candidate and completion evidence already
+    /// sealed by the pinned checkpoint authority. This method performs no
+    /// append and cannot mint candidate, activity, or promotion authority.
+    #[allow(clippy::too_many_arguments)]
+    pub fn resolve_governed_v5_candidate_receipt_v1(
+        &self,
+        run_id: RunId,
+        candidate_completion_event_id: EventId,
+        v5_authority: &GovernedDispatchV5AdmissionAuthorityV1,
+        activity_authority: &ActivityClaimAuthorityV1,
+        receipt_signer: &ActorKeyRef,
+        candidate_signer: &ActorKeyRef,
+    ) -> Result<ResolvedGovernedV5CandidateReceiptV1> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Deferred)?;
+        let material = verified_governed_v5_completed_candidate_material(
+            &tx,
+            run_id,
+            candidate_completion_event_id,
+            v5_authority,
+            activity_authority,
+            receipt_signer,
+            candidate_signer,
+        )?;
+        let candidate_created_event_id = material.completion.candidate_created_event_ref;
+        let candidate_event = load_verified_authority_event(
+            &tx,
+            candidate_created_event_id,
+            &activity_authority.trusted_keys,
+            candidate_signer,
+            "V5 candidate receipt artifact",
+        )?;
+        let Payload::CandidateCreatedV2(candidate) = candidate_event.payload else {
+            return Err(LedgerError::CandidateCompletionAuthorityRejected {
+                reason: "V5 candidate receipt artifact is not CandidateCreatedV2".into(),
+            });
+        };
+        if candidate_event.run_id != run_id
+            || material.completion_event.id != candidate_completion_event_id
+            || material.completion_event.parent_event_id != Some(candidate_event.id)
+            || material.completion.candidate_digest != candidate.candidate_digest
+            || material.completion.workflow_id != candidate.workflow_id
+            || material.completion.unit_id != candidate.unit_id
+            || material.completion.attempt != candidate.attempt
+            || material.completion.provenance_ref != candidate.provenance_ref
+        {
+            return Err(LedgerError::CandidateCompletionAuthorityRejected {
+                reason: "V5 candidate receipt does not bind one exact signed lifecycle".into(),
+            });
+        }
+        let candidate_completion_event_digest = canonical_event_hash(&material.completion_event)
+            .map_err(|error| LedgerError::CandidateCompletionAuthorityRejected {
+                reason: format!("V5 candidate receipt completion cannot be canonicalized: {error}"),
+            })?;
+        let receipt = ResolvedGovernedV5CandidateReceiptV1 {
+            candidate,
+            candidate_created_event_id,
+            candidate_completion_event_id,
+            candidate_completion_digest: material.completion.completion_digest,
+            candidate_completion_event_digest,
+            tape_root_digest: material.tape_root_digest,
+        };
+        tx.commit()?;
+        Ok(receipt)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn seal_governed_v5_candidate_completion_prefix(
         &self,
@@ -14618,6 +14696,7 @@ struct GovernedCommandActionIssueInTx {
 struct VerifiedGovernedV5CompletedCandidateMaterialV1 {
     completion_event: Event,
     completion: CandidateCompletionRecordedV1,
+    tape_root_digest: String,
     dispatch_event_id: EventId,
     admission_event_id: EventId,
     dispatch_material: DispatchAuthorityMaterialV1,
@@ -14709,7 +14788,8 @@ fn verified_governed_v5_completed_candidate_material(
         activity_authority,
         candidate_signer,
     )?;
-    verify_governed_v5_completion_checkpoint(tx, run_id, completion_event_id, v5_authority)?;
+    let tape_root_digest =
+        verify_governed_v5_completion_checkpoint(tx, run_id, completion_event_id, v5_authority)?;
     let admission =
         governed_dispatch_v5_admission_by_source(tx, run_id, evidence.dispatch_event_id)?
             .ok_or_else(|| rejected("V5 acceptance completion has no recorded admission".into()))?;
@@ -14725,6 +14805,7 @@ fn verified_governed_v5_completed_candidate_material(
     Ok(VerifiedGovernedV5CompletedCandidateMaterialV1 {
         completion_event,
         completion,
+        tape_root_digest,
         dispatch_event_id: evidence.dispatch_event_id,
         admission_event_id: admission.admission_event_id,
         dispatch_material,
@@ -14736,7 +14817,7 @@ fn verify_governed_v5_completion_checkpoint(
     run_id: RunId,
     completion_event_id: EventId,
     authority: &GovernedDispatchV5AdmissionAuthorityV1,
-) -> Result<()> {
+) -> Result<String> {
     let rejected = |reason: &str| LedgerError::CandidateCompletionAuthorityRejected {
         reason: format!("V5 candidate completion checkpoint rejected: {reason}"),
     };
@@ -14788,7 +14869,7 @@ fn verify_governed_v5_completion_checkpoint(
             "completion requires exactly one pinned checkpoint",
         ));
     }
-    Ok(())
+    Ok(expected_root)
 }
 
 fn verified_governed_command_packet_for_dispatch(

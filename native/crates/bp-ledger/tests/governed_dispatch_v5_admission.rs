@@ -1985,6 +1985,34 @@ fn v5_command_issuance_requires_a_checkpoint_sealed_admission() {
         finalize_action_event_id
     );
     assert_eq!(completion_payload.action_receipt_ref, finalize_receipt_ref);
+    let resolved_receipt = store
+        .resolve_governed_v5_candidate_receipt_v1(
+            fixture.run_id,
+            completion_event_id,
+            &v5_authority,
+            &activity_authority,
+            &receipt_signer,
+            &candidate_signer,
+        )
+        .expect("resolve exact signed candidate receipt projection");
+    assert_eq!(resolved_receipt.candidate, *candidate);
+    assert_eq!(
+        resolved_receipt.candidate_created_event_id,
+        candidate_created_event_id
+    );
+    assert_eq!(
+        resolved_receipt.candidate_completion_event_id,
+        completion_event_id
+    );
+    assert_eq!(
+        resolved_receipt.candidate_completion_digest,
+        completion_digest
+    );
+    assert_eq!(
+        resolved_receipt.candidate_completion_event_digest,
+        completion_event_digest
+    );
+    assert!(resolved_receipt.tape_root_digest.starts_with("sha256:"));
     let completion_retry = store
         .record_governed_v5_candidate_completion_v1(
             &completion_request,

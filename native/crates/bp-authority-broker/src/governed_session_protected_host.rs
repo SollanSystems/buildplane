@@ -27,7 +27,10 @@ use crate::governed_session_host::{
     handle_governed_session_connection, GovernedSessionHostDispositionV1,
     GovernedSessionHostErrorV1,
 };
-use crate::governed_session_response::governed_reviewer_run_result_v1;
+use crate::governed_session_response::{
+    governed_candidate_run_status_v1, governed_reviewer_run_result_v1,
+    host_owned_governed_candidate_run_result_v1, GovernedCandidateReceiptProjectionV1,
+};
 use crate::governed_session_startup::{
     GovernedSessionHostStartupErrorV1, GovernedSessionHostStartupV1, GovernedSessionProviderLaneV1,
 };
@@ -101,6 +104,11 @@ pub(crate) struct ProtectedGovernedSessionHostStateV1 {
     cas: ProtectedV5CasV1,
     anthropic_provider: ProtectedAnthropicProviderV1,
     provider_runtime: tokio::runtime::Runtime,
+}
+
+struct CandidateCommandRunResultV1 {
+    status: BrokerCommandActionStatus,
+    receipt: Option<GovernedCandidateReceiptProjectionV1>,
 }
 
 #[derive(Clone)]
@@ -246,7 +254,7 @@ impl ProtectedGovernedSessionHostStateV1 {
         &self,
         recovery_ref: &str,
         session_ref: &str,
-    ) -> Result<BrokerCommandActionStatus, ProtectedGovernedSessionProviderErrorV1> {
+    ) -> Result<CandidateCommandRunResultV1, ProtectedGovernedSessionProviderErrorV1> {
         let untrusted = parse_untrusted_recovery_token_binding_v1(recovery_ref)
             .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)?;
         let config = self.validated_startup.config();
@@ -675,12 +683,60 @@ impl ProtectedGovernedSessionHostStateV1 {
                 GovernedV5CandidateAcceptanceDispositionV1::Recorded { outcome, .. }
                 | GovernedV5CandidateAcceptanceDispositionV1::Existing { outcome, .. } => outcome,
             };
-            return Ok(match outcome {
-                CandidateAcceptanceOutcomeV1::Passed => BrokerCommandActionStatus::Succeeded,
-                CandidateAcceptanceOutcomeV1::Rejected => BrokerCommandActionStatus::Failed,
-            });
+            return match outcome {
+                CandidateAcceptanceOutcomeV1::Passed => {
+                    let target_ref = resolve_candidate_target_ref_v1(
+                        self.validated_startup.authority_root().directory(),
+                        &execution.candidate,
+                    )
+                    .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)?;
+                    let resolved = self
+                        .ledger
+                        .store()
+                        .resolve_governed_v5_candidate_receipt_v1(
+                            config.run_id,
+                            candidate_completion_event_id,
+                            &config.v5_admission_authority,
+                            &config.activity_authority,
+                            &config.action_receipt_signer,
+                            &config.candidate_artifact_signer,
+                        )
+                        .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)?;
+                    Ok(CandidateCommandRunResultV1 {
+                        status: BrokerCommandActionStatus::Succeeded,
+                        receipt: Some(GovernedCandidateReceiptProjectionV1 {
+                            target_ref,
+                            candidate: resolved.candidate,
+                            candidate_created_event_ref: resolved
+                                .candidate_created_event_id
+                                .to_string(),
+                            candidate_completion_event_ref: resolved
+                                .candidate_completion_event_id
+                                .to_string(),
+                            candidate_completion_digest: resolved.candidate_completion_digest,
+                            tape_root_digest: resolved.tape_root_digest,
+                            native_receipt_ref: format!(
+                                "signed-event:{}",
+                                resolved.candidate_completion_event_id
+                            ),
+                            native_receipt_digest: resolved.candidate_completion_event_digest,
+                            governed_packet_digest: execution
+                                .candidate
+                                .governed_packet_digest
+                                .clone(),
+                        }),
+                    })
+                }
+                CandidateAcceptanceOutcomeV1::Rejected => Ok(CandidateCommandRunResultV1 {
+                    status: BrokerCommandActionStatus::Failed,
+                    receipt: None,
+                }),
+            };
         }
-        Ok(status)
+        Ok(CandidateCommandRunResultV1 {
+            status,
+            receipt: None,
+        })
     }
 
     fn open_recovery_session(
@@ -1037,15 +1093,19 @@ impl ProtectedGovernedSessionHostStateV1 {
                 session_ref,
                 ..
             } => {
-                let status = self
+                let outcome = self
                     .run_candidate_command(recovery_ref, session_ref)
                     .map_err(|_| GovernedSessionHostErrorV1::AuthorityRejected)?;
+                let result = match outcome.receipt {
+                    Some(receipt) => {
+                        host_owned_governed_candidate_run_result_v1(recovery_ref, receipt)
+                    }
+                    None => governed_candidate_run_status_v1(outcome.status),
+                };
                 Ok(GovernedSessionHostDispositionV1::Completed {
                     recovery_ref: recovery_ref.clone(),
                     session_ref: session_ref.clone(),
-                    result: crate::governed_session_response::governed_candidate_run_result_v1(
-                        status,
-                    ),
+                    result,
                 })
             }
             ParsedGovernedSessionClientRequestV1::OpenRecoverySession {
