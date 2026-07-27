@@ -6,9 +6,11 @@
 //! No listener or worker authority is granted by this module.
 
 use crate::anthropic_model_gateway::AnthropicModelGatewayV1;
+use crate::candidate_repository::verify_governed_repository_binding_v1;
 use crate::candidate_workspace::{
     finalize_candidate_workspace_v1, immutable_candidate_artifact_v1_bytes,
     open_candidate_verification_workspace_v1, open_candidate_workspace_v1,
+    persist_candidate_packet_source_binding_v1, recover_candidate_packet_source_v1,
     reopen_candidate_workspace_v1, resolve_candidate_target_ref_v1,
 };
 use crate::command_action::{
@@ -203,10 +205,22 @@ impl ProtectedGovernedSessionHostStateV1 {
             request_id,
         )
         .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)?;
+        let packet_source_ref = self
+            .cas
+            .cas()
+            .put_canonical_bytes(packet_source.as_bytes())
+            .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)?;
         open_candidate_workspace_v1(
             self.validated_startup.authority_root().directory(),
             project_root,
             &resolved,
+        )
+        .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)?;
+        persist_candidate_packet_source_binding_v1(
+            self.validated_startup.authority_root().directory(),
+            &resolved,
+            &packet_source_ref.to_cas_ref(),
+            packet_source_ref.digest(),
         )
         .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)?;
         self.ledger
@@ -228,10 +242,8 @@ impl ProtectedGovernedSessionHostStateV1 {
         Ok((recovery_ref, session_ref))
     }
 
-    #[allow(dead_code)] // Wired to RunCandidateSession after immutable finalization is composed.
     fn run_candidate_command(
         &self,
-        packet_source: &str,
         recovery_ref: &str,
         session_ref: &str,
     ) -> Result<BrokerCommandActionStatus, ProtectedGovernedSessionProviderErrorV1> {
@@ -282,6 +294,17 @@ impl ProtectedGovernedSessionHostStateV1 {
             self.validated_startup.authority_root().directory(),
             &execution.candidate,
         )
+        .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)?;
+        let packet_source = recover_candidate_packet_source_v1(
+            self.validated_startup.authority_root().directory(),
+            &execution.candidate,
+            self.cas.cas(),
+        )
+        .and_then(|source| {
+            String::from_utf8(source).map_err(|_| {
+                crate::candidate_workspace::CandidateWorkspaceErrorV1::ReconciliationRequired
+            })
+        })
         .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)?;
         let backend = LedgerV5CommandAuthorityBackend::new(
             self.ledger.store(),
@@ -541,7 +564,7 @@ impl ProtectedGovernedSessionHostStateV1 {
             )
             .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)?;
             let packet = GovernedCommandPacketV1::parse_and_verify(
-                packet_source,
+                &packet_source,
                 &execution.candidate.governed_packet_digest,
             )
             .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)?;
@@ -559,7 +582,7 @@ impl ProtectedGovernedSessionHostStateV1 {
                         &GovernedV5AcceptanceCheckIssueRequestV1 {
                             run_id: config.run_id,
                             candidate_completion_event_id,
-                            packet_source: packet_source.into(),
+                            packet_source: packet_source.clone(),
                             check_index,
                         },
                         self.cas.cas(),
@@ -589,7 +612,7 @@ impl ProtectedGovernedSessionHostStateV1 {
                     candidate_completion_event_id,
                     execution.candidate.dispatch_event_id,
                     action_request_event_id,
-                    packet_source.into(),
+                    packet_source.clone(),
                     check_index,
                     &config.action_receipt_signer,
                     &config.candidate_artifact_signer,
@@ -634,7 +657,7 @@ impl ProtectedGovernedSessionHostStateV1 {
                     &GovernedV5CandidateAcceptanceRequestV1 {
                         run_id: config.run_id,
                         candidate_completion_event_id,
-                        packet_source: packet_source.into(),
+                        packet_source: packet_source.clone(),
                         check_action_request_event_ids,
                     },
                     self.cas.cas(),
@@ -658,6 +681,76 @@ impl ProtectedGovernedSessionHostStateV1 {
             });
         }
         Ok(status)
+    }
+
+    fn open_recovery_session(
+        &self,
+        project_root: &str,
+        recovery_ref: &str,
+        request_id: &str,
+    ) -> Result<String, ProtectedGovernedSessionProviderErrorV1> {
+        let untrusted = parse_untrusted_recovery_token_binding_v1(recovery_ref)
+            .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)?;
+        let config = self.validated_startup.config();
+        if untrusted.run_id != config.run_id.to_string() {
+            return Err(ProtectedGovernedSessionProviderErrorV1::DurableAuthority);
+        }
+        let dispatch_event_id = Uuid::parse_str(&untrusted.candidate_dispatch_event_ref)
+            .map(bp_ledger::EventId::from_uuid)
+            .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)?;
+        let execution = self
+            .ledger
+            .store()
+            .resolve_governed_v5_candidate_execution_authority_v1(
+                config.run_id,
+                dispatch_event_id,
+                &config.v5_admission_authority,
+                &config.activity_authority,
+            )
+            .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)?;
+        let verified_recovery = verify_recovery_token_v1(
+            &self.signing_keys.broker_identity().verifying_key(),
+            recovery_ref,
+            &execution.candidate.repository_binding_digest,
+        )
+        .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)?;
+        if verified_recovery.run_id() != config.run_id.to_string()
+            || verified_recovery.candidate_dispatch_event_ref()
+                != execution.candidate.dispatch_event_id.to_string()
+            || execution.candidate.sandbox_profile_digest
+                != self.session_startup.sandbox_profile_digest()
+        {
+            return Err(ProtectedGovernedSessionProviderErrorV1::DurableAuthority);
+        }
+        verify_governed_repository_binding_v1(
+            project_root,
+            &execution.candidate.repository_binding_digest,
+        )
+        .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)?;
+        reopen_candidate_workspace_v1(
+            self.validated_startup.authority_root().directory(),
+            &execution.candidate,
+        )
+        .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)?;
+        let packet_source = recover_candidate_packet_source_v1(
+            self.validated_startup.authority_root().directory(),
+            &execution.candidate,
+            self.cas.cas(),
+        )
+        .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)?;
+        GovernedCommandPacketV1::parse_and_verify(
+            std::str::from_utf8(&packet_source)
+                .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)?,
+            &execution.candidate.governed_packet_digest,
+        )
+        .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)?;
+        issue_session_token_v1(
+            self.signing_keys.broker_identity(),
+            GovernedSessionKindV1::Candidate,
+            &verified_recovery,
+            request_id,
+        )
+        .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)
     }
 
     pub(crate) fn validated_startup(&self) -> &ValidatedGovernedSessionHostStartupV1 {
@@ -940,13 +1033,12 @@ impl ProtectedGovernedSessionHostStateV1 {
                 })
             }
             ParsedGovernedSessionClientRequestV1::RunCandidateSession {
-                packet_source,
                 recovery_ref,
                 session_ref,
                 ..
             } => {
                 let status = self
-                    .run_candidate_command(packet_source, recovery_ref, session_ref)
+                    .run_candidate_command(recovery_ref, session_ref)
                     .map_err(|_| GovernedSessionHostErrorV1::AuthorityRejected)?;
                 Ok(GovernedSessionHostDispositionV1::Completed {
                     recovery_ref: recovery_ref.clone(),
@@ -956,10 +1048,18 @@ impl ProtectedGovernedSessionHostStateV1 {
                     ),
                 })
             }
-            // Recovery opening remains unavailable until reducer-owned pending
-            // activity restoration is composed into the same protected state.
-            ParsedGovernedSessionClientRequestV1::OpenRecoverySession { .. } => {
-                Err(GovernedSessionHostErrorV1::AuthorityRejected)
+            ParsedGovernedSessionClientRequestV1::OpenRecoverySession {
+                request_id,
+                project_root,
+                recovery_ref,
+            } => {
+                let session_ref = self
+                    .open_recovery_session(project_root, recovery_ref, request_id)
+                    .map_err(|_| GovernedSessionHostErrorV1::AuthorityRejected)?;
+                Ok(GovernedSessionHostDispositionV1::Opened {
+                    recovery_ref: recovery_ref.clone(),
+                    session_ref,
+                })
             }
         }
     }
@@ -1568,7 +1668,7 @@ mod tests {
         );
 
         let candidate = crate::governed_session_client::parse_governed_session_client_request(
-            br#"{"schema_version":1,"protocol":"buildplane-governed-session","request_id":"01919000-0000-7000-8000-000000000099","operation":"run_candidate_session","packet_source":"{}","recovery_ref":"recovery:opaque","session_ref":"session:opaque"}"#,
+            br#"{"schema_version":1,"protocol":"buildplane-governed-session","request_id":"01919000-0000-7000-8000-000000000099","operation":"run_candidate_session","recovery_ref":"recovery:opaque","session_ref":"session:opaque"}"#,
         )
         .expect("candidate request");
         assert_eq!(

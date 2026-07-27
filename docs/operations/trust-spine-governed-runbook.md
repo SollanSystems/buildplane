@@ -278,9 +278,14 @@ StandardError=journal
 
 The configured provider endpoint is fixed in the host binary and redirects
 and ambient proxy discovery are disabled. Egress policy outside the process
-must allow only the approved provider destination. Reviewer session ingress
-can expose only `probe`, `open_reviewer_session`, and
-`run_reviewer_session`; candidate and general tool execution remain blocked.
+must allow only the approved provider destination. Governed-session ingress
+exposes exactly `probe`, `open_candidate_session`, `open_recovery_session`,
+`run_candidate_session`, `open_reviewer_session`, and
+`run_reviewer_session`. A candidate packet is accepted only while opening the
+initial session. The host stores it in verified CAS and binds its digest to the
+protected workspace manifest; candidate execution and recovery accept only
+opaque session or recovery references and reload those exact bytes from CAS.
+Caller-supplied packet replacement and general tool execution remain blocked.
 The signed run response contains only opaque session references and the closed
 status set `pending`, `recorded`, `failed`, `lease_expired`, or
 `reconciliation_required`.
@@ -410,10 +415,11 @@ substitute.
 
 ### Enforcement already implemented
 
-- The governed CLI does not invoke the legacy JavaScript `openSession` or
-  `admit` candidate/admission callbacks. Those structural callbacks would hand
-  an untrusted host a writable checkout, so they stop before invocation until a
-  native capability-bound host contract is available.
+- The governed CLI does not invoke legacy JavaScript `openSession` or `admit`
+  candidate/admission callbacks. Those structural callbacks would hand an
+  untrusted host a writable checkout. The only candidate-session protocol
+  eligible for governed integration is the fixed native client and protected
+  host contract described above.
 - A governed host must own the capability, trusted-tape projection, opaque
   recovery identity, and rootless OCI action plane. Missing native authority,
   signed-tape/root proof, or OCI feasibility blocks before worker execution;

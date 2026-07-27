@@ -400,6 +400,9 @@ fn validate_session_refs(
 fn probe_result() -> Value {
     serde_json::json!({
         "operations": [
+            "open_candidate_session",
+            "open_recovery_session",
+            "run_candidate_session",
             "open_reviewer_session",
             "run_reviewer_session"
         ]

@@ -16,7 +16,7 @@ fn reviewer_request(recovery_ref: &str) -> Vec<u8> {
 }
 
 fn candidate_run_request() -> Vec<u8> {
-    br#"{"schema_version":1,"protocol":"buildplane-governed-session","request_id":"01919000-0000-7000-8000-000000000082","operation":"run_candidate_session","packet_source":"{}","recovery_ref":"host-recovery/session-0001","session_ref":"host-session/session-0001"}"#.to_vec()
+    br#"{"schema_version":1,"protocol":"buildplane-governed-session","request_id":"01919000-0000-7000-8000-000000000082","operation":"run_candidate_session","recovery_ref":"host-recovery/session-0001","session_ref":"host-session/session-0001"}"#.to_vec()
 }
 
 fn reviewer_run_request() -> Vec<u8> {
@@ -35,7 +35,7 @@ fn signed_probe_proves_the_exact_fixed_operation_set_without_session_authority()
         verify_governed_session_response_v1(&signed, &key.verifying_key(), &request).unwrap();
     assert_eq!(
         std::str::from_utf8(verified.projection_json()).unwrap(),
-        r#"{"schema_version":1,"protocol":"buildplane-governed-session","request_id":"01919000-0000-7000-8000-000000000080","operation":"probe","status":"ready","recovery_ref":null,"session_ref":null,"result":{"operations":["open_reviewer_session","run_reviewer_session"]}}"#
+        r#"{"schema_version":1,"protocol":"buildplane-governed-session","request_id":"01919000-0000-7000-8000-000000000080","operation":"probe","status":"ready","recovery_ref":null,"session_ref":null,"result":{"operations":["open_candidate_session","open_recovery_session","run_candidate_session","open_reviewer_session","run_reviewer_session"]}}"#
     );
 }
 

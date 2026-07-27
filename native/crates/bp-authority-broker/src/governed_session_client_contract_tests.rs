@@ -64,6 +64,32 @@ fn parses_closed_candidate_recovery_and_reviewer_session_requests() {
         GovernedSessionClientOperationV1::OpenReviewerSession
     );
     assert_eq!(reviewer.recovery_ref(), Some("host-recovery/session-0001"));
+
+    let candidate_run = parse_governed_session_client_request(&request(
+        "run_candidate_session",
+        r#""recovery_ref":"host-recovery/session-0001","session_ref":"host-session/session-0001""#,
+    ))
+    .expect("opaque candidate run request");
+    assert_eq!(
+        candidate_run.operation(),
+        GovernedSessionClientOperationV1::RunCandidateSession
+    );
+    assert_eq!(
+        candidate_run.recovery_ref(),
+        Some("host-recovery/session-0001")
+    );
+    assert_eq!(
+        candidate_run.session_ref(),
+        Some("host-session/session-0001")
+    );
+    assert!(
+        parse_governed_session_client_request(&request(
+            "run_candidate_session",
+            r#""packet_source":"{}","recovery_ref":"host-recovery/session-0001","session_ref":"host-session/session-0001""#,
+        ))
+        .is_err(),
+        "a resumed candidate run must not accept caller replacement packet bytes"
+    );
 }
 
 #[test]

@@ -15,7 +15,7 @@ native compare-and-swap promotion result all bind the same immutable candidate.
 | --- | --- | ---: | ---: | --- |
 | `buildplane run --packet <file>` | Supported governed preview | No | No | Supply a complete governed source packet to validate and preview it. |
 | `buildplane run --packet <file> --approve` | Blocked pending protected host | No, until host capability is available | No | Deploy/enroll the protected authority host and OCI action plane; see the governed-run runbook. |
-| `buildplane run --resume <opaque-ref> --approve` | Blocked host-only recovery | No local retry | No | Preserve the opaque reference and ask the protected host to reconcile the existing workflow. |
+| `buildplane run --resume <opaque-ref> --approve` | Protected-host recovery protocol available; CLI integration remains gated | Only on a deployed protected host; never a local retry | No until the fixed client verifies the host result | Preserve the opaque reference and use the enrolled protected host to reconcile the existing workflow; never submit a replacement packet. |
 | `buildplane run --raw ...` | Explicit raw compatibility lane | Yes, legacy only | No; output is `governance: "unsafe"` | Use only for local diagnostics. Never use it to bypass a governed block. |
 | `run-graph --raw`, `replay --raw`, `fork --raw`, `demo --raw` | Explicit raw compatibility lane | Varies by command | No | Treat all resulting evidence as unsafe/untrusted. |
 | Raw implement-then-review strategy | Rejected | No | No | A future raw review workflow must use a shared immutable candidate view; it cannot finalize before review. |

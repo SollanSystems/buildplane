@@ -72,7 +72,6 @@ pub(crate) enum ParsedGovernedSessionClientRequestV1 {
     },
     RunCandidateSession {
         request_id: String,
-        packet_source: String,
         recovery_ref: String,
         session_ref: String,
     },
@@ -241,7 +240,6 @@ struct RunCandidateSessionWireV1 {
     protocol: String,
     operation: RunCandidateOperationV1,
     request_id: String,
-    packet_source: String,
     recovery_ref: String,
     session_ref: String,
 }
@@ -393,7 +391,6 @@ pub(crate) fn parse_governed_session_client_request(
             validate_header(wire.schema_version, &wire.protocol, &wire.request_id)?;
             Ok(ParsedGovernedSessionClientRequestV1::RunCandidateSession {
                 request_id: wire.request_id,
-                packet_source: require_bounded_source(wire.packet_source)?,
                 recovery_ref: require_opaque_ref(wire.recovery_ref)?,
                 session_ref: require_opaque_ref(wire.session_ref)?,
             })

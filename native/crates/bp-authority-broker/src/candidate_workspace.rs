@@ -9,7 +9,7 @@ use crate::candidate_repository::{
     governed_git_executable, governed_git_output, required_git_value,
     verify_governed_repository_binding_v1, CandidateRepositoryErrorV1,
 };
-use bp_ledger::storage::sqlite::ResolvedGovernedV5CandidateAuthorityV1;
+use bp_ledger::storage::{sqlite::ResolvedGovernedV5CandidateAuthorityV1, Cas};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::ffi::CString;
@@ -22,6 +22,7 @@ use thiserror::Error;
 const WORKSPACE_DIRECTORY: &[u8] = b"candidate-workspaces\0";
 const VERIFICATION_WORKSPACE_DIRECTORY: &[u8] = b"candidate-verification-workspaces\0";
 const CANDIDATE_REF_PREFIX: &str = "refs/buildplane/candidates/";
+const MAX_PACKET_SOURCE_BYTES: usize = 512 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -39,6 +40,17 @@ struct CandidateWorkspaceManifestV1 {
     dispatch_envelope_digest: String,
     governed_packet_digest: String,
     sandbox_profile_digest: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CandidatePacketSourceBindingV1 {
+    schema_version: u8,
+    run_id: String,
+    dispatch_event_id: String,
+    governed_packet_digest: String,
+    packet_source_ref: String,
+    packet_source_digest: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -321,6 +333,60 @@ pub(crate) fn reopen_candidate_workspace_v1(
         path: canonical_workspace,
         base_commit_sha: authority.base_commit_sha.clone(),
     })
+}
+
+pub(crate) fn persist_candidate_packet_source_binding_v1(
+    authority_root: &File,
+    authority: &ResolvedGovernedV5CandidateAuthorityV1,
+    packet_source_ref: &str,
+    packet_source_digest: &str,
+) -> Result<(), CandidateWorkspaceErrorV1> {
+    let (_, _, workspace_name) = candidate_identity(authority)?;
+    let workspace_root = open_or_create_private_directory_at(authority_root, WORKSPACE_DIRECTORY)?;
+    let binding = CandidatePacketSourceBindingV1 {
+        schema_version: 1,
+        run_id: authority.run_id.to_string(),
+        dispatch_event_id: authority.dispatch_event_id.to_string(),
+        governed_packet_digest: authority.governed_packet_digest.clone(),
+        packet_source_ref: packet_source_ref.into(),
+        packet_source_digest: packet_source_digest.into(),
+    };
+    let expected =
+        serde_json::to_vec(&binding).map_err(|_| CandidateWorkspaceErrorV1::WorkspaceCustody)?;
+    persist_workspace_bytes(
+        &workspace_root,
+        &packet_source_binding_name(&workspace_name)?,
+        &expected,
+    )
+}
+
+pub(crate) fn recover_candidate_packet_source_v1(
+    authority_root: &File,
+    authority: &ResolvedGovernedV5CandidateAuthorityV1,
+    cas: &Cas,
+) -> Result<Vec<u8>, CandidateWorkspaceErrorV1> {
+    let (_, _, workspace_name) = candidate_identity(authority)?;
+    let workspace_root = open_or_create_private_directory_at(authority_root, WORKSPACE_DIRECTORY)?;
+    let bytes = read_workspace_manifest_bytes(
+        &workspace_root,
+        &packet_source_binding_name(&workspace_name)?,
+    )?;
+    let binding: CandidatePacketSourceBindingV1 = serde_json::from_slice(&bytes)
+        .map_err(|_| CandidateWorkspaceErrorV1::ReconciliationRequired)?;
+    if binding.schema_version != 1
+        || binding.run_id != authority.run_id.to_string()
+        || binding.dispatch_event_id != authority.dispatch_event_id.to_string()
+        || binding.governed_packet_digest != authority.governed_packet_digest
+    {
+        return Err(CandidateWorkspaceErrorV1::ReconciliationRequired);
+    }
+    let source = cas
+        .get_verified_canonical_bytes(&binding.packet_source_ref, &binding.packet_source_digest)
+        .map_err(|_| CandidateWorkspaceErrorV1::ReconciliationRequired)?;
+    if source.is_empty() || source.len() > MAX_PACKET_SOURCE_BYTES || source.contains(&0) {
+        return Err(CandidateWorkspaceErrorV1::ReconciliationRequired);
+    }
+    Ok(source)
 }
 
 /// Recover the immutable target branch from the protected workspace manifest
@@ -858,6 +924,11 @@ fn manifest_name(workspace_name: &str) -> Result<CString, CandidateWorkspaceErro
         .map_err(|_| CandidateWorkspaceErrorV1::WorkspaceCustody)
 }
 
+fn packet_source_binding_name(workspace_name: &str) -> Result<CString, CandidateWorkspaceErrorV1> {
+    CString::new(format!("{workspace_name}.packet-source.json"))
+        .map_err(|_| CandidateWorkspaceErrorV1::WorkspaceCustody)
+}
+
 fn persist_workspace_manifest(
     directory: &File,
     workspace_name: &str,
@@ -866,6 +937,14 @@ fn persist_workspace_manifest(
     let expected =
         serde_json::to_vec(manifest).map_err(|_| CandidateWorkspaceErrorV1::WorkspaceCustody)?;
     let name = manifest_name(workspace_name)?;
+    persist_workspace_bytes(directory, &name, &expected)
+}
+
+fn persist_workspace_bytes(
+    directory: &File,
+    name: &CString,
+    expected: &[u8],
+) -> Result<(), CandidateWorkspaceErrorV1> {
     let fd = unsafe {
         libc::openat(
             directory.as_raw_fd(),
@@ -884,7 +963,7 @@ fn persist_workspace_manifest(
     if std::io::Error::last_os_error().raw_os_error() != Some(libc::EEXIST) {
         return Err(CandidateWorkspaceErrorV1::WorkspaceCustody);
     }
-    if read_workspace_manifest_bytes(directory, &name)? != expected {
+    if read_workspace_manifest_bytes(directory, name)? != expected {
         return Err(CandidateWorkspaceErrorV1::ReconciliationRequired);
     }
     Ok(())
@@ -999,7 +1078,7 @@ mod tests {
     use crate::candidate_repository::{
         canonical_governed_repository_binding_digest_v1, compute_governed_repository_binding_v1,
     };
-    use bp_ledger::{EventId, RunId};
+    use bp_ledger::{storage::Cas, EventId, RunId};
     use std::fs;
     use std::os::unix::fs::symlink;
     use std::os::unix::fs::PermissionsExt;
@@ -1120,6 +1199,46 @@ mod tests {
             reopen_candidate_workspace_v1(&root, &authority)
                 .expect("recover workspace from protected manifest"),
             opened
+        );
+    }
+
+    #[test]
+    fn packet_source_recovery_uses_only_the_protected_manifest_and_verified_cas() {
+        let (repository, custody, root, authority) = fixture();
+        open_candidate_workspace_v1(
+            &root,
+            repository.path().to_str().expect("utf8 repository"),
+            &authority,
+        )
+        .expect("open candidate workspace");
+        let cas = Cas::open(custody.path().join("cas")).expect("CAS");
+        let source = br#"{"schema_version":1,"unit":{"id":"unit"}}"#;
+        let reference = cas.put_canonical_bytes(source).expect("packet source");
+
+        persist_candidate_packet_source_binding_v1(
+            &root,
+            &authority,
+            &reference.to_cas_ref(),
+            reference.digest(),
+        )
+        .expect("persist protected packet binding");
+        assert_eq!(
+            recover_candidate_packet_source_v1(&root, &authority, &cas)
+                .expect("recover exact packet source"),
+            source
+        );
+
+        let (_, _, workspace_name) = candidate_identity(&authority).expect("identity");
+        let binding = custody
+            .path()
+            .join("candidate-workspaces")
+            .join(format!("{workspace_name}.packet-source.json"));
+        fs::write(&binding, b"{}").expect("substitute packet binding");
+        fs::set_permissions(&binding, fs::Permissions::from_mode(0o600))
+            .expect("retain private mode");
+        assert_eq!(
+            recover_candidate_packet_source_v1(&root, &authority, &cas),
+            Err(CandidateWorkspaceErrorV1::ReconciliationRequired)
         );
     }
 
