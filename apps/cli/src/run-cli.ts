@@ -94,6 +94,7 @@ import {
 } from "./governed-authority-broker-host.js";
 import { GOVERNED_AUTHORITY_BROKER_REQUIRED_CODE } from "./governed-ledger-authority.js";
 import { submitProtectedPromotionDecision } from "./governed-promotion-decision-client.js";
+import { runHostOwnedGovernedReviewSession } from "./governed-review-session.js";
 import {
 	type GovernedV5AdmissionResponseV1,
 	requestGovernedV5Admission,
@@ -3030,6 +3031,31 @@ function formatGovernedGraphPreview(preview: GovernedGraphPreview): string[] {
  * promotion authority. The privileged host keeps the candidate identity and
  * signed evidence opaque until the separate review and promotion stages.
  */
+type GovernedReviewedRunOutput =
+	| {
+			readonly governance: "governed";
+			readonly status: "review-approved-awaiting-promotion-decision";
+			readonly executionStarted: true;
+			readonly review: {
+				readonly decision: "approve";
+			};
+			readonly promotion: {
+				readonly state: "operator-decision-required";
+				readonly requestReference: string;
+			};
+	  }
+	| {
+			readonly governance: "governed";
+			readonly status: "review-blocked";
+			readonly executionStarted: true;
+			readonly review: {
+				readonly decision: "request_changes" | "reject" | "abstain";
+			};
+			readonly promotion: {
+				readonly state: "not-authorized";
+			};
+	  };
+
 interface GovernedCandidateRunOutput {
 	readonly governance: "governed";
 	readonly status: "candidate-awaiting-review";
@@ -3055,6 +3081,26 @@ function formatGovernedCandidateRun(
 		"Governed candidate created: awaiting review",
 		`execution-started: ${output.executionStarted}`,
 		"promotion: not authorized (candidate review and a bound promotion decision are required)",
+	];
+}
+
+function formatGovernedReviewedRun(
+	output: GovernedReviewedRunOutput,
+): readonly string[] {
+	if (output.status === "review-approved-awaiting-promotion-decision") {
+		return [
+			"Governed candidate approved: awaiting operator promotion decision",
+			`execution-started: ${output.executionStarted}`,
+			`review: ${output.review.decision}`,
+			`promotion-request: ${output.promotion.requestReference}`,
+			`resume: buildplane run --resume ${output.promotion.requestReference} --approve --decision promote|reject`,
+		];
+	}
+	return [
+		"Governed candidate review blocked promotion",
+		`execution-started: ${output.executionStarted}`,
+		`review: ${output.review.decision}`,
+		"promotion: not authorized",
 	];
 }
 
@@ -3418,7 +3464,7 @@ async function executeHostCandidateSession(
 		| HostOwnedRecoverySessionOpenInputV1,
 	sourcePacket?: unknown,
 	expectedEnvelopeDigest?: string,
-): Promise<void> {
+): Promise<ParsedHostCandidateResult> {
 	if (!isProtectedHostOwnedGovernedBroker(broker)) {
 		throw new Error(
 			"Governed host execution is unavailable: the broker was not minted by the fixed protected native client.",
@@ -3431,6 +3477,7 @@ async function executeHostCandidateSession(
 		);
 	}
 	let sessionFailure: unknown;
+	let completed: ParsedHostCandidateResult | undefined;
 	try {
 		const session = parseHostCandidateSession(
 			await ("kind" in openInput
@@ -3449,6 +3496,7 @@ async function executeHostCandidateSession(
 			sourcePacket,
 			expectedEnvelopeDigest,
 		);
+		completed = result;
 	} catch (error) {
 		sessionFailure = error;
 	}
@@ -3458,6 +3506,78 @@ async function executeHostCandidateSession(
 	if (sessionFailure !== undefined) {
 		throw sessionFailure;
 	}
+	if (!completed) {
+		throw new TypeError(
+			"host candidate session completed without a verified candidate receipt.",
+		);
+	}
+	return completed;
+}
+
+async function executeHostReviewerSession(
+	projectRoot: string,
+	candidate: ParsedHostCandidateResult,
+): Promise<GovernedReviewedRunOutput> {
+	const recoveryReference = candidate.recoveryRef;
+	const before = captureGovernedRootSnapshot(projectRoot);
+	if (!before) {
+		throw new Error(
+			"governed root integrity snapshot is unavailable; the host reviewer session was not opened.",
+		);
+	}
+	const result = await runHostOwnedGovernedReviewSession({
+		projectRoot,
+		recoveryReference,
+	});
+	if (!rootSnapshotMatches(before, projectRoot)) {
+		throw new GovernedRootIntegrityViolation();
+	}
+	if (result.state === "unavailable" || !result.reviewReceipt) {
+		throw new Error(
+			result.state === "unavailable"
+				? result.reason
+				: "host reviewer completed without a verified review receipt.",
+		);
+	}
+	if (
+		result.reviewReceipt.candidateDigest !==
+			candidate.candidateReceipt.candidate.candidateDigest ||
+		result.reviewReceipt.candidateCreatedEventRef !==
+			candidate.candidateReceipt.candidateCreatedEventRef ||
+		result.reviewReceipt.candidateCompletionEventRef !==
+			candidate.candidateReceipt.candidateCompletionEventRef
+	) {
+		throw new TypeError(
+			"host review receipt does not bind the exact completed candidate.",
+		);
+	}
+	const decision = result.verdict.decision;
+	if (decision === "approve") {
+		const requestReference =
+			result.reviewReceipt.promotionApprovalRequestEventRef;
+		if (!requestReference) {
+			throw new TypeError(
+				"approved host review did not return its bound promotion approval request.",
+			);
+		}
+		return Object.freeze({
+			governance: "governed" as const,
+			status: "review-approved-awaiting-promotion-decision" as const,
+			executionStarted: true as const,
+			review: Object.freeze({ decision: "approve" as const }),
+			promotion: Object.freeze({
+				state: "operator-decision-required" as const,
+				requestReference,
+			}),
+		});
+	}
+	return Object.freeze({
+		governance: "governed" as const,
+		status: "review-blocked" as const,
+		executionStarted: true as const,
+		review: Object.freeze({ decision }),
+		promotion: Object.freeze({ state: "not-authorized" as const }),
+	});
 }
 
 function assertPlanForgeCandidateReceiptMatchesInvocation(
@@ -3823,12 +3943,14 @@ async function runGovernedRunCommand(
 		if (!broker) {
 			return emitGovernedHostRecovery(runArguments.json, options.stdout);
 		}
+		let output: GovernedReviewedRunOutput;
 		try {
-			await executeHostCandidateSession(projectRoot, broker, {
+			const candidate = await executeHostCandidateSession(projectRoot, broker, {
 				projectRoot,
 				recoveryReference: runArguments.recoveryReference,
 				approval: "operator-requested",
 			});
+			output = await executeHostReviewerSession(projectRoot, candidate);
 		} catch (error) {
 			return emitGovernedHostRecovery(
 				runArguments.json,
@@ -3837,11 +3959,10 @@ async function runGovernedRunCommand(
 			);
 		}
 
-		const output = buildGovernedCandidateRunOutput();
 		if (runArguments.json) {
 			options.stdout(formatJson(output));
 		} else {
-			for (const line of formatGovernedCandidateRun(output)) {
+			for (const line of formatGovernedReviewedRun(output)) {
 				options.stdout(line);
 			}
 		}
@@ -3984,6 +4105,7 @@ async function runGovernedRunCommand(
 		return emitGovernedRunPreview(preview, runArguments.json, options.stdout);
 	}
 
+	let output: GovernedReviewedRunOutput;
 	try {
 		let approval: HostOwnedCandidateApprovalV1;
 		if (runArguments.approve) {
@@ -4001,7 +4123,7 @@ async function runGovernedRunCommand(
 				preauthorizedEnvelopeSource: preauthorizedEnvelope.source,
 			};
 		}
-		await executeHostCandidateSession(
+		const candidate = await executeHostCandidateSession(
 			projectRoot,
 			broker,
 			{
@@ -4013,6 +4135,7 @@ async function runGovernedRunCommand(
 			sourcePacket,
 			runArguments.approve ? undefined : loadedEnvelope?.preview.envelopeDigest,
 		);
+		output = await executeHostReviewerSession(projectRoot, candidate);
 	} catch (error) {
 		return emitGovernedHostRecovery(
 			runArguments.json,
@@ -4021,11 +4144,10 @@ async function runGovernedRunCommand(
 		);
 	}
 
-	const output = buildGovernedCandidateRunOutput();
 	if (runArguments.json) {
 		options.stdout(formatJson(output));
 	} else {
-		for (const line of formatGovernedCandidateRun(output)) {
+		for (const line of formatGovernedReviewedRun(output)) {
 			options.stdout(line);
 		}
 	}

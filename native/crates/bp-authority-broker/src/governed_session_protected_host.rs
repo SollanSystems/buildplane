@@ -1056,9 +1056,20 @@ impl ProtectedGovernedSessionHostStateV1 {
                     &config.v5_admission_checkpoint_signer,
                 )
                 .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)?;
-            let receipt = match finalized {
-                GovernedV5ReviewVerdictFinalizeDispositionV1::Recorded { receipt, .. }
-                | GovernedV5ReviewVerdictFinalizeDispositionV1::Existing { receipt, .. } => receipt,
+            let (receipt, promotion_approval_request_event_ref) = match finalized {
+                GovernedV5ReviewVerdictFinalizeDispositionV1::Recorded {
+                    receipt,
+                    promotion_approval_request_event_id,
+                    ..
+                }
+                | GovernedV5ReviewVerdictFinalizeDispositionV1::Existing {
+                    receipt,
+                    promotion_approval_request_event_id,
+                    ..
+                } => (
+                    receipt,
+                    promotion_approval_request_event_id.map(|event_id| event_id.to_string()),
+                ),
             };
             let verdict = receipt.verdict;
             return Ok(ReviewerRunResultV1 {
@@ -1074,6 +1085,7 @@ impl ProtectedGovernedSessionHostStateV1 {
                     reviewer_dispatch_event_ref: receipt.reviewer_dispatch_event_id.to_string(),
                     reviewer_dispatch_envelope_digest: receipt.reviewer_dispatch_envelope_digest,
                     review_verdict_event_ref: receipt.review_verdict_event_id.to_string(),
+                    promotion_approval_request_event_ref,
                     decision: verdict.decision,
                     findings: verdict.findings,
                     confidence: verdict.confidence,

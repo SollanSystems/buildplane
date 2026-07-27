@@ -87,6 +87,7 @@ fn review_receipt_projection() -> GovernedReviewReceiptProjectionV1 {
         reviewer_dispatch_envelope_digest:
             "sha256:8888888888888888888888888888888888888888888888888888888888888888".into(),
         review_verdict_event_ref: "01919000-0000-7000-8000-000000000095".into(),
+        promotion_approval_request_event_ref: Some("01919000-0000-7000-8000-000000000096".into()),
         decision: ReviewDecisionV1::Approve,
         findings: vec![ReviewFindingV1 {
             severity: ReviewFindingSeverityV1::Low,
@@ -237,7 +238,10 @@ fn reviewer_completion_requires_a_verified_receipt_for_recorded_success() {
         .expect("verify reviewer receipt");
     let projection = std::str::from_utf8(verified.projection_json()).unwrap();
     assert!(projection.contains(r#""kind":"host-owned-governed-reviewer-run-result-v1""#));
+    assert!(projection.contains(r#""schemaVersion":2"#));
     assert!(projection.contains(r#""decision":"approve""#));
+    assert!(projection
+        .contains(r#""promotionApprovalRequestEventRef":"01919000-0000-7000-8000-000000000096""#));
 
     for invalid in [
         serde_json::json!({"status": "recorded"}),

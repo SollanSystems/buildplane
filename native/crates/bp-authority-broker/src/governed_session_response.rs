@@ -118,6 +118,7 @@ pub(crate) struct GovernedReviewReceiptProjectionV1 {
     pub(crate) reviewer_dispatch_event_ref: String,
     pub(crate) reviewer_dispatch_envelope_digest: String,
     pub(crate) review_verdict_event_ref: String,
+    pub(crate) promotion_approval_request_event_ref: Option<String>,
     pub(crate) decision: ReviewDecisionV1,
     pub(crate) findings: Vec<ReviewFindingV1>,
     pub(crate) confidence: f64,
@@ -186,6 +187,7 @@ struct HostVerifiedReviewReceiptWireV1 {
     reviewer_dispatch_event_ref: String,
     reviewer_dispatch_envelope_digest: String,
     review_verdict_event_ref: String,
+    promotion_approval_request_event_ref: Option<String>,
     verdict: HostReviewVerdictWireV1,
     tape_root_digest: String,
     native_receipt_ref: String,
@@ -261,7 +263,7 @@ pub(crate) fn host_owned_governed_reviewer_run_result_v1(
         kind: "host-owned-governed-reviewer-run-result-v1".into(),
         recovery_ref: recovery_ref.into(),
         review_receipt: HostVerifiedReviewReceiptWireV1 {
-            schema_version: 1,
+            schema_version: 2,
             recovery_ref: recovery_ref.into(),
             candidate_created_event_ref: receipt.candidate_created_event_ref,
             candidate_completion_event_ref: receipt.candidate_completion_event_ref,
@@ -271,6 +273,7 @@ pub(crate) fn host_owned_governed_reviewer_run_result_v1(
             reviewer_dispatch_event_ref: receipt.reviewer_dispatch_event_ref,
             reviewer_dispatch_envelope_digest: receipt.reviewer_dispatch_envelope_digest,
             review_verdict_event_ref: receipt.review_verdict_event_ref,
+            promotion_approval_request_event_ref: receipt.promotion_approval_request_event_ref,
             verdict: HostReviewVerdictWireV1 {
                 schema_version: 1,
                 candidate_digest: receipt.candidate_digest,
@@ -533,7 +536,7 @@ fn validate_governed_reviewer_run_result(
         let verdict = &receipt.verdict;
         if result.recovery_ref != expected_recovery_ref
             || result.recovery_ref != receipt.recovery_ref
-            || receipt.schema_version != 1
+            || receipt.schema_version != 2
             || verdict.schema_version != 1
             || verdict.candidate_digest != receipt.candidate_digest
             || !is_event_id(&receipt.candidate_created_event_ref)
@@ -541,6 +544,12 @@ fn validate_governed_reviewer_run_result(
             || !is_event_id(&receipt.acceptance_event_ref)
             || !is_event_id(&receipt.reviewer_dispatch_event_ref)
             || !is_event_id(&receipt.review_verdict_event_ref)
+            || receipt
+                .promotion_approval_request_event_ref
+                .as_ref()
+                .is_some_and(|event_ref| !is_event_id(event_ref))
+            || matches!(verdict.decision, ReviewDecisionV1::Approve)
+                != receipt.promotion_approval_request_event_ref.is_some()
             || !is_sha256_digest(&receipt.candidate_digest)
             || !is_sha256_digest(&receipt.acceptance_digest)
             || !is_sha256_digest(&receipt.reviewer_dispatch_envelope_digest)

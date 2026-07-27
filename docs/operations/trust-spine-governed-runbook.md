@@ -68,6 +68,14 @@ candidate. Deterministic acceptance and semantic review bind to that candidate
 digest. A review decision other than `approve`, malformed review output,
 failed acceptance, cancellation, or stale target base blocks promotion.
 
+The default governed CLI carries a successful candidate receipt directly into
+the protected read-only reviewer session using the host-issued opaque recovery
+identity. An approved closed review returns a V2 host receipt containing the
+exact kernel-signed `promotion_approval_requested` event ID; the CLI reports
+`review-approved-awaiting-promotion-decision` and gives the operator the
+corresponding `--resume` command. `request_changes`, `reject`, and `abstain`
+report `review-blocked` and expose no promotion request.
+
 The only valid promotion sequence is:
 
 ```text
@@ -430,6 +438,11 @@ substitute.
   recovery identity, and rootless OCI action plane. Missing native authority,
   signed-tape/root proof, or OCI feasibility blocks before worker execution;
   there is no host-shell, ambient-model, or generic-callback fallback.
+- Candidate completion flows immediately into the protected read-only
+  reviewer. The CLI verifies that the reviewer receipt binds the exact
+  candidate event lineage and accepts a promotion-request reference only for
+  `approve`. Rejected, abstaining, malformed, or mismatched reviews leave the
+  target root unchanged and non-promotable.
 - The release campaign verifier accepts only an absolute, regular,
   non-symlinked bundle and the source-controlled pinned
   `config/trust-spine-release-trust-root.json`; it has no caller-selected trust

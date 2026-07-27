@@ -29,6 +29,7 @@ import type {
 	HostOwnedCandidateSessionOpenInputV1,
 	HostOwnedGovernedBrokerV1,
 	HostOwnedRecoverySessionOpenInputV1,
+	HostOwnedReviewerSessionOpenInputV1,
 } from "../src/governed-authority-broker-host.js";
 import type { RunCliDependencies } from "../src/run-cli.js";
 
@@ -481,6 +482,43 @@ function createHostCandidateRunResult(
 		},
 		...overrides,
 	} as HostOwnedCandidateRunResultV2;
+}
+
+function createHostReviewRunResult(
+	recoveryRef: string,
+	decision: "approve" | "request_changes" | "reject" | "abstain" = "approve",
+) {
+	const candidateDigest = digest("a");
+	const promotionApprovalRequestEventRef =
+		decision === "approve" ? "01900000-0000-7000-8000-000000000009" : null;
+	return {
+		kind: "host-owned-governed-reviewer-run-result-v1",
+		recoveryRef,
+		reviewReceipt: {
+			schemaVersion: 2,
+			recoveryRef,
+			candidateCreatedEventRef: "01900000-0000-7000-8000-000000000002",
+			candidateCompletionEventRef: "01900000-0000-7000-8000-000000000003",
+			candidateDigest,
+			acceptanceEventRef: "01900000-0000-7000-8000-000000000004",
+			acceptanceDigest: digest("7"),
+			reviewerDispatchEventRef: "01900000-0000-7000-8000-000000000005",
+			reviewerDispatchEnvelopeDigest: digest("8"),
+			reviewVerdictEventRef: "01900000-0000-7000-8000-000000000006",
+			promotionApprovalRequestEventRef,
+			verdict: {
+				schemaVersion: 1,
+				candidateDigest,
+				decision,
+				findings: [],
+				confidence: 0.99,
+				reviewerManifestDigest: digest("9"),
+			},
+			tapeRootDigest: digest("0"),
+			nativeReceiptRef: "signed-event:01900000-0000-7000-8000-000000000006",
+			nativeReceiptDigest: digest("f"),
+		},
+	};
 }
 
 afterEach(() => {
@@ -1190,7 +1228,7 @@ describe("governed run front door", () => {
 		expectRootUnchanged(root, before);
 	});
 
-	it("runs a candidate only through a provenance-verified protected host broker", async () => {
+	it("runs candidate and review through a provenance-verified protected host broker", async () => {
 		const root = createGitProject();
 		const packetPath = writePacket(root, createGovernedPacket("host-success"));
 		const packetSource = readFileSync(packetPath, "utf8");
@@ -1202,6 +1240,10 @@ describe("governed run front door", () => {
 			.mockResolvedValue(
 				createHostCandidateRunResult(root, "host-success", recoveryRef),
 			);
+		const reviewRun = vi
+			.fn()
+			.mockResolvedValue(createHostReviewRunResult(recoveryRef));
+		const reviewerSessions: HostOwnedReviewerSessionOpenInputV1[] = [];
 		const broker = {
 			kind: "host-owned-governed-broker-v1",
 			openCandidateSession: async (
@@ -1212,6 +1254,16 @@ describe("governed run front door", () => {
 					kind: "host-owned-governed-candidate-session-v1",
 					recoveryRef,
 					run,
+				};
+			},
+			openReviewerSession: async (
+				input: HostOwnedReviewerSessionOpenInputV1,
+			) => {
+				reviewerSessions.push(input);
+				return {
+					kind: "host-owned-governed-reviewer-session-v1",
+					recoveryRef,
+					run: reviewRun,
 				};
 			},
 		} as unknown as HostOwnedGovernedBrokerV1;
@@ -1236,12 +1288,72 @@ describe("governed run front door", () => {
 			},
 		]);
 		expect(run).toHaveBeenCalledOnce();
+		expect(reviewerSessions).toEqual([
+			{
+				kind: "governed-reviewer-session-open-v1",
+				schemaVersion: 1,
+				projectRoot: root,
+				recoveryReference: recoveryRef,
+			},
+		]);
+		expect(reviewRun).toHaveBeenCalledOnce();
 		expect(JSON.parse(result.stdout.join("\n"))).toEqual({
 			governance: "governed",
-			status: "candidate-awaiting-review",
+			status: "review-approved-awaiting-promotion-decision",
 			executionStarted: true,
+			review: { decision: "approve" },
+			promotion: {
+				state: "operator-decision-required",
+				requestReference: "01900000-0000-7000-8000-000000000009",
+			},
+		});
+		expectRootUnchanged(root, before);
+	});
+
+	it.each([
+		"request_changes",
+		"reject",
+		"abstain",
+	] as const)("keeps a %s review non-promotable and leaves root unchanged", async (decision) => {
+		const root = createGitProject();
+		const packetPath = writePacket(
+			root,
+			createGovernedPacket(`host-${decision}`),
+		);
+		const before = snapshotRoot(root);
+		const recoveryRef = `host-recovery/host-${decision}`;
+		const broker = {
+			kind: "host-owned-governed-broker-v1",
+			openCandidateSession: async () => ({
+				kind: "host-owned-governed-candidate-session-v1",
+				recoveryRef,
+				run: async () =>
+					createHostCandidateRunResult(root, `host-${decision}`, recoveryRef),
+			}),
+			openReviewerSession: async () => ({
+				kind: "host-owned-governed-reviewer-session-v1",
+				recoveryRef,
+				run: async () => createHostReviewRunResult(recoveryRef, decision),
+			}),
+		} as unknown as HostOwnedGovernedBrokerV1;
+		hostResolver.resolve.mockResolvedValue(broker);
+		hostResolver.isProtected.mockReturnValue(true);
+
+		const result = await runCliCapture(
+			root,
+			["run", "--approve", "--packet", packetPath, "--json"],
+			legacyBundleMustNotBeConstructed(),
+		);
+
+		expect(result.exitCode).toBe(0);
+		expect(JSON.parse(result.stdout.join("\n"))).toEqual({
+			governance: "governed",
+			status: "review-blocked",
+			executionStarted: true,
+			review: { decision },
 			promotion: { state: "not-authorized" },
 		});
+		expect(promotionDecisionClient.submit).not.toHaveBeenCalled();
 		expectRootUnchanged(root, before);
 	});
 

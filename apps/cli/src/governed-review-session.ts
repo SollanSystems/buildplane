@@ -10,7 +10,7 @@ import {
 	validateGovernedCandidateReviewExecutionInput,
 } from "@buildplane/kernel";
 import {
-	type HostVerifiedReviewReceiptV1,
+	type HostVerifiedReviewReceiptV2,
 	resolveHostOwnedGovernedBroker,
 } from "./governed-authority-broker-host.js";
 
@@ -32,7 +32,7 @@ export type GovernedReviewSessionResult =
 			 * recorded the read-only reviewer activity. It is not promotion
 			 * authority: this CLI process cannot append, verify, or promote from it.
 			 */
-			readonly reviewReceipt?: HostVerifiedReviewReceiptV1;
+			readonly reviewReceipt?: HostVerifiedReviewReceiptV2;
 			readonly promotionEligible: false;
 			readonly promotionBlockedReason: typeof REVIEW_PROMOTION_BLOCKED_REASON;
 	  }
@@ -98,6 +98,7 @@ const HOST_RECEIPT_FIELDS = [
 	"reviewerDispatchEventRef",
 	"reviewerDispatchEnvelopeDigest",
 	"reviewVerdictEventRef",
+	"promotionApprovalRequestEventRef",
 	"verdict",
 	"tapeRootDigest",
 	"nativeReceiptRef",
@@ -264,7 +265,7 @@ function prepareHostReviewSession(
 function parseHostReviewReceipt(
 	input: unknown,
 	recoveryReference: string,
-): HostVerifiedReviewReceiptV1 | undefined {
+): HostVerifiedReviewReceiptV2 | undefined {
 	const result = readClosedDataRecord(input, HOST_RESULT_FIELDS);
 	if (
 		!result ||
@@ -279,7 +280,7 @@ function parseHostReviewReceipt(
 	);
 	if (
 		!receipt ||
-		receipt.schemaVersion !== 1 ||
+		receipt.schemaVersion !== 2 ||
 		receipt.recoveryRef !== recoveryReference
 	) {
 		return undefined;
@@ -304,6 +305,10 @@ function parseHostReviewReceipt(
 	const reviewVerdictEventRef = readNonBlankString(
 		receipt.reviewVerdictEventRef,
 	);
+	const promotionApprovalRequestEventRef =
+		receipt.promotionApprovalRequestEventRef === null
+			? null
+			: readNonBlankString(receipt.promotionApprovalRequestEventRef);
 	const nativeReceiptRef = readNonBlankString(receipt.nativeReceiptRef);
 	if (
 		!candidateDigest ||
@@ -316,6 +321,7 @@ function parseHostReviewReceipt(
 		!acceptanceEventRef ||
 		!reviewerDispatchEventRef ||
 		!reviewVerdictEventRef ||
+		promotionApprovalRequestEventRef === undefined ||
 		!nativeReceiptRef
 	) {
 		return undefined;
@@ -327,9 +333,15 @@ function parseHostReviewReceipt(
 		return undefined;
 	}
 	if (verdict.candidateDigest !== candidateDigest) return undefined;
+	if (
+		(verdict.decision === "approve") !==
+		(promotionApprovalRequestEventRef !== null)
+	) {
+		return undefined;
+	}
 
 	return Object.freeze({
-		schemaVersion: 1 as const,
+		schemaVersion: 2 as const,
 		recoveryRef: recoveryReference,
 		candidateCreatedEventRef,
 		candidateCompletionEventRef,
@@ -339,6 +351,7 @@ function parseHostReviewReceipt(
 		reviewerDispatchEventRef,
 		reviewerDispatchEnvelopeDigest,
 		reviewVerdictEventRef,
+		promotionApprovalRequestEventRef,
 		verdict,
 		tapeRootDigest,
 		nativeReceiptRef,

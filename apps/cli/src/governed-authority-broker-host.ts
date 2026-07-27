@@ -207,8 +207,8 @@ export interface HostVerifiedPlanForgeCandidateReceiptV1
  * receipt and verify its signed tape/root before treating any field as
  * evidence. In particular, no review receipt grants promotion authority.
  */
-export interface HostVerifiedReviewReceiptV1 {
-	readonly schemaVersion: 1;
+export interface HostVerifiedReviewReceiptV2 {
+	readonly schemaVersion: 2;
 	readonly recoveryRef: string;
 	readonly candidateCreatedEventRef: string;
 	readonly candidateCompletionEventRef: string;
@@ -218,6 +218,7 @@ export interface HostVerifiedReviewReceiptV1 {
 	readonly reviewerDispatchEventRef: string;
 	readonly reviewerDispatchEnvelopeDigest: string;
 	readonly reviewVerdictEventRef: string;
+	readonly promotionApprovalRequestEventRef: string | null;
 	readonly verdict: ReviewVerdictV1;
 	readonly tapeRootDigest: string;
 	readonly nativeReceiptRef: string;
@@ -285,7 +286,7 @@ export interface HostOwnedReviewerSessionV1 {
 export interface HostOwnedReviewerRunResultV1 {
 	readonly kind: "host-owned-governed-reviewer-run-result-v1";
 	readonly recoveryRef: string;
-	readonly reviewReceipt: HostVerifiedReviewReceiptV1;
+	readonly reviewReceipt: HostVerifiedReviewReceiptV2;
 	readonly [hostOwnedReviewerRunResultBrand]: true;
 }
 

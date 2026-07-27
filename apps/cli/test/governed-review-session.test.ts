@@ -147,7 +147,7 @@ function hostInput(overrides: Record<string, unknown> = {}) {
 
 function hostReviewReceipt(overrides: Record<string, unknown> = {}) {
 	return {
-		schemaVersion: 1,
+		schemaVersion: 2,
 		recoveryRef: RECOVERY_REFERENCE,
 		candidateCreatedEventRef: "event://candidate-created/1",
 		candidateCompletionEventRef: "event://candidate-completion/1",
@@ -157,6 +157,7 @@ function hostReviewReceipt(overrides: Record<string, unknown> = {}) {
 		reviewerDispatchEventRef: "event://reviewer-dispatch/1",
 		reviewerDispatchEnvelopeDigest: DIGEST("8"),
 		reviewVerdictEventRef: "event://review-verdict/1",
+		promotionApprovalRequestEventRef: "01919000-0000-7000-8000-000000000096",
 		verdict: {
 			schemaVersion: 1,
 			candidateDigest: CANDIDATE_DIGEST,
