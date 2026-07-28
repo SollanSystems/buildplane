@@ -415,52 +415,53 @@ describe("governed command worker execution port", () => {
 				};
 			},
 		},
-	] as const)("blocks a persisted canonical-input commitment with a changed $label before request, claim, or OCI", async ({
-		mutate,
-	}) => {
-		const root = mkdtempSync(join(tmpdir(), "buildplane-governed-worker-"));
-		try {
-			const order: string[] = [];
-			const runCommand = vi.fn(() => ({
-				success: true,
-				exitCode: 0,
-				stdout: "",
-				stderr: "",
-			}));
-			const evidence = actionEvidencePort(order);
-			const claims = activityClaimPort(order);
-			const port = createGovernedCommandWorkerExecutionPort({
-				actionExecutor: executor({ runCommand }),
-				evidenceStore: evidenceStore(order, {
-					persistCanonicalInput: async (input) => {
-						order.push("input");
-						const forged = mutate(input);
-						return {
-							canonicalInputDigest: forged.digest,
-							canonicalInputRef: forged.ref,
-							redactions: [],
-						};
-					},
-				}),
-				activityClaimPort: claims,
-				now: () => "2026-07-18T00:00:00.000Z",
-			});
-			const inputPacket = packet();
+	] as const)(
+		"blocks a persisted canonical-input commitment with a changed $label before request, claim, or OCI",
+		async ({ mutate }) => {
+			const root = mkdtempSync(join(tmpdir(), "buildplane-governed-worker-"));
+			try {
+				const order: string[] = [];
+				const runCommand = vi.fn(() => ({
+					success: true,
+					exitCode: 0,
+					stdout: "",
+					stderr: "",
+				}));
+				const evidence = actionEvidencePort(order);
+				const claims = activityClaimPort(order);
+				const port = createGovernedCommandWorkerExecutionPort({
+					actionExecutor: executor({ runCommand }),
+					evidenceStore: evidenceStore(order, {
+						persistCanonicalInput: async (input) => {
+							order.push("input");
+							const forged = mutate(input);
+							return {
+								canonicalInputDigest: forged.digest,
+								canonicalInputRef: forged.ref,
+								redactions: [],
+							};
+						},
+					}),
+					activityClaimPort: claims,
+					now: () => "2026-07-18T00:00:00.000Z",
+				});
+				const inputPacket = packet();
 
-			await expect(
-				port.executeCandidatePacketAsync(
-					v3Request(root, inputPacket, evidence),
-				),
-			).rejects.toThrow(/exact shared CAS commitment/i);
+				await expect(
+					port.executeCandidatePacketAsync(
+						v3Request(root, inputPacket, evidence),
+					),
+				).rejects.toThrow(/exact shared CAS commitment/i);
 
-			expect(order).toEqual(["input"]);
-			expect(evidence.recordActionRequested).not.toHaveBeenCalled();
-			expect(claims.claim).not.toHaveBeenCalled();
-			expect(runCommand).not.toHaveBeenCalled();
-		} finally {
-			rmSync(root, { recursive: true, force: true });
-		}
-	});
+				expect(order).toEqual(["input"]);
+				expect(evidence.recordActionRequested).not.toHaveBeenCalled();
+				expect(claims.claim).not.toHaveBeenCalled();
+				expect(runCommand).not.toHaveBeenCalled();
+			} finally {
+				rmSync(root, { recursive: true, force: true });
+			}
+		},
+	);
 
 	it("mints one immutable compute deadline from the signed dispatch budget", async () => {
 		const root = mkdtempSync(join(tmpdir(), "buildplane-governed-worker-"));
@@ -523,39 +524,42 @@ describe("governed command worker execution port", () => {
 			{ maxComputeTimeMs: Number.MAX_SAFE_INTEGER },
 			/invalid budget/i,
 		],
-	])("fails closed before evidence or OCI for %s", async (_label, budget, error) => {
-		const root = mkdtempSync(join(tmpdir(), "buildplane-governed-worker-"));
-		try {
-			const issuedAt = "2026-07-18T00:00:00.000Z";
-			const issuedAtMs = Date.parse(issuedAt);
-			const order: string[] = [];
-			const runCommand = vi.fn(executor().runCommand);
-			const inputPacket = packet();
-			const port = createGovernedCommandWorkerExecutionPort({
-				actionExecutor: executor({ runCommand }),
-				evidenceStore: evidenceStore(order),
-				activityClaimPort: activityClaimPort(order),
-				now: () => issuedAt,
-				nowMs: () => issuedAtMs,
-			});
+	])(
+		"fails closed before evidence or OCI for %s",
+		async (_label, budget, error) => {
+			const root = mkdtempSync(join(tmpdir(), "buildplane-governed-worker-"));
+			try {
+				const issuedAt = "2026-07-18T00:00:00.000Z";
+				const issuedAtMs = Date.parse(issuedAt);
+				const order: string[] = [];
+				const runCommand = vi.fn(executor().runCommand);
+				const inputPacket = packet();
+				const port = createGovernedCommandWorkerExecutionPort({
+					actionExecutor: executor({ runCommand }),
+					evidenceStore: evidenceStore(order),
+					activityClaimPort: activityClaimPort(order),
+					now: () => issuedAt,
+					nowMs: () => issuedAtMs,
+				});
 
-			await expect(
-				port.executeCandidatePacketAsync({
-					...request(root, inputPacket),
-					governedDispatch: governedDispatch(
-						inputPacket.capability_bundle_digest!,
-						{ budget },
-						inputPacket,
-					),
-					actionEvidencePort: actionEvidencePort(order),
-				}),
-			).rejects.toThrow(error);
-			expect(order).toEqual([]);
-			expect(runCommand).not.toHaveBeenCalled();
-		} finally {
-			rmSync(root, { recursive: true, force: true });
-		}
-	});
+				await expect(
+					port.executeCandidatePacketAsync({
+						...request(root, inputPacket),
+						governedDispatch: governedDispatch(
+							inputPacket.capability_bundle_digest!,
+							{ budget },
+							inputPacket,
+						),
+						actionEvidencePort: actionEvidencePort(order),
+					}),
+				).rejects.toThrow(error);
+				expect(order).toEqual([]);
+				expect(runCommand).not.toHaveBeenCalled();
+			} finally {
+				rmSync(root, { recursive: true, force: true });
+			}
+		},
+	);
 
 	it("denies an expired signed compute budget before action evidence or OCI", async () => {
 		const root = mkdtempSync(join(tmpdir(), "buildplane-governed-worker-"));
@@ -990,49 +994,49 @@ describe("governed command worker execution port", () => {
 			},
 			expectedError: /claim was rejected/i,
 		},
-	])("blocks a $label native activity claim before OCI and action receipt persistence", async ({
-		disposition,
-		expectedError,
-	}) => {
-		const root = mkdtempSync(join(tmpdir(), "buildplane-governed-worker-"));
-		try {
-			const order: string[] = [];
-			const runCommand = vi.fn(() => {
-				order.push("oci");
-				return { success: true, exitCode: 0, stdout: "", stderr: "" };
-			});
-			const inputPacket = packet();
-			const claims = activityClaimPort(order, {
-				claim: vi.fn(async () => {
-					order.push("claim");
-					return disposition;
-				}),
-			});
-			const evidence = actionEvidencePort(order);
-			const port = createGovernedCommandWorkerExecutionPort({
-				actionExecutor: executor({ runCommand }),
-				evidenceStore: evidenceStore(order),
-				activityClaimPort: claims,
-				now: () => "2026-07-18T00:00:00.000Z",
-			});
+	])(
+		"blocks a $label native activity claim before OCI and action receipt persistence",
+		async ({ disposition, expectedError }) => {
+			const root = mkdtempSync(join(tmpdir(), "buildplane-governed-worker-"));
+			try {
+				const order: string[] = [];
+				const runCommand = vi.fn(() => {
+					order.push("oci");
+					return { success: true, exitCode: 0, stdout: "", stderr: "" };
+				});
+				const inputPacket = packet();
+				const claims = activityClaimPort(order, {
+					claim: vi.fn(async () => {
+						order.push("claim");
+						return disposition;
+					}),
+				});
+				const evidence = actionEvidencePort(order);
+				const port = createGovernedCommandWorkerExecutionPort({
+					actionExecutor: executor({ runCommand }),
+					evidenceStore: evidenceStore(order),
+					activityClaimPort: claims,
+					now: () => "2026-07-18T00:00:00.000Z",
+				});
 
-			await expect(
-				port.executeCandidatePacketAsync({
-					...request(root, inputPacket),
-					governedDispatch: governedDispatch(
-						inputPacket.capability_bundle_digest!,
-					),
-					actionEvidencePort: evidence,
-				}),
-			).rejects.toThrow(expectedError);
-			expect(order).toEqual(["input", "request", "claim"]);
-			expect(runCommand).not.toHaveBeenCalled();
-			expect(claims.recordResult).not.toHaveBeenCalled();
-			expect(evidence.recordActionReceipt).not.toHaveBeenCalled();
-		} finally {
-			rmSync(root, { recursive: true, force: true });
-		}
-	});
+				await expect(
+					port.executeCandidatePacketAsync({
+						...request(root, inputPacket),
+						governedDispatch: governedDispatch(
+							inputPacket.capability_bundle_digest!,
+						),
+						actionEvidencePort: evidence,
+					}),
+				).rejects.toThrow(expectedError);
+				expect(order).toEqual(["input", "request", "claim"]);
+				expect(runCommand).not.toHaveBeenCalled();
+				expect(claims.recordResult).not.toHaveBeenCalled();
+				expect(evidence.recordActionReceipt).not.toHaveBeenCalled();
+			} finally {
+				rmSync(root, { recursive: true, force: true });
+			}
+		},
+	);
 
 	it("rechecks dispatch expiry after write-ahead evidence and before the OCI action", async () => {
 		const root = mkdtempSync(join(tmpdir(), "buildplane-governed-worker-"));
@@ -1668,39 +1672,42 @@ describe("governed command worker execution port", () => {
 					},
 				}),
 		],
-	] as const)("rejects a substituted %s packet surface before evidence or OCI execution", async (_label, mutate) => {
-		const root = mkdtempSync(join(tmpdir(), "buildplane-governed-worker-"));
-		try {
-			const order: string[] = [];
-			const runCommand = vi.fn(executor().runCommand);
-			const admittedPacket = packet();
-			const substitutedPacket = mutate(admittedPacket);
-			const port = createGovernedCommandWorkerExecutionPort({
-				actionExecutor: executor({ runCommand }),
-				evidenceStore: evidenceStore(order),
-				activityClaimPort: activityClaimPort(order),
-				now: () => "2026-07-18T00:00:00.000Z",
-			});
+	] as const)(
+		"rejects a substituted %s packet surface before evidence or OCI execution",
+		async (_label, mutate) => {
+			const root = mkdtempSync(join(tmpdir(), "buildplane-governed-worker-"));
+			try {
+				const order: string[] = [];
+				const runCommand = vi.fn(executor().runCommand);
+				const admittedPacket = packet();
+				const substitutedPacket = mutate(admittedPacket);
+				const port = createGovernedCommandWorkerExecutionPort({
+					actionExecutor: executor({ runCommand }),
+					evidenceStore: evidenceStore(order),
+					activityClaimPort: activityClaimPort(order),
+					now: () => "2026-07-18T00:00:00.000Z",
+				});
 
-			await expect(
-				port.executeCandidatePacketAsync({
-					...request(root, substitutedPacket),
-					governedDispatch: governedDispatch(
-						admittedPacket.capability_bundle_digest!,
-						{},
-						admittedPacket,
-					),
-					actionEvidencePort: actionEvidencePort(order),
-				}),
-			).rejects.toThrow(
-				/packet does not match the exact packet digest|run, packet unit, provenance, and capability authority|only an implementer/i,
-			);
-			expect(order).toEqual([]);
-			expect(runCommand).not.toHaveBeenCalled();
-		} finally {
-			rmSync(root, { recursive: true, force: true });
-		}
-	});
+				await expect(
+					port.executeCandidatePacketAsync({
+						...request(root, substitutedPacket),
+						governedDispatch: governedDispatch(
+							admittedPacket.capability_bundle_digest!,
+							{},
+							admittedPacket,
+						),
+						actionEvidencePort: actionEvidencePort(order),
+					}),
+				).rejects.toThrow(
+					/packet does not match the exact packet digest|run, packet unit, provenance, and capability authority|only an implementer/i,
+				);
+				expect(order).toEqual([]);
+				expect(runCommand).not.toHaveBeenCalled();
+			} finally {
+				rmSync(root, { recursive: true, force: true });
+			}
+		},
+	);
 
 	it("blocks model packets instead of routing them to an ambient model adapter", async () => {
 		const root = mkdtempSync(join(tmpdir(), "buildplane-governed-worker-"));

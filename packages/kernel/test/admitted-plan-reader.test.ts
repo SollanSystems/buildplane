@@ -296,21 +296,21 @@ describe("default admitted-plan reader", () => {
 		});
 	});
 
-	it.each([
-		"missing",
-		"malformed",
-	])("fails closed for a %s detached signature row", async (label) => {
-		const fixture =
-			label === "missing"
-				? seedAdmission({ omitSignature: true })
-				: seedAdmission({ signature: "not-a-valid-ed25519-signature" });
-		await expect(
-			trustedReader(fixture).read(fixture.eventsDbPath, EVENT_ID),
-		).resolves.toEqual({
-			authorizedNextStep: "dispatch_admitted_plan",
-			signedByKernel: false,
-		});
-	});
+	it.each(["missing", "malformed"])(
+		"fails closed for a %s detached signature row",
+		async (label) => {
+			const fixture =
+				label === "missing"
+					? seedAdmission({ omitSignature: true })
+					: seedAdmission({ signature: "not-a-valid-ed25519-signature" });
+			await expect(
+				trustedReader(fixture).read(fixture.eventsDbPath, EVENT_ID),
+			).resolves.toEqual({
+				authorizedNextStep: "dispatch_admitted_plan",
+				signedByKernel: false,
+			});
+		},
+	);
 
 	it("rejects an admission whose stored event content no longer matches the signed canonical hash", async () => {
 		const fixture = seedAdmission();

@@ -407,69 +407,73 @@ describe("orchestrator run admission", () => {
 		);
 	});
 
-	it.each(
-		GOVERNANCE_FIELD_VARIANTS,
-	)("rejects direct unsafe sync execution of a packet carrying %s before ambient runtime", (_field, governanceFields) => {
-		const packet = createPacket(governanceFields);
-		const harness = createHarness({ packet });
-		cleanup.push(harness.cleanup);
-
-		expect(() =>
-			harness.orchestrator.runPacket(packet, undefined, {
-				trustLane: "unsafe",
-			}),
-		).toThrow(/governance fields.*verified sealed_v3 dispatch/i);
-		expect(harness.runtime.executePacket).not.toHaveBeenCalled();
-		expect(harness.runEvents).toEqual([]);
-	});
-
-	it.each(
-		GOVERNANCE_FIELD_VARIANTS,
-	)("rejects direct unsafe async execution of a packet carrying %s before ambient runtime", async (_field, governanceFields) => {
-		const packet = createPacket(governanceFields);
-		const harness = createHarness({ packet });
-		cleanup.push(harness.cleanup);
-
-		await expect(
-			harness.orchestrator.runPacketAsync(packet, undefined, {
-				trustLane: "unsafe",
-			}),
-		).rejects.toThrow(/governance fields.*verified sealed_v3 dispatch/i);
-		expect(harness.runtime.executePacketAsync).not.toHaveBeenCalled();
-		expect(harness.runEvents).toEqual([]);
-	});
-
-	it.each(
-		GOVERNANCE_FIELD_VARIANTS,
-	)("rejects sync execution of a packet carrying %s without a verified V3 dispatch", (_field, governanceFields) => {
-		for (const [_optionsLabel, runOptions] of NON_GOVERNED_OPTION_VARIANTS) {
+	it.each(GOVERNANCE_FIELD_VARIANTS)(
+		"rejects direct unsafe sync execution of a packet carrying %s before ambient runtime",
+		(_field, governanceFields) => {
 			const packet = createPacket(governanceFields);
 			const harness = createHarness({ packet });
 			cleanup.push(harness.cleanup);
 
 			expect(() =>
-				harness.orchestrator.runPacket(packet, undefined, runOptions),
+				harness.orchestrator.runPacket(packet, undefined, {
+					trustLane: "unsafe",
+				}),
 			).toThrow(/governance fields.*verified sealed_v3 dispatch/i);
 			expect(harness.runtime.executePacket).not.toHaveBeenCalled();
 			expect(harness.runEvents).toEqual([]);
-		}
-	});
+		},
+	);
 
-	it.each(
-		GOVERNANCE_FIELD_VARIANTS,
-	)("rejects async execution of a packet carrying %s without a verified V3 dispatch", async (_field, governanceFields) => {
-		for (const [_optionsLabel, runOptions] of NON_GOVERNED_OPTION_VARIANTS) {
+	it.each(GOVERNANCE_FIELD_VARIANTS)(
+		"rejects direct unsafe async execution of a packet carrying %s before ambient runtime",
+		async (_field, governanceFields) => {
 			const packet = createPacket(governanceFields);
 			const harness = createHarness({ packet });
 			cleanup.push(harness.cleanup);
 
 			await expect(
-				harness.orchestrator.runPacketAsync(packet, undefined, runOptions),
+				harness.orchestrator.runPacketAsync(packet, undefined, {
+					trustLane: "unsafe",
+				}),
 			).rejects.toThrow(/governance fields.*verified sealed_v3 dispatch/i);
 			expect(harness.runtime.executePacketAsync).not.toHaveBeenCalled();
 			expect(harness.runEvents).toEqual([]);
-		}
-	});
+		},
+	);
+
+	it.each(GOVERNANCE_FIELD_VARIANTS)(
+		"rejects sync execution of a packet carrying %s without a verified V3 dispatch",
+		(_field, governanceFields) => {
+			for (const [_optionsLabel, runOptions] of NON_GOVERNED_OPTION_VARIANTS) {
+				const packet = createPacket(governanceFields);
+				const harness = createHarness({ packet });
+				cleanup.push(harness.cleanup);
+
+				expect(() =>
+					harness.orchestrator.runPacket(packet, undefined, runOptions),
+				).toThrow(/governance fields.*verified sealed_v3 dispatch/i);
+				expect(harness.runtime.executePacket).not.toHaveBeenCalled();
+				expect(harness.runEvents).toEqual([]);
+			}
+		},
+	);
+
+	it.each(GOVERNANCE_FIELD_VARIANTS)(
+		"rejects async execution of a packet carrying %s without a verified V3 dispatch",
+		async (_field, governanceFields) => {
+			for (const [_optionsLabel, runOptions] of NON_GOVERNED_OPTION_VARIANTS) {
+				const packet = createPacket(governanceFields);
+				const harness = createHarness({ packet });
+				cleanup.push(harness.cleanup);
+
+				await expect(
+					harness.orchestrator.runPacketAsync(packet, undefined, runOptions),
+				).rejects.toThrow(/governance fields.*verified sealed_v3 dispatch/i);
+				expect(harness.runtime.executePacketAsync).not.toHaveBeenCalled();
+				expect(harness.runEvents).toEqual([]);
+			}
+		},
+	);
 
 	it("fails closed before sync or async runtime when no admission store is configured", async () => {
 		const syncHarness = createHarness({ admissionStore: null });
@@ -597,24 +601,27 @@ describe("orchestrator run admission", () => {
 	] as const satisfies readonly (readonly [
 		string,
 		AdmittedPlanReader["read"],
-	])[])("rejects a legacy provenance_ref with a %s historic admission before consulting the tape reader", async (_admissionState, read) => {
-		const readSpy = vi.fn(read);
-		const harness = createHarness({
-			packet: createPacket({ provenance_ref: "evt-1" }),
-			admittedPlanReader: { read: readSpy },
-		});
-		cleanup.push(harness.cleanup);
+	])[])(
+		"rejects a legacy provenance_ref with a %s historic admission before consulting the tape reader",
+		async (_admissionState, read) => {
+			const readSpy = vi.fn(read);
+			const harness = createHarness({
+				packet: createPacket({ provenance_ref: "evt-1" }),
+				admittedPlanReader: { read: readSpy },
+			});
+			cleanup.push(harness.cleanup);
 
-		await expect(
-			harness.orchestrator.runPacketAsync(harness.packet),
-		).rejects.toThrow(/governance fields.*verified sealed_v3 dispatch/i);
+			await expect(
+				harness.orchestrator.runPacketAsync(harness.packet),
+			).rejects.toThrow(/governance fields.*verified sealed_v3 dispatch/i);
 
-		expect(readSpy).not.toHaveBeenCalled();
-		expect(harness.runtime.executePacketAsync).not.toHaveBeenCalled();
-		expect(harness.artifacts).toHaveLength(0);
-		expect(harness.admissionEvents).toHaveLength(0);
-		expect(harness.runEvents).toEqual([]);
-	});
+			expect(readSpy).not.toHaveBeenCalled();
+			expect(harness.runtime.executePacketAsync).not.toHaveBeenCalled();
+			expect(harness.artifacts).toHaveLength(0);
+			expect(harness.admissionEvents).toHaveLength(0);
+			expect(harness.runEvents).toEqual([]);
+		},
+	);
 
 	it("skips the tape gate for non-PlanForge packets (empty provenance_ref)", async () => {
 		const read = vi.fn();

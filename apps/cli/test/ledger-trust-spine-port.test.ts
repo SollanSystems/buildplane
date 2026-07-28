@@ -1836,7 +1836,7 @@ describe("governed action evidence ledger port", () => {
 			},
 		});
 		expect(
-			(fake.emits[0]?.payload as { readonly ActionRequestedV2: unknown })
+			(fake.emits[0]!.payload as { readonly ActionRequestedV2: unknown })
 				.ActionRequestedV2,
 		).not.toHaveProperty("schema_version");
 	});

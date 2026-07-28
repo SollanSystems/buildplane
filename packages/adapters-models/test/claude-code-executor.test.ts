@@ -827,40 +827,43 @@ describe("ClaudeCodeExecutor", () => {
 		expect(receipt.exitCode).not.toBe(0);
 	});
 
-	it.each([
-		"reviewer",
-		"adversary",
-	] as const)("passes the %s packet role to its renderer", async (execution_role) => {
-		const mockSpawn = createMockSpawn({
-			stdout: JSON.stringify({ result: "done" }),
-		});
-		const renderer: TaskRenderer = {
-			provider: "test",
-			render: vi.fn(() => ({ prompt: "rendered task" })),
-		};
-		const executor = createClaudeCodeExecutor({
-			renderer,
-			spawnFn: mockSpawn as never,
-		});
-		const eventBus = createEventBus();
-		const packet = makePacket({
-			execution_role,
-			intent: {
-				objective: "Review the task.",
-				taskType: "review",
-				context: { files: [] },
-				constraints: { scope: [], verification: [] },
-				features: {
-					ambiguity: "low",
-					reversibility: "easy",
-					verifierStrength: "strong",
+	it.each(["reviewer", "adversary"] as const)(
+		"passes the %s packet role to its renderer",
+		async (execution_role) => {
+			const mockSpawn = createMockSpawn({
+				stdout: JSON.stringify({ result: "done" }),
+			});
+			const renderer: TaskRenderer = {
+				provider: "test",
+				render: vi.fn(() => ({ prompt: "rendered task" })),
+			};
+			const executor = createClaudeCodeExecutor({
+				renderer,
+				spawnFn: mockSpawn as never,
+			});
+			const eventBus = createEventBus();
+			const packet = makePacket({
+				execution_role,
+				intent: {
+					objective: "Review the task.",
+					taskType: "review",
+					context: { files: [] },
+					constraints: { scope: [], verification: [] },
+					features: {
+						ambiguity: "low",
+						reversibility: "easy",
+						verifierStrength: "strong",
+					},
 				},
-			},
-			model: { provider: "claude-code", model: "claude-opus-4-5" },
-		});
+				model: { provider: "claude-code", model: "claude-opus-4-5" },
+			});
 
-		await executor.executePacketAsync(packet, PROJECT_ROOT, eventBus);
+			await executor.executePacketAsync(packet, PROJECT_ROOT, eventBus);
 
-		expect(renderer.render).toHaveBeenCalledWith(packet.intent, execution_role);
-	});
+			expect(renderer.render).toHaveBeenCalledWith(
+				packet.intent,
+				execution_role,
+			);
+		},
+	);
 });

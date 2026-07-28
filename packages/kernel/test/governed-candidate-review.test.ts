@@ -308,11 +308,14 @@ describe("governed candidate review execution", () => {
 				});
 			},
 		],
-	] as const)("fails closed at the public validator for %s", (_label, buildInput) => {
-		expect(() =>
-			validateGovernedCandidateReviewExecutionInput(buildInput()),
-		).toThrow(/governed candidate review/i);
-	});
+	] as const)(
+		"fails closed at the public validator for %s",
+		(_label, buildInput) => {
+			expect(() =>
+				validateGovernedCandidateReviewExecutionInput(buildInput()),
+			).toThrow(/governed candidate review/i);
+		},
+	);
 
 	it("rejects inherited or accessor-backed review inputs before reading them", () => {
 		const inheritedCandidate = Object.create(candidate()) as CandidateIdentity;
@@ -481,9 +484,12 @@ describe("governed candidate review execution", () => {
 				});
 			},
 		],
-	] as const)("rejects a view digest substitution at the public validator for %s", (_label, buildInput) => {
-		expect(() =>
-			validateGovernedCandidateReviewExecutionInput(buildInput()),
-		).toThrow(/candidateViewDigest/i);
-	});
+	] as const)(
+		"rejects a view digest substitution at the public validator for %s",
+		(_label, buildInput) => {
+			expect(() =>
+				validateGovernedCandidateReviewExecutionInput(buildInput()),
+			).toThrow(/candidateViewDigest/i);
+		},
+	);
 });

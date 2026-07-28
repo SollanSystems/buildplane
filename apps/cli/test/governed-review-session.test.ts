@@ -255,16 +255,19 @@ describe("governed review session", () => {
 				});
 			},
 		],
-	] as const)("blocks %s before it can invoke an injected review port", async (_label, buildInput) => {
-		const review = port();
-		const result = await run({ ...buildInput(), reviewPort: review.port });
+	] as const)(
+		"blocks %s before it can invoke an injected review port",
+		async (_label, buildInput) => {
+			const review = port();
+			const result = await run({ ...buildInput(), reviewPort: review.port });
 
-		expect(result).toMatchObject({
-			state: "unavailable",
-			code: "REVIEW_REQUEST_INVALID",
-		});
-		expect(review.executeCandidateReviewAsync).not.toHaveBeenCalled();
-	});
+			expect(result).toMatchObject({
+				state: "unavailable",
+				code: "REVIEW_REQUEST_INVALID",
+			});
+			expect(review.executeCandidateReviewAsync).not.toHaveBeenCalled();
+		},
+	);
 
 	it("does not read an accessor-backed top-level input before rejecting it", async () => {
 		const review = port();

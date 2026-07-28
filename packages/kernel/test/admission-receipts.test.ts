@@ -370,24 +370,23 @@ describe("createRunAdmissionReceiptDryRun", () => {
 		expect(receipt.policy.quarantine).toBe(false);
 	});
 
-	it.each([
-		"git.status",
-		"git.rev-parse",
-		"declared_scope",
-	])("fails closed when required %s evidence is absent from otherwise present inputs", (kind) => {
-		const fixture = withoutEvidenceKind(loadFixture("pass"), kind);
+	it.each(["git.status", "git.rev-parse", "declared_scope"])(
+		"fails closed when required %s evidence is absent from otherwise present inputs",
+		(kind) => {
+			const fixture = withoutEvidenceKind(loadFixture("pass"), kind);
 
-		const receipt = createRunAdmissionReceiptDryRun(
-			admissionInputFromFixture(fixture),
-		);
+			const receipt = createRunAdmissionReceiptDryRun(
+				admissionInputFromFixture(fixture),
+			);
 
-		expect(receipt.admission.decision).toBe("INSUFFICIENT_EVIDENCE");
-		expect(receipt.admission.missing_evidence).toEqual([kind]);
-		expect(receipt.admission.unsafe_requests).toEqual([]);
-		expect(receipt.policy.allowed_side_effects).toEqual([]);
-		expect(receipt.policy.capability_grants).toEqual([]);
-		expect(receipt.policy.quarantine).toBe(false);
-	});
+			expect(receipt.admission.decision).toBe("INSUFFICIENT_EVIDENCE");
+			expect(receipt.admission.missing_evidence).toEqual([kind]);
+			expect(receipt.admission.unsafe_requests).toEqual([]);
+			expect(receipt.policy.allowed_side_effects).toEqual([]);
+			expect(receipt.policy.capability_grants).toEqual([]);
+			expect(receipt.policy.quarantine).toBe(false);
+		},
+	);
 
 	it("fails closed when evidence inputs are omitted and repo binding is absent", () => {
 		const receipt = createRunAdmissionReceiptDryRun(
@@ -993,43 +992,46 @@ describe("recordRunAdmissionReceiptAttempt", () => {
 	it.each([
 		["async", recordRunAdmissionReceiptAttempt],
 		["sync", recordRunAdmissionReceiptAttemptSync],
-	] as const)("keeps %s recorded dispatch authority bound to the persisted receipt snapshot", async (_mode, recordAttempt) => {
-		const receipt = createRunAdmissionReceiptDryRun(
-			admissionInputFromFixture(loadFixture("pass")),
-		);
-		const persistedDigest = receiptDigest(receipt);
-		const baseStore = createTempEvidenceStore();
-		const store: ReturnType<typeof createTempEvidenceStore> = {
-			...baseStore,
-			writeReceiptArtifact: vi.fn((input) => {
-				const result = baseStore.writeReceiptArtifact(input);
-				const mutableReceipt = input.receipt as unknown as {
-					admission: {
-						will_execute_worker: boolean;
-						authorized_next_step: string;
+	] as const)(
+		"keeps %s recorded dispatch authority bound to the persisted receipt snapshot",
+		async (_mode, recordAttempt) => {
+			const receipt = createRunAdmissionReceiptDryRun(
+				admissionInputFromFixture(loadFixture("pass")),
+			);
+			const persistedDigest = receiptDigest(receipt);
+			const baseStore = createTempEvidenceStore();
+			const store: ReturnType<typeof createTempEvidenceStore> = {
+				...baseStore,
+				writeReceiptArtifact: vi.fn((input) => {
+					const result = baseStore.writeReceiptArtifact(input);
+					const mutableReceipt = input.receipt as unknown as {
+						admission: {
+							will_execute_worker: boolean;
+							authorized_next_step: string;
+						};
 					};
-				};
-				mutableReceipt.admission.will_execute_worker = true;
-				mutableReceipt.admission.authorized_next_step = "dispatch_worker";
-				return result;
-			}),
-		};
+					mutableReceipt.admission.will_execute_worker = true;
+					mutableReceipt.admission.authorized_next_step = "dispatch_worker";
+					return result;
+				}),
+			};
 
-		const record = await recordAttempt({ receipt, store });
+			const record = await recordAttempt({ receipt, store });
 
-		expect(record.receipt_digest).toBe(persistedDigest);
-		expect(record.payload.receipt_digest).toBe(persistedDigest);
-		expect(record.payload.will_execute_worker).toBe(false);
-		expect(record.payload.authorized_next_step).toBe("record_admission_only");
-		expect(record.event.payload.will_execute_worker).toBe(false);
-		expect(record.event.payload.authorized_next_step).toBe(
-			"record_admission_only",
-		);
-		expect(readFileSync(record.receipt_path, "utf8").trim()).toBe(
-			record.receipt_json,
-		);
-		expectNoForbiddenSideEffects(store);
-	});
+			expect(record.receipt_digest).toBe(persistedDigest);
+			expect(record.payload.receipt_digest).toBe(persistedDigest);
+			expect(record.payload.will_execute_worker).toBe(false);
+			expect(record.payload.authorized_next_step).toBe("record_admission_only");
+			expect(record.event.payload.will_execute_worker).toBe(false);
+			expect(record.event.payload.authorized_next_step).toBe(
+				"record_admission_only",
+			);
+			expect(readFileSync(record.receipt_path, "utf8").trim()).toBe(
+				record.receipt_json,
+			);
+			expectNoForbiddenSideEffects(store);
+		},
+	);
 
 	it("rejects credential-shaped receipt values before writing artifacts or events", async () => {
 		const safeReceipt = createRunAdmissionReceiptDryRun(
@@ -1161,24 +1163,24 @@ describe("recordRunAdmissionReceiptAttempt", () => {
 		expectNoForbiddenSideEffects(store);
 	});
 
-	it.each([
-		"BLOCKED",
-		"FAILED",
-	] as const)("records %s attempts fail-closed without dispatch authority", async (decision) => {
-		const receipt = withAdmissionDecision(
-			createRunAdmissionReceiptDryRun(
-				admissionInputFromFixture(loadFixture("pass")),
-			),
-			decision,
-		);
-		const store = createTempEvidenceStore();
+	it.each(["BLOCKED", "FAILED"] as const)(
+		"records %s attempts fail-closed without dispatch authority",
+		async (decision) => {
+			const receipt = withAdmissionDecision(
+				createRunAdmissionReceiptDryRun(
+					admissionInputFromFixture(loadFixture("pass")),
+				),
+				decision,
+			);
+			const store = createTempEvidenceStore();
 
-		const record = await recordRunAdmissionReceiptAttempt({ receipt, store });
+			const record = await recordRunAdmissionReceiptAttempt({ receipt, store });
 
-		expect(record.payload.decision).toBe(decision);
-		expect(record.payload.allowed_side_effects).toEqual([]);
-		expect(record.payload.will_execute_worker).toBe(false);
-		expect(record.event.replay.side_effect_safe).toBe(true);
-		expectNoForbiddenSideEffects(store);
-	});
+			expect(record.payload.decision).toBe(decision);
+			expect(record.payload.allowed_side_effects).toEqual([]);
+			expect(record.payload.will_execute_worker).toBe(false);
+			expect(record.event.replay.side_effect_safe).toBe(true);
+			expectNoForbiddenSideEffects(store);
+		},
+	);
 });

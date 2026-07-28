@@ -670,87 +670,87 @@ describe("governed run front door", () => {
 		expectGovernedLedgerAbsent(root);
 	});
 
-	it.each([
-		"sealed",
-		"reconciliation_required",
-	] as const)("emits a non-executing broker-owned V5 %s admission view", async (status) => {
-		const root = createGitProject();
-		const packet = createGovernedPacket(`native-v5-${status}`);
-		const packetPath = writePacket(root, packet);
-		const carrier = createNativeV5SignedEventCarrier(root, packet);
-		const envelopePath = writeEnvelope(root, carrier);
-		const event = carrier.event as Record<string, unknown>;
-		const signature = carrier.signature as Record<string, unknown>;
-		const before = snapshotRoot(root);
-		const stateBefore = readFileSync(
-			join(root, ".buildplane", "state.db"),
-			"utf8",
-		);
-		const openCandidateSession = vi.fn();
-		hostResolver.resolve.mockResolvedValue({
-			kind: "host-owned-governed-broker-v1",
-			openCandidateSession,
-		} as unknown as HostOwnedGovernedBrokerV1);
-		v5AdmissionClient.request.mockImplementation(
-			async (request: {
-				requestId: string;
-				runId: string;
-				v5EnvelopeDigest: string;
-			}) =>
-				nativeV5AdmissionResponse(
-					request,
-					String(event.id),
-					String(signature.canonical_event_hash),
-					status,
-				),
-		);
+	it.each(["sealed", "reconciliation_required"] as const)(
+		"emits a non-executing broker-owned V5 %s admission view",
+		async (status) => {
+			const root = createGitProject();
+			const packet = createGovernedPacket(`native-v5-${status}`);
+			const packetPath = writePacket(root, packet);
+			const carrier = createNativeV5SignedEventCarrier(root, packet);
+			const envelopePath = writeEnvelope(root, carrier);
+			const event = carrier.event as Record<string, unknown>;
+			const signature = carrier.signature as Record<string, unknown>;
+			const before = snapshotRoot(root);
+			const stateBefore = readFileSync(
+				join(root, ".buildplane", "state.db"),
+				"utf8",
+			);
+			const openCandidateSession = vi.fn();
+			hostResolver.resolve.mockResolvedValue({
+				kind: "host-owned-governed-broker-v1",
+				openCandidateSession,
+			} as unknown as HostOwnedGovernedBrokerV1);
+			v5AdmissionClient.request.mockImplementation(
+				async (request: {
+					requestId: string;
+					runId: string;
+					v5EnvelopeDigest: string;
+				}) =>
+					nativeV5AdmissionResponse(
+						request,
+						String(event.id),
+						String(signature.canonical_event_hash),
+						status,
+					),
+			);
 
-		const result = await runCliCapture(
-			root,
-			[
-				"run",
-				"--approve",
-				"--packet",
-				packetPath,
-				"--envelope",
-				envelopePath,
-				"--json",
-			],
-			legacyBundleMustNotBeConstructed(),
-		);
+			const result = await runCliCapture(
+				root,
+				[
+					"run",
+					"--approve",
+					"--packet",
+					packetPath,
+					"--envelope",
+					envelopePath,
+					"--json",
+				],
+				legacyBundleMustNotBeConstructed(),
+			);
 
-		expect(result.exitCode).toBe(2);
-		expect(result.stderr).toEqual([]);
-		expect(v5AdmissionClient.request).toHaveBeenCalledOnce();
-		expect(v5AdmissionClient.request).toHaveBeenCalledWith({
-			requestId: expect.stringMatching(
-				/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
-			),
-			runId: event.run_id,
-			v5EnvelopeDigest: expect.stringMatching(/^sha256:[0-9a-f]{64}$/),
-		});
-		expect(hostResolver.resolve).not.toHaveBeenCalled();
-		expect(openCandidateSession).not.toHaveBeenCalled();
-		expect(JSON.parse(result.stdout.join("\n"))).toMatchObject({
-			governance: "governed",
-			status,
-			executionStarted: false,
-			admission: {
-				sourceEventId: event.id,
-				sourceEventHash: signature.canonical_event_hash,
-			},
-			blockers: expect.arrayContaining([
-				expect.stringMatching(
-					/candidate.*worker.*action.*promotion authority.*not opened/i,
+			expect(result.exitCode).toBe(2);
+			expect(result.stderr).toEqual([]);
+			expect(v5AdmissionClient.request).toHaveBeenCalledOnce();
+			expect(v5AdmissionClient.request).toHaveBeenCalledWith({
+				requestId: expect.stringMatching(
+					/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
 				),
-			]),
-		});
-		expectRootUnchanged(root, before);
-		expect(readFileSync(join(root, ".buildplane", "state.db"), "utf8")).toBe(
-			stateBefore,
-		);
-		expectGovernedLedgerAbsent(root);
-	});
+				runId: event.run_id,
+				v5EnvelopeDigest: expect.stringMatching(/^sha256:[0-9a-f]{64}$/),
+			});
+			expect(hostResolver.resolve).not.toHaveBeenCalled();
+			expect(openCandidateSession).not.toHaveBeenCalled();
+			expect(JSON.parse(result.stdout.join("\n"))).toMatchObject({
+				governance: "governed",
+				status,
+				executionStarted: false,
+				admission: {
+					sourceEventId: event.id,
+					sourceEventHash: signature.canonical_event_hash,
+				},
+				blockers: expect.arrayContaining([
+					expect.stringMatching(
+						/candidate.*worker.*action.*promotion authority.*not opened/i,
+					),
+				]),
+			});
+			expectRootUnchanged(root, before);
+			expect(readFileSync(join(root, ".buildplane", "state.db"), "utf8")).toBe(
+				stateBefore,
+			);
+			expectGovernedLedgerAbsent(root);
+		},
+	);
 
 	it("blocks a V5 admission response whose source event identity differs from the signed carrier", async () => {
 		const root = createGitProject();
@@ -1110,72 +1110,75 @@ describe("governed run front door", () => {
 		["packet", ["--packet", "forbidden-packet.json"]],
 		["tui", ["--tui"]],
 		["resume", ["--resume", "host-recovery/graph", "--approve"]],
-	] as const)("rejects a governed graph preview combined with %s before any host or worker boundary", async (_label, incompatibleArguments) => {
-		const root = createGitProject();
-		const before = snapshotRoot(root);
-		hostResolver.resolve.mockResolvedValue({
-			kind: "host-owned-governed-broker-v1",
-		} as unknown as HostOwnedGovernedBrokerV1);
+	] as const)(
+		"rejects a governed graph preview combined with %s before any host or worker boundary",
+		async (_label, incompatibleArguments) => {
+			const root = createGitProject();
+			const before = snapshotRoot(root);
+			hostResolver.resolve.mockResolvedValue({
+				kind: "host-owned-governed-broker-v1",
+			} as unknown as HostOwnedGovernedBrokerV1);
 
-		const result = await runCliCapture(
-			root,
-			[
-				"run",
-				"--graph",
-				"nonexistent-governed-graph.json",
-				...incompatibleArguments,
-				"--json",
-			],
-			legacyBundleMustNotBeConstructed(),
-		);
+			const result = await runCliCapture(
+				root,
+				[
+					"run",
+					"--graph",
+					"nonexistent-governed-graph.json",
+					...incompatibleArguments,
+					"--json",
+				],
+				legacyBundleMustNotBeConstructed(),
+			);
 
-		expect(result.exitCode).toBe(1);
-		expect(hostResolver.resolve).not.toHaveBeenCalled();
-		expect(JSON.parse(result.stdout.join("\n"))).toMatchObject({
-			error: { code: "CLI_ERROR" },
-		});
-		expectRootUnchanged(root, before);
-	});
+			expect(result.exitCode).toBe(1);
+			expect(hostResolver.resolve).not.toHaveBeenCalled();
+			expect(JSON.parse(result.stdout.join("\n"))).toMatchObject({
+				error: { code: "CLI_ERROR" },
+			});
+			expectRootUnchanged(root, before);
+		},
+	);
 
-	it.each([
-		"approval-first",
-		"envelope-first",
-	] as const)("rejects a V3 approve plus envelope request after immutable envelope classification (%s)", async (order) => {
-		const root = createGitProject();
-		const packet = createGovernedPacket(`v3-mutual-${order}`);
-		const packetPath = writePacket(root, packet);
-		const envelopePath = writeEnvelope(
-			root,
-			createPreauthorizedEnvelope(root, packet),
-		);
-		const before = snapshotRoot(root);
-		hostResolver.resolve.mockResolvedValue({
-			kind: "host-owned-governed-broker-v1",
-		} as unknown as HostOwnedGovernedBrokerV1);
-		const argumentsAfterRun =
-			order === "approval-first"
-				? ["--approve", "--packet", packetPath, "--envelope", envelopePath]
-				: ["--packet", packetPath, "--envelope", envelopePath, "--approve"];
+	it.each(["approval-first", "envelope-first"] as const)(
+		"rejects a V3 approve plus envelope request after immutable envelope classification (%s)",
+		async (order) => {
+			const root = createGitProject();
+			const packet = createGovernedPacket(`v3-mutual-${order}`);
+			const packetPath = writePacket(root, packet);
+			const envelopePath = writeEnvelope(
+				root,
+				createPreauthorizedEnvelope(root, packet),
+			);
+			const before = snapshotRoot(root);
+			hostResolver.resolve.mockResolvedValue({
+				kind: "host-owned-governed-broker-v1",
+			} as unknown as HostOwnedGovernedBrokerV1);
+			const argumentsAfterRun =
+				order === "approval-first"
+					? ["--approve", "--packet", packetPath, "--envelope", envelopePath]
+					: ["--packet", packetPath, "--envelope", envelopePath, "--approve"];
 
-		const result = await runCliCapture(
-			root,
-			["run", ...argumentsAfterRun, "--json"],
-			legacyBundleMustNotBeConstructed(),
-		);
+			const result = await runCliCapture(
+				root,
+				["run", ...argumentsAfterRun, "--json"],
+				legacyBundleMustNotBeConstructed(),
+			);
 
-		expect(result.exitCode).toBe(1);
-		expect(JSON.parse(result.stdout.join("\n"))).toMatchObject({
-			error: {
-				code: "CLI_ERROR",
-				message: expect.stringMatching(
-					/--approve.*--envelope.*mutually exclusive/i,
-				),
-			},
-		});
-		expect(hostResolver.resolve).not.toHaveBeenCalled();
-		expect(v5AdmissionClient.request).not.toHaveBeenCalled();
-		expectRootUnchanged(root, before);
-	});
+			expect(result.exitCode).toBe(1);
+			expect(JSON.parse(result.stdout.join("\n"))).toMatchObject({
+				error: {
+					code: "CLI_ERROR",
+					message: expect.stringMatching(
+						/--approve.*--envelope.*mutually exclusive/i,
+					),
+				},
+			});
+			expect(hostResolver.resolve).not.toHaveBeenCalled();
+			expect(v5AdmissionClient.request).not.toHaveBeenCalled();
+			expectRootUnchanged(root, before);
+		},
+	);
 
 	it("returns help for a graph/raw request before the legacy bundle can be constructed", async () => {
 		const root = createGitProject();
@@ -1199,41 +1202,44 @@ describe("governed run front door", () => {
 	it.each([
 		["without an operator approval", []],
 		["with an operator approval", ["--approve"]],
-	] as const)("builds the governed preview from the source snapshot %s without invoking an injected path parser", async (_label, approvalArguments) => {
-		const root = createGitProject();
-		const packetPath = writePacket(
-			root,
-			createGovernedPacket("source-snapshot"),
-		);
-		const before = snapshotRoot(root);
-		const parsePacket = vi.fn(() => {
-			throw new Error(
-				"governed preview must not re-parse the packet path after snapshotting its source",
+	] as const)(
+		"builds the governed preview from the source snapshot %s without invoking an injected path parser",
+		async (_label, approvalArguments) => {
+			const root = createGitProject();
+			const packetPath = writePacket(
+				root,
+				createGovernedPacket("source-snapshot"),
 			);
-		});
-		hostResolver.resolve.mockResolvedValue(undefined);
+			const before = snapshotRoot(root);
+			const parsePacket = vi.fn(() => {
+				throw new Error(
+					"governed preview must not re-parse the packet path after snapshotting its source",
+				);
+			});
+			hostResolver.resolve.mockResolvedValue(undefined);
 
-		const result = await runCliCapture(
-			root,
-			["run", ...approvalArguments, "--packet", packetPath, "--json"],
-			{
-				...legacyBundleMustNotBeConstructed(),
-				parsePacket,
-			},
-		);
+			const result = await runCliCapture(
+				root,
+				["run", ...approvalArguments, "--packet", packetPath, "--json"],
+				{
+					...legacyBundleMustNotBeConstructed(),
+					parsePacket,
+				},
+			);
 
-		expect(result.exitCode).toBe(2);
-		expect(parsePacket).not.toHaveBeenCalled();
-		expect(JSON.parse(result.stdout.join("\n"))).toMatchObject({
-			governance: "preview",
-			packet: {
-				unitId: "source-snapshot",
-				executionRole: "implementer",
-				executionRoleExplicit: true,
-			},
-		});
-		expectRootUnchanged(root, before);
-	});
+			expect(result.exitCode).toBe(2);
+			expect(parsePacket).not.toHaveBeenCalled();
+			expect(JSON.parse(result.stdout.join("\n"))).toMatchObject({
+				governance: "preview",
+				packet: {
+					unitId: "source-snapshot",
+					executionRole: "implementer",
+					executionRoleExplicit: true,
+				},
+			});
+			expectRootUnchanged(root, before);
+		},
+	);
 
 	it("runs candidate and review through a provenance-verified protected host broker", async () => {
 		const root = createGitProject();
@@ -1317,52 +1323,51 @@ describe("governed run front door", () => {
 		expectRootUnchanged(root, before);
 	});
 
-	it.each([
-		"request_changes",
-		"reject",
-		"abstain",
-	] as const)("keeps a %s review non-promotable and leaves root unchanged", async (decision) => {
-		const root = createGitProject();
-		const packetPath = writePacket(
-			root,
-			createGovernedPacket(`host-${decision}`),
-		);
-		const before = snapshotRoot(root);
-		const recoveryRef = `host-recovery/host-${decision}`;
-		const broker = {
-			kind: "host-owned-governed-broker-v1",
-			openCandidateSession: async () => ({
-				kind: "host-owned-governed-candidate-session-v1",
-				recoveryRef,
-				run: async () =>
-					createHostCandidateRunResult(root, `host-${decision}`, recoveryRef),
-			}),
-			openReviewerSession: async () => ({
-				kind: "host-owned-governed-reviewer-session-v1",
-				recoveryRef,
-				run: async () => createHostReviewRunResult(recoveryRef, decision),
-			}),
-		} as unknown as HostOwnedGovernedBrokerV1;
-		hostResolver.resolve.mockResolvedValue(broker);
-		hostResolver.isProtected.mockReturnValue(true);
+	it.each(["request_changes", "reject", "abstain"] as const)(
+		"keeps a %s review non-promotable and leaves root unchanged",
+		async (decision) => {
+			const root = createGitProject();
+			const packetPath = writePacket(
+				root,
+				createGovernedPacket(`host-${decision}`),
+			);
+			const before = snapshotRoot(root);
+			const recoveryRef = `host-recovery/host-${decision}`;
+			const broker = {
+				kind: "host-owned-governed-broker-v1",
+				openCandidateSession: async () => ({
+					kind: "host-owned-governed-candidate-session-v1",
+					recoveryRef,
+					run: async () =>
+						createHostCandidateRunResult(root, `host-${decision}`, recoveryRef),
+				}),
+				openReviewerSession: async () => ({
+					kind: "host-owned-governed-reviewer-session-v1",
+					recoveryRef,
+					run: async () => createHostReviewRunResult(recoveryRef, decision),
+				}),
+			} as unknown as HostOwnedGovernedBrokerV1;
+			hostResolver.resolve.mockResolvedValue(broker);
+			hostResolver.isProtected.mockReturnValue(true);
 
-		const result = await runCliCapture(
-			root,
-			["run", "--approve", "--packet", packetPath, "--json"],
-			legacyBundleMustNotBeConstructed(),
-		);
+			const result = await runCliCapture(
+				root,
+				["run", "--approve", "--packet", packetPath, "--json"],
+				legacyBundleMustNotBeConstructed(),
+			);
 
-		expect(result.exitCode).toBe(0);
-		expect(JSON.parse(result.stdout.join("\n"))).toEqual({
-			governance: "governed",
-			status: "review-blocked",
-			executionStarted: true,
-			review: { decision },
-			promotion: { state: "not-authorized" },
-		});
-		expect(promotionDecisionClient.submit).not.toHaveBeenCalled();
-		expectRootUnchanged(root, before);
-	});
+			expect(result.exitCode).toBe(0);
+			expect(JSON.parse(result.stdout.join("\n"))).toEqual({
+				governance: "governed",
+				status: "review-blocked",
+				executionStarted: true,
+				review: { decision },
+				promotion: { state: "not-authorized" },
+			});
+			expect(promotionDecisionClient.submit).not.toHaveBeenCalled();
+			expectRootUnchanged(root, before);
+		},
+	);
 
 	it("requires a fresh host receipt to bind the exact governed packet digest", async () => {
 		const root = createGitProject();
@@ -1591,38 +1596,41 @@ describe("governed run front door", () => {
 			},
 			"compute deadline",
 		],
-	] as const)("renders a preview without resolving a host when preauthorized authority is %s", async (_label, overrides, blocker) => {
-		const root = createGitProject();
-		const packet = createGovernedPacket("host-preauthorization-window");
-		const packetPath = writePacket(root, packet);
-		const envelopePath = writeEnvelope(
-			root,
-			createPreauthorizedEnvelope(root, packet, overrides),
-		);
-		const openCandidateSession = vi.fn();
-		hostResolver.resolve.mockResolvedValue({
-			kind: "host-owned-governed-broker-v1",
-			openCandidateSession,
-		} as unknown as HostOwnedGovernedBrokerV1);
-		const before = snapshotRoot(root);
+	] as const)(
+		"renders a preview without resolving a host when preauthorized authority is %s",
+		async (_label, overrides, blocker) => {
+			const root = createGitProject();
+			const packet = createGovernedPacket("host-preauthorization-window");
+			const packetPath = writePacket(root, packet);
+			const envelopePath = writeEnvelope(
+				root,
+				createPreauthorizedEnvelope(root, packet, overrides),
+			);
+			const openCandidateSession = vi.fn();
+			hostResolver.resolve.mockResolvedValue({
+				kind: "host-owned-governed-broker-v1",
+				openCandidateSession,
+			} as unknown as HostOwnedGovernedBrokerV1);
+			const before = snapshotRoot(root);
 
-		const result = await runCliCapture(
-			root,
-			["run", "--packet", packetPath, "--envelope", envelopePath, "--json"],
-			legacyBundleMustNotBeConstructed(),
-		);
+			const result = await runCliCapture(
+				root,
+				["run", "--packet", packetPath, "--envelope", envelopePath, "--json"],
+				legacyBundleMustNotBeConstructed(),
+			);
 
-		expect(result.exitCode).toBe(2);
-		expect(JSON.parse(result.stdout.join("\n"))).toMatchObject({
-			governance: "preview",
-			status: "blocked",
-			executionStarted: false,
-			blockers: expect.arrayContaining([expect.stringContaining(blocker)]),
-		});
-		expect(hostResolver.resolve).not.toHaveBeenCalled();
-		expect(openCandidateSession).not.toHaveBeenCalled();
-		expectRootUnchanged(root, before);
-	});
+			expect(result.exitCode).toBe(2);
+			expect(JSON.parse(result.stdout.join("\n"))).toMatchObject({
+				governance: "preview",
+				status: "blocked",
+				executionStarted: false,
+				blockers: expect.arrayContaining([expect.stringContaining(blocker)]),
+			});
+			expect(hostResolver.resolve).not.toHaveBeenCalled();
+			expect(openCandidateSession).not.toHaveBeenCalled();
+			expectRootUnchanged(root, before);
+		},
+	);
 
 	it("blocks preauthorized envelope failures before resolving a host or opening any candidate session", async () => {
 		const root = createGitProject();
@@ -1728,41 +1736,44 @@ describe("governed run front door", () => {
 				},
 			}),
 		],
-	] as const)("blocks a preauthorized packet with %s before host resolution or session opening", async (_label, mutatePacket) => {
-		const root = createGitProject();
-		const packet = mutatePacket(createGovernedPacket("strict-source"));
-		const packetPath = writePacket(root, packet);
-		const envelopePath = writeEnvelope(
-			root,
-			createPreauthorizedEnvelope(root, packet, {
-				executionRole: "implementer",
-			}),
-		);
-		const openCandidateSession = vi.fn();
-		hostResolver.resolve.mockResolvedValue({
-			kind: "host-owned-governed-broker-v1",
-			openCandidateSession,
-		} as unknown as HostOwnedGovernedBrokerV1);
-		const before = snapshotRoot(root);
+	] as const)(
+		"blocks a preauthorized packet with %s before host resolution or session opening",
+		async (_label, mutatePacket) => {
+			const root = createGitProject();
+			const packet = mutatePacket(createGovernedPacket("strict-source"));
+			const packetPath = writePacket(root, packet);
+			const envelopePath = writeEnvelope(
+				root,
+				createPreauthorizedEnvelope(root, packet, {
+					executionRole: "implementer",
+				}),
+			);
+			const openCandidateSession = vi.fn();
+			hostResolver.resolve.mockResolvedValue({
+				kind: "host-owned-governed-broker-v1",
+				openCandidateSession,
+			} as unknown as HostOwnedGovernedBrokerV1);
+			const before = snapshotRoot(root);
 
-		const result = await runCliCapture(
-			root,
-			["run", "--packet", packetPath, "--envelope", envelopePath, "--json"],
-			legacyBundleMustNotBeConstructed(),
-		);
+			const result = await runCliCapture(
+				root,
+				["run", "--packet", packetPath, "--envelope", envelopePath, "--json"],
+				legacyBundleMustNotBeConstructed(),
+			);
 
-		expect(result.exitCode).toBe(2);
-		expect(JSON.parse(result.stdout.join("\n"))).toMatchObject({
-			governance: "preview",
-			status: "blocked",
-			blockers: expect.arrayContaining([
-				"Governed packet source must pass strict admission before authority resolution.",
-			]),
-		});
-		expect(hostResolver.resolve).not.toHaveBeenCalled();
-		expect(openCandidateSession).not.toHaveBeenCalled();
-		expectRootUnchanged(root, before);
-	});
+			expect(result.exitCode).toBe(2);
+			expect(JSON.parse(result.stdout.join("\n"))).toMatchObject({
+				governance: "preview",
+				status: "blocked",
+				blockers: expect.arrayContaining([
+					"Governed packet source must pass strict admission before authority resolution.",
+				]),
+			});
+			expect(hostResolver.resolve).not.toHaveBeenCalled();
+			expect(openCandidateSession).not.toHaveBeenCalled();
+			expectRootUnchanged(root, before);
+		},
+	);
 
 	it.each([
 		[
@@ -1796,35 +1807,40 @@ describe("governed run front door", () => {
 				},
 			}),
 		],
-	] as const)("blocks an operator-approved packet with %s before host resolution or session opening", async (_label, mutatePacket) => {
-		const root = createGitProject();
-		const packet = mutatePacket(createGovernedPacket("strict-operator-source"));
-		const packetPath = writePacket(root, packet);
-		const openCandidateSession = vi.fn();
-		hostResolver.resolve.mockResolvedValue({
-			kind: "host-owned-governed-broker-v1",
-			openCandidateSession,
-		} as unknown as HostOwnedGovernedBrokerV1);
-		const before = snapshotRoot(root);
+	] as const)(
+		"blocks an operator-approved packet with %s before host resolution or session opening",
+		async (_label, mutatePacket) => {
+			const root = createGitProject();
+			const packet = mutatePacket(
+				createGovernedPacket("strict-operator-source"),
+			);
+			const packetPath = writePacket(root, packet);
+			const openCandidateSession = vi.fn();
+			hostResolver.resolve.mockResolvedValue({
+				kind: "host-owned-governed-broker-v1",
+				openCandidateSession,
+			} as unknown as HostOwnedGovernedBrokerV1);
+			const before = snapshotRoot(root);
 
-		const result = await runCliCapture(
-			root,
-			["run", "--approve", "--packet", packetPath, "--json"],
-			legacyBundleMustNotBeConstructed(),
-		);
+			const result = await runCliCapture(
+				root,
+				["run", "--approve", "--packet", packetPath, "--json"],
+				legacyBundleMustNotBeConstructed(),
+			);
 
-		expect(result.exitCode).toBe(2);
-		expect(JSON.parse(result.stdout.join("\n"))).toMatchObject({
-			governance: "preview",
-			status: "blocked",
-			blockers: expect.arrayContaining([
-				"Governed packet source must pass strict admission before authority resolution.",
-			]),
-		});
-		expect(hostResolver.resolve).not.toHaveBeenCalled();
-		expect(openCandidateSession).not.toHaveBeenCalled();
-		expectRootUnchanged(root, before);
-	});
+			expect(result.exitCode).toBe(2);
+			expect(JSON.parse(result.stdout.join("\n"))).toMatchObject({
+				governance: "preview",
+				status: "blocked",
+				blockers: expect.arrayContaining([
+					"Governed packet source must pass strict admission before authority resolution.",
+				]),
+			});
+			expect(hostResolver.resolve).not.toHaveBeenCalled();
+			expect(openCandidateSession).not.toHaveBeenCalled();
+			expectRootUnchanged(root, before);
+		},
+	);
 
 	it("keeps a valid preauthorized envelope blocked when the privileged host is unavailable", async () => {
 		const root = createGitProject();
@@ -2200,39 +2216,39 @@ describe("governed run front door", () => {
 		expect(host).not.toHaveBeenCalled();
 	});
 
-	it.each([
-		"promote",
-		"reject",
-	] as const)("keeps the recovered %s decision blocked when no privileged host is installed without changing the target root", async (decision) => {
-		const root = createGitProject();
-		const before = snapshotRoot(root);
-		hostResolver.resolve.mockResolvedValue(undefined);
+	it.each(["promote", "reject"] as const)(
+		"keeps the recovered %s decision blocked when no privileged host is installed without changing the target root",
+		async (decision) => {
+			const root = createGitProject();
+			const before = snapshotRoot(root);
+			hostResolver.resolve.mockResolvedValue(undefined);
 
-		const response = await runCliCapture(
-			root,
-			[
-				"run",
-				"--resume",
-				"host-recovery/promotion-decision",
-				"--approve",
-				"--decision",
-				decision,
-				"--json",
-			],
-			legacyBundleMustNotBeConstructed(),
-		);
+			const response = await runCliCapture(
+				root,
+				[
+					"run",
+					"--resume",
+					"host-recovery/promotion-decision",
+					"--approve",
+					"--decision",
+					decision,
+					"--json",
+				],
+				legacyBundleMustNotBeConstructed(),
+			);
 
-		expect(response.exitCode).toBe(2);
-		expect(JSON.parse(response.stdout.join("\n"))).toEqual({
-			governance: "governed",
-			status: "recovery-required",
-			executionStarted: "unknown",
-			decision: { requested: decision, state: "blocked" },
-			promotion: { state: "not-executed" },
-			recovery: { action: "contact-host", retry: "blocked" },
-		});
-		expectRootUnchanged(root, before);
-	});
+			expect(response.exitCode).toBe(2);
+			expect(JSON.parse(response.stdout.join("\n"))).toEqual({
+				governance: "governed",
+				status: "recovery-required",
+				executionStarted: "unknown",
+				decision: { requested: decision, state: "blocked" },
+				promotion: { state: "not-executed" },
+				recovery: { action: "contact-host", retry: "blocked" },
+			});
+			expectRootUnchanged(root, before);
+		},
+	);
 
 	it("reports terminal completion only for an exact sealed native completion response", async () => {
 		const root = createGitProject();
@@ -2321,74 +2337,77 @@ describe("governed run front door", () => {
 		{ status: "reconciliation_required" },
 		{ status: "rejected" },
 		undefined,
-	] as const)("keeps promotion execution status %s in recovery", async (status) => {
-		const root = createGitProject();
-		const before = snapshotRoot(root);
-		promotionDecisionClient.submit.mockResolvedValue({
-			status: "sealed",
-			promotionDecisionEventId: "123e4567-e89b-12d3-a456-426614174002",
-		});
-		promotionExecutionClient.execute.mockResolvedValue(status);
+	] as const)(
+		"keeps promotion execution status %s in recovery",
+		async (status) => {
+			const root = createGitProject();
+			const before = snapshotRoot(root);
+			promotionDecisionClient.submit.mockResolvedValue({
+				status: "sealed",
+				promotionDecisionEventId: "123e4567-e89b-12d3-a456-426614174002",
+			});
+			promotionExecutionClient.execute.mockResolvedValue(status);
 
-		const response = await runCliCapture(
-			root,
-			[
-				"run",
-				"--resume",
-				"123e4567-e89b-12d3-a456-426614174001",
-				"--approve",
-				"--decision",
-				"promote",
-				"--json",
-			],
-			legacyBundleMustNotBeConstructed(),
-		);
+			const response = await runCliCapture(
+				root,
+				[
+					"run",
+					"--resume",
+					"123e4567-e89b-12d3-a456-426614174001",
+					"--approve",
+					"--decision",
+					"promote",
+					"--json",
+				],
+				legacyBundleMustNotBeConstructed(),
+			);
 
-		expect(response.exitCode).toBe(2);
-		expect(JSON.parse(response.stdout.join("\n"))).toMatchObject({
-			decision: { requested: "promote", state: "recorded" },
-			promotion: {
-				state: status?.status ?? "blocked",
-			},
-			recovery: {
-				retry: status?.status === "recorded" ? "required" : "blocked",
-			},
-		});
-		expectRootUnchanged(root, before);
-	});
+			expect(response.exitCode).toBe(2);
+			expect(JSON.parse(response.stdout.join("\n"))).toMatchObject({
+				decision: { requested: "promote", state: "recorded" },
+				promotion: {
+					state: status?.status ?? "blocked",
+				},
+				recovery: {
+					retry: status?.status === "recorded" ? "required" : "blocked",
+				},
+			});
+			expectRootUnchanged(root, before);
+		},
+	);
 
-	it.each([
-		{ status: "reconciliation_required" },
-		undefined,
-	] as const)("keeps native promotion-decision status %s blocked", async (status) => {
-		const root = createGitProject();
-		const before = snapshotRoot(root);
-		promotionDecisionClient.submit.mockResolvedValue(status);
+	it.each([{ status: "reconciliation_required" }, undefined] as const)(
+		"keeps native promotion-decision status %s blocked",
+		async (status) => {
+			const root = createGitProject();
+			const before = snapshotRoot(root);
+			promotionDecisionClient.submit.mockResolvedValue(status);
 
-		const response = await runCliCapture(
-			root,
-			[
-				"run",
-				"--resume",
-				"123e4567-e89b-12d3-a456-426614174001",
-				"--approve",
-				"--decision",
-				"reject",
-				"--json",
-			],
-			legacyBundleMustNotBeConstructed(),
-		);
+			const response = await runCliCapture(
+				root,
+				[
+					"run",
+					"--resume",
+					"123e4567-e89b-12d3-a456-426614174001",
+					"--approve",
+					"--decision",
+					"reject",
+					"--json",
+				],
+				legacyBundleMustNotBeConstructed(),
+			);
 
-		expect(response.exitCode).toBe(2);
-		expect(JSON.parse(response.stdout.join("\n"))).toMatchObject({
-			decision: { requested: "reject", state: "blocked" },
-			promotion: { state: "not-executed" },
-			recovery: { retry: "blocked" },
-		});
-		expect(hostResolver.resolve).not.toHaveBeenCalled();
-		expect(promotionExecutionClient.execute).not.toHaveBeenCalled();
-		expectRootUnchanged(root, before);
-	});
+			expect(response.exitCode).toBe(2);
+			expect(JSON.parse(response.stdout.join("\n"))).toMatchObject({
+				decision: { requested: "reject", state: "blocked" },
+				promotion: { state: "not-executed" },
+				recovery: { retry: "blocked" },
+			});
+			expect(hostResolver.resolve).not.toHaveBeenCalled();
+			expect(promotionExecutionClient.execute).not.toHaveBeenCalled();
+			expectRootUnchanged(root, before);
+		},
+	);
 
 	it("rejects decision forms that could select a fresh packet, graph, raw lane, alternate input, or malformed decision before host resolution", async () => {
 		const root = createGitProject();

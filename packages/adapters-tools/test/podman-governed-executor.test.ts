@@ -692,130 +692,137 @@ describe("rootless Podman governed ActionGateway executor", () => {
 		]);
 	});
 
-	it.each(
-		EVALUATOR_ROLES,
-	)("runs %s against fsRead snapshots only and ignores fsWrite recovery state", (role) => {
-		const root = makeWorktree();
-		const calls: Array<{
-			binary: string;
-			args: readonly string[];
-			input?: string;
-		}> = [];
-		const afterOverlayPromotion = vi.fn();
-		const executor = createPodmanGovernedActionExecutor(
-			{
-				image: IMAGE,
-				profile: profile(),
-				runner: successfulRunner(calls),
-				afterOverlayPromotion,
-			},
-			LINUX_TEST_HOST,
-		);
-		// A mutable action would attempt to reconcile this malformed journal before
-		// it can build its mount plan. Evaluator actions must never inspect fsWrite
-		// recovery state because they have no overlay to reconcile or promote.
-		writeFileSync(overlayControlPath(root, "journal"), "not a journal", "utf8");
+	it.each(EVALUATOR_ROLES)(
+		"runs %s against fsRead snapshots only and ignores fsWrite recovery state",
+		(role) => {
+			const root = makeWorktree();
+			const calls: Array<{
+				binary: string;
+				args: readonly string[];
+				input?: string;
+			}> = [];
+			const afterOverlayPromotion = vi.fn();
+			const executor = createPodmanGovernedActionExecutor(
+				{
+					image: IMAGE,
+					profile: profile(),
+					runner: successfulRunner(calls),
+					afterOverlayPromotion,
+				},
+				LINUX_TEST_HOST,
+			);
+			// A mutable action would attempt to reconcile this malformed journal before
+			// it can build its mount plan. Evaluator actions must never inspect fsWrite
+			// recovery state because they have no overlay to reconcile or promote.
+			writeFileSync(
+				overlayControlPath(root, "journal"),
+				"not a journal",
+				"utf8",
+			);
 
-		const receipt = gatewayFor(root, executor, governedBundle(), {
-			role,
-		}).execute({
-			actionId: `action-${role}-read-only-podman`,
-			kind: "process.run",
-			command: "git",
-			args: ["status"],
-			cwd: "src",
-		});
+			const receipt = gatewayFor(root, executor, governedBundle(), {
+				role,
+			}).execute({
+				actionId: `action-${role}-read-only-podman`,
+				kind: "process.run",
+				command: "git",
+				args: ["status"],
+				cwd: "src",
+			});
 
-		expect(receipt.outcome).toBe("succeeded");
-		expect(afterOverlayPromotion).not.toHaveBeenCalled();
-		expect(calls).toHaveLength(1);
-		const actionArgs = calls[0]?.args ?? [];
-		const volumes = actionArgs.filter((argument) =>
-			argument.startsWith("--volume="),
-		);
-		expect(volumes).toEqual([
-			expect.stringMatching(/:\/workspace\/src:ro,rprivate$/),
-		]);
-		expect(volumes.some((volume) => volume.includes(":rw,rprivate"))).toBe(
-			false,
-		);
-		expect(
-			volumes.some((volume) => volume.includes("/workspace/generated:")),
-		).toBe(false);
-		expect(actionArgs).toContain("--read-only");
-		expect(actionArgs).toContain("--network=none");
-	});
+			expect(receipt.outcome).toBe("succeeded");
+			expect(afterOverlayPromotion).not.toHaveBeenCalled();
+			expect(calls).toHaveLength(1);
+			const actionArgs = calls[0]?.args ?? [];
+			const volumes = actionArgs.filter((argument) =>
+				argument.startsWith("--volume="),
+			);
+			expect(volumes).toEqual([
+				expect.stringMatching(/:\/workspace\/src:ro,rprivate$/),
+			]);
+			expect(volumes.some((volume) => volume.includes(":rw,rprivate"))).toBe(
+				false,
+			);
+			expect(
+				volumes.some((volume) => volume.includes("/workspace/generated:")),
+			).toBe(false);
+			expect(actionArgs).toContain("--read-only");
+			expect(actionArgs).toContain("--network=none");
+		},
+	);
 
-	it.each(
-		EVALUATOR_ROLES,
-	)("denies %s filesystem writes before invoking Podman", (role) => {
-		const root = makeWorktree();
-		const calls: Array<{
-			binary: string;
-			args: readonly string[];
-			input?: string;
-		}> = [];
-		const executor = createPodmanGovernedActionExecutor(
-			{
-				image: IMAGE,
-				profile: profile(),
-				runner: successfulRunner(calls),
-			},
-			LINUX_TEST_HOST,
-		);
+	it.each(EVALUATOR_ROLES)(
+		"denies %s filesystem writes before invoking Podman",
+		(role) => {
+			const root = makeWorktree();
+			const calls: Array<{
+				binary: string;
+				args: readonly string[];
+				input?: string;
+			}> = [];
+			const executor = createPodmanGovernedActionExecutor(
+				{
+					image: IMAGE,
+					profile: profile(),
+					runner: successfulRunner(calls),
+				},
+				LINUX_TEST_HOST,
+			);
 
-		const receipt = gatewayFor(root, executor, governedBundle(), {
-			role,
-		}).execute({
-			actionId: `action-${role}-write-denial`,
-			kind: "filesystem.write",
-			path: "generated/review.txt",
-			content: "must not run",
-		});
+			const receipt = gatewayFor(root, executor, governedBundle(), {
+				role,
+			}).execute({
+				actionId: `action-${role}-write-denial`,
+				kind: "filesystem.write",
+				path: "generated/review.txt",
+				content: "must not run",
+			});
 
-		expect(receipt).toMatchObject({
-			outcome: "denied",
-			reason: `${role} is not permitted to perform filesystem.write`,
-		});
-		expect(calls).toEqual([]);
-	});
+			expect(receipt).toMatchObject({
+				outcome: "denied",
+				reason: `${role} is not permitted to perform filesystem.write`,
+			});
+			expect(calls).toEqual([]);
+		},
+	);
 
-	it.each(
-		EVALUATOR_ROLES,
-	)("does not treat %s fsWrite authority as fsRead authority", (role) => {
-		const root = makeWorktree();
-		const calls: Array<{
-			binary: string;
-			args: readonly string[];
-			input?: string;
-		}> = [];
-		const executor = createPodmanGovernedActionExecutor(
-			{
-				image: IMAGE,
-				profile: profile(),
-				runner: successfulRunner(calls),
-			},
-			LINUX_TEST_HOST,
-		);
+	it.each(EVALUATOR_ROLES)(
+		"does not treat %s fsWrite authority as fsRead authority",
+		(role) => {
+			const root = makeWorktree();
+			const calls: Array<{
+				binary: string;
+				args: readonly string[];
+				input?: string;
+			}> = [];
+			const executor = createPodmanGovernedActionExecutor(
+				{
+					image: IMAGE,
+					profile: profile(),
+					runner: successfulRunner(calls),
+				},
+				LINUX_TEST_HOST,
+			);
 
-		const receipt = gatewayFor(
-			root,
-			executor,
-			governedBundle({ fsRead: undefined, fsWrite: ["generated/**"] }),
-			{ role },
-		).execute({
-			actionId: `action-${role}-missing-read`,
-			kind: "process.run",
-			command: "git",
-			cwd: "generated",
-		});
+			const receipt = gatewayFor(
+				root,
+				executor,
+				governedBundle({ fsRead: undefined, fsWrite: ["generated/**"] }),
+				{ role },
+			).execute({
+				actionId: `action-${role}-missing-read`,
+				kind: "process.run",
+				command: "git",
+				cwd: "generated",
+			});
 
-		expect(receipt).toMatchObject({
-			outcome: "failed",
-			reason: expect.stringMatching(/fsRead scope/i),
-		});
-		expect(calls).toEqual([]);
-	});
+			expect(receipt).toMatchObject({
+				outcome: "failed",
+				reason: expect.stringMatching(/fsRead scope/i),
+			});
+			expect(calls).toEqual([]);
+		},
+	);
 
 	it("bounds the Podman control-plane timeout to the remaining governed compute budget", () => {
 		const root = makeWorktree();

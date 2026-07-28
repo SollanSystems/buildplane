@@ -57,18 +57,18 @@ describe("remote interchange quarantine", () => {
 		expect(Object.isFrozen(interchange.artifacts[0])).toBe(true);
 	});
 
-	it.each([
-		"mcp",
-		"a2a",
-	] as const)("accepts %s only as a read-only quarantine protocol", (protocol) => {
-		const interchange = quarantineRemoteInterchange(
-			remoteInterchange({ protocol }),
-		);
+	it.each(["mcp", "a2a"] as const)(
+		"accepts %s only as a read-only quarantine protocol",
+		(protocol) => {
+			const interchange = quarantineRemoteInterchange(
+				remoteInterchange({ protocol }),
+			);
 
-		expect(interchange.protocol).toBe(protocol);
-		expect(interchange.tainted).toBe(true);
-		expect(interchange.quarantined).toBe(true);
-	});
+			expect(interchange.protocol).toBe(protocol);
+			expect(interchange.tainted).toBe(true);
+			expect(interchange.quarantined).toBe(true);
+		},
+	);
 
 	it("does not make remote content actionable until a local verifier returns true", () => {
 		const interchange = quarantineRemoteInterchange(remoteInterchange());

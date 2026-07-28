@@ -80,19 +80,22 @@ describe("protected promotion-execution native client", () => {
 		"recorded",
 		"lease_expired",
 		"reconciliation_required",
-	] as const)("accepts only the exact closed native status %s", async (status) => {
-		childProcess.spawnSync.mockReturnValue(
-			nativeResult({
-				stdout: `{"schema_version":1,"status":"${status}"}\n`,
-			}),
-		);
+	] as const)(
+		"accepts only the exact closed native status %s",
+		async (status) => {
+			childProcess.spawnSync.mockReturnValue(
+				nativeResult({
+					stdout: `{"schema_version":1,"status":"${status}"}\n`,
+				}),
+			);
 
-		await expect(
-			executeProtectedPromotion({
-				promotionDecisionEventId: decisionEventId,
-			}),
-		).resolves.toEqual({ status });
-	});
+			await expect(
+				executeProtectedPromotion({
+					promotionDecisionEventId: decisionEventId,
+				}),
+			).resolves.toEqual({ status });
+		},
+	);
 
 	it.each([
 		{ stdout: '{"schema_version":1,"status":"recorded"}' },
@@ -116,13 +119,16 @@ describe("protected promotion-execution native client", () => {
 		["win32", decisionEventId],
 		["linux", "123E4567-E89B-12D3-A456-426614174003"],
 		["linux", "host-recovery/promotion-execution"],
-	] as const)("does not spawn for unsupported or noncanonical input", async (platform, eventId) => {
-		setPlatform(platform);
-		await expect(
-			executeProtectedPromotion({
-				promotionDecisionEventId: eventId,
-			}),
-		).resolves.toBeUndefined();
-		expect(childProcess.spawnSync).not.toHaveBeenCalled();
-	});
+	] as const)(
+		"does not spawn for unsupported or noncanonical input",
+		async (platform, eventId) => {
+			setPlatform(platform);
+			await expect(
+				executeProtectedPromotion({
+					promotionDecisionEventId: eventId,
+				}),
+			).resolves.toBeUndefined();
+			expect(childProcess.spawnSync).not.toHaveBeenCalled();
+		},
+	);
 });

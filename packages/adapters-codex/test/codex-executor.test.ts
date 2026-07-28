@@ -432,38 +432,41 @@ describe("CodexExecutor", () => {
 		);
 	});
 
-	it.each([
-		"reviewer",
-		"adversary",
-	] as const)("passes the %s packet role to its renderer", async (execution_role) => {
-		const mockSpawn = createMockSpawn({ exitCode: 0 });
-		const renderer: TaskRenderer = {
-			provider: "test",
-			render: vi.fn(() => ({ prompt: "rendered task" })),
-		};
-		const executor = createCodexExecutor({
-			renderer,
-			spawnFn: mockSpawn as never,
-		});
-		const eventBus = createEventBus();
-		const packet = makePacket({
-			execution_role,
-			intent: {
-				objective: "Challenge the task.",
-				taskType: "review",
-				context: { files: [] },
-				constraints: { scope: [], verification: [] },
-				features: {
-					ambiguity: "low",
-					reversibility: "easy",
-					verifierStrength: "strong",
+	it.each(["reviewer", "adversary"] as const)(
+		"passes the %s packet role to its renderer",
+		async (execution_role) => {
+			const mockSpawn = createMockSpawn({ exitCode: 0 });
+			const renderer: TaskRenderer = {
+				provider: "test",
+				render: vi.fn(() => ({ prompt: "rendered task" })),
+			};
+			const executor = createCodexExecutor({
+				renderer,
+				spawnFn: mockSpawn as never,
+			});
+			const eventBus = createEventBus();
+			const packet = makePacket({
+				execution_role,
+				intent: {
+					objective: "Challenge the task.",
+					taskType: "review",
+					context: { files: [] },
+					constraints: { scope: [], verification: [] },
+					features: {
+						ambiguity: "low",
+						reversibility: "easy",
+						verifierStrength: "strong",
+					},
 				},
-			},
-			model: { provider: "codex", model: "o4-mini" },
-		});
+				model: { provider: "codex", model: "o4-mini" },
+			});
 
-		await executor.executePacketAsync(packet, PROJECT_ROOT, eventBus);
+			await executor.executePacketAsync(packet, PROJECT_ROOT, eventBus);
 
-		expect(renderer.render).toHaveBeenCalledWith(packet.intent, execution_role);
-	});
+			expect(renderer.render).toHaveBeenCalledWith(
+				packet.intent,
+				execution_role,
+			);
+		},
+	);
 });

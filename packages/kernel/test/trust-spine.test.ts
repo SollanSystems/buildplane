@@ -1533,9 +1533,12 @@ describe("trust-spine V1 contracts", () => {
 				),
 			"promotionDecision.decidedAt must be an RFC3339 UTC timestamp",
 		],
-	])("rejects required properties inherited by %s", (_label, parse, message) => {
-		expect(parse).toThrow(message);
-	});
+	])(
+		"rejects required properties inherited by %s",
+		(_label, parse, message) => {
+			expect(parse).toThrow(message);
+		},
+	);
 
 	it("rejects a prototype-pollution-shaped own field", () => {
 		const raw = JSON.parse(JSON.stringify(dispatchEnvelope())) as Record<
@@ -1909,16 +1912,19 @@ describe("trust-spine worker runtime manifests", () => {
 			{},
 			"sandboxProfileDigest",
 		],
-	])("fails closed for %s", (_label, bodyOverrides, dispatchOverrides, message) => {
-		const runtime = parseWorkerRuntimeManifestV1(workerRuntimeManifest());
-		const dispatch = parseDispatchEnvelopeV3(
-			dispatchEnvelopeV3ForRuntime(runtime, bodyOverrides, dispatchOverrides),
-		);
+	])(
+		"fails closed for %s",
+		(_label, bodyOverrides, dispatchOverrides, message) => {
+			const runtime = parseWorkerRuntimeManifestV1(workerRuntimeManifest());
+			const dispatch = parseDispatchEnvelopeV3(
+				dispatchEnvelopeV3ForRuntime(runtime, bodyOverrides, dispatchOverrides),
+			);
 
-		expect(() =>
-			assertDispatchWorkerRuntimeManifestV1(dispatch, runtime),
-		).toThrow(message);
-	});
+			expect(() =>
+				assertDispatchWorkerRuntimeManifestV1(dispatch, runtime),
+			).toThrow(message);
+		},
+	);
 
 	it("rejects a V4-shaped value instead of falling back to a different binding", () => {
 		const runtime = parseWorkerRuntimeManifestV1(workerRuntimeManifest());

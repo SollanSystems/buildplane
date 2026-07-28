@@ -2090,21 +2090,24 @@ describe("governed API worker execution port", () => {
 	it.each([
 		["acceptance-contract", packet({ acceptance_contract: undefined })],
 		["trust-scope", packet({ trust_scope: undefined })],
-	])("requires governed packet %s authority before model evidence", async (authorityName, inputPacket) => {
-		const events: string[] = [];
-		const evidence = actionEvidence(events);
-		const complete = vi.fn(client(events).complete);
-		const port = createGovernedApiWorkerExecutionPort({
-			actionGateway: actionGateway(events, client(events, { complete })),
-			evidenceStore: evidenceStore(events),
-		});
+	])(
+		"requires governed packet %s authority before model evidence",
+		async (authorityName, inputPacket) => {
+			const events: string[] = [];
+			const evidence = actionEvidence(events);
+			const complete = vi.fn(client(events).complete);
+			const port = createGovernedApiWorkerExecutionPort({
+				actionGateway: actionGateway(events, client(events, { complete })),
+				evidenceStore: evidenceStore(events),
+			});
 
-		await expect(
-			port.executeCandidatePacketAsync(request({ evidence, inputPacket })),
-		).rejects.toThrow(new RegExp(authorityName, "i"));
-		expect(events).toEqual([]);
-		expect(complete).not.toHaveBeenCalled();
-	});
+			await expect(
+				port.executeCandidatePacketAsync(request({ evidence, inputPacket })),
+			).rejects.toThrow(new RegExp(authorityName, "i"));
+			expect(events).toEqual([]);
+			expect(complete).not.toHaveBeenCalled();
+		},
+	);
 
 	it("writes a model action request before the host ActionGateway and returns its durable receipt", async () => {
 		const events: string[] = [];
@@ -2493,25 +2496,25 @@ describe("governed API worker execution port", () => {
 			inputPacket: packet({ execution_role: "reviewer" }),
 			dispatch: governedDispatch({ executionRole: "implementer" }),
 		},
-	])("rejects $name before calling the host ActionGateway", async ({
-		inputPacket,
-		dispatch,
-	}) => {
-		const events: string[] = [];
-		const evidence = actionEvidence(events);
-		const complete = vi.fn(client(events).complete);
-		const port = createGovernedApiWorkerExecutionPort({
-			actionGateway: actionGateway(events, client(events, { complete })),
-			evidenceStore: evidenceStore(events),
-		});
+	])(
+		"rejects $name before calling the host ActionGateway",
+		async ({ inputPacket, dispatch }) => {
+			const events: string[] = [];
+			const evidence = actionEvidence(events);
+			const complete = vi.fn(client(events).complete);
+			const port = createGovernedApiWorkerExecutionPort({
+				actionGateway: actionGateway(events, client(events, { complete })),
+				evidenceStore: evidenceStore(events),
+			});
 
-		await expect(
-			port.executeCandidatePacketAsync(
-				request({ inputPacket, dispatch, evidence }),
-			),
-		).rejects.toThrow(/governed API worker/i);
-		expect(complete).not.toHaveBeenCalled();
-	});
+			await expect(
+				port.executeCandidatePacketAsync(
+					request({ inputPacket, dispatch, evidence }),
+				),
+			).rejects.toThrow(/governed API worker/i);
+			expect(complete).not.toHaveBeenCalled();
+		},
+	);
 
 	it("requires strict review verdicts bound to the immutable candidate and reviewer manifest", async () => {
 		const events: string[] = [];

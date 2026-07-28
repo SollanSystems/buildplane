@@ -70,29 +70,32 @@ describe("ModelExecutor renderer roles", () => {
 		).toThrow(/AMBIENT_MODEL_EXECUTOR_FORBIDDEN/);
 	});
 
-	it.each([
-		"reviewer",
-		"adversary",
-	] as const)("passes the %s packet role to its renderer", async (execution_role) => {
-		const renderer: TaskRenderer = {
-			provider: "test",
-			render: vi.fn(() => ({ prompt: "rendered task" })),
-		};
-		const executor = createModelExecutor({
-			renderer,
-			modelResolver: () => ({}),
-			streamFn: () => ({
-				fullStream: (async function* () {})(),
-			}),
-		});
-		const packet = makePacket(execution_role);
+	it.each(["reviewer", "adversary"] as const)(
+		"passes the %s packet role to its renderer",
+		async (execution_role) => {
+			const renderer: TaskRenderer = {
+				provider: "test",
+				render: vi.fn(() => ({ prompt: "rendered task" })),
+			};
+			const executor = createModelExecutor({
+				renderer,
+				modelResolver: () => ({}),
+				streamFn: () => ({
+					fullStream: (async function* () {})(),
+				}),
+			});
+			const packet = makePacket(execution_role);
 
-		await executor.executePacketAsync(
-			packet,
-			"/tmp/bp-model-test",
-			createEventBus(),
-		);
+			await executor.executePacketAsync(
+				packet,
+				"/tmp/bp-model-test",
+				createEventBus(),
+			);
 
-		expect(renderer.render).toHaveBeenCalledWith(packet.intent, execution_role);
-	});
+			expect(renderer.render).toHaveBeenCalledWith(
+				packet.intent,
+				execution_role,
+			);
+		},
+	);
 });

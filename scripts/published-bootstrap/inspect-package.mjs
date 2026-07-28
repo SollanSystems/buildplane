@@ -10,7 +10,7 @@ import {
 import { tmpdir as nodeOsTmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import ts from "typescript";
+import { parseAst } from "vite";
 import {
 	assertRuntimeImportClosure,
 	collectRuntimeFiles,
@@ -474,77 +474,103 @@ function assertReadmeContract(readmePath, readme) {
 	}
 }
 
-function parseJavaScriptSource(source, filePath) {
-	return ts.createSourceFile(
-		filePath,
-		source,
-		ts.ScriptTarget.ESNext,
-		true,
-		ts.ScriptKind.JS,
-	);
+function parseJavaScriptSource(source) {
+	return parseAst(source);
+}
+
+function walkEstreeChildren(node, visit) {
+	for (const key of Object.keys(node)) {
+		if (key === "type" || key === "start" || key === "end" || key === "raw") {
+			continue;
+		}
+		const child = node[key];
+		if (Array.isArray(child)) {
+			for (const item of child) {
+				if (item && typeof item === "object" && typeof item.type === "string") {
+					visit(item);
+				}
+			}
+		} else if (
+			child &&
+			typeof child === "object" &&
+			typeof child.type === "string"
+		) {
+			visit(child);
+		}
+	}
 }
 
 function isLocalDynamicImportCall(node) {
 	if (
-		!ts.isCallExpression(node) ||
-		node.expression.kind !== ts.SyntaxKind.ImportKeyword ||
-		node.arguments.length < 1 ||
-		!ts.isStringLiteralLike(node.arguments[0])
+		node.type !== "ImportExpression" ||
+		!node.source ||
+		node.source.type !== "Literal" ||
+		typeof node.source.value !== "string"
 	) {
 		return false;
 	}
 
-	const specifier = node.arguments[0].text;
+	const specifier = node.source.value;
 	return isLocalFilesystemPath(specifier) && !isAbsolute(specifier);
 }
 
 function getStaticModuleSpecifier(statement) {
 	if (
-		(ts.isImportDeclaration(statement) || ts.isExportDeclaration(statement)) &&
-		statement.moduleSpecifier &&
-		ts.isStringLiteralLike(statement.moduleSpecifier)
+		(statement.type === "ImportDeclaration" ||
+			statement.type === "ExportNamedDeclaration" ||
+			statement.type === "ExportAllDeclaration") &&
+		statement.source &&
+		statement.source.type === "Literal" &&
+		typeof statement.source.value === "string"
 	) {
-		return statement.moduleSpecifier.text;
+		return statement.source.value;
 	}
 
 	return undefined;
 }
 
 function isStaticWrapperVersionGuardImport(statement) {
-	if (!ts.isImportDeclaration(statement) || !statement.moduleSpecifier) {
+	if (
+		statement.type !== "ImportDeclaration" ||
+		!statement.source ||
+		statement.source.type !== "Literal" ||
+		typeof statement.source.value !== "string"
+	) {
 		return false;
 	}
 
-	if (!ts.isStringLiteralLike(statement.moduleSpecifier)) {
-		return false;
-	}
-
-	return ALLOWED_STATIC_WRAPPER_IMPORT_SPECIFIERS.has(
-		statement.moduleSpecifier.text,
-	);
+	return ALLOWED_STATIC_WRAPPER_IMPORT_SPECIFIERS.has(statement.source.value);
 }
 
 function statementBindsVersionGuardImport(statement) {
-	if (!ts.isImportDeclaration(statement) || !statement.importClause) {
+	if (
+		statement.type !== "ImportDeclaration" ||
+		!statement.specifiers ||
+		statement.specifiers.length === 0
+	) {
 		return false;
 	}
 
-	if (statement.importClause.isTypeOnly || statement.importClause.name) {
+	const hasDefault = statement.specifiers.some(
+		(s) => s.type === "ImportDefaultSpecifier",
+	);
+	if (hasDefault) {
 		return false;
 	}
 
-	const namedBindings = statement.importClause.namedBindings;
-	if (!namedBindings || ts.isNamespaceImport(namedBindings)) {
+	const hasNamespace = statement.specifiers.some(
+		(s) => s.type === "ImportNamespaceSpecifier",
+	);
+	if (hasNamespace) {
 		return false;
 	}
 
-	return namedBindings.elements.some((element) => {
-		const importedName = element.propertyName
-			? element.propertyName.text
-			: element.name.text;
+	return statement.specifiers.some((element) => {
+		const importedName = element.imported?.name ?? element.imported?.value;
+		const localName = element.local?.name;
 		return (
 			importedName === "assertSupportedNodeVersion" &&
-			element.name.text === "assertSupportedNodeVersion"
+			localName === "assertSupportedNodeVersion"
 		);
 	});
 }
@@ -557,7 +583,7 @@ function isAllowedStaticWrapperVersionGuardImport(statement) {
 }
 
 function findMalformedStaticWrapperVersionGuardImport(sourceFile) {
-	for (const statement of sourceFile.statements) {
+	for (const statement of sourceFile.body) {
 		if (
 			isStaticWrapperVersionGuardImport(statement) &&
 			!statementBindsVersionGuardImport(statement)
@@ -570,7 +596,7 @@ function findMalformedStaticWrapperVersionGuardImport(sourceFile) {
 }
 
 function findUnsafeStaticWrapperImport(sourceFile) {
-	for (const statement of sourceFile.statements) {
+	for (const statement of sourceFile.body) {
 		const specifier = getStaticModuleSpecifier(statement);
 		if (!specifier || ALLOWED_STATIC_WRAPPER_IMPORT_SPECIFIERS.has(specifier)) {
 			continue;
@@ -582,43 +608,34 @@ function findUnsafeStaticWrapperImport(sourceFile) {
 	return undefined;
 }
 
-function unwrapParenthesizedExpression(node) {
-	let currentNode = node;
-	while (ts.isParenthesizedExpression(currentNode)) {
-		currentNode = currentNode.expression;
-	}
-	return currentNode;
-}
-
 function getAwaitedRuntimeBoundarySpecifier(expression) {
 	if (!expression) {
 		return undefined;
 	}
 
-	const node = unwrapParenthesizedExpression(expression);
-	if (!ts.isAwaitExpression(node)) {
+	if (expression.type !== "AwaitExpression") {
 		return undefined;
 	}
 
-	const awaitedExpression = unwrapParenthesizedExpression(node.expression);
+	const awaitedExpression = expression.argument;
 	if (!isLocalDynamicImportCall(awaitedExpression)) {
 		return undefined;
 	}
 
-	return awaitedExpression.arguments[0].text;
+	return awaitedExpression.source.value;
 }
 
 function getTopLevelWrapperRuntimeBoundary(statement) {
-	if (!ts.isVariableStatement(statement)) {
+	if (statement.type !== "VariableDeclaration") {
 		return undefined;
 	}
 
-	if (statement.declarationList.declarations.length !== 1) {
+	if (statement.declarations.length !== 1) {
 		return undefined;
 	}
 
-	const [declaration] = statement.declarationList.declarations;
-	const specifier = getAwaitedRuntimeBoundarySpecifier(declaration.initializer);
+	const [declaration] = statement.declarations;
+	const specifier = getAwaitedRuntimeBoundarySpecifier(declaration.init);
 	return specifier ? { specifier } : undefined;
 }
 
@@ -630,11 +647,11 @@ function findLocalDynamicImportSpecifier(node) {
 		}
 
 		if (isLocalDynamicImportCall(currentNode)) {
-			dynamicImportSpecifier = currentNode.arguments[0].text;
+			dynamicImportSpecifier = currentNode.source.value;
 			return;
 		}
 
-		ts.forEachChild(currentNode, visit);
+		walkEstreeChildren(currentNode, visit);
 	};
 
 	visit(node);
@@ -643,16 +660,16 @@ function findLocalDynamicImportSpecifier(node) {
 
 function isTopLevelVersionGuardCallStatement(statement) {
 	return (
-		ts.isExpressionStatement(statement) &&
-		ts.isCallExpression(statement.expression) &&
-		ts.isIdentifier(statement.expression.expression) &&
-		statement.expression.expression.text === "assertSupportedNodeVersion" &&
+		statement.type === "ExpressionStatement" &&
+		statement.expression.type === "CallExpression" &&
+		statement.expression.callee.type === "Identifier" &&
+		statement.expression.callee.name === "assertSupportedNodeVersion" &&
 		statement.expression.arguments.length === 0
 	);
 }
 
 function assertWrapperImportBoundary(distIndexPath, indexSource) {
-	const sourceFile = parseJavaScriptSource(indexSource, distIndexPath);
+	const sourceFile = parseJavaScriptSource(indexSource);
 	const malformedVersionGuardImport =
 		findMalformedStaticWrapperVersionGuardImport(sourceFile);
 	if (malformedVersionGuardImport) {
@@ -670,16 +687,16 @@ function assertWrapperImportBoundary(distIndexPath, indexSource) {
 
 	let prefixImportCount = 0;
 	while (
-		prefixImportCount < sourceFile.statements.length &&
-		ts.isImportDeclaration(sourceFile.statements[prefixImportCount])
+		prefixImportCount < sourceFile.body.length &&
+		sourceFile.body[prefixImportCount].type === "ImportDeclaration"
 	) {
 		if (
 			!isAllowedStaticWrapperVersionGuardImport(
-				sourceFile.statements[prefixImportCount],
+				sourceFile.body[prefixImportCount],
 			)
 		) {
 			fail(
-				`dist/index.js must not contain top-level static imports other than ${JSON.stringify([...ALLOWED_STATIC_WRAPPER_IMPORT_SPECIFIERS][0])} (found ${JSON.stringify(getStaticModuleSpecifier(sourceFile.statements[prefixImportCount]))}): ${distIndexPath}`,
+				`dist/index.js must not contain top-level static imports other than ${JSON.stringify([...ALLOWED_STATIC_WRAPPER_IMPORT_SPECIFIERS][0])} (found ${JSON.stringify(getStaticModuleSpecifier(sourceFile.body[prefixImportCount]))}): ${distIndexPath}`,
 			);
 		}
 
@@ -692,14 +709,14 @@ function assertWrapperImportBoundary(distIndexPath, indexSource) {
 		);
 	}
 
-	const guardStatement = sourceFile.statements[prefixImportCount];
+	const guardStatement = sourceFile.body[prefixImportCount];
 	if (!guardStatement || !isTopLevelVersionGuardCallStatement(guardStatement)) {
 		fail(
 			`dist/index.js must call assertSupportedNodeVersion() before importing its runtime boundary ${JSON.stringify(REQUIRED_WRAPPER_RUNTIME_BOUNDARY_SPECIFIER)}`,
 		);
 	}
 
-	const runtimeBoundaryStatement = sourceFile.statements[prefixImportCount + 1];
+	const runtimeBoundaryStatement = sourceFile.body[prefixImportCount + 1];
 	const runtimeBoundary = runtimeBoundaryStatement
 		? getTopLevelWrapperRuntimeBoundary(runtimeBoundaryStatement)
 		: undefined;
@@ -717,16 +734,16 @@ function assertWrapperImportBoundary(distIndexPath, indexSource) {
 		);
 	}
 
-	const trailingStaticImport = sourceFile.statements
+	const trailingStaticImport = sourceFile.body
 		.slice(prefixImportCount + 1)
-		.find((statement) => ts.isImportDeclaration(statement));
+		.find((statement) => statement.type === "ImportDeclaration");
 	if (trailingStaticImport) {
 		fail(
 			`dist/index.js must keep all top-level static imports inside its initial version-guard prefix before assertSupportedNodeVersion() (found ${JSON.stringify(getStaticModuleSpecifier(trailingStaticImport))}): ${distIndexPath}`,
 		);
 	}
 
-	const extraTopLevelRuntimeImport = sourceFile.statements
+	const extraTopLevelRuntimeImport = sourceFile.body
 		.slice(prefixImportCount + 2)
 		.map((statement) => findLocalDynamicImportSpecifier(statement))
 		.find(Boolean);

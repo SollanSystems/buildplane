@@ -281,52 +281,52 @@ describe("ActionGateway", () => {
 		expect(sandboxRunCommand).not.toHaveBeenCalled();
 	});
 
-	it.each([
-		"plain",
-		"serialized",
-	] as const)("denies a %s forged permit before OCI observes a governed action", (kind) => {
-		const sandboxRunCommand = vi.fn(governedExecutor().runCommand);
-		const bundle = governedBundle();
-		const ociExecutor = governedExecutor({ runCommand: sandboxRunCommand });
-		const action = Object.freeze({
-			actionId: "action-forged-governed-permit",
-			kind: "process.run" as const,
-			command: "git",
-			args: Object.freeze(["status"]),
-		});
-		const capabilityBundleDigest = governedBundleDigest(bundle);
-		const permitBinding = governedActionPermit({
-			runId: "run-forged-governed-permit",
-			worktreeRoot: "/worktree",
-			role: "implementer",
-			action,
-			capabilityBundleDigest,
-			sandboxProfileDigest: ociExecutor.sandbox.profileDigest,
-			governedDeadlineAtMs: 4_102_444_800_000,
-		});
-		const forgedPermit =
-			kind === "plain"
-				? Object.freeze({})
-				: JSON.parse(JSON.stringify(permitBinding.permit));
-		const gateway = createActionGateway({
-			runId: "run-forged-governed-permit",
-			worktreeRoot: "/worktree",
-			role: "implementer",
-			trustTier: "governed",
-			capabilityBundle: bundle,
-			capabilityBundleDigest,
-			governedExecutor: ociExecutor,
-			governedDeadlineAtMs: 4_102_444_800_000,
-			governedActionPermit: forgedPermit,
-			governedActionEvidence: permitBinding.evidence,
-		});
+	it.each(["plain", "serialized"] as const)(
+		"denies a %s forged permit before OCI observes a governed action",
+		(kind) => {
+			const sandboxRunCommand = vi.fn(governedExecutor().runCommand);
+			const bundle = governedBundle();
+			const ociExecutor = governedExecutor({ runCommand: sandboxRunCommand });
+			const action = Object.freeze({
+				actionId: "action-forged-governed-permit",
+				kind: "process.run" as const,
+				command: "git",
+				args: Object.freeze(["status"]),
+			});
+			const capabilityBundleDigest = governedBundleDigest(bundle);
+			const permitBinding = governedActionPermit({
+				runId: "run-forged-governed-permit",
+				worktreeRoot: "/worktree",
+				role: "implementer",
+				action,
+				capabilityBundleDigest,
+				sandboxProfileDigest: ociExecutor.sandbox.profileDigest,
+				governedDeadlineAtMs: 4_102_444_800_000,
+			});
+			const forgedPermit =
+				kind === "plain"
+					? Object.freeze({})
+					: JSON.parse(JSON.stringify(permitBinding.permit));
+			const gateway = createActionGateway({
+				runId: "run-forged-governed-permit",
+				worktreeRoot: "/worktree",
+				role: "implementer",
+				trustTier: "governed",
+				capabilityBundle: bundle,
+				capabilityBundleDigest,
+				governedExecutor: ociExecutor,
+				governedDeadlineAtMs: 4_102_444_800_000,
+				governedActionPermit: forgedPermit,
+				governedActionEvidence: permitBinding.evidence,
+			});
 
-		expect(gateway.execute(action)).toMatchObject({
-			outcome: "denied",
-			reason: expect.stringMatching(/claim-bound permit/i),
-		});
-		expect(sandboxRunCommand).not.toHaveBeenCalled();
-	});
+			expect(gateway.execute(action)).toMatchObject({
+				outcome: "denied",
+				reason: expect.stringMatching(/claim-bound permit/i),
+			});
+			expect(sandboxRunCommand).not.toHaveBeenCalled();
+		},
+	);
 
 	it("consumes a governed permit once, including across separate gateways", () => {
 		const sandboxRunCommand = vi.fn(governedExecutor().runCommand);
@@ -842,83 +842,81 @@ describe("ActionGateway", () => {
 		).toThrow(/rootless OCI isolation contract/i);
 	});
 
-	it.each([
-		"reviewer",
-		"adversary",
-		"judge",
-	] as const)("allows %s to dispatch governed process.run through the attested executor", (role) => {
-		const sandboxRunCommand = vi.fn(governedExecutor().runCommand);
-		const bundle = governedBundle();
-		const ociExecutor = governedExecutor({ runCommand: sandboxRunCommand });
-		const action = Object.freeze({
-			actionId: `action-${role}-read-only-command`,
-			kind: "process.run" as const,
-			command: "git",
-			args: Object.freeze(["status"]),
-		});
-		const capabilityBundleDigest = governedBundleDigest(bundle);
-		const permitBinding = governedActionPermit({
-			runId: `run-${role}-read-only-command`,
-			worktreeRoot: "/worktree",
-			role,
-			action,
-			capabilityBundleDigest,
-			sandboxProfileDigest: ociExecutor.sandbox.profileDigest,
-			governedDeadlineAtMs: 4_102_444_800_000,
-		});
-		const gateway = createActionGateway({
-			runId: `run-${role}-read-only-command`,
-			worktreeRoot: "/worktree",
-			role,
-			trustTier: "governed",
-			capabilityBundle: bundle,
-			capabilityBundleDigest,
-			governedExecutor: ociExecutor,
-			governedDeadlineAtMs: 4_102_444_800_000,
-			governedActionPermit: permitBinding.permit,
-			governedActionEvidence: permitBinding.evidence,
-		});
+	it.each(["reviewer", "adversary", "judge"] as const)(
+		"allows %s to dispatch governed process.run through the attested executor",
+		(role) => {
+			const sandboxRunCommand = vi.fn(governedExecutor().runCommand);
+			const bundle = governedBundle();
+			const ociExecutor = governedExecutor({ runCommand: sandboxRunCommand });
+			const action = Object.freeze({
+				actionId: `action-${role}-read-only-command`,
+				kind: "process.run" as const,
+				command: "git",
+				args: Object.freeze(["status"]),
+			});
+			const capabilityBundleDigest = governedBundleDigest(bundle);
+			const permitBinding = governedActionPermit({
+				runId: `run-${role}-read-only-command`,
+				worktreeRoot: "/worktree",
+				role,
+				action,
+				capabilityBundleDigest,
+				sandboxProfileDigest: ociExecutor.sandbox.profileDigest,
+				governedDeadlineAtMs: 4_102_444_800_000,
+			});
+			const gateway = createActionGateway({
+				runId: `run-${role}-read-only-command`,
+				worktreeRoot: "/worktree",
+				role,
+				trustTier: "governed",
+				capabilityBundle: bundle,
+				capabilityBundleDigest,
+				governedExecutor: ociExecutor,
+				governedDeadlineAtMs: 4_102_444_800_000,
+				governedActionPermit: permitBinding.permit,
+				governedActionEvidence: permitBinding.evidence,
+			});
 
-		const receipt = gateway.execute(action);
+			const receipt = gateway.execute(action);
 
-		expect(receipt.outcome).toBe("succeeded");
-		expect(sandboxRunCommand).toHaveBeenCalledOnce();
-		expect(sandboxRunCommand).toHaveBeenCalledWith(
-			{ command: "git", args: ["status"] },
-			expect.objectContaining({ role }),
-		);
-	});
+			expect(receipt.outcome).toBe("succeeded");
+			expect(sandboxRunCommand).toHaveBeenCalledOnce();
+			expect(sandboxRunCommand).toHaveBeenCalledWith(
+				{ command: "git", args: ["status"] },
+				expect.objectContaining({ role }),
+			);
+		},
+	);
 
-	it.each([
-		"reviewer",
-		"adversary",
-		"judge",
-	] as const)("denies %s filesystem.write before the governed executor is reached", (role) => {
-		const sandboxWriteFile = vi.fn(governedExecutor().writeFile);
-		const gateway = createActionGateway({
-			runId: `run-${role}-write-denial`,
-			worktreeRoot: "/worktree",
-			role,
-			trustTier: "governed",
-			capabilityBundle: governedBundle(),
-			capabilityBundleDigest: governedBundleDigest(),
-			governedExecutor: governedExecutor({ writeFile: sandboxWriteFile }),
-			governedDeadlineAtMs: 4_102_444_800_000,
-		});
+	it.each(["reviewer", "adversary", "judge"] as const)(
+		"denies %s filesystem.write before the governed executor is reached",
+		(role) => {
+			const sandboxWriteFile = vi.fn(governedExecutor().writeFile);
+			const gateway = createActionGateway({
+				runId: `run-${role}-write-denial`,
+				worktreeRoot: "/worktree",
+				role,
+				trustTier: "governed",
+				capabilityBundle: governedBundle(),
+				capabilityBundleDigest: governedBundleDigest(),
+				governedExecutor: governedExecutor({ writeFile: sandboxWriteFile }),
+				governedDeadlineAtMs: 4_102_444_800_000,
+			});
 
-		const receipt = gateway.execute({
-			actionId: `action-${role}-write-denial`,
-			kind: "filesystem.write",
-			path: "review.txt",
-			content: "nope",
-		});
+			const receipt = gateway.execute({
+				actionId: `action-${role}-write-denial`,
+				kind: "filesystem.write",
+				path: "review.txt",
+				content: "nope",
+			});
 
-		expect(receipt).toMatchObject({
-			outcome: "denied",
-			reason: `${role} is not permitted to perform filesystem.write`,
-		});
-		expect(sandboxWriteFile).not.toHaveBeenCalled();
-	});
+			expect(receipt).toMatchObject({
+				outcome: "denied",
+				reason: `${role} is not permitted to perform filesystem.write`,
+			});
+			expect(sandboxWriteFile).not.toHaveBeenCalled();
+		},
+	);
 
 	it("rejects an unknown role before it can become governed authority", () => {
 		expect(() =>
@@ -1025,68 +1023,71 @@ describe("ActionGateway", () => {
 				throw new Error("telemetry offline");
 			}),
 		],
-	] as const)("does not let %s governed receipt telemetry mint or retain a permit or invoke host tools", (_telemetryState, onReceipt) => {
-		const hostRunCommand = vi.fn(tools().runCommand);
-		const sandboxRunCommand = vi.fn(governedExecutor().runCommand);
-		const bundle = governedBundle();
-		const ociExecutor = governedExecutor({ runCommand: sandboxRunCommand });
-		const action = Object.freeze({
-			actionId: "action-governed-telemetry-permit",
-			kind: "process.run" as const,
-			command: "git",
-			args: Object.freeze(["status"]),
-		});
-		const capabilityBundleDigest = governedBundleDigest(bundle);
-		const permitBinding = governedActionPermit({
-			runId: "run-governed-telemetry-permit",
-			worktreeRoot: "/worktree",
-			role: "implementer",
-			action,
-			capabilityBundleDigest,
-			sandboxProfileDigest: ociExecutor.sandbox.profileDigest,
-			governedDeadlineAtMs: 4_102_444_800_000,
-		});
-		const commonOptions = {
-			runId: "run-governed-telemetry-permit",
-			worktreeRoot: "/worktree",
-			role: "implementer" as const,
-			trustTier: "governed" as const,
-			capabilityBundle: bundle,
-			capabilityBundleDigest,
-			governedExecutor: ociExecutor,
-			governedDeadlineAtMs: 4_102_444_800_000,
-			tools: tools({ runCommand: hostRunCommand }),
-			...(onReceipt === undefined ? {} : { onReceipt }),
-		};
-		expect(createActionGateway(commonOptions).execute(action)).toMatchObject({
-			outcome: "denied",
-			reason: expect.stringMatching(/claim-bound permit/i),
-		});
-		expect(sandboxRunCommand).not.toHaveBeenCalled();
-		expect(hostRunCommand).not.toHaveBeenCalled();
+	] as const)(
+		"does not let %s governed receipt telemetry mint or retain a permit or invoke host tools",
+		(_telemetryState, onReceipt) => {
+			const hostRunCommand = vi.fn(tools().runCommand);
+			const sandboxRunCommand = vi.fn(governedExecutor().runCommand);
+			const bundle = governedBundle();
+			const ociExecutor = governedExecutor({ runCommand: sandboxRunCommand });
+			const action = Object.freeze({
+				actionId: "action-governed-telemetry-permit",
+				kind: "process.run" as const,
+				command: "git",
+				args: Object.freeze(["status"]),
+			});
+			const capabilityBundleDigest = governedBundleDigest(bundle);
+			const permitBinding = governedActionPermit({
+				runId: "run-governed-telemetry-permit",
+				worktreeRoot: "/worktree",
+				role: "implementer",
+				action,
+				capabilityBundleDigest,
+				sandboxProfileDigest: ociExecutor.sandbox.profileDigest,
+				governedDeadlineAtMs: 4_102_444_800_000,
+			});
+			const commonOptions = {
+				runId: "run-governed-telemetry-permit",
+				worktreeRoot: "/worktree",
+				role: "implementer" as const,
+				trustTier: "governed" as const,
+				capabilityBundle: bundle,
+				capabilityBundleDigest,
+				governedExecutor: ociExecutor,
+				governedDeadlineAtMs: 4_102_444_800_000,
+				tools: tools({ runCommand: hostRunCommand }),
+				...(onReceipt === undefined ? {} : { onReceipt }),
+			};
+			expect(createActionGateway(commonOptions).execute(action)).toMatchObject({
+				outcome: "denied",
+				reason: expect.stringMatching(/claim-bound permit/i),
+			});
+			expect(sandboxRunCommand).not.toHaveBeenCalled();
+			expect(hostRunCommand).not.toHaveBeenCalled();
 
-		const options = {
-			...commonOptions,
-			governedActionPermit: permitBinding.permit,
-			governedActionEvidence: permitBinding.evidence,
-		};
+			const options = {
+				...commonOptions,
+				governedActionPermit: permitBinding.permit,
+				governedActionEvidence: permitBinding.evidence,
+			};
 
-		expect(createActionGateway(options).execute(action)).toMatchObject({
-			outcome: "succeeded",
-		});
-		expect(sandboxRunCommand).toHaveBeenCalledOnce();
-		expect(hostRunCommand).not.toHaveBeenCalled();
+			expect(createActionGateway(options).execute(action)).toMatchObject({
+				outcome: "succeeded",
+			});
+			expect(sandboxRunCommand).toHaveBeenCalledOnce();
+			expect(hostRunCommand).not.toHaveBeenCalled();
 
-		expect(createActionGateway(options).execute(action)).toMatchObject({
-			outcome: "denied",
-			reason: expect.stringMatching(/already consumed/i),
-		});
-		expect(sandboxRunCommand).toHaveBeenCalledOnce();
-		expect(hostRunCommand).not.toHaveBeenCalled();
-		if (onReceipt !== undefined) {
-			expect(onReceipt).toHaveBeenCalledTimes(3);
-		}
-	});
+			expect(createActionGateway(options).execute(action)).toMatchObject({
+				outcome: "denied",
+				reason: expect.stringMatching(/already consumed/i),
+			});
+			expect(sandboxRunCommand).toHaveBeenCalledOnce();
+			expect(hostRunCommand).not.toHaveBeenCalled();
+			if (onReceipt !== undefined) {
+				expect(onReceipt).toHaveBeenCalledTimes(3);
+			}
+		},
+	);
 
 	it("returns an immutable receipt even when an observer attempts to rewrite it", () => {
 		let observed: ActionGatewayReceipt | undefined;
@@ -1251,103 +1252,112 @@ describe("ActionGateway", () => {
 		RESERVED_ACTION_FAMILIES.flatMap((kind) =>
 			ACTION_GATEWAY_TEST_MODES.map((mode) => [kind, mode] as const),
 		),
-	)("denies the unavailable %s action family in %s mode before execution dependencies or receipt telemetry", (kind, mode) => {
-		const {
-			gateway,
-			rawRunCommand,
-			rawWriteFile,
-			ociRunCommand,
-			ociWriteFile,
-			onReceipt,
-		} = reservedActionGateway(mode);
+	)(
+		"denies the unavailable %s action family in %s mode before execution dependencies or receipt telemetry",
+		(kind, mode) => {
+			const {
+				gateway,
+				rawRunCommand,
+				rawWriteFile,
+				ociRunCommand,
+				ociWriteFile,
+				onReceipt,
+			} = reservedActionGateway(mode);
 
-		const receipt = gateway.execute({
-			actionId: `reserved-${kind}-${mode}`,
-			kind,
-		});
+			const receipt = gateway.execute({
+				actionId: `reserved-${kind}-${mode}`,
+				kind,
+			});
 
-		expect(receipt).toMatchObject({
-			actionId: `reserved-${kind}-${mode}`,
-			kind,
-			outcome: "denied",
-			reason: expect.stringContaining("ACTION_FAMILY_UNAVAILABLE"),
-		});
-		expect(Object.isFrozen(receipt)).toBe(true);
-		expect(rawRunCommand).not.toHaveBeenCalled();
-		expect(rawWriteFile).not.toHaveBeenCalled();
-		expect(ociRunCommand).not.toHaveBeenCalled();
-		expect(ociWriteFile).not.toHaveBeenCalled();
-		expect(onReceipt).not.toHaveBeenCalled();
-	});
-
-	it.each(
-		RESERVED_ACTION_FAMILIES.flatMap((kind) =>
-			ACTION_GATEWAY_TEST_MODES.map((mode) => [kind, mode] as const),
-		),
-	)("rejects extra fields on the reserved %s action family in %s mode", (kind, mode) => {
-		const {
-			gateway,
-			rawRunCommand,
-			rawWriteFile,
-			ociRunCommand,
-			ociWriteFile,
-		} = reservedActionGateway(mode);
-
-		const receipt = gateway.execute({
-			actionId: `reserved-extra-${kind}-${mode}`,
-			kind,
-			command: "git",
-			path: "output.txt",
-			payload: { value: "must not become authority" },
-			endpoint: "https://example.invalid",
-			metadata: { value: "must not become authority" },
-		} as never);
-
-		expect(receipt).toMatchObject({
-			actionId: `reserved-extra-${kind}-${mode}`,
-			kind,
-			outcome: "denied",
-			reason: "action contains an unknown field",
-		});
-		expect(rawRunCommand).not.toHaveBeenCalled();
-		expect(rawWriteFile).not.toHaveBeenCalled();
-		expect(ociRunCommand).not.toHaveBeenCalled();
-		expect(ociWriteFile).not.toHaveBeenCalled();
-	});
+			expect(receipt).toMatchObject({
+				actionId: `reserved-${kind}-${mode}`,
+				kind,
+				outcome: "denied",
+				reason: expect.stringContaining("ACTION_FAMILY_UNAVAILABLE"),
+			});
+			expect(Object.isFrozen(receipt)).toBe(true);
+			expect(rawRunCommand).not.toHaveBeenCalled();
+			expect(rawWriteFile).not.toHaveBeenCalled();
+			expect(ociRunCommand).not.toHaveBeenCalled();
+			expect(ociWriteFile).not.toHaveBeenCalled();
+			expect(onReceipt).not.toHaveBeenCalled();
+		},
+	);
 
 	it.each(
 		RESERVED_ACTION_FAMILIES.flatMap((kind) =>
 			ACTION_GATEWAY_TEST_MODES.map((mode) => [kind, mode] as const),
 		),
-	)("rejects accessors on the reserved %s action family in %s mode without invoking them", (kind, mode) => {
-		const {
-			gateway,
-			rawRunCommand,
-			rawWriteFile,
-			ociRunCommand,
-			ociWriteFile,
-		} = reservedActionGateway(mode);
-		const action = {
-			actionId: `reserved-accessor-${kind}-${mode}`,
-			kind,
-			get metadata() {
-				throw new Error("reserved action accessor must not execute");
-			},
-		};
+	)(
+		"rejects extra fields on the reserved %s action family in %s mode",
+		(kind, mode) => {
+			const {
+				gateway,
+				rawRunCommand,
+				rawWriteFile,
+				ociRunCommand,
+				ociWriteFile,
+			} = reservedActionGateway(mode);
 
-		const receipt = gateway.execute(action as never);
+			const receipt = gateway.execute({
+				actionId: `reserved-extra-${kind}-${mode}`,
+				kind,
+				command: "git",
+				path: "output.txt",
+				payload: { value: "must not become authority" },
+				endpoint: "https://example.invalid",
+				metadata: { value: "must not become authority" },
+			} as never);
 
-		expect(receipt).toMatchObject({
-			actionId: `reserved-accessor-${kind}-${mode}`,
-			kind,
-			outcome: "denied",
-			reason: "action cannot contain accessor fields",
-		});
-		expect(rawRunCommand).not.toHaveBeenCalled();
-		expect(rawWriteFile).not.toHaveBeenCalled();
-		expect(ociRunCommand).not.toHaveBeenCalled();
-		expect(ociWriteFile).not.toHaveBeenCalled();
-	});
+			expect(receipt).toMatchObject({
+				actionId: `reserved-extra-${kind}-${mode}`,
+				kind,
+				outcome: "denied",
+				reason: "action contains an unknown field",
+			});
+			expect(rawRunCommand).not.toHaveBeenCalled();
+			expect(rawWriteFile).not.toHaveBeenCalled();
+			expect(ociRunCommand).not.toHaveBeenCalled();
+			expect(ociWriteFile).not.toHaveBeenCalled();
+		},
+	);
+
+	it.each(
+		RESERVED_ACTION_FAMILIES.flatMap((kind) =>
+			ACTION_GATEWAY_TEST_MODES.map((mode) => [kind, mode] as const),
+		),
+	)(
+		"rejects accessors on the reserved %s action family in %s mode without invoking them",
+		(kind, mode) => {
+			const {
+				gateway,
+				rawRunCommand,
+				rawWriteFile,
+				ociRunCommand,
+				ociWriteFile,
+			} = reservedActionGateway(mode);
+			const action = {
+				actionId: `reserved-accessor-${kind}-${mode}`,
+				kind,
+				get metadata() {
+					throw new Error("reserved action accessor must not execute");
+				},
+			};
+
+			const receipt = gateway.execute(action as never);
+
+			expect(receipt).toMatchObject({
+				actionId: `reserved-accessor-${kind}-${mode}`,
+				kind,
+				outcome: "denied",
+				reason: "action cannot contain accessor fields",
+			});
+			expect(rawRunCommand).not.toHaveBeenCalled();
+			expect(rawWriteFile).not.toHaveBeenCalled();
+			expect(ociRunCommand).not.toHaveBeenCalled();
+			expect(ociWriteFile).not.toHaveBeenCalled();
+		},
+	);
 
 	it.each(
 		RESERVED_ACTION_FAMILIES.flatMap((kind) =>

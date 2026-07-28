@@ -507,49 +507,49 @@ describe("storage adapter", () => {
 		expect(storage.getCandidateArtifact(run.id)).toBeNull();
 	});
 
-	it.each([
-		"sealed-v2",
-		"sealed_v3",
-	] as const)("prepares promotion from %s evidence without falling back to a legacy receipt", (actionEvidenceVersion) => {
-		const root = mkdtempSync(
-			join(
-				tmpdir(),
-				`buildplane-store-${actionEvidenceVersion}-candidate-promotion-`,
-			),
-		);
-		const storage = createBuildplaneStorage(root);
-		storage.initializeProject();
-		const run = storage.createRun(
-			{ ...packet, provenance_ref: "admission:unit-1" },
-			{ trustLane: "governed" },
-		);
-		storage.recordWorkspacePrepared(run.id, {
-			path: createWorkspacePath(root, run.id),
-			headSha: "b".repeat(40),
-			sourceProjectRoot: root,
-		});
-		storage.markRunRunning(run.id);
-		storage.commitRunCandidateOutcome(run.id, {
-			decision,
-			candidate: sealedCandidateArtifact(run.id, actionEvidenceVersion),
-		});
-		const candidate = storage.getCandidateArtifact(run.id);
-		if (!candidate) throw new Error("Expected sealed candidate artifact.");
+	it.each(["sealed-v2", "sealed_v3"] as const)(
+		"prepares promotion from %s evidence without falling back to a legacy receipt",
+		(actionEvidenceVersion) => {
+			const root = mkdtempSync(
+				join(
+					tmpdir(),
+					`buildplane-store-${actionEvidenceVersion}-candidate-promotion-`,
+				),
+			);
+			const storage = createBuildplaneStorage(root);
+			storage.initializeProject();
+			const run = storage.createRun(
+				{ ...packet, provenance_ref: "admission:unit-1" },
+				{ trustLane: "governed" },
+			);
+			storage.recordWorkspacePrepared(run.id, {
+				path: createWorkspacePath(root, run.id),
+				headSha: "b".repeat(40),
+				sourceProjectRoot: root,
+			});
+			storage.markRunRunning(run.id);
+			storage.commitRunCandidateOutcome(run.id, {
+				decision,
+				candidate: sealedCandidateArtifact(run.id, actionEvidenceVersion),
+			});
+			const candidate = storage.getCandidateArtifact(run.id);
+			if (!candidate) throw new Error("Expected sealed candidate artifact.");
 
-		const prepared = storage.prepareCandidatePromotion(
-			candidatePromotionIntent(candidate),
-		);
+			const prepared = storage.prepareCandidatePromotion(
+				candidatePromotionIntent(candidate),
+			);
 
-		expect(prepared).toMatchObject({
-			state: "prepared",
-			candidate: {
-				schemaVersion: 2,
-				actionEvidenceVersion,
-				actionReceiptSetRef: "tape:action-receipt-set:workflow-1/unit-1/1",
-			},
-		});
-		expect(prepared.candidate).not.toHaveProperty("actionReceiptDigest");
-	});
+			expect(prepared).toMatchObject({
+				state: "prepared",
+				candidate: {
+					schemaVersion: 2,
+					actionEvidenceVersion,
+					actionReceiptSetRef: "tape:action-receipt-set:workflow-1/unit-1/1",
+				},
+			});
+			expect(prepared.candidate).not.toHaveProperty("actionReceiptDigest");
+		},
+	);
 
 	it("requires a new workflow attempt before recording another candidate", () => {
 		const root = mkdtempSync(

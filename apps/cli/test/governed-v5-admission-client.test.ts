@@ -232,16 +232,19 @@ describe("governed V5 admission native client", () => {
 		["linux", "01919000-0000-7000-8000-00000000008A", runId, envelopeDigest],
 		["linux", requestId, "not-a-run", envelopeDigest],
 		["linux", requestId, runId, "sha256:BAD"],
-	] as const)("does not spawn for unsupported or noncanonical input", async (platform, request, run, digest) => {
-		childProcess.spawnSync.mockClear();
-		setPlatform(platform);
-		await expect(
-			requestGovernedV5Admission({
-				requestId: request,
-				runId: run,
-				v5EnvelopeDigest: digest,
-			}),
-		).resolves.toBeUndefined();
-		expect(childProcess.spawnSync).not.toHaveBeenCalled();
-	});
+	] as const)(
+		"does not spawn for unsupported or noncanonical input",
+		async (platform, request, run, digest) => {
+			childProcess.spawnSync.mockClear();
+			setPlatform(platform);
+			await expect(
+				requestGovernedV5Admission({
+					requestId: request,
+					runId: run,
+					v5EnvelopeDigest: digest,
+				}),
+			).resolves.toBeUndefined();
+			expect(childProcess.spawnSync).not.toHaveBeenCalled();
+		},
+	);
 });

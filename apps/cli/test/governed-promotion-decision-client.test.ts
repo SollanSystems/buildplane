@@ -128,14 +128,17 @@ describe("protected promotion-decision native client", () => {
 		["win32", approvalEventId, "promote"],
 		["linux", "123E4567-E89B-12D3-A456-426614174001", "promote"],
 		["linux", "host-recovery/promotion-decision", "reject"],
-	] as const)("does not spawn for unsupported or noncanonical input", async (platform, eventId, decision) => {
-		setPlatform(platform);
-		await expect(
-			submitProtectedPromotionDecision({
-				promotionApprovalRequestEventId: eventId,
-				decision,
-			}),
-		).resolves.toBeUndefined();
-		expect(childProcess.spawnSync).not.toHaveBeenCalled();
-	});
+	] as const)(
+		"does not spawn for unsupported or noncanonical input",
+		async (platform, eventId, decision) => {
+			setPlatform(platform);
+			await expect(
+				submitProtectedPromotionDecision({
+					promotionApprovalRequestEventId: eventId,
+					decision,
+				}),
+			).resolves.toBeUndefined();
+			expect(childProcess.spawnSync).not.toHaveBeenCalled();
+		},
+	);
 });

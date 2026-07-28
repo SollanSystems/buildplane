@@ -520,152 +520,154 @@ function createPromotionGateHarness(
 }
 
 describe("governed candidate root invariants", () => {
-	it.each(
-		SCENARIOS,
-	)("leaves HEAD, tree, commit count, and worktree unchanged for $label", async (scenario) => {
-		const fixture = createFixture();
-		try {
-			const baseline = rootSnapshot(fixture.root);
-			const reviewerAttempt = vi.fn(
-				async (): Promise<ReadOnlyCandidateReviewResult> => {
-					// If an untrusted callback ever becomes reachable before the
-					// native reviewer/evidence binding exists, it could advance the
-					// target ref. The governed strategy must reject before this runs.
-					git(fixture.root, [
-						"update-ref",
-						fixture.rootRef,
-						fixture.candidate.candidateCommitSha,
-						fixture.baseSha,
-					]);
-					return reviewerResult(
-						reviewOutputForScenario(scenario, fixture.candidate),
-					);
-				},
-			);
-			const candidateResult = vi.fn(async (): Promise<RunPacketResult> => {
-				if (scenario.kind === "cancelled") {
-					return {
-						run: {
-							id: "root-invariant-implementer",
-							unitId: "implement",
-							status: "cancelled",
-						},
-					};
-				}
-				if (scenario.kind === "provider-failure") {
-					// A provider failure has no immutable candidate and therefore cannot
-					// reach review or promotion. The root snapshot below guards against
-					// accidental target mutation while the failed result is handled.
-					return {
-						run: {
-							id: "root-invariant-implementer",
-							unitId: "implement",
-							status: "failed",
-						},
-					};
-				}
-				return {
-					run: {
-						id: "root-invariant-implementer",
-						unitId: "implement",
-						status: "passed",
+	it.each(SCENARIOS)(
+		"leaves HEAD, tree, commit count, and worktree unchanged for $label",
+		async (scenario) => {
+			const fixture = createFixture();
+			try {
+				const baseline = rootSnapshot(fixture.root);
+				const reviewerAttempt = vi.fn(
+					async (): Promise<ReadOnlyCandidateReviewResult> => {
+						// If an untrusted callback ever becomes reachable before the
+						// native reviewer/evidence binding exists, it could advance the
+						// target ref. The governed strategy must reject before this runs.
+						git(fixture.root, [
+							"update-ref",
+							fixture.rootRef,
+							fixture.candidate.candidateCommitSha,
+							fixture.baseSha,
+						]);
+						return reviewerResult(
+							reviewOutputForScenario(scenario, fixture.candidate),
+						);
 					},
-					candidate: fixture.candidate,
-					candidateAcceptance: acceptance(
-						fixture.candidate,
-						scenario.kind === "failed-acceptance" ? "rejected" : "passed",
-					),
+				);
+				const candidateResult = vi.fn(async (): Promise<RunPacketResult> => {
+					if (scenario.kind === "cancelled") {
+						return {
+							run: {
+								id: "root-invariant-implementer",
+								unitId: "implement",
+								status: "cancelled",
+							},
+						};
+					}
+					if (scenario.kind === "provider-failure") {
+						// A provider failure has no immutable candidate and therefore cannot
+						// reach review or promotion. The root snapshot below guards against
+						// accidental target mutation while the failed result is handled.
+						return {
+							run: {
+								id: "root-invariant-implementer",
+								unitId: "implement",
+								status: "failed",
+							},
+						};
+					}
+					return {
+						run: {
+							id: "root-invariant-implementer",
+							unitId: "implement",
+							status: "passed",
+						},
+						candidate: fixture.candidate,
+						candidateAcceptance: acceptance(
+							fixture.candidate,
+							scenario.kind === "failed-acceptance" ? "rejected" : "passed",
+						),
+					};
+				});
+				const orchestrator: StrategyOrchestrator = {
+					runPacketAsync: async () => {
+						throw new Error("governed strategy must not use ambient execution");
+					},
+					runCandidatePacketAsync: candidateResult,
+					runReadOnlyCandidateReviewAsync: reviewerAttempt,
+					runGraphAsync: async () => {
+						throw new Error("governed strategy must not dispatch a graph");
+					},
 				};
-			});
-			const orchestrator: StrategyOrchestrator = {
-				runPacketAsync: async () => {
-					throw new Error("governed strategy must not use ambient execution");
-				},
-				runCandidatePacketAsync: candidateResult,
-				runReadOnlyCandidateReviewAsync: reviewerAttempt,
-				runGraphAsync: async () => {
-					throw new Error("governed strategy must not dispatch a graph");
-				},
-			};
 
-			const result = await runStrategy(strategy(), orchestrator, undefined, {
-				lane: "governed-candidate",
-				governedDispatch: governedDispatch(fixture.baseSha),
-			});
+				const result = await runStrategy(strategy(), orchestrator, undefined, {
+					lane: "governed-candidate",
+					governedDispatch: governedDispatch(fixture.baseSha),
+				});
 
-			expect(result.outcome).toBe("failed");
-			expect(result.mergeDecision.outcome).toBe("rejected");
-			expect(candidateResult).toHaveBeenCalledTimes(1);
-			expect(reviewerAttempt).not.toHaveBeenCalled();
-			if (scenario.kind === "provider-failure") {
-				expect(result.candidate).toBeUndefined();
-				expect(result.candidateAcceptance).toBeUndefined();
-				expect(result.reviewVerdict).toBeUndefined();
-				expect(result.reviewRecord).toBeUndefined();
+				expect(result.outcome).toBe("failed");
+				expect(result.mergeDecision.outcome).toBe("rejected");
+				expect(candidateResult).toHaveBeenCalledTimes(1);
+				expect(reviewerAttempt).not.toHaveBeenCalled();
+				if (scenario.kind === "provider-failure") {
+					expect(result.candidate).toBeUndefined();
+					expect(result.candidateAcceptance).toBeUndefined();
+					expect(result.reviewVerdict).toBeUndefined();
+					expect(result.reviewRecord).toBeUndefined();
+				}
+				if (scenario.kind === "failed-acceptance") {
+					expect(result.mergeDecision.reasons.join(" ")).toMatch(
+						/deterministic acceptance/i,
+					);
+				} else if (
+					scenario.kind === "cancelled" ||
+					scenario.kind === "provider-failure"
+				) {
+					expect(result.mergeDecision.reasons.join(" ")).toMatch(
+						/implementer did not pass/i,
+					);
+				} else {
+					expect(result.mergeDecision.reasons.join(" ")).toMatch(
+						/native-verified reviewer dispatch/i,
+					);
+				}
+				expectRootUnchanged(fixture.root, baseline);
+			} finally {
+				rmSync(fixture.root, { recursive: true, force: true });
 			}
-			if (scenario.kind === "failed-acceptance") {
-				expect(result.mergeDecision.reasons.join(" ")).toMatch(
-					/deterministic acceptance/i,
-				);
-			} else if (
-				scenario.kind === "cancelled" ||
-				scenario.kind === "provider-failure"
-			) {
-				expect(result.mergeDecision.reasons.join(" ")).toMatch(
-					/implementer did not pass/i,
-				);
-			} else {
-				expect(result.mergeDecision.reasons.join(" ")).toMatch(
-					/native-verified reviewer dispatch/i,
-				);
-			}
-			expectRootUnchanged(fixture.root, baseline);
-		} finally {
-			rmSync(fixture.root, { recursive: true, force: true });
-		}
-	});
+		},
+	);
 });
 
 describe("candidate-promotion semantic root invariants", () => {
-	it.each(
-		PROMOTION_GATE_SCENARIOS,
-	)("does not select a promotion effect for $label", async (scenario) => {
-		const fixture = createFixture();
-		try {
-			const candidate = promotionCandidate(fixture);
-			const recordedCandidate = scenario.candidateRegenerated
-				? regeneratedPromotionCandidate(fixture, candidate)
-				: candidate;
-			const harness = createPromotionGateHarness(
-				fixture,
-				scenario.candidateRecorded === false ? null : recordedCandidate,
-			);
-			const baseline = rootSnapshot(fixture.root);
-			const input = promotionInput(fixture, candidate, scenario);
-			if (scenario.candidateRegenerated) {
-				expect(recordedCandidate.candidateDigest).not.toBe(
-					input.decision.candidateDigest,
+	it.each(PROMOTION_GATE_SCENARIOS)(
+		"does not select a promotion effect for $label",
+		async (scenario) => {
+			const fixture = createFixture();
+			try {
+				const candidate = promotionCandidate(fixture);
+				const recordedCandidate = scenario.candidateRegenerated
+					? regeneratedPromotionCandidate(fixture, candidate)
+					: candidate;
+				const harness = createPromotionGateHarness(
+					fixture,
+					scenario.candidateRecorded === false ? null : recordedCandidate,
 				);
-				expect(recordedCandidate.candidateDigest).not.toBe(
-					input.acceptance.candidateDigest,
-				);
-				expect(recordedCandidate.candidateDigest).not.toBe(
-					input.review.candidateDigest,
-				);
-				expect(recordedCandidate.candidateDigest).not.toBe(
-					input.review.verdict.candidateDigest,
-				);
+				const baseline = rootSnapshot(fixture.root);
+				const input = promotionInput(fixture, candidate, scenario);
+				if (scenario.candidateRegenerated) {
+					expect(recordedCandidate.candidateDigest).not.toBe(
+						input.decision.candidateDigest,
+					);
+					expect(recordedCandidate.candidateDigest).not.toBe(
+						input.acceptance.candidateDigest,
+					);
+					expect(recordedCandidate.candidateDigest).not.toBe(
+						input.review.candidateDigest,
+					);
+					expect(recordedCandidate.candidateDigest).not.toBe(
+						input.review.verdict.candidateDigest,
+					);
+				}
+
+				await expect(
+					harness.orchestrator.recordCandidatePromotion(input),
+				).rejects.toThrow(scenario.expectedError);
+
+				expect(harness.decisionWrites()).toBe(0);
+				expect(harness.targetMutationCalls()).toBe(0);
+				expectRootUnchanged(fixture.root, baseline);
+			} finally {
+				rmSync(fixture.root, { recursive: true, force: true });
 			}
-
-			await expect(
-				harness.orchestrator.recordCandidatePromotion(input),
-			).rejects.toThrow(scenario.expectedError);
-
-			expect(harness.decisionWrites()).toBe(0);
-			expect(harness.targetMutationCalls()).toBe(0);
-			expectRootUnchanged(fixture.root, baseline);
-		} finally {
-			rmSync(fixture.root, { recursive: true, force: true });
-		}
-	});
+		},
+	);
 });

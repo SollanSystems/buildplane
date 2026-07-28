@@ -962,26 +962,26 @@ describe("native governed dispatch resolver", () => {
 		expect(resolved).not.toHaveProperty("promotionResolver");
 	});
 
-	it.each([
-		"adversary",
-		"judge",
-	] as const)("accepts a sealed %s review role for pending approval status", (reviewerRole) => {
-		const fixture = nativeFixture(
-			NATIVE_GOVERNED_DISPATCH_RESOLUTION_V2_PROMOTION_APPROVAL_FIXTURE,
-		);
-		const recovery = fixture.recovery as Record<string, unknown>;
-		const reviews = recovery.reviews as Record<string, unknown>[];
-		reviews[0] = {
-			...reviews[0],
-			reviewer_execution_role: reviewerRole,
-		};
+	it.each(["adversary", "judge"] as const)(
+		"accepts a sealed %s review role for pending approval status",
+		(reviewerRole) => {
+			const fixture = nativeFixture(
+				NATIVE_GOVERNED_DISPATCH_RESOLUTION_V2_PROMOTION_APPROVAL_FIXTURE,
+			);
+			const recovery = fixture.recovery as Record<string, unknown>;
+			const reviews = recovery.reviews as Record<string, unknown>[];
+			reviews[0] = {
+				...reviews[0],
+				reviewer_execution_role: reviewerRole,
+			};
 
-		const resolved = parseNativeFixture(fixture);
+			const resolved = parseNativeFixture(fixture);
 
-		expect(resolved.phase).toBe("promotion_approval_pending");
-		expect(resolved.pendingPromotionApprovalRecoveryWork).toHaveLength(1);
-		expect(resolved).not.toHaveProperty("promotionResolver");
-	});
+			expect(resolved.phase).toBe("promotion_approval_pending");
+			expect(resolved.pendingPromotionApprovalRecoveryWork).toHaveLength(1);
+			expect(resolved).not.toHaveProperty("promotionResolver");
+		},
+	);
 
 	it("requires a native full lineage for a pending promotion-approval handoff", () => {
 		const fixture = nativeFixture(

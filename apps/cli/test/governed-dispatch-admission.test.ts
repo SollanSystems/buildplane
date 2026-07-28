@@ -391,15 +391,20 @@ describe("governed dispatch admission", () => {
 				({ ...input, unexpected: true }) as GovernedDispatchAdmissionInputV3,
 			/unknown/i,
 		],
-	] as const)("fails closed for %s without emitting", async (_label, alter, error) => {
-		const fake = createFakeEmitter();
+	] as const)(
+		"fails closed for %s without emitting",
+		async (_label, alter, error) => {
+			const fake = createFakeEmitter();
 
-		await expect(
-			__testOnlyIssueGovernedDispatchAdmissionV3(alter(request(fake.emitter))),
-		).rejects.toThrow(error);
-		expect(fake.emits).toEqual([]);
-		expect(fake.flushCalls).toBe(0);
-	});
+			await expect(
+				__testOnlyIssueGovernedDispatchAdmissionV3(
+					alter(request(fake.emitter)),
+				),
+			).rejects.toThrow(error);
+			expect(fake.emits).toEqual([]);
+			expect(fake.flushCalls).toBe(0);
+		},
+	);
 
 	it("requires the injected signed emitter to be bound to the requested run", async () => {
 		const fake = createFakeEmitter({

@@ -654,18 +654,21 @@ describe("candidate-bound promotion transaction", () => {
 	it.each([
 		["V1", candidate()],
 		["sealed-v2 V2", candidateV2()],
-	] as const)("keeps %s candidate promotion replay-only outside the explicit raw compatibility lane", async (_lineage, candidateProjection) => {
-		const harness = makeGovernedHarness({ candidateProjection });
+	] as const)(
+		"keeps %s candidate promotion replay-only outside the explicit raw compatibility lane",
+		async (_lineage, candidateProjection) => {
+			const harness = makeGovernedHarness({ candidateProjection });
 
-		await expect(
-			harness.orchestrator.recordCandidatePromotion(promotionInput()),
-		).rejects.toThrow(/pre-sealed V3 candidate promotion is replay-only/i);
+			await expect(
+				harness.orchestrator.recordCandidatePromotion(promotionInput()),
+			).rejects.toThrow(/pre-sealed V3 candidate promotion is replay-only/i);
 
-		expect(harness.order).toEqual([]);
-		expect(harness.decisionEvents).toEqual([]);
-		expect(harness.rootMutations).toBe(0);
-		expect(harness.promotionCalls).toBe(0);
-	});
+			expect(harness.order).toEqual([]);
+			expect(harness.decisionEvents).toEqual([]);
+			expect(harness.rootMutations).toBe(0);
+			expect(harness.promotionCalls).toBe(0);
+		},
+	);
 
 	it("does not recover a recorded pre-sealed-V3 promotion through the generic Git adapter", async () => {
 		const harness = makeGovernedHarness();

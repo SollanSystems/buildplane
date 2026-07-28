@@ -60,39 +60,33 @@ describe("graph scheduler containment", () => {
 		expect(() => createGraphScheduler(graph)).toThrow(/duplicate unit id/i);
 	});
 
-	it.each([
-		0,
-		-1,
-		1.5,
-		Number.NaN,
-		Number.POSITIVE_INFINITY,
-	])("rejects an invalid graph maxConcurrent value (%p)", (maxConcurrent) => {
-		const graph: UnitGraph = {
-			nodes: [makeGraphNode("unit-a")],
-			maxConcurrent,
-		};
+	it.each([0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY])(
+		"rejects an invalid graph maxConcurrent value (%p)",
+		(maxConcurrent) => {
+			const graph: UnitGraph = {
+				nodes: [makeGraphNode("unit-a")],
+				maxConcurrent,
+			};
 
-		expect(() => createGraphScheduler(graph)).toThrow(
-			/maxConcurrent.*positive safe integer/i,
-		);
-	});
+			expect(() => createGraphScheduler(graph)).toThrow(
+				/maxConcurrent.*positive safe integer/i,
+			);
+		},
+	);
 
-	it.each([
-		0,
-		-1,
-		1.5,
-		Number.NaN,
-		Number.POSITIVE_INFINITY,
-	])("rejects an invalid options maxConcurrent value (%p)", (maxConcurrent) => {
-		const graph: UnitGraph = {
-			nodes: [makeGraphNode("unit-a")],
-			maxConcurrent: 2,
-		};
+	it.each([0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY])(
+		"rejects an invalid options maxConcurrent value (%p)",
+		(maxConcurrent) => {
+			const graph: UnitGraph = {
+				nodes: [makeGraphNode("unit-a")],
+				maxConcurrent: 2,
+			};
 
-		expect(() => createGraphScheduler(graph, { maxConcurrent })).toThrow(
-			/maxConcurrent.*positive safe integer/i,
-		);
-	});
+			expect(() => createGraphScheduler(graph, { maxConcurrent })).toThrow(
+				/maxConcurrent.*positive safe integer/i,
+			);
+		},
+	);
 });
 
 describe("graph packet containment", () => {
@@ -203,25 +197,28 @@ describe("graph packet containment", () => {
 	it.each([
 		["a string", "valid-first"],
 		["an array containing a non-string", ["valid-first", 42]],
-	])("rejects dependsOn supplied as %s before graph start or dispatch", async (_description, dependsOn) => {
-		const orchestrator = createGraphOrchestrator();
-		const dispatch = vi.spyOn(orchestrator, "runPacketAsync");
-		const bus = createEventBus();
-		const eventKinds: string[] = [];
-		bus.subscribe((event) => eventKinds.push(event.kind));
-		const graph = {
-			nodes: [
-				{
-					...makeGraphNode("valid-first"),
-					dependsOn,
-				},
-			],
-		} as unknown as UnitGraph;
+	])(
+		"rejects dependsOn supplied as %s before graph start or dispatch",
+		async (_description, dependsOn) => {
+			const orchestrator = createGraphOrchestrator();
+			const dispatch = vi.spyOn(orchestrator, "runPacketAsync");
+			const bus = createEventBus();
+			const eventKinds: string[] = [];
+			bus.subscribe((event) => eventKinds.push(event.kind));
+			const graph = {
+				nodes: [
+					{
+						...makeGraphNode("valid-first"),
+						dependsOn,
+					},
+				],
+			} as unknown as UnitGraph;
 
-		await expect(
-			orchestrator.runGraphAsync(graph, bus, { lane: "raw-legacy" }),
-		).rejects.toThrow(/dependsOn must be an array of strings/i);
-		expect(eventKinds).toEqual([]);
-		expect(dispatch).not.toHaveBeenCalled();
-	});
+			await expect(
+				orchestrator.runGraphAsync(graph, bus, { lane: "raw-legacy" }),
+			).rejects.toThrow(/dependsOn must be an array of strings/i);
+			expect(eventKinds).toEqual([]);
+			expect(dispatch).not.toHaveBeenCalled();
+		},
+	);
 });
