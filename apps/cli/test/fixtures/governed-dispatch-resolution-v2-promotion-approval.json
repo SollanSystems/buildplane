@@ -223,7 +223,7 @@
 				"review_ref": "review:fixture",
 				"decision": "approve",
 				"findings": [],
-				"confidence": 1,
+				"confidence": 1.0,
 				"reviewer_manifest_digest": "sha256:9999999999999999999999999999999999999999999999999999999999999999",
 				"review_verdict_action_id": "review:fixture/action",
 				"review_action_request_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
