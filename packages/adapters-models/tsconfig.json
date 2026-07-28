@@ -4,9 +4,8 @@
 		"outDir": "dist",
 		"rootDir": "src",
 		"composite": true,
-		"baseUrl": "../..",
 		"paths": {
-			"@buildplane/ledger-client": ["packages/ledger-client/src/index.ts"]
+			"@buildplane/ledger-client": ["../ledger-client/src/index.ts"]
 		}
 	},
 	"include": ["src"],

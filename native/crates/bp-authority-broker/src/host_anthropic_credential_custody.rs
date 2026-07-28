@@ -337,7 +337,7 @@ mod tests {
 
     #[test]
     fn issues_only_a_valid_descriptor_bound_credential() {
-        let fixture = CredentialFixture::new(b"short-lived-host-secret");
+        let fixture = CredentialFixture::new(b"test");
         let broker = fixture.broker();
         assert!(block_on(broker.available()).expect("availability"));
         let credential = block_on(broker.issue_for_messages()).expect("credential");
@@ -349,7 +349,7 @@ mod tests {
 
     #[test]
     fn missing_credential_reports_unavailable_without_authority() {
-        let fixture = CredentialFixture::new(b"short-lived-host-secret");
+        let fixture = CredentialFixture::new(b"test");
         fs::remove_file(&fixture.credential_file).expect("remove credential");
         let broker = fixture.broker();
         assert!(!block_on(broker.available()).expect("closed absence"));
@@ -363,7 +363,7 @@ mod tests {
 
     #[test]
     fn rejects_symlinks_hardlinks_and_unsafe_permissions() {
-        let fixture = CredentialFixture::new(b"short-lived-host-secret");
+        let fixture = CredentialFixture::new(b"test");
         let original = fixture.credential_directory.join("original");
         fs::rename(&fixture.credential_file, &original).expect("move credential");
         symlink(&original, &fixture.credential_file).expect("credential symlink");
@@ -382,7 +382,7 @@ mod tests {
 
     #[test]
     fn rejects_unsafe_directory_invalid_content_and_oversized_secret() {
-        let fixture = CredentialFixture::new(b"short-lived-host-secret");
+        let fixture = CredentialFixture::new(b"test");
         fs::set_permissions(
             &fixture.credential_directory,
             fs::Permissions::from_mode(0o750),

@@ -1461,7 +1461,7 @@ mod tests {
             let credential_directory = self.authority_root.join("credentials");
             create_private_directory(&credential_directory);
             let credential = credential_directory.join("anthropic-api-key-v1");
-            fs::write(&credential, b"short-lived-host-secret").expect("credential");
+            fs::write(&credential, b"test").expect("credential");
             set_mode(&credential, 0o600);
         }
 
