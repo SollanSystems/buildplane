@@ -1,5 +1,11 @@
 # buildplane
 
+## 0.15.0
+
+### Minor Changes
+
+- a53519b: Complete governed promotion only after the protected host seals an immutable candidate result and terminal workflow record, while keeping rejection lease-free and reconciliation fail-closed.
+
 ## 0.14.2
 
 ### Patch Changes
