@@ -1,9 +1,8 @@
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it } from "vitest";
 import {
-	makeBuildplaneRunFixture,
+	makeLegacyForkPreflightTapeFixture,
 	resolveNativeBinaryForLedgerTests,
 } from "./fixtures.js";
 
@@ -51,37 +50,8 @@ async function runForkCli(
 
 describe("fork invalid target", () => {
 	it("errors when target is run_started (fork at root)", async () => {
-		const parent = await makeBuildplaneRunFixture({
-			packet: {
-				unit: {
-					id: "u",
-					kind: "command",
-					scope: "task",
-					inputRefs: [],
-					expectedOutputs: ["out.txt"],
-					verificationContract: "exit-0-and-required-outputs",
-					policyProfile: "default",
-				},
-				execution: { command: "sh", args: ["-c", "echo hi > out.txt"] },
-				verification: { requiredOutputs: ["out.txt"] },
-			},
-		});
+		const parent = await makeLegacyForkPreflightTapeFixture();
 		try {
-			const db = new DatabaseSync(parent.eventsDbPath);
-			const runId = (
-				db.prepare("SELECT DISTINCT run_id FROM events LIMIT 1").get() as {
-					run_id: string;
-				}
-			).run_id;
-			const runStartId = (
-				db
-					.prepare(
-						"SELECT id FROM events WHERE kind = 'run_started' ORDER BY id ASC LIMIT 1",
-					)
-					.get() as { id: string }
-			).id;
-			db.close();
-
 			const packetPath = join(parent.dir, "fork.json");
 			writeFileSync(
 				packetPath,
@@ -91,9 +61,10 @@ describe("fork invalid target", () => {
 			const result = await runForkCli(
 				[
 					"fork",
-					runId,
+					"--raw",
+					parent.runId,
 					"--at",
-					runStartId,
+					parent.runStartedEventId,
 					"--packet",
 					packetPath,
 					"--workspace",
@@ -109,39 +80,8 @@ describe("fork invalid target", () => {
 	}, 60_000);
 
 	it("errors when target is non-unit event (e.g. git_checkpoint)", async () => {
-		const parent = await makeBuildplaneRunFixture({
-			packet: {
-				unit: {
-					id: "u",
-					kind: "command",
-					scope: "task",
-					inputRefs: [],
-					expectedOutputs: ["out.txt"],
-					verificationContract: "exit-0-and-required-outputs",
-					policyProfile: "default",
-				},
-				execution: { command: "sh", args: ["-c", "echo hi > out.txt"] },
-				verification: { requiredOutputs: ["out.txt"] },
-			},
-		});
+		const parent = await makeLegacyForkPreflightTapeFixture();
 		try {
-			const db = new DatabaseSync(parent.eventsDbPath);
-			const runId = (
-				db.prepare("SELECT DISTINCT run_id FROM events LIMIT 1").get() as {
-					run_id: string;
-				}
-			).run_id;
-			const ckptRow = db
-				.prepare(
-					"SELECT id FROM events WHERE kind = 'git_checkpoint' ORDER BY id ASC LIMIT 1",
-				)
-				.get() as { id: string } | undefined;
-			db.close();
-			if (!ckptRow) {
-				// No checkpoints in tape (e.g. wiring gap) — skip the assertion.
-				return;
-			}
-
 			const packetPath = join(parent.dir, "fork.json");
 			writeFileSync(
 				packetPath,
@@ -151,9 +91,10 @@ describe("fork invalid target", () => {
 			const result = await runForkCli(
 				[
 					"fork",
-					runId,
+					"--raw",
+					parent.runId,
 					"--at",
-					ckptRow.id,
+					parent.preUnitGitCheckpointEventId,
 					"--packet",
 					packetPath,
 					"--workspace",
@@ -169,30 +110,8 @@ describe("fork invalid target", () => {
 	}, 60_000);
 
 	it("errors when target event id does not exist", async () => {
-		const parent = await makeBuildplaneRunFixture({
-			packet: {
-				unit: {
-					id: "u",
-					kind: "command",
-					scope: "task",
-					inputRefs: [],
-					expectedOutputs: ["out.txt"],
-					verificationContract: "exit-0-and-required-outputs",
-					policyProfile: "default",
-				},
-				execution: { command: "sh", args: ["-c", "echo hi > out.txt"] },
-				verification: { requiredOutputs: ["out.txt"] },
-			},
-		});
+		const parent = await makeLegacyForkPreflightTapeFixture();
 		try {
-			const db = new DatabaseSync(parent.eventsDbPath);
-			const runId = (
-				db.prepare("SELECT DISTINCT run_id FROM events LIMIT 1").get() as {
-					run_id: string;
-				}
-			).run_id;
-			db.close();
-
 			const packetPath = join(parent.dir, "fork.json");
 			writeFileSync(
 				packetPath,
@@ -203,7 +122,8 @@ describe("fork invalid target", () => {
 			const result = await runForkCli(
 				[
 					"fork",
-					runId,
+					"--raw",
+					parent.runId,
 					"--at",
 					bogus,
 					"--packet",

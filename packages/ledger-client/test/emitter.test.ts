@@ -31,6 +31,7 @@ function createMock() {
 
 describe("createTapeEmitter", () => {
 	const runId = "01919000-0000-7000-8000-000000000000";
+	const digest = `sha256:${"a".repeat(64)}`;
 
 	it("resolves after handshake success", async () => {
 		const { stdin, stderr, childExit } = createMock();
@@ -150,5 +151,310 @@ describe("createTapeEmitter", () => {
 			),
 		);
 		await flushP;
+	});
+
+	it("claims a governed activity through the signed ledger control channel", async () => {
+		const { stdin, stderr, childExit } = createMock();
+		const emitterP = createTapeEmitter({
+			childStdin: asWritable(stdin),
+			childStderr: asReadable(stderr),
+			childExit,
+			workspacePath: "/tmp/ws",
+			runId,
+		});
+		setImmediate(() =>
+			stderr.push(
+				`{"control":"handshake_ack","ready":true,"ledger_version":"0.1.0","schema_version":1}\n`,
+			),
+		);
+		const emitter = await emitterP;
+		const claimP = emitter.claimActivity({
+			requestId: "claim-request-1",
+			runId,
+			activityId: "model:attempt:1",
+			idempotencyKey: "sha256:activity",
+			dispatchEventId: "01919000-0000-7000-8000-000000000001",
+			actionRequestEventId: "01919000-0000-7000-8000-000000000002",
+			leaseDurationMs: 30_000,
+		});
+		await new Promise((resolve) => setImmediate(resolve));
+		expect(stdin.writes.at(-1)).toContain(`"control":"claim_activity_v1"`);
+		stderr.push(
+			'{"control":"claim_activity_v1_result","request_id":"claim-request-1","outcome":"granted","claim_event_id":"01919000-0000-7000-8000-000000000003","claim_event_digest":"sha256:claim","lease_id":"lease-1","lease_expires_at":"2026-07-18T12:00:00Z"}\n',
+		);
+		await expect(claimP).resolves.toMatchObject({
+			outcome: "granted",
+			lease_id: "lease-1",
+		});
+	});
+
+	it("fails closed on a malformed activity authority response", async () => {
+		const { stdin, stderr, childExit } = createMock();
+		const emitterP = createTapeEmitter({
+			childStdin: asWritable(stdin),
+			childStderr: asReadable(stderr),
+			childExit,
+			workspacePath: "/tmp/ws",
+			runId,
+		});
+		setImmediate(() =>
+			stderr.push(
+				`{"control":"handshake_ack","ready":true,"ledger_version":"0.1.0","schema_version":1}\n`,
+			),
+		);
+		const emitter = await emitterP;
+		const failure = vi.fn();
+		emitter.onFailure(failure);
+		const claimP = emitter.claimActivity({
+			requestId: "claim-request-1",
+			runId,
+			activityId: "model:attempt:1",
+			idempotencyKey: "sha256:activity",
+			dispatchEventId: "01919000-0000-7000-8000-000000000001",
+			actionRequestEventId: "01919000-0000-7000-8000-000000000002",
+			leaseDurationMs: 30_000,
+		});
+		await new Promise((resolve) => setImmediate(resolve));
+		stderr.push(
+			'{"control":"claim_activity_v1_result","request_id":"claim-request-1","outcome":"granted","claim_event_id":"id","claim_event_digest":"sha256:claim","lease_id":"lease-1","lease_expires_at":"time","unexpected":true}\n',
+		);
+		await expect(claimP).rejects.toThrow(
+			"malformed activity authority response",
+		);
+		expect(failure).toHaveBeenCalledOnce();
+	});
+
+	it("records a terminal governed activity result through the control channel", async () => {
+		const { stdin, stderr, childExit } = createMock();
+		const emitterP = createTapeEmitter({
+			childStdin: asWritable(stdin),
+			childStderr: asReadable(stderr),
+			childExit,
+			workspacePath: "/tmp/ws",
+			runId,
+		});
+		setImmediate(() =>
+			stderr.push(
+				`{"control":"handshake_ack","ready":true,"ledger_version":"0.1.0","schema_version":1}\n`,
+			),
+		);
+		const emitter = await emitterP;
+		const recordP = emitter.recordActivityResult({
+			requestId: "result-request-1",
+			runId,
+			activityId: "model:attempt:1",
+			idempotencyKey: "sha256:activity",
+			leaseId: "lease-1",
+			outcome: "succeeded",
+			resultDigest: digest,
+			resultRef: "cas://result",
+			evidenceDigest: digest,
+			evidenceRef: "cas://evidence",
+		});
+		await new Promise((resolve) => setImmediate(resolve));
+		expect(stdin.writes.at(-1)).toContain(
+			`"control":"record_activity_result_v1"`,
+		);
+		stderr.push(
+			'{"control":"record_activity_result_v1_result","request_id":"result-request-1","outcome":"recorded","result_event_id":"01919000-0000-7000-8000-000000000003","result_event_digest":"sha256:result","result_outcome":"succeeded"}\n',
+		);
+		await expect(recordP).resolves.toMatchObject({
+			outcome: "recorded",
+			result_outcome: "succeeded",
+		});
+	});
+
+	it("heartbeats a governed activity through the authority-owned control channel", async () => {
+		const { stdin, stderr, childExit } = createMock();
+		const emitterP = createTapeEmitter({
+			childStdin: asWritable(stdin),
+			childStderr: asReadable(stderr),
+			childExit,
+			workspacePath: "/tmp/ws",
+			runId,
+		});
+		setImmediate(() =>
+			stderr.push(
+				`{"control":"handshake_ack","ready":true,"ledger_version":"0.1.0","schema_version":1}\n`,
+			),
+		);
+		const emitter = await emitterP;
+		const heartbeatP = emitter.heartbeatActivity({
+			requestId: "heartbeat-request-1",
+			runId,
+			activityId: "model:attempt:1",
+			idempotencyKey: "sha256:activity",
+			leaseId: "lease-1",
+			heartbeatId: "heartbeat-1",
+		});
+		await new Promise((resolve) => setImmediate(resolve));
+		expect(stdin.writes.at(-1)).toContain(`"control":"heartbeat_activity_v1"`);
+		stderr.push(
+			'{"control":"heartbeat_activity_v1_result","request_id":"heartbeat-request-1","outcome":"existing","heartbeat_event_id":"01919000-0000-7000-8000-000000000003","heartbeat_event_digest":"sha256:heartbeat","lease_expires_at":"2026-07-18T12:00:00Z"}\n',
+		);
+		await expect(heartbeatP).resolves.toMatchObject({
+			outcome: "existing",
+			heartbeat_event_id: "01919000-0000-7000-8000-000000000003",
+		});
+	});
+
+	it("resolves a retry candidate action identity through the closed native control", async () => {
+		const { stdin, stderr, childExit } = createMock();
+		const emitterP = createTapeEmitter({
+			childStdin: asWritable(stdin),
+			childStderr: asReadable(stderr),
+			childExit,
+			workspacePath: "/tmp/ws",
+			runId,
+		});
+		setImmediate(() =>
+			stderr.push(
+				`{"control":"handshake_ack","ready":true,"ledger_version":"0.1.0","schema_version":1}\n`,
+			),
+		);
+		const emitter = await emitterP;
+		const identityP = emitter.resolveRetryCandidateActionIdentity({
+			requestId: "retry-identity-request-1",
+			runId,
+			dispatchEventId: "01919000-0000-7000-8000-000000000001",
+			candidateRef: "refs/buildplane/candidates/candidate-1/run-1/2",
+		});
+		await new Promise((resolve) => setImmediate(resolve));
+		expect(JSON.parse(stdin.writes.at(-1)!)).toEqual({
+			control: "resolve_retry_candidate_action_identity_v1",
+			request_id: "retry-identity-request-1",
+			run_id: runId,
+			dispatch_event_id: "01919000-0000-7000-8000-000000000001",
+			candidate_ref: "refs/buildplane/candidates/candidate-1/run-1/2",
+		});
+		stderr.push(
+			'{"control":"resolve_retry_candidate_action_identity_v1_result","request_id":"retry-identity-request-1","outcome":"resolved","action_id":"git-candidate-create:candidate-1/run-1/2","activity_id":"git-candidate-create:candidate-1/run-1/2","idempotency_key":"dispatch:run-1:retry-candidate"}\n',
+		);
+		await expect(identityP).resolves.toMatchObject({
+			outcome: "resolved",
+			action_id: "git-candidate-create:candidate-1/run-1/2",
+		});
+	});
+
+	it("fails closed on a malformed retry candidate action identity response", async () => {
+		const { stdin, stderr, childExit } = createMock();
+		const emitterP = createTapeEmitter({
+			childStdin: asWritable(stdin),
+			childStderr: asReadable(stderr),
+			childExit,
+			workspacePath: "/tmp/ws",
+			runId,
+			activityControlTimeoutMs: 100,
+		});
+		setImmediate(() =>
+			stderr.push(
+				`{"control":"handshake_ack","ready":true,"ledger_version":"0.1.0","schema_version":1}\n`,
+			),
+		);
+		const emitter = await emitterP;
+		const failure = vi.fn();
+		emitter.onFailure(failure);
+		const identityP = emitter.resolveRetryCandidateActionIdentity({
+			requestId: "retry-identity-request-1",
+			runId,
+			dispatchEventId: "01919000-0000-7000-8000-000000000001",
+			candidateRef: "refs/buildplane/candidates/candidate-1/run-1/2",
+		});
+		await new Promise((resolve) => setImmediate(resolve));
+		stderr.push(
+			'{"control":"resolve_retry_candidate_action_identity_v1_result","request_id":"retry-identity-request-1","outcome":"resolved","action_id":"action","activity_id":"activity","idempotency_key":"key","unexpected":true}\n',
+		);
+		await expect(identityP).rejects.toThrow(
+			"malformed activity authority response",
+		);
+		expect(failure).toHaveBeenCalledOnce();
+	});
+
+	it("fails closed when a retry identity request receives another control response", async () => {
+		const { stdin, stderr, childExit } = createMock();
+		const emitterP = createTapeEmitter({
+			childStdin: asWritable(stdin),
+			childStderr: asReadable(stderr),
+			childExit,
+			workspacePath: "/tmp/ws",
+			runId,
+			activityControlTimeoutMs: 100,
+		});
+		setImmediate(() =>
+			stderr.push(
+				`{"control":"handshake_ack","ready":true,"ledger_version":"0.1.0","schema_version":1}\n`,
+			),
+		);
+		const emitter = await emitterP;
+		const identityP = emitter.resolveRetryCandidateActionIdentity({
+			requestId: "retry-identity-request-1",
+			runId,
+			dispatchEventId: "01919000-0000-7000-8000-000000000001",
+			candidateRef: "refs/buildplane/candidates/candidate-1/run-1/2",
+		});
+		await new Promise((resolve) => setImmediate(resolve));
+		stderr.push(
+			'{"control":"claim_activity_v1_result","request_id":"retry-identity-request-1","outcome":"rejected","code":"wrong_control","message":"wrong control"}\n',
+		);
+		await expect(identityP).rejects.toThrow("incompatible pending control");
+	});
+
+	it("fails closed on an unsolicited retry candidate action identity response", async () => {
+		const { stdin, stderr, childExit } = createMock();
+		const emitterP = createTapeEmitter({
+			childStdin: asWritable(stdin),
+			childStderr: asReadable(stderr),
+			childExit,
+			workspacePath: "/tmp/ws",
+			runId,
+		});
+		setImmediate(() =>
+			stderr.push(
+				`{"control":"handshake_ack","ready":true,"ledger_version":"0.1.0","schema_version":1}\n`,
+			),
+		);
+		const emitter = await emitterP;
+		const failure = vi.fn();
+		emitter.onFailure(failure);
+		stderr.push(
+			'{"control":"resolve_retry_candidate_action_identity_v1_result","request_id":"unsolicited-request","outcome":"rejected","code":"untrusted","message":"unsolicited"}\n',
+		);
+		await new Promise((resolve) => setImmediate(resolve));
+		expect(failure).toHaveBeenCalledOnce();
+		expect(failure.mock.calls[0][0].message).toContain("unsolicited");
+	});
+
+	it("refuses caller-crafted trust-spine authority events on the generic emitter", async () => {
+		const { stdin, stderr, childExit } = createMock();
+		const emitterP = createTapeEmitter({
+			childStdin: asWritable(stdin),
+			childStderr: asReadable(stderr),
+			childExit,
+			workspacePath: "/tmp/ws",
+			runId,
+		});
+		setImmediate(() =>
+			stderr.push(
+				`{"control":"handshake_ack","ready":true,"ledger_version":"0.1.0","schema_version":1}\n`,
+			),
+		);
+		const emitter = await emitterP;
+
+		for (const kind of [
+			"activity_heartbeat_recorded_v1",
+			"dispatch_envelope_v5",
+			"governed_dispatch_v5_admission_recorded_v1",
+			"context_manifest_declared_v1",
+			"worker_manifest_declared_v1",
+			"sandbox_profile_declared_v1",
+			"attempt_context_declared_v1",
+		]) {
+			expect(() =>
+				emitter.emit(kind, {
+					forged: true,
+				}),
+			).toThrow("authority-owned control");
+			expect(stdin.writes.some((line) => line.includes(kind))).toBe(false);
+		}
 	});
 });

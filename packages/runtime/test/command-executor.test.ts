@@ -3,6 +3,7 @@ import {
 	mkdirSync,
 	mkdtempSync,
 	readFileSync,
+	rmSync,
 	symlinkSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -12,6 +13,42 @@ import { describe, expect, it } from "vitest";
 import { executePacket } from "../src/command-executor";
 
 describe("command executor", () => {
+	it("rejects a governed packet before the raw host command can write", () => {
+		const workspaceRoot = mkdtempSync(
+			join(tmpdir(), "buildplane-runtime-governed-"),
+		);
+		const sentinel = join(workspaceRoot, "must-not-exist.txt");
+		const packet: UnitPacket = {
+			unit: {
+				id: "unit-runtime-governed",
+				kind: "command",
+				scope: "task",
+				inputRefs: [],
+				expectedOutputs: [],
+				verificationContract: "exit-0-and-required-outputs",
+				policyProfile: "default",
+			},
+			execution: {
+				command: "node",
+				args: [
+					"-e",
+					`require('node:fs').writeFileSync(${JSON.stringify(sentinel)}, 'forbidden')`,
+				],
+			},
+			provenance_ref: "admission:governed-run",
+			verification: { requiredOutputs: [] },
+		};
+
+		try {
+			expect(() => executePacket(packet, workspaceRoot)).toThrow(
+				/RAW_RUNTIME_EXECUTOR_FORBIDDEN/,
+			);
+			expect(existsSync(sentinel)).toBe(false);
+		} finally {
+			rmSync(workspaceRoot, { recursive: true, force: true });
+		}
+	});
+
 	it("resolves execution cwd and output checks relative to the supplied workspace root", () => {
 		const sourceCheckout = process.cwd();
 		const workspaceRoot = mkdtempSync(

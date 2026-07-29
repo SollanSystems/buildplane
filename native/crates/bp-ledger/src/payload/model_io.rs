@@ -82,15 +82,30 @@ mod tests {
             provider: "anthropic".into(),
             model: "claude-opus-4-7".into(),
             system: Some("you are a coder".into()),
-            messages: vec![Message { role: "user".into(), content: "hi".into() }],
+            messages: vec![Message {
+                role: "user".into(),
+                content: "hi".into(),
+            }],
             tools: vec![json!({"name": "read_file"})],
-            sampling: SamplingParams { temperature: Some(0.0), top_p: None, max_tokens: Some(4096) },
+            sampling: SamplingParams {
+                temperature: Some(0.0),
+                top_p: None,
+                max_tokens: Some(4096),
+            },
             headers: BTreeMap::from([
-                ("user-agent".into(), HeaderValue::Raw { value: "buildplane/0.1".into() }),
-                ("authorization".into(), HeaderValue::Redacted {
-                    hash: "sha256:aa".into(),
-                    hint: "auth_header".into(),
-                }),
+                (
+                    "user-agent".into(),
+                    HeaderValue::Raw {
+                        value: "buildplane/0.1".into(),
+                    },
+                ),
+                (
+                    "authorization".into(),
+                    HeaderValue::Redacted {
+                        hash: "sha256:aa".into(),
+                        hint: "auth_header".into(),
+                    },
+                ),
             ]),
         };
         let s = serde_json::to_string(&p).unwrap();
@@ -106,7 +121,10 @@ mod tests {
                 name: "read_file".into(),
                 arguments: json!({"path": "README.md"}),
             }],
-            usage: Usage { input_tokens: 100, output_tokens: 5 },
+            usage: Usage {
+                input_tokens: 100,
+                output_tokens: 5,
+            },
             stop_reason: "end_turn".into(),
             latency_ms: 850,
         };

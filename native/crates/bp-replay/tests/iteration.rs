@@ -25,28 +25,32 @@ fn event_of(run_id: RunId, kind: EventKind, payload: Payload) -> Event {
 
 fn write_sample_tape(db_path: &std::path::Path, run_id: RunId) {
     let store = SqliteStore::open(db_path).unwrap();
-    store.append(&event_of(
-        run_id,
-        EventKind::RunStarted,
-        Payload::RunStartedV1(RunStartedV1 {
-            packet_hash: "sha256:aa".into(),
-            git_head: "dead".into(),
-            workspace_path: "/ws".into(),
-            config: BTreeMap::new(),
-            parent_run_id: None,
-            parent_event_id: None,
-        }),
-    )).unwrap();
-    store.append(&event_of(
-        run_id,
-        EventKind::RunCompleted,
-        Payload::RunCompletedV1(RunCompletedV1 {
-            outcome: RunOutcome::Passed,
-            duration_ms: "10".into(),
-            event_count: "2".into(),
-            unit_count: "0".into(),
-        }),
-    )).unwrap();
+    store
+        .append(&event_of(
+            run_id,
+            EventKind::RunStarted,
+            Payload::RunStartedV1(RunStartedV1 {
+                packet_hash: "sha256:aa".into(),
+                git_head: "dead".into(),
+                workspace_path: "/ws".into(),
+                config: BTreeMap::new(),
+                parent_run_id: None,
+                parent_event_id: None,
+            }),
+        ))
+        .unwrap();
+    store
+        .append(&event_of(
+            run_id,
+            EventKind::RunCompleted,
+            Payload::RunCompletedV1(RunCompletedV1 {
+                outcome: RunOutcome::Passed,
+                duration_ms: "10".into(),
+                event_count: "2".into(),
+                unit_count: "0".into(),
+            }),
+        ))
+        .unwrap();
 }
 
 #[test]
@@ -92,4 +96,31 @@ fn reopening_engine_on_same_db_yields_identical_steps() {
             _ => panic!("engine iteration diverged"),
         }
     }
+}
+
+#[test]
+fn verified_events_exposes_the_immutable_open_snapshot_without_advancing_replay() {
+    let tmp = TempDir::new().unwrap();
+    let db_path = tmp.path().join("events.db");
+    let run_id = RunId::new();
+    write_sample_tape(&db_path, run_id);
+
+    let mut engine = ReplayEngine::open(&run_id.to_string(), &db_path).unwrap();
+    let snapshot_ids = engine
+        .verified_events()
+        .iter()
+        .map(|verified| verified.event.id)
+        .collect::<Vec<_>>();
+
+    assert_eq!(snapshot_ids.len(), 2);
+    assert_eq!(engine.next().unwrap().event.id, snapshot_ids[0]);
+    assert_eq!(
+        engine
+            .verified_events()
+            .iter()
+            .map(|verified| verified.event.id)
+            .collect::<Vec<_>>(),
+        snapshot_ids,
+        "replay progress must not mutate or truncate the opened verification snapshot"
+    );
 }

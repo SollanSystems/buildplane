@@ -79,5 +79,8 @@ describe("backpressure stress", () => {
 		} finally {
 			await fixture.cleanup().catch(() => {});
 		}
-	}, 60_000);
+		// This is a no-loss correctness test, not a latency budget. The full suite
+		// concurrently launches native ledger fixtures, so constrained CI runners
+		// can need longer than the isolated burst to flush all 10,000 events.
+	}, 120_000);
 });

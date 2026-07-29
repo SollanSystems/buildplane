@@ -13,6 +13,8 @@ pub mod storage;
 pub mod tape_export;
 pub mod types;
 
+pub mod v5_manifest_witness;
+
 pub use error::{LedgerError, Result};
 pub use event::Event;
 pub use id::{EventId, RunId};

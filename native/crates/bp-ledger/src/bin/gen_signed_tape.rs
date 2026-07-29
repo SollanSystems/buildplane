@@ -31,7 +31,9 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 fn fixed_event_id(n: u8) -> EventId {
-    EventId::from_uuid(uuid::Uuid::parse_str(&format!("01919000-0000-7000-8000-{:012}", n)).unwrap())
+    EventId::from_uuid(
+        uuid::Uuid::parse_str(&format!("01919000-0000-7000-8000-{:012}", n)).unwrap(),
+    )
 }
 fn fixed_run_id() -> RunId {
     RunId::from_uuid(uuid::Uuid::parse_str("01919000-0000-7000-8000-0000000000ff").unwrap())
@@ -221,7 +223,11 @@ fn plan_cycle_checkpoint(tape_root: String) -> Event {
 }
 
 fn signer() -> ActorKeyRef {
-    ActorKeyRef { actor_id: "kernel".into(), key_id: "kernel-main".into(), public_key_hash: None }
+    ActorKeyRef {
+        actor_id: "kernel".into(),
+        key_id: "kernel-main".into(),
+        public_key_hash: None,
+    }
 }
 
 fn entry(event: &Event, sig: &EventSignatureV1) -> Value {
@@ -257,24 +263,35 @@ fn write_tape(out_dir: &Path, variant: &str, run_id: RunId, key: &SigningKey, en
 }
 
 fn main() {
-    let out_dir = std::env::args().nth(1).map(PathBuf::from)
+    let out_dir = std::env::args()
+        .nth(1)
+        .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("test/fixtures/signed-tape"));
 
     let key = SigningKey::from_bytes(&[7u8; 32]);
     let signed_at = at("2026-05-29T00:00:05Z");
 
     let covered = covered_events();
-    let covered_sigs: Vec<EventSignatureV1> =
-        covered.iter().map(|e| sign_event(e, &key, &signer(), signed_at).unwrap()).collect();
+    let covered_sigs: Vec<EventSignatureV1> = covered
+        .iter()
+        .map(|e| sign_event(e, &key, &signer(), signed_at).unwrap())
+        .collect();
 
-    let ordered: Vec<String> = covered_sigs.iter().map(|s| s.canonical_event_hash.clone()).collect();
+    let ordered: Vec<String> = covered_sigs
+        .iter()
+        .map(|s| s.canonical_event_hash.clone())
+        .collect();
     let correct_root = tape_root_hash(&ordered);
 
     // valid
     {
         let cp = checkpoint_event(correct_root.clone());
         let cp_sig = sign_event(&cp, &key, &signer(), signed_at).unwrap();
-        let mut entries: Vec<Value> = covered.iter().zip(&covered_sigs).map(|(e, s)| entry(e, s)).collect();
+        let mut entries: Vec<Value> = covered
+            .iter()
+            .zip(&covered_sigs)
+            .map(|(e, s)| entry(e, s))
+            .collect();
         entries.push(entry(&cp, &cp_sig));
         write_tape(&out_dir, "valid", fixed_run_id(), &key, entries);
     }
@@ -297,7 +314,11 @@ fn main() {
         let wrong_root = format!("sha256:{}", "0".repeat(64));
         let cp = checkpoint_event(wrong_root);
         let cp_sig = sign_event(&cp, &key, &signer(), signed_at).unwrap();
-        let mut entries: Vec<Value> = covered.iter().zip(&covered_sigs).map(|(e, s)| entry(e, s)).collect();
+        let mut entries: Vec<Value> = covered
+            .iter()
+            .zip(&covered_sigs)
+            .map(|(e, s)| entry(e, s))
+            .collect();
         entries.push(entry(&cp, &cp_sig));
         write_tape(&out_dir, "bad-root", fixed_run_id(), &key, entries);
     }
@@ -306,15 +327,26 @@ fn main() {
     // checkpoint root correct. Proves the external verifier validates the new kinds.
     {
         let events = plan_cycle_events();
-        let sigs: Vec<EventSignatureV1> =
-            events.iter().map(|e| sign_event(e, &key, &signer(), signed_at).unwrap()).collect();
-        let ordered: Vec<String> = sigs.iter().map(|s| s.canonical_event_hash.clone()).collect();
+        let sigs: Vec<EventSignatureV1> = events
+            .iter()
+            .map(|e| sign_event(e, &key, &signer(), signed_at).unwrap())
+            .collect();
+        let ordered: Vec<String> = sigs
+            .iter()
+            .map(|s| s.canonical_event_hash.clone())
+            .collect();
         let root = tape_root_hash(&ordered);
         let cp = plan_cycle_checkpoint(root);
         let cp_sig = sign_event(&cp, &key, &signer(), signed_at).unwrap();
         let mut entries: Vec<Value> = events.iter().zip(&sigs).map(|(e, s)| entry(e, s)).collect();
         entries.push(entry(&cp, &cp_sig));
-        write_tape(&out_dir, "plan-cycle", fixed_plan_cycle_run_id(), &key, entries);
+        write_tape(
+            &out_dir,
+            "plan-cycle",
+            fixed_plan_cycle_run_id(),
+            &key,
+            entries,
+        );
     }
 
     eprintln!("wrote signed-tape fixtures to {}", out_dir.display());

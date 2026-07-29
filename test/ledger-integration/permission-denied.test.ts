@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { makeBuildplaneRunFixture } from "./fixtures.js";
 
@@ -6,16 +7,7 @@ const SKIP_PLATFORMS = new Set(["win32", "darwin"]);
 describe.skipIf(SKIP_PLATFORMS.has(process.platform))(
 	"permission-denied",
 	() => {
-		// NOTE: full read-only-directory testing requires a makeBuildplaneRunFixture
-		// variant that allows mutating the workspace between fixture setup and
-		// runCli() invocation (to chmod 500 the ledger dir BEFORE the run starts).
-		// Phase C's fixture doesn't expose that hook; extending it is a Phase D
-		// item.
-		//
-		// For Phase C, this test exercises the writable-workspace happy path —
-		// it catches regressions where the ledger subprocess's mkdir -p fails
-		// silently, even if we can't test the failure mode explicitly.
-		it("writable workspace: ledger subprocess creates its dir and run completes cleanly", async () => {
+		it("writable unsafe workspace completes without creating a tape authority", async () => {
 			const fixture = await makeBuildplaneRunFixture({
 				packet: {
 					unit: {
@@ -34,6 +26,7 @@ describe.skipIf(SKIP_PLATFORMS.has(process.platform))(
 
 			try {
 				expect(fixture.exitCode).toBe(0);
+				expect(existsSync(fixture.eventsDbPath)).toBe(false);
 			} finally {
 				await fixture.cleanup();
 			}

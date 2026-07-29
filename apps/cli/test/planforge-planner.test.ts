@@ -1,6 +1,7 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
 	buildPlannerWorkerPacket,
@@ -23,6 +24,29 @@ afterEach(() => {
 
 describe("readCompletedSliceIds", () => {
 	it("returns an empty list when the workspace has no tape", async () => {
+		expect(await readCompletedSliceIds(ws)).toEqual([]);
+	});
+
+	it("does not treat a legacy completed plan_receipt as governed completion", async () => {
+		const ledgerDir = join(ws, ".buildplane", "ledger");
+		mkdirSync(ledgerDir, { recursive: true });
+		const db = new DatabaseSync(join(ledgerDir, "events.db"));
+		try {
+			db.exec("CREATE TABLE events (id TEXT, payload TEXT, kind TEXT)");
+			db.prepare("INSERT INTO events VALUES (?, ?, ?)").run(
+				"legacy-receipt",
+				JSON.stringify({
+					PlanReceiptRecordedV1: {
+						outcome: "completed",
+						plan_id: "legacy-plan",
+					},
+				}),
+				"plan_receipt",
+			);
+		} finally {
+			db.close();
+		}
+
 		expect(await readCompletedSliceIds(ws)).toEqual([]);
 	});
 });

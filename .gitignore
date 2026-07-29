@@ -1,4 +1,5 @@
-node_modules/
+# Keep package-manager trees and local dependency snapshots out of source checks.
+node_modules*/
 dist/
 *.tsbuildinfo
 coverage/

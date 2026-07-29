@@ -186,7 +186,9 @@ describe("merge failure handling", () => {
 		const { orchestrator, cleanup } = createMergeFailureHarness();
 
 		try {
-			const result = orchestrator.runPacket(packet);
+			const result = orchestrator.runPacket(packet, undefined, {
+				trustLane: "unsafe",
+			});
 
 			// Run must be marked failed, not passed
 			expect(result.run.status).toBe("failed");
@@ -203,7 +205,9 @@ describe("merge failure handling", () => {
 		const { orchestrator, runEvents, cleanup } = createMergeFailureHarness();
 
 		try {
-			const result = orchestrator.runPacket(packet);
+			const result = orchestrator.runPacket(packet, undefined, {
+				trustLane: "unsafe",
+			});
 
 			// Workspace must be retained — do NOT delete it
 			expect(result.workspace?.status).toBe("retained");
@@ -217,7 +221,9 @@ describe("merge failure handling", () => {
 		const { orchestrator, runEvents, cleanup } = createMergeFailureHarness();
 
 		try {
-			orchestrator.runPacket(packet);
+			orchestrator.runPacket(packet, undefined, {
+				trustLane: "unsafe",
+			});
 
 			// commitRunSuccessOutcome must NOT have been called
 			expect(runEvents).not.toContain("commit-run-success-outcome");

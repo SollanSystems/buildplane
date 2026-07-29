@@ -580,7 +580,7 @@ describe("orchestrator memory integration", () => {
 		expect(result.run.status).toBe("passed");
 	});
 
-	it("promotes a multi-round strategy workflow learning into a canonical procedure", async () => {
+	it("does not promote a raw review workflow into a routing procedure", async () => {
 		const root = mkdtempSync(join(tmpdir(), "bp-orch-strategy-promote-"));
 		const storage = makeProcedureAwareStorage();
 		const orch = createOrchestratorWithAdmissionStore({
@@ -594,32 +594,20 @@ describe("orchestrator memory integration", () => {
 			memoryPort: makeMemoryPort(),
 		});
 
-		const result = await orch.runStrategy(makeStrategyPacket());
-
-		expect(result.outcome).toBe("passed");
-		expect(storage.createProcedure).toHaveBeenCalledTimes(1);
-		const procedures = storage.listProcedures({ taskType: "implement" });
-		expect(procedures).toHaveLength(1);
-		expect(procedures[0]?.name).toBe(
-			"implement-then-review workflow for implement tasks",
-		);
-		expect(procedures[0]?.bodyMarkdown).toContain(
-			"Use an implement-then-review workflow for implement tasks.",
-		);
-		expect(procedures[0]?.bodyMarkdown).toContain("missing tests");
-		expect(procedures[0]?.provenance.sourceRunId).toBe(result.winnerRunId);
-		expect(procedures[0]?.provenance.sourceTaskId).toBe("task-implementer");
-		expect(procedures[0]?.provenance.createdBy).toBe("worker");
-		expect(procedures[0]?.metadata).toMatchObject({
-			promotionRule: "multi-round-strategy-workflow->procedure",
-			strategyMode: "implement-then-review",
-			sourceLearningTitle: "Strategy required multiple rounds",
-			sourceLearningKind: "workflow",
-			sourceStrategyId: "strategy-promote-workflow",
+		const result = await orch.runStrategy(makeStrategyPacket(), undefined, {
+			lane: "raw-legacy",
 		});
+
+		expect(result.outcome).toBe("failed");
+		expect(result.mergeDecision.reasons).toContain(
+			"raw review strategies are blocked because they cannot guarantee pre-promotion review",
+		);
+		expect(storage.createProcedure).not.toHaveBeenCalled();
+		const procedures = storage.listProcedures({ taskType: "implement" });
+		expect(procedures).toHaveLength(0);
 	});
 
-	it("does not duplicate an identical promoted procedure on repeated strategy replays", async () => {
+	it("does not create a procedure on repeated blocked raw review attempts", async () => {
 		const root = mkdtempSync(join(tmpdir(), "bp-orch-strategy-dedupe-"));
 		const storage = makeProcedureAwareStorage();
 
@@ -633,7 +621,9 @@ describe("orchestrator memory integration", () => {
 			workspace: makeWorkspace(root),
 			memoryPort: makeMemoryPort(),
 		});
-		await firstOrchestrator.runStrategy(makeStrategyPacket());
+		await firstOrchestrator.runStrategy(makeStrategyPacket(), undefined, {
+			lane: "raw-legacy",
+		});
 
 		const secondOrchestrator = createOrchestratorWithAdmissionStore({
 			projectRoot: root,
@@ -645,14 +635,16 @@ describe("orchestrator memory integration", () => {
 			workspace: makeWorkspace(root),
 			memoryPort: makeMemoryPort(),
 		});
-		await secondOrchestrator.runStrategy(makeStrategyPacket());
+		await secondOrchestrator.runStrategy(makeStrategyPacket(), undefined, {
+			lane: "raw-legacy",
+		});
 
-		expect(storage.createProcedure).toHaveBeenCalledTimes(1);
+		expect(storage.createProcedure).not.toHaveBeenCalled();
 		expect(storage.supersedeProcedure).not.toHaveBeenCalled();
-		expect(storage.listProcedures({ taskType: "implement" })).toHaveLength(1);
+		expect(storage.listProcedures({ taskType: "implement" })).toHaveLength(0);
 	});
 
-	it("still promotes a procedure when learning persistence fails", async () => {
+	it("does not bypass the raw review gate when learning persistence fails", async () => {
 		const root = mkdtempSync(
 			join(tmpdir(), "bp-orch-strategy-promote-fallback-"),
 		);
@@ -675,9 +667,12 @@ describe("orchestrator memory integration", () => {
 			memoryPort: throwingMemoryPort,
 		});
 
-		await orch.runStrategy(makeStrategyPacket());
+		await orch.runStrategy(makeStrategyPacket(), undefined, {
+			lane: "raw-legacy",
+		});
 
-		expect(storage.listProcedures({ taskType: "implement" })).toHaveLength(1);
+		expect(storage.createProcedure).not.toHaveBeenCalled();
+		expect(storage.listProcedures({ taskType: "implement" })).toHaveLength(0);
 	});
 
 	it("does not supersede or replace a same-name manual procedure", async () => {
@@ -703,7 +698,9 @@ describe("orchestrator memory integration", () => {
 			memoryPort: makeMemoryPort(),
 		});
 
-		await orch.runStrategy(makeStrategyPacket());
+		await orch.runStrategy(makeStrategyPacket(), undefined, {
+			lane: "raw-legacy",
+		});
 
 		expect(storage.supersedeProcedure).not.toHaveBeenCalled();
 		expect(storage.procedures).toHaveLength(initialProcedureCount);
@@ -713,7 +710,7 @@ describe("orchestrator memory integration", () => {
 		).toBe("Manual operator-authored guidance");
 	});
 
-	it("supersedes the active canonical procedure when the promoted workflow body changes", async () => {
+	it("does not supersede a procedure from blocked raw review attempts", async () => {
 		const root = mkdtempSync(join(tmpdir(), "bp-orch-strategy-supersede-"));
 		const storage = makeProcedureAwareStorage();
 
@@ -727,7 +724,9 @@ describe("orchestrator memory integration", () => {
 			workspace: makeWorkspace(root),
 			memoryPort: makeMemoryPort(),
 		});
-		await firstOrchestrator.runStrategy(makeStrategyPacket());
+		await firstOrchestrator.runStrategy(makeStrategyPacket(), undefined, {
+			lane: "raw-legacy",
+		});
 
 		const secondOrchestrator = createOrchestratorWithAdmissionStore({
 			projectRoot: root,
@@ -739,17 +738,18 @@ describe("orchestrator memory integration", () => {
 			workspace: makeWorkspace(root),
 			memoryPort: makeMemoryPort(),
 		});
-		await secondOrchestrator.runStrategy(makeStrategyPacket());
+		await secondOrchestrator.runStrategy(makeStrategyPacket(), undefined, {
+			lane: "raw-legacy",
+		});
 
-		expect(storage.createProcedure).toHaveBeenCalledTimes(2);
-		expect(storage.supersedeProcedure).toHaveBeenCalledTimes(1);
+		expect(storage.createProcedure).not.toHaveBeenCalled();
+		expect(storage.supersedeProcedure).not.toHaveBeenCalled();
 		const activeProcedures = storage.listProcedures({ taskType: "implement" });
-		expect(activeProcedures).toHaveLength(1);
-		expect(activeProcedures[0]?.bodyMarkdown).toContain("missing type guards");
+		expect(activeProcedures).toHaveLength(0);
 		expect(
 			storage.procedures.filter(
 				(procedure) => procedure.status === "superseded",
 			),
-		).toHaveLength(1);
+		).toHaveLength(0);
 	});
 });

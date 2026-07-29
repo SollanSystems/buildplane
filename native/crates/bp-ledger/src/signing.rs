@@ -258,9 +258,13 @@ mod tests {
             public_key_hash: None,
         };
 
-        let signature =
-            sign_event(&event, &signing_key, &signer, "2026-05-22T23:30:00Z".parse().unwrap())
-                .unwrap();
+        let signature = sign_event(
+            &event,
+            &signing_key,
+            &signer,
+            "2026-05-22T23:30:00Z".parse().unwrap(),
+        )
+        .unwrap();
 
         // public_key_hash is filled in by sign_event and must match the verify-path lookup.
         assert_eq!(
@@ -289,18 +293,19 @@ mod tests {
             key_id: "kernel-main".into(),
             public_key_hash: None,
         };
-        let signature =
-            sign_event(&event, &signing_key, &signer, "2026-05-22T23:30:00Z".parse().unwrap())
-                .unwrap();
+        let signature = sign_event(
+            &event,
+            &signing_key,
+            &signer,
+            "2026-05-22T23:30:00Z".parse().unwrap(),
+        )
+        .unwrap();
 
         let claimed_hash = signature.signer.public_key_hash.clone().unwrap();
         // Map the claimed hash to a DIFFERENT key's bytes.
         let other_key = SigningKey::from_bytes(&[99u8; 32]);
         let mut poisoned = TrustedPublicKeys::default();
-        poisoned.insert_public_key(
-            claimed_hash,
-            other_key.verifying_key().to_bytes().to_vec(),
-        );
+        poisoned.insert_public_key(claimed_hash, other_key.verifying_key().to_bytes().to_vec());
 
         assert_eq!(
             verify_event_signature(&event, &signature, &poisoned),
@@ -317,9 +322,13 @@ mod tests {
             key_id: "kernel-main".into(),
             public_key_hash: None,
         };
-        let mut signature =
-            sign_event(&event, &signing_key, &signer, "2026-05-22T23:30:00Z".parse().unwrap())
-                .unwrap();
+        let mut signature = sign_event(
+            &event,
+            &signing_key,
+            &signer,
+            "2026-05-22T23:30:00Z".parse().unwrap(),
+        )
+        .unwrap();
         // Re-point the signature at a different event id.
         signature.event_id = EventId::new();
 
@@ -354,9 +363,13 @@ mod tests {
             key_id: "kernel-main".into(),
             public_key_hash: None,
         };
-        let signature =
-            sign_event(&event, &signing_key, &signer, "2026-05-22T23:30:00Z".parse().unwrap())
-                .unwrap();
+        let signature = sign_event(
+            &event,
+            &signing_key,
+            &signer,
+            "2026-05-22T23:30:00Z".parse().unwrap(),
+        )
+        .unwrap();
         let raw = URL_SAFE_NO_PAD.decode(&signature.signature).unwrap();
         assert_eq!(raw.len(), 64);
     }

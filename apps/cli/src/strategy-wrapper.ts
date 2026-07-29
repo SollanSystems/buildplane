@@ -54,6 +54,9 @@ interface PacketLike {
 	readonly verification: {
 		readonly requiredOutputs: readonly string[];
 	};
+	/** The parser is still backward-compatible with legacy packets, but derived
+	 * review packets must carry their signed execution role explicitly. */
+	readonly execution_role?: string;
 	readonly routingHints?: unknown;
 }
 
@@ -127,6 +130,7 @@ function buildModelReviewer(packet: PacketLike): PacketLike {
 		},
 		intent: buildReviewIntent(packet, objective, packet.unit.expectedOutputs),
 		verification: { requiredOutputs: [] },
+		execution_role: "reviewer",
 		routingHints: packet.routingHints,
 	};
 }
@@ -149,6 +153,7 @@ function buildCommandReviewer(packet: PacketLike): PacketLike {
 			execution: { command: "true", args: [] },
 			intent: buildReviewIntent(packet, objective, []),
 			verification: { requiredOutputs: [] },
+			execution_role: "reviewer",
 		};
 	}
 	const checks = outputs.map((o) => `test -s ${o}`).join(" && ");
@@ -165,6 +170,7 @@ function buildCommandReviewer(packet: PacketLike): PacketLike {
 		execution: { command: "sh", args: ["-c", checks] },
 		intent: buildReviewIntent(packet, objective, outputs),
 		verification: { requiredOutputs: [] },
+		execution_role: "reviewer",
 	};
 }
 

@@ -112,7 +112,11 @@ fn checkpoint_emits_at_cadence_boundaries_and_chains() {
     }
 
     let checkpoints = checkpoints_for_run(&store, run_id);
-    assert_eq!(checkpoints.len(), 2, "two cadence-2 checkpoints over 4 events");
+    assert_eq!(
+        checkpoints.len(),
+        2,
+        "two cadence-2 checkpoints over 4 events"
+    );
 
     let (cp0_id, cp0) = &checkpoints[0];
     let (cp1_id, cp1) = &checkpoints[1];
@@ -227,7 +231,10 @@ fn checkpoint_signature_insert_failure_rolls_back_checkpoint_event() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(cp_count, 0, "checkpoint event must roll back with its signature");
+    assert_eq!(
+        cp_count, 0,
+        "checkpoint event must roll back with its signature"
+    );
 }
 
 #[test]
@@ -262,7 +269,11 @@ fn final_checkpoint_emits_at_run_completed_with_uncheckpointed_events() {
         .unwrap();
 
     let checkpoints = checkpoints_for_run(&store, run_id);
-    assert_eq!(checkpoints.len(), 1, "one final checkpoint at run_completed");
+    assert_eq!(
+        checkpoints.len(),
+        1,
+        "one final checkpoint at run_completed"
+    );
     let (_, cp) = &checkpoints[0];
     assert_eq!(cp.checkpoint_index, 0);
     // Final checkpoint covers the 4 signed events through run_completed.
@@ -305,7 +316,11 @@ fn final_checkpoint_covers_lone_run_completed_event() {
     // The only signed event in empty_run is run_completed itself, which IS
     // uncheckpointed, so a final checkpoint covering it is expected.
     let cps = checkpoints_for_run(&store, empty_run);
-    assert_eq!(cps.len(), 1, "final checkpoint covers the lone signed event");
+    assert_eq!(
+        cps.len(),
+        1,
+        "final checkpoint covers the lone signed event"
+    );
     assert_eq!(cps[0].1.through_event_count, 1);
     assert_eq!(cps[0].1.through_event_id, done.id);
 }
@@ -334,8 +349,10 @@ fn external_recomputation_matches_stored_root_and_detects_tamper() {
     // hashes, in id order. This mirrors exactly what M1-S7 must do.
     let mut ordered = ordinary.clone();
     ordered.sort_by_key(|e| e.id.as_uuid());
-    let recomputed_hashes: Vec<String> =
-        ordered.iter().map(|e| canonical_event_hash(e).unwrap()).collect();
+    let recomputed_hashes: Vec<String> = ordered
+        .iter()
+        .map(|e| canonical_event_hash(e).unwrap())
+        .collect();
     let recomputed_root = tape_root_hash(&recomputed_hashes);
 
     assert_eq!(
@@ -491,7 +508,11 @@ fn checkpoint_injection_does_not_perturb_cadence() {
     // Exactly one real cadence-2 checkpoint over the two ordinary events, with
     // honest coverage — the forged index/count never leaked in.
     let checkpoints = checkpoints_for_run(&store, run_id);
-    assert_eq!(checkpoints.len(), 1, "cadence unaffected by injection attempt");
+    assert_eq!(
+        checkpoints.len(),
+        1,
+        "cadence unaffected by injection attempt"
+    );
     let (_, cp) = &checkpoints[0];
     assert_eq!(cp.checkpoint_index, 0);
     assert_eq!(cp.through_event_count, 2);
@@ -516,9 +537,8 @@ fn lower_id_ordinary_append_rejected_per_run_monotonic() {
 
     // A lower-id event for the same run is rejected.
     let mut lower = run_started(run_id);
-    lower.id = EventId::from_uuid(
-        uuid::Uuid::parse_str("00000000-0000-7000-8000-000000000000").unwrap(),
-    );
+    lower.id =
+        EventId::from_uuid(uuid::Uuid::parse_str("00000000-0000-7000-8000-000000000000").unwrap());
     let result = store.append_signed_with_checkpoint(&lower, &key, &kernel_signer(), &policy);
     assert!(
         matches!(result, Err(LedgerError::NonMonotonicEventId { .. })),
@@ -709,9 +729,8 @@ fn monotonic_guard_is_per_run_and_allows_interleaving() {
     // run B's first event carries a lower id than run A's existing event; the
     // per-run guard must NOT reject it (different run_id).
     let mut b1 = run_started(run_b);
-    b1.id = EventId::from_uuid(
-        uuid::Uuid::parse_str("00000000-0000-7000-8000-000000000001").unwrap(),
-    );
+    b1.id =
+        EventId::from_uuid(uuid::Uuid::parse_str("00000000-0000-7000-8000-000000000001").unwrap());
     assert!(b1.id.as_uuid() < a1.id.as_uuid());
     store
         .append_signed_with_checkpoint(&b1, &key, &kernel_signer(), &policy)

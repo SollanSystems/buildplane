@@ -11,6 +11,7 @@ describe("demo packet factories", () => {
 			"exit-0-and-required-outputs",
 		);
 		expect(packet.execution.command).toBe("node");
+		expect(packet.execution_role).toBe("implementer");
 		expect(packet.verification.requiredOutputs).toContain("output/result.txt");
 		expect(packet.intent.taskType).toBe("implement");
 	});
@@ -20,15 +21,26 @@ describe("demo packet factories", () => {
 		expect(packet.unit.id).toBe("demo-cmd-2");
 		expect(packet.verification.requiredOutputs).toContain("output/summary.txt");
 		expect(packet.intent.objective).toBe("Summarize workspace state");
+		expect(packet.execution_role).toBe("implementer");
 	});
 });
 
 describe("CLI demo dispatch", () => {
-	it("dispatches buildplane demo and exits 0", async () => {
+	it("requires --raw before dispatching the ambient demo", async () => {
+		const stderr: string[] = [];
+		const exitCode = await runCli(["demo"], {
+			stdout: () => {},
+			stderr: (line) => stderr.push(line),
+		});
+		expect(exitCode).toBe(1);
+		expect(stderr.join("\n")).toMatch(/Pass --raw/i);
+	});
+
+	it("dispatches the acknowledged unsafe demo and exits 0", async () => {
 		const originalWrite = process.stdout.write;
 		process.stdout.write = (() => true) as typeof process.stdout.write;
 		try {
-			const exitCode = await runCli(["demo"], {
+			const exitCode = await runCli(["demo", "--raw"], {
 				stdout: () => {},
 				stderr: () => {},
 			});
@@ -50,13 +62,15 @@ describe("runDemo integration", () => {
 
 		try {
 			const { runDemo } = await import("../src/demo.js");
-			await runDemo({ model: false });
+			await runDemo({ model: false, raw: true });
 		} finally {
 			process.stdout.write = originalWrite;
 		}
 
 		const text = output.join("");
 		expect(text).toContain("Buildplane Flywheel Demo");
+		expect(text).toContain("governance: unsafe");
+		expect(text).toContain("trusted-receipt: false");
 		expect(text).toContain("Passed");
 		expect(text).toContain("Flywheel closed");
 		expect(text).toContain("learnings found");

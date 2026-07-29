@@ -7,3 +7,10 @@ license.workspace = true
 [dependencies]
 async-trait.workspace = true
 bp-provider-sdk.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+futures.workspace = true

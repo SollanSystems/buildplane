@@ -12,8 +12,8 @@
 //! See docs/architecture/canonical-digest-contract.md.
 
 use bp_ledger::id::{EventId, RunId};
-use bp_ledger::payload::activity::{ActivityCompletedV1, ActivityStartedV1, ActivityType};
 use bp_ledger::payload::acceptance::AcceptanceRecordedV1;
+use bp_ledger::payload::activity::{ActivityCompletedV1, ActivityStartedV1, ActivityType};
 use bp_ledger::payload::plan_lifecycle::{
     PlanAdmittedV1, PlanReceiptOutcome, PlanReceiptRecordedV1,
 };

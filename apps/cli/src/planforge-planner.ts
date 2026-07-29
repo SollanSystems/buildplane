@@ -1,12 +1,6 @@
-import {
-	existsSync,
-	mkdtempSync,
-	readFileSync,
-	rmSync,
-	writeFileSync,
-} from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import type { UnitPacket } from "@buildplane/kernel";
 import {
 	buildPlannerPlanMarkdown,
@@ -26,16 +20,8 @@ export interface PlannerProposal {
 	readonly status: PlanForgeValidationStatus;
 }
 
-interface PlanReceiptRow {
-	id: string;
-	payload: string;
-}
-
 /**
  * Emit, deterministically, the `plan.md` the planner would author for a slice.
- * Used both to propose the next slice and (offline) to recompute a slice's
- * stable PlanForge plan id so a completed receipt on the tape can be mapped back
- * to its slice id without an L0 payload derivation.
  */
 function emitSliceMarkdown(
 	slice: RoadmapSlice,
@@ -45,37 +31,10 @@ function emitSliceMarkdown(
 	return buildPlannerPlanMarkdown({ slice, remote, trustedBase });
 }
 
-/**
- * The deterministic PlanForge plan id (`pf-plan-<fingerprint>`) the planner's
- * emitted `plan.md` produces for a slice at the given remote/base. This is the
- * mapping key from a recorded `plan_receipt.plan_id` back to a roadmap slice id:
- * the roadmap + the deterministic emitter ARE the mapping, so no `slice_id`
- * field is added to the signed receipt payload (that would be an L0 derivation).
- */
-function planIdForSlice(
-	slice: RoadmapSlice,
-	remote: string,
-	trustedBase: string,
-): string {
-	const dir = mkdtempSync(join(tmpdir(), "planner-planid-"));
-	try {
-		const planPath = join(dir, "plan.md");
-		writeFileSync(
-			planPath,
-			emitSliceMarkdown(slice, remote, trustedBase),
-			"utf8",
-		);
-		return createPlanForgeDryRunPlan(planPath).id;
-	} finally {
-		rmSync(dir, { recursive: true, force: true });
-	}
-}
-
 export interface ReadCompletedSliceIdsOptions {
 	/**
-	 * The roadmap whose slice ids the completed `plan_receipt` rows are mapped
-	 * back to. When omitted, the raw completed `plan_id`s are returned (the tape
-	 * carries no slice id, so without the roadmap there is nothing to map to).
+	 * Reserved reducer-projection inputs. They keep the read API stable while
+	 * completion is moved from legacy plan receipts to governed candidates.
 	 */
 	readonly roadmap?: RoadmapDoc;
 	readonly remote?: string;
@@ -83,60 +42,21 @@ export interface ReadCompletedSliceIdsOptions {
 }
 
 /**
- * Read-only tape scan for completed roadmap slices. Reuses the read-only
- * `node:sqlite` pattern over `.buildplane/ledger/events.db`. A slice is
- * 'completed' when a `plan_receipt` with `outcome='completed'` exists whose
- * recorded `plan_id` equals the deterministic plan id the planner emits for that
- * slice. The signed receipt carries `plan_id` only (no slice id / title), so the
- * slice id is recovered by recomputing each slice's plan id from the roadmap —
- * not by adding an L0 payload field.
+ * Returns completed roadmap slices that have governed candidate/promotion
+ * evidence. Legacy `plan_receipt` rows are intentionally ignored: they can be
+ * produced by the retired ambient-worker PlanForge path and carry no immutable
+ * candidate digest or promotion decision to prove the target mutation. A future
+ * governed PlanForge projection will populate this from the trust-spine reducer;
+ * until then planning remains conservative and treats every slice as unfinished.
+ *
+ * The parameters remain for source compatibility with the former read-only tape
+ * scan and for the upcoming reducer-backed implementation.
  */
 export async function readCompletedSliceIds(
-	workspace: string,
-	options: ReadCompletedSliceIdsOptions = {},
+	_workspace: string,
+	_options: ReadCompletedSliceIdsOptions = {},
 ): Promise<string[]> {
-	const eventsDbPath = resolve(workspace, ".buildplane", "ledger", "events.db");
-	if (!existsSync(eventsDbPath)) {
-		return [];
-	}
-	const { DatabaseSync } = await import("node:sqlite");
-	const db = new DatabaseSync(eventsDbPath, { readOnly: true });
-	let completedPlanIds: string[];
-	try {
-		const rows = db
-			.prepare(
-				"SELECT id, payload FROM events WHERE kind = 'plan_receipt' ORDER BY id ASC",
-			)
-			.all() as unknown as PlanReceiptRow[];
-		const planIds = new Set<string>();
-		for (const row of rows) {
-			const payload = JSON.parse(row.payload) as {
-				PlanReceiptRecordedV1?: { outcome?: string; plan_id?: string };
-			};
-			const receipt = payload.PlanReceiptRecordedV1;
-			if (receipt?.outcome === "completed" && receipt.plan_id) {
-				planIds.add(receipt.plan_id);
-			}
-		}
-		completedPlanIds = [...planIds];
-	} finally {
-		db.close();
-	}
-
-	const { roadmap } = options;
-	if (!roadmap) {
-		return completedPlanIds;
-	}
-	const remote = options.remote ?? "";
-	const trustedBase = options.trustedBase ?? "";
-	const completedSet = new Set(completedPlanIds);
-	const completedSliceIds: string[] = [];
-	for (const slice of roadmap.slices) {
-		if (completedSet.has(planIdForSlice(slice, remote, trustedBase))) {
-			completedSliceIds.push(slice.id);
-		}
-	}
-	return completedSliceIds;
+	return [];
 }
 
 export interface RunPlannerProposalInput {
@@ -221,6 +141,7 @@ export function buildPlannerWorkerPacket(
 			verificationContract: "true",
 			policyProfile: "planforge-planner",
 		},
+		execution_role: "implementer",
 		model: { provider: "anthropic", model: input.model, prompt },
 		verification: { requiredOutputs: [input.outputPlanPath] },
 		routingHints: { preferredWorker: "claude-code" },

@@ -1,11 +1,11 @@
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
-import type {
-	EventBus,
-	ExecutionReceipt,
-	ExecutionRole,
-	TaskRenderer,
-	UnitPacket,
+import {
+	carriesGovernanceFields,
+	type EventBus,
+	type ExecutionReceipt,
+	type TaskRenderer,
+	type UnitPacket,
 } from "@buildplane/kernel";
 import { executePacket as executeCommandPacket } from "@buildplane/runtime";
 
@@ -105,6 +105,7 @@ export function createModelExecutor(
 
 	return {
 		executePacket(packet: UnitPacket, projectRoot: string): ExecutionReceipt {
+			assertAmbientModelExecutorIsRawOnly(packet);
 			if (!packet.execution) {
 				throw new Error(
 					"Sync executePacket only supports command packets. Use executePacketAsync for model packets.",
@@ -119,6 +120,7 @@ export function createModelExecutor(
 			eventBus: EventBus,
 			signal?: AbortSignal,
 		): Promise<ExecutionReceipt> {
+			assertAmbientModelExecutorIsRawOnly(packet);
 			// Command packets delegate to the sync executor
 			if (packet.execution) {
 				return executeCommandPacket(packet, projectRoot);
@@ -175,6 +177,14 @@ export function createModelExecutor(
 	};
 }
 
+function assertAmbientModelExecutorIsRawOnly(packet: UnitPacket): void {
+	if (carriesGovernanceFields(packet)) {
+		throw new Error(
+			"AMBIENT_MODEL_EXECUTOR_FORBIDDEN: the generic model executor is raw-only and cannot execute a packet carrying governed authority fields.",
+		);
+	}
+}
+
 async function executeModelStream(
 	packet: UnitPacket,
 	projectRoot: string,
@@ -201,8 +211,7 @@ async function executeModelStream(
 	let resolvedSystem: string | undefined;
 	let resolvedPrompt: string;
 	if (packet.intent && renderer) {
-		const role: ExecutionRole = "implementer";
-		const rendered = renderer.render(packet.intent, role);
+		const rendered = renderer.render(packet.intent, packet.execution_role);
 		resolvedSystem = rendered.system;
 		resolvedPrompt = rendered.prompt;
 	} else {

@@ -2,45 +2,28 @@ import { spawnSync } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it } from "vitest";
 import {
-	makeBuildplaneRunFixture,
+	makeLegacyReplayTapeFixture,
 	resolveNativeBinaryForLedgerTests,
 } from "./fixtures.js";
 
 const NATIVE_BIN = resolveNativeBinaryForLedgerTests();
 
 describe("replay basic", () => {
-	it("streams one JSON line per event with hydrated state", async () => {
-		const fixture = await makeBuildplaneRunFixture({
-			packet: {
-				unit: {
-					id: "unit-replay",
-					kind: "command",
-					scope: "task",
-					inputRefs: [],
-					expectedOutputs: ["out.txt"],
-					verificationContract: "exit-0-and-required-outputs",
-					policyProfile: "default",
-				},
-				execution: {
-					command: "sh",
-					args: ["-c", "echo hi > out.txt"],
-				},
-				verification: { requiredOutputs: ["out.txt"] },
-			},
-		});
+	it("streams one JSON line per event with hydrated state from an unsigned legacy tape", async () => {
+		const fixture = await makeLegacyReplayTapeFixture();
 
 		try {
-			expect(fixture.exitCode).toBe(0);
-			const db = new DatabaseSync(fixture.eventsDbPath);
-			const runId = (
-				db.prepare("SELECT DISTINCT run_id FROM events LIMIT 1").get() as {
-					run_id: string;
-				}
-			).run_id;
+			const db = new DatabaseSync(fixture.eventsDbPath, { readOnly: true });
 			const expectedCount = (
 				db.prepare("SELECT COUNT(*) as c FROM events").get() as { c: number }
 			).c;
+			const signatureCount = (
+				db.prepare("SELECT COUNT(*) as c FROM event_signatures").get() as {
+					c: number;
+				}
+			).c;
 			db.close();
+			expect(signatureCount).toBe(0);
 
 			const result = spawnSync(
 				NATIVE_BIN,
@@ -48,7 +31,7 @@ describe("replay basic", () => {
 					"ledger",
 					"replay",
 					"--run-id",
-					runId,
+					fixture.runId,
 					"--workspace",
 					fixture.dir,
 					"--format",

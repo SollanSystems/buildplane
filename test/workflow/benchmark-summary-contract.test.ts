@@ -36,21 +36,21 @@ describe("benchmark summary contract", () => {
 		expect(documentedFixtureNames).toEqual(fixtureNames);
 	});
 
-	it("explains the current benchmark deltas and combined-only proof", () => {
-		expect(benchmarkDoc).toContain("memory changes the outcome");
-		expect(benchmarkDoc).toContain("strategy changes the outcome");
-		expect(benchmarkDoc).toContain("combined-only proof");
+	it("marks raw capability observations as unsafe and blocked strategies as non-governed", () => {
+		expect(benchmarkDoc).toContain("unsafe/shadow capability benchmark");
+		expect(benchmarkDoc).toContain(
+			"strategy-derived rates currently remain zero",
+		);
 		expect(benchmarkDoc).toContain("memory-strategy-combined-only");
-		expect(benchmarkDoc).not.toContain("does not currently prove");
+		expect(benchmarkDoc).toContain("does not prove provider quality");
 		expect(benchmarkDoc).toMatch(/duration .* environment-sensitive/i);
 	});
 
-	it("documents a concrete reviewer-rescue comparison against raw one-shot execution", () => {
-		expect(benchmarkDoc).toContain("## Concrete rescue/recovery story");
-		expect(benchmarkDoc).toContain("raw one-shot path");
+	it("documents reviewer-rescue as a blocked historical path", () => {
+		expect(benchmarkDoc).toContain("raw one-shot execution");
 		expect(benchmarkDoc).toContain("implement-then-review");
 		expect(benchmarkDoc).toContain("reviewer-rescue");
-		expect(benchmarkDoc).toContain("`memory+raw` | fail");
-		expect(benchmarkDoc).toContain("`memory+strategy` | pass");
+		expect(benchmarkDoc).toMatch(/signed review\s+evidence/);
+		expect(benchmarkDoc).toContain("read-only candidate reviewer");
 	});
 });

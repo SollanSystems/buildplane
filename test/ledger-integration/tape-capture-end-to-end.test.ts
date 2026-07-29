@@ -1,9 +1,9 @@
-import { DatabaseSync } from "node:sqlite";
+import { existsSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { makeBuildplaneRunFixture } from "./fixtures.js";
 
-describe("tape-capture end-to-end", () => {
-	it("command packet produces the full Phase A event sequence", async () => {
+describe("unsafe raw execution evidence boundary", () => {
+	it("does not create a tape that could be mistaken for governed evidence", async () => {
 		const fixture = await makeBuildplaneRunFixture({
 			packet: {
 				unit: {
@@ -25,26 +25,7 @@ describe("tape-capture end-to-end", () => {
 
 		try {
 			expect(fixture.exitCode).toBe(0);
-			const db = new DatabaseSync(fixture.eventsDbPath);
-			const kinds = (
-				db.prepare("SELECT kind FROM events ORDER BY id ASC").all() as {
-					kind: string;
-				}[]
-			).map((r) => r.kind);
-
-			expect(kinds).toContain("run_started");
-			expect(kinds).toContain("unit_started");
-			expect(kinds).toContain("git_checkpoint");
-			expect(kinds).toContain("unit_completed");
-			expect(kinds).toContain("run_completed");
-
-			// Pre + post checkpoints at minimum.
-			const checkpointCount = kinds.filter(
-				(k) => k === "git_checkpoint",
-			).length;
-			expect(checkpointCount).toBeGreaterThanOrEqual(2);
-
-			db.close();
+			expect(existsSync(fixture.eventsDbPath)).toBe(false);
 		} finally {
 			await fixture.cleanup();
 		}

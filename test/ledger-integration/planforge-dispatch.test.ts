@@ -1,52 +1,14 @@
-import { spawnSync } from "node:child_process";
-import {
-	chmodSync,
-	existsSync,
-	mkdirSync,
-	readdirSync,
-	readFileSync,
-	writeFileSync,
-} from "node:fs";
-import { mkdtemp, rm } from "node:fs/promises";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import {
-	LEDGER_TEST_REPO_ROOT,
-	resolveNativeBinaryForLedgerTests,
-} from "./fixtures.ts";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
 
-// End-to-end admit→dispatch over REAL machinery: the signed ledger subprocess
-// (native binary) appends a kernel-signed plan_admitted; `planforge dispatch`
-// reads it back via findExistingPlanAdmitted, builds one packet per task, and
-// runs each through the kernel orchestrator's runPacketAsync (prepareRun →
-// assertRunnableRepository → prepareWorkspace (git worktree add) → admission gate
-// (re-verifies the signed plan_admitted by event id) → execute `true` → finalize).
-//
-// No process.chdir here (it races under vitest parallel workers, per the
-// fixtures.ts corruption note) — runCli takes an explicit cwd, and the binary +
-// kernel key resolve via env. This file is intentionally separate so its
-// worker-per-file isolation never overlaps with makeBuildplaneRunFixture's chdir.
-
-const GOAL_INPUT = resolve(
-	LEDGER_TEST_REPO_ROOT,
-	"apps/cli/test/fixtures/planforge/goal-input.md",
-);
-
-interface DispatchEnv {
-	dir: string;
-	home: string;
-	binDir: string;
-	eventsDbPath: string;
-	cleanup: () => Promise<void>;
-}
-
-function runGit(cwd: string, args: string[]): void {
-	const r = spawnSync("git", args, { cwd, encoding: "utf8" });
-	if (r.status !== 0) {
-		throw new Error(`git ${args.join(" ")} failed: ${r.stderr}`);
-	}
-}
+// The old PlanForge activity, receipt, recovery, and crash tapes exercised an
+// ambient local worker lane. That lane is intentionally retired: the CLI cannot
+// mint its own signed authority or execute a PlanForge task outside a host-owned
+// candidate session. Governed equivalents live in the broker-view, candidate
+// promotion, and native workflow-reducer suites; this integration test protects
+// the local fail-closed boundary itself.
 
 async function loadRunCli() {
 	const mod = (await import("../../apps/cli/src/run-cli.js")) as {
@@ -65,277 +27,78 @@ async function loadRunCli() {
 async function runCliCapture(
 	argv: string[],
 	cwd: string,
-): Promise<{ code: number; threw: boolean; out: string; err: string }> {
+): Promise<{ code: number; out: string; err: string }> {
 	const runCli = await loadRunCli();
 	const out: string[] = [];
 	const err: string[] = [];
 	try {
 		const code = await runCli(argv, {
 			cwd,
-			stdout: (l) => out.push(l),
-			stderr: (l) => err.push(l),
+			stdout: (line) => out.push(line),
+			stderr: (line) => err.push(line),
 		});
-		return { code, threw: false, out: out.join("\n"), err: err.join("\n") };
-	} catch (e) {
+		return { code, out: out.join("\n"), err: err.join("\n") };
+	} catch (error) {
 		return {
 			code: 1,
-			threw: true,
 			out: out.join("\n"),
-			err: err.join("\n") || String(e),
+			err: err.join("\n") || String(error),
 		};
 	}
 }
 
-/**
- * Create an isolated git-initialized + buildplane-initialized workspace under a
- * temp HOME carrying a kernel ed25519 seed (so `ledger serve --sign` produces
- * real detached signatures). Mirrors makeBuildplaneRunFixture's runnable-project
- * setup (git init + commit + `buildplane init` + commit) — but with an explicit
- * cwd instead of process.chdir, and without running a packet.
- */
-async function makeDispatchEnv(): Promise<DispatchEnv> {
-	const dir = await mkdtemp(join(tmpdir(), "bp-dispatch-ws-"));
-	const home = await mkdtemp(join(tmpdir(), "bp-dispatch-home-"));
-	const binDir = await mkdtemp(join(tmpdir(), "bp-dispatch-bin-"));
-	const keyDir = join(home, ".buildplane", "keys", "kernel");
-	mkdirSync(keyDir, { recursive: true });
-	// Raw 32-byte ed25519 seed (copied from planforge-admit.test.ts) — the value
-	// is irrelevant, only that the kernel key resolves so signing succeeds.
-	writeFileSync(join(keyDir, "kernel-main.ed25519"), Buffer.alloc(32, 7));
+describe("PlanForge legacy dispatch trust boundary", () => {
+	const temporaryRoots: string[] = [];
 
-	runGit(dir, ["init", "-q"]);
-	runGit(dir, ["config", "user.email", "test@test"]);
-	runGit(dir, ["config", "user.name", "test"]);
-	runGit(dir, ["commit", "-q", "--allow-empty", "-m", "init"]);
-
-	return {
-		dir,
-		home,
-		binDir,
-		eventsDbPath: join(dir, ".buildplane", "ledger", "events.db"),
-		cleanup: async () => {
-			await rm(dir, { recursive: true, force: true });
-			await rm(home, { recursive: true, force: true });
-			await rm(binDir, { recursive: true, force: true });
-		},
-	};
-}
-
-/**
- * Install a `claude` shim on PATH. PlanForge dispatch spawns a real claude-code
- * model worker; without a binary the worker exits non-zero and the run fails.
- * The shim emits a valid result and exits 0 so the model packet succeeds.
- */
-function installClaudeShim(binDir: string): void {
-	const shim = join(binDir, "claude");
-	writeFileSync(shim, '#!/bin/sh\necho \'{"result":"ok"}\'\nexit 0\n', "utf8");
-	chmodSync(shim, 0o755);
-}
-
-/**
- * Install a `pnpm` shim on PATH. The acceptance gate is ON by default (GAP-3), so
- * `pnpm` is invoked for worktree provisioning (`pnpm install --frozen-lockfile`)
- * AND the gate's `pnpm lint` check. The `install` invocation is intercepted to
- * exit 0; `body` is the shell body for the CHECK invocation. A green shim
- * (`exit 0`) lets the default-on gate pass so these tests exercise the dispatch
- * behavior, not the gate verdict.
- */
-function installPnpmShim(binDir: string, body: string): void {
-	const shim = join(binDir, "pnpm");
-	writeFileSync(
-		shim,
-		`#!/bin/sh\nif [ "$1" = "install" ]; then exit 0; fi\n${body}\n`,
-		"utf8",
-	);
-	chmodSync(shim, 0o755);
-}
-
-/** Initialize the Buildplane project (state.db + project.json) and commit the
- * artifacts so the run-loop's assertRunnableRepository sees a clean worktree. */
-async function initBuildplaneProject(dir: string): Promise<void> {
-	const res = await runCliCapture(["init"], dir);
-	expect(res.code).toBe(0);
-	runGit(dir, ["add", "-A"]);
-	runGit(dir, ["commit", "-q", "-m", "buildplane: init"]);
-}
-
-interface AdmissionReceiptRun {
-	run_id?: string;
-	provenance_ref?: string;
-}
-interface AdmissionReceipt {
-	run?: AdmissionReceiptRun;
-}
-
-/** Read every admission receipt written under <git-dir>/buildplane/admission/
- * receipts/*.json. The kernel default admission store resolves the git dir via
- * `git rev-parse --absolute-git-dir`; for a plain repo that is <dir>/.git. */
-function readAdmissionReceipts(dir: string): AdmissionReceipt[] {
-	const receiptsDir = join(dir, ".git", "buildplane", "admission", "receipts");
-	if (!existsSync(receiptsDir)) {
-		return [];
-	}
-	return readdirSync(receiptsDir)
-		.filter((f) => f.endsWith(".json"))
-		.map(
-			(f) =>
-				JSON.parse(
-					readFileSync(join(receiptsDir, f), "utf8"),
-				) as AdmissionReceipt,
-		);
-}
-
-interface DispatchJson {
-	status: string;
-	plan_id: string;
-	admitted_event_id: string;
-	runs: Array<{ task: string; run_id: string; status: string }>;
-}
-
-describe("planforge admit→dispatch — signed-gate end-to-end", () => {
-	let env: DispatchEnv;
-	let originalHome: string | undefined;
-	let originalNativeBin: string | undefined;
-	let originalPath: string | undefined;
-
-	beforeEach(async () => {
-		env = await makeDispatchEnv();
-		originalHome = process.env.HOME;
-		originalNativeBin = process.env.BUILDPLANE_NATIVE_BIN;
-		originalPath = process.env.PATH;
-		process.env.HOME = env.home;
-		process.env.BUILDPLANE_NATIVE_BIN = resolveNativeBinaryForLedgerTests();
-		// Dispatch spawns a real claude-code model worker; shim it so the model
-		// packet succeeds (no `claude` binary exists in the test sandbox). The
-		// acceptance gate is ON by default (GAP-3), so a green `pnpm` shim lets
-		// provisioning + checks pass and these tests stay focused on dispatch.
-		process.env.PATH = `${env.binDir}:${originalPath ?? ""}`;
-		installClaudeShim(env.binDir);
-		installPnpmShim(env.binDir, "exit 0");
+	afterEach(() => {
+		for (const root of temporaryRoots.splice(0)) {
+			rmSync(root, { recursive: true, force: true });
+		}
 	});
 
-	afterEach(async () => {
-		if (originalHome === undefined) {
-			delete process.env.HOME;
-		} else {
-			process.env.HOME = originalHome;
+	it("blocks every retired local execution form before it creates governed-looking state", async () => {
+		const root = mkdtempSync(join(tmpdir(), "buildplane-planforge-dispatch-"));
+		temporaryRoots.push(root);
+		const input = join(root, "untrusted-plan.md");
+		writeFileSync(input, "# Untrusted PlanForge source\n", "utf8");
+
+		const invocations = [
+			{
+				label: "dispatch",
+				argv: ["planforge", "dispatch", "--input", input, "--json"],
+				expectedError: "PlanForge legacy execution is blocked",
+			},
+			{
+				label: "resume",
+				argv: ["planforge", "resume", "--input", input, "--json"],
+				expectedError: "PlanForge legacy execution is blocked",
+			},
+			{
+				label: "recover",
+				argv: ["planforge", "recover", "--json"],
+				expectedError: "PlanForge legacy execution is blocked",
+			},
+			{
+				label: "loop",
+				argv: ["planforge", "loop", "--once", "--json"],
+				expectedError: "PlanForge legacy execution is blocked",
+			},
+			{
+				label: "authorize-envelope",
+				argv: ["planforge", "authorize-envelope", "--json"],
+				expectedError: "GOVERNED_AUTHORITY_BROKER_REQUIRED",
+			},
+		] as const;
+
+		for (const invocation of invocations) {
+			const result = await runCliCapture([...invocation.argv], root);
+			expect(result.code, invocation.label).toBe(1);
+			expect(`${result.out}\n${result.err}`, invocation.label).toContain(
+				invocation.expectedError,
+			);
+			expect(existsSync(join(root, ".buildplane")), invocation.label).toBe(
+				false,
+			);
 		}
-		if (originalNativeBin === undefined) {
-			delete process.env.BUILDPLANE_NATIVE_BIN;
-		} else {
-			process.env.BUILDPLANE_NATIVE_BIN = originalNativeBin;
-		}
-		if (originalPath === undefined) {
-			delete process.env.PATH;
-		} else {
-			process.env.PATH = originalPath;
-		}
-		await env.cleanup();
 	});
-
-	it("dispatches an admitted plan as one passed run per task, all carrying admitted_event_id", async () => {
-		await initBuildplaneProject(env.dir);
-
-		const admit = await runCliCapture(
-			[
-				"planforge",
-				"admit",
-				"--input",
-				GOAL_INPUT,
-				"--approve",
-				"--operator",
-				"op1",
-				"--json",
-			],
-			env.dir,
-		);
-		expect(admit.code).toBe(0);
-		const admitJson = JSON.parse(admit.out) as {
-			status: string;
-			event_id: string;
-		};
-		expect(admitJson.status).toBe("admitted");
-		const admittedEventId = admitJson.event_id;
-		expect(admittedEventId).toBeTruthy();
-
-		const dispatch = await runCliCapture(
-			["planforge", "dispatch", "--input", GOAL_INPUT, "--json"],
-			env.dir,
-		);
-		expect(dispatch.err).toBe("");
-		expect(dispatch.code).toBe(0);
-
-		const result = JSON.parse(dispatch.out) as DispatchJson;
-		expect(result.status).toBe("dispatched");
-		expect(result.admitted_event_id).toBe(admittedEventId);
-		expect(result.runs).toHaveLength(2);
-		for (const run of result.runs) {
-			expect(run.status).toBe("passed");
-			expect(run.run_id).toBeTruthy();
-		}
-		// One run per PlanForgeTask (PF1, PF2), in plan order.
-		expect(result.runs.map((r) => r.task)).toEqual([
-			"pf-plan-95d7132e:PF1",
-			"pf-plan-95d7132e:PF2",
-		]);
-	}, 30_000);
-
-	it("lands provenance_ref == admitted_event_id on each run's admission receipt", async () => {
-		await initBuildplaneProject(env.dir);
-
-		const admit = await runCliCapture(
-			[
-				"planforge",
-				"admit",
-				"--input",
-				GOAL_INPUT,
-				"--approve",
-				"--operator",
-				"op1",
-				"--json",
-			],
-			env.dir,
-		);
-		expect(admit.code).toBe(0);
-		const admittedEventId = (JSON.parse(admit.out) as { event_id: string })
-			.event_id;
-
-		const dispatch = await runCliCapture(
-			["planforge", "dispatch", "--input", GOAL_INPUT, "--json"],
-			env.dir,
-		);
-		expect(dispatch.code).toBe(0);
-		const result = JSON.parse(dispatch.out) as DispatchJson;
-		expect(result.runs).toHaveLength(2);
-
-		const receipts = readAdmissionReceipts(env.dir);
-		// One admission receipt per dispatched run.
-		const byRunId = new Map<string, AdmissionReceipt>();
-		for (const receipt of receipts) {
-			const runId = receipt.run?.run_id;
-			if (runId) {
-				byRunId.set(runId, receipt);
-			}
-		}
-		for (const run of result.runs) {
-			const receipt = byRunId.get(run.run_id);
-			expect(
-				receipt,
-				`expected an admission receipt for run ${run.run_id}`,
-			).toBeDefined();
-			expect(receipt?.run?.provenance_ref).toBe(admittedEventId);
-		}
-	}, 30_000);
-
-	it("fails closed (plan-not-admitted) when dispatching a plan with no signed plan_admitted", async () => {
-		await initBuildplaneProject(env.dir);
-		// No admit step: the tape has no plan_admitted for this plan.
-
-		const dispatch = await runCliCapture(
-			["planforge", "dispatch", "--input", GOAL_INPUT, "--json"],
-			env.dir,
-		);
-		expect(dispatch.threw || dispatch.code !== 0).toBe(true);
-		expect(`${dispatch.err}\n${dispatch.out}`).toContain("plan-not-admitted");
-	}, 30_000);
 });

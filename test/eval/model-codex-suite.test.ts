@@ -295,14 +295,17 @@ describe("model-codex eval suite", () => {
 				combinedHelpedRate: number;
 			};
 		};
-
 		expect(report.suiteId).toBe("model-codex");
 		expect(report.aggregates.totalFixtures).toBe(4);
 		expect(report.aggregates.totalConditions).toBe(16);
-		expect(report.aggregates.memoryInjectedRate).toBeGreaterThan(0);
-		expect(report.aggregates.memoryHelpedRate).toBeGreaterThan(0);
-		expect(report.aggregates.strategyHelpedRate).toBeGreaterThan(0);
-		expect(report.aggregates.combinedHelpedRate).toBeGreaterThan(0);
+		// Memory enrichment still reaches every fixture, but this legacy eval's
+		// strategy arm is an ungoverned implement-then-review graph. Trust Spine
+		// blocks that arm, so it cannot create a governed "helped" capability
+		// signal from otherwise useful raw one-shot comparisons.
+		expect(report.aggregates.memoryInjectedRate).toBe(1);
+		expect(report.aggregates.memoryHelpedRate).toBe(0);
+		expect(report.aggregates.strategyHelpedRate).toBe(0);
+		expect(report.aggregates.combinedHelpedRate).toBe(0);
 		const fixtures = new Map(
 			report.fixtures.map((fixture) => [fixture.name, fixture]),
 		);
@@ -312,7 +315,7 @@ describe("model-codex eval suite", () => {
 			expect.arrayContaining([
 				expect.objectContaining({
 					condition: "memory+strategy",
-					passed: true,
+					passed: false,
 					memoriesInjected: expect.any(Number),
 				}),
 				expect.objectContaining({
@@ -322,7 +325,7 @@ describe("model-codex eval suite", () => {
 				}),
 				expect.objectContaining({
 					condition: "nomemory+strategy",
-					passed: true,
+					passed: false,
 					memoriesInjected: 0,
 				}),
 				expect.objectContaining({
@@ -338,7 +341,7 @@ describe("model-codex eval suite", () => {
 			expect.arrayContaining([
 				expect.objectContaining({
 					condition: "memory+strategy",
-					passed: true,
+					passed: false,
 					memoriesInjected: expect.any(Number),
 				}),
 				expect.objectContaining({
@@ -362,20 +365,10 @@ describe("model-codex eval suite", () => {
 			fixtures.get("reviewer-rescue")?.conditions ?? [];
 		expect(reviewerRescueConditions).toEqual(
 			expect.arrayContaining([
-				expect.objectContaining({ condition: "memory+strategy", passed: true }),
-				expect.objectContaining({ condition: "memory+raw", passed: false }),
 				expect.objectContaining({
-					condition: "nomemory+strategy",
-					passed: true,
+					condition: "memory+strategy",
+					passed: false,
 				}),
-				expect.objectContaining({ condition: "nomemory+raw", passed: false }),
-			]),
-		);
-		const combinedOnlyConditions =
-			fixtures.get("memory-strategy-combined-only")?.conditions ?? [];
-		expect(combinedOnlyConditions).toEqual(
-			expect.arrayContaining([
-				expect.objectContaining({ condition: "memory+strategy", passed: true }),
 				expect.objectContaining({ condition: "memory+raw", passed: false }),
 				expect.objectContaining({
 					condition: "nomemory+strategy",
@@ -384,15 +377,30 @@ describe("model-codex eval suite", () => {
 				expect.objectContaining({ condition: "nomemory+raw", passed: false }),
 			]),
 		);
+		const combinedOnlyConditions =
+			fixtures.get("memory-strategy-combined-only")?.conditions ?? [];
+		expect(combinedOnlyConditions).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					condition: "memory+strategy",
+					passed: false,
+				}),
+				expect.objectContaining({ condition: "memory+raw", passed: false }),
+				expect.objectContaining({
+					condition: "nomemory+strategy",
+					passed: false,
+				}),
+				expect.objectContaining({ condition: "nomemory+raw", passed: false }),
+			]),
+		);
+		const memoryConditions = report.fixtures.flatMap((fixture) =>
+			fixture.conditions.filter((condition) =>
+				condition.condition.startsWith("memory+"),
+			),
+		);
+		expect(memoryConditions).toHaveLength(8);
 		expect(
-			helloConditions
-				.filter((condition) => condition.condition.startsWith("memory+"))
-				.every((condition) => condition.memoriesInjected > 0),
-		).toBe(true);
-		expect(
-			memoryHelpConditions
-				.filter((condition) => condition.condition.startsWith("memory+"))
-				.every((condition) => condition.memoriesInjected > 0),
+			memoryConditions.every((condition) => condition.memoriesInjected > 0),
 		).toBe(true);
 	});
 });

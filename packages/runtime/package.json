@@ -12,6 +12,10 @@
 		"./command-executor": {
 			"types": "./src/command-executor.ts",
 			"import": "./src/command-executor.ts"
+		},
+		"./governed-sandbox": {
+			"types": "./src/governed-sandbox.ts",
+			"import": "./src/governed-sandbox.ts"
 		}
 	},
 	"dependencies": {

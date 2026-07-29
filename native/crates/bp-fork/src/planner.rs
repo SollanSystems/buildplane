@@ -12,8 +12,10 @@ use uuid::Uuid;
 pub enum PlanError {
     #[error("replay: {0}")]
     Replay(String),
-    #[error("target event must be unit_started; got {kind} at {event_id}. \
-             Nearest enclosing unit_started: {nearest}")]
+    #[error(
+        "target event must be unit_started; got {kind} at {event_id}. \
+             Nearest enclosing unit_started: {nearest}"
+    )]
     TargetNotUnitStarted {
         kind: String,
         event_id: String,
@@ -52,7 +54,10 @@ pub fn build_fork_plan(
     packet_path: &Path,
 ) -> Result<ForkPlan, PlanError> {
     // Resolve events.db under <workspace>/.buildplane/ledger/events.db.
-    let db_path = workspace.join(".buildplane").join("ledger").join("events.db");
+    let db_path = workspace
+        .join(".buildplane")
+        .join("ledger")
+        .join("events.db");
     let mut engine = ReplayEngine::open(parent_run_id, &db_path)
         .map_err(|e| PlanError::Replay(format!("{e}")))?;
 
@@ -94,10 +99,11 @@ pub fn build_fork_plan(
     // The checkpoint may not have been seen yet at this point in iteration
     // (unit_started fires before pre-unit git_checkpoint). We need to
     // continue iteration briefly to pick up the pre-unit checkpoint.
-    let pre_sha = find_pre_checkpoint_after(&mut engine, &unit_id)
-        .ok_or_else(|| PlanError::MissingPreCheckpoint {
+    let pre_sha = find_pre_checkpoint_after(&mut engine, &unit_id).ok_or_else(|| {
+        PlanError::MissingPreCheckpoint {
             unit_id: unit_id.clone(),
-        })?;
+        }
+    })?;
 
     // Read + parse packet.
     let packet_bytes = std::fs::read(packet_path).map_err(|source| PlanError::PacketIo {
@@ -137,7 +143,10 @@ fn find_pre_checkpoint_after(engine: &mut ReplayEngine, unit_id: &str) -> Option
         if let Payload::GitCheckpointV1(p) = &step.event.payload {
             if p.unit_id == unit_id
                 && matches!(p.boundary, CheckpointBoundary::PreUnit)
-                && matches!(p.git_status, bp_ledger::payload::git_checkpoint::GitStatus::Ok)
+                && matches!(
+                    p.git_status,
+                    bp_ledger::payload::git_checkpoint::GitStatus::Ok
+                )
             {
                 return Some(p.commit_sha.clone());
             }

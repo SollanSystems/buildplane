@@ -60,10 +60,10 @@ describe("README contract", () => {
 			"pnpm buildplane inspect <run-id> --json",
 		);
 		expect(repoDevelopmentSection).toContain(
-			"pnpm buildplane replay <run-id> --json",
+			"pnpm buildplane replay <run-id> --raw --json",
 		);
 		expect(repoDevelopmentSection).toContain(
-			"pnpm buildplane fork <run-id> --at <event-id> --packet <fixed-packet.json>",
+			"pnpm buildplane fork <run-id> --at <event-id> --packet <fixed-packet.json> --raw",
 		);
 		expect(repoDevelopmentSection).toContain("pnpm buildplane memory doctor");
 		expect(repoDevelopmentSection).toContain(
@@ -92,10 +92,10 @@ describe("README contract", () => {
 			"node apps/cli/dist/index.js inspect <run-id> --json",
 		);
 		expect(builtCliSection).toContain(
-			"node apps/cli/dist/index.js replay <run-id> --json",
+			"node apps/cli/dist/index.js replay <run-id> --raw --json",
 		);
 		expect(builtCliSection).toContain(
-			"node apps/cli/dist/index.js fork <run-id> --at <event-id> --packet <fixed-packet.json>",
+			"node apps/cli/dist/index.js fork <run-id> --at <event-id> --packet <fixed-packet.json> --raw",
 		);
 		expect(builtCliSection).toContain(
 			"node apps/cli/dist/index.js memory doctor --json",
@@ -157,23 +157,30 @@ describe("README contract", () => {
 		);
 	});
 
-	it("keeps replay, fork, and event-tape docs tied to the operator loop", () => {
+	it("keeps raw replay/fork and read-only tape docs tied to the operator loop", () => {
 		expect(readme).toContain("docs/ledger.md");
 		expect(readme).toContain("inspect the event tape");
-		expect(readme).toContain("replay the stored packet snapshot");
-		expect(readme).toContain("fork from a unit boundary");
+		expect(readme).toContain("re-executes a stored legacy packet snapshot");
+		expect(readme).toContain("re-execute from a unit boundary");
 		expect(readme).toContain(
 			"buildplane ledger replay --run-id <run-id> --workspace <path>",
 		);
 	});
 
-	it("presents replay review and recovery as the high-trust operator loop", () => {
-		expect(highTrustLoopSection).toContain("run with implement-then-review");
-		expect(highTrustLoopSection).toContain("inspect the event tape");
-		expect(highTrustLoopSection).toContain("replay the stored packet snapshot");
-		expect(highTrustLoopSection).toContain("fork from a unit boundary");
+	it("presents candidate review and read-only tape recovery as the high-trust loop", () => {
+		expect(highTrustLoopSection).toContain("blocked governed preview");
+		expect(highTrustLoopSection).toContain("host-brokered candidate session");
+		expect(highTrustLoopSection).toContain("read-only tape reconstruction");
+		expect(highTrustLoopSection).toContain(
+			"explicitly accept unsafe legacy execution",
+		);
 		expect(highTrustLoopSection).toContain("reviewer-rescue");
-		expect(highTrustLoopSection).toContain("raw one-shot path");
+		expect(highTrustLoopSection).toContain(
+			"never falls back to an ambient worker",
+		);
+		expect(highTrustLoopSection).toContain(
+			"docs/operations/trust-spine-compatibility-matrix.md",
+		);
 	});
 
 	it("documents the Node baseline and published runtime range", () => {

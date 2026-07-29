@@ -1,7 +1,7 @@
 import type { CapabilityBundleV0 } from "@buildplane/capability-broker";
 import type { MemoryStatus } from "./memory-types.js";
 import type { AcceptanceEvidence } from "./policy.js";
-import type { Run, RunStatus, Unit } from "./types.js";
+import type { ExecutionRole, Run, RunStatus, Unit } from "./types.js";
 
 export interface ToolDefinition {
 	readonly name: string;
@@ -31,6 +31,12 @@ export interface CommandExecutionBlock {
 
 export interface UnitPacket {
 	readonly unit: Unit;
+	/**
+	 * Canonical execution identity for renderer and worker behavior.
+	 * Legacy wire packets without this field are normalized to `implementer`
+	 * exclusively by parseUnitPacket.
+	 */
+	readonly execution_role: ExecutionRole;
 	readonly execution?: CommandExecutionBlock;
 	readonly model?: ModelExecutionBlock;
 	readonly intent?: import("./types.js").TaskIntent;
@@ -165,6 +171,28 @@ export interface WorkspaceSnapshot {
 	readonly status: "active" | "retained" | "deleted" | "cleanup-failed";
 	readonly finalizedAt?: string;
 	readonly cleanupError?: string;
+}
+
+/**
+ * Immutable Git material produced from an isolated worktree. This is the
+ * raw, adapter-facing candidate identity; it deliberately does not claim to
+ * be a signed `CandidateArtifactV1`, whose workflow/envelope evidence is
+ * attached only in the governed dispatch path.
+ */
+export interface WorkspaceCandidateArtifact {
+	readonly schemaVersion: 1;
+	readonly candidateId: string;
+	readonly runId: string;
+	readonly attempt: number;
+	readonly candidateKey: string;
+	readonly candidateRef: string;
+	readonly baseSha: string;
+	readonly candidateCommitSha: string;
+	readonly commitDigest: string;
+	readonly treeDigest: string;
+	readonly patchDigest: string;
+	readonly changedFilesDigest: string;
+	readonly candidateDigest: string;
 }
 
 export interface StatusWorkspaceSummary {
@@ -304,6 +332,14 @@ export interface RunPacketResult {
 	readonly receipt?: ExecutionReceipt;
 	readonly decision?: PolicyDecision;
 	readonly failure?: RunInfrastructureFailure;
+	/** Present only when finalization froze output as an immutable candidate. */
+	readonly candidate?: WorkspaceCandidateArtifact;
+	/**
+	 * Present only after deterministic acceptance was recorded against the exact
+	 * frozen candidate. A raw Git candidate without this record is intentionally
+	 * not promotion-eligible.
+	 */
+	readonly candidateAcceptance?: import("./ports.js").CandidateAcceptanceRecord;
 	readonly workspace?: WorkspaceSnapshot;
 	readonly injectedMemories?: readonly PersistedInjectedMemoryRecord[];
 	readonly suspended?: boolean;

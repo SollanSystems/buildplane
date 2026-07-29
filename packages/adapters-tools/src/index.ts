@@ -1,4 +1,49 @@
 import type { CapabilityBundleV0 } from "@buildplane/capability-broker";
+
+export {
+	type ActionGateway,
+	type ActionGatewayReceipt,
+	type ActionGatewayRole,
+	type ActionGatewayTrustTier,
+	type CreateActionGatewayOptions,
+	createActionGateway,
+	type GatewayAction,
+	type GatewayTools,
+	type GovernedActionExecutionContext,
+	type GovernedActionExecutor,
+	type GovernedSandboxAttestationV1,
+} from "./action-gateway.js";
+export {
+	type CreateGovernedCommandWorkerExecutionPortOptions,
+	createGovernedCommandWorkerExecutionPort,
+	type GovernedActivityClaimDispositionV1,
+	type GovernedActivityClaimPort,
+	type GovernedActivityResultDispositionV1,
+	type GovernedActivityResultOutcomeV1,
+	type GovernedCommandEvidenceStore,
+	type GrantedGovernedActivityClaimV1,
+} from "./governed-worker.js";
+export {
+	PODMAN_GOVERNED_PROFILE_ID,
+	type PodmanCommandResult,
+	type PodmanGovernedSandboxProfileV1,
+	podmanGovernedSandboxProfileDigest,
+} from "./podman-governed-executor.js";
+export {
+	type ActionDefinition,
+	approveRemoteActionProposal,
+	canonicalRemoteContentDigest,
+	createRemoteActionProposal,
+	type LocalRemoteActionVerifier,
+	type QuarantinedRemoteActionDraft,
+	type QuarantinedRemoteArtifact,
+	type QuarantinedRemoteInterchange,
+	type QuarantinedRemoteMetadata,
+	quarantineRemoteInterchange,
+	type RemoteActionProposal,
+	type RemoteInterchangeProtocol,
+} from "./remote-interchange.js";
+
 import { type RunCommandResult, runCommand } from "./run-command.js";
 import {
 	type WriteFileOptions,

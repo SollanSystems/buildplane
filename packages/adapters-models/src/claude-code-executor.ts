@@ -1,12 +1,12 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
-import type {
-	EventBus,
-	ExecutionReceipt,
-	ExecutionRole,
-	TaskRenderer,
-	UnitPacket,
+import {
+	carriesGovernanceFields,
+	type EventBus,
+	type ExecutionReceipt,
+	type TaskRenderer,
+	type UnitPacket,
 } from "@buildplane/kernel";
 
 const CLAUDE_UNSAFE_PERMISSION_FLAG = [
@@ -167,6 +167,7 @@ export function createClaudeCodeExecutor(
 			eventBus: EventBus,
 			signal?: AbortSignal,
 		): Promise<ExecutionReceipt> {
+			assertAmbientHostWorkerIsRawOnly(packet, "Claude Code");
 			const startedAt = new Date().toISOString();
 
 			// Validate: must be a model packet, not a command packet
@@ -190,8 +191,7 @@ export function createClaudeCodeExecutor(
 			// Resolve prompt: intent + renderer takes precedence over model.prompt
 			let foldedPrompt: string;
 			if (packet.intent && renderer) {
-				const role: ExecutionRole = "implementer";
-				const rendered = renderer.render(packet.intent, role);
+				const rendered = renderer.render(packet.intent, packet.execution_role);
 				foldedPrompt = rendered.system
 					? `${rendered.system}\n\n---\n\n${rendered.prompt}`
 					: rendered.prompt;
@@ -472,4 +472,15 @@ export function createClaudeCodeExecutor(
 			});
 		},
 	};
+}
+
+function assertAmbientHostWorkerIsRawOnly(
+	packet: UnitPacket,
+	workerName: string,
+): void {
+	if (carriesGovernanceFields(packet)) {
+		throw new Error(
+			`AMBIENT_HOST_WORKER_FORBIDDEN: ${workerName} CLI is raw-only and cannot execute a packet carrying governed authority fields.`,
+		);
+	}
 }

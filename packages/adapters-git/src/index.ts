@@ -1,4 +1,15 @@
 export {
+	type CreateGitWorkspaceCandidateInput,
 	createGitWorktreeAdapter,
+	createGovernedGitWorktreeAdapter,
 	type GitCommandRunner,
+	type GitWorkspaceCandidate,
+	GitWorkspaceCandidateError,
+	type GitWorkspaceCandidateErrorCode,
+	type GitWorkspaceCandidateIdentity,
+	type GitWorkspaceCandidatePromotionInspectionResult,
+	type GitWorkspaceCandidatePromotionResult,
+	type GitWorktreeAdapter,
+	type GovernedGitWorktreeAdapter,
+	type PromoteGitWorkspaceCandidateInput,
 } from "./worktree-adapter.js";

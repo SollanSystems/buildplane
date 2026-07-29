@@ -63,11 +63,11 @@ function buildTaskBlock(intent: TaskIntent, role: ExecutionRole): string {
 function roleInstructionLine(role: ExecutionRole, taskType: string): string {
 	switch (role) {
 		case "reviewer":
-			return "You are reviewing existing work. Produce a verdict: approve | request-changes | reject. Be specific with file:line references.";
+			return "You are reviewing existing work only. Do not modify files, create persistent files, or run mutating commands. Produce a verdict: approve | request-changes | reject. Be specific with file:line references.";
 		case "adversary":
-			return "You are an adversarial reviewer. Challenge every assumption. Find bugs, security issues, and design flaws. Be thorough and critical.";
+			return "You are an adversarial reviewer. Do not modify files, create persistent files, or run mutating commands. Challenge every assumption. Find bugs, security issues, and design flaws. Be thorough and critical.";
 		case "judge":
-			return "You are arbitrating between competing implementations. Select the best candidate and explain your reasoning.";
+			return "You are arbitrating between competing implementations. Read existing candidate evidence only; do not modify files or run mutating commands. Select the best candidate and explain your reasoning.";
 		case "candidate":
 			return `You are producing a candidate ${taskType} for evaluation against other candidates. Focus on correctness and test coverage.`;
 		default:
@@ -131,7 +131,7 @@ function buildContextBlock(intent: TaskIntent, role: ExecutionRole): string {
 			.map((p, i) => `  ${i + 1}. ${p}`)
 			.join("\n");
 		const label =
-			role === "reviewer" || role === "adversary"
+			role === "reviewer" || role === "adversary" || role === "judge"
 				? "work-to-review"
 				: "prior-work";
 		lines.push(`<${label}>\n${priorList}\n</${label}>`);

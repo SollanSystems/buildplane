@@ -158,10 +158,13 @@ pub fn pack_inspection_json(inspection: &LoadedPackInspection) -> PackInspection
             display_name: loaded.manifest.pack.display_name.clone(),
             version: loaded.manifest.pack.version.clone(),
             default_provider: loaded.manifest.pack.default_provider.clone(),
-            default_mode: loaded.manifest.default_mode().map(|mode| PackModeSummaryJson {
-                id: mode.id.clone(),
-                display_name: mode.display_name.clone(),
-            }),
+            default_mode: loaded
+                .manifest
+                .default_mode()
+                .map(|mode| PackModeSummaryJson {
+                    id: mode.id.clone(),
+                    display_name: mode.display_name.clone(),
+                }),
         },
         pack_root: loaded.pack_root.clone(),
         manifest_path: loaded.manifest_path.clone(),
@@ -532,7 +535,10 @@ mod tests {
         let payload = pack_inspection_json(&inspection);
 
         assert_eq!(payload.pack.id, "superclaude");
-        assert_eq!(payload.selection.route, ExecutionRoute::Provider("openai".to_string()));
+        assert_eq!(
+            payload.selection.route,
+            ExecutionRoute::Provider("openai".to_string())
+        );
         assert_eq!(payload.selection_reason, "explicit provider requested");
         assert_eq!(payload.detection_source, DetectionSource::Environment);
         assert!(payload.effective_memory_policy.include_user);

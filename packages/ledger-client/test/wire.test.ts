@@ -1,14 +1,21 @@
 import { describe, expect, it } from "vitest";
 import {
+	buildClaimActivityV1,
 	buildClose,
 	buildFlush,
 	buildHandshake,
+	buildHeartbeatActivityV1,
+	buildRecordActivityResultV1,
+	buildResolveRetryCandidateActionIdentityV1,
 	type CloseAck,
 	type ErrorLine,
 	type FlushAck,
 	type HandshakeAck,
+	isActivityControlResponseLine,
 	parseAckLine,
 } from "../src/wire.js";
+
+const digest = `sha256:${"a".repeat(64)}`;
 
 describe("wire builders", () => {
 	it("builds a handshake line", () => {
@@ -30,6 +37,123 @@ describe("wire builders", () => {
 
 	it("builds a close line with seq", () => {
 		expect(buildClose(43)).toBe(`{"control":"close","seq":43}\n`);
+	});
+
+	it("builds a closed governed activity claim", () => {
+		const line = buildClaimActivityV1({
+			requestId: "request-1",
+			runId: "01919000-0000-7000-8000-000000000000",
+			activityId: "model:attempt:1",
+			idempotencyKey: "sha256:activity",
+			dispatchEventId: "01919000-0000-7000-8000-000000000001",
+			actionRequestEventId: "01919000-0000-7000-8000-000000000002",
+			leaseDurationMs: 30_000,
+		});
+		expect(JSON.parse(line)).toEqual({
+			control: "claim_activity_v1",
+			request_id: "request-1",
+			run_id: "01919000-0000-7000-8000-000000000000",
+			activity_id: "model:attempt:1",
+			idempotency_key: "sha256:activity",
+			dispatch_event_id: "01919000-0000-7000-8000-000000000001",
+			action_request_event_id: "01919000-0000-7000-8000-000000000002",
+			lease_duration_ms: 30_000,
+		});
+		expect(() =>
+			buildClaimActivityV1({
+				requestId: "request-1",
+				runId: "run",
+				activityId: "activity",
+				idempotencyKey: "key",
+				dispatchEventId: "dispatch",
+				actionRequestEventId: "action",
+				leaseDurationMs: 999,
+			}),
+		).toThrow("leaseDurationMs");
+	});
+
+	it("requires paired activity result references and mandatory evidence", () => {
+		const line = buildRecordActivityResultV1({
+			requestId: "request-1",
+			runId: "run",
+			activityId: "activity",
+			idempotencyKey: "key",
+			leaseId: "lease",
+			outcome: "succeeded",
+			resultDigest: digest,
+			resultRef: "cas://result",
+			evidenceDigest: digest,
+			evidenceRef: "cas://evidence",
+		});
+		expect(JSON.parse(line).result_digest).toBe(digest);
+		expect(() =>
+			buildRecordActivityResultV1({
+				requestId: "request-1",
+				runId: "run",
+				activityId: "activity",
+				idempotencyKey: "key",
+				leaseId: "lease",
+				outcome: "unknown",
+				resultDigest: digest,
+				resultRef: "cas://result",
+				evidenceDigest: digest,
+				evidenceRef: "cas://evidence",
+			}),
+		).toThrow("unknown outcome");
+	});
+
+	it("builds an authority-owned, closed activity heartbeat", () => {
+		const line = buildHeartbeatActivityV1({
+			requestId: "heartbeat-request-1",
+			runId: "01919000-0000-7000-8000-000000000000",
+			activityId: "model:attempt:1",
+			idempotencyKey: "activity:heartbeat:1",
+			leaseId: "lease:model:attempt:1",
+			heartbeatId: "heartbeat:model:attempt:1",
+		});
+		expect(JSON.parse(line)).toEqual({
+			control: "heartbeat_activity_v1",
+			request_id: "heartbeat-request-1",
+			run_id: "01919000-0000-7000-8000-000000000000",
+			activity_id: "model:attempt:1",
+			idempotency_key: "activity:heartbeat:1",
+			lease_id: "lease:model:attempt:1",
+			heartbeat_id: "heartbeat:model:attempt:1",
+		});
+		expect(() =>
+			buildHeartbeatActivityV1({
+				requestId: "heartbeat-request-1",
+				runId: "run",
+				activityId: "activity",
+				idempotencyKey: "key",
+				leaseId: "lease",
+				heartbeatId: "",
+			}),
+		).toThrow("heartbeatId");
+	});
+
+	it("builds a closed retry candidate action identity request", () => {
+		const line = buildResolveRetryCandidateActionIdentityV1({
+			requestId: "retry-identity-request-1",
+			runId: "01919000-0000-7000-8000-000000000000",
+			dispatchEventId: "01919000-0000-7000-8000-000000000001",
+			candidateRef: "refs/buildplane/candidates/candidate-1/run-1/2",
+		});
+		expect(JSON.parse(line)).toEqual({
+			control: "resolve_retry_candidate_action_identity_v1",
+			request_id: "retry-identity-request-1",
+			run_id: "01919000-0000-7000-8000-000000000000",
+			dispatch_event_id: "01919000-0000-7000-8000-000000000001",
+			candidate_ref: "refs/buildplane/candidates/candidate-1/run-1/2",
+		});
+		expect(() =>
+			buildResolveRetryCandidateActionIdentityV1({
+				requestId: "retry-identity-request-1",
+				runId: "run",
+				dispatchEventId: "dispatch",
+				candidateRef: "",
+			}),
+		).toThrow("candidateRef");
 	});
 });
 
@@ -78,5 +202,79 @@ describe("parseAckLine", () => {
 
 	it("returns null on non-json", () => {
 		expect(parseAckLine("not json")).toBeNull();
+	});
+
+	it("strictly parses authority claim responses", () => {
+		const line =
+			'{"control":"claim_activity_v1_result","request_id":"request-1","outcome":"granted","claim_event_id":"01919000-0000-7000-8000-000000000001","claim_event_digest":"sha256:claim","lease_id":"lease-1","lease_expires_at":"2026-07-18T12:00:00Z"}';
+		const ack = parseAckLine(line);
+		expect(ack).toMatchObject({
+			control: "claim_activity_v1_result",
+			outcome: "granted",
+			lease_id: "lease-1",
+		});
+		expect(isActivityControlResponseLine(line)).toBe(true);
+		expect(
+			parseAckLine(
+				'{"control":"claim_activity_v1_result","request_id":"request-1","outcome":"granted","claim_event_id":"id","claim_event_digest":"sha256:claim","lease_id":"lease-1","lease_expires_at":"time","unexpected":true}',
+			),
+		).toBeNull();
+	});
+
+	it("strictly parses authority-owned heartbeat responses", () => {
+		const recorded =
+			'{"control":"heartbeat_activity_v1_result","request_id":"heartbeat-request-1","outcome":"recorded","heartbeat_event_id":"01919000-0000-7000-8000-000000000003","heartbeat_event_digest":"sha256:heartbeat","lease_expires_at":"2026-07-18T12:00:00Z"}';
+		expect(parseAckLine(recorded)).toMatchObject({
+			control: "heartbeat_activity_v1_result",
+			outcome: "recorded",
+			heartbeat_event_id: "01919000-0000-7000-8000-000000000003",
+		});
+		expect(isActivityControlResponseLine(recorded)).toBe(true);
+		expect(
+			parseAckLine(
+				'{"control":"heartbeat_activity_v1_result","request_id":"heartbeat-request-1","outcome":"existing","heartbeat_event_id":"01919000-0000-7000-8000-000000000003","heartbeat_event_digest":"sha256:heartbeat","lease_expires_at":"2026-07-18T12:00:00Z"}',
+			),
+		).toMatchObject({ outcome: "existing" });
+		expect(
+			parseAckLine(
+				'{"control":"heartbeat_activity_v1_result","request_id":"heartbeat-request-1","outcome":"lease_expired","claim_event_id":"01919000-0000-7000-8000-000000000004","lease_expires_at":"2026-07-18T12:00:00Z"}',
+			),
+		).toMatchObject({ outcome: "lease_expired" });
+		expect(
+			parseAckLine(
+				'{"control":"heartbeat_activity_v1_result","request_id":"heartbeat-request-1","outcome":"recorded","heartbeat_event_id":"id","heartbeat_event_digest":"sha256:heartbeat","lease_expires_at":"time","unexpected":true}',
+			),
+		).toBeNull();
+	});
+
+	it("strictly parses closed retry candidate action identity responses", () => {
+		const resolved =
+			'{"control":"resolve_retry_candidate_action_identity_v1_result","request_id":"retry-identity-request-1","outcome":"resolved","action_id":"git-candidate-create:candidate-1/run-1/2","activity_id":"git-candidate-create:candidate-1/run-1/2","idempotency_key":"dispatch:run-1:retry-candidate"}';
+		expect(parseAckLine(resolved)).toMatchObject({
+			control: "resolve_retry_candidate_action_identity_v1_result",
+			outcome: "resolved",
+			action_id: "git-candidate-create:candidate-1/run-1/2",
+		});
+		expect(isActivityControlResponseLine(resolved)).toBe(true);
+		expect(
+			parseAckLine(
+				'{"control":"resolve_retry_candidate_action_identity_v1_result","request_id":"retry-identity-request-1","outcome":"resolved","action_id":"action","activity_id":"activity","idempotency_key":"key","unexpected":true}',
+			),
+		).toBeNull();
+		expect(
+			parseAckLine(
+				'{"control":"resolve_retry_candidate_action_identity_v1_result","request_id":"retry-identity-request-1","outcome":"resolved","action_id":"action","activity_id":"activity"}',
+			),
+		).toBeNull();
+		expect(
+			parseAckLine(
+				'{"control":"resolve_retry_candidate_action_identity_v1_result","request_id":"retry-identity-request-1","outcome":"resolved","action_id":"action","activity_id":"activity","idempotency_key":false}',
+			),
+		).toBeNull();
+		expect(
+			parseAckLine(
+				'{"control":"resolve_retry_candidate_action_identity_v1_result","request_id":"retry-identity-request-1","outcome":"rejected","code":"candidate_not_found","message":"no matching candidate"}',
+			),
+		).toMatchObject({ outcome: "rejected", code: "candidate_not_found" });
 	});
 });

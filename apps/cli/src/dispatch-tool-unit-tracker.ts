@@ -63,6 +63,9 @@ export function createDispatchToolUnitTracker(): DispatchToolUnitTracker {
 				},
 				flush: () => emitter.flush(),
 				close: () => emitter.close(),
+				claimActivity: (args) => emitter.claimActivity(args),
+				recordActivityResult: (args) => emitter.recordActivityResult(args),
+				heartbeatActivity: (args) => emitter.heartbeatActivity(args),
 				onFailure: (cb) => emitter.onFailure(cb),
 				stats: () => emitter.stats(),
 			};

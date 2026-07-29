@@ -93,9 +93,7 @@ mod tests {
     use uuid::Uuid;
 
     fn fixed_event_id(n: u8) -> EventId {
-        EventId::from_uuid(
-            Uuid::parse_str(&format!("01919000-0000-7000-8000-{n:012}")).unwrap(),
-        )
+        EventId::from_uuid(Uuid::parse_str(&format!("01919000-0000-7000-8000-{n:012}")).unwrap())
     }
 
     fn fixed_run_id() -> RunId {
@@ -107,12 +105,9 @@ mod tests {
         // A fixed ordered set of canonical event hash strings yields a stable
         // root. This is the exact pure-function contract M1-S7 must mirror.
         let hashes = vec![
-            "sha256:0000000000000000000000000000000000000000000000000000000000000001"
-                .to_string(),
-            "sha256:0000000000000000000000000000000000000000000000000000000000000002"
-                .to_string(),
-            "sha256:0000000000000000000000000000000000000000000000000000000000000003"
-                .to_string(),
+            "sha256:0000000000000000000000000000000000000000000000000000000000000001".to_string(),
+            "sha256:0000000000000000000000000000000000000000000000000000000000000002".to_string(),
+            "sha256:0000000000000000000000000000000000000000000000000000000000000003".to_string(),
         ];
 
         // Independently recompute the spec formula here to lock the contract.

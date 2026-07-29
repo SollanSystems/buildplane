@@ -143,7 +143,7 @@ export function formatRunResult(result: RunResultLike): string[] {
 export interface StrategyResultLike {
 	readonly strategyId: string;
 	readonly mode: string;
-	readonly outcome: "passed" | "failed" | "mixed";
+	readonly outcome: "passed" | "failed" | "mixed" | "awaiting-promotion";
 	readonly childResults: Map<string, RunResultLike>;
 	readonly rounds?: ReadonlyArray<Map<string, RunResultLike>>;
 	readonly winnerRunId?: string;

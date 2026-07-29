@@ -1,17 +1,15 @@
 import { execFileSync } from "node:child_process";
 import {
 	chmodSync,
-	mkdirSync,
+	existsSync,
 	mkdtempSync,
 	rmSync,
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { DatabaseSync } from "node:sqlite";
+import { delimiter, join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import { runCli } from "../../apps/cli/src/run-cli";
-import { resolveNativeBinaryForLedgerTests } from "../ledger-integration/fixtures.js";
 
 // ── Helpers ─────────────────────────────────────────────────
 
@@ -98,21 +96,9 @@ describe("claude-code e2e smoke test", () => {
 		// Create stub claude binary in a separate temp dir (outside the git repo)
 		const stubBinDir = createStubClaude();
 		const origPath = process.env.PATH;
-		const originalNativeBin = process.env.BUILDPLANE_NATIVE_BIN;
-		process.env.PATH = `${stubBinDir}:${origPath}`;
-		process.env.BUILDPLANE_NATIVE_BIN = resolveNativeBinaryForLedgerTests();
-
-		// M2-S5: `buildplane run --raw` now signs the tape with the kernel key (D2),
-		// so provision a temp-HOME kernel ed25519 seed (value irrelevant — only that
-		// it resolves); otherwise the signed ledger init is skipped and events.db is
-		// never created.
-		const originalHome = process.env.HOME;
-		const home = mkdtempSync(join(tmpdir(), "bp-claude-smoke-home-"));
-		cleanupPaths.push(home);
-		process.env.HOME = home;
-		const keyDir = join(home, ".buildplane", "keys", "kernel");
-		mkdirSync(keyDir, { recursive: true });
-		writeFileSync(join(keyDir, "kernel-main.ed25519"), Buffer.alloc(32, 7));
+		process.env.PATH = [stubBinDir, origPath ?? ""]
+			.filter(Boolean)
+			.join(delimiter);
 
 		try {
 			// Write the model packet with routingHints
@@ -162,6 +148,8 @@ describe("claude-code e2e smoke test", () => {
 			// (exit 0 means the stub binary ran, created output.txt in the
 			// worktree, and the policy evaluator verified the required output)
 			expect(run.exitCode).toBe(0);
+			expect(run.stdout).toContain("governance: unsafe");
+			expect(run.stdout).toContain("trusted-receipt: false");
 
 			// Extract run ID
 			const runId =
@@ -176,70 +164,11 @@ describe("claude-code e2e smoke test", () => {
 				initialized: true,
 				latestRun: { id: runId, status: "passed" },
 			});
-
-			const ledgerDbPath = join(root, ".buildplane", "ledger", "events.db");
-			const db = new DatabaseSync(ledgerDbPath);
-			const tapeRunIds = (
-				db
-					.prepare("SELECT DISTINCT run_id FROM events ORDER BY run_id ASC")
-					.all() as {
-					run_id: string;
-				}[]
-			).map((row) => row.run_id);
-			expect(tapeRunIds).toEqual([runId]);
-
-			const rows = db
-				.prepare(
-					"SELECT kind, payload FROM events WHERE run_id = ? ORDER BY id ASC",
-				)
-				.all(runId) as { kind: string; payload: string }[];
-			const kinds = rows.map((row) => row.kind);
-			expect(kinds).toContain("unit_started");
-			expect(kinds).toContain("unit_completed");
-			expect(kinds).toContain("git_checkpoint");
-			// M2-S5: the run-path brackets the model activity with signed
-			// activity_started/activity_completed. This is the run-path counterpart to
-			// the dispatch-path e2e (activity-bracketing.test.ts) — and proves MODEL
-			// bracketing on a real run tape (the packet uses preferredWorker=claude-code).
-			expect(kinds).toContain("activity_started");
-			expect(kinds).toContain("activity_completed");
-			const startedRow = rows.find((r) => r.kind === "activity_started");
-			expect(startedRow).toBeDefined();
-			const started = JSON.parse(startedRow?.payload ?? "{}") as {
-				ActivityStartedV1?: { activity_type?: string; activity_id?: string };
-			};
-			expect(started.ActivityStartedV1?.activity_type).toBe("model");
-			// write-ahead: activity_started precedes its paired activity_completed
-			const startedIdx = rows.findIndex((r) => r.kind === "activity_started");
-			const completedIdx = rows.findIndex(
-				(r) => r.kind === "activity_completed",
+			expect(existsSync(join(root, ".buildplane", "ledger", "events.db"))).toBe(
+				false,
 			);
-			expect(startedIdx).toBeLessThan(completedIdx);
-			const checkpointBoundaries = rows
-				.filter((row) => row.kind === "git_checkpoint")
-				.map(
-					(row) =>
-						(
-							JSON.parse(row.payload) as {
-								GitCheckpointV1: { boundary: string };
-							}
-						).GitCheckpointV1.boundary,
-				);
-			expect(checkpointBoundaries).toContain("pre-unit");
-			expect(checkpointBoundaries).toContain("post-unit");
-			db.close();
 		} finally {
 			process.env.PATH = origPath;
-			if (originalNativeBin === undefined) {
-				delete process.env.BUILDPLANE_NATIVE_BIN;
-			} else {
-				process.env.BUILDPLANE_NATIVE_BIN = originalNativeBin;
-			}
-			if (originalHome === undefined) {
-				delete process.env.HOME;
-			} else {
-				process.env.HOME = originalHome;
-			}
 		}
 	});
 });

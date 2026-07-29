@@ -37,3 +37,6 @@ Supporting architecture docs:
 - `docs/architecture/run-inspector-evidence-slice.md` — evidence-first Run Inspector contract for the first Mission Control surface
 - `docs/architecture/run-admission-receipts.md` — deterministic local-first run admission receipt, ledger event contract, and BP5B fixture/implementation map
 - `docs/architecture/bp6a-run-loop-admission-checkpoint.md` — mini-spec choosing the prepared-run admission gate for BP6B run-loop wiring
+- `docs/architecture/trust-spine.md` — candidate-bound review/promotion invariant, execution lanes, and fail-closed action boundary
+- `docs/operations/trust-spine-governed-runbook.md` — governed preview, recovery, promotion, migration, and GA activation contract
+- `docs/operations/trust-spine-compatibility-matrix.md` — supported, raw, historical, shadow, and blocked Trust Spine surfaces

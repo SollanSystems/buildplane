@@ -85,6 +85,7 @@ describe("wrapAsStrategy", () => {
 		expect(rev.packet.unit.policyProfile).toBe("default");
 		expect(rev.packet.unit.inputRefs).toEqual(["output/result.js"]);
 		expect(rev.packet.unit.expectedOutputs).toEqual([]);
+		expect(rev.packet.execution_role).toBe("reviewer");
 		expect(rev.packet.model?.systemPrompt).toContain("code reviewer");
 		expect(rev.packet.model?.systemPrompt).toContain(
 			"Write a hello world script",
@@ -113,6 +114,7 @@ describe("wrapAsStrategy", () => {
 		);
 		expect(rev.packet.execution?.args?.[1]).toContain("test -s output/log.txt");
 		expect(rev.packet.model).toBeUndefined();
+		expect(rev.packet.execution_role).toBe("reviewer");
 		expect(rev.packet.intent?.taskType).toBe("review");
 		expect(rev.packet.intent?.objective).toContain("cmd-1");
 	});
@@ -122,6 +124,7 @@ describe("wrapAsStrategy", () => {
 		const rev = strategy.children[1];
 		expect(rev.packet.execution?.command).toBe("true");
 		expect(rev.packet.execution?.args).toEqual([]);
+		expect(rev.packet.execution_role).toBe("reviewer");
 		expect(rev.packet.intent?.taskType).toBe("review");
 	});
 

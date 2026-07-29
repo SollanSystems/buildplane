@@ -1,0 +1,15 @@
+[Unit]
+Description=Buildplane protected V5 dispatch-admission socket
+
+[Socket]
+ListenStream=/run/buildplane/authority-host/v5-dispatch-admission-v1.sock
+Accept=no
+Service=buildplane-v5-dispatch-admission-host.service
+SocketUser=root
+SocketGroup=buildplane-governed-session
+SocketMode=0660
+DirectoryMode=0755
+RemoveOnStop=true
+
+[Install]
+WantedBy=sockets.target

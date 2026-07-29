@@ -34,7 +34,12 @@ describe("fork basic", () => {
 		});
 
 		try {
-			expect(fixture.forkExitCode).toBe(0);
+			expect(
+				fixture.forkExitCode,
+				`${fixture.forkStdout}\n${fixture.forkStderr}`,
+			).toBe(0);
+			expect(fixture.forkStdout).toContain("governance: unsafe");
+			expect(fixture.forkStdout).toContain("trusted-receipt: false");
 			expect(fixture.forkRunId).not.toBe("");
 			expect(fixture.forkRunId).not.toBe(fixture.parentRunId);
 
@@ -75,15 +80,51 @@ describe("fork basic", () => {
 				);
 			expect(checkpointBoundaries).toContain("pre-unit");
 			expect(checkpointBoundaries).toContain("post-unit");
+			const signatureCount = (
+				db
+					.prepare(
+						"SELECT COUNT(*) AS count FROM event_signatures AS signatures INNER JOIN events AS event ON event.id = signatures.event_id WHERE event.run_id = ?",
+					)
+					.get(fixture.forkRunId) as { count: number }
+			).count;
+			expect(signatureCount).toBe(0);
 
 			db.close();
 
-			// Verify the fork packet's expected output exists in the workspace.
+			// The unsafe fork runs in its own detached worktree. Its root caller
+			// remains byte-for-byte untouched even when the child writes output.
 			const { existsSync, readFileSync } = await import("node:fs");
 			const { join } = await import("node:path");
-			const forkOutputPath = join(fixture.dir, "fork.txt");
+			expect(fixture.forkWorkspace).not.toBe("");
+			expect(existsSync(join(fixture.dir, "fork.txt"))).toBe(false);
+			const forkOutputPath = join(fixture.forkWorkspace, "fork.txt");
 			expect(existsSync(forkOutputPath)).toBe(true);
 			expect(readFileSync(forkOutputPath, "utf8").trim()).toBe("fork");
+
+			// The child receives a fresh storage projection keyed to its own absolute
+			// root. Reusing the parent's state.db would either fail initialization or
+			// couple isolated fork state back to the caller workspace.
+			const parentState = new DatabaseSync(
+				join(fixture.dir, ".buildplane", "state.db"),
+				{ readOnly: true },
+			);
+			const childState = new DatabaseSync(
+				join(fixture.forkWorkspace, ".buildplane", "state.db"),
+				{ readOnly: true },
+			);
+			try {
+				const parentProject = parentState
+					.prepare("SELECT project_root FROM projects LIMIT 1")
+					.get() as { project_root: string };
+				const childProject = childState
+					.prepare("SELECT project_root FROM projects LIMIT 1")
+					.get() as { project_root: string };
+				expect(parentProject.project_root).toBe(fixture.dir);
+				expect(childProject.project_root).toBe(fixture.forkWorkspace);
+			} finally {
+				parentState.close();
+				childState.close();
+			}
 		} finally {
 			await fixture.cleanup();
 		}

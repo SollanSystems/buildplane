@@ -2,20 +2,23 @@
 //! event verifies against the crate's own verifier and the checkpoint's
 //! tape_root_hash recomputes from the covered events' stored hash strings.
 
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine;
 use bp_ledger::event::Event;
 use bp_ledger::payload::checkpoint::tape_root_hash;
 use bp_ledger::payload::Payload;
 use bp_ledger::signing::{
     verify_event_signature, EventSignatureV1, TrustedPublicKeys, VerificationStatus,
 };
-use base64::engine::general_purpose::STANDARD;
-use base64::Engine;
 use serde_json::Value;
 use std::process::Command;
 
 fn run_generator(out_dir: &std::path::Path) {
     let bin = env!("CARGO_BIN_EXE_bp-ledger-gen-signed-tape");
-    let status = Command::new(bin).arg(out_dir).status().expect("generator runs");
+    let status = Command::new(bin)
+        .arg(out_dir)
+        .status()
+        .expect("generator runs");
     assert!(status.success(), "generator exited non-zero");
 }
 
@@ -30,7 +33,9 @@ fn assert_tape_is_a_real_signed_tape(tape: &Value) {
     let mut keys = TrustedPublicKeys::default();
     for k in tape["trusted_keys"].as_array().unwrap() {
         let hash = k["public_key_hash"].as_str().unwrap().to_string();
-        let raw = STANDARD.decode(k["public_key_b64"].as_str().unwrap()).unwrap();
+        let raw = STANDARD
+            .decode(k["public_key_b64"].as_str().unwrap())
+            .unwrap();
         keys.insert_public_key(hash, raw);
     }
 
@@ -39,7 +44,9 @@ fn assert_tape_is_a_real_signed_tape(tape: &Value) {
     let mut checkpoints: Vec<(Event, EventSignatureV1)> = Vec::new();
 
     for entry in events {
-        let bytes = STANDARD.decode(entry["canonical_event_b64"].as_str().unwrap()).unwrap();
+        let bytes = STANDARD
+            .decode(entry["canonical_event_b64"].as_str().unwrap())
+            .unwrap();
         let event: Event = serde_json::from_slice(&bytes).expect("event deserializes");
         let sig: EventSignatureV1 =
             serde_json::from_value(entry["signature"].clone()).expect("signature deserializes");
@@ -92,12 +99,19 @@ fn plan_cycle_fixture_is_a_real_signed_tape() {
         .unwrap()
         .iter()
         .map(|entry| {
-            let bytes = STANDARD.decode(entry["canonical_event_b64"].as_str().unwrap()).unwrap();
+            let bytes = STANDARD
+                .decode(entry["canonical_event_b64"].as_str().unwrap())
+                .unwrap();
             let event: Event = serde_json::from_slice(&bytes).unwrap();
             event.kind.as_wire().to_string()
         })
         .collect();
-    for kind in ["plan_admitted", "activity_started", "activity_completed", "plan_receipt"] {
+    for kind in [
+        "plan_admitted",
+        "activity_started",
+        "activity_completed",
+        "plan_receipt",
+    ] {
         assert!(
             wire_kinds.iter().any(|k| k == kind),
             "plan-cycle tape must contain {kind}"

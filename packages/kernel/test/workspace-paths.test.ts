@@ -42,7 +42,7 @@ describe("workspace path validation", () => {
 					kind: "command",
 					scope: "task",
 					inputRefs: [],
-					expectedOutputs: ["tmp/out.txt"],
+					expectedOutputs: ["tmp\\out.txt"],
 					verificationContract: "exit-0-and-required-outputs",
 					policyProfile: "default",
 				},
@@ -51,13 +51,15 @@ describe("workspace path validation", () => {
 					cwd: "packages/cli/../cli",
 				},
 				verification: {
-					requiredOutputs: ["tmp/out.txt"],
+					requiredOutputs: ["tmp\\out.txt"],
 				},
 			},
 			".buildplane/workspaces/future-run-id",
 		);
 
+		expect(packet.unit.expectedOutputs).toEqual(["tmp/out.txt"]);
 		expect(packet.execution.cwd).toBe("packages/cli");
+		expect(packet.verification.requiredOutputs).toEqual(["tmp/out.txt"]);
 	});
 
 	it("rejects workspace-root unit expected outputs", () => {
@@ -136,6 +138,32 @@ describe("workspace path validation", () => {
 		).toThrow(/outside the worktree root/i);
 	});
 
+	it("rejects backslash cwd traversal before canonicalizing it", () => {
+		expect(() =>
+			validatePacketForWorkspaceRoot(
+				{
+					unit: {
+						id: "unit-backslash-escape",
+						kind: "command",
+						scope: "task",
+						inputRefs: [],
+						expectedOutputs: ["tmp/out.txt"],
+						verificationContract: "exit-0-and-required-outputs",
+						policyProfile: "default",
+					},
+					execution: {
+						command: "node",
+						cwd: "..\\escape",
+					},
+					verification: {
+						requiredOutputs: ["tmp/out.txt"],
+					},
+				},
+				".buildplane/workspaces/future-run-id",
+			),
+		).toThrow(/outside the worktree root/i);
+	});
+
 	it("rejects absolute execution cwd", () => {
 		expect(() =>
 			validatePacketForWorkspaceRoot(
@@ -151,7 +179,7 @@ describe("workspace path validation", () => {
 					},
 					execution: {
 						command: "node",
-						cwd: "/tmp/escape",
+						cwd: "C:\\tmp\\escape",
 					},
 					verification: {
 						requiredOutputs: ["tmp/out.txt"],

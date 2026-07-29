@@ -32,9 +32,12 @@ Near-term work is focused on trust-surface hardening rather than broader agent-s
 
 ## The v0.5 control plane
 
-Buildplane's surface is layered trust-first on a signed, append-only event tape (L0):
+Buildplane's intended trust surface is layered around a signed, append-only
+event tape (L0). The governed worker/action plane is currently fail-closed
+until its OCI executor and signed-dispatch resolver are configured; use the
+unsafe raw lane only for development and diagnostics.
 
-- **PlanForge admission cycle** — every unit runs `compile → validate → preview → admit → dispatch → execute → receipt`. Nothing executes until an admitted, signed plan authorizes it.
+- **PlanForge admission cycle** — the legacy execution commands are temporarily blocked while they migrate to the candidate/promotion transaction. Compile, validate, preview, and dry-run remain available.
 - **Capability broker (M3)** — digest-referenced capability bundles gate each tool call; out-of-scope `write_file` / `run_command` attempts fail closed and are recorded as signed `capability_denied` events.
 - **Acceptance contract (M4)** — finalization is gated on diff-scope + CI + lint, so a run advances only when the recorded evidence matches the contract.
 - **Mission Control web (M5)** — a read-only run inspector plus an operator approval inbox, served by `bp web` (source/dev only).
@@ -44,18 +47,29 @@ Buildplane's surface is layered trust-first on a signed, append-only event tape 
 
 Current Phase 5 benchmark evidence for the `model-codex` eval suite lives in [`docs/benchmarks/model-codex.md`](docs/benchmarks/model-codex.md).
 
-That summary documents the rerun command, current aggregate signals, what the current memory-help and strategy-help fixtures prove, and which combined memory-plus-strategy proof remains a benchmark gap. The current concrete rescue story is the `reviewer-rescue` fixture: the raw one-shot path leaves a rejected draft, while Buildplane's implement-then-review strategy path records reviewer feedback and produces an accepted result.
+That summary documents the unsafe/shadow rerun contract and aggregate signals.
+The historical `reviewer-rescue` fixture explains why the raw one-shot path and
+the old `implement-then-review` loop are not governed promotion evidence: the
+legacy strategy arm is deliberately blocked until a native candidate reviewer,
+signed review evidence, and a promotion transaction exist.
 
 ## High-trust operator loop
 
-For high-trust work, Buildplane's front door is the governed loop rather than a raw one-shot worker path:
+For high-trust work, Buildplane's front door is governed rather than a raw
+one-shot worker path. It deliberately blocks in preview until a privileged host
+has verified the signed envelope and tape and initialized the ActionGateway and
+OCI sandbox; it never falls back to an ambient worker:
 
-1. `pnpm buildplane run --packet <path>` to run with implement-then-review instead of unbounded chat.
-2. `pnpm buildplane inspect <run-id> --json` to inspect the event tape, policy decisions, evidence, artifacts, and final outcome.
-3. `pnpm buildplane replay <run-id> --json` to replay the stored packet snapshot as a new run when the same unit needs another attempt with changed settings.
-4. `pnpm buildplane fork <run-id> --at <event-id> --packet <fixed-packet.json>` to fork from a unit boundary when recovery after a bad or partial run needs a corrected packet.
+1. `pnpm buildplane run --packet <path>` to compile, validate, and render the blocked governed preview. `--approve` can request an opaque host-brokered candidate session when that external host is installed; `run --resume <opaque-reference> --approve` is a separate host-only recovery route with no caller-supplied packet or envelope. Neither grants promotion authority.
+2. `pnpm buildplane ledger replay --run-id <id> --workspace <path>` for read-only tape reconstruction.
+3. `pnpm buildplane replay <run-id> --raw` or `pnpm buildplane fork <run-id> --at <event-id> --packet <fixed-packet.json> --raw` only when you explicitly accept unsafe legacy execution; neither can produce a trusted receipt.
 
-The concrete `reviewer-rescue` benchmark documents why this loop matters: the raw one-shot path leaves a rejected draft, while the implement-then-review path records reviewer feedback and lands an accepted artifact. Use the benchmark doc for the current evidence matrix and the local run loop below for the exact repo-development commands.
+The historical `reviewer-rescue` benchmark remains useful capability evidence,
+not a governed promotion guarantee. See
+[`docs/architecture/trust-spine.md`](docs/architecture/trust-spine.md) for the
+current trust boundary and migration status, and
+[`docs/operations/trust-spine-compatibility-matrix.md`](docs/operations/trust-spine-compatibility-matrix.md)
+for the supported, raw, shadow, historical, and blocked surfaces.
 
 ## Evidence-first Run Inspector
 
@@ -101,8 +115,8 @@ pnpm buildplane init
 pnpm buildplane run --packet ./packet.json
 pnpm buildplane status --json
 pnpm buildplane inspect <run-id> --json
-pnpm buildplane replay <run-id> --json
-pnpm buildplane fork <run-id> --at <event-id> --packet <fixed-packet.json>
+pnpm buildplane replay <run-id> --raw --json
+pnpm buildplane fork <run-id> --at <event-id> --packet <fixed-packet.json> --raw
 pnpm buildplane memory doctor
 pnpm buildplane pack show superclaude
 pnpm buildplane pack export superclaude --target github-agent --out .github/agents/superclaude.md --json
@@ -134,8 +148,8 @@ node apps/cli/dist/index.js init
 node apps/cli/dist/index.js run --packet ./packet.json
 node apps/cli/dist/index.js status --json
 node apps/cli/dist/index.js inspect <run-id> --json
-node apps/cli/dist/index.js replay <run-id> --json
-node apps/cli/dist/index.js fork <run-id> --at <event-id> --packet <fixed-packet.json>
+node apps/cli/dist/index.js replay <run-id> --raw --json
+node apps/cli/dist/index.js fork <run-id> --at <event-id> --packet <fixed-packet.json> --raw
 node apps/cli/dist/index.js memory doctor --json
 node apps/cli/dist/index.js pack show superclaude
 node apps/cli/dist/index.js pack export superclaude --target github-skill --out .github/skills --json
@@ -189,10 +203,10 @@ Today's working path is a local, packet-driven loop:
 2. `pnpm buildplane run --packet <path>`
 3. `pnpm buildplane status --json`
 4. `pnpm buildplane inspect <run-id> --json` to inspect the event tape, decisions, evidence, and workspace state
-5. `pnpm buildplane replay <run-id> --json` to replay the stored packet snapshot as a new run when you want another attempt with changed settings
-6. `pnpm buildplane fork <run-id> --at <event-id> --packet <fixed-packet.json>` to fork from a unit boundary when recovery needs a corrected packet
+5. `pnpm buildplane replay <run-id> --raw --json` to re-execute a stored legacy packet snapshot only when you explicitly accept unsafe execution
+6. `pnpm buildplane fork <run-id> --at <event-id> --packet <fixed-packet.json> --raw` to re-execute from a unit boundary only when you explicitly accept unsafe execution
 
-The top-level `replay` command re-executes the stored packet snapshot and records a new run. The native-backed read-only event-tape walker is documented separately in [`docs/ledger.md`](docs/ledger.md) as `buildplane ledger replay --run-id <run-id> --workspace <path>`. Use `fork` when a prior run found the right setup but a later unit needs recovery from a known `unit_started` boundary.
+The top-level `replay` command re-executes a stored legacy packet snapshot and records an unsafe run; it requires `--raw`. The native-backed read-only event-tape walker is documented separately in [`docs/ledger.md`](docs/ledger.md) as `buildplane ledger replay --run-id <run-id> --workspace <path>`. `fork` likewise requires `--raw` until it uses the governed candidate/promotion transaction.
 
 Example packet:
 
@@ -224,7 +238,10 @@ This example is intentionally narrow: one packet, one run, one local command ste
 
 ## Known limitations
 
-- The adversarial-Codex reviewer role scores **43.75%** on the internal `reviewer-rescue` benchmark — measured against a **deterministic local stub** over four fixtures, never against the real Codex CLI, so the number characterizes the stub harness rather than Codex. It is an internal review aid, not a production-ready gate, and is disclosed as such rather than presented as finished.
+- The historical `reviewer-rescue` local-stub score is not a live governed
+  strategy score. Ambient/legacy `implement-then-review` execution is blocked
+  until the privileged candidate-review boundary is available; use the Trust
+  Spine release gate rather than this benchmark for promotion or GA claims.
 - Published/global native memory ships a prebuilt binary for **linux-x64 only**; other platforms report the native-memory contract as optional/unavailable.
 - `bp web` (Mission Control) is source/dev only — the web assets and the optional server package are not vendored into the published npm artifact. On a published install `bp web` fails closed: exit 1 with guidance to run from a source checkout.
 

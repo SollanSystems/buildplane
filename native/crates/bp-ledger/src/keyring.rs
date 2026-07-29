@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 /// boundary. The actual seed is loaded locally via [`load_signing_key`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KeyringRef {
-    /// Actor that owns the key, for example `kernel`.
+    /// Actor that owns the key, for example `kernel` or `operator:1`.
     pub actor_id: String,
     /// Key identifier scoped to the actor.
     pub key_id: String,
@@ -35,19 +35,48 @@ impl KeyringRef {
 
     /// Resolve the on-disk path for this key under the given keyring root.
     ///
-    /// Layout: `<root>/<actor>/<key-id>.ed25519`.
+    /// Layout: `<root>/<actor>/<key-id>.ed25519` for a single-segment actor,
+    /// or `<root>/<role>/<principal>/<key-id>.ed25519` for an actor id written
+    /// as `<role>:<principal>`.
     ///
-    /// Both `actor_id` and `key_id` are validated by [`validate_keyring_id`]
-    /// before any join, so the resolved path is guaranteed to stay within
-    /// `<root>/<actor>/`. A traversal attempt (`..`, an absolute path, a path
-    /// separator, etc.) fails closed with [`LedgerError::UnsafeKeyringId`]
-    /// rather than escaping the actor-scoped directory.
+    /// Every path segment derived from `actor_id` and `key_id` is validated
+    /// by [`validate_keyring_id`] before any join, so the resolved path is
+    /// guaranteed to stay within its actor-scoped directory. A traversal
+    /// attempt fails closed with [`LedgerError::UnsafeKeyringId`] rather than
+    /// escaping the keyring.
     pub fn path_under(&self, root: &Path) -> Result<PathBuf> {
-        validate_keyring_id("actor_id", &self.actor_id)?;
+        let actor_path = actor_path(&self.actor_id)?;
         validate_keyring_id("key_id", &self.key_id)?;
         Ok(root
-            .join(&self.actor_id)
+            .join(actor_path)
             .join(format!("{}.ed25519", self.key_id)))
+    }
+}
+
+/// Return the safe relative keyring directory for an actor identity.
+///
+/// A single segment remains a one-directory identity for backward
+/// compatibility. Scoped identities such as operator:1 and worker:alice map
+/// to nested role/principal directories without placing a colon in a
+/// filesystem component.
+fn actor_path(actor_id: &str) -> Result<PathBuf> {
+    let mut segments = actor_id.split(':');
+    let role = segments.next().expect("split always returns one segment");
+    let principal = segments.next();
+    if segments.next().is_some() {
+        return Err(LedgerError::UnsafeKeyringId {
+            which: "actor_id".into(),
+            reason: format!("actor identifier may contain at most one ':' separator: {actor_id:?}"),
+        });
+    }
+
+    validate_keyring_id("actor_id", role)?;
+    match principal {
+        Some(principal) => {
+            validate_keyring_id("actor_id principal", principal)?;
+            Ok(PathBuf::from(role).join(principal))
+        }
+        None => Ok(PathBuf::from(role)),
     }
 }
 
@@ -128,14 +157,14 @@ pub fn load_signing_key_at(root: &Path, key_ref: &KeyringRef) -> Result<SigningK
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::signing::sign_event;
-    use crate::signing::ActorKeyRef;
-    use crate::signing::{verify_event_signature, TrustedPublicKeys, VerificationStatus};
     use crate::event::Event;
     use crate::id::{EventId, RunId};
     use crate::kind::EventKind;
     use crate::payload::run_lifecycle::{RunCompletedV1, RunOutcome};
     use crate::payload::Payload;
+    use crate::signing::sign_event;
+    use crate::signing::ActorKeyRef;
+    use crate::signing::{verify_event_signature, TrustedPublicKeys, VerificationStatus};
     use sha2::{Digest, Sha256};
 
     const FIXTURE_SEED: [u8; 32] = [9u8; 32];
@@ -224,7 +253,10 @@ mod tests {
         assert!(msg.contains("32-byte"), "msg: {msg}");
         // The raw secret bytes must not appear in the error.
         assert!(!msg.contains("171"), "error leaked byte value: {msg}");
-        assert!(!msg.to_lowercase().contains("ab ab"), "error leaked bytes: {msg}");
+        assert!(
+            !msg.to_lowercase().contains("ab ab"),
+            "error leaked bytes: {msg}"
+        );
     }
 
     #[test]
@@ -232,6 +264,21 @@ mod tests {
         let key_ref = KeyringRef::new("kernel", "kernel-main");
         let path = key_ref.path_under(Path::new("/root/keys")).unwrap();
         assert!(path.ends_with("kernel/kernel-main.ed25519"));
+    }
+
+    #[test]
+    fn scoped_actor_identity_loads_from_a_safe_nested_keyring_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let key_dir = tmp.path().join("operator").join("1");
+        std::fs::create_dir_all(&key_dir).unwrap();
+        std::fs::write(key_dir.join("operator-main.ed25519"), FIXTURE_SEED).unwrap();
+
+        let key_ref = KeyringRef::new("operator:1", "operator-main");
+        let path = key_ref.path_under(tmp.path()).unwrap();
+        assert!(path.ends_with("operator/1/operator-main.ed25519"));
+
+        let signing_key = load_signing_key_at(tmp.path(), &key_ref).unwrap();
+        assert_eq!(signing_key.to_bytes(), FIXTURE_SEED);
     }
 
     #[test]
@@ -251,7 +298,10 @@ mod tests {
     fn rejects_parent_traversal_key_id() {
         let key_ref = KeyringRef::new("kernel", "../../foo");
         let err = key_ref.path_under(Path::new("/root/keys")).unwrap_err();
-        assert!(matches!(err, LedgerError::UnsafeKeyringId { .. }), "got: {err}");
+        assert!(
+            matches!(err, LedgerError::UnsafeKeyringId { .. }),
+            "got: {err}"
+        );
         // load path must reject identically.
         let tmp = tempfile::tempdir().unwrap();
         assert!(matches!(
@@ -264,21 +314,30 @@ mod tests {
     fn rejects_absolute_path_key_id() {
         let key_ref = KeyringRef::new("kernel", "/tmp/foo");
         let err = key_ref.path_under(Path::new("/root/keys")).unwrap_err();
-        assert!(matches!(err, LedgerError::UnsafeKeyringId { .. }), "got: {err}");
+        assert!(
+            matches!(err, LedgerError::UnsafeKeyringId { .. }),
+            "got: {err}"
+        );
     }
 
     #[test]
     fn rejects_path_separator_key_id() {
         let key_ref = KeyringRef::new("kernel", "a/b");
         let err = key_ref.path_under(Path::new("/root/keys")).unwrap_err();
-        assert!(matches!(err, LedgerError::UnsafeKeyringId { .. }), "got: {err}");
+        assert!(
+            matches!(err, LedgerError::UnsafeKeyringId { .. }),
+            "got: {err}"
+        );
     }
 
     #[test]
     fn rejects_dot_dot_key_id() {
         let key_ref = KeyringRef::new("kernel", "..");
         let err = key_ref.path_under(Path::new("/root/keys")).unwrap_err();
-        assert!(matches!(err, LedgerError::UnsafeKeyringId { .. }), "got: {err}");
+        assert!(
+            matches!(err, LedgerError::UnsafeKeyringId { .. }),
+            "got: {err}"
+        );
     }
 
     #[test]
@@ -287,12 +346,29 @@ mod tests {
         let err = KeyringRef::new("kernel", "a\\b")
             .path_under(Path::new("/root/keys"))
             .unwrap_err();
-        assert!(matches!(err, LedgerError::UnsafeKeyringId { .. }), "got: {err}");
+        assert!(
+            matches!(err, LedgerError::UnsafeKeyringId { .. }),
+            "got: {err}"
+        );
         // Actor id is validated too — a traversal actor escapes the keyring root.
         let err = KeyringRef::new("../../kernel", "kernel-main")
             .path_under(Path::new("/root/keys"))
             .unwrap_err();
-        assert!(matches!(err, LedgerError::UnsafeKeyringId { .. }), "got: {err}");
+        assert!(
+            matches!(err, LedgerError::UnsafeKeyringId { .. }),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_unsafe_scoped_actor_identity() {
+        let err = KeyringRef::new("operator:../escape", "operator-main")
+            .path_under(Path::new("/root/keys"))
+            .unwrap_err();
+        assert!(
+            matches!(err, LedgerError::UnsafeKeyringId { .. }),
+            "got: {err}"
+        );
     }
 
     #[test]
@@ -302,7 +378,13 @@ mod tests {
             .path_under(Path::new("/root/keys"))
             .unwrap_err();
         let msg = format!("{err}");
-        assert!(msg.contains("../../foo"), "expected offending id in msg: {msg}");
-        assert!(!msg.contains(".ed25519"), "must not leak resolved path: {msg}");
+        assert!(
+            msg.contains("../../foo"),
+            "expected offending id in msg: {msg}"
+        );
+        assert!(
+            !msg.contains(".ed25519"),
+            "must not leak resolved path: {msg}"
+        );
     }
 }

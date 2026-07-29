@@ -1,4 +1,11 @@
-import { isAbsolute, normalize, relative, resolve, sep } from "node:path";
+import {
+	isAbsolute,
+	normalize,
+	relative,
+	resolve,
+	sep,
+	win32,
+} from "node:path";
 
 import type { UnitPacket } from "./run-loop.js";
 
@@ -10,11 +17,12 @@ function normalizeWorkspaceRelativePath(
 		allowWorkspaceRoot?: boolean;
 	},
 ): string {
-	if (isAbsolute(value)) {
+	const canonicalValue = value.replaceAll("\\", "/");
+	if (isAbsolute(canonicalValue) || win32.isAbsolute(value)) {
 		throw new Error(`${label} must not be absolute`);
 	}
 
-	const normalizedValue = normalize(value);
+	const normalizedValue = normalize(canonicalValue);
 	const normalizedWorkspaceRoot = resolve(sep, workspaceRoot);
 	const resolvedPath = resolve(normalizedWorkspaceRoot, normalizedValue);
 	const relativeToWorkspaceRoot = relative(
@@ -35,7 +43,7 @@ function normalizeWorkspaceRelativePath(
 		throw new Error(`${label} must not be the worktree root`);
 	}
 
-	return normalizedRelativePath;
+	return normalizedRelativePath.replaceAll("\\", "/");
 }
 
 export function validatePacketForWorkspaceRoot(

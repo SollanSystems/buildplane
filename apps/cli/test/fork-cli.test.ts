@@ -1,5 +1,12 @@
 import { EventEmitter } from "node:events";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	rmSync,
+	symlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -20,6 +27,8 @@ const hoisted = vi.hoisted(() => {
 		parsePacketImpl: (input: string) => unknown;
 		runPacketImpl: (packet: unknown) => unknown;
 		runPacketAsyncImpl: (packet: unknown) => Promise<unknown>;
+		createPlanLedgerSidecars: boolean;
+		planCreatedLedgerSidecars: boolean;
 	} = {
 		plan: {
 			new_run_id: "fork-run-123",
@@ -32,6 +41,8 @@ const hoisted = vi.hoisted(() => {
 		parsePacketImpl: (input: string) => JSON.parse(input),
 		runPacketImpl: () => ({ run: { status: "passed" } }),
 		runPacketAsyncImpl: async () => ({ run: { status: "passed" } }),
+		createPlanLedgerSidecars: false,
+		planCreatedLedgerSidecars: false,
 	};
 
 	const parseUnitPacketMock = vi.fn((input: string) =>
@@ -55,12 +66,29 @@ const hoisted = vi.hoisted(() => {
 			_options?: { cwd?: string; encoding?: string },
 		) => {
 			if (command === "git" && args[0] === "-C" && args[2] === "status") {
-				return { status: 0, stdout: "", stderr: "" };
+				return {
+					status: 0,
+					stdout: forkState.planCreatedLedgerSidecars
+						? "?? .buildplane/ledger/events.db-wal\n"
+						: "",
+					stderr: "",
+				};
 			}
 			if (command === "git" && args[0] === "-C" && args[2] === "checkout") {
 				return { status: 0, stdout: "", stderr: "" };
 			}
 			if (args[0] === "fork" && args[1] === "plan") {
+				if (forkState.createPlanLedgerSidecars) {
+					const workspaceIndex = args.indexOf("--workspace");
+					const workspace = args[workspaceIndex + 1];
+					if (workspace) {
+						const ledgerDir = join(workspace, ".buildplane", "ledger");
+						mkdirSync(ledgerDir, { recursive: true });
+						writeFileSync(join(ledgerDir, "events.db-shm"), "generated");
+						writeFileSync(join(ledgerDir, "events.db-wal"), "generated");
+						forkState.planCreatedLedgerSidecars = true;
+					}
+				}
 				return {
 					status: 0,
 					stdout: `${JSON.stringify(forkState.plan)}\n`,
@@ -225,6 +253,9 @@ import { runCli } from "../src/run-cli";
 function createTempForkInputs() {
 	const root = mkdtempSync(join(tmpdir(), "buildplane-fork-cli-test-"));
 	mkdirSync(root, { recursive: true });
+	const ledgerDir = join(root, ".buildplane", "ledger");
+	mkdirSync(ledgerDir, { recursive: true });
+	writeFileSync(join(ledgerDir, "events.db"), "fixture");
 	const packetPath = join(root, "fork-packet.json");
 	writeFileSync(packetPath, JSON.stringify({ marker: true }, null, 2));
 	return { root, packetPath };
@@ -243,6 +274,8 @@ beforeEach(() => {
 	forkState.parsePacketImpl = (input: string) => JSON.parse(input);
 	forkState.runPacketImpl = () => ({ run: { status: "passed" } });
 	forkState.runPacketAsyncImpl = async () => ({ run: { status: "passed" } });
+	forkState.createPlanLedgerSidecars = false;
+	forkState.planCreatedLedgerSidecars = false;
 	process.env.BUILDPLANE_NATIVE_BIN = "/tmp/buildplane-native";
 });
 
@@ -251,6 +284,135 @@ afterEach(() => {
 });
 
 describe("fork CLI orchestration", () => {
+	it("preserves planner-created ledger sidecars and executes in an isolated worktree", async () => {
+		forkState.createPlanLedgerSidecars = true;
+		const { root, packetPath } = createTempForkInputs();
+
+		const exitCode = await runCli(
+			[
+				"fork",
+				"--raw",
+				"parent-run-1",
+				"--at",
+				"parent-event-1",
+				"--packet",
+				packetPath,
+				"--workspace",
+				root,
+			],
+			{
+				cwd: root,
+				stdout: () => {},
+				stderr: () => {},
+			},
+		);
+
+		expect(exitCode).toBe(0);
+		expect(
+			existsSync(join(root, ".buildplane", "ledger", "events.db-shm")),
+		).toBe(true);
+		expect(
+			existsSync(join(root, ".buildplane", "ledger", "events.db-wal")),
+		).toBe(true);
+		expect(
+			hoisted.spawnSyncMock.mock.calls.some(
+				([command, args]) =>
+					command === "git" &&
+					Array.isArray(args) &&
+					args.includes("worktree") &&
+					args.includes("add"),
+			),
+		).toBe(true);
+		expect(
+			hoisted.spawnSyncMock.mock.calls.some(
+				([command, args]) =>
+					command === "git" && Array.isArray(args) && args.includes("checkout"),
+			),
+		).toBe(false);
+	});
+
+	it("does not remove caller-owned ledger sidecars", async () => {
+		const { root, packetPath } = createTempForkInputs();
+		const ledgerDir = join(root, ".buildplane", "ledger");
+		mkdirSync(ledgerDir, { recursive: true });
+		writeFileSync(join(ledgerDir, "events.db-wal"), "caller-owned");
+
+		const exitCode = await runCli(
+			[
+				"fork",
+				"--raw",
+				"parent-run-1",
+				"--at",
+				"parent-event-1",
+				"--packet",
+				packetPath,
+				"--workspace",
+				root,
+			],
+			{
+				cwd: root,
+				stdout: () => {},
+				stderr: () => {},
+			},
+		);
+
+		expect(exitCode).toBe(0);
+		expect(existsSync(join(ledgerDir, "events.db-wal"))).toBe(true);
+	});
+
+	it.runIf(process.platform === "linux")(
+		"rejects an escaped ledger before VCR or native planning can open it",
+		async () => {
+			forkState.createPlanLedgerSidecars = true;
+			const { root, packetPath } = createTempForkInputs();
+			const escapedLedgerDir = mkdtempSync(
+				join(tmpdir(), "buildplane-fork-sidecar-escape-"),
+			);
+			const workspaceBuildplaneDir = join(root, ".buildplane");
+			rmSync(join(workspaceBuildplaneDir, "ledger"), {
+				recursive: true,
+				force: true,
+			});
+			writeFileSync(join(escapedLedgerDir, "events.db"), "external");
+			symlinkSync(
+				escapedLedgerDir,
+				join(workspaceBuildplaneDir, "ledger"),
+				"dir",
+			);
+			const stderr: string[] = [];
+
+			const exitCode = await runCli(
+				[
+					"fork",
+					"--raw",
+					"parent-run-1",
+					"--at",
+					"parent-event-1",
+					"--packet",
+					packetPath,
+					"--workspace",
+					root,
+				],
+				{
+					cwd: root,
+					stdout: () => {},
+					stderr: (line) => stderr.push(line),
+				},
+			);
+
+			expect(exitCode).toBe(1);
+			expect(stderr.join("\n")).toContain("escapes the workspace");
+			expect(existsSync(join(escapedLedgerDir, "events.db-shm"))).toBe(false);
+			expect(existsSync(join(escapedLedgerDir, "events.db-wal"))).toBe(false);
+			expect(
+				hoisted.spawnSyncMock.mock.calls.some(
+					([_command, args]) =>
+						Array.isArray(args) && args[0] === "fork" && args[1] === "plan",
+				),
+			).toBe(false);
+		},
+	);
+
 	it("routes fork execution through runPacketAsync for planned model packets", async () => {
 		const rawForkPacket = {
 			unit: {
@@ -286,6 +448,7 @@ describe("fork CLI orchestration", () => {
 		const exitCode = await runCli(
 			[
 				"fork",
+				"--raw",
 				"parent-run-1",
 				"--at",
 				"parent-event-1",
@@ -372,6 +535,7 @@ describe("fork CLI orchestration", () => {
 		const exitCode = await runCli(
 			[
 				"fork",
+				"--raw",
 				"parent-run-1",
 				"--at",
 				"parent-event-1",
@@ -419,6 +583,7 @@ describe("fork CLI orchestration", () => {
 		const exitCode = await runCli(
 			[
 				"fork",
+				"--raw",
 				"parent-run-1",
 				"--at",
 				"parent-event-1",
@@ -453,6 +618,7 @@ describe("fork CLI orchestration", () => {
 		const exitCode = await runCli(
 			[
 				"fork",
+				"--raw",
 				"parent-run-1",
 				"--at",
 				"parent-event-1",

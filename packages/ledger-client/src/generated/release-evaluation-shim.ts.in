@@ -1,0 +1,26 @@
+
+/**
+ * Typeshare does not support serde's deliberately untagged closed enum used
+ * by ReleaseEvaluationEvidenceV1. The enum's leaf types are generated from
+ * Rust; this companion declaration preserves the exact wire union in the
+ * generated public module.
+ */
+export type ReleaseEvaluationClaimV1 =
+	| ReleaseEvaluationTrialClaimV1
+	| ReleaseEvaluationTargetBranchImmutabilityClaimV1
+	| ReleaseEvaluationBackwardReplayCompatibilityClaimV1
+	| ReleaseEvaluationRequiredCheckClaimV1;
+
+/**
+ * Signed release-evaluation evidence. `claim_kind` is the closed wire
+ * discriminator; native validation rejects a mismatched untagged claim body.
+ */
+export interface ReleaseEvaluationEvidenceV1 {
+	schema_version: number;
+	release_commit: string;
+	release_ref: string;
+	policy_digest: string;
+	claim_kind: ReleaseEvaluationClaimKindV1;
+	claim: ReleaseEvaluationClaimV1;
+	claim_digest: string;
+}

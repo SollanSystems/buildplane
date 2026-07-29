@@ -1,0 +1,28 @@
+[package]
+name = "bp-authority-broker"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+bp-ledger.workspace = true
+bp-provider-anthropic.workspace = true
+bp-provider-sdk.workspace = true
+bp-replay.workspace = true
+chrono.workspace = true
+ed25519-dalek.workspace = true
+libc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio = { version = "1", features = ["rt", "time"] }
+uuid.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+bp-ledger = { workspace = true, features = ["test-support"] }
+futures.workspace = true
+rusqlite.workspace = true
+tempfile = "3"

@@ -1,12 +1,22 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, lstatSync, realpathSync } from "node:fs";
 import { isAbsolute, normalize, relative, resolve, sep } from "node:path";
-import type { ExecutionReceipt, UnitPacket } from "@buildplane/kernel";
+import {
+	carriesGovernanceFields,
+	type ExecutionReceipt,
+	type UnitPacket,
+} from "@buildplane/kernel";
 
 export function executePacket(
 	packet: UnitPacket,
 	executionRoot: string,
 ): ExecutionReceipt {
+	if (carriesGovernanceFields(packet)) {
+		throw new Error(
+			"RAW_RUNTIME_EXECUTOR_FORBIDDEN: the legacy command executor is raw-only and cannot execute a packet carrying governed authority fields.",
+		);
+	}
+
 	if (!packet.execution) {
 		throw new Error(
 			"executePacket requires a packet with an execution block. Model packets must use a model executor.",

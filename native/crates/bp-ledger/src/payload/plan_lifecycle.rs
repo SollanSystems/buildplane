@@ -88,7 +88,10 @@ mod tests {
             decided_at: "2026-05-30T00:01:00Z".into(),
         };
         let s = serde_json::to_string(&p).unwrap();
-        assert_eq!(p, serde_json::from_str::<PlanReceiptRecordedV1>(&s).unwrap());
+        assert_eq!(
+            p,
+            serde_json::from_str::<PlanReceiptRecordedV1>(&s).unwrap()
+        );
     }
 
     #[test]

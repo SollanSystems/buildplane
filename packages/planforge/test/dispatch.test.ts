@@ -24,6 +24,7 @@ describe("dispatchAdmittedPlan", () => {
 		expect(packets).toHaveLength(plan.tasks.length);
 		for (const p of packets) {
 			expect(p.provenance_ref).toBe("evt-42");
+			expect(p.execution_role).toBe("implementer");
 			expect(p.unit.policyProfile).toBe("default");
 			expect(p.capability_bundle.bundleId).toContain(plan.id);
 			expect(p.capability_bundle_digest).toBe(

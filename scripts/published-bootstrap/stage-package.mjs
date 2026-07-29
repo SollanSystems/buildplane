@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
 	chmodSync,
 	cpSync,
@@ -33,6 +34,7 @@ const STAGED_RUNTIME_ENTRY_SPECIFIER = `./${STAGED_RUNTIME_ENTRY_BASENAME}`;
 const SOURCE_RUNTIME_ENTRY_SPECIFIER = `./${SOURCE_RUNTIME_ENTRY_BASENAME}`;
 const PACKAGED_NATIVE_PLATFORM = "linux-x64";
 const PACKAGED_NATIVE_BINARY_BASENAME = "buildplane-native";
+const PACKAGED_NATIVE_INTEGRITY_BASENAME = "buildplane-native.sha256";
 const FALLBACK_STAGING_PARENT_PATHS = Object.freeze(
 	process.platform === "win32"
 		? [
@@ -317,12 +319,21 @@ function stagePackagedNativeBinary(packageRoot) {
 	mkdirSync(dirname(destinationPath), { recursive: true });
 	cpSync(sourcePath, destinationPath);
 	chmodSync(destinationPath, 0o755);
+	const nativeDigest = `sha256:${createHash("sha256")
+		.update(readFileSync(destinationPath))
+		.digest("hex")}`;
+	writeFileSync(
+		join(dirname(destinationPath), PACKAGED_NATIVE_INTEGRITY_BASENAME),
+		`${nativeDigest}\n`,
+		{ encoding: "utf8", mode: 0o644 },
+	);
 
 	return {
 		available: true,
 		platform: target.platform,
 		sourcePath,
 		destinationPath,
+		digest: nativeDigest,
 	};
 }
 

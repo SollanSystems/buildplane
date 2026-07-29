@@ -62,6 +62,8 @@ export interface DispatchedUnitPacket {
 	readonly intent: DispatchTaskIntent;
 	readonly routingHints: { readonly preferredWorker: "claude-code" };
 	readonly verification: { readonly requiredOutputs: readonly string[] };
+	/** PlanForge task packets always authorize an implementer, never infer a role. */
+	readonly execution_role: "implementer";
 	readonly provenance_ref: string;
 	readonly capability_bundle: PlanForgeAttachedCapabilityBundle;
 	readonly capability_bundle_digest: string;
@@ -170,6 +172,7 @@ export function dispatchAdmittedPlan(
 			intent: buildTaskIntent(plan, task),
 			routingHints: { preferredWorker: "claude-code" },
 			verification: { requiredOutputs: [] },
+			execution_role: "implementer",
 			provenance_ref: admittedEventId,
 			capability_bundle,
 			capability_bundle_digest: capabilityBundleDigest(capability_bundle),

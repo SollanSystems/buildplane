@@ -47,11 +47,15 @@ fn parse_plan(args: &[String]) -> Result<ForkPlanArgs, String> {
             }
             "--workspace" => {
                 i += 1;
-                workspace = Some(PathBuf::from(args.get(i).ok_or("--workspace requires a value")?));
+                workspace = Some(PathBuf::from(
+                    args.get(i).ok_or("--workspace requires a value")?,
+                ));
             }
             "--packet" => {
                 i += 1;
-                packet = Some(PathBuf::from(args.get(i).ok_or("--packet requires a value")?));
+                packet = Some(PathBuf::from(
+                    args.get(i).ok_or("--packet requires a value")?,
+                ));
             }
             other => return Err(format!("unknown flag: {other}")),
         }
@@ -75,13 +79,8 @@ fn parse_plan(args: &[String]) -> Result<ForkPlanArgs, String> {
 }
 
 pub fn run_fork_plan(args: ForkPlanArgs) -> Result<(), String> {
-    let plan: ForkPlan = build_fork_plan(
-        &args.run_id,
-        &args.at,
-        &args.workspace,
-        &args.packet,
-    )
-    .map_err(|e| format!("{e}"))?;
+    let plan: ForkPlan = build_fork_plan(&args.run_id, &args.at, &args.workspace, &args.packet)
+        .map_err(|e| format!("{e}"))?;
 
     let line = serde_json::to_string(&plan).map_err(|e| format!("json: {e}"))?;
     println!("{}", line);

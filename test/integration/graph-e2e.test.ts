@@ -1,5 +1,5 @@
 import { execFileSync, execSync } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
@@ -32,8 +32,11 @@ describe("CLI run-graph integration", () => {
 						policyProfile: "default",
 					},
 					execution: {
-						command: "sh",
-						args: ["-c", "echo 'Hello from A' > a.txt"],
+						command: process.execPath,
+						args: [
+							"-e",
+							"require('node:fs').writeFileSync('a.txt', 'Hello from A\\n')",
+						],
 					},
 					verification: { requiredOutputs: ["a.txt"] },
 				},
@@ -48,8 +51,11 @@ describe("CLI run-graph integration", () => {
 						policyProfile: "default",
 					},
 					execution: {
-						command: "sh",
-						args: ["-c", "echo 'Hello from B' > b.txt"],
+						command: process.execPath,
+						args: [
+							"-e",
+							"require('node:fs').writeFileSync('b.txt', 'Hello from B\\n')",
+						],
 					},
 					verification: { requiredOutputs: ["b.txt"] },
 				},
@@ -65,8 +71,11 @@ describe("CLI run-graph integration", () => {
 					},
 					dependsOn: ["A", "B"],
 					execution: {
-						command: "sh",
-						args: ["-c", "cat a.txt b.txt > c.txt"],
+						command: process.execPath,
+						args: [
+							"-e",
+							"const fs = require('node:fs'); fs.writeFileSync('c.txt', fs.readFileSync('a.txt') + fs.readFileSync('b.txt'))",
+						],
 					},
 					verification: { requiredOutputs: ["c.txt"] },
 				},
@@ -82,7 +91,7 @@ describe("CLI run-graph integration", () => {
 		// Create default profile
 		const buildplaneDir = join(projectRoot, ".buildplane");
 		const profilesDir = join(buildplaneDir, "profiles");
-		execSync(`mkdir -p ${profilesDir}`);
+		mkdirSync(profilesDir, { recursive: true });
 		writeFileSync(
 			join(profilesDir, "default.json"),
 			JSON.stringify({
@@ -111,7 +120,7 @@ describe("CLI run-graph integration", () => {
 		try {
 			const output = execFileSync(
 				process.execPath,
-				[cliPath, "run-graph", "--graph", graphPath],
+				[cliPath, "run-graph", "--raw", "--graph", graphPath],
 				{ cwd: projectRoot, encoding: "utf8" },
 			);
 
