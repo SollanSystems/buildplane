@@ -18,7 +18,7 @@
 	},
 	"devDependencies": {
 		"@ai-sdk/anthropic": "^4.0.16",
-		"ai": "^7.0.29"
+		"ai": "^7.0.40"
 	},
 	"peerDependencies": {
 		"ai": ">=6.0.0",
