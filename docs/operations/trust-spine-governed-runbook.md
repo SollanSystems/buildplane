@@ -478,9 +478,11 @@ The following are release gates, not optional hardening:
   explicitly bounded verified scan.
 - Crash-injection evidence for every write-ahead/result boundary, including
   duplicate delivery and crash-after-merge cases.
-- Held-out 30-task, three-trial campaign across both GA providers and each
-  trust tier, meeting the Trust Spine release gate with no unauthorized or
-  duplicated effects and no false approvals.
+- Held-out 30-task, three-trial campaign across every provider named by the
+  pinned release policy — `anthropic` is the only one the gate requires, since
+  it is the only provider with a real adapter — and each trust tier, meeting
+  the Trust Spine release gate with no unauthorized or duplicated effects and
+  no false approvals.
 
 Until every item is verified, Buildplane is in containment/pre-GA mode. The
 existing preview and replay surfaces remain valuable diagnostics but do not
