@@ -45,12 +45,15 @@ The build is **trust-first sequenced**: the signed, append-only event tape (L0) 
 >   `release:publish`). v0.5.0 is on npm; further releases are blocked until a protected release
 >   host issues that bundle.
 >
-> **Open decision that blocks every GA timeline:** the release gate hardcodes
-> `REQUIRED_GA_PROVIDERS = ["anthropic", "openai"]` (`eval/trust-spine-release-gate-cli.ts:163`) and
-> refuses any policy whose `expectedProviders` omits either, while `bp-provider-openai` is a 22-line
-> stub whose `available()` returns `Ok(false)`. The GA campaign is therefore unsatisfiable by
-> construction — not merely gated. Either drop `openai` from the required set (a one-line change
-> plus two fixtures in `test/eval/trust-spine-release-gate-cli.test.ts`) or implement the provider.
+> **GA provider requirement (resolved 2026-07-30):** the release gate previously hardcoded
+> `REQUIRED_GA_PROVIDERS = ["anthropic", "openai"]` and refused any policy omitting either, while
+> `bp-provider-openai` is a 22-line stub whose `available()` returns `Ok(false)`. Because the gate
+> demands three-trial coverage plus a week-2 baseline per provider group and never waives missing
+> capability evidence, GA was unsatisfiable *by construction* — and since the same gate guards npm
+> publication via `TRUST_SPINE_CAMPAIGN_BUNDLE`, it blocked every release, not just GA. `openai` is
+> now dropped from the required set (`eval/trust-spine-release-gate-cli.ts`); a signer may still
+> require additional providers. **Re-add it when the crate can actually produce trial evidence** —
+> the release lane no longer enforces that for you.
 
 Milestone map (**history** — status as of 2026-07-08; see the Trust Spine note above for present state):
 

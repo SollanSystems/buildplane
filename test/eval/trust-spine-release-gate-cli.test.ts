@@ -738,7 +738,7 @@ describe("Trust Spine release-gate CLI evidence boundary", () => {
 		).toThrow(/release policy.*configured|policy.*unconfigured/i);
 	});
 
-	it("requires the root-pinned policy to cover both GA providers", () => {
+	it("requires the root-pinned policy to cover the anthropic GA provider", () => {
 		const fixture = signedFixture();
 
 		expect(() =>
@@ -753,6 +753,42 @@ describe("Trust Spine release-gate CLI evidence boundary", () => {
 				},
 			}),
 		).toThrow(/must include GA provider anthropic/i);
+	});
+
+	it("does not require openai, which has no adapter behind it", () => {
+		// Regression pin for dropping `openai` from REQUIRED_GA_PROVIDERS. An
+		// anthropic-only policy must now clear the GA-provider gate; it still
+		// fails, but on the *later* claim check, because this fixture's campaign
+		// carries openai trials the narrowed policy no longer expects.
+		//
+		// The distinction is the whole point: while openai was required, this
+		// same policy died at parse time with "must include GA provider openai",
+		// so a signer could never certify a release without evidence from a
+		// provider whose complete() returns Err(Unsupported).
+		const anthropicOnly = {
+			...RELEASE_POLICY,
+			expectedProviders: ["anthropic"],
+			baselineByGroup: {
+				"anthropic/standard": { passAt1: 1, passAll3: 1 },
+			},
+		} satisfies TrustSpineReleasePolicyV1;
+		// Re-stamp the policy digest on both the campaign payload and the tape's
+		// trial claims so the bundle genuinely commits to the narrowed policy.
+		// Without this the digest checks fire first and the case would pass for
+		// the wrong reason.
+		const fixture = signedFixture(
+			(payload) => {
+				payload.policyDigest = policyDigest(anthropicOnly);
+			},
+			{ claimPolicyDigest: policyDigest(anthropicOnly) },
+		);
+
+		expect(() =>
+			evaluateTrustSpineReleaseCampaignBundle(fixture.bundle, {
+				...fixture.trustRoot,
+				releasePolicy: anthropicOnly,
+			}),
+		).toThrow(/provider is not in the pinned release policy/i);
 	});
 
 	it("requires thirty held-out tasks for every provider and trust-tier group", () => {

@@ -157,10 +157,20 @@ interface VerifiedSignedTape {
 
 type CampaignPolicy = TrustSpineReleasePolicyV1;
 
-// These are the two GA worker/provider contracts. A release-policy signer may
-// require additional providers later, but cannot silently omit either GA
-// population and still certify a Trust Spine release.
-const REQUIRED_GA_PROVIDERS = Object.freeze(["anthropic", "openai"]);
+// Anthropic is the only provider with a real adapter, so it is the only one a
+// release policy must cover. A signer may require additional providers, but
+// cannot silently omit this GA population and still certify a Trust Spine
+// release.
+//
+// `openai` was required here until 2026-07-30. That made GA unsatisfiable by
+// construction rather than merely gated: the gate demands three-trial coverage
+// and a week-2 baseline for every expected provider group and never treats
+// missing capability evidence as a waiver, while `bp-provider-openai` is a stub
+// whose `available()` returns `Ok(false)` and whose `complete()` returns
+// `Err(Unsupported)`. Since this gate also guards npm publication via
+// TRUST_SPINE_CAMPAIGN_BUNDLE, that blocked every release, not just GA.
+// Re-add `openai` when the crate can actually produce trial evidence.
+const REQUIRED_GA_PROVIDERS = Object.freeze(["anthropic"]);
 const MINIMUM_GA_TASKS_PER_GROUP = 30;
 const MAXIMUM_GA_CAPABILITY_REGRESSION = 0.05;
 
