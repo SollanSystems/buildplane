@@ -164,10 +164,24 @@ attempt with zero opaque failures.
 
 ## Next gate
 
-1. Install Podman at the pinned `/usr/bin/podman` and exercise
-   `attest_rootless_oci_v1` against the real binary, replacing the `FakeRunner`
-   every existing attestation test injects. This unblocks the governed-session
-   host, and therefore the candidate → review → promotion cycle.
+1. Provision a Podman that supplies `--no-hostname` at the pinned
+   `/usr/bin/podman`, then exercise `attest_rootless_oci_v1` against the real
+   binary, replacing the `FakeRunner` every existing attestation test injects.
+   This unblocks the governed-session host, and therefore the
+   candidate → review → promotion cycle.
+
+   **Verified blocker (2026-07-29): Podman `4.9.3` is insufficient.** The
+   feasibility probe requires all nine of `--read-only`, `--network`,
+   `--http-proxy`, `--no-hosts`, `--no-hostname`, `--cap-drop`,
+   `--security-opt`, `--userns`, `--entrypoint` in `podman run --help`. Only
+   `--no-hostname` is missing on `4.9.3`, and it is genuinely passed by both the
+   governed run arguments (`rootless_oci.rs:392`) and the startup canary
+   (`:633`) — so the probe is correct to demand it and correctly fail-closes.
+   Ubuntu 24.04 LTS ships only `4.9.3` in every repo, so the distro package
+   cannot satisfy the OCI plane. `podman unshare true` passes on `4.9.3`, so a
+   green userns probe is not evidence of readiness. The version floor is now
+   recorded in the governed runbook; this was found by probing before building
+   the governed-session host rather than after.
 2. Reach a `sealed` promotion honestly, by driving the real candidate lifecycle
    through the governed-session host — never by seeding the tape.
 3. Design and build PlanForge admission/dispatch as views over the candidate and
