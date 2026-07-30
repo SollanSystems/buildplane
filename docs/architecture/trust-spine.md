@@ -91,14 +91,23 @@ still use a shared immutable candidate view; it must not reintroduce
 pre-review target mutation.
 
 `planforge admit`, `dispatch`, `resume`, `recover`, and the normal `loop` are
-currently blocked, rather than relabelled raw. Legacy admission could append a
+withdrawn, rather than relabelled raw. Legacy admission could append a
 locally signed, duplicable authority-looking record without sealed V3
 authority; legacy execution could auto-merge an ambient Claude worker and
 append signed activity/receipt events that downstream consumers would mistake
-for governed evidence. `planforge dry-run`, `plan`, `authorize-envelope`, and
-`loop --reset` remain available; PlanForge admission and execution return only
-after they are views over the same candidate and promotion transaction as the
-governed front door.
+for governed evidence.
+
+Nothing has replaced them, and this is a protocol-level gap rather than a
+deployment gap. The protected governed session protocol defines no PlanForge
+operation at all: `bp-authority-broker` carries no PlanForge surface, and the
+CLI broker binds `admitPlanForge` and `openPlanForgeCandidateSession` to a
+throw that fires *after* a successful host probe. Deploying and enrolling a
+protected host therefore does not enable these commands. PlanForge returns
+only once a PlanForge task is designed as a candidate plus a promotion
+transaction, and then built as a view over the same transaction as the
+governed front door. `planforge dry-run`, `plan`, and `loop --reset` remain
+available; `authorize-envelope` throws unconditionally and is not a planning
+view.
 The planner also ignores legacy `plan_receipt` completion rows until they can
 be correlated to that governed transaction.
 

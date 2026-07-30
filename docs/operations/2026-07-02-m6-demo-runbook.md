@@ -1,5 +1,19 @@
 # M6 killer-demo — operator runbook (v0.5)
 
+> [!WARNING]
+> **HISTORICAL — superseded by the Trust Spine (#281, merged 2026-07-29).**
+> This runbook records the v0.5 demo as it was executed on 2026-07-03. **It cannot be
+> followed as written today** and is retained for provenance, not as a procedure.
+>
+> - Step 4 uses `planforge admit … --operator <operator-id>`. The current parser rejects
+>   `--operator`; only `--input <file>`, `--approve`, and `--json` are accepted.
+> - `planforge admit` and `dispatch` are **unbuilt at the protocol level** — the broker binds
+>   them to a throw that fires even against a live enrolled host, so no deployment makes this
+>   flow run.
+>
+> For what each surface may actually do, see
+> [the Trust Spine compatibility matrix](trust-spine-compatibility-matrix.md).
+
 > The ten-step Buildplane demo, plus the three properties it proves. Companion to
 > `scripts/run-demo.mjs`. Preview the whole flow with
 > `node scripts/run-demo.mjs --dry-run` (prints every step, spawns nothing).
