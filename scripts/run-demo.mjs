@@ -1,6 +1,21 @@
 #!/usr/bin/env node
 // M6 killer-demo runner — stages the ten-step operator flow for the v0.5 demo.
 //
+// ┌─ HISTORICAL (superseded by the Trust Spine, #281) ─────────────────────────┐
+// │ This flow CANNOT be followed as written. It is retained as a record of the │
+// │ v0.5 demo, not as a runnable procedure.                                    │
+// │                                                                            │
+// │  * Step 4 narrates `planforge admit … --operator <id>`. The current parser │
+// │    rejects `--operator` outright ("Use only --input <file>, --approve, and │
+// │    --json"), so the step fails at argument parsing.                        │
+// │  * `planforge admit` and `dispatch` are unbuilt at the protocol level: the │
+// │    broker binds them to a throw that fires even against a live enrolled    │
+// │    host. Deploying a host does not make this demo run.                     │
+// │                                                                            │
+// │ See docs/operations/trust-spine-compatibility-matrix.md for what each      │
+// │ surface may actually do today.                                             │
+// └────────────────────────────────────────────────────────────────────────────┘
+//
 // This script NEVER autonomously triggers a live Claude worker run (spec §7
 // live-run gate): the operator triggers and watches the one live execution.
 // The runner only stages the flow and narrates every command.

@@ -20,8 +20,9 @@ native compare-and-swap promotion result all bind the same immutable candidate.
 | `buildplane run --raw ...` | Explicit raw compatibility lane | Yes, legacy only | No; output is `governance: "unsafe"` | Use only for local diagnostics. Never use it to bypass a governed block. |
 | `run-graph --raw`, `replay --raw`, `fork --raw`, `demo --raw` | Explicit raw compatibility lane | Varies by command | No | Treat all resulting evidence as unsafe/untrusted. |
 | Raw implement-then-review strategy | Rejected | No | No | A future raw review workflow must use a shared immutable candidate view; it cannot finalize before review. |
-| `planforge dry-run`, `plan`, `authorize-envelope` | Supported planning views | No | No | Use as compiler/planning inputs only. |
-| `planforge admit`, `dispatch`, `resume`, `recover`, normal `loop` | Blocked pending unified transaction | No | No | Migrate only when these commands resolve the same protected workflow as `buildplane run`. |
+| `planforge dry-run`, `plan` | Supported planning views | No | No | Use as compiler/planning inputs only. |
+| `planforge authorize-envelope` | Unbuilt; the command throws unconditionally | No | No | Not a planning view. `runPlanForgeAuthorizeEnvelopeCommand` ignores its arguments and throws `GOVERNED_AUTHORITY_BROKER_REQUIRED` on every invocation, on every platform, with or without an enrolled host. A V0 CLI-generated envelope is deliberately not an externally verified V3 dispatch authority. |
+| `planforge admit`, `dispatch`, `resume`, `recover`, normal `loop` | Unbuilt at the protocol level | No | No | **Not deployment-gated.** The protected governed session protocol defines no PlanForge operation: `bp-authority-broker` contains no PlanForge surface at all, and the CLI broker binds `admitPlanForge` and `openPlanForgeCandidateSession` to a throw that fires *after* a successful host probe. Deploying and enrolling a protected host does not enable these commands. Enabling them requires first designing what a PlanForge task is as a candidate plus a promotion transaction, then building that on both the native and CLI sides. |
 | Legacy programmatic `runPacket` | Compatibility-only | Only explicit `trustLane: "unsafe"` | No governed receipt; auto-merge otherwise rejected | Replace with a governed host session or keep the caller explicitly raw. |
 
 ## Packets, envelopes, and tape data

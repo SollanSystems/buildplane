@@ -5,7 +5,7 @@
 		{
 			"id": "M6-S6",
 			"title": "result_ready signed L0 event kind",
-			"status": "pending",
+			"status": "done",
 			"objective": "Add the signed result_ready L0 event kind end to end across Rust and TypeScript so a completed, acceptance-passed run carries a terminal result_ready fact on the tape. Derivation per CLAUDE.md Adding a new event kind: add the Kind variant in native/crates/bp-ledger/src/kind.rs with its kind_str and as_wire mapping; add the ResultReadyV1 payload struct in native/crates/bp-ledger/src/payload/run_lifecycle.rs with fields runId, admissionEventId, acceptanceEventId all String and typeshare annotated with no u64; register Payload ResultReadyV1 in payload/mod.rs; add the kind_to_variant and payload_variant_name arms in canonicalize.rs; add the mandatory exhaustive no-op transition arm in native/crates/bp-replay/src/transitions.rs with no wildcard; add round-trip and canonicalize byte-stability tests with a golden sha256 in native/crates/bp-ledger/tests/run_lifecycle.rs; regenerate typeshare TS into packages/ledger-client/src/generated; hand-extend the TS payload union in packages/ledger-client/src/payload.ts; regenerate fixtures with ledger gen-fixtures.",
 			"allowedSideEffects": ["code-edit"],
 			"verificationCommands": [

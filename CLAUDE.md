@@ -14,7 +14,45 @@ The build is **trust-first sequenced**: the signed, append-only event tape (L0) 
 
 ## Current state & roadmap
 
-Milestone map (status as of 2026-07-08):
+> **Read this before trusting anything below it.** The **Trust Spine** (#281, merged 2026-07-29) is
+> the current program, and it supersedes the M0–M6 / v0.5.0 narrative as a description of *what
+> works today*. The milestone table is accurate **history**; it is not a statement of present
+> capability. The Trust Spine deliberately placed the product in **full containment**: `buildplane
+> run` resolves an opaque capability supplied only by a privileged OS-authenticated host, the
+> shipped resolver returns none, and a stock installation therefore renders a non-executing preview
+> and exits blocked. Nothing executes and produces governed evidence without an enrolled host.
+>
+> Authoritative reading, in order: `docs/architecture/trust-spine.md` (trust boundaries) ·
+> `docs/operations/trust-spine-compatibility-matrix.md` (what each surface may do) ·
+> `docs/operations/trust-spine-governed-runbook.md` (stop conditions and recovery) ·
+> `docs/operations/2026-07-29-trust-spine-first-live-host-roundtrip-receipt.md` (#283, the first
+> proven live authority-host round trip).
+>
+> Consequences that directly contradict the milestone text below:
+>
+> - **PlanForge admission and dispatch are unbuilt at the protocol level — not deployment-gated.**
+>   `bp-authority-broker` contains no PlanForge surface at all, and the CLI broker binds
+>   `admitPlanForge` / `openPlanForgeCandidateSession` to a throw that fires *after* a successful
+>   host probe (`apps/cli/src/governed-authority-broker-host.ts`). Deploying a host does not enable
+>   them. M2 is real history, but the cycle it shipped has no governed path today. `planforge
+>   authorize-envelope` throws unconditionally on every platform and is **not** a planning view;
+>   only `dry-run`, `plan`, and `loop --reset` remain usable.
+> - **The M6 demo runner and its runbook are historical.** `scripts/run-demo.mjs` narrates
+>   `planforge admit … --operator <id>`; the current parser rejects `--operator` outright, so the
+>   scripted demo cannot be followed as written.
+> - **npm publish is gated on a host-issued signed campaign bundle**
+>   (`TRUST_SPINE_CAMPAIGN_BUNDLE`, enforced in `.github/workflows/release.yml` and re-checked by
+>   `release:publish`). v0.5.0 is on npm; further releases are blocked until a protected release
+>   host issues that bundle.
+>
+> **Open decision that blocks every GA timeline:** the release gate hardcodes
+> `REQUIRED_GA_PROVIDERS = ["anthropic", "openai"]` (`eval/trust-spine-release-gate-cli.ts:163`) and
+> refuses any policy whose `expectedProviders` omits either, while `bp-provider-openai` is a 22-line
+> stub whose `available()` returns `Ok(false)`. The GA campaign is therefore unsatisfiable by
+> construction — not merely gated. Either drop `openai` from the required set (a one-line change
+> plus two fixtures in `test/eval/trust-spine-release-gate-cli.test.ts`) or implement the provider.
+
+Milestone map (**history** — status as of 2026-07-08; see the Trust Spine note above for present state):
 
 | Milestone | Scope | Status |
 |---|---|---|

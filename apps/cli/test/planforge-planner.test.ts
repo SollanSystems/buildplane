@@ -1,4 +1,10 @@
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import {
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -21,6 +27,29 @@ beforeEach(() => {
 afterEach(() => {
 	rmSync(ws, { recursive: true, force: true });
 });
+
+/**
+ * The committed roadmap is exhausted — every slice is `done`. These planner
+ * cases need a *pending* slice to exercise, so they reuse the committed slice
+ * content verbatim and flip only its status.
+ *
+ * Deriving the fixture instead of hardcoding one keeps the PASS assertions
+ * meaningful (identical objective, globs, verification commands, acceptance
+ * criteria) while decoupling planner behaviour from whatever happens to be
+ * outstanding in the real roadmap. Pinning these to the live file is what
+ * previously forced `docs/roadmap.json` to advertise shipped work as pending.
+ */
+function pendingRoadmapFixture(sliceId: string): string {
+	const doc = JSON.parse(readFileSync(ROADMAP, "utf8")) as {
+		slices: { id: string; status: string }[];
+	};
+	const slice = doc.slices.find((candidate) => candidate.id === sliceId);
+	if (!slice) throw new Error(`roadmap fixture: unknown slice ${sliceId}`);
+	slice.status = "pending";
+	const path = join(ws, "roadmap.json");
+	writeFileSync(path, JSON.stringify(doc), "utf8");
+	return path;
+}
 
 describe("readCompletedSliceIds", () => {
 	it("returns an empty list when the workspace has no tape", async () => {
@@ -52,9 +81,9 @@ describe("readCompletedSliceIds", () => {
 });
 
 describe("runPlannerProposal", () => {
-	it("proposes M6-S6 as a PASS plan from the committed roadmap (no prior slices done)", async () => {
+	it("proposes a pending slice as a PASS plan (no prior slices done)", async () => {
 		const proposal = await runPlannerProposal({
-			roadmapPath: ROADMAP,
+			roadmapPath: pendingRoadmapFixture("M6-S6"),
 			workspace: ws,
 			remote: REMOTE,
 			trustedBase: TRUSTED_BASE,
@@ -67,7 +96,7 @@ describe("runPlannerProposal", () => {
 
 	it("round-trips the emitted plan back through compile() to the intended slice", async () => {
 		const proposal = await runPlannerProposal({
-			roadmapPath: ROADMAP,
+			roadmapPath: pendingRoadmapFixture("M6-S6"),
 			workspace: ws,
 			remote: REMOTE,
 			trustedBase: TRUSTED_BASE,

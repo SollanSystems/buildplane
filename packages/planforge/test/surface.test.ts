@@ -42,13 +42,17 @@ describe("@buildplane/planforge public surface", () => {
 		expect(typeof selectNextRoadmapSlice).toBe("function");
 	});
 
-	it("the committed docs/roadmap.json is valid; M6-S6 is the first runtime slice", () => {
+	it("the committed docs/roadmap.json is valid and exhausted", () => {
+		// M6-S6 (result_ready) shipped in #235, so the committed roadmap has no
+		// pending work and the planner reports roadmap-complete. Asserting the
+		// exhausted state — rather than pinning a specific slice as pending —
+		// keeps the real roadmap free to record shipped work as done.
 		const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "../../..");
 		const doc = loadRoadmapFromString(
 			readFileSync(join(repoRoot, "docs/roadmap.json"), "utf8"),
 		);
 		expect(doc.milestone).toBe("M6");
-		expect(doc.slices.find((s) => s.id === "M6-S6")?.status).toBe("pending");
-		expect(selectNextRoadmapSlice(doc, [])?.id).toBe("M6-S6");
+		expect(doc.slices.find((s) => s.id === "M6-S6")?.status).toBe("done");
+		expect(selectNextRoadmapSlice(doc, [])).toBeUndefined();
 	});
 });
