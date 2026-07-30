@@ -6036,12 +6036,26 @@ describe("planforge dry-run", () => {
 		expect(existsSync(join(root, ".buildplane"))).toBe(false);
 	});
 
-	it("planforge plan emits the next-slice plan.md and exits 0 (PASS) from the committed roadmap", async () => {
+	it("planforge plan emits the next-slice plan.md and exits 0 (PASS) for a pending slice", async () => {
 		const root = mkdtempSync(join(tmpdir(), "buildplane-planforge-plan-"));
-		const roadmap = join(
-			dirname(fileURLToPath(import.meta.url)),
-			"../../../docs/roadmap.json",
-		);
+		// The committed roadmap is exhausted (M6-S6 shipped in #235), so this
+		// end-to-end case reuses its slice content verbatim and flips only the
+		// status. Pinning it to the live file is what previously forced
+		// docs/roadmap.json to advertise shipped work as pending.
+		const committed = JSON.parse(
+			readFileSync(
+				join(
+					dirname(fileURLToPath(import.meta.url)),
+					"../../../docs/roadmap.json",
+				),
+				"utf8",
+			),
+		) as { slices: { id: string; status: string }[] };
+		const target = committed.slices.find((slice) => slice.id === "M6-S6");
+		if (!target) throw new Error("roadmap fixture: unknown slice M6-S6");
+		target.status = "pending";
+		const roadmap = join(root, "roadmap.json");
+		writeFileSync(roadmap, JSON.stringify(committed), "utf8");
 		const outPath = join(root, "plan.md");
 		const result = await runCliCapture(root, [
 			"planforge",
