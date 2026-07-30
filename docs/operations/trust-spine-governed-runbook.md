@@ -464,7 +464,11 @@ The following are release gates, not optional hardening:
   keys and tape/CAS access.
 - Rootless OCI execution on Linux/WSL with read-only base, narrow overlay,
   scrubbed environment, resource limits, no default network, and brokered
-  secrets.
+  secrets. **This requires a Podman that provides `--no-hostname`** — see the
+  version floor under "Protected-host checkout prerequisite" below. The
+  governed-session host runs `attest_rootless_oci_v1` inside its startup
+  composition, so an insufficient Podman blocks that host with an opaque
+  `startup_failed` and no further diagnostic.
 - Native candidate-view issuer for reviewer/adversary/judge roles and a
   credential-holding Anthropic/OpenAI provider gateway with typed tools and
   strict outputs.
@@ -522,7 +526,33 @@ substitute.
 
 Run campaign and preflight commands from a native Linux filesystem on the
 protected host (for example, `/srv/buildplane`), using Node `24.13.1` and
-pnpm `10.0.0`. Do not reuse `node_modules` installed from Windows or another
+pnpm `10.0.0`.
+
+**Podman version floor (verified 2026-07-29).** The rootless-OCI action plane is
+pinned to the absolute path `/usr/bin/podman` and its feasibility probe requires
+all nine of `--read-only`, `--network`, `--http-proxy`, `--no-hosts`,
+`--no-hostname`, `--cap-drop`, `--security-opt`, `--userns`, and `--entrypoint`
+to appear in `podman run --help`. Every one of those flags except
+`--no-hostname` is present in Podman `4.9.3`; `--no-hostname` is not, and it is
+genuinely passed by both the governed run arguments and the startup canary, so
+the requirement is not merely a capability assertion.
+
+**Consequence: the distro Podman on Ubuntu 24.04 LTS is insufficient.** `noble`,
+`noble-updates`, and `noble-security` offer only `4.9.3+ds1-1ubuntu0.2`, so the
+governed-session host cannot start on a stock Ubuntu 24.04 LTS host. Provision
+Podman from an upstream source that supplies `--no-hostname` and confirm it
+before treating OCI readiness as satisfied:
+
+```sh
+podman --version
+podman unshare true                     # userns probe; must exit 0
+podman run --help | grep -c -- --no-hostname   # must be >= 1
+```
+
+`podman unshare true` succeeds on `4.9.3`, so a passing userns probe alone does
+not indicate readiness — check the flag explicitly.
+
+Do not reuse `node_modules` installed from Windows or another
 OS: native dependencies such as `esbuild` are platform-specific and a
 cross-platform mount can prevent the preflight from starting before it can
 report OCI readiness. Clone or create a Linux-native worktree and install its
