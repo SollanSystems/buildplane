@@ -322,10 +322,23 @@ building itself.
 
 ## 11. Open questions for the operator
 
-1. **Who writes `dispatch_envelope_v5` + `governed_dispatch_v5_admission_recorded_v1` today?**
-   Not the CLI and not `bp-authority-broker`. Presumably `scripts/trust-spine/roundtrip`. This
-   must be established before the plan -> admission mapping is implemented, because that
-   producer is where N admissions get minted.
+1. ~~**Who writes `dispatch_envelope_v5` + `governed_dispatch_v5_admission_recorded_v1`?**~~
+   **RESOLVED — the producer must be native, by design.** Three independent enforcements:
+   - `packages/ledger-client/src/emitter.ts:30-36` lists the kind in
+     `CALLER_SUPPLIED_TRUST_SPINE_KINDS`, documented as kinds that "can advance governed
+     authority or record an effect, so they must be issued by a dedicated native control
+     rather than caller-provided JSON." The TS emitter refuses it.
+   - `native/crates/bp-ledger/src/serve.rs:1658-1662` calls
+     `reject_caller_supplied_authority_event` for the kind — the wire refuses it too.
+   - The real writer is a **two-phase native operation**:
+     `record_governed_dispatch_v5_admission_v1` (`storage/sqlite.rs:6867`) followed by
+     `seal_governed_dispatch_v5_admission_v1` (`:6986`), with
+     `validate_governed_dispatch_v5_admission_record_signer` (`:14645`) gating the signer.
+
+   **Consequence for implementation:** minting N per-task admissions is Rust inside the native
+   ledger/broker. It cannot be done from `packages/planforge`, from the CLI, or by emitting
+   JSON over the wire. The TypeScript side derives packet sources and digests; the native side
+   records and seals. Any plan that plans TS-side admission minting is wrong.
 2. **Are the two broker protocols converging?** `admission_protocol.rs:19-35` carries a dead
    `admit` / `lookup_preauthorized` vocabulary alongside the live `governed_session_*` family.
    If they are meant to converge, the plan admission belongs in the former.
