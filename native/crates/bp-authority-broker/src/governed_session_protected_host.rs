@@ -6,6 +6,7 @@
 //! No listener or worker authority is granted by this module.
 
 use crate::anthropic_model_gateway::AnthropicModelGatewayV1;
+use crate::candidate_approval::authorize_candidate_approval_v1;
 use crate::candidate_repository::verify_governed_repository_binding_v1;
 use crate::candidate_workspace::{
     finalize_candidate_workspace_v1, immutable_candidate_artifact_v1_bytes,
@@ -184,9 +185,6 @@ impl ProtectedGovernedSessionHostStateV1 {
         request_id: &str,
         approval: &CandidateApprovalV1,
     ) -> Result<(String, String), ProtectedGovernedSessionProviderErrorV1> {
-        if !matches!(approval, CandidateApprovalV1::OperatorRequested) {
-            return Err(ProtectedGovernedSessionProviderErrorV1::DurableAuthority);
-        }
         let config = self.validated_startup.config();
         let resolved = self
             .ledger
@@ -199,6 +197,8 @@ impl ProtectedGovernedSessionHostStateV1 {
                 &config.v5_admission_authority,
                 &config.activity_authority,
             )
+            .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)?;
+        authorize_candidate_approval_v1(approval, &resolved)
             .map_err(|_| ProtectedGovernedSessionProviderErrorV1::DurableAuthority)?;
         let recovery_ref = issue_recovery_token_v1(
             self.signing_keys.broker_identity(),
