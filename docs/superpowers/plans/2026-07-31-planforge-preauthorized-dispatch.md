@@ -781,4 +781,42 @@ git commit -m "test(ledger): prove preauthorized dispatch binds plan_admitted pr
 
 **Criterion 4 (digest-domain reconciliation) is not in this slice.** PlanForge derives an acceptance-contract digest with undomained canonical-JSON sha256 while the trust spine uses domain-separated declaration-ordered serde (spec §8.1). Nothing in this slice places a PlanForge-derived digest into an envelope — the fixture path builds envelopes as it does today — so the mismatch is not yet reachable. It becomes load-bearing the moment a real PlanForge task is mapped to a packet, which is slice 2. Pulling it in here would add a cross-package derivation with no consumer.
 
-**`plan_admitted` signature verification inside the broker is not in this slice.** Task 1 binds the preauthorization to the admission's `provenance_ref`, and `resolve_governed_v5_candidate_authority_v1` has already validated that admission's signer and window. Verifying the referenced `plan_admitted` event's own kernel signature is defence-in-depth requiring a new store read path in the broker. It is the first item of slice 2.
+**`plan_admitted` signature verification inside the broker is not in this slice — and it is a BLOCKING PREREQUISITE, not defence-in-depth.**
+
+> **Corrected 2026-08-01 by the L0 four-role ceremony on Task 2.** An earlier version of this
+> paragraph called this item "defence-in-depth". That was wrong, and the mischaracterization is
+> what produced the defect below.
+
+Two independent reviewers (independent Opus reviewer and adversarial reviewer) established, citing
+the same lines, that **the `provenance_ref` binding this slice ships is vacuous as a security
+control**:
+
+- resolution enforces `packet.provenance_ref == dispatch.body.provenance_ref` (`bp-ledger` `sqlite.rs:15331`)
+- that same value becomes `resolved.provenance_ref` (`sqlite.rs:9253`)
+- `provenance_ref` is a plain `String` field (`governed_packet.rs:37`) of JSON parsed directly from
+  the caller-supplied `packet_source` (`governed_packet.rs:310`)
+- `packet_source` is mandatory on the request for **every** approval variant
+
+Therefore any caller able to resolve an admission at all already holds, in its own request, the
+exact value the `PreauthorizationRef` arm demands back. The check binds to caller-supplied data.
+
+**Why this was accepted rather than reverted:** `OperatorRequested` is itself unconditional and
+strictly weaker, so the new arm grants no capability that was not already reachable. Both reviewers
+agree there is **no capability expansion today**. The hazard is ordering-dependent and future-facing.
+
+**The obligation this creates.** Verifying the referenced `plan_admitted` event's own kernel
+signature inside the broker (a new store read path) is what makes the binding real. Until it lands:
+
+1. Nothing may treat "opened via `PreauthorizationRef`" as evidence of standing or automated authorization.
+2. `OperatorRequested` **must not be tightened** before this lands — doing so would silently make
+   `PreauthorizationRef` the weakest path and defeat the tightening.
+
+It remains the first item of slice 2, now as a blocker on that slice rather than a nice-to-have.
+
+**Disclosed coverage gap (HIGH).** The new admissible path has **zero integration coverage** —
+nothing drives `open_candidate_session` with a non-`OperatorRequested` approval. Task 2's stated
+justification ("the end-to-end proof is Task 6") **no longer holds**: under the ratified T6′ rescope,
+Task 6 proves the `plan_admitted` writer and signed-tape verification and never touches
+`open_candidate_session`. The pure decision is exhaustively unit-tested; its wiring into the host is
+not tested at all. No host-level test asserted the old blanket rejection either, so nothing would
+have caught the guard's deletion.
