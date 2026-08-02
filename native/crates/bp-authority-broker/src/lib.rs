@@ -43,6 +43,9 @@ use thiserror::Error;
 #[allow(dead_code)]
 mod admission_protocol;
 mod anthropic_model_gateway;
+mod candidate_approval;
+#[cfg(test)]
+mod candidate_approval_contract_tests;
 #[allow(dead_code)] // Candidate host composition consumes this after sealed V5 resolution.
 mod candidate_repository;
 #[allow(dead_code)] // Candidate host composition consumes this after session opening.
