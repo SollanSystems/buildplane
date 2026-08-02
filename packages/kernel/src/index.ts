@@ -302,6 +302,8 @@ export type {
 	OperatorDecisionSubject,
 	OperatorDecisionVerdict,
 	PendingOperatorDecision,
+	PlanAdmissionPort,
+	PlanAdmissionRecordInput,
 	PromoteWorkspaceCandidateInput,
 	RecordActionReceiptV2Input,
 	RecordCandidatePromotionDecisionInput,

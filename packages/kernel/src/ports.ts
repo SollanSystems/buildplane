@@ -862,6 +862,29 @@ export interface BuildplaneAcceptancePort {
 	recordAcceptance(input: AcceptanceRecordInput): Promise<string | undefined>;
 }
 
+export interface PlanAdmissionRecordInput {
+	readonly planId: string;
+	readonly planDigest: string;
+	readonly inputDigest: string;
+	readonly trustedBase: string;
+	readonly decidedBy: string;
+	/** RFC3339 admission timestamp. */
+	readonly decidedAt: string;
+	readonly idempotencyKey: string;
+	/** Next step this admission authorizes, e.g. `dispatch`. */
+	readonly authorizedNextStep: string;
+}
+
+/**
+ * Kernel-facing seam for appending the signed `plan_admitted` event. Mirrors
+ * {@link BuildplaneAcceptancePort}: the concrete impl lives in the CLI layer and
+ * wraps a signed ledger TapeEmitter. Resolves only once the event is durably on
+ * the tape, so a dispatch can name the returned id as its `provenance_ref`.
+ */
+export interface PlanAdmissionPort {
+	recordPlanAdmission(input: PlanAdmissionRecordInput): Promise<string>;
+}
+
 /**
  * Kernel-facing seam for appending the signed `result_ready` event (M6-S7). A
  * SEPARATE port from {@link BuildplaneAcceptancePort} (pre-build resolution 7) —
