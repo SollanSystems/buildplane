@@ -7692,7 +7692,7 @@ interface PlanForgeBrokerAdmitArguments {
  * The authenticated host supplies the operator identity and validates all
  * authority state itself.
  */
-function parsePlanForgeBrokerAdmitArguments(
+export function parsePlanForgeBrokerAdmitArguments(
 	args: readonly string[],
 ): PlanForgeBrokerAdmitArguments {
 	let inputPath: string | undefined;
