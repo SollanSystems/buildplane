@@ -9,7 +9,7 @@ const INPUT = {
 	decidedBy: "operator-1",
 	decidedAt: "2026-07-31T00:00:00Z",
 	idempotencyKey: "planforge:v0:buildplane:base:abcd1234",
-	authorizedNextStep: "dispatch",
+	authorizedNextStep: "dispatch_admitted_plan",
 };
 
 describe("createPlanAdmissionPort", () => {
@@ -32,7 +32,7 @@ describe("createPlanAdmissionPort", () => {
 				decided_by: "operator-1",
 				decided_at: "2026-07-31T00:00:00Z",
 				idempotency_key: "planforge:v0:buildplane:base:abcd1234",
-				authorized_next_step: "dispatch",
+				authorized_next_step: "dispatch_admitted_plan",
 			},
 		});
 	});
@@ -55,5 +55,25 @@ describe("createPlanAdmissionPort", () => {
 		await expect(port.recordPlanAdmission(INPUT)).rejects.toThrow(
 			/did not return a signed event id/i,
 		);
+	});
+
+	it("refuses to emit when a required field is blank", async () => {
+		const emit = vi.fn(async () => "evt-000000000042");
+		const port = createPlanAdmissionPort({ emit });
+
+		await expect(
+			port.recordPlanAdmission({ ...INPUT, trustedBase: "   " }),
+		).rejects.toThrow(/non-empty trustedBase/);
+		expect(emit).not.toHaveBeenCalled();
+	});
+
+	it("refuses to emit an admission that could never authorize dispatch", async () => {
+		const emit = vi.fn(async () => "evt-000000000042");
+		const port = createPlanAdmissionPort({ emit });
+
+		await expect(
+			port.recordPlanAdmission({ ...INPUT, authorizedNextStep: "dispatch" }),
+		).rejects.toThrow(/authorized_next_step must be "dispatch_admitted_plan"/);
+		expect(emit).not.toHaveBeenCalled();
 	});
 });

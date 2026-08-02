@@ -2,6 +2,7 @@ import type {
 	PlanAdmissionPort,
 	PlanAdmissionRecordInput,
 } from "@buildplane/kernel";
+import { PLANFORGE_AUTHORIZED_NEXT_STEP } from "@buildplane/planforge";
 
 /**
  * Minimal seam over the signed tape emitter. `plan_admitted` is deliberately NOT
@@ -19,6 +20,16 @@ export interface PlanAdmissionEmitter {
 	emit(kind: string, payload: unknown): Promise<string>;
 }
 
+const REQUIRED_FIELDS = [
+	"planId",
+	"planDigest",
+	"inputDigest",
+	"trustedBase",
+	"decidedBy",
+	"decidedAt",
+	"idempotencyKey",
+] as const satisfies readonly (keyof PlanAdmissionRecordInput)[];
+
 export function createPlanAdmissionPort(
 	emitter: PlanAdmissionEmitter,
 ): PlanAdmissionPort {
@@ -26,6 +37,25 @@ export function createPlanAdmissionPort(
 		async recordPlanAdmission(
 			input: PlanAdmissionRecordInput,
 		): Promise<string> {
+			// This port is the only writer of a signed tape event that later
+			// authorizes dispatch, and the `validation.status === PASS` gate in
+			// `buildPlanAdmittedPayload` is bypassable here because the port accepts
+			// a pre-built input. Assert fail-closed on our own terms rather than
+			// trusting a callsite that does not exist yet.
+			for (const field of REQUIRED_FIELDS) {
+				const value = input[field];
+				if (typeof value !== "string" || value.trim() === "") {
+					throw new Error(
+						`plan_admitted requires a non-empty ${field}; refusing to sign.`,
+					);
+				}
+			}
+			if (input.authorizedNextStep !== PLANFORGE_AUTHORIZED_NEXT_STEP) {
+				throw new Error(
+					`plan_admitted authorized_next_step must be "${PLANFORGE_AUTHORIZED_NEXT_STEP}", got "${input.authorizedNextStep}"; refusing to sign an admission that could never authorize dispatch.`,
+				);
+			}
+
 			const eventId = await emitter.emit("plan_admitted", {
 				PlanAdmittedV1: {
 					plan_id: input.planId,

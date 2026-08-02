@@ -871,15 +871,35 @@ export interface PlanAdmissionRecordInput {
 	/** RFC3339 admission timestamp. */
 	readonly decidedAt: string;
 	readonly idempotencyKey: string;
-	/** Next step this admission authorizes, e.g. `dispatch`. */
+	/**
+	 * Next step this admission authorizes. The only value the dispatch gate
+	 * accepts is `dispatch_admitted_plan` (planforge's
+	 * `PLANFORGE_AUTHORIZED_NEXT_STEP`); the CLI writer refuses to sign anything
+	 * else.
+	 */
 	readonly authorizedNextStep: string;
 }
 
 /**
  * Kernel-facing seam for appending the signed `plan_admitted` event. Mirrors
  * {@link BuildplaneAcceptancePort}: the concrete impl lives in the CLI layer and
- * wraps a signed ledger TapeEmitter. Resolves only once the event is durably on
- * the tape, so a dispatch can name the returned id as its `provenance_ref`.
+ * wraps a signed ledger TapeEmitter. A dispatch names the returned id as its
+ * `provenance_ref`, so it must be the id of an event that is durably on the tape
+ * — which is achievable, but only under a discipline the adapter MUST follow:
+ *
+ * - Pre-mint the id with `newLedgerEventId()`, pass it via `EmitOptions.id`, call
+ *   `emit`, `await flush()`, then return the pre-minted id.
+ * - MUST NOT derive the id from `emitter.stats().lastAckedEventId`. That is a
+ *   single mutable field on a per-run emitter shared by several ports, so any
+ *   interleaved emit yields a wrong-but-non-empty id. The sibling
+ *   `apps/cli/src/ledger-acceptance.ts` reads it safely only because its emit is
+ *   the last write before its own flush; that invariant does NOT hold here.
+ * - `flush()` throws once the ledger has failed, which is what makes
+ *   emit-then-await-flush genuinely durable rather than merely enqueued.
+ *
+ * Open conflict, to be resolved before this port is wired in production:
+ * `EmitOptions.id` is currently documented as "tests only"
+ * (`packages/ledger-client/src/emitter.ts`).
  */
 export interface PlanAdmissionPort {
 	recordPlanAdmission(input: PlanAdmissionRecordInput): Promise<string>;
