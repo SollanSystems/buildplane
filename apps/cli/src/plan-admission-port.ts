@@ -5,9 +5,21 @@ import type {
 import { PLANFORGE_AUTHORIZED_NEXT_STEP } from "@buildplane/planforge";
 
 /**
- * Minimal seam over the signed tape emitter. `plan_admitted` is deliberately NOT
- * in the emitter's caller-supplied denylist, so it may be emitted from here —
- * unlike the V5 dispatch admission, which is native-only.
+ * Minimal seam over the signed tape emitter.
+ *
+ * `plan_admitted` is absent from the emitter's
+ * `CALLER_SUPPLIED_TRUST_SPINE_KINDS` guard, but that does NOT make it emittable
+ * on a signed tape. That guard mirrors only the native *always-blocked* denylist;
+ * `plan_admitted` is on the native *signed-only* denylist
+ * (`reject_caller_supplied_authority_event`, serve.rs:312, applied at
+ * serve.rs:731-733). A signed append from this port is rejected by the native
+ * subprocess — `caller-supplied signed authority event plan_admitted is
+ * rejected: the generic signed ingest endpoint cannot bless workflow lifecycle
+ * or decision records` — the wall documented in
+ * `test/ledger-integration/planforge-plan-admission.test.ts`. So, like the V5
+ * dispatch admission, `plan_admitted` needs a dedicated native control that
+ * mints it from verified state; this port cannot reach a signed tape until one
+ * exists.
  *
  * Narrower than `TapeEmitter` on purpose: the real emitter's `emit` is
  * synchronous, fire-and-forget, and returns no id (the caller supplies one via
