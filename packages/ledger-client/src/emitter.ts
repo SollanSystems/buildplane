@@ -26,6 +26,17 @@ import {
  * Generic tape emission is observational/legacy telemetry only. These event
  * kinds can advance governed authority or record an effect, so they must be
  * issued by a dedicated native control rather than caller-provided JSON.
+ *
+ * This set mirrors ONLY the native *always-blocked* list in
+ * `reject_caller_supplied_authority_event` (serve.rs:252-292). The native
+ * second list (serve.rs:298-326) blocks a further set of lifecycle/decision
+ * kinds — `plan_admitted`, `run_completed`, `operator_decision_recorded`,
+ * `acceptance_recorded`, `result_ready`, the unit/activity kinds — but only
+ * when the append is signed. That list cannot be mirrored here: whether an
+ * append is signed is a property of the `ledger serve` subprocess, not of the
+ * call, and `emit` has no signing context. So a signed append of a
+ * second-list kind is rejected by the native subprocess at flush time, not by
+ * this guard at the call site.
  */
 const CALLER_SUPPLIED_TRUST_SPINE_KINDS = new Set<string>([
 	"dispatch_envelope",
@@ -58,6 +69,7 @@ const CALLER_SUPPLIED_TRUST_SPINE_KINDS = new Set<string>([
 	"review_verdict_recorded_v2",
 	"promotion_approval_requested",
 	"promotion_decision_recorded",
+	"promotion_execution_claimed_v1",
 	"promotion_result_recorded",
 	"promotion_reconciliation_resolved",
 	"workflow_timer_scheduled_v1",
