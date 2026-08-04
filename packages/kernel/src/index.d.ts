@@ -31,6 +31,16 @@ export {
 	RunAdmissionReceiptInputError,
 	recordRunAdmissionReceiptAttempt,
 } from "./admission-receipts.ts";
+export {
+	type AdmittedPlanReader,
+	type AdmittedPlanReaderOptions,
+	type AdmittedPlanRecord,
+	type AdmittedPlanSignatureVerificationInput,
+	createDefaultAdmittedPlanReader,
+	createPinnedEd25519AdmittedPlanSignatureVerifier,
+	type PinnedAdmittedPlanSignatureVerifier,
+	type PinnedEd25519AdmissionVerifierInput,
+} from "./admitted-plan-reader.ts";
 export type {
 	CommandExecutionCompleteEvent,
 	EventBus,
@@ -351,6 +361,10 @@ export type {
 	CommandExecutionBlock,
 	ExecutionReceipt,
 	InjectedMemoryRecord,
+	InspectEventTapeEntry,
+	InspectEventTapeKindCount,
+	InspectEventTapeMetadataValue,
+	InspectEventTapeSummary,
 	InspectProvenance,
 	InspectProvenancePolicy,
 	InspectProvenanceRoute,

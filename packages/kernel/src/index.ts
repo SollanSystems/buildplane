@@ -53,10 +53,13 @@ export type {
 	ExecutionStartedEvent,
 	ModelResponseCompleteEvent,
 	ModelTokenDeltaEvent,
+	PolicyBudgetBreachedEvent,
 	PolicyDecisionEvent,
 	RunCompletedEvent,
 	RunCreatedEvent,
+	RunResumedEvent,
 	RunStartedEvent,
+	RunSuspendedEvent,
 	ToolCallCompletedEvent,
 	ToolCallStartedEvent,
 } from "./events.js";
