@@ -37,8 +37,13 @@ import {
  * call, and `emit` has no signing context. So a signed append of a
  * second-list kind is rejected by the native subprocess at flush time, not by
  * this guard at the call site.
+ *
+ * Exported for the cross-language drift guard in
+ * `test/caller-supplied-trust-spine-kinds-sync.test.ts`, which reads the native
+ * denylists out of the Rust source and asserts set-equality. Deliberately not
+ * re-exported from `index.ts`: this is an internal invariant, not package API.
  */
-const CALLER_SUPPLIED_TRUST_SPINE_KINDS = new Set<string>([
+export const CALLER_SUPPLIED_TRUST_SPINE_KINDS = new Set<string>([
 	"dispatch_envelope",
 	"dispatch_envelope_v2",
 	"dispatch_envelope_v3",
@@ -98,7 +103,16 @@ export interface CreateTapeEmitterOptions {
 export interface EmitOptions {
 	/** Parent event id, if any. UUIDv7. */
 	parent?: string;
-	/** Override auto-assigned id (tests only). */
+	/**
+	 * Pre-minted event id, overriding the auto-assigned one. Production callers
+	 * use this to mint a durable id *before* emitting, so subsequently-emitted
+	 * related events can reference it as `parent` — see `beginLedgerUnit` and
+	 * `emitLedgerRunStarted` in `apps/cli/src/run-cli.ts` (`:6093`, `:6162`),
+	 * which return the pre-minted id and thread it into the unit's git-checkpoint
+	 * and unit-completed events. Also used by the trust-spine evidence ports
+	 * (`apps/cli/src/ledger-trust-spine-port.ts:1841,1861,1978,2660`) for the same
+	 * write-ahead reference pattern.
+	 */
 	id?: string;
 	/** Override occurred_at (tests only). */
 	occurredAt?: string;
