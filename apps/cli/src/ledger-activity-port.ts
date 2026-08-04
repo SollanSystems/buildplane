@@ -10,10 +10,13 @@ import { digest } from "@buildplane/planforge";
  * Shared port body. Reads the signed {@link TapeEmitter} via `getEmitter` at
  * activity time. When the getter returns `null` (no signed ledger bound — e.g. a
  * non-ledger `buildplane run`), both methods are no-ops, so run behaviour is
- * byte-unchanged. `activityStarted` awaits `emitter.flush()` so it resolves only
- * once the event is durably on the signed tape (write-ahead — the orchestrator
- * awaits it before invoking the activity). `activityCompleted` needs no
- * pre-resolve flush.
+ * byte-unchanged. Both methods await `emitter.flush()` so they resolve only once
+ * the event is durably on the signed tape: for `activityStarted` that is
+ * write-ahead ordering (the orchestrator awaits it before invoking the
+ * activity); for `activityCompleted` it is the failure channel — `emit()` alone
+ * swallows queue-write errors, so without the flush a rejected append (the
+ * native signed-ingest denylist rejects `activity_completed`) would resolve as
+ * success while nothing reached the tape.
  */
 function makeLedgerActivityPort(
 	getEmitter: () => TapeEmitter | null,
@@ -46,6 +49,7 @@ function makeLedgerActivityPort(
 					result: i.result,
 				},
 			});
+			await emitter.flush(); // surfaces a rejected append instead of resolving silently
 		},
 	};
 }
