@@ -189,6 +189,20 @@ export async function issueGovernedDispatchAdmissionV3(
  * emitter is useful for serialization and parser coverage only; it cannot
  * establish external authority identity, protected tape inclusion, or worker
  * execution permission.
+ *
+ * QUARANTINED WRITE SURFACE (operator decision 2026-08-15). `dispatch_envelope_v3`
+ * is on the native *always-blocked* denylist (`bp-ledger` `serve.rs`
+ * `reject_caller_supplied_authority_event`, serve.rs:256): a caller-supplied
+ * append can never reach a signed tape, by protocol design — such effects require
+ * a dedicated native control that replays and verifies the preceding evidence.
+ * Always-blocked means the rejection does not even depend on the append being
+ * signed, and `TapeEmitter.emit` refuses the kind at the call site too
+ * (`CALLER_SUPPLIED_TRUST_SPINE_KINDS`). This function has no production callers
+ * — the only production entry point, {@link issueGovernedDispatchAdmissionV3},
+ * throws `GOVERNED_AUTHORITY_BROKER_REQUIRED` unconditionally, and the sole
+ * caller of this fixture is `apps/cli/test/governed-dispatch-admission.test.ts`.
+ * Do NOT re-wire it without that native control. See
+ * `docs/operations/trust-spine-compatibility-matrix.md`.
  */
 export async function __testOnlyIssueGovernedDispatchAdmissionV3(
 	input: GovernedDispatchAdmissionInputV3,

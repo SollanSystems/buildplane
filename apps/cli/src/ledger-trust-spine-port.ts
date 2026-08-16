@@ -1825,6 +1825,19 @@ function toPromotionResultWirePayload(
  * Concrete kernel evidence port over an already-initialized signed tape
  * emitter. The emitter is intentionally mandatory: governed evidence has no
  * nullable/no-op path.
+ *
+ * QUARANTINED WRITE SURFACE (operator decision 2026-08-15).
+ * `candidate_acceptance_recorded` and `review_verdict_recorded` are on the
+ * native *always-blocked* denylist (`bp-ledger` `serve.rs`
+ * `reject_caller_supplied_authority_event`, serve.rs:279-280): a caller-supplied
+ * append can never reach a signed tape, by protocol design — such effects require
+ * a dedicated native control that replays and verifies the preceding evidence.
+ * Always-blocked means the rejection does not even depend on the append being
+ * signed, and `TapeEmitter.emit` refuses both kinds at the call site
+ * (`CALLER_SUPPLIED_TRUST_SPINE_KINDS`), so the `flushWriteAhead` below can never
+ * run in production. This factory has no production callers; its only callers are
+ * in `apps/cli/test/ledger-trust-spine-port.test.ts`. Do NOT re-wire it without
+ * that native control. See `docs/operations/trust-spine-compatibility-matrix.md`.
  */
 export function createCandidateEvidencePort(
 	emitter: TapeEmitter,
@@ -1877,6 +1890,19 @@ export function createCandidateEvidencePort(
  * reference. The result carries the exact decision ref returned by the
  * kernel-facing decision call; for restart-safe deduplication, pass
  * `references` backed by a reducer/tape projection.
+ *
+ * QUARANTINED WRITE SURFACE (operator decision 2026-08-15).
+ * `promotion_decision_recorded` and `promotion_result_recorded` are on the native
+ * *always-blocked* denylist (`bp-ledger` `serve.rs`
+ * `reject_caller_supplied_authority_event`, serve.rs:283-285): a caller-supplied
+ * append can never reach a signed tape, by protocol design — such effects require
+ * a dedicated native control that replays and verifies the preceding evidence.
+ * Always-blocked means the rejection does not even depend on the append being
+ * signed, and `TapeEmitter.emit` refuses both kinds at the call site
+ * (`CALLER_SUPPLIED_TRUST_SPINE_KINDS`). This factory has no production callers;
+ * its only callers are in `apps/cli/test/ledger-trust-spine-port.test.ts`. Do NOT
+ * re-wire it without that native control. See
+ * `docs/operations/trust-spine-compatibility-matrix.md`.
  */
 export function createCandidatePromotionDecisionPort(
 	emitter: TapeEmitter,
@@ -2489,6 +2515,21 @@ export function toCandidateCompletionRecordedV1WirePayload(
  * Requests, receipts, seals, and candidate records all share a serialization
  * queue. A call never exposes a reference until `flush()` succeeds, and every
  * later stage independently verifies the exact durable record it references.
+ *
+ * QUARANTINED WRITE SURFACE (operator decision 2026-08-15). Every kind this port
+ * writes — `action_requested_v2`, `action_receipt_recorded_v2`,
+ * `action_receipt_set_recorded_v1`, `candidate_created_v2`,
+ * `candidate_completion_recorded_v1` — is on the native *always-blocked* denylist
+ * (`bp-ledger` `serve.rs` `reject_caller_supplied_authority_event`, serve.rs:266,
+ * 273-274, 277-278): a caller-supplied append can never reach a signed tape, by
+ * protocol design — such effects require a dedicated native control that replays
+ * and verifies the preceding evidence. Always-blocked means the rejection does not
+ * even depend on the append being signed, and `TapeEmitter.emit` refuses every one
+ * of these kinds at the call site (`CALLER_SUPPLIED_TRUST_SPINE_KINDS`), so the
+ * serialization queue below can never drain in production. This factory has no
+ * production callers; its only callers are in
+ * `apps/cli/test/ledger-trust-spine-port.test.ts`. Do NOT re-wire it without that
+ * native control. See `docs/operations/trust-spine-compatibility-matrix.md`.
  */
 export function createGovernedActionEvidencePort(
 	emitter: TapeEmitter,

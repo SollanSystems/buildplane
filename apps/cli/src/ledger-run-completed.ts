@@ -77,6 +77,25 @@ export function toRunCompletedWirePayload(
  * tape, then `close`s the subprocess. Used from the operator-decision path (a
  * separate CLI invocation with no live dispatch emitter), so it owns its subprocess
  * rather than sharing one.
+ *
+ * QUARANTINED WRITE SURFACE (operator decision 2026-08-15). `run_completed` is on
+ * the native *signed-only* denylist (`bp-ledger` `serve.rs`
+ * `reject_caller_supplied_authority_event`, serve.rs:309): a caller-supplied
+ * append can never reach a signed tape, by protocol design — such effects require
+ * a dedicated native control that replays and verifies the preceding evidence.
+ * Because this port always spawns `ledger serve --sign`, the signed-only list
+ * applies to every call it makes, so `flush()` below rejects unconditionally. This
+ * factory has no production callers: the retire slice unwired it alongside
+ * {@link createOperatorDecisionPort}, and
+ * `apps/cli/test/retired-decision-ports.test.ts` pins that `run-cli.ts` never
+ * references it again. It is still exercised DELIBERATELY by
+ * `test/ledger-integration/operator-decision-writers.test.ts`, which asserts the
+ * native rejection and that nothing lands on the tape — that test is the pin on
+ * this quarantine, not a live caller. Note the unsigned `run_completed` written by
+ * the fork lane's `emitLedgerRunCompleted` (`apps/cli/src/run-cli.ts`) is a
+ * different surface and is NOT quarantined: it never spawns `--sign`, so the
+ * signed-only list does not apply to it. Do NOT re-wire this port without that
+ * native control. See `docs/operations/trust-spine-compatibility-matrix.md`.
  */
 export function createRunCompletionPort(cwd: string): RunCompletionPort {
 	return {
