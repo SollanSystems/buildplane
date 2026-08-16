@@ -1,13 +1,18 @@
 import { EventEmitter } from "node:events";
 import type { Readable, Writable } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
-import { createTapeEmitter } from "../src/emitter.js";
+import { createTapeEmitter, type TapeEmitter } from "../src/emitter.js";
 
 class MockWritable extends EventEmitter {
 	public writes: string[] = [];
+	/** When set, `write` throws instead of accepting the chunk. */
+	public throwOnWrite: Error | null = null;
+	/** When true, `write` reports backpressure so the queue awaits `drain`. */
+	public backpressured = false;
 	write(chunk: string): boolean {
+		if (this.throwOnWrite) throw this.throwOnWrite;
 		this.writes.push(chunk);
-		return true;
+		return !this.backpressured;
 	}
 	end() {}
 }
@@ -422,6 +427,206 @@ describe("createTapeEmitter", () => {
 		await new Promise((resolve) => setImmediate(resolve));
 		expect(failure).toHaveBeenCalledOnce();
 		expect(failure.mock.calls[0][0].message).toContain("unsolicited");
+	});
+
+	const handshakeAck = `{"control":"handshake_ack","ready":true,"ledger_version":"0.1.0","schema_version":1}\n`;
+	const tick = () => new Promise((r) => setImmediate(r));
+
+	async function createReadyEmitter(
+		extra: { stallTimeoutMs?: number } = {},
+	): Promise<{
+		emitter: Awaited<ReturnType<typeof createTapeEmitter>>;
+		stdin: MockWritable;
+		stderr: MockReadable;
+		exitResolve: (code: number) => void;
+	}> {
+		const { stdin, stderr, childExit, exitResolve } = createMock();
+		const emitterP = createTapeEmitter({
+			childStdin: asWritable(stdin),
+			childStderr: asReadable(stderr),
+			childExit,
+			workspacePath: "/tmp/ws",
+			runId,
+			...extra,
+		});
+		setImmediate(() => stderr.push(handshakeAck));
+		return { emitter: await emitterP, stdin, stderr, exitResolve };
+	}
+
+	it("surfaces a throwing emit pipe write while the child is still alive", async () => {
+		const { emitter, stdin } = await createReadyEmitter();
+		const failure = vi.fn();
+		emitter.onFailure(failure);
+
+		// The child never exits and never writes a protocol error line: before
+		// this slice the rejection was swallowed by `catch(() => {})` and the
+		// event vanished with no loud path at all.
+		stdin.throwOnWrite = new Error("EPIPE: broken pipe");
+		emitter.emit("run_started", { RunStartedV1: { packet_hash: "sha256:aa" } });
+		await tick();
+
+		expect(failure).toHaveBeenCalledOnce();
+		const record = failure.mock.calls[0][0];
+		expect(record.kind).toBe("protocol_error");
+		expect(record.exitCode).toBeNull();
+		expect(record.message).toContain("run_started");
+		expect(record.message).toContain("EPIPE");
+
+		// The failure latches: later emits no-op instead of writing.
+		stdin.throwOnWrite = null;
+		const writesBefore = stdin.writes.length;
+		emitter.emit("unit_started", {});
+		await tick();
+		expect(stdin.writes.length).toBe(writesBefore);
+
+		await expect(emitter.close()).rejects.toThrow("ledger failed");
+	});
+
+	it("surfaces a pipe error raised while an emit awaits drain", async () => {
+		const { emitter, stdin } = await createReadyEmitter();
+		const failure = vi.fn();
+		emitter.onFailure(failure);
+
+		stdin.backpressured = true;
+		emitter.emit("run_started", { RunStartedV1: { packet_hash: "sha256:aa" } });
+		await tick();
+		stdin.emit("error", new Error("EPIPE: broken pipe"));
+		await tick();
+
+		expect(failure).toHaveBeenCalledOnce();
+		expect(failure.mock.calls[0][0].kind).toBe("protocol_error");
+		expect(failure.mock.calls[0][0].message).toContain("EPIPE");
+	});
+
+	it("fails loud when a flush ack never arrives", async () => {
+		const { emitter } = await createReadyEmitter({ stallTimeoutMs: 50 });
+		const failure = vi.fn();
+		emitter.onFailure(failure);
+
+		await expect(emitter.flush()).rejects.toThrow(/timed out .*flush_ack/);
+		expect(failure).toHaveBeenCalledOnce();
+		const record = failure.mock.calls[0][0];
+		expect(record.kind).toBe("protocol_error");
+		expect(record.message).toContain("queueDepth=");
+		expect(record.message).toContain("lastAckedEventId=");
+	});
+
+	it("fails loud when a close ack never arrives", async () => {
+		const { emitter } = await createReadyEmitter({ stallTimeoutMs: 50 });
+		const failure = vi.fn();
+		emitter.onFailure(failure);
+
+		await expect(emitter.close()).rejects.toThrow(/timed out .*close_ack/);
+		expect(failure).toHaveBeenCalledOnce();
+		expect(failure.mock.calls[0][0].kind).toBe("protocol_error");
+	});
+
+	it("fails loud when the child never exits after a close ack", async () => {
+		const { emitter, stdin, stderr } = await createReadyEmitter({
+			stallTimeoutMs: 50,
+		});
+		const failure = vi.fn();
+		emitter.onFailure(failure);
+
+		const closeP = emitter.close();
+		await tick();
+		const closeLine = stdin.writes.find((w) => w.includes(`"control":"close"`));
+		expect(closeLine).toBeTruthy();
+		const seq = JSON.parse(closeLine as string).seq;
+		stderr.push(
+			`{"control":"close_ack","seq":${seq},"last_event_id":"01919000-0000-7000-8000-000000000001"}\n`,
+		);
+
+		// The ack lands, so the old code advanced to an unbounded
+		// `await opts.childExit` and hung forever on a child that never exits.
+		await expect(closeP).rejects.toThrow(/timed out .*ledger exit/);
+		expect(failure).toHaveBeenCalledOnce();
+		expect(failure.mock.calls[0][0].kind).toBe("protocol_error");
+	});
+
+	it("close resolves normally when the ack and the child exit arrive", async () => {
+		const { emitter, stdin, stderr, exitResolve } = await createReadyEmitter({
+			stallTimeoutMs: 50,
+		});
+		const failure = vi.fn();
+		emitter.onFailure(failure);
+
+		const closeP = emitter.close();
+		await tick();
+		const closeLine = stdin.writes.find((w) => w.includes(`"control":"close"`));
+		const seq = JSON.parse(closeLine as string).seq;
+		stderr.push(
+			`{"control":"close_ack","seq":${seq},"last_event_id":"01919000-0000-7000-8000-000000000001"}\n`,
+		);
+		exitResolve(0);
+
+		await expect(closeP).resolves.toBeUndefined();
+		expect(failure).not.toHaveBeenCalled();
+		expect(emitter.stats().lastAckedEventId).toBe(
+			"01919000-0000-7000-8000-000000000001",
+		);
+	});
+
+	// The pending flush/close resolvers are registered before `operation()`
+	// runs, but are only awaited *after* the control-line write resolves. Park
+	// that write on backpressure and the resolver has no subscriber at all —
+	// so an unrelated `markFailed` rejecting the whole pending map hits an
+	// orphan. Without the no-op latch on those resolvers that is a genuine
+	// unhandled rejection, which is why the latch exists.
+	for (const variant of [
+		{ name: "flush", start: (e: TapeEmitter) => e.flush() },
+		{ name: "close", start: (e: TapeEmitter) => e.close() },
+	]) {
+		it(`does not orphan the ${variant.name} resolver when its control write is parked`, async () => {
+			const { emitter, stdin, exitResolve } = await createReadyEmitter({
+				stallTimeoutMs: 50,
+			});
+			const failure = vi.fn();
+			emitter.onFailure(failure);
+
+			const unhandled: unknown[] = [];
+			const onUnhandled = (reason: unknown) => {
+				unhandled.push(reason);
+			};
+			process.on("unhandledRejection", onUnhandled);
+			try {
+				// Park the control-line write inside `WriteQueue.waitForDrain()`, so
+				// the operation never reaches its `await promise`.
+				stdin.backpressured = true;
+				const pending = variant.start(emitter);
+				await tick();
+
+				// An unrelated cause fails the emitter and rejects every pending
+				// resolver — including the orphaned one.
+				exitResolve(1);
+
+				await expect(pending).rejects.toThrow();
+				expect(failure).toHaveBeenCalledOnce();
+				expect(failure.mock.calls[0][0].kind).toBe("exit");
+
+				// Let Node surface an unhandled rejection if one was created.
+				await tick();
+				await tick();
+				expect(unhandled).toEqual([]);
+			} finally {
+				process.off("unhandledRejection", onUnhandled);
+			}
+		});
+	}
+
+	it("rejects a non-positive stall timeout", async () => {
+		const { stdin, stderr, childExit } = createMock();
+		setImmediate(() => stderr.push(handshakeAck));
+		await expect(
+			createTapeEmitter({
+				childStdin: asWritable(stdin),
+				childStderr: asReadable(stderr),
+				childExit,
+				workspacePath: "/tmp/ws",
+				runId,
+				stallTimeoutMs: 0,
+			}),
+		).rejects.toThrow("stallTimeoutMs must be a positive integer");
 	});
 
 	it("refuses caller-crafted trust-spine authority events on the generic emitter", async () => {
