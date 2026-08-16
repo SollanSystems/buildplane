@@ -1,10 +1,10 @@
 /**
- * REGRESSION PIN — the two operator-decision-path signed-tape writers are
- * LIVE-BROKEN today. This file records what IS true; it does not assert what
- * SHOULD be true.
+ * REGRESSION PIN — the two operator-decision-path signed-tape writers cannot
+ * append. This file records what IS true; it does not assert what SHOULD be
+ * true.
  *
- * WHAT IS BROKEN
- * --------------
+ * WHY THESE WRITERS CANNOT APPEND
+ * -------------------------------
  * `createOperatorDecisionPort` (`apps/cli/src/ledger-operator-decision.ts`) and
  * `createRunCompletionPort` (`apps/cli/src/ledger-run-completed.ts`) each spawn
  * their own `ledger serve --sign` subprocess and append
@@ -16,11 +16,15 @@
  * on it (`EventKind::OperatorDecisionRecorded` serve.rs:324,
  * `EventKind::RunCompleted` serve.rs:309). So every call to either port throws.
  *
- * Both ports are DEFAULT-WIRED (`run-cli.ts:5289` operatorDecisionPort,
- * `run-cli.ts:5296` runCompletionPort) and reachable from `bp web` ->
- * `POST /api/runs/:runId/decision`, which therefore answers HTTP 500. `bp web`
- * is source/dev-only, so the blast radius is operators running from a git
- * checkout.
+ * They are NO LONGER DEFAULT-WIRED. Both were, until the surface was retired by
+ * operator decision (2026-08-15): `loadCliOrchestrator` now supplies
+ * `createRetiredOperatorDecisionPort()` / `createRetiredRunCompletionPort()`
+ * (`apps/cli/src/retired-decision-ports.ts`), so `bp web`
+ * `POST /api/runs/:runId/decision` answers an explicit HTTP 501 with a stated
+ * reason instead of the opaque 500 this rejection used to produce. These two
+ * ports are therefore no longer on any live path — which is exactly why this
+ * file must keep driving them DIRECTLY: it is the only remaining check that the
+ * native rejection they were retired for is still real.
  *
  * VERBATIM REJECTION (the native error control line, surfaced through the
  * emitter's failure path into the rejected `flush()`):
@@ -31,10 +35,11 @@
  *
  * IT FAILS CLOSED. serve.rs rejects BEFORE `store.append_signed_with_checkpoint`,
  * so no event is persisted; and in the orchestrator the shadow row
- * (`orchestrator.ts:4957`) and the side effect (`:4968`) both sit AFTER the
- * throwing await, so there is no false evidence and no partial merge. The
- * empty-tape assertions below pin exactly that property — it is what makes the
- * break tolerable rather than corrupting.
+ * (`orchestrator.ts:5011`) and the side effect (`:5022`) both sit AFTER the
+ * throwing await (`:5006`), so there is no false evidence and no partial merge.
+ * The empty-tape assertions below pin exactly that property — it is what made
+ * the break tolerable rather than corrupting, and it is what the retirement
+ * preserves.
  *
  * WHY THIS FILE EXISTS
  * --------------------
@@ -46,14 +51,17 @@
  * the broken orchestrator method (`mission-control-server/test/router.test.ts:56`),
  * so nothing anywhere would notice this break.
  *
- * Whether the `bp web` decision surface is intended to be retired or this is an
- * unintended regression is UNRESOLVED — nothing in `a53519b`, its changeset, or
- * the trust-spine docs says. This file deliberately takes no position.
+ * RESOLVED 2026-08-15 (it was UNRESOLVED when this file landed — nothing in
+ * `a53519b`, its changeset, or the trust-spine docs took a position): the
+ * operator retired the `bp web` decision write surface rather than repairing it.
+ * See `docs/operations/trust-spine-compatibility-matrix.md`. Retirement did NOT
+ * change these two ports or the native denylist; it stopped wiring them.
  *
- * A FUTURE FIX MUST UPDATE THIS TEST, NOT DELETE IT. When these writers are
- * routed through a dedicated native control that mints these records from
- * verified state, this file must be rewritten to assert the new success path
- * (and to keep the fail-closed pin). Deleting it re-creates the exact blind spot
+ * A FUTURE FIX MUST UPDATE THIS TEST, NOT DELETE IT. If a live operator-decision
+ * write path is ever restored — necessarily through a dedicated native control
+ * that mints these records from verified state, never by removing a kind from
+ * the denylist — this file must be rewritten to assert the new success path (and
+ * to keep the fail-closed pin). Deleting it re-creates the exact blind spot
  * `a53519b` created.
  */
 
