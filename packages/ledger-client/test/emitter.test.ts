@@ -1,7 +1,7 @@
 import { EventEmitter } from "node:events";
 import type { Readable, Writable } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
-import { createTapeEmitter } from "../src/emitter.js";
+import { createTapeEmitter, type TapeEmitter } from "../src/emitter.js";
 
 class MockWritable extends EventEmitter {
 	public writes: string[] = [];
@@ -566,6 +566,53 @@ describe("createTapeEmitter", () => {
 			"01919000-0000-7000-8000-000000000001",
 		);
 	});
+
+	// The pending flush/close resolvers are registered before `operation()`
+	// runs, but are only awaited *after* the control-line write resolves. Park
+	// that write on backpressure and the resolver has no subscriber at all —
+	// so an unrelated `markFailed` rejecting the whole pending map hits an
+	// orphan. Without the no-op latch on those resolvers that is a genuine
+	// unhandled rejection, which is why the latch exists.
+	for (const variant of [
+		{ name: "flush", start: (e: TapeEmitter) => e.flush() },
+		{ name: "close", start: (e: TapeEmitter) => e.close() },
+	]) {
+		it(`does not orphan the ${variant.name} resolver when its control write is parked`, async () => {
+			const { emitter, stdin, exitResolve } = await createReadyEmitter({
+				stallTimeoutMs: 50,
+			});
+			const failure = vi.fn();
+			emitter.onFailure(failure);
+
+			const unhandled: unknown[] = [];
+			const onUnhandled = (reason: unknown) => {
+				unhandled.push(reason);
+			};
+			process.on("unhandledRejection", onUnhandled);
+			try {
+				// Park the control-line write inside `WriteQueue.waitForDrain()`, so
+				// the operation never reaches its `await promise`.
+				stdin.backpressured = true;
+				const pending = variant.start(emitter);
+				await tick();
+
+				// An unrelated cause fails the emitter and rejects every pending
+				// resolver — including the orphaned one.
+				exitResolve(1);
+
+				await expect(pending).rejects.toThrow();
+				expect(failure).toHaveBeenCalledOnce();
+				expect(failure.mock.calls[0][0].kind).toBe("exit");
+
+				// Let Node surface an unhandled rejection if one was created.
+				await tick();
+				await tick();
+				expect(unhandled).toEqual([]);
+			} finally {
+				process.off("unhandledRejection", onUnhandled);
+			}
+		});
+	}
 
 	it("rejects a non-positive stall timeout", async () => {
 		const { stdin, stderr, childExit } = createMock();
