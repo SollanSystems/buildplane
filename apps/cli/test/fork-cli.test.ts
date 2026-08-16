@@ -726,7 +726,9 @@ describe("fork ledger evidence guard", () => {
 
 		expect(result.exitCode).toBe(0);
 		expect(result.stderr).not.toContain("ledger evidence lost");
-		expect(result.stdout).toContain("fork run completed: fork-run-123 (exit 0)");
+		expect(result.stdout).toContain(
+			"fork run completed: fork-run-123 (exit 0)",
+		);
 	});
 
 	it("fails the run when an append the tape rejected was swallowed by emit()", async () => {
@@ -744,7 +746,9 @@ describe("fork ledger evidence guard", () => {
 		expect(result.stderr).toContain(
 			"caller_supplied_authority_event: run_started is rejected",
 		);
-		expect(result.stdout).toContain("fork run completed: fork-run-123 (exit 1)");
+		expect(result.stdout).toContain(
+			"fork run completed: fork-run-123 (exit 1)",
+		);
 	});
 
 	it("fails the run when close() rejects instead of swallowing the rejection", async () => {

@@ -224,7 +224,9 @@ describe("tool-sink family under a guarded emitter", () => {
 		// await a flush and cannot reject, so the tool call is bound to resolve
 		// clean even when its tape events never land. The guard is what makes the
 		// loss observable.
-		const fake = createFakeEmitter({ failOnEmit: "storage_failure: disk full" });
+		const fake = createFakeEmitter({
+			failOnEmit: "storage_failure: disk full",
+		});
 		const reported: string[] = [];
 		const guard = guardLedgerEvidence(fake.emitter, (line) =>
 			reported.push(line),
