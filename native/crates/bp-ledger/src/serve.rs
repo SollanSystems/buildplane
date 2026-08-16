@@ -1708,52 +1708,9 @@ mod control_message_tests {
         ));
     }
 
-    #[test]
-    fn signed_generic_ingest_rejects_legacy_lifecycle_authority_events() {
-        use crate::id::{EventId, RunId};
-        use crate::kind::EventKind;
-        use crate::payload::run_lifecycle::{RunCompletedV1, RunOutcome};
-        use crate::payload::Payload;
-        use chrono::Utc;
-
-        for kind in [
-            EventKind::RunCompleted,
-            EventKind::ActivityCompleted,
-            EventKind::AcceptanceRecorded,
-            EventKind::OperatorDecisionRecorded,
-            EventKind::ResultReady,
-            EventKind::ToolRequest,
-            EventKind::ToolResult,
-        ] {
-            let event = crate::event::Event {
-                id: EventId::new(),
-                run_id: RunId::new(),
-                parent_event_id: None,
-                schema_version: 1,
-                kind,
-                occurred_at: Utc::now(),
-                payload: Payload::RunCompletedV1(RunCompletedV1 {
-                    outcome: RunOutcome::Passed,
-                    duration_ms: "0".into(),
-                    event_count: "1".into(),
-                    unit_count: "0".into(),
-                }),
-            };
-            // The guard classifies envelope kind before payload
-            // canonicalization. Reusing a valid run-completed payload here
-            // intentionally keeps this focused on the ingress classification
-            // table.
-            let error = reject_caller_supplied_authority_event(&event, true)
-                .expect_err("signed generic ingest must not mint workflow lifecycle evidence");
-            assert!(matches!(
-                error,
-                LedgerError::CallerSuppliedSignedAuthorityEvent { .. }
-            ));
-
-            reject_caller_supplied_authority_event(&event, false)
-                .expect("the explicitly unsafe unsigned lane retains legacy compatibility");
-        }
-    }
+    // The signed/unsigned lifecycle denylist is pinned exhaustively in
+    // `authority_ingest_denylist_tests` below, which supersedes the seven-kind
+    // sample this module used to carry.
 
     #[test]
     fn event_envelope_parses_as_event() {
@@ -1781,6 +1738,321 @@ mod control_message_tests {
         match parse_control_or_event(&line).unwrap() {
             Line::Event(e) => assert_eq!(e.id, event.id),
             _ => panic!("expected Event"),
+        }
+    }
+}
+
+/// Exhaustive ingress-disposition pin for
+/// [`reject_caller_supplied_authority_event`].
+///
+/// The guard holds two denylists whose strengths differ, and the difference is
+/// load-bearing:
+///
+/// * [`REJECTED_SIGNED_OR_UNSIGNED`] — refused on the generic ingest lane
+///   whether or not an append signer is configured.
+/// * [`REJECTED_ONLY_WHEN_SIGNED`] — refused only when a signer is configured;
+///   the explicitly unsafe unsigned lane keeps legacy compatibility for these.
+/// * [`PASSED_BY_THIS_GUARD`] — the control group the guard deliberately lets
+///   through in both modes, so the rejection assertions cannot pass vacuously.
+///
+/// The three arrays are the single place these lists live in the test module,
+/// and together they must name every [`EventKind`] exactly once.
+/// `disposition_table_covers_every_event_kind_exactly_once` proves that against
+/// the variant list serde derives from the enum itself, so neither a kind added
+/// to (or moved between) the production match arms nor a kind added to the enum
+/// can land without a visible failure here.
+///
+/// Clearing this guard is not the same as being accepted by the ledger: the
+/// guard passes `TapeCheckpoint`, which `SqliteStore::validate_external_append`
+/// then refuses. These arrays describe this one function's verdict, nothing
+/// wider.
+#[cfg(test)]
+mod authority_ingest_denylist_tests {
+    use super::*;
+    use crate::payload::run_lifecycle::{RunCompletedV1, RunOutcome};
+    use crate::payload::Payload;
+    use chrono::Utc;
+    use std::collections::{BTreeMap, BTreeSet};
+
+    /// Verbatim membership of the first denylist (`serve.rs`, the unconditional
+    /// `matches!` block).
+    const REJECTED_SIGNED_OR_UNSIGNED: &[EventKind] = &[
+        EventKind::DispatchEnvelope,
+        EventKind::DispatchEnvelopeV2,
+        EventKind::DispatchEnvelopeV3,
+        EventKind::DispatchEnvelopeV4,
+        EventKind::DispatchEnvelopeV5,
+        EventKind::GovernedDispatchV5AdmissionRecordedV1,
+        EventKind::ContextManifestDeclaredV1,
+        EventKind::WorkerManifestDeclaredV1,
+        EventKind::SandboxProfileDeclaredV1,
+        EventKind::AttemptContextDeclaredV1,
+        EventKind::WorkflowGraphDeclaredV1,
+        EventKind::WorkflowGraphDeclaredV2,
+        EventKind::ActionRequestedV2,
+        EventKind::ModelActionIntentV1,
+        EventKind::ModelActionAuthorizedV1,
+        EventKind::ModelActionAuthorizedV2,
+        EventKind::ActivityClaimedV1,
+        EventKind::ActivityHeartbeatRecordedV1,
+        EventKind::ActivityResultRecordedV1,
+        EventKind::ActionReceiptRecordedV2,
+        EventKind::ActionReceiptSetRecordedV1,
+        EventKind::AttemptContextRecordedV1,
+        EventKind::CandidateCreated,
+        EventKind::CandidateCreatedV2,
+        EventKind::CandidateCompletionRecordedV1,
+        EventKind::CandidateAcceptanceRecorded,
+        EventKind::ReviewVerdictRecorded,
+        EventKind::ReviewVerdictRecordedV2,
+        EventKind::PromotionApprovalRequested,
+        EventKind::PromotionDecisionRecorded,
+        EventKind::PromotionExecutionClaimedV1,
+        EventKind::PromotionResultRecorded,
+        EventKind::PromotionReconciliationResolved,
+        EventKind::WorkflowTimerScheduledV1,
+        EventKind::WorkflowTimerFiredV1,
+        EventKind::WorkflowCancellationRequestedV1,
+        EventKind::WorkflowTerminal,
+        EventKind::WorkflowTerminalV2,
+    ];
+
+    /// Verbatim membership of the second denylist (`serve.rs`, the block guarded
+    /// by `signed_append`).
+    const REJECTED_ONLY_WHEN_SIGNED: &[EventKind] = &[
+        EventKind::RunStarted,
+        EventKind::RunCompleted,
+        EventKind::RunFailed,
+        EventKind::RunAdmissionRecorded,
+        EventKind::PlanAdmitted,
+        EventKind::PlanReceiptRecorded,
+        EventKind::ActivityStarted,
+        EventKind::ActivityCompleted,
+        EventKind::UnitStarted,
+        EventKind::UnitCompleted,
+        EventKind::UnitFailed,
+        EventKind::UnitCancelled,
+        EventKind::GitCheckpoint,
+        EventKind::ToolRequest,
+        EventKind::ToolResult,
+        EventKind::AcceptanceRecorded,
+        EventKind::OperatorDecisionRecorded,
+        EventKind::ResultReady,
+    ];
+
+    /// Kinds on neither denylist. This records what the guard does today; it is
+    /// not an assertion that every entry *ought* to be caller-suppliable.
+    const PASSED_BY_THIS_GUARD: &[EventKind] = &[
+        EventKind::ModelRequest,
+        EventKind::ModelResponse,
+        EventKind::WorkspaceRead,
+        EventKind::WorkspaceWrite,
+        EventKind::CapabilityDenied,
+        EventKind::ReleaseEvaluationEvidenceV1,
+        // Cleared here and refused downstream by
+        // `SqliteStore::validate_external_append`.
+        EventKind::TapeCheckpoint,
+    ];
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Disposition {
+        RejectedSignedOrUnsigned,
+        RejectedOnlyWhenSigned,
+        PassedByThisGuard,
+    }
+
+    fn disposition_table() -> Vec<(EventKind, Disposition)> {
+        let tiers = [
+            (
+                REJECTED_SIGNED_OR_UNSIGNED,
+                Disposition::RejectedSignedOrUnsigned,
+            ),
+            (
+                REJECTED_ONLY_WHEN_SIGNED,
+                Disposition::RejectedOnlyWhenSigned,
+            ),
+            (PASSED_BY_THIS_GUARD, Disposition::PassedByThisGuard),
+        ];
+        tiers
+            .into_iter()
+            .flat_map(|(kinds, disposition)| kinds.iter().map(move |kind| (*kind, disposition)))
+            .collect()
+    }
+
+    /// The guard classifies the envelope kind before payload canonicalization,
+    /// so one valid payload stands in for every kind and keeps these tests on
+    /// the ingress classification table rather than on payload shape.
+    fn event_of_kind(kind: EventKind) -> Event {
+        Event {
+            id: EventId::new(),
+            run_id: RunId::new(),
+            parent_event_id: None,
+            schema_version: 1,
+            kind,
+            occurred_at: Utc::now(),
+            payload: Payload::RunCompletedV1(RunCompletedV1 {
+                outcome: RunOutcome::Passed,
+                duration_ms: "0".into(),
+                event_count: "1".into(),
+                unit_count: "0".into(),
+            }),
+        }
+    }
+
+    /// Every variant `EventKind` can represent, recovered from serde's
+    /// unknown-variant error rather than from a hand-maintained list. A hand
+    /// list would silently omit a newly added kind, which is precisely the
+    /// drift this suite exists to catch.
+    fn every_event_kind() -> Vec<EventKind> {
+        let sentinel = serde_json::Value::String("__not_an_event_kind__".into());
+        let message = serde_json::from_value::<EventKind>(sentinel)
+            .expect_err("the sentinel must not name a real event kind")
+            .to_string();
+        let listed = message
+            .split_once("expected one of ")
+            .unwrap_or_else(|| {
+                panic!(
+                    "serde no longer enumerates variants in its unknown-variant error, so this \
+                     coverage check can no longer see the whole enum. Repair the parser (or \
+                     replace it with an explicit list) instead of deleting the check. Message: \
+                     {message}"
+                )
+            })
+            .1;
+        listed
+            .split(',')
+            .map(|variant| {
+                let wire = variant.trim().trim_matches('`');
+                serde_json::from_value::<EventKind>(serde_json::Value::String(wire.to_string()))
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "serde listed `{wire}` as an EventKind variant but then refused to \
+                             parse it: {error}"
+                        )
+                    })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn disposition_table_covers_every_event_kind_exactly_once() {
+        let mut declared: BTreeMap<String, Disposition> = BTreeMap::new();
+        for (kind, disposition) in disposition_table() {
+            if let Some(previous) = declared.insert(kind.as_wire().to_string(), disposition) {
+                panic!(
+                    "{} appears twice in the ingest disposition table (as {previous:?} and \
+                     {disposition:?}); a kind has exactly one disposition",
+                    kind.as_wire()
+                );
+            }
+        }
+
+        let declared_kinds: BTreeSet<&String> = declared.keys().collect();
+        let wire_names: Vec<String> = every_event_kind()
+            .iter()
+            .map(|kind| kind.as_wire().to_string())
+            .collect();
+        let actual_kinds: BTreeSet<&String> = wire_names.iter().collect();
+
+        let unclassified: Vec<&&String> = actual_kinds.difference(&declared_kinds).collect();
+        assert!(
+            unclassified.is_empty(),
+            "these event kinds have no ingest disposition: {unclassified:?}. Read \
+             reject_caller_supplied_authority_event, decide which of the three arrays each one \
+             belongs in, and add it there."
+        );
+
+        let stale: Vec<&&String> = declared_kinds.difference(&actual_kinds).collect();
+        assert!(
+            stale.is_empty(),
+            "the ingest disposition table names kinds EventKind no longer has: {stale:?}"
+        );
+    }
+
+    #[test]
+    fn kinds_on_the_first_denylist_are_refused_signed_and_unsigned() {
+        assert!(
+            !REJECTED_SIGNED_OR_UNSIGNED.is_empty(),
+            "an empty denylist would make this test vacuous"
+        );
+        for kind in REJECTED_SIGNED_OR_UNSIGNED {
+            let event = event_of_kind(*kind);
+            for signed_append in [true, false] {
+                match reject_caller_supplied_authority_event(&event, signed_append) {
+                    Err(LedgerError::CallerSuppliedTrustSpineEvent { kind: reported }) => {
+                        assert_eq!(
+                            reported,
+                            kind.as_wire(),
+                            "the rejection must name the kind it refused"
+                        );
+                    }
+                    other => panic!(
+                        "{} (signed_append={signed_append}) must be refused as a caller-supplied \
+                         trust-spine event, got {other:?}",
+                        kind.as_wire()
+                    ),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn kinds_on_the_second_denylist_are_refused_when_the_append_is_signed() {
+        assert!(
+            !REJECTED_ONLY_WHEN_SIGNED.is_empty(),
+            "an empty denylist would make this test vacuous"
+        );
+        for kind in REJECTED_ONLY_WHEN_SIGNED {
+            let event = event_of_kind(*kind);
+            match reject_caller_supplied_authority_event(&event, true) {
+                Err(LedgerError::CallerSuppliedSignedAuthorityEvent { kind: reported }) => {
+                    assert_eq!(
+                        reported,
+                        kind.as_wire(),
+                        "the rejection must name the kind it refused"
+                    );
+                }
+                other => panic!(
+                    "a configured append signer must not bless caller-supplied {}, got {other:?}",
+                    kind.as_wire()
+                ),
+            }
+        }
+    }
+
+    /// The property that makes the second list a *signed-only* list. Without
+    /// this, narrowing the guard to reject these kinds unconditionally — or
+    /// widening it by moving one to the first list — would go unnoticed.
+    #[test]
+    fn kinds_on_the_second_denylist_still_pass_the_unsigned_lane() {
+        for kind in REJECTED_ONLY_WHEN_SIGNED {
+            let event = event_of_kind(*kind);
+            if let Err(error) = reject_caller_supplied_authority_event(&event, false) {
+                panic!(
+                    "{} must stay available to the explicitly unsafe unsigned lane, got {error:?}",
+                    kind.as_wire()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn control_kinds_pass_the_guard_in_both_modes() {
+        assert!(
+            !PASSED_BY_THIS_GUARD.is_empty(),
+            "without a control group the rejection tests above could pass vacuously"
+        );
+        for kind in PASSED_BY_THIS_GUARD {
+            let event = event_of_kind(*kind);
+            for signed_append in [true, false] {
+                if let Err(error) = reject_caller_supplied_authority_event(&event, signed_append) {
+                    panic!(
+                        "{} (signed_append={signed_append}) is on neither denylist and must clear \
+                         this guard, got {error:?}",
+                        kind.as_wire()
+                    );
+                }
+            }
         }
     }
 }

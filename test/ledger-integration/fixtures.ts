@@ -1,4 +1,5 @@
 import { type ChildProcess, spawn, spawnSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { once } from "node:events";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -62,6 +63,12 @@ export interface LedgerFixture {
 	binary: string; // resolved native binary
 	child: ChildProcess;
 	emitter: TapeEmitter;
+	/**
+	 * Isolated `$HOME` holding this fixture's keyring. Created and injected into
+	 * the ledger subprocess only when `sign` is requested; the unsigned default
+	 * inherits the ambient environment exactly as before.
+	 */
+	homeDir: string;
 	cleanup: () => Promise<void>;
 }
 
@@ -77,9 +84,17 @@ export interface LedgerFixture {
 export async function makeLedgerFixture(options?: {
 	runId?: string;
 	handshakeTimeoutMs?: number;
+	/**
+	 * Spawn the ledger with kernel Ed25519 signing enabled over an isolated
+	 * per-fixture keyring, so the resulting tape can be exported and checked by
+	 * `scripts/verify-signed-tape.mjs`. Default OFF — the historical fixtures
+	 * deliberately produce unsigned legacy tapes.
+	 */
+	sign?: boolean;
 }): Promise<LedgerFixture> {
 	const dir = await mkdtemp(join(tmpdir(), "bp-ledger-it-"));
 	const runId = options?.runId ?? "01919000-0000-7000-8000-000000000000";
+	const homeDir = join(dir, "home");
 
 	// Locate the native binary using the ledger-integration fixture root rather
 	// than process.cwd(), which can be changed by unrelated tests before this
@@ -91,20 +106,40 @@ export async function makeLedgerFixture(options?: {
 	// packs/. Use the repo root derived from this fixture file so the binary
 	// starts successfully; the --workspace flag points to the isolated temp dir
 	// that holds the SQLite ledger.
-	const child = spawn(
-		binary,
-		[
-			"ledger",
-			"serve",
-			"--run-id",
-			runId,
-			"--workspace",
-			dir,
-			"--schema-version",
-			"1",
-		],
-		{ stdio: ["pipe", "inherit", "pipe"], cwd: LEDGER_TEST_REPO_ROOT },
-	);
+	const serveArgs = [
+		"ledger",
+		"serve",
+		"--run-id",
+		runId,
+		"--workspace",
+		dir,
+		"--schema-version",
+		"1",
+	];
+	// Signing resolves the kernel key through `$HOME/.buildplane/keys`, so a
+	// signing fixture seeds its own keyring instead of depending on (or
+	// touching) the developer's real one. A raw 32-byte seed is the on-disk
+	// format the native keyring loader expects.
+	let spawnEnv: NodeJS.ProcessEnv | undefined;
+	if (options?.sign) {
+		const keyDir = join(homeDir, ".buildplane", "keys", "kernel");
+		mkdirSync(keyDir, { recursive: true });
+		writeFileSync(join(keyDir, "kernel-main.ed25519"), randomBytes(32));
+		serveArgs.push(
+			"--sign",
+			"--signing-actor-id",
+			"kernel",
+			"--signing-key-id",
+			"kernel-main",
+		);
+		spawnEnv = { ...process.env, HOME: homeDir };
+	}
+
+	const child = spawn(binary, serveArgs, {
+		stdio: ["pipe", "inherit", "pipe"],
+		cwd: LEDGER_TEST_REPO_ROOT,
+		...(spawnEnv === undefined ? {} : { env: spawnEnv }),
+	});
 	if (!child.stdin || !child.stderr) {
 		throw new Error("subprocess stdio missing");
 	}
@@ -147,7 +182,7 @@ export async function makeLedgerFixture(options?: {
 		await cleanupTempDir(dir);
 	};
 
-	return { dir, runId, binary, child, emitter, cleanup };
+	return { dir, runId, binary, child, emitter, homeDir, cleanup };
 }
 
 export interface LegacyReplayTapeFixture {

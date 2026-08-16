@@ -19,7 +19,9 @@ interface FakeEmitter {
 	flushAtSeq: number[];
 }
 
-function createFakeEmitter(): FakeEmitter {
+function createFakeEmitter(
+	options: { readonly flushError?: Error } = {},
+): FakeEmitter {
 	let seq = 0;
 	const emits: RecordedEmit[] = [];
 	const fake: FakeEmitter = {
@@ -33,6 +35,7 @@ function createFakeEmitter(): FakeEmitter {
 			async flush() {
 				fake.flushCount += 1;
 				fake.flushAtSeq.push(seq);
+				if (options.flushError) throw options.flushError;
 			},
 			async close() {},
 			onFailure() {},
@@ -83,7 +86,7 @@ describe("createLedgerActivityPort", () => {
 		);
 	});
 
-	it("emits activity_completed with result_digest and inline result (no pre-flush required)", async () => {
+	it("emits activity_completed then awaits flush() (durable before resolve)", async () => {
 		const emitter = createFakeEmitter();
 		const port = createLedgerActivityPort(emitter.emitter);
 		const result = { exitCode: 0, stdout: "ok\n", stderr: "" };
@@ -111,6 +114,33 @@ describe("createLedgerActivityPort", () => {
 		expect(payload.ActivityCompletedV1.result_digest).toMatch(
 			/^sha256:[0-9a-f]+$/,
 		);
+		// flush called exactly once, AFTER the emit
+		expect(emitter.flushCount).toBe(1);
+		expect(emitter.flushAtSeq[0]).toBe(1);
+	});
+
+	it("rejects when the activity_completed flush fails instead of resolving silently", async () => {
+		// Shape of a native denylist rejection: the signed-only list at
+		// serve.rs:315 rejects `activity_completed`, the emitter latches failed,
+		// and flush() surfaces it. Without an awaited flush the caller would
+		// observe success while nothing reached the tape.
+		const failure = new Error(
+			"caller_supplied_authority_event: caller-supplied signed authority event activity_completed is rejected",
+		);
+		const emitter = createFakeEmitter({ flushError: failure });
+		const port = createLedgerActivityPort(emitter.emitter);
+
+		await expect(
+			port.activityCompleted({
+				runId: "run-1",
+				activityId: "act-1",
+				result: { exitCode: 0 },
+			}),
+		).rejects.toBe(failure);
+
+		expect(emitter.emits).toHaveLength(1);
+		expect(emitter.emits[0]?.kind).toBe("activity_completed");
+		expect(emitter.flushCount).toBe(1);
 	});
 });
 

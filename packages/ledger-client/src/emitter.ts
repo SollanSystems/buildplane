@@ -26,8 +26,24 @@ import {
  * Generic tape emission is observational/legacy telemetry only. These event
  * kinds can advance governed authority or record an effect, so they must be
  * issued by a dedicated native control rather than caller-provided JSON.
+ *
+ * This set mirrors ONLY the native *always-blocked* list in
+ * `reject_caller_supplied_authority_event` (serve.rs:252-292). The native
+ * second list (serve.rs:298-326) blocks a further set of lifecycle/decision
+ * kinds — `plan_admitted`, `run_completed`, `operator_decision_recorded`,
+ * `acceptance_recorded`, `result_ready`, the unit/activity kinds — but only
+ * when the append is signed. That list cannot be mirrored here: whether an
+ * append is signed is a property of the `ledger serve` subprocess, not of the
+ * call, and `emit` has no signing context. So a signed append of a
+ * second-list kind is rejected by the native subprocess at flush time, not by
+ * this guard at the call site.
+ *
+ * Exported for the cross-language drift guard in
+ * `test/caller-supplied-trust-spine-kinds-sync.test.ts`, which reads the native
+ * denylists out of the Rust source and asserts set-equality. Deliberately not
+ * re-exported from `index.ts`: this is an internal invariant, not package API.
  */
-const CALLER_SUPPLIED_TRUST_SPINE_KINDS = new Set<string>([
+export const CALLER_SUPPLIED_TRUST_SPINE_KINDS = new Set<string>([
 	"dispatch_envelope",
 	"dispatch_envelope_v2",
 	"dispatch_envelope_v3",
@@ -58,6 +74,7 @@ const CALLER_SUPPLIED_TRUST_SPINE_KINDS = new Set<string>([
 	"review_verdict_recorded_v2",
 	"promotion_approval_requested",
 	"promotion_decision_recorded",
+	"promotion_execution_claimed_v1",
 	"promotion_result_recorded",
 	"promotion_reconciliation_resolved",
 	"workflow_timer_scheduled_v1",
@@ -86,7 +103,16 @@ export interface CreateTapeEmitterOptions {
 export interface EmitOptions {
 	/** Parent event id, if any. UUIDv7. */
 	parent?: string;
-	/** Override auto-assigned id (tests only). */
+	/**
+	 * Pre-minted event id, overriding the auto-assigned one. Production callers
+	 * use this to mint a durable id *before* emitting, so subsequently-emitted
+	 * related events can reference it as `parent` — see `beginLedgerUnit` and
+	 * `emitLedgerRunStarted` in `apps/cli/src/run-cli.ts` (`:6093`, `:6162`),
+	 * which return the pre-minted id and thread it into the unit's git-checkpoint
+	 * and unit-completed events. Also used by the trust-spine evidence ports
+	 * (`apps/cli/src/ledger-trust-spine-port.ts:1841,1861,1978,2660`) for the same
+	 * write-ahead reference pattern.
+	 */
 	id?: string;
 	/** Override occurred_at (tests only). */
 	occurredAt?: string;
