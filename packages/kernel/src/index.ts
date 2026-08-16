@@ -182,6 +182,7 @@ export type {
 export {
 	CandidatePromotionValidationError,
 	createBuildplaneOrchestrator,
+	OperatorDecisionSurfaceRetiredError,
 	OperatorDecisionValidationError,
 } from "./orchestrator.js";
 export type {

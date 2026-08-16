@@ -6,6 +6,7 @@ import type {
 	RunStatus,
 	StatusSnapshot,
 } from "@buildplane/kernel";
+import { OperatorDecisionSurfaceRetiredError } from "@buildplane/kernel";
 import {
 	handleApiRequest,
 	type MissionControlRouterDeps,
@@ -371,5 +372,46 @@ describe("POST /api/runs/:id/decision", () => {
 			}),
 		);
 		expect(response.status).toBe(400);
+	});
+
+	// The shipped default wiring (`run-cli.ts`) supplies retired operator-decision
+	// and run-completion ports, so `recordOperatorDecision` refuses before any
+	// validation, tape emit, shadow row, or side effect. That refusal is an
+	// explicit retirement, not an infrastructure fault — it must not surface as
+	// the generic 500 the pre-retirement denylist rejection produced.
+	it("maps the retired write surface to an explicit 501, not a generic 500", async () => {
+		const reason =
+			"the bp web operator-decision write surface is retired under Trust Spine containment.";
+		const deps = makeDeps({
+			orchestrator: {
+				inspect: vi.fn(() => inspectSnapshot("run-1")),
+				recordOperatorDecision: vi.fn(() =>
+					Promise.reject(new OperatorDecisionSurfaceRetiredError(reason)),
+				),
+				recoverPendingDecisions: vi.fn(() =>
+					Promise.resolve({
+						recovered: 0,
+						failed: [],
+						completionEventsSkipped: [],
+					}),
+				),
+			},
+		});
+
+		const response = await handleApiRequest(
+			deps,
+			request({
+				method: "POST",
+				pathname: "/api/runs/run-1/decision",
+				authorizationHeader: "Bearer s3cret",
+				body: { decision: "approved", subject: "merge" },
+			}),
+		);
+
+		expect(response.status).toBe(501);
+		expect(response.body).toEqual({
+			error: "operator_decision_surface_retired",
+			message: reason,
+		});
 	});
 });

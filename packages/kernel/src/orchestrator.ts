@@ -224,6 +224,22 @@ export class OperatorDecisionValidationError extends Error {
 }
 
 /**
+ * Thrown by `recordOperatorDecision` when the wired operator-decision or
+ * run-completion port is marked retired. Retirement is an explicit operator
+ * decision, not an infrastructure fault: the signed protocol refuses
+ * `operator_decision_recorded` and `run_completed` as caller-supplied authority
+ * kinds, so the live write surface is fail-closed by construction rather than
+ * broken. A distinct error name lets a caller (the Mission Control router) map
+ * it to a retirement response instead of a generic failure.
+ */
+export class OperatorDecisionSurfaceRetiredError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "OperatorDecisionSurfaceRetiredError";
+	}
+}
+
+/**
  * Thrown before a candidate-promotion tape write or Git effect when the
  * immutable candidate, its evidence, or its decision do not form one exact
  * binding. This protocol is intentionally separate from legacy run/worktree
