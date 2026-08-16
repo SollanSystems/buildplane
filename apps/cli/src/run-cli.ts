@@ -11411,12 +11411,15 @@ export async function runCli(
 							);
 						}
 						unsubscribeLedger?.();
-						if (ledgerEmitter) {
-							try {
-								await ledgerEmitter.close();
-							} catch {
-								// Cleanup best-effort; the orchestrator result is the authoritative outcome.
-							}
+						if (ledgerEmitter && runEvidence) {
+							// Same contract as the fork lane and this handler's two sibling
+							// branches: a rejected close is reported, never swallowed. All
+							// three `buildplane run` branches (async, TUI, sync) are
+							// unreachable today — `useLedger` is a hard-coded `false`
+							// above, so `ledgerEmitter` is always null — but they must not
+							// drift, because flipping `useLedger` back on is precisely what
+							// would make a silent close matter here.
+							await runEvidence.close();
 						}
 						// --- end ledger cleanup ---
 					}
@@ -11498,12 +11501,15 @@ export async function runCli(
 							);
 						}
 						unsubscribeLedger?.();
-						if (ledgerEmitter) {
-							try {
-								await ledgerEmitter.close();
-							} catch {
-								// Cleanup best-effort; the orchestrator result is the authoritative outcome.
-							}
+						if (ledgerEmitter && runEvidence) {
+							// Same contract as the fork lane and this handler's two sibling
+							// branches: a rejected close is reported, never swallowed. All
+							// three `buildplane run` branches (async, TUI, sync) are
+							// unreachable today — `useLedger` is a hard-coded `false`
+							// above, so `ledgerEmitter` is always null — but they must not
+							// drift, because flipping `useLedger` back on is precisely what
+							// would make a silent close matter here.
+							await runEvidence.close();
 						}
 						// --- end ledger cleanup ---
 					}
@@ -11574,11 +11580,13 @@ export async function runCli(
 					}
 					unsubscribeLedger?.();
 					if (ledgerEmitter && runEvidence) {
-						// Same contract as the fork lane: a rejected close is reported,
-						// never swallowed. Unreachable today — `useLedger` is a hard-coded
-						// `false` above, so `ledgerEmitter` is always null — but the two
-						// lanes must not drift, because flipping `useLedger` back on is
-						// precisely what would make a silent close matter here.
+						// Same contract as the fork lane and this handler's two sibling
+						// branches: a rejected close is reported, never swallowed. All
+						// three `buildplane run` branches (async, TUI, sync) are
+						// unreachable today — `useLedger` is a hard-coded `false`
+						// above, so `ledgerEmitter` is always null — but they must not
+						// drift, because flipping `useLedger` back on is precisely what
+						// would make a silent close matter here.
 						await runEvidence.close();
 					}
 					// --- end ledger cleanup ---

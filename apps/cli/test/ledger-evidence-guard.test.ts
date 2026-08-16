@@ -1,7 +1,15 @@
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { LedgerFailure, TapeEmitter } from "@buildplane/ledger-client";
 import { describe, expect, it } from "vitest";
 import { guardLedgerEvidence } from "../src/ledger-evidence-guard.js";
 import { wrapToolRegistryForLedger } from "../src/ledger-tool-wrapper.js";
+
+const runCliSource = readFileSync(
+	resolve(dirname(fileURLToPath(import.meta.url)), "..", "src", "run-cli.ts"),
+	"utf8",
+);
 
 type FailureCallback = (reason: LedgerFailure) => void;
 
@@ -146,6 +154,24 @@ describe("guardLedgerEvidence", () => {
 		expect(fake.closeCount).toBe(1);
 	});
 
+	it("surfaces a non-Error close rejection without losing the reason", async () => {
+		const fake = createFakeEmitter();
+		// A rejected promise need not carry an Error; `String(reason)` is the
+		// fallback path and must not degrade to "[object Object]"-grade noise.
+		fake.emitter.close = (async () => {
+			throw "close_ack never arrived";
+		}) as TapeEmitter["close"];
+		const reported: string[] = [];
+		const guard = guardLedgerEvidence(fake.emitter, (line) =>
+			reported.push(line),
+		);
+
+		await guard.close();
+
+		expect(guard.lostEvidence()).toBe("close_ack never arrived");
+		expect(reported[0]).toContain("close_ack never arrived");
+	});
+
 	it("does not attempt close() after the tape already failed", async () => {
 		const fake = createFakeEmitter();
 		const guard = guardLedgerEvidence(fake.emitter, () => {});
@@ -157,6 +183,38 @@ describe("guardLedgerEvidence", () => {
 
 		expect(fake.closeCount).toBe(0);
 		expect(guard.lostEvidence()).toContain("ledger exited with code 1");
+	});
+});
+
+/**
+ * The `buildplane run` handler has THREE independent `finally` blocks that close
+ * the run ledger — the `useAsync && !useTui` branch, the `useTui` branch, and the
+ * default sync branch. All three gate on a hard-coded `const useLedger = false`,
+ * so none can be driven from a test without refactoring the handler to make the
+ * flag injectable, which is out of scope here. That structural untestability is
+ * exactly what let a first pass convert one branch and leave the other two
+ * swallowing — nothing failed. These source-level assertions are the pin that
+ * would have caught it, and they hold regardless of the `useLedger` gating.
+ */
+describe("run-cli ledger close parity", () => {
+	it("routes every run-handler close through the guard, with no direct close left", () => {
+		expect(runCliSource).not.toContain("ledgerEmitter.close(");
+		expect(runCliSource).toContain("await runEvidence.close();");
+	});
+
+	it("leaves no swallowed close in the run handler", () => {
+		// The verbatim comment that marked all three original swallows.
+		expect(runCliSource).not.toContain("Cleanup best-effort");
+		// The fork lane's equivalent swallow, replaced by the same guard.
+		expect(runCliSource).not.toContain(
+			"Best-effort close; the orchestrator result is authoritative.",
+		);
+		expect(runCliSource).toContain("await forkEvidence.close();");
+	});
+
+	it("guards all three run-handler branches, not just one", () => {
+		const guardedCloses = runCliSource.match(/await runEvidence\.close\(\);/g);
+		expect(guardedCloses).toHaveLength(3);
 	});
 });
 

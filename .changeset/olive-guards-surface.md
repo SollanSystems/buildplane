@@ -20,6 +20,12 @@ that call sits in a `finally` where throwing would mask the original error.
 
 Success paths are behavior-identical: a healthy tape loses no events, exits with
 the orchestrator's own verdict, and prints nothing extra. Only the failure path
-changes, and only on the unsigned fork lane. The raw `run` lane gets the same
-close contract so the two cannot drift, though it is unreachable today behind its
-hard-coded `useLedger = false`.
+changes, and only on the unsigned fork lane.
+
+The `buildplane run` handler's close sites get the same contract so the lanes
+cannot drift. There are three of them, not one — the `useAsync && !useTui`
+branch, the `useTui` branch, and the default sync branch each own an independent
+`finally`. All three are unreachable today behind a hard-coded
+`useLedger = false`, so this is a no-op at runtime; it matters only if that flag
+is re-enabled, at which point `buildplane run --async` and `--tui` would
+otherwise reproduce the same silent-lost-tape bug this fixes on `fork`.
