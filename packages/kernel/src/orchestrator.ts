@@ -286,13 +286,27 @@ export interface PendingDecisionRecoveryFailure {
 }
 
 /**
+ * One recovered record whose terminal `run_completed` was deliberately not
+ * emitted because the wired completion port is retired. The Tier-1 side effect
+ * and its execution marker still completed, so the record does not recur; this
+ * is the disclosure that its tape evidence is missing by design.
+ */
+export interface PendingDecisionCompletionSkip {
+	readonly runId: string;
+	readonly reason: string;
+}
+
+/**
  * Summary of a `recoverPendingDecisions` pass: how many decided-but-unexecuted
- * side effects were re-driven, and any records whose re-drive threw (per-item
- * isolation — one bad record never wedges the batch).
+ * side effects were re-driven, any records whose re-drive threw (per-item
+ * isolation — one bad record never wedges the batch), and any recovered record
+ * whose signed completion event was skipped against a retired completion port.
  */
 export interface PendingDecisionRecovery {
 	readonly recovered: number;
 	readonly failed: readonly PendingDecisionRecoveryFailure[];
+	/** Always present; empty when nothing was skipped. */
+	readonly completionEventsSkipped: readonly PendingDecisionCompletionSkip[];
 }
 
 export interface BuildplaneOrchestrator {
@@ -887,7 +901,18 @@ export function createBuildplaneOrchestrator(
 		// claim above) and recordRunCompleted dedups on the tape, so the re-drive neither
 		// double-merges nor double-emits. Captured (not awaited) so this function stays
 		// synchronous; the async callers await `pendingRunCompletedEmit`.
-		if (terminalOutcome !== null && runCompletionPort) {
+		//
+		// A RETIRED completion port takes the marker-synchronous branch instead. The
+		// signed protocol refuses `run_completed` as a caller-supplied authority
+		// kind, so emitting would throw, strand the marker, and leave the record
+		// failing identically on every boot (LB-3). Skipping the emit lets the
+		// Tier-1 side effect settle exactly once; the missing tape evidence is
+		// disclosed by the caller rather than dropped silently.
+		if (
+			terminalOutcome !== null &&
+			runCompletionPort &&
+			!runCompletionPort.retired
+		) {
 			const outcome = terminalOutcome;
 			const marker = markerOutcome;
 			pendingRunCompletedEmit = (async () => {
@@ -897,9 +922,10 @@ export function createBuildplaneOrchestrator(
 				storage.markOperatorDecisionExecuted(runId, marker);
 			})();
 		} else {
-			// Non-terminal (resume+approved re-dispatch), or no completion port wired:
-			// there is no run_completed to flush, so the marker is safe to write
-			// synchronously — preserving the original ordering for those paths.
+			// Non-terminal (resume+approved re-dispatch), no completion port wired, or
+			// a retired completion port: there is no run_completed to flush, so the
+			// marker is safe to write synchronously — preserving the original
+			// ordering for those paths.
 			storage.markOperatorDecisionExecuted(runId, markerOutcome);
 		}
 	}
@@ -5100,6 +5126,12 @@ export function createBuildplaneOrchestrator(
 			// the failed record keeps its missing marker, so a later pass retries it.
 			let recovered = 0;
 			const failed: PendingDecisionRecoveryFailure[] = [];
+			// Disclosure, not suppression: a retired completion port turns a record
+			// that used to fail identically on every boot into one that settles its
+			// Tier-1 side effect exactly once. What it can never have is the signed
+			// terminal event, so every such record is reported.
+			const completionEventsSkipped: PendingDecisionCompletionSkip[] = [];
+			const retiredCompletion = runCompletionPort?.retired;
 			for (const pending of storage.listDecidedUnexecutedDecisions()) {
 				if (pending.subject === "merge") {
 					try {
@@ -5137,6 +5169,20 @@ export function createBuildplaneOrchestrator(
 					);
 					await flushPendingRunCompletedEmit();
 					recovered += 1;
+					// Only a terminal transition would have carried a `run_completed`.
+					// `resume`+`approved` re-dispatches (non-terminal), and a `merge`
+					// row never reaches here outside the explicitly quarantined legacy
+					// compatibility mode — it is failed above by the legacy-merge guard.
+					if (
+						retiredCompletion &&
+						pending.subject === "resume" &&
+						pending.decision === "rejected"
+					) {
+						completionEventsSkipped.push({
+							runId: pending.runId,
+							reason: retiredCompletion.reason,
+						});
+					}
 				} catch (error) {
 					failed.push({
 						runId: pending.runId,
@@ -5144,7 +5190,7 @@ export function createBuildplaneOrchestrator(
 					});
 				}
 			}
-			return { recovered, failed };
+			return { recovered, failed, completionEventsSkipped };
 		},
 
 		async recoverPendingCandidatePromotions(): Promise<PendingCandidatePromotionRecovery> {

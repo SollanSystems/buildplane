@@ -56,7 +56,11 @@ function makeDeps(
 			inspect: vi.fn(() => inspectSnapshot("run-1")),
 			recordOperatorDecision: vi.fn(() => Promise.resolve()),
 			recoverPendingDecisions: vi.fn(() =>
-				Promise.resolve({ recovered: 0, failed: [] }),
+				Promise.resolve({
+					recovered: 0,
+					failed: [],
+					completionEventsSkipped: [],
+				}),
 			),
 		},
 		store: {
@@ -358,7 +362,11 @@ describe("POST /api/runs/:id/decision", () => {
 				inspect: vi.fn(() => inspectSnapshot("run-1")),
 				recordOperatorDecision: vi.fn(() => Promise.reject(validationError)),
 				recoverPendingDecisions: vi.fn(() =>
-					Promise.resolve({ recovered: 0, failed: [] }),
+					Promise.resolve({
+					recovered: 0,
+					failed: [],
+					completionEventsSkipped: [],
+				}),
 				),
 			},
 		});

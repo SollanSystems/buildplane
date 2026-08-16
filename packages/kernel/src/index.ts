@@ -175,6 +175,7 @@ export type {
 	CreateBuildplaneOrchestratorOptions,
 	PendingCandidatePromotionRecovery,
 	PendingCandidatePromotionRecoveryFailure,
+	PendingDecisionCompletionSkip,
 	PendingDecisionRecovery,
 	PendingDecisionRecoveryFailure,
 	RecordCandidatePromotionInput,

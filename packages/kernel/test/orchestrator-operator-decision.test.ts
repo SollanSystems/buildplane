@@ -883,6 +883,7 @@ describe("recoverPendingDecisions — exactly-once reconciler (D2/D4)", () => {
 					error: expect.stringMatching(/unsafe legacy.*sealed V3/i),
 				}),
 			],
+			completionEventsSkipped: [],
 		});
 
 		expect(h.mergeCalls).toHaveLength(0);
@@ -908,6 +909,7 @@ describe("recoverPendingDecisions — exactly-once reconciler (D2/D4)", () => {
 						"legacy merge recovery is disabled; reconcile only a verified candidate promotion.",
 				},
 			],
+			completionEventsSkipped: [],
 		});
 		expect(h.mergeCalls).toHaveLength(0);
 		expect(h.executed).toHaveLength(0);
@@ -952,6 +954,56 @@ describe("recoverPendingDecisions — exactly-once reconciler (D2/D4)", () => {
 		expect(h.executed).toHaveLength(1);
 	});
 
+	// LB-3 — before retirement, a historical terminal row recovered into a live
+	// completion port whose emit the signed protocol refuses: the throw pushed the
+	// row to `failed`, the execution marker was never written, and every
+	// subsequent boot repeated the identical failure. A retired completion port
+	// skips the emit instead, so the Tier-1 side effect completes exactly once and
+	// the un-emitted tape evidence is disclosed rather than silently dropped.
+	it("recovers a historical terminal row exactly once against a retired completion port, disclosing the skipped emit", async () => {
+		const completionCalls: string[] = [];
+		const holder: { executed?: { runId: string }[] } = {};
+		const h = makeHarness({
+			initialStatus: "suspended",
+			runCompletionPort: {
+				retired: { reason: "retired for test." },
+				async recordRunCompleted(completionInput) {
+					completionCalls.push(completionInput.runId);
+				},
+			},
+			decidedUnexecuted: () =>
+				holder.executed?.some((entry) => entry.runId === RUN_ID)
+					? []
+					: [{ runId: RUN_ID, decision: "rejected", subject: "resume" }],
+		});
+		holder.executed = h.executed;
+
+		await expect(h.orchestrator.recoverPendingDecisions()).resolves.toEqual({
+			recovered: 1,
+			failed: [],
+			completionEventsSkipped: [{ runId: RUN_ID, reason: "retired for test." }],
+		});
+
+		// The Tier-1 side effect completed and the marker landed, so the row leaves
+		// the pending feed for good.
+		expect(h.rejectSuspendedCalls).toEqual([RUN_ID]);
+		expect(h.state.status).toBe("failed");
+		expect(h.executed).toEqual([{ runId: RUN_ID, mergedHeadSha: undefined }]);
+		expect(completionCalls).toHaveLength(0);
+		expect(h.decisionEmits).toHaveLength(0);
+
+		// Non-recurrence is the point: a second boot finds nothing to recover and
+		// discloses nothing, instead of failing identically forever.
+		await expect(h.orchestrator.recoverPendingDecisions()).resolves.toEqual({
+			recovered: 0,
+			failed: [],
+			completionEventsSkipped: [],
+		});
+		expect(h.rejectSuspendedCalls).toHaveLength(1);
+		expect(h.executed).toHaveLength(1);
+		expect(completionCalls).toHaveLength(0);
+	});
+
 	it("re-drives a resume decision (no workspace) without Tier-2 re-emit", async () => {
 		const h = makeHarness({
 			initialStatus: "suspended",
@@ -984,6 +1036,7 @@ describe("recoverPendingDecisions — crash-idempotent non-merge side effects (F
 		await expect(h.orchestrator.recoverPendingDecisions()).resolves.toEqual({
 			recovered: 1,
 			failed: [],
+			completionEventsSkipped: [],
 		});
 		// approveRun NOT re-applied: no second call, no second `run-resumed` event.
 		expect(h.approveCalls).toHaveLength(0);
@@ -1006,6 +1059,7 @@ describe("recoverPendingDecisions — crash-idempotent non-merge side effects (F
 		await expect(h.orchestrator.recoverPendingDecisions()).resolves.toEqual({
 			recovered: 1,
 			failed: [],
+			completionEventsSkipped: [],
 		});
 		expect(h.rejectSuspendedCalls).toHaveLength(0);
 		// No second terminal event.
@@ -1029,6 +1083,7 @@ describe("recoverPendingDecisions — crash-idempotent non-merge side effects (F
 		await expect(h.orchestrator.recoverPendingDecisions()).resolves.toEqual({
 			recovered: 1,
 			failed: [],
+			completionEventsSkipped: [],
 		});
 		expect(h.rejectMergeCalls).toHaveLength(0);
 		// EXACTLY ZERO new run-completed events (the first one ran pre-crash).
