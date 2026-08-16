@@ -98,6 +98,14 @@ export interface CreateTapeEmitterOptions {
 	schemaVersion?: number;
 	/** Default: 30_000 ms. Fail closed when an authority reply is unavailable. */
 	activityControlTimeoutMs?: number;
+	/**
+	 * Default: 60_000 ms. Upper bound on how long `flush()` and `close()` wait
+	 * for the native ledger. Each wait a caller can block on — the flush ack,
+	 * the close ack, and the child's exit after close — carries its own budget,
+	 * so a stalled subprocess fails loud through `onFailure` instead of hanging
+	 * the caller forever.
+	 */
+	stallTimeoutMs?: number;
 }
 
 export interface EmitOptions {
@@ -187,6 +195,10 @@ export async function createTapeEmitter(
 		activityControlTimeoutMs <= 0
 	) {
 		throw new RangeError("activityControlTimeoutMs must be a positive integer");
+	}
+	const stallTimeoutMs = opts.stallTimeoutMs ?? 60_000;
+	if (!Number.isSafeInteger(stallTimeoutMs) || stallTimeoutMs <= 0) {
+		throw new RangeError("stallTimeoutMs must be a positive integer");
 	}
 
 	const tailer = new StderrTailer(opts.childStderr);
@@ -323,6 +335,42 @@ export async function createTapeEmitter(
 		if (closeReject) closeReject(new Error(failure.message));
 	}
 
+	/**
+	 * Bound a caller-visible wait on the native ledger. On expiry the stall is
+	 * reported through `markFailed`, the one loud path: that fires `onFailure`
+	 * and rejects the in-flight flush/close resolver, so the caller's `await`
+	 * rejects with the stall message. The race also rejects directly, which
+	 * only decides the outcome when `markFailed` cannot reach the pending
+	 * promise — a stalled `childExit` is not the emitter's to reject, and a
+	 * first-failure-wins `markFailed` no-ops once another cause already fired.
+	 * Without that backstop those two cases would still hang.
+	 */
+	function withStallDeadline<T>(
+		label: string,
+		operation: () => Promise<T>,
+	): Promise<T> {
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const deadline = new Promise<never>((_resolve, reject) => {
+			timer = setTimeout(() => {
+				const message = `timed out after ${stallTimeoutMs}ms awaiting ${label} (queueDepth=${queue.depth()}, lastAckedEventId=${lastAckedEventId ?? "none"})`;
+				markFailed({
+					kind: "protocol_error",
+					exitCode: null,
+					stderrTail: tailer.tail(),
+					lastAckedEventId,
+					message,
+				});
+				reject(new Error(message));
+			}, stallTimeoutMs);
+			// A pending deadline must never be the reason the process stays up.
+			timer.unref();
+		});
+		const raced = Promise.race([operation(), deadline]);
+		return raced.finally(() => {
+			clearTimeout(timer);
+		});
+	}
+
 	function requestActivityControl<T extends ActivityResponse>(
 		requestId: string,
 		line: string,
@@ -422,8 +470,19 @@ export async function createTapeEmitter(
 			});
 			const line = `${JSON.stringify(env)}\n`;
 			eventsEmitted += 1;
-			queue.write(line).catch(() => {
-				// Failure surfaced via onFailure; don't bubble here.
+			// `emit` is fire-and-forget, so a rejected pipe write has no caller to
+			// throw at. Route it through `markFailed` — the only loud path — rather
+			// than dropping it: a write that fails while the child stays alive (or
+			// later exits 0) trips neither the stderr error-line path nor the
+			// childExit path, so swallowing it loses the event silently.
+			queue.write(line).catch((error: unknown) => {
+				markFailed({
+					kind: "protocol_error",
+					exitCode: null,
+					stderrTail: tailer.tail(),
+					lastAckedEventId,
+					message: `failed to write ${kind} event to the ledger pipe: ${String(error)}`,
+				});
 			});
 		},
 		claimActivity(args) {
@@ -471,11 +530,21 @@ export async function createTapeEmitter(
 			const promise = new Promise<void>((resolve, reject) => {
 				pendingFlushes.set(seq, { resolve, reject });
 			});
-			// Route through the queue so flush is serialized AFTER all preceding
-			// emits. Bypassing would let flush ack before queued events reach the
-			// ledger, breaking the "flush everything written so far" contract.
-			await queue.write(buildFlush(seq));
-			await promise;
+			// Keep the resolver handled even on paths that never await it (a
+			// rejected `queue.write` below), so a later `markFailed` rejecting the
+			// map cannot raise an unhandled rejection.
+			promise.catch(() => {});
+			try {
+				await withStallDeadline(`flush_ack for seq ${seq}`, async () => {
+					// Route through the queue so flush is serialized AFTER all preceding
+					// emits. Bypassing would let flush ack before queued events reach the
+					// ledger, breaking the "flush everything written so far" contract.
+					await queue.write(buildFlush(seq));
+					await promise;
+				});
+			} finally {
+				pendingFlushes.delete(seq);
+			}
 		},
 		async close() {
 			if (failed) throw new Error("ledger failed; close unavailable");
@@ -489,9 +558,23 @@ export async function createTapeEmitter(
 				closeResolve = resolve;
 				closeReject = reject;
 			});
-			await queue.write(buildClose(seq));
-			await promise;
-			const code = await opts.childExit;
+			promise.catch(() => {});
+			let code: number;
+			try {
+				await withStallDeadline(`close_ack for seq ${seq}`, async () => {
+					await queue.write(buildClose(seq));
+					await promise;
+				});
+				// A child that acks the close but never exits is the same hang, so
+				// this wait is bounded too.
+				code = await withStallDeadline(
+					"ledger exit after close",
+					() => opts.childExit,
+				);
+			} finally {
+				closeResolve = null;
+				closeReject = null;
+			}
 			if (code !== 0 && !failed) {
 				throw new Error(`ledger exited with code ${code} after close`);
 			}
