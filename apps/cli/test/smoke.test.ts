@@ -9,7 +9,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { getBootstrapBanner } from "../src/index";
 
 const root = resolve(import.meta.dirname, "../../..");
@@ -17,6 +17,17 @@ const cliSourceEntrypoint = resolve(root, "apps/cli/src/index.ts");
 const cliDistEntrypoint = resolve(root, "apps/cli/dist/index.js");
 const tsxLoaderEntrypoint = resolve(root, "node_modules/tsx/dist/loader.mjs");
 const cleanupPaths: string[] = [];
+
+/**
+ * Every case here spawns at least one child `node`, and most re-transpile the
+ * whole CLI source graph through the tsx loader. On WSL2/DrvFS one such spawn
+ * measures ~1.5s idle but 8-14s while this file runs alongside the other 11
+ * vitest workers of `pnpm test` — the suite's own canonical execution mode.
+ * The 15s default is sized for the idle single-file run, so it was a coin flip
+ * under load. 60s matches the repo's existing hookTimeout and leaves ~2.8x
+ * headroom over the worst case observed (21.7s at load average 20).
+ */
+const SUBPROCESS_SUITE_TIMEOUT_MS = 60_000;
 
 function sourceCliArgs(entrypoint: string, ...args: string[]): string[] {
 	return [
@@ -107,7 +118,11 @@ afterEach(() => {
 	}
 });
 
-describe("cli bootstrap", () => {
+describe("cli bootstrap", { timeout: SUBPROCESS_SUITE_TIMEOUT_MS }, () => {
+	beforeAll(() => {
+		ensureBuiltCliDist();
+	});
+
 	it("returns the buildplane bootstrap banner", () => {
 		expect(getBootstrapBanner()).toContain("Buildplane");
 	});
@@ -189,7 +204,7 @@ describe("cli bootstrap", () => {
 		expect(JSON.parse(statusResult.stdout)).toMatchObject({
 			initialized: true,
 		});
-	}, 10_000);
+	});
 
 	it("delegates source CLI memory commands through BUILDPLANE_NATIVE_BIN", () => {
 		const tempRoot = mkdtempSync(
@@ -419,7 +434,6 @@ describe("cli bootstrap", () => {
 	});
 
 	it("delegates built CLI memory commands through BUILDPLANE_NATIVE_BIN", () => {
-		ensureBuiltCliDist();
 		const tempRoot = mkdtempSync(join(tmpdir(), "buildplane-cli-memory-dist-"));
 		const workspaceRoot = join(tempRoot, "workspace");
 		const nativeBin = join(tempRoot, "buildplane-native");
@@ -450,7 +464,6 @@ describe("cli bootstrap", () => {
 	});
 
 	it("delegates built CLI pack show through BUILDPLANE_NATIVE_BIN", () => {
-		ensureBuiltCliDist();
 		const tempRoot = mkdtempSync(
 			join(tmpdir(), "buildplane-cli-pack-show-dist-"),
 		);
@@ -483,7 +496,6 @@ describe("cli bootstrap", () => {
 	});
 
 	it("delegates built CLI pack export through BUILDPLANE_NATIVE_BIN", () => {
-		ensureBuiltCliDist();
 		const tempRoot = mkdtempSync(
 			join(tmpdir(), "buildplane-cli-pack-export-dist-"),
 		);
