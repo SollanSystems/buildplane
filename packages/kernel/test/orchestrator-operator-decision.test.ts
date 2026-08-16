@@ -1004,6 +1004,123 @@ describe("recoverPendingDecisions — exactly-once reconciler (D2/D4)", () => {
 		expect(completionCalls).toHaveLength(0);
 	});
 
+	// `applyOperatorDecisionSideEffect` derives a terminal outcome for EVERY
+	// subject/decision pair except `resume`+`approved` (which re-dispatches), so a
+	// retired completion port skips the signed emit for merge rows too. Merge rows
+	// reach the apply only through the explicitly quarantined
+	// `unsafeLegacyMergeDecisionMode` construction path — but when they do, the
+	// skip must be disclosed on exactly the same terms, or the disclosure silently
+	// under-reports the evidence it exists to account for.
+	it("discloses the skipped completion for a merge+approved recovery under the unsafe legacy mode", async () => {
+		const completionCalls: string[] = [];
+		const holder: { executed?: { runId: string }[] } = {};
+		const h = makeHarness({
+			initialStatus: "passed",
+			withWorkspace: true,
+			unsafeLegacyMergeDecisionMode: true,
+			runCompletionPort: {
+				retired: { reason: "retired for test." },
+				async recordRunCompleted(completionInput) {
+					completionCalls.push(completionInput.runId);
+				},
+			},
+			decidedUnexecuted: () =>
+				holder.executed?.some((entry) => entry.runId === RUN_ID)
+					? []
+					: [{ runId: RUN_ID, decision: "approved", subject: "merge" }],
+		});
+		holder.executed = h.executed;
+
+		await expect(h.orchestrator.recoverPendingDecisions()).resolves.toEqual({
+			recovered: 1,
+			failed: [],
+			completionEventsSkipped: [{ runId: RUN_ID, reason: "retired for test." }],
+		});
+
+		// The merge ran and the marker carries its HEAD, so the row settles once.
+		expect(h.mergeCalls).toEqual([{ path: WORKSPACE_PATH, runId: RUN_ID }]);
+		expect(h.executed).toEqual([{ runId: RUN_ID, mergedHeadSha: MERGED_SHA }]);
+		expect(completionCalls).toHaveLength(0);
+		expect(h.decisionEmits).toHaveLength(0);
+
+		await expect(h.orchestrator.recoverPendingDecisions()).resolves.toEqual({
+			recovered: 0,
+			failed: [],
+			completionEventsSkipped: [],
+		});
+		expect(h.mergeCalls).toHaveLength(1);
+		expect(h.executed).toHaveLength(1);
+		expect(completionCalls).toHaveLength(0);
+	});
+
+	it("discloses the skipped completion for a merge+rejected recovery under the unsafe legacy mode", async () => {
+		const completionCalls: string[] = [];
+		const holder: { executed?: { runId: string }[] } = {};
+		const h = makeHarness({
+			initialStatus: "passed",
+			withWorkspace: true,
+			unsafeLegacyMergeDecisionMode: true,
+			runCompletionPort: {
+				retired: { reason: "retired for test." },
+				async recordRunCompleted(completionInput) {
+					completionCalls.push(completionInput.runId);
+				},
+			},
+			decidedUnexecuted: () =>
+				holder.executed?.some((entry) => entry.runId === RUN_ID)
+					? []
+					: [{ runId: RUN_ID, decision: "rejected", subject: "merge" }],
+		});
+		holder.executed = h.executed;
+
+		await expect(h.orchestrator.recoverPendingDecisions()).resolves.toEqual({
+			recovered: 1,
+			failed: [],
+			completionEventsSkipped: [{ runId: RUN_ID, reason: "retired for test." }],
+		});
+
+		// Quarantine, not merge: no merge call, terminal `failed`, marker healed.
+		expect(h.rejectMergeCalls).toEqual([RUN_ID]);
+		expect(h.mergeCalls).toHaveLength(0);
+		expect(h.state.status).toBe("failed");
+		expect(h.executed).toEqual([{ runId: RUN_ID, mergedHeadSha: undefined }]);
+		expect(completionCalls).toHaveLength(0);
+
+		await expect(h.orchestrator.recoverPendingDecisions()).resolves.toEqual({
+			recovered: 0,
+			failed: [],
+			completionEventsSkipped: [],
+		});
+		expect(h.rejectMergeCalls).toHaveLength(1);
+		// EXACTLY ONE terminal event across both passes.
+		expect(h.runCompletedEvents.count).toBe(1);
+	});
+
+	// The one non-terminal transition: `resume`+`approved` re-dispatches, so no
+	// `run_completed` was ever going to be emitted and there is nothing to
+	// disclose. Pins the predicate's lower bound — it must not disclose here.
+	it("discloses nothing for a non-terminal resume+approved recovery", async () => {
+		const h = makeHarness({
+			initialStatus: "suspended",
+			runCompletionPort: {
+				retired: { reason: "retired for test." },
+				async recordRunCompleted() {
+					throw new Error("must not be invoked");
+				},
+			},
+			decidedUnexecuted: () => [
+				{ runId: RUN_ID, decision: "approved", subject: "resume" },
+			],
+		});
+
+		await expect(h.orchestrator.recoverPendingDecisions()).resolves.toEqual({
+			recovered: 1,
+			failed: [],
+			completionEventsSkipped: [],
+		});
+		expect(h.approveCalls).toEqual([RUN_ID]);
+	});
+
 	it("re-drives a resume decision (no workspace) without Tier-2 re-emit", async () => {
 		const h = makeHarness({
 			initialStatus: "suspended",

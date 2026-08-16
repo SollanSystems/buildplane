@@ -5169,15 +5169,20 @@ export function createBuildplaneOrchestrator(
 					);
 					await flushPendingRunCompletedEmit();
 					recovered += 1;
-					// Only a terminal transition would have carried a `run_completed`.
-					// `resume`+`approved` re-dispatches (non-terminal), and a `merge`
-					// row never reaches here outside the explicitly quarantined legacy
-					// compatibility mode — it is failed above by the legacy-merge guard.
-					if (
-						retiredCompletion &&
-						pending.subject === "resume" &&
-						pending.decision === "rejected"
-					) {
+					// Only a terminal transition would have carried a `run_completed`,
+					// so this predicate must mirror `applyOperatorDecisionSideEffect`'s
+					// `terminalOutcome` derivation EXACTLY. That derivation sets an
+					// outcome for every subject/decision pair — `resume`+`rejected`
+					// (`failed`), `merge`+`rejected` (`failed`), `merge`+`approved`
+					// (`passed`) — and leaves it null for `resume`+`approved` alone,
+					// which re-dispatches the run. So the complement is the predicate:
+					// disclose everything EXCEPT `resume`+`approved`. Narrowing this to
+					// one subject would silently under-report the merge rows that reach
+					// the apply under `unsafeLegacyMergeDecisionMode`.
+					const wasTerminal = !(
+						pending.subject === "resume" && pending.decision === "approved"
+					);
+					if (retiredCompletion && wasTerminal) {
 						completionEventsSkipped.push({
 							runId: pending.runId,
 							reason: retiredCompletion.reason,
