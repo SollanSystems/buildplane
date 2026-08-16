@@ -29,6 +29,14 @@ const hoisted = vi.hoisted(() => {
 		runPacketAsyncImpl: (packet: unknown) => Promise<unknown>;
 		createPlanLedgerSidecars: boolean;
 		planCreatedLedgerSidecars: boolean;
+		/**
+		 * Fire the emitter's failure channel on the next `emit`, the way the real
+		 * emitter's `markFailed` does when the native ledger rejects an append.
+		 * `emit` itself stays void-returning and non-throwing — that is the point.
+		 */
+		failTapeOnEmit: string | null;
+		/** Make `close()` reject, the way a lost `close_ack` does. */
+		closeError: string | null;
 	} = {
 		plan: {
 			new_run_id: "fork-run-123",
@@ -43,6 +51,8 @@ const hoisted = vi.hoisted(() => {
 		runPacketAsyncImpl: async () => ({ run: { status: "passed" } }),
 		createPlanLedgerSidecars: false,
 		planCreatedLedgerSidecars: false,
+		failTapeOnEmit: null,
+		closeError: null,
 	};
 
 	const parseUnitPacketMock = vi.fn((input: string) =>
@@ -54,10 +64,35 @@ const hoisted = vi.hoisted(() => {
 	const runPacketAsyncMock = vi.fn((packet: unknown) =>
 		forkState.runPacketAsyncImpl(packet),
 	);
-	const createTapeEmitterMock = vi.fn(async () => ({
-		emit: vi.fn(),
-		close: vi.fn(async () => {}),
-	}));
+	// Mirrors the real `TapeEmitter` closely enough for the guard: `emit` is
+	// synchronous and never throws, failures arrive only via `onFailure`, and
+	// `close` can reject.
+	const createTapeEmitterMock = vi.fn(async () => {
+		const failureCallbacks: Array<(failure: unknown) => void> = [];
+		return {
+			emit: vi.fn(() => {
+				const reason = forkState.failTapeOnEmit;
+				if (!reason) return;
+				// One latch per run, exactly like the real emitter's `markFailed`.
+				forkState.failTapeOnEmit = null;
+				for (const cb of failureCallbacks) {
+					cb({
+						kind: "protocol_error",
+						exitCode: null,
+						stderrTail: "",
+						lastAckedEventId: null,
+						message: reason,
+					});
+				}
+			}),
+			close: vi.fn(async () => {
+				if (forkState.closeError) throw new Error(forkState.closeError);
+			}),
+			onFailure: vi.fn((cb: (failure: unknown) => void) => {
+				failureCallbacks.push(cb);
+			}),
+		};
+	});
 
 	const spawnSyncMock = vi.fn(
 		(
@@ -276,6 +311,8 @@ beforeEach(() => {
 	forkState.runPacketAsyncImpl = async () => ({ run: { status: "passed" } });
 	forkState.createPlanLedgerSidecars = false;
 	forkState.planCreatedLedgerSidecars = false;
+	forkState.failTapeOnEmit = null;
+	forkState.closeError = null;
 	process.env.BUILDPLANE_NATIVE_BIN = "/tmp/buildplane-native";
 });
 
@@ -640,5 +677,107 @@ describe("fork CLI orchestration", () => {
 		);
 		const emitter = await createTapeEmitterMock.mock.results[0]?.value;
 		expect(emitter?.close).toHaveBeenCalledTimes(1);
+	});
+});
+
+/**
+ * The fork lane's writer family — `emitLedgerRunStarted`, `beginLedgerUnit`,
+ * `completeLedgerUnit`, `emitLedgerRunCompleted`, `runGitCheckpoint`, and the
+ * `wrapToolRegistryForLedger` tool sink — is synchronous end to end, so none of
+ * its members can await a flush or reject. Before the guard, a tape that rejected
+ * every append still produced `exit 0` and a "fork run completed" line.
+ */
+describe("fork ledger evidence guard", () => {
+	async function runForkOnce(): Promise<{
+		exitCode: number;
+		stdout: string;
+		stderr: string;
+	}> {
+		const { root, packetPath } = createTempForkInputs();
+		const stdout: string[] = [];
+		const stderr: string[] = [];
+		const exitCode = await runCli(
+			[
+				"fork",
+				"--raw",
+				"parent-run-1",
+				"--at",
+				"parent-event-1",
+				"--packet",
+				packetPath,
+				"--workspace",
+				root,
+			],
+			{
+				cwd: root,
+				stdout: (line) => stdout.push(line),
+				stderr: (line) => stderr.push(line),
+			},
+		);
+		return {
+			exitCode,
+			stdout: stdout.join(""),
+			stderr: stderr.join(""),
+		};
+	}
+
+	it("exits 0 and reports no evidence loss when the tape is healthy", async () => {
+		const result = await runForkOnce();
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stderr).not.toContain("ledger evidence lost");
+		expect(result.stdout).toContain("fork run completed: fork-run-123 (exit 0)");
+	});
+
+	it("fails the run when an append the tape rejected was swallowed by emit()", async () => {
+		// The native signed-ingest denylist rejection shape: `emit()` returns void,
+		// the emitter latches failed, and every later emit silently no-ops. The
+		// orchestrator still reports `passed`, so without the guard this run exits 0
+		// while nothing reached the tape.
+		forkState.failTapeOnEmit =
+			"caller_supplied_authority_event: run_started is rejected";
+
+		const result = await runForkOnce();
+
+		expect(result.exitCode).toBe(1);
+		expect(result.stderr).toContain("ledger evidence lost");
+		expect(result.stderr).toContain(
+			"caller_supplied_authority_event: run_started is rejected",
+		);
+		expect(result.stdout).toContain("fork run completed: fork-run-123 (exit 1)");
+	});
+
+	it("fails the run when close() rejects instead of swallowing the rejection", async () => {
+		forkState.closeError = "close_ack never arrived";
+
+		const result = await runForkOnce();
+
+		expect(result.exitCode).toBe(1);
+		expect(result.stderr).toContain("ledger evidence lost");
+		expect(result.stderr).toContain("close_ack never arrived");
+	});
+
+	it("does not mask the orchestrator's own error when close() also rejects", async () => {
+		// The close runs in a `finally`; throwing there would replace the real cause.
+		forkState.closeError = "close_ack never arrived";
+		forkState.parsePacketImpl = () => {
+			throw new Error("invalid fork packet");
+		};
+
+		const result = await runForkOnce();
+
+		expect(result.exitCode).toBe(1);
+		expect(result.stderr).toContain(
+			"fork orchestrator error: Error: invalid fork packet",
+		);
+		expect(result.stderr).toContain("ledger evidence lost");
+	});
+
+	it("reports evidence loss once, not once per swallowed emit", async () => {
+		forkState.failTapeOnEmit = "ledger exited with code 1";
+
+		const result = await runForkOnce();
+
+		expect(result.stderr.split("ledger evidence lost")).toHaveLength(2);
 	});
 });

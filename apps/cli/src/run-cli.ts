@@ -117,6 +117,10 @@ import {
 	resolveLedgerBinary,
 	spawnLedgerSubprocess,
 } from "./ledger-emit.js";
+import {
+	guardLedgerEvidence,
+	type LedgerEvidenceGuard,
+} from "./ledger-evidence-guard.js";
 import { runGitCheckpoint } from "./ledger-git-checkpoint.js";
 import { createLedgerReceiptPort } from "./ledger-receipt-port.js";
 import { createResultReadyPort } from "./ledger-result-ready.js";
@@ -6544,6 +6548,16 @@ async function runForkExecution(
 		return 1;
 	}
 
+	// Every writer on this lane is synchronous by contract — the event-bus
+	// subscriber below (beginLedgerUnit/completeLedgerUnit/runGitCheckpoint), the
+	// ToolRegistry proxy from wrapToolRegistryForLedger, and the direct
+	// run_started/run_completed/tool_* emits — so none of them can await a flush
+	// or reject. `emit()` swallows queue-write errors and no-ops once the emitter
+	// has latched failed, which is how a broken tape used to produce a clean exit
+	// 0. The tape is mandatory here (a failed handshake already returns 1 above),
+	// so a lost tape is a failed fork run, not a degraded one.
+	const forkEvidence = guardLedgerEvidence(emitter, opts.stderr);
+
 	let exitCode = 1;
 	let runStartEventId: string | undefined;
 	let forkCurrentUnit: LedgerUnitContext | null = null;
@@ -7085,11 +7099,14 @@ async function runForkExecution(
 			forkCurrentUnit,
 			exitCode === 0 ? "passed" : "failed",
 		);
-		try {
-			await emitter.close();
-		} catch {
-			// Best-effort close; the orchestrator result is authoritative.
-		}
+		await forkEvidence.close();
+	}
+
+	// A rejected append or a rejected close means the events this run emitted are
+	// not on the tape. Reporting the orchestrator's verdict alone would resolve
+	// silently on exactly the evidence the fork lane exists to produce.
+	if (forkEvidence.lostEvidence() !== null && exitCode === 0) {
+		exitCode = 1;
 	}
 
 	opts.stdout(`fork run completed: ${plan.new_run_id} (exit ${exitCode})\n`);
@@ -11051,6 +11068,7 @@ export async function runCli(
 				const useLedger = false;
 				let ledgerChild: LedgerChild | null = null;
 				let ledgerEmitter: TapeEmitter | null = null;
+				let runEvidence: LedgerEvidenceGuard | null = null;
 				let unsubscribeLedger: (() => void) | null = null;
 				const ledgerRunId = newEventId();
 				const ledgerWorkspacePath = resolvedCwd;
@@ -11107,6 +11125,14 @@ export async function runCli(
 								// Swallow: best-effort logging only.
 							}
 						});
+						// The persist above is a durable trace, not a signal — nothing reads
+						// it during the run. The guard is what makes the loss visible to the
+						// operator and keeps the close() below from swallowing a rejection.
+						// `stderr` here is line-oriented (console.error), so drop the
+						// guard's trailing newline.
+						runEvidence = guardLedgerEvidence(ledgerEmitter, (line) =>
+							stderr(line.trimEnd()),
+						);
 						unsubscribeLedger = cliEventBus.subscribe((evt: unknown) => {
 							if (!ledgerEmitter) return;
 							const e = evt as {
@@ -11547,12 +11573,13 @@ export async function runCli(
 						);
 					}
 					unsubscribeLedger?.();
-					if (ledgerEmitter) {
-						try {
-							await ledgerEmitter.close();
-						} catch {
-							// Cleanup best-effort; the orchestrator result is the authoritative outcome.
-						}
+					if (ledgerEmitter && runEvidence) {
+						// Same contract as the fork lane: a rejected close is reported,
+						// never swallowed. Unreachable today — `useLedger` is a hard-coded
+						// `false` above, so `ledgerEmitter` is always null — but the two
+						// lanes must not drift, because flipping `useLedger` back on is
+						// precisely what would make a silent close matter here.
+						await runEvidence.close();
 					}
 					// --- end ledger cleanup ---
 				}
