@@ -118,10 +118,8 @@ import {
 	spawnLedgerSubprocess,
 } from "./ledger-emit.js";
 import { runGitCheckpoint } from "./ledger-git-checkpoint.js";
-import { createOperatorDecisionPort } from "./ledger-operator-decision.js";
 import { createLedgerReceiptPort } from "./ledger-receipt-port.js";
 import { createResultReadyPort } from "./ledger-result-ready.js";
-import { createRunCompletionPort } from "./ledger-run-completed.js";
 import { wrapToolRegistryForLedger } from "./ledger-tool-wrapper.js";
 import {
 	buildEnvelopeProposal,
@@ -181,6 +179,10 @@ import {
 	detectRepoSignals,
 	seedRepoFactsFromInspection,
 } from "./repo-fact-seeding.js";
+import {
+	createRetiredOperatorDecisionPort,
+	createRetiredRunCompletionPort,
+} from "./retired-decision-ports.js";
 import { createOtelTraceExport } from "./trace-export.js";
 import {
 	DEFAULT_WEB_PORT,
@@ -5283,17 +5285,24 @@ async function loadCliOrchestrator(
 		ledgerActivityPort: opts?.ledgerActivityPort,
 		profileRegistry: opts?.profileRegistry,
 		acceptancePort: opts?.acceptancePort,
-		// Signed `operator_decision_recorded` emit path (M5-S4). Defaults to the
-		// real ledger-backed port; tests inject a fake via opts.
+		// Operator-decision write path (M5-S4), RETIRED by operator decision
+		// 2026-08-15. `operator_decision_recorded` and `run_completed` are
+		// caller-supplied authority kinds the signed protocol refuses, so the
+		// ledger-backed ports could only ever throw — the default is now the
+		// explicit retired port, which fails the decision closed with a stated
+		// reason instead of an opaque error. Tests still inject a fake via opts.
 		operatorDecisionPort:
-			opts?.operatorDecisionPort ?? createOperatorDecisionPort(projectRoot),
+			opts?.operatorDecisionPort ?? createRetiredOperatorDecisionPort(),
 		// M6-S7 — signed `result_ready` (write-ahead at terminal `passed`) rides the
 		// dispatch's shared signed emitter, injected by the dispatch caller; absent
-		// for non-dispatch callers. `run_completed` fires from the operator-decision
-		// path (a separate invocation), so it owns a subprocess like the decision port.
+		// for non-dispatch callers. It is NOT retired: it is emitted on the dispatch
+		// path, not through the operator-decision surface.
 		resultReadyPort: opts?.resultReadyPort,
+		// Retired as one unit with the decision port above; its marker also lets
+		// startup recovery settle a historical terminal record once and disclose
+		// the signed completion event it cannot emit.
 		runCompletionPort:
-			opts?.runCompletionPort ?? createRunCompletionPort(projectRoot),
+			opts?.runCompletionPort ?? createRetiredRunCompletionPort(),
 		provisionDeps: opts?.provisionDeps,
 		// Runaway-guard budgets (loop dispatch); undefined for non-loop callers.
 		budgets: opts?.budgets,
@@ -10894,10 +10903,12 @@ export async function runCli(
 								createBuildplaneStorage: (dir: string) => MissionControlStore;
 							};
 							// The orchestrator from `loadCliOrchestrator` already owns the
-							// ledger-backed OperatorDecisionPort (it defaults to
-							// `createOperatorDecisionPort(root)`); the decision route emits
-							// through `orchestrator.recordOperatorDecision`, so the server
-							// deps intentionally carry no separate port (see web-command.ts).
+							// OperatorDecisionPort — now the RETIRED port
+							// (`createRetiredOperatorDecisionPort()`), so the decision route
+							// answers 501 with a stated reason rather than recording
+							// anything. It still emits through
+							// `orchestrator.recordOperatorDecision`, so the server deps
+							// intentionally carry no separate port (see web-command.ts).
 							return {
 								orchestrator:
 									orchestrator as unknown as MissionControlOrchestrator,
