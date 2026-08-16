@@ -9,11 +9,13 @@ import type {
 	OperatorDecisionShadow,
 	RecordOperatorDecisionInput,
 	Run,
+	RunCompletionPort,
 	RunStatus,
 	StatusSnapshot,
 } from "@buildplane/kernel";
 import {
 	createBuildplaneOrchestrator,
+	OperatorDecisionSurfaceRetiredError,
 	OperatorDecisionValidationError,
 } from "@buildplane/kernel";
 import { describe, expect, it } from "vitest";
@@ -51,6 +53,7 @@ function makeHarness(
 		initialStatus?: RunStatus;
 		withWorkspace?: boolean;
 		operatorDecisionPort?: OperatorDecisionPort;
+		runCompletionPort?: RunCompletionPort;
 		decidedUnexecuted?: () => readonly DecidedUnexecutedDecision[];
 		acceptanceOutcome?: "passed" | "rejected" | null;
 		hasCandidateArtifact?: boolean;
@@ -285,6 +288,9 @@ function makeHarness(
 				}
 			: {}),
 		...(options.omitOperatorDecisionPort ? {} : { operatorDecisionPort }),
+		...(options.runCompletionPort
+			? { runCompletionPort: options.runCompletionPort }
+			: {}),
 	});
 
 	return {
@@ -356,6 +362,92 @@ describe("recordOperatorDecision — write-ahead ordering (D1/D2)", () => {
 		const h = makeHarness({ initialStatus: "suspended" });
 		await h.orchestrator.recordOperatorDecision(input());
 		expect(h.decisionEmits[0].mergeCommit).toBeUndefined();
+	});
+});
+
+// Retirement (operator decision 2026-08-15). `operator_decision_recorded` and
+// `run_completed` are caller-supplied authority kinds the signed protocol
+// refuses, so the live decision surface is retired rather than repaired. A
+// retired port must stop the decision BEFORE validation, the Tier-2 emit, the
+// Tier-1 shadow and the side effect — the same fail-closed position the F4
+// port-absent guard holds.
+describe("recordOperatorDecision — retired write surface", () => {
+	const REASON = "retired for test.";
+
+	function retiredDecisionPort(
+		record: RecordOperatorDecisionInput[],
+	): OperatorDecisionPort {
+		return {
+			retired: { reason: REASON },
+			async recordDecision(decisionInput) {
+				record.push(decisionInput);
+			},
+		};
+	}
+
+	it("throws before validation, emit, shadow and side effect when the decision port is retired", async () => {
+		const calls: RecordOperatorDecisionInput[] = [];
+		const h = makeHarness({
+			initialStatus: "suspended",
+			operatorDecisionPort: retiredDecisionPort(calls),
+		});
+
+		await expect(
+			h.orchestrator.recordOperatorDecision(input()),
+		).rejects.toBeInstanceOf(OperatorDecisionSurfaceRetiredError);
+		await expect(
+			h.orchestrator.recordOperatorDecision(input()),
+		).rejects.toThrow(REASON);
+
+		expect(calls).toHaveLength(0);
+		expect(h.emitOrder).toEqual([]);
+		expect(h.shadows).toHaveLength(0);
+		expect(h.approveCalls).toHaveLength(0);
+		expect(h.executed).toHaveLength(0);
+		expect(h.state.status).toBe("suspended");
+	});
+
+	it("refuses even a structurally invalid decision with the retirement error, never validation", async () => {
+		// The retirement guard sits ahead of validation, so a malformed input
+		// cannot make the surface look merely mis-called rather than retired.
+		const h = makeHarness({
+			initialStatus: "suspended",
+			operatorDecisionPort: retiredDecisionPort([]),
+		});
+
+		await expect(
+			h.orchestrator.recordOperatorDecision(
+				input({ subject: "bogus" as RecordOperatorDecisionInput["subject"] }),
+			),
+		).rejects.toBeInstanceOf(OperatorDecisionSurfaceRetiredError);
+	});
+
+	it("refuses a mixed wiring whose completion port alone is retired", async () => {
+		// A live decision port with a retired completion port would emit a signed
+		// decision it can never terminally complete. The surface is retired as one
+		// unit, so any retired half fails the whole call closed.
+		const calls: RecordOperatorDecisionInput[] = [];
+		const h = makeHarness({
+			initialStatus: "suspended",
+			operatorDecisionPort: {
+				async recordDecision(decisionInput) {
+					calls.push(decisionInput);
+				},
+			},
+			runCompletionPort: {
+				retired: { reason: REASON },
+				async recordRunCompleted() {
+					throw new Error("must not be invoked");
+				},
+			},
+		});
+
+		await expect(
+			h.orchestrator.recordOperatorDecision(input()),
+		).rejects.toBeInstanceOf(OperatorDecisionSurfaceRetiredError);
+		expect(calls).toHaveLength(0);
+		expect(h.shadows).toHaveLength(0);
+		expect(h.executed).toHaveLength(0);
 	});
 });
 

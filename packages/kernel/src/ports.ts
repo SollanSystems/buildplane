@@ -948,6 +948,13 @@ export interface RecordRunCompletedInput {
  * MUST resolve only once the event is durably on the tape.
  */
 export interface RunCompletionPort {
+	/**
+	 * Present when this port stands for a retired write surface. The orchestrator
+	 * refuses a live operator decision outright and skips the terminal
+	 * `run_completed` emit during recovery, disclosing the skip rather than
+	 * failing the recovered row forever.
+	 */
+	readonly retired?: { readonly reason: string };
 	recordRunCompleted(input: RecordRunCompletedInput): Promise<void>;
 }
 
@@ -980,6 +987,14 @@ export interface RecordOperatorDecisionInput {
  * orchestrator can `await` it before the side effect (merge / resume).
  */
 export interface OperatorDecisionPort {
+	/**
+	 * Present when this port stands for a retired write surface: the signed
+	 * protocol refuses `operator_decision_recorded` as a caller-supplied
+	 * authority kind, so no live decision can be recorded through it. The
+	 * orchestrator rejects the decision before validation, emit, mirror and side
+	 * effect; `recordDecision` itself stays fail-closed as defense in depth.
+	 */
+	readonly retired?: { readonly reason: string };
 	recordDecision(input: RecordOperatorDecisionInput): Promise<void>;
 }
 

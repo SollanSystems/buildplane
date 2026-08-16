@@ -4959,6 +4959,18 @@ export function createBuildplaneOrchestrator(
 				);
 			}
 
+			// Retirement (operator decision 2026-08-15) — refuse ahead of validation,
+			// emit, mirror and side effect, so a retired surface can never be mistaken
+			// for a mis-called one and can never half-apply. The surface is retired as
+			// one unit: a live decision port paired with a retired completion port
+			// could emit a signed decision it can never terminally complete, so either
+			// retired half fails the whole call closed.
+			const retirement =
+				operatorDecisionPort.retired ?? runCompletionPort?.retired;
+			if (retirement) {
+				throw new OperatorDecisionSurfaceRetiredError(retirement.reason);
+			}
+
 			validateOperatorDecisionInput(input);
 
 			// D1 — write-ahead is primary. Emit + flush the signed decision BEFORE
