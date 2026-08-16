@@ -9,11 +9,13 @@ import type {
 	OperatorDecisionShadow,
 	RecordOperatorDecisionInput,
 	Run,
+	RunCompletionPort,
 	RunStatus,
 	StatusSnapshot,
 } from "@buildplane/kernel";
 import {
 	createBuildplaneOrchestrator,
+	OperatorDecisionSurfaceRetiredError,
 	OperatorDecisionValidationError,
 } from "@buildplane/kernel";
 import { describe, expect, it } from "vitest";
@@ -51,6 +53,7 @@ function makeHarness(
 		initialStatus?: RunStatus;
 		withWorkspace?: boolean;
 		operatorDecisionPort?: OperatorDecisionPort;
+		runCompletionPort?: RunCompletionPort;
 		decidedUnexecuted?: () => readonly DecidedUnexecutedDecision[];
 		acceptanceOutcome?: "passed" | "rejected" | null;
 		hasCandidateArtifact?: boolean;
@@ -285,6 +288,9 @@ function makeHarness(
 				}
 			: {}),
 		...(options.omitOperatorDecisionPort ? {} : { operatorDecisionPort }),
+		...(options.runCompletionPort
+			? { runCompletionPort: options.runCompletionPort }
+			: {}),
 	});
 
 	return {
@@ -356,6 +362,92 @@ describe("recordOperatorDecision — write-ahead ordering (D1/D2)", () => {
 		const h = makeHarness({ initialStatus: "suspended" });
 		await h.orchestrator.recordOperatorDecision(input());
 		expect(h.decisionEmits[0].mergeCommit).toBeUndefined();
+	});
+});
+
+// Retirement (operator decision 2026-08-15). `operator_decision_recorded` and
+// `run_completed` are caller-supplied authority kinds the signed protocol
+// refuses, so the live decision surface is retired rather than repaired. A
+// retired port must stop the decision BEFORE validation, the Tier-2 emit, the
+// Tier-1 shadow and the side effect — the same fail-closed position the F4
+// port-absent guard holds.
+describe("recordOperatorDecision — retired write surface", () => {
+	const REASON = "retired for test.";
+
+	function retiredDecisionPort(
+		record: RecordOperatorDecisionInput[],
+	): OperatorDecisionPort {
+		return {
+			retired: { reason: REASON },
+			async recordDecision(decisionInput) {
+				record.push(decisionInput);
+			},
+		};
+	}
+
+	it("throws before validation, emit, shadow and side effect when the decision port is retired", async () => {
+		const calls: RecordOperatorDecisionInput[] = [];
+		const h = makeHarness({
+			initialStatus: "suspended",
+			operatorDecisionPort: retiredDecisionPort(calls),
+		});
+
+		await expect(
+			h.orchestrator.recordOperatorDecision(input()),
+		).rejects.toBeInstanceOf(OperatorDecisionSurfaceRetiredError);
+		await expect(
+			h.orchestrator.recordOperatorDecision(input()),
+		).rejects.toThrow(REASON);
+
+		expect(calls).toHaveLength(0);
+		expect(h.emitOrder).toEqual([]);
+		expect(h.shadows).toHaveLength(0);
+		expect(h.approveCalls).toHaveLength(0);
+		expect(h.executed).toHaveLength(0);
+		expect(h.state.status).toBe("suspended");
+	});
+
+	it("refuses even a structurally invalid decision with the retirement error, never validation", async () => {
+		// The retirement guard sits ahead of validation, so a malformed input
+		// cannot make the surface look merely mis-called rather than retired.
+		const h = makeHarness({
+			initialStatus: "suspended",
+			operatorDecisionPort: retiredDecisionPort([]),
+		});
+
+		await expect(
+			h.orchestrator.recordOperatorDecision(
+				input({ subject: "bogus" as RecordOperatorDecisionInput["subject"] }),
+			),
+		).rejects.toBeInstanceOf(OperatorDecisionSurfaceRetiredError);
+	});
+
+	it("refuses a mixed wiring whose completion port alone is retired", async () => {
+		// A live decision port with a retired completion port would emit a signed
+		// decision it can never terminally complete. The surface is retired as one
+		// unit, so any retired half fails the whole call closed.
+		const calls: RecordOperatorDecisionInput[] = [];
+		const h = makeHarness({
+			initialStatus: "suspended",
+			operatorDecisionPort: {
+				async recordDecision(decisionInput) {
+					calls.push(decisionInput);
+				},
+			},
+			runCompletionPort: {
+				retired: { reason: REASON },
+				async recordRunCompleted() {
+					throw new Error("must not be invoked");
+				},
+			},
+		});
+
+		await expect(
+			h.orchestrator.recordOperatorDecision(input()),
+		).rejects.toBeInstanceOf(OperatorDecisionSurfaceRetiredError);
+		expect(calls).toHaveLength(0);
+		expect(h.shadows).toHaveLength(0);
+		expect(h.executed).toHaveLength(0);
 	});
 });
 
@@ -791,6 +883,7 @@ describe("recoverPendingDecisions — exactly-once reconciler (D2/D4)", () => {
 					error: expect.stringMatching(/unsafe legacy.*sealed V3/i),
 				}),
 			],
+			completionEventsSkipped: [],
 		});
 
 		expect(h.mergeCalls).toHaveLength(0);
@@ -816,6 +909,7 @@ describe("recoverPendingDecisions — exactly-once reconciler (D2/D4)", () => {
 						"legacy merge recovery is disabled; reconcile only a verified candidate promotion.",
 				},
 			],
+			completionEventsSkipped: [],
 		});
 		expect(h.mergeCalls).toHaveLength(0);
 		expect(h.executed).toHaveLength(0);
@@ -860,6 +954,173 @@ describe("recoverPendingDecisions — exactly-once reconciler (D2/D4)", () => {
 		expect(h.executed).toHaveLength(1);
 	});
 
+	// LB-3 — before retirement, a historical terminal row recovered into a live
+	// completion port whose emit the signed protocol refuses: the throw pushed the
+	// row to `failed`, the execution marker was never written, and every
+	// subsequent boot repeated the identical failure. A retired completion port
+	// skips the emit instead, so the Tier-1 side effect completes exactly once and
+	// the un-emitted tape evidence is disclosed rather than silently dropped.
+	it("recovers a historical terminal row exactly once against a retired completion port, disclosing the skipped emit", async () => {
+		const completionCalls: string[] = [];
+		const holder: { executed?: { runId: string }[] } = {};
+		const h = makeHarness({
+			initialStatus: "suspended",
+			runCompletionPort: {
+				retired: { reason: "retired for test." },
+				async recordRunCompleted(completionInput) {
+					completionCalls.push(completionInput.runId);
+				},
+			},
+			decidedUnexecuted: () =>
+				holder.executed?.some((entry) => entry.runId === RUN_ID)
+					? []
+					: [{ runId: RUN_ID, decision: "rejected", subject: "resume" }],
+		});
+		holder.executed = h.executed;
+
+		await expect(h.orchestrator.recoverPendingDecisions()).resolves.toEqual({
+			recovered: 1,
+			failed: [],
+			completionEventsSkipped: [{ runId: RUN_ID, reason: "retired for test." }],
+		});
+
+		// The Tier-1 side effect completed and the marker landed, so the row leaves
+		// the pending feed for good.
+		expect(h.rejectSuspendedCalls).toEqual([RUN_ID]);
+		expect(h.state.status).toBe("failed");
+		expect(h.executed).toEqual([{ runId: RUN_ID, mergedHeadSha: undefined }]);
+		expect(completionCalls).toHaveLength(0);
+		expect(h.decisionEmits).toHaveLength(0);
+
+		// Non-recurrence is the point: a second boot finds nothing to recover and
+		// discloses nothing, instead of failing identically forever.
+		await expect(h.orchestrator.recoverPendingDecisions()).resolves.toEqual({
+			recovered: 0,
+			failed: [],
+			completionEventsSkipped: [],
+		});
+		expect(h.rejectSuspendedCalls).toHaveLength(1);
+		expect(h.executed).toHaveLength(1);
+		expect(completionCalls).toHaveLength(0);
+	});
+
+	// `applyOperatorDecisionSideEffect` derives a terminal outcome for EVERY
+	// subject/decision pair except `resume`+`approved` (which re-dispatches), so a
+	// retired completion port skips the signed emit for merge rows too. Merge rows
+	// reach the apply only through the explicitly quarantined
+	// `unsafeLegacyMergeDecisionMode` construction path — but when they do, the
+	// skip must be disclosed on exactly the same terms, or the disclosure silently
+	// under-reports the evidence it exists to account for.
+	it("discloses the skipped completion for a merge+approved recovery under the unsafe legacy mode", async () => {
+		const completionCalls: string[] = [];
+		const holder: { executed?: { runId: string }[] } = {};
+		const h = makeHarness({
+			initialStatus: "passed",
+			withWorkspace: true,
+			unsafeLegacyMergeDecisionMode: true,
+			runCompletionPort: {
+				retired: { reason: "retired for test." },
+				async recordRunCompleted(completionInput) {
+					completionCalls.push(completionInput.runId);
+				},
+			},
+			decidedUnexecuted: () =>
+				holder.executed?.some((entry) => entry.runId === RUN_ID)
+					? []
+					: [{ runId: RUN_ID, decision: "approved", subject: "merge" }],
+		});
+		holder.executed = h.executed;
+
+		await expect(h.orchestrator.recoverPendingDecisions()).resolves.toEqual({
+			recovered: 1,
+			failed: [],
+			completionEventsSkipped: [{ runId: RUN_ID, reason: "retired for test." }],
+		});
+
+		// The merge ran and the marker carries its HEAD, so the row settles once.
+		expect(h.mergeCalls).toEqual([{ path: WORKSPACE_PATH, runId: RUN_ID }]);
+		expect(h.executed).toEqual([{ runId: RUN_ID, mergedHeadSha: MERGED_SHA }]);
+		expect(completionCalls).toHaveLength(0);
+		expect(h.decisionEmits).toHaveLength(0);
+
+		await expect(h.orchestrator.recoverPendingDecisions()).resolves.toEqual({
+			recovered: 0,
+			failed: [],
+			completionEventsSkipped: [],
+		});
+		expect(h.mergeCalls).toHaveLength(1);
+		expect(h.executed).toHaveLength(1);
+		expect(completionCalls).toHaveLength(0);
+	});
+
+	it("discloses the skipped completion for a merge+rejected recovery under the unsafe legacy mode", async () => {
+		const completionCalls: string[] = [];
+		const holder: { executed?: { runId: string }[] } = {};
+		const h = makeHarness({
+			initialStatus: "passed",
+			withWorkspace: true,
+			unsafeLegacyMergeDecisionMode: true,
+			runCompletionPort: {
+				retired: { reason: "retired for test." },
+				async recordRunCompleted(completionInput) {
+					completionCalls.push(completionInput.runId);
+				},
+			},
+			decidedUnexecuted: () =>
+				holder.executed?.some((entry) => entry.runId === RUN_ID)
+					? []
+					: [{ runId: RUN_ID, decision: "rejected", subject: "merge" }],
+		});
+		holder.executed = h.executed;
+
+		await expect(h.orchestrator.recoverPendingDecisions()).resolves.toEqual({
+			recovered: 1,
+			failed: [],
+			completionEventsSkipped: [{ runId: RUN_ID, reason: "retired for test." }],
+		});
+
+		// Quarantine, not merge: no merge call, terminal `failed`, marker healed.
+		expect(h.rejectMergeCalls).toEqual([RUN_ID]);
+		expect(h.mergeCalls).toHaveLength(0);
+		expect(h.state.status).toBe("failed");
+		expect(h.executed).toEqual([{ runId: RUN_ID, mergedHeadSha: undefined }]);
+		expect(completionCalls).toHaveLength(0);
+
+		await expect(h.orchestrator.recoverPendingDecisions()).resolves.toEqual({
+			recovered: 0,
+			failed: [],
+			completionEventsSkipped: [],
+		});
+		expect(h.rejectMergeCalls).toHaveLength(1);
+		// EXACTLY ONE terminal event across both passes.
+		expect(h.runCompletedEvents.count).toBe(1);
+	});
+
+	// The one non-terminal transition: `resume`+`approved` re-dispatches, so no
+	// `run_completed` was ever going to be emitted and there is nothing to
+	// disclose. Pins the predicate's lower bound — it must not disclose here.
+	it("discloses nothing for a non-terminal resume+approved recovery", async () => {
+		const h = makeHarness({
+			initialStatus: "suspended",
+			runCompletionPort: {
+				retired: { reason: "retired for test." },
+				async recordRunCompleted() {
+					throw new Error("must not be invoked");
+				},
+			},
+			decidedUnexecuted: () => [
+				{ runId: RUN_ID, decision: "approved", subject: "resume" },
+			],
+		});
+
+		await expect(h.orchestrator.recoverPendingDecisions()).resolves.toEqual({
+			recovered: 1,
+			failed: [],
+			completionEventsSkipped: [],
+		});
+		expect(h.approveCalls).toEqual([RUN_ID]);
+	});
+
 	it("re-drives a resume decision (no workspace) without Tier-2 re-emit", async () => {
 		const h = makeHarness({
 			initialStatus: "suspended",
@@ -892,6 +1153,7 @@ describe("recoverPendingDecisions — crash-idempotent non-merge side effects (F
 		await expect(h.orchestrator.recoverPendingDecisions()).resolves.toEqual({
 			recovered: 1,
 			failed: [],
+			completionEventsSkipped: [],
 		});
 		// approveRun NOT re-applied: no second call, no second `run-resumed` event.
 		expect(h.approveCalls).toHaveLength(0);
@@ -914,6 +1176,7 @@ describe("recoverPendingDecisions — crash-idempotent non-merge side effects (F
 		await expect(h.orchestrator.recoverPendingDecisions()).resolves.toEqual({
 			recovered: 1,
 			failed: [],
+			completionEventsSkipped: [],
 		});
 		expect(h.rejectSuspendedCalls).toHaveLength(0);
 		// No second terminal event.
@@ -937,6 +1200,7 @@ describe("recoverPendingDecisions — crash-idempotent non-merge side effects (F
 		await expect(h.orchestrator.recoverPendingDecisions()).resolves.toEqual({
 			recovered: 1,
 			failed: [],
+			completionEventsSkipped: [],
 		});
 		expect(h.rejectMergeCalls).toHaveLength(0);
 		// EXACTLY ZERO new run-completed events (the first one ran pre-crash).

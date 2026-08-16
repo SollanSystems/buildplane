@@ -224,6 +224,22 @@ export class OperatorDecisionValidationError extends Error {
 }
 
 /**
+ * Thrown by `recordOperatorDecision` when the wired operator-decision or
+ * run-completion port is marked retired. Retirement is an explicit operator
+ * decision, not an infrastructure fault: the signed protocol refuses
+ * `operator_decision_recorded` and `run_completed` as caller-supplied authority
+ * kinds, so the live write surface is fail-closed by construction rather than
+ * broken. A distinct error name lets a caller (the Mission Control router) map
+ * it to a retirement response instead of a generic failure.
+ */
+export class OperatorDecisionSurfaceRetiredError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "OperatorDecisionSurfaceRetiredError";
+	}
+}
+
+/**
  * Thrown before a candidate-promotion tape write or Git effect when the
  * immutable candidate, its evidence, or its decision do not form one exact
  * binding. This protocol is intentionally separate from legacy run/worktree
@@ -270,13 +286,27 @@ export interface PendingDecisionRecoveryFailure {
 }
 
 /**
+ * One recovered record whose terminal `run_completed` was deliberately not
+ * emitted because the wired completion port is retired. The Tier-1 side effect
+ * and its execution marker still completed, so the record does not recur; this
+ * is the disclosure that its tape evidence is missing by design.
+ */
+export interface PendingDecisionCompletionSkip {
+	readonly runId: string;
+	readonly reason: string;
+}
+
+/**
  * Summary of a `recoverPendingDecisions` pass: how many decided-but-unexecuted
- * side effects were re-driven, and any records whose re-drive threw (per-item
- * isolation — one bad record never wedges the batch).
+ * side effects were re-driven, any records whose re-drive threw (per-item
+ * isolation — one bad record never wedges the batch), and any recovered record
+ * whose signed completion event was skipped against a retired completion port.
  */
 export interface PendingDecisionRecovery {
 	readonly recovered: number;
 	readonly failed: readonly PendingDecisionRecoveryFailure[];
+	/** Always present; empty when nothing was skipped. */
+	readonly completionEventsSkipped: readonly PendingDecisionCompletionSkip[];
 }
 
 export interface BuildplaneOrchestrator {
@@ -871,7 +901,18 @@ export function createBuildplaneOrchestrator(
 		// claim above) and recordRunCompleted dedups on the tape, so the re-drive neither
 		// double-merges nor double-emits. Captured (not awaited) so this function stays
 		// synchronous; the async callers await `pendingRunCompletedEmit`.
-		if (terminalOutcome !== null && runCompletionPort) {
+		//
+		// A RETIRED completion port takes the marker-synchronous branch instead. The
+		// signed protocol refuses `run_completed` as a caller-supplied authority
+		// kind, so emitting would throw, strand the marker, and leave the record
+		// failing identically on every boot (LB-3). Skipping the emit lets the
+		// Tier-1 side effect settle exactly once; the missing tape evidence is
+		// disclosed by the caller rather than dropped silently.
+		if (
+			terminalOutcome !== null &&
+			runCompletionPort &&
+			!runCompletionPort.retired
+		) {
 			const outcome = terminalOutcome;
 			const marker = markerOutcome;
 			pendingRunCompletedEmit = (async () => {
@@ -881,9 +922,10 @@ export function createBuildplaneOrchestrator(
 				storage.markOperatorDecisionExecuted(runId, marker);
 			})();
 		} else {
-			// Non-terminal (resume+approved re-dispatch), or no completion port wired:
-			// there is no run_completed to flush, so the marker is safe to write
-			// synchronously — preserving the original ordering for those paths.
+			// Non-terminal (resume+approved re-dispatch), no completion port wired, or
+			// a retired completion port: there is no run_completed to flush, so the
+			// marker is safe to write synchronously — preserving the original
+			// ordering for those paths.
 			storage.markOperatorDecisionExecuted(runId, markerOutcome);
 		}
 	}
@@ -4943,6 +4985,18 @@ export function createBuildplaneOrchestrator(
 				);
 			}
 
+			// Retirement (operator decision 2026-08-15) — refuse ahead of validation,
+			// emit, mirror and side effect, so a retired surface can never be mistaken
+			// for a mis-called one and can never half-apply. The surface is retired as
+			// one unit: a live decision port paired with a retired completion port
+			// could emit a signed decision it can never terminally complete, so either
+			// retired half fails the whole call closed.
+			const retirement =
+				operatorDecisionPort.retired ?? runCompletionPort?.retired;
+			if (retirement) {
+				throw new OperatorDecisionSurfaceRetiredError(retirement.reason);
+			}
+
 			validateOperatorDecisionInput(input);
 
 			// D1 — write-ahead is primary. Emit + flush the signed decision BEFORE
@@ -5072,6 +5126,12 @@ export function createBuildplaneOrchestrator(
 			// the failed record keeps its missing marker, so a later pass retries it.
 			let recovered = 0;
 			const failed: PendingDecisionRecoveryFailure[] = [];
+			// Disclosure, not suppression: a retired completion port turns a record
+			// that used to fail identically on every boot into one that settles its
+			// Tier-1 side effect exactly once. What it can never have is the signed
+			// terminal event, so every such record is reported.
+			const completionEventsSkipped: PendingDecisionCompletionSkip[] = [];
+			const retiredCompletion = runCompletionPort?.retired;
 			for (const pending of storage.listDecidedUnexecutedDecisions()) {
 				if (pending.subject === "merge") {
 					try {
@@ -5109,6 +5169,25 @@ export function createBuildplaneOrchestrator(
 					);
 					await flushPendingRunCompletedEmit();
 					recovered += 1;
+					// Only a terminal transition would have carried a `run_completed`,
+					// so this predicate must mirror `applyOperatorDecisionSideEffect`'s
+					// `terminalOutcome` derivation EXACTLY. That derivation sets an
+					// outcome for every subject/decision pair — `resume`+`rejected`
+					// (`failed`), `merge`+`rejected` (`failed`), `merge`+`approved`
+					// (`passed`) — and leaves it null for `resume`+`approved` alone,
+					// which re-dispatches the run. So the complement is the predicate:
+					// disclose everything EXCEPT `resume`+`approved`. Narrowing this to
+					// one subject would silently under-report the merge rows that reach
+					// the apply under `unsafeLegacyMergeDecisionMode`.
+					const wasTerminal = !(
+						pending.subject === "resume" && pending.decision === "approved"
+					);
+					if (retiredCompletion && wasTerminal) {
+						completionEventsSkipped.push({
+							runId: pending.runId,
+							reason: retiredCompletion.reason,
+						});
+					}
 				} catch (error) {
 					failed.push({
 						runId: pending.runId,
@@ -5116,7 +5195,7 @@ export function createBuildplaneOrchestrator(
 					});
 				}
 			}
-			return { recovered, failed };
+			return { recovered, failed, completionEventsSkipped };
 		},
 
 		async recoverPendingCandidatePromotions(): Promise<PendingCandidatePromotionRecovery> {

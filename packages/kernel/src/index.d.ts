@@ -175,6 +175,7 @@ export type {
 	CreateBuildplaneOrchestratorOptions,
 	PendingCandidatePromotionRecovery,
 	PendingCandidatePromotionRecoveryFailure,
+	PendingDecisionCompletionSkip,
 	PendingDecisionRecovery,
 	PendingDecisionRecoveryFailure,
 	RecordCandidatePromotionInput,
@@ -182,6 +183,7 @@ export type {
 export {
 	CandidatePromotionValidationError,
 	createBuildplaneOrchestrator,
+	OperatorDecisionSurfaceRetiredError,
 	OperatorDecisionValidationError,
 } from "./orchestrator.ts";
 export type {

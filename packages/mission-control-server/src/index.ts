@@ -255,6 +255,15 @@ export function createMissionControlServer(
 					`mission-control: failed to recover operator decision for run ${failure.runId}: ${failure.error}`,
 				);
 			}
+			// A retired completion port lets a historical record settle its Tier-1
+			// side effect exactly once instead of failing identically on every boot,
+			// at the cost of its signed terminal event. Log every such record so the
+			// missing tape evidence is disclosed, never silent.
+			for (const skipped of recovery.completionEventsSkipped) {
+				logger(
+					`mission-control: recovered run ${skipped.runId} without a signed run_completed event: ${skipped.reason}`,
+				);
+			}
 
 			if (host === EXTERNAL_HOST) {
 				logger(

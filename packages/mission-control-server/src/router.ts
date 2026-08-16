@@ -93,6 +93,20 @@ function isValidationError(error: unknown): boolean {
 	);
 }
 
+/**
+ * The operator-decision write surface is retired (operator decision 2026-08-15):
+ * `operator_decision_recorded` and `run_completed` are caller-supplied authority
+ * kinds the signed protocol refuses, so the kernel fails the decision closed
+ * before any emit or side effect. Matched by name — the kernel error class is a
+ * value this package deliberately does not import (mirrors `isValidationError`).
+ */
+function isSurfaceRetiredError(error: unknown): boolean {
+	return (
+		error instanceof Error &&
+		error.name === "OperatorDecisionSurfaceRetiredError"
+	);
+}
+
 function parseLimit(raw: string | null): number | undefined | "invalid" {
 	if (raw === null) {
 		return undefined;
@@ -204,6 +218,15 @@ async function recordDecision(
 			return {
 				status: 400,
 				body: { error: "invalid_decision", message: messageOf(error) },
+			};
+		}
+		if (isSurfaceRetiredError(error)) {
+			return {
+				status: 501,
+				body: {
+					error: "operator_decision_surface_retired",
+					message: messageOf(error),
+				},
 			};
 		}
 		throw error;
