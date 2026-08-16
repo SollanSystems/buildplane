@@ -44,6 +44,23 @@ export function toOperatorDecisionWirePayload(
  * is supported), emits the signed `operator_decision_recorded`, `flush`es so the
  * decision is durably on the tape BEFORE the orchestrator applies the side
  * effect (write-ahead, M5-S4 D1), then `close`s the subprocess.
+ *
+ * QUARANTINED WRITE SURFACE (operator decision 2026-08-15).
+ * `operator_decision_recorded` is on the native *signed-only* denylist
+ * (`bp-ledger` `serve.rs` `reject_caller_supplied_authority_event`,
+ * serve.rs:324): a caller-supplied append can never reach a signed tape, by
+ * protocol design — such effects require a dedicated native control that replays
+ * and verifies the preceding evidence. Because this port always spawns
+ * `ledger serve --sign`, the signed-only list applies to every call it makes, so
+ * `flush()` below rejects unconditionally. This factory has no production callers:
+ * the retire slice unwired it from the default CLI wiring in favour of
+ * `apps/cli/src/retired-decision-ports.ts`, and
+ * `apps/cli/test/retired-decision-ports.test.ts` pins that `run-cli.ts` never
+ * references it again. It is still exercised DELIBERATELY by
+ * `test/ledger-integration/operator-decision-writers.test.ts`, which asserts the
+ * native rejection and that nothing lands on the tape — that test is the pin on
+ * this quarantine, not a live caller. Do NOT re-wire it without that native
+ * control. See `docs/operations/trust-spine-compatibility-matrix.md`.
  */
 export function createOperatorDecisionPort(cwd: string): OperatorDecisionPort {
 	return {

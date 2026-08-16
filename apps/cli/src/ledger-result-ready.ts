@@ -26,6 +26,20 @@ export function toResultReadyWirePayload(
  * event is durably on the tape — write-ahead of the later operator merge/quarantine
  * decision. Mirrors {@link createAcceptancePort}: the emitter is kernel-signed
  * (`ledger serve --sign`, `key_id="kernel-main"`) by the dispatch caller.
+ *
+ * QUARANTINED WRITE SURFACE (operator decision 2026-08-15). `result_ready` is on
+ * the native *signed-only* denylist (`bp-ledger` `serve.rs`
+ * `reject_caller_supplied_authority_event`, serve.rs:325): a caller-supplied
+ * append can never reach a signed tape, by protocol design — such effects require
+ * a dedicated native control that replays and verifies the preceding evidence.
+ * The kernel-signed emitter this port is documented to ride is exactly what puts
+ * it on the wrong side of that list. This factory has no reachable production
+ * callers: `run-cli.ts` names it twice, in `runPlanForgeDispatchCommand` and in
+ * `resumePlanForgePlanFromInput`, but BOTH bodies sit after an unconditional
+ * `blockPlanForgeLegacyExecution()` throw, so neither construction ever runs. Do
+ * NOT re-wire it without that native control, and note that merely deleting the
+ * `blockPlanForgeLegacyExecution()` gates would resurrect a writer that the tape
+ * rejects. See `docs/operations/trust-spine-compatibility-matrix.md`.
  */
 export function createResultReadyPort(emitter: TapeEmitter): ResultReadyPort {
 	return {

@@ -54,6 +54,20 @@ export function emitAcceptanceRecorded(
  * to the signed `acceptance_recorded` event id (M6-S7) — captured from the emitter's
  * post-flush ack, since the acceptance emit is the last write before the flush — so
  * the kernel can chain a terminal `result_ready` to it.
+ *
+ * QUARANTINED WRITE SURFACE (operator decision 2026-08-15). `acceptance_recorded`
+ * is on the native *signed-only* denylist (`bp-ledger` `serve.rs`
+ * `reject_caller_supplied_authority_event`, serve.rs:323): a caller-supplied
+ * append can never reach a signed tape, by protocol design — such effects require
+ * a dedicated native control that replays and verifies the preceding evidence.
+ * This factory has no reachable production callers. `run-cli.ts` still names it
+ * twice — inside `runPlanForgeDispatchCommand` and inside
+ * `resumePlanForgePlanFromInput` — but BOTH bodies sit after an unconditional
+ * `blockPlanForgeLegacyExecution()` throw, so neither construction ever runs. Its
+ * only executing caller is `apps/cli/test/ledger-acceptance.test.ts`. Do NOT
+ * re-wire it without that native control, and note that merely deleting the
+ * `blockPlanForgeLegacyExecution()` gates would resurrect a writer that the tape
+ * rejects. See `docs/operations/trust-spine-compatibility-matrix.md`.
  */
 export function createAcceptancePort(
 	emitter: TapeEmitter,

@@ -7,6 +7,21 @@ import { PLANFORGE_AUTHORIZED_NEXT_STEP } from "@buildplane/planforge";
 /**
  * Minimal seam over the signed tape emitter.
  *
+ * QUARANTINED WRITE SURFACE (operator decision 2026-08-15). `plan_admitted` is on
+ * the native *signed-only* denylist (`bp-ledger` `serve.rs`
+ * `reject_caller_supplied_authority_event`, serve.rs:312): a caller-supplied
+ * append can never reach a signed tape, by protocol design — such effects require
+ * a dedicated native control that replays and verifies the preceding evidence.
+ * {@link createPlanAdmissionPort} has no production callers; its only callers are
+ * `apps/cli/test/plan-admission-port.test.ts` (a unit test over a fake emitter)
+ * and `test/ledger-integration/planforge-plan-admission.test.ts` — whose suite is
+ * `describe.skip`ped, with a header documenting this exact wall. So unlike the
+ * operator-decision and run-completion ports, NO executing test pins the native
+ * rejection for `plan_admitted`; the quarantine rests on the serve.rs denylist and
+ * that header. Do NOT re-wire it without that native control. See
+ * `docs/operations/trust-spine-compatibility-matrix.md`. The mechanics of why the
+ * call-site guard does not catch this:
+ *
  * `plan_admitted` is absent from the emitter's
  * `CALLER_SUPPLIED_TRUST_SPINE_KINDS` guard, but that does NOT make it emittable
  * on a signed tape. That guard mirrors only the native *always-blocked* denylist;
