@@ -363,10 +363,10 @@ describe("POST /api/runs/:id/decision", () => {
 				recordOperatorDecision: vi.fn(() => Promise.reject(validationError)),
 				recoverPendingDecisions: vi.fn(() =>
 					Promise.resolve({
-					recovered: 0,
-					failed: [],
-					completionEventsSkipped: [],
-				}),
+						recovered: 0,
+						failed: [],
+						completionEventsSkipped: [],
+					}),
 				),
 			},
 		});
