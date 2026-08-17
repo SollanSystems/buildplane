@@ -1,43 +1,59 @@
 /**
- * SKIPPED — blocked at the protocol level, not flaky and not unfinished.
+ * REGRESSION PIN — the `plan_admitted` writer cannot reach a signed tape, and
+ * the unsigned lane cannot make one verifiable. This file records what IS
+ * true; it does not assert what SHOULD be true.
  *
- * `plan_admitted` cannot be written to a SIGNED tape through the generic ingest
- * endpoint, by design. `native/crates/bp-ledger/src/serve.rs:251`
- * `reject_caller_supplied_authority_event` carries a denylist that includes
- * `EventKind::PlanAdmitted` (serve.rs:312), and serve.rs:729-733 applies that
- * denylist whenever the append is signed
- * (`matches!(signing, SigningConfig::Signed { .. })`).
- *
- * The exact signed-path rejection:
+ * WHY THE SIGNED PATH REJECTS
+ * ---------------------------
+ * `plan_admitted` cannot be written to a SIGNED tape through the generic
+ * ingest endpoint, by design. `native/crates/bp-ledger/src/serve.rs`
+ * `reject_caller_supplied_authority_event` carries a second denylist that is
+ * applied whenever the append is signed (serve.rs:731-734,
+ * `matches!(signing, SigningConfig::Signed { .. })`), and
+ * `EventKind::PlanAdmitted` is on it (serve.rs:312). The exact signed-path
+ * rejection, surfaced through the emitter's failure path into the rejected
+ * `flush()`:
  *
  *   caller_supplied_authority_event: caller-supplied signed authority event
  *   plan_admitted is rejected: the generic signed ingest endpoint cannot bless
  *   workflow lifecycle or decision records
  *
- * On the unsigned path the event lands, but then
- * `node scripts/verify-signed-tape.mjs --fixture <dir>` exits 1 with
+ * IT FAILS CLOSED. serve.rs rejects BEFORE the append, so no event is
+ * persisted. The empty-tape assertion below pins exactly that property.
+ *
+ * THERE IS NO THIRD PATH. On the unsigned path the event lands — and the
+ * kernel's own `createDefaultAdmittedPlanReader` reads it back through its
+ * exact-8-key parser, confirming the `{ PlanAdmittedV1: {...} }`
+ * variant-wrapped payload shape is correct (a flat payload would fail there) —
+ * but `node scripts/verify-signed-tape.mjs` then exits 1 with
  * `event <id> [plan_admitted] -> unsigned` followed by
- * `FAIL: signed tape did not verify`. There is no third path.
+ * `FAIL: signed tape did not verify`. The second test pins that lane: an
+ * unsigned append can never become verifiable evidence.
  *
  * Unblocking requires a dedicated native control that mints `plan_admitted`
  * from verified state — the serve.rs comment names exactly this ("must use a
- * dedicated native control that replays and verifies the preceding evidence").
- * That is an L0 slice, not a test fix.
+ * dedicated native control that replays and verifies the preceding
+ * evidence"). That is an L0 slice, not a test fix. Until it exists,
+ * `createPlanAdmissionPort` stays a QUARANTINED WRITE SURFACE (operator
+ * decision 2026-08-15; see the header in
+ * `apps/cli/src/plan-admission-port.ts`) with no production callers, and this
+ * file is the only executing check that the native rejection it was
+ * quarantined for is still real.
  *
- * WHAT THIS TEST DID PROVE before hitting the wall: on the unsigned path the
- * kernel's own `createDefaultAdmittedPlanReader` read the event back through
- * its exact-8-key parser, confirming the `{ PlanAdmittedV1: {...} }`
- * variant-wrapped payload shape is correct. A flat payload would have failed
- * there.
+ * A FUTURE FIX MUST UPDATE THIS TEST, NOT DELETE IT. If a live plan-admission
+ * write path is ever restored — necessarily through that dedicated native
+ * control, never by removing the kind from the denylist — this file must be
+ * rewritten to assert the new success path (and to keep the fail-closed pin).
  *
- * The adapter discipline below is the reviewed-correct pattern and is the
- * reusable artifact: pre-mint the id with `newLedgerEventId()` (exported ONLY
- * from `packages/ledger-client/src/envelope.ts`, NOT re-exported from the
- * package index), pass it via `EmitOptions.id`, emit, `await flush()`, and
- * return the pre-minted id. Do NOT use `emitter.stats().lastAckedEventId`.
+ * ADAPTER DISCIPLINE (the reviewed-correct pattern, reused below): pre-mint
+ * the id with `newLedgerEventId()` (exported ONLY from
+ * `packages/ledger-client/src/envelope.ts`, NOT re-exported from the package
+ * index), pass it via `EmitOptions.id`, emit, `await flush()`, and return the
+ * pre-minted id. Do NOT use `emitter.stats().lastAckedEventId`.
  */
 
 import { spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { createDefaultAdmittedPlanReader } from "@buildplane/kernel";
 import type { TapeEmitter } from "@buildplane/ledger-client";
@@ -51,6 +67,8 @@ import { newLedgerEventId } from "../../packages/ledger-client/src/envelope.js";
 import { LEDGER_TEST_REPO_ROOT, makeLedgerFixture } from "./fixtures.js";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+const DENYLIST_REASON = /cannot bless workflow lifecycle or decision records/;
 
 /**
  * Concrete `PlanAdmissionEmitter` over the real `TapeEmitter`.
@@ -87,9 +105,127 @@ function admissionInput(runId: string) {
 	};
 }
 
-describe.skip("plan_admitted writer on a real signed tape", () => {
-	it("lands a verifiable, correctly shaped plan_admitted event", async () => {
+function ledgerEventsDbPath(workspace: string): string {
+	return join(workspace, ".buildplane", "ledger", "events.db");
+}
+
+/**
+ * Every event kind persisted for `runId`, or `[]` when nothing was written.
+ *
+ * Note the retry: on the signed rejection the serve subprocess errors out and
+ * can still hold the SQLite lock when the assertion runs, so a read straight
+ * after the rejection intermittently throws `database is locked`. Retrying
+ * only that condition keeps the assertion about the tape's contents rather
+ * than about teardown timing; any other sqlite error still fails the test.
+ */
+async function persistedEventKinds(
+	workspace: string,
+	runId: string,
+): Promise<string[]> {
+	const eventsDbPath = ledgerEventsDbPath(workspace);
+	if (!existsSync(eventsDbPath)) {
+		return [];
+	}
+	const { DatabaseSync } = await import("node:sqlite");
+	const deadline = Date.now() + 15_000;
+	for (;;) {
+		try {
+			return readEventKinds(DatabaseSync, eventsDbPath, runId);
+		} catch (error) {
+			if (
+				!String(error).includes("database is locked") ||
+				Date.now() >= deadline
+			) {
+				throw error;
+			}
+			await new Promise((settle) => setTimeout(settle, 50));
+		}
+	}
+}
+
+function readEventKinds(
+	DatabaseSync: typeof import("node:sqlite").DatabaseSync,
+	eventsDbPath: string,
+	runId: string,
+): string[] {
+	const db = new DatabaseSync(eventsDbPath, { readOnly: true });
+	try {
+		const table = db
+			.prepare(
+				"SELECT name FROM sqlite_master WHERE type='table' AND name='events'",
+			)
+			.get() as { name: string } | undefined;
+		if (!table) {
+			return [];
+		}
+		const rows = db
+			.prepare("SELECT kind FROM events WHERE run_id = ? ORDER BY id")
+			.all(runId) as Array<{ kind: string }>;
+		return rows.map((row) => row.kind);
+	} finally {
+		db.close();
+	}
+}
+
+async function rejectionOf(promise: Promise<unknown>): Promise<Error> {
+	const outcome = await promise.then(
+		() => undefined,
+		(error: unknown) => error,
+	);
+	if (outcome === undefined) {
+		throw new Error("expected the writer to reject, but it resolved");
+	}
+	expect(outcome).toBeInstanceOf(Error);
+	return outcome as Error;
+}
+
+describe("plan_admitted writer on a real tape (currently rejected when signed)", () => {
+	// `retry: 2` absorbs one narrow flake: the native error control line on
+	// stderr races the child's `exit` event inside the emitter's
+	// first-failure-wins `markFailed` (emitter.ts stderr `error` handler vs the
+	// childExit handler), and if exit wins, `flush()` rejects with the generic
+	// `ledger exited with code 1` instead of the denylist text, failing the
+	// message assertions. The retry cannot mask the regression this test pins:
+	// removing `plan_admitted` from the denylist makes the emit SUCCEED, so
+	// `rejectionOf` fails deterministically on every attempt.
+	it("is rejected by the signed generic-ingest denylist and writes nothing", {
+		retry: 2,
+		timeout: 60_000,
+	}, async () => {
 		const fixture = await makeLedgerFixture({ sign: true });
+		try {
+			const port = createPlanAdmissionPort(
+				createTapeBackedPlanAdmissionEmitter(fixture.emitter),
+			);
+
+			const error = await rejectionOf(
+				port.recordPlanAdmission(admissionInput(fixture.runId)),
+			);
+
+			expect(error.message).toContain("caller_supplied_authority_event");
+			expect(error.message).toContain(
+				"caller-supplied signed authority event plan_admitted is rejected",
+			);
+			expect(error.message).toMatch(DENYLIST_REASON);
+
+			// Non-vacuity guard: the signed subprocess really did launch and open
+			// its store (`SqliteStore::open` creates `events` unconditionally at
+			// process startup, before the handshake; and `makeLedgerFixture`
+			// separately awaited a successful handshake), so the emptiness
+			// assertion below is about the rejection rather than about nothing
+			// having run.
+			expect(existsSync(ledgerEventsDbPath(fixture.dir))).toBe(true);
+
+			// Fail-closed: serve.rs rejects before the append, so the tape stays
+			// empty.
+			expect(await persistedEventKinds(fixture.dir, fixture.runId)).toEqual([]);
+		} finally {
+			await fixture.cleanup();
+		}
+	});
+
+	it("lands on the unsigned lane but can never become verifiable evidence", async () => {
+		const fixture = await makeLedgerFixture();
 		try {
 			const port = createPlanAdmissionPort(
 				createTapeBackedPlanAdmissionEmitter(fixture.emitter),
@@ -104,21 +240,18 @@ describe.skip("plan_admitted writer on a real signed tape", () => {
 
 			// Read the event back through the kernel's own reader. It demands an
 			// exact 8-key `PlanAdmittedV1`-wrapped payload record, so a flat or
-			// misnamed payload fails here rather than surviving to slice 2.
-			const eventsDbPath = join(
-				fixture.dir,
-				".buildplane",
-				"ledger",
-				"events.db",
-			);
+			// misnamed payload fails here rather than surviving unnoticed.
 			const record = await createDefaultAdmittedPlanReader().read(
-				eventsDbPath,
+				ledgerEventsDbPath(fixture.dir),
 				eventId,
 			);
 			expect(record).toBeDefined();
 			expect(record?.authorizedNextStep).toBe(PLANFORGE_AUTHORIZED_NEXT_STEP);
 
-			// External Ed25519 verification of the exported tape.
+			// Export the tape and run the external verifier: the unsigned event is
+			// reported `unsigned` and the tape fails verification. This is the
+			// "no third path" half of the wall — landing on the unsigned lane does
+			// not produce evidence.
 			const outDir = join(fixture.dir, "tape-export");
 			const exported = spawnSync(
 				fixture.binary,
@@ -135,7 +268,6 @@ describe.skip("plan_admitted writer on a real signed tape", () => {
 				{
 					cwd: LEDGER_TEST_REPO_ROOT,
 					encoding: "utf8",
-					env: { ...process.env, HOME: fixture.homeDir },
 				},
 			);
 			expect(exported.stderr ?? "").toBe("");
@@ -150,9 +282,9 @@ describe.skip("plan_admitted writer on a real signed tape", () => {
 				],
 				{ cwd: LEDGER_TEST_REPO_ROOT, encoding: "utf8" },
 			);
-			expect(verified.stdout).toContain("[plan_admitted] -> verified");
-			expect(verified.stdout).toContain("OK: signed tape verified");
-			expect(verified.status).toBe(0);
+			expect(verified.stdout).toContain("[plan_admitted] -> unsigned");
+			expect(verified.stdout).toContain("FAIL: signed tape did not verify");
+			expect(verified.status).toBe(1);
 		} finally {
 			await fixture.cleanup();
 		}

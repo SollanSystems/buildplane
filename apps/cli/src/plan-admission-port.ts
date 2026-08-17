@@ -14,11 +14,13 @@ import { PLANFORGE_AUTHORIZED_NEXT_STEP } from "@buildplane/planforge";
  * a dedicated native control that replays and verifies the preceding evidence.
  * {@link createPlanAdmissionPort} has no production callers; its only callers are
  * `apps/cli/test/plan-admission-port.test.ts` (a unit test over a fake emitter)
- * and `test/ledger-integration/planforge-plan-admission.test.ts` — whose suite is
- * `describe.skip`ped, with a header documenting this exact wall. So unlike the
- * operator-decision and run-completion ports, NO executing test pins the native
- * rejection for `plan_admitted`; the quarantine rests on the serve.rs denylist and
- * that header. Do NOT re-wire it without that native control. See
+ * and `test/ledger-integration/planforge-plan-admission.test.ts` — an EXECUTING
+ * regression pin that drives this port over the real `TapeEmitter` against a
+ * live `ledger serve --sign` subprocess and asserts the native rejection plus
+ * the fail-closed empty tape, and that the unsigned lane can never produce a
+ * verifiable tape. So, like the operator-decision and run-completion ports, the
+ * native rejection for `plan_admitted` is pinned by an executing test. Do NOT
+ * re-wire this port without that native control. See
  * `docs/operations/trust-spine-compatibility-matrix.md`. The mechanics of why the
  * call-site guard does not catch this:
  *
@@ -27,7 +29,7 @@ import { PLANFORGE_AUTHORIZED_NEXT_STEP } from "@buildplane/planforge";
  * on a signed tape. That guard mirrors only the native *always-blocked* denylist;
  * `plan_admitted` is on the native *signed-only* denylist
  * (`reject_caller_supplied_authority_event`, serve.rs:312, applied at
- * serve.rs:731-733). A signed append from this port is rejected by the native
+ * serve.rs:731-734). A signed append from this port is rejected by the native
  * subprocess — `caller-supplied signed authority event plan_admitted is
  * rejected: the generic signed ingest endpoint cannot bless workflow lifecycle
  * or decision records` — the wall documented in
