@@ -69,7 +69,7 @@ jobs:
 
       - name: Create Release PR or publish to npm
         id: changesets
-        uses: changesets/action@v1
+        uses: changesets/action@v2
         with:
           # With pending changesets this opens/updates the "chore: version
           # packages" PR (no publish, no NPM_TOKEN needed). Once that PR merges
