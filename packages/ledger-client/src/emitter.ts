@@ -38,6 +38,14 @@ import {
  * second-list kind is rejected by the native subprocess at flush time, not by
  * this guard at the call site.
  *
+ * Clearing the native second list is not the same as reaching the tape, and
+ * these two lists are not a map of what the ledger accepts. `plan_admitted` is
+ * second-list here yet always blocked one layer down by
+ * `SqliteStore::validate_external_append`, so BOTH its lanes are refused
+ * natively — signed at the wire guard, unsigned at the storage guard. Widening
+ * this client set to cover second-list kinds would still be wrong: it cannot
+ * tell those apart from the kinds whose unsigned lane really is open.
+ *
  * Exported for the cross-language drift guard in
  * `test/caller-supplied-trust-spine-kinds-sync.test.ts`, which reads the native
  * denylists out of the Rust source and asserts set-equality. Deliberately not

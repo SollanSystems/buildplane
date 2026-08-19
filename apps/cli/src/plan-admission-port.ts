@@ -7,36 +7,43 @@ import { PLANFORGE_AUTHORIZED_NEXT_STEP } from "@buildplane/planforge";
 /**
  * Minimal seam over the signed tape emitter.
  *
- * QUARANTINED WRITE SURFACE (operator decision 2026-08-15). `plan_admitted` is on
- * the native *signed-only* denylist (`bp-ledger` `serve.rs`
- * `reject_caller_supplied_authority_event`, serve.rs:312): a caller-supplied
- * append can never reach a signed tape, by protocol design — such effects require
- * a dedicated native control that replays and verifies the preceding evidence.
+ * QUARANTINED WRITE SURFACE (operator decision 2026-08-15). `plan_admitted` can
+ * reach NEITHER generic-ingest lane, by protocol design — such effects require a
+ * dedicated native control that replays and verifies the preceding evidence. A
+ * signed append is refused at the wire guard (`bp-ledger` `serve.rs`
+ * `reject_caller_supplied_authority_event`, serve.rs:312); an unsigned one clears
+ * that guard and is refused one layer down by
+ * `SqliteStore::validate_external_append`, which always blocks the kind — and,
+ * because replay dispatches on the payload variant, also blocks a
+ * `PlanAdmittedV1` payload under any other kind.
  * {@link createPlanAdmissionPort} has no production callers; its only callers are
  * `apps/cli/test/plan-admission-port.test.ts` (a unit test over a fake emitter)
  * and `test/ledger-integration/planforge-plan-admission.test.ts` — an EXECUTING
- * regression pin that drives this port over the real `TapeEmitter` against a
- * live `ledger serve --sign` subprocess and asserts the native rejection plus
- * the fail-closed empty tape, and that the unsigned lane can never produce a
- * verifiable tape. So, like the operator-decision and run-completion ports, the
- * native rejection for `plan_admitted` is pinned by an executing test. Do NOT
- * re-wire this port without that native control. See
+ * regression pin that drives this port over the real `TapeEmitter` against a live
+ * `ledger serve` subprocess on each lane in turn, asserting both distinct native
+ * rejections and a fail-closed empty tape after each. So, like the
+ * operator-decision and run-completion ports, the native rejection for
+ * `plan_admitted` is pinned by an executing test. Do NOT re-wire this port
+ * without that native control. See
  * `docs/operations/trust-spine-compatibility-matrix.md`. The mechanics of why the
  * call-site guard does not catch this:
  *
  * `plan_admitted` is absent from the emitter's
  * `CALLER_SUPPLIED_TRUST_SPINE_KINDS` guard, but that does NOT make it emittable
- * on a signed tape. That guard mirrors only the native *always-blocked* denylist;
- * `plan_admitted` is on the native *signed-only* denylist
+ * on any tape. That guard mirrors only the native *always-blocked* wire denylist;
+ * `plan_admitted` is on the native *signed-only* wire denylist
  * (`reject_caller_supplied_authority_event`, serve.rs:312, applied at
- * serve.rs:731-734). A signed append from this port is rejected by the native
+ * serve.rs:731-734), and the client cannot mirror that list because `emit` has no
+ * signing context. A signed append from this port is rejected by the native
  * subprocess — `caller-supplied signed authority event plan_admitted is
  * rejected: the generic signed ingest endpoint cannot bless workflow lifecycle
- * or decision records` — the wall documented in
+ * or decision records`. An unsigned append is rejected too, by a different guard
+ * on a different layer — `caller-supplied trust-spine event plan_admitted is
+ * rejected: authority-bearing records must use a dedicated native control`,
+ * reported as `storage_failure`. Both walls are documented in
  * `test/ledger-integration/planforge-plan-admission.test.ts`. So, like the V5
  * dispatch admission, `plan_admitted` needs a dedicated native control that
- * mints it from verified state; this port cannot reach a signed tape until one
- * exists.
+ * mints it from verified state; this port cannot reach a tape until one exists.
  *
  * Narrower than `TapeEmitter` on purpose: the real emitter's `emit` is
  * synchronous, fire-and-forget, and returns no id (the caller supplies one via

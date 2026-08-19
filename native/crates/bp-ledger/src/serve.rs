@@ -1750,8 +1750,12 @@ mod control_message_tests {
 ///
 /// * [`REJECTED_SIGNED_OR_UNSIGNED`] — refused on the generic ingest lane
 ///   whether or not an append signer is configured.
-/// * [`REJECTED_ONLY_WHEN_SIGNED`] — refused only when a signer is configured;
-///   the explicitly unsafe unsigned lane keeps legacy compatibility for these.
+/// * [`REJECTED_ONLY_WHEN_SIGNED`] — refused *by this guard* only when a signer
+///   is configured; the explicitly unsafe unsigned lane keeps legacy
+///   compatibility for these. Clearing the guard is not acceptance: a kind on
+///   this list may still be refused downstream by
+///   `SqliteStore::validate_external_append`, as `plan_admitted` now is on both
+///   lanes. Membership here describes this function's verdict, not the ledger's.
 /// * [`PASSED_BY_THIS_GUARD`] — the control group the guard deliberately lets
 ///   through in both modes, so the rejection assertions cannot pass vacuously.
 ///
@@ -1824,6 +1828,8 @@ mod authority_ingest_denylist_tests {
         EventKind::RunCompleted,
         EventKind::RunFailed,
         EventKind::RunAdmissionRecorded,
+        // Signed-only *here*, but always blocked downstream by
+        // `SqliteStore::validate_external_append`, so neither lane can land one.
         EventKind::PlanAdmitted,
         EventKind::PlanReceiptRecorded,
         EventKind::ActivityStarted,
@@ -2023,13 +2029,19 @@ mod authority_ingest_denylist_tests {
     /// The property that makes the second list a *signed-only* list. Without
     /// this, narrowing the guard to reject these kinds unconditionally — or
     /// widening it by moving one to the first list — would go unnoticed.
+    ///
+    /// Clearing this guard is not the same as reaching the tape. `plan_admitted`
+    /// clears it unsigned and is then refused by
+    /// `SqliteStore::validate_external_append`, so passing here means only that
+    /// *this* function returned `Ok`.
     #[test]
     fn kinds_on_the_second_denylist_still_pass_the_unsigned_lane() {
         for kind in REJECTED_ONLY_WHEN_SIGNED {
             let event = event_of_kind(*kind);
             if let Err(error) = reject_caller_supplied_authority_event(&event, false) {
                 panic!(
-                    "{} must stay available to the explicitly unsafe unsigned lane, got {error:?}",
+                    "{} must stay classified signed-only by this guard; refusing it \
+                     unsigned belongs downstream, not here. Got {error:?}",
                     kind.as_wire()
                 );
             }
