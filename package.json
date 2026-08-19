@@ -42,7 +42,7 @@
 		"@biomejs/biome": "^2.5.7",
 		"@changesets/cli": "^2.31.1",
 		"@commitlint/cli": "^21.2.2",
-		"@commitlint/config-conventional": "^21.2.0",
+		"@commitlint/config-conventional": "^21.2.2",
 		"@types/node": "^26.2.0",
 		"glob": "^13.0.6",
 		"husky": "^9.1.7",
