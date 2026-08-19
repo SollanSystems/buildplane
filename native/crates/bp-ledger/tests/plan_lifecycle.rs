@@ -202,6 +202,34 @@ fn generic_unsigned_ingest_refuses_a_caller_supplied_plan_admitted_without_a_wri
         .contains("storage_failure"));
 }
 
+/// The refusal cannot be side-stepped by mislabelling the envelope either.
+/// `bp-replay` dispatches on the payload variant and never reads `event.kind`
+/// (`transitions.rs` `apply_with_verified_signer`), so a `PlanAdmittedV1`
+/// payload carried under a permitted kind would still replay as a genuine
+/// admission. Production writers canonicalize before appending, which enforces
+/// kind/payload agreement — but the exclusivity claim must not rest on an
+/// invariant only well-behaved callers honour.
+#[test]
+fn a_mislabelled_envelope_cannot_smuggle_a_plan_admitted_payload() {
+    let store = SqliteStore::open_in_memory().unwrap();
+    let smuggled = Event {
+        kind: EventKind::ModelRequest,
+        ..plan_admitted_event()
+    };
+
+    let outcome = store.append(&smuggled);
+
+    assert!(
+        matches!(
+            outcome,
+            Err(LedgerError::CallerSuppliedTrustSpineEvent { ref kind })
+                if kind == "plan_admitted"
+        ),
+        "a plan-admission payload must be refused whatever kind it declares, got {outcome:?}"
+    );
+    assert_eq!(store.event_count().unwrap(), 0);
+}
+
 /// Every public append entry point shares `validate_external_append`, so the
 /// refusal cannot be side-stepped by choosing a different one.
 #[test]

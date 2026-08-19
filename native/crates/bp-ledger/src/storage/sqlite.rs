@@ -3034,11 +3034,22 @@ impl SqliteStore {
     /// a tape is a test concern, so this is compiled in only under
     /// `cfg(test)` or the `test-support` feature and can never widen the
     /// production append surface.
+    ///
+    /// Checkpoints stay out of reach even here: they must never advance the
+    /// ordinary high-water mark, and `record_ordinary_append` guards that with a
+    /// `debug_assert!` which vanishes under `--release`. This assertion holds in
+    /// every profile.
     #[cfg(any(test, feature = "test-support"))]
     pub fn insert_event_bypassing_external_validation_for_tests(
         &self,
         event: &Event,
     ) -> Result<()> {
+        assert_ne!(
+            event.kind,
+            EventKind::TapeCheckpoint,
+            "checkpoints are ledger-internal and minted only by the checkpoint \
+             emitter; inserting one here would poison the ordinary high-water mark"
+        );
         insert_event(&self.conn, event)?;
         self.record_ordinary_append(event);
         Ok(())
@@ -3066,6 +3077,13 @@ impl SqliteStore {
     ///     admission no control had ever authorized. It is the first
     ///     signed-only-tier wire kind that is also always blocked here; the
     ///     asymmetry is deliberate and does not move the kind's wire tier.
+    /// (b2) Reject a `PlanAdmittedV1` *payload* whatever kind its envelope
+    ///     declares. (b) reads a caller-chosen label, while replay dispatches on
+    ///     the payload variant, so label and payload must both be refused for
+    ///     the mint to be the only writer. Scoped to `plan_admitted`: generalizing
+    ///     this to every trust-spine payload (or enforcing kind/payload agreement
+    ///     here outright) is a wider change than closing this hole and is left to
+    ///     the mint slice.
     /// (c) Per-run strictly-monotonic ordinary-event id: reject an ordinary
     ///     event whose id is `<=` the latest NON-checkpoint event id for the
     ///     same run. Checkpoint ids never constrain the ordinary sequence (an
@@ -3099,6 +3117,18 @@ impl SqliteStore {
         ) {
             return Err(LedgerError::CallerSuppliedTrustSpineEvent {
                 kind: event.kind.as_wire().to_string(),
+            });
+        }
+        // The check above reads the envelope label, which a caller of this API
+        // chooses freely. `bp-replay` dispatches on the payload variant and
+        // never consults `event.kind`, so a plan-admission payload declared
+        // under a permitted kind would still replay as a genuine admission.
+        // Production writers canonicalize first, which enforces kind/payload
+        // agreement, but the mint's exclusivity must not rest on callers
+        // honouring that.
+        if matches!(event.payload, Payload::PlanAdmittedV1(_)) {
+            return Err(LedgerError::CallerSuppliedTrustSpineEvent {
+                kind: EventKind::PlanAdmitted.as_wire().to_string(),
             });
         }
         if let Some(latest) = self.latest_ordinary_id(&event.run_id)? {
