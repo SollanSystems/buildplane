@@ -156,8 +156,8 @@ importers:
         version: link:../kernel
     devDependencies:
       '@honcho-ai/sdk':
-        specifier: ^2.1.1
-        version: 2.1.1
+        specifier: ^2.3.0
+        version: 2.3.0
 
   packages/adapters-models:
     dependencies:
@@ -743,8 +743,8 @@ packages:
       '@noble/hashes':
         optional: true
 
-  '@honcho-ai/sdk@2.1.1':
-    resolution: {integrity: sha512-1EgDchnK2bTllhUCNhH1PZbw65fExmTtY2sraqXc1O41o1gY4Rpqrl1XCo+7RfdcZo85N7vl461hqYCouhbR1A==}
+  '@honcho-ai/sdk@2.3.0':
+    resolution: {integrity: sha512-98TKsWvXpuR/Qcew+uIFH/ISBtnzWnTAjsJVkAuiH8gs5yOd/MNefj6Z9V4IG3vjkADyJunAmsi85UsgIchQ7w==}
 
   '@inquirer/external-editor@1.0.3':
     resolution: {integrity: sha512-RWbSrDiYmO4LbejWY7ttpxczuwQyZLBUyygsA9Nsv95hpzUWwnNTVQmAq3xuh7vNwCp07UTmE5i11XAEExx4RA==}
@@ -2720,7 +2720,7 @@ snapshots:
 
   '@exodus/bytes@1.15.1': {}
 
-  '@honcho-ai/sdk@2.1.1':
+  '@honcho-ai/sdk@2.3.0':
     dependencies:
       zod: 4.0.0
 
