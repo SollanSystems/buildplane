@@ -209,6 +209,12 @@ fn generic_unsigned_ingest_refuses_a_caller_supplied_plan_admitted_without_a_wri
 /// admission. Production writers canonicalize before appending, which enforces
 /// kind/payload agreement — but the exclusivity claim must not rest on an
 /// invariant only well-behaved callers honour.
+///
+/// This test and its mirror below pin the two INDEPENDENT clauses of
+/// `validate_external_append`: this one the payload check, the mirror the kind
+/// check. Both clauses raise the identical error, so a test that pairs
+/// kind=PlanAdmitted with payload=PlanAdmittedV1 stays green if either clause is
+/// deleted. Only this pair distinguishes them. Keep both.
 #[test]
 fn a_mislabelled_envelope_cannot_smuggle_a_plan_admitted_payload() {
     let store = SqliteStore::open_in_memory().unwrap();
@@ -226,6 +232,38 @@ fn a_mislabelled_envelope_cannot_smuggle_a_plan_admitted_payload() {
                 if kind == "plan_admitted"
         ),
         "a plan-admission payload must be refused whatever kind it declares, got {outcome:?}"
+    );
+    assert_eq!(store.event_count().unwrap(), 0);
+}
+
+/// The mirror, pinning the kind check on its own. A `plan_admitted` envelope
+/// carrying some other payload is not inert: `append` does not canonicalize, so
+/// nothing else rejects the row, and the kernel's admitted-plan reader selects
+/// by `kind = 'plan_admitted'` — a label-only row is exactly what it would find.
+#[test]
+fn a_plan_admitted_envelope_is_refused_whatever_payload_it_carries() {
+    let store = SqliteStore::open_in_memory().unwrap();
+    let mislabelled = Event {
+        payload: Payload::PlanReceiptRecordedV1(PlanReceiptRecordedV1 {
+            plan_id: "pf-plan-001".into(),
+            admission_event_id: EventId::new(),
+            outcome: PlanReceiptOutcome::Completed,
+            side_effects: vec![],
+            result_digest: "sha256:cc".into(),
+            decided_at: "2026-08-17T00:00:00Z".into(),
+        }),
+        ..plan_admitted_event()
+    };
+
+    let outcome = store.append(&mislabelled);
+
+    assert!(
+        matches!(
+            outcome,
+            Err(LedgerError::CallerSuppliedTrustSpineEvent { ref kind })
+                if kind == "plan_admitted"
+        ),
+        "a plan-admission envelope must be refused whatever payload it carries, got {outcome:?}"
     );
     assert_eq!(store.event_count().unwrap(), 0);
 }
