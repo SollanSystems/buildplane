@@ -3026,6 +3026,24 @@ impl SqliteStore {
         Ok(())
     }
 
+    /// Insert an ordinary event through the private writer, skipping
+    /// [`Self::validate_external_append`].
+    ///
+    /// Historical tapes and replay/fork fixtures legitimately contain kinds
+    /// that guard now refuses on every public append path. Reconstructing such
+    /// a tape is a test concern, so this is compiled in only under
+    /// `cfg(test)` or the `test-support` feature and can never widen the
+    /// production append surface.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn insert_event_bypassing_external_validation_for_tests(
+        &self,
+        event: &Event,
+    ) -> Result<()> {
+        insert_event(&self.conn, event)?;
+        self.record_ordinary_append(event);
+        Ok(())
+    }
+
     /// Validation enforced on every public append entry point for events that
     /// arrive from a caller/wire (NOT internal checkpoint creation).
     ///
@@ -3034,10 +3052,20 @@ impl SqliteStore {
     ///     inserts directly through the private `insert_event`/
     ///     `insert_event_signature` and so bypasses this helper. Enforced in
     ///     EVERY mode (signed and unsigned).
-    /// (b) Reject caller-supplied protected-host V5 admission receipts. They
-    ///     are minted only by [`Self::record_governed_dispatch_v5_admission_v1`]
-    ///     after it re-derives raw signed V5 witness evidence; allowing the
-    ///     generic path to append one could poison receipt reconciliation.
+    /// (b) Reject caller-supplied trust-spine authority records. These are
+    ///     minted only by a dedicated native control that first replays and
+    ///     verifies the evidence they claim to summarize:
+    ///     `governed_dispatch_v5_admission_recorded_v1` and
+    ///     `promotion_reconciliation_resolved` by
+    ///     [`Self::record_governed_dispatch_v5_admission_v1`] and its promotion
+    ///     sibling, which re-derive raw signed witness evidence — a generic
+    ///     append of either could poison receipt reconciliation. `plan_admitted`
+    ///     joins them ahead of its own mint control: the wire guard
+    ///     (`serve::reject_caller_supplied_authority_event`) refuses it only on
+    ///     the signed lane, which left the unsigned lane able to land a PlanForge
+    ///     admission no control had ever authorized. It is the first
+    ///     signed-only-tier wire kind that is also always blocked here; the
+    ///     asymmetry is deliberate and does not move the kind's wire tier.
     /// (c) Per-run strictly-monotonic ordinary-event id: reject an ordinary
     ///     event whose id is `<=` the latest NON-checkpoint event id for the
     ///     same run. Checkpoint ids never constrain the ordinary sequence (an
@@ -3067,6 +3095,7 @@ impl SqliteStore {
             event.kind,
             EventKind::GovernedDispatchV5AdmissionRecordedV1
                 | EventKind::PromotionReconciliationResolved
+                | EventKind::PlanAdmitted
         ) {
             return Err(LedgerError::CallerSuppliedTrustSpineEvent {
                 kind: event.kind.as_wire().to_string(),

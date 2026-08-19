@@ -6,7 +6,17 @@ use bp_ledger::payload::plan_lifecycle::{
     PlanAdmittedV1, PlanReceiptOutcome, PlanReceiptRecordedV1,
 };
 use bp_ledger::payload::Payload;
+use bp_ledger::serve::{serve_with_protocol, SigningConfig};
+use bp_ledger::signing::ActorKeyRef;
+use bp_ledger::storage::sqlite::{CheckpointPolicy, SqliteStore};
+use bp_ledger::storage::Cas;
+use bp_ledger::LedgerError;
 use chrono::Utc;
+use ed25519_dalek::SigningKey;
+use std::io::Cursor;
+use tempfile::TempDir;
+
+const INGEST_RUN_UUID: &str = "01919000-0000-7000-8000-0000000000a1";
 
 fn admitted() -> PlanAdmittedV1 {
     PlanAdmittedV1 {
@@ -73,4 +83,156 @@ fn plan_receipt_canonical_bytes_carry_chain_and_digest() {
     assert!(json.contains("admission_event_id"));
     assert!(json.contains("result_digest"));
     assert!(json.contains("completed"));
+}
+
+fn ingest_run_id() -> RunId {
+    RunId::from_uuid(uuid::Uuid::parse_str(INGEST_RUN_UUID).unwrap())
+}
+
+fn plan_admitted_event() -> Event {
+    Event {
+        id: EventId::new(),
+        run_id: ingest_run_id(),
+        parent_event_id: None,
+        schema_version: 1,
+        kind: EventKind::PlanAdmitted,
+        occurred_at: Utc::now(),
+        payload: Payload::PlanAdmittedV1(admitted()),
+    }
+}
+
+fn ingest_fixture() -> (SqliteStore, Cas, TempDir) {
+    let tmp = TempDir::new().unwrap();
+    let store = SqliteStore::open(tmp.path().join("events.db")).unwrap();
+    let cas = Cas::open(tmp.path().join("objects")).unwrap();
+    (store, cas, tmp)
+}
+
+fn ingest_signer() -> (SigningKey, ActorKeyRef) {
+    (
+        SigningKey::from_bytes(&[91u8; 32]),
+        ActorKeyRef {
+            actor_id: "kernel".into(),
+            key_id: "kernel-main".into(),
+            public_key_hash: None,
+        },
+    )
+}
+
+fn ingest_stdin(event: &Event) -> String {
+    format!(
+        concat!(
+            r#"{{"control":"handshake","protocol":1,"run_id":"{run_id}","#,
+            r#""started_at":"2026-08-17T00:00:00Z","schema_version":1}}"#,
+            "\n{event}\n",
+            r#"{{"control":"close","seq":0}}"#,
+            "\n",
+        ),
+        run_id = INGEST_RUN_UUID,
+        event = serde_json::to_string(event).unwrap(),
+    )
+}
+
+/// The signed generic-ingest lane refuses `plan_admitted` in
+/// `reject_caller_supplied_authority_event`, before any append is attempted.
+#[test]
+fn generic_signed_ingest_refuses_a_caller_supplied_plan_admitted_without_a_write() {
+    let (store, cas, _tmp) = ingest_fixture();
+    let (signing_key, signer) = ingest_signer();
+    let mut stderr = Vec::new();
+
+    let error = serve_with_protocol(
+        Cursor::new(ingest_stdin(&plan_admitted_event()).into_bytes()),
+        &mut stderr,
+        &store,
+        &cas,
+        1,
+        &SigningConfig::Signed {
+            signing_key,
+            signer,
+            checkpoint_policy: CheckpointPolicy::every(1),
+        },
+    )
+    .expect_err("the signed generic ingest lane must never bless a plan admission");
+
+    assert!(
+        matches!(
+            error,
+            LedgerError::CallerSuppliedSignedAuthorityEvent { ref kind }
+                if kind == "plan_admitted"
+        ),
+        "expected a signed-authority rejection, got {error:?}"
+    );
+    assert_eq!(store.event_count().unwrap(), 0);
+    assert!(String::from_utf8(stderr)
+        .unwrap()
+        .contains("caller_supplied_authority_event"));
+}
+
+/// The unsigned generic-ingest lane clears the wire guard (`plan_admitted` is
+/// signed-only there) and is refused one layer down, in
+/// `validate_external_append`, which the serve loop reports as
+/// `storage_failure`.
+#[test]
+fn generic_unsigned_ingest_refuses_a_caller_supplied_plan_admitted_without_a_write() {
+    let (store, cas, _tmp) = ingest_fixture();
+    let mut stderr = Vec::new();
+
+    let error = serve_with_protocol(
+        Cursor::new(ingest_stdin(&plan_admitted_event()).into_bytes()),
+        &mut stderr,
+        &store,
+        &cas,
+        1,
+        &SigningConfig::Unsigned,
+    )
+    .expect_err("the unsigned generic ingest lane must never land a plan admission");
+
+    assert!(
+        matches!(
+            error,
+            LedgerError::CallerSuppliedTrustSpineEvent { ref kind }
+                if kind == "plan_admitted"
+        ),
+        "expected a trust-spine rejection, got {error:?}"
+    );
+    assert_eq!(store.event_count().unwrap(), 0);
+    assert!(String::from_utf8(stderr)
+        .unwrap()
+        .contains("storage_failure"));
+}
+
+/// Every public append entry point shares `validate_external_append`, so the
+/// refusal cannot be side-stepped by choosing a different one.
+#[test]
+fn every_public_store_append_path_refuses_a_caller_supplied_plan_admitted() {
+    let store = SqliteStore::open_in_memory().unwrap();
+    let (signing_key, signer) = ingest_signer();
+
+    let unsigned = store.append(&plan_admitted_event());
+    let signed = store.append_signed(&plan_admitted_event(), &signing_key, &signer);
+    let checkpointed = store
+        .append_signed_with_checkpoint(
+            &plan_admitted_event(),
+            &signing_key,
+            &signer,
+            &CheckpointPolicy::every(1),
+        )
+        .map(|_| ());
+
+    for (path, outcome) in [
+        ("append", unsigned),
+        ("append_signed", signed),
+        ("append_signed_with_checkpoint", checkpointed),
+    ] {
+        assert!(
+            matches!(
+                outcome,
+                Err(LedgerError::CallerSuppliedTrustSpineEvent { ref kind })
+                    if kind == "plan_admitted"
+            ),
+            "{path} must refuse a caller-supplied plan admission, got {outcome:?}"
+        );
+    }
+    assert_eq!(store.event_count().unwrap(), 0);
 }
