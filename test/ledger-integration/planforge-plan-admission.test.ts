@@ -1,7 +1,7 @@
 /**
- * REGRESSION PIN — the `plan_admitted` writer cannot reach a signed tape, and
- * the unsigned lane cannot make one verifiable. This file records what IS
- * true; it does not assert what SHOULD be true.
+ * REGRESSION PIN — the `plan_admitted` writer cannot reach a tape through
+ * either generic-ingest lane. This file records what IS true; it does not
+ * assert what SHOULD be true.
  *
  * WHY THE SIGNED PATH REJECTS
  * ---------------------------
@@ -21,14 +21,32 @@
  * IT FAILS CLOSED. serve.rs rejects BEFORE the append, so no event is
  * persisted. The empty-tape assertion below pins exactly that property.
  *
- * THERE IS NO THIRD PATH. On the unsigned path the event lands — and the
- * kernel's own `createDefaultAdmittedPlanReader` reads it back through its
- * exact-8-key parser, confirming the `{ PlanAdmittedV1: {...} }`
- * variant-wrapped payload shape is correct (a flat payload would fail there) —
- * but `node scripts/verify-signed-tape.mjs` then exits 1 with
- * `event <id> [plan_admitted] -> unsigned` followed by
- * `FAIL: signed tape did not verify`. The second test pins that lane: an
- * unsigned append can never become verifiable evidence.
+ * WHY THE UNSIGNED PATH REJECTS
+ * -----------------------------
+ * `plan_admitted` is signed-only on the wire, so it clears
+ * `reject_caller_supplied_authority_event` unsigned and reaches
+ * `store.append` (serve.rs:746) — which runs `validate_external_append`
+ * (`native/crates/bp-ledger/src/storage/sqlite.rs`) first, and that guard's
+ * always-blocked set now names `EventKind::PlanAdmitted`. The refusal is a
+ * different typed error on a different layer, reported by the serve loop under
+ * a different code:
+ *
+ *   storage_failure: caller-supplied trust-spine event plan_admitted is
+ *   rejected: authority-bearing records must use a dedicated native control
+ *
+ * THERE IS NO THIRD PATH, and that property is now total: both lanes refuse
+ * before anything is persisted, so an unsigned append can no longer produce
+ * even unverifiable tape data.
+ *
+ * COVERAGE THIS FILE GAVE UP TO GET THAT. While the unsigned lane still landed
+ * the event, the second test read it back with the kernel's own
+ * `createDefaultAdmittedPlanReader`, joining the two halves of the payload
+ * contract end to end: the port's emitted bytes really did satisfy the reader's
+ * exact-8-key `{ PlanAdmittedV1: {...} }` parse. No lane can persist that event
+ * any more, so the halves are now pinned only separately —
+ * `apps/cli/test/plan-admission-port.test.ts` on the emitted payload,
+ * `packages/kernel/test/admitted-plan-reader.test.ts` on the parse (from a raw
+ * `INSERT`). Rejoining them is the mint control's round trip, not this file's.
  *
  * Unblocking requires a dedicated native control that mints `plan_admitted`
  * from verified state — the serve.rs comment names exactly this ("must use a
@@ -52,10 +70,8 @@
  * pre-minted id. Do NOT use `emitter.stats().lastAckedEventId`.
  */
 
-import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { createDefaultAdmittedPlanReader } from "@buildplane/kernel";
 import type { TapeEmitter } from "@buildplane/ledger-client";
 import { PLANFORGE_AUTHORIZED_NEXT_STEP } from "@buildplane/planforge";
 import { describe, expect, it } from "vitest";
@@ -64,11 +80,12 @@ import {
 	type PlanAdmissionEmitter,
 } from "../../apps/cli/src/plan-admission-port.js";
 import { newLedgerEventId } from "../../packages/ledger-client/src/envelope.js";
-import { LEDGER_TEST_REPO_ROOT, makeLedgerFixture } from "./fixtures.js";
-
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+import { makeLedgerFixture } from "./fixtures.js";
 
 const DENYLIST_REASON = /cannot bless workflow lifecycle or decision records/;
+
+const NATIVE_CONTROL_REASON =
+	/authority-bearing records must use a dedicated native control/;
 
 /**
  * Concrete `PlanAdmissionEmitter` over the real `TapeEmitter`.
@@ -179,7 +196,7 @@ async function rejectionOf(promise: Promise<unknown>): Promise<Error> {
 	return outcome as Error;
 }
 
-describe("plan_admitted writer on a real tape (currently rejected when signed)", () => {
+describe("plan_admitted writer on a real tape (rejected on both generic-ingest lanes)", () => {
 	// `retry: 2` absorbs one narrow flake: the native error control line on
 	// stderr races the child's `exit` event inside the emitter's
 	// first-failure-wins `markFailed` (emitter.ts stderr `error` handler vs the
@@ -224,69 +241,44 @@ describe("plan_admitted writer on a real tape (currently rejected when signed)",
 		}
 	});
 
-	it("lands on the unsigned lane but can never become verifiable evidence", async () => {
+	// Same `retry: 2` rationale as the signed case above: the native error line
+	// on stderr races the child's `exit` event inside the emitter's
+	// first-failure-wins `markFailed`. Removing `plan_admitted` from
+	// `validate_external_append`'s always-blocked set makes the emit SUCCEED, so
+	// `rejectionOf` still fails deterministically on every attempt.
+	it("is rejected by the unsigned lane's storage guard and writes nothing", {
+		retry: 2,
+		timeout: 60_000,
+	}, async () => {
 		const fixture = await makeLedgerFixture();
 		try {
 			const port = createPlanAdmissionPort(
 				createTapeBackedPlanAdmissionEmitter(fixture.emitter),
 			);
 
-			const eventId = await port.recordPlanAdmission(
-				admissionInput(fixture.runId),
+			const error = await rejectionOf(
+				port.recordPlanAdmission(admissionInput(fixture.runId)),
 			);
-			expect(eventId).toMatch(UUID);
 
-			await fixture.emitter.close();
-
-			// Read the event back through the kernel's own reader. It demands an
-			// exact 8-key `PlanAdmittedV1`-wrapped payload record, so a flat or
-			// misnamed payload fails here rather than surviving unnoticed.
-			const record = await createDefaultAdmittedPlanReader().read(
-				ledgerEventsDbPath(fixture.dir),
-				eventId,
+			// A different layer and a different typed error from the signed case:
+			// `validate_external_append` rejects after the wire guard cleared the
+			// event, and the serve loop reports that as `storage_failure`.
+			expect(error.message).toContain("storage_failure");
+			expect(error.message).toContain(
+				"caller-supplied trust-spine event plan_admitted is rejected",
 			);
-			expect(record).toBeDefined();
-			expect(record?.authorizedNextStep).toBe(PLANFORGE_AUTHORIZED_NEXT_STEP);
+			expect(error.message).toMatch(NATIVE_CONTROL_REASON);
 
-			// Export the tape and run the external verifier: the unsigned event is
-			// reported `unsigned` and the tape fails verification. This is the
-			// "no third path" half of the wall — landing on the unsigned lane does
-			// not produce evidence.
-			const outDir = join(fixture.dir, "tape-export");
-			const exported = spawnSync(
-				fixture.binary,
-				[
-					"ledger",
-					"export-signed-tape",
-					"--run-id",
-					fixture.runId,
-					"--workspace",
-					fixture.dir,
-					"--out",
-					outDir,
-				],
-				{
-					cwd: LEDGER_TEST_REPO_ROOT,
-					encoding: "utf8",
-				},
-			);
-			expect(exported.stderr ?? "").toBe("");
-			expect(exported.status).toBe(0);
+			// Non-vacuity guard, mirroring the signed case: the subprocess launched
+			// and opened its store, so the emptiness assertion is about the
+			// rejection rather than about nothing having run.
+			expect(existsSync(ledgerEventsDbPath(fixture.dir))).toBe(true);
 
-			const verified = spawnSync(
-				process.execPath,
-				[
-					join(LEDGER_TEST_REPO_ROOT, "scripts", "verify-signed-tape.mjs"),
-					"--fixture",
-					outDir,
-				],
-				{ cwd: LEDGER_TEST_REPO_ROOT, encoding: "utf8" },
-			);
-			expect(verified.stdout).toContain("[plan_admitted] -> unsigned");
-			expect(verified.stdout).toContain("FAIL: signed tape did not verify");
-			expect(verified.status).toBe(1);
+			// Fail-closed: the guard runs before `insert_event`, so the tape stays
+			// empty on this lane too.
+			expect(await persistedEventKinds(fixture.dir, fixture.runId)).toEqual([]);
 		} finally {
 			await fixture.cleanup();
 		}
-	}, 60_000);
+	});
 });

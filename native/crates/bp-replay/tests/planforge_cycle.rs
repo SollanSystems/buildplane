@@ -47,8 +47,11 @@ fn write_planforge_cycle_tape(db_path: &std::path::Path) -> PlanForgeTapeIds {
     let completed_event_id = EventId::new();
     let receipt_event_id = EventId::new();
 
+    // `plan_admitted` is always blocked on the public append paths — it may be
+    // minted only by a dedicated native control. This fixture reconstructs a
+    // historical tape, so it uses the gated internal writer instead.
     store
-        .append(&event_of(
+        .insert_event_bypassing_external_validation_for_tests(&event_of(
             run_id,
             admission_event_id,
             None,

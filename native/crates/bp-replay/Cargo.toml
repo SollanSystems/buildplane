@@ -15,5 +15,9 @@ thiserror.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+# Replay fixtures reconstruct historical tapes containing kinds the public
+# append paths now refuse, so the integration tests need bp-ledger's gated
+# insert helper. Mirrors the bp-authority-broker dev-dependency idiom.
+bp-ledger = { workspace = true, features = ["test-support"] }
 ed25519-dalek.workspace = true
 tempfile = "3"

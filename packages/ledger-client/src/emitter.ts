@@ -31,12 +31,20 @@ import {
  * `reject_caller_supplied_authority_event` (serve.rs:252-292). The native
  * second list (serve.rs:298-326) blocks a further set of lifecycle/decision
  * kinds — `plan_admitted`, `run_completed`, `operator_decision_recorded`,
- * `acceptance_recorded`, `result_ready`, the unit/activity kinds — but only
- * when the append is signed. That list cannot be mirrored here: whether an
- * append is signed is a property of the `ledger serve` subprocess, not of the
- * call, and `emit` has no signing context. So a signed append of a
- * second-list kind is rejected by the native subprocess at flush time, not by
- * this guard at the call site.
+ * `acceptance_recorded`, `result_ready`, the unit/activity kinds — but,
+ * *within that guard*, only when the append is signed. That list cannot be
+ * mirrored here: whether an append is signed is a property of the `ledger
+ * serve` subprocess, not of the call, and `emit` has no signing context. So a
+ * signed append of a second-list kind is rejected by the native subprocess at
+ * flush time, not by this guard at the call site.
+ *
+ * Clearing that guard is not the same as reaching the tape, so neither list is
+ * a map of what the ledger accepts. `plan_admitted` is second-list there yet
+ * always blocked one layer down by `SqliteStore::validate_external_append`, so
+ * BOTH its lanes are refused natively — signed at the wire guard, unsigned at
+ * the storage guard. Widening this client set to cover second-list kinds would
+ * still be wrong: it cannot tell those apart from the kinds whose unsigned lane
+ * really is open.
  *
  * Exported for the cross-language drift guard in
  * `test/caller-supplied-trust-spine-kinds-sync.test.ts`, which reads the native

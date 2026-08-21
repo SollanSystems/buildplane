@@ -234,9 +234,15 @@ describe("CALLER_SUPPLIED_TRUST_SPINE_KINDS vs the native denylists", () => {
 
 	it("lets every signed-only kind through the client-side guard", async () => {
 		// The documented asymmetry, pinned as behavior: `emit()` has no signing
-		// context, so the native second denylist is structurally unenforceable here.
-		// Widening this guard to cover those kinds would break the unsigned lane the
-		// native side deliberately keeps open — the rejection must stay native-side.
+		// context, so the native second denylist is structurally unenforceable
+		// here. The rejection must stay native-side, where the signing mode is
+		// known. Note the two lists are wire-tier lists, not a statement about the
+		// unsigned lane: `plan_admitted` is signed-only here yet also always
+		// blocked by `SqliteStore::validate_external_append`, so its unsigned lane
+		// is closed at the storage layer while its wire tier is unchanged. Widening
+		// this client guard would still be wrong — it would refuse kinds whose
+		// unsigned lane the native side does keep open, and it cannot tell them
+		// apart.
 		const signedOnly = toWireKinds(extractDenylistVariants(SIGNED_ONLY_ANCHOR));
 		expect(signedOnly).toEqual(
 			expect.arrayContaining([
