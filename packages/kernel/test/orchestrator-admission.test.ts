@@ -580,6 +580,12 @@ describe("orchestrator run admission", () => {
 			}),
 		],
 		[
+			// Not sealed-gate coverage: this table asserts the legacy
+			// provenance_ref refusal, which fires before the reader is ever
+			// consulted, so every row here is rejected identically. The
+			// load-bearing sealed-gate test is "refuses a signed but unsealed
+			// plan admission before any worker effect" in
+			// candidate-evidence-flow.test.ts.
 			"unsealed",
 			async () => ({
 				authorizedNextStep: "dispatch_admitted_plan",

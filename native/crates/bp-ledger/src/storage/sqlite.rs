@@ -3179,6 +3179,19 @@ impl SqliteStore {
             -- recorded verbatim as non-authoritative metadata. A later slice
             -- records the plan -> per-task linkage here rather than in the
             -- frozen 8-field payload.
+            --
+            -- CROSS-LANGUAGE COUPLING. `packages/kernel/src/admitted-plan-reader.ts`
+            -- opens this database directly over `node:sqlite` and reads this
+            -- schema by name: the table name `plan_admissions`, the
+            -- `admission_event_id` column it keys the lookup on, the `state`
+            -- column, and the `'sealed'` literal. Renaming any of them silently
+            -- disables every governed dispatch — the reader's lookup misses or
+            -- throws, either way resolving to not-sealed, so the kernel gate
+            -- refuses with a misleading "unsealed" diagnosis: a fail-closed
+            -- outage with no failing test on either side. A cross-language
+            -- drift test is deliberately deferred to S3/S6; until it exists,
+            -- treat any change to these four names as a coordinated
+            -- two-language change.
             CREATE TABLE IF NOT EXISTS plan_admissions (
                 run_id                          TEXT NOT NULL,
                 request_id                      TEXT NOT NULL,

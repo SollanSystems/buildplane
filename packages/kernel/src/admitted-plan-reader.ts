@@ -35,7 +35,19 @@ export interface AdmittedPlanRecord {
 	 * This deliberately reads `false` for every tape written before the mint
 	 * existed: such a tape carries no `plan_admissions` table at all, so its
 	 * historical `plan_admitted` events are reported unsealed and confer no
-	 * dispatch authority. That is the ratified behaviour, not an oversight.
+	 * dispatch authority.
+	 *
+	 * What is ratified, and what is not. The sealed-only direction is
+	 * operator-ratified — gates Q12b and Q13 of
+	 * `docs/superpowers/specs/2026-08-17-plan-admitted-native-mint-control-design.md`
+	 * §8, recorded on PR #306, with Q13 placing checkpoint-coverage-required at
+	 * S4. This slice lands the consumer half one slice early because S2 is
+	 * itself what opens the unsealed crash window, mirroring that spec's §7-S1
+	 * front-loading rationale: leave no window in which the claim is false. The
+	 * blanket reclassification of every pre-mint tape's `plan_admitted` as
+	 * unsealed follows the same direction but is not literally covered by that
+	 * record — it is a deliberate fail-closed choice, pending explicit operator
+	 * confirmation before S3, the slice that makes this gate live.
 	 */
 	readonly sealed: boolean;
 }
