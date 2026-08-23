@@ -3309,6 +3309,24 @@ export function createBuildplaneOrchestrator(
 						),
 					};
 				}
+				// A signed admission the mint never sealed authorizes nothing: the
+				// mint commits the event and an `awaiting_checkpoint` projection row
+				// together, so a crash before the seal leaves a validly signed event
+				// whose admission was never completed. Named separately from the
+				// unsigned refusal above so the failure says which one happened.
+				if (!admitted.sealed) {
+					return {
+						ok: false,
+						result: finalizeInfrastructureFailure(
+							ctx.run,
+							infrastructureFailure(
+								"plan-not-admitted",
+								`The plan_admitted event for provenance_ref "${provenanceRef}" is unsealed: no sealing checkpoint covers it, so the admission was never completed and authorizes no dispatch.`,
+							),
+							{ workspace: ctx.workspace, workspaceStatus: "retained" },
+						),
+					};
+				}
 			}
 			const receipt = createRunAdmissionReceiptLive(
 				createRunAdmissionReceiptInput(ctx),

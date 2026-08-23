@@ -576,6 +576,15 @@ describe("orchestrator run admission", () => {
 			async () => ({
 				authorizedNextStep: "dispatch_admitted_plan",
 				signedByKernel: true,
+				sealed: true,
+			}),
+		],
+		[
+			"unsealed",
+			async () => ({
+				authorizedNextStep: "dispatch_admitted_plan",
+				signedByKernel: true,
+				sealed: false,
 			}),
 		],
 		[
@@ -583,6 +592,7 @@ describe("orchestrator run admission", () => {
 			async () => ({
 				authorizedNextStep: "dispatch_admitted_plan",
 				signedByKernel: false,
+				sealed: false,
 			}),
 		],
 		[
@@ -590,6 +600,7 @@ describe("orchestrator run admission", () => {
 			async () => ({
 				authorizedNextStep: "some_other_step",
 				signedByKernel: true,
+				sealed: true,
 			}),
 		],
 		[

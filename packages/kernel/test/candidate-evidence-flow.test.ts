@@ -7,6 +7,7 @@ import {
 	CAPABILITY_BUNDLE_SCHEMA_VERSION,
 } from "@buildplane/capability-broker";
 import { describe, expect, it, vi } from "vitest";
+import type { AdmittedPlanRecord } from "../src/admitted-plan-reader.js";
 import {
 	canonicalGovernedV3RetryRequestV1Digest,
 	canonicalUntrustedAttemptContextRecordedV1Digest,
@@ -196,8 +197,15 @@ function untrustedRetryAttemptContextForRequest(
 	};
 }
 
+const SEALED_ADMITTED_PLAN: AdmittedPlanRecord = {
+	authorizedNextStep: "dispatch_admitted_plan",
+	signedByKernel: true,
+	sealed: true,
+};
+
 async function runV3RetryHarness(
 	governedRetryContextResolverPort?: GovernedV3RetryContextResolverPort,
+	admittedPlan: AdmittedPlanRecord = SEALED_ADMITTED_PLAN,
 ) {
 	const root = mkdtempSync(join(tmpdir(), "buildplane-v3-retry-context-"));
 	git(root, ["init", "-q"]);
@@ -349,10 +357,7 @@ async function runV3RetryHarness(
 		},
 		admittedPlanReader: {
 			async read() {
-				return {
-					authorizedNextStep: "dispatch_admitted_plan",
-					signedByKernel: true,
-				};
+				return admittedPlan;
 			},
 		},
 		profileRegistry: {
@@ -1029,10 +1034,7 @@ describe("candidate-bound acceptance", () => {
 				},
 				admittedPlanReader: {
 					async read() {
-						return {
-							authorizedNextStep: "dispatch_admitted_plan",
-							signedByKernel: true,
-						};
+						return SEALED_ADMITTED_PLAN;
 					},
 				},
 				profileRegistry: {
@@ -1077,6 +1079,29 @@ describe("candidate-bound acceptance", () => {
 			);
 		} finally {
 			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("refuses a signed but unsealed plan admission before any worker effect", async () => {
+		const harness = await runV3RetryHarness(undefined, {
+			authorizedNextStep: "dispatch_admitted_plan",
+			signedByKernel: true,
+			sealed: false,
+		});
+		try {
+			expect(harness.result.run.status).toBe("failed");
+			expect(harness.result.failure).toMatchObject({
+				kind: "plan-not-admitted",
+			});
+			expect(harness.result.failure?.message).toMatch(/unsealed/i);
+			expect(harness.workerCalls).toBe(0);
+			expect(harness.candidateCalls).toBe(0);
+			expect(git(harness.root, ["rev-parse", "HEAD"])).toBe(harness.baseSha);
+			expect(git(harness.root, ["rev-list", "--count", "HEAD"])).toBe(
+				harness.commitCountBefore,
+			);
+		} finally {
+			harness.cleanup();
 		}
 	});
 
@@ -1622,10 +1647,7 @@ describe("candidate-bound acceptance", () => {
 				},
 				admittedPlanReader: {
 					async read() {
-						return {
-							authorizedNextStep: "dispatch_admitted_plan",
-							signedByKernel: true,
-						};
+						return SEALED_ADMITTED_PLAN;
 					},
 				},
 				profileRegistry: {
@@ -2054,10 +2076,7 @@ describe("candidate-bound acceptance", () => {
 				},
 				admittedPlanReader: {
 					async read() {
-						return {
-							authorizedNextStep: "dispatch_admitted_plan",
-							signedByKernel: true,
-						};
+						return SEALED_ADMITTED_PLAN;
 					},
 				},
 				profileRegistry: {
