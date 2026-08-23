@@ -3322,13 +3322,14 @@ impl SqliteStore {
     ///     admission no control had ever authorized. It is the first
     ///     signed-only-tier wire kind that is also always blocked here; the
     ///     asymmetry is deliberate and does not move the kind's wire tier.
-    /// (b2) Reject a `PlanAdmittedV1` *payload* whatever kind its envelope
-    ///     declares. (b) reads a caller-chosen label, while replay dispatches on
-    ///     the payload variant, so label and payload must both be refused for
-    ///     the mint to be the only writer. Scoped to `plan_admitted`: generalizing
-    ///     this to every trust-spine payload (or enforcing kind/payload agreement
-    ///     here outright) is a wider change than closing this hole and is left to
-    ///     the mint slice.
+    /// (b2) Reject the *payload variant* of every always-blocked kind, whatever
+    ///     kind its envelope declares. (a) and (b) read a caller-chosen label,
+    ///     while replay dispatches on the payload variant, so label and payload
+    ///     must both be refused for a dedicated control to be the only writer.
+    ///     S1 scoped this to `plan_admitted`; the mint slice generalizes it to
+    ///     the whole always-blocked set, so the two halves cannot drift apart
+    ///     again. Enforcing kind/payload agreement here outright remains a wider
+    ///     change and is still out of scope.
     /// (c) Per-run strictly-monotonic ordinary-event id: reject an ordinary
     ///     event whose id is `<=` the latest NON-checkpoint event id for the
     ///     same run. Checkpoint ids never constrain the ordinary sequence (an
@@ -3351,29 +3352,16 @@ impl SqliteStore {
     /// out of scope here and noted for whoever lifts the single-writer
     /// assumption.
     fn validate_external_append(&self, event: &Event) -> Result<()> {
-        if event.kind == EventKind::TapeCheckpoint {
+        // Both halves of the checkpoint block: the envelope label a caller
+        // chooses, and the payload variant replay actually dispatches on.
+        if event.kind == EventKind::TapeCheckpoint
+            || matches!(event.payload, Payload::TapeCheckpointV1(_))
+        {
             return Err(LedgerError::CallerSuppliedCheckpoint);
         }
-        if matches!(
-            event.kind,
-            EventKind::GovernedDispatchV5AdmissionRecordedV1
-                | EventKind::PromotionReconciliationResolved
-                | EventKind::PlanAdmitted
-        ) {
+        if let Some(blocked) = always_blocked_trust_spine_kind(event) {
             return Err(LedgerError::CallerSuppliedTrustSpineEvent {
-                kind: event.kind.as_wire().to_string(),
-            });
-        }
-        // The check above reads the envelope label, which a caller of this API
-        // chooses freely. `bp-replay` dispatches on the payload variant and
-        // never consults `event.kind`, so a plan-admission payload declared
-        // under a permitted kind would still replay as a genuine admission.
-        // Production writers canonicalize first, which enforces kind/payload
-        // agreement, but the mint's exclusivity must not rest on callers
-        // honouring that.
-        if matches!(event.payload, Payload::PlanAdmittedV1(_)) {
-            return Err(LedgerError::CallerSuppliedTrustSpineEvent {
-                kind: EventKind::PlanAdmitted.as_wire().to_string(),
+                kind: blocked.as_wire().to_string(),
             });
         }
         if let Some(latest) = self.latest_ordinary_id(&event.run_id)? {
@@ -22508,6 +22496,43 @@ fn sealed_governed_dispatch_v5_admission_disposition(
         checkpoint_event_id: checkpoint.event_id,
         checkpoint_event_digest: checkpoint.event_digest,
     })
+}
+
+/// The trust-spine kinds `validate_external_append` blocks on EVERY public
+/// append path, in EVERY signing mode. Each is minted only by a dedicated
+/// native control that first replays and verifies the evidence it summarizes.
+///
+/// `tape_checkpoint` is blocked too but carries its own error variant, so it is
+/// handled separately rather than folded in here.
+pub(crate) const ALWAYS_BLOCKED_TRUST_SPINE_KINDS: [EventKind; 3] = [
+    EventKind::GovernedDispatchV5AdmissionRecordedV1,
+    EventKind::PromotionReconciliationResolved,
+    EventKind::PlanAdmitted,
+];
+
+/// Classify an inbound event against the always-blocked set by BOTH its
+/// envelope label and its payload variant.
+///
+/// The label is caller-chosen, and `bp-replay` dispatches on the payload
+/// variant without ever consulting `event.kind` (`transitions.rs`
+/// `apply_with_verified_signer`), so a trust-spine payload declared under a
+/// permitted kind would still replay as the genuine record. Production writers
+/// canonicalize first, which enforces kind/payload agreement — but a dedicated
+/// control's exclusivity must not rest on callers honouring that.
+fn always_blocked_trust_spine_kind(event: &Event) -> Option<EventKind> {
+    if ALWAYS_BLOCKED_TRUST_SPINE_KINDS.contains(&event.kind) {
+        return Some(event.kind);
+    }
+    match event.payload {
+        Payload::GovernedDispatchV5AdmissionRecordedV1(_) => {
+            Some(EventKind::GovernedDispatchV5AdmissionRecordedV1)
+        }
+        Payload::PromotionReconciliationResolvedV1(_) => {
+            Some(EventKind::PromotionReconciliationResolved)
+        }
+        Payload::PlanAdmittedV1(_) => Some(EventKind::PlanAdmitted),
+        _ => None,
+    }
 }
 
 const PLAN_ADMISSION_COLUMNS: &str = "run_id, request_id, admission_identity_digest, \

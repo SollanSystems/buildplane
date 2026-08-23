@@ -1344,15 +1344,37 @@ export interface OperatorDecisionRecordedV1 {
 }
 
 /**
- * `plan_admitted` payload — operator-approved PlanForge admission; the dispatch
- * authority. Signed by the kernel key; the operator identity is `decided_by`.
+ * `plan_admitted` payload — an operator-approved PlanForge admission, minted
+ * only by the dedicated native plan-admission control. Signed by the kernel
+ * key; the operator identity is the `decided_by` payload field.
+ *
+ * The record is intentionally recovery evidence, not effect authority, in line
+ * with every other native admission control. Sealing it under a checkpoint
+ * makes recovery and duplicate delivery verifiable; it confers no capability by
+ * itself, and a consumer must reopen the evidence under a separately
+ * configured authority before any effect.
  */
 export interface PlanAdmittedV1 {
-	/** Stable PlanForge plan id (e.g. `pf-plan-<fingerprint>`). */
+	/**
+	 * Stable plan id. A PlanForge preview produces `pf-plan-<fingerprint>`,
+	 * where the fingerprint hashes a *parsed projection* of the plan rather
+	 * than its compiled bytes; the native mint cannot reproduce that without
+	 * porting the TypeScript compiler, so it derives its own byte-addressed
+	 * `pf-plan-native-<hex>` instead. The two are deliberately distinguishable.
+	 */
 	plan_id: string;
-	/** Canonical digest of the admitted plan, `sha256:<hex>`. */
+	/**
+	 * Canonical digest of the admitted plan, `sha256:<hex>`. Produced by
+	 * PlanForge over a key-sorted JSON object graph; the native mint records it
+	 * as a caller assertion and never re-derives it.
+	 */
 	plan_digest: string;
-	/** Canonical digest of the compiled input, `sha256:<hex>`. */
+	/**
+	 * Canonical digest of the compiled input, `sha256:<hex>`. PlanForge digests
+	 * the JSON-quoted plan text; the native mint digests the exact
+	 * content-addressed bytes it loaded, which is the value it treats as the
+	 * admission identity.
+	 */
 	input_digest: string;
 	/** Trusted base commit the plan was admitted against. */
 	trusted_base: string;
@@ -1360,7 +1382,12 @@ export interface PlanAdmittedV1 {
 	decided_by: string;
 	/** Admission timestamp, RFC3339. */
 	decided_at: string;
-	/** Deterministic idempotency key over normalized plan inputs. */
+	/**
+	 * PlanForge's deterministic idempotency key over normalized plan inputs.
+	 * Recorded as a caller assertion: the native mint keeps its own identity
+	 * (request id plus the digest of the content it loaded) in its projection,
+	 * so this value is never what a retry is resolved against.
+	 */
 	idempotency_key: string;
 	/** Next step this admission authorizes. */
 	authorized_next_step: string;
