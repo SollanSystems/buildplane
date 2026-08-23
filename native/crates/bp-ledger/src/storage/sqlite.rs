@@ -3316,7 +3316,11 @@ impl SqliteStore {
     ///     [`Self::record_governed_dispatch_v5_admission_v1`] and its promotion
     ///     sibling, which re-derive raw signed witness evidence — a generic
     ///     append of either could poison receipt reconciliation. `plan_admitted`
-    ///     joins them ahead of its own mint control: the wire guard
+    ///     joins them under its own dedicated mint pair,
+    ///     [`Self::record_plan_admission_v1`] and
+    ///     [`Self::seal_plan_admission_v1`], which derive the admission's own
+    ///     fields and seal it under a covering checkpoint. It is blocked here
+    ///     because the wire guard
     ///     (`serve::reject_caller_supplied_authority_event`) refuses it only on
     ///     the signed lane, which left the unsigned lane able to land a PlanForge
     ///     admission no control had ever authorized. It is the first

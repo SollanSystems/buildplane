@@ -1364,9 +1364,13 @@ export interface PlanAdmittedV1 {
 	 */
 	plan_id: string;
 	/**
-	 * Canonical digest of the admitted plan, `sha256:<hex>`. Produced by
-	 * PlanForge over a key-sorted JSON object graph; the native mint records it
-	 * as a caller assertion and never re-derives it.
+	 * Caller-asserted, non-authoritative advisory value: whatever the caller
+	 * claimed as PlanForge's canonical plan digest (`sha256:<hex>`, produced
+	 * over a key-sorted JSON object graph). The native mint records it
+	 * verbatim and never re-derives or verifies it, so it proves nothing about
+	 * the admitted plan. The authoritative admission identity is the natively
+	 * derived `input_digest` together with the projection's native idempotency
+	 * identity.
 	 */
 	plan_digest: string;
 	/**
@@ -1383,10 +1387,13 @@ export interface PlanAdmittedV1 {
 	/** Admission timestamp, RFC3339. */
 	decided_at: string;
 	/**
-	 * PlanForge's deterministic idempotency key over normalized plan inputs.
-	 * Recorded as a caller assertion: the native mint keeps its own identity
-	 * (request id plus the digest of the content it loaded) in its projection,
-	 * so this value is never what a retry is resolved against.
+	 * Caller-asserted, non-authoritative advisory value: whatever the caller
+	 * claimed as PlanForge's deterministic idempotency key over normalized
+	 * plan inputs. The native mint records it verbatim and never verifies it,
+	 * and a retry is never resolved against it. The authoritative admission
+	 * identity is the natively derived `input_digest` together with the
+	 * projection's native idempotency identity (request id plus the digest of
+	 * the content the mint itself loaded).
 	 */
 	idempotency_key: string;
 	/** Next step this admission authorizes. */

@@ -279,6 +279,14 @@ pub(crate) enum PlanAdmissionBackendError {
 /// Injected postcondition seam. It must reopen trusted recovery after the seal
 /// and verify the exact sealed evidence; cached or pre-seal snapshots are not
 /// sufficient.
+///
+/// "Trusted recovery" here is weaker than the V5 analogue names: `bp-replay`
+/// exposes no plan-admission accessor on `TrustedGovernedRecoverySnapshot`, so
+/// the production implementation re-derives the evidence through a fresh
+/// connection to the same storage-layer verification rather than through an
+/// independent replay of the signed tape. It proves the seal is durable and
+/// re-derivable from a separate handle, not that an independent mechanism
+/// agrees with it.
 pub(crate) trait PlanAdmissionSnapshotVerifier {
     fn verify_fresh_sealed_admission(
         &mut self,
@@ -336,8 +344,9 @@ impl From<SealedPlanAdmissionEvidence> for BrokerSealedPlanAdmissionProof {
 /// serialized to a peer.** A protected host calls [`BrokerPlanAdmissionAuthority::admit`],
 /// which collapses every variant here to `ReconciliationRequired` so the wire
 /// boundary discloses nothing about signer, storage, content, or reconciliation
-/// state. `admit_detailed` exists so the negative controls can prove that six
-/// different refusals really are six different code paths rather than one.
+/// state. `admit_detailed` exists so the negative controls can prove that each
+/// `PlanAdmissionRefusal` variant really is its own code path rather than one
+/// path wearing several labels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PlanAdmissionRefusal {
     ValidationNotAsserted,
@@ -616,6 +625,14 @@ fn sealed_evidence_from_disposition(
 /// connection and re-derives the sealed evidence through it. A matching digest
 /// read back through the same handle that performed the write is not a trusted
 /// proof; neither is a cached or pre-seal snapshot.
+///
+/// The re-derivation runs through the same storage-layer verification that
+/// performed the seal (`SqliteStore::resolve_sealed_plan_admission_v1`), NOT
+/// through `bp_replay::TrustedGovernedRecoverySnapshot` as the V5 analogue
+/// does, because `bp-replay` exposes no plan-admission accessor. The guarantee
+/// is correspondingly weaker: it establishes that the seal is durable and
+/// reproducible from an independent connection, not that an independent
+/// mechanism corroborates it.
 pub(crate) struct TrustedPlanAdmissionSnapshotVerifier<'a> {
     store: &'a SqliteStore,
     database_path: PathBuf,

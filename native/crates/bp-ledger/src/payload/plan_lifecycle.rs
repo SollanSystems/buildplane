@@ -22,9 +22,13 @@ pub struct PlanAdmittedV1 {
     /// porting the TypeScript compiler, so it derives its own byte-addressed
     /// `pf-plan-native-<hex>` instead. The two are deliberately distinguishable.
     pub plan_id: String,
-    /// Canonical digest of the admitted plan, `sha256:<hex>`. Produced by
-    /// PlanForge over a key-sorted JSON object graph; the native mint records it
-    /// as a caller assertion and never re-derives it.
+    /// Caller-asserted, non-authoritative advisory value: whatever the caller
+    /// claimed as PlanForge's canonical plan digest (`sha256:<hex>`, produced
+    /// over a key-sorted JSON object graph). The native mint records it
+    /// verbatim and never re-derives or verifies it, so it proves nothing about
+    /// the admitted plan. The authoritative admission identity is the natively
+    /// derived `input_digest` together with the projection's native idempotency
+    /// identity.
     pub plan_digest: String,
     /// Canonical digest of the compiled input, `sha256:<hex>`. PlanForge digests
     /// the JSON-quoted plan text; the native mint digests the exact
@@ -37,10 +41,13 @@ pub struct PlanAdmittedV1 {
     pub decided_by: String,
     /// Admission timestamp, RFC3339.
     pub decided_at: String,
-    /// PlanForge's deterministic idempotency key over normalized plan inputs.
-    /// Recorded as a caller assertion: the native mint keeps its own identity
-    /// (request id plus the digest of the content it loaded) in its projection,
-    /// so this value is never what a retry is resolved against.
+    /// Caller-asserted, non-authoritative advisory value: whatever the caller
+    /// claimed as PlanForge's deterministic idempotency key over normalized
+    /// plan inputs. The native mint records it verbatim and never verifies it,
+    /// and a retry is never resolved against it. The authoritative admission
+    /// identity is the natively derived `input_digest` together with the
+    /// projection's native idempotency identity (request id plus the digest of
+    /// the content the mint itself loaded).
     pub idempotency_key: String,
     /// Next step this admission authorizes.
     pub authorized_next_step: String,
