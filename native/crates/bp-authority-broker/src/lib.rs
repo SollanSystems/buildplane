@@ -95,6 +95,10 @@ mod plan_admission_contract_tests;
 mod plan_admission_handler;
 #[allow(dead_code)] // Consumed by the protected plan-admission host loader next.
 mod plan_admission_host_config;
+#[allow(dead_code)]
+mod plan_admission_response;
+#[cfg(test)]
+mod plan_admission_response_contract_tests;
 mod promotion_decision_client;
 #[cfg(test)]
 mod promotion_decision_client_contract_tests;
