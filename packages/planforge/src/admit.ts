@@ -59,6 +59,9 @@ function requireOperatorField(value: string, field: string): string {
  * payload on any non-PASS validation status or a missing operator/timestamp —
  * the admit stage must never sign an unvalidated or unattributed admission. The
  * plan-derived digests/idempotency key are trusted as computed by `preview`.
+ * That trust model is superseded by the native mint (`record_plan_admission_v1`,
+ * mint-control S2), which records those same values as caller-asserted,
+ * non-authoritative advisory fields and derives its own authoritative identity.
  */
 export function buildPlanAdmittedPayload(
 	input: AdmitPlanInput,

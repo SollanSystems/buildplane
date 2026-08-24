@@ -88,6 +88,15 @@ function seedAdmission(
 		readonly algorithm?: string;
 		readonly publicKeyHash?: string | null;
 		readonly omitSignature?: boolean;
+		/**
+		 * Mint projection row to seed. Omitting it seeds no `plan_admissions`
+		 * table at all, which is exactly the shape of every tape written before
+		 * the native mint existed.
+		 */
+		readonly projection?: {
+			readonly state: "awaiting_checkpoint" | "sealed";
+			readonly admissionEventId?: string;
+		};
 	} = {},
 ): AdmissionFixture {
 	const root = mkdtempSync(join(tmpdir(), "buildplane-admitted-plan-reader-"));
@@ -143,6 +152,21 @@ function seedAdmission(
 				options.algorithm ?? "ed25519",
 				signature,
 				"2026-05-30T00:00:02Z",
+			);
+		}
+		if (options.projection) {
+			// Column names and the state vocabulary mirror `plan_admissions` as
+			// created by `SqliteStore::init`
+			// (native/crates/bp-ledger/src/storage/sqlite.rs).
+			db.exec(
+				"CREATE TABLE plan_admissions (run_id TEXT NOT NULL, admission_event_id TEXT NOT NULL UNIQUE, state TEXT NOT NULL CHECK(state IN ('awaiting_checkpoint', 'sealed')))",
+			);
+			db.prepare(
+				"INSERT INTO plan_admissions (run_id, admission_event_id, state) VALUES (?, ?, ?)",
+			).run(
+				RUN_ID,
+				options.projection.admissionEventId ?? EVENT_ID,
+				options.projection.state,
 			);
 		}
 	} finally {
@@ -280,6 +304,7 @@ describe("default admitted-plan reader", () => {
 		).resolves.toEqual({
 			authorizedNextStep: "dispatch_admitted_plan",
 			signedByKernel: true,
+			sealed: false,
 		});
 	});
 
@@ -293,6 +318,7 @@ describe("default admitted-plan reader", () => {
 		).resolves.toEqual({
 			authorizedNextStep: "dispatch_admitted_plan",
 			signedByKernel: false,
+			sealed: false,
 		});
 	});
 
@@ -308,6 +334,7 @@ describe("default admitted-plan reader", () => {
 			).resolves.toEqual({
 				authorizedNextStep: "dispatch_admitted_plan",
 				signedByKernel: false,
+				sealed: false,
 			});
 		},
 	);
@@ -340,6 +367,7 @@ describe("default admitted-plan reader", () => {
 		).resolves.toEqual({
 			authorizedNextStep: "different_step",
 			signedByKernel: false,
+			sealed: false,
 		});
 	});
 
@@ -351,6 +379,7 @@ describe("default admitted-plan reader", () => {
 		).resolves.toEqual({
 			authorizedNextStep: "dispatch_admitted_plan",
 			signedByKernel: false,
+			sealed: false,
 		});
 	});
 
@@ -362,6 +391,7 @@ describe("default admitted-plan reader", () => {
 		).resolves.toEqual({
 			authorizedNextStep: "dispatch_admitted_plan",
 			signedByKernel: false,
+			sealed: false,
 		});
 	});
 
@@ -373,6 +403,62 @@ describe("default admitted-plan reader", () => {
 		).resolves.toEqual({
 			authorizedNextStep: "dispatch_admitted_plan",
 			signedByKernel: false,
+			sealed: false,
+		});
+	});
+
+	it("reports a sealed projection row as sealed recovery evidence", async () => {
+		const fixture = seedAdmission({ projection: { state: "sealed" } });
+
+		await expect(
+			trustedReader(fixture).read(fixture.eventsDbPath, EVENT_ID),
+		).resolves.toEqual({
+			authorizedNextStep: "dispatch_admitted_plan",
+			signedByKernel: true,
+			sealed: true,
+		});
+	});
+
+	it("refuses to call a validly signed but awaiting_checkpoint admission sealed", async () => {
+		const fixture = seedAdmission({
+			projection: { state: "awaiting_checkpoint" },
+		});
+
+		await expect(
+			trustedReader(fixture).read(fixture.eventsDbPath, EVENT_ID),
+		).resolves.toEqual({
+			authorizedNextStep: "dispatch_admitted_plan",
+			signedByKernel: true,
+			sealed: false,
+		});
+	});
+
+	it("reports a pre-mint tape with no projection table as unsealed", async () => {
+		const fixture = seedAdmission();
+
+		await expect(
+			trustedReader(fixture).read(fixture.eventsDbPath, EVENT_ID),
+		).resolves.toEqual({
+			authorizedNextStep: "dispatch_admitted_plan",
+			signedByKernel: true,
+			sealed: false,
+		});
+	});
+
+	it("reports an admission with no projection row of its own as unsealed even when the table holds other sealed rows", async () => {
+		const fixture = seedAdmission({
+			projection: {
+				state: "sealed",
+				admissionEventId: "01919000-0000-7000-8000-000000000099",
+			},
+		});
+
+		await expect(
+			trustedReader(fixture).read(fixture.eventsDbPath, EVENT_ID),
+		).resolves.toEqual({
+			authorizedNextStep: "dispatch_admitted_plan",
+			signedByKernel: true,
+			sealed: false,
 		});
 	});
 

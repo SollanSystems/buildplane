@@ -156,6 +156,27 @@ pub enum LedgerError {
         reason: String,
     },
 
+    #[error("plan admission authority rejected: {reason}")]
+    PlanAdmissionAuthorityRejected { reason: String },
+
+    #[error("plan admission input rejected: {reason}")]
+    PlanInputRejected { reason: String },
+
+    #[error("plan admission input digest mismatch: the content reference names {expected} but the loaded bytes digest to {actual}")]
+    PlanInputDigestMismatch { expected: String, actual: String },
+
+    #[error("plan admission idempotency conflict for run {run_id} and request {request_id}")]
+    PlanAdmissionIdempotencyConflict { run_id: String, request_id: String },
+
+    #[error(
+        "plan admission requires reconciliation for run {run_id} and request {request_id}: {reason}"
+    )]
+    PlanAdmissionReconciliationRequired {
+        run_id: String,
+        request_id: String,
+        reason: String,
+    },
+
     #[error("governed promotion authority rejected: {reason}")]
     PromotionAuthorityRejected { reason: String },
 

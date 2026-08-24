@@ -1332,6 +1332,7 @@ describe("kernel orchestrator", () => {
 						return {
 							authorizedNextStep: "dispatch_admitted_plan",
 							signedByKernel: true,
+							sealed: true,
 						};
 					},
 				},

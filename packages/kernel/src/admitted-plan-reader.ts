@@ -5,9 +5,11 @@ import {
 	verify as verifyDetachedSignature,
 } from "node:crypto";
 import { existsSync } from "node:fs";
+import type { DatabaseSync } from "node:sqlite";
 
 const KERNEL_ACTOR_ID = "kernel";
 const KERNEL_KEY_ID = "kernel-main";
+const PLAN_ADMISSION_SEALED_STATE = "sealed";
 const ED25519 = "ed25519";
 const SHA256_DIGEST = /^sha256:[0-9a-f]{64}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -18,6 +20,36 @@ const UTC_TIMESTAMP =
 export interface AdmittedPlanRecord {
 	readonly authorizedNextStep: string;
 	readonly signedByKernel: boolean;
+	/**
+	 * Whether the native mint's `plan_admissions` projection records this exact
+	 * admission event as `sealed` — i.e. a checkpoint covers the signed prefix
+	 * the admission belongs to.
+	 *
+	 * A signed but unsealed admission authorizes nothing. The mint commits the
+	 * event, its signature, and an `awaiting_checkpoint` projection row in one
+	 * transaction, and only a later successful seal advances that row; a crash
+	 * in between therefore leaves a validly signed `plan_admitted` event on the
+	 * tape whose admission was never completed. Signature validity alone cannot
+	 * distinguish the two.
+	 *
+	 * This deliberately reads `false` for every tape written before the mint
+	 * existed: such a tape carries no `plan_admissions` table at all, so its
+	 * historical `plan_admitted` events are reported unsealed and confer no
+	 * dispatch authority.
+	 *
+	 * What is ratified, and what is not. The sealed-only direction is
+	 * operator-ratified — gates Q12b and Q13 of
+	 * `docs/superpowers/specs/2026-08-17-plan-admitted-native-mint-control-design.md`
+	 * §8, recorded on PR #306, with Q13 placing checkpoint-coverage-required at
+	 * S4. This slice lands the consumer half one slice early because S2 is
+	 * itself what opens the unsealed crash window, mirroring that spec's §7-S1
+	 * front-loading rationale: leave no window in which the claim is false. The
+	 * blanket reclassification of every pre-mint tape's `plan_admitted` as
+	 * unsealed follows the same direction but is not literally covered by that
+	 * record — it is a deliberate fail-closed choice, pending explicit operator
+	 * confirmation before S3, the slice that makes this gate live.
+	 */
+	readonly sealed: boolean;
 }
 
 export interface AdmittedPlanReader {
@@ -183,6 +215,7 @@ export function createDefaultAdmittedPlanReader(
 				const unverified: AdmittedPlanRecord = {
 					authorizedNextStep: event.payload.authorizedNextStep,
 					signedByKernel: false,
+					sealed: readSealedProjectionState(db, eventId),
 				};
 				if (!signatureVerifier) {
 					return unverified;
@@ -233,6 +266,34 @@ export function createDefaultAdmittedPlanReader(
 			}
 		},
 	};
+}
+
+/**
+ * Read the native mint's projection state for one admission event.
+ *
+ * Mirrors `plan_admissions` as created by `SqliteStore::init`
+ * (`native/crates/bp-ledger/src/storage/sqlite.rs`), where
+ * `admission_event_id` is UNIQUE and `state` is constrained to
+ * `awaiting_checkpoint` | `sealed`. The lookup uses the same event id the
+ * event row was found by, so a caller cannot widen it.
+ *
+ * Every uncertainty reads as not sealed: no projection table (a pre-mint
+ * tape), no row for this admission, an unexpected state, or a failed query.
+ */
+function readSealedProjectionState(db: DatabaseSync, eventId: string): boolean {
+	try {
+		const row = exactDataRecord(
+			db
+				.prepare(
+					"SELECT state FROM plan_admissions WHERE admission_event_id = ?",
+				)
+				.get(eventId),
+			["state"],
+		);
+		return row?.state === PLAN_ADMISSION_SEALED_STATE;
+	} catch {
+		return false;
+	}
 }
 
 function resolvePinnedVerifier(

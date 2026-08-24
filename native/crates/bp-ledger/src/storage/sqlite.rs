@@ -40,6 +40,7 @@ use crate::payload::model_evidence::{
     VerifiedProviderTokenPreflightInputV1, VerifiedProviderTokenPreflightResultV1,
     VerifiedTrustScopeEvidenceDocumentV1,
 };
+use crate::payload::plan_lifecycle::PlanAdmittedV1;
 use crate::payload::trust_spine::{
     action_receipt_recorded_v2_digest, action_receipt_set_v1_digest, action_requested_v2_digest,
     attempt_context_recorded_v1_digest, candidate_completion_recorded_v1_digest,
@@ -1296,6 +1297,164 @@ pub struct GovernedDispatchV5AdmissionRequestV1 {
 pub struct GovernedDispatchV5AdmissionSealRequestV1 {
     pub run_id: RunId,
     pub admission_event_id: EventId,
+}
+
+/// The single next step a `plan_admitted` event authorizes. Must stay
+/// byte-identical to `@buildplane/planforge`'s `PLANFORGE_AUTHORIZED_NEXT_STEP`
+/// (`packages/planforge/src/admit.ts`), which the kernel's admitted-plan gate
+/// compares against; a drift here silently produces admissions no consumer will
+/// accept.
+pub const PLAN_ADMISSION_AUTHORIZED_NEXT_STEP_V1: &str = "dispatch_admitted_plan";
+
+/// Upper bound on the compiled-plan bytes one admission may digest. The mint
+/// holds the whole object in memory to digest it, so an unbounded object is a
+/// protected-process denial-of-service surface rather than evidence.
+const MAX_PLAN_ADMISSION_INPUT_BYTES: usize = 1 << 20;
+
+/// Domain separator for the mint's own plan identity. The PlanForge
+/// `pf-plan-<fingerprint>` id is NOT reproducible here: it hashes an
+/// insertion-order `JSON.stringify` over a *parsed* projection of the plan
+/// (`packages/planforge/src/preview.ts`), not the compiled bytes, so
+/// re-deriving it natively would mean porting the TypeScript compiler. This
+/// control therefore derives its own byte-addressed identity and marks it
+/// visibly distinct so the two can never be confused.
+const PLAN_ADMISSION_PLAN_ID_DOMAIN_V1: &[u8] = b"buildplane.plan-admission.plan-id.v1\0";
+
+/// Prefix that distinguishes a natively minted plan id from a PlanForge
+/// preview id.
+const PLAN_ADMISSION_NATIVE_PLAN_ID_PREFIX: &str = "pf-plan-native-";
+
+/// Domain separator for the mint's native idempotency identity: the exact
+/// request id plus the digest of the content the control itself loaded. The
+/// PlanForge `idempotencyKey` is recorded but never trusted, so it can never
+/// become the identity a retry is resolved against.
+const PLAN_ADMISSION_IDENTITY_DIGEST_DOMAIN_V1: &[u8] = b"buildplane.plan-admission.identity.v1\0";
+
+/// Closed protected-control request to mint one `plan_admitted` event.
+///
+/// Unlike every other native admission control, a plan admission has no signed
+/// predecessor on the tape to replay (`kind.rs` carries no `plan_compiled` /
+/// `plan_validated` / `plan_previewed`), so its evidence is the exact
+/// content-addressed bytes named by `plan_content_ref`. This struct therefore
+/// carries the bytes themselves and **never a digest value**: the control
+/// digests what it was handed and refuses any object that does not hash to its
+/// own reference.
+///
+/// `trusted_base` and `decided_by` are facts a protected control derives from
+/// its own retained repository descriptor and its authenticated peer — never
+/// from a wire request. They arrive already derived because this storage
+/// surface is in-process to that control; the storage layer still refuses
+/// anything that is not shaped like the fact it claims to be.
+///
+/// The `asserted_*` fields are caller assertions recorded verbatim as
+/// non-authoritative metadata. `asserted_validation_status` is additionally a
+/// fail-closed input-hygiene precondition (it must assert `PASS`): recording a
+/// verdict this control cannot verify is honest, minting one it was never given
+/// is not.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PlanAdmissionRequestV1 {
+    pub run_id: RunId,
+    pub request_id: Uuid,
+    pub plan_content_ref: String,
+    pub plan_bytes: Vec<u8>,
+    pub trusted_base: String,
+    pub decided_by: String,
+    pub asserted_plan_digest: String,
+    pub asserted_idempotency_key: String,
+    pub asserted_validation_status: String,
+}
+
+/// Closed protected-control request to seal an already-recorded plan admission.
+/// The admission event, its projection, the complete signed prefix, and the
+/// checkpoint coverage are all re-derived by the ledger.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PlanAdmissionSealRequestV1 {
+    pub run_id: RunId,
+    pub admission_event_id: EventId,
+}
+
+/// Narrowly scoped authority for one plan-admission realm.
+///
+/// **Single kernel signer.** `PlanAdmittedV1` records the operator as a payload
+/// field and is signed by the kernel key, so this realm deliberately configures
+/// ONE identity for both the admission event and its sealing checkpoint. That
+/// is weaker than the V5 admission realm, whose three distinct identities stop
+/// a source-dispatch issuer from self-admitting: here there is no source
+/// dispatch and no second party, and every checkpoint on a buildplane tape is
+/// kernel-signed. The seal therefore buys prefix verifiability, not a second
+/// independent attestation — do not read it as separation of duties.
+#[derive(Clone, Debug)]
+pub struct PlanAdmissionAuthorityV1 {
+    trusted_keys: TrustedPublicKeys,
+    kernel_signer: ActorKeyRef,
+    ledger_authority_realm_digest: String,
+}
+
+impl PlanAdmissionAuthorityV1 {
+    /// Construct the plan-admission realm. The signer must carry the public key
+    /// hash it will be held to, so a later mint cannot silently substitute
+    /// different key material behind the same actor/key identity.
+    pub fn new_kernel_realm(
+        trusted_keys: TrustedPublicKeys,
+        kernel_signer: ActorKeyRef,
+        ledger_authority_realm_digest: String,
+    ) -> Result<Self> {
+        if !is_canonical_sha256_digest(&ledger_authority_realm_digest) {
+            return plan_admission_authority_rejected(
+                "plan admission authority realm digest must be canonical sha256",
+            );
+        }
+        if kernel_signer.actor_id.trim().is_empty() || kernel_signer.key_id.trim().is_empty() {
+            return plan_admission_authority_rejected(
+                "plan admission kernel signer must name a non-empty actor and key",
+            );
+        }
+        let Some(public_key_hash) = kernel_signer.public_key_hash.as_deref() else {
+            return plan_admission_authority_rejected(
+                "plan admission kernel signer must pin its public key hash",
+            );
+        };
+        if !is_canonical_sha256_digest(public_key_hash) {
+            return plan_admission_authority_rejected(
+                "plan admission kernel signer public key hash must be canonical sha256",
+            );
+        }
+        if trusted_keys.public_key_for(&kernel_signer).is_none() {
+            return plan_admission_authority_rejected(
+                "plan admission kernel signer key is not among the pinned trusted keys",
+            );
+        }
+        Ok(Self {
+            trusted_keys,
+            kernel_signer,
+            ledger_authority_realm_digest,
+        })
+    }
+}
+
+/// Durable state of one plan admission.
+///
+/// Both variants are **recovery evidence, not effect authority**, mirroring the
+/// V5 admission receipt. Sealing makes recovery and duplicate delivery
+/// verifiable; it does not turn the record into a dispatch capability.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PlanAdmissionDispositionV1 {
+    AwaitingCheckpoint {
+        admission_event_id: EventId,
+        admission_event_digest: String,
+        admission_identity_digest: String,
+        plan_id: String,
+        input_digest: String,
+    },
+    Sealed {
+        admission_event_id: EventId,
+        admission_event_digest: String,
+        admission_identity_digest: String,
+        plan_id: String,
+        input_digest: String,
+        checkpoint_event_id: EventId,
+        checkpoint_event_digest: String,
+    },
 }
 
 /// Closed, observation-only read of one already-persisted manifest-bound V5
@@ -3007,6 +3166,105 @@ impl SqliteStore {
                     SELECT RAISE(ABORT, 'governed promotion results are tape-backed: DELETE forbidden');
                 END;
 
+            -- Control-private projection for one minted PlanForge admission.
+            -- `plan_admitted` is always blocked on every public append path
+            -- (`validate_external_append`), so this row and its tape event are
+            -- created together by `record_plan_admission_v1` and can advance
+            -- exactly once, when `seal_plan_admission_v1` associates the
+            -- checkpoint that covers the complete signed prefix.
+            --
+            -- It is not effect authority on its own. The columns are split
+            -- deliberately: the derived block is what the control itself
+            -- computed, the `asserted_*` block is what a caller claimed and is
+            -- recorded verbatim as non-authoritative metadata. A later slice
+            -- records the plan -> per-task linkage here rather than in the
+            -- frozen 8-field payload.
+            --
+            -- CROSS-LANGUAGE COUPLING. `packages/kernel/src/admitted-plan-reader.ts`
+            -- opens this database directly over `node:sqlite` and reads this
+            -- schema by name: the table name `plan_admissions`, the
+            -- `admission_event_id` column it keys the lookup on, the `state`
+            -- column, and the `'sealed'` literal. Renaming any of them silently
+            -- disables every governed dispatch — the reader's lookup misses or
+            -- throws, either way resolving to not-sealed, so the kernel gate
+            -- refuses with a misleading "unsealed" diagnosis: a fail-closed
+            -- outage with no failing test on either side. A cross-language
+            -- drift test is deliberately deferred to S3/S6; until it exists,
+            -- treat any change to these four names as a coordinated
+            -- two-language change.
+            CREATE TABLE IF NOT EXISTS plan_admissions (
+                run_id                          TEXT NOT NULL,
+                request_id                      TEXT NOT NULL,
+                admission_identity_digest       TEXT NOT NULL,
+                plan_content_ref                TEXT NOT NULL,
+                plan_id                         TEXT NOT NULL,
+                input_digest                    TEXT NOT NULL,
+                trusted_base                    TEXT NOT NULL,
+                decided_by                      TEXT NOT NULL,
+                decided_at                      TEXT NOT NULL,
+                authorized_next_step            TEXT NOT NULL,
+                asserted_plan_digest            TEXT NOT NULL,
+                asserted_idempotency_key        TEXT NOT NULL,
+                asserted_validation_status      TEXT NOT NULL,
+                ledger_authority_realm_digest   TEXT NOT NULL,
+                admission_event_id              TEXT NOT NULL UNIQUE,
+                admission_event_digest          TEXT NOT NULL,
+                state                           TEXT NOT NULL CHECK(state IN ('awaiting_checkpoint', 'sealed')),
+                sealed_checkpoint_event_id      TEXT,
+                sealed_checkpoint_event_digest  TEXT,
+                created_at                      TEXT NOT NULL,
+                sealed_at                       TEXT,
+                PRIMARY KEY (run_id, request_id),
+                UNIQUE (run_id, admission_identity_digest),
+                FOREIGN KEY(admission_event_id) REFERENCES events(id),
+                FOREIGN KEY(sealed_checkpoint_event_id) REFERENCES events(id),
+                CHECK(
+                    (state = 'awaiting_checkpoint'
+                        AND sealed_checkpoint_event_id IS NULL
+                        AND sealed_checkpoint_event_digest IS NULL
+                        AND sealed_at IS NULL)
+                    OR
+                    (state = 'sealed'
+                        AND sealed_checkpoint_event_id IS NOT NULL
+                        AND sealed_checkpoint_event_digest IS NOT NULL
+                        AND sealed_at IS NOT NULL)
+                )
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_plan_admissions_state
+                ON plan_admissions(run_id, state);
+
+            CREATE TRIGGER IF NOT EXISTS plan_admissions_no_delete
+                BEFORE DELETE ON plan_admissions
+                BEGIN
+                    SELECT RAISE(ABORT, 'plan admissions are tape-backed: DELETE forbidden');
+                END;
+
+            CREATE TRIGGER IF NOT EXISTS plan_admissions_seal_only
+                BEFORE UPDATE ON plan_admissions
+                WHEN OLD.state != 'awaiting_checkpoint'
+                  OR NEW.state != 'sealed'
+                  OR OLD.run_id != NEW.run_id
+                  OR OLD.request_id != NEW.request_id
+                  OR OLD.admission_identity_digest != NEW.admission_identity_digest
+                  OR OLD.plan_content_ref != NEW.plan_content_ref
+                  OR OLD.plan_id != NEW.plan_id
+                  OR OLD.input_digest != NEW.input_digest
+                  OR OLD.trusted_base != NEW.trusted_base
+                  OR OLD.decided_by != NEW.decided_by
+                  OR OLD.decided_at != NEW.decided_at
+                  OR OLD.authorized_next_step != NEW.authorized_next_step
+                  OR OLD.asserted_plan_digest != NEW.asserted_plan_digest
+                  OR OLD.asserted_idempotency_key != NEW.asserted_idempotency_key
+                  OR OLD.asserted_validation_status != NEW.asserted_validation_status
+                  OR OLD.ledger_authority_realm_digest != NEW.ledger_authority_realm_digest
+                  OR OLD.admission_event_id != NEW.admission_event_id
+                  OR OLD.admission_event_digest != NEW.admission_event_digest
+                  OR OLD.created_at != NEW.created_at
+                BEGIN
+                    SELECT RAISE(ABORT, 'plan admissions advance once: only the checkpoint seal transition is permitted');
+                END;
+
             "#,
         )?;
         ensure_governed_dispatch_admission_identity_guard_v2(conn)?;
@@ -3071,19 +3329,24 @@ impl SqliteStore {
     ///     [`Self::record_governed_dispatch_v5_admission_v1`] and its promotion
     ///     sibling, which re-derive raw signed witness evidence — a generic
     ///     append of either could poison receipt reconciliation. `plan_admitted`
-    ///     joins them ahead of its own mint control: the wire guard
+    ///     joins them under its own dedicated mint pair,
+    ///     [`Self::record_plan_admission_v1`] and
+    ///     [`Self::seal_plan_admission_v1`], which derive the admission's own
+    ///     fields and seal it under a covering checkpoint. It is blocked here
+    ///     because the wire guard
     ///     (`serve::reject_caller_supplied_authority_event`) refuses it only on
     ///     the signed lane, which left the unsigned lane able to land a PlanForge
     ///     admission no control had ever authorized. It is the first
     ///     signed-only-tier wire kind that is also always blocked here; the
     ///     asymmetry is deliberate and does not move the kind's wire tier.
-    /// (b2) Reject a `PlanAdmittedV1` *payload* whatever kind its envelope
-    ///     declares. (b) reads a caller-chosen label, while replay dispatches on
-    ///     the payload variant, so label and payload must both be refused for
-    ///     the mint to be the only writer. Scoped to `plan_admitted`: generalizing
-    ///     this to every trust-spine payload (or enforcing kind/payload agreement
-    ///     here outright) is a wider change than closing this hole and is left to
-    ///     the mint slice.
+    /// (b2) Reject the *payload variant* of every always-blocked kind, whatever
+    ///     kind its envelope declares. (a) and (b) read a caller-chosen label,
+    ///     while replay dispatches on the payload variant, so label and payload
+    ///     must both be refused for a dedicated control to be the only writer.
+    ///     S1 scoped this to `plan_admitted`; the mint slice generalizes it to
+    ///     the whole always-blocked set, so the two halves cannot drift apart
+    ///     again. Enforcing kind/payload agreement here outright remains a wider
+    ///     change and is still out of scope.
     /// (c) Per-run strictly-monotonic ordinary-event id: reject an ordinary
     ///     event whose id is `<=` the latest NON-checkpoint event id for the
     ///     same run. Checkpoint ids never constrain the ordinary sequence (an
@@ -3106,29 +3369,16 @@ impl SqliteStore {
     /// out of scope here and noted for whoever lifts the single-writer
     /// assumption.
     fn validate_external_append(&self, event: &Event) -> Result<()> {
-        if event.kind == EventKind::TapeCheckpoint {
+        // Both halves of the checkpoint block: the envelope label a caller
+        // chooses, and the payload variant replay actually dispatches on.
+        if event.kind == EventKind::TapeCheckpoint
+            || matches!(event.payload, Payload::TapeCheckpointV1(_))
+        {
             return Err(LedgerError::CallerSuppliedCheckpoint);
         }
-        if matches!(
-            event.kind,
-            EventKind::GovernedDispatchV5AdmissionRecordedV1
-                | EventKind::PromotionReconciliationResolved
-                | EventKind::PlanAdmitted
-        ) {
+        if let Some(blocked) = always_blocked_trust_spine_kind(event) {
             return Err(LedgerError::CallerSuppliedTrustSpineEvent {
-                kind: event.kind.as_wire().to_string(),
-            });
-        }
-        // The check above reads the envelope label, which a caller of this API
-        // chooses freely. `bp-replay` dispatches on the payload variant and
-        // never consults `event.kind`, so a plan-admission payload declared
-        // under a permitted kind would still replay as a genuine admission.
-        // Production writers canonicalize first, which enforces kind/payload
-        // agreement, but the mint's exclusivity must not rest on callers
-        // honouring that.
-        if matches!(event.payload, Payload::PlanAdmittedV1(_)) {
-            return Err(LedgerError::CallerSuppliedTrustSpineEvent {
-                kind: EventKind::PlanAdmitted.as_wire().to_string(),
+                kind: blocked.as_wire().to_string(),
             });
         }
         if let Some(latest) = self.latest_ordinary_id(&event.run_id)? {
@@ -7248,6 +7498,306 @@ impl SqliteStore {
         })?;
         let disposition =
             sealed_governed_dispatch_v5_admission_disposition(&tx, &sealed, authority)?;
+        tx.commit()?;
+        Ok(disposition)
+    }
+
+    /// Record (or resolve) one kernel-signed PlanForge admission.
+    ///
+    /// This is the dedicated native control the generic ingest guard names:
+    /// `plan_admitted` is refused on every public append path, and this method
+    /// deliberately does not call `validate_external_append`, re-asserting only
+    /// the narrow invariant that guard also carried (a strictly monotonic
+    /// ordinary event id) before inserting through the private
+    /// `insert_event`/`insert_event_signature` pair.
+    ///
+    /// Every field the control can derive, it derives:
+    /// `input_digest` from the exact bytes it was handed (refusing any object
+    /// that does not hash to its own content reference), `plan_id` from that
+    /// digest, and `decided_at` from this control's clock. `plan_digest` and
+    /// `idempotency_key` are recorded verbatim as caller assertions because
+    /// their PlanForge schemes are not natively reproducible; they are never
+    /// the identity a retry resolves against.
+    ///
+    /// The returned record is intentionally recovery evidence, not effect
+    /// authority, matching the V5 admission receipt and the projection's own
+    /// contract.
+    pub fn record_plan_admission_v1(
+        &self,
+        request: &PlanAdmissionRequestV1,
+        authority: &PlanAdmissionAuthorityV1,
+        signing_key: &SigningKey,
+        signer: &ActorKeyRef,
+    ) -> Result<PlanAdmissionDispositionV1> {
+        validate_plan_admission_signer(authority, signing_key, signer)?;
+        validate_plan_admission_request_shape(request)?;
+        let derived = derive_plan_admission_content_v1(request)?;
+
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        if let Some(stored) = plan_admission_by_request(&tx, request.run_id, request.request_id)? {
+            let disposition =
+                resolve_existing_plan_admission(&tx, &stored, request, &derived, authority)?;
+            tx.commit()?;
+            return Ok(disposition);
+        }
+        if plan_admission_by_identity(&tx, request.run_id, &derived.admission_identity_digest)?
+            .is_some()
+        {
+            return Err(plan_admission_identity_conflict(request));
+        }
+
+        let occurred_at = canonical_ledger_timestamp(Utc::now())?;
+        let decided_at = timestamp(occurred_at);
+        let payload = PlanAdmittedV1 {
+            plan_id: derived.plan_id.clone(),
+            plan_digest: request.asserted_plan_digest.clone(),
+            input_digest: derived.input_digest.clone(),
+            trusted_base: request.trusted_base.clone(),
+            decided_by: request.decided_by.clone(),
+            decided_at: decided_at.clone(),
+            idempotency_key: request.asserted_idempotency_key.clone(),
+            authorized_next_step: PLAN_ADMISSION_AUTHORIZED_NEXT_STEP_V1.to_string(),
+        };
+        let event = canonicalize(Event {
+            id: EventId::new(),
+            run_id: request.run_id,
+            // There is no predecessor kind for a plan admission: the digests it
+            // summarizes are computed off-tape, so nothing on the tape precedes
+            // it. Every existing `plan_admitted` construction site agrees.
+            parent_event_id: None,
+            schema_version: Event::CURRENT_SCHEMA_VERSION,
+            kind: EventKind::PlanAdmitted,
+            occurred_at,
+            payload: Payload::PlanAdmittedV1(payload),
+        })?;
+        validate_new_ordinary_event_id(&tx, &event)?;
+        let signature = sign_event(&event, signing_key, signer, occurred_at)?;
+        let admission_event_digest = signature.canonical_event_hash.clone();
+        insert_event(&tx, &event)?;
+        insert_event_signature(&tx, &signature)?;
+        insert_plan_admission(
+            &tx,
+            request,
+            &derived,
+            authority,
+            &event,
+            &decided_at,
+            &admission_event_digest,
+        )?;
+        tx.commit()?;
+        self.record_ordinary_append(&event);
+
+        Ok(PlanAdmissionDispositionV1::AwaitingCheckpoint {
+            admission_event_id: event.id,
+            admission_event_digest,
+            admission_identity_digest: derived.admission_identity_digest,
+            plan_id: derived.plan_id,
+            input_digest: derived.input_digest,
+        })
+    }
+
+    /// Seal one plan admission with the exact current signed tape prefix. The
+    /// admission remains non-effect evidence after sealing; this only makes
+    /// recovery and duplicate delivery verifiable.
+    pub fn seal_plan_admission_v1(
+        &self,
+        request: &PlanAdmissionSealRequestV1,
+        authority: &PlanAdmissionAuthorityV1,
+        checkpoint_signing_key: &SigningKey,
+        checkpoint_signer: &ActorKeyRef,
+    ) -> Result<PlanAdmissionDispositionV1> {
+        validate_plan_admission_signer(authority, checkpoint_signing_key, checkpoint_signer)?;
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let stored =
+            plan_admission_by_admission_event(&tx, request.run_id, request.admission_event_id)?
+                .ok_or_else(|| LedgerError::PlanAdmissionReconciliationRequired {
+                    run_id: request.run_id.to_string(),
+                    request_id: "unknown".into(),
+                    reason: "plan admission has no native projection".into(),
+                })?;
+        verify_stored_plan_admission(&tx, &stored, authority)?;
+        if stored.state == StoredPlanAdmissionState::Sealed {
+            let disposition = sealed_plan_admission_disposition(&tx, &stored, authority)?;
+            tx.commit()?;
+            return Ok(disposition);
+        }
+        tx.commit()?;
+
+        let seal = self.seal_plan_admission_prefix(
+            &stored,
+            authority,
+            checkpoint_signing_key,
+            checkpoint_signer,
+        )?;
+        let checkpoint_event_id = match seal {
+            GovernedCheckpointSealOutcome::AlreadySealed {
+                checkpoint_event_id,
+            }
+            | GovernedCheckpointSealOutcome::Emitted {
+                checkpoint_event_id,
+            } => checkpoint_event_id,
+            GovernedCheckpointSealOutcome::EmptyPrefix => {
+                return Err(plan_admission_reconciliation_required(
+                    &stored,
+                    "plan admission checkpoint sealing found no signed ordinary-event prefix",
+                ));
+            }
+        };
+        let checkpoint = fully_covering_plan_admission_checkpoint(
+            &self.conn,
+            &stored,
+            authority,
+        )?
+        .ok_or_else(|| {
+            plan_admission_reconciliation_required(
+                &stored,
+                "plan admission checkpoint sealing did not cover the current complete signed prefix",
+            )
+        })?;
+        if checkpoint.event_id != checkpoint_event_id {
+            return Err(plan_admission_reconciliation_required(
+                &stored,
+                "a concurrent checkpoint changed the sealed plan admission prefix; reopen trusted recovery before proceeding",
+            ));
+        }
+        self.mark_plan_admission_sealed(&stored, authority, &checkpoint)
+    }
+
+    /// Read-only reopen of one already-sealed plan admission.
+    ///
+    /// This exists so a postcondition verifier can confirm the exact sealed
+    /// evidence from a freshly opened durable connection rather than from the
+    /// handle that performed the write. It never mutates and never resolves an
+    /// `awaiting_checkpoint` record.
+    pub fn resolve_sealed_plan_admission_v1(
+        &self,
+        run_id: RunId,
+        admission_event_id: EventId,
+        authority: &PlanAdmissionAuthorityV1,
+    ) -> Result<PlanAdmissionDispositionV1> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Deferred)?;
+        let stored = plan_admission_by_admission_event(&tx, run_id, admission_event_id)?
+            .ok_or_else(|| LedgerError::PlanAdmissionReconciliationRequired {
+                run_id: run_id.to_string(),
+                request_id: "unknown".into(),
+                reason: "plan admission has no native projection".into(),
+            })?;
+        verify_stored_plan_admission(&tx, &stored, authority)?;
+        if stored.state != StoredPlanAdmissionState::Sealed {
+            return Err(plan_admission_reconciliation_required(
+                &stored,
+                "plan admission is awaiting its checkpoint seal",
+            ));
+        }
+        let disposition = sealed_plan_admission_disposition(&tx, &stored, authority)?;
+        tx.commit()?;
+        Ok(disposition)
+    }
+
+    fn seal_plan_admission_prefix(
+        &self,
+        expected: &StoredPlanAdmission,
+        authority: &PlanAdmissionAuthorityV1,
+        checkpoint_signing_key: &SigningKey,
+        checkpoint_signer: &ActorKeyRef,
+    ) -> Result<GovernedCheckpointSealOutcome> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let current =
+            plan_admission_by_admission_event(&tx, expected.run_id, expected.admission_event_id)?
+                .ok_or_else(|| {
+                plan_admission_reconciliation_required(
+                    expected,
+                    "plan admission projection disappeared before checkpoint sealing",
+                )
+            })?;
+        verify_stored_plan_admission(&tx, &current, authority)?;
+        let outcome = self.seal_governed_signed_prefix_in_transaction(
+            &tx,
+            &current.run_id,
+            checkpoint_signing_key,
+            checkpoint_signer,
+        )?;
+        tx.commit()?;
+        Ok(outcome)
+    }
+
+    fn mark_plan_admission_sealed(
+        &self,
+        expected: &StoredPlanAdmission,
+        authority: &PlanAdmissionAuthorityV1,
+        checkpoint: &PlanAdmissionCheckpointEvidence,
+    ) -> Result<PlanAdmissionDispositionV1> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let current =
+            plan_admission_by_admission_event(&tx, expected.run_id, expected.admission_event_id)?
+                .ok_or_else(|| {
+                plan_admission_reconciliation_required(
+                    expected,
+                    "plan admission projection disappeared before checkpoint association",
+                )
+            })?;
+        verify_stored_plan_admission(&tx, &current, authority)?;
+        match current.state {
+            StoredPlanAdmissionState::Sealed => {
+                let current_checkpoint =
+                    sealed_plan_admission_checkpoint(&tx, &current, authority)?;
+                if current_checkpoint != *checkpoint {
+                    return Err(plan_admission_reconciliation_required(
+                        &current,
+                        "plan admission was sealed by a different checkpoint; reopen trusted recovery before proceeding",
+                    ));
+                }
+            }
+            StoredPlanAdmissionState::AwaitingCheckpoint => {
+                let current_complete_checkpoint =
+                    fully_covering_plan_admission_checkpoint(&tx, &current, authority)?
+                        .ok_or_else(|| {
+                            plan_admission_reconciliation_required(
+                        &current,
+                        "checkpoint no longer covers the current complete plan admission prefix",
+                    )
+                        })?;
+                if current_complete_checkpoint != *checkpoint {
+                    return Err(plan_admission_reconciliation_required(
+                        &current,
+                        "checkpoint changed before the plan admission seal transition",
+                    ));
+                }
+                verify_plan_admission_checkpoint_covers(&tx, &current, checkpoint, authority)?;
+                let updated = tx.execute(
+                    r#"UPDATE plan_admissions
+                       SET state = 'sealed',
+                           sealed_checkpoint_event_id = ?1,
+                           sealed_checkpoint_event_digest = ?2,
+                           sealed_at = ?3
+                       WHERE run_id = ?4
+                         AND request_id = ?5
+                         AND state = 'awaiting_checkpoint'"#,
+                    params![
+                        checkpoint.event_id.to_string(),
+                        &checkpoint.event_digest,
+                        timestamp(Utc::now()),
+                        current.run_id.to_string(),
+                        current.request_id.to_string(),
+                    ],
+                )?;
+                if updated != 1 {
+                    return Err(plan_admission_reconciliation_required(
+                        &current,
+                        "checkpoint seal did not advance exactly one plan admission projection",
+                    ));
+                }
+            }
+        }
+        let sealed =
+            plan_admission_by_admission_event(&tx, expected.run_id, expected.admission_event_id)?
+                .ok_or_else(|| {
+                plan_admission_reconciliation_required(
+                    expected,
+                    "plan admission projection disappeared after checkpoint association",
+                )
+            })?;
+        let disposition = sealed_plan_admission_disposition(&tx, &sealed, authority)?;
         tx.commit()?;
         Ok(disposition)
     }
@@ -21963,6 +22513,849 @@ fn sealed_governed_dispatch_v5_admission_disposition(
         checkpoint_event_id: checkpoint.event_id,
         checkpoint_event_digest: checkpoint.event_digest,
     })
+}
+
+/// The trust-spine kinds `validate_external_append` blocks on EVERY public
+/// append path, in EVERY signing mode. Each is minted only by a dedicated
+/// native control that first replays and verifies the evidence it summarizes.
+///
+/// `tape_checkpoint` is blocked too but carries its own error variant, so it is
+/// handled separately rather than folded in here.
+pub(crate) const ALWAYS_BLOCKED_TRUST_SPINE_KINDS: [EventKind; 3] = [
+    EventKind::GovernedDispatchV5AdmissionRecordedV1,
+    EventKind::PromotionReconciliationResolved,
+    EventKind::PlanAdmitted,
+];
+
+/// Classify an inbound event against the always-blocked set by BOTH its
+/// envelope label and its payload variant.
+///
+/// The label is caller-chosen, and `bp-replay` dispatches on the payload
+/// variant without ever consulting `event.kind` (`transitions.rs`
+/// `apply_with_verified_signer`), so a trust-spine payload declared under a
+/// permitted kind would still replay as the genuine record. Production writers
+/// canonicalize first, which enforces kind/payload agreement — but a dedicated
+/// control's exclusivity must not rest on callers honouring that.
+fn always_blocked_trust_spine_kind(event: &Event) -> Option<EventKind> {
+    if ALWAYS_BLOCKED_TRUST_SPINE_KINDS.contains(&event.kind) {
+        return Some(event.kind);
+    }
+    match event.payload {
+        Payload::GovernedDispatchV5AdmissionRecordedV1(_) => {
+            Some(EventKind::GovernedDispatchV5AdmissionRecordedV1)
+        }
+        Payload::PromotionReconciliationResolvedV1(_) => {
+            Some(EventKind::PromotionReconciliationResolved)
+        }
+        Payload::PlanAdmittedV1(_) => Some(EventKind::PlanAdmitted),
+        _ => None,
+    }
+}
+
+const PLAN_ADMISSION_COLUMNS: &str = "run_id, request_id, admission_identity_digest, \
+     plan_content_ref, plan_id, input_digest, trusted_base, decided_by, decided_at, \
+     authorized_next_step, asserted_plan_digest, asserted_idempotency_key, \
+     asserted_validation_status, ledger_authority_realm_digest, admission_event_id, \
+     admission_event_digest, state, sealed_checkpoint_event_id, sealed_checkpoint_event_digest";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StoredPlanAdmissionState {
+    AwaitingCheckpoint,
+    Sealed,
+}
+
+#[derive(Clone, Debug)]
+struct StoredPlanAdmission {
+    run_id: RunId,
+    request_id: Uuid,
+    admission_identity_digest: String,
+    plan_content_ref: String,
+    plan_id: String,
+    input_digest: String,
+    trusted_base: String,
+    decided_by: String,
+    decided_at: String,
+    authorized_next_step: String,
+    asserted_plan_digest: String,
+    asserted_idempotency_key: String,
+    asserted_validation_status: String,
+    ledger_authority_realm_digest: String,
+    admission_event_id: EventId,
+    admission_event_digest: String,
+    state: StoredPlanAdmissionState,
+    sealed_checkpoint_event_id: Option<EventId>,
+    sealed_checkpoint_event_digest: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PlanAdmissionCheckpointEvidence {
+    event_id: EventId,
+    event_digest: String,
+}
+
+/// The facts the mint derives for itself from the exact content it loaded.
+/// Nothing in here can be chosen by a caller.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DerivedPlanAdmissionContent {
+    input_digest: String,
+    plan_id: String,
+    admission_identity_digest: String,
+}
+
+#[derive(serde::Serialize)]
+struct PlanAdmissionIdentityDigestMaterial<'a> {
+    run_id: String,
+    request_id: String,
+    input_digest: &'a str,
+}
+
+fn plan_admission_authority_rejected<T>(reason: impl Into<String>) -> Result<T> {
+    Err(LedgerError::PlanAdmissionAuthorityRejected {
+        reason: reason.into(),
+    })
+}
+
+fn plan_admission_reconciliation_required(
+    stored: &StoredPlanAdmission,
+    reason: impl Into<String>,
+) -> LedgerError {
+    LedgerError::PlanAdmissionReconciliationRequired {
+        run_id: stored.run_id.to_string(),
+        request_id: stored.request_id.to_string(),
+        reason: reason.into(),
+    }
+}
+
+fn plan_admission_identity_conflict(request: &PlanAdmissionRequestV1) -> LedgerError {
+    LedgerError::PlanAdmissionIdempotencyConflict {
+        run_id: request.run_id.to_string(),
+        request_id: request.request_id.to_string(),
+    }
+}
+
+/// The single configured kernel identity signs both the admission event and its
+/// sealing checkpoint (see `PlanAdmissionAuthorityV1`), so one validator serves
+/// both phases and neither phase can quietly use different key material.
+fn validate_plan_admission_signer(
+    authority: &PlanAdmissionAuthorityV1,
+    signing_key: &SigningKey,
+    signer: &ActorKeyRef,
+) -> Result<()> {
+    let actual_public_key_hash = public_key_hash(&signing_key.verifying_key());
+    let expected = &authority.kernel_signer;
+    if signer.actor_id != expected.actor_id
+        || signer.key_id != expected.key_id
+        || expected.public_key_hash.as_deref() != Some(actual_public_key_hash.as_str())
+    {
+        return plan_admission_authority_rejected(
+            "signer does not match the explicitly configured plan-admission kernel authority",
+        );
+    }
+    Ok(())
+}
+
+/// Fail-closed hygiene on the request block the control cannot verify.
+///
+/// None of these checks make a caller assertion true; they refuse a request
+/// that is not even shaped like the fact it claims. The validation status is
+/// the one operator-ratified precondition (it must assert `PASS`) and is still
+/// recorded as caller-asserted, non-authoritative metadata.
+fn validate_plan_admission_request_shape(request: &PlanAdmissionRequestV1) -> Result<()> {
+    if !is_canonical_git_commit_sha(&request.trusted_base) {
+        return plan_admission_authority_rejected(
+            "plan admission trusted base must be a canonical git commit sha",
+        );
+    }
+    if request.decided_by.trim().is_empty()
+        || request
+            .decided_by
+            .chars()
+            .any(|character| character.is_control())
+    {
+        return plan_admission_authority_rejected(
+            "plan admission decided_by must be a non-empty single-line identity",
+        );
+    }
+    if !is_canonical_sha256_digest(&request.asserted_plan_digest) {
+        return plan_admission_authority_rejected(
+            "asserted plan digest must be canonical sha256 to be recorded",
+        );
+    }
+    if request.asserted_idempotency_key.trim().is_empty()
+        || request
+            .asserted_idempotency_key
+            .chars()
+            .any(|character| character.is_control())
+    {
+        return plan_admission_authority_rejected(
+            "asserted idempotency key must be a non-empty single-line value to be recorded",
+        );
+    }
+    if request.asserted_validation_status != "PASS" {
+        return plan_admission_authority_rejected(
+            "plan admission requires an asserted validation status of PASS; the status stays advisory and is never a verified claim",
+        );
+    }
+    Ok(())
+}
+
+/// Digest the bytes the control was handed and refuse anything that does not
+/// hash to its own content reference.
+///
+/// The caller names a reference, never a digest value. A mis-staged or
+/// substituted object therefore cannot become a forged admission: it either
+/// fails this check outright, or (under a different reference) produces a
+/// different admission identity.
+fn derive_plan_admission_content_v1(
+    request: &PlanAdmissionRequestV1,
+) -> Result<DerivedPlanAdmissionContent> {
+    if request.plan_bytes.is_empty() {
+        return Err(LedgerError::PlanInputRejected {
+            reason: "compiled plan content is empty".into(),
+        });
+    }
+    if request.plan_bytes.len() > MAX_PLAN_ADMISSION_INPUT_BYTES {
+        return Err(LedgerError::PlanInputRejected {
+            reason: format!(
+                "compiled plan content exceeds the {MAX_PLAN_ADMISSION_INPUT_BYTES}-byte admission bound"
+            ),
+        });
+    }
+    if std::str::from_utf8(&request.plan_bytes).is_err() {
+        return Err(LedgerError::PlanInputRejected {
+            reason: "compiled plan content is not valid UTF-8".into(),
+        });
+    }
+    let Some(referenced_digest) = request.plan_content_ref.strip_prefix("cas://") else {
+        return Err(LedgerError::PlanInputRejected {
+            reason: "plan content reference must be a canonical cas:// reference".into(),
+        });
+    };
+    if !is_canonical_sha256_digest(referenced_digest) {
+        return Err(LedgerError::PlanInputRejected {
+            reason: "plan content reference must name a canonical sha256 object".into(),
+        });
+    }
+    let input_digest = format!("sha256:{:x}", Sha256::digest(&request.plan_bytes));
+    if input_digest != referenced_digest {
+        return Err(LedgerError::PlanInputDigestMismatch {
+            expected: referenced_digest.to_string(),
+            actual: input_digest,
+        });
+    }
+
+    let mut plan_id_hasher = Sha256::new();
+    plan_id_hasher.update(PLAN_ADMISSION_PLAN_ID_DOMAIN_V1);
+    plan_id_hasher.update(input_digest.as_bytes());
+    let plan_id_digest = format!("{:x}", plan_id_hasher.finalize());
+    let plan_id = format!(
+        "{PLAN_ADMISSION_NATIVE_PLAN_ID_PREFIX}{}",
+        &plan_id_digest[..32]
+    );
+
+    let material = PlanAdmissionIdentityDigestMaterial {
+        run_id: request.run_id.to_string(),
+        request_id: request.request_id.to_string(),
+        input_digest: &input_digest,
+    };
+    let bytes = serde_json::to_vec(&material)?;
+    let mut identity_hasher = Sha256::new();
+    identity_hasher.update(PLAN_ADMISSION_IDENTITY_DIGEST_DOMAIN_V1);
+    identity_hasher.update(bytes);
+    let admission_identity_digest = format!("sha256:{:x}", identity_hasher.finalize());
+
+    Ok(DerivedPlanAdmissionContent {
+        input_digest,
+        plan_id,
+        admission_identity_digest,
+    })
+}
+
+fn stored_plan_admission_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<StoredPlanAdmission> {
+    let run_id: String = row.get(0)?;
+    let request_id: String = row.get(1)?;
+    let admission_event_id: String = row.get(14)?;
+    let state: String = row.get(16)?;
+    let sealed_checkpoint_event_id: Option<String> = row.get(17)?;
+    let invalid = |column: usize, message: &str| {
+        rusqlite::Error::FromSqlConversionFailure(
+            column,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                message.to_string(),
+            )),
+        )
+    };
+    Ok(StoredPlanAdmission {
+        run_id: RunId::from_uuid(
+            Uuid::parse_str(&run_id).map_err(|_| invalid(0, "plan admission run id"))?,
+        ),
+        request_id: Uuid::parse_str(&request_id)
+            .map_err(|_| invalid(1, "plan admission request id"))?,
+        admission_identity_digest: row.get(2)?,
+        plan_content_ref: row.get(3)?,
+        plan_id: row.get(4)?,
+        input_digest: row.get(5)?,
+        trusted_base: row.get(6)?,
+        decided_by: row.get(7)?,
+        decided_at: row.get(8)?,
+        authorized_next_step: row.get(9)?,
+        asserted_plan_digest: row.get(10)?,
+        asserted_idempotency_key: row.get(11)?,
+        asserted_validation_status: row.get(12)?,
+        ledger_authority_realm_digest: row.get(13)?,
+        admission_event_id: EventId::from_uuid(
+            Uuid::parse_str(&admission_event_id)
+                .map_err(|_| invalid(14, "plan admission event id"))?,
+        ),
+        admission_event_digest: row.get(15)?,
+        state: match state.as_str() {
+            "awaiting_checkpoint" => StoredPlanAdmissionState::AwaitingCheckpoint,
+            "sealed" => StoredPlanAdmissionState::Sealed,
+            _ => return Err(invalid(16, "plan admission state")),
+        },
+        sealed_checkpoint_event_id: sealed_checkpoint_event_id
+            .map(|value| {
+                Uuid::parse_str(&value)
+                    .map(EventId::from_uuid)
+                    .map_err(|_| invalid(17, "plan admission checkpoint event id"))
+            })
+            .transpose()?,
+        sealed_checkpoint_event_digest: row.get(18)?,
+    })
+}
+
+fn plan_admission_by_request(
+    conn: &Connection,
+    run_id: RunId,
+    request_id: Uuid,
+) -> Result<Option<StoredPlanAdmission>> {
+    let query = format!(
+        "SELECT {PLAN_ADMISSION_COLUMNS} FROM plan_admissions \
+         WHERE run_id = ?1 AND request_id = ?2"
+    );
+    conn.query_row(
+        &query,
+        params![run_id.to_string(), request_id.to_string()],
+        stored_plan_admission_from_row,
+    )
+    .optional()
+    .map_err(LedgerError::from)
+}
+
+fn plan_admission_by_identity(
+    conn: &Connection,
+    run_id: RunId,
+    admission_identity_digest: &str,
+) -> Result<Option<StoredPlanAdmission>> {
+    let query = format!(
+        "SELECT {PLAN_ADMISSION_COLUMNS} FROM plan_admissions \
+         WHERE run_id = ?1 AND admission_identity_digest = ?2"
+    );
+    conn.query_row(
+        &query,
+        params![run_id.to_string(), admission_identity_digest],
+        stored_plan_admission_from_row,
+    )
+    .optional()
+    .map_err(LedgerError::from)
+}
+
+fn plan_admission_by_admission_event(
+    conn: &Connection,
+    run_id: RunId,
+    admission_event_id: EventId,
+) -> Result<Option<StoredPlanAdmission>> {
+    let query = format!(
+        "SELECT {PLAN_ADMISSION_COLUMNS} FROM plan_admissions \
+         WHERE run_id = ?1 AND admission_event_id = ?2"
+    );
+    conn.query_row(
+        &query,
+        params![run_id.to_string(), admission_event_id.to_string()],
+        stored_plan_admission_from_row,
+    )
+    .optional()
+    .map_err(LedgerError::from)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn insert_plan_admission(
+    conn: &Connection,
+    request: &PlanAdmissionRequestV1,
+    derived: &DerivedPlanAdmissionContent,
+    authority: &PlanAdmissionAuthorityV1,
+    event: &Event,
+    decided_at: &str,
+    admission_event_digest: &str,
+) -> Result<()> {
+    conn.execute(
+        r#"INSERT INTO plan_admissions (
+                run_id, request_id, admission_identity_digest, plan_content_ref, plan_id,
+                input_digest, trusted_base, decided_by, decided_at, authorized_next_step,
+                asserted_plan_digest, asserted_idempotency_key, asserted_validation_status,
+                ledger_authority_realm_digest, admission_event_id, admission_event_digest,
+                state, created_at
+            ) VALUES (
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
+                'awaiting_checkpoint', ?17
+            )"#,
+        params![
+            request.run_id.to_string(),
+            request.request_id.to_string(),
+            &derived.admission_identity_digest,
+            &request.plan_content_ref,
+            &derived.plan_id,
+            &derived.input_digest,
+            &request.trusted_base,
+            &request.decided_by,
+            decided_at,
+            PLAN_ADMISSION_AUTHORIZED_NEXT_STEP_V1,
+            &request.asserted_plan_digest,
+            &request.asserted_idempotency_key,
+            &request.asserted_validation_status,
+            &authority.ledger_authority_realm_digest,
+            event.id.to_string(),
+            admission_event_digest,
+            event.occurred_at.to_rfc3339(),
+        ],
+    )?;
+    Ok(())
+}
+
+/// Reload the signed admission event this projection claims and prove the row
+/// is an exact projection of it.
+///
+/// A plan admission has no signed predecessor to replay, so the strongest
+/// available re-derivation is this one: the row must name a real, canonical,
+/// kernel-signed `plan_admitted` whose every payload field equals the row.
+fn load_verified_plan_admission_event(
+    conn: &Connection,
+    stored: &StoredPlanAdmission,
+    authority: &PlanAdmissionAuthorityV1,
+) -> Result<Event> {
+    let Some((event, signature)) = event_and_signature_by_id(conn, stored.admission_event_id)?
+    else {
+        return Err(plan_admission_reconciliation_required(
+            stored,
+            "plan admission event is missing from the tape",
+        ));
+    };
+    let Some(signature) = signature else {
+        return Err(plan_admission_reconciliation_required(
+            stored,
+            "plan admission event is unsigned",
+        ));
+    };
+    let event = canonicalize(event).map_err(|error| {
+        plan_admission_reconciliation_required(
+            stored,
+            format!("plan admission event is not canonical: {error}"),
+        )
+    })?;
+    if !actor_matches(&authority.kernel_signer, &signature.signer)
+        || verify_event_signature(&event, &signature, &authority.trusted_keys)
+            != VerificationStatus::Verified
+    {
+        return Err(plan_admission_reconciliation_required(
+            stored,
+            "plan admission event signature is not verified for the configured kernel authority",
+        ));
+    }
+    let event_digest = canonical_event_hash(&event).map_err(|error| {
+        plan_admission_reconciliation_required(
+            stored,
+            format!("could not canonicalize plan admission event: {error}"),
+        )
+    })?;
+    if signature.canonical_event_hash != event_digest
+        || event_digest != stored.admission_event_digest
+    {
+        return Err(plan_admission_reconciliation_required(
+            stored,
+            "plan admission event digest does not match its immutable projection",
+        ));
+    }
+    Ok(event)
+}
+
+fn verify_stored_plan_admission(
+    conn: &Connection,
+    stored: &StoredPlanAdmission,
+    authority: &PlanAdmissionAuthorityV1,
+) -> Result<()> {
+    if stored.ledger_authority_realm_digest != authority.ledger_authority_realm_digest {
+        return Err(plan_admission_reconciliation_required(
+            stored,
+            "plan admission projection belongs to a different ledger authority realm",
+        ));
+    }
+    let event = load_verified_plan_admission_event(conn, stored, authority)?;
+    if event.run_id != stored.run_id
+        || event.kind != EventKind::PlanAdmitted
+        || event.parent_event_id.is_some()
+    {
+        return Err(plan_admission_reconciliation_required(
+            stored,
+            "plan admission event identity does not match its native projection",
+        ));
+    }
+    let Payload::PlanAdmittedV1(payload) = &event.payload else {
+        return Err(plan_admission_reconciliation_required(
+            stored,
+            "plan admission event does not carry a PlanAdmittedV1 payload",
+        ));
+    };
+    if payload.plan_id != stored.plan_id
+        || payload.plan_digest != stored.asserted_plan_digest
+        || payload.input_digest != stored.input_digest
+        || payload.trusted_base != stored.trusted_base
+        || payload.decided_by != stored.decided_by
+        || payload.decided_at != stored.decided_at
+        || payload.idempotency_key != stored.asserted_idempotency_key
+        || payload.authorized_next_step != stored.authorized_next_step
+        || payload.authorized_next_step != PLAN_ADMISSION_AUTHORIZED_NEXT_STEP_V1
+    {
+        return Err(plan_admission_reconciliation_required(
+            stored,
+            "plan admission projection does not exactly match its signed tape event",
+        ));
+    }
+    Ok(())
+}
+
+/// Resolve a retry against an existing record.
+///
+/// Identity-first: a request id already claimed by a *different* identity is a
+/// conflict, never a silent second admission. Everything else the control
+/// derived must still agree with the row, otherwise this is reconciliation
+/// evidence rather than a legitimate retry. `decided_at` is deliberately not
+/// compared against a fresh clock — the recorded value is the fact.
+fn resolve_existing_plan_admission(
+    conn: &Connection,
+    stored: &StoredPlanAdmission,
+    request: &PlanAdmissionRequestV1,
+    derived: &DerivedPlanAdmissionContent,
+    authority: &PlanAdmissionAuthorityV1,
+) -> Result<PlanAdmissionDispositionV1> {
+    if stored.admission_identity_digest != derived.admission_identity_digest {
+        return Err(plan_admission_identity_conflict(request));
+    }
+    verify_stored_plan_admission(conn, stored, authority)?;
+    if stored.run_id != request.run_id
+        || stored.request_id != request.request_id
+        || stored.plan_content_ref != request.plan_content_ref
+        || stored.plan_id != derived.plan_id
+        || stored.input_digest != derived.input_digest
+        || stored.trusted_base != request.trusted_base
+        || stored.decided_by != request.decided_by
+        || stored.asserted_plan_digest != request.asserted_plan_digest
+        || stored.asserted_idempotency_key != request.asserted_idempotency_key
+        || stored.asserted_validation_status != request.asserted_validation_status
+    {
+        return Err(plan_admission_reconciliation_required(
+            stored,
+            "plan admission replay re-derived different admission facts",
+        ));
+    }
+    match stored.state {
+        StoredPlanAdmissionState::AwaitingCheckpoint => {
+            Ok(awaiting_plan_admission_disposition(stored))
+        }
+        StoredPlanAdmissionState::Sealed => {
+            sealed_plan_admission_disposition(conn, stored, authority)
+        }
+    }
+}
+
+fn awaiting_plan_admission_disposition(stored: &StoredPlanAdmission) -> PlanAdmissionDispositionV1 {
+    PlanAdmissionDispositionV1::AwaitingCheckpoint {
+        admission_event_id: stored.admission_event_id,
+        admission_event_digest: stored.admission_event_digest.clone(),
+        admission_identity_digest: stored.admission_identity_digest.clone(),
+        plan_id: stored.plan_id.clone(),
+        input_digest: stored.input_digest.clone(),
+    }
+}
+
+fn sealed_plan_admission_disposition(
+    conn: &Connection,
+    stored: &StoredPlanAdmission,
+    authority: &PlanAdmissionAuthorityV1,
+) -> Result<PlanAdmissionDispositionV1> {
+    verify_stored_plan_admission(conn, stored, authority)?;
+    let checkpoint = sealed_plan_admission_checkpoint(conn, stored, authority)?;
+    Ok(PlanAdmissionDispositionV1::Sealed {
+        admission_event_id: stored.admission_event_id,
+        admission_event_digest: stored.admission_event_digest.clone(),
+        admission_identity_digest: stored.admission_identity_digest.clone(),
+        plan_id: stored.plan_id.clone(),
+        input_digest: stored.input_digest.clone(),
+        checkpoint_event_id: checkpoint.event_id,
+        checkpoint_event_digest: checkpoint.event_digest,
+    })
+}
+
+fn load_verified_plan_admission_checkpoint_event(
+    conn: &Connection,
+    stored: &StoredPlanAdmission,
+    checkpoint_event_id: EventId,
+    authority: &PlanAdmissionAuthorityV1,
+) -> Result<Event> {
+    let Some((event, signature)) = event_and_signature_by_id(conn, checkpoint_event_id)? else {
+        return Err(plan_admission_reconciliation_required(
+            stored,
+            "plan admission checkpoint is missing from the tape",
+        ));
+    };
+    let Some(signature) = signature else {
+        return Err(plan_admission_reconciliation_required(
+            stored,
+            "plan admission checkpoint is unsigned",
+        ));
+    };
+    let event = canonicalize(event).map_err(|error| {
+        plan_admission_reconciliation_required(
+            stored,
+            format!("plan admission checkpoint is not canonical: {error}"),
+        )
+    })?;
+    if !actor_matches(&authority.kernel_signer, &signature.signer)
+        || verify_event_signature(&event, &signature, &authority.trusted_keys)
+            != VerificationStatus::Verified
+    {
+        return Err(plan_admission_reconciliation_required(
+            stored,
+            "plan admission checkpoint signature is not verified for the configured kernel authority",
+        ));
+    }
+    let event_digest = canonical_event_hash(&event).map_err(|error| {
+        plan_admission_reconciliation_required(
+            stored,
+            format!("could not canonicalize plan admission checkpoint: {error}"),
+        )
+    })?;
+    if signature.canonical_event_hash != event_digest {
+        return Err(plan_admission_reconciliation_required(
+            stored,
+            "plan admission checkpoint signature hash does not match its canonical event",
+        ));
+    }
+    Ok(event)
+}
+
+fn verified_plan_admission_checkpoint_by_id(
+    conn: &Connection,
+    stored: &StoredPlanAdmission,
+    checkpoint_event_id: EventId,
+    authority: &PlanAdmissionAuthorityV1,
+) -> Result<PlanAdmissionCheckpointEvidence> {
+    let event = load_verified_plan_admission_checkpoint_event(
+        conn,
+        stored,
+        checkpoint_event_id,
+        authority,
+    )?;
+    let Payload::TapeCheckpointV1(checkpoint) = &event.payload else {
+        return Err(plan_admission_reconciliation_required(
+            stored,
+            "plan admission seal does not reference a TapeCheckpointV1 event",
+        ));
+    };
+    if event.run_id != stored.run_id
+        || checkpoint.run_id != stored.run_id
+        || event.parent_event_id != Some(checkpoint.through_event_id)
+    {
+        return Err(plan_admission_reconciliation_required(
+            stored,
+            "plan admission checkpoint does not anchor its signed run and covered event",
+        ));
+    }
+    Ok(PlanAdmissionCheckpointEvidence {
+        event_id: checkpoint_event_id,
+        event_digest: canonical_event_hash(&event)?,
+    })
+}
+
+fn verify_plan_admission_checkpoint_covers(
+    conn: &Connection,
+    stored: &StoredPlanAdmission,
+    checkpoint: &PlanAdmissionCheckpointEvidence,
+    authority: &PlanAdmissionAuthorityV1,
+) -> Result<()> {
+    let verified =
+        verified_plan_admission_checkpoint_by_id(conn, stored, checkpoint.event_id, authority)?;
+    if verified != *checkpoint {
+        return Err(plan_admission_reconciliation_required(
+            stored,
+            "plan admission checkpoint digest does not match the immutable sealing evidence",
+        ));
+    }
+    let checkpoint_event = load_verified_plan_admission_checkpoint_event(
+        conn,
+        stored,
+        checkpoint.event_id,
+        authority,
+    )?;
+    let Payload::TapeCheckpointV1(checkpoint_payload) = checkpoint_event.payload else {
+        return Err(plan_admission_reconciliation_required(
+            stored,
+            "plan admission checkpoint evidence no longer carries TapeCheckpointV1 payload",
+        ));
+    };
+    let signed = signed_ordinary_events_for_connection(conn, &stored.run_id)?;
+    let Some(admission_index) = signed
+        .iter()
+        .position(|event| event.event_id == stored.admission_event_id)
+    else {
+        return Err(plan_admission_reconciliation_required(
+            stored,
+            "plan admission is absent from the signed ordinary-event prefix",
+        ));
+    };
+    let through_count = usize::try_from(checkpoint_payload.through_event_count).map_err(|_| {
+        plan_admission_reconciliation_required(
+            stored,
+            "plan admission checkpoint through-event count is not representable on this host",
+        )
+    })?;
+    if through_count == 0
+        || through_count > signed.len()
+        || through_count <= admission_index
+        || checkpoint_payload.algorithm != TapeRootAlgorithm::Sha256Linear
+    {
+        return Err(plan_admission_reconciliation_required(
+            stored,
+            "checkpoint does not cover the exact plan admission",
+        ));
+    }
+    let covered = &signed[..through_count];
+    let Some(last) = covered.last() else {
+        return Err(plan_admission_reconciliation_required(
+            stored,
+            "checkpoint coverage became empty while verifying the plan admission seal",
+        ));
+    };
+    let expected_root = tape_root_hash(
+        &covered
+            .iter()
+            .map(|event| event.canonical_event_hash.clone())
+            .collect::<Vec<_>>(),
+    );
+    if checkpoint_payload.through_event_id != last.event_id
+        || checkpoint_payload.tape_root_hash != expected_root
+    {
+        return Err(plan_admission_reconciliation_required(
+            stored,
+            "checkpoint root does not verify the plan admission signed event prefix",
+        ));
+    }
+    Ok(())
+}
+
+/// The latest checkpoint, but only when it covers the CURRENT COMPLETE signed
+/// prefix and that prefix contains the admission. A checkpoint that covers less
+/// than everything currently signed is not a seal for this admission.
+fn fully_covering_plan_admission_checkpoint(
+    conn: &Connection,
+    stored: &StoredPlanAdmission,
+    authority: &PlanAdmissionAuthorityV1,
+) -> Result<Option<PlanAdmissionCheckpointEvidence>> {
+    let signed = signed_ordinary_events_for_connection(conn, &stored.run_id)?;
+    let Some(admission_index) = signed
+        .iter()
+        .position(|event| event.event_id == stored.admission_event_id)
+    else {
+        return Err(plan_admission_reconciliation_required(
+            stored,
+            "plan admission is absent from the signed ordinary-event prefix",
+        ));
+    };
+    let Some(latest) = latest_checkpoint_for_connection(conn, &stored.run_id)? else {
+        return Ok(None);
+    };
+    let Some(last) = signed.last() else {
+        return Ok(None);
+    };
+    if latest.through_event_count != signed.len() as u64
+        || latest.through_event_id != last.event_id
+        || latest.through_event_count <= admission_index as u64
+    {
+        return Ok(None);
+    }
+    let checkpoint =
+        verified_plan_admission_checkpoint_by_id(conn, stored, latest.event_id, authority)?;
+    let checkpoint_event = load_verified_plan_admission_checkpoint_event(
+        conn,
+        stored,
+        checkpoint.event_id,
+        authority,
+    )?;
+    let Payload::TapeCheckpointV1(checkpoint_payload) = checkpoint_event.payload else {
+        return Err(plan_admission_reconciliation_required(
+            stored,
+            "latest plan admission checkpoint does not carry TapeCheckpointV1 payload",
+        ));
+    };
+    let expected_root = tape_root_hash(
+        &signed
+            .iter()
+            .map(|event| event.canonical_event_hash.clone())
+            .collect::<Vec<_>>(),
+    );
+    if checkpoint_payload.run_id != stored.run_id
+        || checkpoint_payload.algorithm != TapeRootAlgorithm::Sha256Linear
+        || checkpoint_payload.through_event_id != last.event_id
+        || checkpoint_payload.through_event_count != signed.len() as u64
+        || checkpoint_payload.tape_root_hash != expected_root
+    {
+        return Err(plan_admission_reconciliation_required(
+            stored,
+            "latest plan admission checkpoint does not verify the complete signed prefix",
+        ));
+    }
+    Ok(Some(checkpoint))
+}
+
+fn sealed_plan_admission_checkpoint(
+    conn: &Connection,
+    stored: &StoredPlanAdmission,
+    authority: &PlanAdmissionAuthorityV1,
+) -> Result<PlanAdmissionCheckpointEvidence> {
+    if stored.state != StoredPlanAdmissionState::Sealed {
+        return Err(plan_admission_reconciliation_required(
+            stored,
+            "unsealed plan admission lacks checkpoint evidence",
+        ));
+    }
+    let checkpoint_event_id = stored.sealed_checkpoint_event_id.ok_or_else(|| {
+        plan_admission_reconciliation_required(
+            stored,
+            "sealed plan admission lacks its checkpoint event reference",
+        )
+    })?;
+    let expected_digest = stored
+        .sealed_checkpoint_event_digest
+        .as_deref()
+        .ok_or_else(|| {
+            plan_admission_reconciliation_required(
+                stored,
+                "sealed plan admission lacks its checkpoint digest",
+            )
+        })?;
+    let checkpoint =
+        verified_plan_admission_checkpoint_by_id(conn, stored, checkpoint_event_id, authority)?;
+    if checkpoint.event_digest != expected_digest {
+        return Err(plan_admission_reconciliation_required(
+            stored,
+            "sealed plan admission checkpoint digest does not match its immutable projection",
+        ));
+    }
+    verify_plan_admission_checkpoint_covers(conn, stored, &checkpoint, authority)?;
+    Ok(checkpoint)
 }
 
 /// Private proof boundary for V5 observation witnesses. Keeping the proof in

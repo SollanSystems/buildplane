@@ -576,6 +576,21 @@ describe("orchestrator run admission", () => {
 			async () => ({
 				authorizedNextStep: "dispatch_admitted_plan",
 				signedByKernel: true,
+				sealed: true,
+			}),
+		],
+		[
+			// Not sealed-gate coverage: this table asserts the legacy
+			// provenance_ref refusal, which fires before the reader is ever
+			// consulted, so every row here is rejected identically. The
+			// load-bearing sealed-gate test is "refuses a signed but unsealed
+			// plan admission before any worker effect" in
+			// candidate-evidence-flow.test.ts.
+			"unsealed",
+			async () => ({
+				authorizedNextStep: "dispatch_admitted_plan",
+				signedByKernel: true,
+				sealed: false,
 			}),
 		],
 		[
@@ -583,6 +598,7 @@ describe("orchestrator run admission", () => {
 			async () => ({
 				authorizedNextStep: "dispatch_admitted_plan",
 				signedByKernel: false,
+				sealed: false,
 			}),
 		],
 		[
@@ -590,6 +606,7 @@ describe("orchestrator run admission", () => {
 			async () => ({
 				authorizedNextStep: "some_other_step",
 				signedByKernel: true,
+				sealed: true,
 			}),
 		],
 		[

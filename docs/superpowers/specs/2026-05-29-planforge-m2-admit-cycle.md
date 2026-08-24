@@ -9,6 +9,14 @@
 | **Depends on** | M1 complete on `main` (`8a98ea6`: signed tape S1–S7 + external verifier); run-admission contract landed (#133 `9598c0e`, #138 `ee212b2`); PlanForge dry-run on `main` |
 | **Companion docs** | [v0.5 design §6 L6 / §8](./2026-05-21-buildplane-v05-design.md) · [M1 signing spec](./2026-05-22-tape-per-event-signing.md) · [planforge architecture](../../architecture/planforge.md) · [run admission receipts](../../architecture/run-admission-receipts.md) · [ledger](../../ledger.md) |
 
+> **[Superseded in part — 2026-08-17.]** This is an archive document; its body is retained
+> unchanged as history. The digest-trust model it describes — `idempotencyKey` / `inputDigest` /
+> `planDigest` as *the same signed admission identity* (§ Canonical digest contract), and admit
+> deduping by `idempotency_key` (M2-S3 acceptance) — is **superseded for the native mint** by
+> [`2026-08-17-plan-admitted-native-mint-control-design.md`](./2026-08-17-plan-admitted-native-mint-control-design.md)
+> §4: the native control treats `plan_digest` and `idempotency_key` as caller-asserted,
+> non-authoritative advisory fields and derives its own authoritative admission identity.
+
 ## Goal
 
 Complete the PlanForge admission cycle on `main`. `compile → validate → preview` already ship as the side-effect-free dry-run. M2 adds **`admit → dispatch → execute → receipt`**, where:

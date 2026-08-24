@@ -1,6 +1,4 @@
-use crate::candidate_approval::{
-    authorize_candidate_approval_v1, CandidateApprovalRejectionV1,
-};
+use crate::candidate_approval::{authorize_candidate_approval_v1, CandidateApprovalRejectionV1};
 use crate::governed_session_client::CandidateApprovalV1;
 use bp_ledger::storage::sqlite::ResolvedGovernedV5CandidateAuthorityV1;
 use bp_ledger::{EventId, RunId};

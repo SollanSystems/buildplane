@@ -84,6 +84,13 @@ mod host_config;
 mod host_config_loader;
 mod host_key_custody;
 mod host_ledger_custody;
+// The plan-admission mint's private composition. It has no transport, socket,
+// role, bin, or config loader in this slice by design: the authenticated
+// ingress is the next slice, so nothing production-side calls it yet.
+#[allow(dead_code)]
+mod plan_admission;
+#[cfg(test)]
+mod plan_admission_contract_tests;
 mod promotion_decision_client;
 #[cfg(test)]
 mod promotion_decision_client_contract_tests;
