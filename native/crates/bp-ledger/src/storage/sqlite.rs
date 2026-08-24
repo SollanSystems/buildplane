@@ -3188,10 +3188,12 @@ impl SqliteStore {
             -- disables every governed dispatch — the reader's lookup misses or
             -- throws, either way resolving to not-sealed, so the kernel gate
             -- refuses with a misleading "unsealed" diagnosis: a fail-closed
-            -- outage with no failing test on either side. A cross-language
-            -- drift test is deliberately deferred to S3/S6; until it exists,
-            -- treat any change to these four names as a coordinated
-            -- two-language change.
+            -- outage that would otherwise have no failing test on either side.
+            -- `tests/plan_admissions_cross_language_schema.rs` pins all four
+            -- names against both this schema and the reader's source, so a
+            -- rename on either side fails there. Changing one is still a
+            -- coordinated two-language change; the test is what makes
+            -- forgetting the other half loud.
             CREATE TABLE IF NOT EXISTS plan_admissions (
                 run_id                          TEXT NOT NULL,
                 request_id                      TEXT NOT NULL,

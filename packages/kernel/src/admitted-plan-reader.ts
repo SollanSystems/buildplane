@@ -45,9 +45,12 @@ export interface AdmittedPlanRecord {
 	 * itself what opens the unsealed crash window, mirroring that spec's §7-S1
 	 * front-loading rationale: leave no window in which the claim is false. The
 	 * blanket reclassification of every pre-mint tape's `plan_admitted` as
-	 * unsealed follows the same direction but is not literally covered by that
-	 * record — it is a deliberate fail-closed choice, pending explicit operator
-	 * confirmation before S3, the slice that makes this gate live.
+	 * unsealed follows the same direction but was not literally covered by that
+	 * record; it was ratified as coded in the pre-S3 gate round on PR #306
+	 * (2026-08-24), together with landing the consumer gate early.
+	 *
+	 * The four schema names this reader hardcodes below are pinned against the
+	 * Rust DDL by `native/crates/bp-ledger/tests/plan_admissions_cross_language_schema.rs`.
 	 */
 	readonly sealed: boolean;
 }
