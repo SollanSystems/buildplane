@@ -1,7 +1,7 @@
 //! Protected descriptor-bound CAS custody for the V5 admission host.
 
-use crate::host_config_loader::ValidatedPlanAdmissionHostStartupV1;
 use crate::host_config_loader::ValidatedGovernedSessionHostStartupV1;
+use crate::host_config_loader::ValidatedPlanAdmissionHostStartupV1;
 use bp_ledger::storage::cas::Cas;
 use thiserror::Error;
 

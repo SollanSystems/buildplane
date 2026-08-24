@@ -26,14 +26,16 @@ use crate::host_config_loader::{
 #[cfg(target_os = "linux")]
 use crate::host_key_custody::load_plan_admission_signing_key_v1;
 #[cfg(target_os = "linux")]
-use crate::host_ledger_custody::{load_plan_admission_ledger_v1, ProtectedPromotionDecisionLedgerV1};
+use crate::host_ledger_custody::{
+    load_plan_admission_ledger_v1, ProtectedPromotionDecisionLedgerV1,
+};
 #[cfg(target_os = "linux")]
 use crate::plan_admission::{
-    BrokerPlanAdmissionAuthority, BrokerPlanAdmissionDisposition,
-    LedgerPlanAdmissionBackend, LoadedPlanContent, PlanAdmissionIdentityError,
-    PlanAdmissionIdentityResolver, PlanContentRefV1, PlanContentResolver, PlanContentResolverError,
-    PlanRepositoryDescriptorError, PlanRepositoryDescriptorResolver, ResolvedOperatorIdentity,
-    ResolvedRepositoryDescriptor, TrustedPlanAdmissionSnapshotVerifier,
+    BrokerPlanAdmissionAuthority, BrokerPlanAdmissionDisposition, LedgerPlanAdmissionBackend,
+    LoadedPlanContent, PlanAdmissionIdentityError, PlanAdmissionIdentityResolver, PlanContentRefV1,
+    PlanContentResolver, PlanContentResolverError, PlanRepositoryDescriptorError,
+    PlanRepositoryDescriptorResolver, ResolvedOperatorIdentity, ResolvedRepositoryDescriptor,
+    TrustedPlanAdmissionSnapshotVerifier,
 };
 #[cfg(target_os = "linux")]
 use crate::plan_admission_handler::read_authenticated_plan_admission_ingress;
@@ -80,9 +82,11 @@ use thiserror::Error;
 #[cfg(target_os = "linux")]
 pub(crate) const PLAN_ADMISSION_LISTENER_FD: libc::c_int = 3;
 #[cfg(target_os = "linux")]
-pub(crate) const PLAN_ADMISSION_SOCKET_PATH: &str = "/run/buildplane/authority-host/plan-admission-v1.sock";
+pub(crate) const PLAN_ADMISSION_SOCKET_PATH: &str =
+    "/run/buildplane/authority-host/plan-admission-v1.sock";
 #[cfg(target_os = "linux")]
-pub(crate) const LISTENER_PARENT_COMPONENTS: [&[u8]; 3] = [b"run", b"buildplane", b"authority-host"];
+pub(crate) const LISTENER_PARENT_COMPONENTS: [&[u8]; 3] =
+    [b"run", b"buildplane", b"authority-host"];
 #[cfg(target_os = "linux")]
 pub(crate) const LISTENER_SOCKET_FILE_NAME: &[u8] = b"plan-admission-v1.sock";
 #[cfg(target_os = "linux")]
@@ -363,11 +367,12 @@ impl PlanContentResolver for ProtectedPlanContentResolver<'_> {
         &mut self,
         content_ref: &PlanContentRefV1,
     ) -> Result<LoadedPlanContent, PlanContentResolverError> {
-        let canonical = CanonicalCasRef::from_digest(content_ref.digest().to_string()).map_err(
-            |_| PlanContentResolverError::Rejected {
-                reason: "plan content reference is not a canonical CAS digest".into(),
-            },
-        )?;
+        let canonical =
+            CanonicalCasRef::from_digest(content_ref.digest().to_string()).map_err(|_| {
+                PlanContentResolverError::Rejected {
+                    reason: "plan content reference is not a canonical CAS digest".into(),
+                }
+            })?;
         let bytes = self
             .cas
             .get_verified_canonical_bytes(&canonical.to_cas_ref(), canonical.digest())

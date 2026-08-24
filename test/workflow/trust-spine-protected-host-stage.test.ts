@@ -135,10 +135,7 @@ describe("Trust Spine protected-host bundle staging", () => {
 				"/usr/lib/systemd/system/buildplane-plan-admission-host.service",
 				"0644",
 			],
-			[
-				"/usr/lib/systemd/system/buildplane-plan-admission-host.socket",
-				"0644",
-			],
+			["/usr/lib/systemd/system/buildplane-plan-admission-host.socket", "0644"],
 			[
 				"/usr/lib/systemd/system/buildplane-promotion-execution-host.service",
 				"0644",

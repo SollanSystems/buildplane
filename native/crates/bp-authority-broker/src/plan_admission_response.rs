@@ -103,8 +103,8 @@ pub(crate) fn verify_plan_admission_response(
     verifying_key: &VerifyingKey,
     expected: PlanAdmissionResponseBindingV1<'_>,
 ) -> Result<(PlanAdmissionResponseStatusV1, Option<String>), PlanAdmissionResponseErrorV1> {
-    let wire: SignedPlanAdmissionResponseWireV1 =
-        serde_json::from_slice(payload).map_err(|_| PlanAdmissionResponseErrorV1::InvalidPayload)?;
+    let wire: SignedPlanAdmissionResponseWireV1 = serde_json::from_slice(payload)
+        .map_err(|_| PlanAdmissionResponseErrorV1::InvalidPayload)?;
     if wire.schema_version != RESPONSE_SCHEMA_VERSION
         || wire.protocol != RESPONSE_PROTOCOL
         || wire.domain != RESPONSE_DOMAIN
@@ -131,8 +131,7 @@ pub(crate) fn verify_plan_admission_response(
     if payload != canonical {
         return Err(PlanAdmissionResponseErrorV1::InvalidPayload);
     }
-    let unsigned =
-        canonical_unsigned_payload(expected, status, wire.admission_event_id.as_deref());
+    let unsigned = canonical_unsigned_payload(expected, status, wire.admission_event_id.as_deref());
     verifying_key
         .verify_strict(
             &signature_message(&unsigned),
@@ -204,9 +203,12 @@ fn is_canonical_uuid(value: &str) -> bool {
 /// The binding is echoed into a hand-built canonical payload, so a value that
 /// could carry a quote or a control character must never reach it.
 fn is_canonical_plan_content_ref(value: &str) -> bool {
-    value
-        .strip_prefix("cas://sha256:")
-        .is_some_and(|hex| hex.len() == 64 && hex.bytes().all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()))
+    value.strip_prefix("cas://sha256:").is_some_and(|hex| {
+        hex.len() == 64
+            && hex
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    })
 }
 
 fn encode_hex(bytes: &[u8]) -> String {

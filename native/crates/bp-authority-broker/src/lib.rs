@@ -94,9 +94,9 @@ mod plan_admission;
 mod plan_admission_contract_tests;
 mod plan_admission_handler;
 mod plan_admission_host;
+mod plan_admission_host_config;
 #[cfg(all(test, target_os = "linux"))]
 mod plan_admission_host_contract_tests;
-mod plan_admission_host_config;
 // The response is signed by the host in this slice and verified only by the
 // contract tests: a plan-admission client is deliberately absent while the mint
 // has no approved consumer. The verification half ships now so a later client

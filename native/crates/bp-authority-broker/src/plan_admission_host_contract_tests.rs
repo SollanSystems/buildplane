@@ -139,8 +139,7 @@ fn sealed_memfd(bytes: &[u8]) -> OwnedFd {
     let raw = unsafe { libc::memfd_create(name.as_ptr(), MFD_CLOEXEC | MFD_ALLOW_SEALING) };
     assert!(raw >= 0);
     let fd = unsafe { OwnedFd::from_raw_fd(raw) };
-    let written =
-        unsafe { libc::pwrite(fd.as_raw_fd(), bytes.as_ptr().cast(), bytes.len(), 0) };
+    let written = unsafe { libc::pwrite(fd.as_raw_fd(), bytes.as_ptr().cast(), bytes.len(), 0) };
     assert_eq!(written, bytes.len() as isize);
     assert_eq!(
         unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_ADD_SEALS, REQUIRED_CONTENT_SEALS) },
@@ -169,9 +168,9 @@ fn send_with_descriptors(stream: &UnixStream, bytes: &[u8], descriptors: &[RawFd
         unsafe {
             (*header).cmsg_level = libc::SOL_SOCKET;
             (*header).cmsg_type = libc::SCM_RIGHTS;
-            (*header).cmsg_len = libc::CMSG_LEN(
-                (descriptors.len() * std::mem::size_of::<libc::c_int>()) as u32,
-            ) as usize;
+            (*header).cmsg_len =
+                libc::CMSG_LEN((descriptors.len() * std::mem::size_of::<libc::c_int>()) as u32)
+                    as usize;
             std::ptr::copy_nonoverlapping(
                 descriptors.as_ptr(),
                 libc::CMSG_DATA(header).cast::<libc::c_int>(),
@@ -317,8 +316,7 @@ fn the_listener_path_policy_is_the_promotion_decision_policy() {
             fs::create_dir(&parent).unwrap();
             fs::set_permissions(&parent, fs::Permissions::from_mode(0o755)).unwrap();
         }
-        let socket_path =
-            parent.join(std::str::from_utf8(LISTENER_SOCKET_FILE_NAME).unwrap());
+        let socket_path = parent.join(std::str::from_utf8(LISTENER_SOCKET_FILE_NAME).unwrap());
         let listener = UnixListener::bind(&socket_path).unwrap();
         fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o660)).unwrap();
         let anchor = std::fs::File::open(root.path()).unwrap();
@@ -369,17 +367,12 @@ fn the_listener_path_policy_is_the_promotion_decision_policy() {
 
     for mode in [0o700, 0o775, 0o777] {
         let wrong_parent_mode = layout();
-        fs::set_permissions(
-            &wrong_parent_mode.parent,
-            fs::Permissions::from_mode(mode),
-        )
-        .unwrap();
+        fs::set_permissions(&wrong_parent_mode.parent, fs::Permissions::from_mode(mode)).unwrap();
         assert!(
             !validate(&wrong_parent_mode, current_gid()),
             "parent mode {mode:o} must be refused; only 0755 is the precedent"
         );
-        fs::set_permissions(&wrong_parent_mode.parent, fs::Permissions::from_mode(0o755))
-            .unwrap();
+        fs::set_permissions(&wrong_parent_mode.parent, fs::Permissions::from_mode(0o755)).unwrap();
     }
 
     let not_a_socket = layout();
@@ -408,8 +401,14 @@ fn a_non_linux_host_fails_closed_with_the_unsupported_platform_diagnostic() {
         OperationalDiagnosticV1::UnsupportedPlatform.as_str(),
         "unsupported_platform"
     );
-    assert_eq!(OperationalDiagnosticV1::StartupFailed.as_str(), "startup_failed");
-    assert_eq!(OperationalDiagnosticV1::AcceptFailed.as_str(), "accept_failed");
+    assert_eq!(
+        OperationalDiagnosticV1::StartupFailed.as_str(),
+        "startup_failed"
+    );
+    assert_eq!(
+        OperationalDiagnosticV1::AcceptFailed.as_str(),
+        "accept_failed"
+    );
 }
 
 #[test]
@@ -439,8 +438,7 @@ fn a_request_cannot_name_the_operator_it_wishes_to_be_recorded_as() {
     let policy = fixture.policy();
     let attestation = policy.attestation_for_same_process_socket_tests();
     let (client, mut server) = UnixStream::pair().unwrap();
-    let mut widened: serde_json::Value =
-        serde_json::from_str(&request_frame(RUN_UUID)).unwrap();
+    let mut widened: serde_json::Value = serde_json::from_str(&request_frame(RUN_UUID)).unwrap();
     widened["decided_by"] = json!("operator:someone-else");
     let object = sealed_memfd(&plan_bytes());
     send_request(&client, &widened.to_string(), Some(object.as_raw_fd()));
@@ -472,11 +470,7 @@ fn a_request_for_another_run_is_refused_by_the_run_bound_endpoint() {
         "this endpoint serves exactly the run its deployment config names"
     );
     assert_eq!(
-        fixture
-            .store
-            .events_for_run(OTHER_RUN_UUID)
-            .unwrap()
-            .len(),
+        fixture.store.events_for_run(OTHER_RUN_UUID).unwrap().len(),
         0,
         "a refused run must leave no trace on the tape"
     );
@@ -497,8 +491,7 @@ fn an_authenticated_mint_seals_a_plan_admission_and_verifies_under_the_external_
     // 1. The peer receives a signed, request-bound, sealed disposition.
     let response = read_response(&mut client);
     let expected_content_ref = content_ref();
-    let binding =
-        PlanAdmissionResponseBindingV1::new(REQUEST_UUID, &expected_content_ref).unwrap();
+    let binding = PlanAdmissionResponseBindingV1::new(REQUEST_UUID, &expected_content_ref).unwrap();
     let (status, admission_event_id) =
         verify_plan_admission_response(&response, &kernel_key().verifying_key(), binding)
             .expect("the response is signed by the host kernel key");

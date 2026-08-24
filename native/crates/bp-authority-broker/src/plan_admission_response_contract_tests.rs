@@ -34,20 +34,15 @@ fn a_sealed_response_verifies_only_against_its_own_request_binding() {
     )
     .expect("the host signs a sealed response");
 
-    let (status, admission_event_id) = verify_plan_admission_response(
-        &payload,
-        &signing_key().verifying_key(),
-        binding(),
-    )
-    .expect("the response verifies against its own binding");
+    let (status, admission_event_id) =
+        verify_plan_admission_response(&payload, &signing_key().verifying_key(), binding())
+            .expect("the response verifies against its own binding");
     assert_eq!(status, PlanAdmissionResponseStatusV1::Sealed);
     assert_eq!(admission_event_id.as_deref(), Some(ADMISSION_UUID));
 
-    let other_request = PlanAdmissionResponseBindingV1::new(
-        "01919000-0000-7000-8000-0000000000f9",
-        CONTENT_REF,
-    )
-    .unwrap();
+    let other_request =
+        PlanAdmissionResponseBindingV1::new("01919000-0000-7000-8000-0000000000f9", CONTENT_REF)
+            .unwrap();
     assert_eq!(
         verify_plan_admission_response(&payload, &signing_key().verifying_key(), other_request),
         Err(PlanAdmissionResponseErrorV1::InvalidPayload)
@@ -77,7 +72,10 @@ fn a_reconciliation_response_carries_no_admission_identity_and_no_reason() {
     let (status, admission_event_id) =
         verify_plan_admission_response(&payload, &signing_key().verifying_key(), binding())
             .expect("the response verifies");
-    assert_eq!(status, PlanAdmissionResponseStatusV1::ReconciliationRequired);
+    assert_eq!(
+        status,
+        PlanAdmissionResponseStatusV1::ReconciliationRequired
+    );
     assert_eq!(admission_event_id, None);
 
     let rendered = String::from_utf8(payload).expect("the payload is text");
@@ -168,9 +166,10 @@ fn another_key_another_domain_and_any_tamper_all_fail_closed() {
     );
 
     // A status swap keeps the signature bytes but changes the signed message.
-    let swapped = String::from_utf8(payload.clone())
-        .unwrap()
-        .replace(r#""status":"sealed""#, r#""status":"reconciliation_required""#);
+    let swapped = String::from_utf8(payload.clone()).unwrap().replace(
+        r#""status":"sealed""#,
+        r#""status":"reconciliation_required""#,
+    );
     assert!(verify_plan_admission_response(
         swapped.as_bytes(),
         &signing_key().verifying_key(),
@@ -181,12 +180,10 @@ fn another_key_another_domain_and_any_tamper_all_fail_closed() {
     // Trailing bytes are not a valid canonical payload even when the prefix is.
     let mut trailing = payload.clone();
     trailing.push(b' ');
-    assert!(verify_plan_admission_response(
-        &trailing,
-        &signing_key().verifying_key(),
-        binding()
-    )
-    .is_err());
+    assert!(
+        verify_plan_admission_response(&trailing, &signing_key().verifying_key(), binding())
+            .is_err()
+    );
 
     // The signature is over a domain-separated message, so a response signed
     // for another protocol can never be replayed into this one.

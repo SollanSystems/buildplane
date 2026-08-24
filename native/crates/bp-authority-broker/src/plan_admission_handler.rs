@@ -181,8 +181,8 @@ pub(crate) fn read_authenticated_plan_admission_ingress_detailed(
     };
     let plan_bytes = read_sealed_plan_content(content_descriptor)?;
 
-    let frame = std::str::from_utf8(&frame)
-        .map_err(|_| PlanAdmissionIngressRefusal::RequestNotClosed)?;
+    let frame =
+        std::str::from_utf8(&frame).map_err(|_| PlanAdmissionIngressRefusal::RequestNotClosed)?;
     let request = parse_plan_admission_request_v1(frame).map_err(|rejection| match rejection {
         PlanAdmissionRequestRejection::FrameRejected => {
             PlanAdmissionIngressRefusal::RequestNotClosed
@@ -300,7 +300,13 @@ fn collect_attached_descriptors(
     if header.is_null() {
         return Ok(());
     }
-    let (level, kind, length) = unsafe { ((*header).cmsg_level, (*header).cmsg_type, (*header).cmsg_len) };
+    let (level, kind, length) = unsafe {
+        (
+            (*header).cmsg_level,
+            (*header).cmsg_type,
+            (*header).cmsg_len,
+        )
+    };
     if level != libc::SOL_SOCKET || kind != libc::SCM_RIGHTS {
         return Err(PlanAdmissionIngressRefusal::ContentDescriptorAmbiguous);
     }
@@ -326,9 +332,7 @@ fn collect_attached_descriptors(
 /// — and therefore its file offset — with the sender, so an offset the sender
 /// happened to leave behind must not decide which bytes the host hashes.
 #[cfg(target_os = "linux")]
-fn read_sealed_plan_content(
-    descriptor: &OwnedFd,
-) -> Result<Vec<u8>, PlanAdmissionIngressRefusal> {
+fn read_sealed_plan_content(descriptor: &OwnedFd) -> Result<Vec<u8>, PlanAdmissionIngressRefusal> {
     let mut stat = std::mem::MaybeUninit::<libc::stat>::zeroed();
     if unsafe { libc::fstat(descriptor.as_raw_fd(), stat.as_mut_ptr()) } != 0 {
         return Err(PlanAdmissionIngressRefusal::ContentReadFailed);
@@ -406,18 +410,13 @@ mod tests {
         assert!(raw >= 0, "memfd_create must succeed on Linux");
         let fd = unsafe { OwnedFd::from_raw_fd(raw) };
         if !bytes.is_empty() {
-            let written = unsafe {
-                libc::pwrite(
-                    fd.as_raw_fd(),
-                    bytes.as_ptr().cast(),
-                    bytes.len(),
-                    0,
-                )
-            };
+            let written =
+                unsafe { libc::pwrite(fd.as_raw_fd(), bytes.as_ptr().cast(), bytes.len(), 0) };
             assert_eq!(written, bytes.len() as isize, "the whole object is written");
         }
         if sealed {
-            let sealed = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_ADD_SEALS, REQUIRED_CONTENT_SEALS) };
+            let sealed =
+                unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_ADD_SEALS, REQUIRED_CONTENT_SEALS) };
             assert_eq!(sealed, 0, "the test object seals");
         }
         fd
@@ -472,7 +471,8 @@ mod tests {
     fn an_authenticated_peer_delivers_one_frame_and_its_sealed_content() {
         let (policy, attestation) = client_policy(BrokerAuthorityRoleV1::PlanAdmission);
         let (client, mut server) = UnixStream::pair().unwrap();
-        let content = b"## Title\nIngress\n\n## Goal\nStage bytes over the authenticated channel.\n";
+        let content =
+            b"## Title\nIngress\n\n## Goal\nStage bytes over the authenticated channel.\n";
         let object = memfd(content, true);
         send_frame(&client, &plan_frame(), &[object.as_raw_fd()]);
         drop(object);
