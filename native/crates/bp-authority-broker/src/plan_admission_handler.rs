@@ -286,16 +286,35 @@ fn receive_frame_chunk(
     Ok(())
 }
 
+/// Take ownership of every descriptor the kernel attached, then decide.
+///
+/// **Ownership must precede judgement.** `MSG_CTRUNC` does not mean the kernel
+/// delivered nothing: it installs as many descriptors as the control buffer
+/// holds and closes only the remainder. Refusing before wrapping the installed
+/// ones in `OwnedFd` therefore leaks them into the host process, and because
+/// the accept loop runs forever, an authenticated peer could repeat one
+/// oversized frame until the descriptor table is exhausted. The same reasoning
+/// applies to a malformed payload length: whole descriptors that are already
+/// installed are taken first, and only then is the frame refused.
 #[cfg(target_os = "linux")]
 fn collect_attached_descriptors(
     message: &libc::msghdr,
     descriptors: &mut Vec<OwnedFd>,
 ) -> Result<(), PlanAdmissionIngressRefusal> {
+    let taken = take_attached_descriptors(message, descriptors);
     if message.msg_flags & libc::MSG_CTRUNC != 0 {
-        // The kernel closed descriptors it could not deliver. The sender asked
-        // for more than one content object; the request is unresolvable.
+        // Whatever fit is now owned above and will be closed; the sender asked
+        // for more than one content object, so the request is unresolvable.
         return Err(PlanAdmissionIngressRefusal::ContentDescriptorAmbiguous);
     }
+    taken
+}
+
+#[cfg(target_os = "linux")]
+fn take_attached_descriptors(
+    message: &libc::msghdr,
+    descriptors: &mut Vec<OwnedFd>,
+) -> Result<(), PlanAdmissionIngressRefusal> {
     let header = unsafe { libc::CMSG_FIRSTHDR(message) };
     if header.is_null() {
         return Ok(());
@@ -308,16 +327,17 @@ fn collect_attached_descriptors(
         )
     };
     if level != libc::SOL_SOCKET || kind != libc::SCM_RIGHTS {
+        // Not a descriptor payload, so there is nothing installed to take.
         return Err(PlanAdmissionIngressRefusal::ContentDescriptorAmbiguous);
     }
     let payload_length = length.saturating_sub(unsafe { libc::CMSG_LEN(0) } as usize);
-    if payload_length == 0 || payload_length % std::mem::size_of::<libc::c_int>() != 0 {
-        return Err(PlanAdmissionIngressRefusal::ContentDescriptorAmbiguous);
-    }
     let data = unsafe { libc::CMSG_DATA(header) }.cast::<libc::c_int>();
     for index in 0..payload_length / std::mem::size_of::<libc::c_int>() {
         let raw: RawFd = unsafe { std::ptr::read_unaligned(data.add(index)) };
         descriptors.push(unsafe { OwnedFd::from_raw_fd(raw) });
+    }
+    if payload_length == 0 || payload_length % std::mem::size_of::<libc::c_int>() != 0 {
+        return Err(PlanAdmissionIngressRefusal::ContentDescriptorAmbiguous);
     }
     Ok(())
 }
@@ -405,7 +425,11 @@ mod tests {
     }
 
     fn memfd(bytes: &[u8], sealed: bool) -> OwnedFd {
-        let name = std::ffi::CString::new("bp-plan-admission-test").unwrap();
+        named_memfd("bp-plan-admission-test", bytes, sealed)
+    }
+
+    fn named_memfd(name: &str, bytes: &[u8], sealed: bool) -> OwnedFd {
+        let name = std::ffi::CString::new(name).unwrap();
         let raw = unsafe { libc::memfd_create(name.as_ptr(), MFD_CLOEXEC | MFD_ALLOW_SEALING) };
         assert!(raw >= 0, "memfd_create must succeed on Linux");
         let fd = unsafe { OwnedFd::from_raw_fd(raw) };
@@ -624,6 +648,71 @@ mod tests {
         assert_eq!(
             read_authenticated_plan_admission_ingress_detailed(&policy, &attestation, &mut server),
             Err(PlanAdmissionIngressRefusal::ContentDescriptorAmbiguous)
+        );
+    }
+
+    /// Count this process's open descriptors that name one specific memfd.
+    ///
+    /// `/proc/self/fd` is process-global and cargo runs these tests on many
+    /// threads, so a bare count races against every sibling test. A memfd's
+    /// link target carries the name it was created with, so counting only a
+    /// tag no other test uses makes the measurement exact and race-free.
+    fn open_descriptors_naming(tag: &str) -> usize {
+        std::fs::read_dir("/proc/self/fd")
+            .expect("/proc/self/fd is readable on Linux")
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                std::fs::read_link(entry.path())
+                    .map(|target| target.to_string_lossy().contains(tag))
+                    .unwrap_or(false)
+            })
+            .count()
+    }
+
+    /// A frame carrying more descriptors than the control buffer can hold sets
+    /// `MSG_CTRUNC` — but Linux still **installs as many as fit** and closes only
+    /// the remainder. Refusing before taking ownership of the installed ones
+    /// leaks them, and `serve_sequential_connections` accepts forever, so any
+    /// authenticated peer could exhaust the host's descriptor table by repeating
+    /// this frame.
+    #[test]
+    fn a_truncated_descriptor_frame_refuses_without_leaking_the_installed_ones() {
+        const TAG: &str = "bp-plan-admission-leak-probe";
+        let (policy, attestation) = client_policy(BrokerAuthorityRoleV1::PlanAdmission);
+        let (client, mut server) = UnixStream::pair().unwrap();
+        let first = named_memfd(TAG, b"first object", true);
+        let second = named_memfd(TAG, b"second object", true);
+        let third = named_memfd(TAG, b"third object", true);
+        send_frame(
+            &client,
+            &plan_frame(),
+            &[first.as_raw_fd(), second.as_raw_fd(), third.as_raw_fd()],
+        );
+        drop(first);
+        drop(second);
+        drop(third);
+        drop(client);
+
+        // Descriptors in flight live in the kernel's socket buffer, not in this
+        // process's table, until `recvmsg` installs them — so the leak is only
+        // observable after the call.
+        assert_eq!(
+            open_descriptors_naming(TAG),
+            0,
+            "the sender's own descriptors are closed before the handler runs"
+        );
+        // Asserting the variant is what keeps the count assertion honest: it
+        // proves the kernel really did truncate, so descriptors really were
+        // installed, so a zero count afterwards means released and not
+        // never-delivered.
+        assert_eq!(
+            read_authenticated_plan_admission_ingress_detailed(&policy, &attestation, &mut server),
+            Err(PlanAdmissionIngressRefusal::ContentDescriptorAmbiguous)
+        );
+        assert_eq!(
+            open_descriptors_naming(TAG),
+            0,
+            "a truncated descriptor frame must close every descriptor the kernel installed"
         );
     }
 
