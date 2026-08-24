@@ -21,6 +21,7 @@ const protectedHostBinaryNames = [
 	"buildplane-authority-host",
 	"buildplane-governed-session-client",
 	"buildplane-governed-session-host",
+	"buildplane-plan-admission-host",
 	"buildplane-promotion-execution-host",
 	"buildplane-v5-dispatch-admission-client",
 	"buildplane-v5-dispatch-admission-host",
@@ -91,6 +92,7 @@ describe("Trust Spine protected-host bundle staging", () => {
 			"libexec/buildplane-authority-host",
 			"libexec/buildplane-governed-session-client",
 			"libexec/buildplane-governed-session-host",
+			"libexec/buildplane-plan-admission-host",
 			"libexec/buildplane-promotion-execution-host",
 			"libexec/buildplane-v5-dispatch-admission-client",
 			"libexec/buildplane-v5-dispatch-admission-host",
@@ -98,6 +100,8 @@ describe("Trust Spine protected-host bundle staging", () => {
 			"systemd/buildplane-authority-host.socket",
 			"systemd/buildplane-governed-session-host.service",
 			"systemd/buildplane-governed-session-host.socket",
+			"systemd/buildplane-plan-admission-host.service",
+			"systemd/buildplane-plan-admission-host.socket",
 			"systemd/buildplane-promotion-execution-host.service",
 			"systemd/buildplane-promotion-execution-host.socket",
 			"systemd/buildplane-v5-dispatch-admission-host.service",
@@ -110,6 +114,7 @@ describe("Trust Spine protected-host bundle staging", () => {
 			["/usr/libexec/buildplane/buildplane-authority-host", "0755"],
 			["/usr/libexec/buildplane/buildplane-governed-session-client", "0755"],
 			["/usr/libexec/buildplane/buildplane-governed-session-host", "0755"],
+			["/usr/libexec/buildplane/buildplane-plan-admission-host", "0755"],
 			["/usr/libexec/buildplane/buildplane-promotion-execution-host", "0755"],
 			[
 				"/usr/libexec/buildplane/buildplane-v5-dispatch-admission-client",
@@ -124,6 +129,14 @@ describe("Trust Spine protected-host bundle staging", () => {
 			],
 			[
 				"/usr/lib/systemd/system/buildplane-governed-session-host.socket",
+				"0644",
+			],
+			[
+				"/usr/lib/systemd/system/buildplane-plan-admission-host.service",
+				"0644",
+			],
+			[
+				"/usr/lib/systemd/system/buildplane-plan-admission-host.socket",
 				"0644",
 			],
 			[

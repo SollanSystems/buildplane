@@ -53,6 +53,13 @@ const FILES = Object.freeze([
 	}),
 	Object.freeze({
 		sourceKind: "binary",
+		sourceName: "buildplane-plan-admission-host",
+		path: "libexec/buildplane-plan-admission-host",
+		installPath: "/usr/libexec/buildplane/buildplane-plan-admission-host",
+		mode: 0o755,
+	}),
+	Object.freeze({
+		sourceKind: "binary",
 		sourceName: "buildplane-promotion-execution-host",
 		path: "libexec/buildplane-promotion-execution-host",
 		installPath: "/usr/libexec/buildplane/buildplane-promotion-execution-host",
@@ -102,6 +109,22 @@ const FILES = Object.freeze([
 		path: "systemd/buildplane-governed-session-host.socket",
 		installPath:
 			"/usr/lib/systemd/system/buildplane-governed-session-host.socket",
+		mode: 0o644,
+	}),
+	Object.freeze({
+		sourceKind: "unit",
+		sourceName: "buildplane-plan-admission-host.service",
+		path: "systemd/buildplane-plan-admission-host.service",
+		installPath:
+			"/usr/lib/systemd/system/buildplane-plan-admission-host.service",
+		mode: 0o644,
+	}),
+	Object.freeze({
+		sourceKind: "unit",
+		sourceName: "buildplane-plan-admission-host.socket",
+		path: "systemd/buildplane-plan-admission-host.socket",
+		installPath:
+			"/usr/lib/systemd/system/buildplane-plan-admission-host.socket",
 		mode: 0o644,
 	}),
 	Object.freeze({
