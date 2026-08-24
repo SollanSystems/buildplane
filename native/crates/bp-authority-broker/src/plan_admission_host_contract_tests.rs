@@ -189,13 +189,17 @@ fn send_request(stream: &UnixStream, frame: &str, descriptor: Option<RawFd>) {
 }
 
 fn request_frame(run_uuid: &str) -> String {
+    custom_request_frame(run_uuid, &content_ref(), "PASS")
+}
+
+fn custom_request_frame(run_uuid: &str, plan_content_ref: &str, validation_status: &str) -> String {
     json!({
         "schema_version": 1,
         "request_id": REQUEST_UUID,
         "run_id": run_uuid,
-        "plan_content_ref": content_ref(),
+        "plan_content_ref": plan_content_ref,
         "asserted": {
-            "validation_status": "PASS",
+            "validation_status": validation_status,
             "plan_digest": format!("sha256:{}", "cd".repeat(32)),
             "idempotency_key": "planforge:v0:buildplane:cccccccc:abcd1234",
         },
@@ -254,6 +258,20 @@ impl HostFixture {
             self.config.plan_admission_client_uids(),
         )
         .expect("the config's client policy is a valid confinement policy")
+    }
+
+    fn cas_is_empty(&self) -> bool {
+        self.cas
+            .get_bytes(&format!("sha256:{:x}", Sha256::digest(plan_bytes())))
+            .is_err()
+    }
+
+    fn projection_is_empty(&self) -> bool {
+        let connection = rusqlite::Connection::open(&self.database_path).unwrap();
+        let count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM plan_admissions", [], |row| row.get(0))
+            .unwrap();
+        count == 0
     }
 
     fn serve_once(&self, stream: &mut UnixStream) -> Result<(), impl std::fmt::Debug> {
@@ -474,6 +492,58 @@ fn a_request_for_another_run_is_refused_by_the_run_bound_endpoint() {
         0,
         "a refused run must leave no trace on the tape"
     );
+}
+
+/// The CAS is the mint's trust root and shares a filesystem with the ledger.
+/// Staging bytes the request has already disqualified turns any authenticated
+/// peer into a write amplifier: 1 MiB per connection, on a loop that never
+/// ends, for content that can never become an admission.
+#[test]
+fn a_request_whose_bytes_do_not_hash_to_its_named_reference_stages_nothing() {
+    let fixture = HostFixture::new();
+    let (client, mut server) = UnixStream::pair().unwrap();
+    let object = sealed_memfd(&plan_bytes());
+    let wrong_ref = format!("cas://sha256:{}", "ab".repeat(32));
+    send_request(
+        &client,
+        &custom_request_frame(RUN_UUID, &wrong_ref, "PASS"),
+        Some(object.as_raw_fd()),
+    );
+    drop(object);
+
+    assert!(fixture.serve_once(&mut server).is_err());
+    assert!(
+        fixture.cas_is_empty(),
+        "bytes that cannot become an admission must never reach the trust-root CAS"
+    );
+    assert!(fixture.projection_is_empty());
+}
+
+/// The asserted-PASS precondition is fail-closed input hygiene, so it must gate
+/// the stage too — otherwise a peer sidesteps it by simply asserting FAIL.
+#[test]
+fn a_request_without_an_asserted_pass_stages_nothing() {
+    for status in ["FAIL", "pass", "", "WARN"] {
+        let fixture = HostFixture::new();
+        let (client, mut server) = UnixStream::pair().unwrap();
+        let object = sealed_memfd(&plan_bytes());
+        send_request(
+            &client,
+            &custom_request_frame(RUN_UUID, &content_ref(), status),
+            Some(object.as_raw_fd()),
+        );
+        drop(object);
+
+        assert!(
+            fixture.serve_once(&mut server).is_err(),
+            "{status:?} is not an asserted PASS"
+        );
+        assert!(
+            fixture.cas_is_empty(),
+            "{status:?} must be refused before anything is staged"
+        );
+        assert!(fixture.projection_is_empty());
+    }
 }
 
 #[test]

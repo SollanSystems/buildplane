@@ -35,7 +35,7 @@ use crate::plan_admission::{
     LoadedPlanContent, PlanAdmissionIdentityError, PlanAdmissionIdentityResolver, PlanContentRefV1,
     PlanContentResolver, PlanContentResolverError, PlanRepositoryDescriptorError,
     PlanRepositoryDescriptorResolver, ResolvedOperatorIdentity, ResolvedRepositoryDescriptor,
-    TrustedPlanAdmissionSnapshotVerifier,
+    TrustedPlanAdmissionSnapshotVerifier, REQUIRED_ASSERTED_VALIDATION_STATUS,
 };
 #[cfg(target_os = "linux")]
 use crate::plan_admission_handler::read_authenticated_plan_admission_ingress;
@@ -64,6 +64,8 @@ use bp_ledger::storage::cas::{CanonicalCasRef, Cas};
 use bp_ledger::storage::sqlite::SqliteStore;
 #[cfg(target_os = "linux")]
 use ed25519_dalek::SigningKey;
+#[cfg(target_os = "linux")]
+use sha2::{Digest, Sha256};
 #[cfg(target_os = "linux")]
 use std::fs::File;
 #[cfg(target_os = "linux")]
@@ -260,12 +262,13 @@ impl ProtectedPlanAdmissionHostV1 {
 
 /// Handle exactly one authenticated plan-admission request end to end.
 ///
-/// The order is load-bearing. The peer is authenticated and the frame is read
-/// before anything is staged; the bytes are staged into the broker-owned CAS
-/// before the mint runs, because the mint must resolve content through the same
-/// protected store every other admission input comes from; and the derived
-/// operator identity is looked up from the authenticated UID, never taken from
-/// the request. A caller that never authenticates causes no CAS write at all.
+/// The order is load-bearing. The peer is authenticated, the frame is read, and
+/// every disqualifying property of the request is decided BEFORE anything is
+/// staged, so a request that cannot become an admission never writes to the
+/// trust-root CAS. Only then are the bytes staged, because the mint must
+/// resolve content through the same protected store every other admission input
+/// comes from. The derived operator identity is looked up from the
+/// authenticated UID, never taken from the request.
 #[cfg(target_os = "linux")]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn serve_one_authenticated_plan_admission(
@@ -289,6 +292,23 @@ pub(crate) fn serve_one_authenticated_plan_admission(
     }
     let operator = resolve_operator_identity_for_peer(config, staged.peer_uid)
         .map_err(|_| ProtectedPlanAdmissionHostErrorV1::ConnectionFailed)?;
+
+    // Everything that can disqualify the request is decided BEFORE the stage.
+    // The CAS is the mint's trust root and shares a filesystem with the ledger,
+    // so staging bytes that can never become an admission would hand any
+    // authenticated peer a write amplifier: up to the full input bound per
+    // connection, on an accept loop that never ends.
+    //
+    // The composition re-checks both of these against the bytes it loaded; that
+    // is the authority check and it stays where it is. This is admission
+    // control for the filesystem, and it is deliberately the same predicate.
+    if parsed.asserted_validation_status != REQUIRED_ASSERTED_VALIDATION_STATUS {
+        return Err(ProtectedPlanAdmissionHostErrorV1::ConnectionFailed);
+    }
+    let staged_digest = format!("sha256:{:x}", Sha256::digest(&staged.plan_bytes));
+    if staged_digest != parsed.plan_content_ref.digest() {
+        return Err(ProtectedPlanAdmissionHostErrorV1::ConnectionFailed);
+    }
 
     // The broker is the only principal that writes this CAS. A failed write is
     // an uncertainty, not a refusal reason: the mint below will simply fail to

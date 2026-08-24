@@ -47,7 +47,7 @@ use uuid::Uuid;
 /// still a fail-closed *precondition*: recording a verdict the control was
 /// never given would be a fabrication, and proceeding without one would discard
 /// a gate the current builder enforces.
-const REQUIRED_ASSERTED_VALIDATION_STATUS: &str = "PASS";
+pub(crate) const REQUIRED_ASSERTED_VALIDATION_STATUS: &str = "PASS";
 
 /// Closed wire shape. `deny_unknown_fields` is load-bearing: the caller surface
 /// must stay no larger than a request id, a run id, one content reference, and
