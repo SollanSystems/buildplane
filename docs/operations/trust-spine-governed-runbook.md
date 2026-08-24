@@ -425,12 +425,16 @@ to claim authority, and the tape is the place to look.
 
 **Accepted residual — CAS write amplification.** An authenticated peer can
 stage up to 1 MiB of self-named bytes per connection whenever the mint refuses
-*downstream* of the ingress checks: an unconvincing run-start attestation, an
-idempotency conflict, or a fresh-snapshot rejection all occur after the bytes
-have been written. Only requests disqualified at the ingress boundary — peer,
-frame, run binding, identity, digest, or asserted validation status — are
-refused before anything is staged. This is inherent to the ratified content
-staging shape: the mint resolves content through the broker-owned CAS, so the
+*downstream* of the pre-stage checks. Every disqualification the host can decide
+from the request and the bytes already in hand is refused before anything is
+staged — peer, frame, run binding, identity, content-ref digest, asserted
+validation status, asserted plan-digest and idempotency-key shape, and the plan
+bytes' own admissibility (empty, over-length, or non-UTF-8). What remains
+downstream is only what genuinely requires the mint to consult the tape and
+projection: an unconvincing run-start attestation, an idempotency *conflict*
+(same key, different request), or a fresh-snapshot rejection. Those occur after
+the bytes have been written, and that is inherent to the ratified content
+staging shape — the mint resolves content through the broker-owned CAS, so the
 bytes must be there before it can decline them. The CAS volume shares a
 filesystem with the ledger. Mitigation is a deployment concern the operator
 owns: give the authority root its own filesystem or quota, and schedule

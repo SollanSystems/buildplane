@@ -385,8 +385,14 @@ impl HostFixture {
     }
 
     fn cas_is_empty(&self) -> bool {
+        self.cas_lacks(&plan_bytes())
+    }
+
+    /// The CAS holds no object for the given content. Used by the "stages
+    /// nothing" tests whose bytes are not the default `plan_bytes()`.
+    fn cas_lacks(&self, bytes: &[u8]) -> bool {
         self.cas
-            .get_bytes(&format!("sha256:{:x}", Sha256::digest(plan_bytes())))
+            .get_bytes(&format!("sha256:{:x}", Sha256::digest(bytes)))
             .is_err()
     }
 
@@ -773,6 +779,74 @@ fn a_request_with_a_malformed_idempotency_key_stages_nothing() {
         );
         assert!(fixture.projection_is_empty());
     }
+}
+
+/// Plan bytes that are not valid UTF-8 are a mint refusal the ingress can decide
+/// from the bytes already in hand — the ingress does not check encoding, only
+/// the descriptor — so the host must refuse them before staging rather than
+/// writing up to the full input bound into the trust-root CAS for content the
+/// mint will reject on resolution.
+#[test]
+fn a_request_with_non_utf8_plan_bytes_stages_nothing() {
+    let non_utf8 = vec![0xff_u8; 4096];
+    // The content reference matches the bytes' hash, so the digest check would
+    // pass; only the UTF-8 admissibility check disqualifies this request.
+    let ref_matching = format!("cas://sha256:{:x}", Sha256::digest(&non_utf8));
+    let fixture = HostFixture::new();
+    let (client, mut server) = UnixStream::pair().unwrap();
+    let object = sealed_memfd(&non_utf8);
+    send_request(
+        &client,
+        &request_frame_with_asserted(
+            RUN_UUID,
+            &ref_matching,
+            "PASS",
+            &format!("sha256:{}", "cd".repeat(32)),
+            "planforge:v0:buildplane:cccccccc:abcd1234",
+        ),
+        Some(object.as_raw_fd()),
+    );
+    drop(object);
+
+    assert!(fixture.serve_once(&mut server).is_err());
+    assert!(
+        fixture.cas_lacks(&non_utf8),
+        "non-UTF-8 plan bytes must never reach the trust-root CAS"
+    );
+    assert!(fixture.projection_is_empty());
+}
+
+/// Empty plan bytes stage nothing. This is defence in depth: the ingress
+/// descriptor check already refuses a zero-length object (`ContentEmpty`) before
+/// the host runs, so this case never reaches the stage on either side of the
+/// admissibility pull-forward — the shared predicate still names empty for the
+/// mint's own direct callers.
+#[test]
+fn a_request_with_empty_plan_bytes_stages_nothing() {
+    let empty: Vec<u8> = Vec::new();
+    let ref_matching = format!("cas://sha256:{:x}", Sha256::digest(&empty));
+    let fixture = HostFixture::new();
+    let (client, mut server) = UnixStream::pair().unwrap();
+    let object = sealed_memfd(&empty);
+    send_request(
+        &client,
+        &request_frame_with_asserted(
+            RUN_UUID,
+            &ref_matching,
+            "PASS",
+            &format!("sha256:{}", "cd".repeat(32)),
+            "planforge:v0:buildplane:cccccccc:abcd1234",
+        ),
+        Some(object.as_raw_fd()),
+    );
+    drop(object);
+
+    assert!(fixture.serve_once(&mut server).is_err());
+    assert!(
+        fixture.cas_lacks(&empty),
+        "empty plan bytes must never reach the trust-root CAS"
+    );
+    assert!(fixture.projection_is_empty());
 }
 
 /// Every way the run-start attestation can fail to convince, driven through the

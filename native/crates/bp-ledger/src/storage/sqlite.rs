@@ -22733,21 +22733,9 @@ fn validate_plan_admission_request_shape(request: &PlanAdmissionRequestV1) -> Re
 fn derive_plan_admission_content_v1(
     request: &PlanAdmissionRequestV1,
 ) -> Result<DerivedPlanAdmissionContent> {
-    if request.plan_bytes.is_empty() {
+    if let Err(reason) = plan_admission_plan_bytes_are_admissible(&request.plan_bytes) {
         return Err(LedgerError::PlanInputRejected {
-            reason: "compiled plan content is empty".into(),
-        });
-    }
-    if request.plan_bytes.len() > MAX_PLAN_ADMISSION_INPUT_BYTES {
-        return Err(LedgerError::PlanInputRejected {
-            reason: format!(
-                "compiled plan content exceeds the {MAX_PLAN_ADMISSION_INPUT_BYTES}-byte admission bound"
-            ),
-        });
-    }
-    if std::str::from_utf8(&request.plan_bytes).is_err() {
-        return Err(LedgerError::PlanInputRejected {
-            reason: "compiled plan content is not valid UTF-8".into(),
+            reason: reason.to_string(),
         });
     }
     let Some(referenced_digest) = request.plan_content_ref.strip_prefix("cas://") else {
@@ -27069,6 +27057,29 @@ pub fn plan_admission_asserted_plan_digest_is_canonical(value: &str) -> bool {
 /// for the same no-drift reason as the digest predicate above.
 pub fn plan_admission_idempotency_key_is_well_formed(value: &str) -> bool {
     !value.trim().is_empty() && !value.chars().any(|character| character.is_control())
+}
+
+/// Whether the compiled plan bytes are admissible on their own terms.
+///
+/// These are the checks the mint makes on the bytes in hand — non-empty, within
+/// the input bound, and valid UTF-8 — independent of any CAS lookup. `Ok(())`
+/// means admissible; `Err(reason)` names why not. It is exposed so a protected
+/// ingress can refuse malformed content BEFORE staging it into the broker-owned
+/// CAS, and `derive_plan_admission_content_v1` calls the same function at mint
+/// time so the pre-stage check and the mint-time check cannot drift.
+pub fn plan_admission_plan_bytes_are_admissible(
+    plan_bytes: &[u8],
+) -> std::result::Result<(), &'static str> {
+    if plan_bytes.is_empty() {
+        return Err("compiled plan content is empty");
+    }
+    if plan_bytes.len() > MAX_PLAN_ADMISSION_INPUT_BYTES {
+        return Err("compiled plan content exceeds the admission byte bound");
+    }
+    if std::str::from_utf8(plan_bytes).is_err() {
+        return Err("compiled plan content is not valid UTF-8");
+    }
+    Ok(())
 }
 
 fn is_canonical_git_commit_sha(value: &str) -> bool {

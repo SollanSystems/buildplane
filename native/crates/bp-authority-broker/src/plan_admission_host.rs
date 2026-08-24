@@ -63,7 +63,8 @@ use bp_ledger::storage::cas::{CanonicalCasRef, Cas};
 #[cfg(target_os = "linux")]
 use bp_ledger::storage::sqlite::{
     plan_admission_asserted_plan_digest_is_canonical,
-    plan_admission_idempotency_key_is_well_formed, SqliteStore,
+    plan_admission_idempotency_key_is_well_formed, plan_admission_plan_bytes_are_admissible,
+    SqliteStore,
 };
 #[cfg(target_os = "linux")]
 use ed25519_dalek::SigningKey;
@@ -309,11 +310,14 @@ pub(crate) fn serve_one_authenticated_plan_admission(
     // The composition re-checks all of these against the request and the bytes
     // it loaded; that is the authority check and it stays where it is. These are
     // admission control for the filesystem, and they are deliberately the same
-    // predicates the mint applies — the digest and idempotency predicates are
-    // shared with the storage layer so the two cannot drift.
+    // predicates the mint applies — the request-field and plan-bytes predicates
+    // are shared with the storage layer so the two cannot drift. The plan-bytes
+    // admissibility check (empty / length / UTF-8) is evaluable from the bytes
+    // already in hand, so it too is decided before the stage.
     if parsed.asserted_validation_status != REQUIRED_ASSERTED_VALIDATION_STATUS
         || !plan_admission_asserted_plan_digest_is_canonical(&parsed.asserted_plan_digest)
         || !plan_admission_idempotency_key_is_well_formed(&parsed.asserted_idempotency_key)
+        || plan_admission_plan_bytes_are_admissible(&staged.plan_bytes).is_err()
     {
         return Err(ProtectedPlanAdmissionHostErrorV1::ConnectionFailed);
     }
