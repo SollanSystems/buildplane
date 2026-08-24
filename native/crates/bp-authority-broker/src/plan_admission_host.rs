@@ -61,7 +61,10 @@ use bp_ledger::signing::{ActorKeyRef, TrustedPublicKeys, VerificationStatus};
 #[cfg(target_os = "linux")]
 use bp_ledger::storage::cas::{CanonicalCasRef, Cas};
 #[cfg(target_os = "linux")]
-use bp_ledger::storage::sqlite::SqliteStore;
+use bp_ledger::storage::sqlite::{
+    plan_admission_asserted_plan_digest_is_canonical,
+    plan_admission_idempotency_key_is_well_formed, SqliteStore,
+};
 #[cfg(target_os = "linux")]
 use ed25519_dalek::SigningKey;
 #[cfg(target_os = "linux")]
@@ -293,16 +296,25 @@ pub(crate) fn serve_one_authenticated_plan_admission(
     let operator = resolve_operator_identity_for_peer(config, staged.peer_uid)
         .map_err(|_| ProtectedPlanAdmissionHostErrorV1::ConnectionFailed)?;
 
-    // Everything that can disqualify the request is decided BEFORE the stage.
-    // The CAS is the mint's trust root and shares a filesystem with the ledger,
-    // so staging bytes that can never become an admission would hand any
-    // authenticated peer a write amplifier: up to the full input bound per
-    // connection, on an accept loop that never ends.
+    // Every request property that can disqualify the mint WITHOUT loading the
+    // bytes back out of the CAS is decided BEFORE the stage. The CAS is the
+    // mint's trust root and shares a filesystem with the ledger, so staging
+    // bytes that can never become an admission would hand any authenticated peer
+    // a write amplifier: up to the full input bound per connection, on an accept
+    // loop that never ends. Only validations that genuinely need the
+    // CAS-resolved content stay in the composition below; that residual
+    // write-amplification is the accepted operator-owned residual (see the
+    // runbook), not a defect to pull forward.
     //
-    // The composition re-checks both of these against the bytes it loaded; that
-    // is the authority check and it stays where it is. This is admission
-    // control for the filesystem, and it is deliberately the same predicate.
-    if parsed.asserted_validation_status != REQUIRED_ASSERTED_VALIDATION_STATUS {
+    // The composition re-checks all of these against the request and the bytes
+    // it loaded; that is the authority check and it stays where it is. These are
+    // admission control for the filesystem, and they are deliberately the same
+    // predicates the mint applies — the digest and idempotency predicates are
+    // shared with the storage layer so the two cannot drift.
+    if parsed.asserted_validation_status != REQUIRED_ASSERTED_VALIDATION_STATUS
+        || !plan_admission_asserted_plan_digest_is_canonical(&parsed.asserted_plan_digest)
+        || !plan_admission_idempotency_key_is_well_formed(&parsed.asserted_idempotency_key)
+    {
         return Err(ProtectedPlanAdmissionHostErrorV1::ConnectionFailed);
     }
     let staged_digest = format!("sha256:{:x}", Sha256::digest(&staged.plan_bytes));
@@ -311,9 +323,14 @@ pub(crate) fn serve_one_authenticated_plan_admission(
     }
 
     // The broker is the only principal that writes this CAS. A failed write is
-    // an uncertainty, not a refusal reason: the mint below will simply fail to
-    // resolve the reference and answer with reconciliation.
-    let _ = cas.put_canonical_bytes(&staged.plan_bytes);
+    // an uncertainty about whether the bytes the mint will try to resolve are
+    // actually present, so it fails the connection closed rather than proceeding
+    // into a mint that would resolve nothing and answer reconciliation on a
+    // silently absent object. Surfacing the write failure is more honest than a
+    // reconciliation the operator cannot distinguish from a real one.
+    if cas.put_canonical_bytes(&staged.plan_bytes).is_err() {
+        return Err(ProtectedPlanAdmissionHostErrorV1::ConnectionFailed);
+    }
 
     // Bind the signed response to the authenticated run, not a request echo:
     // the request's run was already checked equal to `config.run_id` above, and

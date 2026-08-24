@@ -286,6 +286,22 @@ fn request_frame(run_uuid: &str) -> String {
 }
 
 fn custom_request_frame(run_uuid: &str, plan_content_ref: &str, validation_status: &str) -> String {
+    request_frame_with_asserted(
+        run_uuid,
+        plan_content_ref,
+        validation_status,
+        &format!("sha256:{}", "cd".repeat(32)),
+        "planforge:v0:buildplane:cccccccc:abcd1234",
+    )
+}
+
+fn request_frame_with_asserted(
+    run_uuid: &str,
+    plan_content_ref: &str,
+    validation_status: &str,
+    plan_digest: &str,
+    idempotency_key: &str,
+) -> String {
     json!({
         "schema_version": 1,
         "request_id": REQUEST_UUID,
@@ -293,8 +309,8 @@ fn custom_request_frame(run_uuid: &str, plan_content_ref: &str, validation_statu
         "plan_content_ref": plan_content_ref,
         "asserted": {
             "validation_status": validation_status,
-            "plan_digest": format!("sha256:{}", "cd".repeat(32)),
-            "idempotency_key": "planforge:v0:buildplane:cccccccc:abcd1234",
+            "plan_digest": plan_digest,
+            "idempotency_key": idempotency_key,
         },
     })
     .to_string()
@@ -680,6 +696,80 @@ fn a_request_without_an_asserted_pass_stages_nothing() {
         assert!(
             fixture.cas_is_empty(),
             "{status:?} must be refused before anything is staged"
+        );
+        assert!(fixture.projection_is_empty());
+    }
+}
+
+/// A caller-asserted plan digest that is not a canonical sha256 is a request
+/// shape the mint refuses without ever loading the bytes back out of the CAS,
+/// so the ingress refuses it before staging — closing the deeper write
+/// amplification Codex found beyond the digest/PASS pre-checks.
+#[test]
+fn a_request_with_a_non_canonical_asserted_plan_digest_stages_nothing() {
+    for bad_digest in [
+        "not-a-digest",
+        "sha256:zz",
+        &format!("sha256:{}", "cd".repeat(31)),
+        &format!("sha256:{}", "CD".repeat(32)),
+    ] {
+        let fixture = HostFixture::new();
+        let (client, mut server) = UnixStream::pair().unwrap();
+        let object = sealed_memfd(&plan_bytes());
+        send_request(
+            &client,
+            &request_frame_with_asserted(
+                RUN_UUID,
+                &content_ref(),
+                "PASS",
+                bad_digest,
+                "planforge:v0:buildplane:cccccccc:abcd1234",
+            ),
+            Some(object.as_raw_fd()),
+        );
+        drop(object);
+
+        assert!(
+            fixture.serve_once(&mut server).is_err(),
+            "{bad_digest:?} is not a recordable asserted plan digest"
+        );
+        assert!(
+            fixture.cas_is_empty(),
+            "{bad_digest:?} must be refused before anything is staged"
+        );
+        assert!(fixture.projection_is_empty());
+    }
+}
+
+/// A malformed idempotency key (empty or multi-line) is the same class: a
+/// request-field the mint refuses independent of the bytes, so it must not
+/// reach the CAS.
+#[test]
+fn a_request_with_a_malformed_idempotency_key_stages_nothing() {
+    for bad_key in ["", "   ", "planforge\nwith-newline", "planforge\twith-tab"] {
+        let fixture = HostFixture::new();
+        let (client, mut server) = UnixStream::pair().unwrap();
+        let object = sealed_memfd(&plan_bytes());
+        send_request(
+            &client,
+            &request_frame_with_asserted(
+                RUN_UUID,
+                &content_ref(),
+                "PASS",
+                &format!("sha256:{}", "cd".repeat(32)),
+                bad_key,
+            ),
+            Some(object.as_raw_fd()),
+        );
+        drop(object);
+
+        assert!(
+            fixture.serve_once(&mut server).is_err(),
+            "{bad_key:?} is not a recordable idempotency key"
+        );
+        assert!(
+            fixture.cas_is_empty(),
+            "{bad_key:?} must be refused before anything is staged"
         );
         assert!(fixture.projection_is_empty());
     }

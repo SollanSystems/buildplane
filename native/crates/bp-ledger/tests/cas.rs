@@ -25,6 +25,40 @@ fn put_bytes_is_idempotent() {
     assert_eq!(h1, h2);
 }
 
+/// A crash between creating the temp file and renaming it into place must not
+/// wedge every future store of that content. A deterministic `.tmp-<hash>` name
+/// opened with `create_new` did exactly that: the final blob never landed, so
+/// every retry re-entered the write path and every retry then failed
+/// `AlreadyExists` on the leftover temp — a permanently stranded object. The
+/// temp name is now unique per attempt, so a retry always makes progress.
+#[test]
+fn a_stale_temp_from_a_crashed_write_does_not_wedge_a_retry() {
+    let tmp = TempDir::new().unwrap();
+    let cas = Cas::open(tmp.path()).unwrap();
+
+    let content = b"stranded-plan-content";
+    // Learn the object's on-disk layout by storing it once, then reconstruct the
+    // exact crash state: the final blob absent, an old-style deterministic temp
+    // present.
+    let hash = cas.put_bytes(content).unwrap();
+    let hex = hash.strip_prefix("sha256:").unwrap();
+    let (shard, rest) = hex.split_at(2);
+    let shard_dir = tmp.path().join(shard);
+    std::fs::remove_file(shard_dir.join(rest)).unwrap();
+    let stale_temp = shard_dir.join(format!(".tmp-{hash}"));
+    std::fs::write(&stale_temp, b"partial").unwrap();
+    assert!(
+        !shard_dir.join(rest).exists(),
+        "the crash state has no blob"
+    );
+
+    // The retry must succeed and land the real content, not fail on the stale
+    // temp.
+    let retried = cas.put_bytes(content).unwrap();
+    assert_eq!(retried, hash);
+    assert_eq!(cas.get_bytes(&hash).unwrap(), content);
+}
+
 #[test]
 fn put_path_hashes_file_contents() {
     let tmp = TempDir::new().unwrap();

@@ -3227,6 +3227,22 @@ impl SqliteStore {
                 sealed_checkpoint_event_digest  TEXT,
                 created_at                      TEXT NOT NULL,
                 sealed_at                       TEXT,
+                -- INVARIANT: one admission per (run, request), NOT one per run.
+                -- The primary key is `(run_id, request_id)`, so a run may hold
+                -- several sealed admissions under distinct request ids. That is
+                -- intended: each admission authorizes dispatch only for a packet
+                -- whose `provenance_ref` names its own event id, and the kernel
+                -- dispatch gate binds the admission's `run_id` to the run it is
+                -- admitting (`admitted-plan-reader.ts` / `orchestrator.ts`), so
+                -- N admissions in one run cannot cross-authorize each other's
+                -- packets and cannot authorize another run's. A stricter
+                -- `UNIQUE(run_id)` — one admission per run — is deliberately NOT
+                -- imposed here: whether PlanForge should mint at most one plan
+                -- admission per run is an open product question (the
+                -- candidate-transaction model has one plan admission parenting N
+                -- per-task admissions, which would forbid it), and §6.2(3) pins
+                -- only same-`request_id` idempotency. Flagged for the reviewer;
+                -- do not add `UNIQUE(run_id)` without spec/operator direction.
                 PRIMARY KEY (run_id, request_id),
                 UNIQUE (run_id, admission_identity_digest),
                 FOREIGN KEY(admission_event_id) REFERENCES events(id),
@@ -22689,17 +22705,12 @@ fn validate_plan_admission_request_shape(request: &PlanAdmissionRequestV1) -> Re
             "plan admission decided_by must be a non-empty single-line identity",
         );
     }
-    if !is_canonical_sha256_digest(&request.asserted_plan_digest) {
+    if !plan_admission_asserted_plan_digest_is_canonical(&request.asserted_plan_digest) {
         return plan_admission_authority_rejected(
             "asserted plan digest must be canonical sha256 to be recorded",
         );
     }
-    if request.asserted_idempotency_key.trim().is_empty()
-        || request
-            .asserted_idempotency_key
-            .chars()
-            .any(|character| character.is_control())
-    {
+    if !plan_admission_idempotency_key_is_well_formed(&request.asserted_idempotency_key) {
         return plan_admission_authority_rejected(
             "asserted idempotency key must be a non-empty single-line value to be recorded",
         );
@@ -27039,6 +27050,25 @@ fn is_canonical_sha256_digest(value: &str) -> bool {
         && value.as_bytes()[7..]
             .iter()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
+}
+
+/// Whether a caller-asserted plan digest is shaped like a canonical sha256.
+///
+/// This is the same predicate `validate_plan_admission_request_shape` applies at
+/// mint time. It is exposed so a protected ingress can refuse a malformed
+/// request-field BEFORE staging its bytes into the broker-owned CAS, keeping the
+/// mint-time check and the pre-stage check from drifting.
+pub fn plan_admission_asserted_plan_digest_is_canonical(value: &str) -> bool {
+    is_canonical_sha256_digest(value)
+}
+
+/// Whether a caller-asserted idempotency key is a non-empty single-line value.
+///
+/// The mint records it verbatim as non-authoritative metadata; this only refuses
+/// a value that is empty or carries control characters. Shared with the ingress
+/// for the same no-drift reason as the digest predicate above.
+pub fn plan_admission_idempotency_key_is_well_formed(value: &str) -> bool {
+    !value.trim().is_empty() && !value.chars().any(|character| character.is_control())
 }
 
 fn is_canonical_git_commit_sha(value: &str) -> bool {

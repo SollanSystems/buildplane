@@ -10,6 +10,13 @@ use sha2::{Digest, Sha256};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Monotonic per-process counter for temp-file uniqueness. Combined with the
+/// process id it makes every in-flight temp name distinct, so a crashed
+/// attempt's stale temp can never collide with — and therefore never wedge — a
+/// later attempt to store the same content.
+static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 const SHA256_PREFIX: &str = "sha256:";
 const CAS_SHA256_PREFIX: &str = "cas:sha256:";
@@ -83,7 +90,21 @@ impl Cas {
         }
         let parent = dest.parent().expect("CAS path always has a parent");
         fs::create_dir_all(parent)?;
-        let tmp = parent.join(format!(".tmp-{}", &hash));
+        // The temp name is unique per attempt (pid + monotonic counter), not the
+        // content hash. A deterministic `.tmp-<hash>` opened with `create_new`
+        // wedges permanently after a crash between create and rename: the final
+        // blob does not exist, so every retry re-enters this path, and every
+        // retry then fails `AlreadyExists` on the leftover temp. A unique name
+        // cannot collide, so a retry always makes progress; the abandoned temp
+        // is inert (it is never the destination) and is cleaned opportunistically
+        // by the rename of a subsequent successful write of nearby content.
+        let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let tmp = parent.join(format!(
+            ".tmp-{}-{}-{}",
+            &hash,
+            std::process::id(),
+            sequence
+        ));
         {
             let mut f = OpenOptions::new().write(true).create_new(true).open(&tmp)?;
             f.write_all(bytes)?;
