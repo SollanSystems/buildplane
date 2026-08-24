@@ -53,8 +53,10 @@ const KERNEL_SEED: [u8; 32] = [83u8; 32];
 const RUN_UUID: &str = "01919000-0000-7000-8000-00000000cd01";
 const OTHER_RUN_UUID: &str = "01919000-0000-7000-8000-00000000cd09";
 const RUN_STARTED_EVENT_UUID: &str = "01919000-0000-7000-8000-00000000cd02";
+const SECOND_RUN_STARTED_EVENT_UUID: &str = "01919000-0000-7000-8000-00000000cd08";
 const REQUEST_UUID: &str = "01919000-0000-7000-8000-00000000cd03";
 const OPERATOR_IDENTITY: &str = "operator:release-engineer";
+const DECOY_IDENTITY: &str = "operator:decoy";
 
 fn current_uid() -> u32 {
     unsafe { libc::geteuid() }
@@ -93,13 +95,38 @@ fn content_ref() -> String {
 }
 
 fn host_config(authority_root: &Path) -> PlanAdmissionHostConfigV1 {
+    host_config_with_clients(
+        authority_root,
+        json!([{ "uid": current_uid(), "decided_by": OPERATOR_IDENTITY }]),
+    )
+}
+
+/// A config whose *lowest* configured client UID is not this process.
+///
+/// The identity map is ordered, so a host that indexed the configured client
+/// list instead of using the authenticated UID would record `DECOY_IDENTITY`
+/// here while still passing every single-client test.
+fn host_config_with_a_lower_decoy_client(authority_root: &Path) -> PlanAdmissionHostConfigV1 {
+    host_config_with_clients(
+        authority_root,
+        json!([
+            { "uid": current_uid().checked_sub(1).unwrap(), "decided_by": DECOY_IDENTITY },
+            { "uid": current_uid(), "decided_by": OPERATOR_IDENTITY },
+        ]),
+    )
+}
+
+fn host_config_with_clients(
+    authority_root: &Path,
+    clients: serde_json::Value,
+) -> PlanAdmissionHostConfigV1 {
     let config = json!({
         "schema_version": 1,
         "run_id": RUN_UUID,
         // A broker identity distinct from this process, so a same-process peer
         // is a configured *client* rather than the broker itself.
         "broker_uid": current_uid().checked_add(1).unwrap(),
-        "plan_admission_clients": [{ "uid": current_uid(), "decided_by": OPERATOR_IDENTITY }],
+        "plan_admission_clients": clients,
         "socket_group_gid": current_gid(),
         "authority_root": authority_root.to_string_lossy(),
         "authority_realm_digest": format!("sha256:{}", "ab".repeat(32)),
@@ -112,9 +139,32 @@ fn host_config(authority_root: &Path) -> PlanAdmissionHostConfigV1 {
     parse_plan_admission_host_config_v1(&config.to_string()).expect("valid host config")
 }
 
-fn seed_run_started(store: &SqliteStore, git_head: &str) {
-    let event = Event {
-        id: EventId::from_uuid(Uuid::parse_str(RUN_STARTED_EVENT_UUID).unwrap()),
+/// How the run's start event reaches the protected tape.
+///
+/// The resolver treats the run start as an *attestation*, so every way that
+/// attestation can be absent or unconvincing is a distinct refusal path. These
+/// exist to drive the production resolver, not S2's injected fake.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RunStart {
+    KernelSigned,
+    Absent,
+    Unsigned,
+    /// Signed by a key that is not among the realm's pinned trusted keys, so it
+    /// reads back as unverified rather than as a different signer.
+    UntrustedKey,
+    /// Signed by the trusted kernel *key* but under a different actor/key
+    /// identity. Verification succeeds; only the signer comparison refuses it.
+    MismatchedSignerIdentity,
+    Duplicated,
+}
+
+fn stranger_key() -> SigningKey {
+    SigningKey::from_bytes(&[84u8; 32])
+}
+
+fn run_started_event(event_uuid: &str, git_head: &str) -> Event {
+    Event {
+        id: EventId::from_uuid(Uuid::parse_str(event_uuid).unwrap()),
         run_id: run_id(),
         parent_event_id: None,
         schema_version: Event::CURRENT_SCHEMA_VERSION,
@@ -128,10 +178,51 @@ fn seed_run_started(store: &SqliteStore, git_head: &str) {
             parent_run_id: None,
             parent_event_id: None,
         }),
-    };
-    store
-        .append_signed(&event, &kernel_key(), &kernel_signer())
-        .expect("the protected tape records a kernel-signed run start");
+    }
+}
+
+fn seed_run_start(store: &SqliteStore, variant: RunStart, git_head: &str) {
+    let event = run_started_event(RUN_STARTED_EVENT_UUID, git_head);
+    match variant {
+        RunStart::Absent => {}
+        RunStart::KernelSigned => {
+            store
+                .append_signed(&event, &kernel_key(), &kernel_signer())
+                .expect("the protected tape records a kernel-signed run start");
+        }
+        RunStart::Unsigned => {
+            store.append(&event).expect("an unsigned run start lands");
+        }
+        RunStart::UntrustedKey => {
+            let signer = ActorKeyRef {
+                actor_id: "kernel".into(),
+                key_id: "kernel-main".into(),
+                public_key_hash: Some(public_key_hash(&stranger_key().verifying_key())),
+            };
+            store
+                .append_signed(&event, &stranger_key(), &signer)
+                .expect("a run start signed by an unpinned key lands");
+        }
+        RunStart::MismatchedSignerIdentity => {
+            let signer = ActorKeyRef {
+                actor_id: "operator:impostor".into(),
+                key_id: "kernel-main".into(),
+                public_key_hash: Some(public_key_hash(&kernel_key().verifying_key())),
+            };
+            store
+                .append_signed(&event, &kernel_key(), &signer)
+                .expect("a run start under another identity lands");
+        }
+        RunStart::Duplicated => {
+            store
+                .append_signed(&event, &kernel_key(), &kernel_signer())
+                .expect("the first run start lands");
+            let second = run_started_event(SECOND_RUN_STARTED_EVENT_UUID, "d".repeat(40).as_str());
+            store
+                .append_signed(&second, &kernel_key(), &kernel_signer())
+                .expect("a second run start lands");
+        }
+    }
 }
 
 fn sealed_memfd(bytes: &[u8]) -> OwnedFd {
@@ -217,6 +308,7 @@ fn read_response(stream: &mut UnixStream) -> Vec<u8> {
 
 struct HostFixture {
     _root: TempDir,
+    authority_root: PathBuf,
     database_path: PathBuf,
     keyring_root: PathBuf,
     store: SqliteStore,
@@ -226,12 +318,25 @@ struct HostFixture {
 
 impl HostFixture {
     fn new() -> Self {
+        Self::with_run_start(RunStart::KernelSigned)
+    }
+
+    /// The same fixture, but configured with a lower-UID decoy client so the
+    /// recorded identity discriminates between "the peer that connected" and
+    /// "the first client in the config".
+    fn with_a_lower_decoy_client() -> Self {
+        let mut fixture = Self::with_run_start(RunStart::KernelSigned);
+        fixture.config = host_config_with_a_lower_decoy_client(&fixture.authority_root);
+        fixture
+    }
+
+    fn with_run_start(variant: RunStart) -> Self {
         let root = TempDir::new().unwrap();
         let authority_root = root.path().join("authority");
         fs::create_dir(&authority_root).unwrap();
         let database_path = root.path().join("events.db");
         let store = SqliteStore::open(&database_path).unwrap();
-        seed_run_started(&store, &trusted_base());
+        seed_run_start(&store, variant, &trusted_base());
         let cas = Cas::open(root.path().join("cas")).unwrap();
         let keyring_root = root.path().join("keys");
         fs::create_dir_all(keyring_root.join("kernel")).unwrap();
@@ -243,6 +348,7 @@ impl HostFixture {
         let config = host_config(&authority_root);
         Self {
             _root: root,
+            authority_root,
             database_path,
             keyring_root,
             store,
@@ -266,12 +372,39 @@ impl HostFixture {
             .is_err()
     }
 
+    fn plan_admitted_event_count(&self) -> usize {
+        self.store
+            .events_for_run(RUN_UUID)
+            .unwrap()
+            .into_iter()
+            .filter(|row| row.kind == "plan_admitted")
+            .count()
+    }
+
     fn projection_is_empty(&self) -> bool {
         let connection = rusqlite::Connection::open(&self.database_path).unwrap();
         let count: i64 = connection
             .query_row("SELECT COUNT(*) FROM plan_admissions", [], |row| row.get(0))
             .unwrap();
         count == 0
+    }
+
+    /// Drive one complete authenticated request and return the signed status
+    /// the peer receives.
+    fn mint_and_read_status(&self) -> PlanAdmissionResponseStatusV1 {
+        let (mut client, mut server) = UnixStream::pair().unwrap();
+        let object = sealed_memfd(&plan_bytes());
+        send_request(&client, &request_frame(RUN_UUID), Some(object.as_raw_fd()));
+        drop(object);
+        self.serve_once(&mut server)
+            .expect("a well-formed authenticated request always receives a signed answer");
+        let response = read_response(&mut client);
+        let expected_content_ref = content_ref();
+        let binding =
+            PlanAdmissionResponseBindingV1::new(REQUEST_UUID, &expected_content_ref).unwrap();
+        verify_plan_admission_response(&response, &kernel_key().verifying_key(), binding)
+            .expect("the host signs every answer it gives")
+            .0
     }
 
     fn serve_once(&self, stream: &mut UnixStream) -> Result<(), impl std::fmt::Debug> {
@@ -544,6 +677,82 @@ fn a_request_without_an_asserted_pass_stages_nothing() {
         );
         assert!(fixture.projection_is_empty());
     }
+}
+
+/// Every way the run-start attestation can fail to convince, driven through the
+/// **production** resolver rather than S2's injected fake.
+///
+/// The signer-identity case is the one that matters most: it is the only case
+/// that survives deleting the actor/key comparison, because a run start signed
+/// by the trusted kernel *key* under any other identity still verifies.
+#[test]
+fn an_unconvincing_run_start_attestation_yields_reconciliation_and_mints_nothing() {
+    for variant in [
+        RunStart::Absent,
+        RunStart::Unsigned,
+        RunStart::UntrustedKey,
+        RunStart::MismatchedSignerIdentity,
+        RunStart::Duplicated,
+    ] {
+        let fixture = HostFixture::with_run_start(variant);
+        assert_eq!(
+            fixture.mint_and_read_status(),
+            PlanAdmissionResponseStatusV1::ReconciliationRequired,
+            "{variant:?} must not become a trusted base"
+        );
+        assert!(
+            fixture.projection_is_empty(),
+            "{variant:?} must mint no admission"
+        );
+        assert_eq!(
+            fixture.plan_admitted_event_count(),
+            0,
+            "{variant:?} must leave no plan_admitted on the tape"
+        );
+    }
+}
+
+/// The positive control for the case above: the same fixture with a convincing
+/// attestation does seal, so the refusals are about the attestation and not
+/// about the harness.
+#[test]
+fn a_kernel_signed_run_start_is_the_only_attestation_that_mints() {
+    let fixture = HostFixture::with_run_start(RunStart::KernelSigned);
+    assert_eq!(
+        fixture.mint_and_read_status(),
+        PlanAdmissionResponseStatusV1::Sealed
+    );
+    assert!(!fixture.projection_is_empty());
+}
+
+/// `decided_by` must be a fact about *this connection*, not about the config.
+///
+/// This is the test that fails if the host ever reads the operator identity
+/// from the configured client list rather than from the SO_PEERCRED UID: the
+/// decoy sorts first, so an index-based lookup records the wrong operator on a
+/// tape event that is then kernel-signed.
+#[test]
+fn the_recorded_operator_is_the_one_the_peer_authenticated_as() {
+    let fixture = HostFixture::with_a_lower_decoy_client();
+    assert_eq!(
+        fixture.config.plan_admission_client_uids().first().copied(),
+        Some(current_uid() - 1),
+        "the decoy must sort ahead of this process, or the test proves nothing"
+    );
+
+    assert_eq!(
+        fixture.mint_and_read_status(),
+        PlanAdmissionResponseStatusV1::Sealed
+    );
+
+    let connection = rusqlite::Connection::open(&fixture.database_path).unwrap();
+    let decided_by: String = connection
+        .query_row("SELECT decided_by FROM plan_admissions", [], |row| {
+            row.get(0)
+        })
+        .expect("the mint wrote its projection row");
+    assert_eq!(decided_by, OPERATOR_IDENTITY);
+    assert_ne!(decided_by, DECOY_IDENTITY);
 }
 
 #[test]
