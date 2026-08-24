@@ -55,6 +55,11 @@ const MAX_PLAN_ADMISSION_CONTENT_BYTES: u64 = 1 << 20;
 const REQUIRED_CONTENT_SEALS: libc::c_int =
     libc::F_SEAL_WRITE | libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_SEAL;
 
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) fn max_plan_admission_content_bytes_for_test() -> usize {
+    MAX_PLAN_ADMISSION_CONTENT_BYTES as usize
+}
+
 /// Closed local failures for the private authenticated plan-admission ingress.
 ///
 /// Signer, ledger, CAS, storage, and reconciliation internals never cross this
@@ -279,7 +284,10 @@ fn receive_frame_chunk(
             return Err(chunk_refusal);
         }
         filled += received as usize;
-        if Instant::now() >= deadline {
+        // Only a buffer that still needs another read can be refused for time.
+        // Checking unconditionally would reject a frame that arrived complete
+        // exactly at the deadline, after all its bytes were already in hand.
+        if filled < buffer.len() && Instant::now() >= deadline {
             return Err(chunk_refusal);
         }
     }

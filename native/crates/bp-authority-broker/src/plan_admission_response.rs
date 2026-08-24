@@ -24,8 +24,10 @@ const SIGNATURE_DOMAIN: &[u8] = b"buildplane.protected-plan-admission.response.v
 pub(crate) enum PlanAdmissionResponseErrorV1 {
     #[error("plan admission response binding was rejected")]
     InvalidBinding,
+    #[allow(dead_code)] // Produced only by the verification half.
     #[error("plan admission response payload was rejected")]
     InvalidPayload,
+    #[allow(dead_code)] // Produced only by the verification half.
     #[error("plan admission response signature was rejected")]
     InvalidSignature,
 }
@@ -70,6 +72,7 @@ impl<'a> PlanAdmissionResponseBindingV1<'a> {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+#[allow(dead_code)] // Read only by the verification half, above.
 struct SignedPlanAdmissionResponseWireV1 {
     schema_version: u8,
     protocol: String,
@@ -98,6 +101,10 @@ pub(crate) fn sign_plan_admission_response(
     ))
 }
 
+/// No production caller until a plan-admission client lands: the host signs,
+/// and only the contract tests read back. It ships now so a later client cannot
+/// invent a second, looser reading of the same bytes.
+#[allow(dead_code)]
 pub(crate) fn verify_plan_admission_response(
     payload: &[u8],
     verifying_key: &VerifyingKey,
@@ -221,6 +228,7 @@ fn encode_hex(bytes: &[u8]) -> String {
     encoded
 }
 
+#[allow(dead_code)] // Verification half only.
 fn decode_signature_hex(value: &str) -> Result<[u8; 64], PlanAdmissionResponseErrorV1> {
     if value.len() != 128 || !value.as_bytes().iter().all(u8::is_ascii_hexdigit) {
         return Err(PlanAdmissionResponseErrorV1::InvalidSignature);
@@ -232,15 +240,11 @@ fn decode_signature_hex(value: &str) -> Result<[u8; 64], PlanAdmissionResponseEr
     Ok(bytes)
 }
 
+#[allow(dead_code)] // Verification half only.
 fn decode_nibble(byte: u8) -> Result<u8, PlanAdmissionResponseErrorV1> {
     match byte {
         b'0'..=b'9' => Ok(byte - b'0'),
         b'a'..=b'f' => Ok(byte - b'a' + 10),
         _ => Err(PlanAdmissionResponseErrorV1::InvalidSignature),
     }
-}
-
-#[cfg(test)]
-pub(crate) fn signature_message_for_test(unsigned: &[u8]) -> Vec<u8> {
-    signature_message(unsigned)
 }

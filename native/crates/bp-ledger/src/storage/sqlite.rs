@@ -1311,6 +1311,17 @@ pub const PLAN_ADMISSION_AUTHORIZED_NEXT_STEP_V1: &str = "dispatch_admitted_plan
 /// protected-process denial-of-service surface rather than evidence.
 const MAX_PLAN_ADMISSION_INPUT_BYTES: usize = 1 << 20;
 
+/// The compiled-plan size bound, for tests that must not let a second copy of
+/// this number drift from it.
+///
+/// Deliberately not a `pub const`: the bound is this layer's own policy, and a
+/// published constant invites callers to pre-size against it and to treat the
+/// storage refusal as advisory. Test-only visibility mirrors `conn_for_tests`.
+#[cfg(any(test, feature = "test-support"))]
+pub fn max_plan_admission_input_bytes() -> usize {
+    MAX_PLAN_ADMISSION_INPUT_BYTES
+}
+
 /// Domain separator for the mint's own plan identity. The PlanForge
 /// `pf-plan-<fingerprint>` id is NOT reproducible here: it hashes an
 /// insertion-order `JSON.stringify` over a *parsed* projection of the plan

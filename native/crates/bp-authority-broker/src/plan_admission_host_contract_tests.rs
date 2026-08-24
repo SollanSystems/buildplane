@@ -7,7 +7,9 @@
 //! in that path is a fixture except the plan text itself.
 
 use crate::confinement::{BrokerAuthorityRoleV1, BrokerHostConfinementPolicyV1};
-use crate::plan_admission_handler::read_authenticated_plan_admission_ingress_detailed;
+use crate::plan_admission_handler::{
+    read_authenticated_plan_admission_ingress_detailed, PlanAdmissionIngressRefusal,
+};
 use crate::plan_admission_host::{
     resolve_operator_identity_for_peer, serve_one_authenticated_plan_admission,
     OperationalDiagnosticV1, LISTENER_PARENT_COMPONENTS, LISTENER_SOCKET_FILE_NAME,
@@ -546,8 +548,12 @@ fn the_listener_path_policy_is_the_promotion_decision_policy() {
     );
 }
 
+/// Pins the three operational strings, including the one only the non-Linux
+/// runner emits. It does not — and on a Linux runner cannot — exercise the
+/// non-Linux path itself; the enum is constructible under `cfg(test)`
+/// everywhere precisely so the text stays pinned by a test that can run.
 #[test]
-fn a_non_linux_host_fails_closed_with_the_unsupported_platform_diagnostic() {
+fn the_operational_diagnostic_vocabulary_is_the_three_named_classes() {
     assert_eq!(
         OperationalDiagnosticV1::UnsupportedPlatform.as_str(),
         "unsupported_platform"
@@ -596,10 +602,9 @@ fn a_request_cannot_name_the_operator_it_wishes_to_be_recorded_as() {
     drop(object);
     drop(client);
 
-    let refusal =
-        read_authenticated_plan_admission_ingress_detailed(&policy, &attestation, &mut server);
-    assert!(
-        refusal.is_err(),
+    assert_eq!(
+        read_authenticated_plan_admission_ingress_detailed(&policy, &attestation, &mut server),
+        Err(PlanAdmissionIngressRefusal::RequestNotClosed),
         "the closed request shape has no field for a caller-chosen identity"
     );
 }

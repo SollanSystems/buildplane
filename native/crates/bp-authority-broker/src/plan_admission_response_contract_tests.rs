@@ -9,7 +9,7 @@ use crate::plan_admission_response::{
     sign_plan_admission_response, verify_plan_admission_response, PlanAdmissionResponseBindingV1,
     PlanAdmissionResponseErrorV1, PlanAdmissionResponseStatusV1,
 };
-use ed25519_dalek::SigningKey;
+use ed25519_dalek::{Signer, SigningKey};
 
 const REQUEST_UUID: &str = "01919000-0000-7000-8000-0000000000f1";
 const ADMISSION_UUID: &str = "01919000-0000-7000-8000-0000000000f2";
@@ -184,11 +184,57 @@ fn another_key_another_domain_and_any_tamper_all_fail_closed() {
         verify_plan_admission_response(&trailing, &signing_key().verifying_key(), binding())
             .is_err()
     );
+}
 
-    // The signature is over a domain-separated message, so a response signed
-    // for another protocol can never be replayed into this one.
-    let foreign = crate::plan_admission_response::signature_message_for_test(b"{}");
-    assert!(foreign.starts_with(b"buildplane.protected-plan-admission.response.v1\0"));
+/// Domain separation, tested by consequence rather than by restating it.
+///
+/// A signature over the *same bytes* by the *same key*, lacking only the domain
+/// prefix, must not verify. That is what stops a signature this key produced
+/// for some other buildplane protocol from being replayed into a
+/// plan-admission response — and, unlike asserting that the prefix function
+/// prepends its own constant, it can actually fail.
+#[test]
+fn a_signature_over_the_undomained_payload_does_not_verify() {
+    let payload = sign_plan_admission_response(
+        &signing_key(),
+        binding(),
+        PlanAdmissionResponseStatusV1::Sealed,
+        Some(ADMISSION_UUID),
+    )
+    .unwrap();
+    let signed = String::from_utf8(payload).unwrap();
+
+    // Recover the exact bytes that were signed, minus the domain prefix.
+    let split = signed
+        .find(r#","signature":""#)
+        .expect("a signed response always carries its signature member");
+    let undomained_message = format!("{}}}", &signed[..split]);
+
+    let forged = signing_key().sign(undomained_message.as_bytes());
+    let forged_payload = format!(
+        r#"{},"signature":"{}"}}"#,
+        &signed[..split],
+        encode_hex(&forged.to_bytes())
+    );
+
+    // Sanity: the forgery is byte-identical to the real thing except for the
+    // signature, so a failure below is about the domain and nothing else.
+    assert_eq!(&forged_payload[..split], &signed[..split]);
+    assert_ne!(forged_payload, signed);
+
+    assert_eq!(
+        verify_plan_admission_response(
+            forged_payload.as_bytes(),
+            &signing_key().verifying_key(),
+            binding()
+        ),
+        Err(PlanAdmissionResponseErrorV1::InvalidSignature),
+        "a signature over the undomained message must not verify"
+    );
+}
+
+fn encode_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 #[test]

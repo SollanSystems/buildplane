@@ -99,6 +99,55 @@ fn happy_parsed() -> ParsedPlanAdmissionRequestV1 {
     parsed(&format!("cas://{}", sha256_digest(&plan_bytes())), "PASS")
 }
 
+/// The ingress refuses oversized content before it allocates, and the storage
+/// layer refuses it again. Those are two constants in two crates, and a silent
+/// divergence would either let the ingress admit content storage will refuse
+/// (wasted work, and a CAS write for nothing) or make the ingress the real
+/// bound while the storage one reads as authoritative.
+#[test]
+fn the_ingress_content_bound_equals_the_storage_admission_bound() {
+    assert_eq!(
+        crate::plan_admission_handler::max_plan_admission_content_bytes_for_test(),
+        bp_ledger::storage::sqlite::max_plan_admission_input_bytes(),
+        "the ingress and storage bounds on compiled plan content must not drift"
+    );
+}
+
+/// The request boundary must accept only the canonical hyphenated spelling.
+///
+/// `Uuid::parse_str` is permissive: braced, urn-prefixed, unhyphenated, and
+/// upper-case forms all parse to the same value. The deployment config and the
+/// signed response both require the canonical form, so a looser request
+/// boundary would let a request and its own answer disagree textually about the
+/// same identity.
+#[test]
+fn request_identifiers_are_only_the_canonical_hyphenated_spelling() {
+    for spelling in [
+        "01919000-0000-7000-8000-0000000000F1",
+        "01919000000070008000000000000f1a",
+        "{01919000-0000-7000-8000-0000000000f1}",
+        "urn:uuid:01919000-0000-7000-8000-0000000000f1",
+    ] {
+        let frame = serde_json::json!({
+            "schema_version": 1,
+            "request_id": spelling,
+            "run_id": RUN_UUID,
+            "plan_content_ref": format!("cas://{}", sha256_digest(&plan_bytes())),
+            "asserted": {
+                "validation_status": "PASS",
+                "plan_digest": format!("sha256:{}", "cd".repeat(32)),
+                "idempotency_key": "planforge:v0:buildplane:deadbeef:abcd1234",
+            },
+        })
+        .to_string();
+        assert_eq!(
+            parse_plan_admission_request_v1(&frame),
+            Err(PlanAdmissionRequestRejection::RequestRejected),
+            "{spelling} is not the canonical spelling of a request identifier"
+        );
+    }
+}
+
 struct FakeContent {
     outcome: Result<Vec<u8>, PlanContentResolverError>,
 }
