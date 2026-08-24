@@ -401,14 +401,30 @@ impl PlanContentResolver for ProtectedPlanContentResolver<'_> {
     }
 }
 
-/// Derive the trusted base from the run's own signed tape.
+/// Resolve the trusted base from the run's own kernel-signed start event.
 ///
-/// This is deliberately not a live `git rev-parse` and not a configuration
-/// value. `run_started` carries the repository head the run was cut from, it is
-/// already on the protected tape, and it is kernel-signed — so the trusted base
-/// is a fact the broker re-derives from evidence it already holds, verified
-/// against the same pinned signer the mint itself signs with. Anything less
-/// than exactly one verified, kernel-signed `run_started` is refused.
+/// **What this is: an attestation, not a derivation.** The value is not
+/// recomputed from a repository — the host never runs `git`, and never reads a
+/// working tree. It is the `git_head` that *whoever recorded the run start*
+/// put on the tape, and what this resolver establishes is that the kernel
+/// signer attested to it: exactly one `run_started` for the run, verifying
+/// under the pinned trusted keys, signed by the configured kernel identity.
+/// Anything less is refused.
+///
+/// So the trusted base is exactly as trustworthy as the kernel key — the same
+/// key that signs the admission. That is a deliberate, disclosed choice over a
+/// live `git rev-parse` (which would need a new fixed-git operation and a
+/// subprocess) and over a configuration value (which could not vary per run).
+/// It is emphatically not an independent second source.
+///
+/// **Standing constraint.** While `run_started` is the mint's trusted-base
+/// source, it must not become kernel-signable from caller-supplied input. It
+/// sits on the signed-append denylist today — pinned by name in
+/// `bp-ledger`'s `the_signed_only_denylist_names_plan_admitted_and_run_started`
+/// — and any future native `run_started` emitter must derive `git_head` itself
+/// rather than accept it from a request. This carries the same weight as the
+/// no-consumer-before-S4 embargo and is recorded in the compatibility matrix
+/// and the governed runbook.
 #[cfg(target_os = "linux")]
 struct LedgerPlanRepositoryDescriptorResolver<'a> {
     store: &'a SqliteStore,
