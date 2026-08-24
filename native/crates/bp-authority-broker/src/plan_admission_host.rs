@@ -315,6 +315,10 @@ pub(crate) fn serve_one_authenticated_plan_admission(
     // resolve the reference and answer with reconciliation.
     let _ = cas.put_canonical_bytes(&staged.plan_bytes);
 
+    // Bind the signed response to the authenticated run, not a request echo:
+    // the request's run was already checked equal to `config.run_id` above, and
+    // binding to config makes the source of truth explicit.
+    let binding_run_id = config.run_id.to_string();
     let binding_request_id = parsed.request_id.hyphenated().to_string();
     let binding_content_ref = parsed.plan_content_ref.as_str().to_string();
 
@@ -347,6 +351,7 @@ pub(crate) fn serve_one_authenticated_plan_admission(
         attestation,
         stream,
         kernel_signing_key,
+        &binding_run_id,
         &binding_request_id,
         &binding_content_ref,
         disposition,
@@ -518,11 +523,12 @@ fn write_authenticated_plan_admission_response(
     attestation: &BrokerHostConfinementAttestationV1,
     stream: &mut UnixStream,
     kernel_signing_key: &SigningKey,
+    run_id: &str,
     request_id: &str,
     plan_content_ref: &str,
     disposition: BrokerPlanAdmissionDisposition,
 ) -> Result<(), ProtectedPlanAdmissionHostErrorV1> {
-    let binding = PlanAdmissionResponseBindingV1::new(request_id, plan_content_ref)
+    let binding = PlanAdmissionResponseBindingV1::new(run_id, request_id, plan_content_ref)
         .map_err(|_| ProtectedPlanAdmissionHostErrorV1::ConnectionFailed)?;
     let (status, admission_event_id) = match disposition {
         BrokerPlanAdmissionDisposition::Sealed(proof) => (

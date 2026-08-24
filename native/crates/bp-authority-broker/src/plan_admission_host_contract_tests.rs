@@ -403,7 +403,8 @@ impl HostFixture {
         let response = read_response(&mut client);
         let expected_content_ref = content_ref();
         let binding =
-            PlanAdmissionResponseBindingV1::new(REQUEST_UUID, &expected_content_ref).unwrap();
+            PlanAdmissionResponseBindingV1::new(RUN_UUID, REQUEST_UUID, &expected_content_ref)
+                .unwrap();
         verify_plan_admission_response(&response, &kernel_key().verifying_key(), binding)
             .expect("the host signs every answer it gives")
             .0
@@ -775,7 +776,8 @@ fn an_authenticated_mint_seals_a_plan_admission_and_verifies_under_the_external_
     // 1. The peer receives a signed, request-bound, sealed disposition.
     let response = read_response(&mut client);
     let expected_content_ref = content_ref();
-    let binding = PlanAdmissionResponseBindingV1::new(REQUEST_UUID, &expected_content_ref).unwrap();
+    let binding =
+        PlanAdmissionResponseBindingV1::new(RUN_UUID, REQUEST_UUID, &expected_content_ref).unwrap();
     let (status, admission_event_id) =
         verify_plan_admission_response(&response, &kernel_key().verifying_key(), binding)
             .expect("the response is signed by the host kernel key");

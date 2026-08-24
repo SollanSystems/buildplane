@@ -11,6 +11,8 @@ use crate::plan_admission_response::{
 };
 use ed25519_dalek::{Signer, SigningKey};
 
+const RUN_UUID: &str = "01919000-0000-7000-8000-0000000000e1";
+const OTHER_RUN_UUID: &str = "01919000-0000-7000-8000-0000000000e9";
 const REQUEST_UUID: &str = "01919000-0000-7000-8000-0000000000f1";
 const ADMISSION_UUID: &str = "01919000-0000-7000-8000-0000000000f2";
 const CONTENT_REF: &str =
@@ -21,7 +23,8 @@ fn signing_key() -> SigningKey {
 }
 
 fn binding() -> PlanAdmissionResponseBindingV1<'static> {
-    PlanAdmissionResponseBindingV1::new(REQUEST_UUID, CONTENT_REF).expect("a canonical binding")
+    PlanAdmissionResponseBindingV1::new(RUN_UUID, REQUEST_UUID, CONTENT_REF)
+        .expect("a canonical binding")
 }
 
 #[test]
@@ -40,15 +43,19 @@ fn a_sealed_response_verifies_only_against_its_own_request_binding() {
     assert_eq!(status, PlanAdmissionResponseStatusV1::Sealed);
     assert_eq!(admission_event_id.as_deref(), Some(ADMISSION_UUID));
 
-    let other_request =
-        PlanAdmissionResponseBindingV1::new("01919000-0000-7000-8000-0000000000f9", CONTENT_REF)
-            .unwrap();
+    let other_request = PlanAdmissionResponseBindingV1::new(
+        RUN_UUID,
+        "01919000-0000-7000-8000-0000000000f9",
+        CONTENT_REF,
+    )
+    .unwrap();
     assert_eq!(
         verify_plan_admission_response(&payload, &signing_key().verifying_key(), other_request),
         Err(PlanAdmissionResponseErrorV1::InvalidPayload)
     );
 
     let other_content = PlanAdmissionResponseBindingV1::new(
+        RUN_UUID,
         REQUEST_UUID,
         "cas://sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     )
@@ -56,6 +63,40 @@ fn a_sealed_response_verifies_only_against_its_own_request_binding() {
     assert_eq!(
         verify_plan_admission_response(&payload, &signing_key().verifying_key(), other_content),
         Err(PlanAdmissionResponseErrorV1::InvalidPayload)
+    );
+}
+
+/// H2: a sealed response signed for one run must not verify for another.
+///
+/// `request_id` is caller-controlled and unique only within a run, so without
+/// `run_id` in the signed bytes a sealed response for run A would verify
+/// identically as a response for run B that reused the same request id and
+/// content reference. The run is now part of the signed binding, so it does not.
+#[test]
+fn a_response_signed_for_one_run_does_not_verify_for_another() {
+    let payload = sign_plan_admission_response(
+        &signing_key(),
+        binding(),
+        PlanAdmissionResponseStatusV1::Sealed,
+        Some(ADMISSION_UUID),
+    )
+    .expect("the host signs a sealed response for RUN_UUID");
+
+    // Same request id, same content reference, different run.
+    let other_run = PlanAdmissionResponseBindingV1::new(OTHER_RUN_UUID, REQUEST_UUID, CONTENT_REF)
+        .expect("a canonical binding for a different run");
+    assert_eq!(
+        verify_plan_admission_response(&payload, &signing_key().verifying_key(), other_run),
+        Err(PlanAdmissionResponseErrorV1::InvalidPayload),
+        "a response for RUN_UUID must not authorize OTHER_RUN_UUID"
+    );
+
+    // The positive control: the same bytes still verify for their own run.
+    assert_eq!(
+        verify_plan_admission_response(&payload, &signing_key().verifying_key(), binding())
+            .expect("the response verifies for its own run")
+            .0,
+        PlanAdmissionResponseStatusV1::Sealed
     );
 }
 
@@ -129,22 +170,37 @@ fn the_outcome_and_its_identity_cannot_be_paired_incorrectly() {
 }
 
 #[test]
-fn a_binding_is_only_a_canonical_request_and_content_reference() {
-    for (request_id, content_ref) in [
-        ("01919000-0000-7000-8000-0000000000F1", CONTENT_REF),
-        ("not-a-uuid", CONTENT_REF),
-        (REQUEST_UUID, "cas:sha256:aa"),
-        (REQUEST_UUID, "cas://sha256:not-hex"),
+fn a_binding_is_only_a_canonical_run_request_and_content_reference() {
+    for (run_id, request_id, content_ref) in [
         (
+            "01919000-0000-7000-8000-0000000000E1",
+            REQUEST_UUID,
+            CONTENT_REF,
+        ),
+        ("not-a-uuid", REQUEST_UUID, CONTENT_REF),
+        (
+            RUN_UUID,
+            "01919000-0000-7000-8000-0000000000F1",
+            CONTENT_REF,
+        ),
+        (RUN_UUID, "not-a-uuid", CONTENT_REF),
+        (RUN_UUID, REQUEST_UUID, "cas:sha256:aa"),
+        (RUN_UUID, REQUEST_UUID, "cas://sha256:not-hex"),
+        (
+            RUN_UUID,
             REQUEST_UUID,
             "cas://sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
         ),
-        (REQUEST_UUID, r#"cas://sha256:aa","status":"sealed"#),
+        (
+            RUN_UUID,
+            REQUEST_UUID,
+            r#"cas://sha256:aa","status":"sealed"#,
+        ),
     ] {
         assert_eq!(
-            PlanAdmissionResponseBindingV1::new(request_id, content_ref).err(),
+            PlanAdmissionResponseBindingV1::new(run_id, request_id, content_ref).err(),
             Some(PlanAdmissionResponseErrorV1::InvalidBinding),
-            "{request_id} / {content_ref} must not become a response binding"
+            "{run_id} / {request_id} / {content_ref} must not become a response binding"
         );
     }
 }

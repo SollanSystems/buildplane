@@ -51,19 +51,29 @@ impl PlanAdmissionResponseStatusV1 {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct PlanAdmissionResponseBindingV1<'a> {
+    run_id: &'a str,
     request_id: &'a str,
     plan_content_ref: &'a str,
 }
 
 impl<'a> PlanAdmissionResponseBindingV1<'a> {
     pub(crate) fn new(
+        run_id: &'a str,
         request_id: &'a str,
         plan_content_ref: &'a str,
     ) -> Result<Self, PlanAdmissionResponseErrorV1> {
-        if !is_canonical_uuid(request_id) || !is_canonical_plan_content_ref(plan_content_ref) {
+        // `request_id` is caller-controlled and is unique only within a run —
+        // storage keys `(run_id, request_id)`. Without `run_id` in the signed
+        // bytes, a sealed response for one run verifies identically for another,
+        // so the run is bound here alongside the request and content it answers.
+        if !is_canonical_uuid(run_id)
+            || !is_canonical_uuid(request_id)
+            || !is_canonical_plan_content_ref(plan_content_ref)
+        {
             return Err(PlanAdmissionResponseErrorV1::InvalidBinding);
         }
         Ok(Self {
+            run_id,
             request_id,
             plan_content_ref,
         })
@@ -77,6 +87,7 @@ struct SignedPlanAdmissionResponseWireV1 {
     schema_version: u8,
     protocol: String,
     domain: String,
+    run_id: String,
     request_id: String,
     plan_content_ref: String,
     admission_event_id: Option<String>,
@@ -115,6 +126,7 @@ pub(crate) fn verify_plan_admission_response(
     if wire.schema_version != RESPONSE_SCHEMA_VERSION
         || wire.protocol != RESPONSE_PROTOCOL
         || wire.domain != RESPONSE_DOMAIN
+        || wire.run_id != expected.run_id
         || wire.request_id != expected.request_id
         || wire.plan_content_ref != expected.plan_content_ref
     {
@@ -157,7 +169,8 @@ fn canonical_unsigned_payload(
         .map(|event_id| format!(r#""{event_id}""#))
         .unwrap_or_else(|| "null".into());
     format!(
-        r#"{{"schema_version":{RESPONSE_SCHEMA_VERSION},"protocol":"{RESPONSE_PROTOCOL}","domain":"{RESPONSE_DOMAIN}","request_id":"{}","plan_content_ref":"{}","admission_event_id":{},"status":"{}"}}"#,
+        r#"{{"schema_version":{RESPONSE_SCHEMA_VERSION},"protocol":"{RESPONSE_PROTOCOL}","domain":"{RESPONSE_DOMAIN}","run_id":"{}","request_id":"{}","plan_content_ref":"{}","admission_event_id":{},"status":"{}"}}"#,
+        binding.run_id,
         binding.request_id,
         binding.plan_content_ref,
         admission_event_id,
