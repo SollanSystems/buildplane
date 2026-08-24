@@ -28,6 +28,7 @@ use tempfile::TempDir;
 /// two-language change, and this test is the place that says so.
 const TABLE: &str = "plan_admissions";
 const KEY_COLUMN: &str = "admission_event_id";
+const RUN_COLUMN: &str = "run_id";
 const STATE_COLUMN: &str = "state";
 const SEALED_STATE: &str = "sealed";
 const AWAITING_STATE: &str = "awaiting_checkpoint";
@@ -94,11 +95,19 @@ fn the_rust_schema_creates_exactly_the_names_the_typescript_reader_hardcodes() {
     );
 
     let source = reader_source();
-    let expected_query = format!("SELECT {STATE_COLUMN} FROM {TABLE} WHERE {KEY_COLUMN} = ?");
+    let expected_query = format!(
+        "SELECT {STATE_COLUMN} FROM {TABLE} WHERE {KEY_COLUMN} = ? AND {RUN_COLUMN} = ?"
+    );
     assert!(
         source.contains(&expected_query),
         "{READER_SOURCE} must issue exactly `{expected_query}`; a rename on either side is a \
-         coordinated two-language change"
+         coordinated two-language change. The projection lookup binds run_id as well as the \
+         admission event id, so the sealed row must belong to the same run as its event."
+    );
+    assert!(
+        columns.iter().any(|column| column == RUN_COLUMN),
+        "the reader binds the projection lookup on `{RUN_COLUMN}`, which the live schema must \
+         have: {columns:?}"
     );
     assert!(
         source.contains(&format!(

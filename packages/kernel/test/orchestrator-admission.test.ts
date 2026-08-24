@@ -574,6 +574,7 @@ describe("orchestrator run admission", () => {
 		[
 			"kernel-signed",
 			async () => ({
+				runId: "run-1",
 				authorizedNextStep: "dispatch_admitted_plan",
 				signedByKernel: true,
 				sealed: true,
@@ -588,6 +589,7 @@ describe("orchestrator run admission", () => {
 			// candidate-evidence-flow.test.ts.
 			"unsealed",
 			async () => ({
+				runId: "run-1",
 				authorizedNextStep: "dispatch_admitted_plan",
 				signedByKernel: true,
 				sealed: false,
@@ -596,6 +598,7 @@ describe("orchestrator run admission", () => {
 		[
 			"unsigned",
 			async () => ({
+				runId: "run-1",
 				authorizedNextStep: "dispatch_admitted_plan",
 				signedByKernel: false,
 				sealed: false,
@@ -604,6 +607,7 @@ describe("orchestrator run admission", () => {
 		[
 			"mis-authorized",
 			async () => ({
+				runId: "run-1",
 				authorizedNextStep: "some_other_step",
 				signedByKernel: true,
 				sealed: true,

@@ -1330,6 +1330,7 @@ describe("kernel orchestrator", () => {
 				admittedPlanReader: {
 					async read() {
 						return {
+							runId: "run-1",
 							authorizedNextStep: "dispatch_admitted_plan",
 							signedByKernel: true,
 							sealed: true,

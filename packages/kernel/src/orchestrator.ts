@@ -3327,6 +3327,24 @@ export function createBuildplaneOrchestrator(
 						),
 					};
 				}
+				// An admission authorizes a dispatch only in its own run. The tape is
+				// one events.db per project, so a sealed admission minted for another
+				// run satisfies every check above identically; only its run binds it.
+				// Ordered after the sealed check so a wrong-run admission is refused
+				// even when it is signed and sealed.
+				if (admitted.runId !== ctx.run.id) {
+					return {
+						ok: false,
+						result: finalizeInfrastructureFailure(
+							ctx.run,
+							infrastructureFailure(
+								"plan-not-admitted",
+								`The plan_admitted event for provenance_ref "${provenanceRef}" was admitted for run "${admitted.runId}", not this dispatch's run "${ctx.run.id}"; an admission authorizes dispatch only in its own run.`,
+							),
+							{ workspace: ctx.workspace, workspaceStatus: "retained" },
+						),
+					};
+				}
 			}
 			const receipt = createRunAdmissionReceiptLive(
 				createRunAdmissionReceiptInput(ctx),

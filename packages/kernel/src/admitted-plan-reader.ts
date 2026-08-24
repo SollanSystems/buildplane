@@ -18,6 +18,19 @@ const UTC_TIMESTAMP =
 	/^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d{1,9}))?(?:Z|\+00:00)$/;
 
 export interface AdmittedPlanRecord {
+	/**
+	 * The run this `plan_admitted` event belongs to, read from the event's own
+	 * `run_id` column.
+	 *
+	 * An admission authorizes a dispatch only in its own run. The tape is a
+	 * single `events.db` shared by every run in a project, so without this a
+	 * sealed admission minted for run A could be named as the `provenance_ref`
+	 * of a packet dispatched for run B and would satisfy the signature, next-step,
+	 * and sealed checks identically. The dispatch gate must compare this against
+	 * the run it is admitting; a signed and sealed admission for the wrong run is
+	 * not authority for this one.
+	 */
+	readonly runId: string;
 	readonly authorizedNextStep: string;
 	readonly signedByKernel: boolean;
 	/**
@@ -216,9 +229,10 @@ export function createDefaultAdmittedPlanReader(
 				}
 
 				const unverified: AdmittedPlanRecord = {
+					runId: event.runId,
 					authorizedNextStep: event.payload.authorizedNextStep,
 					signedByKernel: false,
-					sealed: readSealedProjectionState(db, eventId),
+					sealed: readSealedProjectionState(db, eventId, event.runId),
 				};
 				if (!signatureVerifier) {
 					return unverified;
@@ -258,6 +272,7 @@ export function createDefaultAdmittedPlanReader(
 				});
 				return {
 					...unverified,
+					runId: event.runId,
 					signedByKernel: signatureVerifier.verify(verificationInput) === true,
 				};
 			} catch {
@@ -276,21 +291,28 @@ export function createDefaultAdmittedPlanReader(
  *
  * Mirrors `plan_admissions` as created by `SqliteStore::init`
  * (`native/crates/bp-ledger/src/storage/sqlite.rs`), where
- * `admission_event_id` is UNIQUE and `state` is constrained to
- * `awaiting_checkpoint` | `sealed`. The lookup uses the same event id the
- * event row was found by, so a caller cannot widen it.
+ * `admission_event_id` is UNIQUE, `run_id` records the admission's run, and
+ * `state` is constrained to `awaiting_checkpoint` | `sealed`. The lookup binds
+ * both the event id the event row was found by AND that row's run, so a caller
+ * cannot widen it and the projection row must agree with the event's own run —
+ * defence in depth behind the dispatch gate's run-match check.
  *
  * Every uncertainty reads as not sealed: no projection table (a pre-mint
- * tape), no row for this admission, an unexpected state, or a failed query.
+ * tape), no row for this admission and run, an unexpected state, or a failed
+ * query.
  */
-function readSealedProjectionState(db: DatabaseSync, eventId: string): boolean {
+function readSealedProjectionState(
+	db: DatabaseSync,
+	eventId: string,
+	runId: string,
+): boolean {
 	try {
 		const row = exactDataRecord(
 			db
 				.prepare(
-					"SELECT state FROM plan_admissions WHERE admission_event_id = ?",
+					"SELECT state FROM plan_admissions WHERE admission_event_id = ? AND run_id = ?",
 				)
-				.get(eventId),
+				.get(eventId, runId),
 			["state"],
 		);
 		return row?.state === PLAN_ADMISSION_SEALED_STATE;
