@@ -466,11 +466,15 @@ impl PlanRepositoryDescriptorResolver for LedgerPlanRepositoryDescriptorResolver
             {
                 return Err(rejected("the run start was not signed by the kernel"));
             }
-            // Defensive only, and deliberately untested: `canonicalize`'s
-            // `validate_kind_matches_payload` refuses to serialize a
-            // `run_started`-kind event holding any other payload variant, so no
-            // store path can produce one. It stays because the alternative is
-            // an `unwrap` on a cross-module invariant.
+            // Defensive only, and deliberately untested. This very read path
+            // has already rejected any mismatch: `StoredEventRow::to_event`
+            // parses the stored payload through
+            // `canonicalize::canonicalize_payload`, which calls
+            // `validate_kind_matches_payload` and errors unless the payload
+            // variant is the one the kind names. A `run_started` row holding
+            // any other variant therefore fails above, at `to_event`, and never
+            // reaches this match. It stays because the alternative is an
+            // `unwrap` on a cross-module invariant.
             let Payload::RunStartedV1(started) = event.payload else {
                 return Err(rejected("the run start carries an unexpected payload"));
             };

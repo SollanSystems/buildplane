@@ -204,12 +204,23 @@ pub(crate) fn read_authenticated_plan_admission_ingress_detailed(
     })
 }
 
-/// Ancillary capacity for two descriptors. One is the contract; the second slot
-/// exists so a two-descriptor frame is *observed and refused* rather than
-/// silently truncated into a one-descriptor frame by the kernel.
+/// How many attached descriptors one `recvmsg` can observe.
+///
+/// One is the contract; the second slot exists so a two-descriptor frame is
+/// *observed and refused* rather than silently truncated into a
+/// one-descriptor frame by the kernel. Sending more than this is what sets
+/// `MSG_CTRUNC`, so the truncation regression test derives its descriptor
+/// count from this constant rather than hard-coding one.
 #[cfg(target_os = "linux")]
-const CONTROL_CAPACITY_BYTES: usize =
-    unsafe { libc::CMSG_SPACE((2 * std::mem::size_of::<libc::c_int>()) as libc::c_uint) } as usize;
+const MAX_OBSERVABLE_CONTENT_DESCRIPTORS: usize = 2;
+
+/// Ancillary capacity for [`MAX_OBSERVABLE_CONTENT_DESCRIPTORS`] descriptors.
+#[cfg(target_os = "linux")]
+const CONTROL_CAPACITY_BYTES: usize = unsafe {
+    libc::CMSG_SPACE(
+        (MAX_OBSERVABLE_CONTENT_DESCRIPTORS * std::mem::size_of::<libc::c_int>()) as libc::c_uint,
+    )
+} as usize;
 #[cfg(target_os = "linux")]
 const CONTROL_CAPACITY_WORDS: usize = CONTROL_CAPACITY_BYTES.div_ceil(std::mem::size_of::<u64>());
 
@@ -686,19 +697,18 @@ mod tests {
     #[test]
     fn a_truncated_descriptor_frame_refuses_without_leaking_the_installed_ones() {
         const TAG: &str = "bp-plan-admission-leak-probe";
+        // One more than the host can observe is exactly what makes the kernel
+        // truncate. Deriving it means widening the capacity keeps this test
+        // exercising MSG_CTRUNC instead of silently retiring the branch.
+        let sent = MAX_OBSERVABLE_CONTENT_DESCRIPTORS + 1;
         let (policy, attestation) = client_policy(BrokerAuthorityRoleV1::PlanAdmission);
         let (client, mut server) = UnixStream::pair().unwrap();
-        let first = named_memfd(TAG, b"first object", true);
-        let second = named_memfd(TAG, b"second object", true);
-        let third = named_memfd(TAG, b"third object", true);
-        send_frame(
-            &client,
-            &plan_frame(),
-            &[first.as_raw_fd(), second.as_raw_fd(), third.as_raw_fd()],
-        );
-        drop(first);
-        drop(second);
-        drop(third);
+        let objects: Vec<OwnedFd> = (0..sent)
+            .map(|index| named_memfd(TAG, format!("object {index}").as_bytes(), true))
+            .collect();
+        let raw: Vec<RawFd> = objects.iter().map(AsRawFd::as_raw_fd).collect();
+        send_frame(&client, &plan_frame(), &raw);
+        drop(objects);
         drop(client);
 
         // Descriptors in flight live in the kernel's socket buffer, not in this

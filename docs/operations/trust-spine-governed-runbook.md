@@ -423,6 +423,19 @@ validation boundary receives no response at all and the connection closes in
 silence. Reconciliation is evidence, not failure — it means the mint declined
 to claim authority, and the tape is the place to look.
 
+**Accepted residual — CAS write amplification.** An authenticated peer can
+stage up to 1 MiB of self-named bytes per connection whenever the mint refuses
+*downstream* of the ingress checks: an unconvincing run-start attestation, an
+idempotency conflict, or a fresh-snapshot rejection all occur after the bytes
+have been written. Only requests disqualified at the ingress boundary — peer,
+frame, run binding, identity, digest, or asserted validation status — are
+refused before anything is staged. This is inherent to the ratified content
+staging shape: the mint resolves content through the broker-owned CAS, so the
+bytes must be there before it can decline them. The CAS volume shares a
+filesystem with the ledger. Mitigation is a deployment concern the operator
+owns: give the authority root its own filesystem or quota, and schedule
+collection of CAS objects that no sealed admission references.
+
 **Standing constraint — the trusted base.** The admission's `trusted_base` is
 not re-derived from a repository. The host takes the `git_head` from the run's
 own `run_started` event after establishing that exactly one exists, verifies
