@@ -91,6 +91,8 @@ mod host_ledger_custody;
 mod plan_admission;
 #[cfg(test)]
 mod plan_admission_contract_tests;
+#[allow(dead_code)]
+mod plan_admission_handler;
 #[allow(dead_code)] // Consumed by the protected plan-admission host loader next.
 mod plan_admission_host_config;
 mod promotion_decision_client;
