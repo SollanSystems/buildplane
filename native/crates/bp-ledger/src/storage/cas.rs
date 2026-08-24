@@ -95,9 +95,17 @@ impl Cas {
         // wedges permanently after a crash between create and rename: the final
         // blob does not exist, so every retry re-enters this path, and every
         // retry then fails `AlreadyExists` on the leftover temp. A unique name
-        // cannot collide, so a retry always makes progress; the abandoned temp
-        // is inert (it is never the destination) and is cleaned opportunistically
-        // by the rename of a subsequent successful write of nearby content.
+        // cannot collide, so a retry always makes progress.
+        //
+        // Accepted residual: a crash between `create_new` and `rename` strands a
+        // `.tmp-<hash>-<pid>-<seq>` file that NO code path reclaims — there is no
+        // opportunistic cleanup, and the rename of a later write moves its own
+        // temp into place, never touching an abandoned one. The stranded file is
+        // inert (it is never a destination and never read) and, on the
+        // sequential single-connection authority host, produced only by a crash
+        // mid-write, so the leak is low-rate. Reclamation is a deployment concern:
+        // a periodic sweep of `.tmp-*` older than any in-flight write, or none by
+        // design. Deliberately no sweeper here.
         let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let tmp = parent.join(format!(
             ".tmp-{}-{}-{}",
