@@ -197,7 +197,10 @@ function untrustedRetryAttemptContextForRequest(
 	};
 }
 
+const OTHER_RUN_ID = "01919000-0000-7000-8000-0000000000cf";
+
 const SEALED_ADMITTED_PLAN: AdmittedPlanRecord = {
+	runId: RUN_ID,
 	authorizedNextStep: "dispatch_admitted_plan",
 	signedByKernel: true,
 	sealed: true,
@@ -1084,6 +1087,7 @@ describe("candidate-bound acceptance", () => {
 
 	it("refuses a signed but unsealed plan admission before any worker effect", async () => {
 		const harness = await runV3RetryHarness(undefined, {
+			runId: RUN_ID,
 			authorizedNextStep: "dispatch_admitted_plan",
 			signedByKernel: true,
 			sealed: false,
@@ -1094,6 +1098,37 @@ describe("candidate-bound acceptance", () => {
 				kind: "plan-not-admitted",
 			});
 			expect(harness.result.failure?.message).toMatch(/unsealed/i);
+			expect(harness.workerCalls).toBe(0);
+			expect(harness.candidateCalls).toBe(0);
+			expect(git(harness.root, ["rev-parse", "HEAD"])).toBe(harness.baseSha);
+			expect(git(harness.root, ["rev-list", "--count", "HEAD"])).toBe(
+				harness.commitCountBefore,
+			);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("refuses a signed and sealed admission that belongs to a different run", async () => {
+		// The tape is one events.db per project. A sealed admission minted for
+		// run A satisfies signedByKernel, authorizedNextStep, and sealed
+		// identically when a packet for run B (ctx.run.id === RUN_ID) names it as
+		// provenance_ref. Only the run-match check distinguishes them, so an
+		// admission for OTHER_RUN_ID must not authorize this dispatch.
+		const harness = await runV3RetryHarness(undefined, {
+			runId: OTHER_RUN_ID,
+			authorizedNextStep: "dispatch_admitted_plan",
+			signedByKernel: true,
+			sealed: true,
+		});
+		try {
+			expect(harness.result.run.status).toBe("failed");
+			expect(harness.result.failure).toMatchObject({
+				kind: "plan-not-admitted",
+			});
+			expect(harness.result.failure?.message).toMatch(/run/i);
+			expect(harness.result.failure?.message).toContain(OTHER_RUN_ID);
+			expect(harness.result.failure?.message).toContain(RUN_ID);
 			expect(harness.workerCalls).toBe(0);
 			expect(harness.candidateCalls).toBe(0);
 			expect(git(harness.root, ["rev-parse", "HEAD"])).toBe(harness.baseSha);

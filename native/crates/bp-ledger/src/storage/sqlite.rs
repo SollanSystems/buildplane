@@ -1311,6 +1311,17 @@ pub const PLAN_ADMISSION_AUTHORIZED_NEXT_STEP_V1: &str = "dispatch_admitted_plan
 /// protected-process denial-of-service surface rather than evidence.
 const MAX_PLAN_ADMISSION_INPUT_BYTES: usize = 1 << 20;
 
+/// The compiled-plan size bound, for tests that must not let a second copy of
+/// this number drift from it.
+///
+/// Deliberately not a `pub const`: the bound is this layer's own policy, and a
+/// published constant invites callers to pre-size against it and to treat the
+/// storage refusal as advisory. Test-only visibility mirrors `conn_for_tests`.
+#[cfg(any(test, feature = "test-support"))]
+pub fn max_plan_admission_input_bytes() -> usize {
+    MAX_PLAN_ADMISSION_INPUT_BYTES
+}
+
 /// Domain separator for the mint's own plan identity. The PlanForge
 /// `pf-plan-<fingerprint>` id is NOT reproducible here: it hashes an
 /// insertion-order `JSON.stringify` over a *parsed* projection of the plan
@@ -3188,10 +3199,12 @@ impl SqliteStore {
             -- disables every governed dispatch — the reader's lookup misses or
             -- throws, either way resolving to not-sealed, so the kernel gate
             -- refuses with a misleading "unsealed" diagnosis: a fail-closed
-            -- outage with no failing test on either side. A cross-language
-            -- drift test is deliberately deferred to S3/S6; until it exists,
-            -- treat any change to these four names as a coordinated
-            -- two-language change.
+            -- outage that would otherwise have no failing test on either side.
+            -- `tests/plan_admissions_cross_language_schema.rs` pins all four
+            -- names against both this schema and the reader's source, so a
+            -- rename on either side fails there. Changing one is still a
+            -- coordinated two-language change; the test is what makes
+            -- forgetting the other half loud.
             CREATE TABLE IF NOT EXISTS plan_admissions (
                 run_id                          TEXT NOT NULL,
                 request_id                      TEXT NOT NULL,
@@ -3214,6 +3227,22 @@ impl SqliteStore {
                 sealed_checkpoint_event_digest  TEXT,
                 created_at                      TEXT NOT NULL,
                 sealed_at                       TEXT,
+                -- INVARIANT: one admission per (run, request), NOT one per run.
+                -- The primary key is `(run_id, request_id)`, so a run may hold
+                -- several sealed admissions under distinct request ids. That is
+                -- intended: each admission authorizes dispatch only for a packet
+                -- whose `provenance_ref` names its own event id, and the kernel
+                -- dispatch gate binds the admission's `run_id` to the run it is
+                -- admitting (`admitted-plan-reader.ts` / `orchestrator.ts`), so
+                -- N admissions in one run cannot cross-authorize each other's
+                -- packets and cannot authorize another run's. A stricter
+                -- `UNIQUE(run_id)` — one admission per run — is deliberately NOT
+                -- imposed here: whether PlanForge should mint at most one plan
+                -- admission per run is an open product question (the
+                -- candidate-transaction model has one plan admission parenting N
+                -- per-task admissions, which would forbid it), and §6.2(3) pins
+                -- only same-`request_id` idempotency. Flagged for the reviewer;
+                -- do not add `UNIQUE(run_id)` without spec/operator direction.
                 PRIMARY KEY (run_id, request_id),
                 UNIQUE (run_id, admission_identity_digest),
                 FOREIGN KEY(admission_event_id) REFERENCES events(id),
@@ -22676,17 +22705,12 @@ fn validate_plan_admission_request_shape(request: &PlanAdmissionRequestV1) -> Re
             "plan admission decided_by must be a non-empty single-line identity",
         );
     }
-    if !is_canonical_sha256_digest(&request.asserted_plan_digest) {
+    if !plan_admission_asserted_plan_digest_is_canonical(&request.asserted_plan_digest) {
         return plan_admission_authority_rejected(
             "asserted plan digest must be canonical sha256 to be recorded",
         );
     }
-    if request.asserted_idempotency_key.trim().is_empty()
-        || request
-            .asserted_idempotency_key
-            .chars()
-            .any(|character| character.is_control())
-    {
+    if !plan_admission_idempotency_key_is_well_formed(&request.asserted_idempotency_key) {
         return plan_admission_authority_rejected(
             "asserted idempotency key must be a non-empty single-line value to be recorded",
         );
@@ -22709,21 +22733,9 @@ fn validate_plan_admission_request_shape(request: &PlanAdmissionRequestV1) -> Re
 fn derive_plan_admission_content_v1(
     request: &PlanAdmissionRequestV1,
 ) -> Result<DerivedPlanAdmissionContent> {
-    if request.plan_bytes.is_empty() {
+    if let Err(reason) = plan_admission_plan_bytes_are_admissible(&request.plan_bytes) {
         return Err(LedgerError::PlanInputRejected {
-            reason: "compiled plan content is empty".into(),
-        });
-    }
-    if request.plan_bytes.len() > MAX_PLAN_ADMISSION_INPUT_BYTES {
-        return Err(LedgerError::PlanInputRejected {
-            reason: format!(
-                "compiled plan content exceeds the {MAX_PLAN_ADMISSION_INPUT_BYTES}-byte admission bound"
-            ),
-        });
-    }
-    if std::str::from_utf8(&request.plan_bytes).is_err() {
-        return Err(LedgerError::PlanInputRejected {
-            reason: "compiled plan content is not valid UTF-8".into(),
+            reason: reason.to_string(),
         });
     }
     let Some(referenced_digest) = request.plan_content_ref.strip_prefix("cas://") else {
@@ -27026,6 +27038,48 @@ fn is_canonical_sha256_digest(value: &str) -> bool {
         && value.as_bytes()[7..]
             .iter()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
+}
+
+/// Whether a caller-asserted plan digest is shaped like a canonical sha256.
+///
+/// This is the same predicate `validate_plan_admission_request_shape` applies at
+/// mint time. It is exposed so a protected ingress can refuse a malformed
+/// request-field BEFORE staging its bytes into the broker-owned CAS, keeping the
+/// mint-time check and the pre-stage check from drifting.
+pub fn plan_admission_asserted_plan_digest_is_canonical(value: &str) -> bool {
+    is_canonical_sha256_digest(value)
+}
+
+/// Whether a caller-asserted idempotency key is a non-empty single-line value.
+///
+/// The mint records it verbatim as non-authoritative metadata; this only refuses
+/// a value that is empty or carries control characters. Shared with the ingress
+/// for the same no-drift reason as the digest predicate above.
+pub fn plan_admission_idempotency_key_is_well_formed(value: &str) -> bool {
+    !value.trim().is_empty() && !value.chars().any(|character| character.is_control())
+}
+
+/// Whether the compiled plan bytes are admissible on their own terms.
+///
+/// These are the checks the mint makes on the bytes in hand — non-empty, within
+/// the input bound, and valid UTF-8 — independent of any CAS lookup. `Ok(())`
+/// means admissible; `Err(reason)` names why not. It is exposed so a protected
+/// ingress can refuse malformed content BEFORE staging it into the broker-owned
+/// CAS, and `derive_plan_admission_content_v1` calls the same function at mint
+/// time so the pre-stage check and the mint-time check cannot drift.
+pub fn plan_admission_plan_bytes_are_admissible(
+    plan_bytes: &[u8],
+) -> std::result::Result<(), &'static str> {
+    if plan_bytes.is_empty() {
+        return Err("compiled plan content is empty");
+    }
+    if plan_bytes.len() > MAX_PLAN_ADMISSION_INPUT_BYTES {
+        return Err("compiled plan content exceeds the admission byte bound");
+    }
+    if std::str::from_utf8(plan_bytes).is_err() {
+        return Err("compiled plan content is not valid UTF-8");
+    }
+    Ok(())
 }
 
 fn is_canonical_git_commit_sha(value: &str) -> bool {

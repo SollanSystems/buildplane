@@ -47,7 +47,7 @@ use uuid::Uuid;
 /// still a fail-closed *precondition*: recording a verdict the control was
 /// never given would be a fabrication, and proceeding without one would discard
 /// a gate the current builder enforces.
-const REQUIRED_ASSERTED_VALIDATION_STATUS: &str = "PASS";
+pub(crate) const REQUIRED_ASSERTED_VALIDATION_STATUS: &str = "PASS";
 
 /// Closed wire shape. `deny_unknown_fields` is load-bearing: the caller surface
 /// must stay no larger than a request id, a run id, one content reference, and
@@ -71,6 +71,23 @@ pub(crate) struct PlanAdmissionCallerAssertionsV1 {
     pub(crate) validation_status: String,
     pub(crate) plan_digest: String,
     pub(crate) idempotency_key: String,
+}
+
+/// Require canonical lower-case hyphenated UUID text before creating a typed
+/// identifier.
+///
+/// `Uuid::parse_str` accepts braced, urn-prefixed, unhyphenated, and mixed-case
+/// spellings of the same value. The deployment config and the signed response
+/// both require the canonical form, so accepting a looser one here would let a
+/// request and the response that answers it disagree textually about the same
+/// identity.
+fn parse_canonical_uuid(value: &str) -> Result<Uuid, PlanAdmissionRequestRejection> {
+    let uuid =
+        Uuid::parse_str(value).map_err(|_| PlanAdmissionRequestRejection::RequestRejected)?;
+    if uuid.hyphenated().to_string() != value {
+        return Err(PlanAdmissionRequestRejection::RequestRejected);
+    }
+    Ok(uuid)
 }
 
 /// An opaque, already-validated content reference.
@@ -134,11 +151,8 @@ pub(crate) fn parse_plan_admission_request_v1(
     if wire.schema_version != 1 {
         return Err(PlanAdmissionRequestRejection::FrameRejected);
     }
-    let request_id = Uuid::parse_str(&wire.request_id)
-        .map_err(|_| PlanAdmissionRequestRejection::RequestRejected)?;
-    let run_id = Uuid::parse_str(&wire.run_id)
-        .map(RunId::from_uuid)
-        .map_err(|_| PlanAdmissionRequestRejection::RequestRejected)?;
+    let request_id = parse_canonical_uuid(&wire.request_id)?;
+    let run_id = RunId::from_uuid(parse_canonical_uuid(&wire.run_id)?);
     let plan_content_ref = PlanContentRefV1::parse(&wire.plan_content_ref)
         .ok_or(PlanAdmissionRequestRejection::RequestRejected)?;
     Ok(ParsedPlanAdmissionRequestV1 {
@@ -323,6 +337,15 @@ pub(crate) struct BrokerSealedPlanAdmissionProof {
     input_digest: String,
     checkpoint_event_id: EventId,
     checkpoint_event_digest: String,
+}
+
+impl BrokerSealedPlanAdmissionProof {
+    /// The minted admission's tape event id. It is the only field a protected
+    /// host echoes to a peer: it names the evidence, and naming evidence is not
+    /// the same as conferring authority over it.
+    pub(crate) fn admission_event_id(&self) -> EventId {
+        self.admission_event_id
+    }
 }
 
 impl From<SealedPlanAdmissionEvidence> for BrokerSealedPlanAdmissionProof {

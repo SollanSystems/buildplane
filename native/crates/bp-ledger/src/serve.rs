@@ -2048,6 +2048,36 @@ mod authority_ingest_denylist_tests {
         }
     }
 
+    /// Membership pin, not a behaviour pin.
+    ///
+    /// Every other test in this module iterates whatever the arrays happen to
+    /// contain, so removing a kind from one would leave them all green. Two
+    /// memberships carry weight beyond this file and are asserted by name:
+    ///
+    /// - `PlanAdmitted`, because the native mint's whole claim is that the
+    ///   generic signed lane cannot produce one.
+    /// - `RunStarted`, because the plan-admission host derives the admission's
+    ///   `trusted_base` from the `git_head` on the run's own kernel-signed
+    ///   start event. If a caller could get a `run_started` signed through the
+    ///   generic lane, it would choose the trusted base of every admission
+    ///   minted for that run.
+    ///
+    /// **Standing constraint:** while `run_started` is the mint's trusted-base
+    /// source, it must not become kernel-signable from caller-supplied input.
+    /// Any future native `run_started` emitter must derive `git_head` itself
+    /// rather than accept it from a request.
+    #[test]
+    fn the_signed_only_denylist_names_plan_admitted_and_run_started() {
+        for required in [EventKind::PlanAdmitted, EventKind::RunStarted] {
+            assert!(
+                REJECTED_ONLY_WHEN_SIGNED.contains(&required),
+                "{} must stay on the signed-append denylist; removing it is a trust-spine \
+                 change, not a list edit",
+                required.as_wire()
+            );
+        }
+    }
+
     #[test]
     fn control_kinds_pass_the_guard_in_both_modes() {
         assert!(

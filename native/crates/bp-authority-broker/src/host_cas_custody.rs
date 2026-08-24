@@ -1,6 +1,7 @@
 //! Protected descriptor-bound CAS custody for the V5 admission host.
 
 use crate::host_config_loader::ValidatedGovernedSessionHostStartupV1;
+use crate::host_config_loader::ValidatedPlanAdmissionHostStartupV1;
 use bp_ledger::storage::cas::Cas;
 use thiserror::Error;
 
@@ -133,6 +134,32 @@ pub(crate) fn load_protected_v5_cas_v1(
     #[cfg(not(target_os = "linux"))]
     {
         let _ = (authority_root, expected_owner);
+        Err(ProtectedV5CasLoadError::UnsupportedPlatform)
+    }
+}
+
+/// Open the broker-owned CAS the plan-admission mint reads its content from.
+///
+/// Unlike the V5 caller, this control **does** dereference CAS objects, and it
+/// is also the only principal that writes them: the requester hands over sealed
+/// bytes on the authenticated socket and the host stages them here. The custody
+/// still makes no per-object claim, and it does not need to — the mint digests
+/// the bytes it loaded and holds them to the reference the caller named, so a
+/// substituted object yields a different admission identity rather than a
+/// forged one.
+pub(crate) fn load_plan_admission_cas_v1(
+    startup: &ValidatedPlanAdmissionHostStartupV1,
+) -> Result<ProtectedV5CasV1, ProtectedV5CasLoadError> {
+    #[cfg(target_os = "linux")]
+    {
+        load_protected_v5_cas_v1(
+            startup.authority_root().directory(),
+            startup.config().broker_uid,
+        )
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = startup;
         Err(ProtectedV5CasLoadError::UnsupportedPlatform)
     }
 }

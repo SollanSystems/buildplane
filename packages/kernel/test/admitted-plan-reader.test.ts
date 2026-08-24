@@ -34,6 +34,7 @@ afterEach(() => {
 interface AdmissionFixture {
 	readonly eventsDbPath: string;
 	readonly eventId: string;
+	readonly runId: string;
 	readonly publicKey: KeyObject | Uint8Array;
 	readonly publicKeyHash: string;
 }
@@ -172,7 +173,13 @@ function seedAdmission(
 	} finally {
 		db.close();
 	}
-	return { eventsDbPath, eventId: EVENT_ID, publicKey, publicKeyHash };
+	return {
+		eventsDbPath,
+		eventId: EVENT_ID,
+		runId: RUN_ID,
+		publicKey,
+		publicKeyHash,
+	};
 }
 
 interface RustSignedTapeEntry {
@@ -281,6 +288,7 @@ function seedRustGeneratedAdmission(): AdmissionFixture {
 	return {
 		eventsDbPath,
 		eventId: event.id,
+		runId: event.run_id,
 		publicKey,
 		publicKeyHash: trustedKey.public_key_hash,
 	};
@@ -302,6 +310,7 @@ describe("default admitted-plan reader", () => {
 		await expect(
 			trustedReader(fixture).read(fixture.eventsDbPath, fixture.eventId),
 		).resolves.toEqual({
+			runId: fixture.runId,
 			authorizedNextStep: "dispatch_admitted_plan",
 			signedByKernel: true,
 			sealed: false,
@@ -316,6 +325,7 @@ describe("default admitted-plan reader", () => {
 		await expect(
 			trustedReader(fixture).read(fixture.eventsDbPath, EVENT_ID),
 		).resolves.toEqual({
+			runId: RUN_ID,
 			authorizedNextStep: "dispatch_admitted_plan",
 			signedByKernel: false,
 			sealed: false,
@@ -332,6 +342,7 @@ describe("default admitted-plan reader", () => {
 			await expect(
 				trustedReader(fixture).read(fixture.eventsDbPath, EVENT_ID),
 			).resolves.toEqual({
+				runId: RUN_ID,
 				authorizedNextStep: "dispatch_admitted_plan",
 				signedByKernel: false,
 				sealed: false,
@@ -365,6 +376,7 @@ describe("default admitted-plan reader", () => {
 		await expect(
 			trustedReader(fixture).read(fixture.eventsDbPath, EVENT_ID),
 		).resolves.toEqual({
+			runId: RUN_ID,
 			authorizedNextStep: "different_step",
 			signedByKernel: false,
 			sealed: false,
@@ -377,6 +389,7 @@ describe("default admitted-plan reader", () => {
 		await expect(
 			trustedReader(fixture).read(fixture.eventsDbPath, EVENT_ID),
 		).resolves.toEqual({
+			runId: RUN_ID,
 			authorizedNextStep: "dispatch_admitted_plan",
 			signedByKernel: false,
 			sealed: false,
@@ -389,6 +402,7 @@ describe("default admitted-plan reader", () => {
 		await expect(
 			createDefaultAdmittedPlanReader().read(fixture.eventsDbPath, EVENT_ID),
 		).resolves.toEqual({
+			runId: RUN_ID,
 			authorizedNextStep: "dispatch_admitted_plan",
 			signedByKernel: false,
 			sealed: false,
@@ -401,6 +415,7 @@ describe("default admitted-plan reader", () => {
 		await expect(
 			trustedReader(fixture).read(fixture.eventsDbPath, EVENT_ID),
 		).resolves.toEqual({
+			runId: RUN_ID,
 			authorizedNextStep: "dispatch_admitted_plan",
 			signedByKernel: false,
 			sealed: false,
@@ -413,6 +428,7 @@ describe("default admitted-plan reader", () => {
 		await expect(
 			trustedReader(fixture).read(fixture.eventsDbPath, EVENT_ID),
 		).resolves.toEqual({
+			runId: RUN_ID,
 			authorizedNextStep: "dispatch_admitted_plan",
 			signedByKernel: true,
 			sealed: true,
@@ -427,6 +443,7 @@ describe("default admitted-plan reader", () => {
 		await expect(
 			trustedReader(fixture).read(fixture.eventsDbPath, EVENT_ID),
 		).resolves.toEqual({
+			runId: RUN_ID,
 			authorizedNextStep: "dispatch_admitted_plan",
 			signedByKernel: true,
 			sealed: false,
@@ -439,6 +456,7 @@ describe("default admitted-plan reader", () => {
 		await expect(
 			trustedReader(fixture).read(fixture.eventsDbPath, EVENT_ID),
 		).resolves.toEqual({
+			runId: RUN_ID,
 			authorizedNextStep: "dispatch_admitted_plan",
 			signedByKernel: true,
 			sealed: false,
@@ -456,10 +474,75 @@ describe("default admitted-plan reader", () => {
 		await expect(
 			trustedReader(fixture).read(fixture.eventsDbPath, EVENT_ID),
 		).resolves.toEqual({
+			runId: RUN_ID,
 			authorizedNextStep: "dispatch_admitted_plan",
 			signedByKernel: true,
 			sealed: false,
 		});
+	});
+
+	it("exposes the admission's own run id from the event row", async () => {
+		const fixture = seedAdmission({ projection: { state: "sealed" } });
+
+		const record = await trustedReader(fixture).read(
+			fixture.eventsDbPath,
+			EVENT_ID,
+		);
+		expect(record?.runId).toBe(RUN_ID);
+	});
+
+	it("does not report a sealed row that belongs to a different run", async () => {
+		// The event is for RUN_ID, but the projection row claims a different run.
+		// The projection lookup binds run_id, so this disagreement reads unsealed
+		// rather than authorizing dispatch on a row that is not the event's own.
+		const root = mkdtempSync(
+			join(tmpdir(), "buildplane-admitted-plan-reader-runmismatch-"),
+		);
+		tempDirs.push(root);
+		const eventsDbPath = join(root, "events.db");
+		const db = new DatabaseSync(eventsDbPath);
+		try {
+			db.exec(
+				"CREATE TABLE events (id TEXT PRIMARY KEY, run_id TEXT NOT NULL, parent_event_id TEXT, schema_version INTEGER NOT NULL, kind TEXT NOT NULL, occurred_at TEXT NOT NULL, payload TEXT NOT NULL)",
+			);
+			db.prepare(
+				"INSERT INTO events (id, run_id, parent_event_id, schema_version, kind, occurred_at, payload) VALUES (?, ?, ?, ?, ?, ?, ?)",
+			).run(
+				EVENT_ID,
+				RUN_ID,
+				null,
+				1,
+				"plan_admitted",
+				STORED_OCCURRED_AT,
+				JSON.stringify({
+					PlanAdmittedV1: {
+						plan_id: "pf-plan-fixture",
+						plan_digest: `sha256:${"a".repeat(64)}`,
+						input_digest: `sha256:${"b".repeat(64)}`,
+						trusted_base: "deadbeef",
+						decided_by: "operator:fixture",
+						decided_at: OCCURRED_AT,
+						idempotency_key: "planforge:v0:buildplane:deadbeef:fixture",
+						authorized_next_step: "dispatch_admitted_plan",
+					},
+				}),
+			);
+			db.exec(
+				"CREATE TABLE plan_admissions (run_id TEXT NOT NULL, admission_event_id TEXT NOT NULL UNIQUE, state TEXT NOT NULL CHECK(state IN ('awaiting_checkpoint', 'sealed')))",
+			);
+			db.prepare(
+				"INSERT INTO plan_admissions (run_id, admission_event_id, state) VALUES (?, ?, ?)",
+			).run("01919000-0000-7000-8000-000000000abc", EVENT_ID, "sealed");
+		} finally {
+			db.close();
+		}
+
+		const record = await createDefaultAdmittedPlanReader().read(
+			eventsDbPath,
+			EVENT_ID,
+		);
+		expect(record?.sealed).toBe(false);
+		expect(record?.runId).toBe(RUN_ID);
 	});
 
 	it("rejects structural, accessor-backed, and prototype-backed verifier inputs", () => {

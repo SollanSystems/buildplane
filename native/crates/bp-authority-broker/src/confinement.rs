@@ -47,6 +47,7 @@ pub(crate) struct BrokerHostConfinementPolicyV1 {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum BrokerAuthorityRoleV1 {
     DispatchAdmission,
+    PlanAdmission,
     PromotionDecision,
     PromotionExecution,
     ModelAction,
@@ -451,6 +452,63 @@ mod tests {
             Err(BrokerHostConfinementErrorV1::RolePolicyMismatch {
                 configured_role: BrokerAuthorityRoleV1::DispatchAdmission,
                 requested_role: BrokerAuthorityRoleV1::ModelAction,
+            })
+        ));
+    }
+
+    #[test]
+    fn plan_admission_role_is_its_own_endpoint_boundary() {
+        let policy = BrokerHostConfinementPolicyV1::new_for_role(
+            4_201,
+            BrokerAuthorityRoleV1::PlanAdmission,
+            [4_202],
+        )
+        .expect("a separately configured plan-admission client is valid");
+
+        policy
+            .verify_peer_for_role(
+                BrokerAuthorityRoleV1::PlanAdmission,
+                BrokerPeerIdentityV1 {
+                    pid: 109,
+                    uid: 4_202,
+                    gid: 4_202,
+                },
+            )
+            .expect("the plan-admission UID is admitted only for that role");
+        assert!(matches!(
+            policy.verify_peer_for_role(
+                BrokerAuthorityRoleV1::PlanAdmission,
+                BrokerPeerIdentityV1 {
+                    pid: 110,
+                    uid: 4_203,
+                    gid: 4_203,
+                },
+            ),
+            Err(BrokerHostConfinementErrorV1::PeerUidNotAllowed { uid: 4_203 })
+        ));
+        assert!(matches!(
+            policy.verify_peer_for_role(
+                BrokerAuthorityRoleV1::PlanAdmission,
+                BrokerPeerIdentityV1 {
+                    pid: 111,
+                    uid: 4_201,
+                    gid: 4_201,
+                },
+            ),
+            Err(BrokerHostConfinementErrorV1::PeerUsesBrokerUid { uid: 4_201 })
+        ));
+        assert!(matches!(
+            policy.verify_peer_for_role(
+                BrokerAuthorityRoleV1::PromotionDecision,
+                BrokerPeerIdentityV1 {
+                    pid: 112,
+                    uid: 4_202,
+                    gid: 4_202,
+                },
+            ),
+            Err(BrokerHostConfinementErrorV1::RolePolicyMismatch {
+                configured_role: BrokerAuthorityRoleV1::PlanAdmission,
+                requested_role: BrokerAuthorityRoleV1::PromotionDecision,
             })
         ));
     }
