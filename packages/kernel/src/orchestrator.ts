@@ -3332,6 +3332,13 @@ export function createBuildplaneOrchestrator(
 				// run satisfies every check above identically; only its run binds it.
 				// Ordered after the sealed check so a wrong-run admission is refused
 				// even when it is signed and sealed.
+				//
+				// This is a per-admission binding, not a one-admission-per-run rule.
+				// A run may carry several sealed admissions under distinct request
+				// ids (the projection is keyed `(run_id, request_id)`); each one
+				// authorizes only a packet whose provenance_ref names its own event
+				// id. Whether PlanForge should mint at most one plan admission per
+				// run is an open product question, deliberately not enforced here.
 				if (admitted.runId !== ctx.run.id) {
 					return {
 						ok: false,
