@@ -84,17 +84,23 @@ mod host_config;
 mod host_config_loader;
 mod host_key_custody;
 mod host_ledger_custody;
-// The plan-admission mint's private composition. It has no transport, socket,
-// role, bin, or config loader in this slice by design: the authenticated
-// ingress is the next slice, so nothing production-side calls it yet.
-#[allow(dead_code)]
+// The plan-admission mint's private composition, wired to its authenticated
+// ingress by `plan_admission_host`. Nothing in the production TypeScript
+// control plane drives that ingress: the mint must not gain a
+// transport-reachable consumer before the approval arm verifies and requires
+// checkpoint coverage of the admission it names.
 mod plan_admission;
 #[cfg(test)]
 mod plan_admission_contract_tests;
-#[allow(dead_code)]
 mod plan_admission_handler;
-#[allow(dead_code)] // Consumed by the protected plan-admission host loader next.
+mod plan_admission_host;
+#[cfg(all(test, target_os = "linux"))]
+mod plan_admission_host_contract_tests;
 mod plan_admission_host_config;
+// The response is signed by the host in this slice and verified only by the
+// contract tests: a plan-admission client is deliberately absent while the mint
+// has no approved consumer. The verification half ships now so a later client
+// cannot invent a second, looser reading of the same bytes.
 #[allow(dead_code)]
 mod plan_admission_response;
 #[cfg(test)]
@@ -148,6 +154,7 @@ mod v5_dispatch_admission;
 
 pub use governed_session_client::run_default_governed_session_client_v1;
 pub use governed_session_listener::run_default_governed_session_host_v1;
+pub use plan_admission_host::run_default_plan_admission_host_v1;
 pub use promotion_decision_client::run_default_promotion_decision_client_v1;
 pub use promotion_decision_host::run_default_promotion_decision_host_v1;
 #[cfg(target_os = "linux")]

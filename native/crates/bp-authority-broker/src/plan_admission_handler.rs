@@ -29,6 +29,10 @@
 use crate::confinement::{
     BrokerAuthorityRoleV1, BrokerHostConfinementAttestationV1, BrokerHostConfinementPolicyV1,
 };
+#[cfg(target_os = "linux")]
+use crate::plan_admission::{
+    parse_plan_admission_request_v1, ParsedPlanAdmissionRequestV1, PlanAdmissionRequestRejection,
+};
 use thiserror::Error;
 
 #[cfg(target_os = "linux")]
@@ -84,18 +88,22 @@ pub(crate) enum PlanAdmissionIngressRefusal {
     ContentEmpty,
     ContentTooLarge,
     ContentReadFailed,
+    RequestNotClosed,
+    RequestIdentifiersRejected,
 }
 
 impl From<PlanAdmissionIngressRefusal> for PlanAdmissionHandlerError {
     fn from(value: PlanAdmissionIngressRefusal) -> Self {
         match value {
             PlanAdmissionIngressRefusal::PeerRejected => Self::PeerRejected,
+            PlanAdmissionIngressRefusal::RequestNotClosed
+            | PlanAdmissionIngressRefusal::RequestIdentifiersRejected => Self::RequestRejected,
             _ => Self::FrameRejected,
         }
     }
 }
 
-/// One authenticated ingress delivery: the closed request frame, the compiled
+/// One authenticated ingress delivery: the strict parsed request, the compiled
 /// plan bytes that rode with it, and the kernel-observed UID that sent both.
 ///
 /// The UID is the only identity in this record. There is deliberately no field
@@ -103,7 +111,7 @@ impl From<PlanAdmissionIngressRefusal> for PlanAdmissionHandlerError {
 #[cfg(target_os = "linux")]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct StagedPlanAdmissionIngressV1 {
-    pub(crate) frame: Vec<u8>,
+    pub(crate) request: ParsedPlanAdmissionRequestV1,
     pub(crate) plan_bytes: Vec<u8>,
     pub(crate) peer_uid: u32,
 }
@@ -173,8 +181,19 @@ pub(crate) fn read_authenticated_plan_admission_ingress_detailed(
     };
     let plan_bytes = read_sealed_plan_content(content_descriptor)?;
 
+    let frame = std::str::from_utf8(&frame)
+        .map_err(|_| PlanAdmissionIngressRefusal::RequestNotClosed)?;
+    let request = parse_plan_admission_request_v1(frame).map_err(|rejection| match rejection {
+        PlanAdmissionRequestRejection::FrameRejected => {
+            PlanAdmissionIngressRefusal::RequestNotClosed
+        }
+        PlanAdmissionRequestRejection::RequestRejected => {
+            PlanAdmissionIngressRefusal::RequestIdentifiersRejected
+        }
+    })?;
+
     Ok(StagedPlanAdmissionIngressV1 {
-        frame,
+        request,
         plan_bytes,
         peer_uid,
     })
@@ -461,7 +480,11 @@ mod tests {
 
         let staged =
             read_authenticated_plan_admission_ingress(&policy, &attestation, &mut server).unwrap();
-        assert_eq!(staged.frame, plan_frame());
+        assert_eq!(
+            staged.request.request_id.hyphenated().to_string(),
+            "01919000-0000-7000-8000-0000000000f1"
+        );
+        assert_eq!(staged.request.asserted_validation_status, "PASS");
         assert_eq!(staged.plan_bytes, content.to_vec());
         assert_eq!(staged.peer_uid, current_uid());
     }
@@ -719,11 +742,17 @@ mod tests {
             PlanAdmissionIngressRefusal::ContentEmpty,
             PlanAdmissionIngressRefusal::ContentTooLarge,
             PlanAdmissionIngressRefusal::ContentReadFailed,
+            PlanAdmissionIngressRefusal::RequestNotClosed,
+            PlanAdmissionIngressRefusal::RequestIdentifiersRejected,
         ] {
             let wire = PlanAdmissionHandlerError::from(refusal);
             let expected = match refusal {
                 PlanAdmissionIngressRefusal::PeerRejected => {
                     PlanAdmissionHandlerError::PeerRejected
+                }
+                PlanAdmissionIngressRefusal::RequestNotClosed
+                | PlanAdmissionIngressRefusal::RequestIdentifiersRejected => {
+                    PlanAdmissionHandlerError::RequestRejected
                 }
                 _ => PlanAdmissionHandlerError::FrameRejected,
             };

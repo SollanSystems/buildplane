@@ -29,9 +29,12 @@ pub(crate) struct PlanAdmissionHostConfigV1 {
     pub(crate) broker_uid: u32,
     pub(crate) socket_group_gid: u32,
     pub(crate) authority_root: PathBuf,
-    pub(crate) authority_realm_digest: String,
     pub(crate) kernel_signer: ActorKeyRef,
     pub(crate) admission_authority: PlanAdmissionAuthorityV1,
+    /// The same pinned key set the authority holds. It is retained separately
+    /// so the host can verify the run's own tape evidence against exactly the
+    /// keys the mint will sign with, rather than a second key set.
+    trusted_keys: TrustedPublicKeys,
     /// Closed UID to operator-identity policy. Ordered so the derived client
     /// UID set is deterministic.
     operator_identities: BTreeMap<u32, String>,
@@ -43,6 +46,11 @@ impl PlanAdmissionHostConfigV1 {
     /// an operator identity to record for it.
     pub(crate) fn plan_admission_client_uids(&self) -> Vec<u32> {
         self.operator_identities.keys().copied().collect()
+    }
+
+    /// The pinned trusted keys for this realm.
+    pub(crate) fn trusted_keys(&self) -> &TrustedPublicKeys {
+        &self.trusted_keys
     }
 
     /// The operator identity recorded for one already-authenticated peer UID.
@@ -137,9 +145,9 @@ pub(crate) fn parse_plan_admission_host_config_v1(
     trusted_keys.insert_public_key(hash, kernel.public_key);
     let kernel_signer = kernel.identity;
     let admission_authority = PlanAdmissionAuthorityV1::new_kernel_realm(
-        trusted_keys,
+        trusted_keys.clone(),
         kernel_signer.clone(),
-        raw.authority_realm_digest.clone(),
+        raw.authority_realm_digest,
     )
     .map_err(|_| PlanAdmissionHostConfigErrorV1::Invalid)?;
 
@@ -148,9 +156,9 @@ pub(crate) fn parse_plan_admission_host_config_v1(
         broker_uid: raw.broker_uid,
         socket_group_gid: raw.socket_group_gid,
         authority_root,
-        authority_realm_digest: raw.authority_realm_digest,
         kernel_signer,
         admission_authority,
+        trusted_keys,
         operator_identities,
     })
 }

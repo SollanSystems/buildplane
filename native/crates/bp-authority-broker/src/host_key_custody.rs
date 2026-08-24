@@ -5,6 +5,7 @@
 //! accepted at this boundary.
 
 use crate::host_config_loader::ValidatedGovernedSessionHostStartupV1;
+use crate::host_config_loader::ValidatedPlanAdmissionHostStartupV1;
 use crate::host_config_loader::ValidatedPromotionDecisionHostStartupV1;
 use crate::host_config_loader::ValidatedV5AdmissionHostStartupV1;
 use ed25519_dalek::SigningKey;
@@ -319,6 +320,32 @@ pub(crate) fn load_promotion_decision_signing_keys_v1(
             return Err(ProtectedHostKeyLoadError::AliasedKeyMaterial);
         }
         Ok(ProtectedPromotionDecisionSigningKeysV1 { kernel, operator })
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = startup;
+        Err(ProtectedHostKeyLoadError::UnsupportedPlatform)
+    }
+}
+
+/// Load the single kernel key the plan-admission realm signs with.
+///
+/// The realm is deliberately one identity (operator gate Q4): the same kernel
+/// key signs the admission event, its sealing checkpoint, and the host's
+/// response. There is no operator key here to open — `PlanAdmittedV1` records
+/// the operator as a payload field, and S3 grounds that field in SO_PEERCRED
+/// rather than in a second signature.
+pub(crate) fn load_plan_admission_signing_key_v1(
+    startup: &ValidatedPlanAdmissionHostStartupV1,
+) -> Result<SigningKey, ProtectedHostKeyLoadError> {
+    #[cfg(target_os = "linux")]
+    {
+        load_signing_key_from_authority_descriptor(
+            startup.authority_root().directory(),
+            &startup.config().kernel_signer,
+            startup.config().broker_uid,
+        )
     }
 
     #[cfg(not(target_os = "linux"))]

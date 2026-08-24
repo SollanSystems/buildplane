@@ -325,6 +325,15 @@ pub(crate) struct BrokerSealedPlanAdmissionProof {
     checkpoint_event_digest: String,
 }
 
+impl BrokerSealedPlanAdmissionProof {
+    /// The minted admission's tape event id. It is the only field a protected
+    /// host echoes to a peer: it names the evidence, and naming evidence is not
+    /// the same as conferring authority over it.
+    pub(crate) fn admission_event_id(&self) -> EventId {
+        self.admission_event_id
+    }
+}
+
 impl From<SealedPlanAdmissionEvidence> for BrokerSealedPlanAdmissionProof {
     fn from(value: SealedPlanAdmissionEvidence) -> Self {
         Self {

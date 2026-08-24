@@ -7,6 +7,7 @@
 //! select the durable authority realm.
 
 use crate::host_config_loader::ValidatedGovernedSessionHostStartupV1;
+use crate::host_config_loader::ValidatedPlanAdmissionHostStartupV1;
 use crate::host_config_loader::ValidatedPromotionDecisionHostStartupV1;
 use crate::host_config_loader::ValidatedV5AdmissionHostStartupV1;
 use bp_ledger::storage::sqlite::SqliteStore;
@@ -112,6 +113,23 @@ pub(crate) fn load_promotion_decision_ledger_v1(
         )
     }
 
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = startup;
+        Err(ProtectedHostLedgerLoadError::UnsupportedPlatform)
+    }
+}
+
+pub(crate) fn load_plan_admission_ledger_v1(
+    startup: &ValidatedPlanAdmissionHostStartupV1,
+) -> Result<ProtectedPromotionDecisionLedgerV1, ProtectedHostLedgerLoadError> {
+    #[cfg(target_os = "linux")]
+    {
+        load_protected_ledger_v1(
+            startup.authority_root().directory(),
+            startup.config().broker_uid,
+        )
+    }
     #[cfg(not(target_os = "linux"))]
     {
         let _ = startup;
