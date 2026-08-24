@@ -355,6 +355,88 @@ event reference. The reference is present if and only if the closed verdict is
 `approve`. A bare `succeeded` or `recorded` status is rejected as incomplete
 success evidence.
 
+### Protected plan-admission host
+
+`buildplane-plan-admission-host` activates only the PlanForge plan-admission
+endpoint. It mints and kernel-seals one `plan_admitted` event per accepted
+request; it has no Git, provider, model, network, or action-execution
+capability, and it holds exactly one signing key. The generic ingest lanes
+still refuse `plan_admitted` on both the signed and unsigned paths — this host
+is an additional surface, never a relaxation of that wall.
+
+**Nothing drives this endpoint yet.** The PlanForge CLI verbs still throw, and
+no TypeScript control-plane path connects to the socket. The mint must not gain
+a transport-reachable consumer before the approval arm learns to load, verify,
+and require checkpoint coverage of the admission it names. Standing the host up
+today gives you a reachable minter with no approved caller; that is expected.
+
+The binary accepts no arguments or environment overrides. A supervisor must
+pass exactly one already-listening Unix stream socket as file descriptor 3. The
+kernel-reported pathname must be exactly
+`/run/buildplane/authority-host/plan-admission-v1.sock`. The socket ownership
+and mode contract is the promotion-decision contract, enforced by the same
+shared validator: three root-owned exact `0755` parent directories, and a
+root-owned socket group-owned by the GID named in the fixed host config, exact
+`0660`, with one link. The broker service UID and every configured client UID
+must be non-root and distinct. Failure to meet any part of this contract stops
+startup; the host never binds, unlinks, replaces, or falls back to another
+socket.
+
+Canonical units are `deploy/trust-spine/systemd/buildplane-plan-admission-host.socket`
+and `.service`. The socket is group-owned by `buildplane-operator`, matching the
+other operator-facing endpoint. The service runs as
+`buildplane-plan-authority`, grants write access only to the protected ledger
+and the broker-owned CAS, takes a private network namespace, and caps its
+descriptor table.
+
+**`buildplane-plan-authority` is not provisioned anywhere in this repository.**
+Neither is `buildplane-v5-authority`; both are operator-created system
+identities, and the units name them rather than create them. Create the user
+and group before enabling the unit, and confirm the authority root, `keys`,
+`ledger`, and `cas` directories are owned by that UID with mode `0700` — the
+custody layer opens each one `O_NOFOLLOW` from a retained descriptor and
+refuses anything else.
+
+The single protected deployment config is
+`/etc/buildplane/authority-host/plan-admission-v1.json`. Its exact closed schema
+lives in `native/crates/bp-authority-broker/src/plan_admission_host_config.rs`;
+unknown fields are rejected rather than ignored. It is run-scoped: one host
+serves exactly the one `run_id` it names, and a request for any other run is
+refused. `plan_admission_clients` is the closed UID-to-operator-identity policy
+— a UID absent from it cannot connect at all, and no two UIDs may share an
+identity, because that map is the *only* source of the `decided_by` recorded on
+the tape. A request has no field through which it can name an operator.
+
+The host emits exactly three operational strings on stderr and nothing else. No
+path, identity, signer, or refusal reason is ever printed:
+
+| Diagnostic | Meaning | Operator action |
+| --- | --- | --- |
+| `startup_failed` | The listener, config, key, ledger, or CAS custody contract was not met. | Check FD 3 and the socket pathname/ownership/mode first, then the config file's own ownership and parse, then the authority-root subdirectory ownership and modes. The host deliberately does not say which; each is a fail-closed precondition. |
+| `accept_failed` | The listener stopped accepting connections. | Treat as a supervisor-level fault: inspect the socket unit and restart the pair. It is not a request-level condition. |
+| `unsupported_platform` | The binary ran on a non-Linux host. | Not a misconfiguration to work around. The confinement boundary, the custody layer, and `SCM_RIGHTS` content delivery are Linux-only, and there is no reduced mode. PlanForge admission fails closed everywhere else. |
+
+Individual requests never produce operator-visible text. A completed request
+receives a kernel-signed `sealed` or `reconciliation_required` response; a
+request refused at the peer, frame, run-binding, identity, digest, or
+validation boundary receives no response at all and the connection closes in
+silence. Reconciliation is evidence, not failure — it means the mint declined
+to claim authority, and the tape is the place to look.
+
+**Standing constraint — the trusted base.** The admission's `trusted_base` is
+not re-derived from a repository. The host takes the `git_head` from the run's
+own `run_started` event after establishing that exactly one exists, verifies
+under the realm's pinned trusted keys, and is signed by the configured kernel
+identity. The value therefore originates with whoever recorded the run start
+and is exactly as trustworthy as the key that signs the admission itself.
+Consequently, **while `run_started` is the mint's trusted-base source it must
+not become kernel-signable from caller-supplied input.** It sits on the
+signed-append denylist today, pinned by name in `bp-ledger`'s
+`the_signed_only_denylist_names_plan_admitted_and_run_started`; any future
+native `run_started` emitter must derive `git_head` itself rather than accept it
+from a request. This carries the same weight as the no-consumer-before-S4
+constraint above.
+
 ### Protected promotion-decision and execution client
 
 Promotion-decision recovery uses a separate fixed protected client. Install
