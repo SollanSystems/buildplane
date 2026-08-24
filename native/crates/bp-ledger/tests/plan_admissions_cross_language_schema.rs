@@ -95,9 +95,8 @@ fn the_rust_schema_creates_exactly_the_names_the_typescript_reader_hardcodes() {
     );
 
     let source = reader_source();
-    let expected_query = format!(
-        "SELECT {STATE_COLUMN} FROM {TABLE} WHERE {KEY_COLUMN} = ? AND {RUN_COLUMN} = ?"
-    );
+    let expected_query =
+        format!("SELECT {STATE_COLUMN} FROM {TABLE} WHERE {KEY_COLUMN} = ? AND {RUN_COLUMN} = ?");
     assert!(
         source.contains(&expected_query),
         "{READER_SOURCE} must issue exactly `{expected_query}`; a rename on either side is a \
